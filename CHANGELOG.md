@@ -2,6 +2,29 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [0.2.4] — 2026-05-12
+
+### Fixed
+- **Lead was working on agent-takkub itself, not on the user's project.**
+  Lead spawned in `REPO_ROOT` (the cockpit source tree), so its Read/Grep/
+  Bash tools all landed in cockpit files instead of the active project's
+  code. Lead now spawns in the project root (common parent of all
+  `paths`, or first listed path), and the cockpit's `CLAUDE.md` is passed
+  via `--append-system-prompt-file` so Lead still knows the `takkub`
+  cheatsheet without losing project context.
+- `config.lead_cwd()` helper resolves the right directory:
+  - `projects.json → projects.<name>.lead` explicit key, if set
+  - else the common parent of all `paths` (e.g. `pms/` for `pms-web` + `pms-api`)
+  - else the first listed path
+
+### Changed
+- Render debounce 20 ms → 0 ms (next-tick coalesce). Qt still batches
+  many `outputUpdated` emits within a single event-loop tick into one
+  redraw, so we don't thrash, but we also never artificially hold a
+  frame back. IME echo and TUI form navigation feel live now.
+
+[0.2.4]: https://github.com/takkub/agent-takkub/releases/tag/v0.2.4
+
 ## [0.2.3] — 2026-05-12
 
 ### Fixed

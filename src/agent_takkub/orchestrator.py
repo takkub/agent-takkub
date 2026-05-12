@@ -28,6 +28,7 @@ from .config import (
     default_cwd_for_role,
     ensure_runtime,
     find_claude_executable,
+    lead_cwd,
 )
 from .pty_session import PtySession
 from .roles import LEAD
@@ -146,7 +147,17 @@ class Orchestrator(QObject):
         #                   role's runtime staging dir
         role_md_file: str | None = None
         if role_name == LEAD.name:
-            spawn_cwd = cwd or str(REPO_ROOT)
+            # Lead works *on* the active project, not on the cockpit's own
+            # source. cwd defaults to the project's root (common parent of
+            # its `paths`) so claude reads the project's CLAUDE.md, runs
+            # `git status` against the right repo, and tools land in the
+            # user's actual codebase. The cockpit's CLAUDE.md (takkub
+            # cheatsheet + role guide) is appended as system prompt so
+            # Lead still knows about `takkub assign / send / done / ...`.
+            spawn_cwd = cwd or lead_cwd() or str(REPO_ROOT)
+            cockpit_md = REPO_ROOT / "CLAUDE.md"
+            if cockpit_md.exists() and spawn_cwd != str(REPO_ROOT):
+                role_md_file = str(cockpit_md)
         else:
             staging = agent_role_dir(role_name)
             spawn_cwd = cwd or default_cwd_for_role(role_name) or str(staging)

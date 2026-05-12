@@ -73,6 +73,41 @@ def preset_roles_for_active() -> list[str]:
     return [str(x).strip().lower() for x in raw if str(x).strip()]
 
 
+def lead_cwd() -> str | None:
+    """Where Lead should spawn.
+
+    Priority:
+      1. The active project's `lead` path key (explicit pick), e.g.
+         `"lead": "web"` reuses paths.web.
+      2. The shared parent of all configured project paths (`pms/` for
+         `pms-web` + `pms-api`), if that parent exists on disk.
+      3. The project's first listed path (often `web`).
+    Returns None if no active project is configured.
+    """
+    import os
+
+    _, proj = active_project()
+    paths = proj.get("paths") or {}
+    if not paths:
+        return None
+
+    # 1. explicit lead path key
+    lead_key = proj.get("lead")
+    if isinstance(lead_key, str) and lead_key in paths:
+        return paths[lead_key]
+
+    # 2. common parent of all paths
+    try:
+        common = os.path.commonpath([str(p) for p in paths.values()])
+        if common and Path(common).is_dir() and Path(common).parent != Path(common):
+            return common
+    except ValueError:
+        pass
+
+    # 3. first listed path
+    return next(iter(paths.values()))
+
+
 def set_active_project(name: str) -> bool:
     """Write a new active project name back to projects.json. Returns True if
     the name was valid (existed in `projects`), False otherwise."""

@@ -123,16 +123,15 @@ class TerminalWidget(QPlainTextEdit):
             "}"
         )
 
-        # Debounced refresh — 20 ms gives ~50 fps which is fast enough to
-        # feel live during typing without thrashing on a tight loop.
-        # We deliberately do NOT cache last-rendered rows: even when the
-        # row tuples look identical, pyte may have updated cursor state /
-        # cleared a flash / nudged a status line, and skipping the redraw
-        # leaves the user staring at stale content (the "ไม่ขยับ" feeling).
+        # Refresh on the very next event-loop tick. interval=0 means Qt
+        # still coalesces multiple outputUpdated emits within the same
+        # tick into one redraw, but we never artificially delay the next
+        # paint. The previous 20-33 ms debounce showed up as visible lag
+        # in IME echo and form navigation.
         self._pending_rich: list | None = None
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setSingleShot(True)
-        self._refresh_timer.setInterval(20)
+        self._refresh_timer.setInterval(0)
         self._refresh_timer.timeout.connect(self._flush_rich)
 
         # cache of QTextCharFormat keyed by (fg, bg, bold, italic, ul, rev)
