@@ -2,6 +2,8 @@
 
 Desktop cockpit for orchestrating Claude Code dev teammates on Windows. Replaces the tmux-based `agent-teams` setup with a PyQt6 GUI, native Windows PTY (pywinpty), and a small CLI (`takkub`) that agents use to talk to each other.
 
+> **Companion docs:** [`docs/TASKS.md`](docs/TASKS.md) (build log) · [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) (constraints & out-of-scope) · [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (how it works) · [`CHANGELOG.md`](CHANGELOG.md) (version history)
+
 ## ทำไมเปลี่ยน
 
 `agent-teams` เดิมพึ่ง tmux ที่ทำงานไม่ดีบน Windows native: MSYS tmux server ตายเองตอน parent shell exit, winpty wrapping ปัญหา, CRLF, ฟอนต์ไทยใน mintty ต้องตั้งเอง. `agent-takkub` จัดการทั้งหมดในแอป Qt ตัวเดียว.
