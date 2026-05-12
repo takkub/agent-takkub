@@ -2,6 +2,27 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [0.3.4] — 2026-05-12
+
+### Added
+- **Smart local echo** — re-introduces optimistic local rendering, but
+  only when claude is sitting at the `❯` ready prompt (`is_at_ready_prompt`
+  returns true). At that point ink.js re-renders synchronously on every
+  keystroke, so local echo + claude's redraw match cell-for-cell and the
+  user gets instant feedback again.
+- When claude is busy ("Sautéed for 17s") the path collapses to pure
+  pass-through, so the v0.3.2-era ghost-character desync can't happen.
+
+### Wiring
+- `TerminalWidget.set_idle(bool)` exposes the flag to the JS side via a
+  new `window.termSetIdle()` JS function.
+- `AgentPane._sync_idle_flag()` listens to `PtySession.outputUpdated`,
+  reads `is_at_ready_prompt()` from the pyte screen, and pushes the
+  flag whenever it flips. Only edge-triggered updates cross the bridge
+  to keep IPC chatter low.
+
+[0.3.4]: https://github.com/takkub/agent-takkub/releases/tag/v0.3.4
+
 ## [0.3.3] — 2026-05-12
 
 ### Removed

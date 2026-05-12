@@ -148,6 +148,15 @@ class TerminalWidget(QWidget):
         `callback(str)` is invoked once the JS resolves."""
         self._view.page().runJavaScript("termGetBufferText();", callback)
 
+    def set_idle(self, idle: bool) -> None:
+        """Tell xterm.js whether claude is sitting at the ready prompt
+        (idle=True) or busy (idle=False). The terminal uses this flag to
+        decide whether to local-echo keystrokes for snappier feedback."""
+        flag = "true" if idle else "false"
+        if not self._page_ready:
+            return
+        self._view.page().runJavaScript(f"termSetIdle({flag});")
+
     # ------------------------------------------------------------------
     # internal
     # ------------------------------------------------------------------

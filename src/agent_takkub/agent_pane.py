@@ -214,11 +214,29 @@ class AgentPane(QFrame):
         self.session = session
         # xterm.js consumes raw PTY bytes directly (no pyte → rich rebuild)
         session.bytesIn.connect(self._terminal.write_bytes)
+        # pyte still parses the bytes in parallel — use that to push the
+        # "claude is idle at the ready prompt" signal into the terminal
+        # widget so it can decide whether to local-echo keystrokes.
+        session.outputUpdated.connect(self._sync_idle_flag)
         session.processExited.connect(self._on_exit)
         self._terminal.resized.connect(session.resize)
         self._update_title_with_cwd(cwd)
         self.set_state("active")
         self._terminal.setFocus()
+        # cached idle flag so we only push to JS when it flips
+        self._last_idle: bool | None = None
+
+    def _sync_idle_flag(self) -> None:
+        if self.session is None:
+            return
+        try:
+            idle = self.session.is_at_ready_prompt()
+        except Exception:
+            idle = False
+        if idle == self._last_idle:
+            return
+        self._last_idle = idle
+        self._terminal.set_idle(idle)
 
     def _update_title_with_cwd(self, cwd: str | None) -> None:
         if not cwd:
@@ -237,7 +255,12 @@ class AgentPane(QFrame):
                 self.session.bytesIn.disconnect(self._terminal.write_bytes)
             except Exception:
                 pass
+            try:
+                self.session.outputUpdated.disconnect(self._sync_idle_flag)
+            except Exception:
+                pass
             self.session = None
+        self._last_idle = None
         self._terminal.clear()
 
     def _on_exit(self, code: int) -> None:
