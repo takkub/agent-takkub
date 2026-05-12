@@ -2,6 +2,30 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [0.3.6] — 2026-05-12
+
+### Removed (final word on local echo)
+- **All local echo logic** — for real this time. v0.3.0..v0.3.5 kept
+  flip-flopping between "echo locally for snappiness" and "pass-through
+  for correctness". Under fast input, claude's TUI renders arrive out
+  of order (e.g. a delayed render of `"กพ"` replays *after* the user
+  backspaces it away), so a smart-echo gate is not enough — the
+  symptom we keep hitting is "I deleted everything, but `กพ` is stuck
+  on screen until I press another key".
+- xterm.js is now a pure pass-through, same as iTerm / Windows
+  Terminal / wezterm. claude is the only writer to the screen. When
+  claude is busy, the user perceives a roundtrip of latency per
+  keystroke — that is the *correct* terminal behaviour for an
+  unresponsive program. The display will never be stuck or desynced.
+
+### Kept
+- `window.termSetIdle()` remains as a no-op so the Python-side wiring
+  (`AgentPane._sync_idle_flag`, `TerminalWidget.set_idle`) doesn't
+  have to be ripped out in lock-step. Reintroducing optimistic
+  rendering later just needs to replace the function body.
+
+[0.3.6]: https://github.com/takkub/agent-takkub/releases/tag/v0.3.6
+
 ## [0.3.5] — 2026-05-12
 
 ### Hardened
