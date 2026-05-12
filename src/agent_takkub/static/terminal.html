@@ -69,26 +69,33 @@
     // ------------------------------------------------------------------
     let bridge = null;
 
-    // Local-echo policy: when the user types a "normal" character, write it
-    // to xterm.js immediately instead of waiting for the Python → PTY →
-    // claude → PTY → bridge round-trip to come back. claude's TUI input
-    // boxes (ink.js) tend to redraw on the *next* keystroke, so without
-    // local echo every char visibly appears one tick behind.
+    // Local-echo policy: write user input to xterm.js immediately instead
+    // of waiting for the Python → PTY → claude → PTY → bridge roundtrip.
+    // claude's ink.js TUI input boxes redraw on the *next* keystroke, so
+    // without local echo every char visibly appears one step behind.
     //
-    // We only echo printable text (no ESC sequences / arrows / Ctrl-keys)
-    // so navigation + special keys still go through claude untouched. The
-    // worst case is claude later redraws the same area and the visible
-    // result is identical (idempotent) — the user just sees instant
-    // feedback meanwhile.
+    // Three kinds of input get different treatment:
+    //   - Printable text (0x20..0x7e + UTF-8 multibyte): write locally,
+    //     claude's later redraw is idempotent.
+    //   - Backspace / DEL (0x08, 0x7f): erase last cell locally so the
+    //     visible state matches the user's intent even if claude is busy.
+    //   - Everything else (Esc, arrows, Enter, Ctrl-*, Tab, function
+    //     keys, mouse, paste-bracket): pass through untouched — claude
+    //     owns the resulting display.
+    function isPrintableChar(code) {
+      // ASCII printable
+      if (code >= 0x20 && code <= 0x7e) return true;
+      // UTF-8 continuation bytes / multi-byte char (Thai, CJK, etc.) — JS
+      // strings here are already decoded to UTF-16 code units, so any
+      // codepoint >= 0x80 that isn't a control char is fair game.
+      if (code >= 0x80) return true;
+      return false;
+    }
+
     function isPrintableInput(data) {
       if (!data) return false;
       for (let i = 0; i < data.length; i++) {
-        const code = data.charCodeAt(i);
-        // tab, newline, carriage-return are fine; everything below 0x20
-        // is treated as a control sequence and skipped
-        if (code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d)
-          return false;
-        if (code === 0x7f) return false;  // DEL / backspace handled by claude
+        if (!isPrintableChar(data.charCodeAt(i))) return false;
       }
       return true;
     }
@@ -96,9 +103,12 @@
     new QWebChannel(qt.webChannelTransport, (channel) => {
       bridge = channel.objects.bridge;
 
-      // any input the user types in xterm goes back to PTY
       term.onData((data) => {
-        if (isPrintableInput(data)) {
+        // local backspace: erase last visible cell so the display matches
+        // the user's keystrokes even when claude hasn't redrawn yet.
+        if (data === '\x7f' || data === '\b') {
+          term.write('\b \b');
+        } else if (isPrintableInput(data)) {
           term.write(data);  // instant local echo
         }
         if (bridge && bridge.sendInput) bridge.sendInput(data);

@@ -2,6 +2,23 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [0.3.2] — 2026-05-12
+
+### Fixed
+- **Backspace ค้าง** — v0.3.0 local echo wrote each typed char to xterm.js
+  instantly but never erased on backspace, so typing "[backend" then
+  hitting backspace 8 times left the chars visibly stuck until claude
+  caught up and redrew the input area. Local echo now writes `\b \b`
+  (erase last cell) when the user presses Backspace/DEL, keeping the
+  display in sync with the user's intent even when claude is mid-think.
+- **Local-echo filter tightened** — previously `\r`, `\n`, `\t` were
+  treated as printable and got written locally, which could nudge the
+  cursor in ways that conflicted with claude's redraw. Now only
+  0x20..0x7e + non-control multi-byte (Thai, CJK) get local echo;
+  everything else passes through to claude untouched.
+
+[0.3.2]: https://github.com/takkub/agent-takkub/releases/tag/v0.3.2
+
 ## [0.3.1] — 2026-05-12
 
 ### Added
