@@ -9,11 +9,11 @@ States:
 The header bar is always visible (role label + status dot + Spawn/Close
 buttons). The body switches between QStackedWidget pages.
 """
+
 from __future__ import annotations
 
 import time
 from datetime import datetime
-from typing import Optional
 
 from PyQt6.QtCore import QSettings, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QFont
@@ -31,7 +31,6 @@ from .config import RUNTIME_DIR
 from .pty_session import PtySession
 from .roles import Role
 from .terminal_widget import TerminalWidget
-
 
 STATUS_COLORS = {
     "empty": "#3f3f46",
@@ -56,12 +55,12 @@ class AgentPane(QFrame):
         super().__init__(parent)
         self.role = role
         self.state: str = "empty"
-        self.last_note: Optional[str] = None
-        self.session: Optional[PtySession] = None
+        self.last_note: str | None = None
+        self.session: PtySession | None = None
 
         # spinner + elapsed time bookkeeping for the working state
         self._spinner_idx = 0
-        self._working_start: Optional[float] = None
+        self._working_start: float | None = None
         self._tick_timer = QTimer(self)
         self._tick_timer.setInterval(250)
         self._tick_timer.timeout.connect(self._tick)
@@ -147,9 +146,7 @@ class AgentPane(QFrame):
 
         # terminal page
         self._terminal = TerminalWidget()
-        self._terminal.inputBytes.connect(
-            lambda data: self.inputBytes.emit(self.role.name, data)
-        )
+        self._terminal.inputBytes.connect(lambda data: self.inputBytes.emit(self.role.name, data))
         self._terminal.fontSizeChanged.connect(self._save_font_size)
         self._stack.addWidget(self._terminal)
 
@@ -178,9 +175,7 @@ class AgentPane(QFrame):
             self._tick_timer.stop()
 
         self._refresh_note()
-        self._dot.setStyleSheet(
-            f"color: {STATUS_COLORS.get(state, '#3f3f46')}; font-size: 14px;"
-        )
+        self._dot.setStyleSheet(f"color: {STATUS_COLORS.get(state, '#3f3f46')}; font-size: 14px;")
         if state in ("active", "working"):
             self._stack.setCurrentIndex(1)
             self._btn_spawn.hide()

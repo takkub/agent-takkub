@@ -8,6 +8,7 @@ The cockpit reserves 8 slots in a 3-column grid:
 
 Custom roles can be added at runtime via Orchestrator.register_role.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -34,7 +35,7 @@ DEFAULT_TEAMMATES: tuple[Role, ...] = (
     Role("reviewer", "Reviewer", "#ef4444", column=2, row=2),
 )
 
-ALL_DEFAULT: tuple[Role, ...] = (LEAD,) + DEFAULT_TEAMMATES
+ALL_DEFAULT: tuple[Role, ...] = (LEAD, *DEFAULT_TEAMMATES)
 
 
 def by_name(name: str) -> Role | None:

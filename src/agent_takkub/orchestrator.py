@@ -9,6 +9,7 @@ Public API (called by main_window UI and cli_server JSON requests):
   done(from_role, note)          -> bool, message
   list_status()                  -> dict[role, state]
 """
+
 from __future__ import annotations
 
 import json
@@ -220,9 +221,7 @@ class Orchestrator(QObject):
 
         QTimer.singleShot(1_000, _check)
 
-    def assign(
-        self, role_name: str, cwd: str | None, task: str
-    ) -> tuple[bool, str]:
+    def assign(self, role_name: str, cwd: str | None, task: str) -> tuple[bool, str]:
         ok, msg = self.spawn(role_name, cwd=cwd)
         if not ok:
             return ok, msg
@@ -231,9 +230,7 @@ class Orchestrator(QObject):
         _log_event("assign", role=role_name, cwd=cwd, task_preview=task[:120])
         return True, f"task queued for {role_name} (sending when ready)"
 
-    def _send_when_ready(
-        self, role_name: str, task: str, max_wait_ms: int = 45_000
-    ) -> None:
+    def _send_when_ready(self, role_name: str, task: str, max_wait_ms: int = 45_000) -> None:
         """Poll until claude's main prompt is idle, then paste task + Enter.
 
         Replaces the old fixed 12s wait so we don't paste into the trust modal
@@ -254,9 +251,7 @@ class Orchestrator(QObject):
                 return
             pane.set_state("working", note=task[:60])
             pane.session.write(task)
-            QTimer.singleShot(
-                200, lambda: pane.session and pane.session.write("\r")
-            )
+            QTimer.singleShot(200, lambda: pane.session and pane.session.write("\r"))
 
         def _check() -> None:
             if sent[0]:
@@ -275,9 +270,7 @@ class Orchestrator(QObject):
 
         QTimer.singleShot(1_000, _check)
 
-    def send(
-        self, to_role: str, msg: str, from_role: str | None = None
-    ) -> tuple[bool, str]:
+    def send(self, to_role: str, msg: str, from_role: str | None = None) -> tuple[bool, str]:
         to_role = to_role.lower().strip()
         pane = self.panes.get(to_role)
         if pane is None:
@@ -285,9 +278,7 @@ class Orchestrator(QObject):
         if pane.session is None or not pane.session.is_alive:
             return False, f"{to_role} is not running (spawn it first)"
 
-        header = (
-            f"[{from_role} → {to_role}] " if from_role and from_role != to_role else ""
-        )
+        header = f"[{from_role} → {to_role}] " if from_role and from_role != to_role else ""
         body = header + msg
         pane.session.write(body)
         QTimer.singleShot(150, lambda: pane.session and pane.session.write(b"\r"))
@@ -297,9 +288,7 @@ class Orchestrator(QObject):
             lead = self.panes.get(LEAD.name)
             if lead and lead.session and lead.session.is_alive:
                 lead.session.write(f"[CC] {body}")
-                QTimer.singleShot(
-                    150, lambda: lead.session and lead.session.write(b"\r")
-                )
+                QTimer.singleShot(150, lambda: lead.session and lead.session.write(b"\r"))
 
         _log_event("send", to=to_role, from_=from_role, msg_preview=msg[:120])
         return True, f"sent to {to_role}"

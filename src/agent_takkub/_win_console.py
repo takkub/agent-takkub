@@ -8,6 +8,7 @@ Strategy: snapshot all ConsoleWindowClass HWNDs before spawn, then after
 spawn diff against a fresh snapshot and `ShowWindow(hwnd, SW_HIDE)` any new
 HWNDs.
 """
+
 from __future__ import annotations
 
 import sys

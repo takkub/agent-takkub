@@ -3,6 +3,7 @@
 Displayed as a collapsible dock at the bottom of the main window. Reads the
 log file every second; only re-renders when the file's size has grown.
 """
+
 from __future__ import annotations
 
 import json
@@ -20,7 +21,6 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-
 
 _EVENT_COLOR = {
     "spawn": "#22c55e",
@@ -52,9 +52,7 @@ class LogsPanel(QWidget):
         title.setStyleSheet("color: #9ca3af; font-size: 11px; font-weight: bold;")
 
         self._event_combo = QComboBox()
-        self._event_combo.addItems(
-            ["all", "spawn", "assign", "send", "done", "close"]
-        )
+        self._event_combo.addItems(["all", "spawn", "assign", "send", "done", "close"])
         self._event_combo.setFixedHeight(22)
         self._event_combo.setToolTip("Filter by event type")
         self._event_combo.currentTextChanged.connect(self._on_event_filter)

@@ -1,10 +1,10 @@
 """Project + runtime config helpers."""
+
 from __future__ import annotations
 
 import json
 import os
 from pathlib import Path
-
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PROJECTS_JSON = REPO_ROOT / "projects.json"
@@ -80,9 +80,7 @@ def set_active_project(name: str) -> bool:
     if name not in data.get("projects", {}):
         return False
     data["active"] = name
-    PROJECTS_JSON.write_text(
-        json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    PROJECTS_JSON.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     return True
 
 
@@ -161,9 +159,7 @@ def find_claude_executable() -> str:
         return cmd_path
 
     # nvm4w default
-    nvm_exe = Path(
-        "C:/nvm4w/nodejs/node_modules/@anthropic-ai/claude-code/bin/claude.exe"
-    )
+    nvm_exe = Path("C:/nvm4w/nodejs/node_modules/@anthropic-ai/claude-code/bin/claude.exe")
     if nvm_exe.exists():
         return str(nvm_exe)
     nvm_cmd = Path("C:/nvm4w/nodejs/claude.cmd")

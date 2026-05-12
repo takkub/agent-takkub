@@ -13,9 +13,10 @@ Layout policy:
 This mimics tmux pane splitting but pre-arranged on a Lead | TeammateStack
 axis — Lead always on the left, teammates stacked vertically on the right.
 """
+
 from __future__ import annotations
 
-from PyQt6.QtCore import QSettings, QTimer, Qt
+from PyQt6.QtCore import QSettings, Qt, QTimer
 from PyQt6.QtWidgets import (
     QColorDialog,
     QComboBox,
@@ -27,8 +28,8 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QSplitter,
     QStatusBar,
-    QSystemTrayIcon,
     QStyle,
+    QSystemTrayIcon,
     QWidget,
 )
 
@@ -150,9 +151,7 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self._logs_dock)
 
         self.cli.started.connect(
-            lambda port: self._status.showMessage(
-                f"cockpit ready · cli port {port}"
-            )
+            lambda port: self._status.showMessage(f"cockpit ready · cli port {port}")
         )
         self.orch.statusChanged.connect(self._update_status)
 
@@ -255,9 +254,7 @@ class MainWindow(QMainWindow):
                 6_000,
             )
             for i, role in enumerate(presets):
-                QTimer.singleShot(
-                    15_000 + i * 3_000, lambda r=role: self.orch.spawn(r)
-                )
+                QTimer.singleShot(15_000 + i * 3_000, lambda r=role: self.orch.spawn(r))
 
     def _track_pane_request(self, role_name: str) -> None:
         # only called when a new pane is being created
@@ -270,9 +267,7 @@ class MainWindow(QMainWindow):
         # mirror to status bar too in case tray is unavailable
         self._status.showMessage(f"✓ {title}: {body[:80]}", 6_000)
         if self._tray and QSystemTrayIcon.isSystemTrayAvailable():
-            self._tray.showMessage(
-                title, body, QSystemTrayIcon.MessageIcon.Information, 5_000
-            )
+            self._tray.showMessage(title, body, QSystemTrayIcon.MessageIcon.Information, 5_000)
 
     # ──────────────────────────────────────────────────────────────
     # toolbar buttons
@@ -286,14 +281,10 @@ class MainWindow(QMainWindow):
         choices = defaults + [r for r in taken if r not in defaults and r != LEAD.name]
         if not choices:
             choices = defaults
-        role, ok = QInputDialog.getItem(
-            self, "Assign task", "Role:", choices, 0, False
-        )
+        role, ok = QInputDialog.getItem(self, "Assign task", "Role:", choices, 0, False)
         if not ok or not role:
             return
-        task, ok = QInputDialog.getMultiLineText(
-            self, "Assign task", f"Task for {role}:", ""
-        )
+        task, ok = QInputDialog.getMultiLineText(self, "Assign task", f"Task for {role}:", "")
         if not ok or not task.strip():
             return
         ok, msg = self.orch.assign(role, cwd=None, task=task.strip())
@@ -306,8 +297,8 @@ class MainWindow(QMainWindow):
             "<b>takkub CLI</b> (run from Lead pane or any agent pane):<br><br>"
             "<code>takkub list</code> — show pane status<br>"
             "<code>takkub spawn --role &lt;name&gt; [--cwd &lt;path&gt;]</code> — open a pane<br>"
-            "<code>takkub assign --role &lt;name&gt; [--cwd &lt;path&gt;] \"task\"</code> — spawn + send task<br>"
-            "<code>takkub send --to &lt;role&gt; \"msg\"</code> — peer message (Lead is CC'd)<br>"
+            '<code>takkub assign --role &lt;name&gt; [--cwd &lt;path&gt;] "task"</code> — spawn + send task<br>'
+            '<code>takkub send --to &lt;role&gt; "msg"</code> — peer message (Lead is CC\'d)<br>'
             "<code>takkub close --role &lt;name&gt;</code> — close a pane<br>"
             "<code>takkub close-all</code> — close every teammate (keeps Lead)<br>"
             "<code>takkub done [note]</code> — (agents) signal completion<br><br>"
@@ -320,7 +311,7 @@ class MainWindow(QMainWindow):
         )
         QMessageBox.information(self, "agent-takkub help", text)
 
-    def keyPressEvent(self, event) -> None:  # noqa: N802
+    def keyPressEvent(self, event) -> None:
         if event.key() == Qt.Key.Key_F1:
             self._show_help()
             return
@@ -370,10 +361,8 @@ class MainWindow(QMainWindow):
     def _on_add_pane_clicked(self) -> None:
         # roles already shown (skip them from the picker)
         taken = set(self.orch.panes.keys())
-        default_unused = [
-            r.name for r in DEFAULT_TEAMMATES if r.name not in taken
-        ]
-        choices = default_unused + ["custom..."]
+        default_unused = [r.name for r in DEFAULT_TEAMMATES if r.name not in taken]
+        choices = [*default_unused, "custom..."]
         name, ok = QInputDialog.getItem(
             self,
             "Open pane",
@@ -422,7 +411,7 @@ class MainWindow(QMainWindow):
         self._settings.sync()
 
     # ──────────────────────────────────────────────────────────────
-    def closeEvent(self, event) -> None:  # noqa: N802
+    def closeEvent(self, event) -> None:
         self._save_window_state()
         for pane in list(self.orch.panes.values()):
             if pane.session is not None:

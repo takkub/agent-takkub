@@ -13,9 +13,49 @@ dependencies = [
 agent-takkub = "agent_takkub.app:main"
 takkub = "agent_takkub.cli:main"
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "ruff>=0.7",
+]
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# ──────────────────────────────────────────────────────────────────
+# ruff: lint + format
+# ──────────────────────────────────────────────────────────────────
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+extend-exclude = ["scripts/test_*.py", "scripts/inspect_*.py", "runtime/**"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "RUF"]
+ignore = [
+    "E501",   # line too long; let `format` handle wrapping
+    "B008",   # function call in default arg (PyQt signal defaults are fine)
+    "RUF001", # ambiguous unicode chars (we use Thai + diacritics on purpose)
+    "RUF002",
+    "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]  # asserts in tests are intentional
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+# ──────────────────────────────────────────────────────────────────
+# pytest
+# ──────────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-q"

@@ -11,6 +11,7 @@ Input handling:
   - wheelEvent: forwarded as PgUp/PgDn so the user can scroll claude's
     internal alt-screen history.
 """
+
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
@@ -25,7 +26,6 @@ from PyQt6.QtGui import (
     QTextCursor,
 )
 from PyQt6.QtWidgets import QPlainTextEdit, QWidget
-
 
 _KEY_MAP = {
     Qt.Key.Key_Enter: b"\r",
@@ -241,7 +241,7 @@ class TerminalWidget(QPlainTextEdit):
     # ──────────────────────────────────────────────────────────────
     # input handling
     # ──────────────────────────────────────────────────────────────
-    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
+    def keyPressEvent(self, event: QKeyEvent) -> None:
         key = event.key()
         mods = event.modifiers()
         text = event.text()
@@ -250,11 +250,16 @@ class TerminalWidget(QPlainTextEdit):
         alt = bool(mods & Qt.KeyboardModifier.AltModifier)
 
         # Ctrl + (+|=|-) → adjust font size. Reserved before forwarding to PTY.
-        if ctrl and not alt and key in (
-            Qt.Key.Key_Plus,
-            Qt.Key.Key_Equal,
-            Qt.Key.Key_Minus,
-            Qt.Key.Key_0,
+        if (
+            ctrl
+            and not alt
+            and key
+            in (
+                Qt.Key.Key_Plus,
+                Qt.Key.Key_Equal,
+                Qt.Key.Key_Minus,
+                Qt.Key.Key_0,
+            )
         ):
             self._adjust_font(key)
             return
@@ -304,14 +309,14 @@ class TerminalWidget(QPlainTextEdit):
         self.resized.emit(cols, rows)
         self.fontSizeChanged.emit(size)
 
-    def inputMethodEvent(self, event: QInputMethodEvent) -> None:  # noqa: N802
+    def inputMethodEvent(self, event: QInputMethodEvent) -> None:
         """Forward IME commit text (Thai, CJK, etc.) to the PTY."""
         commit = event.commitString()
         if commit:
             self.inputBytes.emit(commit.encode("utf-8"))
         event.accept()
 
-    def wheelEvent(self, event) -> None:  # noqa: N802
+    def wheelEvent(self, event) -> None:
         """Forward mouse wheel as PgUp/PgDn so the user can scroll claude's
         internal alt-screen history (pyte's scrollback won't help — claude
         runs in alt-screen and owns its own buffer)."""
@@ -319,18 +324,14 @@ class TerminalWidget(QPlainTextEdit):
         if delta == 0:
             return
         ticks = max(1, abs(delta) // 120)
-        seq = (
-            _KEY_MAP[Qt.Key.Key_PageUp]
-            if delta > 0
-            else _KEY_MAP[Qt.Key.Key_PageDown]
-        )
+        seq = _KEY_MAP[Qt.Key.Key_PageUp] if delta > 0 else _KEY_MAP[Qt.Key.Key_PageDown]
         self.inputBytes.emit(seq * ticks)
         event.accept()
 
     # ──────────────────────────────────────────────────────────────
     # size reporting (so the orchestrator can resize the PTY)
     # ──────────────────────────────────────────────────────────────
-    def resizeEvent(self, event) -> None:  # noqa: N802
+    def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         fm = QFontMetrics(self.font())
         char_w = max(1, fm.horizontalAdvance("M"))

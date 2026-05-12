@@ -8,6 +8,7 @@ Protocol (newline-delimited JSON):
 Runs on the Qt main thread via QTcpServer so all calls into Orchestrator are
 serialised naturally.
 """
+
 from __future__ import annotations
 
 import json
@@ -31,9 +32,7 @@ class CliServer(QObject):
     def listen(self, port: int = 0) -> int:
         # bind to loopback only — other machines on the LAN must not reach us
         if not self._server.listen(QHostAddress.SpecialAddress.LocalHost, port):
-            raise RuntimeError(
-                f"failed to bind cli server: {self._server.errorString()}"
-            )
+            raise RuntimeError(f"failed to bind cli server: {self._server.errorString()}")
         actual = int(self._server.serverPort())
         write_port(actual)
         self.started.emit(actual)
@@ -80,13 +79,9 @@ class CliServer(QObject):
             elif cmd == "close-all":
                 ok, msg = self._orch.close_all_teammates()
             elif cmd == "done":
-                ok, msg = self._orch.done(
-                    req.get("from") or "", note=req.get("note", "")
-                )
+                ok, msg = self._orch.done(req.get("from") or "", note=req.get("note", ""))
             elif cmd == "list":
-                self._reply(
-                    sock, ok=True, msg="status", status=self._orch.list_status()
-                )
+                self._reply(sock, ok=True, msg="status", status=self._orch.list_status())
                 return
             else:
                 ok, msg = False, f"unknown cmd: {cmd}"

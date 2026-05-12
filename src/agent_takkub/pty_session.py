@@ -8,11 +8,12 @@ A PtySession owns:
 
 The terminal widget consumes the screen state, the orchestrator triggers writes.
 """
+
 from __future__ import annotations
 
 import subprocess
 import sys
-from typing import Sequence
+from collections.abc import Sequence
 
 import pyte
 from PyQt6.QtCore import QObject, QThread, QTimer, pyqtSignal

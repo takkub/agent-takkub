@@ -11,6 +11,7 @@ Usage from inside an agent pane (Claude running with TAKKUB_ROLE env set):
 
 Output is human readable on stdout. Exit 0 on success, 1 on error.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -60,15 +61,11 @@ def cmd_spawn(args: argparse.Namespace) -> dict:
 
 
 def cmd_assign(args: argparse.Namespace) -> dict:
-    return _request(
-        {"cmd": "assign", "role": args.role, "cwd": args.cwd, "task": args.task}
-    )
+    return _request({"cmd": "assign", "role": args.role, "cwd": args.cwd, "task": args.task})
 
 
 def cmd_send(args: argparse.Namespace) -> dict:
-    return _request(
-        {"cmd": "send", "to": args.to, "msg": args.msg, "from": _from_role()}
-    )
+    return _request({"cmd": "send", "to": args.to, "msg": args.msg, "from": _from_role()})
 
 
 def cmd_close(args: argparse.Namespace) -> dict:
