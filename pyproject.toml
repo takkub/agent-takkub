@@ -1,10 +1,11 @@
 [project]
 name = "agent-takkub"
-version = "0.2.4"
+version = "0.3.0rc2"
 description = "Desktop cockpit for orchestrating Claude Code dev teammates on Windows"
 requires-python = ">=3.11"
 dependencies = [
     "PyQt6>=6.6",
+    "PyQt6-WebEngine>=6.6",
     "pywinpty>=2.0;sys_platform=='win32'",
     "pyte>=0.8",
 ]
@@ -25,6 +26,9 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+agent_takkub = ["static/*.html", "static/*.js", "static/*.css"]
 
 # ──────────────────────────────────────────────────────────────────
 # ruff: lint + format

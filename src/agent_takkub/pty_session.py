@@ -69,7 +69,11 @@ class _ReaderThread(QThread):
 
 
 class PtySession(QObject):
-    outputUpdated = pyqtSignal()  # screen state changed; widget should redraw
+    # Raw PTY bytes — consumed by the xterm.js TerminalWidget for rendering.
+    bytesIn = pyqtSignal(bytes)
+    # pyte screen mutated — still used by state-detection helpers
+    # (is_at_trust_prompt, is_at_ready_prompt) and display_lines() export.
+    outputUpdated = pyqtSignal()
     processExited = pyqtSignal(int)  # exit code (best effort)
 
     def __init__(
@@ -143,6 +147,10 @@ class PtySession(QObject):
         self._reader.start()
 
     def _on_bytes(self, data: bytes) -> None:
+        # Forward raw bytes to xterm.js (rendering layer) first so the user
+        # sees output ASAP. pyte still consumes them for the state-detection
+        # helpers (is_at_trust_prompt / is_at_ready_prompt / display_lines).
+        self.bytesIn.emit(data)
         try:
             self.stream.feed(data)
         except Exception:
