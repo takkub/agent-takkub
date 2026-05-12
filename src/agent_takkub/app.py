@@ -3,8 +3,26 @@
 from __future__ import annotations
 
 import atexit
+import os
 import signal
 import sys
+
+# Chromium throttles background timers, RAF and rendering for views that
+# aren't the foreground tab. Because we host many xterm.js panes in one
+# window, only one is "focused" at a time and the rest get paint-suppressed
+# — output reaches xterm.js but the DOM doesn't repaint until the user
+# pokes the view. Flip the throttles off before QtWebEngine boots.
+os.environ.setdefault(
+    "QTWEBENGINE_CHROMIUM_FLAGS",
+    " ".join(
+        [
+            "--disable-background-timer-throttling",
+            "--disable-renderer-backgrounding",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-features=CalculateNativeWinOcclusion",
+        ]
+    ),
+)
 
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import QApplication

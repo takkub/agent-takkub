@@ -99,6 +99,19 @@ class TerminalWidget(QWidget):
         self._flush_timer.setInterval(0)
         self._flush_timer.timeout.connect(self._flush_writes)
 
+        # Heartbeat: Chromium throttles RAF / paint on Windows when a
+        # WebEngineView is not currently the focused widget. Symptom: PTY
+        # output is delivered to xterm.js (term.write runs) but the DOM
+        # paint never happens until the user types or moves the mouse, so
+        # the "last frame after claude finishes" is stuck stale. A periodic
+        # no-op runJavaScript keeps the JS context warm and forces a paint
+        # tick so the stalled frame surfaces on its own. Pair this with the
+        # in-page requestAnimationFrame self-loop in terminal.html and the
+        # Chromium flags set in app.py for belt-and-suspenders coverage.
+        self._heartbeat = QTimer(self)
+        self._heartbeat.setInterval(250)
+        self._heartbeat.timeout.connect(self._heartbeat_poke)
+
         self._bridge.inputData.connect(self._on_input_data)
         self._bridge.sizeChanged.connect(self.resized.emit)
         self._bridge.pageReady.connect(self._on_page_ready)
@@ -178,6 +191,18 @@ class TerminalWidget(QWidget):
             joined = "".join(self._pending_writes)
             self._pending_writes.clear()
             self._view.page().runJavaScript(f"termWrite({json.dumps(joined)});")
+        # Start heartbeat once the page is alive — keeps the renderer warm
+        # so stalled-frame bugs (output delivered but not painted) can't
+        # accumulate while the user is looking at another pane.
+        self._heartbeat.start()
+
+    def _heartbeat_poke(self) -> None:
+        if not self._page_ready:
+            return
+        # Cheap no-op that nonetheless forces Chromium to tick the JS task
+        # queue and schedule a frame; xterm.js's render service will flush
+        # any pending DOM writes on that tick.
+        self._view.page().runJavaScript("void 0;")
 
     def setFocus(self) -> None:
         self._view.setFocus()

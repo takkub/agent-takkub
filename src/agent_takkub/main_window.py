@@ -16,7 +16,10 @@ axis — Lead always on the left, teammates stacked vertically on the right.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from PyQt6.QtCore import QSettings, Qt, QTimer
+from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QColorDialog,
     QComboBox,
@@ -45,12 +48,18 @@ from .config import (
 from .logs_panel import LogsPanel
 from .orchestrator import Orchestrator
 from .roles import DEFAULT_TEAMMATES, LEAD, Role, by_name
+from .token_meter import format_tokens, usage_color
 
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("agent-takkub — dev team cockpit")
+        
+        icon_path = Path(__file__).parent.parent.parent / "assets" / "icon.png"
+        app_icon = QIcon(str(icon_path)) if icon_path.exists() else self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxInformation)
+        self.setWindowIcon(app_icon)
+
         self.resize(1500, 900)
 
         self._settings = QSettings("agent-takkub", "cockpit")
@@ -70,10 +79,7 @@ class MainWindow(QMainWindow):
 
         # ── system tray for desktop notifications ───────────────
         self._tray = QSystemTrayIcon(self)
-        # use the OS-standard "information" icon — works without a bundled .ico
-        self._tray.setIcon(
-            self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxInformation)
-        )
+        self._tray.setIcon(app_icon)
         self._tray.setToolTip("agent-takkub")
         if QSystemTrayIcon.isSystemTrayAvailable():
             self._tray.show()
@@ -110,33 +116,50 @@ class MainWindow(QMainWindow):
         self.setStatusBar(self._status)
         self._status.showMessage("starting...")
 
-        # right-side widgets: project combo + add-pane button
         self._project_combo = QComboBox(self)
         self._project_combo.setMinimumWidth(140)
         self._project_combo.setToolTip("Active project (used as default cwd)")
         self._refresh_project_list()
         self._project_combo.currentTextChanged.connect(self._on_project_changed)
 
-        self._btn_add_pane = QPushButton("+ pane", self)
+        self._btn_add_project = QPushButton("📁", self)
+        self._btn_add_project.setToolTip("Add new project from folder")
+        self._btn_add_project.setFixedWidth(28)
+        self._btn_add_project.clicked.connect(self._on_add_project_clicked)
+
+        self._btn_add_pane = QPushButton("➕ Add Agent", self)
         self._btn_add_pane.setToolTip("Open a pane for a role (default or custom)")
         self._btn_add_pane.clicked.connect(self._on_add_pane_clicked)
 
-        self._btn_assign = QPushButton("⟶ assign", self)
+        self._btn_assign = QPushButton("📝 Assign Task", self)
         self._btn_assign.setToolTip("Quick-assign a task to a role")
         self._btn_assign.clicked.connect(self._on_quick_assign_clicked)
 
-        self._btn_logs = QPushButton("logs", self)
+        self._btn_logs = QPushButton("📋 Logs", self)
         self._btn_logs.setToolTip("Show/hide events log panel")
         self._btn_logs.setCheckable(True)
         self._btn_logs.clicked.connect(self._on_toggle_logs)
 
-        self._btn_help = QPushButton("?", self)
-        self._btn_help.setFixedWidth(28)
+        self._btn_help = QPushButton("❓ Help", self)
+        self._btn_help.setFixedWidth(70)
         self._btn_help.setToolTip("Show takkub command cheatsheet (F1)")
         self._btn_help.clicked.connect(self._show_help)
 
+        # Aggregate token meter: sums prompt tokens across every active pane
+        # so the user can spot when the whole team is bumping the limit.
+        # Tooltip breaks it down per role + reveals the largest occupant.
+        self._token_total = QLabel("", self)
+        self._token_total.setToolTip("Aggregate context occupancy across all active panes")
+        self._token_total.setStyleSheet(
+            "color: #6b7280; font-size: 11px; padding: 0 6px; "
+            "font-variant-numeric: tabular-nums;"
+        )
+        self._token_total.hide()
+
+        self._status.addPermanentWidget(self._token_total)
         self._status.addPermanentWidget(QLabel("project:"))
         self._status.addPermanentWidget(self._project_combo)
+        self._status.addPermanentWidget(self._btn_add_project)
         self._status.addPermanentWidget(self._btn_add_pane)
         self._status.addPermanentWidget(self._btn_assign)
         self._status.addPermanentWidget(self._btn_logs)
@@ -320,16 +343,48 @@ class MainWindow(QMainWindow):
     def _update_status(self) -> None:
         active = 0
         working = 0
+        total_prompt = 0
+        biggest_limit = 0
+        per_role: list[tuple[str, int, int]] = []  # (role, prompt, limit)
         for p in self.orch.panes.values():
             if p.session is not None and p.session.is_alive:
                 active += 1
                 if p.state == "working":
                     working += 1
+            usage = p.current_usage()
+            if usage:
+                from .token_meter import context_limit_for_model
+
+                limit = context_limit_for_model(usage["model"])
+                total_prompt += usage["prompt"]
+                biggest_limit = max(biggest_limit, limit)
+                per_role.append((p.role.name, usage["prompt"], limit))
         port = self.cli._server.serverPort() if self.cli._server.isListening() else 0
         bits = [f"cockpit · cli {port}", f"{active} active"]
         if working:
             bits.append(f"{working} working")
         self._status.showMessage("  ·  ".join(bits))
+
+        # Update aggregate token meter. The headline uses the *biggest* single
+        # pane's limit (rather than summing limits) because each context is
+        # independent — the team-wide ratio is "how close any pane is to its
+        # cap" plus a sum for absolute reference.
+        if per_role:
+            ratio = max(p / lim for _, p, lim in per_role if lim) if per_role else 0.0
+            color = usage_color(ratio)
+            head = f"Σ {format_tokens(total_prompt)} · max {int(ratio * 100)}%"
+            self._token_total.setText(head)
+            self._token_total.setStyleSheet(
+                f"color: {color}; font-size: 11px; padding: 0 6px; "
+                "font-variant-numeric: tabular-nums;"
+            )
+            lines = [f"{r}: {format_tokens(pr)} / {format_tokens(lim)}" for r, pr, lim in per_role]
+            self._token_total.setToolTip(
+                "Context occupancy per pane:\n" + "\n".join(lines)
+            )
+            self._token_total.show()
+        else:
+            self._token_total.hide()
 
     # ──────────────────────────────────────────────────────────────
     # project switcher
@@ -354,6 +409,87 @@ class MainWindow(QMainWindow):
         if set_active_project(name):
             self._status.showMessage(f"active project → {name}", 4_000)
             self.lead_pane._title.setText(f"Lead · {name}")
+
+    def _on_add_project_clicked(self) -> None:
+        from PyQt6.QtWidgets import QFileDialog, QDialog, QVBoxLayout, QFormLayout, QLineEdit, QDialogButtonBox, QLabel
+        from pathlib import Path
+        import json
+        from .config import PROJECTS_JSON, load_projects
+        
+        dir_path = QFileDialog.getExistingDirectory(self, "Select Project Root Folder")
+        if not dir_path:
+            return
+            
+        p = Path(dir_path)
+        name = p.name
+        
+        # Create a custom dialog to let the user map paths
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Configure Project Paths: {name}")
+        dialog.resize(400, 300)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("Map subdirectories to role keys (e.g., 'web', 'api').\nLeave blank to ignore a directory."))
+        
+        form = QFormLayout()
+        layout.addLayout(form)
+        
+        # Check if we already have this project configured
+        data = load_projects()
+        existing_paths = {}
+        existing_paths_rev = {}
+        if "projects" in data and name in data["projects"]:
+            existing_paths = data["projects"][name].get("paths", {})
+            # Reverse mapping: value (path) -> key (role)
+            existing_paths_rev = {v: k for k, v in existing_paths.items()}
+
+        inputs = {}
+        for sub in p.iterdir():
+            if sub.is_dir() and not sub.name.startswith("."):
+                le = QLineEdit()
+                le.setPlaceholderText("key (e.g. web, api)")
+                
+                # Pre-fill if we already saved this path previously
+                sub_posix = str(sub.resolve().as_posix())
+                if sub_posix in existing_paths_rev:
+                    le.setText(existing_paths_rev[sub_posix])
+                    
+                form.addRow(sub.name, le)
+                inputs[sub.name] = (sub, le)
+                
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+            
+        paths = {}
+        for sub_name, (sub_path, le) in inputs.items():
+            key = le.text().strip()
+            if key:
+                paths[key] = str(sub_path.resolve().as_posix())
+                
+        if not paths:
+            # Fallback if they mapped nothing
+            paths["main"] = str(p.resolve().as_posix())
+            
+        data = load_projects()
+        if "projects" not in data:
+            data["projects"] = {}
+            
+        data["projects"][name] = {
+            "description": name,
+            "paths": paths,
+            "presets": []
+        }
+        data["active"] = name
+        
+        PROJECTS_JSON.parent.mkdir(parents=True, exist_ok=True)
+        PROJECTS_JSON.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        
+        self._refresh_project_list()
+        self._status.showMessage(f"Added project: {name}", 4_000)
 
     # ──────────────────────────────────────────────────────────────
     # + pane button: spawn an additional teammate from a role name

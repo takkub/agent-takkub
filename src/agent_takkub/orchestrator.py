@@ -24,6 +24,8 @@ from .agent_pane import AgentPane
 from .config import (
     EVENTS_LOG,
     REPO_ROOT,
+    RUNTIME_DIR,
+    active_project,
     agent_role_dir,
     default_cwd_for_role,
     ensure_runtime,
@@ -56,6 +58,65 @@ RESUME_WINDOW_SEC = 5 * 60  # respawn within this window → claude --continue
 # is a *marketplace name* under ~/.claude/plugins/cache/. We pick the highest
 # semver-ish version directory found.
 _SAFE_PLUGINS: tuple[str, ...] = ("superpowers-dev", "addy-agent-skills")
+
+
+def _render_lead_context() -> str | None:
+    """Render Lead's spawn-time system prompt: cockpit CLAUDE.md + an
+    auto-injected `BLOCKED_DIRS` paragraph listing the active project's paths.
+
+    Lead's hybrid policy (see cockpit CLAUDE.md "Lead direct-edit policy")
+    forbids direct file edits inside project paths; this function bakes the
+    *current* project's paths into the prompt every spawn so the rule has
+    teeth even when projects.json switches between sessions.
+
+    Returns the rendered file path (string), or None if there's no cockpit
+    CLAUDE.md to render from.
+    """
+    cockpit_md = REPO_ROOT / "CLAUDE.md"
+    if not cockpit_md.exists():
+        return None
+
+    base = cockpit_md.read_text(encoding="utf-8")
+    name, proj = active_project()
+    paths = list((proj.get("paths") or {}).values()) if proj else []
+
+    if paths:
+        blocked = "\n".join(f"- `{p}`" for p in paths)
+        header = f"active project: **{name}**" if name else "active project:"
+    else:
+        blocked = "- (no active project — projects.json `active` not set)"
+        header = "active project:"
+
+    suffix = f"""
+
+---
+
+## 🚫 BLOCKED_DIRS (auto-injected at spawn)
+
+{header}
+
+ไดเรกทอรีต่อไปนี้คือ project code — Lead **ห้ามใช้ Edit / Write / MultiEdit / NotebookEdit** ในไฟล์ใต้ paths เหล่านี้เด็ดขาด:
+
+{blocked}
+
+ถ้างานต้องแก้ไฟล์ในเส้นทางข้างบน → ใช้ `takkub assign --role <role> --cwd <path> "<task>"` เสมอ
+
+✅ ทำเองได้:
+- Read / Grep / Glob ทุกที่ (สำหรับวางแผน + เขียน task spec)
+- Edit / Write ใน cockpit ({REPO_ROOT}) เช่น CLAUDE.md, projects.json, .claude/agents/*
+- `git status` / `git log` / `git diff` (inspection ไม่กระทบไฟล์)
+
+❌ ห้ามทำเองแม้แค่บรรทัดเดียว:
+- ทุกไฟล์ใต้ BLOCKED_DIRS ข้างบน
+- งานที่ touch > 1 ไฟล์
+- งานที่ edit > 30 บรรทัดในรอบเดียว
+
+ละเมิดข้อใดข้อหนึ่ง → หยุดทันทีแล้ว delegate ผ่าน `takkub assign`
+"""
+    ensure_runtime()
+    out = RUNTIME_DIR / "lead-context.md"
+    out.write_text(base + suffix, encoding="utf-8")
+    return str(out)
 
 
 def _default_plugin_dirs() -> list[str]:
@@ -155,9 +216,12 @@ class Orchestrator(QObject):
             # cheatsheet + role guide) is appended as system prompt so
             # Lead still knows about `takkub assign / send / done / ...`.
             spawn_cwd = cwd or lead_cwd() or str(REPO_ROOT)
-            cockpit_md = REPO_ROOT / "CLAUDE.md"
-            if cockpit_md.exists() and spawn_cwd != str(REPO_ROOT):
-                role_md_file = str(cockpit_md)
+            # Render Lead's system prompt fresh each spawn so BLOCKED_DIRS
+            # tracks whatever project is active in projects.json right now.
+            # Skip injection when Lead is anchored at the cockpit itself
+            # (no project context to enforce).
+            if spawn_cwd != str(REPO_ROOT):
+                role_md_file = _render_lead_context()
         else:
             staging = agent_role_dir(role_name)
             spawn_cwd = cwd or default_cwd_for_role(role_name) or str(staging)

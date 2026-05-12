@@ -11,6 +11,7 @@ The terminal widget consumes the screen state, the orchestrator triggers writes.
 
 from __future__ import annotations
 
+import queue
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -20,6 +21,28 @@ from PyQt6.QtCore import QObject, QThread, QTimer, pyqtSignal
 
 from ._win_console import hide_hwnds, snapshot_console_hwnds
 
+
+class _WriterThread(QThread):
+    def __init__(self, proc, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._proc = proc
+        self._q: queue.Queue[str | None] = queue.Queue()
+
+    def run(self) -> None:
+        while True:
+            data = self._q.get()
+            if data is None:
+                break
+            try:
+                self._proc.write(data)
+            except Exception as e:
+                print(f"[pty_session] write error: {e!r}", flush=True)
+
+    def write(self, data: str) -> None:
+        self._q.put(data)
+
+    def request_stop(self) -> None:
+        self._q.put(None)
 
 class _ReaderThread(QThread):
     bytesReceived = pyqtSignal(bytes)
@@ -89,6 +112,7 @@ class PtySession(QObject):
         self.stream = pyte.ByteStream(self.screen)
         self._proc = None
         self._reader: _ReaderThread | None = None
+        self._writer: _WriterThread | None = None
         self._alive = False
 
     # ──────────────────────────────────────────────────────────────
@@ -108,19 +132,20 @@ class PtySession(QObject):
         # console window (cmd.exe / conhost) pywinpty surfaces.
         pre_hwnds = snapshot_console_hwnds() if sys.platform == "win32" else set()
 
-        # Prefer WinPTY backend on Windows: ConPTY spawns a visible conhost
-        # console window when launched from a GUI process. WinPTY uses a
-        # hidden agent process and stays out of sight (in theory).
+        # Prefer ConPTY backend for lowest latency. ConPTY sends ANSI directly
+        # instead of scraping the screen buffer like WinPTY, eliminating the
+        # "delay" and replacing-character symptoms users experience during fast typing.
         try:
+            import winpty
             self._proc = winpty.PtyProcess.spawn(
                 cmd,
                 dimensions=(self.rows, self.cols),
                 cwd=cwd,
                 env=env,
-                backend=winpty.Backend.WinPTY,
+                backend=winpty.Backend.ConPTY,
             )
         except Exception:
-            # fall back to ConPTY if WinPTY isn't available
+            # fall back if ConPTY isn't available
             self._proc = winpty.PtyProcess.spawn(
                 cmd,
                 dimensions=(self.rows, self.cols),
@@ -146,6 +171,9 @@ class PtySession(QObject):
         self._reader.finished_clean.connect(self._on_exit)
         self._reader.start()
 
+        self._writer = _WriterThread(self._proc, parent=self)
+        self._writer.start()
+
     def _on_bytes(self, data: bytes) -> None:
         # Forward raw bytes to xterm.js (rendering layer) first so the user
         # sees output ASAP. pyte still consumes them for the state-detection
@@ -169,16 +197,13 @@ class PtySession(QObject):
         self.processExited.emit(code)
 
     def write(self, data: bytes | str) -> None:
-        if not self._alive or self._proc is None:
+        if not self._alive or self._proc is None or self._writer is None:
             return
         # pywinpty 3.x .write() expects str (it does its own UTF-8 encoding
         # internally). Passing bytes raises TypeError.
         if isinstance(data, bytes):
             data = data.decode("utf-8", "replace")
-        try:
-            self._proc.write(data)
-        except Exception as e:
-            print(f"[pty_session] write error: {e!r}", flush=True)
+        self._writer.write(data)
 
     def resize(self, cols: int, rows: int) -> None:
         if cols < 20 or rows < 5:
@@ -195,6 +220,8 @@ class PtySession(QObject):
     def terminate(self) -> None:
         if self._reader is not None:
             self._reader.request_stop()
+        if self._writer is not None:
+            self._writer.request_stop()
         if self._proc is not None:
             try:
                 self._proc.terminate(force=True)

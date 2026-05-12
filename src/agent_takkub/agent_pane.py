@@ -31,6 +31,13 @@ from .config import RUNTIME_DIR
 from .pty_session import PtySession
 from .roles import Role
 from .terminal_widget import TerminalWidget
+from .token_meter import (
+    context_limit_for_model,
+    find_latest_session,
+    format_tokens,
+    read_last_usage,
+    usage_color,
+)
 
 STATUS_COLORS = {
     "empty": "#3f3f46",
@@ -71,6 +78,19 @@ class AgentPane(QFrame):
         # throttle pyte-state polling so chatty TUIs don't fire it 50+/sec
         self._idle_check_at: float = 0.0
 
+        # Token-meter bookkeeping. The pane locks on to the first JSONL
+        # session file that appears under the encoded project dir after
+        # spawn — if two panes share a cwd, the second pane locks on to
+        # whichever new file claude opens for it. Once locked, the path
+        # is held until the pane detaches.
+        self._spawn_ts: float = 0.0
+        self._session_cwd: str | None = None
+        self._session_jsonl = None  # type: object | None
+        self._last_usage: dict | None = None
+        self._token_timer = QTimer(self)
+        self._token_timer.setInterval(5_000)
+        self._token_timer.timeout.connect(self._refresh_token_meter)
+
         self.setObjectName(f"pane_{role.name}")
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setStyleSheet(self._stylesheet())
@@ -104,6 +124,14 @@ class AgentPane(QFrame):
         self._note = QLabel("", header)
         self._note.setStyleSheet("color: #9ca3af; font-size: 11px;")
 
+        # Token-usage badge: shows "52k/200k" of the current claude session
+        # for this pane, refreshed on a slow timer. Hidden until the pane has
+        # an active session with at least one assistant turn on disk.
+        self._token_label = QLabel("", header)
+        self._token_label.setStyleSheet("color: #6b7280; font-size: 11px;")
+        self._token_label.setToolTip("Last-turn context occupancy (prompt tokens / limit)")
+        self._token_label.hide()
+
         self._btn_spawn = QPushButton("Spawn", header)
         self._btn_spawn.setFixedHeight(22)
         self._btn_spawn.clicked.connect(lambda: self.spawnRequested.emit(self.role.name))
@@ -128,6 +156,7 @@ class AgentPane(QFrame):
         hl.addWidget(self._dot)
         hl.addWidget(self._title)
         hl.addWidget(self._note, 1)
+        hl.addWidget(self._token_label)
         hl.addWidget(self._btn_spawn)
         hl.addWidget(self._btn_export)
         hl.addWidget(self._btn_min)
@@ -235,6 +264,20 @@ class AgentPane(QFrame):
         self._idle_check_at = 0.0
         self._terminal.set_idle(False)
 
+        # Token-meter: remember when we spawned + which cwd to scan, then
+        # start polling. The very first claude turn won't land for a few
+        # seconds, so the label stays hidden until read_last_usage returns.
+        self._spawn_ts = time.time()
+        self._session_cwd = cwd
+        self._session_jsonl = None
+        self._last_usage = None
+        self._token_label.hide()
+        if cwd:
+            self._token_timer.start()
+            # one quick refresh after a short delay so the badge appears as
+            # soon as the first turn lands without waiting a full interval
+            QTimer.singleShot(1_500, self._refresh_token_meter)
+
     # Minimum interval between pyte-state polls so a chatty TUI doesn't
     # fire this 50+ times a second.
     _IDLE_POLL_MIN_INTERVAL = 0.15  # 150 ms
@@ -283,6 +326,11 @@ class AgentPane(QFrame):
             self.session = None
         self._last_idle = None
         self._terminal.clear()
+        # tear down token-meter state
+        self._token_timer.stop()
+        self._session_jsonl = None
+        self._last_usage = None
+        self._token_label.hide()
 
     def _on_exit(self, code: int) -> None:
         # Distinguish:
@@ -296,6 +344,54 @@ class AgentPane(QFrame):
             self.set_state("exited", note=note)
         self._expected_exit = False
         self.detach_session()
+
+    # ──────────────────────────────────────────────────────────────
+    # token meter
+    # ──────────────────────────────────────────────────────────────
+    def _refresh_token_meter(self) -> None:
+        """Poll the active claude session's JSONL for the latest usage block
+        and update the header badge. Cheap by design — runs every 5s."""
+        if self.session is None or not self._session_cwd:
+            return
+        # Lock onto the JSONL file the first time we see one created after
+        # spawn_ts. Sticky after that so peer panes sharing the cwd can't
+        # steal the meter.
+        if self._session_jsonl is None:
+            cand = find_latest_session(self._session_cwd, since_ts=self._spawn_ts - 5)
+            if cand is None:
+                return
+            self._session_jsonl = cand
+        try:
+            usage = read_last_usage(self._session_jsonl)
+        except Exception:
+            return
+        if usage is None:
+            return
+        self._last_usage = usage
+        limit = context_limit_for_model(usage["model"])
+        prompt = usage["prompt"]
+        pct = (prompt / limit) if limit else 0.0
+        color = usage_color(pct)
+        text = f"{format_tokens(prompt)}/{format_tokens(limit)} · {int(pct * 100)}%"
+        self._token_label.setText(text)
+        self._token_label.setStyleSheet(
+            f"color: {color}; font-size: 11px; font-variant-numeric: tabular-nums;"
+        )
+        self._token_label.setToolTip(
+            f"model: {usage['model']}\n"
+            f"prompt: {usage['prompt']:,} tokens  (input {usage['input']:,} + "
+            f"cache write {usage['cache_creation']:,} + cache read {usage['cache_read']:,})\n"
+            f"output: {usage['output']:,} tokens\n"
+            f"context limit: {limit:,}"
+        )
+        self._token_label.show()
+
+    def current_usage(self) -> dict | None:
+        """Return the last-known usage dict for status-bar aggregation, or
+        None if this pane has no active session / hasn't logged a turn yet."""
+        if self.session is None:
+            return None
+        return self._last_usage
 
     def mark_expected_exit(self) -> None:
         """Called by orchestrator.close()/done() before terminate so the next

@@ -2,6 +2,81 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [0.3.8] — 2026-05-12
+
+### Added (token usage meter)
+- **Per-pane token badge** ("สรุปการใช้งาน token"): each pane header now shows
+  `<prompt> / <limit> · <pct>%` derived from the active claude session's JSONL
+  on disk (`~/.claude/projects/<encoded-cwd>/<uuid>.jsonl`). Polls every 5s
+  by reading the last assistant turn's `usage` block. Hover for full
+  breakdown (input + cache create + cache read + output, model name, limit).
+  Colour ramps: grey < 50% → yellow 50-80% → orange 80-95% → red ≥ 95%.
+- **Aggregate status-bar meter**: shows `Σ <total> · max <pct>%` summing
+  prompt tokens across every active pane. Tooltip lists per-role usage so
+  the user can spot which pane is bumping the cap. Headline percentage is
+  the **largest single pane's ratio**, not a sum — each pane has its own
+  context window so the team-wide ratio is "closest pane to its cap".
+- New `token_meter.py` module: `encode_path_for_claude`, `find_latest_session`,
+  `read_last_usage`, `format_tokens`, `usage_color`, `context_limit_for_model`.
+  Default limit 200k; override via `TAKKUB_CONTEXT_LIMIT` env var for the
+  Opus 4.7 [1m] mode.
+
+### Fixed
+- **UI freeze during typing** ("อาการ ค้างของการพิมพ์"): Typing while Claude was busy printing large amounts of text caused the entire cockpit UI to freeze. This happened because `winpty.write()` is a blocking call. Fixed by moving `PtySession.write()` to a background `_WriterThread` with a non-blocking queue. Input keystrokes are now immediately queued and the UI remains responsive.
+- **Typing delay and ghost characters** ("พิมแล้วดีเลย์/ตัวหนังสือโดนแทนที่"): Switched the PTY backend from WinPTY to ConPTY. WinPTY operates by scraping the hidden console screen buffer on an interval and generating ANSI diffs, which introduced a ~50-150ms roundtrip delay and caused characters to appear out of order or replace each other during rapid typing. ConPTY provides a direct, native ANSI rendering pipeline (same as VS Code and Windows Terminal), resulting in a "super real-time" typing experience.
+
+## [0.3.7] — 2026-05-12
+
+### Added (Lead hybrid policy)
+- **Lead direct-edit hybrid policy.** Old guidance was a single soft bullet
+  ("Lead ห้ามทำงานเอง") which Lead ignored under pressure — user saw Lead
+  doing direct multi-file refactors in pms-web (i18n locales + workload
+  page tsx + CSS) instead of delegating to `frontend`. New policy keeps
+  flexibility for *meta* work (cockpit config, planning, task specs) but
+  draws a hard line for *project* work.
+- New decision matrix in `CLAUDE.md` (cockpit):
+  - ✅ Lead may edit: cockpit files, plan-time Read/Grep/Glob, single-line
+    typos at user-pinned paths, task-spec markdown.
+  - 🚫 Lead must delegate: anything under a project path, >1 file,
+    >30-line edits in a round, specialist-context work (CSS, API
+    contracts, schemas, infra), explicit user assignment.
+- **Auto-injected `BLOCKED_DIRS` at every Lead spawn**
+  (`orchestrator._render_lead_context`): renders cockpit `CLAUDE.md`
+  plus a dynamic section listing the active project's `paths` so Lead
+  starts each session knowing the *exact* off-limits directories. Tracks
+  `projects.json` so switching projects updates the policy automatically.
+- Tools are *not* hard-locked (`--disallowed-tools` unused) — Lead keeps
+  Edit/Write for cockpit-side work. The hybrid relies on a sharp,
+  spawn-time injected rule rather than coarse tool removal.
+
+### Fixed (stalled-frame bug)
+- **Idle pane no longer holds a stale frame.** Symptom the user saw: a
+  teammate finishes its turn, the *final* batch of PTY output reaches
+  xterm.js, but the DOM paint never happens — the pane sits stuck on
+  the second-to-last frame until you press a key or click into it.
+  `term.write` had already run; the render simply wasn't painted.
+- Root cause: Chromium aggressively pauses requestAnimationFrame and
+  paint scheduling for any view that isn't the foreground tab. A
+  multi-pane cockpit always has N−1 panes in that state.
+- Fix is three-pronged so a single layer failing won't bring the bug
+  back:
+  1. **Chromium flags** (`app.py`, set before QtWebEngine boots):
+     `--disable-background-timer-throttling`,
+     `--disable-renderer-backgrounding`,
+     `--disable-backgrounding-occluded-windows`,
+     `--disable-features=CalculateNativeWinOcclusion`.
+  2. **In-page RAF self-loop** (`terminal.html`): a one-line
+     `requestAnimationFrame(pulse)` recursive scheduler keeps xterm.js's
+     render service warm at the page's native refresh rate.
+  3. **Python heartbeat** (`terminal_widget.py`): a 250 ms `QTimer`
+     fires `runJavaScript("void 0;")` to force a JS task-queue tick if
+     the RAF loop is ever paused for any reason. Cheap on capable
+     hardware, harmless on weak.
+- User intent for this fix: *"เครื่องฉันแรง อยากให้มันตื่นตัวอยู่ตลอดเวลา"*
+  — render service is always on.
+
+[0.3.7]: https://github.com/takkub/agent-takkub/releases/tag/v0.3.7
+
 ## [0.3.6] — 2026-05-12
 
 ### Removed (final word on local echo)

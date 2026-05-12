@@ -141,6 +141,21 @@
 
     // Refit whenever the viewport box changes
     new ResizeObserver(() => fit.fit()).observe(document.getElementById('term'));
+
+    // ------------------------------------------------------------------
+    // Always-on render loop
+    // ------------------------------------------------------------------
+    // Chromium (and therefore QtWebEngine) is aggressive about pausing
+    // requestAnimationFrame when a view isn't actively the foreground.
+    // For a multi-pane cockpit that means non-focused panes display
+    // stale frames — PTY output is delivered to xterm.js but the DOM
+    // paint never lands until the user clicks/types. We keep a forever
+    // RAF loop running so the render service is always ticking. The
+    // body is empty; just being scheduled is enough to keep Chrome
+    // honest. Cheap even on weak hardware, free on strong ones.
+    (function pulse() {
+      requestAnimationFrame(pulse);
+    })();
   </script>
 </body>
 </html>
