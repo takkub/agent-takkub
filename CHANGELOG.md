@@ -2,6 +2,24 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [0.2.3] — 2026-05-12
+
+### Fixed
+- **`takkub: command not found` from Lead's bash** — Lead's Bash tool spawns
+  `/usr/bin/bash` (MSYS) which does not auto-append `.cmd` to commands, so
+  `bin/takkub.cmd` was invisible to it. Added a POSIX shell shim at
+  `bin/takkub` (no extension) that delegates to the same `.venv` Python
+  module. cmd.exe/PowerShell still use `bin/takkub.cmd`.
+- **UI felt stale ("ไม่ขยับ")** — the v0.2.2 `_last_rendered_rich` diff
+  cache was skipping legitimate redraws when row tuples looked identical
+  to the previous frame, even though pyte had mutated cursor state /
+  refreshed a status line / pulsed a blink. Removed the cache entirely;
+  every frame now redraws.
+- Bumped debounce 33ms → 20ms (~50 fps) so typing echo feels live again
+  while staying cheap enough that idle frames don't thrash.
+
+[0.2.3]: https://github.com/takkub/agent-takkub/releases/tag/v0.2.3
+
 ## [0.2.2] — 2026-05-12
 
 ### Fixed

@@ -123,12 +123,16 @@ class TerminalWidget(QPlainTextEdit):
             "}"
         )
 
-        # debounced refresh — 33ms = 30fps, easier on typing-induced storms
+        # Debounced refresh — 20 ms gives ~50 fps which is fast enough to
+        # feel live during typing without thrashing on a tight loop.
+        # We deliberately do NOT cache last-rendered rows: even when the
+        # row tuples look identical, pyte may have updated cursor state /
+        # cleared a flash / nudged a status line, and skipping the redraw
+        # leaves the user staring at stale content (the "ไม่ขยับ" feeling).
         self._pending_rich: list | None = None
-        self._last_rendered_rich: list | None = None
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setSingleShot(True)
-        self._refresh_timer.setInterval(33)
+        self._refresh_timer.setInterval(20)
         self._refresh_timer.timeout.connect(self._flush_rich)
 
         # cache of QTextCharFormat keyed by (fg, bg, bold, italic, ul, rev)
@@ -218,23 +222,15 @@ class TerminalWidget(QPlainTextEdit):
         rows = self._pending_rich
         self._pending_rich = None
 
-        # Skip rebuild if nothing actually changed. pyte's outputUpdated
-        # fires for every byte chunk including mouse-mode toggles and
-        # cursor-save sequences that don't visibly mutate the screen.
-        # Without this check, every keystroke pays a ~360-insertText doc
-        # rebuild and the typing feels stuttery.
-        if rows == self._last_rendered_rich:
-            return
-        self._last_rendered_rich = rows
-
         # Only auto-scroll to the bottom if the user wasn't already
         # scrolled up (so manual scroll-back during a long output isn't
         # yanked away by the next refresh).
         sb = self.verticalScrollBar()
         at_bottom = sb is None or sb.value() >= sb.maximum() - 4
 
-        # Rebuild the document. setUpdatesEnabled(False) avoids partial
-        # repaints while we churn through the cursor.
+        # Always rebuild — pyte hides side-effect mutations (cursor moves,
+        # blink, status line refreshes) inside frames that look identical
+        # at the row-tuple level. Skipping these makes the UI feel stale.
         self.setUpdatesEnabled(False)
         try:
             doc = self.document()
@@ -316,10 +312,9 @@ class TerminalWidget(QPlainTextEdit):
             return
         f.setPointSize(size)
         self.setFont(f)
-        # invalidate format cache + last-render cache so the next flush
-        # rebuilds with the new font metrics
+        # invalidate format cache so the next flush rebuilds with the new
+        # font metrics
         self._fmt_cache.clear()
-        self._last_rendered_rich = None
         # recompute the pty grid for the new font metrics and tell the session
         fm = QFontMetrics(self.font())
         char_w = max(1, fm.horizontalAdvance("M"))

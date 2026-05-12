@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# `takkub` CLI shim for POSIX shells (Git Bash / MSYS / WSL).
+# Mirrors bin/takkub.cmd for cmd.exe / PowerShell.
+#
+# Lead/agent panes typically execute their Bash tool via /usr/bin/bash on
+# Windows. That shell's command search does not auto-append `.cmd`, so
+# `takkub.cmd` is invisible to it. This file gives bash a no-extension
+# entry point pointing at the same .venv Python module.
+
+set -e
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "$HERE/.." && pwd)"
+
+# Prefer Windows-style venv (created by scripts\run.bat). Falls back to a
+# POSIX venv layout in case someone bootstrapped on macOS/Linux later.
+if [ -x "$REPO/.venv/Scripts/python.exe" ]; then
+  PY="$REPO/.venv/Scripts/python.exe"
+elif [ -x "$REPO/.venv/bin/python" ]; then
+  PY="$REPO/.venv/bin/python"
+else
+  echo "agent-takkub .venv not found under $REPO/.venv" >&2
+  echo "Launch the cockpit once with scripts\\run.bat to provision it." >&2
+  exit 1
+fi
+
+exec "$PY" -m agent_takkub.cli "$@"
