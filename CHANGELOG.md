@@ -2,6 +2,23 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [0.3.0-rc2] — 2026-05-12 (branch `feat/xterm-terminal`)
+
+### Fixed
+- **Typed character lagged 1 step behind.** Each keystroke had to make a
+  full `xterm.js → QWebChannel → Python → PTY → claude → PTY → bridge →
+  xterm.js` round trip before the user saw their own character; claude's
+  ink.js TUI input boxes only redraw on the *next* keystroke, so the user
+  perceived a one-char delay. Added **local echo** in xterm.js for
+  printable input only — control sequences (Esc, arrows, Ctrl-keys, DEL)
+  still go untouched to claude. Idempotent if claude later redraws.
+- **Output IPC thrash.** Each PTY chunk used to fire its own
+  `runJavaScript` call across the WebChannel. Coalesced multiple
+  `write_bytes()` calls within the same Qt event-loop tick into a single
+  IPC roundtrip via a 0 ms QTimer.
+
+[0.3.0-rc2]: https://github.com/takkub/agent-takkub/tree/feat/xterm-terminal
+
 ## [0.3.0-rc1] — 2026-05-12 (branch `feat/xterm-terminal`)
 
 ### Changed (breaking architecture)

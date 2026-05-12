@@ -27,7 +27,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from PyQt6.QtCore import QObject, QUrl, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import QObject, QTimer, QUrl, pyqtSignal, pyqtSlot
 from PyQt6.QtWebChannel import QWebChannel
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWidgets import QVBoxLayout, QWidget
@@ -89,6 +89,16 @@ class TerminalWidget(QWidget):
         self._pending_writes: list[str] = []
         self._page_ready = False
 
+        # Coalesce multiple write_bytes() calls within the same event-loop
+        # tick into a single runJavaScript IPC roundtrip. Each PTY chunk
+        # used to fire its own runJavaScript — for chatty TUIs that meant
+        # dozens of IPC hops per frame and visible cursor jitter.
+        self._write_buf: list[str] = []
+        self._flush_timer = QTimer(self)
+        self._flush_timer.setSingleShot(True)
+        self._flush_timer.setInterval(0)
+        self._flush_timer.timeout.connect(self._flush_writes)
+
         self._bridge.inputData.connect(self._on_input_data)
         self._bridge.sizeChanged.connect(self.resized.emit)
         self._bridge.pageReady.connect(self._on_page_ready)
@@ -99,16 +109,26 @@ class TerminalWidget(QWidget):
     # Python → JS
     # ------------------------------------------------------------------
     def write_bytes(self, data: bytes | str) -> None:
-        """Forward PTY output to xterm.js."""
+        """Forward PTY output to xterm.js (batched per event-loop tick)."""
         if isinstance(data, bytes):
             text = data.decode("utf-8", "replace")
         else:
             text = data
+        if not text:
+            return
         if not self._page_ready:
             self._pending_writes.append(text)
             return
-        # json.dumps gives us a JS string literal with all escaping handled.
-        self._view.page().runJavaScript(f"termWrite({json.dumps(text)});")
+        self._write_buf.append(text)
+        if not self._flush_timer.isActive():
+            self._flush_timer.start()
+
+    def _flush_writes(self) -> None:
+        if not self._write_buf:
+            return
+        joined = "".join(self._write_buf)
+        self._write_buf.clear()
+        self._view.page().runJavaScript(f"termWrite({json.dumps(joined)});")
 
     def clear(self) -> None:
         if not self._page_ready:
