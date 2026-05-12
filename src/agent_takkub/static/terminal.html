@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>agent-takkub terminal</title>
+  <link rel="stylesheet" href="xterm.css">
+  <style>
+    html, body {
+      margin: 0; padding: 0;
+      height: 100%; width: 100%;
+      background: #0e0e10;
+      overflow: hidden;
+    }
+    #term {
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      padding: 4px;
+    }
+    /* xterm.js viewport scroll bar: subtle dark to match theme */
+    .xterm-viewport::-webkit-scrollbar { width: 10px; }
+    .xterm-viewport::-webkit-scrollbar-track { background: #18181b; }
+    .xterm-viewport::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 5px; }
+    .xterm-viewport::-webkit-scrollbar-thumb:hover { background: #52525b; }
+  </style>
+  <script src="xterm.js"></script>
+  <script src="xterm-addon-fit.js"></script>
+  <script src="xterm-addon-web-links.js"></script>
+  <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+</head>
+<body>
+  <div id="term"></div>
+  <script>
+    // ------------------------------------------------------------------
+    // xterm.js terminal setup
+    // ------------------------------------------------------------------
+    const term = new Terminal({
+      fontFamily: '"Cascadia Mono", "Consolas", "Courier New", "Leelawadee UI", "Tahoma", monospace',
+      fontSize: 13,
+      lineHeight: 1.2,
+      cursorBlink: true,
+      cursorStyle: 'block',
+      scrollback: 10000,
+      allowProposedApi: true,
+      windowsMode: false,  // we feed bytes already from a Windows pty, no normalisation
+      theme: {
+        background: '#0e0e10',
+        foreground: '#e6e6e6',
+        cursor: '#facc15',
+        cursorAccent: '#0e0e10',
+        selectionBackground: '#3b82f6',
+        black: '#1c1c20', red: '#ef4444', green: '#22c55e', yellow: '#facc15',
+        blue: '#3b82f6', magenta: '#a855f7', cyan: '#22d3ee', white: '#e6e6e6',
+        brightBlack: '#52525b', brightRed: '#f87171', brightGreen: '#4ade80',
+        brightYellow: '#fde047', brightBlue: '#60a5fa', brightMagenta: '#c084fc',
+        brightCyan: '#67e8f9', brightWhite: '#fafafa',
+      },
+    });
+
+    const fit = new FitAddon.FitAddon();
+    term.loadAddon(fit);
+    term.loadAddon(new WebLinksAddon.WebLinksAddon());
+
+    term.open(document.getElementById('term'));
+    fit.fit();
+    term.focus();
+
+    // ------------------------------------------------------------------
+    // Qt bridge — exchange bytes with the Python side over QWebChannel
+    // ------------------------------------------------------------------
+    let bridge = null;
+    new QWebChannel(qt.webChannelTransport, (channel) => {
+      bridge = channel.objects.bridge;
+
+      // any input the user types in xterm goes back to PTY
+      term.onData((data) => {
+        if (bridge && bridge.sendInput) bridge.sendInput(data);
+      });
+
+      // resize → tell PTY new cols/rows
+      const reportResize = () => {
+        if (bridge && bridge.resize) bridge.resize(term.cols, term.rows);
+      };
+      term.onResize(reportResize);
+      reportResize();
+
+      // tell Python we're ready to receive
+      if (bridge && bridge.ready) bridge.ready();
+    });
+
+    // ------------------------------------------------------------------
+    // Python → JS API (called via runJavaScript)
+    // ------------------------------------------------------------------
+    // Output from the PTY arrives as a UTF-8 string. xterm.js's write
+    // accepts both strings and Uint8Array; we use the string form for
+    // simpler bridging (QWebChannel serialises bytes as base64 otherwise).
+    window.termWrite = function (text) {
+      term.write(text);
+    };
+
+    // Resize the terminal to match the host widget size in cols/rows.
+    // We rely on FitAddon to compute cols/rows from the host CSS box.
+    window.termFit = function () {
+      fit.fit();
+    };
+
+    window.termSetFontSize = function (px) {
+      term.options.fontSize = px;
+      fit.fit();
+    };
+
+    window.termClear = function () {
+      term.clear();
+    };
+
+    // Return the visible screen as plain text (for export / state detection)
+    window.termGetBufferText = function () {
+      const buf = term.buffer.active;
+      const lines = [];
+      for (let i = 0; i < buf.length; i++) {
+        const line = buf.getLine(i);
+        if (line) lines.push(line.translateToString(true));
+      }
+      return lines.join('\n');
+    };
+
+    // Refit whenever the viewport box changes
+    new ResizeObserver(() => fit.fit()).observe(document.getElementById('term'));
+  </script>
+</body>
+</html>

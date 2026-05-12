@@ -1,371 +1,147 @@
-"""TerminalWidget: renders a pyte screen with ANSI colours, forwards keys.
+"""TerminalWidget: QWebEngineView hosting xterm.js for true terminal fidelity.
 
-Iter 3: full ANSI colour rendering via QTextCharFormat. Background/foreground,
-bold, italic, underline, and reverse are honoured. Builds runs of identically
-styled text from pyte's per-cell attributes (see PtySession.display_rich) so
-we don't pay one format-object per character.
+This replaces the Iter 1–9 QPlainTextEdit + pyte rendering pipeline. xterm.js
+is the same terminal emulator VS Code, Hyper, GitHub Codespaces and Cursor
+use; it handles ANSI, alt-screen, mouse modes, IME composition, BiDi text,
+and Thai/CJK combining marks natively via the browser layout engine.
 
-Input handling:
-  - keyPressEvent: standard keys to bytes, function keys to escape sequences
-  - inputMethodEvent: IME composition commits (Thai, CJK) to bytes
-  - wheelEvent: forwarded as PgUp/PgDn so the user can scroll claude's
-    internal alt-screen history.
+Wiring:
+  PTY bytes (from PtySession reader thread)
+    → terminal_widget.write_bytes(data)
+    → page.runJavaScript("termWrite(...)")
+    → xterm.js renders
+
+  User keystroke / IME commit (inside xterm.js)
+    → bridge.sendInput(data)        [QWebChannel slot]
+    → emit inputBytes(bytes)        [Qt signal]
+    → AgentPane → Orchestrator → PtySession.write()
+
+  Resize:
+    xterm.js FitAddon → bridge.resize(cols, rows)
+    → emit resized(cols, rows)      [Qt signal]
+    → PtySession.resize() → winpty.setwinsize()
 """
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import (
-    QColor,
-    QFont,
-    QFontMetrics,
-    QInputMethodEvent,
-    QKeyEvent,
-    QTextBlockFormat,
-    QTextCharFormat,
-    QTextCursor,
-)
-from PyQt6.QtWidgets import QPlainTextEdit, QWidget
+import json
+from pathlib import Path
 
-_KEY_MAP = {
-    Qt.Key.Key_Enter: b"\r",
-    Qt.Key.Key_Return: b"\r",
-    Qt.Key.Key_Backspace: b"\x7f",
-    Qt.Key.Key_Tab: b"\t",
-    Qt.Key.Key_Escape: b"\x1b",
-    Qt.Key.Key_Up: b"\x1b[A",
-    Qt.Key.Key_Down: b"\x1b[B",
-    Qt.Key.Key_Right: b"\x1b[C",
-    Qt.Key.Key_Left: b"\x1b[D",
-    Qt.Key.Key_Home: b"\x1b[H",
-    Qt.Key.Key_End: b"\x1b[F",
-    Qt.Key.Key_PageUp: b"\x1b[5~",
-    Qt.Key.Key_PageDown: b"\x1b[6~",
-    Qt.Key.Key_Delete: b"\x1b[3~",
-    Qt.Key.Key_F1: b"\x1bOP",
-    Qt.Key.Key_F2: b"\x1bOQ",
-    Qt.Key.Key_F3: b"\x1bOR",
-    Qt.Key.Key_F4: b"\x1bOS",
-}
+from PyQt6.QtCore import QObject, QUrl, pyqtSignal, pyqtSlot
+from PyQt6.QtWebChannel import QWebChannel
+from PyQt6.QtWebEngineWidgets import QWebEngineView
+from PyQt6.QtWidgets import QVBoxLayout, QWidget
 
-# ──────────────────────────────────────────────────────────────────────
-# pyte → Qt colour translation
-# ──────────────────────────────────────────────────────────────────────
-
-DEFAULT_FG = QColor("#e6e6e6")
-DEFAULT_BG = QColor("#0e0e10")
-
-# Standard 16-colour ANSI palette (named + bright variants). pyte uses these
-# strings literally in Char.fg / Char.bg.
-_PALETTE: dict[str, QColor] = {
-    "black": QColor("#1c1c20"),
-    "red": QColor("#ef4444"),
-    "green": QColor("#22c55e"),
-    "yellow": QColor("#facc15"),
-    "blue": QColor("#3b82f6"),
-    "magenta": QColor("#a855f7"),
-    "cyan": QColor("#22d3ee"),
-    "white": QColor("#e6e6e6"),
-    "brightblack": QColor("#52525b"),
-    "brightred": QColor("#f87171"),
-    "brightgreen": QColor("#4ade80"),
-    "brightyellow": QColor("#fde047"),
-    "brightblue": QColor("#60a5fa"),
-    "brightmagenta": QColor("#c084fc"),
-    "brightcyan": QColor("#67e8f9"),
-    "brightwhite": QColor("#fafafa"),
-}
+_STATIC_DIR = Path(__file__).resolve().parent / "static"
+_INDEX_URL = QUrl.fromLocalFile(str(_STATIC_DIR / "terminal.html"))
 
 
-def _resolve_color(name: str, default: QColor) -> QColor:
-    if not name or name == "default":
-        return default
-    if name in _PALETTE:
-        return _PALETTE[name]
-    # 6-char hex (24-bit truecolor) — pyte stores it without the leading '#'
-    if len(name) == 6:
-        c = QColor("#" + name)
-        if c.isValid():
-            return c
-    c = QColor(name)
-    return c if c.isValid() else default
+class _Bridge(QObject):
+    """Object exposed to JS via QWebChannel."""
+
+    inputData = pyqtSignal(str)  # text the user typed in xterm.js
+    sizeChanged = pyqtSignal(int, int)  # cols, rows reported by FitAddon
+    pageReady = pyqtSignal()
+
+    @pyqtSlot(str)
+    def sendInput(self, data: str) -> None:
+        self.inputData.emit(data)
+
+    @pyqtSlot(int, int)
+    def resize(self, cols: int, rows: int) -> None:
+        self.sizeChanged.emit(cols, rows)
+
+    @pyqtSlot()
+    def ready(self) -> None:
+        self.pageReady.emit()
 
 
-class TerminalWidget(QPlainTextEdit):
-    """Read-only viewport over a pyte screen with key/IME input passthrough."""
+class TerminalWidget(QWidget):
+    """xterm.js-backed terminal that drops into an AgentPane.
+
+    Public signals match the v0.2.x QPlainTextEdit-based widget so AgentPane
+    can stay nearly identical:
+
+      inputBytes(bytes)        — user typed something; forward to PTY
+      resized(cols, rows)      — terminal grid size changed; resize PTY
+      fontSizeChanged(int)     — for QSettings per-role persistence
+    """
 
     inputBytes = pyqtSignal(bytes)
-    resized = pyqtSignal(int, int)  # cols, rows  (when user resizes window)
-    fontSizeChanged = pyqtSignal(int)  # for per-pane size persistence
-
-    # Updated by AgentPane whenever the screen is refreshed; lets us forward
-    # mouse-wheel events as proper SGR mouse events when claude has mouse
-    # tracking on (`\x1b[?1006h`) and fall back to PgUp/PgDn otherwise.
-    mouse_tracking_on: bool = False
+    resized = pyqtSignal(int, int)
+    fontSizeChanged = pyqtSignal(int)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setReadOnly(False)  # accept IME composition + focus
-        self.setUndoRedoEnabled(False)
-        self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        self.setTabChangesFocus(False)
-        self.setAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled, True)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
-        font = self._pick_font()
-        self.setFont(font)
-        self.setStyleSheet(
-            "QPlainTextEdit {"
-            "  background-color: #0e0e10;"
-            "  color: #e6e6e6;"
-            "  selection-background-color: #3b82f6;"
-            "  border: none;"
-            "  padding: 6px;"
-            "}"
-        )
+        self._view = QWebEngineView(self)
+        layout.addWidget(self._view, 1)
 
-        # Refresh on the very next event-loop tick. interval=0 means Qt
-        # still coalesces multiple outputUpdated emits within the same
-        # tick into one redraw, but we never artificially delay the next
-        # paint. The previous 20-33 ms debounce showed up as visible lag
-        # in IME echo and form navigation.
-        self._pending_rich: list | None = None
-        self._refresh_timer = QTimer(self)
-        self._refresh_timer.setSingleShot(True)
-        self._refresh_timer.setInterval(0)
-        self._refresh_timer.timeout.connect(self._flush_rich)
+        self._channel = QWebChannel(self)
+        self._bridge = _Bridge(self)
+        self._channel.registerObject("bridge", self._bridge)
+        self._view.page().setWebChannel(self._channel)
 
-        # cache of QTextCharFormat keyed by (fg, bg, bold, italic, ul, rev)
-        self._fmt_cache: dict[tuple, QTextCharFormat] = {}
+        # buffer bytes until xterm.js says it's ready, then flush in order
+        self._pending_writes: list[str] = []
+        self._page_ready = False
 
-        # block format (line height) reused for every paragraph
-        self._block_fmt = QTextBlockFormat()
-        self._block_fmt.setLineHeight(
-            135, QTextBlockFormat.LineHeightTypes.ProportionalHeight.value
-        )
+        self._bridge.inputData.connect(self._on_input_data)
+        self._bridge.sizeChanged.connect(self.resized.emit)
+        self._bridge.pageReady.connect(self._on_page_ready)
 
-    # ──────────────────────────────────────────────────────────────
-    def _pick_font(self) -> QFont:
-        f = QFont()
-        f.setFamilies(
-            [
-                "Cascadia Mono",
-                "Consolas",
-                "Courier New",
-                "Leelawadee UI",
-                "Tahoma",
-                "Microsoft Sans Serif",
-            ]
-        )
-        f.setPointSize(11)
-        f.setStyleHint(QFont.StyleHint.Monospace)
-        f.setFixedPitch(True)
-        return f
+        self._view.load(_INDEX_URL)
 
-    # ──────────────────────────────────────────────────────────────
-    # output rendering
-    # ──────────────────────────────────────────────────────────────
-    def set_screen_rich(
-        self,
-        rows: list[list[tuple[str, str, str, bool, bool, bool, bool]]],
-    ) -> None:
-        """Schedule a redraw with the given rich screen rows."""
-        self._pending_rich = rows
-        if not self._refresh_timer.isActive():
-            self._refresh_timer.start()
-
-    def _format_for(
-        self,
-        fg: str,
-        bg: str,
-        bold: bool,
-        italic: bool,
-        underline: bool,
-        reverse: bool,
-    ) -> QTextCharFormat:
-        key = (fg, bg, bold, italic, underline, reverse)
-        fmt = self._fmt_cache.get(key)
-        if fmt is not None:
-            return fmt
-
-        fg_color = _resolve_color(fg, DEFAULT_FG)
-        bg_color = _resolve_color(bg, DEFAULT_BG)
-        if reverse:
-            fg_color, bg_color = bg_color, fg_color
-
-        fmt = QTextCharFormat()
-
-        # Set the families list directly on the format instead of building a
-        # whole QFont. Using setFont(QFont(widget.font())) collapses the
-        # families fallback chain in some Qt builds, so Thai/CJK chars stop
-        # falling back to Tahoma/Leelawadee and combining marks disappear.
-        # setFontFamilies preserves the per-glyph fallback.
-        fmt.setFontFamilies(self.font().families())
-        if bold:
-            fmt.setFontWeight(QFont.Weight.Bold.value)
-        if italic:
-            fmt.setFontItalic(True)
-        if underline:
-            fmt.setFontUnderline(True)
-
-        fmt.setForeground(fg_color)
-        # Only paint background if it differs from the widget bg — keeps the
-        # rendering cheaper and avoids cell-grid artefacts on bigger spans.
-        if bg_color != DEFAULT_BG or reverse:
-            fmt.setBackground(bg_color)
-        self._fmt_cache[key] = fmt
-        return fmt
-
-    def _flush_rich(self) -> None:
-        if self._pending_rich is None:
+    # ------------------------------------------------------------------
+    # Python → JS
+    # ------------------------------------------------------------------
+    def write_bytes(self, data: bytes | str) -> None:
+        """Forward PTY output to xterm.js."""
+        if isinstance(data, bytes):
+            text = data.decode("utf-8", "replace")
+        else:
+            text = data
+        if not self._page_ready:
+            self._pending_writes.append(text)
             return
-        rows = self._pending_rich
-        self._pending_rich = None
+        # json.dumps gives us a JS string literal with all escaping handled.
+        self._view.page().runJavaScript(f"termWrite({json.dumps(text)});")
 
-        # Only auto-scroll to the bottom if the user wasn't already
-        # scrolled up (so manual scroll-back during a long output isn't
-        # yanked away by the next refresh).
-        sb = self.verticalScrollBar()
-        at_bottom = sb is None or sb.value() >= sb.maximum() - 4
-
-        # Always rebuild — pyte hides side-effect mutations (cursor moves,
-        # blink, status line refreshes) inside frames that look identical
-        # at the row-tuple level. Skipping these makes the UI feel stale.
-        self.setUpdatesEnabled(False)
-        try:
-            doc = self.document()
-            doc.clear()
-            cursor = QTextCursor(doc)
-            cursor.setBlockFormat(self._block_fmt)
-
-            for y, runs in enumerate(rows):
-                if y > 0:
-                    cursor.insertBlock(self._block_fmt)
-                for text, fg, bg, bold, italic, underline, reverse in runs:
-                    if not text:
-                        continue
-                    fmt = self._format_for(fg, bg, bold, italic, underline, reverse)
-                    cursor.insertText(text, fmt)
-        finally:
-            self.setUpdatesEnabled(True)
-
-        if at_bottom and sb is not None:
-            sb.setValue(sb.maximum())
-
-    # ──────────────────────────────────────────────────────────────
-    # input handling
-    # ──────────────────────────────────────────────────────────────
-    def keyPressEvent(self, event: QKeyEvent) -> None:
-        key = event.key()
-        mods = event.modifiers()
-        text = event.text()
-
-        ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
-        alt = bool(mods & Qt.KeyboardModifier.AltModifier)
-
-        # Ctrl + (+|=|-) → adjust font size. Reserved before forwarding to PTY.
-        if (
-            ctrl
-            and not alt
-            and key
-            in (
-                Qt.Key.Key_Plus,
-                Qt.Key.Key_Equal,
-                Qt.Key.Key_Minus,
-                Qt.Key.Key_0,
-            )
-        ):
-            self._adjust_font(key)
+    def clear(self) -> None:
+        if not self._page_ready:
+            self._pending_writes.clear()
             return
-
-        if ctrl and not alt:
-            if Qt.Key.Key_A <= key <= Qt.Key.Key_Z:
-                ctrl_byte = bytes([key - Qt.Key.Key_A + 1])
-                self.inputBytes.emit(ctrl_byte)
-                return
-
-        if key in _KEY_MAP:
-            self.inputBytes.emit(_KEY_MAP[key])
-            return
-
-        if text:
-            self.inputBytes.emit(text.encode("utf-8"))
-            return
-
-    def _adjust_font(self, key: int) -> None:
-        f = self.font()
-        size = f.pointSize() if f.pointSize() > 0 else 11
-        if key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
-            size = min(28, size + 1)
-        elif key == Qt.Key.Key_Minus:
-            size = max(7, size - 1)
-        elif key == Qt.Key.Key_0:
-            size = 11  # reset
-        self.set_font_point_size(size)
+        self._view.page().runJavaScript("termClear();")
 
     def set_font_point_size(self, size: int) -> None:
-        """Set terminal font size + emit fontSizeChanged so AgentPane can
-        persist the choice per role."""
-        f = self.font()
         size = max(7, min(28, int(size)))
-        if f.pointSize() == size:
-            return
-        f.setPointSize(size)
-        self.setFont(f)
-        # invalidate format cache so the next flush rebuilds with the new
-        # font metrics
-        self._fmt_cache.clear()
-        # recompute the pty grid for the new font metrics and tell the session
-        fm = QFontMetrics(self.font())
-        char_w = max(1, fm.horizontalAdvance("M"))
-        char_h = max(1, fm.lineSpacing())
-        cols = max(40, (self.viewport().width() - 12) // char_w)
-        rows = max(10, (self.viewport().height() - 12) // char_h)
-        self.resized.emit(cols, rows)
+        # xterm.js wants pixel size; rough conversion: pt * 1.333 ≈ px
+        px = int(size * 1.333)
+        self._view.page().runJavaScript(f"termSetFontSize({px});")
         self.fontSizeChanged.emit(size)
 
-    def inputMethodEvent(self, event: QInputMethodEvent) -> None:
-        """Forward IME commit text (Thai, CJK, etc.) to the PTY."""
-        commit = event.commitString()
-        if commit:
-            self.inputBytes.emit(commit.encode("utf-8"))
-        event.accept()
+    def request_buffer_text(self, callback) -> None:
+        """Async fetch the current visible+scrollback buffer as text.
+        `callback(str)` is invoked once the JS resolves."""
+        self._view.page().runJavaScript("termGetBufferText();", callback)
 
-    def wheelEvent(self, event) -> None:
-        """Forward mouse wheel to claude.
+    # ------------------------------------------------------------------
+    # internal
+    # ------------------------------------------------------------------
+    def _on_input_data(self, data: str) -> None:
+        # xterm.js gives us already-encoded escape sequences for keys; just
+        # ship the bytes to the PTY.
+        self.inputBytes.emit(data.encode("utf-8"))
 
-        Two strategies:
-          1. If claude has SGR mouse tracking enabled (most modern TUIs do),
-             send a proper wheel-button-press SGR event so claude scrolls its
-             own internal buffer with smooth granularity.
-          2. Otherwise, fall back to PgUp/PgDn so the user can still page
-             through claude's history.
-        """
-        delta = event.angleDelta().y()
-        if delta == 0:
-            return
-        ticks = max(1, abs(delta) // 120)
+    def _on_page_ready(self) -> None:
+        self._page_ready = True
+        if self._pending_writes:
+            joined = "".join(self._pending_writes)
+            self._pending_writes.clear()
+            self._view.page().runJavaScript(f"termWrite({json.dumps(joined)});")
 
-        if self.mouse_tracking_on:
-            # SGR mouse format: ESC [ < button ; col ; row M
-            # button 64 = wheel up, 65 = wheel down (X10 wheel-as-buttons)
-            button = 64 if delta > 0 else 65
-            # use a sensible coordinate near the cursor — claude doesn't
-            # really care for wheel events, but the field is mandatory
-            seq = f"\x1b[<{button};1;1M".encode()
-            self.inputBytes.emit(seq * ticks)
-        else:
-            seq = _KEY_MAP[Qt.Key.Key_PageUp] if delta > 0 else _KEY_MAP[Qt.Key.Key_PageDown]
-            self.inputBytes.emit(seq * ticks)
-        event.accept()
-
-    # ──────────────────────────────────────────────────────────────
-    # size reporting (so the orchestrator can resize the PTY)
-    # ──────────────────────────────────────────────────────────────
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        fm = QFontMetrics(self.font())
-        char_w = max(1, fm.horizontalAdvance("M"))
-        char_h = max(1, fm.lineSpacing())
-        cols = max(40, (self.viewport().width() - 12) // char_w)
-        rows = max(10, (self.viewport().height() - 12) // char_h)
-        self.resized.emit(cols, rows)
+    def setFocus(self) -> None:
+        self._view.setFocus()

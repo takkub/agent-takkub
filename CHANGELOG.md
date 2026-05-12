@@ -2,6 +2,56 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [0.3.0-rc1] — 2026-05-12 (branch `feat/xterm-terminal`)
+
+### Changed (breaking architecture)
+
+The terminal rendering layer is now **xterm.js running inside a
+QWebEngineView**, the same emulator VS Code / Hyper / GitHub Codespaces
+ship with. The Iter 1–9 QPlainTextEdit + pyte rebuild pipeline was a
+"fake terminal" that hit hard walls on Thai/CJK shaping, alt-screen
+scrollback, and TUI form alignment — all the symptoms behind the
+"สระหาย / กระตุก / ลบไม่หมด" reports.
+
+xterm.js solves these natively because the browser layout engine
+handles complex script shaping (Thai combining marks, BiDi, CJK width),
+the emulator has 10k-line scrollback built in, mouse events are
+forwarded correctly, and selection/copy/paste are first-class.
+
+### Added
+- `static/terminal.html` + `xterm.js` 5.5.0 + `addon-fit` + `addon-web-links`,
+  bundled into the package so the app works offline.
+- `TerminalWidget` rewritten as `QWebEngineView` + `QWebChannel` bridge:
+  - `bridge.sendInput(str)` → `inputBytes` signal → PTY
+  - `bridge.resize(cols, rows)` → `resized` signal → `PtySession.resize()`
+  - `bridge.ready()` → flush any bytes queued during boot
+- `PtySession.bytesIn(bytes)` signal that emits raw PTY chunks for xterm.js
+  to consume directly (no pyte → rich rebuild).
+- `PyQt6-WebEngine>=6.6` dependency.
+
+### Kept
+- `pyte.Screen` still in `PtySession` for state-detection helpers
+  (`is_at_trust_prompt`, `is_at_ready_prompt`, `display_lines` for export).
+  We're paying double parse cost in exchange for keeping the rest of
+  v0.2's orchestrator + auto-trust + ready-detect logic unchanged.
+
+### Migration
+- `pip install -e .` (pulls PyQt6-WebEngine ~150 MB Chromium).
+- Same `scripts\run.bat`, same `projects.json`, same `takkub` CLI.
+- All v0.2.x behaviour preserved: Lead in project root, role-aware cwd,
+  superpowers + agent-skills plugins, audit log, tray notifications.
+
+### Known caveats (rc1)
+- Per-pane font size shortcut (Ctrl+= / Ctrl+-) wired but untested in
+  xterm.js context.
+- Export pane buffer still goes via pyte (`display_lines`) so it captures
+  only the visible viewport. Will switch to xterm.js's full buffer
+  (`term.buffer.active`) in rc2.
+- Mouse-wheel forwarding behaviour relies on xterm.js's built-in scroll;
+  the pyte-mode-detection path from v0.2.2 is unused.
+
+[0.3.0-rc1]: https://github.com/takkub/agent-takkub/tree/feat/xterm-terminal
+
 ## [0.2.4] — 2026-05-12
 
 ### Fixed

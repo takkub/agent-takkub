@@ -212,7 +212,8 @@ class AgentPane(QFrame):
         """Bind a PtySession to this pane's terminal widget. `cwd` (optional)
         is shown in the header next to the role label."""
         self.session = session
-        session.outputUpdated.connect(self._refresh_terminal)
+        # xterm.js consumes raw PTY bytes directly (no pyte → rich rebuild)
+        session.bytesIn.connect(self._terminal.write_bytes)
         session.processExited.connect(self._on_exit)
         self._terminal.resized.connect(session.resize)
         self._update_title_with_cwd(cwd)
@@ -233,25 +234,11 @@ class AgentPane(QFrame):
     def detach_session(self) -> None:
         if self.session is not None:
             try:
-                self.session.outputUpdated.disconnect(self._refresh_terminal)
+                self.session.bytesIn.disconnect(self._terminal.write_bytes)
             except Exception:
                 pass
             self.session = None
-        self._terminal.set_screen_rich([])
-
-    def _refresh_terminal(self) -> None:
-        if self.session is None:
-            return
-        # pyte tracks active terminal modes in screen.mode (set of ints).
-        # 1006 = SGR mouse encoding; 1000/1002/1003 = X10/btn/any mouse.
-        # When any of these is on, claude wants mouse events directly, so
-        # the terminal widget forwards wheel as SGR mouse instead of PgUp.
-        try:
-            modes = self.session.screen.mode
-            self._terminal.mouse_tracking_on = bool(modes & {1000, 1002, 1003, 1006})
-        except Exception:
-            self._terminal.mouse_tracking_on = False
-        self._terminal.set_screen_rich(self.session.display_rich())
+        self._terminal.clear()
 
     def _on_exit(self, code: int) -> None:
         # Distinguish:
