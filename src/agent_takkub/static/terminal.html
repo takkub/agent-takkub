@@ -69,48 +69,21 @@
     // ------------------------------------------------------------------
     let bridge = null;
 
-    // Local-echo policy: write user input to xterm.js immediately instead
-    // of waiting for the Python → PTY → claude → PTY → bridge roundtrip.
-    // claude's ink.js TUI input boxes redraw on the *next* keystroke, so
-    // without local echo every char visibly appears one step behind.
+    // Input policy: pure pass-through. Keystrokes go straight to the PTY
+    // and claude is the *only* source of truth for what's displayed in
+    // the input area. We tried local echo (v0.3.0–0.3.2) to mask the
+    // round-trip latency, but ink.js's TUI input boxes batch their
+    // re-renders when claude is busy, and "stale" local-echo state
+    // ended up fighting claude's delayed redraws — chars stuck on
+    // screen until the user pressed an unrelated key.
     //
-    // Three kinds of input get different treatment:
-    //   - Printable text (0x20..0x7e + UTF-8 multibyte): write locally,
-    //     claude's later redraw is idempotent.
-    //   - Backspace / DEL (0x08, 0x7f): erase last cell locally so the
-    //     visible state matches the user's intent even if claude is busy.
-    //   - Everything else (Esc, arrows, Enter, Ctrl-*, Tab, function
-    //     keys, mouse, paste-bracket): pass through untouched — claude
-    //     owns the resulting display.
-    function isPrintableChar(code) {
-      // ASCII printable
-      if (code >= 0x20 && code <= 0x7e) return true;
-      // UTF-8 continuation bytes / multi-byte char (Thai, CJK, etc.) — JS
-      // strings here are already decoded to UTF-16 code units, so any
-      // codepoint >= 0x80 that isn't a control char is fair game.
-      if (code >= 0x80) return true;
-      return false;
-    }
-
-    function isPrintableInput(data) {
-      if (!data) return false;
-      for (let i = 0; i < data.length; i++) {
-        if (!isPrintableChar(data.charCodeAt(i))) return false;
-      }
-      return true;
-    }
-
+    // Authoritative claude = consistent display. The cost is one
+    // round-trip of latency per keystroke when claude is busy, which
+    // matches every other terminal emulator on the planet.
     new QWebChannel(qt.webChannelTransport, (channel) => {
       bridge = channel.objects.bridge;
 
       term.onData((data) => {
-        // local backspace: erase last visible cell so the display matches
-        // the user's keystrokes even when claude hasn't redrawn yet.
-        if (data === '\x7f' || data === '\b') {
-          term.write('\b \b');
-        } else if (isPrintableInput(data)) {
-          term.write(data);  // instant local echo
-        }
         if (bridge && bridge.sendInput) bridge.sendInput(data);
       });
 

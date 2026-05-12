@@ -2,6 +2,26 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [0.3.3] — 2026-05-12
+
+### Removed
+- **All local echo / local backspace handling.** v0.3.0–0.3.2 tried to
+  mask the round-trip latency of "type → JS → Python → PTY → claude →
+  PTY → JS → render" by writing keystrokes to xterm.js immediately,
+  but ink.js TUI input boxes batch their re-renders while claude is
+  busy and our stale local state ended up fighting claude's delayed
+  redraws. Symptom: typing a char then backspacing repeatedly left a
+  ghost char on screen until the user pressed an unrelated key, which
+  triggered claude to finally redraw and "consume" the buffered
+  backspaces in one go.
+- Now xterm.js is a pure pass-through: every keystroke goes straight
+  to the PTY and claude is the only source of truth for the input
+  area's display. Worst-case latency per keystroke matches every other
+  terminal emulator (~roundtrip when claude is busy), but the display
+  never desyncs.
+
+[0.3.3]: https://github.com/takkub/agent-takkub/releases/tag/v0.3.3
+
 ## [0.3.2] — 2026-05-12
 
 ### Fixed
