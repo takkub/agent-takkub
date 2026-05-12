@@ -2,6 +2,28 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [0.2.1] — 2026-05-12
+
+### Fixed
+- Default `--setting-sources` reverted to `project,local`. The v0.2.0 switch to
+  `user,project,local` re-exposed claude-obsidian 1.4.3's `SessionStart` hook
+  bug (`ToolUseContext is required for prompt hooks. This is a bug.`) inside
+  every spawned pane.
+- Cleared `presets: ["frontend"]` from the shipped `projects.json`. Auto-spawn
+  was firing on every cockpit launch regardless of whether the user wanted a
+  frontend pane. Lead now stays alone until you `takkub assign` or click "+ pane".
+
+### Added
+- `_default_plugin_dirs()` + explicit `--plugin-dir` args so spawned agents
+  still inherit **superpowers** and **agent-skills** even though user-level
+  settings are skipped. claude-obsidian is intentionally excluded until its
+  hook is fixed upstream.
+- `TAKKUB_EXTRA_PLUGINS` env var (semicolon-separated paths) to override the
+  default plugin allowlist — set to empty string to suppress, or point at
+  custom plugin directories.
+
+[0.2.1]: https://github.com/takkub/agent-takkub/releases/tag/v0.2.1
+
 ## [0.2.0] — 2026-05-12
 
 ### Changed

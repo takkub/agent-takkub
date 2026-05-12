@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import pathlib
 import time
 from datetime import datetime
 
@@ -48,6 +49,39 @@ def _log_event(event: str, **details) -> None:
 
 
 RESUME_WINDOW_SEC = 5 * 60  # respawn within this window → claude --continue
+
+# Plugins we want spawned agents to inherit *explicitly* (skipping user-level
+# settings to avoid claude-obsidian's broken SessionStart hook). Each entry
+# is a *marketplace name* under ~/.claude/plugins/cache/. We pick the highest
+# semver-ish version directory found.
+_SAFE_PLUGINS: tuple[str, ...] = ("superpowers-dev", "addy-agent-skills")
+
+
+def _default_plugin_dirs() -> list[str]:
+    """Resolve ~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/ for
+    each plugin in `_SAFE_PLUGINS`, returning the directories that actually
+    contain a `.claude-plugin/plugin.json`. Best-effort; never raises."""
+    home = pathlib.Path.home()
+    cache = home / ".claude" / "plugins" / "cache"
+    out: list[str] = []
+    if not cache.exists():
+        return out
+    for marketplace in _SAFE_PLUGINS:
+        mp_dir = cache / marketplace
+        if not mp_dir.is_dir():
+            continue
+        # one plugin per marketplace; one version per plugin (typically)
+        for plugin in sorted(mp_dir.iterdir()):
+            if not plugin.is_dir():
+                continue
+            versions = sorted(
+                (v for v in plugin.iterdir() if v.is_dir()), reverse=True
+            )
+            for v in versions:
+                if (v / ".claude-plugin" / "plugin.json").exists():
+                    out.append(str(v))
+                    break
+    return out
 
 
 class Orchestrator(QObject):
@@ -139,20 +173,31 @@ class Orchestrator(QObject):
         env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
 
         # --setting-sources controls which settings.json layers claude loads.
-        # Default = user,project,local so installed plugins (superpowers,
-        # agent-skills, claude-obsidian, etc.) and MCP servers from the user's
-        # global config are available in every agent pane.
+        # We default to `project,local` (skip ~/.claude/settings.json) because
+        # the claude-obsidian plugin currently ships a SessionStart hook that
+        # crashes with `ToolUseContext is required for prompt hooks. This is a
+        # bug.` whenever it fires inside a cockpit-spawned session.
         #
-        # Override with TAKKUB_SETTING_SOURCES env var (e.g. "project,local")
-        # if a global plugin's SessionStart hook misbehaves and you need to
-        # isolate the cockpit from user-level settings.
-        sources = os.environ.get("TAKKUB_SETTING_SOURCES", "user,project,local")
+        # To still give agents access to superpowers + agent-skills, we hand
+        # those plugins to claude *explicitly* via --plugin-dir (see below).
+        # Override the whole policy with TAKKUB_SETTING_SOURCES env var.
+        sources = os.environ.get("TAKKUB_SETTING_SOURCES", "project,local")
         argv: list[str] = [
             claude,
             "--dangerously-skip-permissions",
             "--setting-sources",
             sources,
         ]
+
+        # Explicit plugin allowlist (skip the broken claude-obsidian hook).
+        # Set TAKKUB_EXTRA_PLUGINS env var to a `;`-separated list of plugin
+        # root dirs (must each contain `.claude-plugin/plugin.json`) to add
+        # more, or set it to empty string to suppress the defaults.
+        plugin_default = ";".join(_default_plugin_dirs())
+        plugin_dirs_raw = os.environ.get("TAKKUB_EXTRA_PLUGINS", plugin_default)
+        for pdir in [p.strip() for p in plugin_dirs_raw.split(";") if p.strip()]:
+            if (pathlib.Path(pdir) / ".claude-plugin" / "plugin.json").exists():
+                argv.extend(["--plugin-dir", pdir])
         if role_md_file:
             argv.extend(["--append-system-prompt-file", role_md_file])
 
