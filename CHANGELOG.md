@@ -2,6 +2,34 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [0.3.1] — 2026-05-12
+
+### Added
+- **`agent-takkub.bat` at repo root** — single-file launcher that newcomers
+  can double-click. Checks Python 3.11+ on PATH, checks `claude` CLI on
+  PATH, creates `.venv` + installs deps on first run, copies
+  `projects.json.example` to `projects.json` and opens it in Notepad if
+  missing, then launches the cockpit detached.
+- **Quick start** section in `README.md` — 3-step setup with the exact
+  commands a fresh user needs (install Python + Claude CLI + clone +
+  double-click the launcher).
+- **Troubleshooting** table in `README.md` covering the seven most likely
+  setup snags (missing Python / claude, sub-window dying, missing
+  takkub shim, Thai diacritics, hook errors, wrong Lead cwd).
+
+### Changed
+- `scripts/run.bat` is now a thin one-line wrapper that delegates to
+  the root `agent-takkub.bat`. Kept for backward compat with existing
+  shortcuts / muscle memory.
+
+### Fixed
+- `agent-takkub.bat` initial drafts had unescaped `)` inside `echo`
+  text blocks (e.g. `echo Log in: claude (one-time)`), which closed
+  the surrounding `if` block early and caused unconditional `goto :fail`.
+  Replaced with `--` separators.
+
+[0.3.1]: https://github.com/takkub/agent-takkub/releases/tag/v0.3.1
+
 ## [0.3.0] — 2026-05-12
 
 ### Changed (breaking architecture)

@@ -18,20 +18,70 @@ Desktop cockpit for orchestrating Claude Code dev teammates on Windows. Replaces
 - Desktop toast notification เมื่อ agent done
 - Event audit log (`runtime/events.log`)
 
-## Requirements
+## Quick start (newcomers, 3 steps)
 
-- Windows 10/11
-- Python 3.11+
-- Claude Code CLI ติดตั้งและล็อกอินแล้ว (`claude --version` ต้อง work)
+ก่อนเริ่มต้อง install **3 ตัวนี้บนเครื่อง**:
 
-## Setup
+1. **Python 3.11+** — https://www.python.org/downloads/ (เลือก "Add Python to PATH")
+2. **Claude Code CLI** — `npm install -g @anthropic-ai/claude-code` แล้ว `claude` ครั้งเดียวเพื่อ login
+3. **Git** — https://git-scm.com/download/win
+
+แล้ว:
 
 ```bat
-cd C:\Users\monch\WebstormProjects\agent-takkub
-scripts\run.bat
+git clone git@github.com:takkub/agent-takkub.git
+cd agent-takkub
+agent-takkub.bat
 ```
 
-ครั้งแรกจะสร้าง `.venv\` และ `pip install -e .` (PyQt6 + pywinpty + pyte) แล้วเปิดแอป. ครั้งถัดไปแค่รัน `scripts\run.bat` ซ้ำ.
+`agent-takkub.bat` จะตรวจ + setup + เปิดให้ ครั้งแรกใช้เวลา ~2 นาทีเพราะ download Chromium (~150 MB):
+
+1. ✅ ตรวจ Python + claude CLI
+2. ✅ สร้าง `.venv` + `pip install -e .`
+3. ✅ Copy `projects.json.example` → `projects.json` แล้วเปิดให้แก้ paths
+4. ✅ Launch cockpit (window pop-up)
+
+หลัง edit `projects.json` ให้ชี้ไปยัง project ของคุณ รัน `agent-takkub.bat` อีกที — เปิดทันที ไม่ตรวจ setup ซ้ำ
+
+## Requirements (detailed)
+
+- Windows 10 (build 19041+) หรือ Windows 11
+- Python 3.11+
+- Claude Code CLI ติดตั้งและล็อกอินแล้ว (`claude --version` ต้อง work)
+- Git (สำหรับ clone)
+- ~200 MB disk (PyQt6 ~50 MB, Chromium ~150 MB, code ~5 MB)
+
+## Manual setup (advanced)
+
+หากอยาก bootstrap ทีละขั้นโดยไม่ผ่าน `agent-takkub.bat`:
+
+```bat
+git clone git@github.com:takkub/agent-takkub.git
+cd agent-takkub
+
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install --upgrade pip
+.venv\Scripts\python.exe -m pip install -e .
+
+copy projects.json.example projects.json
+notepad projects.json   ^&^& REM แก้ paths
+
+.venv\Scripts\pythonw.exe -m agent_takkub
+```
+
+`scripts\run.bat` คือ thin wrapper ที่ delegate ไป `agent-takkub.bat` (root) — เก็บไว้เพื่อ backward compat
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `Python is not on PATH` | re-install Python กับ option "Add Python to PATH" |
+| `claude CLI is not on PATH` | `npm install -g @anthropic-ai/claude-code` แล้ว `claude` ครั้งหนึ่งเพื่อ login |
+| Cockpit เปิดแล้วปิดทันที | ลองรัน `.venv\Scripts\python.exe -m agent_takkub` (ไม่ใช่ `pythonw`) เพื่อดู error |
+| `takkub: command not found` ใน Lead bash | bin/takkub POSIX shim ต้องอยู่ — เช็คว่า `bin\takkub` มีใน clone |
+| Thai สระแสดงไม่ครบ | v0.2.x bug — upgrade ถึง v0.3.0+ (xterm.js terminal) |
+| SessionStart hook error | `set TAKKUB_SETTING_SOURCES=project,local` ก่อนเปิดเพื่อ skip user-level plugins |
+| Lead spawn ใน wrong dir | ตรวจ `projects.json` → `paths` แล้วใส่ `"lead": "web"` เพื่อ pick path |
 
 ## Layout
 

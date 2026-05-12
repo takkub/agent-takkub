@@ -1,6 +1,6 @@
 [project]
 name = "agent-takkub"
-version = "0.3.0"
+version = "0.3.1"
 description = "Desktop cockpit for orchestrating Claude Code dev teammates on Windows"
 requires-python = ">=3.11"
 dependencies = [
