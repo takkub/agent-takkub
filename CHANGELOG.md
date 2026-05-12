@@ -2,6 +2,28 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [0.3.5] — 2026-05-12
+
+### Hardened
+- **Idle-flag poll throttled to 150 ms** so the smart-local-echo gate
+  doesn't fire 50+ times per second on chatty TUI output. Pyte's
+  `is_at_ready_prompt()` scans every line of the screen on each call;
+  combined with `outputUpdated` firing per byte chunk, the original
+  v0.3.4 wiring was wasting real CPU.
+- **Initial idle state forced to `False`** on every pane attach.
+  Previously we left `_last_idle = None` and waited for the first state
+  flip — meaning a race-condition early keystroke could see the JS
+  default (which is whatever the previous pane left there) and local-
+  echo into a not-yet-ready terminal.
+- **`set_idle()` swallows JS bridge exceptions** so a single
+  `runJavaScript` hiccup can't tear the whole `outputUpdated` signal
+  chain down.
+- **`_sync_idle_flag()` swallows pyte exceptions too** — pyte
+  occasionally throws on malformed escape sequences, and we never
+  want that to disable the idle gate.
+
+[0.3.5]: https://github.com/takkub/agent-takkub/releases/tag/v0.3.5
+
 ## [0.3.4] — 2026-05-12
 
 ### Added

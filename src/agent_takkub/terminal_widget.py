@@ -151,11 +151,18 @@ class TerminalWidget(QWidget):
     def set_idle(self, idle: bool) -> None:
         """Tell xterm.js whether claude is sitting at the ready prompt
         (idle=True) or busy (idle=False). The terminal uses this flag to
-        decide whether to local-echo keystrokes for snappier feedback."""
-        flag = "true" if idle else "false"
+        decide whether to local-echo keystrokes for snappier feedback.
+
+        Best-effort: if the page hasn't booted, we drop the call (the
+        default JS-side flag is `false` so we err on the safe side).
+        """
         if not self._page_ready:
             return
-        self._view.page().runJavaScript(f"termSetIdle({flag});")
+        flag = "true" if idle else "false"
+        try:
+            self._view.page().runJavaScript(f"termSetIdle({flag});")
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # internal

@@ -65,6 +65,12 @@ class AgentPane(QFrame):
         self._tick_timer.setInterval(250)
         self._tick_timer.timeout.connect(self._tick)
 
+        # smart-local-echo idle flag — declared here so detach_session can
+        # always reset it safely. Filled by attach_session / _sync_idle_flag.
+        self._last_idle: bool | None = None
+        # throttle pyte-state polling so chatty TUIs don't fire it 50+/sec
+        self._idle_check_at: float = 0.0
+
         self.setObjectName(f"pane_{role.name}")
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setStyleSheet(self._stylesheet())
@@ -223,12 +229,23 @@ class AgentPane(QFrame):
         self._update_title_with_cwd(cwd)
         self.set_state("active")
         self._terminal.setFocus()
-        # cached idle flag so we only push to JS when it flips
-        self._last_idle: bool | None = None
+        # explicit reset — start in busy (no local echo) until pyte
+        # confirms we're at the ready prompt
+        self._last_idle = None
+        self._idle_check_at = 0.0
+        self._terminal.set_idle(False)
+
+    # Minimum interval between pyte-state polls so a chatty TUI doesn't
+    # fire this 50+ times a second.
+    _IDLE_POLL_MIN_INTERVAL = 0.15  # 150 ms
 
     def _sync_idle_flag(self) -> None:
         if self.session is None:
             return
+        now = time.time()
+        if now - self._idle_check_at < self._IDLE_POLL_MIN_INTERVAL:
+            return
+        self._idle_check_at = now
         try:
             idle = self.session.is_at_ready_prompt()
         except Exception:
@@ -236,7 +253,11 @@ class AgentPane(QFrame):
         if idle == self._last_idle:
             return
         self._last_idle = idle
-        self._terminal.set_idle(idle)
+        try:
+            self._terminal.set_idle(idle)
+        except Exception:
+            # never let a JS bridge hiccup tear the signal chain down
+            pass
 
     def _update_title_with_cwd(self, cwd: str | None) -> None:
         if not cwd:
