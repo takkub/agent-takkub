@@ -242,6 +242,15 @@ class AgentPane(QFrame):
     def _refresh_terminal(self) -> None:
         if self.session is None:
             return
+        # pyte tracks active terminal modes in screen.mode (set of ints).
+        # 1006 = SGR mouse encoding; 1000/1002/1003 = X10/btn/any mouse.
+        # When any of these is on, claude wants mouse events directly, so
+        # the terminal widget forwards wheel as SGR mouse instead of PgUp.
+        try:
+            modes = self.session.screen.mode
+            self._terminal.mouse_tracking_on = bool(modes & {1000, 1002, 1003, 1006})
+        except Exception:
+            self._terminal.mouse_tracking_on = False
         self._terminal.set_screen_rich(self.session.display_rich())
 
     def _on_exit(self, code: int) -> None:

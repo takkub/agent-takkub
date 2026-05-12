@@ -2,6 +2,35 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [0.2.2] — 2026-05-12
+
+### Fixed
+- **Thai diacritics rendering** — `QTextCharFormat.setFont(QFont(widget.font()))`
+  was collapsing the families fallback chain in some Qt builds, so combining
+  marks (◌ิ ◌ี ◌่ ◌้ ◌์ ฯลฯ) silently disappeared. Switched to
+  `setFontFamilies(...)` + individual `setFontWeight/Italic/Underline` which
+  preserves per-glyph fallback through Tahoma/Leelawadee UI.
+- **Typing stutter** — added a `_last_rendered_rich` diff cache so identical
+  screen states skip the full QTextDocument rebuild (~360 insertText calls).
+  pyte fires `outputUpdated` for every byte chunk including no-op sequences
+  (mouse-mode toggles, cursor save/restore), and the old path paid the rebuild
+  on every keystroke.
+- Bumped debounce 16ms→33ms (30fps) so typing storms collapse into fewer
+  frames.
+- Auto-scroll-to-bottom only fires when the user was already at the bottom
+  before the refresh. Scrolling up to inspect history no longer gets yanked
+  away by the next pyte update.
+
+### Added
+- **Smart mouse-wheel forwarding** — when claude has SGR mouse tracking on
+  (mode 1006, the modern default), wheel events go out as proper
+  `\x1b[<64;1;1M` / `\x1b[<65;1;1M` press events so claude scrolls its own
+  buffer smoothly. Falls back to PgUp/PgDn when mouse tracking is off.
+- `AgentPane._refresh_terminal` reads `screen.mode` and sets
+  `TerminalWidget.mouse_tracking_on` accordingly on every frame.
+
+[0.2.2]: https://github.com/takkub/agent-takkub/releases/tag/v0.2.2
+
 ## [0.2.1] — 2026-05-12
 
 ### Fixed

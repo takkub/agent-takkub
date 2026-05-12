@@ -98,6 +98,11 @@ class TerminalWidget(QPlainTextEdit):
     resized = pyqtSignal(int, int)  # cols, rows  (when user resizes window)
     fontSizeChanged = pyqtSignal(int)  # for per-pane size persistence
 
+    # Updated by AgentPane whenever the screen is refreshed; lets us forward
+    # mouse-wheel events as proper SGR mouse events when claude has mouse
+    # tracking on (`\x1b[?1006h`) and fall back to PgUp/PgDn otherwise.
+    mouse_tracking_on: bool = False
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setReadOnly(False)  # accept IME composition + focus
@@ -118,11 +123,12 @@ class TerminalWidget(QPlainTextEdit):
             "}"
         )
 
-        # debounced refresh
+        # debounced refresh — 33ms = 30fps, easier on typing-induced storms
         self._pending_rich: list | None = None
+        self._last_rendered_rich: list | None = None
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setSingleShot(True)
-        self._refresh_timer.setInterval(16)
+        self._refresh_timer.setInterval(33)
         self._refresh_timer.timeout.connect(self._flush_rich)
 
         # cache of QTextCharFormat keyed by (fg, bg, bold, italic, ul, rev)
@@ -185,20 +191,18 @@ class TerminalWidget(QPlainTextEdit):
 
         fmt = QTextCharFormat()
 
-        # CRITICAL: copy the widget's QFont as the base so its setFamilies()
-        # fallback chain (Cascadia → Consolas → Tahoma → Leelawadee) is
-        # preserved. Calling setFontWeight/Italic/Underline directly on the
-        # format would collapse the chain to the first family only, and Thai
-        # diacritics (◌ิ ◌ี ◌่ ◌้ ◌์ ฯลฯ) silently disappear because
-        # Cascadia has no Thai glyphs.
-        font = QFont(self.font())
+        # Set the families list directly on the format instead of building a
+        # whole QFont. Using setFont(QFont(widget.font())) collapses the
+        # families fallback chain in some Qt builds, so Thai/CJK chars stop
+        # falling back to Tahoma/Leelawadee and combining marks disappear.
+        # setFontFamilies preserves the per-glyph fallback.
+        fmt.setFontFamilies(self.font().families())
         if bold:
-            font.setBold(True)
+            fmt.setFontWeight(QFont.Weight.Bold.value)
         if italic:
-            font.setItalic(True)
+            fmt.setFontItalic(True)
         if underline:
-            font.setUnderline(True)
-        fmt.setFont(font)
+            fmt.setFontUnderline(True)
 
         fmt.setForeground(fg_color)
         # Only paint background if it differs from the widget bg — keeps the
@@ -213,6 +217,21 @@ class TerminalWidget(QPlainTextEdit):
             return
         rows = self._pending_rich
         self._pending_rich = None
+
+        # Skip rebuild if nothing actually changed. pyte's outputUpdated
+        # fires for every byte chunk including mouse-mode toggles and
+        # cursor-save sequences that don't visibly mutate the screen.
+        # Without this check, every keystroke pays a ~360-insertText doc
+        # rebuild and the typing feels stuttery.
+        if rows == self._last_rendered_rich:
+            return
+        self._last_rendered_rich = rows
+
+        # Only auto-scroll to the bottom if the user wasn't already
+        # scrolled up (so manual scroll-back during a long output isn't
+        # yanked away by the next refresh).
+        sb = self.verticalScrollBar()
+        at_bottom = sb is None or sb.value() >= sb.maximum() - 4
 
         # Rebuild the document. setUpdatesEnabled(False) avoids partial
         # repaints while we churn through the cursor.
@@ -234,8 +253,7 @@ class TerminalWidget(QPlainTextEdit):
         finally:
             self.setUpdatesEnabled(True)
 
-        sb = self.verticalScrollBar()
-        if sb is not None:
+        if at_bottom and sb is not None:
             sb.setValue(sb.maximum())
 
     # ──────────────────────────────────────────────────────────────
@@ -298,8 +316,10 @@ class TerminalWidget(QPlainTextEdit):
             return
         f.setPointSize(size)
         self.setFont(f)
-        # invalidate format cache — old QTextCharFormats hold the old font
+        # invalidate format cache + last-render cache so the next flush
+        # rebuilds with the new font metrics
         self._fmt_cache.clear()
+        self._last_rendered_rich = None
         # recompute the pty grid for the new font metrics and tell the session
         fm = QFontMetrics(self.font())
         char_w = max(1, fm.horizontalAdvance("M"))
@@ -317,15 +337,31 @@ class TerminalWidget(QPlainTextEdit):
         event.accept()
 
     def wheelEvent(self, event) -> None:
-        """Forward mouse wheel as PgUp/PgDn so the user can scroll claude's
-        internal alt-screen history (pyte's scrollback won't help — claude
-        runs in alt-screen and owns its own buffer)."""
+        """Forward mouse wheel to claude.
+
+        Two strategies:
+          1. If claude has SGR mouse tracking enabled (most modern TUIs do),
+             send a proper wheel-button-press SGR event so claude scrolls its
+             own internal buffer with smooth granularity.
+          2. Otherwise, fall back to PgUp/PgDn so the user can still page
+             through claude's history.
+        """
         delta = event.angleDelta().y()
         if delta == 0:
             return
         ticks = max(1, abs(delta) // 120)
-        seq = _KEY_MAP[Qt.Key.Key_PageUp] if delta > 0 else _KEY_MAP[Qt.Key.Key_PageDown]
-        self.inputBytes.emit(seq * ticks)
+
+        if self.mouse_tracking_on:
+            # SGR mouse format: ESC [ < button ; col ; row M
+            # button 64 = wheel up, 65 = wheel down (X10 wheel-as-buttons)
+            button = 64 if delta > 0 else 65
+            # use a sensible coordinate near the cursor — claude doesn't
+            # really care for wheel events, but the field is mandatory
+            seq = f"\x1b[<{button};1;1M".encode()
+            self.inputBytes.emit(seq * ticks)
+        else:
+            seq = _KEY_MAP[Qt.Key.Key_PageUp] if delta > 0 else _KEY_MAP[Qt.Key.Key_PageDown]
+            self.inputBytes.emit(seq * ticks)
         event.accept()
 
     # ──────────────────────────────────────────────────────────────

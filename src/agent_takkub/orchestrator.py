@@ -74,9 +74,7 @@ def _default_plugin_dirs() -> list[str]:
         for plugin in sorted(mp_dir.iterdir()):
             if not plugin.is_dir():
                 continue
-            versions = sorted(
-                (v for v in plugin.iterdir() if v.is_dir()), reverse=True
-            )
+            versions = sorted((v for v in plugin.iterdir() if v.is_dir()), reverse=True)
             for v in versions:
                 if (v / ".claude-plugin" / "plugin.json").exists():
                     out.append(str(v))
