@@ -1,0 +1,19 @@
+# Normalize line endings across platforms.
+# Shell scripts MUST be LF (broken otherwise on Linux/WSL/Git Bash).
+# .bat files MUST be CRLF (cmd.exe parser is picky).
+* text=auto eol=lf
+
+*.sh   text eol=lf
+*.py   text eol=lf
+*.md   text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+
+# Binary
+*.png  binary
+*.jpg  binary
+*.ico  binary

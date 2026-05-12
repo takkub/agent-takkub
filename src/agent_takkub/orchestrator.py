@@ -1,0 +1,372 @@
+"""Orchestrator: owns all AgentPanes, exposes high-level operations.
+
+Public API (called by main_window UI and cli_server JSON requests):
+
+  spawn(role, cwd=None)          -> bool, message
+  assign(role, cwd, task)        -> bool, message
+  send(to_role, msg, from_role)  -> bool, message
+  close(role)                    -> bool, message
+  done(from_role, note)          -> bool, message
+  list_status()                  -> dict[role, state]
+"""
+from __future__ import annotations
+
+import json
+import os
+import time
+from datetime import datetime
+
+from PyQt6.QtCore import QObject, QTimer, pyqtSignal
+
+from .agent_pane import AgentPane
+from .config import (
+    EVENTS_LOG,
+    REPO_ROOT,
+    agent_role_dir,
+    default_cwd_for_role,
+    ensure_runtime,
+    find_claude_executable,
+)
+from .pty_session import PtySession
+from .roles import LEAD
+
+
+def _log_event(event: str, **details) -> None:
+    """Append a JSONL event line to runtime/events.log. Best-effort; never
+    raises so an audit-log failure can't take down the orchestrator."""
+    try:
+        ensure_runtime()
+        line = json.dumps(
+            {"ts": datetime.now().isoformat(timespec="seconds"), "event": event, **details},
+            ensure_ascii=False,
+        )
+        with open(EVENTS_LOG, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+
+
+RESUME_WINDOW_SEC = 5 * 60  # respawn within this window → claude --continue
+
+
+class Orchestrator(QObject):
+    """Owns the pane registry and routes commands.
+
+    Layout policy: Lead is always pre-registered (created by main_window) and
+    fills the window initially. Teammate panes are created on demand the
+    first time we spawn that role, via the `paneRequested` signal which
+    main_window connects to its own add-pane logic.
+    """
+
+    statusChanged = pyqtSignal()
+    leadInjected = pyqtSignal(str)
+    paneRequested = pyqtSignal(str)  # role_name — main_window should add this pane
+    paneClosed = pyqtSignal(str)  # role_name — main_window should remove this pane
+    agentDone = pyqtSignal(str, str)  # role_name, note — for desktop notifications
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self.panes: dict[str, AgentPane] = {}
+        # last-known cwd per role, used to decide whether to pass --continue
+        # on a fresh spawn (must match the previous cwd for resume to be valid)
+        self._recent_exits: dict[str, dict] = {}  # role -> {cwd, ts}
+
+    # ──────────────────────────────────────────────────────────────
+    # registration (main_window builds panes and registers them)
+    # ──────────────────────────────────────────────────────────────
+    def register_pane(self, pane: AgentPane) -> None:
+        self.panes[pane.role.name] = pane
+        pane.spawnRequested.connect(self._on_pane_spawn_clicked)
+        pane.closeRequested.connect(self._on_pane_close_clicked)
+        pane.inputBytes.connect(self._on_pane_input)
+        self.statusChanged.emit()
+
+    def unregister_pane(self, role_name: str) -> None:
+        pane = self.panes.pop(role_name, None)
+        if pane is None:
+            return
+        if pane.session is not None:
+            pane.session.terminate()
+        self.statusChanged.emit()
+
+    # ──────────────────────────────────────────────────────────────
+    # high-level operations
+    # ──────────────────────────────────────────────────────────────
+    def spawn(self, role_name: str, cwd: str | None = None) -> tuple[bool, str]:
+        role_name = role_name.lower().strip()
+        pane = self.panes.get(role_name)
+        if pane is None:
+            # ask main_window to create + register the pane, then retry
+            self.paneRequested.emit(role_name)
+            pane = self.panes.get(role_name)
+            if pane is None:
+                return False, f"unknown role: {role_name}"
+
+        if pane.session is not None and pane.session.is_alive:
+            return True, f"{role_name} already running"
+
+        # Resolve cwd:
+        #   Lead          → repo root (so CLAUDE.md auto-discovery picks up the
+        #                   Lead instructions at agent-takkub/CLAUDE.md)
+        #   teammate      → explicit --cwd, else active project's role-matched
+        #                   path (frontend→web, backend→api, ...), else the
+        #                   role's runtime staging dir
+        role_md_file: str | None = None
+        if role_name == LEAD.name:
+            spawn_cwd = cwd or str(REPO_ROOT)
+        else:
+            staging = agent_role_dir(role_name)
+            spawn_cwd = cwd or default_cwd_for_role(role_name) or str(staging)
+            # When cwd is a project path, claude auto-discovers the project's
+            # CLAUDE.md, not the role's specialist override. Pass the role's
+            # markdown to --append-system-prompt-file so the specialist rules
+            # always apply regardless of where we land. (Using the *file*
+            # variant avoids command-line escaping problems with multiline
+            # markdown containing backticks, asterisks, and Thai text.)
+            role_md_path = staging / "CLAUDE.md"
+            if role_md_path.exists():
+                role_md_file = str(role_md_path)
+
+        try:
+            claude = find_claude_executable()
+        except RuntimeError as e:
+            return False, str(e)
+
+        env = os.environ.copy()
+        env["TAKKUB_ROLE"] = role_name
+        bin_dir = str(REPO_ROOT / "bin")
+        env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+
+        # --setting-sources project,local skips ~/.claude/settings.json so
+        # global plugin SessionStart hooks (e.g. claude-obsidian) don't fire
+        # inside the cockpit panes. CLAUDE.md auto-discovery and Claude Max
+        # OAuth still work.
+        argv: list[str] = [
+            claude,
+            "--dangerously-skip-permissions",
+            "--setting-sources",
+            "project,local",
+        ]
+        if role_md_file:
+            argv.extend(["--append-system-prompt-file", role_md_file])
+
+        # Session resume: if this same role exited recently from the same
+        # cwd, ask claude to continue the previous conversation instead of
+        # starting fresh. Useful for crash recovery + accidental closes.
+        resumed = False
+        prior = self._recent_exits.get(role_name)
+        if (
+            prior
+            and prior.get("cwd") == spawn_cwd
+            and (time.time() - prior.get("ts", 0)) < RESUME_WINDOW_SEC
+        ):
+            argv.append("--continue")
+            resumed = True
+
+        session = PtySession(cols=110, rows=36, parent=self)
+        try:
+            session.spawn(argv=argv, cwd=spawn_cwd, env=env)
+        except Exception as e:
+            return False, f"failed to spawn claude: {e}"
+
+        pane.attach_session(session, cwd=spawn_cwd)
+        # record exits for resume detection
+        session.processExited.connect(
+            lambda _code, r=role_name, c=spawn_cwd: self._on_session_exit(r, c)
+        )
+        # forget the prior exit record now that we've spawned successfully
+        if role_name in self._recent_exits:
+            del self._recent_exits[role_name]
+
+        self._auto_trust(role_name)
+        self.statusChanged.emit()
+        _log_event(
+            "spawn",
+            role=role_name,
+            cwd=spawn_cwd,
+            resumed=resumed,
+        )
+        suffix = " (resumed)" if resumed else ""
+        return True, f"{role_name} spawned in {spawn_cwd}{suffix}"
+
+    def _on_session_exit(self, role_name: str, cwd: str) -> None:
+        """Track recent exits so a quick respawn can pass --continue."""
+        self._recent_exits[role_name] = {"cwd": cwd, "ts": time.time()}
+
+    # ──────────────────────────────────────────────────────────────
+    def _auto_trust(self, role_name: str) -> None:
+        """Watch the pane and auto-press Enter on claude's trust folder modal.
+
+        Polls every 500ms for up to 30s. Stops as soon as the prompt is
+        accepted (or the session dies / never shows it).
+        """
+        pane = self.panes.get(role_name)
+        if pane is None:
+            return
+        elapsed = [0]
+        max_ms = 30_000
+
+        def _check() -> None:
+            if pane.session is None or not pane.session.is_alive:
+                return
+            if pane.session.is_at_trust_prompt():
+                # option 1 (Yes) is preselected; just hit Enter
+                pane.session.write("\r")
+                return
+            elapsed[0] += 500
+            if elapsed[0] >= max_ms:
+                return
+            QTimer.singleShot(500, _check)
+
+        QTimer.singleShot(1_000, _check)
+
+    def assign(
+        self, role_name: str, cwd: str | None, task: str
+    ) -> tuple[bool, str]:
+        ok, msg = self.spawn(role_name, cwd=cwd)
+        if not ok:
+            return ok, msg
+
+        self._send_when_ready(role_name, task)
+        _log_event("assign", role=role_name, cwd=cwd, task_preview=task[:120])
+        return True, f"task queued for {role_name} (sending when ready)"
+
+    def _send_when_ready(
+        self, role_name: str, task: str, max_wait_ms: int = 45_000
+    ) -> None:
+        """Poll until claude's main prompt is idle, then paste task + Enter.
+
+        Replaces the old fixed 12s wait so we don't paste into the trust modal
+        or while claude is still bootstrapping. Falls back to a hard timeout
+        so a hung claude doesn't silently swallow the task.
+        """
+        pane = self.panes.get(role_name)
+        if pane is None:
+            return
+        elapsed = [0]
+        sent = [False]
+
+        def _deliver() -> None:
+            if sent[0]:
+                return
+            sent[0] = True
+            if pane.session is None or not pane.session.is_alive:
+                return
+            pane.set_state("working", note=task[:60])
+            pane.session.write(task)
+            QTimer.singleShot(
+                200, lambda: pane.session and pane.session.write("\r")
+            )
+
+        def _check() -> None:
+            if sent[0]:
+                return
+            if pane.session is None or not pane.session.is_alive:
+                return
+            if pane.session.is_at_ready_prompt():
+                _deliver()
+                return
+            elapsed[0] += 500
+            if elapsed[0] >= max_wait_ms:
+                # hard timeout — paste anyway so user sees the task land
+                _deliver()
+                return
+            QTimer.singleShot(500, _check)
+
+        QTimer.singleShot(1_000, _check)
+
+    def send(
+        self, to_role: str, msg: str, from_role: str | None = None
+    ) -> tuple[bool, str]:
+        to_role = to_role.lower().strip()
+        pane = self.panes.get(to_role)
+        if pane is None:
+            return False, f"unknown role: {to_role}"
+        if pane.session is None or not pane.session.is_alive:
+            return False, f"{to_role} is not running (spawn it first)"
+
+        header = (
+            f"[{from_role} → {to_role}] " if from_role and from_role != to_role else ""
+        )
+        body = header + msg
+        pane.session.write(body)
+        QTimer.singleShot(150, lambda: pane.session and pane.session.write(b"\r"))
+
+        # CC Lead unless source was Lead and target was a teammate, or vice versa
+        if from_role and from_role not in (None, LEAD.name) and to_role != LEAD.name:
+            lead = self.panes.get(LEAD.name)
+            if lead and lead.session and lead.session.is_alive:
+                lead.session.write(f"[CC] {body}")
+                QTimer.singleShot(
+                    150, lambda: lead.session and lead.session.write(b"\r")
+                )
+
+        _log_event("send", to=to_role, from_=from_role, msg_preview=msg[:120])
+        return True, f"sent to {to_role}"
+
+    def close(self, role_name: str) -> tuple[bool, str]:
+        role_name = role_name.lower().strip()
+        pane = self.panes.get(role_name)
+        if pane is None:
+            return False, f"unknown role: {role_name}"
+        was_alive = pane.session is not None
+        if was_alive:
+            # mark exit as expected so the pane doesn't surface "exited"/crash
+            pane.mark_expected_exit()
+            pane.session.terminate()
+            pane.set_state("empty", note=None)
+        # For teammates, fully remove from the layout so the right column
+        # collapses back. Lead stays as it always anchors the cockpit.
+        if role_name != LEAD.name:
+            self.paneClosed.emit(role_name)
+        self.statusChanged.emit()
+        _log_event("close", role=role_name)
+        return True, f"{role_name} closed"
+
+    def done(self, from_role: str, note: str = "") -> tuple[bool, str]:
+        from_role = from_role.lower().strip()
+        pane = self.panes.get(from_role)
+        if pane is None:
+            return False, f"unknown role: {from_role}"
+
+        # notify Lead
+        lead = self.panes.get(LEAD.name)
+        notice = f"[{from_role} done] {note}".rstrip()
+        if lead and lead.session and lead.session.is_alive:
+            lead.session.write(notice)
+            QTimer.singleShot(150, lambda: lead.session and lead.session.write(b"\r"))
+            self.leadInjected.emit(notice)
+
+        # mark pane done, auto-close after a delay so user can see it
+        pane.set_state("done", note=note[:80] if note else "done")
+        QTimer.singleShot(2_500, lambda: self.close(from_role))
+        _log_event("done", role=from_role, note=note[:200])
+        self.agentDone.emit(from_role, note)
+        return True, f"{from_role} reported done"
+
+    def list_status(self) -> dict[str, str]:
+        return {name: p.state for name, p in self.panes.items()}
+
+    def close_all_teammates(self) -> tuple[bool, str]:
+        """Close every non-Lead pane. Used by Lead to reset the board."""
+        names = [n for n in list(self.panes.keys()) if n != LEAD.name]
+        if not names:
+            return True, "no teammates to close"
+        for n in names:
+            self.close(n)
+        return True, f"closed {len(names)} teammate(s): {', '.join(names)}"
+
+    # ──────────────────────────────────────────────────────────────
+    # internal: handlers wired from AgentPane signals
+    # ──────────────────────────────────────────────────────────────
+    def _on_pane_spawn_clicked(self, role_name: str) -> None:
+        self.spawn(role_name)
+
+    def _on_pane_close_clicked(self, role_name: str) -> None:
+        self.close(role_name)
+
+    def _on_pane_input(self, role_name: str, data: bytes) -> None:
+        pane = self.panes.get(role_name)
+        if pane is None or pane.session is None:
+            return
+        pane.session.write(data)
