@@ -2,12 +2,52 @@
 
 from __future__ import annotations
 
+import atexit
+import signal
 import sys
 
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import QApplication
 
 from .main_window import MainWindow
+
+
+def _install_signal_handlers(window: MainWindow) -> None:
+    """Ensure spawned claude/winpty-agent children die with us, even when the
+    Qt window crashes or the process is killed externally (Ctrl+Break, parent
+    terminal close, OOM). closeEvent only fires on graceful close — these
+    hooks cover the rest."""
+
+    def _kill_all() -> None:
+        for pane in list(window.orch.panes.values()):
+            if pane.session is not None:
+                try:
+                    pane.mark_expected_exit()
+                    pane.session.terminate()
+                except Exception:
+                    pass
+        try:
+            window.cli.close()
+        except Exception:
+            pass
+
+    atexit.register(_kill_all)
+
+    # SIGINT (Ctrl+C in launching terminal) + SIGTERM. Windows raises
+    # SIGBREAK on Ctrl+Break — handle it the same way.
+    def _on_signal(_sig: int, _frame: object | None) -> None:
+        _kill_all()
+        # let Qt clean up gracefully too
+        QApplication.quit()
+
+    for sig_name in ("SIGINT", "SIGTERM", "SIGBREAK"):
+        sig = getattr(signal, sig_name, None)
+        if sig is not None:
+            try:
+                signal.signal(sig, _on_signal)
+            except (ValueError, OSError):
+                # not all signals are settable on all platforms
+                pass
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -17,6 +57,7 @@ def main(argv: list[str] | None = None) -> int:
     f = QFont("Segoe UI", 10)
     app.setFont(f)
     w = MainWindow()
+    _install_signal_handlers(w)
     w.show()
     return app.exec()
 

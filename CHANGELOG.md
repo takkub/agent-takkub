@@ -2,6 +2,27 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [0.2.0] — 2026-05-12
+
+### Changed
+- `--setting-sources` default flipped from `project,local` to `user,project,local`
+  so spawned agents inherit the user's installed Claude Code plugins (superpowers,
+  agent-skills, claude-obsidian) and MCP servers. The original Iter 1 SessionStart
+  hook bug that motivated the previous isolation appears resolved in claude-obsidian 1.4.3.
+
+### Added
+- `TAKKUB_SETTING_SOURCES` env var to override the default (e.g.
+  `TAKKUB_SETTING_SOURCES=project,local` to fall back to the isolated v0.1 behaviour
+  if a global plugin misbehaves).
+- Orphan cleanup hook in `app.py`: atexit + SIGINT/SIGTERM/SIGBREAK handlers terminate
+  every spawned claude/winpty-agent before the Qt process exits, so a crash or kill
+  can't leave child processes pinned to the venv.
+- Lead's `CLAUDE.md` now starts with a takkub quick-reference table + a "Tooling
+  available to agents" section pointing at superpowers / agent-skills / MCP. Lead
+  sees this on every session start, no more "what commands exist?".
+
+[0.2.0]: https://github.com/takkub/agent-takkub/releases/tag/v0.2.0
+
 ## [0.1.0] — 2026-05-12
 
 First release. Replaces the tmux-based `agent-teams` setup with a native Windows desktop cockpit. Built in 9 iterations on the same day.

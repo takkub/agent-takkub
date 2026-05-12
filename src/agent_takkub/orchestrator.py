@@ -138,15 +138,20 @@ class Orchestrator(QObject):
         bin_dir = str(REPO_ROOT / "bin")
         env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
 
-        # --setting-sources project,local skips ~/.claude/settings.json so
-        # global plugin SessionStart hooks (e.g. claude-obsidian) don't fire
-        # inside the cockpit panes. CLAUDE.md auto-discovery and Claude Max
-        # OAuth still work.
+        # --setting-sources controls which settings.json layers claude loads.
+        # Default = user,project,local so installed plugins (superpowers,
+        # agent-skills, claude-obsidian, etc.) and MCP servers from the user's
+        # global config are available in every agent pane.
+        #
+        # Override with TAKKUB_SETTING_SOURCES env var (e.g. "project,local")
+        # if a global plugin's SessionStart hook misbehaves and you need to
+        # isolate the cockpit from user-level settings.
+        sources = os.environ.get("TAKKUB_SETTING_SOURCES", "user,project,local")
         argv: list[str] = [
             claude,
             "--dangerously-skip-permissions",
             "--setting-sources",
-            "project,local",
+            sources,
         ]
         if role_md_file:
             argv.extend(["--append-system-prompt-file", role_md_file])

@@ -12,6 +12,40 @@
 Lead ไม่จำเป็นต้อง spawn ทุกตัวทุกครั้ง — spawn เฉพาะที่จำเป็นต่องานนั้น ๆ
 **ไม่มี tmux อีกแล้ว** — ใช้ `takkub` CLI สั่ง orchestrator (Python desktop app) แทน
 
+## Quick reference (อ่านก่อน)
+
+ทุกครั้งที่ผู้ใช้พูดคุย คุณสามารถใช้ `takkub` CLI ได้เลย ไม่ต้องเขียน plan ยาวๆ ก่อน
+
+```bash
+takkub list                                            # ดูสถานะ panes ทั้งหมด
+takkub assign --role frontend "<task>"                 # spawn (ถ้ายังไม่เปิด) + ส่ง task
+takkub assign --role backend --cwd <path> "<task>"     # ระบุ cwd เอง (override role-aware default)
+takkub send --to backend "<message>"                   # ส่งข้อความ peer (CC Lead อัตโนมัติ)
+takkub close --role qa                                 # ปิด pane นึง
+takkub close-all                                       # ปิด teammate ทั้งหมด (Lead รอด)
+```
+
+ถ้าไม่ระบุ `--cwd` orchestrator เลือกอัตโนมัติจาก active project:
+- `frontend/designer` → `web` path
+- `backend` → `api` path
+- `mobile` → `mobile` (หรือ `web` ถ้าไม่มี)
+- `devops` → `api` (หรือ `infra`)
+- `qa/reviewer` → first matched path
+
+## Tooling ที่ agents มีให้ใช้
+
+agents ใน cockpit panes สืบทอด user-level Claude Code settings → เข้าถึงได้:
+
+- **superpowers** (Jesse Vincent's skill library): TDD, debugging, collaboration patterns. agents เรียก skill ด้วย `/skill-name` ได้เลย
+- **agent-skills** (addyosmani): engineering workflow skills
+- **claude-obsidian**: wiki / hot cache / save commands
+- **MCP servers** ที่ user config ไว้ (chrome-devtools, obsidian-vault, ฯลฯ)
+
+ถ้าต้อง isolate (เช่น plugin global ทำให้ agent crash) set env var ก่อน launch cockpit:
+```bash
+export TAKKUB_SETTING_SOURCES="project,local"
+```
+
 ## เมื่อรับงานใหม่
 
 1. อ่านไฟล์ `projects.json` เสมอ
