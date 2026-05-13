@@ -145,6 +145,21 @@ class MainWindow(QMainWindow):
         self._btn_help.setToolTip("Show takkub command cheatsheet (F1)")
         self._btn_help.clicked.connect(self._show_help)
 
+        # Persistent /remote-control reminder. The built-in Claude Code
+        # command bridges a local session to claude.ai/code for browser/phone
+        # control. The user routinely forgets it exists, so we keep a small
+        # always-visible chip in the status bar that names it explicitly.
+        self._remote_hint = QLabel("💡 /remote-control → control from browser", self)
+        self._remote_hint.setStyleSheet(
+            "color: #fbbf24; font-size: 11px; padding: 0 8px; "
+            "background: rgba(251, 191, 36, 0.08); border-radius: 4px;"
+        )
+        self._remote_hint.setToolTip(
+            "Run /remote-control inside the Lead pane to bridge this Claude\n"
+            "session to claude.ai/code. Lets you continue from a browser or\n"
+            "phone. Built-in Claude Code feature (2.x+)."
+        )
+
         # Aggregate token meter: sums prompt tokens across every active pane
         # so the user can spot when the whole team is bumping the limit.
         # Tooltip breaks it down per role + reveals the largest occupant.
@@ -156,6 +171,7 @@ class MainWindow(QMainWindow):
         )
         self._token_total.hide()
 
+        self._status.addPermanentWidget(self._remote_hint)
         self._status.addPermanentWidget(self._token_total)
         self._status.addPermanentWidget(QLabel("project:"))
         self._status.addPermanentWidget(self._project_combo)
