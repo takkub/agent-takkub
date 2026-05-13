@@ -273,6 +273,22 @@ class Orchestrator(QObject):
         bin_dir = str(REPO_ROOT / "bin")
         env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
 
+        # If rtk lives somewhere `shutil.which` can't see (typical when
+        # pythonw inherits a thinner PATH than the cmd that spawned the
+        # cockpit), prepend its directory so the Bash PreToolUse hook that
+        # may sit in the project's .claude/settings.json can still execute
+        # `rtk hook claude` from within the pane.
+        try:
+            from .rtk_helper import find_rtk_binary
+
+            rtk_path = find_rtk_binary()
+        except Exception:
+            rtk_path = None
+        if rtk_path:
+            rtk_dir = str(pathlib.Path(rtk_path).resolve().parent)
+            if rtk_dir not in env["PATH"].split(os.pathsep):
+                env["PATH"] = rtk_dir + os.pathsep + env["PATH"]
+
         # --setting-sources controls which settings.json layers claude loads.
         # We default to `project,local` (skip ~/.claude/settings.json) because
         # the claude-obsidian plugin currently ships a SessionStart hook that

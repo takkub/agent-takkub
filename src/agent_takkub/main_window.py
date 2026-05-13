@@ -197,14 +197,15 @@ class MainWindow(QMainWindow):
         self._status.addPermanentWidget(self._project_combo)
         self._status.addPermanentWidget(self._btn_add_project)
         self._status.addPermanentWidget(self._btn_install_rtk)
-        # Sync visibility now that the button is parented into the status
-        # bar; relying on _boot() to do this races with Qt's first paint and
-        # has been observed to leave the button permanently invisible.
-        self._refresh_rtk_button()
         self._status.addPermanentWidget(self._btn_add_pane)
         self._status.addPermanentWidget(self._btn_assign)
         self._status.addPermanentWidget(self._btn_logs)
         self._status.addPermanentWidget(self._btn_help)
+        # Sync rtk button visibility after every permanent widget has been
+        # added, so any layout invalidation triggered by show()/hide() lands
+        # on a fully-built status bar rather than a half-built one (an
+        # earlier mid-loop call kept the button invisible on first paint).
+        self._refresh_rtk_button()
 
         # ── bottom logs dock (hidden by default) ────────────────
         self._logs_dock = QDockWidget("events", self)
@@ -460,17 +461,43 @@ class MainWindow(QMainWindow):
         """Show the install button only when the active project's lead_cwd()
         doesn't already carry the rtk hook. Hidden when rtk isn't on PATH or
         no project is active."""
-        if not rtk_binary_available():
-            self._btn_install_rtk.hide()
-            return
+        from pathlib import Path as _P
+        import time as _t
+
+        bin_ok = rtk_binary_available()
         root = lead_cwd()
-        if not root:
+        installed = is_rtk_installed(root) if root else None
+
+        if not bin_ok:
             self._btn_install_rtk.hide()
-            return
-        if is_rtk_installed(root):
+            decision = "hide:no-rtk-binary"
+        elif not root:
             self._btn_install_rtk.hide()
+            decision = "hide:no-lead-cwd"
+        elif installed:
+            self._btn_install_rtk.hide()
+            decision = "hide:already-installed"
         else:
             self._btn_install_rtk.show()
+            self._btn_install_rtk.raise_()
+            decision = "show:not-installed"
+
+        # Diagnostic breadcrumb. Written to runtime/rtk_button.log so we
+        # can confirm whether the cockpit's pythonw actually executed this
+        # path (vs. running a stale cached process / older code). Remove
+        # after visibility is verified.
+        try:
+            log = _P(__file__).resolve().parents[2] / "runtime" / "rtk_button.log"
+            log.parent.mkdir(parents=True, exist_ok=True)
+            visible = self._btn_install_rtk.isVisible()
+            with log.open("a", encoding="utf-8") as f:
+                f.write(
+                    f"{_t.strftime('%H:%M:%S')} bin_ok={bin_ok} "
+                    f"root={root!r} installed={installed} "
+                    f"decision={decision} isVisible={visible}\n"
+                )
+        except Exception:
+            pass
 
     def _on_install_rtk_clicked(self) -> None:
         from PyQt6.QtWidgets import QMessageBox

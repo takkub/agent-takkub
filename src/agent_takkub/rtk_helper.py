@@ -25,10 +25,38 @@ from shutil import which
 RTK_HOOK_COMMAND_MARKER = "rtk hook claude"
 RTK_HOOK_COMMAND = "rtk hook claude"
 
+# Well-known locations rtk lands in on each platform. We probe these
+# directly when `shutil.which` comes up empty — typically because the
+# cockpit's pythonw was launched via `start ""` which can present a
+# stripped-down PATH / PATHEXT vs. the cmd that spawned it.
+_FALLBACK_RTK_PATHS: tuple[Path, ...] = (
+    Path.home() / "bin" / "rtk.exe",
+    Path.home() / "bin" / "rtk",
+    Path("/usr/local/bin/rtk"),
+    Path("/opt/homebrew/bin/rtk"),
+)
+
+
+def find_rtk_binary() -> str | None:
+    """Resolve an absolute path to the rtk binary, or None if not present.
+
+    Search order: PATH (`shutil.which`) for both `rtk` and `rtk.exe`, then a
+    list of well-known install locations. The fallback list covers the case
+    where pythonw inherits a thinner PATH than the cmd that launched it."""
+    for name in ("rtk", "rtk.exe"):
+        found = which(name)
+        if found:
+            return found
+    for cand in _FALLBACK_RTK_PATHS:
+        if cand.is_file():
+            return str(cand)
+    return None
+
 
 def rtk_binary_available() -> bool:
-    """True when the `rtk` CLI is on PATH (or its Windows .exe variant)."""
-    return which("rtk") is not None or which("rtk.exe") is not None
+    """True when the `rtk` CLI is reachable, either via PATH or a known
+    install location. See `find_rtk_binary` for the search order."""
+    return find_rtk_binary() is not None
 
 
 def _settings_path(project_root: Path) -> Path:
