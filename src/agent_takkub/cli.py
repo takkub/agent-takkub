@@ -23,6 +23,13 @@ import sys
 from .config import read_port
 
 
+# Commands that orchestrate the cockpit (spawn/route/close panes). Only the
+# Lead pane is allowed to invoke these; teammates must work on their assigned
+# task and coordinate via `send` / `done`. The gate is enforced in `main()`
+# based on the TAKKUB_ROLE env var that the orchestrator injects per pane.
+LEAD_ONLY_COMMANDS = frozenset({"spawn", "assign", "close", "close-all"})
+
+
 def _connect() -> socket.socket:
     port = read_port()
     if port is None:
@@ -54,6 +61,35 @@ def _request(payload: dict) -> dict:
 def _from_role() -> str | None:
     """The role that's invoking the CLI. Set by orchestrator at spawn time."""
     return os.environ.get("TAKKUB_ROLE")
+
+
+def _enforce_role_gate(command: str) -> str | None:
+    """Return an error message if the caller's role can't run `command`.
+
+    Defense against teammate panes drifting into Lead behavior (e.g. devops
+    near the context limit calling `takkub assign --role devops ...`). The
+    `--append-system-prompt` specialist override is text-only and can be
+    diluted by compaction or high-context degradation — this CLI-level gate
+    blocks the action regardless of how confused the agent is.
+
+    Rules:
+      - If TAKKUB_ROLE is unset (user typing manually from a terminal),
+        allow everything. This is the debugging path.
+      - If TAKKUB_ROLE == "lead", allow everything.
+      - Otherwise, block LEAD_ONLY_COMMANDS with a hint pointing at the
+        commands teammates *are* allowed to use.
+    """
+    if command not in LEAD_ONLY_COMMANDS:
+        return None
+    role = _from_role()
+    if role is None or role.lower() == "lead":
+        return None
+    return (
+        f"only lead can run 'takkub {command}'. you are '{role}'.\n"
+        f"       do your task directly with Read/Write/Edit/Bash.\n"
+        f"       use 'takkub send --to <role>' for peer coordination, "
+        f"'takkub done' to report back."
+    )
 
 
 def cmd_spawn(args: argparse.Namespace) -> dict:
@@ -119,6 +155,12 @@ def main(argv: list[str] | None = None) -> int:
     sl.set_defaults(func=cmd_list)
 
     args = p.parse_args(argv)
+
+    gate_err = _enforce_role_gate(args.command)
+    if gate_err:
+        print(f"error: {gate_err}", file=sys.stderr)
+        return 1
+
     try:
         resp = args.func(args)
     except Exception as e:

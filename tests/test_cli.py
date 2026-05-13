@@ -124,6 +124,106 @@ class TestExitCodes:
         assert "frontend" in out and "working" in out
 
 
+class TestRoleGate:
+    """Lead-only commands (spawn/assign/close/close-all) must be blocked when
+    invoked from a teammate pane. Prevents an agent that drifted into Lead
+    behavior (e.g. after compaction at high context) from orchestrating."""
+
+    def test_teammate_cannot_assign(
+        self,
+        fake_request: list[dict[str, Any]],
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        monkeypatch.setenv("TAKKUB_ROLE", "devops")
+        rc = cli.main(["assign", "--role", "devops", "--cwd", "/x", "self-assign attempt"])
+        assert rc == 1
+        assert fake_request == []  # never reached orchestrator
+        err = capsys.readouterr().err
+        assert "only lead" in err and "devops" in err
+
+    def test_teammate_cannot_spawn(
+        self,
+        fake_request: list[dict[str, Any]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("TAKKUB_ROLE", "frontend")
+        rc = cli.main(["spawn", "--role", "backend"])
+        assert rc == 1
+        assert fake_request == []
+
+    def test_teammate_cannot_close(
+        self,
+        fake_request: list[dict[str, Any]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("TAKKUB_ROLE", "qa")
+        rc = cli.main(["close", "--role", "frontend"])
+        assert rc == 1
+        assert fake_request == []
+
+    def test_teammate_cannot_close_all(
+        self,
+        fake_request: list[dict[str, Any]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("TAKKUB_ROLE", "reviewer")
+        rc = cli.main(["close-all"])
+        assert rc == 1
+        assert fake_request == []
+
+    def test_lead_can_assign(
+        self,
+        fake_request: list[dict[str, Any]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("TAKKUB_ROLE", "lead")
+        rc = cli.main(["assign", "--role", "backend", "do work"])
+        assert rc == 0
+        assert fake_request[-1]["cmd"] == "assign"
+
+    def test_unset_role_allows_everything(
+        self,
+        fake_request: list[dict[str, Any]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """User running CLI manually from a terminal (no pane) must still work."""
+        monkeypatch.delenv("TAKKUB_ROLE", raising=False)
+        rc = cli.main(["assign", "--role", "backend", "do work"])
+        assert rc == 0
+        assert fake_request[-1]["cmd"] == "assign"
+
+    def test_teammate_can_send(
+        self,
+        fake_request: list[dict[str, Any]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("TAKKUB_ROLE", "devops")
+        rc = cli.main(["send", "--to", "backend", "need env list"])
+        assert rc == 0
+        assert fake_request[-1]["cmd"] == "send"
+
+    def test_teammate_can_done(
+        self,
+        fake_request: list[dict[str, Any]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("TAKKUB_ROLE", "devops")
+        rc = cli.main(["done", "pipeline green"])
+        assert rc == 0
+        assert fake_request[-1]["cmd"] == "done"
+
+    def test_teammate_can_list(
+        self,
+        fake_request: list[dict[str, Any]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("TAKKUB_ROLE", "devops")
+        rc = cli.main(["list"])
+        assert rc == 0
+        assert fake_request[-1]["cmd"] == "list"
+
+
 def test_request_payload_serialises_cleanly() -> None:
     """Smoke check: every payload we'd send is round-trippable JSON."""
     payload = {
