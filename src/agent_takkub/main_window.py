@@ -146,7 +146,6 @@ class MainWindow(QMainWindow):
             "QPushButton:hover { background: rgba(251, 191, 36, 0.22); }"
         )
         self._btn_install_rtk.clicked.connect(self._on_install_rtk_clicked)
-        self._btn_install_rtk.hide()  # _refresh_rtk_button decides visibility
 
         self._btn_add_pane = QPushButton("➕ Add Agent", self)
         self._btn_add_pane.setToolTip("Open a pane for a role (default or custom)")
@@ -198,6 +197,10 @@ class MainWindow(QMainWindow):
         self._status.addPermanentWidget(self._project_combo)
         self._status.addPermanentWidget(self._btn_add_project)
         self._status.addPermanentWidget(self._btn_install_rtk)
+        # Sync visibility now that the button is parented into the status
+        # bar; relying on _boot() to do this races with Qt's first paint and
+        # has been observed to leave the button permanently invisible.
+        self._refresh_rtk_button()
         self._status.addPermanentWidget(self._btn_add_pane)
         self._status.addPermanentWidget(self._btn_assign)
         self._status.addPermanentWidget(self._btn_logs)
