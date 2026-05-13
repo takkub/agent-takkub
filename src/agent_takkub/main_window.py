@@ -140,10 +140,10 @@ class MainWindow(QMainWindow):
             "on git / docker / npm / pytest / next / prisma output)."
         )
         self._btn_install_rtk.setStyleSheet(
-            "QPushButton { color: #fbbf24; background: rgba(251, 191, 36, 0.12); "
-            "border: 1px solid rgba(251, 191, 36, 0.4); border-radius: 4px; "
-            "padding: 2px 8px; }"
-            "QPushButton:hover { background: rgba(251, 191, 36, 0.22); }"
+            "QPushButton { color: #000; background: #fbbf24; "
+            "border: 2px solid #b45309; border-radius: 4px; "
+            "padding: 4px 12px; font-weight: bold; font-size: 12px; }"
+            "QPushButton:hover { background: #fcd34d; }"
         )
         self._btn_install_rtk.clicked.connect(self._on_install_rtk_clicked)
 
