@@ -169,6 +169,24 @@ Lead **ทำเองได้** เฉพาะ "งาน meta / coordinator"
 ### Agent ทำตัวเป็น Lead แทนที่จะทำงานเอง
 - ขึ้นต้น task ด้วย `[ROLE: xxx — ทำงานเองโดยตรง ห้าม spawn]` เสมอ
 - agent CLAUDE.md ใน `.claude/agents/<role>.md` มี SPECIALIST OVERRIDE อยู่แล้ว แต่ reinforce ใน task ก็ดี
+- CLI gate บังคับ: teammate pane (`TAKKUB_ROLE != "lead"`) เรียก `takkub assign / spawn / close / close-all` ไม่ได้ จะ exit 1 พร้อม error ใช้ได้แค่ `send / done / list`
+
+### Verification anti-patterns (อย่า poll อะไรที่ไม่มีคนสร้าง)
+
+ตัวอย่างที่เคยพลาด: Lead poll `until docker exec X test -f /app/node_modules/.dev-deps-installed` รอ marker file ที่ **ไม่มี process ไหนสร้าง** → loop วน infinite แม้ install เสร็จไปนานแล้ว ติด pane ไว้กิน context จนเต็ม
+
+**Bad signals ❌**
+- Poll marker file ที่ไม่มี entrypoint/script เป็นคน `touch` ให้
+- `sleep N && check` ที่เดาเวลา (ช้าก็ยังไม่เสร็จ, เร็วก็เสีย latency เปล่า)
+- `until <cmd>; do sleep K; done` แบบไม่มี timeout/max-iter → ถ้าเงื่อนไขไม่มาถึงก็ค้างตลอด
+
+**Good signals ✅ (เรียงตามความน่าเชื่อ)**
+1. **`healthcheck:` ใน docker-compose.yml + `depends_on.condition: service_healthy`** → `docker compose up -d` block เองจนจริง ready ไม่ต้อง poll
+2. **`curl -fsS http://localhost:PORT/health`** poll endpoint จริง (HTTP 200 = ready)
+3. **`docker compose logs --follow <svc> 2>&1 | grep -m1 'ready signal'`** exit ทันทีพอเจอ log line (เช่น `Nest application successfully started`, `ready - started server on`)
+4. **`docker compose ps --format json | jq -r '.[].Health'`** ดู health column
+
+**Rule of thumb:** ก่อนเขียน `until ... do sleep` ถามตัวเองก่อน — "มีอะไรจริงๆ ที่จะ flip condition นี้?" ตอบไม่ได้ = pattern ผิด หา signal อื่น
 
 ### การ commit & push
 - commit เฉพาะไฟล์ที่เกี่ยวกับงานที่สั่ง ตรวจ `git status` ก่อนเสมอ
