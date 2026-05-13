@@ -41,6 +41,7 @@ from .cli_server import CliServer
 from .config import (
     EVENTS_LOG,
     active_project,
+    lead_cwd,
     list_project_names,
     preset_roles_for_active,
     set_active_project,
@@ -48,6 +49,7 @@ from .config import (
 from .logs_panel import LogsPanel
 from .orchestrator import Orchestrator
 from .roles import DEFAULT_TEAMMATES, LEAD, Role, by_name
+from .rtk_helper import install_rtk, is_rtk_installed, rtk_binary_available
 from .token_meter import format_tokens, usage_color
 
 
@@ -127,6 +129,25 @@ class MainWindow(QMainWindow):
         self._btn_add_project.setFixedWidth(28)
         self._btn_add_project.clicked.connect(self._on_add_project_clicked)
 
+        # One-click rtk install for the active project. Only visible when
+        # the project hasn't been initialised yet — once `.claude/settings.json`
+        # carries the Bash hook, the button hides itself so it never nags.
+        # Detection runs on startup, on project switch, and after install.
+        self._btn_install_rtk = QPushButton("⚡ Install rtk", self)
+        self._btn_install_rtk.setToolTip(
+            "Add the rtk PreToolUse Bash hook to this project's .claude/settings.json\n"
+            "so every Bash tool call gets auto-rewritten with rtk (60-90% token savings\n"
+            "on git / docker / npm / pytest / next / prisma output)."
+        )
+        self._btn_install_rtk.setStyleSheet(
+            "QPushButton { color: #fbbf24; background: rgba(251, 191, 36, 0.12); "
+            "border: 1px solid rgba(251, 191, 36, 0.4); border-radius: 4px; "
+            "padding: 2px 8px; }"
+            "QPushButton:hover { background: rgba(251, 191, 36, 0.22); }"
+        )
+        self._btn_install_rtk.clicked.connect(self._on_install_rtk_clicked)
+        self._btn_install_rtk.hide()  # _refresh_rtk_button decides visibility
+
         self._btn_add_pane = QPushButton("➕ Add Agent", self)
         self._btn_add_pane.setToolTip("Open a pane for a role (default or custom)")
         self._btn_add_pane.clicked.connect(self._on_add_pane_clicked)
@@ -176,6 +197,7 @@ class MainWindow(QMainWindow):
         self._status.addPermanentWidget(QLabel("project:"))
         self._status.addPermanentWidget(self._project_combo)
         self._status.addPermanentWidget(self._btn_add_project)
+        self._status.addPermanentWidget(self._btn_install_rtk)
         self._status.addPermanentWidget(self._btn_add_pane)
         self._status.addPermanentWidget(self._btn_assign)
         self._status.addPermanentWidget(self._btn_logs)
@@ -283,6 +305,10 @@ class MainWindow(QMainWindow):
         active = active_project()[0]
         if active:
             self.lead_pane._title.setText(f"Lead · {active}")
+
+        # Project may have been picked before boot — sync the rtk button to
+        # match its current installation state.
+        self._refresh_rtk_button()
 
         # Auto-spawn project presets after Lead has had a moment to boot.
         # Stagger 3s apart so we don't hammer the system or race on auto-trust.
@@ -425,6 +451,61 @@ class MainWindow(QMainWindow):
         if set_active_project(name):
             self._status.showMessage(f"active project → {name}", 4_000)
             self.lead_pane._title.setText(f"Lead · {name}")
+            self._refresh_rtk_button()
+
+    def _refresh_rtk_button(self) -> None:
+        """Show the install button only when the active project's lead_cwd()
+        doesn't already carry the rtk hook. Hidden when rtk isn't on PATH or
+        no project is active."""
+        if not rtk_binary_available():
+            self._btn_install_rtk.hide()
+            return
+        root = lead_cwd()
+        if not root:
+            self._btn_install_rtk.hide()
+            return
+        if is_rtk_installed(root):
+            self._btn_install_rtk.hide()
+        else:
+            self._btn_install_rtk.show()
+
+    def _on_install_rtk_clicked(self) -> None:
+        from PyQt6.QtWidgets import QMessageBox
+
+        root = lead_cwd()
+        if not root:
+            QMessageBox.warning(
+                self,
+                "rtk install",
+                "No active project — pick one in the dropdown first.",
+            )
+            return
+
+        proj_name = active_project()[0] or "(unnamed)"
+        confirm = QMessageBox.question(
+            self,
+            "Install rtk hook",
+            (
+                f"Add the rtk PreToolUse Bash hook to:\n\n"
+                f"  {root}/.claude/settings.json\n\n"
+                f"Every Bash tool call in panes under this project ({proj_name}) "
+                f"will be auto-rewritten with rtk (60-90% token savings on common "
+                f"dev output like git diff, docker logs, npm ci, pytest, tsc).\n\n"
+                f"This only touches the project's .claude/settings.json — no user-level "
+                f"settings, no CLAUDE.md changes."
+            ),
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Ok,
+        )
+        if confirm != QMessageBox.StandardButton.Ok:
+            return
+
+        ok, msg = install_rtk(root)
+        if ok:
+            self._status.showMessage(f"rtk: {msg}", 6_000)
+        else:
+            QMessageBox.critical(self, "rtk install failed", msg)
+        self._refresh_rtk_button()
 
     def _on_add_project_clicked(self) -> None:
         from PyQt6.QtWidgets import QFileDialog, QDialog, QVBoxLayout, QFormLayout, QLineEdit, QDialogButtonBox, QLabel
