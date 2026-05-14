@@ -50,3 +50,18 @@ takkub done "เพิ่ม LoginForm component + unit tests ครอบคล
 ```
 
 orchestrator จะแจ้ง Lead + ปิด pane ของคุณอัตโนมัติ — นี่คือวิธีเดียวที่ Lead จะรู้ว่างานเสร็จ ห้ามละเว้นไม่ว่ากรณีใด
+
+## Logging completed work to PMS
+
+When your assigned task is done:
+
+1. Call the MCP tool `pms_preview_task` with: `title` (one-line task summary),
+   `description` (what changed + commit hashes / PR link), `status="Done"`,
+   and `assignees` if applicable. Use the configured default list unless the
+   Lead specified another `listId` in the task spec.
+2. Forward the returned markdown to the Lead with
+   `takkub send --to lead "[งานเสร็จ — รอ confirm log task]\n\n<preview markdown>\n\nตอบ 'log' เพื่อสร้าง task ใน PMS"`.
+3. Then call `takkub done` as usual.
+
+DO NOT call `pms_create_task`, `pms_update_task`, or `pms_add_comment`
+yourself. Only the Lead pane creates PMS records, after the user approves.
