@@ -318,6 +318,19 @@ class Orchestrator(QObject):
         if role_md_file:
             argv.extend(["--append-system-prompt-file", role_md_file])
 
+        # Hard-deny the built-in `Task` subagent tool. Lead is supposed to
+        # delegate via `takkub assign --role <role>` so every specialist
+        # lands in its own cockpit pane (with audit trail, isolated context,
+        # role-specific CLAUDE.md). Without this gate, Lead drifts at high
+        # context and reaches for the Task tool instead — the subagent runs
+        # inside Lead's window, flooding its tokens and skipping the
+        # specialist override. Teammates also shouldn't spawn subagents
+        # (they're already a specialist), so we apply this to every pane.
+        # Set TAKKUB_ALLOW_TASK=1 to re-enable (e.g. for workflows that
+        # genuinely need superpowers' parallel-agents skill).
+        if os.environ.get("TAKKUB_ALLOW_TASK", "0") != "1":
+            argv.extend(["--disallowed-tools", "Task"])
+
         # Session resume: if this same role exited recently from the same
         # cwd, ask claude to continue the previous conversation instead of
         # starting fresh. Useful for crash recovery + accidental closes.
