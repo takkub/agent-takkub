@@ -12,6 +12,19 @@
 Lead ไม่จำเป็นต้อง spawn ทุกตัวทุกครั้ง — spawn เฉพาะที่จำเป็นต่องานนั้น ๆ
 **ไม่มี tmux อีกแล้ว** — ใช้ `takkub` CLI สั่ง orchestrator (Python desktop app) แทน
 
+## Multi-project tabs (สำคัญ)
+
+cockpit รองรับหลาย project พร้อมกันผ่าน **tab** กฎเหล็ก:
+
+- **1 tab = 1 Lead = 1 project** (project เดียวเปิดได้ครั้งเดียวเสมอ ห้ามซ้ำ)
+- เปลี่ยน tab → cockpit set `active = <tab's project>` ให้อัตโนมัติ + refresh ปุ่ม `⚡ Install rtk` ตามสภาพ project ใหม่
+- กดปุ่ม `+` มุมขวาบนของ tab strip เพื่อเปิด project เพิ่ม picker จะแสดงเฉพาะที่ยังไม่เปิด
+- กด `x` บน tab → confirm dialog → orchestrator ปิด teammate ทั้งหมด + ปิด Lead ของ project นั้น
+- ปิด cockpit ขณะมีหลาย tab → confirm dialog (กัน Alt+F4 มือลั่น)
+- `open_tabs` บันทึกใน `projects.json` cockpit restore tab list อัตโนมัติทุกครั้งที่เปิดใหม่
+
+**Routing isolation:** `takkub` CLI ใน pane รู้ project ของตัวเองผ่าน env `TAKKUB_PROJECT` ที่ orchestrator inject ตอน spawn → `takkub send/list/done` ภายใน **project เดียวกัน** เท่านั้น Lead ใน unirecon **ไม่เห็น** backend pane ของ pms (audit trail สะอาด, ไม่ cross-talk)
+
 ## Quick reference (อ่านก่อน)
 
 ทุกครั้งที่ผู้ใช้พูดคุย คุณสามารถใช้ `takkub` CLI ได้เลย ไม่ต้องเขียน plan ยาวๆ ก่อน

@@ -42,10 +42,12 @@ from .cli_server import CliServer
 from .config import (
     EVENTS_LOG,
     active_project,
+    get_open_tabs,
     lead_cwd,
     list_project_names,
     preset_roles_for_active,
     set_active_project,
+    set_open_tabs,
 )
 from .logs_panel import LogsPanel
 from .orchestrator import Orchestrator
@@ -410,6 +412,27 @@ class MainWindow(QMainWindow):
             for i, role in enumerate(presets):
                 QTimer.singleShot(15_000 + i * 3_000, lambda r=role: self.orch.spawn(r))
 
+        # Restore any extra tabs the user had open last session. The very
+        # first tab is already in place (the active project), so we skip
+        # it and reopen the rest with a small stagger so each Lead's
+        # claude bootstrap doesn't collide.
+        saved = get_open_tabs()
+        already = set(self._open_projects())
+        to_open = [n for n in saved if n not in already]
+        if to_open:
+            self._status.showMessage(
+                f"restoring {len(to_open)} extra tab(s): {', '.join(to_open)}", 6_000
+            )
+            for i, name in enumerate(to_open):
+                # 4s stagger so Leads don't all try to bind a renderer / read
+                # claude binaries in parallel
+                QTimer.singleShot(
+                    2_500 + i * 4_000, lambda n=name: self._open_project_tab(n)
+                )
+        # Persist the current state (covers the case where saved tabs
+        # referenced a now-deleted project and got dropped).
+        self._persist_open_tabs()
+
     def _track_pane_request(self, role_name: str) -> None:
         # only called when a new pane is being created
         self._status.showMessage(f"opening pane · {role_name}", 3_000)
@@ -586,6 +609,16 @@ class MainWindow(QMainWindow):
             if isinstance(self.tabs.widget(i), ProjectTab)
         ]
 
+    def _persist_open_tabs(self) -> None:
+        """Snapshot the current tab order into projects.json so the next
+        cockpit launch restores the same set of tabs in the same order.
+        Best-effort; never raises so a config write blip can't take down
+        the orchestrator."""
+        try:
+            set_open_tabs(self._open_projects())
+        except Exception as e:
+            self._status.showMessage(f"⚠ failed to persist open tabs: {e}", 8_000)
+
     def _on_new_tab_clicked(self) -> None:
         """Prompt for a project that isn't already open, then add it as a
         new tab and spawn Lead in it. The picker enforces the "one tab per
@@ -638,6 +671,7 @@ class MainWindow(QMainWindow):
                 LEAD.name, "/remote-control", project=project_name
             )
         self._refresh_rtk_button()
+        self._persist_open_tabs()
         self._status.showMessage(f"opened tab · {project_name}", 4_000)
 
     def _on_tab_close_requested(self, index: int) -> None:
@@ -670,6 +704,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         tab.deleteLater()
+        self._persist_open_tabs()
         self._status.showMessage(f"closed tab · {tab.project_name}", 4_000)
 
     def _on_tab_switched(self, index: int) -> None:
@@ -1011,11 +1046,38 @@ class MainWindow(QMainWindow):
 
     # ──────────────────────────────────────────────────────────────
     def closeEvent(self, event) -> None:
+        from PyQt6.QtWidgets import QMessageBox
+
+        # Multi-tab guard: closing the cockpit with multiple project tabs
+        # tears down *every* Lead + teammate session in one shot, which is
+        # easy to do by accident (Alt+F4 muscle memory). Single tab gets
+        # the usual silent close.
+        open_names = self._open_projects()
+        if len(open_names) > 1:
+            confirm = QMessageBox.question(
+                self,
+                "Close cockpit",
+                (
+                    f"Close cockpit with {len(open_names)} tabs open?\n\n"
+                    f"Lead + every teammate pane in these projects will end:\n"
+                    f"  {', '.join(open_names)}"
+                ),
+                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if confirm != QMessageBox.StandardButton.Ok:
+                event.ignore()
+                return
+
         self._save_window_state()
-        for pane in list(self.orch.panes.values()):
-            if pane.session is not None:
-                pane.mark_expected_exit()
-                pane.session.terminate()
+        self._persist_open_tabs()
+        # Walk every project namespace, not just the active view, so a
+        # background tab's panes are also terminated cleanly.
+        for project_panes in self.orch._panes_by_project.values():
+            for pane in list(project_panes.values()):
+                if pane.session is not None:
+                    pane.mark_expected_exit()
+                    pane.session.terminate()
         self.cli.close()
         super().closeEvent(event)
 

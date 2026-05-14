@@ -119,6 +119,44 @@ def set_active_project(name: str) -> bool:
     return True
 
 
+def get_open_tabs() -> list[str]:
+    """Project names of every tab the user wants restored on next launch.
+
+    Backwards-compatible reader: if `open_tabs` isn't in projects.json
+    (file pre-dates the multi-tab refactor) we synthesise it from
+    `active` so old configs open the active project as a single tab.
+    Orphaned names (project no longer exists in `projects`) are filtered
+    out silently — the cockpit logs a status-bar warning at startup.
+    """
+    data = load_projects()
+    raw = data.get("open_tabs")
+    known = set(data.get("projects", {}).keys())
+    if isinstance(raw, list):
+        return [n for n in raw if isinstance(n, str) and n in known]
+    active = data.get("active")
+    if isinstance(active, str) and active in known:
+        return [active]
+    return []
+
+
+def set_open_tabs(names: list[str]) -> None:
+    """Persist the current tab order. Dedupes while preserving first-seen
+    order so a stray double-add doesn't corrupt the saved list."""
+    data = load_projects()
+    seen: set[str] = set()
+    cleaned: list[str] = []
+    known = set(data.get("projects", {}).keys())
+    for n in names:
+        if not isinstance(n, str):
+            continue
+        if n in seen or n not in known:
+            continue
+        seen.add(n)
+        cleaned.append(n)
+    data["open_tabs"] = cleaned
+    PROJECTS_JSON.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
 def agent_role_dir(role: str) -> Path:
     """Per-role staging dir under runtime/agents/<role>/.
 
