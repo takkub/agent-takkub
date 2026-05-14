@@ -25,19 +25,17 @@ read by every subsequent claude spawn.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 from .config import RUNTIME_DIR
 
 
 SHARED_MCP_FILE = RUNTIME_DIR / "shared-mcp.json"
 
-# Common pms MCP endpoints. The default points at production; the dev
-# endpoint is offered as an alternative in the Setup dialog so the user
-# can flip between them without hand-editing JSON. "Custom" lets the
-# user paste any other URL.
+# pms MCP endpoint. Pinned to production — the cockpit owner does not
+# want a dev variant in the picker (any reference to "pms-dev" tends to
+# leak into Lead's context and trigger searches for a `mcp__pms-dev__*`
+# tool that doesn't exist).
 PMS_MCP_URL_PROD = "https://api.wsol.co.th/pms/mcp"
-PMS_MCP_URL_DEV = "https://api-dev.wsol.co.th/pms/mcp"
 PMS_MCP_DEFAULT_URL = PMS_MCP_URL_PROD
 
 # The pms MCP server config. The bearer token is supplied by the user

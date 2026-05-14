@@ -1074,6 +1074,12 @@ class MainWindow(QMainWindow):
         if list_id:
             summary_prompt += (
                 f"## 📋 Create PMS tasks in list_id={list_id}\n\n"
+                "**MCP server name is `pms` (exact). Tools are `mcp__pms__pms_*`.**\n"
+                "**Do NOT search for `pms-dev`, `pms_dev`, or any variant.** "
+                "There is only one pms server registered for this cockpit; "
+                "if `mcp__pms__pms_resolve_list` is not visible, that means "
+                "the MCP isn't configured — STOP and report. Never invent a "
+                "dev/staging variant.\n\n"
                 "Use the `pms` MCP server to file this session's work as tasks:\n\n"
                 "1. **Discover the work range** — run `git log --reverse "
                 f"--since=\"{week_ago_str}\" --until=\"{today_str}\" "
