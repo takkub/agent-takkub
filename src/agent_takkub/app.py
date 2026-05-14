@@ -3,9 +3,35 @@
 from __future__ import annotations
 
 import atexit
+import faulthandler
 import os
 import signal
 import sys
+from pathlib import Path
+
+# Boot-time crash dump. pythonw.exe has no console, so a segfault or
+# uncaught exception during MainWindow init looks like a silent
+# disappearance. Route faulthandler + a small textual trace into
+# runtime/boot.log so we can read it post-mortem.
+_BOOT_LOG = Path(__file__).resolve().parents[2] / "runtime" / "boot.log"
+try:
+    _BOOT_LOG.parent.mkdir(parents=True, exist_ok=True)
+    _BOOT_LOG_FH = _BOOT_LOG.open("a", encoding="utf-8", buffering=1)
+    faulthandler.enable(_BOOT_LOG_FH)
+    _BOOT_LOG_FH.write(f"\n--- boot {os.getpid()} ---\n")
+except Exception:
+    _BOOT_LOG_FH = None
+
+
+def _boot_log(msg: str) -> None:
+    if _BOOT_LOG_FH:
+        try:
+            _BOOT_LOG_FH.write(msg + "\n")
+            _BOOT_LOG_FH.flush()
+        except Exception:
+            pass
+
+
 
 # Chromium throttles background timers, RAF and rendering for views that
 # aren't the foreground tab. Because we host many xterm.js panes in one
@@ -78,7 +104,6 @@ def _install_signal_handlers(window: MainWindow) -> None:
 def main(argv: list[str] | None = None) -> int:
     app = QApplication(argv or sys.argv)
     app.setApplicationName("agent-takkub")
-    # default font: prefer a Thai-capable sans
     f = QFont("Segoe UI", 10)
     app.setFont(f)
     w = MainWindow()

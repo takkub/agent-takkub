@@ -141,7 +141,15 @@ class MainWindow(QMainWindow):
         self.tabs.setMovable(False)
         self.tabs.setTabsClosable(True)
         self.tabs.tabCloseRequested.connect(self._on_tab_close_requested)
-        self.tabs.currentChanged.connect(self._on_tab_switched)
+        # NOTE: `currentChanged` is connected at the end of __init__ — once
+        # the status bar widgets exist. QTabWidget emits currentChanged the
+        # moment the first tab is added, and our slot calls
+        # `_refresh_rtk_button` which touches `self._btn_install_rtk`.
+        # Connecting up-front means the slot fires while the button still
+        # doesn't exist, raising AttributeError inside a Qt slot — which
+        # the underlying event-dispatch path then surfaces as a silent
+        # Chromium renderer crash on Windows (pythonw shows nothing; the
+        # cockpit window never appears).
 
         # "+" corner widget — opens another project in a new tab. The
         # picker only lists projects that aren't already open (one tab
@@ -158,12 +166,20 @@ class MainWindow(QMainWindow):
         self.tabs.setCornerWidget(btn_new_tab, Qt.Corner.TopRightCorner)
         outer.addWidget(self.tabs, 1)
 
-        # Build the initial tab for the active project.
+        # Build the initial tab for the active project. Order matters
+        # here: QTabWidget.addTab re-parents the inserted widget under
+        # its internal stacked widget. If a QWebEngineView is already
+        # nested inside the tab when that re-parent happens, Chromium's
+        # renderer process crashes silently on Windows ("composition
+        # surface invalidated"). Adding the tab BEFORE creating the
+        # AgentPane that owns the WebEngineView keeps the chain stable
+        # from the QWebEngineView's first paint onward.
         initial_project = active_project()[0] or "default"
-        initial_lead = AgentPane(LEAD)
-        self.orch.register_pane(initial_lead, project=initial_project)
-        initial_tab = ProjectTab(initial_project, initial_lead, self)
+        initial_tab = ProjectTab(initial_project, lead_pane=None)
         self.tabs.addTab(initial_tab, initial_project)
+        initial_lead = AgentPane(LEAD, parent=initial_tab)
+        self.orch.register_pane(initial_lead, project=initial_project)
+        initial_tab.attach_lead(initial_lead)
 
         # ── status bar ──────────────────────────────────────────
         self._status = QStatusBar(self)
@@ -277,6 +293,12 @@ class MainWindow(QMainWindow):
         # on a fully-built status bar rather than a half-built one (an
         # earlier mid-loop call kept the button invisible on first paint).
         self._refresh_rtk_button()
+
+        # Only NOW is it safe to listen for tab switches — the handler
+        # touches `_btn_install_rtk` via `_refresh_rtk_button`, which
+        # didn't exist when the first tab was added. See the comment
+        # next to the deferred connection at MW.11.
+        self.tabs.currentChanged.connect(self._on_tab_switched)
 
         # ── bottom logs dock (hidden by default) ────────────────
         self._logs_dock = QDockWidget("events", self)
@@ -650,16 +672,23 @@ class MainWindow(QMainWindow):
         """Create a ProjectTab for `project_name`, register a fresh Lead
         pane in the orchestrator's per-project namespace, spawn the
         claude session, and auto-bridge to /remote-control. Becomes the
-        focused tab on return."""
+        focused tab on return.
+
+        Uses the deferred-attach pattern (addTab BEFORE creating the
+        Lead AgentPane) so QWebEngineView never gets re-parented after
+        first paint — re-parenting a WebEngine-containing widget
+        crashes Chromium's renderer on Windows.
+        """
         # Set as active so spawn picks up lead_cwd() for the new project.
         set_active_project(project_name)
         self._refresh_project_list()
 
-        lead = AgentPane(LEAD)
-        self.orch.register_pane(lead, project=project_name)
-        tab = ProjectTab(project_name, lead, self)
+        tab = ProjectTab(project_name, lead_pane=None)
         idx = self.tabs.addTab(tab, project_name)
         self.tabs.setCurrentIndex(idx)
+        lead = AgentPane(LEAD, parent=tab)
+        self.orch.register_pane(lead, project=project_name)
+        tab.attach_lead(lead)
 
         ok, msg = self.orch.spawn(LEAD.name, project=project_name)
         if not ok:

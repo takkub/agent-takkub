@@ -22,21 +22,36 @@ from .agent_pane import AgentPane
 
 
 class ProjectTab(QWidget):
-    def __init__(self, project_name: str, lead_pane: AgentPane, parent: QWidget | None = None) -> None:
+    """Visual stack of one project's panes.
+
+    Construct with `lead_pane=None` and pass the tab through
+    `QTabWidget.addTab` *before* attaching the Lead via `attach_lead()`.
+    The deferred attach pattern keeps QWebEngineView from being
+    re-parented under a freshly-added tab — which crashes Chromium's
+    renderer on Windows during the first paint.
+    """
+
+    def __init__(
+        self,
+        project_name: str,
+        lead_pane: AgentPane | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self.project_name = project_name
-        self.lead_pane = lead_pane
+        self.lead_pane: AgentPane | None = None
 
         # Horizontal split: Lead on the left, teammate stack on the right.
         self.main_split = QSplitter(Qt.Orientation.Horizontal, self)
-        self.main_split.addWidget(lead_pane)
 
         self.teammate_split = QSplitter(Qt.Orientation.Vertical, self)
         self.teammate_split.setChildrenCollapsible(False)
         self.teammate_split.hide()  # Lead fills 100% until first teammate
 
+        # Splitter starts with two empty slots — Lead is attached later
+        # via `attach_lead()` so its WebEngineView never sees a parent
+        # change after first paint.
         self.main_split.addWidget(self.teammate_split)
-        self.main_split.setSizes([1500, 0])
 
         self.teammate_panes: dict[str, AgentPane] = {}
         # Color overrides chosen via the "+ pane → custom..." flow stay
@@ -48,6 +63,21 @@ class ProjectTab(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(self.main_split)
+
+        if lead_pane is not None:
+            # Backwards-compat path for callers that still pass Lead at
+            # construction time (e.g. tests). Same widget order as the
+            # original implementation.
+            self.attach_lead(lead_pane)
+
+    def attach_lead(self, lead_pane: AgentPane) -> None:
+        """Insert the Lead pane on the splitter's left side. Idempotent
+        but only meant to be called once per tab."""
+        if self.lead_pane is not None:
+            return
+        self.lead_pane = lead_pane
+        self.main_split.insertWidget(0, lead_pane)
+        self.main_split.setSizes([1500, 0])
 
     def rebalance_teammates(self) -> None:
         """Distribute vertical space evenly across teammate panes."""
