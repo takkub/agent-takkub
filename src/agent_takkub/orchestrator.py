@@ -71,7 +71,7 @@ IDLE_REMINDER_TEXT = (
 # settings to avoid claude-obsidian's broken SessionStart hook). Each entry
 # is a *marketplace name* under ~/.claude/plugins/cache/. We pick the highest
 # semver-ish version directory found.
-_SAFE_PLUGINS: tuple[str, ...] = ("superpowers-dev", "addy-agent-skills")
+_SAFE_PLUGINS: tuple[str, ...] = ("superpowers-dev", "addy-agent-skills", "pordee")
 
 
 def _render_lead_context() -> str | None:
@@ -362,6 +362,22 @@ class Orchestrator(QObject):
                 argv.extend(["--plugin-dir", pdir])
         if role_md_file:
             argv.extend(["--append-system-prompt-file", role_md_file])
+
+        # Inject the cockpit's shared MCP config (pms MCP server with
+        # bearer token) so every spawned claude session has the pms
+        # tools available, regardless of what the project's own
+        # `.claude/settings.json` contains. The file lives under
+        # runtime/ which is gitignored, so the bearer never leaks via
+        # checked-in config. Skipped silently if the user hasn't set
+        # up the token yet (UI offers a "Setup pms MCP" prompt).
+        try:
+            from .shared_dev_tools import shared_mcp_config_path
+
+            mcp_cfg = shared_mcp_config_path()
+        except Exception:
+            mcp_cfg = None
+        if mcp_cfg:
+            argv.extend(["--mcp-config", mcp_cfg])
 
         # Hard-deny the built-in `Task` subagent tool. Lead is supposed to
         # delegate via `takkub assign --role <role>` so every specialist
