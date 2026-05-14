@@ -71,21 +71,31 @@ class CliServer(QObject):
         from_project = req.get("from_project")
         try:
             if cmd == "spawn":
-                ok, msg = self._orch.spawn(req["role"], cwd=req.get("cwd"))
+                ok, msg = self._orch.spawn(
+                    req["role"], cwd=req.get("cwd"), project=from_project
+                )
             elif cmd == "assign":
                 ok, msg = self._orch.assign(
-                    req["role"], cwd=req.get("cwd"), task=req.get("task", "")
+                    req["role"],
+                    cwd=req.get("cwd"),
+                    task=req.get("task", ""),
+                    project=from_project,
                 )
             elif cmd == "send":
                 ok, msg = self._orch.send(
-                    req["to"], msg=req.get("msg", ""), from_role=req.get("from")
+                    req["to"],
+                    msg=req.get("msg", ""),
+                    from_role=req.get("from"),
+                    project=from_project,
                 )
             elif cmd == "close":
-                ok, msg = self._orch.close(req["role"])
+                ok, msg = self._orch.close(req["role"], project=from_project)
             elif cmd == "close-all":
-                ok, msg = self._orch.close_all_teammates()
+                ok, msg = self._orch.close_all_teammates(project=from_project)
             elif cmd == "done":
-                ok, msg = self._orch.done(req.get("from") or "", note=req.get("note", ""))
+                ok, msg = self._orch.done(
+                    req.get("from") or "", note=req.get("note", ""), project=from_project
+                )
             elif cmd == "list":
                 self._reply(
                     sock,

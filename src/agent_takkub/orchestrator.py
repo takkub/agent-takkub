@@ -247,13 +247,17 @@ class Orchestrator(QObject):
     # ──────────────────────────────────────────────────────────────
     # high-level operations
     # ──────────────────────────────────────────────────────────────
-    def spawn(self, role_name: str, cwd: str | None = None) -> tuple[bool, str]:
+    def spawn(
+        self, role_name: str, cwd: str | None = None, project: str | None = None
+    ) -> tuple[bool, str]:
         role_name = role_name.lower().strip()
-        pane = self.panes.get(role_name)
+        project_ns = self._resolve_project(project)
+        project_panes = self._project_panes(project_ns)
+        pane = project_panes.get(role_name)
         if pane is None:
             # ask main_window to create + register the pane, then retry
             self.paneRequested.emit(role_name)
-            pane = self.panes.get(role_name)
+            pane = project_panes.get(role_name)
             if pane is None:
                 return False, f"unknown role: {role_name}"
 
@@ -310,7 +314,7 @@ class Orchestrator(QObject):
         # cli_server uses that to scope routing to panes in the *same*
         # project — under the multi-tab refactor a Lead in unirecon
         # mustn't accidentally send to a backend pane that belongs to pms.
-        env["TAKKUB_PROJECT"] = self._resolve_project(None)
+        env["TAKKUB_PROJECT"] = project_ns
         bin_dir = str(REPO_ROOT / "bin")
         env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
 
@@ -442,17 +446,23 @@ class Orchestrator(QObject):
 
         QTimer.singleShot(1_000, _check)
 
-    def assign(self, role_name: str, cwd: str | None, task: str) -> tuple[bool, str]:
-        ok, msg = self.spawn(role_name, cwd=cwd)
+    def assign(
+        self, role_name: str, cwd: str | None, task: str, project: str | None = None
+    ) -> tuple[bool, str]:
+        ok, msg = self.spawn(role_name, cwd=cwd, project=project)
         if not ok:
             return ok, msg
 
-        self._send_when_ready(role_name, task)
+        self._send_when_ready(role_name, task, project=project)
         _log_event("assign", role=role_name, cwd=cwd, task_preview=task[:120])
         return True, f"task queued for {role_name} (sending when ready)"
 
     def inject_slash_command_when_ready(
-        self, role_name: str, command: str, max_wait_ms: int = 45_000
+        self,
+        role_name: str,
+        command: str,
+        max_wait_ms: int = 45_000,
+        project: str | None = None,
     ) -> None:
         """Type a Claude Code slash command (e.g. `/remote-control`) into a
         pane as soon as it reaches the idle prompt. Unlike `_send_when_ready`,
@@ -461,7 +471,7 @@ class Orchestrator(QObject):
         `max_wait_ms`, the command is silently dropped (we'd rather skip than
         paste into a half-built UI).
         """
-        pane = self.panes.get(role_name)
+        pane = self._project_panes(project).get(role_name)
         if pane is None:
             return
         elapsed = [0]
@@ -493,14 +503,20 @@ class Orchestrator(QObject):
 
         QTimer.singleShot(1_500, _check)
 
-    def _send_when_ready(self, role_name: str, task: str, max_wait_ms: int = 45_000) -> None:
+    def _send_when_ready(
+        self,
+        role_name: str,
+        task: str,
+        max_wait_ms: int = 45_000,
+        project: str | None = None,
+    ) -> None:
         """Poll until claude's main prompt is idle, then paste task + Enter.
 
         Replaces the old fixed 12s wait so we don't paste into the trust modal
         or while claude is still bootstrapping. Falls back to a hard timeout
         so a hung claude doesn't silently swallow the task.
         """
-        pane = self.panes.get(role_name)
+        pane = self._project_panes(project).get(role_name)
         if pane is None:
             return
         elapsed = [0]
@@ -533,9 +549,16 @@ class Orchestrator(QObject):
 
         QTimer.singleShot(1_000, _check)
 
-    def send(self, to_role: str, msg: str, from_role: str | None = None) -> tuple[bool, str]:
+    def send(
+        self,
+        to_role: str,
+        msg: str,
+        from_role: str | None = None,
+        project: str | None = None,
+    ) -> tuple[bool, str]:
         to_role = to_role.lower().strip()
-        pane = self.panes.get(to_role)
+        project_panes = self._project_panes(project)
+        pane = project_panes.get(to_role)
         if pane is None:
             return False, f"unknown role: {to_role}"
         if pane.session is None or not pane.session.is_alive:
@@ -548,7 +571,7 @@ class Orchestrator(QObject):
 
         # CC Lead unless source was Lead and target was a teammate, or vice versa
         if from_role and from_role not in (None, LEAD.name) and to_role != LEAD.name:
-            lead = self.panes.get(LEAD.name)
+            lead = project_panes.get(LEAD.name)
             if lead and lead.session and lead.session.is_alive:
                 lead.session.write(f"[CC] {body}")
                 QTimer.singleShot(150, lambda: lead.session and lead.session.write(b"\r"))
@@ -556,9 +579,9 @@ class Orchestrator(QObject):
         _log_event("send", to=to_role, from_=from_role, msg_preview=msg[:120])
         return True, f"sent to {to_role}"
 
-    def close(self, role_name: str) -> tuple[bool, str]:
+    def close(self, role_name: str, project: str | None = None) -> tuple[bool, str]:
         role_name = role_name.lower().strip()
-        pane = self.panes.get(role_name)
+        pane = self._project_panes(project).get(role_name)
         if pane is None:
             return False, f"unknown role: {role_name}"
         was_alive = pane.session is not None
@@ -576,17 +599,22 @@ class Orchestrator(QObject):
         _log_event("close", role=role_name)
         return True, f"{role_name} closed"
 
-    def done(self, from_role: str, note: str = "") -> tuple[bool, str]:
+    def done(
+        self, from_role: str, note: str = "", project: str | None = None
+    ) -> tuple[bool, str]:
         from_role = from_role.lower().strip()
-        pane = self.panes.get(from_role)
+        project_ns = self._resolve_project(project)
+        project_panes = self._project_panes(project_ns)
+        pane = project_panes.get(from_role)
         if pane is None:
             return False, f"unknown role: {from_role}"
         # Agent finished cleanly — clear any pending idle reminder state so
         # we don't re-fire after the pane closes / respawns.
         self._idle_state.pop(from_role, None)
 
-        # notify Lead
-        lead = self.panes.get(LEAD.name)
+        # notify Lead in the same project (a teammate in unirecon mustn't
+        # nudge the Lead in pms by mistake)
+        lead = project_panes.get(LEAD.name)
         notice = f"[{from_role} done] {note}".rstrip()
         if lead and lead.session and lead.session.is_alive:
             lead.session.write(notice)
@@ -595,7 +623,7 @@ class Orchestrator(QObject):
 
         # mark pane done, auto-close after a delay so user can see it
         pane.set_state("done", note=note[:80] if note else "done")
-        QTimer.singleShot(2_500, lambda: self.close(from_role))
+        QTimer.singleShot(2_500, lambda: self.close(from_role, project=project_ns))
         _log_event("done", role=from_role, note=note[:200])
         self.agentDone.emit(from_role, note)
         return True, f"{from_role} reported done"
@@ -658,13 +686,16 @@ class Orchestrator(QObject):
         QTimer.singleShot(150, lambda: pane.session and pane.session.write(b"\r"))
         _log_event("idle_reminder", role=role_name)
 
-    def close_all_teammates(self) -> tuple[bool, str]:
-        """Close every non-Lead pane. Used by Lead to reset the board."""
-        names = [n for n in list(self.panes.keys()) if n != LEAD.name]
+    def close_all_teammates(self, project: str | None = None) -> tuple[bool, str]:
+        """Close every non-Lead pane in `project` (defaults to active).
+        Used by Lead to reset the board and by the cockpit when a tab is
+        closed."""
+        project_ns = self._resolve_project(project)
+        names = [n for n in list(self._project_panes(project_ns).keys()) if n != LEAD.name]
         if not names:
             return True, "no teammates to close"
         for n in names:
-            self.close(n)
+            self.close(n, project=project_ns)
         return True, f"closed {len(names)} teammate(s): {', '.join(names)}"
 
     # ──────────────────────────────────────────────────────────────

@@ -128,18 +128,35 @@ class MainWindow(QMainWindow):
         outer.setSpacing(8)
         self.setCentralWidget(root)
 
-        # Central QTabWidget hosts one ProjectTab per open project. In
-        # phase 2 of the multi-project rollout the tab strip is single-tab
-        # only (the upcoming + / x corner widgets land in phase 3). Helper
-        # accessors below (`self.lead_pane`, `self.teammate_split`, ...)
-        # transparently resolve to the *currently active* tab so older
-        # MainWindow methods keep operating on the same widget set.
+        # Central QTabWidget hosts one ProjectTab per open project. The
+        # cockpit enforces strict one-tab-per-project. Helper accessors
+        # below (`self.lead_pane`, `self.teammate_split`, ...) resolve to
+        # the *currently active* tab so older MainWindow methods keep
+        # operating on the same widget set without explicit project
+        # plumbing.
         self.tabs = QTabWidget(self)
         self.tabs.setDocumentMode(True)
         self.tabs.setMovable(False)
+        self.tabs.setTabsClosable(True)
+        self.tabs.tabCloseRequested.connect(self._on_tab_close_requested)
+        self.tabs.currentChanged.connect(self._on_tab_switched)
+
+        # "+" corner widget — opens another project in a new tab. The
+        # picker only lists projects that aren't already open (one tab
+        # per project), so the user can't accidentally double up.
+        btn_new_tab = QPushButton("+", self)
+        btn_new_tab.setToolTip("Open another project in a new tab")
+        btn_new_tab.setFixedSize(28, 24)
+        btn_new_tab.setStyleSheet(
+            "QPushButton { background: rgba(255,255,255,0.06); border: none; "
+            "border-radius: 4px; color: #d4d4d8; font-weight: bold; }"
+            "QPushButton:hover { background: rgba(255,255,255,0.12); }"
+        )
+        btn_new_tab.clicked.connect(self._on_new_tab_clicked)
+        self.tabs.setCornerWidget(btn_new_tab, Qt.Corner.TopRightCorner)
         outer.addWidget(self.tabs, 1)
 
-        # Build the initial tab for the active project (single-tab mode).
+        # Build the initial tab for the active project.
         initial_project = active_project()[0] or "default"
         initial_lead = AgentPane(LEAD)
         self.orch.register_pane(initial_lead, project=initial_project)
@@ -241,8 +258,11 @@ class MainWindow(QMainWindow):
 
         self._status.addPermanentWidget(self._remote_hint)
         self._status.addPermanentWidget(self._token_total)
-        self._status.addPermanentWidget(QLabel("project:"))
-        self._status.addPermanentWidget(self._project_combo)
+        # `project_combo` is retained as a hidden widget so legacy code
+        # paths that update it (`_refresh_project_list`, `_on_project_changed`)
+        # still link cleanly. The tab strip is now the authoritative
+        # project switcher — the combo would just duplicate it visually.
+        self._project_combo.hide()
         self._status.addPermanentWidget(self._btn_add_project)
         self._status.addPermanentWidget(self._btn_install_rtk)
         self._status.addPermanentWidget(self._btn_add_pane)
@@ -515,14 +535,124 @@ class MainWindow(QMainWindow):
             self._project_combo.blockSignals(False)
 
     def _on_project_changed(self, name: str) -> None:
+        # Kept for backwards compat with the (now-hidden) `_project_combo`.
+        # The tab strip is the real switcher; nothing routes here anymore
+        # unless a future caller programmatically pokes the combo.
         if not name:
             return
         if not set_active_project(name):
             return
-        self._status.showMessage(f"active project → {name} (restarting Lead...)", 4_000)
-        self.lead_pane._title.setText(f"Lead · {name}")
         self._refresh_rtk_button()
-        self._restart_lead_for_active_project()
+
+    # ──────────────────────────────────────────────────────────────
+    # multi-tab orchestration
+    # ──────────────────────────────────────────────────────────────
+    def _open_projects(self) -> list[str]:
+        """Project names of every tab currently open."""
+        return [
+            self.tabs.widget(i).project_name
+            for i in range(self.tabs.count())
+            if isinstance(self.tabs.widget(i), ProjectTab)
+        ]
+
+    def _on_new_tab_clicked(self) -> None:
+        """Prompt for a project that isn't already open, then add it as a
+        new tab and spawn Lead in it. The picker enforces the "one tab per
+        project" rule by excluding open names."""
+        from PyQt6.QtWidgets import QMessageBox
+
+        open_names = set(self._open_projects())
+        available = [n for n in list_project_names() if n not in open_names]
+        if not available:
+            QMessageBox.information(
+                self,
+                "Open tab",
+                "Every configured project is already open. Use 📁 to add a new one.",
+            )
+            return
+        name, ok = QInputDialog.getItem(
+            self,
+            "Open tab",
+            "Pick a project to open in a new tab:",
+            available,
+            0,
+            False,
+        )
+        if not ok or not name:
+            return
+        self._open_project_tab(name)
+
+    def _open_project_tab(self, project_name: str) -> None:
+        """Create a ProjectTab for `project_name`, register a fresh Lead
+        pane in the orchestrator's per-project namespace, spawn the
+        claude session, and auto-bridge to /remote-control. Becomes the
+        focused tab on return."""
+        # Set as active so spawn picks up lead_cwd() for the new project.
+        set_active_project(project_name)
+        self._refresh_project_list()
+
+        lead = AgentPane(LEAD)
+        self.orch.register_pane(lead, project=project_name)
+        tab = ProjectTab(project_name, lead, self)
+        idx = self.tabs.addTab(tab, project_name)
+        self.tabs.setCurrentIndex(idx)
+
+        ok, msg = self.orch.spawn(LEAD.name, project=project_name)
+        if not ok:
+            self._status.showMessage(f"⚠ Lead spawn failed for {project_name}: {msg}", 15_000)
+            return
+        lead._title.setText(f"Lead · {project_name}")
+        if os.environ.get("TAKKUB_AUTO_REMOTE_CONTROL", "1") != "0":
+            self.orch.inject_slash_command_when_ready(
+                LEAD.name, "/remote-control", project=project_name
+            )
+        self._refresh_rtk_button()
+        self._status.showMessage(f"opened tab · {project_name}", 4_000)
+
+    def _on_tab_close_requested(self, index: int) -> None:
+        """Close the tab at `index`. Confirms first, then tears down every
+        pane for that project (Lead + teammates). If the last tab closes,
+        the cockpit shows the empty state — the user can `+` a new one."""
+        from PyQt6.QtWidgets import QMessageBox
+
+        tab = self.tabs.widget(index)
+        if not isinstance(tab, ProjectTab):
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Close tab",
+            f"Close '{tab.project_name}' tab? Lead + every teammate pane for "
+            f"this project will be terminated.",
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Ok,
+        )
+        if confirm != QMessageBox.StandardButton.Ok:
+            return
+        self.orch.close_all_teammates(project=tab.project_name)
+        self.orch.close(LEAD.name, project=tab.project_name)
+        self.tabs.removeTab(index)
+        # ProjectTab still holds references to AgentPane/TerminalWidget;
+        # explicitly destroy them so Chromium releases the renderer.
+        try:
+            for pane in [tab.lead_pane, *tab.teammate_panes.values()]:
+                pane._terminal.destroy_terminal()
+        except Exception:
+            pass
+        tab.deleteLater()
+        self._status.showMessage(f"closed tab · {tab.project_name}", 4_000)
+
+    def _on_tab_switched(self, index: int) -> None:
+        """User clicked a different tab. Sync `active` in projects.json so
+        the orchestrator's project-default resolution and the rtk button
+        match the visible tab."""
+        if index < 0:
+            return
+        tab = self.tabs.widget(index)
+        if not isinstance(tab, ProjectTab):
+            return
+        if set_active_project(tab.project_name):
+            self._refresh_rtk_button()
+            self._status.showMessage(f"active project → {tab.project_name}", 3_000)
 
     def _restart_lead_for_active_project(self) -> None:
         """Close every pane and respawn Lead at the new project's lead_cwd().
@@ -776,12 +906,22 @@ class MainWindow(QMainWindow):
         PROJECTS_JSON.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
         self._refresh_project_list()
-        self._status.showMessage(f"Added project: {name} (restarting Lead...)", 4_000)
-        self.lead_pane._title.setText(f"Lead · {name}")
-        self._refresh_rtk_button()
-        # Switch Lead to the new project's cwd immediately so the user can
-        # start work without restarting the cockpit by hand.
-        self._restart_lead_for_active_project()
+        # If this project already has a tab (re-adding the same name) just
+        # focus it; otherwise open it as a fresh tab beside the current
+        # ones. Either way the user lands on the new project without
+        # disturbing other open tabs.
+        if name in self._open_projects():
+            for i in range(self.tabs.count()):
+                if (
+                    isinstance(self.tabs.widget(i), ProjectTab)
+                    and self.tabs.widget(i).project_name == name
+                ):
+                    self.tabs.setCurrentIndex(i)
+                    break
+            self._status.showMessage(f"Updated project: {name}", 4_000)
+        else:
+            self._status.showMessage(f"Added project: {name} (opening tab...)", 4_000)
+            self._open_project_tab(name)
 
     # ──────────────────────────────────────────────────────────────
     # + pane button: spawn an additional teammate from a role name
