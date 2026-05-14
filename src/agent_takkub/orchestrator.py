@@ -397,6 +397,48 @@ class Orchestrator(QObject):
         _log_event("assign", role=role_name, cwd=cwd, task_preview=task[:120])
         return True, f"task queued for {role_name} (sending when ready)"
 
+    def inject_slash_command_when_ready(
+        self, role_name: str, command: str, max_wait_ms: int = 45_000
+    ) -> None:
+        """Type a Claude Code slash command (e.g. `/remote-control`) into a
+        pane as soon as it reaches the idle prompt. Unlike `_send_when_ready`,
+        this does *not* flip the pane to the `working` state — slash commands
+        are housekeeping, not tasks. If the pane never becomes ready within
+        `max_wait_ms`, the command is silently dropped (we'd rather skip than
+        paste into a half-built UI).
+        """
+        pane = self.panes.get(role_name)
+        if pane is None:
+            return
+        elapsed = [0]
+        sent = [False]
+
+        def _deliver() -> None:
+            if sent[0]:
+                return
+            sent[0] = True
+            if pane.session is None or not pane.session.is_alive:
+                return
+            pane.session.write(command)
+            QTimer.singleShot(200, lambda: pane.session and pane.session.write("\r"))
+            _log_event("auto_slash_command", role=role_name, command=command)
+
+        def _check() -> None:
+            if sent[0]:
+                return
+            if pane.session is None or not pane.session.is_alive:
+                return
+            if pane.session.is_at_ready_prompt():
+                _deliver()
+                return
+            elapsed[0] += 500
+            if elapsed[0] >= max_wait_ms:
+                # Quiet timeout: skip rather than paste while still booting.
+                return
+            QTimer.singleShot(500, _check)
+
+        QTimer.singleShot(1_500, _check)
+
     def _send_when_ready(self, role_name: str, task: str, max_wait_ms: int = 45_000) -> None:
         """Poll until claude's main prompt is idle, then paste task + Enter.
 

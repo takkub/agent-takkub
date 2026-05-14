@@ -16,6 +16,7 @@ axis — Lead always on the left, teammates stacked vertically on the right.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from PyQt6.QtCore import QSettings, Qt, QTimer
@@ -313,6 +314,13 @@ class MainWindow(QMainWindow):
         # Project may have been picked before boot — sync the rtk button to
         # match its current installation state.
         self._refresh_rtk_button()
+
+        # Auto-run `/remote-control` in the Lead pane after spawn so the
+        # user can drive the cockpit from a browser/phone without having to
+        # remember to type it every session. Skip with
+        # TAKKUB_AUTO_REMOTE_CONTROL=0 if the bridge is unwanted (e.g. CI).
+        if ok and os.environ.get("TAKKUB_AUTO_REMOTE_CONTROL", "1") != "0":
+            self.orch.inject_slash_command_when_ready(LEAD.name, "/remote-control")
 
         # Auto-spawn project presets after Lead has had a moment to boot.
         # Stagger 3s apart so we don't hammer the system or race on auto-trust.
