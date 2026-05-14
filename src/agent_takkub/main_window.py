@@ -141,6 +141,7 @@ class MainWindow(QMainWindow):
         self.tabs.setMovable(False)
         self.tabs.setTabsClosable(True)
         self.tabs.tabCloseRequested.connect(self._on_tab_close_requested)
+        self.tabs.tabBarClicked.connect(self._on_tab_bar_clicked)
         # NOTE: `currentChanged` is connected at the end of __init__ — once
         # the status bar widgets exist. QTabWidget emits currentChanged the
         # moment the first tab is added, and our slot calls
@@ -151,19 +152,6 @@ class MainWindow(QMainWindow):
         # Chromium renderer crash on Windows (pythonw shows nothing; the
         # cockpit window never appears).
 
-        # "+" corner widget — opens another project in a new tab. The
-        # picker only lists projects that aren't already open (one tab
-        # per project), so the user can't accidentally double up.
-        btn_new_tab = QPushButton("+", self)
-        btn_new_tab.setToolTip("Open another project in a new tab")
-        btn_new_tab.setFixedSize(28, 24)
-        btn_new_tab.setStyleSheet(
-            "QPushButton { background: rgba(255,255,255,0.06); border: none; "
-            "border-radius: 4px; color: #d4d4d8; font-weight: bold; }"
-            "QPushButton:hover { background: rgba(255,255,255,0.12); }"
-        )
-        btn_new_tab.clicked.connect(self._on_new_tab_clicked)
-        self.tabs.setCornerWidget(btn_new_tab, Qt.Corner.TopRightCorner)
         outer.addWidget(self.tabs, 1)
 
         # Build the initial tab for the active project. Order matters
@@ -180,6 +168,25 @@ class MainWindow(QMainWindow):
         initial_lead = AgentPane(LEAD, parent=initial_tab)
         self.orch.register_pane(initial_lead, project=initial_project)
         initial_tab.attach_lead(initial_lead)
+
+        # Append a permanent "+" pseudo-tab at the end of the strip. It
+        # has no widget content (an empty QWidget placeholder), is not
+        # closable, and intercepts clicks via `_on_tab_bar_clicked` to
+        # show the project picker instead of activating itself. Real new
+        # tabs always insert *before* the "+" via `_plus_tab_index()` so
+        # the "+" stays anchored on the right.
+        from PyQt6.QtWidgets import QWidget as _QW
+
+        self._plus_tab_placeholder = _QW(self)
+        plus_idx = self.tabs.addTab(self._plus_tab_placeholder, "+")
+        # Strip the close-button from the "+" tab; it must always be there.
+        bar = self.tabs.tabBar()
+        bar.setTabButton(plus_idx, bar.ButtonPosition.RightSide, None)
+        bar.setTabButton(plus_idx, bar.ButtonPosition.LeftSide, None)
+        self.tabs.setTabToolTip(plus_idx, "Open another project in a new tab")
+        # Restore focus to the real first tab — addTab on the "+" would
+        # otherwise make it the active tab (and Lead's pane would hide).
+        self.tabs.setCurrentIndex(0)
 
         # ── status bar ──────────────────────────────────────────
         self._status = QStatusBar(self)
@@ -624,12 +631,31 @@ class MainWindow(QMainWindow):
     # multi-tab orchestration
     # ──────────────────────────────────────────────────────────────
     def _open_projects(self) -> list[str]:
-        """Project names of every tab currently open."""
+        """Project names of every tab currently open. Excludes the "+"
+        pseudo-tab automatically (its widget isn't a ProjectTab)."""
         return [
             self.tabs.widget(i).project_name
             for i in range(self.tabs.count())
             if isinstance(self.tabs.widget(i), ProjectTab)
         ]
+
+    def _plus_tab_index(self) -> int:
+        """Index of the trailing "+" pseudo-tab, or -1 if it isn't in
+        the strip yet (e.g. during __init__ before it's added)."""
+        for i in range(self.tabs.count()):
+            if self.tabs.widget(i) is getattr(self, "_plus_tab_placeholder", None):
+                return i
+        return -1
+
+    def _on_tab_bar_clicked(self, index: int) -> None:
+        """Intercept clicks on the "+" pseudo-tab: prevent it from
+        becoming the active tab and open the new-project picker instead.
+        Other tab clicks fall through to QTabWidget's normal switch
+        behavior (which triggers `currentChanged` → `_on_tab_switched`)."""
+        if index == self._plus_tab_index():
+            # Defer slightly so Qt's own click handling doesn't race the
+            # `_on_new_tab_clicked` dialog (modal blocks until dismissed).
+            QTimer.singleShot(0, self._on_new_tab_clicked)
 
     def _persist_open_tabs(self) -> None:
         """Snapshot the current tab order into projects.json so the next
@@ -684,7 +710,13 @@ class MainWindow(QMainWindow):
         self._refresh_project_list()
 
         tab = ProjectTab(project_name, lead_pane=None)
-        idx = self.tabs.addTab(tab, project_name)
+        # Always insert *before* the trailing "+" pseudo-tab so the "+"
+        # stays anchored at the right edge of the strip.
+        plus_idx = self._plus_tab_index()
+        if plus_idx >= 0:
+            idx = self.tabs.insertTab(plus_idx, tab, project_name)
+        else:
+            idx = self.tabs.addTab(tab, project_name)
         self.tabs.setCurrentIndex(idx)
         lead = AgentPane(LEAD, parent=tab)
         self.orch.register_pane(lead, project=project_name)
@@ -739,11 +771,20 @@ class MainWindow(QMainWindow):
     def _on_tab_switched(self, index: int) -> None:
         """User clicked a different tab. Sync `active` in projects.json so
         the orchestrator's project-default resolution and the rtk button
-        match the visible tab."""
+        match the visible tab. The "+" pseudo-tab is intercepted in
+        `_on_tab_bar_clicked` and never becomes the visible target, so we
+        defensively skip it here too."""
         if index < 0:
             return
         tab = self.tabs.widget(index)
         if not isinstance(tab, ProjectTab):
+            # "+" pseudo-tab landed here through some unusual path
+            # (e.g. keyboard navigation). Snap back to the previous
+            # real tab so the cockpit never shows an empty pane area.
+            for i in range(self.tabs.count()):
+                if isinstance(self.tabs.widget(i), ProjectTab):
+                    self.tabs.setCurrentIndex(i)
+                    break
             return
         if set_active_project(tab.project_name):
             self._refresh_rtk_button()
