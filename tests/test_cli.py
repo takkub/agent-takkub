@@ -24,14 +24,17 @@ def fake_request(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
 
 
 class TestArgparse:
+    """Argument parsing → request payload shape. Every payload now carries a
+    `from_project` field (None when the CLI runs outside a cockpit-spawned
+    pane); tests only assert on the fields the CLI actively populates."""
+
     def test_assign_requires_role_and_task(self, fake_request: list[dict[str, Any]]) -> None:
         cli.main(["assign", "--role", "frontend", "make a thing"])
-        assert fake_request[-1] == {
-            "cmd": "assign",
-            "role": "frontend",
-            "cwd": None,
-            "task": "make a thing",
-        }
+        payload = fake_request[-1]
+        assert payload["cmd"] == "assign"
+        assert payload["role"] == "frontend"
+        assert payload["cwd"] is None
+        assert payload["task"] == "make a thing"
 
     def test_assign_with_cwd(self, fake_request: list[dict[str, Any]]) -> None:
         cli.main(["assign", "--role", "backend", "--cwd", "/x", "do work"])
@@ -42,12 +45,11 @@ class TestArgparse:
     ) -> None:
         monkeypatch.setenv("TAKKUB_ROLE", "frontend")
         cli.main(["send", "--to", "backend", "hi"])
-        assert fake_request[-1] == {
-            "cmd": "send",
-            "to": "backend",
-            "msg": "hi",
-            "from": "frontend",
-        }
+        payload = fake_request[-1]
+        assert payload["cmd"] == "send"
+        assert payload["to"] == "backend"
+        assert payload["msg"] == "hi"
+        assert payload["from"] == "frontend"
 
     def test_send_without_env_passes_none_from(
         self, fake_request: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
@@ -61,11 +63,10 @@ class TestArgparse:
     ) -> None:
         monkeypatch.setenv("TAKKUB_ROLE", "qa")
         cli.main(["done", "tests passing"])
-        assert fake_request[-1] == {
-            "cmd": "done",
-            "from": "qa",
-            "note": "tests passing",
-        }
+        payload = fake_request[-1]
+        assert payload["cmd"] == "done"
+        assert payload["from"] == "qa"
+        assert payload["note"] == "tests passing"
 
     def test_done_without_note(
         self, fake_request: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
@@ -76,19 +77,38 @@ class TestArgparse:
 
     def test_list_command(self, fake_request: list[dict[str, Any]]) -> None:
         cli.main(["list"])
-        assert fake_request[-1] == {"cmd": "list"}
+        assert fake_request[-1]["cmd"] == "list"
 
     def test_close_all(self, fake_request: list[dict[str, Any]]) -> None:
         cli.main(["close-all"])
-        assert fake_request[-1] == {"cmd": "close-all"}
+        assert fake_request[-1]["cmd"] == "close-all"
 
     def test_close_role(self, fake_request: list[dict[str, Any]]) -> None:
         cli.main(["close", "--role", "backend"])
-        assert fake_request[-1] == {"cmd": "close", "role": "backend"}
+        payload = fake_request[-1]
+        assert payload["cmd"] == "close"
+        assert payload["role"] == "backend"
 
     def test_spawn_optional_cwd(self, fake_request: list[dict[str, Any]]) -> None:
         cli.main(["spawn", "--role", "frontend"])
-        assert fake_request[-1] == {"cmd": "spawn", "role": "frontend", "cwd": None}
+        payload = fake_request[-1]
+        assert payload["cmd"] == "spawn"
+        assert payload["role"] == "frontend"
+        assert payload["cwd"] is None
+
+    def test_payload_includes_from_project_env(
+        self, fake_request: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TAKKUB_PROJECT", "unirecon")
+        cli.main(["list"])
+        assert fake_request[-1]["from_project"] == "unirecon"
+
+    def test_payload_from_project_unset_is_none(
+        self, fake_request: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("TAKKUB_PROJECT", raising=False)
+        cli.main(["list"])
+        assert fake_request[-1]["from_project"] is None
 
 
 class TestExitCodes:

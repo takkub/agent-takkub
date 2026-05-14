@@ -63,6 +63,12 @@ class CliServer(QObject):
 
     def _dispatch(self, sock: QTcpSocket, req: dict) -> None:
         cmd = (req.get("cmd") or "").lower()
+        # `from_project` is stamped by the cli when the calling pane was
+        # spawned with TAKKUB_PROJECT set. Manual terminal invocations
+        # don't carry it; the orchestrator falls back to the active
+        # project in that case. Reserved for the multi-tab refactor —
+        # currently informational and only used to scope `list`.
+        from_project = req.get("from_project")
         try:
             if cmd == "spawn":
                 ok, msg = self._orch.spawn(req["role"], cwd=req.get("cwd"))
@@ -81,7 +87,12 @@ class CliServer(QObject):
             elif cmd == "done":
                 ok, msg = self._orch.done(req.get("from") or "", note=req.get("note", ""))
             elif cmd == "list":
-                self._reply(sock, ok=True, msg="status", status=self._orch.list_status())
+                self._reply(
+                    sock,
+                    ok=True,
+                    msg="status",
+                    status=self._orch.list_status(project=from_project),
+                )
                 return
             else:
                 ok, msg = False, f"unknown cmd: {cmd}"

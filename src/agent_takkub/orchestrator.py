@@ -175,7 +175,13 @@ class Orchestrator(QObject):
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
-        self.panes: dict[str, AgentPane] = {}
+        # Panes are namespaced per project so the upcoming multi-tab UI
+        # (Plan B) can keep each project's Lead + teammates isolated. The
+        # `panes` property below resolves to the *active* project's inner
+        # dict so every existing caller (UI + tests) keeps the same shape.
+        # Until tabs land, only one project namespace is populated at a
+        # time and behavior is identical to the pre-refactor single-dict.
+        self._panes_by_project: dict[str, dict[str, AgentPane]] = {}
         # last-known cwd per role, used to decide whether to pass --continue
         # on a fresh spawn (must match the previous cwd for resume to be valid)
         self._recent_exits: dict[str, dict] = {}  # role -> {cwd, ts}
@@ -192,17 +198,46 @@ class Orchestrator(QObject):
             self._idle_watchdog.start()
 
     # ──────────────────────────────────────────────────────────────
+    # project-aware view onto the pane registry
+    # ──────────────────────────────────────────────────────────────
+    @staticmethod
+    def _resolve_project(project: str | None) -> str:
+        """Pick a namespace key. Resolves None to the currently active
+        project from projects.json, falling back to a sentinel "default"
+        when no project is configured (typical in unit tests)."""
+        if project:
+            return project
+        name, _ = active_project()
+        return name or "default"
+
+    def _project_panes(self, project: str | None = None) -> dict[str, AgentPane]:
+        """Return (and lazily create) the inner pane dict for `project`.
+
+        Always returns the same dict instance for a given project, so
+        callers can hold a reference and mutate it directly — that's how
+        `self.panes` works for the active project."""
+        return self._panes_by_project.setdefault(self._resolve_project(project), {})
+
+    @property
+    def panes(self) -> dict[str, AgentPane]:
+        """Active project's pane dict. Backwards-compatible with the
+        pre-Phase-1 single-namespace API — existing callers that read or
+        write `orch.panes["backend"]` continue to operate on the active
+        project's panes without knowing about the project dimension."""
+        return self._project_panes()
+
+    # ──────────────────────────────────────────────────────────────
     # registration (main_window builds panes and registers them)
     # ──────────────────────────────────────────────────────────────
-    def register_pane(self, pane: AgentPane) -> None:
-        self.panes[pane.role.name] = pane
+    def register_pane(self, pane: AgentPane, project: str | None = None) -> None:
+        self._project_panes(project)[pane.role.name] = pane
         pane.spawnRequested.connect(self._on_pane_spawn_clicked)
         pane.closeRequested.connect(self._on_pane_close_clicked)
         pane.inputBytes.connect(self._on_pane_input)
         self.statusChanged.emit()
 
-    def unregister_pane(self, role_name: str) -> None:
-        pane = self.panes.pop(role_name, None)
+    def unregister_pane(self, role_name: str, project: str | None = None) -> None:
+        pane = self._project_panes(project).pop(role_name, None)
         if pane is None:
             return
         if pane.session is not None:
@@ -270,6 +305,12 @@ class Orchestrator(QObject):
 
         env = os.environ.copy()
         env["TAKKUB_ROLE"] = role_name
+        # Tag the pane with its project so the `takkub` CLI inside the
+        # session can stamp every JSON request with `from_project`. The
+        # cli_server uses that to scope routing to panes in the *same*
+        # project — under the multi-tab refactor a Lead in unirecon
+        # mustn't accidentally send to a backend pane that belongs to pms.
+        env["TAKKUB_PROJECT"] = self._resolve_project(None)
         bin_dir = str(REPO_ROOT / "bin")
         env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
 
@@ -559,8 +600,13 @@ class Orchestrator(QObject):
         self.agentDone.emit(from_role, note)
         return True, f"{from_role} reported done"
 
-    def list_status(self) -> dict[str, str]:
-        return {name: p.state for name, p in self.panes.items()}
+    def list_status(self, project: str | None = None) -> dict[str, str]:
+        """Snapshot of `role → state` for one project's panes.
+
+        Defaults to the active project's view, so a Lead in unirecon never
+        accidentally sees a backend pane that belongs to pms.
+        """
+        return {name: p.state for name, p in self._project_panes(project).items()}
 
     # ──────────────────────────────────────────────────────────────
     # idle watchdog — nudge teammates that forgot to `takkub done`

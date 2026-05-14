@@ -63,6 +63,13 @@ def _from_role() -> str | None:
     return os.environ.get("TAKKUB_ROLE")
 
 
+def _from_project() -> str | None:
+    """The project namespace that owns the calling pane. Set by the
+    orchestrator at spawn time so the cli_server can scope routing
+    (a Lead in unirecon never reaches into pms's pane registry)."""
+    return os.environ.get("TAKKUB_PROJECT")
+
+
 def _enforce_role_gate(command: str) -> str | None:
     """Return an error message if the caller's role can't run `command`.
 
@@ -92,32 +99,49 @@ def _enforce_role_gate(command: str) -> str | None:
     )
 
 
+def _with_project(payload: dict) -> dict:
+    """Stamp every outbound request with `from_project` so the server can
+    scope routing. Cockpit-launched panes always have TAKKUB_PROJECT set;
+    when the CLI is invoked manually from a terminal the field is None and
+    the server falls back to the active project from projects.json."""
+    payload["from_project"] = _from_project()
+    return payload
+
+
 def cmd_spawn(args: argparse.Namespace) -> dict:
-    return _request({"cmd": "spawn", "role": args.role, "cwd": args.cwd})
+    return _request(_with_project({"cmd": "spawn", "role": args.role, "cwd": args.cwd}))
 
 
 def cmd_assign(args: argparse.Namespace) -> dict:
-    return _request({"cmd": "assign", "role": args.role, "cwd": args.cwd, "task": args.task})
+    return _request(
+        _with_project(
+            {"cmd": "assign", "role": args.role, "cwd": args.cwd, "task": args.task}
+        )
+    )
 
 
 def cmd_send(args: argparse.Namespace) -> dict:
-    return _request({"cmd": "send", "to": args.to, "msg": args.msg, "from": _from_role()})
+    return _request(
+        _with_project({"cmd": "send", "to": args.to, "msg": args.msg, "from": _from_role()})
+    )
 
 
 def cmd_close(args: argparse.Namespace) -> dict:
-    return _request({"cmd": "close", "role": args.role})
+    return _request(_with_project({"cmd": "close", "role": args.role}))
 
 
 def cmd_close_all(_: argparse.Namespace) -> dict:
-    return _request({"cmd": "close-all"})
+    return _request(_with_project({"cmd": "close-all"}))
 
 
 def cmd_done(args: argparse.Namespace) -> dict:
-    return _request({"cmd": "done", "from": _from_role(), "note": args.note or ""})
+    return _request(
+        _with_project({"cmd": "done", "from": _from_role(), "note": args.note or ""})
+    )
 
 
 def cmd_list(_: argparse.Namespace) -> dict:
-    return _request({"cmd": "list"})
+    return _request(_with_project({"cmd": "list"}))
 
 
 def main(argv: list[str] | None = None) -> int:
