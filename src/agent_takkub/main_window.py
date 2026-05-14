@@ -905,9 +905,12 @@ class MainWindow(QMainWindow):
             )
 
     def _on_setup_pms_mcp_clicked(self) -> None:
-        """Prompt for the pms MCP bearer token and persist the shared
-        config. Idempotent — re-running rewrites the file so the user
-        can rotate the token without leaving the cockpit."""
+        """Prompt for the pms MCP bearer token, persist the shared
+        config, and restart the active tab's Lead so the new
+        `--mcp-config` actually loads (Lead picks up MCP servers at
+        spawn time, never mid-session). Idempotent — re-running
+        rewrites the file so the user can rotate the token without
+        leaving the cockpit."""
         from PyQt6.QtWidgets import QInputDialog, QLineEdit, QMessageBox
 
         token, ok = QInputDialog.getText(
@@ -920,18 +923,41 @@ class MainWindow(QMainWindow):
                 "  runtime/shared-mcp.json\n"
                 "which is gitignored, so it never reaches a public repo.\n\n"
                 "After setup, every claude spawn (Lead + teammates, every\n"
-                "project tab) loads this MCP config via --mcp-config."
+                "project tab) loads this MCP config via --mcp-config.\n\n"
+                "The active tab's Lead will restart automatically so the\n"
+                "new MCP tools become available right away."
             ),
             QLineEdit.EchoMode.Password,
         )
         if not ok:
             return
         ok, msg = write_shared_mcp_config(token)
-        if ok:
-            self._status.showMessage(f"pms MCP: {msg}", 6_000)
-        else:
+        if not ok:
             QMessageBox.critical(self, "Setup pms MCP failed", msg)
+            self._refresh_pms_mcp_button()
+            return
+
         self._refresh_pms_mcp_button()
+
+        # Restart the active tab's Lead so the new --mcp-config takes
+        # effect immediately. Other open tabs keep their old Lead until
+        # the user switches to them and re-triggers a restart (or until
+        # the user closes + reopens the tab). Mention that explicitly
+        # so the user isn't surprised when only one tab gets the tools.
+        other_tabs = [n for n in self._open_projects() if n != active_project()[0]]
+        if other_tabs:
+            self._status.showMessage(
+                f"pms MCP saved. Restarting active Lead… "
+                f"(other tabs unchanged: {', '.join(other_tabs)} — "
+                f"switch + restart manually to apply there too)",
+                12_000,
+            )
+        else:
+            self._status.showMessage(
+                "pms MCP saved. Restarting Lead to pick up the new MCP config…",
+                8_000,
+            )
+        self._restart_lead_for_active_project()
 
     def _on_finish_job_clicked(self) -> None:
         """User-driven job wrap-up. Two parts:
