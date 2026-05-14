@@ -45,6 +45,11 @@ PMS_MCP_DEFAULT_URL = PMS_MCP_URL_PROD
 _PMS_MCP_TEMPLATE = {
     "mcpServers": {
         "pms": {
+            # `type: "http"` is required for claude code to recognise this
+            # as a streaming-HTTP MCP server. Without it claude can't pick
+            # a transport, silently drops the entry, and `/mcp` reports
+            # "No MCP servers configured" — symptom we hit in dogfooding.
+            "type": "http",
             "url": PMS_MCP_DEFAULT_URL,
             "headers": {"Authorization": "Bearer <PMS_TOKEN_HERE>"},
         }
