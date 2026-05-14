@@ -149,6 +149,49 @@ class TerminalWidget(QWidget):
             return
         self._view.page().runJavaScript("termClear();")
 
+    def reset(self) -> None:
+        """Wipe scrollback + pending writes when a session detaches but the
+        widget itself lives on (Lead pane reused across project switches).
+        Without this, xterm.js's scrollback from the previous session sits
+        in Chromium memory and grows unbounded across N project switches.
+
+        Heartbeat keeps running — the JS context is still alive and will
+        host the next attached session shortly.
+        """
+        self._pending_writes.clear()
+        self._write_buf.clear()
+        if self._flush_timer.isActive():
+            self._flush_timer.stop()
+        if self._page_ready:
+            try:
+                self._view.page().runJavaScript("termReset();")
+            except Exception:
+                pass
+
+    def destroy_terminal(self) -> None:
+        """Tear down for good: stop every timer, drop the WebEngine view.
+
+        Distinct from `reset()` (which keeps the widget alive). Used when a
+        teammate pane is being permanently removed from the UI so Chromium
+        can release the renderer process and the JS heap. Qt's parent-chain
+        deleteLater would eventually do most of this, but stopping timers
+        explicitly avoids stray runJavaScript calls into a destroyed page.
+        """
+        for timer in (self._flush_timer, self._heartbeat):
+            try:
+                if timer.isActive():
+                    timer.stop()
+            except Exception:
+                pass
+        try:
+            self._view.page().deleteLater()
+        except Exception:
+            pass
+        try:
+            self._view.deleteLater()
+        except Exception:
+            pass
+
     def set_font_point_size(self, size: int) -> None:
         size = max(7, min(28, int(size)))
         # xterm.js wants pixel size; rough conversion: pt * 1.333 ≈ px

@@ -20,6 +20,13 @@ os.environ.setdefault(
             "--disable-renderer-backgrounding",
             "--disable-backgrounding-occluded-windows",
             "--disable-features=CalculateNativeWinOcclusion",
+            # Cap renderer process count so dozens of panes (multi-project
+            # tabs) don't each spawn a fresh Chromium renderer at ~150 MB
+            # baseline. With this flag Chromium reuses renderer processes
+            # across views past the limit, trading isolation for memory.
+            # 4 is enough to keep paint pipelines responsive without
+            # ballooning RAM.
+            "--renderer-process-limit=4",
         ]
     ),
 )

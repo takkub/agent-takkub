@@ -325,7 +325,11 @@ class AgentPane(QFrame):
                 pass
             self.session = None
         self._last_idle = None
-        self._terminal.clear()
+        # Full reset (scrollback + heartbeat stop) so Lead's reused pane
+        # doesn't carry the prior project's transcript and timers across
+        # restarts. attach_session will restart the heartbeat when the
+        # fresh page reports ready.
+        self._terminal.reset()
         # tear down token-meter state
         self._token_timer.stop()
         self._session_jsonl = None

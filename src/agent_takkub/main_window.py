@@ -290,6 +290,15 @@ class MainWindow(QMainWindow):
         if pane is None:
             return
         self.orch.unregister_pane(role_name)
+        # Explicitly tear down the WebEngine view + its timers before
+        # deleteLater. Without this Chromium's renderer process can linger
+        # holding the scrollback heap until next GC, and a leftover
+        # heartbeat timer can fire runJavaScript into a partially-destroyed
+        # page on the way out.
+        try:
+            pane._terminal.destroy_terminal()
+        except Exception:
+            pass
         pane.setParent(None)
         pane.deleteLater()
         if not self.teammate_panes:
