@@ -378,6 +378,17 @@ class Orchestrator(QObject):
             mcp_cfg = None
         if mcp_cfg:
             argv.extend(["--mcp-config", mcp_cfg])
+            # Force claude to use *only* our cockpit-managed MCP config.
+            # Without this flag claude *also* loads servers registered at
+            # user-level via `claude mcp add` (stored in ~/.claude.json),
+            # which is independent of --setting-sources. If a `pms` entry
+            # is registered there too — typical when the user once ran
+            # `claude mcp add pms ...` directly — the user-level config
+            # wins and Lead ends up calling the old/revoked bearer no
+            # matter how many times we rewrite runtime/shared-mcp.json.
+            # Strict mode means the cockpit's file is the single source
+            # of truth for MCP inside a pane.
+            argv.append("--strict-mcp-config")
 
         # Hard-deny the built-in `Task` subagent tool. Lead is supposed to
         # delegate via `takkub assign --role <role>` so every specialist

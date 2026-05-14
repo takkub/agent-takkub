@@ -32,6 +32,14 @@ from .config import RUNTIME_DIR
 
 SHARED_MCP_FILE = RUNTIME_DIR / "shared-mcp.json"
 
+# Common pms MCP endpoints. The default points at production; the dev
+# endpoint is offered as an alternative in the Setup dialog so the user
+# can flip between them without hand-editing JSON. "Custom" lets the
+# user paste any other URL.
+PMS_MCP_URL_PROD = "https://api.wsol.co.th/pms/mcp"
+PMS_MCP_URL_DEV = "https://api-dev.wsol.co.th/pms/mcp"
+PMS_MCP_DEFAULT_URL = PMS_MCP_URL_PROD
+
 # The pms MCP server config. The bearer token is supplied by the user
 # at setup time (initially via the cockpit's "Setup pms MCP" flow) and
 # stored in shared-mcp.json next to this module. We embed an empty
@@ -39,7 +47,7 @@ SHARED_MCP_FILE = RUNTIME_DIR / "shared-mcp.json"
 _PMS_MCP_TEMPLATE = {
     "mcpServers": {
         "pms": {
-            "url": "https://api.wsol.co.th/pms/mcp",
+            "url": PMS_MCP_DEFAULT_URL,
             "headers": {"Authorization": "Bearer <PMS_TOKEN_HERE>"},
         }
     },
@@ -80,19 +88,28 @@ def shared_mcp_config_exists() -> bool:
     return "PMS_TOKEN_HERE" not in auth and auth.startswith("Bearer ")
 
 
-def write_shared_mcp_config(token: str) -> tuple[bool, str]:
-    """Persist the pms MCP server config with the supplied bearer token.
+def write_shared_mcp_config(
+    token: str, url: str = PMS_MCP_DEFAULT_URL
+) -> tuple[bool, str]:
+    """Persist the pms MCP server config with the supplied bearer token
+    and endpoint URL.
 
     `token` is the raw token (without the `Bearer ` prefix); the prefix is
     added here so the user can paste either form and we still produce
-    valid input. Returns (ok, message).
+    valid input. `url` lets the caller flip between prod / dev / custom
+    endpoints without hand-editing JSON. Returns (ok, message).
     """
     token = (token or "").strip()
     if not token:
         return False, "token is empty"
     if token.lower().startswith("bearer "):
         token = token.split(None, 1)[1]
+    url = (url or PMS_MCP_DEFAULT_URL).strip()
+    if not url.startswith(("http://", "https://")):
+        return False, f"url must start with http(s)://, got: {url!r}"
+
     config = json.loads(json.dumps(_PMS_MCP_TEMPLATE))  # deep copy
+    config["mcpServers"]["pms"]["url"] = url
     config["mcpServers"]["pms"]["headers"]["Authorization"] = f"Bearer {token}"
     try:
         SHARED_MCP_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -103,6 +120,26 @@ def write_shared_mcp_config(token: str) -> tuple[bool, str]:
     except OSError as e:
         return False, f"could not write {SHARED_MCP_FILE}: {e}"
     return True, f"shared MCP config written: {SHARED_MCP_FILE}"
+
+
+def read_shared_mcp_config() -> tuple[str | None, str | None]:
+    """Return (url, masked_token) for the current shared config, or
+    (None, None) if it's not configured yet. The token is masked
+    (`pms_***…last4`) so callers can display it safely in a UI without
+    revealing the full bearer."""
+    if not SHARED_MCP_FILE.is_file():
+        return None, None
+    try:
+        data = json.loads(SHARED_MCP_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None, None
+    pms = (data.get("mcpServers") or {}).get("pms") or {}
+    url = pms.get("url")
+    auth = (pms.get("headers") or {}).get("Authorization") or ""
+    token = auth.split(None, 1)[1] if auth.lower().startswith("bearer ") else None
+    if token and len(token) > 8:
+        token = f"{token[:4]}***{token[-4:]}"
+    return url, token
 
 
 def clear_shared_mcp_config() -> None:

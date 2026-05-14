@@ -55,6 +55,8 @@ from .project_tab import ProjectTab
 from .roles import DEFAULT_TEAMMATES, LEAD, Role, by_name
 from .rtk_helper import install_rtk, is_rtk_installed, rtk_binary_available
 from .shared_dev_tools import (
+    PMS_MCP_DEFAULT_URL,
+    read_shared_mcp_config,
     shared_mcp_config_exists,
     write_shared_mcp_config,
 )
@@ -910,28 +912,54 @@ class MainWindow(QMainWindow):
         `--mcp-config` actually loads (Lead picks up MCP servers at
         spawn time, never mid-session). Idempotent — re-running
         rewrites the file so the user can rotate the token without
-        leaving the cockpit."""
+        leaving the cockpit.
+
+        The URL is fixed to `PMS_MCP_DEFAULT_URL` (production). Cockpit
+        spawns pass `--strict-mcp-config` alongside `--mcp-config` so
+        any pre-existing user-level `claude mcp add pms ...` entry is
+        ignored — otherwise the old/revoked bearer registered there
+        would shadow the new one we just wrote.
+        """
         from PyQt6.QtWidgets import QInputDialog, QLineEdit, QMessageBox
+
+        _, masked = read_shared_mcp_config()
+
+        title = "Setup pms MCP"
+        body = (
+            "Paste the pms MCP bearer token.\n\n"
+            "If the existing token returns 401: open https://pms.wsol.co.th\n"
+            "→ click your name → Settings → Developer API → Generate API key,\n"
+            "then paste the new pms_… string here.\n\n"
+            "Accepts either `pms_…` or `Bearer pms_…` — the prefix is\n"
+            "stripped automatically. Stored under runtime/shared-mcp.json\n"
+            "(gitignored). Spawned panes use --strict-mcp-config so this is\n"
+            "the only pms entry claude sees (any user-level `claude mcp add`\n"
+            "is overridden).\n\n"
+            "The active tab's Lead will restart automatically so the new\n"
+            "token is in effect immediately."
+        )
+        if masked:
+            body += f"\n\nCurrent token (masked): {masked}"
 
         token, ok = QInputDialog.getText(
             self,
-            "Setup pms MCP",
-            (
-                "Paste the pms MCP bearer token.\n\n"
-                "Accepts either `pms_…` or `Bearer pms_…` — the prefix is "
-                "stripped automatically. The token is stored under\n"
-                "  runtime/shared-mcp.json\n"
-                "which is gitignored, so it never reaches a public repo.\n\n"
-                "After setup, every claude spawn (Lead + teammates, every\n"
-                "project tab) loads this MCP config via --mcp-config.\n\n"
-                "The active tab's Lead will restart automatically so the\n"
-                "new MCP tools become available right away."
-            ),
+            title,
+            body,
             QLineEdit.EchoMode.Password,
+            "",
         )
+        token = (token or "").strip()
         if not ok:
             return
-        ok, msg = write_shared_mcp_config(token)
+        if not token:
+            QMessageBox.warning(
+                self,
+                title,
+                "No token entered. The existing config was left unchanged.",
+            )
+            return
+
+        ok, msg = write_shared_mcp_config(token, url=PMS_MCP_DEFAULT_URL)
         if not ok:
             QMessageBox.critical(self, "Setup pms MCP failed", msg)
             self._refresh_pms_mcp_button()
