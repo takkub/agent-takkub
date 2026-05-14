@@ -472,6 +472,8 @@ class MainWindow(QMainWindow):
         super().keyPressEvent(event)
 
     def _update_status(self) -> None:
+        from .token_meter import context_limit_for_model
+
         active = 0
         working = 0
         total_prompt = 0
@@ -484,12 +486,41 @@ class MainWindow(QMainWindow):
                     working += 1
             usage = p.current_usage()
             if usage:
-                from .token_meter import context_limit_for_model
-
                 limit = context_limit_for_model(usage["model"])
                 total_prompt += usage["prompt"]
                 biggest_limit = max(biggest_limit, limit)
                 per_role.append((p.role.name, usage["prompt"], limit))
+
+        # Refresh every tab's label so the user can see context pressure on
+        # other projects without switching tabs. Tab label format:
+        #   "<project>"        — no token data yet (or no panes)
+        #   "<project> · 52k/200k"  — peak usage of any pane in the project
+        for i in range(self.tabs.count()):
+            tab = self.tabs.widget(i)
+            if not isinstance(tab, ProjectTab):
+                continue
+            panes = self.orch._project_panes(tab.project_name)
+            peak_ratio = 0.0
+            peak_prompt = 0
+            peak_limit = 0
+            for pane in panes.values():
+                usage = pane.current_usage()
+                if not usage:
+                    continue
+                lim = context_limit_for_model(usage["model"])
+                ratio = (usage["prompt"] / lim) if lim else 0.0
+                if ratio > peak_ratio:
+                    peak_ratio = ratio
+                    peak_prompt = usage["prompt"]
+                    peak_limit = lim
+            if peak_limit:
+                self.tabs.setTabText(
+                    i,
+                    f"{tab.project_name} · "
+                    f"{format_tokens(peak_prompt)}/{format_tokens(peak_limit)}",
+                )
+            else:
+                self.tabs.setTabText(i, tab.project_name)
         port = self.cli._server.serverPort() if self.cli._server.isListening() else 0
         bits = [f"cockpit · cli {port}", f"{active} active"]
         if working:

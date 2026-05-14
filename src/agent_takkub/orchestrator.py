@@ -265,7 +265,7 @@ class Orchestrator(QObject):
             return True, f"{role_name} already running"
 
         # Fresh spawn — clear any stale idle tracking from a prior session.
-        self._idle_state.pop(role_name, None)
+        self._idle_state.pop(f"{project_ns}::{role_name}", None)
 
         # Resolve cwd:
         #   Lead          → repo root (so CLAUDE.md auto-discovery picks up the
@@ -581,7 +581,8 @@ class Orchestrator(QObject):
 
     def close(self, role_name: str, project: str | None = None) -> tuple[bool, str]:
         role_name = role_name.lower().strip()
-        pane = self._project_panes(project).get(role_name)
+        project_ns = self._resolve_project(project)
+        pane = self._project_panes(project_ns).get(role_name)
         if pane is None:
             return False, f"unknown role: {role_name}"
         was_alive = pane.session is not None
@@ -590,7 +591,7 @@ class Orchestrator(QObject):
             pane.mark_expected_exit()
             pane.session.terminate()
             pane.set_state("empty", note=None)
-        self._idle_state.pop(role_name, None)
+        self._idle_state.pop(f"{project_ns}::{role_name}", None)
         # For teammates, fully remove from the layout so the right column
         # collapses back. Lead stays as it always anchors the cockpit.
         if role_name != LEAD.name:
@@ -610,7 +611,7 @@ class Orchestrator(QObject):
             return False, f"unknown role: {from_role}"
         # Agent finished cleanly — clear any pending idle reminder state so
         # we don't re-fire after the pane closes / respawns.
-        self._idle_state.pop(from_role, None)
+        self._idle_state.pop(f"{project_ns}::{from_role}", None)
 
         # notify Lead in the same project (a teammate in unirecon mustn't
         # nudge the Lead in pms by mistake)
@@ -643,41 +644,50 @@ class Orchestrator(QObject):
         """Inject a `takkub done` reminder into any teammate pane that's been
         at the ready prompt for IDLE_REMIND_AFTER_S while still flagged
         'working'. Lead is exempt — only Lead is allowed to orchestrate, and
-        Lead never calls `done` on itself."""
+        Lead never calls `done` on itself.
+
+        Scans every open project so a teammate in a background tab still
+        gets nudged. Idle-state keys are namespaced `<project>::<role>`
+        to keep two projects' state from colliding."""
         now = time.time()
-        for name, pane in list(self.panes.items()):
-            if name == LEAD.name:
-                continue
-            if pane.state != "working":
-                self._idle_state.pop(name, None)
-                continue
-            if pane.session is None or not pane.session.is_alive:
-                self._idle_state.pop(name, None)
-                continue
+        for project_name, project_panes in list(self._panes_by_project.items()):
+            for name, pane in list(project_panes.items()):
+                key = f"{project_name}::{name}"
+                if name == LEAD.name:
+                    continue
+                if pane.state != "working":
+                    self._idle_state.pop(key, None)
+                    continue
+                if pane.session is None or not pane.session.is_alive:
+                    self._idle_state.pop(key, None)
+                    continue
 
-            entry = self._idle_state.setdefault(
-                name, {"first_idle_ts": None, "last_reminder_ts": 0.0}
-            )
+                entry = self._idle_state.setdefault(
+                    key, {"first_idle_ts": None, "last_reminder_ts": 0.0}
+                )
 
-            if not pane.session.is_at_ready_prompt():
-                # claude is processing — reset the idle streak so a long
-                # build doesn't count toward the reminder threshold.
-                entry["first_idle_ts"] = None
-                continue
+                if not pane.session.is_at_ready_prompt():
+                    # claude is processing — reset the idle streak so a long
+                    # build doesn't count toward the reminder threshold.
+                    entry["first_idle_ts"] = None
+                    continue
 
-            if entry["first_idle_ts"] is None:
-                entry["first_idle_ts"] = now
-                continue
+                if entry["first_idle_ts"] is None:
+                    entry["first_idle_ts"] = now
+                    continue
 
-            idle_for = now - entry["first_idle_ts"]
-            since_last_reminder = now - entry["last_reminder_ts"]
-            if idle_for >= IDLE_REMIND_AFTER_S and since_last_reminder >= IDLE_REMIND_COOLDOWN_S:
-                self._inject_idle_reminder(name, pane)
-                entry["last_reminder_ts"] = now
-                # restart the idle streak so we don't fire again until the
-                # agent stays idle for another full IDLE_REMIND_AFTER_S past
-                # the cooldown.
-                entry["first_idle_ts"] = now
+                idle_for = now - entry["first_idle_ts"]
+                since_last_reminder = now - entry["last_reminder_ts"]
+                if (
+                    idle_for >= IDLE_REMIND_AFTER_S
+                    and since_last_reminder >= IDLE_REMIND_COOLDOWN_S
+                ):
+                    self._inject_idle_reminder(name, pane)
+                    entry["last_reminder_ts"] = now
+                    # restart the idle streak so we don't fire again until
+                    # the agent stays idle for another full
+                    # IDLE_REMIND_AFTER_S past the cooldown.
+                    entry["first_idle_ts"] = now
 
     def _inject_idle_reminder(self, role_name: str, pane: AgentPane) -> None:
         if pane.session is None or not pane.session.is_alive:

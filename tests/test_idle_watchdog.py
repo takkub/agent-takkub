@@ -26,13 +26,33 @@ def qapp() -> QCoreApplication:
     return app
 
 
+# A stable project namespace for every test in this module. The
+# orchestrator namespaces idle-state keys as "<project>::<role>" now;
+# pinning the active project here keeps assertions deterministic
+# regardless of whatever real projects.json the dev environment has.
+TEST_PROJECT = "testproj"
+
+
 @pytest.fixture
-def orch(qapp: QCoreApplication) -> Orchestrator:
+def orch(qapp: QCoreApplication, monkeypatch: pytest.MonkeyPatch) -> Orchestrator:
+    # Force every `_resolve_project(None)` call to land on TEST_PROJECT so
+    # `orch.panes["backend"] = pane` writes to a known namespace and the
+    # idle-state key is predictable.
+    monkeypatch.setattr(
+        Orchestrator,
+        "_resolve_project",
+        staticmethod(lambda project: project or TEST_PROJECT),
+    )
     o = Orchestrator()
     # We drive _check_idle_teammates by hand; the auto-firing timer would
     # race against our assertions.
     o._idle_watchdog.stop()
     return o
+
+
+def _key(role: str) -> str:
+    """Idle-state key for the current test namespace."""
+    return f"{TEST_PROJECT}::{role}"
 
 
 def _make_pane(
@@ -59,7 +79,7 @@ class TestIdleWatchdog:
         monkeypatch.setattr(orch_mod.time, "time", lambda: 1000.0)
         orch._check_idle_teammates()
 
-        assert orch._idle_state["backend"]["first_idle_ts"] == 1000.0
+        assert orch._idle_state[_key("backend")]["first_idle_ts"] == 1000.0
         # Not enough time yet — no reminder fired.
         pane.session.write.assert_not_called()
 
@@ -77,7 +97,7 @@ class TestIdleWatchdog:
         orch._check_idle_teammates()
 
         pane.session.write.assert_called_with(orch_mod.IDLE_REMINDER_TEXT)
-        assert orch._idle_state["backend"]["last_reminder_ts"] == clock[0]
+        assert orch._idle_state[_key("backend")]["last_reminder_ts"] == clock[0]
 
     def test_processing_pane_resets_streak(
         self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
@@ -89,19 +109,19 @@ class TestIdleWatchdog:
         monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
 
         orch._check_idle_teammates()
-        assert orch._idle_state["backend"]["first_idle_ts"] == 1000.0
+        assert orch._idle_state[_key("backend")]["first_idle_ts"] == 1000.0
 
         # Pane goes back to processing (long shell command) — streak resets.
         pane.session.is_at_ready_prompt.return_value = False
         clock[0] += 10
         orch._check_idle_teammates()
-        assert orch._idle_state["backend"]["first_idle_ts"] is None
+        assert orch._idle_state[_key("backend")]["first_idle_ts"] is None
 
         # When it comes back to idle, the streak restarts from scratch.
         pane.session.is_at_ready_prompt.return_value = True
         clock[0] += 5
         orch._check_idle_teammates()
-        assert orch._idle_state["backend"]["first_idle_ts"] == clock[0]
+        assert orch._idle_state[_key("backend")]["first_idle_ts"] == clock[0]
 
     def test_lead_pane_is_never_reminded(
         self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
@@ -119,7 +139,7 @@ class TestIdleWatchdog:
         orch._check_idle_teammates()
 
         lead.session.write.assert_not_called()
-        assert "lead" not in orch._idle_state
+        assert _key("lead") not in orch._idle_state
 
     def test_non_working_state_clears_tracking(
         self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
@@ -131,11 +151,11 @@ class TestIdleWatchdog:
         monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
 
         orch._check_idle_teammates()
-        assert "backend" in orch._idle_state
+        assert _key("backend") in orch._idle_state
 
         pane.state = "done"  # agent finally called `takkub done`
         orch._check_idle_teammates()
-        assert "backend" not in orch._idle_state
+        assert _key("backend") not in orch._idle_state
         pane.session.write.assert_not_called()
 
     def test_dead_session_clears_tracking(
@@ -147,7 +167,7 @@ class TestIdleWatchdog:
         monkeypatch.setattr(orch_mod.time, "time", lambda: 1000.0)
         orch._check_idle_teammates()
 
-        assert "backend" not in orch._idle_state
+        assert _key("backend") not in orch._idle_state
         pane.session.write.assert_not_called()
 
     def test_cooldown_prevents_back_to_back_reminders(
@@ -187,26 +207,26 @@ class TestIdleResetHooks:
         orch.panes["backend"] = pane
         # Stub out the Lead pane so `done()` can write the notice.
         orch.panes["lead"] = _make_pane(state="active")
-        orch._idle_state["backend"] = {"first_idle_ts": 1.0, "last_reminder_ts": 2.0}
+        orch._idle_state[_key("backend")] = {"first_idle_ts": 1.0, "last_reminder_ts": 2.0}
 
         # Suppress Qt timer-based auto-close inside done().
         monkeypatch.setattr(orch_mod.QTimer, "singleShot", lambda *_args, **_kw: None)
 
         ok, _ = orch.done("backend", note="green")
         assert ok
-        assert "backend" not in orch._idle_state
+        assert _key("backend") not in orch._idle_state
 
     def test_close_clears_idle_state(
         self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         pane = _make_pane(state="working", at_ready_prompt=True)
         orch.panes["backend"] = pane
-        orch._idle_state["backend"] = {"first_idle_ts": 1.0, "last_reminder_ts": 2.0}
+        orch._idle_state[_key("backend")] = {"first_idle_ts": 1.0, "last_reminder_ts": 2.0}
 
         # paneClosed.emit happens in close(); the signal has no slots in tests
         # so it just no-ops. mark_expected_exit + terminate are mocks.
         orch.close("backend")
-        assert "backend" not in orch._idle_state
+        assert _key("backend") not in orch._idle_state
 
 
 def test_signal_emit_no_op_when_disabled(qapp: QCoreApplication) -> None:
