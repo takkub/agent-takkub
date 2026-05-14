@@ -30,10 +30,10 @@ from PyQt6.QtWidgets import (
     QLabel,
     QMainWindow,
     QPushButton,
-    QSplitter,
     QStatusBar,
     QStyle,
     QSystemTrayIcon,
+    QTabWidget,
     QWidget,
 )
 
@@ -49,12 +49,46 @@ from .config import (
 )
 from .logs_panel import LogsPanel
 from .orchestrator import Orchestrator
+from .project_tab import ProjectTab
 from .roles import DEFAULT_TEAMMATES, LEAD, Role, by_name
 from .rtk_helper import install_rtk, is_rtk_installed, rtk_binary_available
 from .token_meter import format_tokens, usage_color
 
 
 class MainWindow(QMainWindow):
+    # ──────────────────────────────────────────────────────────────
+    # backwards-compat accessors: until every callsite is rewritten to
+    # explicitly target a project tab, these resolve to the *current*
+    # tab's widgets so legacy methods keep working in single-tab mode.
+    # ──────────────────────────────────────────────────────────────
+    def _current_tab(self) -> ProjectTab:
+        """Return the currently focused ProjectTab. Caller must not hold
+        the reference across tab switches."""
+        return self.tabs.currentWidget()
+
+    @property
+    def lead_pane(self) -> AgentPane:
+        return self._current_tab().lead_pane
+
+    @property
+    def teammate_panes(self) -> dict[str, AgentPane]:
+        return self._current_tab().teammate_panes
+
+    @property
+    def teammate_split(self):
+        return self._current_tab().teammate_split
+
+    @property
+    def main_split(self):
+        return self._current_tab().main_split
+
+    @property
+    def _custom_role_colors(self) -> dict[str, str]:
+        return self._current_tab().custom_role_colors
+
+    def _rebalance_teammates(self) -> None:
+        self._current_tab().rebalance_teammates()
+
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("agent-takkub — dev team cockpit")
@@ -94,25 +128,23 @@ class MainWindow(QMainWindow):
         outer.setSpacing(8)
         self.setCentralWidget(root)
 
-        # horizontal splitter: Lead | (teammate stack)
-        self.main_split = QSplitter(Qt.Orientation.Horizontal, self)
-        outer.addWidget(self.main_split, 1)
+        # Central QTabWidget hosts one ProjectTab per open project. In
+        # phase 2 of the multi-project rollout the tab strip is single-tab
+        # only (the upcoming + / x corner widgets land in phase 3). Helper
+        # accessors below (`self.lead_pane`, `self.teammate_split`, ...)
+        # transparently resolve to the *currently active* tab so older
+        # MainWindow methods keep operating on the same widget set.
+        self.tabs = QTabWidget(self)
+        self.tabs.setDocumentMode(True)
+        self.tabs.setMovable(False)
+        outer.addWidget(self.tabs, 1)
 
-        # Lead pane (always present)
-        self.lead_pane = AgentPane(LEAD)
-        self.orch.register_pane(self.lead_pane)
-        self.main_split.addWidget(self.lead_pane)
-
-        # teammate stack: vertical splitter that hosts teammate panes on demand
-        self.teammate_split = QSplitter(Qt.Orientation.Vertical, self)
-        self.teammate_split.setChildrenCollapsible(False)
-        self.teammate_panes: dict[str, AgentPane] = {}
-        # color overrides chosen via "+ pane → custom..." flow
-        self._custom_role_colors: dict[str, str] = {}
-        # Start hidden — Lead fills 100% until first teammate is added
-        self.teammate_split.hide()
-        self.main_split.addWidget(self.teammate_split)
-        self.main_split.setSizes([1500, 0])
+        # Build the initial tab for the active project (single-tab mode).
+        initial_project = active_project()[0] or "default"
+        initial_lead = AgentPane(LEAD)
+        self.orch.register_pane(initial_lead, project=initial_project)
+        initial_tab = ProjectTab(initial_project, initial_lead, self)
+        self.tabs.addTab(initial_tab, initial_project)
 
         # ── status bar ──────────────────────────────────────────
         self._status = QStatusBar(self)
