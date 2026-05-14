@@ -161,6 +161,21 @@ class MainWindow(QMainWindow):
         self._btn_logs.setCheckable(True)
         self._btn_logs.clicked.connect(self._on_toggle_logs)
 
+        self._btn_finish = QPushButton("✅ Finish Job", self)
+        self._btn_finish.setToolTip(
+            "Mark this whole session as done. Asks Lead to write a final\n"
+            "summary (what was accomplished, what's blocked, next steps),\n"
+            "then closes every teammate pane. Lead stays running so you\n"
+            "can read the summary or start a new task."
+        )
+        self._btn_finish.setStyleSheet(
+            "QPushButton { color: #14532d; background: #86efac; "
+            "border: 1px solid #16a34a; border-radius: 4px; "
+            "padding: 2px 8px; font-weight: 500; }"
+            "QPushButton:hover { background: #bbf7d0; }"
+        )
+        self._btn_finish.clicked.connect(self._on_finish_job_clicked)
+
         self._btn_help = QPushButton("❓ Help", self)
         self._btn_help.setFixedWidth(70)
         self._btn_help.setToolTip("Show takkub command cheatsheet (F1)")
@@ -201,6 +216,7 @@ class MainWindow(QMainWindow):
         self._status.addPermanentWidget(self._btn_add_pane)
         self._status.addPermanentWidget(self._btn_assign)
         self._status.addPermanentWidget(self._btn_logs)
+        self._status.addPermanentWidget(self._btn_finish)
         self._status.addPermanentWidget(self._btn_help)
         # Sync rtk button visibility after every permanent widget has been
         # added, so any layout invalidation triggered by show()/hide() lands
@@ -460,10 +476,42 @@ class MainWindow(QMainWindow):
     def _on_project_changed(self, name: str) -> None:
         if not name:
             return
-        if set_active_project(name):
-            self._status.showMessage(f"active project → {name}", 4_000)
-            self.lead_pane._title.setText(f"Lead · {name}")
-            self._refresh_rtk_button()
+        if not set_active_project(name):
+            return
+        self._status.showMessage(f"active project → {name} (restarting Lead...)", 4_000)
+        self.lead_pane._title.setText(f"Lead · {name}")
+        self._refresh_rtk_button()
+        self._restart_lead_for_active_project()
+
+    def _restart_lead_for_active_project(self) -> None:
+        """Close every pane and respawn Lead at the new project's lead_cwd().
+
+        Used when the user switches the active project from the dropdown or
+        adds a new one — the cockpit's Lead pane is anchored at the project's
+        lead_cwd at spawn time, so it has to be killed and re-spawned for the
+        new working directory to take effect. Teammate panes go too since
+        they were scoped to the old project's paths.
+        """
+        # 1. Close teammates first (they depend on Lead's project for cwd).
+        self.orch.close_all_teammates()
+        # 2. Close Lead.
+        self.orch.close(LEAD.name)
+        # 3. Respawn Lead after a short delay so the PTY can fully release.
+        #    Spawning immediately races the still-terminating session and the
+        #    orchestrator would short-circuit with "already running".
+        QTimer.singleShot(1_500, self._respawn_lead_post_restart)
+
+    def _respawn_lead_post_restart(self) -> None:
+        ok, msg = self.orch.spawn(LEAD.name)
+        if not ok:
+            self._status.showMessage(f"⚠ Lead respawn failed: {msg}", 15_000)
+            return
+        active = active_project()[0]
+        if active:
+            self.lead_pane._title.setText(f"Lead · {active}")
+        # Auto-bridge to the browser again on the fresh session.
+        if os.environ.get("TAKKUB_AUTO_REMOTE_CONTROL", "1") != "0":
+            self.orch.inject_slash_command_when_ready(LEAD.name, "/remote-control")
 
     def _refresh_rtk_button(self) -> None:
         """Show the install button only when the active project's lead_cwd()
@@ -506,6 +554,69 @@ class MainWindow(QMainWindow):
                 )
         except Exception:
             pass
+
+    def _on_finish_job_clicked(self) -> None:
+        """User-driven job wrap-up. Asks Lead for a closing summary then
+        closes every teammate. Lead stays alive so the user can read the
+        summary and queue the next task without restarting the cockpit."""
+        from PyQt6.QtWidgets import QMessageBox
+
+        lead = self.orch.panes.get(LEAD.name)
+        if lead is None or lead.session is None or not lead.session.is_alive:
+            QMessageBox.warning(
+                self,
+                "Finish Job",
+                "Lead pane isn't running. Spawn it first, then try again.",
+            )
+            return
+
+        teammates = [n for n in self.orch.panes if n != LEAD.name and self.orch.panes[n].session]
+        teammate_line = ", ".join(teammates) if teammates else "(none)"
+
+        confirm = QMessageBox.question(
+            self,
+            "Finish Job",
+            (
+                "Wrap up the current session?\n\n"
+                "Lead will be asked to write a closing summary covering:\n"
+                "  • what was accomplished\n"
+                "  • what's blocked or unfinished\n"
+                "  • recommended next steps\n\n"
+                f"After the summary, these teammate panes will be closed:\n"
+                f"  {teammate_line}\n\n"
+                "Lead stays running so you can read the summary."
+            ),
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Ok,
+        )
+        if confirm != QMessageBox.StandardButton.Ok:
+            return
+
+        # Compose the wrap-up prompt. Kept Thai-leaning because the rest of
+        # the cockpit's Lead instructions are Thai, but English fallback
+        # phrases ensure non-Thai users still parse it.
+        summary_prompt = (
+            "[FINISH JOB] User marked the session as done. "
+            "เขียน final summary แบบ structured ก่อนปิดงาน:\n\n"
+            "## ✅ Accomplished\n"
+            "- (สิ่งที่ทำเสร็จใน session นี้, 1 บรรทัดต่อรายการ)\n\n"
+            "## ⚠️ Blockers / Unfinished\n"
+            "- (สิ่งที่ติด หรือยังไม่เสร็จ)\n\n"
+            "## ➡️ Next Steps\n"
+            "- (เริ่มจากตรงไหนต่อ session ถัดไป)\n\n"
+            "หลังจากเขียน summary เสร็จ run `takkub close-all` "
+            "เพื่อปิด teammate panes ที่เหลือ"
+        )
+        # Inject as a regular task so Lead acknowledges the working state
+        # while it writes the summary. close-all happens via Lead itself
+        # (it has the gate permission); we also defensively close from the
+        # cockpit side after a delay in case Lead drifted.
+        self.orch._send_when_ready(LEAD.name, summary_prompt)
+        QTimer.singleShot(60_000, lambda: self.orch.close_all_teammates())
+        self._status.showMessage(
+            "Finish Job: Lead is writing the summary. Teammates will close shortly.",
+            8_000,
+        )
 
     def _on_install_rtk_clicked(self) -> None:
         from PyQt6.QtWidgets import QMessageBox
@@ -622,9 +733,14 @@ class MainWindow(QMainWindow):
         
         PROJECTS_JSON.parent.mkdir(parents=True, exist_ok=True)
         PROJECTS_JSON.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-        
+
         self._refresh_project_list()
-        self._status.showMessage(f"Added project: {name}", 4_000)
+        self._status.showMessage(f"Added project: {name} (restarting Lead...)", 4_000)
+        self.lead_pane._title.setText(f"Lead · {name}")
+        self._refresh_rtk_button()
+        # Switch Lead to the new project's cwd immediately so the user can
+        # start work without restarting the cockpit by hand.
+        self._restart_lead_for_active_project()
 
     # ──────────────────────────────────────────────────────────────
     # + pane button: spawn an additional teammate from a role name
