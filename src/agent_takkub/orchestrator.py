@@ -390,18 +390,35 @@ class Orchestrator(QObject):
             # of truth for MCP inside a pane.
             argv.append("--strict-mcp-config")
 
-        # Hard-deny the built-in `Task` subagent tool. Lead is supposed to
-        # delegate via `takkub assign --role <role>` so every specialist
-        # lands in its own cockpit pane (with audit trail, isolated context,
-        # role-specific CLAUDE.md). Without this gate, Lead drifts at high
-        # context and reaches for the Task tool instead — the subagent runs
-        # inside Lead's window, flooding its tokens and skipping the
-        # specialist override. Teammates also shouldn't spawn subagents
-        # (they're already a specialist), so we apply this to every pane.
-        # Set TAKKUB_ALLOW_TASK=1 to re-enable (e.g. for workflows that
-        # genuinely need superpowers' parallel-agents skill).
+        # Hard-deny built-in tools that don't fit the cockpit's
+        # delegation model:
+        #
+        #   Task             — every pane. Lead delegates via `takkub
+        #                      assign`, never via the built-in subagent
+        #                      dispatcher. Teammates are already
+        #                      specialists and don't need to fan out
+        #                      further. Override with TAKKUB_ALLOW_TASK=1
+        #                      for workflows that genuinely need
+        #                      superpowers' parallel-agents skill.
+        #
+        #   AskUserQuestion  — *teammate* panes only. The tool opens a
+        #                      blocking interactive dropdown in the
+        #                      pane, which the cockpit owner has to
+        #                      click through manually. The whole point
+        #                      of teammate panes is that *Lead* talks
+        #                      to the user; teammates should bounce
+        #                      questions to Lead via
+        #                      `takkub send --to lead "..."`. Lead's
+        #                      own pane keeps AskUserQuestion enabled
+        #                      because that's the legitimate channel to
+        #                      the cockpit owner.
+        denied: list[str] = []
         if os.environ.get("TAKKUB_ALLOW_TASK", "0") != "1":
-            argv.extend(["--disallowed-tools", "Task"])
+            denied.append("Task")
+        if role_name != LEAD.name:
+            denied.append("AskUserQuestion")
+        if denied:
+            argv.extend(["--disallowed-tools", " ".join(denied)])
 
         # Session resume: if this same role exited recently from the same
         # cwd, ask claude to continue the previous conversation instead of
