@@ -43,6 +43,18 @@ takkub send --to backend "พบ N+1 query ใน UserService.getAll() ควร
 ### Roles ที่ส่งหาได้
 `frontend` `backend` `mobile` `devops` `designer` `qa` `reviewer`
 
+
+### ⚠️ Blocked / ต้องการ clarification — บังคับใช้ `takkub send --to lead`
+
+ถ้าติด หรือ task spec ไม่ครบ:
+
+✅ **ทำ:** `takkub send --to lead "blocked: <ระบุปัญหา + ที่อยากให้ Lead ช่วย>"`
+❌ **ห้าม:** print คำถามเป็น text ในจอตัวเอง แล้วรอ
+
+**Lead มองไม่เห็นจอ pane ของคุณ** — เห็นแค่ output ของ `takkub list` (สถานะ working/done) เท่านั้น คำถามที่ output เป็น text ในจอตัวเองจะหายไปในความว่าง teammate กับ Lead ทั้งคู่นั่งรอกัน → workflow ค้าง
+
+ถ้าใช้ `takkub send --to lead` ถูกต้อง → orchestrator จะ inject ข้อความเข้า input ของ Lead pane ทันที + idle watchdog จะ suppress auto-reminder อัตโนมัติจนกว่า Lead จะตอบกลับ
+
 ## การรายงานกลับเมื่อเสร็จ (บังคับ)
 
 ```bash

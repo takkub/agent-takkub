@@ -191,6 +191,14 @@ class Orchestrator(QObject):
         #                     (None = currently processing or not "working")
         #   last_reminder_ts — last time we injected a reminder (0 = never)
         self._idle_state: dict[str, dict[str, float | None]] = {}
+        # Per-pane "waiting for Lead's reply" timestamp. Keyed
+        # `<project>::<role>`. Populated when a teammate sends a message
+        # to Lead via `takkub send --to lead "..."` (see `send()`),
+        # cleared when Lead sends back to that teammate or when the
+        # pane is closed/respawned. The idle watchdog skips panes
+        # whose key is in this dict so the auto-reminder doesn't fire
+        # while a teammate is legitimately stuck waiting for spec.
+        self._blocked_on_lead: dict[str, float] = {}
         self._idle_watchdog = QTimer(self)
         self._idle_watchdog.setInterval(IDLE_WATCHDOG_INTERVAL_MS)
         self._idle_watchdog.timeout.connect(self._check_idle_teammates)
@@ -264,8 +272,12 @@ class Orchestrator(QObject):
         if pane.session is not None and pane.session.is_alive:
             return True, f"{role_name} already running"
 
-        # Fresh spawn — clear any stale idle tracking from a prior session.
-        self._idle_state.pop(f"{project_ns}::{role_name}", None)
+        # Fresh spawn — clear any stale watchdog tracking from a prior
+        # session so the new claude conversation starts with a clean slate
+        # (no leftover "blocked on lead" flag, no leftover idle streak).
+        key = f"{project_ns}::{role_name}"
+        self._idle_state.pop(key, None)
+        self._blocked_on_lead.pop(key, None)
 
         # Resolve cwd:
         #   Lead          → repo root (so CLAUDE.md auto-discovery picks up the
@@ -601,7 +613,8 @@ class Orchestrator(QObject):
         project: str | None = None,
     ) -> tuple[bool, str]:
         to_role = to_role.lower().strip()
-        project_panes = self._project_panes(project)
+        project_ns = self._resolve_project(project)
+        project_panes = self._project_panes(project_ns)
         pane = project_panes.get(to_role)
         if pane is None:
             return False, f"unknown role: {to_role}"
@@ -620,6 +633,17 @@ class Orchestrator(QObject):
                 lead.session.write(f"[CC] {body}")
                 QTimer.singleShot(150, lambda: lead.session and lead.session.write(b"\r"))
 
+        # Track teammate ↔ Lead conversation so the idle watchdog doesn't
+        # fire its `[auto-reminder]` while a teammate is legitimately
+        # waiting for Lead to reply. Two cases:
+        #   - teammate → Lead: mark sender as blocked-on-lead
+        #   - Lead → teammate: clear teammate's blocked-on-lead flag
+        from_norm = (from_role or "").lower().strip()
+        if from_norm and from_norm != LEAD.name and to_role == LEAD.name:
+            self._blocked_on_lead[f"{project_ns}::{from_norm}"] = time.time()
+        elif from_norm == LEAD.name and to_role != LEAD.name:
+            self._blocked_on_lead.pop(f"{project_ns}::{to_role}", None)
+
         _log_event("send", to=to_role, from_=from_role, msg_preview=msg[:120])
         return True, f"sent to {to_role}"
 
@@ -635,7 +659,9 @@ class Orchestrator(QObject):
             pane.mark_expected_exit()
             pane.session.terminate()
             pane.set_state("empty", note=None)
-        self._idle_state.pop(f"{project_ns}::{role_name}", None)
+        key = f"{project_ns}::{role_name}"
+        self._idle_state.pop(key, None)
+        self._blocked_on_lead.pop(key, None)
         # For teammates, fully remove from the layout so the right column
         # collapses back. Lead stays as it always anchors the cockpit.
         if role_name != LEAD.name:
@@ -653,9 +679,12 @@ class Orchestrator(QObject):
         pane = project_panes.get(from_role)
         if pane is None:
             return False, f"unknown role: {from_role}"
-        # Agent finished cleanly — clear any pending idle reminder state so
-        # we don't re-fire after the pane closes / respawns.
-        self._idle_state.pop(f"{project_ns}::{from_role}", None)
+        # Agent finished cleanly — clear any pending watchdog state so
+        # the next session starts fresh (no leftover idle streak, no
+        # leftover "blocked on lead" flag).
+        key = f"{project_ns}::{from_role}"
+        self._idle_state.pop(key, None)
+        self._blocked_on_lead.pop(key, None)
 
         # notify Lead in the same project (a teammate in unirecon mustn't
         # nudge the Lead in pms by mistake)
@@ -704,6 +733,21 @@ class Orchestrator(QObject):
                     continue
                 if pane.session is None or not pane.session.is_alive:
                     self._idle_state.pop(key, None)
+                    continue
+
+                # Suppress the reminder while this teammate is waiting on a
+                # reply from Lead — they're not "stuck on `takkub done`",
+                # they're genuinely blocked on clarification. The flag is
+                # set in `send()` when the teammate runs
+                # `takkub send --to lead "..."` and cleared when Lead
+                # sends back. We also expire the suppression after 30
+                # minutes so a Lead that crashed mid-reply doesn't leave
+                # the teammate's watchdog disabled forever.
+                blocked_at = self._blocked_on_lead.get(key)
+                if blocked_at is not None and (now - blocked_at) < 30 * 60:
+                    entry = self._idle_state.get(key)
+                    if entry:
+                        entry["first_idle_ts"] = None
                     continue
 
                 entry = self._idle_state.setdefault(
