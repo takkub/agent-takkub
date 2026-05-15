@@ -76,9 +76,13 @@ def find_latest_session(cwd: str | Path, since_ts: float = 0.0) -> Path | None:
     """Return the most-recently-modified JSONL file matching `cwd`'s encoded
     project dir, optionally requiring mtime >= since_ts.
 
-    Returns None if no file qualifies. Callers should cache the returned path
-    for the lifetime of a pane spawn so a peer pane sharing the same cwd
-    doesn't steal the meter.
+    Returns None if no file qualifies. Cockpit callers re-poll on every
+    refresh rather than caching the first hit — `/clear` inside claude
+    rolls the conversation over to a new session file, and a sticky lock
+    on the pre-clear file would pin the token meter forever. Cockpit's
+    one-pane-per-cwd discipline (Lead at project root, teammates at
+    distinct sub-paths, no two Leads share a project) makes peer-pane
+    contamination effectively impossible.
     """
     enc = encode_path_for_claude(cwd)
     proj_dir = _claude_projects_dir() / enc

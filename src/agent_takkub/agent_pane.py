@@ -357,14 +357,30 @@ class AgentPane(QFrame):
         and update the header badge. Cheap by design — runs every 5s."""
         if self.session is None or not self._session_cwd:
             return
-        # Lock onto the JSONL file the first time we see one created after
-        # spawn_ts. Sticky after that so peer panes sharing the cwd can't
-        # steal the meter.
-        if self._session_jsonl is None:
-            cand = find_latest_session(self._session_cwd, since_ts=self._spawn_ts - 5)
-            if cand is None:
-                return
+        # Always re-poll for the newest JSONL under this pane's cwd, not
+        # the one we first saw. Claude's `/clear` rolls the conversation
+        # over to a brand-new session file, and a sticky lock on the
+        # pre-clear file leaves the meter pinned at whatever the
+        # truncated context was forever (the user saw "128%" stay
+        # frozen after `/clear`). Peer-pane contamination isn't a risk
+        # in practice: Lead lives at the project root, teammates spawn
+        # at distinct sub-paths (web/, api/, ...), and the one-tab-per-
+        # project rule blocks two Leads from sharing a cwd. The
+        # `since_ts=spawn_ts-5` guard still keeps the meter from
+        # picking up unrelated old files that predate this pane.
+        cand = find_latest_session(self._session_cwd, since_ts=self._spawn_ts - 5)
+        if cand is None:
+            return
+        if cand != self._session_jsonl:
+            # Roll-over (typically `/clear`): point at the fresh file,
+            # clear cached usage, and hide the badge until the new
+            # session emits its first assistant turn. Otherwise the
+            # header would keep the old "128%" label until the next
+            # usage block lands.
             self._session_jsonl = cand
+            self._last_usage = None
+            self._token_label.setText("")
+            self._token_label.hide()
         try:
             usage = read_last_usage(self._session_jsonl)
         except Exception:
