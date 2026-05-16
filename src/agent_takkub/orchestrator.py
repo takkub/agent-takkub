@@ -75,6 +75,31 @@ IDLE_REMINDER_TEXT = (
 AUTO_RESPAWN_DELAY_MS = 2_500
 AUTO_RESPAWN_MAX = 2
 
+# Bracketed-paste threshold for messages injected into a pane via the
+# orchestrator (assign / send / slash-command). Below this length we
+# write raw text — claude code's interactive input handles short typing
+# fine. At or above, we wrap with `ESC [200~ ... ESC [201~` so claude
+# treats the whole block as a single atomic paste instead of typing
+# char-by-char. Without this, long task specs occasionally lose the
+# head of the message when the pane is mid-render at write time (the
+# bug behind teammates complaining about "ข้อความถูกตัดส่วนต้น").
+BRACKETED_PASTE_THRESHOLD = 200
+_PASTE_START = "\x1b[200~"
+_PASTE_END = "\x1b[201~"
+
+
+def _paste_payload(text: str) -> str:
+    """Return `text` wrapped in bracketed-paste escapes when long enough.
+
+    Used by every cockpit-driven write into a pane's PTY (Lead's task
+    specs, peer-to-peer takkub send, slash-command injection). Short
+    inputs are returned unchanged so single-character prompts still
+    feel like typing rather than a paste burst.
+    """
+    if len(text) < BRACKETED_PASTE_THRESHOLD:
+        return text
+    return _PASTE_START + text + _PASTE_END
+
 # Plugins we want spawned agents to inherit *explicitly* (skipping user-level
 # settings to avoid claude-obsidian's broken SessionStart hook). Each entry
 # is a *marketplace name* under ~/.claude/plugins/cache/. We pick the highest
@@ -652,7 +677,7 @@ class Orchestrator(QObject):
             sent[0] = True
             if pane.session is None or not pane.session.is_alive:
                 return
-            pane.session.write(command)
+            pane.session.write(_paste_payload(command))
             QTimer.singleShot(200, lambda: pane.session and pane.session.write("\r"))
             _log_event("auto_slash_command", role=role_name, command=command)
 
@@ -698,7 +723,7 @@ class Orchestrator(QObject):
             if pane.session is None or not pane.session.is_alive:
                 return
             pane.set_state("working", note=task[:60])
-            pane.session.write(task)
+            pane.session.write(_paste_payload(task))
             QTimer.singleShot(200, lambda: pane.session and pane.session.write("\r"))
 
         def _check() -> None:
@@ -736,14 +761,14 @@ class Orchestrator(QObject):
 
         header = f"[{from_role} → {to_role}] " if from_role and from_role != to_role else ""
         body = header + msg
-        pane.session.write(body)
+        pane.session.write(_paste_payload(body))
         QTimer.singleShot(150, lambda: pane.session and pane.session.write(b"\r"))
 
         # CC Lead unless source was Lead and target was a teammate, or vice versa
         if from_role and from_role not in (None, LEAD.name) and to_role != LEAD.name:
             lead = project_panes.get(LEAD.name)
             if lead and lead.session and lead.session.is_alive:
-                lead.session.write(f"[CC] {body}")
+                lead.session.write(_paste_payload(f"[CC] {body}"))
                 QTimer.singleShot(150, lambda: lead.session and lead.session.write(b"\r"))
 
         # Track teammate ↔ Lead conversation so the idle watchdog doesn't
