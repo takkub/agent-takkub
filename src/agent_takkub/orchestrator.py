@@ -346,6 +346,22 @@ class Orchestrator(QObject):
             if rtk_dir not in env["PATH"].split(os.pathsep):
                 env["PATH"] = rtk_dir + os.pathsep + env["PATH"]
 
+        # QA pane uses `@runablehq/mini-browser` for e2e/smoke flows.
+        # The `mb-start-chrome` helper looks for $CHROME_BIN before
+        # falling back to "Chrome not found". Probe the typical Windows
+        # install paths once at spawn time so the QA agent doesn't have
+        # to remember to export the variable in every shell. Skip if
+        # the user already provides CHROME_BIN at the cockpit level.
+        if role_name == "qa" and "CHROME_BIN" not in env:
+            for cand in (
+                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+                str(pathlib.Path.home() / "AppData/Local/Google/Chrome/Application/chrome.exe"),
+            ):
+                if pathlib.Path(cand).is_file():
+                    env["CHROME_BIN"] = cand
+                    break
+
         # --setting-sources controls which settings.json layers claude loads.
         # We default to `project,local` (skip ~/.claude/settings.json) because
         # the claude-obsidian plugin currently ships a SessionStart hook that
