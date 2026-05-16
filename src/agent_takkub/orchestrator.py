@@ -67,6 +67,14 @@ IDLE_REMINDER_TEXT = (
     "รายงาน Lead เลย ถ้ายังทำต่อ ignore ข้อความนี้"
 )
 
+# Auto-respawn on unexpected pane crash. The orchestrator notices when a
+# pane exits without a corresponding takkub close/done (claude crashed,
+# OOM, parent killed it) and gives it a clean respawn with --continue so
+# the conversation survives. AUTO_RESPAWN_MAX caps consecutive attempts
+# per pane so a deterministically-crashing claude doesn't spawn-loop.
+AUTO_RESPAWN_DELAY_MS = 2_500
+AUTO_RESPAWN_MAX = 2
+
 # Plugins we want spawned agents to inherit *explicitly* (skipping user-level
 # settings to avoid claude-obsidian's broken SessionStart hook). Each entry
 # is a *marketplace name* under ~/.claude/plugins/cache/. We pick the highest
@@ -199,6 +207,11 @@ class Orchestrator(QObject):
         # whose key is in this dict so the auto-reminder doesn't fire
         # while a teammate is legitimately stuck waiting for spec.
         self._blocked_on_lead: dict[str, float] = {}
+        # Per-pane consecutive auto-respawn counter. Keyed `<project>::<role>`.
+        # Bumped on each unexpected exit + auto-respawn; reset on a clean
+        # `close()` / `done()` / manual respawn. Capped at AUTO_RESPAWN_MAX
+        # so the orchestrator gives up if claude refuses to come back.
+        self._auto_respawn_attempts: dict[str, int] = {}
         self._idle_watchdog = QTimer(self)
         self._idle_watchdog.setInterval(IDLE_WATCHDOG_INTERVAL_MS)
         self._idle_watchdog.timeout.connect(self._check_idle_teammates)
@@ -275,6 +288,9 @@ class Orchestrator(QObject):
         # Fresh spawn — clear any stale watchdog tracking from a prior
         # session so the new claude conversation starts with a clean slate
         # (no leftover "blocked on lead" flag, no leftover idle streak).
+        # Auto-respawn attempts are *not* cleared here because spawn() is
+        # also the path the auto-respawn watcher takes; clearing would
+        # let a deterministically-crashing claude loop forever.
         key = f"{project_ns}::{role_name}"
         self._idle_state.pop(key, None)
         self._blocked_on_lead.pop(key, None)
@@ -497,9 +513,13 @@ class Orchestrator(QObject):
             return False, f"failed to spawn claude: {e}"
 
         pane.attach_session(session, cwd=spawn_cwd)
-        # record exits for resume detection
+        # Record exits so a fast respawn can pass --continue, and so the
+        # auto-respawn watcher knows which project namespace owned the
+        # pane that just died.
         session.processExited.connect(
-            lambda _code, r=role_name, c=spawn_cwd: self._on_session_exit(r, c)
+            lambda _code, r=role_name, c=spawn_cwd, p=project_ns: self._on_session_exit(
+                r, c, p
+            )
         )
         # forget the prior exit record now that we've spawned successfully
         if role_name in self._recent_exits:
@@ -516,9 +536,57 @@ class Orchestrator(QObject):
         suffix = " (resumed)" if resumed else ""
         return True, f"{role_name} spawned in {spawn_cwd}{suffix}"
 
-    def _on_session_exit(self, role_name: str, cwd: str) -> None:
-        """Track recent exits so a quick respawn can pass --continue."""
+    def _on_session_exit(self, role_name: str, cwd: str, project: str) -> None:
+        """Track recent exits so a quick respawn can pass --continue, then
+        decide whether to auto-respawn.
+
+        Auto-respawn fires only when the pane is in the `exited` state —
+        that's the marker AgentPane sets when claude vanished without a
+        matching `mark_expected_exit()` from `orchestrator.close()` /
+        `done()`. Capped by AUTO_RESPAWN_MAX so a deterministically-
+        crashing claude can't spawn-loop.
+        """
         self._recent_exits[role_name] = {"cwd": cwd, "ts": time.time()}
+
+        pane = self._panes_by_project.get(project, {}).get(role_name)
+        if pane is None or pane.state != "exited":
+            return
+
+        key = f"{project}::{role_name}"
+        attempts = self._auto_respawn_attempts.get(key, 0)
+        if attempts >= AUTO_RESPAWN_MAX:
+            _log_event(
+                "auto_respawn_capped",
+                role=role_name,
+                project=project,
+                attempts=attempts,
+            )
+            return
+        self._auto_respawn_attempts[key] = attempts + 1
+        _log_event(
+            "auto_respawn_scheduled",
+            role=role_name,
+            project=project,
+            attempt=attempts + 1,
+        )
+        QTimer.singleShot(
+            AUTO_RESPAWN_DELAY_MS,
+            lambda r=role_name, c=cwd, p=project: self._auto_respawn(r, c, p),
+        )
+
+    def _auto_respawn(self, role_name: str, cwd: str, project: str) -> None:
+        """Schedule a fresh spawn for a pane that crashed unexpectedly.
+        `--continue` is added automatically by `spawn()` because the
+        previous exit is still inside RESUME_WINDOW_SEC."""
+        # If the pane was already manually respawned during the delay,
+        # bail. The new session would have already cleared `state`.
+        pane = self._panes_by_project.get(project, {}).get(role_name)
+        if pane is None or (pane.session is not None and pane.session.is_alive):
+            return
+        ok, msg = self.spawn(role_name, cwd=cwd, project=project)
+        _log_event(
+            "auto_respawn_done", role=role_name, project=project, ok=ok, msg=msg[:160]
+        )
 
     # ──────────────────────────────────────────────────────────────
     def _auto_trust(self, role_name: str) -> None:
@@ -707,6 +775,7 @@ class Orchestrator(QObject):
         key = f"{project_ns}::{role_name}"
         self._idle_state.pop(key, None)
         self._blocked_on_lead.pop(key, None)
+        self._auto_respawn_attempts.pop(key, None)
         # For teammates, fully remove from the layout so the right column
         # collapses back. Lead stays as it always anchors the cockpit.
         if role_name != LEAD.name:
@@ -726,10 +795,11 @@ class Orchestrator(QObject):
             return False, f"unknown role: {from_role}"
         # Agent finished cleanly — clear any pending watchdog state so
         # the next session starts fresh (no leftover idle streak, no
-        # leftover "blocked on lead" flag).
+        # leftover "blocked on lead" flag, no carried auto-respawn count).
         key = f"{project_ns}::{from_role}"
         self._idle_state.pop(key, None)
         self._blocked_on_lead.pop(key, None)
+        self._auto_respawn_attempts.pop(key, None)
 
         # notify Lead in the same project (a teammate in unirecon mustn't
         # nudge the Lead in pms by mistake)
@@ -744,8 +814,37 @@ class Orchestrator(QObject):
         pane.set_state("done", note=note[:80] if note else "done")
         QTimer.singleShot(2_500, lambda: self.close(from_role, project=project_ns))
         _log_event("done", role=from_role, note=note[:200])
+        self._save_decision_note(project_ns, from_role, note)
         self.agentDone.emit(from_role, note)
         return True, f"{from_role} reported done"
+
+    @staticmethod
+    def _save_decision_note(project: str, role: str, note: str) -> None:
+        """Persist a teammate's `takkub done` note as a small markdown
+        file under `runtime/sessions/<YYYY-MM-DD>/<project>/<role>-<HHMMSS>.md`.
+
+        events.log already captures the same data but is one long
+        machine-readable stream. The per-role markdown gives the user a
+        human-friendly paper trail that survives cockpit restarts and
+        is trivial to grep / link to from a wiki later. Best-effort:
+        any IO error is swallowed so a disk hiccup never breaks the
+        done flow.
+        """
+        if not (note or "").strip():
+            return
+        now = datetime.now()
+        try:
+            day = RUNTIME_DIR / "sessions" / now.strftime("%Y-%m-%d") / project
+            day.mkdir(parents=True, exist_ok=True)
+            path = day / f"{role}-{now.strftime('%H%M%S')}.md"
+            body = (
+                f"# {role} done · {now.isoformat(timespec='seconds')}\n\n"
+                f"**Project:** {project}\n\n"
+                f"## Note\n\n{note.strip()}\n"
+            )
+            path.write_text(body, encoding="utf-8")
+        except OSError:
+            pass
 
     def list_status(self, project: str | None = None) -> dict[str, str]:
         """Snapshot of `role → state` for one project's panes.

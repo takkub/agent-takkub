@@ -301,6 +301,13 @@ class MainWindow(QMainWindow):
         )
         self._token_total.hide()
 
+        # Per-pane "context >= 80%" warning state. Keyed
+        # `<project>::<role>`. We toast (status bar + tray) the first
+        # time a pane crosses 80% and then stay silent until it dips
+        # below 70% — the gap stops a pane that's hovering around
+        # 80% from spamming notifications.
+        self._context_warned: dict[str, bool] = {}
+
         self._status.addPermanentWidget(self._remote_hint)
         self._status.addPermanentWidget(self._token_total)
         # `project_combo` is retained as a hidden widget so legacy code
@@ -577,7 +584,7 @@ class MainWindow(QMainWindow):
             peak_ratio = 0.0
             peak_prompt = 0
             peak_limit = 0
-            for pane in panes.values():
+            for role_name, pane in panes.items():
                 usage = pane.current_usage()
                 if not usage:
                     continue
@@ -587,6 +594,27 @@ class MainWindow(QMainWindow):
                     peak_ratio = ratio
                     peak_prompt = usage["prompt"]
                     peak_limit = lim
+                # Surface a status-bar + tray warning the first time a
+                # pane crosses 80%. Hysteresis at 70% keeps the toast
+                # from flickering when usage oscillates near the line.
+                key = f"{tab.project_name}::{role_name}"
+                if ratio >= 0.80 and not self._context_warned.get(key):
+                    self._context_warned[key] = True
+                    msg = (
+                        f"⚠ {tab.project_name}/{role_name} context at "
+                        f"{int(ratio * 100)}% — consider /clear or ✅ Finish Job"
+                    )
+                    self._status.showMessage(msg, 12_000)
+                    if self._tray and QSystemTrayIcon.isSystemTrayAvailable():
+                        self._tray.showMessage(
+                            f"Context {int(ratio * 100)}%",
+                            f"{tab.project_name}/{role_name} — consider "
+                            f"/clear or Finish Job",
+                            QSystemTrayIcon.MessageIcon.Warning,
+                            6_000,
+                        )
+                elif ratio < 0.70 and self._context_warned.get(key):
+                    self._context_warned.pop(key, None)
             if peak_limit:
                 self.tabs.setTabText(
                     i,
