@@ -363,6 +363,29 @@ class Orchestrator(QObject):
             sources,
         ]
 
+        # Teammate speed tier. Lead does orchestration (planning, multi-step
+        # reasoning, coordinating teammates) and stays on the user's default
+        # model + effort. Teammates execute focused specialist work (edit
+        # files, run commands, verify) and benefit massively from running
+        # Haiku at medium effort — typically 3-5x faster turnaround without
+        # losing the precision the role's CLAUDE.md asks for. Override via:
+        #
+        #   TAKKUB_TEAMMATE_MODEL=""          → no --model (use user default)
+        #   TAKKUB_TEAMMATE_MODEL="sonnet"    → swap to Sonnet
+        #   TAKKUB_TEAMMATE_EFFORT=""         → no --effort
+        #   TAKKUB_TEAMMATE_EFFORT="high"     → match Lead's effort
+        if role_name != LEAD.name:
+            teammate_model = os.environ.get(
+                "TAKKUB_TEAMMATE_MODEL", "claude-haiku-4-5"
+            ).strip()
+            if teammate_model:
+                argv.extend(["--model", teammate_model])
+            teammate_effort = os.environ.get(
+                "TAKKUB_TEAMMATE_EFFORT", "medium"
+            ).strip()
+            if teammate_effort:
+                argv.extend(["--effort", teammate_effort])
+
         # Explicit plugin allowlist (skip the broken claude-obsidian hook).
         # Set TAKKUB_EXTRA_PLUGINS env var to a `;`-separated list of plugin
         # root dirs (must each contain `.claude-plugin/plugin.json`) to add
