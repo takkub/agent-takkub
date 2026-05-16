@@ -364,19 +364,25 @@ class Orchestrator(QObject):
         ]
 
         # Teammate speed tier. Lead does orchestration (planning, multi-step
-        # reasoning, coordinating teammates) and stays on the user's default
-        # model + effort. Teammates execute focused specialist work (edit
-        # files, run commands, verify) and benefit massively from running
-        # Haiku at medium effort — typically 3-5x faster turnaround without
-        # losing the precision the role's CLAUDE.md asks for. Override via:
+        # reasoning, coordinating teammates) and stays on the user's
+        # default model + effort. Teammates execute focused specialist work
+        # (edit files, run commands, verify) and benefit from running on a
+        # faster model — but not as fast as Haiku, because the cockpit
+        # owner runs on a Claude Max subscription (not the API) where
+        # per-token cost is irrelevant and Sonnet's quality margin matters
+        # more than Haiku's raw-speed margin. Sonnet 4.6 at medium effort
+        # gives roughly 1.5-2x Opus speed while keeping enough reasoning
+        # to handle refactors / integrations / code review without
+        # subtle-bug rework cycles. Override via:
         #
-        #   TAKKUB_TEAMMATE_MODEL=""          → no --model (use user default)
-        #   TAKKUB_TEAMMATE_MODEL="sonnet"    → swap to Sonnet
-        #   TAKKUB_TEAMMATE_EFFORT=""         → no --effort
-        #   TAKKUB_TEAMMATE_EFFORT="high"     → match Lead's effort
+        #   TAKKUB_TEAMMATE_MODEL=""                   → no --model (user default)
+        #   TAKKUB_TEAMMATE_MODEL="claude-haiku-4-5"   → fastest tier
+        #   TAKKUB_TEAMMATE_MODEL="claude-opus-4-7"    → match Lead
+        #   TAKKUB_TEAMMATE_EFFORT=""                  → no --effort
+        #   TAKKUB_TEAMMATE_EFFORT="high"              → match Lead's effort
         if role_name != LEAD.name:
             teammate_model = os.environ.get(
-                "TAKKUB_TEAMMATE_MODEL", "claude-haiku-4-5"
+                "TAKKUB_TEAMMATE_MODEL", "claude-sonnet-4-6"
             ).strip()
             if teammate_model:
                 argv.extend(["--model", teammate_model])
