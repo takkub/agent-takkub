@@ -201,6 +201,44 @@ Lead **ทำเองได้** เฉพาะ "งาน meta / coordinator"
 
 **Rule of thumb:** ก่อนเขียน `until ... do sleep` ถามตัวเองก่อน — "มีอะไรจริงๆ ที่จะ flip condition นี้?" ตอบไม่ได้ = pattern ผิด หา signal อื่น
 
+### Long-running commands ต้อง background ตลอด
+
+bash tool ของ pane รัน synchronous → ทุก command ที่ **block ไม่จบ** จะค้าง pane → `takkub done` ไม่ fire → Lead รอตลอดไป → workflow ตาย
+
+❌ **ห้ามรัน foreground เด็ดขาด** (ทุก role, ทุก project):
+
+| Command | สาเหตุที่ block |
+|---|---|
+| `docker compose up` (ไม่มี `-d`) | logs streaming จนกด Ctrl+C |
+| `docker compose logs --follow` | tail forever |
+| `docker compose run <svc>` | attach ติดที่ container's stdin |
+| `npm run dev` / `next dev` / `nest start --watch` | dev server loop |
+| `pnpm dev` / `vite` / `webpack serve` | watcher |
+| `python -m http.server` | listen loop |
+| `until ...; do sleep K; done` | (ดู section ข้างบน) |
+
+✅ **ทำ:** ใช้ detach / background pattern เสมอ
+
+```bash
+# Docker
+docker compose up -d                              # detach
+docker compose logs --tail=50 <svc>               # one-shot
+docker compose logs --follow <svc> 2>&1 | grep -m1 'ready'   # exit on match
+docker compose ps --format json                   # health snapshot
+
+# Dev servers (ถ้าจำเป็นต้องรันใน pane)
+nohup npm run dev > /tmp/dev.log 2>&1 &
+echo "$!" > /tmp/dev.pid
+# ทำ test...
+kill $(cat /tmp/dev.pid)
+
+# หรือ subshell detached
+( npm run dev & ) > /tmp/dev.log 2>&1
+```
+
+**Lead's task spec ควรเตือน teammate ทุกครั้งที่มี docker / dev server:**
+> "ทุก long-running command (docker up, dev server, log follow) ต้อง background หรือ detach ห้าม foreground"
+
 ### การ commit & push
 - commit เฉพาะไฟล์ที่เกี่ยวกับงานที่สั่ง ตรวจ `git status` ก่อนเสมอ
 - ใช้ `git add <specific files>` ไม่ใช่ `git add -A`
