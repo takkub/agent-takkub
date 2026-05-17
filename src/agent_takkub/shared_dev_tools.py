@@ -52,17 +52,34 @@ PMS_MCP_DEFAULT_URL = PMS_MCP_URL_PROD
 #   ~/.claude.json, panes don't see them. Folding the configs into the
 #   cockpit's --mcp-config restores them without re-opening the
 #   user-level settings can-of-worms.
+# Versions pinned 2026-05-17 — the latest tags on npm at the time
+# `BROWSER_MCPS` was authored. Pinning matters because `@latest` makes
+# npx hit the npm registry on every spawn to resolve the dist-tag,
+# which can take long enough on a cold Windows machine to blow past
+# claude code's MCP startup window — the server then shows up as
+# "not connected" and the user has to retry. With a literal version
+# string, npx checks the local cache first and skips the registry
+# round-trip when the package is already there.
+#
+# Bump these when you want to take a new release. Recipe: `npm view
+# @playwright/mcp version` and `npm view chrome-devtools-mcp version`,
+# update here, ship a commit, and let `ensure_browser_mcps` migrate
+# any vault that still has the old pin (it only adds missing names,
+# so an explicit update needs `clear_shared_mcp_config` first).
+_PLAYWRIGHT_MCP_VERSION = "0.0.75"
+_CHROME_DEVTOOLS_MCP_VERSION = "0.26.0"
+
 BROWSER_MCPS: dict = {
     "playwright": {
         "type": "stdio",
         "command": "npx",
-        "args": ["-y", "@playwright/mcp@latest"],
+        "args": ["-y", f"@playwright/mcp@{_PLAYWRIGHT_MCP_VERSION}"],
         "env": {},
     },
     "chrome-devtools": {
         "type": "stdio",
         "command": "npx",
-        "args": ["-y", "chrome-devtools-mcp@latest"],
+        "args": ["-y", f"chrome-devtools-mcp@{_CHROME_DEVTOOLS_MCP_VERSION}"],
         "env": {},
     },
 }
@@ -231,12 +248,13 @@ def ensure_browser_mcps() -> tuple[bool, str]:
             # failure but leave the file alone.
             return False, f"could not parse {SHARED_MCP_FILE}; leaving as-is"
     servers = config.setdefault("mcpServers", {})
-    added = []
+    changed = []
     for name, server_cfg in BROWSER_MCPS.items():
-        if name not in servers:
-            servers[name] = json.loads(json.dumps(server_cfg))  # deep copy
-            added.append(name)
-    if not added:
+        desired = json.loads(json.dumps(server_cfg))  # deep copy
+        if servers.get(name) != desired:
+            servers[name] = desired
+            changed.append(name)
+    if not changed:
         return True, "browser MCPs already present"
     try:
         SHARED_MCP_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -246,4 +264,4 @@ def ensure_browser_mcps() -> tuple[bool, str]:
         )
     except OSError as e:
         return False, f"could not write {SHARED_MCP_FILE}: {e}"
-    return True, f"added browser MCPs: {', '.join(added)}"
+    return True, f"updated browser MCPs: {', '.join(changed)}"
