@@ -371,6 +371,22 @@ class Orchestrator(QObject):
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
+        # Browser MCPs (playwright + chrome-devtools) follow Lead into
+        # every project. Merge them into runtime/shared-mcp.json before
+        # any pane spawns — the orchestrator will then hand the file to
+        # claude via `--mcp-config` and panes pick the servers up
+        # uniformly across projects. Idempotent: existing pms config
+        # and bearer token are preserved untouched. Failure is
+        # non-fatal (logged once and panes spawn without browser MCPs)
+        # so a broken vault path or readonly runtime never blocks
+        # cockpit startup.
+        try:
+            from .shared_dev_tools import ensure_browser_mcps
+
+            ok, msg = ensure_browser_mcps()
+            _log_event("browser_mcp_init", ok=ok, msg=msg)
+        except Exception as e:
+            _log_event("browser_mcp_init_error", error=repr(e))
         # Panes are namespaced per project so the upcoming multi-tab UI
         # (Plan B) can keep each project's Lead + teammates isolated. The
         # `panes` property below resolves to the *active* project's inner

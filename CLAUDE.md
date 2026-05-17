@@ -76,6 +76,23 @@ ECC_DISABLED_HOOKS=pre:edit-write:gateguard-fact-force,post:ecc-context-monitor
 
 **Escape hatch:** ถ้าวันหนึ่งอยากเปิด ECC hooks ครบทุกตัว set `TAKKUB_ECC_FULL=1` ก่อน launch cockpit → orchestrator จะข้าม mute logic ทั้งก้อน
 
+### Browser MCPs — cross-project Playwright + Chrome DevTools
+
+cockpit force-inject browser MCPs เข้าทุก pane ผ่าน `runtime/shared-mcp.json`:
+
+| Server | Package | ใช้ตอนไหน |
+|---|---|---|
+| `playwright` | `@playwright/mcp@latest` | smoke / UX / e2e tests ที่ Lead สั่งโดยตรง หรือ delegate ให้ QA |
+| `chrome-devtools` | `chrome-devtools-mcp@latest` | inspect runtime state ของ web app ที่กำลังเปิดอยู่ |
+
+ทำไมต้อง inject ผ่าน cockpit ไม่ใช่ใช้จาก `~/.claude.json`:
+- pane ทุกตัว spawn ด้วย `--setting-sources project,local` (กัน claude-obsidian SessionStart hook crash)
+- flag นี้ block user-level `mcpServers` ไปด้วย → user ลง playwright ไว้ใน `~/.claude.json` แล้วก็ไม่เห็นใน pane
+- fix: `ensure_browser_mcps()` รันตอน Orchestrator init merge browser entries เข้า `runtime/shared-mcp.json` (preserve PMS bearer ที่มีอยู่)
+- จากนั้น `--mcp-config runtime/shared-mcp.json` + `--strict-mcp-config` ทำให้ทุก pane เห็น playwright + chrome-devtools เหมือนกันทุก project
+
+permission prompts: ครั้งแรกที่ MCP tool ถูกเรียกใน session ใหม่ user จะถูกถาม allow/deny หนึ่งครั้ง (ไม่ pre-allow ใน config เพราะ browser tools ใช้ไม่บ่อยและไม่อยากบังคับ trust ล่วงหน้า)
+
 ### Obsidian vault integration
 
 cockpit auto-mirrors decision logs และ live state ไปที่ vault ถ้าตั้งไว้:

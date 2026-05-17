@@ -38,6 +38,35 @@ SHARED_MCP_FILE = RUNTIME_DIR / "shared-mcp.json"
 PMS_MCP_URL_PROD = "https://api.wsol.co.th/pms/mcp"
 PMS_MCP_DEFAULT_URL = PMS_MCP_URL_PROD
 
+# Browser MCPs that the cockpit forces into every pane so smoke tests,
+# UX checks, and crawls are available from any project's Lead. These
+# are vanilla npx-stdio servers with no auth, so we hard-code their
+# config rather than asking the user to wire them up per project.
+#
+# Why ship them via shared-mcp.json instead of letting claude read
+# them from the user's ~/.claude.json:
+#   The cockpit launches every pane with `--setting-sources project,local`
+#   to dodge claude-obsidian's crashing SessionStart hook. That flag
+#   also blocks user-level mcpServers from loading, so even though the
+#   user has `playwright` + `chrome-devtools` registered in
+#   ~/.claude.json, panes don't see them. Folding the configs into the
+#   cockpit's --mcp-config restores them without re-opening the
+#   user-level settings can-of-worms.
+BROWSER_MCPS: dict = {
+    "playwright": {
+        "type": "stdio",
+        "command": "npx",
+        "args": ["-y", "@playwright/mcp@latest"],
+        "env": {},
+    },
+    "chrome-devtools": {
+        "type": "stdio",
+        "command": "npx",
+        "args": ["-y", "chrome-devtools-mcp@latest"],
+        "env": {},
+    },
+}
+
 # The pms MCP server config. The bearer token is supplied by the user
 # at setup time (initially via the cockpit's "Setup pms MCP" flow) and
 # stored in shared-mcp.json next to this module. We embed an empty
@@ -156,8 +185,65 @@ def clear_shared_mcp_config() -> None:
 
 
 def shared_mcp_config_path() -> str | None:
-    """Absolute path to the shared MCP config file if it exists and is
-    usable. Returned to the orchestrator's argv builder."""
-    if shared_mcp_config_exists():
-        return str(SHARED_MCP_FILE)
-    return None
+    """Absolute path to the shared MCP config file if it exists and has
+    at least one usable MCP entry (pms with a real bearer, or any of
+    the browser MCPs). Returned to the orchestrator's argv builder."""
+    if not SHARED_MCP_FILE.is_file():
+        return None
+    try:
+        data = json.loads(SHARED_MCP_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    servers = data.get("mcpServers") or {}
+    if not servers:
+        return None
+    # If pms is the only thing in there, it must have a real bearer.
+    # Otherwise (browser MCPs alone, or browser + pms) the file is
+    # always worth handing to claude.
+    if set(servers.keys()) == {"pms"}:
+        return str(SHARED_MCP_FILE) if shared_mcp_config_exists() else None
+    return str(SHARED_MCP_FILE)
+
+
+def ensure_browser_mcps() -> tuple[bool, str]:
+    """Merge BROWSER_MCPS into runtime/shared-mcp.json if they're not
+    already present. Idempotent — safe to call on every cockpit launch.
+
+    Three startup states this has to handle without losing data:
+      1. File missing — write a fresh file containing only the browser
+         MCPs (no pms section).
+      2. File exists with pms only — preserve the pms entry and the
+         user's bearer token, just add the browser MCPs alongside.
+      3. File exists with browsers already — no-op (still returns ok
+         so callers don't need to special-case "already done").
+
+    Returns (ok, message) for logging only; failures are non-fatal —
+    panes still spawn, browser MCPs just won't be available until the
+    file is healed by hand.
+    """
+    config: dict = {}
+    if SHARED_MCP_FILE.is_file():
+        try:
+            config = json.loads(SHARED_MCP_FILE.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            # Corrupt file — refuse to clobber it. The user almost
+            # certainly hand-edited and broke the JSON. Surface the
+            # failure but leave the file alone.
+            return False, f"could not parse {SHARED_MCP_FILE}; leaving as-is"
+    servers = config.setdefault("mcpServers", {})
+    added = []
+    for name, server_cfg in BROWSER_MCPS.items():
+        if name not in servers:
+            servers[name] = json.loads(json.dumps(server_cfg))  # deep copy
+            added.append(name)
+    if not added:
+        return True, "browser MCPs already present"
+    try:
+        SHARED_MCP_FILE.parent.mkdir(parents=True, exist_ok=True)
+        SHARED_MCP_FILE.write_text(
+            json.dumps(config, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+    except OSError as e:
+        return False, f"could not write {SHARED_MCP_FILE}: {e}"
+    return True, f"added browser MCPs: {', '.join(added)}"
