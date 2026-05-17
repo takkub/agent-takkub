@@ -427,6 +427,27 @@ class Orchestrator(QObject):
                     env["CHROME_BIN"] = cand
                     break
 
+        # Silence two ECC plugin hooks that flooded every pane:
+        #   pre:edit-write:gateguard-fact-force — interrupts each Edit
+        #     with a "list ALL files that import this" demand, even on
+        #     trivial test fixtures (the user spent half a session
+        #     hand-answering it).
+        #   post:ecc-context-monitor — fires "COST CRITICAL: Session
+        #     cost is $NNN.NN" on every Bash/Edit. The cockpit runs on
+        #     Claude Max OAuth (see project_no_api_max_oauth memory),
+        #     so per-token cost is zero and the warning is noise.
+        # ECC_GATEGUARD=off is the canonical kill-switch the plugin
+        # documents in its block message; ECC_DISABLED_HOOKS uses the
+        # hook IDs registered by run-with-flags.js. Both go in so
+        # whichever the plugin honours wins. Escape hatch:
+        # TAKKUB_ECC_FULL=1 turns the mute off in case a future hook
+        # we actually want gets caught in the same net.
+        if os.environ.get("TAKKUB_ECC_FULL") != "1":
+            env.setdefault("ECC_GATEGUARD", "off")
+            extra = "pre:edit-write:gateguard-fact-force,post:ecc-context-monitor"
+            existing = env.get("ECC_DISABLED_HOOKS", "").strip()
+            env["ECC_DISABLED_HOOKS"] = f"{existing},{extra}" if existing else extra
+
         # --setting-sources controls which settings.json layers claude loads.
         # We default to `project,local` (skip ~/.claude/settings.json) because
         # the claude-obsidian plugin currently ships a SessionStart hook that
