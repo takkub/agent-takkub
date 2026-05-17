@@ -192,6 +192,77 @@ def _render_decision_note(project: str, role: str, note: str, now: datetime) -> 
     )
 
 
+# How often the orchestrator rewrites `<vault>/hot.md`. The hot file is
+# a low-stakes status snapshot — open Obsidian, see what cockpit is
+# doing right now — so the cadence trades freshness for write churn.
+# A minute is plenty: the panes themselves render to xterm in real time.
+_HOT_MD_INTERVAL_MS = 60_000
+
+
+def _render_hot_md(
+    panes_by_project: dict[str, dict[str, str]],
+    active_project_name: str | None,
+    recent_sessions: list[tuple[str, str, str]],
+    now: datetime,
+) -> str:
+    """Compose the body of `<vault>/hot.md` — the "what's happening
+    right now in cockpit" snapshot the user opens to orient themselves.
+
+    Inputs are plain values (no Pane / PtySession refs) so this can be
+    unit-tested without spinning up Qt. `panes_by_project` is
+    `{project: {role: state}}`. `recent_sessions` is a list of
+    `(project, role, filename)` tuples — most recent first.
+    """
+    lines: list[str] = []
+    lines.append("# Hot — cockpit live state")
+    lines.append("")
+    lines.append(f"_Last updated: {now.isoformat(timespec='seconds')}_")
+    lines.append("")
+
+    if active_project_name:
+        lines.append(f"**Active project:** `{active_project_name}`")
+    else:
+        lines.append("**Active project:** _(none — projects.json `active` unset)_")
+    lines.append("")
+
+    if not panes_by_project:
+        lines.append("## Panes")
+        lines.append("")
+        lines.append("_No projects open in cockpit._")
+        lines.append("")
+    else:
+        lines.append("## Panes")
+        lines.append("")
+        for project in sorted(panes_by_project):
+            lines.append(f"### `{project}`")
+            roles = panes_by_project[project]
+            if not roles:
+                lines.append("- _(no panes)_")
+            else:
+                for role in sorted(roles):
+                    lines.append(f"- **{role}** — {roles[role]}")
+            lines.append("")
+
+    lines.append("## Recent `takkub done` (last 10)")
+    lines.append("")
+    if not recent_sessions:
+        lines.append("_(no done events this session)_")
+    else:
+        for project, role, fname in recent_sessions[:10]:
+            lines.append(f"- `{project}` · **{role}** · {fname}")
+    lines.append("")
+
+    lines.append("---")
+    lines.append("")
+    lines.append(
+        "_Auto-written by agent-takkub orchestrator every "
+        f"{_HOT_MD_INTERVAL_MS // 1000}s. Edit-safe target is the project "
+        "page; this file is overwritten on each tick._"
+    )
+    lines.append("")
+    return "\n".join(lines)
+
+
 # Plugins we want spawned agents to inherit *explicitly* (skipping user-level
 # settings to avoid claude-obsidian's broken SessionStart hook). Each entry
 # is a *marketplace name* under ~/.claude/plugins/cache/. We pick the highest
@@ -334,6 +405,16 @@ class Orchestrator(QObject):
         self._idle_watchdog.timeout.connect(self._check_idle_teammates)
         if IDLE_REMIND_AFTER_S > 0:
             self._idle_watchdog.start()
+
+        # Periodic snapshot of cockpit state to `<vault>/hot.md`. Skipped
+        # silently when no vault is configured (see `_resolve_vault_dir`).
+        # In-process list of the last few `takkub done` events drives the
+        # "Recent" section without hitting disk on every tick.
+        self._recent_done: list[tuple[str, str, str]] = []
+        self._hot_md_timer = QTimer(self)
+        self._hot_md_timer.setInterval(_HOT_MD_INTERVAL_MS)
+        self._hot_md_timer.timeout.connect(self._write_hot_md)
+        self._hot_md_timer.start()
 
     # ──────────────────────────────────────────────────────────────
     # project-aware view onto the pane registry
@@ -949,12 +1030,21 @@ class Orchestrator(QObject):
         pane.set_state("done", note=note[:80] if note else "done")
         QTimer.singleShot(2_500, lambda: self.close(from_role, project=project_ns))
         _log_event("done", role=from_role, note=note[:200])
-        self._save_decision_note(project_ns, from_role, note)
+        now = datetime.now()
+        self._save_decision_note(project_ns, from_role, note, now=now)
+        stamp = now.strftime("%Y-%m-%dT%H%M%S")
+        self._recent_done.insert(0, (project_ns, from_role, f"{stamp}-{from_role}.md"))
+        del self._recent_done[20:]
+        # Refresh hot.md immediately so Obsidian shows the done event
+        # without waiting up to a minute for the periodic tick.
+        self._write_hot_md()
         self.agentDone.emit(from_role, note)
         return True, f"{from_role} reported done"
 
     @staticmethod
-    def _save_decision_note(project: str, role: str, note: str) -> None:
+    def _save_decision_note(
+        project: str, role: str, note: str, now: datetime | None = None
+    ) -> None:
         """Persist a teammate's `takkub done` note as a small markdown
         file under `runtime/sessions/<YYYY-MM-DD>/<project>/<role>-<HHMMSS>.md`,
         then mirror the same file into the Obsidian vault (if one is
@@ -969,10 +1059,15 @@ class Orchestrator(QObject):
         is trivial to grep / link to from a wiki later. Best-effort:
         any IO error is swallowed so a disk hiccup never breaks the
         done flow.
+
+        `now` is injected by `done()` so the caller and this writer
+        agree on the timestamp — otherwise the hot.md "Recent" entry
+        and the on-disk filename could disagree by a second under load.
         """
         if not (note or "").strip():
             return
-        now = datetime.now()
+        if now is None:
+            now = datetime.now()
         body = _render_decision_note(project, role, note, now)
         try:
             day = RUNTIME_DIR / "sessions" / now.strftime("%Y-%m-%d") / project
@@ -1000,6 +1095,32 @@ class Orchestrator(QObject):
         accidentally sees a backend pane that belongs to pms.
         """
         return {name: p.state for name, p in self._project_panes(project).items()}
+
+    # ──────────────────────────────────────────────────────────────
+    # `<vault>/hot.md` — periodic snapshot of cockpit live state
+    # ──────────────────────────────────────────────────────────────
+    def _write_hot_md(self) -> None:
+        """Rewrite `<vault>/hot.md` from the current pane registry plus
+        the in-memory ring of recent `takkub done` events. Skipped
+        silently when no vault is configured. Best-effort: swallow
+        OSError so a vault permission glitch never bubbles out of a
+        QTimer tick and kills the orchestrator."""
+        vault = _resolve_vault_dir()
+        if vault is None:
+            return
+        snapshot = {
+            project: {role: pane.state for role, pane in panes.items()}
+            for project, panes in self._panes_by_project.items()
+        }
+        try:
+            active_name, _ = active_project()
+        except Exception:
+            active_name = None
+        body = _render_hot_md(snapshot, active_name, list(self._recent_done), datetime.now())
+        try:
+            (vault / "hot.md").write_text(body, encoding="utf-8")
+        except OSError:
+            pass
 
     # ──────────────────────────────────────────────────────────────
     # idle watchdog — nudge teammates that forgot to `takkub done`

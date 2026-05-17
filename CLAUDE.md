@@ -76,6 +76,21 @@ ECC_DISABLED_HOOKS=pre:edit-write:gateguard-fact-force,post:ecc-context-monitor
 
 **Escape hatch:** ถ้าวันหนึ่งอยากเปิด ECC hooks ครบทุกตัว set `TAKKUB_ECC_FULL=1` ก่อน launch cockpit → orchestrator จะข้าม mute logic ทั้งก้อน
 
+### Obsidian vault integration
+
+cockpit auto-mirrors decision logs และ live state ไปที่ vault ถ้าตั้งไว้:
+
+- **Decision log mirror** — ทุกครั้งที่ teammate รัน `takkub done` ไฟล์ markdown จะถูกเขียน 2 ที่:
+  - `runtime/sessions/<date>/<project>/<role>-<HHMMSS>.md` (local repo)
+  - `<vault>/01-Projects/<project>/sessions/<date>T<HHMMSS>-<role>.md` (Obsidian)
+- **Live state snapshot** — `<vault>/hot.md` rewrite ทุก 60 วินาที + on every `takkub done`. แสดง active project, panes ที่กำลังเปิดต่อ project (พร้อม state), 10 done events ล่าสุด
+- **Resolution order:**
+  1. `$TAKKUB_VAULT_DIR` (explicit override) — ใช้ถ้ามี `01-Projects/` ข้างใน
+  2. `~/WebstormProjects/second-brain` (default) — ใช้ถ้ามี `01-Projects/` ข้างใน
+  3. ไม่มี vault → mirror skip silently
+
+vault สำหรับโปรเจคนี้คือ `C:\Users\monch\WebstormProjects\second-brain` มีหน้า project ที่ [[../second-brain/01-Projects/agent-takkub|01-Projects/agent-takkub.md]] พร้อม Dataview query ดึง sessions/ แสดงตรงนั้น
+
 ## เมื่อรับงานใหม่
 
 1. อ่านไฟล์ `projects.json` เสมอ
