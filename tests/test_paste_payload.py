@@ -15,7 +15,10 @@ from __future__ import annotations
 from agent_takkub.orchestrator import (
     BRACKETED_PASTE_THRESHOLD,
     _PASTE_END,
+    _PASTE_ENTER_DELAY_MS,
     _PASTE_START,
+    _TYPING_ENTER_DELAY_MS,
+    _enter_delay_ms,
     _paste_payload,
 )
 
@@ -67,3 +70,46 @@ class TestPastePayload:
         assert wrapped.startswith(_PASTE_START)
         assert wrapped.endswith(_PASTE_END)
         assert text in wrapped
+
+
+class TestEnterDelay:
+    """Post-write delay before the submitting `\\r` is scaled by whether
+    the payload was bracket-pasted. Claude Code v2.1.x renders the
+    `[Pasted text #N +M lines]` placeholder for bracketed-paste blocks,
+    and an Enter arriving mid-render is consumed as a soft newline —
+    which is the bug behind teammate panes sitting at the placeholder
+    forever instead of running the spec."""
+
+    def test_short_payload_uses_typing_delay(self) -> None:
+        assert _enter_delay_ms("hi") == _TYPING_ENTER_DELAY_MS
+
+    def test_empty_payload_uses_typing_delay(self) -> None:
+        # Edge case: empty string still goes through the typing path
+        # (no `_PASTE_START` prefix to detect).
+        assert _enter_delay_ms("") == _TYPING_ENTER_DELAY_MS
+
+    def test_long_unwrapped_payload_uses_typing_delay(self) -> None:
+        # A long payload that *wasn't* wrapped (e.g. caller bypassed
+        # `_paste_payload`) should still get the typing delay — the
+        # decision is based on the actual escape prefix, not length.
+        assert _enter_delay_ms("x" * 5_000) == _TYPING_ENTER_DELAY_MS
+
+    def test_bracketed_payload_uses_paste_delay(self) -> None:
+        payload = _PASTE_START + "x" * 500 + _PASTE_END
+        assert _enter_delay_ms(payload) == _PASTE_ENTER_DELAY_MS
+
+    def test_paste_payload_output_round_trip(self) -> None:
+        # The two helpers compose: whatever `_paste_payload` returns
+        # for a long input must read back as the paste delay, and for
+        # a short input as the typing delay. This is the contract the
+        # wire-ups in orchestrator.py depend on.
+        long_text = "a" * (BRACKETED_PASTE_THRESHOLD + 100)
+        assert _enter_delay_ms(_paste_payload(long_text)) == _PASTE_ENTER_DELAY_MS
+
+        short_text = "ack"
+        assert _enter_delay_ms(_paste_payload(short_text)) == _TYPING_ENTER_DELAY_MS
+
+    def test_paste_delay_is_longer_than_typing_delay(self) -> None:
+        # Guard against an accidental edit that swaps the two constants.
+        # The whole point of the helper is that paste > typing.
+        assert _PASTE_ENTER_DELAY_MS > _TYPING_ENTER_DELAY_MS

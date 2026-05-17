@@ -100,6 +100,30 @@ def _paste_payload(text: str) -> str:
         return text
     return _PASTE_START + text + _PASTE_END
 
+
+# Delay between writing the payload and writing the submitting `\r`.
+# Claude Code v2.1.x collapses a bracketed-paste block into a
+# `[Pasted text #N +M lines]` placeholder before it accepts Enter as a
+# submit. Rendering that placeholder takes noticeably longer than the
+# 200 ms used for short typing-style writes; an Enter that lands
+# mid-render is consumed as a soft newline inside the paste and the
+# task never actually submits (the bug surfaced when a teammate pane
+# sat at `[Pasted text #1 +15 lines]` forever instead of running the
+# spec). Pick the longer delay only when the payload actually came
+# back from `_paste_payload` wrapped, so slash-command and short
+# message latency stay snappy.
+_PASTE_ENTER_DELAY_MS = 800
+_TYPING_ENTER_DELAY_MS = 200
+
+
+def _enter_delay_ms(payload: str) -> int:
+    """Pick the post-write delay before sending Enter to submit input."""
+    return (
+        _PASTE_ENTER_DELAY_MS
+        if payload.startswith(_PASTE_START)
+        else _TYPING_ENTER_DELAY_MS
+    )
+
 # Plugins we want spawned agents to inherit *explicitly* (skipping user-level
 # settings to avoid claude-obsidian's broken SessionStart hook). Each entry
 # is a *marketplace name* under ~/.claude/plugins/cache/. We pick the highest
@@ -677,8 +701,12 @@ class Orchestrator(QObject):
             sent[0] = True
             if pane.session is None or not pane.session.is_alive:
                 return
-            pane.session.write(_paste_payload(command))
-            QTimer.singleShot(200, lambda: pane.session and pane.session.write("\r"))
+            payload = _paste_payload(command)
+            pane.session.write(payload)
+            QTimer.singleShot(
+                _enter_delay_ms(payload),
+                lambda: pane.session and pane.session.write("\r"),
+            )
             _log_event("auto_slash_command", role=role_name, command=command)
 
         def _check() -> None:
@@ -723,8 +751,12 @@ class Orchestrator(QObject):
             if pane.session is None or not pane.session.is_alive:
                 return
             pane.set_state("working", note=task[:60])
-            pane.session.write(_paste_payload(task))
-            QTimer.singleShot(200, lambda: pane.session and pane.session.write("\r"))
+            payload = _paste_payload(task)
+            pane.session.write(payload)
+            QTimer.singleShot(
+                _enter_delay_ms(payload),
+                lambda: pane.session and pane.session.write("\r"),
+            )
 
         def _check() -> None:
             if sent[0]:
@@ -761,15 +793,23 @@ class Orchestrator(QObject):
 
         header = f"[{from_role} → {to_role}] " if from_role and from_role != to_role else ""
         body = header + msg
-        pane.session.write(_paste_payload(body))
-        QTimer.singleShot(150, lambda: pane.session and pane.session.write(b"\r"))
+        body_payload = _paste_payload(body)
+        pane.session.write(body_payload)
+        QTimer.singleShot(
+            _enter_delay_ms(body_payload),
+            lambda: pane.session and pane.session.write(b"\r"),
+        )
 
         # CC Lead unless source was Lead and target was a teammate, or vice versa
         if from_role and from_role not in (None, LEAD.name) and to_role != LEAD.name:
             lead = project_panes.get(LEAD.name)
             if lead and lead.session and lead.session.is_alive:
-                lead.session.write(_paste_payload(f"[CC] {body}"))
-                QTimer.singleShot(150, lambda: lead.session and lead.session.write(b"\r"))
+                cc_payload = _paste_payload(f"[CC] {body}")
+                lead.session.write(cc_payload)
+                QTimer.singleShot(
+                    _enter_delay_ms(cc_payload),
+                    lambda: lead.session and lead.session.write(b"\r"),
+                )
 
         # Track teammate ↔ Lead conversation so the idle watchdog doesn't
         # fire its `[auto-reminder]` while a teammate is legitimately
