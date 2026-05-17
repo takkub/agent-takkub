@@ -660,8 +660,16 @@ class Orchestrator(QObject):
         # checked-in config. Skipped silently if the user hasn't set
         # up the token yet (UI offers a "Setup pms MCP" prompt).
         try:
-            from .shared_dev_tools import shared_mcp_config_path
+            from .shared_dev_tools import (
+                ensure_browser_mcps,
+                shared_mcp_config_path,
+            )
 
+            # Re-apply the browser-MCP merge on every spawn so a cockpit
+            # instance that booted before the feature shipped still gives
+            # newly-spawned panes the browser servers. Idempotent: if
+            # they're already in the file this is a no-op disk read.
+            ensure_browser_mcps()
             mcp_cfg = shared_mcp_config_path()
         except Exception:
             mcp_cfg = None
