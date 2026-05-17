@@ -157,6 +157,41 @@ def _apply_ecc_mute(env: dict[str, str]) -> None:
     env["ECC_DISABLED_HOOKS"] = f"{existing},{extra}" if existing else extra
 
 
+# Where to look for the Obsidian vault that mirrors cockpit decision
+# logs. Resolution order:
+#   1. $TAKKUB_VAULT_DIR  — explicit override, wins over everything
+#   2. ~/WebstormProjects/second-brain — author's default vault layout
+# We require an existing `01-Projects/` folder inside the candidate before
+# treating it as a vault: a stray empty dir at the default path mustn't
+# silently absorb session logs. Returns None when nothing matches, which
+# tells callers to skip the mirror without raising.
+_VAULT_ENV = "TAKKUB_VAULT_DIR"
+_DEFAULT_VAULT = pathlib.Path.home() / "WebstormProjects" / "second-brain"
+
+
+def _resolve_vault_dir() -> pathlib.Path | None:
+    """Return the configured Obsidian vault root, or None if missing."""
+    candidates: list[pathlib.Path] = []
+    override = os.environ.get(_VAULT_ENV, "").strip()
+    if override:
+        candidates.append(pathlib.Path(override))
+    candidates.append(_DEFAULT_VAULT)
+    for cand in candidates:
+        if (cand / "01-Projects").is_dir():
+            return cand
+    return None
+
+
+def _render_decision_note(project: str, role: str, note: str, now: datetime) -> str:
+    """Render the markdown body shared by the local session log and the
+    vault mirror. Single source of truth so the two copies don't drift."""
+    return (
+        f"# {role} done · {now.isoformat(timespec='seconds')}\n\n"
+        f"**Project:** {project}\n\n"
+        f"## Note\n\n{note.strip()}\n"
+    )
+
+
 # Plugins we want spawned agents to inherit *explicitly* (skipping user-level
 # settings to avoid claude-obsidian's broken SessionStart hook). Each entry
 # is a *marketplace name* under ~/.claude/plugins/cache/. We pick the highest
@@ -921,7 +956,12 @@ class Orchestrator(QObject):
     @staticmethod
     def _save_decision_note(project: str, role: str, note: str) -> None:
         """Persist a teammate's `takkub done` note as a small markdown
-        file under `runtime/sessions/<YYYY-MM-DD>/<project>/<role>-<HHMMSS>.md`.
+        file under `runtime/sessions/<YYYY-MM-DD>/<project>/<role>-<HHMMSS>.md`,
+        then mirror the same file into the Obsidian vault (if one is
+        configured) at
+        `<vault>/01-Projects/<project>/sessions/<YYYY-MM-DD>T<HHMMSS>-<role>.md`
+        so the user can browse the decision trail from Obsidian's
+        Dataview / graph view alongside the project's wiki page.
 
         events.log already captures the same data but is one long
         machine-readable stream. The per-role markdown gives the user a
@@ -933,16 +973,23 @@ class Orchestrator(QObject):
         if not (note or "").strip():
             return
         now = datetime.now()
+        body = _render_decision_note(project, role, note, now)
         try:
             day = RUNTIME_DIR / "sessions" / now.strftime("%Y-%m-%d") / project
             day.mkdir(parents=True, exist_ok=True)
             path = day / f"{role}-{now.strftime('%H%M%S')}.md"
-            body = (
-                f"# {role} done · {now.isoformat(timespec='seconds')}\n\n"
-                f"**Project:** {project}\n\n"
-                f"## Note\n\n{note.strip()}\n"
-            )
             path.write_text(body, encoding="utf-8")
+        except OSError:
+            pass
+
+        vault = _resolve_vault_dir()
+        if vault is None:
+            return
+        try:
+            sessions = vault / "01-Projects" / project / "sessions"
+            sessions.mkdir(parents=True, exist_ok=True)
+            stamp = now.strftime("%Y-%m-%dT%H%M%S")
+            (sessions / f"{stamp}-{role}.md").write_text(body, encoding="utf-8")
         except OSError:
             pass
 
