@@ -366,7 +366,7 @@ class Orchestrator(QObject):
     statusChanged = pyqtSignal()
     leadInjected = pyqtSignal(str)
     paneRequested = pyqtSignal(str)  # role_name — main_window should add this pane
-    paneClosed = pyqtSignal(str)  # role_name — main_window should remove this pane
+    paneClosed = pyqtSignal(str, str)  # role_name, project — main_window removes pane from the matching tab
     agentDone = pyqtSignal(str, str)  # role_name, note — for desktop notifications
 
     def __init__(self, parent: QObject | None = None) -> None:
@@ -1018,8 +1018,13 @@ class Orchestrator(QObject):
         self._auto_respawn_attempts.pop(key, None)
         # For teammates, fully remove from the layout so the right column
         # collapses back. Lead stays as it always anchors the cockpit.
+        # The project namespace travels with the signal so main_window
+        # can route the removal to the correct tab even when the user
+        # is viewing a different project at the moment of close (the
+        # `done`-triggered close fires 2.5 s after the agent reports
+        # done, plenty of time for a tab switch).
         if role_name != LEAD.name:
-            self.paneClosed.emit(role_name)
+            self.paneClosed.emit(role_name, project_ns)
         self.statusChanged.emit()
         _log_event("close", role=role_name)
         return True, f"{role_name} closed"

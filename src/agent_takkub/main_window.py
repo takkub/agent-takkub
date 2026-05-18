@@ -397,11 +397,30 @@ class MainWindow(QMainWindow):
         self._rebalance_teammates()
         self._status.showMessage(f"added pane · {role_name}", 4_000)
 
-    def _remove_teammate_pane(self, role_name: str) -> None:
-        pane = self.teammate_panes.pop(role_name, None)
+    def _tab_for_project(self, project: str) -> ProjectTab | None:
+        """Find the ProjectTab whose `project_name` matches. Returns None
+        if no tab is open for that project (e.g. it was closed before
+        the signal arrived)."""
+        for i in range(self.tabs.count()):
+            w = self.tabs.widget(i)
+            if isinstance(w, ProjectTab) and w.project_name == project:
+                return w
+        return None
+
+    def _remove_teammate_pane(self, role_name: str, project: str) -> None:
+        # Route the removal to the tab that owns `project`, not whichever
+        # tab is active right now. Before this fix the slot popped from
+        # `self.teammate_panes` (the *active* tab's dict), which left the
+        # closed pane stranded in its real tab as a placeholder when the
+        # user had switched tabs during the 2.5 s done-close window. That
+        # was the "Backend empty slot" surfaced in the multi-tab regression.
+        tab = self._tab_for_project(project)
+        if tab is None:
+            return
+        pane = tab.teammate_panes.pop(role_name, None)
         if pane is None:
             return
-        self.orch.unregister_pane(role_name)
+        self.orch.unregister_pane(role_name, project=project)
         # Explicitly tear down the WebEngine view + its timers before
         # deleteLater. Without this Chromium's renderer process can linger
         # holding the scrollback heap until next GC, and a leftover
@@ -413,11 +432,10 @@ class MainWindow(QMainWindow):
             pass
         pane.setParent(None)
         pane.deleteLater()
-        if not self.teammate_panes:
-            self.teammate_split.hide()
-            self.main_split.setSizes([self.width(), 0])
+        if not tab.teammate_panes:
+            tab.hide_teammate_split()
         else:
-            self._rebalance_teammates()
+            tab.rebalance_teammates()
 
     def _rebalance_teammates(self) -> None:
         n = self.teammate_split.count()
