@@ -1070,21 +1070,18 @@ class MainWindow(QMainWindow):
         self._restart_lead_for_active_project()
 
     def _on_finish_job_clicked(self) -> None:
-        """User-driven job wrap-up. Two parts:
+        """User-driven job wrap-up. Asks Lead for a closing summary,
+        appends today's per-project session digest to the vault's
+        05-Daily note, then closes every teammate. Lead stays alive
+        so the user can read the summary and queue the next task
+        without restarting the cockpit.
 
-        1. Always asks Lead for a closing summary, then closes every
-           teammate. Lead stays alive so the user can read the summary
-           and queue the next task without restarting the cockpit.
-
-        2. Optionally, if the user provides a PMS list id, Lead also
-           groups the session's git activity into one parent task + N
-           subtasks (≤ 8h each, one per working day) and creates them
-           via the `pms` MCP server. Skipping the list id leaves the
-           wrap-up summary-only.
+        PMS task auto-creation used to be an optional second step
+        here; it was removed at the user's request so Finish Job
+        stays a single-click action without a list-id prompt. PMS
+        tasks are created manually by Lead when the user asks.
         """
-        from datetime import date, timedelta
-
-        from PyQt6.QtWidgets import QInputDialog, QMessageBox
+        from PyQt6.QtWidgets import QMessageBox
 
         lead = self.orch.panes.get(LEAD.name)
         if lead is None or lead.session is None or not lead.session.is_alive:
@@ -1109,10 +1106,9 @@ class MainWindow(QMainWindow):
                 "  • recommended next steps\n\n"
                 f"After the summary, these teammate panes will be closed:\n"
                 f"  {teammate_line}\n\n"
-                "Lead stays running so you can read the summary.\n\n"
-                "After this dialog you can optionally enter a PMS list id "
-                "to have Lead create tasks for the session's git activity "
-                "via the `pms` MCP server."
+                "Today's session digest is also appended to "
+                "<vault>/05-Daily/<date>.md.\n\n"
+                "Lead stays running so you can read the summary."
             ),
             QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Ok,
@@ -1120,28 +1116,9 @@ class MainWindow(QMainWindow):
         if confirm != QMessageBox.StandardButton.Ok:
             return
 
-        # Step 2 — optional PMS list id. Empty / cancelled = skip task creation.
-        list_id, ok = QInputDialog.getText(
-            self,
-            "Finish Job — PMS list id",
-            (
-                "Enter the PMS list id to file this session's tasks under,\n"
-                "or leave empty to skip task creation.\n\n"
-                "Lead will use the `pms` MCP server to:\n"
-                "  • pms_resolve_list to confirm the list exists\n"
-                "  • pms_preview_task to dry-run each task\n"
-                "  • create 1 parent task + subtasks (≤ 8h each, one per\n"
-                "    working day) grouped from the session's git log."
-            ),
-        )
-        list_id = (list_id or "").strip() if ok else ""
-
         # Compose the wrap-up prompt. Kept Thai-leaning because the rest of
         # the cockpit's Lead instructions are Thai, but English fallback
         # phrases ensure non-Thai users still parse it.
-        today_str = date.today().isoformat()
-        week_ago_str = (date.today() - timedelta(days=7)).isoformat()
-
         summary_prompt = (
             "[FINISH JOB] User marked the session as done. "
             "เขียน final summary แบบ structured ก่อนปิดงาน:\n\n"
@@ -1151,68 +1128,16 @@ class MainWindow(QMainWindow):
             "- (สิ่งที่ติด หรือยังไม่เสร็จ)\n\n"
             "## ➡️ Next Steps\n"
             "- (เริ่มจากตรงไหนต่อ session ถัดไป)\n\n"
-        )
-
-        if list_id:
-            summary_prompt += (
-                f"## 📋 Create PMS tasks in list_id={list_id}\n\n"
-                "**MCP server name is `pms` (exact). Tools are `mcp__pms__pms_*`.**\n"
-                "**Do NOT search for `pms-dev`, `pms_dev`, or any variant.** "
-                "There is only one pms server registered for this cockpit; "
-                "if `mcp__pms__pms_resolve_list` is not visible, that means "
-                "the MCP isn't configured — STOP and report. Never invent a "
-                "dev/staging variant.\n\n"
-                "Use the `pms` MCP server to file this session's work as tasks:\n\n"
-                "1. **Discover the work range** — run `git log --reverse "
-                f"--since=\"{week_ago_str}\" --until=\"{today_str}\" "
-                "--pretty=format:'%h %ad %s' --date=short` in the current "
-                "project root (this is for the **agent-takkub cockpit repo** "
-                "if active, otherwise the active project's git root). Snap "
-                "the actual start to the oldest commit hash you find.\n\n"
-                "2. **Verify the target list** — call "
-                f"`mcp__pms__pms_resolve_list` with `list_id={list_id}` to "
-                "confirm it exists. If it doesn't, report and STOP (do not "
-                "guess a different list).\n\n"
-                "3. **Group commits → tasks** — design as:\n"
-                "   - **1 parent task**: high-level outcome of the session "
-                "(e.g. \"Plan B: multi-project tabs + memory fixes\").\n"
-                "   - **N subtasks**: one per working day, each ≤ 8h "
-                "estimate, name = the day's theme (e.g. \"2026-05-13: "
-                "rtk one-click install + idle watchdog\"). Group commits "
-                "logically — don't create one subtask per commit.\n\n"
-                "4. **Preview before creating** — for each task, call "
-                "`mcp__pms__pms_preview_task` first with the full payload "
-                "(title, description, estimate, parent reference). Show "
-                "the previews here in the pane so the user can spot "
-                "errors before anything is written.\n\n"
-                "5. **Create** — once the previews look right, call the "
-                "matching create tool (likely `mcp__pms__pms_create_task` "
-                "or whatever the server exposes for writes — discover via "
-                "`tools/list` if unsure). Subtasks reference the parent's "
-                "id; create the parent first, then subtasks.\n\n"
-                "6. **Report back** — paste the list of created task ids "
-                "(parent + subtasks) below the summary so the user has a "
-                "paper trail.\n\n"
-                "ถ้า MCP ไม่ available หรือ list_id ไม่มีจริง → STOP, "
-                "เขียน summary ปกติ + รายงานว่า MCP ไม่พร้อม ห้ามแต่ง "
-                "task ids ปลอม\n\n"
-            )
-
-        summary_prompt += (
-            "หลังจากเขียน summary "
-            + ("+ สร้าง tasks " if list_id else "")
-            + "เสร็จ run `takkub close-all` เพื่อปิด teammate panes ที่เหลือ"
+            "หลังจากเขียน summary เสร็จ run `takkub close-all` "
+            "เพื่อปิด teammate panes ที่เหลือ"
         )
         # Inject as a regular task so Lead acknowledges the working state
         # while it writes the summary. close-all happens via Lead itself
         # (it has the gate permission); we also defensively close from the
-        # cockpit side after a delay in case Lead drifted. Bump the
-        # defensive close-all timeout when task creation is involved —
-        # talking to MCP + previewing N subtasks takes longer than a plain
-        # summary.
+        # cockpit side after a delay in case Lead drifted. 60 s is enough
+        # for a plain summary write with no MCP work involved.
         self.orch._send_when_ready(LEAD.name, summary_prompt)
-        defensive_close_ms = 180_000 if list_id else 60_000
-        QTimer.singleShot(defensive_close_ms, lambda: self.orch.close_all_teammates())
+        QTimer.singleShot(60_000, lambda: self.orch.close_all_teammates())
 
         # Append today's session digest for this project to the vault's
         # 05-Daily note. Best-effort: silent when no vault is set up,
@@ -1222,13 +1147,9 @@ class MainWindow(QMainWindow):
         digest_ok = bool(active and self.orch.write_daily_digest(active))
         digest_suffix = " · daily digest appended" if digest_ok else ""
 
-        msg = (
-            f"Finish Job: Lead summary + PMS tasks (list {list_id}){digest_suffix}..."
-            if list_id
-            else f"Finish Job: Lead is writing the summary{digest_suffix}."
-        )
         self._status.showMessage(
-            msg + " Teammates will close shortly.",
+            f"Finish Job: Lead is writing the summary{digest_suffix}. "
+            "Teammates will close shortly.",
             8_000,
         )
 
