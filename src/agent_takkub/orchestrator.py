@@ -230,7 +230,10 @@ _HOT_MD_INTERVAL_MS = 60_000
 
 
 def _render_daily_digest(
-    project: str, when: datetime, sessions: list[tuple[str, str, str]]
+    project: str,
+    when: datetime,
+    sessions: list[tuple[str, str, str]],
+    decisions: list[dict] | None = None,
 ) -> str:
     """Render one Finish-Job digest section for a project.
 
@@ -238,6 +241,12 @@ def _render_daily_digest(
     drawn from `runtime/sessions/<date>/<project>/*.md`. Most recent
     first so the user scanning the daily note sees the latest work
     at the top.
+
+    `decisions` (optional) is a list of {timestamp, heading, ...}
+    dicts from `chatlog_scanner.extract_decisions` — assistant
+    messages with H2 headings that look like recap / structured
+    output. Surfaces under a "Decisions today" sub-bullet so the
+    user can scan what was decided without opening any pane.
 
     Output is a single H2 section so multiple Finish Job invocations
     on the same day (different projects, different times) can append
@@ -249,18 +258,32 @@ def _render_daily_digest(
     if not sessions:
         lines.append("_No `takkub done` events recorded today for this project._")
         lines.append("")
-        return "\n".join(lines)
-    lines.append(f"**Sessions completed today: {len(sessions)}**")
-    lines.append("")
-    for stamp, role, note in sessions:
-        # First line of the note is the human summary; collapse multi-line
-        # notes to one line so the daily file stays scannable.
-        first = (note or "").strip().splitlines()[0] if (note or "").strip() else ""
-        if first:
-            lines.append(f"- `{stamp}` **{role}** — {first}")
-        else:
-            lines.append(f"- `{stamp}` **{role}**")
-    lines.append("")
+    else:
+        lines.append(f"**Sessions completed today: {len(sessions)}**")
+        lines.append("")
+        for stamp, role, note in sessions:
+            # First line of the note is the human summary; collapse multi-line
+            # notes to one line so the daily file stays scannable.
+            first = (
+                (note or "").strip().splitlines()[0]
+                if (note or "").strip()
+                else ""
+            )
+            if first:
+                lines.append(f"- `{stamp}` **{role}** — {first}")
+            else:
+                lines.append(f"- `{stamp}` **{role}**")
+        lines.append("")
+    if decisions:
+        lines.append(f"**Decisions today: {len(decisions)}**")
+        lines.append("")
+        for d in decisions:
+            ts = d.get("timestamp") or ""
+            ts_short = ts.replace("T", " ")[:16] if ts else ""
+            heading = (d.get("heading") or "").strip()
+            if heading:
+                lines.append(f"- `{ts_short}` {heading}")
+        lines.append("")
     return "\n".join(lines)
 
 
@@ -1369,7 +1392,21 @@ class Orchestrator(QObject):
                     tail = body[idx + len(marker) :].strip()
                     note = tail.splitlines()[0] if tail else ""
                 sessions.append((stamp, role, note))
-        section = _render_daily_digest(project, now, sessions)
+        # Decisions today — assistant H2-headed messages from this
+        # project's claude session jsonls. Best-effort: any scan
+        # error degrades to no decisions section.
+        try:
+            from .chatlog_scanner import extract_decisions
+
+            start_of_today = now.replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+            decisions = extract_decisions(
+                project_filter=project, since=start_of_today, limit=10
+            )
+        except Exception:
+            decisions = []
+        section = _render_daily_digest(project, now, sessions, decisions=decisions)
 
         daily_dir = vault / "05-Daily"
         try:

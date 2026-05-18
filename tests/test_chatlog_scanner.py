@@ -25,6 +25,7 @@ from agent_takkub.chatlog_scanner import (
     count_tool_retries,
     count_user_corrections,
     decode_project_dir,
+    extract_decisions,
     extract_text,
     is_conversation_record,
     is_system_reminder,
@@ -575,6 +576,139 @@ class TestToolRetries:
     ) -> None:
         monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
         assert count_tool_retries() == 0
+
+
+class TestExtractDecisions:
+    def test_pulls_h2_headed_assistant_messages(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
+        proj = tmp_path / ".claude" / "projects" / "C--Users-monch-foo"
+        proj.mkdir(parents=True)
+        _write_jsonl(
+            proj / "s.jsonl",
+            [
+                {
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "## Summary\n\nFixed three bugs today.",
+                            }
+                        ],
+                    },
+                    "timestamp": "2026-05-17T10:30:00Z",
+                },
+                {
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "plain reply, no heading"}],
+                    },
+                    "timestamp": "2026-05-17T10:31:00Z",
+                },
+            ],
+        )
+        decisions = extract_decisions()
+        assert len(decisions) == 1
+        assert decisions[0]["heading"] == "Summary"
+
+    def test_ignores_user_messages_with_h2(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        # User messages can contain H2 too (e.g. when pasting docs)
+        # but they're not "claude decided X" — only assistant H2s
+        # qualify as decisions.
+        monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
+        proj = tmp_path / ".claude" / "projects" / "C--Users-monch-foo"
+        proj.mkdir(parents=True)
+        _write_jsonl(
+            proj / "s.jsonl",
+            [
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": [{"type": "text", "text": "## Things to do"}],
+                    },
+                    "timestamp": "2026-05-17T10:00:00Z",
+                }
+            ],
+        )
+        assert extract_decisions() == []
+
+    def test_h1_alone_does_not_qualify(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        # H1 is for top-level reply titles (often boilerplate); only
+        # H2 buckets a message as a decision.
+        monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
+        proj = tmp_path / ".claude" / "projects" / "C--Users-monch-foo"
+        proj.mkdir(parents=True)
+        _write_jsonl(
+            proj / "s.jsonl",
+            [
+                {
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "# Big Title"}],
+                    },
+                    "timestamp": "2026-05-17T10:00:00Z",
+                }
+            ],
+        )
+        assert extract_decisions() == []
+
+    def test_first_h2_wins_for_heading(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
+        proj = tmp_path / ".claude" / "projects" / "C--Users-monch-foo"
+        proj.mkdir(parents=True)
+        _write_jsonl(
+            proj / "s.jsonl",
+            [
+                {
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "intro\n## First Decision\nbody\n## Second\nmore",
+                            }
+                        ],
+                    },
+                    "timestamp": "2026-05-17T10:00:00Z",
+                }
+            ],
+        )
+        decisions = extract_decisions()
+        assert len(decisions) == 1
+        assert decisions[0]["heading"] == "First Decision"
+
+    def test_limit_caps_results(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
+        proj = tmp_path / ".claude" / "projects" / "C--Users-monch-foo"
+        proj.mkdir(parents=True)
+        recs = [
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": f"## Decision {i}"}],
+                },
+                "timestamp": f"2026-05-17T10:{i:02d}:00Z",
+            }
+            for i in range(5)
+        ]
+        _write_jsonl(proj / "s.jsonl", recs)
+        assert len(extract_decisions(limit=3)) == 3
 
 
 class TestSearchSessions:

@@ -377,6 +377,59 @@ def count_tool_retries(
     return storms
 
 
+def _first_h2_heading(text: str) -> str | None:
+    """Return the first H2 line (`## something`) from a multi-line
+    string, stripped of the leading `## ` marker. Returns None if no
+    H2 is present. Skipping H1 (`# `) is deliberate — our assistant
+    side uses H1 for top-level reply titles which are usually noise
+    for a decision timeline."""
+    for line in text.splitlines():
+        s = line.lstrip()
+        if s.startswith("## "):
+            return s[3:].strip()
+    return None
+
+
+def extract_decisions(
+    project_filter: str | None = None,
+    *,
+    since: datetime | None = None,
+    limit: int = 10,
+) -> list[dict]:
+    """Pull assistant messages from today's sessions that look like
+    decision/summary points — heuristic: the message contains at
+    least one `## ` H2 heading. Returns a list (most recent first)
+    of {timestamp, project, heading, snippet} suitable for embedding
+    in the daily digest.
+
+    The daily digest only has room for a handful of these, so
+    `limit` keeps the section short. A noisy assistant turn might
+    contain 5 H2s — we still count the *message* once, surfacing the
+    first heading.
+    """
+    out: list[dict] = []
+    for jsonl in iter_session_files(project_filter, since=since):
+        for rec in iter_records(jsonl):
+            if not is_conversation_record(rec):
+                continue
+            if role_of(rec) != "assistant":
+                continue
+            text = extract_text(rec)
+            heading = _first_h2_heading(text)
+            if heading is None:
+                continue
+            out.append(
+                {
+                    "timestamp": rec.get("timestamp") or "",
+                    "project": jsonl.parent.name,
+                    "heading": heading,
+                    "snippet": _snippet_around(text, "## ", width=160),
+                }
+            )
+    out.sort(key=lambda h: h.get("timestamp") or "", reverse=True)
+    return out[:limit]
+
+
 def search_sessions(
     query: str,
     project_filter: str | None = None,

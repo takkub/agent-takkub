@@ -91,3 +91,49 @@ class TestRenderDailyDigest:
             "p", datetime.now(), [("100000", "backend", "แก้ bug auth")]
         )
         assert "แก้ bug auth" in body
+
+    def test_decisions_section_omitted_when_empty(self) -> None:
+        body = _render_daily_digest("p", datetime.now(), [], decisions=[])
+        assert "Decisions today" not in body
+
+    def test_decisions_section_omitted_when_none(self) -> None:
+        body = _render_daily_digest("p", datetime.now(), [], decisions=None)
+        assert "Decisions today" not in body
+
+    def test_decisions_section_lists_each_with_timestamp(self) -> None:
+        decisions = [
+            {
+                "timestamp": "2026-05-17T11:30:05Z",
+                "heading": "Bracketed paste fix",
+                "project": "p",
+            },
+            {
+                "timestamp": "2026-05-17T10:00:00Z",
+                "heading": "ECC mute decision",
+                "project": "p",
+            },
+        ]
+        body = _render_daily_digest(
+            "p", datetime.now(), [], decisions=decisions
+        )
+        assert "**Decisions today: 2**" in body
+        assert "Bracketed paste fix" in body
+        assert "ECC mute decision" in body
+        # Timestamp shown without trailing Z / seconds-precision
+        assert "2026-05-17 11:30" in body
+
+    def test_decisions_skip_empty_headings(self) -> None:
+        # Defensive: a decision dict without a heading shouldn't
+        # render an empty bullet.
+        body = _render_daily_digest(
+            "p",
+            datetime.now(),
+            [],
+            decisions=[{"timestamp": "x", "heading": "", "project": "p"}],
+        )
+        # Section header still appears (count > 0) but no bullet line.
+        assert "Decisions today" in body
+        bullets = [
+            l for l in body.splitlines() if l.startswith("- ") and "`" in l
+        ]
+        assert bullets == []
