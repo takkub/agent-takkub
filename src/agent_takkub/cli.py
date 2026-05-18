@@ -144,6 +144,48 @@ def cmd_list(_: argparse.Namespace) -> dict:
     return _request(_with_project({"cmd": "list"}))
 
 
+def cmd_search(args: argparse.Namespace) -> dict:
+    """Pure read-only grep across `~/.claude/projects/<*>/<uuid>.jsonl`.
+    Does NOT go through the orchestrator's TCP socket — search is a
+    passive query and works whether the cockpit is running or not."""
+    from datetime import datetime, timedelta
+
+    from .chatlog_scanner import search_sessions
+
+    since: datetime | None = None
+    if getattr(args, "days", None):
+        since = datetime.now() - timedelta(days=args.days)
+    # Default: today only. Keeps a "what did I touch this morning"
+    # search fast on a vault with months of jsonls.
+    if since is None and not getattr(args, "all", False):
+        since = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+
+    hits = search_sessions(
+        args.query,
+        project_filter=args.project,
+        since=since,
+        limit=args.limit,
+    )
+    if not hits:
+        return {"ok": True, "msg": f"no matches for {args.query!r}"}
+    for h in hits:
+        ts = h.get("timestamp") or ""
+        # Trim "T" + microseconds for terminal display
+        ts_short = ts.replace("T", " ")[:19] if ts else "(no ts)"
+        proj = h.get("project") or "?"
+        role = h.get("role") or "?"
+        snippet = h.get("snippet") or ""
+        # Project folder names are encoded — show the recognisable
+        # tail so the line stays readable.
+        proj_tail = proj.split("-")[-1] if "-" in proj else proj
+        print(f"  {proj_tail:18s} {ts_short}  {role:9s}  {snippet}")
+    return {
+        "ok": True,
+        "msg": f"{len(hits)} match(es)"
+        + (" (limit reached)" if len(hits) == args.limit else ""),
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="takkub", description="agent-takkub cockpit CLI")
     sub = p.add_subparsers(dest="command", required=True)
@@ -177,6 +219,35 @@ def main(argv: list[str] | None = None) -> int:
 
     sl = sub.add_parser("list", help="show pane status")
     sl.set_defaults(func=cmd_list)
+
+    sse = sub.add_parser(
+        "search",
+        help="grep past Claude Code conversations across all projects",
+    )
+    sse.add_argument("query", help="substring to grep for (case-insensitive)")
+    sse.add_argument(
+        "--project",
+        default=None,
+        help="filter by project name substring (default: all projects)",
+    )
+    sse.add_argument(
+        "--days",
+        type=int,
+        default=None,
+        help="search last N days (default: today only)",
+    )
+    sse.add_argument(
+        "--all",
+        action="store_true",
+        help="search all history (overrides default 'today only')",
+    )
+    sse.add_argument(
+        "--limit",
+        type=int,
+        default=20,
+        help="max hits to print (default: 20)",
+    )
+    sse.set_defaults(func=cmd_search)
 
     args = p.parse_args(argv)
 

@@ -377,6 +377,75 @@ def count_tool_retries(
     return storms
 
 
+def search_sessions(
+    query: str,
+    project_filter: str | None = None,
+    *,
+    since: datetime | None = None,
+    limit: int = 20,
+) -> list[dict]:
+    """Substring grep across Claude Code session jsonls.
+
+    Returns a list of dicts (most recent first) shaped like:
+      {"project": "<encoded folder>", "path": "<file>",
+       "timestamp": "<iso>", "role": "user|assistant",
+       "snippet": "<text around the match>"}
+
+    The snippet is the line's full text trimmed to ~200 chars
+    centred-ish on the match so the CLI display has context. Case-
+    insensitive. `limit` caps the result list so a generic word
+    doesn't return thousands of hits — the CLI surfaces a footer
+    when truncated.
+
+    System reminders are skipped (the hook-noise meter is the right
+    surface for those) so search results stay focused on real
+    conversation content.
+    """
+    if not query:
+        return []
+    needle = query.lower()
+    hits: list[dict] = []
+    for jsonl in iter_session_files(project_filter, since=since):
+        for rec in iter_records(jsonl):
+            text = extract_text(rec)
+            if not text:
+                continue
+            if needle not in text.lower():
+                continue
+            snippet = _snippet_around(text, query)
+            hits.append(
+                {
+                    "project": jsonl.parent.name,
+                    "path": str(jsonl),
+                    "timestamp": rec.get("timestamp") or "",
+                    "role": role_of(rec) or "",
+                    "snippet": snippet,
+                }
+            )
+    # Most recent first (by timestamp string — ISO8601 sorts right).
+    hits.sort(key=lambda h: h.get("timestamp") or "", reverse=True)
+    return hits[:limit]
+
+
+def _snippet_around(text: str, query: str, width: int = 200) -> str:
+    """Return ~width chars from `text` centred on the first match.
+    Collapses whitespace so the result fits on one terminal line."""
+    flat = " ".join(text.split())
+    flat_lower = flat.lower()
+    idx = flat_lower.find(query.lower())
+    if idx < 0:
+        return flat[:width]
+    half = width // 2
+    start = max(0, idx - half)
+    end = min(len(flat), idx + len(query) + half)
+    snippet = flat[start:end]
+    if start > 0:
+        snippet = "…" + snippet
+    if end < len(flat):
+        snippet = snippet + "…"
+    return snippet
+
+
 def count_hook_fires(
     project_filter: str | None = None, *, since: datetime | None = None
 ) -> dict[str, int]:

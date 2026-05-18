@@ -32,6 +32,7 @@ from agent_takkub.chatlog_scanner import (
     iter_session_files,
     record_timestamp,
     role_of,
+    search_sessions,
     system_reminder_text,
     tool_uses,
 )
@@ -574,6 +575,177 @@ class TestToolRetries:
     ) -> None:
         monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
         assert count_tool_retries() == 0
+
+
+class TestSearchSessions:
+    def test_returns_matching_records(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
+        proj = tmp_path / ".claude" / "projects" / "C--Users-monch-foo"
+        proj.mkdir(parents=True)
+        _write_jsonl(
+            proj / "s.jsonl",
+            [
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": [{"type": "text", "text": "fix the bracketed paste bug"}],
+                    },
+                    "timestamp": "2026-05-17T10:30:00Z",
+                },
+                {
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "unrelated reply"}],
+                    },
+                    "timestamp": "2026-05-17T10:31:00Z",
+                },
+            ],
+        )
+        hits = search_sessions("bracketed paste")
+        assert len(hits) == 1
+        assert hits[0]["role"] == "user"
+        assert "bracketed paste" in hits[0]["snippet"]
+
+    def test_case_insensitive_match(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
+        proj = tmp_path / ".claude" / "projects" / "C--Users-monch-foo"
+        proj.mkdir(parents=True)
+        _write_jsonl(
+            proj / "s.jsonl",
+            [
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": [{"type": "text", "text": "Playwright MCP setup"}],
+                    },
+                    "timestamp": "2026-05-17T10:00:00Z",
+                }
+            ],
+        )
+        assert len(search_sessions("playwright")) == 1
+        assert len(search_sessions("PLAYWRIGHT")) == 1
+
+    def test_results_sorted_most_recent_first(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
+        proj = tmp_path / ".claude" / "projects" / "C--Users-monch-foo"
+        proj.mkdir(parents=True)
+        _write_jsonl(
+            proj / "s.jsonl",
+            [
+                {
+                    "type": "user",
+                    "message": {"role": "user", "content": [{"type": "text", "text": "MCP older"}]},
+                    "timestamp": "2026-05-10T10:00:00Z",
+                },
+                {
+                    "type": "user",
+                    "message": {"role": "user", "content": [{"type": "text", "text": "MCP newer"}]},
+                    "timestamp": "2026-05-17T10:00:00Z",
+                },
+            ],
+        )
+        hits = search_sessions("MCP")
+        assert "newer" in hits[0]["snippet"]
+        assert "older" in hits[1]["snippet"]
+
+    def test_limit_caps_results(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
+        proj = tmp_path / ".claude" / "projects" / "C--Users-monch-foo"
+        proj.mkdir(parents=True)
+        recs = [
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "text", "text": f"hit {i}"}],
+                },
+                "timestamp": f"2026-05-17T10:{i:02d}:00Z",
+            }
+            for i in range(10)
+        ]
+        _write_jsonl(proj / "s.jsonl", recs)
+        assert len(search_sessions("hit", limit=3)) == 3
+
+    def test_empty_query_returns_nothing(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
+        assert search_sessions("") == []
+
+    def test_project_filter_narrows(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
+        base = tmp_path / ".claude" / "projects"
+        keep = base / "C--Users-monch-agent-takkub"
+        skip = base / "C--Users-monch-other"
+        for d in (keep, skip):
+            d.mkdir(parents=True)
+        _write_jsonl(
+            keep / "s.jsonl",
+            [
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": [{"type": "text", "text": "playwright"}],
+                    },
+                    "timestamp": "2026-05-17T10:00:00Z",
+                }
+            ],
+        )
+        _write_jsonl(
+            skip / "s.jsonl",
+            [
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": [{"type": "text", "text": "playwright"}],
+                    },
+                    "timestamp": "2026-05-17T10:00:00Z",
+                }
+            ],
+        )
+        hits = search_sessions("playwright", project_filter="agent-takkub")
+        assert len(hits) == 1
+        assert "agent-takkub" in hits[0]["project"]
+
+    def test_snippet_truncates_around_match(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
+        proj = tmp_path / ".claude" / "projects" / "C--Users-monch-foo"
+        proj.mkdir(parents=True)
+        long_text = "A" * 500 + " needle " + "Z" * 500
+        _write_jsonl(
+            proj / "s.jsonl",
+            [
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": [{"type": "text", "text": long_text}],
+                    },
+                    "timestamp": "2026-05-17T10:00:00Z",
+                }
+            ],
+        )
+        hits = search_sessions("needle")
+        assert "needle" in hits[0]["snippet"]
+        # ~200 chars centred plus ellipses
+        assert len(hits[0]["snippet"]) <= 250
 
 
 class TestIterSessionFiles:
