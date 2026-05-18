@@ -269,6 +269,7 @@ def _render_hot_md(
     active_project_name: str | None,
     recent_sessions: list[tuple[str, str, str]],
     now: datetime,
+    hook_counts: dict[str, int] | None = None,
 ) -> str:
     """Compose the body of `<vault>/hot.md` — the "what's happening
     right now in cockpit" snapshot the user opens to orient themselves.
@@ -277,6 +278,11 @@ def _render_hot_md(
     unit-tested without spinning up Qt. `panes_by_project` is
     `{project: {role: state}}`. `recent_sessions` is a list of
     `(project, role, filename)` tuples — most recent first.
+    `hook_counts` is `{hook_bucket: count}` from
+    `chatlog_scanner.count_hook_fires` — surfaces noisy hooks
+    (GateGuard, cost-critical, loop-warning, etc.) so the user can
+    spot which hook is more annoying than useful and decide whether
+    to mute it via ECC_DISABLED_HOOKS.
     """
     lines: list[str] = []
     lines.append("# Hot — cockpit live state")
@@ -316,6 +322,18 @@ def _render_hot_md(
         for project, role, fname in recent_sessions[:10]:
             lines.append(f"- `{project}` · **{role}** · {fname}")
     lines.append("")
+
+    # Hook noise meter — only render the section when there's
+    # something to report so a quiet day doesn't get a wall of zeros.
+    if hook_counts:
+        lines.append("## Hook noise today")
+        lines.append("")
+        # Loudest hook first so the eye lands on the worst offender.
+        for hook, count in sorted(
+            hook_counts.items(), key=lambda kv: kv[1], reverse=True
+        ):
+            lines.append(f"- **{hook}** — {count}")
+        lines.append("")
 
     lines.append("---")
     lines.append("")
@@ -1371,7 +1389,25 @@ class Orchestrator(QObject):
             active_name, _ = active_project()
         except Exception:
             active_name = None
-        body = _render_hot_md(snapshot, active_name, list(self._recent_done), datetime.now())
+        # Hook noise meter — scan today's Claude Code session jsonl
+        # files for system-reminder records and bucket them. Quiet day
+        # → empty dict → section is omitted by the renderer.
+        try:
+            from .chatlog_scanner import count_hook_fires
+
+            start_of_today = datetime.now().replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+            hook_counts = count_hook_fires(since=start_of_today)
+        except Exception:
+            hook_counts = {}
+        body = _render_hot_md(
+            snapshot,
+            active_name,
+            list(self._recent_done),
+            datetime.now(),
+            hook_counts=hook_counts,
+        )
         try:
             (vault / "hot.md").write_text(body, encoding="utf-8")
         except OSError:

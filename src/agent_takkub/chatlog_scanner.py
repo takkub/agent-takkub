@@ -222,6 +222,62 @@ def tool_uses(rec: dict) -> list[dict]:
     return out
 
 
+# Substring → bucket name. Order matters: more specific patterns
+# first so a "COST CRITICAL" line under an ECC hook bucket as
+# `ecc-cost-monitor`, not the generic catch-all. Buckets surface in
+# hot.md so the user can spot which hook is noisier than useful and
+# decide whether to add it to ECC_DISABLED_HOOKS.
+_HOOK_PATTERNS: list[tuple[str, str]] = [
+    ("Fact-Forcing Gate", "ecc-gateguard"),
+    ("gateguard-fact-force", "ecc-gateguard"),
+    ("COST CRITICAL", "ecc-cost-monitor"),
+    ("ecc-context-monitor", "ecc-cost-monitor"),
+    ("LOOP WARNING", "ecc-loop-warning"),
+    ("StrategicCompact", "ecc-strategic-compact"),
+    ("rtk init", "rtk-hint"),
+    ("claude-obsidian", "claude-obsidian"),
+    ("PostCompact", "post-compact-hook"),
+    ("SessionStart:", "session-start-hook"),
+    ("TodoWrite tool hasn't been used", "todowrite-nag"),
+]
+
+
+def classify_hook(text: str) -> str | None:
+    """Map a system-reminder text to a hook bucket name, or None when
+    none of the known patterns match. Case-sensitive on purpose —
+    hook IDs and the bracket text Claude Code injects are stable, and
+    a fuzzy match would over-bucket harmless system reminders."""
+    if not text:
+        return None
+    for needle, bucket in _HOOK_PATTERNS:
+        if needle in text:
+            return bucket
+    return None
+
+
+def count_hook_fires(
+    project_filter: str | None = None, *, since: datetime | None = None
+) -> dict[str, int]:
+    """Walk session jsonls and count system-reminder records per hook
+    bucket. `since` is typically set to start-of-today so the hot.md
+    section reflects "noise today" rather than lifetime.
+
+    Returns a dict like `{"ecc-gateguard": 47, "ecc-cost-monitor": 62}`.
+    Empty when no buckets matched (or no jsonls under the filter).
+    """
+    counts: dict[str, int] = {}
+    for jsonl in iter_session_files(project_filter, since=since):
+        for rec in iter_records(jsonl):
+            if not is_system_reminder(rec):
+                continue
+            body = system_reminder_text(rec)
+            bucket = classify_hook(body)
+            if bucket is None:
+                continue
+            counts[bucket] = counts.get(bucket, 0) + 1
+    return counts
+
+
 def system_reminder_text(rec: dict) -> str:
     """Extract the text body of a `system` reminder line. Hook fires
     surface here with the hook id buried in the body — the hook noise

@@ -113,6 +113,46 @@ class TestRenderHotMd:
             dt.datetime.now(),
         )
         # Three H2 sections: Panes, Recent, plus the title is H1.
+        # (Hook noise section is omitted when there are no counts.)
         assert body.count("\n## ") == 2
         assert "## Panes" in body
         assert "## Recent `takkub done`" in body
+
+    def test_hook_noise_section_omitted_when_empty(self) -> None:
+        # A quiet day (no hooks fired) should not push an empty
+        # "Hook noise" header to the file — keeps the digest scannable.
+        body = _render_hot_md({}, None, [], dt.datetime.now(), hook_counts={})
+        assert "Hook noise" not in body
+
+    def test_hook_noise_section_rendered_when_counts_present(self) -> None:
+        body = _render_hot_md(
+            {},
+            None,
+            [],
+            dt.datetime.now(),
+            hook_counts={"ecc-gateguard": 47, "ecc-cost-monitor": 62},
+        )
+        assert "## Hook noise today" in body
+        assert "ecc-gateguard" in body
+        assert "47" in body
+        assert "ecc-cost-monitor" in body
+        assert "62" in body
+
+    def test_hook_noise_orders_loudest_first(self) -> None:
+        # The user opens hot.md to see the worst offender first — sort
+        # by count descending so it's the topmost line in the section.
+        body = _render_hot_md(
+            {},
+            None,
+            [],
+            dt.datetime.now(),
+            hook_counts={"low": 3, "high": 99, "mid": 30},
+        )
+        # Find the hook bullets (use " — " separator unique to hook
+        # entries vs. the session bullets which use " · ").
+        hook_lines = [
+            l for l in body.splitlines() if l.startswith("- **") and " — " in l
+        ]
+        assert hook_lines[0].startswith("- **high**")
+        assert hook_lines[1].startswith("- **mid**")
+        assert hook_lines[2].startswith("- **low**")

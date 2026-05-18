@@ -20,6 +20,8 @@ import pytest
 
 from agent_takkub.chatlog_scanner import (
     claude_projects_dir,
+    classify_hook,
+    count_hook_fires,
     decode_project_dir,
     extract_text,
     is_conversation_record,
@@ -272,6 +274,103 @@ class TestSystemReminder:
 
     def test_text_empty_for_non_system(self) -> None:
         assert system_reminder_text({"type": "user"}) == ""
+
+
+class TestClassifyHook:
+    def test_gateguard_pattern_buckets_correctly(self) -> None:
+        assert classify_hook("[Fact-Forcing Gate] please present facts") == "ecc-gateguard"
+        assert classify_hook("running gateguard-fact-force") == "ecc-gateguard"
+
+    def test_cost_critical_pattern(self) -> None:
+        assert classify_hook("COST CRITICAL: Session cost is $999") == "ecc-cost-monitor"
+        assert classify_hook("ecc-context-monitor fired") == "ecc-cost-monitor"
+
+    def test_loop_warning_pattern(self) -> None:
+        assert (
+            classify_hook("LOOP WARNING: Tool called 3 times")
+            == "ecc-loop-warning"
+        )
+
+    def test_strategic_compact(self) -> None:
+        assert (
+            classify_hook("[StrategicCompact] 75 tool calls")
+            == "ecc-strategic-compact"
+        )
+
+    def test_unknown_returns_none(self) -> None:
+        assert classify_hook("some completely unrelated text") is None
+
+    def test_empty_returns_none(self) -> None:
+        assert classify_hook("") is None
+        assert classify_hook(None) is None  # type: ignore[arg-type]
+
+    def test_first_match_wins(self) -> None:
+        # A reminder mentioning both GateGuard and COST CRITICAL —
+        # whichever pattern is listed first in `_HOOK_PATTERNS` claims
+        # the bucket. We don't double-count one record.
+        text = "[Fact-Forcing Gate] ... COST CRITICAL: ..."
+        bucket = classify_hook(text)
+        assert bucket in ("ecc-gateguard", "ecc-cost-monitor")
+
+
+class TestCountHookFires:
+    def test_counts_per_bucket(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
+        proj = tmp_path / ".claude" / "projects" / "C--Users-monch-foo"
+        proj.mkdir(parents=True)
+        _write_jsonl(
+            proj / "s.jsonl",
+            [
+                {"type": "system", "content": "[Fact-Forcing Gate] please"},
+                {"type": "system", "content": "[Fact-Forcing Gate] again"},
+                {"type": "system", "content": "COST CRITICAL: $5"},
+                {"type": "user", "message": {"role": "user", "content": "hi"}},
+            ],
+        )
+        counts = count_hook_fires()
+        assert counts.get("ecc-gateguard") == 2
+        assert counts.get("ecc-cost-monitor") == 1
+
+    def test_filters_by_project(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
+        base = tmp_path / ".claude" / "projects"
+        keep = base / "C--Users-monch-agent-takkub"
+        other = base / "C--Users-monch-other"
+        for d in (keep, other):
+            d.mkdir(parents=True)
+        _write_jsonl(
+            keep / "s.jsonl",
+            [{"type": "system", "content": "[Fact-Forcing Gate]"}],
+        )
+        _write_jsonl(
+            other / "s.jsonl",
+            [{"type": "system", "content": "[Fact-Forcing Gate]"}],
+        )
+        # Restricted to agent-takkub → only that project's 1 fire counted
+        assert count_hook_fires("agent-takkub") == {"ecc-gateguard": 1}
+
+    def test_ignores_non_system_records(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        # Conversational text that happens to contain "COST CRITICAL"
+        # must not bump the counter — only `system` records do.
+        monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
+        proj = tmp_path / ".claude" / "projects" / "C--Users-monch-x"
+        proj.mkdir(parents=True)
+        _write_jsonl(
+            proj / "s.jsonl",
+            [
+                {
+                    "type": "user",
+                    "message": {"role": "user", "content": "COST CRITICAL"},
+                }
+            ],
+        )
+        assert count_hook_fires() == {}
 
 
 class TestIterSessionFiles:
