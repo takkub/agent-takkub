@@ -229,6 +229,41 @@ _LAST_SESSION_MAX_AGE_SEC = 60 * 60
 _HOT_MD_INTERVAL_MS = 60_000
 
 
+def _render_daily_digest(
+    project: str, when: datetime, sessions: list[tuple[str, str, str]]
+) -> str:
+    """Render one Finish-Job digest section for a project.
+
+    `sessions` is a list of (HHMMSS, role, note_first_line) tuples
+    drawn from `runtime/sessions/<date>/<project>/*.md`. Most recent
+    first so the user scanning the daily note sees the latest work
+    at the top.
+
+    Output is a single H2 section so multiple Finish Job invocations
+    on the same day (different projects, different times) can append
+    without clobbering each other.
+    """
+    lines: list[str] = []
+    lines.append(f"## `{project}` · wrapped at {when.strftime('%H:%M:%S')}")
+    lines.append("")
+    if not sessions:
+        lines.append("_No `takkub done` events recorded today for this project._")
+        lines.append("")
+        return "\n".join(lines)
+    lines.append(f"**Sessions completed today: {len(sessions)}**")
+    lines.append("")
+    for stamp, role, note in sessions:
+        # First line of the note is the human summary; collapse multi-line
+        # notes to one line so the daily file stays scannable.
+        first = (note or "").strip().splitlines()[0] if (note or "").strip() else ""
+        if first:
+            lines.append(f"- `{stamp}` **{role}** — {first}")
+        else:
+            lines.append(f"- `{stamp}` **{role}**")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def _render_hot_md(
     panes_by_project: dict[str, dict[str, str]],
     active_project_name: str | None,
@@ -1259,6 +1294,65 @@ class Orchestrator(QObject):
                 if ok:
                     scheduled += 1
         return scheduled
+
+    def write_daily_digest(self, project: str) -> bool:
+        """Append a Finish-Job digest for `project` to today's daily
+        note in the configured Obsidian vault.
+
+        Daily note path is `<vault>/05-Daily/<YYYY-MM-DD>.md`. If the
+        file already exists (another project's Finish Job earlier the
+        same day, or hand-written entries), the digest is appended at
+        the end. Otherwise a fresh file is created with a top-level
+        title.
+
+        Returns True on success, False when no vault is configured or
+        an IO error swallows the write. Caller can surface a status
+        bar message based on the return value.
+        """
+        vault = _resolve_vault_dir()
+        if vault is None:
+            return False
+        now = datetime.now()
+        today = now.strftime("%Y-%m-%d")
+
+        sessions_dir = RUNTIME_DIR / "sessions" / today / project
+        sessions: list[tuple[str, str, str]] = []
+        if sessions_dir.is_dir():
+            for path in sorted(sessions_dir.glob("*.md"), reverse=True):
+                stem = path.stem  # "<role>-<HHMMSS>"
+                if "-" not in stem:
+                    continue
+                role, stamp = stem.rsplit("-", 1)
+                try:
+                    body = path.read_text(encoding="utf-8")
+                except OSError:
+                    continue
+                # `_render_decision_note` writes "## Note\n\n<text>" — pull
+                # the first non-empty line after the header.
+                note = ""
+                marker = "## Note"
+                idx = body.find(marker)
+                if idx >= 0:
+                    tail = body[idx + len(marker) :].strip()
+                    note = tail.splitlines()[0] if tail else ""
+                sessions.append((stamp, role, note))
+        section = _render_daily_digest(project, now, sessions)
+
+        daily_dir = vault / "05-Daily"
+        try:
+            daily_dir.mkdir(parents=True, exist_ok=True)
+            daily_path = daily_dir / f"{today}.md"
+            if daily_path.is_file():
+                existing = daily_path.read_text(encoding="utf-8")
+                if not existing.endswith("\n"):
+                    existing += "\n"
+                daily_path.write_text(existing + "\n" + section, encoding="utf-8")
+            else:
+                header = f"# Daily — {today}\n\n"
+                daily_path.write_text(header + section, encoding="utf-8")
+        except OSError:
+            return False
+        return True
 
     def _write_hot_md(self) -> None:
         """Rewrite `<vault>/hot.md` from the current pane registry plus

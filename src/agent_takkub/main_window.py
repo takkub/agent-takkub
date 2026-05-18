@@ -1213,10 +1213,19 @@ class MainWindow(QMainWindow):
         self.orch._send_when_ready(LEAD.name, summary_prompt)
         defensive_close_ms = 180_000 if list_id else 60_000
         QTimer.singleShot(defensive_close_ms, lambda: self.orch.close_all_teammates())
+
+        # Append today's session digest for this project to the vault's
+        # 05-Daily note. Best-effort: silent when no vault is set up,
+        # but the status bar surfaces the outcome so the user knows the
+        # daily note was (or wasn't) touched.
+        active = active_project()[0]
+        digest_ok = bool(active and self.orch.write_daily_digest(active))
+        digest_suffix = " · daily digest appended" if digest_ok else ""
+
         msg = (
-            f"Finish Job: Lead summary + PMS tasks (list {list_id})..."
+            f"Finish Job: Lead summary + PMS tasks (list {list_id}){digest_suffix}..."
             if list_id
-            else "Finish Job: Lead is writing the summary."
+            else f"Finish Job: Lead is writing the summary{digest_suffix}."
         )
         self._status.showMessage(
             msg + " Teammates will close shortly.",
