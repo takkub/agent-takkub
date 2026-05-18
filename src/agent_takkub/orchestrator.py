@@ -61,6 +61,19 @@ RESUME_WINDOW_SEC = 5 * 60  # respawn within this window → claude --continue
 # Set IDLE_REMIND_AFTER_S to 0 to disable the watchdog entirely.
 IDLE_REMIND_AFTER_S = 45
 IDLE_REMIND_COOLDOWN_S = 90
+
+# A teammate pane in `working` state with no PTY output for this long
+# is treated as hung — claude probably crashed silently, deadlocked on
+# a tool call, or got wedged behind a slow MCP server. Orchestrator
+# auto-recovers via close + respawn (which picks `--continue` because
+# the recent-exit timestamp is fresh). 10 minutes is generous enough
+# that a heavy `npm install` or a slow Lighthouse audit won't trip it.
+STUCK_THRESHOLD_S = 10 * 60
+# Once a recover fires for a pane, wait this long before another one
+# is allowed — otherwise a chronically-stuck workload restarts on a
+# loop. Three strikes is the soft cap (auto-respawn-attempts already
+# handles the hard cap separately).
+STUCK_RECOVER_COOLDOWN_S = 5 * 60
 IDLE_WATCHDOG_INTERVAL_MS = 5_000
 IDLE_REMINDER_TEXT = (
     "🔔 [auto-reminder] task เสร็จแล้วใช่มั้ย? ถ้าใช่ run `takkub done [note]` "
@@ -439,6 +452,10 @@ class Orchestrator(QObject):
         # `close()` / `done()` / manual respawn. Capped at AUTO_RESPAWN_MAX
         # so the orchestrator gives up if claude refuses to come back.
         self._auto_respawn_attempts: dict[str, int] = {}
+        # Last stuck-recover wall-clock per pane (key `<project>::<role>`).
+        # Prevents the watchdog from looping recover→stuck→recover on a
+        # chronically wedged claude.
+        self._last_stuck_recover: dict[str, float] = {}
         self._idle_watchdog = QTimer(self)
         self._idle_watchdog.setInterval(IDLE_WATCHDOG_INTERVAL_MS)
         self._idle_watchdog.timeout.connect(self._check_idle_teammates)
@@ -1279,6 +1296,11 @@ class Orchestrator(QObject):
         gets nudged. Idle-state keys are namespaced `<project>::<role>`
         to keep two projects' state from colliding."""
         now = time.time()
+        # Stuck-pane detection rides the same 5 s tick so we don't pay
+        # for another QTimer. Runs before the idle-reminder logic so a
+        # recover (which closes the pane) doesn't fight with reminder
+        # injection on the same pane.
+        self._check_stuck_panes(now)
         for project_name, project_panes in list(self._panes_by_project.items()):
             for name, pane in list(project_panes.items()):
                 key = f"{project_name}::{name}"
@@ -1332,6 +1354,69 @@ class Orchestrator(QObject):
                     # the agent stays idle for another full
                     # IDLE_REMIND_AFTER_S past the cooldown.
                     entry["first_idle_ts"] = now
+
+    def _check_stuck_panes(self, now: float) -> None:
+        """Walk every teammate pane and auto-recover any that's been
+        sitting in `working` state with no PTY output for longer than
+        STUCK_THRESHOLD_S. A recovered pane runs close→spawn and gets
+        --continue via the existing recent-exits machinery, so claude
+        rejoins the conversation rather than restarting blank.
+
+        Lead is exempt: Lead's "stuck" usually means waiting on user
+        input, not a hang, and a forced restart would lose Lead's
+        conversation with the operator. Teammates are the safe target."""
+        for project_name, project_panes in list(self._panes_by_project.items()):
+            for role, pane in list(project_panes.items()):
+                if role == LEAD.name:
+                    continue
+                if pane.state != "working":
+                    continue
+                if pane.session is None or not pane.session.is_alive:
+                    continue
+                last_out = getattr(pane, "_last_output_ts", 0.0)
+                if not isinstance(last_out, (int, float)) or last_out <= 0:
+                    # Pane hasn't seen output yet — still in bootstrap,
+                    # or the attribute was never initialised (legacy
+                    # AgentPane subclass / test fixture). Skip; the next
+                    # tick will pick it up once a real timestamp lands.
+                    continue
+                if (now - last_out) < STUCK_THRESHOLD_S:
+                    continue
+                key = f"{project_name}::{role}"
+                last_recover = self._last_stuck_recover.get(key, 0.0)
+                if (now - last_recover) < STUCK_RECOVER_COOLDOWN_S:
+                    # Already tried to recover this pane recently;
+                    # leave it alone so we don't loop close→spawn.
+                    continue
+                self._auto_recover_stuck(role, project_name, pane, now)
+
+    def _auto_recover_stuck(
+        self, role: str, project: str, pane: AgentPane, now: float
+    ) -> None:
+        """Close the wedged pane and respawn it with --continue. The
+        spawn uses the pane's last-known cwd so claude rejoins the same
+        project directory."""
+        cwd = pane._session_cwd
+        key = f"{project}::{role}"
+        self._last_stuck_recover[key] = now
+        # Reset the output timestamp so the next tick doesn't re-trigger
+        # before claude has had a chance to print anything from the new
+        # session.
+        pane._last_output_ts = now
+        _log_event(
+            "stuck_pane_recover",
+            role=role,
+            project=project,
+            cwd=cwd or "",
+            silent_for_s=int(now - getattr(pane, "_last_output_ts", now)),
+        )
+        self.close(role, project=project)
+        # 2 s pause so the close has time to terminate the PTY and tear
+        # down the WebEngine view before the respawn binds a new one
+        # to the same role slot.
+        QTimer.singleShot(
+            2_000, lambda: self.spawn(role, cwd=cwd, project=project)
+        )
 
     def _inject_idle_reminder(self, role_name: str, pane: AgentPane) -> None:
         if pane.session is None or not pane.session.is_alive:

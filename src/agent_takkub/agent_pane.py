@@ -90,6 +90,12 @@ class AgentPane(QFrame):
         self._token_timer = QTimer(self)
         self._token_timer.setInterval(5_000)
         self._token_timer.timeout.connect(self._refresh_token_meter)
+        # Wall-clock timestamp of the most recent byte received from the
+        # PTY. The orchestrator's stuck-pane watchdog reads this to
+        # decide whether a "working" pane is silently hung (no output
+        # for STUCK_THRESHOLD_S → auto-recover via close + respawn with
+        # --continue).
+        self._last_output_ts: float = 0.0
 
         self.setObjectName(f"pane_{role.name}")
         self.setFrameShape(QFrame.Shape.StyledPanel)
@@ -243,12 +249,24 @@ class AgentPane(QFrame):
         else:
             self._note.setText("")
 
+    def _mark_output_ts(self, _data: bytes) -> None:
+        """Slot bound to PtySession.bytesIn — bump the last-output
+        wall-clock so the orchestrator's stuck-pane watchdog can tell a
+        live working pane from a silently-hung one."""
+        self._last_output_ts = time.time()
+
     def attach_session(self, session: PtySession, cwd: str | None = None) -> None:
         """Bind a PtySession to this pane's terminal widget. `cwd` (optional)
         is shown in the header next to the role label."""
         self.session = session
         # xterm.js consumes raw PTY bytes directly (no pyte → rich rebuild)
         session.bytesIn.connect(self._terminal.write_bytes)
+        # Also tap bytesIn into the stuck-pane watchdog so it knows when
+        # claude was last *actually* producing output. Reset to "now" at
+        # attach so the watchdog starts the clock from spawn time, not
+        # from whatever the previous session left behind.
+        self._last_output_ts = time.time()
+        session.bytesIn.connect(self._mark_output_ts)
         # pyte still parses the bytes in parallel — use that to push the
         # "claude is idle at the ready prompt" signal into the terminal
         # widget so it can decide whether to local-echo keystrokes.
