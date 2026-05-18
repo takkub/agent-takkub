@@ -1351,6 +1351,49 @@ class Orchestrator(QObject):
                     scheduled += 1
         return scheduled
 
+    def write_resume_briefs(self) -> int:
+        """For every project currently open in cockpit, write a
+        Markdown "resume brief" capturing the last ~20 conversation
+        exchanges to `<vault>/07-AI-Command-Center/briefs/<project>-
+        <YYYY-MM-DD>T<HHMMSS>.md`. Called from MainWindow.closeEvent
+        so the next launch's Lead can read the brief and recover
+        context without scrolling the pane history.
+
+        Returns the number of briefs written. 0 when no vault is
+        configured or no open project had conversation records to
+        summarise.
+        """
+        vault = _resolve_vault_dir()
+        if vault is None:
+            return 0
+        try:
+            from .chatlog_scanner import build_resume_brief
+        except Exception:
+            return 0
+        now = datetime.now()
+        stamp = now.strftime("%Y-%m-%dT%H%M%S")
+        briefs_dir = vault / "07-AI-Command-Center" / "briefs"
+        # Cap the scan window so a long-dormant project doesn't drag
+        # months of jsonls into the brief — last 24 h is plenty for
+        # "where did we leave off."
+        from datetime import timedelta
+
+        since = now - timedelta(hours=24)
+        written = 0
+        for project in self._panes_by_project.keys():
+            body = build_resume_brief(project_filter=project, since=since)
+            if not body:
+                continue
+            try:
+                briefs_dir.mkdir(parents=True, exist_ok=True)
+                (briefs_dir / f"{project}-{stamp}.md").write_text(
+                    body, encoding="utf-8"
+                )
+                written += 1
+            except OSError:
+                continue
+        return written
+
     def write_daily_digest(self, project: str) -> bool:
         """Append a Finish-Job digest for `project` to today's daily
         note in the configured Obsidian vault.

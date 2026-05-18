@@ -1374,6 +1374,14 @@ class MainWindow(QMainWindow):
         # time the snapshot serialiser runs. The next cockpit launch
         # reads this file to re-spawn teammates with `--continue`.
         self.orch.write_session_snapshot()
+        # Also write a per-project resume brief (~last 20 exchanges)
+        # to `<vault>/07-AI-Command-Center/briefs/` so the next session
+        # can read it and pick up context without scrolling pane
+        # history. Best-effort: no vault → silently skipped.
+        try:
+            self.orch.write_resume_briefs()
+        except Exception:
+            pass
         # Walk every project namespace, not just the active view, so a
         # background tab's panes are also terminated cleanly.
         for project_panes in self.orch._panes_by_project.values():

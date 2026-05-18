@@ -430,6 +430,57 @@ def extract_decisions(
     return out[:limit]
 
 
+def build_resume_brief(
+    project_filter: str | None = None,
+    *,
+    last_n: int = 20,
+    since: datetime | None = None,
+) -> str:
+    """Return a markdown blob summarising the last `last_n`
+    conversation records for `project_filter`. Drives the
+    auto-resume brief written to vault on cockpit close so the next
+    session can read it and pick up where the user left off.
+
+    Format: a brief intro header, then a chronological bullet list
+    (oldest first, most recent at the bottom) of user/assistant
+    turns with timestamps and first-line snippets.
+
+    Returns "" when no jsonls match or no conversation records were
+    found — caller can decide whether to write an empty brief or
+    skip the write entirely.
+    """
+    # Walk every jsonl matching the filter, collect every
+    # conversation record with its timestamp. Sort by timestamp so
+    # records from multiple jsonls (multi-session day) interleave
+    # correctly.
+    collected: list[tuple[str, str, str]] = []  # (ts, role, first_line)
+    for jsonl in iter_session_files(project_filter, since=since):
+        for rec in iter_records(jsonl):
+            if not is_conversation_record(rec):
+                continue
+            role = role_of(rec) or "?"
+            text = extract_text(rec)
+            if not text:
+                continue
+            first_line = " ".join(text.split())[:160]
+            ts = rec.get("timestamp") or ""
+            collected.append((ts, role, first_line))
+    if not collected:
+        return ""
+    collected.sort(key=lambda t: t[0])
+    tail = collected[-last_n:]
+    lines: list[str] = []
+    proj_label = project_filter or "all projects"
+    lines.append(f"# Resume brief — {proj_label}")
+    lines.append("")
+    lines.append(f"Last {len(tail)} exchanges (oldest first):")
+    lines.append("")
+    for ts, role, text in tail:
+        ts_short = ts.replace("T", " ")[:16] if ts else ""
+        lines.append(f"- `{ts_short}` **{role}** — {text}")
+    return "\n".join(lines) + "\n"
+
+
 def search_sessions(
     query: str,
     project_filter: str | None = None,

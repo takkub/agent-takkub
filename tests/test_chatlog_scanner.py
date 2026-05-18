@@ -19,6 +19,7 @@ import pathlib
 import pytest
 
 from agent_takkub.chatlog_scanner import (
+    build_resume_brief,
     claude_projects_dir,
     classify_hook,
     count_hook_fires,
@@ -880,6 +881,143 @@ class TestSearchSessions:
         assert "needle" in hits[0]["snippet"]
         # ~200 chars centred plus ellipses
         assert len(hits[0]["snippet"]) <= 250
+
+
+class TestBuildResumeBrief:
+    def test_empty_when_no_records(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
+        assert build_resume_brief() == ""
+
+    def test_renders_chronological_bullets(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
+        proj = tmp_path / ".claude" / "projects" / "C--Users-monch-foo"
+        proj.mkdir(parents=True)
+        _write_jsonl(
+            proj / "s.jsonl",
+            [
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": [{"type": "text", "text": "first msg"}],
+                    },
+                    "timestamp": "2026-05-17T10:00:00Z",
+                },
+                {
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "second msg"}],
+                    },
+                    "timestamp": "2026-05-17T10:01:00Z",
+                },
+            ],
+        )
+        brief = build_resume_brief()
+        # Oldest first → most-recent last
+        first_idx = brief.index("first msg")
+        second_idx = brief.index("second msg")
+        assert first_idx < second_idx
+        assert "**user**" in brief
+        assert "**assistant**" in brief
+
+    def test_caps_at_last_n(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
+        proj = tmp_path / ".claude" / "projects" / "C--Users-monch-foo"
+        proj.mkdir(parents=True)
+        recs = [
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "text", "text": f"msg {i}"}],
+                },
+                "timestamp": f"2026-05-17T10:{i:02d}:00Z",
+            }
+            for i in range(15)
+        ]
+        _write_jsonl(proj / "s.jsonl", recs)
+        brief = build_resume_brief(last_n=5)
+        # Only the last 5 should appear; the first 10 should not
+        for i in range(10):
+            assert f"msg {i}\n" not in brief and f"msg {i} " not in brief
+        for i in range(10, 15):
+            assert f"msg {i}" in brief
+
+    def test_long_lines_truncated_to_160(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        # Keeps the brief scannable; truncates per-line at 160 chars.
+        monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
+        proj = tmp_path / ".claude" / "projects" / "C--Users-monch-foo"
+        proj.mkdir(parents=True)
+        long = "x" * 500
+        _write_jsonl(
+            proj / "s.jsonl",
+            [
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": [{"type": "text", "text": long}],
+                    },
+                    "timestamp": "2026-05-17T10:00:00Z",
+                }
+            ],
+        )
+        brief = build_resume_brief()
+        # Pull the bullet's text portion (after the role marker)
+        bullet = next(
+            line for line in brief.splitlines() if line.startswith("- `")
+        )
+        # The bullet contains some prefix + the truncated x-run
+        x_run = bullet.split("— ", 1)[1] if "— " in bullet else ""
+        assert len(x_run) <= 160
+
+    def test_project_filter_narrows(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
+        base = tmp_path / ".claude" / "projects"
+        keep = base / "C--Users-monch-agent-takkub"
+        skip = base / "C--Users-monch-other"
+        for d in (keep, skip):
+            d.mkdir(parents=True)
+        _write_jsonl(
+            keep / "s.jsonl",
+            [
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": [{"type": "text", "text": "in-scope"}],
+                    },
+                    "timestamp": "2026-05-17T10:00:00Z",
+                }
+            ],
+        )
+        _write_jsonl(
+            skip / "s.jsonl",
+            [
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": [{"type": "text", "text": "out-of-scope"}],
+                    },
+                    "timestamp": "2026-05-17T10:00:00Z",
+                }
+            ],
+        )
+        brief = build_resume_brief(project_filter="agent-takkub")
+        assert "in-scope" in brief
+        assert "out-of-scope" not in brief
 
 
 class TestIterSessionFiles:
