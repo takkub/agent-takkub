@@ -398,10 +398,16 @@ class Orchestrator(QObject):
         # so a broken vault path or readonly runtime never blocks
         # cockpit startup.
         try:
-            from .shared_dev_tools import ensure_browser_mcps
+            from .shared_dev_tools import ensure_browser_mcps, warm_browser_mcps
 
             ok, msg = ensure_browser_mcps()
             _log_event("browser_mcp_init", ok=ok, msg=msg)
+            # Kick the browser MCP servers in background daemon threads
+            # so the npx cache is hot before claude tries to spawn them
+            # lazily on first tool call. Non-blocking; failure here is
+            # logged at the helper level and the MCPs still work on
+            # the slower first call without warm-up.
+            warm_browser_mcps()
         except Exception as e:
             _log_event("browser_mcp_init_error", error=repr(e))
         # Panes are namespaced per project so the upcoming multi-tab UI

@@ -26,6 +26,9 @@ from __future__ import annotations
 
 import json
 
+import subprocess
+import threading
+
 from .config import RUNTIME_DIR
 
 
@@ -199,6 +202,54 @@ def clear_shared_mcp_config() -> None:
             SHARED_MCP_FILE.unlink()
     except OSError:
         pass
+
+
+def warm_browser_mcps() -> None:
+    """Pre-warm the npx cache for the browser MCPs at cockpit boot.
+
+    First-call latency for `npx -y @playwright/mcp@<v>` is high enough
+    on a cold Windows machine to blow past claude code's MCP startup
+    window, which is the failure mode behind "Playwright MCP ยังไม่
+    connect" reports from the user. Pinning the version (already
+    shipped) is half the cure; this is the other half — kick each
+    server in a background daemon thread so npx has the tarball
+    extracted and the entrypoint resolved by the time claude's first
+    `mcp__playwright__*` call lands.
+
+    Implementation: spawn each MCP with stdin closed (DEVNULL). The
+    server starts, reads EOF on stdin, and exits cleanly within a
+    second or two. We don't care about the output — the side effect
+    is the npx cache. A 30 s timeout caps the worst case (slow npm
+    registry / first download); errors are swallowed so a network
+    blip never blocks cockpit boot.
+
+    Daemon threads so cockpit shutdown doesn't wait on them.
+    """
+
+    def _warm_one(argv: list[str]) -> None:
+        try:
+            subprocess.run(
+                argv,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=30,
+                check=False,
+            )
+        except Exception:
+            # Any failure (timeout, FileNotFoundError when npx is
+            # missing, permission issue) is non-fatal — the MCP will
+            # still work on the slow first call, just no warm-up.
+            pass
+
+    for name, cfg in BROWSER_MCPS.items():
+        argv = [cfg["command"], *cfg["args"]]
+        threading.Thread(
+            target=_warm_one,
+            args=(argv,),
+            name=f"warm-{name}",
+            daemon=True,
+        ).start()
 
 
 def shared_mcp_config_path() -> str | None:
