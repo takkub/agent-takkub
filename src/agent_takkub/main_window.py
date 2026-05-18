@@ -54,12 +54,6 @@ from .orchestrator import Orchestrator
 from .project_tab import ProjectTab
 from .roles import DEFAULT_TEAMMATES, LEAD, Role, by_name
 from .rtk_helper import install_rtk, is_rtk_installed, rtk_binary_available
-from .shared_dev_tools import (
-    PMS_MCP_DEFAULT_URL,
-    read_shared_mcp_config,
-    shared_mcp_config_exists,
-    write_shared_mcp_config,
-)
 from .token_meter import format_tokens, usage_color
 
 
@@ -232,20 +226,6 @@ class MainWindow(QMainWindow):
         )
         self._btn_install_rtk.clicked.connect(self._on_install_rtk_clicked)
 
-        # Shared pms MCP setup — cockpit-wide, not per-project. Cockpit
-        # writes runtime/shared-mcp.json with the user's bearer token and
-        # passes it to every claude spawn via --mcp-config so the pms tools
-        # are available in every project tab. Yellow chip while missing,
-        # green checkmark once configured.
-        self._btn_setup_pms_mcp = QPushButton("🔐 Setup pms MCP", self)
-        self._btn_setup_pms_mcp.setToolTip(
-            "Configure the cockpit-wide pms MCP server. The bearer token\n"
-            "is stored under runtime/shared-mcp.json (gitignored). Once\n"
-            "set up, every claude spawn (Lead + teammates, every project\n"
-            "tab) gets the pms tools without per-project settings edits."
-        )
-        self._btn_setup_pms_mcp.clicked.connect(self._on_setup_pms_mcp_clicked)
-
         self._btn_add_pane = QPushButton("➕ Add Agent", self)
         self._btn_add_pane.setToolTip("Open a pane for a role (default or custom)")
         self._btn_add_pane.clicked.connect(self._on_add_pane_clicked)
@@ -320,7 +300,6 @@ class MainWindow(QMainWindow):
         self._project_combo.hide()
         self._status.addPermanentWidget(self._btn_add_project)
         self._status.addPermanentWidget(self._btn_install_rtk)
-        self._status.addPermanentWidget(self._btn_setup_pms_mcp)
         self._status.addPermanentWidget(self._btn_add_pane)
         self._status.addPermanentWidget(self._btn_assign)
         self._status.addPermanentWidget(self._btn_logs)
@@ -331,7 +310,6 @@ class MainWindow(QMainWindow):
         # on a fully-built status bar rather than a half-built one (an
         # earlier mid-loop call kept the button invisible on first paint).
         self._refresh_rtk_button()
-        self._refresh_pms_mcp_button()
 
         # Only NOW is it safe to listen for tab switches — the handler
         # touches `_btn_install_rtk` via `_refresh_rtk_button`, which
@@ -961,109 +939,6 @@ class MainWindow(QMainWindow):
                 )
         except Exception:
             pass
-
-    def _refresh_pms_mcp_button(self) -> None:
-        """Flip the pms MCP button between yellow "Setup" and green "✓"
-        depending on whether `runtime/shared-mcp.json` carries a usable
-        bearer token. Once configured the user can still click to update
-        the token via the same flow."""
-        if shared_mcp_config_exists():
-            self._btn_setup_pms_mcp.setText("🔐 pms MCP ✓")
-            self._btn_setup_pms_mcp.setStyleSheet(
-                "QPushButton { color: #14532d; background: #86efac; "
-                "border: 1px solid #16a34a; border-radius: 4px; "
-                "padding: 2px 8px; }"
-                "QPushButton:hover { background: #bbf7d0; }"
-            )
-        else:
-            self._btn_setup_pms_mcp.setText("🔐 Setup pms MCP")
-            self._btn_setup_pms_mcp.setStyleSheet(
-                "QPushButton { color: #1f2937; background: #fbbf24; "
-                "border: 1px solid #b45309; border-radius: 4px; "
-                "padding: 2px 8px; font-weight: 500; }"
-                "QPushButton:hover { background: #fcd34d; }"
-            )
-
-    def _on_setup_pms_mcp_clicked(self) -> None:
-        """Prompt for the pms MCP bearer token, persist the shared
-        config, and restart the active tab's Lead so the new
-        `--mcp-config` actually loads (Lead picks up MCP servers at
-        spawn time, never mid-session). Idempotent — re-running
-        rewrites the file so the user can rotate the token without
-        leaving the cockpit.
-
-        The URL is fixed to `PMS_MCP_DEFAULT_URL` (production). Cockpit
-        spawns pass `--strict-mcp-config` alongside `--mcp-config` so
-        any pre-existing user-level `claude mcp add pms ...` entry is
-        ignored — otherwise the old/revoked bearer registered there
-        would shadow the new one we just wrote.
-        """
-        from PyQt6.QtWidgets import QInputDialog, QLineEdit, QMessageBox
-
-        _, masked = read_shared_mcp_config()
-
-        title = "Setup pms MCP"
-        body = (
-            "Paste the pms MCP bearer token.\n\n"
-            "If the existing token returns 401: open https://pms.wsol.co.th\n"
-            "→ click your name → Settings → Developer API → Generate API key,\n"
-            "then paste the new pms_… string here.\n\n"
-            "Accepts either `pms_…` or `Bearer pms_…` — the prefix is\n"
-            "stripped automatically. Stored under runtime/shared-mcp.json\n"
-            "(gitignored). Spawned panes use --strict-mcp-config so this is\n"
-            "the only pms entry claude sees (any user-level `claude mcp add`\n"
-            "is overridden).\n\n"
-            "The active tab's Lead will restart automatically so the new\n"
-            "token is in effect immediately."
-        )
-        if masked:
-            body += f"\n\nCurrent token (masked): {masked}"
-
-        token, ok = QInputDialog.getText(
-            self,
-            title,
-            body,
-            QLineEdit.EchoMode.Password,
-            "",
-        )
-        token = (token or "").strip()
-        if not ok:
-            return
-        if not token:
-            QMessageBox.warning(
-                self,
-                title,
-                "No token entered. The existing config was left unchanged.",
-            )
-            return
-
-        ok, msg = write_shared_mcp_config(token, url=PMS_MCP_DEFAULT_URL)
-        if not ok:
-            QMessageBox.critical(self, "Setup pms MCP failed", msg)
-            self._refresh_pms_mcp_button()
-            return
-
-        self._refresh_pms_mcp_button()
-
-        # Restart the active tab's Lead so the new --mcp-config takes
-        # effect immediately. Other open tabs keep their old Lead until
-        # the user switches to them and re-triggers a restart (or until
-        # the user closes + reopens the tab). Mention that explicitly
-        # so the user isn't surprised when only one tab gets the tools.
-        other_tabs = [n for n in self._open_projects() if n != active_project()[0]]
-        if other_tabs:
-            self._status.showMessage(
-                f"pms MCP saved. Restarting active Lead… "
-                f"(other tabs unchanged: {', '.join(other_tabs)} — "
-                f"switch + restart manually to apply there too)",
-                12_000,
-            )
-        else:
-            self._status.showMessage(
-                "pms MCP saved. Restarting Lead to pick up the new MCP config…",
-                8_000,
-            )
-        self._restart_lead_for_active_project()
 
     def _on_finish_job_clicked(self) -> None:
         """User-driven job wrap-up. Asks Lead for a closing summary,

@@ -235,7 +235,7 @@ takkub search "<query>" [--days N] [--all]           # grep past Claude conversa
 
 ### PMS MCP (optional)
 
-ในหน้า cockpit กดปุ่ม **🔧 Setup pms MCP** ใส่ bearer token → cockpit เขียน `runtime/shared-mcp.json` ให้ทุก pane ใช้ pms MCP tools (`mcp__pms__pms_*`) ได้
+ใส่ bearer token เข้า `runtime/shared-mcp.json` ตรงๆ (ไฟล์ gitignore แล้ว) หรือเรียก `write_shared_mcp_config(token)` จาก Python — ทุก pane จะใช้ pms MCP tools (`mcp__pms__pms_*`) ได้ผ่าน `--mcp-config` ที่ orchestrator inject ทุก spawn (ไม่มี UI button — token ไม่ rotate บ่อย ปกติตั้งครั้งเดียวจบ)
 
 ### Browser MCPs (auto, ไม่ต้อง setup)
 
