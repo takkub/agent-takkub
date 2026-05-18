@@ -138,6 +138,49 @@ class TestRenderHotMd:
         assert "ecc-cost-monitor" in body
         assert "62" in body
 
+    def test_friction_section_omitted_when_empty(self) -> None:
+        body = _render_hot_md({}, None, [], dt.datetime.now(), friction={})
+        assert "Friction" not in body
+
+    def test_friction_section_omitted_when_all_zero(self) -> None:
+        # Empty-dict and all-zero counts should both suppress the
+        # section — otherwise a quiet day still gets an empty header.
+        body = _render_hot_md(
+            {},
+            None,
+            [],
+            dt.datetime.now(),
+            friction={"corrections": 0, "tool_retries": 0},
+        )
+        assert "Friction" not in body
+
+    def test_friction_section_rendered_with_counts(self) -> None:
+        body = _render_hot_md(
+            {},
+            None,
+            [],
+            dt.datetime.now(),
+            friction={"corrections": 5, "tool_retries": 2},
+        )
+        assert "## Friction today" in body
+        assert "user corrections" in body
+        assert "tool retry storms" in body
+        assert "5" in body
+        assert "2" in body
+
+    def test_friction_skips_zero_counts(self) -> None:
+        # If corrections > 0 but tool_retries == 0, only the
+        # corrections bullet should render (cleaner output).
+        body = _render_hot_md(
+            {},
+            None,
+            [],
+            dt.datetime.now(),
+            friction={"corrections": 3, "tool_retries": 0},
+        )
+        assert "user corrections" in body
+        assert "tool retry storms" not in body
+
     def test_hook_noise_orders_loudest_first(self) -> None:
         # The user opens hot.md to see the worst offender first — sort
         # by count descending so it's the topmost line in the section.

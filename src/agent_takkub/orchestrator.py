@@ -270,6 +270,7 @@ def _render_hot_md(
     recent_sessions: list[tuple[str, str, str]],
     now: datetime,
     hook_counts: dict[str, int] | None = None,
+    friction: dict[str, int] | None = None,
 ) -> str:
     """Compose the body of `<vault>/hot.md` — the "what's happening
     right now in cockpit" snapshot the user opens to orient themselves.
@@ -333,6 +334,20 @@ def _render_hot_md(
             hook_counts.items(), key=lambda kv: kv[1], reverse=True
         ):
             lines.append(f"- **{hook}** — {count}")
+        lines.append("")
+
+    # Friction heatmap — surface "user corrected claude" and
+    # "claude retried the same tool 3+ times" so the user sees
+    # where workflow was rough. Same omit-when-empty rule.
+    if friction and any(friction.values()):
+        lines.append("## Friction today")
+        lines.append("")
+        c = int(friction.get("corrections", 0))
+        r = int(friction.get("tool_retries", 0))
+        if c:
+            lines.append(f"- **user corrections** — {c}")
+        if r:
+            lines.append(f"- **tool retry storms** — {r}")
         lines.append("")
 
     lines.append("---")
@@ -1389,24 +1404,34 @@ class Orchestrator(QObject):
             active_name, _ = active_project()
         except Exception:
             active_name = None
-        # Hook noise meter — scan today's Claude Code session jsonl
-        # files for system-reminder records and bucket them. Quiet day
-        # → empty dict → section is omitted by the renderer.
+        # Hook noise meter + friction heatmap — scan today's Claude
+        # Code session jsonl files for system reminders and user-
+        # correction signals. Quiet day → empty → renderer omits.
         try:
-            from .chatlog_scanner import count_hook_fires
+            from .chatlog_scanner import (
+                count_hook_fires,
+                count_tool_retries,
+                count_user_corrections,
+            )
 
             start_of_today = datetime.now().replace(
                 hour=0, minute=0, second=0, microsecond=0
             )
             hook_counts = count_hook_fires(since=start_of_today)
+            friction = {
+                "corrections": count_user_corrections(since=start_of_today),
+                "tool_retries": count_tool_retries(since=start_of_today),
+            }
         except Exception:
             hook_counts = {}
+            friction = {}
         body = _render_hot_md(
             snapshot,
             active_name,
             list(self._recent_done),
             datetime.now(),
             hook_counts=hook_counts,
+            friction=friction,
         )
         try:
             (vault / "hot.md").write_text(body, encoding="utf-8")
