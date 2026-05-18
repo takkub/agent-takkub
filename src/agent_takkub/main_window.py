@@ -41,6 +41,7 @@ from .agent_pane import AgentPane
 from .cli_server import CliServer
 from .config import (
     EVENTS_LOG,
+    REPO_ROOT,
     active_project,
     get_open_tabs,
     lead_cwd,
@@ -226,6 +227,30 @@ class MainWindow(QMainWindow):
         )
         self._btn_install_rtk.clicked.connect(self._on_install_rtk_clicked)
 
+        # Self-update chip. Polls `git fetch` + `git status` every 5 min
+        # so a user that pulled their friend's commit from another machine
+        # sees the update light up here without needing to touch a
+        # terminal. Click flow lives in `_on_update_clicked` (with a
+        # confirm dialog, dirty-tree guard, and restart-on-success).
+        self._btn_update = QPushButton("🔄 Up to date", self)
+        self._btn_update.setToolTip(
+            "Check for cockpit code updates from origin/main and pull them\n"
+            "via fast-forward. User-specific files (projects.json, runtime/,\n"
+            ".venv/) are gitignored and never touched. Local edits to\n"
+            "tracked files block the pull until you commit or stash."
+        )
+        self._btn_update.setStyleSheet(
+            "QPushButton { color: #4ade80; background: #052e16; "
+            "border: 1px solid #166534; border-radius: 4px; "
+            "padding: 2px 8px; }"
+            "QPushButton:hover { background: #14532d; }"
+        )
+        self._btn_update.clicked.connect(self._on_update_clicked)
+        # Cached result from the most recent poll. Populated lazily so
+        # the click handler doesn't re-run git just to re-render the
+        # same dialog.
+        self._update_status_cache: dict | None = None
+
         self._btn_add_pane = QPushButton("➕ Add Agent", self)
         self._btn_add_pane.setToolTip("Open a pane for a role (default or custom)")
         self._btn_add_pane.clicked.connect(self._on_add_pane_clicked)
@@ -300,6 +325,7 @@ class MainWindow(QMainWindow):
         self._project_combo.hide()
         self._status.addPermanentWidget(self._btn_add_project)
         self._status.addPermanentWidget(self._btn_install_rtk)
+        self._status.addPermanentWidget(self._btn_update)
         self._status.addPermanentWidget(self._btn_add_pane)
         self._status.addPermanentWidget(self._btn_assign)
         self._status.addPermanentWidget(self._btn_logs)
@@ -346,6 +372,16 @@ class MainWindow(QMainWindow):
         self._session_save_timer.setInterval(60_000)
         self._session_save_timer.timeout.connect(self.orch.write_session_snapshot)
         self._session_save_timer.start()
+
+        # Update-check poll: 5-minute tick after a 30-second warm-up
+        # so the very first cockpit launch doesn't fire `git fetch`
+        # while the renderer + Lead are still booting and disk + npm
+        # cache + ms-playwright browsers are competing for I/O.
+        self._update_check_timer = QTimer(self)
+        self._update_check_timer.setInterval(5 * 60_000)
+        self._update_check_timer.timeout.connect(self._run_update_check)
+        self._update_check_timer.start()
+        QTimer.singleShot(30_000, self._run_update_check)
 
         # ── boot: start CLI server + auto-spawn Lead ────────────
         QTimer.singleShot(0, self._boot)
@@ -1023,6 +1059,202 @@ class MainWindow(QMainWindow):
             "Teammates will close shortly.",
             8_000,
         )
+
+    def _run_update_check(self) -> None:
+        """Poll origin/main and refresh the update chip. Runs on a
+        5-minute QTimer + once 30 s after boot. Errors (offline,
+        timeout, non-repo) leave the chip on its last known state so
+        a brief network blip doesn't blink the UI."""
+        from .update_helper import fetch_remote, is_git_repo, local_status
+
+        if not is_git_repo():
+            self._update_status_cache = {"not_repo": True}
+            self._refresh_update_button()
+            return
+        fetch_remote()  # best effort; ignore failure
+        self._update_status_cache = local_status()
+        self._refresh_update_button()
+
+    def _refresh_update_button(self) -> None:
+        """Flip the update chip's label/colour based on the cached
+        status. Five visual states: not-a-repo, error, clean+up-to-date,
+        clean+behind, dirty."""
+        status = self._update_status_cache or {}
+        if status.get("not_repo"):
+            self._btn_update.setText("🔒 Update disabled")
+            self._btn_update.setToolTip(
+                "This install is not a git checkout — pull updates manually."
+            )
+            self._btn_update.setStyleSheet(
+                "QPushButton { color: #94a3b8; background: #1e293b; "
+                "border: 1px solid #334155; border-radius: 4px; "
+                "padding: 2px 8px; }"
+            )
+            return
+        if not status.get("ok"):
+            self._btn_update.setText("⚠ Update check failed")
+            self._btn_update.setToolTip(
+                f"Last error: {status.get('error', 'unknown')}\n"
+                "Will retry on the next 5-minute tick."
+            )
+            self._btn_update.setStyleSheet(
+                "QPushButton { color: #fca5a5; background: #450a0a; "
+                "border: 1px solid #7f1d1d; border-radius: 4px; "
+                "padding: 2px 8px; }"
+            )
+            return
+        if not status.get("clean"):
+            n = len(status.get("dirty_files", []))
+            self._btn_update.setText(f"⚠ Local edits ({n})")
+            self._btn_update.setToolTip(
+                "Tracked files have uncommitted changes. Click to see\n"
+                "the list. Pull is blocked until you commit or stash."
+            )
+            self._btn_update.setStyleSheet(
+                "QPushButton { color: #fde047; background: #422006; "
+                "border: 1px solid #a16207; border-radius: 4px; "
+                "padding: 2px 8px; }"
+            )
+            return
+        behind = status.get("behind", 0)
+        if behind == 0:
+            self._btn_update.setText("🔄 Up to date")
+            self._btn_update.setToolTip("On origin/main. Next check in 5 min.")
+            self._btn_update.setStyleSheet(
+                "QPushButton { color: #4ade80; background: #052e16; "
+                "border: 1px solid #166534; border-radius: 4px; "
+                "padding: 2px 8px; }"
+                "QPushButton:hover { background: #14532d; }"
+            )
+        else:
+            self._btn_update.setText(f"📦 Update available ({behind})")
+            self._btn_update.setToolTip(
+                f"origin/main has {behind} new commit{'s' if behind != 1 else ''}. Click to pull."
+            )
+            self._btn_update.setStyleSheet(
+                "QPushButton { color: #1e3a8a; background: #93c5fd; "
+                "border: 1px solid #2563eb; border-radius: 4px; "
+                "padding: 2px 8px; font-weight: 500; }"
+                "QPushButton:hover { background: #bfdbfe; }"
+            )
+
+    def _on_update_clicked(self) -> None:
+        """User clicked the update chip. Three branches based on the
+        cached status: not-a-repo (no-op tooltip), dirty (show file
+        list, no pull), clean (confirm dialog → pull → restart prompt).
+        """
+        from PyQt6.QtWidgets import QMessageBox
+
+        from .update_helper import (
+            current_sha,
+            pull_updates,
+            pyproject_changed_in_pull,
+        )
+
+        status = self._update_status_cache or {}
+        if status.get("not_repo"):
+            QMessageBox.information(
+                self,
+                "Update",
+                "This install is not a git checkout. To update, replace\n"
+                "the agent-takkub folder with a fresh clone and copy your\n"
+                "projects.json + runtime/ across.",
+            )
+            return
+        if not status.get("ok"):
+            QMessageBox.warning(
+                self,
+                "Update check failed",
+                f"Could not read git status:\n{status.get('error', 'unknown')}\n\n"
+                "The next 5-minute check will retry automatically.",
+            )
+            return
+        if not status.get("clean"):
+            files = status.get("dirty_files", [])
+            preview = "\n".join(f"  • {f}" for f in files[:20])
+            more = "" if len(files) <= 20 else f"\n  …and {len(files) - 20} more"
+            QMessageBox.warning(
+                self,
+                "Local edits block update",
+                "Tracked files have uncommitted changes:\n\n"
+                f"{preview}{more}\n\n"
+                "Commit, stash, or revert these before pulling. The\n"
+                "update chip will refresh on the next 5-minute tick.",
+            )
+            return
+        behind = status.get("behind", 0)
+        if behind == 0:
+            self._status.showMessage("Already up to date", 4_000)
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Pull update",
+            f"Pull {behind} commit{'s' if behind != 1 else ''} from origin/main?\n\n"
+            "Cockpit will need to restart afterwards. Your project paths\n"
+            "(projects.json), session history (runtime/), and venv are\n"
+            "safe — only git-tracked files are touched.",
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Ok,
+        )
+        if confirm != QMessageBox.StandardButton.Ok:
+            return
+        before_sha = current_sha()
+        ok, msg = pull_updates()
+        if not ok:
+            QMessageBox.critical(self, "Pull failed", msg)
+            self._run_update_check()  # refresh chip with latest state
+            return
+        after_sha = current_sha()
+        pip_needed = pyproject_changed_in_pull(before_sha, after_sha)
+        pip_note = (
+            "\n\n⚠ pyproject.toml changed — run `pip install -e .`\n"
+            "(in `.venv`) before relaunching so dependency changes\n"
+            "take effect."
+            if pip_needed
+            else ""
+        )
+        restart = QMessageBox.question(
+            self,
+            "Restart to apply update",
+            f"{msg}.{pip_note}\n\nRestart cockpit now?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if restart == QMessageBox.StandardButton.Yes:
+            self._restart_cockpit()
+        else:
+            self._run_update_check()
+
+    def _restart_cockpit(self) -> None:
+        """Spawn a fresh agent-takkub process and quit this one. The
+        new process picks up the session-resume snapshot that
+        closeEvent will write, so open tabs + active panes survive
+        the restart automatically.
+        """
+        import subprocess
+        import sys
+
+        from PyQt6.QtCore import QCoreApplication
+
+        try:
+            subprocess.Popen(
+                [sys.executable, "-m", "agent_takkub"],
+                cwd=str(REPO_ROOT),
+                close_fds=True,
+            )
+        except Exception as e:
+            # If we can't spawn the successor, don't quit — leave the
+            # user in their current session and surface the error.
+            from PyQt6.QtWidgets import QMessageBox
+
+            QMessageBox.critical(
+                self,
+                "Restart failed",
+                f"Could not launch a new cockpit:\n{e}\n\n"
+                "Quit this cockpit manually and run agent-takkub.bat.",
+            )
+            return
+        QCoreApplication.quit()
 
     def _on_install_rtk_clicked(self) -> None:
         from PyQt6.QtWidgets import QMessageBox
