@@ -1,32 +1,67 @@
 # agent-takkub
 
-Desktop cockpit for orchestrating Claude Code dev teammates on Windows. Replaces the tmux-based `agent-teams` setup with a PyQt6 GUI, native Windows PTY (pywinpty), and a small CLI (`takkub`) that agents use to talk to each other.
+> Desktop cockpit สำหรับ orchestrate Claude Code dev team หลาย pane พร้อมกัน บน Windows
+> PyQt6 GUI + Windows native PTY + `takkub` CLI ที่ agents ใช้คุยกันเองได้
 
-> **Companion docs:** [`docs/TASKS.md`](docs/TASKS.md) (build log) · [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) (constraints & out-of-scope) · [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (how it works) · [`CHANGELOG.md`](CHANGELOG.md) (version history)
+---
 
-## ทำไมเปลี่ยน
+## สรุประบบสั้นๆ
 
-`agent-teams` เดิมพึ่ง tmux ที่ทำงานไม่ดีบน Windows native: MSYS tmux server ตายเองตอน parent shell exit, winpty wrapping ปัญหา, CRLF, ฟอนต์ไทยใน mintty ต้องตั้งเอง. `agent-takkub` จัดการทั้งหมดในแอป Qt ตัวเดียว.
+`agent-takkub` คือ **desktop app** ที่เปิด Claude Code หลายตัวพร้อมกันในรูปแบบ pane grid ให้ทำงานเป็นทีม dev จริงๆ:
 
-- Windows ConPTY/WinPTY ผ่าน pywinpty
-- GUI desktop app เปิดจาก Start menu / shortcut
-- พิมพ์ไทย + IME + diacritics (สระ, tone marks) render ครบ
-- Lazy spawn — เปิด pane เมื่อ Lead สั่ง, ปิดอัตโนมัติเมื่อ agent ทำ `takkub done`
-- Auto-trust folder prompt
-- Auto-detect ❯ ready prompt ก่อน paste task (ไม่มี fixed delay)
-- Session resume (`claude --continue`) เมื่อ respawn ภายใน 5 นาทีในที่ cwd เดิม
-- Desktop toast notification เมื่อ agent done
-- Event audit log (`runtime/events.log`)
+```
+┌──────────────────┬──────────────────┐
+│                  │  Frontend pane   │
+│                  ├──────────────────┤
+│   Lead pane      │  Backend pane    │
+│  (orchestrator)  ├──────────────────┤
+│                  │  QA pane         │
+│                  ├──────────────────┤
+│                  │  Reviewer pane   │
+└──────────────────┴──────────────────┘
+```
 
-## Quick start (newcomers, 3 steps)
+- **Lead** = claude ตัวหลัก (อยู่ซ้าย) สั่งงาน, วางแผน, รับ report
+- **Teammates** = specialist claude (frontend / backend / mobile / devops / designer / qa / reviewer) ที่ spawn ตามคำสั่ง Lead
+- **takkub CLI** = ทุก pane เรียกคำสั่งหากันเองได้: `takkub assign --role backend "<task>"`, `takkub send --to qa "<msg>"`, `takkub done`
+- **Multi-project tabs** = เปิดหลาย project พร้อมกันใน tab แยก, แต่ละ tab มี Lead + teammates ของตัวเอง, ไม่ cross-talk
+- **Auto-everything** — session resume on restart, stuck-pane auto-recover, MCP pre-warm, decision log to Obsidian vault, daily digest, resume brief, hook noise meter
 
-ก่อนเริ่มต้อง install **3 ตัวนี้บนเครื่อง**:
+**ไม่ใช่** SaaS, ไม่ส่ง code ออกนอกเครื่อง, ทำงานบน `claude` CLI ที่ login แล้ว (Max OAuth หรือ API key — ตามที่คุณตั้งไว้ใน Claude Code)
 
-1. **Python 3.11+** — https://www.python.org/downloads/ (เลือก "Add Python to PATH")
-2. **Claude Code CLI** — `npm install -g @anthropic-ai/claude-code` แล้ว `claude` ครั้งเดียวเพื่อ login
-3. **Git** — https://git-scm.com/download/win
+---
 
-แล้ว:
+## Prerequisites — สิ่งที่ต้องมีก่อนติดตั้ง
+
+ติดตั้งครั้งเดียวต่อเครื่อง:
+
+### 1. Python 3.11 หรือสูงกว่า
+- ดาวน์โหลด: <https://www.python.org/downloads/>
+- ตอน install **ติ๊ก "Add Python to PATH"** (สำคัญที่สุด)
+- ตรวจ: เปิด terminal ใหม่ → `python --version` ต้องโชว์ `Python 3.11.x` หรือสูงกว่า
+
+### 2. Node.js (LTS) + npm
+- ดาวน์โหลด: <https://nodejs.org/> เลือก LTS
+- ใช้สำหรับติดตั้ง `claude` CLI และ run browser MCPs
+- ตรวจ: `node --version` ต้องโชว์ `v20.x` หรือสูงกว่า, `npx --version` ต้องโชว์เลข version
+
+### 3. Claude Code CLI
+- ติดตั้ง: `npm install -g @anthropic-ai/claude-code`
+- รัน `claude` ครั้งแรกเพื่อ login (Claude Max OAuth หรือใส่ API key)
+- ตรวจ: `claude --version` ต้องโชว์ version
+
+### 4. Git
+- Windows: <https://git-scm.com/download/win>
+- ใช้สำหรับ clone repo
+
+### (ทางเลือก) 5. Obsidian
+- ดาวน์โหลด: <https://obsidian.md/>
+- ถ้าใช้ → cockpit จะ auto-mirror decision logs + hot snapshot + daily digest + resume briefs เข้า vault
+- ไม่ใช้ก็ได้ — cockpit ทำงานปกติ แค่ skip vault mirror
+
+---
+
+## Quick Install (สามขั้น)
 
 ```bat
 git clone git@github.com:takkub/agent-takkub.git
@@ -34,110 +69,72 @@ cd agent-takkub
 agent-takkub.bat
 ```
 
-`agent-takkub.bat` จะตรวจ + setup + เปิดให้ ครั้งแรกใช้เวลา ~2 นาทีเพราะ download Chromium (~150 MB):
+`agent-takkub.bat` ทำให้อัตโนมัติ:
 
-1. ✅ ตรวจ Python + claude CLI
-2. ✅ สร้าง `.venv` + `pip install -e .`
-3. ✅ Copy `projects.json.example` → `projects.json` แล้วเปิดให้แก้ paths
-4. ✅ Launch cockpit (window pop-up)
+1. ตรวจ Python + Claude CLI + Node อยู่ใน PATH
+2. สร้าง `.venv` + `pip install -e .` (download PyQt6 + Chromium ~150 MB ใช้เวลา 1–3 นาทีครั้งแรก)
+3. Copy `projects.json.example` → `projects.json` เปิด notepad ให้คุณแก้ paths ของ project
+4. Launch cockpit window
 
-หลัง edit `projects.json` ให้ชี้ไปยัง project ของคุณ รัน `agent-takkub.bat` อีกที — เปิดทันที ไม่ตรวจ setup ซ้ำ
+ครั้งถัดไปรัน `agent-takkub.bat` แล้วเปิดทันที (ไม่ตรวจ setup ซ้ำ)
 
-## Requirements (detailed)
+---
 
-- Windows 10 (build 19041+) หรือ Windows 11
-- Python 3.11+
-- Claude Code CLI ติดตั้งและล็อกอินแล้ว (`claude --version` ต้อง work)
-- Git (สำหรับ clone)
-- ~200 MB disk (PyQt6 ~50 MB, Chromium ~150 MB, code ~5 MB)
+## Detailed Install (ทีละขั้นถ้าอยากเข้าใจ)
 
-## Manual setup (advanced)
-
-หากอยาก bootstrap ทีละขั้นโดยไม่ผ่าน `agent-takkub.bat`:
+### Step 1: Clone repo
 
 ```bat
+cd C:\Users\<you>\Projects
 git clone git@github.com:takkub/agent-takkub.git
 cd agent-takkub
+```
 
+ถ้าไม่มี SSH key set up ให้ใช้ HTTPS:
+```bat
+git clone https://github.com/takkub/agent-takkub.git
+```
+
+### Step 2: สร้าง Python virtual environment
+
+```bat
 python -m venv .venv
+```
+
+จะได้ folder `.venv` ใน repo (gitignore แล้ว) — ใส่ Python interpreter + libs ทั้งหมดที่ cockpit ต้องการ ไม่ปนกับ Python ตัวอื่นในเครื่อง
+
+### Step 3: ติดตั้ง dependencies
+
+```bat
 .venv\Scripts\python.exe -m pip install --upgrade pip
 .venv\Scripts\python.exe -m pip install -e .
+```
 
+ครั้งแรก pip จะดาวน์โหลด:
+- **PyQt6** + **PyQt6-WebEngine** (~150 MB เพราะมี Chromium binary)
+- **pywinpty** (Windows native PTY wrapper)
+- **pyte** (terminal emulator)
+
+ใช้เวลา 1–3 นาที ขึ้นอยู่กับ network
+
+### Step 4: ตั้งค่า projects.json
+
+```bat
 copy projects.json.example projects.json
-notepad projects.json   ^&^& REM แก้ paths
-
-.venv\Scripts\pythonw.exe -m agent_takkub
+notepad projects.json
 ```
 
-`scripts\run.bat` คือ thin wrapper ที่ delegate ไป `agent-takkub.bat` (root) — เก็บไว้เพื่อ backward compat
-
-## Troubleshooting
-
-| Symptom | Fix |
-|---|---|
-| `Python is not on PATH` | re-install Python กับ option "Add Python to PATH" |
-| `claude CLI is not on PATH` | `npm install -g @anthropic-ai/claude-code` แล้ว `claude` ครั้งหนึ่งเพื่อ login |
-| Cockpit เปิดแล้วปิดทันที | ลองรัน `.venv\Scripts\python.exe -m agent_takkub` (ไม่ใช่ `pythonw`) เพื่อดู error |
-| `takkub: command not found` ใน Lead bash | bin/takkub POSIX shim ต้องอยู่ — เช็คว่า `bin\takkub` มีใน clone |
-| Thai สระแสดงไม่ครบ | v0.2.x bug — upgrade ถึง v0.3.0+ (xterm.js terminal) |
-| SessionStart hook error | `set TAKKUB_SETTING_SOURCES=project,local` ก่อนเปิดเพื่อ skip user-level plugins |
-| Lead spawn ใน wrong dir | ตรวจ `projects.json` → `paths` แล้วใส่ `"lead": "web"` เพื่อ pick path |
-
-## Layout
-
-```
-┌────────────────────────────────┬──────────────────────────┐
-│ ● Lead · pms                ×  │ ● Frontend · pms-web  × │
-│                                │                          │
-│  <claude TUI for Lead>         │  <claude TUI>            │
-│                                │                          │
-│                                ├──────────────────────────┤
-│                                │ ● Backend · pms-api   × │
-│                                │  <claude TUI>            │
-│                                │                          │
-└────────────────────────────────┴──────────────────────────┘
-status: cockpit · cli 51609 · 2 active · 1 working     [project: pms ▼] [+ pane] [⟶ assign] [logs] [?]
-```
-
-- Lead pane เต็มจอตอนเริ่ม
-- `takkub assign --role X "task"` → ขวา split ลงล่างตามจำนวน agents
-- Agent `takkub done` → pane เด้งหายอัตโนมัติ + Lead รับแจ้ง
-
-## `takkub` CLI (รันจาก pane ไหนก็ได้)
-
-```bash
-takkub list
-takkub spawn --role <role> [--cwd <path>]
-takkub assign --role <role> [--cwd <path>] "<task>"
-takkub send --to <role> "<msg>"        # peer message, CCs Lead
-takkub close --role <role>
-takkub close-all                       # close all teammates, keep Lead
-takkub done [note]                     # agents call this when finished
-```
-
-ถ้า `--cwd` ไม่ระบุ orchestrator เลือก path จาก active project อัตโนมัติ:
-
-| Role | Default cwd preference |
-|---|---|
-| frontend, designer | `web` → `client` → `frontend` |
-| backend | `api` → `server` → `backend` |
-| mobile | `mobile` → `app` → `web` |
-| devops | `api` → `infra` → `ci` → `ops` |
-| qa | `web` → `api` |
-| reviewer | `api` → `web` |
-| custom | first path in active project |
-
-## projects.json
+แก้ตามตัวอย่าง (เปลี่ยน paths เป็น project ของคุณ):
 
 ```json
 {
-  "active": "pms",
+  "active": "myproject",
   "projects": {
-    "pms": {
-      "description": "PMS",
+    "myproject": {
+      "description": "My web app",
       "paths": {
-        "web": "C:/Users/monch/WebstormProjects/pms/pms-web",
-        "api": "C:/Users/monch/WebstormProjects/pms/pms-api"
+        "web": "C:/Users/me/Projects/myproject/web",
+        "api": "C:/Users/me/Projects/myproject/api"
       },
       "presets": ["frontend", "backend"]
     }
@@ -145,82 +142,217 @@ takkub done [note]                     # agents call this when finished
 }
 ```
 
-- `paths` — มาตรฐาน key (web/api/mobile/infra ฯลฯ); ใช้สำหรับ role-aware cwd
-- `presets` — รายชื่อ role ที่จะ auto-spawn 15s หลัง Lead boot (ตั้งระยะ 3s ต่อ role)
+**Field reference:**
+- `active` — ชื่อ project ที่ default เปิดเมื่อ launch cockpit
+- `paths` — key มาตรฐาน (`web` / `api` / `mobile` / `infra` / etc.) → ใช้สำหรับ role-aware cwd
+  - frontend / designer → `web` first
+  - backend → `api` first
+  - mobile → `mobile` first, fallback `web`
+  - devops → `api` / `infra`
+  - qa / reviewer → first path
+- `presets` — รายชื่อ role ที่จะ auto-spawn 15 วินาทีหลัง Lead boot (เว้น 3s ต่อ role)
 
-Switch active project ผ่าน combo box ใน status bar.
+### Step 5: เปิด cockpit
 
-## Keyboard / mouse shortcuts
+```bat
+.venv\Scripts\pythonw.exe -m agent_takkub
+```
 
-- **F1** — help cheatsheet
-- **Ctrl + + / - / 0** ใน terminal — ขนาดฟอนต์ (จำต่อ pane)
-- **Mouse wheel** ใน terminal — forward เป็น PgUp/PgDn ให้ claude scroll history เอง
-- **กดปุ่ม ×** ใน pane header — ปิด pane (เหมือน `takkub close --role X`)
-- **กดปุ่ม ▾ / ▸** ใน pane header — minimise/restore (collapse body, header strip)
-- **กดปุ่ม ⤓** ใน active pane — export pane buffer เป็น `.txt` ใน `runtime/exports/`
+หรือ
+```bat
+agent-takkub.bat
+```
 
-## Status bar widgets (ขวา → ซ้าย)
+หน้าต่าง PyQt6 จะเปิดขึ้นมา, Lead pane จะ boot อัตโนมัติ และถ้ามี `presets` ก็จะ auto-spawn teammates
 
-| Widget | ทำอะไร |
+---
+
+## First Launch — what happens
+
+1. **Lead pane** เปิดขึ้นมาเต็มจอ + claude bootstrap ~5 วินาที
+2. ถ้ามี **trust folder modal** จาก claude → cockpit auto-press Enter ให้
+3. **Preset teammates** spawn ตามลำดับใน projects.json (3 วินาทีต่อ role)
+4. **Browser MCPs** (Playwright + Chrome DevTools) pre-warm in background — ครั้งแรกใช้เวลา 10–30s ดาวน์โหลด, ครั้งต่อไป instant
+5. ถ้ามี **session snapshot** จาก crash/restart ครั้งก่อน → cockpit re-spawn panes พร้อม `--continue`
+
+---
+
+## Daily usage
+
+### สั่ง Lead จาก main pane
+
+พิมพ์ใน Lead pane ตรงๆ เช่น:
+```
+ช่วยเพิ่ม endpoint /login ที่ backend + form /login ที่ frontend
+```
+
+Lead จะใช้ `takkub assign` spawn teammates เองตาม role ที่ต้องการ
+
+### `takkub` CLI (รันจาก pane ใดก็ได้)
+
+```bash
+takkub list                                          # ดูสถานะทุก pane
+takkub assign --role backend --cwd <path> "<task>"   # spawn (ถ้ายังไม่เปิด) + ส่ง task
+takkub send --to frontend "API ใช้ POST /auth/login" # peer message (CC Lead อัตโนมัติ)
+takkub close --role qa                               # ปิด pane
+takkub close-all                                     # ปิด teammates ทั้งหมด (Lead รอด)
+takkub done [note]                                   # teammates report เสร็จ → ปิดตัวเอง
+takkub search "<query>" [--days N] [--all]           # grep past Claude conversations
+```
+
+### หน้าต่าง multi-project
+
+- กดปุ่ม `+` มุมขวาบนของ tab strip → picker เลือก project เพิ่ม
+- กด `x` บน tab → confirm dialog → ปิด Lead + teammates ของ project นั้น
+- ทุก project มี Lead + teammates ของตัวเอง, แยก audit trail, ไม่ cross-talk
+
+### Finish Job
+
+ปุ่ม **✅ Finish Job** ขวาล่าง status bar:
+1. Lead เขียน structured summary (Accomplished / Blockers / Next Steps)
+2. Append **daily digest** ลง `<vault>/05-Daily/<date>.md` (ถ้ามี vault)
+3. ปิด teammates ทั้งหมด (Lead รอดเพื่ออ่าน summary)
+
+---
+
+## Optional Integrations
+
+### Obsidian vault
+
+ถ้ามี Obsidian vault ที่มี folder `01-Projects/` ภายใน → cockpit auto-mirror:
+
+| ไฟล์ที่เขียน | ตอนไหน | เนื้อหา |
+|---|---|---|
+| `<vault>/01-Projects/<project>/sessions/<date>T<time>-<role>.md` | ทุกครั้งที่ teammate `takkub done` | decision log จากการทำงาน |
+| `<vault>/hot.md` | ทุก 60 วินาที + ทุก done event | live snapshot: active project, panes, recent done, hook noise, friction |
+| `<vault>/05-Daily/<date>.md` | กด Finish Job | per-project digest: sessions + decisions today |
+| `<vault>/07-AI-Command-Center/briefs/<project>-<date>T<time>.md` | ปิด cockpit | last 20 exchanges as resume brief |
+
+**Resolution order** ของ vault path:
+1. `$TAKKUB_VAULT_DIR` (explicit override)
+2. `~/WebstormProjects/second-brain` (default, ถ้ามี `01-Projects/` ข้างใน)
+3. ไม่มี → skip silently
+
+### PMS MCP (optional)
+
+ในหน้า cockpit กดปุ่ม **🔧 Setup pms MCP** ใส่ bearer token → cockpit เขียน `runtime/shared-mcp.json` ให้ทุก pane ใช้ pms MCP tools (`mcp__pms__pms_*`) ได้
+
+### Browser MCPs (auto, ไม่ต้อง setup)
+
+Cockpit auto-inject:
+- `@playwright/mcp@0.0.75` — smoke tests, e2e
+- `chrome-devtools-mcp@0.26.0` — runtime debug ของ web app
+
+ทุก pane เห็น `mcp__playwright__*` และ `mcp__chrome-devtools__*` tools ได้
+
+---
+
+## Auto features (ทำงานเองในพื้นหลัง)
+
+1. **Session resume** — ปิด cockpit → snapshot ทุก active pane → เปิดใหม่ → re-spawn พร้อม `--continue` (ใน 1 ชั่วโมง)
+2. **Stuck-pane auto-recover** — teammate working > 10 นาที ไม่มี output → auto close + respawn พร้อม `--continue`
+3. **Auto-respawn on crash** — claude.exe ตาย unexpected → spawn ใหม่ใน slot เดิมไม่เกิน 2 ครั้ง
+4. **MCP pre-warm** — boot cockpit → npx download/start playwright + chrome-devtools ใน background
+5. **80% context warning** — pane ไหน token ใช้ > 80% → toast + status bar
+6. **Multi-tab token chip** — tab title โชว์ peak usage `<project> · 52k/200k`
+7. **ECC plugin noise muted** — auto-inject `ECC_GATEGUARD=off` + `ECC_DISABLED_HOOKS` กัน hook spam
+8. **Auto-trust folder** — claude แสดง trust modal → cockpit press Enter ให้
+9. **Decision log** — ทุก `takkub done` → markdown file + Obsidian mirror
+
+---
+
+## Chatlog mining (read-only insights จาก Claude sessions)
+
+Cockpit อ่าน `~/.claude/projects/<encoded>/*.jsonl` (Claude Code's session logs) เพื่อแสดง:
+
+| What | Where |
 |---|---|
-| `?` | help dialog (F1) |
-| `logs` | toggle bottom panel แสดง events.log live |
-| `⟶ assign` | quick-assign dialog: pick role + multi-line task |
-| `+ pane` | dialog เพิ่ม pane จาก default role หรือ "custom..." (พร้อม color picker) |
-| `project: ▼` | combo box สลับ active project |
+| **Hook noise meter** | `<vault>/hot.md` "Hook noise today" section — นับ ECC GateGuard / cost-critical / loop-warning ที่ fire วันนี้ |
+| **Friction heatmap** | `<vault>/hot.md` "Friction today" — นับ user corrections (ไม่ใช่, ผิด, พังเลย) + tool retry storms |
+| **Decision timeline** | Daily digest "Decisions today" — H2-headed assistant messages |
+| **Resume brief** | ปิด cockpit → per-project last 20 exchanges |
+| **Search** | `takkub search "<query>"` — grep ทุก project + ทุก session |
 
-## Auto-trust + session resume
+ทั้งหมด read-only — ไม่แตะไฟล์ของ Claude
 
-- ตอน claude แสดง trust folder modal — orchestrator detect แล้วส่ง Enter อัตโนมัติ (poll ทุก 500ms, max 30s)
-- ตอน claude ready (`❯` idle prompt) — orchestrator paste task ที่ queue ไว้ (poll, fallback 45s timeout)
-- ถ้า claude.exe ตาย unexpected — pane state เปลี่ยนเป็น 🟠 `exited` + note exit code, คลิก Spawn เพื่อ respawn
-- Respawn ภายใน 5 นาทีใน cwd เดิม → ผ่าน `--continue` ให้ claude resume conversation ก่อนหน้า
+---
 
-## Specialist role override
+## Environment variables (optional)
 
-แต่ละ teammate pane spawn ด้วย `--append-system-prompt-file .claude/agents/<role>.md` เพื่อบังคับ specialist behavior แม้ cwd เป็น project root ที่มี CLAUDE.md ของ Lead.
-
-ใน `runtime/agents/<role>/CLAUDE.md` คือ specialist instructions + ตัวอย่างคำสั่ง `takkub send` / `takkub done`.
-
-## Files generated at runtime
-
-| Path | Purpose |
+| Var | Effect |
 |---|---|
-| `runtime/port` | TCP port ที่ cli_server bind (เพื่อ `takkub` CLI เชื่อม) |
-| `runtime/events.log` | JSONL audit trail ของ spawn / assign / send / close / done |
-| `runtime/agents/<role>/CLAUDE.md` | specialist role override (copy จาก `.claude/agents/`) |
-| `runtime/exports/<role>-<ts>.txt` | manual buffer exports จากปุ่ม ⤓ |
+| `TAKKUB_VAULT_DIR` | path ไป Obsidian vault (override default `~/WebstormProjects/second-brain`) |
+| `TAKKUB_SETTING_SOURCES` | claude `--setting-sources` flag (default `project,local` กัน claude-obsidian SessionStart crash) |
+| `TAKKUB_ECC_FULL=1` | ปิด ECC noise mute (เปิด ECC hooks ครบทุกตัว) |
+| `TAKKUB_TEAMMATE_MODEL` | model สำหรับ teammates (default `claude-sonnet-4-6`) |
+| `TAKKUB_TEAMMATE_EFFORT` | effort level (default `medium`) |
+| `TAKKUB_AUTO_REMOTE_CONTROL=0` | skip auto `/remote-control` ใน Lead |
+| `TAKKUB_ALLOW_TASK=1` | un-block built-in `Task` tool ให้ panes (default block, ใช้ `takkub assign` แทน) |
 
-`runtime/` ถูก gitignore.
+ตั้ง env vars **ก่อน** launch cockpit จาก terminal เดียวกัน, หรือใส่ใน Windows system env vars
+
+---
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `Python is not on PATH` | re-install Python กับ option "Add Python to PATH" |
+| `claude CLI is not on PATH` | `npm install -g @anthropic-ai/claude-code` แล้ว `claude` ครั้งหนึ่งเพื่อ login |
+| Cockpit เปิดแล้วปิดทันที | รัน `.venv\Scripts\python.exe -m agent_takkub` (ไม่ใช่ `pythonw`) เพื่อดู error ใน console |
+| `takkub: command not found` ใน pane | `bin\takkub` shim ต้องอยู่ — เช็คว่าไฟล์มีจริงใน clone |
+| Thai สระแสดงไม่ครบ | upgrade > v0.3.0 (xterm.js terminal) |
+| Playwright MCP "ไม่ connect" | restart cockpit 1 ครั้ง (per-spawn migration + version pin จะ kick in) |
+| Lead spawn ใน wrong dir | ตรวจ `projects.json` → `paths` แล้วเพิ่ม `"lead": "web"` |
+| Browser MCPs prompt ทุกครั้ง | ปกติ — claude ขอ allow ครั้งแรกของ session ใหม่ |
+| `runtime/shared-mcp.json` race | restart cockpit (one-time, idempotent re-write) |
+| ECC GateGuard fact-force ขึ้นทุก Edit | cockpit auto-mute ตั้งแต่ v0.3.5+ — ถ้ายังขึ้น = pane เก่า, ปิด+spawn ใหม่ |
+
+---
 
 ## Project structure
 
 ```
 agent-takkub/
-├── CLAUDE.md                  # Lead instructions
-├── projects.json              # active project + paths + presets
-├── pyproject.toml
-├── .claude/agents/            # 7 default role CLAUDE.md (frontend/backend/...)
+├── README.md                     # ไฟล์นี้
+├── CLAUDE.md                     # Lead's system prompt (spawn-time)
+├── projects.json                 # active project + paths + presets
+├── pyproject.toml                # PyQt6 + dependencies
+├── agent-takkub.bat              # one-click launcher (setup + launch)
+├── .claude/agents/               # 7 default role CLAUDE.md
+├── bin/takkub                    # POSIX shim → python -m agent_takkub.cli
+├── bin/takkub.cmd                # Windows cmd shim
+├── runtime/                      # gitignored — port file, events.log, sessions, snapshots
 ├── src/agent_takkub/
-│   ├── app.py                 # PyQt entry
-│   ├── main_window.py         # 3-column dynamic splitter, status bar
-│   ├── agent_pane.py          # header + state + terminal stack
-│   ├── terminal_widget.py     # pyte rendering + ANSI colors + key/IME/wheel
-│   ├── pty_session.py         # pywinpty + pyte glue
-│   ├── orchestrator.py        # spawn/assign/send/close/done + auto-trust + resume
-│   ├── cli_server.py          # QTcpServer for takkub CLI
-│   ├── cli.py                 # `takkub` CLI client
-│   ├── logs_panel.py          # bottom dock: tail events.log + filter/search
-│   ├── _win_console.py        # hide ConsoleWindowClass HWNDs after spawn
-│   ├── config.py              # projects.json + runtime/ helpers
-│   └── roles.py               # default role registry
-├── bin/takkub.cmd             # CLI shim → .venv\python -m agent_takkub.cli
-└── scripts/run.bat            # launcher (pythonw, console-less)
+│   ├── app.py                    # PyQt entry point
+│   ├── main_window.py            # QTabWidget, status bar, Finish Job
+│   ├── project_tab.py            # per-tab Lead + teammate stack
+│   ├── agent_pane.py             # pane header + state + terminal stack
+│   ├── terminal_widget.py        # xterm.js terminal in QWebEngineView
+│   ├── pty_session.py            # pywinpty wrapper + reader/writer threads
+│   ├── orchestrator.py           # spawn/assign/send/close/done + auto-features
+│   ├── cli_server.py             # QTcpServer for takkub CLI
+│   ├── cli.py                    # `takkub` CLI client
+│   ├── chatlog_scanner.py        # read-only walker over Claude session jsonl
+│   ├── shared_dev_tools.py       # MCP shared config (pms + browser MCPs)
+│   ├── rtk_helper.py             # rtk hook one-click installer
+│   ├── logs_panel.py             # bottom dock: tail events.log
+│   ├── config.py                 # projects.json + runtime/ helpers
+│   ├── roles.py                  # default role registry
+│   └── token_meter.py            # JSONL session reader + context budget
+└── tests/                        # 231 unit tests, no GUI required
 ```
 
-## Known limits
+---
 
-- Thai chars proportional inside terminal (no Thai monospace ships on Windows). Latin remains mono via Cascadia.
-- Claude alt-screen buffer is not in pyte's history — use mouse wheel to scroll inside claude's own UI.
-- Single-instance only (port file is global). Run separate Python user account if you need parallel cockpits.
-- Custom role color picked via "+ pane → custom..." resets between cockpit restarts (in-memory only).
+## License
+
+MIT — ดู `LICENSE`
+
+---
+
+## Contributing / Bug reports
+
+GitHub Issues: <https://github.com/takkub/agent-takkub/issues>
+
+PR welcome, ลอง `python -m pytest tests/` ก่อน push (ต้องผ่านครบทุก test)
