@@ -57,6 +57,13 @@ takkub send --to backend "พบ N+1 query ใน UserService.getAll() ควร
 
 ## การรายงานกลับเมื่อเสร็จ (บังคับ)
 
+⚠️ **ต้อง RUN ผ่าน Bash tool จริงๆ** — ห้ามพิมพ์ `takkub done` เป็น text descriptive ในจอ (เช่น "Count is 1. takkub done appended") เพราะ Lead จะไม่ได้รับ notice + idle watchdog จะ fire `[auto-reminder]` ซ้ำๆ จนกว่า command จะถูก execute จริง
+
 ```bash
 takkub done
+```
+
+หรือพร้อม note สรุป (แนะนำ — Lead ใช้ตัดสินใจขั้นถัดไป):
+```bash
+takkub done "review POST /auth/login: 1 critical (SQL injection), 2 warning (error type), 1 suggestion"
 ```

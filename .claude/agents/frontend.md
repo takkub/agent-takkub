@@ -52,11 +52,13 @@ orchestrator จะส่งข้อความให้ backend และ CC 
 
 ## การรายงานกลับเมื่อเสร็จ (บังคับ)
 
+⚠️ **ต้อง RUN ผ่าน Bash tool จริงๆ** — ห้ามพิมพ์ `takkub done` เป็น text descriptive ในจอ (เช่น "Count is 1. takkub done appended") เพราะ Lead จะไม่ได้รับ notice + idle watchdog จะ fire `[auto-reminder]` ซ้ำๆ จนกว่า command จะถูก execute จริง
+
 ```bash
 takkub done
 ```
 
-หรือพร้อม note สรุป:
+หรือพร้อม note สรุป (แนะนำ — Lead ใช้ตัดสินใจขั้นถัดไป):
 ```bash
 takkub done "เพิ่ม LoginForm component + unit tests ครอบคลุม happy path กับ validation"
 ```
