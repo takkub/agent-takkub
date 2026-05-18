@@ -192,6 +192,23 @@ def _render_decision_note(project: str, role: str, note: str, now: datetime) -> 
     )
 
 
+# Where teammate-pane state lives between cockpit restarts. Lead panes
+# are already restored by the open_tabs mechanism in projects.json
+# (one Lead per tab). Teammate panes — frontend/backend/qa/etc. that
+# the user spawned manually — disappear when cockpit shuts down. The
+# session snapshot file records which teammates were live in each tab
+# at the moment of shutdown (or at the last periodic tick) so the next
+# cockpit launch can re-spawn them with --continue and the user resumes
+# right where they left off.
+#
+# Skip snapshots older than _LAST_SESSION_MAX_AGE_SEC: an hour-old
+# snapshot is stale enough that the underlying claude conversations
+# have probably been compacted out of usefulness and a fresh spawn is
+# kinder than a confusing `--continue` against half-remembered context.
+_LAST_SESSION_FILE = RUNTIME_DIR / "last-session.json"
+_LAST_SESSION_MAX_AGE_SEC = 60 * 60
+
+
 # How often the orchestrator rewrites `<vault>/hot.md`. The hot file is
 # a low-stakes status snapshot — open Obsidian, see what cockpit is
 # doing right now — so the cadence trades freshness for write churn.
@@ -365,7 +382,7 @@ class Orchestrator(QObject):
 
     statusChanged = pyqtSignal()
     leadInjected = pyqtSignal(str)
-    paneRequested = pyqtSignal(str)  # role_name — main_window should add this pane
+    paneRequested = pyqtSignal(str, str)  # role_name, project — main_window adds pane to the matching tab
     paneClosed = pyqtSignal(str, str)  # role_name, project — main_window removes pane from the matching tab
     agentDone = pyqtSignal(str, str)  # role_name, note — for desktop notifications
 
@@ -491,7 +508,7 @@ class Orchestrator(QObject):
         pane = project_panes.get(role_name)
         if pane is None:
             # ask main_window to create + register the pane, then retry
-            self.paneRequested.emit(role_name)
+            self.paneRequested.emit(role_name, project_ns)
             pane = project_panes.get(role_name)
             if pane is None:
                 return False, f"unknown role: {role_name}"
@@ -1128,6 +1145,98 @@ class Orchestrator(QObject):
     # ──────────────────────────────────────────────────────────────
     # `<vault>/hot.md` — periodic snapshot of cockpit live state
     # ──────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────────
+    # session snapshot — restore teammate panes across cockpit restarts
+    # ──────────────────────────────────────────────────────────────
+    def snapshot_state(self) -> dict:
+        """Return a JSON-serialisable picture of every live teammate pane
+        across every project. Lead panes are excluded because the tab
+        restore in main_window (driven by `open_tabs` in projects.json)
+        already brings Lead back. We only capture panes that are actively
+        running and in a state worth resuming (active/working) — empty,
+        exited, or error panes are intentionally skipped so a crashed
+        run doesn't get re-spawned into the same crash.
+        """
+        projects: dict[str, list[dict]] = {}
+        for project, panes in self._panes_by_project.items():
+            entries: list[dict] = []
+            for role, pane in panes.items():
+                if role == LEAD.name:
+                    continue
+                if pane.session is None or not pane.session.is_alive:
+                    continue
+                if pane.state not in ("active", "working"):
+                    continue
+                entries.append(
+                    {
+                        "role": role,
+                        "cwd": pane._session_cwd or "",
+                        "state": pane.state,
+                    }
+                )
+            if entries:
+                projects[project] = entries
+        return {
+            "saved_at": datetime.now().isoformat(timespec="seconds"),
+            "projects": projects,
+        }
+
+    def write_session_snapshot(self) -> None:
+        """Persist the current snapshot to disk. Best-effort: any error
+        is swallowed so a disk hiccup never bubbles out of closeEvent or
+        the periodic save timer."""
+        try:
+            ensure_runtime()
+            _LAST_SESSION_FILE.write_text(
+                json.dumps(self.snapshot_state(), indent=2, ensure_ascii=False)
+                + "\n",
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+
+    def restore_teammates(self) -> int:
+        """Read the snapshot and re-spawn the recorded teammate panes.
+        Returns the number of panes scheduled to spawn (caller can show
+        a status-bar hint). Skips silently when the snapshot is missing,
+        unparseable, or older than `_LAST_SESSION_MAX_AGE_SEC`.
+
+        The orchestrator's existing `_recent_exits` machinery handles
+        `--continue` — by stamping each role with a fresh `ts` here, the
+        next spawn falls inside RESUME_WINDOW_SEC and claude rejoins the
+        previous conversation instead of starting a blank one.
+        """
+        if not _LAST_SESSION_FILE.is_file():
+            return 0
+        try:
+            snap = json.loads(_LAST_SESSION_FILE.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return 0
+        saved_at = snap.get("saved_at") or ""
+        try:
+            age = (datetime.now() - datetime.fromisoformat(saved_at)).total_seconds()
+        except ValueError:
+            return 0
+        if age > _LAST_SESSION_MAX_AGE_SEC:
+            return 0
+        scheduled = 0
+        for project, entries in (snap.get("projects") or {}).items():
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                role = (entry or {}).get("role")
+                cwd = (entry or {}).get("cwd") or None
+                if not role:
+                    continue
+                # Stamp recent-exit so spawn() picks --continue. The
+                # session file is the cwd it was last running in — the
+                # one claude can resume from.
+                self._recent_exits[role] = {"cwd": cwd, "ts": time.time()}
+                ok, _ = self.spawn(role, cwd=cwd, project=project)
+                if ok:
+                    scheduled += 1
+        return scheduled
+
     def _write_hot_md(self) -> None:
         """Rewrite `<vault>/hot.md` from the current pane registry plus
         the in-memory ring of recent `takkub done` events. Skipped

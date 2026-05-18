@@ -357,6 +357,15 @@ class MainWindow(QMainWindow):
         self._status_timer.timeout.connect(self._update_status)
         self._status_timer.start()
 
+        # Periodic session snapshot so a hard crash (Alt+F4 mishandled,
+        # power loss, force-kill from Task Manager) still leaves a recent
+        # picture on disk for the next launch. closeEvent writes one final
+        # time on a clean shutdown.
+        self._session_save_timer = QTimer(self)
+        self._session_save_timer.setInterval(60_000)
+        self._session_save_timer.timeout.connect(self.orch.write_session_snapshot)
+        self._session_save_timer.start()
+
         # ── boot: start CLI server + auto-spawn Lead ────────────
         QTimer.singleShot(0, self._boot)
 
@@ -367,13 +376,20 @@ class MainWindow(QMainWindow):
     # ──────────────────────────────────────────────────────────────
     # teammate pane lifecycle
     # ──────────────────────────────────────────────────────────────
-    def _ensure_teammate_pane(self, role_name: str) -> None:
-        if role_name == LEAD.name or role_name in self.teammate_panes:
+    def _ensure_teammate_pane(self, role_name: str, project: str) -> None:
+        # Route to the tab that owns `project` so a spawn from a
+        # background tab doesn't drop the new pane into whichever tab
+        # is active right now (same multi-tab routing bug we fixed for
+        # `paneClosed`). Falling back to the current tab when the
+        # project's tab is missing keeps tests that drive the
+        # orchestrator without a tab strip working.
+        tab = self._tab_for_project(project) or self._current_tab()
+        if role_name == LEAD.name or role_name in tab.teammate_panes:
             return
         role = by_name(role_name)
         if role is None:
             # custom role — use user-picked color if available, else default gray
-            color = self._custom_role_colors.get(role_name, "#94a3b8")
+            color = tab.custom_role_colors.get(role_name, "#94a3b8")
             role = Role(
                 name=role_name,
                 label=role_name.capitalize(),
@@ -386,16 +402,16 @@ class MainWindow(QMainWindow):
         # close routing: AgentPane.closeRequested → orchestrator.close (via
         # the connection set up in register_pane) → orchestrator.paneClosed
         # → _remove_teammate_pane. One signal chain, no race.
-        self.teammate_panes[role_name] = pane
-        self.orch.register_pane(pane)
-        self.teammate_split.addWidget(pane)
+        tab.teammate_panes[role_name] = pane
+        self.orch.register_pane(pane, project=tab.project_name)
+        tab.teammate_split.addWidget(pane)
 
         # show right side and rebalance
-        if not self.teammate_split.isVisible():
-            self.teammate_split.show()
-            self.main_split.setSizes([900, 600])
-        self._rebalance_teammates()
-        self._status.showMessage(f"added pane · {role_name}", 4_000)
+        tab.show_teammate_split()
+        tab.rebalance_teammates()
+        self._status.showMessage(
+            f"added pane · {role_name} ({tab.project_name})", 4_000
+        )
 
     def _tab_for_project(self, project: str) -> ProjectTab | None:
         """Find the ProjectTab whose `project_name` matches. Returns None
@@ -509,9 +525,29 @@ class MainWindow(QMainWindow):
         # referenced a now-deleted project and got dropped).
         self._persist_open_tabs()
 
-    def _track_pane_request(self, role_name: str) -> None:
+        # Session resume: re-spawn teammate panes that were live at the
+        # last shutdown. Wait until every Lead has had a chance to boot
+        # (last tab open fires at `2_500 + (N-1) * 4_000`, plus ~10 s
+        # for the trust-modal-auto-press and `/remote-control` injection
+        # to settle) so teammate spawns don't race with their tab's Lead.
+        n_extra = len(to_open)
+        restore_delay = 2_500 + n_extra * 4_000 + 12_000
+        QTimer.singleShot(restore_delay, self._restore_teammates_from_snapshot)
+
+    def _restore_teammates_from_snapshot(self) -> None:
+        """Read last-session.json and re-spawn the teammate panes that
+        were recorded there. Lead is exempt (already restored via
+        open_tabs). Status bar shows a hint so the user sees the
+        restore happen."""
+        scheduled = self.orch.restore_teammates()
+        if scheduled:
+            self._status.showMessage(
+                f"restored {scheduled} teammate pane(s) from last session", 8_000
+            )
+
+    def _track_pane_request(self, role_name: str, project: str) -> None:
         # only called when a new pane is being created
-        self._status.showMessage(f"opening pane · {role_name}", 3_000)
+        self._status.showMessage(f"opening pane · {role_name} ({project})", 3_000)
 
     def _notify_agent_done(self, role_name: str, note: str) -> None:
         """Show a desktop toast when an agent reports done."""
@@ -1403,6 +1439,11 @@ class MainWindow(QMainWindow):
 
         self._save_window_state()
         self._persist_open_tabs()
+        # Capture the live teammate-pane picture BEFORE we terminate the
+        # sessions below — otherwise everything would look dead by the
+        # time the snapshot serialiser runs. The next cockpit launch
+        # reads this file to re-spawn teammates with `--continue`.
+        self.orch.write_session_snapshot()
         # Walk every project namespace, not just the active view, so a
         # background tab's panes are also terminated cleanly.
         for project_panes in self.orch._panes_by_project.values():
