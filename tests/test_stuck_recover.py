@@ -116,9 +116,7 @@ class TestCheckStuckPanes:
         now = 1_000_000.0
         # state "done" — agent already reported, no need to recover
         fake._panes_by_project["p"] = {
-            "backend": _FakePane(
-                state="done", last_out=now - STUCK_THRESHOLD_S - 10
-            )
+            "backend": _FakePane(state="done", last_out=now - STUCK_THRESHOLD_S - 10)
         }
         _check(fake, now)
         assert fake.close_calls == []
@@ -142,9 +140,7 @@ class TestCheckStuckPanes:
         # (`(now - 0) > threshold` would be a false positive).
         fake = _FakeOrch()
         now = 1_000_000.0
-        fake._panes_by_project["p"] = {
-            "backend": _FakePane(state="working", last_out=0.0)
-        }
+        fake._panes_by_project["p"] = {"backend": _FakePane(state="working", last_out=0.0)}
         _check(fake, now)
         assert fake.close_calls == []
 
@@ -152,9 +148,7 @@ class TestCheckStuckPanes:
         fake = _FakeOrch()
         now = 1_000_000.0
         fake._panes_by_project["p"] = {
-            "backend": _FakePane(
-                state="working", last_out=now - (STUCK_THRESHOLD_S - 30)
-            )
+            "backend": _FakePane(state="working", last_out=now - (STUCK_THRESHOLD_S - 30))
         }
         _check(fake, now)
         assert fake.close_calls == []
@@ -173,9 +167,7 @@ class TestCheckStuckPanes:
         assert fake.close_calls == [("backend", "agent-takkub")]
         assert fake.spawn_calls == [("backend", "C:/foo", "agent-takkub")]
         # Cooldown stamp set so a subsequent tick doesn't loop.
-        assert (
-            fake._last_stuck_recover["agent-takkub::backend"] == now
-        )
+        assert fake._last_stuck_recover["agent-takkub::backend"] == now
 
     def test_cooldown_suppresses_back_to_back_recover(self) -> None:
         # Same pane stuck twice within the cooldown window — second
@@ -183,17 +175,13 @@ class TestCheckStuckPanes:
         fake = _FakeOrch()
         now = 1_000_000.0
         fake._panes_by_project["p"] = {
-            "backend": _FakePane(
-                state="working", last_out=now - STUCK_THRESHOLD_S - 1
-            )
+            "backend": _FakePane(state="working", last_out=now - STUCK_THRESHOLD_S - 1)
         }
         _check(fake, now)
         assert len(fake.close_calls) == 1
         # Advance just under cooldown
         now2 = now + STUCK_RECOVER_COOLDOWN_S - 1
-        fake._panes_by_project["p"]["backend"]._last_output_ts = (
-            now2 - STUCK_THRESHOLD_S - 1
-        )
+        fake._panes_by_project["p"]["backend"]._last_output_ts = now2 - STUCK_THRESHOLD_S - 1
         _check(fake, now2)
         # No new close — still in cooldown
         assert len(fake.close_calls) == 1
@@ -201,9 +189,7 @@ class TestCheckStuckPanes:
     def test_cooldown_expires_allows_second_recover(self) -> None:
         fake = _FakeOrch()
         now = 1_000_000.0
-        pane = _FakePane(
-            state="working", last_out=now - STUCK_THRESHOLD_S - 1
-        )
+        pane = _FakePane(state="working", last_out=now - STUCK_THRESHOLD_S - 1)
         fake._panes_by_project["p"] = {"backend": pane}
         _check(fake, now)
         # Advance past cooldown
@@ -220,9 +206,7 @@ class TestAutoRecoverStuck:
         # the respawned claude prints anything.
         fake = _FakeOrch()
         now = 1_000_000.0
-        pane = _FakePane(
-            state="working", last_out=now - STUCK_THRESHOLD_S - 1
-        )
+        pane = _FakePane(state="working", last_out=now - STUCK_THRESHOLD_S - 1)
         fake._panes_by_project["p"] = {"backend": pane}
         _recover(fake, "backend", "p", pane, now)
         assert pane._last_output_ts == now

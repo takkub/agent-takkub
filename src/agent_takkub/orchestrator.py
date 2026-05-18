@@ -131,11 +131,7 @@ _TYPING_ENTER_DELAY_MS = 200
 
 def _enter_delay_ms(payload: str) -> int:
     """Pick the post-write delay before sending Enter to submit input."""
-    return (
-        _PASTE_ENTER_DELAY_MS
-        if payload.startswith(_PASTE_START)
-        else _TYPING_ENTER_DELAY_MS
-    )
+    return _PASTE_ENTER_DELAY_MS if payload.startswith(_PASTE_START) else _TYPING_ENTER_DELAY_MS
 
 
 # ECC plugin hooks we mute in every pane. See cockpit CLAUDE.md
@@ -264,11 +260,7 @@ def _render_daily_digest(
         for stamp, role, note in sessions:
             # First line of the note is the human summary; collapse multi-line
             # notes to one line so the daily file stays scannable.
-            first = (
-                (note or "").strip().splitlines()[0]
-                if (note or "").strip()
-                else ""
-            )
+            first = (note or "").strip().splitlines()[0] if (note or "").strip() else ""
             if first:
                 lines.append(f"- `{stamp}` **{role}** — {first}")
             else:
@@ -353,9 +345,7 @@ def _render_hot_md(
         lines.append("## Hook noise today")
         lines.append("")
         # Loudest hook first so the eye lands on the worst offender.
-        for hook, count in sorted(
-            hook_counts.items(), key=lambda kv: kv[1], reverse=True
-        ):
+        for hook, count in sorted(hook_counts.items(), key=lambda kv: kv[1], reverse=True):
             lines.append(f"- **{hook}** — {count}")
         lines.append("")
 
@@ -486,8 +476,12 @@ class Orchestrator(QObject):
 
     statusChanged = pyqtSignal()
     leadInjected = pyqtSignal(str)
-    paneRequested = pyqtSignal(str, str)  # role_name, project — main_window adds pane to the matching tab
-    paneClosed = pyqtSignal(str, str)  # role_name, project — main_window removes pane from the matching tab
+    paneRequested = pyqtSignal(
+        str, str
+    )  # role_name, project — main_window adds pane to the matching tab
+    paneClosed = pyqtSignal(
+        str, str
+    )  # role_name, project — main_window removes pane from the matching tab
     agentDone = pyqtSignal(str, str)  # role_name, note — for desktop notifications
 
     def __init__(self, parent: QObject | None = None) -> None:
@@ -760,14 +754,10 @@ class Orchestrator(QObject):
         #   TAKKUB_TEAMMATE_EFFORT=""                  → no --effort
         #   TAKKUB_TEAMMATE_EFFORT="high"              → match Lead's effort
         if role_name != LEAD.name:
-            teammate_model = os.environ.get(
-                "TAKKUB_TEAMMATE_MODEL", "claude-sonnet-4-6"
-            ).strip()
+            teammate_model = os.environ.get("TAKKUB_TEAMMATE_MODEL", "claude-sonnet-4-6").strip()
             if teammate_model:
                 argv.extend(["--model", teammate_model])
-            teammate_effort = os.environ.get(
-                "TAKKUB_TEAMMATE_EFFORT", "medium"
-            ).strip()
+            teammate_effort = os.environ.get("TAKKUB_TEAMMATE_EFFORT", "medium").strip()
             if teammate_effort:
                 argv.extend(["--effort", teammate_effort])
 
@@ -872,9 +862,7 @@ class Orchestrator(QObject):
         # auto-respawn watcher knows which project namespace owned the
         # pane that just died.
         session.processExited.connect(
-            lambda _code, r=role_name, c=spawn_cwd, p=project_ns: self._on_session_exit(
-                r, c, p
-            )
+            lambda _code, r=role_name, c=spawn_cwd, p=project_ns: self._on_session_exit(r, c, p)
         )
         # forget the prior exit record now that we've spawned successfully
         if role_name in self._recent_exits:
@@ -939,9 +927,7 @@ class Orchestrator(QObject):
         if pane is None or (pane.session is not None and pane.session.is_alive):
             return
         ok, msg = self.spawn(role_name, cwd=cwd, project=project)
-        _log_event(
-            "auto_respawn_done", role=role_name, project=project, ok=ok, msg=msg[:160]
-        )
+        _log_event("auto_respawn_done", role=role_name, project=project, ok=ok, msg=msg[:160])
 
     # ──────────────────────────────────────────────────────────────
     def _auto_trust(self, role_name: str) -> None:
@@ -1160,9 +1146,7 @@ class Orchestrator(QObject):
         _log_event("close", role=role_name)
         return True, f"{role_name} closed"
 
-    def done(
-        self, from_role: str, note: str = "", project: str | None = None
-    ) -> tuple[bool, str]:
+    def done(self, from_role: str, note: str = "", project: str | None = None) -> tuple[bool, str]:
         from_role = from_role.lower().strip()
         project_ns = self._resolve_project(project)
         project_panes = self._project_panes(project_ns)
@@ -1302,8 +1286,7 @@ class Orchestrator(QObject):
         try:
             ensure_runtime()
             _LAST_SESSION_FILE.write_text(
-                json.dumps(self.snapshot_state(), indent=2, ensure_ascii=False)
-                + "\n",
+                json.dumps(self.snapshot_state(), indent=2, ensure_ascii=False) + "\n",
                 encoding="utf-8",
             )
         except OSError:
@@ -1386,9 +1369,7 @@ class Orchestrator(QObject):
                 continue
             try:
                 briefs_dir.mkdir(parents=True, exist_ok=True)
-                (briefs_dir / f"{project}-{stamp}.md").write_text(
-                    body, encoding="utf-8"
-                )
+                (briefs_dir / f"{project}-{stamp}.md").write_text(body, encoding="utf-8")
                 written += 1
             except OSError:
                 continue
@@ -1441,12 +1422,8 @@ class Orchestrator(QObject):
         try:
             from .chatlog_scanner import extract_decisions
 
-            start_of_today = now.replace(
-                hour=0, minute=0, second=0, microsecond=0
-            )
-            decisions = extract_decisions(
-                project_filter=project, since=start_of_today, limit=10
-            )
+            start_of_today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            decisions = extract_decisions(project_filter=project, since=start_of_today, limit=10)
         except Exception:
             decisions = []
         section = _render_daily_digest(project, now, sessions, decisions=decisions)
@@ -1494,9 +1471,7 @@ class Orchestrator(QObject):
                 count_user_corrections,
             )
 
-            start_of_today = datetime.now().replace(
-                hour=0, minute=0, second=0, microsecond=0
-            )
+            start_of_today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
             hook_counts = count_hook_fires(since=start_of_today)
             friction = {
                 "corrections": count_user_corrections(since=start_of_today),
@@ -1625,9 +1600,7 @@ class Orchestrator(QObject):
                     continue
                 self._auto_recover_stuck(role, project_name, pane, now)
 
-    def _auto_recover_stuck(
-        self, role: str, project: str, pane: AgentPane, now: float
-    ) -> None:
+    def _auto_recover_stuck(self, role: str, project: str, pane: AgentPane, now: float) -> None:
         """Close the wedged pane and respawn it with --continue. The
         spawn uses the pane's last-known cwd so claude rejoins the same
         project directory."""
@@ -1649,9 +1622,7 @@ class Orchestrator(QObject):
         # 2 s pause so the close has time to terminate the PTY and tear
         # down the WebEngine view before the respawn binds a new one
         # to the same role slot.
-        QTimer.singleShot(
-            2_000, lambda: self.spawn(role, cwd=cwd, project=project)
-        )
+        QTimer.singleShot(2_000, lambda: self.spawn(role, cwd=cwd, project=project))
 
     def _inject_idle_reminder(self, role_name: str, pane: AgentPane) -> None:
         if pane.session is None or not pane.session.is_alive:

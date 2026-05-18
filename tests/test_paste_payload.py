@@ -13,11 +13,11 @@ complaining about "ข้อความถูกตัดส่วนต้น"
 from __future__ import annotations
 
 from agent_takkub.orchestrator import (
-    BRACKETED_PASTE_THRESHOLD,
     _PASTE_END,
     _PASTE_ENTER_DELAY_MS,
     _PASTE_START,
     _TYPING_ENTER_DELAY_MS,
+    BRACKETED_PASTE_THRESHOLD,
     _enter_delay_ms,
     _paste_payload,
 )
@@ -45,7 +45,7 @@ class TestPastePayload:
         assert wrapped.startswith(_PASTE_START)
         assert wrapped.endswith(_PASTE_END)
         # The original payload survives intact between the markers.
-        assert wrapped[len(_PASTE_START):-len(_PASTE_END)] == text
+        assert wrapped[len(_PASTE_START) : -len(_PASTE_END)] == text
 
     def test_paste_markers_are_canonical_xterm(self) -> None:
         # Sanity check the constants themselves so an accidental edit to

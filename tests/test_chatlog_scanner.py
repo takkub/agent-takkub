@@ -20,8 +20,8 @@ import pytest
 
 from agent_takkub.chatlog_scanner import (
     build_resume_brief,
-    claude_projects_dir,
     classify_hook,
+    claude_projects_dir,
     count_hook_fires,
     count_tool_retries,
     count_user_corrections,
@@ -89,9 +89,7 @@ class TestIterRecords:
     def test_skips_corrupt_lines(self, tmp_path: pathlib.Path) -> None:
         path = tmp_path / "broken.jsonl"
         path.write_text(
-            '{"type":"user"}\n'
-            "not json at all\n"
-            '{"type":"assistant"}\n',
+            '{"type":"user"}\nnot json at all\n{"type":"assistant"}\n',
             encoding="utf-8",
         )
         recs = list(iter_records(path))
@@ -103,9 +101,7 @@ class TestIterRecords:
 
     def test_skips_blank_lines(self, tmp_path: pathlib.Path) -> None:
         path = tmp_path / "blanks.jsonl"
-        path.write_text(
-            '{"type":"user"}\n\n\n{"type":"assistant"}\n', encoding="utf-8"
-        )
+        path.write_text('{"type":"user"}\n\n\n{"type":"assistant"}\n', encoding="utf-8")
         assert len(list(iter_records(path))) == 2
 
 
@@ -192,9 +188,7 @@ class TestExtractText:
             "type": "assistant",
             "message": {
                 "role": "assistant",
-                "content": [
-                    {"type": "thinking", "thinking": "let me check the build"}
-                ],
+                "content": [{"type": "thinking", "thinking": "let me check the build"}],
             },
         }
         assert "let me check" in extract_text(rec)
@@ -291,16 +285,10 @@ class TestClassifyHook:
         assert classify_hook("ecc-context-monitor fired") == "ecc-cost-monitor"
 
     def test_loop_warning_pattern(self) -> None:
-        assert (
-            classify_hook("LOOP WARNING: Tool called 3 times")
-            == "ecc-loop-warning"
-        )
+        assert classify_hook("LOOP WARNING: Tool called 3 times") == "ecc-loop-warning"
 
     def test_strategic_compact(self) -> None:
-        assert (
-            classify_hook("[StrategicCompact] 75 tool calls")
-            == "ecc-strategic-compact"
-        )
+        assert classify_hook("[StrategicCompact] 75 tool calls") == "ecc-strategic-compact"
 
     def test_unknown_returns_none(self) -> None:
         assert classify_hook("some completely unrelated text") is None
@@ -459,9 +447,7 @@ class TestUserCorrections:
                         "content": [
                             {
                                 "type": "tool_result",
-                                "content": [
-                                    {"type": "text", "text": "broken pipeline"}
-                                ],
+                                "content": [{"type": "text", "text": "broken pipeline"}],
                             }
                         ],
                     },
@@ -925,9 +911,7 @@ class TestBuildResumeBrief:
         assert "**user**" in brief
         assert "**assistant**" in brief
 
-    def test_caps_at_last_n(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
-    ) -> None:
+    def test_caps_at_last_n(self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
         monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
         proj = tmp_path / ".claude" / "projects" / "C--Users-monch-foo"
         proj.mkdir(parents=True)
@@ -973,9 +957,7 @@ class TestBuildResumeBrief:
         )
         brief = build_resume_brief()
         # Pull the bullet's text portion (after the role marker)
-        bullet = next(
-            line for line in brief.splitlines() if line.startswith("- `")
-        )
+        bullet = next(line for line in brief.splitlines() if line.startswith("- `"))
         # The bullet contains some prefix + the truncated x-run
         x_run = bullet.split("— ", 1)[1] if "— " in bullet else ""
         assert len(x_run) <= 160

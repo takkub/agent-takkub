@@ -25,12 +25,10 @@ read by every subsequent claude spawn.
 from __future__ import annotations
 
 import json
-
 import subprocess
 import threading
 
 from .config import RUNTIME_DIR
-
 
 SHARED_MCP_FILE = RUNTIME_DIR / "shared-mcp.json"
 
@@ -140,9 +138,7 @@ def shared_mcp_config_exists() -> bool:
     return "PMS_TOKEN_HERE" not in auth and auth.startswith("Bearer ")
 
 
-def write_shared_mcp_config(
-    token: str, url: str = PMS_MCP_DEFAULT_URL
-) -> tuple[bool, str]:
+def write_shared_mcp_config(token: str, url: str = PMS_MCP_DEFAULT_URL) -> tuple[bool, str]:
     """Persist the pms MCP server config with the supplied bearer token
     and endpoint URL.
 

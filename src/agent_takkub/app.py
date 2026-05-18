@@ -32,7 +32,6 @@ def _boot_log(msg: str) -> None:
             pass
 
 
-
 # Chromium throttles background timers, RAF and rendering for views that
 # aren't the foreground tab. Because we host many xterm.js panes in one
 # window, only one is "focused" at a time and the rest get paint-suppressed
@@ -57,10 +56,10 @@ os.environ.setdefault(
     ),
 )
 
-from PyQt6.QtGui import QFont
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtGui import QFont  # noqa: E402 — PyQt must import after env setup above
+from PyQt6.QtWidgets import QApplication  # noqa: E402
 
-from .main_window import MainWindow
+from .main_window import MainWindow  # noqa: E402
 
 
 def _install_signal_handlers(window: MainWindow) -> None:

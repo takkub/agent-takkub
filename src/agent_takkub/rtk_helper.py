@@ -147,8 +147,7 @@ def install_rtk(project_root: str | Path) -> tuple[bool, str]:
         return False, "Bash hooks entry must have an array `hooks`"
 
     already = any(
-        isinstance(h, dict) and RTK_HOOK_COMMAND_MARKER in (h.get("command") or "")
-        for h in inner
+        isinstance(h, dict) and RTK_HOOK_COMMAND_MARKER in (h.get("command") or "") for h in inner
     )
     if already:
         return True, "already installed (no changes)"

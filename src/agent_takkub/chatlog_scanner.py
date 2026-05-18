@@ -27,8 +27,8 @@ from __future__ import annotations
 
 import json
 import pathlib
+from collections.abc import Iterator
 from datetime import datetime
-from typing import Iterator
 
 
 def claude_projects_dir() -> pathlib.Path:
@@ -349,9 +349,7 @@ def _tool_use_signature(block: dict) -> tuple[str, str]:
     return name, sig
 
 
-def count_tool_retries(
-    project_filter: str | None = None, *, since: datetime | None = None
-) -> int:
+def count_tool_retries(project_filter: str | None = None, *, since: datetime | None = None) -> int:
     """Walk every assistant message and count "retry storms" —
     sequences where the same tool_use signature fires 3+ times in a
     row. Returns the total number of storm events (one per storm,

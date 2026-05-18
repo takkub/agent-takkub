@@ -100,9 +100,13 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("agent-takkub — dev team cockpit")
-        
+
         icon_path = Path(__file__).parent.parent.parent / "assets" / "icon.png"
-        app_icon = QIcon(str(icon_path)) if icon_path.exists() else self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxInformation)
+        app_icon = (
+            QIcon(str(icon_path))
+            if icon_path.exists()
+            else self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxInformation)
+        )
         self.setWindowIcon(app_icon)
 
         self.resize(1500, 900)
@@ -296,8 +300,7 @@ class MainWindow(QMainWindow):
         self._token_total = QLabel("", self)
         self._token_total.setToolTip("Aggregate context occupancy across all active panes")
         self._token_total.setStyleSheet(
-            "color: #6b7280; font-size: 11px; padding: 0 6px; "
-            "font-variant-numeric: tabular-nums;"
+            "color: #6b7280; font-size: 11px; padding: 0 6px; font-variant-numeric: tabular-nums;"
         )
         self._token_total.hide()
 
@@ -409,9 +412,7 @@ class MainWindow(QMainWindow):
         # show right side and rebalance
         tab.show_teammate_split()
         tab.rebalance_teammates()
-        self._status.showMessage(
-            f"added pane · {role_name} ({tab.project_name})", 4_000
-        )
+        self._status.showMessage(f"added pane · {role_name} ({tab.project_name})", 4_000)
 
     def _tab_for_project(self, project: str) -> ProjectTab | None:
         """Find the ProjectTab whose `project_name` matches. Returns None
@@ -518,9 +519,7 @@ class MainWindow(QMainWindow):
             for i, name in enumerate(to_open):
                 # 4s stagger so Leads don't all try to bind a renderer / read
                 # claude binaries in parallel
-                QTimer.singleShot(
-                    2_500 + i * 4_000, lambda n=name: self._open_project_tab(n)
-                )
+                QTimer.singleShot(2_500 + i * 4_000, lambda n=name: self._open_project_tab(n))
         # Persist the current state (covers the case where saved tabs
         # referenced a now-deleted project and got dropped).
         self._persist_open_tabs()
@@ -662,8 +661,7 @@ class MainWindow(QMainWindow):
                     if self._tray and QSystemTrayIcon.isSystemTrayAvailable():
                         self._tray.showMessage(
                             f"Context {int(ratio * 100)}%",
-                            f"{tab.project_name}/{role_name} — consider "
-                            f"/clear or Finish Job",
+                            f"{tab.project_name}/{role_name} — consider /clear or Finish Job",
                             QSystemTrayIcon.MessageIcon.Warning,
                             6_000,
                         )
@@ -697,9 +695,7 @@ class MainWindow(QMainWindow):
                 "font-variant-numeric: tabular-nums;"
             )
             lines = [f"{r}: {format_tokens(pr)} / {format_tokens(lim)}" for r, pr, lim in per_role]
-            self._token_total.setToolTip(
-                "Context occupancy per pane:\n" + "\n".join(lines)
-            )
+            self._token_total.setToolTip("Context occupancy per pane:\n" + "\n".join(lines))
             self._token_total.show()
         else:
             self._token_total.hide()
@@ -928,8 +924,8 @@ class MainWindow(QMainWindow):
         """Show the install button only when the active project's lead_cwd()
         doesn't already carry the rtk hook. Hidden when rtk isn't on PATH or
         no project is active."""
-        from pathlib import Path as _P
         import time as _t
+        from pathlib import Path as _P
 
         bin_ok = rtk_binary_available()
         root = lead_cwd()
@@ -1192,28 +1188,42 @@ class MainWindow(QMainWindow):
         self._refresh_rtk_button()
 
     def _on_add_project_clicked(self) -> None:
-        from PyQt6.QtWidgets import QFileDialog, QDialog, QVBoxLayout, QFormLayout, QLineEdit, QDialogButtonBox, QLabel
-        from pathlib import Path
         import json
+        from pathlib import Path
+
+        from PyQt6.QtWidgets import (
+            QDialog,
+            QDialogButtonBox,
+            QFileDialog,
+            QFormLayout,
+            QLabel,
+            QLineEdit,
+            QVBoxLayout,
+        )
+
         from .config import PROJECTS_JSON, load_projects
-        
+
         dir_path = QFileDialog.getExistingDirectory(self, "Select Project Root Folder")
         if not dir_path:
             return
-            
+
         p = Path(dir_path)
         name = p.name
-        
+
         # Create a custom dialog to let the user map paths
         dialog = QDialog(self)
         dialog.setWindowTitle(f"Configure Project Paths: {name}")
         dialog.resize(400, 300)
         layout = QVBoxLayout(dialog)
-        layout.addWidget(QLabel("Map subdirectories to role keys (e.g., 'web', 'api').\nLeave blank to ignore a directory."))
-        
+        layout.addWidget(
+            QLabel(
+                "Map subdirectories to role keys (e.g., 'web', 'api').\nLeave blank to ignore a directory."
+            )
+        )
+
         form = QFormLayout()
         layout.addLayout(form)
-        
+
         # Check if we already have this project configured
         data = load_projects()
         existing_paths = {}
@@ -1228,44 +1238,42 @@ class MainWindow(QMainWindow):
             if sub.is_dir() and not sub.name.startswith("."):
                 le = QLineEdit()
                 le.setPlaceholderText("key (e.g. web, api)")
-                
+
                 # Pre-fill if we already saved this path previously
                 sub_posix = str(sub.resolve().as_posix())
                 if sub_posix in existing_paths_rev:
                     le.setText(existing_paths_rev[sub_posix])
-                    
+
                 form.addRow(sub.name, le)
                 inputs[sub.name] = (sub, le)
-                
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
-        
+
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-            
+
         paths = {}
-        for sub_name, (sub_path, le) in inputs.items():
+        for _sub_name, (sub_path, le) in inputs.items():
             key = le.text().strip()
             if key:
                 paths[key] = str(sub_path.resolve().as_posix())
-                
+
         if not paths:
             # Fallback if they mapped nothing
             paths["main"] = str(p.resolve().as_posix())
-            
+
         data = load_projects()
         if "projects" not in data:
             data["projects"] = {}
-            
-        data["projects"][name] = {
-            "description": name,
-            "paths": paths,
-            "presets": []
-        }
+
+        data["projects"][name] = {"description": name, "paths": paths, "presets": []}
         data["active"] = name
-        
+
         PROJECTS_JSON.parent.mkdir(parents=True, exist_ok=True)
         PROJECTS_JSON.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 

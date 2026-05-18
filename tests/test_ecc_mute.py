@@ -63,9 +63,7 @@ class TestApplyEccMute:
         assert env["ECC_DISABLED_HOOKS"] == ",".join(_ECC_MUTED_HOOKS)
         assert not env["ECC_DISABLED_HOOKS"].startswith(",")
 
-    def test_escape_hatch_skips_mute_entirely(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_escape_hatch_skips_mute_entirely(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # TAKKUB_ECC_FULL=1 is the documented way to opt back into
         # all ECC hooks when one of the muted ones turns out to
         # matter. The env must come back unchanged.
@@ -74,9 +72,7 @@ class TestApplyEccMute:
         _apply_ecc_mute(env)
         assert env == {}
 
-    def test_non_one_escape_hatch_value_still_mutes(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_non_one_escape_hatch_value_still_mutes(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Defence against the obvious typo: only the exact literal
         # `1` opts out. Anything else (TRUE, true, on, yes) still
         # mutes, matching the documented contract.

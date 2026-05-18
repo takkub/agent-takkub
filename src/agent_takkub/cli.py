@@ -22,7 +22,6 @@ import sys
 
 from .config import read_port
 
-
 # Commands that orchestrate the cockpit (spawn/route/close panes). Only the
 # Lead pane is allowed to invoke these; teammates must work on their assigned
 # task and coordinate via `send` / `done`. The gate is enforced in `main()`
@@ -114,9 +113,7 @@ def cmd_spawn(args: argparse.Namespace) -> dict:
 
 def cmd_assign(args: argparse.Namespace) -> dict:
     return _request(
-        _with_project(
-            {"cmd": "assign", "role": args.role, "cwd": args.cwd, "task": args.task}
-        )
+        _with_project({"cmd": "assign", "role": args.role, "cwd": args.cwd, "task": args.task})
     )
 
 
@@ -135,9 +132,7 @@ def cmd_close_all(_: argparse.Namespace) -> dict:
 
 
 def cmd_done(args: argparse.Namespace) -> dict:
-    return _request(
-        _with_project({"cmd": "done", "from": _from_role(), "note": args.note or ""})
-    )
+    return _request(_with_project({"cmd": "done", "from": _from_role(), "note": args.note or ""}))
 
 
 def cmd_list(_: argparse.Namespace) -> dict:
@@ -181,8 +176,7 @@ def cmd_search(args: argparse.Namespace) -> dict:
         print(f"  {proj_tail:18s} {ts_short}  {role:9s}  {snippet}")
     return {
         "ok": True,
-        "msg": f"{len(hits)} match(es)"
-        + (" (limit reached)" if len(hits) == args.limit else ""),
+        "msg": f"{len(hits)} match(es)" + (" (limit reached)" if len(hits) == args.limit else ""),
     }
 
 

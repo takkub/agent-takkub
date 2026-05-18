@@ -17,9 +17,7 @@ from agent_takkub.orchestrator import _render_daily_digest
 
 class TestRenderDailyDigest:
     def test_empty_sessions_shows_marker(self) -> None:
-        body = _render_daily_digest(
-            "agent-takkub", datetime(2026, 5, 17, 14, 30, 5), []
-        )
+        body = _render_daily_digest("agent-takkub", datetime(2026, 5, 17, 14, 30, 5), [])
         assert "## `agent-takkub`" in body
         assert "14:30:05" in body
         assert "No `takkub done` events recorded today" in body
@@ -47,8 +45,8 @@ class TestRenderDailyDigest:
         )
         lines = body.splitlines()
         # Find the two bullet lines and confirm reviewer appears before backend
-        reviewer_idx = next(i for i, l in enumerate(lines) if "reviewer" in l)
-        backend_idx = next(i for i, l in enumerate(lines) if "backend" in l)
+        reviewer_idx = next(i for i, line in enumerate(lines) if "reviewer" in line)
+        backend_idx = next(i for i, line in enumerate(lines) if "backend" in line)
         assert reviewer_idx < backend_idx
 
     def test_multiline_note_collapses_to_first_line(self) -> None:
@@ -65,9 +63,7 @@ class TestRenderDailyDigest:
         assert "links:" not in body
 
     def test_empty_note_falls_back_to_role_only(self) -> None:
-        body = _render_daily_digest(
-            "p", datetime.now(), [("100000", "qa", "")]
-        )
+        body = _render_daily_digest("p", datetime.now(), [("100000", "qa", "")])
         # Bullet exists but no em-dash + text
         assert "`100000` **qa**" in body
         assert "**qa** —" not in body
@@ -76,9 +72,7 @@ class TestRenderDailyDigest:
         # Multiple Finish Job invocations append to the same file —
         # each digest must produce exactly one H2 (no surprise H1/H3
         # nesting that would mess up Obsidian's outline view).
-        body = _render_daily_digest(
-            "p", datetime.now(), [("100000", "qa", "ok")]
-        )
+        body = _render_daily_digest("p", datetime.now(), [("100000", "qa", "ok")])
         # No H1 anywhere
         h1_count = sum(1 for line in body.splitlines() if line.startswith("# "))
         assert h1_count == 0
@@ -87,9 +81,7 @@ class TestRenderDailyDigest:
         assert h2_count == 1
 
     def test_thai_unicode_survives(self) -> None:
-        body = _render_daily_digest(
-            "p", datetime.now(), [("100000", "backend", "แก้ bug auth")]
-        )
+        body = _render_daily_digest("p", datetime.now(), [("100000", "backend", "แก้ bug auth")])
         assert "แก้ bug auth" in body
 
     def test_decisions_section_omitted_when_empty(self) -> None:
@@ -113,9 +105,7 @@ class TestRenderDailyDigest:
                 "project": "p",
             },
         ]
-        body = _render_daily_digest(
-            "p", datetime.now(), [], decisions=decisions
-        )
+        body = _render_daily_digest("p", datetime.now(), [], decisions=decisions)
         assert "**Decisions today: 2**" in body
         assert "Bracketed paste fix" in body
         assert "ECC mute decision" in body
@@ -133,7 +123,5 @@ class TestRenderDailyDigest:
         )
         # Section header still appears (count > 0) but no bullet line.
         assert "Decisions today" in body
-        bullets = [
-            l for l in body.splitlines() if l.startswith("- ") and "`" in l
-        ]
+        bullets = [line for line in body.splitlines() if line.startswith("- ") and "`" in line]
         assert bullets == []

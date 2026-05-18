@@ -44,6 +44,7 @@ class _WriterThread(QThread):
     def request_stop(self) -> None:
         self._q.put(None)
 
+
 class _ReaderThread(QThread):
     bytesReceived = pyqtSignal(bytes)
     finished_clean = pyqtSignal()
@@ -137,6 +138,7 @@ class PtySession(QObject):
         # "delay" and replacing-character symptoms users experience during fast typing.
         try:
             import winpty
+
             self._proc = winpty.PtyProcess.spawn(
                 cmd,
                 dimensions=(self.rows, self.cols),

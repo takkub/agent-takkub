@@ -33,9 +33,7 @@ class TestResolveVaultDir:
         # or lacks the `01-Projects/` marker. Mirror must opt out
         # silently.
         monkeypatch.delenv(_VAULT_ENV, raising=False)
-        monkeypatch.setattr(
-            "agent_takkub.orchestrator._DEFAULT_VAULT", tmp_path / "nope"
-        )
+        monkeypatch.setattr("agent_takkub.orchestrator._DEFAULT_VAULT", tmp_path / "nope")
         assert _resolve_vault_dir() is None
 
     def test_default_vault_used_when_projects_dir_exists(
@@ -45,9 +43,7 @@ class TestResolveVaultDir:
         fake_vault = tmp_path / "vault"
         (fake_vault / "01-Projects").mkdir(parents=True)
         monkeypatch.delenv(_VAULT_ENV, raising=False)
-        monkeypatch.setattr(
-            "agent_takkub.orchestrator._DEFAULT_VAULT", fake_vault
-        )
+        monkeypatch.setattr("agent_takkub.orchestrator._DEFAULT_VAULT", fake_vault)
         assert _resolve_vault_dir() == fake_vault
 
     def test_env_override_beats_default(

@@ -76,9 +76,7 @@ class TestRenderHotMd:
         # The "Recent" section is for orientation, not auditing — the
         # full trail lives in `01-Projects/<p>/sessions/`. A long
         # session shouldn't push hot.md past one screen.
-        recent = [
-            ("p", f"r{i}", f"2026-05-17T1100{i:02d}-r{i}.md") for i in range(25)
-        ]
+        recent = [("p", f"r{i}", f"2026-05-17T1100{i:02d}-r{i}.md") for i in range(25)]
         body = _render_hot_md({}, None, recent, dt.datetime.now())
         # All entries 0..9 present; 10..24 absent
         for i in range(10):
@@ -194,7 +192,7 @@ class TestRenderHotMd:
         # Find the hook bullets (use " — " separator unique to hook
         # entries vs. the session bullets which use " · ").
         hook_lines = [
-            l for l in body.splitlines() if l.startswith("- **") and " — " in l
+            line for line in body.splitlines() if line.startswith("- **") and " — " in line
         ]
         assert hook_lines[0].startswith("- **high**")
         assert hook_lines[1].startswith("- **mid**")

@@ -71,9 +71,7 @@ class CliServer(QObject):
         from_project = req.get("from_project")
         try:
             if cmd == "spawn":
-                ok, msg = self._orch.spawn(
-                    req["role"], cwd=req.get("cwd"), project=from_project
-                )
+                ok, msg = self._orch.spawn(req["role"], cwd=req.get("cwd"), project=from_project)
             elif cmd == "assign":
                 ok, msg = self._orch.assign(
                     req["role"],

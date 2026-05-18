@@ -19,9 +19,7 @@ from agent_takkub import orchestrator as orch_mod
 
 
 @pytest.fixture
-def isolated_session_file(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
-) -> pathlib.Path:
+def isolated_session_file(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> pathlib.Path:
     """Redirect the module-level _LAST_SESSION_FILE to a tmp path so
     tests don't stomp the real cockpit snapshot under `runtime/`."""
     target = tmp_path / "last-session.json"
@@ -50,25 +48,19 @@ def _run_restore(fake: _FakeOrchestrator) -> int:
 
 
 class TestRestoreTeammates:
-    def test_returns_zero_when_file_missing(
-        self, isolated_session_file: pathlib.Path
-    ) -> None:
+    def test_returns_zero_when_file_missing(self, isolated_session_file: pathlib.Path) -> None:
         assert not isolated_session_file.exists()
         fake = _FakeOrchestrator()
         assert _run_restore(fake) == 0
         assert fake.spawn_calls == []
 
-    def test_returns_zero_when_file_corrupt(
-        self, isolated_session_file: pathlib.Path
-    ) -> None:
+    def test_returns_zero_when_file_corrupt(self, isolated_session_file: pathlib.Path) -> None:
         isolated_session_file.write_text("{not valid", encoding="utf-8")
         fake = _FakeOrchestrator()
         assert _run_restore(fake) == 0
         assert fake.spawn_calls == []
 
-    def test_returns_zero_when_timestamp_too_old(
-        self, isolated_session_file: pathlib.Path
-    ) -> None:
+    def test_returns_zero_when_timestamp_too_old(self, isolated_session_file: pathlib.Path) -> None:
         # `_LAST_SESSION_MAX_AGE_SEC` is one hour; offset by two hours so
         # the snapshot is decisively stale.
         old = dt.datetime.now() - dt.timedelta(hours=2)
@@ -81,14 +73,10 @@ class TestRestoreTeammates:
         assert _run_restore(fake) == 0
         assert fake.spawn_calls == []
 
-    def test_returns_zero_when_timestamp_missing(
-        self, isolated_session_file: pathlib.Path
-    ) -> None:
+    def test_returns_zero_when_timestamp_missing(self, isolated_session_file: pathlib.Path) -> None:
         # A snapshot without `saved_at` can't have its age verified —
         # safer to skip than to assume "fresh".
-        snap = {
-            "projects": {"p": [{"role": "backend", "cwd": "/x", "state": "active"}]}
-        }
+        snap = {"projects": {"p": [{"role": "backend", "cwd": "/x", "state": "active"}]}}
         isolated_session_file.write_text(json.dumps(snap), encoding="utf-8")
         fake = _FakeOrchestrator()
         assert _run_restore(fake) == 0
@@ -119,9 +107,7 @@ class TestRestoreTeammates:
                 "agent-takkub": [
                     {"role": "backend", "cwd": "C:/agent-takkub/api", "state": "working"}
                 ],
-                "line-websupport": [
-                    {"role": "frontend", "cwd": "C:/line/web", "state": "active"}
-                ],
+                "line-websupport": [{"role": "frontend", "cwd": "C:/line/web", "state": "active"}],
             },
         }
         isolated_session_file.write_text(json.dumps(snap), encoding="utf-8")
@@ -137,9 +123,7 @@ class TestRestoreTeammates:
         assert "backend" in fake._recent_exits
         assert "frontend" in fake._recent_exits
 
-    def test_skips_entries_without_role(
-        self, isolated_session_file: pathlib.Path
-    ) -> None:
+    def test_skips_entries_without_role(self, isolated_session_file: pathlib.Path) -> None:
         # Defensive: a malformed entry shouldn't blow up the whole restore.
         now = dt.datetime.now().isoformat(timespec="seconds")
         snap = {

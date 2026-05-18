@@ -151,9 +151,7 @@ class TestInstall:
                         "PreToolUse": [
                             {
                                 "matcher": "Bash",
-                                "hooks": [
-                                    {"type": "command", "command": "node guard.mjs"}
-                                ],
+                                "hooks": [{"type": "command", "command": "node guard.mjs"}],
                             }
                         ]
                     }

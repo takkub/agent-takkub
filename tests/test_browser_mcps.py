@@ -28,9 +28,7 @@ from agent_takkub.shared_dev_tools import (
 
 
 @pytest.fixture
-def isolated_mcp_file(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
-) -> pathlib.Path:
+def isolated_mcp_file(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> pathlib.Path:
     """Redirect SHARED_MCP_FILE to a tmp path so tests don't stomp the
     real cockpit config under `runtime/`."""
     target = tmp_path / "shared-mcp.json"
@@ -50,9 +48,7 @@ class TestEnsureBrowserMcps:
         data = _read(isolated_mcp_file)
         assert set(data["mcpServers"].keys()) == set(BROWSER_MCPS.keys())
 
-    def test_preserves_existing_pms_bearer_token(
-        self, isolated_mcp_file: pathlib.Path
-    ) -> None:
+    def test_preserves_existing_pms_bearer_token(self, isolated_mcp_file: pathlib.Path) -> None:
         # The pms entry with a real bearer must survive byte-for-byte —
         # silently rotating it would break PMS MCP calls for every
         # project and force the user to redo the setup flow.
@@ -91,9 +87,7 @@ class TestEnsureBrowserMcps:
         after = isolated_mcp_file.read_text(encoding="utf-8")
         assert before == after
 
-    def test_refuses_to_clobber_corrupt_json(
-        self, isolated_mcp_file: pathlib.Path
-    ) -> None:
+    def test_refuses_to_clobber_corrupt_json(self, isolated_mcp_file: pathlib.Path) -> None:
         # Leave a hand-edited broken file alone — surface the failure
         # so the user can fix it, don't silently overwrite their work.
         isolated_mcp_file.write_text("{not valid json", encoding="utf-8")
@@ -131,14 +125,10 @@ class TestEnsureBrowserMcps:
 
 
 class TestSharedMcpConfigPath:
-    def test_returns_none_when_file_missing(
-        self, isolated_mcp_file: pathlib.Path
-    ) -> None:
+    def test_returns_none_when_file_missing(self, isolated_mcp_file: pathlib.Path) -> None:
         assert shared_mcp_config_path() is None
 
-    def test_returns_none_when_pms_placeholder_token(
-        self, isolated_mcp_file: pathlib.Path
-    ) -> None:
+    def test_returns_none_when_pms_placeholder_token(self, isolated_mcp_file: pathlib.Path) -> None:
         # The PMS template ships a `<PMS_TOKEN_HERE>` placeholder. A
         # file that only has pms with the placeholder isn't usable —
         # don't hand it to claude (it'd 401 on every pms tool call).
@@ -158,9 +148,7 @@ class TestSharedMcpConfigPath:
         )
         assert shared_mcp_config_path() is None
 
-    def test_returns_path_when_pms_has_real_token(
-        self, isolated_mcp_file: pathlib.Path
-    ) -> None:
+    def test_returns_path_when_pms_has_real_token(self, isolated_mcp_file: pathlib.Path) -> None:
         isolated_mcp_file.write_text(
             json.dumps(
                 {
@@ -177,9 +165,7 @@ class TestSharedMcpConfigPath:
         )
         assert shared_mcp_config_path() == str(isolated_mcp_file)
 
-    def test_returns_path_when_only_browsers_present(
-        self, isolated_mcp_file: pathlib.Path
-    ) -> None:
+    def test_returns_path_when_only_browsers_present(self, isolated_mcp_file: pathlib.Path) -> None:
         # The previous behaviour gated `--mcp-config` on pms being
         # configured. Now that browser MCPs are also worth handing to
         # claude, a browser-only file should still resolve. Otherwise
