@@ -295,7 +295,7 @@ class MainWindow(QMainWindow):
 
         self._btn_providers = QPushButton("🤖 Providers", self)
         self._btn_providers.setToolTip(
-            "Configure which CLI (claude / codex) backs each teammate role.\n"
+            "Configure which CLI (claude / codex / gemini) backs each teammate role.\n"
             "Edits ~/.takkub/role-providers.json. Live — applies to the\n"
             "next pane you spawn, no cockpit restart needed."
         )
