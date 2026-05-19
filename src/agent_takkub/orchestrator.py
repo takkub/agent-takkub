@@ -634,6 +634,42 @@ class Orchestrator(QObject):
         self._idle_state.pop(key, None)
         self._blocked_on_lead.pop(key, None)
 
+        # ── codex pane: non-claude path ─────────────────────────────
+        # `codex` is OpenAI's TUI; it speaks a different protocol and
+        # doesn't understand any of the claude flags below. Build a
+        # minimal argv and short-circuit so we don't accidentally pass
+        # `--dangerously-skip-permissions`, MCP configs, plugin dirs,
+        # or `--continue` (all claude-only) to it.
+        if role_name == "codex":
+            from .codex_helper import find_codex_executable
+
+            codex_bin = find_codex_executable()
+            if codex_bin is None:
+                return False, (
+                    "codex binary not on PATH. Install with "
+                    "`npm install -g @openai/codex`, then run `codex login` once."
+                )
+            spawn_cwd = cwd or default_cwd_for_role(role_name) or str(REPO_ROOT)
+            env = os.environ.copy()
+            env["TAKKUB_ROLE"] = role_name
+            env["TAKKUB_PROJECT"] = project_ns
+            bin_dir = str(REPO_ROOT / "bin")
+            env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+            session = PtySession(cols=110, rows=36, parent=self)
+            try:
+                session.spawn(argv=[codex_bin], cwd=spawn_cwd, env=env)
+            except Exception as e:
+                return False, f"failed to spawn codex: {e}"
+            pane.attach_session(session, cwd=spawn_cwd)
+            session.processExited.connect(
+                lambda _code, r=role_name, c=spawn_cwd, p=project_ns: self._on_session_exit(r, c, p)
+            )
+            if role_name in self._recent_exits:
+                del self._recent_exits[role_name]
+            self.statusChanged.emit()
+            _log_event("spawn", role=role_name, cwd=spawn_cwd, resumed=False)
+            return True, f"codex spawned in {spawn_cwd}"
+
         # Resolve cwd:
         #   Lead          → repo root (so CLAUDE.md auto-discovery picks up the
         #                   Lead instructions at agent-takkub/CLAUDE.md)

@@ -11,8 +11,8 @@ class TestDefaults:
         assert roles.LEAD.row == 0
         assert roles.LEAD.name == "lead"
 
-    def test_seven_default_teammates(self) -> None:
-        assert len(roles.DEFAULT_TEAMMATES) == 7
+    def test_default_teammates_registry(self) -> None:
+        assert len(roles.DEFAULT_TEAMMATES) == 8
         names = {r.name for r in roles.DEFAULT_TEAMMATES}
         assert names == {
             "frontend",
@@ -22,15 +22,17 @@ class TestDefaults:
             "designer",
             "qa",
             "reviewer",
+            "codex",
         }
 
     def test_default_columns_assigned(self) -> None:
-        # column 1 = middle (dev roles), column 2 = right (support roles)
+        # column 1 = middle (dev roles), column 2 = right (support + codex)
         cols = {r.name: r.column for r in roles.DEFAULT_TEAMMATES}
         assert cols["frontend"] == 1
         assert cols["backend"] == 1
         assert cols["designer"] == 2
         assert cols["reviewer"] == 2
+        assert cols["codex"] == 2
 
 
 class TestByName:

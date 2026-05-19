@@ -33,6 +33,13 @@ DEFAULT_TEAMMATES: tuple[Role, ...] = (
     Role("designer", "Designer", "#ec4899", column=2, row=0),
     Role("qa", "QA", "#f97316", column=2, row=1),
     Role("reviewer", "Reviewer", "#ef4444", column=2, row=2),
+    # Codex is a non-claude pane: orchestrator launches the `codex`
+    # binary directly (interactive TUI) and skips all claude flags +
+    # ECC mutes. The pane behaves like a terminal-bound second-opinion
+    # workstation — no `takkub done` integration, no token meter.
+    # Colour is OpenAI's signature teal so it visually stands apart
+    # from the claude-backed roles.
+    Role("codex", "Codex", "#10a37f", column=2, row=3),
 )
 
 ALL_DEFAULT: tuple[Role, ...] = (LEAD, *DEFAULT_TEAMMATES)
