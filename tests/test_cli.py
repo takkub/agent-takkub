@@ -110,6 +110,57 @@ class TestArgparse:
         cli.main(["list"])
         assert fake_request[-1]["from_project"] is None
 
+    def test_gemini_one_shot_routes_to_helper(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # `takkub gemini "<prompt>"` is pure-local (does NOT go through
+        # the orchestrator socket). Mock gemini_exec and assert the CLI
+        # routes the prompt + flags through correctly.
+        seen: dict[str, object] = {}
+
+        def fake_gemini_exec(prompt: str, *, cwd: str | None = None,
+                             timeout: float = 120.0, model: str | None = None):
+            seen["prompt"] = prompt
+            seen["cwd"] = cwd
+            seen["timeout"] = timeout
+            seen["model"] = model
+            return True, "gemini answered"
+
+        from agent_takkub import gemini_helper
+        monkeypatch.setattr(gemini_helper, "gemini_exec", fake_gemini_exec)
+        rc = cli.main(["gemini", "review this approach"])
+        assert rc == 0
+        assert seen["prompt"] == "review this approach"
+        assert seen["cwd"] is None
+        assert seen["model"] is None
+        out = capsys.readouterr().out
+        assert "gemini answered" in out
+
+    def test_gemini_forwards_cwd_and_model(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: dict[str, object] = {}
+
+        def fake_gemini_exec(prompt: str, *, cwd: str | None = None,
+                             timeout: float = 120.0, model: str | None = None):
+            seen["cwd"] = cwd
+            seen["model"] = model
+            seen["timeout"] = timeout
+            return True, ""
+
+        from agent_takkub import gemini_helper
+        monkeypatch.setattr(gemini_helper, "gemini_exec", fake_gemini_exec)
+        cli.main([
+            "gemini",
+            "--cwd", "C:/x/proj",
+            "--model", "gemini-2.5-pro",
+            "--timeout", "30",
+            "do thing",
+        ])
+        assert seen["cwd"] == "C:/x/proj"
+        assert seen["model"] == "gemini-2.5-pro"
+        assert seen["timeout"] == 30.0
+
 
 class TestExitCodes:
     def test_ok_response_exit_zero(
@@ -242,6 +293,21 @@ class TestRoleGate:
         rc = cli.main(["list"])
         assert rc == 0
         assert fake_request[-1]["cmd"] == "list"
+
+    def test_teammate_can_run_gemini_one_shot(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # `gemini` is local — not in LEAD_ONLY_COMMANDS — so a teammate
+        # pane can fire it for a second opinion mid-task.
+        monkeypatch.setenv("TAKKUB_ROLE", "backend")
+        from agent_takkub import gemini_helper
+        monkeypatch.setattr(
+            gemini_helper, "gemini_exec",
+            lambda *_a, **_kw: (True, "answer"),
+        )
+        rc = cli.main(["gemini", "ping"])
+        assert rc == 0
 
 
 def test_request_payload_serialises_cleanly() -> None:
