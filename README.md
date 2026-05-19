@@ -72,6 +72,14 @@ cd agent-takkub
 .\scripts\install.ps1
 ```
 
+ถ้า PowerShell execution policy บล็อก หรืออยาก double-click → ใช้
+`.bat` แทน (wrapper บางๆ ที่ตั้ง `-ExecutionPolicy Bypass` ให้รอบเดียว):
+
+```bat
+scripts\install.bat
+scripts\install.bat -Update
+```
+
 สิ่งที่ script ลงให้ (เรียงตาม phase):
 
 | Phase | สิ่งที่ลง | ทำไม |
