@@ -1153,16 +1153,22 @@ class MainWindow(QMainWindow):
         self._refresh_update_button()
 
     def _refresh_version_label(self) -> None:
-        """Update the `v<x.y.z> · @<sha>` chip. Reads `pyproject.toml`
-        once per call (cheap — 1 KB file) and queries git for the short
-        SHA. Falls back to just the version (no `@`) when not in a git
-        checkout."""
-        # Prefer pyproject.toml on disk — it's the live source of truth
-        # for editable installs. `importlib.metadata.version()` reads the
-        # *.egg-info/* snapshot baked at `pip install -e .` time and
-        # goes stale whenever pyproject is bumped without a reinstall.
-        # We fall back to installed metadata only when pyproject isn't
-        # reachable (e.g. wheel install with no source tree alongside).
+        """Update the version chip — live every commit when possible.
+
+        Primary source: `git describe --tags --always --dirty`. Output
+        looks like `v0.3.9-3-g4a5b6c7` (3 commits past the v0.3.9 tag)
+        or just `4a5b6c7` if no tags exist yet. Adds `-dirty` suffix
+        when the working tree has uncommitted changes.
+
+        Fallback: when not in a git checkout (ZIP / wheel install)
+        read pyproject.toml and stitch with `@<sha>` if available.
+        """
+        from .update_helper import current_sha_short, current_version_describe
+
+        described = current_version_describe()
+        if described:
+            self._version_label.setText(described)
+            return
         ver = "?"
         try:
             pyproj = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
@@ -1178,8 +1184,6 @@ class MainWindow(QMainWindow):
                 ver = _pkg_version("agent-takkub")
             except Exception:
                 pass
-        from .update_helper import current_sha_short
-
         sha = current_sha_short()
         text = f"v{ver} · @{sha}" if sha else f"v{ver}"
         self._version_label.setText(text)

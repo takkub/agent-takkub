@@ -297,6 +297,27 @@ def current_sha_short() -> str:
     return full[:7] if full else ""
 
 
+def current_version_describe() -> str:
+    """Live `git describe` output — `<tag>-<count>-g<sha>` if any tags
+    exist, otherwise just `g<sha>`. Adds `-dirty` if the working tree
+    has uncommitted changes.
+
+    Used by the status-bar version chip so the label refreshes on
+    every commit without requiring `pip install -e .` to regenerate
+    egg-info. Returns empty string on any git failure / non-repo so
+    the caller can fall back to pyproject's static version.
+    """
+    if not is_git_repo():
+        return ""
+    try:
+        proc = _git("describe", "--tags", "--always", "--dirty")
+    except Exception:
+        return ""
+    if proc.returncode != 0:
+        return ""
+    return (proc.stdout or "").strip()
+
+
 def pyproject_will_change_on_pull() -> bool:
     """True iff `pyproject.toml` is in the diff between HEAD and
     origin/main *before* the pull happens. Used to warn the user
