@@ -92,7 +92,8 @@ scripts\install.bat -Update
 | 5 | rtk (Rust Token Killer) | optional — ลด token usage 60-90% ของ shell command output |
 | 6 | clone agent-takkub + `pip install -e .` | cockpit เอง |
 | 7 | `~/.takkub/role-providers.json` (empty `{}`), Obsidian vault skeleton | per-role provider config + vault placeholder สำหรับ session mirror |
-| 8 | `claude login` + `codex login` (interactive) | OAuth ทั้งสองตัว |
+
+> Login (`claude login` / `codex login`) ไม่ได้รวมใน script — รันเองหลัง install เสร็จ (เปิด browser OAuth)
 
 **Flags:**
 
@@ -100,7 +101,6 @@ scripts\install.bat -Update
 |---|---|
 | (none) | ลงเฉพาะที่ยังไม่มี |
 | `-Update` | re-install / upgrade ทุกตัว ดึง `git pull` cockpit ล่าสุดด้วย |
-| `-SkipLogin` | ข้าม claude/codex login (รันครั้งหลังที่ login แล้ว) |
 | `-SkipMCPPrewarm` | ข้าม Phase 4b — MCP packages download อัตโนมัติตอน Lead pane spawn แทน |
 | `-VaultDir ""` | ข้ามการสร้าง Obsidian vault skeleton |
 

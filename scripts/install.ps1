@@ -17,14 +17,15 @@
       5.  rtk              : Rust Token Killer (skipped if no cargo)
       6.  Cockpit setup    : git clone (if needed) + pip install -e .
       7.  Cockpit config   : role-providers.json + optional vault dir
-      8.  Login (optional) : claude login + codex login (interactive)
+
+    Login (claude / codex) is intentionally NOT automated — those
+    open browser OAuth flows that read better in a separate shell
+    when the user is ready. Run them manually after install:
+        claude login
+        codex login
 
 .PARAMETER Update
     Re-install / upgrade everything even if already present.
-
-.PARAMETER SkipLogin
-    Skip the interactive `claude login` / `codex login` prompts at
-    the end. Useful for re-runs after the first one.
 
 .PARAMETER SkipMCPPrewarm
     Skip Phase 4b (MCP pre-install). MCP packages still auto-download
@@ -47,7 +48,6 @@
 [CmdletBinding()]
 param(
     [switch]$Update,
-    [switch]$SkipLogin,
     [switch]$SkipMCPPrewarm,
     [string]$VaultDir = "$env:USERPROFILE\WebstormProjects\second-brain"
 )
@@ -402,28 +402,6 @@ if ($VaultDir -and (-not (Test-Path (Join-Path $VaultDir "01-Projects")))) {
 }
 
 # ─────────────────────────────────────────────────────────────
-# Phase 8 — Login (optional, interactive)
-# ─────────────────────────────────────────────────────────────
-if (-not $SkipLogin) {
-    Write-Step "Phase 8 - Auth login (interactive)"
-    Write-Host "  About to run 'claude login' and 'codex login'." -ForegroundColor Yellow
-    Write-Host "  Each opens a browser for OAuth. Skip with -SkipLogin." -ForegroundColor Yellow
-    $resp = Read-Host "  Proceed? [Y/n]"
-    if ($resp -ne 'n') {
-        if (Test-Cmd claude) {
-            Write-Doing "claude login"
-            claude login
-        }
-        if (Test-Cmd codex) {
-            Write-Doing "codex login"
-            codex login
-        }
-    } else {
-        Write-Skip "logins skipped - run 'claude login' and 'codex login' manually later"
-    }
-}
-
-# ─────────────────────────────────────────────────────────────
 # Summary
 # ─────────────────────────────────────────────────────────────
 Write-Host ""
@@ -453,6 +431,8 @@ if ($script:Summary.Failed.Count -gt 0) {
 
 Write-Host ""
 Write-Host "Next:" -ForegroundColor Cyan
+Write-Host "  claude login              # OAuth (skip if already logged in)"
+Write-Host "  codex login               # OAuth (skip if already logged in)"
 Write-Host "  cd $cockpitDir"
 Write-Host "  python -m agent_takkub"
 Write-Host ""
