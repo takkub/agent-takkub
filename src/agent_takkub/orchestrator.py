@@ -720,7 +720,44 @@ class Orchestrator(QObject):
         # binary via `~/.takkub/role-providers.json`. The `codex` role
         # itself is forced into this branch by provider_config's
         # `_FORCED_PROVIDER` table.
-        from .provider_config import CODEX, provider_for
+        from .provider_config import CODEX, GEMINI, provider_for
+
+        if provider_for(role_name) == GEMINI:
+            from .gemini_helper import find_gemini_executable
+            from .gemini_md import ensure_gemini_md
+
+            gemini_bin = find_gemini_executable()
+            if gemini_bin is None:
+                return False, (
+                    "gemini binary not on PATH. Install with "
+                    "`npm install -g @google/gemini-cli`, then run `gemini` once to log in."
+                )
+            spawn_cwd = cwd or default_cwd_for_role(role_name) or str(REPO_ROOT)
+            ensure_gemini_md(spawn_cwd)
+            env = os.environ.copy()
+            env["TAKKUB_ROLE"] = role_name
+            env["TAKKUB_PROJECT"] = project_ns
+            bin_dir = str(REPO_ROOT / "bin")
+            env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+            gemini_argv = [
+                gemini_bin,
+                "-y",  # yolo: skip per-command approval prompts (parity with codex --ask-for-approval never)
+            ]
+            session = PtySession(cols=110, rows=36, parent=self)
+            try:
+                session.spawn(argv=gemini_argv, cwd=spawn_cwd, env=env)
+            except Exception as e:
+                return False, f"failed to spawn gemini: {e}"
+            pane.attach_session(session, cwd=spawn_cwd)
+            session.processExited.connect(
+                lambda _code, r=role_name, c=spawn_cwd, p=project_ns: self._on_session_exit(r, c, p)
+            )
+            if role_name in self._recent_exits:
+                del self._recent_exits[role_name]
+            self._auto_trust(role_name)
+            self.statusChanged.emit()
+            _log_event("spawn", role=role_name, cwd=spawn_cwd, resumed=False)
+            return True, f"gemini spawned in {spawn_cwd}"
 
         if provider_for(role_name) == CODEX:
             from .codex_agents_md import ensure_agents_md
