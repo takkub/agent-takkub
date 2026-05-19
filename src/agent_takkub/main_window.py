@@ -232,7 +232,11 @@ class MainWindow(QMainWindow):
         # sees the update light up here without needing to touch a
         # terminal. Click flow lives in `_on_update_clicked` (with a
         # confirm dialog, dirty-tree guard, and restart-on-success).
-        self._btn_update = QPushButton("🔄 Up to date", self)
+        # Neutral placeholder until the first poll completes (~30 s after
+        # boot). Showing "Up to date" pre-check is a lie — if the user
+        # clicks during the window before the timer fires, the cache is
+        # still None and the click handler can't render a real status.
+        self._btn_update = QPushButton("🔄 Checking…", self)
         self._btn_update.setToolTip(
             "Check for cockpit code updates from origin/main and pull them\n"
             "via fast-forward. User-specific files (projects.json, runtime/,\n"
@@ -240,10 +244,9 @@ class MainWindow(QMainWindow):
             "tracked files block the pull until you commit or stash."
         )
         self._btn_update.setStyleSheet(
-            "QPushButton { color: #4ade80; background: #052e16; "
-            "border: 1px solid #166534; border-radius: 4px; "
+            "QPushButton { color: #94a3b8; background: #1e293b; "
+            "border: 1px solid #334155; border-radius: 4px; "
             "padding: 2px 8px; }"
-            "QPushButton:hover { background: #14532d; }"
         )
         self._btn_update.clicked.connect(self._on_update_clicked)
         # Cached result from the most recent poll. Populated lazily so
@@ -1151,7 +1154,15 @@ class MainWindow(QMainWindow):
             pyproject_changed_in_pull,
         )
 
-        status = self._update_status_cache or {}
+        # First poll fires 30 s after boot. If the user clicks during
+        # that window the cache is still None — don't render a fake
+        # "check failed" dialog. Kick the check off immediately and
+        # tell the user to retry in a moment.
+        if self._update_status_cache is None:
+            self._status.showMessage("Checking for updates… click again in a moment.", 4_000)
+            self._run_update_check()
+            return
+        status = self._update_status_cache
         if status.get("not_repo"):
             QMessageBox.information(
                 self,
