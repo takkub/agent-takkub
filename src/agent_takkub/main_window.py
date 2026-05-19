@@ -1159,21 +1159,27 @@ class MainWindow(QMainWindow):
         once per call (cheap — 1 KB file) and queries git for the short
         SHA. Falls back to just the version (no `@`) when not in a git
         checkout."""
+        # Prefer pyproject.toml on disk — it's the live source of truth
+        # for editable installs. `importlib.metadata.version()` reads the
+        # *.egg-info/* snapshot baked at `pip install -e .` time and
+        # goes stale whenever pyproject is bumped without a reinstall.
+        # We fall back to installed metadata only when pyproject isn't
+        # reachable (e.g. wheel install with no source tree alongside).
+        ver = "?"
         try:
-            from importlib.metadata import version as _pkg_version
+            pyproj = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+            import re as _re
 
-            ver = _pkg_version("agent-takkub")
+            m = _re.search(r'^version\s*=\s*"([^"]+)"', pyproj, _re.MULTILINE)
+            if m:
+                ver = m.group(1)
         except Exception:
-            # Editable install pre-`pip install -e .` etc — try pyproject
-            # raw read as a fallback so the boot UI still has something.
             try:
-                pyproj = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-                import re as _re
+                from importlib.metadata import version as _pkg_version
 
-                m = _re.search(r'^version\s*=\s*"([^"]+)"', pyproj, _re.MULTILINE)
-                ver = m.group(1) if m else "?"
+                ver = _pkg_version("agent-takkub")
             except Exception:
-                ver = "?"
+                pass
         from .update_helper import current_sha_short
 
         sha = current_sha_short()
