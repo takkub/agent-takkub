@@ -1,11 +1,11 @@
 """Role provider config dialog — UI for `~/.takkub/role-providers.json`.
 
 Lets the user pick claude or codex for each non-forced teammate role
-without hand-editing JSON. The dialog button is labelled
-"Save & Restart" because the orchestrator reads the mapping at
-spawn time only — to actually apply a change the cockpit has to
-restart, so we do that automatically on save instead of forcing
-the user to remember.
+without hand-editing JSON. Changes are live: `orchestrator.spawn()`
+re-reads the mapping file on every spawn (no in-memory cache), so
+the new provider applies to the very next pane the user opens.
+Already-running panes are NOT affected — close + respawn them to
+flip their provider.
 
 Hard-coded rows (locked, no dropdown):
 - Lead  → always claude (claude-specific plumbing demands it)
@@ -46,10 +46,11 @@ class RoleProviderDialog(QDialog):
         layout.setSpacing(10)
 
         intro = QLabel(
-            "Choose which CLI backs each teammate role. Cockpit will\n"
-            "restart automatically after saving so the new mapping\n"
-            "takes effect. Lead is locked to Claude; Codex role is\n"
-            "locked to Codex."
+            "Choose which CLI backs each teammate role. Saving applies\n"
+            "to the next pane you spawn — no restart needed. Already-\n"
+            "running panes keep their original CLI; close + respawn to\n"
+            "flip them. Lead is locked to Claude; Codex role is locked\n"
+            "to Codex."
         )
         intro.setWordWrap(True)
         intro.setStyleSheet("color: #d4d4d8;")
@@ -79,15 +80,10 @@ class RoleProviderDialog(QDialog):
             self._combos[role.name] = combo
             form.addRow(f"{role.label}:", combo)
 
-        # Two-button bar. The Save action carries the auto-restart
-        # promise in its label so the user knows what's about to
-        # happen before clicking.
-        buttons = QDialogButtonBox(self)
-        save_btn = buttons.addButton(
-            "Save && Restart cockpit", QDialogButtonBox.ButtonRole.AcceptRole
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel,
+            self,
         )
-        buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
-        save_btn.setDefault(True)
         buttons.accepted.connect(self._on_save)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)

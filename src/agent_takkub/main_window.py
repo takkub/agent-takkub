@@ -296,7 +296,8 @@ class MainWindow(QMainWindow):
         self._btn_providers = QPushButton("🤖 Providers", self)
         self._btn_providers.setToolTip(
             "Configure which CLI (claude / codex) backs each teammate role.\n"
-            "Edits ~/.takkub/role-providers.json. Cockpit auto-restarts on save."
+            "Edits ~/.takkub/role-providers.json. Live — applies to the\n"
+            "next pane you spawn, no cockpit restart needed."
         )
         self._btn_providers.setStyleSheet(
             "QPushButton { color: #e0e7ff; background: #312e81; "
@@ -663,19 +664,20 @@ class MainWindow(QMainWindow):
 
     def _on_providers_clicked(self) -> None:
         """Open the role-provider config dialog. On save the dialog writes
-        `~/.takkub/role-providers.json`; we then auto-restart the cockpit
-        so the orchestrator picks up the new role→CLI mapping at the
-        next spawn cycle (no live-reload in v1).
+        `~/.takkub/role-providers.json`; `orchestrator.spawn()` re-reads
+        that file every time, so the new mapping applies to the very
+        next pane the user opens — no restart needed. Already-running
+        panes keep whatever CLI they were spawned with.
         """
         from .provider_dialog import RoleProviderDialog
 
         dlg = RoleProviderDialog(self)
         if dlg.exec() != dlg.DialogCode.Accepted:
             return
-        # Save landed — restart so the new mapping takes effect on every
-        # subsequent `takkub assign --role <X>` call.
-        self._status.showMessage("Role providers saved — restarting cockpit…", 4_000)
-        QTimer.singleShot(500, self._restart_cockpit)
+        self._status.showMessage(
+            "Role providers saved — new mapping applies to the next pane you spawn.",
+            6_000,
+        )
 
     # ──────────────────────────────────────────────────────────────
     # toolbar buttons
