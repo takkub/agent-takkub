@@ -35,7 +35,11 @@ def _connect() -> socket.socket:
         raise RuntimeError(
             "agent-takkub cockpit is not running (no port file). Launch the app first."
         )
-    s = socket.create_connection(("127.0.0.1", port), timeout=5)
+    # 15 s: long enough that codex/gemini pane spawns (which wait on
+    # workspace-write sandbox + AGENTS.md/GEMINI.md plant + ready-
+    # prompt detection, ~7-10 s) don't return "timed out" while the
+    # orchestrator is still doing the right thing in the background.
+    s = socket.create_connection(("127.0.0.1", port), timeout=15)
     return s
 
 
@@ -44,7 +48,7 @@ def _request(payload: dict) -> dict:
     try:
         s.sendall((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
         buf = b""
-        s.settimeout(5)
+        s.settimeout(15)
         while b"\n" not in buf:
             chunk = s.recv(4096)
             if not chunk:
