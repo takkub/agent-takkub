@@ -88,6 +88,7 @@ scripts\install.bat -Update
 | 2 | npm registry → `registry.npmjs.org` | กัน corporate proxy block MCP fetch |
 | 3 | Claude Code CLI, OpenAI Codex CLI | backend ของ Lead pane + Codex pane |
 | 4 | Claude plugins: superpowers, agent-skills, ECC, Pordee | skills + reviewers + workflow utilities ที่ agents ใช้ผ่าน `/skill-name` |
+| 4b | MCP servers: `@playwright/mcp`, `chrome-devtools-mcp` + Playwright Chromium (~150 MB) | pre-warm npm cache + Playwright browser → Lead pane spawn ครั้งแรกไม่ต้องรอ MCP download |
 | 5 | rtk (Rust Token Killer) | optional — ลด token usage 60-90% ของ shell command output |
 | 6 | clone agent-takkub + `pip install -e .` | cockpit เอง |
 | 7 | `~/.takkub/role-providers.json` (empty `{}`), Obsidian vault skeleton | per-role provider config + vault placeholder สำหรับ session mirror |
@@ -100,6 +101,7 @@ scripts\install.bat -Update
 | (none) | ลงเฉพาะที่ยังไม่มี |
 | `-Update` | re-install / upgrade ทุกตัว ดึง `git pull` cockpit ล่าสุดด้วย |
 | `-SkipLogin` | ข้าม claude/codex login (รันครั้งหลังที่ login แล้ว) |
+| `-SkipMCPPrewarm` | ข้าม Phase 4b — MCP packages download อัตโนมัติตอน Lead pane spawn แทน |
 | `-VaultDir ""` | ข้ามการสร้าง Obsidian vault skeleton |
 
 หลังจบ script จะ print **summary** ว่าตัวไหน installed / upgraded / skipped / failed

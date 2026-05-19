@@ -8,14 +8,16 @@
     so `python -m agent_takkub` runs cleanly.
 
     Sections:
-      1. System runtime    : Python 3.11+, Git, Node.js, Chrome, gh CLI
-      2. npm registry      : reset to public registry (gates MCP fetch)
-      3. AI CLIs           : Claude Code, OpenAI Codex
-      4. Claude plugins    : superpowers, agent-skills, ECC, Pordee
-      5. rtk               : Rust Token Killer (skipped if no cargo)
-      6. Cockpit setup     : git clone (if needed) + pip install -e .
-      7. Cockpit config    : role-providers.json + optional vault dir
-      8. Login (optional)  : claude login + codex login (interactive)
+      1.  System runtime   : Python 3.11+, Git, Node.js, Chrome, gh CLI
+      2.  npm registry     : reset to public registry (gates MCP fetch)
+      3.  AI CLIs          : Claude Code, OpenAI Codex
+      4.  Claude plugins   : superpowers, agent-skills, ECC, Pordee
+      4b. MCP servers      : Playwright MCP + Chrome DevTools MCP +
+                             Playwright Chromium browser (~150 MB)
+      5.  rtk              : Rust Token Killer (skipped if no cargo)
+      6.  Cockpit setup    : git clone (if needed) + pip install -e .
+      7.  Cockpit config   : role-providers.json + optional vault dir
+      8.  Login (optional) : claude login + codex login (interactive)
 
 .PARAMETER Update
     Re-install / upgrade everything even if already present.
@@ -23,6 +25,11 @@
 .PARAMETER SkipLogin
     Skip the interactive `claude login` / `codex login` prompts at
     the end. Useful for re-runs after the first one.
+
+.PARAMETER SkipMCPPrewarm
+    Skip Phase 4b (MCP pre-install). MCP packages still auto-download
+    via `npx -y` on first use; pre-warm only saves the wait at
+    cockpit's first claude-pane spawn.
 
 .PARAMETER VaultDir
     Path to create an Obsidian vault skeleton at. Defaults to
@@ -41,6 +48,7 @@
 param(
     [switch]$Update,
     [switch]$SkipLogin,
+    [switch]$SkipMCPPrewarm,
     [string]$VaultDir = "$env:USERPROFILE\WebstormProjects\second-brain"
 )
 
@@ -260,6 +268,41 @@ Install-ClaudePlugin -Spec "github:jessevincent/superpowers"
 Install-ClaudePlugin -Spec "github:addyosmani/agent-skills"
 Install-ClaudePlugin -Spec "github:everything-claude-code/marketplace"
 Install-ClaudePlugin -Spec "github:kerlos/pordee"
+
+# ─────────────────────────────────────────────────────────────
+# Phase 4b — MCP servers (Playwright + Chrome DevTools)
+# ─────────────────────────────────────────────────────────────
+# Cockpit's `runtime/shared-mcp.json` references these two servers
+# via `npx -y <pkg>@<version>`. By default claude pulls them on
+# first use (5-30 s wait at Lead pane spawn). Pre-installing into
+# the npm global cache + downloading Playwright's bundled Chromium
+# means the MCP servers are warm and ready the moment cockpit asks
+# for them. Skip with -SkipMCPPrewarm.
+Write-Step "Phase 4b - MCP servers (Playwright + Chrome DevTools)"
+if ($SkipMCPPrewarm) {
+    Write-Skip "MCP pre-warm skipped (-SkipMCPPrewarm). They'll auto-download via npx on first use."
+    $script:Summary.Skipped += "MCP pre-warm"
+} elseif (-not (Test-Cmd npm)) {
+    Write-Fail "npm not on PATH - open a new shell after Node install"
+    $script:Summary.Failed += "MCP pre-warm"
+} else {
+    Install-NpmGlobal -Package "@playwright/mcp@0.0.75"      -ProbeCmd ""
+    Install-NpmGlobal -Package "chrome-devtools-mcp@0.26.0"  -ProbeCmd ""
+    # Playwright MCP drives a bundled Chromium (not the system Chrome).
+    # `playwright install chromium` is idempotent — exits fast if the
+    # browser is already downloaded under %USERPROFILE%\AppData\Local\ms-playwright\.
+    if (Test-Cmd npx) {
+        Write-Doing "downloading Playwright Chromium browser (~150 MB, idempotent)"
+        npx --yes playwright install chromium
+        if ($LASTEXITCODE -eq 0) {
+            Write-Ok "Playwright Chromium ready"
+            $script:Summary.Installed += "playwright chromium"
+        } else {
+            Write-Fail "playwright install chromium exit $LASTEXITCODE"
+            $script:Summary.Failed += "playwright chromium"
+        }
+    }
+}
 
 # ─────────────────────────────────────────────────────────────
 # Phase 5 — rtk (optional)
