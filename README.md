@@ -61,7 +61,45 @@
 
 ---
 
-## Quick Install (สามขั้น)
+## One-shot install (Windows, recommended for เครื่องใหม่)
+
+`scripts/install.ps1` ลงทุกอย่างที่ระบบนี้ใช้ในรอบเดียว
+ตัวไหนลงไว้แล้วจะ **skip** อัตโนมัติ ส่ง `-Update` เพื่อ upgrade
+
+```powershell
+git clone https://github.com/takkub/agent-takkub.git
+cd agent-takkub
+.\scripts\install.ps1
+```
+
+สิ่งที่ script ลงให้ (เรียงตาม phase):
+
+| Phase | สิ่งที่ลง | ทำไม |
+|---|---|---|
+| 1 | Python 3.11+, Git, Node.js LTS, Chrome, GitHub CLI | runtime + ผูก git update flow + Chrome สำหรับ chrome-devtools MCP |
+| 2 | npm registry → `registry.npmjs.org` | กัน corporate proxy block MCP fetch |
+| 3 | Claude Code CLI, OpenAI Codex CLI | backend ของ Lead pane + Codex pane |
+| 4 | Claude plugins: superpowers, agent-skills, ECC, Pordee | skills + reviewers + workflow utilities ที่ agents ใช้ผ่าน `/skill-name` |
+| 5 | rtk (Rust Token Killer) | optional — ลด token usage 60-90% ของ shell command output |
+| 6 | clone agent-takkub + `pip install -e .` | cockpit เอง |
+| 7 | `~/.takkub/role-providers.json` (empty `{}`), Obsidian vault skeleton | per-role provider config + vault placeholder สำหรับ session mirror |
+| 8 | `claude login` + `codex login` (interactive) | OAuth ทั้งสองตัว |
+
+**Flags:**
+
+| Flag | ทำอะไร |
+|---|---|
+| (none) | ลงเฉพาะที่ยังไม่มี |
+| `-Update` | re-install / upgrade ทุกตัว ดึง `git pull` cockpit ล่าสุดด้วย |
+| `-SkipLogin` | ข้าม claude/codex login (รันครั้งหลังที่ login แล้ว) |
+| `-VaultDir ""` | ข้ามการสร้าง Obsidian vault skeleton |
+
+หลังจบ script จะ print **summary** ว่าตัวไหน installed / upgraded / skipped / failed
+รันได้ซ้ำได้ทุกเมื่อ — idempotent, re-runnable
+
+---
+
+## Quick Install (สามขั้น — manual path)
 
 ```bat
 git clone git@github.com:takkub/agent-takkub.git
