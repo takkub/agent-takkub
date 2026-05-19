@@ -30,4 +30,12 @@ if not exist "%SCRIPT%" (
 powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT%" %*
 set "RC=%ERRORLEVEL%"
 
+REM Keep the window open so the user can read the summary / any
+REM error message before the console slams shut on exit. Skip when
+REM running headless (CI) by setting TAKKUB_INSTALL_NO_PAUSE=1.
+if not defined TAKKUB_INSTALL_NO_PAUSE (
+    echo.
+    pause
+)
+
 endlocal & exit /b %RC%
