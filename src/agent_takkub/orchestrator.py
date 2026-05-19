@@ -545,6 +545,11 @@ class Orchestrator(QObject):
 
     statusChanged = pyqtSignal()
     leadInjected = pyqtSignal(str)
+    # Emitted at the tail of a successful spawn that picked up `--continue`
+    # (i.e. the role's previous session exited within RESUME_WINDOW_SEC).
+    # main_window uses this to fire `/remote-control` only on resumes, so a
+    # fresh project open doesn't spam the Lead pane with the bridge command.
+    paneResumed = pyqtSignal(str, str)  # role_name, project
     paneRequested = pyqtSignal(
         str, str
     )  # role_name, project — main_window adds pane to the matching tab
@@ -994,6 +999,10 @@ class Orchestrator(QObject):
 
         self._auto_trust(role_name)
         self.statusChanged.emit()
+        if resumed:
+            # main_window listens for this to auto-bridge `/remote-control`
+            # exclusively on resumes — fresh boots stay silent.
+            self.paneResumed.emit(role_name, project_ns)
         _log_event(
             "spawn",
             role=role_name,

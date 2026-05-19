@@ -16,7 +16,6 @@ axis — Lead always on the left, teammates stacked vertically on the right.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from PyQt6.QtCore import QSettings, Qt, QTimer
@@ -120,6 +119,7 @@ class MainWindow(QMainWindow):
         self.orch.paneRequested.connect(self._ensure_teammate_pane)
         self.orch.paneClosed.connect(self._remove_teammate_pane)
         self.orch.agentDone.connect(self._notify_agent_done)
+        self.orch.paneResumed.connect(self._on_pane_resumed)
 
         # ── system tray for desktop notifications ───────────────
         self._tray = QSystemTrayIcon(self)
@@ -287,20 +287,25 @@ class MainWindow(QMainWindow):
         self._btn_help.setToolTip("Show takkub command cheatsheet (F1)")
         self._btn_help.clicked.connect(self._show_help)
 
-        # Persistent /remote-control reminder. The built-in Claude Code
-        # command bridges a local session to claude.ai/code for browser/phone
-        # control. The user routinely forgets it exists, so we keep a small
-        # always-visible chip in the status bar that names it explicitly.
-        self._remote_hint = QLabel("💡 /remote-control → control from browser", self)
+        # Clickable /remote-control trigger. The built-in Claude Code command
+        # bridges a local session to claude.ai/code for browser/phone
+        # control. The cockpit no longer auto-fires it on fresh project
+        # opens (was noisy — every tab open spammed the bridge). Now it
+        # fires only on resume (via orch.paneResumed) or when the user
+        # clicks this chip directly.
+        self._remote_hint = QLabel("💡 /remote-control · click to bridge", self)
         self._remote_hint.setStyleSheet(
             "color: #fbbf24; font-size: 11px; padding: 0 8px; "
             "background: rgba(251, 191, 36, 0.08); border-radius: 4px;"
         )
         self._remote_hint.setToolTip(
-            "Run /remote-control inside the Lead pane to bridge this Claude\n"
-            "session to claude.ai/code. Lets you continue from a browser or\n"
-            "phone. Built-in Claude Code feature (2.x+)."
+            "Click to run /remote-control inside the active Lead pane.\n"
+            "Bridges this Claude session to claude.ai/code so you can\n"
+            "continue from a browser or phone. Auto-fires on session\n"
+            "resume; this chip is for manual trigger on a fresh boot."
         )
+        self._remote_hint.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._remote_hint.mousePressEvent = lambda _ev: self._on_remote_hint_clicked()
 
         # Aggregate token meter: sums prompt tokens across every active pane
         # so the user can spot when the whole team is bumping the limit.
@@ -504,12 +509,11 @@ class MainWindow(QMainWindow):
         # match its current installation state.
         self._refresh_rtk_button()
 
-        # Auto-run `/remote-control` in the Lead pane after spawn so the
-        # user can drive the cockpit from a browser/phone without having to
-        # remember to type it every session. Skip with
-        # TAKKUB_AUTO_REMOTE_CONTROL=0 if the bridge is unwanted (e.g. CI).
-        if ok and os.environ.get("TAKKUB_AUTO_REMOTE_CONTROL", "1") != "0":
-            self.orch.inject_slash_command_when_ready(LEAD.name, "/remote-control")
+        # No auto-/remote-control on fresh boot. The cockpit listens for
+        # orch.paneResumed and only injects the bridge command on session
+        # resume (i.e. the Lead was respawned with --continue inside the
+        # 5-minute window). Manual trigger via the clickable hint chip
+        # below for fresh boots when the user wants to drive from a phone.
 
         # Auto-spawn project presets after Lead has had a moment to boot.
         # Stagger 3s apart so we don't hammer the system or race on auto-trust.
@@ -573,6 +577,30 @@ class MainWindow(QMainWindow):
         self._status.showMessage(f"✓ {title}: {body[:80]}", 6_000)
         if self._tray and QSystemTrayIcon.isSystemTrayAvailable():
             self._tray.showMessage(title, body, QSystemTrayIcon.MessageIcon.Information, 5_000)
+
+    def _on_pane_resumed(self, role: str, project: str) -> None:
+        """Auto-bridge `/remote-control` only when a Lead pane was actually
+        *resumed* (spawn picked up --continue). Teammate-pane resumes are
+        ignored — they're spawned to do task work, not to bridge a
+        session. Fresh boots are silent; the user clicks the hint chip
+        for manual trigger."""
+        if role != LEAD.name:
+            return
+        self.orch.inject_slash_command_when_ready(LEAD.name, "/remote-control", project=project)
+
+    def _on_remote_hint_clicked(self) -> None:
+        """Manual `/remote-control` trigger via the status-bar hint chip.
+        Targets the currently-focused tab's Lead pane."""
+        tab = self._current_tab()
+        if tab is None or tab.lead_pane is None or tab.lead_pane.session is None:
+            self._status.showMessage(
+                "Lead pane isn't running — open or focus a project tab first.",
+                5_000,
+            )
+            return
+        project = tab.project_name
+        self.orch.inject_slash_command_when_ready(LEAD.name, "/remote-control", project=project)
+        self._status.showMessage(f"bridging Lead·{project} → claude.ai/code", 4_000)
 
     # ──────────────────────────────────────────────────────────────
     # toolbar buttons
@@ -844,10 +872,8 @@ class MainWindow(QMainWindow):
             self._status.showMessage(f"⚠ Lead spawn failed for {project_name}: {msg}", 15_000)
             return
         lead._title.setText(f"Lead · {project_name}")
-        if os.environ.get("TAKKUB_AUTO_REMOTE_CONTROL", "1") != "0":
-            self.orch.inject_slash_command_when_ready(
-                LEAD.name, "/remote-control", project=project_name
-            )
+        # No auto-/remote-control on tab open. Resume case is handled by
+        # the orch.paneResumed signal; manual case via the hint chip.
         self._refresh_rtk_button()
         self._persist_open_tabs()
         self._status.showMessage(f"opened tab · {project_name}", 4_000)
@@ -933,9 +959,9 @@ class MainWindow(QMainWindow):
         active = active_project()[0]
         if active:
             self.lead_pane._title.setText(f"Lead · {active}")
-        # Auto-bridge to the browser again on the fresh session.
-        if os.environ.get("TAKKUB_AUTO_REMOTE_CONTROL", "1") != "0":
-            self.orch.inject_slash_command_when_ready(LEAD.name, "/remote-control")
+        # Resume after self-update restart: orch.paneResumed handles the
+        # `/remote-control` injection automatically because spawn() above
+        # picks up --continue inside the 5-minute resume window.
 
     def _refresh_rtk_button(self) -> None:
         """Show the install button only when the active project's lead_cwd()
