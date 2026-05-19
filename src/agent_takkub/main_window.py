@@ -293,6 +293,19 @@ class MainWindow(QMainWindow):
         )
         self._btn_finish.clicked.connect(self._on_finish_job_clicked)
 
+        self._btn_providers = QPushButton("🤖 Providers", self)
+        self._btn_providers.setToolTip(
+            "Configure which CLI (claude / codex) backs each teammate role.\n"
+            "Edits ~/.takkub/role-providers.json. Cockpit auto-restarts on save."
+        )
+        self._btn_providers.setStyleSheet(
+            "QPushButton { color: #e0e7ff; background: #312e81; "
+            "border: 1px solid #4338ca; border-radius: 4px; "
+            "padding: 2px 8px; }"
+            "QPushButton:hover { background: #3730a3; }"
+        )
+        self._btn_providers.clicked.connect(self._on_providers_clicked)
+
         self._btn_help = QPushButton("❓ Help", self)
         self._btn_help.setFixedWidth(70)
         self._btn_help.setToolTip("Show takkub command cheatsheet (F1)")
@@ -361,6 +374,7 @@ class MainWindow(QMainWindow):
         self._status.addPermanentWidget(self._btn_assign)
         self._status.addPermanentWidget(self._btn_logs)
         self._status.addPermanentWidget(self._btn_finish)
+        self._status.addPermanentWidget(self._btn_providers)
         self._status.addPermanentWidget(self._btn_help)
         # Sync rtk button visibility after every permanent widget has been
         # added, so any layout invalidation triggered by show()/hide() lands
@@ -646,6 +660,22 @@ class MainWindow(QMainWindow):
         self._lead_first_input_fired.add(project)
         self.orch.inject_slash_command_when_ready(LEAD.name, "/remote-control", project=project)
         self._status.showMessage(f"bridging Lead·{project} → claude.ai/code", 4_000)
+
+    def _on_providers_clicked(self) -> None:
+        """Open the role-provider config dialog. On save the dialog writes
+        `~/.takkub/role-providers.json`; we then auto-restart the cockpit
+        so the orchestrator picks up the new role→CLI mapping at the
+        next spawn cycle (no live-reload in v1).
+        """
+        from .provider_dialog import RoleProviderDialog
+
+        dlg = RoleProviderDialog(self)
+        if dlg.exec() != dlg.DialogCode.Accepted:
+            return
+        # Save landed — restart so the new mapping takes effect on every
+        # subsequent `takkub assign --role <X>` call.
+        self._status.showMessage("Role providers saved — restarting cockpit…", 4_000)
+        QTimer.singleShot(500, self._restart_cockpit)
 
     # ──────────────────────────────────────────────────────────────
     # toolbar buttons
