@@ -167,12 +167,23 @@ class MainWindow(QMainWindow):
         # surface invalidated"). Adding the tab BEFORE creating the
         # AgentPane that owns the WebEngineView keeps the chain stable
         # from the QWebEngineView's first paint onward.
+        # Tracks which Lead panes have already auto-bridged `/remote-control`
+        # in this cockpit session — keyed by project name. Populated by:
+        #   - `_on_pane_resumed` (session-resume auto-fire)
+        #   - `_on_lead_input` (first user Enter in Lead pane)
+        #   - `_on_remote_hint_clicked` (manual chip click)
+        # Membership prevents double-firing across the three paths.
+        self._lead_first_input_fired: set[str] = set()
+
         initial_project = active_project()[0] or "default"
         initial_tab = ProjectTab(initial_project, lead_pane=None)
         self.tabs.addTab(initial_tab, initial_project)
         initial_lead = AgentPane(LEAD, parent=initial_tab)
         self.orch.register_pane(initial_lead, project=initial_project)
         initial_tab.attach_lead(initial_lead)
+        initial_lead.inputBytes.connect(
+            lambda role, data, proj=initial_project: self._on_lead_input(proj, role, data)
+        )
 
         # Append a permanent "+" pseudo-tab at the end of the strip. It
         # has no widget content (an empty QWidget placeholder), is not
@@ -579,13 +590,32 @@ class MainWindow(QMainWindow):
             self._tray.showMessage(title, body, QSystemTrayIcon.MessageIcon.Information, 5_000)
 
     def _on_pane_resumed(self, role: str, project: str) -> None:
-        """Auto-bridge `/remote-control` only when a Lead pane was actually
-        *resumed* (spawn picked up --continue). Teammate-pane resumes are
-        ignored — they're spawned to do task work, not to bridge a
-        session. Fresh boots are silent; the user clicks the hint chip
-        for manual trigger."""
+        """Auto-bridge `/remote-control` when a Lead pane was actually
+        *resumed* (spawn picked up --continue). Teammate-pane resumes
+        are ignored — they're spawned to do task work, not to bridge."""
         if role != LEAD.name:
             return
+        if project in self._lead_first_input_fired:
+            return
+        self._lead_first_input_fired.add(project)
+        self.orch.inject_slash_command_when_ready(LEAD.name, "/remote-control", project=project)
+
+    def _on_lead_input(self, project: str, role: str, data: bytes) -> None:
+        """First-task auto-bridge: when the user hits Enter in a Lead pane
+        for the first time this session, fire `/remote-control` so the
+        bridge command lands right after their task. Fresh boot + idle
+        Lead → silent. Click the hint chip to bridge without typing.
+        """
+        if role != LEAD.name:
+            return
+        if project in self._lead_first_input_fired:
+            return
+        # Treat any Enter (CR or LF) as "task submitted". False positives
+        # (user pressed Enter on empty input) are benign — claude no-ops
+        # on /remote-control when already active.
+        if b"\r" not in data and b"\n" not in data:
+            return
+        self._lead_first_input_fired.add(project)
         self.orch.inject_slash_command_when_ready(LEAD.name, "/remote-control", project=project)
 
     def _on_remote_hint_clicked(self) -> None:
@@ -599,6 +629,8 @@ class MainWindow(QMainWindow):
             )
             return
         project = tab.project_name
+        # Mark fired so first-input handler doesn't re-trigger later.
+        self._lead_first_input_fired.add(project)
         self.orch.inject_slash_command_when_ready(LEAD.name, "/remote-control", project=project)
         self._status.showMessage(f"bridging Lead·{project} → claude.ai/code", 4_000)
 
@@ -866,6 +898,9 @@ class MainWindow(QMainWindow):
         lead = AgentPane(LEAD, parent=tab)
         self.orch.register_pane(lead, project=project_name)
         tab.attach_lead(lead)
+        lead.inputBytes.connect(
+            lambda role, data, proj=project_name: self._on_lead_input(proj, role, data)
+        )
 
         ok, msg = self.orch.spawn(LEAD.name, project=project_name)
         if not ok:
