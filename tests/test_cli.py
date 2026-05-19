@@ -20,6 +20,7 @@ def fake_request(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
         return {"ok": True, "msg": "stubbed"}
 
     monkeypatch.setattr(cli, "_request", _fake)
+    monkeypatch.delenv("TAKKUB_ROLE", raising=False)  # prevent pane env bleeding into tests
     return sent
 
 
