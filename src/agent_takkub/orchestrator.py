@@ -714,7 +714,15 @@ class Orchestrator(QObject):
         # minimal argv and short-circuit so we don't accidentally pass
         # `--dangerously-skip-permissions`, MCP configs, plugin dirs,
         # or `--continue` (all claude-only) to it.
-        if role_name == "codex":
+        #
+        # Entry condition uses `provider_for(role_name)` so the user
+        # can remap any teammate role (e.g. "backend") to the codex
+        # binary via `~/.takkub/role-providers.json`. The `codex` role
+        # itself is forced into this branch by provider_config's
+        # `_FORCED_PROVIDER` table.
+        from .provider_config import CODEX, provider_for
+
+        if provider_for(role_name) == CODEX:
             from .codex_agents_md import ensure_agents_md
             from .codex_helper import find_codex_executable
 
