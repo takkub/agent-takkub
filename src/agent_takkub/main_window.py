@@ -404,17 +404,15 @@ class MainWindow(QMainWindow):
         self._session_save_timer.timeout.connect(self.orch.write_session_snapshot)
         self._session_save_timer.start()
 
-        # Update-check poll: 5-minute tick after a 30-second warm-up
-        # so the very first cockpit launch doesn't fire `git fetch`
-        # while the renderer + Lead are still booting and disk + npm
-        # cache + ms-playwright browsers are competing for I/O.
-        self._update_check_timer = QTimer(self)
-        self._update_check_timer.setInterval(5 * 60_000)
-        self._update_check_timer.timeout.connect(self._run_update_check)
-        self._update_check_timer.start()
+        # Update check: fire ONCE 30 s after boot so the cockpit knows
+        # whether origin/main has new commits when the user sits down.
+        # No recurring timer — the previous 5-minute poll was running
+        # `git fetch` on the Qt event loop main thread and caused a
+        # noticeable UI stutter every 5 minutes. Restart cockpit if you
+        # want a fresh check.
         QTimer.singleShot(30_000, self._run_update_check)
         # Populate the version chip immediately so the user doesn't see
-        # an empty slot for the first 30 s until the update poll runs.
+        # an empty slot for the first 30 s until the update check runs.
         self._refresh_version_label()
 
         # ── boot: start CLI server + auto-spawn Lead ────────────
@@ -1213,8 +1211,7 @@ class MainWindow(QMainWindow):
         if not status.get("ok"):
             self._btn_update.setText("⚠ Update check failed")
             self._btn_update.setToolTip(
-                f"Last error: {status.get('error', 'unknown')}\n"
-                "Will retry on the next 5-minute tick."
+                f"Last error: {status.get('error', 'unknown')}\nRestart cockpit to retry."
             )
             self._btn_update.setStyleSheet(
                 "QPushButton { color: #fca5a5; background: #450a0a; "
