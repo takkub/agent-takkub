@@ -82,8 +82,11 @@ function Install-Winget {
         [Parameter(Mandatory)][string]$Id,
         [string]$ProbeCmd
     )
+    # Fast path: if the tool is already on PATH, no need to involve
+    # winget at all — covers users who installed via .msi/.exe or by
+    # other package managers (chocolatey, scoop, manual extract).
     if ($ProbeCmd -and (Test-Cmd $ProbeCmd)) {
-        if ($Update) {
+        if ($Update -and (Test-Cmd winget)) {
             Write-Doing "upgrading $DisplayName via winget"
             winget upgrade --id $Id --silent --accept-package-agreements --accept-source-agreements | Out-Null
             $script:Summary.Upgraded += $DisplayName
@@ -92,6 +95,16 @@ function Install-Winget {
             Write-Skip "$DisplayName already installed"
             $script:Summary.Skipped += $DisplayName
         }
+        return
+    }
+    # Not on PATH — we need winget to install it. Bail early with a
+    # friendly hint instead of throwing CommandNotFoundException all
+    # over the user's terminal.
+    if (-not (Test-Cmd winget)) {
+        Write-Fail "$DisplayName not installed, and winget is unavailable on this system."
+        Write-Host "         Install 'App Installer' from Microsoft Store to enable winget," -ForegroundColor DarkYellow
+        Write-Host "         or install $DisplayName manually (id: $Id)." -ForegroundColor DarkYellow
+        $script:Summary.Failed += "$DisplayName (no winget)"
         return
     }
     if (Test-WingetPackage -Id $Id) {
@@ -144,6 +157,14 @@ function Install-NpmGlobal {
 }
 
 function Install-ClaudePlugin {
+    <#
+    Claude Code's plugin system needs a *marketplace* registered
+    before you can `plugin install`. A `github:owner/repo` spec
+    might be the marketplace OR a single-plugin repo — we try the
+    `marketplace add` path first (idempotent), then `plugin install`.
+    Each step is best-effort; a failure on either is logged but
+    doesn't abort the whole installer.
+    #>
     param([Parameter(Mandatory)][string]$Spec)
     if (-not (Test-Cmd claude)) {
         Write-Fail "$Spec - claude CLI not on PATH"
@@ -163,13 +184,23 @@ function Install-ClaudePlugin {
         }
         return
     }
+    # Step 1: register the spec as a marketplace if it isn't already.
+    # Output captured so we don't litter the terminal with the
+    # "already registered" message on re-runs.
+    & claude plugin marketplace add $Spec 2>$null | Out-Null
+    # Step 2: install. Try the spec as-is first; if it errors,
+    # retry with the bare short-name (some marketplaces expose the
+    # plugin under just `<shortName>` after registration).
     Write-Doing "installing claude plugin $Spec"
-    & claude plugin install $Spec
+    & claude plugin install $Spec 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        & claude plugin install $shortName 2>$null
+    }
     if ($LASTEXITCODE -eq 0) {
         Write-Ok "$shortName plugin installed"
         $script:Summary.Installed += "plugin:$shortName"
     } else {
-        Write-Fail "$shortName plugin install failed (exit $LASTEXITCODE)"
+        Write-Fail "$shortName plugin install failed (try manually: claude plugin marketplace add $Spec; claude plugin install $shortName)"
         $script:Summary.Failed += "plugin:$shortName"
     }
 }
