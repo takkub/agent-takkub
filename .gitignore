@@ -11,3 +11,6 @@ dist/
 projects.json
 runtime/
 *.log
+# Cockpit-managed Codex cheatsheet — auto-planted at codex pane
+# spawn time, marker-tagged, never user-authored. Safe to ignore.
+AGENTS.md

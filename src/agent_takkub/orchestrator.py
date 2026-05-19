@@ -641,6 +641,7 @@ class Orchestrator(QObject):
         # `--dangerously-skip-permissions`, MCP configs, plugin dirs,
         # or `--continue` (all claude-only) to it.
         if role_name == "codex":
+            from .codex_agents_md import ensure_agents_md
             from .codex_helper import find_codex_executable
 
             codex_bin = find_codex_executable()
@@ -650,14 +651,31 @@ class Orchestrator(QObject):
                     "`npm install -g @openai/codex`, then run `codex login` once."
                 )
             spawn_cwd = cwd or default_cwd_for_role(role_name) or str(REPO_ROOT)
+            # Plant the takkub cheatsheet so Codex auto-discovers it on
+            # boot and knows how to call `takkub send/done`. Safe: only
+            # writes when the file is absent or already takkub-managed
+            # (marker check inside the helper).
+            ensure_agents_md(spawn_cwd)
             env = os.environ.copy()
             env["TAKKUB_ROLE"] = role_name
             env["TAKKUB_PROJECT"] = project_ns
             bin_dir = str(REPO_ROOT / "bin")
             env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+            # Autonomy flags so Codex can call `takkub done` and edit
+            # workspace files without stopping for per-command approval —
+            # mirrors claude's `--dangerously-skip-permissions`. Default
+            # to workspace-write sandbox (no system-wide reach) so an
+            # off-the-rails codex can still only touch its cwd.
+            codex_argv = [
+                codex_bin,
+                "--ask-for-approval",
+                "never",
+                "-s",
+                "workspace-write",
+            ]
             session = PtySession(cols=110, rows=36, parent=self)
             try:
-                session.spawn(argv=[codex_bin], cwd=spawn_cwd, env=env)
+                session.spawn(argv=codex_argv, cwd=spawn_cwd, env=env)
             except Exception as e:
                 return False, f"failed to spawn codex: {e}"
             pane.attach_session(session, cwd=spawn_cwd)
@@ -666,6 +684,7 @@ class Orchestrator(QObject):
             )
             if role_name in self._recent_exits:
                 del self._recent_exits[role_name]
+            self._auto_trust(role_name)
             self.statusChanged.emit()
             _log_event("spawn", role=role_name, cwd=spawn_cwd, resumed=False)
             return True, f"codex spawned in {spawn_cwd}"
