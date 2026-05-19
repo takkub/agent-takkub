@@ -26,13 +26,13 @@ class TestDefaults:
         }
 
     def test_default_columns_assigned(self) -> None:
-        # column 1 = middle (dev roles), column 2 = right (support + codex)
+        # column 1 = middle (dev roles incl. codex), column 2 = right (support)
         cols = {r.name: r.column for r in roles.DEFAULT_TEAMMATES}
         assert cols["frontend"] == 1
         assert cols["backend"] == 1
+        assert cols["codex"] == 1
         assert cols["designer"] == 2
         assert cols["reviewer"] == 2
-        assert cols["codex"] == 2
 
 
 class TestByName:

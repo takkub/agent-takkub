@@ -286,20 +286,44 @@ class PtySession(QObject):
     # state detection: helps orchestrator auto-trust / wait-for-ready
     # ──────────────────────────────────────────────────────────────
     def is_at_trust_prompt(self) -> bool:
-        """True when claude is showing the 'Yes, I trust this folder' modal."""
-        text = "\n".join(self.display_lines()).lower()
-        return "trust this folder" in text and "enter to confirm" in text
+        """True when claude OR codex is showing a trust-directory modal.
 
-    def is_at_ready_prompt(self) -> bool:
-        """True when claude's main `❯` input is idle and ready for a task.
-
-        Identified by the presence of the bottom hint bar ('bypass permissions
-        on' or 'shift+tab to cycle') and the absence of any modal/processing
-        indicator ('esc to interrupt', 'trust this folder').
+        Both CLIs default-select "Yes/trust" so a single Enter keypress
+        accepts. Patterns:
+          - claude: "Yes, I trust this folder" + "Enter to confirm"
+          - codex:  "Do you trust the contents of this directory"
+                    + "Press enter to continue"
         """
         text = "\n".join(self.display_lines()).lower()
+        if "trust this folder" in text and "enter to confirm" in text:
+            return True
+        if "do you trust the contents of this directory" in text:
+            return True
+        return False
+
+    def is_at_ready_prompt(self) -> bool:
+        """True when the underlying TUI is idle at its main input prompt.
+
+        Handles both claude and codex panes:
+          - claude: bottom hint 'bypass permissions' or 'shift+tab to cycle',
+                    never 'esc to interrupt' (working) or trust modal.
+          - codex:  splash banner 'openai codex (v' visible, no modal
+                    (`update available!`, `do you trust`, `press enter
+                    to continue`) and no active interrupt indicator.
+        """
+        text = "\n".join(self.display_lines()).lower()
+        # ── modal / interrupt blockers (apply to both providers) ────
         if "trust this folder" in text:
+            return False
+        if "do you trust the contents of this directory" in text:
+            return False
+        if "update available!" in text:
+            return False
+        if "press enter to continue" in text:
             return False
         if "esc to interrupt" in text:
             return False
+        # ── ready markers ───────────────────────────────────────────
+        if "openai codex (v" in text:
+            return True
         return "bypass permissions" in text or "shift+tab to cycle" in text
