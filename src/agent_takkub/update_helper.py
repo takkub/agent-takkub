@@ -30,6 +30,13 @@ from pathlib import Path
 
 from .config import REPO_ROOT
 
+# Official upstream for the in-cockpit "convert to git checkout" flow.
+# HTTPS form, not SSH — ZIP-installed users typically don't have keys
+# configured. If the cockpit gets forked, override per-installation by
+# setting `TAKKUB_OFFICIAL_REPO_URL` env var or editing this constant
+# before shipping the fork.
+OFFICIAL_REPO_URL = "https://github.com/takkub/agent-takkub.git"
+
 
 def _git(*args: str, timeout: float = 30.0) -> subprocess.CompletedProcess[str]:
     """Run a git subcommand inside the repo root with text output.
@@ -208,6 +215,64 @@ def pyproject_changed_in_pull(before_sha: str, after_sha: str) -> bool:
         return False
     files = (proc.stdout or "").splitlines()
     return "pyproject.toml" in {f.strip() for f in files}
+
+
+def init_git_repo() -> tuple[bool, str]:
+    """Convert a non-git install (ZIP download / pip install / copy)
+    into a proper git checkout pointing at origin/main, so the user
+    can use the cockpit's update chip from then on.
+
+    Steps:
+      1. `git init` inside REPO_ROOT
+      2. `git remote add origin <OFFICIAL_REPO_URL>`
+      3. `git fetch origin main`
+      4. `git reset --hard origin/main` — overwrites tracked files
+         with the remote version.
+
+    Safety: only `.gitignored` paths survive untouched. The cockpit's
+    `.gitignore` already covers `projects.json`, `runtime/`, `.venv/`,
+    `*.log`, and `AGENTS.md`, so user data persists. Any local edits
+    to *tracked* cockpit files (CLAUDE.md, README, source, etc.) are
+    discarded — that's the cost of converting to upstream-tracked.
+
+    Returns (ok, message). The caller (main_window) wraps a confirm
+    dialog around this to warn before invoking.
+    """
+    import os
+
+    repo_url = os.environ.get("TAKKUB_OFFICIAL_REPO_URL", "").strip() or OFFICIAL_REPO_URL
+    if is_git_repo():
+        return False, "already a git repo — no conversion needed"
+    try:
+        proc = _git("init", timeout=15.0)
+    except Exception as e:
+        return False, f"git init failed: {e}"
+    if proc.returncode != 0:
+        return False, (proc.stderr or "git init failed").strip()
+    try:
+        proc = _git("remote", "add", "origin", repo_url, timeout=15.0)
+    except Exception as e:
+        return False, f"git remote add failed: {e}"
+    if proc.returncode != 0:
+        return False, (proc.stderr or "git remote add failed").strip()
+    try:
+        proc = _git("fetch", "origin", "main", timeout=60.0)
+    except subprocess.TimeoutExpired:
+        return False, "git fetch timed out (check network / repo url)"
+    except Exception as e:
+        return False, f"git fetch failed: {e}"
+    if proc.returncode != 0:
+        # Surface the actual git complaint — typically "Repository not
+        # found" / authentication errors that the user needs to act on.
+        tail = (proc.stderr or "git fetch failed").strip().splitlines()
+        return False, tail[-1] if tail else "git fetch failed"
+    try:
+        proc = _git("reset", "--hard", "origin/main", timeout=30.0)
+    except Exception as e:
+        return False, f"git reset failed: {e}"
+    if proc.returncode != 0:
+        return False, (proc.stderr or "git reset --hard origin/main failed").strip()
+    return True, f"linked to {repo_url} and synced to origin/main"
 
 
 def current_sha() -> str:

@@ -1196,14 +1196,18 @@ class MainWindow(QMainWindow):
         self._refresh_version_label()
         status = self._update_status_cache or {}
         if status.get("not_repo"):
-            self._btn_update.setText("🔒 Update disabled")
+            self._btn_update.setText("🔧 Enable updates")
             self._btn_update.setToolTip(
-                "This install is not a git checkout — pull updates manually."
+                "This install isn't git-tracked. Click to convert it into a\n"
+                "git checkout linked to the official repo — enables one-click\n"
+                "updates from then on. Your projects.json / runtime/ / .venv/\n"
+                "are gitignored and stay safe."
             )
             self._btn_update.setStyleSheet(
-                "QPushButton { color: #94a3b8; background: #1e293b; "
-                "border: 1px solid #334155; border-radius: 4px; "
+                "QPushButton { color: #fde047; background: #422006; "
+                "border: 1px solid #a16207; border-radius: 4px; "
                 "padding: 2px 8px; }"
+                "QPushButton:hover { background: #713f12; }"
             )
             return
         if not status.get("ok"):
@@ -1273,13 +1277,37 @@ class MainWindow(QMainWindow):
             return
         status = self._update_status_cache
         if status.get("not_repo"):
+            from .update_helper import OFFICIAL_REPO_URL, init_git_repo
+
+            convert = QMessageBox.question(
+                self,
+                "Convert to git checkout?",
+                "This install isn't git-tracked, so the cockpit can't pull\n"
+                "updates the usual way. Want to convert this folder into a\n"
+                f"proper git checkout linked to:\n\n  {OFFICIAL_REPO_URL}\n\n"
+                "Safe:  projects.json, runtime/, .venv/, *.log, and AGENTS.md\n"
+                "       are gitignored and won't be touched.\n"
+                "Lost:  any local edits you made to tracked cockpit files\n"
+                "       (README, CLAUDE.md, source code) — they'll be\n"
+                "       replaced with the upstream version.\n\n"
+                "After conversion the 🔄 update chip will work normally.",
+                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if convert != QMessageBox.StandardButton.Ok:
+                return
+            self._status.showMessage("Converting to git checkout — fetching origin/main…", 0)
+            ok, msg = init_git_repo()
+            self._status.clearMessage()
+            if not ok:
+                QMessageBox.critical(self, "Convert failed", msg)
+                return
             QMessageBox.information(
                 self,
-                "Update",
-                "This install is not a git checkout. To update, replace\n"
-                "the agent-takkub folder with a fresh clone and copy your\n"
-                "projects.json + runtime/ across.",
+                "Converted",
+                f"{msg}\n\nCockpit will restart now to apply the upstream version.",
             )
+            self._restart_cockpit()
             return
         if not status.get("ok"):
             QMessageBox.warning(
