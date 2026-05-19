@@ -52,10 +52,32 @@ _ROLE_PATH_PREFS: dict[str, tuple[str, ...]] = {
 }
 
 
-def default_cwd_for_role(role_name: str) -> str | None:
-    """Return the path from the active project that best matches the role,
-    falling back to the project's first listed path. None if no project."""
+def _project_dict(project: str | None) -> dict:
+    """Resolve a project name to its dict from projects.json. Falls
+    back to the active project when `project` is None — centralises
+    the "by-name vs. active" pattern so callers below can take an
+    optional project arg and stay project-scoped under multi-tab
+    workflows (a spawn coming from Lead in tab A shouldn't read
+    tab B's paths just because tab B is the focused tab).
+    """
+    if project:
+        data = load_projects()
+        return data.get("projects", {}).get(project, {}) or {}
     _, proj = active_project()
+    return proj
+
+
+def default_cwd_for_role(role_name: str, project: str | None = None) -> str | None:
+    """Return the path from `project` (default: active project) that
+    best matches the role, falling back to that project's first
+    listed path. None if no project is resolved.
+
+    Passing `project` explicitly is what makes multi-tab workflows
+    safe: when Lead in tab A calls `takkub assign --role frontend`,
+    the orchestrator passes its project namespace here so the cwd
+    comes from tab A's paths even if tab B is focused.
+    """
+    proj = _project_dict(project)
     paths = proj.get("paths", {})
     if not paths:
         return None
@@ -73,20 +95,24 @@ def preset_roles_for_active() -> list[str]:
     return [str(x).strip().lower() for x in raw if str(x).strip()]
 
 
-def lead_cwd() -> str | None:
+def lead_cwd(project: str | None = None) -> str | None:
     """Where Lead should spawn.
 
     Priority:
-      1. The active project's `lead` path key (explicit pick), e.g.
+      1. The project's `lead` path key (explicit pick), e.g.
          `"lead": "web"` reuses paths.web.
       2. The shared parent of all configured project paths (`pms/` for
          `pms-web` + `pms-api`), if that parent exists on disk.
       3. The project's first listed path (often `web`).
-    Returns None if no active project is configured.
+    Returns None if no project is resolved.
+
+    Passing `project` explicitly is what makes multi-tab workflows
+    safe: each tab's Lead respawn picks up its own paths even when
+    a different tab is focused.
     """
     import os
 
-    _, proj = active_project()
+    proj = _project_dict(project)
     paths = proj.get("paths") or {}
     if not paths:
         return None

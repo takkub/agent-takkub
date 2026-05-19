@@ -732,7 +732,7 @@ class Orchestrator(QObject):
                     "gemini binary not on PATH. Install with "
                     "`npm install -g @google/gemini-cli`, then run `gemini` once to log in."
                 )
-            spawn_cwd = cwd or default_cwd_for_role(role_name) or str(REPO_ROOT)
+            spawn_cwd = cwd or default_cwd_for_role(role_name, project=project_ns) or str(REPO_ROOT)
             ensure_gemini_md(spawn_cwd)
             env = os.environ.copy()
             env["TAKKUB_ROLE"] = role_name
@@ -769,7 +769,7 @@ class Orchestrator(QObject):
                     "codex binary not on PATH. Install with "
                     "`npm install -g @openai/codex`, then run `codex login` once."
                 )
-            spawn_cwd = cwd or default_cwd_for_role(role_name) or str(REPO_ROOT)
+            spawn_cwd = cwd or default_cwd_for_role(role_name, project=project_ns) or str(REPO_ROOT)
             # Plant the takkub cheatsheet so Codex auto-discovers it on
             # boot and knows how to call `takkub send/done`. Safe: only
             # writes when the file is absent or already takkub-managed
@@ -823,7 +823,7 @@ class Orchestrator(QObject):
             # user's actual codebase. The cockpit's CLAUDE.md (takkub
             # cheatsheet + role guide) is appended as system prompt so
             # Lead still knows about `takkub assign / send / done / ...`.
-            spawn_cwd = cwd or lead_cwd() or str(REPO_ROOT)
+            spawn_cwd = cwd or lead_cwd(project=project_ns) or str(REPO_ROOT)
             # Render Lead's system prompt fresh each spawn so BLOCKED_DIRS
             # tracks whatever project is active in projects.json right now.
             # Skip injection when Lead is anchored at the cockpit itself
@@ -832,7 +832,7 @@ class Orchestrator(QObject):
                 role_md_file = _render_lead_context()
         else:
             staging = agent_role_dir(role_name)
-            spawn_cwd = cwd or default_cwd_for_role(role_name) or str(staging)
+            spawn_cwd = cwd or default_cwd_for_role(role_name, project=project_ns) or str(staging)
             # When cwd is a project path, claude auto-discovers the project's
             # CLAUDE.md, not the role's specialist override. Pass the role's
             # markdown to --append-system-prompt-file so the specialist rules
