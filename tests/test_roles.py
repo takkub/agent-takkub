@@ -19,20 +19,31 @@ class TestDefaults:
             "backend",
             "mobile",
             "devops",
-            "designer",
+            "gemini",
             "qa",
             "reviewer",
             "codex",
         }
+        # Designer was retired from defaults but the agent file
+        # `.claude/agents/designer.md` is preserved for custom add.
+        assert "designer" not in names
 
     def test_default_columns_assigned(self) -> None:
-        # column 1 = middle (dev roles incl. codex), column 2 = right (support)
         cols = {r.name: r.column for r in roles.DEFAULT_TEAMMATES}
         assert cols["frontend"] == 1
         assert cols["backend"] == 1
         assert cols["codex"] == 1
-        assert cols["designer"] == 2
+        assert cols["gemini"] == 2
         assert cols["reviewer"] == 2
+
+    def test_gemini_slot_takes_old_designer_position(self) -> None:
+        # Gemini replaces designer at col=2 row=0 - the top-right slot
+        # right next to qa/reviewer.
+        gemini = roles.by_name("gemini")
+        assert gemini is not None
+        assert gemini.column == 2
+        assert gemini.row == 0
+        assert gemini.label == "Gemini"
 
 
 class TestByName:

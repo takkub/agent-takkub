@@ -3,8 +3,8 @@
 The cockpit reserves 8 slots in a 3-column grid:
 
   col 0 (left):   Lead (always-on)
-  col 1 (middle): frontend / backend / mobile / devops
-  col 2 (right):  designer / qa / reviewer + dynamic add-slot
+  col 1 (middle): frontend / backend / mobile / devops / codex
+  col 2 (right):  gemini / qa / reviewer + dynamic add-slot
 
 Custom roles can be added at runtime via Orchestrator.register_role.
 """
@@ -30,7 +30,16 @@ DEFAULT_TEAMMATES: tuple[Role, ...] = (
     Role("backend", "Backend", "#3b82f6", column=1, row=1),
     Role("mobile", "Mobile", "#a855f7", column=1, row=2),
     Role("devops", "DevOps", "#22c55e", column=1, row=3),
-    Role("designer", "Designer", "#ec4899", column=2, row=0),
+    # Gemini is a non-claude pane: orchestrator launches the `gemini`
+    # binary directly (interactive TUI) and skips all claude flags +
+    # ECC mutes. Sits at col=2 row=0 (the slot designer used to occupy)
+    # because Gemini's role is "third brain" planning / second opinion,
+    # which lives alongside qa/reviewer in the support column.
+    # Designer was removed from defaults; .claude/agents/designer.md
+    # is preserved so custom-slot add still works for users who want it.
+    # Colour is Google's signature blue so it visually stands apart
+    # from claude-backed (cyan) and codex (teal) roles.
+    Role("gemini", "Gemini", "#4285f4", column=2, row=0),
     Role("qa", "QA", "#f97316", column=2, row=1),
     Role("reviewer", "Reviewer", "#ef4444", column=2, row=2),
     # Codex is a non-claude pane: orchestrator launches the `codex`
