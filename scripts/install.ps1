@@ -185,14 +185,22 @@ function Install-ClaudePlugin {
         return
     }
     # Step 1: register the spec as a marketplace if it isn't already.
-    # Output captured so we don't litter the terminal with the
-    # "already registered" message on re-runs.
-    & claude plugin marketplace add $Spec 2>$null | Out-Null
-    # Step 2: install. Try the spec as-is first; if it errors,
-    # retry with the bare short-name (some marketplaces expose the
-    # plugin under just `<shortName>` after registration).
+    # `claude plugin marketplace add` accepts both `github:owner/repo`
+    # and bare `owner/repo`. Strip the `github:` prefix so the bare
+    # form is what gets logged when claude prints the marketplace name.
+    $marketplaceArg = $Spec -replace '^github:', ''
+    & claude plugin marketplace add $marketplaceArg 2>$null | Out-Null
+    # Step 2: install. Three forms tried in order (each only fires
+    # if the previous one fails) so different plugin layouts all work:
+    #   a) `<spec>` — for marketplaces named differently from their plugin
+    #   b) `<shortName>@<shortName>` — single-plugin repo convention
+    #      (e.g. `kerlos/pordee` → `pordee@pordee`)
+    #   c) `<shortName>` — fallback for legacy marketplaces
     Write-Doing "installing claude plugin $Spec"
     & claude plugin install $Spec 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        & claude plugin install "$shortName@$shortName" 2>$null
+    }
     if ($LASTEXITCODE -ne 0) {
         & claude plugin install $shortName 2>$null
     }
@@ -200,7 +208,10 @@ function Install-ClaudePlugin {
         Write-Ok "$shortName plugin installed"
         $script:Summary.Installed += "plugin:$shortName"
     } else {
-        Write-Fail "$shortName plugin install failed (try manually: claude plugin marketplace add $Spec; claude plugin install $shortName)"
+        Write-Fail "$shortName plugin install failed"
+        Write-Host "         try manually:" -ForegroundColor DarkYellow
+        Write-Host "           claude plugin marketplace add $marketplaceArg" -ForegroundColor DarkYellow
+        Write-Host "           claude plugin install $shortName@$shortName" -ForegroundColor DarkYellow
         $script:Summary.Failed += "plugin:$shortName"
     }
 }
