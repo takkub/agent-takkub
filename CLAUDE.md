@@ -27,6 +27,71 @@ takkub assign --role codex   --cwd <api> "review this approach: POST /auth/logou
 # ทั้งคู่ทำขนานกัน — backend เขียน code, codex หา edge case ส่งกลับมา cross-check
 ```
 
+## Parallel dispatch (สำคัญมาก — Lead ต้องใช้ให้เป็น)
+
+**Default ให้ parallel ไว้ก่อน** — ถ้า task ของแต่ละ teammate ไม่ได้ depend จาก output ของอีกคน → ส่งคู่ขนาน อย่ารอ done ทีละตัว
+
+**ปัญหาที่เกิดถ้าไม่ทำ parallel:**
+- `takkub assign` แต่ละครั้ง block 5-10s รอ spawn + paste → Lead รอ 2 ครั้ง = 20s แทนที่จะเป็น 10s
+- teammate ทำงาน sequential ทั้งที่ทำขนานได้ → user รอนานเป็นเท่าตัว
+
+### Decision rule (1 บรรทัด)
+
+> **task A ใช้ output จาก task B ไหม?** ใช่ = sequential ไม่ใช่ = parallel
+
+### Parallel pattern (ใช้ `&` + `wait`)
+
+ใช้เมื่อ task ของแต่ละ role **ไม่ depend** จากกัน — เช่น frontend ทำ UI / backend ทำ endpoint โดยมี API contract ตกลงล่วงหน้าแล้ว:
+
+```bash
+takkub assign --role frontend --cwd <web> "เพิ่ม /login form ใช้ POST /auth/login {email, password} → {token, user}" &
+takkub assign --role backend  --cwd <api> "เพิ่ม POST /auth/login รับ {email, password} ส่ง {token, user} ใช้ JWT HS256 24h" &
+wait
+# ทั้ง 2 panes spawn คู่ขนาน → Lead ใช้เวลาแค่ ~10s ไม่ใช่ 20s
+# frontend + backend ทำงานพร้อมกัน Lead รอ report จาก done event
+```
+
+ถ้ามี 3 ตัวก็ใส่ `&` ครบ 3 บรรทัด + `wait` ครั้งเดียวปลายทาง
+
+### Sequential pattern (รอ done ทีละตัว)
+
+ใช้เมื่อ task หลังต้องการ artifact จาก task ก่อน — เช่น qa ต้องรอ feature เสร็จก่อนถึงจะ test ได้:
+
+```bash
+takkub assign --role backend "implement /auth/login + tests"
+# (รอ backend done event เข้า Lead pane — orchestrator inject "[backend done] ...")
+# Lead อ่าน report เสร็จค่อยส่ง qa
+takkub assign --role qa "smoke test /auth/login: happy path + invalid creds + rate limit"
+```
+
+### Pattern ผสม (parallel ใน group, sequential ระหว่าง group)
+
+```bash
+# Group 1: implementation — frontend + backend ขนานกัน
+takkub assign --role frontend "หน้า /login form" &
+takkub assign --role backend  "POST /auth/login endpoint" &
+wait
+
+# รอทั้งคู่ done ก่อน → Group 2: verification ขนานกัน
+takkub assign --role qa       "e2e /login flow" &
+takkub assign --role reviewer "review diff ทั้ง 2 PR" &
+wait
+```
+
+### Tip: ส่ง same info ครั้งเดียวให้หลาย role
+
+ถ้าจะส่ง spec เดียวกันให้ frontend + backend (เช่น API contract):
+
+```bash
+SPEC="API contract: POST /auth/login body={email,password} response={token,user} JWT HS256 24h"
+
+takkub assign --role frontend "$SPEC consume API: form หน้า /login + AuthContext" &
+takkub assign --role backend  "$SPEC implement endpoint + bcrypt + JWT signing + unit test" &
+wait
+```
+
+ทั้งคู่ได้ context เดียวกัน ทำงานคู่ขนานโดยไม่ต้อง coordinate กลาง
+
 ## Multi-project tabs (สำคัญ)
 
 cockpit รองรับหลาย project พร้อมกันผ่าน **tab** กฎเหล็ก:
