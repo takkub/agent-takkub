@@ -55,6 +55,17 @@ class TestProviderFor:
         assert provider_config.provider_for("backend") == "codex"
         assert provider_config.provider_for("  Backend  ") == "codex"
 
+    def test_gemini_role_is_always_gemini(self, redirect_config_path: Path) -> None:
+        # User mapping a "gemini" key to "claude" would be nonsensical;
+        # the role's whole point is gemini.
+        redirect_config_path.write_text('{"gemini": "claude"}', encoding="utf-8")
+        assert provider_config.provider_for("gemini") == "gemini"
+
+    def test_user_override_routes_to_gemini(self, redirect_config_path: Path) -> None:
+        redirect_config_path.write_text('{"backend": "gemini", "qa": "gemini"}', encoding="utf-8")
+        assert provider_config.provider_for("backend") == "gemini"
+        assert provider_config.provider_for("qa") == "gemini"
+
 
 class TestLoadProviders:
     def test_creates_empty_file_when_missing(self, redirect_config_path: Path) -> None:
@@ -79,6 +90,15 @@ class TestLoadProviders:
         redirect_config_path.write_text('{"backend": "codex", "qa": "ollama"}', encoding="utf-8")
         loaded = provider_config.load_providers()
         assert loaded == {"backend": "codex"}
+
+    def test_accepts_gemini_provider(self, redirect_config_path: Path) -> None:
+        # gemini joins claude/codex as a recognised provider — must
+        # survive the sanitizer instead of being dropped.
+        redirect_config_path.write_text(
+            '{"backend": "gemini", "qa": "codex"}', encoding="utf-8"
+        )
+        loaded = provider_config.load_providers()
+        assert loaded == {"backend": "gemini", "qa": "codex"}
 
 
 class TestSaveProviders:

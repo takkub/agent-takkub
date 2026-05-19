@@ -1,22 +1,24 @@
 """Per-role CLI provider mapping.
 
-The cockpit can spawn teammate panes backed by either Claude Code
-(`claude.exe`) or OpenAI Codex (`codex.CMD`). By default every role
-except `codex` itself runs claude. This module lets the user override
-the mapping globally — e.g. "backend always uses codex regardless of
-project" — by editing a small JSON file under `~/.takkub/`.
+The cockpit can spawn teammate panes backed by Claude Code
+(`claude.exe`), OpenAI Codex (`codex.CMD`), or Google Gemini CLI
+(`gemini`). By default every role except `codex` and `gemini` runs
+claude. This module lets the user override the mapping globally —
+e.g. "backend always uses codex regardless of project" — by editing
+a small JSON file under `~/.takkub/`.
 
 Resolution rules:
-- `lead`  → always `claude` (cockpit infrastructure assumes claude
-            for Lead: CLAUDE.md auto-discovery, --append-system-prompt,
-            session-resume `--continue`, token-meter JSONL, etc.)
-- `codex` → always `codex` (the role's whole point)
+- `lead`   → always `claude` (cockpit infrastructure assumes claude
+             for Lead: CLAUDE.md auto-discovery, --append-system-prompt,
+             session-resume `--continue`, token-meter JSONL, etc.)
+- `codex`  → always `codex` (the role's whole point)
+- `gemini` → always `gemini` (the role's whole point)
 - everything else → user config wins; default `claude`
 
 Config file: `~/.takkub/role-providers.json`. Created on first read
 if missing (empty `{}`). Hand-edit to override:
 
-    {"backend": "codex", "qa": "codex"}
+    {"backend": "codex", "qa": "gemini"}
 
 `provider_for("backend")` then returns `"codex"`. Restart cockpit
 to pick up changes (no live reload in v1).
@@ -29,7 +31,8 @@ from pathlib import Path
 
 CLAUDE = "claude"
 CODEX = "codex"
-VALID_PROVIDERS = frozenset({CLAUDE, CODEX})
+GEMINI = "gemini"
+VALID_PROVIDERS = frozenset({CLAUDE, CODEX, GEMINI})
 
 # Roles whose provider is hard-coded — cannot be overridden by config.
 # Lead has too much claude-specific plumbing (CLAUDE.md, JSONL token
@@ -37,6 +40,7 @@ VALID_PROVIDERS = frozenset({CLAUDE, CODEX})
 _FORCED_PROVIDER = {
     "lead": CLAUDE,
     "codex": CODEX,
+    "gemini": GEMINI,
 }
 
 _CONFIG_PATH = Path.home() / ".takkub" / "role-providers.json"
