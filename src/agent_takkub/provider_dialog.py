@@ -24,7 +24,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from .provider_config import CLAUDE, CODEX, provider_for, save_providers
+from .provider_config import CLAUDE, CODEX, GEMINI, provider_for, save_providers
 from .roles import DEFAULT_TEAMMATES, LEAD
 
 
@@ -50,7 +50,7 @@ class RoleProviderDialog(QDialog):
             "to the next pane you spawn — no restart needed. Already-\n"
             "running panes keep their original CLI; close + respawn to\n"
             "flip them. Lead is locked to Claude; Codex role is locked\n"
-            "to Codex."
+            "to Codex; Gemini role is locked to Gemini."
         )
         intro.setWordWrap(True)
         intro.setStyleSheet("color: #d4d4d8;")
@@ -74,8 +74,13 @@ class RoleProviderDialog(QDialog):
                 locked.setStyleSheet("color: #71717a; font-style: italic;")
                 form.addRow(f"{role.label}:", locked)
                 continue
+            if role.name == "gemini":
+                locked = QLabel("gemini   (locked — role identity)")
+                locked.setStyleSheet("color: #71717a; font-style: italic;")
+                form.addRow(f"{role.label}:", locked)
+                continue
             combo = QComboBox()
-            combo.addItems([CLAUDE, CODEX])
+            combo.addItems([CLAUDE, CODEX, GEMINI])
             combo.setCurrentText(provider_for(role.name))
             self._combos[role.name] = combo
             form.addRow(f"{role.label}:", combo)
