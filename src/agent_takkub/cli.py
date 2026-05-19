@@ -139,6 +139,33 @@ def cmd_list(_: argparse.Namespace) -> dict:
     return _request(_with_project({"cmd": "list"}))
 
 
+def cmd_codex(args: argparse.Namespace) -> dict:
+    """Fire OpenAI Codex CLI non-interactively and print the result.
+
+    Pure local invocation — no orchestrator IPC. Codex uses its own
+    auth (ChatGPT login or `OPENAI_API_KEY`); cockpit doesn't touch
+    those credentials. Works whether or not the cockpit is running.
+
+    `cwd` defaults to the calling pane's working directory so a
+    `takkub codex "review this"` inside a project pane naturally
+    runs Codex against that project's files.
+    """
+    from .codex_helper import codex_exec
+
+    ok, output = codex_exec(
+        args.prompt,
+        cwd=args.cwd,
+        timeout=args.timeout,
+        model=args.model,
+    )
+    if output:
+        print(output)
+    return {
+        "ok": ok,
+        "msg": "codex done" if ok else "codex failed",
+    }
+
+
 def cmd_search(args: argparse.Namespace) -> dict:
     """Pure read-only grep across `~/.claude/projects/<*>/<uuid>.jsonl`.
     Does NOT go through the orchestrator's TCP socket — search is a
@@ -242,6 +269,29 @@ def main(argv: list[str] | None = None) -> int:
         help="max hits to print (default: 20)",
     )
     sse.set_defaults(func=cmd_search)
+
+    sx = sub.add_parser(
+        "codex",
+        help="one-shot OpenAI Codex CLI query (non-interactive, pure local)",
+    )
+    sx.add_argument("prompt", help="prompt text to send to Codex (positional)")
+    sx.add_argument(
+        "--cwd",
+        default=None,
+        help="working directory for the Codex run (default: current dir)",
+    )
+    sx.add_argument(
+        "--model",
+        default=None,
+        help="override Codex's default model (e.g. gpt-5-codex)",
+    )
+    sx.add_argument(
+        "--timeout",
+        type=float,
+        default=120.0,
+        help="seconds to wait before killing the codex process (default: 120)",
+    )
+    sx.set_defaults(func=cmd_codex)
 
     args = p.parse_args(argv)
 
