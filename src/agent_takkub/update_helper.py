@@ -223,3 +223,32 @@ def current_sha() -> str:
     if proc.returncode != 0:
         return ""
     return (proc.stdout or "").strip()
+
+
+def current_sha_short() -> str:
+    """First 7 chars of the HEAD SHA, for status-bar display. Empty
+    string when not in a git repo or git is unavailable."""
+    full = current_sha()
+    return full[:7] if full else ""
+
+
+def pyproject_will_change_on_pull() -> bool:
+    """True iff `pyproject.toml` is in the diff between HEAD and
+    origin/main *before* the pull happens. Used to warn the user
+    upfront — without this, the pip-reinstall reminder only appears
+    after the pull, by which time the cockpit has already promised
+    a restart and can't easily back out.
+
+    Returns False on any git failure (including offline / no fetch
+    yet), so the caller defaults to "probably safe to skip pip".
+    """
+    if not is_git_repo():
+        return False
+    try:
+        proc = _git("diff", "--name-only", "HEAD..origin/main")
+    except Exception:
+        return False
+    if proc.returncode != 0:
+        return False
+    files = (proc.stdout or "").splitlines()
+    return "pyproject.toml" in {f.strip() for f in files}

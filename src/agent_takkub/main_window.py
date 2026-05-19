@@ -318,6 +318,17 @@ class MainWindow(QMainWindow):
         self._remote_hint.setCursor(Qt.CursorShape.PointingHandCursor)
         self._remote_hint.mousePressEvent = lambda _ev: self._on_remote_hint_clicked()
 
+        # Cockpit version chip: shows `v<pyproject> · @<short-sha>` so the
+        # user can see at a glance what build they're on. Refreshed after
+        # every update check + after a successful pull.
+        self._version_label = QLabel("", self)
+        self._version_label.setStyleSheet(
+            "color: #6b7280; font-size: 11px; padding: 0 6px; font-variant-numeric: tabular-nums;"
+        )
+        self._version_label.setToolTip(
+            "Cockpit version + commit SHA. Click the 🔄 chip to pull updates."
+        )
+
         # Aggregate token meter: sums prompt tokens across every active pane
         # so the user can spot when the whole team is bumping the limit.
         # Tooltip breaks it down per role + reveals the largest occupant.
@@ -336,6 +347,7 @@ class MainWindow(QMainWindow):
         self._context_warned: dict[str, bool] = {}
 
         self._status.addPermanentWidget(self._remote_hint)
+        self._status.addPermanentWidget(self._version_label)
         self._status.addPermanentWidget(self._token_total)
         # `project_combo` is retained as a hidden widget so legacy code
         # paths that update it (`_refresh_project_list`, `_on_project_changed`)
@@ -401,6 +413,9 @@ class MainWindow(QMainWindow):
         self._update_check_timer.timeout.connect(self._run_update_check)
         self._update_check_timer.start()
         QTimer.singleShot(30_000, self._run_update_check)
+        # Populate the version chip immediately so the user doesn't see
+        # an empty slot for the first 30 s until the update poll runs.
+        self._refresh_version_label()
 
         # ── boot: start CLI server + auto-spawn Lead ────────────
         QTimer.singleShot(0, self._boot)
@@ -1139,10 +1154,40 @@ class MainWindow(QMainWindow):
         self._update_status_cache = local_status()
         self._refresh_update_button()
 
+    def _refresh_version_label(self) -> None:
+        """Update the `v<x.y.z> · @<sha>` chip. Reads `pyproject.toml`
+        once per call (cheap — 1 KB file) and queries git for the short
+        SHA. Falls back to just the version (no `@`) when not in a git
+        checkout."""
+        try:
+            from importlib.metadata import version as _pkg_version
+
+            ver = _pkg_version("agent-takkub")
+        except Exception:
+            # Editable install pre-`pip install -e .` etc — try pyproject
+            # raw read as a fallback so the boot UI still has something.
+            try:
+                pyproj = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+                import re as _re
+
+                m = _re.search(r'^version\s*=\s*"([^"]+)"', pyproj, _re.MULTILINE)
+                ver = m.group(1) if m else "?"
+            except Exception:
+                ver = "?"
+        from .update_helper import current_sha_short
+
+        sha = current_sha_short()
+        text = f"v{ver} · @{sha}" if sha else f"v{ver}"
+        self._version_label.setText(text)
+
     def _refresh_update_button(self) -> None:
         """Flip the update chip's label/colour based on the cached
         status. Five visual states: not-a-repo, error, clean+up-to-date,
         clean+behind, dirty."""
+        # Keep the version chip honest after every poll — pulling new
+        # commits or external `git pull` from a terminal both change
+        # HEAD and we want the chip to reflect that.
+        self._refresh_version_label()
         status = self._update_status_cache or {}
         if status.get("not_repo"):
             self._btn_update.setText("🔒 Update disabled")
@@ -1203,17 +1248,14 @@ class MainWindow(QMainWindow):
             )
 
     def _on_update_clicked(self) -> None:
-        """User clicked the update chip. Three branches based on the
-        cached status: not-a-repo (no-op tooltip), dirty (show file
-        list, no pull), clean (confirm dialog → pull → restart prompt).
+        """User clicked the update chip. Branches by cached status:
+        not-a-repo (info), dirty (block + show file list), clean +
+        up-to-date (no-op toast), clean + behind (single confirm
+        dialog → pull → auto-restart).
         """
         from PyQt6.QtWidgets import QMessageBox
 
-        from .update_helper import (
-            current_sha,
-            pull_updates,
-            pyproject_changed_in_pull,
-        )
+        from .update_helper import pull_updates
 
         # First poll fires 30 s after boot. If the user clicks during
         # that window the cache is still None — don't render a fake
@@ -1258,44 +1300,41 @@ class MainWindow(QMainWindow):
         if behind == 0:
             self._status.showMessage("Already up to date", 4_000)
             return
+        # Single confirmation: pull + auto-restart. Predict the pip
+        # warning up front via the pre-pull diff so the user sees it
+        # in the same dialog rather than after the pull lands.
+        from .update_helper import pyproject_will_change_on_pull
+
+        pip_warn = (
+            "\n\n⚠ pyproject.toml is changing — you'll need to run\n"
+            "`pip install -e .` in `.venv` after the restart so the\n"
+            "new dependencies take effect."
+            if pyproject_will_change_on_pull()
+            else ""
+        )
         confirm = QMessageBox.question(
             self,
-            "Pull update",
-            f"Pull {behind} commit{'s' if behind != 1 else ''} from origin/main?\n\n"
-            "Cockpit will need to restart afterwards. Your project paths\n"
-            "(projects.json), session history (runtime/), and venv are\n"
-            "safe — only git-tracked files are touched.",
+            "Pull update + restart",
+            f"Pull {behind} commit{'s' if behind != 1 else ''} from origin/main "
+            "and restart cockpit to apply the new version?\n\n"
+            "⚠ Cockpit will restart immediately after the pull.\n\n"
+            "Your project paths (projects.json), session history\n"
+            "(runtime/), and venv are safe — only git-tracked files\n"
+            f"are touched.{pip_warn}",
             QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Ok,
         )
         if confirm != QMessageBox.StandardButton.Ok:
             return
-        before_sha = current_sha()
         ok, msg = pull_updates()
         if not ok:
             QMessageBox.critical(self, "Pull failed", msg)
             self._run_update_check()  # refresh chip with latest state
             return
-        after_sha = current_sha()
-        pip_needed = pyproject_changed_in_pull(before_sha, after_sha)
-        pip_note = (
-            "\n\n⚠ pyproject.toml changed — run `pip install -e .`\n"
-            "(in `.venv`) before relaunching so dependency changes\n"
-            "take effect."
-            if pip_needed
-            else ""
-        )
-        restart = QMessageBox.question(
-            self,
-            "Restart to apply update",
-            f"{msg}.{pip_note}\n\nRestart cockpit now?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
-        )
-        if restart == QMessageBox.StandardButton.Yes:
-            self._restart_cockpit()
-        else:
-            self._run_update_check()
+        # Pull succeeded — restart immediately. No second confirm; the
+        # one dialog above already promised this behaviour.
+        self._status.showMessage(f"{msg} — restarting…", 6_000)
+        QTimer.singleShot(500, self._restart_cockpit)
 
     def _restart_cockpit(self) -> None:
         """Spawn a fresh agent-takkub process and quit this one. The
