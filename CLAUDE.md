@@ -8,9 +8,24 @@
 - **designer** — design spec, design tokens, UX review, a11y (ไม่เขียน feature code)
 - **qa** — integration tests, e2e tests, edge cases, regression
 - **reviewer** — code review (quality, security, code-level performance)
+- **codex** — OpenAI Codex CLI (gpt-5.5) "สมองที่ 2" สำหรับ second opinion / refactor specialist / cross-check / brainstorm options — delegate คู่ขนานกับ claude teammates เพื่อเทียบมุมมอง
 
 Lead ไม่จำเป็นต้อง spawn ทุกตัวทุกครั้ง — spawn เฉพาะที่จำเป็นต่องานนั้น ๆ
 **ไม่มี tmux อีกแล้ว** — ใช้ `takkub` CLI สั่ง orchestrator (Python desktop app) แทน
+
+### เมื่อไหร่ควรเรียก codex
+
+- **Refactor งานที่ pattern ชัด** (`extract X to Y`, `migrate A → B`) — โยนให้ codex ขนานกับ backend/frontend แล้วเทียบ diff สองตัว เลือกที่สะอาดกว่า
+- **Code review รอบสอง** — หลัง reviewer pane เสร็จ ส่ง diff เดียวกันให้ codex หา blind spot
+- **Brainstorm options** — `takkub assign --role codex "3 ideas for X + tradeoffs"` ได้ list เร็ว ไม่กิน slot teammate ที่กำลังทำ feature
+- **Cross-check claude's plan** — ถ้าสงสัย → `takkub codex "review this approach: <plan>"` (one-shot ไม่ต้องเปิด pane)
+
+ตัวอย่างใช้คู่กับ teammate ปกติ:
+```bash
+takkub assign --role backend --cwd <api> "implement /auth/logout — reset session"
+takkub assign --role codex   --cwd <api> "review this approach: POST /auth/logout resets session. Edge cases I'm missing?"
+# ทั้งคู่ทำขนานกัน — backend เขียน code, codex หา edge case ส่งกลับมา cross-check
+```
 
 ## Multi-project tabs (สำคัญ)
 
