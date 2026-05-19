@@ -191,12 +191,81 @@ def _resolve_vault_dir() -> pathlib.Path | None:
     return None
 
 
+# Sessions whose `note` matches one of these (case-insensitive, after
+# stripping) are treated as no-information events and never reach the
+# vault. They still flow through `agentDone` / `_recent_done_events` so
+# Lead's inbox + hot.md still surface them — we just don't pollute
+# Obsidian with stubs that have no analytical value.
+_JUNK_NOTE_EXACT = frozenset(
+    {
+        "",
+        ".",
+        "ok",
+        "ok.",
+        "ok done",
+        "done",
+        "done.",
+        "wip",
+        "wip.",
+        "appended",
+        "yes",
+        "no",
+        "fixed",
+        "all green",
+    }
+)
+
+# Notes shorter than this (after stripping) are treated as junk even if
+# they don't match the exact-junk list. 15 chars is enough for a
+# substantive 2-3 word summary like "added /login" but trims one-word
+# acknowledgements.
+_JUNK_NOTE_MIN_LEN = 15
+
+# Project names matching one of these prefixes are also skipped from
+# the vault mirror — typically scratch/test/throwaway workspaces that
+# nobody wants in the Obsidian graph.
+_JUNK_PROJECT_PREFIXES = ("test", "tmp", "scratch", "playground")
+
+
+def _is_junk_note(note: str) -> bool:
+    """Return True when the takkub-done note is too thin to keep."""
+    s = (note or "").strip().lower()
+    if s in _JUNK_NOTE_EXACT:
+        return True
+    return len(s) < _JUNK_NOTE_MIN_LEN
+
+
+def _is_junk_project(project: str) -> bool:
+    """Return True when the project name looks like a scratch workspace."""
+    p = (project or "").strip().lower()
+    if not p:
+        return True
+    return any(p.startswith(prefix) for prefix in _JUNK_PROJECT_PREFIXES)
+
+
 def _render_decision_note(project: str, role: str, note: str, now: datetime) -> str:
     """Render the markdown body shared by the local session log and the
-    vault mirror. Single source of truth so the two copies don't drift."""
+    vault mirror. Single source of truth so the two copies don't drift.
+
+    Body layout (Obsidian-friendly):
+      - YAML frontmatter: role / project / date / tags → enables
+        Dataview queries and `tag:#session` filters.
+      - `[[01-Projects/<project>|<project>]]` backlink in body so the
+        graph view clusters each session under its project page.
+      - Plain markdown `## Note` block so events.log/hot.md scrapers
+        keep working with the existing pattern.
+    """
+    iso = now.isoformat(timespec="seconds")
     return (
-        f"# {role} done · {now.isoformat(timespec='seconds')}\n\n"
-        f"**Project:** {project}\n\n"
+        f"---\n"
+        f"role: {role}\n"
+        f"project: {project}\n"
+        f"date: {iso}\n"
+        f"tags: [session, {role}, {project}]\n"
+        f"---\n\n"
+        f"# {role} done · {iso}\n\n"
+        f"**Project:** [[01-Projects/{project}|{project}]]\n"
+        f"**Role:** {role}\n\n"
         f"## Note\n\n{note.strip()}\n"
     )
 
@@ -1264,6 +1333,14 @@ class Orchestrator(QObject):
         and the on-disk filename could disagree by a second under load.
         """
         if not (note or "").strip():
+            return
+        # Junk filter: skip 1-word "ok" / "wip" / "done" stubs and
+        # scratch/test workspaces. Keeps the Obsidian vault from
+        # filling up with content-less session files that don't
+        # connect to anything (no useful note body to backlink from).
+        if _is_junk_note(note):
+            return
+        if _is_junk_project(project):
             return
         if now is None:
             now = datetime.now()

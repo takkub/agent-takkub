@@ -20,6 +20,8 @@ import pytest
 from agent_takkub.orchestrator import (
     _DEFAULT_VAULT,
     _VAULT_ENV,
+    _is_junk_note,
+    _is_junk_project,
     _render_decision_note,
     _resolve_vault_dir,
 )
@@ -96,14 +98,26 @@ class TestResolveVaultDir:
 class TestRenderDecisionNote:
     def test_body_includes_role_project_and_note(self) -> None:
         now = dt.datetime(2026, 5, 17, 14, 30, 45)
-        body = _render_decision_note("agent-takkub", "backend", "all green", now)
+        body = _render_decision_note("agent-takkub", "backend", "added /login endpoint to API", now)
         assert "backend done" in body
-        assert "**Project:** agent-takkub" in body
-        assert "all green" in body
+        # Project line is now a wikilink so Obsidian's graph clusters
+        # every session of a project under the project page.
+        assert "**Project:** [[01-Projects/agent-takkub|agent-takkub]]" in body
+        assert "added /login endpoint to API" in body
+
+    def test_body_has_frontmatter_tags_for_dataview(self) -> None:
+        now = dt.datetime(2026, 5, 17, 14, 30, 45)
+        body = _render_decision_note("agent-takkub", "backend", "added /login endpoint to API", now)
+        # YAML frontmatter at the top — Dataview reads these fields.
+        assert body.startswith("---\n")
+        assert "role: backend" in body
+        assert "project: agent-takkub" in body
+        assert "date: 2026-05-17T14:30:45" in body
+        assert "tags: [session, backend, agent-takkub]" in body
 
     def test_body_uses_iso_seconds_timestamp(self) -> None:
         now = dt.datetime(2026, 5, 17, 14, 30, 45)
-        body = _render_decision_note("p", "r", "n", now)
+        body = _render_decision_note("p", "r", "long enough note body", now)
         assert "2026-05-17T14:30:45" in body
         # No microseconds — the format is `isoformat(timespec='seconds')`.
         assert ".000000" not in body
@@ -112,9 +126,53 @@ class TestRenderDecisionNote:
         # `takkub done "  text  "` shouldn't produce a body with leading
         # or trailing blank lines around the note block — those break
         # the section parser used by some downstream wiki tools.
-        body = _render_decision_note("p", "r", "  text  ", dt.datetime.now())
-        assert "## Note\n\ntext\n" in body
+        body = _render_decision_note("p", "r", "  long enough note body  ", dt.datetime.now())
+        assert "## Note\n\nlong enough note body\n" in body
 
     def test_thai_unicode_survives(self) -> None:
-        body = _render_decision_note("p", "r", "เสร็จแล้วครับ", dt.datetime.now())
+        body = _render_decision_note("p", "r", "เสร็จแล้วครับ ทำ /login endpoint", dt.datetime.now())
         assert "เสร็จแล้วครับ" in body
+
+
+class TestJunkFilters:
+    """Notes / projects that look like throwaway stubs are dropped from
+    the vault mirror so Obsidian's graph stays connected and meaningful.
+    """
+
+    def test_junk_note_matches_exact_list(self) -> None:
+        for stub in ("ok", "wip", "done", "appended", "all green", "fixed", "."):
+            assert _is_junk_note(stub) is True, stub
+
+    def test_junk_note_is_case_and_whitespace_insensitive(self) -> None:
+        assert _is_junk_note("  OK  ") is True
+        assert _is_junk_note("Appended\n") is True
+
+    def test_short_notes_are_junk(self) -> None:
+        # < 15 chars → treated as throwaway, even if novel.
+        assert _is_junk_note("hi there") is True
+        assert _is_junk_note("oops") is True
+
+    def test_substantive_note_passes(self) -> None:
+        assert _is_junk_note("added /login endpoint with JWT") is False
+        assert _is_junk_note("refactor: extract paste_payload helper") is False
+
+    def test_junk_project_matches_known_prefixes(self) -> None:
+        for proj in (
+            "testproj",
+            "test-vault",
+            "tmp-experiment",
+            "scratch-1",
+            "playground",
+        ):
+            assert _is_junk_project(proj) is True, proj
+
+    def test_real_project_passes(self) -> None:
+        assert _is_junk_project("agent-takkub") is False
+        assert _is_junk_project("pms") is False
+        assert _is_junk_project("unirecon") is False
+
+    def test_empty_project_is_junk(self) -> None:
+        # An empty / None-ish project name shouldn't generate a session
+        # file under `01-Projects/` (would land at `01-Projects//...`).
+        assert _is_junk_project("") is True
+        assert _is_junk_project("   ") is True
