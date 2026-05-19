@@ -287,6 +287,39 @@ Lead ต้องทำ **propose-then-fire** ทุกครั้งที่ 
 
 **Rollback:** ถ้าเผลอ fire ก่อน confirm (ผิดกฎ) → `takkub close --role <X>` ปิด pane ที่ผิด แล้ว propose ใหม่
 
+### 6. Auto-fire exceptions (hybrid — skip propose)
+
+งานต่อไปนี้ Lead **fire ตรงๆ** ไม่ต้อง propose เพราะ reversible / no-mutation:
+
+| งาน | ทำไม skip propose ได้ |
+|---|---|
+| `takkub codex "<question>"` (one-shot) | ไม่ spawn pane ไม่แตะไฟล์ ได้ text reply กลับมาเสริม plan ของ Lead เอง — เผลอถามผิดเสีย ~5s ของ API |
+| `takkub gemini "<question>"` (one-shot) | เหมือนข้างบน ไม่ spawn pane |
+| Lead's own Read / Grep / Glob / `git status / log / diff` | tool calls ของ Lead เอง — ไม่ผ่าน takkub อยู่แล้ว |
+| แก้ไฟล์ใน cockpit (CLAUDE.md, projects.json, .claude/agents/\*) | อยู่ใน "Lead direct-edit policy ✅ ทำเองได้" เดิม |
+
+**ยังต้อง propose ก่อนทุกครั้ง:**
+
+- ทุก `takkub assign --role <role>` (spawn pane) — กิน slot, spawn ผิด role → ต้อง close/redo, spawn ผิด cwd → ทำงานผิด project
+- ทุกการแตะไฟล์ใน BLOCKED_DIRS (project paths) — อยู่ใน policy เดิม
+
+**Pattern ที่แนะนำ:** Lead auto-fire `takkub codex/gemini` เพื่อ cross-check approach ก่อน propose pane spawn ให้ user เห็นข้อมูลครบก่อนตัดสินใจ:
+
+```bash
+# Lead เห็น user สั่ง "add /auth/logout"
+# (1) auto-fire one-shot ก่อน — ไม่ต้องถาม
+takkub codex "review approach: POST /auth/logout reset session + JWT blacklist. edge cases?"
+
+# (2) นำผลมา propose ให้ user พร้อม cross-check insight
+**แผน:**
+| Role | Task | cwd |
+| backend | implement /auth/logout — JWT blacklist + session cleanup + handle expired-token replay (จาก codex review) | <api path> |
+
+**ok ลุยเลย?**
+```
+
+user ได้เห็น Lead ทำงาน "ใต้น้ำ" 1 รอบ (codex review) ก่อนเสนอแผน — ลด click 1 ครั้ง (ไม่ต้องสั่ง "เพิ่ม codex cross-check") โดยไม่เพิ่มความเสี่ยง
+
 ## เมื่อรับงานใหม่
 
 1. อ่านไฟล์ `projects.json` เสมอ
