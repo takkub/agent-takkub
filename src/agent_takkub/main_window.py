@@ -24,7 +24,6 @@ from PyQt6.QtCore import QCoreApplication, QSettings, Qt, QThreadPool, QTimer
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QApplication,
-    QColorDialog,
     QComboBox,
     QDockWidget,
     QHBoxLayout,
@@ -54,7 +53,6 @@ from .config import (
     preset_roles_for_active,
     set_active_project,
     set_open_tabs,
-    validate_name,
 )
 from .logs_panel import LogsPanel
 from .orchestrator import Orchestrator, _log_event
@@ -355,9 +353,9 @@ class MainWindow(QMainWindow):
             "tracked files block the pull until you commit or stash."
         )
         self._btn_update.setStyleSheet(
-            "QPushButton { color: #94a3b8; background: #1e293b; "
-            "border: 1px solid #334155; border-radius: 4px; "
-            "padding: 2px 8px; }"
+            "QPushButton { color: #71717a; background: transparent; "
+            "border: none; padding: 2px 6px; font-size: 11px; }"
+            "QPushButton:hover { color: #94a3b8; }"
         )
         self._btn_update.clicked.connect(self._on_update_clicked)
         # Cached result from the most recent poll. Populated lazily so
@@ -368,33 +366,10 @@ class MainWindow(QMainWindow):
         # queuing a second fetch before the first one completes.
         self._update_worker_busy: bool = False
 
-        self._btn_add_pane = QPushButton("➕ Add Agent", self)
-        self._btn_add_pane.setToolTip("Open a pane for a role (default or custom)")
-        self._btn_add_pane.clicked.connect(self._on_add_pane_clicked)
-
-        self._btn_assign = QPushButton("📝 Assign Task", self)
-        self._btn_assign.setToolTip("Quick-assign a task to a role")
-        self._btn_assign.clicked.connect(self._on_quick_assign_clicked)
-
         self._btn_logs = QPushButton("📋 Logs", self)
         self._btn_logs.setToolTip("Show/hide events log panel")
         self._btn_logs.setCheckable(True)
         self._btn_logs.clicked.connect(self._on_toggle_logs)
-
-        self._btn_finish = QPushButton("✅ Finish Job", self)
-        self._btn_finish.setToolTip(
-            "Mark this whole session as done. Asks Lead to write a final\n"
-            "summary (what was accomplished, what's blocked, next steps),\n"
-            "then closes every teammate pane. Lead stays running so you\n"
-            "can read the summary or start a new task."
-        )
-        self._btn_finish.setStyleSheet(
-            "QPushButton { color: #14532d; background: #86efac; "
-            "border: 1px solid #16a34a; border-radius: 4px; "
-            "padding: 2px 8px; font-weight: 500; }"
-            "QPushButton:hover { background: #bbf7d0; }"
-        )
-        self._btn_finish.clicked.connect(self._on_finish_job_clicked)
 
         self._btn_restart = QPushButton(self)
         self._btn_restart.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
@@ -414,11 +389,6 @@ class MainWindow(QMainWindow):
             "QPushButton:hover { background: #3730a3; }"
         )
         self._btn_providers.clicked.connect(self._on_providers_clicked)
-
-        self._btn_help = QPushButton("❓ Help", self)
-        self._btn_help.setFixedWidth(70)
-        self._btn_help.setToolTip("Show takkub command cheatsheet (F1)")
-        self._btn_help.clicked.connect(self._show_help)
 
         # Clickable /remote-control trigger. The built-in Claude Code command
         # bridges a local session to claude.ai/code for browser/phone
@@ -480,14 +450,10 @@ class MainWindow(QMainWindow):
         self._status.addPermanentWidget(self._btn_install_rtk)
         self._status.addPermanentWidget(self._chip_codex)
         self._status.addPermanentWidget(self._chip_gemini)
-        self._status.addPermanentWidget(self._btn_update)
-        self._status.addPermanentWidget(self._btn_add_pane)
-        self._status.addPermanentWidget(self._btn_assign)
         self._status.addPermanentWidget(self._btn_logs)
-        self._status.addPermanentWidget(self._btn_finish)
         self._status.addPermanentWidget(self._btn_restart)
         self._status.addPermanentWidget(self._btn_providers)
-        self._status.addPermanentWidget(self._btn_help)
+        self._status.addPermanentWidget(self._btn_update)
         # Sync rtk button visibility after every permanent widget has been
         # added, so any layout invalidation triggered by show()/hide() lands
         # on a fully-built status bar rather than a half-built one (an
@@ -810,21 +776,6 @@ class MainWindow(QMainWindow):
     # ──────────────────────────────────────────────────────────────
     def _on_toggle_logs(self, checked: bool) -> None:
         self._logs_dock.setVisible(checked)
-
-    def _on_quick_assign_clicked(self) -> None:
-        taken = list(self.orch.panes.keys())
-        defaults = [r.name for r in DEFAULT_TEAMMATES]
-        choices = defaults + [r for r in taken if r not in defaults and r != LEAD.name]
-        if not choices:
-            choices = defaults
-        role, ok = QInputDialog.getItem(self, "Assign task", "Role:", choices, 0, False)
-        if not ok or not role:
-            return
-        task, ok = QInputDialog.getMultiLineText(self, "Assign task", f"Task for {role}:", "")
-        if not ok or not task.strip():
-            return
-        ok, msg = self.orch.assign(role, cwd=None, task=task.strip())
-        self._status.showMessage(msg, 4_000)
 
     def _show_help(self) -> None:
         from PyQt6.QtWidgets import QMessageBox
@@ -1211,90 +1162,6 @@ class MainWindow(QMainWindow):
                 )
         except Exception:
             pass
-
-    def _on_finish_job_clicked(self) -> None:
-        """User-driven job wrap-up. Asks Lead for a closing summary,
-        appends today's per-project session digest to the vault's
-        05-Daily note, then closes every teammate. Lead stays alive
-        so the user can read the summary and queue the next task
-        without restarting the cockpit.
-
-        PMS task auto-creation used to be an optional second step
-        here; it was removed at the user's request so Finish Job
-        stays a single-click action without a list-id prompt. PMS
-        tasks are created manually by Lead when the user asks.
-        """
-        from PyQt6.QtWidgets import QMessageBox
-
-        lead = self.orch.panes.get(LEAD.name)
-        if lead is None or lead.session is None or not lead.session.is_alive:
-            QMessageBox.warning(
-                self,
-                "Finish Job",
-                "Lead pane isn't running. Spawn it first, then try again.",
-            )
-            return
-
-        teammates = [n for n in self.orch.panes if n != LEAD.name and self.orch.panes[n].session]
-        teammate_line = ", ".join(teammates) if teammates else "(none)"
-
-        confirm = QMessageBox.question(
-            self,
-            "Finish Job",
-            (
-                "Wrap up the current session?\n\n"
-                "Lead will be asked to write a closing summary covering:\n"
-                "  • what was accomplished\n"
-                "  • what's blocked or unfinished\n"
-                "  • recommended next steps\n\n"
-                f"After the summary, these teammate panes will be closed:\n"
-                f"  {teammate_line}\n\n"
-                "Today's session digest is also appended to "
-                "<vault>/05-Daily/<date>.md.\n\n"
-                "Lead stays running so you can read the summary."
-            ),
-            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Ok,
-        )
-        if confirm != QMessageBox.StandardButton.Ok:
-            return
-
-        # Compose the wrap-up prompt. Kept Thai-leaning because the rest of
-        # the cockpit's Lead instructions are Thai, but English fallback
-        # phrases ensure non-Thai users still parse it.
-        summary_prompt = (
-            "[FINISH JOB] User marked the session as done. "
-            "เขียน final summary แบบ structured ก่อนปิดงาน:\n\n"
-            "## ✅ Accomplished\n"
-            "- (สิ่งที่ทำเสร็จใน session นี้, 1 บรรทัดต่อรายการ)\n\n"
-            "## ⚠️ Blockers / Unfinished\n"
-            "- (สิ่งที่ติด หรือยังไม่เสร็จ)\n\n"
-            "## ➡️ Next Steps\n"
-            "- (เริ่มจากตรงไหนต่อ session ถัดไป)\n\n"
-            "หลังจากเขียน summary เสร็จ run `takkub close-all` "
-            "เพื่อปิด teammate panes ที่เหลือ"
-        )
-        # Inject as a regular task so Lead acknowledges the working state
-        # while it writes the summary. close-all happens via Lead itself
-        # (it has the gate permission); we also defensively close from the
-        # cockpit side after a delay in case Lead drifted. 60 s is enough
-        # for a plain summary write with no MCP work involved.
-        self.orch._send_when_ready(LEAD.name, summary_prompt)
-        QTimer.singleShot(60_000, lambda: self.orch.close_all_teammates())
-
-        # Append today's session digest for this project to the vault's
-        # 05-Daily note. Best-effort: silent when no vault is set up,
-        # but the status bar surfaces the outcome so the user knows the
-        # daily note was (or wasn't) touched.
-        active = active_project()[0]
-        digest_ok = bool(active and self.orch.write_daily_digest(active))
-        digest_suffix = " · daily digest appended" if digest_ok else ""
-
-        self._status.showMessage(
-            f"Finish Job: Lead is writing the summary{digest_suffix}. "
-            "Teammates will close shortly.",
-            8_000,
-        )
 
     def _on_restart_cockpit_clicked(self) -> None:
         """User-triggered full cockpit restart. Counts in-flight panes,
@@ -1895,46 +1762,6 @@ class MainWindow(QMainWindow):
         else:
             self._status.showMessage(f"Added project: {name} (opening tab...)", 4_000)
             self._open_project_tab(name)
-
-    # ──────────────────────────────────────────────────────────────
-    # + pane button: spawn an additional teammate from a role name
-    # ──────────────────────────────────────────────────────────────
-    def _on_add_pane_clicked(self) -> None:
-        # roles already shown (skip them from the picker)
-        taken = set(self.orch.panes.keys())
-        default_unused = [r.name for r in DEFAULT_TEAMMATES if r.name not in taken]
-        choices = [*default_unused, "custom..."]
-        name, ok = QInputDialog.getItem(
-            self,
-            "Open pane",
-            "Choose a role (or pick 'custom...' for a new name):",
-            choices,
-            0,
-            False,
-        )
-        if not ok or not name:
-            return
-        if name == "custom...":
-            name, ok = QInputDialog.getText(
-                self, "Custom role", "Role name (lowercase, no spaces):"
-            )
-            if not ok or not name:
-                return
-            try:
-                name = validate_name(name, "role")
-            except ValueError as exc:
-                from PyQt6.QtWidgets import QMessageBox
-
-                QMessageBox.warning(self, "Invalid role name", str(exc))
-                return
-            # let the user pick a colour for the dot indicator
-            picker = QColorDialog(self)
-            picker.setWindowTitle(f"Color for role '{name}'")
-            picker.setCurrentColor(Qt.GlobalColor.cyan)
-            if picker.exec():
-                self._custom_role_colors[name] = picker.currentColor().name()
-        ok, msg = self.orch.spawn(name)
-        self._status.showMessage(msg, 4_000)
 
     # ──────────────────────────────────────────────────────────────
     # window state persistence
