@@ -537,3 +537,66 @@ class TestThaiEnglishHybrid:
         result = classify("แก้ bug หน้า login")
         assert result.kind == ActionKind.PROPOSE
         assert result.role == "frontend"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Thai หน้า false-positive regression
+# Ensures compound Thai words containing หน้า do NOT trigger frontend.
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestThaiPageFalsePositives:
+    # ── negative cases (must NOT route to frontend via หน้า) ──────────
+
+    def test_konnahna_does_not_match_frontend(self):
+        """'ก่อนหน้า' (previous) must not trigger frontend rule."""
+        result = classify("fix bug ที่เกิดในวันก่อนหน้า")
+        # No UI keyword → should not route to frontend
+        assert result.role != "frontend"
+
+    def test_khangnahna_does_not_match_frontend(self):
+        """'ข้างหน้า' (ahead) must not trigger frontend rule."""
+        result = classify("scroll ไปข้างหน้า")
+        assert result.role != "frontend"
+
+    def test_dannahna_does_not_match_frontend(self):
+        """'ด้านหน้า' (front side) must not trigger frontend rule."""
+        result = classify("แก้ด้านหน้าของ object ใน backend")
+        assert result.role != "frontend"
+
+    def test_nahnahw_does_not_match_frontend(self):
+        """'หน้าหนาว' (winter) must not trigger frontend rule."""
+        result = classify("หน้าหนาวต้อง deploy infrastructure")
+        # devops keyword present — role should be devops, not frontend
+        assert result.role != "frontend"
+
+    def test_nahfon_does_not_match_frontend(self):
+        """'หน้าฝน' (rainy season) must not trigger frontend rule."""
+        result = classify("หน้าฝนระบบ backend ล่มบ่อย")
+        assert result.role != "frontend"
+
+    # ── positive regression (must STILL route to frontend) ────────────
+
+    def test_nah_slash_login_still_matches(self):
+        """'ทำหน้า /login' must still route to frontend (Option A)."""
+        result = classify("ทำหน้า /login")
+        assert result.kind == ActionKind.PROPOSE
+        assert result.role == "frontend"
+
+    def test_nah_admin_still_matches(self):
+        """'เพิ่มหน้า admin' must still route to frontend."""
+        result = classify("เพิ่มหน้า admin")
+        assert result.kind == ActionKind.PROPOSE
+        assert result.role == "frontend"
+
+    def test_nahjo_still_matches(self):
+        """'หน้าจอ login พัง' must still route to frontend (via หน้าจอ)."""
+        result = classify("แก้หน้าจอ login พัง")
+        assert result.kind == ActionKind.PROPOSE
+        assert result.role == "frontend"
+
+    def test_pum_still_matches(self):
+        """'แก้ปุ่ม submit' must still route to frontend (ปุ่ม unchanged)."""
+        result = classify("แก้ปุ่ม submit")
+        assert result.kind == ActionKind.PROPOSE
+        assert result.role == "frontend"

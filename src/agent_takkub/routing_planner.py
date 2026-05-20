@@ -163,11 +163,13 @@ _ROUTE_TABLE: list[tuple[re.Pattern, str | None, list[str] | None]] = [
         None,
     ),
     # Frontend (UI / page / form / component …) — Thai: หน้าจอ/หน้า (screen/page), ปุ่ม (button)
+    # หน้า uses lookbehind (ก่อน/ข้าง/ด้าน/เบื้อง) + lookahead (\s*[/a-zA-Z]) to avoid false
+    # positives from compound words: ก่อนหน้า, ข้างหน้า, หน้าหนาว, หน้าฝน, etc.
     (
         re.compile(
             r"(?:\b(UI|page|form|component|button|style|CSS|layout|modal|dialog|"
             r"sidebar|navbar|widget|React|Vue|Next\.js|Tailwind|HTML)\b"
-            r"|หน้าจอ|หน้า|ปุ่ม)",
+            r"|หน้าจอ|(?<!ก่อน)(?<!ข้าง)(?<!ด้าน)(?<!เบื้อง)หน้า(?=\s*[/a-zA-Z])|ปุ่ม)",
             re.IGNORECASE,
         ),
         "frontend",
@@ -192,7 +194,7 @@ _AMBIGUOUS_CONFIRM = re.compile(r"(เออๆ|เออ\s|ok\s*แต่|but\b
 _HAS_UI = re.compile(
     r"(?:\b(UI|page|form|component|button|style|CSS|layout|modal|dialog|"
     r"sidebar|navbar|widget|React|Vue|Next\.js|Tailwind|HTML|frontend|login.page|signup.page)\b"
-    r"|หน้าจอ|หน้า|ปุ่ม)",
+    r"|หน้าจอ|(?<!ก่อน)(?<!ข้าง)(?<!ด้าน)(?<!เบื้อง)หน้า(?=\s*[/a-zA-Z])|ปุ่ม)",
     re.IGNORECASE,
 )
 _HAS_API = re.compile(
