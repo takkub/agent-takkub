@@ -1618,6 +1618,8 @@ class MainWindow(QMainWindow):
         import subprocess
         import sys
 
+        from ._win_console import SUBPROCESS_NO_WINDOW
+
         # Persist state up-front — don't rely on closeEvent firing after quit().
         try:
             self._save_window_state()
@@ -1647,6 +1649,7 @@ class MainWindow(QMainWindow):
                 [sys.executable, "-m", "agent_takkub"],
                 cwd=str(REPO_ROOT),
                 close_fds=True,
+                creationflags=SUBPROCESS_NO_WINDOW,
             )
         except Exception as e:
             # If we can't spawn the successor, don't quit — leave the

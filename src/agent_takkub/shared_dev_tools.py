@@ -24,6 +24,7 @@ import json
 import subprocess
 import threading
 
+from ._win_console import SUBPROCESS_NO_WINDOW
 from .config import RUNTIME_DIR
 
 SHARED_MCP_FILE = RUNTIME_DIR / "shared-mcp.json"
@@ -107,6 +108,7 @@ def warm_browser_mcps() -> None:
                 stderr=subprocess.DEVNULL,
                 timeout=30,
                 check=False,
+                creationflags=SUBPROCESS_NO_WINDOW,
             )
         except Exception:
             pass

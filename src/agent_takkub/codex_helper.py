@@ -25,6 +25,8 @@ from __future__ import annotations
 import shutil
 import subprocess
 
+from ._win_console import SUBPROCESS_NO_WINDOW
+
 
 def find_codex_executable() -> str | None:
     """Return the absolute path to the `codex` binary, or None when
@@ -86,6 +88,7 @@ def codex_exec(
             check=False,
             encoding="utf-8",
             errors="replace",
+            creationflags=SUBPROCESS_NO_WINDOW,
         )
     except subprocess.TimeoutExpired:
         return False, "codex exec timed out"

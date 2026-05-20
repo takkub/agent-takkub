@@ -21,6 +21,7 @@ import sys
 
 from PyQt6.QtCore import QObject, QRunnable, pyqtSignal
 
+from ._win_console import SUBPROCESS_NO_WINDOW
 from .config import REPO_ROOT
 from .update_helper import fetch_remote, is_git_repo, local_status
 
@@ -122,6 +123,7 @@ def try_silent_self_update(*, timeout_fetch: float = 5.0, timeout_pull: float = 
             text=True,
             timeout=5.0,
             check=False,
+            creationflags=SUBPROCESS_NO_WINDOW,
         )
         from_sha = (from_sha_proc.stdout or "").strip()
 
@@ -130,6 +132,7 @@ def try_silent_self_update(*, timeout_fetch: float = 5.0, timeout_pull: float = 
             capture_output=True,
             timeout=timeout_pull,
             check=False,
+            creationflags=SUBPROCESS_NO_WINDOW,
         )
         if result.returncode != 0:
             _log_startup_pull(
@@ -146,6 +149,7 @@ def try_silent_self_update(*, timeout_fetch: float = 5.0, timeout_pull: float = 
             text=True,
             timeout=5.0,
             check=False,
+            creationflags=SUBPROCESS_NO_WINDOW,
         )
         to_sha = (to_sha_proc.stdout or "").strip()
         _log_startup_pull("pulled", from_sha=from_sha, to_sha=to_sha, behind=behind)

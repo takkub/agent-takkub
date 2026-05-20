@@ -7,11 +7,19 @@ GUI process. Functionally harmless but visually disruptive.
 Strategy: snapshot all ConsoleWindowClass HWNDs before spawn, then after
 spawn diff against a fresh snapshot and `ShowWindow(hwnd, SW_HIDE)` any new
 HWNDs.
+
+Also exports `SUBPROCESS_NO_WINDOW` — a `creationflags` value that callers
+pass to `subprocess.run/Popen` so console child processes (git, npm, codex,
+gemini, npx) don't flash a conhost window when spawned from the PyQt GUI.
+Zero on non-Windows so the same call site works cross-platform.
 """
 
 from __future__ import annotations
 
+import subprocess
 import sys
+
+SUBPROCESS_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 def snapshot_console_hwnds() -> set[int]:

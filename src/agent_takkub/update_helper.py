@@ -28,6 +28,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from ._win_console import SUBPROCESS_NO_WINDOW
 from .config import REPO_ROOT
 
 # Official upstream for the in-cockpit "convert to git checkout" flow.
@@ -52,6 +53,7 @@ def _git(*args: str, timeout: float = 30.0) -> subprocess.CompletedProcess[str]:
         check=False,
         encoding="utf-8",
         errors="replace",
+        creationflags=SUBPROCESS_NO_WINDOW,
     )
 
 

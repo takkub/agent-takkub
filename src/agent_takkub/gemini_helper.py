@@ -25,6 +25,8 @@ from __future__ import annotations
 import shutil
 import subprocess
 
+from ._win_console import SUBPROCESS_NO_WINDOW
+
 
 def find_gemini_executable() -> str | None:
     """Return the absolute path to the `gemini` binary, or None when
@@ -81,6 +83,7 @@ def gemini_exec(
             check=False,
             encoding="utf-8",
             errors="replace",
+            creationflags=SUBPROCESS_NO_WINDOW,
         )
     except subprocess.TimeoutExpired:
         return False, "gemini exec timed out"
