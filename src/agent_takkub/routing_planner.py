@@ -45,7 +45,7 @@ class RoutingAction:
 # ─────────────────────────────────────────────────────────────────────
 
 _ACTIONABLE_EN = re.compile(
-    r"\b(add|build|implement|fix|refactor|migrate|setup|set.up|deploy|"
+    r"\b(add|build|implement|fix|refactor|migrate|setup|set.up|deploy|rollout|"
     r"test|create|make|write|update|change|delete|remove|rename|extract|"
     r"scaffold|install|configure|integrate|connect|seed|review|audit|run|"
     r"debug|analyze|verify|"
@@ -301,18 +301,28 @@ def classify(user_message: str, context: dict | None = None) -> RoutingAction:
 
     Args:
         user_message: Raw message from the user.
-        context: Optional state dict.  Keys:
+        context: Optional state dict. Keys:
             ``pending_proposal`` (bool) — True when Lead has shown a plan
             table and is waiting for the user to confirm/abort/edit it.
+            ``disabled_providers`` (set[str]) — provider names that user has
+            disabled via the cockpit status bar toggle. codex/gemini in this
+            set get dropped from cross_check; FIRE_ONESHOT and gemini-primary
+            routes degrade to ASK_CLARIFY.
 
     Returns:
         RoutingAction with kind, role(s), cross_check, reason, mixed.
     """
     msg = user_message.strip()
+    disabled: set[str] = set((context or {}).get("disabled_providers") or set())
 
     # 1. Explicit role ("ให้ backend ทำ X") → FIRE_ASSIGN immediately
     explicit = _detect_explicit_role(msg)
     if explicit:
+        if explicit in disabled:
+            return RoutingAction(
+                kind=ActionKind.ASK_CLARIFY,
+                reason=f"{explicit} provider is disabled — ask user to enable first",
+            )
         return RoutingAction(
             kind=ActionKind.FIRE_ASSIGN,
             role=explicit,
@@ -323,6 +333,11 @@ def classify(user_message: str, context: dict | None = None) -> RoutingAction:
     # 2. One-shot codex/gemini → FIRE_ONESHOT (no pane spawn)
     oneshot = _detect_oneshot(msg)
     if oneshot:
+        if oneshot in disabled:
+            return RoutingAction(
+                kind=ActionKind.ASK_CLARIFY,
+                reason=f"{oneshot} provider is disabled — ask user to enable first",
+            )
         return RoutingAction(
             kind=ActionKind.FIRE_ONESHOT,
             role=oneshot,
@@ -350,12 +365,29 @@ def classify(user_message: str, context: dict | None = None) -> RoutingAction:
 
     # 5. Route actionable message to role(s)
     routing = _route(msg)
+    primary = routing.get("role")
+    cross_check = routing.get("cross_check")
+
+    # Degrade if the *primary* role itself is disabled (e.g. rollout→gemini
+    # when gemini is off): there's no automatic fallback role, so surface
+    # the conflict to the user rather than silently picking something else.
+    if primary in disabled:
+        return RoutingAction(
+            kind=ActionKind.ASK_CLARIFY,
+            reason=f"{primary} provider is disabled — ask user to enable first",
+        )
+
+    # Filter cross_check: drop any disabled providers. None stays None;
+    # empty list collapses to None for backward-compat with existing tests.
+    if cross_check:
+        cross_check = [r for r in cross_check if r not in disabled] or None
+
     return RoutingAction(
         kind=ActionKind.PROPOSE,
-        role=routing.get("role"),
+        role=primary,
         roles=routing.get("roles"),
         task_hint=msg,
-        cross_check=routing.get("cross_check"),
+        cross_check=cross_check,
         reason=routing.get("reason", ""),
         mixed=is_mixed,
     )

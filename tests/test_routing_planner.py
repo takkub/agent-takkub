@@ -600,3 +600,59 @@ class TestThaiPageFalsePositives:
         result = classify("แก้ปุ่ม submit")
         assert result.kind == ActionKind.PROPOSE
         assert result.role == "frontend"
+
+
+class TestDisabledProviders:
+    """classify() respects context['disabled_providers'] — drops codex/gemini
+    from cross_check and degrades FIRE_ONESHOT to ASK_CLARIFY."""
+
+    def test_disabled_codex_dropped_from_cross_check(self):
+        """Refactor message normally proposes backend + codex cross-check.
+        With codex disabled, cross_check should be empty (or None)."""
+        action = classify(
+            "refactor the auth module to use the new session helper",
+            context={"disabled_providers": {"codex"}},
+        )
+        assert action.kind == ActionKind.PROPOSE
+        # codex was the only cross-check entry for refactor — should be gone
+        assert not action.cross_check  # None or empty list
+
+    def test_disabled_gemini_blocks_rollout_proposal(self):
+        """Rollout/strategy normally routes to gemini as primary.
+        With gemini disabled, classifier should ASK_CLARIFY (no fallback)."""
+        action = classify(
+            "rollout plan for deploying the auth changes safely",
+            context={"disabled_providers": {"gemini"}},
+        )
+        assert action.kind == ActionKind.ASK_CLARIFY
+        assert "gemini" in action.reason.lower()
+
+    def test_both_disabled_no_codex_no_gemini_in_output(self):
+        """Refactor with both disabled: cross_check empty (codex gone).
+        Primary still routes to backend (refactor's content-derived role)."""
+        action = classify(
+            "refactor backend to extract auth service",
+            context={"disabled_providers": {"codex", "gemini"}},
+        )
+        assert action.kind == ActionKind.PROPOSE
+        assert action.role == "backend"
+        assert not action.cross_check
+
+    def test_oneshot_codex_disabled_becomes_ask_clarify(self):
+        """FIRE_ONESHOT to a disabled provider -> ASK_CLARIFY with explanation."""
+        action = classify(
+            "ขอ codex review function นี้",
+            context={"disabled_providers": {"codex"}},
+        )
+        assert action.kind == ActionKind.ASK_CLARIFY
+        assert "codex" in action.reason.lower()
+
+    def test_none_disabled_is_backward_compat(self):
+        """Default behavior (no context, or empty disabled set) unchanged."""
+        action_none = classify("refactor the auth module")
+        action_empty = classify(
+            "refactor the auth module",
+            context={"disabled_providers": set()},
+        )
+        assert action_none.kind == action_empty.kind == ActionKind.PROPOSE
+        assert action_none.cross_check == action_empty.cross_check == ["codex"]
