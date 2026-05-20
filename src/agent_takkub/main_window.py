@@ -167,6 +167,7 @@ class MainWindow(QMainWindow):
         self.orch.paneClosed.connect(self._remove_teammate_pane)
         self.orch.agentDone.connect(self._notify_agent_done)
         self.orch.paneResumed.connect(self._on_pane_resumed)
+        self.orch.crossTabDone.connect(self._on_cross_tab_done)
 
         # ── system tray for desktop notifications ───────────────
         self._tray = QSystemTrayIcon(self)
@@ -678,6 +679,14 @@ class MainWindow(QMainWindow):
         self._status.showMessage(f"✓ {title}: {body[:80]}", 6_000)
         if self._tray and QSystemTrayIcon.isSystemTrayAvailable():
             self._tray.showMessage(title, body, QSystemTrayIcon.MessageIcon.Information, 5_000)
+
+    def _on_cross_tab_done(self, project_ns: str, role: str, note: str) -> None:
+        """Flash the status bar when a background-tab teammate reports done.
+
+        The user is currently viewing a different project tab — they'd otherwise
+        see nothing. 8 s timeout gives them time to notice before it clears."""
+        body = note.strip()[:80] if note.strip() else "task complete"
+        self._status.showMessage(f"✓ [{role} done] in {project_ns}: {body}", 8_000)
 
     def _on_pane_resumed(self, role: str, project: str) -> None:
         """Auto-bridge `/remote-control` when a Lead pane was actually

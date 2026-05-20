@@ -653,6 +653,10 @@ class Orchestrator(QObject):
         str, str
     )  # role_name, project — main_window removes pane from the matching tab
     agentDone = pyqtSignal(str, str)  # role_name, note — for desktop notifications
+    # Emitted when a teammate's done() fires for a project that is NOT the
+    # currently active tab. main_window connects this to show a status-bar
+    # flash so the user sees background-tab activity without switching tabs.
+    crossTabDone = pyqtSignal(str, str, str)  # project_ns, role, note
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -691,6 +695,10 @@ class Orchestrator(QObject):
         # Keyed by project namespace; flushed to Lead on next Lead spawn.
         self._pending_lead_cc: dict[str, list[dict]] = {}
         self._load_pending_cc()
+        # Done-notice durability: `takkub done` notices queued when Lead is
+        # not alive at the moment a teammate finishes. Pattern mirrors
+        # _pending_lead_cc; flushed to Lead on next Lead spawn.
+        self._pending_done_notices: dict[str, list[dict]] = {}
 
         # Per-cockpit-run capability token. Injected only into the Lead pane
         # env (TAKKUB_LEAD_TOKEN) so the Lead takkub CLI can authenticate
@@ -1194,6 +1202,11 @@ class Orchestrator(QObject):
                 5_000,
                 lambda p=project_ns: self._flush_pending_lead_cc(p),
             )
+        if role_name == LEAD.name and self._pending_done_notices.get(project_ns):
+            QTimer.singleShot(
+                5_000,
+                lambda p=project_ns: self._flush_pending_done_notices(p),
+            )
         _log_event(
             "spawn",
             role=role_name,
@@ -1448,6 +1461,28 @@ class Orchestrator(QObject):
             )
         _log_event("send_cc_flushed", project=project_ns, count=len(items))
 
+    def _flush_pending_done_notices(self, project_ns: str) -> None:
+        """Deliver queued done notices to Lead if it is currently alive.
+
+        Called after Lead spawns. If Lead is not ready yet the queue is left
+        intact so the next flush attempt can retry. Pattern mirrors
+        _flush_pending_lead_cc."""
+        pending = self._pending_done_notices.get(project_ns)
+        if not pending:
+            return
+        lead = self._project_panes(project_ns).get(LEAD.name)
+        if not (lead and lead.session and lead.session.is_alive):
+            return
+        items = self._pending_done_notices.pop(project_ns)
+        for item in items:
+            payload = _paste_payload(item["body"])
+            lead.session.write(payload)
+            QTimer.singleShot(
+                _enter_delay_ms(payload),
+                lambda s=lead.session: s and s.write(b"\r"),
+            )
+        _log_event("done_notices_flushed", project=project_ns, count=len(items))
+
     def send(
         self,
         to_role: str,
@@ -1595,6 +1630,23 @@ class Orchestrator(QObject):
             lead.session.write(notice)
             QTimer.singleShot(150, lambda: lead.session and lead.session.write(b"\r"))
             self.leadInjected.emit(notice)
+        else:
+            # Lead is absent — queue notice so it isn't silently lost.
+            # Flushed when Lead next spawns via _flush_pending_done_notices.
+            self._pending_done_notices.setdefault(project_ns, []).append(
+                {"role": from_role, "note": note, "body": notice}
+            )
+            _log_event("done_notice_queued", project=project_ns, role=from_role)
+
+        # Fix A: when this done event belongs to a background tab, emit a
+        # cross-tab signal so main_window can flash the status bar even if
+        # the user is currently looking at a different project's tab.
+        try:
+            active_ns, _ = active_project()
+        except Exception:
+            active_ns = None
+        if active_ns and project_ns != active_ns:
+            self.crossTabDone.emit(project_ns, from_role, note)
 
         # mark pane done, auto-close after a delay so user can see it
         pane.set_state("done", note=note[:80] if note else "done")
