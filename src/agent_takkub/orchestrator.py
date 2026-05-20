@@ -538,6 +538,28 @@ def _render_lead_context(project: str | None = None) -> str | None:
 
 ละเมิดข้อใดข้อหนึ่ง → หยุดทันทีแล้ว delegate ผ่าน `takkub assign`
 """
+    # Append disabled-providers section (only if any are disabled — saves tokens
+    # when everything is enabled, which is the common case). Lead reads this on
+    # spawn and treats codex/gemini in the list as forbidden in proposals.
+    from .provider_state import all_disabled as _all_disabled
+
+    disabled = _all_disabled()
+    if disabled:
+        disabled_list = ", ".join(sorted(disabled))
+        suffix += f"""
+
+---
+
+## ⛔ Disabled providers (cockpit toggle)
+
+ขณะนี้ provider ต่อไปนี้ถูกปิดโดย user: **{disabled_list}**
+
+**ห้าม** propose role เหล่านี้ใน routing table หรือ cross-check
+**ห้าม** fire `takkub assign --role <disabled>` หรือ `takkub <disabled>`
+ถ้า user ขอตรงๆ → ตอบว่า provider นั้นถูกปิดอยู่ ให้ user enable ก่อน
+
+Status เปลี่ยนระหว่าง session: cockpit จะ inject `[system] <provider> ENABLED/DISABLED` message
+"""
     ensure_runtime()
     out = RUNTIME_DIR / "lead-context.md"
     out.write_text(base + suffix, encoding="utf-8")
