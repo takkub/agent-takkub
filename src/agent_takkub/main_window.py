@@ -376,6 +376,19 @@ class MainWindow(QMainWindow):
         self._btn_restart.setToolTip("Restart cockpit (kills all panes, relaunches app)")
         self._btn_restart.clicked.connect(self._on_restart_cockpit_clicked)
 
+        self._btn_resume = QPushButton("↻ Resume", self)
+        self._btn_resume.setToolTip(
+            "Send /resume to the Lead pane — opens claude's session picker\n"
+            "so you can hop back into a previous conversation."
+        )
+        self._btn_resume.setStyleSheet(
+            "QPushButton { color: #fde68a; background: #422006; "
+            "border: 1px solid #92400e; border-radius: 4px; "
+            "padding: 2px 8px; }"
+            "QPushButton:hover { background: #713f12; }"
+        )
+        self._btn_resume.clicked.connect(self._on_resume_clicked)
+
         self._btn_providers = QPushButton("🤖 Providers", self)
         self._btn_providers.setToolTip(
             "Configure which CLI (claude / codex / gemini) backs each teammate role.\n"
@@ -451,6 +464,7 @@ class MainWindow(QMainWindow):
         self._status.addPermanentWidget(self._chip_codex)
         self._status.addPermanentWidget(self._chip_gemini)
         self._status.addPermanentWidget(self._btn_logs)
+        self._status.addPermanentWidget(self._btn_resume)
         self._status.addPermanentWidget(self._btn_restart)
         self._status.addPermanentWidget(self._btn_providers)
         self._status.addPermanentWidget(self._btn_update)
@@ -1162,6 +1176,20 @@ class MainWindow(QMainWindow):
                 )
         except Exception:
             pass
+
+    def _on_resume_clicked(self) -> None:
+        """Send /resume to the active tab's Lead pane so claude opens its
+        session picker. No-op if Lead isn't ready yet — slash injection
+        helper drops silently in that case (max wait 45s)."""
+        active_project = None
+        try:
+            from .config import active_project as _active_project
+
+            name, _ = _active_project()
+            active_project = name
+        except Exception:
+            pass
+        self.orch.inject_slash_command_when_ready("lead", "/resume", project=active_project)
 
     def _on_restart_cockpit_clicked(self) -> None:
         """User-triggered full cockpit restart. Counts in-flight panes,
