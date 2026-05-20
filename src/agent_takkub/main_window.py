@@ -16,11 +16,14 @@ axis — Lead always on the left, teammates stacked vertically on the right.
 
 from __future__ import annotations
 
+import json
+from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtCore import QSettings, Qt, QTimer
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
+    QApplication,
     QColorDialog,
     QComboBox,
     QDockWidget,
@@ -28,6 +31,7 @@ from PyQt6.QtWidgets import (
     QInputDialog,
     QLabel,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QStatusBar,
     QStyle,
@@ -55,6 +59,46 @@ from .project_tab import ProjectTab
 from .roles import DEFAULT_TEAMMATES, LEAD, Role, by_name
 from .rtk_helper import install_rtk, is_rtk_installed, rtk_binary_available
 from .token_meter import format_tokens, usage_color
+
+
+def _handle_cli_bind_error(error_msg: str) -> None:
+    """Called when CliServer.listen() fails. Logs, shows a critical dialog,
+    then exits the application. The cockpit cannot function without the CLI
+    server — pane communication (takkub send/done/list) is fully broken.
+    """
+    # 1. Persist to events.log so post-mortem debugging can confirm the cause.
+    try:
+        EVENTS_LOG.parent.mkdir(parents=True, exist_ok=True)
+        entry = json.dumps(
+            {
+                "ts": datetime.now().isoformat(timespec="seconds"),
+                "event": "cli_bind_failed",
+                "error": error_msg,
+            },
+            ensure_ascii=False,
+        )
+        with open(EVENTS_LOG, "a", encoding="utf-8") as f:
+            f.write(entry + "\n")
+    except Exception:
+        pass
+
+    # 2. Show actionable dialog so the user knows exactly what happened.
+    QMessageBox.critical(
+        None,
+        "CLI server failed to start",
+        f"The cockpit's internal CLI server could not bind to a port:\n\n"
+        f"  {error_msg}\n\n"
+        "Most likely causes:\n"
+        "  • Another cockpit instance is already running\n"
+        "  • Antivirus or firewall is blocking loopback sockets\n"
+        "  • Windows socket layer issue (try restarting the machine)\n\n"
+        "To find what is holding the port:\n"
+        "  netstat -ano | findstr :LISTENING\n\n"
+        "The cockpit will now exit. Close any other cockpit windows and retry.",
+    )
+
+    # 3. Graceful exit — pane workflow is non-functional without the CLI.
+    QApplication.quit()
 
 
 class MainWindow(QMainWindow):
@@ -529,7 +573,8 @@ class MainWindow(QMainWindow):
             port = self.cli.listen()
             self._status.showMessage(f"cli port {port}, spawning Lead...")
         except Exception as e:
-            self._status.showMessage(f"⚠ cli server failed: {e}", 15_000)
+            _handle_cli_bind_error(str(e))
+            return  # QApplication.quit() is pending; don't proceed
 
         # Reflect orchestrator errors (eg. claude.exe not found) into the
         # status bar instead of swallowing them silently.

@@ -25,6 +25,7 @@ read by every subsequent claude spawn.
 from __future__ import annotations
 
 import json
+import pathlib
 import subprocess
 import threading
 
@@ -267,6 +268,84 @@ def shared_mcp_config_path() -> str | None:
     if set(servers.keys()) == {"pms"}:
         return str(SHARED_MCP_FILE) if shared_mcp_config_exists() else None
     return str(SHARED_MCP_FILE)
+
+
+_PMS_WRITE_TOOLS = {
+    "mcp__pms__pms_create_task",
+    "mcp__pms__pms_update_task",
+    "mcp__pms__pms_add_comment",
+}
+
+LEAD_MCP_FILE = RUNTIME_DIR / "lead-mcp.json"
+TEAMMATE_MCP_FILE = RUNTIME_DIR / "teammate-mcp.json"
+
+
+def _render_role_mcp_config(
+    dest: "pathlib.Path",
+    include_write_tools: bool,
+) -> "str | None":
+    """Build a role-specific MCP config file and return its path.
+
+    Reads the bearer token and URL from the existing shared-mcp.json so
+    this function is pure rendering — the caller doesn't need to supply
+    credentials.  Returns None when shared-mcp.json doesn't have a valid
+    token yet (i.e. ``shared_mcp_config_exists()`` is False).
+    """
+    if not shared_mcp_config_exists():
+        return None
+
+    try:
+        base = json.loads(SHARED_MCP_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    pms_entry = (base.get("mcpServers") or {}).get("pms", {})
+
+    # Build permissions list
+    all_allowed: list[str] = list(_PMS_MCP_TEMPLATE["permissions"]["allow"])
+    if not include_write_tools:
+        all_allowed = [t for t in all_allowed if t not in _PMS_WRITE_TOOLS]
+
+    config: dict = {
+        "mcpServers": {
+            "pms": {
+                "type": pms_entry.get("type", "http"),
+                "url": pms_entry.get("url", PMS_MCP_DEFAULT_URL),
+                "headers": dict(pms_entry.get("headers", {})),
+            },
+            **{name: json.loads(json.dumps(cfg)) for name, cfg in BROWSER_MCPS.items()},
+        },
+        "permissions": {"allow": all_allowed},
+    }
+
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(
+            json.dumps(config, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        return None
+
+    return str(dest)
+
+
+def render_lead_mcp_config() -> "str | None":
+    """Render runtime/lead-mcp.json with full pms access (read + write) + browser MCPs.
+
+    Returns the absolute path string, or None when pms isn't configured yet.
+    """
+    return _render_role_mcp_config(LEAD_MCP_FILE, include_write_tools=True)
+
+
+def render_teammate_mcp_config() -> "str | None":
+    """Render runtime/teammate-mcp.json with read-only pms access + browser MCPs.
+
+    Write tools (create_task, update_task, add_comment) are omitted so
+    teammates can't mutate the task board without Lead involvement.
+    Returns the absolute path string, or None when pms isn't configured yet.
+    """
+    return _render_role_mcp_config(TEAMMATE_MCP_FILE, include_write_tools=False)
 
 
 def ensure_browser_mcps() -> tuple[bool, str]:

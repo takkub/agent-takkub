@@ -206,6 +206,8 @@ vault สำหรับโปรเจคนี้คือ `C:\Users\monch\Web
 
 ## Auto-routing (propose-then-fire)
 
+> **Authoritative implementation:** `src/agent_takkub/routing_planner.py` encodes every rule in this section as testable Python (`classify()` → `RoutingAction`). If this prompt description and the code ever diverge, **the code wins** — it has unit tests; the prompt does not. Run `python -m pytest tests/test_routing_planner.py` to verify.
+
 Lead ต้องทำ **propose-then-fire** ทุกครั้งที่ user สั่งงาน — ห้าม auto-fire `takkub assign` โดยไม่ confirm ก่อน
 
 ### 1. Actionable detector

@@ -540,6 +540,40 @@ def _render_lead_context(project: str | None = None) -> str | None:
     return str(out)
 
 
+_LEAD_GUARD_WRITE_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
+
+
+def render_lead_settings(project: str) -> pathlib.Path:
+    """Generate runtime/lead-guard-<project>.json with permissions.deny rules
+    that block Lead from editing any path under the project's configured roots.
+
+    Also sets defaultMode=acceptEdits so Lead auto-accepts edits to cockpit
+    files without requiring --dangerously-skip-permissions.
+
+    Idempotent: regenerates the file on every call so path changes in
+    projects.json are picked up on the next Lead spawn.
+    """
+    roots = _allowed_project_roots(project)
+    deny_rules: list[str] = []
+    for root in roots:
+        # Use POSIX forward-slash path; Claude Code accepts both on Windows.
+        path_str = root.as_posix()
+        for tool in _LEAD_GUARD_WRITE_TOOLS:
+            deny_rules.append(f"{tool}({path_str}/**)")
+
+    settings: dict = {
+        "permissions": {
+            "deny": deny_rules,
+            "defaultMode": "acceptEdits",
+        }
+    }
+
+    ensure_runtime()
+    out = RUNTIME_DIR / f"lead-guard-{project}.json"
+    out.write_text(json.dumps(settings, indent=2, ensure_ascii=False), encoding="utf-8")
+    return out
+
+
 def _default_plugin_dirs() -> list[str]:
     """Resolve ~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/ for
     each plugin in `_SAFE_PLUGINS`, returning the directories that actually
@@ -623,6 +657,10 @@ class Orchestrator(QObject):
         # last-known cwd per role, used to decide whether to pass --continue
         # on a fresh spawn (must match the previous cwd for resume to be valid)
         self._recent_exits: dict[str, dict] = {}  # "{project}::{role}" -> {cwd, ts}
+        # Peer CC durability: messages queued when Lead is not alive.
+        # Keyed by project namespace; flushed to Lead on next Lead spawn.
+        self._pending_lead_cc: dict[str, list[dict]] = {}
+        self._load_pending_cc()
 
         # Idle watchdog bookkeeping. Per-role:
         #   first_idle_ts   — when the pane was first seen idle in this streak
@@ -943,12 +981,26 @@ class Orchestrator(QObject):
         # those plugins to claude *explicitly* via --plugin-dir (see below).
         # Override the whole policy with TAKKUB_SETTING_SOURCES env var.
         sources = os.environ.get("TAKKUB_SETTING_SOURCES", "project,local")
-        argv: list[str] = [
-            claude,
-            "--dangerously-skip-permissions",
-            "--setting-sources",
-            sources,
-        ]
+        # Lead runs WITHOUT --dangerously-skip-permissions so that
+        # permissions.deny rules in the guard settings file are respected.
+        # --permission-mode acceptEdits lets Lead auto-accept cockpit-file
+        # edits without prompts, while deny rules block project-path writes.
+        # Teammates still get the full bypass for uninterrupted specialist work.
+        if role_name == LEAD.name:
+            argv: list[str] = [
+                claude,
+                "--permission-mode",
+                "acceptEdits",
+                "--setting-sources",
+                sources,
+            ]
+        else:
+            argv: list[str] = [
+                claude,
+                "--dangerously-skip-permissions",
+                "--setting-sources",
+                sources,
+            ]
 
         # Teammate speed tier. Lead does orchestration (planning, multi-step
         # reasoning, coordinating teammates) and stays on the user's
@@ -987,6 +1039,14 @@ class Orchestrator(QObject):
         if role_md_file:
             argv.extend(["--append-system-prompt-file", role_md_file])
 
+        # Lead write-boundary enforcement: inject a per-project settings file
+        # containing permissions.deny rules for every project path × write tool.
+        # This works because Lead no longer runs with --dangerously-skip-permissions,
+        # so deny rules are evaluated before any edit is applied.
+        if role_name == LEAD.name:
+            lead_guard = render_lead_settings(project_ns)
+            argv.extend(["--settings", str(lead_guard)])
+
         # Inject the cockpit's shared MCP config (pms MCP server with
         # bearer token) so every spawned claude session has the pms
         # tools available, regardless of what the project's own
@@ -996,16 +1056,18 @@ class Orchestrator(QObject):
         # up the token yet (UI offers a "Setup pms MCP" prompt).
         try:
             from .shared_dev_tools import (
-                ensure_browser_mcps,
-                shared_mcp_config_path,
+                render_lead_mcp_config,
+                render_teammate_mcp_config,
             )
 
-            # Re-apply the browser-MCP merge on every spawn so a cockpit
-            # instance that booted before the feature shipped still gives
-            # newly-spawned panes the browser servers. Idempotent: if
-            # they're already in the file this is a no-op disk read.
-            ensure_browser_mcps()
-            mcp_cfg = shared_mcp_config_path()
+            # Lead gets full pms access (read + write tools); teammates
+            # get read-only pms tools. Both get browser MCPs.
+            # render_* returns None when pms isn't configured yet — panes
+            # still spawn, just without MCP tools.
+            if role_name == LEAD.name:
+                mcp_cfg = render_lead_mcp_config()
+            else:
+                mcp_cfg = render_teammate_mcp_config()
         except Exception:
             mcp_cfg = None
         if mcp_cfg:
@@ -1089,6 +1151,15 @@ class Orchestrator(QObject):
             # main_window listens for this to auto-bridge `/remote-control`
             # exclusively on resumes — fresh boots stay silent.
             self.paneResumed.emit(role_name, project_ns)
+        # Flush any CC messages queued while Lead was offline.
+        # Give the session a few seconds to reach the ready prompt before
+        # trying to write; if Lead isn't ready yet, _flush_pending_lead_cc
+        # is a no-op and we rely on the next send() or a future spawn to retry.
+        if role_name == LEAD.name and self._pending_lead_cc.get(project_ns):
+            QTimer.singleShot(
+                5_000,
+                lambda p=project_ns: self._flush_pending_lead_cc(p),
+            )
         _log_event(
             "spawn",
             role=role_name,
@@ -1286,6 +1357,60 @@ class Orchestrator(QObject):
 
         QTimer.singleShot(1_000, _check)
 
+    # ------------------------------------------------------------------
+    # Peer CC durability helpers
+    # ------------------------------------------------------------------
+
+    def _pending_cc_path(self, project_ns: str) -> pathlib.Path:
+        return RUNTIME_DIR / f"pending-lead-cc-{project_ns}.json"
+
+    def _save_pending_cc(self, project_ns: str) -> None:
+        """Persist current queue for project_ns so it survives orchestrator restart."""
+        try:
+            ensure_runtime()
+            self._pending_cc_path(project_ns).write_text(
+                json.dumps(self._pending_lead_cc.get(project_ns, []), ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+    def _load_pending_cc(self) -> None:
+        """Restore queued CC messages from disk on startup."""
+        try:
+            ensure_runtime()
+            for p in RUNTIME_DIR.glob("pending-lead-cc-*.json"):
+                proj = p.stem[len("pending-lead-cc-"):]
+                try:
+                    items = json.loads(p.read_text(encoding="utf-8"))
+                    if items:
+                        self._pending_lead_cc[proj] = items
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _flush_pending_lead_cc(self, project_ns: str) -> None:
+        """Deliver queued CC messages to Lead if it is currently alive.
+
+        Called after Lead spawns. If Lead is not ready yet, the queue is
+        left intact so the next explicit flush attempt (or next send()) can
+        try again. A separate QTimer in spawn() retries until Lead is alive.
+        """
+        pending = self._pending_lead_cc.get(project_ns)
+        if not pending:
+            return
+        lead = self._project_panes(project_ns).get(LEAD.name)
+        if not (lead and lead.session and lead.session.is_alive):
+            return  # Lead still not alive — keep queue, retry later
+        items = self._pending_lead_cc.pop(project_ns)
+        self._save_pending_cc(project_ns)
+        for item in items:
+            payload = _paste_payload(item["body"])
+            lead.session.write(payload)
+            lead.session.write(b"\r")
+        _log_event("send_cc_flushed", project=project_ns, count=len(items))
+
     def send(
         self,
         to_role: str,
@@ -1311,7 +1436,9 @@ class Orchestrator(QObject):
             lambda: pane.session and pane.session.write(b"\r"),
         )
 
-        # CC Lead unless source was Lead and target was a teammate, or vice versa
+        # CC Lead unless source was Lead and target was a teammate, or vice versa.
+        # If Lead is not alive, queue the CC so it isn't silently lost — the
+        # queue is flushed when Lead next spawns (see _flush_pending_lead_cc).
         if from_role and from_role not in (None, LEAD.name) and to_role != LEAD.name:
             lead = project_panes.get(LEAD.name)
             if lead and lead.session and lead.session.is_alive:
@@ -1321,6 +1448,13 @@ class Orchestrator(QObject):
                     _enter_delay_ms(cc_payload),
                     lambda: lead.session and lead.session.write(b"\r"),
                 )
+            else:
+                ts = datetime.now().isoformat(timespec="seconds")
+                self._pending_lead_cc.setdefault(project_ns, []).append(
+                    {"from_role": from_role, "to_role": to_role, "body": f"[CC] {body}", "ts": ts}
+                )
+                self._save_pending_cc(project_ns)
+                _log_event("send_cc_queued", project=project_ns, from_=from_role, to=to_role, msg_preview=body[:120])
 
         # Track teammate ↔ Lead conversation so the idle watchdog doesn't
         # fire its `[auto-reminder]` while a teammate is legitimately
@@ -1333,7 +1467,13 @@ class Orchestrator(QObject):
         elif from_norm == LEAD.name and to_role != LEAD.name:
             self._blocked_on_lead.pop(f"{project_ns}::{to_role}", None)
 
-        _log_event("send", to=to_role, from_=from_role, msg_preview=msg[:120])
+        _MAX_LOG_BODY = 4_096
+        _log_event(
+            "send",
+            to=to_role,
+            from_=from_role,
+            body=msg[:_MAX_LOG_BODY] + ("…" if len(msg) > _MAX_LOG_BODY else ""),
+        )
         return True, f"sent to {to_role}"
 
     def close(self, role_name: str, project: str | None = None) -> tuple[bool, str]:
