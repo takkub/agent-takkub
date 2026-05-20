@@ -94,9 +94,7 @@ class TestLoadProviders:
     def test_accepts_gemini_provider(self, redirect_config_path: Path) -> None:
         # gemini joins claude/codex as a recognised provider — must
         # survive the sanitizer instead of being dropped.
-        redirect_config_path.write_text(
-            '{"backend": "gemini", "qa": "codex"}', encoding="utf-8"
-        )
+        redirect_config_path.write_text('{"backend": "gemini", "qa": "codex"}', encoding="utf-8")
         loaded = provider_config.load_providers()
         assert loaded == {"backend": "gemini", "qa": "codex"}
 

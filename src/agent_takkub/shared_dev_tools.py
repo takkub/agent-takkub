@@ -281,9 +281,9 @@ TEAMMATE_MCP_FILE = RUNTIME_DIR / "teammate-mcp.json"
 
 
 def _render_role_mcp_config(
-    dest: "pathlib.Path",
+    dest: pathlib.Path,
     include_write_tools: bool,
-) -> "str | None":
+) -> str | None:
     """Build a role-specific MCP config file and return its path.
 
     Reads the bearer token and URL from the existing shared-mcp.json so
@@ -330,7 +330,7 @@ def _render_role_mcp_config(
     return str(dest)
 
 
-def render_lead_mcp_config() -> "str | None":
+def render_lead_mcp_config() -> str | None:
     """Render runtime/lead-mcp.json with full pms access (read + write) + browser MCPs.
 
     Returns the absolute path string, or None when pms isn't configured yet.
@@ -338,7 +338,7 @@ def render_lead_mcp_config() -> "str | None":
     return _render_role_mcp_config(LEAD_MCP_FILE, include_write_tools=True)
 
 
-def render_teammate_mcp_config() -> "str | None":
+def render_teammate_mcp_config() -> str | None:
     """Render runtime/teammate-mcp.json with read-only pms access + browser MCPs.
 
     Write tools (create_task, update_task, add_comment) are omitted so

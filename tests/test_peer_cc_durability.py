@@ -13,15 +13,13 @@ Covers:
 from __future__ import annotations
 
 import json
-import pathlib
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from PyQt6.QtCore import QCoreApplication
 
 from agent_takkub import orchestrator as orch_mod
-from agent_takkub.orchestrator import Orchestrator, LEAD
-
+from agent_takkub.orchestrator import LEAD, Orchestrator
 
 # ─────────────────────────────────────────────────────────────
 # Shared fixtures
@@ -65,11 +63,16 @@ def orch(qapp, tmp_path, monkeypatch) -> Orchestrator:
     with (
         patch.object(Orchestrator, "_start_hot_md_timer", lambda self: None, create=True),
         patch("agent_takkub.orchestrator.Orchestrator._load_pending_cc", lambda self: None),
-        patch("agent_takkub.orchestrator.Orchestrator._start_browser_mcps", lambda self: None, create=True),
+        patch(
+            "agent_takkub.orchestrator.Orchestrator._start_browser_mcps",
+            lambda self: None,
+            create=True,
+        ),
     ):
         o = Orchestrator.__new__(Orchestrator)
         # manual minimal __init__ to avoid Qt widget creation
         from PyQt6.QtCore import QObject
+
         QObject.__init__(o)
         o._panes_by_project = {}
         o._recent_exits = {}
@@ -108,7 +111,7 @@ class TestCCDeliveredImmediately:
         backend_session = _make_alive_session()
         _register_pane(orch, "backend", proj, backend_session)
 
-        ok, msg = orch.send("backend", "API ready", from_role="frontend", project=proj)
+        ok, _msg = orch.send("backend", "API ready", from_role="frontend", project=proj)
 
         assert ok
         # Lead session must have received something
@@ -225,7 +228,9 @@ class TestCCQueuedWhenLeadDown:
 
         orch.send("backend", "hello", from_role="frontend", project=proj)
 
-        events = [json.loads(l) for l in log_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+        events = [
+            json.loads(ln) for ln in log_path.read_text(encoding="utf-8").splitlines() if ln.strip()
+        ]
         cc_events = [e for e in events if e["event"] == "send_cc_queued"]
         assert len(cc_events) == 1
         assert cc_events[0]["project"] == proj
@@ -248,8 +253,18 @@ class TestFlushPendingCC:
         _register_pane(orch, LEAD.name, proj, lead_session)
 
         orch._pending_lead_cc[proj] = [
-            {"from_role": "frontend", "to_role": "backend", "body": "[CC] msg1", "ts": "2026-01-01T00:00:00"},
-            {"from_role": "qa", "to_role": "backend", "body": "[CC] msg2", "ts": "2026-01-01T00:00:01"},
+            {
+                "from_role": "frontend",
+                "to_role": "backend",
+                "body": "[CC] msg1",
+                "ts": "2026-01-01T00:00:00",
+            },
+            {
+                "from_role": "qa",
+                "to_role": "backend",
+                "body": "[CC] msg2",
+                "ts": "2026-01-01T00:00:01",
+            },
         ]
 
         save_calls = []
@@ -350,10 +365,10 @@ class TestPersistRoundtrip:
         monkeypatch.setattr(orch_mod, "ensure_runtime", lambda: None)
 
         proj = "myproject"
-        items = [{"from_role": "qa", "to_role": "backend", "body": "[CC] saved", "ts": "2026-01-01"}]
-        (tmp_path / f"pending-lead-cc-{proj}.json").write_text(
-            json.dumps(items), encoding="utf-8"
-        )
+        items = [
+            {"from_role": "qa", "to_role": "backend", "body": "[CC] saved", "ts": "2026-01-01"}
+        ]
+        (tmp_path / f"pending-lead-cc-{proj}.json").write_text(json.dumps(items), encoding="utf-8")
 
         orch._pending_lead_cc.clear()
         orch._load_pending_cc()
@@ -407,7 +422,12 @@ class TestMultiProjectIsolation:
         for proj in ("proj_a", "proj_b"):
             _register_pane(orch, LEAD.name, proj, _make_alive_session())
             orch._pending_lead_cc[proj] = [
-                {"from_role": "qa", "to_role": "backend", "body": f"[CC] {proj}", "ts": "2026-01-01"}
+                {
+                    "from_role": "qa",
+                    "to_role": "backend",
+                    "body": f"[CC] {proj}",
+                    "ts": "2026-01-01",
+                }
             ]
 
         orch._flush_pending_lead_cc("proj_a")
@@ -437,7 +457,9 @@ class TestSendEventLogsFullBody:
 
         orch.send("backend", "hello world", from_role="frontend", project=proj)
 
-        events = [json.loads(l) for l in log_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+        events = [
+            json.loads(ln) for ln in log_path.read_text(encoding="utf-8").splitlines() if ln.strip()
+        ]
         send_events = [e for e in events if e["event"] == "send"]
         assert send_events, "Expected a 'send' event"
         ev = send_events[0]
@@ -459,7 +481,9 @@ class TestSendEventLogsFullBody:
         long_msg = "x" * 10_000
         orch.send("backend", long_msg, from_role=LEAD.name, project=proj)
 
-        events = [json.loads(l) for l in log_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+        events = [
+            json.loads(ln) for ln in log_path.read_text(encoding="utf-8").splitlines() if ln.strip()
+        ]
         send_events = [e for e in events if e["event"] == "send"]
         ev = send_events[0]
         assert len(ev["body"]) <= 4_200  # 4096 chars + ellipsis

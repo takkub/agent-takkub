@@ -13,8 +13,7 @@ required. Qt-less because the function only calls Qt symbols we monkeypatch.
 from __future__ import annotations
 
 import json
-from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -54,13 +53,13 @@ class TestHandleCliBindError:
     def test_logs_cli_bind_failed_event(self, log_file, mock_msgbox, mock_qapp):
         mw_mod._handle_cli_bind_error("QTcpServer: bind: Address already in use")
         assert log_file.is_file(), "events.log was not created"
-        events = [json.loads(l) for l in log_file.read_text(encoding="utf-8").splitlines() if l]
+        events = [json.loads(ln) for ln in log_file.read_text(encoding="utf-8").splitlines() if ln]
         assert any(e["event"] == "cli_bind_failed" for e in events)
 
     def test_log_contains_error_message(self, log_file, mock_msgbox, mock_qapp):
         err = "QTcpServer: bind: WinError 10048"
         mw_mod._handle_cli_bind_error(err)
-        events = [json.loads(l) for l in log_file.read_text(encoding="utf-8").splitlines() if l]
+        events = [json.loads(ln) for ln in log_file.read_text(encoding="utf-8").splitlines() if ln]
         ev = next(e for e in events if e["event"] == "cli_bind_failed")
         assert err in ev.get("error", "")
 
@@ -169,9 +168,7 @@ class TestBootCallsHandlerOnFailure:
         assert mock_msgbox.critical.called
         assert mock_qapp.quit.called
 
-    def test_boot_no_dialog_on_success(
-        self, log_file, mock_msgbox, mock_qapp, monkeypatch
-    ):
+    def test_boot_no_dialog_on_success(self, log_file, mock_msgbox, mock_qapp, monkeypatch):
         win = self._make_window_stub(monkeypatch, log_file, mock_msgbox, mock_qapp)
         win.cli.listen.return_value = 54321
         win._boot()

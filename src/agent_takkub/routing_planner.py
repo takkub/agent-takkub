@@ -13,9 +13,8 @@ classify(user_message, context=None) -> RoutingAction
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
-
 
 # ─────────────────────────────────────────────────────────────────────
 # Public types
@@ -23,22 +22,22 @@ from enum import Enum
 
 
 class ActionKind(Enum):
-    PROPOSE = "propose"           # show plan table, wait for user confirm
-    FIRE_ASSIGN = "fire_assign"   # execute takkub assign immediately
-    FIRE_ONESHOT = "fire_oneshot" # execute takkub codex/gemini (no pane spawn)
-    ASK_CLARIFY = "ask_clarify"   # ambiguous — need more info before acting
-    INFORMATIONAL = "info"        # pure question/explanation, just respond
+    PROPOSE = "propose"  # show plan table, wait for user confirm
+    FIRE_ASSIGN = "fire_assign"  # execute takkub assign immediately
+    FIRE_ONESHOT = "fire_oneshot"  # execute takkub codex/gemini (no pane spawn)
+    ASK_CLARIFY = "ask_clarify"  # ambiguous — need more info before acting
+    INFORMATIONAL = "info"  # pure question/explanation, just respond
 
 
 @dataclass
 class RoutingAction:
     kind: ActionKind
-    role: str | None = None               # primary role (single-role proposal)
-    roles: list[str] | None = None        # multi-role parallel proposal
-    task_hint: str | None = None          # key fragment from user message
+    role: str | None = None  # primary role (single-role proposal)
+    roles: list[str] | None = None  # multi-role parallel proposal
+    task_hint: str | None = None  # key fragment from user message
     cross_check: list[str] | None = None  # extra roles to auto-fire (codex/gemini)
-    reason: str = ""                      # human-readable explanation
-    mixed: bool = False                   # has both informational + actionable intent
+    reason: str = ""  # human-readable explanation
+    mixed: bool = False  # has both informational + actionable intent
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -125,9 +124,7 @@ _ROUTE_TABLE: list[tuple[re.Pattern, str | None, list[str] | None]] = [
     ),
     # Mobile
     (
-        re.compile(
-            r"\b(mobile|iOS|Android|Capacitor|React.Native|expo)\b", re.IGNORECASE
-        ),
+        re.compile(r"\b(mobile|iOS|Android|Capacitor|React.Native|expo)\b", re.IGNORECASE),
         "mobile",
         None,
     ),
@@ -190,9 +187,7 @@ def _is_actionable(msg: str) -> bool:
 
 def _is_informational(msg: str) -> bool:
     return bool(
-        _INFORMATIONAL_EN.search(msg)
-        or _INFORMATIONAL_TH.search(msg)
-        or msg.strip().endswith("?")
+        _INFORMATIONAL_EN.search(msg) or _INFORMATIONAL_TH.search(msg) or msg.strip().endswith("?")
     )
 
 
@@ -219,7 +214,9 @@ def _handle_confirm(msg: str) -> RoutingAction | None:
         return RoutingAction(kind=ActionKind.FIRE_ASSIGN, reason="user confirmed proposal")
     # Ambiguous partial confirm
     if _AMBIGUOUS_CONFIRM.search(s):
-        return RoutingAction(kind=ActionKind.ASK_CLARIFY, reason="ambiguous — clarify before firing")
+        return RoutingAction(
+            kind=ActionKind.ASK_CLARIFY, reason="ambiguous — clarify before firing"
+        )
     # Edit-only (re-propose needed)
     if _EDIT_SIGNAL.search(s):
         return RoutingAction(kind=ActionKind.ASK_CLARIFY, reason="edit requested — re-propose")

@@ -38,8 +38,8 @@ _READ_TOOLS = {
 @pytest.fixture()
 def mcp_env(tmp_path, monkeypatch):
     """Point RUNTIME_DIR to tmp_path and write a valid shared-mcp.json."""
-    import agent_takkub.shared_dev_tools as sdt
     import agent_takkub.config as cfg
+    import agent_takkub.shared_dev_tools as sdt
 
     monkeypatch.setattr(cfg, "RUNTIME_DIR", tmp_path)
     monkeypatch.setattr(sdt, "SHARED_MCP_FILE", tmp_path / "shared-mcp.json")
@@ -95,8 +95,8 @@ class TestRenderLeadMcpConfig:
 
     def test_returns_none_when_no_pms_configured(self, tmp_path, monkeypatch):
         """When shared-mcp.json doesn't exist, return None (can't render without token)."""
-        import agent_takkub.shared_dev_tools as sdt
         import agent_takkub.config as cfg
+        import agent_takkub.shared_dev_tools as sdt
 
         monkeypatch.setattr(cfg, "RUNTIME_DIR", tmp_path)
         monkeypatch.setattr(sdt, "SHARED_MCP_FILE", tmp_path / "shared-mcp.json")
@@ -159,8 +159,8 @@ class TestRenderTeammateMcpConfig:
         assert "test-token-abc123" in auth
 
     def test_returns_none_when_no_pms_configured(self, tmp_path, monkeypatch):
-        import agent_takkub.shared_dev_tools as sdt
         import agent_takkub.config as cfg
+        import agent_takkub.shared_dev_tools as sdt
 
         monkeypatch.setattr(cfg, "RUNTIME_DIR", tmp_path)
         monkeypatch.setattr(sdt, "SHARED_MCP_FILE", tmp_path / "shared-mcp.json")

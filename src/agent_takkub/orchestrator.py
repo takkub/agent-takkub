@@ -464,10 +464,7 @@ def _cwd_within_project(cwd: str, project: str) -> bool:
     target = pathlib.Path(cwd).resolve()
     if target == REPO_ROOT.resolve() or REPO_ROOT.resolve() in target.parents:
         return True
-    return any(
-        target == root or root in target.parents
-        for root in _allowed_project_roots(project)
-    )
+    return any(target == root or root in target.parents for root in _allowed_project_roots(project))
 
 
 def _exit_key(project: str, role: str) -> str:
@@ -1380,7 +1377,7 @@ class Orchestrator(QObject):
         try:
             ensure_runtime()
             for p in RUNTIME_DIR.glob("pending-lead-cc-*.json"):
-                proj = p.stem[len("pending-lead-cc-"):]
+                proj = p.stem[len("pending-lead-cc-") :]
                 try:
                     items = json.loads(p.read_text(encoding="utf-8"))
                     if items:
@@ -1454,7 +1451,13 @@ class Orchestrator(QObject):
                     {"from_role": from_role, "to_role": to_role, "body": f"[CC] {body}", "ts": ts}
                 )
                 self._save_pending_cc(project_ns)
-                _log_event("send_cc_queued", project=project_ns, from_=from_role, to=to_role, msg_preview=body[:120])
+                _log_event(
+                    "send_cc_queued",
+                    project=project_ns,
+                    from_=from_role,
+                    to=to_role,
+                    msg_preview=body[:120],
+                )
 
         # Track teammate ↔ Lead conversation so the idle watchdog doesn't
         # fire its `[auto-reminder]` while a teammate is legitimately

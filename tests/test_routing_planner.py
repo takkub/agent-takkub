@@ -11,14 +11,12 @@ Coverage:
 
 from __future__ import annotations
 
-import pytest
-
 from agent_takkub.routing_planner import ActionKind, RoutingAction, classify
-
 
 # ─────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────
+
 
 def _propose(msg, **kw) -> RoutingAction:
     return classify(msg, **kw)
@@ -31,6 +29,7 @@ def _fire(msg, **kw) -> RoutingAction:
 # ─────────────────────────────────────────────────────────────────────
 # Actionable detector
 # ─────────────────────────────────────────────────────────────────────
+
 
 class TestActionableDetector:
     def test_actionable_thai_add(self):
@@ -92,6 +91,7 @@ class TestActionableDetector:
 # Informational detector
 # ─────────────────────────────────────────────────────────────────────
 
+
 class TestInformationalDetector:
     def test_thai_how_does_it_work(self):
         result = classify("X ทำงานยังไง?")
@@ -130,6 +130,7 @@ class TestInformationalDetector:
 # Mixed messages
 # ─────────────────────────────────────────────────────────────────────
 
+
 class TestMixedMessages:
     def test_explain_then_fix(self):
         """'X ทำงานยังไง แล้วช่วย fix หน่อย' → PROPOSE with mixed=True."""
@@ -146,6 +147,7 @@ class TestMixedMessages:
 # ─────────────────────────────────────────────────────────────────────
 # Auto-fire exceptions: explicit role
 # ─────────────────────────────────────────────────────────────────────
+
 
 class TestExplicitRole:
     def test_explicit_backend(self):
@@ -178,6 +180,7 @@ class TestExplicitRole:
 # Auto-fire exceptions: one-shot codex/gemini
 # ─────────────────────────────────────────────────────────────────────
 
+
 class TestOneShot:
     def test_ask_codex(self):
         result = classify("ถาม codex ว่า edge cases ของ JWT blacklist คืออะไร")
@@ -203,6 +206,7 @@ class TestOneShot:
 # ─────────────────────────────────────────────────────────────────────
 # Routing decision table
 # ─────────────────────────────────────────────────────────────────────
+
 
 class TestRoutingTable:
     def test_frontend_ui_keyword(self):

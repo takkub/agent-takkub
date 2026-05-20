@@ -14,14 +14,14 @@ from __future__ import annotations
 
 import json
 import pathlib
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 from PyQt6.QtCore import QCoreApplication
 
-from agent_takkub import config, orchestrator as orch_mod
+from agent_takkub import config
+from agent_takkub import orchestrator as orch_mod
 from agent_takkub.orchestrator import Orchestrator
-
 
 # ─────────────────────────────────────────────────────────────
 # Shared fixtures
@@ -87,15 +87,11 @@ class TestAllowedProjectRoots:
         assert expected_api in roots
         assert expected_web in roots
 
-    def test_returns_empty_list_for_unknown_project(
-        self, two_project_json: pathlib.Path
-    ) -> None:
+    def test_returns_empty_list_for_unknown_project(self, two_project_json: pathlib.Path) -> None:
         roots = orch_mod._allowed_project_roots("nonexistent")
         assert roots == []
 
-    def test_returns_empty_list_for_default_project(
-        self, two_project_json: pathlib.Path
-    ) -> None:
+    def test_returns_empty_list_for_default_project(self, two_project_json: pathlib.Path) -> None:
         roots = orch_mod._allowed_project_roots("default")
         assert roots == []
 
@@ -236,9 +232,7 @@ class TestAutoTrustProjectNamespace:
 
         # Calling with project="proj_a" → pane found → timer started
         orch._auto_trust("backend", project="proj_a")
-        assert timer_calls, (
-            "_auto_trust with correct project should start the trust-modal timer"
-        )
+        assert timer_calls, "_auto_trust with correct project should start the trust-modal timer"
 
     def test_auto_trust_returns_early_when_pane_not_in_project(
         self,
@@ -266,9 +260,7 @@ class TestAutoTrustProjectNamespace:
 
         # Calling with no project → falls to active (proj_b) → pane None → early return
         orch._auto_trust("backend")
-        assert not timer_calls, (
-            "_auto_trust with no matching pane should NOT start any timer"
-        )
+        assert not timer_calls, "_auto_trust with no matching pane should NOT start any timer"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -277,9 +269,7 @@ class TestAutoTrustProjectNamespace:
 
 
 class TestRenderLeadContext:
-    def _setup_cockpit(
-        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def _setup_cockpit(self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
         cockpit = tmp_path / "cockpit"
         cockpit.mkdir(parents=True, exist_ok=True)
         (cockpit / "CLAUDE.md").write_text("# Lead Guide\n", encoding="utf-8")
@@ -405,9 +395,7 @@ class TestRecentExitsProjectScoping:
         fake = _Fake()
         Orchestrator.restore_teammates(fake)  # type: ignore[arg-type]
 
-        assert "proj_a::backend" in fake._recent_exits, (
-            "restore must stamp project-scoped key"
-        )
+        assert "proj_a::backend" in fake._recent_exits, "restore must stamp project-scoped key"
         assert "proj_b::backend" in fake._recent_exits
         # bare key must not exist
         assert "backend" not in fake._recent_exits

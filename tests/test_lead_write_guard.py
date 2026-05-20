@@ -17,13 +17,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 from PyQt6.QtCore import QCoreApplication
 
-from agent_takkub import config, orchestrator as orch_mod
+from agent_takkub import config
+from agent_takkub import orchestrator as orch_mod
 from agent_takkub.orchestrator import (
     _LEAD_GUARD_WRITE_TOOLS,
     Orchestrator,
     render_lead_settings,
 )
-
 
 # ─────────────────────────────────────────────────────────────
 # Fixtures
@@ -58,9 +58,7 @@ def two_project_json(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) ->
                             "api": str(tmp_path / "proj_b" / "api"),
                         }
                     },
-                    "empty_proj": {
-                        "paths": {}
-                    },
+                    "empty_proj": {"paths": {}},
                 },
             }
         ),
@@ -117,12 +115,8 @@ class TestRenderLeadSettings:
         web_path = (tmp_path / "proj_a" / "web").resolve().as_posix()
 
         for tool in _LEAD_GUARD_WRITE_TOOLS:
-            assert f"{tool}({api_path}/**)" in deny, (
-                f"{tool} deny rule for api path missing"
-            )
-            assert f"{tool}({web_path}/**)" in deny, (
-                f"{tool} deny rule for web path missing"
-            )
+            assert f"{tool}({api_path}/**)" in deny, f"{tool} deny rule for api path missing"
+            assert f"{tool}({web_path}/**)" in deny, f"{tool} deny rule for web path missing"
 
     def test_deny_rules_do_not_contain_other_project_paths(
         self, two_project_json: pathlib.Path, tmp_path: pathlib.Path
@@ -133,9 +127,7 @@ class TestRenderLeadSettings:
         deny_str = json.dumps(deny)
 
         proj_b_api = (tmp_path / "proj_b" / "api").resolve().as_posix()
-        assert proj_b_api not in deny_str, (
-            "proj_b path must NOT appear in proj_a Lead guard"
-        )
+        assert proj_b_api not in deny_str, "proj_b path must NOT appear in proj_a Lead guard"
 
     def test_has_default_mode_accept_edits(
         self, two_project_json: pathlib.Path, tmp_path: pathlib.Path
@@ -182,7 +174,10 @@ class TestRenderLeadSettingsIdempotency:
         assert content_first == content_second
 
     def test_file_reflects_path_changes_on_regenerate(
-        self, two_project_json: pathlib.Path, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+        self,
+        two_project_json: pathlib.Path,
+        tmp_path: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """If projects.json paths change, render_lead_settings picks them up."""
         render_lead_settings("proj_a")
@@ -266,7 +261,7 @@ def _capture_spawn_argv(
 
     captured: list[list[str]] = []
 
-    def fake_pty_spawn(self_pty, argv, cwd, env):  # noqa: ANN001
+    def fake_pty_spawn(self_pty, argv, cwd, env):
         captured.append(list(argv))
 
     monkeypatch.setattr(orch_mod, "find_claude_executable", lambda: "claude")
@@ -275,7 +270,7 @@ def _capture_spawn_argv(
     monkeypatch.setattr(orch_mod, "ensure_browser_mcps", lambda: (True, ""), raising=False)
 
     try:
-        import agent_takkub.shared_dev_tools as sdt  # noqa: PLC0415
+        import agent_takkub.shared_dev_tools as sdt
 
         monkeypatch.setattr(sdt, "ensure_browser_mcps", lambda: (True, ""))
         monkeypatch.setattr(sdt, "shared_mcp_config_path", lambda: None)
@@ -309,7 +304,9 @@ def _capture_spawn_argv(
     fake_session.processExited.connect = MagicMock()
 
     with patch.object(orch_mod.PtySession, "__new__", return_value=fake_session):
-        with patch.object(fake_session, "spawn", side_effect=lambda argv, cwd, env: captured.append(list(argv))):
+        with patch.object(
+            fake_session, "spawn", side_effect=lambda argv, cwd, env: captured.append(list(argv))
+        ):
             # patch shared_dev_tools inside the spawn import
             with patch.dict(
                 "sys.modules",
@@ -380,10 +377,6 @@ class TestSpawnArgvLeadVsTeammate:
     ) -> None:
         argv = _capture_spawn_argv(qapp, two_project_json, tmp_path, monkeypatch, "backend")
         # No --settings pointing to lead-guard file
-        settings_values = [
-            argv[i + 1] for i, v in enumerate(argv) if v == "--settings"
-        ]
+        settings_values = [argv[i + 1] for i, v in enumerate(argv) if v == "--settings"]
         for sv in settings_values:
-            assert "lead-guard" not in sv, (
-                "teammate must not receive lead write-guard settings"
-            )
+            assert "lead-guard" not in sv, "teammate must not receive lead write-guard settings"

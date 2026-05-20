@@ -119,8 +119,9 @@ class TestArgparse:
         # routes the prompt + flags through correctly.
         seen: dict[str, object] = {}
 
-        def fake_gemini_exec(prompt: str, *, cwd: str | None = None,
-                             timeout: float = 120.0, model: str | None = None):
+        def fake_gemini_exec(
+            prompt: str, *, cwd: str | None = None, timeout: float = 120.0, model: str | None = None
+        ):
             seen["prompt"] = prompt
             seen["cwd"] = cwd
             seen["timeout"] = timeout
@@ -128,6 +129,7 @@ class TestArgparse:
             return True, "gemini answered"
 
         from agent_takkub import gemini_helper
+
         monkeypatch.setattr(gemini_helper, "gemini_exec", fake_gemini_exec)
         rc = cli.main(["gemini", "review this approach"])
         assert rc == 0
@@ -137,27 +139,32 @@ class TestArgparse:
         out = capsys.readouterr().out
         assert "gemini answered" in out
 
-    def test_gemini_forwards_cwd_and_model(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_gemini_forwards_cwd_and_model(self, monkeypatch: pytest.MonkeyPatch) -> None:
         seen: dict[str, object] = {}
 
-        def fake_gemini_exec(prompt: str, *, cwd: str | None = None,
-                             timeout: float = 120.0, model: str | None = None):
+        def fake_gemini_exec(
+            prompt: str, *, cwd: str | None = None, timeout: float = 120.0, model: str | None = None
+        ):
             seen["cwd"] = cwd
             seen["model"] = model
             seen["timeout"] = timeout
             return True, ""
 
         from agent_takkub import gemini_helper
+
         monkeypatch.setattr(gemini_helper, "gemini_exec", fake_gemini_exec)
-        cli.main([
-            "gemini",
-            "--cwd", "C:/x/proj",
-            "--model", "gemini-2.5-pro",
-            "--timeout", "30",
-            "do thing",
-        ])
+        cli.main(
+            [
+                "gemini",
+                "--cwd",
+                "C:/x/proj",
+                "--model",
+                "gemini-2.5-pro",
+                "--timeout",
+                "30",
+                "do thing",
+            ]
+        )
         assert seen["cwd"] == "C:/x/proj"
         assert seen["model"] == "gemini-2.5-pro"
         assert seen["timeout"] == 30.0
@@ -303,8 +310,10 @@ class TestRoleGate:
         # pane can fire it for a second opinion mid-task.
         monkeypatch.setenv("TAKKUB_ROLE", "backend")
         from agent_takkub import gemini_helper
+
         monkeypatch.setattr(
-            gemini_helper, "gemini_exec",
+            gemini_helper,
+            "gemini_exec",
             lambda *_a, **_kw: (True, "answer"),
         )
         rc = cli.main(["gemini", "ping"])
