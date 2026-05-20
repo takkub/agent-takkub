@@ -24,6 +24,7 @@ Wiring:
 
 from __future__ import annotations
 
+import codecs
 import json
 from pathlib import Path
 
@@ -85,6 +86,11 @@ class TerminalWidget(QWidget):
         self._channel.registerObject("bridge", self._bridge)
         self._view.page().setWebChannel(self._channel)
 
+        # Stateful UTF-8 decoder: buffers partial multi-byte sequences across
+        # PTY read chunks so Thai/CJK chars split at chunk boundaries are not
+        # corrupted into replacement chars (U+FFFD).
+        self._utf8_decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+
         # buffer bytes until xterm.js says it's ready, then flush in order
         self._pending_writes: list[str] = []
         self._page_ready = False
@@ -124,7 +130,7 @@ class TerminalWidget(QWidget):
     def write_bytes(self, data: bytes | str) -> None:
         """Forward PTY output to xterm.js (batched per event-loop tick)."""
         if isinstance(data, bytes):
-            text = data.decode("utf-8", "replace")
+            text = self._utf8_decoder.decode(data)
         else:
             text = data
         if not text:
@@ -160,6 +166,7 @@ class TerminalWidget(QWidget):
         """
         self._pending_writes.clear()
         self._write_buf.clear()
+        self._utf8_decoder.reset()
         if self._flush_timer.isActive():
             self._flush_timer.stop()
         if self._page_ready:
