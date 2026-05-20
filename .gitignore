@@ -11,6 +11,11 @@ dist/
 projects.json
 runtime/
 *.log
+
+# Claude Code per-user local settings (permission allows, MCP overrides
+# vary per developer machine).
+.claude/settings.local.json
+
 # Cockpit-managed Codex cheatsheet — auto-planted at codex pane
 # spawn time, marker-tagged, never user-authored. Safe to ignore.
 AGENTS.md
