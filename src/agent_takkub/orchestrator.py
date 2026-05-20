@@ -663,6 +663,9 @@ class Orchestrator(QObject):
 
     statusChanged = pyqtSignal()
     leadInjected = pyqtSignal(str)
+    # Emitted when user toggles a provider on/off via status bar. main_window
+    # listens to refresh chip color/label without polling.
+    providerStateChanged = pyqtSignal(str, bool)  # (provider, disabled)
     # Emitted at the tail of a successful spawn that picked up `--continue`
     # (i.e. the role's previous session exited within RESUME_WINDOW_SEC).
     # main_window uses this to fire `/remote-control` only on resumes, so a
@@ -1623,6 +1626,52 @@ class Orchestrator(QObject):
         self.statusChanged.emit()
         _log_event("close", role=role_name, force=force, reason=reason)
         return True, f"{role_name} closed"
+
+    def toggle_provider(self, provider: str, disabled: bool) -> tuple[bool, str]:
+        """Flip codex or gemini between enabled/disabled globally across all tabs.
+
+        Persists to ~/.takkub/disabled-providers.json then broadcasts a
+        `[system] <provider> ENABLED/DISABLED ...` message into every Lead
+        pane in every project so live sessions notice the change without
+        having to poll the file.
+
+        Returns (ok, message). Currently only fails on unknown provider.
+        """
+        from .provider_state import TOGGLABLE, set_disabled
+
+        provider = provider.lower().strip()
+        if provider not in TOGGLABLE:
+            return False, f"unknown provider: {provider!r}"
+
+        set_disabled(provider, disabled)
+
+        word = "DISABLED" if disabled else "ENABLED"
+        suffix = (
+            "Do not propose this in routing or cross-check."
+            if disabled
+            else "Available again."
+        )
+        notice = f"[system] {provider} provider {word}. {suffix}"
+
+        # Broadcast to every Lead pane across all project tabs. Iterate
+        # _panes_by_project directly because we want every Lead, not just
+        # the active project's Lead.
+        for project_ns, panes in self._panes_by_project.items():
+            lead = panes.get(LEAD.name)
+            if lead and lead.session and lead.session.is_alive:
+                lead.session.write(notice)
+                # Same trailing-CR delay as done() so the inject lands
+                # after the inline text not before it.
+                QTimer.singleShot(150, lambda l=lead: l.session and l.session.write(b"\r"))
+                self.leadInjected.emit(notice)
+            # If Lead isn't alive in this project, the next spawn's
+            # _render_lead_context() will read the fresh state — no need
+            # to queue per-message for this case (unlike done notices,
+            # which carry per-event info that mustn't be lost).
+
+        self.providerStateChanged.emit(provider, disabled)
+        _log_event("provider_toggled", provider=provider, disabled=disabled)
+        return True, f"{provider} {word.lower()}"
 
     def done(self, from_role: str, note: str = "", project: str | None = None) -> tuple[bool, str]:
         try:
