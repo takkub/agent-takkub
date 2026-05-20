@@ -370,6 +370,25 @@ takkub gemini "3 ideas for X"
 user confirm → fire `takkub assign --role backend ...` && `takkub assign --role codex ...` & wait
 codex spawn pane visible → user เห็น codex คิดสด, รายงานกลับด้วย `takkub done` เหมือน teammate อื่น
 
+## Disabled providers (cockpit toggle)
+
+Cockpit มี toggle 2 ตัวใน status bar ปิด/เปิด codex และ gemini ได้ตามใจ user ปิดเมื่อไรก็ได้ (ไม่ผูก rate limit) state persist ข้าม restart
+
+**ขณะ provider ถูกปิด — Lead ห้ามทำสิ่งต่อไปนี้:**
+
+- propose role นั้นใน routing table — ทั้ง primary และ cross-check
+- fire `takkub assign --role <disabled>` หรือ `takkub <disabled>`
+- เสนอ row codex/gemini ใน proposal table
+
+ถ้า user ขอตรงๆ ("ให้ codex ทำ X") ขณะ codex ปิดอยู่ → **ห้ามทำ** ตอบว่า "codex provider ถูกปิดอยู่ user enable ก่อนได้ที่ status bar chip" ไม่เสนอ workaround หา role อื่นมาแทน (เคารพ user intent ที่ปิดมัน)
+
+**Source of truth:** `~/.takkub/disabled-providers.json`
+**Orchestrator inject สถานะ 2 ทาง:**
+- Spawn time: `--append-system-prompt-file` มี section "⛔ Disabled providers"
+- Runtime: เมื่อ user คลิก chip → inject `[system] <provider> ENABLED/DISABLED` เข้า Lead pane ทันที
+
+**routing_planner.classify()** ก็เคารพ flag นี้: pass `context={"disabled_providers": {"codex"}}` → strip codex จาก cross_check และ degrade FIRE_ONESHOT เป็น ASK_CLARIFY (ดู tests `TestDisabledProviders`)
+
 ## เมื่อรับงานใหม่
 
 1. อ่านไฟล์ `projects.json` เสมอ
