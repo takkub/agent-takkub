@@ -20,6 +20,7 @@ from PyQt6.QtCore import QCoreApplication
 from agent_takkub import config
 from agent_takkub import orchestrator as orch_mod
 from agent_takkub.orchestrator import (
+    _LEAD_GUARD_ALLOW_TOOLS,
     _LEAD_GUARD_WRITE_TOOLS,
     Orchestrator,
     render_lead_settings,
@@ -135,6 +136,61 @@ class TestRenderLeadSettings:
         result = render_lead_settings("proj_a")
         data = json.loads(result.read_text(encoding="utf-8"))
         assert data["permissions"].get("defaultMode") == "acceptEdits"
+
+    def test_has_permissions_allow_key(
+        self, two_project_json: pathlib.Path, tmp_path: pathlib.Path
+    ) -> None:
+        """Allow list must exist so Lead skips prompts for Bash/Read/MCP/etc."""
+        result = render_lead_settings("proj_a")
+        data = json.loads(result.read_text(encoding="utf-8"))
+        assert "allow" in data["permissions"]
+        assert isinstance(data["permissions"]["allow"], list)
+
+    def test_allow_contains_bash(
+        self, two_project_json: pathlib.Path, tmp_path: pathlib.Path
+    ) -> None:
+        """Lead runs Bash constantly (git/ls/takkub) — must not prompt."""
+        result = render_lead_settings("proj_a")
+        data = json.loads(result.read_text(encoding="utf-8"))
+        assert "Bash" in data["permissions"]["allow"]
+
+    def test_allow_contains_read_only_tools(
+        self, two_project_json: pathlib.Path, tmp_path: pathlib.Path
+    ) -> None:
+        result = render_lead_settings("proj_a")
+        data = json.loads(result.read_text(encoding="utf-8"))
+        allow = data["permissions"]["allow"]
+        for tool in ("Read", "Grep", "Glob", "WebFetch", "WebSearch"):
+            assert tool in allow, f"{tool} missing from allow list"
+
+    def test_allow_contains_mcp_wildcard(
+        self, two_project_json: pathlib.Path, tmp_path: pathlib.Path
+    ) -> None:
+        """All MCP tools (pms / playwright / chrome-devtools) auto-allow."""
+        result = render_lead_settings("proj_a")
+        data = json.loads(result.read_text(encoding="utf-8"))
+        assert "mcp__*" in data["permissions"]["allow"]
+
+    def test_allow_does_not_contain_write_tools(
+        self, two_project_json: pathlib.Path, tmp_path: pathlib.Path
+    ) -> None:
+        """Edit/Write/MultiEdit must NOT be in allow — they go through
+        defaultMode=acceptEdits (cockpit files) and deny rules (project paths)
+        so the write boundary stays enforceable."""
+        result = render_lead_settings("proj_a")
+        data = json.loads(result.read_text(encoding="utf-8"))
+        allow = data["permissions"]["allow"]
+        for tool in _LEAD_GUARD_WRITE_TOOLS:
+            assert tool not in allow, f"{tool} must NOT auto-allow — deny rules need to win"
+
+    def test_allow_matches_constant(
+        self, two_project_json: pathlib.Path, tmp_path: pathlib.Path
+    ) -> None:
+        """Settings file allow list mirrors _LEAD_GUARD_ALLOW_TOOLS exactly
+        (guards against silent drift between constant and renderer)."""
+        result = render_lead_settings("proj_a")
+        data = json.loads(result.read_text(encoding="utf-8"))
+        assert data["permissions"]["allow"] == list(_LEAD_GUARD_ALLOW_TOOLS)
 
     def test_empty_project_gives_empty_deny_list(
         self, two_project_json: pathlib.Path, tmp_path: pathlib.Path

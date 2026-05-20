@@ -539,13 +539,39 @@ def _render_lead_context(project: str | None = None) -> str | None:
 
 _LEAD_GUARD_WRITE_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
 
+# Tools Lead can use without a permission prompt. Read-only ops (Read/Grep/
+# Glob), arbitrary Bash (git/ls/takkub CLI — Lead's daily bread), web reads,
+# task tracking, plan-mode toggles, and every MCP tool. Edit/Write are
+# deliberately omitted: they go through defaultMode=acceptEdits (auto-accept
+# on cockpit files) AND the deny rules above (hard-block project paths) so
+# the write-boundary survives even if a future allow pattern broadens.
+_LEAD_GUARD_ALLOW_TOOLS = (
+    "Bash",
+    "Read",
+    "Grep",
+    "Glob",
+    "WebFetch",
+    "WebSearch",
+    "TaskCreate",
+    "TaskUpdate",
+    "TaskGet",
+    "TaskList",
+    "TaskOutput",
+    "TaskStop",
+    "EnterPlanMode",
+    "ExitPlanMode",
+    "mcp__*",
+)
+
 
 def render_lead_settings(project: str) -> pathlib.Path:
     """Generate runtime/lead-guard-<project>.json with permissions.deny rules
     that block Lead from editing any path under the project's configured roots.
 
     Also sets defaultMode=acceptEdits so Lead auto-accepts edits to cockpit
-    files without requiring --dangerously-skip-permissions.
+    files without requiring --dangerously-skip-permissions, and injects an
+    allow list for read-only / coordinator tools (Bash, Read, Grep, MCP, ...)
+    so Lead doesn't get prompt-spammed for every git/ls/takkub call.
 
     Idempotent: regenerates the file on every call so path changes in
     projects.json are picked up on the next Lead spawn.
@@ -560,6 +586,7 @@ def render_lead_settings(project: str) -> pathlib.Path:
 
     settings: dict = {
         "permissions": {
+            "allow": list(_LEAD_GUARD_ALLOW_TOOLS),
             "deny": deny_rules,
             "defaultMode": "acceptEdits",
         }
