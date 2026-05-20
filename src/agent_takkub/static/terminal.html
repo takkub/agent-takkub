@@ -101,6 +101,36 @@
 
       // tell Python we're ready to receive
       if (bridge && bridge.ready) bridge.ready();
+
+      // ------------------------------------------------------------------
+      // Level 2: intercept image paste (Ctrl+V / context-menu) before
+      // xterm.js handles it. Capture phase runs before xterm's listener.
+      // If the clipboard contains an image, encode as base64 and hand off
+      // to Python; otherwise let xterm.js process text paste normally.
+      // ------------------------------------------------------------------
+      document.addEventListener('paste', function(e) {
+        const items = e.clipboardData && e.clipboardData.items;
+        if (!items) return;
+        for (let i = 0; i < items.length; i++) {
+          const item = items[i];
+          if (item.type && item.type.startsWith('image/')) {
+            e.stopImmediatePropagation();
+            e.preventDefault();
+            const file = item.getAsFile();
+            const mimeType = item.type;
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = (ev) => {
+              // ev.target.result = "data:image/png;base64,<b64>"
+              const b64 = ev.target.result.split(',')[1];
+              if (bridge && bridge.pasteImageData) bridge.pasteImageData(b64, mimeType);
+            };
+            reader.readAsDataURL(file);
+            return;  // image wins — don't fall through to xterm text paste
+          }
+        }
+        // No image in clipboard — let xterm.js handle text paste as usual.
+      }, true /* capture */);
     });
 
     // ------------------------------------------------------------------

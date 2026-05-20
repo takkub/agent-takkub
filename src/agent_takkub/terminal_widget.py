@@ -24,17 +24,63 @@ Wiring:
 
 from __future__ import annotations
 
+import base64
 import codecs
 import json
+from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtCore import QObject, QTimer, QUrl, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import QEvent, QObject, QTimer, QUrl, pyqtSignal, pyqtSlot
 from PyQt6.QtWebChannel import QWebChannel
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWidgets import QVBoxLayout, QWidget
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 _INDEX_URL = QUrl.fromLocalFile(str(_STATIC_DIR / "terminal.html"))
+
+_CLIPBOARD_KEEP = 50  # max clipboard-*.png files kept in runtime/
+
+
+# ---------------------------------------------------------------------------
+# Pure helpers — no Qt required; tested directly in test_image_input.py
+# ---------------------------------------------------------------------------
+
+
+def _normalize_path(raw: str) -> str:
+    """Convert backslashes to forward slashes for cross-tool compatibility."""
+    return raw.replace("\\", "/")
+
+
+def _format_drop_paths(local_paths: list[str]) -> str:
+    """Format a list of file-system paths for insertion into the terminal."""
+    return " ".join(_normalize_path(p) for p in local_paths if p)
+
+
+def _cleanup_clipboard_images(runtime_dir: Path, keep: int = _CLIPBOARD_KEEP) -> list[Path]:
+    """Remove oldest clipboard-*.png files, keeping only `keep` most recent.
+
+    Returns the list of deleted paths (useful for tests and logging).
+    """
+    images = sorted(
+        runtime_dir.glob("clipboard-*.png"),
+        key=lambda p: p.stat().st_mtime,
+    )
+    to_delete = images[: max(0, len(images) - keep)]
+    for old in to_delete:
+        try:
+            old.unlink()
+        except Exception:
+            pass
+    return to_delete
+
+
+def _save_clipboard_image(b64data: str, runtime_dir: Path) -> Path:
+    """Decode base64 image data and write to runtime/clipboard-<ISO-ts>.png."""
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+    path = runtime_dir / f"clipboard-{ts}.png"
+    path.write_bytes(base64.b64decode(b64data))
+    return path
 
 
 class _Bridge(QObject):
@@ -43,6 +89,7 @@ class _Bridge(QObject):
     inputData = pyqtSignal(str)  # text the user typed in xterm.js
     sizeChanged = pyqtSignal(int, int)  # cols, rows reported by FitAddon
     pageReady = pyqtSignal()
+    imageDataPasted = pyqtSignal(str, str)  # base64_data, mime_type
 
     @pyqtSlot(str)
     def sendInput(self, data: str) -> None:
@@ -55,6 +102,11 @@ class _Bridge(QObject):
     @pyqtSlot()
     def ready(self) -> None:
         self.pageReady.emit()
+
+    @pyqtSlot(str, str)
+    def pasteImageData(self, b64data: str, mime_type: str) -> None:
+        """Called from JS when the user pastes an image (Ctrl+V or context menu)."""
+        self.imageDataPasted.emit(b64data, mime_type)
 
 
 class TerminalWidget(QWidget):
@@ -121,6 +173,13 @@ class TerminalWidget(QWidget):
         self._bridge.inputData.connect(self._on_input_data)
         self._bridge.sizeChanged.connect(self.resized.emit)
         self._bridge.pageReady.connect(self._on_page_ready)
+        self._bridge.imageDataPasted.connect(self._on_image_pasted)
+
+        # Enable drag-and-drop for file path insertion (Level 1).
+        # We install an event filter on the child view so we see Qt-level
+        # drag events before Chromium/WebEngine processes them.
+        self._view.installEventFilter(self)
+        self._view.setAcceptDrops(True)
 
         self._view.load(_INDEX_URL)
 
@@ -256,3 +315,75 @@ class TerminalWidget(QWidget):
 
     def setFocus(self) -> None:
         self._view.setFocus()
+
+    # ------------------------------------------------------------------
+    # Level 1: Drag-drop file paths into pane
+    # ------------------------------------------------------------------
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        """Intercept drag-drop events on the WebView to insert file paths.
+
+        Returns True (consumed) for file-URL drag events so Chromium doesn't
+        try to open them as a page load.
+        """
+        if watched is self._view:
+            t = event.type()
+            if t == QEvent.Type.DragEnter:
+                if event.mimeData().hasUrls():  # type: ignore[attr-defined]
+                    event.acceptProposedAction()  # type: ignore[attr-defined]
+                    self._set_drop_highlight(True)
+                    return True
+            elif t == QEvent.Type.DragMove:
+                if event.mimeData().hasUrls():  # type: ignore[attr-defined]
+                    event.acceptProposedAction()  # type: ignore[attr-defined]
+                    return True
+            elif t == QEvent.Type.DragLeave:
+                self._set_drop_highlight(False)
+                return True
+            elif t == QEvent.Type.Drop:
+                self._set_drop_highlight(False)
+                if event.mimeData().hasUrls():  # type: ignore[attr-defined]
+                    local_paths = [
+                        url.toLocalFile()
+                        for url in event.mimeData().urls()  # type: ignore[attr-defined]
+                        if url.isLocalFile()
+                    ]
+                    if local_paths:
+                        self.inputBytes.emit(_format_drop_paths(local_paths).encode("utf-8"))
+                    event.acceptProposedAction()  # type: ignore[attr-defined]
+                    return True
+        return super().eventFilter(watched, event)
+
+    def _set_drop_highlight(self, active: bool) -> None:
+        if active:
+            self._view.setStyleSheet("border: 2px solid #3b82f6;")
+        else:
+            self._view.setStyleSheet("")
+
+    # ------------------------------------------------------------------
+    # Level 2: Ctrl+V image-from-clipboard
+    # ------------------------------------------------------------------
+    def _on_image_pasted(self, b64data: str, _mime_type: str) -> None:
+        """Receive base64 image from JS, save to disk, insert path into terminal."""
+        from .config import EVENTS_LOG, RUNTIME_DIR, ensure_runtime
+
+        ensure_runtime()
+        try:
+            img_path = _save_clipboard_image(b64data, RUNTIME_DIR)
+        except Exception as exc:
+            try:
+                with EVENTS_LOG.open("a", encoding="utf-8") as fh:
+                    fh.write(f"{datetime.now().isoformat()} image_paste_error {exc}\n")
+            except Exception:
+                pass
+            return
+
+        _cleanup_clipboard_images(RUNTIME_DIR)
+
+        fwd = _normalize_path(str(img_path))
+        self.inputBytes.emit(fwd.encode("utf-8"))
+
+        try:
+            with EVENTS_LOG.open("a", encoding="utf-8") as fh:
+                fh.write(f"{datetime.now().isoformat()} image_paste {fwd}\n")
+        except Exception:
+            pass
