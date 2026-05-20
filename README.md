@@ -281,9 +281,23 @@ takkub search "<query>" [--days N] [--all]           # grep past Claude conversa
 2. `~/WebstormProjects/second-brain` (default, ถ้ามี `01-Projects/` ข้างใน)
 3. ไม่มี → skip silently
 
-### PMS MCP (optional)
+### PMS MCP (manual setup outside cockpit)
 
-ใส่ bearer token เข้า `runtime/shared-mcp.json` ตรงๆ (ไฟล์ gitignore แล้ว) หรือเรียก `write_shared_mcp_config(token)` จาก Python — ทุก pane จะใช้ pms MCP tools (`mcp__pms__pms_*`) ได้ผ่าน `--mcp-config` ที่ orchestrator inject ทุก spawn (ไม่มี UI button — token ไม่ rotate บ่อย ปกติตั้งครั้งเดียวจบ)
+Cockpit **ไม่ wire** pms MCP ให้แล้ว — security review 2026-05-20 พบว่า cockpit เคยเก็บ bearer token plaintext ลง `runtime/shared-mcp.json` ตอนนี้ลบทิ้ง ถ้าต้องการใช้ pms tools ใน **claude session ปกตินอก cockpit** ให้ register ใน `~/.claude.json` เอง:
+
+```json
+{
+  "mcpServers": {
+    "pms": {
+      "type": "http",
+      "url": "https://api.wsol.co.th/pms/mcp",
+      "headers": { "Authorization": "Bearer <YOUR_PMS_TOKEN>" }
+    }
+  }
+}
+```
+
+Note: cockpit panes spawn ด้วย `--strict-mcp-config` + `--setting-sources project,local` → user-level mcpServers **ไม่ inject เข้า cockpit pane** snippet นี้ใช้กับ standalone claude session เท่านั้น (ดู `CLAUDE.md` section "Optional: PMS MCP" สำหรับ tool allowlist ครบ)
 
 ### Browser MCPs (auto, ไม่ต้อง setup)
 
@@ -306,6 +320,22 @@ Cockpit auto-inject:
 7. **ECC plugin noise muted** — auto-inject `ECC_GATEGUARD=off` + `ECC_DISABLED_HOOKS` กัน hook spam
 8. **Auto-trust folder** — claude แสดง trust modal → cockpit press Enter ให้
 9. **Decision log** — ทุก `takkub done` → markdown file + Obsidian mirror
+10. **Cross-tab done notification** — teammate ใน background tab รัน `takkub done` → Lead เห็น `[<role> done] in <project>` flash บน status bar ทุก tab (ไม่ต้องสลับไปดู)
+11. **Done notice queue** — teammate `done()` ขณะ target Lead ไม่ alive → notice ค้างใน queue → flush เข้า input ตอน Lead respawn
+
+---
+
+## Security
+
+| What | Where |
+|---|---|
+| **Lead capability token** — auth gate กัน TCP bypass | `cli_server.py` requires `TAKKUB_LEAD_TOKEN` env (auto-injected into Lead pane only) สำหรับ spawn/assign/close/close-all teammate panes ที่พยายาม connect socket ตรงๆ → reject |
+| **Role/project name validation** | `config.validate_name()` regex `^[a-z0-9][a-z0-9_-]{0,63}$` กัน path traversal ก่อน filesystem touch |
+| **Role-aware cwd guard** | `orchestrator._cwd_within_project()` REPO_ROOT exception ใช้กับ Lead เท่านั้น — teammate spawn ใน cockpit repo ไม่ได้ |
+| **MCP config** | `--strict-mcp-config` + `--setting-sources project,local` ทุก pane → user-level mcpServers ไม่ leak เข้า cockpit pane |
+| **No plaintext credentials** | pms bearer token ถูก rip ออก (security review 2026-05-20) ผู้ใช้ setup เองนอก cockpit |
+
+Audit trail: `REVIEW_<date>.md` ที่ repo root + `runtime/sessions/<date>/<project>/codex-*.md` (codex security reviews)
 
 ---
 
@@ -382,13 +412,13 @@ agent-takkub/
 │   ├── cli_server.py             # QTcpServer for takkub CLI
 │   ├── cli.py                    # `takkub` CLI client
 │   ├── chatlog_scanner.py        # read-only walker over Claude session jsonl
-│   ├── shared_dev_tools.py       # MCP shared config (pms + browser MCPs)
+│   ├── shared_dev_tools.py       # MCP shared config (browser MCPs only — pms ripped 2026-05-20)
 │   ├── rtk_helper.py             # rtk hook one-click installer
 │   ├── logs_panel.py             # bottom dock: tail events.log
 │   ├── config.py                 # projects.json + runtime/ helpers
 │   ├── roles.py                  # default role registry
 │   └── token_meter.py            # JSONL session reader + context budget
-└── tests/                        # 231 unit tests, no GUI required
+└── tests/                        # 641 unit tests, no GUI required
 ```
 
 ---
