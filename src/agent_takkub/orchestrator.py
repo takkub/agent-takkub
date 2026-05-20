@@ -763,7 +763,14 @@ class Orchestrator(QObject):
         pane.inputBytes.connect(self._on_pane_input)
         self.statusChanged.emit()
 
-    def unregister_pane(self, role_name: str, project: str | None = None) -> None:
+    def unregister_pane(
+        self, role_name: str, project: str | None = None, force: bool = False
+    ) -> None:
+        # registry never wipes Lead unless cockpit tearing down (tab close → force=True)
+        if role_name == LEAD.name and not force:
+            _log_event("unregister_pane_lead_refused")
+            return
+        # no paneClosed signal — caller (_remove_teammate_pane / tab close) coordinates UI removal
         pane = self._project_panes(project).pop(role_name, None)
         if pane is None:
             return
@@ -1506,7 +1513,18 @@ class Orchestrator(QObject):
         )
         return True, f"sent to {to_role}"
 
-    def close(self, role_name: str, project: str | None = None) -> tuple[bool, str]:
+    def close(
+        self,
+        role_name: str,
+        project: str | None = None,
+        force: bool = False,
+        reason: str = "",
+    ) -> tuple[bool, str]:
+        """Terminate a pane's session and remove it from the layout.
+
+        force=True is for legitimate cockpit lifecycle (tab close, project switch).
+        Never expose to CLI — teammates can only call `takkub done`.
+        """
         role_name = role_name.lower().strip()
         project_ns = self._resolve_project(project)
         pane = self._project_panes(project_ns).get(role_name)
@@ -1514,6 +1532,10 @@ class Orchestrator(QObject):
             return False, f"unknown role: {role_name}"
         was_alive = pane.session is not None
         if was_alive:
+            # Lead is permanent; only force=True (tab close, project switch) may terminate
+            if role_name == LEAD.name and not force:
+                _log_event("close_ignored", role=role_name, reason="lead_protected")
+                return True, "lead close ignored (protected)"
             # mark exit as expected so the pane doesn't surface "exited"/crash
             pane.mark_expected_exit()
             pane.session.terminate()
@@ -1529,14 +1551,17 @@ class Orchestrator(QObject):
         # is viewing a different project at the moment of close (the
         # `done`-triggered close fires 2.5 s after the agent reports
         # done, plenty of time for a tab switch).
+        # paneClosed never fires for Lead — tab close handles UI teardown separately via deleteLater
         if role_name != LEAD.name:
             self.paneClosed.emit(role_name, project_ns)
         self.statusChanged.emit()
-        _log_event("close", role=role_name)
+        _log_event("close", role=role_name, force=force, reason=reason)
         return True, f"{role_name} closed"
 
     def done(self, from_role: str, note: str = "", project: str | None = None) -> tuple[bool, str]:
         from_role = from_role.lower().strip()
+        if from_role == LEAD.name:
+            return False, "lead cannot call done on itself"
         project_ns = self._resolve_project(project)
         project_panes = self._project_panes(project_ns)
         pane = project_panes.get(from_role)

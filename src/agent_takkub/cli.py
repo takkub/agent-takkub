@@ -28,6 +28,11 @@ from .config import read_port
 # based on the TAKKUB_ROLE env var that the orchestrator injects per pane.
 LEAD_ONLY_COMMANDS = frozenset({"spawn", "assign", "close", "close-all"})
 
+# Commands intended only for teammate panes. Lead summarises inline and never
+# needs to call done on itself — blocking this prevents Lead from accidentally
+# scheduling its own close via the done→QTimer→close chain.
+TEAMMATE_ONLY_COMMANDS = frozenset({"done"})
+
 
 def _connect() -> socket.socket:
     port = read_port()
@@ -85,21 +90,30 @@ def _enforce_role_gate(command: str) -> str | None:
     Rules:
       - If TAKKUB_ROLE is unset (user typing manually from a terminal),
         allow everything. This is the debugging path.
-      - If TAKKUB_ROLE == "lead", allow everything.
+      - If TAKKUB_ROLE == "lead", block TEAMMATE_ONLY_COMMANDS (done).
       - Otherwise, block LEAD_ONLY_COMMANDS with a hint pointing at the
         commands teammates *are* allowed to use.
     """
-    if command not in LEAD_ONLY_COMMANDS:
-        return None
+    # defense at CLI layer; orchestrator has matching guard for direct TCP attackers
     role = _from_role()
-    if role is None or role.lower() == "lead":
+    if role is None:
         return None
-    return (
-        f"only lead can run 'takkub {command}'. you are '{role}'.\n"
-        f"       do your task directly with Read/Write/Edit/Bash.\n"
-        f"       use 'takkub send --to <role>' for peer coordination, "
-        f"'takkub done' to report back."
-    )
+    role_lower = role.lower()
+    if command in LEAD_ONLY_COMMANDS:
+        if role_lower == "lead":
+            return None
+        return (
+            f"only lead can run 'takkub {command}'. you are '{role}'.\n"
+            f"       do your task directly with Read/Write/Edit/Bash.\n"
+            f"       use 'takkub send --to <role>' for peer coordination, "
+            f"'takkub done' to report back."
+        )
+    if command in TEAMMATE_ONLY_COMMANDS and role_lower == "lead":
+        return (
+            f"lead cannot run 'takkub {command}'. "
+            f"summarise your work inline — teammates use done to report back to you."
+        )
+    return None
 
 
 def _with_project(payload: dict) -> dict:

@@ -1031,7 +1031,8 @@ class MainWindow(QMainWindow):
         if confirm != QMessageBox.StandardButton.Ok:
             return
         self.orch.close_all_teammates(project=tab.project_name)
-        self.orch.close(LEAD.name, project=tab.project_name)
+        self.orch.close(LEAD.name, project=tab.project_name, force=True, reason="tab_close")
+        self.orch.unregister_pane(LEAD.name, project=tab.project_name, force=True)
         self.tabs.removeTab(index)
         # ProjectTab still holds references to AgentPane/TerminalWidget;
         # explicitly destroy them so Chromium releases the renderer.
@@ -1077,8 +1078,8 @@ class MainWindow(QMainWindow):
         """
         # 1. Close teammates first (they depend on Lead's project for cwd).
         self.orch.close_all_teammates()
-        # 2. Close Lead.
-        self.orch.close(LEAD.name)
+        # 2. Close Lead — force=True because this is an intentional kill-then-respawn.
+        self.orch.close(LEAD.name, force=True, reason="restart_lead")
         # 3. Respawn Lead after a short delay so the PTY can fully release.
         #    Spawning immediately races the still-terminating session and the
         #    orchestrator would short-circuit with "already running".
