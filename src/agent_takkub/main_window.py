@@ -138,6 +138,34 @@ class MainWindow(QMainWindow):
     def _rebalance_teammates(self) -> None:
         self._current_tab().rebalance_teammates()
 
+    @staticmethod
+    def _provider_chip_style(provider: str, disabled: bool) -> str:
+        """QPushButton stylesheet for the codex/gemini status-bar chips.
+
+        Enabled: bright provider-brand color + white text.
+        Disabled: dim gray + strikethrough so the off state is unambiguous.
+        """
+        if disabled:
+            return (
+                "QPushButton { "
+                "background:#3f3f46; color:#71717a; "
+                "border:1px solid #52525b; border-radius:10px; "
+                "padding:2px 10px; font-weight:500; "
+                "text-decoration: line-through; "
+                "}"
+                "QPushButton:hover { background:#52525b; color:#a1a1aa; }"
+            )
+        # Brand colors: codex teal (#10a37f) / gemini blue (#4285f4)
+        brand = "#10a37f" if provider == "codex" else "#4285f4"
+        return (
+            "QPushButton { "
+            f"background:{brand}; color:white; "
+            "border:none; border-radius:10px; "
+            "padding:2px 10px; font-weight:600; "
+            "}"
+            f"QPushButton:hover {{ background:{brand}; opacity:0.85; }}"
+        )
+
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("agent-takkub — dev team cockpit")
@@ -286,6 +314,30 @@ class MainWindow(QMainWindow):
         )
         self._btn_install_rtk.clicked.connect(self._on_install_rtk_clicked)
 
+        # ── provider toggle chips (codex / gemini) ─────────────────
+        # State source-of-truth lives in provider_state.json; orchestrator
+        # owns the broadcast on toggle. We just create the buttons and
+        # subscribe to providerStateChanged to redraw.
+        from .provider_state import CODEX, GEMINI, is_disabled
+
+        self._chip_codex = QPushButton("Codex", self)
+        self._chip_codex.setToolTip(
+            "Codex: disabled — click to enable" if is_disabled(CODEX) else "Codex: enabled — click to disable"
+        )
+        self._chip_codex.setStyleSheet(self._provider_chip_style(CODEX, is_disabled(CODEX)))
+        self._chip_codex.clicked.connect(
+            lambda: self._on_provider_chip_clicked(CODEX)
+        )
+
+        self._chip_gemini = QPushButton("Gemini", self)
+        self._chip_gemini.setToolTip(
+            "Gemini: disabled — click to enable" if is_disabled(GEMINI) else "Gemini: enabled — click to disable"
+        )
+        self._chip_gemini.setStyleSheet(self._provider_chip_style(GEMINI, is_disabled(GEMINI)))
+        self._chip_gemini.clicked.connect(
+            lambda: self._on_provider_chip_clicked(GEMINI)
+        )
+
         # Self-update chip. Polls `git fetch` + `git status` every 5 min
         # so a user that pulled their friend's commit from another machine
         # sees the update light up here without needing to touch a
@@ -426,6 +478,8 @@ class MainWindow(QMainWindow):
         self._project_combo.hide()
         self._status.addPermanentWidget(self._btn_add_project)
         self._status.addPermanentWidget(self._btn_install_rtk)
+        self._status.addPermanentWidget(self._chip_codex)
+        self._status.addPermanentWidget(self._chip_gemini)
         self._status.addPermanentWidget(self._btn_update)
         self._status.addPermanentWidget(self._btn_add_pane)
         self._status.addPermanentWidget(self._btn_assign)
@@ -458,6 +512,7 @@ class MainWindow(QMainWindow):
             lambda port: self._status.showMessage(f"cockpit ready · cli port {port}")
         )
         self.orch.statusChanged.connect(self._update_status)
+        self.orch.providerStateChanged.connect(self._on_provider_state_changed)
 
         # Refresh status bar every 2s so the working/active count tracks the
         # state transitions that don't emit statusChanged (e.g. working→done
@@ -1702,6 +1757,33 @@ class MainWindow(QMainWindow):
         else:
             QMessageBox.critical(self, "rtk install failed", msg)
         self._refresh_rtk_button()
+
+    def _on_provider_chip_clicked(self, provider: str) -> None:
+        """Toggle a provider on the orchestrator. Orchestrator persists state,
+        broadcasts to all Lead panes, and emits providerStateChanged → we
+        update the chip style via _on_provider_state_changed."""
+        from .provider_state import is_disabled
+
+        currently_disabled = is_disabled(provider)
+        # Flip
+        ok, msg = self.orch.toggle_provider(provider, not currently_disabled)
+        if not ok:
+            self._status.showMessage(f"Toggle failed: {msg}", 4000)
+
+    def _on_provider_state_changed(self, provider: str, disabled: bool) -> None:
+        """Repaint the affected chip when provider state flips. Triggered by
+        Orchestrator.providerStateChanged so both user click and future
+        config-file changes from other sources land here."""
+        if provider == "codex" and hasattr(self, "_chip_codex"):
+            self._chip_codex.setStyleSheet(self._provider_chip_style("codex", disabled))
+            self._chip_codex.setToolTip(
+                "Codex: disabled — click to enable" if disabled else "Codex: enabled — click to disable"
+            )
+        elif provider == "gemini" and hasattr(self, "_chip_gemini"):
+            self._chip_gemini.setStyleSheet(self._provider_chip_style("gemini", disabled))
+            self._chip_gemini.setToolTip(
+                "Gemini: disabled — click to enable" if disabled else "Gemini: enabled — click to disable"
+            )
 
     def _on_add_project_clicked(self) -> None:
         from pathlib import Path
