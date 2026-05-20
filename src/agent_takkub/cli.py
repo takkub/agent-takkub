@@ -132,12 +132,22 @@ def _with_project(payload: dict) -> dict:
 
 
 def cmd_spawn(args: argparse.Namespace) -> dict:
-    return _request(_with_project({"cmd": "spawn", "role": args.role, "cwd": args.cwd}))
+    return _request(
+        _with_project({"cmd": "spawn", "role": args.role, "cwd": args.cwd, "from": _from_role()})
+    )
 
 
 def cmd_assign(args: argparse.Namespace) -> dict:
     return _request(
-        _with_project({"cmd": "assign", "role": args.role, "cwd": args.cwd, "task": args.task})
+        _with_project(
+            {
+                "cmd": "assign",
+                "role": args.role,
+                "cwd": args.cwd,
+                "task": args.task,
+                "from": _from_role(),
+            }
+        )
     )
 
 
@@ -148,11 +158,11 @@ def cmd_send(args: argparse.Namespace) -> dict:
 
 
 def cmd_close(args: argparse.Namespace) -> dict:
-    return _request(_with_project({"cmd": "close", "role": args.role}))
+    return _request(_with_project({"cmd": "close", "role": args.role, "from": _from_role()}))
 
 
 def cmd_close_all(_: argparse.Namespace) -> dict:
-    return _request(_with_project({"cmd": "close-all"}))
+    return _request(_with_project({"cmd": "close-all", "from": _from_role()}))
 
 
 def cmd_done(args: argparse.Namespace) -> dict:

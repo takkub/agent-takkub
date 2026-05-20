@@ -76,11 +76,21 @@ class CliServer(QObject):
         # currently informational and only used to scope `list`.
         from_project = req.get("from_project")
 
-        # Server-side authorization for Lead-only commands.
-        # The CLI gate in cli.py blocks teammate roles textually, but raw TCP
-        # clients (confused pane shells, local processes) bypass that gate.
-        # We enforce here using the per-cockpit Lead capability token that is
-        # injected only into the Lead pane's env (TAKKUB_LEAD_TOKEN).
+        # Layer 1 — role gate: check the stamped `from` field before the
+        # token check.  cli.py stamps `from: _from_role()` on every request
+        # so the server can see who is calling.  If the field is absent or is
+        # not "lead", reject lifecycle commands immediately.  This blocks
+        # confused teammate panes that open the TCP socket directly and try to
+        # call assign/spawn/close without the lead token (Gap B hardening).
+        if cmd in _LEAD_ONLY_CMDS:
+            from_role = (req.get("from") or "").lower().strip()
+            if from_role != "lead":
+                self._reply(sock, ok=False, msg=f"role gate: only lead can {cmd}")
+                return
+
+        # Layer 2 — capability token: verify TAKKUB_LEAD_TOKEN so that even a
+        # process that spoofs `from: "lead"` cannot proceed without the token
+        # injected into the Lead pane's env by the orchestrator.
         # secrets.compare_digest prevents timing-side-channel attacks.
         if cmd in _LEAD_ONLY_CMDS:
             lead_token = getattr(self._orch, "_lead_token", None)

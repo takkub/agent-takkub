@@ -85,7 +85,9 @@ class TestLeadOnlyCommandsRejectedWithNoAuth:
     def test_no_auth_field_rejected(self, server_and_sock, cmd: str) -> None:
         srv, sock, _ = server_and_sock
         sock.reset()
-        payload: dict = {"cmd": cmd, "role": "backend", "task": "do x"}
+        # Include `from: "lead"` so the role gate passes; the token check must
+        # then reject due to the missing auth field.
+        payload: dict = {"cmd": cmd, "role": "backend", "task": "do x", "from": "lead"}
         srv._dispatch(sock, payload)
         resp = sock.last_response()
         assert resp["ok"] is False
@@ -102,7 +104,15 @@ class TestLeadOnlyCommandsRejectedWithWrongToken:
     def test_wrong_token_rejected(self, server_and_sock, cmd: str) -> None:
         srv, sock, _ = server_and_sock
         sock.reset()
-        payload = {"cmd": cmd, "role": "backend", "task": "do x", "auth": "not-the-real-token"}
+        # Include `from: "lead"` so the role gate passes; wrong token must be
+        # caught by the capability-token layer.
+        payload = {
+            "cmd": cmd,
+            "role": "backend",
+            "task": "do x",
+            "auth": "not-the-real-token",
+            "from": "lead",
+        }
         srv._dispatch(sock, payload)
         resp = sock.last_response()
         assert resp["ok"] is False
@@ -111,14 +121,16 @@ class TestLeadOnlyCommandsRejectedWithWrongToken:
     def test_empty_string_auth_rejected(self, server_and_sock) -> None:
         srv, sock, _ = server_and_sock
         sock.reset()
-        srv._dispatch(sock, {"cmd": "spawn", "role": "frontend", "auth": ""})
+        srv._dispatch(sock, {"cmd": "spawn", "role": "frontend", "auth": "", "from": "lead"})
         resp = sock.last_response()
         assert resp["ok"] is False
 
     def test_none_auth_rejected(self, server_and_sock) -> None:
         srv, sock, _ = server_and_sock
         sock.reset()
-        srv._dispatch(sock, {"cmd": "assign", "role": "frontend", "task": "x", "auth": None})
+        srv._dispatch(
+            sock, {"cmd": "assign", "role": "frontend", "task": "x", "auth": None, "from": "lead"}
+        )
         resp = sock.last_response()
         assert resp["ok"] is False
 
@@ -132,28 +144,31 @@ class TestLeadOnlyCommandsAcceptedWithCorrectToken:
     def test_spawn_accepted(self, server_and_sock) -> None:
         srv, sock, token = server_and_sock
         sock.reset()
-        srv._dispatch(sock, {"cmd": "spawn", "role": "frontend", "auth": token})
+        srv._dispatch(sock, {"cmd": "spawn", "role": "frontend", "auth": token, "from": "lead"})
         resp = sock.last_response()
         assert resp["ok"] is True
 
     def test_assign_accepted(self, server_and_sock) -> None:
         srv, sock, token = server_and_sock
         sock.reset()
-        srv._dispatch(sock, {"cmd": "assign", "role": "backend", "task": "work", "auth": token})
+        srv._dispatch(
+            sock,
+            {"cmd": "assign", "role": "backend", "task": "work", "auth": token, "from": "lead"},
+        )
         resp = sock.last_response()
         assert resp["ok"] is True
 
     def test_close_accepted(self, server_and_sock) -> None:
         srv, sock, token = server_and_sock
         sock.reset()
-        srv._dispatch(sock, {"cmd": "close", "role": "qa", "auth": token})
+        srv._dispatch(sock, {"cmd": "close", "role": "qa", "auth": token, "from": "lead"})
         resp = sock.last_response()
         assert resp["ok"] is True
 
     def test_close_all_accepted(self, server_and_sock) -> None:
         srv, sock, token = server_and_sock
         sock.reset()
-        srv._dispatch(sock, {"cmd": "close-all", "auth": token})
+        srv._dispatch(sock, {"cmd": "close-all", "auth": token, "from": "lead"})
         resp = sock.last_response()
         assert resp["ok"] is True
 
