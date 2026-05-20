@@ -73,3 +73,26 @@ class TestEnsureAgentsMd:
         ok, reason = ensure_agents_md(tmp_path)
         assert ok is False
         assert reason == "user-owned"
+
+
+class TestCodexAgentsMdGitGuard:
+    def test_template_has_version_control_section(self) -> None:
+        from agent_takkub.codex_agents_md import CODEX_AGENTS_MD
+
+        assert "Version control" in CODEX_AGENTS_MD
+
+    def test_template_forbids_git_commit(self) -> None:
+        from agent_takkub.codex_agents_md import CODEX_AGENTS_MD
+
+        assert "git commit" in CODEX_AGENTS_MD
+        assert "NEVER" in CODEX_AGENTS_MD
+
+    def test_template_forbids_git_push(self) -> None:
+        from agent_takkub.codex_agents_md import CODEX_AGENTS_MD
+
+        assert "git push" in CODEX_AGENTS_MD
+
+    def test_template_no_longer_has_weak_commit_rule(self) -> None:
+        from agent_takkub.codex_agents_md import CODEX_AGENTS_MD
+
+        assert "commit when explicitly asked" not in CODEX_AGENTS_MD

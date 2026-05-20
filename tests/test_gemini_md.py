@@ -74,3 +74,26 @@ class TestEnsureGeminiMd:
 
         assert TAKKUB_GEMINI_MARKER != codex_marker
         assert "GEMINI" in TAKKUB_GEMINI_MARKER
+
+
+class TestGeminiMdGitGuard:
+    def test_template_has_version_control_section(self) -> None:
+        from agent_takkub.gemini_md import GEMINI_MD
+
+        assert "Version control" in GEMINI_MD
+
+    def test_template_forbids_git_commit(self) -> None:
+        from agent_takkub.gemini_md import GEMINI_MD
+
+        assert "git commit" in GEMINI_MD
+        assert "NEVER" in GEMINI_MD
+
+    def test_template_forbids_git_push(self) -> None:
+        from agent_takkub.gemini_md import GEMINI_MD
+
+        assert "git push" in GEMINI_MD
+
+    def test_template_no_longer_has_weak_commit_rule(self) -> None:
+        from agent_takkub.gemini_md import GEMINI_MD
+
+        assert "commit when explicitly asked" not in GEMINI_MD

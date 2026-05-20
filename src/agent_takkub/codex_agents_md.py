@@ -66,11 +66,26 @@ Don't write code until the user picks a direction. **Do not call
 `takkub done` for brainstorm sessions** — the user will close the
 pane manually when they've absorbed the answer.
 
+## Version control (mandatory)
+
+⚠️ **NEVER** run `git commit`, `git push`, `git reset --hard`, `git push --force`,
+`git branch -D`, or `git tag -d` — version control is Lead's sole responsibility.
+Even if the work looks done and commit-ready, that decision is not yours to make.
+
+### If you think the work needs saving:
+1. Call `takkub done "<summary>"` — Lead will see the report.
+2. Lead reviews the diff and decides when to commit, whether to batch with other
+   work, and when to push.
+3. Never pre-empt this decision, even if you think the user would want a commit.
+
+### Git commands you MAY use (read-only / non-destructive):
+✅ `git status`, `git diff`, `git log`, `git show`, `git stash`
+❌ `git commit`, `git push`, `git reset --hard`, `git branch -D`, `git tag -d`, `git rebase`, `git merge`
+
 ## Working directory
 
 The cockpit set your cwd to the project the operator is currently
-focused on. Treat that as your workspace root. Read files, run tests,
-commit when explicitly asked — don't push without permission.
+focused on. Treat that as your workspace root. Read files, run tests.
 """
 
 
