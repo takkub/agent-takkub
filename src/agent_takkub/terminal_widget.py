@@ -27,19 +27,13 @@ from __future__ import annotations
 import base64
 import codecs
 import json
-from collections import OrderedDict
-from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
-from typing import Generic, TypeVar
 
 from PyQt6.QtCore import QEvent, QObject, QTimer, QUrl, pyqtSignal, pyqtSlot
 from PyQt6.QtWebChannel import QWebChannel
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWidgets import QVBoxLayout, QWidget
-
-_KT = TypeVar("_KT")
-_VT = TypeVar("_VT")
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 _INDEX_URL = QUrl.fromLocalFile(str(_STATIC_DIR / "terminal.html"))
@@ -87,49 +81,6 @@ def _save_clipboard_image(b64data: str, runtime_dir: Path) -> Path:
     path = runtime_dir / f"clipboard-{ts}.png"
     path.write_bytes(base64.b64decode(b64data))
     return path
-
-
-class _FmtCache(Generic[_KT, _VT]):
-    """LRU-capped mapping for ANSI-attr → format-object caches.
-
-    The old QPlainTextEdit rendering pipeline had an unbounded `_fmt_cache`
-    dict (ANSI attr tuple → QTextCharFormat) that grew forever on long
-    sessions.  The xterm.js rewrite eliminated that path, but this utility
-    class is kept for any future in-process caching need.
-
-    Eviction policy: least-recently-used (read or write promotes an entry).
-    Default cap: 256 entries — covers the full ANSI 16-colour palette plus
-    ~10 truecolor combinations per pane with comfortable headroom.
-
-    Wire via PreToolUse hook in Claude Code settings to audit Lead bash
-    write-intent (Phase 2, when ready).
-    """
-
-    def __init__(self, maxsize: int = 256) -> None:
-        self.maxsize = maxsize
-        self._store: OrderedDict[_KT, _VT] = OrderedDict()
-
-    # ------------------------------------------------------------------
-    def __setitem__(self, key: _KT, value: _VT) -> None:
-        if key in self._store:
-            self._store.move_to_end(key)
-        self._store[key] = value
-        if len(self._store) > self.maxsize:
-            self._store.popitem(last=False)  # evict LRU (front)
-
-    def __getitem__(self, key: _KT) -> _VT:
-        value = self._store[key]  # raises KeyError if absent
-        self._store.move_to_end(key)
-        return value
-
-    def __contains__(self, key: object) -> bool:
-        return key in self._store
-
-    def __len__(self) -> int:
-        return len(self._store)
-
-    def __iter__(self) -> Iterator[_KT]:
-        return iter(self._store)
 
 
 class _Bridge(QObject):
