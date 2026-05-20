@@ -31,6 +31,7 @@ from .config import (
     ensure_runtime,
     find_claude_executable,
     lead_cwd,
+    load_projects,
 )
 from .pty_session import PtySession
 from .roles import LEAD
@@ -450,7 +451,32 @@ def _render_hot_md(
 _SAFE_PLUGINS: tuple[str, ...] = ("superpowers-dev", "addy-agent-skills", "pordee")
 
 
-def _render_lead_context() -> str | None:
+def _allowed_project_roots(project: str) -> list[pathlib.Path]:
+    """Return resolved Path objects for every path configured in `project`."""
+    data = load_projects()
+    proj = (data.get("projects") or {}).get(project) or {}
+    return [pathlib.Path(p).resolve() for p in (proj.get("paths") or {}).values()]
+
+
+def _cwd_within_project(cwd: str, project: str) -> bool:
+    """True when `cwd` resolves under one of `project`'s configured roots,
+    or under the cockpit repo itself (needed for Lead self-edit tasks)."""
+    target = pathlib.Path(cwd).resolve()
+    if target == REPO_ROOT.resolve() or REPO_ROOT.resolve() in target.parents:
+        return True
+    return any(
+        target == root or root in target.parents
+        for root in _allowed_project_roots(project)
+    )
+
+
+def _exit_key(project: str, role: str) -> str:
+    """Composite key for `_recent_exits` so the same role in different
+    project tabs never shares a resume record."""
+    return f"{project}::{role}"
+
+
+def _render_lead_context(project: str | None = None) -> str | None:
     """Render Lead's spawn-time system prompt: cockpit CLAUDE.md + an
     auto-injected `BLOCKED_DIRS` paragraph listing the active project's paths.
 
@@ -467,7 +493,12 @@ def _render_lead_context() -> str | None:
         return None
 
     base = cockpit_md.read_text(encoding="utf-8")
-    name, proj = active_project()
+    if project is not None:
+        data = load_projects()
+        proj = (data.get("projects") or {}).get(project) or {}
+        name = project
+    else:
+        name, proj = active_project()
     paths = list((proj.get("paths") or {}).values()) if proj else []
 
     if paths:
@@ -591,7 +622,7 @@ class Orchestrator(QObject):
         self._panes_by_project: dict[str, dict[str, AgentPane]] = {}
         # last-known cwd per role, used to decide whether to pass --continue
         # on a fresh spawn (must match the previous cwd for resume to be valid)
-        self._recent_exits: dict[str, dict] = {}  # role -> {cwd, ts}
+        self._recent_exits: dict[str, dict] = {}  # "{project}::{role}" -> {cwd, ts}
 
         # Idle watchdog bookkeeping. Per-role:
         #   first_idle_ts   — when the pane was first seen idle in this streak
@@ -708,6 +739,13 @@ class Orchestrator(QObject):
         self._idle_state.pop(key, None)
         self._blocked_on_lead.pop(key, None)
 
+        # Fix 1: validate explicit cwd stays within the project's configured paths.
+        # "default" namespace (unit-test / no-project) is exempt since it has no
+        # configured paths to validate against. The cockpit repo itself is always
+        # allowed so Lead can self-edit cockpit files (CLAUDE.md, projects.json, …).
+        if cwd and project_ns != "default" and not _cwd_within_project(cwd, project_ns):
+            return False, f"cwd '{cwd}' is outside project '{project_ns}' paths"
+
         # ── codex pane: non-claude path ─────────────────────────────
         # `codex` is OpenAI's TUI; it speaks a different protocol and
         # doesn't understand any of the claude flags below. Build a
@@ -752,9 +790,10 @@ class Orchestrator(QObject):
             session.processExited.connect(
                 lambda _code, r=role_name, c=spawn_cwd, p=project_ns: self._on_session_exit(r, c, p)
             )
-            if role_name in self._recent_exits:
-                del self._recent_exits[role_name]
-            self._auto_trust(role_name)
+            _ekey = _exit_key(project_ns, role_name)
+            if _ekey in self._recent_exits:
+                del self._recent_exits[_ekey]
+            self._auto_trust(role_name, project=project_ns)
             self.statusChanged.emit()
             _log_event("spawn", role=role_name, cwd=spawn_cwd, resumed=False)
             return True, f"gemini spawned in {spawn_cwd}"
@@ -801,9 +840,10 @@ class Orchestrator(QObject):
             session.processExited.connect(
                 lambda _code, r=role_name, c=spawn_cwd, p=project_ns: self._on_session_exit(r, c, p)
             )
-            if role_name in self._recent_exits:
-                del self._recent_exits[role_name]
-            self._auto_trust(role_name)
+            _ekey = _exit_key(project_ns, role_name)
+            if _ekey in self._recent_exits:
+                del self._recent_exits[_ekey]
+            self._auto_trust(role_name, project=project_ns)
             self.statusChanged.emit()
             _log_event("spawn", role=role_name, cwd=spawn_cwd, resumed=False)
             return True, f"codex spawned in {spawn_cwd}"
@@ -829,7 +869,7 @@ class Orchestrator(QObject):
             # Skip injection when Lead is anchored at the cockpit itself
             # (no project context to enforce).
             if spawn_cwd != str(REPO_ROOT):
-                role_md_file = _render_lead_context()
+                role_md_file = _render_lead_context(project_ns)
         else:
             staging = agent_role_dir(role_name)
             spawn_cwd = cwd or default_cwd_for_role(role_name, project=project_ns) or str(staging)
@@ -1016,7 +1056,7 @@ class Orchestrator(QObject):
         # cwd, ask claude to continue the previous conversation instead of
         # starting fresh. Useful for crash recovery + accidental closes.
         resumed = False
-        prior = self._recent_exits.get(role_name)
+        prior = self._recent_exits.get(_exit_key(project_ns, role_name))
         if (
             prior
             and prior.get("cwd") == spawn_cwd
@@ -1039,10 +1079,11 @@ class Orchestrator(QObject):
             lambda _code, r=role_name, c=spawn_cwd, p=project_ns: self._on_session_exit(r, c, p)
         )
         # forget the prior exit record now that we've spawned successfully
-        if role_name in self._recent_exits:
-            del self._recent_exits[role_name]
+        _ekey = _exit_key(project_ns, role_name)
+        if _ekey in self._recent_exits:
+            del self._recent_exits[_ekey]
 
-        self._auto_trust(role_name)
+        self._auto_trust(role_name, project=project_ns)
         self.statusChanged.emit()
         if resumed:
             # main_window listens for this to auto-bridge `/remote-control`
@@ -1067,7 +1108,7 @@ class Orchestrator(QObject):
         `done()`. Capped by AUTO_RESPAWN_MAX so a deterministically-
         crashing claude can't spawn-loop.
         """
-        self._recent_exits[role_name] = {"cwd": cwd, "ts": time.time()}
+        self._recent_exits[_exit_key(project, role_name)] = {"cwd": cwd, "ts": time.time()}
 
         pane = self._panes_by_project.get(project, {}).get(role_name)
         if pane is None or pane.state != "exited":
@@ -1108,13 +1149,13 @@ class Orchestrator(QObject):
         _log_event("auto_respawn_done", role=role_name, project=project, ok=ok, msg=msg[:160])
 
     # ──────────────────────────────────────────────────────────────
-    def _auto_trust(self, role_name: str) -> None:
+    def _auto_trust(self, role_name: str, project: str | None = None) -> None:
         """Watch the pane and auto-press Enter on claude's trust folder modal.
 
         Polls every 500ms for up to 30s. Stops as soon as the prompt is
         accepted (or the session dies / never shows it).
         """
-        pane = self.panes.get(role_name)
+        pane = self._project_panes(project).get(role_name)
         if pane is None:
             return
         elapsed = [0]
@@ -1514,7 +1555,7 @@ class Orchestrator(QObject):
                 # Stamp recent-exit so spawn() picks --continue. The
                 # session file is the cwd it was last running in — the
                 # one claude can resume from.
-                self._recent_exits[role] = {"cwd": cwd, "ts": time.time()}
+                self._recent_exits[_exit_key(project, role)] = {"cwd": cwd, "ts": time.time()}
                 ok, _ = self.spawn(role, cwd=cwd, project=project)
                 if ok:
                     scheduled += 1

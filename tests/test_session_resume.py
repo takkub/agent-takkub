@@ -119,9 +119,9 @@ class TestRestoreTeammates:
             ("backend", "agent-takkub"),
             ("frontend", "line-websupport"),
         }
-        # _recent_exits stamped for --continue routing
-        assert "backend" in fake._recent_exits
-        assert "frontend" in fake._recent_exits
+        # _recent_exits stamped for --continue routing (project-scoped keys)
+        assert "agent-takkub::backend" in fake._recent_exits
+        assert "line-websupport::frontend" in fake._recent_exits
 
     def test_skips_entries_without_role(self, isolated_session_file: pathlib.Path) -> None:
         # Defensive: a malformed entry shouldn't blow up the whole restore.
