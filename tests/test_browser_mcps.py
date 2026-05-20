@@ -1,10 +1,8 @@
-"""Tests for `ensure_browser_mcps` and the updated `shared_mcp_config_path`.
+"""Tests for `ensure_browser_mcps` and `shared_mcp_config_path`.
 
 The cockpit ships playwright + chrome-devtools into every pane via
-`runtime/shared-mcp.json`. Three startup states have to behave
-correctly without losing a user's pms bearer token:
+`runtime/shared-mcp.json`. Two startup states have to behave correctly:
   - file missing entirely (fresh install)
-  - file has pms only (most common — existed before this change)
   - file already has the browser MCPs (re-launch)
 
 A corrupt JSON file must not be clobbered — that's almost always a
@@ -47,33 +45,6 @@ class TestEnsureBrowserMcps:
         assert ok, msg
         data = _read(isolated_mcp_file)
         assert set(data["mcpServers"].keys()) == set(BROWSER_MCPS.keys())
-
-    def test_preserves_existing_pms_bearer_token(self, isolated_mcp_file: pathlib.Path) -> None:
-        # The pms entry with a real bearer must survive byte-for-byte —
-        # silently rotating it would break PMS MCP calls for every
-        # project and force the user to redo the setup flow.
-        pms_only = {
-            "mcpServers": {
-                "pms": {
-                    "type": "http",
-                    "url": "https://api.wsol.co.th/pms/mcp",
-                    "headers": {"Authorization": "Bearer pms_real_token_xyz"},
-                }
-            },
-            "permissions": {"allow": ["mcp__pms__pms_list_tasks"]},
-        }
-        isolated_mcp_file.write_text(json.dumps(pms_only), encoding="utf-8")
-        ok, msg = ensure_browser_mcps()
-        assert ok, msg
-        data = _read(isolated_mcp_file)
-        pms = data["mcpServers"]["pms"]
-        assert pms["headers"]["Authorization"] == "Bearer pms_real_token_xyz"
-        assert pms["url"] == "https://api.wsol.co.th/pms/mcp"
-        # Permissions block also untouched.
-        assert data["permissions"]["allow"] == ["mcp__pms__pms_list_tasks"]
-        # And browser MCPs appear alongside pms, not replacing it.
-        for name in BROWSER_MCPS:
-            assert name in data["mcpServers"]
 
     def test_idempotent_when_browsers_already_present(
         self, isolated_mcp_file: pathlib.Path
@@ -128,73 +99,15 @@ class TestSharedMcpConfigPath:
     def test_returns_none_when_file_missing(self, isolated_mcp_file: pathlib.Path) -> None:
         assert shared_mcp_config_path() is None
 
-    def test_returns_none_when_pms_placeholder_token(self, isolated_mcp_file: pathlib.Path) -> None:
-        # The PMS template ships a `<PMS_TOKEN_HERE>` placeholder. A
-        # file that only has pms with the placeholder isn't usable —
-        # don't hand it to claude (it'd 401 on every pms tool call).
-        isolated_mcp_file.write_text(
-            json.dumps(
-                {
-                    "mcpServers": {
-                        "pms": {
-                            "type": "http",
-                            "url": "https://api.wsol.co.th/pms/mcp",
-                            "headers": {"Authorization": "Bearer <PMS_TOKEN_HERE>"},
-                        }
-                    }
-                }
-            ),
-            encoding="utf-8",
-        )
-        assert shared_mcp_config_path() is None
-
-    def test_returns_path_when_pms_has_real_token(self, isolated_mcp_file: pathlib.Path) -> None:
-        isolated_mcp_file.write_text(
-            json.dumps(
-                {
-                    "mcpServers": {
-                        "pms": {
-                            "type": "http",
-                            "url": "https://api.wsol.co.th/pms/mcp",
-                            "headers": {"Authorization": "Bearer pms_real_xyz"},
-                        }
-                    }
-                }
-            ),
-            encoding="utf-8",
-        )
-        assert shared_mcp_config_path() == str(isolated_mcp_file)
-
     def test_returns_path_when_only_browsers_present(self, isolated_mcp_file: pathlib.Path) -> None:
-        # The previous behaviour gated `--mcp-config` on pms being
-        # configured. Now that browser MCPs are also worth handing to
-        # claude, a browser-only file should still resolve. Otherwise
-        # users who never set up pms would silently lose browsers too.
-        ok, _ = ensure_browser_mcps()
-        assert ok
-        assert shared_mcp_config_path() == str(isolated_mcp_file)
-
-    def test_returns_path_when_pms_real_plus_browsers(
-        self, isolated_mcp_file: pathlib.Path
-    ) -> None:
-        isolated_mcp_file.write_text(
-            json.dumps(
-                {
-                    "mcpServers": {
-                        "pms": {
-                            "type": "http",
-                            "url": "https://api.wsol.co.th/pms/mcp",
-                            "headers": {"Authorization": "Bearer pms_real_xyz"},
-                        }
-                    }
-                }
-            ),
-            encoding="utf-8",
-        )
         ok, _ = ensure_browser_mcps()
         assert ok
         assert shared_mcp_config_path() == str(isolated_mcp_file)
 
     def test_returns_none_when_corrupt(self, isolated_mcp_file: pathlib.Path) -> None:
         isolated_mcp_file.write_text("not json", encoding="utf-8")
+        assert shared_mcp_config_path() is None
+
+    def test_returns_none_when_file_has_no_servers(self, isolated_mcp_file: pathlib.Path) -> None:
+        isolated_mcp_file.write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
         assert shared_mcp_config_path() is None

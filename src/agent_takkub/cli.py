@@ -49,6 +49,12 @@ def _connect() -> socket.socket:
 
 
 def _request(payload: dict) -> dict:
+    # Stamp the Lead capability token when running inside a Lead pane.
+    # Teammates don't have TAKKUB_LEAD_TOKEN in their env, so their payloads
+    # won't carry the auth field and the server will reject Lead-only commands.
+    token = os.environ.get("TAKKUB_LEAD_TOKEN")
+    if token:
+        payload["auth"] = token
     s = _connect()
     try:
         s.sendall((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))

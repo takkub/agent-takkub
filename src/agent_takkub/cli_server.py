@@ -12,12 +12,18 @@ serialised naturally.
 from __future__ import annotations
 
 import json
+import secrets
 
 from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtNetwork import QHostAddress, QTcpServer, QTcpSocket
 
 from .config import write_port
 from .orchestrator import Orchestrator
+
+# Commands that mutate cockpit structure — only the Lead pane is allowed to
+# run these. The gate is enforced server-side so raw TCP clients that bypass
+# the cli.py role check (including confused teammate shells) are rejected.
+_LEAD_ONLY_CMDS = frozenset({"spawn", "assign", "close", "close-all"})
 
 
 class CliServer(QObject):
@@ -69,6 +75,29 @@ class CliServer(QObject):
         # project in that case. Reserved for the multi-tab refactor —
         # currently informational and only used to scope `list`.
         from_project = req.get("from_project")
+
+        # Server-side authorization for Lead-only commands.
+        # The CLI gate in cli.py blocks teammate roles textually, but raw TCP
+        # clients (confused pane shells, local processes) bypass that gate.
+        # We enforce here using the per-cockpit Lead capability token that is
+        # injected only into the Lead pane's env (TAKKUB_LEAD_TOKEN).
+        # secrets.compare_digest prevents timing-side-channel attacks.
+        if cmd in _LEAD_ONLY_CMDS:
+            lead_token = getattr(self._orch, "_lead_token", None)
+            caller_auth = req.get("auth") or ""
+            if not lead_token or not secrets.compare_digest(
+                caller_auth.encode(), lead_token.encode()
+            ):
+                self._reply(sock, ok=False, msg="unauthorized: lead-only command")
+                return
+
+        # done: reject from_role == "lead" — Lead never closes itself via done.
+        # This guard lives at the orchestrator level too; both layers protect
+        # against the done→close chain accidentally targeting the Lead pane.
+        if cmd == "done" and (req.get("from") or "").lower() == "lead":
+            self._reply(sock, ok=False, msg="lead cannot call done")
+            return
+
         try:
             if cmd == "spawn":
                 ok, msg = self._orch.spawn(req["role"], cwd=req.get("cwd"), project=from_project)

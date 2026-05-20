@@ -189,6 +189,41 @@ cockpit force-inject browser MCPs เข้าทุก pane ผ่าน `runti
 
 permission prompts: ครั้งแรกที่ MCP tool ถูกเรียกใน session ใหม่ user จะถูกถาม allow/deny หนึ่งครั้ง (ไม่ pre-allow ใน config เพราะ browser tools ใช้ไม่บ่อยและไม่อยากบังคับ trust ล่วงหน้า)
 
+### Optional: PMS MCP (manual setup outside cockpit)
+
+cockpit **ไม่ wire** pms MCP ให้แล้ว — security review 2026-05-20 ระบุว่า cockpit เคยเก็บ bearer token plaintext ลง `runtime/shared-mcp.json` (critical finding) ตอนนี้ลบทิ้ง ถ้าต้องการใช้ pms tools ใน **claude session ปกตินอก cockpit** ให้ register ใน `~/.claude.json` ของตัวเอง:
+
+```json
+{
+  "mcpServers": {
+    "pms": {
+      "type": "http",
+      "url": "https://api.wsol.co.th/pms/mcp",
+      "headers": {
+        "Authorization": "Bearer <YOUR_PMS_TOKEN>"
+      }
+    }
+  },
+  "permissions": {
+    "allow": [
+      "mcp__pms__pms_preview_task",
+      "mcp__pms__pms_get_task",
+      "mcp__pms__pms_list_tasks",
+      "mcp__pms__pms_list_workspaces",
+      "mcp__pms__pms_list_spaces",
+      "mcp__pms__pms_list_lists",
+      "mcp__pms__pms_list_statuses",
+      "mcp__pms__pms_resolve_list",
+      "mcp__pms__pms_create_task",
+      "mcp__pms__pms_update_task",
+      "mcp__pms__pms_add_comment"
+    ]
+  }
+}
+```
+
+**Note:** cockpit panes spawn ด้วย `--strict-mcp-config` + `--setting-sources project,local` → user-level `~/.claude.json` mcpServers **ไม่ inject เข้า cockpit pane** snippet นี้ใช้ได้กับ standalone claude session เท่านั้น ถ้าอยากได้ pms กลับเข้า cockpit pane อนาคต ต้อง impl env-based injection ใหม่ (ยังไม่อยู่ใน roadmap)
+
 ### Obsidian vault integration
 
 cockpit auto-mirrors decision logs และ live state ไปที่ vault ถ้าตั้งไว้:

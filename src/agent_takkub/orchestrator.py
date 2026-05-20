@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import secrets
 import time
 from datetime import datetime
 
@@ -653,10 +654,9 @@ class Orchestrator(QObject):
         # every project. Merge them into runtime/shared-mcp.json before
         # any pane spawns — the orchestrator will then hand the file to
         # claude via `--mcp-config` and panes pick the servers up
-        # uniformly across projects. Idempotent: existing pms config
-        # and bearer token are preserved untouched. Failure is
-        # non-fatal (logged once and panes spawn without browser MCPs)
-        # so a broken vault path or readonly runtime never blocks
+        # uniformly across projects. Idempotent: safe to call on every
+        # boot. Failure is non-fatal (logged once and panes spawn
+        # without browser MCPs) so a readonly runtime never blocks
         # cockpit startup.
         try:
             from .shared_dev_tools import ensure_browser_mcps, warm_browser_mcps
@@ -685,6 +685,13 @@ class Orchestrator(QObject):
         # Keyed by project namespace; flushed to Lead on next Lead spawn.
         self._pending_lead_cc: dict[str, list[dict]] = {}
         self._load_pending_cc()
+
+        # Per-cockpit-run capability token. Injected only into the Lead pane
+        # env (TAKKUB_LEAD_TOKEN) so the Lead takkub CLI can authenticate
+        # Lead-only server commands. Teammates don't get it — their CLI calls
+        # will be rejected server-side even if they connect to the socket.
+        # Generated fresh each boot; never written to disk, logs, or argv.
+        self._lead_token: str = secrets.token_urlsafe(32)
 
         # Idle watchdog bookkeeping. Per-role:
         #   first_idle_ts   — when the pane was first seen idle in this streak
@@ -965,6 +972,12 @@ class Orchestrator(QObject):
         # project — under the multi-tab refactor a Lead in unirecon
         # mustn't accidentally send to a backend pane that belongs to pms.
         env["TAKKUB_PROJECT"] = project_ns
+        # Inject the Lead capability token only into the Lead pane so its
+        # takkub CLI can authenticate Lead-only server commands. Teammates
+        # don't get this env var — the server will reject their Lead-only
+        # requests even if they dial the TCP socket directly.
+        if role_name == LEAD.name:
+            env["TAKKUB_LEAD_TOKEN"] = self._lead_token
         bin_dir = str(REPO_ROOT / "bin")
         env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
 
@@ -1078,41 +1091,21 @@ class Orchestrator(QObject):
             lead_guard = render_lead_settings(project_ns)
             argv.extend(["--settings", str(lead_guard)])
 
-        # Inject the cockpit's shared MCP config (pms MCP server with
-        # bearer token) so every spawned claude session has the pms
-        # tools available, regardless of what the project's own
-        # `.claude/settings.json` contains. The file lives under
-        # runtime/ which is gitignored, so the bearer never leaks via
-        # checked-in config. Skipped silently if the user hasn't set
-        # up the token yet (UI offers a "Setup pms MCP" prompt).
+        # Inject the cockpit's shared MCP config (browser MCPs) so every
+        # spawned claude session has playwright + chrome-devtools available
+        # regardless of what the project's own `.claude/settings.json`
+        # contains. Skipped silently if shared-mcp.json isn't populated yet.
         try:
-            from .shared_dev_tools import (
-                render_lead_mcp_config,
-                render_teammate_mcp_config,
-            )
+            from .shared_dev_tools import shared_mcp_config_path
 
-            # Lead gets full pms access (read + write tools); teammates
-            # get read-only pms tools. Both get browser MCPs.
-            # render_* returns None when pms isn't configured yet — panes
-            # still spawn, just without MCP tools.
-            if role_name == LEAD.name:
-                mcp_cfg = render_lead_mcp_config()
-            else:
-                mcp_cfg = render_teammate_mcp_config()
+            mcp_cfg = shared_mcp_config_path()
         except Exception:
             mcp_cfg = None
         if mcp_cfg:
             argv.extend(["--mcp-config", mcp_cfg])
-            # Force claude to use *only* our cockpit-managed MCP config.
-            # Without this flag claude *also* loads servers registered at
-            # user-level via `claude mcp add` (stored in ~/.claude.json),
-            # which is independent of --setting-sources. If a `pms` entry
-            # is registered there too — typical when the user once ran
-            # `claude mcp add pms ...` directly — the user-level config
-            # wins and Lead ends up calling the old/revoked bearer no
-            # matter how many times we rewrite runtime/shared-mcp.json.
-            # Strict mode means the cockpit's file is the single source
-            # of truth for MCP inside a pane.
+            # Force claude to use *only* our cockpit-managed MCP config so
+            # user-level entries registered via `claude mcp add` don't
+            # shadow or duplicate what the cockpit provides.
             argv.append("--strict-mcp-config")
 
         # Hard-deny built-in tools that don't fit the cockpit's
