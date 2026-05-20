@@ -1,7 +1,7 @@
 """Unit tests for provider_state — per-provider enable/disable state."""
+
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -69,7 +69,9 @@ def test_default_path_is_under_home_takkub(monkeypatch, tmp_path):
     # (use the module-level _PATH before any monkeypatch from other fixtures)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     import importlib
+
     import agent_takkub.provider_state as ps_module
+
     importlib.reload(ps_module)
     assert ps_module._PATH == tmp_path / ".takkub" / "disabled-providers.json"
     # Reload back so other tests aren't affected

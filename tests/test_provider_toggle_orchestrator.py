@@ -7,6 +7,7 @@ which is covered by manual smoke testing in spec section 8.2.
 Note: pytest-qt (qtbot fixture) is not installed in this repo. Tests use
 plain PyQt6 signal connection via a Python list to capture emissions.
 """
+
 from __future__ import annotations
 
 import pytest

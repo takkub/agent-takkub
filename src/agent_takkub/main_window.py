@@ -322,21 +322,21 @@ class MainWindow(QMainWindow):
 
         self._chip_codex = QPushButton("Codex", self)
         self._chip_codex.setToolTip(
-            "Codex: disabled — click to enable" if is_disabled(CODEX) else "Codex: enabled — click to disable"
+            "Codex: disabled — click to enable"
+            if is_disabled(CODEX)
+            else "Codex: enabled — click to disable"
         )
         self._chip_codex.setStyleSheet(self._provider_chip_style(CODEX, is_disabled(CODEX)))
-        self._chip_codex.clicked.connect(
-            lambda: self._on_provider_chip_clicked(CODEX)
-        )
+        self._chip_codex.clicked.connect(lambda: self._on_provider_chip_clicked(CODEX))
 
         self._chip_gemini = QPushButton("Gemini", self)
         self._chip_gemini.setToolTip(
-            "Gemini: disabled — click to enable" if is_disabled(GEMINI) else "Gemini: enabled — click to disable"
+            "Gemini: disabled — click to enable"
+            if is_disabled(GEMINI)
+            else "Gemini: enabled — click to disable"
         )
         self._chip_gemini.setStyleSheet(self._provider_chip_style(GEMINI, is_disabled(GEMINI)))
-        self._chip_gemini.clicked.connect(
-            lambda: self._on_provider_chip_clicked(GEMINI)
-        )
+        self._chip_gemini.clicked.connect(lambda: self._on_provider_chip_clicked(GEMINI))
 
         # Self-update chip. Polls `git fetch` + `git status` every 5 min
         # so a user that pulled their friend's commit from another machine
@@ -1777,12 +1777,16 @@ class MainWindow(QMainWindow):
         if provider == "codex" and hasattr(self, "_chip_codex"):
             self._chip_codex.setStyleSheet(self._provider_chip_style("codex", disabled))
             self._chip_codex.setToolTip(
-                "Codex: disabled — click to enable" if disabled else "Codex: enabled — click to disable"
+                "Codex: disabled — click to enable"
+                if disabled
+                else "Codex: enabled — click to disable"
             )
         elif provider == "gemini" and hasattr(self, "_chip_gemini"):
             self._chip_gemini.setStyleSheet(self._provider_chip_style("gemini", disabled))
             self._chip_gemini.setToolTip(
-                "Gemini: disabled — click to enable" if disabled else "Gemini: enabled — click to disable"
+                "Gemini: disabled — click to enable"
+                if disabled
+                else "Gemini: enabled — click to disable"
             )
 
     def _on_add_project_clicked(self) -> None:

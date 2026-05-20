@@ -50,16 +50,12 @@ def load() -> dict[str, bool]:
         return {}
     # Sanitize: drop entries with providers not in TOGGLABLE so a stale
     # entry from a previous build doesn't silently survive.
-    return {
-        str(k): bool(v) for k, v in data.items() if str(k) in TOGGLABLE
-    }
+    return {str(k): bool(v) for k, v in data.items() if str(k) in TOGGLABLE}
 
 
 def save(state: dict[str, bool]) -> None:
     """Persist `state` atomically. Drops keys not in TOGGLABLE."""
-    cleaned = {
-        str(k): bool(v) for k, v in state.items() if str(k) in TOGGLABLE
-    }
+    cleaned = {str(k): bool(v) for k, v in state.items() if str(k) in TOGGLABLE}
     _PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = _PATH.with_suffix(_PATH.suffix + ".tmp")
     tmp.write_text(json.dumps(cleaned, indent=2) + "\n", encoding="utf-8")

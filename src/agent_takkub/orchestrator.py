@@ -1647,22 +1647,20 @@ class Orchestrator(QObject):
 
         word = "DISABLED" if disabled else "ENABLED"
         suffix = (
-            "Do not propose this in routing or cross-check."
-            if disabled
-            else "Available again."
+            "Do not propose this in routing or cross-check." if disabled else "Available again."
         )
         notice = f"[system] {provider} provider {word}. {suffix}"
 
         # Broadcast to every Lead pane across all project tabs. Iterate
         # _panes_by_project directly because we want every Lead, not just
         # the active project's Lead.
-        for project_ns, panes in self._panes_by_project.items():
+        for _project_ns, panes in self._panes_by_project.items():
             lead = panes.get(LEAD.name)
             if lead and lead.session and lead.session.is_alive:
                 lead.session.write(notice)
                 # Same trailing-CR delay as done() so the inject lands
                 # after the inline text not before it.
-                QTimer.singleShot(150, lambda l=lead: l.session and l.session.write(b"\r"))
+                QTimer.singleShot(150, lambda pane=lead: pane.session and pane.session.write(b"\r"))
                 self.leadInjected.emit(notice)
             # If Lead isn't alive in this project, the next spawn's
             # _render_lead_context() will read the fresh state — no need
