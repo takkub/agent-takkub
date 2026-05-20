@@ -330,15 +330,19 @@ class PtySession(QObject):
     def is_at_ready_prompt(self) -> bool:
         """True when the underlying TUI is idle at its main input prompt.
 
-        Handles both claude and codex panes:
+        Handles claude, codex, and gemini panes:
           - claude: bottom hint 'bypass permissions' or 'shift+tab to cycle',
                     never 'esc to interrupt' (working) or trust modal.
           - codex:  splash banner 'openai codex (v' visible, no modal
                     (`update available!`, `do you trust`, `press enter
                     to continue`) and no active interrupt indicator.
+          - gemini: prompt hint 'type your message or @path' visible.
+                    Without this marker, the idle watchdog never fired
+                    on gemini panes (root cause of 'gemini forgot
+                    takkub done' incidents 2026-05-20).
         """
         text = "\n".join(self.display_lines()).lower()
-        # ── modal / interrupt blockers (apply to both providers) ────
+        # ── modal / interrupt blockers (apply to all providers) ─────
         if "trust this folder" in text:
             return False
         if "do you trust the contents of this directory" in text:
@@ -351,5 +355,7 @@ class PtySession(QObject):
             return False
         # ── ready markers ───────────────────────────────────────────
         if "openai codex (v" in text:
+            return True
+        if "type your message or" in text:  # gemini's input prompt hint
             return True
         return "bypass permissions" in text or "shift+tab to cycle" in text

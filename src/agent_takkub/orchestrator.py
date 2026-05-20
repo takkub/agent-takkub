@@ -79,8 +79,10 @@ STUCK_THRESHOLD_S = 10 * 60
 STUCK_RECOVER_COOLDOWN_S = 5 * 60
 IDLE_WATCHDOG_INTERVAL_MS = 5_000
 IDLE_REMINDER_TEXT = (
-    "🔔 [auto-reminder] task เสร็จแล้วใช่มั้ย? ถ้าใช่ run `takkub done [note]` "
-    "รายงาน Lead เลย ถ้ายังทำต่อ ignore ข้อความนี้"
+    "🔔 [auto-reminder] pane นี้ idle อยู่ — ถ้า task เสร็จแล้วต้อง run "
+    '`takkub done "<summary>"` เป็นคำสั่ง shell **ตอนนี้** (ไม่ใช่พิมพ์เป็น text). '
+    "Lead ไม่ได้รับ notice จนกว่าจะ run คำสั่งนี้จริง pane จะค้างจน auto-recover. "
+    'ยังทำงานต่ออยู่ → ignore ข้อความนี้ ถ้าติด blocker → `takkub send --to lead "..."`'
 )
 
 # Auto-respawn on unexpected pane crash. The orchestrator notices when a

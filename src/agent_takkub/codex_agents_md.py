@@ -39,9 +39,18 @@ operator (or by a Claude Lead pane via `takkub assign --role codex
 
 - **Do the task yourself.** Don't try to spawn sub-agents or delegate.
   You are the specialist; if you're stuck, ask Lead via `takkub send`.
-- **One task per session.** When the work is done, call
-  `takkub done "<one-line summary>"` so Lead is notified and the
-  cockpit can free the pane.
+- **One task per session.** When the work is done, **YOU MUST call**
+  `takkub done "<one-line summary>"` via shell command — not as text
+  description in your output. Without this, Lead is not notified and
+  the pane idles forever. **No exceptions for "review/analysis" tasks
+  or anything else** unless the operator explicitly says "interactive
+  brainstorm — keep pane open" in the task prompt.
+- **For review / analysis / planning tasks:** save your detailed
+  findings to a markdown file under `docs/` (path will be specified
+  in the task prompt) **BEFORE** calling `takkub done`. The done
+  summary stays one-line; the file holds the substance. Without
+  saving first, your reasoning is lost when the pane auto-closes 2.5s
+  after done.
 - **No long-running foreground commands.** Background docker/dev
   servers with `&` + redirect, or use `-d`. Never `npm run dev` in
   the foreground — it never returns and the pane hangs.
@@ -58,13 +67,18 @@ operator (or by a Claude Lead pane via `takkub assign --role codex
 The `takkub` binary is on `PATH` inside this pane — just run it as a
 shell command.
 
-## When the user said "brainstorm"
+## "Brainstorm" exception — narrow scope only
 
-If the prompt is exploratory ("ideas for X", "how should we approach Y"):
+The ONLY case where you skip `takkub done` is when the task prompt
+contains the literal phrase **"interactive brainstorm"** or
+**"keep pane open"**. In that case:
 respond with 3-5 concrete options + the main trade-off of each.
-Don't write code until the user picks a direction. **Do not call
-`takkub done` for brainstorm sessions** — the user will close the
-pane manually when they've absorbed the answer.
+Don't write code until the user picks a direction. The operator will
+close the pane manually.
+
+**"Review", "analyze", "evaluate", "summarize", "plan" are NOT
+brainstorm sessions** — they produce deliverable output and MUST
+end with `takkub done` after saving findings to file.
 
 ## Version control (mandatory)
 
