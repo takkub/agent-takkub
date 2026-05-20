@@ -14,3 +14,5 @@ runtime/
 # Cockpit-managed Codex cheatsheet — auto-planted at codex pane
 # spawn time, marker-tagged, never user-authored. Safe to ignore.
 AGENTS.md
+# Cockpit-managed Gemini cheatsheet — same pattern as AGENTS.md above.
+GEMINI.md
