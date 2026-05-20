@@ -317,7 +317,7 @@ def _capture_spawn_argv(
 
     captured: list[list[str]] = []
 
-    def fake_pty_spawn(self_pty, argv, cwd, env):
+    def fake_pty_spawn(self_pty, argv, cwd, env, **kwargs):
         captured.append(list(argv))
 
     monkeypatch.setattr(orch_mod, "find_claude_executable", lambda: "claude")
@@ -361,7 +361,9 @@ def _capture_spawn_argv(
 
     with patch.object(orch_mod.PtySession, "__new__", return_value=fake_session):
         with patch.object(
-            fake_session, "spawn", side_effect=lambda argv, cwd, env: captured.append(list(argv))
+            fake_session,
+            "spawn",
+            side_effect=lambda argv, cwd, env, **kwargs: captured.append(list(argv)),
         ):
             # patch shared_dev_tools inside the spawn import
             with patch.dict(

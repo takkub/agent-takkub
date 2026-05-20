@@ -115,6 +115,7 @@ class PtySession(QObject):
         self._reader: _ReaderThread | None = None
         self._writer: _WriterThread | None = None
         self._alive = False
+        self._transcript = None  # open file handle; None = not capturing
 
     # ──────────────────────────────────────────────────────────────
     # lifecycle
@@ -124,6 +125,7 @@ class PtySession(QObject):
         argv: Sequence[str],
         cwd: str | None = None,
         env: dict | None = None,
+        transcript_path: str | None = None,
     ) -> None:
         import winpty  # `pywinpty` pkg, module name is `winpty`
 
@@ -168,6 +170,17 @@ class PtySession(QObject):
             for delay in (150, 400, 900, 1800, 3500):
                 QTimer.singleShot(delay, _sweep)
 
+        if transcript_path is not None:
+            try:
+                import logging
+
+                self._transcript = open(transcript_path, "wb")
+            except Exception as exc:
+                logging.getLogger(__name__).warning(
+                    "transcript open failed (%s): %r — PTY still running", transcript_path, exc
+                )
+                self._transcript = None
+
         self._reader = _ReaderThread(self._proc, parent=self)
         self._reader.bytesReceived.connect(self._on_bytes)
         self._reader.finished_clean.connect(self._on_exit)
@@ -181,6 +194,13 @@ class PtySession(QObject):
         # sees output ASAP. pyte still consumes them for the state-detection
         # helpers (is_at_trust_prompt / is_at_ready_prompt / display_lines).
         self.bytesIn.emit(data)
+        if self._transcript is not None:
+            try:
+                self._transcript.write(data)
+                self._transcript.flush()
+            except Exception:
+                # disk full / handle closed — stop trying rather than blocking the PTY
+                self._transcript = None
         try:
             self.stream.feed(data)
         except Exception:
@@ -230,6 +250,12 @@ class PtySession(QObject):
             except Exception:
                 pass
         self._alive = False
+        if self._transcript is not None:
+            try:
+                self._transcript.close()
+            except Exception:
+                pass
+            self._transcript = None
 
     @property
     def is_alive(self) -> bool:

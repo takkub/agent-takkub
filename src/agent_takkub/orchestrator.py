@@ -246,7 +246,13 @@ def _is_junk_project(project: str) -> bool:
     return any(p.startswith(prefix) for prefix in _JUNK_PROJECT_PREFIXES)
 
 
-def _render_decision_note(project: str, role: str, note: str, now: datetime) -> str:
+def _render_decision_note(
+    project: str,
+    role: str,
+    note: str,
+    now: datetime,
+    transcript_path: str | None = None,
+) -> str:
     """Render the markdown body shared by the local session log and the
     vault mirror. Single source of truth so the two copies don't drift.
 
@@ -257,9 +263,12 @@ def _render_decision_note(project: str, role: str, note: str, now: datetime) -> 
         graph view clusters each session under its project page.
       - Plain markdown `## Note` block so events.log/hot.md scrapers
         keep working with the existing pattern.
+      - Optional `## Transcript` section with a relative path to the raw
+        PTY byte-stream file (ANSI included) so the full pane output is
+        one `less -R` away.
     """
     iso = now.isoformat(timespec="seconds")
-    return (
+    body = (
         f"---\n"
         f"role: {role}\n"
         f"project: {project}\n"
@@ -271,6 +280,18 @@ def _render_decision_note(project: str, role: str, note: str, now: datetime) -> 
         f"**Role:** {role}\n\n"
         f"## Note\n\n{note.strip()}\n"
     )
+    if transcript_path:
+        try:
+            rel = pathlib.Path(transcript_path).relative_to(REPO_ROOT).as_posix()
+        except ValueError:
+            rel = transcript_path
+        body += (
+            f"\n## Transcript\n\n"
+            f"Raw byte stream (with ANSI): `{rel}`\n\n"
+            f"ดูดิบ: `cat {rel}`  \n"
+            f"ดูแบบมีสี: `less -R {rel}`\n"
+        )
+    return body
 
 
 # Where teammate-pane state lives between cockpit restarts. Lead panes
@@ -652,6 +673,23 @@ def _default_plugin_dirs() -> list[str]:
     return out
 
 
+def _build_transcript_path(project_ns: str, role_name: str) -> str:
+    """Return an absolute path for the PTY byte-stream transcript file.
+
+    The path mirrors the decision-log layout so the two artefacts live
+    side-by-side under runtime/sessions/<date>/<project>/:
+        <role>-<HHMMSS>.transcript.log   ← raw bytes (this function)
+        <role>-<HHMMSS>.md               ← markdown summary (done())
+    """
+    now = datetime.now()
+    day = RUNTIME_DIR / "sessions" / now.strftime("%Y-%m-%d") / project_ns
+    try:
+        day.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return str(day / f"{role_name}-{now.strftime('%H%M%S')}.transcript.log")
+
+
 class Orchestrator(QObject):
     """Owns the pane registry and routes commands.
 
@@ -901,8 +939,10 @@ class Orchestrator(QObject):
                 "-y",  # yolo: skip per-command approval prompts (parity with codex --ask-for-approval never)
             ]
             session = PtySession(cols=110, rows=36, parent=self)
+            _t_path = _build_transcript_path(project_ns, role_name)
+            pane._transcript_path = _t_path
             try:
-                session.spawn(argv=gemini_argv, cwd=spawn_cwd, env=env)
+                session.spawn(argv=gemini_argv, cwd=spawn_cwd, env=env, transcript_path=_t_path)
             except Exception as e:
                 return False, f"failed to spawn gemini: {e}"
             pane.attach_session(session, cwd=spawn_cwd)
@@ -951,8 +991,10 @@ class Orchestrator(QObject):
                 "workspace-write",
             ]
             session = PtySession(cols=110, rows=36, parent=self)
+            _t_path = _build_transcript_path(project_ns, role_name)
+            pane._transcript_path = _t_path
             try:
-                session.spawn(argv=codex_argv, cwd=spawn_cwd, env=env)
+                session.spawn(argv=codex_argv, cwd=spawn_cwd, env=env, transcript_path=_t_path)
             except Exception as e:
                 return False, f"failed to spawn codex: {e}"
             pane.attach_session(session, cwd=spawn_cwd)
@@ -1195,8 +1237,10 @@ class Orchestrator(QObject):
             resumed = True
 
         session = PtySession(cols=110, rows=36, parent=self)
+        _t_path = _build_transcript_path(project_ns, role_name)
+        pane._transcript_path = _t_path
         try:
-            session.spawn(argv=argv, cwd=spawn_cwd, env=env)
+            session.spawn(argv=argv, cwd=spawn_cwd, env=env, transcript_path=_t_path)
         except Exception as e:
             return False, f"failed to spawn claude: {e}"
 
@@ -1722,7 +1766,10 @@ class Orchestrator(QObject):
         QTimer.singleShot(2_500, lambda: self.close(from_role, project=project_ns))
         _log_event("done", role=from_role, note=note[:200])
         now = datetime.now()
-        self._save_decision_note(project_ns, from_role, note, now=now)
+        transcript_path = getattr(pane, "_transcript_path", None)
+        self._save_decision_note(
+            project_ns, from_role, note, now=now, transcript_path=transcript_path
+        )
         stamp = now.strftime("%Y-%m-%dT%H%M%S")
         self._recent_done.insert(0, (project_ns, from_role, f"{stamp}-{from_role}.md"))
         del self._recent_done[20:]
@@ -1734,7 +1781,11 @@ class Orchestrator(QObject):
 
     @staticmethod
     def _save_decision_note(
-        project: str, role: str, note: str, now: datetime | None = None
+        project: str,
+        role: str,
+        note: str,
+        now: datetime | None = None,
+        transcript_path: str | None = None,
     ) -> None:
         """Persist a teammate's `takkub done` note as a small markdown
         file under `runtime/sessions/<YYYY-MM-DD>/<project>/<role>-<HHMMSS>.md`,
@@ -1767,7 +1818,7 @@ class Orchestrator(QObject):
             return
         if now is None:
             now = datetime.now()
-        body = _render_decision_note(project, role, note, now)
+        body = _render_decision_note(project, role, note, now, transcript_path=transcript_path)
         try:
             day = RUNTIME_DIR / "sessions" / now.strftime("%Y-%m-%d") / project
             day.mkdir(parents=True, exist_ok=True)
