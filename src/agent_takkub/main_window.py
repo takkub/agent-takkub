@@ -20,7 +20,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtCore import QSettings, Qt, QThreadPool, QTimer
+from PyQt6.QtCore import QCoreApplication, QSettings, Qt, QThreadPool, QTimer
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QApplication,
@@ -44,6 +44,7 @@ from .agent_pane import AgentPane
 from .cli_server import CliServer
 from .config import (
     EVENTS_LOG,
+    PORT_FILE,
     REPO_ROOT,
     active_project,
     get_open_tabs,
@@ -54,7 +55,7 @@ from .config import (
     set_open_tabs,
 )
 from .logs_panel import LogsPanel
-from .orchestrator import Orchestrator
+from .orchestrator import Orchestrator, _log_event
 from .project_tab import ProjectTab
 from .roles import DEFAULT_TEAMMATES, LEAD, Role, by_name
 from .rtk_helper import install_rtk, is_rtk_installed, rtk_binary_available
@@ -340,6 +341,11 @@ class MainWindow(QMainWindow):
         )
         self._btn_finish.clicked.connect(self._on_finish_job_clicked)
 
+        self._btn_restart = QPushButton(self)
+        self._btn_restart.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
+        self._btn_restart.setToolTip("Restart cockpit (kills all panes, relaunches app)")
+        self._btn_restart.clicked.connect(self._on_restart_cockpit_clicked)
+
         self._btn_providers = QPushButton("🤖 Providers", self)
         self._btn_providers.setToolTip(
             "Configure which CLI (claude / codex / gemini) backs each teammate role.\n"
@@ -422,6 +428,7 @@ class MainWindow(QMainWindow):
         self._status.addPermanentWidget(self._btn_assign)
         self._status.addPermanentWidget(self._btn_logs)
         self._status.addPermanentWidget(self._btn_finish)
+        self._status.addPermanentWidget(self._btn_restart)
         self._status.addPermanentWidget(self._btn_providers)
         self._status.addPermanentWidget(self._btn_help)
         # Sync rtk button visibility after every permanent widget has been
@@ -1223,6 +1230,42 @@ class MainWindow(QMainWindow):
             8_000,
         )
 
+    def _on_restart_cockpit_clicked(self) -> None:
+        """User-triggered full cockpit restart. Counts in-flight panes,
+        asks for confirmation, logs the event, then delegates to
+        `_restart_cockpit` which persists state and relaunches."""
+        working_count = sum(
+            1
+            for project_panes in self.orch._panes_by_project.values()
+            for pane in project_panes.values()
+            if getattr(pane, "state", None) in ("working", "active")
+        )
+
+        if working_count > 0:
+            body = (
+                f"{working_count} pane(s) currently working. "
+                "Restart will terminate in-flight tasks. Continue?"
+            )
+        else:
+            body = "Restart cockpit? All panes will be closed and the app will relaunch."
+
+        confirm = QMessageBox.question(
+            self,
+            "Restart cockpit",
+            body,
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if confirm != QMessageBox.StandardButton.Ok:
+            return
+
+        _log_event("cockpit_restart", reason="user_action", working_panes=working_count)
+
+        # Do NOT close panes here — _restart_cockpit() persists snapshot while
+        # panes are still alive (is_alive=True), then atexit kills them.
+        # Closing first would produce an empty snapshot → no teammate restore.
+        self._restart_cockpit()
+
     # ------------------------------------------------------------------
     # Threaded recurring update poll (Layer A)
     # ------------------------------------------------------------------
@@ -1554,15 +1597,39 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(500, self._restart_cockpit)
 
     def _restart_cockpit(self) -> None:
-        """Spawn a fresh agent-takkub process and quit this one. The
-        new process picks up the session-resume snapshot that
-        closeEvent will write, so open tabs + active panes survive
-        the restart automatically.
+        """Spawn a fresh agent-takkub process and quit this one.
+
+        Explicitly persists window state, open tabs, and the session-resume
+        snapshot BEFORE spawning the successor so data survives even when
+        QCoreApplication.quit() skips closeEvent (e.g. called from a
+        non-main-thread context or during a forced restart).
         """
         import subprocess
         import sys
 
-        from PyQt6.QtCore import QCoreApplication
+        # Persist state up-front — don't rely on closeEvent firing after quit().
+        try:
+            self._save_window_state()
+        except Exception:
+            pass
+        try:
+            self._persist_open_tabs()
+        except Exception:
+            pass
+        try:
+            self.orch.write_session_snapshot()
+        except Exception:
+            pass
+        try:
+            self.orch.write_resume_briefs()
+        except Exception:
+            pass
+        # Release port file so the successor can reclaim or renumber cleanly.
+        try:
+            if PORT_FILE.exists():
+                PORT_FILE.unlink()
+        except Exception:
+            pass
 
         try:
             subprocess.Popen(
