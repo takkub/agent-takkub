@@ -164,3 +164,5 @@ Both events captured in `runtime/events.log`.
 - ⚪ PTY resize fully verified (signal wired, never live-tested with claude reflow)
 - ⚪ Memory growth on long sessions (`_fmt_cache` no cap)
 - ⚪ `install.sh` for macOS/Linux (Windows-first by design)
+- ⚪ **Lead hardening — Gap A: Bash write-boundary bypass** — Lead-side `Edit`/`Write` tools deny BLOCKED_DIRS, but shell (`python -c "open(...).write(...)"`, `Set-Content`, redirect `>`, `git apply`) goes through unrestricted. Needs design: PreToolUse hook on `Bash`? Sandbox cwd? Audit-only via events.log? (Surfaced by codex review during Lead self-protection fix, 2026-05-20.)
+- ⚪ **Lead hardening — Gap B: CliServer has no role gate** — `cli_server.py:70` trusts loopback JSON; a confused pane can open the TCP socket directly and bypass `cli.py._enforce_role_gate`. Orchestrator-level guards catch lifecycle invariants, but the IPC boundary itself accepts any `cmd`. Fix sketch: move role gate into `CliServer._dispatch` using stamped `from`/`from_project` fields. (Surfaced by codex review during Lead self-protection fix, 2026-05-20.)
