@@ -217,3 +217,38 @@ class TestAutoRecoverStuck:
         pane = _FakePane(state="working", last_out=now - STUCK_THRESHOLD_S - 1)
         _recover(fake, "backend", "p", pane, now)
         assert fake._last_stuck_recover["p::backend"] == now
+
+    def test_silent_for_s_computed_before_timestamp_reset(self) -> None:
+        """Regression: silent_for_s must capture the *pre-reset* duration,
+        not 0 (which is what you get if you reset _last_output_ts first)."""
+        import json
+
+        from agent_takkub.config import EVENTS_LOG, ensure_runtime
+
+        # We verify the logged value by monkeypatching _log_event to capture kwargs.
+        logged: list[dict] = []
+
+        import agent_takkub.orchestrator as orch_mod
+
+        orig_log = orch_mod._log_event
+
+        def capture_log(event, **kw):
+            logged.append({"event": event, **kw})
+
+        orch_mod._log_event = capture_log
+        try:
+            fake = _FakeOrch()
+            now = 1_000_000.0
+            silence = STUCK_THRESHOLD_S + 42
+            pane = _FakePane(state="working", last_out=now - silence)
+            _recover(fake, "backend", "p", pane, now)
+        finally:
+            orch_mod._log_event = orig_log
+
+        stuck_log = next(
+            (e for e in logged if e.get("event") == "stuck_pane_recover"), None
+        )
+        assert stuck_log is not None, "stuck_pane_recover event not logged"
+        assert stuck_log["silent_for_s"] == int(silence), (
+            f"expected {int(silence)}, got {stuck_log['silent_for_s']}"
+        )

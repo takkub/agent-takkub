@@ -46,6 +46,7 @@ from .config import (
     EVENTS_LOG,
     PORT_FILE,
     REPO_ROOT,
+    _write_json_atomic,
     active_project,
     get_open_tabs,
     lead_cwd,
@@ -53,6 +54,7 @@ from .config import (
     preset_roles_for_active,
     set_active_project,
     set_open_tabs,
+    validate_name,
 )
 from .logs_panel import LogsPanel
 from .orchestrator import Orchestrator, _log_event
@@ -1777,7 +1779,7 @@ class MainWindow(QMainWindow):
         data["active"] = name
 
         PROJECTS_JSON.parent.mkdir(parents=True, exist_ok=True)
-        PROJECTS_JSON.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        _write_json_atomic(PROJECTS_JSON, data)
 
         self._refresh_project_list()
         # If this project already has a tab (re-adding the same name) just
@@ -1821,8 +1823,12 @@ class MainWindow(QMainWindow):
             )
             if not ok or not name:
                 return
-            name = name.strip().lower().replace(" ", "-")
-            if not name:
+            try:
+                name = validate_name(name, "role")
+            except ValueError as exc:
+                from PyQt6.QtWidgets import QMessageBox
+
+                QMessageBox.warning(self, "Invalid role name", str(exc))
                 return
             # let the user pick a colour for the dot indicator
             picker = QColorDialog(self)

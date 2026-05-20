@@ -101,37 +101,43 @@ class TestCwdWithinProject:
         self, two_project_json: pathlib.Path, tmp_path: pathlib.Path
     ) -> None:
         cwd = str(tmp_path / "proj_a" / "api")
-        assert orch_mod._cwd_within_project(cwd, "proj_a") is True
+        assert orch_mod._cwd_within_project(cwd, "proj_a", "backend") is True
 
     def test_accepts_subdir_of_project_path(
         self, two_project_json: pathlib.Path, tmp_path: pathlib.Path
     ) -> None:
         cwd = str(tmp_path / "proj_a" / "api" / "src" / "handlers")
-        assert orch_mod._cwd_within_project(cwd, "proj_a") is True
+        assert orch_mod._cwd_within_project(cwd, "proj_a", "backend") is True
 
     def test_rejects_sibling_project_path(
         self, two_project_json: pathlib.Path, tmp_path: pathlib.Path
     ) -> None:
         cwd = str(tmp_path / "proj_b" / "api")
-        assert orch_mod._cwd_within_project(cwd, "proj_a") is False
+        assert orch_mod._cwd_within_project(cwd, "proj_a", "backend") is False
 
     def test_rejects_completely_unrelated_path(
         self, two_project_json: pathlib.Path, tmp_path: pathlib.Path
     ) -> None:
         cwd = str(tmp_path / "somewhere_else" / "foo")
-        assert orch_mod._cwd_within_project(cwd, "proj_a") is False
+        assert orch_mod._cwd_within_project(cwd, "proj_a", "backend") is False
 
-    def test_accepts_cockpit_repo_root_for_any_project(
+    def test_accepts_cockpit_repo_root_for_lead(
         self, two_project_json: pathlib.Path, tmp_path: pathlib.Path
     ) -> None:
         cockpit = tmp_path / "cockpit"
-        assert orch_mod._cwd_within_project(str(cockpit), "proj_a") is True
+        assert orch_mod._cwd_within_project(str(cockpit), "proj_a", "lead") is True
 
-    def test_accepts_cockpit_subdir_for_any_project(
+    def test_accepts_cockpit_subdir_for_lead(
         self, two_project_json: pathlib.Path, tmp_path: pathlib.Path
     ) -> None:
         cockpit_sub = tmp_path / "cockpit" / "runtime" / "sessions"
-        assert orch_mod._cwd_within_project(str(cockpit_sub), "proj_a") is True
+        assert orch_mod._cwd_within_project(str(cockpit_sub), "proj_a", "lead") is True
+
+    def test_rejects_cockpit_repo_root_for_teammate(
+        self, two_project_json: pathlib.Path, tmp_path: pathlib.Path
+    ) -> None:
+        cockpit = tmp_path / "cockpit"
+        assert orch_mod._cwd_within_project(str(cockpit), "proj_a", "backend") is False
 
     def test_rejects_path_for_default_namespace(
         self, two_project_json: pathlib.Path, tmp_path: pathlib.Path
@@ -139,7 +145,7 @@ class TestCwdWithinProject:
         # "default" project has no paths — only cockpit exception can pass
         unrelated = str(tmp_path / "proj_a" / "api")
         # cwd is NOT under the cockpit dir, so it must be rejected for "default"
-        assert orch_mod._cwd_within_project(unrelated, "default") is False
+        assert orch_mod._cwd_within_project(unrelated, "default", "backend") is False
 
 
 # ─────────────────────────────────────────────────────────────
@@ -182,7 +188,7 @@ def test_spawn_refuses_cwd_outside_project_boundaries(
 ) -> None:
     """spawn() must return (False, error) when explicit cwd falls outside project."""
     outside = str(tmp_path / "proj_b" / "api")
-    assert not orch_mod._cwd_within_project(outside, "proj_a"), (
+    assert not orch_mod._cwd_within_project(outside, "proj_a", "backend"), (
         "pre-condition: outside path must fail the guard"
     )
 
@@ -191,7 +197,7 @@ def test_spawn_allows_cwd_inside_project_boundary(
     two_project_json: pathlib.Path, tmp_path: pathlib.Path
 ) -> None:
     inside = str(tmp_path / "proj_a" / "api")
-    assert orch_mod._cwd_within_project(inside, "proj_a")
+    assert orch_mod._cwd_within_project(inside, "proj_a", "backend")
 
 
 # ─────────────────────────────────────────────────────────────

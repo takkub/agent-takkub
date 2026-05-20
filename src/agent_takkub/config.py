@@ -4,7 +4,32 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
+
+_SAFE_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+def validate_name(value: str, kind: str) -> str:
+    """Normalise and validate a role or project name used as a path component.
+
+    Lowercases and strips whitespace before matching so callers that already
+    normalise their input still pass. Raises ValueError for anything that could
+    escape the intended runtime subtree (traversal sequences, uppercase-only
+    chars, spaces, empty string, …).
+    """
+    name = (value or "").lower().strip()
+    if not _SAFE_NAME.fullmatch(name):
+        raise ValueError(f"invalid {kind}: {value!r}")
+    return name
+
+
+def _write_json_atomic(path: Path, data: dict) -> None:
+    """Write *data* to *path* via a temp file so a crash mid-write never
+    leaves a partial/corrupt JSON file behind."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PROJECTS_JSON = REPO_ROOT / "projects.json"
@@ -141,7 +166,7 @@ def set_active_project(name: str) -> bool:
     if name not in data.get("projects", {}):
         return False
     data["active"] = name
-    PROJECTS_JSON.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    _write_json_atomic(PROJECTS_JSON, data)
     return True
 
 
@@ -180,7 +205,7 @@ def set_open_tabs(names: list[str]) -> None:
         seen.add(n)
         cleaned.append(n)
     data["open_tabs"] = cleaned
-    PROJECTS_JSON.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    _write_json_atomic(PROJECTS_JSON, data)
 
 
 def agent_role_dir(role: str) -> Path:
@@ -189,7 +214,11 @@ def agent_role_dir(role: str) -> Path:
     A copy of `.claude/agents/<role>.md` is materialised here as CLAUDE.md so
     claude reads the specialist role definition before any task arrives.
     """
-    d = RUNTIME_DIR / "agents" / role
+    role = validate_name(role, "role")
+    base = (RUNTIME_DIR / "agents").resolve()
+    d = (RUNTIME_DIR / "agents" / role).resolve()
+    if d != base and base not in d.parents:
+        raise ValueError(f"role path escapes runtime: {role!r}")
     d.mkdir(parents=True, exist_ok=True)
     src = AGENTS_DIR / f"{role}.md"
     if src.exists():

@@ -33,6 +33,7 @@ from .config import (
     find_claude_executable,
     lead_cwd,
     load_projects,
+    validate_name,
 )
 from .pty_session import PtySession
 from .roles import LEAD
@@ -459,11 +460,16 @@ def _allowed_project_roots(project: str) -> list[pathlib.Path]:
     return [pathlib.Path(p).resolve() for p in (proj.get("paths") or {}).values()]
 
 
-def _cwd_within_project(cwd: str, project: str) -> bool:
-    """True when `cwd` resolves under one of `project`'s configured roots,
-    or under the cockpit repo itself (needed for Lead self-edit tasks)."""
+def _cwd_within_project(cwd: str, project: str, role_name: str) -> bool:
+    """True when `cwd` resolves under one of `project`'s configured roots.
+
+    The cockpit repo-root bypass is intentionally restricted to Lead: teammates
+    of unrelated projects must not inherit Lead's self-edit privileges.
+    """
     target = pathlib.Path(cwd).resolve()
-    if target == REPO_ROOT.resolve() or REPO_ROOT.resolve() in target.parents:
+    if role_name == LEAD.name and (
+        target == REPO_ROOT.resolve() or REPO_ROOT.resolve() in target.parents
+    ):
         return True
     return any(target == root or root in target.parents for root in _allowed_project_roots(project))
 
@@ -740,6 +746,7 @@ class Orchestrator(QObject):
         project from projects.json, falling back to a sentinel "default"
         when no project is configured (typical in unit tests)."""
         if project:
+            validate_name(project, "project")  # raises ValueError on traversal attempts
             return project
         name, _ = active_project()
         return name or "default"
@@ -791,7 +798,10 @@ class Orchestrator(QObject):
     def spawn(
         self, role_name: str, cwd: str | None = None, project: str | None = None
     ) -> tuple[bool, str]:
-        role_name = role_name.lower().strip()
+        try:
+            role_name = validate_name(role_name, "role")
+        except ValueError as exc:
+            return False, str(exc)
         project_ns = self._resolve_project(project)
         project_panes = self._project_panes(project_ns)
         pane = project_panes.get(role_name)
@@ -819,7 +829,7 @@ class Orchestrator(QObject):
         # "default" namespace (unit-test / no-project) is exempt since it has no
         # configured paths to validate against. The cockpit repo itself is always
         # allowed so Lead can self-edit cockpit files (CLAUDE.md, projects.json, …).
-        if cwd and project_ns != "default" and not _cwd_within_project(cwd, project_ns):
+        if cwd and project_ns != "default" and not _cwd_within_project(cwd, project_ns, role_name):
             return False, f"cwd '{cwd}' is outside project '{project_ns}' paths"
 
         # ── codex pane: non-claude path ─────────────────────────────
@@ -1432,7 +1442,10 @@ class Orchestrator(QObject):
         for item in items:
             payload = _paste_payload(item["body"])
             lead.session.write(payload)
-            lead.session.write(b"\r")
+            QTimer.singleShot(
+                _enter_delay_ms(payload),
+                lambda s=lead.session: s and s.write(b"\r"),
+            )
         _log_event("send_cc_flushed", project=project_ns, count=len(items))
 
     def send(
@@ -1442,7 +1455,10 @@ class Orchestrator(QObject):
         from_role: str | None = None,
         project: str | None = None,
     ) -> tuple[bool, str]:
-        to_role = to_role.lower().strip()
+        try:
+            to_role = validate_name(to_role, "role")
+        except ValueError as exc:
+            return False, str(exc)
         project_ns = self._resolve_project(project)
         project_panes = self._project_panes(project_ns)
         pane = project_panes.get(to_role)
@@ -1552,7 +1568,10 @@ class Orchestrator(QObject):
         return True, f"{role_name} closed"
 
     def done(self, from_role: str, note: str = "", project: str | None = None) -> tuple[bool, str]:
-        from_role = from_role.lower().strip()
+        try:
+            from_role = validate_name(from_role, "role")
+        except ValueError as exc:
+            return False, str(exc)
         if from_role == LEAD.name:
             return False, "lead cannot call done on itself"
         project_ns = self._resolve_project(project)
@@ -2022,6 +2041,7 @@ class Orchestrator(QObject):
         cwd = pane._session_cwd
         key = f"{project}::{role}"
         self._last_stuck_recover[key] = now
+        silent_for_s = int(now - getattr(pane, "_last_output_ts", now))
         # Reset the output timestamp so the next tick doesn't re-trigger
         # before claude has had a chance to print anything from the new
         # session.
@@ -2031,7 +2051,7 @@ class Orchestrator(QObject):
             role=role,
             project=project,
             cwd=cwd or "",
-            silent_for_s=int(now - getattr(pane, "_last_output_ts", now)),
+            silent_for_s=silent_for_s,
         )
         self.close(role, project=project)
         # 2 s pause so the close has time to terminate the PTY and tear
