@@ -14,8 +14,7 @@ from unittest.mock import MagicMock
 import pytest
 from PyQt6.QtCore import QCoreApplication
 
-from agent_takkub.cli_server import CliServer, _LEAD_ONLY_CMDS
-
+from agent_takkub.cli_server import _LEAD_ONLY_CMDS, CliServer
 
 # ─────────────────────────────────────────────────────────────
 # Fixtures

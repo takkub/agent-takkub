@@ -13,11 +13,10 @@ import pathlib
 
 import pytest
 
-from agent_takkub.config import _write_json_atomic, validate_name
-from agent_takkub import config as config_mod
-from agent_takkub.orchestrator import LEAD, _cwd_within_project
 import agent_takkub.orchestrator as orch_mod
-
+from agent_takkub import config as config_mod
+from agent_takkub.config import _write_json_atomic, validate_name
+from agent_takkub.orchestrator import LEAD, _cwd_within_project
 
 # ──────────────────────────────────────────────────────────────────────────────
 # validate_name
@@ -166,9 +165,7 @@ class TestCwdWithinProject:
         subdir.mkdir()
         assert _cwd_within_project(str(subdir), project_env["project"], LEAD.name) is True
 
-    def test_unrelated_path_denied_for_all(
-        self, project_env: dict, tmp_path: pathlib.Path
-    ) -> None:
+    def test_unrelated_path_denied_for_all(self, project_env: dict, tmp_path: pathlib.Path) -> None:
         unrelated = tmp_path / "unrelated"
         unrelated.mkdir()
         assert _cwd_within_project(str(unrelated), project_env["project"], LEAD.name) is False
@@ -193,9 +190,7 @@ class TestWriteJsonAtomic:
         tmp_files = list(tmp_path.glob("*.tmp"))
         assert tmp_files == [], f"unexpected tmp files: {tmp_files}"
 
-    def test_original_survives_when_tmp_exists_at_start(
-        self, tmp_path: pathlib.Path
-    ) -> None:
+    def test_original_survives_when_tmp_exists_at_start(self, tmp_path: pathlib.Path) -> None:
         """If a stale .tmp file exists from a previous crash, atomic write
         overwrites the tmp file and replaces the original cleanly — the
         original is never in a half-written state."""

@@ -18,7 +18,6 @@ from PyQt6.QtCore import QCoreApplication
 from agent_takkub import orchestrator as orch_mod
 from agent_takkub.orchestrator import LEAD, Orchestrator
 
-
 # ─────────────────────────────────────────────────────────────
 # Fixtures
 # ─────────────────────────────────────────────────────────────
@@ -236,9 +235,7 @@ class TestDoneNoticeQueue:
         orch.done("devops", note="deployed", project=proj)
 
         events = [
-            json.loads(ln)
-            for ln in log_path.read_text(encoding="utf-8").splitlines()
-            if ln.strip()
+            json.loads(ln) for ln in log_path.read_text(encoding="utf-8").splitlines() if ln.strip()
         ]
         queued = [e for e in events if e["event"] == "done_notice_queued"]
         assert len(queued) == 1
@@ -333,9 +330,7 @@ class TestFlushPendingDoneNotices:
         orch._flush_pending_done_notices(proj)
 
         events = [
-            json.loads(ln)
-            for ln in log_path.read_text(encoding="utf-8").splitlines()
-            if ln.strip()
+            json.loads(ln) for ln in log_path.read_text(encoding="utf-8").splitlines() if ln.strip()
         ]
         flushed = [e for e in events if e["event"] == "done_notices_flushed"]
         assert len(flushed) == 1

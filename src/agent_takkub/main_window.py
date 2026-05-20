@@ -1701,7 +1701,6 @@ class MainWindow(QMainWindow):
         self._refresh_rtk_button()
 
     def _on_add_project_clicked(self) -> None:
-        import json
         from pathlib import Path
 
         from PyQt6.QtWidgets import (

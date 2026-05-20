@@ -31,6 +31,7 @@ def _write_json_atomic(path: Path, data: dict) -> None:
     tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     tmp.replace(path)
 
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PROJECTS_JSON = REPO_ROOT / "projects.json"
 AGENTS_DIR = REPO_ROOT / ".claude" / "agents"

@@ -221,9 +221,6 @@ class TestAutoRecoverStuck:
     def test_silent_for_s_computed_before_timestamp_reset(self) -> None:
         """Regression: silent_for_s must capture the *pre-reset* duration,
         not 0 (which is what you get if you reset _last_output_ts first)."""
-        import json
-
-        from agent_takkub.config import EVENTS_LOG, ensure_runtime
 
         # We verify the logged value by monkeypatching _log_event to capture kwargs.
         logged: list[dict] = []
@@ -245,9 +242,7 @@ class TestAutoRecoverStuck:
         finally:
             orch_mod._log_event = orig_log
 
-        stuck_log = next(
-            (e for e in logged if e.get("event") == "stuck_pane_recover"), None
-        )
+        stuck_log = next((e for e in logged if e.get("event") == "stuck_pane_recover"), None)
         assert stuck_log is not None, "stuck_pane_recover event not logged"
         assert stuck_log["silent_for_s"] == int(silence), (
             f"expected {int(silence)}, got {stuck_log['silent_for_s']}"
