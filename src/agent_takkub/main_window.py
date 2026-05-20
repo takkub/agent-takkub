@@ -20,7 +20,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtCore import QSettings, Qt, QTimer
+from PyQt6.QtCore import QSettings, Qt, QThreadPool, QTimer
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QApplication,
@@ -308,6 +308,9 @@ class MainWindow(QMainWindow):
         # the click handler doesn't re-run git just to re-render the
         # same dialog.
         self._update_status_cache: dict | None = None
+        # True while a background UpdateCheckWorker is running; prevents
+        # queuing a second fetch before the first one completes.
+        self._update_worker_busy: bool = False
 
         self._btn_add_pane = QPushButton("➕ Add Agent", self)
         self._btn_add_pane.setToolTip("Open a pane for a role (default or custom)")
@@ -463,13 +466,18 @@ class MainWindow(QMainWindow):
         self._session_save_timer.timeout.connect(self.orch.write_session_snapshot)
         self._session_save_timer.start()
 
-        # Update check: fire ONCE 30 s after boot so the cockpit knows
-        # whether origin/main has new commits when the user sits down.
-        # No recurring timer — the previous 5-minute poll was running
-        # `git fetch` on the Qt event loop main thread and caused a
-        # noticeable UI stutter every 5 minutes. Restart cockpit if you
-        # want a fresh check.
-        QTimer.singleShot(30_000, self._run_update_check)
+        # Update check — two-stage strategy:
+        # 1. singleShot 30 s after boot: first poll without blocking startup.
+        # 2. Recurring 5-minute timer started *after* the singleShot fires
+        #    (wired inside _schedule_update_check) so fetch never runs on
+        #    the Qt main thread — each poll offloads to a QThreadPool worker.
+        QTimer.singleShot(30_000, self._schedule_update_check)
+        self._update_poll_timer = QTimer(self)
+        self._update_poll_timer.setInterval(5 * 60 * 1000)  # 5 minutes
+        self._update_poll_timer.timeout.connect(self._schedule_update_check)
+        # Start after the singleShot so the first background fetch doesn't
+        # race with the boot fetch.
+        QTimer.singleShot(30_000, self._update_poll_timer.start)
         # Populate the version chip immediately so the user doesn't see
         # an empty slot for the first 30 s until the update check runs.
         self._refresh_version_label()
@@ -1214,11 +1222,107 @@ class MainWindow(QMainWindow):
             8_000,
         )
 
+    # ------------------------------------------------------------------
+    # Threaded recurring update poll (Layer A)
+    # ------------------------------------------------------------------
+
+    def _schedule_update_check(self) -> None:
+        """Dispatch an UpdateCheckWorker to the global thread pool.
+        Skips silently if a previous worker is still running so we
+        never stack up parallel git fetches."""
+        if self._update_worker_busy:
+            return
+        from .update_worker import UpdateCheckWorker
+
+        self._update_worker_busy = True
+        worker = UpdateCheckWorker()
+        worker.signals.finished.connect(self._on_update_check_done)
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_update_check_done(self, status: dict) -> None:
+        """Receive result from UpdateCheckWorker, refresh UI, and emit
+        a subtle notification when the repo transitions from up-to-date
+        to behind — without pestering the user on every subsequent poll."""
+        prev = self._update_status_cache or {}
+        self._update_status_cache = status
+        self._update_worker_busy = False
+
+        # Detect transition: was up-to-date (behind==0, clean, ok),
+        # now behind.  Skip notification if previous state was dirty or
+        # errored — the tree was already in a non-pristine state.
+        prev_up_to_date = (
+            prev.get("ok", False) and prev.get("clean", False) and prev.get("behind", 0) == 0
+        )
+        now_behind = (
+            status.get("ok", False) and status.get("clean", False) and status.get("behind", 0) > 0
+        )
+        if prev_up_to_date and now_behind:
+            self._notify_update_available(status["behind"])
+
+        self._refresh_update_button()
+
+    def _notify_update_available(self, n_behind: int) -> None:
+        """Flash the update button border and show a system-tray balloon
+        when origin/main just gained new commits the user hasn't seen yet.
+        Keeps the notification subtle — user can dismiss or ignore."""
+        label = f"📦 {n_behind} new commit{'s' if n_behind != 1 else ''} — click to pull"
+        self._btn_update.setToolTip(label)
+
+        # Try system tray balloon first (non-modal, disappears on its own).
+        tray = getattr(self, "_tray_icon", None)
+        if tray is None:
+            tray = QSystemTrayIcon(self)
+            self._tray_icon = tray
+        if tray.isSystemTrayAvailable() and not tray.isVisible():
+            tray.setIcon(
+                self.windowIcon()
+                or self.style().standardIcon(self.style().StandardPixmap.SP_MessageBoxInformation)
+            )
+            tray.show()
+        if tray.isVisible():
+            tray.showMessage(
+                "Cockpit update available",
+                label,
+                QSystemTrayIcon.MessageIcon.Information,
+                8_000,
+            )
+        else:
+            # Fallback: orange pulsing border on the button (3 flashes).
+            self._pulse_update_button(flashes=3)
+
+    def _pulse_update_button(self, flashes: int = 3, _count: int = 0) -> None:
+        """Alternate button border between orange and normal 3 times."""
+        if _count >= flashes * 2:
+            # Restore to whatever _refresh_update_button would set.
+            self._refresh_update_button()
+            return
+        if _count % 2 == 0:
+            self._btn_update.setStyleSheet(
+                "QPushButton { color: #fde047; background: #422006; "
+                "border: 2px solid #f97316; border-radius: 4px; "
+                "padding: 2px 8px; font-weight: 600; }"
+            )
+        else:
+            self._btn_update.setStyleSheet(
+                "QPushButton { color: #fde047; background: #422006; "
+                "border: 1px solid #a16207; border-radius: 4px; "
+                "padding: 2px 8px; }"
+            )
+        QTimer.singleShot(
+            400,
+            lambda count=_count + 1: self._pulse_update_button(flashes, count),
+        )
+
+    # ------------------------------------------------------------------
+    # Legacy synchronous check — kept for the click handler's "cache is
+    # None" early-boot path only.  All recurring polls now go through
+    # _schedule_update_check.
+    # ------------------------------------------------------------------
+
     def _run_update_check(self) -> None:
-        """Poll origin/main and refresh the update chip. Runs on a
-        5-minute QTimer + once 30 s after boot. Errors (offline,
-        timeout, non-repo) leave the chip on its last known state so
-        a brief network blip doesn't blink the UI."""
+        """Synchronous fallback used only when the user clicks the chip
+        before the first threaded poll has completed (~30 s after boot).
+        Runs on the Qt main thread; acceptable for a one-off user action."""
         from .update_helper import fetch_remote, is_git_repo, local_status
 
         if not is_git_repo():

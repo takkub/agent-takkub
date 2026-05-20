@@ -60,6 +60,7 @@ from PyQt6.QtGui import QFont  # noqa: E402 — PyQt must import after env setup
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
 from .main_window import MainWindow  # noqa: E402
+from .update_worker import try_silent_self_update  # noqa: E402
 
 
 def _install_signal_handlers(window: MainWindow) -> None:
@@ -101,6 +102,11 @@ def _install_signal_handlers(window: MainWindow) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Layer C: silent fast-forward pull before UI starts.  If a pull
+    # succeeds, os.execv re-execs into the new code — execution never
+    # reaches the next line.  Any failure returns False silently.
+    try_silent_self_update()
+
     app = QApplication(argv or sys.argv)
     app.setApplicationName("agent-takkub")
     f = QFont("Segoe UI", 10)
