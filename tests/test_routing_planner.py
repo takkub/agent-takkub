@@ -374,3 +374,166 @@ class TestConfirmHandling:
         # Without pending proposal, "ok" alone has no actionable verb
         # so it should be INFORMATIONAL (not FIRE_ASSIGN)
         assert result.kind != ActionKind.FIRE_ASSIGN
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Thai UI keywords (หน้าจอ, หน้า, ปุ่ม)
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestThaiUIKeywords:
+    def test_thai_screen_routes_frontend(self):
+        """'ทำหน้าจอ login' should route to frontend, not backend."""
+        result = classify("ทำหน้าจอ login")
+        assert result.kind == ActionKind.PROPOSE
+        assert result.role == "frontend"
+
+    def test_thai_button_routes_frontend(self):
+        """'แก้ปุ่ม submit' should route to frontend."""
+        result = classify("แก้ปุ่ม submit")
+        assert result.kind == ActionKind.PROPOSE
+        assert result.role == "frontend"
+
+    def test_thai_page_routes_frontend(self):
+        """'ทำหน้า profile' should route to frontend."""
+        result = classify("ทำหน้า profile")
+        assert result.kind == ActionKind.PROPOSE
+        assert result.role == "frontend"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Thai API keywords (ฐานข้อมูล, หลังบ้าน)
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestThaiAPIKeywords:
+    def test_thai_database_routes_backend(self):
+        """'แก้ฐานข้อมูล' should route to backend."""
+        result = classify("แก้ฐานข้อมูล")
+        assert result.kind == ActionKind.PROPOSE
+        assert result.role == "backend"
+
+    def test_thai_server_side_routes_backend(self):
+        """'แก้หลังบ้าน' should route to backend."""
+        result = classify("แก้หลังบ้าน")
+        assert result.kind == ActionKind.PROPOSE
+        assert result.role == "backend"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# New Thai actionable verbs (จัด, ฝาก, รบกวน, เช็ค)
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestNewThaiActionableVerbs:
+    def test_jad_is_actionable(self):
+        """'จัด layout หน้า home' should be classified as actionable (PROPOSE)."""
+        result = classify("จัด layout หน้า home")
+        assert result.kind == ActionKind.PROPOSE
+
+    def test_fak_is_actionable(self):
+        """'ฝากดู bug นี้' should be actionable (not INFORMATIONAL)."""
+        result = classify("ฝากดู bug นี้")
+        assert result.kind != ActionKind.INFORMATIONAL
+
+    def test_robkuan_is_actionable(self):
+        """'รบกวนช่วยแก้ X' should be actionable."""
+        result = classify("รบกวนช่วยแก้ bug นี้")
+        assert result.kind == ActionKind.PROPOSE
+
+    def test_check_th_is_actionable(self):
+        """'เช็ค endpoint /auth' should be actionable and route to backend."""
+        result = classify("เช็ค endpoint /auth")
+        assert result.kind == ActionKind.PROPOSE
+        assert result.role == "backend"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# New English actionable verbs (debug, analyze, verify)
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestNewEnglishActionableVerbs:
+    def test_debug_is_actionable(self):
+        """'debug login flow' should be actionable (not INFORMATIONAL)."""
+        result = classify("debug login flow")
+        assert result.kind == ActionKind.PROPOSE
+
+    def test_verify_is_actionable(self):
+        """'verify migration script' should be actionable."""
+        result = classify("verify migration script")
+        assert result.kind == ActionKind.PROPOSE
+
+    def test_analyze_is_actionable(self):
+        """'analyze the query performance' should be actionable."""
+        result = classify("analyze the query performance")
+        assert result.kind == ActionKind.PROPOSE
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Flexible explicit role patterns (ช่วย, ฝาก, role review/check/ดู)
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestFlexibleExplicitRole:
+    def test_role_chuay_verb(self):
+        """'backend ช่วยแก้ X' should fire directly as FIRE_ASSIGN backend."""
+        result = classify("backend ช่วยแก้ bug นี้หน่อย")
+        assert result.kind == ActionKind.FIRE_ASSIGN
+        assert result.role == "backend"
+
+    def test_fak_role_verb(self):
+        """'ฝาก devops ดู pipeline' should fire directly as FIRE_ASSIGN devops."""
+        result = classify("ฝาก devops ดู pipeline")
+        assert result.kind == ActionKind.FIRE_ASSIGN
+        assert result.role == "devops"
+
+    def test_fak_backend_fix(self):
+        """'ฝาก backend แก้ bug นี้' should fire as FIRE_ASSIGN backend."""
+        result = classify("ฝาก backend แก้ bug นี้")
+        assert result.kind == ActionKind.FIRE_ASSIGN
+        assert result.role == "backend"
+
+    def test_role_review_direct(self):
+        """'reviewer ดู โค้ดนี้' should fire as FIRE_ASSIGN reviewer."""
+        result = classify("reviewer ดู โค้ดนี้")
+        assert result.kind == ActionKind.FIRE_ASSIGN
+        assert result.role == "reviewer"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# One-shot codex/gemini natural patterns (without ถาม/ขอ/ให้ prefix)
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestOneShotNatural:
+    def test_codex_review_direct(self):
+        """'codex review function นี้' should fire as FIRE_ONESHOT codex."""
+        result = classify("codex review function นี้")
+        assert result.kind == ActionKind.FIRE_ONESHOT
+        assert result.role == "codex"
+
+    def test_gemini_check_direct(self):
+        """'gemini check this approach' should fire as FIRE_ONESHOT gemini."""
+        result = classify("gemini check this approach")
+        assert result.kind == ActionKind.FIRE_ONESHOT
+        assert result.role == "gemini"
+
+    def test_codex_lorg_direct(self):
+        """'codex ลอง refactor นี้' should fire as FIRE_ONESHOT codex."""
+        result = classify("codex ลอง refactor นี้")
+        assert result.kind == ActionKind.FIRE_ONESHOT
+        assert result.role == "codex"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Thai-English hybrid messages
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestThaiEnglishHybrid:
+    def test_fix_bug_thai_page(self):
+        """'แก้ bug หน้า login' should route to frontend."""
+        result = classify("แก้ bug หน้า login")
+        assert result.kind == ActionKind.PROPOSE
+        assert result.role == "frontend"

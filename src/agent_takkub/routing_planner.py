@@ -48,13 +48,14 @@ _ACTIONABLE_EN = re.compile(
     r"\b(add|build|implement|fix|refactor|migrate|setup|set.up|deploy|"
     r"test|create|make|write|update|change|delete|remove|rename|extract|"
     r"scaffold|install|configure|integrate|connect|seed|review|audit|run|"
+    r"debug|analyze|verify|"
     r"init(?:ialise|ialize)?|ลอง)\b",  # 'ลอง' (try/attempt) = Thai actionable
     re.IGNORECASE,
 )
 _ACTIONABLE_TH = re.compile(
     # ทำ(?!งาน|ไม) — "ทำงาน" means "work/function" (informational);
     # "ทำไม" means "why" (informational). Plain "ทำ" = do/make = actionable.
-    r"(ทำ(?!งาน|ไม)|สร้าง|แก้|เพิ่ม|ลบ|ปรับ|เขียน|อัพ|แก้ไข|ติดตั้ง|ตั้งค่า|เชื่อม|รัน|ลอง)"
+    r"(ทำ(?!งาน|ไม)|สร้าง|แก้|เพิ่ม|ลบ|ปรับ|เขียน|อัพ|แก้ไข|ติดตั้ง|ตั้งค่า|เชื่อม|รัน|ลอง|จัด|ฝาก|รบกวน|เช็ค)"
 )
 
 _INFORMATIONAL_EN = re.compile(
@@ -67,16 +68,38 @@ _INFORMATIONAL_TH = re.compile(
     r"(ดู|อธิบาย|ทำไม|สรุป|บอก|อ่าน|คือ|หมายถึง|ยังไง|อย่างไร|ทำงานยังไง|ทำงานอย่างไร)"
 )
 
-# Explicit role: "ให้ backend ทำ X"
+# Explicit role — four patterns, each captures the role in its own group.
+# _detect_explicit_role() returns the first non-None group.
 _EXPLICIT_ROLE = re.compile(
+    r"(?:"
+    # Pattern 1 (original): ให้ <role> <action-verb>
     r"ให้\s*(frontend|backend|mobile|devops|qa|reviewer|codex|gemini)"
-    r"\s*(ทำ|สร้าง|แก้|build|implement|fix|test|review|deploy|refactor)",
+    r"\s*(?:ทำ|สร้าง|แก้|build|implement|fix|test|review|deploy|refactor)"
+    r"|"
+    # Pattern 2: <role> ช่วย <action-verb>  — e.g. "backend ช่วยแก้ X"
+    r"(frontend|backend|mobile|devops|qa|reviewer|codex|gemini)"
+    r"\s*ช่วย\s*(?:ทำ|สร้าง|แก้|build|implement|fix|test|review|deploy|refactor)"
+    r"|"
+    # Pattern 3: ฝาก <role> <verb>  — e.g. "ฝาก devops ดู pipeline"
+    r"ฝาก\s*(frontend|backend|mobile|devops|qa|reviewer|codex|gemini)"
+    r"\s*(?:ทำ|แก้|ดู|review|check|build|implement|fix|test|deploy|refactor)"
+    r"|"
+    # Pattern 4: <non-ai-role> review/check/ดู  — exclude codex/gemini (handled by _ONESHOT)
+    # \b only on English words; ดู is Thai so no \b needed
+    r"(frontend|backend|mobile|devops|qa|reviewer)"
+    r"\s*(?:review\b|check\b|ดู)"
+    r")",
     re.IGNORECASE,
 )
 
 # One-shot codex/gemini: "ถาม codex ว่า...", "ขอ codex review", "ให้ gemini ดู"
+# Also direct: "codex review function นี้", "gemini check plan"
 _ONESHOT = re.compile(
-    r"(ถาม|ขอ|ให้)\s*(codex|gemini)\s*(ว่า|review|check|cross.check|ดู|ช่วย)?",
+    r"(?:"
+    r"(?:ถาม|ขอ|ให้)\s*(codex|gemini)\s*(?:ว่า|review|check|cross.check|ดู|ช่วย)?"
+    r"|"
+    r"(codex|gemini)\s*(?:review\b|check\b|ลอง)"
+    r")",
     re.IGNORECASE,
 )
 
@@ -128,21 +151,23 @@ _ROUTE_TABLE: list[tuple[re.Pattern, str | None, list[str] | None]] = [
         "mobile",
         None,
     ),
-    # Backend (API / db / schema)
+    # Backend (API / db / schema) — Thai: ฐานข้อมูล (database), หลังบ้าน (server-side)
     (
         re.compile(
-            r"\b(endpoint|API|route|handler|schema|database|db|migration|model|"
-            r"ORM|query|controller|service|REST|GraphQL)\b",
+            r"(?:\b(endpoint|API|route|handler|schema|database|db|migration|model|"
+            r"ORM|query|controller|service|REST|GraphQL)\b"
+            r"|ฐานข้อมูล|หลังบ้าน)",
             re.IGNORECASE,
         ),
         "backend",
         None,
     ),
-    # Frontend (UI / page / form / component …)
+    # Frontend (UI / page / form / component …) — Thai: หน้าจอ/หน้า (screen/page), ปุ่ม (button)
     (
         re.compile(
-            r"\b(UI|page|form|component|button|style|CSS|layout|modal|dialog|"
-            r"sidebar|navbar|widget|React|Vue|Next\.js|Tailwind|HTML)\b",
+            r"(?:\b(UI|page|form|component|button|style|CSS|layout|modal|dialog|"
+            r"sidebar|navbar|widget|React|Vue|Next\.js|Tailwind|HTML)\b"
+            r"|หน้าจอ|หน้า|ปุ่ม)",
             re.IGNORECASE,
         ),
         "frontend",
@@ -165,13 +190,15 @@ _AMBIGUOUS_CONFIRM = re.compile(r"(เออๆ|เออ\s|ok\s*แต่|but\b
 
 # Multi-role detection helpers (UI + API co-presence)
 _HAS_UI = re.compile(
-    r"\b(UI|page|form|component|button|style|CSS|layout|modal|dialog|"
-    r"sidebar|navbar|widget|React|Vue|Next\.js|Tailwind|HTML|frontend|login.page|signup.page)\b",
+    r"(?:\b(UI|page|form|component|button|style|CSS|layout|modal|dialog|"
+    r"sidebar|navbar|widget|React|Vue|Next\.js|Tailwind|HTML|frontend|login.page|signup.page)\b"
+    r"|หน้าจอ|หน้า|ปุ่ม)",
     re.IGNORECASE,
 )
 _HAS_API = re.compile(
-    r"\b(endpoint|API|route|handler|schema|database|db|model|query|"
-    r"controller|service|REST|GraphQL|backend|server)\b",
+    r"(?:\b(endpoint|API|route|handler|schema|database|db|model|query|"
+    r"controller|service|REST|GraphQL|backend|server)\b"
+    r"|ฐานข้อมูล|หลังบ้าน)",
     re.IGNORECASE,
 )
 
@@ -193,12 +220,22 @@ def _is_informational(msg: str) -> bool:
 
 def _detect_explicit_role(msg: str) -> str | None:
     m = _EXPLICIT_ROLE.search(msg)
-    return m.group(1).lower() if m else None
+    if not m:
+        return None
+    for g in m.groups():
+        if g is not None:
+            return g.lower()
+    return None
 
 
 def _detect_oneshot(msg: str) -> str | None:
     m = _ONESHOT.search(msg)
-    return m.group(2).lower() if m else None
+    if not m:
+        return None
+    for g in m.groups():
+        if g is not None:
+            return g.lower()
+    return None
 
 
 def _handle_confirm(msg: str) -> RoutingAction | None:
