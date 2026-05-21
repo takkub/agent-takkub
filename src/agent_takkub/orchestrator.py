@@ -38,6 +38,67 @@ from .config import (
 from .pty_session import PtySession
 from .roles import LEAD
 
+# Env vars that MUST pass through to claude/codex/gemini panes for them to
+# function. Anything not in this list is dropped to avoid leaking secrets
+# from the cockpit shell.
+_PANE_ENV_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        # Windows essentials
+        "PATH",
+        "PATHEXT",
+        "SYSTEMROOT",
+        "SYSTEMDRIVE",
+        "WINDIR",
+        "TEMP",
+        "TMP",
+        "USERPROFILE",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "PROGRAMDATA",
+        "PROGRAMFILES",
+        "PROGRAMFILES(X86)",
+        "USERNAME",
+        "COMPUTERNAME",
+        "OS",
+        "PROCESSOR_ARCHITECTURE",
+        # POSIX essentials (forward-compat for mac-port branch)
+        "HOME",
+        "USER",
+        "SHELL",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TERM",
+        # Node / npm tooling (used by some claude internals + RTK)
+        "NODE_PATH",
+        "NPM_CONFIG_PREFIX",
+        # Cockpit-injected (will be reset below anyway, but listed for clarity)
+        "TAKKUB_ROLE",
+        "TAKKUB_PROJECT",
+        "TAKKUB_LEAD_TOKEN",
+        "TAKKUB_SETTING_SOURCES",
+        "TAKKUB_ECC_FULL",
+        "ECC_GATEGUARD",
+        "ECC_DISABLED_HOOKS",
+        # Browser MCP (chrome-devtools needs to find Chrome)
+        "CHROME_BIN",
+    }
+)
+
+
+def _build_pane_env() -> dict[str, str]:
+    """Build a clean env for spawned panes — only allowlisted keys.
+
+    Why: codex's OMA review (docs/security-audit-2026-05-21.md, Check 1)
+    flagged unbounded env inheritance as a HIGH-severity issue. Teammate
+    panes don't need ANTHROPIC_API_KEY (Max OAuth handles auth) or any
+    other secret-bearing var. This builds the minimum env claude needs
+    to run on this OS.
+    """
+    return {k: v for k, v in os.environ.items() if k.upper() in _PANE_ENV_ALLOWLIST}
+
 
 def _log_event(event: str, **details) -> None:
     """Append a JSONL event line to runtime/events.log. Best-effort; never
@@ -931,7 +992,7 @@ class Orchestrator(QObject):
                 )
             spawn_cwd = cwd or default_cwd_for_role(role_name, project=project_ns) or str(REPO_ROOT)
             ensure_gemini_md(spawn_cwd)
-            env = os.environ.copy()
+            env = _build_pane_env()
             env["TAKKUB_ROLE"] = role_name
             env["TAKKUB_PROJECT"] = project_ns
             bin_dir = str(REPO_ROOT / "bin")
@@ -975,7 +1036,7 @@ class Orchestrator(QObject):
             # writes when the file is absent or already takkub-managed
             # (marker check inside the helper).
             ensure_agents_md(spawn_cwd)
-            env = os.environ.copy()
+            env = _build_pane_env()
             env["TAKKUB_ROLE"] = role_name
             env["TAKKUB_PROJECT"] = project_ns
             bin_dir = str(REPO_ROOT / "bin")
