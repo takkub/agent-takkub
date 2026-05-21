@@ -26,15 +26,21 @@ if role_name == LEAD.name:
 
 This means any `ANTHROPIC_API_KEY`, `AWS_*`, `GH_TOKEN`, or `OPENAI_API_KEY` present in the cockpit's own environment is **inherited by every teammate pane** via `os.environ.copy()`.
 
-**Status: fixed** *(2026-05-21, round-2 hardening)*
+**Status: FIXED** *(2026-05-21 round 2: codex/gemini paths; 2026-05-21 round 3: claude teammate path)*
 
 **Resolution:**
 
-`_build_pane_env()` added to `src/agent_takkub/orchestrator.py` (near top of module). All three `os.environ.copy()` calls in the spawn path (claude ~line 1054, codex ~line 978, gemini ~line 934) replaced with `_build_pane_env()`.
+`_build_pane_env()` added to `src/agent_takkub/orchestrator.py` (near top of module). All three `os.environ.copy()` calls in the spawn path replaced with filtered env builds:
 
-The function keeps only keys whose `.upper()` form appears in `_PANE_ENV_ALLOWLIST` — a `frozenset` of ~25 OS-essential, Node-tooling, and cockpit-injected variables. `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GH_TOKEN`, `AWS_*`, and any other secret-bearing vars are dropped.
+- **Codex path** (~line 1000): `_build_pane_env()` — round-2 fix
+- **Gemini path** (~line 1044): `_build_pane_env()` — round-2 fix
+- **Claude path** (~line 1120): `os.environ.copy() if role_name == LEAD.name else _build_pane_env()` — round-3 fix (this commit). Lead retains full env so user-level tools (gh, docker, etc.) work; teammates get the allowlist-filtered env.
 
-Test coverage: `tests/test_orchestrator_env_allowlist.py` (9 tests) verifies inclusion of `PATH`/`HOME`/`USERPROFILE`, exclusion of all four common secret vars, case-insensitive matching, and that the return value is a plain `dict` (not `os.environ` itself).
+The function keeps only keys whose `.upper()` form appears in `_PANE_ENV_ALLOWLIST` — a `frozenset` of ~25 OS-essential, Node-tooling, and cockpit-injected variables. `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GH_TOKEN`, `AWS_*`, and any other secret-bearing vars are dropped for non-Lead panes.
+
+Test coverage:
+- `tests/test_orchestrator_env_allowlist.py` (9 tests): unit-tests `_build_pane_env()` directly — inclusion/exclusion/case-insensitivity/dict-type
+- `tests/test_orchestrator_claude_env_leak.py` (12 tests): **spawn-level regression** — monkeypatches `PtySession.spawn` to capture the actual `env` dict passed at spawn time; asserts teammate panes exclude all four secret vars, Lead pane retains them, and both paths always carry `TAKKUB_ROLE`/`TAKKUB_PROJECT`
 
 ---
 
@@ -122,10 +128,10 @@ No `urllib`, `requests`, `http.client`, `curl`, or `wget` usage found in `src/ag
 
 | # | Check | Status |
 |---|---|---|
-| 1 | Env leak: sensitive vars inherited by panes | **fixed** (`_build_pane_env()` allowlist, 2026-05-21) |
+| 1 | Env leak: sensitive vars inherited by panes | **fixed** (`_build_pane_env()` allowlist, round 3: 2026-05-21 — all three spawn paths covered) |
 | 2 | Auto-approve flags in pane spawns | clean (by design) |
 | 3 | `shell=True` with user-controlled input | clean |
 | 4 | HOME-level mutation outside namespaces | clean |
 | 5 | Unexpected network calls at startup | clean |
 
-**Result: 5/5 clean.** Check 1 fixed 2026-05-21 via round-2 hardening (`_build_pane_env()` allowlist).
+**Result: 5/5 clean.** Check 1 fixed 2026-05-21 via round-3 hardening (claude teammate path now uses `_build_pane_env()`; all three spawn paths covered).

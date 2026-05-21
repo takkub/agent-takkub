@@ -1117,7 +1117,7 @@ class Orchestrator(QObject):
         except RuntimeError as e:
             return False, str(e)
 
-        env = os.environ.copy()
+        env = os.environ.copy() if role_name == LEAD.name else _build_pane_env()
         env["TAKKUB_ROLE"] = role_name
         # Tag the pane with its project so the `takkub` CLI inside the
         # session can stamp every JSON request with `from_project`. The
