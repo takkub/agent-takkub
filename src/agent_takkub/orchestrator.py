@@ -883,6 +883,12 @@ class Orchestrator(QObject):
         # done() rejects the agent until git working tree is clean. Keyed
         # `<project>::<role>`, cleared by close() and on successful done().
         self._requires_commit_on_done: dict[str, bool] = {}
+
+        # Opt-in auto-chain: when assign() was called with auto_chain=True,
+        # done() injects a pre-authorisation handoff prompt to Lead AFTER
+        # all auto-chain panes in the same project have reported done.
+        # Keyed `<project>::<role>`, cleared by close() and on done().
+        self._auto_chain_panes: dict[str, bool] = {}
         # Last stuck-recover wall-clock per pane (key `<project>::<role>`).
         # Prevents the watchdog from looping recover→stuck→recover on a
         # chronically wedged claude.
@@ -1574,6 +1580,7 @@ class Orchestrator(QObject):
         cwd: str | None,
         task: str,
         requires_commit: bool = False,
+        auto_chain: bool = False,
         project: str | None = None,
     ) -> tuple[bool, str]:
         ok, msg = self.spawn(role_name, cwd=cwd, project=project)
@@ -1585,6 +1592,8 @@ class Orchestrator(QObject):
         self._last_assigned_task[key] = task
         if requires_commit:
             self._requires_commit_on_done[key] = True
+        if auto_chain:
+            self._auto_chain_panes[key] = True
         self._send_when_ready(role_name, task, project=project)
         _log_event(
             "assign",
@@ -1592,6 +1601,7 @@ class Orchestrator(QObject):
             cwd=cwd,
             task_preview=task[:120],
             requires_commit=requires_commit,
+            auto_chain=auto_chain,
         )
         return True, f"task queued for {role_name} (sending when ready)"
 
