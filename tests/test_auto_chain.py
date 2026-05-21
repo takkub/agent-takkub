@@ -118,3 +118,15 @@ class TestAutoChainStateLifecycle:
         monkeypatch.setattr(orch, "_send_when_ready", MagicMock())
         orch.assign("frontend", cwd="/tmp", task="ui", project="proj_a")
         assert "proj_a::frontend" not in orch._auto_chain_panes
+
+    def test_close_clears_auto_chain_state(
+        self,
+        qapp: QCoreApplication,
+        two_project_json: pathlib.Path,
+        tmp_path: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        orch, _ = _make_orch_with_fake_panes("proj_a", ["lead", "frontend"])
+        orch._auto_chain_panes["proj_a::frontend"] = True
+        orch.close("frontend", project="proj_a", force=True)
+        assert "proj_a::frontend" not in orch._auto_chain_panes

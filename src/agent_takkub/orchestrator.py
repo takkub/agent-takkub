@@ -1891,6 +1891,7 @@ class Orchestrator(QObject):
         self._auto_respawn_attempts.pop(key, None)
         self._last_assigned_task.pop(key, None)
         self._requires_commit_on_done.pop(key, None)
+        self._auto_chain_panes.pop(key, None)
         self._session_uuids.pop(key, None)
         # For teammates, fully remove from the layout so the right column
         # collapses back. Lead stays as it always anchors the cockpit.
