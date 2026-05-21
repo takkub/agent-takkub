@@ -34,6 +34,7 @@ class _FakeOrchestrator:
 
     def __init__(self) -> None:
         self._recent_exits: dict[str, dict] = {}
+        self._session_uuids: dict[str, dict] = {}
         self.spawn_calls: list[tuple[str, str | None, str]] = []
 
     def spawn(self, role, cwd=None, project=None):
@@ -99,7 +100,7 @@ class TestRestoreTeammates:
     ) -> None:
         # A fresh snapshot with two teammates across two projects must
         # produce two spawn calls (project namespace preserved) and stamp
-        # `_recent_exits` so the spawn picks --continue.
+        # `_recent_exits` for crash-recovery bookkeeping.
         now = dt.datetime.now().isoformat(timespec="seconds")
         snap = {
             "saved_at": now,
@@ -119,7 +120,7 @@ class TestRestoreTeammates:
             ("backend", "agent-takkub"),
             ("frontend", "line-websupport"),
         }
-        # _recent_exits stamped for --continue routing (project-scoped keys)
+        # _recent_exits stamped for crash-recovery bookkeeping (project-scoped keys)
         assert "agent-takkub::backend" in fake._recent_exits
         assert "line-websupport::frontend" in fake._recent_exits
 

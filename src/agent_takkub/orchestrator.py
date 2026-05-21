@@ -18,6 +18,7 @@ import pathlib
 import secrets
 import subprocess
 import time
+import uuid as _uuid
 from datetime import datetime
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
@@ -115,7 +116,7 @@ def _log_event(event: str, **details) -> None:
         pass
 
 
-RESUME_WINDOW_SEC = 5 * 60  # respawn within this window → claude --continue
+RESUME_WINDOW_SEC = 5 * 60  # respawn within this window → claude --resume <uuid>
 
 # Idle watchdog: when a teammate pane sits at the ready prompt (claude is
 # idle, no "esc to interrupt") while pane.state is still "working", the
@@ -129,8 +130,8 @@ IDLE_REMIND_COOLDOWN_S = 90
 # A teammate pane in `working` state with no PTY output for this long
 # is treated as hung — claude probably crashed silently, deadlocked on
 # a tool call, or got wedged behind a slow MCP server. Orchestrator
-# auto-recovers via close + respawn (which picks `--continue` because
-# the recent-exit timestamp is fresh). 10 minutes is generous enough
+# auto-recovers via close + respawn (which picks `--resume <uuid>` because
+# the recent-exit timestamp and UUID are still fresh). 10 minutes is generous enough
 # that a heavy `npm install` or a slow Lighthouse audit won't trip it.
 STUCK_THRESHOLD_S = 10 * 60
 # Once a recover fires for a pane, wait this long before another one
@@ -148,8 +149,8 @@ IDLE_REMINDER_TEXT = (
 
 # Auto-respawn on unexpected pane crash. The orchestrator notices when a
 # pane exits without a corresponding takkub close/done (claude crashed,
-# OOM, parent killed it) and gives it a clean respawn with --continue so
-# the conversation survives. AUTO_RESPAWN_MAX caps consecutive attempts
+# OOM, parent killed it) and gives it a clean respawn with --resume <uuid>
+# so the conversation survives. AUTO_RESPAWN_MAX caps consecutive attempts
 # per pane so a deterministically-crashing claude doesn't spawn-loop.
 AUTO_RESPAWN_DELAY_MS = 2_500
 AUTO_RESPAWN_MAX = 2
@@ -363,13 +364,13 @@ def _render_decision_note(
 # the user spawned manually — disappear when cockpit shuts down. The
 # session snapshot file records which teammates were live in each tab
 # at the moment of shutdown (or at the last periodic tick) so the next
-# cockpit launch can re-spawn them with --continue and the user resumes
-# right where they left off.
+# cockpit launch can re-spawn them; since session UUIDs are in-memory only,
+# each role gets a fresh --session-id (clean slate, no cross-session bleed).
 #
 # Skip snapshots older than _LAST_SESSION_MAX_AGE_SEC: an hour-old
 # snapshot is stale enough that the underlying claude conversations
 # have probably been compacted out of usefulness and a fresh spawn is
-# kinder than a confusing `--continue` against half-remembered context.
+# the right call.
 _LAST_SESSION_FILE = RUNTIME_DIR / "last-session.json"
 _LAST_SESSION_MAX_AGE_SEC = 60 * 60
 
@@ -767,7 +768,7 @@ class Orchestrator(QObject):
     # Emitted when user toggles a provider on/off via status bar. main_window
     # listens to refresh chip color/label without polling.
     providerStateChanged = pyqtSignal(str, bool)  # (provider, disabled)
-    # Emitted at the tail of a successful spawn that picked up `--continue`
+    # Emitted at the tail of a successful spawn that picked up `--resume <uuid>`
     # (i.e. the role's previous session exited within RESUME_WINDOW_SEC).
     # main_window uses this to fire `/remote-control` only on resumes, so a
     # fresh project open doesn't spam the Lead pane with the bridge command.
@@ -814,9 +815,14 @@ class Orchestrator(QObject):
         # Until tabs land, only one project namespace is populated at a
         # time and behavior is identical to the pre-refactor single-dict.
         self._panes_by_project: dict[str, dict[str, AgentPane]] = {}
-        # last-known cwd per role, used to decide whether to pass --continue
-        # on a fresh spawn (must match the previous cwd for resume to be valid)
+        # last-known cwd per role, used to decide whether the pane's prior
+        # session is within the resume window (must match previous cwd)
         self._recent_exits: dict[str, dict] = {}  # "{project}::{role}" -> {cwd, ts}
+        # session-id per role: generated at each fresh spawn, kept so a
+        # respawn within RESUME_WINDOW_SEC can pass --resume <uuid> and
+        # bypass claude's CWD-based --continue resolution (prevents bleed
+        # between Lead and teammate panes sharing the same cwd)
+        self._session_uuids: dict[str, dict] = {}  # "{project}::{role}" -> {uuid, cwd}
         # Peer CC durability: messages queued when Lead is not alive.
         # Keyed by project namespace; flushed to Lead on next Lead spawn.
         self._pending_lead_cc: dict[str, list[dict]] = {}
@@ -980,7 +986,7 @@ class Orchestrator(QObject):
         # doesn't understand any of the claude flags below. Build a
         # minimal argv and short-circuit so we don't accidentally pass
         # `--dangerously-skip-permissions`, MCP configs, plugin dirs,
-        # or `--continue` (all claude-only) to it.
+        # or `--session-id`/`--resume` (all claude-only) to it.
         #
         # Entry condition uses `provider_for(role_name)` so the user
         # can remap any teammate role (e.g. "backend") to the codex
@@ -1296,17 +1302,29 @@ class Orchestrator(QObject):
             argv.extend(["--disallowed-tools", " ".join(denied)])
 
         # Session resume: if this same role exited recently from the same
-        # cwd, ask claude to continue the previous conversation instead of
-        # starting fresh. Useful for crash recovery + accidental closes.
+        # cwd and we have its session UUID, use --resume <uuid> so claude
+        # rejoins the exact conversation without CWD-based disambiguation.
+        # This avoids bleed where Lead and a teammate sharing the same cwd
+        # could each inherit the other's history via --continue.
+        # On a fresh spawn (no prior UUID or expired window), generate a new
+        # UUIDv4 and pass --session-id so claude tracks the session from the start.
         resumed = False
-        prior = self._recent_exits.get(_exit_key(project_ns, role_name))
-        if (
-            prior
-            and prior.get("cwd") == spawn_cwd
-            and (time.time() - prior.get("ts", 0)) < RESUME_WINDOW_SEC
-        ):
-            argv.append("--continue")
+        _ekey_spawn = _exit_key(project_ns, role_name)
+        prior_uuid = self._session_uuids.get(_ekey_spawn)
+        prior_exit = self._recent_exits.get(_ekey_spawn)
+        can_resume = (
+            prior_uuid is not None
+            and prior_uuid.get("cwd") == spawn_cwd
+            and prior_exit is not None
+            and (time.time() - prior_exit.get("ts", 0)) < RESUME_WINDOW_SEC
+        )
+        if can_resume:
+            argv.extend(["--resume", prior_uuid["uuid"]])
             resumed = True
+        else:
+            new_uuid = str(_uuid.uuid4())
+            argv.extend(["--session-id", new_uuid])
+            self._session_uuids[_ekey_spawn] = {"uuid": new_uuid, "cwd": spawn_cwd}
 
         session = PtySession(cols=110, rows=36, parent=self)
         _t_path = _build_transcript_path(project_ns, role_name)
@@ -1317,16 +1335,14 @@ class Orchestrator(QObject):
             return False, f"failed to spawn claude: {e}"
 
         pane.attach_session(session, cwd=spawn_cwd)
-        # Record exits so a fast respawn can pass --continue, and so the
-        # auto-respawn watcher knows which project namespace owned the
-        # pane that just died.
+        # Record exits so the auto-respawn watcher knows which project
+        # namespace owned the pane that just died.
         session.processExited.connect(
             lambda _code, r=role_name, c=spawn_cwd, p=project_ns: self._on_session_exit(r, c, p)
         )
         # forget the prior exit record now that we've spawned successfully
-        _ekey = _exit_key(project_ns, role_name)
-        if _ekey in self._recent_exits:
-            del self._recent_exits[_ekey]
+        if _ekey_spawn in self._recent_exits:
+            del self._recent_exits[_ekey_spawn]
 
         self._auto_trust(role_name, project=project_ns)
         self.statusChanged.emit()
@@ -1358,7 +1374,7 @@ class Orchestrator(QObject):
         return True, f"{role_name} spawned in {spawn_cwd}{suffix}"
 
     def _on_session_exit(self, role_name: str, cwd: str, project: str) -> None:
-        """Track recent exits so a quick respawn can pass --continue, then
+        """Track recent exits so a quick respawn can pass --resume <uuid>, then
         decide whether to auto-respawn.
 
         Auto-respawn fires only when the pane is in the `exited` state —
@@ -1397,8 +1413,8 @@ class Orchestrator(QObject):
 
     def _auto_respawn(self, role_name: str, cwd: str, project: str) -> None:
         """Schedule a fresh spawn for a pane that crashed unexpectedly.
-        `--continue` is added automatically by `spawn()` because the
-        previous exit is still inside RESUME_WINDOW_SEC."""
+        `--resume <uuid>` is picked automatically by `spawn()` because the
+        previous exit is still inside RESUME_WINDOW_SEC and UUID is cached."""
         # If the pane was already manually respawned during the delay,
         # bail. The new session would have already cleared `state`.
         pane = self._panes_by_project.get(project, {}).get(role_name)
@@ -1757,6 +1773,7 @@ class Orchestrator(QObject):
         self._auto_respawn_attempts.pop(key, None)
         self._last_assigned_task.pop(key, None)
         self._requires_commit_on_done.pop(key, None)
+        self._session_uuids.pop(key, None)
         # For teammates, fully remove from the layout so the right column
         # collapses back. Lead stays as it always anchors the cockpit.
         # The project namespace travels with the signal so main_window
@@ -1876,6 +1893,7 @@ class Orchestrator(QObject):
         self._auto_respawn_attempts.pop(key, None)
         self._last_assigned_task.pop(key, None)
         self._requires_commit_on_done.pop(key, None)
+        self._session_uuids.pop(key, None)
 
         # notify Lead in the same project (a teammate in unirecon mustn't
         # nudge the Lead in pms by mistake)
@@ -2046,10 +2064,10 @@ class Orchestrator(QObject):
         a status-bar hint). Skips silently when the snapshot is missing,
         unparseable, or older than `_LAST_SESSION_MAX_AGE_SEC`.
 
-        The orchestrator's existing `_recent_exits` machinery handles
-        `--continue` — by stamping each role with a fresh `ts` here, the
-        next spawn falls inside RESUME_WINDOW_SEC and claude rejoins the
-        previous conversation instead of starting a blank one.
+        The `_recent_exits` stamp is kept for crash-recovery bookkeeping,
+        but since `_session_uuids` has no entry for these roles yet, each
+        spawn here generates a fresh `--session-id` (no bleed from a prior
+        cockpit run's sessions).
         """
         if not _LAST_SESSION_FILE.is_file():
             return 0
@@ -2073,9 +2091,9 @@ class Orchestrator(QObject):
                 cwd = (entry or {}).get("cwd") or None
                 if not role:
                     continue
-                # Stamp recent-exit so spawn() picks --continue. The
-                # session file is the cwd it was last running in — the
-                # one claude can resume from.
+                # Stamp recent-exit for crash-recovery bookkeeping.
+                # _session_uuids has no UUID for these roles yet, so
+                # spawn() will issue --session-id (fresh session, no bleed).
                 self._recent_exits[_exit_key(project, role)] = {"cwd": cwd, "ts": time.time()}
                 ok, _ = self.spawn(role, cwd=cwd, project=project)
                 if ok:
@@ -2317,8 +2335,8 @@ class Orchestrator(QObject):
         """Walk every teammate pane and auto-recover any that's been
         sitting in `working` state with no PTY output for longer than
         STUCK_THRESHOLD_S. A recovered pane runs close→spawn and gets
-        --continue via the existing recent-exits machinery, so claude
-        rejoins the conversation rather than restarting blank.
+        --resume <uuid> via the session-uuid + recent-exits machinery, so
+        claude rejoins the conversation rather than restarting blank.
 
         Lead is exempt: Lead's "stuck" usually means waiting on user
         input, not a hang, and a forced restart would lose Lead's
@@ -2349,7 +2367,7 @@ class Orchestrator(QObject):
                 self._auto_recover_stuck(role, project_name, pane, now)
 
     def _auto_recover_stuck(self, role: str, project: str, pane: AgentPane, now: float) -> None:
-        """Close the wedged pane and respawn it with --continue. The
+        """Close the wedged pane and respawn it with --resume <uuid>. The
         spawn uses the pane's last-known cwd so claude rejoins the same
         project directory."""
         cwd = pane._session_cwd
