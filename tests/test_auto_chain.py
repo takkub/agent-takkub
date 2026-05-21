@@ -156,3 +156,107 @@ class TestInjectAutoChainHandoff:
         orch._inject_auto_chain_handoff("proj_a")
         queue = orch._pending_done_notices.get("proj_a", [])
         assert any("auto-chain handoff" in entry.get("body", "") for entry in queue)
+
+
+class TestDoneAutoChainTrigger:
+    def test_done_last_auto_chain_pane_fires_handoff(
+        self,
+        qapp: QCoreApplication,
+        two_project_json: pathlib.Path,
+        tmp_path: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Single auto-chain pane: done() fires handoff immediately."""
+        orch, panes = _make_orch_with_fake_panes("proj_a", ["lead", "frontend"])
+        orch._auto_chain_panes["proj_a::frontend"] = True
+        monkeypatch.setattr(orch, "close", MagicMock(return_value=(True, "ok")))
+        monkeypatch.setattr(orch, "_save_decision_note", MagicMock())
+
+        orch.done("frontend", note="UI shipped", project="proj_a")
+
+        lead_writes = [c.args[0] for c in panes["lead"].session.write.call_args_list]
+        assert any("[frontend done]" in str(w) for w in lead_writes)
+        assert any("auto-chain handoff" in str(w) for w in lead_writes)
+
+    def test_done_not_last_auto_chain_pane_no_handoff(
+        self,
+        qapp: QCoreApplication,
+        two_project_json: pathlib.Path,
+        tmp_path: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Two auto-chain panes; first done → no handoff yet."""
+        orch, panes = _make_orch_with_fake_panes("proj_a", ["lead", "frontend", "backend"])
+        orch._auto_chain_panes["proj_a::frontend"] = True
+        orch._auto_chain_panes["proj_a::backend"] = True
+        monkeypatch.setattr(orch, "close", MagicMock(return_value=(True, "ok")))
+        monkeypatch.setattr(orch, "_save_decision_note", MagicMock())
+
+        orch.done("frontend", note="UI shipped", project="proj_a")
+
+        lead_writes = [c.args[0] for c in panes["lead"].session.write.call_args_list]
+        assert any("[frontend done]" in str(w) for w in lead_writes)
+        assert not any("auto-chain handoff" in str(w) for w in lead_writes)
+
+    def test_done_non_auto_chain_pane_no_handoff(
+        self,
+        qapp: QCoreApplication,
+        two_project_json: pathlib.Path,
+        tmp_path: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Pane that was assigned without --auto-chain → no handoff."""
+        orch, panes = _make_orch_with_fake_panes("proj_a", ["lead", "frontend"])
+        # NOTE: _auto_chain_panes deliberately NOT set
+        monkeypatch.setattr(orch, "close", MagicMock(return_value=(True, "ok")))
+        monkeypatch.setattr(orch, "_save_decision_note", MagicMock())
+
+        orch.done("frontend", note="just a scout", project="proj_a")
+
+        lead_writes = [c.args[0] for c in panes["lead"].session.write.call_args_list]
+        assert any("[frontend done]" in str(w) for w in lead_writes)
+        assert not any("auto-chain handoff" in str(w) for w in lead_writes)
+
+    def test_done_clears_auto_chain_key_after_handoff(
+        self,
+        qapp: QCoreApplication,
+        two_project_json: pathlib.Path,
+        tmp_path: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        orch, _ = _make_orch_with_fake_panes("proj_a", ["lead", "frontend"])
+        orch._auto_chain_panes["proj_a::frontend"] = True
+        monkeypatch.setattr(orch, "close", MagicMock(return_value=(True, "ok")))
+        monkeypatch.setattr(orch, "_save_decision_note", MagicMock())
+
+        orch.done("frontend", note="UI shipped", project="proj_a")
+
+        assert "proj_a::frontend" not in orch._auto_chain_panes
+
+    def test_multi_project_isolation(
+        self,
+        qapp: QCoreApplication,
+        two_project_json: pathlib.Path,
+        tmp_path: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Auto-chain done in proj_a does NOT trigger handoff for proj_b."""
+        orch, panes_a = _make_orch_with_fake_panes("proj_a", ["lead", "frontend"])
+        lead_b = MagicMock()
+        lead_b.session = MagicMock()
+        lead_b.session.is_alive = True
+        lead_b.session.write = MagicMock()
+        orch._panes_by_project["proj_b"] = {"lead": lead_b}
+
+        orch._auto_chain_panes["proj_a::frontend"] = True
+        orch._auto_chain_panes["proj_b::backend"] = True  # still pending in proj_b
+        monkeypatch.setattr(orch, "close", MagicMock(return_value=(True, "ok")))
+        monkeypatch.setattr(orch, "_save_decision_note", MagicMock())
+
+        orch.done("frontend", note="proj_a UI", project="proj_a")
+
+        a_writes = [c.args[0] for c in panes_a["lead"].session.write.call_args_list]
+        assert any("auto-chain handoff" in str(w) for w in a_writes)
+        b_writes = [c.args[0] for c in lead_b.session.write.call_args_list]
+        assert not any("auto-chain handoff" in str(w) for w in b_writes)
+        assert "proj_b::backend" in orch._auto_chain_panes

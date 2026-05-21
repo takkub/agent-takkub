@@ -2078,6 +2078,15 @@ class Orchestrator(QObject):
         if active_ns and project_ns != active_ns:
             self.crossTabDone.emit(project_ns, from_role, note)
 
+        # Auto-chain handoff: if this pane was tagged --auto-chain at
+        # assign time, and it was the LAST pending auto-chain pane in
+        # the project, inject a pre-authorisation prompt so Lead fires
+        # verify (qa+reviewer) without proposing/confirming.
+        if self._auto_chain_panes.pop(key, False):
+            pending = [k for k in self._auto_chain_panes if k.startswith(f"{project_ns}::")]
+            if not pending:
+                self._inject_auto_chain_handoff(project_ns)
+
         # mark pane done, auto-close after a delay so user can see it
         pane.set_state("done", note=note[:80] if note else "done")
         QTimer.singleShot(2_500, lambda: self.close(from_role, project=project_ns))
