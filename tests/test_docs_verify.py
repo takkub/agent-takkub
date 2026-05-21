@@ -13,6 +13,7 @@ from agent_takkub.docs_verify import (
     extract_path_refs,
     extract_symbol_refs,
     format_drift_report,
+    strip_code_blocks,
     verify_docs,
     verify_path,
     verify_symbol,
@@ -220,3 +221,106 @@ def test_verify_docs_real_repo_no_crash() -> None:
         repo_root=repo_root,
     )
     assert isinstance(results, list)
+
+
+# ---------------------------------------------------------------------------
+# strip_code_blocks
+# ---------------------------------------------------------------------------
+
+
+def test_strip_code_blocks_removes_fenced_content() -> None:
+    md = "before\n```\n`src/foo.py:1`\n```\nafter\n"
+    stripped = strip_code_blocks(md)
+    assert "src/foo.py" not in stripped
+    assert "before" in stripped
+    assert "after" in stripped
+
+
+def test_strip_code_blocks_preserves_line_count() -> None:
+    md = "line1\n```\ninner1\ninner2\n```\nline6\n"
+    stripped = strip_code_blocks(md)
+    assert stripped.count("\n") == md.count("\n")
+
+
+def test_strip_code_blocks_unmatched_fence_returns_original() -> None:
+    md = "line1\n```\nno closing fence\n"
+    stripped = strip_code_blocks(md)
+    assert stripped == md
+
+
+def test_strip_code_blocks_multiple_fences() -> None:
+    md = "```\n`src/a.py`\n```\nmiddle\n```\n`src/b.py`\n```\nend\n"
+    stripped = strip_code_blocks(md)
+    assert "src/a.py" not in stripped
+    assert "src/b.py" not in stripped
+    assert "middle" in stripped
+    assert "end" in stripped
+
+
+# ---------------------------------------------------------------------------
+# verify_docs — code block skipping
+# ---------------------------------------------------------------------------
+
+
+def test_verify_docs_code_block_refs_not_reported(tmp_path: Path) -> None:
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    # Path ref inside a fenced code block — should not be flagged as broken
+    (docs_dir / "guide.md").write_text("```\nSee `src/nonexistent_file.py:1` for example.\n```\n")
+    results = verify_docs(
+        docs_dirs=(Path("docs"),),
+        extras=(),
+        repo_root=tmp_path,
+    )
+    broken = [r for r in results if r.status != "ok"]
+    assert broken == []
+
+
+# ---------------------------------------------------------------------------
+# verify_docs — exclude_globs
+# ---------------------------------------------------------------------------
+
+
+def test_verify_docs_exclude_globs_skips_matching_file(tmp_path: Path) -> None:
+    reviews_dir = tmp_path / "docs" / "reviews"
+    reviews_dir.mkdir(parents=True)
+    (reviews_dir / "external.md").write_text("See `src/nonexistent_vendored.py:1`.\n")
+    results = verify_docs(
+        docs_dirs=(Path("docs"),),
+        extras=(),
+        repo_root=tmp_path,
+        exclude_globs=("docs/reviews/*",),
+    )
+    broken = [r for r in results if r.status != "ok"]
+    assert broken == []
+
+
+def test_verify_docs_default_excludes_reviews_dir(tmp_path: Path) -> None:
+    reviews_dir = tmp_path / "docs" / "reviews"
+    reviews_dir.mkdir(parents=True)
+    (reviews_dir / "audit.md").write_text("See `src/nonexistent_audit.py:1`.\n")
+    # Default call (no explicit exclude_globs) — reviews/ auto-excluded
+    results = verify_docs(
+        docs_dirs=(Path("docs"),),
+        extras=(),
+        repo_root=tmp_path,
+    )
+    broken = [r for r in results if r.status != "ok"]
+    assert broken == []
+
+
+def test_verify_docs_no_default_excludes_includes_reviews(tmp_path: Path) -> None:
+    reviews_dir = tmp_path / "docs" / "reviews"
+    reviews_dir.mkdir(parents=True)
+    (reviews_dir / "audit.md").write_text("See `src/nonexistent_reincluded.py:1`.\n")
+    # Passing exclude_globs=() disables default excludes
+    results = verify_docs(
+        docs_dirs=(Path("docs"),),
+        extras=(),
+        repo_root=tmp_path,
+        exclude_globs=(),
+        use_default_excludes=False,
+    )
+    broken = [r for r in results if r.status != "ok"]
+    assert len(broken) == 1
+    assert "nonexistent_reincluded" in broken[0].message

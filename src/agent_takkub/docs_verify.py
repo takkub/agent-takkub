@@ -36,6 +36,47 @@ class VerifyResult:
 
 _CODE_EXTENSIONS = (".py", ".md", ".json", ".yml", ".yaml", ".ts", ".tsx", ".js", ".sh", ".toml")
 
+_DEFAULT_EXCLUDE_GLOBS: tuple[str, ...] = ("docs/reviews/*",)
+
+
+def strip_code_blocks(md_text: str) -> str:
+    """Replace content inside triple-backtick fences with blank lines.
+
+    Preserves line count so error source_line numbers remain accurate.
+    If a fence is unmatched (no closing ```), returns the original text unchanged.
+    """
+    lines = md_text.split("\n")
+    result: list[str] = []
+    in_fence = False
+    temp: list[str] = []
+
+    for line in lines:
+        stripped = line.strip()
+        if not in_fence and stripped.startswith("```"):
+            in_fence = True
+            temp = [line]
+        elif in_fence and stripped.startswith("```"):
+            # Close the fence — replace all interior lines with empty strings
+            temp.append(line)
+            for j, orig in enumerate(temp):
+                if j == 0 or j == len(temp) - 1:
+                    result.append(orig)  # keep fence markers (they have no refs)
+                else:
+                    result.append("")
+            temp = []
+            in_fence = False
+        elif in_fence:
+            temp.append(line)
+        else:
+            result.append(line)
+
+    if in_fence:
+        # Unmatched fence — return original unchanged
+        return md_text
+
+    return "\n".join(result)
+
+
 # Matches backtick-quoted paths that contain at least one `/` (directory-qualified)
 # e.g. `src/foo.py:42` or `docs/bar.md` — bare filenames without a `/` are skipped.
 _PATH_PATTERN = re.compile(
@@ -179,15 +220,41 @@ def verify_docs(
     docs_dirs: tuple[Path, ...] = (Path("docs"),),
     extras: tuple[Path, ...] = (Path("CLAUDE.md"), Path("README.md")),
     repo_root: Path = Path("."),
+    exclude_globs: tuple[str, ...] | None = None,
+    use_default_excludes: bool = True,
 ) -> list[VerifyResult]:
-    """Walk markdown files, extract refs, verify each. Returns all non-ok results."""
+    """Walk markdown files, extract refs, verify each. Returns all non-ok results.
+
+    exclude_globs: additional glob patterns to skip (matched against relative path).
+    use_default_excludes: when True, auto-excludes docs/reviews/*.md (vendored content).
+    """
+    from pathlib import PurePath
+
+    active_excludes: tuple[str, ...] = exclude_globs if exclude_globs is not None else ()
+    if use_default_excludes:
+        active_excludes = active_excludes + _DEFAULT_EXCLUDE_GLOBS
+
     results: list[VerifyResult] = []
 
+    def _is_excluded(md_path: Path) -> bool:
+        try:
+            rel = md_path.relative_to(repo_root)
+        except ValueError:
+            rel = Path(str(md_path))
+        rel_posix = rel.as_posix()
+        for pattern in active_excludes:
+            if PurePath(rel_posix).match(pattern):
+                return True
+        return False
+
     def _process(md_path: Path) -> None:
+        if _is_excluded(md_path):
+            return
         try:
             text = md_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return
+        text = strip_code_blocks(text)
         rel = str(md_path.relative_to(repo_root)) if md_path.is_absolute() else str(md_path)
         for ref in extract_path_refs(text, source=rel):
             r = verify_path(ref, repo_root)

@@ -216,10 +216,13 @@ def cmd_docs_verify(args: argparse.Namespace) -> dict:
 
     from .docs_verify import format_drift_report, verify_docs
 
+    exclude_globs: tuple[str, ...] = tuple(args.exclude) if args.exclude else ()
     results = verify_docs(
         docs_dirs=(Path("docs"),),
         extras=(Path("CLAUDE.md"), Path("README.md")),
         repo_root=Path("."),
+        exclude_globs=exclude_globs,
+        use_default_excludes=not args.no_default_excludes,
     )
     broken = [r for r in results if r.status != "ok"]
     report = format_drift_report(results)
@@ -403,6 +406,18 @@ def main(argv: list[str] | None = None) -> int:
     sdv = sub.add_parser("docs-verify", help="verify markdown file/symbol refs")
     sdv.add_argument("--report", default="runtime/docs_drift.md")
     sdv.add_argument("--exit-on-broken", action="store_true", dest="exit_on_broken")
+    sdv.add_argument(
+        "--exclude",
+        action="append",
+        metavar="GLOB",
+        help="skip files matching this glob (repeatable, e.g. --exclude 'docs/reviews/*')",
+    )
+    sdv.add_argument(
+        "--no-default-excludes",
+        action="store_true",
+        dest="no_default_excludes",
+        help="disable auto-exclusion of docs/reviews/*.md",
+    )
     sdv.set_defaults(func=cmd_docs_verify)
 
     sas = sub.add_parser("audit-skills", help="TF-IDF role boundary audit")
