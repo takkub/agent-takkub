@@ -16,6 +16,7 @@ import json
 import os
 import pathlib
 import secrets
+import subprocess
 import time
 from datetime import datetime
 
@@ -855,6 +856,10 @@ class Orchestrator(QObject):
         # a crash-and-respawn cycle doesn't silently drop the work.
         # Cleared on manual close() so a deliberate restart doesn't replay.
         self._last_assigned_task: dict[str, str] = {}
+        # Opt-in done gate: when assign() was called with requires_commit=True,
+        # done() rejects the agent until git working tree is clean. Keyed
+        # `<project>::<role>`, cleared by close() and on successful done().
+        self._requires_commit_on_done: dict[str, bool] = {}
         # Last stuck-recover wall-clock per pane (key `<project>::<role>`).
         # Prevents the watchdog from looping recover→stuck→recover on a
         # chronically wedged claude.
@@ -1440,16 +1445,30 @@ class Orchestrator(QObject):
         QTimer.singleShot(1_000, _check)
 
     def assign(
-        self, role_name: str, cwd: str | None, task: str, project: str | None = None
+        self,
+        role_name: str,
+        cwd: str | None,
+        task: str,
+        requires_commit: bool = False,
+        project: str | None = None,
     ) -> tuple[bool, str]:
         ok, msg = self.spawn(role_name, cwd=cwd, project=project)
         if not ok:
             return ok, msg
 
         project_ns = self._resolve_project(project)
-        self._last_assigned_task[_exit_key(project_ns, role_name)] = task
+        key = _exit_key(project_ns, role_name)
+        self._last_assigned_task[key] = task
+        if requires_commit:
+            self._requires_commit_on_done[key] = True
         self._send_when_ready(role_name, task, project=project)
-        _log_event("assign", role=role_name, cwd=cwd, task_preview=task[:120])
+        _log_event(
+            "assign",
+            role=role_name,
+            cwd=cwd,
+            task_preview=task[:120],
+            requires_commit=requires_commit,
+        )
         return True, f"task queued for {role_name} (sending when ready)"
 
     def inject_slash_command_when_ready(
@@ -1737,6 +1756,7 @@ class Orchestrator(QObject):
         self._blocked_on_lead.pop(key, None)
         self._auto_respawn_attempts.pop(key, None)
         self._last_assigned_task.pop(key, None)
+        self._requires_commit_on_done.pop(key, None)
         # For teammates, fully remove from the layout so the right column
         # collapses back. Lead stays as it always anchors the cockpit.
         # The project namespace travels with the signal so main_window
@@ -1807,14 +1827,55 @@ class Orchestrator(QObject):
         pane = project_panes.get(from_role)
         if pane is None:
             return False, f"unknown role: {from_role}"
+
+        key = f"{project_ns}::{from_role}"
+
+        # Opt-in commit gate: if assign() was called with requires_commit=True,
+        # reject done() when git working tree is not clean so the agent is
+        # forced to commit before reporting done to Lead.
+        if self._requires_commit_on_done.get(key, False):
+            spawn_cwd = getattr(pane, "_session_cwd", None) or str(REPO_ROOT)
+            try:
+                git_result = subprocess.run(
+                    ["git", "status", "--porcelain"],
+                    cwd=spawn_cwd,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                dirty = git_result.stdout.strip()
+            except Exception:
+                dirty = ""  # can't check; allow done
+            if dirty:
+                files_preview = dirty[:200]
+                _log_event(
+                    "done_rejected",
+                    role=from_role,
+                    project=project_ns,
+                    reason="dirty_tree",
+                    files=files_preview,
+                )
+                if pane.session and pane.session.is_alive:
+                    reject_msg = (
+                        f"[orchestrator] done rejected — git working tree ไม่ clean. "
+                        f"commit ก่อนเรียก takkub done อีกครั้ง. Files:\n{files_preview}"
+                    )
+                    payload = _paste_payload(reject_msg)
+                    pane.session.write(payload)
+                    QTimer.singleShot(
+                        _enter_delay_ms(payload),
+                        lambda: pane.session and pane.session.write(b"\r"),
+                    )
+                return False, "done rejected: working tree dirty"
+
         # Agent finished cleanly — clear any pending watchdog state so
         # the next session starts fresh (no leftover idle streak, no
         # leftover "blocked on lead" flag, no carried auto-respawn count).
-        key = f"{project_ns}::{from_role}"
         self._idle_state.pop(key, None)
         self._blocked_on_lead.pop(key, None)
         self._auto_respawn_attempts.pop(key, None)
         self._last_assigned_task.pop(key, None)
+        self._requires_commit_on_done.pop(key, None)
 
         # notify Lead in the same project (a teammate in unirecon mustn't
         # nudge the Lead in pms by mistake)

@@ -169,6 +169,20 @@ class TestArgparse:
         assert seen["model"] == "gemini-2.5-pro"
         assert seen["timeout"] == 30.0
 
+    def test_assign_requires_commit_flag_parsed(self, fake_request: list[dict[str, Any]]) -> None:
+        """--requires-commit is parsed and forwarded as True in the payload."""
+        cli.main(["assign", "--role", "backend", "--requires-commit", "do work"])
+        payload = fake_request[-1]
+        assert payload["cmd"] == "assign"
+        assert payload["requires_commit"] is True
+
+    def test_assign_default_no_requires_commit(self, fake_request: list[dict[str, Any]]) -> None:
+        """Without the flag, requires_commit is False in the payload."""
+        cli.main(["assign", "--role", "backend", "do work"])
+        payload = fake_request[-1]
+        assert payload["cmd"] == "assign"
+        assert payload.get("requires_commit") is False
+
 
 class TestExitCodes:
     def test_ok_response_exit_zero(

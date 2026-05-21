@@ -129,6 +129,7 @@ cockpit รองรับหลาย project พร้อมกันผ่า
 takkub list                                            # ดูสถานะ panes ทั้งหมด
 takkub assign --role frontend "<task>"                 # spawn (ถ้ายังไม่เปิด) + ส่ง task
 takkub assign --role backend --cwd <path> "<task>"     # ระบุ cwd เอง (override role-aware default)
+takkub assign --role backend --requires-commit "<task>" # gate done(): ต้อง git commit ก่อน takkub done
 takkub send --to backend "<message>"                   # ส่งข้อความ peer (CC Lead อัตโนมัติ)
 takkub close --role qa                                 # ปิด pane นึง
 takkub close-all                                       # ปิด teammate ทั้งหมด (Lead รอด)

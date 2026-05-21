@@ -116,6 +116,7 @@ class CliServer(QObject):
                     req["role"],
                     cwd=req.get("cwd"),
                     task=req.get("task", ""),
+                    requires_commit=bool(req.get("requires_commit", False)),
                     project=from_project,
                 )
             elif cmd == "send":

@@ -146,6 +146,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                 "cwd": args.cwd,
                 "task": args.task,
                 "from": _from_role(),
+                "requires_commit": bool(getattr(args, "requires_commit", False)),
             }
         )
     )
@@ -374,6 +375,13 @@ def main(argv: list[str] | None = None) -> int:
     sa.add_argument("--role", required=True)
     sa.add_argument("--cwd", default=None)
     sa.add_argument("task", help="task content (positional)")
+    sa.add_argument(
+        "--requires-commit",
+        action="store_true",
+        dest="requires_commit",
+        default=False,
+        help="gate takkub done: reject if git working tree is not clean",
+    )
     sa.set_defaults(func=cmd_assign)
 
     ss = sub.add_parser("send", help="send a message to a running pane")
