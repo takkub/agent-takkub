@@ -18,6 +18,7 @@ takkub = "agent_takkub.cli:main"
 dev = [
     "pytest>=8",
     "ruff>=0.7",
+    "pre-commit>=3.7",
 ]
 
 [build-system]

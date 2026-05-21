@@ -429,6 +429,29 @@ MIT — ดู `LICENSE`
 
 ---
 
+## Pre-commit hooks
+
+Repo มี 2 hooks บังคับก่อน commit:
+
+| Hook | ทำอะไร |
+|---|---|
+| `ruff` | lint + auto-fix |
+| `ruff-format` | format ให้ตรง `pyproject.toml` |
+| `takkub-docs-verify` | ตรวจ markdown refs ใน `docs/` + `CLAUDE.md` + `README.md` — block ถ้ามี drift |
+
+ติดตั้งครั้งแรก:
+
+```bash
+pip install pre-commit
+pre-commit install
+```
+
+หลังจากนั้น hook จะรันอัตโนมัติทุก `git commit`
+
+ถ้า `takkub-docs-verify` fail ให้รัน `takkub docs-verify` เพื่อดู drift report (`runtime/docs_drift.md`)
+
+---
+
 ## Contributing / Bug reports
 
 GitHub Issues: <https://github.com/takkub/agent-takkub/issues>

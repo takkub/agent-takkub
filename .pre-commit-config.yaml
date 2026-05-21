@@ -1,0 +1,23 @@
+repos:
+  # ruff: lint + format (matches pyproject.toml [tool.ruff] config)
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.13
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  # takkub docs-verify: block doc-drift before it reaches main
+  - repo: local
+    hooks:
+      - id: takkub-docs-verify
+        name: takkub docs-verify
+        language: system
+        # exclude planning/spec docs that deliberately reference future files
+        entry: >-
+          takkub docs-verify --exit-on-broken
+          --exclude "docs/MACOS_PORT_PLAN.md"
+          --exclude "docs/superpowers/plans/*.md"
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
