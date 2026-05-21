@@ -851,6 +851,11 @@ class Orchestrator(QObject):
         # `close()` / `done()` / manual respawn. Capped at AUTO_RESPAWN_MAX
         # so the orchestrator gives up if claude refuses to come back.
         self._auto_respawn_attempts: dict[str, int] = {}
+        # Last task sent via assign() per pane. Keyed `<project>::<role>`.
+        # Used by _auto_respawn() to replay the task into the fresh session so
+        # a crash-and-respawn cycle doesn't silently drop the work.
+        # Cleared on manual close() so a deliberate restart doesn't replay.
+        self._last_assigned_task: dict[str, str] = {}
         # Last stuck-recover wall-clock per pane (key `<project>::<role>`).
         # Prevents the watchdog from looping recover→stuck→recover on a
         # chronically wedged claude.
@@ -1397,6 +1402,11 @@ class Orchestrator(QObject):
             return
         ok, msg = self.spawn(role_name, cwd=cwd, project=project)
         _log_event("auto_respawn_done", role=role_name, project=project, ok=ok, msg=msg[:160])
+        if ok:
+            cached_task = self._last_assigned_task.get(_exit_key(project, role_name))
+            if cached_task:
+                _log_event("auto_respawn_replay", role=role_name, project=project, task_preview=cached_task[:120])
+                self._send_when_ready(role_name, cached_task, project=project)
 
     # ──────────────────────────────────────────────────────────────
     def _auto_trust(self, role_name: str, project: str | None = None) -> None:
@@ -1432,6 +1442,8 @@ class Orchestrator(QObject):
         if not ok:
             return ok, msg
 
+        project_ns = self._resolve_project(project)
+        self._last_assigned_task[_exit_key(project_ns, role_name)] = task
         self._send_when_ready(role_name, task, project=project)
         _log_event("assign", role=role_name, cwd=cwd, task_preview=task[:120])
         return True, f"task queued for {role_name} (sending when ready)"
@@ -1720,6 +1732,7 @@ class Orchestrator(QObject):
         self._idle_state.pop(key, None)
         self._blocked_on_lead.pop(key, None)
         self._auto_respawn_attempts.pop(key, None)
+        self._last_assigned_task.pop(key, None)
         # For teammates, fully remove from the layout so the right column
         # collapses back. Lead stays as it always anchors the cockpit.
         # The project namespace travels with the signal so main_window
