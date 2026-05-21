@@ -173,6 +173,43 @@ def cmd_list(_: argparse.Namespace) -> dict:
     return _request(_with_project({"cmd": "list"}))
 
 
+def cmd_verify(args: argparse.Namespace) -> dict:
+    """Auto-detect stack and run lint/test gate in cwd."""
+    import json as _json
+    from pathlib import Path
+
+    from .verify import detect_stack, format_summary, run_checks
+
+    cwd = Path(args.cwd) if args.cwd else Path(".")
+    checks = detect_stack(cwd)
+
+    skip = set(getattr(args, "skip", None) or [])
+    checks = [c for c in checks if c.name not in skip]
+
+    result = run_checks(checks, cwd=cwd)
+    summary = format_summary(result)
+    print(summary)
+
+    if args.json:
+        data = {
+            "all_passed": result.all_passed,
+            "checks": [
+                {
+                    "name": cr.check.name,
+                    "exit_code": cr.exit_code,
+                    "duration_ms": round(cr.duration_ms, 1),
+                    "stdout_tail": cr.stdout_tail,
+                    "stderr_tail": cr.stderr_tail,
+                }
+                for cr in result.checks
+            ],
+        }
+        print(_json.dumps(data, indent=2))
+
+    ok = result.all_passed
+    return {"ok": ok, "msg": "all checks passed" if ok else "some checks failed"}
+
+
 def cmd_docs_verify(args: argparse.Namespace) -> dict:
     """Verify markdown references in docs/ and key root files."""
     from pathlib import Path
@@ -354,6 +391,14 @@ def main(argv: list[str] | None = None) -> int:
 
     sl = sub.add_parser("list", help="show pane status")
     sl.set_defaults(func=cmd_list)
+
+    sv = sub.add_parser("verify", help="auto-detect stack and run lint/test gate")
+    sv.add_argument("--cwd", default=None, help="working directory (default: current dir)")
+    sv.add_argument("--json", action="store_true", help="emit machine-readable result")
+    sv.add_argument(
+        "--skip", action="append", metavar="NAME", help="skip check by name (repeatable)"
+    )
+    sv.set_defaults(func=cmd_verify)
 
     sdv = sub.add_parser("docs-verify", help="verify markdown file/symbol refs")
     sdv.add_argument("--report", default="runtime/docs_drift.md")
