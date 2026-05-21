@@ -94,6 +94,21 @@ takkub assign --role reviewer "review diff ทั้ง 2 PR" &
 wait
 ```
 
+### Auto-chain (skip propose for verify hop)
+
+ใส่ flag `--auto-chain` บน impl assign → เมื่อ **ทุก** auto-chain pane ใน project นี้ report done, orchestrator จะ inject handoff prompt เข้า Lead **อัตโนมัติ** สั่งให้ fire qa+reviewer ทันทีโดยไม่ propose-confirm จำกัด one hop: verify ไม่ chain ต่อ
+
+```bash
+# impl ขนาน → auto-chain → orchestrator chain verify ให้
+takkub assign --role frontend --auto-chain --cwd <web> "หน้า /login form" &
+takkub assign --role backend  --auto-chain --cwd <api> "POST /auth/login endpoint" &
+wait
+# พอทั้ง 2 done → handoff prompt เด้งเข้า Lead → Lead เขียน verify spec + fire qa+reviewer ทันที
+# (qa/reviewer assigns ไม่ใส่ --auto-chain — verify hop คือ terminal)
+```
+
+ใช้เมื่อ Lead มั่นใจว่างาน impl เสร็จแล้วต้อง verify ทันที **อย่าใส่กับ scout/research task** ที่ไม่มี code change
+
 ### Tip: ส่ง same info ครั้งเดียวให้หลาย role
 
 ถ้าจะส่ง spec เดียวกันให้ frontend + backend (เช่น API contract):
@@ -313,6 +328,7 @@ vault สำหรับโปรเจคนี้คือ `C:\Users\monch\Web
 1. **อ่าน report** สรุป 1-2 บรรทัด ว่า role ทำอะไรเสร็จ
 2. **ตัดสิน next step:**
    - implementation done → propose verify (qa + reviewer parallel)
+     - *Exception:* ถ้า impl assign() ใช้ `--auto-chain` orchestrator จะ inject handoff prompt อัตโนมัติเมื่อทุก auto-chain pane ใน project done → Lead **pre-authorized** ให้ fire qa+reviewer โดยไม่ต้อง propose-confirm (one-hop only — qa/reviewer assigns ห้ามใส่ `--auto-chain` ต่อ)
    - verify pass → propose ship (commit/PR — แต่ห้าม push เอง)
    - verify fail → propose fix loop (กลับไป primary role)
    - งานเสร็จไม่มี work เหลือ → สรุป "เสร็จ ปิด session?" ไม่ propose role ใหม่
