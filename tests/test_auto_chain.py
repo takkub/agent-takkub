@@ -260,3 +260,56 @@ class TestDoneAutoChainTrigger:
         b_writes = [c.args[0] for c in lead_b.session.write.call_args_list]
         assert not any("auto-chain handoff" in str(w) for w in b_writes)
         assert "proj_b::backend" in orch._auto_chain_panes
+
+
+class TestCliAutoChainFlag:
+    def test_assign_parser_accepts_auto_chain(self) -> None:
+        import argparse
+
+        p = argparse.ArgumentParser()
+        sub = p.add_subparsers(dest="command")
+        sa = sub.add_parser("assign")
+        sa.add_argument("--role", required=True)
+        sa.add_argument("--cwd", default=None)
+        sa.add_argument("task")
+        sa.add_argument(
+            "--requires-commit",
+            action="store_true",
+            dest="requires_commit",
+            default=False,
+        )
+        sa.add_argument(
+            "--auto-chain",
+            action="store_true",
+            dest="auto_chain",
+            default=False,
+        )
+        ns = p.parse_args(["assign", "--role", "frontend", "--auto-chain", "do the thing"])
+        assert ns.auto_chain is True
+
+    def test_cmd_assign_forwards_auto_chain_in_request_body(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import argparse
+
+        from agent_takkub import cli as cli_mod
+
+        captured: dict = {}
+
+        def fake_request(payload):
+            captured.update(payload)
+            return {"ok": True, "msg": "queued"}
+
+        monkeypatch.setattr(cli_mod, "_request", fake_request)
+        monkeypatch.setattr(cli_mod, "_from_role", lambda: "lead")
+        monkeypatch.setattr(cli_mod, "_from_project", lambda: "proj_a")
+
+        ns = argparse.Namespace(
+            role="frontend",
+            cwd="/tmp",
+            task="do the thing",
+            requires_commit=False,
+            auto_chain=True,
+        )
+        cli_mod.cmd_assign(ns)
+        assert captured.get("auto_chain") is True

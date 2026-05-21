@@ -147,6 +147,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                 "task": args.task,
                 "from": _from_role(),
                 "requires_commit": bool(getattr(args, "requires_commit", False)),
+                "auto_chain": bool(getattr(args, "auto_chain", False)),
             }
         )
     )
@@ -381,6 +382,14 @@ def main(argv: list[str] | None = None) -> int:
         dest="requires_commit",
         default=False,
         help="gate takkub done: reject if git working tree is not clean",
+    )
+    sa.add_argument(
+        "--auto-chain",
+        action="store_true",
+        dest="auto_chain",
+        default=False,
+        help="after impl done, auto-trigger Lead to fire qa+reviewer "
+        "without proposing (one-hop only — verify is terminal)",
     )
     sa.set_defaults(func=cmd_assign)
 
