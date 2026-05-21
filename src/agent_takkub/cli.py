@@ -173,6 +173,32 @@ def cmd_list(_: argparse.Namespace) -> dict:
     return _request(_with_project({"cmd": "list"}))
 
 
+def cmd_audit_skills(args: argparse.Namespace) -> dict:
+    """Compute TF-IDF cosine similarity across role docs, produce a boundary report."""
+    from pathlib import Path
+
+    from .skill_audit import audit_skills, format_report
+
+    skills_dir = Path(".claude/agents")
+    pairs = audit_skills(skills_dir, threshold=args.threshold)
+    report = format_report(pairs, threshold=args.threshold)
+
+    if args.json:
+        import json
+
+        data = [{"role_a": a, "role_b": b, "similarity": s} for a, b, s in pairs]
+        print(json.dumps(data, indent=2))
+        print(f"\n{len(pairs)} pair(s) above threshold {args.threshold}")
+    else:
+        output_path = Path(args.output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(report, encoding="utf-8")
+        print(report)
+        print(f"\nReport written to {output_path}")
+
+    return {"ok": True, "msg": f"{len(pairs)} overlap pair(s) found"}
+
+
 def cmd_codex(args: argparse.Namespace) -> dict:
     """Fire OpenAI Codex CLI non-interactively and print the result.
 
@@ -302,6 +328,12 @@ def main(argv: list[str] | None = None) -> int:
 
     sl = sub.add_parser("list", help="show pane status")
     sl.set_defaults(func=cmd_list)
+
+    sas = sub.add_parser("audit-skills", help="TF-IDF role boundary audit")
+    sas.add_argument("--threshold", type=float, default=0.6)
+    sas.add_argument("--output", default="runtime/skill_audit.md")
+    sas.add_argument("--json", action="store_true", help="emit JSON instead of writing markdown")
+    sas.set_defaults(func=cmd_audit_skills)
 
     sse = sub.add_parser(
         "search",
