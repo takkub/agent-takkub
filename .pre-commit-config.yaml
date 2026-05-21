@@ -18,6 +18,7 @@ repos:
           takkub docs-verify --exit-on-broken
           --exclude "docs/MACOS_PORT_PLAN.md"
           --exclude "docs/superpowers/plans/*.md"
+          --exclude "docs/superpowers/specs/*.md"
         pass_filenames: false
         always_run: true
         stages: [pre-commit]
