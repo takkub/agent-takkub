@@ -1514,7 +1514,18 @@ class MainWindow(QMainWindow):
             )
             return
         if not status.get("clean"):
-            files = status.get("dirty_files", [])
+            # Cache is up to 5 min stale — user may have just committed
+            # in a terminal. Re-check synchronously (local-only, fast)
+            # before nagging them about dirty files.
+            from .update_helper import local_status
+
+            fresh = local_status()
+            self._update_status_cache = {**status, **fresh}
+            self._refresh_update_button()
+            if fresh.get("ok") and fresh.get("clean"):
+                self._status.showMessage("Up to date — chip refreshed.", 4_000)
+                return
+            files = fresh.get("dirty_files", status.get("dirty_files", []))
             preview = "\n".join(f"  • {f}" for f in files[:20])
             more = "" if len(files) <= 20 else f"\n  …and {len(files) - 20} more"
             QMessageBox.warning(
