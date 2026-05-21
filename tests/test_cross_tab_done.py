@@ -71,6 +71,7 @@ def orch(qapp, tmp_path, monkeypatch) -> Orchestrator:
         o._idle_state = {}
         o._blocked_on_lead = {}
         o._auto_respawn_attempts = {}
+        o._last_assigned_task = {}
         o._last_stuck_recover = {}
         o._recent_done = []
         o._pending_lead_cc = {}

@@ -77,7 +77,6 @@ _PANE_ENV_ALLOWLIST: frozenset[str] = frozenset(
         # Cockpit-injected (will be reset below anyway, but listed for clarity)
         "TAKKUB_ROLE",
         "TAKKUB_PROJECT",
-        "TAKKUB_LEAD_TOKEN",
         "TAKKUB_SETTING_SOURCES",
         "TAKKUB_ECC_FULL",
         "ECC_GATEGUARD",
@@ -1405,7 +1404,12 @@ class Orchestrator(QObject):
         if ok:
             cached_task = self._last_assigned_task.get(_exit_key(project, role_name))
             if cached_task:
-                _log_event("auto_respawn_replay", role=role_name, project=project, task_preview=cached_task[:120])
+                _log_event(
+                    "auto_respawn_replay",
+                    role=role_name,
+                    project=project,
+                    task_preview=cached_task[:120],
+                )
                 self._send_when_ready(role_name, cached_task, project=project)
 
     # ──────────────────────────────────────────────────────────────
@@ -1810,6 +1814,7 @@ class Orchestrator(QObject):
         self._idle_state.pop(key, None)
         self._blocked_on_lead.pop(key, None)
         self._auto_respawn_attempts.pop(key, None)
+        self._last_assigned_task.pop(key, None)
 
         # notify Lead in the same project (a teammate in unirecon mustn't
         # nudge the Lead in pms by mistake)

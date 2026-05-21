@@ -10,13 +10,12 @@ Three cases are verified:
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from PyQt6.QtCore import QCoreApplication
 
 from agent_takkub.orchestrator import Orchestrator, _exit_key
-
 
 TEST_PROJECT = "testproj"
 
@@ -66,8 +65,10 @@ class TestAutoRespawnReplay:
         crashed_pane.state = "exited"
         orch._panes_by_project.setdefault(TEST_PROJECT, {})["backend"] = crashed_pane
 
-        with patch.object(orch, "spawn", return_value=(True, "spawned")) as mock_spawn, \
-             patch.object(orch, "_send_when_ready") as mock_send:
+        with (
+            patch.object(orch, "spawn", return_value=(True, "spawned")) as mock_spawn,
+            patch.object(orch, "_send_when_ready") as mock_send,
+        ):
             orch._auto_respawn("backend", "/some/cwd", TEST_PROJECT)
 
         mock_spawn.assert_called_once_with("backend", cwd="/some/cwd", project=TEST_PROJECT)
@@ -82,8 +83,10 @@ class TestAutoRespawnReplay:
         crashed_pane.state = "exited"
         orch._panes_by_project.setdefault(TEST_PROJECT, {})["devops"] = crashed_pane
 
-        with patch.object(orch, "spawn", return_value=(True, "spawned")), \
-             patch.object(orch, "_send_when_ready") as mock_send:
+        with (
+            patch.object(orch, "spawn", return_value=(True, "spawned")),
+            patch.object(orch, "_send_when_ready") as mock_send,
+        ):
             orch._auto_respawn("devops", "/some/cwd", TEST_PROJECT)
 
         mock_send.assert_not_called()
@@ -114,8 +117,10 @@ class TestAutoRespawnReplay:
         crashed_pane.state = "exited"
         orch._panes_by_project.setdefault(TEST_PROJECT, {})["mobile"] = crashed_pane
 
-        with patch.object(orch, "spawn", return_value=(False, "spawn failed")), \
-             patch.object(orch, "_send_when_ready") as mock_send:
+        with (
+            patch.object(orch, "spawn", return_value=(False, "spawn failed")),
+            patch.object(orch, "_send_when_ready") as mock_send,
+        ):
             orch._auto_respawn("mobile", "/some/cwd", TEST_PROJECT)
 
         mock_send.assert_not_called()
@@ -124,8 +129,41 @@ class TestAutoRespawnReplay:
         """assign() must persist the task before calling _send_when_ready."""
         ekey = _exit_key(TEST_PROJECT, "frontend")
 
-        with patch.object(orch, "spawn", return_value=(True, "spawned")), \
-             patch.object(orch, "_send_when_ready"):
+        with (
+            patch.object(orch, "spawn", return_value=(True, "spawned")),
+            patch.object(orch, "_send_when_ready"),
+        ):
             orch.assign("frontend", cwd="/web", task=SAMPLE_TASK, project=TEST_PROJECT)
 
         assert orch._last_assigned_task.get(ekey) == SAMPLE_TASK
+
+    def test_done_clears_replay_cache_so_late_crash_does_not_replay(
+        self, orch: Orchestrator
+    ) -> None:
+        """done() must pop _last_assigned_task so a crash within the 2.5 s close-
+        window doesn't replay an already-completed task on auto-respawn."""
+        ekey = _exit_key(TEST_PROJECT, "reviewer")
+        orch._last_assigned_task[ekey] = SAMPLE_TASK
+
+        pane = _make_alive_pane()
+        orch._panes_by_project.setdefault(TEST_PROJECT, {})["reviewer"] = pane
+
+        with patch.object(orch, "_send_when_ready"):
+            orch.done("reviewer", note="done", project=TEST_PROJECT)
+
+        # Cache must be cleared immediately (before the 2.5 s close fires)
+        assert ekey not in orch._last_assigned_task
+
+        # Simulate session exit within the 2.5 s window → _auto_respawn fires
+        crashed_pane = MagicMock()
+        crashed_pane.session = None
+        crashed_pane.state = "exited"
+        orch._panes_by_project[TEST_PROJECT]["reviewer"] = crashed_pane
+
+        with (
+            patch.object(orch, "spawn", return_value=(True, "spawned")),
+            patch.object(orch, "_send_when_ready") as mock_send_after,
+        ):
+            orch._auto_respawn("reviewer", "/some/cwd", TEST_PROJECT)
+
+        mock_send_after.assert_not_called()
