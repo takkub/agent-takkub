@@ -62,9 +62,17 @@ _PANE_ENV_ALLOWLIST: frozenset[str] = frozenset(
         "PROGRAMFILES",
         "PROGRAMFILES(X86)",
         "USERNAME",
+        "USERDOMAIN",
         "COMPUTERNAME",
         "OS",
         "PROCESSOR_ARCHITECTURE",
+        # COMSPEC = path to cmd.exe — Node.js child_process.spawn() falls back to
+        # this when launching subprocesses on Windows; missing → ENOENT crash in
+        # MCP servers (codex_apps) that shell out. Top hypothesis for codex early-crash.
+        "COMSPEC",
+        # Session identity — some Windows auth flows + .NET apps consult these
+        "SESSIONNAME",
+        "LOGONSERVER",
         # POSIX essentials (forward-compat for mac-port branch)
         "HOME",
         "USER",

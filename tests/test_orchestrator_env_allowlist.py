@@ -65,3 +65,24 @@ def test_build_pane_env_returns_plain_dict(monkeypatch: pytest.MonkeyPatch) -> N
     assert isinstance(env, dict)
     # Must not be the os.environ object itself — mutation safety
     assert env is not os.environ
+
+
+def test_build_pane_env_includes_comspec(monkeypatch: pytest.MonkeyPatch) -> None:
+    # COMSPEC = path to cmd.exe; Node.js child_process needs it on Windows.
+    # Missing COMSPEC → ENOENT crash in MCP servers (codex_apps) that shell out.
+    monkeypatch.setenv("COMSPEC", "C:\\Windows\\system32\\cmd.exe")
+    env = _build_pane_env()
+    assert "COMSPEC" in env
+    assert env["COMSPEC"] == "C:\\Windows\\system32\\cmd.exe"
+
+
+def test_build_pane_env_includes_userdomain(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("USERDOMAIN", "WORKGROUP")
+    env = _build_pane_env()
+    assert "USERDOMAIN" in env
+
+
+def test_build_pane_env_includes_sessionname(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SESSIONNAME", "Console")
+    env = _build_pane_env()
+    assert "SESSIONNAME" in env
