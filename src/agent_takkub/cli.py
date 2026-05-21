@@ -173,6 +173,32 @@ def cmd_list(_: argparse.Namespace) -> dict:
     return _request(_with_project({"cmd": "list"}))
 
 
+def cmd_docs_verify(args: argparse.Namespace) -> dict:
+    """Verify markdown references in docs/ and key root files."""
+    from pathlib import Path
+
+    from .docs_verify import format_drift_report, verify_docs
+
+    results = verify_docs(
+        docs_dirs=(Path("docs"),),
+        extras=(Path("CLAUDE.md"), Path("README.md")),
+        repo_root=Path("."),
+    )
+    broken = [r for r in results if r.status != "ok"]
+    report = format_drift_report(results)
+
+    output_path = Path(args.report)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(report, encoding="utf-8")
+    print(report)
+    print(f"\nReport written to {output_path}")
+    print(f"{len(broken)} broken ref(s) found")
+
+    if args.exit_on_broken and broken:
+        return {"ok": False, "msg": f"{len(broken)} broken ref(s)"}
+    return {"ok": True, "msg": f"{len(broken)} broken ref(s)"}
+
+
 def cmd_audit_skills(args: argparse.Namespace) -> dict:
     """Compute TF-IDF cosine similarity across role docs, produce a boundary report."""
     from pathlib import Path
@@ -328,6 +354,11 @@ def main(argv: list[str] | None = None) -> int:
 
     sl = sub.add_parser("list", help="show pane status")
     sl.set_defaults(func=cmd_list)
+
+    sdv = sub.add_parser("docs-verify", help="verify markdown file/symbol refs")
+    sdv.add_argument("--report", default="runtime/docs_drift.md")
+    sdv.add_argument("--exit-on-broken", action="store_true", dest="exit_on_broken")
+    sdv.set_defaults(func=cmd_docs_verify)
 
     sas = sub.add_parser("audit-skills", help="TF-IDF role boundary audit")
     sas.add_argument("--threshold", type=float, default=0.6)

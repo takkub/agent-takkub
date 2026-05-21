@@ -1,0 +1,229 @@
+"""Markdown reference verifier — catch stale file/symbol refs after refactors."""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from pathlib import Path
+
+
+@dataclass
+class PathRef:
+    text: str
+    path: str
+    line: int | None
+    source: str
+    source_line: int
+
+
+@dataclass
+class SymbolRef:
+    text: str
+    class_name: str | None
+    method: str
+    source: str
+    source_line: int
+
+
+@dataclass
+class VerifyResult:
+    ref_text: str
+    status: str  # "ok" | "missing" | "line_oob"
+    message: str
+    source: str
+    source_line: int
+
+
+_CODE_EXTENSIONS = (".py", ".md", ".json", ".yml", ".yaml", ".ts", ".tsx", ".js", ".sh", ".toml")
+
+# Matches backtick-quoted paths that contain at least one `/` (directory-qualified)
+# e.g. `src/foo.py:42` or `docs/bar.md` — bare filenames without a `/` are skipped.
+_PATH_PATTERN = re.compile(
+    r"`((?!https?://)([a-zA-Z0-9_.][a-zA-Z0-9_./\-]*/[a-zA-Z0-9_./\-]+(?:"
+    + "|".join(re.escape(ext) for ext in _CODE_EXTENSIONS)
+    + r"))(?::(\d+))?)`"
+)
+
+# Matches `ClassName.method` (method >= 4 chars) or `function_name()` (func >= 4 chars)
+_SYMBOL_CLASS_METHOD = re.compile(r"`([A-Z][a-zA-Z0-9_]*)\.([a-z_][a-zA-Z0-9_]{3,})`")
+_SYMBOL_FUNCTION = re.compile(r"`([a-z_][a-zA-Z0-9_]{3,})\(\)`")
+
+_SKIP_SYMBOLS = frozenset({"i.e", "e.g", "etc"})
+
+
+def extract_path_refs(md_text: str, source: str = "") -> list[PathRef]:
+    """Extract backtick-quoted file path references from markdown text."""
+    refs: list[PathRef] = []
+    for lineno, line in enumerate(md_text.splitlines(), start=1):
+        for m in _PATH_PATTERN.finditer(line):
+            full_text, path, line_str = m.group(1), m.group(2), m.group(3)
+            refs.append(
+                PathRef(
+                    text=f"`{full_text}`",
+                    path=path,
+                    line=int(line_str) if line_str else None,
+                    source=source,
+                    source_line=lineno,
+                )
+            )
+    return refs
+
+
+def extract_symbol_refs(md_text: str, source: str = "") -> list[SymbolRef]:
+    """Extract backtick-quoted symbol references (Class.method or func()) from markdown."""
+    refs: list[SymbolRef] = []
+    for lineno, line in enumerate(md_text.splitlines(), start=1):
+        for m in _SYMBOL_CLASS_METHOD.finditer(line):
+            cls, method = m.group(1), m.group(2)
+            refs.append(
+                SymbolRef(
+                    text=f"`{cls}.{method}`",
+                    class_name=cls,
+                    method=method,
+                    source=source,
+                    source_line=lineno,
+                )
+            )
+        for m in _SYMBOL_FUNCTION.finditer(line):
+            func = m.group(1)
+            if func in _SKIP_SYMBOLS:
+                continue
+            refs.append(
+                SymbolRef(
+                    text=f"`{func}()`",
+                    class_name=None,
+                    method=func,
+                    source=source,
+                    source_line=lineno,
+                )
+            )
+    return refs
+
+
+def verify_path(ref: PathRef, repo_root: Path) -> VerifyResult:
+    """Check that a path ref's file exists and, if a line is given, is in range."""
+    target = repo_root / ref.path
+    if not target.exists():
+        return VerifyResult(
+            ref_text=ref.text,
+            status="missing",
+            message=f"file not found: {ref.path}",
+            source=ref.source,
+            source_line=ref.source_line,
+        )
+    if ref.line is not None:
+        try:
+            line_count = sum(1 for _ in target.read_bytes().split(b"\n"))
+        except OSError:
+            line_count = 0
+        if ref.line > line_count:
+            return VerifyResult(
+                ref_text=ref.text,
+                status="line_oob",
+                message=f"line {ref.line} > {line_count} lines in {ref.path}",
+                source=ref.source,
+                source_line=ref.source_line,
+            )
+    return VerifyResult(
+        ref_text=ref.text,
+        status="ok",
+        message="",
+        source=ref.source,
+        source_line=ref.source_line,
+    )
+
+
+def verify_symbol(
+    ref: SymbolRef,
+    repo_root: Path,
+    search_dirs: tuple[Path, ...] = (Path("src"),),
+) -> VerifyResult:
+    """Search for the symbol definition in source files under search_dirs."""
+    patterns = [
+        re.compile(rf"\bdef\s+{re.escape(ref.method)}\b"),
+        re.compile(rf"\bclass\s+{re.escape(ref.method)}\b"),
+        re.compile(rf"^{re.escape(ref.method)}\s*=", re.MULTILINE),
+    ]
+    if ref.class_name:
+        patterns.append(re.compile(rf"\bclass\s+{re.escape(ref.class_name)}\b"))
+
+    for search_dir in search_dirs:
+        base = repo_root / search_dir
+        if not base.exists():
+            continue
+        for f in base.rglob("*.py"):
+            try:
+                content = f.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            for pat in patterns:
+                if pat.search(content):
+                    return VerifyResult(
+                        ref_text=ref.text,
+                        status="ok",
+                        message="",
+                        source=ref.source,
+                        source_line=ref.source_line,
+                    )
+
+    return VerifyResult(
+        ref_text=ref.text,
+        status="missing",
+        message=f"symbol '{ref.method}' not found in {[str(d) for d in search_dirs]}",
+        source=ref.source,
+        source_line=ref.source_line,
+    )
+
+
+def verify_docs(
+    docs_dirs: tuple[Path, ...] = (Path("docs"),),
+    extras: tuple[Path, ...] = (Path("CLAUDE.md"), Path("README.md")),
+    repo_root: Path = Path("."),
+) -> list[VerifyResult]:
+    """Walk markdown files, extract refs, verify each. Returns all non-ok results."""
+    results: list[VerifyResult] = []
+
+    def _process(md_path: Path) -> None:
+        try:
+            text = md_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return
+        rel = str(md_path.relative_to(repo_root)) if md_path.is_absolute() else str(md_path)
+        for ref in extract_path_refs(text, source=rel):
+            r = verify_path(ref, repo_root)
+            if r.status != "ok":
+                results.append(r)
+        for ref in extract_symbol_refs(text, source=rel):
+            r = verify_symbol(ref, repo_root)
+            if r.status != "ok":
+                results.append(r)
+
+    for docs_dir in docs_dirs:
+        base = repo_root / docs_dir
+        if not base.exists():
+            continue
+        for md_file in base.rglob("*.md"):
+            _process(md_file)
+
+    for extra in extras:
+        p = repo_root / extra
+        if p.exists():
+            _process(p)
+
+    return results
+
+
+def format_drift_report(results: list[VerifyResult]) -> str:
+    """Markdown table of broken refs; empty → 'No broken refs found.'"""
+    broken = [r for r in results if r.status != "ok"]
+    if not broken:
+        return "No broken refs found."
+    lines = [
+        "# Docs drift report",
+        "",
+        "| Source | Line | Ref | Status | Message |",
+        "|--------|------|-----|--------|---------|",
+    ]
+    for r in broken:
+        lines.append(f"| {r.source} | {r.source_line} | {r.ref_text} | {r.status} | {r.message} |")
+    return "\n".join(lines)
