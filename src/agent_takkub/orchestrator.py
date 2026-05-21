@@ -1212,26 +1212,17 @@ class Orchestrator(QObject):
         # those plugins to claude *explicitly* via --plugin-dir (see below).
         # Override the whole policy with TAKKUB_SETTING_SOURCES env var.
         sources = os.environ.get("TAKKUB_SETTING_SOURCES", "project,local")
-        # Lead runs WITHOUT --dangerously-skip-permissions so that
-        # permissions.deny rules in the guard settings file are respected.
-        # --permission-mode acceptEdits lets Lead auto-accept cockpit-file
-        # edits without prompts, while deny rules block project-path writes.
-        # Teammates still get the full bypass for uninterrupted specialist work.
-        if role_name == LEAD.name:
-            argv: list[str] = [
-                claude,
-                "--permission-mode",
-                "acceptEdits",
-                "--setting-sources",
-                sources,
-            ]
-        else:
-            argv: list[str] = [
-                claude,
-                "--dangerously-skip-permissions",
-                "--setting-sources",
-                sources,
-            ]
+        # Both Lead and teammates run with --dangerously-skip-permissions.
+        # The write-boundary for Lead (don't touch project paths) is now a
+        # soft policy in CLAUDE.md only — the previous deny-rule guard was
+        # removed because the per-Bash / per-tool permission prompts it
+        # exposed broke flow ("ต้องกด enter ตลอด ๆ งานไม่จบ").
+        argv: list[str] = [
+            claude,
+            "--dangerously-skip-permissions",
+            "--setting-sources",
+            sources,
+        ]
 
         # Teammate speed tier. Lead does orchestration (planning, multi-step
         # reasoning, coordinating teammates) and stays on the user's
@@ -1270,13 +1261,11 @@ class Orchestrator(QObject):
         if role_md_file:
             argv.extend(["--append-system-prompt-file", role_md_file])
 
-        # Lead write-boundary enforcement: inject a per-project settings file
-        # containing permissions.deny rules for every project path × write tool.
-        # This works because Lead no longer runs with --dangerously-skip-permissions,
-        # so deny rules are evaluated before any edit is applied.
-        if role_name == LEAD.name:
-            lead_guard = render_lead_settings(project_ns)
-            argv.extend(["--settings", str(lead_guard)])
+        # (Lead write-boundary used to inject a per-project deny-rule
+        # settings file here. Removed when Lead switched to
+        # --dangerously-skip-permissions: deny rules are bypassed under
+        # that flag anyway, so the file would have been ignored. The
+        # write boundary is now a soft policy in CLAUDE.md.)
 
         # Inject the cockpit's shared MCP config (browser MCPs) so every
         # spawned claude session has playwright + chrome-devtools available

@@ -381,40 +381,43 @@ def _capture_spawn_argv(
 
 
 class TestSpawnArgvLeadVsTeammate:
-    def test_lead_argv_has_permission_mode_accept_edits(
+    def test_lead_argv_has_dangerously_skip_permissions(
         self,
         qapp: QCoreApplication,
         two_project_json: pathlib.Path,
         tmp_path: pathlib.Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Lead now runs with --dangerously-skip-permissions to eliminate
+        per-tool permission prompts that disrupted flow."""
         argv = _capture_spawn_argv(qapp, two_project_json, tmp_path, monkeypatch, "lead")
-        assert "--permission-mode" in argv
-        idx = argv.index("--permission-mode")
-        assert argv[idx + 1] == "acceptEdits"
+        assert "--dangerously-skip-permissions" in argv
 
-    def test_lead_argv_no_dangerously_skip_permissions(
+    def test_lead_argv_no_permission_mode_flag(
         self,
         qapp: QCoreApplication,
         two_project_json: pathlib.Path,
         tmp_path: pathlib.Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """--permission-mode is redundant when --dangerously-skip-permissions
+        is set — guard against re-introducing it by accident."""
         argv = _capture_spawn_argv(qapp, two_project_json, tmp_path, monkeypatch, "lead")
-        assert "--dangerously-skip-permissions" not in argv
+        assert "--permission-mode" not in argv
 
-    def test_lead_argv_has_settings_guard_path(
+    def test_lead_argv_no_settings_guard_path(
         self,
         qapp: QCoreApplication,
         two_project_json: pathlib.Path,
         tmp_path: pathlib.Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Lead no longer receives a lead-guard-*.json --settings file
+        (deny rules are bypassed under --dangerously-skip-permissions)."""
         argv = _capture_spawn_argv(qapp, two_project_json, tmp_path, monkeypatch, "lead")
-        assert "--settings" in argv
-        idx = argv.index("--settings")
-        settings_path = pathlib.Path(argv[idx + 1])
-        assert settings_path.name == "lead-guard-proj_a.json"
+        settings_values = [argv[i + 1] for i, v in enumerate(argv) if v == "--settings"]
+        for sv in settings_values:
+            assert "lead-guard" not in sv
 
     def test_teammate_argv_has_dangerously_skip_permissions(
         self,
