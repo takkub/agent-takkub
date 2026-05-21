@@ -1762,6 +1762,44 @@ class Orchestrator(QObject):
             )
         _log_event("send_cc_flushed", project=project_ns, count=len(items))
 
+    def _inject_auto_chain_handoff(self, project_ns: str) -> None:
+        """Send a pre-authorisation prompt to Lead telling it to fire
+        verify (qa + reviewer) in parallel WITHOUT proposing or waiting
+        for user confirmation. Fires after all panes assigned with
+        --auto-chain in the project have reported done.
+
+        If the Lead pane is absent, the prompt is queued via
+        _pending_done_notices and delivered when Lead next spawns.
+        """
+        lead = self._project_panes(project_ns).get(LEAD.name)
+        prompt = (
+            "[auto-chain handoff] impl panes spawned with --auto-chain "
+            "in this project have all reported done.\n"
+            "You are pre-authorized to fire verify (qa + reviewer) "
+            "in parallel WITHOUT proposing or waiting for user confirmation.\n"
+            "\n"
+            "Steps:\n"
+            "1. Re-read the recent [<role> done] notes above\n"
+            "2. (Optional) `git -C <project_path> diff --stat` for changed files\n"
+            "3. Write a verify spec covering the implemented changes\n"
+            "4. Fire in parallel: takkub assign --role qa ... & "
+            "takkub assign --role reviewer ... & wait\n"
+            "\n"
+            "Do NOT add --auto-chain on the verify fire (verify is the "
+            "terminal hop). After qa+reviewer done events arrive, resume "
+            "normal propose-then-confirm flow."
+        )
+        if lead and lead.session and lead.session.is_alive:
+            lead.session.write(prompt)
+            QTimer.singleShot(150, lambda: lead.session and lead.session.write(b"\r"))
+            self.leadInjected.emit(prompt)
+            _log_event("auto_chain_handoff", project=project_ns)
+        else:
+            self._pending_done_notices.setdefault(project_ns, []).append(
+                {"role": "system", "note": "auto-chain handoff", "body": prompt}
+            )
+            _log_event("auto_chain_handoff_queued", project=project_ns)
+
     def _flush_pending_done_notices(self, project_ns: str) -> None:
         """Deliver queued done notices to Lead if it is currently alive.
 
