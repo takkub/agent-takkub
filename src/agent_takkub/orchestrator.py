@@ -155,6 +155,15 @@ IDLE_REMINDER_TEXT = (
 AUTO_RESPAWN_DELAY_MS = 2_500
 AUTO_RESPAWN_MAX = 2
 
+# Codex early-crash detection. If a codex pane exits within this many seconds
+# of spawning, the orchestrator treats it as a suspicious early crash, logs a
+# `codex_early_crash` event, and writes a diagnostic dump to
+# runtime/codex_crash_dumps/<ts>-<project>-<role>.log containing the exit
+# code, time-to-exit, last PTY output tail, and the filtered env keys.  Dumps
+# let us falsify the MCP-boot-race vs env-missing hypotheses without needing a
+# live debugger session.
+CODEX_EARLY_CRASH_WINDOW_SEC = 90
+
 # Bracketed-paste threshold for messages injected into a pane via the
 # orchestrator (assign / send / slash-command). Below this length we
 # write raw text — claude code's interactive input handles short typing
@@ -870,6 +879,10 @@ class Orchestrator(QObject):
         # Prevents the watchdog from looping recover→stuck→recover on a
         # chronically wedged claude.
         self._last_stuck_recover: dict[str, float] = {}
+        # Codex early-crash instrumentation. Keyed `<project>::<role>`.
+        # Records wall-clock at spawn so _on_codex_exit() can compute
+        # time-to-exit and decide whether to write a crash dump.
+        self._codex_spawn_times: dict[str, float] = {}
         self._idle_watchdog = QTimer(self)
         self._idle_watchdog.setInterval(IDLE_WATCHDOG_INTERVAL_MS)
         self._idle_watchdog.timeout.connect(self._check_idle_teammates)
@@ -1076,10 +1089,13 @@ class Orchestrator(QObject):
             except Exception as e:
                 return False, f"failed to spawn codex: {e}"
             pane.attach_session(session, cwd=spawn_cwd)
-            session.processExited.connect(
-                lambda _code, r=role_name, c=spawn_cwd, p=project_ns: self._on_session_exit(r, c, p)
-            )
             _ekey = _exit_key(project_ns, role_name)
+            self._codex_spawn_times[_ekey] = time.time()
+            session.processExited.connect(
+                lambda code, r=role_name, c=spawn_cwd, p=project_ns, sess=session: (
+                    self._on_codex_exit(code, r, c, p, sess)
+                )
+            )
             if _ekey in self._recent_exits:
                 del self._recent_exits[_ekey]
             self._auto_trust(role_name, project=project_ns)
@@ -1372,6 +1388,101 @@ class Orchestrator(QObject):
         )
         suffix = " (resumed)" if resumed else ""
         return True, f"{role_name} spawned in {spawn_cwd}{suffix}"
+
+    def _on_codex_exit(
+        self,
+        exit_code: int,
+        role_name: str,
+        cwd: str,
+        project: str,
+        session: PtySession,
+    ) -> None:
+        """Codex-specific exit handler. Detects early crashes and writes a
+        diagnostic dump before delegating to the generic _on_session_exit.
+
+        An 'early crash' is any exit within CODEX_EARLY_CRASH_WINDOW_SEC of
+        spawning — exactly the pattern observed (codex dies ~50s after boot
+        without any visible error).  The dump captures enough context to
+        falsify the two top hypotheses: env-missing vars and MCP-boot race.
+        """
+        ekey = _exit_key(project, role_name)
+        spawn_ts = self._codex_spawn_times.pop(ekey, None)
+        time_to_exit = (time.time() - spawn_ts) if spawn_ts is not None else None
+
+        if time_to_exit is not None and time_to_exit <= CODEX_EARLY_CRASH_WINDOW_SEC:
+            self._write_codex_crash_dump(
+                role_name=role_name,
+                project=project,
+                cwd=cwd,
+                exit_code=exit_code,
+                time_to_exit=time_to_exit,
+                session=session,
+            )
+
+        self._on_session_exit(role_name, cwd, project)
+
+    def _write_codex_crash_dump(
+        self,
+        *,
+        role_name: str,
+        project: str,
+        cwd: str,
+        exit_code: int,
+        time_to_exit: float,
+        session: PtySession,
+    ) -> None:
+        """Write a plaintext diagnostic dump for a codex early-crash to
+        runtime/codex_crash_dumps/<ts>-<project>-<role>.log.
+
+        The dump is human-readable (not JSONL) because the main consumer is
+        a developer reading it in a text editor after a repro.
+        """
+        try:
+            ensure_runtime()
+            dump_dir = RUNTIME_DIR / "codex_crash_dumps"
+            dump_dir.mkdir(parents=True, exist_ok=True)
+            ts_str = datetime.now().strftime("%Y%m%dT%H%M%S")
+            safe_project = project.replace("/", "_").replace("\\", "_")
+            dump_path = dump_dir / f"{ts_str}-{safe_project}-{role_name}.log"
+
+            # Last visible screen content from the pyte buffer (best-effort).
+            try:
+                output_tail = "\n".join(session.display_lines())
+            except Exception:
+                output_tail = "(unavailable)"
+
+            # Env keys the filtered pane env would have contained at spawn time.
+            # Re-build from _build_pane_env() — same logic as spawn, values omitted.
+            env_keys = sorted(_build_pane_env().keys())
+
+            lines = [
+                f"# Codex early-crash dump — {ts_str}",
+                f"role:         {role_name}",
+                f"project:      {project}",
+                f"cwd:          {cwd}",
+                f"exit_code:    {exit_code}",
+                f"time_to_exit: {time_to_exit:.1f}s",
+                f"threshold:    {CODEX_EARLY_CRASH_WINDOW_SEC}s",
+                "",
+                "## env keys present in pane",
+                ", ".join(env_keys) if env_keys else "(unavailable)",
+                "",
+                "## last PTY output (tail)",
+                output_tail,
+                "",
+            ]
+            dump_path.write_text("\n".join(lines), encoding="utf-8")
+
+            _log_event(
+                "codex_early_crash",
+                role=role_name,
+                project=project,
+                exit_code=exit_code,
+                time_to_exit_s=round(time_to_exit, 1),
+                dump=str(dump_path),
+            )
+        except Exception:
+            pass  # crash dump must never crash the orchestrator
 
     def _on_session_exit(self, role_name: str, cwd: str, project: str) -> None:
         """Track recent exits so a quick respawn can pass --resume <uuid>, then
