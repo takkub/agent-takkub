@@ -431,8 +431,10 @@ class MainWindow(QMainWindow):
             "color: #6b7280; font-size: 11px; padding: 0 6px; font-variant-numeric: tabular-nums;"
         )
         self._version_label.setToolTip(
-            "Cockpit version + commit SHA. Click the 🔄 chip to pull updates."
+            "Cockpit version + commit SHA.\nClick to copy. Click the 🔄 chip to pull updates."
         )
+        self._version_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._version_label.mousePressEvent = lambda _ev: self._copy_version_to_clipboard()
 
         # Aggregate token meter: sums prompt tokens across every active pane
         # so the user can spot when the whole team is bumping the limit.
@@ -1373,6 +1375,13 @@ class MainWindow(QMainWindow):
         sha = current_sha_short()
         text = f"v{ver} · @{sha}" if sha else f"v{ver}"
         self._version_label.setText(text)
+
+    def _copy_version_to_clipboard(self) -> None:
+        text = self._version_label.text().strip()
+        if not text:
+            return
+        QApplication.clipboard().setText(text)
+        self._status.showMessage(f"copied: {text}", 2000)
 
     def _refresh_update_button(self) -> None:
         """Flip the update chip's label/colour based on the cached
