@@ -26,25 +26,15 @@ if role_name == LEAD.name:
 
 This means any `ANTHROPIC_API_KEY`, `AWS_*`, `GH_TOKEN`, or `OPENAI_API_KEY` present in the cockpit's own environment is **inherited by every teammate pane** via `os.environ.copy()`.
 
-**Status: found**
+**Status: fixed** *(2026-05-21, round-2 hardening)*
 
-**Recommendation:** The practical risk is low for this specific codebase because:
-1. Teammates run Claude Code (Max OAuth — no `ANTHROPIC_API_KEY` needed to authenticate).
-2. Teammates are trusted sub-agents spawned locally on the user's own machine.
-3. No exfiltration vector exists beyond the pane's own Claude session.
+**Resolution:**
 
-However, if `OPENAI_API_KEY` or `GH_TOKEN` is set in the cockpit shell, an off-the-rails teammate could theoretically use them. A defense-in-depth fix would be to explicitly list only the keys panes need:
+`_build_pane_env()` added to `src/agent_takkub/orchestrator.py` (near top of module). All three `os.environ.copy()` calls in the spawn path (claude ~line 1054, codex ~line 978, gemini ~line 934) replaced with `_build_pane_env()`.
 
-```python
-_PANE_ENV_ALLOWLIST = {
-    "PATH", "PATHEXT", "SYSTEMROOT", "TEMP", "TMP", "USERPROFILE", "HOME",
-    "TAKKUB_ROLE", "TAKKUB_PROJECT", "TAKKUB_LEAD_TOKEN",
-    "TAKKUB_SETTING_SOURCES", "TAKKUB_ECC_FULL",
-    "CHROME_BIN",
-}
-```
+The function keeps only keys whose `.upper()` form appears in `_PANE_ENV_ALLOWLIST` — a `frozenset` of ~25 OS-essential, Node-tooling, and cockpit-injected variables. `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GH_TOKEN`, `AWS_*`, and any other secret-bearing vars are dropped.
 
-Deferring this to Lead as a low-priority hardening item (not a blocking security issue given trust model).
+Test coverage: `tests/test_orchestrator_env_allowlist.py` (9 tests) verifies inclusion of `PATH`/`HOME`/`USERPROFILE`, exclusion of all four common secret vars, case-insensitive matching, and that the return value is a plain `dict` (not `os.environ` itself).
 
 ---
 
@@ -132,12 +122,10 @@ No `urllib`, `requests`, `http.client`, `curl`, or `wget` usage found in `src/ag
 
 | # | Check | Status |
 |---|---|---|
-| 1 | Env leak: sensitive vars inherited by panes | found (low-risk, deferred hardening) |
+| 1 | Env leak: sensitive vars inherited by panes | **fixed** (`_build_pane_env()` allowlist, 2026-05-21) |
 | 2 | Auto-approve flags in pane spawns | clean (by design) |
 | 3 | `shell=True` with user-controlled input | clean |
 | 4 | HOME-level mutation outside namespaces | clean |
 | 5 | Unexpected network calls at startup | clean |
 
-**Result: 4/5 clean, 1 found (not fixed — low risk, deferred to Lead as hardening item).**
-
-**Recommendation for Check 1:** Future PR — replace `os.environ.copy()` in orchestrator spawn path with an explicit allowlist. No immediate action required given the local trust model (panes are user-owned Claude Code processes on the user's own machine).
+**Result: 5/5 clean.** Check 1 fixed 2026-05-21 via round-2 hardening (`_build_pane_env()` allowlist).
