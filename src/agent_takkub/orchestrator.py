@@ -2184,6 +2184,85 @@ class Orchestrator(QObject):
         except OSError:
             pass
 
+    def end_session(self, project: str | None = None, note: str = "") -> tuple[bool, str]:
+        """Write a Lead session summary to runtime/sessions and the vault mirror.
+
+        Called via `takkub end-session [--note '...']` from the Lead pane.
+        Never closes any pane — Lead stays open, teammates continue as-is.
+        """
+        project_ns = self._resolve_project(project)
+        if not note.strip():
+            note = "session ended"
+        now = datetime.now()
+        day_str = now.strftime("%Y-%m-%d")
+        time_str = now.strftime("%H%M%S")
+
+        # Gather teammate done-event files from today's session dir.
+        session_day = RUNTIME_DIR / "sessions" / day_str / project_ns
+        done_files: list[str] = []
+        if session_day.is_dir():
+            for f in sorted(session_day.iterdir()):
+                if f.name.startswith("lead-"):
+                    continue
+                if f.suffix == ".md":
+                    done_files.append(f"runtime/sessions/{day_str}/{project_ns}/{f.name}")
+
+        # Gather still-open teammate panes.
+        active_teammates: list[tuple[str, str]] = [
+            (name, pane.state)
+            for name, pane in self._project_panes(project_ns).items()
+            if name != LEAD.name
+        ]
+
+        # Build markdown body.
+        iso = now.isoformat(timespec="seconds")
+        body = (
+            f"---\n"
+            f"role: lead\n"
+            f"project: {project_ns}\n"
+            f"date: {iso}\n"
+            f"tags: [session, lead, {project_ns}]\n"
+            f"---\n\n"
+            f"# lead session end · {iso}\n\n"
+            f"**Project:** [[01-Projects/{project_ns}|{project_ns}]]\n"
+            f"**Role:** lead\n\n"
+            f"## Note\n\n{note.strip()}\n"
+        )
+        if done_files:
+            body += "\n## Teammate done events\n\n"
+            body += "\n".join(f"- {p}" for p in done_files) + "\n"
+        else:
+            body += "\n## Teammate done events\n\n_(none today)_\n"
+
+        if active_teammates:
+            body += "\n## Active teammates at end-session\n\n"
+            body += "\n".join(f"- {role}: {state}" for role, state in active_teammates) + "\n"
+        else:
+            body += "\n## Active teammates at end-session\n\n_(none)_\n"
+
+        # Write local file.
+        rel_path = f"runtime/sessions/{day_str}/{project_ns}/lead-{time_str}.md"
+        try:
+            session_day.mkdir(parents=True, exist_ok=True)
+            local_path = RUNTIME_DIR / "sessions" / day_str / project_ns / f"lead-{time_str}.md"
+            local_path.write_text(body, encoding="utf-8")
+        except OSError as exc:
+            return False, f"failed to write session file: {exc}"
+
+        # Mirror to vault (best-effort, never fails the call).
+        vault = _resolve_vault_dir()
+        if vault is not None:
+            try:
+                vault_sessions = vault / "01-Projects" / project_ns / "sessions"
+                vault_sessions.mkdir(parents=True, exist_ok=True)
+                stamp = now.strftime("%Y-%m-%dT%H%M%S")
+                (vault_sessions / f"{stamp}-lead.md").write_text(body, encoding="utf-8")
+            except OSError:
+                pass
+
+        _log_event("end_session", project=project_ns, note=note[:200])
+        return True, f"lead session summary written: {rel_path}"
+
     def list_status(self, project: str | None = None) -> dict[str, str]:
         """Snapshot of `role → state` for one project's panes.
 

@@ -108,6 +108,13 @@ class CliServer(QObject):
             self._reply(sock, ok=False, msg="lead cannot call done")
             return
 
+        # end-session: Lead-only (reverse of done — only Lead may call this).
+        if cmd == "end-session":
+            from_role = (req.get("from") or "").lower().strip()
+            if from_role not in ("lead", ""):
+                self._reply(sock, ok=False, msg="only lead can call end-session")
+                return
+
         try:
             if cmd == "spawn":
                 ok, msg = self._orch.spawn(req["role"], cwd=req.get("cwd"), project=from_project)
@@ -135,6 +142,8 @@ class CliServer(QObject):
                 ok, msg = self._orch.done(
                     req.get("from") or "", note=req.get("note", ""), project=from_project
                 )
+            elif cmd == "end-session":
+                ok, msg = self._orch.end_session(project=from_project, note=req.get("note", ""))
             elif cmd == "list":
                 self._reply(
                     sock,

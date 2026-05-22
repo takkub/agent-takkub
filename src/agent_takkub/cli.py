@@ -26,7 +26,7 @@ from .config import read_port
 # Lead pane is allowed to invoke these; teammates must work on their assigned
 # task and coordinate via `send` / `done`. The gate is enforced in `main()`
 # based on the TAKKUB_ROLE env var that the orchestrator injects per pane.
-LEAD_ONLY_COMMANDS = frozenset({"spawn", "assign", "close", "close-all"})
+LEAD_ONLY_COMMANDS = frozenset({"spawn", "assign", "close", "close-all", "end-session"})
 
 # Commands intended only for teammate panes. Lead summarises inline and never
 # needs to call done on itself — blocking this prevents Lead from accidentally
@@ -169,6 +169,12 @@ def cmd_close_all(_: argparse.Namespace) -> dict:
 
 def cmd_done(args: argparse.Namespace) -> dict:
     return _request(_with_project({"cmd": "done", "from": _from_role(), "note": args.note or ""}))
+
+
+def cmd_end_session(args: argparse.Namespace) -> dict:
+    return _request(
+        _with_project({"cmd": "end-session", "from": _from_role(), "note": args.note or ""})
+    )
 
 
 def cmd_list(_: argparse.Namespace) -> dict:
@@ -408,6 +414,13 @@ def main(argv: list[str] | None = None) -> int:
     sd = sub.add_parser("done", help="(agent) report done to Lead")
     sd.add_argument("note", nargs="?", default="")
     sd.set_defaults(func=cmd_done)
+
+    ses = sub.add_parser(
+        "end-session",
+        help="(lead) write session summary to runtime/sessions and vault mirror",
+    )
+    ses.add_argument("--note", default="", help="summary note (default: 'session ended')")
+    ses.set_defaults(func=cmd_end_session)
 
     sl = sub.add_parser("list", help="show pane status")
     sl.set_defaults(func=cmd_list)
