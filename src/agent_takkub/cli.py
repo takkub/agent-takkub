@@ -485,6 +485,58 @@ def main(argv: list[str] | None = None) -> int:
     )
     sse.set_defaults(func=cmd_search)
 
+    # ── issue tracker ────────────────────────────────────────────────────────
+    si = sub.add_parser("issue", help="manage cockpit bug/issue tracker (local, in repo)")
+    si_sub = si.add_subparsers(dest="issue_command", required=True)
+
+    # issue new
+    sin = si_sub.add_parser("new", help="create a new issue")
+    sin.add_argument("title", help="issue title")
+    sin.add_argument("--severity", choices=["low", "med", "high"], default="med")
+    sin.add_argument("--noticed-in", dest="noticed_in", default=None, metavar="PROJECT")
+    sin.add_argument("--role", default=None, metavar="ROLE")
+    sin.add_argument("--tag", default=None, metavar="a,b,c", help="comma-separated tags")
+    sin.add_argument(
+        "--body", default=None, metavar="TEXT", help="body text (opens $EDITOR if omitted on TTY)"
+    )
+
+    # issue list
+    sil = si_sub.add_parser("list", help="list issues with optional filters")
+    sil.add_argument("--open", action="store_true", dest="open", help="show only open issues")
+    sil.add_argument("--closed", action="store_true", dest="closed", help="show only closed issues")
+    sil.add_argument("--noticed-in", dest="noticed_in", default=None, metavar="PROJECT")
+    sil.add_argument("--role", default=None, metavar="ROLE")
+    sil.add_argument("--severity", choices=["low", "med", "high"], default=None)
+
+    # issue close
+    sic = si_sub.add_parser("close", help="close an issue by ID")
+    sic.add_argument("id", help="issue ID (e.g. 20260522-001)")
+    sic.add_argument("--note", default="", metavar="MSG", help="cause / fix summary")
+
+    # issue show
+    sis = si_sub.add_parser("show", help="print raw issue file to stdout")
+    sis.add_argument("id", help="issue ID (e.g. 20260522-001)")
+
+    # wire --issues-dir into all issue subcommands
+    for sp in (sin, sil, sic, sis):
+        sp.add_argument("--issues-dir", dest="issues_dir", default=None, metavar="PATH")
+
+    def _cmd_issue(args: argparse.Namespace) -> dict:
+        from .issues import cmd_issue_close, cmd_issue_list, cmd_issue_new, cmd_issue_show
+
+        dispatch = {
+            "new": cmd_issue_new,
+            "list": cmd_issue_list,
+            "close": cmd_issue_close,
+            "show": cmd_issue_show,
+        }
+        fn = dispatch.get(args.issue_command)
+        if fn is None:
+            return {"ok": False, "msg": f"unknown issue subcommand: {args.issue_command}"}
+        return fn(args)
+
+    si.set_defaults(func=_cmd_issue)
+
     sx = sub.add_parser(
         "codex",
         help="one-shot OpenAI Codex CLI query (non-interactive, pure local)",
