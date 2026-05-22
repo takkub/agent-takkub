@@ -1,0 +1,594 @@
+"""takkub doctor — diagnose cockpit environment.
+
+Pure-logic checks: no orchestrator TCP, no network probes, no installs.
+Every subprocess call uses timeout=5 + SUBPROCESS_NO_WINDOW to prevent hangs.
+"""
+
+from __future__ import annotations
+
+import json
+import shutil
+import subprocess
+import sys
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from enum import StrEnum
+from pathlib import Path
+
+
+class Status(StrEnum):
+    OK = "ok"
+    WARN = "warn"
+    FAIL = "fail"
+    SKIP = "skip"
+    INFO = "info"
+
+
+@dataclass
+class Finding:
+    category: str
+    name: str
+    status: Status
+    detail: str = ""
+    fix_hint: str = ""
+    auto_fix: Callable[[], tuple[bool, str]] | None = field(default=None, repr=False)
+
+
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
+
+
+def _run(argv: list[str]) -> tuple[int, str]:
+    """Run *argv* with timeout=5. Returns (returncode, combined output)."""
+    from ._win_console import SUBPROCESS_NO_WINDOW
+
+    try:
+        r = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            creationflags=SUBPROCESS_NO_WINDOW,
+        )
+        out = (r.stdout or "").strip() or (r.stderr or "").strip()
+        return r.returncode, out
+    except FileNotFoundError:
+        return 1, f"not found: {argv[0]}"
+    except subprocess.TimeoutExpired:
+        return 1, "timed out"
+    except Exception as e:
+        return 1, str(e)
+
+
+# ---------------------------------------------------------------------------
+# [claude]
+# ---------------------------------------------------------------------------
+
+
+def check_claude() -> list[Finding]:
+    findings: list[Finding] = []
+
+    # binary
+    try:
+        from .config import find_claude_executable
+
+        path = find_claude_executable()
+        _, out = _run([path, "--version"])
+        version = out.splitlines()[0] if out else "(unknown)"
+        findings.append(Finding("claude", "binary", Status.OK, f"{version}  {path}"))
+    except Exception as e:
+        findings.append(
+            Finding(
+                "claude", "binary", Status.FAIL, str(e), "install claude code from claude.ai/code"
+            )
+        )
+
+    # authenticated
+    if sys.platform == "win32":
+        # credentials may live in Windows Credential Manager — not directly checkable
+        creds = Path.home() / ".claude" / "credentials.json"
+        if creds.is_file():
+            try:
+                json.loads(creds.read_text(encoding="utf-8"))
+                findings.append(
+                    Finding("claude", "authenticated", Status.OK, "credentials.json present")
+                )
+            except Exception:
+                findings.append(
+                    Finding(
+                        "claude",
+                        "authenticated",
+                        Status.WARN,
+                        "credentials.json present but unreadable",
+                        "run 'claude login' from a terminal",
+                    )
+                )
+        else:
+            findings.append(
+                Finding(
+                    "claude",
+                    "authenticated",
+                    Status.SKIP,
+                    "auth state not directly checkable on Windows; try 'claude --print Hello' to verify",
+                    "run 'claude login' from a terminal if needed",
+                )
+            )
+    else:
+        creds = Path.home() / ".claude" / "credentials.json"
+        if creds.is_file():
+            try:
+                json.loads(creds.read_text(encoding="utf-8"))
+                findings.append(
+                    Finding("claude", "authenticated", Status.OK, "credentials.json present")
+                )
+            except Exception:
+                findings.append(
+                    Finding(
+                        "claude",
+                        "authenticated",
+                        Status.WARN,
+                        "credentials.json present but unreadable",
+                        "run 'claude login' from a terminal",
+                    )
+                )
+        else:
+            findings.append(
+                Finding(
+                    "claude",
+                    "authenticated",
+                    Status.WARN,
+                    "credentials.json not found",
+                    "run 'claude login' from a terminal",
+                )
+            )
+
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# [runtime]
+# ---------------------------------------------------------------------------
+
+
+def check_runtime() -> list[Finding]:
+    findings: list[Finding] = []
+
+    # node
+    node = shutil.which("node")
+    if node:
+        rc, ver = _run(["node", "--version"])
+        findings.append(Finding("runtime", "node", Status.OK, ver if rc == 0 and ver else node))
+    else:
+        findings.append(
+            Finding(
+                "runtime", "node", Status.FAIL, "not found", "install Node.js 18+ from nodejs.org"
+            )
+        )
+
+    # npx
+    npx = shutil.which("npx")
+    if npx:
+        rc, ver = _run(["npx", "--version"])
+        findings.append(Finding("runtime", "npx", Status.OK, ver if rc == 0 and ver else npx))
+    else:
+        findings.append(
+            Finding(
+                "runtime", "npx", Status.FAIL, "not found", "comes with Node.js — reinstall Node"
+            )
+        )
+
+    # python
+    vi = sys.version_info
+    ver_str = f"{vi[0]}.{vi[1]}.{vi[2]}"
+    if (vi[0], vi[1]) < (3, 11):
+        findings.append(
+            Finding("runtime", "python", Status.WARN, ver_str, "upgrade to Python 3.11+")
+        )
+    else:
+        findings.append(Finding("runtime", "python", Status.OK, ver_str))
+
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# [plugins]
+# ---------------------------------------------------------------------------
+
+
+def _plugin_cache_root() -> Path:
+    return Path.home() / ".claude" / "plugins" / "cache"
+
+
+def check_plugins(cache_root: Path | None = None) -> list[Finding]:
+    from .orchestrator import _SAFE_PLUGINS
+
+    root = cache_root if cache_root is not None else _plugin_cache_root()
+    findings: list[Finding] = []
+
+    for marketplace in _SAFE_PLUGINS:
+        mp_dir = root / marketplace
+        if not mp_dir.is_dir():
+            findings.append(
+                Finding(
+                    "plugins",
+                    marketplace,
+                    Status.WARN,
+                    "not installed",
+                    "install via /plugin in a Claude Code session",
+                )
+            )
+            continue
+
+        # 3-level walk: marketplace / plugin / version / .claude-plugin / plugin.json
+        found = False
+        for plugin_dir in sorted(mp_dir.iterdir()):
+            if not plugin_dir.is_dir():
+                continue
+            versions = sorted((v for v in plugin_dir.iterdir() if v.is_dir()), reverse=True)
+            for v in versions:
+                plugin_json = v / ".claude-plugin" / "plugin.json"
+                if not plugin_json.is_file():
+                    continue
+                try:
+                    json.loads(plugin_json.read_text(encoding="utf-8"))
+                except Exception as e:
+                    findings.append(
+                        Finding(
+                            "plugins",
+                            marketplace,
+                            Status.FAIL,
+                            f"plugin.json broken: {e}",
+                            "re-install via /plugin",
+                        )
+                    )
+                    found = True
+                    break
+                label = f"{marketplace}/{plugin_dir.name}@{v.name}"
+                if marketplace == "ecc":
+                    findings.append(
+                        Finding(
+                            "plugins",
+                            marketplace,
+                            Status.WARN,
+                            f"{label}   SessionStart hook present",
+                            'if Lead crashes set TAKKUB_EXTRA_PLUGINS=""',
+                        )
+                    )
+                else:
+                    findings.append(Finding("plugins", marketplace, Status.OK, label))
+                found = True
+                break
+            if found:
+                break
+
+        if not found:
+            findings.append(
+                Finding(
+                    "plugins",
+                    marketplace,
+                    Status.FAIL,
+                    f"no plugin.json found under {marketplace}",
+                    "re-install via /plugin",
+                )
+            )
+
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# [mcps]
+# ---------------------------------------------------------------------------
+
+
+def check_mcps(shared_mcp_file: Path | None = None) -> list[Finding]:
+    from .shared_dev_tools import SHARED_MCP_FILE as _DEFAULT_SHARED_MCP
+
+    mcp_path = shared_mcp_file if shared_mcp_file is not None else _DEFAULT_SHARED_MCP
+
+    findings: list[Finding] = []
+
+    if not mcp_path.is_file():
+
+        def _auto_fix_mcp() -> tuple[bool, str]:
+            from .shared_dev_tools import ensure_browser_mcps, ensure_user_mcps
+
+            ok1, msg1 = ensure_browser_mcps()
+            ok2, msg2 = ensure_user_mcps()
+            return (ok1 and ok2), f"{msg1}; {msg2}"
+
+        findings.append(
+            Finding(
+                "mcps",
+                "shared-mcp.json",
+                Status.WARN,
+                "file missing",
+                "run 'takkub doctor --fix' to regenerate",
+                auto_fix=_auto_fix_mcp,
+            )
+        )
+        return findings
+
+    try:
+        data = json.loads(mcp_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        findings.append(
+            Finding(
+                "mcps",
+                "shared-mcp.json",
+                Status.FAIL,
+                f"JSON broken: {e}",
+                "delete and re-run cockpit",
+            )
+        )
+        return findings
+
+    servers: dict = data.get("mcpServers") or {}
+    findings.append(Finding("mcps", "shared-mcp.json", Status.OK, f"{len(servers)} server(s)"))
+
+    for srv_name, cfg in servers.items():
+        if not isinstance(cfg, dict):
+            findings.append(Finding("mcps", srv_name, Status.WARN, "entry is not a dict"))
+            continue
+
+        srv_type = cfg.get("type", "")
+        if srv_type == "stdio":
+            cmd = cfg.get("command", "")
+
+            # obsidian-vault: check vault path instead of generic npx check
+            if srv_name == "obsidian-vault":
+                args = cfg.get("args") or []
+                if args:
+                    vault_path = Path(args[-1])
+                    if vault_path.is_dir():
+                        findings.append(Finding("mcps", srv_name, Status.OK, "vault path ok"))
+                    else:
+                        findings.append(
+                            Finding(
+                                "mcps",
+                                srv_name,
+                                Status.WARN,
+                                f"vault path not found: {args[-1]}",
+                                "update the vault path in ~/.claude.json",
+                            )
+                        )
+                else:
+                    findings.append(Finding("mcps", srv_name, Status.WARN, "no vault path arg"))
+            elif cmd == "npx":
+                findings.append(Finding("mcps", srv_name, Status.OK, "npx ok (connection skipped)"))
+            elif cmd and shutil.which(cmd):
+                findings.append(Finding("mcps", srv_name, Status.OK, f"{cmd} found"))
+            elif cmd:
+                findings.append(
+                    Finding(
+                        "mcps",
+                        srv_name,
+                        Status.WARN,
+                        f"command '{cmd}' not found in PATH",
+                        f"install {cmd} or remove this MCP entry",
+                    )
+                )
+            else:
+                findings.append(Finding("mcps", srv_name, Status.WARN, "no command specified"))
+        else:
+            # non-stdio: skip network probe
+            findings.append(Finding("mcps", srv_name, Status.INFO, f"type={srv_type!r} (skipped)"))
+
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# [projects]
+# ---------------------------------------------------------------------------
+
+
+def check_projects() -> list[Finding]:
+    from .config import load_projects
+
+    findings: list[Finding] = []
+
+    try:
+        data = load_projects()
+    except Exception as e:
+        findings.append(Finding("projects", "projects.json", Status.FAIL, str(e)))
+        return findings
+
+    projects: dict = data.get("projects") or {}
+    active: str | None = data.get("active")
+    open_tabs: list = data.get("open_tabs") or []
+
+    n = len(projects)
+    active_label = f"active={active}" if active else "no active"
+    findings.append(
+        Finding("projects", "projects.json", Status.OK, f"{n} project(s), {active_label}")
+    )
+
+    if active and active not in projects:
+        findings.append(
+            Finding(
+                "projects",
+                "active",
+                Status.WARN,
+                f"active project '{active}' not in projects map",
+                "edit projects.json or run 'takkub project set <name>'",
+            )
+        )
+
+    for proj_name, proj_data in projects.items():
+        paths: dict = proj_data.get("paths") or {}
+        for path_key, path_val in paths.items():
+            if not Path(path_val).exists():
+                findings.append(
+                    Finding(
+                        "projects",
+                        proj_name,
+                        Status.FAIL,
+                        f"path '{path_key}' not found: {path_val}",
+                        "edit projects.json or run 'takkub project rm " + proj_name + "'",
+                    )
+                )
+
+    for tab in open_tabs:
+        if tab not in projects:
+            findings.append(
+                Finding(
+                    "projects",
+                    f"tab:{tab}",
+                    Status.WARN,
+                    f"orphaned tab '{tab}' not in projects map",
+                    "edit open_tabs in projects.json",
+                )
+            )
+
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# [providers]
+# ---------------------------------------------------------------------------
+
+
+def check_providers() -> list[Finding]:
+    findings: list[Finding] = []
+
+    for provider in ("codex", "gemini"):
+        path = shutil.which(provider)
+        if path:
+            rc, ver = _run([provider, "--version"])
+            version = (ver.splitlines()[0] if ver else path) if rc == 0 else path
+            findings.append(Finding("providers", provider, Status.INFO, version))
+        else:
+            findings.append(
+                Finding(
+                    "providers",
+                    provider,
+                    Status.SKIP,
+                    "not installed (optional)",
+                    f"install {provider} CLI to use '{provider}' teammate role",
+                )
+            )
+
+    # disabled-providers.json
+    dp_file = Path.home() / ".takkub" / "disabled-providers.json"
+    if dp_file.is_file():
+        try:
+            json.loads(dp_file.read_text(encoding="utf-8"))
+            findings.append(
+                Finding("providers", "disabled-providers.json", Status.OK, "valid JSON")
+            )
+        except Exception as e:
+            findings.append(
+                Finding(
+                    "providers",
+                    "disabled-providers.json",
+                    Status.WARN,
+                    f"JSON broken: {e}",
+                    f"fix or delete {dp_file}",
+                )
+            )
+
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# [hooks]
+# ---------------------------------------------------------------------------
+
+
+def check_hooks() -> list[Finding]:
+    findings: list[Finding] = []
+
+    if sys.platform == "win32":
+        import os
+
+        comspec = os.environ.get("COMSPEC")
+        if comspec:
+            findings.append(Finding("hooks", "COMSPEC", Status.OK, comspec))
+        else:
+            findings.append(
+                Finding(
+                    "hooks",
+                    "COMSPEC",
+                    Status.WARN,
+                    "not set",
+                    "missing — codex pane may crash; cockpit fixed this in cf6529b",
+                )
+            )
+
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# runner
+# ---------------------------------------------------------------------------
+
+
+def run_all_checks() -> list[Finding]:
+    findings: list[Finding] = []
+    findings.extend(check_claude())
+    findings.extend(check_runtime())
+    findings.extend(check_plugins())
+    findings.extend(check_mcps())
+    findings.extend(check_projects())
+    findings.extend(check_providers())
+    findings.extend(check_hooks())
+    return findings
+
+
+def run_auto_fixes(findings: list[Finding]) -> None:
+    for f in findings:
+        if f.auto_fix is not None:
+            ok, msg = f.auto_fix()
+            label = "fixed" if ok else "fix failed"
+            print(f"  [{label}] {f.category}/{f.name}: {msg}")
+
+
+# ---------------------------------------------------------------------------
+# formatter
+# ---------------------------------------------------------------------------
+
+_STATUS_ICON: dict[Status, str] = {
+    Status.OK: "✓",
+    Status.WARN: "⚠",
+    Status.FAIL: "✗",
+    Status.SKIP: "-",
+    Status.INFO: "·",
+}
+
+
+def format_report(findings: list[Finding]) -> str:
+    lines: list[str] = []
+    current_cat = ""
+    counts: dict[Status, int] = {s: 0 for s in Status}
+
+    for f in findings:
+        if f.category != current_cat:
+            if current_cat:
+                lines.append("")
+            lines.append(f"[{f.category}]")
+            current_cat = f.category
+
+        icon = _STATUS_ICON[f.status]
+        name_col = f"{f.name:<18}"
+        detail_part = f"  {f.detail}" if f.detail else ""
+        lines.append(f"  {icon} {name_col}{detail_part}")
+        if f.fix_hint:
+            lines.append(f"    → fix: {f.fix_hint}")
+
+        counts[f.status] += 1
+
+    lines.append("")
+    parts = []
+    if counts[Status.OK]:
+        parts.append(f"{counts[Status.OK]} ok")
+    if counts[Status.WARN]:
+        parts.append(f"{counts[Status.WARN]} warn")
+    if counts[Status.FAIL]:
+        parts.append(f"{counts[Status.FAIL]} fail")
+    if counts[Status.SKIP]:
+        parts.append(f"{counts[Status.SKIP]} skip")
+    if counts[Status.INFO]:
+        parts.append(f"{counts[Status.INFO]} info")
+    lines.append("Summary: " + ", ".join(parts))
+
+    return "\n".join(lines)

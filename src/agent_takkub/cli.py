@@ -328,6 +328,50 @@ def cmd_gemini(args: argparse.Namespace) -> dict:
     }
 
 
+def _utf8_print(text: str) -> None:
+    """Print *text* to stdout, forcing UTF-8 on Windows to avoid charmap errors."""
+    if hasattr(sys.stdout, "buffer"):
+        sys.stdout.buffer.write((text + "\n").encode("utf-8"))
+        sys.stdout.buffer.flush()
+    else:
+        print(text)
+
+
+def cmd_doctor(args: argparse.Namespace) -> dict:
+    from .doctor import Status, format_report, run_all_checks, run_auto_fixes
+
+    findings = run_all_checks()
+
+    if args.fix:
+        run_auto_fixes(findings)
+        findings = run_all_checks()
+
+    if args.json:
+        import json as _json
+
+        _utf8_print(
+            _json.dumps(
+                [
+                    {
+                        "category": f.category,
+                        "name": f.name,
+                        "status": f.status.value,
+                        "detail": f.detail,
+                        "fix_hint": f.fix_hint,
+                    }
+                    for f in findings
+                ],
+                indent=2,
+            )
+        )
+    else:
+        _utf8_print(format_report(findings))
+
+    n_fail = sum(1 for f in findings if f.status == Status.FAIL)
+    ok = n_fail == 0
+    return {"ok": ok, "msg": f"{n_fail} fail(s)" if not ok else "all checks passed"}
+
+
 def cmd_search(args: argparse.Namespace) -> dict:
     """Pure read-only grep across `~/.claude/projects/<*>/<uuid>.jsonl`.
     Does NOT go through the orchestrator's TCP socket — search is a
@@ -536,6 +580,22 @@ def main(argv: list[str] | None = None) -> int:
         return fn(args)
 
     si.set_defaults(func=_cmd_issue)
+
+    sdoc = sub.add_parser(
+        "doctor",
+        help="diagnose cockpit env (claude, node, plugins, mcps, projects)",
+    )
+    sdoc.add_argument(
+        "--fix",
+        action="store_true",
+        help="apply safe auto-fixes for missing/broken state",
+    )
+    sdoc.add_argument(
+        "--json",
+        action="store_true",
+        help="emit JSON instead of text report",
+    )
+    sdoc.set_defaults(func=cmd_doctor)
 
     sx = sub.add_parser(
         "codex",
