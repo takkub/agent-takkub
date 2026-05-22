@@ -12,7 +12,7 @@ class TestDefaults:
         assert roles.LEAD.name == "lead"
 
     def test_default_teammates_registry(self) -> None:
-        assert len(roles.DEFAULT_TEAMMATES) == 8
+        assert len(roles.DEFAULT_TEAMMATES) == 9
         names = {r.name for r in roles.DEFAULT_TEAMMATES}
         assert names == {
             "frontend",
@@ -23,9 +23,13 @@ class TestDefaults:
             "qa",
             "reviewer",
             "codex",
+            "critic",
         }
         # Designer was retired from defaults but the agent file
         # `.claude/agents/designer.md` is preserved for custom add.
+        # Critic (Design Critic) replaces designer with a post-QA visual
+        # review workflow (shots → gemini → propose) rather than the old
+        # Figma-to-code spec.
         assert "designer" not in names
 
     def test_default_columns_assigned(self) -> None:
@@ -35,6 +39,14 @@ class TestDefaults:
         assert cols["codex"] == 1
         assert cols["gemini"] == 2
         assert cols["reviewer"] == 2
+        assert cols["critic"] == 2
+
+    def test_critic_slot_below_reviewer(self) -> None:
+        critic = roles.by_name("critic")
+        assert critic is not None
+        assert critic.column == 2
+        assert critic.row == 3
+        assert critic.label == "Design Critic"
 
     def test_gemini_slot_takes_old_designer_position(self) -> None:
         # Gemini replaces designer at col=2 row=0 - the top-right slot

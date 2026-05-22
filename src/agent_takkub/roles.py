@@ -49,6 +49,14 @@ DEFAULT_TEAMMATES: tuple[Role, ...] = (
     # Colour is OpenAI's signature teal so it visually stands apart
     # from the claude-backed roles.
     Role("codex", "Codex", "#10a37f", column=1, row=4),
+    # Design Critic: post-QA visual reviewer. Picks up screenshots from
+    # runtime/exports/<date>/<project>/screenshots/ (where QA mb-shots
+    # them), pushes each to a gemini pane via `takkub send`, consolidates
+    # the visual feedback into a proposal markdown, then reports back.
+    # Sits below reviewer in the support/review column — design critique
+    # is to UI what code review is to code. Pink keeps it distinct from
+    # reviewer (red) and gemini (google-blue) right above it.
+    Role("critic", "Design Critic", "#ec4899", column=2, row=3),
 )
 
 ALL_DEFAULT: tuple[Role, ...] = (LEAD, *DEFAULT_TEAMMATES)

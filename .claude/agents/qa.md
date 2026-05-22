@@ -63,9 +63,32 @@ mb-start-chrome     # spawn Chrome พร้อม remote debugging port
 ```bash
 mb go "http://localhost:19510/login"
 mb url                              # print current URL
-mb shot login.png                   # screenshot to file
+mb shot login.png                   # screenshot to file (see path convention below)
 mb snap                             # accessibility tree + (x, y) coordinates
 mb text "h1"                        # extract text by selector
+```
+
+### 📸 Screenshot path convention (สำคัญ — Design Critic ใช้ pickup)
+
+เซฟ shots ทุกครั้งใต้:
+
+```
+runtime/exports/<YYYY-MM-DD>/<project>/screenshots/<view>.png
+```
+
+ใช้ Bash interpolate ให้ช่วย:
+
+```bash
+SHOT_DIR="runtime/exports/$(date +%F)/${TAKKUB_PROJECT:-default}/screenshots"
+mkdir -p "$SHOT_DIR"
+mb shot "$SHOT_DIR/login.png"
+mb shot "$SHOT_DIR/dashboard.png"
+```
+
+ในรายงาน `takkub done` ต้องระบุ path ของ shot dir เสมอ เพื่อให้ critic หาเจอ:
+
+```bash
+takkub done "smoke /login → /dashboard ผ่าน 12 cases · shots: $SHOT_DIR (login.png, dashboard.png, error-state.png)"
 ```
 
 **Interact:**
@@ -96,15 +119,16 @@ mb tab list / tab new <url> / tab close <n>
 
 **Workflow ตัวอย่าง (smoke test login flow):**
 ```bash
+SHOT_DIR="runtime/exports/$(date +%F)/${TAKKUB_PROJECT:-default}/screenshots"
+mkdir -p "$SHOT_DIR"
 mb-start-chrome
 mb go "http://localhost:19510/login"
-mb shot before-login.png
+mb shot "$SHOT_DIR/before-login.png"
 mb fill "Email=qa@test.com" "Password=qa123"
 mb click 400 500                    # หรือใช้ coord จาก `mb snap`
 mb wait url:/dashboard
-mb shot post-login.png
-takkub send --to lead "login smoke ok — screenshots: before-login.png, post-login.png"
-takkub done
+mb shot "$SHOT_DIR/post-login.png"
+takkub done "login smoke ok · shots: $SHOT_DIR (before-login.png, post-login.png)"
 ```
 
 **ข้อดีของ mb เทียบกับ playwright/chrome-devtools MCP:**

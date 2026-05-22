@@ -264,6 +264,44 @@ class TestRoutingTable:
         assert result.kind == ActionKind.PROPOSE
         assert result.role == "reviewer"
 
+    def test_design_review_routes_to_critic(self):
+        """'design review' / 'UI review' → critic with gemini cross-check.
+
+        MUST resolve to `critic` (not `reviewer`) since the design-review
+        rule sits above the generic review rule in the route table.
+        """
+        result = classify("design review the login page")
+        assert result.kind == ActionKind.PROPOSE
+        assert result.role == "critic"
+        assert result.cross_check is not None
+        assert "gemini" in result.cross_check
+
+    def test_ui_review_routes_to_critic(self):
+        result = classify("UI review on the dashboard screenshots")
+        assert result.kind == ActionKind.PROPOSE
+        assert result.role == "critic"
+
+    def test_thai_review_ui_routes_to_critic(self):
+        result = classify("รีวิว UI หน้า /login")
+        assert result.kind == ActionKind.PROPOSE
+        assert result.role == "critic"
+
+    def test_thai_review_design_routes_to_critic(self):
+        result = classify("รีวิวดีไซน์ของ dashboard")
+        assert result.kind == ActionKind.PROPOSE
+        assert result.role == "critic"
+
+    def test_heuristic_routes_to_critic(self):
+        result = classify("run heuristic evaluation on the cockpit")
+        assert result.kind == ActionKind.PROPOSE
+        assert result.role == "critic"
+
+    def test_explicit_critic_role_recognised(self):
+        """'ให้ critic review' → FIRE_ASSIGN (explicit-role skips propose per spec)."""
+        result = classify("ให้ critic review หน้า login")
+        assert result.kind == ActionKind.FIRE_ASSIGN
+        assert result.role == "critic"
+
     def test_refactor_adds_codex_cross_check(self):
         """Refactor → primary role + codex cross-check (per spec rule of thumb)."""
         result = classify("refactor the auth module")

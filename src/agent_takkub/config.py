@@ -73,6 +73,7 @@ _ROLE_PATH_PREFS: dict[str, tuple[str, ...]] = {
     "mobile": ("mobile", "app", "web"),
     "devops": ("api", "infra", "ci", "ops"),
     "designer": ("web", "client", "design"),
+    "critic": ("web", "client", "design"),
     "qa": ("web", "api"),
     "reviewer": ("api", "web"),
 }

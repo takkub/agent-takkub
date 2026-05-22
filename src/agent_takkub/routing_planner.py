@@ -55,7 +55,10 @@ _ACTIONABLE_EN = re.compile(
 _ACTIONABLE_TH = re.compile(
     # ทำ(?!งาน|ไม) — "ทำงาน" means "work/function" (informational);
     # "ทำไม" means "why" (informational). Plain "ทำ" = do/make = actionable.
-    r"(ทำ(?!งาน|ไม)|สร้าง|แก้|เพิ่ม|ลบ|ปรับ|เขียน|อัพ|แก้ไข|ติดตั้ง|ตั้งค่า|เชื่อม|รัน|ลอง|จัด|ฝาก|รบกวน|เช็ค)"
+    # "รีวิว" (review) + "ออกแบบ" (design) added so design-critic triggers
+    # like "รีวิว UI หน้า X" or "ออกแบบ flow X" classify as actionable.
+    r"(ทำ(?!งาน|ไม)|สร้าง|แก้|เพิ่ม|ลบ|ปรับ|เขียน|อัพ|แก้ไข|ติดตั้ง|ตั้งค่า|"
+    r"เชื่อม|รัน|ลอง|จัด|ฝาก|รบกวน|เช็ค|รีวิว|ออกแบบ)"
 )
 
 _INFORMATIONAL_EN = re.compile(
@@ -73,20 +76,20 @@ _INFORMATIONAL_TH = re.compile(
 _EXPLICIT_ROLE = re.compile(
     r"(?:"
     # Pattern 1 (original): ให้ <role> <action-verb>
-    r"ให้\s*(frontend|backend|mobile|devops|qa|reviewer|codex|gemini)"
+    r"ให้\s*(frontend|backend|mobile|devops|qa|reviewer|critic|designer|codex|gemini)"
     r"\s*(?:ทำ|สร้าง|แก้|build|implement|fix|test|review|deploy|refactor)"
     r"|"
     # Pattern 2: <role> ช่วย <action-verb>  — e.g. "backend ช่วยแก้ X"
-    r"(frontend|backend|mobile|devops|qa|reviewer|codex|gemini)"
+    r"(frontend|backend|mobile|devops|qa|reviewer|critic|designer|codex|gemini)"
     r"\s*ช่วย\s*(?:ทำ|สร้าง|แก้|build|implement|fix|test|review|deploy|refactor)"
     r"|"
     # Pattern 3: ฝาก <role> <verb>  — e.g. "ฝาก devops ดู pipeline"
-    r"ฝาก\s*(frontend|backend|mobile|devops|qa|reviewer|codex|gemini)"
+    r"ฝาก\s*(frontend|backend|mobile|devops|qa|reviewer|critic|designer|codex|gemini)"
     r"\s*(?:ทำ|แก้|ดู|review|check|build|implement|fix|test|deploy|refactor)"
     r"|"
     # Pattern 4: <non-ai-role> review/check/ดู  — exclude codex/gemini (handled by _ONESHOT)
     # \b only on English words; ดู is Thai so no \b needed
-    r"(frontend|backend|mobile|devops|qa|reviewer)"
+    r"(frontend|backend|mobile|devops|qa|reviewer|critic|designer)"
     r"\s*(?:review\b|check\b|ดู)"
     r")",
     re.IGNORECASE,
@@ -120,6 +123,28 @@ _ROUTE_TABLE: list[tuple[re.Pattern, str | None, list[str] | None]] = [
         re.compile(r"\b(refactor|extract|rename|restructure|migrate)\b", re.IGNORECASE),
         None,  # derived from content keywords below
         ["codex"],
+    ),
+    # Design / UI critique — routed to `critic` (post-QA visual reviewer).
+    # MUST come before the generic `review` rule below or "design review"
+    # / "UI review" would land on `reviewer` (which is code-review only).
+    # Triggers: "design review", "UI review", "UX review", "visual review",
+    # "heuristic" (Nielsen), "look and feel", and Thai equivalents:
+    # "รีวิว UI / หน้าตา / ดีไซน์", "ดู UI", "ดู หน้าตา".
+    # Cross-check: gemini pane spawned in parallel so critic can immediately
+    # `takkub send --to gemini` shot paths without waiting for a fresh pane.
+    (
+        re.compile(
+            r"(?:"
+            r"\b(design.review|UI.review|UX.review|visual.review|heuristic|look.and.feel|"
+            r"design.critique|design.critic|critique.UI|review.UI|review.design)\b"
+            r"|รีวิว\s*(?:UI|หน้าตา|ดีไซน์|design|ux)"
+            r"|ดู\s*(?:UI|หน้าตา|ดีไซน์)"
+            r"|ปรับ(?:ปรุง)?\s*(?:UI|หน้าตา|ดีไซน์)\s*(?:หน่อย|ให้)?"
+            r")",
+            re.IGNORECASE,
+        ),
+        "critic",
+        ["gemini"],
     ),
     # Code review / security audit
     (
