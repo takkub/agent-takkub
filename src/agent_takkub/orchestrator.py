@@ -591,6 +591,92 @@ def _exit_key(project: str, role: str) -> str:
     return f"{project}::{role}"
 
 
+def _recent_session_brief(project: str) -> str | None:
+    """Build a compact context-restoration brief for Lead's spawn-time prompt.
+
+    Reads runtime/sessions/<date>/<project>/ for:
+      * the newest `lead-*.md` (most recent `takkub end-session` summary)
+      * today's teammate done-event filenames (`<role>-HHMMSS.md`)
+
+    Returns formatted markdown, or None when no history exists. Output is
+    capped at ~3KB so it can't blow up Lead's spawn-time context budget.
+
+    Why: without this, every new Lead session forgets the previous one — user
+    says "rebuild" and Lead has to ask "rebuild what?" because the
+    end_session summary is on disk but unread.
+    """
+    sessions_root = RUNTIME_DIR / "sessions"
+    if not sessions_root.is_dir():
+        return None
+
+    latest_lead: pathlib.Path | None = None
+    for day_dir in sorted(sessions_root.iterdir(), reverse=True):
+        if not day_dir.is_dir():
+            continue
+        proj_dir = day_dir / project
+        if not proj_dir.is_dir():
+            continue
+        leads = sorted(proj_dir.glob("lead-*.md"), reverse=True)
+        if leads:
+            latest_lead = leads[0]
+            break
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    today_dir = sessions_root / today / project
+    today_done: list[str] = []
+    if today_dir.is_dir():
+        for f in sorted(today_dir.iterdir()):
+            if f.suffix == ".md" and not f.name.startswith("lead-"):
+                today_done.append(f.stem)
+
+    if latest_lead is None and not today_done:
+        return None
+
+    lines = [
+        "",
+        "---",
+        "",
+        "## 🧠 Recent session brief (auto-injected at spawn)",
+        "",
+        f"context จาก previous session ของ project **{project}** — ใช้เป็น starting point",
+        "ก่อนถาม user ซ้ำในเรื่องที่ทำไปแล้ว",
+        "",
+    ]
+
+    if latest_lead is not None:
+        try:
+            raw = latest_lead.read_text(encoding="utf-8")
+        except OSError:
+            raw = ""
+        # Truncate per-summary to ~2KB so a giant note can't swallow the budget.
+        if len(raw) > 2048:
+            raw = raw[:2048] + "\n…(truncated)"
+        rel = (
+            latest_lead.relative_to(RUNTIME_DIR.parent).as_posix()
+            if RUNTIME_DIR.parent in latest_lead.parents
+            else latest_lead.name
+        )
+        lines.append(f"### latest lead end-session — `{rel}`")
+        lines.append("")
+        lines.append(raw.rstrip())
+        lines.append("")
+
+    if today_done:
+        lines.append("### today's teammate done events")
+        lines.append("")
+        for stem in today_done[:20]:
+            lines.append(f"- `{stem}`")
+        if len(today_done) > 20:
+            lines.append(f"- …และอีก {len(today_done) - 20} event")
+        lines.append("")
+
+    brief = "\n".join(lines)
+    # Hard cap — keeps total injection under control even if upstream sizes drift.
+    if len(brief) > 4000:
+        brief = brief[:4000] + "\n…(truncated)\n"
+    return brief
+
+
 def _render_lead_context(project: str | None = None) -> str | None:
     """Render Lead's spawn-time system prompt: cockpit CLAUDE.md + an
     auto-injected `BLOCKED_DIRS` paragraph listing the active project's paths.
@@ -671,6 +757,15 @@ def _render_lead_context(project: str | None = None) -> str | None:
 
 Status เปลี่ยนระหว่าง session: cockpit จะ inject `[system] <provider> ENABLED/DISABLED` message
 """
+    # Append recent-session brief so a fresh Lead pane inherits context from
+    # the previous `takkub end-session` summary + today's teammate done events.
+    # Without this the read half of the session-log loop is missing — files
+    # get written by end_session() but never read back at spawn time.
+    if project is not None:
+        brief = _recent_session_brief(project)
+        if brief:
+            suffix += brief
+
     ensure_runtime()
     out = RUNTIME_DIR / "lead-context.md"
     out.write_text(base + suffix, encoding="utf-8")
