@@ -2758,6 +2758,51 @@ class Orchestrator(QObject):
         QTimer.singleShot(150, lambda: pane.session and pane.session.write(b"\r"))
         _log_event("idle_reminder", role=role_name)
 
+    def broadcast_bug_check(self, project: str | None = None) -> tuple[int, list[str]]:
+        """Ask every active pane in `project` to introspect for cockpit bugs.
+
+        Each live pane gets a prompt instructing the agent to either:
+          * `takkub issue new ...` if it noticed a cockpit/orchestrator/CLI/UI bug
+          * `takkub send --to lead 'no bugs to report'` if the session was clean
+
+        Empty / dead-session slots are skipped silently. Cross-project panes
+        are not touched (multi-tab isolation).
+
+        Returns (count, role_names) for the cockpit's status-bar feedback.
+        """
+        project_ns = self._resolve_project(project)
+        prompted: list[str] = []
+        for role_name, pane in list(self._project_panes(project_ns).items()):
+            if pane.session is None or not pane.session.is_alive:
+                continue
+            prompt = self._build_bug_check_prompt(role_name, project_ns)
+            self._send_when_ready(role_name, prompt, project=project_ns)
+            prompted.append(role_name)
+        _log_event("broadcast_bug_check", project=project_ns, count=len(prompted), roles=prompted)
+        return len(prompted), prompted
+
+    @staticmethod
+    def _build_bug_check_prompt(role: str, project: str) -> str:
+        """Render the per-pane bug-introspection prompt.
+
+        Static-method so the test suite can call it without a full
+        Orchestrator + Qt event loop just to inspect the wording.
+        """
+        return (
+            "🐛 **Bug check** (orchestrator broadcast)\n\n"
+            "introspect session ของเรา — เจอบัค **ของ cockpit / orchestrator / CLI / UI** ไหม\n"
+            "(ไม่ใช่บัคของ code ที่เรากำลังทำงาน — เฉพาะบัคของ cockpit เอง)\n\n"
+            "**ถ้าเจอ:** เรียก\n"
+            "```\n"
+            f'takkub issue new "<title>" --severity <low|med|high> --noticed-in {project} --role {role} --tag <a,b,c> --body "<reproduce + impact>"\n'
+            "```\n\n"
+            "**ถ้าไม่เจอ:** เรียก\n"
+            "```\n"
+            'takkub send --to lead "no bugs to report"\n'
+            "```\n\n"
+            "รายงานกลับเมื่อเสร็จ"
+        )
+
     def close_all_teammates(self, project: str | None = None) -> tuple[bool, str]:
         """Close every non-Lead pane in `project` (defaults to active).
         Used by Lead to reset the board and by the cockpit when a tab is

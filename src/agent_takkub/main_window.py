@@ -389,6 +389,46 @@ class MainWindow(QMainWindow):
         )
         self._btn_resume.clicked.connect(self._on_resume_clicked)
 
+        # End-Session button: prompts for a session-summary note then runs
+        # close_all_teammates + end_session. The summary feeds Lead's
+        # spawn-time "Recent session brief" the next time a pane opens for
+        # this project — so finishing through this button is what makes
+        # the next session "remember" what just happened.
+        self._btn_end_session = QPushButton("🏁 End Session", self)
+        self._btn_end_session.setToolTip(
+            "Wrap up the active project: prompts for a one-paragraph note,\n"
+            "closes every teammate pane, then writes a Lead session summary\n"
+            "to runtime/sessions/ + the vault. Next session for this project\n"
+            "auto-inherits the note in Lead's spawn-time prompt."
+        )
+        self._btn_end_session.setStyleSheet(
+            "QPushButton { color: #d1fae5; background: #064e3b; "
+            "border: 1px solid #047857; border-radius: 4px; "
+            "padding: 2px 8px; }"
+            "QPushButton:hover { background: #065f46; }"
+        )
+        self._btn_end_session.clicked.connect(self._on_end_session_clicked)
+
+        # Bug-Check button: broadcasts an introspection prompt to every
+        # active pane. Each agent decides on its own whether to file a
+        # cockpit issue or report "no bugs" back to Lead. Keeps bug
+        # capture cheap — user doesn't have to context-switch to write
+        # an issue while still mid-task.
+        self._btn_bug_check = QPushButton("🐛 Bug Check", self)
+        self._btn_bug_check.setToolTip(
+            "Ask every active pane to introspect this session for cockpit\n"
+            "bugs (orchestrator / CLI / UI). Each agent runs\n"
+            "`takkub issue new` if it found something, or sends a clean\n"
+            "report back to Lead. Project-scoped — other tabs untouched."
+        )
+        self._btn_bug_check.setStyleSheet(
+            "QPushButton { color: #fee2e2; background: #7f1d1d; "
+            "border: 1px solid #b91c1c; border-radius: 4px; "
+            "padding: 2px 8px; }"
+            "QPushButton:hover { background: #991b1b; }"
+        )
+        self._btn_bug_check.clicked.connect(self._on_bug_check_clicked)
+
         self._btn_providers = QPushButton("🤖 Providers", self)
         self._btn_providers.setToolTip(
             "Configure which CLI (claude / codex / gemini) backs each teammate role.\n"
@@ -467,6 +507,8 @@ class MainWindow(QMainWindow):
         self._status.addPermanentWidget(self._chip_gemini)
         self._status.addPermanentWidget(self._btn_logs)
         self._status.addPermanentWidget(self._btn_resume)
+        self._status.addPermanentWidget(self._btn_bug_check)
+        self._status.addPermanentWidget(self._btn_end_session)
         self._status.addPermanentWidget(self._btn_restart)
         self._status.addPermanentWidget(self._btn_providers)
         self._status.addPermanentWidget(self._btn_update)
@@ -1192,6 +1234,89 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self.orch.inject_slash_command_when_ready("lead", "/resume", project=active_project)
+
+    def _on_end_session_clicked(self) -> None:
+        """🏁 End-Session button: prompt for note → close teammates → write summary.
+
+        The note becomes the body of `runtime/sessions/<date>/<project>/lead-*.md`
+        and is auto-injected into the next Lead spawn for this project via
+        `_recent_session_brief`. So a good note here is what makes the next
+        session "remember" today's work.
+        """
+        try:
+            from .config import active_project as _active_project
+
+            project_name, _ = _active_project()
+        except Exception:
+            project_name = None
+        scope = project_name or "active project"
+
+        note, ok = QInputDialog.getMultiLineText(
+            self,
+            "End Session",
+            (
+                f"Session-end note for **{scope}**.\n\n"
+                "เขียนสั้นๆ ว่า:\n"
+                "• เสร็จอะไรไปวันนี้\n"
+                "• ค้างอะไรไว้ที่ session หน้าควรหยิบต่อ\n\n"
+                "(note นี้จะ auto-inject เข้า Lead's prompt ใน session หน้า)"
+            ),
+            "session ended",
+        )
+        if not ok:
+            return
+        note = note.strip() or "session ended"
+
+        _closed_ok, closed_msg = self.orch.close_all_teammates(project=project_name)
+        end_ok, end_msg = self.orch.end_session(project=project_name, note=note)
+        _log_event(
+            "ui_end_session",
+            project=project_name or "",
+            closed=closed_msg,
+            written=end_msg,
+            ok=end_ok,
+        )
+        if end_ok:
+            self._status.showMessage(f"✅ {closed_msg} · {end_msg}", 10_000)
+        else:
+            QMessageBox.warning(self, "End Session failed", end_msg)
+
+    def _on_bug_check_clicked(self) -> None:
+        """🐛 Bug-Check button: confirm → broadcast introspection prompt to every pane.
+
+        Each pane's agent decides whether to file a `takkub issue new` or
+        send a 'no bugs' note back. No-op if no active panes exist.
+        """
+        try:
+            from .config import active_project as _active_project
+
+            project_name, _ = _active_project()
+        except Exception:
+            project_name = None
+        scope = project_name or "active project"
+
+        confirm = QMessageBox.question(
+            self,
+            "Broadcast bug check",
+            (
+                f"Send a bug-introspection prompt to every active pane in **{scope}**?\n\n"
+                "Each agent will either file a cockpit issue with\n"
+                "`takkub issue new` or report 'no bugs' back to Lead."
+            ),
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Ok,
+        )
+        if confirm != QMessageBox.StandardButton.Ok:
+            return
+
+        count, roles = self.orch.broadcast_bug_check(project=project_name)
+        _log_event("ui_bug_check", project=project_name or "", count=count, roles=roles)
+        if count == 0:
+            self._status.showMessage("🐛 No active panes to bug-check", 7_000)
+        else:
+            self._status.showMessage(
+                f"🐛 Bug-check sent to {count} pane(s): {', '.join(roles)}", 10_000
+            )
 
     def _on_restart_cockpit_clicked(self) -> None:
         """User-triggered full cockpit restart. Counts in-flight panes,
