@@ -1278,8 +1278,64 @@ class MainWindow(QMainWindow):
         )
         if end_ok:
             self._status.showMessage(f"✅ {closed_msg} · {end_msg}", 10_000)
+            self._show_end_session_summary(project_name, end_msg, closed_msg)
         else:
             QMessageBox.warning(self, "End Session failed", end_msg)
+
+    def _show_end_session_summary(
+        self, project_name: str | None, end_msg: str, closed_msg: str
+    ) -> None:
+        """Render the just-written `lead-*.md` in a modal so user sees what got logged.
+
+        Status-bar feedback alone is too quiet — vanishes after 10s and the
+        user can miss it entirely. This dialog presents the markdown body
+        of the session summary plus the close-teammates result line, so
+        "did anything happen?" has an unambiguous answer.
+        """
+        import pathlib
+        import re
+
+        from PyQt6.QtWidgets import (
+            QDialog,
+            QDialogButtonBox,
+            QTextBrowser,
+            QVBoxLayout,
+        )
+
+        m = re.search(r"written:\s*(.+)$", end_msg.strip())
+        if not m:
+            return
+        rel_path = m.group(1).strip()
+        abs_path = pathlib.Path(rel_path)
+        if not abs_path.is_absolute():
+            abs_path = REPO_ROOT / rel_path
+        if not abs_path.is_file():
+            return
+        try:
+            body = abs_path.read_text(encoding="utf-8")
+        except OSError:
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"🏁 Session ended — {project_name or 'project'}")
+        dlg.resize(640, 520)
+        layout = QVBoxLayout(dlg)
+
+        browser = QTextBrowser(dlg)
+        browser.setMarkdown(body)
+        browser.setOpenExternalLinks(False)
+        layout.addWidget(browser)
+
+        footer = QLabel(f"📍 {closed_msg}\n📄 {rel_path}", dlg)
+        footer.setStyleSheet("color: #6b7280; font-size: 11px; padding: 4px 0;")
+        footer.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(footer)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok, dlg)
+        buttons.accepted.connect(dlg.accept)
+        layout.addWidget(buttons)
+
+        dlg.exec()
 
     def _on_bug_check_clicked(self) -> None:
         """🐛 Bug-Check button: confirm → broadcast introspection prompt to every pane.
