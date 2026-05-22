@@ -9,23 +9,32 @@ requiring per-project `.claude/settings.json` edits:
     every pane via `runtime/shared-mcp.json` so smoke tests, UX checks,
     and crawls are available from any project's Lead without per-project
     wiring.
+  * **User MCPs** — user's own `~/.claude.json` mcpServers (obsidian-vault,
+    pms, postgres-pms, etc.) are merged into `runtime/shared-mcp.json` so
+    every cockpit pane inherits them automatically without manual setup.
+    Browser MCPs (playwright, chrome-devtools) take precedence on name
+    collision. Entries without a `type` field are skipped.
   * **rtk hook** — still per-project (the PreToolUse Bash hook lives
     in `.claude/settings.json`). Use the `⚡ Install rtk` button to add
     it to a specific project.
 
 The shared-mcp.json file lives under `runtime/` (gitignored). The
-cockpit writes it at startup via `ensure_browser_mcps()` and every
-claude spawn receives it via `--mcp-config`.
+cockpit writes it at startup via `ensure_browser_mcps()` +
+`ensure_user_mcps()` and every claude spawn receives it via `--mcp-config`.
 """
 
 from __future__ import annotations
 
 import json
+import logging
+import pathlib
 import subprocess
 import threading
 
 from ._win_console import SUBPROCESS_NO_WINDOW
 from .config import RUNTIME_DIR
+
+_log = logging.getLogger(__name__)
 
 SHARED_MCP_FILE = RUNTIME_DIR / "shared-mcp.json"
 
@@ -177,3 +186,174 @@ def ensure_browser_mcps() -> tuple[bool, str]:
     except OSError as e:
         return False, f"could not write {SHARED_MCP_FILE}: {e}"
     return True, f"updated browser MCPs: {', '.join(changed)}"
+
+
+# Browser MCP names are force-injected by ensure_browser_mcps() with pinned
+# versions and specific flags.  User copies of the same names are skipped so
+# cockpit's version always wins.
+_BROWSER_MCP_NAMES = frozenset(BROWSER_MCPS.keys())
+
+# Explicit allowlist of user MCP names that are safe to copy into
+# runtime/shared-mcp.json by default.  Criteria: stdio servers with no
+# bearer token or API-key credentials.  Any name NOT in this set is
+# evaluated by _is_secret_bearing(); if that check fails the entry is
+# skipped with a warning.
+#
+# To include pms (HTTP + Authorization header) cockpit-wide, set env:
+#   TAKKUB_INCLUDE_PMS=1
+# This is opt-in because pms config carries a plaintext bearer token and
+# merging it into shared-mcp.json re-introduces the security regression
+# that was explicitly removed in the 2026-05-20 security audit.
+_USER_MCP_DEFAULT_ALLOW = frozenset({"obsidian-vault", "postgres-pms"})
+
+# Patterns that indicate a credential-bearing MCP entry.  Any entry that
+# matches is skipped unless the user has opted in via TAKKUB_INCLUDE_PMS
+# (for pms specifically) or is explicitly in _USER_MCP_DEFAULT_ALLOW.
+_SECRET_HEADER_KEYS = frozenset({"Authorization", "authorization"})
+_SECRET_ENV_SUBSTRINGS = ("TOKEN", "KEY", "SECRET", "PASSWORD", "PASS")
+
+
+def _has_secrets(cfg: dict) -> bool:
+    """Return True if *cfg* contains a credential that should not be written
+    to a world-accessible shared runtime file."""
+    headers = cfg.get("headers") or {}
+    for key in _SECRET_HEADER_KEYS:
+        if key in headers:
+            return True
+    env = cfg.get("env") or {}
+    for var_name in env:
+        upper = str(var_name).upper()
+        if any(s in upper for s in _SECRET_ENV_SUBSTRINGS):
+            return True
+    return False
+
+
+def ensure_user_mcps() -> tuple[bool, str]:
+    """Merge allowlisted user MCPs from ~/.claude.json into shared-mcp.json.
+
+    Called after ensure_browser_mcps() so browser MCPs are already present
+    and take precedence on name collision.
+
+    Policy:
+    - Only names in _USER_MCP_DEFAULT_ALLOW are included by default.
+    - Any entry not in the default allow set AND carrying a secret (bearer
+      token, API key, etc.) is skipped with a warning.
+    - Browser MCP names (playwright, chrome-devtools) are never overwritten;
+      user copies are skipped and logged.
+    - pms is skipped by default (HTTP + bearer token); set TAKKUB_INCLUDE_PMS=1
+      to include it despite the credential risk.
+    - Authorization header values are never written to logs.
+    - ~/.claude.json read failure → log warning, skip silently (non-fatal).
+    - shared-mcp.json corrupt → refuse to touch it.
+
+    Returns (ok, message) for logging only; failure is non-fatal.
+    """
+    import os
+
+    home = pathlib.Path.home()
+    claude_json = home / ".claude.json"
+
+    # --- read user MCPs ---
+    try:
+        raw = claude_json.read_text(encoding="utf-8")
+        user_data = json.loads(raw)
+    except FileNotFoundError:
+        return True, "~/.claude.json not found; skipping user MCP merge"
+    except (OSError, json.JSONDecodeError) as e:
+        _log.warning("ensure_user_mcps: could not read ~/.claude.json: %s", e)
+        return True, f"skipped user MCP merge: {e}"
+
+    # top-level mcpServers only (not per-project entries nested under `projects`)
+    user_servers: dict = user_data.get("mcpServers") or {}
+    if not user_servers:
+        return True, "no mcpServers in ~/.claude.json; nothing to merge"
+
+    include_pms = os.environ.get("TAKKUB_INCLUDE_PMS", "").strip() == "1"
+
+    # --- classify each entry ---
+    to_merge: dict[str, dict] = {}
+    skipped: list[str] = []
+
+    for name, cfg in user_servers.items():
+        if name in _BROWSER_MCP_NAMES:
+            skipped.append(f"{name} (browser MCP wins)")
+            continue
+        if not isinstance(cfg, dict):
+            skipped.append(f"{name} (not a dict)")
+            continue
+
+        in_allowlist = name in _USER_MCP_DEFAULT_ALLOW
+        is_secret = _has_secrets(cfg)
+
+        # pms-specific opt-in gate — evaluate before the general secret check
+        # so that TAKKUB_INCLUDE_PMS=1 actually reaches to_merge.
+        if name == "pms":
+            if not include_pms:
+                skipped.append(
+                    f"{name} (skipped: HTTP+bearer; set TAKKUB_INCLUDE_PMS=1 to include)"
+                )
+                continue
+            # User explicitly opted in — include despite bearer token.
+            to_merge[name] = cfg
+            continue
+
+        if not in_allowlist and is_secret:
+            _log.warning(
+                "ensure_user_mcps: skipping %r — credential-bearing entry not in default allowlist",
+                name,
+            )
+            skipped.append(f"{name} (skipped: credential-bearing)")
+            continue
+
+        to_merge[name] = cfg
+
+    if not to_merge:
+        return True, f"no eligible user MCPs to merge (skipped: {', '.join(skipped) or 'none'})"
+
+    # --- read/update shared-mcp.json ---
+    config: dict = {}
+    if SHARED_MCP_FILE.is_file():
+        try:
+            config = json.loads(SHARED_MCP_FILE.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return False, f"could not parse {SHARED_MCP_FILE}; leaving as-is"
+
+    servers = config.setdefault("mcpServers", {})
+
+    # Prune stale entries: non-browser user MCPs no longer in current policy.
+    # Log name only — never the cfg value (may contain bearer tokens).
+    pruned: list[str] = []
+    for name in list(servers.keys()):
+        if name in _BROWSER_MCP_NAMES:
+            continue  # managed by ensure_browser_mcps; never touch
+        if name not in to_merge:
+            del servers[name]
+            pruned.append(name)
+            _log.info("ensure_user_mcps: pruned stale entry %r", name)
+
+    changed: list[str] = []
+    for name, cfg in to_merge.items():
+        desired = json.loads(json.dumps(cfg))  # deep copy
+        if servers.get(name) != desired:
+            servers[name] = desired
+            changed.append(name)
+
+    if not changed and not pruned:
+        return True, "user MCPs already up-to-date in shared-mcp.json"
+
+    try:
+        SHARED_MCP_FILE.parent.mkdir(parents=True, exist_ok=True)
+        SHARED_MCP_FILE.write_text(
+            json.dumps(config, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+    except OSError as e:
+        return False, f"could not write {SHARED_MCP_FILE}: {e}"
+
+    # log names only — never cfg values (may contain bearer tokens)
+    parts: list[str] = []
+    if changed:
+        parts.append(f"merged: {', '.join(changed)}")
+    if pruned:
+        parts.append(f"pruned: {', '.join(pruned)}")
+    return True, "; ".join(parts)

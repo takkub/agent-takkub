@@ -281,31 +281,19 @@ takkub search "<query>" [--days N] [--all]           # grep past Claude conversa
 2. `~/WebstormProjects/second-brain` (default, ถ้ามี `01-Projects/` ข้างใน)
 3. ไม่มี → skip silently
 
-### PMS MCP (manual setup outside cockpit)
+### Shared MCPs — user-level inheritance (auto, ไม่ต้อง setup)
 
-Cockpit **ไม่ wire** pms MCP ให้แล้ว — security review 2026-05-20 พบว่า cockpit เคยเก็บ bearer token plaintext ลง `runtime/shared-mcp.json` ตอนนี้ลบทิ้ง ถ้าต้องการใช้ pms tools ใน **claude session ปกตินอก cockpit** ให้ register ใน `~/.claude.json` เอง:
+cockpit boot ทุกครั้ง อ่าน `~/.claude.json` → merge เฉพาะ MCPs ที่อยู่ใน allowlist เข้า `runtime/shared-mcp.json`:
 
-```json
-{
-  "mcpServers": {
-    "pms": {
-      "type": "http",
-      "url": "https://api.wsol.co.th/pms/mcp",
-      "headers": { "Authorization": "Bearer <YOUR_PMS_TOKEN>" }
-    }
-  }
-}
-```
+| MCP | included by default |
+|---|---|
+| `obsidian-vault` | ✅ |
+| `postgres-pms` | ✅ |
+| `pms` (HTTP + bearer) | ❌ — set `TAKKUB_INCLUDE_PMS=1` เพื่อ opt-in |
+| entries ที่มี `Authorization` header / env `TOKEN/KEY/SECRET` | ❌ skip + warning |
+| `playwright`, `chrome-devtools` | ❌ cockpit's force-inject ชนะ |
 
-Note: cockpit panes spawn ด้วย `--strict-mcp-config` + `--setting-sources project,local` → user-level mcpServers **ไม่ inject เข้า cockpit pane** snippet นี้ใช้กับ standalone claude session เท่านั้น (ดู `CLAUDE.md` section "Optional: PMS MCP" สำหรับ tool allowlist ครบ)
-
-### Browser MCPs (auto, ไม่ต้อง setup)
-
-Cockpit auto-inject:
-- `@playwright/mcp@0.0.75` — smoke tests, e2e
-- `chrome-devtools-mcp@0.26.0` — runtime debug ของ web app
-
-ทุก pane เห็น `mcp__playwright__*` และ `mcp__chrome-devtools__*` tools ได้
+ทุก pane เห็น `mcp__playwright__*`, `mcp__chrome-devtools__*`, `mcp__obsidian-vault__*`
 
 ---
 
@@ -332,7 +320,7 @@ Cockpit auto-inject:
 | **Lead capability token** — auth gate กัน TCP bypass | `cli_server.py` requires `TAKKUB_LEAD_TOKEN` env (auto-injected into Lead pane only) สำหรับ spawn/assign/close/close-all teammate panes ที่พยายาม connect socket ตรงๆ → reject |
 | **Role/project name validation** | `config.validate_name()` regex `^[a-z0-9][a-z0-9_-]{0,63}$` กัน path traversal ก่อน filesystem touch |
 | **Role-aware cwd guard** | `orchestrator._cwd_within_project()` REPO_ROOT exception ใช้กับ Lead เท่านั้น — teammate spawn ใน cockpit repo ไม่ได้ |
-| **MCP config** | `--strict-mcp-config` + `--setting-sources project,local` ทุก pane → user-level mcpServers ไม่ leak เข้า cockpit pane |
+| **MCP config** | `--strict-mcp-config` + `--setting-sources project,local` ทุก pane → user MCPs ถูก merge ผ่าน cockpit (`ensure_user_mcps`) เท่านั้น ไม่ inject ตรงจาก user-level settings (bearer tokens ถูก redact ใน log) |
 | **No plaintext credentials** | pms bearer token ถูก rip ออก (security review 2026-05-20) ผู้ใช้ setup เองนอก cockpit |
 
 Audit trail: `REVIEW_<date>.md` ที่ repo root + `runtime/sessions/<date>/<project>/codex-*.md` (codex security reviews)
@@ -412,7 +400,7 @@ agent-takkub/
 │   ├── cli_server.py             # QTcpServer for takkub CLI
 │   ├── cli.py                    # `takkub` CLI client
 │   ├── chatlog_scanner.py        # read-only walker over Claude session jsonl
-│   ├── shared_dev_tools.py       # MCP shared config (browser MCPs only — pms ripped 2026-05-20)
+│   ├── shared_dev_tools.py       # MCP shared config — browser MCPs + user-level MCP inheritance
 │   ├── rtk_helper.py             # rtk hook one-click installer
 │   ├── logs_panel.py             # bottom dock: tail events.log
 │   ├── config.py                 # projects.json + runtime/ helpers

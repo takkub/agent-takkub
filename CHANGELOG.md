@@ -2,6 +2,24 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [vNEXT]
+
+### Added (user-level plugin + MCP inheritance)
+- **User MCP allowlist-merge**: `ensure_user_mcps()` in `shared_dev_tools.py`
+  reads `~/.claude.json` top-level `mcpServers` at cockpit boot and merges a
+  curated allowlist into `runtime/shared-mcp.json`. Included by default:
+  `obsidian-vault` and `postgres-pms` (stdio, no credentials). Skipped by
+  default: `pms` (HTTP + bearer token — security regression risk); any entry
+  with `headers.Authorization` or env vars matching TOKEN/KEY/SECRET. Set
+  `TAKKUB_INCLUDE_PMS=1` to opt pms back in. Browser MCPs (playwright,
+  chrome-devtools) always win on name collision. Authorization header values
+  are never logged.
+- **`ecc` plugin** added to `_SAFE_PLUGINS` — ECC tools available in panes;
+  noisy hooks remain muted via `ECC_GATEGUARD=off` + `ECC_DISABLED_HOOKS`.
+- **`claude-obsidian-marketplace` intentionally NOT added** — cached 1.4.3
+  still ships a `SessionStart` prompt-hook that crashed all panes in v0.2.0.
+  Gated on a manual spawn smoke-test before enabling.
+
 ## [0.3.8] — 2026-05-12
 
 ### Added (token usage meter)

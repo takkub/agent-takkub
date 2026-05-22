@@ -552,7 +552,16 @@ def _render_hot_md(
 # settings to avoid claude-obsidian's broken SessionStart hook). Each entry
 # is a *marketplace name* under ~/.claude/plugins/cache/. We pick the highest
 # semver-ish version directory found.
-_SAFE_PLUGINS: tuple[str, ...] = ("superpowers-dev", "addy-agent-skills", "pordee")
+_SAFE_PLUGINS: tuple[str, ...] = (
+    "superpowers-dev",
+    "addy-agent-skills",
+    "pordee",
+    "ecc",
+    # claude-obsidian-marketplace is intentionally excluded: the cached 1.4.3
+    # build ships a SessionStart prompt-hook that crashed all panes in v0.2.0
+    # (ToolUseContext required error). Until a spawn smoke-test under cockpit
+    # flags confirms the hook no longer fires, do not add it here.
+)
 
 
 def _allowed_project_roots(project: str) -> list[pathlib.Path]:
@@ -825,6 +834,17 @@ class Orchestrator(QObject):
             warm_browser_mcps()
         except Exception as e:
             _log_event("browser_mcp_init_error", error=repr(e))
+        # Merge user's ~/.claude.json mcpServers (obsidian-vault, pms, etc.)
+        # into shared-mcp.json so every pane inherits them automatically.
+        # Browser MCP entries win on name collision. Non-fatal: failure logs
+        # once and panes spawn without user MCPs until the issue is resolved.
+        try:
+            from .shared_dev_tools import ensure_user_mcps
+
+            ok, msg = ensure_user_mcps()
+            _log_event("user_mcp_init", ok=ok, msg=msg)
+        except Exception as e:
+            _log_event("user_mcp_init_error", error=repr(e))
         # Panes are namespaced per project so the upcoming multi-tab UI
         # (Plan B) can keep each project's Lead + teammates isolated. The
         # `panes` property below resolves to the *active* project's inner
