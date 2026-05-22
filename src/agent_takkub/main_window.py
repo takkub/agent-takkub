@@ -26,6 +26,7 @@ from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
     QDockWidget,
+    QFrame,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -135,6 +136,21 @@ class MainWindow(QMainWindow):
 
     def _rebalance_teammates(self) -> None:
         self._current_tab().rebalance_teammates()
+
+    @staticmethod
+    def _make_status_separator() -> QFrame:
+        """A thin vertical divider between status-bar groups.
+
+        Same height as the chips around it so the bar still reads as a
+        single row; faint zinc color so it acts as a hint, not a wall.
+        """
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.VLine)
+        sep.setFrameShadow(QFrame.Shadow.Plain)
+        sep.setFixedWidth(1)
+        sep.setStyleSheet("QFrame { color: #3f3f46; background: #3f3f46; }")
+        sep.setContentsMargins(2, 4, 2, 4)
+        return sep
 
     @staticmethod
     def _provider_chip_style(provider: str, disabled: bool) -> str:
@@ -304,10 +320,13 @@ class MainWindow(QMainWindow):
             "so every Bash tool call gets auto-rewritten with rtk (60-90% token savings\n"
             "on git / docker / npm / pytest / next / prisma output)."
         )
+        # Amber color + emoji is enough nudge — keep the button visible
+        # without screaming. Original 2px border + bold made it look like
+        # the cockpit's primary CTA when it's actually optional optimisation.
         self._btn_install_rtk.setStyleSheet(
             "QPushButton { color: #000; background: #fbbf24; "
-            "border: 2px solid #b45309; border-radius: 4px; "
-            "padding: 4px 12px; font-weight: bold; font-size: 12px; }"
+            "border: 1px solid #b45309; border-radius: 4px; "
+            "padding: 2px 8px; font-size: 12px; }"
             "QPushButton:hover { background: #fcd34d; }"
         )
         self._btn_install_rtk.clicked.connect(self._on_install_rtk_clicked)
@@ -354,7 +373,7 @@ class MainWindow(QMainWindow):
         )
         self._btn_update.setStyleSheet(
             "QPushButton { color: #71717a; background: transparent; "
-            "border: none; padding: 2px 6px; font-size: 11px; }"
+            "border: none; padding: 2px 6px; font-size: 12px; }"
             "QPushButton:hover { color: #94a3b8; }"
         )
         self._btn_update.clicked.connect(self._on_update_clicked)
@@ -429,6 +448,25 @@ class MainWindow(QMainWindow):
         )
         self._btn_bug_check.clicked.connect(self._on_bug_check_clicked)
 
+        # 🎨 UI Review button: 1-click design-review pipeline. Spawns critic +
+        # gemini in parallel. Critic reads shots from runtime/exports/<date>/
+        # <project>/screenshots/ (left by QA's `mb shot` runs) and writes a
+        # proposal to docs/design-review/. Gemini cross-checks visually so
+        # the proposal isn't single-agent confirmation bias.
+        self._btn_ui_review = QPushButton("🎨 UI Review", self)
+        self._btn_ui_review.setToolTip(
+            "Run the design-review pipeline: spawn critic + gemini parallel\n"
+            "to read today's QA screenshots and propose add/remove/refine.\n"
+            "Fire after QA smoke; proposals land in docs/design-review/."
+        )
+        self._btn_ui_review.setStyleSheet(
+            "QPushButton { color: #fbcfe8; background: #831843; "
+            "border: 1px solid #be185d; border-radius: 4px; "
+            "padding: 2px 8px; }"
+            "QPushButton:hover { background: #9d174d; }"
+        )
+        self._btn_ui_review.clicked.connect(self._on_ui_review_clicked)
+
         self._btn_providers = QPushButton("🤖 Providers", self)
         self._btn_providers.setToolTip(
             "Configure which CLI (claude / codex / gemini) backs each teammate role.\n"
@@ -493,25 +531,42 @@ class MainWindow(QMainWindow):
         # 80% from spamming notifications.
         self._context_warned: dict[str, bool] = {}
 
-        self._status.addPermanentWidget(self._remote_hint)
-        self._status.addPermanentWidget(self._version_label)
-        self._status.addPermanentWidget(self._token_total)
         # `project_combo` is retained as a hidden widget so legacy code
         # paths that update it (`_refresh_project_list`, `_on_project_changed`)
         # still link cleanly. The tab strip is now the authoritative
         # project switcher — the combo would just duplicate it visually.
         self._project_combo.hide()
-        self._status.addPermanentWidget(self._btn_add_project)
-        self._status.addPermanentWidget(self._btn_install_rtk)
-        self._status.addPermanentWidget(self._chip_codex)
-        self._status.addPermanentWidget(self._chip_gemini)
-        self._status.addPermanentWidget(self._btn_logs)
-        self._status.addPermanentWidget(self._btn_resume)
-        self._status.addPermanentWidget(self._btn_bug_check)
-        self._status.addPermanentWidget(self._btn_end_session)
-        self._status.addPermanentWidget(self._btn_restart)
-        self._status.addPermanentWidget(self._btn_providers)
-        self._status.addPermanentWidget(self._btn_update)
+
+        # Status bar is laid out in 3 semantic groups separated by thin
+        # vertical lines. Without grouping, 14+ widgets scan as one long
+        # blob and the user has to recall (not recognize) which button
+        # does what. Order within each group stays stable across cockpit
+        # versions so muscle memory survives upgrades.
+        #
+        #   Group 1 — Project context  (info you read, not click)
+        #   Group 2 — Workflow actions (buttons that change pane state)
+        #   Group 3 — System status    (cockpit-level toggles + updates)
+        for w in (self._remote_hint, self._version_label, self._token_total, self._btn_add_project):
+            self._status.addPermanentWidget(w)
+        self._status.addPermanentWidget(self._make_status_separator())
+        for w in (
+            self._btn_logs,
+            self._btn_resume,
+            self._btn_bug_check,
+            self._btn_ui_review,
+            self._btn_end_session,
+        ):
+            self._status.addPermanentWidget(w)
+        self._status.addPermanentWidget(self._make_status_separator())
+        for w in (
+            self._chip_codex,
+            self._chip_gemini,
+            self._btn_install_rtk,
+            self._btn_restart,
+            self._btn_providers,
+            self._btn_update,
+        ):
+            self._status.addPermanentWidget(w)
         # Sync rtk button visibility after every permanent widget has been
         # added, so any layout invalidation triggered by show()/hide() lands
         # on a fully-built status bar rather than a half-built one (an
@@ -1336,6 +1391,47 @@ class MainWindow(QMainWindow):
         layout.addWidget(buttons)
 
         dlg.exec()
+
+    def _on_ui_review_clicked(self) -> None:
+        """🎨 UI Review button: confirm → spawn critic + gemini design-review pair.
+
+        Resolves the project namespace, asks one Cancel/Ok dialog, then calls
+        `orch.broadcast_design_review` which assigns parallel tasks. Status
+        bar reflects the outcome with the list of spawned roles.
+        """
+        try:
+            from .config import active_project as _active_project
+
+            project_name, _ = _active_project()
+        except Exception:
+            project_name = None
+        scope = project_name or "active project"
+
+        confirm = QMessageBox.question(
+            self,
+            "Spawn design-review pipeline",
+            (
+                f"Spawn the design-review duo for **{scope}**?\n\n"
+                "• critic reads runtime/exports/<today>/<project>/screenshots/\n"
+                "  and writes a proposal to docs/design-review/<date>-<view>.md\n"
+                "• gemini cross-checks visual heuristics on the same shots\n\n"
+                "Fire this after QA captures screenshots."
+            ),
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Ok,
+        )
+        if confirm != QMessageBox.StandardButton.Ok:
+            return
+
+        count, roles = self.orch.broadcast_design_review(project=project_name)
+        _log_event("ui_design_review", project=project_name or "", count=count, roles=roles)
+        if count == 0:
+            self._status.showMessage(
+                "🎨 Could not spawn design-review panes (check providers / project paths)",
+                7_000,
+            )
+        else:
+            self._status.showMessage(f"🎨 Design review pipeline armed: {', '.join(roles)}", 10_000)
 
     def _on_bug_check_clicked(self) -> None:
         """🐛 Bug-Check button: confirm → broadcast introspection prompt to every pane.

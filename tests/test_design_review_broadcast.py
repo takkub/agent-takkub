@@ -1,0 +1,211 @@
+"""Tests for `Orchestrator.broadcast_design_review` — the "🎨 UI Review" button.
+
+Unlike `broadcast_bug_check` which prompts every existing live pane, the
+design-review broadcast *spawns* the design-review pipeline:
+
+  - critic pane assigned to read shots from runtime/exports/<date>/<project>/
+    screenshots/ and write a proposal to docs/design-review/<date>-<view>.md
+  - gemini pane assigned to be ready to view images critic will send via
+    `takkub send`
+
+Both panes are spawned in parallel via `assign()`. The method must respect
+the disabled-providers toggle: if gemini is off in `~/.takkub/disabled-
+providers.json`, the broadcast still fires critic alone (degrades, doesn't
+abort) and the status-bar message reflects the missing cross-check.
+"""
+
+from __future__ import annotations
+
+import json
+import pathlib
+
+import pytest
+from PyQt6.QtCore import QCoreApplication
+
+from agent_takkub import config
+from agent_takkub import orchestrator as orch_mod
+from agent_takkub.orchestrator import Orchestrator
+
+ACTIVE_PROJECT = "proj"
+
+
+@pytest.fixture(scope="module")
+def qapp() -> QCoreApplication:
+    app = QCoreApplication.instance()
+    if app is None:
+        app = QCoreApplication([])
+    return app
+
+
+@pytest.fixture
+def minimal_project_json(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> pathlib.Path:
+    pj = tmp_path / "projects.json"
+    pj.write_text(
+        json.dumps(
+            {
+                "active": ACTIVE_PROJECT,
+                "projects": {
+                    ACTIVE_PROJECT: {
+                        "paths": {
+                            "web": str(tmp_path / "proj" / "web"),
+                        }
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config, "PROJECTS_JSON", pj)
+    cockpit = tmp_path / "cockpit"
+    monkeypatch.setattr(config, "REPO_ROOT", cockpit)
+    monkeypatch.setattr(orch_mod, "REPO_ROOT", cockpit)
+    runtime = tmp_path / "runtime"
+    monkeypatch.setattr(config, "RUNTIME_DIR", runtime)
+    monkeypatch.setattr(orch_mod, "RUNTIME_DIR", runtime)
+    return pj
+
+
+@pytest.fixture
+def orch(
+    qapp: QCoreApplication,
+    minimal_project_json: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Orchestrator:
+    monkeypatch.setattr(
+        Orchestrator,
+        "_resolve_project",
+        staticmethod(lambda project: project or ACTIVE_PROJECT),
+    )
+    o = Orchestrator()
+    o._idle_watchdog.stop()
+    monkeypatch.setattr(orch_mod.QTimer, "singleShot", staticmethod(lambda *_: None))
+    return o
+
+
+class TestBroadcastDesignReview:
+    def test_spawns_critic_and_gemini_parallel(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Default case: both critic and gemini get assigned via assign()."""
+        calls: list[tuple[str, str]] = []  # (role, task[:60])
+
+        def fake_assign(role_name, cwd, task, **_kw):
+            calls.append((role_name, task[:60]))
+            return True, f"queued {role_name}"
+
+        monkeypatch.setattr(orch, "assign", fake_assign)
+        # Pretend no providers disabled.
+        monkeypatch.setattr(
+            "agent_takkub.provider_state.all_disabled",
+            lambda: set(),
+        )
+
+        count, roles = orch.broadcast_design_review(project=ACTIVE_PROJECT)
+        assert count == 2
+        assert set(roles) == {"critic", "gemini"}
+        assigned = {role for role, _ in calls}
+        assert assigned == {"critic", "gemini"}
+
+    def test_critic_prompt_points_to_today_shot_dir(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The critic task must reference runtime/exports/<date>/<project>/screenshots/
+        so the agent reads the right images."""
+        captured: list[tuple[str, str]] = []
+
+        def fake_assign(role_name, cwd, task, **_kw):
+            captured.append((role_name, task))
+            return True, ""
+
+        monkeypatch.setattr(orch, "assign", fake_assign)
+        monkeypatch.setattr(
+            "agent_takkub.provider_state.all_disabled",
+            lambda: set(),
+        )
+
+        orch.broadcast_design_review(project=ACTIVE_PROJECT)
+        critic_task = next(t for r, t in captured if r == "critic")
+        assert "runtime/exports/" in critic_task
+        assert ACTIVE_PROJECT in critic_task
+        assert "screenshots" in critic_task
+
+    def test_gemini_prompt_describes_image_review_role(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The gemini task must say it's preparing to view images via takkub send."""
+        captured: list[tuple[str, str]] = []
+
+        def fake_assign(role_name, cwd, task, **_kw):
+            captured.append((role_name, task))
+            return True, ""
+
+        monkeypatch.setattr(orch, "assign", fake_assign)
+        monkeypatch.setattr(
+            "agent_takkub.provider_state.all_disabled",
+            lambda: set(),
+        )
+
+        orch.broadcast_design_review(project=ACTIVE_PROJECT)
+        gemini_task = next(t for r, t in captured if r == "gemini")
+        assert "takkub send" in gemini_task or "critic" in gemini_task.lower()
+        assert "image" in gemini_task.lower() or "ภาพ" in gemini_task or "รูป" in gemini_task
+
+    def test_skips_gemini_when_disabled(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If gemini provider is disabled, broadcast fires critic alone."""
+        calls: list[str] = []
+
+        def fake_assign(role_name, cwd, task, **_kw):
+            calls.append(role_name)
+            return True, ""
+
+        monkeypatch.setattr(orch, "assign", fake_assign)
+        monkeypatch.setattr(
+            "agent_takkub.provider_state.all_disabled",
+            lambda: {"gemini"},
+        )
+
+        count, roles = orch.broadcast_design_review(project=ACTIVE_PROJECT)
+        assert count == 1
+        assert roles == ["critic"]
+        assert "gemini" not in calls
+
+    def test_critic_prompt_mentions_proposal_doc_path(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Critic must know to write the proposal to docs/design-review/<date>-<view>.md
+        so Lead has a stable place to read it back."""
+        captured: list[tuple[str, str]] = []
+
+        def fake_assign(role_name, cwd, task, **_kw):
+            captured.append((role_name, task))
+            return True, ""
+
+        monkeypatch.setattr(orch, "assign", fake_assign)
+        monkeypatch.setattr(
+            "agent_takkub.provider_state.all_disabled",
+            lambda: set(),
+        )
+
+        orch.broadcast_design_review(project=ACTIVE_PROJECT)
+        critic_task = next(t for r, t in captured if r == "critic")
+        assert "docs/design-review/" in critic_task
+
+    def test_logs_event(self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Method must emit `broadcast_design_review` event for audit trail."""
+        events: list[tuple[str, dict]] = []
+
+        def fake_log(event, **details):
+            events.append((event, details))
+
+        monkeypatch.setattr(orch_mod, "_log_event", fake_log)
+        monkeypatch.setattr(orch, "assign", lambda *a, **k: (True, ""))
+        monkeypatch.setattr(
+            "agent_takkub.provider_state.all_disabled",
+            lambda: set(),
+        )
+
+        orch.broadcast_design_review(project=ACTIVE_PROJECT)
+        kinds = [e[0] for e in events]
+        assert "broadcast_design_review" in kinds

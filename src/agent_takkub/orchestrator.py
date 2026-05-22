@@ -2803,6 +2803,75 @@ class Orchestrator(QObject):
             "รายงานกลับเมื่อเสร็จ"
         )
 
+    def broadcast_design_review(self, project: str | None = None) -> tuple[int, list[str]]:
+        """Spawn the design-review pipeline for `project` — critic + gemini parallel.
+
+        Unlike `broadcast_bug_check` (prompts existing live panes), this
+        method assigns fresh tasks to the design-review duo:
+          * critic — read shots from runtime/exports/<date>/<project>/screenshots/
+            and write a proposal to docs/design-review/<date>-<view>.md
+          * gemini — prepare to view images critic will send via `takkub send`
+
+        Respects the disabled-providers toggle: when gemini is off, critic
+        still fires alone (degraded mode) so user can iterate solo.
+
+        Returns (count, role_names) for status-bar feedback. Roles ordered
+        consistently (critic first) so the UI message reads naturally.
+        """
+        from datetime import datetime as _dt
+
+        from .provider_state import all_disabled
+
+        project_ns = self._resolve_project(project)
+        today = _dt.now().strftime("%Y-%m-%d")
+        shot_dir = f"runtime/exports/{today}/{project_ns}/screenshots/"
+        proposal_path = f"docs/design-review/{today}-<view>.md"
+        cwd = default_cwd_for_role("critic", project=project_ns)
+
+        critic_task = (
+            "[ROLE: Design Critic — ทำงานเองโดยตรง ห้าม spawn subagent]\n\n"
+            "🎨 **Design review** (orchestrator broadcast)\n\n"
+            f"อ่าน screenshots ที่ `{shot_dir}` (ถ้าโฟลเดอร์ยังว่าง บอก Lead ผ่าน "
+            "`takkub send --to lead` ขอให้ QA capture ก่อน) — เสนอ:\n"
+            "  • **เพิ่ม** — element/affordance ที่ขาด\n"
+            "  • **ลบ** — clutter หรือ widget ซ้ำซ้อน\n"
+            "  • **ปรับ** — spacing / typography / color / interaction\n\n"
+            "สื่อสารกับ gemini pane ผ่าน `takkub send --to gemini` เพื่อขอมุมที่ 2 "
+            "จากภาพเดียวกัน (cross-check confirmation bias)\n\n"
+            f"เขียน proposal markdown ไปที่ `{proposal_path}` พร้อม frontmatter "
+            "(date / scope / shots) แล้ว report กลับผ่าน `takkub done`"
+        )
+
+        gemini_task = (
+            "[ROLE: gemini — second opinion on visual design]\n\n"
+            "🖼️ **Image review co-pilot**\n\n"
+            "Design Critic pane จะส่ง path ของ screenshot images ให้ผ่าน "
+            "`takkub send` — โหลดภาพอ่านดู แล้วตอบกลับ 1-3 จุดที่:\n"
+            "  • รู้สึกขาด / clutter / ไม่ balance\n"
+            "  • เป็นไปได้ที่ user จะใช้ผิด\n"
+            "  • Heuristic ผิด (Nielsen / contrast / hierarchy)\n\n"
+            "ตอบสั้น focus — critic จะรวบรวมเขียน proposal เอง "
+            "report กลับผ่าน `takkub done` เมื่อ critic บอกว่าจบรอบ"
+        )
+
+        disabled = all_disabled()
+        spawned: list[str] = []
+        ok_critic, _ = self.assign("critic", cwd=cwd, task=critic_task, project=project_ns)
+        if ok_critic:
+            spawned.append("critic")
+        if "gemini" not in disabled:
+            ok_gemini, _ = self.assign("gemini", cwd=cwd, task=gemini_task, project=project_ns)
+            if ok_gemini:
+                spawned.append("gemini")
+        _log_event(
+            "broadcast_design_review",
+            project=project_ns,
+            count=len(spawned),
+            roles=spawned,
+            shot_dir=shot_dir,
+        )
+        return len(spawned), spawned
+
     def close_all_teammates(self, project: str | None = None) -> tuple[bool, str]:
         """Close every non-Lead pane in `project` (defaults to active).
         Used by Lead to reset the board and by the cockpit when a tab is
