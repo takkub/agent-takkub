@@ -127,6 +127,7 @@ takkub issue new "<title>" --severity <low|med|high> --tag <a,b> --body "..."
 
 - **superpowers / agent-skills / ecc** — skill libraries เรียกผ่าน `/skill-name`
 - **MCP servers** — browser MCPs (playwright, chrome-devtools) สำหรับ UI work; obsidian-vault + postgres-pms inherit จาก user config
+- **MCP timeout** — `MCP_TOOL_TIMEOUT=180000` (3 นาที) inject ทุก pane โดย default — กัน browser MCP timeout 60s ที่ทำ Lighthouse audit/page load พังบ่อย override ที่ cockpit env ได้ถ้าต้องการ
 - **rtk CLI** — token-optimized wrappers (ดูรายละเอียดใน `~/.claude/CLAUDE.md`)
 - **ECC gateguard/cost-monitor** ปิดอัตโนมัติใน pane env (cockpit ใช้ Max OAuth ไม่ต้องการ cost alerts)
 

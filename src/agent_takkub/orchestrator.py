@@ -93,8 +93,18 @@ _PANE_ENV_ALLOWLIST: frozenset[str] = frozenset(
         "ECC_DISABLED_HOOKS",
         # Browser MCP (chrome-devtools needs to find Chrome)
         "CHROME_BIN",
+        # User override for MCP per-call timeout (default injected below).
+        "MCP_TOOL_TIMEOUT",
     }
 )
+
+# Default per-call MCP timeout (milliseconds). Claude Code's built-in
+# ceiling for HTTP/SSE MCP tool calls is 60s, which trips on browser MCP
+# operations like Playwright page loads, Chrome DevTools traces, or
+# Lighthouse audits. Raising to 3min covers realistic UI work without
+# hiding genuinely-stuck calls forever. Honoured per-pane only when the
+# user hasn't already set MCP_TOOL_TIMEOUT in the cockpit env.
+_DEFAULT_MCP_TOOL_TIMEOUT_MS = "180000"
 
 
 def _build_pane_env() -> dict[str, str]:
@@ -248,6 +258,18 @@ def _apply_ecc_mute(env: dict[str, str]) -> None:
     extra = ",".join(_ECC_MUTED_HOOKS)
     existing = env.get("ECC_DISABLED_HOOKS", "").strip()
     env["ECC_DISABLED_HOOKS"] = f"{existing},{extra}" if existing else extra
+
+
+def _apply_mcp_timeout(env: dict[str, str]) -> None:
+    """Set a 3-minute MCP per-call timeout when the user hasn't picked one.
+
+    CC 2.1.142 fixed `MCP_TOOL_TIMEOUT` so it actually raises the per-request
+    fetch timeout for HTTP/SSE MCP servers (was hard-capped at 60s before).
+    Browser-heavy roles routinely exceed 60s on first page load, Lighthouse
+    audits, or screenshot capture with network idle — leave the env var
+    alone if the operator has already set one at the cockpit level.
+    """
+    env.setdefault("MCP_TOOL_TIMEOUT", _DEFAULT_MCP_TOOL_TIMEOUT_MS)
 
 
 # Where to look for the Obsidian vault that mirrors cockpit decision
@@ -1370,6 +1392,7 @@ class Orchestrator(QObject):
                     env["CHROME_BIN"] = cand
                     break
 
+        _apply_mcp_timeout(env)
         _apply_ecc_mute(env)
 
         # --setting-sources controls which settings.json layers claude loads.
