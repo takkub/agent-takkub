@@ -1123,6 +1123,45 @@ class Orchestrator(QObject):
         if cwd and project_ns != "default" and not _cwd_within_project(cwd, project_ns, role_name):
             return False, f"cwd '{cwd}' is outside project '{project_ns}' paths"
 
+        # ── shell pane: plain PowerShell, no agent ──────────────────
+        # The "Open Shell" status-bar button drops the user into a raw
+        # pwsh prompt inside the cockpit grid — handy for one-off git
+        # pokes / log tails without losing context to another window.
+        # Skips every claude/codex/gemini flag, every CLAUDE.md inject,
+        # and every MCP/plugin wiring. The pane still emits processExited
+        # through the generic _on_session_exit handler so a closed shell
+        # leaves the slot in the same "exited" state as any other pane.
+        if role_name == "shell":
+            import shutil as _shutil
+
+            pwsh_bin = _shutil.which("pwsh") or _shutil.which("powershell")
+            if pwsh_bin is None:
+                return False, "PowerShell not on PATH (looked for pwsh / powershell)"
+            spawn_cwd = cwd or default_cwd_for_role(role_name, project=project_ns) or str(REPO_ROOT)
+            env = _build_pane_env()
+            env["TAKKUB_ROLE"] = role_name
+            env["TAKKUB_PROJECT"] = project_ns
+            bin_dir = str(REPO_ROOT / "bin")
+            env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+            shell_argv = [pwsh_bin, "-NoLogo"]
+            session = PtySession(cols=110, rows=36, parent=self)
+            _t_path = _build_transcript_path(project_ns, role_name)
+            pane._transcript_path = _t_path
+            try:
+                session.spawn(argv=shell_argv, cwd=spawn_cwd, env=env, transcript_path=_t_path)
+            except Exception as e:
+                return False, f"failed to spawn shell: {e}"
+            pane.attach_session(session, cwd=spawn_cwd)
+            session.processExited.connect(
+                lambda _code, r=role_name, c=spawn_cwd, p=project_ns: self._on_session_exit(r, c, p)
+            )
+            _ekey = _exit_key(project_ns, role_name)
+            if _ekey in self._recent_exits:
+                del self._recent_exits[_ekey]
+            self.statusChanged.emit()
+            _log_event("spawn", role=role_name, cwd=spawn_cwd, resumed=False)
+            return True, f"shell spawned in {spawn_cwd}"
+
         # ── codex pane: non-claude path ─────────────────────────────
         # `codex` is OpenAI's TUI; it speaks a different protocol and
         # doesn't understand any of the claude flags below. Build a

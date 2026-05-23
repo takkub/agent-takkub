@@ -467,6 +467,26 @@ class MainWindow(QMainWindow):
         )
         self._btn_ui_review.clicked.connect(self._on_ui_review_clicked)
 
+        # 💻 Open Shell: drops a raw PowerShell into the cockpit grid as
+        # the `shell` pane. No claude, no codex, no gemini — just pwsh in
+        # the active project's cwd. Lets the user run a one-off git poke
+        # or tail a log without leaving the cockpit. Re-clicking when the
+        # pane already exists just focuses it (orchestrator.spawn() is a
+        # no-op for an already-running session).
+        self._btn_open_shell = QPushButton("💻 Shell", self)
+        self._btn_open_shell.setToolTip(
+            "Open a PowerShell pane inside this project's cockpit grid.\n"
+            "Lands in the active project's cwd. Close like any other pane\n"
+            "(header × button or `exit`). Re-clicking focuses the existing pane."
+        )
+        self._btn_open_shell.setStyleSheet(
+            "QPushButton { color: #e2e8f0; background: #334155; "
+            "border: 1px solid #475569; border-radius: 4px; "
+            "padding: 2px 8px; }"
+            "QPushButton:hover { background: #475569; }"
+        )
+        self._btn_open_shell.clicked.connect(self._on_open_shell_clicked)
+
         self._btn_providers = QPushButton("🤖 Providers", self)
         self._btn_providers.setToolTip(
             "Configure which CLI (claude / codex / gemini) backs each teammate role.\n"
@@ -552,6 +572,7 @@ class MainWindow(QMainWindow):
         for w in (
             self._btn_logs,
             self._btn_resume,
+            self._btn_open_shell,
             self._btn_bug_check,
             self._btn_ui_review,
             self._btn_end_session,
@@ -1432,6 +1453,40 @@ class MainWindow(QMainWindow):
             )
         else:
             self._status.showMessage(f"🎨 Design review pipeline armed: {', '.join(roles)}", 10_000)
+
+    def _on_open_shell_clicked(self) -> None:
+        """💻 Shell button: spawn (or focus) a plain PowerShell pane.
+
+        Routes through `orch.spawn('shell', ...)` which hits the non-claude
+        shell branch added in orchestrator.spawn(). Re-clicking when the
+        pane is already alive surfaces it instead of double-spawning —
+        orchestrator returns "already running" and we just nudge focus.
+        """
+        try:
+            from .config import active_project as _active_project
+
+            project_name, _ = _active_project()
+        except Exception:
+            project_name = None
+
+        ok, msg = self.orch.spawn("shell", project=project_name)
+        _log_event("ui_open_shell", project=project_name or "", ok=ok, msg=msg)
+        if not ok:
+            self._status.showMessage(f"💻 Shell: {msg}", 7_000)
+            return
+
+        # Focus the freshly-spawned (or already-running) pane so the
+        # user's next keystroke lands in the shell, not the Lead.
+        tab = self._tab_for_project(project_name) if project_name else self._current_tab()
+        if tab is not None:
+            pane = tab.teammate_panes.get("shell")
+            if pane is not None:
+                pane.setFocus()
+                try:
+                    pane._terminal.setFocus()
+                except Exception:
+                    pass
+        self._status.showMessage(f"💻 {msg}", 5_000)
 
     def _on_bug_check_clicked(self) -> None:
         """🐛 Bug-Check button: confirm → broadcast introspection prompt to every pane.

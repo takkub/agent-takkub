@@ -57,6 +57,12 @@ DEFAULT_TEAMMATES: tuple[Role, ...] = (
     # is to UI what code review is to code. Pink keeps it distinct from
     # reviewer (red) and gemini (google-blue) right above it.
     Role("critic", "Design Critic", "#ec4899", column=2, row=3),
+    # Plain PowerShell pane — no claude, no codex, no gemini. Spawned via
+    # the "Open Shell" status-bar button when the user wants a quick
+    # ad-hoc shell inside the cockpit grid (run a one-off command, tail a
+    # log, poke at git) without losing context to a separate terminal
+    # window. Neutral slate so it doesn't compete with agent panes.
+    Role("shell", "Shell", "#94a3b8", column=2, row=4),
 )
 
 ALL_DEFAULT: tuple[Role, ...] = (LEAD, *DEFAULT_TEAMMATES)
