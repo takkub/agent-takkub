@@ -35,7 +35,7 @@ class TestResolveVaultDir:
         # or lacks the `01-Projects/` marker. Mirror must opt out
         # silently.
         monkeypatch.delenv(_VAULT_ENV, raising=False)
-        monkeypatch.setattr("agent_takkub.orchestrator._DEFAULT_VAULT", tmp_path / "nope")
+        monkeypatch.setattr("agent_takkub.vault_mirror._DEFAULT_VAULT", tmp_path / "nope")
         assert _resolve_vault_dir() is None
 
     def test_default_vault_used_when_projects_dir_exists(
@@ -45,7 +45,7 @@ class TestResolveVaultDir:
         fake_vault = tmp_path / "vault"
         (fake_vault / "01-Projects").mkdir(parents=True)
         monkeypatch.delenv(_VAULT_ENV, raising=False)
-        monkeypatch.setattr("agent_takkub.orchestrator._DEFAULT_VAULT", fake_vault)
+        monkeypatch.setattr("agent_takkub.vault_mirror._DEFAULT_VAULT", fake_vault)
         assert _resolve_vault_dir() == fake_vault
 
     def test_env_override_beats_default(
@@ -59,7 +59,7 @@ class TestResolveVaultDir:
         decoy = tmp_path / "decoy"
         (decoy / "01-Projects").mkdir(parents=True)
         monkeypatch.setenv(_VAULT_ENV, str(override))
-        monkeypatch.setattr("agent_takkub.orchestrator._DEFAULT_VAULT", decoy)
+        monkeypatch.setattr("agent_takkub.vault_mirror._DEFAULT_VAULT", decoy)
         assert _resolve_vault_dir() == override
 
     def test_env_override_falls_through_to_default_if_invalid(
@@ -73,7 +73,7 @@ class TestResolveVaultDir:
         good = tmp_path / "good"
         (good / "01-Projects").mkdir(parents=True)
         monkeypatch.setenv(_VAULT_ENV, str(bad_override))
-        monkeypatch.setattr("agent_takkub.orchestrator._DEFAULT_VAULT", good)
+        monkeypatch.setattr("agent_takkub.vault_mirror._DEFAULT_VAULT", good)
         assert _resolve_vault_dir() == good
 
     def test_whitespace_only_override_is_ignored(
@@ -84,7 +84,7 @@ class TestResolveVaultDir:
         good = tmp_path / "good"
         (good / "01-Projects").mkdir(parents=True)
         monkeypatch.setenv(_VAULT_ENV, "   ")
-        monkeypatch.setattr("agent_takkub.orchestrator._DEFAULT_VAULT", good)
+        monkeypatch.setattr("agent_takkub.vault_mirror._DEFAULT_VAULT", good)
         assert _resolve_vault_dir() == good
 
     def test_default_constant_points_at_expected_layout(self) -> None:
