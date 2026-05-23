@@ -25,6 +25,15 @@ from .orchestrator import Orchestrator
 # the cli.py role check (including confused teammate shells) are rejected.
 _LEAD_ONLY_CMDS = frozenset({"spawn", "assign", "close", "close-all"})
 
+# Commands that ANY pane may call, but where claiming `from: lead` in the
+# payload would let a teammate (or any local process) forge a message that
+# appears in another pane as if Lead authored it. Whenever the caller
+# stamps `from: lead` on one of these, require the Lead token — same gate
+# as _LEAD_ONLY_CMDS, just scoped to the spoofing surface. Listed here
+# rather than added to _LEAD_ONLY_CMDS so legitimate peer-to-peer use
+# (e.g. backend → qa) keeps working without the token.
+_LEAD_SPOOF_GUARDED_CMDS = frozenset({"send"})
+
 
 class CliServer(QObject):
     started = pyqtSignal(int)  # port
@@ -101,10 +110,27 @@ class CliServer(QObject):
                 self._reply(sock, ok=False, msg="unauthorized: lead-only command")
                 return
 
+        # Layer 3 — send-as-lead guard. `send` isn't lead-only (teammates
+        # message each other peer-to-peer), but a payload claiming
+        # `from: lead` would otherwise inject a `[lead → x]` message into
+        # another pane that any local process can forge. Demand the Lead
+        # token whenever the caller claims to *be* Lead, regardless of which
+        # non-lifecycle command they ran. Skipped when `from` is empty
+        # (manual terminal invocations) or any other role.
+        from_role_norm = (req.get("from") or "").lower().strip()
+        if cmd in _LEAD_SPOOF_GUARDED_CMDS and from_role_norm == "lead":
+            lead_token = getattr(self._orch, "_lead_token", None)
+            caller_auth = req.get("auth") or ""
+            if not lead_token or not secrets.compare_digest(
+                caller_auth.encode(), lead_token.encode()
+            ):
+                self._reply(sock, ok=False, msg=f"unauthorized: {cmd} as lead requires token")
+                return
+
         # done: reject from_role == "lead" — Lead never closes itself via done.
         # This guard lives at the orchestrator level too; both layers protect
         # against the done→close chain accidentally targeting the Lead pane.
-        if cmd == "done" and (req.get("from") or "").lower() == "lead":
+        if cmd == "done" and from_role_norm == "lead":
             self._reply(sock, ok=False, msg="lead cannot call done")
             return
 

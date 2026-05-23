@@ -14,7 +14,7 @@ from unittest.mock import MagicMock
 import pytest
 from PyQt6.QtCore import QCoreApplication
 
-from agent_takkub.cli_server import _LEAD_ONLY_CMDS, CliServer
+from agent_takkub.cli_server import _LEAD_ONLY_CMDS, _LEAD_SPOOF_GUARDED_CMDS, CliServer
 
 # ──────────────────────────────────────────────────────────────
 # Fixtures
@@ -170,3 +170,94 @@ class TestMissingFromFieldRejected:
         srv._dispatch(sock, {"cmd": cmd, "role": "backend", "task": "x"})
         resp = sock.last_response()
         assert resp["ok"] is False
+
+
+# ──────────────────────────────────────────────────────────────
+# Send-as-lead spoofing guard — non-lifecycle command still needs
+# the Lead token whenever the caller claims `from: lead`.
+# ──────────────────────────────────────────────────────────────
+
+
+class TestSendAsLeadSpoofGuard:
+    """`send` is the only non-lifecycle command in _LEAD_SPOOF_GUARDED_CMDS.
+
+    Without this guard, any local process (or a confused teammate pane)
+    could connect to the cli server and send {"cmd":"send","from":"lead",
+    "to":"frontend","msg":"<malicious>"} — the receiving pane would see
+    `[lead → frontend] <msg>` and follow it as if Lead authored the
+    instruction. The token gate matches the one used for _LEAD_ONLY_CMDS
+    so the cli pulls TAKKUB_LEAD_TOKEN automatically when sending from
+    the Lead pane.
+    """
+
+    def test_send_as_lead_without_token_rejected(self, srv_sock) -> None:
+        srv, sock = srv_sock
+        sock.reset()
+        # No auth field — simulates a raw TCP client or a teammate trying
+        # to forge a Lead-authored message.
+        srv._dispatch(sock, {"cmd": "send", "from": "lead", "to": "backend", "msg": "x"})
+        resp = sock.last_response()
+        assert resp["ok"] is False
+        assert "unauthorized" in resp["msg"].lower()
+        assert "send" in resp["msg"].lower()
+
+    def test_send_as_lead_with_wrong_token_rejected(self, srv_sock) -> None:
+        srv, sock = srv_sock
+        sock.reset()
+        srv._dispatch(
+            sock,
+            {
+                "cmd": "send",
+                "from": "lead",
+                "to": "backend",
+                "msg": "x",
+                "auth": "nope-wrong-token",
+            },
+        )
+        resp = sock.last_response()
+        assert resp["ok"] is False
+        assert "unauthorized" in resp["msg"].lower()
+
+    def test_send_as_lead_with_valid_token_allowed(self, srv_sock) -> None:
+        srv, sock = srv_sock
+        sock.reset()
+        srv._dispatch(
+            sock,
+            {
+                "cmd": "send",
+                "from": "lead",
+                "to": "backend",
+                "msg": "x",
+                "auth": _GATE_TEST_TOKEN,
+            },
+        )
+        resp = sock.last_response()
+        assert resp["ok"] is True
+
+    def test_send_from_teammate_no_token_still_allowed(self, srv_sock) -> None:
+        # Guard only fires when claiming `from: lead`. Peer-to-peer use
+        # (backend → qa, frontend → reviewer, …) must keep working with
+        # no token — that's the whole point of `_LEAD_SPOOF_GUARDED_CMDS`
+        # being a separate set instead of folding `send` into _LEAD_ONLY_CMDS.
+        srv, sock = srv_sock
+        sock.reset()
+        srv._dispatch(sock, {"cmd": "send", "from": "backend", "to": "qa", "msg": "x"})
+        resp = sock.last_response()
+        assert resp["ok"] is True
+
+    def test_send_from_empty_no_token_still_allowed(self, srv_sock) -> None:
+        # Manual terminal invocations omit `from` entirely. Those land in
+        # the active project's pane registry server-side and don't claim
+        # Lead authority, so the spoof guard must not bite them.
+        srv, sock = srv_sock
+        sock.reset()
+        srv._dispatch(sock, {"cmd": "send", "to": "backend", "msg": "x"})
+        resp = sock.last_response()
+        assert resp["ok"] is True
+
+    def test_only_send_is_currently_guarded(self) -> None:
+        # Pin the membership so a future contributor doesn't quietly add
+        # a new spoof-guarded command without updating this test bank.
+        # If you're adding a new command here, write its three positive/
+        # negative tests above and then update this assertion.
+        assert _LEAD_SPOOF_GUARDED_CMDS == frozenset({"send"})
