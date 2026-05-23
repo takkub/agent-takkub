@@ -27,10 +27,18 @@ TEST_PROJECT = "testproj"
 
 @pytest.fixture
 def runtime_tmp(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> pathlib.Path:
-    """Point RUNTIME_DIR at tmp_path so brief reads don't see real session logs."""
+    """Point RUNTIME_DIR at tmp_path so brief reads don't see real session logs.
+
+    `_recent_session_brief` and `_render_lead_context` were extracted from
+    orchestrator.py to lead_context.py; both modules need the patched
+    RUNTIME_DIR because functions read it from their own module namespace.
+    """
     runtime = tmp_path / "runtime"
     runtime.mkdir()
     monkeypatch.setattr(orch_mod, "RUNTIME_DIR", runtime)
+    from agent_takkub import lead_context as lc_mod
+
+    monkeypatch.setattr(lc_mod, "RUNTIME_DIR", runtime)
     return runtime
 
 

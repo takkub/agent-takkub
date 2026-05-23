@@ -72,6 +72,13 @@ def two_project_json(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) ->
     cockpit = tmp_path / "cockpit"
     monkeypatch.setattr(config, "REPO_ROOT", cockpit)
     monkeypatch.setattr(orch_mod, "REPO_ROOT", cockpit)
+    # render_lead_settings was extracted to lead_context.py — patch its
+    # module namespace too so the function writes into tmp instead of the
+    # real runtime/.
+    from agent_takkub import lead_context as lc_mod
+
+    monkeypatch.setattr(lc_mod, "RUNTIME_DIR", runtime)
+    monkeypatch.setattr(lc_mod, "REPO_ROOT", cockpit)
     return pj
 
 
