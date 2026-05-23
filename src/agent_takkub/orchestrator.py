@@ -1388,14 +1388,18 @@ class Orchestrator(QObject):
         # that flag anyway, so the file would have been ignored. The
         # write boundary is now a soft policy in CLAUDE.md.)
 
-        # Inject the cockpit's shared MCP config (browser MCPs) so every
-        # spawned claude session has playwright + chrome-devtools available
-        # regardless of what the project's own `.claude/settings.json`
-        # contains. Skipped silently if shared-mcp.json isn't populated yet.
+        # Inject the cockpit's shared MCP config so every spawned claude
+        # session has the right MCPs available regardless of what the
+        # project's own `.claude/settings.json` contains. Uses role-aware
+        # filter so browser MCPs (~15k tokens of tool schemas) only load
+        # for roles that actually do UI work (qa/critic/designer). Lead and
+        # other roles get a smaller filtered config. Roles with no policy
+        # fall back to the full master file. Skipped silently if there's
+        # no config yet.
         try:
-            from .shared_dev_tools import shared_mcp_config_path
+            from .shared_dev_tools import shared_mcp_config_path_for_role
 
-            mcp_cfg = shared_mcp_config_path()
+            mcp_cfg = shared_mcp_config_path_for_role(role_name)
         except Exception:
             mcp_cfg = None
         if mcp_cfg:

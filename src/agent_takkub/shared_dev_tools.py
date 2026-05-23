@@ -147,6 +147,31 @@ def shared_mcp_config_path() -> str | None:
     return str(SHARED_MCP_FILE)
 
 
+def shared_mcp_config_path_for_role(role: str) -> str | None:
+    """Role-aware MCP config path. Returns the per-role variant if the
+    role has a policy entry and its variant exists; otherwise falls back
+    to the master shared-mcp.json (full schema).
+
+    Why: lets the orchestrator send each claude pane only the MCPs that
+    role actually uses, cutting browser-MCP schemas (~12-16k tokens) out
+    of panes that never call them.
+    """
+    if role in _ROLE_MCP_POLICY:
+        variant = _role_variant_path(role)
+        if variant.is_file():
+            try:
+                data = json.loads(variant.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                return shared_mcp_config_path()  # fall back on corruption
+            servers = data.get("mcpServers") or {}
+            if servers:
+                return str(variant)
+            # Empty allowlist intersection → no MCPs for this role: signal
+            # "skip --mcp-config" by returning None.
+            return None
+    return shared_mcp_config_path()
+
+
 def ensure_browser_mcps() -> tuple[bool, str]:
     """Merge BROWSER_MCPS into runtime/shared-mcp.json if they're not
     already present. Idempotent — safe to call on every cockpit launch.
@@ -176,6 +201,9 @@ def ensure_browser_mcps() -> tuple[bool, str]:
             servers[name] = desired
             changed.append(name)
     if not changed:
+        # Ensure variants exist on first boot after upgrade (master may
+        # be up-to-date but variants haven't been generated yet).
+        _write_role_variants()
         return True, "browser MCPs already present"
     try:
         SHARED_MCP_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -185,6 +213,7 @@ def ensure_browser_mcps() -> tuple[bool, str]:
         )
     except OSError as e:
         return False, f"could not write {SHARED_MCP_FILE}: {e}"
+    _write_role_variants()
     return True, f"updated browser MCPs: {', '.join(changed)}"
 
 
@@ -205,6 +234,76 @@ _BROWSER_MCP_NAMES = frozenset(BROWSER_MCPS.keys())
 # merging it into shared-mcp.json re-introduces the security regression
 # that was explicitly removed in the 2026-05-20 security audit.
 _USER_MCP_DEFAULT_ALLOW = frozenset({"obsidian-vault", "postgres-pms"})
+
+# Role-aware MCP policy: which MCPs each role pane sees.
+#
+# Why: claude loads every tool schema from --mcp-config into the session
+# context at spawn time. playwright + chrome-devtools have huge schemas
+# (~24 + ~28 tools, each with full JSON parameter descriptions) that add
+# 12-16k tokens to every pane regardless of whether the tools are used.
+# Lead and most teammates never call browser MCPs directly — they're only
+# meaningful for visual/UI work (qa smoke, critic shots, designer audit).
+#
+# Solution: per-role allowlist filters the master shared-mcp.json into a
+# role-specific variant. Roles in this dict get only their allowed MCPs;
+# roles NOT in this dict fall back to the full master file (back-compat
+# for any future role we haven't classified yet).
+#
+# Policy rationale:
+#   - lead: orchestrator only — delegates UI work, no direct browser use.
+#   - qa: smoke + e2e tests need playwright/chrome-devtools.
+#   - critic/designer: visual review reads shots, may inspect runtime DOM.
+#   - reviewer: code review may query DB for context; no browser.
+#   - frontend/mobile: UI dev but uses dev server + DOM directly, not MCPs.
+#   - backend/devops: may query DB; no browser.
+#   - codex/gemini: not claude — bypass --mcp-config entirely, listed here
+#     for documentation only (won't be used; argv builder skips for them).
+_ROLE_MCP_POLICY: dict[str, frozenset[str]] = {
+    "lead": frozenset({"obsidian-vault", "postgres-pms"}),
+    "qa": frozenset({"playwright", "chrome-devtools", "obsidian-vault", "postgres-pms"}),
+    "critic": frozenset({"playwright", "chrome-devtools", "obsidian-vault"}),
+    "designer": frozenset({"playwright", "chrome-devtools", "obsidian-vault"}),
+    "reviewer": frozenset({"obsidian-vault", "postgres-pms"}),
+    "frontend": frozenset({"obsidian-vault"}),
+    "backend": frozenset({"obsidian-vault", "postgres-pms"}),
+    "mobile": frozenset({"obsidian-vault"}),
+    "devops": frozenset({"obsidian-vault", "postgres-pms"}),
+}
+
+
+def _role_variant_path(role: str) -> pathlib.Path:
+    """Path to the per-role MCP config variant (filtered from master).
+    Derived from SHARED_MCP_FILE so test fixtures that redirect that
+    constant pick up the variants automatically."""
+    return SHARED_MCP_FILE.parent / f"shared-mcp-{role}.json"
+
+
+def _write_role_variants() -> None:
+    """Regenerate every per-role MCP variant file from the master
+    shared-mcp.json. Called after ensure_browser_mcps/ensure_user_mcps
+    mutates the master so variants stay in sync.
+
+    Failure is non-fatal: a missing variant simply causes the orchestrator
+    to fall back to the master file for that role (back-compat).
+    """
+    if not SHARED_MCP_FILE.is_file():
+        return
+    try:
+        master = json.loads(SHARED_MCP_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    master_servers: dict = master.get("mcpServers") or {}
+    for role, allowed in _ROLE_MCP_POLICY.items():
+        filtered = {name: cfg for name, cfg in master_servers.items() if name in allowed}
+        variant = {"mcpServers": filtered}
+        try:
+            _role_variant_path(role).write_text(
+                json.dumps(variant, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+        except OSError as e:
+            _log.warning("_write_role_variants: could not write %s: %s", role, e)
+
 
 # Patterns that indicate a credential-bearing MCP entry.  Any entry that
 # matches is skipped unless the user has opted in via TAKKUB_INCLUDE_PMS
@@ -339,6 +438,10 @@ def ensure_user_mcps() -> tuple[bool, str]:
             changed.append(name)
 
     if not changed and not pruned:
+        # Even when master is unchanged, ensure variants exist (first boot
+        # after upgrade: master may already be up-to-date but variants
+        # haven't been generated yet).
+        _write_role_variants()
         return True, "user MCPs already up-to-date in shared-mcp.json"
 
     try:
@@ -349,6 +452,7 @@ def ensure_user_mcps() -> tuple[bool, str]:
         )
     except OSError as e:
         return False, f"could not write {SHARED_MCP_FILE}: {e}"
+    _write_role_variants()
 
     # log names only — never cfg values (may contain bearer tokens)
     parts: list[str] = []

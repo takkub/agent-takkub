@@ -330,6 +330,7 @@ def _capture_spawn_argv(
 
         monkeypatch.setattr(sdt, "ensure_browser_mcps", lambda: (True, ""))
         monkeypatch.setattr(sdt, "shared_mcp_config_path", lambda: None)
+        monkeypatch.setattr(sdt, "shared_mcp_config_path_for_role", lambda role: None)
     except Exception:
         pass
 
@@ -337,6 +338,7 @@ def _capture_spawn_argv(
     fake_sdt = MagicMock()
     fake_sdt.ensure_browser_mcps.return_value = (True, "ok")
     fake_sdt.shared_mcp_config_path.return_value = None
+    fake_sdt.shared_mcp_config_path_for_role.return_value = None
     monkeypatch.setattr(
         orch_mod,
         "ensure_browser_mcps",
@@ -372,6 +374,7 @@ def _capture_spawn_argv(
                     "agent_takkub.shared_dev_tools": MagicMock(
                         ensure_browser_mcps=lambda: (True, "ok"),
                         shared_mcp_config_path=lambda: None,
+                        shared_mcp_config_path_for_role=lambda role: None,
                     )
                 },
             ):
