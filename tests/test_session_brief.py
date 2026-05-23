@@ -147,8 +147,14 @@ class TestLeadContextAppendsBrief:
         )
 
         # Provide minimal projects.json shape so _render_lead_context resolves paths.
+        # `_render_lead_context` reads load_projects from the lead_context
+        # module namespace (where it was extracted to). Patching orch_mod
+        # would no-op now — the orchestrator re-export was removed when
+        # ruff cleaned up unused imports during the extraction.
+        from agent_takkub import lead_context as lc_mod
+
         monkeypatch.setattr(
-            orch_mod,
+            lc_mod,
             "load_projects",
             lambda: {"projects": {TEST_PROJECT: {"paths": {"web": "/tmp/web"}}}},
         )
@@ -162,8 +168,14 @@ class TestLeadContextAppendsBrief:
         self, runtime_tmp: pathlib.Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """No history → no 'Recent session' header (avoids empty stub)."""
+        # `_render_lead_context` reads load_projects from the lead_context
+        # module namespace (where it was extracted to). Patching orch_mod
+        # would no-op now — the orchestrator re-export was removed when
+        # ruff cleaned up unused imports during the extraction.
+        from agent_takkub import lead_context as lc_mod
+
         monkeypatch.setattr(
-            orch_mod,
+            lc_mod,
             "load_projects",
             lambda: {"projects": {TEST_PROJECT: {"paths": {"web": "/tmp/web"}}}},
         )
