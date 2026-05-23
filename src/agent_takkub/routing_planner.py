@@ -71,6 +71,73 @@ _INFORMATIONAL_TH = re.compile(
     r"(ดู|อธิบาย|ทำไม|สรุป|บอก|อ่าน|คือ|หมายถึง|ยังไง|อย่างไร|ทำงานยังไง|ทำงานอย่างไร)"
 )
 
+# ─────────────────────────────────────────────────────────────────────
+# UI / API keyword cores  — single source of truth for both the routing
+# table (single-role rules) and the multi-role _HAS_UI/_HAS_API detectors.
+#
+# Pre-refactor these patterns were duplicated inline; adding a keyword to
+# the routing entry but forgetting to mirror it in _HAS_UI/_HAS_API caused
+# silent drift (e.g. `migration`/`ORM` lived in the backend route but not
+# in _HAS_API, so "add migration to login form" missed multi-role).  Now
+# the base tuples drive both — the _MULTIROLE_EXTRA tuples add signals
+# that are too weak to route a single role on their own but help when
+# paired with the other side (UI + API simultaneous-work intent).
+# ─────────────────────────────────────────────────────────────────────
+
+_UI_EN_BASE: tuple[str, ...] = (
+    "UI",
+    "page",
+    "form",
+    "component",
+    "button",
+    "style",
+    "CSS",
+    "layout",
+    "modal",
+    "dialog",
+    "sidebar",
+    "navbar",
+    "widget",
+    "React",
+    "Vue",
+    r"Next\.js",
+    "Tailwind",
+    "HTML",
+)
+_UI_EN_MULTIROLE_EXTRA: tuple[str, ...] = ("frontend", r"login\.page", r"signup\.page")
+_UI_TH_FRAGMENT = r"หน้าจอ|(?<!ก่อน)(?<!ข้าง)(?<!ด้าน)(?<!เบื้อง)หน้า(?=\s*[/a-zA-Z])|ปุ่ม"
+
+_API_EN_BASE: tuple[str, ...] = (
+    "endpoint",
+    "API",
+    "route",
+    "handler",
+    "schema",
+    "database",
+    "db",
+    "migration",
+    "model",
+    "ORM",
+    "query",
+    "controller",
+    "service",
+    "REST",
+    "GraphQL",
+)
+_API_EN_MULTIROLE_EXTRA: tuple[str, ...] = ("backend", "server")
+_API_TH_FRAGMENT = r"ฐานข้อมูล|หลังบ้าน"
+
+
+def _build_ui_regex(extra: tuple[str, ...] = ()) -> re.Pattern:
+    en_alt = "|".join(_UI_EN_BASE + extra)
+    return re.compile(rf"(?:\b({en_alt})\b|{_UI_TH_FRAGMENT})", re.IGNORECASE)
+
+
+def _build_api_regex(extra: tuple[str, ...] = ()) -> re.Pattern:
+    en_alt = "|".join(_API_EN_BASE + extra)
+    return re.compile(rf"(?:\b({en_alt})\b|{_API_TH_FRAGMENT})", re.IGNORECASE)
+
+
 # Explicit role — four patterns, each captures the role in its own group.
 # _detect_explicit_role() returns the first non-None group.
 _EXPLICIT_ROLE = re.compile(
@@ -177,29 +244,14 @@ _ROUTE_TABLE: list[tuple[re.Pattern, str | None, list[str] | None]] = [
         None,
     ),
     # Backend (API / db / schema) — Thai: ฐานข้อมูล (database), หลังบ้าน (server-side)
-    (
-        re.compile(
-            r"(?:\b(endpoint|API|route|handler|schema|database|db|migration|model|"
-            r"ORM|query|controller|service|REST|GraphQL)\b"
-            r"|ฐานข้อมูล|หลังบ้าน)",
-            re.IGNORECASE,
-        ),
-        "backend",
-        None,
-    ),
+    # Pattern built from _API_EN_BASE so the routing rule and multi-role
+    # detection (_HAS_API below) stay in sync automatically.
+    (_build_api_regex(), "backend", None),
     # Frontend (UI / page / form / component …) — Thai: หน้าจอ/หน้า (screen/page), ปุ่ม (button)
-    # หน้า uses lookbehind (ก่อน/ข้าง/ด้าน/เบื้อง) + lookahead (\s*[/a-zA-Z]) to avoid false
-    # positives from compound words: ก่อนหน้า, ข้างหน้า, หน้าหนาว, หน้าฝน, etc.
-    (
-        re.compile(
-            r"(?:\b(UI|page|form|component|button|style|CSS|layout|modal|dialog|"
-            r"sidebar|navbar|widget|React|Vue|Next\.js|Tailwind|HTML)\b"
-            r"|หน้าจอ|(?<!ก่อน)(?<!ข้าง)(?<!ด้าน)(?<!เบื้อง)หน้า(?=\s*[/a-zA-Z])|ปุ่ม)",
-            re.IGNORECASE,
-        ),
-        "frontend",
-        None,
-    ),
+    # หน้า uses lookbehind (ก่อน/ข้าง/ด้าน/เบื้อง) + lookahead (\s*[/a-zA-Z]) inside
+    # _UI_TH_FRAGMENT to avoid false positives from compound words: ก่อนหน้า,
+    # ข้างหน้า, หน้าหนาว, หน้าฝน, etc.
+    (_build_ui_regex(), "frontend", None),
 ]
 
 # Confirm / abort / ambiguous signals
@@ -215,19 +267,13 @@ _EDIT_SIGNAL = re.compile(r"(แก้|ใช้.{1,30}แทน|change|swap|rep
 _FIRE_SIGNAL = re.compile(r"(ลุย|ลุยเลย|แล้วลุย|go|เอาเลย)", re.IGNORECASE)
 _AMBIGUOUS_CONFIRM = re.compile(r"(เออๆ|เออ\s|ok\s*แต่|but\b|แต่)", re.IGNORECASE)
 
-# Multi-role detection helpers (UI + API co-presence)
-_HAS_UI = re.compile(
-    r"(?:\b(UI|page|form|component|button|style|CSS|layout|modal|dialog|"
-    r"sidebar|navbar|widget|React|Vue|Next\.js|Tailwind|HTML|frontend|login.page|signup.page)\b"
-    r"|หน้าจอ|(?<!ก่อน)(?<!ข้าง)(?<!ด้าน)(?<!เบื้อง)หน้า(?=\s*[/a-zA-Z])|ปุ่ม)",
-    re.IGNORECASE,
-)
-_HAS_API = re.compile(
-    r"(?:\b(endpoint|API|route|handler|schema|database|db|model|query|"
-    r"controller|service|REST|GraphQL|backend|server)\b"
-    r"|ฐานข้อมูล|หลังบ้าน)",
-    re.IGNORECASE,
-)
+# Multi-role detection helpers (UI + API co-presence). Built from the same
+# base tuples as the routing-table entries above plus _MULTIROLE_EXTRA terms
+# ("frontend"/"backend"/"server" etc. — too weak alone to route a single role
+# but useful for pair detection). Drift between the two layers is now
+# impossible: change the base, both update.
+_HAS_UI = _build_ui_regex(_UI_EN_MULTIROLE_EXTRA)
+_HAS_API = _build_api_regex(_API_EN_MULTIROLE_EXTRA)
 
 
 # ─────────────────────────────────────────────────────────────────────
