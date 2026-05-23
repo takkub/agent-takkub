@@ -157,7 +157,11 @@ class AgentPane(QFrame):
         self._btn_close.setFixedSize(22, 22)
         self._btn_close.setToolTip("Close pane")
         self._btn_close.clicked.connect(lambda: self.closeRequested.emit(self.role.name))
-        self._btn_close.hide()
+        # Always visible — even in empty/exited states the user needs a way
+        # to dismiss the pane (e.g. a Shell pane whose spawn just failed,
+        # an exited claude session, or an empty preset slot the user never
+        # used). Orchestrator.close() still gates Lead so clicking × on
+        # Lead is a safe no-op.
 
         hl.addWidget(self._dot)
         hl.addWidget(self._title)
@@ -220,13 +224,14 @@ class AgentPane(QFrame):
         if state in ("active", "working"):
             self._stack.setCurrentIndex(1)
             self._btn_spawn.hide()
-            self._btn_close.show()
             self._btn_export.show()
         else:
             self._stack.setCurrentIndex(0)
             self._btn_spawn.show()
-            self._btn_close.hide()
             self._btn_export.hide()
+        # × is now always visible (see _btn_close init comment) — user
+        # always has an escape hatch regardless of pane state.
+        self._btn_close.show()
 
     def _tick(self) -> None:
         self._spinner_idx = (self._spinner_idx + 1) % len(SPINNER_FRAMES)

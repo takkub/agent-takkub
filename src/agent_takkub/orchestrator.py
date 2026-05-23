@@ -1134,16 +1134,26 @@ class Orchestrator(QObject):
         if role_name == "shell":
             import shutil as _shutil
 
-            pwsh_bin = _shutil.which("pwsh") or _shutil.which("powershell")
-            if pwsh_bin is None:
+            # winpty's ConPTY backend can't handle full paths that contain
+            # spaces (e.g. `"C:\Program Files\PowerShell\7\pwsh.EXE"` gets
+            # split at the space before quoting takes effect, surfacing as
+            # `command not found: C:\Program`). Detect the binary so we
+            # fail fast with a clear message, then hand the **basename** to
+            # winpty and let it resolve via PATH — which the cockpit
+            # controls via _build_pane_env() + the bin/ prepend below.
+            pwsh_full = _shutil.which("pwsh") or _shutil.which("powershell")
+            if pwsh_full is None:
                 return False, "PowerShell not on PATH (looked for pwsh / powershell)"
+            pwsh_basename = (
+                "pwsh.exe" if pwsh_full.lower().endswith("pwsh.exe") else "powershell.exe"
+            )
             spawn_cwd = cwd or default_cwd_for_role(role_name, project=project_ns) or str(REPO_ROOT)
             env = _build_pane_env()
             env["TAKKUB_ROLE"] = role_name
             env["TAKKUB_PROJECT"] = project_ns
             bin_dir = str(REPO_ROOT / "bin")
             env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
-            shell_argv = [pwsh_bin, "-NoLogo"]
+            shell_argv = [pwsh_basename, "-NoLogo"]
             session = PtySession(cols=110, rows=36, parent=self)
             _t_path = _build_transcript_path(project_ns, role_name)
             pane._transcript_path = _t_path
