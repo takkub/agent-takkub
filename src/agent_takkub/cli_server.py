@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import secrets
+from datetime import datetime
 
 from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtNetwork import QHostAddress, QTcpServer, QTcpSocket
@@ -23,7 +24,7 @@ from .orchestrator import Orchestrator
 # Commands that mutate cockpit structure — only the Lead pane is allowed to
 # run these. The gate is enforced server-side so raw TCP clients that bypass
 # the cli.py role check (including confused teammate shells) are rejected.
-_LEAD_ONLY_CMDS = frozenset({"spawn", "assign", "close", "close-all"})
+_LEAD_ONLY_CMDS = frozenset({"spawn", "assign", "close", "close-all", "harvest", "harvest-done"})
 
 # Commands that ANY pane may call, but where claiming `from: lead` in the
 # payload would let a teammate (or any local process) forge a message that
@@ -171,13 +172,80 @@ class CliServer(QObject):
             elif cmd == "end-session":
                 ok, msg = self._orch.end_session(project=from_project, note=req.get("note", ""))
             elif cmd == "list":
-                self._reply(
-                    sock,
-                    ok=True,
-                    msg="status",
-                    status=self._orch.list_status(project=from_project),
-                )
+                detailed = self._orch.list_status_detailed(project=from_project)
+                status: dict[str, str] = {}
+                for role, info in detailed.items():
+                    state = info["state"]
+                    stall_min = info.get("stall_minutes")
+                    if stall_min is not None:
+                        state = f"{state} (stalled {stall_min}m)"
+                    status[role] = state
+                self._reply(sock, ok=True, msg="status", status=status)
                 return
+            elif cmd == "status":
+                since_ts: float | None = None
+                since_hhmm = req.get("since")
+                if since_hhmm:
+                    try:
+                        h, m = str(since_hhmm).split(":")
+                        now_dt = datetime.now()
+                        since_dt = now_dt.replace(
+                            hour=int(h), minute=int(m), second=0, microsecond=0
+                        )
+                        if since_dt > now_dt:
+                            from datetime import timedelta
+
+                            since_dt -= timedelta(days=1)
+                        since_ts = since_dt.timestamp()
+                    except (ValueError, AttributeError):
+                        self._reply(
+                            sock,
+                            ok=False,
+                            msg=f"bad --since format: {since_hhmm!r} (use HH:MM)",
+                        )
+                        return
+                report = self._orch.pane_status_report(project=from_project, since_ts=since_ts)
+                self._reply(sock, ok=True, msg="status report", report=report)
+                return
+            elif cmd == "harvest":
+                harvest_since_ts: float | None = None
+                harvest_since_hhmm = req.get("since")
+                if harvest_since_hhmm:
+                    try:
+                        h, m = str(harvest_since_hhmm).split(":")
+                        now_dt = datetime.now()
+                        since_dt = now_dt.replace(
+                            hour=int(h), minute=int(m), second=0, microsecond=0
+                        )
+                        if since_dt > now_dt:
+                            from datetime import timedelta
+
+                            since_dt -= timedelta(days=1)
+                        harvest_since_ts = since_dt.timestamp()
+                    except (ValueError, AttributeError):
+                        self._reply(
+                            sock,
+                            ok=False,
+                            msg=f"bad --since format: {harvest_since_hhmm!r} (use HH:MM)",
+                        )
+                        return
+                harvest_limit = int(req.get("limit", 100))
+                harvest_role = req.get("role", "")
+                ok_h, msg_h, payload_h = self._orch.harvest_info(
+                    harvest_role,
+                    project=from_project,
+                    since_ts=harvest_since_ts,
+                    limit=harvest_limit,
+                )
+                if ok_h:
+                    self._reply(sock, ok=True, msg=msg_h, **payload_h)
+                else:
+                    self._reply(sock, ok=False, msg=msg_h)
+                return
+            elif cmd == "harvest-done":
+                harvest_role = req.get("role", "")
+                harvest_note = req.get("note", "harvested by lead")
+                ok, msg = self._orch.done(harvest_role, note=harvest_note, project=from_project)
             else:
                 ok, msg = False, f"unknown cmd: {cmd}"
         except KeyError as e:

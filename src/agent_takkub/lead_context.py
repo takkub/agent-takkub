@@ -149,7 +149,10 @@ def _recent_session_brief(project: str) -> str | None:
     return brief
 
 
-def _render_lead_context(project: str | None = None) -> str | None:
+def _render_lead_context(
+    project: str | None = None,
+    post_compact_brief: str | None = None,
+) -> str | None:
     """Render Lead's spawn-time system prompt: cockpit CLAUDE.md + an
     auto-injected `BLOCKED_DIRS` paragraph listing the active project's paths.
 
@@ -237,6 +240,11 @@ Status เปลี่ยนระหว่าง session: cockpit จะ inject
         brief = _recent_session_brief(project)
         if brief:
             suffix += brief
+
+    # Append post-compact pane status when the orchestrator detects a recent
+    # cockpit restart with live teammates (session-compact scenario).
+    if post_compact_brief:
+        suffix += post_compact_brief
 
     ensure_runtime()
     out = RUNTIME_DIR / "lead-context.md"

@@ -345,3 +345,139 @@ def test_request_payload_serialises_cleanly() -> None:
     encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     assert b"\xe0" in encoded  # Thai bytes survived
     assert json.loads(encoded.decode("utf-8")) == payload
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# harvest command
+# ──────────────────────────────────────────────────────────────────────────────
+
+_SAMPLE_ARTIFACTS = [
+    {"path": "/proj/src/foo.py", "mtime_ts": 1_700_000_000.0, "mtime_rel": "5m ago"},
+    {"path": "/proj/docs/notes.md", "mtime_ts": 1_700_000_100.0, "mtime_rel": "3m ago"},
+]
+
+
+def _make_harvest_responder(
+    *,
+    artifacts: list[dict] | None = None,
+    role_missing: bool = False,
+) -> Any:
+    """Return a fake _request callable that handles harvest + harvest-done calls."""
+    calls: list[dict] = []
+
+    def _fake(payload: dict) -> dict:
+        calls.append(payload)
+        cmd = payload.get("cmd")
+        if cmd == "harvest":
+            if role_missing:
+                return {"ok": False, "msg": "role not running: backend"}
+            return {
+                "ok": True,
+                "msg": "ok",
+                "state": "working",
+                "spawn_ts": 1_700_000_000.0,
+                "since_ts": 1_699_996_400.0,
+                "artifacts": artifacts if artifacts is not None else _SAMPLE_ARTIFACTS,
+            }
+        if cmd == "harvest-done":
+            return {"ok": True, "msg": "backend reported done"}
+        return {"ok": True, "msg": "stubbed"}
+
+    _fake.calls = calls  # type: ignore[attr-defined]
+    return _fake
+
+
+class TestHarvestArgparse:
+    def test_harvest_payload_has_role(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("TAKKUB_ROLE", raising=False)
+        responder = _make_harvest_responder()
+        monkeypatch.setattr(cli, "_request", responder)
+        monkeypatch.setattr("builtins.input", lambda _: "n")
+        cli.main(["harvest", "--role", "backend"])
+        first = responder.calls[0]
+        assert first["cmd"] == "harvest"
+        assert first["role"] == "backend"
+
+    def test_harvest_since_passed_through(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("TAKKUB_ROLE", raising=False)
+        responder = _make_harvest_responder()
+        monkeypatch.setattr(cli, "_request", responder)
+        monkeypatch.setattr("builtins.input", lambda _: "n")
+        cli.main(["harvest", "--role", "backend", "--since", "14:30"])
+        first = responder.calls[0]
+        assert first["since"] == "14:30"
+
+    def test_harvest_limit_passed_through(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("TAKKUB_ROLE", raising=False)
+        responder = _make_harvest_responder()
+        monkeypatch.setattr(cli, "_request", responder)
+        monkeypatch.setattr("builtins.input", lambda _: "n")
+        cli.main(["harvest", "--role", "backend", "--limit", "50"])
+        first = responder.calls[0]
+        assert first["limit"] == 50
+
+    def test_harvest_default_limit_is_100(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("TAKKUB_ROLE", raising=False)
+        responder = _make_harvest_responder()
+        monkeypatch.setattr(cli, "_request", responder)
+        monkeypatch.setattr("builtins.input", lambda _: "n")
+        cli.main(["harvest", "--role", "backend"])
+        assert responder.calls[0]["limit"] == 100
+
+
+class TestHarvestFlow:
+    def test_auto_confirm_sends_harvest_done(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("TAKKUB_ROLE", raising=False)
+        responder = _make_harvest_responder()
+        monkeypatch.setattr(cli, "_request", responder)
+        rc = cli.main(["harvest", "--role", "backend", "--auto-confirm"])
+        assert rc == 0
+        cmds = [c["cmd"] for c in responder.calls]
+        assert "harvest" in cmds
+        assert "harvest-done" in cmds
+
+    def test_harvest_done_carries_role(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("TAKKUB_ROLE", raising=False)
+        responder = _make_harvest_responder()
+        monkeypatch.setattr(cli, "_request", responder)
+        cli.main(["harvest", "--role", "backend", "--auto-confirm"])
+        done_calls = [c for c in responder.calls if c["cmd"] == "harvest-done"]
+        assert done_calls
+        assert done_calls[0]["role"] == "backend"
+
+    def test_user_declines_returns_exit_1(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("TAKKUB_ROLE", raising=False)
+        responder = _make_harvest_responder()
+        monkeypatch.setattr(cli, "_request", responder)
+        monkeypatch.setattr("builtins.input", lambda _: "n")
+        rc = cli.main(["harvest", "--role", "backend"])
+        assert rc == 1
+        cmds = [c["cmd"] for c in responder.calls]
+        assert "harvest-done" not in cmds
+
+    def test_role_not_running_returns_exit_2(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("TAKKUB_ROLE", raising=False)
+        responder = _make_harvest_responder(role_missing=True)
+        monkeypatch.setattr(cli, "_request", responder)
+        rc = cli.main(["harvest", "--role", "backend"])
+        assert rc == 2
+
+    def test_no_artifacts_returns_exit_3(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("TAKKUB_ROLE", raising=False)
+        responder = _make_harvest_responder(artifacts=[])
+        monkeypatch.setattr(cli, "_request", responder)
+        rc = cli.main(["harvest", "--role", "backend"])
+        assert rc == 3
+
+    def test_harvest_blocked_for_teammates(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        monkeypatch.setenv("TAKKUB_ROLE", "backend")
+        responder = _make_harvest_responder()
+        monkeypatch.setattr(cli, "_request", responder)
+        rc = cli.main(["harvest", "--role", "backend"])
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "only lead" in err

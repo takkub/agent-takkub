@@ -82,6 +82,7 @@ def orch(qapp, tmp_path, monkeypatch) -> Orchestrator:
         o._last_stuck_recover = {}
         o._recent_done = []
         o._pending_lead_cc = {}
+        o._last_send_ts = {}
     return o
 
 

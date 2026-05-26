@@ -79,6 +79,7 @@ def orch(qapp, tmp_path, monkeypatch) -> Orchestrator:
         o._recent_done = []
         o._pending_lead_cc = {}
         o._pending_done_notices = {}
+        o._last_send_ts = {}
     return o
 
 

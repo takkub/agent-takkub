@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
 import secrets
 import subprocess
 import time
@@ -68,10 +69,31 @@ from .vault_mirror import (  # re-exported for test + script imports
     _resolve_vault_dir,
 )
 
+_ANSI = re.compile(r"\x1b\[[0-9;]*[mABCDHJKSThlsu]")
+
+# Artifact dirs excluded from harvest scans.
+_HARVEST_EXCLUDE_DIRS = frozenset(
+    {
+        "__pycache__",
+        ".git",
+        "node_modules",
+        ".venv",
+        ".next",
+        "dist",
+        "build",
+    }
+)
+
+# Harvest hint: inject a '[cockpit] <role> ไม่ active >Nm' message into Lead
+# when a teammate pane has been idle this long. 0 = disabled.
+HARVEST_HINT_SEC = int(os.environ.get("TAKKUB_HARVEST_HINT_SEC", "600"))
+
 __all__ = [  # backwards-compat re-exports
+    "HARVEST_HINT_SEC",
     "_DEFAULT_MCP_TOOL_TIMEOUT_MS",
     "_DEFAULT_VAULT",
     "_ECC_MUTED_HOOKS",
+    "_HARVEST_EXCLUDE_DIRS",
     "_JUNK_NOTE_EXACT",
     "_JUNK_NOTE_MIN_LEN",
     "_JUNK_PROJECT_PREFIXES",
@@ -92,6 +114,7 @@ __all__ = [  # backwards-compat re-exports
     "_render_lead_context",
     "_resolve_vault_dir",
     "render_lead_settings",
+    "scan_artifacts",
 ]
 
 
@@ -110,7 +133,73 @@ def _log_event(event: str, **details) -> None:
         pass
 
 
+def scan_artifacts(
+    project_paths: list[pathlib.Path],
+    since_ts: float,
+    *,
+    limit: int = 100,
+) -> list[dict]:
+    """Scan project paths for files modified at or after `since_ts`.
+
+    Returns list[{path, mtime_ts, mtime_rel}] sorted by mtime descending,
+    capped at `limit`. Skips symlinks, directories, and any path whose parts
+    contain a name from _HARVEST_EXCLUDE_DIRS. Non-existent or unreadable
+    paths are silently skipped.
+    """
+    found: list[tuple[float, pathlib.Path]] = []
+    seen: set[pathlib.Path] = set()
+    now = time.time()
+
+    for base in project_paths:
+        if not base.exists():
+            continue
+        try:
+            for p in base.rglob("*"):
+                if p.is_symlink() or p.is_dir():
+                    continue
+                if p in seen:
+                    continue
+                seen.add(p)
+                if any(part in _HARVEST_EXCLUDE_DIRS for part in p.parts):
+                    continue
+                try:
+                    mtime = p.stat().st_mtime
+                except OSError:
+                    continue
+                if mtime >= since_ts:
+                    found.append((mtime, p))
+        except OSError:
+            continue
+
+    found.sort(key=lambda t: t[0], reverse=True)
+    del found[limit:]
+
+    result: list[dict] = []
+    for mtime, p in found:
+        age = now - mtime
+        if age < 60:
+            rel = f"{int(age)}s ago"
+        elif age < 3600:
+            rel = f"{int(age // 60)}m ago"
+        else:
+            rel = f"{int(age // 3600)}h ago"
+        result.append({"path": str(p), "mtime_ts": mtime, "mtime_rel": rel})
+    return result
+
+
 RESUME_WINDOW_SEC = 5 * 60  # respawn within this window → claude --resume <uuid>
+
+# Stall detection: if a `working` pane shows no detectable progress (no
+# transcript bytes, no new screenshots, no takkub send received) for this long,
+# `list_status_detailed()` marks it stalled and `takkub list` shows
+# `active (stalled Nm)` instead of plain `active`.
+# Overrideable via env so QA-heavy workflows can tune the threshold.
+STALL_THRESHOLD_SEC = int(os.environ.get("TAKKUB_STALL_THRESHOLD_SEC", "300"))
+
+# When `_LAST_SESSION_FILE` is newer than this and teammates are alive,
+# the current Lead boot is treated as post-compact so a status snapshot
+# is auto-injected into the Lead prompt.
+_POST_COMPACT_DETECT_SEC = 5 * 60
 
 # Idle watchdog: when a teammate pane sits at the ready prompt (claude is
 # idle, no "esc to interrupt") while pane.state is still "working", the
@@ -551,6 +640,15 @@ class Orchestrator(QObject):
         # Records wall-clock at spawn so _on_codex_exit() can compute
         # time-to-exit and decide whether to write a crash dump.
         self._codex_spawn_times: dict[str, float] = {}
+        # Stall detection: last successful `takkub send` delivery timestamp.
+        # Keyed `<project>::<role>`. One of three signals checked by
+        # _compute_last_progress_ts(); the others are transcript mtime and
+        # today's screenshot dir mtime. Cleared on close().
+        self._last_send_ts: dict[str, float] = {}
+        # Harvest hint cooldown. Keyed `<project>::<role>`. Records when
+        # the last harvest hint was injected into Lead so the watchdog
+        # doesn't spam the same message every tick.
+        self._harvest_hint_ts: dict[str, float] = {}
         self._idle_watchdog = QTimer(self)
         self._idle_watchdog.setInterval(IDLE_WATCHDOG_INTERVAL_MS)
         self._idle_watchdog.timeout.connect(self._check_idle_teammates)
@@ -841,7 +939,10 @@ class Orchestrator(QObject):
             # Skip injection when Lead is anchored at the cockpit itself
             # (no project context to enforce).
             if spawn_cwd != str(REPO_ROOT):
-                role_md_file = _render_lead_context(project_ns)
+                post_compact_brief = self._build_post_compact_brief(project_ns)
+                role_md_file = _render_lead_context(
+                    project_ns, post_compact_brief=post_compact_brief
+                )
         else:
             staging = agent_role_dir(role_name)
             spawn_cwd = cwd or default_cwd_for_role(role_name, project=project_ns) or str(staging)
@@ -1558,6 +1659,10 @@ class Orchestrator(QObject):
             lambda: pane.session and pane.session.write(b"\r"),
         )
 
+        # Record delivery time for stall detection: receiving a message counts
+        # as evidence the pane is still being monitored by the orchestrator.
+        self._last_send_ts[f"{project_ns}::{to_role}"] = time.time()
+
         # CC Lead unless source was Lead and target was a teammate, or vice versa.
         # If Lead is not alive, queue the CC so it isn't silently lost — the
         # queue is flushed when Lead next spawns (see _flush_pending_lead_cc).
@@ -1639,6 +1744,7 @@ class Orchestrator(QObject):
         self._requires_commit_on_done.pop(key, None)
         self._auto_chain_panes.pop(key, None)
         self._session_uuids.pop(key, None)
+        self._last_send_ts.pop(key, None)
         # For teammates, fully remove from the layout so the right column
         # collapses back. Lead stays as it always anchors the cockpit.
         # The project namespace travels with the signal so main_window
@@ -1958,6 +2064,290 @@ class Orchestrator(QObject):
         accidentally sees a backend pane that belongs to pms.
         """
         return {name: p.state for name, p in self._project_panes(project).items()}
+
+    def _compute_last_progress_ts(self, role: str, project_ns: str, pane: AgentPane) -> float:
+        """Return the most-recent activity timestamp for `pane` (0.0 = no baseline).
+
+        Checks three signals and returns the largest (= most recent):
+          1. Transcript file mtime — new PTY bytes written
+          2. Today's screenshot directory mtime — QA captured a new shot
+          3. Last `takkub send` delivery timestamp — orchestrator pushed a message
+        """
+        ts = 0.0
+
+        transcript_path = getattr(pane, "_transcript_path", None)
+        if transcript_path:
+            try:
+                mt = pathlib.Path(transcript_path).stat().st_mtime
+                if mt > ts:
+                    ts = mt
+            except OSError:
+                pass
+
+        if role in ("qa", "critic", "designer"):
+            today = datetime.now().strftime("%Y-%m-%d")
+            shot_dir = RUNTIME_DIR / "exports" / today / project_ns / "screenshots"
+            try:
+                mt = shot_dir.stat().st_mtime
+                if mt > ts:
+                    ts = mt
+            except OSError:
+                pass
+
+        send_ts = self._last_send_ts.get(f"{project_ns}::{role}", 0.0)
+        if send_ts > ts:
+            ts = send_ts
+
+        return ts
+
+    def list_status_detailed(self, project: str | None = None) -> dict[str, dict]:
+        """Extended status snapshot with stall detection.
+
+        Returns `{role: {"state": str, "stall_minutes": int|None, "last_progress_ts": float}}`.
+        `stall_minutes` is set when the pane is `working` and no progress signal
+        has been seen for more than STALL_THRESHOLD_SEC.
+        """
+        now = time.time()
+        project_ns = self._resolve_project(project)
+        result: dict[str, dict] = {}
+        for role, pane in self._project_panes(project_ns).items():
+            state = pane.state
+            stall_minutes: int | None = None
+            last_progress_ts = 0.0
+            if state == "working" and pane.session is not None and pane.session.is_alive:
+                last_progress_ts = self._compute_last_progress_ts(role, project_ns, pane)
+                if last_progress_ts > 0:
+                    silent_for = now - last_progress_ts
+                    if silent_for >= STALL_THRESHOLD_SEC:
+                        stall_minutes = int(silent_for // 60)
+            result[role] = {
+                "state": state,
+                "stall_minutes": stall_minutes,
+                "last_progress_ts": last_progress_ts,
+            }
+        return result
+
+    def pane_status_report(
+        self,
+        project: str | None = None,
+        since_ts: float | None = None,
+    ) -> dict:
+        """Per-pane summary for `takkub status`.
+
+        Returns `{"panes": {role: {...}}, "any_stalled": bool, "project": str}`.
+        Each pane entry includes state, stall info, last-progress timestamps,
+        transcript tail, newest screenshot path, and done events in the window.
+        `since_ts` defaults to one hour ago when omitted.
+        """
+        now = time.time()
+        if since_ts is None:
+            since_ts = now - 3600
+        project_ns = self._resolve_project(project)
+        detailed = self.list_status_detailed(project=project_ns)
+        panes_out: dict[str, dict] = {}
+
+        for role, info in detailed.items():
+            state = info["state"]
+            last_ts = info["last_progress_ts"]
+            stall_min = info["stall_minutes"]
+
+            if last_ts > 0:
+                age_sec = now - last_ts
+                if age_sec < 60:
+                    human_ts = f"{int(age_sec)}s ago"
+                elif age_sec < 3600:
+                    human_ts = f"{int(age_sec // 60)}m ago"
+                else:
+                    human_ts = f"{int(age_sec // 3600)}h ago"
+                abs_ts = datetime.fromtimestamp(last_ts).strftime("%H:%M:%S")
+            else:
+                human_ts = "unknown"
+                abs_ts = "unknown"
+
+            pane = self._project_panes(project_ns).get(role)
+            transcript_tail = ""
+            if pane is not None:
+                transcript_path = getattr(pane, "_transcript_path", None)
+                if transcript_path:
+                    try:
+                        raw = pathlib.Path(transcript_path).read_bytes()
+                        lines = raw.decode("utf-8", errors="replace").splitlines()
+                        tail_lines = [ln for ln in lines if ln.strip()][-5:]
+                        tail_lines = [_ANSI.sub("", ln) for ln in tail_lines]
+                        transcript_tail = "\n".join(tail_lines)
+                    except OSError:
+                        pass
+
+            last_screenshot = ""
+            if role in ("qa", "critic", "designer"):
+                today = datetime.now().strftime("%Y-%m-%d")
+                shot_dir = RUNTIME_DIR / "exports" / today / project_ns / "screenshots"
+                try:
+                    shots = sorted(
+                        shot_dir.iterdir(), key=lambda f: f.stat().st_mtime, reverse=True
+                    )
+                    if shots:
+                        last_screenshot = str(shots[0])
+                except OSError:
+                    pass
+
+            done_events: list[str] = []
+            sessions_root = RUNTIME_DIR / "sessions"
+            if sessions_root.is_dir():
+                for day_dir in sorted(sessions_root.iterdir(), reverse=True):
+                    if not day_dir.is_dir():
+                        continue
+                    proj_dir = day_dir / project_ns
+                    if not proj_dir.is_dir():
+                        continue
+                    for f in sorted(proj_dir.iterdir()):
+                        if f.suffix != ".md" or f.name.startswith("lead-"):
+                            continue
+                        if not f.name.startswith(f"{role}-"):
+                            continue
+                        try:
+                            if f.stat().st_mtime >= since_ts:
+                                done_events.append(f.name)
+                        except OSError:
+                            pass
+
+            panes_out[role] = {
+                "state": state,
+                "stall_minutes": stall_min,
+                "last_progress_ts": last_ts,
+                "last_progress_human": human_ts,
+                "last_progress_abs": abs_ts,
+                "transcript_tail": transcript_tail,
+                "last_screenshot": last_screenshot,
+                "done_events": done_events,
+            }
+
+        any_stalled = any(info["stall_minutes"] is not None for info in panes_out.values())
+        return {"panes": panes_out, "any_stalled": any_stalled, "project": project_ns}
+
+    def harvest_info(
+        self,
+        role: str,
+        project: str | None = None,
+        since_ts: float | None = None,
+        limit: int = 100,
+    ) -> tuple[bool, str, dict]:
+        """Return pane state + artifact list for `takkub harvest`.
+
+        Returns (ok, msg, payload). When ok=False and the role is not running,
+        msg contains 'role not running: <role>' so the CLI can set exit_code 2.
+        payload keys: state, spawn_ts, since_ts, artifacts.
+        """
+        from .config import load_projects as _load_projects
+
+        project_ns = self._resolve_project(project)
+        pane = self._project_panes(project_ns).get(role)
+        if pane is None:
+            return False, f"role not running: {role}", {}
+
+        spawn_ts_raw: float = getattr(pane, "_spawn_ts", 0.0) or 0.0
+        if since_ts is None:
+            since_ts = spawn_ts_raw if spawn_ts_raw > 0 else (time.time() - 3600)
+
+        # Build scan paths: configured project paths + runtime/exports/<date>/<project>/
+        try:
+            data = _load_projects()
+            paths_cfg: dict = data.get("projects", {}).get(project_ns, {}).get("paths", {})
+        except Exception:
+            paths_cfg = {}
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        scan_bases: list[pathlib.Path] = [
+            RUNTIME_DIR / "exports" / today / project_ns,
+        ]
+        for v in paths_cfg.values():
+            scan_bases.append(pathlib.Path(str(v)))
+
+        artifacts = scan_artifacts(scan_bases, since_ts, limit=limit)
+
+        return (
+            True,
+            "ok",
+            {
+                "state": pane.state,
+                "spawn_ts": spawn_ts_raw,
+                "since_ts": since_ts,
+                "artifacts": artifacts,
+            },
+        )
+
+    def _build_post_compact_brief(self, project_ns: str) -> str | None:
+        """Return a markdown snippet summarising alive teammates for post-compact injection.
+
+        Fires when `_LAST_SESSION_FILE` was written within _POST_COMPACT_DETECT_SEC
+        and live teammates exist — indicating a cockpit restart after session compact.
+        Returns None when no snapshot is fresh enough or no teammates are running.
+        """
+        if not _LAST_SESSION_FILE.is_file():
+            return None
+        try:
+            age = time.time() - _LAST_SESSION_FILE.stat().st_mtime
+        except OSError:
+            return None
+        if age > _POST_COMPACT_DETECT_SEC:
+            return None
+
+        project_panes = self._project_panes(project_ns)
+        alive_teammates = [
+            (role, pane)
+            for role, pane in project_panes.items()
+            if role != LEAD.name and pane.session is not None and pane.session.is_alive
+        ]
+        if not alive_teammates:
+            return None
+
+        now = time.time()
+        lines: list[str] = [
+            "",
+            "---",
+            "",
+            "## 🔄 Post-compact status (auto-injected)",
+            "",
+            "cockpit เพิ่ง restart จาก session snapshot — pane ที่ยังทำงานอยู่:",
+            "",
+        ]
+        for role, pane in alive_teammates:
+            state = pane.state
+            last_ts = self._compute_last_progress_ts(role, project_ns, pane)
+            if last_ts > 0:
+                age_s = now - last_ts
+                if age_s < 60:
+                    age_str = f"{int(age_s)}s ago"
+                elif age_s < 3600:
+                    age_str = f"{int(age_s // 60)}m ago"
+                else:
+                    age_str = f"{int(age_s // 3600)}h ago"
+                ts_abs = datetime.fromtimestamp(last_ts).strftime("%H:%M:%S")
+            else:
+                age_str = "unknown"
+                ts_abs = "unknown"
+
+            lines.append(f"### {role} ({state}) — last progress: {age_str} ({ts_abs})")
+            lines.append("")
+
+            transcript_path = getattr(pane, "_transcript_path", None)
+            if transcript_path:
+                try:
+                    raw = pathlib.Path(transcript_path).read_bytes()
+                    raw_lines = raw.decode("utf-8", errors="replace").splitlines()
+                    tail = [ln for ln in raw_lines if ln.strip()][-5:]
+                    if tail:
+                        lines.append("```")
+                        lines.extend(tail)
+                        lines.append("```")
+                except OSError:
+                    pass
+            lines.append("")
+
+        brief = "\n".join(lines)
+        if len(brief) > 2000:
+            brief = brief[:2000] + "\n…(truncated)\n"
+        return brief
 
     # ──────────────────────────────────────────────────────────────
     # `<vault>/hot.md` — periodic snapshot of cockpit live state
@@ -2283,6 +2673,27 @@ class Orchestrator(QObject):
                     # the agent stays idle for another full
                     # IDLE_REMIND_AFTER_S past the cooldown.
                     entry["first_idle_ts"] = now
+
+                # Harvest hint: if the pane has been idle much longer than
+                # the reminder threshold, suggest `takkub harvest` to Lead.
+                if HARVEST_HINT_SEC > 0 and idle_for >= HARVEST_HINT_SEC:
+                    hint_key = f"{project_name}::{name}"
+                    last_hint = self._harvest_hint_ts.get(hint_key, 0.0)
+                    if now - last_hint >= HARVEST_HINT_SEC:
+                        lead_pane = project_panes.get(LEAD.name)
+                        if lead_pane and lead_pane.session and lead_pane.session.is_alive:
+                            hint_min = HARVEST_HINT_SEC // 60
+                            hint_msg = (
+                                f"[cockpit] {name} ไม่ active >{hint_min}m. "
+                                f"ลอง: takkub harvest --role {name}"
+                            )
+                            lead_pane.session.write(hint_msg)
+                            QTimer.singleShot(
+                                150,
+                                lambda lp=lead_pane: lp.session and lp.session.write(b"\r"),
+                            )
+                            _log_event("harvest_hint", role=name, project=project_name)
+                            self._harvest_hint_ts[hint_key] = now
 
     def _check_stuck_panes(self, now: float) -> None:
         """Walk every teammate pane and auto-recover any that's been

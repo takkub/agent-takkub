@@ -1,116 +1,115 @@
-"""Issue tracker for agent-takkub cockpit bugs.
+"""Issue tracker for agent-takkub cockpit — GitHub Issues backend.
 
-Storage: docs/issues/<YYYYMMDD-NNN>.md (YAML frontmatter + markdown body).
-Pure file-based — no orchestrator dependency, works offline.
+All operations delegate to the `gh` CLI. Repo is auto-detected from the
+project's working directory via `gh repo view`, so `takkub issue new` filed
+from an unirecon pane goes to the unirecon repo, not agent-takkub's.
 """
 
 from __future__ import annotations
 
-import os
-import re
-import shlex
+import json
+import subprocess
 import sys
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import yaml
-
-# Relative to repo root (cwd when takkub is invoked from project root).
-DEFAULT_ISSUES_DIR = Path("docs/issues")
-
 _SEVERITY_VALUES = ("low", "med", "high")
-_STATUS_OPEN = "open"
-_STATUS_CLOSED = "closed"
 
-_ID_RE = re.compile(r"^(\d{8})-(\d{3})$")
-
-
-def _validate_id(issue_id: str) -> None:
-    if not _ID_RE.match(issue_id):
-        raise ValueError(f"invalid issue ID {issue_id!r} — expected YYYYMMDD-NNN")
-
-
-# ── helpers ──────────────────────────────────────────────────────────────────
-
-
-def _now_iso() -> str:
-    """Local time as ISO-8601 with UTC offset (no microseconds)."""
-    now = datetime.now().astimezone()
-    return now.strftime("%Y-%m-%dT%H:%M:%S%z")
-
-
-def _today_str() -> str:
-    return datetime.now().strftime("%Y%m%d")
+# Label colour map used when auto-creating missing labels.
+_LABEL_COLORS: dict[str, str] = {
+    "severity:high": "#d73a4a",
+    "severity:med": "#fbca04",
+    "severity:low": "#fef2c0",
+}
+_ROLE_LABEL_COLOR = "#c5def5"
+_ROLES = (
+    "frontend",
+    "backend",
+    "mobile",
+    "devops",
+    "qa",
+    "reviewer",
+    "critic",
+    "codex",
+    "gemini",
+)
 
 
-def _parse_file(path: Path) -> tuple[dict[str, Any], str]:
-    """Return (frontmatter_dict, body_str) from an issue file.
+# ── gh helpers ────────────────────────────────────────────────────────────────
 
-    Raises ValueError on malformed frontmatter.
-    """
-    text = path.read_text(encoding="utf-8")
-    if not text.startswith("---"):
-        raise ValueError(f"malformed frontmatter in {path}: file must start with '---'")
-    parts = text.split("---", 2)
-    # parts[0] == '' (before first ---), parts[1] == yaml block, parts[2] == body
-    if len(parts) < 3:
-        raise ValueError(f"malformed frontmatter in {path}: missing closing '---'")
+
+def _gh(*args: str, cwd: str | Path | None = None, input_text: str | None = None) -> str:
+    """Run gh CLI, return stdout. Raises RuntimeError on non-zero exit."""
+    _require_gh()
+    cmd = ["gh", *args]
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        cwd=str(cwd) if cwd else None,
+        input=input_text,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or f"gh exited {result.returncode}")
+    return result.stdout.strip()
+
+
+def _require_gh() -> None:
+    import shutil
+
+    if not shutil.which("gh"):
+        raise RuntimeError(
+            "gh CLI not found — install from https://cli.github.com/ and authenticate with 'gh auth login'"
+        )
+
+
+def _detect_repo(cwd: str | Path | None = None) -> str:
+    """Return 'owner/repo' for the git remote in cwd. Raises RuntimeError if not GitHub."""
     try:
-        fm = yaml.safe_load(parts[1]) or {}
-    except yaml.YAMLError as exc:
-        raise ValueError(f"malformed frontmatter in {path}: {exc}") from exc
-    if not isinstance(fm, dict):
-        raise ValueError(f"malformed frontmatter in {path}: expected mapping, got {type(fm)}")
-    body = parts[2].lstrip("\n")
-    return fm, body
+        repo = _gh("repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner", cwd=cwd)
+    except RuntimeError as exc:
+        msg = str(exc)
+        if (
+            "not a git repository" in msg.lower()
+            or "no git remote" in msg.lower()
+            or "Could not resolve" in msg.lower()
+        ):
+            raise RuntimeError(
+                f"no GitHub remote found in {cwd or '.'}. "
+                "Create a repo with 'gh repo create' or set a remote with 'git remote add origin <url>'"
+            ) from exc
+        raise RuntimeError(f"cannot detect GitHub repo: {msg}") from exc
+    if not repo:
+        raise RuntimeError(f"directory {cwd or '.'} has no GitHub remote")
+    return repo
 
 
-def _write_file(path: Path, fm: dict[str, Any], body: str) -> None:
-    """Serialise frontmatter + body to path."""
-    # Use yaml.dump with allow_unicode so Thai chars survive round-trips.
-    fm_text = yaml.dump(fm, allow_unicode=True, sort_keys=False, default_flow_style=False)
-    path.write_text(f"---\n{fm_text}---\n\n{body}", encoding="utf-8")
+def _ensure_label(label: str, color: str, repo: str, cwd: str | Path | None = None) -> None:
+    """Create label if it doesn't exist; ignore 'already exists' error."""
+    try:
+        _gh("label", "create", label, "--color", color.lstrip("#"), "--repo", repo, cwd=cwd)
+    except RuntimeError as exc:
+        if "already exists" in str(exc).lower():
+            return
+        raise
 
 
-# ── ID generation ─────────────────────────────────────────────────────────────
+def _ensure_labels(labels: list[str], repo: str, cwd: str | Path | None = None) -> None:
+    """Ensure all needed labels exist in the repo."""
+    for label in labels:
+        if label in _LABEL_COLORS:
+            color = _LABEL_COLORS[label]
+        elif label.startswith("role:"):
+            color = _ROLE_LABEL_COLOR
+        elif label.startswith("noticed-in:"):
+            color = "#e4e669"
+        else:
+            color = "#ededed"
+        _ensure_label(label, color, repo, cwd=cwd)
 
 
-def next_id(issues_dir: Path, date_str: str | None = None) -> str:
-    """Return the next available YYYYMMDD-NNN for today.
-
-    Scans existing files to find the highest NNN used today, then increments.
-    Handles ID collision (e.g. concurrent writes) by finding the first unused slot.
-    """
-    ds = date_str or _today_str()
-    prefix = f"{ds}-"
-    used: set[int] = set()
-    if issues_dir.exists():
-        for f in issues_dir.glob(f"{prefix}*.md"):
-            m = _ID_RE.match(f.stem)
-            if m and m.group(1) == ds:
-                used.add(int(m.group(2)))
-    n = 1
-    while n in used:
-        n += 1
-    return f"{ds}-{n:03d}"
-
-
-def _reserve_issue_path(issues_dir: Path, date_str: str) -> tuple[str, Path]:
-    """Atomically reserve a new issue file slot. Returns (issue_id, path)."""
-    issues_dir.mkdir(parents=True, exist_ok=True)
-    for n in range(1, 1000):
-        issue_id = f"{date_str}-{n:03d}"
-        path = issues_dir / f"{issue_id}.md"
-        try:
-            path.open("x", encoding="utf-8").close()
-            return issue_id, path
-        except FileExistsError:
-            continue
-    raise RuntimeError(f"no issue ID available for {date_str}")
-
-
-# ── commands ──────────────────────────────────────────────────────────────────
+# ── public API ────────────────────────────────────────────────────────────────
 
 
 def new_issue(
@@ -121,32 +120,41 @@ def new_issue(
     noticed_in: str | None = None,
     role: str | None = None,
     tags: list[str] | None = None,
-    issues_dir: Path = DEFAULT_ISSUES_DIR,
-) -> tuple[str, Path]:
-    """Create a new issue file. Returns (id, path)."""
+    cwd: str | Path | None = None,
+) -> tuple[int, str]:
+    """Create a GitHub issue. Returns (number, url)."""
     if not title.strip():
         raise ValueError("title must not be empty")
     if severity not in _SEVERITY_VALUES:
         raise ValueError(f"severity must be one of {_SEVERITY_VALUES}, got {severity!r}")
 
-    issue_id, path = _reserve_issue_path(issues_dir, _today_str())
+    repo = _detect_repo(cwd)
 
-    fm: dict[str, Any] = {
-        "id": issue_id,
-        "title": title,
-        "status": _STATUS_OPEN,
-        "severity": severity,
-        "created_at": _now_iso(),
-    }
-    if noticed_in:
-        fm["noticed_in"] = noticed_in
+    labels: list[str] = [f"severity:{severity}"]
     if role:
-        fm["role"] = role
+        labels.append(f"role:{role}")
+    if noticed_in:
+        labels.append(f"noticed-in:{noticed_in}")
     if tags:
-        fm["tags"] = tags
+        labels.extend(tags)
 
-    _write_file(path, fm, body)
-    return issue_id, path
+    _ensure_labels(labels, repo, cwd=cwd)
+
+    gh_args = ["issue", "create", "--repo", repo, "--title", title, "--body", body or ""]
+    for lbl in labels:
+        gh_args += ["--label", lbl]
+
+    out = _gh(*gh_args, cwd=cwd)
+    # gh returns the URL as last line
+    url = out.splitlines()[-1] if out else ""
+    # Extract number from URL: .../issues/123
+    number = 0
+    if url:
+        try:
+            number = int(url.rstrip("/").rsplit("/", 1)[-1])
+        except (ValueError, IndexError):
+            pass
+    return number, url
 
 
 def list_issues(
@@ -156,35 +164,74 @@ def list_issues(
     noticed_in: str | None = None,
     role: str | None = None,
     severity: str | None = None,
-    issues_dir: Path = DEFAULT_ISSUES_DIR,
+    cwd: str | Path | None = None,
 ) -> list[dict[str, Any]]:
-    """Return list of issue dicts matching filters (sorted by id)."""
-    if not issues_dir.exists():
+    """Return list of issue dicts from GitHub matching filters."""
+    repo = _detect_repo(cwd)
+
+    # Determine state
+    if filter_open and not filter_closed:
+        state = "open"
+    elif filter_closed and not filter_open:
+        state = "closed"
+    else:
+        state = "all"
+
+    gh_args = [
+        "issue",
+        "list",
+        "--repo",
+        repo,
+        "--state",
+        state,
+        "--json",
+        "number,title,state,labels,url,createdAt,closedAt",
+        "--limit",
+        "200",
+    ]
+
+    if severity:
+        gh_args += ["--label", f"severity:{severity}"]
+    if role:
+        gh_args += ["--label", f"role:{role}"]
+    if noticed_in:
+        gh_args += ["--label", f"noticed-in:{noticed_in}"]
+
+    out = _gh(*gh_args, cwd=cwd)
+    if not out:
         return []
 
+    raw = json.loads(out)
     results = []
-    for path in sorted(issues_dir.glob("*.md")):
-        try:
-            fm, _ = _parse_file(path)
-        except ValueError as exc:
-            print(f"warn: {path.name}: {exc}", file=sys.stderr)
-            continue
-
-        status = fm.get("status", _STATUS_OPEN)
-
-        if filter_open and not filter_closed and status != _STATUS_OPEN:
-            continue
-        if filter_closed and not filter_open and status != _STATUS_CLOSED:
-            continue
-        if noticed_in and fm.get("noticed_in") != noticed_in:
-            continue
-        if role and fm.get("role") != role:
-            continue
-        if severity and fm.get("severity") != severity:
-            continue
-
-        results.append(fm)
-
+    for item in raw:
+        label_names = [lb["name"] for lb in item.get("labels", [])]
+        sev = next((lb.split(":")[-1] for lb in label_names if lb.startswith("severity:")), "")
+        r = next((lb.split(":")[-1] for lb in label_names if lb.startswith("role:")), "")
+        ni = next(
+            (lb.split("noticed-in:", 1)[-1] for lb in label_names if lb.startswith("noticed-in:")),
+            "",
+        )
+        extra_tags = [
+            lb
+            for lb in label_names
+            if not lb.startswith("severity:")
+            and not lb.startswith("role:")
+            and not lb.startswith("noticed-in:")
+        ]
+        results.append(
+            {
+                "number": item["number"],
+                "title": item["title"],
+                "status": item["state"].lower(),
+                "severity": sev,
+                "role": r,
+                "noticed_in": ni,
+                "tags": extra_tags,
+                "url": item["url"],
+                "created_at": item.get("createdAt", ""),
+                "closed_at": item.get("closedAt") or "",
+            }
+        )
     return results
 
 
@@ -192,44 +239,63 @@ def close_issue(
     issue_id: str,
     *,
     note: str = "",
-    issues_dir: Path = DEFAULT_ISSUES_DIR,
-) -> Path:
-    """Close an issue. Returns the file path. Raises ValueError on errors."""
-    _validate_id(issue_id)
-    path = issues_dir / f"{issue_id}.md"
-    if not path.exists():
-        raise ValueError(f"issue {issue_id!r} not found")
+    cwd: str | Path | None = None,
+) -> str:
+    """Close a GitHub issue by number. Returns the issue URL."""
+    number = _parse_issue_number(issue_id)
+    repo = _detect_repo(cwd)
 
-    fm, body = _parse_file(path)
-
-    if fm.get("status") == _STATUS_CLOSED:
-        raise ValueError(f"issue {issue_id!r} is already closed")
-
-    fm["status"] = _STATUS_CLOSED
-    fm["closed_at"] = _now_iso()
+    gh_args = ["issue", "close", str(number), "--repo", repo]
     if note:
-        fm["closed_note"] = note
+        gh_args += ["--comment", note]
 
-    _write_file(path, fm, body)
-    return path
-
-
-def show_issue(issue_id: str, *, issues_dir: Path = DEFAULT_ISSUES_DIR) -> str:
-    """Return raw file content. Raises ValueError if not found."""
-    _validate_id(issue_id)
-    path = issues_dir / f"{issue_id}.md"
-    if not path.exists():
-        raise ValueError(f"issue {issue_id!r} not found")
-    return path.read_text(encoding="utf-8")
+    _gh(*gh_args, cwd=cwd)
+    return f"https://github.com/{repo}/issues/{number}"
 
 
-# ── CLI entry points (called from cli.py) ────────────────────────────────────
+def show_issue(issue_id: str, *, cwd: str | Path | None = None) -> str:
+    """Return rendered issue text from GitHub."""
+    number = _parse_issue_number(issue_id)
+    repo = _detect_repo(cwd)
+    return _gh("issue", "view", str(number), "--repo", repo, cwd=cwd)
 
 
-def _resolve_issues_dir(args_issues_dir: str | None) -> Path:
-    if args_issues_dir:
-        return Path(args_issues_dir)
-    return DEFAULT_ISSUES_DIR
+# ── ID parsing ────────────────────────────────────────────────────────────────
+
+
+def _parse_issue_number(issue_id: str) -> int:
+    """Accept '123', '#123', 'owner/repo#123' — return int. Raises ValueError."""
+    s = str(issue_id).strip()
+    if "#" in s:
+        s = s.rsplit("#", 1)[-1]
+    s = s.lstrip("#")
+    try:
+        n = int(s)
+        if n <= 0:
+            raise ValueError
+        return n
+    except ValueError:
+        raise ValueError(
+            f"invalid issue ID {issue_id!r} — expected GitHub issue number (e.g. 123, #123)"
+        ) from None
+
+
+# ── CLI helpers ────────────────────────────────────────────────────────────────
+
+
+def _safe_print(text: str, **kwargs) -> None:
+    try:
+        print(text, **kwargs)
+    except UnicodeEncodeError:
+        enc = sys.stdout.encoding or "utf-8"
+        print(text.encode(enc, errors="replace").decode(enc), **kwargs)
+
+
+def _safe_col(val: str, width: int) -> str:
+    return val.replace("\n", " ").replace("\r", "")[:width]
+
+
+# ── CLI entry points (called from cli.py) ─────────────────────────────────────
 
 
 def cmd_issue_new(args: Any) -> dict:
@@ -238,13 +304,13 @@ def cmd_issue_new(args: Any) -> dict:
     body: str = args.body or ""
 
     if not body:
-        # No --body and no TTY → cannot open $EDITOR safely in a pane
         if not sys.stdin.isatty():
             return {
                 "ok": False,
                 "msg": 'no --body provided and no TTY — pass --body "<text>" explicitly',
             }
-        # TTY: open $EDITOR
+        import os
+        import shlex
         import subprocess
         import tempfile
 
@@ -264,41 +330,38 @@ def cmd_issue_new(args: Any) -> dict:
             except OSError:
                 pass
 
+    if getattr(args, "issues_dir", None):
+        print(
+            "warn: --issues-dir is deprecated and ignored (issues now stored in GitHub)",
+            file=sys.stderr,
+        )
+
     tags = [t.strip() for t in args.tag.split(",")] if getattr(args, "tag", None) else None
-    issues_dir = _resolve_issues_dir(getattr(args, "issues_dir", None))
+    cwd = getattr(args, "cwd", None)
 
     try:
-        issue_id, path = new_issue(
+        number, url = new_issue(
             title,
             body,
             severity=getattr(args, "severity", "med") or "med",
             noticed_in=getattr(args, "noticed_in", None),
             role=getattr(args, "role", None),
             tags=tags or None,
-            issues_dir=issues_dir,
+            cwd=cwd,
         )
-    except ValueError as exc:
+    except (ValueError, RuntimeError) as exc:
         return {"ok": False, "msg": str(exc)}
 
-    print(f"{issue_id}  {path}")
-    return {"ok": True, "msg": f"created {issue_id}"}
-
-
-def _safe_col(val: str, width: int) -> str:
-    return val.replace("\n", " ").replace("\r", "")[:width]
-
-
-def _safe_print(text: str, **kwargs) -> None:
-    try:
-        print(text, **kwargs)
-    except UnicodeEncodeError:
-        enc = sys.stdout.encoding or "utf-8"
-        print(text.encode(enc, errors="replace").decode(enc), **kwargs)
+    print(f"#{number}  {url}")
+    return {"ok": True, "msg": f"created #{number}"}
 
 
 def cmd_issue_list(args: Any) -> dict:
     """Handler for `takkub issue list`."""
-    issues_dir = _resolve_issues_dir(getattr(args, "issues_dir", None))
+    if getattr(args, "issues_dir", None):
+        print("warn: --issues-dir is deprecated and ignored", file=sys.stderr)
+
+    cwd = getattr(args, "cwd", None)
     try:
         items = list_issues(
             filter_open=getattr(args, "open", False),
@@ -306,53 +369,57 @@ def cmd_issue_list(args: Any) -> dict:
             noticed_in=getattr(args, "noticed_in", None),
             role=getattr(args, "role", None),
             severity=getattr(args, "severity", None),
-            issues_dir=issues_dir,
+            cwd=cwd,
         )
-    except Exception as exc:
+    except (ValueError, RuntimeError) as exc:
         return {"ok": False, "msg": str(exc)}
 
     if not items:
         _safe_print("(no issues)")
         return {"ok": True, "msg": "0 issue(s)"}
 
-    # Table header
-    _safe_print(f"{'ID':<18} {'SEV':<5} {'STATUS':<8} {'ROLE':<12} {'NOTICED_IN':<14} TITLE")
+    _safe_print(f"{'#':<6} {'SEV':<5} {'STATUS':<8} {'ROLE':<12} {'NOTICED_IN':<14} TITLE")
     _safe_print("-" * 80)
-    for fm in items:
+    for item in items:
         _safe_print(
-            f"{fm.get('id', ''):<18} "
-            f"{fm.get('severity', ''):<5} "
-            f"{fm.get('status', ''):<8} "
-            f"{fm.get('role', ''):<12} "
-            f"{fm.get('noticed_in', ''):<14} "
-            f"{_safe_col(fm.get('title', ''), 50)}"
+            f"#{item['number']:<5} "
+            f"{item.get('severity', ''):<5} "
+            f"{item.get('status', ''):<8} "
+            f"{item.get('role', ''):<12} "
+            f"{item.get('noticed_in', ''):<14} "
+            f"{_safe_col(item.get('title', ''), 50)}"
         )
-
     return {"ok": True, "msg": f"{len(items)} issue(s)"}
 
 
 def cmd_issue_close(args: Any) -> dict:
     """Handler for `takkub issue close`."""
-    issues_dir = _resolve_issues_dir(getattr(args, "issues_dir", None))
+    if getattr(args, "issues_dir", None):
+        print("warn: --issues-dir is deprecated and ignored", file=sys.stderr)
+
+    cwd = getattr(args, "cwd", None)
     try:
-        path = close_issue(
+        url = close_issue(
             args.id,
             note=getattr(args, "note", "") or "",
-            issues_dir=issues_dir,
+            cwd=cwd,
         )
-    except ValueError as exc:
+    except (ValueError, RuntimeError) as exc:
         return {"ok": False, "msg": str(exc)}
 
-    print(f"closed: {path}")
-    return {"ok": True, "msg": f"closed {args.id}"}
+    print(f"closed: {url}")
+    return {"ok": True, "msg": f"closed #{args.id}"}
 
 
 def cmd_issue_show(args: Any) -> dict:
     """Handler for `takkub issue show`."""
-    issues_dir = _resolve_issues_dir(getattr(args, "issues_dir", None))
+    if getattr(args, "issues_dir", None):
+        print("warn: --issues-dir is deprecated and ignored", file=sys.stderr)
+
+    cwd = getattr(args, "cwd", None)
     try:
-        content = show_issue(args.id, issues_dir=issues_dir)
-    except ValueError as exc:
+        content = show_issue(args.id, cwd=cwd)
+    except (ValueError, RuntimeError) as exc:
         return {"ok": False, "msg": str(exc)}
 
     _safe_print(content, end="")

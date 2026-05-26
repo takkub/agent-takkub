@@ -26,7 +26,7 @@ from .config import read_port
 # Lead pane is allowed to invoke these; teammates must work on their assigned
 # task and coordinate via `send` / `done`. The gate is enforced in `main()`
 # based on the TAKKUB_ROLE env var that the orchestrator injects per pane.
-LEAD_ONLY_COMMANDS = frozenset({"spawn", "assign", "close", "close-all", "end-session"})
+LEAD_ONLY_COMMANDS = frozenset({"spawn", "assign", "close", "close-all", "end-session", "harvest"})
 
 # Commands intended only for teammate panes. Lead summarises inline and never
 # needs to call done on itself — blocking this prevents Lead from accidentally
@@ -177,8 +177,102 @@ def cmd_end_session(args: argparse.Namespace) -> dict:
     )
 
 
+def cmd_harvest(args: argparse.Namespace) -> dict:
+    """Scan artifact paths for a role that forgot `takkub done`, then optionally
+    synthesize a done event via harvest-done IPC.
+
+    Exit codes (returned in the dict as 'exit_code'):
+      0 = done event synthesized
+      1 = user declined or server error
+      2 = role not running
+      3 = no artifacts found
+    """
+    from datetime import datetime
+
+    payload: dict = _with_project({"cmd": "harvest", "role": args.role})
+    if getattr(args, "since", None):
+        payload["since"] = args.since
+    payload["limit"] = getattr(args, "limit", None) or 100
+
+    resp = _request(payload)
+    if not resp.get("ok"):
+        msg = resp.get("msg", "harvest query failed")
+        if "not running" in msg:
+            return {"ok": False, "msg": msg, "exit_code": 2}
+        return {"ok": False, "msg": msg, "exit_code": 1}
+
+    artifacts = resp.get("artifacts") or []
+    state = resp.get("state", "?")
+    since_ts = resp.get("since_ts") or 0
+
+    since_str = datetime.fromtimestamp(since_ts).strftime("%H:%M:%S") if since_ts else "?"
+
+    if not artifacts:
+        print(f"no artifacts found for '{args.role}' (state: {state}) since {since_str}")
+        return {"ok": False, "msg": "no artifacts found", "exit_code": 3}
+
+    print(f"\n[harvest] role: {args.role}  state: {state}  since: {since_str}")
+    print(f"  {len(artifacts)} artifact(s) found:")
+    for a in artifacts:
+        rel = a.get("mtime_rel", "?")
+        path = a.get("path", "?")
+        print(f"  {rel:>10}  {path}")
+    print()
+
+    if getattr(args, "auto_confirm", False):
+        answer = "y"
+    else:
+        try:
+            answer = input(f"mark '{args.role}' as done? [Y/n] ").strip().lower() or "y"
+        except EOFError:
+            answer = "n"
+
+    if answer not in ("y", "yes"):
+        print("harvest cancelled")
+        return {"ok": False, "msg": "user declined", "exit_code": 1}
+
+    note = f"harvest: {len(artifacts)} artifact(s) modified since {since_str}"
+    done_resp = _request(_with_project({"cmd": "harvest-done", "role": args.role, "note": note}))
+    if done_resp.get("ok"):
+        print(f"ok: '{args.role}' marked as done ({len(artifacts)} artifact(s))")
+        return {"ok": True, "msg": f"harvested {len(artifacts)} artifact(s)"}
+    return {"ok": False, "msg": done_resp.get("msg", "harvest-done failed"), "exit_code": 1}
+
+
 def cmd_list(_: argparse.Namespace) -> dict:
     return _request(_with_project({"cmd": "list"}))
+
+
+def _print_status_report(report: dict) -> None:
+    """Pretty-print the per-pane report returned by `takkub status`."""
+    project = report.get("project") or "?"
+    panes = report.get("panes") or {}
+    print(f"  project: {project}")
+    for role, info in panes.items():
+        state = info.get("state", "?")
+        stall = info.get("stall_minutes")
+        human_ts = info.get("last_progress_human", "?")
+        abs_ts = info.get("last_progress_abs", "?")
+        stall_str = f" ⚠ stalled {stall}m" if stall is not None else ""
+        print(f"\n  [{role}] {state}{stall_str}")
+        print(f"    last progress: {human_ts} ({abs_ts})")
+        tail = (info.get("transcript_tail") or "").strip()
+        if tail:
+            for line in tail.splitlines()[-3:]:
+                print(f"    │ {line[:120]}")
+        shot = info.get("last_screenshot") or ""
+        if shot:
+            print(f"    screenshot: {shot}")
+        done_evts = info.get("done_events") or []
+        if done_evts:
+            print(f"    done events: {', '.join(done_evts)}")
+
+
+def cmd_status(args: argparse.Namespace) -> dict:
+    payload = _with_project({"cmd": "status"})
+    if getattr(args, "since", None):
+        payload["since"] = args.since
+    return _request(payload)
 
 
 def cmd_verify(args: argparse.Namespace) -> dict:
@@ -466,8 +560,46 @@ def main(argv: list[str] | None = None) -> int:
     ses.add_argument("--note", default="", help="summary note (default: 'session ended')")
     ses.set_defaults(func=cmd_end_session)
 
+    sh = sub.add_parser(
+        "harvest",
+        help="scan artifact paths for a role that never sent takkub done",
+    )
+    sh.add_argument("--role", required=True, help="role name to harvest")
+    sh.add_argument(
+        "--since",
+        default=None,
+        metavar="HH:MM",
+        help="scan window start (default: pane spawn timestamp, fallback 1h ago)",
+    )
+    sh.add_argument(
+        "--auto-confirm",
+        action="store_true",
+        dest="auto_confirm",
+        default=False,
+        help="skip interactive prompt — mark as done immediately",
+    )
+    sh.add_argument(
+        "--limit",
+        type=int,
+        default=100,
+        help="max artifacts to list (default: 100)",
+    )
+    sh.set_defaults(func=cmd_harvest)
+
     sl = sub.add_parser("list", help="show pane status")
     sl.set_defaults(func=cmd_list)
+
+    sst = sub.add_parser(
+        "status",
+        help="per-pane progress summary with stall detection (post-compact awareness)",
+    )
+    sst.add_argument(
+        "--since",
+        default=None,
+        metavar="HH:MM",
+        help="window start for done-event scan (default: 1h ago)",
+    )
+    sst.set_defaults(func=cmd_status)
 
     sv = sub.add_parser("verify", help="auto-detect stack and run lint/test gate")
     sv.add_argument("--cwd", default=None, help="working directory (default: current dir)")
@@ -530,7 +662,9 @@ def main(argv: list[str] | None = None) -> int:
     sse.set_defaults(func=cmd_search)
 
     # ── issue tracker ────────────────────────────────────────────────────────
-    si = sub.add_parser("issue", help="manage cockpit bug/issue tracker (local, in repo)")
+    si = sub.add_parser(
+        "issue", help="manage issues via GitHub Issues (auto-detects repo from project)"
+    )
     si_sub = si.add_subparsers(dest="issue_command", required=True)
 
     # issue new
@@ -553,17 +687,25 @@ def main(argv: list[str] | None = None) -> int:
     sil.add_argument("--severity", choices=["low", "med", "high"], default=None)
 
     # issue close
-    sic = si_sub.add_parser("close", help="close an issue by ID")
-    sic.add_argument("id", help="issue ID (e.g. 20260522-001)")
-    sic.add_argument("--note", default="", metavar="MSG", help="cause / fix summary")
+    sic = si_sub.add_parser("close", help="close an issue by GitHub number")
+    sic.add_argument("id", help="GitHub issue number (e.g. 123, #123)")
+    sic.add_argument(
+        "--note", default="", metavar="MSG", help="cause / fix summary (posted as comment)"
+    )
 
     # issue show
-    sis = si_sub.add_parser("show", help="print raw issue file to stdout")
-    sis.add_argument("id", help="issue ID (e.g. 20260522-001)")
+    sis = si_sub.add_parser("show", help="print issue from GitHub to stdout")
+    sis.add_argument("id", help="GitHub issue number (e.g. 123, #123)")
 
-    # wire --issues-dir into all issue subcommands
+    # --issues-dir kept for backward compat — deprecated, issues.py emits a warning and ignores it
     for sp in (sin, sil, sic, sis):
-        sp.add_argument("--issues-dir", dest="issues_dir", default=None, metavar="PATH")
+        sp.add_argument(
+            "--issues-dir",
+            dest="issues_dir",
+            default=None,
+            metavar="PATH",
+            help="[DEPRECATED] ignored — issues are now stored in GitHub",
+        )
 
     def _cmd_issue(args: argparse.Namespace) -> dict:
         from .issues import cmd_issue_close, cmd_issue_list, cmd_issue_new, cmd_issue_show
@@ -657,13 +799,17 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     ok = bool(resp.get("ok"))
-    if "status" in resp:
+    if "report" in resp:
+        _print_status_report(resp["report"])
+        if resp.get("report", {}).get("any_stalled"):
+            ok = False
+    elif "status" in resp:
         for role, state in resp["status"].items():
             print(f"  {role:12s} {state}")
     msg = resp.get("msg", "")
     if msg:
         print(("ok: " if ok else "err: ") + msg)
-    return 0 if ok else 1
+    return resp.get("exit_code", 0 if ok else 1)
 
 
 if __name__ == "__main__":
