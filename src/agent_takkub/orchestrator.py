@@ -886,16 +886,35 @@ class Orchestrator(QObject):
             env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
             # Autonomy flags so Codex can call `takkub done` and edit
             # workspace files without stopping for per-command approval —
-            # mirrors claude's `--dangerously-skip-permissions`. Default
-            # to workspace-write sandbox (no system-wide reach) so an
-            # off-the-rails codex can still only touch its cwd.
-            codex_argv = [
-                codex_bin,
-                "--ask-for-approval",
-                "never",
-                "-s",
-                "workspace-write",
-            ]
+            # mirrors claude's `--dangerously-skip-permissions`.
+            #
+            # Windows: codex 0.133 interactive TUI still spawns
+            # `codex-windows-sandbox-setup.exe` on the first shell tool
+            # call even with `-s danger-full-access`. That helper has a
+            # `requireAdministrator` manifest, so under a non-elevated
+            # cockpit it ENOENTs out as "windows sandbox: spawn setup
+            # refresh" and the pane can't run any command (issue #5).
+            # `--dangerously-bypass-approvals-and-sandbox` is the codex-
+            # documented escape hatch that skips the helper entirely —
+            # same net trust as `-s danger-full-access` we already use.
+            #
+            # Linux/macOS: keep workspace-write so the OS sandbox still
+            # constrains an off-the-rails codex to its cwd.
+            import sys
+
+            if sys.platform == "win32":
+                codex_argv = [
+                    codex_bin,
+                    "--dangerously-bypass-approvals-and-sandbox",
+                ]
+            else:
+                codex_argv = [
+                    codex_bin,
+                    "--ask-for-approval",
+                    "never",
+                    "-s",
+                    "workspace-write",
+                ]
             session = PtySession(cols=110, rows=36, parent=self)
             _t_path = _build_transcript_path(project_ns, role_name)
             pane._transcript_path = _t_path
