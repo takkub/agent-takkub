@@ -112,6 +112,30 @@ def _ensure_labels(labels: list[str], repo: str, cwd: str | Path | None = None) 
 # ── public API ────────────────────────────────────────────────────────────────
 
 
+def _get_local_issues_path(cwd: str | Path | None) -> Path:
+    return Path(cwd or ".").resolve() / ".takkub_issues.json"
+
+
+def _load_local_issues(cwd: str | Path | None) -> list[dict[str, Any]]:
+    path = _get_local_issues_path(cwd)
+    if not path.exists():
+        return []
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def _save_local_issues(issues: list[dict[str, Any]], cwd: str | Path | None) -> None:
+    path = _get_local_issues_path(cwd)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(issues, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
+
 def new_issue(
     title: str,
     body: str,
@@ -122,13 +146,17 @@ def new_issue(
     tags: list[str] | None = None,
     cwd: str | Path | None = None,
 ) -> tuple[int, str]:
-    """Create a GitHub issue. Returns (number, url)."""
+    """Create an issue. Returns (number, url). Falls back to local store if GitHub is unavailable."""
     if not title.strip():
         raise ValueError("title must not be empty")
     if severity not in _SEVERITY_VALUES:
         raise ValueError(f"severity must be one of {_SEVERITY_VALUES}, got {severity!r}")
 
-    repo = _detect_repo(cwd)
+    try:
+        repo = _detect_repo(cwd)
+        use_local = False
+    except RuntimeError:
+        use_local = True
 
     labels: list[str] = [f"severity:{severity}"]
     if role:
@@ -138,23 +166,47 @@ def new_issue(
     if tags:
         labels.extend(tags)
 
-    _ensure_labels(labels, repo, cwd=cwd)
-
-    gh_args = ["issue", "create", "--repo", repo, "--title", title, "--body", body or ""]
-    for lbl in labels:
-        gh_args += ["--label", lbl]
-
-    out = _gh(*gh_args, cwd=cwd)
-    # gh returns the URL as last line
-    url = out.splitlines()[-1] if out else ""
-    # Extract number from URL: .../issues/123
-    number = 0
-    if url:
+    if not use_local:
         try:
-            number = int(url.rstrip("/").rsplit("/", 1)[-1])
-        except (ValueError, IndexError):
-            pass
-    return number, url
+            _ensure_labels(labels, repo, cwd=cwd)
+            gh_args = ["issue", "create", "--repo", repo, "--title", title, "--body", body or ""]
+            for lbl in labels:
+                gh_args += ["--label", lbl]
+
+            out = _gh(*gh_args, cwd=cwd)
+            url = out.splitlines()[-1] if out else ""
+            number = 0
+            if url:
+                try:
+                    number = int(url.rstrip("/").rsplit("/", 1)[-1])
+                except (ValueError, IndexError):
+                    pass
+            return number, url
+        except RuntimeError:
+            use_local = True
+
+    # Local fallback
+    issues = _load_local_issues(cwd)
+    number = max([iss.get("number", 0) for iss in issues] or [0]) + 1
+    import datetime
+
+    now_iso = datetime.datetime.now().isoformat() + "Z"
+    new_iss = {
+        "number": number,
+        "title": title,
+        "body": body or "",
+        "status": "open",
+        "severity": severity,
+        "role": role or "",
+        "noticed_in": noticed_in or "",
+        "tags": tags or [],
+        "url": f"local://issue/{number}",
+        "created_at": now_iso,
+        "closed_at": "",
+    }
+    issues.append(new_iss)
+    _save_local_issues(issues, cwd)
+    return number, new_iss["url"]
 
 
 def list_issues(
@@ -166,72 +218,103 @@ def list_issues(
     severity: str | None = None,
     cwd: str | Path | None = None,
 ) -> list[dict[str, Any]]:
-    """Return list of issue dicts from GitHub matching filters."""
-    repo = _detect_repo(cwd)
+    """Return list of issue dicts matching filters. Falls back to local store if GitHub is unavailable."""
+    try:
+        repo = _detect_repo(cwd)
+        use_local = False
+    except RuntimeError:
+        use_local = True
 
-    # Determine state
-    if filter_open and not filter_closed:
-        state = "open"
-    elif filter_closed and not filter_open:
-        state = "closed"
-    else:
-        state = "all"
+    if not use_local:
+        try:
+            if filter_open and not filter_closed:
+                state = "open"
+            elif filter_closed and not filter_open:
+                state = "closed"
+            else:
+                state = "all"
 
-    gh_args = [
-        "issue",
-        "list",
-        "--repo",
-        repo,
-        "--state",
-        state,
-        "--json",
-        "number,title,state,labels,url,createdAt,closedAt",
-        "--limit",
-        "200",
-    ]
+            gh_args = [
+                "issue",
+                "list",
+                "--repo",
+                repo,
+                "--state",
+                state,
+                "--json",
+                "number,title,state,labels,url,createdAt,closedAt",
+                "--limit",
+                "200",
+            ]
 
-    if severity:
-        gh_args += ["--label", f"severity:{severity}"]
-    if role:
-        gh_args += ["--label", f"role:{role}"]
-    if noticed_in:
-        gh_args += ["--label", f"noticed-in:{noticed_in}"]
+            if severity:
+                gh_args += ["--label", f"severity:{severity}"]
+            if role:
+                gh_args += ["--label", f"role:{role}"]
+            if noticed_in:
+                gh_args += ["--label", f"noticed-in:{noticed_in}"]
 
-    out = _gh(*gh_args, cwd=cwd)
-    if not out:
-        return []
+            out = _gh(*gh_args, cwd=cwd)
+            if not out:
+                return []
 
-    raw = json.loads(out)
+            raw = json.loads(out)
+            results = []
+            for item in raw:
+                label_names = [lb["name"] for lb in item.get("labels", [])]
+                sev = next(
+                    (lb.split(":")[-1] for lb in label_names if lb.startswith("severity:")), ""
+                )
+                r = next((lb.split(":")[-1] for lb in label_names if lb.startswith("role:")), "")
+                ni = next(
+                    (
+                        lb.split("noticed-in:", 1)[-1]
+                        for lb in label_names
+                        if lb.startswith("noticed-in:")
+                    ),
+                    "",
+                )
+                extra_tags = [
+                    lb
+                    for lb in label_names
+                    if not lb.startswith("severity:")
+                    and not lb.startswith("role:")
+                    and not lb.startswith("noticed-in:")
+                ]
+                results.append(
+                    {
+                        "number": item["number"],
+                        "title": item["title"],
+                        "status": item["state"].lower(),
+                        "severity": sev,
+                        "role": r,
+                        "noticed_in": ni,
+                        "tags": extra_tags,
+                        "url": item["url"],
+                        "created_at": item.get("createdAt", ""),
+                        "closed_at": item.get("closedAt") or "",
+                    }
+                )
+            return results
+        except RuntimeError:
+            use_local = True
+
+    # Local fallback
+    issues = _load_local_issues(cwd)
     results = []
-    for item in raw:
-        label_names = [lb["name"] for lb in item.get("labels", [])]
-        sev = next((lb.split(":")[-1] for lb in label_names if lb.startswith("severity:")), "")
-        r = next((lb.split(":")[-1] for lb in label_names if lb.startswith("role:")), "")
-        ni = next(
-            (lb.split("noticed-in:", 1)[-1] for lb in label_names if lb.startswith("noticed-in:")),
-            "",
-        )
-        extra_tags = [
-            lb
-            for lb in label_names
-            if not lb.startswith("severity:")
-            and not lb.startswith("role:")
-            and not lb.startswith("noticed-in:")
-        ]
-        results.append(
-            {
-                "number": item["number"],
-                "title": item["title"],
-                "status": item["state"].lower(),
-                "severity": sev,
-                "role": r,
-                "noticed_in": ni,
-                "tags": extra_tags,
-                "url": item["url"],
-                "created_at": item.get("createdAt", ""),
-                "closed_at": item.get("closedAt") or "",
-            }
-        )
+    for iss in issues:
+        status = iss.get("status", "open").lower()
+        if filter_open and not filter_closed and status != "open":
+            continue
+        if filter_closed and not filter_open and status != "closed":
+            continue
+        if severity and iss.get("severity") != severity:
+            continue
+        if role and iss.get("role") != role:
+            continue
+        if noticed_in and iss.get("noticed_in") != noticed_in:
+            continue
+        results.append(iss)
     return results
 
 
@@ -241,23 +324,87 @@ def close_issue(
     note: str = "",
     cwd: str | Path | None = None,
 ) -> str:
-    """Close a GitHub issue by number. Returns the issue URL."""
+    """Close an issue by number. Returns the issue URL. Falls back to local store if GitHub is unavailable."""
     number = _parse_issue_number(issue_id)
-    repo = _detect_repo(cwd)
+    try:
+        repo = _detect_repo(cwd)
+        use_local = False
+    except RuntimeError:
+        use_local = True
 
-    gh_args = ["issue", "close", str(number), "--repo", repo]
-    if note:
-        gh_args += ["--comment", note]
+    if not use_local:
+        try:
+            gh_args = ["issue", "close", str(number), "--repo", repo]
+            if note:
+                gh_args += ["--comment", note]
 
-    _gh(*gh_args, cwd=cwd)
-    return f"https://github.com/{repo}/issues/{number}"
+            _gh(*gh_args, cwd=cwd)
+            return f"https://github.com/{repo}/issues/{number}"
+        except RuntimeError:
+            use_local = True
+
+    # Local fallback
+    issues = _load_local_issues(cwd)
+    found = False
+    import datetime
+
+    now_iso = datetime.datetime.now().isoformat() + "Z"
+    for iss in issues:
+        if iss.get("number") == number:
+            iss["status"] = "closed"
+            iss["closed_at"] = now_iso
+            if note:
+                if "comments" not in iss:
+                    iss["comments"] = []
+                iss["comments"].append({"body": note, "created_at": now_iso})
+            found = True
+            break
+    if not found:
+        raise RuntimeError(f"local issue #{number} not found")
+    _save_local_issues(issues, cwd)
+    return f"local://issue/{number}"
 
 
 def show_issue(issue_id: str, *, cwd: str | Path | None = None) -> str:
-    """Return rendered issue text from GitHub."""
+    """Return rendered issue text. Falls back to local store if GitHub is unavailable."""
     number = _parse_issue_number(issue_id)
-    repo = _detect_repo(cwd)
-    return _gh("issue", "view", str(number), "--repo", repo, cwd=cwd)
+    try:
+        repo = _detect_repo(cwd)
+        use_local = False
+    except RuntimeError:
+        use_local = True
+
+    if not use_local:
+        try:
+            return _gh("issue", "view", str(number), "--repo", repo, cwd=cwd)
+        except RuntimeError:
+            use_local = True
+
+    # Local fallback
+    issues = _load_local_issues(cwd)
+    iss = next((i for i in issues if i.get("number") == number), None)
+    if not iss:
+        raise RuntimeError(f"local issue #{number} not found")
+
+    lines = [
+        f"title:\t{iss.get('title')}",
+        f"state:\t{iss.get('status', 'open').upper()}",
+        "author:\tlocal",
+        f"created:\t{iss.get('created_at')}",
+        f"severity:\t{iss.get('severity')}",
+        f"role:\t{iss.get('role')}",
+        f"noticed_in:\t{iss.get('noticed_in')}",
+        f"tags:\t{', '.join(iss.get('tags', []))}",
+        "",
+        iss.get("body", ""),
+    ]
+    comments = iss.get("comments", [])
+    if comments:
+        lines.append("\n-- comments --")
+        for comment in comments:
+            lines.append(f"\ncomment:\t{comment.get('created_at')}")
+            lines.append(comment.get("body", ""))
+    return "\n".join(lines)
 
 
 # ── ID parsing ────────────────────────────────────────────────────────────────

@@ -291,13 +291,16 @@ def test_ensure_label_raises_other_errors() -> None:
             _ensure_label("severity:high", "#d73a4a", "owner/repo")
 
 
-# ── missing gh CLI ────────────────────────────────────────────────────────────
+# ── missing gh CLI (falls back to local issues) ───────────────────────────────
 
 
-def test_missing_gh_cli_raises_clear_error() -> None:
+def test_missing_gh_cli_falls_back_to_local(tmp_path) -> None:
+    local_json = tmp_path / ".takkub_issues.json"
     with patch("shutil.which", return_value=None):
-        with pytest.raises(RuntimeError, match="gh CLI not found"):
-            new_issue("title", "body")
+        number, url = new_issue("local title", "local body", cwd=tmp_path)
+    assert number == 1
+    assert url == "local://issue/1"
+    assert local_json.exists()
 
 
 # ── cmd_* handlers (CLI layer) ────────────────────────────────────────────────
