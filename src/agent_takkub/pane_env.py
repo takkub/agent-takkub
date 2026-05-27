@@ -46,6 +46,9 @@ _PANE_ENV_ALLOWLIST: frozenset[str] = frozenset(
         "COMPUTERNAME",
         "OS",
         "PROCESSOR_ARCHITECTURE",
+        # Anthropic Proxy / Claude API Auth (allows bypassing login using global environment settings)
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_AUTH_TOKEN",
         # COMSPEC = path to cmd.exe — Node.js child_process.spawn() falls back to
         # this when launching subprocesses on Windows; missing → ENOENT crash in
         # MCP servers (codex_apps) that shell out. Top hypothesis for codex early-crash.
