@@ -96,3 +96,26 @@ class TestCodexAgentsMdGitGuard:
         from agent_takkub.codex_agents_md import CODEX_AGENTS_MD
 
         assert "commit when explicitly asked" not in CODEX_AGENTS_MD
+
+
+class TestCodexAgentsMdOverrideRule:
+    """Guards the section that prevents codex from misreading
+    Lead's `[ROLE: ... ห้าม spawn subagent]` prefix as forbidding the
+    mandatory `takkub done` shell call (root cause of the "codex doesn't
+    send takkub done" bug — see 2026-05-28 screenshots).
+    """
+
+    def test_template_has_override_rule_section(self) -> None:
+        from agent_takkub.codex_agents_md import CODEX_AGENTS_MD
+
+        assert "Override rule" in CODEX_AGENTS_MD
+
+    def test_override_rule_clarifies_subagent_scope(self) -> None:
+        from agent_takkub.codex_agents_md import CODEX_AGENTS_MD
+
+        assert "AI subagents only" in CODEX_AGENTS_MD
+
+    def test_override_rule_pins_done_as_shell_command(self) -> None:
+        from agent_takkub.codex_agents_md import CODEX_AGENTS_MD
+
+        assert "`takkub done` is a shell command, not a subagent" in CODEX_AGENTS_MD

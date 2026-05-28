@@ -274,6 +274,39 @@ def _paste_payload(text: str) -> str:
     return _PASTE_START + text + _PASTE_END
 
 
+_CODEX_TASK_NOTICE = (
+    "[orchestrator note] อ่านก่อนเริ่มงาน:\n"
+    "- `ห้าม spawn subagent` ใน ROLE prefix หมายถึง AI subagent\n"
+    "  เท่านั้น (Task tool / codex delegation flags) — ไม่รวม shell\n"
+    "  command ที่คุณรันเองในเทอร์มินัลนี้\n"
+    "- เมื่อเสร็จงาน ต้อง **รัน shell command** ผ่าน Bash tool:\n"
+    '      takkub done "<one-line summary>"\n'
+    '  ห้ามพิมพ์ "takkub done" เป็นข้อความตอบในแชท (orchestrator\n'
+    "  มองไม่เห็น → Lead ไม่ทราบว่างานเสร็จ → pane idle ตลอด)\n"
+    "- review / analysis tasks: save findings ลงไฟล์ docs/ ก่อน\n"
+    "  แล้วค่อย `takkub done` (pane auto-close ~2.5s หลัง done)\n"
+    "\n"
+    "------ task ------\n"
+)
+
+
+def _rewrite_task_for_codex(task: str) -> str:
+    """Prepend an unambiguous override notice when sending a task to a codex pane.
+
+    Codex tends to over-interpret Lead's standard
+    `[ROLE: ... ห้าม spawn subagent]` prefix as forbidding any external
+    orchestration — including the mandatory `takkub done` shell command.
+    The planted AGENTS.md tries to prevent this but loses to the more-
+    proximal inline ROLE prefix. We inject a same-proximity clarification
+    before the task so the override cannot be ranked below the constraint.
+    Idempotent: if the notice marker is already present we return unchanged
+    (e.g. orchestrator replays the stored task after auto-respawn).
+    """
+    if _CODEX_TASK_NOTICE in task:
+        return task
+    return _CODEX_TASK_NOTICE + task
+
+
 # Delay between writing the payload and writing the submitting `\r`.
 # Claude Code v2.1.x collapses a bracketed-paste block into a
 # `[Pasted text #N +M lines]` placeholder before it accepts Enter as a
@@ -1416,6 +1449,11 @@ class Orchestrator(QObject):
         ok, msg = self.spawn(role_name, cwd=cwd, project=project)
         if not ok:
             return ok, msg
+
+        from .provider_config import CODEX, provider_for
+
+        if provider_for(role_name) == CODEX:
+            task = _rewrite_task_for_codex(task)
 
         project_ns = self._resolve_project(project)
         key = _exit_key(project_ns, role_name)
