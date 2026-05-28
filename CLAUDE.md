@@ -90,22 +90,12 @@ wait
 ```
 
 ### ส่ง spec เดียวกันให้หลาย role
-```bash
-SPEC="API contract: POST /auth/login body={email,password} response={token,user} JWT HS256 24h"
-takkub assign --role frontend "$SPEC consume API: form หน้า /login + AuthContext" &
-takkub assign --role backend  "$SPEC implement endpoint + bcrypt + JWT signing + unit test" &
-wait
-```
+ตั้ง `SPEC="..."` แล้ว interpolate `$SPEC` เข้าทุก assign — กัน drift ระหว่าง frontend/backend prompts
 
 ## Multi-project tabs
 
-- **1 tab = 1 Lead = 1 project** (project เดียวเปิดได้ครั้งเดียวเสมอ)
-- เปลี่ยน tab → cockpit set `active = <tab's project>` + refresh ปุ่ม ⚡ Install rtk
-- กด `+` มุมขวาบน → picker แสดงเฉพาะ project ที่ยังไม่เปิด
-- กด `x` บน tab → confirm dialog → ปิด teammate ทั้งหมด + ปิด Lead ของ project นั้น
-- `open_tabs` บันทึกใน `projects.json` → restore tab list ทุกครั้งที่เปิดใหม่
-
-**Routing isolation:** `takkub` ใน pane รู้ project ตัวเองผ่าน env `TAKKUB_PROJECT` → `takkub send/list/done` ภายใน project เดียวกันเท่านั้น (ไม่ cross-talk)
+- **1 tab = 1 Lead = 1 project** (project เดียวเปิดได้ครั้งเดียว)
+- **Routing isolation:** pane รู้ project ตัวเองผ่าน env `TAKKUB_PROJECT` → `takkub send/list/done` ภายใน project เดียวกัน ไม่ cross-talk
 
 ## Quick reference
 
@@ -229,29 +219,13 @@ Cockpit มี toggle 2 ตัวใน status bar ปิด/เปิด codex 
 
 ## วิธี spawn + assign งาน
 
-```bash
-takkub assign --role <role> --cwd <project_path> "<task content>"
+`takkub assign --role <role> --cwd <path> "<task>"` — orchestrator spawn pane (ถ้ายังไม่เปิด) + inject cwd + paste task + Enter
+
+**ทุก task ต้องขึ้นต้นด้วย role declaration** + ลงท้ายด้วย "รายงานกลับด้วย takkub done เมื่อเสร็จ":
 ```
-
-orchestrator จะ:
-1. Spawn agent ใน slot ของ role นั้น (ถ้ายังไม่เปิด) + inject working directory
-2. รอ claude bootstrap (❯ prompt)
-3. Paste task content + Enter
-4. Update status indicator ใน UI
-
-**ทุก task ต้องขึ้นต้นด้วย role declaration:** `[ROLE: xxx developer — ทำงานเองโดยตรง ห้าม spawn subagent]`
-
-ตัวอย่าง parallel:
-```bash
-takkub assign --role frontend --cwd <web> \
-  "[ROLE: frontend developer — ทำงานเองโดยตรง ห้าม spawn subagent]
-   เพิ่มหน้า /login form (email+password) ใช้ shadcn/ui + unit tests
-   รายงานกลับด้วย takkub done เมื่อเสร็จ" &
-takkub assign --role backend --cwd <api> \
-  "[ROLE: backend developer — ทำงานเองโดยตรง ห้าม spawn subagent]
-   เพิ่ม POST /auth/login: {email,password} → {token,user} JWT HS256 24h + unit tests
-   รายงานกลับด้วย takkub done เมื่อเสร็จ" &
-wait
+[ROLE: xxx developer — ทำงานเองโดยตรง ห้าม spawn subagent]
+<task content>
+รายงานกลับด้วย takkub done เมื่อเสร็จ
 ```
 
 ## บทเรียน (anti-patterns ที่เคยทำพลาด)
@@ -312,33 +286,4 @@ Lead's task spec เตือนทุกครั้งที่มี docker/d
 - รอ user สั่ง commit อย่า auto-commit
 - ห้าม push เอง — propose ก่อนทุกครั้ง
 
-## คำสั่ง takkub ทั้งหมด
-
-| คำสั่ง | ใช้ตอนไหน |
-|---|---|
-| `takkub spawn --role <role> [--cwd <path>]` | เปิด pane (Lead ใช้น้อย — ปกติใช้ assign) |
-| `takkub assign --role <role> --cwd <path> "<task>"` | Spawn + ส่ง task |
-| `takkub send --to <role> "<msg>"` | ส่งข้อความถึง role (Lead ใช้ตอน follow-up) |
-| `takkub list` | ดู status ทุก slot |
-| `takkub close --role <role>` | สั่งปิด pane |
-| `takkub close-all` | ปิด teammate ทั้งหมด (Lead รอด) |
-| `takkub done [note]` | (agents) แจ้ง Lead เสร็จ orchestrator ปิด pane ให้ |
-| `takkub issue new/list/show/close` | cockpit bug tracker |
-
-## Layout
-
-```
-┌────────┬────────────┬──────────┐
-│        │ frontend   │ gemini   │
-│        ├────────────┤          │
-│        │ backend    ├──────────┤
-│        │            │   qa     │
-│  Lead  │ mobile     ├──────────┤
-│        ├────────────┤ reviewer │
-│        │ devops     ├──────────┤
-│        ├────────────┤          │
-│        │ codex      │ critic   │
-└────────┴────────────┴──────────┘
-```
-
-กดปุ่ม `+` ใต้ column ขวาเพื่อ split slot ใหม่ (data-eng, ml, security) Lead ใช้ `takkub assign --role <new-role>` ได้เลย
+ดู Quick reference (section ด้านบน) สำหรับคำสั่งทั้งหมด — `takkub spawn` ไม่ค่อยใช้ (Lead ใช้ `assign` แทน, orchestrator spawn อัตโนมัติถ้า pane ยังไม่เปิด)
