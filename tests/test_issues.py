@@ -425,6 +425,54 @@ def test_new_issue_passes_cwd_to_detect_repo(tmp_path) -> None:
     assert str(tmp_path) in str(detected_cwds[0])
 
 
+def test_new_issue_cockpit_bug_overrides_cwd_to_repo_root() -> None:
+    """`cockpit_bug=True` must route gh issue create to REPO_ROOT's remote
+    instead of the caller's cwd. Regression guard: bug-check broadcasts
+    fired from a pms-api pane must NOT file against the pms-api repo —
+    cockpit/orchestrator/CLI bugs always go to agent-takkub.
+    """
+    from agent_takkub.config import REPO_ROOT
+
+    detected_cwds: list = []
+
+    def fake_detect_repo(cwd=None):
+        detected_cwds.append(str(cwd) if cwd is not None else None)
+        return "takkub/agent-takkub"
+
+    with patch("agent_takkub.issues._detect_repo", side_effect=fake_detect_repo):
+        with patch("agent_takkub.issues._ensure_labels"):
+            with patch(
+                "agent_takkub.issues._gh",
+                return_value="https://github.com/takkub/agent-takkub/issues/42",
+            ):
+                new_issue(
+                    "cockpit bug",
+                    "body",
+                    cwd="/unrelated/pms-api/path",
+                    cockpit_bug=True,
+                )
+
+    assert detected_cwds == [str(REPO_ROOT)]
+
+
+def test_new_issue_cockpit_bug_default_false_preserves_existing_routing(tmp_path) -> None:
+    """cockpit_bug defaults to False so existing callers keep cwd-based routing."""
+    detected_cwds: list = []
+
+    def fake_detect_repo(cwd=None):
+        detected_cwds.append(str(cwd) if cwd is not None else None)
+        return "owner/repo"
+
+    with patch("agent_takkub.issues._detect_repo", side_effect=fake_detect_repo):
+        with patch("agent_takkub.issues._ensure_labels"):
+            with patch(
+                "agent_takkub.issues._gh", return_value="https://github.com/owner/repo/issues/1"
+            ):
+                new_issue("project bug", "body", cwd=str(tmp_path))
+
+    assert str(tmp_path) in detected_cwds[0]
+
+
 # ── --issues-dir CLI backward compat ─────────────────────────────────────────
 
 

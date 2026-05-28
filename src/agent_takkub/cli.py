@@ -677,6 +677,16 @@ def main(argv: list[str] | None = None) -> int:
     sin.add_argument(
         "--body", default=None, metavar="TEXT", help="body text (opens $EDITOR if omitted on TTY)"
     )
+    sin.add_argument(
+        "--cockpit-bug",
+        dest="cockpit_bug",
+        action="store_true",
+        help=(
+            "route this issue to the agent-takkub install repo regardless of cwd — "
+            "used by the 🐛 Bug Check broadcast for cockpit/orchestrator/CLI/UI bugs "
+            "noticed inside another project's pane"
+        ),
+    )
 
     # issue list
     sil = si_sub.add_parser("list", help="list issues with optional filters")

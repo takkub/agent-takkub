@@ -2855,9 +2855,9 @@ class Orchestrator(QObject):
             "🐛 **Bug check** (orchestrator broadcast)\n\n"
             "introspect session ของเรา — เจอบัค **ของ cockpit / orchestrator / CLI / UI** ไหม\n"
             "(ไม่ใช่บัคของ code ที่เรากำลังทำงาน — เฉพาะบัคของ cockpit เอง)\n\n"
-            "**ถ้าเจอ:** เรียก\n"
+            "**ถ้าเจอ:** เรียก (อย่าลืม `--cockpit-bug` เพื่อให้ issue ไปลง agent-takkub repo)\n"
             "```\n"
-            f'takkub issue new "<title>" --severity <low|med|high> --noticed-in {project} --role {role} --tag <a,b,c> --body "<reproduce + impact>"\n'
+            f'takkub issue new "<title>" --severity <low|med|high> --noticed-in {project} --role {role} --tag <a,b,c> --cockpit-bug --body "<reproduce + impact>"\n'
             "```\n\n"
             "**ถ้าไม่เจอ:** เรียก\n"
             "```\n"

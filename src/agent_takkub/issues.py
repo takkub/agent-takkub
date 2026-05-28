@@ -13,6 +13,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from .config import REPO_ROOT
+
 _SEVERITY_VALUES = ("low", "med", "high")
 
 # Label colour map used when auto-creating missing labels.
@@ -145,15 +147,25 @@ def new_issue(
     role: str | None = None,
     tags: list[str] | None = None,
     cwd: str | Path | None = None,
+    cockpit_bug: bool = False,
 ) -> tuple[int, str]:
-    """Create an issue. Returns (number, url). Falls back to local store if GitHub is unavailable."""
+    """Create an issue. Returns (number, url). Falls back to local store if GitHub is unavailable.
+
+    `cockpit_bug=True` overrides the cwd-based repo detection and files the
+    issue against the agent-takkub install repo (REPO_ROOT's git remote)
+    instead. Used by the 🐛 Bug Check broadcast so cockpit/orchestrator/
+    CLI bugs noticed inside e.g. a pms-api pane don't end up on the
+    pms-api repo. `noticed_in` still records the project where the bug
+    surfaced — useful debug context, independent of the routing target.
+    """
     if not title.strip():
         raise ValueError("title must not be empty")
     if severity not in _SEVERITY_VALUES:
         raise ValueError(f"severity must be one of {_SEVERITY_VALUES}, got {severity!r}")
 
+    detect_cwd: str | Path | None = str(REPO_ROOT) if cockpit_bug else cwd
     try:
-        repo = _detect_repo(cwd)
+        repo = _detect_repo(detect_cwd)
         use_local = False
     except RuntimeError:
         use_local = True
@@ -168,12 +180,12 @@ def new_issue(
 
     if not use_local:
         try:
-            _ensure_labels(labels, repo, cwd=cwd)
+            _ensure_labels(labels, repo, cwd=detect_cwd)
             gh_args = ["issue", "create", "--repo", repo, "--title", title, "--body", body or ""]
             for lbl in labels:
                 gh_args += ["--label", lbl]
 
-            out = _gh(*gh_args, cwd=cwd)
+            out = _gh(*gh_args, cwd=detect_cwd)
             url = out.splitlines()[-1] if out else ""
             number = 0
             if url:
@@ -185,8 +197,10 @@ def new_issue(
         except RuntimeError:
             use_local = True
 
-    # Local fallback
-    issues = _load_local_issues(cwd)
+    # Local fallback — when cockpit_bug=True, write to REPO_ROOT's
+    # .takkub_issues.json so a flaky `gh` doesn't scatter cockpit-bug
+    # JSON files across every project the user touches.
+    issues = _load_local_issues(detect_cwd)
     number = max([iss.get("number", 0) for iss in issues] or [0]) + 1
     import datetime
 
@@ -205,7 +219,7 @@ def new_issue(
         "closed_at": "",
     }
     issues.append(new_iss)
-    _save_local_issues(issues, cwd)
+    _save_local_issues(issues, detect_cwd)
     return number, new_iss["url"]
 
 
@@ -495,6 +509,7 @@ def cmd_issue_new(args: Any) -> dict:
             role=getattr(args, "role", None),
             tags=tags or None,
             cwd=cwd,
+            cockpit_bug=getattr(args, "cockpit_bug", False),
         )
     except (ValueError, RuntimeError) as exc:
         return {"ok": False, "msg": str(exc)}

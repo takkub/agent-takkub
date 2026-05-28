@@ -153,6 +153,20 @@ class TestBroadcastBugCheck:
         assert ACTIVE_PROJECT in prompt  # --noticed-in <project>
         assert "backend" in prompt  # --role <role>
 
+    def test_prompt_includes_cockpit_bug_flag(self, orch: Orchestrator) -> None:
+        """Broadcast prompt must instruct agents to pass `--cockpit-bug` so
+        cockpit/orchestrator/CLI bugs noticed inside another project's pane
+        route to the agent-takkub repo, not the pane's working repo.
+        Regression guard for the bug-check routing fix.
+        """
+        orch._panes_by_project[ACTIVE_PROJECT] = {"backend": _live_pane()}
+        captured: list[str] = []
+        orch._send_when_ready = lambda role, task, **_kw: captured.append(task)  # type: ignore[assignment]
+
+        orch.broadcast_bug_check(project=ACTIVE_PROJECT)
+        prompt = captured[0]
+        assert "--cockpit-bug" in prompt
+
     def test_prompt_offers_no_bug_path(self, orch: Orchestrator) -> None:
         """Prompt must give agents a 'no bugs' escape so they don't invent issues."""
         orch._panes_by_project[ACTIVE_PROJECT] = {"backend": _live_pane()}
