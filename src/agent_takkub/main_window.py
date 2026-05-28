@@ -501,6 +501,19 @@ class MainWindow(QMainWindow):
         )
         self._btn_providers.clicked.connect(self._on_providers_clicked)
 
+        self._btn_claude_auth = QPushButton("Claude Auth", self)
+        self._btn_claude_auth.setToolTip(
+            "Configure optional Claude Code base URL / API key / auth token overrides.\n"
+            "Leave fields blank to use Claude Code's default login/session."
+        )
+        self._btn_claude_auth.setStyleSheet(
+            "QPushButton { color: #dbeafe; background: #1e3a8a; "
+            "border: 1px solid #2563eb; border-radius: 4px; "
+            "padding: 2px 8px; }"
+            "QPushButton:hover { background: #1d4ed8; }"
+        )
+        self._btn_claude_auth.clicked.connect(self._on_claude_auth_clicked)
+
         # Clickable /remote-control trigger. The built-in Claude Code command
         # bridges a local session to claude.ai/code for browser/phone
         # control. The cockpit no longer auto-fires it on fresh project
@@ -585,6 +598,7 @@ class MainWindow(QMainWindow):
             self._btn_install_rtk,
             self._btn_restart,
             self._btn_providers,
+            self._btn_claude_auth,
             self._btn_update,
         ):
             self._status.addPermanentWidget(w)
@@ -903,6 +917,18 @@ class MainWindow(QMainWindow):
         self._status.showMessage(
             "Role providers saved — new mapping applies to the next pane you spawn.",
             6_000,
+        )
+
+    def _on_claude_auth_clicked(self) -> None:
+        """Open optional Claude auth override settings."""
+        from .claude_auth_dialog import ClaudeAuthDialog
+
+        dlg = ClaudeAuthDialog(self)
+        if dlg.exec() != dlg.DialogCode.Accepted:
+            return
+        self._status.showMessage(
+            "Claude auth saved — close and respawn Claude panes to use the new settings.",
+            7_000,
         )
 
     # ──────────────────────────────────────────────────────────────

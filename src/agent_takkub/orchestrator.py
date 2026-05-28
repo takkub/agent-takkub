@@ -25,6 +25,7 @@ from datetime import datetime
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
 from .agent_pane import AgentPane
+from .claude_auth_config import apply_claude_auth_overrides
 from .config import (
     EVENTS_LOG,
     REPO_ROOT,
@@ -1031,6 +1032,7 @@ class Orchestrator(QObject):
 
         _apply_mcp_timeout(env)
         _apply_ecc_mute(env)
+        apply_claude_auth_overrides(env)
 
         # --setting-sources controls which settings.json layers claude loads.
         # We default to `project,local` (skip ~/.claude/settings.json) because
