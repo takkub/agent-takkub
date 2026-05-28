@@ -74,6 +74,22 @@ class TestEnsureAgentsMd:
         assert ok is False
         assert reason == "user-owned"
 
+    def test_rejects_relative_path(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Drive-relative / relative paths must be refused — otherwise
+        # `mkdir(parents=True)` creates junk dirs under the process cwd.
+        monkeypatch.chdir(tmp_path)
+        ok, reason = ensure_agents_md("UsersmonchWebstormProjectsagent-takkub")
+        assert ok is False
+        assert "invalid spawn_cwd" in reason
+        assert not (tmp_path / "UsersmonchWebstormProjectsagent-takkub").exists()
+
+    def test_rejects_nonexistent_absolute_path(self, tmp_path: Path) -> None:
+        ghost = tmp_path / "does-not-exist"
+        ok, reason = ensure_agents_md(ghost)
+        assert ok is False
+        assert "invalid spawn_cwd" in reason
+        assert not ghost.exists()
+
 
 class TestCodexAgentsMdGitGuard:
     def test_template_has_version_control_section(self) -> None:

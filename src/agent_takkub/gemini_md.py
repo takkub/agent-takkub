@@ -113,14 +113,20 @@ def ensure_gemini_md(spawn_cwd: str | Path) -> tuple[bool, str]:
     Idempotent: if the file already carries our marker, we overwrite
     it (refresh). If a user-owned GEMINI.md exists we skip.
     """
-    target = Path(spawn_cwd) / "GEMINI.md"
+    spawn_path = Path(spawn_cwd)
+    # Refuse drive-relative or relative paths — they make `mkdir(parents=True)`
+    # create junk dirs under whatever the current process cwd happens to be
+    # (e.g. `Path("C:UsersmonchWebstormProjectsagent-takkub")` from a
+    # backslash-stripped string resolves drive-relative on Windows).
+    if not spawn_path.is_absolute() or not spawn_path.exists():
+        return False, f"invalid spawn_cwd: {spawn_cwd!r}"
+    target = spawn_path / "GEMINI.md"
     try:
         if target.exists():
             head = target.read_text(encoding="utf-8", errors="replace").splitlines()
             first = head[0] if head else ""
             if TAKKUB_GEMINI_MARKER not in first:
                 return False, "user-owned"
-        target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(GEMINI_MD, encoding="utf-8")
         return True, "written"
     except OSError as e:

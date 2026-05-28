@@ -66,6 +66,22 @@ class TestEnsureGeminiMd:
         assert ok is False
         assert reason == "user-owned"
 
+    def test_rejects_relative_path(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Drive-relative / relative paths must be refused — otherwise
+        # `mkdir(parents=True)` creates junk dirs under the process cwd.
+        monkeypatch.chdir(tmp_path)
+        ok, reason = ensure_gemini_md("UsersmonchWebstormProjectsagent-takkub")
+        assert ok is False
+        assert "invalid spawn_cwd" in reason
+        assert not (tmp_path / "UsersmonchWebstormProjectsagent-takkub").exists()
+
+    def test_rejects_nonexistent_absolute_path(self, tmp_path: Path) -> None:
+        ghost = tmp_path / "does-not-exist"
+        ok, reason = ensure_gemini_md(ghost)
+        assert ok is False
+        assert "invalid spawn_cwd" in reason
+        assert not ghost.exists()
+
     def test_marker_is_distinct_from_codex(self) -> None:
         # Guard against accidental copy-paste: each planter must use
         # its own marker so the two files can coexist in a single cwd
