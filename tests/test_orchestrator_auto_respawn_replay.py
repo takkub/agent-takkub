@@ -137,6 +137,50 @@ class TestAutoRespawnReplay:
 
         assert orch._last_assigned_task.get(ekey) == SAMPLE_TASK
 
+    def test_assign_rewrites_codex_task_with_override_notice(self, orch: Orchestrator) -> None:
+        """assign() must prepend the override notice when the role is backed
+        by codex — otherwise codex over-reads `ห้าม spawn subagent` and skips
+        `takkub done` as a shell command (regression guard for 9fd6001).
+        Asserts the call-site, not just the rewriter helper, so removing
+        the assign() integration breaks a test.
+        """
+        from agent_takkub.orchestrator import _CODEX_TASK_NOTICE
+
+        ekey = _exit_key(TEST_PROJECT, "codex")
+        raw_task = (
+            "[ROLE: codex reviewer — ทำงานเองโดยตรง ห้าม spawn subagent]\nCross-check refactor X."
+        )
+
+        with (
+            patch.object(orch, "spawn", return_value=(True, "spawned")),
+            patch.object(orch, "_send_when_ready") as mock_send,
+        ):
+            orch.assign("codex", cwd="/web", task=raw_task, project=TEST_PROJECT)
+
+        cached = orch._last_assigned_task[ekey]
+        assert cached.startswith(_CODEX_TASK_NOTICE)
+        sent_task = mock_send.call_args.args[1]
+        assert sent_task.startswith(_CODEX_TASK_NOTICE)
+
+    def test_assign_does_not_rewrite_non_codex_task(self, orch: Orchestrator) -> None:
+        """Non-codex roles must NOT receive the codex-specific override
+        notice — claude/gemini panes have their own rules and the notice
+        text references codex-only context."""
+        from agent_takkub.orchestrator import _CODEX_TASK_NOTICE
+
+        ekey = _exit_key(TEST_PROJECT, "backend")
+        raw_task = "[ROLE: backend] implement /auth/logout"
+
+        with (
+            patch.object(orch, "spawn", return_value=(True, "spawned")),
+            patch.object(orch, "_send_when_ready"),
+        ):
+            orch.assign("backend", cwd="/api", task=raw_task, project=TEST_PROJECT)
+
+        cached = orch._last_assigned_task[ekey]
+        assert _CODEX_TASK_NOTICE not in cached
+        assert cached == raw_task
+
     def test_done_clears_replay_cache_so_late_crash_does_not_replay(
         self, orch: Orchestrator
     ) -> None:
