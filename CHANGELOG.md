@@ -4,6 +4,23 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Changed (per-role model tiers)
+- **Teammate model is now picked per role instead of one flat Sonnet-medium
+  tier.** The cockpit owner runs on Claude Max (per-token cost irrelevant), so
+  model choice trades latency for quality, not dollars — spend the bigger tier
+  where a miss is expensive, stay snappy where it isn't:
+  - **reviewer, critic** → Opus 4.8 high effort (gate roles: last line before
+    ship, run infrequently at verify/pre-ship hops where the user already
+    waits). Fallback degrades only to Sonnet.
+  - **backend, devops** → Sonnet 4.6 **high** effort (API contracts, schema,
+    migrations, irreversible deploy/infra — high frequency, so keep Sonnet for
+    turn speed but raise effort to cut subtle-bug rework).
+  - **frontend, mobile, qa, designer** → Sonnet 4.6 medium (unchanged default
+    — high-frequency execution, low blast radius, latency matters).
+  - `_ROLE_MODEL_TIERS` / `_teammate_tier()` in `orchestrator.py`. The global
+    `TAKKUB_TEAMMATE_MODEL` / `_EFFORT` / `_FALLBACK` env vars still override
+    every role at once when explicitly set.
+
 ### Added (graceful model fallback under load)
 - **`--fallback-model` on every spawned claude pane.** When a pane's model is
   overloaded (HTTP 529) or not found, claude now switches to a fallback model

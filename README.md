@@ -353,8 +353,8 @@ Cockpit อ่าน `~/.claude/projects/<encoded>/*.jsonl` (Claude Code's sessi
 | `TAKKUB_VAULT_DIR` | path ไป Obsidian vault (override default `~/WebstormProjects/second-brain`) |
 | `TAKKUB_SETTING_SOURCES` | claude `--setting-sources` flag (default `project,local` กัน claude-obsidian SessionStart crash) |
 | `TAKKUB_ECC_FULL=1` | ปิด ECC noise mute (เปิด ECC hooks ครบทุกตัว) |
-| `TAKKUB_TEAMMATE_MODEL` | model สำหรับ teammates (default `claude-sonnet-4-6`) |
-| `TAKKUB_TEAMMATE_EFFORT` | effort level (default `medium`) |
+| `TAKKUB_TEAMMATE_MODEL` | บังคับ model ให้ teammate **ทุก role** (override per-role tier; default per-role: reviewer/critic→`claude-opus-4-8`, อื่นๆ→`claude-sonnet-4-6`) |
+| `TAKKUB_TEAMMATE_EFFORT` | บังคับ effort ให้ **ทุก role** (override per-role tier; default per-role: reviewer/critic/backend/devops→`high`, อื่นๆ→`medium`) |
 | `TAKKUB_TEAMMATE_FALLBACK` | claude `--fallback-model` ของ teammate ตอน overload/not-found (default `claude-haiku-4-5`, `""` = ปิด) |
 | `TAKKUB_LEAD_FALLBACK` | claude `--fallback-model` ของ Lead ตอน overload/not-found (default `claude-sonnet-4-6`, `""` = ปิด) |
 | `TAKKUB_AUTO_REMOTE_CONTROL=0` | skip auto `/remote-control` ใน Lead |

@@ -251,6 +251,48 @@ def scan_artifacts(
 
 RESUME_WINDOW_SEC = 5 * 60  # respawn within this window → claude --resume <uuid>
 
+# Per-role model tier: (model, effort, fallback-model). Picked per role
+# rather than one flat tier for all teammates because the cockpit owner runs
+# on Claude Max (per-token cost irrelevant), so the only real tradeoff is
+# latency. That lets us spend quality where a miss is expensive and stay snappy
+# where it isn't:
+#
+#   • Gate roles (reviewer, critic) — the last line before something ships.
+#     A missed bug / UX flaw leaks to production, and these run infrequently
+#     at verify/pre-ship hops where the user is already waiting, so latency
+#     barely matters. → Opus, high effort. Fallback Sonnet (not Haiku) so a
+#     degraded gate is still strong.
+#   • Correctness-sensitive impl (backend, devops) — API contracts, schema,
+#     migrations, and irreversible deploy/infra. High frequency, so stay on
+#     Sonnet for turn speed but raise effort to cut subtle-bug rework cycles.
+#   • Everything else (frontend, mobile, qa, designer) — execution-heavy,
+#     high frequency, low blast radius → Sonnet medium (the default tier) for
+#     snappy turns.
+#
+# The global TAKKUB_TEAMMATE_MODEL / _EFFORT / _FALLBACK env vars still win
+# when explicitly set — they override every role's per-role default at once.
+_DEFAULT_TEAMMATE_TIER: tuple[str, str, str] = (
+    "claude-sonnet-4-6",
+    "medium",
+    "claude-haiku-4-5",
+)
+_ROLE_MODEL_TIERS: dict[str, tuple[str, str, str]] = {
+    "reviewer": ("claude-opus-4-8", "high", "claude-sonnet-4-6"),
+    "critic": ("claude-opus-4-8", "high", "claude-sonnet-4-6"),
+    "backend": ("claude-sonnet-4-6", "high", "claude-haiku-4-5"),
+    "devops": ("claude-sonnet-4-6", "high", "claude-haiku-4-5"),
+}
+
+
+def _teammate_tier(role_name: str) -> tuple[str, str, str]:
+    """(model, effort, fallback) for a claude teammate role.
+
+    Non-claude panes (codex/gemini/shell) never reach this — they spawn via a
+    separate path that skips claude model flags entirely.
+    """
+    return _ROLE_MODEL_TIERS.get(role_name, _DEFAULT_TEAMMATE_TIER)
+
+
 # Stall detection: if a `working` pane shows no detectable progress (no
 # transcript bytes, no new screenshots, no takkub send received) for this long,
 # `list_status_detailed()` marks it stalled and `takkub list` shows
@@ -1158,28 +1200,30 @@ class Orchestrator(QObject):
             sources,
         ]
 
-        # Teammate speed tier. Lead does orchestration (planning, multi-step
-        # reasoning, coordinating teammates) and stays on the user's
-        # default model + effort. Teammates execute focused specialist work
-        # (edit files, run commands, verify) and benefit from running on a
-        # faster model — but not as fast as Haiku, because the cockpit
-        # owner runs on a Claude Max subscription (not the API) where
-        # per-token cost is irrelevant and Sonnet's quality margin matters
-        # more than Haiku's raw-speed margin. Sonnet 4.6 at medium effort
-        # gives roughly 1.5-2x Opus speed while keeping enough reasoning
-        # to handle refactors / integrations / code review without
-        # subtle-bug rework cycles. Override via:
+        # Teammate model tier — picked PER ROLE (see _ROLE_MODEL_TIERS above),
+        # not one flat tier for everyone. Lead does orchestration and stays on
+        # the user's default model + effort. Teammates default to Sonnet 4.6
+        # medium (roughly 1.5-2x Opus speed with enough reasoning for refactors
+        # / integrations without subtle-bug rework), except where a miss is
+        # expensive: gate roles (reviewer, critic) run Opus high, and
+        # correctness-sensitive impl (backend, devops) runs Sonnet high. The
+        # cockpit owner is on Claude Max (per-token cost irrelevant), so the
+        # only tradeoff for spending a bigger tier is latency — which we accept
+        # on the low-frequency gate/correctness roles and avoid on the
+        # high-frequency execution roles. The global env vars below override
+        # the per-role default for ALL roles at once when explicitly set:
         #
         #   TAKKUB_TEAMMATE_MODEL=""                   → no --model (user default)
-        #   TAKKUB_TEAMMATE_MODEL="claude-haiku-4-5"   → fastest tier
-        #   TAKKUB_TEAMMATE_MODEL="claude-opus-4-7"    → match Lead
+        #   TAKKUB_TEAMMATE_MODEL="claude-haiku-4-5"   → force fastest tier everywhere
+        #   TAKKUB_TEAMMATE_MODEL="claude-opus-4-8"    → force Opus everywhere
         #   TAKKUB_TEAMMATE_EFFORT=""                  → no --effort
-        #   TAKKUB_TEAMMATE_EFFORT="high"              → match Lead's effort
+        #   TAKKUB_TEAMMATE_EFFORT="high"              → force high effort everywhere
         if role_name != LEAD.name:
-            teammate_model = os.environ.get("TAKKUB_TEAMMATE_MODEL", "claude-sonnet-4-6").strip()
+            tier_model, tier_effort, tier_fallback = _teammate_tier(role_name)
+            teammate_model = os.environ.get("TAKKUB_TEAMMATE_MODEL", tier_model).strip()
             if teammate_model:
                 argv.extend(["--model", teammate_model])
-            teammate_effort = os.environ.get("TAKKUB_TEAMMATE_EFFORT", "medium").strip()
+            teammate_effort = os.environ.get("TAKKUB_TEAMMATE_EFFORT", tier_effort).strip()
             if teammate_effort:
                 argv.extend(["--effort", teammate_effort])
             # Graceful degradation under load. When the teammate's model is
@@ -1188,12 +1232,11 @@ class Orchestrator(QObject):
             # turn (CC 2.1.152 made the switch session-wide; 2.1.144 made it
             # survive /bg + detach). Matters in a multi-pane cockpit where
             # 4-8 panes can hit the Max rate ceiling at the same instant —
-            # a falling-back pane keeps working on Haiku rather than erroring
-            # mid-task and forcing a respawn. Set TAKKUB_TEAMMATE_FALLBACK=""
-            # to disable, or to another model id to pick a different tier.
-            teammate_fallback = os.environ.get(
-                "TAKKUB_TEAMMATE_FALLBACK", "claude-haiku-4-5"
-            ).strip()
+            # a falling-back pane keeps working one tier down (per _teammate_tier:
+            # Sonnet roles → Haiku, Opus gate roles → Sonnet) rather than
+            # erroring mid-task and forcing a respawn. Set
+            # TAKKUB_TEAMMATE_FALLBACK="" to disable, or to another model id.
+            teammate_fallback = os.environ.get("TAKKUB_TEAMMATE_FALLBACK", tier_fallback).strip()
             if teammate_fallback:
                 argv.extend(["--fallback-model", teammate_fallback])
         else:
