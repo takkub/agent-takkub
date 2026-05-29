@@ -15,7 +15,7 @@ import json
 import secrets
 from datetime import datetime
 
-from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 from PyQt6.QtNetwork import QHostAddress, QTcpServer, QTcpSocket
 
 from .config import write_port
@@ -143,17 +143,38 @@ class CliServer(QObject):
                 return
 
         try:
-            if cmd == "spawn":
-                ok, msg = self._orch.spawn(req["role"], cwd=req.get("cwd"), project=from_project)
-            elif cmd == "assign":
-                ok, msg = self._orch.assign(
-                    req["role"],
-                    cwd=req.get("cwd"),
-                    task=req.get("task", ""),
-                    requires_commit=bool(req.get("requires_commit", False)),
-                    auto_chain=bool(req.get("auto_chain", False)),
-                    project=from_project,
-                )
+            if cmd in ("spawn", "assign"):
+                # Spawning a pane is heavy (QWebEngine init) and runs on THIS
+                # thread — the same one serving IPC + UI. Doing it inline blocked
+                # the reply until the pane was up, routinely blowing the client's
+                # 15 s timeout and making `takkub` look hung. Ack immediately and
+                # run the spawn on the next event-loop tick (the reply is already
+                # flushed to the socket by then). The real outcome shows up via
+                # `takkub list` / done events; failures are logged in spawn().
+                role = req.get("role")
+                if not role:
+                    self._reply(sock, ok=False, msg="missing arg: 'role'")
+                    return
+                if cmd == "spawn":
+                    QTimer.singleShot(
+                        0,
+                        lambda: self._orch.spawn(role, cwd=req.get("cwd"), project=from_project),
+                    )
+                    self._reply(sock, ok=True, msg=f"spawning {role} (async)")
+                else:
+                    QTimer.singleShot(
+                        0,
+                        lambda: self._orch.assign(
+                            role,
+                            cwd=req.get("cwd"),
+                            task=req.get("task", ""),
+                            requires_commit=bool(req.get("requires_commit", False)),
+                            auto_chain=bool(req.get("auto_chain", False)),
+                            project=from_project,
+                        ),
+                    )
+                    self._reply(sock, ok=True, msg=f"task queued for {role} (spawning async)")
+                return
             elif cmd == "send":
                 ok, msg = self._orch.send(
                     req["to"],
