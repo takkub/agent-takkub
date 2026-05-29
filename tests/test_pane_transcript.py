@@ -80,13 +80,18 @@ class TestTranscriptOpen:
 
 
 class TestOnBytesTranscriptTee:
-    """_on_bytes() tees raw bytes to the transcript file."""
+    """_feed_and_log() (runs in the reader thread) tees raw bytes to the
+    transcript file. (Moved off _on_bytes when pyte parsing went off the Qt
+    main thread — see docs/cockpit-freeze-rca-2026-05-29.md.)"""
 
     def _make_session(self):
+        import threading
+
         from agent_takkub.pty_session import PtySession
 
         session = PtySession.__new__(PtySession)
         session._transcript = None
+        session._screen_lock = threading.Lock()
         # Minimal Qt signal stubs
         session.bytesIn = MagicMock()
         session.bytesIn.emit = MagicMock()
@@ -102,17 +107,17 @@ class TestOnBytesTranscriptTee:
         log = tmp_path / "tee.transcript.log"
         session._transcript = log.open("wb")
 
-        session._on_bytes(b"hello world")
+        session._feed_and_log(b"hello world")
 
         session._transcript.flush()
         assert b"hello world" in log.read_bytes()
 
     def test_no_transcript_no_write(self, tmp_path: pathlib.Path) -> None:
-        """When _transcript is None, _on_bytes must not crash."""
+        """When _transcript is None, _feed_and_log must not crash."""
         session = self._make_session()
         session._transcript = None
 
-        session._on_bytes(b"data that should not be saved")
+        session._feed_and_log(b"data that should not be saved")
         # No exception = pass; no file created
         assert list(tmp_path.glob("*.log")) == []
 
@@ -125,7 +130,7 @@ class TestOnBytesTranscriptTee:
         bad_handle.write.side_effect = OSError("disk full")
         session._transcript = bad_handle
 
-        session._on_bytes(b"trigger error")
+        session._feed_and_log(b"trigger error")
 
         assert session._transcript is None
 

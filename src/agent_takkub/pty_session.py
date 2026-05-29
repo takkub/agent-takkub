@@ -14,6 +14,7 @@ from __future__ import annotations
 import queue
 import subprocess
 import sys
+import threading
 from collections.abc import Sequence
 
 import pyte
@@ -49,9 +50,13 @@ class _ReaderThread(QThread):
     bytesReceived = pyqtSignal(bytes)
     finished_clean = pyqtSignal()
 
-    def __init__(self, proc, parent: QObject | None = None) -> None:
+    def __init__(self, proc, on_data=None, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._proc = proc
+        # Called in THIS reader thread for each chunk — does the heavy pyte
+        # parse + transcript write off the Qt main thread so many panes don't
+        # serialise on it (see docs/cockpit-freeze-rca-2026-05-29.md).
+        self._on_data = on_data
         self._stop = False
 
     def run(self) -> None:
@@ -85,6 +90,10 @@ class _ReaderThread(QThread):
 
             if isinstance(data, str):
                 data = data.encode("utf-8", "replace")
+            # Parse + log in this thread first, then hand the raw bytes to the
+            # main thread purely for rendering (xterm.js) + state-change notify.
+            if self._on_data is not None:
+                self._on_data(data)
             self.bytesReceived.emit(data)
         self.finished_clean.emit()
 
@@ -111,6 +120,10 @@ class PtySession(QObject):
         self.rows = rows
         self.screen = pyte.Screen(cols, rows)
         self.stream = pyte.ByteStream(self.screen)
+        # Guards every read/write of the pyte screen. stream.feed() now runs in
+        # the reader thread while the main thread reads display_lines() /
+        # is_at_*_prompt() — without this lock those race.
+        self._screen_lock = threading.Lock()
         self._proc = None
         self._reader: _ReaderThread | None = None
         self._writer: _WriterThread | None = None
@@ -181,7 +194,7 @@ class PtySession(QObject):
                 )
                 self._transcript = None
 
-        self._reader = _ReaderThread(self._proc, parent=self)
+        self._reader = _ReaderThread(self._proc, on_data=self._feed_and_log, parent=self)
         self._reader.bytesReceived.connect(self._on_bytes)
         self._reader.finished_clean.connect(self._on_exit)
         self._reader.start()
@@ -189,11 +202,10 @@ class PtySession(QObject):
         self._writer = _WriterThread(self._proc, parent=self)
         self._writer.start()
 
-    def _on_bytes(self, data: bytes) -> None:
-        # Forward raw bytes to xterm.js (rendering layer) first so the user
-        # sees output ASAP. pyte still consumes them for the state-detection
-        # helpers (is_at_trust_prompt / is_at_ready_prompt / display_lines).
-        self.bytesIn.emit(data)
+    def _feed_and_log(self, data: bytes) -> None:
+        """Runs in the reader thread. Does the heavy work off the Qt main
+        thread: write the transcript and feed pyte (under the screen lock).
+        Best-effort — never raises so a bad chunk can't kill the reader."""
         if self._transcript is not None:
             try:
                 self._transcript.write(data)
@@ -202,10 +214,19 @@ class PtySession(QObject):
                 # disk full / handle closed — stop trying rather than blocking the PTY
                 self._transcript = None
         try:
-            self.stream.feed(data)
+            with self._screen_lock:
+                self.stream.feed(data)
         except Exception:
             # pyte sometimes chokes on partial sequences; skip and continue
             pass
+
+    def _on_bytes(self, data: bytes) -> None:
+        # Runs on the Qt main thread (queued from the reader). pyte parsing and
+        # the transcript write already happened in _feed_and_log on the reader
+        # thread, so here we only forward raw bytes to xterm.js (rendering must
+        # touch QWebEngine on the main thread) and notify state-detection
+        # consumers that the screen changed.
+        self.bytesIn.emit(data)
         self.outputUpdated.emit()
 
     def _on_exit(self) -> None:
@@ -232,7 +253,8 @@ class PtySession(QObject):
             return
         self.cols = cols
         self.rows = rows
-        self.screen.resize(rows, cols)
+        with self._screen_lock:
+            self.screen.resize(rows, cols)
         if self._alive and self._proc is not None:
             try:
                 self._proc.setwinsize(rows, cols)
@@ -266,11 +288,13 @@ class PtySession(QObject):
     # ──────────────────────────────────────────────────────────────
     def display_lines(self) -> list[str]:
         """Return the visible screen as a list of rows (top → bottom)."""
-        return list(self.screen.display)
+        with self._screen_lock:
+            return list(self.screen.display)
 
     def cursor(self) -> tuple[int, int]:
-        c = self.screen.cursor
-        return c.x, c.y
+        with self._screen_lock:
+            c = self.screen.cursor
+            return c.x, c.y
 
     def display_rich(self) -> list[list[tuple[str, str, str, bool, bool, bool, bool]]]:
         """Return rows as lists of style-runs.
@@ -281,31 +305,32 @@ class PtySession(QObject):
         run, keeping the row's total run count low for fast rendering.
         """
         rows: list[list[tuple[str, str, str, bool, bool, bool, bool]]] = []
-        for y in range(self.screen.lines):
-            line = self.screen.buffer[y]
-            runs: list[tuple[str, str, str, bool, bool, bool, bool]] = []
-            cur_text = ""
-            cur_key: tuple = ()
-            for x in range(self.screen.columns):
-                cell = line[x]
-                key = (
-                    cell.fg,
-                    cell.bg,
-                    cell.bold,
-                    cell.italics,
-                    cell.underscore,
-                    cell.reverse,
-                )
-                if key != cur_key:
-                    if cur_text:
-                        runs.append((cur_text, *cur_key))
-                    cur_text = cell.data
-                    cur_key = key
-                else:
-                    cur_text += cell.data
-            if cur_text:
-                runs.append((cur_text, *cur_key))
-            rows.append(runs)
+        with self._screen_lock:
+            for y in range(self.screen.lines):
+                line = self.screen.buffer[y]
+                runs: list[tuple[str, str, str, bool, bool, bool, bool]] = []
+                cur_text = ""
+                cur_key: tuple = ()
+                for x in range(self.screen.columns):
+                    cell = line[x]
+                    key = (
+                        cell.fg,
+                        cell.bg,
+                        cell.bold,
+                        cell.italics,
+                        cell.underscore,
+                        cell.reverse,
+                    )
+                    if key != cur_key:
+                        if cur_text:
+                            runs.append((cur_text, *cur_key))
+                        cur_text = cell.data
+                        cur_key = key
+                    else:
+                        cur_text += cell.data
+                if cur_text:
+                    runs.append((cur_text, *cur_key))
+                rows.append(runs)
         return rows
 
     # ──────────────────────────────────────────────────────────────
