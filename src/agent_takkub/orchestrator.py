@@ -1182,6 +1182,30 @@ class Orchestrator(QObject):
             teammate_effort = os.environ.get("TAKKUB_TEAMMATE_EFFORT", "medium").strip()
             if teammate_effort:
                 argv.extend(["--effort", teammate_effort])
+            # Graceful degradation under load. When the teammate's model is
+            # overloaded (HTTP 529) or not found, claude switches to this
+            # model for the rest of the session instead of hard-failing the
+            # turn (CC 2.1.152 made the switch session-wide; 2.1.144 made it
+            # survive /bg + detach). Matters in a multi-pane cockpit where
+            # 4-8 panes can hit the Max rate ceiling at the same instant —
+            # a falling-back pane keeps working on Haiku rather than erroring
+            # mid-task and forcing a respawn. Set TAKKUB_TEAMMATE_FALLBACK=""
+            # to disable, or to another model id to pick a different tier.
+            teammate_fallback = os.environ.get(
+                "TAKKUB_TEAMMATE_FALLBACK", "claude-haiku-4-5"
+            ).strip()
+            if teammate_fallback:
+                argv.extend(["--fallback-model", teammate_fallback])
+        else:
+            # Lead runs on the user's default model (Opus on this install).
+            # Degrade to Sonnet on overload/not-found so orchestration keeps
+            # moving during peak load instead of the Lead turn erroring out
+            # — the Lead is the single pane the user is actually talking to,
+            # so a hard failure there stalls the whole session. Set
+            # TAKKUB_LEAD_FALLBACK="" to disable.
+            lead_fallback = os.environ.get("TAKKUB_LEAD_FALLBACK", "claude-sonnet-4-6").strip()
+            if lead_fallback:
+                argv.extend(["--fallback-model", lead_fallback])
 
         # Explicit plugin allowlist (skip the broken claude-obsidian hook).
         # Set TAKKUB_EXTRA_PLUGINS env var to a `;`-separated list of plugin

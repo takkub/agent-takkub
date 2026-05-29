@@ -4,6 +4,17 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Added (graceful model fallback under load)
+- **`--fallback-model` on every spawned claude pane.** When a pane's model is
+  overloaded (HTTP 529) or not found, claude now switches to a fallback model
+  for the rest of the session instead of hard-failing the turn (CC 2.1.152
+  made the switch session-wide; 2.1.144 made it survive `/bg`+detach). In a
+  multi-pane cockpit, 4-8 panes can hit the Max rate ceiling at the same
+  instant — a falling-back pane keeps working rather than erroring mid-task
+  and forcing a respawn. Defaults: teammates → `claude-haiku-4-5`,
+  Lead → `claude-sonnet-4-6`. Override with `TAKKUB_TEAMMATE_FALLBACK` /
+  `TAKKUB_LEAD_FALLBACK` (set to `""` to disable). `orchestrator.py` spawn argv.
+
 ### Added (user-level plugin + MCP inheritance)
 - **User MCP allowlist-merge**: `ensure_user_mcps()` in `shared_dev_tools.py`
   reads `~/.claude.json` top-level `mcpServers` at cockpit boot and merges a

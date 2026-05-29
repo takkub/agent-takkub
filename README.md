@@ -355,6 +355,8 @@ Cockpit อ่าน `~/.claude/projects/<encoded>/*.jsonl` (Claude Code's sessi
 | `TAKKUB_ECC_FULL=1` | ปิด ECC noise mute (เปิด ECC hooks ครบทุกตัว) |
 | `TAKKUB_TEAMMATE_MODEL` | model สำหรับ teammates (default `claude-sonnet-4-6`) |
 | `TAKKUB_TEAMMATE_EFFORT` | effort level (default `medium`) |
+| `TAKKUB_TEAMMATE_FALLBACK` | claude `--fallback-model` ของ teammate ตอน overload/not-found (default `claude-haiku-4-5`, `""` = ปิด) |
+| `TAKKUB_LEAD_FALLBACK` | claude `--fallback-model` ของ Lead ตอน overload/not-found (default `claude-sonnet-4-6`, `""` = ปิด) |
 | `TAKKUB_AUTO_REMOTE_CONTROL=0` | skip auto `/remote-control` ใน Lead |
 | `TAKKUB_ALLOW_TASK=1` | un-block built-in `Task` tool ให้ panes (default block, ใช้ `takkub assign` แทน) |
 
