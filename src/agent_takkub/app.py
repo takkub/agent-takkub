@@ -52,6 +52,15 @@ os.environ.setdefault(
             # 4 is enough to keep paint pipelines responsive without
             # ballooning RAM.
             "--renderer-process-limit=4",
+            # Force software compositing. With many xterm.js WebEngine views
+            # (2+ project tabs) the shared GPU process gets overwhelmed and
+            # crashes — every view goes blank/white and the window stops
+            # responding (the classic QtWebEngine-on-Windows "white screen").
+            # A text terminal needs no GPU, so software rendering trades a
+            # little CPU for not having a GPU process that can take the whole
+            # UI down. See docs/cockpit-freeze-rca-2026-05-29.md.
+            "--disable-gpu",
+            "--disable-gpu-compositing",
         ]
     ),
 )
