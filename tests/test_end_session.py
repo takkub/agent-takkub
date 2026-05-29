@@ -206,6 +206,50 @@ class TestEndSession:
         assert "backend-120000.md" in body
         assert "frontend-130000.md" in body
 
+    def test_end_session_writes_daily_digest(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        """end_session also appends a Finish-Job digest to the vault's
+        `05-Daily/<today>.md` note — wiring write_daily_digest into the
+        end-session flow so the daily roll-up isn't dead code."""
+        runtime = tmp_path / "runtime"
+        fake_vault = tmp_path / "vault"
+        (fake_vault / "01-Projects").mkdir(parents=True)
+        monkeypatch.setattr("agent_takkub.orchestrator.RUNTIME_DIR", runtime)
+        monkeypatch.setattr("agent_takkub.orchestrator._resolve_vault_dir", lambda: fake_vault)
+
+        ok, _ = orch.end_session(project=TEST_PROJECT, note="daily digest wire test")
+        assert ok is True
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        daily = fake_vault / "05-Daily" / f"{today}.md"
+        assert daily.is_file()
+        content = daily.read_text(encoding="utf-8")
+        assert TEST_PROJECT in content
+        assert "wrapped at" in content
+
+    def test_end_session_ok_when_digest_fails(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        """A failure inside write_daily_digest must never fail end_session —
+        the local session summary is the contract; the digest is best-effort."""
+        runtime = tmp_path / "runtime"
+        fake_vault = tmp_path / "vault"
+        (fake_vault / "01-Projects").mkdir(parents=True)
+        monkeypatch.setattr("agent_takkub.orchestrator.RUNTIME_DIR", runtime)
+        monkeypatch.setattr("agent_takkub.orchestrator._resolve_vault_dir", lambda: fake_vault)
+
+        def _boom(_project: str) -> bool:
+            raise RuntimeError("digest exploded")
+
+        monkeypatch.setattr(orch, "write_daily_digest", _boom)
+
+        ok, msg = orch.end_session(project=TEST_PROJECT, note="digest blows up but session ok")
+        assert ok is True
+        assert "lead session summary written" in msg
+        files = list((runtime / "sessions").rglob("lead-*.md"))
+        assert len(files) == 1
+
 
 # ──────────────────────────────────────────────────────────────
 # CLI role gate test

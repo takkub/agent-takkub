@@ -2348,6 +2348,21 @@ class Orchestrator(QObject):
             except OSError:
                 pass
 
+        # Append today's Finish-Job digest to the vault's 05-Daily note.
+        # Best-effort: the local session summary above is the contract, so a
+        # digest failure (vault glitch, chatlog scan error) must never fail
+        # end_session. write_daily_digest already no-ops when no vault is
+        # configured and swallows its own IO errors; the try/except here is a
+        # belt-and-braces guard against any unexpected raise.
+        try:
+            self.write_daily_digest(project_ns)
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).debug(
+                "end_session: write_daily_digest failed (non-fatal)", exc_info=True
+            )
+
         _log_event("end_session", project=project_ns, note=note[:200])
         return True, f"lead session summary written: {rel_path}"
 
