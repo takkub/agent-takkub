@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import json
 import pathlib
-from datetime import datetime
+import re
 
 from .config import (
     REPO_ROOT,
@@ -39,6 +39,38 @@ from .config import (
     ensure_runtime,
     load_projects,
 )
+from .vault_mirror import _is_junk_note
+
+# Recent-teammate-note injection budget. We surface the *body* of recent
+# done notes (not just filenames) so a fresh Lead recalls what teammates
+# actually did — but bounded so it can't swallow the spawn-time context.
+_BRIEF_MAX_NOTES = 6  # newest-first across days
+_BRIEF_NOTE_CAP = 240  # chars per note snippet
+_LEAD_SUMMARY_CAP = 1600  # chars for the latest lead end-session note
+
+# Captures the body of the `## Note` block written by `_render_decision_note`,
+# stopping at the next `##` section (e.g. `## Transcript`) or end of file.
+_NOTE_BODY_RE = re.compile(r"## Note\s*\n+(?P<note>.+?)(?:\n##\s|\Z)", re.DOTALL)
+
+
+def _extract_note_body(text: str) -> str:
+    """Pull the substantive note text out of a session-mirror markdown file.
+
+    Prefers the `## Note` block; falls back to everything after the YAML
+    frontmatter and heading lines so older / hand-written files still yield
+    something useful. Returns '' when nothing meaningful remains.
+    """
+    m = _NOTE_BODY_RE.search(text)
+    if m:
+        return m.group("note").strip()
+    body = text
+    if body.startswith("---"):
+        parts = body.split("---", 2)
+        if len(parts) == 3:
+            body = parts[2]
+    kept = [ln for ln in body.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
+    return "\n".join(kept).strip()
+
 
 # Plugins we want spawned agents to inherit *explicitly* (skipping user-level
 # settings to avoid claude-obsidian's broken SessionStart hook). Each entry
@@ -93,15 +125,33 @@ def _recent_session_brief(project: str) -> str | None:
             latest_lead = leads[0]
             break
 
-    today = datetime.now().strftime("%Y-%m-%d")
-    today_dir = sessions_root / today / project
-    today_done: list[str] = []
-    if today_dir.is_dir():
-        for f in sorted(today_dir.iterdir()):
-            if f.suffix == ".md" and not f.name.startswith("lead-"):
-                today_done.append(f.stem)
+    # Recent teammate done notes WITH their bodies, newest-first across days.
+    # Injecting the note *content* (not just the filename) is what actually
+    # lets a fresh Lead recall what teammates did — the old version listed
+    # bare filenames, so the substantive work was stored but never recalled.
+    recent_notes: list[tuple[str, str, str]] = []  # (day, stem, note body)
+    for day_dir in sorted(sessions_root.iterdir(), reverse=True):
+        if not day_dir.is_dir():
+            continue
+        proj_dir = day_dir / project
+        if not proj_dir.is_dir():
+            continue
+        for f in sorted(proj_dir.iterdir(), reverse=True):
+            if f.suffix != ".md" or f.name.startswith("lead-"):
+                continue
+            try:
+                note = _extract_note_body(f.read_text(encoding="utf-8"))
+            except OSError:
+                continue
+            if _is_junk_note(note):
+                continue
+            recent_notes.append((day_dir.name, f.stem, note))
+            if len(recent_notes) >= _BRIEF_MAX_NOTES:
+                break
+        if len(recent_notes) >= _BRIEF_MAX_NOTES:
+            break
 
-    if latest_lead is None and not today_done:
+    if latest_lead is None and not recent_notes:
         return None
 
     lines = [
@@ -120,9 +170,10 @@ def _recent_session_brief(project: str) -> str | None:
             raw = latest_lead.read_text(encoding="utf-8")
         except OSError:
             raw = ""
-        # Truncate per-summary to ~2KB so a giant note can't swallow the budget.
-        if len(raw) > 2048:
-            raw = raw[:2048] + "\n…(truncated)"
+        # Truncate per-summary so a giant note can't swallow the budget and
+        # leaves room for the teammate-note section below.
+        if len(raw) > _LEAD_SUMMARY_CAP:
+            raw = raw[:_LEAD_SUMMARY_CAP] + "\n…(truncated)"
         rel = (
             latest_lead.relative_to(RUNTIME_DIR.parent).as_posix()
             if RUNTIME_DIR.parent in latest_lead.parents
@@ -133,13 +184,14 @@ def _recent_session_brief(project: str) -> str | None:
         lines.append(raw.rstrip())
         lines.append("")
 
-    if today_done:
-        lines.append("### today's teammate done events")
+    if recent_notes:
+        lines.append("### recent teammate done (newest first)")
         lines.append("")
-        for stem in today_done[:20]:
-            lines.append(f"- `{stem}`")
-        if len(today_done) > 20:
-            lines.append(f"- …และอีก {len(today_done) - 20} event")
+        for day, stem, note in recent_notes:
+            snippet = note if len(note) <= _BRIEF_NOTE_CAP else note[:_BRIEF_NOTE_CAP] + "…"
+            # Collapse newlines/runs of whitespace so each note stays one line.
+            snippet = " ".join(snippet.split())
+            lines.append(f"- `{day}` **{stem}** — {snippet}")
         lines.append("")
 
     brief = "\n".join(lines)

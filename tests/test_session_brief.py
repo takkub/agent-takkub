@@ -74,6 +74,30 @@ def _write_done(
     return f
 
 
+def _write_done_note(
+    runtime: pathlib.Path, project: str, day: str, role: str, time_str: str, note: str
+) -> pathlib.Path:
+    """Helper: write a teammate done file with a real `## Note` block,
+    matching `_render_decision_note`'s on-disk layout."""
+    target_dir = runtime / "sessions" / day / project
+    target_dir.mkdir(parents=True, exist_ok=True)
+    body = (
+        f"---\n"
+        f"role: {role}\n"
+        f"project: {project}\n"
+        f"date: {day}T{time_str[:2]}:{time_str[2:4]}:{time_str[4:]}\n"
+        f"tags: [session, {role}, {project}]\n"
+        f"---\n\n"
+        f"# {role} done\n\n"
+        f"**Project:** [[01-Projects/{project}|{project}]]\n"
+        f"**Role:** {role}\n\n"
+        f"## Note\n\n{note}\n"
+    )
+    f = target_dir / f"{role}-{time_str}.md"
+    f.write_text(body, encoding="utf-8")
+    return f
+
+
 class TestRecentSessionBrief:
     def test_no_history_returns_none(self, runtime_tmp: pathlib.Path) -> None:
         """No session dir at all → brief returns None (caller skips section)."""
@@ -110,14 +134,76 @@ class TestRecentSessionBrief:
         )
 
     def test_lists_todays_done_events(self, runtime_tmp: pathlib.Path) -> None:
-        """Teammate `<role>-*.md` files today → listed in the brief."""
+        """Today's substantive teammate done events surface with both their
+        `<role>-<time>` stem and their note body."""
         today = datetime.now().strftime("%Y-%m-%d")
-        _write_done(runtime_tmp, TEST_PROJECT, today, "backend", "090000")
-        _write_done(runtime_tmp, TEST_PROJECT, today, "frontend", "100000")
+        _write_done_note(
+            runtime_tmp, TEST_PROJECT, today, "backend", "090000", "added rate-limit middleware"
+        )
+        _write_done_note(
+            runtime_tmp, TEST_PROJECT, today, "frontend", "100000", "wired login form to /auth"
+        )
         brief = _recent_session_brief(TEST_PROJECT)
         assert brief is not None
         assert "backend-090000" in brief
         assert "frontend-100000" in brief
+        assert "rate-limit middleware" in brief
+        assert "wired login form" in brief
+
+    def test_includes_teammate_note_content(self, runtime_tmp: pathlib.Path) -> None:
+        """A teammate done note's *body* (not just its filename) is injected —
+        this is the whole point: a fresh Lead recalls *what* was done."""
+        today = datetime.now().strftime("%Y-%m-%d")
+        _write_done_note(
+            runtime_tmp,
+            TEST_PROJECT,
+            today,
+            "backend",
+            "090000",
+            "implemented JWT refresh-token rotation with 7-day sliding window",
+        )
+        brief = _recent_session_brief(TEST_PROJECT)
+        assert brief is not None
+        assert "JWT refresh-token rotation" in brief
+
+    def test_teammate_notes_carry_across_days(self, runtime_tmp: pathlib.Path) -> None:
+        """Substantive teammate notes from previous days still surface when
+        there are no events today — knowledge must not vanish at midnight."""
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        _write_done_note(
+            runtime_tmp,
+            TEST_PROJECT,
+            yesterday,
+            "frontend",
+            "143000",
+            "migrated dashboard to server components, cut TTI by 400ms",
+        )
+        brief = _recent_session_brief(TEST_PROJECT)
+        assert brief is not None
+        assert "server components" in brief
+
+    def test_skips_junk_teammate_notes(self, runtime_tmp: pathlib.Path) -> None:
+        """Thin acknowledgement notes ('ok'/'wip') don't pollute the brief —
+        with no substantive history the brief is omitted entirely."""
+        today = datetime.now().strftime("%Y-%m-%d")
+        _write_done_note(runtime_tmp, TEST_PROJECT, today, "backend", "090000", "ok")
+        _write_done_note(runtime_tmp, TEST_PROJECT, today, "qa", "100000", "wip")
+        assert _recent_session_brief(TEST_PROJECT) is None
+
+    def test_newest_teammate_notes_first(self, runtime_tmp: pathlib.Path) -> None:
+        """Most-recent teammate note appears before older ones in the brief."""
+        today = datetime.now().strftime("%Y-%m-%d")
+        _write_done_note(
+            runtime_tmp, TEST_PROJECT, today, "backend", "090000", "OLDER substantive note here"
+        )
+        _write_done_note(
+            runtime_tmp, TEST_PROJECT, today, "frontend", "150000", "NEWER substantive note here"
+        )
+        brief = _recent_session_brief(TEST_PROJECT)
+        assert brief is not None
+        assert brief.index("NEWER substantive note here") < brief.index(
+            "OLDER substantive note here"
+        )
 
     def test_ignores_other_projects(self, runtime_tmp: pathlib.Path) -> None:
         """Done events under a *different* project don't leak into the brief."""
