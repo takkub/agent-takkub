@@ -54,8 +54,8 @@ def encode_path_for_claude(cwd: str | Path) -> str:
     `~/.claude/projects/`.
 
     Observed encoding (Windows):
-        C:\\Users\\monch\\WebstormProjects\\agent-takkub
-        → C--Users-monch-WebstormProjects-agent-takkub
+        C:\\Users\\alice\\WebstormProjects\\agent-takkub
+        → C--Users-alice-WebstormProjects-agent-takkub
 
     Drive letter uppercased, `:\\` becomes `--`, all path separators become
     `-`. POSIX paths (no drive) get every `/` replaced with `-`.

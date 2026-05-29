@@ -137,7 +137,7 @@ def ensure_agents_md(spawn_cwd: str | Path) -> tuple[bool, str]:
     spawn_path = Path(spawn_cwd)
     # Refuse drive-relative or relative paths — they make `mkdir(parents=True)`
     # create junk dirs under whatever the current process cwd happens to be
-    # (e.g. `Path("C:UsersmonchWebstormProjectsagent-takkub")` from a
+    # (e.g. `Path("C:UsersaliceWebstormProjectsagent-takkub")` from a
     # backslash-stripped string resolves drive-relative on Windows).
     if not spawn_path.is_absolute() or not spawn_path.exists():
         return False, f"invalid spawn_cwd: {spawn_cwd!r}"

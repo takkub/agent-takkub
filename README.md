@@ -112,10 +112,12 @@ scripts\install.bat -Update
 ## Quick Install (สามขั้น — manual path)
 
 ```bat
-git clone git@github.com:takkub/agent-takkub.git
+git clone https://github.com/takkub/agent-takkub.git
 cd agent-takkub
 agent-takkub.bat
 ```
+
+(มี SSH key อยู่แล้วใช้ `git@github.com:takkub/agent-takkub.git` แทนได้)
 
 `agent-takkub.bat` ทำให้อัตโนมัติ:
 

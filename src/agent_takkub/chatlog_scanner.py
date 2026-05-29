@@ -39,8 +39,8 @@ def claude_projects_dir() -> pathlib.Path:
 def decode_project_dir(name: str) -> pathlib.Path:
     """Turn an encoded folder name back into the original cwd path.
 
-    Claude Code encodes a cwd like `C:\\Users\\monch\\WebstormProjects\\foo`
-    as the folder name `C--Users-monch-WebstormProjects-foo`. We
+    Claude Code encodes a cwd like `C:\\Users\\alice\\WebstormProjects\\foo`
+    as the folder name `C--Users-alice-WebstormProjects-foo`. We
     reverse the dash-mapping: leading `C--` → drive letter + `:`, then
     every remaining `-` is a path separator.
     """
@@ -48,7 +48,7 @@ def decode_project_dir(name: str) -> pathlib.Path:
         return pathlib.Path(".")
     raw = name
     if len(raw) >= 3 and raw[1:3] == "--":
-        # Drive letter prefix, e.g. "C--Users-monch-..." → "C:/Users/monch/..."
+        # Drive letter prefix, e.g. "C--Users-alice-..." → "C:/Users/alice/..."
         drive = raw[0]
         rest = raw[3:].replace("-", "/")
         return pathlib.Path(f"{drive}:/{rest}")

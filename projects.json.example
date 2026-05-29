@@ -1,11 +1,11 @@
 {
-  "active": "pms",
+  "active": "myproject",
   "projects": {
-    "pms": {
-      "description": "PMS - project management",
+    "myproject": {
+      "description": "My web app",
       "paths": {
-        "web": "C:/Users/monch/WebstormProjects/pms/pms-web",
-        "api": "C:/Users/monch/WebstormProjects/pms/pms-api"
+        "web": "C:/Users/you/Projects/myproject/web",
+        "api": "C:/Users/you/Projects/myproject/api"
       },
       "presets": ["frontend", "backend"]
     }
