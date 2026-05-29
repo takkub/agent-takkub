@@ -244,6 +244,17 @@ class TestCheckPlugins:
         assert ecc.status == Status.WARN
         assert "SessionStart" in ecc.detail
 
+    def test_ecc_not_installed_is_skip_not_warn(self, tmp_path: Path) -> None:
+        """ECC is intentionally not installed — doctor must not nag to install
+        it (SKIP, no fix hint), unlike any other missing _SAFE_PLUGINS entry."""
+        with patch("agent_takkub.orchestrator._SAFE_PLUGINS", ("ecc",)):
+            findings = check_plugins(cache_root=tmp_path)
+
+        ecc = next(f for f in findings if f.name == "ecc")
+        assert ecc.status == Status.SKIP
+        assert ecc.fix_hint == ""
+        assert "intentional" in ecc.detail
+
     def test_marketplace_dir_without_plugin_json_fails(self, tmp_path: Path) -> None:
         """A marketplace dir exists but has no .claude-plugin/plugin.json anywhere in its tree
         → should FAIL, not silently accept."""

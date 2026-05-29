@@ -11,7 +11,7 @@
       1.  System runtime   : Python 3.11+, Git, Node.js, Chrome, gh CLI
       2.  npm registry     : reset to public registry (gates MCP fetch)
       3.  AI CLIs          : Claude Code, OpenAI Codex
-      4.  Claude plugins   : superpowers, agent-skills, ECC, Pordee
+      4.  Claude plugins   : superpowers, agent-skills, Pordee
       4b. MCP servers      : Playwright MCP + Chrome DevTools MCP +
                              Playwright Chromium browser (~150 MB)
       5.  rtk              : Rust Token Killer (skipped if no cargo)
@@ -39,7 +39,7 @@
 .EXAMPLE
     .\scripts\install.ps1
     .\scripts\install.ps1 -Update
-    .\scripts\install.ps1 -SkipLogin -VaultDir ""
+    .\scripts\install.ps1 -SkipMCPPrewarm -VaultDir ""
 
 .NOTES
     Run from repo root: `.\scripts\install.ps1`
@@ -264,9 +264,12 @@ Install-NpmGlobal -Package "@openai/codex"             -ProbeCmd "codex"
 # Phase 4 — Claude plugins
 # ─────────────────────────────────────────────────────────────
 Write-Step "Phase 4 - Claude plugins"
+# ECC (everything-claude-code) intentionally NOT installed: its SessionStart
+# prompt-hook crashed cockpit panes and added ~31k tokens/session. The cockpit
+# still defensively mutes ECC hooks if it's present from another source
+# (see pane_env ECC-mute + `takkub doctor` warning), but we don't pull it in.
 Install-ClaudePlugin -Spec "github:jessevincent/superpowers"
 Install-ClaudePlugin -Spec "github:addyosmani/agent-skills"
-Install-ClaudePlugin -Spec "github:everything-claude-code/marketplace"
 Install-ClaudePlugin -Spec "github:kerlos/pordee"
 
 # ─────────────────────────────────────────────────────────────
