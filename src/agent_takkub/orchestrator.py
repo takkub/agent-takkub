@@ -293,6 +293,26 @@ def _teammate_tier(role_name: str) -> tuple[str, str, str]:
     return _ROLE_MODEL_TIERS.get(role_name, _DEFAULT_TEAMMATE_TIER)
 
 
+def _lead_model_override() -> str | None:
+    """Explicit `--model` for the Lead pane, or None to inherit the user default.
+
+    The Lead normally spawns with no `--model` flag and rides the owner's
+    default model. On a Max account that default is often the `[1m]`
+    1M-context variant — fine on Max, but a hard error on Pro ("Usage credits
+    required for 1M context"). When the owner has marked the install as Pro
+    (see plan_tier), pin the Lead to a standard-context model so it doesn't
+    inherit a 1M default and fail. Max → None (unchanged: inherit user default).
+
+    Env override TAKKUB_PRO_LEAD_MODEL swaps the pinned model per-install; set
+    it to empty to disable the pin even under Pro (inherit user default again).
+    """
+    from . import plan_tier
+
+    if not plan_tier.is_pro():
+        return None
+    return os.environ.get("TAKKUB_PRO_LEAD_MODEL", plan_tier.PRO_LEAD_MODEL).strip() or None
+
+
 # Stall detection: if a `working` pane shows no detectable progress (no
 # transcript bytes, no new screenshots, no takkub send received) for this long,
 # `list_status_detailed()` marks it stalled and `takkub list` shows
@@ -654,6 +674,9 @@ class Orchestrator(QObject):
     # Emitted when user toggles a provider on/off via status bar. main_window
     # listens to refresh chip color/label without polling.
     providerStateChanged = pyqtSignal(str, bool)  # (provider, disabled)
+    # Emitted when user flips the account plan (Pro/Max) via the status bar.
+    # main_window listens to repaint the plan chip without polling.
+    planTierChanged = pyqtSignal(str)  # "pro" | "max"
     # Emitted at the tail of a successful spawn that picked up `--resume <uuid>`
     # (i.e. the role's previous session exited within RESUME_WINDOW_SEC).
     # main_window uses this to fire `/remote-control` only on resumes, so a
@@ -1240,7 +1263,14 @@ class Orchestrator(QObject):
             if teammate_fallback:
                 argv.extend(["--fallback-model", teammate_fallback])
         else:
-            # Lead runs on the user's default model (Opus on this install).
+            # Lead normally rides the user's default model (Opus on this
+            # install) with no --model flag. Under a Pro plan that default may
+            # be the [1m] 1M-context variant, which Pro can't reach (usage
+            # credits required) and which hard-errors the turn. Pin the Lead
+            # to a standard-context model in that case (see plan_tier).
+            lead_model = _lead_model_override()
+            if lead_model:
+                argv.extend(["--model", lead_model])
             # Degrade to Sonnet on overload/not-found so orchestration keeps
             # moving during peak load instead of the Lead turn erroring out
             # — the Lead is the single pane the user is actually talking to,
@@ -1999,6 +2029,52 @@ class Orchestrator(QObject):
         self.providerStateChanged.emit(provider, disabled)
         _log_event("provider_toggled", provider=provider, disabled=disabled)
         return True, f"{provider} {word.lower()}"
+
+    def set_plan_tier(self, tier: str) -> tuple[bool, str]:
+        """Set the account plan (pro/max) globally and persist it.
+
+        Pins (or unpins) the Lead's model at the NEXT spawn: Pro forces a
+        standard-context model so the 1M-context credit error can't bite,
+        Max lets the Lead inherit the user default again. Already-running
+        Lead panes keep their current model until respawn — we broadcast a
+        `[system]` notice so the live session knows, and (under Pro) stops
+        proposing 1M-context work.
+
+        Returns (ok, message). Fails only on an unknown tier.
+        """
+        from . import plan_tier
+
+        tier = tier.lower().strip()
+        if tier not in plan_tier.TIERS:
+            return False, f"unknown plan tier: {tier!r}"
+
+        plan_tier.set_current(tier)
+
+        if tier == plan_tier.PRO:
+            notice = (
+                "[system] account plan set to PRO. 1M-context model is "
+                "unavailable (usage-credits gated) — do not propose or rely on "
+                "it. New Lead panes pin to a standard-context model."
+            )
+        else:
+            notice = (
+                "[system] account plan set to MAX. Full model access restored "
+                "(incl. 1M context). Applies to newly spawned panes."
+            )
+
+        # Broadcast to every Lead pane across all project tabs (same pattern
+        # as toggle_provider). The model pin itself only lands at the next
+        # spawn, but the notice keeps live sessions in sync.
+        for _project_ns, panes in self._panes_by_project.items():
+            lead = panes.get(LEAD.name)
+            if lead and lead.session and lead.session.is_alive:
+                lead.session.write(notice)
+                QTimer.singleShot(150, lambda pane=lead: pane.session and pane.session.write(b"\r"))
+                self.leadInjected.emit(notice)
+
+        self.planTierChanged.emit(tier)
+        _log_event("plan_tier_set", tier=tier)
+        return True, f"plan set to {tier}"
 
     def done(self, from_role: str, note: str = "", project: str | None = None) -> tuple[bool, str]:
         try:

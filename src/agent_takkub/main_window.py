@@ -180,6 +180,38 @@ class MainWindow(QMainWindow):
             f"QPushButton:hover {{ background:{brand}; opacity:0.85; }}"
         )
 
+    @staticmethod
+    def _plan_chip_style(is_pro: bool) -> str:
+        """QPushButton stylesheet for the account-plan (Pro/Max) status chip.
+
+        Unlike the provider chips this isn't an on/off state — it's two valid
+        modes — so both render solid (no strikethrough). Max = violet
+        (full access, incl. 1M context), Pro = amber (capped: 1M unavailable).
+        """
+        brand = "#8b5cf6" if not is_pro else "#f59e0b"
+        return (
+            "QPushButton { "
+            f"background:{brand}; color:white; "
+            "border:none; border-radius:10px; "
+            "padding:2px 10px; font-weight:600; "
+            "}"
+            f"QPushButton:hover {{ background:{brand}; opacity:0.85; }}"
+        )
+
+    @staticmethod
+    def _plan_chip_tooltip(is_pro: bool) -> str:
+        """Tooltip for the plan chip — explains the consequence, not just the state."""
+        if is_pro:
+            return (
+                "Account plan: Pro — click to switch to Max.\n"
+                "New Lead panes pin to a standard-context model\n"
+                "(1M context is usage-credits gated on Pro)."
+            )
+        return (
+            "Account plan: Max — click to switch to Pro.\n"
+            "Lead inherits your default model, incl. 1M context."
+        )
+
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("agent-takkub — dev team cockpit")
@@ -354,6 +386,19 @@ class MainWindow(QMainWindow):
         )
         self._chip_gemini.setStyleSheet(self._provider_chip_style(GEMINI, is_disabled(GEMINI)))
         self._chip_gemini.clicked.connect(lambda: self._on_provider_chip_clicked(GEMINI))
+
+        # ── account plan chip (Pro / Max) ──────────────────────────
+        # Records whether the owner is on Pro or Max so the orchestrator can
+        # pin the Lead to a standard-context model under Pro (the 1M-context
+        # variant is usage-credits gated and hard-errors on Pro). State lives
+        # in plan.json; orchestrator owns persist+broadcast on flip.
+        from .plan_tier import is_pro as _plan_is_pro
+
+        _pro_now = _plan_is_pro()
+        self._chip_plan = QPushButton("Pro" if _pro_now else "Max", self)
+        self._chip_plan.setToolTip(self._plan_chip_tooltip(_pro_now))
+        self._chip_plan.setStyleSheet(self._plan_chip_style(_pro_now))
+        self._chip_plan.clicked.connect(self._on_plan_chip_clicked)
 
         # Self-update chip. Polls `git fetch` + `git status` every 5 min
         # so a user that pulled their friend's commit from another machine
@@ -593,6 +638,7 @@ class MainWindow(QMainWindow):
             self._status.addPermanentWidget(w)
         self._status.addPermanentWidget(self._make_status_separator())
         for w in (
+            self._chip_plan,
             self._chip_codex,
             self._chip_gemini,
             self._btn_install_rtk,
@@ -627,6 +673,7 @@ class MainWindow(QMainWindow):
         )
         self.orch.statusChanged.connect(self._update_status)
         self.orch.providerStateChanged.connect(self._on_provider_state_changed)
+        self.orch.planTierChanged.connect(self._on_plan_tier_changed)
 
         # Refresh status bar every 2s so the working/active count tracks the
         # state transitions that don't emit statusChanged (e.g. working→done
@@ -2061,6 +2108,28 @@ class MainWindow(QMainWindow):
                 if disabled
                 else "Gemini: enabled — click to disable"
             )
+
+    def _on_plan_chip_clicked(self) -> None:
+        """Flip the account plan on the orchestrator. It persists state,
+        broadcasts to live Lead panes, and emits planTierChanged → we repaint
+        the chip via _on_plan_tier_changed."""
+        from .plan_tier import MAX, PRO, is_pro
+
+        target = MAX if is_pro() else PRO
+        ok, msg = self.orch.set_plan_tier(target)
+        if not ok:
+            self._status.showMessage(f"Plan switch failed: {msg}", 4000)
+
+    def _on_plan_tier_changed(self, tier: str) -> None:
+        """Repaint the plan chip when the tier flips. Triggered by
+        Orchestrator.planTierChanged so both user click and any future
+        programmatic change land here."""
+        if not hasattr(self, "_chip_plan"):
+            return
+        is_pro = tier == "pro"
+        self._chip_plan.setText("Pro" if is_pro else "Max")
+        self._chip_plan.setStyleSheet(self._plan_chip_style(is_pro))
+        self._chip_plan.setToolTip(self._plan_chip_tooltip(is_pro))
 
     def _on_add_project_clicked(self) -> None:
         from pathlib import Path

@@ -232,6 +232,25 @@ def _render_lead_context(
 
 Status เปลี่ยนระหว่าง session: cockpit จะ inject `[system] <provider> ENABLED/DISABLED` message
 """
+    # Append account-plan note ONLY under Pro (Max is the default and behaves
+    # exactly as before — emitting nothing there saves tokens on every spawn).
+    # A Pro owner can't reach the 1M-context model variant (usage-credits
+    # gated), so the Lead must not propose or assume it.
+    from .plan_tier import is_pro as _plan_is_pro
+
+    if _plan_is_pro():
+        suffix += """
+
+---
+
+## 💳 Account plan: Pro (1M context unavailable)
+
+User อยู่บน Pro plan — **1M-context model variant ใช้ไม่ได้** (usage-credits gated)
+**ห้าม** propose หรือพึ่ง 1M context / `[1m]` model variant
+Lead pane ของ session นี้ถูก pin ไว้ที่ standard-context model อยู่แล้ว
+
+Status เปลี่ยนระหว่าง session: cockpit จะ inject `[system] account plan set to PRO/MAX` message
+"""
     # Append recent-session brief so a fresh Lead pane inherits context from
     # the previous `takkub end-session` summary + today's teammate done events.
     # Without this the read half of the session-log loop is missing — files
