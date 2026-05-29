@@ -118,6 +118,7 @@ __all__ = [  # backwards-compat re-exports
     "_render_decision_note",
     "_render_lead_context",
     "_resolve_vault_dir",
+    "prune_old_transcripts",
     "render_lead_settings",
     "scan_artifacts",
 ]
@@ -148,6 +149,47 @@ def _log_event(event: str, **details) -> None:
             f.write(line + "\n")
     except Exception:
         pass
+
+
+# Per-pane PTY transcripts (runtime/sessions/<date>/<project>/<role>-*.transcript.log)
+# are append streams with no per-file cap — a single chatty/runaway pane once
+# produced a 203 MB transcript. We can't bound an open stream cleanly, so we
+# prune old ones at startup instead. The .md session notes are tiny and kept.
+_TRANSCRIPT_RETENTION_DAYS = 7
+
+
+def prune_old_transcripts(max_age_days: int = _TRANSCRIPT_RETENTION_DAYS) -> int:
+    """Delete `*.transcript.log` files under runtime/sessions older than
+    *max_age_days* (by mtime). Keeps `.md` session notes. Best-effort: never
+    raises, returns the number of files removed."""
+    import time as _time
+
+    sessions = RUNTIME_DIR / "sessions"
+    if not sessions.is_dir():
+        return 0
+    cutoff = _time.time() - max_age_days * 86_400
+    removed = 0
+    bytes_freed = 0
+    try:
+        for p in sessions.rglob("*.transcript.log"):
+            try:
+                st = p.stat()
+                if st.st_mtime < cutoff:
+                    bytes_freed += st.st_size
+                    p.unlink()
+                    removed += 1
+            except OSError:
+                continue
+    except OSError:
+        pass
+    if removed:
+        _log_event(
+            "transcript_prune",
+            removed=removed,
+            mb_freed=round(bytes_freed / 1_048_576, 1),
+            max_age_days=max_age_days,
+        )
+    return removed
 
 
 def scan_artifacts(
@@ -621,6 +663,13 @@ class Orchestrator(QObject):
             _log_event("user_mcp_init", ok=ok, msg=msg)
         except Exception as e:
             _log_event("user_mcp_init_error", error=repr(e))
+        # Reclaim disk: prune stale per-pane PTY transcripts so runtime/sessions
+        # can't grow without bound (a runaway pane once left a 203 MB log).
+        # Best-effort and non-fatal — a readonly runtime never blocks startup.
+        try:
+            prune_old_transcripts()
+        except Exception as e:
+            _log_event("transcript_prune_error", error=repr(e))
         # Panes are namespaced per project so the upcoming multi-tab UI
         # (Plan B) can keep each project's Lead + teammates isolated. The
         # `panes` property below resolves to the *active* project's inner
