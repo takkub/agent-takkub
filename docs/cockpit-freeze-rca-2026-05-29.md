@@ -55,27 +55,34 @@ thread. Any one of them blocking starves the others.
 These remove the *permanent* wedge (#1) and the disk bloat. They do **not**
 fix the transient spawn freeze (#2).
 
-## The sure fix for #2 (next round)
+## Fix for #2
 
 Goal: a `takkub assign`/`spawn` must never block the IPC reply or freeze the UI.
 
-1. **Ack `assign`/`spawn` immediately.** Return "queued" to the CLI right away;
-   perform the actual pane launch + ready-wait asynchronously (QTimer.singleShot
-   / QThreadPool), not inline in the `_dispatch` handler.
+1. **Ack `assign`/`spawn` immediately. — DONE (commit c0c0dc6).** The cli_server
+   `_dispatch` now runs the lead-token/role gates synchronously, replies to the
+   client, then schedules the actual spawn via `QTimer.singleShot(0)`. Verified
+   live: `takkub assign` returns in **221 ms** (was ~15 s timeout) and `takkub
+   list` right after stays responsive at **257 ms** with the pane spawning async.
+   This removes the CLI-timeout / retry pile-up that was the visible "freeze".
 2. **Offload per-pane PTY processing.** `pyte.feed` + `is_at_ready_prompt`
    full-screen render currently run on the main thread for every output burst.
    Move parsing/ready-detection to a worker, or render the ready-check from a
    cached screen snapshot instead of re-rendering live. (`_sync_idle_flag` is
    already throttled to 150 ms/pane — keep that, but the render itself is the
    cost.)
-3. **Make timer file-reads cheap/off-thread.** `token_meter.read_last_usage`
-   reads the session JSONL on the main thread on a timer — tail it like we did
-   for `logs_panel`, or run it in a `QThreadPool` worker.
-4. **`find_rtk_binary`** does `shutil.which` on every spawn — cache the resolved
-   path once.
+3. **Make timer file-reads cheap. — DONE (commit dc6fa14).**
+   `token_meter.read_last_usage` now tail-reads the last 512 KiB of the session
+   JSONL (full-scan fallback) instead of streaming the whole file every 5 s.
+4. **`find_rtk_binary` — DONE (commit dc6fa14).** Caches the resolved path
+   (re-validated; negatives not cached) so spawns don't re-scan PATH.
 
-Priority: #1 (async spawn) gives the biggest UX win — the CLI/UI stop freezing
-during spawns even if the pane itself takes 30 s to come up.
+Remaining: only #2 (offload pyte parsing/render off the main thread). With #1
+shipped the CLI/UI no longer freeze *waiting* on a spawn; #2 would also remove
+the brief hitch while a chatty pane streams its first burst. It's the largest
+and riskiest change (threading a terminal emulator) — left for a deliberate
+session. The per-spawn QWebEngine init is inherent to using WebEngine and is
+not addressed by any of the above.
 
 ## How to verify a fix
 
