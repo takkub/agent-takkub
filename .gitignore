@@ -21,3 +21,6 @@ runtime/
 AGENTS.md
 # Cockpit-managed Gemini cheatsheet — same pattern as AGENTS.md above.
 GEMINI.md
+# Review/audit docs are intentionally committed even if the filename
+# happens to be `gemini.md` (case-insensitive match on Windows).
+!docs/**/gemini.md
