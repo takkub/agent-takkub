@@ -656,9 +656,10 @@ class Orchestrator(QObject):
         # a crash-and-respawn cycle doesn't silently drop the work.
         # Cleared on manual close() so a deliberate restart doesn't replay.
         self._last_assigned_task: dict[str, str] = {}
-        # Opt-in done gate: when assign() was called with requires_commit=True,
-        # done() rejects the agent until git working tree is clean. Keyed
-        # `<project>::<role>`, cleared by close() and on successful done().
+        # Opt-in done handoff: when assign() was called with requires_commit=True,
+        # done() appends an uncommitted-changes warning to the Lead notice instead
+        # of blocking the agent. Keyed `<project>::<role>`, cleared by close()
+        # and on successful done().
         self._requires_commit_on_done: dict[str, bool] = {}
 
         # Opt-in auto-chain: when assign() was called with auto_chain=True,
@@ -1877,9 +1878,11 @@ class Orchestrator(QObject):
 
         key = f"{project_ns}::{from_role}"
 
-        # Opt-in commit gate: if assign() was called with requires_commit=True,
-        # reject done() when git working tree is not clean so the agent is
-        # forced to commit before reporting done to Lead.
+        # Opt-in commit handoff: if assign() was called with requires_commit=True,
+        # check for a dirty working tree and forward a warning to Lead instead
+        # of blocking the agent. Teammate ไม่ต้อง commit — Lead review + commit.
+        has_uncommitted = False
+        files_preview = ""
         if self._requires_commit_on_done.get(key, False):
             spawn_cwd = getattr(pane, "_session_cwd", None) or str(REPO_ROOT)
             try:
@@ -1892,28 +1895,17 @@ class Orchestrator(QObject):
                 )
                 dirty = git_result.stdout.strip()
             except Exception:
-                dirty = ""  # can't check; allow done
+                dirty = ""  # can't check; proceed without warning
             if dirty:
+                has_uncommitted = True
                 files_preview = dirty[:200]
                 _log_event(
-                    "done_rejected",
+                    "done_with_uncommitted",
                     role=from_role,
                     project=project_ns,
                     reason="dirty_tree",
                     files=files_preview,
                 )
-                if pane.session and pane.session.is_alive:
-                    reject_msg = (
-                        f"[orchestrator] done rejected — git working tree ไม่ clean. "
-                        f"commit ก่อนเรียก takkub done อีกครั้ง. Files:\n{files_preview}"
-                    )
-                    payload = _paste_payload(reject_msg)
-                    pane.session.write(payload)
-                    QTimer.singleShot(
-                        _enter_delay_ms(payload),
-                        lambda: pane.session and pane.session.write(b"\r"),
-                    )
-                return False, "done rejected: working tree dirty"
 
         # Agent finished cleanly — clear any pending watchdog state so
         # the next session starts fresh (no leftover idle streak, no
@@ -1929,6 +1921,11 @@ class Orchestrator(QObject):
         # nudge the Lead in pms by mistake)
         lead = project_panes.get(LEAD.name)
         notice = f"[{from_role} done] {note}".rstrip()
+        if has_uncommitted:
+            notice += (
+                f"\n⚠ [requires-commit] {from_role} มี uncommitted changes รอ Lead review + commit:\n"
+                f"{files_preview}"
+            )
         if lead and lead.session and lead.session.is_alive:
             lead.session.write(notice)
             QTimer.singleShot(150, lambda: lead.session and lead.session.write(b"\r"))

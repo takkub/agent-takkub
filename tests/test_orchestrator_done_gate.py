@@ -1,17 +1,19 @@
-"""Tests for the opt-in --requires-commit done gate.
+"""Tests for the opt-in --requires-commit done handoff signal.
 
-The gate runs inside orchestrator.done() when assign() was called with
-requires_commit=True. It shells out to `git status --porcelain` in the
-pane's cwd; if the output is non-empty (working tree dirty) done is
-rejected and an error message is written into the pane session.
+The handoff runs inside orchestrator.done() when assign() was called with
+requires_commit=True. It shells out to `git status --porcelain` in the pane's
+cwd; if the output is non-empty (working tree dirty) done still SUCCEEDS but
+the Lead notice is augmented with an uncommitted-changes warning so Lead can
+review and commit. Teammate ไม่ต้อง commit เอง.
 
-Six scenarios:
-  1. No flag → done on dirty tree → OK
-  2. Flag set → done on dirty tree → rejected, error injected into pane
-  3. Flag set → done on clean tree → OK
-  4. Flag set → done rejected on dirty → commit (simulate clean) → done → OK
+Seven scenarios:
+  1. No flag → done on dirty tree → OK, no warning
+  2. Flag set → done on dirty tree → OK (passes), Lead notice contains warning
+  3. Flag set → done on clean tree → OK, no warning in notice
+  4. Flag set → done on dirty tree → flag cleared after done (single-use)
   5. close() → flag cleared (no stale gate on next assign)
-  6. Two panes (one flagged, one not) → gate applies only to the flagged one
+  6. Two panes (one flagged, one not) → warning only on flagged one
+  7. Flag set → done on dirty → Lead notice body contains files preview
 """
 
 from __future__ import annotations
@@ -57,6 +59,13 @@ def _make_working_pane(cwd: str = "/repo") -> MagicMock:
     return pane
 
 
+def _make_lead_pane() -> MagicMock:
+    pane = MagicMock()
+    pane.session = MagicMock()
+    pane.session.is_alive = True
+    return pane
+
+
 def _dirty_result(files: str = "M src/foo.py\n") -> MagicMock:
     r = MagicMock()
     r.stdout = files
@@ -69,13 +78,24 @@ def _clean_result() -> MagicMock:
     return r
 
 
+def _written_str(mock_session: MagicMock) -> str:
+    """Collect all string args written to a session mock into one string."""
+    parts: list[str] = []
+    for c in mock_session.write.call_args_list:
+        arg = c.args[0] if c.args else ""
+        if isinstance(arg, bytes):
+            parts.append(arg.decode("utf-8", errors="replace"))
+        else:
+            parts.append(str(arg))
+    return "".join(parts)
+
+
 class TestDoneGate:
     def test_done_no_flag_allows_dirty(self, orch: Orchestrator) -> None:
-        """assign without flag → done on dirty tree → allowed."""
+        """assign without flag → done on dirty tree → allowed, no warning."""
         pane = _make_working_pane()
         orch._panes_by_project.setdefault(TEST_PROJECT, {})["backend"] = pane
 
-        # assign WITHOUT requires_commit
         with (
             patch.object(orch, "spawn", return_value=(True, "spawned")),
             patch.object(orch, "_send_when_ready"),
@@ -84,16 +104,22 @@ class TestDoneGate:
                 "backend", cwd="/repo", task="do work", requires_commit=False, project=TEST_PROJECT
             )
 
+        lead = _make_lead_pane()
+        orch._panes_by_project[TEST_PROJECT]["lead"] = lead
+
         with patch("agent_takkub.orchestrator.subprocess.run", return_value=_dirty_result()):
             ok, msg = orch.done("backend", note="done", project=TEST_PROJECT)
 
         assert ok is True
         assert "rejected" not in msg
+        assert "requires-commit" not in _written_str(lead.session)
 
-    def test_done_with_flag_rejects_dirty(self, orch: Orchestrator) -> None:
-        """assign with requires_commit=True → done on dirty tree → rejected."""
+    def test_done_with_flag_dirty_passes_with_warning(self, orch: Orchestrator) -> None:
+        """assign with requires_commit=True → done on dirty tree → OK, Lead notice has warning."""
         pane = _make_working_pane()
         orch._panes_by_project.setdefault(TEST_PROJECT, {})["frontend"] = pane
+        lead = _make_lead_pane()
+        orch._panes_by_project[TEST_PROJECT]["lead"] = lead
 
         with (
             patch.object(orch, "spawn", return_value=(True, "spawned")),
@@ -109,27 +135,18 @@ class TestDoneGate:
         ):
             ok, msg = orch.done("frontend", note="done", project=TEST_PROJECT)
 
-        assert ok is False
-        assert "dirty" in msg
-        # error message was written into the pane session
-        pane.session.write.assert_called()
-        written = pane.session.write.call_args_list
-        injected = b"".join(
-            (a[0] if isinstance(a[0], bytes) else a[0].encode("utf-8"))
-            for call in written
-            for a in [call.args]
-            if a
-        )
-        assert (
-            b"rejected" in injected
-            or b"done rejected" in injected.lower()
-            or b"clean" in injected.lower()
-        )
+        assert ok is True
+        assert "rejected" not in msg
+        injected = _written_str(lead.session)
+        assert "requires-commit" in injected
+        assert "uncommitted" in injected
 
     def test_done_with_flag_allows_clean(self, orch: Orchestrator) -> None:
-        """assign with requires_commit=True → done on clean tree → allowed."""
+        """assign with requires_commit=True → done on clean tree → OK, no warning."""
         pane = _make_working_pane()
         orch._panes_by_project.setdefault(TEST_PROJECT, {})["mobile"] = pane
+        lead = _make_lead_pane()
+        orch._panes_by_project[TEST_PROJECT]["lead"] = lead
 
         with (
             patch.object(orch, "spawn", return_value=(True, "spawned")),
@@ -144,9 +161,10 @@ class TestDoneGate:
 
         assert ok is True
         assert "rejected" not in msg
+        assert "requires-commit" not in _written_str(lead.session)
 
-    def test_done_with_flag_then_commit_then_retry(self, orch: Orchestrator) -> None:
-        """First done rejected (dirty) → simulate commit → second done passes."""
+    def test_done_with_flag_dirty_clears_flag(self, orch: Orchestrator) -> None:
+        """Flag is cleared after done succeeds (even on dirty tree)."""
         pane = _make_working_pane()
         orch._panes_by_project.setdefault(TEST_PROJECT, {})["devops"] = pane
 
@@ -158,21 +176,13 @@ class TestDoneGate:
                 "devops", cwd="/repo", task="deploy", requires_commit=True, project=TEST_PROJECT
             )
 
-        # First attempt: dirty
-        with patch("agent_takkub.orchestrator.subprocess.run", return_value=_dirty_result()):
-            ok1, _ = orch.done("devops", note="done", project=TEST_PROJECT)
-        assert ok1 is False
-
-        # Flag must still be set so the gate still applies on retry
         ekey = _exit_key(TEST_PROJECT, "devops")
         assert orch._requires_commit_on_done.get(ekey) is True
 
-        # Second attempt: clean (agent committed)
-        with patch("agent_takkub.orchestrator.subprocess.run", return_value=_clean_result()):
-            ok2, msg2 = orch.done("devops", note="done", project=TEST_PROJECT)
-        assert ok2 is True
-        assert "rejected" not in msg2
-        # Flag cleared after successful done
+        with patch("agent_takkub.orchestrator.subprocess.run", return_value=_dirty_result()):
+            ok, _ = orch.done("devops", note="done", project=TEST_PROJECT)
+
+        assert ok is True
         assert ekey not in orch._requires_commit_on_done
 
     def test_close_clears_requires_commit_flag(self, orch: Orchestrator) -> None:
@@ -194,21 +204,51 @@ class TestDoneGate:
         """Flag on 'reviewer' must not affect 'designer' (no flag)."""
         pane_reviewer = _make_working_pane()
         pane_designer = _make_working_pane()
+        lead = _make_lead_pane()
         orch._panes_by_project.setdefault(TEST_PROJECT, {})["reviewer"] = pane_reviewer
-        orch._panes_by_project.setdefault(TEST_PROJECT, {})["designer"] = pane_designer
+        orch._panes_by_project[TEST_PROJECT]["designer"] = pane_designer
+        orch._panes_by_project[TEST_PROJECT]["lead"] = lead
 
         ekey_reviewer = _exit_key(TEST_PROJECT, "reviewer")
 
         # Only reviewer gets the flag
         orch._requires_commit_on_done[ekey_reviewer] = True
 
-        # designer done on dirty tree → allowed (no flag)
+        # designer done on dirty tree → allowed, no warning
         with patch("agent_takkub.orchestrator.subprocess.run", return_value=_dirty_result()):
             ok_designer, _ = orch.done("designer", note="done", project=TEST_PROJECT)
         assert ok_designer is True
 
-        # reviewer done on dirty tree → rejected (flag set)
+        lead_text_after_designer = _written_str(lead.session)
+        assert "requires-commit" not in lead_text_after_designer
+
+        # reviewer done on dirty tree → also passes, but Lead notice has warning
         with patch("agent_takkub.orchestrator.subprocess.run", return_value=_dirty_result()):
             ok_reviewer, msg_reviewer = orch.done("reviewer", note="done", project=TEST_PROJECT)
-        assert ok_reviewer is False
-        assert "dirty" in msg_reviewer
+        assert ok_reviewer is True
+        assert "rejected" not in msg_reviewer
+
+        lead_text_after_reviewer = _written_str(lead.session)
+        assert "requires-commit" in lead_text_after_reviewer
+
+    def test_done_with_flag_dirty_notice_contains_files_preview(self, orch: Orchestrator) -> None:
+        """Lead notice must include the dirty-files preview (up to 200 chars)."""
+        pane = _make_working_pane()
+        orch._panes_by_project.setdefault(TEST_PROJECT, {})["qa"] = pane
+        lead = _make_lead_pane()
+        orch._panes_by_project[TEST_PROJECT]["lead"] = lead
+
+        ekey = _exit_key(TEST_PROJECT, "qa")
+        orch._requires_commit_on_done[ekey] = True
+
+        dirty_files = "M src/api.py\nA tests/test_api.py\n"
+        with patch(
+            "agent_takkub.orchestrator.subprocess.run",
+            return_value=_dirty_result(dirty_files),
+        ):
+            ok, _ = orch.done("qa", note="done", project=TEST_PROJECT)
+
+        assert ok is True
+        injected = _written_str(lead.session)
+        assert "src/api.py" in injected
+        assert "tests/test_api.py" in injected

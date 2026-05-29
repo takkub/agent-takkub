@@ -525,7 +525,7 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         dest="requires_commit",
         default=False,
-        help="gate takkub done: reject if git working tree is not clean",
+        help="flag uncommitted changes to Lead on done (Lead reviews + commits; teammate ไม่ต้อง commit เอง)",
     )
     sa.add_argument(
         "--auto-chain",
