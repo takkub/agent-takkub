@@ -2019,7 +2019,16 @@ class Orchestrator(QObject):
             now = datetime.now()
         body = _render_decision_note(project, role, note, now, transcript_path=transcript_path)
         try:
-            day = RUNTIME_DIR / "sessions" / now.strftime("%Y-%m-%d") / project
+            safe_project = validate_name(project, "project")
+        except ValueError:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "_save_decision_note: rejected unsafe project name %r", project
+            )
+            return
+        try:
+            day = RUNTIME_DIR / "sessions" / now.strftime("%Y-%m-%d") / safe_project
             day.mkdir(parents=True, exist_ok=True)
             path = day / f"{role}-{now.strftime('%H%M%S')}.md"
             path.write_text(body, encoding="utf-8")
@@ -2030,7 +2039,7 @@ class Orchestrator(QObject):
         if vault is None:
             return
         try:
-            sessions = vault / "01-Projects" / project / "sessions"
+            sessions = vault / "01-Projects" / safe_project / "sessions"
             sessions.mkdir(parents=True, exist_ok=True)
             stamp = now.strftime("%Y-%m-%dT%H%M%S")
             (sessions / f"{stamp}-{role}.md").write_text(body, encoding="utf-8")
@@ -2044,6 +2053,15 @@ class Orchestrator(QObject):
         Never closes any pane — Lead stays open, teammates continue as-is.
         """
         project_ns = self._resolve_project(project)
+        try:
+            project_ns = validate_name(project_ns, "project")
+        except ValueError:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "end_session: rejected unsafe project name %r", project_ns
+            )
+            return False, f"unsafe project name rejected: {project_ns!r}"
         if not note.strip():
             note = "session ended"
         now = datetime.now()
@@ -2103,6 +2121,7 @@ class Orchestrator(QObject):
             return False, f"failed to write session file: {exc}"
 
         # Mirror to vault (best-effort, never fails the call).
+        # project_ns is already validated above so safe to use directly.
         vault = _resolve_vault_dir()
         if vault is not None:
             try:
@@ -2532,12 +2551,21 @@ class Orchestrator(QObject):
         since = now - timedelta(hours=24)
         written = 0
         for project in self._panes_by_project.keys():
-            body = build_resume_brief(project_filter=project, since=since)
+            try:
+                safe_project = validate_name(project, "project")
+            except ValueError:
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "write_resume_briefs: rejected unsafe project name %r", project
+                )
+                continue
+            body = build_resume_brief(project_filter=safe_project, since=since)
             if not body:
                 continue
             try:
                 briefs_dir.mkdir(parents=True, exist_ok=True)
-                (briefs_dir / f"{project}-{stamp}.md").write_text(body, encoding="utf-8")
+                (briefs_dir / f"{safe_project}-{stamp}.md").write_text(body, encoding="utf-8")
                 written += 1
             except OSError:
                 continue
