@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import logging
 import pathlib
+import re
 import subprocess
 import threading
 
@@ -224,8 +225,8 @@ _BROWSER_MCP_NAMES = frozenset(BROWSER_MCPS.keys())
 
 # Explicit allowlist of user MCP names that are safe to copy into
 # runtime/shared-mcp.json by default.  Criteria: stdio servers with no
-# bearer token or API-key credentials.  Any name NOT in this set is
-# evaluated by _is_secret_bearing(); if that check fails the entry is
+# bearer token, API-key, or inline DSN credentials.  Any name NOT in this
+# set is evaluated by _has_secrets(); if that check fails the entry is
 # skipped with a warning.
 #
 # To include pms (HTTP + Authorization header) cockpit-wide, set env:
@@ -233,7 +234,12 @@ _BROWSER_MCP_NAMES = frozenset(BROWSER_MCPS.keys())
 # This is opt-in because pms config carries a plaintext bearer token and
 # merging it into shared-mcp.json re-introduces the security regression
 # that was explicitly removed in the 2026-05-20 security audit.
-_USER_MCP_DEFAULT_ALLOW = frozenset({"obsidian-vault", "postgres-pms"})
+#
+# postgres-pms was removed from the default allow on 2026-05-29: its DSN
+# carries inline credentials (postgresql://user:pass@host) in args, so it
+# is now skipped by the general secret check like any other credential-
+# bearing entry.
+_USER_MCP_DEFAULT_ALLOW = frozenset({"obsidian-vault"})
 
 # Role-aware MCP policy: which MCPs each role pane sees.
 #
@@ -324,6 +330,11 @@ def _has_secrets(cfg: dict) -> bool:
         upper = str(var_name).upper()
         if any(s in upper for s in _SECRET_ENV_SUBSTRINGS):
             return True
+    args = cfg.get("args") or []
+    for a in args:
+        # DSN with inline credentials: scheme://user:pass@host
+        if re.search(r"://[^/@\s]+:[^/@\s]+@", str(a)):
+            return True
     return False
 
 
@@ -383,6 +394,14 @@ def ensure_user_mcps() -> tuple[bool, str]:
 
         in_allowlist = name in _USER_MCP_DEFAULT_ALLOW
         is_secret = _has_secrets(cfg)
+
+        if in_allowlist and is_secret:
+            _log.warning(
+                "ensure_user_mcps: %r is allowlisted but carries a credential "
+                "(written to runtime/shared-mcp.json). Consider rotating to a "
+                "credential-free config or env-based secret.",
+                name,
+            )
 
         # pms-specific opt-in gate — evaluate before the general secret check
         # so that TAKKUB_INCLUDE_PMS=1 actually reaches to_merge.

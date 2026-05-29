@@ -18,11 +18,19 @@ from agent_takkub import shared_dev_tools as sdt
 from agent_takkub.shared_dev_tools import (
     _BROWSER_MCP_NAMES,
     BROWSER_MCPS,
+    _has_secrets,
     ensure_user_mcps,
 )
 
 _OBSIDIAN_CFG = {"type": "stdio", "command": "npx", "args": ["-y", "obsidian-vault-mcp"]}
 _POSTGRES_CFG = {"type": "stdio", "command": "npx", "args": ["-y", "postgres-pms-mcp"]}
+# Real-world postgres-pms shape: DSN with inline credentials passed as an arg.
+# Credentials here are synthetic placeholders — never commit real secrets.
+_POSTGRES_DSN_CFG = {
+    "type": "stdio",
+    "command": "npx",
+    "args": ["-y", "pg-mcp", "postgresql://dbuser:REDACTED@localhost:5432/exampledb"],
+}
 _PMS_CFG = {
     "type": "http",
     "url": "http://localhost:3001/mcp",
@@ -175,3 +183,100 @@ class TestPmsOptIn:
         # The bearer token value must never appear in the return message
         assert "secret" not in msg
         assert "Bearer" not in msg
+
+
+class TestHasSecrets:
+    def test_dsn_with_credentials_detected(self) -> None:
+        cfg = {"args": ["postgresql://u:p@host/db"]}
+        assert _has_secrets(cfg) is True
+
+    def test_dsn_without_credentials_clean(self) -> None:
+        cfg = {"args": ["postgresql://host/db"]}
+        assert _has_secrets(cfg) is False
+
+    def test_normal_path_arg_clean(self) -> None:
+        cfg = {"args": ["/normal/path/file.js"]}
+        assert _has_secrets(cfg) is False
+
+    def test_authorization_header_detected_regression(self) -> None:
+        cfg = {"headers": {"Authorization": "Bearer x"}}
+        assert _has_secrets(cfg) is True
+
+    def test_env_api_key_detected_regression(self) -> None:
+        cfg = {"env": {"API_KEY": "x"}}
+        assert _has_secrets(cfg) is True
+
+
+class TestPostgresPmsRemovedFromAllowlist:
+    """postgres-pms is no longer in _USER_MCP_DEFAULT_ALLOW (removed 2026-05-29).
+
+    Its real config carries DSN credentials in args, so it must now be
+    skipped by the general credential check — never merged into the
+    shared runtime file.
+    """
+
+    def test_postgres_pms_not_in_default_allow(self) -> None:
+        assert "postgres-pms" not in sdt._USER_MCP_DEFAULT_ALLOW
+        assert "obsidian-vault" in sdt._USER_MCP_DEFAULT_ALLOW
+
+    def test_postgres_pms_with_dsn_creds_is_skipped(
+        self, isolated, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mcp_file, claude_json = isolated
+        mcp_file.write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
+        # User has the real credential-bearing postgres-pms + a clean obsidian-vault.
+        _write_claude_json(
+            claude_json,
+            {"postgres-pms": _POSTGRES_DSN_CFG, "obsidian-vault": _OBSIDIAN_CFG},
+        )
+
+        ok, msg = ensure_user_mcps()
+        assert ok, msg
+        data = _read_mcp(mcp_file)
+        # Credential-bearing postgres-pms must NOT be merged.
+        assert "postgres-pms" not in data["mcpServers"]
+        # Clean obsidian-vault still merges.
+        assert "obsidian-vault" in data["mcpServers"]
+        # The DSN password must never leak into the return message.
+        assert "REDACTED" not in msg
+
+    def test_clean_postgres_pms_still_merges(
+        self, isolated, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A credential-free postgres-pms (no inline DSN secret) is not a
+        # secret, so it falls through and merges even without allowlisting.
+        mcp_file, claude_json = isolated
+        mcp_file.write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
+        _write_claude_json(claude_json, {"postgres-pms": _POSTGRES_CFG})
+
+        ok, msg = ensure_user_mcps()
+        assert ok, msg
+        data = _read_mcp(mcp_file)
+        assert "postgres-pms" in data["mcpServers"]
+
+
+class TestAllowlistedSecretWarns:
+    """An allowlisted entry that carries a credential is still merged
+    (allowlist wins) but emits a warning so the operator can rotate it."""
+
+    def test_allowlisted_with_secret_merges_and_warns(
+        self, isolated, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        mcp_file, claude_json = isolated
+        mcp_file.write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
+        # obsidian-vault is the lone allowlisted name; give it a DSN secret.
+        secretful = {
+            "type": "stdio",
+            "command": "npx",
+            "args": ["-y", "obsidian-vault-mcp", "postgresql://u:p@localhost/db"],
+        }
+        _write_claude_json(claude_json, {"obsidian-vault": secretful})
+
+        with caplog.at_level("WARNING"):
+            ok, msg = ensure_user_mcps()
+        assert ok, msg
+        data = _read_mcp(mcp_file)
+        # Allowlist wins — it still merges...
+        assert "obsidian-vault" in data["mcpServers"]
+        # ...but a rotation warning was emitted.
+        assert any("allowlisted but carries a credential" in r.message for r in caplog.records)
