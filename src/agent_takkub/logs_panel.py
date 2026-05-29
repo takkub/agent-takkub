@@ -28,6 +28,32 @@ from PyQt6.QtWidgets import (
 # log grew to multi-MB (IPC + UI share this thread). 256 KiB >> 120 lines.
 _TAIL_BYTES = 256 * 1024
 
+
+def read_log_tail(path: Path, tail_bytes: int = _TAIL_BYTES) -> str:
+    """Return the decoded tail of *path* — at most *tail_bytes* bytes, never the
+    whole file. When the file is larger than the window we seek to the end and
+    drop the (likely partial) first line. Empty string on any read error.
+
+    Extracted from LogsPanel._poll so the cheap-read behaviour can be tested
+    without standing up a QWidget."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return ""
+    try:
+        with open(path, "rb") as f:
+            if size > tail_bytes:
+                f.seek(size - tail_bytes)
+            raw = f.read()
+    except OSError:
+        return ""
+    if size > tail_bytes:
+        nl = raw.find(b"\n")
+        if nl != -1:
+            raw = raw[nl + 1 :]
+    return raw.decode("utf-8", "replace")
+
+
 _EVENT_COLOR = {
     "spawn": "#22c55e",
     "assign": "#facc15",
@@ -138,19 +164,7 @@ class LogsPanel(QWidget):
         if size == self._last_size:
             return
         self._last_size = size
-        try:
-            with open(self._log_path, "rb") as f:
-                if size > _TAIL_BYTES:
-                    f.seek(size - _TAIL_BYTES)
-                raw = f.read()
-        except OSError:
-            return
-        if size > _TAIL_BYTES:
-            # we seeked into the middle of a line — drop the partial head
-            nl = raw.find(b"\n")
-            if nl != -1:
-                raw = raw[nl + 1 :]
-        text = raw.decode("utf-8", "replace")
+        text = read_log_tail(self._log_path)
 
         # show the last ~120 lines so we don't blow up memory
         lines = text.splitlines()[-120:]
