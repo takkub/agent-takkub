@@ -4,7 +4,7 @@ Diagnosed with py-spy live stack dumps + raw-socket IPC probe + A/B test.
 
 ## TL;DR
 
-There are **two separate problems**, often confused as one "the cockpit hangs":
+There are **three separate problems**, often confused as one "the cockpit hangs":
 
 1. **(FIXED)** `LogsPanel` read the *entire* `events.log` every 1 s on the Qt
    main thread. Once the log reached ~10 MB this saturated the main thread →
@@ -14,6 +14,14 @@ There are **two separate problems**, often confused as one "the cockpit hangs":
    of PTY output) blocks the IPC server for the spawn window → `takkub` CLI
    hits its 15 s timeout and the UI freezes *momentarily*, then **recovers on
    its own**. This is the "ค้างตอน assign" the user kept seeing.
+3. **(FIXED — commit 0a84ef4)** The shared Chromium **GPU process crashes**
+   when 2+ project tabs each host xterm.js WebEngine views. When it dies every
+   view goes blank/white and the window stops responding — the OS shows a
+   "not responding / end process" dialog. This is the **hard white-screen
+   freeze** the user had to close+reopen the app to escape (distinct from #2,
+   which self-recovers). Fixed by forcing software rendering
+   (`--disable-gpu --disable-gpu-compositing`): a text terminal needs no GPU,
+   so there is no GPU process left to take the UI down.
 
 The orchestrator itself never crashed. During a "hang" a raw TCP request to
 the IPC port replied in **0.00 s** while `takkub list` timed out — the GUI was
@@ -77,12 +85,23 @@ Goal: a `takkub assign`/`spawn` must never block the IPC reply or freeze the UI.
 4. **`find_rtk_binary` — DONE (commit dc6fa14).** Caches the resolved path
    (re-validated; negatives not cached) so spawns don't re-scan PATH.
 
+## Fix for #3 — DONE (commit 0a84ef4)
+
+Add `--disable-gpu --disable-gpu-compositing` to `QTWEBENGINE_CHROMIUM_FLAGS`
+in `app.py` (before QtWebEngine boots). Forces software compositing so no GPU
+process exists to crash.
+
+Verified live: `gpu-process` count = **0**, 8 panes + multiple project tabs
+open, `takkub list` responsive at **128 ms**, and the user confirmed the
+white-screen freeze no longer reproduces when opening 2+ projects. Memory cost
+is acceptable (terminal text rendering is cheap on CPU); no perceptible latency.
+
 Remaining: only #2 (offload pyte parsing/render off the main thread). With #1
-shipped the CLI/UI no longer freeze *waiting* on a spawn; #2 would also remove
-the brief hitch while a chatty pane streams its first burst. It's the largest
-and riskiest change (threading a terminal emulator) — left for a deliberate
-session. The per-spawn QWebEngine init is inherent to using WebEngine and is
-not addressed by any of the above.
+shipped the CLI/UI no longer freeze *waiting* on a spawn; the pyte parse +
+transcript write are already moved to the reader thread (commit 01633c7), so
+the main thread now only forwards bytes to xterm.js + emits the
+state-change notify. The per-spawn QWebEngine init is inherent to using
+WebEngine and is not addressed by any of the above.
 
 ## How to verify a fix
 
@@ -90,3 +109,7 @@ not addressed by any of the above.
   MainThread must stay parked at `app.py:117` (event loop) — never blocked in
   `spawn`/`pyte`/`read_*` for more than a frame.
 - `takkub list` issued during a spawn must reply in < 1 s.
+- **White-screen (#3):** with the running app, no `QtWebEngineProcess.exe`
+  command line should contain `type=gpu-process` (count must be 0). Open 2+
+  project tabs, spawn several panes each — views must keep rendering (never go
+  blank/white) and the window must stay responsive.
