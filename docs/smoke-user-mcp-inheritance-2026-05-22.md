@@ -24,7 +24,7 @@ result: PARTIAL PASS (1 FAIL, 1 WARNING)
     "playwright":     { "type":"stdio", "command":"npx", "args":["-y","@playwright/mcp@0.0.75"] },
     "chrome-devtools":{ "type":"stdio", "command":"npx", "args":["-y","chrome-devtools-mcp@0.26.0"] },
     "obsidian-vault": { "type":"stdio", "command":"npx", "args":["-y","@bitbonsai/mcpvault@latest","C:\\Users\\monch\\WebstormProjects\\second-brain"] },
-    "postgres-pms":   { "type":"stdio", "command":"npx", "args":["-y","@modelcontextprotocol/server-postgres","postgresql://pms_user:pms_pass@localhost:5432/pms_db"] }
+    "postgres-pms":   { "type":"stdio", "command":"npx", "args":["-y","@modelcontextprotocol/server-postgres","postgresql://REDACTED@localhost:5432/pms_db"] }
   }
 }
 ```
@@ -45,7 +45,7 @@ plugin:ecc:playwright: npx -y @playwright/mcp@0.0.69 --extension - ✗ Failed to
 plugin:ecc:sequential-thinking: npx -y @modelcontextprotocol/server-sequential-thinking@2025.12.18 - ✓ Connected
 obsidian-vault: npx -y @bitbonsai/mcpvault@latest C:\Users\monch\WebstormProjects\second-brain - ✓ Connected
 chrome-devtools: npx -y chrome-devtools-mcp@latest - ✓ Connected
-postgres-pms: npx -y @modelcontextprotocol/server-postgres postgresql://pms_user:pms_pass@localhost:5432/pms_db - ✓ Connected
+postgres-pms: npx -y @modelcontextprotocol/server-postgres postgresql://REDACTED@localhost:5432/pms_db - ✓ Connected
 pms: https://api.wsol.co.th/pms/mcp (HTTP) - ✗ Failed to connect
 ```
 
