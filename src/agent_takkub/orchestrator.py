@@ -123,11 +123,23 @@ __all__ = [  # backwards-compat re-exports
 ]
 
 
+# Cap events.log so it can never grow unbounded. The LogsPanel dock and any
+# tail reader pay per-byte; a multi-MB log on the Qt main thread wedged the
+# cockpit (see logs_panel._TAIL_BYTES). When the file crosses the cap we
+# rotate it to events.log.old (single generation) and start fresh.
+_EVENTS_LOG_MAX_BYTES = 2 * 1024 * 1024
+
+
 def _log_event(event: str, **details) -> None:
     """Append a JSONL event line to runtime/events.log. Best-effort; never
     raises so an audit-log failure can't take down the orchestrator."""
     try:
         ensure_runtime()
+        try:
+            if EVENTS_LOG.exists() and EVENTS_LOG.stat().st_size > _EVENTS_LOG_MAX_BYTES:
+                os.replace(EVENTS_LOG, EVENTS_LOG.parent / (EVENTS_LOG.name + ".old"))
+        except OSError:
+            pass
         line = json.dumps(
             {"ts": datetime.now().isoformat(timespec="seconds"), "event": event, **details},
             ensure_ascii=False,

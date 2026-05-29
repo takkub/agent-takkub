@@ -22,6 +22,12 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+# Only read the tail of events.log — never the whole file. The panel shows
+# the last ~120 lines, so a fixed-size tail is always enough. Reading the
+# entire file on the Qt main thread every second wedged the cockpit once the
+# log grew to multi-MB (IPC + UI share this thread). 256 KiB >> 120 lines.
+_TAIL_BYTES = 256 * 1024
+
 _EVENT_COLOR = {
     "spawn": "#22c55e",
     "assign": "#facc15",
@@ -133,9 +139,18 @@ class LogsPanel(QWidget):
             return
         self._last_size = size
         try:
-            text = self._log_path.read_text(encoding="utf-8")
+            with open(self._log_path, "rb") as f:
+                if size > _TAIL_BYTES:
+                    f.seek(size - _TAIL_BYTES)
+                raw = f.read()
         except OSError:
             return
+        if size > _TAIL_BYTES:
+            # we seeked into the middle of a line — drop the partial head
+            nl = raw.find(b"\n")
+            if nl != -1:
+                raw = raw[nl + 1 :]
+        text = raw.decode("utf-8", "replace")
 
         # show the last ~120 lines so we don't blow up memory
         lines = text.splitlines()[-120:]
