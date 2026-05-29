@@ -159,20 +159,23 @@ def scan_artifacts(
         if not base.exists():
             continue
         try:
-            for p in base.rglob("*"):
-                if p.is_symlink() or p.is_dir():
-                    continue
-                if p in seen:
-                    continue
-                seen.add(p)
-                if any(part in _HARVEST_EXCLUDE_DIRS for part in p.parts):
-                    continue
-                try:
-                    mtime = p.stat().st_mtime
-                except OSError:
-                    continue
-                if mtime >= since_ts:
-                    found.append((mtime, p))
+            for root, dirnames, filenames in os.walk(base, followlinks=False):
+                dirnames[:] = [d for d in dirnames if d not in _HARVEST_EXCLUDE_DIRS]
+                for fname in filenames:
+                    p = pathlib.Path(root) / fname
+                    if p.is_symlink():
+                        continue
+                    if p in seen:
+                        continue
+                    seen.add(p)
+                    if any(part in _HARVEST_EXCLUDE_DIRS for part in p.parts):
+                        continue
+                    try:
+                        mtime = p.stat().st_mtime
+                    except OSError:
+                        continue
+                    if mtime >= since_ts:
+                        found.append((mtime, p))
         except OSError:
             continue
 
@@ -1589,10 +1592,12 @@ class Orchestrator(QObject):
         """Persist current queue for project_ns so it survives orchestrator restart."""
         try:
             ensure_runtime()
-            self._pending_cc_path(project_ns).write_text(
-                json.dumps(self._pending_lead_cc.get(project_ns, []), ensure_ascii=False),
-                encoding="utf-8",
-            )
+            queue = self._pending_lead_cc.get(project_ns, [])
+            path = self._pending_cc_path(project_ns)
+            if not queue:
+                path.unlink(missing_ok=True)
+                return
+            path.write_text(json.dumps(queue, ensure_ascii=False), encoding="utf-8")
         except Exception:
             pass
 
@@ -1898,8 +1903,14 @@ class Orchestrator(QObject):
                     timeout=10,
                 )
                 dirty = git_result.stdout.strip()
-            except Exception:
+            except Exception as exc:
                 dirty = ""  # can't check; proceed without warning
+                _log_event(
+                    "done_commit_gate_skipped",
+                    role=from_role,
+                    project=project_ns,
+                    reason=str(exc)[:200],
+                )
             if dirty:
                 has_uncommitted = True
                 files_preview = dirty[:200]

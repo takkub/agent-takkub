@@ -8,6 +8,7 @@ What these tests pin down:
   - sorted by mtime descending
   - skips non-existent scan bases silently
   - mtime_rel string follows age bucket rules
+  - circular dir symlinks do not cause infinite recursion (#16)
 """
 
 from __future__ import annotations
@@ -152,3 +153,37 @@ class TestScanArtifactsPayloadShape:
             assert "path" in item
             assert "mtime_ts" in item
             assert "mtime_rel" in item
+
+
+class TestScanArtifactsCircularSymlink:
+    """#16 — circular dir symlinks must not cause infinite recursion."""
+
+    @pytest.mark.skipif(
+        not hasattr(pathlib.Path, "symlink_to"),
+        reason="symlinks not available",
+    )
+    def test_circular_dir_symlink_does_not_hang(self, tmp_path: pathlib.Path) -> None:
+        """scan_artifacts must return without hanging when a dir symlink points back."""
+        real_file = _write(tmp_path / "src" / "module.py")
+        loop_target = tmp_path / "loop"
+        try:
+            loop_target.symlink_to(tmp_path, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pytest.skip("cannot create directory symlink on this platform")
+
+        since = time.time() - 60
+        result = scan_artifacts([tmp_path], since)
+        paths = [pathlib.Path(r["path"]) for r in result]
+        # real file found; the circular symlink dir was not followed
+        assert real_file in paths
+        assert loop_target not in paths
+
+    def test_normal_files_still_scanned_after_os_walk_switch(self, tmp_path: pathlib.Path) -> None:
+        """os.walk-based scan still returns regular files correctly (regression guard)."""
+        f1 = _write(tmp_path / "a" / "one.py")
+        f2 = _write(tmp_path / "b" / "two.py")
+        since = time.time() - 60
+        result = scan_artifacts([tmp_path], since)
+        paths = [pathlib.Path(r["path"]) for r in result]
+        assert f1 in paths
+        assert f2 in paths

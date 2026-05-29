@@ -6,7 +6,7 @@ cwd; if the output is non-empty (working tree dirty) done still SUCCEEDS but
 the Lead notice is augmented with an uncommitted-changes warning so Lead can
 review and commit. Teammate ไม่ต้อง commit เอง.
 
-Seven scenarios:
+Eight scenarios:
   1. No flag → done on dirty tree → OK, no warning
   2. Flag set → done on dirty tree → OK (passes), Lead notice contains warning
   3. Flag set → done on clean tree → OK, no warning in notice
@@ -14,15 +14,18 @@ Seven scenarios:
   5. close() → flag cleared (no stale gate on next assign)
   6. Two panes (one flagged, one not) → warning only on flagged one
   7. Flag set → done on dirty → Lead notice body contains files preview
+  8. (#19) git unavailable → done still returns ok + done_commit_gate_skipped logged
 """
 
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
 from PyQt6.QtCore import QCoreApplication
 
+from agent_takkub import orchestrator as orch_mod
 from agent_takkub.orchestrator import Orchestrator, _exit_key
 
 TEST_PROJECT = "testproj"
@@ -252,3 +255,68 @@ class TestDoneGate:
         injected = _written_str(lead.session)
         assert "src/api.py" in injected
         assert "tests/test_api.py" in injected
+
+
+class TestDoneCommitGateSkipped:
+    """#19 — gate logs done_commit_gate_skipped when git is unavailable."""
+
+    def test_git_unavailable_done_still_ok(self, orch: Orchestrator, tmp_path, monkeypatch) -> None:
+        """done() returns ok even when subprocess.run raises (git not available)."""
+        monkeypatch.setattr(orch_mod, "EVENTS_LOG", tmp_path / "events.log")
+
+        pane = _make_working_pane()
+        orch._panes_by_project.setdefault(TEST_PROJECT, {})["backend"] = pane
+        lead = _make_lead_pane()
+        orch._panes_by_project[TEST_PROJECT]["lead"] = lead
+
+        with (
+            patch.object(orch, "spawn", return_value=(True, "spawned")),
+            patch.object(orch, "_send_when_ready"),
+        ):
+            orch.assign(
+                "backend", cwd="/repo", task="do work", requires_commit=True, project=TEST_PROJECT
+            )
+
+        with patch(
+            "agent_takkub.orchestrator.subprocess.run",
+            side_effect=FileNotFoundError("git not found"),
+        ):
+            ok, msg = orch.done("backend", note="done", project=TEST_PROJECT)
+
+        assert ok is True
+        assert "rejected" not in msg
+
+    def test_git_unavailable_logs_gate_skipped_event(
+        self, orch: Orchestrator, tmp_path, monkeypatch
+    ) -> None:
+        """done_commit_gate_skipped event is written to events.log when git raises."""
+        log_path = tmp_path / "events.log"
+        monkeypatch.setattr(orch_mod, "EVENTS_LOG", log_path)
+
+        pane = _make_working_pane()
+        orch._panes_by_project.setdefault(TEST_PROJECT, {})["frontend"] = pane
+        lead = _make_lead_pane()
+        orch._panes_by_project[TEST_PROJECT]["lead"] = lead
+
+        with (
+            patch.object(orch, "spawn", return_value=(True, "spawned")),
+            patch.object(orch, "_send_when_ready"),
+        ):
+            orch.assign(
+                "frontend", cwd="/repo", task="build UI", requires_commit=True, project=TEST_PROJECT
+            )
+
+        with patch(
+            "agent_takkub.orchestrator.subprocess.run",
+            side_effect=OSError("no git"),
+        ):
+            orch.done("frontend", note="done", project=TEST_PROJECT)
+
+        events = [
+            json.loads(ln) for ln in log_path.read_text(encoding="utf-8").splitlines() if ln.strip()
+        ]
+        skipped = [e for e in events if e["event"] == "done_commit_gate_skipped"]
+        assert len(skipped) == 1
+        assert skipped[0]["role"] == "frontend"
+        assert skipped[0]["project"] == TEST_PROJECT
+        assert "reason" in skipped[0]

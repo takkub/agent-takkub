@@ -348,17 +348,32 @@ class TestPersistRoundtrip:
         loaded = json.loads(saved_path.read_text())
         assert loaded == items
 
-    def test_save_empty_clears_file(self, orch, tmp_path, monkeypatch):
-        """Saving empty queue writes [] so the loader knows it's cleared."""
+    def test_save_empty_deletes_file(self, orch, tmp_path, monkeypatch):
+        """Saving empty queue deletes the file instead of writing [] (avoids accumulation)."""
         monkeypatch.setattr(orch_mod, "RUNTIME_DIR", tmp_path)
         monkeypatch.setattr(orch_mod, "ensure_runtime", lambda: None)
 
         proj = "proj_a"
+        saved_path = tmp_path / f"pending-lead-cc-{proj}.json"
+        # pre-create file to verify it gets removed
+        saved_path.write_text("[]", encoding="utf-8")
+
         orch._pending_lead_cc[proj] = []
         orch._save_pending_cc(proj)
 
-        saved_path = tmp_path / f"pending-lead-cc-{proj}.json"
-        assert json.loads(saved_path.read_text()) == []
+        assert not saved_path.exists()
+
+    def test_save_empty_noop_when_file_missing(self, orch, tmp_path, monkeypatch):
+        """Saving empty queue when file doesn't exist is a no-op (no error)."""
+        monkeypatch.setattr(orch_mod, "RUNTIME_DIR", tmp_path)
+        monkeypatch.setattr(orch_mod, "ensure_runtime", lambda: None)
+
+        proj = "proj_b"
+        orch._pending_lead_cc[proj] = []
+        # Should not raise even though file doesn't exist
+        orch._save_pending_cc(proj)
+
+        assert not (tmp_path / f"pending-lead-cc-{proj}.json").exists()
 
     def test_load_restores_queue(self, orch, tmp_path, monkeypatch):
         """_load_pending_cc reads existing files and populates _pending_lead_cc."""
