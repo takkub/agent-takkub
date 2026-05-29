@@ -196,3 +196,51 @@ class TestBinaryGuard:
         ok, msg = rtk_helper.install_rtk(bogus)
         assert not ok
         assert "not a directory" in msg.lower()
+
+
+class TestFindRtkBinaryCache:
+    """find_rtk_binary() runs on the Qt main thread per pane spawn; it caches
+    a found path (re-validated) so repeated spawns don't re-scan PATH."""
+
+    def test_caches_positive_result_no_rescan(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(rtk_helper, "_RTK_BINARY_CACHE", None, raising=False)
+        real = tmp_path / "rtk.exe"
+        real.write_text("", encoding="utf-8")
+        calls = {"n": 0}
+
+        def fake_which(name: str):
+            calls["n"] += 1
+            return str(real) if name == "rtk" else None
+
+        monkeypatch.setattr(rtk_helper, "which", fake_which)
+
+        assert rtk_helper.find_rtk_binary() == str(real)
+        first = calls["n"]
+        assert first >= 1
+        # Second call must hit the cache — `which` not invoked again.
+        assert rtk_helper.find_rtk_binary() == str(real)
+        assert calls["n"] == first
+
+    def test_does_not_cache_negative_result(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(rtk_helper, "_RTK_BINARY_CACHE", None, raising=False)
+        monkeypatch.setattr(rtk_helper, "_FALLBACK_RTK_PATHS", [], raising=False)
+        monkeypatch.setattr(rtk_helper, "which", lambda name: None)
+        assert rtk_helper.find_rtk_binary() is None
+        # A later install is picked up (no negative caching).
+        real = tmp_path / "rtk.exe"
+        real.write_text("", encoding="utf-8")
+        monkeypatch.setattr(rtk_helper, "which", lambda name: str(real) if name == "rtk" else None)
+        assert rtk_helper.find_rtk_binary() == str(real)
+
+    def test_revalidates_stale_cache(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A cached path that no longer exists must be re-resolved, not returned.
+        stale = tmp_path / "gone.exe"
+        monkeypatch.setattr(rtk_helper, "_RTK_BINARY_CACHE", str(stale), raising=False)
+        real = tmp_path / "rtk.exe"
+        real.write_text("", encoding="utf-8")
+        monkeypatch.setattr(rtk_helper, "which", lambda name: str(real) if name == "rtk" else None)
+        assert rtk_helper.find_rtk_binary() == str(real)

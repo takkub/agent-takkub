@@ -37,18 +37,31 @@ _FALLBACK_RTK_PATHS: tuple[Path, ...] = (
 )
 
 
+# Cache the resolved path once found. find_rtk_binary() runs on the Qt main
+# thread on every pane spawn; each call did two PATH scans (`which`). The
+# binary location doesn't move within a session, so cache the positive result
+# (re-validated cheaply with one stat). We deliberately do NOT cache a negative
+# result, so installing rtk mid-session is still picked up.
+_RTK_BINARY_CACHE: str | None = None
+
+
 def find_rtk_binary() -> str | None:
     """Resolve an absolute path to the rtk binary, or None if not present.
 
     Search order: PATH (`shutil.which`) for both `rtk` and `rtk.exe`, then a
     list of well-known install locations. The fallback list covers the case
     where pythonw inherits a thinner PATH than the cmd that launched it."""
+    global _RTK_BINARY_CACHE
+    if _RTK_BINARY_CACHE is not None and Path(_RTK_BINARY_CACHE).is_file():
+        return _RTK_BINARY_CACHE
     for name in ("rtk", "rtk.exe"):
         found = which(name)
         if found:
+            _RTK_BINARY_CACHE = found
             return found
     for cand in _FALLBACK_RTK_PATHS:
         if cand.is_file():
+            _RTK_BINARY_CACHE = str(cand)
             return str(cand)
     return None
 

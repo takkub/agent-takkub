@@ -106,8 +106,40 @@ def find_latest_session(cwd: str | Path, since_ts: float = 0.0) -> Path | None:
     return best[1] if best else None
 
 
+# The token badge refreshes every 5 s per pane and only needs the *last*
+# assistant turn, which sits at the end of the file. Scanning the whole JSONL
+# (claude sessions reach tens of MB) on the Qt main thread caused periodic UI
+# hitches — same failure mode as the events.log full-read. So we scan only the
+# tail and fall back to a full scan only if the tail held no assistant turn.
+_TAIL_SCAN_BYTES = 512 * 1024
+
+
+def _scan_lines_for_usage(lines) -> tuple[dict | None, str | None]:
+    """Return (last_usage_block, last_model) from an iterable of JSONL lines."""
+    last_usage: dict | None = None
+    last_model: str | None = None
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            j = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if j.get("type") != "assistant":
+            continue
+        msg = j.get("message")
+        if not isinstance(msg, dict):
+            continue
+        u = msg.get("usage")
+        if not isinstance(u, dict):
+            continue
+        last_usage = u
+        last_model = msg.get("model") or last_model
+    return last_usage, last_model
+
+
 def read_last_usage(jsonl: Path) -> dict | None:
-    """Stream the JSONL and return the last assistant turn's usage block.
+    """Return the last assistant turn's usage block.
 
     Returns a dict with the keys:
         input, cache_creation, cache_read, output, prompt, total, model
@@ -115,29 +147,38 @@ def read_last_usage(jsonl: Path) -> dict | None:
     to the model this turn — the context occupancy) and `total = prompt +
     output`.
     """
-    last_usage: dict | None = None
-    last_model: str | None = None
     try:
-        with jsonl.open("r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                if not line.strip():
-                    continue
-                try:
-                    j = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if j.get("type") != "assistant":
-                    continue
-                msg = j.get("message")
-                if not isinstance(msg, dict):
-                    continue
-                u = msg.get("usage")
-                if not isinstance(u, dict):
-                    continue
-                last_usage = u
-                last_model = msg.get("model") or last_model
+        size = jsonl.stat().st_size
     except OSError:
         return None
+
+    last_usage: dict | None = None
+    last_model: str | None = None
+
+    # Fast path: scan only the tail. The newest assistant turn is near EOF.
+    if size > _TAIL_SCAN_BYTES:
+        try:
+            with open(jsonl, "rb") as f:
+                f.seek(size - _TAIL_SCAN_BYTES)
+                raw = f.read()
+            nl = raw.find(b"\n")  # drop the partial leading line
+            if nl != -1:
+                raw = raw[nl + 1 :]
+            last_usage, last_model = _scan_lines_for_usage(
+                raw.decode("utf-8", "replace").splitlines()
+            )
+        except OSError:
+            last_usage = None
+
+    # Full scan when the file is small, or the tail held no assistant turn
+    # (e.g. a very large final turn pushed it past the window).
+    if last_usage is None:
+        try:
+            with jsonl.open("r", encoding="utf-8", errors="replace") as f:
+                last_usage, last_model = _scan_lines_for_usage(f)
+        except OSError:
+            return None
+
     if not last_usage:
         return None
     inp = int(last_usage.get("input_tokens") or 0)
