@@ -1,12 +1,13 @@
 """Spawn-level regression: env passed to PtySession.spawn must exclude secrets
-for Claude teammate panes, and retain them for the Lead pane.
+for Claude teammate panes; Lead uses an allowlist (not full env copy).
 
 Coverage:
   1. spawn("backend")  → env excludes the four common secret vars
-  2. spawn("lead")     → env retains all four secrets (Lead full env preserved)
+  2. spawn("lead")     → ANTHROPIC_API_KEY filtered; GH_TOKEN / git identity pass
   3. Both spawn paths  → TAKKUB_ROLE and TAKKUB_PROJECT always present
   4. TAKKUB_LEAD_TOKEN → never inherited from parent env by teammate panes;
      Lead pane receives the orchestrator-generated token (not any parent leak)
+  5. _build_lead_env() unit tests: allowlist semantics + TAKKUB_LEAD_ENV_ALLOW
 """
 
 from __future__ import annotations
@@ -119,40 +120,53 @@ class TestClaudeTeammateEnvLeak:
         assert "AWS_ACCESS_KEY_ID" not in env
 
 
-class TestClaudeLeadEnvPreserved:
-    """Lead pane must retain the full cockpit env so user-level tools (gh, docker, …) work."""
+class TestClaudeLeadEnvFiltered:
+    """Lead pane uses _build_lead_env() allowlist — secrets not in the list are filtered."""
 
-    def test_lead_retains_anthropic_api_key(
+    def test_lead_excludes_anthropic_api_key(
         self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-anthro")
         env = _spawn_capture_env(orch, "lead")
-        assert "ANTHROPIC_API_KEY" in env
-        assert env["ANTHROPIC_API_KEY"] == "fake-anthro"
+        assert "ANTHROPIC_API_KEY" not in env
 
-    def test_lead_retains_openai_api_key(
+    def test_lead_excludes_openai_api_key(
         self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("OPENAI_API_KEY", "fake-openai")
         env = _spawn_capture_env(orch, "lead")
-        assert "OPENAI_API_KEY" in env
-        assert env["OPENAI_API_KEY"] == "fake-openai"
+        assert "OPENAI_API_KEY" not in env
+
+    def test_lead_excludes_aws_access_key_id(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("AWS_ACCESS_KEY_ID", "fake-aws")
+        env = _spawn_capture_env(orch, "lead")
+        assert "AWS_ACCESS_KEY_ID" not in env
 
     def test_lead_retains_gh_token(
         self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """GH_TOKEN is in _LEAD_ENV_EXTRA_ALLOWLIST — Lead needs it for gh CLI."""
         monkeypatch.setenv("GH_TOKEN", "fake-gh")
         env = _spawn_capture_env(orch, "lead")
         assert "GH_TOKEN" in env
         assert env["GH_TOKEN"] == "fake-gh"
 
-    def test_lead_retains_aws_access_key_id(
+    def test_lead_retains_github_token(
         self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setenv("AWS_ACCESS_KEY_ID", "fake-aws")
+        monkeypatch.setenv("GITHUB_TOKEN", "fake-github")
         env = _spawn_capture_env(orch, "lead")
-        assert "AWS_ACCESS_KEY_ID" in env
-        assert env["AWS_ACCESS_KEY_ID"] == "fake-aws"
+        assert "GITHUB_TOKEN" in env
+        assert env["GITHUB_TOKEN"] == "fake-github"
+
+    def test_lead_retains_base_allowlist_keys(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Lead env must include PATH and other base allowlist keys."""
+        env = _spawn_capture_env(orch, "lead")
+        assert "PATH" in env
 
 
 class TestClaudeSpawnEnvRegressions:
@@ -177,6 +191,63 @@ class TestClaudeSpawnEnvRegressions:
         env = _spawn_capture_env(orch, "lead")
         assert "TAKKUB_PROJECT" in env
         assert env["TAKKUB_PROJECT"] == TEST_PROJECT
+
+
+class TestBuildLeadEnvUnit:
+    """Unit tests for _build_lead_env() — allowlist semantics, no spawn needed."""
+
+    def test_filters_anthropic_api_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from agent_takkub.orchestrator import _build_lead_env
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "should-be-filtered")
+        env = _build_lead_env()
+        assert "ANTHROPIC_API_KEY" not in env
+
+    def test_filters_openai_api_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from agent_takkub.orchestrator import _build_lead_env
+
+        monkeypatch.setenv("OPENAI_API_KEY", "should-be-filtered")
+        env = _build_lead_env()
+        assert "OPENAI_API_KEY" not in env
+
+    def test_retains_gh_token(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from agent_takkub.orchestrator import _build_lead_env
+
+        monkeypatch.setenv("GH_TOKEN", "my-gh-token")
+        env = _build_lead_env()
+        assert "GH_TOKEN" in env
+        assert env["GH_TOKEN"] == "my-gh-token"
+
+    def test_retains_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from agent_takkub.orchestrator import _build_lead_env
+
+        env = _build_lead_env()
+        assert "PATH" in env
+
+    def test_custom_key_via_takkub_lead_env_allow(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from agent_takkub.orchestrator import _build_lead_env
+
+        monkeypatch.setenv("MY_CUSTOM_KEY", "custom-value")
+        monkeypatch.setenv("TAKKUB_LEAD_ENV_ALLOW", "MY_CUSTOM_KEY")
+        env = _build_lead_env()
+        assert "MY_CUSTOM_KEY" in env
+        assert env["MY_CUSTOM_KEY"] == "custom-value"
+
+    def test_custom_key_not_present_without_allow(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from agent_takkub.orchestrator import _build_lead_env
+
+        monkeypatch.setenv("MY_CUSTOM_KEY", "custom-value")
+        monkeypatch.delenv("TAKKUB_LEAD_ENV_ALLOW", raising=False)
+        env = _build_lead_env()
+        assert "MY_CUSTOM_KEY" not in env
+
+    def test_gh_token_not_in_build_pane_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """GH_TOKEN is Lead-only — must not leak into teammate env."""
+        from agent_takkub.orchestrator import _build_pane_env
+
+        monkeypatch.setenv("GH_TOKEN", "fake-gh")
+        env = _build_pane_env()
+        assert "GH_TOKEN" not in env
 
 
 class TestTakkubLeadTokenIsolation:

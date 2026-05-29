@@ -51,9 +51,11 @@ from .lead_context import (  # re-exported for test + doctor.py imports
 from .pane_env import (  # re-exported for test imports — see pane_env.py docstring
     _DEFAULT_MCP_TOOL_TIMEOUT_MS,
     _ECC_MUTED_HOOKS,
+    _LEAD_ENV_EXTRA_ALLOWLIST,
     _PANE_ENV_ALLOWLIST,
     _apply_ecc_mute,
     _apply_mcp_timeout,
+    _build_lead_env,
     _build_pane_env,
 )
 from .pty_session import PtySession
@@ -98,6 +100,7 @@ __all__ = [  # backwards-compat re-exports
     "_JUNK_NOTE_EXACT",
     "_JUNK_NOTE_MIN_LEN",
     "_JUNK_PROJECT_PREFIXES",
+    "_LEAD_ENV_EXTRA_ALLOWLIST",
     "_LEAD_GUARD_ALLOW_TOOLS",
     "_LEAD_GUARD_WRITE_TOOLS",
     "_PANE_ENV_ALLOWLIST",
@@ -106,6 +109,7 @@ __all__ = [  # backwards-compat re-exports
     "_allowed_project_roots",
     "_apply_ecc_mute",
     "_apply_mcp_timeout",
+    "_build_lead_env",
     "_build_pane_env",
     "_default_plugin_dirs",
     "_is_junk_note",
@@ -1015,7 +1019,7 @@ class Orchestrator(QObject):
         except RuntimeError as e:
             return False, str(e)
 
-        env = os.environ.copy() if role_name == LEAD.name else _build_pane_env()
+        env = _build_lead_env() if role_name == LEAD.name else _build_pane_env()
         env["TAKKUB_ROLE"] = role_name
         # Tag the pane with its project so the `takkub` CLI inside the
         # session can stamp every JSON request with `from_project`. The
