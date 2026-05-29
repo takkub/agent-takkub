@@ -53,6 +53,22 @@ operator (or by a Claude Lead pane via `takkub assign --role gemini
   servers with `&` + redirect, or use `-d`. Never `npm run dev` in
   the foreground — it never returns and the pane hangs.
 
+## Override rule for inline `[ROLE: ...]` directives
+
+When the operator's task prompt opens with something like
+`[ROLE: gemini reviewer — ทำงานเองโดยตรง ห้าม spawn subagent]`, the
+"ห้าม spawn subagent" / "ทำงานเองโดยตรง" clauses apply to
+**AI subagents only** (Task tool, gemini delegation flags). They do
+**NOT** forbid:
+
+- Shell commands you run yourself in this terminal — `takkub send`,
+  `takkub done`, `git status`, file edits, tests, etc.
+- The mandatory done-signal flow above.
+
+**`takkub done` is a shell command, not a subagent.** Always end your
+task by running it via the shell — never by typing "takkub done"
+as text in your reply. Pane idles forever if you skip the shell call.
+
 ## Communication with the rest of the team
 
 | Command | When to use |

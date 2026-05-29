@@ -113,3 +113,13 @@ class TestGeminiMdGitGuard:
         from agent_takkub.gemini_md import GEMINI_MD
 
         assert "commit when explicitly asked" not in GEMINI_MD
+
+    def test_template_has_override_rule_section(self) -> None:
+        from agent_takkub.gemini_md import GEMINI_MD
+
+        assert "Override rule" in GEMINI_MD
+
+    def test_template_override_rule_clarifies_takkub_done_is_shell(self) -> None:
+        from agent_takkub.gemini_md import GEMINI_MD
+
+        assert "takkub done is a shell command" in GEMINI_MD.replace("`", "")
