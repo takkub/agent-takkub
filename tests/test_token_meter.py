@@ -9,7 +9,36 @@ from __future__ import annotations
 import json
 import pathlib
 
-from agent_takkub.token_meter import _TAIL_SCAN_BYTES, read_last_usage
+from agent_takkub.token_meter import (
+    _TAIL_SCAN_BYTES,
+    encode_path_for_claude,
+    read_last_usage,
+)
+
+
+class TestEncodePathForClaude:
+    """The token badge finds a pane's session JSONL by reproducing Claude's
+    project-dir encoding. A mismatch = silent missing badge (the bug where
+    projects with '_' in the path, e.g. line_websupport, never showed)."""
+
+    def test_underscore_becomes_dash(self) -> None:
+        # This is the regression: '_' MUST encode to '-' like Claude does.
+        enc = encode_path_for_claude("C:/Users/monch/WebstormProjects/line_websupport/client")
+        assert "line-websupport-client" in enc
+        assert "_" not in enc
+
+    def test_dot_becomes_dash(self) -> None:
+        enc = encode_path_for_claude("C:/Users/monch/.claude-monitor/x")
+        assert "." not in enc
+        assert "-claude-monitor-x" in enc
+
+    def test_separators_and_drive(self) -> None:
+        enc = encode_path_for_claude("C:/Users/monch/WebstormProjects/agent-takkub")
+        assert enc == "C--Users-monch-WebstormProjects-agent-takkub"
+
+    def test_only_alnum_and_dash_remain(self) -> None:
+        enc = encode_path_for_claude("C:/a_b.c/d e/f")
+        assert set(enc) <= set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-")
 
 
 def _assistant(model: str, inp: int, cc: int, cr: int, out: int) -> str:

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 # Default context window for Claude 4 family. Override per pane with the
@@ -49,23 +50,29 @@ def context_limit_for_model(model: str | None) -> int:
     return _DEFAULT_LIMIT
 
 
+# Claude Code replaces every char that is not [A-Za-z0-9] with '-' when it
+# builds the project dir name under ~/.claude/projects/ — separators AND '_'
+# and '.'. Matching that exactly is what lets the token meter find the session
+# JSONL.
+_NON_ALNUM_RE = re.compile(r"[^A-Za-z0-9]")
+
+
 def encode_path_for_claude(cwd: str | Path) -> str:
     """Map a filesystem path to the directory name Claude Code uses under
     `~/.claude/projects/`.
 
-    Observed encoding (Windows):
-        C:\\Users\\alice\\WebstormProjects\\agent-takkub
-        → C--Users-alice-WebstormProjects-agent-takkub
+    Claude replaces every non-alphanumeric character with '-' (drive ':',
+    separators '\\' '/', and crucially '_' and '.'), keeping alphanumerics and
+    the original drive-letter case that `Path.resolve()` produces:
 
-    Drive letter uppercased, `:\\` becomes `--`, all path separators become
-    `-`. POSIX paths (no drive) get every `/` replaced with `-`.
+        C:\\Users\\monch\\WebstormProjects\\line_websupport\\client
+        → C--Users-monch-WebstormProjects-line-websupport-client
+
+    The earlier version only rewrote '\\', '/' and ':', so any project whose
+    path contained '_' or '.' (e.g. line_websupport) resolved to a directory
+    that doesn't exist — its token badge silently never appeared.
     """
-    p = str(Path(cwd).resolve()).replace("\\", "/")
-    if len(p) >= 2 and p[1] == ":":
-        drive = p[0].upper()
-        rest = p[2:]  # leading "/" included
-        return drive + "-" + rest.replace("/", "-")
-    return p.replace("/", "-")
+    return _NON_ALNUM_RE.sub("-", str(Path(cwd).resolve()))
 
 
 def _claude_projects_dir() -> Path:
