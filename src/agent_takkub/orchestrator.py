@@ -1284,7 +1284,7 @@ class Orchestrator(QObject):
         # Set TAKKUB_EXTRA_PLUGINS env var to a `;`-separated list of plugin
         # root dirs (must each contain `.claude-plugin/plugin.json`) to add
         # more, or set it to empty string to suppress the defaults.
-        plugin_default = ";".join(_default_plugin_dirs())
+        plugin_default = ";".join(_default_plugin_dirs(role_name))
         plugin_dirs_raw = os.environ.get("TAKKUB_EXTRA_PLUGINS", plugin_default)
         for pdir in [p.strip() for p in plugin_dirs_raw.split(";") if p.strip()]:
             if (pathlib.Path(pdir) / ".claude-plugin" / "plugin.json").exists():

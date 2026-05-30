@@ -384,16 +384,43 @@ def render_lead_settings(project: str) -> pathlib.Path:
     return out
 
 
-def _default_plugin_dirs() -> list[str]:
+# Role-scoped plugin injection. `--plugin-dir` loads each plugin's skill +
+# agent descriptions into the pane's system prompt, so an unused plugin is
+# pure per-pane context bloat. addy-agent-skills (44 skills + 7 agents,
+# ~3-5k tokens) duplicates the role `.md` prompts and takkub's own role panes,
+# so it's dropped for every role. superpowers-dev (TDD/debug/brainstorm/plans)
+# stays for implementing teammates; Lead orchestrates and gets only pordee
+# (Thai compression, used in conversation). This mirrors `_ROLE_MCP_POLICY` in
+# shared_dev_tools.py: _SAFE_PLUGINS stays the full safe set (doctor validates
+# all of it); this policy only decides what each pane actually receives.
+#
+# Roles NOT in this map fall back to the teammate set, NOT the full set — a
+# future role should default to lean, not inherit addy-agent-skills by accident.
+_TEAMMATE_PLUGINS: frozenset[str] = frozenset({"superpowers-dev", "pordee"})
+_ROLE_PLUGIN_POLICY: dict[str, frozenset[str]] = {
+    "lead": frozenset({"pordee"}),
+}
+
+
+def _default_plugin_dirs(role: str | None = None) -> list[str]:
     """Resolve ~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/ for
     each plugin in `_SAFE_PLUGINS`, returning the directories that actually
-    contain a `.claude-plugin/plugin.json`. Best-effort; never raises."""
+    contain a `.claude-plugin/plugin.json`. Best-effort; never raises.
+
+    When `role` is given, the result is filtered through `_ROLE_PLUGIN_POLICY`
+    (lead → pordee only; any other role → teammate set) so each pane only
+    loads the plugins it actually uses. `role=None` keeps the full discovered
+    set for back-compat with direct callers (e.g. doctor / smoke tests).
+    """
+    allowed = None if role is None else _ROLE_PLUGIN_POLICY.get(role, _TEAMMATE_PLUGINS)
     home = pathlib.Path.home()
     cache = home / ".claude" / "plugins" / "cache"
     out: list[str] = []
     if not cache.exists():
         return out
     for marketplace in _SAFE_PLUGINS:
+        if allowed is not None and marketplace not in allowed:
+            continue
         mp_dir = cache / marketplace
         if not mp_dir.is_dir():
             continue
