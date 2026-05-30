@@ -1012,7 +1012,7 @@ class MainWindow(QMainWindow):
         super().keyPressEvent(event)
 
     def _update_status(self) -> None:
-        from .token_meter import context_limit_for_model
+        from .token_meter import effective_context_limit
 
         active = 0
         working = 0
@@ -1026,7 +1026,9 @@ class MainWindow(QMainWindow):
                     working += 1
             usage = p.current_usage()
             if usage:
-                limit = context_limit_for_model(usage["model"])
+                limit = effective_context_limit(
+                    usage["model"], usage["prompt"], base=getattr(p, "_context_limit", None)
+                )
                 total_prompt += usage["prompt"]
                 biggest_limit = max(biggest_limit, limit)
                 per_role.append((p.role.name, usage["prompt"], limit))
@@ -1047,7 +1049,9 @@ class MainWindow(QMainWindow):
                 usage = pane.current_usage()
                 if not usage:
                     continue
-                lim = context_limit_for_model(usage["model"])
+                lim = effective_context_limit(
+                    usage["model"], usage["prompt"], base=getattr(pane, "_context_limit", None)
+                )
                 ratio = (usage["prompt"] / lim) if lim else 0.0
                 if ratio > peak_ratio:
                     peak_ratio = ratio
