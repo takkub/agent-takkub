@@ -169,3 +169,39 @@ class TestTerminateClosesTranscript:
 
         session.terminate()  # must not raise
         assert session._transcript is None
+
+
+class TestDisableTranscriptOptOut:
+    """issue #15: TAKKUB_DISABLE_TRANSCRIPTS suppresses transcript capture so
+    sensitive projects don't persist raw PTY bytes that could leak secrets."""
+
+    def test_path_is_none_when_disabled(self, monkeypatch) -> None:
+        from agent_takkub.orchestrator import _build_transcript_path
+
+        monkeypatch.setenv("TAKKUB_DISABLE_TRANSCRIPTS", "1")
+        assert _build_transcript_path("proj", "backend") is None
+
+    def test_path_built_when_not_disabled(self, monkeypatch, tmp_path) -> None:
+        from agent_takkub import orchestrator as orch_mod
+        from agent_takkub.orchestrator import _build_transcript_path
+
+        monkeypatch.delenv("TAKKUB_DISABLE_TRANSCRIPTS", raising=False)
+        monkeypatch.setattr(orch_mod, "RUNTIME_DIR", tmp_path)
+        path = _build_transcript_path("proj", "backend")
+        assert path is not None
+        assert path.endswith(".transcript.log")
+
+    def test_truthy_variants_all_disable(self, monkeypatch) -> None:
+        from agent_takkub.orchestrator import _build_transcript_path
+
+        for val in ("1", "true", "YES", "True"):
+            monkeypatch.setenv("TAKKUB_DISABLE_TRANSCRIPTS", val)
+            assert _build_transcript_path("proj", "qa") is None
+
+    def test_falsy_value_keeps_capture(self, monkeypatch, tmp_path) -> None:
+        from agent_takkub import orchestrator as orch_mod
+        from agent_takkub.orchestrator import _build_transcript_path
+
+        monkeypatch.setattr(orch_mod, "RUNTIME_DIR", tmp_path)
+        monkeypatch.setenv("TAKKUB_DISABLE_TRANSCRIPTS", "0")
+        assert _build_transcript_path("proj", "qa") is not None

@@ -657,14 +657,23 @@ def _exit_key(project: str, role: str) -> str:
     return f"{project}::{role}"
 
 
-def _build_transcript_path(project_ns: str, role_name: str) -> str:
-    """Return an absolute path for the PTY byte-stream transcript file.
+def _build_transcript_path(project_ns: str, role_name: str) -> str | None:
+    """Return an absolute path for the PTY byte-stream transcript file, or
+    None to disable capture for this pane.
 
     The path mirrors the decision-log layout so the two artefacts live
     side-by-side under runtime/sessions/<date>/<project>/:
         <role>-<HHMMSS>.transcript.log   ← raw bytes (this function)
         <role>-<HHMMSS>.md               ← markdown summary (done())
+
+    Setting TAKKUB_DISABLE_TRANSCRIPTS=1 returns None so no raw PTY bytes are
+    persisted — an opt-out for sensitive projects whose panes may print
+    tokens/.env/OAuth URLs that would otherwise land in a durable file and be
+    re-injected into other agents via status/brief tails (issue #15). Every
+    transcript reader already guards on a falsy path, so None is safe.
     """
+    if os.environ.get("TAKKUB_DISABLE_TRANSCRIPTS", "").strip().lower() in ("1", "true", "yes"):
+        return None
     now = datetime.now()
     day = RUNTIME_DIR / "sessions" / now.strftime("%Y-%m-%d") / project_ns
     try:
