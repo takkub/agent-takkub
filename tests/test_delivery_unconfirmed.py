@@ -95,3 +95,44 @@ class TestDeliveryUnconfirmedWarning:
         assert reviewer.session.write.called
         # ...and the Lead got the unconfirmed-delivery warning.
         assert any("#26" in c.args[0] for c in lead.session.write.call_args_list if c.args)
+
+
+class TestSpawnFailureNotSilent:
+    """#26 root cause: when spawn can't register the pane (main_window routing
+    desync), assign must NOT silently drop — it logs and warns the Lead."""
+
+    def test_spawn_logs_and_returns_false_when_pane_absent(self, orch: Orchestrator) -> None:
+        # No main_window is connected to paneRequested, so the pane never gets
+        # created/registered — spawn must surface that, not return a bare False.
+        orch._idle_state = {}
+        orch._blocked_on_lead = {}
+        with patch("agent_takkub.orchestrator._log_event") as log:
+            ok, msg = orch.spawn("reviewer", cwd=None, project="P")
+        assert ok is False
+        assert "could not create pane" in msg
+        assert any(c.args and c.args[0] == "spawn_failed" for c in log.call_args_list)
+
+    def test_assign_warns_lead_when_spawn_fails(self, orch: Orchestrator) -> None:
+        lead = _pane(_live_session())
+        orch._panes_by_project["P"] = {"lead": lead}
+        orch._idle_state = {}
+        orch._blocked_on_lead = {}
+        with (
+            patch("agent_takkub.orchestrator._log_event"),
+            patch("agent_takkub.orchestrator.QTimer.singleShot"),
+        ):
+            ok, _msg = orch.assign("reviewer", cwd=None, task="do it", project="P")
+        assert ok is False
+        assert any("spawn-failed" in c.args[0] for c in lead.session.write.call_args_list if c.args)
+
+    def test_warn_spawn_failed_noop_for_lead_role(self, orch: Orchestrator) -> None:
+        lead = _pane(_live_session())
+        orch._panes_by_project["P"] = {"lead": lead}
+        with patch("agent_takkub.orchestrator._log_event"):
+            orch._warn_lead_spawn_failed("lead", "P", "x")
+        lead.session.write.assert_not_called()
+
+    def test_warn_spawn_failed_noop_without_live_lead(self, orch: Orchestrator) -> None:
+        orch._panes_by_project["P"] = {"reviewer": _pane(_live_session())}
+        with patch("agent_takkub.orchestrator._log_event"):
+            orch._warn_lead_spawn_failed("reviewer", "P", "x")  # must not raise

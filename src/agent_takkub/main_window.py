@@ -719,14 +719,32 @@ class MainWindow(QMainWindow):
     # teammate pane lifecycle
     # ──────────────────────────────────────────────────────────────
     def _ensure_teammate_pane(self, role_name: str, project: str) -> None:
-        # Route to the tab that owns `project` so a spawn from a
-        # background tab doesn't drop the new pane into whichever tab
-        # is active right now (same multi-tab routing bug we fixed for
-        # `paneClosed`). Falling back to the current tab when the
-        # project's tab is missing keeps tests that drive the
-        # orchestrator without a tab strip working.
-        tab = self._tab_for_project(project) or self._current_tab()
-        if role_name == LEAD.name or role_name in tab.teammate_panes:
+        if role_name == LEAD.name:
+            return
+        # Route to the tab that OWNS `project`. The old code fell back to the
+        # focused tab when `_tab_for_project` missed — but that registers the
+        # pane under the wrong project, so orchestrator.spawn() (checking the
+        # right project) can't find it and silently drops the assign (#26 root
+        # cause). Only borrow the current tab when it genuinely serves this
+        # project (covers unit tests that drive one tab); otherwise bail and
+        # let spawn() fail loudly + warn the Lead.
+        tab = self._tab_for_project(project)
+        if tab is None:
+            cur = self._current_tab()
+            resolved = self.orch._resolve_project(project)
+            if isinstance(cur, ProjectTab) and cur.project_name == resolved:
+                tab = cur
+            else:
+                return
+        existing = tab.teammate_panes.get(role_name)
+        if existing is not None:
+            # Repair a registry desync: a pane lingering in the tab dict but
+            # missing from the orchestrator registry (e.g. a stale entry from a
+            # wrong-tab close) would make spawn() report the role as missing.
+            # Re-register so both views agree instead of early-returning into
+            # the silent-drop path.
+            if self.orch._project_panes(tab.project_name).get(role_name) is not existing:
+                self.orch.register_pane(existing, project=tab.project_name)
             return
         role = by_name(role_name)
         if role is None:

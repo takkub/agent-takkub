@@ -939,7 +939,17 @@ class Orchestrator(QObject):
             self.paneRequested.emit(role_name, project_ns)
             pane = project_panes.get(role_name)
             if pane is None:
-                return False, f"unknown role: {role_name}"
+                # Pane never landed in this project's registry — usually a
+                # main_window routing desync (the pane got created under the
+                # wrong tab, or a stale entry blocked creation). Log it instead
+                # of failing silently so the assign drop is visible (#26).
+                _log_event(
+                    "spawn_failed",
+                    role=role_name,
+                    project=project_ns,
+                    reason="pane not registered after paneRequested",
+                )
+                return False, f"could not create pane for {role_name} (registry desync)"
 
         if pane.session is not None and pane.session.is_alive:
             return True, f"{role_name} already running"
@@ -1652,6 +1662,10 @@ class Orchestrator(QObject):
     ) -> tuple[bool, str]:
         ok, msg = self.spawn(role_name, cwd=cwd, project=project)
         if not ok:
+            # The CLI already acked "task queued" to the Lead's shell before
+            # this async spawn ran, so a failure here is invisible unless we
+            # say so. Tell the Lead the task never landed (#26).
+            self._warn_lead_spawn_failed(role_name, project, msg)
             return ok, msg
 
         from .provider_config import CODEX, provider_for
@@ -1806,6 +1820,27 @@ class Orchestrator(QObject):
         QTimer.singleShot(150, lambda: lead.session and lead.session.write("\r"))
         self.leadInjected.emit(msg)
         _log_event("delivery_unconfirmed", role=role_name, project=project_ns)
+
+    def _warn_lead_spawn_failed(self, role_name: str, project: str | None, reason: str) -> None:
+        """Tell the Lead that an assign's pane spawn failed. The CLI acks
+        'task queued' to the Lead's shell before the async spawn runs, so a
+        spawn failure is otherwise invisible and the delegation silently dies
+        (#26). No-op when the failed role is the Lead itself."""
+        if role_name == LEAD.name:
+            return
+        project_ns = self._resolve_project(project)
+        lead = self._project_panes(project_ns).get(LEAD.name)
+        if not (lead and lead.session and lead.session.is_alive):
+            return
+        msg = (
+            f"⚠️ [spawn-failed] {role_name} pane สร้างไม่สำเร็จ — task ไม่ได้ส่ง ({reason}). "
+            f"ลอง assign {role_name} ใหม่อีกครั้ง (ถ้ายิง parallel ลองยิงทีละตัว) — "
+            f"อย่าถือว่า 'task queued' = สำเร็จ (issue #26)"
+        )
+        lead.session.write(msg)
+        QTimer.singleShot(150, lambda: lead.session and lead.session.write("\r"))
+        self.leadInjected.emit(msg)
+        _log_event("spawn_failed_warned", role=role_name, project=project_ns)
 
     # ------------------------------------------------------------------
     # Peer CC durability helpers
