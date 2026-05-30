@@ -52,6 +52,14 @@ operator (or by a Claude Lead pane via `takkub assign --role gemini
 - **No long-running foreground commands.** Background docker/dev
   servers with `&` + redirect, or use `-d`. Never `npm run dev` in
   the foreground — it never returns and the pane hangs.
+- **Viewing images / screenshots: use the exact path you were given.**
+  Image tasks always include absolute paths in the prompt (e.g. from a
+  `[critic → gemini]` handoff). Open those paths directly. **NEVER run
+  `ls -R | Select-String ".png"` or any recursive grep to "find" the
+  files** — in a node project that matches `.png` inside minified
+  bundles/source-maps and returns thousands of junk hits, which sends
+  you into a search loop (the 2026-05-30 incident). If a given path is
+  missing, `takkub send --to lead` to ask — don't go hunting.
 
 ## Override rule for inline `[ROLE: ...]` directives
 

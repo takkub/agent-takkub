@@ -447,6 +447,13 @@ class PtySession(QObject):
             return False
         if "esc to interrupt" in text:
             return False
+        # gemini/codex show "Thinking… (esc to cancel)" while working, but
+        # keep their "type your message or @path" input box visible the whole
+        # time — so without this blocker the idle watchdog reads a thinking
+        # gemini as idle and floods the pane with `takkub done` reminders
+        # (root cause of the 2026-05-30 gemini reminder-pileup + search loop).
+        if "esc to cancel" in text:
+            return False
         # ── ready markers ───────────────────────────────────────────
         if "openai codex (v" in text:
             return True
