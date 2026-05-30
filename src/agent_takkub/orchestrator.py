@@ -1746,7 +1746,7 @@ class Orchestrator(QObject):
         elapsed = [0]
         sent = [False]
 
-        def _deliver() -> None:
+        def _deliver(unconfirmed: bool = False) -> None:
             if sent[0]:
                 return
             sent[0] = True
@@ -1759,6 +1759,11 @@ class Orchestrator(QObject):
                 _enter_delay_ms(payload),
                 lambda: pane.session and pane.session.write("\r"),
             )
+            if unconfirmed:
+                # Delivered blind — the pane never signalled ready, so on a cold
+                # re-spawn the paste may have been swallowed (issue #26). Surface
+                # it to the Lead instead of letting delegation fail silently.
+                self._warn_lead_delivery_unconfirmed(role_name, project)
 
         def _check() -> None:
             if sent[0]:
@@ -1770,12 +1775,37 @@ class Orchestrator(QObject):
                 return
             elapsed[0] += 500
             if elapsed[0] >= max_wait_ms:
-                # hard timeout — paste anyway so user sees the task land
-                _deliver()
+                # Hard timeout: pane never reached the ready prompt. Paste
+                # best-effort (markers may be a false negative) but flag it as
+                # unconfirmed so the Lead verifies/re-assigns rather than
+                # assuming the task landed (issue #26).
+                _deliver(unconfirmed=True)
                 return
             QTimer.singleShot(500, _check)
 
         QTimer.singleShot(1_000, _check)
+
+    def _warn_lead_delivery_unconfirmed(self, role_name: str, project: str | None) -> None:
+        """Tell the Lead that an assign hit the 45s hard timeout without the
+        target pane ever signalling ready. The task was pasted blind and may
+        not have landed (cold re-spawn render differs from boot), so the Lead
+        should verify / re-assign instead of trusting the 'task queued' reply
+        (issue #26). No-op when warning the Lead about itself."""
+        if role_name == LEAD.name:
+            return
+        project_ns = self._resolve_project(project)
+        lead = self._project_panes(project_ns).get(LEAD.name)
+        if not (lead and lead.session and lead.session.is_alive):
+            return
+        msg = (
+            f"⚠️ [delivery-unconfirmed] {role_name} pane ไม่ถึง ready prompt ใน 45s — "
+            f"task ถูก paste แบบ blind อาจไม่ติด (pane อาจค้าง empty). "
+            f"เช็ค pane / re-assign ถ้ายังว่าง — อย่าถือว่าส่งสำเร็จ (issue #26)"
+        )
+        lead.session.write(msg)
+        QTimer.singleShot(150, lambda: lead.session and lead.session.write("\r"))
+        self.leadInjected.emit(msg)
+        _log_event("delivery_unconfirmed", role=role_name, project=project_ns)
 
     # ------------------------------------------------------------------
     # Peer CC durability helpers
