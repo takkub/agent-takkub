@@ -113,3 +113,25 @@ class TestEnterDelay:
         # Guard against an accidental edit that swaps the two constants.
         # The whole point of the helper is that paste > typing.
         assert _PASTE_ENTER_DELAY_MS > _TYPING_ENTER_DELAY_MS
+
+    def test_large_bracketed_payload_scales_above_base(self) -> None:
+        # issue #22: a multi-KB paste renders its placeholder slower than the
+        # 800ms base window, so the delay must grow with payload size.
+        from agent_takkub.orchestrator import _PASTE_MAX_ENTER_DELAY_MS
+
+        big = _PASTE_START + "x" * 4096 + _PASTE_END  # ~4 KB
+        delay = _enter_delay_ms(big)
+        assert delay > _PASTE_ENTER_DELAY_MS
+        assert delay <= _PASTE_MAX_ENTER_DELAY_MS
+
+    def test_huge_bracketed_payload_is_capped(self) -> None:
+        # The scaling must saturate so a giant spec can't stall input forever.
+        from agent_takkub.orchestrator import _PASTE_MAX_ENTER_DELAY_MS
+
+        huge = _PASTE_START + "x" * 200_000 + _PASTE_END
+        assert _enter_delay_ms(huge) == _PASTE_MAX_ENTER_DELAY_MS
+
+    def test_small_bracketed_payload_keeps_base_delay(self) -> None:
+        # A sub-1KB paste rounds to 0 extra KB → unchanged 800ms base.
+        small = _PASTE_START + "x" * 100 + _PASTE_END
+        assert _enter_delay_ms(small) == _PASTE_ENTER_DELAY_MS

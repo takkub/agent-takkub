@@ -303,6 +303,58 @@ def test_missing_gh_cli_falls_back_to_local(tmp_path) -> None:
     assert local_json.exists()
 
 
+# ── #12: gh timeout + visible local-fallback warning ──────────────────────────
+
+
+def test_gh_passes_timeout_to_subprocess() -> None:
+    from agent_takkub.issues import _gh
+
+    with patch("shutil.which", return_value="/usr/bin/gh"):
+        with patch("subprocess.run", return_value=_gh_result(stdout="ok")) as mock_run:
+            _gh("issue", "list", timeout=42)
+    assert mock_run.call_args.kwargs["timeout"] == 42
+
+
+def test_gh_default_timeout_is_bounded() -> None:
+    from agent_takkub.issues import _gh
+
+    with patch("shutil.which", return_value="/usr/bin/gh"):
+        with patch("subprocess.run", return_value=_gh_result(stdout="ok")) as mock_run:
+            _gh("issue", "view", "1")
+    # Never unbounded — a stalled gh must not block forever (issue #12).
+    assert mock_run.call_args.kwargs["timeout"] > 0
+
+
+def test_gh_timeout_raises_runtimeerror() -> None:
+    import subprocess as _sp
+
+    from agent_takkub.issues import _gh
+
+    with patch("shutil.which", return_value="/usr/bin/gh"):
+        with patch("subprocess.run", side_effect=_sp.TimeoutExpired(cmd="gh", timeout=30)):
+            with pytest.raises(RuntimeError, match="timed out"):
+                _gh("issue", "list")
+
+
+def test_new_issue_transient_gh_failure_warns_and_falls_back(tmp_path, capsys) -> None:
+    # Repo detected but `gh issue create` fails (network/auth) → dangerous
+    # silent divergence; must fall back to local AND warn on stderr.
+    with patch("agent_takkub.issues._ensure_labels"):
+        with patch("agent_takkub.issues._gh") as mock_gh:
+            mock_gh.side_effect = ["takkub/agent-takkub", RuntimeError("503 server error")]
+            _, url = new_issue("transient title", "body", cwd=tmp_path)
+    assert url == "local://issue/1"
+    assert "gh unavailable" in capsys.readouterr().err
+
+
+def test_new_issue_no_remote_falls_back_quietly(tmp_path, capsys) -> None:
+    # A genuine no-GitHub-remote project is legit local mode — no scary warning.
+    with patch("agent_takkub.issues._detect_repo", side_effect=RuntimeError("no remote")):
+        _, url = new_issue("local title", "body", cwd=tmp_path)
+    assert url == "local://issue/1"
+    assert "gh unavailable" not in capsys.readouterr().err
+
+
 # ── cmd_* handlers (CLI layer) ────────────────────────────────────────────────
 
 

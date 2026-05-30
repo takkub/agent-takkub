@@ -40,21 +40,51 @@ _ROLES = (
 # ── gh helpers ────────────────────────────────────────────────────────────────
 
 
-def _gh(*args: str, cwd: str | Path | None = None, input_text: str | None = None) -> str:
-    """Run gh CLI, return stdout. Raises RuntimeError on non-zero exit."""
+def _gh(
+    *args: str,
+    cwd: str | Path | None = None,
+    input_text: str | None = None,
+    timeout: int = 30,
+) -> str:
+    """Run gh CLI, return stdout. Raises RuntimeError on non-zero exit.
+
+    A stalled auth/network/credential-helper call would otherwise block the
+    caller (and the Qt main thread) indefinitely, so every gh invocation is
+    bounded by `timeout` seconds — read/view default to 30s, mutating ops
+    (create/close) pass a longer value (issue #12).
+    """
     _require_gh()
     cmd = ["gh", *args]
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        cwd=str(cwd) if cwd else None,
-        input=input_text,
-    )
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            cwd=str(cwd) if cwd else None,
+            input=input_text,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"gh {' '.join(args[:2])} timed out after {timeout}s (network/auth stalled?)"
+        ) from exc
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or f"gh exited {result.returncode}")
     return result.stdout.strip()
+
+
+def _warn_local_fallback(op: str, reason: str = "") -> None:
+    """Emit a visible stderr warning when an issue op silently falls back to
+    the local .takkub_issues.json store because gh was unavailable. Without
+    this, a local backlog stays invisible once gh recovers (issue #12)."""
+    tail = f" ({reason})" if reason else ""
+    print(
+        f"⚠ takkub issue: gh unavailable — {op} used the local "
+        f".takkub_issues.json store instead of GitHub{tail}. "
+        "These items are NOT on GitHub; reconcile once gh works again.",
+        file=sys.stderr,
+    )
 
 
 def _require_gh() -> None:
@@ -185,7 +215,7 @@ def new_issue(
             for lbl in labels:
                 gh_args += ["--label", lbl]
 
-            out = _gh(*gh_args, cwd=detect_cwd)
+            out = _gh(*gh_args, cwd=detect_cwd, timeout=60)
             url = out.splitlines()[-1] if out else ""
             number = 0
             if url:
@@ -194,7 +224,12 @@ def new_issue(
                 except (ValueError, IndexError):
                     pass
             return number, url
-        except RuntimeError:
+        except RuntimeError as exc:
+            # Repo was detected but the create failed (network/auth/rate
+            # limit) — this is the dangerous silent-divergence case worth a
+            # visible warning. A bare no-remote project (outer except) is a
+            # legit local-only mode and stays quiet.
+            _warn_local_fallback(f"new issue '{title[:40]}'", reason=str(exc)[:60])
             use_local = True
 
     # Local fallback — when cockpit_bug=True, write to REPO_ROOT's
@@ -352,9 +387,10 @@ def close_issue(
             if note:
                 gh_args += ["--comment", note]
 
-            _gh(*gh_args, cwd=cwd)
+            _gh(*gh_args, cwd=cwd, timeout=60)
             return f"https://github.com/{repo}/issues/{number}"
-        except RuntimeError:
+        except RuntimeError as exc:
+            _warn_local_fallback(f"close #{number}", reason=str(exc)[:60])
             use_local = True
 
     # Local fallback

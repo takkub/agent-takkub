@@ -443,11 +443,25 @@ def _rewrite_task_for_codex(task: str) -> str:
 # message latency stay snappy.
 _PASTE_ENTER_DELAY_MS = 800
 _TYPING_ENTER_DELAY_MS = 200
+# Extra delay per KB of bracketed-paste payload. A very large paste renders
+# its `[Pasted text]` placeholder slower than the fixed 800 ms window, so the
+# submit \r can land mid-render and be swallowed as a soft newline (issue #22).
+# Scale the wait with payload size, capped so a huge spec can't stall input.
+_PASTE_PER_KB_DELAY_MS = 150
+_PASTE_MAX_ENTER_DELAY_MS = 3000
 
 
 def _enter_delay_ms(payload: str) -> int:
-    """Pick the post-write delay before sending Enter to submit input."""
-    return _PASTE_ENTER_DELAY_MS if payload.startswith(_PASTE_START) else _TYPING_ENTER_DELAY_MS
+    """Pick the post-write delay before sending Enter to submit input.
+
+    Short/typed payloads use the snappy typing delay. Bracketed pastes use a
+    base delay that grows with payload size — large pastes take longer to
+    render their placeholder, and an Enter sent before the render completes is
+    consumed inside the paste buffer instead of submitting (issue #22)."""
+    if not payload.startswith(_PASTE_START):
+        return _TYPING_ENTER_DELAY_MS
+    kb = len(payload.encode("utf-8")) // 1024
+    return min(_PASTE_ENTER_DELAY_MS + kb * _PASTE_PER_KB_DELAY_MS, _PASTE_MAX_ENTER_DELAY_MS)
 
 
 # Where teammate-pane state lives between cockpit restarts. Lead panes
@@ -756,8 +770,11 @@ class Orchestrator(QObject):
         self._load_pending_cc()
         # Done-notice durability: `takkub done` notices queued when Lead is
         # not alive at the moment a teammate finishes. Pattern mirrors
-        # _pending_lead_cc; flushed to Lead on next Lead spawn.
+        # _pending_lead_cc; flushed to Lead on next Lead spawn AND persisted to
+        # disk so a teammate's done report survives a cockpit restart while the
+        # Lead is down (issue #13).
         self._pending_done_notices: dict[str, list[dict]] = {}
+        self._load_pending_done_notices()
 
         # Per-cockpit-run capability token. Injected only into the Lead pane
         # env (TAKKUB_LEAD_TOKEN) so the Lead takkub CLI can authenticate
@@ -1543,14 +1560,19 @@ class Orchestrator(QObject):
             )
             return
         self._auto_respawn_attempts[key] = attempts + 1
+        # Exponential back-off: a pane that keeps crashing (deterministic bug
+        # triggered by its replayed task) shouldn't re-spawn at a fixed fast
+        # interval and burn tokens. Each attempt waits 2x longer (issue #23).
+        backoff_ms = AUTO_RESPAWN_DELAY_MS * (2**attempts)
         _log_event(
             "auto_respawn_scheduled",
             role=role_name,
             project=project,
             attempt=attempts + 1,
+            delay_ms=backoff_ms,
         )
         QTimer.singleShot(
-            AUTO_RESPAWN_DELAY_MS,
+            backoff_ms,
             lambda r=role_name, c=cwd, p=project: self._auto_respawn(r, c, p),
         )
 
@@ -1774,6 +1796,39 @@ class Orchestrator(QObject):
         except Exception:
             pass
 
+    def _pending_done_path(self, project_ns: str) -> pathlib.Path:
+        return RUNTIME_DIR / f"pending-done-notices-{project_ns}.json"
+
+    def _save_pending_done_notices(self, project_ns: str) -> None:
+        """Persist queued done notices so they survive an orchestrator restart
+        while the Lead is down (issue #13). Mirrors _save_pending_cc."""
+        try:
+            ensure_runtime()
+            queue = self._pending_done_notices.get(project_ns, [])
+            path = self._pending_done_path(project_ns)
+            if not queue:
+                path.unlink(missing_ok=True)
+                return
+            path.write_text(json.dumps(queue, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _load_pending_done_notices(self) -> None:
+        """Restore queued done notices from disk on startup. Mirrors
+        _load_pending_cc."""
+        try:
+            ensure_runtime()
+            for p in RUNTIME_DIR.glob("pending-done-notices-*.json"):
+                proj = p.stem[len("pending-done-notices-") :]
+                try:
+                    items = json.loads(p.read_text(encoding="utf-8"))
+                    if items:
+                        self._pending_done_notices[proj] = items
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     def _flush_pending_lead_cc(self, project_ns: str) -> None:
         """Deliver queued CC messages to Lead if it is currently alive.
 
@@ -1834,6 +1889,7 @@ class Orchestrator(QObject):
             self._pending_done_notices.setdefault(project_ns, []).append(
                 {"role": "system", "note": "auto-chain handoff", "body": prompt}
             )
+            self._save_pending_done_notices(project_ns)
             _log_event("auto_chain_handoff_queued", project=project_ns)
 
     def _flush_pending_done_notices(self, project_ns: str) -> None:
@@ -1849,6 +1905,7 @@ class Orchestrator(QObject):
         if not (lead and lead.session and lead.session.is_alive):
             return
         items = self._pending_done_notices.pop(project_ns)
+        self._save_pending_done_notices(project_ns)
         for item in items:
             payload = _paste_payload(item["body"])
             lead.session.write(payload)
@@ -2155,6 +2212,7 @@ class Orchestrator(QObject):
             self._pending_done_notices.setdefault(project_ns, []).append(
                 {"role": from_role, "note": note, "body": notice}
             )
+            self._save_pending_done_notices(project_ns)
             _log_event("done_notice_queued", project=project_ns, role=from_role)
 
         # Fix A: when this done event belongs to a background tab, emit a

@@ -354,3 +354,49 @@ class TestFlushPendingDoneNotices:
 
         assert "proj_b" not in orch._pending_done_notices
         assert len(orch._pending_done_notices.get("proj_c", [])) == 1
+
+
+# ─────────────────────────────────────────────────────────────
+# #13 — done-notice durability across cockpit restart
+# ─────────────────────────────────────────────────────────────
+
+
+class TestDoneNoticeDiskPersistence:
+    """A teammate's done notice queued while Lead is down must survive a
+    cockpit restart, mirroring the CC queue's disk persistence."""
+
+    def test_save_then_load_round_trip(self, orch, tmp_path):
+        orch._pending_done_notices = {
+            "proj_x": [{"role": "backend", "note": "done", "body": "the body"}]
+        }
+        orch._save_pending_done_notices("proj_x")
+        assert (tmp_path / "pending-done-notices-proj_x.json").exists()
+
+        # Simulate restart: in-memory queue gone, reload from disk.
+        orch._pending_done_notices = {}
+        orch._load_pending_done_notices()
+        assert orch._pending_done_notices["proj_x"][0]["note"] == "done"
+
+    def test_save_empty_queue_removes_file(self, orch, tmp_path):
+        path = tmp_path / "pending-done-notices-proj_y.json"
+        orch._pending_done_notices = {"proj_y": [{"role": "qa", "note": "x", "body": "y"}]}
+        orch._save_pending_done_notices("proj_y")
+        assert path.exists()
+
+        # Draining the queue must delete the file, not leave a stale [].
+        orch._pending_done_notices["proj_y"] = []
+        orch._save_pending_done_notices("proj_y")
+        assert not path.exists()
+
+    def test_queue_on_done_persists_to_disk(self, orch, tmp_path, monkeypatch):
+        # End-to-end: done() while Lead absent both queues in memory AND writes
+        # the durable file so a restart can recover it.
+        monkeypatch.setattr(orch_mod, "active_project", lambda: ("proj_z", {}))
+        _mock_done(orch)
+        _register_pane(orch, LEAD.name, "proj_z", _make_dead_session())
+        _register_pane(orch, "backend", "proj_z", _make_alive_session())
+
+        orch.done("backend", note="finished the endpoint", project="proj_z")
+
+        assert (tmp_path / "pending-done-notices-proj_z.json").exists()
+        assert len(orch._pending_done_notices.get("proj_z", [])) == 1
