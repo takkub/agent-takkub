@@ -65,6 +65,10 @@ def _make_pane(
     pane.session = MagicMock()
     pane.session.is_alive = alive
     pane.session.is_at_ready_prompt.return_value = at_ready_prompt
+    # Default: not rate-limited (real PtySession returns None when no usage-limit
+    # banner is showing). Without this a MagicMock would return a truthy stub and
+    # the rate-limit gate would suppress the idle reminder.
+    pane.session.rate_limit_reset_at.return_value = None
     return pane
 
 

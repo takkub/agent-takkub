@@ -11,16 +11,85 @@ The terminal widget consumes the screen state, the orchestrator triggers writes.
 
 from __future__ import annotations
 
+import os
 import queue
+import re
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Sequence
 
 import pyte
 from PyQt6.QtCore import QObject, QThread, QTimer, pyqtSignal
 
 from ._win_console import hide_hwnds, snapshot_console_hwnds
+
+# ── Claude usage-limit detection ────────────────────────────────────────────
+# When a claude pane hits the plan's usage limit it stops producing output and
+# prints a "limit reached … resets <time>" banner. Without detection the idle
+# watchdog mistakes this for "finished but forgot takkub done" and nags every
+# 90s (and eventually force-respawns into the same limit). These markers let
+# the orchestrator recognise the state, suppress the watchdog, and notify when
+# the limit resets instead.
+#
+# ⚠ The exact wording + time format are Claude-Code-version-dependent and must
+# be verified against a real limit banner. Override without a code change via
+# TAKKUB_RATE_LIMIT_MARKERS (comma-separated substrings, lower-case).
+_DEFAULT_RATE_LIMIT_MARKERS = (
+    "usage limit",
+    "limit reached",
+    "limit will reset",
+    "reached your usage",
+    "out of usage",
+)
+
+
+def _rate_limit_markers() -> tuple[str, ...]:
+    override = os.environ.get("TAKKUB_RATE_LIMIT_MARKERS", "").strip()
+    if override:
+        return tuple(m.strip().lower() for m in override.split(",") if m.strip())
+    return _DEFAULT_RATE_LIMIT_MARKERS
+
+
+# Reset clock-time, e.g. "resets 3pm", "resets at 3:30pm", "reset at 14:00".
+_RESET_TIME_RE = re.compile(
+    r"reset[s]?(?:\s+at)?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", re.IGNORECASE
+)
+# Fallback window when the banner is present but no parseable time is found —
+# Anthropic's rolling window is ~5h, so wait that long before re-checking.
+_RATE_LIMIT_FALLBACK_SEC = 5 * 60 * 60
+
+
+def _parse_rate_limit_reset(text: str, now: float) -> float | None:
+    """Given lower-cased pane text, return the epoch the usage limit resets at,
+    or None if no limit banner is present.
+
+    If a banner is present but the reset time can't be parsed, fall back to
+    now + ~5h so the watchdog still backs off rather than nagging forever.
+    """
+    if not any(m in text for m in _rate_limit_markers()):
+        return None
+    m = _RESET_TIME_RE.search(text)
+    if not m:
+        return now + _RATE_LIMIT_FALLBACK_SEC
+    hour = int(m.group(1))
+    minute = int(m.group(2) or 0)
+    ampm = (m.group(3) or "").lower()
+    if ampm == "pm" and hour != 12:
+        hour += 12
+    elif ampm == "am" and hour == 12:
+        hour = 0
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return now + _RATE_LIMIT_FALLBACK_SEC
+    lt = time.localtime(now)
+    target = time.struct_time(
+        (lt.tm_year, lt.tm_mon, lt.tm_mday, hour, minute, 0, lt.tm_wday, lt.tm_yday, lt.tm_isdst)
+    )
+    epoch = time.mktime(target)
+    if epoch <= now:  # clock time already passed today → it means tomorrow
+        epoch += 24 * 60 * 60
+    return epoch
 
 
 class _WriterThread(QThread):
@@ -384,3 +453,15 @@ class PtySession(QObject):
         if "type your message or" in text:  # gemini's input prompt hint
             return True
         return "bypass permissions" in text or "shift+tab to cycle" in text
+
+    def rate_limit_reset_at(self) -> float | None:
+        """If the pane is showing claude's usage-limit banner, return the epoch
+        the limit resets at; else None.
+
+        Used by the orchestrator's idle watchdog to tell "rate-limited, can't
+        work until reset" apart from "idle, forgot takkub done" so it suppresses
+        the reminder loop and notifies at reset time instead. See the marker
+        notes at module top — detection wording needs real-banner verification.
+        """
+        text = "\n".join(self.display_lines()).lower()
+        return _parse_rate_limit_reset(text, time.time())

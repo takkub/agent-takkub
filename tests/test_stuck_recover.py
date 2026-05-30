@@ -56,6 +56,7 @@ class _FakeOrch:
     def __init__(self) -> None:
         self._panes_by_project: dict[str, dict] = {}
         self._last_stuck_recover: dict[str, float] = {}
+        self._rate_limited_until: dict[str, float] = {}
         self.close_calls: list[tuple[str, str]] = []
         self.spawn_calls: list[tuple[str, str | None, str]] = []
 

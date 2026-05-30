@@ -805,6 +805,13 @@ class Orchestrator(QObject):
         # whose key is in this dict so the auto-reminder doesn't fire
         # while a teammate is legitimately stuck waiting for spec.
         self._blocked_on_lead: dict[str, float] = {}
+        # Rate-limit suppression: when a pane hits the claude usage limit it
+        # stops outputting, which the idle/stuck watchdogs would otherwise read
+        # as "forgot takkub done" (nag loop) or "hung" (force-respawn into the
+        # same limit). Keyed `<project>::<role>` -> epoch the limit resets at;
+        # while set+future the watchdog leaves the pane alone and a one-shot
+        # QTimer notifies the Lead at reset time. (issue: rate-limit watchdog)
+        self._rate_limited_until: dict[str, float] = {}
         # Per-pane consecutive auto-respawn counter. Keyed `<project>::<role>`.
         # Bumped on each unexpected exit + auto-respawn; reset on a clean
         # `close()` / `done()` / manual respawn. Capped at AUTO_RESPAWN_MAX
@@ -3017,6 +3024,14 @@ class Orchestrator(QObject):
                     self._idle_state.pop(key, None)
                     continue
 
+                # Suppress the reminder while this pane is rate-limited: it's
+                # not idle-because-done, it physically can't work until the
+                # usage limit resets. Detection happens here (every tick) and
+                # schedules a one-shot reset notice the first time it's seen.
+                if self._rate_limit_suppressed(project_name, name, pane, now):
+                    self._idle_state.pop(key, None)
+                    continue
+
                 # Suppress the reminder while this teammate is waiting on a
                 # reply from Lead — they're not "stuck on `takkub done`",
                 # they're genuinely blocked on clarification. The flag is
@@ -3098,6 +3113,11 @@ class Orchestrator(QObject):
                     continue
                 if pane.session is None or not pane.session.is_alive:
                     continue
+                # A rate-limited pane is silent on purpose — never force-respawn
+                # it (the fresh session would just hit the same limit). The idle
+                # walker owns detection; here we only read the recorded state.
+                if self._rate_limited_until.get(f"{project_name}::{role}", 0.0) > now:
+                    continue
                 last_out = getattr(pane, "_last_output_ts", 0.0)
                 if not isinstance(last_out, (int, float)) or last_out <= 0:
                     # Pane hasn't seen output yet — still in bootstrap,
@@ -3139,6 +3159,60 @@ class Orchestrator(QObject):
         # down the WebEngine view before the respawn binds a new one
         # to the same role slot.
         QTimer.singleShot(2_000, lambda: self.spawn(role, cwd=cwd, project=project))
+
+    def _rate_limit_suppressed(self, project: str, role: str, pane: AgentPane, now: float) -> bool:
+        """Return True if `pane` is rate-limited and the watchdog should leave
+        it alone until the limit resets.
+
+        On first detection it records the reset epoch and schedules a one-shot
+        notice to the Lead (option A: notify only, no auto-resume). Once the
+        reset time passes the state is cleared and the watchdog resumes."""
+        key = f"{project}::{role}"
+        existing = self._rate_limited_until.get(key)
+        if existing is not None:
+            if now < existing:
+                return True
+            # Reset time reached — clear and let the watchdog behave normally.
+            # The notice fires from its own QTimer scheduled at detection time.
+            self._rate_limited_until.pop(key, None)
+            return False
+
+        if pane.session is None or not pane.session.is_alive:
+            return False
+        reset_at = pane.session.rate_limit_reset_at()
+        if reset_at is None:
+            return False
+
+        self._rate_limited_until[key] = reset_at
+        self._schedule_rate_limit_notice(project, role, reset_at)
+        _log_event(
+            "rate_limit_detected",
+            role=role,
+            project=project,
+            resets_in_s=int(max(0, reset_at - now)),
+        )
+        return True
+
+    def _schedule_rate_limit_notice(self, project: str, role: str, reset_at: float) -> None:
+        """Fire a single reset notice when the usage limit lifts."""
+        delay_ms = max(0, int((reset_at - time.time()) * 1000))
+        QTimer.singleShot(delay_ms, lambda: self._emit_rate_limit_reset(project, role))
+
+    def _emit_rate_limit_reset(self, project: str, role: str) -> None:
+        """Tell the Lead a rate-limited pane's window has reset (notify-only)."""
+        key = f"{project}::{role}"
+        self._rate_limited_until.pop(key, None)
+        msg = (
+            f"⏰ [rate-limit] {role} ({project}) — usage limit reset แล้ว "
+            f"pane พร้อมทำงานต่อ (nudge/มอบงานต่อได้เลย)"
+        )
+        lead = self._project_panes(project).get(LEAD.name)
+        if lead and lead.session and lead.session.is_alive:
+            lead.session.write(msg)
+            QTimer.singleShot(150, lambda: lead.session and lead.session.write(b"\r"))
+            self.leadInjected.emit(msg)
+        _log_event("rate_limit_reset", role=role, project=project)
+        self.statusChanged.emit()
 
     def _inject_idle_reminder(self, role_name: str, pane: AgentPane) -> None:
         if pane.session is None or not pane.session.is_alive:
