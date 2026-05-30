@@ -11,9 +11,33 @@ import pathlib
 
 from agent_takkub.token_meter import (
     _TAIL_SCAN_BYTES,
+    effective_context_limit,
     encode_path_for_claude,
     read_last_usage,
 )
+
+
+class TestEffectiveContextLimit:
+    """The badge cap must never let the percentage exceed 100% just because the
+    bare model name (claude-opus-4-8, no [1m]) hides the 1M runtime flag."""
+
+    def test_under_default_uses_200k(self) -> None:
+        assert effective_context_limit("claude-opus-4-8", 50_000) == 200_000
+
+    def test_prompt_over_200k_bumps_to_1m(self) -> None:
+        # The 177%-badge bug: 360k prompt on a bare model name must read 1M.
+        assert effective_context_limit("claude-opus-4-8", 360_000) == 1_000_000
+
+    def test_per_pane_base_pins_1m_from_token_zero(self) -> None:
+        # A Max Lead pins base=1M so even a small prompt shows /1M, not /200k.
+        assert effective_context_limit("claude-opus-4-8", 33_000, base=1_000_000) == 1_000_000
+
+    def test_base_overrides_model_lookup(self) -> None:
+        assert effective_context_limit("anything", 10_000, base=200_000) == 200_000
+
+    def test_prompt_exceeding_pinned_base_still_bumps(self) -> None:
+        # Defensive: even with a base, a prompt above it bumps (shouldn't pin <100%).
+        assert effective_context_limit("x", 250_000, base=200_000) == 1_000_000
 
 
 class TestEncodePathForClaude:

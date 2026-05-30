@@ -29,10 +29,10 @@ from PyQt6.QtWidgets import (
 
 from .config import RUNTIME_DIR
 from .pty_session import PtySession
-from .roles import Role
+from .roles import LEAD, Role
 from .terminal_widget import TerminalWidget
 from .token_meter import (
-    context_limit_for_model,
+    effective_context_limit,
     find_latest_session,
     format_tokens,
     read_last_usage,
@@ -87,6 +87,17 @@ class AgentPane(QFrame):
         self._session_cwd: str | None = None
         self._session_jsonl = None  # type: object | None
         self._last_usage: dict | None = None
+        # Known context cap for the token badge. Teammates use per-model limits
+        # (200k). The Lead inherits the user's default model — on a Max plan the
+        # 1M-context variant — but the JSONL stamps the bare model name with no
+        # `[1m]` suffix so the limit can't be read back from it. Pin 1M for a
+        # Max Lead; the runtime guard in _refresh_token_meter self-heals a wrong
+        # tier guess once usage exceeds the base. (None = derive per-model.)
+        self._context_limit: int | None = None
+        if role.name == LEAD.name:
+            from .plan_tier import is_pro
+
+            self._context_limit = None if is_pro() else 1_000_000
         self._token_timer = QTimer(self)
         self._token_timer.setInterval(5_000)
         self._token_timer.timeout.connect(self._refresh_token_meter)
@@ -411,8 +422,8 @@ class AgentPane(QFrame):
         if usage is None:
             return
         self._last_usage = usage
-        limit = context_limit_for_model(usage["model"])
         prompt = usage["prompt"]
+        limit = effective_context_limit(usage["model"], prompt, base=self._context_limit)
         pct = (prompt / limit) if limit else 0.0
         color = usage_color(pct)
         text = f"{format_tokens(prompt)}/{format_tokens(limit)} · {int(pct * 100)}%"

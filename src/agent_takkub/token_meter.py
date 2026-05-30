@@ -50,6 +50,21 @@ def context_limit_for_model(model: str | None) -> int:
     return _DEFAULT_LIMIT
 
 
+def effective_context_limit(model: str | None, prompt: int, base: int | None = None) -> int:
+    """Context-window cap to display for a turn of `prompt` tokens.
+
+    `base` is a per-pane known cap (e.g. a Max Lead pinned to 1M); when None it
+    falls back to the per-model/env limit. Either way, if the observed prompt
+    already exceeds the cap we bump to 1M — a turn that sent >200k tokens can
+    only be a 1M-context session, and the bare model name stamped in the JSONL
+    (`claude-opus-4-8`, no `[1m]`) doesn't encode the 1M runtime flag. This
+    keeps the badge from showing an impossible ">100%" when the per-pane tier
+    guess was wrong or absent.
+    """
+    cap = base if base is not None else context_limit_for_model(model)
+    return 1_000_000 if prompt > cap else cap
+
+
 # Claude Code replaces every char that is not [A-Za-z0-9] with '-' when it
 # builds the project dir name under ~/.claude/projects/ — separators AND '_'
 # and '.'. Matching that exactly is what lets the token meter find the session
