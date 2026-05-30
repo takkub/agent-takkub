@@ -3238,7 +3238,15 @@ class Orchestrator(QObject):
         for role_name, pane in list(self._project_panes(project_ns).items()):
             if pane.session is None or not pane.session.is_alive:
                 continue
-            prompt = self._build_bug_check_prompt(role_name, project_ns)
+            # Teammates introspect ("did you notice a bug?"); the Lead gets an
+            # active-audit directive so the broadcast doesn't dead-end into
+            # everyone waiting for reports. Introspection only catches bugs an
+            # agent stumbled into — the Lead must actively run tests / diff /
+            # audit to surface latent ones.
+            if role_name == LEAD.name:
+                prompt = self._build_lead_bug_check_prompt(project_ns)
+            else:
+                prompt = self._build_bug_check_prompt(role_name, project_ns)
             self._send_when_ready(role_name, prompt, project=project_ns)
             prompted.append(role_name)
         _log_event("broadcast_bug_check", project=project_ns, count=len(prompted), roles=prompted)
@@ -3264,6 +3272,34 @@ class Orchestrator(QObject):
             'takkub send --to lead "no bugs to report"\n'
             "```\n\n"
             "รายงานกลับเมื่อเสร็จ"
+        )
+
+    @staticmethod
+    def _build_lead_bug_check_prompt(project: str) -> str:
+        """Render the Lead-side ACTIVE bug-audit prompt.
+
+        The teammate prompt is passive (introspect + report). If the Lead got
+        the same prompt the whole broadcast would dead-end into "everyone waits
+        for reports, nobody checks anything" — the exact stall the user hit.
+        This prompt makes the Lead *do* an audit: run the suite, diff recent
+        work, eyeball risk subsystems, and only then conclude. Lead's own
+        Read/test/diff are auto-fire; spawning an auditor stays propose-first.
+        """
+        return (
+            "🐛 **Bug check — Lead active audit** (orchestrator broadcast)\n\n"
+            "คุณคือ Lead — **อย่าแค่รอ report จาก teammate** (introspection จับได้แค่บัค "
+            "ที่ agent บังเอิญสะดุดเจอ ไม่ใช่บัคแฝง) ลงมือ audit เชิงรุก **อย่างน้อย 1 อย่างทันที** "
+            "ก่อนสรุป:\n\n"
+            "1. รัน test suite — `rtk proxy python -m pytest -q` (มี fail/regression ไหม)\n"
+            "2. ดู change ล่าสุด — `rtk git log --oneline -10` + `git diff` หา bug แฝง\n"
+            "3. ไล่ subsystem เสี่ยง/เพิ่งแตะ — encode path, routing, watchdog, env leak, paste\n"
+            "4. ถ้าต้องเจาะลึก → **propose** spawn reviewer/codex audit (pane visible รอ confirm)\n\n"
+            "**เจอบัค:** (อย่าลืม `--cockpit-bug`)\n"
+            "```\n"
+            f'takkub issue new "<title>" --severity <low|med|high> --noticed-in {project} --cockpit-bug --body "<reproduce + impact>"\n'
+            "```\n"
+            "**ไม่เจอหลัง audit จริง:** สรุปสั้นๆ ว่า audit อะไรไปบ้าง + ผล\n\n"
+            '❗ ห้ามจบด้วยการ "รอ teammate" เฉยๆ — ต้องมี action เกิดขึ้นก่อนสรุปเสมอ'
         )
 
     def broadcast_design_review(self, project: str | None = None) -> tuple[int, list[str]]:

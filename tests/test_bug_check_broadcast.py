@@ -179,6 +179,25 @@ class TestBroadcastBugCheck:
         # feel forced to fabricate an issue when the session was clean.
         assert "no bug" in prompt.lower() or "ไม่มีบัค" in prompt or "ไม่เจอ" in prompt
 
+    def test_lead_gets_active_audit_not_passive_introspection(self, orch: Orchestrator) -> None:
+        """The Lead must receive an ACTIVE audit directive (run tests / diff),
+        not the same passive 'did you notice a bug?' prompt as teammates —
+        otherwise the broadcast dead-ends with everyone waiting for reports."""
+        orch._panes_by_project[ACTIVE_PROJECT] = {
+            "lead": _live_pane(),
+            "backend": _live_pane(),
+        }
+        sent: dict[str, str] = {}
+        orch._send_when_ready = lambda role, task, **_kw: sent.__setitem__(role, task)  # type: ignore[assignment]
+
+        orch.broadcast_bug_check(project=ACTIVE_PROJECT)
+        lead_prompt, backend_prompt = sent["lead"], sent["backend"]
+        # Lead drives action; teammate introspects.
+        assert "pytest" in lead_prompt
+        assert "audit" in lead_prompt.lower()
+        assert "pytest" not in backend_prompt
+        assert lead_prompt != backend_prompt
+
     def test_project_scoped(self, orch: Orchestrator) -> None:
         """Panes under 'other' project must not be prompted when broadcast targets 'proj'."""
         orch._panes_by_project[ACTIVE_PROJECT] = {"backend": _live_pane()}
@@ -193,3 +212,13 @@ class TestBroadcastBugCheck:
         assert count == 1
         # Only the proj-scoped backend received a prompt.
         assert all(p == ACTIVE_PROJECT for _, p in sent)
+
+
+def test_lead_bug_check_prompt_forbids_passive_wait() -> None:
+    """Static-method contract: the Lead audit prompt must push concrete action
+    and explicitly forbid ending on 'just wait for teammates'."""
+    prompt = Orchestrator._build_lead_bug_check_prompt("proj")
+    assert "pytest" in prompt
+    assert "git log" in prompt or "git diff" in prompt
+    assert "--cockpit-bug" in prompt
+    assert "รอ teammate" in prompt  # the explicit anti-stall guard
