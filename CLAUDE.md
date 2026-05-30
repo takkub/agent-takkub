@@ -123,6 +123,23 @@ takkub issue new "<title>" --severity <low|med|high> --tag <a,b> --body "..."
 
 vault สำหรับโปรเจคนี้: `C:\Users\monch\WebstormProjects\second-brain` มีหน้า [[../second-brain/01-Projects/agent-takkub|01-Projects/agent-takkub.md]] + Dataview ดึง sessions/ มาแสดง
 
+### เมื่อไหร่ Lead ควรค้น vault ก่อนเริ่มงาน (pull-on-demand)
+
+Context ตอน spawn **ไม่ได้ preload vault** — เบาไว้ก่อน Lead ต้องดึงเองเมื่อจำเป็น **ก่อนลงมือ/propose** ให้ค้น vault เมื่อ task เข้าข่ายนี้:
+
+- งาน **ต่อเนื่อง** จาก session ก่อน ("ทำต่อ", "แก้อันที่ค้างไว้", "เหมือนเมื่อวาน")
+- user **ถามถึงประวัติ/เหตุผล** decision เก่า ("ทำไมเลือก X", "เคยลองอะไรไปแล้ว")
+- งานแตะ subsystem ที่ **เคยมี bug/decision** บันทึกไว้ (routing, pane spawn, env leak, paste)
+
+**ค้นที่ไหน** (`<vault>` = vault root ที่ระบุข้างบน — เรียงตามความสด):
+1. `<vault>/07-AI-Command-Center/briefs/agent-takkub-<ts>.md` — **resume brief สดสุด** (transcript tail 20 exchanges ล่าสุด ต่อ session) เอาไว้รู้ว่า session ก่อนทำอะไรค้างไว้
+2. `<vault>/04-Archive/agent-takkub/bugs/*.md` — bug post-mortem เก่า (root cause + fix)
+3. `<vault>/01-Projects/agent-takkub.md` — project page **(ระวัง: เขียนมือ อาจ stale/ขัดแย้ง — cross-check กับ git log ก่อนเชื่อ)**
+
+**ข้อจำกัด:** ` ```dataview ` block อ่านด้วย `Read` ตรงๆ จะเห็นแค่ query ไม่ใช่ผลลัพธ์ — ถ้าต้อง resolve ใช้ obsidian-vault MCP
+
+งาน **ใหม่ standalone** ที่ไม่พึ่งประวัติ → **ไม่ต้องค้น** ทำจาก code + task ที่ให้พอ (กัน token บวมเปล่า)
+
 ## Auto-routing
 
 > **Authoritative implementation:** `src/agent_takkub/routing_planner.py` encodes every rule below as testable Python (`classify()` → `RoutingAction`). Prompt and code drift → **code wins**. Run `python -m pytest tests/test_routing_planner.py`.
