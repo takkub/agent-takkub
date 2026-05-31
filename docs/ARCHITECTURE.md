@@ -45,27 +45,77 @@ How agent-takkub is wired together. Read this when you're about to modify spawn 
 
 ## Module map
 
+Complete map (40 modules). Grouped by concern; sizes change but the
+groupings are stable. If you add a module, slot it here.
+
 ```
 src/agent_takkub/
-├── app.py            QApplication setup, signal handlers, MainWindow.show()
-├── __main__.py       so `python -m agent_takkub` works
-├── main_window.py    layout, project switcher, status bar, dock, F1 help
-├── agent_pane.py     header chrome + state machine + terminal stack
-├── terminal_widget.py  QPlainTextEdit subclass: pyte → QTextCharFormat
-├── pty_session.py    pywinpty + pyte + reader thread + screen-state helpers
-├── orchestrator.py   spawn / assign / send / close / done semantics
-├── cli_server.py     QTcpServer dispatching JSON to orchestrator
-├── cli.py            `takkub` CLI client — TCP JSON to runtime/port
-├── logs_panel.py     bottom dock tailing runtime/events.log
-├── roles.py          default role registry (lead + 7 teammates)
-├── config.py         projects.json + runtime/ + claude.exe finder
-└── _win_console.py   ConsoleWindowClass HWND hide helper
+│ ── entry / app shell ──
+├── __main__.py        so `python -m agent_takkub` works
+├── app.py             QApplication entry point, signal handlers
+├── main_window.py     top-level window: QTabWidget of ProjectTabs, status bar, dock, F1 help
+├── project_tab.py     one project's pane stack (own Lead + teammate splitter) inside a tab
+│ ── pane rendering ──
+├── agent_pane.py      one grid slot: header chrome + state machine + terminal stack
+├── terminal_widget.py QWebEngineView hosting xterm.js (static/terminal.html); raw PTY bytes
+│                      → termWrite. Clickable URLs + file paths via WebLinksAddon + a custom
+│                      link provider → QDesktopServices.openUrl
+├── pty_session.py     pywinpty (WinPTY) + reader thread + pyte screen used ONLY for state
+│                      detection (idle ❯ prompt, usage-limit banner) — NOT for rendering
+├── _win_console.py    hide the stray ConsoleWindowClass HWND WinPTY leaks
+│   static/            xterm.js + addons (fit, web-links) + terminal.html (renderer)
+│ ── orchestration core ──
+├── orchestrator.py    THE HEART: spawn/assign/send/close/done + auto-chain, watchdogs,
+│                      rate-limit, resume briefs, snapshot/restore, broadcasts
+├── cli_server.py      QTcpServer on main thread — parses JSON, dispatches to orchestrator
+├── cli.py             `takkub` CLI client — newline JSON over TCP to runtime/port
+├── routing_planner.py classify(msg,ctx) → RoutingAction; CLAUDE.md auto-routing as tested code
+├── roles.py           role registry (3-col grid: lead + frontend/backend/mobile/devops/codex
+│                      + gemini/qa/reviewer/critic/shell), colors, positions
+├── config.py          projects.json + runtime/ paths + claude.exe finder
+│ ── spawn-time context & env ──
+├── lead_context.py    builds runtime/lead-context.md (CLAUDE.md + BLOCKED_DIRS + disabled-
+│                      providers + brief), write-guard json, _SAFE_PLUGINS discovery
+├── pane_env.py        per-pane env allowlist (drop secrets), ECC mute, MCP_TOOL_TIMEOUT inject
+├── shared_dev_tools.py dev-tool config that follows Lead into every project tab
+├── codex_agents_md.py auto-plant AGENTS.md into codex pane cwd
+├── gemini_md.py       auto-plant GEMINI.md into gemini pane cwd
+│ ── providers / plan ──
+├── provider_config.py per-role CLI mapping (which CLI backs role X) — ~/.takkub/role-providers.json
+├── provider_state.py  per-provider enable/disable state — ~/.takkub/disabled-providers.json
+├── provider_dialog.py Qt dialog to pick claude/codex per role
+├── plan_tier.py       account plan tier (Pro vs Max) — gates which models
+├── codex_helper.py    OpenAI Codex CLI one-shot wrapper (non-interactive)
+├── gemini_helper.py   Google Gemini CLI one-shot wrapper (mirror of codex_helper)
+│ ── auth ──
+├── claude_auth_config.py  optional Claude Code auth override (default = CC's own login)
+├── claude_auth_dialog.py  Qt dialog for the auth override
+│ ── observability / persistence ──
+├── logs_panel.py      bottom dock tailing runtime/events.log
+├── token_meter.py     per-pane context occupancy from claude session JSONL usage
+├── issues.py          cockpit issue tracker — GitHub Issues backend via `gh` CLI
+├── vault_mirror.py    Obsidian write-side: mirror `takkub done` notes/briefs into the vault
+├── chatlog_scanner.py read-only scan of CC per-project session JSONL (resume-brief source)
+├── lead_bash_audit.py detect write-y Lead shell commands → JSONL audit record
+│ ── diagnostics / verify ──
+├── doctor.py          `takkub doctor` — pure-logic env diagnosis (no TCP, no network)
+├── skill_audit.py     TF-IDF role-boundary audit — detect overlapping role responsibilities
+├── verify.py          `takkub verify` — auto-detect stack + run lint/test gate
+├── docs_verify.py     markdown reference verifier — catch stale file/symbol refs
+│ ── self-update ──
+├── rtk_helper.py      one-click install of rtk's PreToolUse Bash hook
+├── update_helper.py   git-wrapper behind the status-bar update button
+└── update_worker.py   QRunnable that fetches origin/main + reports local_status()
 ```
+
+> **Note on layering:** the process-layout diagram above simplifies
+> `MainWindow → AgentPane`. The real chain is `MainWindow → QTabWidget →
+> ProjectTab → AgentPane` (one tab per project, each owning its own Lead).
 
 ## Data flow — "user types into Lead"
 
-1. User keystroke lands on `TerminalWidget` (focused).
-2. `keyPressEvent` translates the key to PTY bytes (e.g. arrow → `\x1b[A`, Thai char → UTF-8) and emits `inputBytes`.
+1. Keystroke lands inside **xterm.js** (the focused `QWebEngineView`); xterm encodes it to terminal bytes (arrow → `\x1b[A`, Thai → UTF-8).
+2. xterm's `term.onData(data)` → `bridge.sendInput(data)` over QWebChannel → `_Bridge.inputData` signal → `TerminalWidget._on_input_data` emits `inputBytes(bytes)`.
 3. `AgentPane` re-emits `inputBytes(role_name, data)`.
 4. `Orchestrator._on_pane_input` writes the data to that pane's `PtySession`.
 5. `PtySession.write(data)` decodes to `str` (pywinpty 3.x quirk) and calls `proc.write()`.
@@ -74,12 +124,18 @@ src/agent_takkub/
 ## Data flow — "claude prints something"
 
 1. Reader QThread (one per session) is blocked on `proc.read(4096)`.
-2. pywinpty returns the bytes / str — thread `emit(bytesReceived)` to main thread.
-3. `PtySession._on_bytes` feeds the bytes into `pyte.ByteStream` which updates the `pyte.Screen` model.
-4. `PtySession.outputUpdated` signal fires.
-5. `AgentPane._refresh_terminal` calls `session.display_rich()` → list of styled rows.
-6. `TerminalWidget.set_screen_rich(rows)` schedules a debounced redraw (16ms).
-7. `_flush_rich` clears the QTextDocument and inserts each run with a cached `QTextCharFormat`. The cache is keyed by `(fg, bg, bold, italic, underline, reverse)`.
+2. pywinpty returns the bytes / str — thread emits `bytesIn` to the main thread.
+3. Two consumers run in parallel off `bytesIn`:
+   - **render**: `TerminalWidget.write_bytes` batches per event-loop tick → `page.runJavaScript("termWrite(...)")` → xterm.js renders (the browser layout engine owns ANSI/alt-screen/IME/BiDi).
+   - **state**: `PtySession` also feeds the bytes into a `pyte.Screen` purely to detect screen state (idle `❯` prompt, usage-limit banner). This drives `outputUpdated` / idle flags — it is **not** the render path.
+4. There is no pyte→QTextCharFormat rebuild anymore (that was the pre-xterm pipeline); pyte is a headless state model now.
+
+## Data flow — "user clicks a URL or file path in a pane"
+
+1. xterm.js's `WebLinksAddon` (URLs) or the custom link provider in `terminal.html` (file paths) detects the span and underlines it on hover.
+2. On click → `bridge.openUrl(uri)` / `bridge.openPath(path)` over QWebChannel.
+3. `TerminalWidget._on_open_url` validates the scheme and calls `QDesktopServices.openUrl` (real OS browser — `window.open` is blocked inside QtWebEngine).
+4. `TerminalWidget._on_open_path` resolves the token via `_resolve_open_path(raw, self._cwd, (REPO_ROOT,))` — absolute paths checked directly, relative paths against the pane cwd then the repo root — then `QDesktopServices.openUrl(QUrl.fromLocalFile(...))` so the OS default app opens it (html→browser, md→editor).
 
 ## Data flow — "Lead runs `takkub assign --role backend ...`"
 

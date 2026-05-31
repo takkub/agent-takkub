@@ -58,7 +58,54 @@
 
     const fit = new FitAddon.FitAddon();
     term.loadAddon(fit);
-    term.loadAddon(new WebLinksAddon.WebLinksAddon());
+
+    // Web URLs (http/https/mailto). The addon's default handler calls
+    // window.open(), which QtWebEngine silently blocks — links looked dead.
+    // Hand the URI to Python (QDesktopServices) so it opens in the real
+    // browser. `bridge` is null until QWebChannel connects, but this
+    // closure only runs on click, long after that.
+    term.loadAddon(new WebLinksAddon.WebLinksAddon((event, uri) => {
+      if (bridge && bridge.openUrl) bridge.openUrl(uri);
+    }));
+
+    // File paths — xterm's WebLinksAddon only matches URLs, so absolute
+    // (C:\... or /...) and project-relative (docs/x.md, src\a\b.py) paths
+    // printed by claude/qa/critic were not clickable. Register a custom
+    // link provider that linkifies path-looking tokens and hands the click
+    // to Python, which resolves it against the pane cwd and opens it with
+    // the OS default app (html→browser, md→editor, png→viewer).
+    //
+    //   group 1: Windows absolute  C:\... or C:/...
+    //   group 2: path with a separator ending in a .ext (rel or POSIX-abs)
+    const PATH_RE = /[A-Za-z]:[\\/][^\s"'<>|]+|(?:\.{0,2}[\\/])?(?:[\w.@~+-]+[\\/])+[\w.@~+-]+\.[A-Za-z0-9]{1,8}/g;
+    term.registerLinkProvider({
+      provideLinks(lineNumber, callback) {
+        const ln = term.buffer.active.getLine(lineNumber - 1);
+        if (!ln) { callback(undefined); return; }
+        const text = ln.translateToString(true);
+        const links = [];
+        let m;
+        PATH_RE.lastIndex = 0;
+        while ((m = PATH_RE.exec(text)) !== null) {
+          let raw = m[0];
+          if (/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) continue;  // a URL — addon owns it
+          // drop trailing sentence punctuation from the linkified span
+          const tail = raw.match(/[.,;:!?)\]}>'"`]+$/);
+          let len = raw.length - (tail ? tail[0].length : 0);
+          if (len <= 0) continue;
+          raw = raw.slice(0, len);
+          const startX = m.index + 1;          // xterm cols are 1-based
+          const endX = m.index + len;           // inclusive end col
+          links.push({
+            text: raw,
+            range: { start: { x: startX, y: lineNumber }, end: { x: endX, y: lineNumber } },
+            decorations: { pointerCursor: true, underline: true },
+            activate(ev, uri) { if (bridge && bridge.openPath) bridge.openPath(uri); },
+          });
+        }
+        callback(links.length ? links : undefined);
+      },
+    });
 
     term.open(document.getElementById('term'));
     fit.fit();
