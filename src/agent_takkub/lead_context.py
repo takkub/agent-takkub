@@ -264,7 +264,7 @@ def _render_lead_context(
 """
     # Append disabled-providers section (only if any are disabled — saves tokens
     # when everything is enabled, which is the common case). Lead reads this on
-    # spawn and treats codex/gemini in the list as forbidden in proposals.
+    # spawn: a disabled codex/gemini is NOT forbidden — Claude substitutes for it.
     from .provider_state import all_disabled as _all_disabled
 
     disabled = _all_disabled()
@@ -274,13 +274,14 @@ def _render_lead_context(
 
 ---
 
-## ⛔ Disabled providers (cockpit toggle)
+## 🔄 Substituted providers (cockpit toggle)
 
 ขณะนี้ provider ต่อไปนี้ถูกปิดโดย user: **{disabled_list}**
 
-**ห้าม** propose role เหล่านี้ใน routing table หรือ cross-check
-**ห้าม** fire `takkub assign --role <disabled>` หรือ `takkub <disabled>`
-ถ้า user ขอตรงๆ → ตอบว่า provider นั้นถูกปิดอยู่ ให้ user enable ก่อน
+**ไม่ต้อง refuse** — ตำแหน่งเหล่านี้ **Claude รับแทนอัตโนมัติ**:
+- propose / fire role เหล่านี้ได้ตามปกติ (primary หรือ cross-check)
+- orchestrator จะ spawn pane ชื่อ role เดิมแต่รันด้วย claude (claude-backed substitute)
+- เวลา propose/fire ให้ **บอก user 1 บรรทัด** ว่า "{disabled_list} ปิดอยู่ → Claude รับแทน (เสีย model diversity)" แล้วเดินงานต่อ ไม่ต้องหยุดรอ
 
 Status เปลี่ยนระหว่าง session: cockpit จะ inject `[system] <provider> ENABLED/DISABLED` message
 """

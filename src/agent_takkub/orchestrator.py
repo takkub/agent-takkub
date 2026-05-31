@@ -1027,14 +1027,27 @@ class Orchestrator(QObject):
         # `--dangerously-skip-permissions`, MCP configs, plugin dirs,
         # or `--session-id`/`--resume` (all claude-only) to it.
         #
-        # Entry condition uses `provider_for(role_name)` so the user
-        # can remap any teammate role (e.g. "backend") to the codex
+        # Entry condition uses `effective_provider_for(role_name)` so the
+        # user can remap any teammate role (e.g. "backend") to the codex
         # binary via `~/.takkub/role-providers.json`. The `codex` role
-        # itself is forced into this branch by provider_config's
+        # itself is forced toward codex by provider_config's
         # `_FORCED_PROVIDER` table.
-        from .provider_config import CODEX, GEMINI, provider_for
+        #
+        # `effective_provider_for` (not plain `provider_for`) degrades a
+        # codex/gemini role to claude when that provider is unavailable —
+        # toggled off in the status bar OR its CLI isn't installed. When
+        # that happens neither branch below matches and execution falls
+        # through to the claude spawn path *with role_name unchanged*, so
+        # a "gemini"/"codex" pane keeps its slot/identity but is powered by
+        # claude ("Claude รับตำแหน่งแทน"). The in-branch `find_*_executable`
+        # None-guards are now belt-and-suspenders (we only enter a branch
+        # when the binary resolved), but kept in case PATH changes between
+        # the availability probe and the spawn.
+        from .provider_config import CODEX, GEMINI, effective_provider_for
 
-        if provider_for(role_name) == GEMINI:
+        effective_provider = effective_provider_for(role_name)
+
+        if effective_provider == GEMINI:
             from .gemini_helper import find_gemini_executable
             from .gemini_md import ensure_gemini_md
 
@@ -1074,7 +1087,7 @@ class Orchestrator(QObject):
             _log_event("spawn", role=role_name, cwd=spawn_cwd, resumed=False)
             return True, f"gemini spawned in {spawn_cwd}"
 
-        if provider_for(role_name) == CODEX:
+        if effective_provider == CODEX:
             from .codex_agents_md import ensure_agents_md
             from .codex_helper import find_codex_executable
 
@@ -1462,6 +1475,12 @@ class Orchestrator(QObject):
             resumed=resumed,
         )
         suffix = " (resumed)" if resumed else ""
+        # If a codex/gemini role reached the claude spawn path, its provider
+        # was unavailable (toggled off or not installed) and claude is
+        # standing in. Surface that so the user isn't surprised the pane
+        # talks like Claude.
+        if role_name in (CODEX, GEMINI):
+            suffix += " — claude substitute (provider unavailable)"
         return True, f"{role_name} spawned in {spawn_cwd}{suffix}"
 
     def _on_codex_exit(
@@ -1668,9 +1687,12 @@ class Orchestrator(QObject):
             self._warn_lead_spawn_failed(role_name, project, msg)
             return ok, msg
 
-        from .provider_config import CODEX, provider_for
+        from .provider_config import CODEX, effective_provider_for
 
-        if provider_for(role_name) == CODEX:
+        # Use the *effective* provider: a codex role substituted by claude
+        # (provider unavailable) must keep the plain task — codex-specific
+        # task rewriting would only confuse the standing-in claude pane.
+        if effective_provider_for(role_name) == CODEX:
             task = _rewrite_task_for_codex(task)
 
         project_ns = self._resolve_project(project)
@@ -2144,7 +2166,10 @@ class Orchestrator(QObject):
 
         word = "DISABLED" if disabled else "ENABLED"
         suffix = (
-            "Do not propose this in routing or cross-check." if disabled else "Available again."
+            f"Claude will substitute for the {provider} role (same slot, claude-backed); "
+            "you may still propose/fire it — just note the substitution to the user."
+            if disabled
+            else f"{provider} CLI available again — it will back its role natively."
         )
         notice = f"[system] {provider} provider {word}. {suffix}"
 

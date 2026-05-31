@@ -641,49 +641,79 @@ class TestThaiPageFalsePositives:
 
 
 class TestDisabledProviders:
-    """classify() respects context['disabled_providers'] — drops codex/gemini
-    from cross_check and degrades FIRE_ONESHOT to ASK_CLARIFY."""
+    """classify() no longer refuses disabled codex/gemini. The spawn layer
+    (provider_config.effective_provider_for) transparently backs an
+    unavailable codex/gemini role with claude ("Claude รับตำแหน่งแทน"), so
+    routing proceeds identically — disabled providers stay in cross_check and
+    as primary, with a substitution note in `reason`."""
 
-    def test_disabled_codex_dropped_from_cross_check(self):
-        """Refactor message normally proposes backend + codex cross-check.
-        With codex disabled, cross_check should be empty (or None)."""
+    def test_disabled_codex_kept_in_cross_check(self):
+        """Refactor proposes backend + codex cross-check. With codex disabled
+        the cross-check STAYS (claude will back it) — not dropped."""
         action = classify(
             "refactor the auth module to use the new session helper",
             context={"disabled_providers": {"codex"}},
         )
         assert action.kind == ActionKind.PROPOSE
-        # codex was the only cross-check entry for refactor — should be gone
-        assert not action.cross_check  # None or empty list
+        assert action.cross_check == ["codex"]
+        assert "substitut" in action.reason.lower()
 
-    def test_disabled_gemini_blocks_rollout_proposal(self):
-        """Rollout/strategy normally routes to gemini as primary.
-        With gemini disabled, classifier should ASK_CLARIFY (no fallback)."""
+    def test_disabled_gemini_rollout_still_proposes_gemini(self):
+        """Rollout/strategy routes to gemini as primary. With gemini disabled
+        it STILL proposes gemini (claude-backed) — no ASK_CLARIFY refusal."""
         action = classify(
             "rollout plan for deploying the auth changes safely",
             context={"disabled_providers": {"gemini"}},
         )
-        assert action.kind == ActionKind.ASK_CLARIFY
-        assert "gemini" in action.reason.lower()
+        assert action.kind == ActionKind.PROPOSE
+        assert action.role == "gemini"
+        assert "substitut" in action.reason.lower()
 
-    def test_both_disabled_no_codex_no_gemini_in_output(self):
-        """Refactor with both disabled: cross_check empty (codex gone).
-        Primary still routes to backend (refactor's content-derived role)."""
+    def test_both_disabled_primary_and_cross_check_survive(self):
+        """Refactor with both disabled: primary backend, cross_check codex
+        still present (both claude-backed where relevant)."""
         action = classify(
             "refactor backend to extract auth service",
             context={"disabled_providers": {"codex", "gemini"}},
         )
         assert action.kind == ActionKind.PROPOSE
         assert action.role == "backend"
-        assert not action.cross_check
+        assert action.cross_check == ["codex"]
 
-    def test_oneshot_codex_disabled_becomes_ask_clarify(self):
-        """FIRE_ONESHOT to a disabled provider -> ASK_CLARIFY with explanation."""
+    def test_explicit_disabled_role_still_fires(self):
+        """Explicit-role 'ให้ gemini ทำ ...' (action verb → explicit branch)
+        with gemini disabled → FIRE_ASSIGN (claude-backed substitute), not
+        ASK_CLARIFY."""
+        action = classify(
+            "ให้ gemini ทำ rollout plan",
+            context={"disabled_providers": {"gemini"}},
+        )
+        assert action.kind == ActionKind.FIRE_ASSIGN
+        assert action.role == "gemini"
+        assert "explicit role" in action.reason.lower()
+        assert "substitut" in action.reason.lower()
+
+    def test_oneshot_phrasing_disabled_fires_as_pane(self):
+        """One-shot phrasing 'ให้ gemini ดู ...' (no action verb) with gemini
+        disabled → FIRE_ASSIGN pane substitute (one-shot has no CLI to hit)."""
+        action = classify(
+            "ให้ gemini ดู plan นี้",
+            context={"disabled_providers": {"gemini"}},
+        )
+        assert action.kind == ActionKind.FIRE_ASSIGN
+        assert action.role == "gemini"
+        assert "substitut" in action.reason.lower()
+
+    def test_oneshot_codex_disabled_becomes_pane_assign(self):
+        """A one-shot to a disabled provider can't run as a one-shot (no CLI)
+        → degrade to FIRE_ASSIGN: a claude-backed pane in that role's slot."""
         action = classify(
             "ขอ codex review function นี้",
             context={"disabled_providers": {"codex"}},
         )
-        assert action.kind == ActionKind.ASK_CLARIFY
-        assert "codex" in action.reason.lower()
+        assert action.kind == ActionKind.FIRE_ASSIGN
+        assert action.role == "codex"
+        assert "substitut" in action.reason.lower()
 
     def test_none_disabled_is_backward_compat(self):
         """Default behavior (no context, or empty disabled set) unchanged."""

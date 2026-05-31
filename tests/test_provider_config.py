@@ -67,6 +67,56 @@ class TestProviderFor:
         assert provider_config.provider_for("qa") == "gemini"
 
 
+class TestEffectiveProviderFor:
+    """`effective_provider_for` degrades an unavailable codex/gemini role to
+    claude (toggled off OR CLI not installed) while `provider_for` keeps
+    reporting the static identity."""
+
+    def test_claude_role_unaffected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # claude is always available — no availability probe needed.
+        assert provider_config.effective_provider_for("frontend") == "claude"
+        assert provider_config.effective_provider_for("lead") == "claude"
+
+    def test_codex_available_stays_codex(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: True)
+        assert provider_config.effective_provider_for("codex") == "codex"
+
+    def test_codex_unavailable_degrades_to_claude(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: False)
+        # role identity (provider_for) is still codex...
+        assert provider_config.provider_for("codex") == "codex"
+        # ...but the effective engine is claude (the substitute).
+        assert provider_config.effective_provider_for("codex") == "claude"
+
+    def test_gemini_unavailable_degrades_to_claude(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: False)
+        assert provider_config.effective_provider_for("gemini") == "claude"
+
+    def test_remapped_role_also_degrades(
+        self, monkeypatch: pytest.MonkeyPatch, redirect_config_path: Path
+    ) -> None:
+        # A user-remapped role (backend→codex) substitutes too when codex is off.
+        redirect_config_path.write_text('{"backend": "codex"}', encoding="utf-8")
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: False)
+        assert provider_config.effective_provider_for("backend") == "claude"
+
+    def test_disabled_toggle_makes_unavailable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # _provider_available consults provider_state.is_disabled.
+        import agent_takkub.provider_state as ps
+
+        monkeypatch.setattr(ps, "is_disabled", lambda prov: prov == "codex")
+        assert provider_config._provider_available("codex") is False
+        # gemini not disabled here — availability then depends on the CLI probe.
+
+    def test_not_installed_makes_unavailable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import agent_takkub.codex_helper as ch
+        import agent_takkub.provider_state as ps
+
+        monkeypatch.setattr(ps, "is_disabled", lambda prov: False)
+        monkeypatch.setattr(ch, "find_codex_executable", lambda: None)
+        assert provider_config._provider_available("codex") is False
+
+
 class TestLoadProviders:
     def test_creates_empty_file_when_missing(self, redirect_config_path: Path) -> None:
         assert not redirect_config_path.exists()

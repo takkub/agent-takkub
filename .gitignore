@@ -24,3 +24,6 @@ GEMINI.md
 # Review/audit docs are intentionally committed even if the filename
 # happens to be `gemini.md` (case-insensitive match on Windows).
 !docs/**/gemini.md
+# Gemini-role stand-in prompt (claude substitute) — a real source file,
+# not the auto-planted cheatsheet. Negate the case-insensitive GEMINI.md match.
+!.claude/agents/gemini.md

@@ -108,3 +108,60 @@ def provider_for(role: str) -> str:
         return _FORCED_PROVIDER[key]
     mapping = load_providers()
     return mapping.get(key, CLAUDE)
+
+
+def _provider_available(provider: str) -> bool:
+    """True iff `provider` can actually run right now.
+
+    Two ways a codex/gemini provider becomes unusable:
+      1. Toggled off in the cockpit status bar (`disabled-providers.json`).
+      2. Its CLI isn't installed (binary not on PATH).
+
+    `claude` is always considered available (it's the cockpit's baseline;
+    if claude itself is missing the spawn fails far louder elsewhere).
+    Imports are lazy so this stays a thin per-role config module with no
+    hard dependency on provider_state / the CLI helpers at import time.
+    """
+    if provider == CLAUDE:
+        return True
+    # (1) user-intent toggle
+    try:
+        from .provider_state import is_disabled
+
+        if is_disabled(provider):
+            return False
+    except Exception:
+        pass
+    # (2) CLI actually installed
+    try:
+        if provider == GEMINI:
+            from .gemini_helper import find_gemini_executable
+
+            return find_gemini_executable() is not None
+        if provider == CODEX:
+            from .codex_helper import find_codex_executable
+
+            return find_codex_executable() is not None
+    except Exception:
+        return False
+    return True
+
+
+def effective_provider_for(role: str) -> str:
+    """Resolve which CLI will *actually* back the role this spawn.
+
+    Like `provider_for()` but degrades a codex/gemini role to `claude`
+    when that provider is unavailable — toggled off OR not installed.
+    The role keeps its identity (a "gemini" pane is still a "gemini"
+    pane); only the engine behind it changes. This is the "Claude รับ
+    ตำแหน่งแทน" substitution: an assigned codex/gemini slot never fails
+    or refuses — Claude fills it instead.
+
+    `provider_for()` answers "which CLI is *configured* for this role"
+    (static identity); this answers "which CLI is *usable* right now"
+    (runtime). Spawn-time decisions should use this one.
+    """
+    desired = provider_for(role)
+    if desired == CLAUDE:
+        return CLAUDE
+    return desired if _provider_available(desired) else CLAUDE

@@ -4,6 +4,29 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Added (provider substitution — Claude รับตำแหน่งแทน)
+- **Unavailable codex/gemini roles now fall back to Claude** instead of being
+  refused. Two ways a provider becomes unusable — **toggled off** in the status
+  bar OR its **CLI not installed** — are unified at the spawn layer:
+  `provider_config.effective_provider_for()` (runtime "which CLI is usable now",
+  vs `provider_for()` "which is configured") degrades an unavailable codex/gemini
+  role to `claude`. `orchestrator._spawn` gates the codex/gemini branches on it,
+  so an unavailable provider falls through to the claude branch **keeping its
+  role name** — a "gemini"/"codex" pane keeps its slot/identity but is powered
+  by `claude.exe`.
+- **Stand-in role prompts** `.claude/agents/{gemini,codex}.md` — read only on the
+  substitute path; tell the claude pane it is standing in (reports prefixed
+  `[claude-substitute for <role>]`) and flag the lost model diversity.
+
+### Changed
+- **Routing no longer refuses disabled codex/gemini** — `routing_planner.classify()`
+  routes them normally (no more `ASK_CLARIFY`, no cross_check stripping) and adds
+  a substitution note to `reason`; a disabled one-shot degrades to `FIRE_ASSIGN`
+  (a claude-backed pane — one-shot has no substitute path). The Lead spawn context
+  (`lead_context.py`), the toggle broadcast notice, and `CLAUDE.md` now tell Lead
+  to propose/fire the role and note the substitution, rather than tell the user to
+  enable it first.
+
 ## [v0.4.0] - 2026-05-31
 
 ### Added (terminal UX + review/release tooling)

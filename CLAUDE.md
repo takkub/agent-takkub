@@ -238,19 +238,24 @@ CLI ยังมีอยู่แต่ **Lead ห้ามใช้** — user
 
 แทนที่จะ one-shot → ใส่เป็น row ใน propose table คู่กับ implementation role → user confirm → fire `takkub assign --role codex/gemini` (pane visible)
 
-## Disabled providers (cockpit toggle)
+## Unavailable providers → Claude รับตำแหน่งแทน (substitution)
 
-Cockpit มี toggle 2 ตัวใน status bar ปิด/เปิด codex และ gemini ได้ตามใจ user — state persist ข้าม restart
+codex/gemini อาจ **ใช้ไม่ได้** 2 กรณี:
+1. **ปิดผ่าน toggle** ใน status bar (`~/.takkub/disabled-providers.json`)
+2. **ยังไม่ได้ติดตั้ง** CLI (binary ไม่อยู่ใน PATH)
 
-**ขณะ provider ถูกปิด — Lead ห้าม:**
-- propose role นั้นใน routing table (primary หรือ cross-check)
-- fire `takkub assign --role <disabled>` หรือ `takkub <disabled>`
+**ทั้ง 2 กรณี Lead ไม่ต้อง refuse** — ตำแหน่งนั้นไม่ตกหล่น **Claude รับแทนอัตโนมัติ**:
+- propose / fire role codex/gemini ได้ตามปกติ (ทั้ง primary และ cross-check)
+- orchestrator (`provider_config.effective_provider_for`) จะ degrade provider ที่ใช้ไม่ได้ → spawn pane **ชื่อ role เดิม** (`gemini`/`codex`) แต่รันด้วย `claude.exe`
+- pane substitute อ่าน stand-in role file `.claude/agents/{gemini,codex}.md` (รู้ว่าตัวเองเป็น Claude ที่รับบทแทน + ขึ้น report ว่า `[claude-substitute for <role>]`)
 
-ถ้า user ขอตรงๆ ขณะปิด → ตอบว่า "provider ถูกปิดอยู่ user enable ก่อน" ไม่หา role อื่นแทน (เคารพ user intent)
+**Lead ควรทำ:** เวลา propose/fire role ที่ใช้ไม่ได้ → **บอก user 1 บรรทัด** ว่า "gemini/codex ใช้ไม่ได้ → Claude รับแทน (เสีย model diversity)" เพื่อให้ user ตัดสินใจว่าจะเปิด/ติดตั้งก่อนไหม — แต่ **ไม่ต้องหยุดรอ** ถ้า user ไม่ได้ขอ
 
-**Source:** `~/.takkub/disabled-providers.json` orchestrator inject สถานะใน Lead spawn prompt + runtime `[system] <provider> ENABLED/DISABLED` เมื่อ toggle
+**ข้อควรรู้:** substitute = Claude ทั้งคู่ → ถ้างานต้องการ cross-check จากโมเดลอื่นจริงๆ (กัน confirmation bias) substitute จะไม่ได้ประโยชน์นั้น — flag ให้ user รู้
 
-`routing_planner.classify()` เคารพ flag นี้: `context={"disabled_providers": {"codex"}}` → strip codex จาก cross_check, degrade FIRE_ONESHOT → ASK_CLARIFY
+**Source:** `~/.takkub/disabled-providers.json` orchestrator inject สถานะใน Lead spawn prompt + runtime `[system] <provider> ENABLED/DISABLED` เมื่อ toggle (notice บอกว่า Claude จะรับแทน)
+
+`routing_planner.classify()`: `context={"disabled_providers": {"codex"}}` → route เหมือนเดิม + ใส่ substitution note ใน `reason`; FIRE_ONESHOT ที่ provider ปิด → degrade เป็น FIRE_ASSIGN (claude-backed pane — one-shot ไม่มี substitute path)
 
 ## วิธี spawn + assign งาน
 

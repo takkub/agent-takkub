@@ -363,6 +363,16 @@ def _derive_primary_role(msg: str) -> str:
     return "backend"  # safest default for ambiguous actionable tasks
 
 
+def _sub_note(role: str) -> str:
+    """Reason fragment when a disabled codex/gemini role is routed anyway.
+
+    The spawn layer (provider_config.effective_provider_for) backs an
+    unavailable codex/gemini role with claude, so we never refuse — we just
+    flag the substitution so Lead can pre-warn the user.
+    """
+    return f"{role} disabled → claude substitutes (same slot)"
+
+
 def _route(msg: str) -> dict:
     """Apply routing decision table. Returns dict with role/roles/cross_check/reason."""
     # Multi-role: UI + API together → parallel frontend + backend
@@ -396,10 +406,13 @@ def classify(user_message: str, context: dict | None = None) -> RoutingAction:
         context: Optional state dict. Keys:
             ``pending_proposal`` (bool) — True when Lead has shown a plan
             table and is waiting for the user to confirm/abort/edit it.
-            ``disabled_providers`` (set[str]) — provider names that user has
-            disabled via the cockpit status bar toggle. codex/gemini in this
-            set get dropped from cross_check; FIRE_ONESHOT and gemini-primary
-            routes degrade to ASK_CLARIFY.
+            ``disabled_providers`` (set[str]) — provider names the user has
+            disabled via the cockpit status bar toggle. These are NO LONGER
+            refused: routing proceeds normally and the spawn layer backs the
+            unavailable codex/gemini role with claude ("Claude รับตำแหน่งแทน").
+            The only effect here is a substitution note in ``reason`` and a
+            disabled FIRE_ONESHOT degrading to FIRE_ASSIGN (a claude-backed
+            pane — one-shot has no substitute path).
 
     Returns:
         RoutingAction with kind, role(s), cross_check, reason, mixed.
@@ -410,25 +423,30 @@ def classify(user_message: str, context: dict | None = None) -> RoutingAction:
     # 1. Explicit role ("ให้ backend ทำ X") → FIRE_ASSIGN immediately
     explicit = _detect_explicit_role(msg)
     if explicit:
+        # A disabled codex/gemini explicit role is fired anyway — the spawn
+        # layer backs it with claude. Just note the substitution.
+        reason = "explicit role specified by user"
         if explicit in disabled:
-            return RoutingAction(
-                kind=ActionKind.ASK_CLARIFY,
-                reason=f"{explicit} provider is disabled — ask user to enable first",
-            )
+            reason = f"explicit role; {_sub_note(explicit)}"
         return RoutingAction(
             kind=ActionKind.FIRE_ASSIGN,
             role=explicit,
             task_hint=msg,
-            reason="explicit role specified by user",
+            reason=reason,
         )
 
     # 2. One-shot codex/gemini → FIRE_ONESHOT (no pane spawn)
     oneshot = _detect_oneshot(msg)
     if oneshot:
         if oneshot in disabled:
+            # No CLI to one-shot against — substitute a claude-backed pane in
+            # that role's slot instead (also matches "Lead never one-shots,
+            # always uses a pane").
             return RoutingAction(
-                kind=ActionKind.ASK_CLARIFY,
-                reason=f"{oneshot} provider is disabled — ask user to enable first",
+                kind=ActionKind.FIRE_ASSIGN,
+                role=oneshot,
+                task_hint=msg,
+                reason=f"one-shot target disabled → {_sub_note(oneshot)} via pane",
             )
         return RoutingAction(
             kind=ActionKind.FIRE_ONESHOT,
@@ -472,20 +490,16 @@ def classify(user_message: str, context: dict | None = None) -> RoutingAction:
     routing = _route(msg)
     primary = routing.get("role")
     cross_check = routing.get("cross_check")
+    reason = routing.get("reason", "")
 
-    # Degrade if the *primary* role itself is disabled (e.g. rollout→gemini
-    # when gemini is off): there's no automatic fallback role, so surface
-    # the conflict to the user rather than silently picking something else.
-    if primary in disabled:
-        return RoutingAction(
-            kind=ActionKind.ASK_CLARIFY,
-            reason=f"{primary} provider is disabled — ask user to enable first",
-        )
-
-    # Filter cross_check: drop any disabled providers. None stays None;
-    # empty list collapses to None for backward-compat with existing tests.
-    if cross_check:
-        cross_check = [r for r in cross_check if r not in disabled] or None
+    # A disabled codex/gemini — whether it's the primary (e.g. rollout→gemini
+    # when gemini is off) or a cross-check (refactor→codex) — is no longer
+    # refused or stripped. Routing proceeds identically; the spawn layer backs
+    # the unavailable role with claude. We only annotate the reason so Lead can
+    # tell the user a claude substitute is coming.
+    subs = [r for r in ([primary] + (cross_check or [])) if r in disabled]
+    if subs:
+        reason = f"{reason}; " + ", ".join(_sub_note(r) for r in subs)
 
     return RoutingAction(
         kind=ActionKind.PROPOSE,
@@ -493,6 +507,6 @@ def classify(user_message: str, context: dict | None = None) -> RoutingAction:
         roles=routing.get("roles"),
         task_hint=msg,
         cross_check=cross_check,
-        reason=routing.get("reason", ""),
+        reason=reason,
         mixed=is_mixed,
     )
