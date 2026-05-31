@@ -4,6 +4,39 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v0.4.0] - 2026-05-31
+
+### Added (terminal UX + review/release tooling)
+- **Clickable URLs & file paths in panes** — click a link or path in any pane
+  to open it: URLs go to the OS browser (`QDesktopServices`, since QtWebEngine
+  blocks `window.open`), file paths open in the OS default app (resolved against
+  the pane cwd, then repo root). `terminal_widget.py` + `static/terminal.html`
+  (WebLinksAddon handler + a custom xterm link provider).
+- **Self-contained HTML design reviews** — `design_review_html.py` renders a
+  review `.md` → portable `.html` (screenshots from front-matter `shots:`
+  inlined as base64, `*impact: …*` tags → colored badge cards via CSS `:has()`).
+  `critic.md` runs the converter after writing the markdown and reports both paths.
+- **`EXPLAIN_SYSTEM` routing intent** — "รีวิวระบบ / อธิบายระบบ / explain
+  architecture / system overview" classifies as `ActionKind.EXPLAIN_SYSTEM` and
+  produces an HTML system explainer for the project instead of a chat answer;
+  normal work tasks stay markdown. `routing_planner.py`.
+- **Changelog viewer** — clicking the status-bar version chip opens CHANGELOG.md
+  rendered in an in-app dialog (`QTextBrowser.setMarkdown`); copy-version moved
+  inside it. `main_window.py`.
+- **`takkub release`** — one-shot version bump (major/minor/patch or `--version`)
+  + CHANGELOG `[vNEXT]` roll + git commit & annotated tag; push left to the user.
+  Guards (run before any write, so `--dry-run` is a real preflight): empty
+  changelog, downgrade/same/malformed version, duplicate tag. `release.py`.
+
+### Changed (status bar visual cleanup)
+- **Neutralized the status bar** (design-review findings) — action buttons
+  dropped their per-button rainbow fills for a quiet ghost style; only End
+  Session (closes all panes = destructive) keeps a restrained red accent.
+  Provider/plan chips became outline + status dot (codex/gemini stay clickable
+  toggles). Token meter de-duplicated: the tab shows `%` only, the status-bar Σ
+  shows only with 2+ panes, and the pane header stays the canonical per-pane
+  meter. `main_window.py`.
+
 ### Changed (per-role model tiers)
 - **Teammate model is now picked per role instead of one flat Sonnet-medium
   tier.** The cockpit owner runs on Claude Max (per-token cost irrelevant), so
