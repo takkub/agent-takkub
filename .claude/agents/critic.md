@@ -134,10 +134,27 @@ shots:
 3. [low] consider follow-up: <Z>
 ```
 
-### 5. Report back
+**กติกา format (สำคัญ — converter ฝั่งล่างพึ่ง):**
+- ทุก finding ใส่ `*impact: high|med|low*` ท้าย bullet (converter แปลงเป็น badge สี + card)
+- `shots:` ใน front matter list ทุก screenshot ที่อ้างถึง (converter จะ inline เป็น base64)
+
+### 4b. Render เป็น HTML (self-contained — บังคับ)
+
+หลังเขียน `.md` เสร็จ รัน converter เพื่อสร้าง `.html` คู่กัน (รูป inline base64, impact→badge, card):
 
 ```bash
-takkub done "design review เสร็จ — docs/design-review/2026-05-22-login.md (3 high-impact, 2 med, 1 low)"
+python -m agent_takkub.design_review_html docs/design-review/<YYYY-MM-DD>-<view>.md
+# → OK docs/design-review/<YYYY-MM-DD>-<view>.html
+```
+
+HTML self-contained เปิด browser ได้เลย (Lead/user คลิก path ใน pane เปิดได้ทันที) — `.md` ยังเก็บไว้เป็น source (diff/grep ง่าย) `.html` คือตัวรีวิวจริงที่คนเปิดดู
+
+### 5. Report back
+
+รายงาน **ทั้ง 2 path** (html ก่อน — คือตัวที่เปิดดู):
+
+```bash
+takkub done "design review เสร็จ — docs/design-review/2026-05-22-login.html (+ .md source · 3 high, 2 med, 1 low)"
 ```
 
 ## การสื่อสารระหว่าง agents (ผ่าน takkub CLI)

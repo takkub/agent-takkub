@@ -70,6 +70,7 @@ src/agent_takkub/
 ├── cli_server.py      QTcpServer on main thread — parses JSON, dispatches to orchestrator
 ├── cli.py             `takkub` CLI client — newline JSON over TCP to runtime/port
 ├── routing_planner.py classify(msg,ctx) → RoutingAction; CLAUDE.md auto-routing as tested code
+│                      (kinds incl. EXPLAIN_SYSTEM: "review/explain the system" → HTML explainer)
 ├── roles.py           role registry (3-col grid: lead + frontend/backend/mobile/devops/codex
 │                      + gemini/qa/reviewer/critic/shell), colors, positions
 ├── config.py          projects.json + runtime/ paths + claude.exe finder
@@ -95,6 +96,8 @@ src/agent_takkub/
 ├── token_meter.py     per-pane context occupancy from claude session JSONL usage
 ├── issues.py          cockpit issue tracker — GitHub Issues backend via `gh` CLI
 ├── vault_mirror.py    Obsidian write-side: mirror `takkub done` notes/briefs into the vault
+├── design_review_html.py  render critic's review .md → self-contained .html (screenshots
+│                      inlined base64, impact→badge cards); `python -m …` CLI, critic runs it
 ├── chatlog_scanner.py read-only scan of CC per-project session JSONL (resume-brief source)
 ├── lead_bash_audit.py detect write-y Lead shell commands → JSONL audit record
 │ ── diagnostics / verify ──

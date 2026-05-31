@@ -9,6 +9,7 @@ dependencies = [
     "pywinpty>=2.0;sys_platform=='win32'",
     "pyte>=0.8",
     "pyyaml>=6",
+    "markdown>=3",
 ]
 
 [project.scripts]
