@@ -589,10 +589,11 @@ class MainWindow(QMainWindow):
             "color: #6b7280; font-size: 11px; padding: 0 6px; font-variant-numeric: tabular-nums;"
         )
         self._version_label.setToolTip(
-            "Cockpit version + commit SHA.\nClick to copy. Click the 🔄 chip to pull updates."
+            "Cockpit version + commit SHA.\nClick to view the changelog "
+            "(copy version from inside).\nClick the 🔄 chip to pull updates."
         )
         self._version_label.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._version_label.mousePressEvent = lambda _ev: self._copy_version_to_clipboard()
+        self._version_label.mousePressEvent = lambda _ev: self._show_changelog()
 
         # Aggregate token meter: sums prompt tokens across every active pane
         # so the user can spot when the whole team is bumping the limit.
@@ -1812,6 +1813,48 @@ class MainWindow(QMainWindow):
             return
         QApplication.clipboard().setText(text)
         self._status.showMessage(f"copied: {text}", 2000)
+
+    def _show_changelog(self) -> None:
+        """Version chip click → render CHANGELOG.md in a scrollable in-app
+        dialog (QTextBrowser.setMarkdown — no external browser). The old
+        copy-to-clipboard action moves to a button inside the dialog so it
+        isn't lost."""
+        from PyQt6.QtWidgets import (
+            QDialog,
+            QDialogButtonBox,
+            QPushButton,
+            QTextBrowser,
+            QVBoxLayout,
+        )
+
+        path = REPO_ROOT / "CHANGELOG.md"
+        try:
+            body = path.read_text(encoding="utf-8")
+        except OSError:
+            body = "# Changelog\n\n_ไม่พบ CHANGELOG.md ที่ repo root_"
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Changelog · {self._version_label.text().strip() or 'agent-takkub'}")
+        dlg.resize(760, 620)
+        layout = QVBoxLayout(dlg)
+
+        browser = QTextBrowser(dlg)
+        browser.setMarkdown(body)
+        browser.setOpenExternalLinks(True)
+        browser.setStyleSheet(
+            "QTextBrowser { background:#0e0e10; color:#e4e4e7; "
+            "border:1px solid #27272a; border-radius:6px; padding:8px; }"
+        )
+        layout.addWidget(browser)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, dlg)
+        copy_btn = QPushButton("📋 Copy version", dlg)
+        copy_btn.clicked.connect(self._copy_version_to_clipboard)
+        buttons.addButton(copy_btn, QDialogButtonBox.ButtonRole.ActionRole)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+
+        dlg.exec()
 
     def _refresh_update_button(self) -> None:
         """Flip the update chip's label/colour based on the cached
