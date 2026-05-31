@@ -10,6 +10,7 @@ import pytest
 
 from agent_takkub.release import (
     bump_version,
+    changelog_has_entries,
     read_pyproject_version,
     release,
     roll_changelog,
@@ -99,3 +100,55 @@ class TestRelease:
         res = release(repo, explicit_version="1.2.3", do_commit=False, do_tag=False)
         assert res["new_version"] == "1.2.3"
         assert res["tag"] == "v1.2.3"
+
+
+_EMPTY_CL = "# Changelog\n\n## [vNEXT]\n\n## [v0.3.8] - 2026-05-20\n\n- old\n"
+
+
+class TestChangelogHasEntries:
+    def test_has(self):
+        assert changelog_has_entries(_CHANGELOG) is True
+
+    def test_empty_vnext(self):
+        assert changelog_has_entries(_EMPTY_CL) is False
+
+    def test_no_vnext(self):
+        assert changelog_has_entries("# Changelog\n\n## [v0.1.0]\n- x\n") is False
+
+
+class TestGuards:
+    def _repo(self, tmp_path, changelog=_CHANGELOG):
+        (tmp_path / "pyproject.toml").write_text(_PYPROJECT, encoding="utf-8")
+        (tmp_path / "CHANGELOG.md").write_text(changelog, encoding="utf-8")
+        return tmp_path
+
+    def test_empty_vnext_blocks(self, tmp_path):
+        repo = self._repo(tmp_path, _EMPTY_CL)
+        with pytest.raises(ValueError, match="no changelog entries"):
+            release(repo, part="patch", do_commit=False, do_tag=False)
+
+    def test_allow_empty_overrides(self, tmp_path):
+        repo = self._repo(tmp_path, _EMPTY_CL)
+        res = release(repo, part="patch", do_commit=False, do_tag=False, allow_empty=True)
+        assert res["new_version"] == "0.3.10"
+
+    def test_explicit_downgrade_blocks(self, tmp_path):
+        repo = self._repo(tmp_path)
+        with pytest.raises(ValueError, match="not newer"):
+            release(repo, explicit_version="0.2.0", do_commit=False, do_tag=False)
+
+    def test_explicit_same_blocks(self, tmp_path):
+        repo = self._repo(tmp_path)
+        with pytest.raises(ValueError, match="not newer"):
+            release(repo, explicit_version="0.3.9", do_commit=False, do_tag=False)
+
+    def test_explicit_bad_format_blocks(self, tmp_path):
+        repo = self._repo(tmp_path)
+        with pytest.raises(ValueError, match="SemVer"):
+            release(repo, explicit_version="0.4", do_commit=False, do_tag=False)
+
+    def test_guards_run_in_dry_run(self, tmp_path):
+        # dry-run is a preflight: the empty-vNEXT guard must still fire
+        repo = self._repo(tmp_path, _EMPTY_CL)
+        with pytest.raises(ValueError, match="no changelog entries"):
+            release(repo, part="patch", dry_run=True)

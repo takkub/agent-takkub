@@ -68,6 +68,24 @@ def roll_changelog(text: str, version: str, date: str) -> str:
     return text.replace(_VNEXT, replacement, 1)
 
 
+def changelog_has_entries(text: str) -> bool:
+    """True if the `## [vNEXT]` section has any non-blank content before the
+    next `## ` version heading. Guards against cutting a contentless release
+    (version bumped + tagged but the changelog says nothing changed)."""
+    idx = text.find(_VNEXT)
+    if idx == -1:
+        return False
+    after = text[idx + len(_VNEXT) :]
+    m = re.search(r"\n## ", after)  # next version heading (### sub-headings don't match)
+    body = after[: m.start()] if m else after
+    return bool(body.strip())
+
+
+def _semver_tuple(v: str) -> tuple[int, int, int]:
+    a, b, c = (int(x) for x in v.split("."))
+    return (a, b, c)
+
+
 def _git(repo_root: pathlib.Path, *args: str) -> None:
     subprocess.run(
         ["git", "-C", str(repo_root), *args],
@@ -77,6 +95,19 @@ def _git(repo_root: pathlib.Path, *args: str) -> None:
     )
 
 
+def _tag_exists(repo_root: pathlib.Path, tag: str) -> bool:
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(repo_root), "tag", "-l", tag],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return False
+    return tag in out.stdout.split()
+
+
 def release(
     repo_root: str | pathlib.Path,
     part: str = "patch",
@@ -84,24 +115,51 @@ def release(
     do_commit: bool = True,
     do_tag: bool = True,
     dry_run: bool = False,
+    allow_empty: bool = False,
     today: str | None = None,
 ) -> dict:
     """Run the release ceremony. Returns a summary dict. With dry_run=True
-    nothing on disk or in git is touched (just computes the new version)."""
+    nothing on disk or in git is touched — but all correctness guards still
+    run, so `--dry-run` doubles as a preflight check.
+
+    Guards (raise ValueError, abort before any write):
+      - explicit --version must be X.Y.Z and strictly newer than current
+      - `## [vNEXT]` must have entries (unless allow_empty) — no contentless release
+      - the git tag must not already exist
+    """
     repo_root = pathlib.Path(repo_root)
     pyproject = repo_root / "pyproject.toml"
     changelog = repo_root / "CHANGELOG.md"
 
     pp_text = pyproject.read_text(encoding="utf-8")
     current = read_pyproject_version(pp_text)
-    new_version = explicit_version or bump_version(current, part)
+
+    if explicit_version is not None:
+        ver = explicit_version.strip()
+        if not re.fullmatch(r"\d+\.\d+\.\d+", ver):
+            raise ValueError(f"--version must be SemVer X.Y.Z, got {explicit_version!r}")
+        if _semver_tuple(ver) <= _semver_tuple(current):
+            raise ValueError(f"{ver} is not newer than the current version {current}")
+        new_version = ver
+    else:
+        new_version = bump_version(current, part)
+
     date = today or datetime.date.today().isoformat()
     tag = f"v{new_version}"
+
+    cl_text = changelog.read_text(encoding="utf-8")
+    if not allow_empty and not changelog_has_entries(cl_text):
+        raise ValueError(
+            "## [vNEXT] has no changelog entries — document what changed first, "
+            "or pass --allow-empty to release anyway"
+        )
+    if do_tag and _tag_exists(repo_root, tag):
+        raise ValueError(f"git tag {tag} already exists — pick a different version")
 
     # compute both transforms up front so a changelog error aborts before we
     # write a half-done pyproject
     new_pp = set_pyproject_version(pp_text, new_version)
-    new_cl = roll_changelog(changelog.read_text(encoding="utf-8"), new_version, date)
+    new_cl = roll_changelog(cl_text, new_version, date)
 
     summary = {
         "current": current,

@@ -480,6 +480,7 @@ def cmd_release(args: argparse.Namespace) -> dict:
         do_commit=not args.no_commit,
         do_tag=not args.no_tag,
         dry_run=args.dry_run,
+        allow_empty=args.allow_empty,
     )
     if res["dry_run"]:
         _utf8_print(
@@ -845,6 +846,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     srel.add_argument("--no-commit", action="store_true", help="edit files but don't git commit")
     srel.add_argument("--no-tag", action="store_true", help="commit but don't create the git tag")
+    srel.add_argument(
+        "--allow-empty",
+        action="store_true",
+        help="release even if ## [vNEXT] has no changelog entries",
+    )
     srel.add_argument(
         "--dry-run",
         action="store_true",
