@@ -4,6 +4,8 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v0.5.0] - 2026-06-01
+
 ### Added (provider substitution — Claude รับตำแหน่งแทน)
 - **Unavailable codex/gemini roles now fall back to Claude** instead of being
   refused. Two ways a provider becomes unusable — **toggled off** in the status
