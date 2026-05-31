@@ -303,6 +303,8 @@ class AgentPane(QFrame):
         # seconds, so the label stays hidden until read_last_usage returns.
         self._spawn_ts = time.time()
         self._session_cwd = cwd
+        # let the terminal resolve clicked relative paths against this cwd
+        self._terminal.set_cwd(cwd)
         self._session_jsonl = None
         self._last_usage = None
         self._token_label.hide()

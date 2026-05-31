@@ -31,6 +31,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtCore import QEvent, QObject, QTimer, QUrl, pyqtSignal, pyqtSlot
+from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWebChannel import QWebChannel
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWidgets import QVBoxLayout, QWidget
@@ -83,6 +84,43 @@ def _save_clipboard_image(b64data: str, runtime_dir: Path) -> Path:
     return path
 
 
+_TRAILING_PUNCT = ".,;:!?)]}>\"'`"
+
+
+def _resolve_open_path(
+    raw: str, cwd: str | None = None, extra_bases: tuple[str, ...] = ()
+) -> Path | None:
+    """Resolve a clicked terminal token to an existing file path, or None.
+
+    Pure (no Qt) so it can be unit-tested. Absolute paths are checked
+    directly; relative paths are tried against `cwd` (the pane's project
+    dir) then each `extra_bases` entry (e.g. the cockpit repo root). The
+    first candidate that exists wins. Surrounding quotes/brackets and
+    trailing sentence punctuation are stripped first so a path printed mid
+    sentence ("see docs/x.md.") still resolves.
+    """
+    if not raw:
+        return None
+    s = raw.strip().strip("\"'`").strip("()[]{}<>").rstrip(_TRAILING_PUNCT)
+    if not s:
+        return None
+    try:
+        p = Path(s)
+        if p.is_absolute():
+            return p if p.exists() else None
+        bases: list[Path] = []
+        if cwd:
+            bases.append(Path(cwd))
+        bases.extend(Path(b) for b in extra_bases if b)
+        for base in bases:
+            cand = base / s
+            if cand.exists():
+                return cand
+    except OSError:
+        return None
+    return None
+
+
 class _Bridge(QObject):
     """Object exposed to JS via QWebChannel."""
 
@@ -90,10 +128,22 @@ class _Bridge(QObject):
     sizeChanged = pyqtSignal(int, int)  # cols, rows reported by FitAddon
     pageReady = pyqtSignal()
     imageDataPasted = pyqtSignal(str, str)  # base64_data, mime_type
+    openUrlRequested = pyqtSignal(str)  # web URL clicked in a pane
+    openPathRequested = pyqtSignal(str)  # file path clicked in a pane
 
     @pyqtSlot(str)
     def sendInput(self, data: str) -> None:
         self.inputData.emit(data)
+
+    @pyqtSlot(str)
+    def openUrl(self, uri: str) -> None:
+        """Called from JS when the user clicks a web link (WebLinksAddon)."""
+        self.openUrlRequested.emit(uri)
+
+    @pyqtSlot(str)
+    def openPath(self, path: str) -> None:
+        """Called from JS when the user clicks a file path (custom provider)."""
+        self.openPathRequested.emit(path)
 
     @pyqtSlot(int, int)
     def resize(self, cols: int, rows: int) -> None:
@@ -170,10 +220,16 @@ class TerminalWidget(QWidget):
         self._heartbeat.setInterval(250)
         self._heartbeat.timeout.connect(self._heartbeat_poke)
 
+        # Pane cwd (set by AgentPane.attach_session) so clicked relative
+        # paths resolve against the project this pane is working in.
+        self._cwd: str | None = None
+
         self._bridge.inputData.connect(self._on_input_data)
         self._bridge.sizeChanged.connect(self.resized.emit)
         self._bridge.pageReady.connect(self._on_page_ready)
         self._bridge.imageDataPasted.connect(self._on_image_pasted)
+        self._bridge.openUrlRequested.connect(self._on_open_url)
+        self._bridge.openPathRequested.connect(self._on_open_path)
 
         # Enable drag-and-drop for file path insertion (Level 1).
         # We install an event filter on the child view so we see Qt-level
@@ -315,6 +371,49 @@ class TerminalWidget(QWidget):
 
     def setFocus(self) -> None:
         self._view.setFocus()
+
+    def set_cwd(self, cwd: str | None) -> None:
+        """Record the pane's working dir so clicked relative paths resolve."""
+        self._cwd = cwd
+
+    # ------------------------------------------------------------------
+    # Clickable links: open URL / file path clicked inside a pane
+    # ------------------------------------------------------------------
+    def _on_open_url(self, uri: str) -> None:
+        """Open a clicked web link in the OS default browser.
+
+        WebLinksAddon's default handler uses window.open(), which QtWebEngine
+        silently blocks (no createWindow override) — so links looked dead.
+        Routing through QDesktopServices opens them in the real browser.
+        """
+        u = (uri or "").strip()
+        if not u or not u.lower().startswith(("http://", "https://", "mailto:", "file://")):
+            return
+        QDesktopServices.openUrl(QUrl(u))
+        self._log_link_event("open_url", u)
+
+    def _on_open_path(self, raw: str) -> None:
+        """Open a clicked file path with its OS default app (html→browser,
+        md→editor, png→viewer). Relative paths resolve against the pane cwd
+        first, then the cockpit repo root."""
+        from .config import REPO_ROOT
+
+        resolved = _resolve_open_path(raw, self._cwd, (str(REPO_ROOT),))
+        if resolved is None:
+            self._log_link_event("open_path_miss", raw)
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(resolved)))
+        self._log_link_event("open_path", str(resolved))
+
+    def _log_link_event(self, kind: str, value: str) -> None:
+        from .config import EVENTS_LOG, ensure_runtime
+
+        try:
+            ensure_runtime()
+            with EVENTS_LOG.open("a", encoding="utf-8") as fh:
+                fh.write(f"{datetime.now().isoformat()} {kind} {value}\n")
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Level 1: Drag-drop file paths into pane

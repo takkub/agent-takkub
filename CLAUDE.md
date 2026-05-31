@@ -164,8 +164,26 @@ Context ตอน spawn **ไม่ได้ preload vault** — เบาไว
 | test / smoke / e2e / regression | qa | — |
 | review / code review / security | reviewer | — |
 | design review / รีวิว UI | critic | **+gemini** parallel |
+| **รีวิวระบบ / อธิบายระบบ / ระบบทำงานยังไง / explain architecture / system overview** | **Lead → HTML system explainer** | — |
 | feature ใหญ่ (UI + API) | frontend + backend (parallel) | — |
 | complex / สงสัย approach | primary | **+gemini** (1M context) |
+
+### Explain-system → HTML explainer (intent พิเศษ)
+
+เมื่อ user สั่ง **"รีวิวระบบ / อธิบายระบบ / ระบบทำงานยังไง / explain the architecture / system overview"** (intent = เข้าใจว่าระบบทำงานยังไง ไม่ใช่ code review/design review) → `routing_planner.classify()` คืน `ActionKind.EXPLAIN_SYSTEM`. Lead ทำ **ไม่ใช่ตอบในแชตเฉยๆ** แต่ผลิต **HTML explainer**:
+
+1. วิเคราะห์ codebase ของโปรเจคนั้น → เขียน system-overview เป็น **markdown** (source) ที่ `docs/system-overview/<YYYY-MM-DD>-<project>.md` (front matter `shots:` ใส่ diagram/screenshot ถ้ามี)
+2. รัน converter → **self-contained HTML**:
+   ```bash
+   python -m agent_takkub.design_review_html docs/system-overview/<date>-<project>.md
+   ```
+3. ส่ง path `.html` ให้ user (คลิกใน pane เปิด browser ได้เลย — terminal คลิก path ได้)
+
+**กฎแยก md/html (ตามที่ user ต้องการ):**
+- intent = **"explain/review ระบบ"** → **HTML** (visual, เปิดดูง่าย)
+- intent = **งานปกติ** (ทำ/แก้/เพิ่มฟีเจอร์) → **md ปกติ** หรือไม่มี doc (flow เดิม ไม่เปลี่ยน)
+
+> diagram สวย (box/arrow) = hand-craft ได้ตามต้องการเป็นรายโปรเจค; default ของ EXPLAIN_SYSTEM คือ converter (faithful render — scale ทุกโปรเจคอัตโนมัติ)
 
 ### Proposal template
 ```markdown

@@ -694,3 +694,60 @@ class TestDisabledProviders:
         )
         assert action_none.kind == action_empty.kind == ActionKind.PROPOSE
         assert action_none.cross_check == action_empty.cross_check == ["codex"]
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Explain / review the system → HTML explainer
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestExplainSystem:
+    def test_thai_review_system_how_it_works(self):
+        # the user's canonical example
+        assert classify("รีวิวระบบหน่อย ทำงานยังไง").kind == ActionKind.EXPLAIN_SYSTEM
+
+    def test_thai_explain_system(self):
+        assert classify("อธิบายระบบ").kind == ActionKind.EXPLAIN_SYSTEM
+
+    def test_thai_how_does_this_system_work(self):
+        assert classify("ระบบนี้ทำงานยังไง").kind == ActionKind.EXPLAIN_SYSTEM
+
+    def test_thai_project_overview(self):
+        assert classify("ขอภาพรวมระบบ").kind == ActionKind.EXPLAIN_SYSTEM
+
+    def test_en_how_does_the_system_work(self):
+        assert classify("how does the system work").kind == ActionKind.EXPLAIN_SYSTEM
+
+    def test_en_explain_architecture(self):
+        assert (
+            classify("explain the architecture of this project").kind == ActionKind.EXPLAIN_SYSTEM
+        )
+
+    def test_en_system_overview(self):
+        assert classify("give me a system overview").kind == ActionKind.EXPLAIN_SYSTEM
+
+    def test_task_hint_carried(self):
+        action = classify("อธิบายระบบ")
+        assert action.task_hint == "อธิบายระบบ"
+
+    # ── negatives: must NOT steal normal traffic ──
+    def test_code_review_endpoint_still_reviewer(self):
+        action = classify("review the login endpoint")
+        assert action.kind == ActionKind.PROPOSE
+        assert action.role == "reviewer"
+
+    def test_design_review_still_critic(self):
+        action = classify("design review หน้า login")
+        assert action.kind == ActionKind.PROPOSE
+        assert action.role == "critic"
+
+    def test_normal_impl_task_unaffected(self):
+        action = classify("เพิ่ม login form")
+        assert action.kind == ActionKind.PROPOSE
+        assert action.role == "frontend"
+
+    def test_rollout_for_a_system_not_explain(self):
+        # "rollout plan ... auth system" is strategy, not an explainer
+        action = classify("create a rollout plan for the new auth system")
+        assert action.kind != ActionKind.EXPLAIN_SYSTEM
+        assert action.role == "gemini"

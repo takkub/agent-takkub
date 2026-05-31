@@ -154,48 +154,84 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _provider_chip_style(provider: str, disabled: bool) -> str:
-        """QPushButton stylesheet for the codex/gemini status-bar chips.
+        """Outline chip for the codex/gemini toggles.
 
-        Enabled: bright provider-brand color + white text.
-        Disabled: dim gray + strikethrough so the off state is unambiguous.
+        The leading status dot (baked into the button text) inherits the
+        text color — brand when enabled, gray + strikethrough when disabled
+        — so on/off reads at a glance, while the outline + hover keep it
+        obviously a clickable toggle (the old filled-pill looked like a
+        plain action button → affordance mismatch).
         """
         if disabled:
             return (
                 "QPushButton { "
-                "background:#3f3f46; color:#71717a; "
-                "border:1px solid #52525b; border-radius:10px; "
+                "background:transparent; color:#71717a; "
+                "border:1px solid #3f3f46; border-radius:10px; "
                 "padding:2px 10px; font-weight:500; "
                 "text-decoration: line-through; "
                 "}"
-                "QPushButton:hover { background:#52525b; color:#a1a1aa; }"
+                "QPushButton:hover { background:#27272a; color:#a1a1aa; }"
             )
         # Brand colors: codex teal (#10a37f) / gemini blue (#4285f4)
         brand = "#10a37f" if provider == "codex" else "#4285f4"
         return (
             "QPushButton { "
-            f"background:{brand}; color:white; "
-            "border:none; border-radius:10px; "
+            f"background:transparent; color:{brand}; "
+            f"border:1px solid {brand}; border-radius:10px; "
             "padding:2px 10px; font-weight:600; "
             "}"
-            f"QPushButton:hover {{ background:{brand}; opacity:0.85; }}"
+            "QPushButton:hover { background:rgba(255,255,255,0.06); }"
         )
 
     @staticmethod
     def _plan_chip_style(is_pro: bool) -> str:
-        """QPushButton stylesheet for the account-plan (Pro/Max) status chip.
+        """Outline chip for the account plan (Pro/Max).
 
-        Unlike the provider chips this isn't an on/off state — it's two valid
-        modes — so both render solid (no strikethrough). Max = violet
-        (full access, incl. 1M context), Pro = amber (capped: 1M unavailable).
+        Two valid modes (not on/off), so no strikethrough. Outline (not the
+        old solid fill) keeps it consistent with the provider chips and
+        signals a clickable mode-toggle without shouting. Max = violet
+        (full access incl. 1M context), Pro = amber (1M capped).
         """
         brand = "#8b5cf6" if not is_pro else "#f59e0b"
         return (
             "QPushButton { "
-            f"background:{brand}; color:white; "
-            "border:none; border-radius:10px; "
+            f"background:transparent; color:{brand}; "
+            f"border:1px solid {brand}; border-radius:10px; "
             "padding:2px 10px; font-weight:600; "
             "}"
-            f"QPushButton:hover {{ background:{brand}; opacity:0.85; }}"
+            "QPushButton:hover { background:rgba(255,255,255,0.06); }"
+        )
+
+    @staticmethod
+    def _ghost_button_style() -> str:
+        """Neutral status-bar action button.
+
+        Quiet by default so the bar reads calm and the one accented button
+        (End Session, destructive) carries the visual weight. Replaces the
+        old per-button rainbow fills (every button shouted equally →
+        Christmas-tree effect, no hierarchy). `:checked` covers the
+        toggle-style Logs button.
+        """
+        return (
+            "QPushButton { color:#d4d4d8; background:transparent; "
+            "border:1px solid #3f3f46; border-radius:4px; padding:2px 8px; }"
+            "QPushButton:hover { background:#27272a; border-color:#52525b; }"
+            "QPushButton:checked { background:#27272a; color:#e4e4e7; border-color:#52525b; }"
+        )
+
+    @staticmethod
+    def _danger_button_style() -> str:
+        """Restrained red accent for the one consequential action.
+
+        End Session closes every teammate pane — the most destructive
+        status-bar action — so it gets the only colored treatment. Outline,
+        not a full red fill, so it stands out against the ghost buttons
+        without re-introducing the rainbow.
+        """
+        return (
+            "QPushButton { color:#fca5a5; background:transparent; "
+            "border:1px solid #7f1d1d; border-radius:4px; padding:2px 8px; }"
+            "QPushButton:hover { background:#450a0a; border-color:#b91c1c; }"
         )
 
     @staticmethod
@@ -369,7 +405,7 @@ class MainWindow(QMainWindow):
         # subscribe to providerStateChanged to redraw.
         from .provider_state import CODEX, GEMINI, is_disabled
 
-        self._chip_codex = QPushButton("Codex", self)
+        self._chip_codex = QPushButton("● Codex", self)
         self._chip_codex.setToolTip(
             "Codex: disabled — click to enable"
             if is_disabled(CODEX)
@@ -378,7 +414,7 @@ class MainWindow(QMainWindow):
         self._chip_codex.setStyleSheet(self._provider_chip_style(CODEX, is_disabled(CODEX)))
         self._chip_codex.clicked.connect(lambda: self._on_provider_chip_clicked(CODEX))
 
-        self._chip_gemini = QPushButton("Gemini", self)
+        self._chip_gemini = QPushButton("● Gemini", self)
         self._chip_gemini.setToolTip(
             "Gemini: disabled — click to enable"
             if is_disabled(GEMINI)
@@ -433,6 +469,7 @@ class MainWindow(QMainWindow):
         self._btn_logs = QPushButton("📋 Logs", self)
         self._btn_logs.setToolTip("Show/hide events log panel")
         self._btn_logs.setCheckable(True)
+        self._btn_logs.setStyleSheet(self._ghost_button_style())
         self._btn_logs.clicked.connect(self._on_toggle_logs)
 
         self._btn_restart = QPushButton(self)
@@ -445,12 +482,7 @@ class MainWindow(QMainWindow):
             "Send /resume to the Lead pane — opens claude's session picker\n"
             "so you can hop back into a previous conversation."
         )
-        self._btn_resume.setStyleSheet(
-            "QPushButton { color: #fde68a; background: #422006; "
-            "border: 1px solid #92400e; border-radius: 4px; "
-            "padding: 2px 8px; }"
-            "QPushButton:hover { background: #713f12; }"
-        )
+        self._btn_resume.setStyleSheet(self._ghost_button_style())
         self._btn_resume.clicked.connect(self._on_resume_clicked)
 
         # End-Session button: prompts for a session-summary note then runs
@@ -465,12 +497,7 @@ class MainWindow(QMainWindow):
             "to runtime/sessions/ + the vault. Next session for this project\n"
             "auto-inherits the note in Lead's spawn-time prompt."
         )
-        self._btn_end_session.setStyleSheet(
-            "QPushButton { color: #d1fae5; background: #064e3b; "
-            "border: 1px solid #047857; border-radius: 4px; "
-            "padding: 2px 8px; }"
-            "QPushButton:hover { background: #065f46; }"
-        )
+        self._btn_end_session.setStyleSheet(self._danger_button_style())
         self._btn_end_session.clicked.connect(self._on_end_session_clicked)
 
         # Bug-Check button: broadcasts an introspection prompt to every
@@ -485,12 +512,7 @@ class MainWindow(QMainWindow):
             "`takkub issue new` if it found something, or sends a clean\n"
             "report back to Lead. Project-scoped — other tabs untouched."
         )
-        self._btn_bug_check.setStyleSheet(
-            "QPushButton { color: #fee2e2; background: #7f1d1d; "
-            "border: 1px solid #b91c1c; border-radius: 4px; "
-            "padding: 2px 8px; }"
-            "QPushButton:hover { background: #991b1b; }"
-        )
+        self._btn_bug_check.setStyleSheet(self._ghost_button_style())
         self._btn_bug_check.clicked.connect(self._on_bug_check_clicked)
 
         # 🎨 UI Review button: 1-click design-review pipeline. Spawns critic +
@@ -504,12 +526,7 @@ class MainWindow(QMainWindow):
             "to read today's QA screenshots and propose add/remove/refine.\n"
             "Fire after QA smoke; proposals land in docs/design-review/."
         )
-        self._btn_ui_review.setStyleSheet(
-            "QPushButton { color: #fbcfe8; background: #831843; "
-            "border: 1px solid #be185d; border-radius: 4px; "
-            "padding: 2px 8px; }"
-            "QPushButton:hover { background: #9d174d; }"
-        )
+        self._btn_ui_review.setStyleSheet(self._ghost_button_style())
         self._btn_ui_review.clicked.connect(self._on_ui_review_clicked)
 
         # 💻 Open Shell: drops a raw PowerShell into the cockpit grid as
@@ -524,12 +541,7 @@ class MainWindow(QMainWindow):
             "Lands in the active project's cwd. Close like any other pane\n"
             "(header × button or `exit`). Re-clicking focuses the existing pane."
         )
-        self._btn_open_shell.setStyleSheet(
-            "QPushButton { color: #e2e8f0; background: #334155; "
-            "border: 1px solid #475569; border-radius: 4px; "
-            "padding: 2px 8px; }"
-            "QPushButton:hover { background: #475569; }"
-        )
+        self._btn_open_shell.setStyleSheet(self._ghost_button_style())
         self._btn_open_shell.clicked.connect(self._on_open_shell_clicked)
 
         self._btn_providers = QPushButton("🤖 Providers", self)
@@ -538,12 +550,7 @@ class MainWindow(QMainWindow):
             "Edits ~/.takkub/role-providers.json. Live — applies to the\n"
             "next pane you spawn, no cockpit restart needed."
         )
-        self._btn_providers.setStyleSheet(
-            "QPushButton { color: #e0e7ff; background: #312e81; "
-            "border: 1px solid #4338ca; border-radius: 4px; "
-            "padding: 2px 8px; }"
-            "QPushButton:hover { background: #3730a3; }"
-        )
+        self._btn_providers.setStyleSheet(self._ghost_button_style())
         self._btn_providers.clicked.connect(self._on_providers_clicked)
 
         self._btn_claude_auth = QPushButton("Claude Auth", self)
@@ -551,12 +558,7 @@ class MainWindow(QMainWindow):
             "Configure optional Claude Code base URL / API key / auth token overrides.\n"
             "Leave fields blank to use Claude Code's default login/session."
         )
-        self._btn_claude_auth.setStyleSheet(
-            "QPushButton { color: #dbeafe; background: #1e3a8a; "
-            "border: 1px solid #2563eb; border-radius: 4px; "
-            "padding: 2px 8px; }"
-            "QPushButton:hover { background: #1d4ed8; }"
-        )
+        self._btn_claude_auth.setStyleSheet(self._ghost_button_style())
         self._btn_claude_auth.clicked.connect(self._on_claude_auth_clicked)
 
         # Clickable /remote-control trigger. The built-in Claude Code command
@@ -587,10 +589,11 @@ class MainWindow(QMainWindow):
             "color: #6b7280; font-size: 11px; padding: 0 6px; font-variant-numeric: tabular-nums;"
         )
         self._version_label.setToolTip(
-            "Cockpit version + commit SHA.\nClick to copy. Click the 🔄 chip to pull updates."
+            "Cockpit version + commit SHA.\nClick to view the changelog "
+            "(copy version from inside).\nClick the 🔄 chip to pull updates."
         )
         self._version_label.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._version_label.mousePressEvent = lambda _ev: self._copy_version_to_clipboard()
+        self._version_label.mousePressEvent = lambda _ev: self._show_changelog()
 
         # Aggregate token meter: sums prompt tokens across every active pane
         # so the user can spot when the whole team is bumping the limit.
@@ -1061,7 +1064,6 @@ class MainWindow(QMainWindow):
                 continue
             panes = self.orch._project_panes(tab.project_name)
             peak_ratio = 0.0
-            peak_prompt = 0
             peak_limit = 0
             for role_name, pane in panes.items():
                 usage = pane.current_usage()
@@ -1073,7 +1075,6 @@ class MainWindow(QMainWindow):
                 ratio = (usage["prompt"] / lim) if lim else 0.0
                 if ratio > peak_ratio:
                     peak_ratio = ratio
-                    peak_prompt = usage["prompt"]
                     peak_limit = lim
                 # Surface a status-bar + tray warning the first time a
                 # pane crosses 80%. Hysteresis at 70% keeps the toast
@@ -1096,11 +1097,10 @@ class MainWindow(QMainWindow):
                 elif ratio < 0.70 and self._context_warned.get(key):
                     self._context_warned.pop(key, None)
             if peak_limit:
-                self.tabs.setTabText(
-                    i,
-                    f"{tab.project_name} · "
-                    f"{format_tokens(peak_prompt)}/{format_tokens(peak_limit)}",
-                )
+                # Tab shows only the % — the absolute count lives on the
+                # pane header (the canonical per-pane meter). Avoids the
+                # same number appearing in three places (tab/header/status).
+                self.tabs.setTabText(i, f"{tab.project_name} · {int(peak_ratio * 100)}%")
             else:
                 self.tabs.setTabText(i, tab.project_name)
         port = self.cli._server.serverPort() if self.cli._server.isListening() else 0
@@ -1113,7 +1113,11 @@ class MainWindow(QMainWindow):
         # pane's limit (rather than summing limits) because each context is
         # independent — the team-wide ratio is "how close any pane is to its
         # cap" plus a sum for absolute reference.
-        if per_role:
+        #
+        # Only meaningful with 2+ active panes: with a single pane the Σ just
+        # echoes that pane's own header meter, so we hide it (de-dup) and let
+        # the pane header be the single source of truth.
+        if len(per_role) >= 2:
             ratio = max(p / lim for _, p, lim in per_role if lim) if per_role else 0.0
             color = usage_color(ratio)
             head = f"Σ {format_tokens(total_prompt)} · max {int(ratio * 100)}%"
@@ -1809,6 +1813,48 @@ class MainWindow(QMainWindow):
             return
         QApplication.clipboard().setText(text)
         self._status.showMessage(f"copied: {text}", 2000)
+
+    def _show_changelog(self) -> None:
+        """Version chip click → render CHANGELOG.md in a scrollable in-app
+        dialog (QTextBrowser.setMarkdown — no external browser). The old
+        copy-to-clipboard action moves to a button inside the dialog so it
+        isn't lost."""
+        from PyQt6.QtWidgets import (
+            QDialog,
+            QDialogButtonBox,
+            QPushButton,
+            QTextBrowser,
+            QVBoxLayout,
+        )
+
+        path = REPO_ROOT / "CHANGELOG.md"
+        try:
+            body = path.read_text(encoding="utf-8")
+        except OSError:
+            body = "# Changelog\n\n_ไม่พบ CHANGELOG.md ที่ repo root_"
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Changelog · {self._version_label.text().strip() or 'agent-takkub'}")
+        dlg.resize(760, 620)
+        layout = QVBoxLayout(dlg)
+
+        browser = QTextBrowser(dlg)
+        browser.setMarkdown(body)
+        browser.setOpenExternalLinks(True)
+        browser.setStyleSheet(
+            "QTextBrowser { background:#0e0e10; color:#e4e4e7; "
+            "border:1px solid #27272a; border-radius:6px; padding:8px; }"
+        )
+        layout.addWidget(browser)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, dlg)
+        copy_btn = QPushButton("📋 Copy version", dlg)
+        copy_btn.clicked.connect(self._copy_version_to_clipboard)
+        buttons.addButton(copy_btn, QDialogButtonBox.ButtonRole.ActionRole)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+
+        dlg.exec()
 
     def _refresh_update_button(self) -> None:
         """Flip the update chip's label/colour based on the cached

@@ -26,7 +26,9 @@ from .config import read_port
 # Lead pane is allowed to invoke these; teammates must work on their assigned
 # task and coordinate via `send` / `done`. The gate is enforced in `main()`
 # based on the TAKKUB_ROLE env var that the orchestrator injects per pane.
-LEAD_ONLY_COMMANDS = frozenset({"spawn", "assign", "close", "close-all", "end-session", "harvest"})
+LEAD_ONLY_COMMANDS = frozenset(
+    {"spawn", "assign", "close", "close-all", "end-session", "harvest", "release"}
+)
 
 # Commands intended only for teammate panes. Lead summarises inline and never
 # needs to call done on itself — blocking this prevents Lead from accidentally
@@ -466,6 +468,37 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
     return {"ok": ok, "msg": f"{n_fail} fail(s)" if not ok else "all checks passed"}
 
 
+def cmd_release(args: argparse.Namespace) -> dict:
+    """Bump version + roll CHANGELOG's [vNEXT] + git commit & tag."""
+    from .config import REPO_ROOT
+    from .release import release
+
+    res = release(
+        REPO_ROOT,
+        part=args.part,
+        explicit_version=args.version,
+        do_commit=not args.no_commit,
+        do_tag=not args.no_tag,
+        dry_run=args.dry_run,
+        allow_empty=args.allow_empty,
+    )
+    if res["dry_run"]:
+        _utf8_print(
+            f"[dry-run] {res['current']} → {res['new_version']} · tag {res['tag']} · {res['date']}"
+        )
+        _utf8_print("  (no files or git touched)")
+        return {"ok": True, "msg": "dry-run"}
+
+    bits = [f"{res['current']} → {res['new_version']}"]
+    if res["committed"]:
+        bits.append("committed")
+    if res["tagged"]:
+        bits.append(f"tagged {res['tag']}")
+    _utf8_print("  " + " · ".join(bits))
+    _utf8_print("  push when ready:  git push --follow-tags")
+    return {"ok": True, "msg": f"released {res['tag']}"}
+
+
 def cmd_search(args: argparse.Namespace) -> dict:
     """Pure read-only grep across `~/.claude/projects/<*>/<uuid>.jsonl`.
     Does NOT go through the orchestrator's TCP socket — search is a
@@ -794,6 +827,36 @@ def main(argv: list[str] | None = None) -> int:
         help="seconds to wait before killing the gemini process (default: 120)",
     )
     sg.set_defaults(func=cmd_gemini)
+
+    srel = sub.add_parser(
+        "release",
+        help="bump version + roll CHANGELOG [vNEXT] + git commit & tag",
+    )
+    srel.add_argument(
+        "part",
+        nargs="?",
+        choices=["major", "minor", "patch"],
+        default="patch",
+        help="which SemVer part to bump (default: patch)",
+    )
+    srel.add_argument(
+        "--version",
+        default=None,
+        help="set an explicit version (e.g. 0.4.0) instead of bumping a part",
+    )
+    srel.add_argument("--no-commit", action="store_true", help="edit files but don't git commit")
+    srel.add_argument("--no-tag", action="store_true", help="commit but don't create the git tag")
+    srel.add_argument(
+        "--allow-empty",
+        action="store_true",
+        help="release even if ## [vNEXT] has no changelog entries",
+    )
+    srel.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the planned version/tag without touching files or git",
+    )
+    srel.set_defaults(func=cmd_release)
 
     args = p.parse_args(argv)
 
