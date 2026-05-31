@@ -27,6 +27,7 @@ class ActionKind(Enum):
     FIRE_ONESHOT = "fire_oneshot"  # execute takkub codex/gemini (no pane spawn)
     ASK_CLARIFY = "ask_clarify"  # ambiguous — need more info before acting
     INFORMATIONAL = "info"  # pure question/explanation, just respond
+    EXPLAIN_SYSTEM = "explain_system"  # "review/explain the system" → produce HTML explainer
 
 
 @dataclass
@@ -158,6 +159,26 @@ _EXPLICIT_ROLE = re.compile(
     # \b only on English words; ดู is Thai so no \b needed
     r"(frontend|backend|mobile|devops|qa|reviewer|critic|designer)"
     r"\s*(?:review\b|check\b|ดู)"
+    r")",
+    re.IGNORECASE,
+)
+
+# "Explain / review the SYSTEM (how it works)" → produce an HTML system
+# explainer (not a chat answer, not a code review). Distinguished from
+# code-review / design-review by the system/architecture + understand-how
+# signal. Examples: "รีวิวระบบหน่อย ทำงานยังไง", "อธิบายระบบ",
+# "how does the system work", "explain the architecture", "system overview".
+_EXPLAIN_SYSTEM = re.compile(
+    r"(?:"
+    r"รีวิว\s*ระบบ"
+    r"|อธิบาย\s*(?:ระบบ|โครงสร้าง|สถาปัตยกรรม|โค้?ด|codebase)"
+    r"|(?:ระบบ|โค้?ด|codebase)\s*(?:นี้|ตัวนี้)?\s*(?:ทำงาน|เป็น)\s*(?:ยังไง|อย่างไร|ยัง)"
+    r"|(?:ภาพรวม|โครงสร้าง|สถาปัตยกรรม)\s*(?:ระบบ|โปรเจ[คก]ต?|code|app)"
+    r"|\b(?:review|explain|describe|document|walk\s*me\s*through|overview\s*of|map\s*out)\b"
+    r"[^.\n]{0,25}\b(?:system|architecture|codebase|how\s*it\s*works)\b"
+    r"|\bhow\s+(?:does|do)\b[^.\n]{0,25}\b(?:system|architecture|the\s*app|everything)\b"
+    r"[^.\n]{0,15}\bwork"
+    r"|\b(?:system|architecture)\s+(?:overview|explainer|diagram|map|walkthrough)\b"
     r")",
     re.IGNORECASE,
 )
@@ -423,7 +444,20 @@ def classify(user_message: str, context: dict | None = None) -> RoutingAction:
             result.task_hint = msg
             return result
 
-    # 4. Classify intent
+    # 4. "Explain / review the system" → produce an HTML system explainer.
+    # Checked before the informational short-circuit (so "ระบบทำงานยังไง"
+    # doesn't degrade to a chat answer) and before the route table (so
+    # "รีวิวระบบ" doesn't land on reviewer/critic). Pure-understanding intent
+    # — no role to assign; Lead writes a system-overview .md then runs
+    # design_review_html to emit the .html.
+    if _EXPLAIN_SYSTEM.search(msg):
+        return RoutingAction(
+            kind=ActionKind.EXPLAIN_SYSTEM,
+            task_hint=msg,
+            reason="explain/review-the-system request → produce HTML explainer (md source + converter)",
+        )
+
+    # 5. Classify intent
     is_act = _is_actionable(msg)
     is_info = _is_informational(msg)
     is_mixed = is_act and is_info
@@ -434,7 +468,7 @@ def classify(user_message: str, context: dict | None = None) -> RoutingAction:
     if not is_act:
         return RoutingAction(kind=ActionKind.INFORMATIONAL, reason="no actionable verb detected")
 
-    # 5. Route actionable message to role(s)
+    # 6. Route actionable message to role(s)
     routing = _route(msg)
     primary = routing.get("role")
     cross_check = routing.get("cross_check")
