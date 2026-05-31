@@ -105,7 +105,9 @@ src/agent_takkub/
 ├── skill_audit.py     TF-IDF role-boundary audit — detect overlapping role responsibilities
 ├── verify.py          `takkub verify` — auto-detect stack + run lint/test gate
 ├── docs_verify.py     markdown reference verifier — catch stale file/symbol refs
-│ ── self-update ──
+│ ── release / self-update ──
+├── release.py         `takkub release` — bump pyproject version + roll CHANGELOG
+│                      [vNEXT] → dated heading + git commit & annotated tag (no push)
 ├── rtk_helper.py      one-click install of rtk's PreToolUse Bash hook
 ├── update_helper.py   git-wrapper behind the status-bar update button
 └── update_worker.py   QRunnable that fetches origin/main + reports local_status()
