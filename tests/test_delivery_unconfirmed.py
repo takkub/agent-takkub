@@ -105,7 +105,7 @@ class TestSpawnFailureNotSilent:
         # No main_window is connected to paneRequested, so the pane never gets
         # created/registered — spawn must surface that, not return a bare False.
         orch._idle_state = {}
-        orch._blocked_on_lead = {}
+        orch._pane_state = {}
         with patch("agent_takkub.orchestrator._log_event") as log:
             ok, msg = orch.spawn("reviewer", cwd=None, project="P")
         assert ok is False
@@ -116,7 +116,7 @@ class TestSpawnFailureNotSilent:
         lead = _pane(_live_session())
         orch._panes_by_project["P"] = {"lead": lead}
         orch._idle_state = {}
-        orch._blocked_on_lead = {}
+        orch._pane_state = {}
         with (
             patch("agent_takkub.orchestrator._log_event"),
             patch("agent_takkub.orchestrator.QTimer.singleShot"),

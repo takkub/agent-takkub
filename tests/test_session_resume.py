@@ -34,7 +34,6 @@ class _FakeOrchestrator:
 
     def __init__(self) -> None:
         self._recent_exits: dict[str, dict] = {}
-        self._session_uuids: dict[str, dict] = {}
         self.spawn_calls: list[tuple[str, str | None, str]] = []
 
     def spawn(self, role, cwd=None, project=None):

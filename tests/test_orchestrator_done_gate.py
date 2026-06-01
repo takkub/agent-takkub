@@ -26,7 +26,7 @@ import pytest
 from PyQt6.QtCore import QCoreApplication
 
 from agent_takkub import orchestrator as orch_mod
-from agent_takkub.orchestrator import Orchestrator, _exit_key
+from agent_takkub.orchestrator import Orchestrator, PaneState, _exit_key
 
 TEST_PROJECT = "testproj"
 
@@ -180,13 +180,13 @@ class TestDoneGate:
             )
 
         ekey = _exit_key(TEST_PROJECT, "devops")
-        assert orch._requires_commit_on_done.get(ekey) is True
+        assert (orch._pane_state.get(ekey) or PaneState()).requires_commit_on_done is True
 
         with patch("agent_takkub.orchestrator.subprocess.run", return_value=_dirty_result()):
             ok, _ = orch.done("devops", note="done", project=TEST_PROJECT)
 
         assert ok is True
-        assert ekey not in orch._requires_commit_on_done
+        assert not (orch._pane_state.get(ekey) or PaneState()).requires_commit_on_done
 
     def test_close_clears_requires_commit_flag(self, orch: Orchestrator) -> None:
         """close() must pop the flag so a new assign doesn't inherit stale gate."""
@@ -197,11 +197,11 @@ class TestDoneGate:
         orch._panes_by_project.setdefault(TEST_PROJECT, {})["qa"] = pane
 
         ekey = _exit_key(TEST_PROJECT, "qa")
-        orch._requires_commit_on_done[ekey] = True
+        orch._ps(ekey).requires_commit_on_done = True
 
         orch.close("qa", project=TEST_PROJECT)
 
-        assert ekey not in orch._requires_commit_on_done
+        assert orch._pane_state.get(ekey) is None
 
     def test_requires_commit_isolated_per_pane(self, orch: Orchestrator) -> None:
         """Flag on 'reviewer' must not affect 'designer' (no flag)."""
@@ -215,7 +215,7 @@ class TestDoneGate:
         ekey_reviewer = _exit_key(TEST_PROJECT, "reviewer")
 
         # Only reviewer gets the flag
-        orch._requires_commit_on_done[ekey_reviewer] = True
+        orch._ps(ekey_reviewer).requires_commit_on_done = True
 
         # designer done on dirty tree → allowed, no warning
         with patch("agent_takkub.orchestrator.subprocess.run", return_value=_dirty_result()):
@@ -242,7 +242,7 @@ class TestDoneGate:
         orch._panes_by_project[TEST_PROJECT]["lead"] = lead
 
         ekey = _exit_key(TEST_PROJECT, "qa")
-        orch._requires_commit_on_done[ekey] = True
+        orch._ps(ekey).requires_commit_on_done = True
 
         dirty_files = "M src/api.py\nA tests/test_api.py\n"
         with patch(

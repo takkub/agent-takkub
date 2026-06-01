@@ -20,6 +20,7 @@ import secrets
 import subprocess
 import time
 import uuid as _uuid
+from dataclasses import dataclass
 from datetime import datetime
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
@@ -697,6 +698,56 @@ def _build_transcript_path(project_ns: str, role_name: str) -> str | None:
     return str(day / f"{role_name}-{now.strftime('%H%M%S')}.transcript.log")
 
 
+@dataclass
+class PaneState:
+    """Per-pane transient state, keyed ``"{project}::{role}"`` in
+    ``Orchestrator._pane_state``.
+
+    Consolidates the ~15 per-pane dicts that used to live as separate
+    ``dict[str, T]`` attributes on Orchestrator.  Created lazily by
+    ``_ps(key)`` and popped atomically by ``close()`` / ``done()`` so
+    teardown is a single ``_pane_state.pop(key)`` instead of ~15 individual
+    dict pops (the root cause of state-divergence bugs).
+
+    ``_idle_state`` and ``_recent_exits`` are intentionally **not** merged here:
+
+    * ``_idle_state``: key-presence semantics (absent = "not tracking") relied
+      on by the watchdog and tests.
+    * ``_recent_exits``: persists through ``close()`` (needed for crash-resume
+      logic); close() must NOT clear it so ``_do_respawn`` can still find the
+      entry even when ``_on_session_exit`` fires after the 2 s delay.
+    """
+
+    # _session_uuids: uuid+cwd for the current/last session
+    session_uuid: str | None = None
+    session_uuid_cwd: str = ""
+    # _blocked_on_lead: ts when teammate last sent to Lead (suppresses idle nag)
+    blocked_on_lead_ts: float | None = None
+    # _rate_limited_until: epoch at which the usage-rate limit resets (0 = no limit)
+    rate_limited_until: float = 0.0
+    # _auto_respawn_attempts: consecutive crash-respawn count (capped at AUTO_RESPAWN_MAX)
+    auto_respawn_attempts: int = 0
+    # _last_assigned_task: last task pasted by assign(); replayed after crash-respawn
+    last_assigned_task: str | None = None
+    # _requires_commit_on_done: warns Lead of uncommitted changes when done() fires
+    requires_commit_on_done: bool = False
+    # _auto_chain_panes: pane is tagged --auto-chain; done() fires verify-hop when last
+    auto_chain: bool = False
+    # _last_stuck_recover: cooldown ts for the stuck-pane auto-recover watchdog
+    last_stuck_recover: float = 0.0
+    # _codex_spawn_times: wall-clock at spawn for early-crash detection (None = not set)
+    codex_spawn_ts: float | None = None
+    # _last_send_ts: last delivery ts for stall detection
+    last_send_ts: float = 0.0
+    # _harvest_hint_ts: cooldown for harvest-hint injection to Lead
+    harvest_hint_ts: float = 0.0
+    # _last_content_hash + _last_content_change_ts: content-delta stuck detection
+    last_content_hash: str | None = None
+    last_content_change_ts: float | None = None
+    # _last_spawn_resumed: True when the last spawn used --resume (not --session-id)
+    last_spawn_resumed: bool = False
+
+
 class Orchestrator(QObject):
     """Owns the pane registry and routes commands.
 
@@ -779,14 +830,15 @@ class Orchestrator(QObject):
         # Until tabs land, only one project namespace is populated at a
         # time and behavior is identical to the pre-refactor single-dict.
         self._panes_by_project: dict[str, dict[str, AgentPane]] = {}
-        # last-known cwd per role, used to decide whether the pane's prior
-        # session is within the resume window (must match previous cwd)
+        # Per-pane transient state. Created lazily by _ps(key) and popped
+        # atomically by close()/done() — single dict.pop replaces what was
+        # previously ~14 individual teardown pops (root cause of divergence bugs).
+        self._pane_state: dict[str, PaneState] = {}
+        # last-known cwd per role — kept as a separate dict because its lifecycle
+        # differs: close() does NOT clear it (unlike _pane_state) so _do_respawn
+        # can still read the entry after close() fires during stuck-recover.
+        # Only cleared by a successful spawn() (del after attach).
         self._recent_exits: dict[str, dict] = {}  # "{project}::{role}" -> {cwd, ts}
-        # session-id per role: generated at each fresh spawn, kept so a
-        # respawn within RESUME_WINDOW_SEC can pass --resume <uuid> and
-        # bypass claude's CWD-based --continue resolution (prevents bleed
-        # between Lead and teammate panes sharing the same cwd)
-        self._session_uuids: dict[str, dict] = {}  # "{project}::{role}" -> {uuid, cwd}
         # Peer CC durability: messages queued when Lead is not alive.
         # Keyed by project namespace; flushed to Lead on next Lead spawn.
         self._pending_lead_cc: dict[str, list[dict]] = {}
@@ -810,72 +862,10 @@ class Orchestrator(QObject):
         #   first_idle_ts   — when the pane was first seen idle in this streak
         #                     (None = currently processing or not "working")
         #   last_reminder_ts — last time we injected a reminder (0 = never)
+        # Kept as a separate dict (not in PaneState) because its key-presence
+        # semantics ("absent = not tracking") are relied on by the watchdog and
+        # tests — pop() must remove the entry, not merely reset fields.
         self._idle_state: dict[str, dict[str, float | None]] = {}
-        # Per-pane "waiting for Lead's reply" timestamp. Keyed
-        # `<project>::<role>`. Populated when a teammate sends a message
-        # to Lead via `takkub send --to lead "..."` (see `send()`),
-        # cleared when Lead sends back to that teammate or when the
-        # pane is closed/respawned. The idle watchdog skips panes
-        # whose key is in this dict so the auto-reminder doesn't fire
-        # while a teammate is legitimately stuck waiting for spec.
-        self._blocked_on_lead: dict[str, float] = {}
-        # Rate-limit suppression: when a pane hits the claude usage limit it
-        # stops outputting, which the idle/stuck watchdogs would otherwise read
-        # as "forgot takkub done" (nag loop) or "hung" (force-respawn into the
-        # same limit). Keyed `<project>::<role>` -> epoch the limit resets at;
-        # while set+future the watchdog leaves the pane alone and a one-shot
-        # QTimer notifies the Lead at reset time. (issue: rate-limit watchdog)
-        self._rate_limited_until: dict[str, float] = {}
-        # Per-pane consecutive auto-respawn counter. Keyed `<project>::<role>`.
-        # Bumped on each unexpected exit + auto-respawn; reset on a clean
-        # `close()` / `done()` / manual respawn. Capped at AUTO_RESPAWN_MAX
-        # so the orchestrator gives up if claude refuses to come back.
-        self._auto_respawn_attempts: dict[str, int] = {}
-        # Last task sent via assign() per pane. Keyed `<project>::<role>`.
-        # Used by _auto_respawn() to replay the task into the fresh session so
-        # a crash-and-respawn cycle doesn't silently drop the work.
-        # Cleared on manual close() so a deliberate restart doesn't replay.
-        self._last_assigned_task: dict[str, str] = {}
-        # Opt-in done handoff: when assign() was called with requires_commit=True,
-        # done() appends an uncommitted-changes warning to the Lead notice instead
-        # of blocking the agent. Keyed `<project>::<role>`, cleared by close()
-        # and on successful done().
-        self._requires_commit_on_done: dict[str, bool] = {}
-
-        # Opt-in auto-chain: when assign() was called with auto_chain=True,
-        # done() injects a pre-authorisation handoff prompt to Lead AFTER
-        # all auto-chain panes in the same project have reported done.
-        # Keyed `<project>::<role>`, cleared by close() and on done().
-        self._auto_chain_panes: dict[str, bool] = {}
-        # Last stuck-recover wall-clock per pane (key `<project>::<role>`).
-        # Prevents the watchdog from looping recover→stuck→recover on a
-        # chronically wedged claude.
-        self._last_stuck_recover: dict[str, float] = {}
-        # Codex early-crash instrumentation. Keyed `<project>::<role>`.
-        # Records wall-clock at spawn so _on_codex_exit() can compute
-        # time-to-exit and decide whether to write a crash dump.
-        self._codex_spawn_times: dict[str, float] = {}
-        # Stall detection: last successful `takkub send` delivery timestamp.
-        # Keyed `<project>::<role>`. One of three signals checked by
-        # _compute_last_progress_ts(); the others are transcript mtime and
-        # today's screenshot dir mtime. Cleared on close().
-        self._last_send_ts: dict[str, float] = {}
-        # Harvest hint cooldown. Keyed `<project>::<role>`. Records when
-        # the last harvest hint was injected into Lead so the watchdog
-        # doesn't spam the same message every tick.
-        self._harvest_hint_ts: dict[str, float] = {}
-        # Bug-2 fix: screen-content-delta for stuck detection.
-        # Stores a hash of display_lines() with spinner lines excluded, and the
-        # wall-clock when the content last changed.  The stuck watchdog uses
-        # this instead of raw byte timestamps so a pane whose only output is
-        # the animated 'esc to interrupt' spinner is still detected as stuck.
-        self._last_content_hash: dict[str, str] = {}
-        self._last_content_change_ts: dict[str, float] = {}
-        # Structured resume flag written by spawn() so callers can check whether
-        # the last spawn for a key was a resume or a fresh session without parsing
-        # the human-readable message string (Fix 1 — string-coupling fragility).
-        # Keyed `<project>::<role>`, overwritten on every spawn(), popped by close().
-        self._last_spawn_resumed: dict[str, bool] = {}
         self._idle_watchdog = QTimer(self)
         self._idle_watchdog.setInterval(IDLE_WATCHDOG_INTERVAL_MS)
         self._idle_watchdog.timeout.connect(self._check_idle_teammates)
@@ -894,6 +884,30 @@ class Orchestrator(QObject):
 
     # ──────────────────────────────────────────────────────────────
     # project-aware view onto the pane registry
+    # ──────────────────────────────────────────────────────────────
+    # per-pane state helpers
+    # ──────────────────────────────────────────────────────────────
+    def _ps(self, key: str) -> PaneState:
+        """Get-or-create the PaneState for *key* (``"{project}::{role}"``).
+
+        Callers that only need to *read* without creating an entry should use
+        ``self._pane_state.get(key)`` and guard against None.
+
+        Lazily initialises ``_pane_state`` so test fixtures that create a bare
+        ``Orchestrator.__new__`` instance without running ``__init__`` still work.
+        """
+        try:
+            d = self._pane_state
+        except AttributeError:
+            d = {}
+            self._pane_state = d
+        try:
+            return d[key]
+        except KeyError:
+            ps = PaneState()
+            d[key] = ps
+            return ps
+
     # ──────────────────────────────────────────────────────────────
     @staticmethod
     def _resolve_project(project: str | None) -> str:
@@ -993,9 +1007,11 @@ class Orchestrator(QObject):
         # the counter so a deterministically-crashing claude can't loop.
         key = f"{project_ns}::{role_name}"
         self._idle_state.pop(key, None)
-        self._blocked_on_lead.pop(key, None)
-        if not _from_auto_respawn:
-            self._auto_respawn_attempts.pop(key, None)
+        _ps_spawn_clear = getattr(self, "_pane_state", {}).get(key)
+        if _ps_spawn_clear is not None:
+            _ps_spawn_clear.blocked_on_lead_ts = None
+            if not _from_auto_respawn:
+                _ps_spawn_clear.auto_respawn_attempts = 0
 
         # Fix 1: validate explicit cwd stays within the project's configured paths.
         # "default" namespace (unit-test / no-project) is exempt since it has no
@@ -1181,7 +1197,7 @@ class Orchestrator(QObject):
                 return False, f"failed to spawn codex: {e}"
             pane.attach_session(session, cwd=spawn_cwd)
             _ekey = _exit_key(project_ns, role_name)
-            self._codex_spawn_times[_ekey] = time.time()
+            self._ps(_ekey).codex_spawn_ts = time.time()
             session.processExited.connect(
                 lambda code, r=role_name, c=spawn_cwd, p=project_ns, sess=session: (
                     self._on_codex_exit(code, r, c, p, sess)
@@ -1447,21 +1463,25 @@ class Orchestrator(QObject):
         # UUIDv4 and pass --session-id so claude tracks the session from the start.
         resumed = False
         _ekey_spawn = _exit_key(project_ns, role_name)
-        prior_uuid = self._session_uuids.get(_ekey_spawn)
+        _ps_pre = self._pane_state.get(_ekey_spawn)
+        prior_uuid = _ps_pre.session_uuid if _ps_pre is not None else None
+        prior_uuid_cwd = _ps_pre.session_uuid_cwd if _ps_pre is not None else ""
         prior_exit = self._recent_exits.get(_ekey_spawn)
         can_resume = (
             prior_uuid is not None
-            and prior_uuid.get("cwd") == spawn_cwd
+            and prior_uuid_cwd == spawn_cwd
             and prior_exit is not None
             and (time.time() - prior_exit.get("ts", 0)) < RESUME_WINDOW_SEC
         )
         if can_resume:
-            argv.extend(["--resume", prior_uuid["uuid"]])
+            argv.extend(["--resume", prior_uuid])
             resumed = True
         else:
             new_uuid = str(_uuid.uuid4())
             argv.extend(["--session-id", new_uuid])
-            self._session_uuids[_ekey_spawn] = {"uuid": new_uuid, "cwd": spawn_cwd}
+            _ps_new = self._ps(_ekey_spawn)
+            _ps_new.session_uuid = new_uuid
+            _ps_new.session_uuid_cwd = spawn_cwd
 
         session = PtySession(cols=110, rows=36, parent=self)
         _t_path = _build_transcript_path(project_ns, role_name)
@@ -1510,7 +1530,7 @@ class Orchestrator(QObject):
         # Record resume decision as a structured flag so _auto_respawn and
         # _do_respawn can read it directly without parsing the message string.
         # (Fix 1: eliminates the "(resumed)" in msg string-coupling fragility.)
-        self._last_spawn_resumed[_ekey_spawn] = resumed
+        self._ps(_ekey_spawn).last_spawn_resumed = resumed
         suffix = " (resumed)" if resumed else ""
         # If a codex/gemini role reached the claude spawn path, its provider
         # was unavailable (toggled off or not installed) and claude is
@@ -1537,7 +1557,10 @@ class Orchestrator(QObject):
         falsify the two top hypotheses: env-missing vars and MCP-boot race.
         """
         ekey = _exit_key(project, role_name)
-        spawn_ts = self._codex_spawn_times.pop(ekey, None)
+        _ps_cx = self._pane_state.get(ekey)
+        spawn_ts = _ps_cx.codex_spawn_ts if _ps_cx is not None else None
+        if _ps_cx is not None:
+            _ps_cx.codex_spawn_ts = None
         time_to_exit = (time.time() - spawn_ts) if spawn_ts is not None else None
 
         if time_to_exit is not None and time_to_exit <= CODEX_EARLY_CRASH_WINDOW_SEC:
@@ -1632,7 +1655,8 @@ class Orchestrator(QObject):
             return
 
         key = f"{project}::{role_name}"
-        attempts = self._auto_respawn_attempts.get(key, 0)
+        ps = self._ps(key)
+        attempts = ps.auto_respawn_attempts
         if attempts >= AUTO_RESPAWN_MAX:
             _log_event(
                 "auto_respawn_capped",
@@ -1643,10 +1667,10 @@ class Orchestrator(QObject):
             # Bug-3 fix: notify Lead so the operator knows the pane gave up and
             # auto-chain doesn't deadlock waiting for a done event that never comes.
             self._warn_lead_respawn_capped(role_name, project)
-            self._auto_chain_panes.pop(key, None)
-            self._last_assigned_task.pop(key, None)
+            ps.auto_chain = False
+            ps.last_assigned_task = None
             return
-        self._auto_respawn_attempts[key] = attempts + 1
+        ps.auto_respawn_attempts = attempts + 1
         # Exponential back-off: a pane that keeps crashing (deterministic bug
         # triggered by its replayed task) shouldn't re-spawn at a fixed fast
         # interval and burn tokens. Each attempt waits 2x longer (issue #23).
@@ -1679,8 +1703,9 @@ class Orchestrator(QObject):
             # conversation history — re-pasting it risks duplicate work on
             # non-idempotent steps (file creates, migrations, etc.).
             # Fix 1: read structured flag set by spawn() instead of parsing msg.
-            spawn_resumed = self._last_spawn_resumed.get(_exit_key(project, role_name), False)
-            cached_task = self._last_assigned_task.get(_exit_key(project, role_name))
+            _ps_ar = self._pane_state.get(_exit_key(project, role_name))
+            spawn_resumed = _ps_ar.last_spawn_resumed if _ps_ar is not None else False
+            cached_task = _ps_ar.last_assigned_task if _ps_ar is not None else None
             if cached_task and not spawn_resumed:
                 _log_event(
                     "auto_respawn_replay",
@@ -1744,11 +1769,12 @@ class Orchestrator(QObject):
 
         project_ns = self._resolve_project(project)
         key = _exit_key(project_ns, role_name)
-        self._last_assigned_task[key] = task
+        ps_assign = self._ps(key)
+        ps_assign.last_assigned_task = task
         if requires_commit:
-            self._requires_commit_on_done[key] = True
+            ps_assign.requires_commit_on_done = True
         if auto_chain:
-            self._auto_chain_panes[key] = True
+            ps_assign.auto_chain = True
         self._send_when_ready(role_name, task, project=project)
         _log_event(
             "assign",
@@ -2117,7 +2143,7 @@ class Orchestrator(QObject):
 
         # Record delivery time for stall detection: receiving a message counts
         # as evidence the pane is still being monitored by the orchestrator.
-        self._last_send_ts[f"{project_ns}::{to_role}"] = time.time()
+        self._ps(f"{project_ns}::{to_role}").last_send_ts = time.time()
 
         # CC Lead unless source was Lead and target was a teammate, or vice versa.
         # If Lead is not alive, queue the CC so it isn't silently lost — the
@@ -2152,9 +2178,11 @@ class Orchestrator(QObject):
         #   - Lead → teammate: clear teammate's blocked-on-lead flag
         from_norm = (from_role or "").lower().strip()
         if from_norm and from_norm != LEAD.name and to_role == LEAD.name:
-            self._blocked_on_lead[f"{project_ns}::{from_norm}"] = time.time()
+            self._ps(f"{project_ns}::{from_norm}").blocked_on_lead_ts = time.time()
         elif from_norm == LEAD.name and to_role != LEAD.name:
-            self._blocked_on_lead.pop(f"{project_ns}::{to_role}", None)
+            _ps_to = self._pane_state.get(f"{project_ns}::{to_role}")
+            if _ps_to is not None:
+                _ps_to.blocked_on_lead_ts = None
 
         _MAX_LOG_BODY = 4_096
         _log_event(
@@ -2194,21 +2222,7 @@ class Orchestrator(QObject):
             pane.set_state("empty", note=None)
         key = f"{project_ns}::{role_name}"
         self._idle_state.pop(key, None)
-        self._blocked_on_lead.pop(key, None)
-        self._auto_respawn_attempts.pop(key, None)
-        self._last_assigned_task.pop(key, None)
-        self._requires_commit_on_done.pop(key, None)
-        self._auto_chain_panes.pop(key, None)
-        self._session_uuids.pop(key, None)
-        self._last_send_ts.pop(key, None)
-        # Bug-6 fix: these were written-only; pop on teardown to prevent
-        # O(projects*roles) unbounded growth across many close/respawn cycles.
-        self._harvest_hint_ts.pop(key, None)
-        self._last_stuck_recover.pop(key, None)
-        self._rate_limited_until.pop(key, None)
-        self._last_content_hash.pop(key, None)
-        self._last_content_change_ts.pop(key, None)
-        self._last_spawn_resumed.pop(key, None)
+        getattr(self, "_pane_state", {}).pop(key, None)
         # For teammates, fully remove from the layout so the right column
         # collapses back. Lead stays as it always anchors the cockpit.
         # The project namespace travels with the signal so main_window
@@ -2331,12 +2345,17 @@ class Orchestrator(QObject):
 
         key = f"{project_ns}::{from_role}"
 
+        # Read state before teardown so fields are available after the pop.
+        _ps_done = getattr(self, "_pane_state", {}).get(key) or PaneState()
+        had_requires_commit = _ps_done.requires_commit_on_done
+        had_auto_chain = _ps_done.auto_chain
+
         # Opt-in commit handoff: if assign() was called with requires_commit=True,
         # check for a dirty working tree and forward a warning to Lead instead
         # of blocking the agent. Teammate ไม่ต้อง commit — Lead review + commit.
         has_uncommitted = False
         files_preview = ""
-        if self._requires_commit_on_done.get(key, False):
+        if had_requires_commit:
             spawn_cwd = getattr(pane, "_session_cwd", None) or str(REPO_ROOT)
             try:
                 git_result = subprocess.run(
@@ -2366,15 +2385,10 @@ class Orchestrator(QObject):
                     files=files_preview,
                 )
 
-        # Agent finished cleanly — clear any pending watchdog state so
-        # the next session starts fresh (no leftover idle streak, no
-        # leftover "blocked on lead" flag, no carried auto-respawn count).
+        # Agent finished cleanly — pop all per-pane state atomically.
+        # close() (scheduled 2.5 s below) will also pop; second pop is a no-op.
         self._idle_state.pop(key, None)
-        self._blocked_on_lead.pop(key, None)
-        self._auto_respawn_attempts.pop(key, None)
-        self._last_assigned_task.pop(key, None)
-        self._requires_commit_on_done.pop(key, None)
-        self._session_uuids.pop(key, None)
+        getattr(self, "_pane_state", {}).pop(key, None)
 
         # notify Lead in the same project (a teammate in unirecon mustn't
         # nudge the Lead in pms by mistake)
@@ -2412,8 +2426,12 @@ class Orchestrator(QObject):
         # assign time, and it was the LAST pending auto-chain pane in
         # the project, inject a pre-authorisation prompt so Lead fires
         # verify (qa+reviewer) without proposing/confirming.
-        if self._auto_chain_panes.pop(key, False):
-            pending = [k for k in self._auto_chain_panes if k.startswith(f"{project_ns}::")]
+        if had_auto_chain:
+            pending = [
+                k
+                for k, s in getattr(self, "_pane_state", {}).items()
+                if k.startswith(f"{project_ns}::") and s.auto_chain
+            ]
             if not pending:
                 self._inject_auto_chain_handoff(project_ns)
 
@@ -2644,7 +2662,9 @@ class Orchestrator(QObject):
             except OSError:
                 pass
 
-        send_ts = self._last_send_ts.get(f"{project_ns}::{role}", 0.0)
+        send_ts = (
+            getattr(self, "_pane_state", {}).get(f"{project_ns}::{role}") or PaneState()
+        ).last_send_ts
         if send_ts > ts:
             ts = send_ts
 
@@ -2957,9 +2977,9 @@ class Orchestrator(QObject):
         a status-bar hint). Skips silently when the snapshot is missing,
         unparseable, or older than `_LAST_SESSION_MAX_AGE_SEC`.
 
-        The `_recent_exits` stamp is kept for crash-recovery bookkeeping,
-        but since `_session_uuids` has no entry for these roles yet, each
-        spawn here generates a fresh `--session-id` (no bleed from a prior
+        The ``exit_ts`` field is stamped for crash-recovery bookkeeping,
+        but since ``session_uuid`` has no value for these roles yet, each
+        spawn here generates a fresh ``--session-id`` (no bleed from a prior
         cockpit run's sessions).
         """
         if not _LAST_SESSION_FILE.is_file():
@@ -2985,7 +3005,7 @@ class Orchestrator(QObject):
                 if not role:
                     continue
                 # Stamp recent-exit for crash-recovery bookkeeping.
-                # _session_uuids has no UUID for these roles yet, so
+                # session_uuid has no value yet for these roles, so
                 # spawn() will issue --session-id (fresh session, no bleed).
                 self._recent_exits[_exit_key(project, role)] = {"cwd": cwd, "ts": time.time()}
                 ok, _ = self.spawn(role, cwd=cwd, project=project)
@@ -3207,7 +3227,8 @@ class Orchestrator(QObject):
                 # sends back. We also expire the suppression after 30
                 # minutes so a Lead that crashed mid-reply doesn't leave
                 # the teammate's watchdog disabled forever.
-                blocked_at = self._blocked_on_lead.get(key)
+                _ps_bl = getattr(self, "_pane_state", {}).get(key)
+                blocked_at = _ps_bl.blocked_on_lead_ts if _ps_bl is not None else None
                 if blocked_at is not None and (now - blocked_at) < 30 * 60:
                     entry = self._idle_state.get(key)
                     if entry:
@@ -3244,8 +3265,8 @@ class Orchestrator(QObject):
                 # Harvest hint: if the pane has been idle much longer than
                 # the reminder threshold, suggest `takkub harvest` to Lead.
                 if HARVEST_HINT_SEC > 0 and idle_for >= HARVEST_HINT_SEC:
-                    hint_key = f"{project_name}::{name}"
-                    last_hint = self._harvest_hint_ts.get(hint_key, 0.0)
+                    _ps_hh = getattr(self, "_pane_state", {}).get(key)
+                    last_hint = _ps_hh.harvest_hint_ts if _ps_hh is not None else 0.0
                     if now - last_hint >= HARVEST_HINT_SEC:
                         lead_pane = project_panes.get(LEAD.name)
                         if lead_pane and lead_pane.session and lead_pane.session.is_alive:
@@ -3260,7 +3281,7 @@ class Orchestrator(QObject):
                                 lambda lp=lead_pane: lp.session and lp.session.write(b"\r"),
                             )
                             _log_event("harvest_hint", role=name, project=project_name)
-                            self._harvest_hint_ts[hint_key] = now
+                            self._ps(key).harvest_hint_ts = now
 
     def _check_stuck_panes(self, now: float) -> None:
         """Walk every teammate pane and auto-recover any that's been
@@ -3284,7 +3305,7 @@ class Orchestrator(QObject):
                 # it (the fresh session would just hit the same limit). The idle
                 # walker owns detection; here we only read the recorded state.
                 key = f"{project_name}::{role}"
-                if self._rate_limited_until.get(key, 0.0) > now:
+                if (self._pane_state.get(key) or PaneState()).rate_limited_until > now:
                     continue
                 last_out = getattr(pane, "_last_output_ts", 0.0)
                 if not isinstance(last_out, (int, float)) or last_out <= 0:
@@ -3298,6 +3319,7 @@ class Orchestrator(QObject):
                 # every PTY byte including the animated spinner, so a claude
                 # wedged on a slow MCP call never trips STUCK_THRESHOLD_S with
                 # the old byte-only check.  Content-delta is immune to spinners.
+                ps_ck = self._ps(key)
                 try:
                     disp = pane.session.display_lines()
                     # Fix 3: filter spinner/status lines more broadly.
@@ -3314,27 +3336,30 @@ class Orchestrator(QObject):
                             )
                         )
                     )
-                    prev_hash = self._last_content_hash.get(key)
+                    prev_hash = ps_ck.last_content_hash
                     if prev_hash != non_spinner_hash:
-                        self._last_content_hash[key] = non_spinner_hash
+                        ps_ck.last_content_hash = non_spinner_hash
                         if prev_hash is not None:
                             # Genuine content change (not first observation) →
                             # reset the change clock so the pane isn't recovered.
-                            self._last_content_change_ts[key] = now
-                        else:
+                            ps_ck.last_content_change_ts = now
+                        elif ps_ck.last_content_change_ts is None:
                             # First time we see this pane: initialise from
                             # last_out so an already-stale pane is detected on
                             # the very first tick rather than getting a free
                             # STUCK_THRESHOLD_S grace period.
-                            self._last_content_change_ts.setdefault(key, last_out)
+                            ps_ck.last_content_change_ts = last_out
                 except Exception:
                     # display_lines() failed (session torn down mid-tick); fall
                     # back to initialising the ts from last raw byte time.
-                    self._last_content_change_ts.setdefault(key, last_out)
-                last_content_ts = self._last_content_change_ts.get(key, last_out)
+                    if ps_ck.last_content_change_ts is None:
+                        ps_ck.last_content_change_ts = last_out
+                last_content_ts = ps_ck.last_content_change_ts
+                if last_content_ts is None:
+                    last_content_ts = last_out
                 if (now - last_content_ts) < STUCK_THRESHOLD_S:
                     continue
-                last_recover = self._last_stuck_recover.get(key, 0.0)
+                last_recover = ps_ck.last_stuck_recover
                 if (now - last_recover) < STUCK_RECOVER_COOLDOWN_S:
                     # Already tried to recover this pane recently;
                     # leave it alone so we don't loop close→spawn.
@@ -3355,13 +3380,15 @@ class Orchestrator(QObject):
         cwd = pane._session_cwd
         key = f"{project}::{role}"
 
-        # Snapshot per-pane state that close() will pop.
-        snap_uuid = self._session_uuids.get(key)
-        snap_task = self._last_assigned_task.get(key)
-        snap_auto_chain = self._auto_chain_panes.get(key, False)
-        snap_requires_commit = self._requires_commit_on_done.get(key, False)
+        # Snapshot fields that close() will pop so _do_respawn can restore them.
+        _ps_snap = self._pane_state.get(key)
+        snap_uuid = _ps_snap.session_uuid if _ps_snap is not None else None
+        snap_uuid_cwd = _ps_snap.session_uuid_cwd if _ps_snap is not None else ""
+        snap_task = _ps_snap.last_assigned_task if _ps_snap is not None else None
+        snap_auto_chain = _ps_snap.auto_chain if _ps_snap is not None else False
+        snap_requires_commit = _ps_snap.requires_commit_on_done if _ps_snap is not None else False
 
-        self._last_stuck_recover[key] = now
+        self._ps(key).last_stuck_recover = now
         silent_for_s = int(now - getattr(pane, "_last_output_ts", now))
         # Reset the output timestamp so the next tick doesn't re-trigger
         # before claude has had a chance to print anything from the new
@@ -3378,45 +3405,48 @@ class Orchestrator(QObject):
 
         def _do_respawn() -> None:
             # Restore snapshotted state before spawn() runs so:
-            #   - _session_uuids lets can_resume pick --resume <uuid>
-            #   - _last_assigned_task survives for replay (gated by Bug-5 fix)
-            #   - _auto_chain_panes keeps the verify-hop tag alive
-            #   - _requires_commit_on_done preserves the commit gate
+            #   - session_uuid lets can_resume pick --resume <uuid>
+            #   - last_assigned_task survives for replay (gated by Bug-5 fix)
+            #   - auto_chain keeps the verify-hop tag alive
+            #   - requires_commit_on_done preserves the commit gate
+            # Cooldown stamp: close() pops the whole PaneState so last_stuck_recover
+            # reverts to 0.0 — restore it here so the watchdog can't re-trigger
+            # within STUCK_RECOVER_COOLDOWN_S of the recovery attempt.
+            self._ps(key).last_stuck_recover = now
             if snap_uuid is not None:
-                self._session_uuids[key] = snap_uuid
+                _ps_r = self._ps(key)
+                _ps_r.session_uuid = snap_uuid
+                _ps_r.session_uuid_cwd = snap_uuid_cwd
             if snap_task is not None:
-                self._last_assigned_task[key] = snap_task
+                self._ps(key).last_assigned_task = snap_task
             if snap_auto_chain:
-                self._auto_chain_panes[key] = snap_auto_chain
+                self._ps(key).auto_chain = snap_auto_chain
             if snap_requires_commit:
-                self._requires_commit_on_done[key] = snap_requires_commit
+                self._ps(key).requires_commit_on_done = snap_requires_commit
             # m3 fix: if PTY teardown hasn't fired _on_session_exit yet (takes
             # longer than the 2s singleShot on a slow machine), _recent_exits
             # has no entry and spawn()'s can_resume returns False → blank session.
             # Synthesise the entry from snap_uuid so we never depend on timing.
             if snap_uuid is not None and key not in self._recent_exits:
                 self._recent_exits[key] = {
-                    "cwd": snap_uuid.get("cwd", cwd or ""),
+                    "cwd": snap_uuid_cwd or cwd or "",
                     "ts": time.time(),
                 }
             ok, msg = self.spawn(role, cwd=cwd, project=project, _from_auto_respawn=True)
             _log_event("stuck_recover_respawn", role=role, project=project, ok=ok, msg=msg[:160])
             if not ok:
-                # Fix 2: spawn failed — roll back state restored above so a dead
-                # pane doesn't leave stale uuid/task/flags in the live maps.
-                if snap_uuid is not None:
-                    self._session_uuids.pop(key, None)
-                if snap_task is not None:
-                    self._last_assigned_task.pop(key, None)
-                if snap_auto_chain:
-                    self._auto_chain_panes.pop(key, None)
-                if snap_requires_commit:
-                    self._requires_commit_on_done.pop(key, None)
+                # Spawn failed — pop the whole PaneState (pane is dead, return
+                # to post-close empty state) rather than resetting fields one by
+                # one.  Matches the "popped atomically by close()/done()" contract
+                # and avoids leaving an empty PaneState entry in _pane_state.
+                self._pane_state.pop(key, None)
                 return
             # If the session was resumed, the task is already in claude's
             # conversation history — don't re-paste it (Bug-5 gate).
             # Fix 1: read structured flag set by spawn() instead of parsing msg.
-            if snap_task and not self._last_spawn_resumed.get(key, False):
+            _ps_after = self._pane_state.get(key)
+            spawn_resumed = _ps_after.last_spawn_resumed if _ps_after is not None else False
+            if snap_task and not spawn_resumed:
                 self._send_when_ready(role, snap_task, project=project)
 
         # 2 s pause so the close has time to terminate the PTY and tear
@@ -3432,13 +3462,15 @@ class Orchestrator(QObject):
         notice to the Lead (option A: notify only, no auto-resume). Once the
         reset time passes the state is cleared and the watchdog resumes."""
         key = f"{project}::{role}"
-        existing = self._rate_limited_until.get(key)
-        if existing is not None:
+        _ps_rl = getattr(self, "_pane_state", {}).get(key)
+        existing = _ps_rl.rate_limited_until if _ps_rl is not None else 0.0
+        if existing > 0.0:
             if now < existing:
                 return True
             # Reset time reached — clear and let the watchdog behave normally.
             # The notice fires from its own QTimer scheduled at detection time.
-            self._rate_limited_until.pop(key, None)
+            if _ps_rl is not None:
+                _ps_rl.rate_limited_until = 0.0
             return False
 
         if pane.session is None or not pane.session.is_alive:
@@ -3447,7 +3479,7 @@ class Orchestrator(QObject):
         if reset_at is None:
             return False
 
-        self._rate_limited_until[key] = reset_at
+        self._ps(key).rate_limited_until = reset_at
         self._schedule_rate_limit_notice(project, role, reset_at)
         _log_event(
             "rate_limit_detected",
@@ -3465,7 +3497,9 @@ class Orchestrator(QObject):
     def _emit_rate_limit_reset(self, project: str, role: str) -> None:
         """Tell the Lead a rate-limited pane's window has reset (notify-only)."""
         key = f"{project}::{role}"
-        self._rate_limited_until.pop(key, None)
+        _ps_rr = self._pane_state.get(key)
+        if _ps_rr is not None:
+            _ps_rr.rate_limited_until = 0.0
         msg = (
             f"⏰ [rate-limit] {role} ({project}) — usage limit reset แล้ว "
             f"pane พร้อมทำงานต่อ (nudge/มอบงานต่อได้เลย)"

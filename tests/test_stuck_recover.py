@@ -22,6 +22,7 @@ from agent_takkub.orchestrator import (
     STUCK_RECOVER_COOLDOWN_S,
     STUCK_THRESHOLD_S,
     Orchestrator,
+    PaneState,
 )
 
 
@@ -54,32 +55,35 @@ class _FakeOrch:
     tests can assert the recover path fired."""
 
     def __init__(self) -> None:
-        self._panes_by_project: dict[str, dict] = {}
-        self._last_stuck_recover: dict[str, float] = {}
-        self._rate_limited_until: dict[str, float] = {}
-        # Bug-1 fix attrs required by the new snapshot/restore path
-        self._session_uuids: dict[str, dict] = {}
-        self._last_assigned_task: dict[str, str] = {}
-        self._auto_chain_panes: dict[str, bool] = {}
-        self._requires_commit_on_done: dict[str, bool] = {}
-        # Bug-2 fix attrs for content-delta tracking
-        self._last_content_hash: dict[str, str] = {}
-        self._last_content_change_ts: dict[str, float] = {}
-        # Fix 1: structured resume flag
-        self._last_spawn_resumed: dict[str, bool] = {}
-        # m3 fix: recent exits dict
-        self._recent_exits: dict[str, dict] = {}
+        self._panes_by_project = {}
+        self._pane_state = {}  # key -> PaneState; NOT popped by close() so cooldown survives
+        self._idle_state = {}
+        self._recent_exits = {}
         self.close_calls: list[tuple[str, str]] = []
         self.spawn_calls: list[tuple[str, str | None, str]] = []
 
+    def _ps(self, key: str) -> PaneState:
+        try:
+            return self._pane_state[key]
+        except KeyError:
+            ps = PaneState()
+            self._pane_state[key] = ps
+            return ps
+
     def close(self, role: str, project: str | None = None) -> tuple[bool, str]:
-        # Mimic the orchestrator's close() popping state dicts so restore
-        # tests can verify the snapshot/restore roundtrip correctly.
+        # Mimic the orchestrator's close() clearing the snapshot/restore fields
+        # (session_uuid, task, auto_chain, requires_commit).
+        # Intentionally preserve last_stuck_recover so cooldown tests work
+        # (real close() pops it, but the fake is a minimal stub for snapshot tests).
         key = f"{project or ''}::{role}"
-        self._session_uuids.pop(key, None)
-        self._last_assigned_task.pop(key, None)
-        self._auto_chain_panes.pop(key, None)
-        self._requires_commit_on_done.pop(key, None)
+        ps = self._pane_state.get(key)
+        if ps is not None:
+            ps.session_uuid = None
+            ps.session_uuid_cwd = ""
+            ps.last_assigned_task = None
+            ps.auto_chain = False
+            ps.requires_commit_on_done = False
+        self._idle_state.pop(key, None)
         self.close_calls.append((role, project or ""))
         return True, "ok"
 
@@ -190,7 +194,9 @@ class TestCheckStuckPanes:
         assert fake.close_calls == [("backend", "agent-takkub")]
         assert fake.spawn_calls == [("backend", "C:/foo", "agent-takkub")]
         # Cooldown stamp set so a subsequent tick doesn't loop.
-        assert fake._last_stuck_recover["agent-takkub::backend"] == now
+        assert (
+            fake._pane_state.get("agent-takkub::backend") or PaneState()
+        ).last_stuck_recover == now
 
     def test_cooldown_suppresses_back_to_back_recover(self) -> None:
         # Same pane stuck twice within the cooldown window — second
@@ -239,7 +245,65 @@ class TestAutoRecoverStuck:
         now = 1_000_000.0
         pane = _FakePane(state="working", last_out=now - STUCK_THRESHOLD_S - 1)
         _recover(fake, "backend", "p", pane, now)
-        assert fake._last_stuck_recover["p::backend"] == now
+        assert (fake._pane_state.get("p::backend") or PaneState()).last_stuck_recover == now
+
+    def test_cooldown_survives_real_close_pop(self) -> None:
+        """Regression: last_stuck_recover must survive close()'s _pane_state.pop().
+
+        The default _FakeOrch.close() preserves _pane_state to keep snapshot
+        tests simple — but that divergence masks the real bug. This test uses a
+        pop-on-close variant that mirrors the production lifecycle: close() pops
+        the whole PaneState, then _do_respawn() must restore last_stuck_recover
+        so the watchdog can't re-trigger before STUCK_RECOVER_COOLDOWN_S expires.
+        """
+
+        class _PopOnClose(_FakeOrch):
+            def close(self, role: str, project: str | None = None) -> tuple[bool, str]:
+                key = f"{project or ''}::{role}"
+                self._pane_state.pop(key, None)
+                self._idle_state.pop(key, None)
+                self.close_calls.append((role, project or ""))
+                return True, "ok"
+
+        fake = _PopOnClose()
+        now = 1_000_000.0
+        pane = _FakePane(state="working", last_out=now - STUCK_THRESHOLD_S - 1)
+        fake._panes_by_project["p"] = {"backend": pane}
+        _recover(fake, "backend", "p", pane, now)
+
+        ps = fake._pane_state.get("p::backend")
+        assert ps is not None, "PaneState must exist after respawn"
+        assert ps.last_stuck_recover == now, (
+            "cooldown stamp lost across close()->pop()->_do_respawn(); "
+            "watchdog will re-trigger without honoring STUCK_RECOVER_COOLDOWN_S"
+        )
+
+    def test_cooldown_check_suppressed_after_real_close_pop(self) -> None:
+        """Full path with real pop: _check_stuck_panes → recover → second check
+        must be suppressed by the cooldown stamp restored in _do_respawn."""
+
+        class _PopOnClose(_FakeOrch):
+            def close(self, role: str, project: str | None = None) -> tuple[bool, str]:
+                key = f"{project or ''}::{role}"
+                self._pane_state.pop(key, None)
+                self._idle_state.pop(key, None)
+                self.close_calls.append((role, project or ""))
+                return True, "ok"
+
+        fake = _PopOnClose()
+        now = 1_000_000.0
+        pane = _FakePane(state="working", last_out=now - STUCK_THRESHOLD_S - 1)
+        fake._panes_by_project["p"] = {"backend": pane}
+        _check(fake, now)
+        assert len(fake.close_calls) == 1
+
+        now2 = now + STUCK_RECOVER_COOLDOWN_S - 1
+        pane._last_output_ts = now2 - STUCK_THRESHOLD_S - 1
+        _check(fake, now2)
+        assert len(fake.close_calls) == 1, (
+            "_do_respawn did not restore last_stuck_recover after real close()->pop(); "
+            "second check fired within cooldown window"
+        )
 
     def test_silent_for_s_computed_before_timestamp_reset(self) -> None:
         """Regression: silent_for_s must capture the *pre-reset* duration,

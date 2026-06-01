@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from PyQt6.QtCore import QCoreApplication
 
-from agent_takkub.orchestrator import Orchestrator, _exit_key
+from agent_takkub.orchestrator import Orchestrator, PaneState, _exit_key
 
 TEST_PROJECT = "testproj"
 
@@ -57,7 +57,7 @@ class TestAutoRespawnReplay:
         ekey = _exit_key(TEST_PROJECT, "backend")
 
         # Simulate: assign was called and cached the task
-        orch._last_assigned_task[ekey] = SAMPLE_TASK
+        orch._ps(ekey).last_assigned_task = SAMPLE_TASK
 
         # Simulate: pane exists in exited state (crashed)
         crashed_pane = MagicMock()
@@ -96,7 +96,7 @@ class TestAutoRespawnReplay:
     def test_no_replay_after_manual_close(self, orch: Orchestrator) -> None:
         """close() clears the cache so a manual restart doesn't re-inject stale task."""
         ekey = _exit_key(TEST_PROJECT, "qa")
-        orch._last_assigned_task[ekey] = SAMPLE_TASK
+        orch._ps(ekey).last_assigned_task = SAMPLE_TASK
 
         pane = _make_alive_pane()
         orch._panes_by_project.setdefault(TEST_PROJECT, {})["qa"] = pane
@@ -107,12 +107,12 @@ class TestAutoRespawnReplay:
         # close() should clear the cache
         orch.close("qa", project=TEST_PROJECT)
 
-        assert ekey not in orch._last_assigned_task
+        assert (orch._pane_state.get(ekey) or PaneState()).last_assigned_task is None
 
     def test_no_replay_when_spawn_fails(self, orch: Orchestrator) -> None:
         """If spawn fails, _auto_respawn must not attempt _send_when_ready."""
         ekey = _exit_key(TEST_PROJECT, "mobile")
-        orch._last_assigned_task[ekey] = SAMPLE_TASK
+        orch._ps(ekey).last_assigned_task = SAMPLE_TASK
 
         crashed_pane = MagicMock()
         crashed_pane.session = None
@@ -137,7 +137,7 @@ class TestAutoRespawnReplay:
         ):
             orch.assign("frontend", cwd="/web", task=SAMPLE_TASK, project=TEST_PROJECT)
 
-        assert orch._last_assigned_task.get(ekey) == SAMPLE_TASK
+        assert (orch._pane_state.get(ekey) or PaneState()).last_assigned_task == SAMPLE_TASK
 
     def test_assign_rewrites_codex_task_with_override_notice(self, orch: Orchestrator) -> None:
         """assign() must prepend the override notice when the role is backed
@@ -164,7 +164,7 @@ class TestAutoRespawnReplay:
         ):
             orch.assign("codex", cwd="/web", task=raw_task, project=TEST_PROJECT)
 
-        cached = orch._last_assigned_task[ekey]
+        cached = orch._pane_state[ekey].last_assigned_task
         assert cached.startswith(_CODEX_TASK_NOTICE)
         sent_task = mock_send.call_args.args[1]
         assert sent_task.startswith(_CODEX_TASK_NOTICE)
@@ -184,7 +184,7 @@ class TestAutoRespawnReplay:
         ):
             orch.assign("backend", cwd="/api", task=raw_task, project=TEST_PROJECT)
 
-        cached = orch._last_assigned_task[ekey]
+        cached = orch._pane_state[ekey].last_assigned_task
         assert _CODEX_TASK_NOTICE not in cached
         assert cached == raw_task
 
@@ -194,7 +194,7 @@ class TestAutoRespawnReplay:
         """done() must pop _last_assigned_task so a crash within the 2.5 s close-
         window doesn't replay an already-completed task on auto-respawn."""
         ekey = _exit_key(TEST_PROJECT, "reviewer")
-        orch._last_assigned_task[ekey] = SAMPLE_TASK
+        orch._ps(ekey).last_assigned_task = SAMPLE_TASK
 
         pane = _make_alive_pane()
         orch._panes_by_project.setdefault(TEST_PROJECT, {})["reviewer"] = pane
@@ -203,7 +203,7 @@ class TestAutoRespawnReplay:
             orch.done("reviewer", note="done", project=TEST_PROJECT)
 
         # Cache must be cleared immediately (before the 2.5 s close fires)
-        assert ekey not in orch._last_assigned_task
+        assert (orch._pane_state.get(ekey) or PaneState()).last_assigned_task is None
 
         # Simulate session exit within the 2.5 s window → _auto_respawn fires
         crashed_pane = MagicMock()

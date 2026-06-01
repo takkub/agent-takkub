@@ -75,14 +75,11 @@ def orch(qapp, tmp_path, monkeypatch) -> Orchestrator:
 
         QObject.__init__(o)
         o._panes_by_project = {}
-        o._recent_exits = {}
+        o._pane_state = {}
         o._idle_state = {}
-        o._blocked_on_lead = {}
-        o._auto_respawn_attempts = {}
-        o._last_stuck_recover = {}
+        o._recent_exits = {}
         o._recent_done = []
         o._pending_lead_cc = {}
-        o._last_send_ts = {}
     return o
 
 

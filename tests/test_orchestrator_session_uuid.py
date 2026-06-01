@@ -20,7 +20,7 @@ from PyQt6.QtCore import QCoreApplication
 
 from agent_takkub import config
 from agent_takkub import orchestrator as orch_mod
-from agent_takkub.orchestrator import RESUME_WINDOW_SEC, Orchestrator, _exit_key
+from agent_takkub.orchestrator import RESUME_WINDOW_SEC, Orchestrator, PaneState, _exit_key
 
 # project="default" bypasses the CWD-within-project validation in spawn()
 _PROJECT = "default"
@@ -141,7 +141,7 @@ class TestFirstSpawnUsesSessionId:
         idx = argv.index("--session-id")
         uuid_val = argv[idx + 1]
         key = _exit_key(_PROJECT, "backend")
-        assert orch._session_uuids.get(key, {}).get("uuid") == uuid_val
+        assert (orch._pane_state.get(key) or PaneState()).session_uuid == uuid_val
 
 
 # ─────────────────────────────────────────────────────────────
@@ -173,7 +173,7 @@ class TestRespawnWithinWindowUsesResume:
         _spawn_capture(orch, "qa", cwd=cwd)
 
         key = _exit_key(_PROJECT, "qa")
-        assert orch._session_uuids[key]["uuid"] == uuid1
+        assert orch._pane_state[key].session_uuid == uuid1
 
 
 # ─────────────────────────────────────────────────────────────
@@ -225,7 +225,7 @@ class TestRespawnDifferentCwdUsesNewSessionId:
         _simulate_exit(orch, "reviewer", cwd="/proj/a")
         _spawn_capture(orch, "reviewer", cwd="/proj/b")
         key = _exit_key(_PROJECT, "reviewer")
-        assert orch._session_uuids[key]["cwd"] == "/proj/b"
+        assert orch._pane_state[key].session_uuid_cwd == "/proj/b"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -237,14 +237,16 @@ class TestManualCloseClears:
     def test_close_pops_uuid(self, orch: Orchestrator) -> None:
         _spawn_capture(orch, "designer")
         key = _exit_key(_PROJECT, "designer")
-        assert key in orch._session_uuids
-        # close() clears _session_uuids even when session is None (pane not alive)
+        assert (
+            orch._pane_state.get(key) is not None and orch._pane_state[key].session_uuid is not None
+        )
+        # close() clears all per-pane state even when session is None (pane not alive)
         orch.close("designer", project=_PROJECT)
-        assert key not in orch._session_uuids
+        assert orch._pane_state.get(key) is None
 
     def test_post_close_spawn_gets_fresh_session_id(self, orch: Orchestrator) -> None:
         _spawn_capture(orch, "designer")
-        uuid1 = orch._session_uuids[_exit_key(_PROJECT, "designer")]["uuid"]
+        uuid1 = orch._pane_state[_exit_key(_PROJECT, "designer")].session_uuid
 
         orch.close("designer", project=_PROJECT)
 
@@ -264,14 +266,16 @@ class TestDoneClears:
     def test_done_pops_uuid(self, orch: Orchestrator) -> None:
         _spawn_capture(orch, "backend")
         key = _exit_key(_PROJECT, "backend")
-        assert key in orch._session_uuids
-        # done() clears _session_uuids regardless of session state
+        assert (
+            orch._pane_state.get(key) is not None and orch._pane_state[key].session_uuid is not None
+        )
+        # done() clears all per-pane state regardless of session state
         orch.done("backend", note="done", project=_PROJECT)
-        assert key not in orch._session_uuids
+        assert orch._pane_state.get(key) is None
 
     def test_post_done_spawn_gets_fresh_session_id(self, orch: Orchestrator) -> None:
         _spawn_capture(orch, "qa")
-        uuid1 = orch._session_uuids[_exit_key(_PROJECT, "qa")]["uuid"]
+        uuid1 = orch._pane_state[_exit_key(_PROJECT, "qa")].session_uuid
 
         orch.done("qa", note="done", project=_PROJECT)
 
@@ -294,10 +298,16 @@ class TestTwoRolesIsolatedInSameCwd:
         key_back = _exit_key(_PROJECT, "backend")
         key_front = _exit_key(_PROJECT, "frontend")
         assert key_back != key_front
-        assert key_back in orch._session_uuids
-        assert key_front in orch._session_uuids
-        uuid_back = orch._session_uuids[key_back]["uuid"]
-        uuid_front = orch._session_uuids[key_front]["uuid"]
+        assert (
+            orch._pane_state.get(key_back) is not None
+            and orch._pane_state[key_back].session_uuid is not None
+        )
+        assert (
+            orch._pane_state.get(key_front) is not None
+            and orch._pane_state[key_front].session_uuid is not None
+        )
+        uuid_back = orch._pane_state[key_back].session_uuid
+        uuid_front = orch._pane_state[key_front].session_uuid
         assert uuid_back != uuid_front
 
 

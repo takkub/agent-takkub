@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from PyQt6.QtCore import QCoreApplication
 
-from agent_takkub.orchestrator import CODEX_EARLY_CRASH_WINDOW_SEC, Orchestrator
+from agent_takkub.orchestrator import CODEX_EARLY_CRASH_WINDOW_SEC, Orchestrator, PaneState
 
 TEST_PROJECT = "default"
 FAKE_CWD = "/tmp/takkub-codex-crash-test"
@@ -58,7 +58,7 @@ class TestEarlyCrashDetection:
     def test_early_exit_writes_dump(self, orch: Orchestrator, tmp_path: pathlib.Path) -> None:
         """Exit within CODEX_EARLY_CRASH_WINDOW_SEC → dump file created."""
         ekey = f"{TEST_PROJECT}::codex"
-        orch._codex_spawn_times[ekey] = time.time() - 30  # 30s ago = early crash
+        orch._ps(ekey).codex_spawn_ts = time.time() - 30  # 30s ago = early crash
 
         session = MagicMock()
         session.display_lines.return_value = ["Booting MCP server: codex_apps", ""]
@@ -89,7 +89,7 @@ class TestEarlyCrashDetection:
         """Exit after threshold → no dump file created."""
         ekey = f"{TEST_PROJECT}::codex"
         # spawn time far in the past → time_to_exit >> threshold
-        orch._codex_spawn_times[ekey] = time.time() - (CODEX_EARLY_CRASH_WINDOW_SEC + 60)
+        orch._ps(ekey).codex_spawn_ts = time.time() - (CODEX_EARLY_CRASH_WINDOW_SEC + 60)
 
         session = MagicMock()
         pane = MagicMock()
@@ -112,7 +112,7 @@ class TestEarlyCrashDetection:
     def test_delegates_to_on_session_exit(self, orch: Orchestrator, tmp_path: pathlib.Path) -> None:
         """_on_codex_exit always calls _on_session_exit regardless of crash status."""
         ekey = f"{TEST_PROJECT}::codex"
-        orch._codex_spawn_times[ekey] = time.time() - 10  # early crash
+        orch._ps(ekey).codex_spawn_ts = time.time() - 10  # early crash
 
         session = MagicMock()
         session.display_lines.return_value = []
@@ -136,7 +136,7 @@ class TestEarlyCrashDetection:
     ) -> None:
         """_codex_spawn_times entry is popped during _on_codex_exit."""
         ekey = f"{TEST_PROJECT}::codex"
-        orch._codex_spawn_times[ekey] = time.time() - 5
+        orch._ps(ekey).codex_spawn_ts = time.time() - 5
 
         session = MagicMock()
         session.display_lines.return_value = []
@@ -151,14 +151,14 @@ class TestEarlyCrashDetection:
         ):
             orch._on_codex_exit(0, "codex", FAKE_CWD, TEST_PROJECT, session)
 
-        assert ekey not in orch._codex_spawn_times
+        assert (orch._pane_state.get(ekey) or PaneState()).codex_spawn_ts is None
 
     def test_dump_survives_display_lines_exception(
         self, orch: Orchestrator, tmp_path: pathlib.Path
     ) -> None:
         """If session.display_lines() raises, the dump is still written."""
         ekey = f"{TEST_PROJECT}::codex"
-        orch._codex_spawn_times[ekey] = time.time() - 20
+        orch._ps(ekey).codex_spawn_ts = time.time() - 20
 
         session = MagicMock()
         session.display_lines.side_effect = RuntimeError("PTY gone")
@@ -184,7 +184,7 @@ class TestEarlyCrashDetection:
     def test_dump_filename_format(self, orch: Orchestrator, tmp_path: pathlib.Path) -> None:
         """Dump filename follows <ts>-<project>-<role>.log pattern."""
         ekey = f"{TEST_PROJECT}::codex"
-        orch._codex_spawn_times[ekey] = time.time() - 5
+        orch._ps(ekey).codex_spawn_ts = time.time() - 5
 
         session = MagicMock()
         session.display_lines.return_value = ["line1"]

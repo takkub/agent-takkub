@@ -15,6 +15,7 @@ from __future__ import annotations
 import time
 from unittest.mock import MagicMock, patch
 
+from agent_takkub.orchestrator import PaneState
 from agent_takkub.pty_session import _parse_rate_limit_reset
 
 # ── layer 1: pure parser ─────────────────────────────────────────────────────
@@ -69,7 +70,7 @@ def _bare_orch():
     from agent_takkub.orchestrator import Orchestrator
 
     o = Orchestrator.__new__(Orchestrator)
-    o._rate_limited_until = {}
+    o._pane_state = {}
     return o
 
 
@@ -91,7 +92,7 @@ class TestRateLimitGate:
         ):
             suppressed = o._rate_limit_suppressed("proj", "frontend", pane, now)
         assert suppressed is True
-        assert o._rate_limited_until["proj::frontend"] == now + 3600
+        assert (o._pane_state.get("proj::frontend") or PaneState()).rate_limited_until == now + 3600
         timer.assert_called_once()  # reset notice scheduled
 
     def test_not_limited_returns_false(self) -> None:
@@ -100,12 +101,12 @@ class TestRateLimitGate:
         pane = _pane_reporting(None)
         with patch("agent_takkub.orchestrator._log_event"):
             assert o._rate_limit_suppressed("proj", "backend", pane, now) is False
-        assert "proj::backend" not in o._rate_limited_until
+        assert (o._pane_state.get("proj::backend") or PaneState()).rate_limited_until == 0.0
 
     def test_known_limit_skips_redetect(self) -> None:
         o = _bare_orch()
         now = time.time()
-        o._rate_limited_until["proj::qa"] = now + 1800
+        o._ps("proj::qa").rate_limited_until = now + 1800
         pane = _pane_reporting(None)  # would say "not limited" if asked
         assert o._rate_limit_suppressed("proj", "qa", pane, now) is True
         pane.session.rate_limit_reset_at.assert_not_called()  # short-circuited
@@ -113,10 +114,10 @@ class TestRateLimitGate:
     def test_reset_time_passed_clears_and_resumes(self) -> None:
         o = _bare_orch()
         now = time.time()
-        o._rate_limited_until["proj::qa"] = now - 10  # already reset
+        o._ps("proj::qa").rate_limited_until = now - 10  # already reset
         pane = _pane_reporting(None)
         assert o._rate_limit_suppressed("proj", "qa", pane, now) is False
-        assert "proj::qa" not in o._rate_limited_until
+        assert (o._pane_state.get("proj::qa") or PaneState()).rate_limited_until == 0.0
 
     def test_dead_session_not_limited(self) -> None:
         o = _bare_orch()

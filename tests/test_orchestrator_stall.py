@@ -21,6 +21,7 @@ import pytest
 from agent_takkub.orchestrator import (
     LEAD,
     Orchestrator,
+    PaneState,
 )
 
 
@@ -50,7 +51,15 @@ class _FakeOrch:
 
     def __init__(self) -> None:
         self._panes_by_project: dict[str, dict] = {}
-        self._last_send_ts: dict[str, float] = {}
+        self._pane_state: dict[str, PaneState] = {}
+
+    def _ps(self, key: str) -> PaneState:
+        try:
+            return self._pane_state[key]
+        except KeyError:
+            ps = PaneState()
+            self._pane_state[key] = ps
+            return ps
 
     def _resolve_project(self, project: str | None) -> str:
         return project or "default"
@@ -100,7 +109,7 @@ class TestComputeLastProgressTs:
         orch = self._make_orch()
         pane = _FakePane(transcript_path=None)
         send_time = time.time() - 30
-        orch._last_send_ts["default::qa"] = send_time
+        orch._ps("default::qa").last_send_ts = send_time
         ts = orch._compute_last_progress_ts("qa", "default", pane)
         assert ts == pytest.approx(send_time, abs=1)
 
@@ -118,7 +127,7 @@ class TestComputeLastProgressTs:
         pane = _FakePane(transcript_path=str(transcript))
         # Send is 5 seconds ago — newer than transcript
         recent_send = time.time() - 5
-        orch._last_send_ts["default::qa"] = recent_send
+        orch._ps("default::qa").last_send_ts = recent_send
         ts = orch._compute_last_progress_ts("qa", "default", pane)
         assert ts == pytest.approx(recent_send, abs=1)
 
@@ -172,7 +181,7 @@ class TestListStatusDetailed:
     def test_recent_send_no_stall(self, runtime_tmp: pathlib.Path) -> None:
         pane = _FakePane(state="working", transcript_path=None)
         orch = self._setup_orch(pane)
-        orch._last_send_ts["default::qa"] = time.time() - 60  # 1 min ago
+        orch._ps("default::qa").last_send_ts = time.time() - 60  # 1 min ago
         result = orch.list_status_detailed("default")
         assert result["qa"]["stall_minutes"] is None
 
@@ -182,7 +191,7 @@ class TestListStatusDetailed:
         monkeypatch.setattr("agent_takkub.orchestrator.STALL_THRESHOLD_SEC", 300)
         pane = _FakePane(state="working", transcript_path=None)
         orch = self._setup_orch(pane)
-        orch._last_send_ts["default::qa"] = time.time() - 450  # 7.5 min ago
+        orch._ps("default::qa").last_send_ts = time.time() - 450  # 7.5 min ago
         result = orch.list_status_detailed("default")
         stall = result["qa"]["stall_minutes"]
         assert stall is not None
@@ -191,7 +200,7 @@ class TestListStatusDetailed:
     def test_dead_session_not_stalled(self, runtime_tmp: pathlib.Path) -> None:
         pane = _FakePane(state="working", session_alive=False, transcript_path=None)
         orch = self._setup_orch(pane)
-        orch._last_send_ts["default::qa"] = time.time() - 600
+        orch._ps("default::qa").last_send_ts = time.time() - 600
         result = orch.list_status_detailed("default")
         assert result["qa"]["stall_minutes"] is None
 
@@ -219,7 +228,7 @@ class TestPaneStatusReport:
         orch = _FakeOrch()
         pane = _FakePane(state="working", transcript_path=None)
         orch._panes_by_project["default"] = {"qa": pane}
-        orch._last_send_ts["default::qa"] = time.time() - 400
+        orch._ps("default::qa").last_send_ts = time.time() - 400
         report = orch.pane_status_report("default")
         assert report["any_stalled"] is True
 
@@ -246,7 +255,7 @@ class TestPaneStatusReport:
         transcript.write_text("\n".join(lines), encoding="utf-8")
         orch = _FakeOrch()
         pane = _FakePane(state="working", transcript_path=str(transcript))
-        orch._last_send_ts["default::qa"] = time.time() - 30
+        orch._ps("default::qa").last_send_ts = time.time() - 30
         orch._panes_by_project["default"] = {"qa": pane}
         report = orch.pane_status_report("default")
         tail = report["panes"]["qa"]["transcript_tail"]
@@ -288,7 +297,7 @@ class TestPaneStatusReport:
         # backend pane: stale send 8 min ago, no transcript
         backend_pane = _FakePane(state="working", transcript_path=None)
         orch._panes_by_project["myproj"] = {"backend": backend_pane}
-        orch._last_send_ts["myproj::backend"] = time.time() - 480
+        orch._ps("myproj::backend").last_send_ts = time.time() - 480
 
         result = orch.list_status_detailed("myproj")
         assert result["backend"]["stall_minutes"] is not None, (

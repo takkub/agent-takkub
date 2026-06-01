@@ -338,9 +338,18 @@ class _ExitFake:
     def __init__(self) -> None:
         self._recent_exits: dict[str, dict] = {}
         self._panes_by_project: dict = {}
-        self._auto_respawn_attempts: dict = {}
         self._idle_state: dict = {}
-        self._blocked_on_lead: dict = {}
+        self._pane_state: dict = {}
+
+    def _ps(self, key: str):
+        from agent_takkub.orchestrator import PaneState
+
+        try:
+            return self._pane_state[key]
+        except KeyError:
+            ps = PaneState()
+            self._pane_state[key] = ps
+            return ps
 
     def spawn(self, role: str, cwd: str | None = None, project: str | None = None):
         return True, "ok"

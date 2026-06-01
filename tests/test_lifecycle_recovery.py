@@ -26,6 +26,7 @@ from agent_takkub.orchestrator import (
     AUTO_RESPAWN_MAX,
     STUCK_THRESHOLD_S,
     Orchestrator,
+    PaneState,
     _exit_key,
 )
 
@@ -78,10 +79,12 @@ class TestStuckRecoverPreservesState:
         pane = _working_pane()
         project, role = key.split("::", 1)
         orch._panes_by_project.setdefault(project, {})[role] = pane
-        orch._session_uuids[key] = {"uuid": "test-uuid-1234", "cwd": "/proj"}
-        orch._last_assigned_task[key] = SAMPLE_TASK
-        orch._auto_chain_panes[key] = True
-        orch._requires_commit_on_done[key] = True
+        ps = orch._ps(key)
+        ps.session_uuid = "test-uuid-1234"
+        ps.session_uuid_cwd = "/proj"
+        ps.last_assigned_task = SAMPLE_TASK
+        ps.auto_chain = True
+        ps.requires_commit_on_done = True
         return pane
 
     def test_session_uuid_restored_after_recover(self, orch: Orchestrator) -> None:
@@ -97,8 +100,8 @@ class TestStuckRecoverPreservesState:
             mock_timer.singleShot.side_effect = lambda ms, fn: fn()
             orch._auto_recover_stuck("backend", TEST_PROJECT, pane, now)
 
-        assert key in orch._session_uuids
-        assert orch._session_uuids[key]["uuid"] == "test-uuid-1234"
+        assert orch._pane_state.get(key) is not None
+        assert orch._pane_state[key].session_uuid == "test-uuid-1234"
 
     def test_last_task_restored_after_recover(self, orch: Orchestrator) -> None:
         key = _exit_key(TEST_PROJECT, "qa")
@@ -113,7 +116,7 @@ class TestStuckRecoverPreservesState:
             mock_timer.singleShot.side_effect = lambda ms, fn: fn()
             orch._auto_recover_stuck("qa", TEST_PROJECT, pane, now)
 
-        assert orch._last_assigned_task.get(key) == SAMPLE_TASK
+        assert (orch._pane_state.get(key) or PaneState()).last_assigned_task == SAMPLE_TASK
 
     def test_auto_chain_restored_after_recover(self, orch: Orchestrator) -> None:
         key = _exit_key(TEST_PROJECT, "frontend")
@@ -128,7 +131,7 @@ class TestStuckRecoverPreservesState:
             mock_timer.singleShot.side_effect = lambda ms, fn: fn()
             orch._auto_recover_stuck("frontend", TEST_PROJECT, pane, now)
 
-        assert orch._auto_chain_panes.get(key) is True
+        assert (orch._pane_state.get(key) or PaneState()).auto_chain is True
 
     def test_requires_commit_restored_after_recover(self, orch: Orchestrator) -> None:
         key = _exit_key(TEST_PROJECT, "devops")
@@ -143,7 +146,7 @@ class TestStuckRecoverPreservesState:
             mock_timer.singleShot.side_effect = lambda ms, fn: fn()
             orch._auto_recover_stuck("devops", TEST_PROJECT, pane, now)
 
-        assert orch._requires_commit_on_done.get(key) is True
+        assert (orch._pane_state.get(key) or PaneState()).requires_commit_on_done is True
 
     def test_spawn_called_with_from_auto_respawn_true(self, orch: Orchestrator) -> None:
         key = _exit_key(TEST_PROJECT, "mobile")
@@ -166,7 +169,7 @@ class TestStuckRecoverPreservesState:
         now = 1_000_000.0
 
         def _spawn_resumed(*_a, **_kw):
-            orch._last_spawn_resumed[key] = True
+            orch._ps(key).last_spawn_resumed = True
             return (True, "reviewer spawned (resumed)")
 
         with (
@@ -185,7 +188,7 @@ class TestStuckRecoverPreservesState:
         now = 1_000_000.0
 
         def _spawn_fresh(*_a, **_kw):
-            orch._last_spawn_resumed[key] = False
+            orch._ps(key).last_spawn_resumed = False
             return (True, "critic spawned in /proj")
 
         with (
@@ -209,18 +212,18 @@ class _FakeOrchForContentDelta:
 
     def __init__(self) -> None:
         self._panes_by_project: dict[str, dict] = {}
-        self._last_stuck_recover: dict[str, float] = {}
-        self._rate_limited_until: dict[str, float] = {}
-        self._session_uuids: dict[str, dict] = {}
-        self._last_assigned_task: dict[str, str] = {}
-        self._auto_chain_panes: dict[str, bool] = {}
-        self._requires_commit_on_done: dict[str, bool] = {}
-        self._last_content_hash: dict[str, str] = {}
-        self._last_content_change_ts: dict[str, float] = {}
-        # Fix 1 + m3 attrs needed by _auto_recover_stuck
-        self._last_spawn_resumed: dict[str, bool] = {}
+        self._pane_state: dict[str, PaneState] = {}
+        self._idle_state: dict[str, dict] = {}
         self._recent_exits: dict[str, dict] = {}
         self.recover_calls: list[tuple[str, str]] = []
+
+    def _ps(self, key: str) -> PaneState:
+        try:
+            return self._pane_state[key]
+        except KeyError:
+            ps = PaneState()
+            self._pane_state[key] = ps
+            return ps
 
     def close(self, role: str, project: str | None = None) -> tuple[bool, str]:
         return True, "ok"
@@ -281,9 +284,9 @@ class TestSpinnerBlindspotsFixed:
         key = "p::backend"
         # Pre-seed the content hash as the FILTERED hash (empty — spinner lines
         # are excluded so the stored hash is hash(()), not hash of spinner text).
-        fake._last_content_hash[key] = str(hash(()))
+        fake._ps(key).last_content_hash = str(hash(()))
         # Content last changed > threshold ago
-        fake._last_content_change_ts[key] = now - STUCK_THRESHOLD_S - 5
+        fake._ps(key).last_content_change_ts = now - STUCK_THRESHOLD_S - 5
 
         _check_stuck(fake, now)
         assert fake.recover_calls == [("backend", "p")]
@@ -315,9 +318,9 @@ class TestSpinnerBlindspotsFixed:
 
         key = "p::frontend"
         # Set previous hash to something DIFFERENT so change is detected
-        fake._last_content_hash[key] = "old-hash-value"
+        fake._ps(key).last_content_hash = "old-hash-value"
         # Content change ts is 10s ago — content changed recently → not stuck
-        fake._last_content_change_ts[key] = now - (STUCK_THRESHOLD_S - 10)
+        fake._ps(key).last_content_change_ts = now - (STUCK_THRESHOLD_S - 10)
 
         _check_stuck(fake, now)
         assert fake.recover_calls == []
@@ -362,7 +365,7 @@ class TestSpinnerBlindspotsFixed:
 class TestRespawnCapWarnsLead:
     def test_cap_warns_lead_when_alive(self, orch: Orchestrator) -> None:
         key = _exit_key(TEST_PROJECT, "backend")
-        orch._auto_respawn_attempts[key] = AUTO_RESPAWN_MAX
+        orch._ps(key).auto_respawn_attempts = AUTO_RESPAWN_MAX
 
         lead_pane = MagicMock()
         lead_pane.session = MagicMock()
@@ -384,8 +387,8 @@ class TestRespawnCapWarnsLead:
 
     def test_cap_clears_auto_chain(self, orch: Orchestrator) -> None:
         key = _exit_key(TEST_PROJECT, "frontend")
-        orch._auto_respawn_attempts[key] = AUTO_RESPAWN_MAX
-        orch._auto_chain_panes[key] = True
+        orch._ps(key).auto_respawn_attempts = AUTO_RESPAWN_MAX
+        orch._ps(key).auto_chain = True
 
         pane = MagicMock()
         pane.state = "exited"
@@ -395,12 +398,12 @@ class TestRespawnCapWarnsLead:
         with patch("agent_takkub.orchestrator.QTimer"):
             orch._on_session_exit("frontend", "/proj", TEST_PROJECT)
 
-        assert key not in orch._auto_chain_panes
+        assert not (orch._pane_state.get(key) or PaneState()).auto_chain
 
     def test_cap_clears_last_assigned_task(self, orch: Orchestrator) -> None:
         key = _exit_key(TEST_PROJECT, "devops")
-        orch._auto_respawn_attempts[key] = AUTO_RESPAWN_MAX
-        orch._last_assigned_task[key] = SAMPLE_TASK
+        orch._ps(key).auto_respawn_attempts = AUTO_RESPAWN_MAX
+        orch._ps(key).last_assigned_task = SAMPLE_TASK
 
         pane = MagicMock()
         pane.state = "exited"
@@ -410,7 +413,7 @@ class TestRespawnCapWarnsLead:
         with patch("agent_takkub.orchestrator.QTimer"):
             orch._on_session_exit("devops", "/proj", TEST_PROJECT)
 
-        assert key not in orch._last_assigned_task
+        assert (orch._pane_state.get(key) or PaneState()).last_assigned_task is None
 
 
 # ─────────────────────────────────────────────────────────────
@@ -430,7 +433,7 @@ class TestRespawnCounterReset:
 
     def test_manual_spawn_resets_counter(self, orch: Orchestrator) -> None:
         key = _exit_key(TEST_PROJECT, "backend")
-        orch._auto_respawn_attempts[key] = AUTO_RESPAWN_MAX - 1
+        orch._ps(key).auto_respawn_attempts = AUTO_RESPAWN_MAX - 1
 
         self._register_pane(orch, "backend")
         fake_session = MagicMock()
@@ -443,11 +446,11 @@ class TestRespawnCounterReset:
             with patch.object(fake_session, "spawn"):
                 orch.spawn("backend", cwd="/proj", project=TEST_PROJECT)
 
-        assert orch._auto_respawn_attempts.get(key) is None
+        assert (orch._pane_state.get(key) or PaneState()).auto_respawn_attempts == 0
 
     def test_auto_respawn_does_not_reset_counter(self, orch: Orchestrator) -> None:
         key = _exit_key(TEST_PROJECT, "qa")
-        orch._auto_respawn_attempts[key] = 2
+        orch._ps(key).auto_respawn_attempts = 2
 
         self._register_pane(orch, "qa")
         fake_session = MagicMock()
@@ -461,7 +464,7 @@ class TestRespawnCounterReset:
                 orch.spawn("qa", cwd="/proj", project=TEST_PROJECT, _from_auto_respawn=True)
 
         # Counter must NOT be cleared
-        assert orch._auto_respawn_attempts.get(key) == 2
+        assert (orch._pane_state.get(key) or PaneState()).auto_respawn_attempts == 2
 
 
 # ─────────────────────────────────────────────────────────────
@@ -472,7 +475,7 @@ class TestRespawnCounterReset:
 class TestNoReplayOnResumedSession:
     def test_no_replay_when_spawn_returns_resumed(self, orch: Orchestrator) -> None:
         key = _exit_key(TEST_PROJECT, "mobile")
-        orch._last_assigned_task[key] = SAMPLE_TASK
+        orch._ps(key).last_assigned_task = SAMPLE_TASK
 
         pane = MagicMock()
         pane.session = None
@@ -480,7 +483,7 @@ class TestNoReplayOnResumedSession:
         orch._panes_by_project.setdefault(TEST_PROJECT, {})["mobile"] = pane
 
         def _spawn_resumed(*_a, **_kw):
-            orch._last_spawn_resumed[key] = True
+            orch._ps(key).last_spawn_resumed = True
             return (True, "mobile spawned (resumed)")
 
         with (
@@ -493,7 +496,7 @@ class TestNoReplayOnResumedSession:
 
     def test_replay_when_spawn_is_fresh(self, orch: Orchestrator) -> None:
         key = _exit_key(TEST_PROJECT, "mobile")
-        orch._last_assigned_task[key] = SAMPLE_TASK
+        orch._ps(key).last_assigned_task = SAMPLE_TASK
 
         pane = MagicMock()
         pane.session = None
@@ -501,7 +504,7 @@ class TestNoReplayOnResumedSession:
         orch._panes_by_project.setdefault(TEST_PROJECT, {})["mobile"] = pane
 
         def _spawn_fresh(*_a, **_kw):
-            orch._last_spawn_resumed[key] = False
+            orch._ps(key).last_spawn_resumed = False
             return (True, "mobile spawned in /proj")
 
         with (
@@ -531,45 +534,44 @@ class TestCloseLeakFix:
 
     def test_harvest_hint_ts_popped(self, orch: Orchestrator) -> None:
         key = _exit_key(TEST_PROJECT, "qa")
-        orch._harvest_hint_ts[key] = 12345.0
+        orch._ps(key).harvest_hint_ts = 12345.0
         pane = self._make_alive_pane()
         orch._panes_by_project.setdefault(TEST_PROJECT, {})["qa"] = pane
 
         orch.close("qa", project=TEST_PROJECT)
 
-        assert key not in orch._harvest_hint_ts
+        assert orch._pane_state.get(key) is None
 
     def test_last_stuck_recover_popped(self, orch: Orchestrator) -> None:
         key = _exit_key(TEST_PROJECT, "frontend")
-        orch._last_stuck_recover[key] = 99999.0
+        orch._ps(key).last_stuck_recover = 99999.0
         pane = self._make_alive_pane()
         orch._panes_by_project.setdefault(TEST_PROJECT, {})["frontend"] = pane
 
         orch.close("frontend", project=TEST_PROJECT)
 
-        assert key not in orch._last_stuck_recover
+        assert orch._pane_state.get(key) is None
 
     def test_rate_limited_until_popped(self, orch: Orchestrator) -> None:
         key = _exit_key(TEST_PROJECT, "backend")
-        orch._rate_limited_until[key] = 99999.0
+        orch._ps(key).rate_limited_until = 99999.0
         pane = self._make_alive_pane()
         orch._panes_by_project.setdefault(TEST_PROJECT, {})["backend"] = pane
 
         orch.close("backend", project=TEST_PROJECT)
 
-        assert key not in orch._rate_limited_until
+        assert orch._pane_state.get(key) is None
 
     def test_content_hash_popped(self, orch: Orchestrator) -> None:
         key = _exit_key(TEST_PROJECT, "reviewer")
-        orch._last_content_hash[key] = "abc"
-        orch._last_content_change_ts[key] = 1234.0
+        orch._ps(key).last_content_hash = "abc"
+        orch._ps(key).last_content_change_ts = 1234.0
         pane = self._make_alive_pane()
         orch._panes_by_project.setdefault(TEST_PROJECT, {})["reviewer"] = pane
 
         orch.close("reviewer", project=TEST_PROJECT)
 
-        assert key not in orch._last_content_hash
-        assert key not in orch._last_content_change_ts
+        assert orch._pane_state.get(key) is None
 
 
 # ─────────────────────────────────────────────────────────────
@@ -685,12 +687,12 @@ class TestStructuredResumeFlag:
     def test_cwd_with_resumed_substring_still_replays(self, orch: Orchestrator) -> None:
         """A cwd like '/work/(resumed)-migration' must NOT suppress replay."""
         key = _exit_key(TEST_PROJECT, "backend")
-        orch._last_assigned_task[key] = SAMPLE_TASK
+        orch._ps(key).last_assigned_task = SAMPLE_TASK
         self._make_crashed_pane(orch, "backend")
 
         def _spawn_fresh_tricky(*_a, **_kw):
             # spawn sets flag=False (fresh), but message contains "(resumed)"
-            orch._last_spawn_resumed[key] = False
+            orch._ps(key).last_spawn_resumed = False
             return (True, "backend spawned in /work/(resumed)-migration")
 
         with (
@@ -703,7 +705,7 @@ class TestStructuredResumeFlag:
 
     def test_close_pops_last_spawn_resumed(self, orch: Orchestrator) -> None:
         key = _exit_key(TEST_PROJECT, "qa")
-        orch._last_spawn_resumed[key] = True
+        orch._ps(key).last_spawn_resumed = True
 
         pane = MagicMock()
         pane.session = MagicMock()
@@ -716,12 +718,12 @@ class TestStructuredResumeFlag:
 
         orch.close("qa", project=TEST_PROJECT)
 
-        assert key not in orch._last_spawn_resumed
+        assert orch._pane_state.get(key) is None
 
     def test_auto_respawn_fresh_spawn_no_flag_means_replay(self, orch: Orchestrator) -> None:
-        """If _last_spawn_resumed has no entry (absent = False), task is replayed."""
+        """If last_spawn_resumed is False (default), task is replayed."""
         key = _exit_key(TEST_PROJECT, "devops")
-        orch._last_assigned_task[key] = SAMPLE_TASK
+        orch._ps(key).last_assigned_task = SAMPLE_TASK
         self._make_crashed_pane(orch, "devops")
         # Do NOT set _last_spawn_resumed — absence should be treated as fresh
 
@@ -746,10 +748,12 @@ class TestDoRespawnRollbackOnFailure:
         pane = _working_pane()
         project, role = key.split("::", 1)
         orch._panes_by_project.setdefault(project, {})[role] = pane
-        orch._session_uuids[key] = {"uuid": "test-uuid-rollback", "cwd": "/proj"}
-        orch._last_assigned_task[key] = SAMPLE_TASK
-        orch._auto_chain_panes[key] = True
-        orch._requires_commit_on_done[key] = True
+        ps = orch._ps(key)
+        ps.session_uuid = "test-uuid-rollback"
+        ps.session_uuid_cwd = "/proj"
+        ps.last_assigned_task = SAMPLE_TASK
+        ps.auto_chain = True
+        ps.requires_commit_on_done = True
         return pane
 
     def test_uuid_rolled_back_on_spawn_failure(self, orch: Orchestrator) -> None:
@@ -764,7 +768,7 @@ class TestDoRespawnRollbackOnFailure:
             mock_timer.singleShot.side_effect = lambda ms, fn: fn()
             orch._auto_recover_stuck("frontend", TEST_PROJECT, pane, now)
 
-        assert key not in orch._session_uuids
+        assert (orch._pane_state.get(key) or PaneState()).session_uuid is None
 
     def test_task_rolled_back_on_spawn_failure(self, orch: Orchestrator) -> None:
         key = _exit_key(TEST_PROJECT, "mobile")
@@ -778,7 +782,7 @@ class TestDoRespawnRollbackOnFailure:
             mock_timer.singleShot.side_effect = lambda ms, fn: fn()
             orch._auto_recover_stuck("mobile", TEST_PROJECT, pane, now)
 
-        assert key not in orch._last_assigned_task
+        assert (orch._pane_state.get(key) or PaneState()).last_assigned_task is None
 
     def test_auto_chain_rolled_back_on_spawn_failure(self, orch: Orchestrator) -> None:
         key = _exit_key(TEST_PROJECT, "reviewer")
@@ -792,7 +796,7 @@ class TestDoRespawnRollbackOnFailure:
             mock_timer.singleShot.side_effect = lambda ms, fn: fn()
             orch._auto_recover_stuck("reviewer", TEST_PROJECT, pane, now)
 
-        assert key not in orch._auto_chain_panes
+        assert not (orch._pane_state.get(key) or PaneState()).auto_chain
 
     def test_requires_commit_rolled_back_on_spawn_failure(self, orch: Orchestrator) -> None:
         key = _exit_key(TEST_PROJECT, "devops")
@@ -806,7 +810,27 @@ class TestDoRespawnRollbackOnFailure:
             mock_timer.singleShot.side_effect = lambda ms, fn: fn()
             orch._auto_recover_stuck("devops", TEST_PROJECT, pane, now)
 
-        assert key not in orch._requires_commit_on_done
+        assert not (orch._pane_state.get(key) or PaneState()).requires_commit_on_done
+
+    def test_pane_state_fully_popped_on_spawn_failure(self, orch: Orchestrator) -> None:
+        """Regression: rollback must pop the whole PaneState, not just reset fields.
+        Field-reset left an empty PaneState entry that weakens the 'popped atomically
+        by close()/done()' contract and can skew future membership checks."""
+        key = _exit_key(TEST_PROJECT, "backend")
+        pane = self._setup(orch, key)
+        now = 1_000_000.0
+
+        with (
+            patch("agent_takkub.orchestrator.QTimer") as mock_timer,
+            patch.object(orch, "spawn", return_value=(False, "spawn failed: cwd not found")),
+        ):
+            mock_timer.singleShot.side_effect = lambda ms, fn: fn()
+            orch._auto_recover_stuck("backend", TEST_PROJECT, pane, now)
+
+        assert orch._pane_state.get(key) is None, (
+            "failed rollback must pop the whole PaneState entry (not reset fields), "
+            "matching the 'popped atomically by close()/done()' contract"
+        )
 
     def test_no_send_when_ready_after_spawn_failure(self, orch: Orchestrator) -> None:
         key = _exit_key(TEST_PROJECT, "qa")
@@ -862,8 +886,8 @@ class TestSpinnerFilterRobust:
 
         key = "p::backend"
         # Pre-seed with the empty-tuple hash (what filter produces for these lines)
-        fake._last_content_hash[key] = str(hash(()))
-        fake._last_content_change_ts[key] = now - STUCK_THRESHOLD_S - 5
+        fake._ps(key).last_content_hash = str(hash(()))
+        fake._ps(key).last_content_change_ts = now - STUCK_THRESHOLD_S - 5
 
         _check_stuck(fake, now)
         assert fake.recover_calls == [("backend", "p")]
@@ -893,8 +917,8 @@ class TestSpinnerFilterRobust:
         fake._panes_by_project["p"] = {"backend": pane}
 
         key = "p::backend"
-        fake._last_content_hash[key] = str(hash(()))
-        fake._last_content_change_ts[key] = now - STUCK_THRESHOLD_S - 5
+        fake._ps(key).last_content_hash = str(hash(()))
+        fake._ps(key).last_content_change_ts = now - STUCK_THRESHOLD_S - 5
 
         _check_stuck(fake, now)
         assert fake.recover_calls == [("backend", "p")]
@@ -924,8 +948,8 @@ class TestSpinnerFilterRobust:
         fake._panes_by_project["p"] = {"backend": pane}
 
         key = "p::backend"
-        fake._last_content_hash[key] = str(hash(()))
-        fake._last_content_change_ts[key] = now - STUCK_THRESHOLD_S - 5
+        fake._ps(key).last_content_hash = str(hash(()))
+        fake._ps(key).last_content_change_ts = now - STUCK_THRESHOLD_S - 5
 
         _check_stuck(fake, now)
         assert fake.recover_calls == [("backend", "p")]
@@ -945,11 +969,10 @@ class TestDoRespawnSynthesisedRecentExit:
         key = _exit_key(TEST_PROJECT, "backend")
         pane = _working_pane()
         orch._panes_by_project.setdefault(TEST_PROJECT, {})["backend"] = pane
-        snap_uuid = {"uuid": "synth-uuid-9999", "cwd": "/proj"}
-        orch._session_uuids[key] = snap_uuid
-        orch._last_assigned_task[key] = SAMPLE_TASK
-        orch._auto_chain_panes[key] = False
-        orch._requires_commit_on_done[key] = False
+        ps = orch._ps(key)
+        ps.session_uuid = "synth-uuid-9999"
+        ps.session_uuid_cwd = "/proj"
+        ps.last_assigned_task = SAMPLE_TASK
         now = 1_000_000.0
 
         # Capture the state of _recent_exits at the moment spawn() is called.
@@ -957,7 +980,7 @@ class TestDoRespawnSynthesisedRecentExit:
 
         def _mock_spawn(role, cwd=None, project=None, **kw):
             recent_exits_at_spawn.append(dict(orch._recent_exits))
-            orch._last_spawn_resumed[key] = False
+            orch._ps(key).last_spawn_resumed = False
             return (True, "backend spawned")
 
         with (
@@ -983,9 +1006,10 @@ class TestDoRespawnSynthesisedRecentExit:
         key = _exit_key(TEST_PROJECT, "qa")
         pane = _working_pane()
         orch._panes_by_project.setdefault(TEST_PROJECT, {})["qa"] = pane
-        snap_uuid = {"uuid": "existing-uuid", "cwd": "/proj"}
-        orch._session_uuids[key] = snap_uuid
-        orch._last_assigned_task[key] = SAMPLE_TASK
+        ps = orch._ps(key)
+        ps.session_uuid = "existing-uuid"
+        ps.session_uuid_cwd = "/proj"
+        ps.last_assigned_task = SAMPLE_TASK
         now = 1_000_000.0
         original_ts = 999_999.0
         orch._recent_exits[key] = {"cwd": "/proj", "ts": original_ts}
@@ -996,7 +1020,7 @@ class TestDoRespawnSynthesisedRecentExit:
             ts = orch._recent_exits.get(key, {}).get("ts")
             if ts is not None:
                 seen_recent_exit_ts.append(ts)
-            orch._last_spawn_resumed[key] = False
+            orch._ps(key).last_spawn_resumed = False
             return (True, "qa spawned")
 
         with (
