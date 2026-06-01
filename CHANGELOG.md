@@ -4,6 +4,8 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v0.5.1] - 2026-06-01
+
 ### Fixed
 - **Issues no longer leak onto other projects' repos.** `new_issue` now defaults
   `cockpit_bug=True`, so `takkub issue new` files against the **agent-takkub repo**
