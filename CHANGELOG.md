@@ -4,6 +4,8 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v0.5.2] - 2026-06-01
+
 ### Added (เพิ่ม)
 - **`takkub release` สร้าง GitHub Release ให้อัตโนมัติ** — เดิมทำแค่ commit + git
   tag, `git push --follow-tags` ดัน tag ขึ้นแต่หน้า Releases ว่าง (เหตุที่
