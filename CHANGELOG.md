@@ -4,6 +4,15 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Added (เพิ่ม)
+- **`takkub release` สร้าง GitHub Release ให้อัตโนมัติ** — เดิมทำแค่ commit + git
+  tag, `git push --follow-tags` ดัน tag ขึ้นแต่หน้า Releases ว่าง (เหตุที่
+  v0.4.0–v0.5.1 ไม่โผล่). ตอนนี้ step สุดท้าย: push + `gh release create` โดยใช้
+  section ของ version นั้นใน CHANGELOG เป็น notes → changelog โชว์บนหน้า Releases
+  ทันที. best-effort (gh ไม่มี / offline → เตือนแต่ไม่ fail release เพราะ commit+tag
+  ในเครื่องสำเร็จแล้ว). ปิดด้วย `--no-github-release` (กลับไป commit+tag เฉยๆ ไม่ push).
+  เพิ่ม `extract_release_notes()` + `create_github_release()` ใน `release.py`.
+
 ## [v0.5.1] - 2026-06-01
 
 ### Fixed (แก้)

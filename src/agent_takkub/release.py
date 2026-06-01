@@ -10,12 +10,17 @@ heading. This automates the whole ceremony:
   4. roll CHANGELOG: rename `## [vNEXT]` → `## [vX.Y.Z] - <date>` and drop a
      fresh empty `## [vNEXT]` back on top
   5. git commit (pyproject.toml + CHANGELOG.md only) + annotated tag vX.Y.Z
+  6. (default) push + create the GitHub Release with the rolled changelog
+     section as its notes, so the release shows up on the Releases page
 
-Pushing is left to the user (`git push --follow-tags`) — consistent with the
-cockpit's never-auto-push rule.
+Step 6 is on by default (`do_github_release=True`; CLI `--no-github-release`
+to skip). Without it, a `git push --follow-tags` puts the tag on GitHub but
+the Releases page stays empty — the gap that left v0.4.0–v0.5.1 unpublished.
+`--no-github-release` reverts to the old "commit + tag only, push left to the
+user" behaviour.
 
-The string transforms are pure (unit-tested); only `release()` touches the
-filesystem and git.
+The string transforms are pure (unit-tested); only `release()`,
+`create_github_release()` touch the filesystem / git / gh.
 """
 
 from __future__ import annotations
@@ -81,6 +86,89 @@ def changelog_has_entries(text: str) -> bool:
     return bool(body.strip())
 
 
+def extract_release_notes(text: str, version: str) -> str:
+    """Return the body of the `## [vX.Y.Z]` changelog section (heading
+    excluded), up to the next `## ` version heading. Empty string if the
+    version's section isn't found. Used as the GitHub Release notes.
+
+    Matches both `## [v0.5.1] - date` and the older un-prefixed `## [0.3.8]`.
+    """
+    pat = re.compile(rf"(?m)^## \[v?{re.escape(version)}\][^\n]*$")
+    m = pat.search(text)
+    if not m:
+        return ""
+    after = text[m.end() :]
+    nxt = re.search(r"(?m)^## ", after)
+    body = after[: nxt.start()] if nxt else after
+    return body.strip()
+
+
+def create_github_release(
+    repo_root: str | pathlib.Path,
+    tag: str,
+    title: str,
+    notes: str,
+    *,
+    push: bool = True,
+) -> tuple[bool, str]:
+    """Push (so the tag reaches the remote) then `gh release create`.
+
+    Returns (ok, url-or-error). Best-effort: a missing `gh`, no remote, or a
+    network error returns (False, reason) WITHOUT raising — the local commit +
+    tag from `release()` already succeeded, so a publish hiccup must not look
+    like a failed release. Notes go through a temp file (not an argv string) so
+    multi-line Thai content can't hit quoting / length limits.
+    """
+    import shutil
+
+    repo_root = pathlib.Path(repo_root)
+    if not shutil.which("gh"):
+        return False, "gh CLI not found — run `gh release create` manually once installed"
+    if push:
+        try:
+            subprocess.run(
+                ["git", "-C", str(repo_root), "push", "--follow-tags"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as e:
+            tail = (e.stderr or "git push failed").strip().splitlines()
+            return False, f"git push failed: {tail[-1] if tail else 'unknown'}"
+    notes_file = repo_root / "runtime" / f"relnotes-{tag}.md"
+    try:
+        notes_file.parent.mkdir(parents=True, exist_ok=True)
+        notes_file.write_text(notes or title, encoding="utf-8")
+        proc = subprocess.run(
+            [
+                "gh",
+                "release",
+                "create",
+                tag,
+                "--verify-tag",
+                "--title",
+                title,
+                "--notes-file",
+                str(notes_file),
+            ],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+        )
+    except OSError as e:
+        return False, f"gh release create failed: {e}"
+    finally:
+        try:
+            notes_file.unlink()
+        except OSError:
+            pass
+    if proc.returncode != 0:
+        tail = (proc.stderr or "gh release create failed").strip().splitlines()
+        return False, tail[-1] if tail else "gh release create failed"
+    out = (proc.stdout or "").strip().splitlines()
+    return True, (out[-1] if out else "")
+
+
 def _semver_tuple(v: str) -> tuple[int, int, int]:
     a, b, c = (int(x) for x in v.split("."))
     return (a, b, c)
@@ -116,6 +204,7 @@ def release(
     do_tag: bool = True,
     dry_run: bool = False,
     allow_empty: bool = False,
+    do_github_release: bool = True,
     today: str | None = None,
 ) -> dict:
     """Run the release ceremony. Returns a summary dict. With dry_run=True
@@ -169,6 +258,9 @@ def release(
         "dry_run": dry_run,
         "committed": False,
         "tagged": False,
+        "github_released": False,
+        "github_url": "",
+        "github_error": "",
     }
     if dry_run:
         return summary
@@ -183,4 +275,17 @@ def release(
     if do_tag:
         _git(repo_root, "tag", "-a", tag, "-m", tag)
         summary["tagged"] = True
+
+    # Publish the GitHub Release (push + gh release create) so the changelog
+    # shows on the Releases page. Needs a real commit+tag to push, so it's
+    # gated on both. Best-effort: a publish failure is recorded, not raised —
+    # the local release already happened.
+    if do_github_release and do_commit and do_tag:
+        notes = extract_release_notes(new_cl, new_version)
+        ok, msg = create_github_release(repo_root, tag, tag, notes)
+        if ok:
+            summary["github_released"] = True
+            summary["github_url"] = msg
+        else:
+            summary["github_error"] = msg
     return summary

@@ -473,6 +473,7 @@ def cmd_release(args: argparse.Namespace) -> dict:
     from .config import REPO_ROOT
     from .release import release
 
+    do_github_release = getattr(args, "github_release", True)
     res = release(
         REPO_ROOT,
         part=args.part,
@@ -481,12 +482,18 @@ def cmd_release(args: argparse.Namespace) -> dict:
         do_tag=not args.no_tag,
         dry_run=args.dry_run,
         allow_empty=args.allow_empty,
+        do_github_release=do_github_release,
     )
     if res["dry_run"]:
         _utf8_print(
             f"[dry-run] {res['current']} → {res['new_version']} · tag {res['tag']} · {res['date']}"
         )
-        _utf8_print("  (no files or git touched)")
+        step6 = (
+            "push + GitHub Release"
+            if do_github_release
+            else "no GitHub Release (--no-github-release)"
+        )
+        _utf8_print(f"  (no files or git touched) · would: {step6}")
         return {"ok": True, "msg": "dry-run"}
 
     bits = [f"{res['current']} → {res['new_version']}"]
@@ -495,7 +502,17 @@ def cmd_release(args: argparse.Namespace) -> dict:
     if res["tagged"]:
         bits.append(f"tagged {res['tag']}")
     _utf8_print("  " + " · ".join(bits))
-    _utf8_print("  push when ready:  git push --follow-tags")
+    if res.get("github_released"):
+        _utf8_print(f"  GitHub Release:  {res['github_url']}")
+    elif do_github_release and res.get("github_error"):
+        # Publish failed but the local release is intact — tell the user how to finish.
+        _utf8_print(f"  ⚠ GitHub Release skipped: {res['github_error']}")
+        _utf8_print(
+            "  finish manually:  git push --follow-tags  &&  gh release create "
+            f"{res['tag']} --verify-tag --title {res['tag']} --notes-file <section>"
+        )
+    else:
+        _utf8_print("  push when ready:  git push --follow-tags")
     return {"ok": True, "msg": f"released {res['tag']}"}
 
 
@@ -851,6 +868,17 @@ def main(argv: list[str] | None = None) -> int:
         "--allow-empty",
         action="store_true",
         help="release even if ## [vNEXT] has no changelog entries",
+    )
+    srel.add_argument(
+        "--github-release",
+        dest="github_release",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "after commit+tag, push and create the GitHub Release with the "
+            "changelog section as notes (DEFAULT). Use --no-github-release to "
+            "only commit+tag locally (push left to you)."
+        ),
     )
     srel.add_argument(
         "--dry-run",

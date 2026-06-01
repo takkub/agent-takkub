@@ -6,11 +6,14 @@ with do_commit/do_tag off (and dry_run) so no git is invoked.
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 
 from agent_takkub.release import (
     bump_version,
     changelog_has_entries,
+    extract_release_notes,
     read_pyproject_version,
     release,
     roll_changelog,
@@ -100,6 +103,90 @@ class TestRelease:
         res = release(repo, explicit_version="1.2.3", do_commit=False, do_tag=False)
         assert res["new_version"] == "1.2.3"
         assert res["tag"] == "v1.2.3"
+
+
+class TestExtractReleaseNotes:
+    _CL = (
+        "# Changelog\n\n## [vNEXT]\n\n"
+        "## [v0.5.1] - 2026-06-01\n\n### Fixed\n- แก้ issue routing\n\n"
+        "## [v0.5.0] - 2026-06-01\n\n### Added\n- provider substitution\n\n"
+        "## [0.3.8] — 2026-05-20\n\n- old un-prefixed heading\n"
+    )
+
+    def test_extracts_only_that_section(self):
+        out = extract_release_notes(self._CL, "0.5.1")
+        assert "แก้ issue routing" in out
+        assert "provider substitution" not in out  # stops at next ## heading
+        assert "## [v0.5.1]" not in out  # heading itself excluded
+
+    def test_middle_section(self):
+        out = extract_release_notes(self._CL, "0.5.0")
+        assert "provider substitution" in out
+        assert "old un-prefixed" not in out
+
+    def test_un_prefixed_heading(self):
+        # older headings have no leading 'v' — must still match
+        out = extract_release_notes(self._CL, "0.3.8")
+        assert "old un-prefixed heading" in out
+
+    def test_missing_version_returns_empty(self):
+        assert extract_release_notes(self._CL, "9.9.9") == ""
+
+
+class TestReleaseGithubStep:
+    def _repo(self, tmp_path):
+        (tmp_path / "pyproject.toml").write_text(_PYPROJECT, encoding="utf-8")
+        (tmp_path / "CHANGELOG.md").write_text(_CHANGELOG, encoding="utf-8")
+        return tmp_path
+
+    def test_github_release_invoked_when_committed_and_tagged(self, tmp_path):
+        """do_github_release=True + commit + tag → create_github_release is
+        called with the tag and the rolled changelog section as notes."""
+        repo = self._repo(tmp_path)
+        with (
+            patch("agent_takkub.release._git"),  # stub real git
+            patch(
+                "agent_takkub.release.create_github_release", return_value=(True, "url://rel")
+            ) as m,
+        ):
+            res = release(repo, part="minor", today="2026-05-31")
+        assert m.called
+        call = m.call_args
+        assert call.args[1] == "v0.4.0"  # tag
+        assert "did a thing" in call.args[3]  # notes = rolled section body
+        assert res["github_released"] is True
+        assert res["github_url"] == "url://rel"
+
+    def test_no_github_release_flag_skips_publish(self, tmp_path):
+        repo = self._repo(tmp_path)
+        with (
+            patch("agent_takkub.release._git"),
+            patch("agent_takkub.release.create_github_release") as m,
+        ):
+            res = release(repo, part="minor", today="2026-05-31", do_github_release=False)
+        assert not m.called
+        assert res["github_released"] is False
+
+    def test_publish_failure_does_not_raise(self, tmp_path):
+        """A gh/network failure is recorded, not raised — local release stands."""
+        repo = self._repo(tmp_path)
+        with (
+            patch("agent_takkub.release._git"),
+            patch(
+                "agent_takkub.release.create_github_release",
+                return_value=(False, "gh CLI not found"),
+            ),
+        ):
+            res = release(repo, part="minor", today="2026-05-31")
+        assert res["tagged"] is True
+        assert res["github_released"] is False
+        assert "gh CLI not found" in res["github_error"]
+
+    def test_github_step_skipped_without_tag(self, tmp_path):
+        repo = self._repo(tmp_path)
+        with patch("agent_takkub.release.create_github_release") as m:
+            release(repo, part="minor", do_commit=False, do_tag=False, today="2026-05-31")
+        assert not m.called  # no tag → nothing to publish
 
 
 _EMPTY_CL = "# Changelog\n\n## [vNEXT]\n\n## [v0.3.8] - 2026-05-20\n\n- old\n"
