@@ -713,11 +713,12 @@ def main(argv: list[str] | None = None) -> int:
     sin.add_argument(
         "--cockpit-bug",
         dest="cockpit_bug",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help=(
-            "route this issue to the agent-takkub install repo regardless of cwd — "
-            "used by the 🐛 Bug Check broadcast for cockpit/orchestrator/CLI/UI bugs "
-            "noticed inside another project's pane"
+            "route this issue to the agent-takkub install repo regardless of cwd "
+            "(DEFAULT — the cockpit tracker is for cockpit/orchestrator/CLI/UI bugs). "
+            "Use --no-cockpit-bug to file against the active project's repo instead."
         ),
     )
 

@@ -3352,10 +3352,10 @@ class Orchestrator(QObject):
         return (
             "🐛 **Bug check** (orchestrator broadcast)\n\n"
             "introspect session ของเรา — เจอบัค **ของ cockpit / orchestrator / CLI / UI** ไหม\n"
-            "(ไม่ใช่บัคของ code ที่เรากำลังทำงาน — เฉพาะบัคของ cockpit เอง)\n\n"
-            "**ถ้าเจอ:** เรียก (อย่าลืม `--cockpit-bug` เพื่อให้ issue ไปลง agent-takkub repo)\n"
+            "(ไม่ใช่บัคของ code ที่เรากำลังทำงาน — **เฉพาะบัคของ cockpit เอง**)\n\n"
+            "**ถ้าเจอ:** เรียก (issue ลง agent-takkub repo อัตโนมัติ)\n"
             "```\n"
-            f'takkub issue new "<title>" --severity <low|med|high> --noticed-in {project} --role {role} --tag <a,b,c> --cockpit-bug --body "<reproduce + impact>"\n'
+            f'takkub issue new "<title>" --severity <low|med|high> --noticed-in {project} --role {role} --tag <a,b,c> --body "<reproduce + impact>"\n'
             "```\n\n"
             "**ถ้าไม่เจอ:** เรียก\n"
             "```\n"
@@ -3384,9 +3384,9 @@ class Orchestrator(QObject):
             "2. ดู change ล่าสุด — `rtk git log --oneline -10` + `git diff` หา bug แฝง\n"
             "3. ไล่ subsystem เสี่ยง/เพิ่งแตะ — encode path, routing, watchdog, env leak, paste\n"
             "4. ถ้าต้องเจาะลึก → **propose** spawn reviewer/codex audit (pane visible รอ confirm)\n\n"
-            "**เจอบัค:** (อย่าลืม `--cockpit-bug`)\n"
+            "**เจอบัค:** (issue ลง agent-takkub repo อัตโนมัติ — เฉพาะบัค cockpit)\n"
             "```\n"
-            f'takkub issue new "<title>" --severity <low|med|high> --noticed-in {project} --cockpit-bug --body "<reproduce + impact>"\n'
+            f'takkub issue new "<title>" --severity <low|med|high> --noticed-in {project} --body "<reproduce + impact>"\n'
             "```\n"
             "**ไม่เจอหลัง audit จริง:** สรุปสั้นๆ ว่า audit อะไรไปบ้าง + ผล\n\n"
             '❗ ห้ามจบด้วยการ "รอ teammate" เฉยๆ — ต้องมี action เกิดขึ้นก่อนสรุปเสมอ'

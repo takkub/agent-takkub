@@ -4,7 +4,40 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
-## [v0.5.0] - 2026-06-01
+### Fixed
+- **Issues no longer leak onto other projects' repos.** `new_issue` now defaults
+  `cockpit_bug=True`, so `takkub issue new` files against the **agent-takkub repo**
+  regardless of which project's pane it was run from — the cockpit tracker is for
+  cockpit/orchestrator/CLI/UI bugs. Previously the bug-check prompt *asked* agents
+  to pass `--cockpit-bug`, but a forgotten flag silently filed the issue on the
+  active project's repo (e.g. pms-api). New `--no-cockpit-bug` opt-out routes to
+  the active project's repo deliberately. Bug-check prompts updated; local
+  fallback store `.takkub_issues.json` gitignored.
+
+### Added (Claude CLI update button)
+- **`⬆ Claude CLI` status-bar button** — checks whether the Claude Code CLI
+  (`@anthropic-ai/claude-code`, npm global) has a newer version and, if so,
+  runs an **AI compatibility analysis** before applying: fetches the upstream
+  CHANGELOG, slices it to the entries newer than the installed version, and
+  asks headless `claude -p` to assess them against the exact CLI surface the
+  cockpit depends on (`--append-system-prompt-file`, `--resume`/`--session-id`,
+  `--mcp-config`, `--plugin-dir`, `--fallback-model`, `--disallowed-tools`, the
+  token-meter JSONL shape, …) → a Thai report (กระทบ / เอามาใช้ได้ / ปลอดภัย +
+  คำแนะนำ). New `claude_update.py` + `ClaudeUpdateCheckWorker` (runs the
+  version/network/analysis off the Qt thread).
+- **Safe apply on Windows** — applying writes a detached updater script, quits
+  the cockpit (so Lead + all claude panes release the binary), runs
+  `npm install -g @anthropic-ai/claude-code@latest` with nothing holding the
+  files, then relaunches the cockpit. Sidesteps the file-lock brick that
+  disabled autoupdate. Confirm dialog shows how many live claude panes will be
+  closed.
+- **Findings → GitHub issue (auto)** — the analysis ends with a machine-readable
+  `<<<TAKKUB>>>` verdict (`ACTION_REQUIRED`/`SEVERITY`/`ISSUE_TITLE`). When the
+  new version means agent-takkub itself needs work, the cockpit auto-files a
+  GitHub issue against its own repo (`new_issue(cockpit_bug=True)`, tag
+  `claude-update`), deduped by version range so repeated checks don't spam the
+  tracker. The report dialog shows the issue #/URL — so the compatibility work
+  isn't lost when the dialog closes; the user fixes it on their own schedule.
 
 ### Added (provider substitution — Claude รับตำแหน่งแทน)
 - **Unavailable codex/gemini roles now fall back to Claude** instead of being

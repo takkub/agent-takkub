@@ -1,8 +1,13 @@
 """Issue tracker for agent-takkub cockpit — GitHub Issues backend.
 
-All operations delegate to the `gh` CLI. Repo is auto-detected from the
-project's working directory via `gh repo view`, so `takkub issue new` filed
-from an unirecon pane goes to the unirecon repo, not agent-takkub's.
+All operations delegate to the `gh` CLI.
+
+**Routing default = agent-takkub.** The cockpit's issue tracker is for
+cockpit/orchestrator/CLI/UI bugs, so `new_issue` defaults `cockpit_bug=True`:
+issues land on the **agent-takkub install repo** regardless of which project's
+pane filed them. An agent forgetting a flag can no longer leak a cockpit bug
+onto, say, the pms-api repo. To deliberately file against the *active project's*
+repo (cwd-detected), pass `cockpit_bug=False` (CLI: `--no-cockpit-bug`).
 """
 
 from __future__ import annotations
@@ -177,16 +182,19 @@ def new_issue(
     role: str | None = None,
     tags: list[str] | None = None,
     cwd: str | Path | None = None,
-    cockpit_bug: bool = False,
+    cockpit_bug: bool = True,
 ) -> tuple[int, str]:
     """Create an issue. Returns (number, url). Falls back to local store if GitHub is unavailable.
 
-    `cockpit_bug=True` overrides the cwd-based repo detection and files the
-    issue against the agent-takkub install repo (REPO_ROOT's git remote)
-    instead. Used by the 🐛 Bug Check broadcast so cockpit/orchestrator/
-    CLI bugs noticed inside e.g. a pms-api pane don't end up on the
-    pms-api repo. `noticed_in` still records the project where the bug
-    surfaced — useful debug context, independent of the routing target.
+    `cockpit_bug` (default **True**) files the issue against the agent-takkub
+    install repo (REPO_ROOT's git remote) regardless of cwd — the cockpit's
+    tracker is for cockpit/orchestrator/CLI/UI bugs, so this is the safe
+    default that stops a bug noticed inside e.g. a pms-api pane from leaking
+    onto the pms-api repo. `noticed_in` still records where the bug surfaced
+    (useful context, independent of the routing target).
+
+    Pass `cockpit_bug=False` to deliberately route to the *active project's*
+    repo via cwd-based `gh repo view` detection (CLI: `--no-cockpit-bug`).
     """
     if not title.strip():
         raise ValueError("title must not be empty")
@@ -545,7 +553,7 @@ def cmd_issue_new(args: Any) -> dict:
             role=getattr(args, "role", None),
             tags=tags or None,
             cwd=cwd,
-            cockpit_bug=getattr(args, "cockpit_bug", False),
+            cockpit_bug=getattr(args, "cockpit_bug", True),
         )
     except (ValueError, RuntimeError) as exc:
         return {"ok": False, "msg": str(exc)}

@@ -297,7 +297,7 @@ def test_ensure_label_raises_other_errors() -> None:
 def test_missing_gh_cli_falls_back_to_local(tmp_path) -> None:
     local_json = tmp_path / ".takkub_issues.json"
     with patch("shutil.which", return_value=None):
-        number, url = new_issue("local title", "local body", cwd=tmp_path)
+        number, url = new_issue("local title", "local body", cwd=tmp_path, cockpit_bug=False)
     assert number == 1
     assert url == "local://issue/1"
     assert local_json.exists()
@@ -342,7 +342,7 @@ def test_new_issue_transient_gh_failure_warns_and_falls_back(tmp_path, capsys) -
     with patch("agent_takkub.issues._ensure_labels"):
         with patch("agent_takkub.issues._gh") as mock_gh:
             mock_gh.side_effect = ["takkub/agent-takkub", RuntimeError("503 server error")]
-            _, url = new_issue("transient title", "body", cwd=tmp_path)
+            _, url = new_issue("transient title", "body", cwd=tmp_path, cockpit_bug=False)
     assert url == "local://issue/1"
     assert "gh unavailable" in capsys.readouterr().err
 
@@ -350,7 +350,7 @@ def test_new_issue_transient_gh_failure_warns_and_falls_back(tmp_path, capsys) -
 def test_new_issue_no_remote_falls_back_quietly(tmp_path, capsys) -> None:
     # A genuine no-GitHub-remote project is legit local mode — no scary warning.
     with patch("agent_takkub.issues._detect_repo", side_effect=RuntimeError("no remote")):
-        _, url = new_issue("local title", "body", cwd=tmp_path)
+        _, url = new_issue("local title", "body", cwd=tmp_path, cockpit_bug=False)
     assert url == "local://issue/1"
     assert "gh unavailable" not in capsys.readouterr().err
 
@@ -460,7 +460,8 @@ def test_cmd_show_invalid_id_returns_error() -> None:
 # ── auto-detect repo from cwd ─────────────────────────────────────────────────
 
 
-def test_new_issue_passes_cwd_to_detect_repo(tmp_path) -> None:
+def test_new_issue_no_cockpit_bug_passes_cwd_to_detect_repo(tmp_path) -> None:
+    """With cockpit_bug=False (explicit opt-out) routing follows cwd again."""
     detected_cwds: list = []
 
     def fake_detect_repo(cwd=None):
@@ -472,7 +473,7 @@ def test_new_issue_passes_cwd_to_detect_repo(tmp_path) -> None:
             with patch(
                 "agent_takkub.issues._gh", return_value="https://github.com/owner/repo/issues/1"
             ):
-                new_issue("t", "b", cwd=str(tmp_path))
+                new_issue("t", "b", cwd=str(tmp_path), cockpit_bug=False)
 
     assert str(tmp_path) in str(detected_cwds[0])
 
@@ -507,25 +508,76 @@ def test_new_issue_cockpit_bug_overrides_cwd_to_repo_root() -> None:
     assert detected_cwds == [str(REPO_ROOT)]
 
 
-def test_new_issue_cockpit_bug_default_false_preserves_existing_routing(tmp_path) -> None:
-    """cockpit_bug defaults to False so existing callers keep cwd-based routing."""
+def test_new_issue_default_routes_to_agent_takkub_repo(tmp_path) -> None:
+    """cockpit_bug now defaults to True — issues land on the agent-takkub repo
+    (REPO_ROOT) regardless of cwd, so a forgotten flag can't leak a cockpit
+    bug onto another project's repo. This is the fix for issues filed against
+    other projects when they should only be agent-takkub bugs."""
+    from agent_takkub.config import REPO_ROOT
+
     detected_cwds: list = []
 
     def fake_detect_repo(cwd=None):
         detected_cwds.append(str(cwd) if cwd is not None else None)
-        return "owner/repo"
+        return "takkub/agent-takkub"
 
     with patch("agent_takkub.issues._detect_repo", side_effect=fake_detect_repo):
         with patch("agent_takkub.issues._ensure_labels"):
             with patch(
-                "agent_takkub.issues._gh", return_value="https://github.com/owner/repo/issues/1"
+                "agent_takkub.issues._gh",
+                return_value="https://github.com/takkub/agent-takkub/issues/1",
             ):
-                new_issue("project bug", "body", cwd=str(tmp_path))
+                # cwd points at another project, but default routing ignores it
+                new_issue("cockpit bug", "body", cwd=str(tmp_path))
 
-    assert str(tmp_path) in detected_cwds[0]
+    assert detected_cwds == [str(REPO_ROOT)]
 
 
 # ── --issues-dir CLI backward compat ─────────────────────────────────────────
+
+
+def test_cli_issue_new_defaults_to_cockpit_bug(monkeypatch) -> None:
+    """`takkub issue new` with no flag → cockpit_bug=True (agent-takkub repo)."""
+    import sys
+
+    from agent_takkub import cli
+
+    captured: dict = {}
+
+    def fake_new_issue(title, body, **kw):
+        captured.update(kw)
+        return (1, "https://github.com/takkub/agent-takkub/issues/1")
+
+    with patch("agent_takkub.issues.new_issue", side_effect=fake_new_issue):
+        monkeypatch.setattr(sys, "argv", ["takkub", "issue", "new", "t", "--body", "b"])
+        try:
+            cli.main()
+        except SystemExit as exc:
+            assert exc.code == 0, f"CLI exited {exc.code}"
+    assert captured.get("cockpit_bug") is True
+
+
+def test_cli_issue_new_no_cockpit_bug_opt_out(monkeypatch) -> None:
+    """`--no-cockpit-bug` opts back into cwd-based (active project) routing."""
+    import sys
+
+    from agent_takkub import cli
+
+    captured: dict = {}
+
+    def fake_new_issue(title, body, **kw):
+        captured.update(kw)
+        return (1, "https://github.com/owner/repo/issues/1")
+
+    with patch("agent_takkub.issues.new_issue", side_effect=fake_new_issue):
+        monkeypatch.setattr(
+            sys, "argv", ["takkub", "issue", "new", "t", "--body", "b", "--no-cockpit-bug"]
+        )
+        try:
+            cli.main()
+        except SystemExit as exc:
+            assert exc.code == 0, f"CLI exited {exc.code}"
+    assert captured.get("cockpit_bug") is False
 
 
 def test_issues_dir_flag_cli_deprecated(tmp_path, monkeypatch, capsys) -> None:

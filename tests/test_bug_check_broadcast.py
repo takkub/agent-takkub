@@ -153,11 +153,12 @@ class TestBroadcastBugCheck:
         assert ACTIVE_PROJECT in prompt  # --noticed-in <project>
         assert "backend" in prompt  # --role <role>
 
-    def test_prompt_includes_cockpit_bug_flag(self, orch: Orchestrator) -> None:
-        """Broadcast prompt must instruct agents to pass `--cockpit-bug` so
-        cockpit/orchestrator/CLI bugs noticed inside another project's pane
-        route to the agent-takkub repo, not the pane's working repo.
-        Regression guard for the bug-check routing fix.
+    def test_prompt_scopes_to_cockpit_bugs_and_agent_takkub_repo(self, orch: Orchestrator) -> None:
+        """Routing to the agent-takkub repo is now the `new_issue` default (see
+        test_issues.test_new_issue_default_routes_to_agent_takkub_repo), so the
+        prompt no longer needs a `--cockpit-bug` flag. It must still (a) scope
+        agents to cockpit-only bugs and (b) tell them the issue lands on the
+        agent-takkub repo — so a pms-api pane doesn't file project bugs here.
         """
         orch._panes_by_project[ACTIVE_PROJECT] = {"backend": _live_pane()}
         captured: list[str] = []
@@ -165,7 +166,10 @@ class TestBroadcastBugCheck:
 
         orch.broadcast_bug_check(project=ACTIVE_PROJECT)
         prompt = captured[0]
-        assert "--cockpit-bug" in prompt
+        assert "agent-takkub repo" in prompt  # routing target stated
+        assert "cockpit" in prompt.lower()  # scope: only cockpit bugs
+        # The leak-prone manual flag is gone — routing is enforced by default.
+        assert "--cockpit-bug" not in prompt
 
     def test_prompt_offers_no_bug_path(self, orch: Orchestrator) -> None:
         """Prompt must give agents a 'no bugs' escape so they don't invent issues."""
@@ -220,5 +224,5 @@ def test_lead_bug_check_prompt_forbids_passive_wait() -> None:
     prompt = Orchestrator._build_lead_bug_check_prompt("proj")
     assert "pytest" in prompt
     assert "git log" in prompt or "git diff" in prompt
-    assert "--cockpit-bug" in prompt
+    assert "agent-takkub repo" in prompt  # cockpit bugs route to agent-takkub (now default)
     assert "รอ teammate" in prompt  # the explicit anti-stall guard

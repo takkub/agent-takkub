@@ -66,6 +66,138 @@ class UpdateCheckWorker(QRunnable):
         self.signals.finished.emit(status)
 
 
+class ClaudeUpdateCheckWorker(QRunnable):
+    """Check Claude CLI version + (if newer) fetch changelog and run the
+    compatibility analysis — all off the Qt thread, since `npm view`,
+    the changelog GET, and especially the headless `claude -p` analysis
+    can together take up to ~2-3 minutes.
+
+    Emits one `finished(dict)` with keys:
+        ok          bool   — False only on a fatal setup error
+        error       str    — set when ok=False
+        current     str|None
+        latest      str|None
+        has_update  bool
+        analysis_ok bool   — whether the AI report succeeded
+        analysis    str    — markdown report, or an error note
+        changelog_ok bool
+
+    Usage (from MainWindow):
+        worker = ClaudeUpdateCheckWorker()
+        worker.signals.finished.connect(self._on_claude_update_check_done)
+        QThreadPool.globalInstance().start(worker)
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.signals = _WorkerSignals()
+
+    def run(self) -> None:  # called by QThreadPool
+        from .claude_update import (
+            analyze_compatibility,
+            current_version,
+            fetch_changelog,
+            latest_version,
+            slice_changelog,
+        )
+
+        result: dict = {
+            "ok": True,
+            "current": None,
+            "latest": None,
+            "has_update": False,
+            "analysis_ok": False,
+            "analysis": "",
+            "changelog_ok": False,
+            # issue auto-filing outcome (populated by _maybe_file_issue)
+            "issue_action_required": False,
+            "issue_number": None,
+            "issue_url": None,
+            "issue_skipped": False,  # True when a matching open issue already existed
+            "issue_error": None,
+        }
+        try:
+            cur = current_version()
+            result["current"] = cur
+            ok_latest, latest = latest_version()
+            if not ok_latest:
+                result.update(ok=False, error=f"เช็ค version ล่าสุดไม่ได้: {latest}")
+                self.signals.finished.emit(result)
+                return
+            result["latest"] = latest
+            if cur is None:
+                result.update(
+                    ok=False, error="หา version ของ claude ปัจจุบันไม่ได้ (claude ไม่อยู่บน PATH?)"
+                )
+                self.signals.finished.emit(result)
+                return
+
+            from .claude_update import compare_versions
+
+            result["has_update"] = compare_versions(cur, latest) < 0
+            if not result["has_update"]:
+                self.signals.finished.emit(result)
+                return
+
+            ok_cl, changelog = fetch_changelog()
+            result["changelog_ok"] = ok_cl
+            sliced = slice_changelog(changelog, cur) if ok_cl else ""
+            ok_an, report = analyze_compatibility(cur, latest, sliced)
+            result["analysis_ok"] = ok_an
+            result["analysis"] = report
+            # When the analysis says agent-takkub itself needs work, file a
+            # GitHub issue so the user can come fix it later (their ask).
+            if ok_an:
+                self._maybe_file_issue(result, cur, latest, report)
+        except Exception as exc:  # never let the pool thread die silently
+            logger.debug("claude update worker raised %s", exc)
+            result.update(ok=False, error=f"ตรวจสอบล้มเหลว: {exc}")
+        self.signals.finished.emit(result)
+
+    @staticmethod
+    def _maybe_file_issue(result: dict, cur: str, latest: str, report: str) -> None:
+        """Parse the analyzer verdict; if action is required, open a GitHub
+        issue against the agent-takkub repo (deduped by version range so
+        repeated checks don't spam the tracker). Mutates `result` in place;
+        never raises (gh hiccups become `issue_error`)."""
+        from .claude_update import build_issue_body, build_issue_title, parse_verdict
+
+        required, severity, suggested = parse_verdict(report)
+        result["issue_action_required"] = required
+        if not required:
+            return
+
+        title = build_issue_title(cur, latest, suggested)
+        dedup_key = f"v{cur} → v{latest}"
+        try:
+            from . import issues
+
+            # Dedup: skip if an open issue for this exact version range exists.
+            try:
+                existing = issues.list_issues(filter_open=True, cwd=str(REPO_ROOT))
+            except Exception:
+                existing = []
+            for it in existing:
+                if dedup_key in (it.get("title") or ""):
+                    result["issue_skipped"] = True
+                    result["issue_number"] = it.get("number")
+                    result["issue_url"] = it.get("url")
+                    return
+
+            number, url = issues.new_issue(
+                title,
+                build_issue_body(cur, latest, report),
+                severity=severity if severity in ("low", "med", "high") else "med",
+                tags=["claude-update"],
+                cockpit_bug=True,  # file against the agent-takkub repo, not the active project
+            )
+            result["issue_number"] = number
+            result["issue_url"] = url
+        except Exception as exc:
+            logger.debug("claude update: issue filing failed %s", exc)
+            result["issue_error"] = str(exc)
+
+
 # ── Startup silent self-update (Layer C) ─────────────────────────────────────
 
 

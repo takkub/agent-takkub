@@ -11,6 +11,9 @@ dist/
 projects.json
 runtime/
 *.log
+# Local issue-store fallback (written only when gh is unavailable). With
+# issues now defaulting to the agent-takkub repo, this can land at repo root.
+.takkub_issues.json
 
 # Claude Code per-user local settings (permission allows, MCP overrides
 # vary per developer machine).

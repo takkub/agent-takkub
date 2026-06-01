@@ -466,6 +466,25 @@ class MainWindow(QMainWindow):
         # queuing a second fetch before the first one completes.
         self._update_worker_busy: bool = False
 
+        # ── Claude CLI update button ───────────────────────────────
+        # Separate from _btn_update (which pulls agent-takkub source). This
+        # one updates the Claude Code CLI (`@anthropic-ai/claude-code` via
+        # npm) and, before applying, runs an AI compatibility check against
+        # how the cockpit spawns claude. Flow: _on_claude_update_clicked →
+        # background worker (version + changelog + analysis) → report dialog
+        # → confirm → close live claude panes (Windows lock guard) → npm
+        # install → restart prompt.
+        self._btn_claude_update = QPushButton("⬆ Claude CLI", self)
+        self._btn_claude_update.setToolTip(
+            "ตรวจว่ามี Claude Code CLI version ใหม่ไหม\n"
+            "ถ้ามี: วิเคราะห์ด้วย AI ว่าใช้กับ cockpit ได้ไหม → ยืนยัน → อัพเดต\n"
+            "(ก่อนอัพเดตจะปิด claude pane ที่รันอยู่ กัน brick บน Windows)"
+        )
+        self._btn_claude_update.setStyleSheet(self._ghost_button_style())
+        self._btn_claude_update.clicked.connect(self._on_claude_update_clicked)
+        # True while ClaudeUpdateCheckWorker runs — blocks re-entry.
+        self._claude_update_busy: bool = False
+
         self._btn_logs = QPushButton("📋 Logs", self)
         self._btn_logs.setToolTip("Show/hide events log panel")
         self._btn_logs.setCheckable(True)
@@ -648,6 +667,7 @@ class MainWindow(QMainWindow):
             self._btn_restart,
             self._btn_providers,
             self._btn_claude_auth,
+            self._btn_claude_update,
             self._btn_update,
         ):
             self._status.addPermanentWidget(w)
@@ -1855,6 +1875,275 @@ class MainWindow(QMainWindow):
         layout.addWidget(buttons)
 
         dlg.exec()
+
+    # ------------------------------------------------------------------
+    # Claude CLI update (separate from cockpit self-update above)
+    # ------------------------------------------------------------------
+
+    def _on_claude_update_clicked(self) -> None:
+        """⬆ Claude CLI clicked. Kick a background check (version + changelog +
+        AI compatibility analysis); `_on_claude_update_check_done` renders the
+        result. Re-entrancy guarded by `_claude_update_busy`."""
+        from PyQt6.QtCore import QThreadPool
+
+        from .update_worker import ClaudeUpdateCheckWorker
+
+        if self._claude_update_busy:
+            self._status.showMessage("กำลังตรวจ Claude CLI อยู่… รอสักครู่", 4_000)
+            return
+        self._claude_update_busy = True
+        self._btn_claude_update.setEnabled(False)
+        self._btn_claude_update.setText("⏳ กำลังตรวจ…")
+        self._status.showMessage("ตรวจ Claude CLI + วิเคราะห์ความเข้ากันได้ด้วย AI (อาจใช้เวลาสักครู่)…")
+        worker = ClaudeUpdateCheckWorker()
+        worker.signals.finished.connect(self._on_claude_update_check_done)
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_claude_update_check_done(self, result: dict) -> None:
+        """Render the worker result: fatal error → warning; no update → toast;
+        update available → report dialog."""
+        from PyQt6.QtWidgets import QMessageBox
+
+        self._claude_update_busy = False
+        self._btn_claude_update.setEnabled(True)
+        self._btn_claude_update.setText("⬆ Claude CLI")
+        self._status.clearMessage()
+
+        if not result.get("ok"):
+            QMessageBox.warning(
+                self, "ตรวจ Claude CLI ไม่สำเร็จ", result.get("error", "unknown error")
+            )
+            return
+        cur = result.get("current") or "?"
+        latest = result.get("latest") or "?"
+        if not result.get("has_update"):
+            QMessageBox.information(
+                self,
+                "Claude CLI ล่าสุดแล้ว",
+                f"ติดตั้งอยู่: v{cur}\nล่าสุดบน npm: v{latest}\n\nไม่ต้องอัพเดต ✅",
+            )
+            return
+        self._show_claude_update_dialog(cur, latest, result)
+
+    def _show_claude_update_dialog(self, cur: str, latest: str, result: dict) -> None:
+        """Report dialog: version diff + AI compatibility analysis (markdown),
+        with [อัพเดตเลย] / [ปิด] buttons."""
+        from PyQt6.QtWidgets import (
+            QDialog,
+            QDialogButtonBox,
+            QLabel,
+            QPushButton,
+            QTextBrowser,
+            QVBoxLayout,
+        )
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"อัพเดต Claude CLI · v{cur} → v{latest}")
+        dlg.resize(760, 620)
+        layout = QVBoxLayout(dlg)
+
+        header = QLabel(f"<b>Claude Code CLI</b>: v{cur} → <b>v{latest}</b>", dlg)
+        header.setStyleSheet("color:#e4e4e7; font-size:13px; padding:2px;")
+        layout.addWidget(header)
+
+        # Issue auto-filing status (the user wants action-needed findings filed
+        # to GitHub so they can fix later). Show what happened.
+        issue_line = ""
+        if result.get("issue_error"):
+            issue_line = f"⚠️ เปิด issue ไม่สำเร็จ: {result['issue_error']}"
+            issue_color = "#fca5a5"
+        elif result.get("issue_skipped") and result.get("issue_number"):
+            issue_line = (
+                f"📋 มี issue เดิมสำหรับ version นี้อยู่แล้ว: #{result['issue_number']} "
+                f"({result.get('issue_url', '')})"
+            )
+            issue_color = "#94a3b8"
+        elif result.get("issue_number"):
+            issue_line = (
+                f"📋 เปิด GitHub issue ให้แล้ว: #{result['issue_number']} "
+                f"({result.get('issue_url', '')}) — มาสั่งแก้ทีหลังได้"
+            )
+            issue_color = "#4ade80"
+        elif result.get("analysis_ok") and not result.get("issue_action_required"):
+            issue_line = "✅ AI ประเมินว่าไม่ต้องแก้ระบบ — ไม่เปิด issue"
+            issue_color = "#94a3b8"
+        if issue_line:
+            issue_label = QLabel(issue_line, dlg)
+            issue_label.setWordWrap(True)
+            issue_label.setStyleSheet(f"color:{issue_color}; font-size:12px; padding:2px;")
+            layout.addWidget(issue_label)
+
+        if result.get("analysis_ok"):
+            body = result.get("analysis", "")
+        else:
+            # Analysis failed (offline / claude error). Don't block the update —
+            # just say we couldn't assess and surface why.
+            why = result.get("analysis", "ไม่ทราบสาเหตุ")
+            body = (
+                "## ⚠️ วิเคราะห์ความเข้ากันได้ไม่สำเร็จ\n\n"
+                f"`{why}`\n\n"
+                "ยังอัพเดตได้ แต่ไม่มีรายงานความเข้ากันได้ — ดู changelog เองที่ "
+                "https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md"
+            )
+            if not result.get("changelog_ok"):
+                body += "\n\n_(โหลด changelog ไม่ได้ด้วย — อาจ offline)_"
+
+        browser = QTextBrowser(dlg)
+        browser.setMarkdown(body)
+        browser.setOpenExternalLinks(True)
+        browser.setStyleSheet(
+            "QTextBrowser { background:#0e0e10; color:#e4e4e7; "
+            "border:1px solid #27272a; border-radius:6px; padding:8px; }"
+        )
+        layout.addWidget(browser)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, dlg)
+        update_btn = QPushButton(f"⬆ อัพเดตเป็น v{latest}", dlg)
+        update_btn.setStyleSheet(
+            "QPushButton { color:#fff; background:#2563eb; border:none; "
+            "border-radius:4px; padding:4px 12px; font-weight:500; }"
+            "QPushButton:hover { background:#1d4ed8; }"
+        )
+
+        def _do_update() -> None:
+            dlg.accept()
+            self._confirm_and_apply_claude_update(cur, latest)
+
+        update_btn.clicked.connect(_do_update)
+        buttons.addButton(update_btn, QDialogButtonBox.ButtonRole.AcceptRole)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+        dlg.exec()
+
+    def _count_live_claude_panes(self) -> int:
+        """How many alive panes are backed by claude.exe (Lead is always; a
+        teammate unless remapped/substituted to codex/gemini). These hold the
+        binary open and must die before `npm install -g` can replace it on
+        Windows."""
+        from .provider_config import effective_provider_for
+
+        n = 0
+        for project_panes in self.orch._panes_by_project.values():
+            for role, pane in project_panes.items():
+                sess = getattr(pane, "session", None)
+                if sess is not None and getattr(sess, "is_alive", False):
+                    if effective_provider_for(role) == "claude":
+                        n += 1
+        return n
+
+    def _confirm_and_apply_claude_update(self, cur: str, latest: str) -> None:
+        """Confirm, then update via a detached script + cockpit restart.
+
+        Why a detached script instead of inline `npm install`: on Windows the
+        live Lead + teammate claude processes lock the package files, so the
+        install can corrupt the CLI (the exact failure that disabled
+        autoupdate). We sidestep it: persist state, spawn a detached updater
+        that waits for this process (and its panes) to exit, runs the install
+        with nothing holding claude, then relaunches the cockpit.
+        """
+        import subprocess
+        import sys
+
+        from PyQt6.QtWidgets import QMessageBox
+
+        from .claude_update import _npm, build_updater_script
+
+        npm = _npm()
+        if not npm:
+            QMessageBox.warning(self, "อัพเดตไม่ได้", "หา npm ไม่เจอบน PATH")
+            return
+
+        live = self._count_live_claude_panes()
+        confirm = QMessageBox.question(
+            self,
+            "อัพเดต Claude CLI",
+            f"จะอัพเดต Claude Code CLI: v{cur} → v{latest}\n\n"
+            f"บน Windows ต้องปิด claude pane ที่รันอยู่ ({live} pane รวม Lead) ก่อน "
+            "เพื่อเลี่ยง file lock ที่ทำให้ install พัง\n\n"
+            "เมื่อกดตกลง ระบบจะ:\n"
+            "  1. บันทึก session + ปิด cockpit (panes ปิดทั้งหมด)\n"
+            "  2. รัน npm install -g (ตอนไม่มี claude รันอยู่)\n"
+            "  3. เปิด cockpit ใหม่อัตโนมัติ\n\n"
+            "ดำเนินการ?",
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if confirm != QMessageBox.StandardButton.Ok:
+            return
+
+        # Persist everything up-front (same as _restart_cockpit) — we quit()
+        # right after spawning the updater, can't rely on closeEvent.
+        for fn in (
+            self._save_window_state,
+            self._persist_open_tabs,
+            self.orch.write_session_snapshot,
+            self.orch.write_resume_briefs,
+        ):
+            try:
+                fn()
+            except Exception:
+                pass
+        try:
+            if PORT_FILE.exists():
+                PORT_FILE.unlink()
+        except Exception:
+            pass
+
+        is_win = sys.platform == "win32"
+        runtime_dir = REPO_ROOT / "runtime"
+        try:
+            runtime_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        log_path = runtime_dir / "claude_update.log"
+        script_path = runtime_dir / ("claude_update.ps1" if is_win else "claude_update.sh")
+        script = build_updater_script(
+            npm=npm,
+            python_exe=sys.executable,
+            repo_root=str(REPO_ROOT),
+            log_path=str(log_path),
+            is_windows=is_win,
+        )
+        try:
+            script_path.write_text(script, encoding="utf-8")
+        except Exception as e:
+            QMessageBox.critical(self, "อัพเดตไม่ได้", f"เขียน updater script ไม่ได้:\n{e}")
+            return
+
+        _log_event("claude_update_start", current=cur, latest=latest, live_panes=live)
+
+        try:
+            if is_win:
+                import shutil as _shutil
+
+                pwsh = _shutil.which("pwsh") or _shutil.which("powershell") or "powershell"
+                # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP so the updater
+                # outlives the cockpit we're about to quit. NOT CREATE_NO_WINDOW
+                # — Win32 forbids combining it with DETACHED_PROCESS; DETACHED
+                # already gives the child no inherited console.
+                flags = 0x00000008 | 0x00000200
+                subprocess.Popen(
+                    [pwsh, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
+                    cwd=str(REPO_ROOT),
+                    close_fds=True,
+                    creationflags=flags,
+                )
+            else:
+                subprocess.Popen(
+                    ["sh", str(script_path)],
+                    cwd=str(REPO_ROOT),
+                    close_fds=True,
+                    start_new_session=True,
+                )
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "อัพเดตไม่ได้",
+                f"spawn updater ไม่สำเร็จ:\n{e}\n\ncockpit ยังเปิดอยู่ตามเดิม",
+            )
+            return
+
+        QCoreApplication.quit()
 
     def _refresh_update_button(self) -> None:
         """Flip the update chip's label/colour based on the cached
