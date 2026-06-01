@@ -57,16 +57,38 @@ class _FakeOrch:
         self._panes_by_project: dict[str, dict] = {}
         self._last_stuck_recover: dict[str, float] = {}
         self._rate_limited_until: dict[str, float] = {}
+        # Bug-1 fix attrs required by the new snapshot/restore path
+        self._session_uuids: dict[str, dict] = {}
+        self._last_assigned_task: dict[str, str] = {}
+        self._auto_chain_panes: dict[str, bool] = {}
+        self._requires_commit_on_done: dict[str, bool] = {}
+        # Bug-2 fix attrs for content-delta tracking
+        self._last_content_hash: dict[str, str] = {}
+        self._last_content_change_ts: dict[str, float] = {}
+        # Fix 1: structured resume flag
+        self._last_spawn_resumed: dict[str, bool] = {}
+        # m3 fix: recent exits dict
+        self._recent_exits: dict[str, dict] = {}
         self.close_calls: list[tuple[str, str]] = []
         self.spawn_calls: list[tuple[str, str | None, str]] = []
 
     def close(self, role: str, project: str | None = None) -> tuple[bool, str]:
+        # Mimic the orchestrator's close() popping state dicts so restore
+        # tests can verify the snapshot/restore roundtrip correctly.
+        key = f"{project or ''}::{role}"
+        self._session_uuids.pop(key, None)
+        self._last_assigned_task.pop(key, None)
+        self._auto_chain_panes.pop(key, None)
+        self._requires_commit_on_done.pop(key, None)
         self.close_calls.append((role, project or ""))
         return True, "ok"
 
-    def spawn(self, role: str, cwd: str | None = None, project: str | None = None):
+    def spawn(self, role: str, cwd: str | None = None, project: str | None = None, **_kw):
         self.spawn_calls.append((role, cwd, project or ""))
         return True, "ok"
+
+    def _send_when_ready(self, role: str, task: str, project: str | None = None) -> None:
+        pass  # no-op in tests
 
     def _auto_recover_stuck(self, role, project, pane, now) -> None:
         # Delegate to the real orchestrator method so the cooldown

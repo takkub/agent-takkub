@@ -281,6 +281,11 @@ _ROLE_MODEL_TIERS: dict[str, tuple[str, str, str]] = {
     "critic": ("claude-opus-4-8", "high", "claude-sonnet-4-6"),
     "backend": ("claude-sonnet-4-6", "high", "claude-haiku-4-5"),
     "devops": ("claude-sonnet-4-6", "high", "claude-haiku-4-5"),
+    # codex/gemini substitutes: when the real binary is unavailable, Claude
+    # backs the role — use Opus/high so the cross-check has the same quality
+    # as reviewer/critic rather than falling to the default Sonnet tier.
+    "codex": ("claude-opus-4-8", "high", "claude-sonnet-4-6"),
+    "gemini": ("claude-opus-4-8", "high", "claude-sonnet-4-6"),
 }
 
 
@@ -346,6 +351,15 @@ STUCK_THRESHOLD_S = 10 * 60
 # loop. Three strikes is the soft cap (auto-respawn-attempts already
 # handles the hard cap separately).
 STUCK_RECOVER_COOLDOWN_S = 5 * 60
+
+# Spinner-line filtering for content-delta stuck detection (Fix 3).
+# Lines matching any interrupt phrase or volatile counter pattern are excluded
+# from the hash so a pane that only emits spinner bytes is still detected as stuck.
+_SPINNER_INTERRUPT_PHRASES = ("esc to interrupt", "esc to stop", "ctrl-c to", "ctrl+c to")
+_SPINNER_VOLATILE_RE = re.compile(
+    r"\d+s[\s·]|[↑↓]\s*[\d.,]+k?\s*tokens?",
+    re.IGNORECASE,
+)
 IDLE_WATCHDOG_INTERVAL_MS = 5_000
 IDLE_REMINDER_TEXT = (
     "🔔 [auto-reminder] pane นี้ idle อยู่ — ถ้า task เสร็จแล้วต้อง run "
@@ -850,6 +864,18 @@ class Orchestrator(QObject):
         # the last harvest hint was injected into Lead so the watchdog
         # doesn't spam the same message every tick.
         self._harvest_hint_ts: dict[str, float] = {}
+        # Bug-2 fix: screen-content-delta for stuck detection.
+        # Stores a hash of display_lines() with spinner lines excluded, and the
+        # wall-clock when the content last changed.  The stuck watchdog uses
+        # this instead of raw byte timestamps so a pane whose only output is
+        # the animated 'esc to interrupt' spinner is still detected as stuck.
+        self._last_content_hash: dict[str, str] = {}
+        self._last_content_change_ts: dict[str, float] = {}
+        # Structured resume flag written by spawn() so callers can check whether
+        # the last spawn for a key was a resume or a fresh session without parsing
+        # the human-readable message string (Fix 1 — string-coupling fragility).
+        # Keyed `<project>::<role>`, overwritten on every spawn(), popped by close().
+        self._last_spawn_resumed: dict[str, bool] = {}
         self._idle_watchdog = QTimer(self)
         self._idle_watchdog.setInterval(IDLE_WATCHDOG_INTERVAL_MS)
         self._idle_watchdog.timeout.connect(self._check_idle_teammates)
@@ -925,7 +951,11 @@ class Orchestrator(QObject):
     # high-level operations
     # ──────────────────────────────────────────────────────────────
     def spawn(
-        self, role_name: str, cwd: str | None = None, project: str | None = None
+        self,
+        role_name: str,
+        cwd: str | None = None,
+        project: str | None = None,
+        _from_auto_respawn: bool = False,
     ) -> tuple[bool, str]:
         try:
             role_name = validate_name(role_name, "role")
@@ -957,12 +987,15 @@ class Orchestrator(QObject):
         # Fresh spawn — clear any stale watchdog tracking from a prior
         # session so the new claude conversation starts with a clean slate
         # (no leftover "blocked on lead" flag, no leftover idle streak).
-        # Auto-respawn attempts are *not* cleared here because spawn() is
-        # also the path the auto-respawn watcher takes; clearing would
-        # let a deterministically-crashing claude loop forever.
+        # Auto-respawn attempts are cleared on manual spawns so a pane that
+        # was deliberately revived after working fine gets a clean recovery
+        # budget.  Auto-respawn paths pass _from_auto_respawn=True to keep
+        # the counter so a deterministically-crashing claude can't loop.
         key = f"{project_ns}::{role_name}"
         self._idle_state.pop(key, None)
         self._blocked_on_lead.pop(key, None)
+        if not _from_auto_respawn:
+            self._auto_respawn_attempts.pop(key, None)
 
         # Fix 1: validate explicit cwd stays within the project's configured paths.
         # "default" namespace (unit-test / no-project) is exempt since it has no
@@ -1474,6 +1507,10 @@ class Orchestrator(QObject):
             cwd=spawn_cwd,
             resumed=resumed,
         )
+        # Record resume decision as a structured flag so _auto_respawn and
+        # _do_respawn can read it directly without parsing the message string.
+        # (Fix 1: eliminates the "(resumed)" in msg string-coupling fragility.)
+        self._last_spawn_resumed[_ekey_spawn] = resumed
         suffix = " (resumed)" if resumed else ""
         # If a codex/gemini role reached the claude spawn path, its provider
         # was unavailable (toggled off or not installed) and claude is
@@ -1603,6 +1640,11 @@ class Orchestrator(QObject):
                 project=project,
                 attempts=attempts,
             )
+            # Bug-3 fix: notify Lead so the operator knows the pane gave up and
+            # auto-chain doesn't deadlock waiting for a done event that never comes.
+            self._warn_lead_respawn_capped(role_name, project)
+            self._auto_chain_panes.pop(key, None)
+            self._last_assigned_task.pop(key, None)
             return
         self._auto_respawn_attempts[key] = attempts + 1
         # Exponential back-off: a pane that keeps crashing (deterministic bug
@@ -1630,11 +1672,16 @@ class Orchestrator(QObject):
         pane = self._panes_by_project.get(project, {}).get(role_name)
         if pane is None or (pane.session is not None and pane.session.is_alive):
             return
-        ok, msg = self.spawn(role_name, cwd=cwd, project=project)
+        ok, msg = self.spawn(role_name, cwd=cwd, project=project, _from_auto_respawn=True)
         _log_event("auto_respawn_done", role=role_name, project=project, ok=ok, msg=msg[:160])
         if ok:
+            # Bug-5 fix: a resumed session already holds the task in claude's
+            # conversation history — re-pasting it risks duplicate work on
+            # non-idempotent steps (file creates, migrations, etc.).
+            # Fix 1: read structured flag set by spawn() instead of parsing msg.
+            spawn_resumed = self._last_spawn_resumed.get(_exit_key(project, role_name), False)
             cached_task = self._last_assigned_task.get(_exit_key(project, role_name))
-            if cached_task:
+            if cached_task and not spawn_resumed:
                 _log_event(
                     "auto_respawn_replay",
                     role=role_name,
@@ -1863,6 +1910,28 @@ class Orchestrator(QObject):
         QTimer.singleShot(150, lambda: lead.session and lead.session.write("\r"))
         self.leadInjected.emit(msg)
         _log_event("spawn_failed_warned", role=role_name, project=project_ns)
+
+    def _warn_lead_respawn_capped(self, role_name: str, project: str) -> None:
+        """Bug-3 fix: tell Lead that a teammate hit AUTO_RESPAWN_MAX and gave up.
+
+        Without this notice the Lead never learns the pane is permanently down,
+        auto-chain siblings wait forever for a done event that never comes, and
+        the operator stares at a deadlocked workflow.  No-op when Lead is absent
+        (queuing is not needed — if Lead comes back, respawn is already capped
+        and the operator will see the dead pane slot directly)."""
+        project_ns = self._resolve_project(project)
+        lead = self._project_panes(project_ns).get(LEAD.name)
+        if not (lead and lead.session and lead.session.is_alive):
+            return
+        msg = (
+            f"⚠️ [respawn-capped] {role_name} ({project_ns}) หยุด auto-respawn แล้ว "
+            f"(crash {AUTO_RESPAWN_MAX} ครั้งติด) — pane ดับถาวรจนกว่า Lead จะ assign ใหม่ "
+            f"ถ้า pane นี้อยู่ใน auto-chain verify hop อาจค้างได้ — ตรวจสอบ takkub list"
+        )
+        lead.session.write(msg)
+        QTimer.singleShot(150, lambda: lead.session and lead.session.write("\r"))
+        self.leadInjected.emit(msg)
+        _log_event("respawn_capped_warned", role=role_name, project=project_ns)
 
     # ------------------------------------------------------------------
     # Peer CC durability helpers
@@ -2132,6 +2201,14 @@ class Orchestrator(QObject):
         self._auto_chain_panes.pop(key, None)
         self._session_uuids.pop(key, None)
         self._last_send_ts.pop(key, None)
+        # Bug-6 fix: these were written-only; pop on teardown to prevent
+        # O(projects*roles) unbounded growth across many close/respawn cycles.
+        self._harvest_hint_ts.pop(key, None)
+        self._last_stuck_recover.pop(key, None)
+        self._rate_limited_until.pop(key, None)
+        self._last_content_hash.pop(key, None)
+        self._last_content_change_ts.pop(key, None)
+        self._last_spawn_resumed.pop(key, None)
         # For teammates, fully remove from the layout so the right column
         # collapses back. Lead stays as it always anchors the cockpit.
         # The project namespace travels with the signal so main_window
@@ -3206,7 +3283,8 @@ class Orchestrator(QObject):
                 # A rate-limited pane is silent on purpose — never force-respawn
                 # it (the fresh session would just hit the same limit). The idle
                 # walker owns detection; here we only read the recorded state.
-                if self._rate_limited_until.get(f"{project_name}::{role}", 0.0) > now:
+                key = f"{project_name}::{role}"
+                if self._rate_limited_until.get(key, 0.0) > now:
                     continue
                 last_out = getattr(pane, "_last_output_ts", 0.0)
                 if not isinstance(last_out, (int, float)) or last_out <= 0:
@@ -3215,9 +3293,47 @@ class Orchestrator(QObject):
                     # AgentPane subclass / test fixture). Skip; the next
                     # tick will pick it up once a real timestamp lands.
                     continue
-                if (now - last_out) < STUCK_THRESHOLD_S:
+                # Bug-2 fix: measure screen-content delta excluding the spinner
+                # region ('esc to interrupt').  Raw byte timestamps are bumped on
+                # every PTY byte including the animated spinner, so a claude
+                # wedged on a slow MCP call never trips STUCK_THRESHOLD_S with
+                # the old byte-only check.  Content-delta is immune to spinners.
+                try:
+                    disp = pane.session.display_lines()
+                    # Fix 3: filter spinner/status lines more broadly.
+                    # Exclude lines matching any known interrupt phrase OR volatile
+                    # counter patterns (elapsed seconds, token counters) so a
+                    # counter-only spinner line doesn't keep resetting the hash.
+                    non_spinner_hash = str(
+                        hash(
+                            tuple(
+                                ln
+                                for ln in disp
+                                if not any(p in ln.lower() for p in _SPINNER_INTERRUPT_PHRASES)
+                                and not _SPINNER_VOLATILE_RE.search(ln)
+                            )
+                        )
+                    )
+                    prev_hash = self._last_content_hash.get(key)
+                    if prev_hash != non_spinner_hash:
+                        self._last_content_hash[key] = non_spinner_hash
+                        if prev_hash is not None:
+                            # Genuine content change (not first observation) →
+                            # reset the change clock so the pane isn't recovered.
+                            self._last_content_change_ts[key] = now
+                        else:
+                            # First time we see this pane: initialise from
+                            # last_out so an already-stale pane is detected on
+                            # the very first tick rather than getting a free
+                            # STUCK_THRESHOLD_S grace period.
+                            self._last_content_change_ts.setdefault(key, last_out)
+                except Exception:
+                    # display_lines() failed (session torn down mid-tick); fall
+                    # back to initialising the ts from last raw byte time.
+                    self._last_content_change_ts.setdefault(key, last_out)
+                last_content_ts = self._last_content_change_ts.get(key, last_out)
+                if (now - last_content_ts) < STUCK_THRESHOLD_S:
                     continue
-                key = f"{project_name}::{role}"
                 last_recover = self._last_stuck_recover.get(key, 0.0)
                 if (now - last_recover) < STUCK_RECOVER_COOLDOWN_S:
                     # Already tried to recover this pane recently;
@@ -3228,9 +3344,23 @@ class Orchestrator(QObject):
     def _auto_recover_stuck(self, role: str, project: str, pane: AgentPane, now: float) -> None:
         """Close the wedged pane and respawn it with --resume <uuid>. The
         spawn uses the pane's last-known cwd so claude rejoins the same
-        project directory."""
+        project directory.
+
+        Bug-1 fix: close() pops session UUID, last-task, auto-chain flag and
+        requires-commit gate — without a snapshot/restore the respawned session
+        starts blank (no --resume despite the docstring), drops the verify hop
+        from auto-chain, and silently loses the commit gate.  We snapshot those
+        four fields before teardown and restore them in the respawn callback so
+        spawn() can_resume logic finds the UUID and the task/flags survive."""
         cwd = pane._session_cwd
         key = f"{project}::{role}"
+
+        # Snapshot per-pane state that close() will pop.
+        snap_uuid = self._session_uuids.get(key)
+        snap_task = self._last_assigned_task.get(key)
+        snap_auto_chain = self._auto_chain_panes.get(key, False)
+        snap_requires_commit = self._requires_commit_on_done.get(key, False)
+
         self._last_stuck_recover[key] = now
         silent_for_s = int(now - getattr(pane, "_last_output_ts", now))
         # Reset the output timestamp so the next tick doesn't re-trigger
@@ -3245,10 +3375,54 @@ class Orchestrator(QObject):
             silent_for_s=silent_for_s,
         )
         self.close(role, project=project)
+
+        def _do_respawn() -> None:
+            # Restore snapshotted state before spawn() runs so:
+            #   - _session_uuids lets can_resume pick --resume <uuid>
+            #   - _last_assigned_task survives for replay (gated by Bug-5 fix)
+            #   - _auto_chain_panes keeps the verify-hop tag alive
+            #   - _requires_commit_on_done preserves the commit gate
+            if snap_uuid is not None:
+                self._session_uuids[key] = snap_uuid
+            if snap_task is not None:
+                self._last_assigned_task[key] = snap_task
+            if snap_auto_chain:
+                self._auto_chain_panes[key] = snap_auto_chain
+            if snap_requires_commit:
+                self._requires_commit_on_done[key] = snap_requires_commit
+            # m3 fix: if PTY teardown hasn't fired _on_session_exit yet (takes
+            # longer than the 2s singleShot on a slow machine), _recent_exits
+            # has no entry and spawn()'s can_resume returns False → blank session.
+            # Synthesise the entry from snap_uuid so we never depend on timing.
+            if snap_uuid is not None and key not in self._recent_exits:
+                self._recent_exits[key] = {
+                    "cwd": snap_uuid.get("cwd", cwd or ""),
+                    "ts": time.time(),
+                }
+            ok, msg = self.spawn(role, cwd=cwd, project=project, _from_auto_respawn=True)
+            _log_event("stuck_recover_respawn", role=role, project=project, ok=ok, msg=msg[:160])
+            if not ok:
+                # Fix 2: spawn failed — roll back state restored above so a dead
+                # pane doesn't leave stale uuid/task/flags in the live maps.
+                if snap_uuid is not None:
+                    self._session_uuids.pop(key, None)
+                if snap_task is not None:
+                    self._last_assigned_task.pop(key, None)
+                if snap_auto_chain:
+                    self._auto_chain_panes.pop(key, None)
+                if snap_requires_commit:
+                    self._requires_commit_on_done.pop(key, None)
+                return
+            # If the session was resumed, the task is already in claude's
+            # conversation history — don't re-paste it (Bug-5 gate).
+            # Fix 1: read structured flag set by spawn() instead of parsing msg.
+            if snap_task and not self._last_spawn_resumed.get(key, False):
+                self._send_when_ready(role, snap_task, project=project)
+
         # 2 s pause so the close has time to terminate the PTY and tear
         # down the WebEngine view before the respawn binds a new one
         # to the same role slot.
-        QTimer.singleShot(2_000, lambda: self.spawn(role, cwd=cwd, project=project))
+        QTimer.singleShot(2_000, _do_respawn)
 
     def _rate_limit_suppressed(self, project: str, role: str, pane: AgentPane, now: float) -> bool:
         """Return True if `pane` is rate-limited and the watchdog should leave

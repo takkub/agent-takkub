@@ -341,6 +341,33 @@ class TestRoutingTable:
         assert "frontend" in result.roles
         assert "backend" in result.roles
 
+    def test_review_ui_and_api_routes_to_reviewer_not_parallel_impl(self):
+        result = classify("review the API endpoint for the login form")
+        assert result.kind == ActionKind.PROPOSE
+        assert result.role == "reviewer"
+        assert result.roles is None
+
+    def test_test_ui_and_api_routes_to_qa_not_parallel_impl(self):
+        result = classify("test the login page and auth endpoint")
+        assert result.kind == ActionKind.PROPOSE
+        assert result.role == "qa"
+        assert result.roles is None
+
+    def test_refactor_ui_and_api_keeps_codex_cross_check(self):
+        result = classify("refactor the login page and auth endpoint")
+        assert result.kind == ActionKind.PROPOSE
+        assert result.role == "frontend"
+        assert result.roles is None
+        assert result.cross_check == ["codex"]
+
+    def test_design_review_ui_and_api_routes_to_critic_not_parallel_impl(self):
+        result = classify("design review the login page and auth endpoint")
+        assert result.kind == ActionKind.PROPOSE
+        assert result.role == "critic"
+        assert result.roles is None
+        assert result.cross_check is not None
+        assert "gemini" in result.cross_check
+
 
 # ─────────────────────────────────────────────────────────────────────
 # Confirm handling (requires pending_proposal context)
@@ -506,6 +533,30 @@ class TestNewEnglishActionableVerbs:
         """'analyze the query performance' should be actionable."""
         result = classify("analyze the query performance")
         assert result.kind == ActionKind.PROPOSE
+
+    def test_optimize_is_actionable(self):
+        result = classify("optimize the query performance")
+        assert result.kind == ActionKind.PROPOSE
+        assert result.role == "backend"
+
+    def test_investigate_is_actionable(self):
+        result = classify("investigate the login endpoint")
+        assert result.kind == ActionKind.PROPOSE
+        assert result.role == "backend"
+
+    def test_upgrade_is_actionable(self):
+        result = classify("upgrade Next.js")
+        assert result.kind == ActionKind.PROPOSE
+        assert result.role == "frontend"
+
+    def test_enable_is_actionable(self):
+        result = classify("enable dark mode")
+        assert result.kind == ActionKind.PROPOSE
+
+    def test_patch_is_actionable(self):
+        result = classify("patch the XSS in the comment form")
+        assert result.kind == ActionKind.PROPOSE
+        assert result.role == "frontend"
 
 
 # ─────────────────────────────────────────────────────────────────────

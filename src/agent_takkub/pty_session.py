@@ -331,16 +331,26 @@ class PtySession(QObject):
                 pass
 
     def terminate(self) -> None:
-        if self._reader is not None:
-            self._reader.request_stop()
         if self._writer is not None:
-            self._writer.request_stop()
+            self._writer.request_stop()  # enqueue sentinel → writer loop exits
+        if self._reader is not None:
+            self._reader.request_stop()  # set stop flag
         if self._proc is not None:
             try:
-                self._proc.terminate(force=True)
+                self._proc.terminate(force=True)  # unblocks reader's proc.read()
             except Exception:
                 pass
         self._alive = False
+        # Bug-7 fix: join threads so they don't accumulate as zombies across
+        # many close/respawn cycles.  500 ms timeout avoids blocking the UI
+        # thread; if a thread hasn't exited by then we leave it — the process
+        # kill above ensures it will exit momentarily on its own.
+        if self._writer is not None:
+            self._writer.quit()
+            self._writer.wait(500)
+        if self._reader is not None:
+            self._reader.quit()
+            self._reader.wait(500)
         if self._transcript is not None:
             try:
                 self._transcript.close()

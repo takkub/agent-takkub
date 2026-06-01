@@ -4,6 +4,24 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Added (เพิ่ม)
+- **AI-generated project rules** — เพิ่ม project ใหม่ผ่านปุ่ม **＋ Add Project** เลือก
+  "New project (AI rules)" → cockpit รัน Claude Code headless สร้าง `<project>/CLAUDE.md`
+  ให้อัตโนมัติ (ใช้เวลา ~15–60 วินาที). preview + แก้ใน editor dialog ก่อน save
+  หรือกด 🔄 Regenerate ถ้าไม่พอใจ. แก้ทีหลังได้ผ่านปุ่ม **✏ Rules**. Lead pane
+  ทุก spawn โหลด rules เข้า context อัตโนมัติ (cap 3000 chars) ผ่าน `lead_context.py`.
+  เพิ่ม `project_rules.py` (read/write helpers) + `_RulesGeneratorThread` (headless
+  claude QThread worker) + `_generate_rules_with_ui()` / `_show_rules_editor_dialog()`
+  ใน `main_window.py`.
+
+### Changed (เปลี่ยน)
+- **รวม `_show_rules_preview_dialog` กับ `_show_rules_editor_dialog` เหลือเมธอดเดียว** —
+  ทั้งสองทำงานเหมือนกัน, ลบ `_show_rules_preview_dialog` (dead duplicate)
+- **ลบ `MainWindow._rebalance_teammates` สองอัน** (dead code) — caller จริงใช้
+  `tab.rebalance_teammates()` ใน `project_tab.py` โดยตรงอยู่แล้ว
+- **เพิ่มปุ่ม `?` ใน status bar** + `QShortcut(F1)` ระดับ window สำหรับ help dialog
+  (เดิม F1 ใช้ได้แค่ตอน main window focused — ตอนนี้ทำงานแม้ pane terminal focused)
+
 ## [v0.5.2] - 2026-06-01
 
 ### Added (เพิ่ม)

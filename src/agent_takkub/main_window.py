@@ -20,7 +20,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtCore import QCoreApplication, QSettings, Qt, QThreadPool, QTimer
+from PyQt6.QtCore import QCoreApplication, QSettings, Qt, QThread, QThreadPool, QTimer, pyqtSignal
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QApplication,
@@ -103,6 +103,47 @@ def _handle_cli_bind_error(error_msg: str) -> None:
     QApplication.quit()
 
 
+class _RulesGeneratorThread(QThread):
+    """Background thread that runs claude headless to generate project rules.
+
+    Signals
+    -------
+    finished(str)  — emits the generated markdown on success
+    failed(str)    — emits an error message on failure (incl. cancel)
+    """
+
+    rulesReady: pyqtSignal = pyqtSignal(str)
+    failed: pyqtSignal = pyqtSignal(str)
+
+    def __init__(self, prompt: str, project_name: str, parent=None) -> None:
+        super().__init__(parent)
+        self._prompt = prompt
+        self._project_name = project_name
+        self._proc = None  # subprocess.Popen — set in run(), cleared after
+
+    def run(self) -> None:
+        from .project_rules import collect_result, generate_project_rules_proc
+
+        try:
+            proc = generate_project_rules_proc(self._prompt, self._project_name)
+            self._proc = proc
+            content = collect_result(proc, self._project_name)
+            self._proc = None
+            self.rulesReady.emit(content)
+        except Exception as exc:
+            self._proc = None
+            self.failed.emit(str(exc))
+
+    def cancel(self) -> None:
+        """Kill the claude subprocess if it's still running."""
+        proc = self._proc
+        if proc is not None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+
 class MainWindow(QMainWindow):
     # ──────────────────────────────────────────────────────────────
     # backwards-compat accessors: until every callsite is rewritten to
@@ -133,9 +174,6 @@ class MainWindow(QMainWindow):
     @property
     def _custom_role_colors(self) -> dict[str, str]:
         return self._current_tab().custom_role_colors
-
-    def _rebalance_teammates(self) -> None:
-        self._current_tab().rebalance_teammates()
 
     @staticmethod
     def _make_status_separator() -> QFrame:
@@ -305,6 +343,9 @@ class MainWindow(QMainWindow):
         self.tabs.setTabsClosable(True)
         self.tabs.tabCloseRequested.connect(self._on_tab_close_requested)
         self.tabs.tabBarClicked.connect(self._on_tab_bar_clicked)
+        # Right-click on any project tab → context menu with "Edit project rules"
+        self.tabs.tabBar().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tabs.tabBar().customContextMenuRequested.connect(self._on_tab_bar_context_menu)
         # NOTE: `currentChanged` is connected at the end of __init__ — once
         # the status bar widgets exist. QTabWidget emits currentChanged the
         # moment the first tab is added, and our slot calls
@@ -374,9 +415,16 @@ class MainWindow(QMainWindow):
         self._project_combo.currentTextChanged.connect(self._on_project_changed)
 
         self._btn_add_project = QPushButton("📁", self)
-        self._btn_add_project.setToolTip("Add new project from folder")
+        self._btn_add_project.setToolTip(
+            "Add project — choose New (AI-generated CLAUDE.md rules) or Import existing"
+        )
         self._btn_add_project.setFixedWidth(28)
         self._btn_add_project.clicked.connect(self._on_add_project_clicked)
+
+        self._btn_edit_rules = QPushButton("📋", self)
+        self._btn_edit_rules.setToolTip("Edit project rules (CLAUDE.md) for the active project")
+        self._btn_edit_rules.setFixedWidth(28)
+        self._btn_edit_rules.clicked.connect(self._on_edit_project_rules_clicked)
 
         # One-click rtk install for the active project. Only visible when
         # the project hasn't been initialised yet — once `.claude/settings.json`
@@ -484,6 +532,11 @@ class MainWindow(QMainWindow):
         self._btn_claude_update.clicked.connect(self._on_claude_update_clicked)
         # True while ClaudeUpdateCheckWorker runs — blocks re-entry.
         self._claude_update_busy: bool = False
+
+        self._btn_help = QPushButton("?", self)
+        self._btn_help.setToolTip("Show keyboard shortcuts and takkub CLI reference (also F1)")
+        self._btn_help.setStyleSheet(self._ghost_button_style())
+        self._btn_help.clicked.connect(self._show_help)
 
         self._btn_logs = QPushButton("📋 Logs", self)
         self._btn_logs.setToolTip("Show/hide events log panel")
@@ -651,10 +704,17 @@ class MainWindow(QMainWindow):
         #   Group 1 — Project context  (info you read, not click)
         #   Group 2 — Workflow actions (buttons that change pane state)
         #   Group 3 — System status    (cockpit-level toggles + updates)
-        for w in (self._remote_hint, self._version_label, self._token_total, self._btn_add_project):
+        for w in (
+            self._remote_hint,
+            self._version_label,
+            self._token_total,
+            self._btn_add_project,
+            self._btn_edit_rules,
+        ):
             self._status.addPermanentWidget(w)
         self._status.addPermanentWidget(self._make_status_separator())
         for w in (
+            self._btn_help,
             self._btn_logs,
             self._btn_resume,
             self._btn_open_shell,
@@ -737,6 +797,8 @@ class MainWindow(QMainWindow):
         # Populate the version chip immediately so the user doesn't see
         # an empty slot for the first 30 s until the update check runs.
         self._refresh_version_label()
+
+        self._install_shortcuts()
 
         # ── boot: start CLI server + auto-spawn Lead ────────────
         QTimer.singleShot(0, self._boot)
@@ -840,14 +902,6 @@ class MainWindow(QMainWindow):
             tab.hide_teammate_split()
         else:
             tab.rebalance_teammates()
-
-    def _rebalance_teammates(self) -> None:
-        n = self.teammate_split.count()
-        if n <= 0:
-            return
-        h = max(self.teammate_split.height(), 100)
-        each = max(120, h // n)
-        self.teammate_split.setSizes([each] * n)
 
     # ──────────────────────────────────────────────────────────────
     def _boot(self) -> None:
@@ -1045,9 +1099,9 @@ class MainWindow(QMainWindow):
             "<code>takkub close-all</code> — close every teammate (keeps Lead)<br>"
             "<code>takkub done [note]</code> — (agents) signal completion<br><br>"
             "<b>Shortcuts</b><br>"
-            "Ctrl + + / - / 0 — terminal font size (per pane)<br>"
-            "Wheel — scroll claude's history (PgUp/PgDn passthrough)<br>"
-            "F1 — this dialog<br><br>"
+            "F1 / ? button — this dialog<br>"
+            "Ctrl + + / - / 0 — terminal font size (click pane first)<br>"
+            "Wheel — scroll claude's history (click pane first)<br><br>"
             "<b>Default cwd</b> when <code>--cwd</code> omitted: active project's<br>"
             "role-matched path (frontend→web, backend→api, ...)."
         )
@@ -1058,6 +1112,11 @@ class MainWindow(QMainWindow):
             self._show_help()
             return
         super().keyPressEvent(event)
+
+    def _install_shortcuts(self) -> None:
+        from PyQt6.QtGui import QKeySequence, QShortcut
+
+        QShortcut(QKeySequence(Qt.Key.Key_F1), self).activated.connect(self._show_help)
 
     def _update_status(self) -> None:
         from .token_meter import effective_context_limit
@@ -2496,19 +2555,33 @@ class MainWindow(QMainWindow):
         self._chip_plan.setToolTip(self._plan_chip_tooltip(is_pro))
 
     def _on_add_project_clicked(self) -> None:
+        """Show a choice dialog: New project (AI-generated rules) vs Import existing."""
+        from PyQt6.QtWidgets import QMessageBox
+
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Add project")
+        msg.setText("How do you want to add this project?")
+        btn_new = msg.addButton(
+            "✨ New project (AI-generated rules)", QMessageBox.ButtonRole.AcceptRole
+        )
+        btn_import = msg.addButton("📂 Import existing", QMessageBox.ButtonRole.ActionRole)
+        msg.addButton(QMessageBox.StandardButton.Cancel)
+        msg.exec()
+
+        clicked = msg.clickedButton()
+        if clicked is btn_new:
+            self._new_project_with_rules()
+        elif clicked is btn_import:
+            self._import_existing_project()
+        # Cancel → do nothing
+
+    def _import_existing_project(self) -> None:
+        """Original add-project flow: select folder → map paths → save."""
         from pathlib import Path
 
         from PyQt6.QtWidgets import (
-            QDialog,
-            QDialogButtonBox,
             QFileDialog,
-            QFormLayout,
-            QLabel,
-            QLineEdit,
-            QVBoxLayout,
         )
-
-        from .config import PROJECTS_JSON, load_projects
 
         dir_path = QFileDialog.getExistingDirectory(self, "Select Project Root Folder")
         if not dir_path:
@@ -2517,7 +2590,207 @@ class MainWindow(QMainWindow):
         p = Path(dir_path)
         name = p.name
 
-        # Create a custom dialog to let the user map paths
+        paths = self._run_map_paths_dialog(p)
+        if paths is None:
+            return
+
+        self._save_and_open_project(name, p, paths, rules_content=None)
+
+    def _new_project_with_rules(self) -> None:
+        """New project flow: select folder → prompt → generate rules → preview/edit → map paths → save."""
+        from pathlib import Path
+
+        from PyQt6.QtWidgets import (
+            QFileDialog,
+            QMessageBox,
+        )
+
+        from .config import load_projects
+
+        dir_path = QFileDialog.getExistingDirectory(self, "Select New Project Root Folder")
+        if not dir_path:
+            return
+
+        p = Path(dir_path)
+        name = p.name
+
+        # Warn if same project name already exists from a different path
+        data = load_projects()
+        existing = (data.get("projects") or {}).get(name)
+        if existing:
+            existing_paths = list((existing.get("paths") or {}).values())
+            if existing_paths:
+                p_posix = p.resolve().as_posix()
+                if not any(ep == p_posix or ep.startswith(p_posix + "/") for ep in existing_paths):
+                    ans = QMessageBox.question(
+                        self,
+                        "Duplicate project name",
+                        f"A project named '{name}' already exists (different folder).\n"
+                        "Continuing will overwrite its configuration. Proceed?",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                    )
+                    if ans != QMessageBox.StandardButton.Yes:
+                        return
+
+        # Step 1: prompt dialog
+        prompt_text = self._ask_project_description(name)
+        if prompt_text is None:
+            return  # user cancelled
+
+        # Step 2: generate rules in background
+        rules_content = self._generate_rules_with_ui(prompt_text, name)
+        if rules_content is None:
+            return  # cancelled or failed
+
+        # Step 3: allow re-generation if needed (loop)
+        while True:
+            result = self._show_rules_editor_dialog(rules_content, name, allow_regenerate=True)
+            if result is None:
+                return  # Cancel
+            if isinstance(result, str):
+                rules_content = result
+                break  # Save
+            # result is True → Regenerate: ask for new prompt and re-gen
+            prompt_text = self._ask_project_description(name, prefill=prompt_text)
+            if prompt_text is None:
+                return
+            rules_content = self._generate_rules_with_ui(prompt_text, name)
+            if rules_content is None:
+                return
+
+        # Step 4: map paths
+        paths = self._run_map_paths_dialog(p)
+        if paths is None:
+            return
+
+        # Step 5: handle existing CLAUDE.md in target folder
+        if (p / "CLAUDE.md").exists():
+            ans = QMessageBox.question(
+                self,
+                "CLAUDE.md exists",
+                f"'{name}/CLAUDE.md' already exists.\nReplace it with the generated rules?",
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No
+                | QMessageBox.StandardButton.Cancel,
+            )
+            if ans == QMessageBox.StandardButton.Cancel:
+                return
+            if ans == QMessageBox.StandardButton.No:
+                rules_content = None  # keep existing, skip write
+
+        self._save_and_open_project(name, p, paths, rules_content=rules_content)
+
+    def _ask_project_description(self, project_name: str, prefill: str = "") -> str | None:
+        """Show a multiline prompt dialog. Returns the text or None on cancel."""
+        from PyQt6.QtWidgets import (
+            QDialog,
+            QDialogButtonBox,
+            QLabel,
+            QPlainTextEdit,
+            QVBoxLayout,
+        )
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Describe project: {project_name}")
+        dlg.resize(500, 260)
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(QLabel("อธิบายระบบนี้ (stack, deploy, constraints, conventions):"))
+        txt = QPlainTextEdit(dlg)
+        txt.setPlaceholderText(
+            "e.g. Next.js 14 frontend + FastAPI backend, deploy to Vercel + Fly.io, "
+            "TypeScript strict, ห้ามใช้ any, test coverage ≥80%…"
+        )
+        if prefill:
+            txt.setPlainText(prefill)
+        lay.addWidget(txt)
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.button(QDialogButtonBox.StandardButton.Ok).setText("Generate")
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        lay.addWidget(btns)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return txt.toPlainText().strip() or None
+
+    def _generate_rules_with_ui(self, prompt: str, project_name: str) -> str | None:
+        """Run the generator thread and show a busy dialog.  Returns markdown or None."""
+        from PyQt6.QtWidgets import (
+            QDialog,
+            QLabel,
+            QPushButton,
+            QVBoxLayout,
+        )
+
+        busy = QDialog(self)
+        busy.setWindowTitle("Generating project rules…")
+        busy.setModal(True)
+        busy.resize(360, 120)
+        lay = QVBoxLayout(busy)
+        lay.addWidget(
+            QLabel(f"Running claude headless for '{project_name}'…\nThis may take up to 2 minutes.")
+        )
+        btn_cancel = QPushButton("Cancel")
+        lay.addWidget(btn_cancel)
+
+        thread = _RulesGeneratorThread(prompt, project_name, parent=self)
+        result_holder: list[str | None] = [None]
+        error_holder: list[str | None] = [None]
+
+        def on_finished(content: str) -> None:
+            result_holder[0] = content
+            busy.accept()
+
+        def on_failed(msg: str) -> None:
+            error_holder[0] = msg
+            busy.reject()
+
+        def on_cancel() -> None:
+            thread.cancel()
+            thread.wait(3000)
+            busy.reject()
+
+        thread.rulesReady.connect(on_finished)
+        thread.failed.connect(on_failed)
+        btn_cancel.clicked.connect(on_cancel)
+
+        self._btn_add_project.setEnabled(False)
+        try:
+            thread.start()
+            busy.exec()
+            thread.wait(5000)
+            thread.deleteLater()
+        finally:
+            self._btn_add_project.setEnabled(True)
+
+        if result_holder[0] is not None:
+            return result_holder[0]
+
+        if error_holder[0]:
+            from PyQt6.QtWidgets import QMessageBox
+
+            QMessageBox.warning(self, "Generation failed", error_holder[0])
+        return None
+
+    def _run_map_paths_dialog(self, p: Path) -> dict | None:
+        """Show the subdirectory → role-key mapping dialog.
+
+        Returns a dict of {key: posix_path} on accept, or None on cancel.
+        """
+        from PyQt6.QtWidgets import (
+            QDialog,
+            QDialogButtonBox,
+            QFormLayout,
+            QLabel,
+            QLineEdit,
+            QVBoxLayout,
+        )
+
+        from .config import load_projects
+
+        name = p.name
         dialog = QDialog(self)
         dialog.setWindowTitle(f"Configure Project Paths: {name}")
         dialog.resize(400, 300)
@@ -2531,26 +2804,25 @@ class MainWindow(QMainWindow):
         form = QFormLayout()
         layout.addLayout(form)
 
-        # Check if we already have this project configured
         data = load_projects()
         existing_paths = {}
-        existing_paths_rev = {}
+        existing_paths_rev: dict[str, str] = {}
         if "projects" in data and name in data["projects"]:
             existing_paths = data["projects"][name].get("paths", {})
-            # Reverse mapping: value (path) -> key (role)
             existing_paths_rev = {v: k for k, v in existing_paths.items()}
 
-        inputs = {}
-        for sub in p.iterdir():
+        inputs: dict[str, tuple[Path, QLineEdit]] = {}
+        try:
+            subs = sorted(p.iterdir(), key=lambda x: x.name)
+        except PermissionError:
+            subs = []
+        for sub in subs:
             if sub.is_dir() and not sub.name.startswith("."):
                 le = QLineEdit()
                 le.setPlaceholderText("key (e.g. web, api)")
-
-                # Pre-fill if we already saved this path previously
                 sub_posix = str(sub.resolve().as_posix())
                 if sub_posix in existing_paths_rev:
                     le.setText(existing_paths_rev[sub_posix])
-
                 form.addRow(sub.name, le)
                 inputs[sub.name] = (sub, le)
 
@@ -2562,33 +2834,46 @@ class MainWindow(QMainWindow):
         layout.addWidget(buttons)
 
         if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
+            return None
 
-        paths = {}
+        paths: dict[str, str] = {}
         for _sub_name, (sub_path, le) in inputs.items():
             key = le.text().strip()
             if key:
                 paths[key] = str(sub_path.resolve().as_posix())
 
         if not paths:
-            # Fallback if they mapped nothing
             paths["main"] = str(p.resolve().as_posix())
+
+        return paths
+
+    def _save_and_open_project(
+        self, name: str, p: Path, paths: dict, rules_content: str | None
+    ) -> None:
+        """Write CLAUDE.md (if rules_content given), save projects.json, open tab."""
+        from .config import PROJECTS_JSON, load_projects
+
+        if rules_content is not None:
+            from .project_rules import write_project_rules
+
+            write_project_rules(p, rules_content)
 
         data = load_projects()
         if "projects" not in data:
             data["projects"] = {}
 
-        data["projects"][name] = {"description": name, "paths": paths, "presets": []}
+        existing = (data.get("projects") or {}).get(name, {})
+        data["projects"][name] = {
+            "description": existing.get("description", name),
+            "paths": paths,
+            "presets": existing.get("presets", []),
+        }
         data["active"] = name
 
         PROJECTS_JSON.parent.mkdir(parents=True, exist_ok=True)
         _write_json_atomic(PROJECTS_JSON, data)
 
         self._refresh_project_list()
-        # If this project already has a tab (re-adding the same name) just
-        # focus it; otherwise open it as a fresh tab beside the current
-        # ones. Either way the user lands on the new project without
-        # disturbing other open tabs.
         if name in self._open_projects():
             for i in range(self.tabs.count()):
                 if (
@@ -2601,6 +2886,140 @@ class MainWindow(QMainWindow):
         else:
             self._status.showMessage(f"Added project: {name} (opening tab...)", 4_000)
             self._open_project_tab(name)
+
+    def _on_edit_project_rules_clicked(self, project_name: str | None = None) -> None:
+        """Open the rules editor for the given project (defaults to active)."""
+        from pathlib import Path
+
+        from PyQt6.QtWidgets import QMessageBox
+
+        from .config import active_project, load_projects
+        from .project_rules import read_project_rules, write_project_rules
+
+        if project_name:
+            data = load_projects()
+            proj = (data.get("projects") or {}).get(project_name, {})
+            name = project_name
+        else:
+            name, proj = active_project()
+
+        if not name or not proj:
+            QMessageBox.information(self, "No active project", "No project is currently active.")
+            return
+
+        proj_paths = proj.get("paths") or {}
+        root_str = proj_paths.get("main") or (next(iter(proj_paths.values()), None))
+        if not root_str:
+            QMessageBox.information(self, "No paths", f"Project '{name}' has no configured paths.")
+            return
+
+        project_root = Path(root_str)
+        existing = read_project_rules(project_root)
+        content = existing or ""
+
+        while True:
+            result = self._show_rules_editor_dialog(content, name, allow_regenerate=True)
+            if result is None:
+                return  # Cancel
+            if result is True:
+                # Regenerate: ask for description, then generate
+                prompt_text = self._ask_project_description(name)
+                if prompt_text is None:
+                    return
+                new_content = self._generate_rules_with_ui(prompt_text, name)
+                if new_content is None:
+                    return
+                content = new_content
+                continue
+            # Save
+            write_project_rules(project_root, result)
+            self._status.showMessage(f"Saved project rules for '{name}'", 4_000)
+            return
+
+    def _show_rules_editor_dialog(
+        self, content: str, project_name: str, allow_regenerate: bool = False
+    ):
+        """Editable rules dialog (used by both preview and edit flows).
+
+        Returns str (save), True (regenerate), or None (cancel).
+        """
+        from PyQt6.QtWidgets import (
+            QDialog,
+            QHBoxLayout,
+            QLabel,
+            QPlainTextEdit,
+            QPushButton,
+            QVBoxLayout,
+        )
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Project rules — {project_name}/CLAUDE.md")
+        dlg.resize(680, 500)
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(QLabel(f"Edit {project_name}/CLAUDE.md:"))
+        editor = QPlainTextEdit(dlg)
+        editor.setPlainText(content)
+        lay.addWidget(editor)
+
+        btn_row = QHBoxLayout()
+        btn_save = QPushButton("💾 Save")
+        btn_cancel = QPushButton("Cancel")
+        outcome: list = [None]
+
+        if allow_regenerate:
+            btn_regen = QPushButton("🔄 Regenerate from new prompt")
+            btn_row.addWidget(btn_regen)
+
+            def do_regen() -> None:
+                outcome[0] = True
+                dlg.accept()
+
+            btn_regen.clicked.connect(do_regen)
+
+        btn_row.addStretch()
+        btn_row.addWidget(btn_cancel)
+        btn_row.addWidget(btn_save)
+        lay.addLayout(btn_row)
+
+        def do_save() -> None:
+            text = editor.toPlainText()
+            if not text.strip():
+                from PyQt6.QtWidgets import QMessageBox
+
+                QMessageBox.warning(
+                    dlg,
+                    "Cannot save empty rules",
+                    "The editor is empty. Add content or cancel to discard.",
+                )
+                return
+            outcome[0] = text
+            dlg.accept()
+
+        btn_save.clicked.connect(do_save)
+        btn_cancel.clicked.connect(dlg.reject)
+
+        dlg.exec()
+        return outcome[0]
+
+    def _on_tab_bar_context_menu(self, pos) -> None:
+        """Right-click on tab bar → context menu for project-level actions."""
+        from PyQt6.QtWidgets import QMenu
+
+        bar = self.tabs.tabBar()
+        tab_idx = bar.tabAt(pos)
+        if tab_idx < 0 or tab_idx == self._plus_tab_index():
+            return
+
+        widget = self.tabs.widget(tab_idx)
+        if not isinstance(widget, ProjectTab):
+            return
+        proj_name = widget.project_name
+
+        menu = QMenu(self)
+        act_rules = menu.addAction("📋 Edit project rules…")
+        chosen = menu.exec(bar.mapToGlobal(pos))
+        if chosen is act_rules:
+            self._on_edit_project_rules_clicked(proj_name)
 
     # ──────────────────────────────────────────────────────────────
     # window state persistence

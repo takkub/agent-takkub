@@ -49,10 +49,16 @@ _ACTIONABLE_EN = re.compile(
     r"\b(add|build|implement|fix|refactor|migrate|setup|set.up|deploy|rollout|"
     r"test|create|make|write|update|change|delete|remove|rename|extract|"
     r"scaffold|install|configure|integrate|connect|seed|review|audit|run|"
-    r"debug|analyze|verify|"
+    r"debug|analyze|verify|optimi[sz]e|investigate|upgrade|enable|patch|"
+    r"port|moderni[sz]e|convert|replace|"
     r"init(?:ialise|ialize)?|ลอง)\b",  # 'ลอง' (try/attempt) = Thai actionable
     re.IGNORECASE,
 )
+_IMPLEMENTATION_EN = re.compile(
+    r"\b(add|build|implement|create|make|write|scaffold|setup|set.up)\b",
+    re.IGNORECASE,
+)
+_IMPLEMENTATION_TH = re.compile(r"(ทำ|สร้าง|เพิ่ม|เขียน|จัด)")
 _ACTIONABLE_TH = re.compile(
     # ทำ(?!งาน|ไม) — "ทำงาน" means "work/function" (informational);
     # "ทำไม" means "why" (informational). Plain "ทำ" = do/make = actionable.
@@ -375,8 +381,11 @@ def _sub_note(role: str) -> str:
 
 def _route(msg: str) -> dict:
     """Apply routing decision table. Returns dict with role/roles/cross_check/reason."""
-    # Multi-role: UI + API together → parallel frontend + backend
-    if _HAS_UI.search(msg) and _HAS_API.search(msg):
+    # Multi-role: UI + API implementation together → parallel frontend + backend.
+    # Non-implementation intents (review/test/refactor/design) must reach the
+    # ordered route table so reviewer/qa/critic/codex cross-check rules win.
+    has_impl_intent = bool(_IMPLEMENTATION_EN.search(msg) or _IMPLEMENTATION_TH.search(msg))
+    if has_impl_intent and _HAS_UI.search(msg) and _HAS_API.search(msg):
         return {
             "roles": ["frontend", "backend"],
             "reason": "UI + API keywords detected — parallel roles",

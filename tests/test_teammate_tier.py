@@ -48,5 +48,17 @@ def test_default_tier_is_sonnet_medium_haiku():
 
 
 def test_only_intended_roles_are_overridden():
-    """Guard against accidental tier creep — keep the override set explicit."""
-    assert set(_ROLE_MODEL_TIERS) == {"reviewer", "critic", "backend", "devops"}
+    """Guard against accidental tier creep — keep the override set explicit.
+    codex/gemini use Opus/high so Claude substitutes have the same quality as
+    reviewer/critic when the real binary is unavailable."""
+    assert set(_ROLE_MODEL_TIERS) == {"reviewer", "critic", "backend", "devops", "codex", "gemini"}
+
+
+def test_codex_gemini_substitutes_use_opus_high():
+    """codex/gemini roles map to Opus/high so a Claude substitute gets the same
+    model quality as reviewer/critic (not the default Sonnet/medium)."""
+    for role in ("codex", "gemini"):
+        model, effort, fallback = _teammate_tier(role)
+        assert model == "claude-opus-4-8"
+        assert effort == "high"
+        assert fallback == "claude-sonnet-4-6"

@@ -202,6 +202,23 @@ notepad projects.json
   - qa / reviewer / critic → first path
 - `presets` — รายชื่อ role ที่จะ auto-spawn 15 วินาทีหลัง Lead boot (เว้น 3s ต่อ role)
 
+### Step 4b: AI-generated project rules (optional)
+
+cockpit สามารถสร้าง `CLAUDE.md` สำหรับแต่ละ project โดยใช้ AI — ไม่ต้องเขียนเอง
+
+**New project flow (เพิ่ม project ใหม่):**
+1. กดปุ่ม **＋ Add Project** ใน status bar
+2. เลือก **"New project (AI rules)"** → ใส่คำอธิบาย project สั้นๆ
+3. cockpit รัน Claude Code headless สร้าง `CLAUDE.md` ให้ (ใช้เวลา ~15–60 วินาที)
+4. preview + แก้ไขใน editor dialog ก่อน save หรือกด **🔄 Regenerate** ถ้าไม่พอใจ
+5. `<project-root>/CLAUDE.md` ถูกสร้างและ inject เข้า Lead pane ทุก session อัตโนมัติ
+
+**Edit rules ภายหลัง:**
+- กดปุ่ม **✏ Rules** ใน status bar ขณะที่ project นั้น active
+- แก้ไขใน editor dialog → Save หรือ Regenerate จาก prompt ใหม่
+
+**Auto-injection:** Lead spawn ทุกครั้งจะโหลด `CLAUDE.md` ของ project (cap 3000 chars) เข้า context อัตโนมัติ — Lead รู้ codebase conventions โดยไม่ต้องพิมพ์ซ้ำ
+
 ### Step 5: เปิด cockpit
 
 ```bat

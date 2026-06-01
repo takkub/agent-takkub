@@ -71,7 +71,9 @@ class TestAutoRespawnReplay:
         ):
             orch._auto_respawn("backend", "/some/cwd", TEST_PROJECT)
 
-        mock_spawn.assert_called_once_with("backend", cwd="/some/cwd", project=TEST_PROJECT)
+        mock_spawn.assert_called_once_with(
+            "backend", cwd="/some/cwd", project=TEST_PROJECT, _from_auto_respawn=True
+        )
         mock_send.assert_called_once_with("backend", SAMPLE_TASK, project=TEST_PROJECT)
 
     def test_no_replay_when_no_prior_assign(self, orch: Orchestrator) -> None:

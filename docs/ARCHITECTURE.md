@@ -45,7 +45,7 @@ How agent-takkub is wired together. Read this when you're about to modify spawn 
 
 ## Module map
 
-Complete map (40 modules). Grouped by concern; sizes change but the
+Complete map (41 modules). Grouped by concern; sizes change but the
 groupings are stable. If you add a module, slot it here.
 
 ```
@@ -108,6 +108,9 @@ src/agent_takkub/
 │ ── release / self-update ──
 ├── release.py         `takkub release` — bump pyproject version + roll CHANGELOG
 │                      [vNEXT] → dated heading + git commit & annotated tag (no push)
+├── claude_update.py   Claude Code CLI self-update: version check, AI compatibility
+│                      analysis, controlled update (closes panes first on Windows to
+│                      avoid file-lock brick)
 ├── rtk_helper.py      one-click install of rtk's PreToolUse Bash hook
 ├── update_helper.py   git-wrapper behind the status-bar update button
 └── update_worker.py   QRunnable that fetches origin/main + reports local_status()

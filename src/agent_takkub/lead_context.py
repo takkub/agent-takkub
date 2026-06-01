@@ -262,26 +262,85 @@ def _render_lead_context(
 
 ละเมิดข้อใดข้อหนึ่ง → หยุดทันทีแล้ว delegate ผ่าน `takkub assign`
 """
-    # Append disabled-providers section (only if any are disabled — saves tokens
-    # when everything is enabled, which is the common case). Lead reads this on
-    # spawn: a disabled codex/gemini is NOT forbidden — Claude substitutes for it.
-    from .provider_state import all_disabled as _all_disabled
 
-    disabled = _all_disabled()
-    if disabled:
-        disabled_list = ", ".join(sorted(disabled))
+    # Inject project-specific CLAUDE.md so Lead knows the project's deploy
+    # rules, stack constraints, and conventions at planning time — previously
+    # Lead only saw the cockpit CLAUDE.md and had to infer project rules from
+    # the task description alone.
+    #
+    # Guard: if the active project IS the cockpit repo itself (agent-takkub),
+    # its project_root/CLAUDE.md == the cockpit CLAUDE.md already in `base`,
+    # so we skip to avoid double-injecting the same content.
+    _project_rules_text: str | None = None
+    if proj and paths:
+        # Resolve project_root: prefer path keyed "main", else first path.
+        _proj_paths: dict = proj.get("paths") or {}
+        _proj_root_str: str | None = _proj_paths.get("main") or next(
+            iter(_proj_paths.values()), None
+        )
+        if _proj_root_str:
+            _proj_root = pathlib.Path(_proj_root_str).resolve()
+            if _proj_root != REPO_ROOT.resolve():
+                _candidate = _proj_root / "CLAUDE.md"
+                if _candidate.exists():
+                    _raw = _candidate.read_text(encoding="utf-8")
+                    _cap = 3000
+                    if len(_raw) > _cap:
+                        _raw = _raw[:_cap] + "\n…(truncated)\n"
+                    _project_rules_text = _raw
+
+    if _project_rules_text:
         suffix += f"""
 
 ---
 
-## 🔄 Substituted providers (cockpit toggle)
+## 📋 Project rules (auto-injected from {name}/CLAUDE.md)
 
-ขณะนี้ provider ต่อไปนี้ถูกปิดโดย user: **{disabled_list}**
+{_project_rules_text}"""
 
-**ไม่ต้อง refuse** — ตำแหน่งเหล่านี้ **Claude รับแทนอัตโนมัติ**:
+    # Determine provider availability — two distinct reasons codex/gemini can be
+    # unusable, each warranting different Lead messaging:
+    #   "toggled off"   = user disabled via cockpit status bar (can re-enable)
+    #   "not installed" = binary absent from PATH — cross-check is Claude-on-Claude
+    # Section is suppressed entirely when all providers are available (saves tokens
+    # on every normal spawn where nothing is substituted).
+    from .provider_config import _provider_available as _check_available
+    from .provider_state import TOGGLABLE as _TOGGLABLE
+    from .provider_state import is_disabled as _is_disabled
+
+    _toggled_off: list[str] = []
+    _not_installed: list[str] = []
+    for _prov in sorted(_TOGGLABLE):
+        if _is_disabled(_prov):
+            _toggled_off.append(_prov)
+        elif not _check_available(_prov):
+            _not_installed.append(_prov)
+
+    if _toggled_off or _not_installed:
+        _sub_parts: list[str] = []
+        if _toggled_off:
+            _sub_parts.append(f"**ปิดโดย user (toggle):** {', '.join(_toggled_off)}")
+        if _not_installed:
+            _sub_parts.append(
+                f"**ไม่ได้ติดตั้ง (CLI ไม่พบใน PATH):** {', '.join(_not_installed)}"
+                " — cross-check จะเป็น Claude-on-Claude"
+            )
+        _sub_note_lines = "\n".join("- " + p for p in _sub_parts)
+        _all_unavailable = ", ".join(sorted(_toggled_off + _not_installed))
+        suffix += f"""
+
+---
+
+## 🔄 Substituted providers (Claude รับแทน)
+
+provider ต่อไปนี้ใช้ไม่ได้ → **Claude รับแทนอัตโนมัติ** (เสีย model diversity):
+
+{_sub_note_lines}
+
+**ไม่ต้อง refuse** — ตำแหน่งเหล่านี้ Claude รับแทนอัตโนมัติ:
 - propose / fire role เหล่านี้ได้ตามปกติ (primary หรือ cross-check)
-- orchestrator จะ spawn pane ชื่อ role เดิมแต่รันด้วย claude (claude-backed substitute)
-- เวลา propose/fire ให้ **บอก user 1 บรรทัด** ว่า "{disabled_list} ปิดอยู่ → Claude รับแทน (เสีย model diversity)" แล้วเดินงานต่อ ไม่ต้องหยุดรอ
+- orchestrator จะ spawn pane ชื่อ role เดิมแต่รันด้วย claude
+- เวลา propose/fire ให้ **บอก user 1 บรรทัด** ว่า "{_all_unavailable} ใช้ไม่ได้ → Claude รับแทน (เสีย model diversity)" แล้วเดินงานต่อ ไม่ต้องหยุดรอ
 
 Status เปลี่ยนระหว่าง session: cockpit จะ inject `[system] <provider> ENABLED/DISABLED` message
 """
