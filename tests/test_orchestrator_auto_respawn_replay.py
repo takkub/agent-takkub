@@ -151,7 +151,12 @@ class TestAutoRespawnReplay:
             "[ROLE: codex reviewer — ทำงานเองโดยตรง ห้าม spawn subagent]\nCross-check refactor X."
         )
 
+        # The rewrite gate uses effective_provider_for(), which degrades codex
+        # → claude when the codex CLI isn't installed (provider substitution).
+        # CI runners have no codex binary, so force it "available" here to test
+        # the rewrite deterministically regardless of environment.
         with (
+            patch("agent_takkub.provider_config._provider_available", return_value=True),
             patch.object(orch, "spawn", return_value=(True, "spawned")),
             patch.object(orch, "_send_when_ready") as mock_send,
         ):

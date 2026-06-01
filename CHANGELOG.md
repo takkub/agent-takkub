@@ -6,63 +6,59 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [v0.5.1] - 2026-06-01
 
-### Fixed
-- **Issues no longer leak onto other projects' repos.** `new_issue` now defaults
-  `cockpit_bug=True`, so `takkub issue new` files against the **agent-takkub repo**
-  regardless of which project's pane it was run from — the cockpit tracker is for
-  cockpit/orchestrator/CLI/UI bugs. Previously the bug-check prompt *asked* agents
-  to pass `--cockpit-bug`, but a forgotten flag silently filed the issue on the
-  active project's repo (e.g. pms-api). New `--no-cockpit-bug` opt-out routes to
-  the active project's repo deliberately. Bug-check prompts updated; local
-  fallback store `.takkub_issues.json` gitignored.
+### Fixed (แก้)
+- **issue ไม่รั่วไป repo ของโปรเจคอื่นแล้ว** — `new_issue` เปลี่ยน default เป็น
+  `cockpit_bug=True` → `takkub issue new` ลง **agent-takkub repo เสมอ** ไม่ว่าจะ
+  สั่งจาก pane ของโปรเจคไหน (cockpit tracker มีไว้สำหรับบั๊กของ cockpit/orchestrator/
+  CLI/UI). เดิม bug-check prompt *ขอให้* ใส่ `--cockpit-bug` แต่พอ agent ลืม issue
+  ก็หลุดไปลง repo ของโปรเจคที่ active อยู่ (เช่น pms-api) เพิ่ม `--no-cockpit-bug`
+  เป็น opt-out ไว้ตั้งใจลง repo ของโปรเจค active. อัพเดต bug-check prompts; เพิ่ม
+  `.takkub_issues.json` (local fallback) ใน gitignore.
 
-### Added (Claude CLI update button)
-- **`⬆ Claude CLI` status-bar button** — checks whether the Claude Code CLI
-  (`@anthropic-ai/claude-code`, npm global) has a newer version and, if so,
-  runs an **AI compatibility analysis** before applying: fetches the upstream
-  CHANGELOG, slices it to the entries newer than the installed version, and
-  asks headless `claude -p` to assess them against the exact CLI surface the
-  cockpit depends on (`--append-system-prompt-file`, `--resume`/`--session-id`,
-  `--mcp-config`, `--plugin-dir`, `--fallback-model`, `--disallowed-tools`, the
-  token-meter JSONL shape, …) → a Thai report (กระทบ / เอามาใช้ได้ / ปลอดภัย +
-  คำแนะนำ). New `claude_update.py` + `ClaudeUpdateCheckWorker` (runs the
-  version/network/analysis off the Qt thread).
-- **Safe apply on Windows** — applying writes a detached updater script, quits
-  the cockpit (so Lead + all claude panes release the binary), runs
-  `npm install -g @anthropic-ai/claude-code@latest` with nothing holding the
-  files, then relaunches the cockpit. Sidesteps the file-lock brick that
-  disabled autoupdate. Confirm dialog shows how many live claude panes will be
-  closed.
-- **Findings → GitHub issue (auto)** — the analysis ends with a machine-readable
-  `<<<TAKKUB>>>` verdict (`ACTION_REQUIRED`/`SEVERITY`/`ISSUE_TITLE`). When the
-  new version means agent-takkub itself needs work, the cockpit auto-files a
-  GitHub issue against its own repo (`new_issue(cockpit_bug=True)`, tag
-  `claude-update`), deduped by version range so repeated checks don't spam the
-  tracker. The report dialog shows the issue #/URL — so the compatibility work
-  isn't lost when the dialog closes; the user fixes it on their own schedule.
+### Added (ปุ่มอัพเดต Claude CLI)
+- **ปุ่ม `⬆ Claude CLI` ใน status bar** — เช็คว่ามี Claude Code CLI
+  (`@anthropic-ai/claude-code`, npm global) version ใหม่ไหม ถ้ามีจะ **วิเคราะห์
+  ความเข้ากันได้ด้วย AI** ก่อนอัพเดต: ดึง CHANGELOG ของ upstream, ตัดเฉพาะส่วนที่
+  ใหม่กว่าที่ติดตั้ง, แล้วให้ headless `claude -p` ประเมินเทียบกับ flags ที่ cockpit
+  พึ่งพา (`--append-system-prompt-file`, `--resume`/`--session-id`, `--mcp-config`,
+  `--plugin-dir`, `--fallback-model`, `--disallowed-tools`, รูปแบบ JSONL ของ
+  token-meter ฯลฯ) → report ภาษาไทย (กระทบ / เอามาใช้ได้ / ปลอดภัย + คำแนะนำ).
+  เพิ่ม `claude_update.py` + `ClaudeUpdateCheckWorker` (รัน version/network/analysis
+  นอก Qt thread).
+- **อัพเดตปลอดภัยบน Windows** — ตอน apply จะเขียน detached updater script, ปิด
+  cockpit (Lead + claude pane ทุกตัวปล่อย binary), รัน
+  `npm install -g @anthropic-ai/claude-code@latest` ตอนไม่มีอะไรจับไฟล์อยู่, แล้ว
+  เปิด cockpit ใหม่. เลี่ยง file-lock ที่เคยทำ CLI พัง (เหตุผลที่ปิด autoupdate).
+  popup ยืนยันบอกจำนวน claude pane ที่จะถูกปิด.
+- **เจอว่าต้องแก้ → เปิด GitHub issue อัตโนมัติ** — ผลวิเคราะห์จบด้วย machine-readable
+  verdict `<<<TAKKUB>>>` (`ACTION_REQUIRED`/`SEVERITY`/`ISSUE_TITLE`). ถ้า version
+  ใหม่หมายความว่า agent-takkub ต้องแก้ระบบ → cockpit เปิด GitHub issue เข้า repo
+  ตัวเองให้ (`new_issue(cockpit_bug=True)`, tag `claude-update`), dedup ตาม version
+  range กันสแปมเวลากดเช็คซ้ำ. dialog โชว์เลข issue + URL → งานความเข้ากันได้ไม่หาย
+  ตอนปิด dialog ผู้ใช้มาแก้ทีหลังตามจังหวะตัวเองได้.
+
+## [v0.5.0] - 2026-06-01
 
 ### Added (provider substitution — Claude รับตำแหน่งแทน)
-- **Unavailable codex/gemini roles now fall back to Claude** instead of being
-  refused. Two ways a provider becomes unusable — **toggled off** in the status
-  bar OR its **CLI not installed** — are unified at the spawn layer:
-  `provider_config.effective_provider_for()` (runtime "which CLI is usable now",
-  vs `provider_for()` "which is configured") degrades an unavailable codex/gemini
-  role to `claude`. `orchestrator._spawn` gates the codex/gemini branches on it,
-  so an unavailable provider falls through to the claude branch **keeping its
-  role name** — a "gemini"/"codex" pane keeps its slot/identity but is powered
-  by `claude.exe`.
-- **Stand-in role prompts** `.claude/agents/{gemini,codex}.md` — read only on the
-  substitute path; tell the claude pane it is standing in (reports prefixed
-  `[claude-substitute for <role>]`) and flag the lost model diversity.
+- **role codex/gemini ที่ใช้ไม่ได้ ตกมาเป็น Claude แทน** แทนที่จะปฏิเสธ. 2 กรณีที่
+  provider ใช้ไม่ได้ — **ปิดผ่าน toggle** ใน status bar หรือ **ยังไม่ได้ติดตั้ง CLI**
+  — รวมจัดการที่ spawn layer: `provider_config.effective_provider_for()` (runtime
+  "ตอนนี้ CLI ไหนใช้ได้" ต่างจาก `provider_for()` ที่บอก "ตั้งค่าไว้เป็นอะไร") จะ
+  degrade role codex/gemini ที่ใช้ไม่ได้ → `claude`. `orchestrator._spawn` gate
+  branch codex/gemini ด้วยค่านี้ → provider ที่ใช้ไม่ได้ไหลลง branch claude **โดยคง
+  ชื่อ role เดิม** → pane "gemini"/"codex" ยังอยู่ตำแหน่ง/slot เดิม แต่รันด้วย
+  `claude.exe`.
+- **stand-in role prompts** `.claude/agents/{gemini,codex}.md` — อ่านเฉพาะตอน
+  substitute; บอก claude pane ว่ากำลังรับบทแทน (report ขึ้นต้น `[claude-substitute
+  for <role>]`) และเตือนว่าเสีย model diversity.
 
-### Changed
-- **Routing no longer refuses disabled codex/gemini** — `routing_planner.classify()`
-  routes them normally (no more `ASK_CLARIFY`, no cross_check stripping) and adds
-  a substitution note to `reason`; a disabled one-shot degrades to `FIRE_ASSIGN`
-  (a claude-backed pane — one-shot has no substitute path). The Lead spawn context
-  (`lead_context.py`), the toggle broadcast notice, and `CLAUDE.md` now tell Lead
-  to propose/fire the role and note the substitution, rather than tell the user to
-  enable it first.
+### Changed (เปลี่ยน)
+- **routing ไม่ปฏิเสธ codex/gemini ที่ถูกปิดอีกแล้ว** — `routing_planner.classify()`
+  route ตามปกติ (ไม่มี `ASK_CLARIFY`, ไม่ strip cross_check) + ใส่ substitution note
+  ใน `reason`; one-shot ที่ถูกปิด degrade เป็น `FIRE_ASSIGN` (pane ที่ backed ด้วย
+  claude — one-shot ไม่มี substitute path). Lead spawn context (`lead_context.py`),
+  toggle broadcast notice, และ `CLAUDE.md` เปลี่ยนเป็นบอก Lead ให้ propose/fire role
+  แล้วหมายเหตุเรื่อง substitution แทนที่จะบอกผู้ใช้ให้ไปเปิด provider ก่อน.
 
 ## [v0.4.0] - 2026-05-31
 

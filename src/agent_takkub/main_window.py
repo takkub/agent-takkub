@@ -579,6 +579,11 @@ class MainWindow(QMainWindow):
         )
         self._btn_claude_auth.setStyleSheet(self._ghost_button_style())
         self._btn_claude_auth.clicked.connect(self._on_claude_auth_clicked)
+        # Hidden per user request (kept for easy future restore). It's created +
+        # wired but NOT added to the status bar; hide() so an unplaced child
+        # doesn't render as a stray button at the window origin. To restore:
+        # delete this hide() line and re-add it to the Group-3 widget tuple below.
+        self._btn_claude_auth.hide()
 
         # Clickable /remote-control trigger. The built-in Claude Code command
         # bridges a local session to claude.ai/code for browser/phone
@@ -666,7 +671,9 @@ class MainWindow(QMainWindow):
             self._btn_install_rtk,
             self._btn_restart,
             self._btn_providers,
-            self._btn_claude_auth,
+            # self._btn_claude_auth,  # hidden per user request — uncomment to restore.
+            # The button + its handler are still created above; only its
+            # placement in the status bar is removed so it can come back easily.
             self._btn_claude_update,
             self._btn_update,
         ):
