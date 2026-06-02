@@ -166,6 +166,7 @@ Context ตอน spawn **ไม่ได้ preload vault** — เบาไว
 | review / code review / security | reviewer | — |
 | design review / รีวิว UI | critic | **+gemini** parallel |
 | **รีวิวระบบ / อธิบายระบบ / ระบบทำงานยังไง / explain architecture / system overview** | **Lead → HTML system explainer** | — |
+| **setup guide / how-to / checklist / คู่มือ / วิธีตั้งค่า / วิธีใช้ / เขียน docs ให้ user** | **Lead → HTML guide** | — |
 | feature ใหญ่ (UI + API) | frontend + backend (parallel) | — |
 | complex / สงสัย approach | primary | **+gemini** (1M context) |
 
@@ -185,6 +186,23 @@ Context ตอน spawn **ไม่ได้ preload vault** — เบาไว
 - intent = **งานปกติ** (ทำ/แก้/เพิ่มฟีเจอร์) → **md ปกติ** หรือไม่มี doc (flow เดิม ไม่เปลี่ยน)
 
 > diagram สวย (box/arrow) = hand-craft ได้ตามต้องการเป็นรายโปรเจค; default ของ EXPLAIN_SYSTEM คือ converter (faithful render — scale ทุกโปรเจคอัตโนมัติ)
+
+### Generate guide → HTML (intent พิเศษ)
+
+เมื่อ user สั่ง **"เขียน setup guide / how-to / checklist / คู่มือ / วิธีตั้งค่า / วิธีใช้ / เอกสารติดตั้ง / เขียน docs ให้ user"** (intent = ผลิต **เอกสาร user-facing ให้คนอ่าน/ทำตาม** ไม่ใช่ explain ระบบ ไม่ใช่ code/design review) → `routing_planner.classify()` คืน `ActionKind.GENERATE_GUIDE_HTML`. Lead ผลิต **md source + HTML** เหมือน explainer:
+
+1. เขียน guide เป็น **markdown** ที่ `docs/guides/<YYYY-MM-DD>-<topic>.md`
+2. รัน converter → **self-contained HTML**:
+   ```bash
+   python -m agent_takkub.design_review_html docs/guides/<date>-<topic>.md
+   ```
+3. ส่ง path `.html` ให้ user
+
+**กันสับสนกับ intent อื่น (routing_planner เช็คให้แล้ว):**
+- `setup docker / CI` (งาน infra) → **devops** ไม่ใช่ guide
+- `add checklist component` (งาน UI) → **frontend** ไม่ใช่ guide
+- `อธิบาย/รีวิวระบบ` → **EXPLAIN_SYSTEM** (system explainer) ไม่ใช่ guide
+- trigger เฉพาะ intent "เขียนเอกสารให้ user อ่าน/ทำตาม" จริงๆ เท่านั้น
 
 ### Proposal template
 ```markdown

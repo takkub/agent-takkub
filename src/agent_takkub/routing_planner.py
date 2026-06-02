@@ -28,6 +28,9 @@ class ActionKind(Enum):
     ASK_CLARIFY = "ask_clarify"  # ambiguous — need more info before acting
     INFORMATIONAL = "info"  # pure question/explanation, just respond
     EXPLAIN_SYSTEM = "explain_system"  # "review/explain the system" → produce HTML explainer
+    GENERATE_GUIDE_HTML = (
+        "generate_guide_html"  # user-facing guide/setup/how-to/checklist → md source + HTML
+    )
 
 
 @dataclass
@@ -185,6 +188,38 @@ _EXPLAIN_SYSTEM = re.compile(
     r"|\bhow\s+(?:does|do)\b[^.\n]{0,25}\b(?:system|architecture|the\s*app|everything)\b"
     r"[^.\n]{0,15}\bwork"
     r"|\b(?:system|architecture)\s+(?:overview|explainer|diagram|map|walkthrough)\b"
+    r")",
+    re.IGNORECASE,
+)
+
+# "Write a setup guide / how-to / checklist / คู่มือ" for users → produce md source + HTML.
+# Requires an explicit doc-indicator word or combination so bare "setup docker"
+# and "add checklist component" don't false-positive.
+#
+# Positive: เขียน setup guide สำหรับ LINE · คู่มือการใช้งาน · วิธีตั้งค่า X
+#           installation guide · getting started guide · checklist for deploy
+# Negative: setup docker compose · setup CI pipeline · add checklist component
+_GENERATE_GUIDE = re.compile(
+    r"(?:"
+    # ── Thai standalone doc-indicator words ──────────────────────────────────
+    r"คู่มือ"  # "user manual / guide"
+    r"|วิธีตั้งค่า"  # "how to configure"
+    r"|วิธีใช้"  # "how to use"
+    r"|เอกสาร(?:ติดตั้ง|การใช้งาน|สำหรับผู้ใช้)"  # "installation/usage docs"
+    r"|เขียน\s*(?:docs?|เอกสาร)\s*(?:ให้|สำหรับ)"  # "write docs for"
+    # ── Thai checklist with doc-writing context ───────────────────────────────
+    r"|(?:เขียน|สร้าง|ทำ)\s*checklist"  # "write/create checklist"
+    r"|checklist\s*(?:สำหรับ|ของ|ให้)"  # "checklist for/of X"
+    # ── English: "<topic> guide/tutorial/manual/how-to/checklist" ────────────
+    r"|\b(?:setup|install(?:ation)?|getting[- ]started|onboarding|usage|user)"
+    r"\s+(?:guide|tutorial|manual|how.to|instructions?|walkthrough|checklist)\b"
+    # ── English: "write/create/draft <...> guide/tutorial/manual/how-to" ─────
+    r"|\b(?:write|create|make|draft|build|produce)\b[^.\n]{0,30}"
+    r"\b(?:guide|how.to|tutorial|manual|walkthrough)\b"
+    # ── Other English doc-intent patterns ────────────────────────────────────
+    r"|\bhow.to\s+guide\b"
+    r"|\bstep.by.step\s+(?:guide|instructions?|tutorial)\b"
+    r"|\bchecklist\s+for\b"  # "checklist for X"
     r")",
     re.IGNORECASE,
 )
@@ -471,7 +506,22 @@ def classify(user_message: str, context: dict | None = None) -> RoutingAction:
             result.task_hint = msg
             return result
 
-    # 4. "Explain / review the system" → produce an HTML system explainer.
+    # 4. User-facing guide / setup / how-to / checklist → produce md source + HTML.
+    # Checked before EXPLAIN_SYSTEM so "write a guide on how the system works"
+    # (guide intent more specific) and before the informational short-circuit so
+    # "วิธีใช้ X" / "วิธีตั้งค่า X" don't degrade to a plain chat answer.
+    # No role to assign — Lead writes the .md then runs design_review_html.
+    if _GENERATE_GUIDE.search(msg):
+        return RoutingAction(
+            kind=ActionKind.GENERATE_GUIDE_HTML,
+            task_hint=msg,
+            reason=(
+                "user-facing guide/setup/checklist request → produce md source"
+                " + run design_review_html converter to emit .html"
+            ),
+        )
+
+    # 5. "Explain / review the system" → produce an HTML system explainer.
     # Checked before the informational short-circuit (so "ระบบทำงานยังไง"
     # doesn't degrade to a chat answer) and before the route table (so
     # "รีวิวระบบ" doesn't land on reviewer/critic). Pure-understanding intent
@@ -484,7 +534,7 @@ def classify(user_message: str, context: dict | None = None) -> RoutingAction:
             reason="explain/review-the-system request → produce HTML explainer (md source + converter)",
         )
 
-    # 5. Classify intent
+    # 7. Classify intent
     is_act = _is_actionable(msg)
     is_info = _is_informational(msg)
     is_mixed = is_act and is_info
@@ -495,7 +545,7 @@ def classify(user_message: str, context: dict | None = None) -> RoutingAction:
     if not is_act:
         return RoutingAction(kind=ActionKind.INFORMATIONAL, reason="no actionable verb detected")
 
-    # 6. Route actionable message to role(s)
+    # 8. Route actionable message to role(s)
     routing = _route(msg)
     primary = routing.get("role")
     cross_check = routing.get("cross_check")

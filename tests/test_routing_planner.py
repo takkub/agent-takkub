@@ -782,6 +782,131 @@ class TestDisabledProviders:
 # ─────────────────────────────────────────────────────────────────────
 
 
+# ─────────────────────────────────────────────────────────────────────
+# Generate guide / setup / how-to / checklist → HTML
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestGenerateGuideHTML:
+    # ── Positive: should return GENERATE_GUIDE_HTML ──────────────────
+
+    def test_thai_setup_guide(self):
+        assert classify("เขียน setup guide สำหรับ LINE").kind == ActionKind.GENERATE_GUIDE_HTML
+
+    def test_thai_kumrue_kaichaigan(self):
+        assert classify("สร้างคู่มือการใช้งาน takkub").kind == ActionKind.GENERATE_GUIDE_HTML
+
+    def test_thai_kumrue_standalone(self):
+        assert classify("เขียนคู่มือ takkub").kind == ActionKind.GENERATE_GUIDE_HTML
+
+    def test_thai_withi_tangkha(self):
+        assert classify("วิธีตั้งค่า LINE Notify").kind == ActionKind.GENERATE_GUIDE_HTML
+
+    def test_thai_withi_chai(self):
+        assert classify("วิธีใช้ takkub").kind == ActionKind.GENERATE_GUIDE_HTML
+
+    def test_thai_ekasan_titatang(self):
+        assert classify("เขียนเอกสารติดตั้ง docker").kind == ActionKind.GENERATE_GUIDE_HTML
+
+    def test_thai_kheian_docs_hai_user(self):
+        assert classify("เขียน docs ให้ user").kind == ActionKind.GENERATE_GUIDE_HTML
+
+    def test_thai_kheian_ekasan_samrab(self):
+        assert classify("เขียน เอกสาร สำหรับ LINE setup").kind == ActionKind.GENERATE_GUIDE_HTML
+
+    def test_thai_checklist_samrab(self):
+        """'สร้าง checklist สำหรับ LINE setup' — canonical issue #30 example."""
+        assert classify("สร้าง checklist สำหรับ LINE setup").kind == ActionKind.GENERATE_GUIDE_HTML
+
+    def test_thai_kheian_checklist(self):
+        assert classify("เขียน checklist deploy").kind == ActionKind.GENERATE_GUIDE_HTML
+
+    def test_en_setup_guide(self):
+        assert (
+            classify("write a setup guide for the project").kind == ActionKind.GENERATE_GUIDE_HTML
+        )
+
+    def test_en_installation_guide(self):
+        assert classify("create an installation guide").kind == ActionKind.GENERATE_GUIDE_HTML
+
+    def test_en_how_to_guide(self):
+        assert classify("write a how-to guide for the API").kind == ActionKind.GENERATE_GUIDE_HTML
+
+    def test_en_checklist_for(self):
+        assert (
+            classify("write a checklist for the deploy process").kind
+            == ActionKind.GENERATE_GUIDE_HTML
+        )
+
+    def test_en_getting_started_guide(self):
+        assert classify("create a getting started guide").kind == ActionKind.GENERATE_GUIDE_HTML
+
+    def test_en_user_guide(self):
+        assert classify("write a user guide").kind == ActionKind.GENERATE_GUIDE_HTML
+
+    def test_en_onboarding_checklist(self):
+        assert classify("create onboarding checklist").kind == ActionKind.GENERATE_GUIDE_HTML
+
+    def test_en_step_by_step_guide(self):
+        assert (
+            classify("write a step-by-step guide for deployment").kind
+            == ActionKind.GENERATE_GUIDE_HTML
+        )
+
+    def test_task_hint_carried(self):
+        action = classify("วิธีใช้ takkub")
+        assert action.task_hint == "วิธีใช้ takkub"
+
+    def test_reason_mentions_html(self):
+        action = classify("สร้างคู่มือ takkub")
+        assert ".html" in action.reason.lower()
+
+    # ── Negative: must NOT trigger GENERATE_GUIDE_HTML ───────────────
+
+    def test_setup_docker_is_devops(self):
+        """'setup docker compose' is a devops task, not a guide."""
+        result = classify("setup docker compose for the project")
+        assert result.kind != ActionKind.GENERATE_GUIDE_HTML
+        assert result.role == "devops"
+
+    def test_setup_ci_is_devops(self):
+        """'setup CI pipeline' is devops, not a guide."""
+        result = classify("setup CI pipeline")
+        assert result.kind != ActionKind.GENERATE_GUIDE_HTML
+        assert result.role == "devops"
+
+    def test_add_checklist_component_is_frontend(self):
+        """'add checklist component' is frontend UI — no doc-intent marker."""
+        result = classify("add a checklist component")
+        assert result.kind != ActionKind.GENERATE_GUIDE_HTML
+        assert result.role == "frontend"
+
+    def test_explain_system_still_explain_system(self):
+        """EXPLAIN_SYSTEM pattern 'อธิบายระบบ' unaffected by new check."""
+        result = classify("อธิบายระบบ")
+        assert result.kind == ActionKind.EXPLAIN_SYSTEM
+
+    def test_design_review_unaffected(self):
+        result = classify("design review หน้า login")
+        assert result.kind != ActionKind.GENERATE_GUIDE_HTML
+        assert result.role == "critic"
+
+    def test_code_review_unaffected(self):
+        result = classify("do a code review for auth PR")
+        assert result.kind != ActionKind.GENERATE_GUIDE_HTML
+        assert result.role == "reviewer"
+
+    def test_normal_impl_unaffected(self):
+        result = classify("เพิ่ม login form")
+        assert result.kind != ActionKind.GENERATE_GUIDE_HTML
+        assert result.role == "frontend"
+
+    def test_rollout_plan_not_guide(self):
+        result = classify("create a rollout plan for the new auth system")
+        assert result.kind != ActionKind.GENERATE_GUIDE_HTML
+        assert result.role == "gemini"
+
+
 class TestExplainSystem:
     def test_thai_review_system_how_it_works(self):
         # the user's canonical example
