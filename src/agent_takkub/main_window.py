@@ -616,20 +616,13 @@ class MainWindow(QMainWindow):
         self._btn_open_shell.setStyleSheet(self._ghost_button_style())
         self._btn_open_shell.clicked.connect(self._on_open_shell_clicked)
 
-        self._btn_providers = QPushButton("🤖 Providers", self)
-        self._btn_providers.setToolTip(
-            "Configure which CLI (claude / codex / gemini) backs each teammate role.\n"
-            "Edits ~/.takkub/role-providers.json. Live — applies to the\n"
-            "next pane you spawn, no cockpit restart needed."
-        )
-        self._btn_providers.setStyleSheet(self._ghost_button_style())
-        self._btn_providers.clicked.connect(self._on_providers_clicked)
-
         self._btn_pipelines = QPushButton("⚙ Pipelines", self)
         self._btn_pipelines.setToolTip(
             "Build dev pipelines: drag roles into hops, save reusable templates,\n"
-            "toggle providers/roles. Edits ~/.takkub/pipelines.json (provider\n"
-            "on/off shares ~/.takkub/disabled-providers.json with the chips)."
+            "toggle providers, enable/disable roles, and pick each role's CLI\n"
+            "(claude/codex/gemini). Edits ~/.takkub/pipelines.json +\n"
+            "disabled-providers.json + role-providers.json. Applies to the\n"
+            "next pane you spawn, no restart needed."
         )
         self._btn_pipelines.setStyleSheet(self._ghost_button_style())
         self._btn_pipelines.clicked.connect(self._on_pipelines_clicked)
@@ -739,7 +732,6 @@ class MainWindow(QMainWindow):
             self._chip_gemini,
             self._btn_install_rtk,
             self._btn_restart,
-            self._btn_providers,
             self._btn_pipelines,
             # self._btn_claude_auth,  # hidden per user request — uncomment to restore.
             # The button + its handler are still created above; only its
@@ -1060,23 +1052,6 @@ class MainWindow(QMainWindow):
         self._lead_first_input_fired.add(project)
         self.orch.inject_slash_command_when_ready(LEAD.name, "/remote-control", project=project)
         self._status.showMessage(f"bridging Lead·{project} → claude.ai/code", 4_000)
-
-    def _on_providers_clicked(self) -> None:
-        """Open the role-provider config dialog. On save the dialog writes
-        `~/.takkub/role-providers.json`; `orchestrator.spawn()` re-reads
-        that file every time, so the new mapping applies to the very
-        next pane the user opens — no restart needed. Already-running
-        panes keep whatever CLI they were spawned with.
-        """
-        from .provider_dialog import RoleProviderDialog
-
-        dlg = RoleProviderDialog(self)
-        if dlg.exec() != dlg.DialogCode.Accepted:
-            return
-        self._status.showMessage(
-            "Role providers saved — new mapping applies to the next pane you spawn.",
-            6_000,
-        )
 
     def _on_pipelines_clicked(self) -> None:
         """Open the pipeline-settings dialog (drag-drop hops, templates,

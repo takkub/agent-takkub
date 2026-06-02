@@ -370,6 +370,8 @@
   .togglerow.locked{opacity:.9;}
   .togglerow.off{opacity:.6;}
   .lock-tag{font-size:10px;color:var(--tx-dim);border:1px solid var(--border);border-radius:999px;padding:1px 7px;}
+  .cli-pick{display:inline-flex;align-items:center;}
+  .cli-pick select{font-size:11.5px;padding:3px 6px;min-width:78px;}
 
   /* switch */
   .sw{position:relative;width:38px;height:20px;flex:none;cursor:pointer;}
@@ -569,6 +571,9 @@ const DEFAULT_CWD = {
 const STATE = {
   providers: { codex:true, gemini:true },          // true = native CLI · false = → Claude substitute
   rolesEnabled: Object.fromEntries(PALETTE_ORDER.map(r=>[r,true])),
+  // per-role CLI engine (role → claude/codex/gemini). codex/gemini roles are
+  // locked to their identity; everything else defaults to claude.
+  roleProviders: Object.fromEntries(PALETTE_ORDER.map(r=>[r, ROLES[r].provider || "claude"])),
 };
 
 /* ─────────────────────────────────────────────────────────────
@@ -609,7 +614,7 @@ function esc(s){
   });
 }
 function snapshot(){
-  return JSON.stringify({t:TEMPLATES, p:STATE.providers, e:STATE.rolesEnabled, a:activeTplId});
+  return JSON.stringify({t:TEMPLATES, p:STATE.providers, e:STATE.rolesEnabled, m:STATE.roleProviders, a:activeTplId});
 }
 function activeTpl(){ return TEMPLATES.find(t=>t.id===activeTplId); }
 function uid(){ return "tpl"+Math.random().toString(36).slice(2,8); }
@@ -1133,6 +1138,29 @@ function renderProvidersTab(){
         meta.provider ? (sub?"provider ปิด — pane นี้รันด้วย Claude":"non-Claude provider role")
                       : (on?"Claude-backed role":"<b>disabled</b> — เอาออกจากทุก pipeline แล้ว")
       }</span>`;
+    // per-role CLI engine: codex/gemini roles are locked to their identity;
+    // every other role gets a claude/codex/gemini dropdown (role→CLI mapping,
+    // folded in from the retired 🤖 Providers dialog → role-providers.json).
+    const cli = document.createElement("span");
+    cli.className = "cli-pick";
+    if(meta.provider){
+      cli.innerHTML = `<span class="lock-tag mono">${meta.provider} CLI</span>`;
+    } else {
+      const seld = document.createElement("select");
+      seld.title = "CLI engine ที่ใช้รัน role นี้ (claude = default)";
+      ["claude","codex","gemini"].forEach(p=>{
+        const o=document.createElement("option"); o.value=p; o.textContent=p;
+        if((STATE.roleProviders[role]||"claude")===p) o.selected=true;
+        seld.appendChild(o);
+      });
+      seld.addEventListener("click", e=>e.stopPropagation());
+      seld.addEventListener("change", ()=>{
+        STATE.roleProviders[role]=seld.value; markDirty();
+        toast(`${meta.label} → ${seld.value} CLI`);
+      });
+      cli.appendChild(seld);
+    }
+    row.appendChild(cli);
     row.appendChild(makeSwitch(on, false, val=>{
       STATE.rolesEnabled[role]=val; markDirty(); renderAll();
       toast(val? `${meta.label} enabled` : `${meta.label} disabled — เอาออกจากทุก pipeline`);
@@ -1196,7 +1224,8 @@ document.getElementById("saveBtn").addEventListener("click", ()=>{
   if (window.__bridge && window.__bridge.savePipelines) {
     window.__bridge.savePipelines(JSON.stringify({
       templates: TEMPLATES, providers: STATE.providers,
-      rolesEnabled: STATE.rolesEnabled, activeTemplate: activeTplId
+      rolesEnabled: STATE.rolesEnabled, roleProviders: STATE.roleProviders,
+      activeTemplate: activeTplId
     }));
     // persist (above) is queued before this close call → save lands first.
     if (window.__bridge.closeDialog) window.__bridge.closeDialog(true);
@@ -1206,6 +1235,7 @@ document.getElementById("cancelBtn").addEventListener("click", ()=>{
   if(dirty && !confirm("ทิ้งการแก้ไขที่ยังไม่ได้ save?")) return;
   const s = JSON.parse(savedSnapshot);
   TEMPLATES = s.t; STATE.providers = s.p; STATE.rolesEnabled = s.e; activeTplId = s.a;
+  if(s.m) STATE.roleProviders = s.m;
   dirty=false; selection=null;
   document.getElementById("dirtyFlag").classList.remove("show");
   document.getElementById("saveBtn").disabled = true;
@@ -1240,6 +1270,7 @@ function applyLoadedState(data){
     if(Array.isArray(data.templates) && data.templates.length) TEMPLATES = data.templates;
     if(data.providers)    STATE.providers    = Object.assign({}, STATE.providers, data.providers);
     if(data.rolesEnabled) STATE.rolesEnabled = Object.assign({}, STATE.rolesEnabled, data.rolesEnabled);
+    if(data.roleProviders) STATE.roleProviders = Object.assign({}, STATE.roleProviders, data.roleProviders);
     if(data.activeTemplate && TEMPLATES.some(t=>t.id===data.activeTemplate)) activeTplId = data.activeTemplate;
   }
   if(!TEMPLATES.some(t=>t.id===activeTplId)) activeTplId = TEMPLATES[0].id;

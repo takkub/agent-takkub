@@ -166,3 +166,46 @@ class TestSaveProviders:
         # if the caller passes typos.
         provider_config.save_providers({"backend": "codex", "ml": "openrouter"})
         assert provider_config.load_providers() == {"backend": "codex"}
+
+
+class TestRoleProviderMap:
+    def test_maps_each_role_to_its_cli(self, redirect_config_path: Path) -> None:
+        redirect_config_path.write_text('{"backend": "codex"}', encoding="utf-8")
+        m = provider_config.role_provider_map(["frontend", "backend", "codex", "gemini"])
+        assert m == {
+            "frontend": "claude",  # default
+            "backend": "codex",  # override
+            "codex": "codex",  # forced identity
+            "gemini": "gemini",  # forced identity
+        }
+
+
+class TestSaveRoleOverrides:
+    def test_drops_claude_defaults_and_forced_roles(self, redirect_config_path: Path) -> None:
+        provider_config.save_role_overrides(
+            {
+                "frontend": "claude",  # default → dropped
+                "backend": "codex",  # real override → kept
+                "qa": "gemini",  # real override → kept
+                "lead": "codex",  # forced → dropped
+                "codex": "codex",  # forced → dropped
+                "gemini": "gemini",  # forced → dropped
+            }
+        )
+        assert provider_config.load_providers() == {"backend": "codex", "qa": "gemini"}
+
+    def test_drops_invalid_providers(self, redirect_config_path: Path) -> None:
+        provider_config.save_role_overrides({"backend": "codex", "ml": "openrouter"})
+        assert provider_config.load_providers() == {"backend": "codex"}
+
+    def test_empty_or_none_writes_empty(self, redirect_config_path: Path) -> None:
+        provider_config.save_role_overrides({})
+        assert provider_config.load_providers() == {}
+        provider_config.save_role_overrides(None)  # type: ignore[arg-type]
+        assert provider_config.load_providers() == {}
+
+    def test_replaces_existing_file(self, redirect_config_path: Path) -> None:
+        provider_config.save_providers({"backend": "codex", "qa": "gemini"})
+        # New save with only backend → qa override must be gone (full replace).
+        provider_config.save_role_overrides({"backend": "gemini"})
+        assert provider_config.load_providers() == {"backend": "gemini"}

@@ -35,7 +35,7 @@ from PyQt6.QtWebChannel import QWebChannel
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWidgets import QDialog, QMessageBox, QVBoxLayout, QWidget
 
-from . import pipeline_config, provider_state
+from . import pipeline_config, provider_config, provider_state
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 _PAGE_URL = QUrl.fromLocalFile(str(_STATIC_DIR / "pipeline_settings.html"))
@@ -66,6 +66,9 @@ class _PipelineBridge(QObject):
         payload = pipeline_config.with_providers(
             payload, provider_state.all_disabled(), provider_state.TOGGLABLE
         )
+        # Per-role CLI mapping (role→claude/codex/gemini), folded in from the
+        # retired standalone Providers dialog.
+        payload["roleProviders"] = provider_config.role_provider_map(pipeline_config.VALID_ROLES)
         return json.dumps(payload)
 
     @pyqtSlot(str)
@@ -85,7 +88,11 @@ class _PipelineBridge(QObject):
             self.pending_provider_disabled = pipeline_config.provider_disabled_targets(
                 data, provider_state.TOGGLABLE
             )
-            pipeline_config.save(data)  # ignores the providers key it carries
+            pipeline_config.save(data)  # ignores the providers / roleProviders keys it carries
+            # Per-role CLI mapping → role-providers.json (forced roles + claude dropped).
+            role_providers = data.get("roleProviders")
+            if isinstance(role_providers, dict):
+                provider_config.save_role_overrides(role_providers)
             self.savedOk.emit()  # only after successful disk write
         except (json.JSONDecodeError, TypeError) as e:
             self.saveError.emit(f"couldn't parse settings: {e}")
