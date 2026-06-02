@@ -3016,10 +3016,108 @@ class MainWindow(QMainWindow):
         proj_name = widget.project_name
 
         menu = QMenu(self)
+        act_edit = menu.addAction("✏️ Edit project…")
         act_rules = menu.addAction("📋 Edit project rules…")
         chosen = menu.exec(bar.mapToGlobal(pos))
-        if chosen is act_rules:
+        if chosen is act_edit:
+            self._on_edit_project_clicked(proj_name)
+        elif chosen is act_rules:
             self._on_edit_project_rules_clicked(proj_name)
+
+    def _on_edit_project_clicked(self, proj_name: str) -> None:
+        """Edit an existing project's description and paths in-place (no restart needed)."""
+        from pathlib import Path
+
+        from PyQt6.QtWidgets import (
+            QDialog,
+            QDialogButtonBox,
+            QFileDialog,
+            QFormLayout,
+            QLineEdit,
+            QMessageBox,
+            QVBoxLayout,
+        )
+
+        from .config import PROJECTS_JSON, load_projects
+
+        data = load_projects()
+        existing = (data.get("projects") or {}).get(proj_name, {})
+        if not existing:
+            QMessageBox.warning(self, "Project not found", f"Project '{proj_name}' not found.")
+            return
+
+        existing_paths: dict[str, str] = existing.get("paths", {})
+        existing_desc: str = existing.get("description", proj_name)
+        existing_presets: list = existing.get("presets", [])
+
+        # Infer project root from configured paths
+        non_main = {k: v for k, v in existing_paths.items() if k != "main"}
+        if non_main:
+            p = Path(next(iter(non_main.values()))).parent
+        elif "main" in existing_paths:
+            p = Path(existing_paths["main"])
+        else:
+            p = None
+
+        if p is None or not p.exists():
+            dir_path = QFileDialog.getExistingDirectory(
+                self, f"Select root folder for '{proj_name}'"
+            )
+            if not dir_path:
+                return
+            p = Path(dir_path)
+
+        # Step 1: description dialog
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Edit project: {proj_name}")
+        dlg.resize(420, 130)
+        lay = QVBoxLayout(dlg)
+        form = QFormLayout()
+        desc_edit = QLineEdit(existing_desc)
+        form.addRow("Description:", desc_edit)
+        lay.addLayout(form)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        lay.addWidget(buttons)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        new_desc = desc_edit.text().strip() or existing_desc
+
+        # Step 2: paths mapping dialog (pre-fills existing mapping automatically)
+        paths = self._run_map_paths_dialog(p)
+        if paths is None:
+            return
+
+        # Step 3: validate all configured paths exist on disk
+        missing = [v for v in paths.values() if not Path(v).exists()]
+        if missing:
+            QMessageBox.warning(
+                self,
+                "Invalid paths",
+                "These paths do not exist:\n" + "\n".join(missing),
+            )
+            return
+
+        # Step 4: write atomically, preserving presets; reload without restart
+        data = load_projects()
+        if "projects" not in data:
+            data["projects"] = {}
+        data["projects"][proj_name] = {
+            "description": new_desc,
+            "paths": paths,
+            "presets": existing_presets,
+        }
+
+        PROJECTS_JSON.parent.mkdir(parents=True, exist_ok=True)
+        _write_json_atomic(PROJECTS_JSON, data)
+
+        self._refresh_project_list()
+        self._status.showMessage(f"Updated project '{proj_name}'", 4_000)
 
     # ──────────────────────────────────────────────────────────────
     # window state persistence
