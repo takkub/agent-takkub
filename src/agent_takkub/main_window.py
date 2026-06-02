@@ -625,6 +625,15 @@ class MainWindow(QMainWindow):
         self._btn_providers.setStyleSheet(self._ghost_button_style())
         self._btn_providers.clicked.connect(self._on_providers_clicked)
 
+        self._btn_pipelines = QPushButton("⚙ Pipelines", self)
+        self._btn_pipelines.setToolTip(
+            "Build dev pipelines: drag roles into hops, save reusable templates,\n"
+            "toggle providers/roles. Edits ~/.takkub/pipelines.json (provider\n"
+            "on/off shares ~/.takkub/disabled-providers.json with the chips)."
+        )
+        self._btn_pipelines.setStyleSheet(self._ghost_button_style())
+        self._btn_pipelines.clicked.connect(self._on_pipelines_clicked)
+
         self._btn_claude_auth = QPushButton("Claude Auth", self)
         self._btn_claude_auth.setToolTip(
             "Configure optional Claude Code base URL / API key / auth token overrides.\n"
@@ -731,6 +740,7 @@ class MainWindow(QMainWindow):
             self._btn_install_rtk,
             self._btn_restart,
             self._btn_providers,
+            self._btn_pipelines,
             # self._btn_claude_auth,  # hidden per user request — uncomment to restore.
             # The button + its handler are still created above; only its
             # placement in the status bar is removed so it can come back easily.
@@ -1065,6 +1075,32 @@ class MainWindow(QMainWindow):
             return
         self._status.showMessage(
             "Role providers saved — new mapping applies to the next pane you spawn.",
+            6_000,
+        )
+
+    def _on_pipelines_clicked(self) -> None:
+        """Open the pipeline-settings dialog (drag-drop hops, templates,
+        provider/role enable). On Save & Apply the page persists templates +
+        per-role enable to `~/.takkub/pipelines.json` via the bridge and stashes
+        the desired provider on/off. We then route any *changed* provider
+        through `orchestrator.toggle_provider` so it persists to
+        `disabled-providers.json`, repaints the status-bar chip, AND broadcasts
+        the `[system]` notice to live Lead panes — identical to a chip click.
+        Cancel / window-close discards (dialog returns Rejected).
+        """
+        from .pipeline_dialog import PipelineSettingsDialog
+        from .provider_state import is_disabled
+
+        dlg = PipelineSettingsDialog(self)
+        if dlg.exec() != dlg.DialogCode.Accepted:
+            return
+        # Apply only providers whose target state differs from disk — toggle_provider
+        # always broadcasts, so a no-op call would spam Lead panes spuriously.
+        for provider, target_disabled in dlg.bridge.pending_provider_disabled.items():
+            if target_disabled != is_disabled(provider):
+                self.orch.toggle_provider(provider, target_disabled)
+        self._status.showMessage(
+            "Pipeline settings saved — applies to the next pane you spawn.",
             6_000,
         )
 
