@@ -353,6 +353,20 @@ STUCK_THRESHOLD_S = 10 * 60
 # handles the hard cap separately).
 STUCK_RECOVER_COOLDOWN_S = 5 * 60
 
+# Throughput watchdog (issue #35): flag panes whose PTY output rate exceeds
+# RUNAWAY_BYTES_S continuously for RUNAWAY_DURATION_S seconds.
+#
+# Rationale for thresholds:
+#   500 KB/s — a fast build log (e.g. webpack) peaks around 100-200 KB/s;
+#   500 KB/s sustained is essentially only seen when a loop prints without
+#   any sleep (runaway agent).
+#   60 s — a single burst (e.g. `npm install`) can look high for ~10 s;
+#   requiring it to sustain 60 s eliminates transient spikes that are not
+#   worth bothering Lead about.
+RUNAWAY_BYTES_S = 500_000  # 500 KB/s sustained output rate
+RUNAWAY_DURATION_S = 60.0  # seconds of sustained overrate before warning Lead
+RUNAWAY_WARN_COOLDOWN_S = 300.0  # suppress repeat warnings for 5 min
+
 # Spinner-line filtering for content-delta stuck detection (Fix 3).
 # Lines matching any interrupt phrase or volatile counter pattern are excluded
 # from the hash so a pane that only emits spinner bytes is still detected as stuck.
@@ -672,6 +686,23 @@ def _exit_key(project: str, role: str) -> str:
     return f"{project}::{role}"
 
 
+def _resolve_project_memory(cwd: str | None) -> pathlib.Path | None:
+    """Return the Lead's MEMORY.md path for the project rooted at *cwd*, or None.
+
+    Claude Code encodes the project directory as the key under
+    ``~/.claude/projects/`` by replacing the OS separator and colon with ``-``.
+    For example ``C:\\Users\\monch\\web`` → ``C--Users-monch-web``.
+
+    Returns None when *cwd* is absent or no memory file exists yet.
+    """
+    if not cwd:
+        return None
+    encoded = str(pathlib.Path(cwd).resolve())
+    encoded = encoded.replace(os.sep, "-").replace(":", "-")
+    mem = pathlib.Path.home() / ".claude" / "projects" / encoded / "memory" / "MEMORY.md"
+    return mem if mem.exists() else None
+
+
 def _build_transcript_path(project_ns: str, role_name: str) -> str | None:
     """Return an absolute path for the PTY byte-stream transcript file, or
     None to disable capture for this pane.
@@ -746,6 +777,14 @@ class PaneState:
     last_content_change_ts: float | None = None
     # _last_spawn_resumed: True when the last spawn used --resume (not --session-id)
     last_spawn_resumed: bool = False
+    # throughput watchdog (issue #35) — snapshot of pane._tp_total_bytes taken
+    # each watchdog tick, plus the wall-clock of that snapshot.
+    tp_last_total: int = 0
+    tp_last_ts: float = 0.0
+    # Wall-clock when throughput first exceeded RUNAWAY_BYTES_S (None = not over)
+    tp_runaway_since: float | None = None
+    # Last time Lead was warned about this pane's runaway throughput
+    tp_warn_ts: float = 0.0
 
 
 class Orchestrator(QObject):
@@ -1246,6 +1285,34 @@ class Orchestrator(QObject):
             # markdown containing backticks, asterisks, and Thai text.)
             role_md_path = staging / "CLAUDE.md"
             if role_md_path.exists():
+                # Issue #33: inject a pointer to Lead's project-memory so the
+                # teammate can read domain rules (package manager, ports, vendor
+                # patterns) on demand without relying on Lead to echo them in
+                # every task spec.  Append to the already-materialised CLAUDE.md
+                # (agent_role_dir() always rewrites it fresh from the source
+                # .claude/agents/<role>.md, so the injection doesn't accumulate).
+                _mem_path = _resolve_project_memory(lead_cwd(project_ns) or spawn_cwd)
+                if _mem_path is not None:
+                    _existing_md = role_md_path.read_text(encoding="utf-8")
+                    _mem_section = f"""
+
+---
+
+## 📋 Project memory (Lead's constraint registry)
+
+Lead ของ project นี้มี auto-memory ที่บันทึก domain rules ไว้ที่:
+
+`{_mem_path}`
+
+**อ่านก่อนเริ่มงานที่แตะ:** dependency, lockfile, docker, ports, vendor pattern, หรือ tool ที่โปรเจ็คระบุว่าใช้:
+
+```
+Read("{_mem_path}")
+```
+
+MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง memory file ที่อธิบาย rule นั้นๆ อ่านเฉพาะ file ที่เกี่ยวกับงานของคุณ ไม่ต้องอ่านทั้งหมด
+"""
+                    role_md_path.write_text(_existing_md + _mem_section, encoding="utf-8")
                 role_md_file = str(role_md_path)
 
         try:
@@ -3357,6 +3424,28 @@ class Orchestrator(QObject):
                 last_content_ts = ps_ck.last_content_change_ts
                 if last_content_ts is None:
                     last_content_ts = last_out
+                # Throughput watchdog (issue #35): detect runaway output loops
+                # that flood the Qt main thread. The existing stuck detector
+                # only catches *silent* or *content-stable* panes; a pane in a
+                # runaway loop has ever-changing content and is never "stuck" by
+                # the existing metric. Here we measure byte rate and warn Lead.
+                _tp_total = getattr(pane, "_tp_total_bytes", 0)
+                if ps_ck.tp_last_ts > 0:
+                    _tp_elapsed = now - ps_ck.tp_last_ts
+                    if _tp_elapsed > 0:
+                        _tp_delta = _tp_total - ps_ck.tp_last_total
+                        _tp_rate = _tp_delta / _tp_elapsed
+                        if _tp_rate > RUNAWAY_BYTES_S:
+                            if ps_ck.tp_runaway_since is None:
+                                ps_ck.tp_runaway_since = now
+                            elif (now - ps_ck.tp_runaway_since) >= RUNAWAY_DURATION_S:
+                                if (now - ps_ck.tp_warn_ts) >= RUNAWAY_WARN_COOLDOWN_S:
+                                    self._warn_lead_runaway_pane(role, project_name, _tp_rate)
+                                    ps_ck.tp_warn_ts = now
+                        else:
+                            ps_ck.tp_runaway_since = None
+                ps_ck.tp_last_total = _tp_total
+                ps_ck.tp_last_ts = now
                 if (now - last_content_ts) < STUCK_THRESHOLD_S:
                     continue
                 last_recover = ps_ck.last_stuck_recover
@@ -3453,6 +3542,27 @@ class Orchestrator(QObject):
         # down the WebEngine view before the respawn binds a new one
         # to the same role slot.
         QTimer.singleShot(2_000, _do_respawn)
+
+    def _warn_lead_runaway_pane(self, role: str, project: str, rate_bps: float) -> None:
+        """Inject a one-line warning into Lead's input when a teammate pane has
+        sustained unusually high PTY throughput (issue #35 throughput watchdog).
+
+        Does *not* auto-recover: runaway output is not necessarily an agent bug
+        (e.g. a build streaming logs). We surface it so Lead can decide whether
+        to close the pane or let it continue."""
+        lead = self._project_panes(project).get(LEAD.name)
+        if not (lead and lead.session and lead.session.is_alive):
+            return
+        rate_kb = rate_bps / 1024
+        msg = (
+            f"⚠️ [runaway-output] {role} pane พ่น output ≈ {rate_kb:.0f} KB/s "
+            f"ต่อเนื่อง > {int(RUNAWAY_DURATION_S)}s — อาจติดลูป. "
+            f"ตรวจสอบ pane /{role} หรือ `takkub close --role {role}` ถ้าต้องการหยุด"
+        )
+        lead.session.write(msg)
+        QTimer.singleShot(150, lambda: lead.session and lead.session.write(b"\r"))
+        self.leadInjected.emit(msg)
+        _log_event("runaway_pane_warn", role=role, project=project, rate_kb=int(rate_kb))
 
     def _rate_limit_suppressed(self, project: str, role: str, pane: AgentPane, now: float) -> bool:
         """Return True if `pane` is rate-limited and the watchdog should leave

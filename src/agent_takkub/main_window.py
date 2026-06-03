@@ -17,6 +17,7 @@ axis — Lead always on the left, teammates stacked vertically on the right.
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -783,6 +784,16 @@ class MainWindow(QMainWindow):
         self._session_save_timer.setInterval(60_000)
         self._session_save_timer.timeout.connect(self.orch.write_session_snapshot)
         self._session_save_timer.start()
+
+        # Heartbeat for the dead-man watchdog in app.py._start_deadman_watchdog.
+        # The watchdog daemon thread reads _heartbeat_ts; if it stops advancing
+        # for ~30 s the watchdog assumes the main thread is wedged and calls
+        # os._exit(1). Writing a float is effectively atomic under CPython's GIL.
+        self._heartbeat_ts: float = time.monotonic()
+        self._heartbeat_timer = QTimer(self)
+        self._heartbeat_timer.setInterval(1_000)
+        self._heartbeat_timer.timeout.connect(self._tick_heartbeat)
+        self._heartbeat_timer.start()
 
         # Update check — two-stage strategy:
         # 1. singleShot 30 s after boot: first poll without blocking startup.
@@ -3148,6 +3159,9 @@ class MainWindow(QMainWindow):
         self._settings.setValue("window/geometry", self.saveGeometry())
         self._settings.setValue("split/main", self.main_split.sizes())
         self._settings.sync()
+
+    def _tick_heartbeat(self) -> None:
+        self._heartbeat_ts = time.monotonic()
 
     # ──────────────────────────────────────────────────────────────
     def closeEvent(self, event) -> None:
