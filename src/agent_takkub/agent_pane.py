@@ -124,7 +124,12 @@ class AgentPane(QFrame):
         # throughput watchdog to detect runaway-output panes.
         self._tp_total_bytes: int = 0
 
-        self.setObjectName(f"pane_{role.name}")
+        # Qt CSS ID selectors use "#id" syntax; a "#" inside the name itself
+        # breaks the parser (e.g. "pane_qa#1" → "#pane_qa#1" is invalid CSS).
+        # Sanitise by replacing "#" with "-" for the objectName/stylesheet while
+        # keeping role.name intact for signal identity and registry routing.
+        _css_safe = role.name.replace("#", "-")
+        self.setObjectName(f"pane_{_css_safe}")
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setStyleSheet(self._stylesheet())
 
@@ -580,8 +585,9 @@ class AgentPane(QFrame):
     # styling
     # ──────────────────────────────────────────────────────────────
     def _stylesheet(self) -> str:
+        _css_safe = self.role.name.replace("#", "-")
         return (
-            f"#pane_{self.role.name} {{"
+            f"#pane_{_css_safe} {{"
             "  background-color: #18181b;"
             "  border: 1px solid #27272a;"
             "  border-radius: 6px;"

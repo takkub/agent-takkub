@@ -37,7 +37,14 @@ class _FakeOrch:
         self.spawn_calls: list[tuple] = []
 
     def assign(
-        self, role, cwd=None, task="", requires_commit=False, auto_chain=False, project=None
+        self,
+        role,
+        cwd=None,
+        task="",
+        requires_commit=False,
+        auto_chain=False,
+        shard_total=0,
+        project=None,
     ):
         self.assign_calls.append((role, cwd, task, requires_commit, auto_chain))
         return True, "ok"

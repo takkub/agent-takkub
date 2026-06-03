@@ -20,7 +20,7 @@ import secrets
 import subprocess
 import time
 import uuid as _uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
@@ -666,6 +666,21 @@ def _render_hot_md(
     return "\n".join(lines)
 
 
+def _split_shard(key: str) -> tuple[str, int | None]:
+    """Split a pane key into ``(base_role, shard_index)``.
+
+    ``"qa#2"`` → ``("qa", 2)``;  ``"qa"`` → ``("qa", None)``
+
+    Used to separate instance identity (pane_key) from behaviour identity
+    (base_role) so shard panes load the correct role file, provider, cwd
+    defaults, and env config while staying independently keyed in the registry.
+    """
+    if "#" in key:
+        role, _, idx = key.partition("#")
+        return role, int(idx)
+    return key, None
+
+
 def _cwd_within_project(cwd: str, project: str, role_name: str) -> bool:
     """True when `cwd` resolves under one of `project`'s configured roots.
 
@@ -770,6 +785,8 @@ class PaneState:
     codex_spawn_ts: float | None = None
     # _last_send_ts: last delivery ts for stall detection
     last_send_ts: float = 0.0
+    # _shard_total: total shards in the fan-out group (0 = not a shard pane)
+    shard_total: int = 0
     # _harvest_hint_ts: cooldown for harvest-hint injection to Lead
     harvest_hint_ts: float = 0.0
     # _last_content_hash + _last_content_change_ts: content-delta stuck detection
@@ -785,6 +802,26 @@ class PaneState:
     tp_runaway_since: float | None = None
     # Last time Lead was warned about this pane's runaway throughput
     tp_warn_ts: float = 0.0
+
+
+@dataclass
+class ShardGroup:
+    """Aggregate state for a parallel QA fan-out (``assign --shards N``).
+
+    Keyed ``"{project_ns}::{base_role}"`` in ``Orchestrator._shard_groups``.
+    Created on the first shard assign; closed when all N shards report
+    done/failed or the timeout fires.
+    """
+
+    base_role: str
+    total: int
+    done: dict = field(default_factory=dict)  # {shard_key: note}
+    failed: set = field(default_factory=set)  # shard_keys that crashed
+    closed: bool = False
+
+
+# Timeout before injecting a partial handoff when shards don't all respond.
+_SHARD_GROUP_TIMEOUT_MS: int = 45 * 60 * 1000  # 45 minutes
 
 
 class Orchestrator(QObject):
@@ -889,6 +926,9 @@ class Orchestrator(QObject):
         # Lead is down (issue #13).
         self._pending_done_notices: dict[str, list[dict]] = {}
         self._load_pending_done_notices()
+        # Shard fan-out groups: keyed f"{project_ns}::{base_role}".
+        # Created on first shard assign, closed when all N shards report.
+        self._shard_groups: dict[str, ShardGroup] = {}
 
         # Per-cockpit-run capability token. Injected only into the Lead pane
         # env (TAKKUB_LEAD_TOKEN) so the Lead takkub CLI can authenticate
@@ -1009,11 +1049,16 @@ class Orchestrator(QObject):
         cwd: str | None = None,
         project: str | None = None,
         _from_auto_respawn: bool = False,
+        _shard_total: int = 0,
     ) -> tuple[bool, str]:
         try:
             role_name = validate_name(role_name, "role")
         except ValueError as exc:
             return False, str(exc)
+        # Separate instance key from behaviour key.
+        # base_role ("qa") → role file / provider / cwd / env config
+        # role_name ("qa#1") → registry key, pane_state key, TAKKUB_ROLE env
+        base_role, shard_idx = _split_shard(role_name)
         project_ns = self._resolve_project(project)
         project_panes = self._project_panes(project_ns)
         pane = project_panes.get(role_name)
@@ -1051,6 +1096,10 @@ class Orchestrator(QObject):
             _ps_spawn_clear.blocked_on_lead_ts = None
             if not _from_auto_respawn:
                 _ps_spawn_clear.auto_respawn_attempts = 0
+            # Auto-respawn path: recover shard_total so TAKKUB_SHARD_TOTAL is
+            # re-injected correctly when _shard_total wasn't passed explicitly.
+            if _shard_total == 0 and _ps_spawn_clear.shard_total > 0:
+                _shard_total = _ps_spawn_clear.shard_total
 
         # Fix 1: validate explicit cwd stays within the project's configured paths.
         # "default" namespace (unit-test / no-project) is exempt since it has no
@@ -1133,7 +1182,7 @@ class Orchestrator(QObject):
         # the availability probe and the spawn.
         from .provider_config import CODEX, GEMINI, effective_provider_for
 
-        effective_provider = effective_provider_for(role_name)
+        effective_provider = effective_provider_for(base_role)
 
         if effective_provider == GEMINI:
             from .gemini_helper import find_gemini_executable
@@ -1275,8 +1324,8 @@ class Orchestrator(QObject):
                     project_ns, post_compact_brief=post_compact_brief
                 )
         else:
-            staging = agent_role_dir(role_name)
-            spawn_cwd = cwd or default_cwd_for_role(role_name, project=project_ns) or str(staging)
+            staging = agent_role_dir(base_role)
+            spawn_cwd = cwd or default_cwd_for_role(base_role, project=project_ns) or str(staging)
             # When cwd is a project path, claude auto-discovers the project's
             # CLAUDE.md, not the role's specialist override. Pass the role's
             # markdown to --append-system-prompt-file so the specialist rules
@@ -1322,6 +1371,15 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
 
         env = _build_lead_env() if role_name == LEAD.name else _build_pane_env()
         env["TAKKUB_ROLE"] = role_name
+        # Shard env: let the agent know its instance identity vs behaviour identity.
+        # TAKKUB_BASE_ROLE = base role name (loads qa.md, correct Chrome config, etc.)
+        # TAKKUB_SHARD     = this shard's 1-based index (None-string when not a shard)
+        # TAKKUB_SHARD_TOTAL = total shards in the fan-out group
+        env["TAKKUB_BASE_ROLE"] = base_role
+        if shard_idx is not None:
+            env["TAKKUB_SHARD"] = str(shard_idx)
+            if _shard_total > 0:
+                env["TAKKUB_SHARD_TOTAL"] = str(_shard_total)
         # Tag the pane with its project so the `takkub` CLI inside the
         # session can stamp every JSON request with `from_project`. The
         # cli_server uses that to scope routing to panes in the *same*
@@ -1359,7 +1417,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         # install paths once at spawn time so the QA agent doesn't have
         # to remember to export the variable in every shell. Skip if
         # the user already provides CHROME_BIN at the cockpit level.
-        if role_name == "qa" and "CHROME_BIN" not in env:
+        if base_role == "qa" and "CHROME_BIN" not in env:
             for cand in (
                 r"C:\Program Files\Google\Chrome\Application\chrome.exe",
                 r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
@@ -1414,7 +1472,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         #   TAKKUB_TEAMMATE_EFFORT=""                  → no --effort
         #   TAKKUB_TEAMMATE_EFFORT="high"              → force high effort everywhere
         if role_name != LEAD.name:
-            tier_model, tier_effort, tier_fallback = _teammate_tier(role_name)
+            tier_model, tier_effort, tier_fallback = _teammate_tier(base_role)
             teammate_model = os.environ.get("TAKKUB_TEAMMATE_MODEL", tier_model).strip()
             if teammate_model:
                 argv.extend(["--model", teammate_model])
@@ -1456,7 +1514,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         # Set TAKKUB_EXTRA_PLUGINS env var to a `;`-separated list of plugin
         # root dirs (must each contain `.claude-plugin/plugin.json`) to add
         # more, or set it to empty string to suppress the defaults.
-        plugin_default = ";".join(_default_plugin_dirs(role_name))
+        plugin_default = ";".join(_default_plugin_dirs(base_role))
         plugin_dirs_raw = os.environ.get("TAKKUB_EXTRA_PLUGINS", plugin_default)
         for pdir in [p.strip() for p in plugin_dirs_raw.split(";") if p.strip()]:
             if (pathlib.Path(pdir) / ".claude-plugin" / "plugin.json").exists():
@@ -1481,7 +1539,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         try:
             from .shared_dev_tools import shared_mcp_config_path_for_role
 
-            mcp_cfg = shared_mcp_config_path_for_role(role_name)
+            mcp_cfg = shared_mcp_config_path_for_role(base_role)
         except Exception:
             mcp_cfg = None
         if mcp_cfg:
@@ -1816,9 +1874,10 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         task: str,
         requires_commit: bool = False,
         auto_chain: bool = False,
+        shard_total: int = 0,
         project: str | None = None,
     ) -> tuple[bool, str]:
-        ok, msg = self.spawn(role_name, cwd=cwd, project=project)
+        ok, msg = self.spawn(role_name, cwd=cwd, project=project, _shard_total=shard_total)
         if not ok:
             # The CLI already acked "task queued" to the Lead's shell before
             # this async spawn ran, so a failure here is invisible unless we
@@ -1831,7 +1890,8 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         # Use the *effective* provider: a codex role substituted by claude
         # (provider unavailable) must keep the plain task — codex-specific
         # task rewriting would only confuse the standing-in claude pane.
-        if effective_provider_for(role_name) == CODEX:
+        base_role_a = _split_shard(role_name)[0]
+        if effective_provider_for(base_role_a) == CODEX:
             task = _rewrite_task_for_codex(task)
 
         project_ns = self._resolve_project(project)
@@ -1842,6 +1902,19 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             ps_assign.requires_commit_on_done = True
         if auto_chain:
             ps_assign.auto_chain = True
+        if shard_total > 0:
+            ps_assign.shard_total = shard_total
+            # Create/update shard group for aggregate tracking.
+            group_key = f"{project_ns}::{base_role_a}"
+            if group_key not in self._shard_groups:
+                group = ShardGroup(base_role=base_role_a, total=shard_total)
+                self._shard_groups[group_key] = group
+                QTimer.singleShot(
+                    _SHARD_GROUP_TIMEOUT_MS,
+                    lambda gk=group_key, pns=project_ns: self._check_shard_group_timeout(pns, gk),
+                )
+            else:
+                self._shard_groups[group_key].total = shard_total
         self._send_when_ready(role_name, task, project=project)
         _log_event(
             "assign",
@@ -1850,6 +1923,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             task_preview=task[:120],
             requires_commit=requires_commit,
             auto_chain=auto_chain,
+            shard_total=shard_total,
         )
         return True, f"task queued for {role_name} (sending when ready)"
 
@@ -2026,6 +2100,22 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         self.leadInjected.emit(msg)
         _log_event("respawn_capped_warned", role=role_name, project=project_ns)
 
+        # Shard partial-pass: if this capped pane is a shard, record it as
+        # failed so the aggregate doesn't deadlock waiting forever.
+        base_role_c, shard_idx_c = _split_shard(role_name)
+        if shard_idx_c is not None:
+            key_c = f"{project_ns}::{role_name}"
+            ps_c = getattr(self, "_pane_state", {}).get(key_c) or PaneState()
+            if ps_c.shard_total > 0:
+                group_key_c = f"{project_ns}::{base_role_c}"
+                group_c = self._shard_groups.get(group_key_c)
+                if group_c and not group_c.closed:
+                    group_c.failed.add(role_name)
+                    if len(group_c.done) + len(group_c.failed) >= group_c.total:
+                        group_c.closed = True
+                        self._inject_shard_fanout_handoff(project_ns, group_c)
+                        self._shard_groups.pop(group_key_c, None)
+
     # ------------------------------------------------------------------
     # Peer CC durability helpers
     # ------------------------------------------------------------------
@@ -2156,6 +2246,86 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             )
             self._save_pending_done_notices(project_ns)
             _log_event("auto_chain_handoff_queued", project=project_ns)
+
+    def _inject_shard_fanout_handoff(
+        self, project_ns: str, group: ShardGroup, timed_out: bool = False
+    ) -> None:
+        """Inject a consolidated fan-out result to Lead after all N shards finish."""
+        project_panes = self._project_panes(project_ns)
+        lead = project_panes.get(LEAD.name)
+
+        done_count = len(group.done)
+        fail_count = len(group.failed)
+        total = group.total
+
+        if timed_out:
+            status = (
+                f"[qa fan-out timeout: {done_count}/{total} shards done"
+                + (f", {fail_count} failed" if fail_count else "")
+                + "]"
+            )
+        else:
+            status = (
+                f"[qa fan-out complete: {done_count}/{total} shards done"
+                + (f", {fail_count} failed" if fail_count else "")
+                + "]"
+            )
+
+        lines = [status]
+        for shard_key in sorted(group.done):
+            _, idx = _split_shard(shard_key)
+            lines.append(f"  shard {idx}: {group.done[shard_key] or 'done'}")
+        for shard_key in sorted(group.failed):
+            _, idx = _split_shard(shard_key)
+            lines.append(f"  shard {idx}: CRASHED (respawn-capped)")
+        if timed_out:
+            reported = set(group.done) | group.failed
+            for n in range(1, total + 1):
+                shard_key = f"{group.base_role}#{n}"
+                if shard_key not in reported:
+                    lines.append(f"  shard {n}: NO RESPONSE (timeout)")
+
+        message = "\n".join(lines)
+        if lead and lead.session and lead.session.is_alive:
+            lead.session.write(message.encode("utf-8"))
+            QTimer.singleShot(150, lambda: lead.session and lead.session.write(b"\r"))
+            self.leadInjected.emit(message)
+            _log_event(
+                "shard_fanout_complete",
+                project=project_ns,
+                base_role=group.base_role,
+                total=total,
+                done=done_count,
+                failed=fail_count,
+                timed_out=timed_out,
+            )
+        else:
+            self._pending_done_notices.setdefault(project_ns, []).append(
+                {
+                    "role": group.base_role,
+                    "note": f"shard fan-out {total} shards",
+                    "body": message,
+                }
+            )
+            self._save_pending_done_notices(project_ns)
+            _log_event("shard_fanout_queued", project=project_ns, base_role=group.base_role)
+
+    def _check_shard_group_timeout(self, project_ns: str, group_key: str) -> None:
+        """Fire a partial handoff if the shard group hasn't completed yet."""
+        group = self._shard_groups.get(group_key)
+        if group is None or group.closed:
+            return
+        group.closed = True
+        self._inject_shard_fanout_handoff(project_ns, group, timed_out=True)
+        self._shard_groups.pop(group_key, None)
+        _log_event(
+            "shard_group_timeout",
+            project=project_ns,
+            base_role=group.base_role,
+            done=len(group.done),
+            failed=len(group.failed),
+            total=group.total,
+        )
 
     def _flush_pending_done_notices(self, project_ns: str) -> None:
         """Deliver queued done notices to Lead if it is currently alive.
@@ -2416,6 +2586,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         _ps_done = getattr(self, "_pane_state", {}).get(key) or PaneState()
         had_requires_commit = _ps_done.requires_commit_on_done
         had_auto_chain = _ps_done.auto_chain
+        had_shard_total = _ps_done.shard_total
 
         # Opt-in commit handoff: if assign() was called with requires_commit=True,
         # check for a dirty working tree and forward a warning to Lead instead
@@ -2466,18 +2637,22 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 f"\n⚠ [requires-commit] {from_role} มี uncommitted changes รอ Lead review + commit:\n"
                 f"{files_preview}"
             )
-        if lead and lead.session and lead.session.is_alive:
-            lead.session.write(notice)
-            QTimer.singleShot(150, lambda: lead.session and lead.session.write(b"\r"))
-            self.leadInjected.emit(notice)
-        else:
-            # Lead is absent — queue notice so it isn't silently lost.
-            # Flushed when Lead next spawns via _flush_pending_done_notices.
-            self._pending_done_notices.setdefault(project_ns, []).append(
-                {"role": from_role, "note": note, "body": notice}
-            )
-            self._save_pending_done_notices(project_ns)
-            _log_event("done_notice_queued", project=project_ns, role=from_role)
+        # Shard panes: suppress per-shard notice to Lead — consolidated handoff
+        # (_inject_shard_fanout_handoff) is the single message Lead sees.
+        # Non-shard panes (had_shard_total == 0) use the normal notice path.
+        if had_shard_total == 0:
+            if lead and lead.session and lead.session.is_alive:
+                lead.session.write(notice)
+                QTimer.singleShot(150, lambda: lead.session and lead.session.write(b"\r"))
+                self.leadInjected.emit(notice)
+            else:
+                # Lead is absent — queue notice so it isn't silently lost.
+                # Flushed when Lead next spawns via _flush_pending_done_notices.
+                self._pending_done_notices.setdefault(project_ns, []).append(
+                    {"role": from_role, "note": note, "body": notice}
+                )
+                self._save_pending_done_notices(project_ns)
+                _log_event("done_notice_queued", project=project_ns, role=from_role)
 
         # Fix A: when this done event belongs to a background tab, emit a
         # cross-tab signal so main_window can flash the status bar even if
@@ -2501,6 +2676,18 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             ]
             if not pending:
                 self._inject_auto_chain_handoff(project_ns)
+
+        # Shard aggregate: record this shard's note and check if all N done.
+        if had_shard_total > 0:
+            base_role_d, _ = _split_shard(from_role)
+            group_key = f"{project_ns}::{base_role_d}"
+            group = self._shard_groups.get(group_key)
+            if group and not group.closed:
+                group.done[from_role] = note
+                if len(group.done) + len(group.failed) >= group.total:
+                    group.closed = True
+                    self._inject_shard_fanout_handoff(project_ns, group)
+                    self._shard_groups.pop(group_key, None)
 
         # mark pane done, auto-close after a delay so user can see it
         pane.set_state("done", note=note[:80] if note else "done")
@@ -2719,7 +2906,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             except OSError:
                 pass
 
-        if role in ("qa", "critic", "designer"):
+        if _split_shard(role)[0] in ("qa", "critic", "designer"):
             today = datetime.now().strftime("%Y-%m-%d")
             shot_dir = RUNTIME_DIR / "exports" / today / project_ns / "screenshots"
             try:
@@ -2816,7 +3003,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                         pass
 
             last_screenshot = ""
-            if role in ("qa", "critic", "designer"):
+            if _split_shard(role)[0] in ("qa", "critic", "designer"):
                 today = datetime.now().strftime("%Y-%m-%d")
                 shot_dir = RUNTIME_DIR / "exports" / today / project_ns / "screenshots"
                 try:
@@ -3476,6 +3663,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         snap_task = _ps_snap.last_assigned_task if _ps_snap is not None else None
         snap_auto_chain = _ps_snap.auto_chain if _ps_snap is not None else False
         snap_requires_commit = _ps_snap.requires_commit_on_done if _ps_snap is not None else False
+        snap_shard_total = _ps_snap.shard_total if _ps_snap is not None else 0
 
         self._ps(key).last_stuck_recover = now
         silent_for_s = int(now - getattr(pane, "_last_output_ts", now))
@@ -3512,6 +3700,8 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 self._ps(key).auto_chain = snap_auto_chain
             if snap_requires_commit:
                 self._ps(key).requires_commit_on_done = snap_requires_commit
+            if snap_shard_total:
+                self._ps(key).shard_total = snap_shard_total
             # m3 fix: if PTY teardown hasn't fired _on_session_exit yet (takes
             # longer than the 2s singleShot on a slow machine), _recent_exits
             # has no entry and spawn()'s can_resume returns False → blank session.
@@ -3521,7 +3711,13 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                     "cwd": snap_uuid_cwd or cwd or "",
                     "ts": time.time(),
                 }
-            ok, msg = self.spawn(role, cwd=cwd, project=project, _from_auto_respawn=True)
+            ok, msg = self.spawn(
+                role,
+                cwd=cwd,
+                project=project,
+                _from_auto_respawn=True,
+                _shard_total=snap_shard_total,
+            )
             _log_event("stuck_recover_respawn", role=role, project=project, ok=ok, msg=msg[:160])
             if not ok:
                 # Spawn failed — pop the whole PaneState (pane is dead, return

@@ -170,6 +170,7 @@ class CliServer(QObject):
                             task=req.get("task", ""),
                             requires_commit=bool(req.get("requires_commit", False)),
                             auto_chain=bool(req.get("auto_chain", False)),
+                            shard_total=int(req.get("shard_total", 0)),
                             project=from_project,
                         ),
                     )

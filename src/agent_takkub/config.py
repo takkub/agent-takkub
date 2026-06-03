@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 
 _SAFE_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+_SAFE_SHARD_IDX = re.compile(r"^[1-9][0-9]{0,2}$")  # 1–999
 
 
 def validate_name(value: str, kind: str) -> str:
@@ -17,8 +18,19 @@ def validate_name(value: str, kind: str) -> str:
     normalise their input still pass. Raises ValueError for anything that could
     escape the intended runtime subtree (traversal sequences, uppercase-only
     chars, spaces, empty string, …).
+
+    Shard-instance keys like ``"qa#1"`` are accepted: the role part is validated
+    with the usual regex and the numeric suffix must be 1–999.  The ``#`` is
+    never used as a path separator so it cannot escape the runtime subtree.
     """
     name = (value or "").lower().strip()
+    if "#" in name:
+        role_part, _, shard_part = name.partition("#")
+        if not _SAFE_NAME.fullmatch(role_part):
+            raise ValueError(f"invalid {kind}: {value!r}")
+        if not _SAFE_SHARD_IDX.fullmatch(shard_part):
+            raise ValueError(f"invalid {kind} shard index: {value!r}")
+        return name
     if not _SAFE_NAME.fullmatch(name):
         raise ValueError(f"invalid {kind}: {value!r}")
     return name

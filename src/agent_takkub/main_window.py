@@ -851,7 +851,13 @@ class MainWindow(QMainWindow):
             if self.orch._project_panes(tab.project_name).get(role_name) is not existing:
                 self.orch.register_pane(existing, project=tab.project_name)
             return
-        role = by_name(role_name)
+        # For shard panes like "qa#1", look up the base role ("qa") so we get
+        # the correct color and grid position; but create the Role with the full
+        # pane_key as name so register_pane stores it under the right key.
+        from .orchestrator import _split_shard as _mw_split_shard
+
+        base_role_mw, shard_idx_mw = _mw_split_shard(role_name)
+        role = by_name(base_role_mw) if shard_idx_mw is not None else by_name(role_name)
         if role is None:
             # custom role — use user-picked color if available, else default gray
             color = tab.custom_role_colors.get(role_name, "#94a3b8")
@@ -861,6 +867,16 @@ class MainWindow(QMainWindow):
                 color=color,
                 column=2,
                 row=99,
+            )
+        elif shard_idx_mw is not None:
+            # Shard: keep base role's color/position but give it the pane_key
+            # as name so the registry stores it under "qa#1", not "qa".
+            role = Role(
+                name=role_name,
+                label=f"{role.label}#{shard_idx_mw}",
+                color=role.color,
+                column=role.column,
+                row=role.row,
             )
 
         pane = AgentPane(role)
@@ -2108,6 +2124,7 @@ class MainWindow(QMainWindow):
         teammate unless remapped/substituted to codex/gemini). These hold the
         binary open and must die before `npm install -g` can replace it on
         Windows."""
+        from .orchestrator import _split_shard as _mw_split_shard2
         from .provider_config import effective_provider_for
 
         n = 0
@@ -2115,7 +2132,7 @@ class MainWindow(QMainWindow):
             for role, pane in project_panes.items():
                 sess = getattr(pane, "session", None)
                 if sess is not None and getattr(sess, "is_alive", False):
-                    if effective_provider_for(role) == "claude":
+                    if effective_provider_for(_mw_split_shard2(role)[0]) == "claude":
                         n += 1
         return n
 

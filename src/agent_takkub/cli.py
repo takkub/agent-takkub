@@ -140,6 +140,38 @@ def cmd_spawn(args: argparse.Namespace) -> dict:
 
 
 def cmd_assign(args: argparse.Namespace) -> dict:
+    shards = int(getattr(args, "shards", 1) or 1)
+    if shards > 1 and getattr(args, "auto_chain", False):
+        return {
+            "ok": False,
+            "msg": (
+                "--shards and --auto-chain cannot be used together: "
+                "shard fan-out already uses a consolidated handoff; "
+                "--auto-chain would double-fire a verify hop."
+            ),
+        }
+    if shards > 1:
+        # Fan-out: spawn <role>#1 … <role>#N in parallel; each carries shard_total.
+        results = []
+        for n in range(1, shards + 1):
+            shard_key = f"{args.role}#{n}"
+            resp = _request(
+                _with_project(
+                    {
+                        "cmd": "assign",
+                        "role": shard_key,
+                        "cwd": args.cwd,
+                        "task": args.task,
+                        "from": _from_role(),
+                        "requires_commit": bool(getattr(args, "requires_commit", False)),
+                        "auto_chain": bool(getattr(args, "auto_chain", False)),
+                        "shard_total": shards,
+                    }
+                )
+            )
+            results.append(resp)
+        ok_count = sum(1 for r in results if r.get("ok"))
+        return {"ok": ok_count == shards, "msg": f"queued {ok_count}/{shards} shards"}
     return _request(
         _with_project(
             {
@@ -584,6 +616,14 @@ def main(argv: list[str] | None = None) -> int:
         default=False,
         help="after impl done, auto-trigger Lead to fire qa+reviewer "
         "without proposing (one-hop only — verify is terminal)",
+    )
+    sa.add_argument(
+        "--shards",
+        type=int,
+        default=1,
+        metavar="N",
+        help="fan-out to N parallel shard panes (<role>#1 … <role>#N); "
+        "each pane gets TAKKUB_SHARD / TAKKUB_SHARD_TOTAL env vars",
     )
     sa.set_defaults(func=cmd_assign)
 

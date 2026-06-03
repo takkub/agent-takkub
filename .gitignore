@@ -19,6 +19,9 @@ runtime/
 # vary per developer machine).
 .claude/settings.local.json
 
+# Chrome port files and per-shard user-data-dir created by qa shard panes.
+.takkub/
+
 # Cockpit-managed Codex cheatsheet — auto-planted at codex pane
 # spawn time, marker-tagged, never user-authored. Safe to ignore.
 AGENTS.md

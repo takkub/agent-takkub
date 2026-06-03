@@ -159,3 +159,62 @@ takkub done
 ```bash
 takkub done "smoke test login → dashboard ผ่าน 15 cases, screenshots ใน runtime/exports/"
 ```
+
+---
+
+## 🔀 Shard mode (parallel fan-out)
+
+เมื่อ Lead ยิง `takkub assign --role qa --shards 3 "<task>"`, orchestrator spawn pane `qa#1`, `qa#2`, `qa#3` พร้อมกัน
+
+### Environment vars ที่ inject ต่อ pane
+
+| Var | ตัวอย่าง | ใช้ทำ |
+|---|---|---|
+| `TAKKUB_ROLE` | `qa#2` | pane key (ใช้กับ `takkub done`) |
+| `TAKKUB_BASE_ROLE` | `qa` | role behavior (ใช้อ้างอิง role identity) |
+| `TAKKUB_SHARD` | `2` | shard index (1-based) |
+| `TAKKUB_SHARD_TOTAL` | `3` | total shards in this fan-out |
+
+### Chrome port isolation (สำคัญ — ห้ามใช้ port เดียวกัน)
+
+ใช้ **shard-specific port file** กัน collision ระหว่าง shard ที่รัน Chrome พร้อมกัน:
+
+```bash
+# สร้าง port file path เฉพาะ shard นี้
+SHARD=${TAKKUB_SHARD:-1}
+CHROME_PORT_FILE=".takkub/chrome/qa-${SHARD}.port"
+CHROME_PROFILE_DIR=".takkub/chrome/qa-${SHARD}-profile"
+mkdir -p "$(dirname "$CHROME_PORT_FILE")"
+
+# Start Chrome ด้วย ephemeral port (0 = OS picks) + shard-specific profile dir
+mb-start-chrome --port 0 --port-file "$CHROME_PORT_FILE" --user-data-dir "$CHROME_PROFILE_DIR"
+
+# ทุก mb command ถัดไปในรอบนี้อ่าน port จาก file เดียวกัน
+export MB_CHROME_PORT_FILE="$CHROME_PORT_FILE"
+```
+
+### แบ่งงานตาม planner plan (Approach A)
+
+Lead จะ spawn qa planner pane ก่อน แล้ว read plan → แบ่ง page list ให้แต่ละ shard ใน task spec
+
+ถ้าไม่มี planner step: อ่าน `TAKKUB_SHARD` + `TAKKUB_SHARD_TOTAL` แล้ว self-select:
+```bash
+# ตัวอย่าง: แบ่ง routes array ตาม shard index
+ROUTES=("/login" "/dashboard" "/settings" "/profile" "/admin" "/reports")
+TOTAL=${TAKKUB_SHARD_TOTAL:-1}
+SHARD=${TAKKUB_SHARD:-1}
+# เลือก routes ที่ (index % TOTAL) == (SHARD - 1)
+for i in "${!ROUTES[@]}"; do
+  if (( i % TOTAL == SHARD - 1 )); then
+    echo "testing ${ROUTES[$i]}"
+  fi
+done
+```
+
+### Done report format (สำคัญ — Lead aggregate ดู)
+
+```bash
+takkub done "shard $TAKKUB_SHARD/$TAKKUB_SHARD_TOTAL: หน้า /login /dashboard ผ่าน · shots: $SHOT_DIR"
+```
+
+orchestrator รอครบ N shards แล้ว inject **1 consolidated handoff** ให้ Lead (ไม่ spam N ข้อความ)
