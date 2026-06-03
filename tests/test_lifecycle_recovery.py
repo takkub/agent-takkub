@@ -17,6 +17,7 @@ Covers:
 
 from __future__ import annotations
 
+import hashlib
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -29,6 +30,11 @@ from agent_takkub.orchestrator import (
     PaneState,
     _exit_key,
 )
+
+# Hash produced by the blake2b filter when ALL visible lines are spinner
+# lines (filtered out → empty string). Pre-computed once so tests that
+# pre-seed last_content_hash stay in sync with the orchestrator's hash algo.
+_EMPTY_FILTERED_HASH = hashlib.blake2b(b"", digest_size=8).hexdigest()
 
 TEST_PROJECT = "testproj"
 SAMPLE_TASK = "[ROLE: backend] implement /auth/logout\ntakkub done when done"
@@ -251,9 +257,10 @@ class TestSpinnerBlindspotsFixed:
         """Pane that only outputs spinner lines should still trip stuck threshold.
 
         The non-spinner filtered hash for a pane whose only lines contain
-        'esc to interrupt' is hash(()) (empty tuple) — that stays constant
-        across ticks while bytes keep arriving, so _last_content_change_ts
-        never updates and the pane is eventually detected as stuck."""
+        'esc to interrupt' is blake2b("") (empty string after filtering) —
+        that stays constant across ticks while bytes keep arriving, so
+        _last_content_change_ts never updates and the pane is eventually
+        detected as stuck."""
         fired: list = []
 
         class _ShotCapture:
@@ -275,7 +282,7 @@ class TestSpinnerBlindspotsFixed:
         pane._last_output_ts = now - 1
         sess = MagicMock()
         sess.is_alive = True
-        # Only spinner lines — non-spinner hash = hash(()) on every tick
+        # Only spinner lines — non-spinner hash = blake2b("") on every tick
         sess.display_lines.return_value = [SPINNER_LINE, SPINNER_LINE]
         pane.session = sess
 
@@ -283,8 +290,8 @@ class TestSpinnerBlindspotsFixed:
 
         key = "p::backend"
         # Pre-seed the content hash as the FILTERED hash (empty — spinner lines
-        # are excluded so the stored hash is hash(()), not hash of spinner text).
-        fake._ps(key).last_content_hash = str(hash(()))
+        # are excluded so the stored hash is blake2b(""), not hash of spinner text).
+        fake._ps(key).last_content_hash = _EMPTY_FILTERED_HASH
         # Content last changed > threshold ago
         fake._ps(key).last_content_change_ts = now - STUCK_THRESHOLD_S - 5
 
@@ -885,8 +892,8 @@ class TestSpinnerFilterRobust:
         fake._panes_by_project["p"] = {"backend": pane}
 
         key = "p::backend"
-        # Pre-seed with the empty-tuple hash (what filter produces for these lines)
-        fake._ps(key).last_content_hash = str(hash(()))
+        # Pre-seed with the blake2b("") hash (what filter produces for these lines)
+        fake._ps(key).last_content_hash = _EMPTY_FILTERED_HASH
         fake._ps(key).last_content_change_ts = now - STUCK_THRESHOLD_S - 5
 
         _check_stuck(fake, now)
@@ -917,7 +924,7 @@ class TestSpinnerFilterRobust:
         fake._panes_by_project["p"] = {"backend": pane}
 
         key = "p::backend"
-        fake._ps(key).last_content_hash = str(hash(()))
+        fake._ps(key).last_content_hash = _EMPTY_FILTERED_HASH
         fake._ps(key).last_content_change_ts = now - STUCK_THRESHOLD_S - 5
 
         _check_stuck(fake, now)
@@ -948,7 +955,7 @@ class TestSpinnerFilterRobust:
         fake._panes_by_project["p"] = {"backend": pane}
 
         key = "p::backend"
-        fake._ps(key).last_content_hash = str(hash(()))
+        fake._ps(key).last_content_hash = _EMPTY_FILTERED_HASH
         fake._ps(key).last_content_change_ts = now - STUCK_THRESHOLD_S - 5
 
         _check_stuck(fake, now)

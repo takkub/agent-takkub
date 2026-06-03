@@ -140,7 +140,21 @@ def cmd_spawn(args: argparse.Namespace) -> dict:
 
 
 def cmd_assign(args: argparse.Namespace) -> dict:
-    shards = int(getattr(args, "shards", 1) or 1)
+    # #1: validate --shards BEFORE the `or 1` fallback so explicit 0 / negative /
+    # >8 values are rejected with a clear message rather than silently clamped.
+    _SHARDS_MAX = 8
+    _raw_shards = getattr(args, "shards", 1)
+    if _raw_shards is not None:
+        _shards_int = int(_raw_shards)
+        if not (1 <= _shards_int <= _SHARDS_MAX):
+            return {
+                "ok": False,
+                "msg": (
+                    f"--shards must be between 1 and {_SHARDS_MAX} (got {_shards_int}); "
+                    "use a smaller fan-out to avoid overwhelming the system"
+                ),
+            }
+    shards = int(_raw_shards or 1)
     if shards > 1 and getattr(args, "auto_chain", False):
         return {
             "ok": False,

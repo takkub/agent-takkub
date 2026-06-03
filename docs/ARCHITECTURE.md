@@ -45,8 +45,7 @@ How agent-takkub is wired together. Read this when you're about to modify spawn 
 
 ## Module map
 
-Complete map (41 modules). Grouped by concern; sizes change but the
-groupings are stable. If you add a module, slot it here.
+Complete map (45 modules). Grouped by concern. List generated from `ls src/agent_takkub/*.py`.
 
 ```
 src/agent_takkub/
@@ -66,26 +65,27 @@ src/agent_takkub/
 │   static/            xterm.js + addons (fit, web-links) + terminal.html (renderer)
 │ ── orchestration core ──
 ├── orchestrator.py    THE HEART: spawn/assign/send/close/done + auto-chain, watchdogs,
-│                      rate-limit, resume briefs, snapshot/restore, broadcasts
+│                      rate-limit, resume briefs, snapshot/restore, broadcasts, shard coordination
 ├── cli_server.py      QTcpServer on main thread — parses JSON, dispatches to orchestrator
 ├── cli.py             `takkub` CLI client — newline JSON over TCP to runtime/port
 ├── routing_planner.py classify(msg,ctx) → RoutingAction; CLAUDE.md auto-routing as tested code
-│                      (kinds incl. EXPLAIN_SYSTEM: "review/explain the system" → HTML explainer)
 ├── roles.py           role registry (3-col grid: lead + frontend/backend/mobile/devops/codex
 │                      + gemini/qa/reviewer/critic/shell), colors, positions
 ├── config.py          projects.json + runtime/ paths + claude.exe finder
 │ ── spawn-time context & env ──
-├── lead_context.py    builds runtime/lead-context.md (CLAUDE.md + BLOCKED_DIRS + disabled-
-│                      providers + brief), write-guard json, _SAFE_PLUGINS discovery
+├── lead_context.py    builds runtime/lead-context.md (CLAUDE.md + BLOCKED_DIRS + brief),
+│                      write-guard json, _SAFE_PLUGINS discovery
+├── project_rules.py   injects Lead's constraint registry (MEMORY.md) pointers into teammates
 ├── pane_env.py        per-pane env allowlist (drop secrets), ECC mute, MCP_TOOL_TIMEOUT inject
-├── shared_dev_tools.py dev-tool config that follows Lead into every project tab
+├── shared_dev_tools.py shared MCP config management + role-aware tool filtering
 ├── codex_agents_md.py auto-plant AGENTS.md into codex pane cwd
 ├── gemini_md.py       auto-plant GEMINI.md into gemini pane cwd
-│ ── providers / plan ──
-├── provider_config.py per-role CLI mapping (which CLI backs role X) — ~/.takkub/role-providers.json
+│ ── providers / pipelines / plan ──
+├── provider_config.py per-role CLI mapping (claude/codex/gemini) — ~/.takkub/role-providers.json
 ├── provider_state.py  per-provider enable/disable state — ~/.takkub/disabled-providers.json
-├── provider_dialog.py Qt dialog to pick claude/codex per role
-├── plan_tier.py       account plan tier (Pro vs Max) — gates which models
+├── pipeline_config.py pipeline template store (feature/design/quickfix) — ~/.takkub/pipelines.json
+├── pipeline_dialog.py UI bridge for pipeline/role settings (Qt ↔ HTML/JS)
+├── plan_tier.py       account plan tier (Pro vs Max) — gates [1m] model variant — ~/.takkub/plan.json
 ├── codex_helper.py    OpenAI Codex CLI one-shot wrapper (non-interactive)
 ├── gemini_helper.py   Google Gemini CLI one-shot wrapper (mirror of codex_helper)
 │ ── auth ──
@@ -96,8 +96,7 @@ src/agent_takkub/
 ├── token_meter.py     per-pane context occupancy from claude session JSONL usage
 ├── issues.py          cockpit issue tracker — GitHub Issues backend via `gh` CLI
 ├── vault_mirror.py    Obsidian write-side: mirror `takkub done` notes/briefs into the vault
-├── design_review_html.py  render critic's review .md → self-contained .html (screenshots
-│                      inlined base64, impact→badge cards); `python -m …` CLI, critic runs it
+├── design_review_html.py  render critic's review .md → self-contained .html
 ├── chatlog_scanner.py read-only scan of CC per-project session JSONL (resume-brief source)
 ├── lead_bash_audit.py detect write-y Lead shell commands → JSONL audit record
 │ ── diagnostics / verify ──
@@ -106,19 +105,12 @@ src/agent_takkub/
 ├── verify.py          `takkub verify` — auto-detect stack + run lint/test gate
 ├── docs_verify.py     markdown reference verifier — catch stale file/symbol refs
 │ ── release / self-update ──
-├── release.py         `takkub release` — bump pyproject version + roll CHANGELOG
-│                      [vNEXT] → dated heading + git commit & annotated tag (no push)
-├── claude_update.py   Claude Code CLI self-update: version check, AI compatibility
-│                      analysis, controlled update (closes panes first on Windows to
-│                      avoid file-lock brick)
+├── release.py         `takkub release` — bump version + roll CHANGELOG + commit/tag
+├── claude_update.py   Claude Code CLI self-update: compatibility analysis + controlled rollout
 ├── rtk_helper.py      one-click install of rtk's PreToolUse Bash hook
 ├── update_helper.py   git-wrapper behind the status-bar update button
 └── update_worker.py   QRunnable that fetches origin/main + reports local_status()
 ```
-
-> **Note on layering:** the process-layout diagram above simplifies
-> `MainWindow → AgentPane`. The real chain is `MainWindow → QTabWidget →
-> ProjectTab → AgentPane` (one tab per project, each owning its own Lead).
 
 ## Data flow — "user types into Lead"
 
@@ -156,12 +148,23 @@ src/agent_takkub/
 7. `MainWindow._ensure_teammate_pane` creates an `AgentPane`, registers it with the orchestrator, and adds it to the right-side vertical splitter.
 8. `Orchestrator.spawn` resolves cwd (role-aware default), starts `claude.exe` via `pywinpty.PtyProcess.spawn` with:
    - `--dangerously-skip-permissions`
-   - `--setting-sources <user,project,local>` (configurable)
-   - `--append-system-prompt-file runtime/agents/backend/CLAUDE.md`
-   - `--continue` if a recent matching exit is recorded
+   - `--setting-sources project,local` (default; skips `~/.claude/settings.json` to avoid the `claude-obsidian` SessionStart crash)
+   - `--model`, `--effort`, `--fallback-model` (picked per role tier or global env override)
+   - `--plugin-dir` (explicitly passing superpower/skill plugins)
+   - `--mcp-config` + `--strict-mcp-config` (force cockpit-managed tool allowlist)
+   - `--disallowed-tools Task` (always) + `AskUserQuestion` (teammates only)
+   - `--resume <uuid>` if a recent matching session exists in the same cwd
+   - `--session-id <uuid>` for fresh spawns to isolate history from other roles/projects
 9. `Orchestrator._auto_trust(role_name)` schedules a 500ms-poll loop watching for the "trust this folder" modal and presses Enter when seen.
 10. `Orchestrator._send_when_ready(role_name, task)` schedules another 500ms-poll loop watching for the idle `❯` prompt; when seen, writes the task + `\r`.
 11. The pane's state goes `empty → active → working`.
+
+## QA Shard Fan-out
+
+When Lead assigns a task with `--shards N` (clamped to 1–8), the orchestrator spawns `N` parallel panes named `<role>#1` to `<role>#N`.
+- **Isolation:** Each shard gets its own Chrome port-file and profile-dir (`.takkub/chrome/qa-${SHARD}.port`).
+- **Coordination:** Shards share a `ShardGroup` in the orchestrator. When the last shard calls `takkub done`, a consolidated handoff message is sent to Lead.
+- **Environment:** `TAKKUB_SHARD` and `TAKKUB_SHARD_TOTAL` are injected into each pane.
 
 ## Lifecycle states (AgentPane)
 
@@ -185,8 +188,8 @@ The `_expected_exit` flag on `AgentPane` is set by `Orchestrator.close()` / `don
 ## Concurrency model
 
 - **Qt main thread** owns every widget, signal slot, `QTimer`, and IPC dispatch.
-- **Reader QThread (per session)** is the only background thread. It does nothing but `proc.read()` + emit. Cross-thread signal emission is automatic (queued connection).
-- No locks anywhere because (a) the orchestrator only runs on the main thread, and (b) `QTcpServer` queues `newConnection` events into the main thread's event loop.
+- **Reader QThread (per session)** is the only background thread. It does nothing but `proc.read()` + emit.
+- **Worker Thread Pool:** Heavy I/O like `git status`, `harvest` (stat-walk), and `doctor` fixes are moved off the main thread to avoid UI freezes.
 
 ## IPC schema (CLI ↔ orchestrator, newline-delimited JSON over localhost TCP)
 
@@ -194,63 +197,65 @@ The `_expected_exit` flag on `AgentPane` is set by `Orchestrator.close()` / `don
 // requests
 {"cmd": "list"}
 {"cmd": "spawn",     "role": "frontend", "cwd": "C:/path"}
-{"cmd": "assign",    "role": "frontend", "cwd": "C:/path", "task": "..."}
+{"cmd": "assign",    "role": "frontend", "cwd": "C:/path", "task": "...", 
+                     "requires_commit": false, "auto_chain": false, "shard_total": 0}
 {"cmd": "send",      "to":   "backend",  "msg": "...",     "from": "frontend"}
 {"cmd": "close",     "role": "frontend"}
 {"cmd": "close-all"}
 {"cmd": "done",      "from": "frontend", "note": "..."}
+{"cmd": "status",    "since": "HH:MM"}
+{"cmd": "harvest",   "role": "qa", "since": "HH:MM", "limit": 100}
+{"cmd": "harvest-done", "role": "qa", "note": "..."}
+{"cmd": "end-session",  "note": "..."}
 
 // responses
 {"ok": true,  "msg": "..."}
 {"ok": true,  "msg": "status", "status": {"lead": "active", "frontend": "working"}}
+{"ok": true,  "msg": "status report", "report": {...}}
 {"ok": false, "msg": "<error>"}
 ```
-
-The `from` field on `send` / `done` is populated by the CLI from the `TAKKUB_ROLE` env var that the orchestrator injects when spawning that pane.
 
 ## Persistence surface
 
 | What | Where | Format |
 |---|---|---|
+| **Project local** | | |
 | Active project / paths / presets | `projects.json` (repo root) | JSON |
 | Audit log | `runtime/events.log` | JSONL (append-only) |
 | TCP port number | `runtime/port` | plain int |
-| Role staging CLAUDE.md | `runtime/agents/<role>/CLAUDE.md` | markdown (rewritten on each spawn from `.claude/agents/<role>.md`) |
+| Role staging CLAUDE.md | `runtime/agents/<role>/CLAUDE.md` | markdown |
 | Pane buffer exports | `runtime/exports/<role>-<ts>.txt` | plain text |
-| Window geometry + splitter | Windows registry via `QSettings("agent-takkub", "cockpit")` | binary |
-| Per-role font size | Same QSettings, key `pane/<role>/font_pt` | int |
+| **User global** | | |
+| Role provider map | `~/.takkub/role-providers.json` | JSON |
+| Disabled providers | `~/.takkub/disabled-providers.json` | JSON |
+| Pipeline templates | `~/.takkub/pipelines.json` | JSON |
+| Account plan tier | `~/.takkub/plan.json` | JSON |
+| **System** | | |
+| Window geometry + splitter | Windows registry `HKCU\Software\agent-takkub\cockpit` | binary |
+| Per-role font size | Same registry, key `pane/<role>/font_pt` | int |
 
 ## Why some choices look weird
 
 ### Why pywinpty WinPTY (not ConPTY) backend?
-ConPTY surfaces a visible conhost console window when spawned from a GUI process. WinPTY uses a hidden agent process. We tried both; WinPTY still leaks a `ConsoleWindowClass` HWND on some Windows builds, so we additionally diff-and-hide via `_win_console.py` for belt-and-suspenders.
+ConPTY surfaces a visible conhost console window when spawned from a GUI process. WinPTY uses a hidden agent process.
 
 ### Why `--append-system-prompt-file`, not inline text?
-Role markdown contains backticks, asterisks, and Thai diacritics. Inline-string `--append-system-prompt "<long text>"` runs into Windows argv quoting limits and CommandLineToArgvW edge cases. The file variant avoids both.
+Role markdown contains backticks, asterisks, and Thai diacritics. Inline-string `--append-system-prompt "<long text>"` runs into Windows argv quoting limits.
+
+### Why `--setting-sources project,local`?
+Skips `~/.claude/settings.json` to prevent the `claude-obsidian` SessionStart hook from crashing the cockpit session.
 
 ### Why does `Orchestrator.spawn` emit `paneRequested` instead of creating panes itself?
-Pane widgets are Qt UI objects — only `MainWindow` knows about the splitter layout. Keeping pane construction in `main_window.py` and orchestration in `orchestrator.py` lets the orchestrator stay UI-agnostic (e.g. easier to unit-test).
+Pane widgets are Qt UI objects — only `MainWindow` knows about the splitter layout.
 
 ### Why a TCP server inside a GUI process?
-`QTcpServer` lives on the Qt main thread and emits `newConnection` as a normal Qt signal. That means every IPC call from `takkub` CLI is serialised through the same event loop as UI events — no lock juggling, no race conditions, no GIL surprises.
-
-### Why ship a `.venv` launcher (`run.bat`) instead of pip installing as a script?
-PyQt6 wheels are large and `pywinpty` requires a Windows build toolchain to compile from source. Forcing a `.venv` lets users on locked-down machines run without poking system Python. The `start "" pythonw.exe` trick lets the launcher batch exit immediately so no cmd.exe lingers.
+`QTcpServer` lives on the Qt main thread and emits `newConnection` as a normal Qt signal. Every IPC call is serialised through the same event loop as UI events — no lock juggling.
 
 ## Test surface
 
-Unit tests cover the non-Qt parts:
-
-- `tests/test_config.py` — projects.json loader, role-aware cwd, presets, port file roundtrip
-- `tests/test_roles.py` — default registry, by_name (case-insensitive)
-- `tests/test_cli.py` — argparse for every subcommand, exit codes, Thai bytes round-trip
-
-The Qt + pywinpty parts are validated by live end-to-end runs against the real PMS project (see TASKS.md → "End-to-end verifications").
+Test surface covers **90 files** (authoritative source: `tests/test_routing_planner.py`).
 
 CI (`.github/workflows/ci.yml`) on `windows-latest`:
 1. `pip install -e .[dev]`
 2. `ruff check .` + `ruff format --check .`
-3. Import smoke test on the non-Qt modules
-4. `pytest -v`
-
-Future test work (deferred): a `pytest-qt` harness for `AgentPane` state transitions and a mock `PtySession` for orchestrator integration tests.
+3. `pytest -v` (Unit + Integration)

@@ -12,6 +12,8 @@ Public API (called by main_window UI and cli_server JSON requests):
 
 from __future__ import annotations
 
+import hashlib
+import itertools
 import json
 import os
 import pathlib
@@ -804,6 +806,9 @@ class PaneState:
     tp_warn_ts: float = 0.0
 
 
+_shard_generation_counter: itertools.count = itertools.count()
+
+
 @dataclass
 class ShardGroup:
     """Aggregate state for a parallel QA fan-out (``assign --shards N``).
@@ -811,6 +816,11 @@ class ShardGroup:
     Keyed ``"{project_ns}::{base_role}"`` in ``Orchestrator._shard_groups``.
     Created on the first shard assign; closed when all N shards report
     done/failed or the timeout fires.
+
+    ``generation`` is a monotonically-increasing integer unique to each
+    ShardGroup instance.  The 45-minute timeout timer captures this value
+    at scheduling time and bails early if the group was replaced by a newer
+    fan-out with the same key before the timer fires (stale-timer guard, #2).
     """
 
     base_role: str
@@ -818,6 +828,7 @@ class ShardGroup:
     done: dict = field(default_factory=dict)  # {shard_key: note}
     failed: set = field(default_factory=set)  # shard_keys that crashed
     closed: bool = False
+    generation: int = field(default_factory=lambda: next(_shard_generation_counter))
 
 
 # Timeout before injecting a partial handoff when shards don't all respond.
@@ -1883,6 +1894,28 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             # this async spawn ran, so a failure here is invisible unless we
             # say so. Tell the Lead the task never landed (#26).
             self._warn_lead_spawn_failed(role_name, project, msg)
+            # #5: record spawn-failed shard into its group so the aggregate
+            # doesn't orphan forever (mirrors _warn_lead_respawn_capped path).
+            if shard_total > 0:
+                pns_fail = self._resolve_project(project)
+                base_fail = _split_shard(role_name)[0]
+                gk_fail = f"{pns_fail}::{base_fail}"
+                if gk_fail not in self._shard_groups:
+                    self._shard_groups[gk_fail] = ShardGroup(base_role=base_fail, total=shard_total)
+                    gen_fail = self._shard_groups[gk_fail].generation
+                    QTimer.singleShot(
+                        _SHARD_GROUP_TIMEOUT_MS,
+                        lambda gk=gk_fail, pns=pns_fail, g=gen_fail: (
+                            self._check_shard_group_timeout(pns, gk, g)
+                        ),
+                    )
+                grp_fail = self._shard_groups[gk_fail]
+                if not grp_fail.closed:
+                    grp_fail.failed.add(role_name)
+                    if len(grp_fail.done) + len(grp_fail.failed) >= grp_fail.total:
+                        grp_fail.closed = True
+                        self._inject_shard_fanout_handoff(pns_fail, grp_fail)
+                        self._shard_groups.pop(gk_fail, None)
             return ok, msg
 
         from .provider_config import CODEX, effective_provider_for
@@ -1909,9 +1942,14 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             if group_key not in self._shard_groups:
                 group = ShardGroup(base_role=base_role_a, total=shard_total)
                 self._shard_groups[group_key] = group
+                # #2: capture generation so stale timers from a previous
+                # fan-out with the same key don't close this new group.
+                gen_a = group.generation
                 QTimer.singleShot(
                     _SHARD_GROUP_TIMEOUT_MS,
-                    lambda gk=group_key, pns=project_ns: self._check_shard_group_timeout(pns, gk),
+                    lambda gk=group_key, pns=project_ns, g=gen_a: self._check_shard_group_timeout(
+                        pns, gk, g
+                    ),
                 )
             else:
                 self._shard_groups[group_key].total = shard_total
@@ -2085,23 +2123,15 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         auto-chain siblings wait forever for a done event that never comes, and
         the operator stares at a deadlocked workflow.  No-op when Lead is absent
         (queuing is not needed — if Lead comes back, respawn is already capped
-        and the operator will see the dead pane slot directly)."""
-        project_ns = self._resolve_project(project)
-        lead = self._project_panes(project_ns).get(LEAD.name)
-        if not (lead and lead.session and lead.session.is_alive):
-            return
-        msg = (
-            f"⚠️ [respawn-capped] {role_name} ({project_ns}) หยุด auto-respawn แล้ว "
-            f"(crash {AUTO_RESPAWN_MAX} ครั้งติด) — pane ดับถาวรจนกว่า Lead จะ assign ใหม่ "
-            f"ถ้า pane นี้อยู่ใน auto-chain verify hop อาจค้างได้ — ตรวจสอบ takkub list"
-        )
-        lead.session.write(msg)
-        QTimer.singleShot(150, lambda: lead.session and lead.session.write("\r"))
-        self.leadInjected.emit(msg)
-        _log_event("respawn_capped_warned", role=role_name, project=project_ns)
+        and the operator will see the dead pane slot directly).
 
-        # Shard partial-pass: if this capped pane is a shard, record it as
-        # failed so the aggregate doesn't deadlock waiting forever.
+        #4 fix: shard failed-bookkeeping runs BEFORE the Lead-alive early return
+        so the group closes (and fires a handoff via queue) even when Lead is down.
+        """
+        project_ns = self._resolve_project(project)
+
+        # #4: hoist shard bookkeeping before the Lead-alive gate so the group
+        # closes and queues its handoff regardless of whether Lead is running.
         base_role_c, shard_idx_c = _split_shard(role_name)
         if shard_idx_c is not None:
             key_c = f"{project_ns}::{role_name}"
@@ -2115,6 +2145,19 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                         group_c.closed = True
                         self._inject_shard_fanout_handoff(project_ns, group_c)
                         self._shard_groups.pop(group_key_c, None)
+
+        lead = self._project_panes(project_ns).get(LEAD.name)
+        if not (lead and lead.session and lead.session.is_alive):
+            return
+        msg = (
+            f"⚠️ [respawn-capped] {role_name} ({project_ns}) หยุด auto-respawn แล้ว "
+            f"(crash {AUTO_RESPAWN_MAX} ครั้งติด) — pane ดับถาวรจนกว่า Lead จะ assign ใหม่ "
+            f"ถ้า pane นี้อยู่ใน auto-chain verify hop อาจค้างได้ — ตรวจสอบ takkub list"
+        )
+        lead.session.write(msg)
+        QTimer.singleShot(150, lambda: lead.session and lead.session.write("\r"))
+        self.leadInjected.emit(msg)
+        _log_event("respawn_capped_warned", role=role_name, project=project_ns)
 
     # ------------------------------------------------------------------
     # Peer CC durability helpers
@@ -2310,11 +2353,21 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             self._save_pending_done_notices(project_ns)
             _log_event("shard_fanout_queued", project=project_ns, base_role=group.base_role)
 
-    def _check_shard_group_timeout(self, project_ns: str, group_key: str) -> None:
-        """Fire a partial handoff if the shard group hasn't completed yet."""
+    def _check_shard_group_timeout(
+        self, project_ns: str, group_key: str, generation: int | None = None
+    ) -> None:
+        """Fire a partial handoff if the shard group hasn't completed yet.
+
+        ``generation`` is captured by the scheduling lambda (#2 fix): if the
+        group was replaced by a newer fan-out with the same key before this
+        timer fires, the generations won't match and we bail early so we don't
+        clobber the live fan-out.
+        """
         group = self._shard_groups.get(group_key)
         if group is None or group.closed:
             return
+        if generation is not None and group.generation != generation:
+            return  # stale timer from a previous fan-out with same key
         group.closed = True
         self._inject_shard_fanout_handoff(project_ns, group, timed_out=True)
         self._shard_groups.pop(group_key, None)
@@ -2458,8 +2511,24 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             pane.session.terminate()
             pane.set_state("empty", note=None)
         key = f"{project_ns}::{role_name}"
+        # #8: read auto_chain flag BEFORE popping state so a pane that is
+        # closed externally (e.g. forced close) still triggers the auto-chain
+        # handoff if it was the last pending auto-chain pane in the project.
+        _ps_close = getattr(self, "_pane_state", {}).get(key)
+        had_auto_chain_close = _ps_close.auto_chain if _ps_close is not None else False
+
         self._idle_state.pop(key, None)
         getattr(self, "_pane_state", {}).pop(key, None)
+
+        if had_auto_chain_close:
+            pending_ac = [
+                k
+                for k, s in getattr(self, "_pane_state", {}).items()
+                if k.startswith(f"{project_ns}::") and s.auto_chain
+            ]
+            if not pending_ac:
+                self._inject_auto_chain_handoff(project_ns)
+
         # For teammates, fully remove from the layout so the right column
         # collapses back. Lead stays as it always anchors the cockpit.
         # The project namespace travels with the signal so main_window
@@ -2688,6 +2757,29 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                     group.closed = True
                     self._inject_shard_fanout_handoff(project_ns, group)
                     self._shard_groups.pop(group_key, None)
+            else:
+                # #3: group already closed (timeout) or popped — shard arrived
+                # late.  Send a notice so Lead knows instead of silently dropping.
+                late_msg = (
+                    f"⚠️ [shard late-complete] {from_role} reported done after its "
+                    f"shard group already closed (timeout or all-failed). "
+                    f"note: {note!r:.120}"
+                )
+                if lead and lead.session and lead.session.is_alive:
+                    lead.session.write(late_msg)
+                    QTimer.singleShot(150, lambda: lead.session and lead.session.write(b"\r"))
+                    self.leadInjected.emit(late_msg)
+                else:
+                    self._pending_done_notices.setdefault(project_ns, []).append(
+                        {"role": from_role, "note": "late-complete", "body": late_msg}
+                    )
+                    self._save_pending_done_notices(project_ns)
+                _log_event(
+                    "shard_late_complete",
+                    project=project_ns,
+                    role=from_role,
+                    note=note[:200],
+                )
 
         # mark pane done, auto-close after a delay so user can see it
         pane.set_state("done", note=note[:80] if note else "done")
@@ -3198,11 +3290,16 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                     continue
                 if pane.state not in ("active", "working"):
                     continue
+                # #9: persist last_task + session_uuid so restore_teammates
+                # can re-paste the task and (optionally) resume the session.
+                ps_snap = getattr(self, "_pane_state", {}).get(_exit_key(project, role))
                 entries.append(
                     {
                         "role": role,
                         "cwd": pane._session_cwd or "",
                         "state": pane.state,
+                        "last_task": ((ps_snap.last_assigned_task if ps_snap else None) or ""),
+                        "session_uuid": ((ps_snap.session_uuid if ps_snap else None) or ""),
                     }
                 )
             if entries:
@@ -3256,6 +3353,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             for entry in entries:
                 role = (entry or {}).get("role")
                 cwd = (entry or {}).get("cwd") or None
+                last_task = (entry or {}).get("last_task") or ""
                 if not role:
                     continue
                 # Stamp recent-exit for crash-recovery bookkeeping.
@@ -3265,6 +3363,31 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 ok, _ = self.spawn(role, cwd=cwd, project=project)
                 if ok:
                     scheduled += 1
+                    # #9: re-paste the last task so the pane continues working;
+                    # queue a Lead notice (delivered when Lead spawns) either
+                    # way so the operator knows the pane was re-spawned.
+                    if last_task:
+                        self._send_when_ready(role, last_task, project=project)
+                        notice_body = (
+                            f"[cockpit restart] {role} pane restored from last session "
+                            f"and last task re-sent automatically."
+                        )
+                    else:
+                        notice_body = (
+                            f"⚠️ [cockpit restart] {role} pane restored from last session "
+                            f"but last task was not saved — pane started fresh. "
+                            f"Re-assign if needed."
+                        )
+                    self._pending_done_notices.setdefault(project, []).append(
+                        {"role": role, "note": "restore", "body": notice_body}
+                    )
+                    self._save_pending_done_notices(project)
+                    _log_event(
+                        "teammate_restored",
+                        role=role,
+                        project=project,
+                        has_task=bool(last_task),
+                    )
         return scheduled
 
     def write_resume_briefs(self) -> int:
@@ -3580,16 +3703,16 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                     # Exclude lines matching any known interrupt phrase OR volatile
                     # counter patterns (elapsed seconds, token counters) so a
                     # counter-only spinner line doesn't keep resetting the hash.
-                    non_spinner_hash = str(
-                        hash(
-                            tuple(
-                                ln
-                                for ln in disp
-                                if not any(p in ln.lower() for p in _SPINNER_INTERRUPT_PHRASES)
-                                and not _SPINNER_VOLATILE_RE.search(ln)
-                            )
-                        )
+                    _filtered_lines = "\n".join(
+                        ln
+                        for ln in disp
+                        if not any(p in ln.lower() for p in _SPINNER_INTERRUPT_PHRASES)
+                        and not _SPINNER_VOLATILE_RE.search(ln)
                     )
+                    non_spinner_hash = hashlib.blake2b(
+                        _filtered_lines.encode("utf-8", errors="replace"),
+                        digest_size=8,
+                    ).hexdigest()
                     prev_hash = ps_ck.last_content_hash
                     if prev_hash != non_spinner_hash:
                         ps_ck.last_content_hash = non_spinner_hash

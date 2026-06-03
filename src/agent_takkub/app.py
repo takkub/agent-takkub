@@ -140,6 +140,17 @@ def _start_deadman_watchdog(window: MainWindow, _stop: threading.Event | None = 
                                 pass
                 except Exception:
                     pass
+                # #6: best-effort snapshot + resume briefs before hard exit so
+                # the next launch can restore panes and recover Lead context.
+                # Both methods are Qt-free and safe to call from a daemon thread.
+                try:
+                    window.orch.write_session_snapshot()
+                except Exception:
+                    pass
+                try:
+                    window.orch.write_resume_briefs()
+                except Exception:
+                    pass
                 os._exit(1)
 
     t = threading.Thread(target=_run, daemon=True, name="cockpit-deadman")

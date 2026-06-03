@@ -35,10 +35,18 @@ class _FakeOrchestrator:
     def __init__(self) -> None:
         self._recent_exits: dict[str, dict] = {}
         self.spawn_calls: list[tuple[str, str | None, str]] = []
+        self._pending_done_notices: dict = {}
+        self.send_when_ready_calls: list[tuple[str, str]] = []
 
     def spawn(self, role, cwd=None, project=None):
         self.spawn_calls.append((role, cwd, project))
         return True, "ok"
+
+    def _save_pending_done_notices(self, project: str) -> None:
+        pass
+
+    def _send_when_ready(self, role: str, task: str, project: str | None = None) -> None:
+        self.send_when_ready_calls.append((role, task))
 
 
 def _run_restore(fake: _FakeOrchestrator) -> int:

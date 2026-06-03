@@ -26,6 +26,7 @@ from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
+    QDialog,
     QDockWidget,
     QFrame,
     QHBoxLayout,
@@ -33,11 +34,13 @@ from PyQt6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QStatusBar,
     QStyle,
     QSystemTrayIcon,
     QTabWidget,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -192,14 +195,13 @@ class MainWindow(QMainWindow):
         return sep
 
     @staticmethod
-    def _provider_chip_style(provider: str, disabled: bool) -> str:
+    def _provider_chip_style(provider: str, disabled: bool, not_installed: bool = False) -> str:
         """Outline chip for the codex/gemini toggles.
 
-        The leading status dot (baked into the button text) inherits the
-        text color — brand when enabled, gray + strikethrough when disabled
-        — so on/off reads at a glance, while the outline + hover keep it
-        obviously a clickable toggle (the old filled-pill looked like a
-        plain action button → affordance mismatch).
+        Three visual states:
+          • available      — brand color (green/blue), bold
+          • disabled       — gray + strikethrough (toggled off by user)
+          • not_installed  — amber, enabled but CLI absent; Claude substitutes
         """
         if disabled:
             return (
@@ -211,6 +213,16 @@ class MainWindow(QMainWindow):
                 "}"
                 "QPushButton:hover { background:#27272a; color:#a1a1aa; }"
             )
+        if not_installed:
+            # Amber: enabled in config but CLI not on PATH → Claude will substitute
+            return (
+                "QPushButton { "
+                "background:transparent; color:#d97706; "
+                "border:1px solid #d97706; border-radius:10px; "
+                "padding:2px 10px; font-weight:500; "
+                "}"
+                "QPushButton:hover { background:rgba(217,119,6,0.08); }"
+            )
         # Brand colors: codex teal (#10a37f) / gemini blue (#4285f4)
         brand = "#10a37f" if provider == "codex" else "#4285f4"
         return (
@@ -221,6 +233,53 @@ class MainWindow(QMainWindow):
             "}"
             "QPushButton:hover { background:rgba(255,255,255,0.06); }"
         )
+
+    @staticmethod
+    def _provider_chip_state(provider: str) -> str:
+        """Return the chip's display state: 'available', 'disabled', or 'not_installed'.
+
+        'disabled'      — toggled off in disabled-providers.json (user intent)
+        'not_installed' — enabled but CLI binary not found; Claude will substitute
+        'available'     — enabled and CLI present
+        """
+        from .provider_state import is_disabled
+
+        if is_disabled(provider):
+            return "disabled"
+        if provider == "codex":
+            try:
+                from .codex_helper import find_codex_executable
+
+                installed = find_codex_executable() is not None
+            except Exception:
+                import shutil
+
+                installed = shutil.which(provider) is not None
+        elif provider == "gemini":
+            try:
+                from .gemini_helper import find_gemini_executable
+
+                installed = find_gemini_executable() is not None
+            except Exception:
+                import shutil
+
+                installed = shutil.which(provider) is not None
+        else:
+            installed = True
+        return "available" if installed else "not_installed"
+
+    @staticmethod
+    def _provider_chip_tooltip(provider: str, state: str) -> str:
+        """Human-readable tooltip for a provider chip given its state."""
+        name = provider.capitalize()
+        if state == "disabled":
+            return f"{name}: disabled — click to enable"
+        if state == "not_installed":
+            return (
+                f"{name}: enabled but not installed — Claude will substitute.\n"
+                "Loses model diversity. Install the CLI to fix, or click to disable."
+            )
+        return f"{name}: enabled — click to disable"
 
     @staticmethod
     def _plan_chip_style(is_pro: bool) -> str:
@@ -452,24 +511,30 @@ class MainWindow(QMainWindow):
         # State source-of-truth lives in provider_state.json; orchestrator
         # owns the broadcast on toggle. We just create the buttons and
         # subscribe to providerStateChanged to redraw.
-        from .provider_state import CODEX, GEMINI, is_disabled
+        from .provider_state import CODEX, GEMINI
 
+        _codex_state = self._provider_chip_state(CODEX)
         self._chip_codex = QPushButton("● Codex", self)
-        self._chip_codex.setToolTip(
-            "Codex: disabled — click to enable"
-            if is_disabled(CODEX)
-            else "Codex: enabled — click to disable"
+        self._chip_codex.setToolTip(self._provider_chip_tooltip(CODEX, _codex_state))
+        self._chip_codex.setStyleSheet(
+            self._provider_chip_style(
+                CODEX,
+                disabled=_codex_state == "disabled",
+                not_installed=_codex_state == "not_installed",
+            )
         )
-        self._chip_codex.setStyleSheet(self._provider_chip_style(CODEX, is_disabled(CODEX)))
         self._chip_codex.clicked.connect(lambda: self._on_provider_chip_clicked(CODEX))
 
+        _gemini_state = self._provider_chip_state(GEMINI)
         self._chip_gemini = QPushButton("● Gemini", self)
-        self._chip_gemini.setToolTip(
-            "Gemini: disabled — click to enable"
-            if is_disabled(GEMINI)
-            else "Gemini: enabled — click to disable"
+        self._chip_gemini.setToolTip(self._provider_chip_tooltip(GEMINI, _gemini_state))
+        self._chip_gemini.setStyleSheet(
+            self._provider_chip_style(
+                GEMINI,
+                disabled=_gemini_state == "disabled",
+                not_installed=_gemini_state == "not_installed",
+            )
         )
-        self._chip_gemini.setStyleSheet(self._provider_chip_style(GEMINI, is_disabled(GEMINI)))
         self._chip_gemini.clicked.connect(lambda: self._on_provider_chip_clicked(GEMINI))
 
         # ── account plan chip (Pro / Max) ──────────────────────────
@@ -587,6 +652,17 @@ class MainWindow(QMainWindow):
         )
         self._btn_bug_check.setStyleSheet(self._ghost_button_style())
         self._btn_bug_check.clicked.connect(self._on_bug_check_clicked)
+
+        # 🩺 Doctor button: runs cockpit environment checks and shows a
+        # report with optional one-click auto-fix for fixable findings.
+        self._btn_doctor = QPushButton("🩺 Doctor", self)
+        self._btn_doctor.setToolTip(
+            "Run cockpit environment diagnostics (claude binary, runtime,\n"
+            "plugins, MCPs, projects, providers). Shows a report with\n"
+            "one-click Fix for auto-fixable findings."
+        )
+        self._btn_doctor.setStyleSheet(self._ghost_button_style())
+        self._btn_doctor.clicked.connect(self._on_doctor_clicked)
 
         # 🎨 UI Review button: 1-click design-review pipeline. Spawns critic +
         # gemini in parallel. Critic reads shots from runtime/exports/<date>/
@@ -722,6 +798,7 @@ class MainWindow(QMainWindow):
             self._btn_resume,
             self._btn_open_shell,
             self._btn_bug_check,
+            self._btn_doctor,
             self._btn_ui_review,
             self._btn_end_session,
         ):
@@ -1748,6 +1825,82 @@ class MainWindow(QMainWindow):
                 f"🐛 Bug-check sent to {count} pane(s): {', '.join(roles)}", 10_000
             )
 
+    def _on_doctor_clicked(self) -> None:
+        """🩺 Doctor button: run environment checks and display a report dialog.
+
+        Shows doctor.format_report() in a scrollable monospace view.
+        A Fix button appears when at least one finding has auto_fix set;
+        clicking it runs doctor.run_auto_fixes() and refreshes the display.
+        """
+        from . import doctor as _doctor
+
+        self._status.showMessage("🩺 Running diagnostics…", 2_000)
+        findings = _doctor.run_all_checks()
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("🩺 Cockpit Doctor")
+        dlg.setMinimumSize(560, 480)
+        dlg.resize(640, 540)
+
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        report_view = QPlainTextEdit(dlg)
+        report_view.setReadOnly(True)
+        report_view.setFont(dlg.font())
+        report_view.setStyleSheet(
+            "QPlainTextEdit { background:#18181b; color:#d4d4d8; "
+            "border:1px solid #3f3f46; border-radius:4px; padding:6px; "
+            "font-family: 'Consolas', 'Courier New', monospace; font-size:12px; }"
+        )
+        report_view.setPlainText(_doctor.format_report(findings))
+        layout.addWidget(report_view, 1)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+
+        has_fixes = any(f.auto_fix is not None for f in findings)
+
+        btn_fix = QPushButton("Fix", dlg)
+        btn_fix.setEnabled(has_fixes)
+        btn_fix.setToolTip(
+            "Run auto-fixes for all fixable findings."
+            if has_fixes
+            else "No auto-fixable findings in this report."
+        )
+        btn_fix.setStyleSheet(
+            "QPushButton { background:#16a34a; color:#fff; border:none; "
+            "border-radius:5px; padding:4px 14px; font-weight:600; }"
+            "QPushButton:hover { background:#15803d; }"
+            "QPushButton:disabled { background:#3f3f46; color:#71717a; }"
+        )
+
+        def _on_fix() -> None:
+            _doctor.run_auto_fixes(findings)
+            refreshed = _doctor.run_all_checks()
+            report_view.setPlainText(_doctor.format_report(refreshed))
+            btn_fix.setEnabled(any(f.auto_fix is not None for f in refreshed))
+            self._status.showMessage("🩺 Auto-fixes applied", 4_000)
+
+        btn_fix.clicked.connect(_on_fix)
+
+        btn_close = QPushButton("Close", dlg)
+        btn_close.setStyleSheet(
+            "QPushButton { background:transparent; color:#a1a1aa; "
+            "border:1px solid #3f3f46; border-radius:5px; padding:4px 14px; }"
+            "QPushButton:hover { background:#27272a; color:#d4d4d8; }"
+        )
+        btn_close.clicked.connect(dlg.accept)
+
+        btn_row.addStretch()
+        btn_row.addWidget(btn_fix)
+        btn_row.addWidget(btn_close)
+        layout.addLayout(btn_row)
+
+        _log_event("ui_doctor_opened")
+        dlg.exec()
+
     def _on_restart_cockpit_clicked(self) -> None:
         """User-triggered full cockpit restart. Counts in-flight panes,
         asks for confirmation, logs the event, then delegates to
@@ -2556,20 +2709,25 @@ class MainWindow(QMainWindow):
         """Repaint the affected chip when provider state flips. Triggered by
         Orchestrator.providerStateChanged so both user click and future
         config-file changes from other sources land here."""
+        state = self._provider_chip_state(provider)
         if provider == "codex" and hasattr(self, "_chip_codex"):
-            self._chip_codex.setStyleSheet(self._provider_chip_style("codex", disabled))
-            self._chip_codex.setToolTip(
-                "Codex: disabled — click to enable"
-                if disabled
-                else "Codex: enabled — click to disable"
+            self._chip_codex.setStyleSheet(
+                self._provider_chip_style(
+                    "codex",
+                    disabled=state == "disabled",
+                    not_installed=state == "not_installed",
+                )
             )
+            self._chip_codex.setToolTip(self._provider_chip_tooltip("codex", state))
         elif provider == "gemini" and hasattr(self, "_chip_gemini"):
-            self._chip_gemini.setStyleSheet(self._provider_chip_style("gemini", disabled))
-            self._chip_gemini.setToolTip(
-                "Gemini: disabled — click to enable"
-                if disabled
-                else "Gemini: enabled — click to disable"
+            self._chip_gemini.setStyleSheet(
+                self._provider_chip_style(
+                    "gemini",
+                    disabled=state == "disabled",
+                    not_installed=state == "not_installed",
+                )
             )
+            self._chip_gemini.setToolTip(self._provider_chip_tooltip("gemini", state))
 
     def _on_plan_chip_clicked(self) -> None:
         """Flip the account plan on the orchestrator. It persists state,

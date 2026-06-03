@@ -333,13 +333,14 @@ def test_exit_key_format() -> None:
 
 
 class _ExitFake:
-    """Fake for driving _on_session_exit without Qt."""
+    """Fake for driving _on_session_exit / restore_teammates without Qt."""
 
     def __init__(self) -> None:
         self._recent_exits: dict[str, dict] = {}
         self._panes_by_project: dict = {}
         self._idle_state: dict = {}
         self._pane_state: dict = {}
+        self._pending_done_notices: dict = {}
 
     def _ps(self, key: str):
         from agent_takkub.orchestrator import PaneState
@@ -353,6 +354,12 @@ class _ExitFake:
 
     def spawn(self, role: str, cwd: str | None = None, project: str | None = None):
         return True, "ok"
+
+    def _save_pending_done_notices(self, project: str) -> None:
+        pass
+
+    def _send_when_ready(self, role: str, task: str, project: str | None = None) -> None:
+        pass
 
 
 class TestRecentExitsProjectScoping:
