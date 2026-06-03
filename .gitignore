@@ -19,8 +19,18 @@ runtime/
 # vary per developer machine).
 .claude/settings.local.json
 
+# Gemini CLI per-machine config (MCP servers etc.) — tool-managed, not
+# cockpit source.
+.gemini/
+
 # Chrome port files and per-shard user-data-dir created by qa shard panes.
 .takkub/
+
+# Playwright MCP session artifacts (snapshots/console logs) — transient.
+.playwright-mcp/
+
+# Local eval / scratch notes — kept out of the repo on purpose.
+docs/eval/
 
 # Cockpit-managed Codex cheatsheet — auto-planted at codex pane
 # spawn time, marker-tagged, never user-authored. Safe to ignore.
