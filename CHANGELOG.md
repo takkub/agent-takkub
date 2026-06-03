@@ -4,7 +4,29 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v0.6.0] - 2026-06-03
+
 ### Added (เพิ่ม)
+- **QA shard fan-out** — `takkub assign --role qa --shards N` spawn QA หลาย pane
+  (qa#1..qa#N) แชร์ base role `qa` รัน UI smoke คู่ขนาน. แต่ละ shard แยก Chrome
+  port + user-data-dir ของตัวเอง (ไม่ชนกัน), ผลรวมเป็น Lead handoff ก้อนเดียว
+  พร้อม timeout 45 นาที. cross-check โดย gemini (design) + codex (21 side-effects)
+  ก่อน ship.
+- **Pipeline Settings dialog** — ปุ่ม **⚙ Pipelines** ใน status bar เปิดหน้า
+  ตั้งค่า dev pipeline ผ่าน UI ไม่ต้องแก้ code: (1) drag-drop hop builder (role
+  ใน hop เดียว = parallel, ระหว่าง hop = sequential; ตั้ง cwd/requires-commit/
+  auto-chain รายตัวใน Inspector), (2) custom templates (สร้าง/rename/duplicate/
+  delete; built-in 3 ตัวล็อกแก้ไม่ได้ + ปุ่ม ↺ Restore defaults), (3) Provider &
+  Role toggles เปิด/ปิด codex/gemini + per-role enable. เพิ่ม `pipeline_config.py`
+  (store `~/.takkub/pipelines.json` + self-heal) + `pipeline_dialog.py` (QWebChannel
+  bridge) + `static/pipeline_settings.html`.
+- **Edit project config ผ่าน right-click tab** (#32) — เมนู "Edit project…" แก้
+  description + path mapping แล้ว save+reload **ไม่ต้อง restart** (atomic write +
+  refresh list, validate path มีจริงก่อน save, preserve presets เดิม).
+- **GENERATE_GUIDE_HTML routing** (#30) — เอกสาร user-facing (setup guide / how-to /
+  checklist / คู่มือ / วิธีตั้งค่า) route ไปผลิต md source + แปลงเป็น HTML ผ่าน
+  `design_review_html` converter อัตโนมัติ. เช็คก่อน EXPLAIN_SYSTEM กัน precedence ชน
+  + กัน false-positive (setup docker→devops, checklist component→frontend).
 - **AI-generated project rules** — เพิ่ม project ใหม่ผ่านปุ่ม **＋ Add Project** เลือก
   "New project (AI rules)" → cockpit รัน Claude Code headless สร้าง `<project>/CLAUDE.md`
   ให้อัตโนมัติ (ใช้เวลา ~15–60 วินาที). preview + แก้ใน editor dialog ก่อน save
@@ -15,12 +37,31 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
   ใน `main_window.py`.
 
 ### Changed (เปลี่ยน)
+- **รวม role→CLI provider mapping เข้า Pipeline Settings** — ลบปุ่ม **🤖 Providers**
+  + `provider_dialog.py` (dead code หลังย้าย); ตั้ง provider ต่อ role (claude/codex/
+  gemini) ในแท็บ Providers & Roles ของ ⚙ Pipelines แทน. team/provider/role config
+  รวมจบที่ปุ่มเดียว.
+- **ยุบ ~14 per-pane state dict เป็น `PaneState` dataclass** — แก้ root cause ของ
+  lifecycle bug class: teardown เคยต้อง pop ~14 dict แยกกัน (diverge ง่าย → state-loss/
+  leak) เหลือ `_pane_state.pop(key)` ครั้งเดียว. ~60 call sites migrated. pure refactor
+  (1430 tests pass, 2 independent reviews).
 - **รวม `_show_rules_preview_dialog` กับ `_show_rules_editor_dialog` เหลือเมธอดเดียว** —
   ทั้งสองทำงานเหมือนกัน, ลบ `_show_rules_preview_dialog` (dead duplicate)
 - **ลบ `MainWindow._rebalance_teammates` สองอัน** (dead code) — caller จริงใช้
   `tab.rebalance_teammates()` ใน `project_tab.py` โดยตรงอยู่แล้ว
 - **เพิ่มปุ่ม `?` ใน status bar** + `QShortcut(F1)` ระดับ window สำหรับ help dialog
   (เดิม F1 ใช้ได้แค่ตอน main window focused — ตอนนี้ทำงานแม้ pane terminal focused)
+
+### Fixed (แก้)
+- **กัน main-thread freeze / zombie orchestrator / memory drop** (#33 #34 #35) — มาจาก
+  freeze incident จริง (teammate pane พ่น output ต่อเนื่อง): (#35) coalesce bytesIn เป็น
+  buffer ~16ms/จำกัดขนาด แทน render ทีละ chunk, (#34) single-instance QLockFile guard +
+  dead-man watchdog (1s heartbeat), (#33) inject MEMORY.md pointer เข้า teammate spawn
+  prompt.
+- **gap-audit lifecycle/routing fixes** — stuck-recover snapshot/restore (uuid/task/
+  auto-chain/commit-gate) + rollback on spawn fail; gate multi-role UI+API ด้วย impl-verb
+  (review/test/refactor ไม่โดน shadow); แยก provider toggle-off vs not-installed
+  (Claude-on-Claude); กัน save-empty/preset-loss.
 
 ## [v0.5.2] - 2026-06-01
 
