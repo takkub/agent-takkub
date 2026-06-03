@@ -27,6 +27,7 @@ to pick up changes (no live reload in v1).
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from pathlib import Path
 
 CLAUDE = "claude"
@@ -42,6 +43,9 @@ _FORCED_PROVIDER = {
     "codex": CODEX,
     "gemini": GEMINI,
 }
+
+# Roles whose CLI is fixed and must not be offered as an override in the UI.
+FORCED_ROLES = frozenset(_FORCED_PROVIDER)
 
 _CONFIG_PATH = Path.home() / ".takkub" / "role-providers.json"
 
@@ -93,6 +97,33 @@ def save_providers(mapping: dict[str, str]) -> None:
         if str(provider).lower() in VALID_PROVIDERS
     }
     path.write_text(json.dumps(cleaned, indent=2) + "\n", encoding="utf-8")
+
+
+def role_provider_map(roles: Iterable[str]) -> dict[str, str]:
+    """Return ``{role: provider_for(role)}`` for the given roles.
+
+    Used to seed the Pipeline-Settings page's per-role CLI dropdowns with the
+    currently-configured mapping (forced roles resolve to their fixed CLI).
+    """
+    return {r: provider_for(r) for r in roles}
+
+
+def save_role_overrides(mapping: dict[str, str]) -> None:
+    """Persist only real overrides from a page payload.
+
+    Drops forced roles (lead/codex/gemini — their CLI is fixed) and claude
+    defaults (claude is the implicit default, storing it adds noise), then
+    writes the result via :func:`save_providers`. Mirrors the old
+    RoleProviderDialog save behavior so the file stays minimal.
+    """
+    overrides: dict[str, str] = {}
+    for role, provider in (mapping or {}).items():
+        r = str(role).lower().strip()
+        p = str(provider).lower().strip()
+        if r in FORCED_ROLES or p == CLAUDE or p not in VALID_PROVIDERS:
+            continue
+        overrides[r] = p
+    save_providers(overrides)
 
 
 def provider_for(role: str) -> str:

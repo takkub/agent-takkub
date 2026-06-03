@@ -108,6 +108,22 @@ class AgentPane(QFrame):
         # --continue).
         self._last_output_ts: float = 0.0
 
+        # Issue #35 — render-path coalescing.
+        # Instead of forwarding every PTY chunk to xterm.js immediately (which
+        # floods the Qt main thread when an agent loops and emits thousands of
+        # chunks/s), we buffer incoming bytes and flush on a ~16 ms timer
+        # (≈60 fps).  Force-flush when the buffer exceeds 256 KB so a single
+        # bursty write doesn't accumulate unbounded backlog.
+        self._render_buf: bytearray = bytearray()
+        self._render_timer = QTimer(self)
+        self._render_timer.setInterval(16)  # ≈60 fps
+        self._render_timer.setSingleShot(True)
+        self._render_timer.timeout.connect(self._flush_render_buf)
+
+        # Monotonically increasing byte counter used by the orchestrator's
+        # throughput watchdog to detect runaway-output panes.
+        self._tp_total_bytes: int = 0
+
         self.setObjectName(f"pane_{role.name}")
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setStyleSheet(self._stylesheet())
@@ -265,6 +281,36 @@ class AgentPane(QFrame):
         else:
             self._note.setText("")
 
+    # Maximum render-buffer size before a forced flush regardless of timer.
+    _RENDER_FLUSH_CAP = 256 * 1024  # 256 KB
+
+    def _coalesce_bytes(self, data: bytes) -> None:
+        """Accumulate PTY bytes and schedule a batched flush to xterm.js.
+
+        Replaces the direct bytesIn→write_bytes connection so the Qt main
+        thread isn't flooded when a pane emits thousands of chunks/s.
+        Force-flushes immediately when the buffer exceeds _RENDER_FLUSH_CAP
+        to bound worst-case latency on very large writes.
+        """
+        self._render_buf.extend(data)
+        self._tp_total_bytes += len(data)
+        if len(self._render_buf) >= self._RENDER_FLUSH_CAP:
+            self._flush_render_buf()
+        elif not self._render_timer.isActive():
+            self._render_timer.start()
+
+    def _flush_render_buf(self) -> None:
+        """Write the coalesced buffer to xterm.js and reset the timer."""
+        if not self._render_buf:
+            return
+        chunk = bytes(self._render_buf)
+        self._render_buf.clear()
+        self._render_timer.stop()
+        try:
+            self._terminal.write_bytes(chunk)
+        except Exception:
+            pass
+
     def _mark_output_ts(self, _data: bytes) -> None:
         """Slot bound to PtySession.bytesIn — bump the last-output
         wall-clock so the orchestrator's stuck-pane watchdog can tell a
@@ -275,13 +321,16 @@ class AgentPane(QFrame):
         """Bind a PtySession to this pane's terminal widget. `cwd` (optional)
         is shown in the header next to the role label."""
         self.session = session
-        # xterm.js consumes raw PTY bytes directly (no pyte → rich rebuild)
-        session.bytesIn.connect(self._terminal.write_bytes)
+        # Route PTY bytes through the coalescing buffer (issue #35).
+        # _coalesce_bytes accumulates chunks and flushes to xterm.js every
+        # ~16 ms, preventing main-thread flooding on high-throughput panes.
+        session.bytesIn.connect(self._coalesce_bytes)
         # Also tap bytesIn into the stuck-pane watchdog so it knows when
         # claude was last *actually* producing output. Reset to "now" at
         # attach so the watchdog starts the clock from spawn time, not
         # from whatever the previous session left behind.
         self._last_output_ts = time.time()
+        self._tp_total_bytes = 0
         session.bytesIn.connect(self._mark_output_ts)
         # pyte still parses the bytes in parallel — use that to push the
         # "claude is idle at the ready prompt" signal into the terminal
@@ -350,9 +399,17 @@ class AgentPane(QFrame):
         self._title.setText(f"{self.role.label} · {tail}")
 
     def detach_session(self) -> None:
+        # Flush any pending render bytes before tearing down so no output is
+        # silently dropped when the session ends (e.g. final "done" message).
+        self._flush_render_buf()
+        self._render_timer.stop()
         if self.session is not None:
             try:
-                self.session.bytesIn.disconnect(self._terminal.write_bytes)
+                self.session.bytesIn.disconnect(self._coalesce_bytes)
+            except Exception:
+                pass
+            try:
+                self.session.bytesIn.disconnect(self._mark_output_ts)
             except Exception:
                 pass
             try:

@@ -7,6 +7,9 @@ import faulthandler
 import os
 import signal
 import sys
+import tempfile
+import threading
+import time
 from pathlib import Path
 
 # Boot-time crash dump. pythonw.exe has no console, so a segfault or
@@ -65,11 +68,82 @@ os.environ.setdefault(
     ),
 )
 
+from PyQt6.QtCore import QLockFile  # noqa: E402
 from PyQt6.QtGui import QFont  # noqa: E402 — PyQt must import after env setup above
-from PyQt6.QtWidgets import QApplication  # noqa: E402
+from PyQt6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
 from .main_window import MainWindow  # noqa: E402
 from .update_worker import try_silent_self_update  # noqa: E402
+
+# Temp-dir lock file prevents two cockpit processes from co-existing.
+# OS-level advisory lock: automatically released when the process exits
+# (even on force-kill), so a crashed cockpit never permanently blocks restart.
+_LOCK_PATH = str(Path(tempfile.gettempdir()) / "agent-takkub-cockpit.lock")
+_instance_lock: QLockFile | None = None  # module-level ref keeps GC from releasing the lock
+
+# Dead-man watchdog constants.
+# 30-second threshold: normal Qt operations (modal dialogs, large snapshot
+# writes) resolve in well under 10 s. Legitimate slow paths at startup don't
+# exceed ~5 s. 30 s is conservative enough to never fire on transient slowness
+# yet fast enough to catch the 21-minute zombie observed in issue #34.
+_WATCHDOG_TIMEOUT_S = 30.0
+_WATCHDOG_POLL_S = 5.0
+
+
+def _watchdog_should_exit(heartbeat_ts: float, now: float, timeout_s: float) -> bool:
+    """Pure helper: True when the main-thread heartbeat has been stale too long.
+
+    Extracted for unit-testability — the daemon thread calls this in a loop.
+    """
+    return (now - heartbeat_ts) > timeout_s
+
+
+def _start_deadman_watchdog(window: MainWindow, _stop: threading.Event | None = None) -> None:
+    """Start a background daemon that kills the process when the Qt main thread wedges.
+
+    MainWindow._heartbeat_timer ticks _heartbeat_ts every ~1 s from the Qt event
+    loop. If the heartbeat stops advancing for _WATCHDOG_TIMEOUT_S seconds the
+    main thread is blocked — a busy-loop, a blocking subprocess.run call on the
+    Qt thread, or a deadlock. We call os._exit() rather than sys.exit() because
+    sys.exit() raises SystemExit which needs the main thread to handle it, and
+    the main thread is exactly what we cannot reach when it is wedged.
+
+    _stop is an optional threading.Event used only in tests to halt the daemon
+    cleanly without killing the process.
+    """
+
+    def _run() -> None:
+        while not (_stop is not None and _stop.is_set()):
+            time.sleep(_WATCHDOG_POLL_S)
+            if _stop is not None and _stop.is_set():
+                return
+            now = time.monotonic()
+            if _watchdog_should_exit(window._heartbeat_ts, now, _WATCHDOG_TIMEOUT_S):
+                age = now - window._heartbeat_ts
+                _boot_log(
+                    f"[watchdog] main thread wedged for {age:.0f}s"
+                    " — terminating children then os._exit(1)"
+                )
+                # Best-effort: terminate child sessions so they don't become
+                # orphans after os._exit bypasses atexit/_kill_all.
+                # pane.session.terminate() is OS-level (TerminateProcess) and
+                # safe to call from a daemon thread; wrap every access in
+                # try/except to guard against races with teardown on the main
+                # thread (e.g. a pane being removed while we iterate).
+                try:
+                    for pane in list(window.orch.panes.values()):
+                        if pane.session is not None:
+                            try:
+                                pane.mark_expected_exit()
+                                pane.session.terminate()
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+                os._exit(1)
+
+    t = threading.Thread(target=_run, daemon=True, name="cockpit-deadman")
+    t.start()
 
 
 def _install_signal_handlers(window: MainWindow) -> None:
@@ -120,8 +194,26 @@ def main(argv: list[str] | None = None) -> int:
     app.setApplicationName("agent-takkub")
     f = QFont("Segoe UI", 10)
     app.setFont(f)
+
+    # Single-instance guard: refuse to open a second cockpit window.
+    # tryLock(100) waits at most 100 ms so startup delay is imperceptible.
+    global _instance_lock
+    _instance_lock = QLockFile(_LOCK_PATH)
+    if not _instance_lock.tryLock(100):
+        _boot_log(f"[single-instance] lock held — refusing duplicate start (pid={os.getpid()})")
+        QMessageBox.warning(
+            None,
+            "agent-takkub already running",
+            "A cockpit window is already open.\n\n"
+            "Close the existing window before starting a new one.\n\n"
+            "If the old window is unresponsive, use Task Manager to end\n"
+            "the 'pythonw.exe' process and try again.",
+        )
+        return 1
+
     w = MainWindow()
     _install_signal_handlers(w)
+    _start_deadman_watchdog(w)
     w.show()
     return app.exec()
 

@@ -17,6 +17,7 @@ axis — Lead always on the left, teammates stacked vertically on the right.
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -616,14 +617,16 @@ class MainWindow(QMainWindow):
         self._btn_open_shell.setStyleSheet(self._ghost_button_style())
         self._btn_open_shell.clicked.connect(self._on_open_shell_clicked)
 
-        self._btn_providers = QPushButton("🤖 Providers", self)
-        self._btn_providers.setToolTip(
-            "Configure which CLI (claude / codex / gemini) backs each teammate role.\n"
-            "Edits ~/.takkub/role-providers.json. Live — applies to the\n"
-            "next pane you spawn, no cockpit restart needed."
+        self._btn_pipelines = QPushButton("⚙ Pipelines", self)
+        self._btn_pipelines.setToolTip(
+            "Build dev pipelines: drag roles into hops, save reusable templates,\n"
+            "toggle providers, enable/disable roles, and pick each role's CLI\n"
+            "(claude/codex/gemini). Edits ~/.takkub/pipelines.json +\n"
+            "disabled-providers.json + role-providers.json. Applies to the\n"
+            "next pane you spawn, no restart needed."
         )
-        self._btn_providers.setStyleSheet(self._ghost_button_style())
-        self._btn_providers.clicked.connect(self._on_providers_clicked)
+        self._btn_pipelines.setStyleSheet(self._ghost_button_style())
+        self._btn_pipelines.clicked.connect(self._on_pipelines_clicked)
 
         self._btn_claude_auth = QPushButton("Claude Auth", self)
         self._btn_claude_auth.setToolTip(
@@ -730,7 +733,7 @@ class MainWindow(QMainWindow):
             self._chip_gemini,
             self._btn_install_rtk,
             self._btn_restart,
-            self._btn_providers,
+            self._btn_pipelines,
             # self._btn_claude_auth,  # hidden per user request — uncomment to restore.
             # The button + its handler are still created above; only its
             # placement in the status bar is removed so it can come back easily.
@@ -781,6 +784,16 @@ class MainWindow(QMainWindow):
         self._session_save_timer.setInterval(60_000)
         self._session_save_timer.timeout.connect(self.orch.write_session_snapshot)
         self._session_save_timer.start()
+
+        # Heartbeat for the dead-man watchdog in app.py._start_deadman_watchdog.
+        # The watchdog daemon thread reads _heartbeat_ts; if it stops advancing
+        # for ~30 s the watchdog assumes the main thread is wedged and calls
+        # os._exit(1). Writing a float is effectively atomic under CPython's GIL.
+        self._heartbeat_ts: float = time.monotonic()
+        self._heartbeat_timer = QTimer(self)
+        self._heartbeat_timer.setInterval(1_000)
+        self._heartbeat_timer.timeout.connect(self._tick_heartbeat)
+        self._heartbeat_timer.start()
 
         # Update check — two-stage strategy:
         # 1. singleShot 30 s after boot: first poll without blocking startup.
@@ -1051,20 +1064,29 @@ class MainWindow(QMainWindow):
         self.orch.inject_slash_command_when_ready(LEAD.name, "/remote-control", project=project)
         self._status.showMessage(f"bridging Lead·{project} → claude.ai/code", 4_000)
 
-    def _on_providers_clicked(self) -> None:
-        """Open the role-provider config dialog. On save the dialog writes
-        `~/.takkub/role-providers.json`; `orchestrator.spawn()` re-reads
-        that file every time, so the new mapping applies to the very
-        next pane the user opens — no restart needed. Already-running
-        panes keep whatever CLI they were spawned with.
+    def _on_pipelines_clicked(self) -> None:
+        """Open the pipeline-settings dialog (drag-drop hops, templates,
+        provider/role enable). On Save & Apply the page persists templates +
+        per-role enable to `~/.takkub/pipelines.json` via the bridge and stashes
+        the desired provider on/off. We then route any *changed* provider
+        through `orchestrator.toggle_provider` so it persists to
+        `disabled-providers.json`, repaints the status-bar chip, AND broadcasts
+        the `[system]` notice to live Lead panes — identical to a chip click.
+        Cancel / window-close discards (dialog returns Rejected).
         """
-        from .provider_dialog import RoleProviderDialog
+        from .pipeline_dialog import PipelineSettingsDialog
+        from .provider_state import is_disabled
 
-        dlg = RoleProviderDialog(self)
+        dlg = PipelineSettingsDialog(self)
         if dlg.exec() != dlg.DialogCode.Accepted:
             return
+        # Apply only providers whose target state differs from disk — toggle_provider
+        # always broadcasts, so a no-op call would spam Lead panes spuriously.
+        for provider, target_disabled in dlg.bridge.pending_provider_disabled.items():
+            if target_disabled != is_disabled(provider):
+                self.orch.toggle_provider(provider, target_disabled)
         self._status.showMessage(
-            "Role providers saved — new mapping applies to the next pane you spawn.",
+            "Pipeline settings saved — applies to the next pane you spawn.",
             6_000,
         )
 
@@ -3137,6 +3159,9 @@ class MainWindow(QMainWindow):
         self._settings.setValue("window/geometry", self.saveGeometry())
         self._settings.setValue("split/main", self.main_split.sizes())
         self._settings.sync()
+
+    def _tick_heartbeat(self) -> None:
+        self._heartbeat_ts = time.monotonic()
 
     # ──────────────────────────────────────────────────────────────
     def closeEvent(self, event) -> None:
