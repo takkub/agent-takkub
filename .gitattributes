@@ -9,9 +9,14 @@
 *.json text eol=lf
 *.toml text eol=lf
 
-*.bat  text eol=crlf
-*.cmd  text eol=crlf
-*.ps1  text eol=crlf
+# cmd.exe parses .bat/.cmd by byte offset assuming CRLF — an LF-only file
+# misparses and leaks a fragment (e.g. the `M` of `REM`) as a bogus command
+# ('M' is not recognized…). `text eol=crlf` proved unreliable on checkout here
+# (core.autocrlf=true + LF blob → git skips the LF→CRLF conversion), so pin
+# these as binary-verbatim: the CRLF bytes committed are what gets checked out.
+*.bat  -text
+*.cmd  -text
+*.ps1  -text
 
 # Binary
 *.png  binary
