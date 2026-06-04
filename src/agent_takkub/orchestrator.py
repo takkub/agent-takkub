@@ -1574,7 +1574,14 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         try:
             from .shared_dev_tools import shared_mcp_config_path_for_role
 
-            mcp_cfg = shared_mcp_config_path_for_role(base_role)
+            if shard_idx is not None:
+                # Fan-out shard: give each shard its own browser-profile dir so
+                # parallel shards don't collide on one Chrome profile lock (#39).
+                from .shared_dev_tools import shard_mcp_config_path
+
+                mcp_cfg = shard_mcp_config_path(base_role, shard_idx, project_ns)
+            else:
+                mcp_cfg = shared_mcp_config_path_for_role(base_role)
         except Exception:
             mcp_cfg = None
         if mcp_cfg:

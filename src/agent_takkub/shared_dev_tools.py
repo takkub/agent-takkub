@@ -173,6 +173,94 @@ def shared_mcp_config_path_for_role(role: str) -> str | None:
     return shared_mcp_config_path()
 
 
+# Each browser MCP's canonical "user data dir" CLI flag, taken from its own
+# --help: @playwright/mcp uses kebab `--user-data-dir`; chrome-devtools-mcp
+# documents camelCase `--userDataDir`. (yargs would also accept the kebab alias
+# for chrome-devtools, but we hand each tool its documented form so the profile
+# override never depends on camel-case expansion being enabled.)
+_PROFILE_FLAG: dict[str, str] = {
+    "playwright": "--user-data-dir",
+    "chrome-devtools": "--userDataDir",
+}
+
+# Chromium "singleton" guard files live at the root of a user-data-dir and are
+# what raise "profile is already in use / locked". A hard-killed shard (cockpit
+# force-restart, watchdog os._exit, ConPTY freeze kill) leaves them behind; on
+# Windows they don't self-recover, so a stale set would wedge the SAME shard's
+# next run — re-introducing #39 one layer down. We best-effort clear them when
+# (re)generating a shard config; the pane isn't alive yet, so no live browser
+# owns the profile.
+_SINGLETON_LOCK_FILES = ("SingletonLock", "SingletonCookie", "SingletonSocket")
+
+
+def _clear_stale_singleton_locks(profile_dir: pathlib.Path) -> None:
+    for fname in _SINGLETON_LOCK_FILES:
+        try:
+            (profile_dir / fname).unlink(missing_ok=True)
+        except OSError:
+            pass  # a leftover lock is recoverable; crashing here is not
+
+
+def shard_mcp_config_path(base_role: str, shard_idx: int, project: str) -> str | None:
+    """Per-shard MCP config: identical to the role variant, but each browser MCP
+    (playwright, chrome-devtools) gets a UNIQUE per-shard user-data-dir — via that
+    browser's own profile flag (``--user-data-dir`` for playwright, ``--userDataDir``
+    for chrome-devtools) — so parallel fan-out shards (``assign --shards N``) don't
+    collide on one Chrome profile lock (the #39 bug where only shard #1 could drive
+    the browser and the rest hit "profile locked by another shard").
+
+    Non-browser MCPs pass through untouched. Returns the path to a generated
+    ``shared-mcp-<project>-<role>-shard<N>.json``; falls back to the plain
+    role-variant path when the role has no browser MCP (nothing to isolate) or on
+    any read/write error (a shared profile still beats no MCPs at all).
+    """
+    base_path = shared_mcp_config_path_for_role(base_role)
+    if base_path is None:
+        return None
+    try:
+        data = json.loads(pathlib.Path(base_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return base_path
+    servers = data.get("mcpServers") or {}
+    browser_names = [n for n in servers if n in _BROWSER_MCP_NAMES]
+    if not browser_names:
+        return base_path  # no browser MCP for this role — nothing to isolate
+
+    # Sanitize the project namespace for use in file/dir names.
+    safe_project = re.sub(r"[^A-Za-z0-9._-]", "_", project) or "default"
+    profiles_root = SHARED_MCP_FILE.parent / "browser-profiles"
+    for name in browser_names:
+        flag = _PROFILE_FLAG.get(name, "--user-data-dir")
+        cfg = dict(servers[name])
+        args = list(cfg.get("args") or [])
+        if flag in args:
+            continue  # idempotent — already templated
+        # Per (project, role, shard, browser) profile dir — distinct browsers get
+        # distinct dirs too (playwright Chromium vs chrome-devtools Chrome would
+        # otherwise lock each other).
+        profile_dir = profiles_root / f"{safe_project}-{base_role}-shard{shard_idx}-{name}"
+        try:
+            profile_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            # Don't go silent — a path-too-long (Windows MAX_PATH) or permission
+            # failure is the only signal that the profile won't isolate.
+            _log.warning("shard_mcp_config_path: could not create %s: %s", profile_dir, e)
+        _clear_stale_singleton_locks(profile_dir)
+        cfg["args"] = [*args, flag, str(profile_dir)]
+        servers[name] = cfg
+    data["mcpServers"] = servers
+
+    out = SHARED_MCP_FILE.parent / f"shared-mcp-{safe_project}-{base_role}-shard{shard_idx}.json"
+    try:
+        out.write_text(
+            json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        return base_path
+    return str(out)
+
+
 def ensure_browser_mcps() -> tuple[bool, str]:
     """Merge BROWSER_MCPS into runtime/shared-mcp.json if they're not
     already present. Idempotent — safe to call on every cockpit launch.
