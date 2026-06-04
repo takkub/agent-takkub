@@ -22,8 +22,8 @@ from agent_takkub.shared_dev_tools import (
     _ROLE_MCP_POLICY,
     BROWSER_MCPS,
     _role_variant_path,
+    browser_profile_mcp_config_path,
     ensure_browser_mcps,
-    shard_mcp_config_path,
     shared_mcp_config_path,
     shared_mcp_config_path_for_role,
 )
@@ -234,15 +234,41 @@ class TestRoleAwareMcpFilter:
         assert set(qa_before.keys()) == set(qa_after.keys())
 
 
-class TestShardMcpConfigPath:
-    """Per-shard browser-profile isolation (#39): each fan-out shard gets its
-    own --user-data-dir so parallel shards don't lock one Chrome profile."""
+class TestBrowserProfileMcpConfigPath:
+    """Persistent per-pane browser-profile isolation: every browser role gets its
+    own --user-data-dir so the browser remembers its session across runs, and
+    parallel fan-out shards don't lock one Chrome profile (#39)."""
+
+    def test_non_shard_gets_persistent_profile_without_shard_suffix(
+        self, isolated_mcp_file: pathlib.Path
+    ) -> None:
+        # A normal (non-fan-out) qa pane — shard_idx=None — must still get a
+        # PERSISTENT profile (so it remembers login), with NO "-shard" in the path.
+        ensure_browser_mcps()
+        path = browser_profile_mcp_config_path("qa", None, "proj_a")
+        assert path is not None
+        assert path.endswith("shared-mcp-proj_a-qa.json")  # no -shard suffix
+        servers = _read(pathlib.Path(path))["mcpServers"]
+        for name, flag in _PROFILE_FLAGS.items():
+            udd = _udd(servers[name]["args"], flag)
+            # Exact dir name — no "-shard<N>" segment for a non-fan-out pane.
+            assert pathlib.Path(udd).name == f"proj_a-qa-{name}"
+
+    def test_non_shard_and_shard_get_distinct_profiles(
+        self, isolated_mcp_file: pathlib.Path
+    ) -> None:
+        ensure_browser_mcps()
+        plain = _read(pathlib.Path(browser_profile_mcp_config_path("qa", None, "proj_a")))
+        sh1 = _read(pathlib.Path(browser_profile_mcp_config_path("qa", 1, "proj_a")))
+        assert _udd(plain["mcpServers"]["playwright"]["args"]) != _udd(
+            sh1["mcpServers"]["playwright"]["args"]
+        )
 
     def test_injects_unique_user_data_dir_per_browser(
         self, isolated_mcp_file: pathlib.Path
     ) -> None:
         ensure_browser_mcps()
-        path = shard_mcp_config_path("qa", 1, "proj_a")
+        path = browser_profile_mcp_config_path("qa", 1, "proj_a")
         assert path is not None
         servers = _read(pathlib.Path(path))["mcpServers"]
         for name, flag in _PROFILE_FLAGS.items():
@@ -260,8 +286,8 @@ class TestShardMcpConfigPath:
 
     def test_different_shards_get_different_profiles(self, isolated_mcp_file: pathlib.Path) -> None:
         ensure_browser_mcps()
-        s1 = _read(pathlib.Path(shard_mcp_config_path("qa", 1, "proj_a")))
-        s2 = _read(pathlib.Path(shard_mcp_config_path("qa", 2, "proj_a")))
+        s1 = _read(pathlib.Path(browser_profile_mcp_config_path("qa", 1, "proj_a")))
+        s2 = _read(pathlib.Path(browser_profile_mcp_config_path("qa", 2, "proj_a")))
         u1 = _udd(s1["mcpServers"]["playwright"]["args"])
         u2 = _udd(s2["mcpServers"]["playwright"]["args"])
         assert u1 != u2
@@ -271,16 +297,20 @@ class TestShardMcpConfigPath:
         self, isolated_mcp_file: pathlib.Path
     ) -> None:
         ensure_browser_mcps()
-        a = _read(pathlib.Path(shard_mcp_config_path("qa", 1, "proj_a")))
-        b = _read(pathlib.Path(shard_mcp_config_path("qa", 1, "proj_b")))
+        a = _read(pathlib.Path(browser_profile_mcp_config_path("qa", 1, "proj_a")))
+        b = _read(pathlib.Path(browser_profile_mcp_config_path("qa", 1, "proj_b")))
         assert _udd(a["mcpServers"]["playwright"]["args"]) != _udd(
             b["mcpServers"]["playwright"]["args"]
         )
 
     def test_idempotent_no_double_append(self, isolated_mcp_file: pathlib.Path) -> None:
         ensure_browser_mcps()
-        first = pathlib.Path(shard_mcp_config_path("qa", 1, "proj_a")).read_text(encoding="utf-8")
-        second = pathlib.Path(shard_mcp_config_path("qa", 1, "proj_a")).read_text(encoding="utf-8")
+        first = pathlib.Path(browser_profile_mcp_config_path("qa", 1, "proj_a")).read_text(
+            encoding="utf-8"
+        )
+        second = pathlib.Path(browser_profile_mcp_config_path("qa", 1, "proj_a")).read_text(
+            encoding="utf-8"
+        )
         assert first == second  # regenerated from the base variant, stable
         data = json.loads(second)
         for name, flag in _PROFILE_FLAGS.items():
@@ -292,7 +322,9 @@ class TestShardMcpConfigPath:
         master["mcpServers"]["obsidian-vault"] = {"type": "stdio", "command": "noop", "args": ["x"]}
         isolated_mcp_file.write_text(json.dumps(master), encoding="utf-8")
         ensure_browser_mcps()  # regenerate variants so qa picks up obsidian-vault
-        servers = _read(pathlib.Path(shard_mcp_config_path("qa", 1, "proj_a")))["mcpServers"]
+        servers = _read(pathlib.Path(browser_profile_mcp_config_path("qa", 1, "proj_a")))[
+            "mcpServers"
+        ]
         assert servers["obsidian-vault"]["args"] == ["x"]
         assert "--user-data-dir" not in servers["obsidian-vault"]["args"]
 
@@ -306,7 +338,7 @@ class TestShardMcpConfigPath:
         ensure_browser_mcps()
         # backend's policy has no browser MCP → nothing to isolate → base path.
         base = shared_mcp_config_path_for_role("backend")
-        assert shard_mcp_config_path("backend", 1, "proj_a") == base
+        assert browser_profile_mcp_config_path("backend", 1, "proj_a") == base
 
     def test_clears_stale_singleton_lock_on_regenerate(
         self, isolated_mcp_file: pathlib.Path
@@ -315,10 +347,10 @@ class TestShardMcpConfigPath:
         # shard's next run that stale lock would wedge the browser. Regenerating
         # the shard config must best-effort clear it.
         ensure_browser_mcps()
-        shard_mcp_config_path("qa", 1, "proj_a")
+        browser_profile_mcp_config_path("qa", 1, "proj_a")
         prof = isolated_mcp_file.parent / "browser-profiles" / "proj_a-qa-shard1-playwright"
         assert prof.is_dir()
         lock = prof / "SingletonLock"
         lock.write_text("stale", encoding="utf-8")
-        shard_mcp_config_path("qa", 1, "proj_a")  # regenerate
+        browser_profile_mcp_config_path("qa", 1, "proj_a")  # regenerate
         assert not lock.exists()

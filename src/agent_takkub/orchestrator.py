@@ -1369,16 +1369,17 @@ class Orchestrator(QObject):
             # markdown containing backticks, asterisks, and Thai text.)
             role_md_path = staging / "CLAUDE.md"
             if role_md_path.exists():
-                # Issue #33: inject a pointer to Lead's project-memory so the
-                # teammate can read domain rules (package manager, ports, vendor
-                # patterns) on demand without relying on Lead to echo them in
-                # every task spec.  Append to the already-materialised CLAUDE.md
-                # (agent_role_dir() always rewrites it fresh from the source
-                # .claude/agents/<role>.md, so the injection doesn't accumulate).
+                # agent_role_dir() always rewrites CLAUDE.md fresh from the source
+                # .claude/agents/<role>.md, so these injections never accumulate.
+                # Build the whole appendix, then write once.
+                _existing_md = role_md_path.read_text(encoding="utf-8")
+                _appendix = ""
+                # Issue #33: pointer to Lead's project-memory so the teammate can
+                # read domain rules (package manager, ports, vendor patterns) on
+                # demand without relying on Lead to echo them in every task spec.
                 _mem_path = _resolve_project_memory(lead_cwd(project_ns) or spawn_cwd)
                 if _mem_path is not None:
-                    _existing_md = role_md_path.read_text(encoding="utf-8")
-                    _mem_section = f"""
+                    _appendix += f"""
 
 ---
 
@@ -1396,7 +1397,32 @@ Read("{_mem_path}")
 
 MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง memory file ที่อธิบาย rule นั้นๆ อ่านเฉพาะ file ที่เกี่ยวกับงานของคุณ ไม่ต้องอ่านทั้งหมด
 """
-                    role_md_path.write_text(_existing_md + _mem_section, encoding="utf-8")
+                # Per-(role × project) learned memory: this role's OWN accumulated
+                # notes for THIS project (conventions, gotchas, decisions; qa: test
+                # login/flow). Read-on-spawn + append-on-learn so each role grows
+                # into its project instead of starting cold every spawn.
+                try:
+                    from .role_memory import ensure_role_memory
+
+                    _role_mem = ensure_role_memory(project_ns, base_role)
+                except Exception:
+                    _role_mem = None
+                if _role_mem is not None:
+                    _appendix += f"""
+
+---
+
+## 🧠 Your learned notes ({base_role} · this project)
+
+ความรู้ที่ **คุณ ({base_role}) สะสมไว้กับโปรเจคนี้** (สะสมข้ามรอบงาน):
+
+`{_role_mem}`
+
+**ก่อนเริ่มงาน:** `Read("{_role_mem}")` — ดู convention / gotcha / decision (qa: test login/flow) ที่เคยเรียนรู้ จะได้ไม่ต้องค้นใหม่
+**เมื่อเจอสิ่งที่ไม่ obvious** (pattern, pitfall, login/flow, decision) → append สั้นๆ ลงไฟล์นี้ด้วย Edit/Write เพื่อให้รอบหน้าเร็วขึ้น เก็บเฉพาะของจริงที่มีค่า อย่าซ้ำ code/git
+"""
+                if _appendix:
+                    role_md_path.write_text(_existing_md + _appendix, encoding="utf-8")
                 role_md_file = str(role_md_path)
 
         try:
@@ -1572,16 +1598,14 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         # fall back to the full master file. Skipped silently if there's
         # no config yet.
         try:
-            from .shared_dev_tools import shared_mcp_config_path_for_role
+            from .shared_dev_tools import browser_profile_mcp_config_path
 
-            if shard_idx is not None:
-                # Fan-out shard: give each shard its own browser-profile dir so
-                # parallel shards don't collide on one Chrome profile lock (#39).
-                from .shared_dev_tools import shard_mcp_config_path
-
-                mcp_cfg = shard_mcp_config_path(base_role, shard_idx, project_ns)
-            else:
-                mcp_cfg = shared_mcp_config_path_for_role(base_role)
+            # Every pane: browser roles (qa/critic/designer) get a PERSISTENT
+            # per-(project, role[, shard]) browser profile so the browser remembers
+            # its session/cookies across runs (no more re-login every test) and
+            # parallel shards don't collide on one Chrome profile lock (#39).
+            # Non-browser roles fall through to their plain role-variant config.
+            mcp_cfg = browser_profile_mcp_config_path(base_role, shard_idx, project_ns)
         except Exception:
             mcp_cfg = None
         if mcp_cfg:

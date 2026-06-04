@@ -201,16 +201,27 @@ def _clear_stale_singleton_locks(profile_dir: pathlib.Path) -> None:
             pass  # a leftover lock is recoverable; crashing here is not
 
 
-def shard_mcp_config_path(base_role: str, shard_idx: int, project: str) -> str | None:
-    """Per-shard MCP config: identical to the role variant, but each browser MCP
-    (playwright, chrome-devtools) gets a UNIQUE per-shard user-data-dir — via that
-    browser's own profile flag (``--user-data-dir`` for playwright, ``--userDataDir``
-    for chrome-devtools) — so parallel fan-out shards (``assign --shards N``) don't
-    collide on one Chrome profile lock (the #39 bug where only shard #1 could drive
-    the browser and the rest hit "profile locked by another shard").
+def browser_profile_mcp_config_path(
+    base_role: str, shard_idx: int | None, project: str
+) -> str | None:
+    """Browser-profile-isolated MCP config: identical to the role variant, but
+    each browser MCP (playwright, chrome-devtools) gets a PERSISTENT per-pane
+    user-data-dir — via that browser's own profile flag (``--user-data-dir`` for
+    playwright, ``--userDataDir`` for chrome-devtools). Two wins:
+
+      * the browser **remembers its session/cookies across runs** instead of
+        starting from playwright's default ephemeral temp profile — so a logged-in
+        QA pane stays logged in next time;
+      * parallel fan-out shards (``assign --shards N``) don't collide on one Chrome
+        profile lock (#39 — only shard #1 could drive the browser, the rest hit
+        "profile locked by another shard").
+
+    The dir is keyed per (project, base_role[, shard], browser). ``shard_idx`` is
+    None for a normal (non-fan-out) pane and an int for a shard, which is the only
+    difference between the two callers — both get a persistent isolated profile.
 
     Non-browser MCPs pass through untouched. Returns the path to a generated
-    ``shared-mcp-<project>-<role>-shard<N>.json``; falls back to the plain
+    ``shared-mcp-<project>-<role>[-shard<N>].json``; falls back to the plain
     role-variant path when the role has no browser MCP (nothing to isolate) or on
     any read/write error (a shared profile still beats no MCPs at all).
     """
@@ -228,6 +239,7 @@ def shard_mcp_config_path(base_role: str, shard_idx: int, project: str) -> str |
 
     # Sanitize the project namespace for use in file/dir names.
     safe_project = re.sub(r"[^A-Za-z0-9._-]", "_", project) or "default"
+    shard_suffix = f"-shard{shard_idx}" if shard_idx is not None else ""
     profiles_root = SHARED_MCP_FILE.parent / "browser-profiles"
     for name in browser_names:
         flag = _PROFILE_FLAG.get(name, "--user-data-dir")
@@ -235,22 +247,22 @@ def shard_mcp_config_path(base_role: str, shard_idx: int, project: str) -> str |
         args = list(cfg.get("args") or [])
         if flag in args:
             continue  # idempotent — already templated
-        # Per (project, role, shard, browser) profile dir — distinct browsers get
+        # Per (project, role[, shard], browser) profile dir — distinct browsers get
         # distinct dirs too (playwright Chromium vs chrome-devtools Chrome would
         # otherwise lock each other).
-        profile_dir = profiles_root / f"{safe_project}-{base_role}-shard{shard_idx}-{name}"
+        profile_dir = profiles_root / f"{safe_project}-{base_role}{shard_suffix}-{name}"
         try:
             profile_dir.mkdir(parents=True, exist_ok=True)
         except OSError as e:
             # Don't go silent — a path-too-long (Windows MAX_PATH) or permission
             # failure is the only signal that the profile won't isolate.
-            _log.warning("shard_mcp_config_path: could not create %s: %s", profile_dir, e)
+            _log.warning("browser_profile_mcp_config_path: could not create %s: %s", profile_dir, e)
         _clear_stale_singleton_locks(profile_dir)
         cfg["args"] = [*args, flag, str(profile_dir)]
         servers[name] = cfg
     data["mcpServers"] = servers
 
-    out = SHARED_MCP_FILE.parent / f"shared-mcp-{safe_project}-{base_role}-shard{shard_idx}.json"
+    out = SHARED_MCP_FILE.parent / f"shared-mcp-{safe_project}-{base_role}{shard_suffix}.json"
     try:
         out.write_text(
             json.dumps(data, indent=2, ensure_ascii=False) + "\n",
