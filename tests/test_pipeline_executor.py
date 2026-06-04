@@ -627,6 +627,218 @@ class TestPipelineFailureHandling:
 
 
 # ──────────────────────────────────────────────────────────────
+# Watchdog stuck-recovery × pipeline (suppress_pipeline guard)
+#
+# The stuck-pane watchdog recovers a silent pane via close()→respawn. Without a
+# guard, the recovery-close would run the pipeline fail/advance path and, for a
+# single-role hop, spuriously complete the whole pipeline before the recovered
+# pane returns (whose later done() would then be a no-op). suppress_pipeline=True
+# defers that: the hop holds the role until either the respawned pane reports
+# done (advance normally) or the respawn itself fails (then re-honor the failure).
+# ──────────────────────────────────────────────────────────────
+
+
+class TestPipelineWatchdogRecovery:
+    def _single_role_pipeline(self, monkeypatch, role="backend", template_id="wd-pipe"):
+        from agent_takkub import pipeline_config
+
+        monkeypatch.setattr(
+            pipeline_config,
+            "load",
+            lambda: _simple_pipeline(
+                [[{"role": role, "cwd": "", "requiresCommit": False, "autoChain": False}]],
+                template_id=template_id,
+            ),
+        )
+
+    def test_suppress_pipeline_close_does_not_advance(
+        self,
+        qapp: QCoreApplication,
+        two_project_json: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        orch, _panes = _make_orch_with_panes("proj_a", ["lead", "backend"])
+        monkeypatch.setattr(orch, "spawn", MagicMock(return_value=(True, "ok")))
+        self._single_role_pipeline(monkeypatch, template_id="wd-suppress")
+
+        orch.run_pipeline("wd-suppress", project="proj_a")
+        run = next(iter(orch._pipeline_runs.values()))
+        assert run.hop_pending == {"backend"}
+
+        # Recovery-close: the watchdog will respawn backend, so the single-role
+        # hop must stay open — NOT advance/complete here.
+        orch.close("backend", project="proj_a", force=True, suppress_pipeline=True)
+
+        assert not run.closed
+        assert "backend" not in run.hop_failed
+        assert "backend" in run.hop_pending  # held, waiting for respawn
+        assert orch._pipeline_runs  # run still registered
+        assert run.current_hop == 0
+
+    def test_default_close_still_advances_single_role_hop(
+        self,
+        qapp: QCoreApplication,
+        two_project_json: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Regression guard: a normal (non-suppressed) close must still mark the
+        # role failed and advance/complete, exactly as before.
+        orch, _panes = _make_orch_with_panes("proj_a", ["lead", "backend"])
+        monkeypatch.setattr(orch, "spawn", MagicMock(return_value=(True, "ok")))
+        self._single_role_pipeline(monkeypatch, template_id="wd-default")
+
+        orch.run_pipeline("wd-default", project="proj_a")
+        run = next(iter(orch._pipeline_runs.values()))
+
+        orch.close("backend", project="proj_a", force=True)  # suppress_pipeline=False
+
+        assert run.closed
+        assert "backend" in run.hop_failed
+
+    def test_recovery_close_then_done_completes_cleanly(
+        self,
+        qapp: QCoreApplication,
+        two_project_json: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        orch, _panes = _make_orch_with_panes("proj_a", ["lead", "backend"])
+        monkeypatch.setattr(orch, "spawn", MagicMock(return_value=(True, "ok")))
+        self._single_role_pipeline(monkeypatch, template_id="wd-recover")
+
+        orch.run_pipeline("wd-recover", project="proj_a")
+        run = next(iter(orch._pipeline_runs.values()))
+        run_id = run.run_id
+
+        # Recovery-close holds the hop…
+        orch.close("backend", project="proj_a", force=True, suppress_pipeline=True)
+        assert not run.closed and "backend" in run.hop_pending
+
+        # …_do_respawn success restores the pane's pipeline tag…
+        orch._ps("proj_a::backend").pipeline_run_id = run_id
+        # …and the recovered pane finishes the work → hop completes as SUCCESS.
+        orch.done("backend", note="recovered then done", project="proj_a")
+
+        assert run.closed
+        assert "backend" not in run.hop_failed
+
+    def test_recovery_respawn_failure_rehonors_pipeline_fail(
+        self,
+        qapp: QCoreApplication,
+        two_project_json: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import time as _time
+
+        orch, panes = _make_orch_with_panes("proj_a", ["lead", "backend"])
+        monkeypatch.setattr(orch, "spawn", MagicMock(return_value=(True, "ok")))
+        self._single_role_pipeline(monkeypatch, template_id="wd-respawn-fail")
+
+        orch.run_pipeline("wd-respawn-fail", project="proj_a")
+        run = next(iter(orch._pipeline_runs.values()))
+        assert "backend" in run.hop_pending
+
+        # Make the respawn fail. Capture the scheduled respawn callback and run
+        # it explicitly so the test never depends on a (possibly leaked) real Qt
+        # timer firing — deterministic across combined-suite runs.
+        panes["backend"]._last_output_ts = _time.time()
+        monkeypatch.setattr(orch, "spawn", MagicMock(return_value=(False, "respawn fail")))
+        scheduled: list = []
+        monkeypatch.setattr(
+            orch_mod.QTimer, "singleShot", lambda _ms, cb=None: scheduled.append(cb)
+        )
+
+        orch._auto_recover_stuck("backend", "proj_a", panes["backend"], _time.time())
+        assert scheduled, "stuck-recovery must schedule a respawn callback"
+        scheduled[0]()  # run _do_respawn deterministically → spawn fails → re-honor
+
+        # Recovery-close suppressed the fail; the respawn then failed → the hop
+        # must NOT stall — re-honor the failure and complete.
+        assert run.closed
+        assert "backend" in run.hop_failed
+
+    def test_capped_respawn_rehonors_pipeline(
+        self,
+        qapp: QCoreApplication,
+        two_project_json: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A recovered pipeline pane that then crash-loops to AUTO_RESPAWN_MAX is
+        gone for good: the capped branch must mark it failed + advance, else the
+        hop stalls forever on a pane that will never report done."""
+        from agent_takkub.orchestrator import AUTO_RESPAWN_MAX
+
+        orch, panes = _make_orch_with_panes("proj_a", ["lead", "backend"])
+        monkeypatch.setattr(orch, "spawn", MagicMock(return_value=(True, "ok")))
+        self._single_role_pipeline(monkeypatch, template_id="wd-capped")
+
+        orch.run_pipeline("wd-capped", project="proj_a")
+        run = next(iter(orch._pipeline_runs.values()))
+        assert "backend" in run.hop_pending
+
+        # Simulate a crashed pane already at the respawn cap, still pipeline-tagged.
+        panes["backend"].state = "exited"
+        ps = orch._ps("proj_a::backend")
+        ps.pipeline_run_id = run.run_id
+        ps.auto_respawn_attempts = AUTO_RESPAWN_MAX
+
+        orch._on_session_exit("backend", "/tmp", "proj_a")
+
+        assert run.closed
+        assert "backend" in run.hop_failed
+
+    def test_multi_role_hop_recovery_holds_sibling_not_failed(
+        self,
+        qapp: QCoreApplication,
+        two_project_json: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Suppressed recovery-close on ONE role of a 2-role hop must keep the hop
+        open (sibling still pending) and must NOT mark the recovered role failed;
+        the respawned role then rejoins and the hop completes cleanly."""
+        orch, _panes = _make_orch_with_panes("proj_a", ["lead", "backend", "frontend"])
+        monkeypatch.setattr(orch, "spawn", MagicMock(return_value=(True, "ok")))
+        from agent_takkub import pipeline_config
+
+        monkeypatch.setattr(
+            pipeline_config,
+            "load",
+            lambda: _simple_pipeline(
+                [
+                    [
+                        {"role": "backend", "cwd": "", "requiresCommit": False, "autoChain": False},
+                        {
+                            "role": "frontend",
+                            "cwd": "",
+                            "requiresCommit": False,
+                            "autoChain": False,
+                        },
+                    ]
+                ],
+                template_id="wd-multi",
+            ),
+        )
+
+        orch.run_pipeline("wd-multi", project="proj_a")
+        run = next(iter(orch._pipeline_runs.values()))
+        assert run.hop_pending == {"backend", "frontend"}
+
+        # Recovery-close backend (suppressed): frontend still holds the hop open;
+        # backend must NOT be failed and must stay pending for its respawn.
+        orch.close("backend", project="proj_a", force=True, suppress_pipeline=True)
+        assert not run.closed
+        assert run.hop_pending == {"backend", "frontend"}
+        assert "backend" not in run.hop_failed
+
+        # Respawn-success restores the tag; both report done → clean completion.
+        orch._ps("proj_a::backend").pipeline_run_id = run.run_id
+        orch.done("backend", note="recovered", project="proj_a")
+        assert not run.closed  # frontend still pending
+        orch.done("frontend", note="done", project="proj_a")
+        assert run.closed
+        assert not run.hop_failed
+
+
+# ──────────────────────────────────────────────────────────────
 # Multi-project isolation
 # ──────────────────────────────────────────────────────────────
 

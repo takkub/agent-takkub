@@ -70,7 +70,9 @@ class _FakeOrch:
             self._pane_state[key] = ps
             return ps
 
-    def close(self, role: str, project: str | None = None) -> tuple[bool, str]:
+    def close(
+        self, role: str, project: str | None = None, suppress_pipeline: bool = False
+    ) -> tuple[bool, str]:
         # Mimic the orchestrator's close() clearing the snapshot/restore fields
         # (session_uuid, task, auto_chain, requires_commit).
         # Intentionally preserve last_stuck_recover so cooldown tests work
@@ -258,7 +260,9 @@ class TestAutoRecoverStuck:
         """
 
         class _PopOnClose(_FakeOrch):
-            def close(self, role: str, project: str | None = None) -> tuple[bool, str]:
+            def close(
+                self, role: str, project: str | None = None, suppress_pipeline: bool = False
+            ) -> tuple[bool, str]:
                 key = f"{project or ''}::{role}"
                 self._pane_state.pop(key, None)
                 self._idle_state.pop(key, None)
@@ -283,7 +287,9 @@ class TestAutoRecoverStuck:
         must be suppressed by the cooldown stamp restored in _do_respawn."""
 
         class _PopOnClose(_FakeOrch):
-            def close(self, role: str, project: str | None = None) -> tuple[bool, str]:
+            def close(
+                self, role: str, project: str | None = None, suppress_pipeline: bool = False
+            ) -> tuple[bool, str]:
                 key = f"{project or ''}::{role}"
                 self._pane_state.pop(key, None)
                 self._idle_state.pop(key, None)

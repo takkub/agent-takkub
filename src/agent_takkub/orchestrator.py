@@ -1829,6 +1829,20 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             self._warn_lead_respawn_capped(role_name, project)
             ps.auto_chain = False
             ps.last_assigned_task = None
+            # Pipeline: a capped pane is gone for good. If it belonged to a
+            # pipeline hop (e.g. a stuck-recovered hop role that then crash-looped
+            # to the cap), mark it failed + advance so the hop doesn't stall
+            # forever on a pane that will never report done. Mirrors the re-honor
+            # in the stuck-recovery respawn-fail path (_do_respawn).
+            pl_run_id = ps.pipeline_run_id
+            if pl_run_id:
+                pl_key = f"{project}::{pl_run_id}"
+                pl_run = self._pipeline_runs.get(pl_key)
+                if pl_run is not None and not pl_run.closed:
+                    pl_run.hop_pending.discard(role_name)
+                    pl_run.hop_failed.add(role_name)
+                    if not pl_run.hop_pending:
+                        self._advance_pipeline(project, pl_key, pl_run)
             return
         ps.auto_respawn_attempts = attempts + 1
         # Exponential back-off: a pane that keeps crashing (deterministic bug
@@ -2667,11 +2681,20 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         project: str | None = None,
         force: bool = False,
         reason: str = "",
+        suppress_pipeline: bool = False,
     ) -> tuple[bool, str]:
         """Terminate a pane's session and remove it from the layout.
 
         force=True is for legitimate cockpit lifecycle (tab close, project switch).
         Never expose to CLI — teammates can only call `takkub done`.
+
+        suppress_pipeline=True skips the "pane closed without done → mark the
+        pipeline role failed + advance" path. Used by the stuck-pane watchdog,
+        which closes then *respawns* the same role 2 s later: without this guard a
+        recovery-close on a single-role hop would empty hop_pending and spuriously
+        advance/complete the whole pipeline before the recovered pane comes back
+        (whose later done() would then be a no-op). The respawn path re-honors the
+        failure only if the respawn itself fails.
         """
         role_name = role_name.lower().strip()
         project_ns = self._resolve_project(project)
@@ -2710,7 +2733,9 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
 
         # Pipeline: pane closed without done (crash / forced close) — mark failed.
         # Advance if all roles in the hop are now done or failed.
-        if had_pipeline_run_id_close:
+        # suppress_pipeline (stuck-watchdog recovery-close) skips this: the same
+        # role respawns 2 s later, so a single-role hop must NOT advance here.
+        if had_pipeline_run_id_close and not suppress_pipeline:
             pipeline_key_close = f"{project_ns}::{had_pipeline_run_id_close}"
             pl_run_close = self._pipeline_runs.get(pipeline_key_close)
             if pl_run_close and not pl_run_close.closed:
@@ -4003,7 +4028,11 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             cwd=cwd or "",
             silent_for_s=silent_for_s,
         )
-        self.close(role, project=project)
+        # suppress_pipeline: this close is half of a close→respawn recovery, not a
+        # real pane death. Skip the pipeline fail/advance so a single-role hop
+        # isn't spuriously completed before _do_respawn brings the role back.
+        # _do_respawn re-honors the failure only if the respawn fails.
+        self.close(role, project=project, suppress_pipeline=True)
 
         def _do_respawn() -> None:
             # Restore snapshotted state before spawn() runs so:
@@ -4052,6 +4081,18 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 # one.  Matches the "popped atomically by close()/done()" contract
                 # and avoids leaving an empty PaneState entry in _pane_state.
                 self._pane_state.pop(key, None)
+                # Recovery truly failed: the recovery-close suppressed the
+                # pipeline fail/advance assuming the role would come back. It
+                # won't — so now mark it failed and advance the hop, else the
+                # pipeline stalls forever waiting on a pane that's gone.
+                if snap_pipeline_run_id is not None:
+                    pl_key = f"{project}::{snap_pipeline_run_id}"
+                    pl_run = self._pipeline_runs.get(pl_key)
+                    if pl_run is not None and not pl_run.closed:
+                        pl_run.hop_pending.discard(role)
+                        pl_run.hop_failed.add(role)
+                        if not pl_run.hop_pending:
+                            self._advance_pipeline(project, pl_key, pl_run)
                 return
             # If the session was resumed, the task is already in claude's
             # conversation history — don't re-paste it (Bug-5 gate).

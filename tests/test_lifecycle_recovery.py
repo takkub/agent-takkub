@@ -231,7 +231,9 @@ class _FakeOrchForContentDelta:
             self._pane_state[key] = ps
             return ps
 
-    def close(self, role: str, project: str | None = None) -> tuple[bool, str]:
+    def close(
+        self, role: str, project: str | None = None, suppress_pipeline: bool = False
+    ) -> tuple[bool, str]:
         return True, "ok"
 
     def spawn(self, role: str, cwd=None, project=None, **_kw):
