@@ -19,6 +19,16 @@ from pathlib import Path
 _BOOT_LOG = Path(__file__).resolve().parents[2] / "runtime" / "boot.log"
 try:
     _BOOT_LOG.parent.mkdir(parents=True, exist_ok=True)
+    # boot.log is append-only across every launch. Cap it so stale faulthandler
+    # dumps from earlier builds don't accumulate forever — a 169 KB log of
+    # historical "wedged 1s" lines from an old watchdog actively misled the
+    # 2026-06-04 freeze post-mortem. Keep the tail when it grows past 256 KB.
+    try:
+        if _BOOT_LOG.exists() and _BOOT_LOG.stat().st_size > 256 * 1024:
+            _tail = _BOOT_LOG.read_bytes()[-32 * 1024 :]
+            _BOOT_LOG.write_bytes(b"--- (boot.log rotated, tail kept) ---\n" + _tail)
+    except Exception:
+        pass
     _BOOT_LOG_FH = _BOOT_LOG.open("a", encoding="utf-8", buffering=1)
     faulthandler.enable(_BOOT_LOG_FH)
     _BOOT_LOG_FH.write(f"\n--- boot {os.getpid()} ---\n")
@@ -87,7 +97,13 @@ _instance_lock: QLockFile | None = None  # module-level ref keeps GC from releas
 # exceed ~5 s. 30 s is conservative enough to never fire on transient slowness
 # yet fast enough to catch the 21-minute zombie observed in issue #34.
 _WATCHDOG_TIMEOUT_S = 30.0
-_WATCHDOG_POLL_S = 5.0
+_WATCHDOG_POLL_S = 1.0
+# Soft-stall threshold: the main thread is hung for a few seconds (UI freezes)
+# but recovers before the 30 s hard kill. These transient freezes — e.g. a pane
+# spawn that briefly blocks the Qt thread — never reach _WATCHDOG_TIMEOUT_S, so
+# without a separate capture they leave no stack. On a soft stall we dump the
+# main-thread stack to boot.log WITHOUT killing the process (once per episode).
+_WATCHDOG_SOFT_STALL_S = 3.0
 
 
 def _watchdog_should_exit(heartbeat_ts: float, now: float, timeout_s: float) -> bool:
@@ -96,6 +112,22 @@ def _watchdog_should_exit(heartbeat_ts: float, now: float, timeout_s: float) -> 
     Extracted for unit-testability — the daemon thread calls this in a loop.
     """
     return (now - heartbeat_ts) > timeout_s
+
+
+def _dump_main_stack(header: str) -> None:
+    """Write *header* + a faulthandler all-threads dump to boot.log.
+
+    Called from the watchdog daemon thread; the dump includes the (possibly
+    wedged) main thread's frames, which is the whole point. Best-effort.
+    """
+    try:
+        if _BOOT_LOG_FH:
+            _BOOT_LOG_FH.write(header + "\n")
+            _BOOT_LOG_FH.flush()
+            faulthandler.dump_traceback(file=_BOOT_LOG_FH, all_threads=True)
+            _BOOT_LOG_FH.flush()
+    except Exception:
+        pass
 
 
 def _start_deadman_watchdog(window: MainWindow, _stop: threading.Event | None = None) -> None:
@@ -113,17 +145,35 @@ def _start_deadman_watchdog(window: MainWindow, _stop: threading.Event | None = 
     """
 
     def _run() -> None:
+        soft_dumped = False
         while not (_stop is not None and _stop.is_set()):
             time.sleep(_WATCHDOG_POLL_S)
             if _stop is not None and _stop.is_set():
                 return
             now = time.monotonic()
+            age = now - window._heartbeat_ts
+            # Soft stall: UI hung a few seconds but not yet at the hard kill.
+            # Capture the main-thread stack once per episode (re-arm on recovery)
+            # so transient spawn freezes — which recover before 30 s — still
+            # leave a diagnosable stack. Does NOT kill the process.
+            if not _watchdog_should_exit(window._heartbeat_ts, now, _WATCHDOG_TIMEOUT_S):
+                if age > _WATCHDOG_SOFT_STALL_S and not soft_dumped:
+                    _dump_main_stack(f"[watchdog] SOFT stall {age:.1f}s — main-thread stack:")
+                    soft_dumped = True
+                elif age <= _WATCHDOG_SOFT_STALL_S:
+                    soft_dumped = False
             if _watchdog_should_exit(window._heartbeat_ts, now, _WATCHDOG_TIMEOUT_S):
                 age = now - window._heartbeat_ts
                 _boot_log(
                     f"[watchdog] main thread wedged for {age:.0f}s"
                     " — terminating children then os._exit(1)"
                 )
+                # Capture WHERE the main thread is wedged before we kill the
+                # process. Without this the log only says "wedged Xs" with no
+                # stack — exactly the gap that forced the 2026-06-04 freeze to
+                # be diagnosed from incidental COM-exception dumps instead of
+                # the actual wedge.
+                _dump_main_stack(f"[watchdog] main-thread stack at wedge (age {age:.0f}s):")
                 # Best-effort: terminate child sessions so they don't become
                 # orphans after os._exit bypasses atexit/_kill_all.
                 # pane.session.terminate() is OS-level (TerminateProcess) and

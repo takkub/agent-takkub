@@ -130,6 +130,8 @@ class TestWatchdogThreadBehaviour:
     ) -> None:
         monkeypatch.setattr(app_mod, "_WATCHDOG_TIMEOUT_S", 0.05)
         monkeypatch.setattr(app_mod, "_WATCHDOG_POLL_S", 0.01)
+        # Don't let the real faulthandler dump pollute runtime/boot.log.
+        monkeypatch.setattr(app_mod, "_BOOT_LOG_FH", None)
 
         fired = threading.Event()
         exit_called: list[int] = []
@@ -150,11 +152,84 @@ class TestWatchdogThreadBehaviour:
 
         assert exit_called == [1], "Watchdog must call os._exit(1) on stale heartbeat"
 
+    def test_watchdog_dumps_main_thread_stack_before_exit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """On a stale heartbeat the watchdog must dump the main-thread stack
+        (faulthandler) to boot.log BEFORE os._exit — otherwise a real freeze
+        leaves no record of where the main thread wedged (the gap that forced
+        the 2026-06-04 freeze to be diagnosed indirectly)."""
+        monkeypatch.setattr(app_mod, "_WATCHDOG_TIMEOUT_S", 0.05)
+        monkeypatch.setattr(app_mod, "_WATCHDOG_POLL_S", 0.01)
+        # Force the boot-log branch on so the dump path runs.
+        monkeypatch.setattr(app_mod, "_BOOT_LOG_FH", MagicMock())
+
+        dump_calls: list[tuple] = []
+        monkeypatch.setattr(
+            app_mod.faulthandler,
+            "dump_traceback",
+            lambda *a, **k: dump_calls.append((a, k)),
+        )
+
+        fired = threading.Event()
+        stop = threading.Event()
+        dump_count_at_exit: list[int] = []
+
+        def _fake_exit(code: int) -> None:
+            if not fired.is_set():
+                # Snapshot how many dumps had happened by the time we exit.
+                dump_count_at_exit.append(len(dump_calls))
+                fired.set()
+
+        window = MagicMock()
+        window._heartbeat_ts = time.monotonic() - 1.0  # frozen 1 s in the past
+
+        with patch.object(os, "_exit", side_effect=_fake_exit):
+            app_mod._start_deadman_watchdog(window, _stop=stop)
+            fired.wait(timeout=2.0)
+            stop.set()
+
+        assert dump_count_at_exit and dump_count_at_exit[0] >= 1, (
+            "faulthandler.dump_traceback must be called before os._exit"
+        )
+        # Dump must target the boot-log handle and include every thread.
+        assert dump_calls[0][1].get("all_threads") is True
+
+    def test_watchdog_soft_stall_dumps_without_exiting(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A transient stall (past the soft threshold but below the hard kill)
+        must dump the main-thread stack WITHOUT calling os._exit — this is how
+        the sub-30 s spawn freeze gets a diagnosable stack."""
+        monkeypatch.setattr(app_mod, "_WATCHDOG_TIMEOUT_S", 999.0)  # never hard-kill
+        monkeypatch.setattr(app_mod, "_WATCHDOG_SOFT_STALL_S", 0.05)
+        monkeypatch.setattr(app_mod, "_WATCHDOG_POLL_S", 0.01)
+        monkeypatch.setattr(app_mod, "_BOOT_LOG_FH", MagicMock())
+
+        dump_calls: list[str] = []
+        monkeypatch.setattr(app_mod, "_dump_main_stack", lambda header: dump_calls.append(header))
+
+        exit_called: list[int] = []
+        stop = threading.Event()
+        window = MagicMock()
+        window._heartbeat_ts = time.monotonic() - 1.0  # 1 s stale → past soft, below hard
+
+        with patch.object(os, "_exit", side_effect=lambda c: exit_called.append(c)):
+            app_mod._start_deadman_watchdog(window, _stop=stop)
+            time.sleep(0.15)
+            stop.set()
+
+        assert exit_called == [], "soft stall must NOT kill the process"
+        assert dump_calls, "soft stall must dump the main-thread stack"
+        assert "SOFT stall" in dump_calls[0]
+
     def test_watchdog_does_not_fire_with_live_heartbeat(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(app_mod, "_WATCHDOG_TIMEOUT_S", 0.1)
         monkeypatch.setattr(app_mod, "_WATCHDOG_POLL_S", 0.02)
+        monkeypatch.setattr(app_mod, "_WATCHDOG_SOFT_STALL_S", 999.0)  # never soft-dump here
+        monkeypatch.setattr(app_mod, "_BOOT_LOG_FH", None)
 
         exit_called: list[int] = []
         stop = threading.Event()
