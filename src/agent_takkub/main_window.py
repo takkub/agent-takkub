@@ -825,7 +825,10 @@ class MainWindow(QMainWindow):
             self._chip_gemini,
             self._btn_install_rtk,
             self._btn_restart,
-            self._btn_run_pipeline,
+            # self._btn_run_pipeline,  # hidden per user request — uncomment to restore.
+            # The button + its handlers (_on_run_pipeline_clicked /
+            # _run_pipeline_template) are still created above; only its
+            # placement in the status bar is removed so it can come back easily.
             self._btn_pipelines,
             # self._btn_claude_auth,  # hidden per user request — uncomment to restore.
             # The button + its handler are still created above; only its
@@ -3152,7 +3155,7 @@ class MainWindow(QMainWindow):
 
         from PyQt6.QtWidgets import QMessageBox
 
-        from .config import active_project, load_projects
+        from .config import active_project, lead_cwd, load_projects
         from .project_rules import read_project_rules, write_project_rules
 
         if project_name:
@@ -3166,8 +3169,13 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "No active project", "No project is currently active.")
             return
 
-        proj_paths = proj.get("paths") or {}
-        root_str = proj_paths.get("main") or (next(iter(proj_paths.values()), None))
+        # Resolve the project root via the SAME logic Lead uses to find its
+        # cwd (lead path key → common parent of all paths → first path).
+        # CLAUDE.md lives where Lead spawns — e.g. `pms/`, not the `pms-web/`
+        # subfolder. The old `paths.get("main")` lookup never matched (keys
+        # are web/api/mobile, never "main") and fell back to the first
+        # subfolder, so the editor opened empty / saved to the wrong place.
+        root_str = lead_cwd(project_name)
         if not root_str:
             QMessageBox.information(self, "No paths", f"Project '{name}' has no configured paths.")
             return
