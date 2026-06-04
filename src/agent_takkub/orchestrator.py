@@ -804,6 +804,8 @@ class PaneState:
     tp_runaway_since: float | None = None
     # Last time Lead was warned about this pane's runaway throughput
     tp_warn_ts: float = 0.0
+    # pipeline_run_id: set when this pane was spawned as part of a pipeline hop
+    pipeline_run_id: str | None = None
 
 
 _shard_generation_counter: itertools.count = itertools.count()
@@ -829,6 +831,25 @@ class ShardGroup:
     failed: set = field(default_factory=set)  # shard_keys that crashed
     closed: bool = False
     generation: int = field(default_factory=lambda: next(_shard_generation_counter))
+
+
+@dataclass
+class PipelineRun:
+    """State for a running pipeline template execution.
+
+    Keyed ``"{project_ns}::{run_id}"`` in ``Orchestrator._pipeline_runs``.
+    Created by ``run_pipeline()``; closed when the last hop completes or all
+    hops are skipped due to spawn failures.
+    """
+
+    run_id: str
+    template_id: str
+    template_name: str
+    hops: list  # list[list[dict]] — validated copies of template hops
+    current_hop: int = 0
+    hop_pending: set = field(default_factory=set)  # roles in current hop not yet done
+    hop_failed: set = field(default_factory=set)  # roles closed without done
+    closed: bool = False
 
 
 # Timeout before injecting a partial handoff when shards don't all respond.
@@ -940,6 +961,9 @@ class Orchestrator(QObject):
         # Shard fan-out groups: keyed f"{project_ns}::{base_role}".
         # Created on first shard assign, closed when all N shards report.
         self._shard_groups: dict[str, ShardGroup] = {}
+        # Pipeline runs: keyed f"{project_ns}::{run_id}".
+        # Created by run_pipeline(); closed when last hop completes.
+        self._pipeline_runs: dict[str, PipelineRun] = {}
 
         # Per-cockpit-run capability token. Injected only into the Lead pane
         # env (TAKKUB_LEAD_TOKEN) so the Lead takkub CLI can authenticate
@@ -2380,6 +2404,160 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             total=group.total,
         )
 
+    # ──────────────────────────────────────────────────────────────
+    # Pipeline executor
+    # ──────────────────────────────────────────────────────────────
+
+    def _inject_to_lead(
+        self, project_ns: str, message: str, log_event: str = "lead_inject"
+    ) -> None:
+        """Write *message* to the Lead pane. If Lead is absent, queue it in
+        _pending_done_notices so it is delivered when Lead next spawns."""
+        lead = self._project_panes(project_ns).get(LEAD.name)
+        if lead and lead.session and lead.session.is_alive:
+            lead.session.write(message.encode("utf-8"))
+            QTimer.singleShot(150, lambda: lead.session and lead.session.write(b"\r"))
+            self.leadInjected.emit(message)
+            _log_event(log_event, project=project_ns)
+        else:
+            self._pending_done_notices.setdefault(project_ns, []).append(
+                {"role": "system", "note": "pipeline", "body": message}
+            )
+            self._save_pending_done_notices(project_ns)
+            _log_event(f"{log_event}_queued", project=project_ns)
+
+    def run_pipeline(self, template_id: str, project: str | None = None) -> tuple[bool, str]:
+        """Load *template_id* from pipeline_config and fire hop 0.
+
+        Sequential between hops (hop N+1 starts only after all roles in hop N
+        report done), parallel within each hop (all roles in a hop are spawned
+        simultaneously). Hop advancement is driven by ``done()`` / ``close()``
+        events, never by busy-wait.
+
+        Returns ``(ok, message)``.  Errors on unknown template or empty hops.
+        """
+        from . import pipeline_config
+
+        project_ns = self._resolve_project(project)
+
+        data = pipeline_config.load()
+        templates = {t["id"]: t for t in data.get("templates", [])}
+        tpl = templates.get(template_id)
+        if tpl is None:
+            return False, f"pipeline template not found: {template_id!r}"
+
+        hops = [hop for hop in tpl.get("hops", []) if hop]
+        if not hops:
+            return False, f"pipeline {template_id!r}: no runnable hops"
+
+        run_id = str(_uuid.uuid4())[:8]
+        run = PipelineRun(
+            run_id=run_id,
+            template_id=template_id,
+            template_name=tpl.get("name", template_id),
+            hops=hops,
+        )
+        pipeline_key = f"{project_ns}::{run_id}"
+        self._pipeline_runs[pipeline_key] = run
+
+        _log_event(
+            "pipeline_run_start",
+            project=project_ns,
+            template=template_id,
+            run_id=run_id,
+            total_hops=len(hops),
+        )
+        self._fire_pipeline_hop(project_ns, run_id, run)
+        return True, f"pipeline {tpl['name']!r} started (run {run_id}, {len(hops)} hops)"
+
+    def _fire_pipeline_hop(self, project_ns: str, run_id: str, run: PipelineRun) -> None:
+        """Spawn all roles in the current hop and inject a hop-start message to Lead."""
+        from .config import default_cwd_for_role
+
+        hop_idx = run.current_hop
+        hop = run.hops[hop_idx]
+        total = len(run.hops)
+
+        run.hop_pending = set()
+        run.hop_failed = set()
+
+        spawned_lines: list[str] = []
+        for entry in hop:
+            role = entry["role"]
+            cwd = (entry.get("cwd") or "").strip() or default_cwd_for_role(role, project_ns)
+            ok, _msg = self.spawn(role, cwd=cwd, project=project_ns)
+            if ok:
+                key = f"{project_ns}::{role}"
+                self._ps(key).pipeline_run_id = run_id
+                run.hop_pending.add(role)
+                cwd_note = f" (cwd: {cwd})" if cwd else ""
+                spawned_lines.append(f"  - {role}{cwd_note}")
+            else:
+                run.hop_failed.add(role)
+                _log_event(
+                    "pipeline_spawn_fail",
+                    project=project_ns,
+                    run_id=run_id,
+                    hop=hop_idx,
+                    role=role,
+                    msg=_msg,
+                )
+
+        if not run.hop_pending:
+            # All spawns failed — abort and notify Lead.
+            run.closed = True
+            self._pipeline_runs.pop(f"{project_ns}::{run_id}", None)
+            failed_roles = ", ".join(sorted(run.hop_failed))
+            err = (
+                f"[pipeline:{run_id}] {run.template_name} — "
+                f"hop {hop_idx + 1}/{total} aborted: all spawns failed ({failed_roles})"
+            )
+            self._inject_to_lead(project_ns, err, log_event="pipeline_hop_abort")
+            return
+
+        roles_str = ", ".join(sorted(run.hop_pending))
+        lines = [
+            f"[pipeline:{run_id}] {run.template_name} — hop {hop_idx + 1}/{total}",
+            f"Panes spawned and ready: {roles_str}",
+            "Assign each their task. Pipeline auto-advances when all done (no confirm needed).",
+        ]
+        if run.hop_failed:
+            lines.append(f"⚠ spawn failed (skipped): {', '.join(sorted(run.hop_failed))}")
+        if hop_idx + 1 < total:
+            next_roles = [e["role"] for e in run.hops[hop_idx + 1]]
+            lines.append(f"Next hop ({hop_idx + 2}/{total}): {', '.join(next_roles)}")
+        self._inject_to_lead(project_ns, "\n".join(lines), log_event="pipeline_hop_start")
+        _log_event(
+            "pipeline_hop_fired",
+            project=project_ns,
+            run_id=run_id,
+            hop=hop_idx,
+            roles=list(run.hop_pending),
+        )
+
+    def _advance_pipeline(self, project_ns: str, pipeline_key: str, run: PipelineRun) -> None:
+        """Advance *run* to the next hop, or inject a completion notice if done."""
+        run.current_hop += 1
+        if run.current_hop >= len(run.hops):
+            run.closed = True
+            self._pipeline_runs.pop(pipeline_key, None)
+            total = len(run.hops)
+            if run.hop_failed:
+                status = f"completed with failures ({', '.join(sorted(run.hop_failed))} closed without done)"
+            else:
+                status = "all hops complete ✓"
+            msg = f"[pipeline:{run.run_id}] {run.template_name} — {status} ({total}/{total} hops)"
+            self._inject_to_lead(project_ns, msg, log_event="pipeline_run_complete")
+            _log_event(
+                "pipeline_complete",
+                project=project_ns,
+                template=run.template_id,
+                run_id=run.run_id,
+                total_hops=total,
+            )
+        else:
+            self._fire_pipeline_hop(project_ns, run.run_id, run)
+
     def _flush_pending_done_notices(self, project_ns: str) -> None:
         """Deliver queued done notices to Lead if it is currently alive.
 
@@ -2516,6 +2694,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         # handoff if it was the last pending auto-chain pane in the project.
         _ps_close = getattr(self, "_pane_state", {}).get(key)
         had_auto_chain_close = _ps_close.auto_chain if _ps_close is not None else False
+        had_pipeline_run_id_close = _ps_close.pipeline_run_id if _ps_close is not None else None
 
         self._idle_state.pop(key, None)
         getattr(self, "_pane_state", {}).pop(key, None)
@@ -2528,6 +2707,17 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             ]
             if not pending_ac:
                 self._inject_auto_chain_handoff(project_ns)
+
+        # Pipeline: pane closed without done (crash / forced close) — mark failed.
+        # Advance if all roles in the hop are now done or failed.
+        if had_pipeline_run_id_close:
+            pipeline_key_close = f"{project_ns}::{had_pipeline_run_id_close}"
+            pl_run_close = self._pipeline_runs.get(pipeline_key_close)
+            if pl_run_close and not pl_run_close.closed:
+                pl_run_close.hop_pending.discard(role_name)
+                pl_run_close.hop_failed.add(role_name)
+                if not pl_run_close.hop_pending:
+                    self._advance_pipeline(project_ns, pipeline_key_close, pl_run_close)
 
         # For teammates, fully remove from the layout so the right column
         # collapses back. Lead stays as it always anchors the cockpit.
@@ -2656,6 +2846,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         had_requires_commit = _ps_done.requires_commit_on_done
         had_auto_chain = _ps_done.auto_chain
         had_shard_total = _ps_done.shard_total
+        had_pipeline_run_id = _ps_done.pipeline_run_id
 
         # Opt-in commit handoff: if assign() was called with requires_commit=True,
         # check for a dirty working tree and forward a warning to Lead instead
@@ -2780,6 +2971,16 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                     role=from_role,
                     note=note[:200],
                 )
+
+        # Pipeline hop advance: if this pane was part of a pipeline run, remove
+        # it from the hop's pending set and fire the next hop when all done.
+        if had_pipeline_run_id:
+            pipeline_key = f"{project_ns}::{had_pipeline_run_id}"
+            pl_run = self._pipeline_runs.get(pipeline_key)
+            if pl_run and not pl_run.closed:
+                pl_run.hop_pending.discard(from_role)
+                if not pl_run.hop_pending:
+                    self._advance_pipeline(project_ns, pipeline_key, pl_run)
 
         # mark pane done, auto-close after a delay so user can see it
         pane.set_state("done", note=note[:80] if note else "done")
@@ -3787,6 +3988,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         snap_auto_chain = _ps_snap.auto_chain if _ps_snap is not None else False
         snap_requires_commit = _ps_snap.requires_commit_on_done if _ps_snap is not None else False
         snap_shard_total = _ps_snap.shard_total if _ps_snap is not None else 0
+        snap_pipeline_run_id = _ps_snap.pipeline_run_id if _ps_snap is not None else None
 
         self._ps(key).last_stuck_recover = now
         silent_for_s = int(now - getattr(pane, "_last_output_ts", now))
@@ -3825,6 +4027,8 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 self._ps(key).requires_commit_on_done = snap_requires_commit
             if snap_shard_total:
                 self._ps(key).shard_total = snap_shard_total
+            if snap_pipeline_run_id is not None:
+                self._ps(key).pipeline_run_id = snap_pipeline_run_id
             # m3 fix: if PTY teardown hasn't fired _on_session_exit yet (takes
             # longer than the 2s singleShot on a slow machine), _recent_exits
             # has no entry and spawn()'s can_resume returns False → blank session.

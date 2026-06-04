@@ -27,7 +27,7 @@ from .config import read_port
 # task and coordinate via `send` / `done`. The gate is enforced in `main()`
 # based on the TAKKUB_ROLE env var that the orchestrator injects per pane.
 LEAD_ONLY_COMMANDS = frozenset(
-    {"spawn", "assign", "close", "close-all", "end-session", "harvest", "release"}
+    {"spawn", "assign", "close", "close-all", "end-session", "harvest", "release", "pipeline"}
 )
 
 # Commands intended only for teammate panes. Lead summarises inline and never
@@ -853,6 +853,35 @@ def main(argv: list[str] | None = None) -> int:
         help="emit JSON instead of text report",
     )
     sdoc.set_defaults(func=cmd_doctor)
+
+    # ── pipeline ────────────────────────────────────────────────────────────
+    spipe = sub.add_parser("pipeline", help="pipeline template commands (lead only)")
+    spipe_sub = spipe.add_subparsers(dest="pipeline_command", required=True)
+
+    spipe_run = spipe_sub.add_parser("run", help="start a pipeline template")
+    spipe_run.add_argument(
+        "template_id", help="pipeline template id (e.g. feature, design, quickfix)"
+    )
+    spipe_run.add_argument(
+        "--project",
+        default=None,
+        help="project namespace override (default: active project)",
+    )
+
+    def _cmd_pipeline(args: argparse.Namespace) -> dict:
+        if args.pipeline_command == "run":
+            return _request(
+                _with_project(
+                    {
+                        "cmd": "pipeline-run",
+                        "template_id": args.template_id,
+                        "from": _from_role(),
+                    }
+                )
+            )
+        return {"ok": False, "msg": f"unknown pipeline subcommand: {args.pipeline_command}"}
+
+    spipe.set_defaults(func=_cmd_pipeline)
 
     sx = sub.add_parser(
         "codex",

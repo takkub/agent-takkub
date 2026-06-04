@@ -24,7 +24,9 @@ from .orchestrator import Orchestrator
 # Commands that mutate cockpit structure — only the Lead pane is allowed to
 # run these. The gate is enforced server-side so raw TCP clients that bypass
 # the cli.py role check (including confused teammate shells) are rejected.
-_LEAD_ONLY_CMDS = frozenset({"spawn", "assign", "close", "close-all", "harvest", "harvest-done"})
+_LEAD_ONLY_CMDS = frozenset(
+    {"spawn", "assign", "close", "close-all", "harvest", "harvest-done", "pipeline-run"}
+)
 
 # Commands that ANY pane may call, but where claiming `from: lead` in the
 # payload would let a teammate (or any local process) forge a message that
@@ -268,6 +270,20 @@ class CliServer(QObject):
                 harvest_role = req.get("role", "")
                 harvest_note = req.get("note", "harvested by lead")
                 ok, msg = self._orch.done(harvest_role, note=harvest_note, project=from_project)
+            elif cmd == "pipeline-run":
+                template_id = (req.get("template_id") or "").strip()
+                if not template_id:
+                    self._reply(sock, ok=False, msg="missing arg: 'template_id'")
+                    return
+                QTimer.singleShot(
+                    0,
+                    lambda tid=template_id: self._orch.run_pipeline(
+                        template_id=tid,
+                        project=from_project,
+                    ),
+                )
+                self._reply(sock, ok=True, msg=f"pipeline {template_id!r} starting (async)")
+                return
             else:
                 ok, msg = False, f"unknown cmd: {cmd}"
         except KeyError as e:
