@@ -13,7 +13,9 @@ silent overwrite.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
+import time
 
 import pytest
 
@@ -354,3 +356,55 @@ class TestBrowserProfileMcpConfigPath:
         lock.write_text("stale", encoding="utf-8")
         browser_profile_mcp_config_path("qa", 1, "proj_a")  # regenerate
         assert not lock.exists()
+
+
+class TestPruneOldBrowserProfiles:
+    """Age-prune of runtime/browser-profiles/ so #39 fan-out shard profiles
+    can't accumulate unbounded (#42), while recently-used login profiles
+    (fresh mtime) survive the window."""
+
+    def _profiles_root(self, isolated_mcp_file: pathlib.Path) -> pathlib.Path:
+        return isolated_mcp_file.parent / "browser-profiles"
+
+    def test_removes_dir_older_than_window(self, isolated_mcp_file: pathlib.Path) -> None:
+        ensure_browser_mcps()
+        browser_profile_mcp_config_path("qa", 1, "proj_a")
+        d = self._profiles_root(isolated_mcp_file) / "proj_a-qa-shard1-playwright"
+        assert d.is_dir()
+        old = time.time() - 30 * 86_400
+        os.utime(d, (old, old))
+        assert sdt.prune_old_browser_profiles(max_age_days=14) >= 1
+        assert not d.exists()
+
+    def test_keeps_recently_used_profile(self, isolated_mcp_file: pathlib.Path) -> None:
+        ensure_browser_mcps()
+        browser_profile_mcp_config_path("qa", None, "proj_a")  # persistent login profile
+        d = self._profiles_root(isolated_mcp_file) / "proj_a-qa-playwright"
+        assert d.is_dir()  # just created → fresh mtime
+        sdt.prune_old_browser_profiles(max_age_days=14)
+        assert d.exists(), "a recently-used login profile must survive the window"
+
+    def test_returns_count_of_removed(self, isolated_mcp_file: pathlib.Path) -> None:
+        ensure_browser_mcps()
+        browser_profile_mcp_config_path("qa", 1, "proj_a")
+        browser_profile_mcp_config_path("qa", 2, "proj_a")
+        old = time.time() - 30 * 86_400
+        for d in self._profiles_root(isolated_mcp_file).iterdir():
+            os.utime(d, (old, old))
+        removed = sdt.prune_old_browser_profiles(max_age_days=14)
+        # 2 shards × 2 browser binaries (playwright + chrome-devtools) = 4 dirs.
+        assert removed == 4
+
+    def test_missing_root_returns_zero(self, isolated_mcp_file: pathlib.Path) -> None:
+        assert not self._profiles_root(isolated_mcp_file).exists()
+        assert sdt.prune_old_browser_profiles() == 0
+
+    def test_ignores_stray_files(self, isolated_mcp_file: pathlib.Path) -> None:
+        root = self._profiles_root(isolated_mcp_file)
+        root.mkdir(parents=True, exist_ok=True)
+        stray = root / "not-a-profile.txt"
+        stray.write_text("x", encoding="utf-8")
+        old = time.time() - 30 * 86_400
+        os.utime(stray, (old, old))
+        assert sdt.prune_old_browser_profiles(max_age_days=14) == 0
+        assert stray.exists()  # stray files are left alone

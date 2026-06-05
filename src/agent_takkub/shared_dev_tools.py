@@ -273,6 +273,57 @@ def browser_profile_mcp_config_path(
     return str(out)
 
 
+# Per-(project, role[, shard], browser) Chromium profile dirs created above are
+# persistent on purpose: a QA pane stays logged in across runs (#39, 04ee5c6).
+# But each new shard index / project / browser leaves a fresh dir behind forever,
+# so runtime/browser-profiles/ grows unbounded (#42). We age-prune by mtime —
+# Chromium bumps the dir mtime on every run, so mtime doubles as "last used", and
+# a generous window keeps recently-used login profiles while reclaiming stale
+# fan-out shards. Mirrors prune_old_transcripts() in orchestrator.py.
+_BROWSER_PROFILE_RETENTION_DAYS = 14
+
+
+def prune_old_browser_profiles(max_age_days: int = _BROWSER_PROFILE_RETENTION_DAYS) -> int:
+    """Delete per-(project, role[, shard], browser) Chromium profile dirs under
+    runtime/browser-profiles/ not used (by mtime) within *max_age_days*. Reclaims
+    disk from #39 fan-out shards that otherwise accumulate forever (#42).
+
+    Best-effort: never raises, returns the number of dirs removed. Call ONLY when
+    no pane is live (e.g. at cockpit boot) — at startup no browser holds a profile
+    open AND a recently-used login profile has a fresh mtime, so the age window
+    keeps it. Do NOT call on pane/shard close: Windows holds the dir open while
+    Chromium shuts down, and it would wipe the persistent login profile every run.
+    """
+    import shutil as _shutil
+    import time as _time
+
+    root = SHARED_MCP_FILE.parent / "browser-profiles"
+    if not root.is_dir():
+        return 0
+    cutoff = _time.time() - max_age_days * 86_400
+    removed = 0
+    try:
+        for p in root.iterdir():
+            if not p.is_dir():
+                continue  # leave stray files alone
+            try:
+                if p.stat().st_mtime < cutoff:
+                    _shutil.rmtree(p, ignore_errors=True)
+                    if not p.exists():  # don't count a partial delete (locked file mid-tree)
+                        removed += 1
+            except OSError:
+                continue  # locked / MAX_PATH dir — skip, never crash startup
+    except OSError:
+        pass
+    if removed:
+        _log.info(
+            "prune_old_browser_profiles: removed %d stale profile dir(s) (>%dd)",
+            removed,
+            max_age_days,
+        )
+    return removed
+
+
 def ensure_browser_mcps() -> tuple[bool, str]:
     """Merge BROWSER_MCPS into runtime/shared-mcp.json if they're not
     already present. Idempotent — safe to call on every cockpit launch.

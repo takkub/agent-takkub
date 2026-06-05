@@ -350,10 +350,17 @@ IDLE_REMIND_COOLDOWN_S = 90
 # that a heavy `npm install` or a slow Lighthouse audit won't trip it.
 STUCK_THRESHOLD_S = 10 * 60
 # Once a recover fires for a pane, wait this long before another one
-# is allowed — otherwise a chronically-stuck workload restarts on a
-# loop. Three strikes is the soft cap (auto-respawn-attempts already
-# handles the hard cap separately).
+# is allowed — otherwise a chronically-stuck workload restarts on a loop.
 STUCK_RECOVER_COOLDOWN_S = 5 * 60
+# Hard cap on consecutive stuck-recover attempts for a single pane (#41).
+# auto-respawn-attempts only caps *crash* respawns; a pane that is alive but
+# wedged (deadlocked on a tool call, never reports done) never crashes, so the
+# cooldown above would otherwise let the watchdog close→respawn it forever —
+# stalling any pipeline hop it belongs to indefinitely. After this many
+# recoveries we give up: warn Lead, fail+advance the pipeline hop, and leave the
+# pane for the operator instead of looping. ~3 strikes ≈ 30 min of repeated
+# wedging (STUCK_THRESHOLD_S + STUCK_RECOVER_COOLDOWN_S per cycle).
+STUCK_RECOVER_MAX = 3
 
 # Throughput watchdog (issue #35): flag panes whose PTY output rate exceeds
 # RUNAWAY_BYTES_S continuously for RUNAWAY_DURATION_S seconds.
@@ -783,6 +790,10 @@ class PaneState:
     auto_chain: bool = False
     # _last_stuck_recover: cooldown ts for the stuck-pane auto-recover watchdog
     last_stuck_recover: float = 0.0
+    # _stuck_recover_attempts: consecutive stuck-recover count (capped at STUCK_RECOVER_MAX, #41)
+    stuck_recover_attempts: int = 0
+    # _stuck_recover_gave_up: True once STUCK_RECOVER_MAX hit — watchdog stops recovering this pane
+    stuck_recover_gave_up: bool = False
     # _codex_spawn_times: wall-clock at spawn for early-crash detection (None = not set)
     codex_spawn_ts: float | None = None
     # _last_send_ts: last delivery ts for stall detection
@@ -931,6 +942,17 @@ class Orchestrator(QObject):
             prune_old_transcripts()
         except Exception as e:
             _log_event("transcript_prune_error", error=repr(e))
+        # Reclaim disk: prune stale per-(project, role, shard, browser) Chromium
+        # profile dirs (#39 fan-out) so runtime/browser-profiles/ can't grow
+        # without bound (#42). Safe here: no pane is alive yet at startup, so no
+        # browser owns a profile, and recently-used login profiles have a fresh
+        # mtime and survive the age window. Best-effort / non-fatal.
+        try:
+            from .shared_dev_tools import prune_old_browser_profiles
+
+            prune_old_browser_profiles()
+        except Exception as e:
+            _log_event("browser_profile_prune_error", error=repr(e))
         # Panes are namespaced per project so the upcoming multi-tab UI
         # (Plan B) can keep each project's Lead + teammates isolated. The
         # `panes` property below resolves to the *active* project's inner
@@ -1131,6 +1153,13 @@ class Orchestrator(QObject):
             _ps_spawn_clear.blocked_on_lead_ts = None
             if not _from_auto_respawn:
                 _ps_spawn_clear.auto_respawn_attempts = 0
+                # #41: a deliberate (manual / fresh-assign) spawn also clears the
+                # stuck-recover cap — a pane revived to do new work gets a clean
+                # recovery budget. NOT cleared on the _from_auto_respawn path (the
+                # stuck-recover respawn itself) or the cap would reset every
+                # recovery and never bite a genuinely-wedged pane.
+                _ps_spawn_clear.stuck_recover_attempts = 0
+                _ps_spawn_clear.stuck_recover_gave_up = False
             # Auto-respawn path: recover shard_total so TAKKUB_SHARD_TOTAL is
             # re-injected correctly when _shard_total wasn't passed explicitly.
             if _shard_total == 0 and _ps_spawn_clear.shard_total > 0:
@@ -1426,9 +1455,13 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                         _mem_text = ""
                     _MEM_MAX_LINES = 200
                     _mem_all = _mem_text.splitlines()
-                    _mem_shown = "\n".join(_mem_all[:_MEM_MAX_LINES])
+                    # Keep the TAIL (newest) — notes are appended at the bottom, so
+                    # a head slice would drop the freshest learnings first (#43).
+                    # role_memory curation normally keeps the file under this cap;
+                    # this slice is just a safety net for a still-large file.
+                    _mem_shown = "\n".join(_mem_all[-_MEM_MAX_LINES:])
                     _trunc = (
-                        f"\n\n> ⚠️ ตัดมา {_MEM_MAX_LINES}/{len(_mem_all)} บรรทัด — "
+                        f"\n\n> ⚠️ ตัดมา {_MEM_MAX_LINES}/{len(_mem_all)} บรรทัดท้ายสุด — "
                         f'อ่านเต็มด้วย `Read("{_role_mem}")`'
                         if len(_mem_all) > _MEM_MAX_LINES
                         else ""
@@ -2570,7 +2603,20 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         return True, f"pipeline {tpl['name']!r} started (run {run_id}, {len(hops)} hops)"
 
     def _fire_pipeline_hop(self, project_ns: str, run_id: str, run: PipelineRun) -> None:
-        """Spawn all roles in the current hop and inject a hop-start message to Lead."""
+        """Spawn all roles in the current hop and inject a hop-start message to Lead.
+
+        NOTE (#44 scope): this loop spawns a hop's roles back-to-back on one
+        event-loop tick — the same ConPTY-collision exposure the cli_server
+        stagger (CliServer._next_spawn_delay_ms) fixes for the manual `takkub
+        assign` fan-out path. It is NOT staggered here on purpose: the abort /
+        hop_pending bookkeeping below (and done()→_advance_pipeline) depend on
+        spawn() being SYNCHRONOUS, so deferring spawns via QTimer would require
+        reworking that contract (and the 8+ pipeline-executor tests that assert
+        the synchronous behaviour). Built-in hops are ≤2 roles, so the burst is
+        small and the collision intermittent; staggering this safely is tracked
+        as follow-up. The reported #44 repro (parallel `takkub assign`) and shard
+        fan-out both go through the staggered cli_server path and ARE covered.
+        """
         from .config import default_cwd_for_role
 
         hop_idx = run.current_hop
@@ -4069,10 +4115,20 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 ps_ck.tp_last_ts = now
                 if (now - last_content_ts) < STUCK_THRESHOLD_S:
                     continue
+                if ps_ck.stuck_recover_gave_up:
+                    # Already hit STUCK_RECOVER_MAX for this pane and handed it
+                    # to the operator (#41). Stop recovering — re-recovering a
+                    # deterministically-wedged pane just loops + burns tokens.
+                    continue
                 last_recover = ps_ck.last_stuck_recover
                 if (now - last_recover) < STUCK_RECOVER_COOLDOWN_S:
                     # Already tried to recover this pane recently;
                     # leave it alone so we don't loop close→spawn.
+                    continue
+                if ps_ck.stuck_recover_attempts >= STUCK_RECOVER_MAX:
+                    # Recovered MAX times and it wedged again — giving up beats
+                    # an infinite close→respawn loop that stalls the pipeline (#41).
+                    self._give_up_stuck(role, project_name, pane, now)
                     continue
                 self._auto_recover_stuck(role, project_name, pane, now)
 
@@ -4099,6 +4155,9 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         snap_requires_commit = _ps_snap.requires_commit_on_done if _ps_snap is not None else False
         snap_shard_total = _ps_snap.shard_total if _ps_snap is not None else 0
         snap_pipeline_run_id = _ps_snap.pipeline_run_id if _ps_snap is not None else None
+        # #41: carry the stuck-recover attempt count across the close→respawn so
+        # the watchdog can enforce STUCK_RECOVER_MAX (close() pops the PaneState).
+        snap_recover_attempts = _ps_snap.stuck_recover_attempts if _ps_snap is not None else 0
 
         self._ps(key).last_stuck_recover = now
         silent_for_s = int(now - getattr(pane, "_last_output_ts", now))
@@ -4129,6 +4188,11 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             # reverts to 0.0 — restore it here so the watchdog can't re-trigger
             # within STUCK_RECOVER_COOLDOWN_S of the recovery attempt.
             self._ps(key).last_stuck_recover = now
+            # #41: persist the incremented stuck-recover count across the
+            # close()-pop so the watchdog can enforce STUCK_RECOVER_MAX (a
+            # wedged-but-alive pane never crashes, so auto_respawn_attempts —
+            # which only counts crashes — never caps it).
+            self._ps(key).stuck_recover_attempts = snap_recover_attempts + 1
             if snap_uuid is not None:
                 _ps_r = self._ps(key)
                 _ps_r.session_uuid = snap_uuid
@@ -4191,6 +4255,60 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         # down the WebEngine view before the respawn binds a new one
         # to the same role slot.
         QTimer.singleShot(2_000, _do_respawn)
+
+    def _give_up_stuck(self, role: str, project: str, pane: AgentPane, now: float) -> None:
+        """STUCK_RECOVER_MAX hit (#41): stop auto-recovering a wedged-but-alive
+        pane. Recovering it again just loops — it re-wedges deterministically —
+        and, if it belongs to a pipeline hop, stalls that pipeline forever waiting
+        on a done event that never comes. So we give up exactly ONCE: flag the
+        pane so the watchdog leaves it alone, drop any auto-chain tag (siblings
+        would otherwise wait forever), warn Lead, and — if it's a pipeline-hop
+        role — mark it failed + advance the hop (mirrors the crash-cap branch in
+        _do_respawn / _schedule_auto_respawn). The pane is left ALIVE so the
+        operator can inspect it and reassign; nothing keeps recovering it."""
+        key = f"{project}::{role}"
+        ps = self._ps(key)
+        if ps.stuck_recover_gave_up:
+            return  # one-shot — never warn / advance more than once per pane
+        ps.stuck_recover_gave_up = True
+        ps.last_stuck_recover = now
+        _log_event(
+            "stuck_recover_capped",
+            role=role,
+            project=project,
+            attempts=ps.stuck_recover_attempts,
+        )
+        # An auto-chain verify-hop sibling would wait forever for this pane's
+        # done event; drop the tag so a capped pane can't keep a hop open.
+        ps.auto_chain = False
+        # Pipeline hop: fail + advance so the run doesn't stall on a pane that
+        # will never report done (same bookkeeping as the respawn-fail path).
+        pl_run_id = ps.pipeline_run_id
+        if pl_run_id is not None:
+            pl_key = f"{project}::{pl_run_id}"
+            pl_run = self._pipeline_runs.get(pl_key)
+            if pl_run is not None and not pl_run.closed:
+                pl_run.hop_pending.discard(role)
+                pl_run.hop_failed.add(role)
+                if not pl_run.hop_pending:
+                    self._advance_pipeline(project, pl_key, pl_run)
+            # Unlink the (still-alive) pane from the run so a later operator
+            # close() can't re-enter the pipeline-fail branch and spuriously
+            # advance a DIFFERENT (already-advanced) hop. The crash-cap path gets
+            # this for free by popping the PaneState; we keep the pane alive for
+            # inspection, so clear the linkage explicitly.
+            ps.pipeline_run_id = None
+        lead = self._project_panes(project).get(LEAD.name)
+        if lead and lead.session and lead.session.is_alive:
+            msg = (
+                f"⚠️ [stuck-capped] {role} ({project}) wedged แต่ยังไม่ตาย — "
+                f"auto-recover ครบ {STUCK_RECOVER_MAX} ครั้งแล้วยังค้าง เลิก recover "
+                f"อัตโนมัติ (กัน loop + pipeline stall) — เช็ค `takkub list` แล้ว "
+                f"close + assign ใหม่ถ้าต้องการให้ทำต่อ"
+            )
+            lead.session.write(msg)
+            QTimer.singleShot(150, lambda: lead.session and lead.session.write(b"\r"))
+            self.leadInjected.emit(msg)
 
     def _warn_lead_runaway_pane(self, role: str, project: str, rate_bps: float) -> None:
         """Inject a one-line warning into Lead's input when a teammate pane has

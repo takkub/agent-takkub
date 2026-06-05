@@ -82,3 +82,89 @@ class TestEnsureRoleMemory:
             assert ".." not in p.parts
             assert isolated_role_memory in p.parents
         assert role_memory_path("p", "..").name == "__.md"
+
+
+class TestCuration:
+    """ensure_role_memory curates the accumulated file on read (#43): dedup
+    repeated bullets + size-cap, preserving the header + seeded skeleton."""
+
+    def test_dedup_collapses_repeated_bullet(self, isolated_role_memory: pathlib.Path) -> None:
+        path = ensure_role_memory("p", "qa")
+        path.write_text(
+            path.read_text(encoding="utf-8")
+            + "\n- pitfall: ZZZWIDGET needs a retry\n- Pitfall:  zzzwidget needs a retry  \n",
+            encoding="utf-8",
+        )
+        ensure_role_memory("p", "qa")  # curate on next spawn
+        lines = [
+            ln for ln in path.read_text(encoding="utf-8").splitlines() if "zzzwidget" in ln.lower()
+        ]
+        assert len(lines) == 1, lines
+        # newest (last) occurrence is the one kept, verbatim.
+        assert lines[0] == "- Pitfall:  zzzwidget needs a retry  "
+
+    def test_dedup_keeps_distinct_bullets(self, isolated_role_memory: pathlib.Path) -> None:
+        path = ensure_role_memory("p", "qa")
+        path.write_text(
+            path.read_text(encoding="utf-8") + "\n- alpha note one\n- beta note two\n",
+            encoding="utf-8",
+        )
+        ensure_role_memory("p", "qa")
+        text = path.read_text(encoding="utf-8")
+        assert "alpha note one" in text and "beta note two" in text
+
+    def test_size_cap_trims_oldest_keeps_newest(
+        self, isolated_role_memory: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(rm, "_MEM_MAX_ENTRIES", 5)
+        path = ensure_role_memory("p", "backend")
+        notes = "".join(f"\n- note number {i:03d}\n" for i in range(20))
+        path.write_text(path.read_text(encoding="utf-8") + notes, encoding="utf-8")
+        ensure_role_memory("p", "backend")
+        text = path.read_text(encoding="utf-8")
+        n_bullets = sum(1 for ln in text.splitlines() if rm._BULLET_RE.match(ln))
+        assert n_bullets <= 5
+        assert "number 019" in text  # newest survives
+        assert "number 000" not in text  # oldest trimmed
+
+    def test_preserves_header_and_seeded_headings(self, isolated_role_memory: pathlib.Path) -> None:
+        path = ensure_role_memory("p", "qa")
+        # A duplicate forces a curation rewrite.
+        path.write_text(path.read_text(encoding="utf-8") + "\n- dupe\n- dupe\n", encoding="utf-8")
+        ensure_role_memory("p", "qa")
+        text = path.read_text(encoding="utf-8")
+        assert "# qa — learned notes" in text  # header survives
+        assert "## Conventions / patterns" in text  # seeded skeleton survives
+        assert "## Gotchas / pitfalls" in text
+
+    def test_sub_headings_stay_in_body(self) -> None:
+        _header, sections = rm._split_doc("# h\n\n## A\n- one\n### sub\n- two\n## B\n- three\n")
+        assert len(sections) == 2  # only ## splits; ### is body
+        assert any("### sub" in ln for ln in sections[0][1])
+
+    def test_curation_is_idempotent(self, isolated_role_memory: pathlib.Path) -> None:
+        text = ensure_role_memory("p", "qa").read_text(encoding="utf-8")
+        new, changed = rm._curate_text(text)
+        assert changed is False and new == text
+
+    def test_literal_braces_preserved(self, isolated_role_memory: pathlib.Path) -> None:
+        path = ensure_role_memory("p", "devops")
+        brace = "- health: {{.State.Health.Status}} must be healthy"
+        path.write_text(
+            path.read_text(encoding="utf-8") + "\n" + brace + "\n- dupe\n- dupe\n",
+            encoding="utf-8",
+        )
+        ensure_role_memory("p", "devops")  # must not raise on literal braces
+        assert brace in path.read_text(encoding="utf-8")
+
+    def test_best_effort_on_unreadable(
+        self, isolated_role_memory: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = ensure_role_memory("p", "qa")
+
+        def boom(*_a, **_k):
+            raise OSError("read failed")
+
+        monkeypatch.setattr(pathlib.Path, "read_text", boom)
+        # A read failure during curation must be swallowed — ensure still returns.
+        assert ensure_role_memory("p", "qa") == path

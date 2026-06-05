@@ -20,9 +20,11 @@ import pytest
 from agent_takkub.orchestrator import (
     LEAD,
     STUCK_RECOVER_COOLDOWN_S,
+    STUCK_RECOVER_MAX,
     STUCK_THRESHOLD_S,
     Orchestrator,
     PaneState,
+    PipelineRun,
 )
 
 
@@ -340,3 +342,111 @@ class TestAutoRecoverStuck:
         assert stuck_log["silent_for_s"] == int(silence), (
             f"expected {int(silence)}, got {stuck_log['silent_for_s']}"
         )
+
+
+class _CapOrch(_FakeOrch):
+    """_FakeOrch + the bits _give_up_stuck touches, so the STUCK_RECOVER_MAX
+    cap path (#41) runs for real against the watchdog driver."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._pipeline_runs: dict = {}
+        self.leadInjected = MagicMock()
+        self.advance_calls: list[tuple] = []
+
+    def _project_panes(self, project: str | None):
+        return self._panes_by_project.get(project or "", {})
+
+    def _advance_pipeline(self, project, pl_key, run) -> None:
+        self.advance_calls.append((project, pl_key, run))
+
+    def _give_up_stuck(self, role, project, pane, now) -> None:
+        Orchestrator._give_up_stuck(self, role, project, pane, now)  # type: ignore[arg-type]
+
+
+def _drive_until(fake: _FakeOrch, pane, ticks: int, start: float = 1_000_000.0) -> float:
+    """Run `_check` *ticks* times, stepping past the cooldown each tick and
+    re-staling the pane so the watchdog keeps wanting to recover it."""
+    now = start
+    for _ in range(ticks):
+        pane._last_output_ts = now - STUCK_THRESHOLD_S - 1
+        _check(fake, now)
+        now += STUCK_RECOVER_COOLDOWN_S + 1
+    return now
+
+
+class TestStuckRecoverCap:
+    def test_attempts_increment_each_recover(self) -> None:
+        fake = _FakeOrch()
+        pane = _FakePane(state="working", last_out=0.0)
+        fake._panes_by_project["p"] = {"backend": pane}
+        for expected in (1, 2, 3):
+            _recover(fake, "backend", "p", pane, 1_000_000.0 + expected)
+            assert fake._pane_state["p::backend"].stuck_recover_attempts == expected
+
+    def test_attempts_survive_real_close_pop(self) -> None:
+        class _PopOnClose(_FakeOrch):
+            def close(self, role, project=None, suppress_pipeline=False):
+                self._pane_state.pop(f"{project or ''}::{role}", None)
+                self._idle_state.pop(f"{project or ''}::{role}", None)
+                self.close_calls.append((role, project or ""))
+                return True, "ok"
+
+        fake = _PopOnClose()
+        pane = _FakePane(state="working", last_out=0.0)
+        fake._panes_by_project["p"] = {"backend": pane}
+        _recover(fake, "backend", "p", pane, 1_000_000.0)
+        ps = fake._pane_state.get("p::backend")
+        assert ps is not None and ps.stuck_recover_attempts == 1, (
+            "stuck_recover_attempts must survive close()->pop()->_do_respawn() "
+            "or STUCK_RECOVER_MAX can never bite"
+        )
+
+    def test_cap_stops_recovery_loop(self) -> None:
+        fake = _CapOrch()
+        pane = _FakePane(state="working", last_out=0.0)
+        fake._panes_by_project["p"] = {"backend": pane}
+        _drive_until(fake, pane, ticks=STUCK_RECOVER_MAX + 4)
+        # Exactly STUCK_RECOVER_MAX recoveries fire, then the watchdog gives up.
+        assert len(fake.close_calls) == STUCK_RECOVER_MAX
+        assert len(fake.spawn_calls) == STUCK_RECOVER_MAX
+        assert fake._pane_state["p::backend"].stuck_recover_gave_up is True
+
+    def test_give_up_is_one_shot(self) -> None:
+        fake = _CapOrch()
+        pane = _FakePane(state="working", last_out=0.0)
+        fake._panes_by_project["p"] = {"backend": pane}
+        _drive_until(fake, pane, ticks=STUCK_RECOVER_MAX + 1)  # reach + trigger give-up
+        log_count_before = len(fake.spawn_calls)
+        # Many more ticks must not recover again nor advance/warn repeatedly.
+        _drive_until(fake, pane, ticks=10, start=5_000_000.0)
+        assert len(fake.spawn_calls) == log_count_before
+        assert len(fake.close_calls) == STUCK_RECOVER_MAX
+
+    def test_cap_fails_and_advances_pipeline(self) -> None:
+        fake = _CapOrch()
+        pane = _FakePane(state="working", last_out=0.0)
+        fake._panes_by_project["p"] = {"backend": pane}
+        run = PipelineRun(
+            run_id="r1", template_id="t", template_name="T", hops=[[{"role": "backend"}]]
+        )
+        run.hop_pending = {"backend"}
+        fake._pipeline_runs["p::r1"] = run
+        # Tie the pane to the pipeline run (set on the persisted PaneState).
+        fake._ps("p::backend").pipeline_run_id = "r1"
+        _drive_until(fake, pane, ticks=STUCK_RECOVER_MAX + 2)
+        assert "backend" in run.hop_failed
+        assert "backend" not in run.hop_pending
+        assert len(fake.advance_calls) == 1, "hop emptied → pipeline must advance once"
+        # The surviving pane must be UNLINKED from the run so a later operator
+        # close() can't re-enter the pipeline branch and spuriously advance again.
+        assert fake._pane_state["p::backend"].pipeline_run_id is None
+
+    def test_give_up_warns_lead(self) -> None:
+        fake = _CapOrch()
+        pane = _FakePane(state="working", last_out=0.0)
+        lead = _FakePane(state="working", last_out=0.0)
+        fake._panes_by_project["p"] = {"backend": pane, LEAD.name: lead}
+        _drive_until(fake, pane, ticks=STUCK_RECOVER_MAX + 2)
+        assert lead.session.write.called, "Lead must be warned when a pane is stuck-capped"
+        assert fake.leadInjected.emit.called
