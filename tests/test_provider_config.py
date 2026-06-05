@@ -18,9 +18,12 @@ from agent_takkub import provider_config
 
 @pytest.fixture(autouse=True)
 def redirect_config_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    """Point every `config_path()` call at a per-test temp file."""
+    """Point the global `config_path()` at a per-test temp file, and the
+    per-project root at the temp dir, so the real path-resolution logic runs
+    (rather than stubbing config_path away — which would hide the project arg)."""
     fake = tmp_path / "role-providers.json"
-    monkeypatch.setattr(provider_config, "config_path", lambda: fake)
+    monkeypatch.setattr(provider_config, "_CONFIG_PATH", fake)
+    monkeypatch.setattr(provider_config, "_BASE_DIR", tmp_path)
     return fake
 
 
@@ -209,3 +212,21 @@ class TestSaveRoleOverrides:
         # New save with only backend → qa override must be gone (full replace).
         provider_config.save_role_overrides({"backend": "gemini"})
         assert provider_config.load_providers() == {"backend": "gemini"}
+
+
+class TestPerProject:
+    def test_projects_keep_independent_mappings(self, redirect_config_path: Path) -> None:
+        provider_config.save_role_overrides({"backend": "codex"}, project="proj-a")
+        provider_config.save_role_overrides({"backend": "gemini"}, project="proj-b")
+        assert provider_config.provider_for("backend", project="proj-a") == "codex"
+        assert provider_config.provider_for("backend", project="proj-b") == "gemini"
+
+    def test_unsaved_project_inherits_global(self, redirect_config_path: Path) -> None:
+        # Global override present; a project with no file inherits it.
+        provider_config.save_role_overrides({"backend": "codex"})
+        assert provider_config.provider_for("backend", project="fresh") == "codex"
+
+    def test_per_project_does_not_leak_to_global(self, redirect_config_path: Path) -> None:
+        provider_config.save_role_overrides({"backend": "codex"}, project="proj-a")
+        # Global stays default (claude) — the per-project save didn't touch it.
+        assert provider_config.provider_for("backend") == "claude"

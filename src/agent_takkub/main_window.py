@@ -580,19 +580,19 @@ class MainWindow(QMainWindow):
         # queuing a second fetch before the first one completes.
         self._update_worker_busy: bool = False
 
-        # ── Claude CLI update button ───────────────────────────────
-        # Separate from _btn_update (which pulls agent-takkub source). This
-        # one updates the Claude Code CLI (`@anthropic-ai/claude-code` via
-        # npm) and, before applying, runs an AI compatibility check against
-        # how the cockpit spawns claude. Flow: _on_claude_update_clicked →
-        # background worker (version + changelog + analysis) → report dialog
-        # → confirm → close live claude panes (Windows lock guard) → npm
-        # install → restart prompt.
+        # ── Claude CLI check button ────────────────────────────────
+        # Separate from _btn_update (which pulls agent-takkub source). Clicking
+        # this hands a version-check task to the active tab's Lead pane
+        # (_on_claude_update_clicked → orch.inject_lead_prompt) so the Lead
+        # reports `claude --version` vs npm in chat and the user decides there.
+        # The native worker+dialog self-update flow (_on_claude_update_check_done,
+        # _show_claude_update_dialog, _confirm_and_apply_claude_update) is kept
+        # below for the close-panes detached path but is no longer wired here.
         self._btn_claude_update = QPushButton("⬆ Claude CLI", self)
         self._btn_claude_update.setToolTip(
-            "ตรวจว่ามี Claude Code CLI version ใหม่ไหม\n"
-            "ถ้ามี: วิเคราะห์ด้วย AI ว่าใช้กับ cockpit ได้ไหม → ยืนยัน → อัพเดต\n"
-            "(ก่อนอัพเดตจะปิด claude pane ที่รันอยู่ กัน brick บน Windows)"
+            "ยิงคำขอเช็ค Claude Code CLI version เข้า Lead pane\n"
+            "Lead จะเทียบ version ที่ติดตั้ง vs ล่าสุดบน npm แล้วรายงานในแชต\n"
+            "(แทน native dialog เดิม — user ตัดสินใจอัพเดตจากบทสนทนา)"
         )
         self._btn_claude_update.setStyleSheet(self._ghost_button_style())
         self._btn_claude_update.clicked.connect(self._on_claude_update_clicked)
@@ -697,27 +697,17 @@ class MainWindow(QMainWindow):
         self._btn_pipelines.setToolTip(
             "Build dev pipelines: drag roles into hops, save reusable templates,\n"
             "toggle providers, enable/disable roles, and pick each role's CLI\n"
-            "(claude/codex/gemini). Edits ~/.takkub/pipelines.json +\n"
-            "disabled-providers.json + role-providers.json. Applies to the\n"
-            "next pane you spawn, no restart needed."
+            "(claude/codex/gemini). Templates + per-role CLI are saved PER PROJECT\n"
+            "(~/.takkub/projects/<project>/) so tabs don't collide; provider on/off\n"
+            "stays global. Applies to the next pane you spawn, no restart needed."
         )
         self._btn_pipelines.setStyleSheet(self._ghost_button_style())
         self._btn_pipelines.clicked.connect(self._on_pipelines_clicked)
 
-        # ▶ Run: fire a saved pipeline template (Finding #13). Pops a menu of
-        # templates from ~/.takkub/pipelines.json; picking one calls
-        # orch.run_pipeline(id) — spawns each hop's roles in parallel and
-        # auto-advances to the next hop when all report done. The ⚙ Pipelines
-        # button (next to it) edits templates; this one runs them.
-        self._btn_run_pipeline = QPushButton("▶ Run", self)
-        self._btn_run_pipeline.setToolTip(
-            "Run a saved dev pipeline. Pick a template (Feature / Design Review /\n"
-            "Quick fix / your custom ones) — each hop's roles spawn in parallel and\n"
-            "the pipeline auto-advances to the next hop when all report done.\n"
-            "Edit templates via ⚙ Pipelines."
-        )
-        self._btn_run_pipeline.setStyleSheet(self._ghost_button_style())
-        self._btn_run_pipeline.clicked.connect(self._on_run_pipeline_clicked)
+        # ▶ Run button removed per user request — it rendered as a stray widget
+        # at the window origin (parent=self, never placed in a layout) and
+        # covered the first project tab. Pipelines are still fired via the
+        # ⚙ Pipelines editor + orch.run_pipeline(id) / CLI.
 
         self._btn_claude_auth = QPushButton("Claude Auth", self)
         self._btn_claude_auth.setToolTip(
@@ -825,10 +815,6 @@ class MainWindow(QMainWindow):
             self._chip_gemini,
             self._btn_install_rtk,
             self._btn_restart,
-            # self._btn_run_pipeline,  # hidden per user request — uncomment to restore.
-            # The button + its handlers (_on_run_pipeline_clicked /
-            # _run_pipeline_template) are still created above; only its
-            # placement in the status bar is removed so it can come back easily.
             self._btn_pipelines,
             # self._btn_claude_auth,  # hidden per user request — uncomment to restore.
             # The button + its handler are still created above; only its
@@ -1178,18 +1164,26 @@ class MainWindow(QMainWindow):
 
     def _on_pipelines_clicked(self) -> None:
         """Open the pipeline-settings dialog (drag-drop hops, templates,
-        provider/role enable). On Save & Apply the page persists templates +
-        per-role enable to `~/.takkub/pipelines.json` via the bridge and stashes
-        the desired provider on/off. We then route any *changed* provider
-        through `orchestrator.toggle_provider` so it persists to
-        `disabled-providers.json`, repaints the status-bar chip, AND broadcasts
-        the `[system]` notice to live Lead panes — identical to a chip click.
-        Cancel / window-close discards (dialog returns Rejected).
+        provider/role enable) for the **active project**. On Save & Apply the
+        page persists templates + per-role enable + per-role CLI to that
+        project's files under `~/.takkub/projects/<project>/` via the bridge
+        (so tabs don't collide), and stashes the desired provider on/off. We
+        then route any *changed* provider through `orchestrator.toggle_provider`
+        — which stays GLOBAL (`disabled-providers.json`) — so it repaints the
+        status-bar chip AND broadcasts the `[system]` notice to live Lead panes,
+        identical to a chip click. Cancel / window-close discards (Rejected).
         """
         from .pipeline_dialog import PipelineSettingsDialog
         from .provider_state import is_disabled
 
-        dlg = PipelineSettingsDialog(self)
+        try:
+            from .config import active_project as _active_project
+
+            active_project, _ = _active_project()
+        except Exception:
+            active_project = None
+
+        dlg = PipelineSettingsDialog(self, project=active_project)
         if dlg.exec() != dlg.DialogCode.Accepted:
             return
         # Apply only providers whose target state differs from disk — toggle_provider
@@ -1201,52 +1195,6 @@ class MainWindow(QMainWindow):
             "Pipeline settings saved — applies to the next pane you spawn.",
             6_000,
         )
-
-    def _on_run_pipeline_clicked(self) -> None:
-        """▶ Run button: pop a menu of saved pipeline templates and fire the
-        chosen one via `orch.run_pipeline(id)`.
-
-        Templates come from `pipeline_config.load()` (the same store the ⚙
-        Pipelines editor writes). Each menu row shows the hop flow
-        (e.g. "Design Review · qa → critic+gemini → frontend") so the user
-        picks by shape, not just name. Empty-hop templates are shown disabled.
-        """
-        from PyQt6.QtWidgets import QMenu
-
-        from . import pipeline_config
-
-        templates = pipeline_config.load().get("templates", [])
-        if not templates:
-            self._status.showMessage(
-                "No pipeline templates yet — open ⚙ Pipelines to build one.", 6_000
-            )
-            return
-
-        menu = QMenu(self)
-        for tpl in templates:
-            tid = tpl.get("id", "")
-            name = tpl.get("name", tid)
-            hops = [h for h in tpl.get("hops", []) if h]
-            flow = " → ".join("+".join(e["role"] for e in hop) for hop in hops)
-            label = f"{name}  ·  {flow}" if flow else f"{name}  ·  (no runnable hops)"
-            act = menu.addAction(label)
-            act.setEnabled(bool(hops))
-            act.triggered.connect(lambda _checked=False, t=tid: self._run_pipeline_template(t))
-
-        menu.exec(self._btn_run_pipeline.mapToGlobal(self._btn_run_pipeline.rect().bottomLeft()))
-
-    def _run_pipeline_template(self, template_id: str) -> None:
-        """Fire one pipeline template in the active project + reflect the result."""
-        try:
-            from .config import active_project as _active_project
-
-            project_name, _ = _active_project()
-        except Exception:
-            project_name = None
-
-        ok, msg = self.orch.run_pipeline(template_id, project=project_name)
-        _log_event("ui_run_pipeline", project=project_name or "", template=template_id, ok=ok)
-        self._status.showMessage((f"▶ {msg}" if ok else f"▶ Pipeline failed: {msg}"), 10_000)
 
     def _on_claude_auth_clicked(self) -> None:
         """Open optional Claude auth override settings."""
@@ -2203,23 +2151,34 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_claude_update_clicked(self) -> None:
-        """⬆ Claude CLI clicked. Kick a background check (version + changelog +
-        AI compatibility analysis); `_on_claude_update_check_done` renders the
-        result. Re-entrancy guarded by `_claude_update_busy`."""
-        from PyQt6.QtCore import QThreadPool
+        """⬆ Claude CLI clicked. Hand the version-check off to the active tab's
+        Lead pane instead of running a native worker+dialog flow — the Lead
+        checks `claude --version` vs npm and reports conversationally, so the
+        user decides from chat. (The native worker/dialog machinery below —
+        `_on_claude_update_check_done` etc. — is kept intact but no longer
+        wired to this button; the safe self-update still needs the close-panes
+        detached path it provides.)"""
+        try:
+            from .config import active_project as _active_project
 
-        from .update_worker import ClaudeUpdateCheckWorker
+            active_project, _ = _active_project()
+        except Exception:
+            active_project = None
 
-        if self._claude_update_busy:
-            self._status.showMessage("กำลังตรวจ Claude CLI อยู่… รอสักครู่", 4_000)
-            return
-        self._claude_update_busy = True
-        self._btn_claude_update.setEnabled(False)
-        self._btn_claude_update.setText("⏳ กำลังตรวจ…")
-        self._status.showMessage("ตรวจ Claude CLI + วิเคราะห์ความเข้ากันได้ด้วย AI (อาจใช้เวลาสักครู่)…")
-        worker = ClaudeUpdateCheckWorker()
-        worker.signals.finished.connect(self._on_claude_update_check_done)
-        QThreadPool.globalInstance().start(worker)
+        prompt = (
+            "[claude-cli check] ช่วยเช็ค Claude Code CLI ให้หน่อย:\n"
+            "1. version ที่ติดตั้ง: `claude --version`\n"
+            "2. version ล่าสุดบน npm: `npm view @anthropic-ai/claude-code version`\n"
+            "ถ้ามีตัวใหม่ → สรุป changelog สำคัญที่อาจกระทบ cockpit + แนะนำว่าควรอัพไหม\n"
+            "หมายเหตุ: บน Windows ห้าม `npm install -g` ตอน claude pane ยังรันอยู่ "
+            "(lock ทำ claude.exe brick) — ต้องปิด pane ก่อน หรือใช้ flow detached "
+            "updater ของ cockpit (build_updater_script) ที่ปิด pane ให้อัตโนมัติ"
+        )
+        delivered = self.orch.inject_lead_prompt(prompt, project=active_project)
+        if delivered:
+            self._status.showMessage("ยิงคำขอเช็ค Claude CLI เข้า Lead แล้ว ↗", 4_000)
+        else:
+            self._status.showMessage("Lead ยังไม่พร้อม — คำขอถูก queue ไว้ จะส่งเมื่อ Lead เปิด", 5_000)
 
     def _on_claude_update_check_done(self, result: dict) -> None:
         """Render the worker result: fatal error → warning; no update → toast;

@@ -130,7 +130,7 @@ class TestRunPipelineValidation:
         orch, _ = _make_orch_with_panes("proj_a", ["lead"])
         from agent_takkub import pipeline_config
 
-        monkeypatch.setattr(pipeline_config, "load", lambda: _simple_pipeline([]))
+        monkeypatch.setattr(pipeline_config, "load", lambda *a, **k: _simple_pipeline([]))
         ok, msg = orch.run_pipeline("does-not-exist", project="proj_a")
         assert not ok
         assert "not found" in msg
@@ -146,7 +146,7 @@ class TestRunPipelineValidation:
 
         # hops=[] means no runnable hops
         monkeypatch.setattr(
-            pipeline_config, "load", lambda: _simple_pipeline([], template_id="empty-pipe")
+            pipeline_config, "load", lambda *a, **k: _simple_pipeline([], template_id="empty-pipe")
         )
         ok, msg = orch.run_pipeline("empty-pipe", project="proj_a")
         assert not ok
@@ -165,7 +165,7 @@ class TestRunPipelineValidation:
         monkeypatch.setattr(
             pipeline_config,
             "load",
-            lambda: _simple_pipeline([[], []], template_id="allblank"),
+            lambda *a, **k: _simple_pipeline([[], []], template_id="allblank"),
         )
         ok, msg = orch.run_pipeline("allblank", project="proj_a")
         assert not ok
@@ -197,7 +197,7 @@ class TestRunPipelineHop0:
         monkeypatch.setattr(
             pipeline_config,
             "load",
-            lambda: _simple_pipeline(
+            lambda *a, **k: _simple_pipeline(
                 [
                     [
                         {
@@ -237,7 +237,7 @@ class TestRunPipelineHop0:
         monkeypatch.setattr(
             pipeline_config,
             "load",
-            lambda: _simple_pipeline(
+            lambda *a, **k: _simple_pipeline(
                 [[{"role": "backend", "cwd": "", "requiresCommit": False, "autoChain": False}]],
                 template_id="be-only",
             ),
@@ -260,7 +260,7 @@ class TestRunPipelineHop0:
         monkeypatch.setattr(
             pipeline_config,
             "load",
-            lambda: _simple_pipeline(
+            lambda *a, **k: _simple_pipeline(
                 [[{"role": "backend", "cwd": "", "requiresCommit": False, "autoChain": False}]],
                 template_id="tag-test",
             ),
@@ -297,7 +297,7 @@ class TestCwdResolution:
         monkeypatch.setattr(
             pipeline_config,
             "load",
-            lambda: _simple_pipeline(
+            lambda *a, **k: _simple_pipeline(
                 [
                     [
                         {
@@ -336,7 +336,7 @@ class TestCwdResolution:
         monkeypatch.setattr(
             pipeline_config,
             "load",
-            lambda: _simple_pipeline(
+            lambda *a, **k: _simple_pipeline(
                 [[{"role": "backend", "cwd": "", "requiresCommit": False, "autoChain": False}]],
                 template_id="cwd-fallback",
             ),
@@ -365,7 +365,7 @@ class TestHopSequencing:
         monkeypatch.setattr(
             pipeline_config,
             "load",
-            lambda: _simple_pipeline(
+            lambda *a, **k: _simple_pipeline(
                 [
                     [{"role": "backend", "cwd": "", "requiresCommit": False, "autoChain": False}],
                     [{"role": "qa", "cwd": "", "requiresCommit": False, "autoChain": False}],
@@ -494,7 +494,7 @@ class TestHopSequencing:
         monkeypatch.setattr(
             pipeline_config,
             "load",
-            lambda: _simple_pipeline(
+            lambda *a, **k: _simple_pipeline(
                 [
                     [
                         {
@@ -549,7 +549,7 @@ class TestPipelineFailureHandling:
         monkeypatch.setattr(
             pipeline_config,
             "load",
-            lambda: _simple_pipeline(
+            lambda *a, **k: _simple_pipeline(
                 [[{"role": "backend", "cwd": "", "requiresCommit": False, "autoChain": False}]],
                 template_id="fail-test",
             ),
@@ -578,7 +578,7 @@ class TestPipelineFailureHandling:
         monkeypatch.setattr(
             pipeline_config,
             "load",
-            lambda: _simple_pipeline(
+            lambda *a, **k: _simple_pipeline(
                 [[{"role": "backend", "cwd": "", "requiresCommit": False, "autoChain": False}]],
                 template_id="fail-notify",
             ),
@@ -610,7 +610,7 @@ class TestPipelineFailureHandling:
         monkeypatch.setattr(
             pipeline_config,
             "load",
-            lambda: _simple_pipeline(
+            lambda *a, **k: _simple_pipeline(
                 [[{"role": "backend", "cwd": "", "requiresCommit": False, "autoChain": False}]],
                 template_id="abort-test",
             ),
@@ -645,7 +645,7 @@ class TestPipelineWatchdogRecovery:
         monkeypatch.setattr(
             pipeline_config,
             "load",
-            lambda: _simple_pipeline(
+            lambda *a, **k: _simple_pipeline(
                 [[{"role": role, "cwd": "", "requiresCommit": False, "autoChain": False}]],
                 template_id=template_id,
             ),
@@ -802,7 +802,7 @@ class TestPipelineWatchdogRecovery:
         monkeypatch.setattr(
             pipeline_config,
             "load",
-            lambda: _simple_pipeline(
+            lambda *a, **k: _simple_pipeline(
                 [
                     [
                         {"role": "backend", "cwd": "", "requiresCommit": False, "autoChain": False},
@@ -873,7 +873,7 @@ class TestPipelineProjectIsolation:
         monkeypatch.setattr(
             pipeline_config,
             "load",
-            lambda: _simple_pipeline(
+            lambda *a, **k: _simple_pipeline(
                 [[{"role": "backend", "cwd": "", "requiresCommit": False, "autoChain": False}]],
                 template_id="iso-test",
             ),
