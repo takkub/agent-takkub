@@ -1217,7 +1217,9 @@ class Orchestrator(QObject):
         # the availability probe and the spawn.
         from .provider_config import CODEX, GEMINI, effective_provider_for
 
-        effective_provider = effective_provider_for(base_role)
+        # Per-project role→CLI mapping (project_ns resolved at spawn entry):
+        # the same role can be backed by a different CLI in different tabs.
+        effective_provider = effective_provider_for(base_role, project=project_ns)
 
         if effective_provider == GEMINI:
             from .gemini_helper import find_gemini_executable
@@ -1989,14 +1991,15 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
 
         from .provider_config import CODEX, effective_provider_for
 
+        project_ns = self._resolve_project(project)
+
         # Use the *effective* provider: a codex role substituted by claude
         # (provider unavailable) must keep the plain task — codex-specific
         # task rewriting would only confuse the standing-in claude pane.
+        # Scoped to project_ns so the per-project role→CLI mapping decides.
         base_role_a = _split_shard(role_name)[0]
-        if effective_provider_for(base_role_a) == CODEX:
+        if effective_provider_for(base_role_a, project=project_ns) == CODEX:
             task = _rewrite_task_for_codex(task)
-
-        project_ns = self._resolve_project(project)
         key = _exit_key(project_ns, role_name)
         ps_assign = self._ps(key)
         ps_assign.last_assigned_task = task
@@ -2083,6 +2086,35 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             QTimer.singleShot(500, _check)
 
         QTimer.singleShot(1_500, _check)
+
+    def inject_lead_prompt(self, prompt: str, project: str | None = None) -> bool:
+        """Paste a prompt into a project's Lead pane and submit it.
+
+        For status-bar buttons that hand a task to the Lead instead of running
+        a native GUI flow (e.g. the ⬆ Claude CLI button asks the Lead to
+        check/report the CLI version rather than popping its own dialog).
+        Writes immediately if the Lead is alive; otherwise queues via
+        `_pending_done_notices` so it lands on the next Lead spawn. Returns
+        True when delivered live, False when queued (no live Lead).
+        """
+        project_ns = self._resolve_project(project)
+        lead = self._project_panes(project_ns).get(LEAD.name)
+        if lead and lead.session and lead.session.is_alive:
+            payload = _paste_payload(prompt)
+            lead.session.write(payload)
+            QTimer.singleShot(
+                _enter_delay_ms(payload),
+                lambda: lead.session and lead.session.write(b"\r"),
+            )
+            self.leadInjected.emit(prompt)
+            _log_event("inject_lead_prompt", project=project_ns)
+            return True
+        self._pending_done_notices.setdefault(project_ns, []).append(
+            {"role": "system", "note": "lead prompt", "body": prompt}
+        )
+        self._save_pending_done_notices(project_ns)
+        _log_event("inject_lead_prompt_queued", project=project_ns)
+        return False
 
     def _send_when_ready(
         self,
@@ -2485,7 +2517,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
 
         project_ns = self._resolve_project(project)
 
-        data = pipeline_config.load()
+        data = pipeline_config.load(project=project_ns)
         templates = {t["id"]: t for t in data.get("templates", [])}
         tpl = templates.get(template_id)
         if tpl is None:

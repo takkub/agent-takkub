@@ -113,9 +113,10 @@ def test_save_writes_atomically_via_tmp_file(tmp_path_json):
     json.loads(raw)
 
 
-def test_builtins_reasserted_even_if_file_tampers_them(tmp_path_json):
-    # A tampered built-in (wrong hops, claims non-builtin) must be overwritten
-    # by the canonical definition, and stay marked builtin.
+def test_builtin_identity_locked_but_hops_overridable(tmp_path_json):
+    # A built-in's IDENTITY is locked: a file claiming name "HACKED"/builtin
+    # False can't rename or declassify it. But its HOPS are user-overridable —
+    # that's how per-project pipeline edits persist.
     tmp_path_json.write_text(
         json.dumps(
             {
@@ -124,7 +125,7 @@ def test_builtins_reasserted_even_if_file_tampers_them(tmp_path_json):
                         "id": "feature",
                         "name": "HACKED",
                         "builtin": False,
-                        "hops": [[{"role": "shell"}]],
+                        "hops": [[{"role": "qa"}], [{"role": "reviewer"}]],
                     }
                 ],
                 "activeTemplate": "feature",
@@ -133,9 +134,93 @@ def test_builtins_reasserted_even_if_file_tampers_them(tmp_path_json):
         encoding="utf-8",
     )
     feature = next(t for t in pipeline_config.load()["templates"] if t["id"] == "feature")
-    assert feature["name"] == "Feature (UI+API)"
+    assert feature["name"] == "Feature (UI+API)"  # identity locked
     assert feature["builtin"] is True
+    assert [e["role"] for e in feature["hops"][0]] == ["qa"]  # hops follow the file
+    assert [e["role"] for e in feature["hops"][1]] == ["reviewer"]
+
+
+def test_builtin_hop_override_roundtrips(tmp_path_json):
+    # Editing a built-in's hops persists across save/load (the original
+    # "edit reverts on reopen" bug fix).
+    payload = pipeline_config.seed()
+    feat = next(t for t in payload["templates"] if t["id"] == "feature")
+    feat["hops"] = [[{"role": "backend"}]]
+    pipeline_config.save(payload)
+    loaded = next(t for t in pipeline_config.load()["templates"] if t["id"] == "feature")
+    assert [e["role"] for e in loaded["hops"][0]] == ["backend"]
+    assert loaded["builtin"] is True
+
+
+def test_degenerate_builtin_override_keeps_canonical(tmp_path_json):
+    # An all-empty override can't wipe a built-in to nothing — canonical wins.
+    tmp_path_json.write_text(
+        json.dumps({"templates": [{"id": "feature", "hops": [[]]}]}),
+        encoding="utf-8",
+    )
+    feature = next(t for t in pipeline_config.load()["templates"] if t["id"] == "feature")
     assert [e["role"] for e in feature["hops"][0]] == ["frontend", "backend"]
+
+
+def test_untouched_builtins_not_persisted(tmp_path_json):
+    # Saving with built-ins at their code defaults writes no built-in entry, so
+    # they keep tracking code (and the file stays minimal).
+    pipeline_config.save(pipeline_config.seed())
+    raw = json.loads(tmp_path_json.read_text(encoding="utf-8"))
+    assert raw["templates"] == []
+
+
+def test_edited_builtin_persisted_but_others_not(tmp_path_json):
+    # Only the edited built-in is written; untouched ones stay code-tracked.
+    payload = pipeline_config.seed()
+    feat = next(t for t in payload["templates"] if t["id"] == "feature")
+    feat["hops"] = [[{"role": "qa"}]]
+    pipeline_config.save(payload)
+    raw = json.loads(tmp_path_json.read_text(encoding="utf-8"))
+    ids = [t["id"] for t in raw["templates"]]
+    assert ids == ["feature"]
+
+
+def test_per_project_isolation(tmp_path, monkeypatch):
+    # Two projects edit the same built-in independently; a third inherits the
+    # global/code default.
+    monkeypatch.setattr(pipeline_config, "_BASE_DIR", tmp_path)
+    monkeypatch.setattr(pipeline_config, "_PATH", tmp_path / "pipelines.json")
+
+    a = pipeline_config.seed()
+    next(t for t in a["templates"] if t["id"] == "feature")["hops"] = [[{"role": "qa"}]]
+    pipeline_config.save(a, project="proj-a")
+
+    b = pipeline_config.seed()
+    next(t for t in b["templates"] if t["id"] == "feature")["hops"] = [[{"role": "mobile"}]]
+    pipeline_config.save(b, project="proj-b")
+
+    feat_a = next(
+        t for t in pipeline_config.load(project="proj-a")["templates"] if t["id"] == "feature"
+    )
+    feat_b = next(
+        t for t in pipeline_config.load(project="proj-b")["templates"] if t["id"] == "feature"
+    )
+    feat_c = next(
+        t for t in pipeline_config.load(project="proj-c")["templates"] if t["id"] == "feature"
+    )
+    assert [e["role"] for e in feat_a["hops"][0]] == ["qa"]
+    assert [e["role"] for e in feat_b["hops"][0]] == ["mobile"]
+    assert [e["role"] for e in feat_c["hops"][0]] == ["frontend", "backend"]  # inherits default
+
+
+def test_per_project_falls_back_to_global_until_saved(tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline_config, "_BASE_DIR", tmp_path)
+    monkeypatch.setattr(pipeline_config, "_PATH", tmp_path / "pipelines.json")
+    # global has a custom template
+    g = pipeline_config.seed()
+    g["templates"].append(
+        {"id": "glob", "name": "Glob", "builtin": False, "hops": [[{"role": "qa"}]]}
+    )
+    pipeline_config.save(g, project=None)
+    # a project with no file yet inherits the global custom
+    ids = [t["id"] for t in pipeline_config.load(project="fresh")["templates"]]
+    assert "glob" in ids
 
 
 def test_custom_template_claiming_builtin_id_is_dropped(tmp_path_json):

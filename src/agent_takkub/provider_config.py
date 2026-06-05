@@ -27,6 +27,7 @@ to pick up changes (no live reload in v1).
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -47,30 +48,55 @@ _FORCED_PROVIDER = {
 # Roles whose CLI is fixed and must not be offered as an override in the UI.
 FORCED_ROLES = frozenset(_FORCED_PROVIDER)
 
-_CONFIG_PATH = Path.home() / ".takkub" / "role-providers.json"
+_BASE_DIR = Path.home() / ".takkub"
+# Global mapping — the cross-project default. Kept as a module global so tests
+# can monkeypatch ``_CONFIG_PATH``; per-project mappings live under
+# ``_BASE_DIR/projects/<slug>/`` (monkeypatch ``_BASE_DIR`` to redirect those).
+_CONFIG_PATH = _BASE_DIR / "role-providers.json"
 
 
-def config_path() -> Path:
-    """Where the per-role provider mapping lives. Module-level constant
-    exposed as a function so tests can monkeypatch the path."""
+def _project_slug(project: str) -> str:
+    """Filesystem-safe folder name for a project (mirrors pipeline_config)."""
+    return re.sub(r"[^A-Za-z0-9._-]", "_", project) or "default"
+
+
+def config_path(project: str | None = None) -> Path:
+    """Where the per-role provider mapping lives.
+
+    ``project`` → that project's own file under ``~/.takkub/projects/<slug>/``
+    so each tab can back the same role with a different CLI without colliding;
+    ``None`` → the global file (also the fallback a project inherits until it
+    overrides). Function form so tests can monkeypatch ``_CONFIG_PATH``
+    (global) or ``_BASE_DIR`` (per-project root).
+    """
+    if project:
+        return _BASE_DIR / "projects" / _project_slug(project) / "role-providers.json"
     return _CONFIG_PATH
 
 
-def load_providers() -> dict[str, str]:
-    """Return the user's role→provider mapping. Creates an empty file
-    on first call if the config doesn't exist yet, so the user has a
-    file to discover and edit. Invalid JSON or non-dict content is
-    treated as empty (silent recovery — never blocks spawn)."""
-    path = config_path()
-    if not path.exists():
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("{}\n", encoding="utf-8")
-        except OSError:
+def load_providers(project: str | None = None) -> dict[str, str]:
+    """Return the role→provider mapping for ``project`` (or global when None).
+
+    A ``project`` with no per-project file falls back to the global mapping, so
+    a fresh tab inherits global overrides until it saves its own. Only the
+    global file is auto-created on first read (so the user has one to discover);
+    per-project files are written lazily on first save. Invalid JSON or non-dict
+    content is treated as empty (silent recovery — never blocks spawn)."""
+    if project:
+        p = config_path(project)
+        if not p.exists():
+            return load_providers(None)  # inherit global defaults
+    else:
+        p = config_path(None)
+        if not p.exists():
+            try:
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text("{}\n", encoding="utf-8")
+            except OSError:
+                return {}
             return {}
-        return {}
     try:
-        raw = path.read_text(encoding="utf-8")
+        raw = p.read_text(encoding="utf-8")
         data = json.loads(raw)
     except (OSError, json.JSONDecodeError):
         return {}
@@ -85,11 +111,12 @@ def load_providers() -> dict[str, str]:
     }
 
 
-def save_providers(mapping: dict[str, str]) -> None:
-    """Write the mapping back to disk. Best-effort: raises only if the
-    user's home dir is unwritable (very rare). Caller passes the full
-    desired mapping — partial updates aren't supported."""
-    path = config_path()
+def save_providers(mapping: dict[str, str], project: str | None = None) -> None:
+    """Write the mapping back to disk (per-project when ``project`` given, else
+    global). Best-effort: raises only if the target dir is unwritable (very
+    rare). Caller passes the full desired mapping — partial updates aren't
+    supported."""
+    path = config_path(project)
     path.parent.mkdir(parents=True, exist_ok=True)
     cleaned = {
         str(role).lower(): str(provider).lower()
@@ -99,17 +126,19 @@ def save_providers(mapping: dict[str, str]) -> None:
     path.write_text(json.dumps(cleaned, indent=2) + "\n", encoding="utf-8")
 
 
-def role_provider_map(roles: Iterable[str]) -> dict[str, str]:
-    """Return ``{role: provider_for(role)}`` for the given roles.
+def role_provider_map(roles: Iterable[str], project: str | None = None) -> dict[str, str]:
+    """Return ``{role: provider_for(role)}`` for the given roles (scoped to
+    ``project`` when given).
 
     Used to seed the Pipeline-Settings page's per-role CLI dropdowns with the
     currently-configured mapping (forced roles resolve to their fixed CLI).
     """
-    return {r: provider_for(r) for r in roles}
+    return {r: provider_for(r, project) for r in roles}
 
 
-def save_role_overrides(mapping: dict[str, str]) -> None:
-    """Persist only real overrides from a page payload.
+def save_role_overrides(mapping: dict[str, str], project: str | None = None) -> None:
+    """Persist only real overrides from a page payload (per-project when
+    ``project`` given, else global).
 
     Drops forced roles (lead/codex/gemini — their CLI is fixed) and claude
     defaults (claude is the implicit default, storing it adds noise), then
@@ -123,21 +152,21 @@ def save_role_overrides(mapping: dict[str, str]) -> None:
         if r in FORCED_ROLES or p == CLAUDE or p not in VALID_PROVIDERS:
             continue
         overrides[r] = p
-    save_providers(overrides)
+    save_providers(overrides, project)
 
 
-def provider_for(role: str) -> str:
+def provider_for(role: str, project: str | None = None) -> str:
     """Resolve which CLI backs the given role.
 
-    Returns one of `"claude"` or `"codex"`. Forced for `lead` and
-    `codex`; consulted from `~/.takkub/role-providers.json` for
-    everything else; defaults to `"claude"` when the role isn't in
-    the config.
+    Returns one of `"claude"`, `"codex"`, or `"gemini"`. Forced for `lead`,
+    `codex`, and `gemini`; consulted from the per-project (or global)
+    role-providers mapping for everything else; defaults to `"claude"` when the
+    role isn't in the config.
     """
     key = (role or "").lower().strip()
     if key in _FORCED_PROVIDER:
         return _FORCED_PROVIDER[key]
-    mapping = load_providers()
+    mapping = load_providers(project)
     return mapping.get(key, CLAUDE)
 
 
@@ -178,7 +207,7 @@ def _provider_available(provider: str) -> bool:
     return True
 
 
-def effective_provider_for(role: str) -> str:
+def effective_provider_for(role: str, project: str | None = None) -> str:
     """Resolve which CLI will *actually* back the role this spawn.
 
     Like `provider_for()` but degrades a codex/gemini role to `claude`
@@ -192,7 +221,7 @@ def effective_provider_for(role: str) -> str:
     (static identity); this answers "which CLI is *usable* right now"
     (runtime). Spawn-time decisions should use this one.
     """
-    desired = provider_for(role)
+    desired = provider_for(role, project)
     if desired == CLAUDE:
         return CLAUDE
     return desired if _provider_available(desired) else CLAUDE

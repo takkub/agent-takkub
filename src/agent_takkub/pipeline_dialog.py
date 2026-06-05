@@ -48,27 +48,34 @@ class _PipelineBridge(QObject):
     saveError = pyqtSignal(str)  # disk/parse failure → surfaced to the user
     savedOk = pyqtSignal()  # emitted only after a successful disk write
 
-    def __init__(self, parent: QObject | None = None) -> None:
+    def __init__(self, parent: QObject | None = None, project: str | None = None) -> None:
         super().__init__(parent)
         # {provider: desired_disabled} from the last successful save; read by
         # MainWindow after the dialog closes to broadcast via the orchestrator.
         self.pending_provider_disabled: dict[str, bool] = {}
+        # Active project this dialog edits. Templates + per-role CLI map are
+        # scoped to it (so each tab's pipeline config is independent); provider
+        # on/off stays global (machine capability surfaced by the status bar).
+        self._project = project
 
     @pyqtSlot(result=str)
     def loadState(self) -> str:
         """Return the full settings state as a JSON string.
 
-        Composes pipeline_config (templates/rolesEnabled/activeTemplate) with
-        provider enable-state read from provider_state (inverted to the page's
+        Composes pipeline_config (templates/rolesEnabled/activeTemplate) +
+        per-role CLI map for ``self._project`` with the **global** provider
+        enable-state from provider_state (inverted to the page's
         ``true = enabled`` convention).
         """
-        payload = pipeline_config.load()
+        payload = pipeline_config.load(self._project)
         payload = pipeline_config.with_providers(
             payload, provider_state.all_disabled(), provider_state.TOGGLABLE
         )
         # Per-role CLI mapping (role→claude/codex/gemini), folded in from the
-        # retired standalone Providers dialog.
-        payload["roleProviders"] = provider_config.role_provider_map(pipeline_config.VALID_ROLES)
+        # retired standalone Providers dialog — scoped to the active project.
+        payload["roleProviders"] = provider_config.role_provider_map(
+            pipeline_config.VALID_ROLES, self._project
+        )
         return json.dumps(payload)
 
     @pyqtSlot(str)
@@ -88,11 +95,13 @@ class _PipelineBridge(QObject):
             self.pending_provider_disabled = pipeline_config.provider_disabled_targets(
                 data, provider_state.TOGGLABLE
             )
-            pipeline_config.save(data)  # ignores the providers / roleProviders keys it carries
-            # Per-role CLI mapping → role-providers.json (forced roles + claude dropped).
+            # Templates + per-role CLI map persist to the active project's files;
+            # provider on/off (above) stays global. save() ignores the providers
+            # / roleProviders keys the blob carries.
+            pipeline_config.save(data, self._project)
             role_providers = data.get("roleProviders")
             if isinstance(role_providers, dict):
-                provider_config.save_role_overrides(role_providers)
+                provider_config.save_role_overrides(role_providers, self._project)
             self.savedOk.emit()  # only after successful disk write
         except (json.JSONDecodeError, TypeError) as e:
             self.saveError.emit(f"couldn't parse settings: {e}")
@@ -108,9 +117,12 @@ class _PipelineBridge(QObject):
 class PipelineSettingsDialog(QDialog):
     """Modal dialog hosting the pipeline-settings page with a bridged backend."""
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, project: str | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Pipeline Settings — takkub")
+        # Templates + per-role CLI are scoped to this project (per-tab isolation);
+        # provider on/off remains global.
+        title = f"Pipeline Settings — {project}" if project else "Pipeline Settings — takkub"
+        self.setWindowTitle(title)
         self.resize(980, 760)
 
         layout = QVBoxLayout(self)
@@ -123,7 +135,7 @@ class PipelineSettingsDialog(QDialog):
         layout.addWidget(self._view, 1)
 
         self._channel = QWebChannel(self)
-        self._bridge = _PipelineBridge(self)
+        self._bridge = _PipelineBridge(self, project=project)
         self._channel.registerObject("bridge", self._bridge)
         self._view.page().setWebChannel(self._channel)
 

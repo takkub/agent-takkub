@@ -31,6 +31,7 @@ drift, and changing a definition here propagates to every user on next load.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -45,11 +46,29 @@ _VALID_ROLE_SET: frozenset[str] = frozenset(VALID_ROLES)
 # fork). Re-asserted from code on every load/save so they can't drift.
 BUILTIN_IDS: frozenset[str] = frozenset({"feature", "design", "quickfix"})
 
-_PATH = Path.home() / ".takkub" / "pipelines.json"
+_BASE_DIR = Path.home() / ".takkub"
+# Global file — the cross-project default. Kept as a module global so existing
+# tests can monkeypatch ``_PATH``; per-project files live under
+# ``_BASE_DIR/projects/<slug>/`` (monkeypatch ``_BASE_DIR`` to redirect those).
+_PATH = _BASE_DIR / "pipelines.json"
 
 
-def path() -> Path:
-    """Where state lives. Function form so tests can monkeypatch ``_PATH``."""
+def _project_slug(project: str) -> str:
+    """Filesystem-safe folder name for a project (mirrors shared_dev_tools)."""
+    return re.sub(r"[^A-Za-z0-9._-]", "_", project) or "default"
+
+
+def path(project: str | None = None) -> Path:
+    """Where pipeline state lives.
+
+    ``project`` → that project's own file under ``~/.takkub/projects/<slug>/``
+    so each tab keeps an independent pipeline config (no cross-project
+    collision). ``None`` → the global file, which doubles as the default a new
+    project inherits on first open. Function form so tests can monkeypatch
+    ``_PATH`` (global) or ``_BASE_DIR`` (per-project root).
+    """
+    if project:
+        return _BASE_DIR / "projects" / _project_slug(project) / "pipelines.json"
     return _PATH
 
 
@@ -164,25 +183,55 @@ def _norm_custom_template(raw: object) -> dict | None:
     return {"id": tid, "name": name, "builtin": False, "hops": _norm_hops(raw.get("hops"))}
 
 
+def _has_runnable_hop(hops: list[list[dict]]) -> bool:
+    """True if at least one hop carries a role — guards built-in overrides from
+    wiping a pipeline down to nothing."""
+    return any(hop for hop in hops)
+
+
 def _normalize(raw: object) -> dict:
     """Validate any input into the canonical payload. Never raises.
 
-    Canonical built-ins are placed first (re-asserted from code), then the
-    file's well-formed custom templates in their original order (deduped by id,
-    built-in-id collisions dropped).
+    Built-ins are seeded from code and placed first. Their **identity**
+    (id/name/builtin) is locked — a file claiming a built-in id can rename or
+    declassify nothing. Their **hops** are user-overridable, though: a file
+    entry with a built-in id replaces that template's hops, which is how
+    per-project pipeline edits persist (a non-degenerate override only — an
+    all-empty one is ignored so a built-in can't be accidentally emptied).
+    Well-formed custom templates follow in file order (deduped by id).
     """
     data = raw if isinstance(raw, dict) else {}
 
-    templates = _builtin_templates()
+    builtins = {t["id"]: t for t in _builtin_templates()}
+    order = list(builtins.keys())  # canonical display order
+    customs: list[dict] = []
     seen_ids: set[str] = set(BUILTIN_IDS)
     raw_templates = data.get("templates")
     if isinstance(raw_templates, list):
         for item in raw_templates:
+            if not isinstance(item, dict):
+                continue
+            tid = item.get("id")
+            tid = tid.strip() if isinstance(tid, str) else ""
+            if tid in BUILTIN_IDS:
+                # Override hops only — name/builtin stay canonical.
+                if "hops" in item:
+                    hops = _norm_hops(item.get("hops"))
+                    if _has_runnable_hop(hops):
+                        builtins[tid] = {
+                            "id": tid,
+                            "name": builtins[tid]["name"],
+                            "builtin": True,
+                            "hops": hops,
+                        }
+                continue
             tpl = _norm_custom_template(item)
             if tpl is None or tpl["id"] in seen_ids:
                 continue
             seen_ids.add(tpl["id"])
-            templates.append(tpl)
+            customs.append(tpl)
+
+    templates = [builtins[i] for i in order] + customs
 
     raw_roles = data.get("rolesEnabled")
     raw_roles = raw_roles if isinstance(raw_roles, dict) else {}
@@ -206,9 +255,16 @@ def seed() -> dict:
     return _normalize({})
 
 
-def load() -> dict:
-    """Return the validated pipeline payload. Missing/corrupt → built-in seed."""
-    p = path()
+def load(project: str | None = None) -> dict:
+    """Return the validated pipeline payload. Missing/corrupt → built-in seed.
+
+    For a ``project`` with no per-project file yet, falls back to the global
+    file so a fresh tab inherits the user's global defaults until it saves its
+    own — after which the two are independent and never collide across tabs.
+    """
+    p = path(project)
+    if project and not p.exists():
+        p = path(None)  # inherit global defaults on first open
     if not p.exists():
         return _normalize({})
     try:
@@ -218,15 +274,27 @@ def load() -> dict:
     return _normalize(data)
 
 
-def save(payload: object) -> None:
-    """Validate ``payload`` and persist atomically (built-ins re-asserted).
+def save(payload: object, project: str | None = None) -> None:
+    """Validate ``payload`` and persist atomically.
 
-    ``payload`` may include an unrelated ``providers`` key (the settings page
-    sends the whole state blob) — it is ignored here; provider enable/disable is
-    owned by :mod:`provider_state`.
+    ``project`` targets that project's own file; ``None`` writes the global
+    one. Built-in templates whose hops still match the code defaults are NOT
+    written (they keep tracking code and the file stays minimal); only *edited*
+    built-ins and custom templates are persisted.
+
+    ``payload`` may include unrelated ``providers`` / ``roleProviders`` keys
+    (the settings page sends the whole state blob) — ignored here; provider
+    enable/disable is owned by :mod:`provider_state` and the per-role CLI map by
+    :mod:`provider_config`.
     """
     normalized = _normalize(payload)
-    p = path()
+    default_hops = {t["id"]: t["hops"] for t in _builtin_templates()}
+    normalized["templates"] = [
+        t
+        for t in normalized["templates"]
+        if not (t["id"] in BUILTIN_IDS and t["hops"] == default_hops[t["id"]])
+    ]
+    p = path(project)
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(p.suffix + ".tmp")
     tmp.write_text(json.dumps(normalized, indent=2) + "\n", encoding="utf-8")
