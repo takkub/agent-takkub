@@ -6,11 +6,19 @@ see docs/cockpit-freeze-rca-2026-05-29.md)."""
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 from PyQt6.QtCore import QCoreApplication
 
 from agent_takkub.cli_server import CliServer
+
+
+def _delay_ms(reply_msg: str) -> int:
+    """Extract the `+<n>ms` stagger suffix the dispatcher reports."""
+    m = re.search(r"\+(\d+)ms", reply_msg)
+    assert m is not None, f"no +Nms suffix in {reply_msg!r}"
+    return int(m.group(1))
 
 
 @pytest.fixture(scope="module")
@@ -141,3 +149,50 @@ class TestAsyncSpawnDispatch:
         assert r[0]["ok"] is False and "lead" in r[0]["msg"].lower()
         qapp.processEvents()
         assert orch.assign_calls == []
+
+
+class TestSpawnStagger:
+    """Concurrent assigns must be spaced apart so back-to-back ConPTY spawns
+    don't collide on one event-loop tick (#44); codex gets a bigger gap so its
+    npm self-update windows don't overlap (#38). Non-blocking — QTimer only."""
+
+    def test_first_assign_has_zero_delay(self, qapp: QCoreApplication) -> None:
+        srv = CliServer(_FakeOrch())
+        sock = _FakeSock()
+        srv._dispatch(sock, _auth({"cmd": "assign", "role": "backend", "task": "x"}))
+        assert _delay_ms(_replies(sock)[0]["msg"]) == 0  # lone assign unchanged
+
+    def test_parallel_assigns_are_staggered(self, qapp: QCoreApplication) -> None:
+        srv = CliServer(_FakeOrch())
+        srv._spawn_gap_ms = 400
+        delays = []
+        for _ in range(3):
+            sock = _FakeSock()
+            srv._dispatch(sock, _auth({"cmd": "assign", "role": "backend", "task": "x"}))
+            delays.append(_delay_ms(_replies(sock)[0]["msg"]))
+        d0, d1, d2 = delays
+        assert d0 == 0
+        assert 0 < d1 <= 400
+        assert d1 < d2 <= 800  # spawns spaced ~one gap apart, not all on one tick
+
+    def test_codex_gets_larger_gap(self, qapp: QCoreApplication) -> None:
+        srv = CliServer(_FakeOrch())
+        srv._spawn_gap_ms = 400
+        srv._codex_gap_ms = 10_000
+        s1, s2 = _FakeSock(), _FakeSock()
+        srv._dispatch(s1, _auth({"cmd": "assign", "role": "codex", "task": "x"}))
+        srv._dispatch(s2, _auth({"cmd": "assign", "role": "codex", "task": "y"}))
+        assert _delay_ms(_replies(s1)[0]["msg"]) == 0
+        # second codex waits the (much larger) codex gap, not the 400ms general gap.
+        assert _delay_ms(_replies(s2)[0]["msg"]) > 5_000
+
+    def test_non_codex_after_codex_not_penalized(self, qapp: QCoreApplication) -> None:
+        srv = CliServer(_FakeOrch())
+        srv._spawn_gap_ms = 400
+        srv._codex_gap_ms = 10_000
+        s1, s2 = _FakeSock(), _FakeSock()
+        srv._dispatch(s1, _auth({"cmd": "assign", "role": "codex", "task": "x"}))
+        srv._dispatch(s2, _auth({"cmd": "assign", "role": "backend", "task": "y"}))
+        backend_delay = _delay_ms(_replies(s2)[0]["msg"])
+        # backend is spaced by the general gap, NOT held back the full codex gap.
+        assert 0 < backend_delay <= 400

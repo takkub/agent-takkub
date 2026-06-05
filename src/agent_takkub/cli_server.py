@@ -12,7 +12,9 @@ serialised naturally.
 from __future__ import annotations
 
 import json
+import os
 import secrets
+import time
 from datetime import datetime
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
@@ -46,6 +48,51 @@ class CliServer(QObject):
         self._orch = orchestrator
         self._server = QTcpServer(self)
         self._server.newConnection.connect(self._on_new_connection)
+        # Spawn staggering (#44/#38). Concurrent `takkub assign` (parallel
+        # fan-out / shard fan-out) would otherwise schedule N QTimer.singleShot(0)
+        # spawns that fire back-to-back on one tick; the 2nd+ ConPTY COM call
+        # lands during the 1st spawn's input-synchronous WebEngine dispatch and
+        # Windows rejects it (RPC_E_CANTCALLOUT) → spawn_failed_warned. We reserve
+        # a time slot per spawn so the actual spawns are spaced apart (non-blocking
+        # — QTimer, never a main-thread sleep, which would re-introduce the freeze).
+        self._spawn_gap_ms = int(os.environ.get("TAKKUB_SPAWN_STAGGER_MS", "400"))
+        # codex needs a bigger gap: each codex child runs `npm i -g @openai/codex`
+        # on boot (codex v0.137 has no off-switch), and two overlapping global-npm
+        # installs collide on EBUSY on Windows (#38). Space codex spawns further so
+        # their update windows don't overlap.
+        self._codex_gap_ms = int(os.environ.get("TAKKUB_CODEX_SPAWN_STAGGER_MS", "10000"))
+        self._spawn_slot_until = 0.0  # monotonic ms; next non-codex spawn may start
+        self._codex_slot_until = 0.0  # monotonic ms; next codex spawn may start
+
+    def _next_spawn_delay_ms(self, role: str | None) -> int:
+        """Reserve the next spawn time slot and return the delay (ms) until it.
+
+        Two slots: a general one spaces ALL spawns ≥ _spawn_gap_ms apart (the
+        ConPTY collision fix, #44); a codex one additionally spaces codex spawns
+        ≥ _codex_gap_ms apart (the npm-EBUSY mitigation, #38). A non-codex spawn
+        following a SINGLE codex spawn is not penalised by the codex gap (it uses
+        the general slot); after multiple codex spawns the general slot is dragged
+        forward by the in-flight codex window, which is benign (the system is
+        mid-codex-install anyway). The first spawn in an idle period yields delay
+        0, so a lone `takkub assign` is unchanged. Runs on the Qt main thread
+        (QTcpServer), so no locking is needed.
+
+        BLIND SPOT: codex is detected by role name prefix here, but a role
+        REMAPPED to the codex CLI via ~/.takkub/role-providers.json (e.g.
+        backend→codex) isn't resolved until orchestrator.spawn(), so it only gets
+        the general gap. The named `codex` role + `codex#N` shards (the common
+        case) are covered; full coverage would mean resolving the effective
+        provider here, which the dispatcher can't do cheaply."""
+        now = time.monotonic() * 1000.0
+        is_codex = (role or "").strip().lower().startswith("codex")
+        start = max(now, self._spawn_slot_until)
+        if is_codex:
+            start = max(start, self._codex_slot_until)
+        # General slot advances for every spawn; codex slot only for codex spawns.
+        self._spawn_slot_until = start + self._spawn_gap_ms
+        if is_codex:
+            self._codex_slot_until = start + self._codex_gap_ms
+        return max(0, int(start - now))
 
     def listen(self, port: int = 0) -> int:
         # bind to loopback only — other machines on the LAN must not reach us
@@ -157,15 +204,16 @@ class CliServer(QObject):
                 if not role:
                     self._reply(sock, ok=False, msg="missing arg: 'role'")
                     return
+                delay = self._next_spawn_delay_ms(role)
                 if cmd == "spawn":
                     QTimer.singleShot(
-                        0,
+                        delay,
                         lambda: self._orch.spawn(role, cwd=req.get("cwd"), project=from_project),
                     )
-                    self._reply(sock, ok=True, msg=f"spawning {role} (async)")
+                    self._reply(sock, ok=True, msg=f"spawning {role} (async, +{delay}ms)")
                 else:
                     QTimer.singleShot(
-                        0,
+                        delay,
                         lambda: self._orch.assign(
                             role,
                             cwd=req.get("cwd"),
@@ -176,7 +224,9 @@ class CliServer(QObject):
                             project=from_project,
                         ),
                     )
-                    self._reply(sock, ok=True, msg=f"task queued for {role} (spawning async)")
+                    self._reply(
+                        sock, ok=True, msg=f"task queued for {role} (spawning async, +{delay}ms)"
+                    )
                 return
             elif cmd == "send":
                 ok, msg = self._orch.send(
@@ -275,14 +325,17 @@ class CliServer(QObject):
                 if not template_id:
                     self._reply(sock, ok=False, msg="missing arg: 'template_id'")
                     return
+                pl_delay = self._next_spawn_delay_ms(None)
                 QTimer.singleShot(
-                    0,
+                    pl_delay,
                     lambda tid=template_id: self._orch.run_pipeline(
                         template_id=tid,
                         project=from_project,
                     ),
                 )
-                self._reply(sock, ok=True, msg=f"pipeline {template_id!r} starting (async)")
+                self._reply(
+                    sock, ok=True, msg=f"pipeline {template_id!r} starting (async, +{pl_delay}ms)"
+                )
                 return
             else:
                 ok, msg = False, f"unknown cmd: {cmd}"
