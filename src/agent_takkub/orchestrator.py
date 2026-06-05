@@ -1410,19 +1410,41 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 except Exception:
                     _role_mem = None
                 if _role_mem is not None:
-                    _appendix += f"""
-
----
-
-## 🧠 Your learned notes ({base_role} · this project)
-
-ความรู้ที่ **คุณ ({base_role}) สะสมไว้กับโปรเจคนี้** (สะสมข้ามรอบงาน):
-
-`{_role_mem}`
-
-**ก่อนเริ่มงาน:** `Read("{_role_mem}")` — ดู convention / gotcha / decision (qa: test login/flow) ที่เคยเรียนรู้ จะได้ไม่ต้องค้นใหม่
-**เมื่อเจอสิ่งที่ไม่ obvious** (pattern, pitfall, login/flow, decision) → append สั้นๆ ลงไฟล์นี้ด้วย Edit/Write เพื่อให้รอบหน้าเร็วขึ้น เก็บเฉพาะของจริงที่มีค่า อย่าซ้ำ code/git
-"""
+                    # Inline the learned-notes CONTENT (not just a pointer) so the
+                    # pane literally sees its project knowledge from token 0 and
+                    # cannot skip a Read() under an urgent "เริ่มทันที" task — the
+                    # root cause of teammates re-discovering known facts every spawn.
+                    # Capped so a large accumulated file can't bloat the prompt; the
+                    # pane is told to Read() the full file when truncated.
+                    # NOTE: the notes text is *concatenated*, never f-string-
+                    # interpolated, because role-memory legitimately contains literal
+                    # braces (e.g. Go templates `{{.State.Health.Status}}`) that
+                    # would raise on an f-string.
+                    try:
+                        _mem_text = _role_mem.read_text(encoding="utf-8", errors="replace")
+                    except OSError:
+                        _mem_text = ""
+                    _MEM_MAX_LINES = 200
+                    _mem_all = _mem_text.splitlines()
+                    _mem_shown = "\n".join(_mem_all[:_MEM_MAX_LINES])
+                    _trunc = (
+                        f"\n\n> ⚠️ ตัดมา {_MEM_MAX_LINES}/{len(_mem_all)} บรรทัด — "
+                        f'อ่านเต็มด้วย `Read("{_role_mem}")`'
+                        if len(_mem_all) > _MEM_MAX_LINES
+                        else ""
+                    )
+                    _appendix += (
+                        "\n\n---\n\n"
+                        f"## 🧠 Your learned notes ({base_role} · this project)\n\n"
+                        f"ความรู้ที่ **คุณ ({base_role}) สะสมไว้กับโปรเจคนี้** "
+                        "(สะสมข้ามรอบงาน) — **นี่คือสิ่งที่คุณรู้เกี่ยวกับโปรเจคนี้แล้ว "
+                        "อย่าเดา/ค้นใหม่ในสิ่งที่อยู่ด้านล่างนี้:**\n\n"
+                        "<learned-notes>\n" + _mem_shown + "\n</learned-notes>" + _trunc + "\n\n"
+                        "**เมื่อเจอสิ่งที่ไม่ obvious** (pattern, pitfall, login/flow, "
+                        "decision) ที่ยังไม่มีด้านบน → **append สั้นๆ** ลงไฟล์ "
+                        f"`{_role_mem}` ด้วย Edit/Write เพื่อให้รอบหน้าเร็วขึ้น "
+                        "เก็บเฉพาะของจริงที่มีค่า อย่าซ้ำ code/git\n"
+                    )
                 if _appendix:
                     role_md_path.write_text(_existing_md + _appendix, encoding="utf-8")
                 role_md_file = str(role_md_path)
