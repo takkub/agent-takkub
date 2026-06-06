@@ -4,6 +4,69 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v0.7.0] - 2026-06-06
+
+### Added (เพิ่ม)
+- **Per-project pipeline + role→CLI settings** — pipeline templates และ per-role
+  CLI mapping เก็บแยกราย project (`~/.takkub/projects/<slug>/`) แต่ละ tab ไม่ชนกัน;
+  provider on/off (`disabled-providers.json`) ยัง global (เป็น machine capability).
+  `load/save/provider_for/effective_provider_for` รับ `project=None` (None = global +
+  fallback ที่ project ใหม่ inherit จนกว่าจะ save เอง). แก้กับดัก "แก้ built-in
+  pipeline → save → reverted" (built-in identity ล็อค แต่ override hops ได้;
+  save() ข้าม built-in ที่ไม่ถูกแตะให้ track code ต่อ).
+- **Inline learned-notes content เข้า spawn prompt** — เดิม inject แค่ *pointer*
+  ให้ pane Read() เอง (มักข้ามตอนงานด่วน → ค้นความรู้เดิมซ้ำทุก spawn). ตอนนี้ฝัง
+  content ตรงๆ ใน `<learned-notes>` block (cap 200 บรรทัดท้ายสุด + truncation notice)
+  ให้ pane เห็นความรู้ของ project ตั้งแต่ token 0. concat ไม่ f-string (กัน literal
+  braces เช่น Go templates `{{.x}}`), read มี try/except OSError.
+- **Per-role × project learned memory + QA จำ login** (`role_memory.py`) — แต่ละ
+  teammate role สะสมความรู้ของ project ข้ามรอบงานใน
+  `runtime/role-memory/<project>/<role>.md` (conventions/gotchas/decisions; qa: test
+  login/flow) อ่านตอน spawn + append เมื่อเจอของไม่ obvious.
+
+### Changed (เปลี่ยน)
+- **ซ่อนปุ่ม ▶ Run pipeline** จาก status bar (handlers เก็บไว้ตาม pattern ปุ่มที่
+  ซ่อน restore ได้ง่าย); pipeline backend + CLI ใช้งานปกติ.
+- **role-memory curation** — เก็บ learned notes ไม่ให้บวมเกิน: dedup bullet
+  (เก็บอันใหม่สุด) + size-cap (16 KB / 120 entries, ตัดเก่าสุด) ตอนอ่าน โดยคง
+  header + seeded skeleton, best-effort ไม่ raise, atomic write (#43).
+
+### Fixed (แก้)
+- **#44 parallel spawn ชน ConPTY** — ยิง `takkub assign` หลาย role พร้อมกัน /
+  shard fan-out / pipeline hop spawn บน tick เดียว → ConPTY COM call ตัวหลังชน
+  input-sync dispatch ของตัวก่อน (`RPC_E_CANTCALLOUT`) → `spawn_failed_warned`.
+  เพิ่ม **non-blocking stagger** (QTimer slot-reservation ใน cli_server + `_defer`
+  seam ใน pipeline hop; env `TAKKUB_SPAWN_STAGGER_MS` default 400ms) ครอบทุก spawn
+  path. assign แรก delay 0 (ของเดิมไม่เปลี่ยน). **ไม่แตะ ConPTY/main-thread** กัน
+  freeze RCA (ไม่มี `time.sleep`).
+- **#38 codex npm self-update ชน EBUSY** (mitigated) — codex 2 ตัว spawn พร้อมกัน
+  รัน `npm i -g @openai/codex` ทับกัน. stagger codex ด้วย gap ใหญ่กว่า (env
+  `TAKKUB_CODEX_SPAWN_STAGGER_MS` default 10s) + detect ผ่าน `effective_provider_for`
+  (ครอบ role ที่ remap→codex, ไม่ stagger ผิดให้ codex ที่ degrade เป็น claude).
+  codex ไม่มี update off-switch จึงเป็น mitigation ไม่ใช่ full prevention.
+- **#41 stuck-recovery loop ไม่มี max-attempts cap** — pane ที่ค้างแต่ยังไม่ตาย
+  (wedged-alive) ถูก close→respawn วนไม่จบ → pipeline ค้างถาวร. เพิ่ม
+  `STUCK_RECOVER_MAX=3` + counter ที่ survive close-pop → ครบแล้วเลิก recover +
+  fail/advance pipeline hop + เตือน Lead (one-shot).
+- **#42 prune `runtime/browser-profiles/`** — per-shard Chrome profile สะสม
+  ไม่จำกัด → age-prune (>14 วัน, env-tunable) ตอน startup เก็บ login profile
+  ที่เพิ่งใช้.
+- **#40 stray 'M' ในทุก pane shell** — pin `.bat`/`.cmd` เป็น CRLF verbatim
+  (`-text` ใน `.gitattributes`) แก้ cmd.exe parse bug ที่ทำให้มีตัว `M`/REM
+  fragment โผล่ทุก pane.
+- **Cockpit freeze hardening (RCA 2026-06-04)** — `boot.log` rotation (>256 KB) +
+  soft-stall watchdog dump main-thread stack ก่อน kill; แยก RCA Issue A (CLI
+  pile-up, fixed) vs Issue B (ConPTY GIL freeze, open) ใน
+  `docs/cockpit-freeze-rca-2026-06-04.md`.
+- **Audit Wave 1** — shard lifecycle (stale-timer guard, spawn-fail bookkeeping),
+  watchdog durability, doctor UI.
+
+### Notes
+- Issue B (single-spawn ~12s GIL-hold GUI freeze) ยัง **open** — ConPTY spawn ยัง
+  sync บน Qt main thread (remedies off-thread + WinPTY backend ถูก revert ก่อนหน้า
+  เพราะ GIL-starve / live-typing lag). v0.7.0 stagger เฉพาะ **parallel** spawn
+  collision (spawn_failed) เท่านั้น ไม่ได้แก้ single-spawn freeze.
+
 ## [v0.6.0] - 2026-06-03
 
 ### Added (เพิ่ม)
