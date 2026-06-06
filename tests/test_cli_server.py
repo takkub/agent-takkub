@@ -156,6 +156,22 @@ class TestSpawnStagger:
     don't collide on one event-loop tick (#44); codex gets a bigger gap so its
     npm self-update windows don't overlap (#38). Non-blocking — QTimer only."""
 
+    @pytest.fixture(autouse=True)
+    def _stub_provider(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """codex detection now resolves the effective provider, which reads real
+        ~/.takkub config + probes for the codex binary. Stub it to a deterministic
+        name-based rule so these tests isolate the stagger math (and never touch
+        the user's real config / installed CLIs)."""
+        import agent_takkub.provider_config as pc
+
+        monkeypatch.setattr(
+            pc,
+            "effective_provider_for",
+            lambda role, project=None: (
+                pc.CODEX if (role or "").lower().startswith("codex") else pc.CLAUDE
+            ),
+        )
+
     def test_first_assign_has_zero_delay(self, qapp: QCoreApplication) -> None:
         srv = CliServer(_FakeOrch())
         sock = _FakeSock()
@@ -196,3 +212,36 @@ class TestSpawnStagger:
         backend_delay = _delay_ms(_replies(s2)[0]["msg"])
         # backend is spaced by the general gap, NOT held back the full codex gap.
         assert 0 < backend_delay <= 400
+
+
+class TestCodexDetection:
+    """#38: the codex gap follows the EFFECTIVE provider, not the role name.
+    Exercises the REAL effective_provider_for (no name-based stub), so these would
+    fail if _is_codex_spawn reverted to the old role.startswith('codex') check.
+    conftest isolates provider_config paths off the real ~/.takkub."""
+
+    def test_remapped_role_detected_as_codex(self, qapp: QCoreApplication, monkeypatch) -> None:
+        import agent_takkub.provider_config as pc
+
+        monkeypatch.setattr(pc, "_provider_available", lambda provider: True)  # codex installed
+        pc.save_providers({"backend": "codex"})  # remap backend → codex
+        srv = CliServer(_FakeOrch())
+        assert srv._is_codex_spawn("backend", None) is True
+        assert srv._is_codex_spawn("backend#2", None) is True  # shard form too
+
+    def test_degraded_codex_not_detected(self, qapp: QCoreApplication, monkeypatch) -> None:
+        import agent_takkub.provider_config as pc
+
+        # codex unavailable (toggled off / not installed) → degrades to claude.
+        monkeypatch.setattr(pc, "_provider_available", lambda provider: provider == pc.CLAUDE)
+        srv = CliServer(_FakeOrch())
+        assert srv._is_codex_spawn("codex", None) is False
+        assert srv._is_codex_spawn("backend", None) is False
+
+    def test_named_codex_detected_when_available(self, qapp: QCoreApplication, monkeypatch) -> None:
+        import agent_takkub.provider_config as pc
+
+        monkeypatch.setattr(pc, "_provider_available", lambda provider: True)
+        srv = CliServer(_FakeOrch())
+        assert srv._is_codex_spawn("codex", None) is True
+        assert srv._is_codex_spawn("codex#1", None) is True

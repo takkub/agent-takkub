@@ -64,7 +64,26 @@ class CliServer(QObject):
         self._spawn_slot_until = 0.0  # monotonic ms; next non-codex spawn may start
         self._codex_slot_until = 0.0  # monotonic ms; next codex spawn may start
 
-    def _next_spawn_delay_ms(self, role: str | None) -> int:
+    def _is_codex_spawn(self, role: str | None, project: str | None) -> bool:
+        """True iff this spawn will actually be backed by the codex CLI.
+
+        Resolves the EFFECTIVE provider (per-project role→CLI mapping) rather than
+        sniffing the role name, so it (a) catches a role REMAPPED to codex via
+        role-providers.json (e.g. backend→codex) and (b) does NOT apply the codex
+        gap to a `codex` role that has degraded to claude (codex toggled off / not
+        installed) — that pane runs no npm self-update, so it needs no gap.
+        Best-effort: falls back to the name heuristic if resolution fails."""
+        base = (role or "").split("#", 1)[0].strip().lower()
+        if not base:
+            return False
+        try:
+            from .provider_config import CODEX, effective_provider_for
+
+            return effective_provider_for(base, project) == CODEX
+        except Exception:
+            return base == "codex"
+
+    def _next_spawn_delay_ms(self, role: str | None, project: str | None = None) -> int:
         """Reserve the next spawn time slot and return the delay (ms) until it.
 
         Two slots: a general one spaces ALL spawns ≥ _spawn_gap_ms apart (the
@@ -75,16 +94,11 @@ class CliServer(QObject):
         forward by the in-flight codex window, which is benign (the system is
         mid-codex-install anyway). The first spawn in an idle period yields delay
         0, so a lone `takkub assign` is unchanged. Runs on the Qt main thread
-        (QTcpServer), so no locking is needed.
-
-        BLIND SPOT: codex is detected by role name prefix here, but a role
-        REMAPPED to the codex CLI via ~/.takkub/role-providers.json (e.g.
-        backend→codex) isn't resolved until orchestrator.spawn(), so it only gets
-        the general gap. The named `codex` role + `codex#N` shards (the common
-        case) are covered; full coverage would mean resolving the effective
-        provider here, which the dispatcher can't do cheaply."""
+        (QTcpServer), so no locking is needed. codex detection resolves the
+        effective provider (see _is_codex_spawn) so remapped→codex roles are
+        covered and a degraded-to-claude codex role is not over-staggered."""
         now = time.monotonic() * 1000.0
-        is_codex = (role or "").strip().lower().startswith("codex")
+        is_codex = self._is_codex_spawn(role, project)
         start = max(now, self._spawn_slot_until)
         if is_codex:
             start = max(start, self._codex_slot_until)
@@ -204,7 +218,7 @@ class CliServer(QObject):
                 if not role:
                     self._reply(sock, ok=False, msg="missing arg: 'role'")
                     return
-                delay = self._next_spawn_delay_ms(role)
+                delay = self._next_spawn_delay_ms(role, from_project)
                 if cmd == "spawn":
                     QTimer.singleShot(
                         delay,
@@ -325,7 +339,7 @@ class CliServer(QObject):
                 if not template_id:
                     self._reply(sock, ok=False, msg="missing arg: 'template_id'")
                     return
-                pl_delay = self._next_spawn_delay_ms(None)
+                pl_delay = self._next_spawn_delay_ms(None, from_project)
                 QTimer.singleShot(
                     pl_delay,
                     lambda tid=template_id: self._orch.run_pipeline(

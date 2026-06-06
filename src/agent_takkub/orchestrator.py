@@ -400,6 +400,16 @@ IDLE_REMINDER_TEXT = (
 AUTO_RESPAWN_DELAY_MS = 2_500
 AUTO_RESPAWN_MAX = 2
 
+# Pipeline-hop spawn staggering (#44). A multi-role hop spawns its roles via
+# _fire_pipeline_hop; firing them back-to-back on one event-loop tick hits the
+# same ConPTY collision the cli_server stagger fixes for manual fan-out (the 2nd+
+# ConPTY COM call lands during the 1st spawn's input-sync dispatch →
+# RPC_E_CANTCALLOUT). Space them across ticks instead. Same env knobs as
+# cli_server so the operator tunes one place; codex roles get the larger gap so
+# their npm self-update windows don't overlap (#38).
+_SPAWN_STAGGER_MS = int(os.environ.get("TAKKUB_SPAWN_STAGGER_MS", "400"))
+_CODEX_SPAWN_STAGGER_MS = int(os.environ.get("TAKKUB_CODEX_SPAWN_STAGGER_MS", "10000"))
+
 # Codex early-crash detection. If a codex pane exits within this many seconds
 # of spawning, the orchestrator treats it as a suspicious early crash, logs a
 # `codex_early_crash` event, and writes a diagnostic dump to
@@ -2602,42 +2612,49 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         self._fire_pipeline_hop(project_ns, run_id, run)
         return True, f"pipeline {tpl['name']!r} started (run {run_id}, {len(hops)} hops)"
 
-    def _fire_pipeline_hop(self, project_ns: str, run_id: str, run: PipelineRun) -> None:
-        """Spawn all roles in the current hop and inject a hop-start message to Lead.
+    def _defer(self, delay_ms: int, fn) -> None:
+        """Run *fn* on the Qt event loop after *delay_ms* (non-blocking seam).
 
-        NOTE (#44 scope): this loop spawns a hop's roles back-to-back on one
-        event-loop tick — the same ConPTY-collision exposure the cli_server
-        stagger (CliServer._next_spawn_delay_ms) fixes for the manual `takkub
-        assign` fan-out path. It is NOT staggered here on purpose: the abort /
-        hop_pending bookkeeping below (and done()→_advance_pipeline) depend on
-        spawn() being SYNCHRONOUS, so deferring spawns via QTimer would require
-        reworking that contract (and the 8+ pipeline-executor tests that assert
-        the synchronous behaviour). Built-in hops are ≤2 roles, so the burst is
-        small and the collision intermittent; staggering this safely is tracked
-        as follow-up. The reported #44 repro (parallel `takkub assign`) and shard
-        fan-out both go through the staggered cli_server path and ARE covered.
-        """
+        A thin wrapper over ``QTimer.singleShot`` so the pipeline-hop staggering
+        is injectable: tests patch this to run inline, preserving the old
+        synchronous spawn behaviour, while production spaces spawns across ticks."""
+        QTimer.singleShot(delay_ms, fn)
+
+    def _fire_pipeline_hop(self, project_ns: str, run_id: str, run: PipelineRun) -> None:
+        """Spawn the current hop's roles (staggered) and notify Lead when done.
+
+        Staggering (#44): a multi-role hop's spawns are deferred across ticks via
+        ``_defer`` so back-to-back ConPTY COM calls don't collide
+        (RPC_E_CANTCALLOUT). hop_pending is pre-populated with ALL roles up front
+        so a fast done()/close() landing between staggered spawns can't empty it
+        and advance the hop prematurely; a spawn that FAILS removes its role. The
+        last scheduled spawn calls ``_finalize_pipeline_hop`` (abort if every
+        spawn failed, else notify Lead). codex roles get the larger gap (#38)."""
         from .config import default_cwd_for_role
+        from .provider_config import CODEX, effective_provider_for
 
         hop_idx = run.current_hop
         hop = run.hops[hop_idx]
         total = len(run.hops)
+        entries = list(hop)
+        n = len(entries)
 
-        run.hop_pending = set()
+        # Optimistic: every role is pending until its spawn proves otherwise.
+        run.hop_pending = {e["role"] for e in entries}
         run.hop_failed = set()
+        spawned_ok: set[str] = set()
 
-        spawned_lines: list[str] = []
-        for entry in hop:
+        def _spawn_one(idx: int, entry: dict) -> None:
+            if run.closed:
+                return  # a done()/close() already resolved this hop
             role = entry["role"]
             cwd = (entry.get("cwd") or "").strip() or default_cwd_for_role(role, project_ns)
             ok, _msg = self.spawn(role, cwd=cwd, project=project_ns)
             if ok:
-                key = f"{project_ns}::{role}"
-                self._ps(key).pipeline_run_id = run_id
-                run.hop_pending.add(role)
-                cwd_note = f" (cwd: {cwd})" if cwd else ""
-                spawned_lines.append(f"  - {role}{cwd_note}")
+                self._ps(f"{project_ns}::{role}").pipeline_run_id = run_id
+                spawned_ok.add(role)
             else:
+                run.hop_pending.discard(role)
                 run.hop_failed.add(role)
                 _log_event(
                     "pipeline_spawn_fail",
@@ -2647,9 +2664,38 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                     role=role,
                     msg=_msg,
                 )
+            if idx == n - 1:
+                self._finalize_pipeline_hop(project_ns, run_id, run, hop_idx, total, spawned_ok)
 
-        if not run.hop_pending:
-            # All spawns failed — abort and notify Lead.
+        delay = 0
+        for i, entry in enumerate(entries):
+            self._defer(delay, lambda idx=i, e=entry: _spawn_one(idx, e))
+            base = str(entry.get("role", "")).split("#", 1)[0]
+            try:
+                is_codex = effective_provider_for(base, project_ns) == CODEX
+            except Exception:
+                is_codex = base == "codex"
+            delay += _CODEX_SPAWN_STAGGER_MS if is_codex else _SPAWN_STAGGER_MS
+
+    def _finalize_pipeline_hop(
+        self,
+        project_ns: str,
+        run_id: str,
+        run: PipelineRun,
+        hop_idx: int,
+        total: int,
+        spawned_ok: set,
+    ) -> None:
+        """After the hop's last staggered spawn: abort if every spawn failed,
+        otherwise inject the hop-start message to Lead."""
+        if run.closed:
+            return
+        if not spawned_ok:
+            # Every spawn failed — abort and notify Lead. (Guard on spawned_ok,
+            # NOT hop_pending: with staggering, hop_pending can also be empty
+            # because survivors already reported done() during the stagger gap
+            # and only the remainder failed — that's a COMPLETE hop, handled
+            # below, not an abort.)
             run.closed = True
             self._pipeline_runs.pop(f"{project_ns}::{run_id}", None)
             failed_roles = ", ".join(sorted(run.hop_failed))
@@ -2659,8 +2705,16 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             )
             self._inject_to_lead(project_ns, err, log_event="pipeline_hop_abort")
             return
+        if not run.hop_pending:
+            # Some roles spawned but every survivor already reported done() during
+            # the stagger window and the rest failed to spawn → the hop is
+            # complete; advance. done() could NOT have advanced earlier (the
+            # not-yet-spawned/failed role kept hop_pending non-empty until its own
+            # _spawn_one ran here), so finalize is the sole advancer — no double.
+            self._advance_pipeline(project_ns, f"{project_ns}::{run_id}", run)
+            return
 
-        roles_str = ", ".join(sorted(run.hop_pending))
+        roles_str = ", ".join(sorted(spawned_ok))
         lines = [
             f"[pipeline:{run_id}] {run.template_name} — hop {hop_idx + 1}/{total}",
             f"Panes spawned and ready: {roles_str}",
@@ -2677,7 +2731,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             project=project_ns,
             run_id=run_id,
             hop=hop_idx,
-            roles=list(run.hop_pending),
+            roles=sorted(spawned_ok),
         )
 
     def _advance_pipeline(self, project_ns: str, pipeline_key: str, run: PipelineRun) -> None:
