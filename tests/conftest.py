@@ -70,4 +70,16 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
         if mod is not None and hasattr(mod, attr):
             monkeypatch.setattr(mod, attr, value, raising=False)
 
+    # Redirect per-role provider config off the real ~/.takkub. effective_provider_for
+    # is now on the spawn/assign stagger path (codex-gap detection, #38), so any
+    # assign/spawn/run_pipeline test would otherwise read — and auto-create — the
+    # user's real role-providers.json. provider_config is stdlib-only, so we can
+    # force-import it to patch the paths before the test runs. Tests with their own
+    # provider-config fixture re-patch over this (autouse runs first).
+    pc = _maybe_module("agent_takkub.provider_config", force=True)
+    if pc is not None:
+        takkub_dir = tmp_path / "_isolated_takkub"
+        monkeypatch.setattr(pc, "_BASE_DIR", takkub_dir, raising=False)
+        monkeypatch.setattr(pc, "_CONFIG_PATH", takkub_dir / "role-providers.json", raising=False)
+
     yield

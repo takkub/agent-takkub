@@ -45,6 +45,15 @@ def qapp() -> QCoreApplication:
     return app
 
 
+@pytest.fixture(autouse=True)
+def _inline_pipeline_defer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_fire_pipeline_hop staggers its spawns across ticks via _defer in
+    production (#44). Run them INLINE in tests so the existing synchronous
+    spawn/hop_pending/advance assertions hold without pumping the event loop.
+    (The staggering timing itself is covered by test_multi_role_hop_staggers.)"""
+    monkeypatch.setattr(Orchestrator, "_defer", lambda _self, _delay, fn: fn())
+
+
 @pytest.fixture
 def two_project_json(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> pathlib.Path:
     pj = tmp_path / "projects.json"
@@ -270,6 +279,136 @@ class TestRunPipelineHop0:
         ps = orch._pane_state.get("proj_a::backend")
         assert ps is not None
         assert ps.pipeline_run_id is not None
+
+
+# ──────────────────────────────────────────────────────────────
+# Hop spawn staggering (#44)
+# ──────────────────────────────────────────────────────────────
+
+
+class TestPipelineHopStagger:
+    """A multi-role hop must stagger its spawns across ticks (not fire all on one
+    event-loop tick) so back-to-back ConPTY COM calls don't collide (#44)."""
+
+    def test_multi_role_hop_staggers_spawns(
+        self,
+        qapp: QCoreApplication,
+        two_project_json: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import agent_takkub.provider_config as pc
+
+        # Isolate codex detection from real ~/.takkub config: all roles → claude
+        # (general gap) so the timing is deterministic.
+        monkeypatch.setattr(pc, "effective_provider_for", lambda role, project=None: pc.CLAUDE)
+
+        orch, _ = _make_orch_with_panes("proj_a", ["lead", "frontend", "backend"])
+        monkeypatch.setattr(orch, "spawn", MagicMock(return_value=(True, "ok")))
+        # Capture _defer(delay, fn) instead of running inline (overrides autouse).
+        scheduled: list = []
+        monkeypatch.setattr(orch, "_defer", lambda delay, fn: scheduled.append((delay, fn)))
+
+        from agent_takkub import pipeline_config
+
+        monkeypatch.setattr(
+            pipeline_config,
+            "load",
+            lambda *a, **k: _simple_pipeline(
+                [
+                    [
+                        {
+                            "role": "frontend",
+                            "cwd": "",
+                            "requiresCommit": False,
+                            "autoChain": False,
+                        },
+                        {"role": "backend", "cwd": "", "requiresCommit": False, "autoChain": False},
+                    ]
+                ],
+                template_id="stagger-test",
+            ),
+        )
+
+        orch.run_pipeline("stagger-test", project="proj_a")
+
+        delays = [d for d, _ in scheduled]
+        assert len(delays) == 2
+        assert delays[0] == 0  # first role fires immediately
+        assert delays[1] == orch_mod._SPAWN_STAGGER_MS  # second staggered by one gap
+        assert delays[1] > 0
+        # Optimistic pre-population: both roles pending before any spawn runs.
+        run = next(iter(orch._pipeline_runs.values()))
+        assert run.hop_pending == {"frontend", "backend"}
+        # Running the captured spawns lands both panes tagged with the run.
+        for _d, fn in scheduled:
+            fn()
+        assert orch._ps("proj_a::frontend").pipeline_run_id == run.run_id
+        assert orch._ps("proj_a::backend").pipeline_run_id == run.run_id
+
+    def test_survivor_done_then_last_spawn_fails_advances_not_aborts(
+        self,
+        qapp: QCoreApplication,
+        two_project_json: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Stagger-window race: in a 2-role hop, role A spawns OK and reports
+        done() during the gap, then role B's spawn FAILS — emptying hop_pending.
+        finalize must ADVANCE (the hop completed with one failure), NOT abort the
+        run as 'all spawns failed'."""
+        import agent_takkub.provider_config as pc
+
+        monkeypatch.setattr(pc, "effective_provider_for", lambda role, project=None: pc.CLAUDE)
+        orch, _ = _make_orch_with_panes("proj_a", ["lead", "frontend", "backend", "qa"])
+        monkeypatch.setattr(orch, "close", MagicMock(return_value=(True, "ok")))
+        monkeypatch.setattr(orch, "_save_decision_note", MagicMock())
+
+        def fake_spawn(role, cwd=None, project=None, **kw):
+            ok = role != "backend"  # backend fails to spawn
+            return ok, ("ok" if ok else "spawn fail")
+
+        monkeypatch.setattr(orch, "spawn", fake_spawn)
+        # Capture deferred spawns so we can interleave a done() between them.
+        scheduled: list = []
+        monkeypatch.setattr(orch, "_defer", lambda delay, fn: scheduled.append(fn))
+
+        from agent_takkub import pipeline_config
+
+        monkeypatch.setattr(
+            pipeline_config,
+            "load",
+            lambda *a, **k: _simple_pipeline(
+                [
+                    [
+                        {
+                            "role": "frontend",
+                            "cwd": "",
+                            "requiresCommit": False,
+                            "autoChain": False,
+                        },
+                        {"role": "backend", "cwd": "", "requiresCommit": False, "autoChain": False},
+                    ],
+                    [{"role": "qa", "cwd": "", "requiresCommit": False, "autoChain": False}],
+                ],
+                template_id="race-test",
+            ),
+        )
+
+        orch.run_pipeline("race-test", project="proj_a")
+        run = next(iter(orch._pipeline_runs.values()))
+        assert len(scheduled) == 2  # both hop-0 spawns deferred
+
+        scheduled[0]()  # frontend spawns OK → tagged (stays pending until done)
+        assert orch._ps("proj_a::frontend").pipeline_run_id == run.run_id
+        assert run.hop_pending == {"frontend", "backend"}
+
+        orch.done("frontend", note="ui done", project="proj_a")  # during the gap
+        assert run.hop_pending == {"backend"}
+        assert run.current_hop == 0 and not run.closed  # backend still pending → no advance
+
+        scheduled[1]()  # backend (last) spawn FAILS → hop_pending empties → finalize
+        assert not run.closed, "one-done + one-failed-spawn must NOT abort the run"
+        assert run.current_hop == 1, "hop must advance to hop 1 (qa)"
+        assert len(scheduled) >= 3, "advance must fire hop 1's qa spawn"
 
 
 # ──────────────────────────────────────────────────────────────
