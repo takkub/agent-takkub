@@ -366,6 +366,17 @@ STUCK_RECOVER_COOLDOWN_S = 5 * 60
 # wedging (STUCK_THRESHOLD_S + STUCK_RECOVER_COOLDOWN_S per cycle).
 STUCK_RECOVER_MAX = 3
 
+# Continue-nudge injected after a *resumed* stuck-recovery. `--resume` restores
+# the conversation but leaves claude idle at the ready prompt — it does NOT
+# auto-continue the interrupted turn, so without a prompt the recovered pane
+# silently stalls. Short by design: the full task is already in the restored
+# history, and re-pasting it would double the work (Bug-5 gate).
+_STUCK_RESUME_NUDGE = (
+    "[auto-recovered] pane นี้ถูก restart อัตโนมัติเพราะค้างนานเกิน threshold — "
+    "conversation เดิมถูกโหลดกลับมาแล้ว ทำงานต่อจากจุดที่ค้างไว้ได้เลย "
+    "เสร็จแล้วรายงานด้วย takkub done"
+)
+
 # Throughput watchdog (issue #35): flag panes whose PTY output rate exceeds
 # RUNAWAY_BYTES_S continuously for RUNAWAY_DURATION_S seconds.
 #
@@ -4496,7 +4507,16 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         snap_recover_attempts = _ps_snap.stuck_recover_attempts if _ps_snap is not None else 0
 
         self._ps(key).last_stuck_recover = now
+        # silent_for_s = raw-byte silence. It is frequently 0 even on a genuine
+        # recover because the animated spinner ("esc to interrupt") keeps
+        # emitting bytes — so on its own it does NOT explain why the watchdog
+        # fired and reads as a false alarm. The actual trigger is
+        # content_static_s: how long the spinner-filtered screen content stayed
+        # byte-for-byte identical (>= STUCK_THRESHOLD_S is what trips recovery).
+        # Log both so the recover reason is unambiguous in events.log.
         silent_for_s = int(now - getattr(pane, "_last_output_ts", now))
+        _content_ts = _ps_snap.last_content_change_ts if _ps_snap is not None else None
+        content_static_s = int(now - _content_ts) if _content_ts is not None else -1
         # Reset the output timestamp so the next tick doesn't re-trigger
         # before claude has had a chance to print anything from the new
         # session.
@@ -4507,6 +4527,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             project=project,
             cwd=cwd or "",
             silent_for_s=silent_for_s,
+            content_static_s=content_static_s,
         )
         # suppress_pipeline: this close is half of a close→respawn recovery, not a
         # real pane death. Skip the pipeline fail/advance so a single-role hop
@@ -4579,13 +4600,22 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                         if not pl_run.hop_pending:
                             self._advance_pipeline(project, pl_key, pl_run)
                 return
-            # If the session was resumed, the task is already in claude's
-            # conversation history — don't re-paste it (Bug-5 gate).
+            # Drive the recovered pane so it actually continues the task:
+            #   - blank respawn (no --resume): re-paste the original task verbatim.
+            #   - resumed respawn (--resume): claude reloads the conversation but
+            #     sits idle at the ready prompt — it does NOT auto-continue the
+            #     interrupted turn, so the pane would silently stall ("ไม่ทำต่อ").
+            #     Send a short continue-nudge instead of the full task (Bug-5
+            #     gate: never re-paste the whole task into restored history — that
+            #     would double the work).
             # Fix 1: read structured flag set by spawn() instead of parsing msg.
             _ps_after = self._pane_state.get(key)
             spawn_resumed = _ps_after.last_spawn_resumed if _ps_after is not None else False
-            if snap_task and not spawn_resumed:
-                self._send_when_ready(role, snap_task, project=project)
+            if snap_task:
+                if not spawn_resumed:
+                    self._send_when_ready(role, snap_task, project=project)
+                else:
+                    self._send_when_ready(role, _STUCK_RESUME_NUDGE, project=project)
 
         # 2 s pause so the close has time to terminate the PTY and tear
         # down the WebEngine view before the respawn binds a new one

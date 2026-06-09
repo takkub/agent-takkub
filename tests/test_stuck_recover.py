@@ -450,3 +450,78 @@ class TestStuckRecoverCap:
         _drive_until(fake, pane, ticks=STUCK_RECOVER_MAX + 2)
         assert lead.session.write.called, "Lead must be warned when a pane is stuck-capped"
         assert fake.leadInjected.emit.called
+
+
+class TestResumeNudgeAndLog:
+    """A: a resumed stuck-recovery must drive the pane to continue (a short
+    nudge), not leave it idle at the ready prompt. Blank recovery still
+    re-pastes the full task. C: the recover event logs content_static_s
+    (the real trigger) alongside the (often-zero) raw silent_for_s."""
+
+    def test_resumed_recovery_sends_continue_nudge(self) -> None:
+        from agent_takkub.orchestrator import _STUCK_RESUME_NUDGE
+
+        sent: list[tuple[str, str]] = []
+
+        class _ResumeOrch(_FakeOrch):
+            def spawn(self, role, cwd=None, project=None, **_kw):
+                # Simulate a --resume respawn by setting the structured flag
+                # _auto_recover_stuck reads to decide re-paste vs. nudge.
+                self._ps(f"{project or ''}::{role}").last_spawn_resumed = True
+                return super().spawn(role, cwd=cwd, project=project, **_kw)
+
+            def _send_when_ready(self, role, task, project=None):
+                sent.append((role, task))
+
+        fake = _ResumeOrch()
+        now = 1_000_000.0
+        ps = fake._ps("p::backend")
+        ps.last_assigned_task = "implement /foo"
+        ps.session_uuid = "uuid-123"
+        ps.session_uuid_cwd = "/x"
+        pane = _FakePane(state="working", last_out=now - STUCK_THRESHOLD_S - 1)
+        _recover(fake, "backend", "p", pane, now)
+
+        assert sent == [("backend", _STUCK_RESUME_NUDGE)], (
+            "resumed recovery must send the short continue-nudge so the pane "
+            "keeps working, not sit idle"
+        )
+
+    def test_blank_recovery_repastes_full_task(self) -> None:
+        sent: list[tuple[str, str]] = []
+
+        class _BlankOrch(_FakeOrch):
+            # spawn leaves last_spawn_resumed at its PaneState default (False).
+            def _send_when_ready(self, role, task, project=None):
+                sent.append((role, task))
+
+        fake = _BlankOrch()
+        now = 1_000_000.0
+        fake._ps("p::backend").last_assigned_task = "implement /foo"
+        pane = _FakePane(state="working", last_out=now - STUCK_THRESHOLD_S - 1)
+        _recover(fake, "backend", "p", pane, now)
+
+        assert sent == [("backend", "implement /foo")], (
+            "blank (non-resumed) recovery must re-paste the original task verbatim"
+        )
+
+    def test_content_static_s_logged_alongside_silent_for_s(self) -> None:
+        import agent_takkub.orchestrator as orch_mod
+
+        logged: list[dict] = []
+        orig = orch_mod._log_event
+        orch_mod._log_event = lambda event, **kw: logged.append({"event": event, **kw})
+        try:
+            fake = _FakeOrch()
+            now = 1_000_000.0
+            ps = fake._ps("p::backend")
+            ps.last_content_change_ts = now - 123.0
+            pane = _FakePane(state="working", last_out=now - 5)
+            _recover(fake, "backend", "p", pane, now)
+        finally:
+            orch_mod._log_event = orig
+
+        rec = next((e for e in logged if e["event"] == "stuck_pane_recover"), None)
+        assert rec is not None, "stuck_pane_recover event not logged"
+        assert rec["content_static_s"] == 123, "content_static_s = real trigger duration"
+        assert rec["silent_for_s"] == 5, "raw-byte silence still reported for context"
