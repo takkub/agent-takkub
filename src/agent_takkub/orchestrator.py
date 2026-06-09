@@ -1885,7 +1885,15 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         if role_name != LEAD.name:
             denied.append("AskUserQuestion")
         if denied:
-            argv.extend(["--disallowed-tools", " ".join(denied)])
+            # Comma-join, NOT space: a space inside this single argv element
+            # makes subprocess.list2cmdline (pty_session.spawn) wrap the value
+            # in double quotes, and the ConPTY → claude.exe argument round-trip
+            # on Windows leaks those quotes into the rule names — claude then
+            # warns `Permission deny rule "Task / AskUserQuestion" matches no
+            # known tool` on every spawn. The names themselves are valid; only
+            # the leaked quotes break the match. Comma needs no quoting and
+            # --disallowed-tools accepts comma- or space-separated lists.
+            argv.extend(["--disallowed-tools", ",".join(denied)])
 
         # Session resume: if this same role exited recently from the same
         # cwd and we have its session UUID, use --resume <uuid> so claude
