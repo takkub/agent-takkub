@@ -429,6 +429,11 @@ CODEX_EARLY_CRASH_WINDOW_SEC = 90
 # head of the message when the pane is mid-render at write time (the
 # bug behind teammates complaining about "ข้อความถูกตัดส่วนต้น").
 BRACKETED_PASTE_THRESHOLD = 200
+# After this many consecutive 400-ms busy-retries (~30 s) the pump gives up
+# and spills remaining items to the durable _pending_done_notices queue.
+# Prevents unbounded memory growth and ensures delivery survives a crash that
+# occurs while Lead is alive-but-wedged.
+LEAD_NOTIFY_BUSY_CAP = 75
 _PASTE_START = "\x1b[200~"
 _PASTE_END = "\x1b[201~"
 
@@ -997,6 +1002,8 @@ class Orchestrator(QObject):
         # mid-generation.  Lead-absent items fall through to _pending_done_notices.
         self._lead_notify_queue: dict[str, collections.deque] = {}
         self._lead_notify_pumping: set[str] = set()
+        # Busy-retry counter per project_ns; reset on delivery or Lead-dies path.
+        self._lead_notify_retry: dict[str, int] = {}
         # Shard fan-out groups: keyed f"{project_ns}::{base_role}".
         # Created on first shard assign, closed when all N shards report.
         self._shard_groups: dict[str, ShardGroup] = {}
@@ -2784,11 +2791,16 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         Serialises concurrent done-notices so they never overwrite each other
         mid-generation.  Falls back to _pending_done_notices when Lead dies
         while items are still in the queue.
+
+        Busy-retry cap: after LEAD_NOTIFY_BUSY_CAP consecutive retries (~30 s) the
+        remaining items are spilled to _pending_done_notices so they survive a crash
+        and the hot-loop stops.
         """
         queue = getattr(self, "_lead_notify_queue", {}).get(project_ns)
         if not queue:
             pumping: set = getattr(self, "_lead_notify_pumping", set())
             pumping.discard(project_ns)
+            getattr(self, "_lead_notify_retry", {}).pop(project_ns, None)
             return
 
         lead = self._project_panes(project_ns).get(LEAD.name)
@@ -2798,6 +2810,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             queue.clear()
             pumping = getattr(self, "_lead_notify_pumping", set())
             pumping.discard(project_ns)
+            getattr(self, "_lead_notify_retry", {}).pop(project_ns, None)
             if not hasattr(self, "_pending_done_notices"):
                 self._pending_done_notices = {}
             for b in items:
@@ -2809,11 +2822,34 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             return
 
         if not lead.session.is_at_ready_prompt():
-            # Lead is busy — retry after a short delay without consuming the item.
+            # Lead is busy — check retry cap before re-scheduling.
+            if not hasattr(self, "_lead_notify_retry"):
+                self._lead_notify_retry = {}
+            count = self._lead_notify_retry.get(project_ns, 0) + 1
+            self._lead_notify_retry[project_ns] = count
+            if count > LEAD_NOTIFY_BUSY_CAP:
+                # Lead has been wedged too long — spill to durable and stop.
+                items = list(queue)
+                queue.clear()
+                pumping = getattr(self, "_lead_notify_pumping", set())
+                pumping.discard(project_ns)
+                self._lead_notify_retry.pop(project_ns, None)
+                if not hasattr(self, "_pending_done_notices"):
+                    self._pending_done_notices = {}
+                for b in items:
+                    self._pending_done_notices.setdefault(project_ns, []).append(
+                        {"role": "system", "note": "notify_spill", "body": b}
+                    )
+                if items:
+                    self._save_pending_done_notices(project_ns)
+                _log_event("lead_notify_spill", project=project_ns, count=len(items))
+                return
+            # Retry after a short delay without consuming the item.
             QTimer.singleShot(400, lambda: self._pump_lead_notify(project_ns))
             return
 
-        # Lead is alive and idle — deliver one item.
+        # Lead is alive and idle — deliver one item; reset retry counter.
+        getattr(self, "_lead_notify_retry", {}).pop(project_ns, None)
         body = queue.popleft()
         payload = _paste_payload(body)
         lead.session.write(payload)
@@ -2845,6 +2881,24 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         for item in items:
             self._notify_lead(project_ns, item["body"])
         _log_event("done_notices_flushed", project=project_ns, count=len(items))
+
+    def _reap_pending_done_notices(self) -> None:
+        """Flush durable done-notices for any project whose Lead is idle.
+
+        Runs on every idle-watchdog tick so notices spilled while Lead was busy
+        (durability-cap exceeded) are delivered as soon as Lead returns to the
+        ready prompt — without needing a restart.  Skips projects whose Lead is
+        absent or still busy to avoid ping-pong (flush → re-spill → flush loop).
+        """
+        pending = getattr(self, "_pending_done_notices", None)
+        if not pending:
+            return
+        for project_ns in list(pending.keys()):
+            lead = self._project_panes(project_ns).get(LEAD.name)
+            if not (lead and lead.session and lead.session.is_alive):
+                continue
+            if lead.session.is_at_ready_prompt():
+                self._flush_pending_done_notices(project_ns)
 
     def send(
         self,
@@ -4031,6 +4085,10 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         # recover (which closes the pane) doesn't fight with reminder
         # injection on the same pane.
         self._check_stuck_panes(now)
+        # Flush durable done-notices for any project whose Lead is now idle.
+        # Handles the case where notices spilled to _pending_done_notices while
+        # Lead was busy — delivers them without requiring a Lead restart.
+        self._reap_pending_done_notices()
         for project_name, project_panes in list(self._panes_by_project.items()):
             for name, pane in list(project_panes.items()):
                 key = f"{project_name}::{name}"

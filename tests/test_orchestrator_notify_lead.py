@@ -17,6 +17,7 @@ from PyQt6.QtCore import QCoreApplication
 
 from agent_takkub.orchestrator import (
     BRACKETED_PASTE_THRESHOLD,
+    LEAD_NOTIFY_BUSY_CAP,
     Orchestrator,
     _enter_delay_ms,
     _paste_payload,
@@ -267,3 +268,159 @@ class TestLeadDiesMidQueue:
         bodies = [item["body"] for item in durable]
         assert any("first" in b for b in bodies), "first notice must be in durable queue"
         assert any("second" in b for b in bodies), "second notice must be in durable queue"
+
+
+class TestBusyRetryCapSpill:
+    """After LEAD_NOTIFY_BUSY_CAP consecutive busy-retries the pump must spill
+    remaining items to _pending_done_notices and stop retrying."""
+
+    def test_busy_over_cap_spills_to_durable(self, orch: Orchestrator) -> None:
+        lead = _make_lead_pane(ready=False)
+        orch._panes_by_project[TEST_PROJECT] = {"lead": lead}
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            orch._notify_lead(TEST_PROJECT, "notice A")
+            orch._notify_lead(TEST_PROJECT, "notice B")
+
+        # Both items are now in the in-memory queue; pump ran once (count=1).
+        q = getattr(orch, "_lead_notify_queue", {}).get(TEST_PROJECT)
+        assert q and len(q) == 2, f"expected 2 queued items, got {list(q)}"
+
+        # Drive pump manually until the cap is exceeded.
+        # Initial pump already ran (count=1); LEAD_NOTIFY_BUSY_CAP more calls
+        # brings count to cap+1, triggering the spill on the last call.
+        for _ in range(LEAD_NOTIFY_BUSY_CAP):
+            with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+                orch._pump_lead_notify(TEST_PROJECT)
+
+        # In-memory queue must be drained
+        q2 = getattr(orch, "_lead_notify_queue", {}).get(TEST_PROJECT)
+        assert not q2, "queue must be empty after cap exceeded"
+
+        # Retry counter must be cleared
+        retry = getattr(orch, "_lead_notify_retry", {})
+        assert TEST_PROJECT not in retry, "retry counter must be cleared after spill"
+
+        # Both items must be in the durable queue
+        durable = orch._pending_done_notices.get(TEST_PROJECT, [])
+        bodies = [item["body"] for item in durable]
+        assert any("notice A" in b for b in bodies), "notice A must be in durable queue"
+        assert any("notice B" in b for b in bodies), "notice B must be in durable queue"
+
+        # Nothing must have been written to Lead's session
+        lead.session.write.assert_not_called()
+
+    def test_retry_counter_resets_after_delivery(self, orch: Orchestrator) -> None:
+        """Counter must reset when Lead becomes ready and an item is delivered."""
+        lead = _make_lead_pane(ready=False)
+        orch._panes_by_project[TEST_PROJECT] = {"lead": lead}
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            orch._notify_lead(TEST_PROJECT, "hello")
+
+        # Simulate a few retries (well below cap)
+        for _ in range(3):
+            with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+                orch._pump_lead_notify(TEST_PROJECT)
+
+        assert getattr(orch, "_lead_notify_retry", {}).get(TEST_PROJECT, 0) == 4
+
+        # Lead becomes ready
+        lead.session.is_at_ready_prompt.return_value = True
+        pumping: set = getattr(orch, "_lead_notify_pumping", set())
+        pumping.discard(TEST_PROJECT)
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            orch._pump_lead_notify(TEST_PROJECT)
+
+        # Item delivered; retry counter cleared
+        assert lead.session.write.called
+        retry = getattr(orch, "_lead_notify_retry", {})
+        assert TEST_PROJECT not in retry, "retry counter must be cleared after delivery"
+
+
+class TestReapPendingDoneNotices:
+    """Periodic reaper flushes durable done-notices when Lead returns to idle.
+
+    Scenarios:
+      1. Notice spilled to durable queue → Lead becomes idle → reaper delivers.
+      2. Notice in durable queue + Lead still busy → reaper does nothing.
+      3. Reaper does not double-deliver when durable queue is empty.
+    """
+
+    def _spill_to_durable(self, orch: Orchestrator, body: str) -> None:
+        """Directly inject an item into _pending_done_notices (simulating a spill)."""
+        orch._pending_done_notices.setdefault(TEST_PROJECT, []).append(
+            {"role": "system", "note": "notify_spill", "body": body}
+        )
+
+    def test_reaper_flushes_when_lead_idle(self, orch: Orchestrator) -> None:
+        """Durable notice → Lead becomes idle → _reap_pending_done_notices delivers."""
+        lead = _make_lead_pane(ready=True)
+        orch._panes_by_project[TEST_PROJECT] = {"lead": lead}
+        self._spill_to_durable(orch, "spilled notice")
+
+        # Durable queue must have the notice before reaping
+        assert orch._pending_done_notices.get(TEST_PROJECT), (
+            "setup: durable queue should be non-empty"
+        )
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            orch._reap_pending_done_notices()
+
+        # _flush routes through _notify_lead → synchronous write (Lead idle)
+        assert lead.session.write.called, "reaper must deliver notice to idle Lead"
+
+        # Durable queue must be cleared after flush
+        assert not orch._pending_done_notices.get(TEST_PROJECT), (
+            "durable queue must be empty after reaping"
+        )
+
+    def test_reaper_does_nothing_when_lead_busy(self, orch: Orchestrator) -> None:
+        """Durable notice + Lead busy → reaper must not write, durable queue intact."""
+        lead = _make_lead_pane(ready=False)
+        orch._panes_by_project[TEST_PROJECT] = {"lead": lead}
+        self._spill_to_durable(orch, "pending notice")
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            orch._reap_pending_done_notices()
+
+        # Lead busy → nothing should be written
+        lead.session.write.assert_not_called()
+
+        # Durable queue must still contain the notice
+        durable = orch._pending_done_notices.get(TEST_PROJECT, [])
+        assert any("pending notice" in item["body"] for item in durable), (
+            "durable queue must be intact when Lead is busy"
+        )
+
+    def test_reaper_noop_when_durable_empty(self, orch: Orchestrator) -> None:
+        """No durable items → reaper must be a no-op (no write, no error)."""
+        lead = _make_lead_pane(ready=True)
+        orch._panes_by_project[TEST_PROJECT] = {"lead": lead}
+        # Ensure durable queue is empty
+        orch._pending_done_notices.pop(TEST_PROJECT, None)
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            orch._reap_pending_done_notices()
+
+        lead.session.write.assert_not_called()
+
+    def test_reaper_no_double_deliver_with_flush_on_spawn(self, orch: Orchestrator) -> None:
+        """pop() in _flush_pending_done_notices guarantees single delivery even
+        if reaper and spawn-flush race (pop is atomic in CPython)."""
+        lead = _make_lead_pane(ready=True)
+        orch._panes_by_project[TEST_PROJECT] = {"lead": lead}
+        self._spill_to_durable(orch, "once only")
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            # First flush (simulates spawn-path flush)
+            orch._flush_pending_done_notices(TEST_PROJECT)
+            # Second call (simulates reaper firing just after)
+            orch._reap_pending_done_notices()
+
+        # Body written exactly once (the second flush finds an empty queue)
+        written = _written_str(lead.session)
+        assert written.count("once only") == 1, (
+            "notice must be delivered exactly once even if flush called twice"
+        )

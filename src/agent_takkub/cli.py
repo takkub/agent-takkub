@@ -470,6 +470,19 @@ def cmd_gemini(args: argparse.Namespace) -> dict:
     }
 
 
+def _ensure_utf8_stdio() -> None:
+    """Reconfigure stdout/stderr to UTF-8 so Thai (and other non-ASCII) text
+    prints correctly on Windows consoles instead of showing ???? (mojibake).
+    Safe to call unconditionally — silently skips on streams that don't support
+    reconfigure (e.g. already-closed or binary-mode streams)."""
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8")
+            except Exception:
+                pass
+
+
 def _utf8_print(text: str) -> None:
     """Print *text* to stdout, forcing UTF-8 on Windows to avoid charmap errors."""
     if hasattr(sys.stdout, "buffer"):
@@ -604,6 +617,7 @@ def cmd_search(args: argparse.Namespace) -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _ensure_utf8_stdio()
     p = argparse.ArgumentParser(prog="takkub", description="agent-takkub cockpit CLI")
     sub = p.add_subparsers(dest="command", required=True)
 

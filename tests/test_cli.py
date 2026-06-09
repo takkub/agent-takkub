@@ -481,3 +481,41 @@ class TestHarvestFlow:
         assert rc == 1
         err = capsys.readouterr().err
         assert "only lead" in err
+
+
+class TestEnsureUtf8Stdio:
+    """_ensure_utf8_stdio() must reconfigure stdout/stderr to UTF-8 so Thai and
+    other non-ASCII text doesn't appear as ???? on Windows consoles."""
+
+    def test_reconfigures_stdout_and_stderr(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[tuple[str, str]] = []
+
+        class _FakeStream:
+            def reconfigure(self, encoding: str) -> None:
+                calls.append(("stream", encoding))
+
+        monkeypatch.setattr("sys.stdout", _FakeStream())
+        monkeypatch.setattr("sys.stderr", _FakeStream())
+        cli._ensure_utf8_stdio()
+        assert calls.count(("stream", "utf-8")) == 2, (
+            "_ensure_utf8_stdio must reconfigure both stdout and stderr to utf-8"
+        )
+
+    def test_skips_streams_without_reconfigure(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Streams that lack reconfigure (e.g. binary wrappers) must not raise."""
+        import io
+
+        monkeypatch.setattr("sys.stdout", io.BytesIO())
+        monkeypatch.setattr("sys.stderr", io.BytesIO())
+        cli._ensure_utf8_stdio()  # must not raise
+
+    def test_swallows_reconfigure_exceptions(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """If reconfigure raises (e.g. already closed stream), it must be swallowed."""
+
+        class _BadStream:
+            def reconfigure(self, encoding: str) -> None:
+                raise OSError("stream closed")
+
+        monkeypatch.setattr("sys.stdout", _BadStream())
+        monkeypatch.setattr("sys.stderr", _BadStream())
+        cli._ensure_utf8_stdio()  # must not propagate the OSError
