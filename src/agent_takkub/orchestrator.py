@@ -12,6 +12,7 @@ Public API (called by main_window UI and cli_server JSON requests):
 
 from __future__ import annotations
 
+import collections
 import hashlib
 import itertools
 import json
@@ -990,6 +991,12 @@ class Orchestrator(QObject):
         # Lead is down (issue #13).
         self._pending_done_notices: dict[str, list[dict]] = {}
         self._load_pending_done_notices()
+        # In-memory serialisation queue for live Lead writes (ready-prompt aware).
+        # Keyed by project namespace.  Items are string bodies; a single pump
+        # fires per project so concurrent done notices never overwrite each other
+        # mid-generation.  Lead-absent items fall through to _pending_done_notices.
+        self._lead_notify_queue: dict[str, collections.deque] = {}
+        self._lead_notify_pumping: set[str] = set()
         # Shard fan-out groups: keyed f"{project_ns}::{base_role}".
         # Created on first shard assign, closed when all N shards report.
         self._shard_groups: dict[str, ShardGroup] = {}
@@ -2165,13 +2172,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         project_ns = self._resolve_project(project)
         lead = self._project_panes(project_ns).get(LEAD.name)
         if lead and lead.session and lead.session.is_alive:
-            payload = _paste_payload(prompt)
-            lead.session.write(payload)
-            QTimer.singleShot(
-                _enter_delay_ms(payload),
-                lambda: lead.session and lead.session.write(b"\r"),
-            )
-            self.leadInjected.emit(prompt)
+            self._notify_lead(project_ns, prompt)
             _log_event("inject_lead_prompt", project=project_ns)
             return True
         self._pending_done_notices.setdefault(project_ns, []).append(
@@ -2256,9 +2257,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             f"task ถูก paste แบบ blind อาจไม่ติด (pane อาจค้าง empty). "
             f"เช็ค pane / re-assign ถ้ายังว่าง — อย่าถือว่าส่งสำเร็จ (issue #26)"
         )
-        lead.session.write(msg)
-        QTimer.singleShot(150, lambda: lead.session and lead.session.write("\r"))
-        self.leadInjected.emit(msg)
+        self._notify_lead(project_ns, msg)
         _log_event("delivery_unconfirmed", role=role_name, project=project_ns)
 
     def _warn_lead_spawn_failed(self, role_name: str, project: str | None, reason: str) -> None:
@@ -2277,9 +2276,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             f"ลอง assign {role_name} ใหม่อีกครั้ง (ถ้ายิง parallel ลองยิงทีละตัว) — "
             f"อย่าถือว่า 'task queued' = สำเร็จ (issue #26)"
         )
-        lead.session.write(msg)
-        QTimer.singleShot(150, lambda: lead.session and lead.session.write("\r"))
-        self.leadInjected.emit(msg)
+        self._notify_lead(project_ns, msg)
         _log_event("spawn_failed_warned", role=role_name, project=project_ns)
 
     def _warn_lead_respawn_capped(self, role_name: str, project: str) -> None:
@@ -2320,9 +2317,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             f"(crash {AUTO_RESPAWN_MAX} ครั้งติด) — pane ดับถาวรจนกว่า Lead จะ assign ใหม่ "
             f"ถ้า pane นี้อยู่ใน auto-chain verify hop อาจค้างได้ — ตรวจสอบ takkub list"
         )
-        lead.session.write(msg)
-        QTimer.singleShot(150, lambda: lead.session and lead.session.write("\r"))
-        self.leadInjected.emit(msg)
+        self._notify_lead(project_ns, msg)
         _log_event("respawn_capped_warned", role=role_name, project=project_ns)
 
     # ------------------------------------------------------------------
@@ -2426,7 +2421,6 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         If the Lead pane is absent, the prompt is queued via
         _pending_done_notices and delivered when Lead next spawns.
         """
-        lead = self._project_panes(project_ns).get(LEAD.name)
         prompt = (
             "[auto-chain handoff] impl panes spawned with --auto-chain "
             "in this project have all reported done.\n"
@@ -2444,25 +2438,13 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             "terminal hop). After qa+reviewer done events arrive, resume "
             "normal propose-then-confirm flow."
         )
-        if lead and lead.session and lead.session.is_alive:
-            lead.session.write(prompt)
-            QTimer.singleShot(150, lambda: lead.session and lead.session.write(b"\r"))
-            self.leadInjected.emit(prompt)
-            _log_event("auto_chain_handoff", project=project_ns)
-        else:
-            self._pending_done_notices.setdefault(project_ns, []).append(
-                {"role": "system", "note": "auto-chain handoff", "body": prompt}
-            )
-            self._save_pending_done_notices(project_ns)
-            _log_event("auto_chain_handoff_queued", project=project_ns)
+        self._notify_lead(project_ns, prompt)
+        _log_event("auto_chain_handoff", project=project_ns)
 
     def _inject_shard_fanout_handoff(
         self, project_ns: str, group: ShardGroup, timed_out: bool = False
     ) -> None:
         """Inject a consolidated fan-out result to Lead after all N shards finish."""
-        project_panes = self._project_panes(project_ns)
-        lead = project_panes.get(LEAD.name)
-
         done_count = len(group.done)
         fail_count = len(group.failed)
         total = group.total
@@ -2495,29 +2477,16 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                     lines.append(f"  shard {n}: NO RESPONSE (timeout)")
 
         message = "\n".join(lines)
-        if lead and lead.session and lead.session.is_alive:
-            lead.session.write(message.encode("utf-8"))
-            QTimer.singleShot(150, lambda: lead.session and lead.session.write(b"\r"))
-            self.leadInjected.emit(message)
-            _log_event(
-                "shard_fanout_complete",
-                project=project_ns,
-                base_role=group.base_role,
-                total=total,
-                done=done_count,
-                failed=fail_count,
-                timed_out=timed_out,
-            )
-        else:
-            self._pending_done_notices.setdefault(project_ns, []).append(
-                {
-                    "role": group.base_role,
-                    "note": f"shard fan-out {total} shards",
-                    "body": message,
-                }
-            )
-            self._save_pending_done_notices(project_ns)
-            _log_event("shard_fanout_queued", project=project_ns, base_role=group.base_role)
+        self._notify_lead(project_ns, message)
+        _log_event(
+            "shard_fanout_complete",
+            project=project_ns,
+            base_role=group.base_role,
+            total=total,
+            done=done_count,
+            failed=fail_count,
+            timed_out=timed_out,
+        )
 
     def _check_shard_group_timeout(
         self, project_ns: str, group_key: str, generation: int | None = None
@@ -2555,18 +2524,8 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
     ) -> None:
         """Write *message* to the Lead pane. If Lead is absent, queue it in
         _pending_done_notices so it is delivered when Lead next spawns."""
-        lead = self._project_panes(project_ns).get(LEAD.name)
-        if lead and lead.session and lead.session.is_alive:
-            lead.session.write(message.encode("utf-8"))
-            QTimer.singleShot(150, lambda: lead.session and lead.session.write(b"\r"))
-            self.leadInjected.emit(message)
-            _log_event(log_event, project=project_ns)
-        else:
-            self._pending_done_notices.setdefault(project_ns, []).append(
-                {"role": "system", "note": "pipeline", "body": message}
-            )
-            self._save_pending_done_notices(project_ns)
-            _log_event(f"{log_event}_queued", project=project_ns)
+        self._notify_lead(project_ns, message)
+        _log_event(log_event, project=project_ns)
 
     def run_pipeline(self, template_id: str, project: str | None = None) -> tuple[bool, str]:
         """Load *template_id* from pipeline_config and fire hop 0.
@@ -2757,12 +2716,124 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         else:
             self._fire_pipeline_hop(project_ns, run.run_id, run)
 
+    # ------------------------------------------------------------------
+    # Lead-notify queue: ready-prompt-aware serialised delivery
+    # ------------------------------------------------------------------
+
+    def _notify_lead(
+        self,
+        project_ns: str,
+        body: str,
+        *,
+        from_role: str = "system",
+        note: str = "notify",
+    ) -> None:
+        """Queue *body* for delivery to the Lead pane.
+
+        If Lead is alive the item enters the in-memory per-project queue and an
+        idempotent pump is armed.  The pump blocks until Lead is at its ready
+        prompt before each write so concurrent done notices never overwrite each
+        other mid-generation.
+
+        If Lead is absent the item falls directly into the durable
+        _pending_done_notices (survives a restart, delivered on next Lead spawn).
+
+        *from_role* and *note* are stored only in the durable fallback record so
+        callers that care about the audit trail can pass them through; the live
+        delivery path only needs *body*.
+
+        Lazy-initialises queue / pumping-set so partial test fixtures (those that
+        use Orchestrator.__new__ and bypass __init__) don't need to pre-populate
+        these attributes.
+        """
+        lead = self._project_panes(project_ns).get(LEAD.name)
+        if lead and lead.session and lead.session.is_alive:
+            if not hasattr(self, "_lead_notify_queue"):
+                self._lead_notify_queue = {}
+            if not hasattr(self, "_lead_notify_pumping"):
+                self._lead_notify_pumping = set()
+            self._lead_notify_queue.setdefault(project_ns, collections.deque()).append(body)
+            self._arm_lead_notify_pump(project_ns)
+        else:
+            if not hasattr(self, "_pending_done_notices"):
+                self._pending_done_notices = {}
+            self._pending_done_notices.setdefault(project_ns, []).append(
+                {"role": from_role, "note": note, "body": body}
+            )
+            self._save_pending_done_notices(project_ns)
+            _log_event("done_notice_queued", project=project_ns, role=from_role)
+
+    def _arm_lead_notify_pump(self, project_ns: str) -> None:
+        """Start a pump for *project_ns* if one is not already running.
+
+        Calls _pump_lead_notify directly (synchronously) for the first attempt so
+        tests that do not run a Qt event loop still see the write happen.  Retries
+        when Lead is busy are scheduled via QTimer.singleShot.
+        """
+        pumping: set = getattr(self, "_lead_notify_pumping", set())
+        if not hasattr(self, "_lead_notify_pumping"):
+            self._lead_notify_pumping = pumping
+        if project_ns in pumping:
+            return
+        pumping.add(project_ns)
+        self._pump_lead_notify(project_ns)
+
+    def _pump_lead_notify(self, project_ns: str) -> None:
+        """Deliver one notice to Lead when it is at the ready prompt, then re-arm.
+
+        Serialises concurrent done-notices so they never overwrite each other
+        mid-generation.  Falls back to _pending_done_notices when Lead dies
+        while items are still in the queue.
+        """
+        queue = getattr(self, "_lead_notify_queue", {}).get(project_ns)
+        if not queue:
+            pumping: set = getattr(self, "_lead_notify_pumping", set())
+            pumping.discard(project_ns)
+            return
+
+        lead = self._project_panes(project_ns).get(LEAD.name)
+        if not (lead and lead.session and lead.session.is_alive):
+            # Lead died — move remaining items to the durable queue.
+            items = list(queue)
+            queue.clear()
+            pumping = getattr(self, "_lead_notify_pumping", set())
+            pumping.discard(project_ns)
+            if not hasattr(self, "_pending_done_notices"):
+                self._pending_done_notices = {}
+            for b in items:
+                self._pending_done_notices.setdefault(project_ns, []).append(
+                    {"role": "system", "note": "notify", "body": b}
+                )
+            if items:
+                self._save_pending_done_notices(project_ns)
+            return
+
+        if not lead.session.is_at_ready_prompt():
+            # Lead is busy — retry after a short delay without consuming the item.
+            QTimer.singleShot(400, lambda: self._pump_lead_notify(project_ns))
+            return
+
+        # Lead is alive and idle — deliver one item.
+        body = queue.popleft()
+        payload = _paste_payload(body)
+        lead.session.write(payload)
+        delay = _enter_delay_ms(payload)
+        QTimer.singleShot(delay, lambda: lead.session and lead.session.write(b"\r"))
+        self.leadInjected.emit(body)
+
+        if queue:
+            # More items waiting — re-arm after this item has had time to submit
+            # and Lead has begun processing it (so is_at_ready_prompt drops).
+            QTimer.singleShot(delay + 300, lambda: self._pump_lead_notify(project_ns))
+        else:
+            pumping = getattr(self, "_lead_notify_pumping", set())
+            pumping.discard(project_ns)
+
     def _flush_pending_done_notices(self, project_ns: str) -> None:
         """Deliver queued done notices to Lead if it is currently alive.
 
-        Called after Lead spawns. If Lead is not ready yet the queue is left
-        intact so the next flush attempt can retry. Pattern mirrors
-        _flush_pending_lead_cc."""
+        Called after Lead spawns. Routes all items through _notify_lead so they
+        enter the ready-prompt-aware queue instead of being dumped all at once."""
         pending = self._pending_done_notices.get(project_ns)
         if not pending:
             return
@@ -2772,12 +2843,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         items = self._pending_done_notices.pop(project_ns)
         self._save_pending_done_notices(project_ns)
         for item in items:
-            payload = _paste_payload(item["body"])
-            lead.session.write(payload)
-            QTimer.singleShot(
-                _enter_delay_ms(payload),
-                lambda s=lead.session: s and s.write(b"\r"),
-            )
+            self._notify_lead(project_ns, item["body"])
         _log_event("done_notices_flushed", project=project_ns, count=len(items))
 
     def send(
@@ -2818,12 +2884,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         if from_role and from_role not in (None, LEAD.name) and to_role != LEAD.name:
             lead = project_panes.get(LEAD.name)
             if lead and lead.session and lead.session.is_alive:
-                cc_payload = _paste_payload(f"[CC] {body}")
-                lead.session.write(cc_payload)
-                QTimer.singleShot(
-                    _enter_delay_ms(cc_payload),
-                    lambda: lead.session and lead.session.write(b"\r"),
-                )
+                self._notify_lead(project_ns, f"[CC] {body}")
             else:
                 ts = datetime.now().isoformat(timespec="seconds")
                 self._pending_lead_cc.setdefault(project_ns, []).append(
@@ -3100,7 +3161,6 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
 
         # notify Lead in the same project (a teammate in unirecon mustn't
         # nudge the Lead in pms by mistake)
-        lead = project_panes.get(LEAD.name)
         notice = f"[{from_role} done] {note}".rstrip()
         if has_uncommitted:
             notice += (
@@ -3111,18 +3171,10 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         # (_inject_shard_fanout_handoff) is the single message Lead sees.
         # Non-shard panes (had_shard_total == 0) use the normal notice path.
         if had_shard_total == 0:
-            if lead and lead.session and lead.session.is_alive:
-                lead.session.write(notice)
-                QTimer.singleShot(150, lambda: lead.session and lead.session.write(b"\r"))
-                self.leadInjected.emit(notice)
-            else:
-                # Lead is absent — queue notice so it isn't silently lost.
-                # Flushed when Lead next spawns via _flush_pending_done_notices.
-                self._pending_done_notices.setdefault(project_ns, []).append(
-                    {"role": from_role, "note": note, "body": notice}
-                )
-                self._save_pending_done_notices(project_ns)
-                _log_event("done_notice_queued", project=project_ns, role=from_role)
+            # Route through _notify_lead so concurrent done notices are serialised
+            # and never injected while Lead is mid-generation (the root cause of the
+            # "Lead goes silent after parallel dispatch" bug).
+            self._notify_lead(project_ns, notice, from_role=from_role, note=note)
 
         # Fix A: when this done event belongs to a background tab, emit a
         # cross-tab signal so main_window can flash the status bar even if
@@ -3166,15 +3218,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                     f"shard group already closed (timeout or all-failed). "
                     f"note: {note!r:.120}"
                 )
-                if lead and lead.session and lead.session.is_alive:
-                    lead.session.write(late_msg)
-                    QTimer.singleShot(150, lambda: lead.session and lead.session.write(b"\r"))
-                    self.leadInjected.emit(late_msg)
-                else:
-                    self._pending_done_notices.setdefault(project_ns, []).append(
-                        {"role": from_role, "note": "late-complete", "body": late_msg}
-                    )
-                    self._save_pending_done_notices(project_ns)
+                self._notify_lead(project_ns, late_msg, from_role=from_role, note="late-complete")
                 _log_event(
                     "shard_late_complete",
                     project=project_ns,

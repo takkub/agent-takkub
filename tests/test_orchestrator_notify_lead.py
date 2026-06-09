@@ -1,0 +1,269 @@
+"""Tests for _notify_lead / _pump_lead_notify — ready-prompt-aware serialised delivery.
+
+Scenarios:
+  1. 2 notices arrive while Lead is busy → no write during busy, once ready both
+     delivered in order, each followed by \\r via QTimer.
+  2. Notice >=200 chars → payload is bracketed-paste wrapped, enter delay > 150ms.
+  3. Lead dies between first and second item → second item falls into
+     _pending_done_notices (durable fallback).
+"""
+
+from __future__ import annotations
+
+from unittest.mock import MagicMock, patch
+
+import pytest
+from PyQt6.QtCore import QCoreApplication
+
+from agent_takkub.orchestrator import (
+    BRACKETED_PASTE_THRESHOLD,
+    Orchestrator,
+    _enter_delay_ms,
+    _paste_payload,
+)
+
+TEST_PROJECT = "notifytest"
+
+# --------------------------------------------------------------------------
+# Fixtures
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def qapp() -> QCoreApplication:
+    app = QCoreApplication.instance()
+    if app is None:
+        app = QCoreApplication([])
+    return app
+
+
+def _make_lead_session(*, ready: bool = True) -> MagicMock:
+    """Return a session mock whose is_at_ready_prompt() returns *ready*."""
+    s = MagicMock()
+    s.is_alive = True
+    s.is_at_ready_prompt = MagicMock(return_value=ready)
+    s.write = MagicMock()
+    return s
+
+
+def _make_lead_pane(*, ready: bool = True) -> MagicMock:
+    pane = MagicMock()
+    pane.session = _make_lead_session(ready=ready)
+    return pane
+
+
+@pytest.fixture
+def orch(qapp: QCoreApplication, monkeypatch: pytest.MonkeyPatch) -> Orchestrator:
+    monkeypatch.setattr(
+        Orchestrator,
+        "_resolve_project",
+        staticmethod(lambda project: project or TEST_PROJECT),
+    )
+    o = Orchestrator()
+    o._idle_watchdog.stop()
+    return o
+
+
+# --------------------------------------------------------------------------
+# Helper
+# --------------------------------------------------------------------------
+
+
+def _written_str(session: MagicMock) -> str:
+    """Collect all payload strings written to a session mock."""
+    parts: list[str] = []
+    for c in session.write.call_args_list:
+        arg = c.args[0] if c.args else ""
+        if isinstance(arg, bytes):
+            parts.append(arg.decode("utf-8", errors="replace"))
+        else:
+            parts.append(str(arg))
+    return "".join(parts)
+
+
+def _drain_timers(orch: Orchestrator, project_ns: str = TEST_PROJECT) -> None:
+    """Run the pump for *project_ns* until the queue is empty.
+
+    In tests QTimer.singleShot callbacks don't auto-fire, so we call
+    _pump_lead_notify directly after each delivery to simulate the timer.
+    Stops when the queue is empty or lead is no longer ready.
+    """
+    for _ in range(100):
+        q = getattr(orch, "_lead_notify_queue", {}).get(project_ns)
+        if not q:
+            break
+        orch._pump_lead_notify(project_ns)
+
+
+# --------------------------------------------------------------------------
+# Tests
+# --------------------------------------------------------------------------
+
+
+class TestNotifyLeadBusyQueue:
+    """Lead busy when first notice arrives → second notice queued, both delivered
+    in order once Lead becomes ready."""
+
+    def test_no_write_while_lead_is_busy(self, orch: Orchestrator) -> None:
+        """If Lead is not at the ready prompt, _notify_lead must not write anything."""
+        lead = _make_lead_pane(ready=False)
+        orch._panes_by_project[TEST_PROJECT] = {"lead": lead}
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            orch._notify_lead(TEST_PROJECT, "notice A")
+
+        # Lead busy → pump should not have written anything yet
+        lead.session.write.assert_not_called()
+
+    def test_two_notices_busy_then_ready_delivered_in_order(self, orch: Orchestrator) -> None:
+        """Queue 2 notices while busy; flip to ready; pump delivers both in order."""
+        lead = _make_lead_pane(ready=False)
+        orch._panes_by_project[TEST_PROJECT] = {"lead": lead}
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            orch._notify_lead(TEST_PROJECT, "notice A")
+            orch._notify_lead(TEST_PROJECT, "notice B")
+
+        # Still busy — nothing written yet
+        lead.session.write.assert_not_called()
+
+        # Lead becomes ready — pump guard still set from busy attempt, clear it
+        # then drive the pump synchronously.
+        lead.session.is_at_ready_prompt.return_value = True
+        pumping: set = getattr(orch, "_lead_notify_pumping", set())
+        pumping.discard(TEST_PROJECT)
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            _drain_timers(orch)
+
+        # Both notices should have been written, A before B
+        written = _written_str(lead.session)
+        assert "notice A" in written
+        assert "notice B" in written
+        pos_a = written.index("notice A")
+        pos_b = written.index("notice B")
+        assert pos_a < pos_b, "notice A must be delivered before notice B"
+
+    def test_each_notice_gets_enter_after(self, orch: Orchestrator) -> None:
+        """Every delivered notice must be followed by \\r via QTimer.singleShot."""
+        lead = _make_lead_pane(ready=True)
+        orch._panes_by_project[TEST_PROJECT] = {"lead": lead}
+
+        timers: list[tuple[int, object]] = []
+
+        def capture_timer(ms, fn):
+            timers.append((ms, fn))
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot", side_effect=capture_timer):
+            orch._notify_lead(TEST_PROJECT, "hello")
+
+        # Payload write happened synchronously
+        assert lead.session.write.called
+
+        # At least one timer was scheduled (for the \\r)
+        assert timers, "QTimer.singleShot must be called for the \\r submit"
+        # Fire all timers to deliver \\r
+        for _ms, fn in timers:
+            fn()
+
+        # Now check that \\r was written
+        all_written = lead.session.write.call_args_list
+        enter_calls = [c for c in all_written if c.args and c.args[0] == b"\r"]
+        assert enter_calls, "\\r must be written after the payload"
+
+
+class TestBracketedPasteWrapping:
+    """Notices >= BRACKETED_PASTE_THRESHOLD must be wrapped + use long delay."""
+
+    def test_long_notice_uses_bracketed_paste(self, orch: Orchestrator) -> None:
+        lead = _make_lead_pane(ready=True)
+        orch._panes_by_project[TEST_PROJECT] = {"lead": lead}
+
+        long_body = "X" * BRACKETED_PASTE_THRESHOLD  # at threshold → wrapped
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            orch._notify_lead(TEST_PROJECT, long_body)
+
+        assert lead.session.write.called
+        written_arg = lead.session.write.call_args[0][0]
+        # Payload must start with the bracketed-paste escape
+        assert written_arg.startswith("\x1b[200~"), (
+            "long notice payload must be wrapped in bracketed-paste"
+        )
+
+    def test_long_notice_uses_paste_enter_delay(self, orch: Orchestrator) -> None:
+        """For a long notice the QTimer delay must exceed the typing delay (150ms)."""
+        lead = _make_lead_pane(ready=True)
+        orch._panes_by_project[TEST_PROJECT] = {"lead": lead}
+
+        long_body = "Y" * BRACKETED_PASTE_THRESHOLD
+        expected_payload = _paste_payload(long_body)
+        expected_delay = _enter_delay_ms(expected_payload)
+        assert expected_delay > 150, "test setup: bracketed delay must exceed 150ms"
+
+        captured_delays: list[int] = []
+
+        def capture(ms, _fn):
+            captured_delays.append(ms)
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot", side_effect=capture):
+            orch._notify_lead(TEST_PROJECT, long_body)
+
+        # The first timer call should be for the \\r with the paste delay
+        assert captured_delays, "QTimer.singleShot must be called"
+        assert captured_delays[0] == expected_delay, (
+            f"enter delay must be {expected_delay}ms for long notice, got {captured_delays[0]}"
+        )
+
+    def test_short_notice_not_wrapped(self, orch: Orchestrator) -> None:
+        """Short notices (< threshold) must NOT be wrapped in bracketed-paste."""
+        lead = _make_lead_pane(ready=True)
+        orch._panes_by_project[TEST_PROJECT] = {"lead": lead}
+
+        short_body = "short"
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            orch._notify_lead(TEST_PROJECT, short_body)
+
+        assert lead.session.write.called
+        written_arg = lead.session.write.call_args[0][0]
+        assert not written_arg.startswith("\x1b[200~"), (
+            "short notice must not be wrapped in bracketed-paste"
+        )
+
+
+class TestLeadDiesMidQueue:
+    """Lead dies while items are still in the queue → remaining items fall into
+    _pending_done_notices for durable delivery on next Lead spawn."""
+
+    def test_remaining_items_fall_to_durable_queue(self, orch: Orchestrator) -> None:
+        """Queue 2 notices while Lead is busy; then Lead dies before pump runs →
+        both items must fall into _pending_done_notices."""
+        # Start with Lead busy so the pump retries via QTimer (doesn't deliver)
+        lead = _make_lead_pane(ready=False)
+        orch._panes_by_project[TEST_PROJECT] = {"lead": lead}
+
+        # Queue both items — pump fires synchronously but Lead is busy, so it
+        # schedules a QTimer retry without delivering.  We patch QTimer to no-op.
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            orch._notify_lead(TEST_PROJECT, "first")
+            orch._notify_lead(TEST_PROJECT, "second")
+
+        # Both items are now in the in-memory queue, none delivered yet
+        q = getattr(orch, "_lead_notify_queue", {}).get(TEST_PROJECT)
+        assert q and len(q) == 2, f"expected 2 queued items, got {list(q)}"
+
+        # Lead dies before it ever becomes ready
+        lead.session.is_alive = False
+
+        # Drive pump — Lead is dead, items should fall to durable queue
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            orch._pump_lead_notify(TEST_PROJECT)
+
+        # Queue should be cleared
+        q2 = getattr(orch, "_lead_notify_queue", {}).get(TEST_PROJECT)
+        assert not q2, "in-memory queue must be empty after Lead dies"
+
+        # Both items should be in the durable queue
+        durable = orch._pending_done_notices.get(TEST_PROJECT, [])
+        bodies = [item["body"] for item in durable]
+        assert any("first" in b for b in bodies), "first notice must be in durable queue"
+        assert any("second" in b for b in bodies), "second notice must be in durable queue"
