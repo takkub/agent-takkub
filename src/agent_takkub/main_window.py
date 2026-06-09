@@ -479,12 +479,16 @@ class MainWindow(QMainWindow):
         _limit_hl = QHBoxLayout(_limit_container)
         # Extra right margin keeps the readout from butting up against the
         # window edge / pane chrome buttons (↓ ▾ ×) sitting just below it.
-        _limit_hl.setContentsMargins(6, 0, 14, 0)
+        # Small top margin (2px) lifts the text clear of the tab-strip top edge
+        # without dropping it down toward the tab/content seam.
+        _limit_hl.setContentsMargins(6, 2, 14, 0)
         _limit_hl.setSpacing(0)
         self._limit_label = QLabel("—", _limit_container)
-        # Vertically centre the text in the corner band so it can never ride
-        # up against (and get clipped by) the top edge of the tab strip.
-        self._limit_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        # Top-align the text so it sits high in the tab strip (next to the tab
+        # labels) instead of being centred in the taller corner band, which
+        # dropped it down onto the tab/content seam and clipped it.
+        self._limit_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
+        _limit_hl.setAlignment(self._limit_label, Qt.AlignmentFlag.AlignTop)
         self._limit_label.setStyleSheet(
             "QLabel { color:#52525b; font-size:11px; "
             "font-variant-numeric:tabular-nums; padding:0 2px; }"
