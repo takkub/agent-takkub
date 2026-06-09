@@ -24,6 +24,7 @@ import pytest
 from PyQt6.QtCore import QCoreApplication
 
 from agent_takkub.orchestrator import (
+    _STUCK_RESUME_NUDGE,
     AUTO_RESPAWN_MAX,
     STUCK_THRESHOLD_S,
     Orchestrator,
@@ -169,7 +170,7 @@ class TestStuckRecoverPreservesState:
 
         assert mock_spawn.call_args.kwargs.get("_from_auto_respawn") is True
 
-    def test_no_task_replay_when_resumed(self, orch: Orchestrator) -> None:
+    def test_nudge_not_full_task_when_resumed(self, orch: Orchestrator) -> None:
         key = _exit_key(TEST_PROJECT, "reviewer")
         pane = self._setup(orch, key)
         now = 1_000_000.0
@@ -186,7 +187,10 @@ class TestStuckRecoverPreservesState:
             mock_timer.singleShot.side_effect = lambda ms, fn: fn()
             orch._auto_recover_stuck("reviewer", TEST_PROJECT, pane, now)
 
-        mock_send.assert_not_called()
+        # Resumed pane: send a short continue-nudge (claude does not auto-continue
+        # an interrupted turn), NOT the full task — the task is already in the
+        # restored conversation history (Bug-5 gate against double-work).
+        mock_send.assert_called_once_with("reviewer", _STUCK_RESUME_NUDGE, project=TEST_PROJECT)
 
     def test_task_replayed_when_fresh_spawn(self, orch: Orchestrator) -> None:
         key = _exit_key(TEST_PROJECT, "critic")
