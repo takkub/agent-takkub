@@ -477,7 +477,7 @@ class MainWindow(QMainWindow):
         # ── limit-status corner widget (top-right of tab bar) ───────────
         _limit_container = QWidget(self)
         _limit_hl = QHBoxLayout(_limit_container)
-        _limit_hl.setContentsMargins(4, 2, 8, 2)
+        _limit_hl.setContentsMargins(4, 0, 8, 0)
         _limit_hl.setSpacing(0)
         self._limit_label = QLabel("—", _limit_container)
         self._limit_label.setStyleSheet(
@@ -491,6 +491,9 @@ class MainWindow(QMainWindow):
         )
         _limit_hl.addWidget(self._limit_label)
         self.tabs.setCornerWidget(_limit_container, Qt.Corner.TopRightCorner)
+        # Match the corner widget's height to the tab bar so the limit readout
+        # lines up flush with the tabs instead of floating shorter/taller.
+        _limit_container.setFixedHeight(self.tabs.tabBar().sizeHint().height())
 
         # ── status bar ──────────────────────────────────────────
         self._status = QStatusBar(self)
@@ -509,14 +512,6 @@ class MainWindow(QMainWindow):
         )
         self._btn_add_project.setFixedWidth(28)
         self._btn_add_project.clicked.connect(self._on_add_project_clicked)
-
-        self._btn_setup_wizard = QPushButton("⚙ Setup", self)
-        self._btn_setup_wizard.setToolTip(
-            "Config Wizard — guided multi-step setup for a new project\n"
-            "(name, role paths, presets, user profile, optional CLAUDE.md)"
-        )
-        self._btn_setup_wizard.setStyleSheet(self._ghost_button_style())
-        self._btn_setup_wizard.clicked.connect(self._on_setup_wizard_clicked)
 
         # ── per-project user profile selector ──────────────────
         self._user_label = QLabel("User:", self)
@@ -817,7 +812,6 @@ class MainWindow(QMainWindow):
         for w in (
             self._version_label,
             self._btn_add_project,
-            self._btn_setup_wizard,
             self._user_label,
             self._user_combo,
             self._btn_add_user,
@@ -2783,75 +2777,6 @@ class MainWindow(QMainWindow):
             self._import_existing_project()
         # Cancel → do nothing
 
-    # ── Config Wizard ────────────────────────────────────────────
-    def _on_setup_wizard_clicked(self) -> None:
-        """Launch the multi-step Config Wizard to set up a new project."""
-        from .config import load_projects
-        from .config_wizard import ConfigWizard
-
-        data = load_projects()
-        existing_names: set[str] = set((data.get("projects") or {}).keys())
-
-        wizard = ConfigWizard(existing_names=existing_names, parent=self)
-        if wizard.exec() != ConfigWizard.DialogCode.Accepted:
-            return
-
-        result = wizard.result_data()
-        name: str = result["name"]
-        root = Path(result["root"])
-        paths: dict[str, str] = result["paths"]
-        presets: list[str] = result["presets"]
-        profile: str = result["profile"]
-        want_claude_md: bool = result["generate_claude_md"]
-
-        # Fall back to root as "main" when user mapped no paths
-        if not paths:
-            paths = {"main": str(root.resolve().as_posix())}
-
-        if want_claude_md:
-            # Step A: describe the project
-            prompt_text = self._ask_project_description(name)
-            if prompt_text is None:
-                return  # user cancelled description
-            # Step B: generate rules (headless claude, shows busy dialog)
-            rules_content = self._generate_rules_with_ui(prompt_text, name)
-            if rules_content is None:
-                return
-            # Step C: let user edit / re-generate before saving
-            while True:
-                edit_result = self._show_rules_editor_dialog(
-                    rules_content, name, allow_regenerate=True
-                )
-                if edit_result is None:
-                    return  # Cancel
-                if edit_result is True:
-                    prompt_text = self._ask_project_description(name, prefill=prompt_text)
-                    if prompt_text is None:
-                        return
-                    rules_content = self._generate_rules_with_ui(prompt_text, name)
-                    if rules_content is None:
-                        return
-                    continue
-                rules_content = edit_result
-                break
-        else:
-            rules_content = None
-
-        # Save projects.json entry + optional CLAUDE.md, open tab
-        self._save_and_open_project(name, root, paths, rules_content, presets=presets)
-
-        # Apply non-default user profile
-        if profile and profile != "default":
-            from . import user_profile
-
-            try:
-                user_profile.set_profile(name, profile)
-            except ValueError:
-                pass  # profile was removed between wizard open and Finish
-
-        # Refresh user selector so new project's profile is reflected
-        self._refresh_user_combo(name)
-
     def _import_existing_project(self) -> None:
         """Original add-project flow: select folder → map paths → save."""
         from pathlib import Path
@@ -3600,7 +3525,7 @@ class MainWindow(QMainWindow):
             w = window_map.get(key)
             if w is None:
                 return f"{label} —"
-            return f"{label} {int(w.utilization * 100)}%"
+            return f"{label} {round(w.utilization)}%"
 
         text = "  ".join(
             [
@@ -3613,9 +3538,9 @@ class MainWindow(QMainWindow):
         max_util = max((w.utilization for w in (data.windows or [])), default=0.0)
         if rate_limited:
             color = "#a16207"
-        elif max_util >= 0.80:
+        elif max_util >= 80:
             color = "#f87171"
-        elif max_util >= 0.50:
+        elif max_util >= 50:
             color = "#fbbf24"
         else:
             color = "#71717a"
