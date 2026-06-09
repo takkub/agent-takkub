@@ -253,6 +253,138 @@ def fetch_usage(config_dir: Path | None = None) -> UsageData | None:
     return None
 
 
+def _resolve_config_dir(config_dir: Path | None) -> Path:
+    """Resolve a config_dir to an absolute canonical Path for use as a dict key."""
+    if config_dir is None:
+        return (Path.home() / ".claude").resolve()
+    return Path(config_dir).resolve()
+
+
+class LimitStore:
+    """Shared background poller with per-user (config_dir) ref-counting.
+
+    One daemon thread polls all registered config_dirs on *interval_s*
+    cadence.  Switching tabs reads the cache only — never fetches.
+
+    Usage:
+        store = LimitStore(on_update=lambda cd, data: signal.emit((cd, data)))
+        store.start()
+        store.register(config_dir)     # on tab open
+        store.get(config_dir)          # on tab switch — cache read, no fetch
+        store.unregister(config_dir)   # on tab close
+        store.stop()                   # on app quit
+    """
+
+    def __init__(
+        self,
+        interval_s: int = 120,
+        on_update: Callable[[Path, UsageData | None], None] | None = None,
+        stagger_s: float = 2.0,
+    ) -> None:
+        self._interval_s = interval_s
+        self._on_update = on_update
+        self._stagger_s = stagger_s
+        self._lock = threading.Lock()
+        self._refs: dict[Path, int] = {}
+        self._cache: dict[Path, UsageData | None] = {}
+        self._running = False
+        self._wake = threading.Event()
+
+    def start(self) -> None:
+        self._running = True
+        threading.Thread(target=self._loop, daemon=True, name="limit-store-loop").start()
+
+    def stop(self) -> None:
+        self._running = False
+        self._wake.set()
+
+    def register(self, config_dir: Path | None) -> None:
+        """Increment ref-count for *config_dir*.
+
+        First registration triggers an immediate background fetch so the UI
+        has data quickly without waiting for the next polling interval.
+        """
+        key = _resolve_config_dir(config_dir)
+        with self._lock:
+            is_new = key not in self._refs
+            self._refs[key] = self._refs.get(key, 0) + 1
+        if is_new:
+            threading.Thread(
+                target=self._do_fetch,
+                args=(key,),
+                daemon=True,
+                name=f"limit-fetch-{key.name}",
+            ).start()
+
+    def unregister(self, config_dir: Path | None) -> None:
+        """Decrement ref-count for *config_dir*.
+
+        When the count reaches 0, remove from the poll set and clear the
+        cached data.
+        """
+        key = _resolve_config_dir(config_dir)
+        with self._lock:
+            if key not in self._refs:
+                return
+            self._refs[key] -= 1
+            if self._refs[key] <= 0:
+                self._refs.pop(key, None)
+                self._cache.pop(key, None)
+
+    def get(self, config_dir: Path | None) -> UsageData | None:
+        """Return cached data for *config_dir* without triggering any fetch."""
+        key = _resolve_config_dir(config_dir)
+        with self._lock:
+            return self._cache.get(key)
+
+    # ── internal ──────────────────────────────────────────────────
+
+    def _do_fetch(self, key: Path) -> None:
+        """Fetch usage for one config_dir, update cache, emit callback."""
+        try:
+            data = fetch_usage(key)
+        except RateLimited:
+            _log.warning("Rate limited for %s, retaining cached data", key)
+            data = None
+        except Exception:
+            _log.exception("Error fetching usage for %s", key)
+            data = None
+
+        with self._lock:
+            if key not in self._refs:
+                return  # unregistered while fetch was in-flight
+            if data is not None:
+                self._cache[key] = data
+            emit_data = self._cache.get(key)
+
+        if self._on_update is not None:
+            try:
+                self._on_update(key, emit_data)
+            except Exception:
+                _log.exception("Error in LimitStore on_update callback")
+
+    def _loop(self) -> None:
+        """Background daemon: sleep *interval_s*, then fetch all registered dirs."""
+        while self._running:
+            # Wait first — immediate fetches on register() handle "show quickly"
+            self._wake.wait(
+                timeout=self._interval_s + random.uniform(0, min(self._interval_s * 0.1, 10))
+            )
+            self._wake.clear()
+            if not self._running:
+                return
+            with self._lock:
+                keys = list(self._refs.keys())
+            for i, key in enumerate(keys):
+                if not self._running:
+                    return
+                self._do_fetch(key)
+                if i < len(keys) - 1:
+                    # Small stagger between fetches to avoid burst
+                    self._wake.wait(timeout=self._stagger_s)
+                    self._wake.clear()
+
+
 class Poller:
     def __init__(
         self,

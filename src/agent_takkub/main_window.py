@@ -856,11 +856,11 @@ class MainWindow(QMainWindow):
         # next to the deferred connection at MW.11.
         self.tabs.currentChanged.connect(self._on_tab_switched)
 
-        # ── limit-status poller (background thread → GUI via signal) ───
-        self._limit_poller = None
+        # ── limit-status store (background thread → GUI via signal) ───
+        self._limit_store = None
         self._usageUpdated.connect(self._on_usage_updated)
         # Defer 3 s so the boot sequence settles before the first HTTP hit.
-        QTimer.singleShot(3_000, self._restart_limit_poller)
+        QTimer.singleShot(3_000, self._init_limit_store)
 
         # ── bottom logs dock (hidden by default) ────────────────
         self._logs_dock = QDockWidget("events", self)
@@ -1456,6 +1456,10 @@ class MainWindow(QMainWindow):
         # No auto-/remote-control on tab open. Resume case is handled by
         # the orch.paneResumed signal; manual case via the hint chip.
         self._refresh_rtk_button()
+        if self._limit_store is not None:
+            from . import user_profile as _up_ot
+
+            self._limit_store.register(_up_ot.config_dir_for(project_name))
         self._persist_open_tabs()
         self._status.showMessage(f"opened tab · {project_name}", 4_000)
 
@@ -1481,6 +1485,10 @@ class MainWindow(QMainWindow):
         self.orch.close_all_teammates(project=tab.project_name)
         self.orch.close(LEAD.name, project=tab.project_name, force=True, reason="tab_close")
         self.orch.unregister_pane(LEAD.name, project=tab.project_name, force=True)
+        if self._limit_store is not None:
+            from . import user_profile as _up_tc
+
+            self._limit_store.unregister(_up_tc.config_dir_for(tab.project_name))
         self.tabs.removeTab(index)
         # ProjectTab still holds references to AgentPane/TerminalWidget;
         # explicitly destroy them so Chromium releases the renderer.
@@ -1516,7 +1524,9 @@ class MainWindow(QMainWindow):
             self._refresh_user_combo(tab.project_name)
             from . import user_profile as _up_sw
 
-            self._restart_limit_poller(_up_sw.config_dir_for(tab.project_name))
+            if self._limit_store is not None:
+                cd = _up_sw.config_dir_for(tab.project_name)
+                self._refresh_limit_label(self._limit_store.get(cd))
             self._status.showMessage(f"active project → {tab.project_name}", 3_000)
 
     def _restart_lead_for_active_project(self) -> None:
@@ -3366,11 +3376,17 @@ class MainWindow(QMainWindow):
             return
         from . import user_profile
 
+        old_cd = user_profile.config_dir_for(project)
         try:
             user_profile.set_profile(project, name)
         except ValueError:
             return
-        self._restart_limit_poller(user_profile.config_dir_for(project))
+        new_cd = user_profile.config_dir_for(project)
+        if self._limit_store is not None:
+            if old_cd.resolve() != new_cd.resolve():
+                self._limit_store.unregister(old_cd)
+                self._limit_store.register(new_cd)
+            self._refresh_limit_label(self._limit_store.get(new_cd))
 
     def _on_add_user_clicked(self) -> None:
         from PyQt6.QtWidgets import (
@@ -3480,33 +3496,46 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     # ──────────────────────────────────────────────────────────────
-    # limit-status poller (thread-safe via _usageUpdated signal)
+    # limit-status store (thread-safe via _usageUpdated signal)
     # ──────────────────────────────────────────────────────────────
-    def _restart_limit_poller(self, config_dir: Path | None = None) -> None:
+    def _init_limit_store(self) -> None:
+        """Create the shared LimitStore and register every currently open project tab.
+
+        Called once via QTimer.singleShot(3_000) so the boot sequence
+        settles before the first HTTP hit.  Per-tab register/unregister
+        hooks keep the poll set in sync as tabs open and close.
+        """
         from . import limit_status, user_profile
-
-        if self._limit_poller is not None:
-            self._limit_poller.stop()
-            self._limit_poller = None
-
-        if config_dir is None:
-            project = active_project()[0] or ""
-            config_dir = user_profile.config_dir_for(project)
 
         # on_update runs in a daemon thread — emit signal so Qt queues the
         # call and _on_usage_updated executes on the GUI thread.
-        self._limit_poller = limit_status.Poller(
-            interval_s=300,
-            on_update=lambda data: self._usageUpdated.emit(data),
-            config_dir=config_dir,
+        self._limit_store = limit_status.LimitStore(
+            interval_s=120,
+            on_update=lambda cd, data: self._usageUpdated.emit((cd, data)),
         )
-        self._limit_poller.start()
+        self._limit_store.start()
 
-    def _on_usage_updated(self, data) -> None:
+        # Register all tabs that already exist (initial tab + any restored tabs
+        # that opened during the 3 s boot window).
+        for i in range(self.tabs.count()):
+            tab = self.tabs.widget(i)
+            if isinstance(tab, ProjectTab):
+                cd = user_profile.config_dir_for(tab.project_name)
+                self._limit_store.register(cd)
+
+    def _on_usage_updated(self, payload) -> None:
         """Slot — always called on the GUI thread (queued via _usageUpdated signal)."""
         if not hasattr(self, "_limit_label"):
             return
-        self._refresh_limit_label(data)
+        config_dir, data = payload
+        from pathlib import Path as _Path
+
+        from . import user_profile as _up_uu
+
+        active = active_project()[0] or ""
+        active_cd = _up_uu.config_dir_for(active)
+        if _Path(config_dir).resolve() == _Path(active_cd).resolve():
+            self._refresh_limit_label(data)
 
     def _refresh_limit_label(self, data) -> None:
         if data is None:
@@ -3626,9 +3655,9 @@ class MainWindow(QMainWindow):
                 if pane.session is not None:
                     pane.mark_expected_exit()
                     pane.session.terminate()
-        if self._limit_poller is not None:
-            self._limit_poller.stop()
-            self._limit_poller = None
+        if self._limit_store is not None:
+            self._limit_store.stop()
+            self._limit_store = None
         self.cli.close()
         super().closeEvent(event)
 
