@@ -513,29 +513,7 @@ class MainWindow(QMainWindow):
         self._btn_add_project.setFixedWidth(28)
         self._btn_add_project.clicked.connect(self._on_add_project_clicked)
 
-        # ── per-project user profile selector ──────────────────
-        self._user_label = QLabel("User:", self)
-        self._user_label.setStyleSheet("color:#a1a1aa; font-size:11px; padding:0 2px;")
-        self._user_combo = QComboBox(self)
-        self._user_combo.setMinimumWidth(80)
-        self._user_combo.setMaximumWidth(130)
-        self._user_combo.setToolTip(
-            "Claude config profile for this project.\n"
-            "Sets CLAUDE_CONFIG_DIR so each project can log in as a different account."
-        )
-        self._user_combo.setStyleSheet(
-            "QComboBox { background:#27272a; color:#d4d4d8; border:1px solid #3f3f46; "
-            "border-radius:4px; padding:1px 6px; font-size:11px; }"
-            "QComboBox::drop-down { border:none; width:14px; }"
-            "QComboBox QAbstractItemView { background:#27272a; color:#d4d4d8; "
-            "selection-background-color:#3f3f46; }"
-        )
-        self._btn_add_user = QPushButton("+ User", self)
-        self._btn_add_user.setToolTip("Add or remove Claude config profiles")
-        self._btn_add_user.setStyleSheet(self._ghost_button_style())
-        self._btn_add_user.clicked.connect(self._on_add_user_clicked)
-        self._refresh_user_combo()
-        self._user_combo.currentTextChanged.connect(self._on_user_changed)
+        # user profile selector moved to ⚙ Pipelines QMenu
 
         # One-click rtk install for the active project. Only visible when
         # the project hasn't been initialised yet — once `.claude/settings.json`
@@ -753,7 +731,7 @@ class MainWindow(QMainWindow):
             "stays global. Applies to the next pane you spawn, no restart needed."
         )
         self._btn_pipelines.setStyleSheet(self._ghost_button_style())
-        self._btn_pipelines.clicked.connect(self._on_pipelines_clicked)
+        self._btn_pipelines.clicked.connect(self._show_pipelines_menu)
 
         # ▶ Run button removed per user request — it rendered as a stray widget
         # at the window origin (parent=self, never placed in a layout) and
@@ -812,9 +790,6 @@ class MainWindow(QMainWindow):
         for w in (
             self._version_label,
             self._btn_add_project,
-            self._user_label,
-            self._user_combo,
-            self._btn_add_user,
         ):
             self._status.addPermanentWidget(w)
         self._status.addPermanentWidget(self._make_status_separator())
@@ -1173,7 +1148,7 @@ class MainWindow(QMainWindow):
         self._lead_first_input_fired.add(project)
         self.orch.inject_slash_command_when_ready(LEAD.name, "/remote-control", project=project)
 
-    def _on_pipelines_clicked(self) -> None:
+    def _open_pipeline_settings_dialog(self) -> None:
         """Open the pipeline-settings dialog (drag-drop hops, templates,
         provider/role enable) for the **active project**. On Save & Apply the
         page persists templates + per-role enable + per-role CLI to that
@@ -1190,11 +1165,11 @@ class MainWindow(QMainWindow):
         try:
             from .config import active_project as _active_project
 
-            active_project, _ = _active_project()
+            _proj, _ = _active_project()
         except Exception:
-            active_project = None
+            _proj = None
 
-        dlg = PipelineSettingsDialog(self, project=active_project)
+        dlg = PipelineSettingsDialog(self, project=_proj)
         if dlg.exec() != dlg.DialogCode.Accepted:
             return
         # Apply only providers whose target state differs from disk — toggle_provider
@@ -1206,6 +1181,54 @@ class MainWindow(QMainWindow):
             "Pipeline settings saved — applies to the next pane you spawn.",
             6_000,
         )
+
+    def _show_pipelines_menu(self) -> None:
+        """Show the ⚙ Pipelines drop-down menu.
+
+        Built fresh on every click so user-profile state is always current.
+        Menu sections:
+          1. Pipeline Settings… (opens the dialog)
+          ─────────────────
+          2. User profiles (checkable, one per profile)
+          ─────────────────
+          3. Add / Remove user…
+        """
+        from PyQt6.QtGui import QAction
+        from PyQt6.QtWidgets import QMenu
+
+        from . import user_profile
+
+        try:
+            from .config import active_project as _active_project
+
+            _proj, _ = _active_project()
+        except Exception:
+            _proj = None
+
+        menu = QMenu(self)
+
+        act_pipeline = QAction("Pipeline Settings…", self)
+        act_pipeline.triggered.connect(self._open_pipeline_settings_dialog)
+        menu.addAction(act_pipeline)
+
+        menu.addSeparator()
+
+        current_profile = user_profile.profile_for(_proj or "")
+        for profile in user_profile.list_profiles():
+            name = profile["name"]
+            act = QAction(name, self)
+            act.setCheckable(True)
+            act.setChecked(name == current_profile)
+            act.triggered.connect(lambda _checked, n=name: self._on_user_changed(n))
+            menu.addAction(act)
+
+        menu.addSeparator()
+
+        act_manage = QAction("Add / Remove user…", self)
+        act_manage.triggered.connect(self._on_add_user_clicked)
+        menu.addAction(act_manage)
+
+        menu.exec(self._btn_pipelines.mapToGlobal(self._btn_pipelines.rect().bottomLeft()))
 
     def _on_claude_auth_clicked(self) -> None:
         """Open optional Claude auth override settings."""
@@ -1521,7 +1544,6 @@ class MainWindow(QMainWindow):
             return
         if set_active_project(tab.project_name):
             self._refresh_rtk_button()
-            self._refresh_user_combo(tab.project_name)
             from . import user_profile as _up_sw
 
             if self._limit_store is not None:
@@ -3346,28 +3368,8 @@ class MainWindow(QMainWindow):
         self._status.showMessage(f"Updated project '{proj_name}'", 4_000)
 
     # ──────────────────────────────────────────────────────────────
-    # per-project user profile selector
+    # per-project user profile selector (accessed via ⚙ Pipelines menu)
     # ──────────────────────────────────────────────────────────────
-    def _refresh_user_combo(self, project: str | None = None) -> None:
-        if not hasattr(self, "_user_combo"):
-            return
-        from . import user_profile
-
-        if project is None:
-            project = active_project()[0] or ""
-        self._user_combo.blockSignals(True)
-        try:
-            self._user_combo.clear()
-            profiles = user_profile.list_profiles()
-            for p in profiles:
-                self._user_combo.addItem(p["name"])
-            current = user_profile.profile_for(project)
-            idx = self._user_combo.findText(current)
-            if idx >= 0:
-                self._user_combo.setCurrentIndex(idx)
-        finally:
-            self._user_combo.blockSignals(False)
-
     def _on_user_changed(self, name: str) -> None:
         if not name:
             return
@@ -3436,7 +3438,6 @@ class MainWindow(QMainWindow):
                 return
             profile_list.takeItem(row)
             profiles.pop(row)
-            self._refresh_user_combo()
 
         btn_remove.clicked.connect(_do_remove)
 
@@ -3486,7 +3487,6 @@ class MainWindow(QMainWindow):
             profile_list.addItem(f"{n}  →  {d}")
             name_edit.clear()
             dir_edit.clear()
-            self._refresh_user_combo()
 
         btn_add.clicked.connect(_do_add)
 
