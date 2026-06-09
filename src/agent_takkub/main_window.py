@@ -3393,17 +3393,50 @@ class MainWindow(QMainWindow):
             return
         from . import user_profile
 
+        old_name = user_profile.profile_for(project)
         old_cd = user_profile.config_dir_for(project)
         try:
             user_profile.set_profile(project, name)
         except ValueError:
             return
         new_cd = user_profile.config_dir_for(project)
+        changed = old_cd.resolve() != new_cd.resolve()
+
+        # When the account actually changes, the running Lead + teammate panes
+        # still carry the old CLAUDE_CONFIG_DIR (injected once at spawn time),
+        # so the switch is invisible until they respawn. Confirm, then kill +
+        # respawn so the new profile's login takes effect immediately. Same
+        # restart path the active-project switch uses.
+        if changed:
+            from PyQt6.QtWidgets import QMessageBox
+
+            confirm = QMessageBox.question(
+                self,
+                "Switch Claude account",
+                f"Switch '{project}' to profile '{name}'?\n\n"
+                f"Lead + every teammate pane for this project will be "
+                f"restarted so the new login takes effect.",
+                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Ok,
+            )
+            if confirm != QMessageBox.StandardButton.Ok:
+                # Backed out — restore the previous selection so the persisted
+                # state still matches the (unchanged) running panes.
+                try:
+                    user_profile.set_profile(project, old_name)
+                except ValueError:
+                    pass
+                return
+
         if self._limit_store is not None:
-            if old_cd.resolve() != new_cd.resolve():
+            if changed:
                 self._limit_store.unregister(old_cd)
                 self._limit_store.register(new_cd)
             self._refresh_limit_label(self._limit_store.get(new_cd))
+
+        if changed:
+            self._status.showMessage(f"switching {project} → {name} · restarting panes…", 6_000)
+            self._restart_lead_for_active_project()
 
     def _on_add_user_clicked(self) -> None:
         from PyQt6.QtWidgets import (
