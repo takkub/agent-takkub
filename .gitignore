@@ -43,3 +43,12 @@ GEMINI.md
 # Gemini-role stand-in prompt (claude substitute) — a real source file,
 # not the auto-planted cheatsheet. Negate the case-insensitive GEMINI.md match.
 !.claude/agents/gemini.md
+
+# Scheduled-tasks lock — runtime, per-machine (created by /schedule).
+.claude/scheduled_tasks.lock
+
+# Local scratch scripts / experiments — not repo source.
+scratch/
+
+# Large local media tarballs (gameplay captures etc.) — never committed.
+*.tar
