@@ -616,6 +616,65 @@ def cmd_search(args: argparse.Namespace) -> dict:
     }
 
 
+def cmd_services(args: argparse.Namespace) -> dict:
+    """Local docker compose operations — no orchestrator IPC.
+
+    Works whether the cockpit is running or not. Resolves the compose path
+    from --cwd; if omitted, scans the active project's configured paths for
+    a compose file.
+    """
+    from pathlib import Path
+
+    from .config import active_project
+    from .services import detect_compose, down, logs, ps, up
+
+    sub = args.services_command
+
+    # Resolve the working directory that contains the compose file.
+    cwd: Path | None = Path(args.cwd) if getattr(args, "cwd", None) else None
+    if cwd is None:
+        _, proj = active_project()
+        paths = proj.get("paths", {})
+        for _p in paths.values():
+            candidate = Path(_p)
+            if detect_compose(candidate) is not None:
+                cwd = candidate
+                break
+        if cwd is None and paths:
+            cwd = Path(next(iter(paths.values())))
+    if cwd is None:
+        cwd = Path(".")
+
+    project_name = getattr(args, "project", None) or str(cwd.resolve().name)
+
+    if sub == "start":
+        ok, msg = up(project_name, cwd)
+        return {"ok": ok, "msg": msg}
+
+    if sub == "stop":
+        ok, msg = down(project_name, cwd)
+        return {"ok": ok, "msg": msg}
+
+    if sub == "ps":
+        services = ps(project_name, cwd)
+        if not services:
+            print("  (no services running or compose file not found)")
+            return {"ok": True, "msg": "0 services"}
+        for svc in services:
+            health_str = f"  [{svc.health}]" if svc.health else ""
+            print(f"  {svc.name:<30} {svc.state}{health_str}")
+        return {"ok": True, "msg": f"{len(services)} service(s)"}
+
+    if sub == "logs":
+        tail = getattr(args, "tail", 50) or 50
+        ok, output = logs(project_name, cwd, tail=tail)
+        if output:
+            print(output)
+        return {"ok": ok, "msg": "logs fetched" if ok else output}
+
+    return {"ok": False, "msg": f"unknown services subcommand: {sub}"}
+
+
 def main(argv: list[str] | None = None) -> int:
     _ensure_utf8_stdio()
     p = argparse.ArgumentParser(prog="takkub", description="agent-takkub cockpit CLI")
@@ -983,6 +1042,37 @@ def main(argv: list[str] | None = None) -> int:
         help="print the planned version/tag without touching files or git",
     )
     srel.set_defaults(func=cmd_release)
+
+    # ── services (docker compose) ────────────────────────────────────────────
+    ssvcs = sub.add_parser(
+        "services",
+        help="docker compose operations for the active project (start/stop/ps/logs)",
+    )
+    ssvcs.add_argument(
+        "--cwd",
+        default=None,
+        help="directory containing the compose file (default: active project's compose path)",
+    )
+    ssvcs.add_argument(
+        "--project",
+        default=None,
+        help="project name override (default: derived from cwd directory name)",
+    )
+    ssvcs_sub = ssvcs.add_subparsers(dest="services_command", required=True)
+
+    ssvcs_sub.add_parser("start", help="docker compose up -d")
+    ssvcs_sub.add_parser("stop", help="docker compose down")
+    ssvcs_sub.add_parser("ps", help="show running services and health state")
+
+    ssvcs_logs = ssvcs_sub.add_parser("logs", help="fetch recent log lines (non-blocking)")
+    ssvcs_logs.add_argument(
+        "--tail",
+        type=int,
+        default=50,
+        help="number of log lines to fetch (default: 50)",
+    )
+
+    ssvcs.set_defaults(func=cmd_services)
 
     args = p.parse_args(argv)
 
