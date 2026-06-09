@@ -50,33 +50,56 @@ def _boot_log(msg: str) -> None:
 # window, only one is "focused" at a time and the rest get paint-suppressed
 # — output reaches xterm.js but the DOM doesn't repaint until the user
 # pokes the view. Flip the throttles off before QtWebEngine boots.
-os.environ.setdefault(
-    "QTWEBENGINE_CHROMIUM_FLAGS",
-    " ".join(
-        [
-            "--disable-background-timer-throttling",
-            "--disable-renderer-backgrounding",
-            "--disable-backgrounding-occluded-windows",
-            "--disable-features=CalculateNativeWinOcclusion",
-            # Cap renderer process count so dozens of panes (multi-project
-            # tabs) don't each spawn a fresh Chromium renderer at ~150 MB
-            # baseline. With this flag Chromium reuses renderer processes
-            # across views past the limit, trading isolation for memory.
-            # 4 is enough to keep paint pipelines responsive without
-            # ballooning RAM.
-            "--renderer-process-limit=4",
-            # Force software compositing. With many xterm.js WebEngine views
-            # (2+ project tabs) the shared GPU process gets overwhelmed and
-            # crashes — every view goes blank/white and the window stops
-            # responding (the classic QtWebEngine-on-Windows "white screen").
-            # A text terminal needs no GPU, so software rendering trades a
-            # little CPU for not having a GPU process that can take the whole
-            # UI down. See docs/cockpit-freeze-rca-2026-05-29.md.
-            "--disable-gpu",
-            "--disable-gpu-compositing",
-        ]
-    ),
+# Software vs hardware compositing.
+#
+# History: GPU was force-disabled (--disable-gpu) because the *shared* Chromium
+# GPU process could get overwhelmed with many xterm.js views (2+ project tabs)
+# and crash — every view goes blank/white and the window stops responding (the
+# classic QtWebEngine-on-Windows "white screen"; see
+# docs/cockpit-freeze-rca-2026-05-29.md). The trade was "a little CPU" for GPU
+# stability.
+#
+# In practice that "little CPU" is not little: software rasterising every pane
+# pegs the CPU and makes the whole UI feel janky/stuttery even on a fast machine
+# with a discrete GPU and plenty of RAM — exactly the case where hardware
+# compositing is dramatically smoother. So the default is now **hardware GPU
+# ON**. If the GPU process ever destabilises on a given machine (white screen),
+# set TAKKUB_FORCE_SOFTWARE_GPU=1 to fall back to the old software path WITHOUT
+# editing code.
+_force_software_gpu = os.environ.get("TAKKUB_FORCE_SOFTWARE_GPU", "").strip().lower() not in (
+    "",
+    "0",
+    "false",
+    "no",
 )
+
+_chromium_flags = [
+    "--disable-background-timer-throttling",
+    "--disable-renderer-backgrounding",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-features=CalculateNativeWinOcclusion",
+    # Cap renderer process count so dozens of panes (multi-project tabs) don't
+    # each spawn a fresh Chromium renderer at ~150 MB baseline. With this flag
+    # Chromium reuses renderer processes across views past the limit, trading
+    # isolation for memory.
+    "--renderer-process-limit=4",
+]
+
+if _force_software_gpu:
+    # Legacy safe path: no GPU process at all (cannot take the UI down), at the
+    # cost of CPU-bound software rasterisation.
+    _chromium_flags += ["--disable-gpu", "--disable-gpu-compositing"]
+else:
+    # Hardware compositing + GPU rasterisation → smooth xterm.js scroll/paint
+    # and the CPU freed from rasterising every pane. --ignore-gpu-blocklist
+    # forces acceleration on even if Chromium's driver blocklist is overly
+    # cautious (common on otherwise-capable Windows GPUs).
+    _chromium_flags += [
+        "--enable-gpu-rasterization",
+        "--ignore-gpu-blocklist",
+    ]
+
+os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", " ".join(_chromium_flags))
 
 from PyQt6.QtCore import QLockFile  # noqa: E402
 from PyQt6.QtGui import QFont  # noqa: E402 — PyQt must import after env setup above

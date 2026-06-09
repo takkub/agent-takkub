@@ -477,9 +477,14 @@ class MainWindow(QMainWindow):
         # ── limit-status corner widget (top-right of tab bar) ───────────
         _limit_container = QWidget(self)
         _limit_hl = QHBoxLayout(_limit_container)
-        _limit_hl.setContentsMargins(4, 0, 8, 0)
+        # Extra right margin keeps the readout from butting up against the
+        # window edge / pane chrome buttons (↓ ▾ ×) sitting just below it.
+        _limit_hl.setContentsMargins(6, 0, 14, 0)
         _limit_hl.setSpacing(0)
         self._limit_label = QLabel("—", _limit_container)
+        # Vertically centre the text in the corner band so it can never ride
+        # up against (and get clipped by) the top edge of the tab strip.
+        self._limit_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self._limit_label.setStyleSheet(
             "QLabel { color:#52525b; font-size:11px; "
             "font-variant-numeric:tabular-nums; padding:0 2px; }"
@@ -492,8 +497,14 @@ class MainWindow(QMainWindow):
         _limit_hl.addWidget(self._limit_label)
         self.tabs.setCornerWidget(_limit_container, Qt.Corner.TopRightCorner)
         # Match the corner widget's height to the tab bar so the limit readout
-        # lines up flush with the tabs instead of floating shorter/taller.
-        _limit_container.setFixedHeight(self.tabs.tabBar().sizeHint().height())
+        # lines up flush with the tabs — but never let it be shorter than the
+        # label itself needs, or the text gets clipped at the top edge.
+        _limit_container.setFixedHeight(
+            max(
+                self.tabs.tabBar().sizeHint().height(),
+                self._limit_label.sizeHint().height(),
+            )
+        )
 
         # ── status bar ──────────────────────────────────────────
         self._status = QStatusBar(self)
