@@ -373,6 +373,15 @@ class MainWindow(QMainWindow):
 
         # ── orchestrator + cli server ───────────────────────────
         self.orch = Orchestrator(self)
+        # Inject the 3-layer spawn gate predicate (layers 1+2; layer 3 is the
+        # Win32 InSendMessageEx check inside spawn_gate.py itself).
+        # Prevents RPC_E_CANTCALLOUT_ININPUTSYNCCALL when QTimer fires during
+        # a modal dialog, QMenu, or other nested Qt event loop.
+        from PyQt6.QtWidgets import QApplication as _QApp
+
+        self.orch.set_spawn_guard(
+            lambda: _QApp.activeModalWidget() is not None or _QApp.activePopupWidget() is not None
+        )
         self.cli = CliServer(self.orch, self)
         self.orch.paneRequested.connect(self._ensure_teammate_pane)
         self.orch.paneClosed.connect(self._remove_teammate_pane)

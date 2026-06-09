@@ -23,6 +23,7 @@ import secrets
 import subprocess
 import time
 import uuid as _uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -1044,6 +1045,22 @@ class Orchestrator(QObject):
         self._hot_md_timer.timeout.connect(self._write_hot_md)
         self._hot_md_timer.start()
 
+        # ── Spawn arbiter (3-layer gate + FIFO serialiser) ──────────
+        # Predicate injected by main_window; returns True when Qt has a modal
+        # or popup widget active (QDialog/QWizard/QMenu).  None = no guard
+        # (tests, headless paths).  Win32 InSendMessageEx is always checked
+        # directly inside _is_spawn_blocked() regardless of this predicate.
+        self._spawn_gate_pred: Callable[[], bool] | None = None
+        # Per-(project::role) set of roles with a pending deferred-spawn timer.
+        # Prevents duplicate QTimer callbacks while the gate is still blocked.
+        self._spawn_deferred: set[str] = set()
+        # FIFO queue: serialise ConPTY construction so only one session.spawn()
+        # runs at a time (a second call while one is in progress is queued here
+        # and re-dispatched by _drain_spawn_queue when the current one finishes).
+        self._spawn_queue: collections.deque = collections.deque()
+        # True while a ConPTY session.spawn() call is executing on this thread.
+        self._spawn_in_progress: bool = False
+
     # ──────────────────────────────────────────────────────────────
     # project-aware view onto the pane registry
     # ──────────────────────────────────────────────────────────────
@@ -1124,6 +1141,87 @@ class Orchestrator(QObject):
         self.statusChanged.emit()
 
     # ──────────────────────────────────────────────────────────────
+    # spawn-gate helpers (injected predicate + deferred retry)
+    # ──────────────────────────────────────────────────────────────
+
+    def set_spawn_guard(self, pred: Callable[[], bool] | None) -> None:
+        """Inject the Qt modal/popup predicate from main_window.
+
+        pred() == True  → ConPTY spawn is unsafe (modal or popup active).
+        Pass None to disable the guard (tests, headless).
+        """
+        self._spawn_gate_pred = pred  # type: ignore[assignment]
+
+    def _is_spawn_blocked(self) -> bool:
+        """3-layer gate: True when ConPTY spawn is unsafe right now."""
+        from .spawn_gate import is_spawn_blocked
+
+        return is_spawn_blocked(getattr(self, "_spawn_gate_pred", None))
+
+    def _retry_deferred_spawn(
+        self,
+        role_name: str,
+        cwd: str | None,
+        project: str | None,
+        _from_auto_respawn: bool,
+        _shard_total: int,
+    ) -> None:
+        """QTimer callback: re-evaluate gate and spawn when safe, or re-defer."""
+        project_ns = self._resolve_project(project)
+        deferred_key = f"{project_ns}::{role_name}"
+        _deferred = getattr(self, "_spawn_deferred", None)
+        if _deferred is not None:
+            _deferred.discard(deferred_key)
+
+        pane = self._project_panes(project_ns).get(role_name)
+        if pane is not None and pane.session is not None and pane.session.is_alive:
+            _log_event("spawn_deferred_already_alive", role=role_name, project=project_ns)
+            return
+        if pane is None:
+            _log_event("spawn_deferred_pane_gone", role=role_name, project=project_ns)
+            return
+
+        if self._is_spawn_blocked():
+            if _deferred is not None:
+                _deferred.add(deferred_key)
+            _log_event("spawn_still_blocked", role=role_name, project=project_ns)
+            QTimer.singleShot(
+                50,
+                lambda r=role_name, c=cwd, p=project, a=_from_auto_respawn, s=_shard_total: (
+                    self._retry_deferred_spawn(r, c, p, a, s)
+                ),
+            )
+            return
+
+        # Gate cleared: wait ~35 ms (1 event-loop turn) then re-check to
+        # close the check-to-call race, then re-enter spawn() which verifies once more.
+        QTimer.singleShot(
+            35,
+            lambda r=role_name, c=cwd, p=project, a=_from_auto_respawn, s=_shard_total: self.spawn(
+                r, cwd=c, project=p, _from_auto_respawn=a, _shard_total=s
+            ),
+        )
+
+    def _drain_spawn_queue(self) -> None:
+        """Pop and schedule the next queued spawn after the current one finishes."""
+        _queue = getattr(self, "_spawn_queue", None)
+        if not _queue:
+            return
+        role, cwd, project, from_auto_respawn, shard_total = _queue.popleft()
+        project_ns = self._resolve_project(project)
+        pane = self._project_panes(project_ns).get(role)
+        if pane is not None and pane.session is not None and pane.session.is_alive:
+            self._drain_spawn_queue()
+            return
+        _log_event("spawn_queue_drain", role=role, project=project_ns)
+        QTimer.singleShot(
+            0,
+            lambda r=role, c=cwd, p=project, a=from_auto_respawn, s=shard_total: self.spawn(
+                r, cwd=c, project=p, _from_auto_respawn=a, _shard_total=s
+            ),
+        )
+
+    # ──────────────────────────────────────────────────────────────
     # high-level operations
     # ──────────────────────────────────────────────────────────────
     def spawn(
@@ -1198,6 +1296,48 @@ class Orchestrator(QObject):
         if cwd and project_ns != "default" and not _cwd_within_project(cwd, project_ns, role_name):
             return False, f"cwd '{cwd}' is outside project '{project_ns}' paths"
 
+        # ── Spawn gate + FIFO arbiter ────────────────────────────────
+        # Prevent RPC_E_CANTCALLOUT_ININPUTSYNCCALL (Windows fatal 0x8001010d):
+        # ConPTY construction is illegal when the Qt main thread is inside an
+        # input-synchronous call context (modal dialog, QMenu, COM SendMessage).
+        # Gate is checked at ONE point above all four spawn branches.
+        # Callers receive True so _send_when_ready keeps polling until the
+        # session becomes alive (see updated _check() below).
+        _deferred = getattr(self, "_spawn_deferred", None)
+        if _deferred is None:
+            self._spawn_deferred = _deferred = set()
+        _deferred_key = f"{project_ns}::{role_name}"
+
+        if _deferred_key in _deferred:
+            # A retry timer is already in flight for this role; don't add another.
+            return True, f"{role_name} spawn already pending"
+
+        if self._is_spawn_blocked():
+            _deferred.add(_deferred_key)
+            _log_event("spawn_deferred_gate", role=role_name, project=project_ns)
+            QTimer.singleShot(
+                50,
+                lambda r=role_name, c=cwd, p=project, a=_from_auto_respawn, s=_shard_total: (
+                    self._retry_deferred_spawn(r, c, p, a, s)
+                ),
+            )
+            return True, f"{role_name} spawn deferred (gate blocked)"
+
+        # Gate clear — discard any stale deferred marker from a prior retry cycle.
+        _deferred.discard(_deferred_key)
+
+        # FIFO serialisation: if another ConPTY session.spawn() is already
+        # executing (GIL may be released, Qt can dispatch further timers),
+        # queue this request and return True so callers start polling.
+        if getattr(self, "_spawn_in_progress", False):
+            _queue = getattr(self, "_spawn_queue", None)
+            if _queue is None:
+                self._spawn_queue = _queue = collections.deque()
+            _queue.append((role_name, cwd, project, _from_auto_respawn, _shard_total))
+            _log_event("spawn_queued_fifo", role=role_name, project=project_ns)
+            return True, f"{role_name} spawn queued (arbiter busy)"
+        # ── /Spawn gate + FIFO arbiter ──────────────────────────────
+
         # ── shell pane: plain PowerShell, no agent ──────────────────
         # The "Open Shell" status-bar button drops the user into a raw
         # pwsh prompt inside the cockpit grid — handy for one-off git
@@ -1233,9 +1373,12 @@ class Orchestrator(QObject):
             session = PtySession(cols=110, rows=36, parent=self)
             _t_path = _build_transcript_path(project_ns, role_name)
             pane._transcript_path = _t_path
+            self._spawn_in_progress = True
             try:
                 session.spawn(argv=shell_argv, cwd=spawn_cwd, env=env, transcript_path=_t_path)
             except Exception as e:
+                self._spawn_in_progress = False
+                self._drain_spawn_queue()
                 return False, f"failed to spawn shell: {e}"
             pane.attach_session(session, cwd=spawn_cwd)
             session.processExited.connect(
@@ -1246,6 +1389,8 @@ class Orchestrator(QObject):
                 del self._recent_exits[_ekey]
             self.statusChanged.emit()
             _log_event("spawn", role=role_name, cwd=spawn_cwd, resumed=False)
+            self._spawn_in_progress = False
+            self._drain_spawn_queue()
             return True, f"shell spawned in {spawn_cwd}"
 
         # ── codex pane: non-claude path ─────────────────────────────
@@ -1302,9 +1447,12 @@ class Orchestrator(QObject):
             session = PtySession(cols=110, rows=36, parent=self)
             _t_path = _build_transcript_path(project_ns, role_name)
             pane._transcript_path = _t_path
+            self._spawn_in_progress = True
             try:
                 session.spawn(argv=gemini_argv, cwd=spawn_cwd, env=env, transcript_path=_t_path)
             except Exception as e:
+                self._spawn_in_progress = False
+                self._drain_spawn_queue()
                 return False, f"failed to spawn gemini: {e}"
             pane.attach_session(session, cwd=spawn_cwd)
             session.processExited.connect(
@@ -1316,6 +1464,8 @@ class Orchestrator(QObject):
             self._auto_trust(role_name, project=project_ns)
             self.statusChanged.emit()
             _log_event("spawn", role=role_name, cwd=spawn_cwd, resumed=False)
+            self._spawn_in_progress = False
+            self._drain_spawn_queue()
             return True, f"gemini spawned in {spawn_cwd}"
 
         if effective_provider == CODEX:
@@ -1374,9 +1524,12 @@ class Orchestrator(QObject):
             session = PtySession(cols=110, rows=36, parent=self)
             _t_path = _build_transcript_path(project_ns, role_name)
             pane._transcript_path = _t_path
+            self._spawn_in_progress = True
             try:
                 session.spawn(argv=codex_argv, cwd=spawn_cwd, env=env, transcript_path=_t_path)
             except Exception as e:
+                self._spawn_in_progress = False
+                self._drain_spawn_queue()
                 return False, f"failed to spawn codex: {e}"
             pane.attach_session(session, cwd=spawn_cwd)
             _ekey = _exit_key(project_ns, role_name)
@@ -1391,6 +1544,8 @@ class Orchestrator(QObject):
             self._auto_trust(role_name, project=project_ns)
             self.statusChanged.emit()
             _log_event("spawn", role=role_name, cwd=spawn_cwd, resumed=False)
+            self._spawn_in_progress = False
+            self._drain_spawn_queue()
             return True, f"codex spawned in {spawn_cwd}"
 
         # Resolve cwd:
@@ -1764,9 +1919,12 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         session = PtySession(cols=110, rows=36, parent=self)
         _t_path = _build_transcript_path(project_ns, role_name)
         pane._transcript_path = _t_path
+        self._spawn_in_progress = True
         try:
             session.spawn(argv=argv, cwd=spawn_cwd, env=env, transcript_path=_t_path)
         except Exception as e:
+            self._spawn_in_progress = False
+            self._drain_spawn_queue()
             return False, f"failed to spawn claude: {e}"
 
         pane.attach_session(session, cwd=spawn_cwd)
@@ -1816,6 +1974,8 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         # talks like Claude.
         if role_name in (CODEX, GEMINI):
             suffix += " — claude substitute (provider unavailable)"
+        self._spawn_in_progress = False
+        self._drain_spawn_queue()
         return True, f"{role_name} spawned in {spawn_cwd}{suffix}"
 
     def _on_codex_exit(
@@ -2237,6 +2397,12 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             if sent[0]:
                 return
             if pane.session is None or not pane.session.is_alive:
+                # Session absent or not yet alive — may be deferred by the
+                # spawn gate.  Keep waiting rather than silently dropping the
+                # task; the gate retry will attach the session within seconds.
+                elapsed[0] += 500
+                if elapsed[0] < max_wait_ms:
+                    QTimer.singleShot(500, _check)
                 return
             if pane.session.is_at_ready_prompt():
                 _deliver()
