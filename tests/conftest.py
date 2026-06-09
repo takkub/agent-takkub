@@ -15,7 +15,14 @@ that bound them — to a per-test tmp dir, so no test can touch the real runtime
 from __future__ import annotations
 
 import importlib
+import os
 import sys
+
+# Must be set before any QApplication/QCoreApplication is constructed.
+# Individual test modules import PyQt6 at module level, but Qt reads this
+# env var at application-creation time — so setting it here (conftest loads
+# first) is sufficient.
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 
@@ -83,3 +90,31 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
         monkeypatch.setattr(pc, "_CONFIG_PATH", takkub_dir / "role-providers.json", raising=False)
 
     yield
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _qt_session_app():
+    """Keep a single QApplication alive for the entire test session.
+
+    Qt forbids creating a second application object in the same process after
+    the first has been destroyed.  Without this fixture, module-scoped ``qapp``
+    fixtures in individual test files (test_auto_chain, test_cli_server, …)
+    each create a QCoreApplication and drop it at module teardown, leaving the
+    C++ singleton dead.  When test_config_wizard.py then tries to construct a
+    QApplication, Qt aborts the process (exit 127 in the full suite, but passes
+    when run in isolation because no prior module has polluted the singleton).
+
+    This fixture creates one QApplication before any test module runs and holds
+    the Python reference for the entire session, so the C++ singleton is never
+    destroyed between modules.  Module-scoped ``qapp`` fixtures in test files
+    call ``QCoreApplication.instance()`` / ``QApplication.instance()`` first
+    and reuse this instance — no second construction ever happens.
+    """
+    from PyQt6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    yield app
+    # Do NOT call app.quit() here — session-scoped fixture teardown may race
+    # with other fixtures still running.  Let the process exit handle cleanup.

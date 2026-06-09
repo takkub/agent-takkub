@@ -64,7 +64,6 @@ from .orchestrator import Orchestrator, _log_event
 from .project_tab import ProjectTab
 from .roles import DEFAULT_TEAMMATES, LEAD, Role, by_name
 from .rtk_helper import install_rtk, is_rtk_installed, rtk_binary_available
-from .token_meter import format_tokens, usage_color
 
 
 def _handle_cli_bind_error(error_msg: str) -> None:
@@ -149,6 +148,10 @@ class _RulesGeneratorThread(QThread):
 
 
 class MainWindow(QMainWindow):
+    # Thread-safe signal: background limit_status.Poller emits UsageData|None
+    # from a daemon thread → Qt queues the call so _on_usage_updated runs on the GUI thread.
+    _usageUpdated: pyqtSignal = pyqtSignal(object)
+
     # ──────────────────────────────────────────────────────────────
     # backwards-compat accessors: until every callsite is rewritten to
     # explicitly target a project tab, these resolve to the *current*
@@ -430,8 +433,7 @@ class MainWindow(QMainWindow):
         # in this cockpit session — keyed by project name. Populated by:
         #   - `_on_pane_resumed` (session-resume auto-fire)
         #   - `_on_lead_input` (first user Enter in Lead pane)
-        #   - `_on_remote_hint_clicked` (manual chip click)
-        # Membership prevents double-firing across the three paths.
+        # Membership prevents double-firing across both paths.
         self._lead_first_input_fired: set[str] = set()
 
         initial_project = active_project()[0] or "default"
@@ -463,6 +465,24 @@ class MainWindow(QMainWindow):
         # otherwise make it the active tab (and Lead's pane would hide).
         self.tabs.setCurrentIndex(0)
 
+        # ── limit-status corner widget (top-right of tab bar) ───────────
+        _limit_container = QWidget(self)
+        _limit_hl = QHBoxLayout(_limit_container)
+        _limit_hl.setContentsMargins(4, 2, 8, 2)
+        _limit_hl.setSpacing(0)
+        self._limit_label = QLabel("—", _limit_container)
+        self._limit_label.setStyleSheet(
+            "QLabel { color:#52525b; font-size:11px; "
+            "font-variant-numeric:tabular-nums; padding:0 2px; }"
+        )
+        self._limit_label.setToolTip(
+            "Claude usage windows (5h / 7d / 7d-Sonnet)\n"
+            "Reflects the User: profile selected for this project.\n"
+            "Updates every 5 min."
+        )
+        _limit_hl.addWidget(self._limit_label)
+        self.tabs.setCornerWidget(_limit_container, Qt.Corner.TopRightCorner)
+
         # ── status bar ──────────────────────────────────────────
         self._status = QStatusBar(self)
         self.setStatusBar(self._status)
@@ -481,10 +501,37 @@ class MainWindow(QMainWindow):
         self._btn_add_project.setFixedWidth(28)
         self._btn_add_project.clicked.connect(self._on_add_project_clicked)
 
-        self._btn_edit_rules = QPushButton("📋", self)
-        self._btn_edit_rules.setToolTip("Edit project rules (CLAUDE.md) for the active project")
-        self._btn_edit_rules.setFixedWidth(28)
-        self._btn_edit_rules.clicked.connect(self._on_edit_project_rules_clicked)
+        self._btn_setup_wizard = QPushButton("⚙ Setup", self)
+        self._btn_setup_wizard.setToolTip(
+            "Config Wizard — guided multi-step setup for a new project\n"
+            "(name, role paths, presets, user profile, optional CLAUDE.md)"
+        )
+        self._btn_setup_wizard.setStyleSheet(self._ghost_button_style())
+        self._btn_setup_wizard.clicked.connect(self._on_setup_wizard_clicked)
+
+        # ── per-project user profile selector ──────────────────
+        self._user_label = QLabel("User:", self)
+        self._user_label.setStyleSheet("color:#a1a1aa; font-size:11px; padding:0 2px;")
+        self._user_combo = QComboBox(self)
+        self._user_combo.setMinimumWidth(80)
+        self._user_combo.setMaximumWidth(130)
+        self._user_combo.setToolTip(
+            "Claude config profile for this project.\n"
+            "Sets CLAUDE_CONFIG_DIR so each project can log in as a different account."
+        )
+        self._user_combo.setStyleSheet(
+            "QComboBox { background:#27272a; color:#d4d4d8; border:1px solid #3f3f46; "
+            "border-radius:4px; padding:1px 6px; font-size:11px; }"
+            "QComboBox::drop-down { border:none; width:14px; }"
+            "QComboBox QAbstractItemView { background:#27272a; color:#d4d4d8; "
+            "selection-background-color:#3f3f46; }"
+        )
+        self._btn_add_user = QPushButton("+ User", self)
+        self._btn_add_user.setToolTip("Add or remove Claude config profiles")
+        self._btn_add_user.setStyleSheet(self._ghost_button_style())
+        self._btn_add_user.clicked.connect(self._on_add_user_clicked)
+        self._refresh_user_combo()
+        self._user_combo.currentTextChanged.connect(self._on_user_changed)
 
         # One-click rtk install for the active project. Only visible when
         # the project hasn't been initialised yet — once `.claude/settings.json`
@@ -722,26 +769,6 @@ class MainWindow(QMainWindow):
         # delete this hide() line and re-add it to the Group-3 widget tuple below.
         self._btn_claude_auth.hide()
 
-        # Clickable /remote-control trigger. The built-in Claude Code command
-        # bridges a local session to claude.ai/code for browser/phone
-        # control. The cockpit no longer auto-fires it on fresh project
-        # opens (was noisy — every tab open spammed the bridge). Now it
-        # fires only on resume (via orch.paneResumed) or when the user
-        # clicks this chip directly.
-        self._remote_hint = QLabel("💡 /remote-control · click to bridge", self)
-        self._remote_hint.setStyleSheet(
-            "color: #fbbf24; font-size: 11px; padding: 0 8px; "
-            "background: rgba(251, 191, 36, 0.08); border-radius: 4px;"
-        )
-        self._remote_hint.setToolTip(
-            "Click to run /remote-control inside the active Lead pane.\n"
-            "Bridges this Claude session to claude.ai/code so you can\n"
-            "continue from a browser or phone. Auto-fires on session\n"
-            "resume; this chip is for manual trigger on a fresh boot."
-        )
-        self._remote_hint.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._remote_hint.mousePressEvent = lambda _ev: self._on_remote_hint_clicked()
-
         # Cockpit version chip: shows `v<pyproject> · @<short-sha>` so the
         # user can see at a glance what build they're on. Refreshed after
         # every update check + after a successful pull.
@@ -755,16 +782,6 @@ class MainWindow(QMainWindow):
         )
         self._version_label.setCursor(Qt.CursorShape.PointingHandCursor)
         self._version_label.mousePressEvent = lambda _ev: self._show_changelog()
-
-        # Aggregate token meter: sums prompt tokens across every active pane
-        # so the user can spot when the whole team is bumping the limit.
-        # Tooltip breaks it down per role + reveals the largest occupant.
-        self._token_total = QLabel("", self)
-        self._token_total.setToolTip("Aggregate context occupancy across all active panes")
-        self._token_total.setStyleSheet(
-            "color: #6b7280; font-size: 11px; padding: 0 6px; font-variant-numeric: tabular-nums;"
-        )
-        self._token_total.hide()
 
         # Per-pane "context >= 80%" warning state. Keyed
         # `<project>::<role>`. We toast (status bar + tray) the first
@@ -789,11 +806,12 @@ class MainWindow(QMainWindow):
         #   Group 2 — Workflow actions (buttons that change pane state)
         #   Group 3 — System status    (cockpit-level toggles + updates)
         for w in (
-            self._remote_hint,
             self._version_label,
-            self._token_total,
             self._btn_add_project,
-            self._btn_edit_rules,
+            self._btn_setup_wizard,
+            self._user_label,
+            self._user_combo,
+            self._btn_add_user,
         ):
             self._status.addPermanentWidget(w)
         self._status.addPermanentWidget(self._make_status_separator())
@@ -834,6 +852,12 @@ class MainWindow(QMainWindow):
         # didn't exist when the first tab was added. See the comment
         # next to the deferred connection at MW.11.
         self.tabs.currentChanged.connect(self._on_tab_switched)
+
+        # ── limit-status poller (background thread → GUI via signal) ───
+        self._limit_poller = None
+        self._usageUpdated.connect(self._on_usage_updated)
+        # Defer 3 s so the boot sequence settles before the first HTTP hit.
+        QTimer.singleShot(3_000, self._restart_limit_poller)
 
         # ── bottom logs dock (hidden by default) ────────────────
         self._logs_dock = QDockWidget("events", self)
@@ -1146,22 +1170,6 @@ class MainWindow(QMainWindow):
         self._lead_first_input_fired.add(project)
         self.orch.inject_slash_command_when_ready(LEAD.name, "/remote-control", project=project)
 
-    def _on_remote_hint_clicked(self) -> None:
-        """Manual `/remote-control` trigger via the status-bar hint chip.
-        Targets the currently-focused tab's Lead pane."""
-        tab = self._current_tab()
-        if tab is None or tab.lead_pane is None or tab.lead_pane.session is None:
-            self._status.showMessage(
-                "Lead pane isn't running — open or focus a project tab first.",
-                5_000,
-            )
-            return
-        project = tab.project_name
-        # Mark fired so first-input handler doesn't re-trigger later.
-        self._lead_first_input_fired.add(project)
-        self.orch.inject_slash_command_when_ready(LEAD.name, "/remote-control", project=project)
-        self._status.showMessage(f"bridging Lead·{project} → claude.ai/code", 4_000)
-
     def _on_pipelines_clicked(self) -> None:
         """Open the pipeline-settings dialog (drag-drop hops, templates,
         provider/role enable) for the **active project**. On Save & Apply the
@@ -1251,22 +1259,11 @@ class MainWindow(QMainWindow):
 
         active = 0
         working = 0
-        total_prompt = 0
-        biggest_limit = 0
-        per_role: list[tuple[str, int, int]] = []  # (role, prompt, limit)
         for p in self.orch.panes.values():
             if p.session is not None and p.session.is_alive:
                 active += 1
                 if p.state == "working":
                     working += 1
-            usage = p.current_usage()
-            if usage:
-                limit = effective_context_limit(
-                    usage["model"], usage["prompt"], base=getattr(p, "_context_limit", None)
-                )
-                total_prompt += usage["prompt"]
-                biggest_limit = max(biggest_limit, limit)
-                per_role.append((p.role.name, usage["prompt"], limit))
 
         # Refresh every tab's label so the user can see context pressure on
         # other projects without switching tabs. Tab label format:
@@ -1322,29 +1319,6 @@ class MainWindow(QMainWindow):
         if working:
             bits.append(f"{working} working")
         self._status.showMessage("  ·  ".join(bits))
-
-        # Update aggregate token meter. The headline uses the *biggest* single
-        # pane's limit (rather than summing limits) because each context is
-        # independent — the team-wide ratio is "how close any pane is to its
-        # cap" plus a sum for absolute reference.
-        #
-        # Only meaningful with 2+ active panes: with a single pane the Σ just
-        # echoes that pane's own header meter, so we hide it (de-dup) and let
-        # the pane header be the single source of truth.
-        if len(per_role) >= 2:
-            ratio = max(p / lim for _, p, lim in per_role if lim) if per_role else 0.0
-            color = usage_color(ratio)
-            head = f"Σ {format_tokens(total_prompt)} · max {int(ratio * 100)}%"
-            self._token_total.setText(head)
-            self._token_total.setStyleSheet(
-                f"color: {color}; font-size: 11px; padding: 0 6px; "
-                "font-variant-numeric: tabular-nums;"
-            )
-            lines = [f"{r}: {format_tokens(pr)} / {format_tokens(lim)}" for r, pr, lim in per_role]
-            self._token_total.setToolTip("Context occupancy per pane:\n" + "\n".join(lines))
-            self._token_total.show()
-        else:
-            self._token_total.hide()
 
     # ──────────────────────────────────────────────────────────────
     # project switcher
@@ -1536,6 +1510,10 @@ class MainWindow(QMainWindow):
             return
         if set_active_project(tab.project_name):
             self._refresh_rtk_button()
+            self._refresh_user_combo(tab.project_name)
+            from . import user_profile as _up_sw
+
+            self._restart_limit_poller(_up_sw.config_dir_for(tab.project_name))
             self._status.showMessage(f"active project → {tab.project_name}", 3_000)
 
     def _restart_lead_for_active_project(self) -> None:
@@ -2796,6 +2774,75 @@ class MainWindow(QMainWindow):
             self._import_existing_project()
         # Cancel → do nothing
 
+    # ── Config Wizard ────────────────────────────────────────────
+    def _on_setup_wizard_clicked(self) -> None:
+        """Launch the multi-step Config Wizard to set up a new project."""
+        from .config import load_projects
+        from .config_wizard import ConfigWizard
+
+        data = load_projects()
+        existing_names: set[str] = set((data.get("projects") or {}).keys())
+
+        wizard = ConfigWizard(existing_names=existing_names, parent=self)
+        if wizard.exec() != ConfigWizard.DialogCode.Accepted:
+            return
+
+        result = wizard.result_data()
+        name: str = result["name"]
+        root = Path(result["root"])
+        paths: dict[str, str] = result["paths"]
+        presets: list[str] = result["presets"]
+        profile: str = result["profile"]
+        want_claude_md: bool = result["generate_claude_md"]
+
+        # Fall back to root as "main" when user mapped no paths
+        if not paths:
+            paths = {"main": str(root.resolve().as_posix())}
+
+        if want_claude_md:
+            # Step A: describe the project
+            prompt_text = self._ask_project_description(name)
+            if prompt_text is None:
+                return  # user cancelled description
+            # Step B: generate rules (headless claude, shows busy dialog)
+            rules_content = self._generate_rules_with_ui(prompt_text, name)
+            if rules_content is None:
+                return
+            # Step C: let user edit / re-generate before saving
+            while True:
+                edit_result = self._show_rules_editor_dialog(
+                    rules_content, name, allow_regenerate=True
+                )
+                if edit_result is None:
+                    return  # Cancel
+                if edit_result is True:
+                    prompt_text = self._ask_project_description(name, prefill=prompt_text)
+                    if prompt_text is None:
+                        return
+                    rules_content = self._generate_rules_with_ui(prompt_text, name)
+                    if rules_content is None:
+                        return
+                    continue
+                rules_content = edit_result
+                break
+        else:
+            rules_content = None
+
+        # Save projects.json entry + optional CLAUDE.md, open tab
+        self._save_and_open_project(name, root, paths, rules_content, presets=presets)
+
+        # Apply non-default user profile
+        if profile and profile != "default":
+            from . import user_profile
+
+            try:
+                user_profile.set_profile(name, profile)
+            except ValueError:
+                pass  # profile was removed between wizard open and Finish
+
+        # Refresh user selector so new project's profile is reflected
+        self._refresh_user_combo(name)
+
     def _import_existing_project(self) -> None:
         """Original add-project flow: select folder → map paths → save."""
         from pathlib import Path
@@ -3069,9 +3116,18 @@ class MainWindow(QMainWindow):
         return paths
 
     def _save_and_open_project(
-        self, name: str, p: Path, paths: dict, rules_content: str | None
+        self,
+        name: str,
+        p: Path,
+        paths: dict,
+        rules_content: str | None,
+        presets: list[str] | None = None,
     ) -> None:
-        """Write CLAUDE.md (if rules_content given), save projects.json, open tab."""
+        """Write CLAUDE.md (if rules_content given), save projects.json, open tab.
+
+        *presets* overrides the stored preset list when provided; otherwise the
+        existing list is preserved (import / edit flows that don't touch presets).
+        """
         from .config import PROJECTS_JSON, load_projects
 
         if rules_content is not None:
@@ -3087,7 +3143,7 @@ class MainWindow(QMainWindow):
         data["projects"][name] = {
             "description": existing.get("description", name),
             "paths": paths,
-            "presets": existing.get("presets", []),
+            "presets": presets if presets is not None else existing.get("presets", []),
         }
         data["active"] = name
 
@@ -3346,6 +3402,228 @@ class MainWindow(QMainWindow):
         self._status.showMessage(f"Updated project '{proj_name}'", 4_000)
 
     # ──────────────────────────────────────────────────────────────
+    # per-project user profile selector
+    # ──────────────────────────────────────────────────────────────
+    def _refresh_user_combo(self, project: str | None = None) -> None:
+        if not hasattr(self, "_user_combo"):
+            return
+        from . import user_profile
+
+        if project is None:
+            project = active_project()[0] or ""
+        self._user_combo.blockSignals(True)
+        try:
+            self._user_combo.clear()
+            profiles = user_profile.list_profiles()
+            for p in profiles:
+                self._user_combo.addItem(p["name"])
+            current = user_profile.profile_for(project)
+            idx = self._user_combo.findText(current)
+            if idx >= 0:
+                self._user_combo.setCurrentIndex(idx)
+        finally:
+            self._user_combo.blockSignals(False)
+
+    def _on_user_changed(self, name: str) -> None:
+        if not name:
+            return
+        project = active_project()[0] or ""
+        if not project:
+            return
+        from . import user_profile
+
+        try:
+            user_profile.set_profile(project, name)
+        except ValueError:
+            return
+        self._restart_limit_poller(user_profile.config_dir_for(project))
+
+    def _on_add_user_clicked(self) -> None:
+        from PyQt6.QtWidgets import (
+            QDialog,
+            QDialogButtonBox,
+            QFileDialog,
+            QFormLayout,
+            QHBoxLayout,
+            QLabel,
+            QLineEdit,
+            QListWidget,
+            QPushButton,
+            QVBoxLayout,
+        )
+
+        from . import user_profile
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Manage Claude Config Profiles")
+        dlg.resize(460, 360)
+        lay = QVBoxLayout(dlg)
+
+        lay.addWidget(QLabel("Existing profiles ('default' cannot be removed):"))
+        profile_list = QListWidget(dlg)
+        profiles: list[dict] = user_profile.list_profiles()
+        for p in profiles:
+            profile_list.addItem(f"{p['name']}  →  {p['config_dir']}")
+        lay.addWidget(profile_list)
+
+        btn_remove = QPushButton("Remove selected", dlg)
+        btn_remove.setEnabled(False)
+        lay.addWidget(btn_remove)
+
+        def _on_sel(row: int) -> None:
+            btn_remove.setEnabled(row > 0)  # row 0 = "default", not removable
+
+        profile_list.currentRowChanged.connect(_on_sel)
+
+        def _do_remove() -> None:
+            row = profile_list.currentRow()
+            if row <= 0 or row >= len(profiles):
+                return
+            try:
+                user_profile.remove_profile(profiles[row]["name"])
+            except ValueError as exc:
+                QMessageBox.warning(dlg, "Cannot remove", str(exc))
+                return
+            profile_list.takeItem(row)
+            profiles.pop(row)
+            self._refresh_user_combo()
+
+        btn_remove.clicked.connect(_do_remove)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("color: #3f3f46;")
+        lay.addWidget(sep)
+        lay.addWidget(QLabel("Add new profile:"))
+        form = QFormLayout()
+        name_edit = QLineEdit(dlg)
+        name_edit.setPlaceholderText("e.g. work, personal")
+        dir_edit = QLineEdit(dlg)
+        dir_edit.setPlaceholderText("path to Claude config dir, e.g. ~/.claude-work")
+        dir_row_w = QWidget(dlg)
+        dir_row_l = QHBoxLayout(dir_row_w)
+        dir_row_l.setContentsMargins(0, 0, 0, 0)
+        dir_row_l.addWidget(dir_edit)
+        btn_browse = QPushButton("Browse…", dlg)
+        btn_browse.setFixedWidth(72)
+        dir_row_l.addWidget(btn_browse)
+        form.addRow("Name:", name_edit)
+        form.addRow("Config dir:", dir_row_w)
+        lay.addLayout(form)
+
+        def _do_browse() -> None:
+            d = QFileDialog.getExistingDirectory(dlg, "Select Claude config directory")
+            if d:
+                dir_edit.setText(d)
+
+        btn_browse.clicked.connect(_do_browse)
+
+        btn_add = QPushButton("Add Profile", dlg)
+        lay.addWidget(btn_add)
+
+        def _do_add() -> None:
+            n = name_edit.text().strip()
+            d = dir_edit.text().strip()
+            if not n or not d:
+                return
+            try:
+                user_profile.add_profile(n, d)
+            except ValueError as exc:
+                QMessageBox.warning(dlg, "Invalid profile", str(exc))
+                return
+            new_p = {"name": n, "config_dir": d}
+            profiles.append(new_p)
+            profile_list.addItem(f"{n}  →  {d}")
+            name_edit.clear()
+            dir_edit.clear()
+            self._refresh_user_combo()
+
+        btn_add.clicked.connect(_do_add)
+
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, dlg)
+        btns.rejected.connect(dlg.accept)
+        lay.addWidget(btns)
+        dlg.exec()
+
+    # ──────────────────────────────────────────────────────────────
+    # limit-status poller (thread-safe via _usageUpdated signal)
+    # ──────────────────────────────────────────────────────────────
+    def _restart_limit_poller(self, config_dir: Path | None = None) -> None:
+        from . import limit_status, user_profile
+
+        if self._limit_poller is not None:
+            self._limit_poller.stop()
+            self._limit_poller = None
+
+        if config_dir is None:
+            project = active_project()[0] or ""
+            config_dir = user_profile.config_dir_for(project)
+
+        # on_update runs in a daemon thread — emit signal so Qt queues the
+        # call and _on_usage_updated executes on the GUI thread.
+        self._limit_poller = limit_status.Poller(
+            interval_s=300,
+            on_update=lambda data: self._usageUpdated.emit(data),
+            config_dir=config_dir,
+        )
+        self._limit_poller.start()
+
+    def _on_usage_updated(self, data) -> None:
+        """Slot — always called on the GUI thread (queued via _usageUpdated signal)."""
+        if not hasattr(self, "_limit_label"):
+            return
+        self._refresh_limit_label(data)
+
+    def _refresh_limit_label(self, data) -> None:
+        if data is None:
+            self._limit_label.setText("—")
+            self._limit_label.setStyleSheet(
+                "QLabel { color:#52525b; font-size:11px; "
+                "font-variant-numeric:tabular-nums; padding:0 2px; }"
+            )
+            self._limit_label.setToolTip("Usage unavailable (offline or not logged in)")
+            return
+
+        rate_limited = getattr(data, "status", "ok") == "rate_limited"
+        window_map = {w.name: w for w in (data.windows or [])}
+
+        def _fmt(key: str, label: str) -> str:
+            w = window_map.get(key)
+            if w is None:
+                return f"{label} —"
+            return f"{label} {int(w.utilization * 100)}%"
+
+        text = "  ".join(
+            [
+                _fmt("five_hour", "5h"),
+                _fmt("seven_day", "7d"),
+                _fmt("seven_day_sonnet", "7dS"),
+            ]
+        )
+
+        max_util = max((w.utilization for w in (data.windows or [])), default=0.0)
+        if rate_limited:
+            color = "#a16207"
+        elif max_util >= 0.80:
+            color = "#f87171"
+        elif max_util >= 0.50:
+            color = "#fbbf24"
+        else:
+            color = "#71717a"
+
+        self._limit_label.setText(text)
+        self._limit_label.setStyleSheet(
+            f"QLabel {{ color:{color}; font-size:11px; "
+            "font-variant-numeric:tabular-nums; padding:0 2px; }"
+        )
+        plan = getattr(data, "plan", "")
+        stale_note = " (rate-limited, showing last known)" if rate_limited else ""
+        self._limit_label.setToolTip(
+            f"Claude usage — plan: {plan}{stale_note}\n"
+            "5h = five-hour · 7d = seven-day · 7dS = seven-day Sonnet"
+        )
+
+    # ──────────────────────────────────────────────────────────────
     # window state persistence
     # ──────────────────────────────────────────────────────────────
     def _restore_window_state(self) -> None:
@@ -3414,6 +3692,9 @@ class MainWindow(QMainWindow):
                 if pane.session is not None:
                     pane.mark_expected_exit()
                     pane.session.terminate()
+        if self._limit_poller is not None:
+            self._limit_poller.stop()
+            self._limit_poller = None
         self.cli.close()
         super().closeEvent(event)
 

@@ -61,6 +61,7 @@ from .pane_env import (  # re-exported for test imports — see pane_env.py docs
     _apply_mcp_timeout,
     _build_lead_env,
     _build_pane_env,
+    inject_user_profile_env,
 )
 from .pty_session import PtySession
 from .roles import LEAD
@@ -122,6 +123,7 @@ __all__ = [  # backwards-compat re-exports
     "_render_decision_note",
     "_render_lead_context",
     "_resolve_vault_dir",
+    "inject_user_profile_env",
     "prune_old_transcripts",
     "render_lead_settings",
     "scan_artifacts",
@@ -1224,6 +1226,7 @@ class Orchestrator(QObject):
             env = _build_pane_env()
             env["TAKKUB_ROLE"] = role_name
             env["TAKKUB_PROJECT"] = project_ns
+            inject_user_profile_env(env, project_ns)
             bin_dir = str(REPO_ROOT / "bin")
             env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
             shell_argv = [pwsh_basename, "-NoLogo"]
@@ -1289,6 +1292,7 @@ class Orchestrator(QObject):
             env = _build_pane_env()
             env["TAKKUB_ROLE"] = role_name
             env["TAKKUB_PROJECT"] = project_ns
+            inject_user_profile_env(env, project_ns)
             bin_dir = str(REPO_ROOT / "bin")
             env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
             gemini_argv = [
@@ -1333,6 +1337,7 @@ class Orchestrator(QObject):
             env = _build_pane_env()
             env["TAKKUB_ROLE"] = role_name
             env["TAKKUB_PROJECT"] = project_ns
+            inject_user_profile_env(env, project_ns)
             bin_dir = str(REPO_ROOT / "bin")
             env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
             # Autonomy flags so Codex can call `takkub done` and edit
@@ -1513,6 +1518,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
 
         env = _build_lead_env() if role_name == LEAD.name else _build_pane_env()
         env["TAKKUB_ROLE"] = role_name
+        inject_user_profile_env(env, project_ns)
         # Shard env: let the agent know its instance identity vs behaviour identity.
         # TAKKUB_BASE_ROLE = base role name (loads qa.md, correct Chrome config, etc.)
         # TAKKUB_SHARD     = this shard's 1-based index (None-string when not a shard)

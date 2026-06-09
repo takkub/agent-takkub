@@ -191,3 +191,20 @@ def _apply_mcp_timeout(env: dict[str, str]) -> None:
     alone if the operator has already set one at the cockpit level.
     """
     env.setdefault("MCP_TOOL_TIMEOUT", _DEFAULT_MCP_TOOL_TIMEOUT_MS)
+
+
+def inject_user_profile_env(env: dict[str, str], project: str) -> None:
+    """Set ``CLAUDE_CONFIG_DIR`` in *env* when the project uses a non-default profile.
+
+    When the selected profile is ``"default"`` (or missing/corrupt) the env
+    var is intentionally left unset so the existing ``~/.claude`` setup is
+    used unchanged — this keeps the current behaviour for every project that
+    hasn't opted into a named profile.
+    """
+    from .user_profile import DEFAULT_PROFILE, config_dir_for, profile_for
+
+    try:
+        if profile_for(project) != DEFAULT_PROFILE:
+            env["CLAUDE_CONFIG_DIR"] = str(config_dir_for(project))
+    except Exception:
+        pass
