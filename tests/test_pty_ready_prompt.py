@@ -38,3 +38,38 @@ def test_claude_working_esc_to_interrupt_is_not_ready() -> None:
     # Regression guard for the pre-existing claude busy indicator.
     s = _feed_screen("(esc to interrupt) building...", "bypass permissions")
     assert s.is_at_ready_prompt() is False
+
+
+def test_gemini_idle_with_update_footer_is_ready() -> None:
+    # issue #51: once a newer gemini release exists upstream, gemini shows a
+    # PASSIVE "Gemini CLI update available! <cur> → <new>" footer that does
+    # NOT block input. A ready gemini wearing this banner must still read as
+    # idle so the watchdog can nudge it to run `takkub done`. Previously the
+    # blanket "update available!" blocker made it read as perpetually-busy.
+    s = _feed_screen(
+        "Gemini CLI update available! 0.46.0 → 0.47.0",
+        "Type your message or @path/to/file",
+    )
+    assert s.is_at_ready_prompt() is True
+
+
+def test_gemini_thinking_with_update_footer_is_not_ready() -> None:
+    # The update footer must not flip a *thinking* gemini to ready — the
+    # "esc to cancel" busy indicator still takes precedence.
+    s = _feed_screen(
+        "Gemini CLI update available! 0.46.0 → 0.47.0",
+        "Thinking... (esc to cancel, 12s)",
+        "Type your message or @path/to/file",
+    )
+    assert s.is_at_ready_prompt() is False
+
+
+def test_codex_splash_update_modal_is_not_ready() -> None:
+    # codex's "update available!" is part of a startup splash modal that must
+    # be dismissed before the prompt is usable — it must still block (the
+    # gemini ready marker is absent on a codex screen, so the blocker applies).
+    s = _feed_screen(
+        "OpenAI Codex (v1.2.3)",
+        "update available! run npm i -g @openai/codex",
+    )
+    assert s.is_at_ready_prompt() is False

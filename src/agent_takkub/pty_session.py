@@ -451,8 +451,6 @@ class PtySession(QObject):
             return False
         if "do you trust the contents of this directory" in text:
             return False
-        if "update available!" in text:
-            return False
         if "press enter to continue" in text:
             return False
         if "esc to interrupt" in text:
@@ -465,9 +463,25 @@ class PtySession(QObject):
         if "esc to cancel" in text:
             return False
         # ── ready markers ───────────────────────────────────────────
-        if "openai codex (v" in text:
-            return True
+        # gemini: the "type your message or @path" input prompt stays usable
+        # even while the passive "Gemini CLI update available! <cur> → <new>"
+        # footer banner is showing — which it does PERSISTENTLY once a newer
+        # gemini release exists upstream. Check this ready marker BEFORE the
+        # generic "update available!" blocker below; otherwise a gemini that
+        # merely has an update banner reads as perpetually-busy, the idle
+        # watchdog never nudges it to run `takkub done`, and its report never
+        # reaches Lead (issue #51 — surfaced right after gemini auto-updated
+        # to 0.46.0 with a newer release already published upstream).
         if "type your message or" in text:  # gemini's input prompt hint
+            return True
+        # codex: "update available!" is part of its startup splash modal that
+        # must be dismissed before the prompt is usable — keep blocking it.
+        # Checked AFTER gemini's ready marker so it only ever gates the codex
+        # splash (and claude, which never shows this string), never a ready
+        # gemini wearing an update footer.
+        if "update available!" in text:
+            return False
+        if "openai codex (v" in text:
             return True
         return "bypass permissions" in text or "shift+tab to cycle" in text
 
