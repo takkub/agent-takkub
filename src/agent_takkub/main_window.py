@@ -640,6 +640,15 @@ class MainWindow(QMainWindow):
         )
         self._btn_claude_update.setStyleSheet(self._ghost_button_style())
         self._btn_claude_update.clicked.connect(self._on_claude_update_clicked)
+
+        self._btn_gemini_update = QPushButton("⬆ Gemini CLI", self)
+        self._btn_gemini_update.setToolTip(
+            "ยิงคำขอเช็ค Google Gemini CLI version เข้า Lead pane\n"
+            "Lead จะเทียบ version ที่ติดตั้ง vs ล่าสุดบน npm แล้วรายงานในแชต"
+        )
+        self._btn_gemini_update.setStyleSheet(self._ghost_button_style())
+        self._btn_gemini_update.clicked.connect(self._on_gemini_update_clicked)
+
         # True while ClaudeUpdateCheckWorker runs — blocks re-entry.
         self._claude_update_busy: bool = False
 
@@ -831,6 +840,7 @@ class MainWindow(QMainWindow):
             # The button + its handler are still created above; only its
             # placement in the status bar is removed so it can come back easily.
             self._btn_claude_update,
+            self._btn_gemini_update,
             self._btn_update,
         ):
             self._status.addPermanentWidget(w)
@@ -888,9 +898,15 @@ class MainWindow(QMainWindow):
         # The watchdog daemon thread reads _heartbeat_ts; if it stops advancing
         # for ~30 s the watchdog assumes the main thread is wedged and calls
         # os._exit(1). Writing a float is effectively atomic under CPython's GIL.
+        #
+        # Interval is 250 ms (not 1 s) so the watchdog can resolve SUB-SECOND
+        # main-thread stalls — the brief freezes felt while typing during a pane
+        # spawn. With a 1 s beat, normal age regularly approached 1 s and would
+        # false-trigger the 0.75 s soft-stall log threshold; a 250 ms beat keeps
+        # normal age well under it. The extra timestamp writes are negligible.
         self._heartbeat_ts: float = time.monotonic()
         self._heartbeat_timer = QTimer(self)
-        self._heartbeat_timer.setInterval(1_000)
+        self._heartbeat_timer.setInterval(250)
         self._heartbeat_timer.timeout.connect(self._tick_heartbeat)
         self._heartbeat_timer.start()
 
@@ -2205,6 +2221,30 @@ class MainWindow(QMainWindow):
         delivered = self.orch.inject_lead_prompt(prompt, project=active_project)
         if delivered:
             self._status.showMessage("ยิงคำขอเช็ค Claude CLI เข้า Lead แล้ว ↗", 4_000)
+        else:
+            self._status.showMessage("Lead ยังไม่พร้อม — คำขอถูก queue ไว้ จะส่งเมื่อ Lead เปิด", 5_000)
+
+    def _on_gemini_update_clicked(self) -> None:
+        """⬆ Gemini CLI clicked. Hand the version-check off to the active tab's
+        Lead pane. Lead checks `gemini --version` vs npm and reports."""
+        try:
+            from .config import active_project as _active_project
+
+            active_project, _ = _active_project()
+        except Exception:
+            active_project = None
+
+        prompt = (
+            "[gemini-cli check] ช่วยเช็ค Google Gemini CLI ให้หน่อย:\n"
+            "1. version ที่ติดตั้ง: `gemini --version`\n"
+            "2. version ล่าสุดบน npm: `npm view @google/gemini-cli version`\n"
+            "ถ้ามีตัวใหม่ → แนะนำวิธีอัพเดต (`npm install -g @google/gemini-cli@latest`)\n"
+            "หมายเหตุ: ถ้าเจอ banner 'Gemini CLI update available! 0.46.0 → ...' "
+            "ค้างอยู่ ให้แนะนำวิธีแก้ปัญหา persistent notification ด้วย"
+        )
+        delivered = self.orch.inject_lead_prompt(prompt, project=active_project)
+        if delivered:
+            self._status.showMessage("ยิงคำขอเช็ค Gemini CLI เข้า Lead แล้ว ↗", 4_000)
         else:
             self._status.showMessage("Lead ยังไม่พร้อม — คำขอถูก queue ไว้ จะส่งเมื่อ Lead เปิด", 5_000)
 

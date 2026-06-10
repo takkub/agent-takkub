@@ -120,13 +120,24 @@ _instance_lock: QLockFile | None = None  # module-level ref keeps GC from releas
 # exceed ~5 s. 30 s is conservative enough to never fire on transient slowness
 # yet fast enough to catch the 21-minute zombie observed in issue #34.
 _WATCHDOG_TIMEOUT_S = 30.0
-_WATCHDOG_POLL_S = 1.0
-# Soft-stall threshold: the main thread is hung for a few seconds (UI freezes)
+# Poll at 250 ms so sub-second stalls are sampled (matches the 250 ms heartbeat).
+_WATCHDOG_POLL_S = float(os.environ.get("TAKKUB_WATCHDOG_POLL_S", "0.25"))
+# Soft-stall threshold: the main thread is hung for a couple seconds (UI freezes)
 # but recovers before the 30 s hard kill. These transient freezes — e.g. a pane
 # spawn that briefly blocks the Qt thread — never reach _WATCHDOG_TIMEOUT_S, so
 # without a separate capture they leave no stack. On a soft stall we dump the
 # main-thread stack to boot.log WITHOUT killing the process (once per episode).
-_WATCHDOG_SOFT_STALL_S = 3.0
+# Lowered 3.0 → 1.5 so the shorter spawn freezes that started this investigation
+# also leave a stack.
+_WATCHDOG_SOFT_STALL_S = float(os.environ.get("TAKKUB_WATCHDOG_SOFT_STALL_S", "1.5"))
+# Stall-log threshold: the watchdog records a structured `main_thread_stall`
+# event to events.log for ANY freeze whose peak exceeds this — cheaper than a
+# stack dump, and queryable. Set just above the normal age ceiling (~0.25–0.35 s
+# with a 250 ms heartbeat) so routine operation never false-fires. Each event
+# carries the peak duration and whether a pane spawn was in flight during the
+# episode — the signal that confirms (or refutes) the spawn-induced-freeze
+# hypothesis without guessing.
+_WATCHDOG_STALL_LOG_S = float(os.environ.get("TAKKUB_STALL_LOG_S", "0.75"))
 
 
 def _watchdog_should_exit(heartbeat_ts: float, now: float, timeout_s: float) -> bool:
@@ -135,6 +146,42 @@ def _watchdog_should_exit(heartbeat_ts: float, now: float, timeout_s: float) -> 
     Extracted for unit-testability — the daemon thread calls this in a loop.
     """
     return (now - heartbeat_ts) > timeout_s
+
+
+class _StallTracker:
+    """Episode tracker for sub-hard-kill main-thread stalls (pure, testable).
+
+    Fed one (age, spawn_in_progress) sample per watchdog poll. While `age`
+    stays above the log threshold the episode is "active": it tracks the peak
+    age and latches whether a pane spawn was ever in flight during it (latching
+    survives a spawn that finishes mid-episode, which a single instantaneous
+    read would miss). When `age` falls back below the threshold the episode
+    ends and `update()` returns a record dict to log exactly once; otherwise
+    returns None.
+    """
+
+    def __init__(self, log_threshold_s: float) -> None:
+        self._th = log_threshold_s
+        self._active = False
+        self._peak = 0.0
+        self._saw_spawn = False
+
+    def update(self, age: float, spawn_in_progress: bool) -> dict | None:
+        if age > self._th:
+            self._active = True
+            self._peak = max(self._peak, age)
+            self._saw_spawn = self._saw_spawn or bool(spawn_in_progress)
+            return None
+        if self._active:
+            rec = {
+                "duration_ms": round(self._peak * 1000),
+                "spawn_in_progress": self._saw_spawn,
+            }
+            self._active = False
+            self._peak = 0.0
+            self._saw_spawn = False
+            return rec
+        return None
 
 
 def _dump_main_stack(header: str) -> None:
@@ -169,6 +216,7 @@ def _start_deadman_watchdog(window: MainWindow, _stop: threading.Event | None = 
 
     def _run() -> None:
         soft_dumped = False
+        stall_tracker = _StallTracker(_WATCHDOG_STALL_LOG_S)
         while not (_stop is not None and _stop.is_set()):
             time.sleep(_WATCHDOG_POLL_S)
             if _stop is not None and _stop.is_set():
@@ -185,6 +233,22 @@ def _start_deadman_watchdog(window: MainWindow, _stop: threading.Event | None = 
                     soft_dumped = True
                 elif age <= _WATCHDOG_SOFT_STALL_S:
                     soft_dumped = False
+                # Structured stall record (cheaper than a stack dump, queryable
+                # from events.log). Latch whether a pane spawn was in flight so
+                # we can confirm/refute the spawn-induced-freeze hypothesis. The
+                # orchestrator's `_spawn_in_progress` bool is read cross-thread
+                # (atomic under the GIL); never mutate orchestrator state here.
+                spawn_active = bool(
+                    getattr(getattr(window, "orch", None), "_spawn_in_progress", False)
+                )
+                rec = stall_tracker.update(age, spawn_active)
+                if rec is not None:
+                    try:
+                        from .orchestrator import _log_event
+
+                        _log_event("main_thread_stall", **rec)
+                    except Exception:
+                        pass
             if _watchdog_should_exit(window._heartbeat_ts, now, _WATCHDOG_TIMEOUT_S):
                 age = now - window._heartbeat_ts
                 _boot_log(

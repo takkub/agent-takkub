@@ -260,6 +260,70 @@ class TestWatchdogThreadBehaviour:
 
 
 # ─────────────────────────────────────────────────────────────
+# 3b. Sub-hard-kill stall tracker — _StallTracker (pure logic)
+# ─────────────────────────────────────────────────────────────
+
+
+class TestStallTracker:
+    """_StallTracker turns a stream of (age, spawn_in_progress) samples into one
+    logged record per stall episode, capturing peak duration + spawn latch."""
+
+    def _t(self, threshold: float = 0.75) -> app_mod._StallTracker:
+        return app_mod._StallTracker(threshold)
+
+    def test_below_threshold_never_records(self) -> None:
+        t = self._t()
+        for age in (0.0, 0.1, 0.5, 0.74):
+            assert t.update(age, False) is None
+
+    def test_active_episode_returns_none_until_recovery(self) -> None:
+        t = self._t()
+        assert t.update(1.0, False) is None  # crosses threshold — episode open
+        assert t.update(1.5, False) is None  # still stalled
+        rec = t.update(0.2, False)  # recovered → emit once
+        assert rec is not None
+        assert rec["duration_ms"] == 1500  # peak, not the recovery sample
+        assert rec["spawn_in_progress"] is False
+
+    def test_peak_is_max_over_episode(self) -> None:
+        t = self._t()
+        t.update(0.9, False)
+        t.update(2.3, False)
+        t.update(1.1, False)
+        rec = t.update(0.0, False)
+        assert rec["duration_ms"] == 2300
+
+    def test_spawn_latches_even_if_only_briefly_true(self) -> None:
+        # spawn finishes mid-episode (True on one sample, False on others) — the
+        # record must still attribute the stall to a spawn.
+        t = self._t()
+        t.update(1.0, False)
+        t.update(1.2, True)  # spawn seen here
+        t.update(1.4, False)
+        rec = t.update(0.1, False)
+        assert rec["spawn_in_progress"] is True
+
+    def test_no_spawn_episode_reports_false(self) -> None:
+        t = self._t()
+        t.update(1.0, False)
+        rec = t.update(0.0, False)
+        assert rec["spawn_in_progress"] is False
+
+    def test_separate_episodes_emit_separate_records(self) -> None:
+        t = self._t()
+        t.update(1.0, True)
+        rec1 = t.update(0.1, False)
+        assert rec1 is not None and rec1["spawn_in_progress"] is True
+        # second episode starts fresh — peak + spawn latch reset
+        assert t.update(0.2, False) is None  # below threshold, no double-emit
+        t.update(0.9, False)
+        rec2 = t.update(0.0, False)
+        assert rec2 is not None
+        assert rec2["duration_ms"] == 900
+        assert rec2["spawn_in_progress"] is False
+
+
+# ─────────────────────────────────────────────────────────────
 # 4. MainWindow heartbeat attribute
 # ─────────────────────────────────────────────────────────────
 
