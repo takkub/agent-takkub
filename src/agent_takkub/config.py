@@ -222,11 +222,34 @@ def set_open_tabs(names: list[str]) -> None:
     _write_json_atomic(PROJECTS_JSON, data)
 
 
+# Central dev-server hygiene appended to EVERY role's materialised CLAUDE.md so
+# the rule applies to all roles in all projects from one place. Born from a
+# `next dev` postcss-worker leak that piled up to 3170 node procs / 18 GB: HMR
+# dev servers fork a worker per compile and leak them, and a force-closed pane
+# can orphan the whole tree. `next build && next start` has no per-compile worker
+# churn, so it's the default for verify/smoke runs.
+_DEV_SERVER_HYGIENE = (
+    "\n\n## รัน web/dev server (กฎกลาง — ทุกโปรเจค)\n"
+    "- **เพื่อ verify / smoke test หน้าเว็บ Next: ใช้ `next build && next start` "
+    "ไม่ใช่ `next dev`.** `next dev` (HMR) fork postcss/jest-worker subprocess "
+    "ต่อ compile แล้ว leak — เคยพอกถึง ~3170 node proc / 18 GB. "
+    "`next build && next start` ไม่มี worker churn นั้น.\n"
+    "- `next dev` ใช้เฉพาะตอน **iterative UI dev ที่ต้องการ HMR จริงๆ** เท่านั้น "
+    "และต้อง background (`&` + redirect หรือ `nohup`) + **ปิด server เมื่อเสร็จงาน** "
+    "อย่าทิ้งค้าง.\n"
+    "- หลักเดียวกันกับ dev server อื่น (vite, `nest --watch`, `pnpm dev`): "
+    "background เสมอ ห้าม foreground + ปิดเมื่อจบ.\n"
+)
+
+
 def agent_role_dir(role: str) -> Path:
     """Per-role staging dir under runtime/agents/<role>/.
 
     A copy of `.claude/agents/<role>.md` is materialised here as CLAUDE.md so
-    claude reads the specialist role definition before any task arrives.
+    claude reads the specialist role definition before any task arrives. A
+    central dev-server-hygiene block (`_DEV_SERVER_HYGIENE`) is appended to every
+    role so the `next build && next start` rule applies cockpit-wide from one
+    place.
     """
     role = validate_name(role, "role")
     base = (RUNTIME_DIR / "agents").resolve()
@@ -242,7 +265,7 @@ def agent_role_dir(role: str) -> Path:
             end = text.find("\n---", 3)
             if end != -1:
                 text = text[end + 4 :].lstrip()
-        (d / "CLAUDE.md").write_text(text, encoding="utf-8")
+        (d / "CLAUDE.md").write_text(text.rstrip() + _DEV_SERVER_HYGIENE, encoding="utf-8")
     return d
 
 

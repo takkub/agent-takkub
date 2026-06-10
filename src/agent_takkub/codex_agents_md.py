@@ -54,6 +54,12 @@ operator (or by a Claude Lead pane via `takkub assign --role codex
 - **No long-running foreground commands.** Background docker/dev
   servers with `&` + redirect, or use `-d`. Never `npm run dev` in
   the foreground — it never returns and the pane hangs.
+- **To verify/smoke-test a Next.js page, use `next build && next
+  start`, not `next dev`.** Next dev's HMR compiler forks a postcss/
+  jest-worker subprocess per compile and leaks them (it once piled up
+  to ~3170 node procs / 18 GB). Reserve `next dev` for genuine
+  iterative UI work that needs HMR, background it, and kill the server
+  when done.
 
 ## Override rule for inline `[ROLE: ...]` directives
 

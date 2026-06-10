@@ -25,6 +25,37 @@ from PyQt6.QtCore import QObject, QThread, QTimer, pyqtSignal
 
 from ._win_console import hide_hwnds, snapshot_console_hwnds
 
+# CREATE_NO_WINDOW so the helper taskkill doesn't flash a console window.
+_CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def _tree_kill(pid: int | None) -> None:
+    """Force-kill `pid` and its entire descendant process tree (Windows).
+
+    pywinpty's PtyProcess.terminate() only reaps the root command (claude.exe);
+    grandchildren spawned by a teammate — most painfully a `next dev` / `npm run
+    dev` server and the postcss / jest-worker node subprocesses it forks — are
+    left orphaned and accumulate into thousands of zombie node procs. `taskkill
+    /T` walks the parent→child tree by PID and force-kills every descendant.
+
+    Best-effort and non-blocking-ish: short timeout, never raises (a failure
+    here must not prevent the rest of terminate() from running).
+    """
+    if pid is None or sys.platform != "win32":
+        return
+    try:
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=_CREATE_NO_WINDOW,
+            timeout=5,
+            check=False,
+        )
+    except Exception:
+        pass
+
+
 # ── Claude usage-limit detection ────────────────────────────────────────────
 # When a claude pane hits the plan's usage limit it stops producing output and
 # prints a "limit reached … resets <time>" banner. Without detection the idle
@@ -194,6 +225,9 @@ class PtySession(QObject):
         # is_at_*_prompt() — without this lock those race.
         self._screen_lock = threading.Lock()
         self._proc = None
+        # Root PID of the spawned command (claude.exe), captured at spawn so
+        # terminate() can tree-kill descendants even after _proc is torn down.
+        self._pid: int | None = None
         self._reader: _ReaderThread | None = None
         self._writer: _WriterThread | None = None
         self._alive = False
@@ -248,6 +282,10 @@ class PtySession(QObject):
                 env=env,
             )
         self._alive = True
+        try:
+            self._pid = int(self._proc.pid)
+        except Exception:
+            self._pid = None
 
         # The console window can take a moment to appear. Retry hiding on a
         # short backoff so we catch it whenever it shows up.
@@ -344,6 +382,15 @@ class PtySession(QObject):
             self._writer.request_stop()  # enqueue sentinel → writer loop exits
         if self._reader is not None:
             self._reader.request_stop()  # set stop flag
+        # Tree-kill the whole descendant chain BEFORE killing the root. pywinpty's
+        # terminate(force=True) only reaps claude.exe itself; a teammate that ran
+        # `next dev` / `npm run dev` leaves the node dev server and its postcss /
+        # jest-worker subprocesses orphaned, which pile up into thousands of zombie
+        # node procs (observed: a single leaked `next dev` reached 3170 procs /
+        # 18 GB). `taskkill /T` walks the live parent→child tree, so it MUST run
+        # while the root is still alive — kill the root first and the descendants
+        # re-parent away from this PID and survive.
+        _tree_kill(self._pid)
         if self._proc is not None:
             try:
                 self._proc.terminate(force=True)  # unblocks reader's proc.read()
