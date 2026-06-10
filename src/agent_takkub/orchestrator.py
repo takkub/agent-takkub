@@ -377,6 +377,11 @@ _STUCK_RESUME_NUDGE = (
     "เสร็จแล้วรายงานด้วย takkub done"
 )
 
+# Session-goal context header (issue #50). Prepended to every `assign`
+# task while a goal is set. Also doubles as the idempotency marker that
+# _apply_session_goal greps for to avoid double-prepending on respawn replay.
+_SESSION_GOAL_HEADER = "[SESSION GOAL — ทุก role ในงานนี้ยึดเป้าหมายเดียวกัน]"
+
 # Throughput watchdog (issue #35): flag panes whose PTY output rate exceeds
 # RUNAWAY_BYTES_S continuously for RUNAWAY_DURATION_S seconds.
 #
@@ -1024,6 +1029,12 @@ class Orchestrator(QObject):
         # Pipeline runs: keyed f"{project_ns}::{run_id}".
         # Created by run_pipeline(); closed when last hop completes.
         self._pipeline_runs: dict[str, PipelineRun] = {}
+        # Session objective per project (issue #50). Set by Lead via
+        # `takkub goal "<objective>"`; prepended to every subsequent
+        # `assign` task so parallel teammates share the big picture and
+        # don't drift on scope. Volatile (never persisted) and per-project
+        # so a goal set in one tab never leaks into another.
+        self._session_goals: dict[str, str] = {}
 
         # Per-cockpit-run capability token. Injected only into the Lead pane
         # env (TAKKUB_LEAD_TOKEN) so the Lead takkub CLI can authenticate
@@ -2213,6 +2224,46 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
 
         QTimer.singleShot(1_000, _check)
 
+    # ── Session goal (issue #50) ────────────────────────────────────
+    def set_session_goal(self, text: str, project: str | None = None) -> tuple[bool, str]:
+        """Set the session objective for `project`. Prepended to every
+        subsequent `assign` task so teammates share the big picture."""
+        project_ns = self._resolve_project(project)
+        text = (text or "").strip()
+        if not text:
+            return False, "empty goal — pass an objective string, or use --clear to unset"
+        self._session_goals[project_ns] = text
+        _log_event("goal-set", goal_preview=text[:120], project=project_ns)
+        preview = text if len(text) <= 80 else text[:77] + "…"
+        return True, f"goal set: {preview}"
+
+    def clear_session_goal(self, project: str | None = None) -> tuple[bool, str]:
+        """Unset the session objective for `project`."""
+        project_ns = self._resolve_project(project)
+        had = self._session_goals.pop(project_ns, None)
+        if had is None:
+            return True, "no goal was set"
+        _log_event("goal-clear", project=project_ns)
+        return True, "goal cleared"
+
+    def get_session_goal(self, project: str | None = None) -> str | None:
+        """Return the current session objective for `project`, or None."""
+        project_ns = self._resolve_project(project)
+        return self._session_goals.get(project_ns)
+
+    def _apply_session_goal(self, task: str, project_ns: str) -> str:
+        """Prepend the session-goal context block to `task` when one is set.
+
+        No-op when no goal exists, or when the task already carries the
+        block (idempotent — guards against double-prepend on auto-respawn
+        replay, which re-sends the stored last_assigned_task)."""
+        goal = self._session_goals.get(project_ns)
+        if not goal:
+            return task
+        if _SESSION_GOAL_HEADER in task:
+            return task
+        return f"{_SESSION_GOAL_HEADER}\n{goal}\n\n{task}"
+
     def assign(
         self,
         role_name: str,
@@ -2256,6 +2307,12 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         from .provider_config import CODEX, effective_provider_for
 
         project_ns = self._resolve_project(project)
+
+        # #50: prepend the session objective (if Lead set one) so every
+        # teammate sees the big picture. Done before the codex rewrite and
+        # before storing last_assigned_task, so the goal also rides along on
+        # auto-respawn replay (the _apply_session_goal guard keeps it idempotent).
+        task = self._apply_session_goal(task, project_ns)
 
         # Use the *effective* provider: a codex role substituted by claude
         # (provider unavailable) must keep the plain task — codex-specific

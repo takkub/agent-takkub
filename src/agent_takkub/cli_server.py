@@ -27,7 +27,7 @@ from .orchestrator import Orchestrator
 # run these. The gate is enforced server-side so raw TCP clients that bypass
 # the cli.py role check (including confused teammate shells) are rejected.
 _LEAD_ONLY_CMDS = frozenset(
-    {"spawn", "assign", "close", "close-all", "harvest", "harvest-done", "pipeline-run"}
+    {"spawn", "assign", "close", "close-all", "harvest", "harvest-done", "pipeline-run", "goal"}
 )
 
 # Commands that ANY pane may call, but where claiming `from: lead` in the
@@ -259,6 +259,16 @@ class CliServer(QObject):
                 )
             elif cmd == "end-session":
                 ok, msg = self._orch.end_session(project=from_project, note=req.get("note", ""))
+            elif cmd == "goal":
+                # #50: set / clear / show the session objective. Lead-only
+                # (gated above). `clear` wins over `text`; absent both = show.
+                if req.get("clear"):
+                    ok, msg = self._orch.clear_session_goal(project=from_project)
+                elif (req.get("text") or "").strip():
+                    ok, msg = self._orch.set_session_goal(req["text"], project=from_project)
+                else:
+                    current = self._orch.get_session_goal(project=from_project)
+                    ok, msg = True, (f"current goal: {current}" if current else "no goal set")
             elif cmd == "list":
                 detailed = self._orch.list_status_detailed(project=from_project)
                 status: dict[str, str] = {}

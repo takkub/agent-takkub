@@ -27,7 +27,17 @@ from .config import read_port
 # task and coordinate via `send` / `done`. The gate is enforced in `main()`
 # based on the TAKKUB_ROLE env var that the orchestrator injects per pane.
 LEAD_ONLY_COMMANDS = frozenset(
-    {"spawn", "assign", "close", "close-all", "end-session", "harvest", "release", "pipeline"}
+    {
+        "spawn",
+        "assign",
+        "close",
+        "close-all",
+        "end-session",
+        "harvest",
+        "release",
+        "pipeline",
+        "goal",
+    }
 )
 
 # Commands intended only for teammate panes. Lead summarises inline and never
@@ -222,6 +232,25 @@ def cmd_done(args: argparse.Namespace) -> dict:
 def cmd_end_session(args: argparse.Namespace) -> dict:
     return _request(
         _with_project({"cmd": "end-session", "from": _from_role(), "note": args.note or ""})
+    )
+
+
+def cmd_goal(args: argparse.Namespace) -> dict:
+    """Set / show / clear the session objective (issue #50).
+
+    `takkub goal "<objective>"` sets it; `takkub goal` (no arg) shows the
+    current one; `takkub goal --clear` unsets it. The objective is prepended
+    to every subsequent `takkub assign` task so parallel teammates share the
+    same big picture and don't drift on scope."""
+    return _request(
+        _with_project(
+            {
+                "cmd": "goal",
+                "from": _from_role(),
+                "text": getattr(args, "text", None) or "",
+                "clear": bool(getattr(args, "clear", False)),
+            }
+        )
     )
 
 
@@ -736,6 +765,24 @@ def main(argv: list[str] | None = None) -> int:
     )
     ses.add_argument("--note", default="", help="summary note (default: 'session ended')")
     ses.set_defaults(func=cmd_end_session)
+
+    sgoal = sub.add_parser(
+        "goal",
+        help="(lead) set/show/clear the session objective prepended to every assign",
+    )
+    sgoal.add_argument(
+        "text",
+        nargs="?",
+        default=None,
+        help="objective text to set; omit to show the current goal",
+    )
+    sgoal.add_argument(
+        "--clear",
+        action="store_true",
+        default=False,
+        help="unset the current session goal",
+    )
+    sgoal.set_defaults(func=cmd_goal)
 
     sh = sub.add_parser(
         "harvest",

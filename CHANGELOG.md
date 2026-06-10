@@ -4,6 +4,23 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Added (เพิ่ม)
+- **`takkub goal "<objective>"`** (#50) — Lead ตั้งเป้าหมาย session ก่อน fan-out
+  parallel; orchestrator prepend goal block เข้าทุก `assign` task หลังจากนั้น
+  อัตโนมัติ → ทุก role เห็น big picture เดียวกัน กัน scope drift เก็บแบบ volatile
+  ราย project (ไม่ persist, แต่ละ tab ไม่ leak กัน), prepend แบบ idempotent (กัน
+  double บน auto-respawn replay), ride ไปกับ task replay ด้วย `takkub goal` โชว์
+  goal ปัจจุบัน, `--clear` ล้าง lead-only (gate ทั้ง CLI + server).
+
+### Fixed (แก้)
+- **#51 gemini ไม่ส่ง report กลับ Lead หลัง CLI update** — gemini 0.46.0 ที่มีรุ่น
+  ใหม่กว่า upstream โชว์ footer `"Gemini CLI update available! …"` ค้างถาวร (passive,
+  prompt ใช้ได้ปกติ) แต่ `is_at_ready_prompt()` ดัน block บน substring
+  `"update available!"` (ตั้งใจไว้สำหรับ codex splash modal) → gemini ถูกอ่านว่า
+  "ทำงานอยู่ตลอด" → idle watchdog ไม่เคยถึง threshold nudge `takkub done` → report
+  ไม่ถึง Lead แก้โดยเช็ค gemini ready marker (`type your message or`) **ก่อน**
+  generic update blocker (codex splash ยัง block เหมือนเดิม) + regression test.
+
 ## [v0.7.0] - 2026-06-06
 
 ### Added (เพิ่ม)
