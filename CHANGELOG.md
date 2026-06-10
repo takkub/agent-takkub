@@ -20,6 +20,19 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
   "ทำงานอยู่ตลอด" → idle watchdog ไม่เคยถึง threshold nudge `takkub done` → report
   ไม่ถึง Lead แก้โดยเช็ค gemini ready marker (`type your message or`) **ก่อน**
   generic update blocker (codex splash ยัง block เหมือนเดิม) + regression test.
+- **context % ไม่ขึ้นบน tab ที่ใช้ user profile อื่น** — `token_meter` hardcode
+  `~/.claude/projects` ตายตัว แต่ pane ที่รันใต้ profile อื่น (`CLAUDE_CONFIG_DIR`
+  ต่าง) เก็บ session JSONL ที่ `<config_dir>/projects/` → `find_latest_session`
+  หาไม่เจอ → badge ไม่โผล่ แก้: `PtySession` จำ `CLAUDE_CONFIG_DIR` จาก spawn env,
+  `find_latest_session(config_dir=...)` scope ตาม config home ของ pane นั้น
+  (None = default `~/.claude` เหมือนเดิม) + regression test.
+
+### Added (เพิ่ม · instrumentation)
+- **main-thread stall logging** — dead-man watchdog เก็บ event `main_thread_stall`
+  ลง `events.log` ทุก freeze > 0.75s (peak duration + `spawn_in_progress`) +
+  heartbeat ถี่ขึ้น 1s→250ms, soft stack-dump 3s→1.5s เพื่อจับ UI freeze สั้นๆ
+  ตอนพิมพ์ (ไว้ยืนยันว่า freeze เกิดตอน pane spawn จริงไหม). ปรับ threshold ผ่าน
+  env `TAKKUB_STALL_LOG_S` / `TAKKUB_WATCHDOG_SOFT_STALL_S` / `TAKKUB_WATCHDOG_POLL_S`.
 
 ## [v0.7.0] - 2026-06-06
 

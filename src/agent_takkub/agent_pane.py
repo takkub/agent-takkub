@@ -466,7 +466,14 @@ class AgentPane(QFrame):
         # project rule blocks two Leads from sharing a cwd. The
         # `since_ts=spawn_ts-5` guard still keeps the meter from
         # picking up unrelated old files that predate this pane.
-        cand = find_latest_session(self._session_cwd, since_ts=self._spawn_ts - 5)
+        # Scope the lookup to this pane's Claude config home — a pane on a
+        # non-default user profile writes sessions under <CLAUDE_CONFIG_DIR>/
+        # projects/, not ~/.claude/projects/, so without this its context-%
+        # badge never appeared (per-profile regression).
+        cfg_dir = getattr(self.session, "_claude_config_dir", None)
+        cand = find_latest_session(
+            self._session_cwd, since_ts=self._spawn_ts - 5, config_dir=cfg_dir
+        )
         if cand is None:
             return
         if cand != self._session_jsonl:

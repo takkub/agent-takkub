@@ -13,6 +13,7 @@ from agent_takkub.token_meter import (
     _TAIL_SCAN_BYTES,
     effective_context_limit,
     encode_path_for_claude,
+    find_latest_session,
     read_last_usage,
 )
 
@@ -146,3 +147,57 @@ class TestReadLastUsage:
         f = tmp_path / "u.jsonl"
         f.write_text(_user("hi") + "\n" + _user("there") + "\n", encoding="utf-8")
         assert read_last_usage(f) is None
+
+
+class TestFindLatestSessionConfigDir:
+    """find_latest_session must honour a non-default CLAUDE_CONFIG_DIR.
+
+    A pane on a non-default user profile writes its session JSONL under
+    <config_dir>/projects/, not ~/.claude/projects/. Before the fix the meter
+    only ever looked under ~/.claude, so those panes never showed a context %.
+    """
+
+    def _plant_session(self, config_home: pathlib.Path, cwd: pathlib.Path) -> pathlib.Path:
+        enc = encode_path_for_claude(cwd)
+        proj = config_home / "projects" / enc
+        proj.mkdir(parents=True)
+        sess = proj / "abc.jsonl"
+        sess.write_text(
+            json.dumps({"type": "assistant", "message": {"usage": {"input_tokens": 1}}}) + "\n",
+            encoding="utf-8",
+        )
+        return sess
+
+    def test_finds_session_under_custom_config_dir(self, tmp_path: pathlib.Path) -> None:
+        cwd = tmp_path / "proj"
+        cwd.mkdir()
+        custom_home = tmp_path / "profileB"
+        planted = self._plant_session(custom_home, cwd)
+        found = find_latest_session(cwd, config_dir=custom_home)
+        assert found == planted
+
+    def test_default_lookup_misses_custom_profile_session(
+        self, tmp_path: pathlib.Path, monkeypatch
+    ) -> None:
+        # Reproduces the bug: session lives ONLY under the custom profile home.
+        cwd = tmp_path / "proj"
+        cwd.mkdir()
+        custom_home = tmp_path / "profileB"
+        self._plant_session(custom_home, cwd)
+        # Point the default (~/.claude) lookup at an empty fake home.
+        fake_default = tmp_path / "defaulthome"
+        (fake_default / ".claude").mkdir(parents=True)
+        monkeypatch.setattr(pathlib.Path, "home", classmethod(lambda cls: fake_default))
+        # config_dir=None (default profile) → not found; custom → found.
+        assert find_latest_session(cwd, config_dir=None) is None
+        assert find_latest_session(cwd, config_dir=custom_home) is not None
+
+    def test_none_config_dir_falls_back_to_home_claude(
+        self, tmp_path: pathlib.Path, monkeypatch
+    ) -> None:
+        cwd = tmp_path / "proj"
+        cwd.mkdir()
+        fake_default = tmp_path / "defaulthome"
+        monkeypatch.setattr(pathlib.Path, "home", classmethod(lambda cls: fake_default))
+        planted = self._plant_session(fake_default / ".claude", cwd)
+        assert find_latest_session(cwd, config_dir=None) == planted

@@ -90,13 +90,28 @@ def encode_path_for_claude(cwd: str | Path) -> str:
     return _NON_ALNUM_RE.sub("-", str(Path(cwd).resolve()))
 
 
-def _claude_projects_dir() -> Path:
-    return Path.home() / ".claude" / "projects"
+def _claude_projects_dir(config_dir: str | Path | None = None) -> Path:
+    """Return the `projects/` dir holding Claude Code session JSONLs.
+
+    `config_dir` is the pane's CLAUDE_CONFIG_DIR. When None (the default
+    profile, which never sets that env var) it falls back to `~/.claude`.
+    A pane running under a non-default user profile writes its sessions to
+    `<config_dir>/projects/`, NOT `~/.claude/projects/` — so the meter must
+    honour it or the badge silently never appears (the per-profile
+    context-% regression).
+    """
+    base = Path(config_dir) if config_dir else Path.home() / ".claude"
+    return base / "projects"
 
 
-def find_latest_session(cwd: str | Path, since_ts: float = 0.0) -> Path | None:
+def find_latest_session(
+    cwd: str | Path, since_ts: float = 0.0, config_dir: str | Path | None = None
+) -> Path | None:
     """Return the most-recently-modified JSONL file matching `cwd`'s encoded
     project dir, optionally requiring mtime >= since_ts.
+
+    `config_dir` scopes the lookup to a specific Claude config home (the
+    pane's CLAUDE_CONFIG_DIR); None means the default `~/.claude`.
 
     Returns None if no file qualifies. Cockpit callers re-poll on every
     refresh rather than caching the first hit — `/clear` inside claude
@@ -107,7 +122,7 @@ def find_latest_session(cwd: str | Path, since_ts: float = 0.0) -> Path | None:
     contamination effectively impossible.
     """
     enc = encode_path_for_claude(cwd)
-    proj_dir = _claude_projects_dir() / enc
+    proj_dir = _claude_projects_dir(config_dir) / enc
     if not proj_dir.is_dir():
         return None
     best: tuple[float, Path] | None = None

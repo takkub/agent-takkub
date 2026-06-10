@@ -198,6 +198,11 @@ class PtySession(QObject):
         self._writer: _WriterThread | None = None
         self._alive = False
         self._transcript = None  # open file handle; None = not capturing
+        # CLAUDE_CONFIG_DIR this session was spawned with, captured from the
+        # spawn env (None = default profile / ~/.claude). The token meter reads
+        # it so a pane on a non-default user profile finds its session JSONL
+        # under <config_dir>/projects/ instead of ~/.claude/projects/.
+        self._claude_config_dir: str | None = None
 
     # ──────────────────────────────────────────────────────────────
     # lifecycle
@@ -210,6 +215,10 @@ class PtySession(QObject):
         transcript_path: str | None = None,
     ) -> None:
         import winpty  # `pywinpty` pkg, module name is `winpty`
+
+        # Remember which Claude config home this pane uses so the token meter
+        # can locate its session JSONL (non-default profiles redirect it).
+        self._claude_config_dir = (env or {}).get("CLAUDE_CONFIG_DIR")
 
         cmd = subprocess.list2cmdline(list(argv))
 
@@ -474,9 +483,12 @@ class PtySession(QObject):
         # to 0.46.0 with a newer release already published upstream).
         if "type your message or" in text:  # gemini's input prompt hint
             return True
+        if "gemini cli update available!" in text:
+            return True
+
         # codex: "update available!" is part of its startup splash modal that
         # must be dismissed before the prompt is usable — keep blocking it.
-        # Checked AFTER gemini's ready marker so it only ever gates the codex
+        # Checked AFTER gemini's ready markers so it only ever gates the codex
         # splash (and claude, which never shows this string), never a ready
         # gemini wearing an update footer.
         if "update available!" in text:
