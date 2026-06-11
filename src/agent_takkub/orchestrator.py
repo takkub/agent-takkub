@@ -4853,20 +4853,43 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         """Tell the Lead a rate-limited pane's window has reset (notify-only)."""
         key = f"{project}::{role}"
         _ps_rr = self._pane_state.get(key)
-        if _ps_rr is not None:
+
+        # De-dupe guard: if rate_limited_until is already 0, a previous timer
+        # for the same episode already handled the reset — skip silently.
+        if _ps_rr is None or _ps_rr.rate_limited_until == 0.0:
+            _log_event(
+                "rate_limit_reset_skipped",
+                role=role,
+                project=project,
+                reason="already_handled",
+            )
+            return
+
+        # Pane-alive guard: if the pane closed while the timer was pending,
+        # there is nobody to assign work to — clear state but skip the notice.
+        panes = self._project_panes(project)
+        target_pane = panes.get(role)
+        if target_pane is None or target_pane.session is None or not target_pane.session.is_alive:
             _ps_rr.rate_limited_until = 0.0
-            # Reset the content-change timestamp so the stuck-pane watchdog
-            # doesn't immediately fire after the rate-limit lifts.  The pane's
-            # content has been static for the entire rate-limit window (often
-            # hours); without this reset the very next watchdog tick would see
-            # content_static_s >> STUCK_THRESHOLD_S and trigger a spurious
-            # close→respawn that fires the auto-chain handoff prematurely.
-            _ps_rr.last_content_change_ts = time.time()
+            _log_event(
+                "rate_limit_reset_skipped",
+                role=role,
+                project=project,
+                reason="pane_gone",
+            )
+            return
+
+        # Pane is alive — clear state and reset the stuck-watchdog timestamp so
+        # the very next tick doesn't see content_static_s >> STUCK_THRESHOLD_S
+        # and trigger a spurious close→respawn (#53 fix, must stay here).
+        _ps_rr.rate_limited_until = 0.0
+        _ps_rr.last_content_change_ts = time.time()
+
         msg = (
             f"⏰ [rate-limit] {role} ({project}) — usage limit reset แล้ว "
             f"pane พร้อมทำงานต่อ (nudge/มอบงานต่อได้เลย)"
         )
-        lead = self._project_panes(project).get(LEAD.name)
+        lead = panes.get(LEAD.name)
         if lead and lead.session and lead.session.is_alive:
             lead.session.write(msg)
             QTimer.singleShot(150, lambda: lead.session and lead.session.write(b"\r"))

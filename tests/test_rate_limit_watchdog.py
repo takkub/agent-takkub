@@ -126,3 +126,123 @@ class TestRateLimitGate:
         pane.session.is_alive = False
         with patch("agent_takkub.orchestrator._log_event"):
             assert o._rate_limit_suppressed("proj", "devops", pane, now) is False
+
+
+# ── layer 3: _emit_rate_limit_reset guards ───────────────────────────────────
+
+
+def _bare_emit_orch():
+    """Orchestrator with attributes needed by _emit_rate_limit_reset."""
+    from agent_takkub.orchestrator import Orchestrator
+
+    o = Orchestrator.__new__(Orchestrator)
+    o._pane_state = {}
+    o._panes_by_project = {}
+    o.leadInjected = MagicMock()
+    o.statusChanged = MagicMock()
+    return o
+
+
+def _alive_pane():
+    p = MagicMock()
+    p.session.is_alive = True
+    return p
+
+
+def _dead_pane():
+    p = MagicMock()
+    p.session.is_alive = False
+    return p
+
+
+class TestEmitRateLimitReset:
+    def test_pane_gone_skips_lead_notice(self) -> None:
+        """Timer fires after pane closed → Lead must NOT receive the message."""
+        o = _bare_emit_orch()
+        o._ps("proj::backend").rate_limited_until = time.time() + 1
+        # pane not registered → _project_panes("proj").get("backend") is None
+        with (
+            patch("agent_takkub.orchestrator.QTimer.singleShot"),
+            patch("agent_takkub.orchestrator._log_event") as log,
+        ):
+            o._emit_rate_limit_reset("proj", "backend")
+        o.leadInjected.emit.assert_not_called()
+        o.statusChanged.emit.assert_not_called()
+        skipped_calls = [c for c in log.call_args_list if c.args[0] == "rate_limit_reset_skipped"]
+        assert skipped_calls, "expected rate_limit_reset_skipped event"
+        assert skipped_calls[0].kwargs.get("reason") == "pane_gone"
+        # state cleared even though notice was skipped
+        assert o._pane_state["proj::backend"].rate_limited_until == 0.0
+
+    def test_pane_dead_session_skips_lead_notice(self) -> None:
+        """Pane exists but session is dead → skip."""
+        o = _bare_emit_orch()
+        o._ps("proj::qa").rate_limited_until = time.time() + 1
+        o._project_panes("proj")["qa"] = _dead_pane()
+        with (
+            patch("agent_takkub.orchestrator.QTimer.singleShot"),
+            patch("agent_takkub.orchestrator._log_event") as log,
+        ):
+            o._emit_rate_limit_reset("proj", "qa")
+        o.leadInjected.emit.assert_not_called()
+        skipped = [c for c in log.call_args_list if c.args[0] == "rate_limit_reset_skipped"]
+        assert skipped and skipped[0].kwargs.get("reason") == "pane_gone"
+
+    def test_pane_alive_injects_and_resets_ts(self) -> None:
+        """Pane alive → Lead gets notice AND last_content_change_ts reset (#53)."""
+        o = _bare_emit_orch()
+        reset_at = time.time() + 1
+        o._ps("proj::frontend").rate_limited_until = reset_at
+        o._ps("proj::frontend").last_content_change_ts = 0.0
+
+        alive_role_pane = _alive_pane()
+        alive_lead_pane = _alive_pane()
+        panes = o._project_panes("proj")
+        panes["frontend"] = alive_role_pane
+
+        from agent_takkub.roles import LEAD
+
+        panes[LEAD.name] = alive_lead_pane
+
+        before = time.time()
+        with (
+            patch("agent_takkub.orchestrator.QTimer.singleShot"),
+            patch("agent_takkub.orchestrator._log_event") as log,
+        ):
+            o._emit_rate_limit_reset("proj", "frontend")
+        after = time.time()
+
+        alive_lead_pane.session.write.assert_called_once()
+        o.leadInjected.emit.assert_called_once()
+        o.statusChanged.emit.assert_called_once()
+        ps = o._pane_state["proj::frontend"]
+        assert ps.rate_limited_until == 0.0
+        assert before <= ps.last_content_change_ts <= after  # #53 preserved
+        # must have logged rate_limit_reset (not skipped)
+        logged = [c.args[0] for c in log.call_args_list]
+        assert "rate_limit_reset" in logged
+        assert "rate_limit_reset_skipped" not in logged
+
+    def test_duplicate_timer_injects_only_once(self) -> None:
+        """Two timers fire for same episode → only the first injects."""
+        o = _bare_emit_orch()
+        o._ps("proj::mobile").rate_limited_until = time.time() + 1
+
+        alive_role_pane = _alive_pane()
+        alive_lead_pane = _alive_pane()
+        panes = o._project_panes("proj")
+        panes["mobile"] = alive_role_pane
+
+        from agent_takkub.roles import LEAD
+
+        panes[LEAD.name] = alive_lead_pane
+
+        with (
+            patch("agent_takkub.orchestrator.QTimer.singleShot"),
+            patch("agent_takkub.orchestrator._log_event"),
+        ):
+            o._emit_rate_limit_reset("proj", "mobile")  # first fire
+            o._emit_rate_limit_reset("proj", "mobile")  # duplicate — must be skipped
+
+        assert alive_lead_pane.session.write.call_count == 1
+        assert o.leadInjected.emit.call_count == 1
