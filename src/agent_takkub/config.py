@@ -242,6 +242,26 @@ _DEV_SERVER_HYGIENE = (
 )
 
 
+# Central non-interactive shell hygiene appended to EVERY role's CLAUDE.md
+# so commands inside panes never block on y/N or credential prompts.
+# Born from issue #52 where npx's 'Ok to proceed? (y)' or a git credential
+# prompt caused the pane to hang permanently with the watchdog unable to
+# distinguish it from "idle, forgot takkub done".
+_NON_INTERACTIVE_HYGIENE = (
+    "\n\n## รัน shell แบบ non-interactive (กฎกลาง — ทุกโปรเจค)\n"
+    "- **ห้ามรันคำสั่งที่รอ y/N จาก user**: "
+    "`npx` → ใช้ `npx --yes <pkg>`, "
+    "`npm install` → `npm ci` หรือ `npm install --yes`, "
+    "`git` → ต้อง cache credential ก่อน (`GIT_TERMINAL_PROMPT=0` inject อัตโนมัติ → git fail แทน prompt)\n"
+    "- **อย่าใช้ `npx <pkg>` ตรงๆ** ถ้า pkg ยังไม่ติดตั้ง — "
+    "npx จะถาม 'Ok to proceed? (y)' แล้วปิดกั้น pane ถาวร; "
+    "ใช้ test runner ของโปรเจค (`pytest`, `jest`, `vitest`, `pnpm test`) แทนเสมอ\n"
+    "- คำสั่งที่รอ 'Press any key', 'Are you sure', 'Overwrite?' → "
+    "ต้องผ่าน flag `--force` / `--yes` / `--no-interaction` "
+    "หรือ pipe `yes |` ก่อนเรียก\n"
+)
+
+
 def agent_role_dir(role: str) -> Path:
     """Per-role staging dir under runtime/agents/<role>/.
 
@@ -265,7 +285,10 @@ def agent_role_dir(role: str) -> Path:
             end = text.find("\n---", 3)
             if end != -1:
                 text = text[end + 4 :].lstrip()
-        (d / "CLAUDE.md").write_text(text.rstrip() + _DEV_SERVER_HYGIENE, encoding="utf-8")
+        (d / "CLAUDE.md").write_text(
+            text.rstrip() + _DEV_SERVER_HYGIENE + _NON_INTERACTIVE_HYGIENE,
+            encoding="utf-8",
+        )
     return d
 
 

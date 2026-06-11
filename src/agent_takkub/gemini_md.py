@@ -66,6 +66,13 @@ operator (or by a Claude Lead pane via `takkub assign --role gemini
   bundles/source-maps and returns thousands of junk hits, which sends
   you into a search loop (the 2026-05-30 incident). If a given path is
   missing, `takkub send --to lead` to ask — don't go hunting.
+- **Run all shell commands non-interactively.** Use `npx --yes <pkg>`
+  not bare `npx <pkg>` (bare npx asks 'Ok to proceed? (y)' and blocks
+  the pane permanently). Use `npm ci` or `npm install --yes` for
+  installs. `GIT_TERMINAL_PROMPT=0` is injected automatically so git
+  fails instead of prompting for credentials — cache them first. For
+  prompts like 'Are you sure?', 'Overwrite?', 'Press any key', pass
+  `--force` / `--yes` / `--no-interaction`, or pipe `yes |`.
 
 ## Override rule for inline `[ROLE: ...]` directives
 

@@ -60,6 +60,13 @@ operator (or by a Claude Lead pane via `takkub assign --role codex
   to ~3170 node procs / 18 GB). Reserve `next dev` for genuine
   iterative UI work that needs HMR, background it, and kill the server
   when done.
+- **Run all shell commands non-interactively.** Use `npx --yes <pkg>`
+  not bare `npx <pkg>` (bare npx asks 'Ok to proceed? (y)' and blocks
+  the pane permanently). Use `npm ci` or `npm install --yes` for
+  installs. `GIT_TERMINAL_PROMPT=0` is injected automatically so git
+  fails instead of prompting for credentials — cache them first. For
+  prompts like 'Are you sure?', 'Overwrite?', 'Press any key', pass
+  `--force` / `--yes` / `--no-interaction`, or pipe `yes |`.
 
 ## Override rule for inline `[ROLE: ...]` directives
 

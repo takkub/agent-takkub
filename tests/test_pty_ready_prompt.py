@@ -81,3 +81,100 @@ def test_codex_splash_update_modal_is_not_ready() -> None:
         "update available! run npm i -g @openai/codex",
     )
     assert s.is_at_ready_prompt() is False
+
+
+# ── is_blocked_on_tty_prompt() — issue #52 Layer 2 ──────────────────────────
+
+
+class TestIsBlockedOnTtyPrompt:
+    """Verify that is_blocked_on_tty_prompt() detects interactive shell prompts
+    in the bottom tail of the visible screen without false-positives on:
+    - claude/codex/gemini ready prompts
+    - identical patterns in earlier scrollback
+    """
+
+    def test_npx_ok_to_proceed_detected(self) -> None:
+        s = _feed_screen(
+            "Need to install the following packages:",
+            "  create-react-app@5.0.1",
+            "Ok to proceed? (y)",
+        )
+        assert s.is_blocked_on_tty_prompt() is not None
+
+    def test_y_slash_n_bracket_detected(self) -> None:
+        s = _feed_screen("Do you want to overwrite the file? [y/N]")
+        assert s.is_blocked_on_tty_prompt() is not None
+
+    def test_Y_slash_n_bracket_detected(self) -> None:
+        s = _feed_screen("Continue with the operation? [Y/n]")
+        assert s.is_blocked_on_tty_prompt() is not None
+
+    def test_y_slash_n_parens_detected(self) -> None:
+        s = _feed_screen("Are you sure you want to delete? (y/n)")
+        assert s.is_blocked_on_tty_prompt() is not None
+
+    def test_press_any_key_detected(self) -> None:
+        s = _feed_screen("Press any key to continue...")
+        assert s.is_blocked_on_tty_prompt() is not None
+
+    def test_overwrite_prompt_detected(self) -> None:
+        s = _feed_screen("Overwrite? [y/N]")
+        assert s.is_blocked_on_tty_prompt() is not None
+
+    def test_are_you_sure_detected(self) -> None:
+        s = _feed_screen("Are you sure you want to push? [y/N]")
+        assert s.is_blocked_on_tty_prompt() is not None
+
+    def test_password_prompt_detected(self) -> None:
+        s = _feed_screen("Username for 'https://github.com': monch", "Password:")
+        assert s.is_blocked_on_tty_prompt() is not None
+
+    def test_username_prompt_detected(self) -> None:
+        s = _feed_screen("Username:")
+        assert s.is_blocked_on_tty_prompt() is not None
+
+    def test_returns_none_on_normal_output(self) -> None:
+        s = _feed_screen(
+            "✓ Tests passed (42 passed, 0 failed)",
+            "Build succeeded in 3.2s",
+        )
+        assert s.is_blocked_on_tty_prompt() is None
+
+    def test_returns_none_on_empty_screen(self) -> None:
+        s = _feed_screen("")
+        assert s.is_blocked_on_tty_prompt() is None
+
+    def test_returns_none_on_claude_ready_prompt(self) -> None:
+        # Claude's "bypass permissions" footer must NOT be detected as a TTY
+        # prompt — it's a claude UI element, not an interactive shell pause.
+        s = _feed_screen(
+            "What would you like to do next?",
+            "bypass permissions",
+        )
+        assert s.is_blocked_on_tty_prompt() is None
+
+    def test_prompt_in_scrollback_not_detected(self) -> None:
+        # A [y/N] pattern that appeared earlier (not in the bottom 5 rows)
+        # must not trigger a false-positive. Simulate by filling 10 rows
+        # of normal output above the prompt so it's pushed out of the tail.
+        lines = ["Ok to proceed? (y)"] + [f"output line {i}" for i in range(10)]
+        s = _feed_screen(*lines)
+        # The TTY prompt is now more than 5 rows from the bottom.
+        assert s.is_blocked_on_tty_prompt() is None
+
+    def test_returns_matched_line_text(self) -> None:
+        # Return value should be the stripped content of the matching line.
+        s = _feed_screen("Ok to proceed? (y)")
+        result = s.is_blocked_on_tty_prompt()
+        assert result is not None
+        assert "ok to proceed" in result.lower()
+
+    def test_is_independent_of_is_at_ready_prompt(self) -> None:
+        # These two state-detection methods are orthogonal: a pane at its
+        # claude ready prompt is NOT blocked on a TTY prompt, and vice versa.
+        ready = _feed_screen("bypass permissions")
+        blocked = _feed_screen("Ok to proceed? (y)")
+        assert ready.is_at_ready_prompt() is True
+        assert ready.is_blocked_on_tty_prompt() is None
+        assert blocked.is_at_ready_prompt() is False
+        assert blocked.is_blocked_on_tty_prompt() is not None

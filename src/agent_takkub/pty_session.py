@@ -56,6 +56,31 @@ def _tree_kill(pid: int | None) -> None:
         pass
 
 
+# ── Interactive TTY-prompt detection ────────────────────────────────────────
+# When a shell command (npx, git, rm -rf) pauses for user input the pane
+# output stops scrolling and the cursor sits on a y/N or credential line.
+# The idle watchdog cannot tell this apart from "agent finished but forgot
+# takkub done" — it fires reminders into the blocked pane indefinitely.
+# `is_blocked_on_tty_prompt()` lets the watchdog distinguish the two states
+# so it can log a warning and suppress repeated reminders instead.
+#
+# Patterns are anchored to the bottom _TTY_PROMPT_TAIL_ROWS rows (where the
+# cursor rests after a prompt is emitted) to avoid matching identical text
+# in earlier scrollback that the agent has already answered and moved past.
+_TTY_PROMPT_RE = re.compile(
+    r"ok to proceed\? \(y\)"  # npx first-install download gate
+    r"|\[[yY]/[nN]\]"  # [Y/n] [y/N] [y/n] [Y/N]
+    r"|\([yY]/[nN]\)"  # (y/n) (Y/n) (y/N)
+    r"|press any key"  # generic pause / paginator
+    r"|overwrite\?"  # rsync, cp -i, create-react-app
+    r"|are you sure"  # git push --force guard, rm -rf guard
+    r"|password:\s*$"  # git credential / SSH passphrase
+    r"|username:\s*$",  # git credential username
+    re.IGNORECASE | re.MULTILINE,
+)
+_TTY_PROMPT_TAIL_ROWS = 5
+
+
 # ── Claude usage-limit detection ────────────────────────────────────────────
 # When a claude pane hits the plan's usage limit it stops producing output and
 # prints a "limit reached … resets <time>" banner. Without detection the idle
@@ -555,3 +580,32 @@ class PtySession(QObject):
         """
         text = "\n".join(self.display_lines()).lower()
         return _parse_rate_limit_reset(text, time.time())
+
+    def is_blocked_on_tty_prompt(self) -> str | None:
+        """Return the first matching line if the pane is stuck on an interactive
+        shell prompt (y/N, credential, 'press any key'); else ``None``.
+
+        Scans the ``_TTY_PROMPT_TAIL_ROWS`` rows ending at the current cursor
+        row.  Using the cursor position (rather than a fixed bottom-of-screen
+        slice) means:
+        - In a fresh/short session the cursor is near the top (row 0–2) and the
+          scan window follows it there, so short test screens work correctly.
+        - Older content that scrolled above the cursor window does NOT trigger
+          false-positives even if it happened to contain one of the patterns
+          (e.g. command output that printed 'Are you sure' in its own text).
+
+        The screen and cursor are sampled under a single lock acquisition so
+        the two reads are consistent.  The returned string is the stripped
+        content of the matched line, suitable for watchdog log messages.
+        """
+        with self._screen_lock:
+            lines = list(self.screen.display)
+            cursor_row = self.screen.cursor.y
+        if not lines:
+            return None
+        lo = max(0, cursor_row - _TTY_PROMPT_TAIL_ROWS + 1)
+        hi = cursor_row + 1
+        for line in reversed(lines[lo:hi]):
+            if _TTY_PROMPT_RE.search(line):
+                return line.strip() or "interactive prompt detected"
+        return None

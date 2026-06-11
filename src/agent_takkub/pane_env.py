@@ -1,6 +1,6 @@
 """Per-pane env construction — allowlist + mute helpers for spawned panes.
 
-Four concerns live here:
+Five concerns live here:
 1. `_PANE_ENV_ALLOWLIST` + `_build_pane_env()` — keep secret-bearing env
    vars (API keys, GH tokens, AWS creds) out of teammate panes by
    filtering to a known-safe set.
@@ -13,6 +13,10 @@ Four concerns live here:
 4. `_apply_mcp_timeout()` — raise the CC 2.1.142+ MCP per-call timeout
    default from 60s to 3min so browser MCP work (Playwright, Chrome
    DevTools, Lighthouse) doesn't trip on first page load.
+5. `_apply_non_interactive_env()` — prevent npx/npm/git from blocking on
+   interactive y/N or credential prompts (issue #52). Sets npm_config_yes
+   and GIT_TERMINAL_PROMPT at process level so every shell command inside
+   the pane is non-interactive by default.
 
 Extracted from orchestrator.py to keep that file focused on pane
 lifecycle (spawn/send/done/close) rather than environment plumbing.
@@ -191,6 +195,27 @@ def _apply_mcp_timeout(env: dict[str, str]) -> None:
     alone if the operator has already set one at the cockpit level.
     """
     env.setdefault("MCP_TOOL_TIMEOUT", _DEFAULT_MCP_TOOL_TIMEOUT_MS)
+
+
+def _apply_non_interactive_env(env: dict[str, str]) -> None:
+    """Prevent npx/npm/git from blocking a pane on interactive y/N prompts.
+
+    Two env vars cover the two most common blocking commands pane agents run:
+
+    - ``npm_config_yes=true``  → equivalent to passing ``--yes`` to every
+      ``npx`` invocation; suppresses the 'Ok to proceed? (y)' prompt that
+      npx shows when it needs to download a package that isn't installed yet.
+    - ``GIT_TERMINAL_PROMPT=0`` → git fails immediately (exit 128) instead
+      of prompting for username/password when the credential helper is absent
+      or the cached token has expired.
+
+    Both are set via ``setdefault`` so a cockpit-level override in the host
+    env still wins — same contract as ``MCP_TOOL_TIMEOUT``.  A pane that
+    genuinely needs interactive npx (rare) can set ``npm_config_yes=false``
+    in the cockpit shell before spawning.
+    """
+    env.setdefault("npm_config_yes", "true")
+    env.setdefault("GIT_TERMINAL_PROMPT", "0")
 
 
 def inject_user_profile_env(env: dict[str, str], project: str) -> None:
