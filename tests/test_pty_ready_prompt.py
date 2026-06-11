@@ -53,6 +53,14 @@ def test_gemini_idle_with_update_footer_is_ready() -> None:
     assert s.is_at_ready_prompt() is True
 
 
+def test_gemini_idle_with_update_footer_is_ready_even_if_prompt_missing() -> None:
+    # Regression guard: even if the "type your message or" hint is missing (e.g.
+    # scrolled off-screen or prompt changed), the passive Gemini update footer
+    # should NOT trigger the "update available!" blocker.
+    s = _feed_screen("Gemini CLI update available! 0.46.0 → 0.47.0")
+    assert s.is_at_ready_prompt() is True
+
+
 def test_gemini_thinking_with_update_footer_is_not_ready() -> None:
     # The update footer must not flip a *thinking* gemini to ready — the
     # "esc to cancel" busy indicator still takes precedence.
