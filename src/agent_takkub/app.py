@@ -201,21 +201,29 @@ def _dump_main_stack(header: str) -> None:
 
 
 def _start_deadman_watchdog(window: MainWindow, _stop: threading.Event | None = None) -> None:
-    """Start a background daemon that kills the process when the Qt main thread wedges.
+    """Start a background daemon that LOGS (never kills) Qt main-thread wedges.
 
     MainWindow._heartbeat_timer ticks _heartbeat_ts every ~1 s from the Qt event
     loop. If the heartbeat stops advancing for _WATCHDOG_TIMEOUT_S seconds the
     main thread is blocked — a busy-loop, a blocking subprocess.run call on the
-    Qt thread, or a deadlock. We call os._exit() rather than sys.exit() because
-    sys.exit() raises SystemExit which needs the main thread to handle it, and
-    the main thread is exactly what we cannot reach when it is wedged.
+    Qt thread, or a deadlock.
+
+    HARD-KILL DISABLED (user request 2026-06-10): the old behaviour called
+    os._exit(1) on a wedge, which nuked the whole cockpit on resume-from-sleep
+    (the heartbeat is frozen during system suspend, so on wake the age is huge
+    and the watchdog fired instantly) and on any transient native wedge. Per
+    user: never auto-kill — if the UI wedges they close it manually. The daemon
+    is kept purely for diagnostics: it dumps the wedged main-thread stack to
+    boot.log so freezes stay debuggable, but it no longer terminates children,
+    snapshots, or exits.
 
     _stop is an optional threading.Event used only in tests to halt the daemon
-    cleanly without killing the process.
+    cleanly.
     """
 
     def _run() -> None:
         soft_dumped = False
+        hard_dumped = False
         stall_tracker = _StallTracker(_WATCHDOG_STALL_LOG_S)
         while not (_stop is not None and _stop.is_set()):
             time.sleep(_WATCHDOG_POLL_S)
@@ -249,46 +257,22 @@ def _start_deadman_watchdog(window: MainWindow, _stop: threading.Event | None = 
                         _log_event("main_thread_stall", **rec)
                     except Exception:
                         pass
+            # Wedge detected. DIAGNOSTIC ONLY — never kill the process (see the
+            # docstring: hard-kill disabled per user request). Dump the wedged
+            # main-thread stack to boot.log once per episode (re-arm when the
+            # heartbeat recovers) so the freeze stays debuggable, then leave the
+            # process completely alone. If it stays wedged the user closes it.
             if _watchdog_should_exit(window._heartbeat_ts, now, _WATCHDOG_TIMEOUT_S):
                 age = now - window._heartbeat_ts
-                _boot_log(
-                    f"[watchdog] main thread wedged for {age:.0f}s"
-                    " — terminating children then os._exit(1)"
-                )
-                # Capture WHERE the main thread is wedged before we kill the
-                # process. Without this the log only says "wedged Xs" with no
-                # stack — exactly the gap that forced the 2026-06-04 freeze to
-                # be diagnosed from incidental COM-exception dumps instead of
-                # the actual wedge.
-                _dump_main_stack(f"[watchdog] main-thread stack at wedge (age {age:.0f}s):")
-                # Best-effort: terminate child sessions so they don't become
-                # orphans after os._exit bypasses atexit/_kill_all.
-                # pane.session.terminate() is OS-level (TerminateProcess) and
-                # safe to call from a daemon thread; wrap every access in
-                # try/except to guard against races with teardown on the main
-                # thread (e.g. a pane being removed while we iterate).
-                try:
-                    for pane in list(window.orch.panes.values()):
-                        if pane.session is not None:
-                            try:
-                                pane.mark_expected_exit()
-                                pane.session.terminate()
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
-                # #6: best-effort snapshot + resume briefs before hard exit so
-                # the next launch can restore panes and recover Lead context.
-                # Both methods are Qt-free and safe to call from a daemon thread.
-                try:
-                    window.orch.write_session_snapshot()
-                except Exception:
-                    pass
-                try:
-                    window.orch.write_resume_briefs()
-                except Exception:
-                    pass
-                os._exit(1)
+                if not hard_dumped:
+                    _boot_log(
+                        f"[watchdog] main thread wedged for {age:.0f}s"
+                        " — hard-kill disabled, leaving process alive"
+                    )
+                    _dump_main_stack(f"[watchdog] main-thread stack at wedge (age {age:.0f}s):")
+                    hard_dumped = True
+            else:
+                hard_dumped = False
 
     t = threading.Thread(target=_run, daemon=True, name="cockpit-deadman")
     t.start()

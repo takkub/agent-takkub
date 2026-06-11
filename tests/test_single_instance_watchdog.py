@@ -115,53 +115,56 @@ class TestWatchdogShouldExit:
 
 
 # ─────────────────────────────────────────────────────────────
-# 3. Dead-man watchdog — thread calls os._exit when heartbeat stalls
+# 3. Dead-man watchdog — DIAGNOSTIC ONLY (hard-kill disabled 2026-06-10)
 # ─────────────────────────────────────────────────────────────
 
 
 class TestWatchdogThreadBehaviour:
-    """Verify that _start_deadman_watchdog fires os._exit on a stale heartbeat.
+    """Verify _start_deadman_watchdog logs a wedge but NEVER kills the process.
 
-    We use a very short timeout (0.05 s) and poll (0.01 s) so tests finish fast.
+    Hard-kill was removed at the user's request (it was nuking the cockpit on
+    resume-from-sleep and on transient native wedges). The daemon must still
+    dump the wedged main-thread stack for diagnostics, but must not call
+    os._exit. We use a very short timeout (0.05 s) and poll (0.01 s) so tests
+    finish fast.
     """
 
-    def test_watchdog_calls_os_exit_when_heartbeat_stale(
+    def test_watchdog_does_not_kill_on_stale_heartbeat(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """A stale heartbeat (a wedge) must NOT call os._exit — the cockpit
+        stays alive even when wedged; the user closes it manually if needed."""
         monkeypatch.setattr(app_mod, "_WATCHDOG_TIMEOUT_S", 0.05)
+        monkeypatch.setattr(app_mod, "_WATCHDOG_SOFT_STALL_S", 999.0)  # isolate hard branch
         monkeypatch.setattr(app_mod, "_WATCHDOG_POLL_S", 0.01)
-        # Don't let the real faulthandler dump pollute runtime/boot.log.
         monkeypatch.setattr(app_mod, "_BOOT_LOG_FH", None)
 
-        fired = threading.Event()
+        dump_calls: list[str] = []
+        monkeypatch.setattr(app_mod, "_dump_main_stack", lambda header: dump_calls.append(header))
+
         exit_called: list[int] = []
         stop = threading.Event()
-
-        def _fake_exit(code: int) -> None:
-            if not fired.is_set():
-                exit_called.append(code)
-                fired.set()
-
         window = MagicMock()
         window._heartbeat_ts = time.monotonic() - 1.0  # frozen 1 s in the past
 
-        with patch.object(os, "_exit", side_effect=_fake_exit):
+        with patch.object(os, "_exit", side_effect=lambda c: exit_called.append(c)):
             app_mod._start_deadman_watchdog(window, _stop=stop)
-            fired.wait(timeout=2.0)
-            stop.set()  # cleanly halt daemon before os._exit is un-patched
+            time.sleep(0.15)  # several poll cycles past the hard threshold
+            stop.set()
 
-        assert exit_called == [1], "Watchdog must call os._exit(1) on stale heartbeat"
+        assert exit_called == [], "watchdog must NEVER call os._exit (hard-kill disabled)"
+        assert dump_calls, "a wedge must still dump the main-thread stack for diagnostics"
+        assert "wedge" in dump_calls[0]
 
-    def test_watchdog_dumps_main_thread_stack_before_exit(
+    def test_watchdog_dumps_main_thread_stack_on_wedge(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """On a stale heartbeat the watchdog must dump the main-thread stack
-        (faulthandler) to boot.log BEFORE os._exit — otherwise a real freeze
-        leaves no record of where the main thread wedged (the gap that forced
-        the 2026-06-04 freeze to be diagnosed indirectly)."""
+        """On a wedge the watchdog must still dump the main-thread stack
+        (faulthandler all-threads) to boot.log — the diagnostic survives the
+        hard-kill removal so freezes stay debuggable."""
         monkeypatch.setattr(app_mod, "_WATCHDOG_TIMEOUT_S", 0.05)
+        monkeypatch.setattr(app_mod, "_WATCHDOG_SOFT_STALL_S", 999.0)  # isolate hard branch
         monkeypatch.setattr(app_mod, "_WATCHDOG_POLL_S", 0.01)
-        # Force the boot-log branch on so the dump path runs.
         monkeypatch.setattr(app_mod, "_BOOT_LOG_FH", MagicMock())
 
         dump_calls: list[tuple] = []
@@ -171,28 +174,19 @@ class TestWatchdogThreadBehaviour:
             lambda *a, **k: dump_calls.append((a, k)),
         )
 
-        fired = threading.Event()
+        exit_called: list[int] = []
         stop = threading.Event()
-        dump_count_at_exit: list[int] = []
-
-        def _fake_exit(code: int) -> None:
-            if not fired.is_set():
-                # Snapshot how many dumps had happened by the time we exit.
-                dump_count_at_exit.append(len(dump_calls))
-                fired.set()
-
         window = MagicMock()
         window._heartbeat_ts = time.monotonic() - 1.0  # frozen 1 s in the past
 
-        with patch.object(os, "_exit", side_effect=_fake_exit):
+        with patch.object(os, "_exit", side_effect=lambda c: exit_called.append(c)):
             app_mod._start_deadman_watchdog(window, _stop=stop)
-            fired.wait(timeout=2.0)
+            time.sleep(0.15)
             stop.set()
 
-        assert dump_count_at_exit and dump_count_at_exit[0] >= 1, (
-            "faulthandler.dump_traceback must be called before os._exit"
-        )
-        # Dump must target the boot-log handle and include every thread.
+        assert exit_called == [], "hard-kill disabled: os._exit must not be called"
+        assert dump_calls, "faulthandler.dump_traceback must run on a wedge"
+        # Dump must include every thread.
         assert dump_calls[0][1].get("all_threads") is True
 
     def test_watchdog_soft_stall_dumps_without_exiting(
