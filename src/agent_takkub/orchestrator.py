@@ -60,6 +60,7 @@ from .pane_env import (  # re-exported for test imports — see pane_env.py docs
     _PANE_ENV_ALLOWLIST,
     _apply_ecc_mute,
     _apply_mcp_timeout,
+    _apply_non_interactive_env,
     _build_lead_env,
     _build_pane_env,
     inject_user_profile_env,
@@ -115,6 +116,7 @@ __all__ = [  # backwards-compat re-exports
     "_allowed_project_roots",
     "_apply_ecc_mute",
     "_apply_mcp_timeout",
+    "_apply_non_interactive_env",
     "_build_lead_env",
     "_build_pane_env",
     "_default_plugin_dirs",
@@ -1754,6 +1756,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
 
         _apply_mcp_timeout(env)
         _apply_ecc_mute(env)
+        _apply_non_interactive_env(env)
         apply_claude_auth_overrides(env)
 
         # --setting-sources controls which settings.json layers claude loads.
@@ -3230,6 +3233,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         force: bool = False,
         reason: str = "",
         suppress_pipeline: bool = False,
+        suppress_auto_chain: bool = False,
     ) -> tuple[bool, str]:
         """Terminate a pane's session and remove it from the layout.
 
@@ -3243,6 +3247,12 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         advance/complete the whole pipeline before the recovered pane comes back
         (whose later done() would then be a no-op). The respawn path re-honors the
         failure only if the respawn itself fails.
+
+        suppress_auto_chain=True skips the auto-chain handoff check. Used by the
+        stuck-pane watchdog (close→respawn cycle) so a recovery-close never fires
+        the verify-hop pre-authorisation prematurely. External / user-initiated
+        closes (force=True, tab close) do NOT suppress so the #8 behaviour holds:
+        if a user forcibly removes the last auto-chain pane the handoff still fires.
         """
         role_name = role_name.lower().strip()
         project_ns = self._resolve_project(project)
@@ -3270,7 +3280,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         self._idle_state.pop(key, None)
         getattr(self, "_pane_state", {}).pop(key, None)
 
-        if had_auto_chain_close:
+        if had_auto_chain_close and not suppress_auto_chain:
             pending_ac = [
                 k
                 for k, s in getattr(self, "_pane_state", {}).items()
@@ -4586,11 +4596,11 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             silent_for_s=silent_for_s,
             content_static_s=content_static_s,
         )
-        # suppress_pipeline: this close is half of a close→respawn recovery, not a
-        # real pane death. Skip the pipeline fail/advance so a single-role hop
-        # isn't spuriously completed before _do_respawn brings the role back.
-        # _do_respawn re-honors the failure only if the respawn fails.
-        self.close(role, project=project, suppress_pipeline=True)
+        # suppress_pipeline + suppress_auto_chain: this close is the first half of a
+        # close→respawn recovery, not a real pane death.  Neither the pipeline hop
+        # nor the auto-chain handoff should advance here — the same role respawns
+        # 2 s later with its auto_chain flag restored by _do_respawn.
+        self.close(role, project=project, suppress_pipeline=True, suppress_auto_chain=True)
 
         def _do_respawn() -> None:
             # Restore snapshotted state before spawn() runs so:
@@ -4800,6 +4810,13 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         _ps_rr = self._pane_state.get(key)
         if _ps_rr is not None:
             _ps_rr.rate_limited_until = 0.0
+            # Reset the content-change timestamp so the stuck-pane watchdog
+            # doesn't immediately fire after the rate-limit lifts.  The pane's
+            # content has been static for the entire rate-limit window (often
+            # hours); without this reset the very next watchdog tick would see
+            # content_static_s >> STUCK_THRESHOLD_S and trigger a spurious
+            # close→respawn that fires the auto-chain handoff prematurely.
+            _ps_rr.last_content_change_ts = time.time()
         msg = (
             f"⏰ [rate-limit] {role} ({project}) — usage limit reset แล้ว "
             f"pane พร้อมทำงานต่อ (nudge/มอบงานต่อได้เลย)"

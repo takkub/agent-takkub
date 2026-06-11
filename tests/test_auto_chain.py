@@ -10,12 +10,16 @@ Covers:
   close() → state cleared
   Multi-project isolation: proj_a auto-chain done does NOT trigger proj_b handoff
   Lead-absent handoff is queued via _pending_done_notices
+  close(suppress_auto_chain=True) → no handoff (stuck-recover path)
+  close(force=True) → handoff fires (regression #8)
+  _emit_rate_limit_reset → clears rate_limited_until + resets last_content_change_ts
 """
 
 from __future__ import annotations
 
 import json
 import pathlib
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -262,6 +266,102 @@ class TestDoneAutoChainTrigger:
         assert (orch._pane_state.get("proj_b::backend") or PaneState()).auto_chain
 
 
+class TestSuppressAutoChain:
+    """close(suppress_auto_chain=True) must never fire the verify-hop handoff.
+
+    Regression: stuck-pane recovery calls close→respawn — the close is NOT a
+    real done event.  Ordinary user-initiated / tab-close must still fire so
+    the #8 forced-close behaviour is preserved.
+    """
+
+    def test_stuck_recover_close_does_not_fire_handoff(
+        self,
+        qapp: QCoreApplication,
+        two_project_json: pathlib.Path,
+        tmp_path: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """suppress_auto_chain=True: no handoff even when it's the last pane."""
+        orch, _panes = _make_orch_with_fake_panes("proj_a", ["lead", "backend"])
+        orch._ps("proj_a::backend").auto_chain = True
+        inject = MagicMock()
+        monkeypatch.setattr(orch, "_inject_auto_chain_handoff", inject)
+
+        orch.close("backend", project="proj_a", suppress_auto_chain=True)
+
+        inject.assert_not_called()
+        # pane state should still be cleared
+        assert orch._pane_state.get("proj_a::backend") is None
+
+    def test_normal_forced_close_fires_handoff(
+        self,
+        qapp: QCoreApplication,
+        two_project_json: pathlib.Path,
+        tmp_path: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Regression #8: user / tab-close (no suppress) fires handoff for last pane."""
+        orch, _panes = _make_orch_with_fake_panes("proj_a", ["lead", "backend"])
+        orch._ps("proj_a::backend").auto_chain = True
+        inject = MagicMock()
+        monkeypatch.setattr(orch, "_inject_auto_chain_handoff", inject)
+
+        orch.close("backend", project="proj_a", force=True)
+
+        inject.assert_called_once_with("proj_a")
+
+    def test_stuck_recover_close_does_not_fire_handoff_for_solo_pane(
+        self,
+        qapp: QCoreApplication,
+        two_project_json: pathlib.Path,
+        tmp_path: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """suppress_auto_chain=True on the ONLY auto-chain pane must still not
+        fire handoff — this is the exact issue #53 scenario where rate-limit
+        stuck-recover was the sole trigger."""
+        orch, _panes = _make_orch_with_fake_panes("proj_a", ["lead", "backend"])
+        orch._ps("proj_a::backend").auto_chain = True
+        inject = MagicMock()
+        monkeypatch.setattr(orch, "_inject_auto_chain_handoff", inject)
+
+        # Stuck-recover closes the only auto-chain pane
+        orch.close("backend", project="proj_a", suppress_auto_chain=True)
+
+        inject.assert_not_called()
+
+    def test_stuck_recover_close_then_respawn_then_done_fires_handoff(
+        self,
+        qapp: QCoreApplication,
+        two_project_json: pathlib.Path,
+        tmp_path: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Full happy path: stuck-recover close (no handoff) → respawn restores
+        auto_chain → done() fires handoff correctly."""
+        orch, panes = _make_orch_with_fake_panes("proj_a", ["lead", "backend"])
+        orch._ps("proj_a::backend").auto_chain = True
+        inject = MagicMock()
+        monkeypatch.setattr(orch, "_inject_auto_chain_handoff", inject)
+
+        # Step 1: stuck-recover close — no handoff
+        orch.close("backend", project="proj_a", suppress_auto_chain=True)
+        inject.assert_not_called()
+
+        # Step 2: simulate _do_respawn restoring auto_chain (2 s later in prod)
+        orch._ps("proj_a::backend").auto_chain = True
+        # Re-add the pane so done() can find it
+        orch._panes_by_project["proj_a"]["backend"] = panes["backend"]
+
+        # Step 3: backend eventually finishes and calls done()
+        monkeypatch.setattr(orch, "close", MagicMock(return_value=(True, "ok")))
+        monkeypatch.setattr(orch, "_save_decision_note", MagicMock())
+        orch.done("backend", note="backend impl done", project="proj_a")
+
+        # handoff fires because done() was the real completion
+        inject.assert_called_once_with("proj_a")
+
+
 class TestCliAutoChainFlag:
     def test_assign_parser_accepts_auto_chain(self) -> None:
         import argparse
@@ -313,3 +413,61 @@ class TestCliAutoChainFlag:
         )
         cli_mod.cmd_assign(ns)
         assert captured.get("auto_chain") is True
+
+
+class TestEmitRateLimitReset:
+    """_emit_rate_limit_reset must clear rate_limited_until AND reset
+    last_content_change_ts so the stuck-pane watchdog doesn't immediately
+    fire after the rate-limit window lifts (issue #53 root-cause fix)."""
+
+    def test_clears_rate_limited_until(
+        self,
+        qapp: QCoreApplication,
+        two_project_json: pathlib.Path,
+        tmp_path: pathlib.Path,
+    ) -> None:
+        orch, _panes = _make_orch_with_fake_panes("proj_a", ["lead", "backend"])
+        orch._ps("proj_a::backend").rate_limited_until = time.time() - 1
+
+        orch._emit_rate_limit_reset("proj_a", "backend")
+
+        assert orch._ps("proj_a::backend").rate_limited_until == 0.0
+
+    def test_resets_content_change_ts_to_prevent_stuck_recovery(
+        self,
+        qapp: QCoreApplication,
+        two_project_json: pathlib.Path,
+        tmp_path: pathlib.Path,
+    ) -> None:
+        """After rate-limit reset, last_content_change_ts must be refreshed.
+
+        Without this reset: pane content was static for the entire rate-limit
+        window (hours); the very next watchdog tick would see
+        content_static_s >> STUCK_THRESHOLD_S and trigger _auto_recover_stuck
+        → close() → spurious auto-chain handoff (issue #53 RCA).
+        """
+        orch, _panes = _make_orch_with_fake_panes("proj_a", ["lead", "backend"])
+        old_ts = time.time() - 7200  # 2 h ago — simulate hours-long rate-limit
+        ps = orch._ps("proj_a::backend")
+        ps.rate_limited_until = time.time() - 1
+        ps.last_content_change_ts = old_ts
+
+        t_before = time.time()
+        orch._emit_rate_limit_reset("proj_a", "backend")
+        t_after = time.time()
+
+        new_ts = orch._ps("proj_a::backend").last_content_change_ts
+        assert new_ts is not None
+        assert new_ts >= t_before
+        assert new_ts <= t_after
+
+    def test_no_state_entry_does_not_crash(
+        self,
+        qapp: QCoreApplication,
+        two_project_json: pathlib.Path,
+        tmp_path: pathlib.Path,
+    ) -> None:
+        """If there is no PaneState for the role, emit must not raise."""
+        orch, _panes = _make_orch_with_fake_panes("proj_a", ["lead"])
+        # No pane state for "ghost" — must not raise
+        orch._emit_rate_limit_reset("proj_a", "ghost")

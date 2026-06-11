@@ -73,7 +73,12 @@ class _FakeOrch:
             return ps
 
     def close(
-        self, role: str, project: str | None = None, suppress_pipeline: bool = False
+        self,
+        role: str,
+        project: str | None = None,
+        suppress_pipeline: bool = False,
+        suppress_auto_chain: bool = False,
+        **_kw,
     ) -> tuple[bool, str]:
         # Mimic the orchestrator's close() clearing the snapshot/restore fields
         # (session_uuid, task, auto_chain, requires_commit).
@@ -263,7 +268,12 @@ class TestAutoRecoverStuck:
 
         class _PopOnClose(_FakeOrch):
             def close(
-                self, role: str, project: str | None = None, suppress_pipeline: bool = False
+                self,
+                role: str,
+                project: str | None = None,
+                suppress_pipeline: bool = False,
+                suppress_auto_chain: bool = False,
+                **_kw,
             ) -> tuple[bool, str]:
                 key = f"{project or ''}::{role}"
                 self._pane_state.pop(key, None)
@@ -290,7 +300,12 @@ class TestAutoRecoverStuck:
 
         class _PopOnClose(_FakeOrch):
             def close(
-                self, role: str, project: str | None = None, suppress_pipeline: bool = False
+                self,
+                role: str,
+                project: str | None = None,
+                suppress_pipeline: bool = False,
+                suppress_auto_chain: bool = False,
+                **_kw,
             ) -> tuple[bool, str]:
                 key = f"{project or ''}::{role}"
                 self._pane_state.pop(key, None)
@@ -386,7 +401,9 @@ class TestStuckRecoverCap:
 
     def test_attempts_survive_real_close_pop(self) -> None:
         class _PopOnClose(_FakeOrch):
-            def close(self, role, project=None, suppress_pipeline=False):
+            def close(
+                self, role, project=None, suppress_pipeline=False, suppress_auto_chain=False, **_kw
+            ):
                 self._pane_state.pop(f"{project or ''}::{role}", None)
                 self._idle_state.pop(f"{project or ''}::{role}", None)
                 self.close_calls.append((role, project or ""))

@@ -236,7 +236,12 @@ class _FakeOrchForContentDelta:
             return ps
 
     def close(
-        self, role: str, project: str | None = None, suppress_pipeline: bool = False
+        self,
+        role: str,
+        project: str | None = None,
+        suppress_pipeline: bool = False,
+        suppress_auto_chain: bool = False,
+        **_kw,
     ) -> tuple[bool, str]:
         return True, "ok"
 
