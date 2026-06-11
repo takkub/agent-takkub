@@ -13,7 +13,12 @@ import pytest
 from PyQt6.QtCore import QCoreApplication
 
 from agent_takkub import orchestrator as orch_mod
-from agent_takkub.orchestrator import Orchestrator
+from agent_takkub.orchestrator import (
+    IDLE_REMINDER_TEXT,
+    TTY_BLOCK_SURFACE_AFTER_S,
+    TTY_BLOCK_SURFACE_COOLDOWN_S,
+    Orchestrator,
+)
 
 
 @pytest.fixture(scope="module")
@@ -59,6 +64,7 @@ def _make_pane(
     state: str = "working",
     alive: bool = True,
     at_ready_prompt: bool = True,
+    tty_prompt: str | None = None,
 ) -> MagicMock:
     pane = MagicMock()
     pane.state = state
@@ -69,6 +75,9 @@ def _make_pane(
     # banner is showing). Without this a MagicMock would return a truthy stub and
     # the rate-limit gate would suppress the idle reminder.
     pane.session.rate_limit_reset_at.return_value = None
+    # Default: not blocked on a TTY prompt. Without this a MagicMock would return
+    # a truthy stub and the TTY-block gate would suppress the idle reminder.
+    pane.session.is_blocked_on_tty_prompt.return_value = tty_prompt
     return pane
 
 
@@ -245,3 +254,101 @@ def test_signal_emit_no_op_when_disabled(qapp: QCoreApplication) -> None:
     finally:
         del o
     importlib.reload(orch_mod)  # restore module-level constants
+
+
+class TestTtyBlockIdleWatchdog:
+    """Issue #54: pane blocked on interactive subprocess prompt — idle watchdog
+    behaviour and surface-notice logic."""
+
+    def test_blocked_pane_does_not_fire_forgot_done_reminder(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(a) A pane stuck on a y/N prompt must NOT receive the 'forgot takkub done'
+        idle reminder — that text is meaningless when a subprocess is blocking."""
+        pane = _make_pane(state="working", at_ready_prompt=False, tty_prompt="Ok to proceed? (y)")
+        orch.panes["backend"] = pane
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        monkeypatch.setattr(orch_mod.QTimer, "singleShot", lambda *_a, **_kw: None)
+
+        orch._check_idle_teammates()
+        clock[0] += orch_mod.IDLE_REMIND_AFTER_S + 1
+        orch._check_idle_teammates()
+
+        # The idle reminder is written directly to the pane — it must NOT fire.
+        for call in pane.session.write.call_args_list:
+            assert IDLE_REMINDER_TEXT not in str(call), (
+                "IDLE_REMINDER_TEXT must not be sent to a TTY-blocked pane"
+            )
+
+    def test_blocked_pane_surfaces_notice_to_lead_after_threshold(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(b) After TTY_BLOCK_SURFACE_AFTER_S of continuous blocking, the
+        orchestrator injects a ⚠️ notice to Lead (not to the blocked pane)."""
+        lead = _make_pane(state="active")
+        orch.panes["lead"] = lead
+        pane = _make_pane(state="working", at_ready_prompt=False, tty_prompt="[y/N]")
+        orch.panes["backend"] = pane
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        monkeypatch.setattr(orch_mod.QTimer, "singleShot", lambda *_a, **_kw: None)
+
+        # Tick within threshold — no notice yet.
+        orch._check_idle_teammates()
+        assert lead.session.write.call_count == 0
+
+        # Cross threshold — notice must fire.
+        clock[0] += TTY_BLOCK_SURFACE_AFTER_S + 1
+        orch._check_idle_teammates()
+        assert lead.session.write.call_count == 1
+        notice_text = str(lead.session.write.call_args_list[0])
+        assert "[backend]" in notice_text
+        assert "[y/N]" in notice_text
+
+    def test_surface_notice_respects_cooldown(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(b) Surface notice must not spam — cooldown TTY_BLOCK_SURFACE_COOLDOWN_S."""
+        lead = _make_pane(state="active")
+        orch.panes["lead"] = lead
+        pane = _make_pane(state="working", at_ready_prompt=False, tty_prompt="Enter passphrase:")
+        orch.panes["backend"] = pane
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        monkeypatch.setattr(orch_mod.QTimer, "singleShot", lambda *_a, **_kw: None)
+
+        orch._check_idle_teammates()
+        clock[0] += TTY_BLOCK_SURFACE_AFTER_S + 1
+        orch._check_idle_teammates()  # first surface
+        assert lead.session.write.call_count == 1
+
+        # Still inside cooldown — should not re-surface.
+        clock[0] += TTY_BLOCK_SURFACE_COOLDOWN_S - 1
+        orch._check_idle_teammates()
+        assert lead.session.write.call_count == 1
+
+        # After cooldown — surface again.
+        clock[0] += 2
+        orch._check_idle_teammates()
+        assert lead.session.write.call_count == 2
+
+    def test_normal_idle_pane_behavior_unchanged(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(d) A pane that is NOT TTY-blocked still gets the normal idle reminder."""
+        pane = _make_pane(state="working", at_ready_prompt=True, tty_prompt=None)
+        orch.panes["backend"] = pane
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        monkeypatch.setattr(orch_mod.QTimer, "singleShot", lambda *_a, **_kw: None)
+
+        orch._check_idle_teammates()
+        clock[0] += orch_mod.IDLE_REMIND_AFTER_S + 1
+        orch._check_idle_teammates()
+
+        pane.session.write.assert_called_with(IDLE_REMINDER_TEXT)

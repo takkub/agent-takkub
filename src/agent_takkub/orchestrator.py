@@ -368,6 +368,14 @@ STUCK_RECOVER_COOLDOWN_S = 5 * 60
 # wedging (STUCK_THRESHOLD_S + STUCK_RECOVER_COOLDOWN_S per cycle).
 STUCK_RECOVER_MAX = 3
 
+# TTY prompt block detection (issue #54). When a pane's subprocess is waiting
+# for interactive input (y/N, passphrase, "press any key"), close→respawn won't
+# help because the prompt comes from the subprocess, not claude. Suppress the
+# idle forgot-done reminder (wrong context) and surface a notice to Lead instead.
+# Auto-recover is deliberately opt-in / off-by-default.
+TTY_BLOCK_SURFACE_AFTER_S = 2 * 60  # first surface after 2 min of continuous block
+TTY_BLOCK_SURFACE_COOLDOWN_S = 3 * 60  # minimum gap between repeated surface notices
+
 # Continue-nudge injected after a *resumed* stuck-recovery. `--resume` restores
 # the conversation but leaves claude idle at the ready prompt — it does NOT
 # auto-continue the interrupted turn, so without a prompt the recovered pane
@@ -831,6 +839,10 @@ class PaneState:
     stuck_recover_attempts: int = 0
     # _stuck_recover_gave_up: True once STUCK_RECOVER_MAX hit — watchdog stops recovering this pane
     stuck_recover_gave_up: bool = False
+    # tty_blocked_since / last_tty_block_surface_ts: TTY-prompt block tracking (issue #54).
+    # tty_blocked_since is set on first detection; last_tty_block_surface_ts gates re-surface.
+    tty_blocked_since: float | None = None
+    last_tty_block_surface_ts: float = 0.0
     # _codex_spawn_times: wall-clock at spawn for early-crash detection (None = not set)
     codex_spawn_ts: float | None = None
     # _last_send_ts: last delivery ts for stall detection
@@ -4387,6 +4399,21 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                     key, {"first_idle_ts": None, "last_reminder_ts": 0.0}
                 )
 
+                # Issue #54: suppress the forgot-done reminder while a pane is
+                # blocked on an interactive subprocess prompt (y/N, passphrase,
+                # "press any key"). The idle reminder is the wrong context here
+                # and close→respawn (stuck recover) won't help — the prompt comes
+                # from the subprocess. Surface a separate notice to Lead instead.
+                _tty_prompt = pane.session.is_blocked_on_tty_prompt()
+                if _tty_prompt:
+                    entry["first_idle_ts"] = None
+                    self._maybe_surface_tty_block(key, name, project_name, _tty_prompt, now)
+                    continue
+                # Clear block state when no longer blocked.
+                _ps_tty = getattr(self, "_pane_state", {}).get(key)
+                if _ps_tty is not None and _ps_tty.tty_blocked_since is not None:
+                    _ps_tty.tty_blocked_since = None
+
                 if not pane.session.is_at_ready_prompt():
                     # claude is processing — reset the idle streak so a long
                     # build doesn't count toward the reminder threshold.
@@ -4543,6 +4570,24 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                     # Recovered MAX times and it wedged again — giving up beats
                     # an infinite close→respawn loop that stalls the pipeline (#41).
                     self._give_up_stuck(role, project_name, pane, now)
+                    continue
+                # Issue #54: if the pane is blocked on a TTY prompt, close→respawn
+                # won't help (the prompt comes from a subprocess). Defer recovery
+                # and surface to Lead instead.
+                # Note: we're already past STUCK_THRESHOLD_S here, so we skip the
+                # TTY_BLOCK_SURFACE_AFTER_S grace period and surface immediately
+                # (only the repeat-spam cooldown applies).
+                try:
+                    _tty_stuck = pane.session.is_blocked_on_tty_prompt()
+                except Exception:
+                    _tty_stuck = None
+                if _tty_stuck:
+                    _ps_tty = self._ps(key)
+                    if _ps_tty.tty_blocked_since is None:
+                        _ps_tty.tty_blocked_since = now
+                    if (now - _ps_tty.last_tty_block_surface_ts) >= TTY_BLOCK_SURFACE_COOLDOWN_S:
+                        self._surface_tty_block_notice(role, project_name, _tty_stuck)
+                        _ps_tty.last_tty_block_surface_ts = now
                     continue
                 self._auto_recover_stuck(role, project_name, pane, now)
 
@@ -4828,6 +4873,44 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             self.leadInjected.emit(msg)
         _log_event("rate_limit_reset", role=role, project=project)
         self.statusChanged.emit()
+
+    def _maybe_surface_tty_block(
+        self, key: str, role: str, project: str, prompt_line: str, now: float
+    ) -> None:
+        """Record the TTY block start time and call _surface_tty_block_notice
+        once the block has lasted TTY_BLOCK_SURFACE_AFTER_S, then re-surface
+        at most every TTY_BLOCK_SURFACE_COOLDOWN_S while still blocked."""
+        ps = self._ps(key)
+        if ps.tty_blocked_since is None:
+            ps.tty_blocked_since = now
+        if (
+            now - ps.tty_blocked_since >= TTY_BLOCK_SURFACE_AFTER_S
+            and now - ps.last_tty_block_surface_ts >= TTY_BLOCK_SURFACE_COOLDOWN_S
+        ):
+            self._surface_tty_block_notice(role, project, prompt_line)
+            ps.last_tty_block_surface_ts = now
+
+    def _surface_tty_block_notice(self, role: str, project: str, prompt_line: str) -> None:
+        """Inject a notice into Lead's input when a teammate pane is blocked
+        on an interactive subprocess prompt (issue #54).
+
+        Does NOT auto-close or respawn — surface + nudge only. Lead (or the
+        operator) decides whether to send a non-interactive flag or manually
+        unblock the pane."""
+        lead = self._project_panes(project).get(LEAD.name)
+        if not (lead and lead.session and lead.session.is_alive):
+            return
+        msg = (
+            f"⚠️ [{role}] ค้างรอ input: '{prompt_line}' — "
+            f"subprocess รอคำตอบ interactive (y/N, passphrase, 'press any key'). "
+            f"แก้: รัน subprocess แบบ non-interactive "
+            f"(เช่น `-y`, `--no-input`, `DEBIAN_FRONTEND=noninteractive`) "
+            f'หรือ `takkub send --to {role} "<คำแนะนำ>"` เพื่อปลด block'
+        )
+        lead.session.write(msg)
+        QTimer.singleShot(150, lambda: lead.session and lead.session.write(b"\r"))
+        self.leadInjected.emit(msg)
+        _log_event("tty_block_surface", role=role, project=project, prompt=prompt_line)
 
     def _inject_idle_reminder(self, role_name: str, pane: AgentPane) -> None:
         if pane.session is None or not pane.session.is_alive:

@@ -22,6 +22,7 @@ from agent_takkub.orchestrator import (
     STUCK_RECOVER_COOLDOWN_S,
     STUCK_RECOVER_MAX,
     STUCK_THRESHOLD_S,
+    TTY_BLOCK_SURFACE_COOLDOWN_S,
     Orchestrator,
     PaneState,
     PipelineRun,
@@ -46,6 +47,9 @@ class _FakePane:
         if session_alive:
             sess = MagicMock()
             sess.is_alive = True
+            # Default: not blocked on a TTY prompt. Without this, MagicMock
+            # returns a truthy stub and the TTY-block gate defers every recovery.
+            sess.is_blocked_on_tty_prompt.return_value = None
             self.session = sess
         else:
             self.session = None
@@ -63,6 +67,7 @@ class _FakeOrch:
         self._recent_exits = {}
         self.close_calls: list[tuple[str, str]] = []
         self.spawn_calls: list[tuple[str, str | None, str]] = []
+        self.tty_surface_calls: list[tuple[str, str, str]] = []
 
     def _ps(self, key: str) -> PaneState:
         try:
@@ -109,6 +114,13 @@ class _FakeOrch:
         # `_check_stuck_panes` rely on this method being reachable on
         # the fake (the watchdog calls `self._auto_recover_stuck`).
         Orchestrator._auto_recover_stuck(self, role, project, pane, now)  # type: ignore[arg-type]
+
+    def _maybe_surface_tty_block(self, key, role, project, prompt_line, now) -> None:
+        Orchestrator._maybe_surface_tty_block(self, key, role, project, prompt_line, now)  # type: ignore[arg-type]
+
+    def _surface_tty_block_notice(self, role, project, prompt_line) -> None:
+        # Record that Lead was notified so tests can assert surface behaviour.
+        self.tty_surface_calls.append((role, project, prompt_line))
 
 
 @pytest.fixture(autouse=True)
@@ -542,3 +554,79 @@ class TestResumeNudgeAndLog:
         assert rec is not None, "stuck_pane_recover event not logged"
         assert rec["content_static_s"] == 123, "content_static_s = real trigger duration"
         assert rec["silent_for_s"] == 5, "raw-byte silence still reported for context"
+
+
+class TestTtyBlockStuckDefer:
+    """Issue #54: stuck-recover must be deferred when the pane is blocked on an
+    interactive TTY prompt — close→respawn won't fix a subprocess prompt."""
+
+    def test_tty_blocked_pane_defers_stuck_recover(self) -> None:
+        """(c) A pane blocked on y/N must NOT be close→respawned by stuck-recover."""
+        fake = _FakeOrch()
+        now = 1_000_000.0
+        pane = _FakePane(state="working", last_out=now - STUCK_THRESHOLD_S - 1)
+        pane.session.is_blocked_on_tty_prompt.return_value = "Ok to proceed? (y)"
+        fake._panes_by_project["p"] = {"backend": pane}
+        # Seed the content-change ts so the threshold check fires.
+        fake._ps("p::backend").last_content_change_ts = now - STUCK_THRESHOLD_S - 1
+        _check(fake, now)
+        assert fake.close_calls == [], "TTY-blocked pane must NOT be closed/respawned"
+        assert fake.spawn_calls == []
+
+    def test_tty_blocked_pane_surfaces_notice_immediately_in_stuck_context(self) -> None:
+        """(c) In the stuck-watchdog path we're already past STUCK_THRESHOLD_S (10 min),
+        so the notice fires on first detection without waiting TTY_BLOCK_SURFACE_AFTER_S."""
+        fake = _FakeOrch()
+        now = 1_000_000.0
+        pane = _FakePane(state="working", last_out=now - STUCK_THRESHOLD_S - 1)
+        pane.session.is_blocked_on_tty_prompt.return_value = "[y/N]"
+        fake._panes_by_project["p"] = {"backend": pane}
+        fake._ps("p::backend").last_content_change_ts = now - STUCK_THRESHOLD_S - 1
+
+        _check(fake, now)
+        assert len(fake.tty_surface_calls) == 1
+        assert fake.tty_surface_calls[0][0] == "backend"
+        assert "[y/N]" in fake.tty_surface_calls[0][2]
+        # Still no recovery fired.
+        assert fake.close_calls == []
+
+    def test_tty_surface_notice_respects_cooldown(self) -> None:
+        """(c) Surface notice must not spam — respects TTY_BLOCK_SURFACE_COOLDOWN_S."""
+        fake = _FakeOrch()
+        now = 1_000_000.0
+        pane = _FakePane(state="working", last_out=now - STUCK_THRESHOLD_S - 1)
+        pane.session.is_blocked_on_tty_prompt.return_value = "Enter passphrase:"
+        fake._panes_by_project["p"] = {"backend": pane}
+        fake._ps("p::backend").last_content_change_ts = now - STUCK_THRESHOLD_S - 1
+
+        # First surface fires immediately (stuck path, no TTY_BLOCK_SURFACE_AFTER_S wait).
+        _check(fake, now)
+        assert len(fake.tty_surface_calls) == 1
+
+        # Inside cooldown — no re-surface.
+        now2 = now + TTY_BLOCK_SURFACE_COOLDOWN_S - 1
+        pane._last_output_ts = now2 - STUCK_THRESHOLD_S - 1
+        fake._ps("p::backend").last_content_change_ts = now2 - STUCK_THRESHOLD_S - 1
+        _check(fake, now2)
+        assert len(fake.tty_surface_calls) == 1
+
+        # After cooldown — surface again.
+        now3 = now + TTY_BLOCK_SURFACE_COOLDOWN_S + 1
+        pane._last_output_ts = now3 - STUCK_THRESHOLD_S - 1
+        fake._ps("p::backend").last_content_change_ts = now3 - STUCK_THRESHOLD_S - 1
+        _check(fake, now3)
+        assert len(fake.tty_surface_calls) == 2
+
+    def test_non_blocked_pane_still_recovers(self) -> None:
+        """(d) Regression: a pane with content-static > threshold and no TTY block
+        must still trigger the normal stuck-recover path."""
+        fake = _FakeOrch()
+        now = 1_000_000.0
+        pane = _FakePane(state="working", last_out=now - STUCK_THRESHOLD_S - 1)
+        # Explicit None — not TTY-blocked
+        pane.session.is_blocked_on_tty_prompt.return_value = None
+        fake._panes_by_project["agent-takkub"] = {"backend": pane}
+        fake._ps("agent-takkub::backend").last_content_change_ts = now - STUCK_THRESHOLD_S - 1
+        _check(fake, now)
+        assert len(fake.close_calls) == 1, "non-blocked stuck pane must still be recovered"
+        assert fake.spawn_calls[0][0] == "backend"
