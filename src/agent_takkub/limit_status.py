@@ -66,6 +66,10 @@ def _detect_cli_version() -> str | None:
             text=True,
             timeout=5,
             check=False,
+            # CREATE_NO_WINDOW: never flash a console window for this probe
+            # (0 on non-Windows). Matches the rest of the codebase's subprocess
+            # calls; without it the `claude --version` probe pops a terminal.
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         match = re.search(r"(\d+\.\d+\.\d+)", result.stdout)
         return match.group(1) if match else None
