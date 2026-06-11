@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="th"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Design review · teamtreader</title><style>
+:root{
+  --bg:#0e0e10;--panel:#18181b;--panel2:#1f1f23;--border:#27272a;
+  --fg:#e4e4e7;--muted:#a1a1aa;--dim:#71717a;
+  --high:#ef4444;--med:#f59e0b;--low:#52525b;--keep:#22c55e;--gold:#f5c542;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--fg);
+  font:14px/1.6 "Segoe UI","Leelawadee UI",system-ui,sans-serif}
+a{color:#60a5fa;text-decoration:none}a:hover{text-decoration:underline}
+.wrap{max-width:980px;margin:0 auto;padding:28px 22px 80px}
+h1{font-size:22px;margin:0 0 6px;border-bottom:1px solid var(--border);padding-bottom:16px}
+h2{font-size:17px;margin:30px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+h3{font-size:15px;margin:18px 0 8px}
+p{color:var(--muted)}
+code{background:var(--panel2);border:1px solid var(--border);border-radius:4px;
+  padding:1px 5px;font:12.5px "Cascadia Mono","Consolas",monospace}
+pre{background:var(--panel2);border:1px solid var(--border);border-radius:8px;
+  padding:12px 14px;overflow:auto}
+pre code{border:0;background:none;padding:0}
+strong{color:var(--fg)}
+blockquote{margin:18px 0;padding:12px 16px;border-radius:10px;
+  background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.3);color:#fcd34d}
+blockquote p{color:#fcd34d;margin:4px 0}
+ul,ol{padding-left:0}
+li{list-style:none;background:var(--panel);border:1px solid var(--border);
+  border-left:4px solid var(--low);border-radius:10px;padding:11px 15px;margin:0 0 10px;color:var(--muted)}
+li strong:first-child{color:var(--fg)}
+li ul,li ol{margin-top:8px;padding-left:0}
+li li{background:var(--panel2);margin:6px 0;padding:7px 12px}
+li:has(.badge.high){border-left-color:var(--high)}
+li:has(.badge.med){border-left-color:var(--med)}
+li:has(.badge.low){border-left-color:var(--low)}
+ol.steps-numbered li{counter-increment:none}
+.badge{font-size:10.5px;font-weight:700;letter-spacing:.04em;padding:2px 8px;
+  border-radius:5px;text-transform:uppercase;white-space:nowrap}
+.badge.high{background:var(--high);color:#fff}
+.badge.med{background:var(--med);color:#3a2a00}
+.badge.low{background:var(--low);color:#fff}
+.meta{color:var(--muted);font-size:13px;margin:-4px 0 4px}
+figure{margin:22px 0 26px;border:1px solid var(--border);border-radius:12px;overflow:hidden;background:#000}
+figure img{display:block;width:100%;height:auto}
+figcaption{padding:9px 14px;color:var(--muted);font-size:12px;background:var(--panel)}
+.missing-shot{padding:10px 14px;color:#fca5a5;background:rgba(239,68,68,.08);
+  border:1px solid rgba(239,68,68,.3);border-radius:8px;margin:10px 0;font-size:13px}
+footer{margin-top:40px;padding-top:16px;border-top:1px solid var(--border);
+  color:var(--dim);font-size:12px}
+</style></head><body><div class="wrap"><div class="meta">2026-06-09 · teamtreader</div><h1>Team Trader — คู่มือใช้งาน &amp; วิธีรัน</h1>
+<p>ระบบวิเคราะห์ Forex ด้วยทีม Claude 6 agent (News / Fundamental / Technical / Sentiment / Risk / War Room) แล้วสรุปเป็นแผนเทรด <strong>ATLAS</strong> (Entry / SL / TP / R:R) — <strong>ชี้เป้าอย่างเดียว คนกดออเดอร์จริงคือคุณ 100%</strong></p>
+<hr />
+<h2>1. ระบบประกอบด้วย 2 ส่วน</h2>
+<table>
+<thead>
+<tr>
+<th>ส่วน</th>
+<th>ภาษา</th>
+<th>รันที่ไหน</th>
+<th>หน้าที่</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>orchestrator/</strong></td>
+<td>Python 3.11+</td>
+<td><strong>บน host</strong> (ต้องมี <code>claude</code> CLI auth แล้ว)</td>
+<td>spawn 6 agent วิเคราะห์ → เขียน <code>data/plans/latest.json</code> + <code>history.json</code></td>
+</tr>
+<tr>
+<td><strong>web/</strong></td>
+<td>Next.js 16</td>
+<td>host (<code>npm run dev</code>) หรือ Docker</td>
+<td>dashboard อ่านแผน + หน้า <code>/remote-control</code> (JRPG War Room) สั่งรันสด + ดู SSE</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>orchestrator <strong>ต้องรันบน host</strong> เพราะใช้ <code>claude</code> CLI ที่ auth ไว้ — รันใน Docker ไม่ได้ (container มีแต่ web + mount <code>data/plans</code> แบบ read-only)</p>
+</blockquote>
+<hr />
+<h2>2. สิ่งที่ต้องมีก่อน (Prerequisites)</h2>
+<ul>
+<li><strong>Python 3.11+</strong></li>
+<li><strong>Claude Code CLI</strong> (<code>claude</code>) — ติดตั้งแล้ว + auth แล้ว (ลอง <code>claude --version</code>)</li>
+<li><strong>Node.js</strong> (สำหรับ web) — ถ้าจะรัน dashboard / <code>/remote-control</code></li>
+<li>(ตัวเลือก) <strong>Docker</strong> — ถ้าจะ deploy web เป็น container</li>
+</ul>
+<hr />
+<h2>3. วิธีรัน</h2>
+<h3>A) รัน orchestrator ตรงๆ (CLI) — ได้แผนเร็วสุด</h3>
+<p>จาก root ของโปรเจค (<code>teamtreader/</code>):</p>
+<pre><code class="language-bash"># พื้นฐาน
+python orchestrator/run.py --pair EURUSD --tf H4
+
+# เต็มรูปแบบ
+python orchestrator/run.py \
+  --pair XAUUSD --tf H1 --secondary-tf M15 \
+  --style intraday --risk 1.5 \
+  --chart path/to/chart.png \
+  --context &quot;ราคาอยู่ 2320 เด้งจากแนวรับสำคัญ&quot;
+</code></pre>
+<p><strong>Arguments:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Flag</th>
+<th>บังคับ</th>
+<th>ค่า default</th>
+<th>ความหมาย</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--pair</code></td>
+<td>✅</td>
+<td>—</td>
+<td>คู่เงิน เช่น <code>EURUSD</code>, <code>XAUUSD</code>, <code>GBPJPY</code></td>
+</tr>
+<tr>
+<td><code>--tf</code></td>
+<td>✅</td>
+<td>—</td>
+<td>TF หลัก: <code>M15</code> <code>H1</code> <code>H4</code> <code>D1</code> …</td>
+</tr>
+<tr>
+<td><code>--secondary-tf</code></td>
+<td>❌</td>
+<td>= <code>--tf</code></td>
+<td>TF รอง</td>
+</tr>
+<tr>
+<td><code>--style</code></td>
+<td>❌</td>
+<td><code>intraday</code></td>
+<td><code>scalp</code> / <code>intraday</code> / <code>swing</code></td>
+</tr>
+<tr>
+<td><code>--risk</code></td>
+<td>❌</td>
+<td><code>1.0</code></td>
+<td>ความเสี่ยง % ต่อไม้ (0.1–10)</td>
+</tr>
+<tr>
+<td><code>--chart</code></td>
+<td>❌</td>
+<td>—</td>
+<td>path รูปกราฟ (Technical agent อ่าน)</td>
+</tr>
+<tr>
+<td><code>--context</code></td>
+<td>❌</td>
+<td>—</td>
+<td>ข้อความ context ให้ทุก agent</td>
+</tr>
+</tbody>
+</table>
+<p><strong>ใช้เวลา ~2–3 นาที</strong> (analyst 1–5 รันขนาน ~60–120s + War Room ~30–60s)
+<strong>ผลออกที่:</strong> <code>data/plans/latest.json</code> (ทับทุกครั้ง) + <code>data/plans/history.json</code> (ต่อท้าย)</p>
+<hr />
+<h3>B) รัน web dashboard</h3>
+<p><strong>Dev (host) — แนะนำสำหรับใช้ <code>/remote-control</code>:</strong></p>
+<pre><code class="language-bash">cd web
+npm install      # ครั้งแรก
+npm run dev      # → http://localhost:3000
+</code></pre>
+<p>หน้าที่มี: <code>/</code> (แผนล่าสุด) · <code>/run</code> (สั่งรัน + SSE) · <code>/history</code> (ประวัติ) · <strong><code>/remote-control</code></strong> (War Room 8-bit)</p>
+<p><strong>Docker (deploy web อย่างเดียว):</strong></p>
+<pre><code class="language-bash">docker compose build
+docker compose up -d            # detached เสมอ
+docker compose logs -f web      # ดู log
+# → http://localhost:8742  (เปลี่ยน port ที่ .env: HOST_PORT=)
+</code></pre>
+<blockquote>
+<p>⚠️ ปุ่ม "เรียกประชุมสภา" / <code>/api/run</code> ใน Docker <strong>จะไม่ทำงาน</strong> เพราะ container ไม่มี <code>claude</code> CLI — Docker เหมาะกับ "โชว์แผนที่ orchestrator บน host รันไว้แล้ว" เท่านั้น ถ้าจะสั่งรันสดจากเว็บให้ใช้ <code>npm run dev</code> บน host</p>
+</blockquote>
+<hr />
+<h3>C) ใช้หน้า <code>/remote-control</code> (War Room) สั่งรันสด</h3>
+<ol>
+<li><code>cd web &amp;&amp; npm run dev</code> → เปิด <code>http://localhost:3000/remote-control</code></li>
+<li>หน้า <strong>WAR ROOM</strong> โชว์แผน ATLAS ล่าสุดจาก <code>/api/plan</code> (อ่าน <code>latest.json</code>)</li>
+<li>กดปุ่ม <strong>"⚔ เรียกประชุมสภา"</strong> → ยิง <code>POST /api/run</code> → spawn <code>python run.py --stream</code> จริง</li>
+<li>สลับไปแท็บ <strong>BATTLE LOG</strong> ดู agent ร่ายเวทแบบสด (SSE: <code>agent_status</code> → <code>agent_activity</code> → <code>phase</code> → <code>plan</code>)</li>
+<li>พอจบ War Room อัปเดตแผนใหม่อัตโนมัติ</li>
+</ol>
+<p><strong>ทดสอบ UI โดยไม่เรียก Claude จริง (mock):</strong> ยิง <code>POST /api/run?mock=1</code> → ได้ลำดับ event จำลอง ~12 วิ (BUY plan ตัวอย่าง) ใช้เช็คหน้าจอ/SSE โดยไม่เสีย token</p>
+<hr />
+<h2>4. 5 หน้าจอใน <code>/remote-control</code></h2>
+<table>
+<thead>
+<tr>
+<th>หน้า</th>
+<th>ดูอะไร</th>
+<th>ข้อมูลจาก</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>WAR ROOM</strong></td>
+<td>แผน ATLAS (Entry/SL/TP1/TP2/R:R), Confluence meter, Risk Gate, agent 6 ตัว</td>
+<td><strong>จริง</strong> ← <code>/api/plan</code></td>
+</tr>
+<tr>
+<td><strong>BATTLE LOG</strong></td>
+<td>feed สดตอนรัน (agent ร่ายเวทวิเคราะห์)</td>
+<td><strong>จริง</strong> ← <code>/api/run</code> SSE</td>
+</tr>
+<tr>
+<td><strong>PARTY</strong></td>
+<td>character sheet แต่ละ agent (stats/skill/report)</td>
+<td>flavor + report จริงถ้ามี</td>
+</tr>
+<tr>
+<td><strong>TREASURY</strong></td>
+<td>equity curve / PnL / open positions</td>
+<td>จำลอง (ยังไม่มี backend)</td>
+</tr>
+<tr>
+<td><strong>QUESTS</strong></td>
+<td>กลยุทธ์เป็นภารกิจ RPG</td>
+<td>จำลอง</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Tweaks</strong> (มุมหน้าจอ): palette 4 ชุด · CRT scanline on/off · ฟอนต์พิกเซล · ความเร็ว animation</p>
+<hr />
+<h2>5. อ่านแผน ATLAS ยังไง</h2>
+<pre><code>ทิศทาง:        BUY / SELL / NO TRADE
+ความมั่นใจรวม:  __%  (เห็นตรงกัน __/5 ฝ่าย)
+🎯 Entry / 🛑 SL / ✅ TP1 / ✅ TP2 / 📦 Lot / R:R
+</code></pre>
+<p><strong>Risk Gate — เงื่อนไข NO TRADE</strong> (ถ้าข้อใดไม่ผ่าน = ห้ามเข้า):
+- Confluence ≥ 3/5 ฝ่าย
+- R:R ≥ 1:1.5
+- ไม่มีข่าวแรง &lt; 1 ชม.
+- ความมั่นใจรวม ≥ 60%
+- Liquidity ปกติ</p>
+<p><strong>Checklist ก่อนเทรดเอง:</strong> Confluence ≥ 3/5 · R:R ≥ 1.5 · ข่าวแรงไม่ใกล้ · Entry/SL/TP ชัด · Invalidation ชัด · Lot ถูกตาม risk%</p>
+<hr />
+<h2>6. ปัญหาที่พบบ่อย</h2>
+<table>
+<thead>
+<tr>
+<th>อาการ</th>
+<th>สาเหตุ / แก้</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>claude: command not found</code></td>
+<td>ยังไม่ติดตั้ง/auth Claude CLI หรือไม่อยู่ใน PATH</td>
+</tr>
+<tr>
+<td>Agent timeout</td>
+<td>timeout 240s/agent — แก้ <code>AGENT_TIMEOUT</code> ใน <code>run.py</code></td>
+</tr>
+<tr>
+<td><strong>แผนออก NO_TRADE / confidence 0% ตลอด</strong></td>
+<td>War Room agent อาจ exit 1 (crash) แล้ว fallback → เช็ค stderr ของ run.py ว่า agent ไหน failed / confluence &lt; 3/5</td>
+</tr>
+<tr>
+<td><code>/remote-control</code> กดรันแล้วไม่ไหล</td>
+<td>รันใน Docker (ไม่มี claude CLI) → ใช้ <code>npm run dev</code> บน host แทน; หรือลอง <code>?mock=1</code></td>
+</tr>
+<tr>
+<td>เว็บไม่เห็นแผนใหม่</td>
+<td><code>/api/plan</code> เป็น <code>force-dynamic</code> อ่านไฟล์ทุก request — เช็คว่า orchestrator เขียน <code>data/plans/latest.json</code> สำเร็จจริง</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>7. ⚠️ คำเตือน</h2>
+<p>ระบบนี้ <strong>วิเคราะห์เพื่อประกอบการตัดสินใจ ไม่ใช่คำแนะนำการลงทุน</strong> — Forex เสี่ยงสูง <strong>คนกดออเดอร์จริงคือคุณ 100%</strong></p><footer>Generated by agent_takkub.design_review_html · self-contained (screenshots inlined) · open in any browser</footer></div></body></html>
