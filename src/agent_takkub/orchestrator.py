@@ -376,6 +376,11 @@ STUCK_RECOVER_MAX = 3
 TTY_BLOCK_SURFACE_AFTER_S = 2 * 60  # first surface after 2 min of continuous block
 TTY_BLOCK_SURFACE_COOLDOWN_S = 3 * 60  # minimum gap between repeated surface notices
 
+# Malformed tool-call XML detection (issue #59). When a model outputs tool-call
+# XML without the `antml:` namespace prefix the harness silently no-ops it and
+# the pane appears to hang. Nudge the pane at most this often.
+MALFORMED_XML_NOTICE_COOLDOWN_S = 60  # minimum gap between repeat nudges
+
 # Continue-nudge injected after a *resumed* stuck-recovery. `--resume` restores
 # the conversation but leaves claude idle at the ready prompt — it does NOT
 # auto-continue the interrupted turn, so without a prompt the recovered pane
@@ -885,6 +890,8 @@ class PaneState:
     # tty_blocked_since is set on first detection; last_tty_block_surface_ts gates re-surface.
     tty_blocked_since: float | None = None
     last_tty_block_surface_ts: float = 0.0
+    # malformed_xml_notice_ts: last time a malformed-tool-call nudge was injected (issue #59).
+    malformed_xml_notice_ts: float = 0.0
     # _codex_spawn_times: wall-clock at spawn for early-crash detection (None = not set)
     codex_spawn_ts: float | None = None
     # _last_send_ts: last delivery ts for stall detection
@@ -4646,6 +4653,14 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 try:
                     key = f"{project_name}::{name}"
                     if name == LEAD.name:
+                        # Issue #59: malformed-tool-call detection covers Lead too even
+                        # though Lead is exempt from the idle-done-reminder loop.
+                        if (
+                            pane.session
+                            and pane.session.is_alive
+                            and pane.session.is_at_ready_prompt()
+                        ):
+                            self._maybe_surface_malformed_xml(key, name, project_name, pane, now)
                         continue
                     if pane.state != "working":
                         self._idle_state.pop(key, None)
@@ -4702,6 +4717,10 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                         # build doesn't count toward the reminder threshold.
                         entry["first_idle_ts"] = None
                         continue
+
+                    # Issue #59: pane is idle — check for malformed tool-call XML
+                    # that the harness silently no-op'd (makes pane look hung).
+                    self._maybe_surface_malformed_xml(key, name, project_name, pane, now)
 
                     if entry["first_idle_ts"] is None:
                         entry["first_idle_ts"] = now
@@ -5236,6 +5255,32 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         _idle_sess.write(IDLE_REMINDER_TEXT)
         _delayed_enter(pane, _idle_sess, 150)
         _log_event("idle_reminder", role=role_name)
+
+    def _maybe_surface_malformed_xml(
+        self, key: str, role: str, project: str, pane: AgentPane, now: float
+    ) -> None:
+        """Inject a nudge into `pane` if literal tool-call XML is visible on
+        screen, indicating the harness silently no-op'd a malformed tool call
+        (missing ``antml:`` prefix). Fires at most once per
+        MALFORMED_XML_NOTICE_COOLDOWN_S (issue #59)."""
+        ps = self._ps(key)
+        if now - ps.malformed_xml_notice_ts < MALFORMED_XML_NOTICE_COOLDOWN_S:
+            return
+        if pane.session is None or not pane.session.is_alive:
+            return
+        matched = pane.session.has_unparsed_tool_call()
+        if matched is None:
+            return
+        msg = (
+            "⚠️ [cockpit] ตรวจพบ tool-call XML ที่ harness parse ไม่ได้ "
+            "(หล่น `antml:` prefix) — คำสั่งไม่ได้รันจริงและไม่ถือว่า hang "
+            "ลองพิมพ์ tool call ใหม่ให้ใช้ antml:invoke / antml:parameter ให้ครบ"
+        )
+        _xml_sess = pane.session
+        _xml_sess.write(msg)
+        _delayed_enter(pane, _xml_sess, 150)
+        ps.malformed_xml_notice_ts = now
+        _log_event("malformed_tool_call_detected", role=role, project=project)
 
     def broadcast_bug_check(self, project: str | None = None) -> tuple[int, list[str]]:
         """Ask every active pane in `project` to introspect for cockpit bugs.

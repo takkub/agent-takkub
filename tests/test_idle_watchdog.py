@@ -15,6 +15,7 @@ from PyQt6.QtCore import QCoreApplication
 from agent_takkub import orchestrator as orch_mod
 from agent_takkub.orchestrator import (
     IDLE_REMINDER_TEXT,
+    MALFORMED_XML_NOTICE_COOLDOWN_S,
     TTY_BLOCK_SURFACE_AFTER_S,
     TTY_BLOCK_SURFACE_COOLDOWN_S,
     Orchestrator,
@@ -65,6 +66,7 @@ def _make_pane(
     alive: bool = True,
     at_ready_prompt: bool = True,
     tty_prompt: str | None = None,
+    unparsed_xml: str | None = None,
 ) -> MagicMock:
     pane = MagicMock()
     pane.state = state
@@ -78,6 +80,8 @@ def _make_pane(
     # Default: not blocked on a TTY prompt. Without this a MagicMock would return
     # a truthy stub and the TTY-block gate would suppress the idle reminder.
     pane.session.is_blocked_on_tty_prompt.return_value = tty_prompt
+    # Default: no malformed tool-call XML on screen.
+    pane.session.has_unparsed_tool_call.return_value = unparsed_xml
     return pane
 
 
@@ -352,3 +356,128 @@ class TestTtyBlockIdleWatchdog:
         orch._check_idle_teammates()
 
         pane.session.write.assert_called_with(IDLE_REMINDER_TEXT)
+
+
+class TestMalformedXmlWatchdog:
+    """Issue #59: pane has literal tool-call XML on screen (harness silently
+    no-op'd it due to missing namespace prefix) -- watchdog must inject a nudge."""
+
+    def test_teammate_idle_with_xml_gets_nudge(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A teammate pane that is idle AND shows malformed XML gets a cockpit nudge."""
+        pane = _make_pane(
+            state="working",
+            at_ready_prompt=True,
+            unparsed_xml='<invoke name="Bash">',
+        )
+        orch.panes["backend"] = pane
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        monkeypatch.setattr(orch_mod.QTimer, "singleShot", lambda *_a, **_kw: None)
+
+        orch._check_idle_teammates()
+
+        # The nudge must be written to the affected pane.
+        assert pane.session.write.call_count >= 1
+        notice_text = str(pane.session.write.call_args_list[0])
+        assert "cockpit" in notice_text
+        assert "antml" in notice_text
+
+    def test_lead_idle_with_xml_gets_nudge(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Lead pane (normally exempt from idle-reminder loop) still gets the
+        malformed-XML nudge because it's the role most likely to emit tool calls."""
+        lead = _make_pane(
+            state="active",
+            at_ready_prompt=True,
+            unparsed_xml='<invoke name="Read">',
+        )
+        orch.panes["lead"] = lead
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        monkeypatch.setattr(orch_mod.QTimer, "singleShot", lambda *_a, **_kw: None)
+
+        orch._check_idle_teammates()
+
+        assert lead.session.write.call_count >= 1
+        notice_text = str(lead.session.write.call_args_list[0])
+        assert "cockpit" in notice_text
+
+    def test_nudge_not_sent_when_no_xml(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pane with normal screen content must NOT receive the XML nudge."""
+        pane = _make_pane(state="working", at_ready_prompt=True, unparsed_xml=None)
+        orch.panes["backend"] = pane
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        monkeypatch.setattr(orch_mod.QTimer, "singleShot", lambda *_a, **_kw: None)
+
+        orch._check_idle_teammates()
+
+        # No write at all on first tick (idle streak not yet expired either).
+        pane.session.write.assert_not_called()
+
+    def test_nudge_cooldown_prevents_spam(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The XML nudge must not repeat more often than MALFORMED_XML_NOTICE_COOLDOWN_S.
+
+        (The idle-done reminder is a separate write path and may also fire in
+        this window; we track only the XML-nudge message specifically.)
+        """
+        pane = _make_pane(
+            state="working",
+            at_ready_prompt=True,
+            unparsed_xml="<function_calls>",
+        )
+        orch.panes["backend"] = pane
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        monkeypatch.setattr(orch_mod.QTimer, "singleShot", lambda *_a, **_kw: None)
+
+        def _xml_nudge_count() -> int:
+            return sum(
+                1
+                for call in pane.session.write.call_args_list
+                if "cockpit" in str(call) and "antml" in str(call)
+            )
+
+        # First tick -- XML nudge fires once.
+        orch._check_idle_teammates()
+        assert _xml_nudge_count() == 1
+
+        # Inside cooldown -- XML nudge must NOT repeat.
+        clock[0] += MALFORMED_XML_NOTICE_COOLDOWN_S - 1
+        orch._check_idle_teammates()
+        assert _xml_nudge_count() == 1
+
+        # After cooldown elapses -- XML nudge fires again.
+        clock[0] += 2
+        orch._check_idle_teammates()
+        assert _xml_nudge_count() == 2
+
+    def test_lead_not_busy_no_nudge(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Lead pane that is NOT at its ready prompt (busy) must NOT get nudged."""
+        lead = _make_pane(
+            state="active",
+            at_ready_prompt=False,
+            unparsed_xml='<invoke name="Bash">',
+        )
+        orch.panes["lead"] = lead
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        monkeypatch.setattr(orch_mod.QTimer, "singleShot", lambda *_a, **_kw: None)
+
+        orch._check_idle_teammates()
+
+        lead.session.write.assert_not_called()
