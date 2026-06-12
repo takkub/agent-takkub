@@ -449,6 +449,12 @@ _CODEX_SPAWN_STAGGER_MS = int(os.environ.get("TAKKUB_CODEX_SPAWN_STAGGER_MS", "1
 # live debugger session.
 CODEX_EARLY_CRASH_WINDOW_SEC = 90
 
+# Tier 2: tight re-samples of InSendMessageEx immediately before each native
+# ConPTY call to narrow the TOCTOU window between the early gate check and the
+# actual winpty.PtyProcess.spawn().  Not a temporal quiet guarantee — use Tier 1
+# event-loop-turn streak for that.
+_TOCTOU_RESAMPLE_N = 3
+
 # Bracketed-paste threshold for messages injected into a pane via the
 # orchestrator (assign / send / slash-command). Below this length we
 # write raw text — claude code's interactive input handles short typing
@@ -1301,6 +1307,57 @@ class Orchestrator(QObject):
         )
 
     # ──────────────────────────────────────────────────────────────
+    # Tier 2 final re-sample gate helpers
+    # ──────────────────────────────────────────────────────────────
+
+    def _final_gate_clear(self) -> bool:
+        """Tight TOCTOU re-sample: True when InSendMessageEx stays clear for
+        _TOCTOU_RESAMPLE_N consecutive synchronous reads in the same callback.
+
+        Call immediately before session.spawn() (after all env/argv/transcript
+        setup) and only proceed with the native call when this returns True.
+        No yield, no QTimer, no processEvents between the check and the call.
+        """
+        from .spawn_gate import is_in_send_stable
+
+        return is_in_send_stable(_TOCTOU_RESAMPLE_N)
+
+    def _toctou_redefer(
+        self,
+        role_name: str,
+        cwd: str | None,
+        project: str | None,
+        project_ns: str,
+        _from_auto_respawn: bool,
+        _shard_total: int,
+        pane_tok: str | None = None,
+    ) -> None:
+        """Clean re-defer after Tier 2 final-gate failure.
+
+        Revokes the pane token so it cannot be used by the abandoned attempt,
+        re-adds the role to _spawn_deferred, and schedules _retry_deferred_spawn.
+        _spawn_in_progress is reset by the calling try/finally block.
+        """
+        if pane_tok is not None:
+            getattr(self, "_pane_tokens", {}).pop(pane_tok, None)
+        _deferred = getattr(self, "_spawn_deferred", None)
+        if _deferred is None:
+            self._spawn_deferred = _deferred = set()
+        _dk = f"{project_ns}::{role_name}"
+        _deferred.add(_dk)
+        _log_event(
+            "spawn_toctou_redeferred",
+            role=role_name,
+            project=project_ns,
+        )
+        QTimer.singleShot(
+            50,
+            lambda r=role_name, c=cwd, p=project, a=_from_auto_respawn, s=_shard_total: (
+                self._retry_deferred_spawn(r, c, p, a, s)
+            ),
+        )
+
+    # ──────────────────────────────────────────────────────────────
     # high-level operations
     # ──────────────────────────────────────────────────────────────
     def spawn(
@@ -1463,7 +1520,29 @@ class Orchestrator(QObject):
             pane._transcript_path = _t_path
             self._spawn_in_progress = True
             try:
+                # Tier 2 final re-sample: check InSendMessageEx immediately
+                # before the native ConPTY call to narrow the TOCTOU window.
+                if not self._final_gate_clear():
+                    session.setParent(None)
+                    session.deleteLater()
+                    self._toctou_redefer(
+                        role_name,
+                        cwd,
+                        project,
+                        project_ns,
+                        _from_auto_respawn,
+                        _shard_total,
+                        pane_tok=_shell_tok,
+                    )
+                    return True, f"{role_name} spawn deferred (final re-sample blocked)"
+                _t0 = time.time()
                 session.spawn(argv=shell_argv, cwd=spawn_cwd, env=env, transcript_path=_t_path)
+                _log_event(
+                    "spawn_native_ms",
+                    role=role_name,
+                    project=project_ns,
+                    ms=int((time.time() - _t0) * 1000),
+                )
                 pane.attach_session(session, cwd=spawn_cwd)
                 _sess_shell = session
                 session.processExited.connect(
@@ -1550,7 +1629,29 @@ class Orchestrator(QObject):
             pane._transcript_path = _t_path
             self._spawn_in_progress = True
             try:
+                # Tier 2 final re-sample: check InSendMessageEx immediately
+                # before the native ConPTY call to narrow the TOCTOU window.
+                if not self._final_gate_clear():
+                    session.setParent(None)
+                    session.deleteLater()
+                    self._toctou_redefer(
+                        role_name,
+                        cwd,
+                        project,
+                        project_ns,
+                        _from_auto_respawn,
+                        _shard_total,
+                        pane_tok=_gem_tok,
+                    )
+                    return True, f"{role_name} spawn deferred (final re-sample blocked)"
+                _t0 = time.time()
                 session.spawn(argv=gemini_argv, cwd=spawn_cwd, env=env, transcript_path=_t_path)
+                _log_event(
+                    "spawn_native_ms",
+                    role=role_name,
+                    project=project_ns,
+                    ms=int((time.time() - _t0) * 1000),
+                )
                 pane.attach_session(session, cwd=spawn_cwd)
                 _sess_gem = session
                 session.processExited.connect(
@@ -1640,7 +1741,29 @@ class Orchestrator(QObject):
             pane._transcript_path = _t_path
             self._spawn_in_progress = True
             try:
+                # Tier 2 final re-sample: check InSendMessageEx immediately
+                # before the native ConPTY call to narrow the TOCTOU window.
+                if not self._final_gate_clear():
+                    session.setParent(None)
+                    session.deleteLater()
+                    self._toctou_redefer(
+                        role_name,
+                        cwd,
+                        project,
+                        project_ns,
+                        _from_auto_respawn,
+                        _shard_total,
+                        pane_tok=_cdx_tok,
+                    )
+                    return True, f"{role_name} spawn deferred (final re-sample blocked)"
+                _t0 = time.time()
                 session.spawn(argv=codex_argv, cwd=spawn_cwd, env=env, transcript_path=_t_path)
+                _log_event(
+                    "spawn_native_ms",
+                    role=role_name,
+                    project=project_ns,
+                    ms=int((time.time() - _t0) * 1000),
+                )
                 pane.attach_session(session, cwd=spawn_cwd)
                 _ekey = _exit_key(project_ns, role_name)
                 self._ps(_ekey).codex_spawn_ts = time.time()
@@ -1804,6 +1927,10 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         # project — under the multi-tab refactor a Lead in unirecon
         # mustn't accidentally send to a backend pane that belongs to pms.
         env["TAKKUB_PROJECT"] = project_ns
+        # pane_tok is only assigned in the else branch (non-Lead).  Pre-bind to
+        # None so the Lead path through _toctou_redefer can pass it safely
+        # without triggering UnboundLocalError on a Tier 2 final-gate block.
+        pane_tok = None
         # Inject the Lead capability token only into the Lead pane so its
         # takkub CLI can authenticate Lead-only server commands. Teammates
         # don't get this env var — the server will reject their Lead-only
@@ -2062,7 +2189,29 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         pane._transcript_path = _t_path
         self._spawn_in_progress = True
         try:
+            # Tier 2 final re-sample: check InSendMessageEx immediately
+            # before the native ConPTY call to narrow the TOCTOU window.
+            if not self._final_gate_clear():
+                session.setParent(None)
+                session.deleteLater()
+                self._toctou_redefer(
+                    role_name,
+                    cwd,
+                    project,
+                    project_ns,
+                    _from_auto_respawn,
+                    _shard_total,
+                    pane_tok=pane_tok,
+                )
+                return True, f"{role_name} spawn deferred (final re-sample blocked)"
+            _t0 = time.time()
             session.spawn(argv=argv, cwd=spawn_cwd, env=env, transcript_path=_t_path)
+            _log_event(
+                "spawn_native_ms",
+                role=role_name,
+                project=project_ns,
+                ms=int((time.time() - _t0) * 1000),
+            )
             pane.attach_session(session, cwd=spawn_cwd)
             # Record exits so the auto-respawn watcher knows which project
             # namespace owned the pane that just died.  Capture the session so
@@ -2152,15 +2301,17 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         ekey = _exit_key(project, role_name)
         _ps_cx = self._pane_state.get(ekey)
         spawn_ts = _ps_cx.codex_spawn_ts if _ps_cx is not None else None
-        if _ps_cx is not None:
-            _ps_cx.codex_spawn_ts = None
-        time_to_exit = (time.time() - spawn_ts) if spawn_ts is not None else None
 
-        # Guard: drop stale exit if the pane has already moved to a new session
-        # (same guard pattern as shell/gemini/claude processExited lambdas).
+        # Guard: drop stale exit BEFORE resetting codex_spawn_ts.
+        # If a new session has already spawned and registered its own spawn_ts,
+        # clearing it here would clobber its crash-diagnostic window.
         _pane_cdx = self._panes_by_project.get(project, {}).get(role_name)
         if _pane_cdx is not None and _pane_cdx.session is not session:
             return
+
+        if _ps_cx is not None:
+            _ps_cx.codex_spawn_ts = None
+        time_to_exit = (time.time() - spawn_ts) if spawn_ts is not None else None
 
         if time_to_exit is not None and time_to_exit <= CODEX_EARLY_CRASH_WINDOW_SEC:
             self._write_codex_crash_dump(
