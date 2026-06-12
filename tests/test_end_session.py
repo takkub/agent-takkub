@@ -293,10 +293,14 @@ class TestCliServerEndSessionGate:
         assert "lead" in resp["msg"].lower()
 
     def test_lead_dispatches_to_orchestrator(self, srv_sock) -> None:
-        """end-session from from_role='lead' → calls orchestrator.end_session."""
+        """end-session from from_role='lead' with valid token → calls orchestrator.end_session."""
         srv, sock, mock_orch = srv_sock
         sock.reset()
-        srv._dispatch(sock, {"cmd": "end-session", "from": "lead", "note": "wrap"})
+        # end-session is a Lead-only command and requires the lead token.
+        srv._dispatch(
+            sock,
+            {"cmd": "end-session", "from": "lead", "note": "wrap", "auth": "test-lead-token"},
+        )
         resp = sock.last_response()
         assert resp["ok"] is True
         mock_orch.end_session.assert_called_once()

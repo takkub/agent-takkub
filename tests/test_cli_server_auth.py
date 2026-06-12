@@ -49,6 +49,9 @@ class _FakeSock:
         self._buf = b""
 
 
+_PANE_TOKEN_BACKEND = "test-pane-token-backend-abc"
+
+
 @pytest.fixture
 def server_and_sock(qapp: QCoreApplication):
     """Return a (CliServer, FakeSock, real_token) triple.
@@ -56,10 +59,15 @@ def server_and_sock(qapp: QCoreApplication):
     The CliServer is wired to a MagicMock orchestrator whose `_lead_token`
     attribute is set to a known value so tests can check both the reject
     path (wrong token) and the accept path (correct token).
+
+    _pane_tokens is also pre-populated with a backend pane token so tests
+    for `done`/`send` can supply a valid pane credential.
     """
     real_token = "test-lead-token-abc123"
     mock_orch = MagicMock()
     mock_orch._lead_token = real_token
+    # Pre-register a backend pane token so tests can exercise the pane-token path.
+    mock_orch._pane_tokens = {_PANE_TOKEN_BACKEND: ("test-project", "backend")}
 
     # Stub out orchestrator methods that Lead-only cmds call
     mock_orch.spawn.return_value = (True, "spawned")
@@ -188,17 +196,21 @@ class TestDoneCommand:
         assert "lead cannot" in resp["msg"].lower()
 
     def test_done_from_teammate_allowed(self, server_and_sock) -> None:
+        # `done` requires a valid pane token; identity is derived server-side.
         srv, sock, _ = server_and_sock
         sock.reset()
-        srv._dispatch(sock, {"cmd": "done", "from": "backend", "note": "finished"})
+        srv._dispatch(
+            sock,
+            {"cmd": "done", "from": "backend", "note": "finished", "auth": _PANE_TOKEN_BACKEND},
+        )
         resp = sock.last_response()
         assert resp["ok"] is True
 
     def test_done_with_no_from_field_allowed(self, server_and_sock) -> None:
-        """Raw TCP client that omits 'from' should not be blocked by the done gate."""
+        """A pane that omits `from` but supplies its pane token is allowed for `done`."""
         srv, sock, _ = server_and_sock
         sock.reset()
-        srv._dispatch(sock, {"cmd": "done", "note": "x"})
+        srv._dispatch(sock, {"cmd": "done", "note": "x", "auth": _PANE_TOKEN_BACKEND})
         resp = sock.last_response()
         assert resp["ok"] is True
 
@@ -216,9 +228,19 @@ class TestNonLeadCommandsPassThrough:
         resp = sock.last_response()
         assert resp["ok"] is True
 
-    def test_send_requires_no_auth(self, server_and_sock) -> None:
+    def test_send_requires_pane_token(self, server_and_sock) -> None:
+        # `send` now requires a valid pane token (or lead token).
         srv, sock, _ = server_and_sock
         sock.reset()
-        srv._dispatch(sock, {"cmd": "send", "to": "frontend", "msg": "hi", "from": "backend"})
+        srv._dispatch(
+            sock,
+            {
+                "cmd": "send",
+                "to": "frontend",
+                "msg": "hi",
+                "from": "backend",
+                "auth": _PANE_TOKEN_BACKEND,
+            },
+        )
         resp = sock.last_response()
         assert resp["ok"] is True

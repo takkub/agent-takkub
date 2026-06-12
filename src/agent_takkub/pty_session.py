@@ -403,10 +403,21 @@ class PtySession(QObject):
                 pass
 
     def terminate(self) -> None:
-        if self._writer is not None:
-            self._writer.request_stop()  # enqueue sentinel → writer loop exits
-        if self._reader is not None:
-            self._reader.request_stop()  # set stop flag
+        # PyQt6 raises RuntimeError (not AttributeError) for any attribute access on
+        # a QObject created via __new__ without __init__ (used by some test fixtures).
+        # Guard every attribute access here so terminate() is always safe to call.
+        try:
+            _writer = self._writer
+        except (AttributeError, RuntimeError):
+            _writer = None
+        try:
+            _reader = self._reader
+        except (AttributeError, RuntimeError):
+            _reader = None
+        if _writer is not None:
+            _writer.request_stop()  # enqueue sentinel → writer loop exits
+        if _reader is not None:
+            _reader.request_stop()  # set stop flag
         # Tree-kill the whole descendant chain BEFORE killing the root. pywinpty's
         # terminate(force=True) only reaps claude.exe itself; a teammate that ran
         # `next dev` / `npm run dev` leaves the node dev server and its postcss /
@@ -415,29 +426,47 @@ class PtySession(QObject):
         # 18 GB). `taskkill /T` walks the live parent→child tree, so it MUST run
         # while the root is still alive — kill the root first and the descendants
         # re-parent away from this PID and survive.
-        _tree_kill(self._pid)
-        if self._proc is not None:
+        try:
+            _pid = self._pid
+        except (AttributeError, RuntimeError):
+            _pid = None
+        _tree_kill(_pid)
+        try:
+            _proc = self._proc
+        except (AttributeError, RuntimeError):
+            _proc = None
+        if _proc is not None:
             try:
-                self._proc.terminate(force=True)  # unblocks reader's proc.read()
+                _proc.terminate(force=True)  # unblocks reader's proc.read()
             except Exception:
                 pass
-        self._alive = False
+        try:
+            self._alive = False
+        except (AttributeError, RuntimeError):
+            pass
         # Bug-7 fix: join threads so they don't accumulate as zombies across
         # many close/respawn cycles.  500 ms timeout avoids blocking the UI
         # thread; if a thread hasn't exited by then we leave it — the process
         # kill above ensures it will exit momentarily on its own.
-        if self._writer is not None:
-            self._writer.quit()
-            self._writer.wait(500)
-        if self._reader is not None:
-            self._reader.quit()
-            self._reader.wait(500)
-        if self._transcript is not None:
+        if _writer is not None:
+            _writer.quit()
+            _writer.wait(500)
+        if _reader is not None:
+            _reader.quit()
+            _reader.wait(500)
+        try:
+            _transcript = self._transcript
+        except (AttributeError, RuntimeError):
+            _transcript = None
+        if _transcript is not None:
             try:
-                self._transcript.close()
+                _transcript.close()
             except Exception:
                 pass
-            self._transcript = None
+            try:
+                self._transcript = None
+            except (AttributeError, RuntimeError):
+                pass
 
     @property
     def is_alive(self) -> bool:

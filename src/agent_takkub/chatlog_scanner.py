@@ -592,3 +592,92 @@ def system_reminder_text(rec: dict) -> str:
                     parts.append(b.get("text", ""))
             return "\n".join(parts)
     return ""
+
+
+# Per-file cache for hot.md single-pass scan: (path → (mtime, size)) → cached result.
+# Avoids re-parsing unchanged JSONL files every 60-second tick.
+_hot_md_cache: dict[str, tuple[float, int, dict[str, int], int, int]] = {}
+
+
+def scan_hot_md_metrics(
+    project_filter: str | None = None, *, since: datetime | None = None
+) -> tuple[dict[str, int], int, int]:
+    """Single-pass over today's session jsonl files collecting all three
+    hot.md metrics at once: hook_fires, user_corrections, tool_retries.
+
+    Replaces three separate calls to ``count_hook_fires`` /
+    ``count_user_corrections`` / ``count_tool_retries`` that each opened
+    and parsed every file once (3× I/O per tick on the Qt main thread).
+
+    Results for unchanged files are served from a per-file cache keyed on
+    (path, mtime, size) so a busy day with many large jsonls only pays the
+    parse cost when the file actually grew.
+
+    Returns ``(hook_counts, corrections, tool_retries)``.
+    """
+    hook_counts: dict[str, int] = {}
+    total_corrections = 0
+    total_retries = 0
+
+    for jsonl in iter_session_files(project_filter, since=since):
+        key = str(jsonl)
+        try:
+            st = jsonl.stat()
+            mtime = st.st_mtime
+            size = st.st_size
+        except OSError:
+            mtime = 0.0
+            size = 0
+
+        cached = _hot_md_cache.get(key)
+        if cached is not None and cached[0] == mtime and cached[1] == size:
+            _, _, c_hooks, c_corr, c_retries = cached
+            for bucket, cnt in c_hooks.items():
+                hook_counts[bucket] = hook_counts.get(bucket, 0) + cnt
+            total_corrections += c_corr
+            total_retries += c_retries
+            continue
+
+        # Parse the file once, accumulating all three metrics.
+        file_hooks: dict[str, int] = {}
+        file_corrections = 0
+        file_retries = 0
+        last_sig: tuple[str, str] | None = None
+        repeat = 0
+
+        for rec in iter_records(jsonl):
+            # Hook fires (system reminders)
+            if is_system_reminder(rec):
+                body = system_reminder_text(rec)
+                bucket = classify_hook(body)
+                if bucket is not None:
+                    file_hooks[bucket] = file_hooks.get(bucket, 0) + 1
+
+            # User corrections
+            if is_conversation_record(rec) and role_of(rec) == "user":
+                text = _user_text_only(rec)
+                if text:
+                    t_lower = text.lower()
+                    for needle in _CORRECTION_PATTERNS:
+                        if needle in text or needle.lower() in t_lower:
+                            file_corrections += 1
+                            break
+
+            # Tool retries (same tool_use signature 3+ times in a row)
+            for block in tool_uses(rec):
+                sig = _tool_use_signature(block)
+                if sig == last_sig:
+                    repeat += 1
+                    if repeat == 2:
+                        file_retries += 1
+                else:
+                    last_sig = sig
+                    repeat = 0
+
+        _hot_md_cache[key] = (mtime, size, file_hooks, file_corrections, file_retries)
+        for bucket, cnt in file_hooks.items():
+            hook_counts[bucket] = hook_counts.get(bucket, 0) + cnt
+        total_corrections += file_corrections
+        total_retries += file_retries
+
+    return hook_counts, total_corrections, total_retries

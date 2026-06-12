@@ -65,6 +65,7 @@ class TestEarlyCrashDetection:
 
         pane = MagicMock()
         pane.state = "exited"
+        pane.session = session  # pane still holds this session when exit fires
         orch._panes_by_project.setdefault(TEST_PROJECT, {})["codex"] = pane
 
         dump_dir = tmp_path / "codex_crash_dumps"
@@ -94,6 +95,7 @@ class TestEarlyCrashDetection:
         session = MagicMock()
         pane = MagicMock()
         pane.state = "exited"
+        pane.session = session  # pane still holds this session when exit fires
         orch._panes_by_project.setdefault(TEST_PROJECT, {})["codex"] = pane
 
         dump_dir = tmp_path / "codex_crash_dumps"
@@ -119,6 +121,7 @@ class TestEarlyCrashDetection:
 
         pane = MagicMock()
         pane.state = "active"  # not exited — auto-respawn won't fire
+        pane.session = session  # pane still holds this session when exit fires
         orch._panes_by_project.setdefault(TEST_PROJECT, {})["codex"] = pane
 
         with (
@@ -142,6 +145,7 @@ class TestEarlyCrashDetection:
         session.display_lines.return_value = []
         pane = MagicMock()
         pane.state = "active"
+        pane.session = session  # pane still holds this session when exit fires
         orch._panes_by_project.setdefault(TEST_PROJECT, {})["codex"] = pane
 
         with (
@@ -165,6 +169,7 @@ class TestEarlyCrashDetection:
 
         pane = MagicMock()
         pane.state = "exited"
+        pane.session = session  # pane still holds this session when exit fires
         orch._panes_by_project.setdefault(TEST_PROJECT, {})["codex"] = pane
 
         dump_dir = tmp_path / "codex_crash_dumps"
@@ -190,6 +195,7 @@ class TestEarlyCrashDetection:
         session.display_lines.return_value = ["line1"]
         pane = MagicMock()
         pane.state = "exited"
+        pane.session = session  # pane still holds this session when exit fires
         orch._panes_by_project.setdefault(TEST_PROJECT, {})["codex"] = pane
 
         dump_dir = tmp_path / "codex_crash_dumps"
