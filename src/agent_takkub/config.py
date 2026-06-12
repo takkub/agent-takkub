@@ -60,7 +60,15 @@ def ensure_runtime() -> Path:
 def load_projects() -> dict:
     if not PROJECTS_JSON.exists():
         return {"active": None, "projects": {}}
-    return json.loads(PROJECTS_JSON.read_text(encoding="utf-8"))
+    try:
+        return json.loads(PROJECTS_JSON.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "projects.json contains invalid JSON — falling back to empty project list"
+        )
+        return {"active": None, "projects": {}}
 
 
 def active_project() -> tuple[str | None, dict]:

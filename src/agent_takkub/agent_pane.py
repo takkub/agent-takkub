@@ -138,6 +138,12 @@ class AgentPane(QFrame):
         # treat it as a crash and surface the "exited" state.
         self._expected_exit = False
 
+        # Monotonically incremented each time a new PtySession is attached.
+        # Captured inside the processExited lambda so stale exit signals from
+        # an old session (emitted after a replacement is already attached) are
+        # dropped rather than mutating the new session's state.
+        self._session_generation: int = 0
+
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
@@ -341,7 +347,12 @@ class AgentPane(QFrame):
         # "claude is idle at the ready prompt" signal into the terminal
         # widget so it can decide whether to local-echo keystrokes.
         session.outputUpdated.connect(self._sync_idle_flag)
-        session.processExited.connect(self._on_exit)
+        # Increment generation so stale exit signals from a previous session
+        # (which may still be emitting after we attached a replacement) are
+        # silently dropped by _on_exit's generation check.
+        self._session_generation += 1
+        _gen = self._session_generation
+        session.processExited.connect(lambda code, g=_gen: self._on_exit(code, g))
         self._terminal.resized.connect(session.resize)
         self._update_title_with_cwd(cwd)
         self.set_state("active")
@@ -434,7 +445,12 @@ class AgentPane(QFrame):
         self._last_usage = None
         self._token_label.hide()
 
-    def _on_exit(self, code: int) -> None:
+    def _on_exit(self, code: int, gen: int | None = None) -> None:
+        # Drop stale signals: if the generation captured at connection time no
+        # longer matches the current generation, an old session emitted after a
+        # replacement was attached — ignore it to protect the new session's state.
+        if gen is not None and gen != self._session_generation:
+            return
         # Distinguish:
         #   - expected: orchestrator.close() / done() called terminate first
         #   - unexpected: claude.exe died on its own (crash, OOM, user `/exit`)

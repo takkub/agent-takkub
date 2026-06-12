@@ -61,10 +61,12 @@ def _connect() -> socket.socket:
 
 
 def _request(payload: dict) -> dict:
-    # Stamp the Lead capability token when running inside a Lead pane.
-    # Teammates don't have TAKKUB_LEAD_TOKEN in their env, so their payloads
-    # won't carry the auth field and the server will reject Lead-only commands.
-    token = os.environ.get("TAKKUB_LEAD_TOKEN")
+    # Stamp the capability token so the server can verify the caller's identity.
+    # Lead panes carry TAKKUB_LEAD_TOKEN (authorises Lead-only commands).
+    # Teammate panes carry TAKKUB_PANE_TOKEN (authorises send/done).
+    # Whichever is present in the env is stamped; if both are set (shouldn't
+    # happen in normal operation) the Lead token takes precedence.
+    token = os.environ.get("TAKKUB_LEAD_TOKEN") or os.environ.get("TAKKUB_PANE_TOKEN")
     if token:
         payload["auth"] = token
     s = _connect()

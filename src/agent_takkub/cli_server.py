@@ -23,11 +23,35 @@ from PyQt6.QtNetwork import QHostAddress, QTcpServer, QTcpSocket
 from .config import write_port
 from .orchestrator import Orchestrator
 
+# Maximum allowed frame size (bytes). Frames larger than this are rejected so
+# a malicious or buggy client cannot force the Qt main thread to parse/process
+# an arbitrarily large JSON blob.
+_MAX_FRAME_BYTES = 64 * 1024  # 64 KiB
+
+# Maximum number of concurrent loopback connections. Keeps the connection table
+# bounded; local-only threat model means no legitimate use case needs more.
+_MAX_CONNECTIONS = 32
+
+# Seconds an open connection may exist with no complete newline-terminated
+# frame before it is closed. Prevents unbounded read-buffer accumulation when
+# a client opens a socket but never writes a newline.
+_IDLE_CONNECTION_TIMEOUT_S = 30.0
+
 # Commands that mutate cockpit structure — only the Lead pane is allowed to
 # run these. The gate is enforced server-side so raw TCP clients that bypass
 # the cli.py role check (including confused teammate shells) are rejected.
 _LEAD_ONLY_CMDS = frozenset(
-    {"spawn", "assign", "close", "close-all", "harvest", "harvest-done", "pipeline-run", "goal"}
+    {
+        "spawn",
+        "assign",
+        "close",
+        "close-all",
+        "harvest",
+        "harvest-done",
+        "pipeline-run",
+        "goal",
+        "end-session",  # Lead-only: only Lead summarises + closes the session
+    }
 )
 
 # Commands that ANY pane may call, but where claiming `from: lead` in the
@@ -48,6 +72,14 @@ class CliServer(QObject):
         self._orch = orchestrator
         self._server = QTcpServer(self)
         self._server.newConnection.connect(self._on_new_connection)
+        # {socket: connect_time} — track open connections for the idle-timeout
+        # reaper and the connection cap.
+        self._open_connections: dict[object, float] = {}
+        # Reap idle (no newline received) connections once per second.
+        self._reaper = QTimer(self)
+        self._reaper.setInterval(1_000)
+        self._reaper.timeout.connect(self._reap_idle_connections)
+        self._reaper.start()
         # Spawn staggering (#44/#38). Concurrent `takkub assign` (parallel
         # fan-out / shard fan-out) would otherwise schedule N QTimer.singleShot(0)
         # spawns that fire back-to-back on one tick; the 2nd+ ConPTY COM call
@@ -124,21 +156,81 @@ class CliServer(QObject):
     def _on_new_connection(self) -> None:
         while self._server.hasPendingConnections():
             sock: QTcpSocket = self._server.nextPendingConnection()
+            if len(self._open_connections) >= _MAX_CONNECTIONS:
+                sock.disconnectFromHost()
+                sock.deleteLater()
+                continue
+            connect_ts = time.time()
+            self._open_connections[sock] = connect_ts
             sock.readyRead.connect(lambda s=sock: self._on_ready_read(s))
+            # Remove from tracking only when fully disconnected — keeps the
+            # connection counted against _MAX_CONNECTIONS for its whole lifetime
+            # and allows the reaper to evict it on inactivity.
+            sock.disconnected.connect(lambda s=sock: self._open_connections.pop(s, None))
             sock.disconnected.connect(sock.deleteLater)
 
+    def _reap_idle_connections(self) -> None:
+        """Close connections idle longer than _IDLE_CONNECTION_TIMEOUT_S.
+
+        Uses last-activity timestamp: updated to now() each time a valid frame
+        arrives, so a client that sends one frame then holds the connection does
+        NOT escape the reaper — it just gets a fresh 30-second window.  Prevents
+        both unbounded read-buffer accumulation (no newline) and connection-cap
+        bypass (valid frame then idle)."""
+        cutoff = time.time() - _IDLE_CONNECTION_TIMEOUT_S
+        stale = [s for s, ts in list(self._open_connections.items()) if ts < cutoff]
+        for sock in stale:
+            self._open_connections.pop(sock, None)
+            try:
+                sock.disconnectFromHost()
+            except Exception:
+                pass
+
     def _on_ready_read(self, sock: QTcpSocket) -> None:
+        # Reject connections whose buffered data exceeds the frame cap without a
+        # terminating newline — canReadLine() will be False while bytesAvailable()
+        # grows, indicating a partial / unterminated oversized frame.
+        available = sock.bytesAvailable() if hasattr(sock, "bytesAvailable") else 0
+        if available > _MAX_FRAME_BYTES and not sock.canReadLine():
+            self._reply(sock, ok=False, msg="frame too large (unterminated)")
+            sock.disconnectFromHost()
+            self._open_connections.pop(sock, None)
+            return
+
         # read everything currently available, split on newline, dispatch each
         while sock.canReadLine():
-            line = bytes(sock.readLine()).decode("utf-8", "replace").strip()
+            # Cap each frame to _MAX_FRAME_BYTES.  Pass maxSize to readLine() so
+            # Qt truncates at the boundary rather than buffering a giant line.
+            raw_bytes = bytes(sock.readLine(_MAX_FRAME_BYTES + 2))
+            if len(raw_bytes) > _MAX_FRAME_BYTES:
+                self._reply(sock, ok=False, msg="frame too large")
+                sock.disconnectFromHost()
+                self._open_connections.pop(sock, None)
+                return
+            line = raw_bytes.decode("utf-8", "replace").strip()
             if not line:
                 continue
+            # Update last-activity timestamp so the reaper gives this connection
+            # another full idle window.  Keep it in _open_connections (don't pop)
+            # so the connection still counts toward _MAX_CONNECTIONS.
+            self._open_connections[sock] = time.time()
             try:
                 req = json.loads(line)
             except json.JSONDecodeError as e:
                 self._reply(sock, ok=False, msg=f"bad json: {e}")
                 continue
-            self._dispatch(sock, req)
+            if not isinstance(req, dict):
+                self._reply(sock, ok=False, msg="request must be a JSON object")
+                continue
+            # Validate required field types early — malformed values for cmd/from/auth
+            # would otherwise raise AttributeError inside _dispatch.
+            for _field in ("cmd", "from", "auth"):
+                _val = req.get(_field)
+                if _val is not None and not isinstance(_val, str):
+                    self._reply(sock, ok=False, msg=f"field {_field!r} must be a string")
+                    break
+            else:
+                self._dispatch(sock, req)
 
     def _dispatch(self, sock: QTcpSocket, req: dict) -> None:
         cmd = (req.get("cmd") or "").lower()
@@ -198,12 +290,49 @@ class CliServer(QObject):
             self._reply(sock, ok=False, msg="lead cannot call done")
             return
 
-        # end-session: Lead-only (reverse of done — only Lead may call this).
-        if cmd == "end-session":
-            from_role = (req.get("from") or "").lower().strip()
-            if from_role not in ("lead", ""):
-                self._reply(sock, ok=False, msg="only lead can call end-session")
+        # Layer 4 — per-pane capability token for `done` and `send`.
+        #
+        # Each non-Lead pane receives TAKKUB_PANE_TOKEN in its env at spawn time.
+        # The token is bound to (project, role) server-side. For `done` and `send`,
+        # callers MUST present their token in the `auth` field. The server derives
+        # caller identity (from_role, from_project) from the token instead of
+        # trusting the caller-supplied `from`/`from_project` fields.
+        #
+        # Raw clients that haven't been spawned by the orchestrator have no token
+        # and are rejected for these two commands.
+        if cmd in ("done", "send"):
+            caller_auth = req.get("auth") or ""
+            pane_tokens: dict[str, tuple[str, str]] = getattr(self._orch, "_pane_tokens", {})
+            # Lead token is valid for `send` (Lead sends task specs to teammates)
+            # but not for `done` (Lead cannot call done on itself).
+            lead_token = getattr(self._orch, "_lead_token", None)
+            if (
+                lead_token
+                and caller_auth
+                and secrets.compare_digest(caller_auth.encode(), lead_token.encode())
+            ):
+                # Lead is sending — identity already verified by the lead-spoof
+                # guard above; allow through with the caller-supplied from/project.
+                pass
+            elif caller_auth in pane_tokens:
+                # Valid pane token — derive identity from the server's registry,
+                # overriding whatever the caller put in `from`/`from_project`.
+                _tok_project, _tok_role = pane_tokens[caller_auth]
+                req = {**req, "from": _tok_role, "from_project": _tok_project}
+                from_project = _tok_project
+                from_role_norm = _tok_role
+            else:
+                self._reply(
+                    sock,
+                    ok=False,
+                    msg=f"unauthorized: {cmd} requires a valid pane token (TAKKUB_PANE_TOKEN)",
+                )
                 return
+
+        # list/status: intentionally open — trust-local model; any local process
+        # may query pane state without a token.  If the threat model is tightened
+        # to require tokens for every command, add them to _LEAD_ONLY_CMDS or the
+        # pane-token gate above.
 
         try:
             if cmd in ("spawn", "assign"):

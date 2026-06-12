@@ -54,9 +54,11 @@ _PANE_ENV_ALLOWLIST: frozenset[str] = frozenset(
         "COMPUTERNAME",
         "OS",
         "PROCESSOR_ARCHITECTURE",
-        # Anthropic Proxy / Claude API Auth (allows bypassing login using global environment settings)
+        # Anthropic proxy base URL only — the bearer token (ANTHROPIC_AUTH_TOKEN)
+        # is intentionally excluded from the default allowlist to limit blast radius
+        # if a pane is compromised (prompt injection, malicious MCP, dependency).
+        # Opt-in by adding ANTHROPIC_AUTH_TOKEN to TAKKUB_PANE_ENV_ALLOW.
         "ANTHROPIC_BASE_URL",
-        "ANTHROPIC_AUTH_TOKEN",
         # COMSPEC = path to cmd.exe — Node.js child_process.spawn() falls back to
         # this when launching subprocesses on Windows; missing → ENOENT crash in
         # MCP servers (codex_apps) that shell out. Top hypothesis for codex early-crash.
@@ -106,8 +108,19 @@ def _build_pane_env() -> dict[str, str]:
     panes don't need ANTHROPIC_API_KEY (Max OAuth handles auth) or any
     other secret-bearing var. This builds the minimum env claude needs
     to run on this OS.
+
+    ANTHROPIC_AUTH_TOKEN is opt-in: set TAKKUB_PANE_ENV_ALLOW=ANTHROPIC_AUTH_TOKEN
+    (comma-separated). Note: opting in weakens pane isolation — any compromised
+    pane (prompt injection, malicious MCP, dependency) can exfiltrate the bearer
+    token.
     """
-    return {k: v for k, v in os.environ.items() if k.upper() in _PANE_ENV_ALLOWLIST}
+    allow = set(_PANE_ENV_ALLOWLIST)
+    extra = os.environ.get("TAKKUB_PANE_ENV_ALLOW", "")
+    for k in extra.split(","):
+        k = k.strip()
+        if k:
+            allow.add(k.upper())
+    return {k: v for k, v in os.environ.items() if k.upper() in allow}
 
 
 # Additional env vars that Lead needs beyond the base teammate allowlist.

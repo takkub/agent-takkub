@@ -21,6 +21,7 @@ from agent_takkub.cli_server import _LEAD_ONLY_CMDS, _LEAD_SPOOF_GUARDED_CMDS, C
 # ──────────────────────────────────────────────────────────────
 
 _GATE_TEST_TOKEN = "role-gate-test-token-xyz"
+_PANE_TOKEN_BACKEND = "pane-tok-backend-role-gate"
 
 
 @pytest.fixture(scope="module")
@@ -51,9 +52,11 @@ class _FakeSock:
 
 @pytest.fixture
 def srv_sock(qapp: QCoreApplication):
-    """Return (CliServer, FakeSock). Orchestrator has a known lead token."""
+    """Return (CliServer, FakeSock). Orchestrator has a known lead token and a backend pane token."""
     mock_orch = MagicMock()
     mock_orch._lead_token = _GATE_TEST_TOKEN
+    # Pre-register a backend pane token so tests for send/done can present credentials.
+    mock_orch._pane_tokens = {_PANE_TOKEN_BACKEND: ("test-project", "backend")}
     mock_orch.spawn.return_value = (True, "spawned")
     mock_orch.assign.return_value = (True, "assigned")
     mock_orch.close.return_value = (True, "closed")
@@ -115,16 +118,30 @@ class TestNonLeadRoleRejected:
 
 class TestNonLeadRoleAllowedForOtherCmds:
     def test_backend_can_send(self, srv_sock) -> None:
+        # `send` requires a valid pane token; identity is derived from the token.
         srv, sock = srv_sock
         sock.reset()
-        srv._dispatch(sock, {"cmd": "send", "from": "backend", "to": "frontend", "msg": "hi"})
+        srv._dispatch(
+            sock,
+            {
+                "cmd": "send",
+                "from": "backend",
+                "to": "frontend",
+                "msg": "hi",
+                "auth": _PANE_TOKEN_BACKEND,
+            },
+        )
         resp = sock.last_response()
         assert resp["ok"] is True
 
     def test_backend_can_done(self, srv_sock) -> None:
+        # `done` requires a valid pane token; identity is derived from the token.
         srv, sock = srv_sock
         sock.reset()
-        srv._dispatch(sock, {"cmd": "done", "from": "backend", "note": "finished"})
+        srv._dispatch(
+            sock,
+            {"cmd": "done", "from": "backend", "note": "finished", "auth": _PANE_TOKEN_BACKEND},
+        )
         resp = sock.last_response()
         assert resp["ok"] is True
 
@@ -234,26 +251,25 @@ class TestSendAsLeadSpoofGuard:
         resp = sock.last_response()
         assert resp["ok"] is True
 
-    def test_send_from_teammate_no_token_still_allowed(self, srv_sock) -> None:
-        # Guard only fires when claiming `from: lead`. Peer-to-peer use
-        # (backend → qa, frontend → reviewer, …) must keep working with
-        # no token — that's the whole point of `_LEAD_SPOOF_GUARDED_CMDS`
-        # being a separate set instead of folding `send` into _LEAD_ONLY_CMDS.
+    def test_send_from_teammate_no_token_rejected(self, srv_sock) -> None:
+        # Layer 4: `send` requires a pane token (or lead token) for ALL callers,
+        # not just ones claiming `from: lead`. Raw clients without a token are
+        # rejected to prevent unregistered processes from forging peer messages.
         srv, sock = srv_sock
         sock.reset()
         srv._dispatch(sock, {"cmd": "send", "from": "backend", "to": "qa", "msg": "x"})
         resp = sock.last_response()
-        assert resp["ok"] is True
+        assert resp["ok"] is False
+        assert "unauthorized" in resp["msg"].lower()
 
-    def test_send_from_empty_no_token_still_allowed(self, srv_sock) -> None:
-        # Manual terminal invocations omit `from` entirely. Those land in
-        # the active project's pane registry server-side and don't claim
-        # Lead authority, so the spoof guard must not bite them.
+    def test_send_from_empty_no_token_rejected(self, srv_sock) -> None:
+        # Same as above: omitting `from` does not bypass the pane-token gate.
         srv, sock = srv_sock
         sock.reset()
         srv._dispatch(sock, {"cmd": "send", "to": "backend", "msg": "x"})
         resp = sock.last_response()
-        assert resp["ok"] is True
+        assert resp["ok"] is False
+        assert "unauthorized" in resp["msg"].lower()
 
     def test_only_send_is_currently_guarded(self) -> None:
         # Pin the membership so a future contributor doesn't quietly add

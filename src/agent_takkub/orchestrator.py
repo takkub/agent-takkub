@@ -467,6 +467,42 @@ _PASTE_START = "\x1b[200~"
 _PASTE_END = "\x1b[201~"
 
 
+def _sanitize_pane_text(text: str) -> str:
+    """Strip control sequences that could break out of bracketed-paste mode.
+
+    A message body containing ``\\x1b[201~`` closes the bracketed-paste bracket
+    early, letting the rest of the content execute as raw terminal input in any
+    pane running with ``--dangerously-skip-permissions``. Strip both the opening
+    and closing bracket sequences plus bare ESC bytes so every write path (send,
+    _notify_lead, task inject) is safe regardless of input length.
+
+    Also strips bare ``\\r`` (carriage return) that would submit the partial
+    input before the orchestrator appends its own trailing CR.  LF (``\\n``) is
+    intentional in multi-line task bodies and is preserved.
+    """
+    # Remove bracketed-paste control sequences first
+    text = text.replace(_PASTE_END, "").replace(_PASTE_START, "")
+    # Strip lone ESC bytes (they can start arbitrary escape sequences)
+    text = text.replace("\x1b", "")
+    # Strip bare CR that would submit the input before the orchestrator appends
+    # its own trailing CR.  LF is intentional in multi-line task bodies and is
+    # left intact — it does not submit in bracketed-paste mode.
+    text = text.replace("\r", "")
+    return text
+
+
+def _delayed_enter(pane: AgentPane, session: PtySession, delay_ms: int) -> None:
+    """Schedule CR into pane after delay_ms, no-op if session has changed.
+
+    Captures the session object at call time so the lambda cannot reach a
+    replacement session if the pane is closed and respawned before the timer fires.
+    """
+    QTimer.singleShot(
+        delay_ms,
+        lambda: pane.session is session and pane.session.write(b"\r"),
+    )
+
+
 def _paste_payload(text: str) -> str:
     """Return `text` wrapped in bracketed-paste escapes when long enough.
 
@@ -1057,6 +1093,13 @@ class Orchestrator(QObject):
         # Generated fresh each boot; never written to disk, logs, or argv.
         self._lead_token: str = secrets.token_urlsafe(32)
 
+        # Per-pane capability tokens.  token → (project_ns, role_name).
+        # Injected as TAKKUB_PANE_TOKEN into every non-Lead pane at spawn so
+        # the IPC server can derive caller identity from the token rather than
+        # trusting the caller-supplied `from`/`from_project` fields.  Entries
+        # are removed when the pane is closed.  Checked on `done` and `send`.
+        self._pane_tokens: dict[str, tuple[str, str]] = {}
+
         # Idle watchdog bookkeeping. Per-role:
         #   first_idle_ts   — when the pane was first seen idle in this streak
         #                     (None = currently processing or not "working")
@@ -1405,6 +1448,15 @@ class Orchestrator(QObject):
             inject_user_profile_env(env, project_ns)
             bin_dir = str(REPO_ROOT / "bin")
             env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+            _shell_tok = secrets.token_urlsafe(32)
+            env["TAKKUB_PANE_TOKEN"] = _shell_tok
+            # Revoke any prior token for this (project, role) before registering
+            # the new one so a respawn doesn't leave the old token valid.
+            for _t in [
+                t for t, v in list(self._pane_tokens.items()) if v == (project_ns, role_name)
+            ]:
+                self._pane_tokens.pop(_t, None)
+            self._pane_tokens[_shell_tok] = (project_ns, role_name)
             shell_argv = [pwsh_basename, "-NoLogo"]
             session = PtySession(cols=110, rows=36, parent=self)
             _t_path = _build_transcript_path(project_ns, role_name)
@@ -1412,22 +1464,28 @@ class Orchestrator(QObject):
             self._spawn_in_progress = True
             try:
                 session.spawn(argv=shell_argv, cwd=spawn_cwd, env=env, transcript_path=_t_path)
+                pane.attach_session(session, cwd=spawn_cwd)
+                _sess_shell = session
+                session.processExited.connect(
+                    lambda _code, r=role_name, c=spawn_cwd, p=project_ns, s=_sess_shell: (
+                        self._on_session_exit(r, c, p)
+                        if (pp := self._panes_by_project.get(p, {}).get(r)) is not None
+                        and pp.session is s
+                        else None
+                    )
+                )
+                _ekey = _exit_key(project_ns, role_name)
+                if _ekey in self._recent_exits:
+                    del self._recent_exits[_ekey]
+                self.statusChanged.emit()
+                _log_event("spawn", role=role_name, cwd=spawn_cwd, resumed=False)
+                return True, f"shell spawned in {spawn_cwd}"
             except Exception as e:
+                self._pane_tokens.pop(_shell_tok, None)
+                return False, f"failed to spawn shell: {e}"
+            finally:
                 self._spawn_in_progress = False
                 self._drain_spawn_queue()
-                return False, f"failed to spawn shell: {e}"
-            pane.attach_session(session, cwd=spawn_cwd)
-            session.processExited.connect(
-                lambda _code, r=role_name, c=spawn_cwd, p=project_ns: self._on_session_exit(r, c, p)
-            )
-            _ekey = _exit_key(project_ns, role_name)
-            if _ekey in self._recent_exits:
-                del self._recent_exits[_ekey]
-            self.statusChanged.emit()
-            _log_event("spawn", role=role_name, cwd=spawn_cwd, resumed=False)
-            self._spawn_in_progress = False
-            self._drain_spawn_queue()
-            return True, f"shell spawned in {spawn_cwd}"
 
         # ── codex pane: non-claude path ─────────────────────────────
         # `codex` is OpenAI's TUI; it speaks a different protocol and
@@ -1476,6 +1534,13 @@ class Orchestrator(QObject):
             inject_user_profile_env(env, project_ns)
             bin_dir = str(REPO_ROOT / "bin")
             env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+            _gem_tok = secrets.token_urlsafe(32)
+            env["TAKKUB_PANE_TOKEN"] = _gem_tok
+            for _t in [
+                t for t, v in list(self._pane_tokens.items()) if v == (project_ns, role_name)
+            ]:
+                self._pane_tokens.pop(_t, None)
+            self._pane_tokens[_gem_tok] = (project_ns, role_name)
             gemini_argv = [
                 gemini_bin,
                 "-y",  # yolo: skip per-command approval prompts (parity with codex --ask-for-approval never)
@@ -1486,23 +1551,29 @@ class Orchestrator(QObject):
             self._spawn_in_progress = True
             try:
                 session.spawn(argv=gemini_argv, cwd=spawn_cwd, env=env, transcript_path=_t_path)
+                pane.attach_session(session, cwd=spawn_cwd)
+                _sess_gem = session
+                session.processExited.connect(
+                    lambda _code, r=role_name, c=spawn_cwd, p=project_ns, s=_sess_gem: (
+                        self._on_session_exit(r, c, p)
+                        if (pp := self._panes_by_project.get(p, {}).get(r)) is not None
+                        and pp.session is s
+                        else None
+                    )
+                )
+                _ekey = _exit_key(project_ns, role_name)
+                if _ekey in self._recent_exits:
+                    del self._recent_exits[_ekey]
+                self._auto_trust(role_name, project=project_ns)
+                self.statusChanged.emit()
+                _log_event("spawn", role=role_name, cwd=spawn_cwd, resumed=False)
+                return True, f"gemini spawned in {spawn_cwd}"
             except Exception as e:
+                self._pane_tokens.pop(_gem_tok, None)
+                return False, f"failed to spawn gemini: {e}"
+            finally:
                 self._spawn_in_progress = False
                 self._drain_spawn_queue()
-                return False, f"failed to spawn gemini: {e}"
-            pane.attach_session(session, cwd=spawn_cwd)
-            session.processExited.connect(
-                lambda _code, r=role_name, c=spawn_cwd, p=project_ns: self._on_session_exit(r, c, p)
-            )
-            _ekey = _exit_key(project_ns, role_name)
-            if _ekey in self._recent_exits:
-                del self._recent_exits[_ekey]
-            self._auto_trust(role_name, project=project_ns)
-            self.statusChanged.emit()
-            _log_event("spawn", role=role_name, cwd=spawn_cwd, resumed=False)
-            self._spawn_in_progress = False
-            self._drain_spawn_queue()
-            return True, f"gemini spawned in {spawn_cwd}"
 
         if effective_provider == CODEX:
             from .codex_agents_md import ensure_agents_md
@@ -1526,6 +1597,13 @@ class Orchestrator(QObject):
             inject_user_profile_env(env, project_ns)
             bin_dir = str(REPO_ROOT / "bin")
             env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+            _cdx_tok = secrets.token_urlsafe(32)
+            env["TAKKUB_PANE_TOKEN"] = _cdx_tok
+            for _t in [
+                t for t, v in list(self._pane_tokens.items()) if v == (project_ns, role_name)
+            ]:
+                self._pane_tokens.pop(_t, None)
+            self._pane_tokens[_cdx_tok] = (project_ns, role_name)
             # Autonomy flags so Codex can call `takkub done` and edit
             # workspace files without stopping for per-command approval —
             # mirrors claude's `--dangerously-skip-permissions`.
@@ -1563,26 +1641,27 @@ class Orchestrator(QObject):
             self._spawn_in_progress = True
             try:
                 session.spawn(argv=codex_argv, cwd=spawn_cwd, env=env, transcript_path=_t_path)
+                pane.attach_session(session, cwd=spawn_cwd)
+                _ekey = _exit_key(project_ns, role_name)
+                self._ps(_ekey).codex_spawn_ts = time.time()
+                _sess_cdx = session
+                session.processExited.connect(
+                    lambda code, r=role_name, c=spawn_cwd, p=project_ns, sess=_sess_cdx: (
+                        self._on_codex_exit(code, r, c, p, sess)
+                    )
+                )
+                if _ekey in self._recent_exits:
+                    del self._recent_exits[_ekey]
+                self._auto_trust(role_name, project=project_ns)
+                self.statusChanged.emit()
+                _log_event("spawn", role=role_name, cwd=spawn_cwd, resumed=False)
+                return True, f"codex spawned in {spawn_cwd}"
             except Exception as e:
+                self._pane_tokens.pop(_cdx_tok, None)
+                return False, f"failed to spawn codex: {e}"
+            finally:
                 self._spawn_in_progress = False
                 self._drain_spawn_queue()
-                return False, f"failed to spawn codex: {e}"
-            pane.attach_session(session, cwd=spawn_cwd)
-            _ekey = _exit_key(project_ns, role_name)
-            self._ps(_ekey).codex_spawn_ts = time.time()
-            session.processExited.connect(
-                lambda code, r=role_name, c=spawn_cwd, p=project_ns, sess=session: (
-                    self._on_codex_exit(code, r, c, p, sess)
-                )
-            )
-            if _ekey in self._recent_exits:
-                del self._recent_exits[_ekey]
-            self._auto_trust(role_name, project=project_ns)
-            self.statusChanged.emit()
-            _log_event("spawn", role=role_name, cwd=spawn_cwd, resumed=False)
-            self._spawn_in_progress = False
-            self._drain_spawn_queue()
-            return True, f"codex spawned in {spawn_cwd}"
 
         # Resolve cwd:
         #   Lead          → repo root (so CLAUDE.md auto-discovery picks up the
@@ -1731,6 +1810,23 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         # requests even if they dial the TCP socket directly.
         if role_name == LEAD.name:
             env["TAKKUB_LEAD_TOKEN"] = self._lead_token
+        else:
+            # Per-pane capability token — injected into every non-Lead pane so its
+            # takkub CLI can authenticate send/done requests. The IPC server derives
+            # caller identity from this token instead of trusting the caller-supplied
+            # `from`/`from_project` fields, preventing a compromised or forged pane
+            # from impersonating another role or project.
+            pane_tok = secrets.token_urlsafe(32)
+            env["TAKKUB_PANE_TOKEN"] = pane_tok
+            if not hasattr(self, "_pane_tokens"):
+                self._pane_tokens: dict[str, tuple[str, str]] = {}
+            # Revoke any prior token for this (project, role) before the new one
+            # so a respawn never leaves the crashed session's token valid.
+            for _t in [
+                t for t, v in list(self._pane_tokens.items()) if v == (project_ns, role_name)
+            ]:
+                self._pane_tokens.pop(_t, None)
+            self._pane_tokens[pane_tok] = (project_ns, role_name)
         bin_dir = str(REPO_ROOT / "bin")
         env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
 
@@ -1967,61 +2063,75 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         self._spawn_in_progress = True
         try:
             session.spawn(argv=argv, cwd=spawn_cwd, env=env, transcript_path=_t_path)
+            pane.attach_session(session, cwd=spawn_cwd)
+            # Record exits so the auto-respawn watcher knows which project
+            # namespace owned the pane that just died.  Capture the session so
+            # stale exit signals from an old session don't trigger respawn on a
+            # replacement that's already attached.
+            _sess_claude = session
+            session.processExited.connect(
+                lambda _code, r=role_name, c=spawn_cwd, p=project_ns, s=_sess_claude: (
+                    self._on_session_exit(r, c, p)
+                    if (pp := self._panes_by_project.get(p, {}).get(r)) is not None
+                    and pp.session is s
+                    else None
+                )
+            )
+            # forget the prior exit record now that we've spawned successfully
+            if _ekey_spawn in self._recent_exits:
+                del self._recent_exits[_ekey_spawn]
+
+            # The TAKKUB_PANE_TOKEN was already injected into env (above the
+            # session.spawn call) and registered in self._pane_tokens at that time.
+            # Nothing more to do here.
+
+            self._auto_trust(role_name, project=project_ns)
+            self.statusChanged.emit()
+            if resumed:
+                # main_window listens for this to auto-bridge `/remote-control`
+                # exclusively on resumes — fresh boots stay silent.
+                self.paneResumed.emit(role_name, project_ns)
+            # Flush any CC messages queued while Lead was offline.
+            # Give the session a few seconds to reach the ready prompt before
+            # trying to write; if Lead isn't ready yet, _flush_pending_lead_cc
+            # is a no-op and we rely on the next send() or a future spawn to retry.
+            if role_name == LEAD.name and self._pending_lead_cc.get(project_ns):
+                QTimer.singleShot(
+                    5_000,
+                    lambda p=project_ns: self._flush_pending_lead_cc(p),
+                )
+            if role_name == LEAD.name and self._pending_done_notices.get(project_ns):
+                QTimer.singleShot(
+                    5_000,
+                    lambda p=project_ns: self._flush_pending_done_notices(p),
+                )
+            _log_event(
+                "spawn",
+                role=role_name,
+                cwd=spawn_cwd,
+                resumed=resumed,
+            )
+            # Record resume decision as a structured flag so _auto_respawn and
+            # _do_respawn can read it directly without parsing the message string.
+            # (Fix 1: eliminates the "(resumed)" in msg string-coupling fragility.)
+            self._ps(_ekey_spawn).last_spawn_resumed = resumed
+            suffix = " (resumed)" if resumed else ""
+            # If a codex/gemini role reached the claude spawn path, its provider
+            # was unavailable (toggled off or not installed) and claude is
+            # standing in. Surface that so the user isn't surprised the pane
+            # talks like Claude.
+            if role_name in (CODEX, GEMINI):
+                suffix += " — claude substitute (provider unavailable)"
+            return True, f"{role_name} spawned in {spawn_cwd}{suffix}"
         except Exception as e:
+            # Revoke the token if spawn failed — it was registered before the
+            # try block so the pane never actually came up to use it.
+            if role_name != LEAD.name:
+                getattr(self, "_pane_tokens", {}).pop(pane_tok, None)
+            return False, f"failed to spawn claude: {e}"
+        finally:
             self._spawn_in_progress = False
             self._drain_spawn_queue()
-            return False, f"failed to spawn claude: {e}"
-
-        pane.attach_session(session, cwd=spawn_cwd)
-        # Record exits so the auto-respawn watcher knows which project
-        # namespace owned the pane that just died.
-        session.processExited.connect(
-            lambda _code, r=role_name, c=spawn_cwd, p=project_ns: self._on_session_exit(r, c, p)
-        )
-        # forget the prior exit record now that we've spawned successfully
-        if _ekey_spawn in self._recent_exits:
-            del self._recent_exits[_ekey_spawn]
-
-        self._auto_trust(role_name, project=project_ns)
-        self.statusChanged.emit()
-        if resumed:
-            # main_window listens for this to auto-bridge `/remote-control`
-            # exclusively on resumes — fresh boots stay silent.
-            self.paneResumed.emit(role_name, project_ns)
-        # Flush any CC messages queued while Lead was offline.
-        # Give the session a few seconds to reach the ready prompt before
-        # trying to write; if Lead isn't ready yet, _flush_pending_lead_cc
-        # is a no-op and we rely on the next send() or a future spawn to retry.
-        if role_name == LEAD.name and self._pending_lead_cc.get(project_ns):
-            QTimer.singleShot(
-                5_000,
-                lambda p=project_ns: self._flush_pending_lead_cc(p),
-            )
-        if role_name == LEAD.name and self._pending_done_notices.get(project_ns):
-            QTimer.singleShot(
-                5_000,
-                lambda p=project_ns: self._flush_pending_done_notices(p),
-            )
-        _log_event(
-            "spawn",
-            role=role_name,
-            cwd=spawn_cwd,
-            resumed=resumed,
-        )
-        # Record resume decision as a structured flag so _auto_respawn and
-        # _do_respawn can read it directly without parsing the message string.
-        # (Fix 1: eliminates the "(resumed)" in msg string-coupling fragility.)
-        self._ps(_ekey_spawn).last_spawn_resumed = resumed
-        suffix = " (resumed)" if resumed else ""
-        # If a codex/gemini role reached the claude spawn path, its provider
-        # was unavailable (toggled off or not installed) and claude is
-        # standing in. Surface that so the user isn't surprised the pane
-        # talks like Claude.
-        if role_name in (CODEX, GEMINI):
-            suffix += " — claude substitute (provider unavailable)"
-        self._spawn_in_progress = False
-        self._drain_spawn_queue()
-        return True, f"{role_name} spawned in {spawn_cwd}{suffix}"
 
     def _on_codex_exit(
         self,
@@ -2045,6 +2155,12 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         if _ps_cx is not None:
             _ps_cx.codex_spawn_ts = None
         time_to_exit = (time.time() - spawn_ts) if spawn_ts is not None else None
+
+        # Guard: drop stale exit if the pane has already moved to a new session
+        # (same guard pattern as shell/gemini/claude processExited lambdas).
+        _pane_cdx = self._panes_by_project.get(project, {}).get(role_name)
+        if _pane_cdx is not None and _pane_cdx.session is not session:
+            return
 
         if time_to_exit is not None and time_to_exit <= CODEX_EARLY_CRASH_WINDOW_SEC:
             self._write_codex_crash_dump(
@@ -2132,6 +2248,12 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         crashing claude can't spawn-loop.
         """
         self._recent_exits[_exit_key(project, role_name)] = {"cwd": cwd, "ts": time.time()}
+
+        # Revoke pane token on session death so a crashed or exited pane cannot
+        # continue to authenticate send/done after it terminates.
+        _ptoks = getattr(self, "_pane_tokens", {})
+        for _t in [t for t, v in list(_ptoks.items()) if v == (project, role_name)]:
+            _ptoks.pop(_t, None)
 
         pane = self._panes_by_project.get(project, {}).get(role_name)
         if pane is None or pane.state != "exited":
@@ -2399,12 +2521,10 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             sent[0] = True
             if pane.session is None or not pane.session.is_alive:
                 return
+            _slash_sess = pane.session
             payload = _paste_payload(command)
-            pane.session.write(payload)
-            QTimer.singleShot(
-                _enter_delay_ms(payload),
-                lambda: pane.session and pane.session.write("\r"),
-            )
+            _slash_sess.write(payload)
+            _delayed_enter(pane, _slash_sess, _enter_delay_ms(payload))
             _log_event("auto_slash_command", role=role_name, command=command)
 
         def _check() -> None:
@@ -2472,12 +2592,10 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             if pane.session is None or not pane.session.is_alive:
                 return
             pane.set_state("working", note=task[:60])
-            payload = _paste_payload(task)
-            pane.session.write(payload)
-            QTimer.singleShot(
-                _enter_delay_ms(payload),
-                lambda: pane.session and pane.session.write("\r"),
-            )
+            _task_sess = pane.session
+            payload = _paste_payload(_sanitize_pane_text(task))
+            _task_sess.write(payload)
+            _delayed_enter(pane, _task_sess, _enter_delay_ms(payload))
             if unconfirmed:
                 # Delivered blind — the pane never signalled ready, so on a cold
                 # re-spawn the paste may have been swallowed (issue #26). Surface
@@ -3113,11 +3231,12 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
 
         # Lead is alive and idle — deliver one item; reset retry counter.
         getattr(self, "_lead_notify_retry", {}).pop(project_ns, None)
-        body = queue.popleft()
+        body = _sanitize_pane_text(queue.popleft())
+        _notify_sess = lead.session
         payload = _paste_payload(body)
-        lead.session.write(payload)
+        _notify_sess.write(payload)
         delay = _enter_delay_ms(payload)
-        QTimer.singleShot(delay, lambda: lead.session and lead.session.write(b"\r"))
+        _delayed_enter(lead, _notify_sess, delay)
         self.leadInjected.emit(body)
 
         if queue:
@@ -3183,13 +3302,11 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             return False, f"{to_role} is not running (spawn it first)"
 
         header = f"[{from_role} → {to_role}] " if from_role and from_role != to_role else ""
-        body = header + msg
+        body = header + _sanitize_pane_text(msg)
+        _send_sess = pane.session
         body_payload = _paste_payload(body)
-        pane.session.write(body_payload)
-        QTimer.singleShot(
-            _enter_delay_ms(body_payload),
-            lambda: pane.session and pane.session.write(b"\r"),
-        )
+        _send_sess.write(body_payload)
+        _delayed_enter(pane, _send_sess, _enter_delay_ms(body_payload))
 
         # Record delivery time for stall detection: receiving a message counts
         # as evidence the pane is still being monitored by the orchestrator.
@@ -3291,6 +3408,12 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
 
         self._idle_state.pop(key, None)
         getattr(self, "_pane_state", {}).pop(key, None)
+        # Revoke the pane's capability token so stale done/send requests from
+        # the closing pane are rejected after it terminates.
+        _pane_tokens = getattr(self, "_pane_tokens", {})
+        _revoke_keys = [t for t, v in _pane_tokens.items() if v == (project_ns, role_name)]
+        for _tok in _revoke_keys:
+            _pane_tokens.pop(_tok, None)
 
         if had_auto_chain_close and not suppress_auto_chain:
             pending_ac = [
@@ -3361,10 +3484,11 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         for _project_ns, panes in self._panes_by_project.items():
             lead = panes.get(LEAD.name)
             if lead and lead.session and lead.session.is_alive:
-                lead.session.write(notice)
+                _tog_sess = lead.session
+                _tog_sess.write(notice)
                 # Same trailing-CR delay as done() so the inject lands
                 # after the inline text not before it.
-                QTimer.singleShot(150, lambda pane=lead: pane.session and pane.session.write(b"\r"))
+                _delayed_enter(lead, _tog_sess, 150)
                 self.leadInjected.emit(notice)
             # If Lead isn't alive in this project, the next spawn's
             # _render_lead_context() will read the fresh state — no need
@@ -3413,8 +3537,9 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         for _project_ns, panes in self._panes_by_project.items():
             lead = panes.get(LEAD.name)
             if lead and lead.session and lead.session.is_alive:
-                lead.session.write(notice)
-                QTimer.singleShot(150, lambda pane=lead: pane.session and pane.session.write(b"\r"))
+                _tier_sess = lead.session
+                _tier_sess.write(notice)
+                _delayed_enter(lead, _tier_sess, 150)
                 self.leadInjected.emit(notice)
 
         self.planTierChanged.emit(tier)
@@ -3560,9 +3685,18 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 if not pl_run.hop_pending:
                     self._advance_pipeline(project_ns, pipeline_key, pl_run)
 
-        # mark pane done, auto-close after a delay so user can see it
+        # mark pane done, auto-close after a delay so user can see it.
+        # Capture current session so the delayed close is a no-op if the pane
+        # has already been respawned with a new session by the time the timer fires.
         pane.set_state("done", note=note[:80] if note else "done")
-        QTimer.singleShot(2_500, lambda: self.close(from_role, project=project_ns))
+        _done_sess = pane.session
+
+        def _close_if_same_session() -> None:
+            _pp = self._project_panes(project_ns).get(from_role)
+            if _pp is not None and _pp.session is _done_sess:
+                self.close(from_role, project=project_ns)
+
+        QTimer.singleShot(2_500, _close_if_same_session)
         _log_event("done", role=from_role, note=note[:200])
         now = datetime.now()
         transcript_path = getattr(pane, "_transcript_path", None)
@@ -4305,21 +4439,18 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             active_name, _ = active_project()
         except Exception:
             active_name = None
-        # Hook noise meter + friction heatmap — scan today's Claude
-        # Code session jsonl files for system reminders and user-
-        # correction signals. Quiet day → empty → renderer omits.
+        # Hook noise meter + friction heatmap — single pass over today's
+        # Claude Code session jsonl files collecting all three metrics at once.
+        # Per-file (mtime, size) cache in scan_hot_md_metrics avoids re-parsing
+        # unchanged files every 60-second tick. Quiet day → empty → renderer omits.
         try:
-            from .chatlog_scanner import (
-                count_hook_fires,
-                count_tool_retries,
-                count_user_corrections,
-            )
+            from .chatlog_scanner import scan_hot_md_metrics
 
             start_of_today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-            hook_counts = count_hook_fires(since=start_of_today)
+            hook_counts, _corrections, _tool_retries = scan_hot_md_metrics(since=start_of_today)
             friction = {
-                "corrections": count_user_corrections(since=start_of_today),
-                "tool_retries": count_tool_retries(since=start_of_today),
+                "corrections": _corrections,
+                "tool_retries": _tool_retries,
             }
         except Exception:
             hook_counts = {}
@@ -4361,102 +4492,105 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         self._reap_pending_done_notices()
         for project_name, project_panes in list(self._panes_by_project.items()):
             for name, pane in list(project_panes.items()):
-                key = f"{project_name}::{name}"
-                if name == LEAD.name:
-                    continue
-                if pane.state != "working":
-                    self._idle_state.pop(key, None)
-                    continue
-                if pane.session is None or not pane.session.is_alive:
-                    self._idle_state.pop(key, None)
-                    continue
+                try:
+                    key = f"{project_name}::{name}"
+                    if name == LEAD.name:
+                        continue
+                    if pane.state != "working":
+                        self._idle_state.pop(key, None)
+                        continue
+                    if pane.session is None or not pane.session.is_alive:
+                        self._idle_state.pop(key, None)
+                        continue
 
-                # Suppress the reminder while this pane is rate-limited: it's
-                # not idle-because-done, it physically can't work until the
-                # usage limit resets. Detection happens here (every tick) and
-                # schedules a one-shot reset notice the first time it's seen.
-                if self._rate_limit_suppressed(project_name, name, pane, now):
-                    self._idle_state.pop(key, None)
-                    continue
+                    # Suppress the reminder while this pane is rate-limited: it's
+                    # not idle-because-done, it physically can't work until the
+                    # usage limit resets. Detection happens here (every tick) and
+                    # schedules a one-shot reset notice the first time it's seen.
+                    if self._rate_limit_suppressed(project_name, name, pane, now):
+                        self._idle_state.pop(key, None)
+                        continue
 
-                # Suppress the reminder while this teammate is waiting on a
-                # reply from Lead — they're not "stuck on `takkub done`",
-                # they're genuinely blocked on clarification. The flag is
-                # set in `send()` when the teammate runs
-                # `takkub send --to lead "..."` and cleared when Lead
-                # sends back. We also expire the suppression after 30
-                # minutes so a Lead that crashed mid-reply doesn't leave
-                # the teammate's watchdog disabled forever.
-                _ps_bl = getattr(self, "_pane_state", {}).get(key)
-                blocked_at = _ps_bl.blocked_on_lead_ts if _ps_bl is not None else None
-                if blocked_at is not None and (now - blocked_at) < 30 * 60:
-                    entry = self._idle_state.get(key)
-                    if entry:
+                    # Suppress the reminder while this teammate is waiting on a
+                    # reply from Lead — they're not "stuck on `takkub done`",
+                    # they're genuinely blocked on clarification. The flag is
+                    # set in `send()` when the teammate runs
+                    # `takkub send --to lead "..."` and cleared when Lead
+                    # sends back. We also expire the suppression after 30
+                    # minutes so a Lead that crashed mid-reply doesn't leave
+                    # the teammate's watchdog disabled forever.
+                    _ps_bl = getattr(self, "_pane_state", {}).get(key)
+                    blocked_at = _ps_bl.blocked_on_lead_ts if _ps_bl is not None else None
+                    if blocked_at is not None and (now - blocked_at) < 30 * 60:
+                        entry = self._idle_state.get(key)
+                        if entry:
+                            entry["first_idle_ts"] = None
+                        continue
+
+                    entry = self._idle_state.setdefault(
+                        key, {"first_idle_ts": None, "last_reminder_ts": 0.0}
+                    )
+
+                    # Issue #54: suppress the forgot-done reminder while a pane is
+                    # blocked on an interactive subprocess prompt (y/N, passphrase,
+                    # "press any key"). The idle reminder is the wrong context here
+                    # and close→respawn (stuck recover) won't help — the prompt comes
+                    # from the subprocess. Surface a separate notice to Lead instead.
+                    _tty_prompt = pane.session.is_blocked_on_tty_prompt()
+                    if _tty_prompt:
                         entry["first_idle_ts"] = None
-                    continue
+                        self._maybe_surface_tty_block(key, name, project_name, _tty_prompt, now)
+                        continue
+                    # Clear block state when no longer blocked.
+                    _ps_tty = getattr(self, "_pane_state", {}).get(key)
+                    if _ps_tty is not None and _ps_tty.tty_blocked_since is not None:
+                        _ps_tty.tty_blocked_since = None
 
-                entry = self._idle_state.setdefault(
-                    key, {"first_idle_ts": None, "last_reminder_ts": 0.0}
-                )
+                    if not pane.session.is_at_ready_prompt():
+                        # claude is processing — reset the idle streak so a long
+                        # build doesn't count toward the reminder threshold.
+                        entry["first_idle_ts"] = None
+                        continue
 
-                # Issue #54: suppress the forgot-done reminder while a pane is
-                # blocked on an interactive subprocess prompt (y/N, passphrase,
-                # "press any key"). The idle reminder is the wrong context here
-                # and close→respawn (stuck recover) won't help — the prompt comes
-                # from the subprocess. Surface a separate notice to Lead instead.
-                _tty_prompt = pane.session.is_blocked_on_tty_prompt()
-                if _tty_prompt:
-                    entry["first_idle_ts"] = None
-                    self._maybe_surface_tty_block(key, name, project_name, _tty_prompt, now)
-                    continue
-                # Clear block state when no longer blocked.
-                _ps_tty = getattr(self, "_pane_state", {}).get(key)
-                if _ps_tty is not None and _ps_tty.tty_blocked_since is not None:
-                    _ps_tty.tty_blocked_since = None
+                    if entry["first_idle_ts"] is None:
+                        entry["first_idle_ts"] = now
+                        continue
 
-                if not pane.session.is_at_ready_prompt():
-                    # claude is processing — reset the idle streak so a long
-                    # build doesn't count toward the reminder threshold.
-                    entry["first_idle_ts"] = None
-                    continue
+                    idle_for = now - entry["first_idle_ts"]
+                    since_last_reminder = now - entry["last_reminder_ts"]
+                    if (
+                        idle_for >= IDLE_REMIND_AFTER_S
+                        and since_last_reminder >= IDLE_REMIND_COOLDOWN_S
+                    ):
+                        self._inject_idle_reminder(name, pane)
+                        entry["last_reminder_ts"] = now
+                        # restart the idle streak so we don't fire again until
+                        # the agent stays idle for another full
+                        # IDLE_REMIND_AFTER_S past the cooldown.
+                        entry["first_idle_ts"] = now
 
-                if entry["first_idle_ts"] is None:
-                    entry["first_idle_ts"] = now
-                    continue
-
-                idle_for = now - entry["first_idle_ts"]
-                since_last_reminder = now - entry["last_reminder_ts"]
-                if (
-                    idle_for >= IDLE_REMIND_AFTER_S
-                    and since_last_reminder >= IDLE_REMIND_COOLDOWN_S
-                ):
-                    self._inject_idle_reminder(name, pane)
-                    entry["last_reminder_ts"] = now
-                    # restart the idle streak so we don't fire again until
-                    # the agent stays idle for another full
-                    # IDLE_REMIND_AFTER_S past the cooldown.
-                    entry["first_idle_ts"] = now
-
-                # Harvest hint: if the pane has been idle much longer than
-                # the reminder threshold, suggest `takkub harvest` to Lead.
-                if HARVEST_HINT_SEC > 0 and idle_for >= HARVEST_HINT_SEC:
-                    _ps_hh = getattr(self, "_pane_state", {}).get(key)
-                    last_hint = _ps_hh.harvest_hint_ts if _ps_hh is not None else 0.0
-                    if now - last_hint >= HARVEST_HINT_SEC:
-                        lead_pane = project_panes.get(LEAD.name)
-                        if lead_pane and lead_pane.session and lead_pane.session.is_alive:
-                            hint_min = HARVEST_HINT_SEC // 60
-                            hint_msg = (
-                                f"[cockpit] {name} ไม่ active >{hint_min}m. "
-                                f"ลอง: takkub harvest --role {name}"
-                            )
-                            lead_pane.session.write(hint_msg)
-                            QTimer.singleShot(
-                                150,
-                                lambda lp=lead_pane: lp.session and lp.session.write(b"\r"),
-                            )
-                            _log_event("harvest_hint", role=name, project=project_name)
-                            self._ps(key).harvest_hint_ts = now
+                    # Harvest hint: if the pane has been idle much longer than
+                    # the reminder threshold, suggest `takkub harvest` to Lead.
+                    if HARVEST_HINT_SEC > 0 and idle_for >= HARVEST_HINT_SEC:
+                        _ps_hh = getattr(self, "_pane_state", {}).get(key)
+                        last_hint = _ps_hh.harvest_hint_ts if _ps_hh is not None else 0.0
+                        if now - last_hint >= HARVEST_HINT_SEC:
+                            lead_pane = project_panes.get(LEAD.name)
+                            if lead_pane and lead_pane.session and lead_pane.session.is_alive:
+                                hint_min = HARVEST_HINT_SEC // 60
+                                hint_msg = (
+                                    f"[cockpit] {name} ไม่ active >{hint_min}m. "
+                                    f"ลอง: takkub harvest --role {name}"
+                                )
+                                lead_pane.session.write(hint_msg)
+                                QTimer.singleShot(
+                                    150,
+                                    lambda lp=lead_pane: lp.session and lp.session.write(b"\r"),
+                                )
+                                _log_event("harvest_hint", role=name, project=project_name)
+                                self._ps(key).harvest_hint_ts = now
+                except Exception:
+                    _log_event("idle_watchdog_pane_error", role=name, project=project_name)
 
     def _check_stuck_panes(self, now: float) -> None:
         """Walk every teammate pane and auto-recover any that's been
@@ -4470,126 +4604,131 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         conversation with the operator. Teammates are the safe target."""
         for project_name, project_panes in list(self._panes_by_project.items()):
             for role, pane in list(project_panes.items()):
-                if role == LEAD.name:
-                    continue
-                if pane.state != "working":
-                    continue
-                if pane.session is None or not pane.session.is_alive:
-                    continue
-                # A rate-limited pane is silent on purpose — never force-respawn
-                # it (the fresh session would just hit the same limit). The idle
-                # walker owns detection; here we only read the recorded state.
-                key = f"{project_name}::{role}"
-                if (self._pane_state.get(key) or PaneState()).rate_limited_until > now:
-                    continue
-                last_out = getattr(pane, "_last_output_ts", 0.0)
-                if not isinstance(last_out, (int, float)) or last_out <= 0:
-                    # Pane hasn't seen output yet — still in bootstrap,
-                    # or the attribute was never initialised (legacy
-                    # AgentPane subclass / test fixture). Skip; the next
-                    # tick will pick it up once a real timestamp lands.
-                    continue
-                # Bug-2 fix: measure screen-content delta excluding the spinner
-                # region ('esc to interrupt').  Raw byte timestamps are bumped on
-                # every PTY byte including the animated spinner, so a claude
-                # wedged on a slow MCP call never trips STUCK_THRESHOLD_S with
-                # the old byte-only check.  Content-delta is immune to spinners.
-                ps_ck = self._ps(key)
                 try:
-                    disp = pane.session.display_lines()
-                    # Fix 3: filter spinner/status lines more broadly.
-                    # Exclude lines matching any known interrupt phrase OR volatile
-                    # counter patterns (elapsed seconds, token counters) so a
-                    # counter-only spinner line doesn't keep resetting the hash.
-                    _filtered_lines = "\n".join(
-                        ln
-                        for ln in disp
-                        if not any(p in ln.lower() for p in _SPINNER_INTERRUPT_PHRASES)
-                        and not _SPINNER_VOLATILE_RE.search(ln)
-                    )
-                    non_spinner_hash = hashlib.blake2b(
-                        _filtered_lines.encode("utf-8", errors="replace"),
-                        digest_size=8,
-                    ).hexdigest()
-                    prev_hash = ps_ck.last_content_hash
-                    if prev_hash != non_spinner_hash:
-                        ps_ck.last_content_hash = non_spinner_hash
-                        if prev_hash is not None:
-                            # Genuine content change (not first observation) →
-                            # reset the change clock so the pane isn't recovered.
-                            ps_ck.last_content_change_ts = now
-                        elif ps_ck.last_content_change_ts is None:
-                            # First time we see this pane: initialise from
-                            # last_out so an already-stale pane is detected on
-                            # the very first tick rather than getting a free
-                            # STUCK_THRESHOLD_S grace period.
+                    if role == LEAD.name:
+                        continue
+                    if pane.state != "working":
+                        continue
+                    if pane.session is None or not pane.session.is_alive:
+                        continue
+                    # A rate-limited pane is silent on purpose — never force-respawn
+                    # it (the fresh session would just hit the same limit). The idle
+                    # walker owns detection; here we only read the recorded state.
+                    key = f"{project_name}::{role}"
+                    if (self._pane_state.get(key) or PaneState()).rate_limited_until > now:
+                        continue
+                    last_out = getattr(pane, "_last_output_ts", 0.0)
+                    if not isinstance(last_out, (int, float)) or last_out <= 0:
+                        # Pane hasn't seen output yet — still in bootstrap,
+                        # or the attribute was never initialised (legacy
+                        # AgentPane subclass / test fixture). Skip; the next
+                        # tick will pick it up once a real timestamp lands.
+                        continue
+                    # Bug-2 fix: measure screen-content delta excluding the spinner
+                    # region ('esc to interrupt').  Raw byte timestamps are bumped on
+                    # every PTY byte including the animated spinner, so a claude
+                    # wedged on a slow MCP call never trips STUCK_THRESHOLD_S with
+                    # the old byte-only check.  Content-delta is immune to spinners.
+                    ps_ck = self._ps(key)
+                    try:
+                        disp = pane.session.display_lines()
+                        # Fix 3: filter spinner/status lines more broadly.
+                        # Exclude lines matching any known interrupt phrase OR volatile
+                        # counter patterns (elapsed seconds, token counters) so a
+                        # counter-only spinner line doesn't keep resetting the hash.
+                        _filtered_lines = "\n".join(
+                            ln
+                            for ln in disp
+                            if not any(p in ln.lower() for p in _SPINNER_INTERRUPT_PHRASES)
+                            and not _SPINNER_VOLATILE_RE.search(ln)
+                        )
+                        non_spinner_hash = hashlib.blake2b(
+                            _filtered_lines.encode("utf-8", errors="replace"),
+                            digest_size=8,
+                        ).hexdigest()
+                        prev_hash = ps_ck.last_content_hash
+                        if prev_hash != non_spinner_hash:
+                            ps_ck.last_content_hash = non_spinner_hash
+                            if prev_hash is not None:
+                                # Genuine content change (not first observation) →
+                                # reset the change clock so the pane isn't recovered.
+                                ps_ck.last_content_change_ts = now
+                            elif ps_ck.last_content_change_ts is None:
+                                # First time we see this pane: initialise from
+                                # last_out so an already-stale pane is detected on
+                                # the very first tick rather than getting a free
+                                # STUCK_THRESHOLD_S grace period.
+                                ps_ck.last_content_change_ts = last_out
+                    except Exception:
+                        # display_lines() failed (session torn down mid-tick); fall
+                        # back to initialising the ts from last raw byte time.
+                        if ps_ck.last_content_change_ts is None:
                             ps_ck.last_content_change_ts = last_out
+                    last_content_ts = ps_ck.last_content_change_ts
+                    if last_content_ts is None:
+                        last_content_ts = last_out
+                    # Throughput watchdog (issue #35): detect runaway output loops
+                    # that flood the Qt main thread. The existing stuck detector
+                    # only catches *silent* or *content-stable* panes; a pane in a
+                    # runaway loop has ever-changing content and is never "stuck" by
+                    # the existing metric. Here we measure byte rate and warn Lead.
+                    _tp_total = getattr(pane, "_tp_total_bytes", 0)
+                    if ps_ck.tp_last_ts > 0:
+                        _tp_elapsed = now - ps_ck.tp_last_ts
+                        if _tp_elapsed > 0:
+                            _tp_delta = _tp_total - ps_ck.tp_last_total
+                            _tp_rate = _tp_delta / _tp_elapsed
+                            if _tp_rate > RUNAWAY_BYTES_S:
+                                if ps_ck.tp_runaway_since is None:
+                                    ps_ck.tp_runaway_since = now
+                                elif (now - ps_ck.tp_runaway_since) >= RUNAWAY_DURATION_S:
+                                    if (now - ps_ck.tp_warn_ts) >= RUNAWAY_WARN_COOLDOWN_S:
+                                        self._warn_lead_runaway_pane(role, project_name, _tp_rate)
+                                        ps_ck.tp_warn_ts = now
+                            else:
+                                ps_ck.tp_runaway_since = None
+                    ps_ck.tp_last_total = _tp_total
+                    ps_ck.tp_last_ts = now
+                    if (now - last_content_ts) < STUCK_THRESHOLD_S:
+                        continue
+                    if ps_ck.stuck_recover_gave_up:
+                        # Already hit STUCK_RECOVER_MAX for this pane and handed it
+                        # to the operator (#41). Stop recovering — re-recovering a
+                        # deterministically-wedged pane just loops + burns tokens.
+                        continue
+                    last_recover = ps_ck.last_stuck_recover
+                    if (now - last_recover) < STUCK_RECOVER_COOLDOWN_S:
+                        # Already tried to recover this pane recently;
+                        # leave it alone so we don't loop close→spawn.
+                        continue
+                    if ps_ck.stuck_recover_attempts >= STUCK_RECOVER_MAX:
+                        # Recovered MAX times and it wedged again — giving up beats
+                        # an infinite close→respawn loop that stalls the pipeline (#41).
+                        self._give_up_stuck(role, project_name, pane, now)
+                        continue
+                    # Issue #54: if the pane is blocked on a TTY prompt, close→respawn
+                    # won't help (the prompt comes from a subprocess). Defer recovery
+                    # and surface to Lead instead.
+                    # Note: we're already past STUCK_THRESHOLD_S here, so we skip the
+                    # TTY_BLOCK_SURFACE_AFTER_S grace period and surface immediately
+                    # (only the repeat-spam cooldown applies).
+                    try:
+                        _tty_stuck = pane.session.is_blocked_on_tty_prompt()
+                    except Exception:
+                        _tty_stuck = None
+                    if _tty_stuck:
+                        _ps_tty = self._ps(key)
+                        if _ps_tty.tty_blocked_since is None:
+                            _ps_tty.tty_blocked_since = now
+                        if (
+                            now - _ps_tty.last_tty_block_surface_ts
+                        ) >= TTY_BLOCK_SURFACE_COOLDOWN_S:
+                            self._surface_tty_block_notice(role, project_name, _tty_stuck)
+                            _ps_tty.last_tty_block_surface_ts = now
+                        continue
+                    self._auto_recover_stuck(role, project_name, pane, now)
                 except Exception:
-                    # display_lines() failed (session torn down mid-tick); fall
-                    # back to initialising the ts from last raw byte time.
-                    if ps_ck.last_content_change_ts is None:
-                        ps_ck.last_content_change_ts = last_out
-                last_content_ts = ps_ck.last_content_change_ts
-                if last_content_ts is None:
-                    last_content_ts = last_out
-                # Throughput watchdog (issue #35): detect runaway output loops
-                # that flood the Qt main thread. The existing stuck detector
-                # only catches *silent* or *content-stable* panes; a pane in a
-                # runaway loop has ever-changing content and is never "stuck" by
-                # the existing metric. Here we measure byte rate and warn Lead.
-                _tp_total = getattr(pane, "_tp_total_bytes", 0)
-                if ps_ck.tp_last_ts > 0:
-                    _tp_elapsed = now - ps_ck.tp_last_ts
-                    if _tp_elapsed > 0:
-                        _tp_delta = _tp_total - ps_ck.tp_last_total
-                        _tp_rate = _tp_delta / _tp_elapsed
-                        if _tp_rate > RUNAWAY_BYTES_S:
-                            if ps_ck.tp_runaway_since is None:
-                                ps_ck.tp_runaway_since = now
-                            elif (now - ps_ck.tp_runaway_since) >= RUNAWAY_DURATION_S:
-                                if (now - ps_ck.tp_warn_ts) >= RUNAWAY_WARN_COOLDOWN_S:
-                                    self._warn_lead_runaway_pane(role, project_name, _tp_rate)
-                                    ps_ck.tp_warn_ts = now
-                        else:
-                            ps_ck.tp_runaway_since = None
-                ps_ck.tp_last_total = _tp_total
-                ps_ck.tp_last_ts = now
-                if (now - last_content_ts) < STUCK_THRESHOLD_S:
-                    continue
-                if ps_ck.stuck_recover_gave_up:
-                    # Already hit STUCK_RECOVER_MAX for this pane and handed it
-                    # to the operator (#41). Stop recovering — re-recovering a
-                    # deterministically-wedged pane just loops + burns tokens.
-                    continue
-                last_recover = ps_ck.last_stuck_recover
-                if (now - last_recover) < STUCK_RECOVER_COOLDOWN_S:
-                    # Already tried to recover this pane recently;
-                    # leave it alone so we don't loop close→spawn.
-                    continue
-                if ps_ck.stuck_recover_attempts >= STUCK_RECOVER_MAX:
-                    # Recovered MAX times and it wedged again — giving up beats
-                    # an infinite close→respawn loop that stalls the pipeline (#41).
-                    self._give_up_stuck(role, project_name, pane, now)
-                    continue
-                # Issue #54: if the pane is blocked on a TTY prompt, close→respawn
-                # won't help (the prompt comes from a subprocess). Defer recovery
-                # and surface to Lead instead.
-                # Note: we're already past STUCK_THRESHOLD_S here, so we skip the
-                # TTY_BLOCK_SURFACE_AFTER_S grace period and surface immediately
-                # (only the repeat-spam cooldown applies).
-                try:
-                    _tty_stuck = pane.session.is_blocked_on_tty_prompt()
-                except Exception:
-                    _tty_stuck = None
-                if _tty_stuck:
-                    _ps_tty = self._ps(key)
-                    if _ps_tty.tty_blocked_since is None:
-                        _ps_tty.tty_blocked_since = now
-                    if (now - _ps_tty.last_tty_block_surface_ts) >= TTY_BLOCK_SURFACE_COOLDOWN_S:
-                        self._surface_tty_block_notice(role, project_name, _tty_stuck)
-                        _ps_tty.last_tty_block_surface_ts = now
-                    continue
-                self._auto_recover_stuck(role, project_name, pane, now)
+                    _log_event("stuck_watchdog_pane_error", role=role, project=project_name)
 
     def _auto_recover_stuck(self, role: str, project: str, pane: AgentPane, now: float) -> None:
         """Close the wedged pane and respawn it with --resume <uuid>. The
@@ -4784,8 +4923,9 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 f"อัตโนมัติ (กัน loop + pipeline stall) — เช็ค `takkub list` แล้ว "
                 f"close + assign ใหม่ถ้าต้องการให้ทำต่อ"
             )
-            lead.session.write(msg)
-            QTimer.singleShot(150, lambda: lead.session and lead.session.write(b"\r"))
+            _cap_sess = lead.session
+            _cap_sess.write(msg)
+            _delayed_enter(lead, _cap_sess, 150)
             self.leadInjected.emit(msg)
 
     def _warn_lead_runaway_pane(self, role: str, project: str, rate_bps: float) -> None:
@@ -4804,8 +4944,9 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             f"ต่อเนื่อง > {int(RUNAWAY_DURATION_S)}s — อาจติดลูป. "
             f"ตรวจสอบ pane /{role} หรือ `takkub close --role {role}` ถ้าต้องการหยุด"
         )
-        lead.session.write(msg)
-        QTimer.singleShot(150, lambda: lead.session and lead.session.write(b"\r"))
+        _run_sess = lead.session
+        _run_sess.write(msg)
+        _delayed_enter(lead, _run_sess, 150)
         self.leadInjected.emit(msg)
         _log_event("runaway_pane_warn", role=role, project=project, rate_kb=int(rate_kb))
 
@@ -4891,8 +5032,9 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         )
         lead = panes.get(LEAD.name)
         if lead and lead.session and lead.session.is_alive:
-            lead.session.write(msg)
-            QTimer.singleShot(150, lambda: lead.session and lead.session.write(b"\r"))
+            _rl_sess = lead.session
+            _rl_sess.write(msg)
+            _delayed_enter(lead, _rl_sess, 150)
             self.leadInjected.emit(msg)
         _log_event("rate_limit_reset", role=role, project=project)
         self.statusChanged.emit()
@@ -4930,16 +5072,18 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             f"(เช่น `-y`, `--no-input`, `DEBIAN_FRONTEND=noninteractive`) "
             f'หรือ `takkub send --to {role} "<คำแนะนำ>"` เพื่อปลด block'
         )
-        lead.session.write(msg)
-        QTimer.singleShot(150, lambda: lead.session and lead.session.write(b"\r"))
+        _tty_sess = lead.session
+        _tty_sess.write(msg)
+        _delayed_enter(lead, _tty_sess, 150)
         self.leadInjected.emit(msg)
         _log_event("tty_block_surface", role=role, project=project, prompt=prompt_line)
 
     def _inject_idle_reminder(self, role_name: str, pane: AgentPane) -> None:
         if pane.session is None or not pane.session.is_alive:
             return
-        pane.session.write(IDLE_REMINDER_TEXT)
-        QTimer.singleShot(150, lambda: pane.session and pane.session.write(b"\r"))
+        _idle_sess = pane.session
+        _idle_sess.write(IDLE_REMINDER_TEXT)
+        _delayed_enter(pane, _idle_sess, 150)
         _log_event("idle_reminder", role=role_name)
 
     def broadcast_bug_check(self, project: str | None = None) -> tuple[int, list[str]]:
