@@ -1,6 +1,6 @@
 """Regression tests for is_at_ready_prompt() busy/idle detection.
 
-The idle watchdog (orchestrator._check_idle_teammates) fires `takkub done`
+The idle watchdog (orchestrator._check_idle_teammates) fires `taktub done`
 reminders into any pane that is_at_ready_prompt() reports as idle. gemini and
 codex keep their "type your message or @path" input box visible *even while
 they are Thinking…* — so the busy state must be detected via the
@@ -42,12 +42,12 @@ def test_claude_working_esc_to_interrupt_is_not_ready() -> None:
 
 def test_gemini_idle_with_update_footer_is_ready() -> None:
     # issue #51: once a newer gemini release exists upstream, gemini shows a
-    # PASSIVE "Gemini CLI update available! <cur> → <new>" footer that does
+    # PASSIVE "Gemini CLI update available! <cur> -> <new>" footer that does
     # NOT block input. A ready gemini wearing this banner must still read as
     # idle so the watchdog can nudge it to run `takkub done`. Previously the
     # blanket "update available!" blocker made it read as perpetually-busy.
     s = _feed_screen(
-        "Gemini CLI update available! 0.46.0 → 0.47.0",
+        "Gemini CLI update available! 0.46.0 -> 0.47.0",
         "Type your message or @path/to/file",
     )
     assert s.is_at_ready_prompt() is True
@@ -57,15 +57,15 @@ def test_gemini_idle_with_update_footer_is_ready_even_if_prompt_missing() -> Non
     # Regression guard: even if the "type your message or" hint is missing (e.g.
     # scrolled off-screen or prompt changed), the passive Gemini update footer
     # should NOT trigger the "update available!" blocker.
-    s = _feed_screen("Gemini CLI update available! 0.46.0 → 0.47.0")
+    s = _feed_screen("Gemini CLI update available! 0.46.0 -> 0.47.0")
     assert s.is_at_ready_prompt() is True
 
 
 def test_gemini_thinking_with_update_footer_is_not_ready() -> None:
-    # The update footer must not flip a *thinking* gemini to ready — the
+    # The update footer must not flip a *thinking* gemini to ready -- the
     # "esc to cancel" busy indicator still takes precedence.
     s = _feed_screen(
-        "Gemini CLI update available! 0.46.0 → 0.47.0",
+        "Gemini CLI update available! 0.46.0 -> 0.47.0",
         "Thinking... (esc to cancel, 12s)",
         "Type your message or @path/to/file",
     )
@@ -74,7 +74,7 @@ def test_gemini_thinking_with_update_footer_is_not_ready() -> None:
 
 def test_codex_splash_update_modal_is_not_ready() -> None:
     # codex's "update available!" is part of a startup splash modal that must
-    # be dismissed before the prompt is usable — it must still block (the
+    # be dismissed before the prompt is usable -- it must still block (the
     # gemini ready marker is absent on a codex screen, so the blocker applies).
     s = _feed_screen(
         "OpenAI Codex (v1.2.3)",
@@ -83,7 +83,7 @@ def test_codex_splash_update_modal_is_not_ready() -> None:
     assert s.is_at_ready_prompt() is False
 
 
-# ── is_blocked_on_tty_prompt() — issue #52 Layer 2 ──────────────────────────
+# -- is_blocked_on_tty_prompt() -- issue #52 Layer 2 -------------------------
 
 
 class TestIsBlockedOnTtyPrompt:
@@ -135,7 +135,7 @@ class TestIsBlockedOnTtyPrompt:
 
     def test_returns_none_on_normal_output(self) -> None:
         s = _feed_screen(
-            "✓ Tests passed (42 passed, 0 failed)",
+            "Tests passed (42 passed, 0 failed)",
             "Build succeeded in 3.2s",
         )
         assert s.is_blocked_on_tty_prompt() is None
@@ -146,7 +146,7 @@ class TestIsBlockedOnTtyPrompt:
 
     def test_returns_none_on_claude_ready_prompt(self) -> None:
         # Claude's "bypass permissions" footer must NOT be detected as a TTY
-        # prompt — it's a claude UI element, not an interactive shell pause.
+        # prompt -- it's a claude UI element, not an interactive shell pause.
         s = _feed_screen(
             "What would you like to do next?",
             "bypass permissions",
@@ -178,3 +178,88 @@ class TestIsBlockedOnTtyPrompt:
         assert ready.is_blocked_on_tty_prompt() is None
         assert blocked.is_at_ready_prompt() is False
         assert blocked.is_blocked_on_tty_prompt() is not None
+
+
+# -- has_unparsed_tool_call() -- issue #59 ------------------------------------
+
+
+class TestHasUnparsedToolCall:
+    """Verify that has_unparsed_tool_call() detects literal tool-call XML on
+    screen without false-positives on normal prose that mentions the word.
+
+    Note: test strings use bare tag names (no namespace prefix) because that
+    is the primary failure mode described in issue #59. The regex also catches
+    namespace-prefixed variants (e.g. with 'antml:' prefix) since any tag that
+    renders as visible text was not consumed by the harness.
+    """
+
+    def test_bare_invoke_tag_detected(self) -> None:
+        s = _feed_screen('<invoke name="Bash">')
+        assert s.has_unparsed_tool_call() is not None
+
+    def test_bare_parameter_tag_detected(self) -> None:
+        s = _feed_screen('<parameter name="command">ls -la</parameter>')
+        assert s.has_unparsed_tool_call() is not None
+
+    def test_bare_function_calls_open_tag_detected(self) -> None:
+        s = _feed_screen("<function_calls>")
+        assert s.has_unparsed_tool_call() is not None
+
+    def test_closing_invoke_tag_detected(self) -> None:
+        s = _feed_screen("</invoke>")
+        assert s.has_unparsed_tool_call() is not None
+
+    def test_closing_function_calls_tag_detected(self) -> None:
+        s = _feed_screen("</function_calls>")
+        assert s.has_unparsed_tool_call() is not None
+
+    def test_multiline_tool_call_block_detected(self) -> None:
+        # Typical malformed output: model printed the full XML block as text.
+        s = _feed_screen(
+            "<function_calls>",
+            '<invoke name="Read">',
+            '<parameter name="file_path">/tmp/foo.txt</parameter>',
+            "</invoke>",
+            "</function_calls>",
+        )
+        assert s.has_unparsed_tool_call() is not None
+
+    def test_returns_matched_line_text(self) -> None:
+        # Return value should be the stripped content of the matched line.
+        s = _feed_screen('<invoke name="Bash">')
+        result = s.has_unparsed_tool_call()
+        assert result is not None
+        assert "invoke" in result.lower()
+
+    def test_returns_none_on_normal_output(self) -> None:
+        # Regular prose that doesn't contain XML tags must not fire.
+        s = _feed_screen(
+            "I will now invoke the Bash tool to list files.",
+            "The parameter value is the command string.",
+        )
+        assert s.has_unparsed_tool_call() is None
+
+    def test_returns_none_on_empty_screen(self) -> None:
+        s = _feed_screen("")
+        assert s.has_unparsed_tool_call() is None
+
+    def test_returns_none_on_claude_ready_prompt(self) -> None:
+        # Claude's ready-prompt text must NOT trip the detector.
+        s = _feed_screen("bypass permissions")
+        assert s.has_unparsed_tool_call() is None
+
+    def test_returns_none_on_build_output(self) -> None:
+        # Build/test output that mentions parameter in prose must not trip.
+        s = _feed_screen(
+            "Running tests... 42 passed",
+            "No errors found in parameter handling",
+        )
+        assert s.has_unparsed_tool_call() is None
+
+    def test_scrollback_xml_not_detected(self) -> None:
+        # XML that appeared many rows ago (above the cursor window) must
+        # not trigger a false-positive once the session has moved on.
+        # Fill enough lines so the tag is pushed above the 10-row scan window.
+        lines = ['<invoke name="Bash">'] + [f"output line {i}" for i in range(12)]
+        s = _feed_screen(*lines)
+        assert s.has_unparsed_tool_call() is None

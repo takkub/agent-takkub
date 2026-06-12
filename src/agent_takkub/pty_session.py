@@ -56,6 +56,28 @@ def _tree_kill(pid: int | None) -> None:
         pass
 
 
+# ── Malformed tool-call XML detection ───────────────────────────────────────
+# When a model outputs tool-call XML without the required `antml:` namespace
+# prefix (using bare `<invoke>` / `<parameter>` / `<function_calls>` instead
+# of `<invoke>` etc.) the harness cannot parse and execute it — the XML
+# simply renders as plain text and the pane appears to hang silently.
+#
+# Key invariant: a *well-formed* tool call is consumed by the harness before
+# reaching the terminal renderer, so it never appears as literal text on-screen.
+# Any occurrence of these tag patterns as visible text therefore means the tool
+# call is malformed and was never executed.
+#
+# Patterns cover both opening and closing tags, with or without the `antml:`
+# prefix, since either variant appearing as screen text signals a parse failure.
+_MALFORMED_XML_RE = re.compile(
+    r"<\s*/?\s*(antml:)?(invoke|parameter|function_calls)\b",
+    re.IGNORECASE,
+)
+# Scan this many rows ending at the cursor row (tool-call XML tends to sit just
+# above the cursor after the model finishes outputting it).
+_MALFORMED_XML_TAIL_ROWS = 10
+
+
 # ── Interactive TTY-prompt detection ────────────────────────────────────────
 # When a shell command (npx, git, rm -rf) pauses for user input the pane
 # output stops scrolling and the cursor sits on a y/N or credential line.
@@ -637,4 +659,33 @@ class PtySession(QObject):
         for line in reversed(lines[lo:hi]):
             if _TTY_PROMPT_RE.search(line):
                 return line.strip() or "interactive prompt detected"
+        return None
+
+    def has_unparsed_tool_call(self) -> str | None:
+        """Return the first line containing a literal tool-call XML tag if one is
+        visible near the cursor; else ``None``.
+
+        A well-formed tool call is consumed by the Claude Code harness before it
+        ever reaches the terminal renderer, so it never appears as plain text on
+        screen.  If one of the recognised tag patterns IS visible, the tool call
+        was malformed (missing ``antml:`` prefix or otherwise unparseable) and was
+        silently no-op'd by the harness — the model appears to hang even though
+        no real hang occurred.
+
+        Scans the ``_MALFORMED_XML_TAIL_ROWS`` rows ending at the current cursor
+        row (same cursor-relative window used by ``is_blocked_on_tty_prompt``).
+        The screen and cursor are sampled under a single lock acquisition.  The
+        returned string is the stripped content of the first matched line,
+        suitable for watchdog log messages.
+        """
+        with self._screen_lock:
+            lines = list(self.screen.display)
+            cursor_row = self.screen.cursor.y
+        if not lines:
+            return None
+        lo = max(0, cursor_row - _MALFORMED_XML_TAIL_ROWS + 1)
+        hi = cursor_row + 1
+        for line in reversed(lines[lo:hi]):
+            if _MALFORMED_XML_RE.search(line):
+                return line.strip() or "unparsed tool-call XML detected"
         return None
