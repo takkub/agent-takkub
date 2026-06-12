@@ -65,6 +65,13 @@ from .project_tab import ProjectTab
 from .roles import DEFAULT_TEAMMATES, LEAD, Role, by_name
 from .rtk_helper import install_rtk, is_rtk_installed, rtk_binary_available
 
+# Tier 1 quiet-boot constants: event-driven debounce before Lead spawn.
+# Each poll fires from a separate QTimer callback (one event-loop turn).
+# Streak resets when InSendMessageEx / modal-popup / app-inactive observed.
+_BOOT_LEAD_INITIAL_MS = 150  # wait after first-paint before starting debounce
+_BOOT_LEAD_POLL_MS = 50  # ms between debounce turns
+_BOOT_LEAD_QUIET_N = 3  # consecutive clear turns required (~150-250 ms total)
+
 
 def _handle_cli_bind_error(error_msg: str) -> None:
     """Called when CliServer.listen() fails. Logs, shows a critical dialog,
@@ -1042,7 +1049,7 @@ class MainWindow(QMainWindow):
     def _boot(self) -> None:
         try:
             port = self.cli.listen()
-            self._status.showMessage(f"cli port {port}, spawning Lead...")
+            self._status.showMessage(f"cli port {port} — waiting for quiet boot...")
         except Exception as e:
             _handle_cli_bind_error(str(e))
             return  # QApplication.quit() is pending; don't proceed
@@ -1051,11 +1058,7 @@ class MainWindow(QMainWindow):
         # status bar instead of swallowing them silently.
         self.orch.paneRequested.connect(self._track_pane_request)
 
-        ok, msg = self.orch.spawn(LEAD.name)
-        if not ok:
-            self._status.showMessage(f"⚠ Lead spawn failed: {msg}", 30_000)
-        # Surface label "Lead · <project>" so the user always knows which
-        # project's defaults apply when they assign work.
+        # Surface label "Lead · <project>" immediately (doesn't need spawn).
         active = active_project()[0]
         if active:
             self.lead_pane._title.setText(f"Lead · {active}")
@@ -1063,6 +1066,14 @@ class MainWindow(QMainWindow):
         # Project may have been picked before boot — sync the rtk button to
         # match its current installation state.
         self._refresh_rtk_button()
+
+        # Tier 1: defer Lead spawn until the activation storm settles.
+        # singleShot(0) fires during window-activation SendMessage processing
+        # which triggers 0x8001010d.  Wait _BOOT_LEAD_INITIAL_MS then poll
+        # until InSendMessageEx + modal/popup gate stays clear for
+        # _BOOT_LEAD_QUIET_N consecutive event-loop turns.
+        self._boot_quiet_count = 0
+        QTimer.singleShot(_BOOT_LEAD_INITIAL_MS, self._spawn_lead_when_quiet)
 
         # No auto-/remote-control on fresh boot. The cockpit listens for
         # orch.paneResumed and only injects the bridge command on session
@@ -1108,6 +1119,47 @@ class MainWindow(QMainWindow):
         n_extra = len(to_open)
         restore_delay = 2_500 + n_extra * 4_000 + 12_000
         QTimer.singleShot(restore_delay, self._restore_teammates_from_snapshot)
+
+    def _spawn_lead_when_quiet(self) -> None:
+        """Quiet-boot debounce (Tier 1): sample gate once per event-loop turn.
+
+        Each QTimer callback is one event-loop turn.  Streak resets when any
+        condition fails: InSendMessageEx blocked, modal/popup active, or the
+        application is not yet active+visible.  After _BOOT_LEAD_QUIET_N
+        consecutive clear turns the gate is considered stable and Lead spawns.
+        Tier 2 still performs the final adjacent re-check inside spawn().
+        """
+        from .spawn_gate import is_in_send_blocked
+
+        modal_pred = getattr(self.orch, "_spawn_gate_pred", None)
+        modal_clear = (modal_pred is None) or (not modal_pred())
+        app_active = QApplication.applicationState() == Qt.ApplicationState.ApplicationActive
+        window_ready = self.isVisible()
+        insend_clear = not is_in_send_blocked()
+
+        all_clear = insend_clear and modal_clear and app_active and window_ready
+
+        if not all_clear:
+            self._boot_quiet_count = 0
+            _log_event(
+                "boot_lead_gate_blocked",
+                insend_clear=insend_clear,
+                modal_clear=modal_clear,
+                app_active=app_active,
+                window_ready=window_ready,
+            )
+            QTimer.singleShot(_BOOT_LEAD_POLL_MS, self._spawn_lead_when_quiet)
+            return
+
+        self._boot_quiet_count += 1
+        if self._boot_quiet_count < _BOOT_LEAD_QUIET_N:
+            QTimer.singleShot(_BOOT_LEAD_POLL_MS, self._spawn_lead_when_quiet)
+            return
+
+        _log_event("boot_lead_spawn_ready", quiet_turns=self._boot_quiet_count)
+        ok, msg = self.orch.spawn(LEAD.name)
+        if not ok:
+            self._status.showMessage(f"⚠ Lead spawn failed: {msg}", 30_000)
 
     def _restore_teammates_from_snapshot(self) -> None:
         """Read last-session.json and re-spawn the teammate panes that
