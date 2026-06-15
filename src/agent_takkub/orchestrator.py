@@ -21,6 +21,7 @@ import pathlib
 import re
 import secrets
 import subprocess
+import threading
 import time
 import uuid as _uuid
 from collections.abc import Callable
@@ -4589,6 +4590,11 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         vault = _resolve_vault_dir()
         if vault is None:
             return
+        # Snapshot live state on the main thread (cheap) — the heavy session-file
+        # scan + render + write run off-thread so a large chatlog or slow vault
+        # never blocks the Qt event loop (was a proven main_thread_stall source:
+        # _write_hot_md → scan_hot_md_metrics → stat over every session file,
+        # fired on EVERY `done` event + the 60 s timer).
         snapshot = {
             project: {role: pane.state for role, pane in panes.items()}
             for project, panes in self._panes_by_project.items()
@@ -4597,34 +4603,47 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             active_name, _ = active_project()
         except Exception:
             active_name = None
-        # Hook noise meter + friction heatmap — single pass over today's
-        # Claude Code session jsonl files collecting all three metrics at once.
-        # Per-file (mtime, size) cache in scan_hot_md_metrics avoids re-parsing
-        # unchanged files every 60-second tick. Quiet day → empty → renderer omits.
-        try:
-            from .chatlog_scanner import scan_hot_md_metrics
+        recent = list(self._recent_done)
+        now = datetime.now()
+        # Coalesce bursts: if the previous off-thread write is still running,
+        # skip this tick — the next one picks up fresh state. Prevents a thread
+        # pile-up when `done` events arrive back-to-back.
+        if getattr(self, "_hot_md_writing", False):
+            return
+        self._hot_md_writing = True
 
-            start_of_today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-            hook_counts, _corrections, _tool_retries = scan_hot_md_metrics(since=start_of_today)
-            friction = {
-                "corrections": _corrections,
-                "tool_retries": _tool_retries,
-            }
-        except Exception:
-            hook_counts = {}
-            friction = {}
-        body = _render_hot_md(
-            snapshot,
-            active_name,
-            list(self._recent_done),
-            datetime.now(),
-            hook_counts=hook_counts,
-            friction=friction,
-        )
-        try:
-            (vault / "hot.md").write_text(body, encoding="utf-8")
-        except OSError:
-            pass
+        def _hot_md_worker() -> None:
+            try:
+                # Hook noise meter + friction heatmap — single pass over today's
+                # Claude Code session jsonl files. Per-file (mtime, size) cache in
+                # scan_hot_md_metrics avoids re-parsing unchanged files.
+                try:
+                    from .chatlog_scanner import scan_hot_md_metrics
+
+                    start_of_today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+                    hook_counts, _corrections, _tool_retries = scan_hot_md_metrics(
+                        since=start_of_today
+                    )
+                    friction = {"corrections": _corrections, "tool_retries": _tool_retries}
+                except Exception:
+                    hook_counts = {}
+                    friction = {}
+                body = _render_hot_md(
+                    snapshot,
+                    active_name,
+                    recent,
+                    now,
+                    hook_counts=hook_counts,
+                    friction=friction,
+                )
+                try:
+                    (vault / "hot.md").write_text(body, encoding="utf-8")
+                except OSError:
+                    pass
+            finally:
+                self._hot_md_writing = False
+
+        threading.Thread(target=_hot_md_worker, daemon=True, name="hot-md-writer").start()
 
     # ──────────────────────────────────────────────────────────────
     # idle watchdog — nudge teammates that forgot to `takkub done`

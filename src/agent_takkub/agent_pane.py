@@ -12,6 +12,7 @@ buttons). The body switches between QStackedWidget pages.
 
 from __future__ import annotations
 
+import threading
 import time
 from datetime import datetime
 
@@ -57,6 +58,9 @@ class AgentPane(QFrame):
     spawnRequested = pyqtSignal(str)  # role name
     closeRequested = pyqtSignal(str)
     inputBytes = pyqtSignal(str, bytes)  # role name, bytes for pty
+    # Off-thread token-meter result → applied on the main thread by
+    # _apply_token_meter. Carries (session_path | None, usage dict | None).
+    _tokenMeterReady = pyqtSignal(object, object)
 
     def __init__(self, role: Role, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -101,6 +105,9 @@ class AgentPane(QFrame):
         self._token_timer = QTimer(self)
         self._token_timer.setInterval(5_000)
         self._token_timer.timeout.connect(self._refresh_token_meter)
+        # Apply off-thread token-meter reads back on the main (GUI) thread.
+        self._tokenMeterReady.connect(self._apply_token_meter)
+        self._token_refreshing = False
         # Wall-clock timestamp of the most recent byte received from the
         # PTY. The orchestrator's stuck-pane watchdog reads this to
         # decide whether a "working" pane is silently hung (no output
@@ -468,44 +475,57 @@ class AgentPane(QFrame):
     # ──────────────────────────────────────────────────────────────
     def _refresh_token_meter(self) -> None:
         """Poll the active claude session's JSONL for the latest usage block
-        and update the header badge. Cheap by design — runs every 5s."""
+        and update the header badge. Runs every 5 s.
+
+        The file glob (`find_latest_session`) + JSONL read (`read_last_usage`)
+        run on a background thread — on a large/active session file this was a
+        proven main_thread_stall source at the 5 s tick. The badge itself is
+        updated back on the GUI thread via _tokenMeterReady → _apply_token_meter.
+        """
         if self.session is None or not self._session_cwd:
             return
-        # Always re-poll for the newest JSONL under this pane's cwd, not
-        # the one we first saw. Claude's `/clear` rolls the conversation
-        # over to a brand-new session file, and a sticky lock on the
-        # pre-clear file leaves the meter pinned at whatever the
-        # truncated context was forever (the user saw "128%" stay
-        # frozen after `/clear`). Peer-pane contamination isn't a risk
-        # in practice: Lead lives at the project root, teammates spawn
-        # at distinct sub-paths (web/, api/, ...), and the one-tab-per-
-        # project rule blocks two Leads from sharing a cwd. The
-        # `since_ts=spawn_ts-5` guard still keeps the meter from
-        # picking up unrelated old files that predate this pane.
-        # Scope the lookup to this pane's Claude config home — a pane on a
-        # non-default user profile writes sessions under <CLAUDE_CONFIG_DIR>/
-        # projects/, not ~/.claude/projects/, so without this its context-%
-        # badge never appeared (per-profile regression).
+        # Coalesce: skip if the previous off-thread read is still in flight.
+        if getattr(self, "_token_refreshing", False):
+            return
+        # Always re-poll for the newest JSONL under this pane's cwd, not the one
+        # we first saw — Claude's `/clear` rolls over to a fresh session file.
+        # Scope to this pane's Claude config home (per-profile panes write under
+        # <CLAUDE_CONFIG_DIR>/projects/, not ~/.claude/projects/).
+        cwd = self._session_cwd
+        since_ts = self._spawn_ts - 5
         cfg_dir = getattr(self.session, "_claude_config_dir", None)
-        cand = find_latest_session(
-            self._session_cwd, since_ts=self._spawn_ts - 5, config_dir=cfg_dir
-        )
-        if cand is None:
+        self._token_refreshing = True
+
+        def _worker() -> None:
+            cand = None
+            usage = None
+            try:
+                cand = find_latest_session(cwd, since_ts=since_ts, config_dir=cfg_dir)
+                if cand is not None:
+                    try:
+                        usage = read_last_usage(cand)
+                    except Exception:
+                        usage = None
+            finally:
+                # Hand back to the GUI thread (queued — emitter != receiver thread).
+                self._tokenMeterReady.emit(cand, usage)
+
+        threading.Thread(target=_worker, daemon=True, name="token-meter").start()
+
+    def _apply_token_meter(self, cand, usage) -> None:
+        """GUI-thread slot: apply an off-thread token-meter read to the badge."""
+        self._token_refreshing = False
+        # Pane may have been torn down or respawned while the worker ran.
+        if self.session is None or cand is None:
             return
         if cand != self._session_jsonl:
-            # Roll-over (typically `/clear`): point at the fresh file,
-            # clear cached usage, and hide the badge until the new
-            # session emits its first assistant turn. Otherwise the
-            # header would keep the old "128%" label until the next
-            # usage block lands.
+            # Roll-over (typically `/clear`): point at the fresh file, clear
+            # cached usage, and hide the badge until the new session emits its
+            # first assistant turn (otherwise the header keeps the old "128%").
             self._session_jsonl = cand
             self._last_usage = None
             self._token_label.setText("")
             self._token_label.hide()
-        try:
-            usage = read_last_usage(self._session_jsonl)
-        except Exception:
-            return
         if usage is None:
             return
         self._last_usage = usage
