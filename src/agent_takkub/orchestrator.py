@@ -3261,6 +3261,12 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 is_codex = base == "codex"
             delay += _CODEX_SPAWN_STAGGER_MS if is_codex else _SPAWN_STAGGER_MS
 
+    @staticmethod
+    def _pipeline_tag(run: PipelineRun) -> str:
+        """Common ``[pipeline:<id>] <name> — `` prefix shared by every hop-status
+        message sent to Lead (abort / hop-start / complete). tok-7."""
+        return f"[pipeline:{run.run_id}] {run.template_name} — "
+
     def _finalize_pipeline_hop(
         self,
         project_ns: str,
@@ -3283,8 +3289,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             run.closed = True
             self._pipeline_runs.pop(f"{project_ns}::{run_id}", None)
             failed_roles = ", ".join(sorted(run.hop_failed))
-            err = (
-                f"[pipeline:{run_id}] {run.template_name} — "
+            err = self._pipeline_tag(run) + (
                 f"hop {hop_idx + 1}/{total} aborted: all spawns failed ({failed_roles})"
             )
             self._inject_to_lead(project_ns, err, log_event="pipeline_hop_abort")
@@ -3300,7 +3305,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
 
         roles_str = ", ".join(sorted(spawned_ok))
         lines = [
-            f"[pipeline:{run_id}] {run.template_name} — hop {hop_idx + 1}/{total}",
+            self._pipeline_tag(run) + f"hop {hop_idx + 1}/{total}",
             f"Panes spawned and ready: {roles_str}",
             "Assign each their task. Pipeline auto-advances when all done (no confirm needed).",
         ]
@@ -3329,7 +3334,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 status = f"completed with failures ({', '.join(sorted(run.hop_failed))} closed without done)"
             else:
                 status = "all hops complete ✓"
-            msg = f"[pipeline:{run.run_id}] {run.template_name} — {status} ({total}/{total} hops)"
+            msg = self._pipeline_tag(run) + f"{status} ({total}/{total} hops)"
             self._inject_to_lead(project_ns, msg, log_event="pipeline_run_complete")
             _log_event(
                 "pipeline_complete",
