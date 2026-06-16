@@ -3854,6 +3854,9 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 return
             state["done"] = True
             timeout.stop()
+            # Don't leak the watchdog QTimer (parented to self → would live for the
+            # whole cockpit run, accumulating one per requires-commit done).
+            timeout.deleteLater()
             if reason is not None:
                 _log_event(
                     "done_commit_gate_skipped", role=from_role, project=project_ns, reason=reason
