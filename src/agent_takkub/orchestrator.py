@@ -20,7 +20,6 @@ import os
 import pathlib
 import re
 import secrets
-import subprocess
 import threading
 import time
 import uuid as _uuid
@@ -28,7 +27,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from PyQt6.QtCore import QObject, QTimer, pyqtSignal
+from PyQt6.QtCore import QObject, QProcess, QTimer, pyqtSignal
 
 from .agent_pane import AgentPane
 from .claude_auth_config import apply_claude_auth_overrides
@@ -3820,6 +3819,74 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         _log_event("plan_tier_set", tier=tier)
         return True, f"plan set to {tier}"
 
+    @staticmethod
+    def _uncommitted_warning(from_role: str, porcelain_out: str) -> str | None:
+        """Build the Lead `[requires-commit]` warning from `git status --porcelain`
+        stdout, or None when the tree is clean. Pure → unit-tested. (M2)"""
+        dirty = (porcelain_out or "").strip()
+        if not dirty:
+            return None
+        files_preview = dirty[:200]
+        return (
+            f"⚠ [requires-commit] {from_role} มี uncommitted changes รอ Lead review + commit:\n"
+            f"{files_preview}"
+        )
+
+    def _check_uncommitted_async(self, project_ns: str, from_role: str, cwd: str) -> None:
+        """Run `git status --porcelain` WITHOUT blocking the Qt main thread, then
+        deliver a follow-up warning to Lead if the tree is dirty. (M2)
+
+        Uses QProcess (driven by the Qt event loop) rather than a worker thread,
+        so the completion handler runs on the main thread exactly like any slot —
+        there is NO cross-thread access to orchestrator / pane state, hence no
+        race. A watchdog timer bounds a hung git the way the old timeout=10 did.
+        """
+        proc = QProcess(self)
+        proc.setWorkingDirectory(cwd)
+        timeout = QTimer(self)
+        timeout.setSingleShot(True)
+        timeout.setInterval(10_000)
+        state = {"done": False}
+
+        def _settle(reason: str | None) -> None:
+            # reason is None on a clean finish; a string when we bailed (skip warn).
+            if state["done"]:
+                return
+            state["done"] = True
+            timeout.stop()
+            if reason is not None:
+                _log_event(
+                    "done_commit_gate_skipped", role=from_role, project=project_ns, reason=reason
+                )
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                proc.deleteLater()
+                return
+            try:
+                out = bytes(proc.readAllStandardOutput()).decode("utf-8", "replace")
+            except Exception:
+                out = ""
+            proc.deleteLater()
+            warning = self._uncommitted_warning(from_role, out)
+            if warning is None:
+                return
+            _log_event(
+                "done_with_uncommitted",
+                role=from_role,
+                project=project_ns,
+                reason="dirty_tree",
+                files=warning[-200:],
+            )
+            self._notify_lead(project_ns, warning, from_role=from_role, note="")
+
+        proc.finished.connect(lambda _code, _status: _settle(None))
+        proc.errorOccurred.connect(lambda _e: _settle("git_proc_error"))
+        timeout.timeout.connect(lambda: _settle("timeout"))
+        timeout.start()
+        proc.start("git", ["status", "--porcelain"])
+
     def done(self, from_role: str, note: str = "", project: str | None = None) -> tuple[bool, str]:
         try:
             from_role = validate_name(from_role, "role")
@@ -3843,39 +3910,14 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         had_pipeline_run_id = _ps_done.pipeline_run_id
 
         # Opt-in commit handoff: if assign() was called with requires_commit=True,
-        # check for a dirty working tree and forward a warning to Lead instead
-        # of blocking the agent. Teammate ไม่ต้อง commit — Lead review + commit.
-        has_uncommitted = False
-        files_preview = ""
+        # check for a dirty working tree and warn Lead (the agent isn't blocked —
+        # Lead reviews + commits). M2: the check runs ASYNC via QProcess so a slow
+        # or large repo can't freeze the Qt main thread for up to the git timeout.
+        # The main done notice below goes out immediately; if the tree turns out
+        # dirty, a follow-up `[requires-commit]` warning is delivered to Lead.
         if had_requires_commit:
             spawn_cwd = getattr(pane, "_session_cwd", None) or str(REPO_ROOT)
-            try:
-                git_result = subprocess.run(
-                    ["git", "status", "--porcelain"],
-                    cwd=spawn_cwd,
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                )
-                dirty = git_result.stdout.strip()
-            except Exception as exc:
-                dirty = ""  # can't check; proceed without warning
-                _log_event(
-                    "done_commit_gate_skipped",
-                    role=from_role,
-                    project=project_ns,
-                    reason=str(exc)[:200],
-                )
-            if dirty:
-                has_uncommitted = True
-                files_preview = dirty[:200]
-                _log_event(
-                    "done_with_uncommitted",
-                    role=from_role,
-                    project=project_ns,
-                    reason="dirty_tree",
-                    files=files_preview,
-                )
+            self._check_uncommitted_async(project_ns, from_role, spawn_cwd)
 
         # Agent finished cleanly — pop all per-pane state atomically.
         # close() (scheduled 2.5 s below) will also pop; second pop is a no-op.
@@ -3885,11 +3927,6 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         # notify Lead in the same project (a teammate in unirecon mustn't
         # nudge the Lead in pms by mistake)
         notice = f"[{from_role} done] {note}".rstrip()
-        if has_uncommitted:
-            notice += (
-                f"\n⚠ [requires-commit] {from_role} มี uncommitted changes รอ Lead review + commit:\n"
-                f"{files_preview}"
-            )
         # Shard panes: suppress per-shard notice to Lead — consolidated handoff
         # (_inject_shard_fanout_handoff) is the single message Lead sees.
         # Non-shard panes (had_shard_total == 0) use the normal notice path.
