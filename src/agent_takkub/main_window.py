@@ -3687,7 +3687,6 @@ class MainWindow(QMainWindow):
             [
                 _fmt("five_hour"),
                 _fmt("seven_day"),
-                _fmt("seven_day_sonnet"),
             ]
         )
 
@@ -3712,16 +3711,13 @@ class MainWindow(QMainWindow):
         for key, label in (
             ("five_hour", "5h"),
             ("seven_day", "7d"),
-            ("seven_day_sonnet", "7dS"),
         ):
             w = window_map.get(key)
             if w is not None and (eta := _fmt_eta(w)):
                 reset_lines.append(f"{label} resets in {eta}")
         reset_block = ("\n" + " · ".join(reset_lines)) if reset_lines else ""
         self._limit_label.setToolTip(
-            f"Claude usage — plan: {plan}{stale_note}\n"
-            "5h = five-hour · 7d = seven-day · 7dS = seven-day Sonnet"
-            f"{reset_block}"
+            f"Claude usage — plan: {plan}{stale_note}\n5h = five-hour · 7d = seven-day{reset_block}"
         )
 
     # ──────────────────────────────────────────────────────────────
