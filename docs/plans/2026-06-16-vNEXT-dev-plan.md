@@ -66,6 +66,30 @@ User restarted cockpit (= checkpoint ผ่าน, 11 commit แรก live) แ
 
 ---
 
+## 🔁 Session 2 (ต่อ) — หลัง restart-verify รอบ 1 ผ่าน
+
+restart-verify กองแรกผ่าน → ลุย tier เสี่ยงต่อ เพิ่ม **3 work commit** (full-suite green, จบที่ **2083 passed**):
+
+| ข้อ | งาน | test |
+|---|---|---|
+| **M4#17** | central ready-prompt marker table (`_READY_HARD_BLOCKERS`/`_READY_RULES` first-match-wins = faithful, 7 เคส ordering เดิมผ่าน) + env override `TAKKUB_EXTRA_READY_MARKERS` (กู้ upstream reword) + doctor `markers` self-test | +5 |
+| **M5#23** | extract `_launch_session` จาก 3 branch non-claude (shell/gemini/codex) — drift (codex_spawn_ts/exit-handler, auto_trust, label) เป็น param ชัด · claude branch เก็บ inline (resume/MCP เสี่ยงสุด) | +7 |
+| **M6#28** | strip bracketed-paste markers ใน `_paste_payload` (กัน ESC[201~ ฝัง → break out paste mode → auto-submit injected command) | +4 |
+
+**✅ Security audit (M6#27/#29) — prove แล้วว่า safe (จับ false-positive อีกชุด เหมือน tok-1):**
+- **verify.py** — `shell=False` + cmd เป็น list hardcoded (อ่าน package.json แค่ presence-check) → **ไม่มี injection**
+- **docs_verify.py** — ไม่ exec อะไรเลย
+- **issues.py `_gh()`** — `subprocess.run(["gh", *args])` argv list ไม่มี shell=True → title `"; rm -rf /"` เป็น literal arg เฉยๆ
+- **M6#29** project-name→path guarded โดย `validate_name` + `role_memory._safe()` (ตัด dot) · qa plaintext credential = documented intentional (gitignored/throwaway/มี warning)
+
+**🔴 residue จริง (live-verify / วิจารณญาณคุณ / propose+fire — ไม่ทำ blind):**
+- **M2** async offload (terminate kill ต้อง sync ก่อน respawn = race; done-notice deferral = reorder vs auto-chain/shard) — ต้อง live-profiling + ออกแบบ async ระวัง race
+- **M5#23 claude branch** — fold เสี่ยงสุด (resume/session-uuid/MCP) เก็บ inline ตั้งใจ
+- **M4#17 bottom-row anchoring** — เปลี่ยนตำแหน่ง match ต้อง live verify
+- **M0#3** CLAUDE.md restructure — ต้องตัดสิน load-bearing · **M6#30** codex cross-check (propose+fire) · **M7** release (merge/bump/push — คุณตัดสิน)
+
+---
+
 ## 🟢 M0 — Quick wins (Lead-direct, รอบเดียว จบไว)
 
 1. **fix `takkub harvest` dead** — เพิ่ม `from` stamp ใน payload IPC ทั้ง 2 จุด (`cli.py:271,314`) + e2e test ผ่าน dispatch จริง · **HIGH bug** · `L`
