@@ -2982,16 +2982,32 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         lead = self._project_panes(project_ns).get(LEAD.name)
         if not (lead and lead.session and lead.session.is_alive):
             return  # Lead still not alive — keep queue, retry later
-        items = self._pending_lead_cc.pop(project_ns)
-        self._save_pending_cc(project_ns)
-        for item in items:
-            payload = _paste_payload(item["body"])
-            lead.session.write(payload)
-            QTimer.singleShot(
-                _enter_delay_ms(payload),
-                lambda s=lead.session: s and s.write(b"\r"),
-            )
-        _log_event("send_cc_flushed", project=project_ns, count=len(items))
+        # Deliver-then-dequeue: write each CC first and drop ONLY what was
+        # actually delivered. The previous code popped + persisted-empty BEFORE
+        # writing, so a write that raised mid-flush (Lead session torn down
+        # between the liveness check and the write) silently lost the remaining
+        # queued messages from both memory and disk — defeating the durability
+        # the persistence exists for. (M4#22: blind CC flush / pop-before-write)
+        items = list(pending)
+        delivered = 0
+        try:
+            for item in items:
+                payload = _paste_payload(item["body"])
+                lead.session.write(payload)
+                QTimer.singleShot(
+                    _enter_delay_ms(payload),
+                    lambda s=lead.session: s and s.write(b"\r"),
+                )
+                delivered += 1
+        finally:
+            remaining = items[delivered:]
+            if remaining:
+                self._pending_lead_cc[project_ns] = remaining
+            else:
+                self._pending_lead_cc.pop(project_ns, None)
+            self._save_pending_cc(project_ns)
+        if delivered:
+            _log_event("send_cc_flushed", project=project_ns, count=delivered)
 
     def _maybe_fire_auto_chain_handoff(self, project_ns: str, was_auto_chain: bool) -> None:
         """Fire the verify-hop handoff iff *was_auto_chain* and no pane in the
