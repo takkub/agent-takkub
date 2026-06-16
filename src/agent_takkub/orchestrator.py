@@ -2443,8 +2443,13 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             # Bug-3 fix: notify Lead so the operator knows the pane gave up and
             # auto-chain doesn't deadlock waiting for a done event that never comes.
             self._warn_lead_respawn_capped(role_name, project)
+            _had_ac_cap = ps.auto_chain
             ps.auto_chain = False
             ps.last_assigned_task = None
+            # A capped pane never sends done; if it was the last auto-chain
+            # blocker, release the chain so completed siblings still get verified
+            # instead of the verify hop deadlocking forever (bug-1 orch).
+            self._maybe_fire_auto_chain_handoff(project, _had_ac_cap)
             # Pipeline: a capped pane is gone for good. If it belonged to a
             # pipeline hop (e.g. a stuck-recovered hop role that then crash-looped
             # to the cap), mark it failed + advance so the hop doesn't stall
@@ -2972,6 +2977,27 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 lambda s=lead.session: s and s.write(b"\r"),
             )
         _log_event("send_cc_flushed", project=project_ns, count=len(items))
+
+    def _maybe_fire_auto_chain_handoff(self, project_ns: str, was_auto_chain: bool) -> None:
+        """Fire the verify-hop handoff iff *was_auto_chain* and no pane in the
+        project still carries the auto_chain tag.
+
+        Shared by done(), close(), and the crash-cap / stuck-give-up paths
+        (bug-1 orch, review 2026-06-16). A pane that dies WITHOUT a done event
+        used to only clear its own flag, so if it was the last blocker the chain
+        deadlocked and the completed siblings' verify hop never fired. The Qt
+        event loop is single-threaded, so once pending is empty no tagged pane
+        remains to re-trigger → exactly-once firing across all four call sites.
+        """
+        if not was_auto_chain:
+            return
+        pending = [
+            k
+            for k, s in getattr(self, "_pane_state", {}).items()
+            if k.startswith(f"{project_ns}::") and s.auto_chain
+        ]
+        if not pending:
+            self._inject_auto_chain_handoff(project_ns)
 
     def _inject_auto_chain_handoff(self, project_ns: str) -> None:
         """Send a pre-authorisation prompt to Lead telling it to fire
@@ -3611,14 +3637,8 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         for _tok in _revoke_keys:
             _pane_tokens.pop(_tok, None)
 
-        if had_auto_chain_close and not suppress_auto_chain:
-            pending_ac = [
-                k
-                for k, s in getattr(self, "_pane_state", {}).items()
-                if k.startswith(f"{project_ns}::") and s.auto_chain
-            ]
-            if not pending_ac:
-                self._inject_auto_chain_handoff(project_ns)
+        if not suppress_auto_chain:
+            self._maybe_fire_auto_chain_handoff(project_ns, had_auto_chain_close)
 
         # Pipeline: pane closed without done (crash / forced close) — mark failed.
         # Advance if all roles in the hop are now done or failed.
@@ -3835,14 +3855,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         # assign time, and it was the LAST pending auto-chain pane in
         # the project, inject a pre-authorisation prompt so Lead fires
         # verify (qa+reviewer) without proposing/confirming.
-        if had_auto_chain:
-            pending = [
-                k
-                for k, s in getattr(self, "_pane_state", {}).items()
-                if k.startswith(f"{project_ns}::") and s.auto_chain
-            ]
-            if not pending:
-                self._inject_auto_chain_handoff(project_ns)
+        self._maybe_fire_auto_chain_handoff(project_ns, had_auto_chain)
 
         # Shard aggregate: record this shard's note and check if all N done.
         if had_shard_total > 0:
@@ -5122,8 +5135,12 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             attempts=ps.stuck_recover_attempts,
         )
         # An auto-chain verify-hop sibling would wait forever for this pane's
-        # done event; drop the tag so a capped pane can't keep a hop open.
+        # done event; drop the tag so a capped pane can't keep a hop open. If it
+        # was the last blocker, release the chain so the hop doesn't deadlock
+        # (bug-1 orch).
+        _had_ac_stuck = ps.auto_chain
         ps.auto_chain = False
+        self._maybe_fire_auto_chain_handoff(project, _had_ac_stuck)
         # Pipeline hop: fail + advance so the run doesn't stall on a pane that
         # will never report done (same bookkeeping as the respawn-fail path).
         pl_run_id = ps.pipeline_run_id

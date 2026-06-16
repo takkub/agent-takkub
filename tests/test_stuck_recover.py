@@ -380,12 +380,18 @@ class _CapOrch(_FakeOrch):
         self._pipeline_runs: dict = {}
         self.leadInjected = MagicMock()
         self.advance_calls: list[tuple] = []
+        # _give_up_stuck now releases the auto-chain via this helper (bug-1 orch);
+        # track fires so a give-up of the last tagged pane can be asserted.
+        self._inject_auto_chain_handoff = MagicMock()
 
     def _project_panes(self, project: str | None):
         return self._panes_by_project.get(project or "", {})
 
     def _advance_pipeline(self, project, pl_key, run) -> None:
         self.advance_calls.append((project, pl_key, run))
+
+    def _maybe_fire_auto_chain_handoff(self, project, was_auto_chain) -> None:
+        Orchestrator._maybe_fire_auto_chain_handoff(self, project, was_auto_chain)  # type: ignore[arg-type]
 
     def _give_up_stuck(self, role, project, pane, now) -> None:
         Orchestrator._give_up_stuck(self, role, project, pane, now)  # type: ignore[arg-type]
@@ -479,6 +485,25 @@ class TestStuckRecoverCap:
         _drive_until(fake, pane, ticks=STUCK_RECOVER_MAX + 2)
         assert lead.session.write.called, "Lead must be warned when a pane is stuck-capped"
         assert fake.leadInjected.emit.called
+
+    def test_give_up_last_auto_chain_pane_releases_handoff(self) -> None:
+        # bug-1 orch: if the stuck-capped pane was the last auto-chain blocker,
+        # the verify hop must be released (not deadlock waiting for its done).
+        fake = _CapOrch()
+        pane = _FakePane(state="working", last_out=0.0)
+        lead = _FakePane(state="working", last_out=0.0)
+        fake._panes_by_project["p"] = {"backend": pane, LEAD.name: lead}
+        fake._ps("p::backend").auto_chain = True
+        _drive_until(fake, pane, ticks=STUCK_RECOVER_MAX + 2)
+        fake._inject_auto_chain_handoff.assert_called_once_with("p")
+
+    def test_give_up_non_auto_chain_pane_no_handoff(self) -> None:
+        fake = _CapOrch()
+        pane = _FakePane(state="working", last_out=0.0)
+        lead = _FakePane(state="working", last_out=0.0)
+        fake._panes_by_project["p"] = {"backend": pane, LEAD.name: lead}
+        _drive_until(fake, pane, ticks=STUCK_RECOVER_MAX + 2)
+        fake._inject_auto_chain_handoff.assert_not_called()
 
 
 class TestResumeNudgeAndLog:
