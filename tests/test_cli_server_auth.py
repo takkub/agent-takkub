@@ -244,3 +244,62 @@ class TestNonLeadCommandsPassThrough:
         )
         resp = sock.last_response()
         assert resp["ok"] is True
+
+
+# ─────────────────────────────────────────────────────────────
+# M3#16 — `status` redacts transcript tails + screenshot paths for
+# any caller without the Lead token.
+# ─────────────────────────────────────────────────────────────
+
+
+class TestStatusSensitiveFieldGate:
+    def _report(self) -> dict:
+        return {
+            "project": "test-project",
+            "any_stalled": False,
+            "panes": {
+                "backend": {
+                    "state": "working",
+                    "stall_minutes": None,
+                    "last_progress_human": "2m ago",
+                    "transcript_tail": "secret: API_KEY=sk-123\nline b",
+                    "last_screenshot": "/runtime/exports/2026/shots/s1.png",
+                }
+            },
+        }
+
+    def _dispatch_status(self, server_and_sock, auth: str | None) -> dict:
+        srv, sock, _ = server_and_sock
+        srv._orch.pane_status_report.return_value = self._report()
+        sock.reset()
+        payload: dict = {"cmd": "status"}
+        if auth is not None:
+            payload["auth"] = auth
+        srv._dispatch(sock, payload)
+        return sock.last_response()
+
+    def test_lead_token_keeps_sensitive_fields(self, server_and_sock) -> None:
+        _, _, real_token = server_and_sock
+        resp = self._dispatch_status(server_and_sock, real_token)
+        assert resp["ok"] is True
+        be = resp["report"]["panes"]["backend"]
+        assert be["transcript_tail"].startswith("secret:")
+        assert be["last_screenshot"].endswith("s1.png")
+        assert be["state"] == "working"  # basic state always present
+
+    def test_pane_token_redacts_sensitive_fields(self, server_and_sock) -> None:
+        resp = self._dispatch_status(server_and_sock, _PANE_TOKEN_BACKEND)
+        assert resp["ok"] is True
+        be = resp["report"]["panes"]["backend"]
+        assert "transcript_tail" not in be
+        assert "last_screenshot" not in be
+        # non-sensitive fields survive so peers can still see state/stall
+        assert be["state"] == "working"
+        assert be["last_progress_human"] == "2m ago"
+
+    def test_no_auth_redacts_sensitive_fields(self, server_and_sock) -> None:
+        resp = self._dispatch_status(server_and_sock, None)
+        assert resp["ok"] is True
+        be = resp["report"]["panes"]["backend"]
+        assert "transcript_tail" not in be
+        assert "last_screenshot" not in be
