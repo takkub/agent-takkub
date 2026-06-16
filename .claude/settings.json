@@ -11,5 +11,15 @@
         ]
       }
     ]
+  },
+  "permissions": {
+    "ask": [
+      "Bash(npm install -g:*)",
+      "Bash(npm i -g:*)",
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "Bash(git push --force-with-lease:*)",
+      "Bash(git reset --hard:*)"
+    ]
   }
 }
