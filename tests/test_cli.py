@@ -184,6 +184,46 @@ class TestArgparse:
         assert payload.get("requires_commit") is False
 
 
+class TestHarvestPayload:
+    """Regression for the harvest dead-on-arrival bug (review 2026-06-16). The
+    client built the harvest / harvest-done payloads WITHOUT a `from` stamp, so
+    the server's layer-1 role gate (only-lead) rejected every invocation before
+    the token check. Server-side tests masked it by hand-injecting
+    `from: "lead"`; these go through the real cli.main -> cmd_harvest payload
+    construction so the missing stamp is actually exercised."""
+
+    def test_harvest_payload_stamps_from_role(
+        self, fake_request: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TAKKUB_ROLE", "lead")
+        cli.main(["harvest", "--role", "backend"])
+        payload = fake_request[-1]
+        assert payload["cmd"] == "harvest"
+        assert payload["from"] == "lead"
+
+    def test_harvest_done_payload_stamps_from_role(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        sent: list[dict[str, Any]] = []
+
+        def _fake(payload: dict[str, Any]) -> dict[str, Any]:
+            sent.append(payload)
+            if payload["cmd"] == "harvest":
+                return {
+                    "ok": True,
+                    "state": "working",
+                    "since_ts": 1_700_000_000.0,
+                    "artifacts": [{"path": "/p/foo.py", "mtime_rel": "5m ago"}],
+                }
+            return {"ok": True, "msg": "done"}
+
+        monkeypatch.setattr(cli, "_request", _fake)
+        monkeypatch.setenv("TAKKUB_ROLE", "lead")
+        cli.main(["harvest", "--role", "backend", "--auto-confirm"])
+        cmds = {p["cmd"]: p for p in sent}
+        assert "harvest-done" in cmds, "harvest-done was never reached"
+        assert cmds["harvest"]["from"] == "lead"
+        assert cmds["harvest-done"]["from"] == "lead"
+
+
 class TestExitCodes:
     def test_ok_response_exit_zero(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]

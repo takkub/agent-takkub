@@ -478,6 +478,14 @@ LEAD_NOTIFY_BUSY_CAP = 75
 _PASTE_START = "\x1b[200~"
 _PASTE_END = "\x1b[201~"
 
+# C0 controls (incl. bare ESC 0x1b and CR 0x0d) plus DEL (0x7f) and the 8-bit
+# C1 range (0x80-0x9f). C1 codepoints like U+009B (CSI), U+009D (OSC) and
+# U+0090 (DCS) are single-byte escape introducers that some terminals honour,
+# so a pane message containing them could start an escape sequence even after
+# ESC is stripped. TAB (0x09) and LF (0x0a) are deliberately excluded — both
+# are legitimate in multi-line task bodies.
+_CONTROL_STRIP = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
 
 def _sanitize_pane_text(text: str) -> str:
     """Strip control sequences that could break out of bracketed-paste mode.
@@ -485,21 +493,18 @@ def _sanitize_pane_text(text: str) -> str:
     A message body containing ``\\x1b[201~`` closes the bracketed-paste bracket
     early, letting the rest of the content execute as raw terminal input in any
     pane running with ``--dangerously-skip-permissions``. Strip both the opening
-    and closing bracket sequences plus bare ESC bytes so every write path (send,
+    and closing bracket sequences plus every C0/C1 control byte (incl. bare ESC,
+    CR, and 8-bit CSI/OSC/DCS introducers) so every write path (send,
     _notify_lead, task inject) is safe regardless of input length.
 
-    Also strips bare ``\\r`` (carriage return) that would submit the partial
-    input before the orchestrator appends its own trailing CR.  LF (``\\n``) is
-    intentional in multi-line task bodies and is preserved.
+    TAB and LF are preserved — both are intentional in multi-line task bodies and
+    neither submits the input in bracketed-paste mode.
     """
-    # Remove bracketed-paste control sequences first
+    # Remove bracketed-paste control sequences first so their printable tail
+    # ("[200~") goes together with its ESC before the blanket control strip.
     text = text.replace(_PASTE_END, "").replace(_PASTE_START, "")
-    # Strip lone ESC bytes (they can start arbitrary escape sequences)
-    text = text.replace("\x1b", "")
-    # Strip bare CR that would submit the input before the orchestrator appends
-    # its own trailing CR.  LF is intentional in multi-line task bodies and is
-    # left intact — it does not submit in bracketed-paste mode.
-    text = text.replace("\r", "")
+    # Strip C0 control bytes (incl. ESC + CR), DEL, and 8-bit C1 controls.
+    text = _CONTROL_STRIP.sub("", text)
     return text
 
 
