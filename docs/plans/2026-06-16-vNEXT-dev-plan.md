@@ -36,6 +36,36 @@
 
 ---
 
+## 🌅 Session 2 — 2026-06-16 (post-restart, branch `feat/vnext-hardening`)
+
+User restarted cockpit (= checkpoint ผ่าน, 11 commit แรก live) แล้วสั่ง "ต่อเลยยาวๆ" → เก็บ **ทุกข้อที่ test-gatable ได้จริง** เพิ่ม **9 work commit** (ทุกตัว full-suite green ก่อน commit, จบที่ **2067 passed**):
+
+| ข้อ | งาน | test |
+|---|---|---|
+| **tok-4** | skip double-inject project CLAUDE.md เมื่อ claude auto-load จาก cwd อยู่แล้ว (~750 tok/Lead spawn) | +7 |
+| **tok-5** | skip inline empty role-memory skeleton → one-line pointer (~100-150 tok/teammate) | +6 |
+| **M5#24** | extract `_mint_pane_token` จาก spawn 4 branch | +4 |
+| **M3#16** | gate transcript/screenshot ใน `status` หลัง Lead token (teammate/manual → redact) | +3 |
+| **tok-7** | hoist `_pipeline_tag` prefix (abort/hop-start/complete) | — |
+| **M3#13** | one-click exec hardening: ปฏิเสธ exec ext (reveal-in-folder), confine ใต้ cwd/repo, ตัด `file://` | +13 |
+| **M3#14** | strip OSC 52 clipboard-set escape จาก outbound render (split-batch carry) | +8 |
+| **M4#22a** | CC flush deliver-then-dequeue (เลิก pop-before-write → ไม่หาย message ตอน write fail) | +2 |
+| **M4#22b** | bounded transcript tail-read 64KiB (เลิกอ่านทั้งไฟล์ MB ทุก status call) | +5 |
+| **M5#25** | name `_PANE_COLS`/`_PANE_ROWS` (เลิก magic 110/36 ซ้ำ 4 จุด) | — |
+
+**⏸️ แก้ความเข้าใจผิด (เหมือน tok-1):**
+- **M1#7/tok-6 (dedup codex/gemini dev-server prose) = false-economy** — prose anti-hang **ไม่ได้** env-enforced (env บังคับ foreground dev server ไม่ได้) และ codex/gemini pane อ่าน AGENTS.md/GEMINI.md เป็น**แหล่งเดียว** ตัด = เสี่ยง pane hang กลับมา → **defer**
+- **M4#20 (persist shard groups)** — ค่าขึ้นกับว่า pane resume ข้าม restart ไหม (orphan group ไร้ pane = ไร้ค่า) ต้อง trace/verify สด → **defer**
+
+**🔴 เหลือ tier "restart-verify เดี่ยว / ต้องวิจารณญาณคุณ" (ยังไม่แตะ):**
+- **M5#23** extract `_launch_session` (920 บรรทัด, 4 branch มี drift จริง — ควรทำคู่ codex cross-check M6#30) · de-risk ไปบางส่วนแล้วผ่าน M5#24+#25
+- **M2** offload main-thread (terminate 6s block, done git-status 10s) — threading race ไม่โผล่ใน test
+- **M0#3** CLAUDE.md core/lazy restructure — ต้องตัดสินว่าอะไร load-bearing
+- **M4#17** central marker table + doctor self-test (root cause A)
+- **M6** audit doctor/issues/verify + codex model-diversity cross-check · **M7** release
+
+---
+
 ## 🟢 M0 — Quick wins (Lead-direct, รอบเดียว จบไว)
 
 1. **fix `takkub harvest` dead** — เพิ่ม `from` stamp ใน payload IPC ทั้ง 2 จุด (`cli.py:271,314`) + e2e test ผ่าน dispatch จริง · **HIGH bug** · `L`
