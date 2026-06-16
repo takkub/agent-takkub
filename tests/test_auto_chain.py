@@ -266,6 +266,69 @@ class TestDoneAutoChainTrigger:
         assert (orch._pane_state.get("proj_b::backend") or PaneState()).auto_chain
 
 
+class TestCappedPaneReleasesAutoChain:
+    """bug-1 orch (review 2026-06-16): a pane that dies WITHOUT a done event
+    (auto-respawn cap / stuck give-up) used to only clear its own auto_chain
+    flag, so if it was the last blocker the verify hop deadlocked. It must now
+    release the chain through the shared _maybe_fire_auto_chain_handoff helper."""
+
+    def test_helper_fires_when_no_pending(
+        self,
+        qapp: QCoreApplication,
+        two_project_json: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        orch, _ = _make_orch_with_fake_panes("proj_a", ["lead", "frontend"])
+        inject = MagicMock()
+        monkeypatch.setattr(orch, "_inject_auto_chain_handoff", inject)
+        orch._maybe_fire_auto_chain_handoff("proj_a", was_auto_chain=True)
+        inject.assert_called_once_with("proj_a")
+
+    def test_helper_noop_when_not_auto_chain(
+        self,
+        qapp: QCoreApplication,
+        two_project_json: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        orch, _ = _make_orch_with_fake_panes("proj_a", ["lead"])
+        inject = MagicMock()
+        monkeypatch.setattr(orch, "_inject_auto_chain_handoff", inject)
+        orch._maybe_fire_auto_chain_handoff("proj_a", was_auto_chain=False)
+        inject.assert_not_called()
+
+    def test_helper_noop_when_pending_remains(
+        self,
+        qapp: QCoreApplication,
+        two_project_json: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        orch, _ = _make_orch_with_fake_panes("proj_a", ["lead", "backend"])
+        orch._ps("proj_a::backend").auto_chain = True  # still pending
+        inject = MagicMock()
+        monkeypatch.setattr(orch, "_inject_auto_chain_handoff", inject)
+        orch._maybe_fire_auto_chain_handoff("proj_a", was_auto_chain=True)
+        inject.assert_not_called()
+
+    def test_capped_last_pane_fires_handoff(
+        self,
+        qapp: QCoreApplication,
+        two_project_json: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from agent_takkub.orchestrator import AUTO_RESPAWN_MAX
+
+        orch, panes = _make_orch_with_fake_panes("proj_a", ["lead", "backend"])
+        ps = orch._ps("proj_a::backend")
+        ps.auto_chain = True
+        ps.auto_respawn_attempts = AUTO_RESPAWN_MAX  # next exit hits the cap
+        panes["backend"].state = "exited"
+
+        orch._on_session_exit("backend", "/tmp", "proj_a")
+
+        lead_writes = [c.args[0] for c in panes["lead"].session.write.call_args_list]
+        assert any("auto-chain handoff" in str(w) for w in lead_writes)
+
+
 class TestSuppressAutoChain:
     """close(suppress_auto_chain=True) must never fire the verify-hop handoff.
 

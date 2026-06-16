@@ -710,3 +710,21 @@ class TestSanitizePaneText:
         result = self._sanitize(payload)
         assert "\x1b" not in result
         assert "\r" not in result
+
+    # sec-1 (review 2026-06-16): also strip 8-bit C1 introducers and the rest of
+    # the C0 range / DEL, which the old ESC+CR-only strip let through.
+    def test_strip_c1_csi(self) -> None:
+        assert "\x9b" not in self._sanitize("a\x9b1mb")
+
+    def test_strip_c1_osc_and_dcs(self) -> None:
+        result = self._sanitize("a\x9d0;title\x9bb\x90payload")
+        assert "\x9d" not in result and "\x9b" not in result and "\x90" not in result
+
+    def test_strip_other_c0_and_del(self) -> None:
+        result = self._sanitize("a\x00b\x07c\x7fd")
+        assert all(c not in result for c in ("\x00", "\x07", "\x7f"))
+        assert "abcd" == result
+
+    def test_preserve_tab(self) -> None:
+        # TAB is legitimate in task bodies and must survive the control strip.
+        assert "\t" in self._sanitize("col1\tcol2")

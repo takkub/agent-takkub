@@ -101,3 +101,23 @@ def test_goals_isolated_per_project(orch: Orchestrator) -> None:
     orch.clear_session_goal(project=TEST_PROJECT)
     # Clearing one project must not touch the other.
     assert orch.get_session_goal(project=OTHER_PROJECT) == "goal-B"
+
+
+def test_oversized_goal_is_bounded(orch: Orchestrator) -> None:
+    # tok-3 (review 2026-06-16): a pathological goal must not be re-prepended
+    # verbatim to every assign for the rest of the session.
+    from agent_takkub.orchestrator import _SESSION_GOAL_MAX
+
+    ok, _ = orch.set_session_goal("x" * 64_000, project=TEST_PROJECT)
+    assert ok
+    stored = orch.get_session_goal(project=TEST_PROJECT)
+    assert stored is not None
+    # Bounded to the cap (+ a short truncation marker), nowhere near 64 KiB.
+    assert len(stored) <= _SESSION_GOAL_MAX + 40
+    assert "truncated" in stored
+
+
+def test_normal_goal_not_truncated(orch: Orchestrator) -> None:
+    goal = "ship RBAC v1 · scope = API + form only, no DB migration"
+    orch.set_session_goal(goal, project=TEST_PROJECT)
+    assert orch.get_session_goal(project=TEST_PROJECT) == goal

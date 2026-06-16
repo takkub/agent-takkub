@@ -63,3 +63,150 @@ class TestResolveOpenPath:
     def test_relative_with_no_base_is_none(self, tmp_path):
         # nothing to resolve against → cannot confirm existence
         assert _resolve_open_path("docs/x.md") is None
+
+
+class TestExecExtensionGuard:
+    """M3#13: clicked paths to OS-executable files must be flagged so the open
+    handler reveals-in-folder instead of running them."""
+
+    def test_windows_executables_flagged(self):
+        from pathlib import Path
+
+        from agent_takkub.terminal_widget import _is_exec_path
+
+        for ext in (".exe", ".bat", ".cmd", ".ps1", ".hta", ".lnk", ".msi", ".vbs", ".scr"):
+            assert _is_exec_path(Path(f"payload{ext}")) is True, ext
+
+    def test_extension_check_is_case_insensitive(self):
+        from pathlib import Path
+
+        from agent_takkub.terminal_widget import _is_exec_path
+
+        assert _is_exec_path(Path("Payload.EXE")) is True
+        assert _is_exec_path(Path("run.Bat")) is True
+
+    def test_documents_and_source_not_flagged(self):
+        from pathlib import Path
+
+        from agent_takkub.terminal_widget import _is_exec_path
+
+        for name in ("report.html", "notes.md", "main.py", "app.js", "diagram.png", "data.json"):
+            assert _is_exec_path(Path(name)) is False, name
+
+
+class TestPathConfinement:
+    """M3#13: a clicked path must lie within the pane cwd or an allowed base;
+    anything escaping the subtree (absolute elsewhere, or `../` traversal) is
+    refused so a pane can't lure a click onto an arbitrary file."""
+
+    def test_path_inside_cwd_allowed(self, tmp_path):
+        from agent_takkub.terminal_widget import _within_allowed_bases
+
+        f = tmp_path / "docs" / "x.md"
+        f.parent.mkdir()
+        f.write_text("x", encoding="utf-8")
+        assert _within_allowed_bases(f, cwd=str(tmp_path), extra_bases=()) is True
+
+    def test_path_inside_extra_base_allowed(self, tmp_path):
+        from agent_takkub.terminal_widget import _within_allowed_bases
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        f = repo / "ARCHITECTURE.md"
+        f.write_text("x", encoding="utf-8")
+        assert _within_allowed_bases(f, cwd=None, extra_bases=(str(repo),)) is True
+
+    def test_path_outside_all_bases_refused(self, tmp_path):
+        from agent_takkub.terminal_widget import _within_allowed_bases
+
+        cwd = tmp_path / "proj"
+        outside = tmp_path / "elsewhere" / "secret.txt"
+        cwd.mkdir()
+        outside.parent.mkdir()
+        outside.write_text("x", encoding="utf-8")
+        assert _within_allowed_bases(outside, cwd=str(cwd), extra_bases=()) is False
+
+    def test_dotdot_traversal_refused(self, tmp_path):
+        from pathlib import Path
+
+        from agent_takkub.terminal_widget import _within_allowed_bases
+
+        cwd = tmp_path / "proj"
+        cwd.mkdir()
+        secret = tmp_path / "secret.txt"
+        secret.write_text("x", encoding="utf-8")
+        # cwd/../secret.txt escapes the cwd subtree once resolved
+        escaped = Path(str(cwd)) / ".." / "secret.txt"
+        assert _within_allowed_bases(escaped, cwd=str(cwd), extra_bases=()) is False
+
+    def test_no_bases_refuses_everything(self, tmp_path):
+        from agent_takkub.terminal_widget import _within_allowed_bases
+
+        f = tmp_path / "x.md"
+        f.write_text("x", encoding="utf-8")
+        assert _within_allowed_bases(f, cwd=None, extra_bases=()) is False
+
+
+class TestStripOsc52:
+    """M3#14: OSC 52 clipboard-set escapes must be stripped from outbound render
+    text; a sequence split across flush batches is held back via `carry`."""
+
+    def _strip(self, text):
+        from agent_takkub.terminal_widget import _strip_osc52
+
+        return _strip_osc52(text)
+
+    def test_strips_complete_bel_terminated(self):
+        # ESC ] 52 ; c ; <base64> BEL
+        seq = "\x1b]52;c;aGVsbG8=\x07"
+        cleaned, carry = self._strip(f"before{seq}after")
+        assert cleaned == "beforeafter"
+        assert carry == ""
+
+    def test_strips_complete_st_terminated(self):
+        # ESC ] 52 ; c ; <base64> ESC \  (ST)
+        seq = "\x1b]52;c;aGVsbG8=\x1b\\"
+        cleaned, carry = self._strip(f"x{seq}y")
+        assert cleaned == "xy"
+        assert carry == ""
+
+    def test_strips_multiple(self):
+        s = "a\x1b]52;c;Zm9v\x07b\x1b]52;p;YmFy\x07c"
+        cleaned, carry = self._strip(s)
+        assert cleaned == "abc"
+        assert carry == ""
+
+    def test_leaves_other_osc_untouched(self):
+        # OSC 0 (set title) and OSC 8 (hyperlink) are legitimate — must survive.
+        title = "\x1b]0;my title\x07"
+        cleaned, carry = self._strip(f"{title}hello")
+        assert cleaned == f"{title}hello"
+        assert carry == ""
+
+    def test_incomplete_trailing_held_as_carry(self):
+        # head of an OSC52 with no terminator yet → cleaned excludes it, carry has it
+        cleaned, carry = self._strip("visible\x1b]52;c;aGVsb")
+        assert cleaned == "visible"
+        assert carry == "\x1b]52;c;aGVsb"
+
+    def test_carry_recombines_and_strips(self):
+        # simulate split across two batches: first returns carry, prepend to next
+        cleaned1, carry1 = self._strip("out\x1b]52;c;aGVs")
+        assert cleaned1 == "out"
+        cleaned2, carry2 = self._strip(carry1 + "bG8=\x07done")
+        assert cleaned2 == "done"
+        assert carry2 == ""
+
+    def test_oversized_partial_not_held(self):
+        from agent_takkub.terminal_widget import _OSC52_CARRY_MAX
+
+        big = "\x1b]52;c;" + ("A" * (_OSC52_CARRY_MAX + 10))
+        cleaned, carry = self._strip(big)
+        # too long to plausibly be mid-sequence → passes through, not held
+        assert carry == ""
+        assert cleaned == big
+
+    def test_plain_text_unchanged(self):
+        cleaned, carry = self._strip("just normal output\nwith newlines\n")
+        assert cleaned == "just normal output\nwith newlines\n"
+        assert carry == ""

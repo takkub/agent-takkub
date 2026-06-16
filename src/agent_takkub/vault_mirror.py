@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import re
 from datetime import datetime
 
 from .config import REPO_ROOT
@@ -101,6 +102,29 @@ def _is_junk_project(project: str) -> bool:
     return any(p.startswith(prefix) for prefix in _JUNK_PROJECT_PREFIXES)
 
 
+# Strip C0 control bytes (incl. ESC) except TAB/LF, DEL, and 8-bit C1, so an
+# agent-authored note can't replay terminal escapes when the vault file is
+# `cat`-ed, nor smuggle a CSI/OSC introducer past markdown (sec-w1).
+_NOTE_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+_NOTE_MAX = 8000
+
+
+def _scrub_note(note: str) -> str:
+    """Make an agent-authored note safe to write into a vault markdown file:
+    strip control/escape bytes, defuse a leading frontmatter delimiter, and cap
+    length. A normal note (no control bytes, not starting with ``---``, under
+    the cap) is returned identical to ``note.strip()``."""
+    text = _NOTE_CONTROL.sub("", note).strip()
+    # A leading `---`/`...` line reads as a YAML frontmatter boundary to some
+    # Obsidian/Dataview parsers; a zero-width space breaks the delimiter while
+    # staying invisible in rendered output.
+    if text.startswith("---") or text.startswith("..."):
+        text = chr(0x200B) + text
+    if len(text) > _NOTE_MAX:
+        text = text[:_NOTE_MAX].rstrip() + "\n\n…(note truncated)"
+    return text
+
+
 def _render_decision_note(
     project: str,
     role: str,
@@ -133,7 +157,7 @@ def _render_decision_note(
         f"# {role} done · {iso}\n\n"
         f"**Project:** [[01-Projects/{project}|{project}]]\n"
         f"**Role:** {role}\n\n"
-        f"## Note\n\n{note.strip()}\n"
+        f"## Note\n\n{_scrub_note(note)}\n"
     )
     if transcript_path:
         try:

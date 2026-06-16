@@ -34,6 +34,64 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
   ตอนพิมพ์ (ไว้ยืนยันว่า freeze เกิดตอน pane spawn จริงไหม). ปรับ threshold ผ่าน
   env `TAKKUB_STALL_LOG_S` / `TAKKUB_WATCHDOG_SOFT_STALL_S` / `TAKKUB_WATCHDOG_POLL_S`.
 
+### Security (ความปลอดภัย · vNEXT-hardening)
+- **one-click exec hardening** (M3#13) — คลิก path ที่ pane print แล้วเปิดผ่าน OS
+  default app เดิมไม่มี guard เลย ปิด 3 ช่อง: (1) **exec extension** (`.bat/.cmd/.ps1/
+  .exe/.hta/.lnk/.vbs/.msi/…`) เดิมคลิก = **รันทันที** → เปลี่ยนเป็น reveal-in-folder,
+  (2) **path confinement** — absolute path ที่ไหนก็ได้ (หรือ `../` traversal) เปิดได้ →
+  จำกัดให้อยู่ใต้ cwd/repo เท่านั้น, (3) **drop `file://`** จาก clickable URL (bypass
+  guard ทั้งหมด). logic เป็น pure helper + 13 test.
+- **OSC 52 clipboard-set strip** (M3#14) — PTY output ไหลเข้า `term.write` ตรงๆ; pane
+  ส่ง `ESC]52;c;<base64>BEL` เขียน system clipboard เงียบๆ ได้ → filter ที่ render
+  boundary (split-across-batch carry) เป็น defense-in-depth.
+- **gate `status` transcript + screenshot** (M3#16) — `takkub status` เดิมคืน
+  transcript tail + screenshot path ของ **ทุก pane ให้ caller ใดก็ได้** (teammate/manual
+  อ่าน secret ใน transcript คนอื่นได้) → redact 2 field นี้เว้นแต่ caller ถือ Lead token
+  (state/stall ยังเห็นได้ปกติ; status bar ใน UI อ่าน method ตรง ไม่กระทบ).
+- **bracketed-paste breakout** (M6#28) — content ที่ inject เข้า pane ถ้าฝัง `ESC]201~`
+  จะจบ paste mode ก่อน แล้ว byte ที่เหลือ (รวม `\r`) รันเป็น keystroke จริง = auto-submit
+  คำสั่งที่ถูกแทรก → strip paste marker ออกก่อน wrap เสมอ.
+- **vault decision-note scrub** (sec-w1) — strip control byte + neutralize frontmatter
+  dash นำ + cap length ก่อนเขียน Obsidian.
+
+### Performance / Token diet (vNEXT-hardening)
+- **ไม่ freeze GUI ตอน `--requires-commit` done** (M2) — `git status --porcelain` เดิม
+  รัน sync timeout 10s บน Qt main thread (จอค้างทั้งตัว) → ย้ายไป **QProcess** (event-loop
+  driven = non-blocking + single-thread ไม่มี worker race); done notice ออกทันที, warning
+  uncommitted ตามมาเป็น follow-up.
+- **ลด token ต่อ spawn** — skip inject project CLAUDE.md ซ้ำเมื่อ claude auto-discover จาก
+  cwd อยู่แล้ว (~750 tok/Lead spawn, tok-4); ไม่ dump role-memory skeleton ว่าง → ชี้ทาง
+  บรรทัดเดียว (~100-150 tok/teammate, tok-5); cap session goal ที่ set-time (กัน 64KiB
+  re-paste, tok-3).
+- **bounded transcript tail-read** (M4#22) — `takkub status` เดิมอ่าน transcript ทั้งไฟล์
+  (MB) เข้า memory แค่เอา 5 บรรทัดท้าย → seek อ่านแค่ 64KiB ท้าย.
+
+### Fixed (แก้ robustness · vNEXT-hardening)
+- **`takkub harvest` dead-on-arrival** (M0#1) — payload ไม่มี `from` stamp → server role-gate
+  ปัดทิ้ง; เพิ่ม stamp ทั้ง 2 จุด.
+- **C0/C1 control-byte scrub** (M0#2) — sanitizer strip 8-bit C1 + DEL เพิ่มจาก C0.
+- **central ready-prompt marker table** (M4#17) — marker detection เดิม hardcode อังกฤษ
+  กระจาย; upstream reword = provider stall (เกิด 3 ครั้ง) → รวมเป็น `_READY_RULES` ตัวเดียว
+  (first-match-wins, faithful) + env override `TAKKUB_EXTRA_READY_MARKERS` (กู้ reword โดยไม่
+  แก้ code) + `takkub doctor` self-test จับ marker เสีย.
+- **pipeline-run pre-check** (bug-1) — เดิมตอบ `ok=true` เสมอทิ้ง error message →
+  validate template+hops ก่อน schedule.
+- **auto-chain handoff release** (bug-1) — blocker ตัวสุดท้ายตายโดยไม่ส่ง done →
+  chain deadlock; release ที่ crash-cap + stuck-give-up ครบ 4 จุด.
+- **CC flush durability** (M4#22) — เดิม pop+persist-empty ก่อน write → write fail กลางทาง
+  = message ที่เหลือหาย → deliver-then-dequeue.
+- **brick-guard updater** (M4#21) — รอ cockpit PID exit จริงแทน `sleep 3s` (race) + capture
+  install exit code → sentinel `.failed`.
+- **Windows key ถูกกลืนตอน cockpit focus** — Chromium (QtWebEngine) MediaKeysListener ลง
+  low-level keyboard hook บน Windows → `--disable-features=HardwareMediaKeyHandling,
+  GlobalMediaControls` (cockpit ไม่ใช้ media key).
+
+### Changed (internal refactor · vNEXT-hardening)
+- **แตก spawn() 3 branch** — extract `_launch_session` (shell/gemini/codex) drift เป็น param
+  ชัด (M5#23) + `_mint_pane_token` (M5#24) + named pane-geometry const (M5#25).
+- **🐴 ponytail minimal-code rules** — ดูด ruleset "lazy senior dev" (MIT) เข้า role file
+  `frontend/backend/mobile/devops` + `reviewer` (over-engineering lens) ไม่ลง Node-hook (กัน brick).
+
 ## [v0.7.0] - 2026-06-06
 
 ### Added (เพิ่ม)

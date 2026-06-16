@@ -20,7 +20,6 @@ import os
 import pathlib
 import re
 import secrets
-import subprocess
 import threading
 import time
 import uuid as _uuid
@@ -28,7 +27,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from PyQt6.QtCore import QObject, QTimer, pyqtSignal
+from PyQt6.QtCore import QObject, QProcess, QTimer, pyqtSignal
 
 from .agent_pane import AgentPane
 from .claude_auth_config import apply_claude_auth_overrides
@@ -81,6 +80,24 @@ from .vault_mirror import (  # re-exported for test + script imports
 )
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*[mABCDHJKSThlsu]")
+
+# Bound on how many bytes of a pane transcript we read to extract its tail for
+# `takkub status`. A long session's transcript grows to MBs; reading the whole
+# file every status call (just to keep the last few lines) is an unbounded memory
+# spike. 64 KiB is ample for the 5-line tail even with very long lines. (M4#22)
+_TRANSCRIPT_TAIL_BYTES = 64 * 1024
+
+
+def _read_tail_bytes(path: pathlib.Path, max_bytes: int) -> bytes:
+    """Return at most the last ``max_bytes`` bytes of ``path`` without reading
+    the whole file into memory. Pure (no Qt) so it can be unit-tested. Raises
+    OSError on read failure (caller handles)."""
+    with open(path, "rb") as fh:
+        fh.seek(0, 2)
+        size = fh.tell()
+        fh.seek(max(0, size - max_bytes))
+        return fh.read()
+
 
 # Artifact dirs excluded from harvest scans.
 _HARVEST_EXCLUDE_DIRS = frozenset(
@@ -398,6 +415,13 @@ _STUCK_RESUME_NUDGE = (
 # _apply_session_goal greps for to avoid double-prepending on respawn replay.
 _SESSION_GOAL_HEADER = "[SESSION GOAL — ทุก role ในงานนี้ยึดเป้าหมายเดียวกัน]"
 
+# A goal is a short objective + scope boundary; bound it so a pathological
+# paste (review tok-3: worst case ~64 KiB) can't be re-prepended to every
+# assign for the rest of the session. 4000 chars (~1k tokens) is far above any
+# real objective. Truncation is at set-time so the stored value is already
+# clean for every later prepend.
+_SESSION_GOAL_MAX = 4000
+
 # Throughput watchdog (issue #35): flag panes whose PTY output rate exceeds
 # RUNAWAY_BYTES_S continuously for RUNAWAY_DURATION_S seconds.
 #
@@ -446,6 +470,12 @@ AUTO_RESPAWN_MAX = 2
 _SPAWN_STAGGER_MS = int(os.environ.get("TAKKUB_SPAWN_STAGGER_MS", "400"))
 _CODEX_SPAWN_STAGGER_MS = int(os.environ.get("TAKKUB_CODEX_SPAWN_STAGGER_MS", "10000"))
 
+# Initial PTY geometry every pane session spawns with (FitAddon resizes it to the
+# real widget once the page loads). Named so the four provider spawn branches
+# can't drift apart. (M5#25)
+_PANE_COLS = 110
+_PANE_ROWS = 36
+
 # Codex early-crash detection. If a codex pane exits within this many seconds
 # of spawning, the orchestrator treats it as a suspicious early crash, logs a
 # `codex_early_crash` event, and writes a diagnostic dump to
@@ -478,6 +508,14 @@ LEAD_NOTIFY_BUSY_CAP = 75
 _PASTE_START = "\x1b[200~"
 _PASTE_END = "\x1b[201~"
 
+# C0 controls (incl. bare ESC 0x1b and CR 0x0d) plus DEL (0x7f) and the 8-bit
+# C1 range (0x80-0x9f). C1 codepoints like U+009B (CSI), U+009D (OSC) and
+# U+0090 (DCS) are single-byte escape introducers that some terminals honour,
+# so a pane message containing them could start an escape sequence even after
+# ESC is stripped. TAB (0x09) and LF (0x0a) are deliberately excluded — both
+# are legitimate in multi-line task bodies.
+_CONTROL_STRIP = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
 
 def _sanitize_pane_text(text: str) -> str:
     """Strip control sequences that could break out of bracketed-paste mode.
@@ -485,21 +523,18 @@ def _sanitize_pane_text(text: str) -> str:
     A message body containing ``\\x1b[201~`` closes the bracketed-paste bracket
     early, letting the rest of the content execute as raw terminal input in any
     pane running with ``--dangerously-skip-permissions``. Strip both the opening
-    and closing bracket sequences plus bare ESC bytes so every write path (send,
+    and closing bracket sequences plus every C0/C1 control byte (incl. bare ESC,
+    CR, and 8-bit CSI/OSC/DCS introducers) so every write path (send,
     _notify_lead, task inject) is safe regardless of input length.
 
-    Also strips bare ``\\r`` (carriage return) that would submit the partial
-    input before the orchestrator appends its own trailing CR.  LF (``\\n``) is
-    intentional in multi-line task bodies and is preserved.
+    TAB and LF are preserved — both are intentional in multi-line task bodies and
+    neither submits the input in bracketed-paste mode.
     """
-    # Remove bracketed-paste control sequences first
+    # Remove bracketed-paste control sequences first so their printable tail
+    # ("[200~") goes together with its ESC before the blanket control strip.
     text = text.replace(_PASTE_END, "").replace(_PASTE_START, "")
-    # Strip lone ESC bytes (they can start arbitrary escape sequences)
-    text = text.replace("\x1b", "")
-    # Strip bare CR that would submit the input before the orchestrator appends
-    # its own trailing CR.  LF is intentional in multi-line task bodies and is
-    # left intact — it does not submit in bracketed-paste mode.
-    text = text.replace("\r", "")
+    # Strip C0 control bytes (incl. ESC + CR), DEL, and 8-bit C1 controls.
+    text = _CONTROL_STRIP.sub("", text)
     return text
 
 
@@ -523,6 +558,15 @@ def _paste_payload(text: str) -> str:
     inputs are returned unchanged so single-character prompts still
     feel like typing rather than a paste burst.
     """
+    # M6#28: strip any embedded bracketed-paste markers from the content first.
+    # An attacker-influenced task/message carrying an ESC[201~ end-marker would
+    # otherwise terminate paste mode early, and the bytes after it (including a
+    # \r) would be interpreted as LIVE keystrokes — auto-submitting an injected
+    # command into the pane's TUI. The markers are never legitimate content, so
+    # removing them is always safe (do it regardless of length, since the short
+    # path writes the text straight through too).
+    if _PASTE_START in text or _PASTE_END in text:
+        text = text.replace(_PASTE_START, "").replace(_PASTE_END, "")
     if len(text) < BRACKETED_PASTE_THRESHOLD:
         return text
     return _PASTE_START + text + _PASTE_END
@@ -1368,6 +1412,118 @@ class Orchestrator(QObject):
     # ──────────────────────────────────────────────────────────────
     # high-level operations
     # ──────────────────────────────────────────────────────────────
+    def _mint_pane_token(self, env: dict, project_ns: str, role_name: str) -> str:
+        """Mint a fresh per-pane auth token for ``(project_ns, role_name)``.
+
+        Revokes any prior token for that same pair first — so a respawn never
+        leaves a crashed session's token valid — then registers the new one and
+        stamps it into ``env["TAKKUB_PANE_TOKEN"]``. Returns the token; callers
+        keep it to revoke explicitly if the spawn then fails. M5#24: this minting
+        boilerplate was copy-pasted across all four provider branches of spawn().
+        """
+        if not hasattr(self, "_pane_tokens"):
+            self._pane_tokens: dict[str, tuple[str, str]] = {}
+        tok = secrets.token_urlsafe(32)
+        for _t in [t for t, v in list(self._pane_tokens.items()) if v == (project_ns, role_name)]:
+            self._pane_tokens.pop(_t, None)
+        self._pane_tokens[tok] = (project_ns, role_name)
+        env["TAKKUB_PANE_TOKEN"] = tok
+        return tok
+
+    def _launch_session(
+        self,
+        *,
+        pane,
+        role_name: str,
+        project_ns: str,
+        spawn_cwd: str,
+        argv: list[str],
+        env: dict,
+        pane_tok: str,
+        label: str,
+        cwd: str | None,
+        project: str | None,
+        _from_auto_respawn: bool,
+        _shard_total: int,
+        codex_exit: bool = False,
+        auto_trust: bool = False,
+    ) -> tuple[bool, str]:
+        """Common ConPTY launch tail for the non-claude spawn branches (shell,
+        gemini, codex). Creates the PtySession, runs the final TOCTOU re-sample
+        gate, does the native spawn under the _spawn_in_progress arbiter, attaches
+        the pane, wires the exit handler, clears recent-exit state, and returns
+        spawn()'s (ok, msg). M5#23: was copy-pasted ~50 lines x3 with real drift —
+        the divergences are now explicit params:
+
+          codex_exit : stamp ``codex_spawn_ts`` + wire ``_on_codex_exit`` (codex
+                       early-crash detection) instead of the stale-guarded
+                       ``_on_session_exit`` used by shell/gemini.
+          auto_trust : call ``_auto_trust`` after attach (gemini/codex; NOT shell).
+
+        The claude branch is intentionally NOT routed through here — it adds
+        resume / session-uuid / MCP wiring and stays inline.
+        """
+        session = PtySession(cols=_PANE_COLS, rows=_PANE_ROWS, parent=self)
+        _t_path = _build_transcript_path(project_ns, role_name)
+        pane._transcript_path = _t_path
+        self._spawn_in_progress = True
+        try:
+            # Tier 2 final re-sample: check InSendMessageEx immediately before the
+            # native ConPTY call to narrow the TOCTOU window.
+            if not self._final_gate_clear():
+                session.setParent(None)
+                session.deleteLater()
+                self._toctou_redefer(
+                    role_name,
+                    cwd,
+                    project,
+                    project_ns,
+                    _from_auto_respawn,
+                    _shard_total,
+                    pane_tok=pane_tok,
+                )
+                return True, f"{role_name} spawn deferred (final re-sample blocked)"
+            _t0 = time.time()
+            session.spawn(argv=argv, cwd=spawn_cwd, env=env, transcript_path=_t_path)
+            _log_event(
+                "spawn_native_ms",
+                role=role_name,
+                project=project_ns,
+                ms=int((time.time() - _t0) * 1000),
+            )
+            pane.attach_session(session, cwd=spawn_cwd)
+            _ekey = _exit_key(project_ns, role_name)
+            _sess = session
+            if codex_exit:
+                self._ps(_ekey).codex_spawn_ts = time.time()
+                session.processExited.connect(
+                    lambda code, r=role_name, c=spawn_cwd, p=project_ns, sess=_sess: (
+                        self._on_codex_exit(code, r, c, p, sess)
+                    )
+                )
+            else:
+                session.processExited.connect(
+                    lambda _code, r=role_name, c=spawn_cwd, p=project_ns, s=_sess: (
+                        self._on_session_exit(r, c, p)
+                        if (pp := self._panes_by_project.get(p, {}).get(r)) is not None
+                        and pp.session is s
+                        else None
+                    )
+                )
+            if _ekey in self._recent_exits:
+                del self._recent_exits[_ekey]
+            if auto_trust:
+                self._auto_trust(role_name, project=project_ns)
+            self.statusChanged.emit()
+            _log_event("spawn", role=role_name, cwd=spawn_cwd, resumed=False)
+            return True, f"{label} spawned in {spawn_cwd}"
+        except Exception as e:
+            self._pane_tokens.pop(pane_tok, None)
+            return False, f"failed to spawn {label}: {e}"
+        finally:
+            self._spawn_in_progress = False
+            self._drain_spawn_queue()
+
     def spawn(
         self,
         role_name: str,
@@ -1513,66 +1669,22 @@ class Orchestrator(QObject):
             inject_user_profile_env(env, project_ns)
             bin_dir = str(REPO_ROOT / "bin")
             env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
-            _shell_tok = secrets.token_urlsafe(32)
-            env["TAKKUB_PANE_TOKEN"] = _shell_tok
-            # Revoke any prior token for this (project, role) before registering
-            # the new one so a respawn doesn't leave the old token valid.
-            for _t in [
-                t for t, v in list(self._pane_tokens.items()) if v == (project_ns, role_name)
-            ]:
-                self._pane_tokens.pop(_t, None)
-            self._pane_tokens[_shell_tok] = (project_ns, role_name)
+            _shell_tok = self._mint_pane_token(env, project_ns, role_name)
             shell_argv = [pwsh_basename, "-NoLogo"]
-            session = PtySession(cols=110, rows=36, parent=self)
-            _t_path = _build_transcript_path(project_ns, role_name)
-            pane._transcript_path = _t_path
-            self._spawn_in_progress = True
-            try:
-                # Tier 2 final re-sample: check InSendMessageEx immediately
-                # before the native ConPTY call to narrow the TOCTOU window.
-                if not self._final_gate_clear():
-                    session.setParent(None)
-                    session.deleteLater()
-                    self._toctou_redefer(
-                        role_name,
-                        cwd,
-                        project,
-                        project_ns,
-                        _from_auto_respawn,
-                        _shard_total,
-                        pane_tok=_shell_tok,
-                    )
-                    return True, f"{role_name} spawn deferred (final re-sample blocked)"
-                _t0 = time.time()
-                session.spawn(argv=shell_argv, cwd=spawn_cwd, env=env, transcript_path=_t_path)
-                _log_event(
-                    "spawn_native_ms",
-                    role=role_name,
-                    project=project_ns,
-                    ms=int((time.time() - _t0) * 1000),
-                )
-                pane.attach_session(session, cwd=spawn_cwd)
-                _sess_shell = session
-                session.processExited.connect(
-                    lambda _code, r=role_name, c=spawn_cwd, p=project_ns, s=_sess_shell: (
-                        self._on_session_exit(r, c, p)
-                        if (pp := self._panes_by_project.get(p, {}).get(r)) is not None
-                        and pp.session is s
-                        else None
-                    )
-                )
-                _ekey = _exit_key(project_ns, role_name)
-                if _ekey in self._recent_exits:
-                    del self._recent_exits[_ekey]
-                self.statusChanged.emit()
-                _log_event("spawn", role=role_name, cwd=spawn_cwd, resumed=False)
-                return True, f"shell spawned in {spawn_cwd}"
-            except Exception as e:
-                self._pane_tokens.pop(_shell_tok, None)
-                return False, f"failed to spawn shell: {e}"
-            finally:
-                self._spawn_in_progress = False
-                self._drain_spawn_queue()
+            return self._launch_session(
+                pane=pane,
+                role_name=role_name,
+                project_ns=project_ns,
+                spawn_cwd=spawn_cwd,
+                argv=shell_argv,
+                env=env,
+                pane_tok=_shell_tok,
+                label="shell",
+                cwd=cwd,
+                project=project,
+                _from_auto_respawn=_from_auto_respawn,
+                _shard_total=_shard_total,
+            )
 
         # ── codex pane: non-claude path ─────────────────────────────
         # `codex` is OpenAI's TUI; it speaks a different protocol and
@@ -1621,68 +1733,26 @@ class Orchestrator(QObject):
             inject_user_profile_env(env, project_ns)
             bin_dir = str(REPO_ROOT / "bin")
             env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
-            _gem_tok = secrets.token_urlsafe(32)
-            env["TAKKUB_PANE_TOKEN"] = _gem_tok
-            for _t in [
-                t for t, v in list(self._pane_tokens.items()) if v == (project_ns, role_name)
-            ]:
-                self._pane_tokens.pop(_t, None)
-            self._pane_tokens[_gem_tok] = (project_ns, role_name)
+            _gem_tok = self._mint_pane_token(env, project_ns, role_name)
             gemini_argv = [
                 gemini_bin,
                 "-y",  # yolo: skip per-command approval prompts (parity with codex --ask-for-approval never)
             ]
-            session = PtySession(cols=110, rows=36, parent=self)
-            _t_path = _build_transcript_path(project_ns, role_name)
-            pane._transcript_path = _t_path
-            self._spawn_in_progress = True
-            try:
-                # Tier 2 final re-sample: check InSendMessageEx immediately
-                # before the native ConPTY call to narrow the TOCTOU window.
-                if not self._final_gate_clear():
-                    session.setParent(None)
-                    session.deleteLater()
-                    self._toctou_redefer(
-                        role_name,
-                        cwd,
-                        project,
-                        project_ns,
-                        _from_auto_respawn,
-                        _shard_total,
-                        pane_tok=_gem_tok,
-                    )
-                    return True, f"{role_name} spawn deferred (final re-sample blocked)"
-                _t0 = time.time()
-                session.spawn(argv=gemini_argv, cwd=spawn_cwd, env=env, transcript_path=_t_path)
-                _log_event(
-                    "spawn_native_ms",
-                    role=role_name,
-                    project=project_ns,
-                    ms=int((time.time() - _t0) * 1000),
-                )
-                pane.attach_session(session, cwd=spawn_cwd)
-                _sess_gem = session
-                session.processExited.connect(
-                    lambda _code, r=role_name, c=spawn_cwd, p=project_ns, s=_sess_gem: (
-                        self._on_session_exit(r, c, p)
-                        if (pp := self._panes_by_project.get(p, {}).get(r)) is not None
-                        and pp.session is s
-                        else None
-                    )
-                )
-                _ekey = _exit_key(project_ns, role_name)
-                if _ekey in self._recent_exits:
-                    del self._recent_exits[_ekey]
-                self._auto_trust(role_name, project=project_ns)
-                self.statusChanged.emit()
-                _log_event("spawn", role=role_name, cwd=spawn_cwd, resumed=False)
-                return True, f"gemini spawned in {spawn_cwd}"
-            except Exception as e:
-                self._pane_tokens.pop(_gem_tok, None)
-                return False, f"failed to spawn gemini: {e}"
-            finally:
-                self._spawn_in_progress = False
-                self._drain_spawn_queue()
+            return self._launch_session(
+                pane=pane,
+                role_name=role_name,
+                project_ns=project_ns,
+                spawn_cwd=spawn_cwd,
+                argv=gemini_argv,
+                env=env,
+                pane_tok=_gem_tok,
+                label="gemini",
+                cwd=cwd,
+                project=project,
+                _from_auto_respawn=_from_auto_respawn,
+                _shard_total=_shard_total,
+                auto_trust=True,
+            )
 
         if effective_provider == CODEX:
             from .codex_agents_md import ensure_agents_md
@@ -1706,13 +1776,7 @@ class Orchestrator(QObject):
             inject_user_profile_env(env, project_ns)
             bin_dir = str(REPO_ROOT / "bin")
             env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
-            _cdx_tok = secrets.token_urlsafe(32)
-            env["TAKKUB_PANE_TOKEN"] = _cdx_tok
-            for _t in [
-                t for t, v in list(self._pane_tokens.items()) if v == (project_ns, role_name)
-            ]:
-                self._pane_tokens.pop(_t, None)
-            self._pane_tokens[_cdx_tok] = (project_ns, role_name)
+            _cdx_tok = self._mint_pane_token(env, project_ns, role_name)
             # Autonomy flags so Codex can call `takkub done` and edit
             # workspace files without stopping for per-command approval —
             # mirrors claude's `--dangerously-skip-permissions`.
@@ -1744,55 +1808,22 @@ class Orchestrator(QObject):
                     "-s",
                     "workspace-write",
                 ]
-            session = PtySession(cols=110, rows=36, parent=self)
-            _t_path = _build_transcript_path(project_ns, role_name)
-            pane._transcript_path = _t_path
-            self._spawn_in_progress = True
-            try:
-                # Tier 2 final re-sample: check InSendMessageEx immediately
-                # before the native ConPTY call to narrow the TOCTOU window.
-                if not self._final_gate_clear():
-                    session.setParent(None)
-                    session.deleteLater()
-                    self._toctou_redefer(
-                        role_name,
-                        cwd,
-                        project,
-                        project_ns,
-                        _from_auto_respawn,
-                        _shard_total,
-                        pane_tok=_cdx_tok,
-                    )
-                    return True, f"{role_name} spawn deferred (final re-sample blocked)"
-                _t0 = time.time()
-                session.spawn(argv=codex_argv, cwd=spawn_cwd, env=env, transcript_path=_t_path)
-                _log_event(
-                    "spawn_native_ms",
-                    role=role_name,
-                    project=project_ns,
-                    ms=int((time.time() - _t0) * 1000),
-                )
-                pane.attach_session(session, cwd=spawn_cwd)
-                _ekey = _exit_key(project_ns, role_name)
-                self._ps(_ekey).codex_spawn_ts = time.time()
-                _sess_cdx = session
-                session.processExited.connect(
-                    lambda code, r=role_name, c=spawn_cwd, p=project_ns, sess=_sess_cdx: (
-                        self._on_codex_exit(code, r, c, p, sess)
-                    )
-                )
-                if _ekey in self._recent_exits:
-                    del self._recent_exits[_ekey]
-                self._auto_trust(role_name, project=project_ns)
-                self.statusChanged.emit()
-                _log_event("spawn", role=role_name, cwd=spawn_cwd, resumed=False)
-                return True, f"codex spawned in {spawn_cwd}"
-            except Exception as e:
-                self._pane_tokens.pop(_cdx_tok, None)
-                return False, f"failed to spawn codex: {e}"
-            finally:
-                self._spawn_in_progress = False
-                self._drain_spawn_queue()
+            return self._launch_session(
+                pane=pane,
+                role_name=role_name,
+                project_ns=project_ns,
+                spawn_cwd=spawn_cwd,
+                argv=codex_argv,
+                env=env,
+                pane_tok=_cdx_tok,
+                label="codex",
+                cwd=cwd,
+                project=project,
+                _from_auto_respawn=_from_auto_respawn,
+                _shard_total=_shard_total,
+                codex_exit=True,
+                auto_trust=True,
+            )
 
         # Resolve cwd:
         #   Lead          → repo root (so CLAUDE.md auto-discovery picks up the
@@ -1817,7 +1848,9 @@ class Orchestrator(QObject):
             if spawn_cwd != str(REPO_ROOT):
                 post_compact_brief = self._build_post_compact_brief(project_ns)
                 role_md_file = _render_lead_context(
-                    project_ns, post_compact_brief=post_compact_brief
+                    project_ns,
+                    post_compact_brief=post_compact_brief,
+                    claude_cwd=spawn_cwd,
                 )
         else:
             staging = agent_role_dir(base_role)
@@ -1883,31 +1916,56 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                         _mem_text = _role_mem.read_text(encoding="utf-8", errors="replace")
                     except OSError:
                         _mem_text = ""
-                    _MEM_MAX_LINES = 200
-                    _mem_all = _mem_text.splitlines()
-                    # Keep the TAIL (newest) — notes are appended at the bottom, so
-                    # a head slice would drop the freshest learnings first (#43).
-                    # role_memory curation normally keeps the file under this cap;
-                    # this slice is just a safety net for a still-large file.
-                    _mem_shown = "\n".join(_mem_all[-_MEM_MAX_LINES:])
-                    _trunc = (
-                        f"\n\n> ⚠️ ตัดมา {_MEM_MAX_LINES}/{len(_mem_all)} บรรทัดท้ายสุด — "
-                        f'อ่านเต็มด้วย `Read("{_role_mem}")`'
-                        if len(_mem_all) > _MEM_MAX_LINES
-                        else ""
-                    )
-                    _appendix += (
-                        "\n\n---\n\n"
-                        f"## 🧠 Your learned notes ({base_role} · this project)\n\n"
-                        f"ความรู้ที่ **คุณ ({base_role}) สะสมไว้กับโปรเจคนี้** "
-                        "(สะสมข้ามรอบงาน) — **นี่คือสิ่งที่คุณรู้เกี่ยวกับโปรเจคนี้แล้ว "
-                        "อย่าเดา/ค้นใหม่ในสิ่งที่อยู่ด้านล่างนี้:**\n\n"
-                        "<learned-notes>\n" + _mem_shown + "\n</learned-notes>" + _trunc + "\n\n"
-                        "**เมื่อเจอสิ่งที่ไม่ obvious** (pattern, pitfall, login/flow, "
-                        "decision) ที่ยังไม่มีด้านบน → **append สั้นๆ** ลงไฟล์ "
-                        f"`{_role_mem}` ด้วย Edit/Write เพื่อให้รอบหน้าเร็วขึ้น "
-                        "เก็บเฉพาะของจริงที่มีค่า อย่าซ้ำ code/git\n"
-                    )
+                    # tok-5: a freshly-seeded file is just the skeleton (bare `-`
+                    # placeholders, no learned bullets). Inlining the whole empty
+                    # skeleton + the long "อย่าเดา/ค้นใหม่" wrapper costs ~100-150
+                    # tok/spawn for zero knowledge. When there's no real content
+                    # yet, emit a one-line pointer instead; the full inline block
+                    # returns the moment the role appends its first note.
+                    from .role_memory import has_learned_content
+
+                    if not has_learned_content(_mem_text, project_ns, base_role):
+                        # No real notes yet — a one-line pointer instead of dumping
+                        # the empty skeleton + long wrapper. The full inline block
+                        # below returns the moment this role appends its first note.
+                        _appendix += (
+                            "\n\n---\n\n"
+                            f"## 🧠 Your learned notes ({base_role} · this project)\n\n"
+                            "ยังไม่มี learned notes สำหรับโปรเจคนี้ — เมื่อเจอสิ่งที่ไม่ obvious "
+                            "(pattern, pitfall, login/flow, decision) → **append สั้นๆ** ลงไฟล์ "
+                            f"`{_role_mem}` ด้วย Edit/Write เพื่อให้รอบหน้าเร็วขึ้น "
+                            "(เก็บเฉพาะของจริงที่มีค่า อย่าซ้ำ code/git)\n"
+                        )
+                    else:
+                        _MEM_MAX_LINES = 200
+                        _mem_all = _mem_text.splitlines()
+                        # Keep the TAIL (newest) — notes are appended at the bottom,
+                        # so a head slice would drop the freshest learnings first
+                        # (#43). role_memory curation normally keeps the file under
+                        # this cap; this slice is just a safety net for a large file.
+                        _mem_shown = "\n".join(_mem_all[-_MEM_MAX_LINES:])
+                        _trunc = (
+                            f"\n\n> ⚠️ ตัดมา {_MEM_MAX_LINES}/{len(_mem_all)} บรรทัดท้ายสุด — "
+                            f'อ่านเต็มด้วย `Read("{_role_mem}")`'
+                            if len(_mem_all) > _MEM_MAX_LINES
+                            else ""
+                        )
+                        _appendix += (
+                            "\n\n---\n\n"
+                            f"## 🧠 Your learned notes ({base_role} · this project)\n\n"
+                            f"ความรู้ที่ **คุณ ({base_role}) สะสมไว้กับโปรเจคนี้** "
+                            "(สะสมข้ามรอบงาน) — **นี่คือสิ่งที่คุณรู้เกี่ยวกับโปรเจคนี้แล้ว "
+                            "อย่าเดา/ค้นใหม่ในสิ่งที่อยู่ด้านล่างนี้:**\n\n"
+                            "<learned-notes>\n"
+                            + _mem_shown
+                            + "\n</learned-notes>"
+                            + _trunc
+                            + "\n\n"
+                            "**เมื่อเจอสิ่งที่ไม่ obvious** (pattern, pitfall, login/flow, "
+                            "decision) ที่ยังไม่มีด้านบน → **append สั้นๆ** ลงไฟล์ "
+                            f"`{_role_mem}` ด้วย Edit/Write เพื่อให้รอบหน้าเร็วขึ้น "
+                            "เก็บเฉพาะของจริงที่มีค่า อย่าซ้ำ code/git\n"
+                        )
                 if _appendix:
                     role_md_path.write_text(_existing_md + _appendix, encoding="utf-8")
                 role_md_file = str(role_md_path)
@@ -1951,17 +2009,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             # caller identity from this token instead of trusting the caller-supplied
             # `from`/`from_project` fields, preventing a compromised or forged pane
             # from impersonating another role or project.
-            pane_tok = secrets.token_urlsafe(32)
-            env["TAKKUB_PANE_TOKEN"] = pane_tok
-            if not hasattr(self, "_pane_tokens"):
-                self._pane_tokens: dict[str, tuple[str, str]] = {}
-            # Revoke any prior token for this (project, role) before the new one
-            # so a respawn never leaves the crashed session's token valid.
-            for _t in [
-                t for t, v in list(self._pane_tokens.items()) if v == (project_ns, role_name)
-            ]:
-                self._pane_tokens.pop(_t, None)
-            self._pane_tokens[pane_tok] = (project_ns, role_name)
+            pane_tok = self._mint_pane_token(env, project_ns, role_name)
         bin_dir = str(REPO_ROOT / "bin")
         env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
 
@@ -2192,7 +2240,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             _ps_new.session_uuid = new_uuid
             _ps_new.session_uuid_cwd = spawn_cwd
 
-        session = PtySession(cols=110, rows=36, parent=self)
+        session = PtySession(cols=_PANE_COLS, rows=_PANE_ROWS, parent=self)
         _t_path = _build_transcript_path(project_ns, role_name)
         pane._transcript_path = _t_path
         self._spawn_in_progress = True
@@ -2431,8 +2479,13 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             # Bug-3 fix: notify Lead so the operator knows the pane gave up and
             # auto-chain doesn't deadlock waiting for a done event that never comes.
             self._warn_lead_respawn_capped(role_name, project)
+            _had_ac_cap = ps.auto_chain
             ps.auto_chain = False
             ps.last_assigned_task = None
+            # A capped pane never sends done; if it was the last auto-chain
+            # blocker, release the chain so completed siblings still get verified
+            # instead of the verify hop deadlocking forever (bug-1 orch).
+            self._maybe_fire_auto_chain_handoff(project, _had_ac_cap)
             # Pipeline: a capped pane is gone for good. If it belonged to a
             # pipeline hop (e.g. a stuck-recovered hop role that then crash-looped
             # to the cap), mark it failed + advance so the hop doesn't stall
@@ -2528,6 +2581,8 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         text = (text or "").strip()
         if not text:
             return False, "empty goal — pass an objective string, or use --clear to unset"
+        if len(text) > _SESSION_GOAL_MAX:
+            text = text[:_SESSION_GOAL_MAX].rstrip() + "\n…(goal truncated)"
         self._session_goals[project_ns] = text
         _log_event("goal-set", goal_preview=text[:120], project=project_ns)
         preview = text if len(text) <= 80 else text[:77] + "…"
@@ -2948,16 +3003,53 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         lead = self._project_panes(project_ns).get(LEAD.name)
         if not (lead and lead.session and lead.session.is_alive):
             return  # Lead still not alive — keep queue, retry later
-        items = self._pending_lead_cc.pop(project_ns)
-        self._save_pending_cc(project_ns)
-        for item in items:
-            payload = _paste_payload(item["body"])
-            lead.session.write(payload)
-            QTimer.singleShot(
-                _enter_delay_ms(payload),
-                lambda s=lead.session: s and s.write(b"\r"),
-            )
-        _log_event("send_cc_flushed", project=project_ns, count=len(items))
+        # Deliver-then-dequeue: write each CC first and drop ONLY what was
+        # actually delivered. The previous code popped + persisted-empty BEFORE
+        # writing, so a write that raised mid-flush (Lead session torn down
+        # between the liveness check and the write) silently lost the remaining
+        # queued messages from both memory and disk — defeating the durability
+        # the persistence exists for. (M4#22: blind CC flush / pop-before-write)
+        items = list(pending)
+        delivered = 0
+        try:
+            for item in items:
+                payload = _paste_payload(item["body"])
+                lead.session.write(payload)
+                QTimer.singleShot(
+                    _enter_delay_ms(payload),
+                    lambda s=lead.session: s and s.write(b"\r"),
+                )
+                delivered += 1
+        finally:
+            remaining = items[delivered:]
+            if remaining:
+                self._pending_lead_cc[project_ns] = remaining
+            else:
+                self._pending_lead_cc.pop(project_ns, None)
+            self._save_pending_cc(project_ns)
+        if delivered:
+            _log_event("send_cc_flushed", project=project_ns, count=delivered)
+
+    def _maybe_fire_auto_chain_handoff(self, project_ns: str, was_auto_chain: bool) -> None:
+        """Fire the verify-hop handoff iff *was_auto_chain* and no pane in the
+        project still carries the auto_chain tag.
+
+        Shared by done(), close(), and the crash-cap / stuck-give-up paths
+        (bug-1 orch, review 2026-06-16). A pane that dies WITHOUT a done event
+        used to only clear its own flag, so if it was the last blocker the chain
+        deadlocked and the completed siblings' verify hop never fired. The Qt
+        event loop is single-threaded, so once pending is empty no tagged pane
+        remains to re-trigger → exactly-once firing across all four call sites.
+        """
+        if not was_auto_chain:
+            return
+        pending = [
+            k
+            for k, s in getattr(self, "_pane_state", {}).items()
+            if k.startswith(f"{project_ns}::") and s.auto_chain
+        ]
+        if not pending:
+            self._inject_auto_chain_handoff(project_ns)
 
     def _inject_auto_chain_handoff(self, project_ns: str) -> None:
         """Send a pre-authorisation prompt to Lead telling it to fire
@@ -3074,6 +3166,29 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         self._notify_lead(project_ns, message)
         _log_event(log_event, project=project_ns)
 
+    def pipeline_precheck(self, template_id: str, project: str | None = None) -> tuple[bool, str]:
+        """Validate that *template_id* exists and has runnable hops, with no
+        side effects.
+
+        Lets an async caller (cli_server schedules run_pipeline on a QTimer and
+        replies immediately) verify the run BEFORE acking, instead of always
+        replying ok=true and failing silently when the template is missing or
+        empty. run_pipeline re-checks defensively, so this is purely the
+        early-honest-reply seam.
+        """
+        from . import pipeline_config
+
+        project_ns = self._resolve_project(project)
+        templates = {
+            t["id"]: t for t in pipeline_config.load(project=project_ns).get("templates", [])
+        }
+        tpl = templates.get(template_id)
+        if tpl is None:
+            return False, f"pipeline template not found: {template_id!r}"
+        if not [hop for hop in tpl.get("hops", []) if hop]:
+            return False, f"pipeline {template_id!r}: no runnable hops"
+        return True, "ok"
+
     def run_pipeline(self, template_id: str, project: str | None = None) -> tuple[bool, str]:
         """Load *template_id* from pipeline_config and fire hop 0.
 
@@ -3183,6 +3298,12 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 is_codex = base == "codex"
             delay += _CODEX_SPAWN_STAGGER_MS if is_codex else _SPAWN_STAGGER_MS
 
+    @staticmethod
+    def _pipeline_tag(run: PipelineRun) -> str:
+        """Common ``[pipeline:<id>] <name> — `` prefix shared by every hop-status
+        message sent to Lead (abort / hop-start / complete). tok-7."""
+        return f"[pipeline:{run.run_id}] {run.template_name} — "
+
     def _finalize_pipeline_hop(
         self,
         project_ns: str,
@@ -3205,8 +3326,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             run.closed = True
             self._pipeline_runs.pop(f"{project_ns}::{run_id}", None)
             failed_roles = ", ".join(sorted(run.hop_failed))
-            err = (
-                f"[pipeline:{run_id}] {run.template_name} — "
+            err = self._pipeline_tag(run) + (
                 f"hop {hop_idx + 1}/{total} aborted: all spawns failed ({failed_roles})"
             )
             self._inject_to_lead(project_ns, err, log_event="pipeline_hop_abort")
@@ -3222,7 +3342,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
 
         roles_str = ", ".join(sorted(spawned_ok))
         lines = [
-            f"[pipeline:{run_id}] {run.template_name} — hop {hop_idx + 1}/{total}",
+            self._pipeline_tag(run) + f"hop {hop_idx + 1}/{total}",
             f"Panes spawned and ready: {roles_str}",
             "Assign each their task. Pipeline auto-advances when all done (no confirm needed).",
         ]
@@ -3251,7 +3371,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 status = f"completed with failures ({', '.join(sorted(run.hop_failed))} closed without done)"
             else:
                 status = "all hops complete ✓"
-            msg = f"[pipeline:{run.run_id}] {run.template_name} — {status} ({total}/{total} hops)"
+            msg = self._pipeline_tag(run) + f"{status} ({total}/{total} hops)"
             self._inject_to_lead(project_ns, msg, log_event="pipeline_run_complete")
             _log_event(
                 "pipeline_complete",
@@ -3574,14 +3694,8 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         for _tok in _revoke_keys:
             _pane_tokens.pop(_tok, None)
 
-        if had_auto_chain_close and not suppress_auto_chain:
-            pending_ac = [
-                k
-                for k, s in getattr(self, "_pane_state", {}).items()
-                if k.startswith(f"{project_ns}::") and s.auto_chain
-            ]
-            if not pending_ac:
-                self._inject_auto_chain_handoff(project_ns)
+        if not suppress_auto_chain:
+            self._maybe_fire_auto_chain_handoff(project_ns, had_auto_chain_close)
 
         # Pipeline: pane closed without done (crash / forced close) — mark failed.
         # Advance if all roles in the hop are now done or failed.
@@ -3705,6 +3819,77 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         _log_event("plan_tier_set", tier=tier)
         return True, f"plan set to {tier}"
 
+    @staticmethod
+    def _uncommitted_warning(from_role: str, porcelain_out: str) -> str | None:
+        """Build the Lead `[requires-commit]` warning from `git status --porcelain`
+        stdout, or None when the tree is clean. Pure → unit-tested. (M2)"""
+        dirty = (porcelain_out or "").strip()
+        if not dirty:
+            return None
+        files_preview = dirty[:200]
+        return (
+            f"⚠ [requires-commit] {from_role} มี uncommitted changes รอ Lead review + commit:\n"
+            f"{files_preview}"
+        )
+
+    def _check_uncommitted_async(self, project_ns: str, from_role: str, cwd: str) -> None:
+        """Run `git status --porcelain` WITHOUT blocking the Qt main thread, then
+        deliver a follow-up warning to Lead if the tree is dirty. (M2)
+
+        Uses QProcess (driven by the Qt event loop) rather than a worker thread,
+        so the completion handler runs on the main thread exactly like any slot —
+        there is NO cross-thread access to orchestrator / pane state, hence no
+        race. A watchdog timer bounds a hung git the way the old timeout=10 did.
+        """
+        proc = QProcess(self)
+        proc.setWorkingDirectory(cwd)
+        timeout = QTimer(self)
+        timeout.setSingleShot(True)
+        timeout.setInterval(10_000)
+        state = {"done": False}
+
+        def _settle(reason: str | None) -> None:
+            # reason is None on a clean finish; a string when we bailed (skip warn).
+            if state["done"]:
+                return
+            state["done"] = True
+            timeout.stop()
+            # Don't leak the watchdog QTimer (parented to self → would live for the
+            # whole cockpit run, accumulating one per requires-commit done).
+            timeout.deleteLater()
+            if reason is not None:
+                _log_event(
+                    "done_commit_gate_skipped", role=from_role, project=project_ns, reason=reason
+                )
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                proc.deleteLater()
+                return
+            try:
+                out = bytes(proc.readAllStandardOutput()).decode("utf-8", "replace")
+            except Exception:
+                out = ""
+            proc.deleteLater()
+            warning = self._uncommitted_warning(from_role, out)
+            if warning is None:
+                return
+            _log_event(
+                "done_with_uncommitted",
+                role=from_role,
+                project=project_ns,
+                reason="dirty_tree",
+                files=warning[-200:],
+            )
+            self._notify_lead(project_ns, warning, from_role=from_role, note="")
+
+        proc.finished.connect(lambda _code, _status: _settle(None))
+        proc.errorOccurred.connect(lambda _e: _settle("git_proc_error"))
+        timeout.timeout.connect(lambda: _settle("timeout"))
+        timeout.start()
+        proc.start("git", ["status", "--porcelain"])
+
     def done(self, from_role: str, note: str = "", project: str | None = None) -> tuple[bool, str]:
         try:
             from_role = validate_name(from_role, "role")
@@ -3728,39 +3913,14 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         had_pipeline_run_id = _ps_done.pipeline_run_id
 
         # Opt-in commit handoff: if assign() was called with requires_commit=True,
-        # check for a dirty working tree and forward a warning to Lead instead
-        # of blocking the agent. Teammate ไม่ต้อง commit — Lead review + commit.
-        has_uncommitted = False
-        files_preview = ""
+        # check for a dirty working tree and warn Lead (the agent isn't blocked —
+        # Lead reviews + commits). M2: the check runs ASYNC via QProcess so a slow
+        # or large repo can't freeze the Qt main thread for up to the git timeout.
+        # The main done notice below goes out immediately; if the tree turns out
+        # dirty, a follow-up `[requires-commit]` warning is delivered to Lead.
         if had_requires_commit:
             spawn_cwd = getattr(pane, "_session_cwd", None) or str(REPO_ROOT)
-            try:
-                git_result = subprocess.run(
-                    ["git", "status", "--porcelain"],
-                    cwd=spawn_cwd,
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                )
-                dirty = git_result.stdout.strip()
-            except Exception as exc:
-                dirty = ""  # can't check; proceed without warning
-                _log_event(
-                    "done_commit_gate_skipped",
-                    role=from_role,
-                    project=project_ns,
-                    reason=str(exc)[:200],
-                )
-            if dirty:
-                has_uncommitted = True
-                files_preview = dirty[:200]
-                _log_event(
-                    "done_with_uncommitted",
-                    role=from_role,
-                    project=project_ns,
-                    reason="dirty_tree",
-                    files=files_preview,
-                )
+            self._check_uncommitted_async(project_ns, from_role, spawn_cwd)
 
         # Agent finished cleanly — pop all per-pane state atomically.
         # close() (scheduled 2.5 s below) will also pop; second pop is a no-op.
@@ -3770,11 +3930,6 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         # notify Lead in the same project (a teammate in unirecon mustn't
         # nudge the Lead in pms by mistake)
         notice = f"[{from_role} done] {note}".rstrip()
-        if has_uncommitted:
-            notice += (
-                f"\n⚠ [requires-commit] {from_role} มี uncommitted changes รอ Lead review + commit:\n"
-                f"{files_preview}"
-            )
         # Shard panes: suppress per-shard notice to Lead — consolidated handoff
         # (_inject_shard_fanout_handoff) is the single message Lead sees.
         # Non-shard panes (had_shard_total == 0) use the normal notice path.
@@ -3798,14 +3953,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         # assign time, and it was the LAST pending auto-chain pane in
         # the project, inject a pre-authorisation prompt so Lead fires
         # verify (qa+reviewer) without proposing/confirming.
-        if had_auto_chain:
-            pending = [
-                k
-                for k, s in getattr(self, "_pane_state", {}).items()
-                if k.startswith(f"{project_ns}::") and s.auto_chain
-            ]
-            if not pending:
-                self._inject_auto_chain_handoff(project_ns)
+        self._maybe_fire_auto_chain_handoff(project_ns, had_auto_chain)
 
         # Shard aggregate: record this shard's note and check if all N done.
         if had_shard_total > 0:
@@ -4158,7 +4306,9 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 transcript_path = getattr(pane, "_transcript_path", None)
                 if transcript_path:
                     try:
-                        raw = pathlib.Path(transcript_path).read_bytes()
+                        raw = _read_tail_bytes(
+                            pathlib.Path(transcript_path), _TRANSCRIPT_TAIL_BYTES
+                        )
                         lines = raw.decode("utf-8", errors="replace").splitlines()
                         tail_lines = [ln for ln in lines if ln.strip()][-5:]
                         tail_lines = [_ANSI.sub("", ln) for ln in tail_lines]
@@ -5085,8 +5235,12 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             attempts=ps.stuck_recover_attempts,
         )
         # An auto-chain verify-hop sibling would wait forever for this pane's
-        # done event; drop the tag so a capped pane can't keep a hop open.
+        # done event; drop the tag so a capped pane can't keep a hop open. If it
+        # was the last blocker, release the chain so the hop doesn't deadlock
+        # (bug-1 orch).
+        _had_ac_stuck = ps.auto_chain
         ps.auto_chain = False
+        self._maybe_fire_auto_chain_handoff(project, _had_ac_stuck)
         # Pipeline hop: fail + advance so the run doesn't stall on a pane that
         # will never report done (same bookkeeping as the respawn-fail path).
         pl_run_id = ps.pipeline_run_id

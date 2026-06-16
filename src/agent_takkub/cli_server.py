@@ -232,6 +232,17 @@ class CliServer(QObject):
             else:
                 self._dispatch(sock, req)
 
+    def _caller_is_lead(self, req: dict) -> bool:
+        """True if the request carries the Lead capability token. Used to gate
+        sensitive read-only payloads (M3#16) without timing side-channels."""
+        lead_token = getattr(self._orch, "_lead_token", None)
+        caller_auth = req.get("auth") or ""
+        return bool(
+            lead_token
+            and caller_auth
+            and secrets.compare_digest(caller_auth.encode(), lead_token.encode())
+        )
+
     def _dispatch(self, sock: QTcpSocket, req: dict) -> None:
         cmd = (req.get("cmd") or "").lower()
         # `from_project` is stamped by the cli when the calling pane was
@@ -432,6 +443,17 @@ class CliServer(QObject):
                         )
                         return
                 report = self._orch.pane_status_report(project=from_project, since_ts=since_ts)
+                # M3#16: transcript tails can contain secrets and screenshot paths
+                # leak the filesystem layout. Surface them only to a caller holding
+                # the Lead token; any other local caller (a teammate pane, a manual
+                # shell) still gets per-pane state/stall but not the raw content.
+                # (The cockpit's own status bar reads pane_status_report directly,
+                # not over IPC, so the UI is unaffected.)
+                if not self._caller_is_lead(req):
+                    for _info in (report.get("panes") or {}).values():
+                        if isinstance(_info, dict):
+                            _info.pop("transcript_tail", None)
+                            _info.pop("last_screenshot", None)
                 self._reply(sock, ok=True, msg="status report", report=report)
                 return
             elif cmd == "harvest":
@@ -477,6 +499,12 @@ class CliServer(QObject):
                 template_id = (req.get("template_id") or "").strip()
                 if not template_id:
                     self._reply(sock, ok=False, msg="missing arg: 'template_id'")
+                    return
+                # Pre-check before the async schedule so we don't ack ok=true for
+                # a missing/empty template that run_pipeline would reject silently.
+                pre_ok, pre_msg = self._orch.pipeline_precheck(template_id, project=from_project)
+                if not pre_ok:
+                    self._reply(sock, ok=False, msg=pre_msg)
                     return
                 pl_delay = self._next_spawn_delay_ms(None, from_project)
                 QTimer.singleShot(

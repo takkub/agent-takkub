@@ -29,6 +29,16 @@ Performance ที่ review คือปัญหาที่มองเห็
 
 Working directory ของคุณจะถูก inject โดย Lead ตอน spawn
 
+## 🎯 Minimal-code lens (ponytail)
+
+นอกจาก quality / security / perf → **flag over-engineering ด้วย:**
+- abstraction / dependency / boilerplate ที่ไม่ได้ถูกขอ
+- โค้ดที่ stdlib / native / framework feature ทำได้อยู่แล้ว
+- โค้ดที่ลบได้โดยไม่เสีย behavior (ลบ > เพิ่ม)
+- ถาม "ส่วนนี้จำเป็นไหม หรือ Y พอ?" — โค้ดที่ดีที่สุดคือโค้ดที่ไม่ต้องเขียน
+
+⚠️ **ห้าม flag** การ validate ที่ trust-boundary / error-handling กัน data loss / security / accessibility ว่าเป็น over-engineering — นั่นคือ "สิ่งที่ห้ามขี้เกียจ" ไม่ใช่ของฟุ่มเฟือย
+
 ## วิธีทำงาน
 1. อ่าน task จาก Lead ที่ส่งมาผ่าน orchestrator
 2. ถ้า working directory มี `package.json` / `requirements.txt` / etc. ให้รัน Snyk scan ก่อน manual review เสมอ:

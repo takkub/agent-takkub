@@ -315,7 +315,12 @@ def analyze_compatibility(
 
 
 def build_updater_script(
-    npm: str, python_exe: str, repo_root: str, log_path: str, is_windows: bool
+    npm: str,
+    python_exe: str,
+    repo_root: str,
+    log_path: str,
+    is_windows: bool,
+    cockpit_pid: int,
 ) -> str:
     """Return a self-contained updater script body.
 
@@ -326,22 +331,42 @@ def build_updater_script(
     for the cockpit + panes to die, runs the install with nothing locking
     claude, then relaunches the cockpit (`python -m agent_takkub`).
 
+    Instead of a blind `sleep 3` (a race: a slow-exiting cockpit could still
+    hold claude.exe when npm runs → brick), this *polls* until *cockpit_pid*
+    actually exits (30s cap), then a 1s grace for the OS to release handles.
+    The install exit code is captured and a ``<log_path>.failed`` sentinel is
+    written on non-zero so a silent failure is visible; the cockpit is
+    relaunched either way so the user is never left without it.
+
     Pure string builder so it's unit-testable; the caller owns writing it to
     disk and spawning it detached. Output is tee'd to `log_path` for
     post-mortem if the relaunch doesn't come back.
     """
+    failed_sentinel = f"{log_path}.failed"
     if is_windows:
         return (
             "$ErrorActionPreference = 'Continue'\r\n"
-            "Start-Sleep -Seconds 3\r\n"  # let cockpit + panes fully exit → release file locks
+            # Wait for the cockpit to die so its panes release claude.exe (30s cap).
+            "$deadline = (Get-Date).AddSeconds(30)\r\n"
+            f"while ((Get-Process -Id {cockpit_pid} -ErrorAction SilentlyContinue) "
+            "-and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 200 }\r\n"
+            "Start-Sleep -Seconds 1\r\n"  # grace for the OS to release file handles
             f'& "{npm}" install -g {PACKAGE}@latest *>&1 | Tee-Object -FilePath "{log_path}"\r\n'
+            "$code = $LASTEXITCODE\r\n"
+            f'if ($code -ne 0) {{ "FAILED exit=$code" | Out-File -FilePath "{failed_sentinel}" }}\r\n'
             f"Start-Process -FilePath \"{python_exe}\" -ArgumentList '-m','agent_takkub' "
             f'-WorkingDirectory "{repo_root}"\r\n'
         )
     return (
         "#!/bin/sh\n"
-        "sleep 3\n"
+        f"pid={cockpit_pid}\n"
+        # Wait for the cockpit to die (150 × 0.2s = 30s cap), then a 1s grace.
+        "i=0\n"
+        'while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 150 ]; do sleep 0.2; i=$((i+1)); done\n'
+        "sleep 1\n"
         f'"{npm}" install -g {PACKAGE}@latest > "{log_path}" 2>&1\n'
+        "code=$?\n"
+        f'[ "$code" -ne 0 ] && echo "FAILED exit=$code" > "{failed_sentinel}"\n'
         f'cd "{repo_root}" && "{python_exe}" -m agent_takkub &\n'
     )
 

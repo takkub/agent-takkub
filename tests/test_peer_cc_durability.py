@@ -501,3 +501,57 @@ class TestSendEventLogsFullBody:
         ev = send_events[0]
         assert len(ev["body"]) <= 4_200  # 4096 chars + ellipsis
         assert ev["body"].endswith("…")
+
+
+# ─────────────────────────────────────────────────────────────
+# 7. Write-failure durability (M4#22: pop-before-write)
+# ─────────────────────────────────────────────────────────────
+
+
+class TestFlushWriteFailureKeepsRemainder:
+    def test_undelivered_tail_preserved_on_write_error(self, orch, tmp_path, monkeypatch):
+        """If a session.write raises mid-flush, the messages not yet written stay
+        queued + re-persisted instead of being lost (the bug pop-before-write had)."""
+        monkeypatch.setattr(orch_mod, "RUNTIME_DIR", tmp_path)
+        monkeypatch.setattr(orch_mod, "EVENTS_LOG", tmp_path / "events.log")
+        monkeypatch.setattr(orch_mod, "ensure_runtime", lambda: None)
+
+        proj = "proj_a"
+        lead_session = _make_alive_session()
+        # write succeeds for item 1, raises for item 2 → item 2 must survive
+        lead_session.write = MagicMock(side_effect=[None, RuntimeError("session gone")])
+        _register_pane(orch, LEAD.name, proj, lead_session)
+
+        orch._pending_lead_cc[proj] = [
+            {"from_role": "frontend", "to_role": "backend", "body": "[CC] m1", "ts": "t1"},
+            {"from_role": "qa", "to_role": "backend", "body": "[CC] m2", "ts": "t2"},
+        ]
+        save_calls: list[str] = []
+        monkeypatch.setattr(orch, "_save_pending_cc", lambda ns: save_calls.append(ns))
+
+        with pytest.raises(RuntimeError):
+            orch._flush_pending_lead_cc(proj)
+
+        # the undelivered message stays queued (not lost) and was re-persisted
+        remaining = orch._pending_lead_cc.get(proj, [])
+        assert len(remaining) == 1
+        assert remaining[0]["body"] == "[CC] m2"
+        assert proj in save_calls
+
+    def test_all_delivered_clears_queue(self, orch, tmp_path, monkeypatch):
+        """The happy path still fully clears + persists the empty queue."""
+        monkeypatch.setattr(orch_mod, "RUNTIME_DIR", tmp_path)
+        monkeypatch.setattr(orch_mod, "EVENTS_LOG", tmp_path / "events.log")
+        monkeypatch.setattr(orch_mod, "ensure_runtime", lambda: None)
+
+        proj = "proj_a"
+        _register_pane(orch, LEAD.name, proj, _make_alive_session())
+        orch._pending_lead_cc[proj] = [
+            {"from_role": "qa", "to_role": "backend", "body": "[CC] m1", "ts": "t1"},
+            {"from_role": "qa", "to_role": "backend", "body": "[CC] m2", "ts": "t2"},
+        ]
+        monkeypatch.setattr(orch, "_save_pending_cc", lambda ns: None)
+
+        orch._flush_pending_lead_cc(proj)
+
+        assert proj not in orch._pending_lead_cc

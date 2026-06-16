@@ -134,6 +134,39 @@ class TestRenderDecisionNote:
         assert "เสร็จแล้วครับ" in body
 
 
+class TestNoteScrub:
+    """sec-w1 (review 2026-06-16): the note is agent-authored and written into a
+    vault markdown file users `cat`. Scrub control/escape bytes, defuse a
+    leading frontmatter delimiter, cap length — without changing a normal note."""
+
+    def test_escape_bytes_stripped(self) -> None:
+        body = _render_decision_note(
+            "p", "r", "done \x1b[31mred\x9b2J and \x07bell — long enough note", dt.datetime.now()
+        )
+        assert "\x1b" not in body and "\x9b" not in body and "\x07" not in body
+        assert "done" in body and "bell" in body
+
+    def test_leading_frontmatter_dashes_defused(self) -> None:
+        body = _render_decision_note(
+            "p", "r", "---\nrole: evil\n---\nbody text here long", dt.datetime.now()
+        )
+        note_block = body.split("## Note\n\n", 1)[1]
+        # Must not begin with a bare `---` line (would read as a YAML
+        # frontmatter boundary); a zero-width space precedes it.
+        assert not note_block.startswith("---")
+        assert "​" in note_block
+
+    def test_oversized_note_capped(self) -> None:
+        body = _render_decision_note("p", "r", "x" * 20_000, dt.datetime.now())
+        assert "truncated" in body
+        assert len(body) < 12_000  # bounded — nowhere near 20k
+
+    def test_normal_note_identical_to_strip(self) -> None:
+        # Regression: a clean note renders exactly as before (note.strip()).
+        body = _render_decision_note("p", "r", "  ทำ /login endpoint เสร็จแล้ว  ", dt.datetime.now())
+        assert "## Note\n\nทำ /login endpoint เสร็จแล้ว\n" in body
+
+
 class TestJunkFilters:
     """Notes / projects that look like throwaway stubs are dropped from
     the vault mirror so Obsidian's graph stays connected and meaningful.

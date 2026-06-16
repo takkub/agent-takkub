@@ -168,3 +168,44 @@ class TestCuration:
         monkeypatch.setattr(pathlib.Path, "read_text", boom)
         # A read failure during curation must be swallowed — ensure still returns.
         assert ensure_role_memory("p", "qa") == path
+
+
+class TestHasLearnedContent:
+    """tok-5: a freshly-seeded role-memory file (skeleton only) must read as
+    *empty* so the spawn path injects a one-line pointer instead of the whole
+    skeleton; the moment a real bullet is appended it must read as *has content*
+    so the full learned-notes block returns."""
+
+    def test_seeded_file_is_empty(self, isolated_role_memory: pathlib.Path) -> None:
+        # Every seeded role file is just placeholders (incl. the one content-shaped
+        # "(ว่าง — เติมเมื่อเรียนรู้)" bullet) → no real learned content.
+        for role in ("frontend", "backend", "qa", "devops", "reviewer"):
+            text = ensure_role_memory("p", role).read_text(encoding="utf-8")
+            assert rm.has_learned_content(text, "p", role) is False, role
+
+    def test_real_bullet_counts_as_content(self) -> None:
+        assert (
+            rm.has_learned_content("## Conventions\n- use pnpm not npm here\n", "p", "frontend")
+            is True
+        )
+        assert rm.has_learned_content("## X\n* starred bullet too\n", "p", "backend") is True
+
+    def test_bare_placeholder_does_not_count(self) -> None:
+        # The seed's bare "-" / "-\n" placeholders must not register as content.
+        assert (
+            rm.has_learned_content("## Gotchas / pitfalls\n-\n\n## Key decisions\n-\n", "p", "qa")
+            is False
+        )
+
+    def test_seed_va_placeholder_does_not_count(self) -> None:
+        # The "(ว่าง …)" content-shaped seed bullet must be excluded too.
+        assert rm.has_learned_content("- (ว่าง — เติมเมื่อเรียนรู้)\n", "p", "frontend") is False
+
+    def test_empty_string(self) -> None:
+        assert rm.has_learned_content("", "p", "qa") is False
+
+    def test_appended_note_flips_to_content(self, isolated_role_memory: pathlib.Path) -> None:
+        path = ensure_role_memory("p", "frontend")
+        assert rm.has_learned_content(path.read_text(encoding="utf-8"), "p", "frontend") is False
+        path.write_text(path.read_text(encoding="utf-8") + "\n- learned: ports are 3001\n", "utf-8")
+        assert rm.has_learned_content(path.read_text(encoding="utf-8"), "p", "frontend") is True

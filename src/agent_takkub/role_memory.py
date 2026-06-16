@@ -161,6 +161,36 @@ def _seeded_headings() -> set[str]:
     return heads
 
 
+def has_learned_content(
+    text: str, project: str | None = None, base_role: str | None = None
+) -> bool:
+    """True iff the role-memory text contains at least one *real* learned bullet —
+    a ``- ``/``* `` marker with actual text that is NOT one of the seed skeleton's
+    own placeholders.
+
+    The seed isn't purely bare ``-`` markers: ``_BASE_SECTIONS`` ships one
+    content-shaped placeholder (``- (ว่าง — เติมเมื่อเรียนรู้)``). So a naive
+    ``_BULLET_RE`` scan would read a fresh file as "has content". We therefore
+    exclude every bullet the seed itself emits (matched on the same normalized key
+    the dedup logic uses), leaving only agent-added bullets. This is conservative:
+    a real note can never collide with a seed placeholder's key, so tok-5 can never
+    suppress an actual learned note on spawn.
+    """
+    seeded_keys: set[str] = set()
+    if project is not None and base_role is not None:
+        seeded_keys = {
+            _norm_bullet(ln)
+            for ln in _seed(project, base_role).splitlines()
+            if _BULLET_RE.match(ln)
+        }
+    for ln in text.splitlines():
+        if _BULLET_RE.match(ln):
+            k = _norm_bullet(ln)
+            if k and k not in seeded_keys:
+                return True
+    return False
+
+
 def _norm_bullet(line: str) -> str:
     """Dedup key for a bullet: drop the marker, lowercase, collapse whitespace,
     strip trailing punctuation. Empty string for non-content lines."""

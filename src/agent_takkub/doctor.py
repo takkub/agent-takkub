@@ -536,6 +536,30 @@ def check_hooks() -> list[Finding]:
 # ---------------------------------------------------------------------------
 # runner
 # ---------------------------------------------------------------------------
+# [markers] — ready-prompt detection self-test (M4#17)
+# ---------------------------------------------------------------------------
+
+
+def check_ready_markers() -> list[Finding]:
+    """Self-test the central ready-prompt marker table against canonical sample
+    screens. A FAIL here means an upstream CLI reword (or an edit) has broken
+    idle/done detection for a provider — fix the table or set
+    TAKKUB_EXTRA_READY_MARKERS."""
+    from .pty_session import ready_marker_selftest
+
+    failures = ready_marker_selftest()
+    if not failures:
+        return [Finding("markers", "ready-prompt", Status.OK, "all provider markers verified")]
+    return [
+        Finding(
+            "markers",
+            "ready-prompt",
+            Status.FAIL,
+            "; ".join(failures),
+            "an upstream prompt reword likely broke detection — update _READY_RULES "
+            "in pty_session.py or set TAKKUB_EXTRA_READY_MARKERS",
+        )
+    ]
 
 
 def run_all_checks() -> list[Finding]:
@@ -547,6 +571,7 @@ def run_all_checks() -> list[Finding]:
     findings.extend(check_projects())
     findings.extend(check_providers())
     findings.extend(check_hooks())
+    findings.extend(check_ready_markers())
     return findings
 
 

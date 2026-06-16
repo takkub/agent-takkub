@@ -214,7 +214,12 @@ class TestLeadContextProjectRulesInjection:
 
         from agent_takkub.lead_context import _render_lead_context
 
-        out_path = _render_lead_context(project="myapp")
+        # tok-4: injection only happens when claude WON'T auto-discover the file
+        # from its cwd. Pass an unrelated cwd to exercise the inject path (the
+        # skip-when-auto-loaded path is covered separately below).
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        out_path = _render_lead_context(project="myapp", claude_cwd=str(elsewhere))
         assert out_path is not None
         content = Path(out_path).read_text(encoding="utf-8")
         assert "deploy to Fly.io" in content
@@ -271,9 +276,28 @@ class TestLeadContextProjectRulesInjection:
 
         from agent_takkub.lead_context import _render_lead_context
 
-        out_path = _render_lead_context(project="bigapp")
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        out_path = _render_lead_context(project="bigapp", claude_cwd=str(elsewhere))
         content = Path(out_path).read_text(encoding="utf-8")
         assert "…(truncated)" in content
+
+    def test_skipped_when_cwd_auto_loads_it(self, lead_context_env: Path, tmp_path: Path) -> None:
+        """tok-4: the dominant real case — Lead spawns AT the single-path project
+        root, so claude auto-discovers its CLAUDE.md. The system-prompt injection
+        must be skipped to avoid doubling ~750 tok of identical rules."""
+        proj_root = tmp_path / "ext" / "soloapp"
+        proj_root.mkdir(parents=True)
+        (proj_root / "CLAUDE.md").write_text("# Project rules\n- deploy to Fly.io\n", "utf-8")
+        _write_projects(tmp_path, proj_root, name="soloapp")
+
+        from agent_takkub.lead_context import _render_lead_context
+
+        # claude_cwd == proj_root (what lead_cwd() resolves to for a single path)
+        out_path = _render_lead_context(project="soloapp", claude_cwd=str(proj_root))
+        content = Path(out_path).read_text(encoding="utf-8")
+        assert "📋 Project rules" not in content
+        assert "deploy to Fly.io" not in content
 
 
 # ─────────────────────────────────────────────────────────────────────

@@ -27,6 +27,7 @@ from __future__ import annotations
 import base64
 import codecs
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -119,6 +120,100 @@ def _resolve_open_path(
     except OSError:
         return None
     return None
+
+
+# Extensions that the OS would EXECUTE (not view) when handed to the default
+# "open" verb — a clicked path to one of these is a code-exec vector if a pane
+# can lure the user into clicking it. We reveal-in-folder instead of opening.
+# `.js`/`.sh` are intentionally excluded: they're far more common as source the
+# user legitimately wants to open in an editor, and on Windows `.sh` opens in an
+# editor rather than executing. (M3#13)
+_EXEC_EXTS = frozenset(
+    {
+        ".exe",
+        ".com",
+        ".scr",
+        ".pif",
+        ".bat",
+        ".cmd",
+        ".ps1",
+        ".psm1",
+        ".hta",
+        ".lnk",
+        ".msi",
+        ".msp",
+        ".vbs",
+        ".vbe",
+        ".wsf",
+        ".wsh",
+        ".jse",
+        ".reg",
+        ".cpl",
+        ".msc",
+        ".jar",
+        ".gadget",
+        ".inf",
+    }
+)
+
+
+def _is_exec_path(p: Path) -> bool:
+    """True if opening `p` with the OS default app would execute it (M3#13)."""
+    return p.suffix.lower() in _EXEC_EXTS
+
+
+# OSC 52 = "set clipboard": ESC ] 52 ; <selection> ; <base64> (BEL | ST). A pane
+# emitting this can silently overwrite the user's system clipboard. xterm.js
+# registers no OSC 52 handler today, but allowProposedApi is on, so we strip it
+# from outbound render text as defense-in-depth. The data field is base64 +
+# punctuation (never a control byte), so `[^\x07\x1b]*` safely spans it and stops
+# at the BEL / ST terminator. (M3#14)
+_OSC52_COMPLETE = re.compile(r"\x1b\]52;[^\x07\x1b]*(?:\x07|\x1b\\)")
+# Cap on how long a trailing *incomplete* OSC 52 we'll hold back waiting for its
+# terminator — beyond this a misbehaving program isn't really mid-sequence.
+_OSC52_CARRY_MAX = 8192
+
+
+def _strip_osc52(text: str) -> tuple[str, str]:
+    """Strip complete OSC 52 clipboard-set sequences from outbound terminal text.
+
+    Returns ``(cleaned, carry)``. ``carry`` is a trailing INCOMPLETE OSC 52
+    (started but not yet terminated) that the caller should prepend to the next
+    flush batch, so a sequence split across flushes is still filtered rather than
+    leaking its head to the renderer. Pure / no Qt → unit-tested. (M3#14)
+    """
+    cleaned = _OSC52_COMPLETE.sub("", text)
+    idx = cleaned.rfind("\x1b]52;")
+    if idx != -1:
+        rest = cleaned[idx:]
+        # Incomplete only if no terminator appears after the start marker.
+        if "\x07" not in rest and "\x1b\\" not in rest and len(rest) <= _OSC52_CARRY_MAX:
+            return cleaned[:idx], rest
+    return cleaned, ""
+
+
+def _within_allowed_bases(p: Path, cwd: str | None, extra_bases: tuple[str, ...]) -> bool:
+    """True if `p` resolves to somewhere inside the pane cwd or one of the
+    allowed base dirs. Clicked paths that escape every allowed subtree (an
+    absolute path elsewhere on disk, or a `../../` traversal) are refused so a
+    pane can't lure a click onto an arbitrary file. (M3#13)
+    """
+    bases: list[Path] = []
+    if cwd:
+        bases.append(Path(cwd))
+    bases.extend(Path(b) for b in extra_bases if b)
+    try:
+        rp = p.resolve()
+    except OSError:
+        return False
+    for base in bases:
+        try:
+            rb = base.resolve()
+        except OSError:
+            continue
+        if rp == rb or rp.is_relative_to(rb):
+            return True
+    return False
 
 
 class _Bridge(QObject):
@@ -262,7 +357,16 @@ class TerminalWidget(QWidget):
             return
         joined = "".join(self._write_buf)
         self._write_buf.clear()
-        self._view.page().runJavaScript(f"termWrite({json.dumps(joined)});")
+        # M3#14: drop OSC 52 clipboard-set escapes before they reach the renderer.
+        # A trailing incomplete sequence is held back (re-buffered) and combined
+        # with the next batch; the next write_bytes restarts the flush timer, so a
+        # never-terminated partial simply never renders (harmless, no busy-loop).
+        cleaned, carry = _strip_osc52(joined)
+        if carry:
+            self._write_buf.append(carry)
+        if not cleaned:
+            return
+        self._view.page().runJavaScript(f"termWrite({json.dumps(cleaned)});")
 
     def clear(self) -> None:
         if not self._page_ready:
@@ -387,7 +491,10 @@ class TerminalWidget(QWidget):
         Routing through QDesktopServices opens them in the real browser.
         """
         u = (uri or "").strip()
-        if not u or not u.lower().startswith(("http://", "https://", "mailto:", "file://")):
+        # M3#13: drop file:// — a clicked file:// URL bypasses _on_open_path's
+        # confinement + exec-extension guards and would hand an arbitrary local
+        # path straight to the OS opener. Web/mail schemes only.
+        if not u or not u.lower().startswith(("http://", "https://", "mailto:")):
             return
         QDesktopServices.openUrl(QUrl(u))
         self._log_link_event("open_url", u)
@@ -398,9 +505,21 @@ class TerminalWidget(QWidget):
         first, then the cockpit repo root."""
         from .config import REPO_ROOT
 
-        resolved = _resolve_open_path(raw, self._cwd, (str(REPO_ROOT),))
+        bases = (str(REPO_ROOT),)
+        resolved = _resolve_open_path(raw, self._cwd, bases)
         if resolved is None:
             self._log_link_event("open_path_miss", raw)
+            return
+        # M3#13: refuse paths that escape the pane cwd / repo subtree — a pane
+        # could otherwise print a clickable absolute path to anywhere on disk.
+        if not _within_allowed_bases(resolved, self._cwd, bases):
+            self._log_link_event("open_path_outside", str(resolved))
+            return
+        # M3#13: never hand an executable to the OS "open" verb (it would run it).
+        # Reveal it in the file manager instead so the user still finds the file.
+        if _is_exec_path(resolved):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(resolved.parent)))
+            self._log_link_event("open_path_exec_revealed", str(resolved))
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(resolved)))
         self._log_link_event("open_path", str(resolved))

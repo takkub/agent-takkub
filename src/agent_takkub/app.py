@@ -77,7 +77,16 @@ _chromium_flags = [
     "--disable-background-timer-throttling",
     "--disable-renderer-backgrounding",
     "--disable-backgrounding-occluded-windows",
-    "--disable-features=CalculateNativeWinOcclusion",
+    # CalculateNativeWinOcclusion: classic QtWebEngine white-screen workaround.
+    # HardwareMediaKeyHandling / GlobalMediaControls: on Windows these install a
+    #   low-level keyboard hook (WH_KEYBOARD_LL via Chromium's MediaKeysListener)
+    #   that sits in the system hook chain and can swallow the Windows/Super key
+    #   while the cockpit window is focused — the Start menu then appears dead
+    #   even though the key works fine before the app launches. The cockpit never
+    #   plays media, so disabling these removes the hook with zero functional
+    #   loss. (Multiple features go in ONE --disable-features= flag, comma-joined;
+    #   a second flag would override the first.)
+    "--disable-features=CalculateNativeWinOcclusion,HardwareMediaKeyHandling,GlobalMediaControls",
     # Cap renderer process count so dozens of panes (multi-project tabs) don't
     # each spawn a fresh Chromium renderer at ~150 MB baseline. With this flag
     # Chromium reuses renderer processes across views past the limit, trading

@@ -268,7 +268,7 @@ def cmd_harvest(args: argparse.Namespace) -> dict:
     """
     from datetime import datetime
 
-    payload: dict = _with_project({"cmd": "harvest", "role": args.role})
+    payload: dict = _with_project({"cmd": "harvest", "role": args.role, "from": _from_role()})
     if getattr(args, "since", None):
         payload["since"] = args.since
     payload["limit"] = getattr(args, "limit", None) or 100
@@ -311,7 +311,11 @@ def cmd_harvest(args: argparse.Namespace) -> dict:
         return {"ok": False, "msg": "user declined", "exit_code": 1}
 
     note = f"harvest: {len(artifacts)} artifact(s) modified since {since_str}"
-    done_resp = _request(_with_project({"cmd": "harvest-done", "role": args.role, "note": note}))
+    done_resp = _request(
+        _with_project(
+            {"cmd": "harvest-done", "role": args.role, "note": note, "from": _from_role()}
+        )
+    )
     if done_resp.get("ok"):
         print(f"ok: '{args.role}' marked as done ({len(artifacts)} artifact(s))")
         return {"ok": True, "msg": f"harvested {len(artifacts)} artifact(s)"}
