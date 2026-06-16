@@ -4,6 +4,8 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v0.8.0] - 2026-06-16
+
 ### Added (เพิ่ม)
 - **`takkub goal "<objective>"`** (#50) — Lead ตั้งเป้าหมาย session ก่อน fan-out
   parallel; orchestrator prepend goal block เข้าทุก `assign` task หลังจากนั้น
