@@ -19,6 +19,8 @@
 
 **สรุป overnight:** ทำเฉพาะที่ปลอดภัย 100% (bug + security, test-gated). token diet + M2-M5 รอ checkpoint คุณ
 
+**🐴 ponytail integration (safe path — ไม่ลง plugin):** ดูด rules จริงของ [ponytail](https://github.com/DietrichGebert/ponytail) (MIT) — "lazy senior dev / minimal-code decision hierarchy" — ใส่เป็น block ใน role file ของ teammate ที่เขียน code: `frontend/backend/mobile/devops` (full block) + `reviewer` (over-engineering lens). ไม่แตะ Node-hook plugin (กัน brick risk). per-pane โหลดแค่ role ตัวเอง → duplication ข้ามไฟล์ = 0 token เพิ่ม. test 2008 passed. **ยังไม่ใส่ Lead/CLAUDE.md** (sensitive — ถ้าอยากให้ Lead เขียน task spec แบบ minimal ด้วย บอกได้)
+
 ---
 
 ## 🟢 M0 — Quick wins (Lead-direct, รอบเดียว จบไว)
