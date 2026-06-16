@@ -19,6 +19,7 @@
 - **tok-3** bound session goal ที่ set-time (cap 4000 chars, กัน 64KiB re-paste) + 2 test
 - **bug-1 routing** pipeline-run pre-check ก่อน async ack (เลิกตอบ ok=true เสมอ) — `orch.pipeline_precheck()` + 3 test
 - **sec-w1** scrub agent note ก่อนเขียน vault (strip C0/C1/DEL + defuse leading `---` + cap) + 4 test
+- **bug-1 orch** auto-chain handoff release ตอน crash-cap + stuck-give-up (เดิม deadlock ถ้า blocker ตัวสุดท้ายตายไม่ส่ง done) — extract `_maybe_fire_auto_chain_handoff` เรียก 4 จุด + 6 test
 - **🐴 ponytail** (safe path — ไม่ลง plugin): ดูด rules จริงของ [ponytail](https://github.com/DietrichGebert/ponytail) (MIT) "lazy senior dev / minimal-code" ใส่ role file `frontend/backend/mobile/devops` + `reviewer` (over-engineering lens). ไม่แตะ Node-hook (กัน brick). per-pane โหลดแค่ role ตัวเอง → 0 token เพิ่ม
 
 **⏸️ DEFER (ต้อง checkpoint คุณ):**
