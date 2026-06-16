@@ -82,6 +82,24 @@ from .vault_mirror import (  # re-exported for test + script imports
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*[mABCDHJKSThlsu]")
 
+# Bound on how many bytes of a pane transcript we read to extract its tail for
+# `takkub status`. A long session's transcript grows to MBs; reading the whole
+# file every status call (just to keep the last few lines) is an unbounded memory
+# spike. 64 KiB is ample for the 5-line tail even with very long lines. (M4#22)
+_TRANSCRIPT_TAIL_BYTES = 64 * 1024
+
+
+def _read_tail_bytes(path: pathlib.Path, max_bytes: int) -> bytes:
+    """Return at most the last ``max_bytes`` bytes of ``path`` without reading
+    the whole file into memory. Pure (no Qt) so it can be unit-tested. Raises
+    OSError on read failure (caller handles)."""
+    with open(path, "rb") as fh:
+        fh.seek(0, 2)
+        size = fh.tell()
+        fh.seek(max(0, size - max_bytes))
+        return fh.read()
+
+
 # Artifact dirs excluded from harvest scans.
 _HARVEST_EXCLUDE_DIRS = frozenset(
     {
@@ -4244,7 +4262,9 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 transcript_path = getattr(pane, "_transcript_path", None)
                 if transcript_path:
                     try:
-                        raw = pathlib.Path(transcript_path).read_bytes()
+                        raw = _read_tail_bytes(
+                            pathlib.Path(transcript_path), _TRANSCRIPT_TAIL_BYTES
+                        )
                         lines = raw.decode("utf-8", errors="replace").splitlines()
                         tail_lines = [ln for ln in lines if ln.strip()][-5:]
                         tail_lines = [_ANSI.sub("", ln) for ln in tail_lines]
