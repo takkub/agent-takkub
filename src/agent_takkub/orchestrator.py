@@ -1422,6 +1422,100 @@ class Orchestrator(QObject):
         env["TAKKUB_PANE_TOKEN"] = tok
         return tok
 
+    def _launch_session(
+        self,
+        *,
+        pane,
+        role_name: str,
+        project_ns: str,
+        spawn_cwd: str,
+        argv: list[str],
+        env: dict,
+        pane_tok: str,
+        label: str,
+        cwd: str | None,
+        project: str | None,
+        _from_auto_respawn: bool,
+        _shard_total: int,
+        codex_exit: bool = False,
+        auto_trust: bool = False,
+    ) -> tuple[bool, str]:
+        """Common ConPTY launch tail for the non-claude spawn branches (shell,
+        gemini, codex). Creates the PtySession, runs the final TOCTOU re-sample
+        gate, does the native spawn under the _spawn_in_progress arbiter, attaches
+        the pane, wires the exit handler, clears recent-exit state, and returns
+        spawn()'s (ok, msg). M5#23: was copy-pasted ~50 lines x3 with real drift —
+        the divergences are now explicit params:
+
+          codex_exit : stamp ``codex_spawn_ts`` + wire ``_on_codex_exit`` (codex
+                       early-crash detection) instead of the stale-guarded
+                       ``_on_session_exit`` used by shell/gemini.
+          auto_trust : call ``_auto_trust`` after attach (gemini/codex; NOT shell).
+
+        The claude branch is intentionally NOT routed through here — it adds
+        resume / session-uuid / MCP wiring and stays inline.
+        """
+        session = PtySession(cols=_PANE_COLS, rows=_PANE_ROWS, parent=self)
+        _t_path = _build_transcript_path(project_ns, role_name)
+        pane._transcript_path = _t_path
+        self._spawn_in_progress = True
+        try:
+            # Tier 2 final re-sample: check InSendMessageEx immediately before the
+            # native ConPTY call to narrow the TOCTOU window.
+            if not self._final_gate_clear():
+                session.setParent(None)
+                session.deleteLater()
+                self._toctou_redefer(
+                    role_name,
+                    cwd,
+                    project,
+                    project_ns,
+                    _from_auto_respawn,
+                    _shard_total,
+                    pane_tok=pane_tok,
+                )
+                return True, f"{role_name} spawn deferred (final re-sample blocked)"
+            _t0 = time.time()
+            session.spawn(argv=argv, cwd=spawn_cwd, env=env, transcript_path=_t_path)
+            _log_event(
+                "spawn_native_ms",
+                role=role_name,
+                project=project_ns,
+                ms=int((time.time() - _t0) * 1000),
+            )
+            pane.attach_session(session, cwd=spawn_cwd)
+            _ekey = _exit_key(project_ns, role_name)
+            _sess = session
+            if codex_exit:
+                self._ps(_ekey).codex_spawn_ts = time.time()
+                session.processExited.connect(
+                    lambda code, r=role_name, c=spawn_cwd, p=project_ns, sess=_sess: (
+                        self._on_codex_exit(code, r, c, p, sess)
+                    )
+                )
+            else:
+                session.processExited.connect(
+                    lambda _code, r=role_name, c=spawn_cwd, p=project_ns, s=_sess: (
+                        self._on_session_exit(r, c, p)
+                        if (pp := self._panes_by_project.get(p, {}).get(r)) is not None
+                        and pp.session is s
+                        else None
+                    )
+                )
+            if _ekey in self._recent_exits:
+                del self._recent_exits[_ekey]
+            if auto_trust:
+                self._auto_trust(role_name, project=project_ns)
+            self.statusChanged.emit()
+            _log_event("spawn", role=role_name, cwd=spawn_cwd, resumed=False)
+            return True, f"{label} spawned in {spawn_cwd}"
+        except Exception as e:
+            self._pane_tokens.pop(pane_tok, None)
+            return False, f"failed to spawn {label}: {e}"
+        finally:
+            self._spawn_in_progress = False
+            self._drain_spawn_queue()
+
     def spawn(
         self,
         role_name: str,
@@ -1569,56 +1663,20 @@ class Orchestrator(QObject):
             env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
             _shell_tok = self._mint_pane_token(env, project_ns, role_name)
             shell_argv = [pwsh_basename, "-NoLogo"]
-            session = PtySession(cols=_PANE_COLS, rows=_PANE_ROWS, parent=self)
-            _t_path = _build_transcript_path(project_ns, role_name)
-            pane._transcript_path = _t_path
-            self._spawn_in_progress = True
-            try:
-                # Tier 2 final re-sample: check InSendMessageEx immediately
-                # before the native ConPTY call to narrow the TOCTOU window.
-                if not self._final_gate_clear():
-                    session.setParent(None)
-                    session.deleteLater()
-                    self._toctou_redefer(
-                        role_name,
-                        cwd,
-                        project,
-                        project_ns,
-                        _from_auto_respawn,
-                        _shard_total,
-                        pane_tok=_shell_tok,
-                    )
-                    return True, f"{role_name} spawn deferred (final re-sample blocked)"
-                _t0 = time.time()
-                session.spawn(argv=shell_argv, cwd=spawn_cwd, env=env, transcript_path=_t_path)
-                _log_event(
-                    "spawn_native_ms",
-                    role=role_name,
-                    project=project_ns,
-                    ms=int((time.time() - _t0) * 1000),
-                )
-                pane.attach_session(session, cwd=spawn_cwd)
-                _sess_shell = session
-                session.processExited.connect(
-                    lambda _code, r=role_name, c=spawn_cwd, p=project_ns, s=_sess_shell: (
-                        self._on_session_exit(r, c, p)
-                        if (pp := self._panes_by_project.get(p, {}).get(r)) is not None
-                        and pp.session is s
-                        else None
-                    )
-                )
-                _ekey = _exit_key(project_ns, role_name)
-                if _ekey in self._recent_exits:
-                    del self._recent_exits[_ekey]
-                self.statusChanged.emit()
-                _log_event("spawn", role=role_name, cwd=spawn_cwd, resumed=False)
-                return True, f"shell spawned in {spawn_cwd}"
-            except Exception as e:
-                self._pane_tokens.pop(_shell_tok, None)
-                return False, f"failed to spawn shell: {e}"
-            finally:
-                self._spawn_in_progress = False
-                self._drain_spawn_queue()
+            return self._launch_session(
+                pane=pane,
+                role_name=role_name,
+                project_ns=project_ns,
+                spawn_cwd=spawn_cwd,
+                argv=shell_argv,
+                env=env,
+                pane_tok=_shell_tok,
+                label="shell",
+                cwd=cwd,
+                project=project,
+                _from_auto_respawn=_from_auto_respawn,
+                _shard_total=_shard_total,
+            )
 
         # ── codex pane: non-claude path ─────────────────────────────
         # `codex` is OpenAI's TUI; it speaks a different protocol and
@@ -1672,57 +1730,21 @@ class Orchestrator(QObject):
                 gemini_bin,
                 "-y",  # yolo: skip per-command approval prompts (parity with codex --ask-for-approval never)
             ]
-            session = PtySession(cols=_PANE_COLS, rows=_PANE_ROWS, parent=self)
-            _t_path = _build_transcript_path(project_ns, role_name)
-            pane._transcript_path = _t_path
-            self._spawn_in_progress = True
-            try:
-                # Tier 2 final re-sample: check InSendMessageEx immediately
-                # before the native ConPTY call to narrow the TOCTOU window.
-                if not self._final_gate_clear():
-                    session.setParent(None)
-                    session.deleteLater()
-                    self._toctou_redefer(
-                        role_name,
-                        cwd,
-                        project,
-                        project_ns,
-                        _from_auto_respawn,
-                        _shard_total,
-                        pane_tok=_gem_tok,
-                    )
-                    return True, f"{role_name} spawn deferred (final re-sample blocked)"
-                _t0 = time.time()
-                session.spawn(argv=gemini_argv, cwd=spawn_cwd, env=env, transcript_path=_t_path)
-                _log_event(
-                    "spawn_native_ms",
-                    role=role_name,
-                    project=project_ns,
-                    ms=int((time.time() - _t0) * 1000),
-                )
-                pane.attach_session(session, cwd=spawn_cwd)
-                _sess_gem = session
-                session.processExited.connect(
-                    lambda _code, r=role_name, c=spawn_cwd, p=project_ns, s=_sess_gem: (
-                        self._on_session_exit(r, c, p)
-                        if (pp := self._panes_by_project.get(p, {}).get(r)) is not None
-                        and pp.session is s
-                        else None
-                    )
-                )
-                _ekey = _exit_key(project_ns, role_name)
-                if _ekey in self._recent_exits:
-                    del self._recent_exits[_ekey]
-                self._auto_trust(role_name, project=project_ns)
-                self.statusChanged.emit()
-                _log_event("spawn", role=role_name, cwd=spawn_cwd, resumed=False)
-                return True, f"gemini spawned in {spawn_cwd}"
-            except Exception as e:
-                self._pane_tokens.pop(_gem_tok, None)
-                return False, f"failed to spawn gemini: {e}"
-            finally:
-                self._spawn_in_progress = False
-                self._drain_spawn_queue()
+            return self._launch_session(
+                pane=pane,
+                role_name=role_name,
+                project_ns=project_ns,
+                spawn_cwd=spawn_cwd,
+                argv=gemini_argv,
+                env=env,
+                pane_tok=_gem_tok,
+                label="gemini",
+                cwd=cwd,
+                project=project,
+                _from_auto_respawn=_from_auto_respawn,
+                _shard_total=_shard_total,
+                auto_trust=True,
+            )
 
         if effective_provider == CODEX:
             from .codex_agents_md import ensure_agents_md
@@ -1778,55 +1800,22 @@ class Orchestrator(QObject):
                     "-s",
                     "workspace-write",
                 ]
-            session = PtySession(cols=_PANE_COLS, rows=_PANE_ROWS, parent=self)
-            _t_path = _build_transcript_path(project_ns, role_name)
-            pane._transcript_path = _t_path
-            self._spawn_in_progress = True
-            try:
-                # Tier 2 final re-sample: check InSendMessageEx immediately
-                # before the native ConPTY call to narrow the TOCTOU window.
-                if not self._final_gate_clear():
-                    session.setParent(None)
-                    session.deleteLater()
-                    self._toctou_redefer(
-                        role_name,
-                        cwd,
-                        project,
-                        project_ns,
-                        _from_auto_respawn,
-                        _shard_total,
-                        pane_tok=_cdx_tok,
-                    )
-                    return True, f"{role_name} spawn deferred (final re-sample blocked)"
-                _t0 = time.time()
-                session.spawn(argv=codex_argv, cwd=spawn_cwd, env=env, transcript_path=_t_path)
-                _log_event(
-                    "spawn_native_ms",
-                    role=role_name,
-                    project=project_ns,
-                    ms=int((time.time() - _t0) * 1000),
-                )
-                pane.attach_session(session, cwd=spawn_cwd)
-                _ekey = _exit_key(project_ns, role_name)
-                self._ps(_ekey).codex_spawn_ts = time.time()
-                _sess_cdx = session
-                session.processExited.connect(
-                    lambda code, r=role_name, c=spawn_cwd, p=project_ns, sess=_sess_cdx: (
-                        self._on_codex_exit(code, r, c, p, sess)
-                    )
-                )
-                if _ekey in self._recent_exits:
-                    del self._recent_exits[_ekey]
-                self._auto_trust(role_name, project=project_ns)
-                self.statusChanged.emit()
-                _log_event("spawn", role=role_name, cwd=spawn_cwd, resumed=False)
-                return True, f"codex spawned in {spawn_cwd}"
-            except Exception as e:
-                self._pane_tokens.pop(_cdx_tok, None)
-                return False, f"failed to spawn codex: {e}"
-            finally:
-                self._spawn_in_progress = False
-                self._drain_spawn_queue()
+            return self._launch_session(
+                pane=pane,
+                role_name=role_name,
+                project_ns=project_ns,
+                spawn_cwd=spawn_cwd,
+                argv=codex_argv,
+                env=env,
+                pane_tok=_cdx_tok,
+                label="codex",
+                cwd=cwd,
+                project=project,
+                _from_auto_respawn=_from_auto_respawn,
+                _shard_total=_shard_total,
+                codex_exit=True,
+                auto_trust=True,
+            )
 
         # Resolve cwd:
         #   Lead          → repo root (so CLAUDE.md auto-discovery picks up the
