@@ -72,6 +72,42 @@ class TestPastePayload:
         assert text in wrapped
 
 
+class TestPasteBreakoutStripping:
+    """M6#28: cockpit-injected content must never carry bracketed-paste markers.
+    An embedded ESC[201~ end-marker would terminate paste mode early and have the
+    trailing bytes (incl. a \\r) run as live keystrokes — an auto-submit /
+    command-injection breakout."""
+
+    def test_embedded_end_marker_stripped_in_wrapped(self) -> None:
+        evil = "a" * 250 + _PASTE_END + "\rmalicious --now\r"
+        out = _paste_payload(evil)
+        # exactly one start + one end marker (the wrapping pair), none inside
+        assert out.startswith(_PASTE_START)
+        assert out.endswith(_PASTE_END)
+        assert out.count(_PASTE_END) == 1
+        assert out.count(_PASTE_START) == 1
+        # the injected end-marker is gone; the surrounding text remains
+        assert "malicious --now" in out
+
+    def test_embedded_start_marker_stripped(self) -> None:
+        evil = "b" * 250 + _PASTE_START + "x"
+        out = _paste_payload(evil)
+        assert out.count(_PASTE_START) == 1  # only the wrapper's
+
+    def test_embedded_marker_stripped_in_short_path(self) -> None:
+        # Even below the wrap threshold the markers are scrubbed (the short path
+        # writes straight through, so a lone end-marker would still be live).
+        evil = "short" + _PASTE_END + "\rrm -rf\r"
+        out = _paste_payload(evil)
+        assert _PASTE_END not in out
+        assert _PASTE_START not in out
+        assert "rm -rf" in out
+
+    def test_clean_text_unaffected(self) -> None:
+        text = "a" * 300
+        assert _paste_payload(text) == _PASTE_START + text + _PASTE_END
+
+
 class TestEnterDelay:
     """Post-write delay before the submitting `\\r` is scaled by whether
     the payload was bracket-pasted. Claude Code v2.1.x renders the

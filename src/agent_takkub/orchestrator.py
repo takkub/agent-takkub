@@ -559,6 +559,15 @@ def _paste_payload(text: str) -> str:
     inputs are returned unchanged so single-character prompts still
     feel like typing rather than a paste burst.
     """
+    # M6#28: strip any embedded bracketed-paste markers from the content first.
+    # An attacker-influenced task/message carrying an ESC[201~ end-marker would
+    # otherwise terminate paste mode early, and the bytes after it (including a
+    # \r) would be interpreted as LIVE keystrokes — auto-submitting an injected
+    # command into the pane's TUI. The markers are never legitimate content, so
+    # removing them is always safe (do it regardless of length, since the short
+    # path writes the text straight through too).
+    if _PASTE_START in text or _PASTE_END in text:
+        text = text.replace(_PASTE_START, "").replace(_PASTE_END, "")
     if len(text) < BRACKETED_PASTE_THRESHOLD:
         return text
     return _PASTE_START + text + _PASTE_END
