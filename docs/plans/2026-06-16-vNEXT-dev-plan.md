@@ -20,6 +20,7 @@
 - **bug-1 routing** pipeline-run pre-check ก่อน async ack (เลิกตอบ ok=true เสมอ) — `orch.pipeline_precheck()` + 3 test
 - **sec-w1** scrub agent note ก่อนเขียน vault (strip C0/C1/DEL + defuse leading `---` + cap) + 4 test
 - **bug-1 orch** auto-chain handoff release ตอน crash-cap + stuck-give-up (เดิม deadlock ถ้า blocker ตัวสุดท้ายตายไม่ส่ง done) — extract `_maybe_fire_auto_chain_handoff` เรียก 4 จุด + 6 test
+- **M4#21 + bug-2** updater รอ cockpit PID exit จริง (แทน sleep 3s race) + capture install exit code → sentinel `.failed` (เดิมเงียบ) + tests
 - **🐴 ponytail** (safe path — ไม่ลง plugin): ดูด rules จริงของ [ponytail](https://github.com/DietrichGebert/ponytail) (MIT) "lazy senior dev / minimal-code" ใส่ role file `frontend/backend/mobile/devops` + `reviewer` (over-engineering lens). ไม่แตะ Node-hook (กัน brick). per-pane โหลดแค่ role ตัวเอง → 0 token เพิ่ม
 
 **⏸️ DEFER (ต้อง checkpoint คุณ):**
@@ -27,7 +28,11 @@
 - **M2** (offload main-thread) — threading race ไม่โผล่ใน test เสมอ
 - **M3 #13/#14/#16, M4 #17/#18/#20/#21, M5** — เสี่ยงสูง / blast radius กว้าง ต้อง restart-verify
 
-**สรุป overnight:** ทำ **6 commit** ที่ปลอดภัย 100% (bug + security + token-cap + ponytail, test-gated 2017 passed). ของเสี่ยง/sensitive รอ checkpoint คุณ
+**สรุป:** ทำ **10 work commit** ที่ปลอดภัย+test-gated (2023 passed) — harvest, sanitizer, ponytail, tok-3, pipeline pre-check, vault scrub, auto-chain release, updater PID-wait. หยุด autonomous ตรงนี้เพราะที่เหลือเข้าโซนที่ต้อง restart-verify หรือ refactor path sensitive (สะสมเสี่ยงถ้า stack blind)
+
+**🔜 รอ restart-verify session (ทำกับคุณ ทีละ checkpoint):**
+- **medium** (ทำได้ test-gated แต่แตะ path sensitive): tok-4/5 (context inject), M5#24 (token mint/revoke refactor in spawn), M4#20 (persist shard groups), M3#16 (status gate — ระวัง status bar), tok-7
+- **🔴 high-risk** (verify เดี่ยว ห้าม stack): M4#17 marker-table, M5#23 spawn 920-บรรทัด refactor, M2 main-thread offload, M3#13 exec-hardening, M3#14 outbound filter, M0#3 CLAUDE.md restructure
 
 ---
 
