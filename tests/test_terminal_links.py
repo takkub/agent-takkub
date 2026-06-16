@@ -63,3 +63,85 @@ class TestResolveOpenPath:
     def test_relative_with_no_base_is_none(self, tmp_path):
         # nothing to resolve against → cannot confirm existence
         assert _resolve_open_path("docs/x.md") is None
+
+
+class TestExecExtensionGuard:
+    """M3#13: clicked paths to OS-executable files must be flagged so the open
+    handler reveals-in-folder instead of running them."""
+
+    def test_windows_executables_flagged(self):
+        from pathlib import Path
+
+        from agent_takkub.terminal_widget import _is_exec_path
+
+        for ext in (".exe", ".bat", ".cmd", ".ps1", ".hta", ".lnk", ".msi", ".vbs", ".scr"):
+            assert _is_exec_path(Path(f"payload{ext}")) is True, ext
+
+    def test_extension_check_is_case_insensitive(self):
+        from pathlib import Path
+
+        from agent_takkub.terminal_widget import _is_exec_path
+
+        assert _is_exec_path(Path("Payload.EXE")) is True
+        assert _is_exec_path(Path("run.Bat")) is True
+
+    def test_documents_and_source_not_flagged(self):
+        from pathlib import Path
+
+        from agent_takkub.terminal_widget import _is_exec_path
+
+        for name in ("report.html", "notes.md", "main.py", "app.js", "diagram.png", "data.json"):
+            assert _is_exec_path(Path(name)) is False, name
+
+
+class TestPathConfinement:
+    """M3#13: a clicked path must lie within the pane cwd or an allowed base;
+    anything escaping the subtree (absolute elsewhere, or `../` traversal) is
+    refused so a pane can't lure a click onto an arbitrary file."""
+
+    def test_path_inside_cwd_allowed(self, tmp_path):
+        from agent_takkub.terminal_widget import _within_allowed_bases
+
+        f = tmp_path / "docs" / "x.md"
+        f.parent.mkdir()
+        f.write_text("x", encoding="utf-8")
+        assert _within_allowed_bases(f, cwd=str(tmp_path), extra_bases=()) is True
+
+    def test_path_inside_extra_base_allowed(self, tmp_path):
+        from agent_takkub.terminal_widget import _within_allowed_bases
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        f = repo / "ARCHITECTURE.md"
+        f.write_text("x", encoding="utf-8")
+        assert _within_allowed_bases(f, cwd=None, extra_bases=(str(repo),)) is True
+
+    def test_path_outside_all_bases_refused(self, tmp_path):
+        from agent_takkub.terminal_widget import _within_allowed_bases
+
+        cwd = tmp_path / "proj"
+        outside = tmp_path / "elsewhere" / "secret.txt"
+        cwd.mkdir()
+        outside.parent.mkdir()
+        outside.write_text("x", encoding="utf-8")
+        assert _within_allowed_bases(outside, cwd=str(cwd), extra_bases=()) is False
+
+    def test_dotdot_traversal_refused(self, tmp_path):
+        from pathlib import Path
+
+        from agent_takkub.terminal_widget import _within_allowed_bases
+
+        cwd = tmp_path / "proj"
+        cwd.mkdir()
+        secret = tmp_path / "secret.txt"
+        secret.write_text("x", encoding="utf-8")
+        # cwd/../secret.txt escapes the cwd subtree once resolved
+        escaped = Path(str(cwd)) / ".." / "secret.txt"
+        assert _within_allowed_bases(escaped, cwd=str(cwd), extra_bases=()) is False
+
+    def test_no_bases_refuses_everything(self, tmp_path):
+        from agent_takkub.terminal_widget import _within_allowed_bases
+
+        f = tmp_path / "x.md"
+        f.write_text("x", encoding="utf-8")
+        assert _within_allowed_bases(f, cwd=None, extra_bases=()) is False

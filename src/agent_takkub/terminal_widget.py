@@ -121,6 +121,70 @@ def _resolve_open_path(
     return None
 
 
+# Extensions that the OS would EXECUTE (not view) when handed to the default
+# "open" verb — a clicked path to one of these is a code-exec vector if a pane
+# can lure the user into clicking it. We reveal-in-folder instead of opening.
+# `.js`/`.sh` are intentionally excluded: they're far more common as source the
+# user legitimately wants to open in an editor, and on Windows `.sh` opens in an
+# editor rather than executing. (M3#13)
+_EXEC_EXTS = frozenset(
+    {
+        ".exe",
+        ".com",
+        ".scr",
+        ".pif",
+        ".bat",
+        ".cmd",
+        ".ps1",
+        ".psm1",
+        ".hta",
+        ".lnk",
+        ".msi",
+        ".msp",
+        ".vbs",
+        ".vbe",
+        ".wsf",
+        ".wsh",
+        ".jse",
+        ".reg",
+        ".cpl",
+        ".msc",
+        ".jar",
+        ".gadget",
+        ".inf",
+    }
+)
+
+
+def _is_exec_path(p: Path) -> bool:
+    """True if opening `p` with the OS default app would execute it (M3#13)."""
+    return p.suffix.lower() in _EXEC_EXTS
+
+
+def _within_allowed_bases(p: Path, cwd: str | None, extra_bases: tuple[str, ...]) -> bool:
+    """True if `p` resolves to somewhere inside the pane cwd or one of the
+    allowed base dirs. Clicked paths that escape every allowed subtree (an
+    absolute path elsewhere on disk, or a `../../` traversal) are refused so a
+    pane can't lure a click onto an arbitrary file. (M3#13)
+    """
+    bases: list[Path] = []
+    if cwd:
+        bases.append(Path(cwd))
+    bases.extend(Path(b) for b in extra_bases if b)
+    try:
+        rp = p.resolve()
+    except OSError:
+        return False
+    for base in bases:
+        try:
+            rb = base.resolve()
+        except OSError:
+            continue
+        if rp == rb or rp.is_relative_to(rb):
+            return True
+    return False
+
+
 class _Bridge(QObject):
     """Object exposed to JS via QWebChannel."""
 
@@ -387,7 +451,10 @@ class TerminalWidget(QWidget):
         Routing through QDesktopServices opens them in the real browser.
         """
         u = (uri or "").strip()
-        if not u or not u.lower().startswith(("http://", "https://", "mailto:", "file://")):
+        # M3#13: drop file:// — a clicked file:// URL bypasses _on_open_path's
+        # confinement + exec-extension guards and would hand an arbitrary local
+        # path straight to the OS opener. Web/mail schemes only.
+        if not u or not u.lower().startswith(("http://", "https://", "mailto:")):
             return
         QDesktopServices.openUrl(QUrl(u))
         self._log_link_event("open_url", u)
@@ -398,9 +465,21 @@ class TerminalWidget(QWidget):
         first, then the cockpit repo root."""
         from .config import REPO_ROOT
 
-        resolved = _resolve_open_path(raw, self._cwd, (str(REPO_ROOT),))
+        bases = (str(REPO_ROOT),)
+        resolved = _resolve_open_path(raw, self._cwd, bases)
         if resolved is None:
             self._log_link_event("open_path_miss", raw)
+            return
+        # M3#13: refuse paths that escape the pane cwd / repo subtree — a pane
+        # could otherwise print a clickable absolute path to anywhere on disk.
+        if not _within_allowed_bases(resolved, self._cwd, bases):
+            self._log_link_event("open_path_outside", str(resolved))
+            return
+        # M3#13: never hand an executable to the OS "open" verb (it would run it).
+        # Reveal it in the file manager instead so the user still finds the file.
+        if _is_exec_path(resolved):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(resolved.parent)))
+            self._log_link_event("open_path_exec_revealed", str(resolved))
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(resolved)))
         self._log_link_event("open_path", str(resolved))
