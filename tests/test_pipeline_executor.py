@@ -181,6 +181,64 @@ class TestRunPipelineValidation:
         assert "no runnable hops" in msg
 
 
+class TestPipelinePrecheck:
+    """pipeline_precheck (bug-1 routing 2026-06-16): cli_server schedules
+    run_pipeline async and used to ack ok=true regardless. precheck lets it
+    reply with the real error first, with no side effects."""
+
+    def test_precheck_template_not_found(
+        self,
+        qapp: QCoreApplication,
+        two_project_json: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        orch, _ = _make_orch_with_panes("proj_a", ["lead"])
+        from agent_takkub import pipeline_config
+
+        monkeypatch.setattr(pipeline_config, "load", lambda *a, **k: _simple_pipeline([]))
+        ok, msg = orch.pipeline_precheck("does-not-exist", project="proj_a")
+        assert not ok
+        assert "not found" in msg
+
+    def test_precheck_empty_hops(
+        self,
+        qapp: QCoreApplication,
+        two_project_json: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        orch, _ = _make_orch_with_panes("proj_a", ["lead"])
+        from agent_takkub import pipeline_config
+
+        monkeypatch.setattr(
+            pipeline_config, "load", lambda *a, **k: _simple_pipeline([], template_id="empty-pipe")
+        )
+        ok, msg = orch.pipeline_precheck("empty-pipe", project="proj_a")
+        assert not ok
+        assert "no runnable hops" in msg
+
+    def test_precheck_valid_template_ok_with_no_side_effects(
+        self,
+        qapp: QCoreApplication,
+        two_project_json: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        orch, _ = _make_orch_with_panes("proj_a", ["lead", "backend"])
+        from agent_takkub import pipeline_config
+
+        monkeypatch.setattr(
+            pipeline_config,
+            "load",
+            lambda *a, **k: _simple_pipeline(
+                [[{"role": "backend", "cwd": "", "requiresCommit": False, "autoChain": False}]],
+                template_id="be-only",
+            ),
+        )
+        ok, _ = orch.pipeline_precheck("be-only", project="proj_a")
+        assert ok
+        # precheck must not create a PipelineRun (no hop fired)
+        assert not orch._pipeline_runs
+
+
 # ──────────────────────────────────────────────────────────────
 # run_pipeline() happy path — hop 0 fires
 # ──────────────────────────────────────────────────────────────

@@ -3088,6 +3088,29 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         self._notify_lead(project_ns, message)
         _log_event(log_event, project=project_ns)
 
+    def pipeline_precheck(self, template_id: str, project: str | None = None) -> tuple[bool, str]:
+        """Validate that *template_id* exists and has runnable hops, with no
+        side effects.
+
+        Lets an async caller (cli_server schedules run_pipeline on a QTimer and
+        replies immediately) verify the run BEFORE acking, instead of always
+        replying ok=true and failing silently when the template is missing or
+        empty. run_pipeline re-checks defensively, so this is purely the
+        early-honest-reply seam.
+        """
+        from . import pipeline_config
+
+        project_ns = self._resolve_project(project)
+        templates = {
+            t["id"]: t for t in pipeline_config.load(project=project_ns).get("templates", [])
+        }
+        tpl = templates.get(template_id)
+        if tpl is None:
+            return False, f"pipeline template not found: {template_id!r}"
+        if not [hop for hop in tpl.get("hops", []) if hop]:
+            return False, f"pipeline {template_id!r}: no runnable hops"
+        return True, "ok"
+
     def run_pipeline(self, template_id: str, project: str | None = None) -> tuple[bool, str]:
         """Load *template_id* from pipeline_config and fire hop 0.
 

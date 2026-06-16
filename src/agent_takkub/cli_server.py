@@ -478,6 +478,12 @@ class CliServer(QObject):
                 if not template_id:
                     self._reply(sock, ok=False, msg="missing arg: 'template_id'")
                     return
+                # Pre-check before the async schedule so we don't ack ok=true for
+                # a missing/empty template that run_pipeline would reject silently.
+                pre_ok, pre_msg = self._orch.pipeline_precheck(template_id, project=from_project)
+                if not pre_ok:
+                    self._reply(sock, ok=False, msg=pre_msg)
+                    return
                 pl_delay = self._next_spawn_delay_ms(None, from_project)
                 QTimer.singleShot(
                     pl_delay,
