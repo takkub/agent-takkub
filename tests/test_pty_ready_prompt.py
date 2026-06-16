@@ -263,3 +263,45 @@ class TestHasUnparsedToolCall:
         lines = ['<invoke name="Bash">'] + [f"output line {i}" for i in range(12)]
         s = _feed_screen(*lines)
         assert s.has_unparsed_tool_call() is None
+
+
+# -- M4#17: central marker table — env override + doctor self-test ------------
+
+
+class TestReadyMarkerTable:
+    def test_selftest_passes_on_shipped_table(self) -> None:
+        from agent_takkub.pty_session import ready_marker_selftest
+
+        assert ready_marker_selftest() == []
+
+    def test_env_override_rescues_reworded_prompt(self, monkeypatch) -> None:
+        from agent_takkub.pty_session import _classify_ready
+
+        # Simulate an upstream reword the shipped table doesn't know.
+        reworded = "» send a message (ctrl+j newline)"
+        assert _classify_ready(reworded) is False
+        monkeypatch.setenv("TAKKUB_EXTRA_READY_MARKERS", "send a message")
+        assert _classify_ready(reworded) is True
+
+    def test_env_override_does_not_beat_hard_blocker(self, monkeypatch) -> None:
+        from agent_takkub.pty_session import _classify_ready
+
+        # An active interrupt must still win even with a matching extra marker.
+        monkeypatch.setenv("TAKKUB_EXTRA_READY_MARKERS", "send a message")
+        assert _classify_ready("send a message\n(esc to interrupt) working") is False
+
+    def test_selftest_ignores_env_override(self, monkeypatch) -> None:
+        # The self-test validates the SHIPPED table, not whatever the operator
+        # patched in — so a bogus override can't mask a real regression.
+        from agent_takkub.pty_session import ready_marker_selftest
+
+        monkeypatch.setenv("TAKKUB_EXTRA_READY_MARKERS", "zzz-not-a-real-marker")
+        assert ready_marker_selftest() == []
+
+    def test_doctor_check_reports_ok(self) -> None:
+        from agent_takkub.doctor import Status, check_ready_markers
+
+        findings = check_ready_markers()
+        assert len(findings) == 1
+        assert findings[0].status is Status.OK
+        assert findings[0].category == "markers"

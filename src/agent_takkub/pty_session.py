@@ -103,6 +103,103 @@ _TTY_PROMPT_RE = re.compile(
 _TTY_PROMPT_TAIL_ROWS = 5
 
 
+# ── Ready-prompt detection markers (M4#17) ──────────────────────────────────
+# is_at_ready_prompt() decides whether a pane is idle at its input prompt. The
+# markers are provider-specific bottom-row UI strings; when an upstream CLI
+# rewords its prompt, detection silently breaks and that provider's idle
+# watchdog / done-gate stalls — this happened 3x (gemini input hint, gemini
+# update footer #51, codex splash). Centralised here as ONE ordered table so a
+# reword is a one-line patch, with an env override to rescue a reworded prompt
+# without shipping code, and a doctor self-test that flags a stale marker.
+#
+# Hard blockers: any present → NEVER ready (active interrupt / modal), even if a
+# ready marker is also on screen.
+_READY_HARD_BLOCKERS = (
+    "trust this folder",
+    "do you trust the contents of this directory",
+    "press enter to continue",
+    "esc to interrupt",
+    "esc to cancel",
+)
+# Ordered ready/soft-block rules — FIRST match wins. The order ENCODES the
+# per-provider precedence: gemini's persistent input hint + passive update
+# footer must beat the codex "update available!" splash blocker, which in turn
+# beats codex's own banner. Changing the order changes behaviour — keep it.
+# (ready_when, marker)
+_READY_RULES: tuple[tuple[bool, str], ...] = (
+    (True, "type your message or"),  # gemini input prompt hint
+    (True, "gemini cli update available!"),  # gemini passive footer (#51)
+    (False, "update available!"),  # codex startup splash modal
+    (True, "openai codex (v"),  # codex prompt banner
+    (True, "bypass permissions"),  # claude footer
+    (True, "shift+tab to cycle"),  # claude footer
+)
+
+
+def _extra_ready_markers() -> tuple[str, ...]:
+    """Operator-supplied extra ready markers (lower-case substrings) to rescue an
+    upstream-reworded prompt WITHOUT a code change. Checked after the hard
+    blockers so an active interrupt/modal still wins. (M4#17)"""
+    override = os.environ.get("TAKKUB_EXTRA_READY_MARKERS", "").strip()
+    if not override:
+        return ()
+    return tuple(m.strip().lower() for m in override.split(",") if m.strip())
+
+
+def _classify_ready(text_lower: str) -> bool:
+    """Pure ready-prompt verdict over already-lowercased screen text. Shared by
+    is_at_ready_prompt() and the doctor self-test so the two can't drift. (M4#17)
+
+    Faithful to the original if/return chain: hard blockers (all → not ready)
+    came first there too, so grouping them is equivalent; the ordered rules then
+    reproduce the exact first-match-wins precedence."""
+    if any(b in text_lower for b in _READY_HARD_BLOCKERS):
+        return False
+    for marker in _extra_ready_markers():
+        if marker in text_lower:
+            return True
+    for ready_when, marker in _READY_RULES:
+        if marker in text_lower:
+            return ready_when
+    return False
+
+
+# Canonical sample screens with their expected verdict — bake the behaviour so a
+# marker going stale is caught by `takkub doctor` instead of silently breaking
+# the idle watchdog. Each tuple is (screen_text, expected_is_ready).
+_READY_SELFTEST_CASES: tuple[tuple[str, bool], ...] = (
+    ("Type your message or @path/to/file", True),  # gemini idle
+    ("Thinking... (esc to cancel, 12s)\nType your message or @path", False),  # gemini busy
+    ("Gemini CLI update available! 0.46.0 -> 0.47.0\nType your message or @path", True),
+    ("Gemini CLI update available! 0.46.0 -> 0.47.0", True),  # passive footer alone
+    ("OpenAI Codex (v1.2.3)\nupdate available! run npm i -g @openai/codex", False),  # codex splash
+    ("bypass permissions", True),  # claude idle
+    ("(esc to interrupt) building...\nbypass permissions", False),  # claude busy
+)
+
+
+def ready_marker_selftest() -> list[str]:
+    """Run the canned ready/busy screens through _classify_ready and return a
+    list of human-readable failures (empty = all good). Called by doctor so a
+    stale ready marker surfaces as a diagnostic rather than a silent stall. The
+    env override is intentionally ignored here — the self-test validates the
+    SHIPPED table. (M4#17)"""
+    failures: list[str] = []
+    saved = os.environ.pop("TAKKUB_EXTRA_READY_MARKERS", None)
+    try:
+        for text, expected in _READY_SELFTEST_CASES:
+            got = _classify_ready(text.lower())
+            if got != expected:
+                first = text.splitlines()[0] if text else ""
+                failures.append(
+                    f"ready-marker selftest: {first!r} expected ready={expected}, got {got}"
+                )
+    finally:
+        if saved is not None:
+            os.environ["TAKKUB_EXTRA_READY_MARKERS"] = saved
+    return failures
+
+
 # ── Claude usage-limit detection ────────────────────────────────────────────
 # When a claude pane hits the plan's usage limit it stops producing output and
 # prints a "limit reached … resets <time>" banner. Without detection the idle
@@ -577,48 +674,10 @@ class PtySession(QObject):
                     on gemini panes (root cause of 'gemini forgot
                     takkub done' incidents 2026-05-20).
         """
-        text = "\n".join(self.display_lines()).lower()
-        # ── modal / interrupt blockers (apply to all providers) ─────
-        if "trust this folder" in text:
-            return False
-        if "do you trust the contents of this directory" in text:
-            return False
-        if "press enter to continue" in text:
-            return False
-        if "esc to interrupt" in text:
-            return False
-        # gemini/codex show "Thinking… (esc to cancel)" while working, but
-        # keep their "type your message or @path" input box visible the whole
-        # time — so without this blocker the idle watchdog reads a thinking
-        # gemini as idle and floods the pane with `takkub done` reminders
-        # (root cause of the 2026-05-30 gemini reminder-pileup + search loop).
-        if "esc to cancel" in text:
-            return False
-        # ── ready markers ───────────────────────────────────────────
-        # gemini: the "type your message or @path" input prompt stays usable
-        # even while the passive "Gemini CLI update available! <cur> → <new>"
-        # footer banner is showing — which it does PERSISTENTLY once a newer
-        # gemini release exists upstream. Check this ready marker BEFORE the
-        # generic "update available!" blocker below; otherwise a gemini that
-        # merely has an update banner reads as perpetually-busy, the idle
-        # watchdog never nudges it to run `takkub done`, and its report never
-        # reaches Lead (issue #51 — surfaced right after gemini auto-updated
-        # to 0.46.0 with a newer release already published upstream).
-        if "type your message or" in text:  # gemini's input prompt hint
-            return True
-        if "gemini cli update available!" in text:
-            return True
-
-        # codex: "update available!" is part of its startup splash modal that
-        # must be dismissed before the prompt is usable — keep blocking it.
-        # Checked AFTER gemini's ready markers so it only ever gates the codex
-        # splash (and claude, which never shows this string), never a ready
-        # gemini wearing an update footer.
-        if "update available!" in text:
-            return False
-        if "openai codex (v" in text:
-            return True
-        return "bypass permissions" in text or "shift+tab to cycle" in text
+        # Detection markers + their precedence live in the central table
+        # (_READY_HARD_BLOCKERS / _READY_RULES) so an upstream reword is a
+        # one-line patch and `takkub doctor` can self-test them. See M4#17.
+        return _classify_ready("\n".join(self.display_lines()).lower())
 
     def rate_limit_reset_at(self) -> float | None:
         """If the pane is showing claude's usage-limit banner, return the epoch
