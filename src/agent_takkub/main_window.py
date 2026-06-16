@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from PyQt6.QtCore import QCoreApplication, QSettings, Qt, QThread, QThreadPool, QTimer, pyqtSignal
@@ -3656,18 +3656,38 @@ class MainWindow(QMainWindow):
 
         rate_limited = getattr(data, "status", "ok") == "rate_limited"
         window_map = {w.name: w for w in (data.windows or [])}
+        now = datetime.now(tz=UTC)
 
-        def _fmt(key: str, label: str) -> str:
+        def _fmt_eta(w) -> str:
+            """Clock-style time-left until reset: 'H:MM' or 'D:HH:MM' with days."""
+            resets_at = getattr(w, "resets_at", None)
+            if resets_at is None:
+                return ""
+            if resets_at.tzinfo is None:
+                resets_at = resets_at.replace(tzinfo=UTC)
+            secs = (resets_at - now).total_seconds()
+            if secs <= 0:
+                return "now"
+            mins = int(secs // 60)
+            hours, mins = divmod(mins, 60)
+            days, hours = divmod(hours, 24)
+            if days:
+                return f"{days}:{hours:02d}:{mins:02d}"
+            return f"{hours}:{mins:02d}"
+
+        def _fmt(key: str) -> str:
             w = window_map.get(key)
             if w is None:
-                return f"{label} —"
-            return f"{label} {round(w.utilization)}%"
+                return "—"
+            pct = f"{round(w.utilization)}%"
+            eta = _fmt_eta(w)
+            return f"{eta} {pct}" if eta else pct
 
-        text = "  ".join(
+        text = " / ".join(
             [
-                _fmt("five_hour", "5h"),
-                _fmt("seven_day", "7d"),
-                _fmt("seven_day_sonnet", "7dS"),
+                _fmt("five_hour"),
+                _fmt("seven_day"),
+                _fmt("seven_day_sonnet"),
             ]
         )
 
@@ -3688,9 +3708,20 @@ class MainWindow(QMainWindow):
         )
         plan = getattr(data, "plan", "")
         stale_note = " (rate-limited, showing last known)" if rate_limited else ""
+        reset_lines = []
+        for key, label in (
+            ("five_hour", "5h"),
+            ("seven_day", "7d"),
+            ("seven_day_sonnet", "7dS"),
+        ):
+            w = window_map.get(key)
+            if w is not None and (eta := _fmt_eta(w)):
+                reset_lines.append(f"{label} resets in {eta}")
+        reset_block = ("\n" + " · ".join(reset_lines)) if reset_lines else ""
         self._limit_label.setToolTip(
             f"Claude usage — plan: {plan}{stale_note}\n"
             "5h = five-hour · 7d = seven-day · 7dS = seven-day Sonnet"
+            f"{reset_block}"
         )
 
     # ──────────────────────────────────────────────────────────────
