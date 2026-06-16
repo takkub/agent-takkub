@@ -27,6 +27,7 @@ from __future__ import annotations
 import base64
 import codecs
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -159,6 +160,36 @@ _EXEC_EXTS = frozenset(
 def _is_exec_path(p: Path) -> bool:
     """True if opening `p` with the OS default app would execute it (M3#13)."""
     return p.suffix.lower() in _EXEC_EXTS
+
+
+# OSC 52 = "set clipboard": ESC ] 52 ; <selection> ; <base64> (BEL | ST). A pane
+# emitting this can silently overwrite the user's system clipboard. xterm.js
+# registers no OSC 52 handler today, but allowProposedApi is on, so we strip it
+# from outbound render text as defense-in-depth. The data field is base64 +
+# punctuation (never a control byte), so `[^\x07\x1b]*` safely spans it and stops
+# at the BEL / ST terminator. (M3#14)
+_OSC52_COMPLETE = re.compile(r"\x1b\]52;[^\x07\x1b]*(?:\x07|\x1b\\)")
+# Cap on how long a trailing *incomplete* OSC 52 we'll hold back waiting for its
+# terminator — beyond this a misbehaving program isn't really mid-sequence.
+_OSC52_CARRY_MAX = 8192
+
+
+def _strip_osc52(text: str) -> tuple[str, str]:
+    """Strip complete OSC 52 clipboard-set sequences from outbound terminal text.
+
+    Returns ``(cleaned, carry)``. ``carry`` is a trailing INCOMPLETE OSC 52
+    (started but not yet terminated) that the caller should prepend to the next
+    flush batch, so a sequence split across flushes is still filtered rather than
+    leaking its head to the renderer. Pure / no Qt → unit-tested. (M3#14)
+    """
+    cleaned = _OSC52_COMPLETE.sub("", text)
+    idx = cleaned.rfind("\x1b]52;")
+    if idx != -1:
+        rest = cleaned[idx:]
+        # Incomplete only if no terminator appears after the start marker.
+        if "\x07" not in rest and "\x1b\\" not in rest and len(rest) <= _OSC52_CARRY_MAX:
+            return cleaned[:idx], rest
+    return cleaned, ""
 
 
 def _within_allowed_bases(p: Path, cwd: str | None, extra_bases: tuple[str, ...]) -> bool:
@@ -326,7 +357,16 @@ class TerminalWidget(QWidget):
             return
         joined = "".join(self._write_buf)
         self._write_buf.clear()
-        self._view.page().runJavaScript(f"termWrite({json.dumps(joined)});")
+        # M3#14: drop OSC 52 clipboard-set escapes before they reach the renderer.
+        # A trailing incomplete sequence is held back (re-buffered) and combined
+        # with the next batch; the next write_bytes restarts the flush timer, so a
+        # never-terminated partial simply never renders (harmless, no busy-loop).
+        cleaned, carry = _strip_osc52(joined)
+        if carry:
+            self._write_buf.append(carry)
+        if not cleaned:
+            return
+        self._view.page().runJavaScript(f"termWrite({json.dumps(cleaned)});")
 
     def clear(self) -> None:
         if not self._page_ready:

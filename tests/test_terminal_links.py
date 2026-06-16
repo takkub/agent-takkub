@@ -145,3 +145,68 @@ class TestPathConfinement:
         f = tmp_path / "x.md"
         f.write_text("x", encoding="utf-8")
         assert _within_allowed_bases(f, cwd=None, extra_bases=()) is False
+
+
+class TestStripOsc52:
+    """M3#14: OSC 52 clipboard-set escapes must be stripped from outbound render
+    text; a sequence split across flush batches is held back via `carry`."""
+
+    def _strip(self, text):
+        from agent_takkub.terminal_widget import _strip_osc52
+
+        return _strip_osc52(text)
+
+    def test_strips_complete_bel_terminated(self):
+        # ESC ] 52 ; c ; <base64> BEL
+        seq = "\x1b]52;c;aGVsbG8=\x07"
+        cleaned, carry = self._strip(f"before{seq}after")
+        assert cleaned == "beforeafter"
+        assert carry == ""
+
+    def test_strips_complete_st_terminated(self):
+        # ESC ] 52 ; c ; <base64> ESC \  (ST)
+        seq = "\x1b]52;c;aGVsbG8=\x1b\\"
+        cleaned, carry = self._strip(f"x{seq}y")
+        assert cleaned == "xy"
+        assert carry == ""
+
+    def test_strips_multiple(self):
+        s = "a\x1b]52;c;Zm9v\x07b\x1b]52;p;YmFy\x07c"
+        cleaned, carry = self._strip(s)
+        assert cleaned == "abc"
+        assert carry == ""
+
+    def test_leaves_other_osc_untouched(self):
+        # OSC 0 (set title) and OSC 8 (hyperlink) are legitimate — must survive.
+        title = "\x1b]0;my title\x07"
+        cleaned, carry = self._strip(f"{title}hello")
+        assert cleaned == f"{title}hello"
+        assert carry == ""
+
+    def test_incomplete_trailing_held_as_carry(self):
+        # head of an OSC52 with no terminator yet → cleaned excludes it, carry has it
+        cleaned, carry = self._strip("visible\x1b]52;c;aGVsb")
+        assert cleaned == "visible"
+        assert carry == "\x1b]52;c;aGVsb"
+
+    def test_carry_recombines_and_strips(self):
+        # simulate split across two batches: first returns carry, prepend to next
+        cleaned1, carry1 = self._strip("out\x1b]52;c;aGVs")
+        assert cleaned1 == "out"
+        cleaned2, carry2 = self._strip(carry1 + "bG8=\x07done")
+        assert cleaned2 == "done"
+        assert carry2 == ""
+
+    def test_oversized_partial_not_held(self):
+        from agent_takkub.terminal_widget import _OSC52_CARRY_MAX
+
+        big = "\x1b]52;c;" + ("A" * (_OSC52_CARRY_MAX + 10))
+        cleaned, carry = self._strip(big)
+        # too long to plausibly be mid-sequence → passes through, not held
+        assert carry == ""
+        assert cleaned == big
+
+    def test_plain_text_unchanged(self):
+        cleaned, carry = self._strip("just normal output\nwith newlines\n")
+        assert cleaned == "just normal output\nwith newlines\n"
+        assert carry == ""
