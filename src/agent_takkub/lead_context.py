@@ -37,6 +37,7 @@ from .config import (
     RUNTIME_DIR,
     active_project,
     ensure_runtime,
+    lead_cwd,
     load_projects,
 )
 from .vault_mirror import _is_junk_note
@@ -201,9 +202,26 @@ def _recent_session_brief(project: str) -> str | None:
     return brief
 
 
+def _claude_autoloads(claude_cwd: pathlib.Path, md_dir: pathlib.Path) -> bool:
+    """True if claude, started in ``claude_cwd``, will auto-discover the CLAUDE.md
+    living in ``md_dir`` — i.e. ``md_dir`` is the cwd itself or an ancestor of it,
+    since claude reads CLAUDE.md from cwd and walks UP the tree. A ``md_dir`` that
+    is a *subdirectory* of cwd is NOT auto-loaded eagerly, so the caller must still
+    inject it. Used by tok-4 to avoid double-injecting the project rules that
+    claude already pulls in on its own.
+    """
+    try:
+        claude_cwd = claude_cwd.resolve()
+        md_dir = md_dir.resolve()
+    except (OSError, ValueError):
+        return False
+    return md_dir == claude_cwd or md_dir in claude_cwd.parents
+
+
 def _render_lead_context(
     project: str | None = None,
     post_compact_brief: str | None = None,
+    claude_cwd: str | None = None,
 ) -> str | None:
     """Render Lead's spawn-time system prompt: cockpit CLAUDE.md + an
     auto-injected `BLOCKED_DIRS` paragraph listing the active project's paths.
@@ -281,8 +299,17 @@ def _render_lead_context(
         if _proj_root_str:
             _proj_root = pathlib.Path(_proj_root_str).resolve()
             if _proj_root != REPO_ROOT.resolve():
+                # tok-4: skip injection when claude will auto-discover this same
+                # CLAUDE.md from its cwd (Lead spawns at `claude_cwd`, defaulting to
+                # lead_cwd(project)). Injecting it too would double the project rules
+                # in context. Only inject when the file lives somewhere claude won't
+                # auto-load (e.g. a project subdir while Lead sits at the parent).
+                _lead_dir_str = claude_cwd or lead_cwd(project=name)
+                _auto = bool(_lead_dir_str) and _claude_autoloads(
+                    pathlib.Path(_lead_dir_str), _proj_root
+                )
                 _candidate = _proj_root / "CLAUDE.md"
-                if _candidate.exists():
+                if _candidate.exists() and not _auto:
                     _raw = _candidate.read_text(encoding="utf-8")
                     _cap = 3000
                     if len(_raw) > _cap:

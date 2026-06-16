@@ -1829,7 +1829,9 @@ class Orchestrator(QObject):
             if spawn_cwd != str(REPO_ROOT):
                 post_compact_brief = self._build_post_compact_brief(project_ns)
                 role_md_file = _render_lead_context(
-                    project_ns, post_compact_brief=post_compact_brief
+                    project_ns,
+                    post_compact_brief=post_compact_brief,
+                    claude_cwd=spawn_cwd,
                 )
         else:
             staging = agent_role_dir(base_role)
@@ -1895,31 +1897,56 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                         _mem_text = _role_mem.read_text(encoding="utf-8", errors="replace")
                     except OSError:
                         _mem_text = ""
-                    _MEM_MAX_LINES = 200
-                    _mem_all = _mem_text.splitlines()
-                    # Keep the TAIL (newest) — notes are appended at the bottom, so
-                    # a head slice would drop the freshest learnings first (#43).
-                    # role_memory curation normally keeps the file under this cap;
-                    # this slice is just a safety net for a still-large file.
-                    _mem_shown = "\n".join(_mem_all[-_MEM_MAX_LINES:])
-                    _trunc = (
-                        f"\n\n> ⚠️ ตัดมา {_MEM_MAX_LINES}/{len(_mem_all)} บรรทัดท้ายสุด — "
-                        f'อ่านเต็มด้วย `Read("{_role_mem}")`'
-                        if len(_mem_all) > _MEM_MAX_LINES
-                        else ""
-                    )
-                    _appendix += (
-                        "\n\n---\n\n"
-                        f"## 🧠 Your learned notes ({base_role} · this project)\n\n"
-                        f"ความรู้ที่ **คุณ ({base_role}) สะสมไว้กับโปรเจคนี้** "
-                        "(สะสมข้ามรอบงาน) — **นี่คือสิ่งที่คุณรู้เกี่ยวกับโปรเจคนี้แล้ว "
-                        "อย่าเดา/ค้นใหม่ในสิ่งที่อยู่ด้านล่างนี้:**\n\n"
-                        "<learned-notes>\n" + _mem_shown + "\n</learned-notes>" + _trunc + "\n\n"
-                        "**เมื่อเจอสิ่งที่ไม่ obvious** (pattern, pitfall, login/flow, "
-                        "decision) ที่ยังไม่มีด้านบน → **append สั้นๆ** ลงไฟล์ "
-                        f"`{_role_mem}` ด้วย Edit/Write เพื่อให้รอบหน้าเร็วขึ้น "
-                        "เก็บเฉพาะของจริงที่มีค่า อย่าซ้ำ code/git\n"
-                    )
+                    # tok-5: a freshly-seeded file is just the skeleton (bare `-`
+                    # placeholders, no learned bullets). Inlining the whole empty
+                    # skeleton + the long "อย่าเดา/ค้นใหม่" wrapper costs ~100-150
+                    # tok/spawn for zero knowledge. When there's no real content
+                    # yet, emit a one-line pointer instead; the full inline block
+                    # returns the moment the role appends its first note.
+                    from .role_memory import has_learned_content
+
+                    if not has_learned_content(_mem_text, project_ns, base_role):
+                        # No real notes yet — a one-line pointer instead of dumping
+                        # the empty skeleton + long wrapper. The full inline block
+                        # below returns the moment this role appends its first note.
+                        _appendix += (
+                            "\n\n---\n\n"
+                            f"## 🧠 Your learned notes ({base_role} · this project)\n\n"
+                            "ยังไม่มี learned notes สำหรับโปรเจคนี้ — เมื่อเจอสิ่งที่ไม่ obvious "
+                            "(pattern, pitfall, login/flow, decision) → **append สั้นๆ** ลงไฟล์ "
+                            f"`{_role_mem}` ด้วย Edit/Write เพื่อให้รอบหน้าเร็วขึ้น "
+                            "(เก็บเฉพาะของจริงที่มีค่า อย่าซ้ำ code/git)\n"
+                        )
+                    else:
+                        _MEM_MAX_LINES = 200
+                        _mem_all = _mem_text.splitlines()
+                        # Keep the TAIL (newest) — notes are appended at the bottom,
+                        # so a head slice would drop the freshest learnings first
+                        # (#43). role_memory curation normally keeps the file under
+                        # this cap; this slice is just a safety net for a large file.
+                        _mem_shown = "\n".join(_mem_all[-_MEM_MAX_LINES:])
+                        _trunc = (
+                            f"\n\n> ⚠️ ตัดมา {_MEM_MAX_LINES}/{len(_mem_all)} บรรทัดท้ายสุด — "
+                            f'อ่านเต็มด้วย `Read("{_role_mem}")`'
+                            if len(_mem_all) > _MEM_MAX_LINES
+                            else ""
+                        )
+                        _appendix += (
+                            "\n\n---\n\n"
+                            f"## 🧠 Your learned notes ({base_role} · this project)\n\n"
+                            f"ความรู้ที่ **คุณ ({base_role}) สะสมไว้กับโปรเจคนี้** "
+                            "(สะสมข้ามรอบงาน) — **นี่คือสิ่งที่คุณรู้เกี่ยวกับโปรเจคนี้แล้ว "
+                            "อย่าเดา/ค้นใหม่ในสิ่งที่อยู่ด้านล่างนี้:**\n\n"
+                            "<learned-notes>\n"
+                            + _mem_shown
+                            + "\n</learned-notes>"
+                            + _trunc
+                            + "\n\n"
+                            "**เมื่อเจอสิ่งที่ไม่ obvious** (pattern, pitfall, login/flow, "
+                            "decision) ที่ยังไม่มีด้านบน → **append สั้นๆ** ลงไฟล์ "
+                            f"`{_role_mem}` ด้วย Edit/Write เพื่อให้รอบหน้าเร็วขึ้น "
+                            "เก็บเฉพาะของจริงที่มีค่า อย่าซ้ำ code/git\n"
+                        )
                 if _appendix:
                     role_md_path.write_text(_existing_md + _appendix, encoding="utf-8")
                 role_md_file = str(role_md_path)
