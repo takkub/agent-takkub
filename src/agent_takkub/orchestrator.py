@@ -398,6 +398,13 @@ _STUCK_RESUME_NUDGE = (
 # _apply_session_goal greps for to avoid double-prepending on respawn replay.
 _SESSION_GOAL_HEADER = "[SESSION GOAL — ทุก role ในงานนี้ยึดเป้าหมายเดียวกัน]"
 
+# A goal is a short objective + scope boundary; bound it so a pathological
+# paste (review tok-3: worst case ~64 KiB) can't be re-prepended to every
+# assign for the rest of the session. 4000 chars (~1k tokens) is far above any
+# real objective. Truncation is at set-time so the stored value is already
+# clean for every later prepend.
+_SESSION_GOAL_MAX = 4000
+
 # Throughput watchdog (issue #35): flag panes whose PTY output rate exceeds
 # RUNAWAY_BYTES_S continuously for RUNAWAY_DURATION_S seconds.
 #
@@ -2533,6 +2540,8 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         text = (text or "").strip()
         if not text:
             return False, "empty goal — pass an objective string, or use --clear to unset"
+        if len(text) > _SESSION_GOAL_MAX:
+            text = text[:_SESSION_GOAL_MAX].rstrip() + "\n…(goal truncated)"
         self._session_goals[project_ns] = text
         _log_event("goal-set", goal_preview=text[:120], project=project_ns)
         preview = text if len(text) <= 80 else text[:77] + "…"
