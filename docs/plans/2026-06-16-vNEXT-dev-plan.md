@@ -15,11 +15,18 @@
 
 **⚠️ M0#3 (CLAUDE.md split) — DEFER + แก้ความเข้าใจผิด:** verifier บอก tok-1 ว่า cockpit CLAUDE.md "double-loaded" → **เป็น FALSE POSITIVE** อ่าน code จริงพบ `orchestrator.py:1822` guard: `_render_lead_context` (ตัว inject `base`) ถูกเรียก**เฉพาะตอน Lead cwd ≠ REPO_ROOT** (ทำ project อื่น) ซึ่ง Claude Code auto-load **project CLAUDE.md** (ไม่ใช่ cockpit) → การ inject cockpit CLAUDE.md **จำเป็น ไม่ใช่ของซ้ำ**. tok-1 ที่แท้จริง = CLAUDE.md ตัวมันใหญ่ (6.8k) ควร restructure core/lazy — แต่ต้องใช้ **วิจารณญาณคุณ**ว่าอะไร load-bearing → defer
 
-**⏸️ M1 token items (tok-3/4/5/6/7) — DEFER ทั้งหมด:** ทุกตัวแตะ context-injection ที่ behavioral-sensitive + review พิสูจน์แล้วว่าวิเคราะห์ token พลาดได้ (tok-1) → ไม่ปลอดภัยทำ unsupervised ตอน user หลับ (เช่น tok-5 skip-empty role memory: role-memory มี seed skeleton เสมอ, detect "ว่างจริง" พลาด = suppress note จริง). ทำตอนคุณตื่นพร้อม verify
+**✅ เพิ่มเติมที่ทำเสร็จ (safe + test-gated, commit แล้ว):**
+- **tok-3** bound session goal ที่ set-time (cap 4000 chars, กัน 64KiB re-paste) + 2 test
+- **bug-1 routing** pipeline-run pre-check ก่อน async ack (เลิกตอบ ok=true เสมอ) — `orch.pipeline_precheck()` + 3 test
+- **sec-w1** scrub agent note ก่อนเขียน vault (strip C0/C1/DEL + defuse leading `---` + cap) + 4 test
+- **🐴 ponytail** (safe path — ไม่ลง plugin): ดูด rules จริงของ [ponytail](https://github.com/DietrichGebert/ponytail) (MIT) "lazy senior dev / minimal-code" ใส่ role file `frontend/backend/mobile/devops` + `reviewer` (over-engineering lens). ไม่แตะ Node-hook (กัน brick). per-pane โหลดแค่ role ตัวเอง → 0 token เพิ่ม
 
-**สรุป overnight:** ทำเฉพาะที่ปลอดภัย 100% (bug + security, test-gated). token diet + M2-M5 รอ checkpoint คุณ
+**⏸️ DEFER (ต้อง checkpoint คุณ):**
+- **tok-4/5/6** + M0#3 — แตะ context-injection ที่ behavioral-sensitive, verify ไม่ได้ถ้าคุณไม่อยู่ (tok-5: role-memory มี seed skeleton เสมอ, detect "ว่างจริง" พลาด = suppress note จริง)
+- **M2** (offload main-thread) — threading race ไม่โผล่ใน test เสมอ
+- **M3 #13/#14/#16, M4 #17/#18/#20/#21, M5** — เสี่ยงสูง / blast radius กว้าง ต้อง restart-verify
 
-**🐴 ponytail integration (safe path — ไม่ลง plugin):** ดูด rules จริงของ [ponytail](https://github.com/DietrichGebert/ponytail) (MIT) — "lazy senior dev / minimal-code decision hierarchy" — ใส่เป็น block ใน role file ของ teammate ที่เขียน code: `frontend/backend/mobile/devops` (full block) + `reviewer` (over-engineering lens). ไม่แตะ Node-hook plugin (กัน brick risk). per-pane โหลดแค่ role ตัวเอง → duplication ข้ามไฟล์ = 0 token เพิ่ม. test 2008 passed. **ยังไม่ใส่ Lead/CLAUDE.md** (sensitive — ถ้าอยากให้ Lead เขียน task spec แบบ minimal ด้วย บอกได้)
+**สรุป overnight:** ทำ **6 commit** ที่ปลอดภัย 100% (bug + security + token-cap + ponytail, test-gated 2017 passed). ของเสี่ยง/sensitive รอ checkpoint คุณ
 
 ---
 
