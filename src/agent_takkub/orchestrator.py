@@ -1380,6 +1380,24 @@ class Orchestrator(QObject):
     # ──────────────────────────────────────────────────────────────
     # high-level operations
     # ──────────────────────────────────────────────────────────────
+    def _mint_pane_token(self, env: dict, project_ns: str, role_name: str) -> str:
+        """Mint a fresh per-pane auth token for ``(project_ns, role_name)``.
+
+        Revokes any prior token for that same pair first — so a respawn never
+        leaves a crashed session's token valid — then registers the new one and
+        stamps it into ``env["TAKKUB_PANE_TOKEN"]``. Returns the token; callers
+        keep it to revoke explicitly if the spawn then fails. M5#24: this minting
+        boilerplate was copy-pasted across all four provider branches of spawn().
+        """
+        if not hasattr(self, "_pane_tokens"):
+            self._pane_tokens: dict[str, tuple[str, str]] = {}
+        tok = secrets.token_urlsafe(32)
+        for _t in [t for t, v in list(self._pane_tokens.items()) if v == (project_ns, role_name)]:
+            self._pane_tokens.pop(_t, None)
+        self._pane_tokens[tok] = (project_ns, role_name)
+        env["TAKKUB_PANE_TOKEN"] = tok
+        return tok
+
     def spawn(
         self,
         role_name: str,
@@ -1525,15 +1543,7 @@ class Orchestrator(QObject):
             inject_user_profile_env(env, project_ns)
             bin_dir = str(REPO_ROOT / "bin")
             env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
-            _shell_tok = secrets.token_urlsafe(32)
-            env["TAKKUB_PANE_TOKEN"] = _shell_tok
-            # Revoke any prior token for this (project, role) before registering
-            # the new one so a respawn doesn't leave the old token valid.
-            for _t in [
-                t for t, v in list(self._pane_tokens.items()) if v == (project_ns, role_name)
-            ]:
-                self._pane_tokens.pop(_t, None)
-            self._pane_tokens[_shell_tok] = (project_ns, role_name)
+            _shell_tok = self._mint_pane_token(env, project_ns, role_name)
             shell_argv = [pwsh_basename, "-NoLogo"]
             session = PtySession(cols=110, rows=36, parent=self)
             _t_path = _build_transcript_path(project_ns, role_name)
@@ -1633,13 +1643,7 @@ class Orchestrator(QObject):
             inject_user_profile_env(env, project_ns)
             bin_dir = str(REPO_ROOT / "bin")
             env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
-            _gem_tok = secrets.token_urlsafe(32)
-            env["TAKKUB_PANE_TOKEN"] = _gem_tok
-            for _t in [
-                t for t, v in list(self._pane_tokens.items()) if v == (project_ns, role_name)
-            ]:
-                self._pane_tokens.pop(_t, None)
-            self._pane_tokens[_gem_tok] = (project_ns, role_name)
+            _gem_tok = self._mint_pane_token(env, project_ns, role_name)
             gemini_argv = [
                 gemini_bin,
                 "-y",  # yolo: skip per-command approval prompts (parity with codex --ask-for-approval never)
@@ -1718,13 +1722,7 @@ class Orchestrator(QObject):
             inject_user_profile_env(env, project_ns)
             bin_dir = str(REPO_ROOT / "bin")
             env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
-            _cdx_tok = secrets.token_urlsafe(32)
-            env["TAKKUB_PANE_TOKEN"] = _cdx_tok
-            for _t in [
-                t for t, v in list(self._pane_tokens.items()) if v == (project_ns, role_name)
-            ]:
-                self._pane_tokens.pop(_t, None)
-            self._pane_tokens[_cdx_tok] = (project_ns, role_name)
+            _cdx_tok = self._mint_pane_token(env, project_ns, role_name)
             # Autonomy flags so Codex can call `takkub done` and edit
             # workspace files without stopping for per-command approval —
             # mirrors claude's `--dangerously-skip-permissions`.
@@ -1990,17 +1988,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             # caller identity from this token instead of trusting the caller-supplied
             # `from`/`from_project` fields, preventing a compromised or forged pane
             # from impersonating another role or project.
-            pane_tok = secrets.token_urlsafe(32)
-            env["TAKKUB_PANE_TOKEN"] = pane_tok
-            if not hasattr(self, "_pane_tokens"):
-                self._pane_tokens: dict[str, tuple[str, str]] = {}
-            # Revoke any prior token for this (project, role) before the new one
-            # so a respawn never leaves the crashed session's token valid.
-            for _t in [
-                t for t, v in list(self._pane_tokens.items()) if v == (project_ns, role_name)
-            ]:
-                self._pane_tokens.pop(_t, None)
-            self._pane_tokens[pane_tok] = (project_ns, role_name)
+            pane_tok = self._mint_pane_token(env, project_ns, role_name)
         bin_dir = str(REPO_ROOT / "bin")
         env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
 
