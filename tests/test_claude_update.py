@@ -181,10 +181,15 @@ class TestBuildUpdaterScript:
             repo_root="C:/repo",
             log_path="C:/repo/runtime/u.log",
             is_windows=True,
+            cockpit_pid=4242,
         )
-        assert "Start-Sleep" in s
+        # Polls the cockpit pid to exit (not a blind sleep) before install.
+        assert "Get-Process -Id 4242" in s
         assert f"{cu.PACKAGE}@latest" in s
         assert "C:/n/npm.cmd" in s
+        # captures exit code + failure sentinel
+        assert "$LASTEXITCODE" in s
+        assert "C:/repo/runtime/u.log.failed" in s
         # relaunch
         assert "agent_takkub" in s and "C:/p/python.exe" in s
 
@@ -195,16 +200,19 @@ class TestBuildUpdaterScript:
             repo_root="/home/u/repo",
             log_path="/home/u/repo/runtime/u.log",
             is_windows=False,
+            cockpit_pid=4242,
         )
         assert s.startswith("#!/bin/sh")
-        assert "sleep 3" in s
+        assert "pid=4242" in s
+        assert 'kill -0 "$pid"' in s  # polls for exit instead of a blind sleep
+        assert "/home/u/repo/runtime/u.log.failed" in s  # failure sentinel
         assert f"{cu.PACKAGE}@latest" in s
         assert "agent_takkub" in s
 
     def test_install_waits_before_running(self):
-        # The sleep/wait MUST come before the npm install line in both variants
-        # (the whole point: let claude processes die first).
+        # The pid-wait MUST come before the npm install line in both variants
+        # (the whole point: let claude processes die + release locks first).
         for is_win in (True, False):
-            s = cu.build_updater_script("npm", "py", "/r", "/r/log", is_win)
-            wait_tok = "Start-Sleep" if is_win else "sleep"
+            s = cu.build_updater_script("npm", "py", "/r", "/r/log", is_win, 4242)
+            wait_tok = "Get-Process -Id" if is_win else "kill -0"
             assert s.index(wait_tok) < s.index("install -g")

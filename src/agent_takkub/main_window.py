@@ -17,6 +17,7 @@ axis — Lead always on the left, teammates stacked vertically on the right.
 from __future__ import annotations
 
 import json
+import os
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -2472,6 +2473,7 @@ class MainWindow(QMainWindow):
             repo_root=str(REPO_ROOT),
             log_path=str(log_path),
             is_windows=is_win,
+            cockpit_pid=os.getpid(),
         )
         try:
             script_path.write_text(script, encoding="utf-8")
