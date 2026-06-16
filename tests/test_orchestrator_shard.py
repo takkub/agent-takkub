@@ -198,7 +198,7 @@ class TestShardPaneIndependence:
         orch._ps(key2).shard_total = 2
         orch._shard_groups[f"{TEST_PROJECT}::qa"] = ShardGroup(base_role="qa", total=2)
 
-        with patch("agent_takkub.orchestrator.subprocess.run"):
+        with patch("agent_takkub.orchestrator.Orchestrator._check_uncommitted_async"):
             orch.done("qa#1", note="shard 1 ok", project=TEST_PROJECT)
 
         # qa#1 state popped, qa#2 state intact
@@ -241,7 +241,7 @@ class TestShardAggregate:
         """Consolidated handoff injected to Lead only after all N shards done."""
         _shards, lead = self._setup(orch, total=2)
 
-        with patch("agent_takkub.orchestrator.subprocess.run"):
+        with patch("agent_takkub.orchestrator.Orchestrator._check_uncommitted_async"):
             ok1, _ = orch.done("qa#1", note="shard 1 ok", project=TEST_PROJECT)
             assert ok1 is True
             # After first shard: group not yet closed, no handoff
@@ -261,7 +261,7 @@ class TestShardAggregate:
         """With 3 shards, handoff fires only after the 3rd done."""
         _shards, lead = self._setup(orch, total=3)
 
-        with patch("agent_takkub.orchestrator.subprocess.run"):
+        with patch("agent_takkub.orchestrator.Orchestrator._check_uncommitted_async"):
             orch.done("qa#1", note="s1", project=TEST_PROJECT)
             orch.done("qa#2", note="s2", project=TEST_PROJECT)
             # only 2 of 3 done — no handoff yet; per-shard notices suppressed in shard mode
@@ -274,7 +274,7 @@ class TestShardAggregate:
 
     def test_group_removed_after_handoff(self, orch: Orchestrator) -> None:
         _shards, _lead = self._setup(orch, total=2)
-        with patch("agent_takkub.orchestrator.subprocess.run"):
+        with patch("agent_takkub.orchestrator.Orchestrator._check_uncommitted_async"):
             orch.done("qa#1", note="a", project=TEST_PROJECT)
             orch.done("qa#2", note="b", project=TEST_PROJECT)
         assert orch._shard_groups.get(f"{TEST_PROJECT}::qa") is None
@@ -300,7 +300,7 @@ class TestShardPartialPass:
             orch._ps(ek).shard_total = 2
         orch._shard_groups[f"{TEST_PROJECT}::qa"] = ShardGroup(base_role="qa", total=2)
 
-        with patch("agent_takkub.orchestrator.subprocess.run"):
+        with patch("agent_takkub.orchestrator.Orchestrator._check_uncommitted_async"):
             orch.done("qa#1", note="shard 1 done", project=TEST_PROJECT)
 
         # Simulate qa#2 respawn-capped
@@ -599,7 +599,7 @@ class TestShardLateComplete:
         orch._ps(ek).shard_total = 2
         # No group registered (simulates timeout + pop)
 
-        with patch("agent_takkub.orchestrator.subprocess.run"):
+        with patch("agent_takkub.orchestrator.Orchestrator._check_uncommitted_async"):
             ok, _ = orch.done("qa#1", note="arrived late", project=TEST_PROJECT)
 
         assert ok is True
@@ -615,7 +615,7 @@ class TestShardLateComplete:
         ek = _exit_key(TEST_PROJECT, "qa#1")
         orch._ps(ek).shard_total = 2
 
-        with patch("agent_takkub.orchestrator.subprocess.run"):
+        with patch("agent_takkub.orchestrator.Orchestrator._check_uncommitted_async"):
             orch.done("qa#1", note="late", project=TEST_PROJECT)
 
         queue = orch._pending_done_notices.get(TEST_PROJECT, [])
