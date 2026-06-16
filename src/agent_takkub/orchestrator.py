@@ -471,6 +471,12 @@ AUTO_RESPAWN_MAX = 2
 _SPAWN_STAGGER_MS = int(os.environ.get("TAKKUB_SPAWN_STAGGER_MS", "400"))
 _CODEX_SPAWN_STAGGER_MS = int(os.environ.get("TAKKUB_CODEX_SPAWN_STAGGER_MS", "10000"))
 
+# Initial PTY geometry every pane session spawns with (FitAddon resizes it to the
+# real widget once the page loads). Named so the four provider spawn branches
+# can't drift apart. (M5#25)
+_PANE_COLS = 110
+_PANE_ROWS = 36
+
 # Codex early-crash detection. If a codex pane exits within this many seconds
 # of spawning, the orchestrator treats it as a suspicious early crash, logs a
 # `codex_early_crash` event, and writes a diagnostic dump to
@@ -1563,7 +1569,7 @@ class Orchestrator(QObject):
             env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
             _shell_tok = self._mint_pane_token(env, project_ns, role_name)
             shell_argv = [pwsh_basename, "-NoLogo"]
-            session = PtySession(cols=110, rows=36, parent=self)
+            session = PtySession(cols=_PANE_COLS, rows=_PANE_ROWS, parent=self)
             _t_path = _build_transcript_path(project_ns, role_name)
             pane._transcript_path = _t_path
             self._spawn_in_progress = True
@@ -1666,7 +1672,7 @@ class Orchestrator(QObject):
                 gemini_bin,
                 "-y",  # yolo: skip per-command approval prompts (parity with codex --ask-for-approval never)
             ]
-            session = PtySession(cols=110, rows=36, parent=self)
+            session = PtySession(cols=_PANE_COLS, rows=_PANE_ROWS, parent=self)
             _t_path = _build_transcript_path(project_ns, role_name)
             pane._transcript_path = _t_path
             self._spawn_in_progress = True
@@ -1772,7 +1778,7 @@ class Orchestrator(QObject):
                     "-s",
                     "workspace-write",
                 ]
-            session = PtySession(cols=110, rows=36, parent=self)
+            session = PtySession(cols=_PANE_COLS, rows=_PANE_ROWS, parent=self)
             _t_path = _build_transcript_path(project_ns, role_name)
             pane._transcript_path = _t_path
             self._spawn_in_progress = True
@@ -2237,7 +2243,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             _ps_new.session_uuid = new_uuid
             _ps_new.session_uuid_cwd = spawn_cwd
 
-        session = PtySession(cols=110, rows=36, parent=self)
+        session = PtySession(cols=_PANE_COLS, rows=_PANE_ROWS, parent=self)
         _t_path = _build_transcript_path(project_ns, role_name)
         pane._transcript_path = _t_path
         self._spawn_in_progress = True
