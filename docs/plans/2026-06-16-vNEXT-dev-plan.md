@@ -82,11 +82,16 @@ restart-verify กองแรกผ่าน → ลุย tier เสี่ย
 - **issues.py `_gh()`** — `subprocess.run(["gh", *args])` argv list ไม่มี shell=True → title `"; rm -rf /"` เป็น literal arg เฉยๆ
 - **M6#29** project-name→path guarded โดย `validate_name` + `role_memory._safe()` (ตัด dot) · qa plaintext credential = documented intentional (gitignored/throwaway/มี warning)
 
+**✅ M2 (done git-status) เสร็จ race-safe:**
+- **M2 part 1** offload `--requires-commit` git status ออกจาก Qt main thread ผ่าน **QProcess** (event-loop driven = non-blocking + single-thread ไม่มี cross-thread race) · done notice ส่งทันที + follow-up warning ถ้า dirty · `_uncommitted_warning` pure + tests (2084 pass)
+- **M2 part 2 (terminate)** — **ไม่ offload โดยตั้งใจ**: taskkill /T ต้อง walk tree ตอน root ยังเป็น + kill ก่อน respawn → async = race จริง (ไม่ทำ blind ตามที่ user เน้น "ระวัง race")
+
 **🔴 residue จริง (live-verify / วิจารณญาณคุณ / propose+fire — ไม่ทำ blind):**
-- **M2** async offload (terminate kill ต้อง sync ก่อน respawn = race; done-notice deferral = reorder vs auto-chain/shard) — ต้อง live-profiling + ออกแบบ async ระวัง race
 - **M5#23 claude branch** — fold เสี่ยงสุด (resume/session-uuid/MCP) เก็บ inline ตั้งใจ
 - **M4#17 bottom-row anchoring** — เปลี่ยนตำแหน่ง match ต้อง live verify
 - **M0#3** CLAUDE.md restructure — ต้องตัดสิน load-bearing · **M6#30** codex cross-check (propose+fire) · **M7** release (merge/bump/push — คุณตัดสิน)
+
+**🪟 Win-key bug (สืบจบ, ไม่ใช่ code นี้):** agent-takkub code สะอาด (audit หมด: ไม่มี hook/grab/topmost/focus-loop) · พิสูจน์สด: ตอน pythonw focus → Win ถูกกลืนแม้ inject ระดับ OS → เหตุที่ **QtWebEngine/Chromium library** (ฝัง Chromium ลง low-level kbd hook กลืน Win ตอน focus) · fix ต้อง iterative flag-test + restart (one-shot ไม่ได้แบบซื่อสัตย์) · workaround: **Ctrl+Esc**
 
 ---
 
