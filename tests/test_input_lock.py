@@ -17,7 +17,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 from agent_takkub.agent_pane import AgentPane
-from agent_takkub.roles import LEAD
+from agent_takkub.roles import LEAD, USER_DRIVEN_ROLES
 from agent_takkub.terminal_widget import TerminalWidget
 
 
@@ -62,26 +62,26 @@ class TestTerminalWidgetLock:
 # AgentPane — default lock per role + toggle
 # ─────────────────────────────────────────────────────────────────────
 class TestAgentPaneLock:
-    def _make(self, *, is_lead: bool) -> AgentPane:
+    def _make(self, *, lockable: bool) -> AgentPane:
         pane = AgentPane.__new__(AgentPane)
-        pane._is_lead = is_lead
-        pane._input_locked = not is_lead  # mirrors __init__ default
+        pane._lockable = lockable
+        pane._input_locked = lockable  # mirrors __init__ default
         pane._terminal = MagicMock()
-        pane._btn_lock = None if is_lead else MagicMock()
+        pane._btn_lock = MagicMock() if lockable else None
         return pane
 
     def test_teammate_defaults_locked(self) -> None:
-        pane = self._make(is_lead=False)
+        pane = self._make(lockable=True)
         assert pane._input_locked is True
         assert pane._btn_lock is not None  # teammate gets the toggle button
 
-    def test_lead_is_never_locked_and_has_no_button(self) -> None:
-        pane = self._make(is_lead=True)
+    def test_user_driven_pane_never_locked_and_has_no_button(self) -> None:
+        pane = self._make(lockable=False)
         assert pane._input_locked is False
         assert pane._btn_lock is None
 
     def test_toggle_unlocks_then_relocks_teammate(self) -> None:
-        pane = self._make(is_lead=False)
+        pane = self._make(lockable=True)
         pane._toggle_input_lock()
         assert pane._input_locked is False
         pane._terminal.set_input_locked.assert_called_with(False)
@@ -89,12 +89,16 @@ class TestAgentPaneLock:
         assert pane._input_locked is True
         pane._terminal.set_input_locked.assert_called_with(True)
 
-    def test_set_input_locked_is_noop_on_lead(self) -> None:
-        pane = self._make(is_lead=True)
+    def test_set_input_locked_is_noop_on_user_driven(self) -> None:
+        pane = self._make(lockable=False)
         pane.set_input_locked(True)
         assert pane._input_locked is False  # unchanged
         pane._terminal.set_input_locked.assert_not_called()
 
-    def test_lead_constant_resolves(self) -> None:
-        # Guards against a rename of LEAD.name that the pane keys off.
-        assert isinstance(LEAD.name, str) and LEAD.name
+    def test_user_driven_roles_membership(self) -> None:
+        # The exemption set must cover both the Lead and the ad-hoc Shell pane;
+        # orchestrator-driven teammates must NOT be exempt.
+        assert LEAD.name in USER_DRIVEN_ROLES
+        assert "shell" in USER_DRIVEN_ROLES
+        for r in ("frontend", "backend", "qa", "reviewer", "critic", "codex", "gemini"):
+            assert r not in USER_DRIVEN_ROLES

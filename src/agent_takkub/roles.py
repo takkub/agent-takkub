@@ -67,6 +67,13 @@ DEFAULT_TEAMMATES: tuple[Role, ...] = (
 
 ALL_DEFAULT: tuple[Role, ...] = (LEAD, *DEFAULT_TEAMMATES)
 
+# Panes the USER types into directly, so they are never auto-locked by the
+# accidental-input guard: the Lead (the command surface) and an ad-hoc Shell
+# (opened explicitly to run commands). Every other role is orchestrator-driven
+# and defaults to input-locked. (A locked pane can still be unlocked per-pane
+# via its 🔒 button — these two just don't start locked and have no button.)
+USER_DRIVEN_ROLES: frozenset[str] = frozenset({"lead", "shell"})
+
 
 def by_name(name: str) -> Role | None:
     name = name.lower().strip()

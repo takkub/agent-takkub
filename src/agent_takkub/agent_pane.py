@@ -30,7 +30,7 @@ from PyQt6.QtWidgets import (
 
 from .config import RUNTIME_DIR
 from .pty_session import PtySession
-from .roles import LEAD, Role
+from .roles import LEAD, USER_DRIVEN_ROLES, Role
 from .terminal_widget import TerminalWidget
 from .token_meter import (
     effective_context_limit,
@@ -193,15 +193,16 @@ class AgentPane(QFrame):
         self._btn_export.clicked.connect(self._export_buffer)
         self._btn_export.hide()
 
-        # Input lock toggle (teammate panes only). Teammates are driven by the
-        # orchestrator (takkub assign/send), so the user almost never types into
+        # Input lock toggle (orchestrator-driven panes only). Teammates are
+        # driven by takkub assign/send, so the user almost never types into
         # them — locking by default stops an accidental keypress from derailing a
-        # working agent. The Lead pane is the user's command surface and never
-        # gets a lock button. Default: teammates locked, Lead unlocked.
-        self._is_lead = role.name == LEAD.name
-        self._input_locked = not self._is_lead
+        # working agent. User-driven panes (Lead = command surface, Shell =
+        # ad-hoc terminal the user opened to type in) are never auto-locked and
+        # get no lock button. Default: teammates locked, user-driven unlocked.
+        self._lockable = role.name not in USER_DRIVEN_ROLES
+        self._input_locked = self._lockable
         self._btn_lock: QPushButton | None = None
-        if not self._is_lead:
+        if self._lockable:
             self._btn_lock = QPushButton("🔒", header)
             self._btn_lock.setFixedSize(22, 22)
             self._btn_lock.clicked.connect(self._toggle_input_lock)
@@ -384,7 +385,8 @@ class AgentPane(QFrame):
         # Every (re)spawn of a teammate pane starts input-locked, even if the
         # user had unlocked the previous session in this slot — an accidental
         # keypress into a freshly-spawned agent is exactly what we guard against.
-        if not self._is_lead:
+        # User-driven panes (Lead / Shell) are exempt.
+        if self._lockable:
             self.set_input_locked(True)
         self._terminal.setFocus()
         # explicit reset — start in busy (no local echo) until pyte
@@ -606,9 +608,9 @@ class AgentPane(QFrame):
         self.set_input_locked(not self._input_locked)
 
     def set_input_locked(self, locked: bool) -> None:
-        """Lock/unlock manual typing into this pane. No-op on the Lead pane
-        (its input is the user's command surface and must stay open)."""
-        if self._is_lead:
+        """Lock/unlock manual typing into this pane. No-op on user-driven panes
+        (Lead / Shell) — their input must stay open."""
+        if not self._lockable:
             return
         self._input_locked = bool(locked)
         self._terminal.set_input_locked(self._input_locked)
