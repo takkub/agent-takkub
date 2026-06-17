@@ -97,6 +97,44 @@ class TestDeliveryUnconfirmedWarning:
         assert any("#26" in c.args[0] for c in lead.session.write.call_args_list if c.args)
 
 
+class TestVerifiedEnterWiring:
+    """The swallowed-Enter self-heal (#22) must cover teammate-bound deliveries,
+    not just Lead notices — _send_when_ready's task paste and the peer `send`
+    paste are the documented victims (a pane stuck on `[Pasted text]` forever).
+    Both must route the submit through _delayed_enter_verified, never plain
+    _delayed_enter."""
+
+    def test_task_deliver_uses_verified_enter(self, orch: Orchestrator, monkeypatch) -> None:
+        reviewer = _pane(_live_session())
+        reviewer.session.is_at_ready_prompt.return_value = True  # ready → deliver now
+        orch._panes_by_project["P"] = {"lead": _pane(_live_session()), "reviewer": reviewer}
+        monkeypatch.setattr(orch_mod.QTimer, "singleShot", staticmethod(lambda _ms, fn: fn()))
+        with (
+            patch("agent_takkub.orchestrator._log_event"),
+            patch("agent_takkub.orchestrator._delayed_enter_verified") as verified,
+            patch("agent_takkub.orchestrator._delayed_enter") as plain,
+        ):
+            orch._send_when_ready("reviewer", "run smoke", max_wait_ms=1000, project="P")
+        verified.assert_called_once()
+        assert verified.call_args[0][1] is reviewer.session
+        plain.assert_not_called()
+
+    def test_peer_send_uses_verified_enter(self, orch: Orchestrator, monkeypatch) -> None:
+        reviewer = _pane(_live_session())
+        orch._panes_by_project["P"] = {"reviewer": reviewer}
+        monkeypatch.setattr(orch, "_ps", lambda key: MagicMock())
+        with (
+            patch("agent_takkub.orchestrator._log_event"),
+            patch("agent_takkub.orchestrator._delayed_enter_verified") as verified,
+            patch("agent_takkub.orchestrator._delayed_enter") as plain,
+        ):
+            ok, _ = orch.send("reviewer", "hello peer", project="P")
+        assert ok
+        verified.assert_called_once()
+        assert verified.call_args[0][1] is reviewer.session
+        plain.assert_not_called()
+
+
 class TestSpawnFailureNotSilent:
     """#26 root cause: when spawn can't register the pane (main_window routing
     desync), assign must NOT silently drop — it logs and warns the Lead."""

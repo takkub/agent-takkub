@@ -2865,7 +2865,23 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             _task_sess = pane.session
             payload = _paste_payload(_sanitize_pane_text(task))
             _task_sess.write(payload)
-            _delayed_enter(pane, _task_sess, _enter_delay_ms(payload))
+            # Self-healing submit: the task pastes as a `[Pasted text]` placeholder
+            # and an Enter landing mid-render is swallowed, leaving the teammate
+            # sitting on the placeholder forever instead of running the spec — the
+            # original #22 symptom. _deliver only runs once the pane is at its ready
+            # prompt (or blind on timeout), so verifying the submit landed and
+            # resending is safe (a busy/booting pane is not "ready" → no resend).
+            _delayed_enter_verified(
+                pane,
+                _task_sess,
+                _enter_delay_ms(payload),
+                on_resend=lambda rem, r=role_name, p=project: _log_event(
+                    "task_deliver_enter_resend",
+                    project=self._resolve_project(p),
+                    role=r,
+                    remaining=rem,
+                ),
+            )
             if unconfirmed:
                 # Delivered blind — the pane never signalled ready, so on a cold
                 # re-spawn the paste may have been swallowed (issue #26). Surface
@@ -3651,7 +3667,17 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         _send_sess = pane.session
         body_payload = _paste_payload(body)
         _send_sess.write(body_payload)
-        _delayed_enter(pane, _send_sess, _enter_delay_ms(body_payload))
+        # Self-healing submit (issue #22): resend Enter if the peer message's
+        # submit was swallowed mid-paste-render. Safe — a busy target isn't at
+        # its ready prompt, so no resend fires into an in-flight turn.
+        _delayed_enter_verified(
+            pane,
+            _send_sess,
+            _enter_delay_ms(body_payload),
+            on_resend=lambda rem, r=to_role: _log_event(
+                "send_enter_resend", project=project_ns, role=r, remaining=rem
+            ),
+        )
 
         # Record delivery time for stall detection: receiving a message counts
         # as evidence the pane is still being monitored by the orchestrator.
