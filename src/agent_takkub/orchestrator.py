@@ -550,6 +550,62 @@ def _delayed_enter(pane: AgentPane, session: PtySession, delay_ms: int) -> None:
     )
 
 
+# After the submit `\r` should have landed, re-check whether it actually took.
+# Claude collapses a bracketed paste into a `[Pasted text #N +M lines]`
+# placeholder; an Enter that arrives mid-render is consumed as a soft newline
+# inside the paste and the payload never submits — the pane just sits idle with
+# the text in its input box (issue #22; the user-visible "ส่งงานกลับมาไม่ยอม
+# รันต่อ"). `_enter_delay_ms` only *guesses* a long-enough wait; on a loaded
+# machine or a slow render the guess is sometimes short, hence the intermittent
+# "บางที". This grace + bounded resend turns the guess into a self-correcting
+# loop: a successful submit flips the pane to its busy state ('esc to interrupt'
+# → not ready), so "still at the ready prompt after the Enter" is a reliable
+# swallowed-Enter signal. A stray Enter at a genuinely-empty ready prompt is a
+# harmless empty submit, so an over-eager resend can never double-fire the
+# payload.
+_SUBMIT_VERIFY_GRACE_MS = 600
+_SUBMIT_MAX_RESENDS = 3
+
+
+def _delayed_enter_verified(
+    pane: AgentPane,
+    session: PtySession,
+    delay_ms: int,
+    *,
+    max_resends: int = _SUBMIT_MAX_RESENDS,
+    on_resend=None,
+) -> None:
+    """Like `_delayed_enter`, but re-sends Enter if the submit was swallowed.
+
+    Sends the submitting CR after ``delay_ms`` (same as `_delayed_enter`), then
+    ``_SUBMIT_VERIFY_GRACE_MS`` later checks `is_at_ready_prompt()`. If the pane
+    is STILL at its ready prompt the CR did not submit (a real submit would have
+    flipped it to busy), so the CR is re-sent — bounded by ``max_resends``.
+
+    ``on_resend`` (optional) is invoked with the remaining-attempt count each
+    time a resend fires, so the caller can log/observe the recovery.
+    """
+
+    def _send_then_verify(remaining: int) -> None:
+        if pane.session is not session:
+            return
+        pane.session.write(b"\r")
+
+        def _verify() -> None:
+            if pane.session is not session or remaining <= 0:
+                return
+            # Submit landed → pane is busy → is_at_ready_prompt() is False → stop.
+            # Still ready → the CR was swallowed mid-paste-render → resend.
+            if session.is_at_ready_prompt():
+                if on_resend is not None:
+                    on_resend(remaining)
+                _send_then_verify(remaining - 1)
+
+        QTimer.singleShot(_SUBMIT_VERIFY_GRACE_MS, _verify)
+
+    QTimer.singleShot(delay_ms, lambda: _send_then_verify(max_resends))
+
+
 def _paste_payload(text: str) -> str:
     """Return `text` wrapped in bracketed-paste escapes when long enough.
 
@@ -3515,7 +3571,17 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         payload = _paste_payload(body)
         _notify_sess.write(payload)
         delay = _enter_delay_ms(payload)
-        _delayed_enter(lead, _notify_sess, delay)
+        # Self-healing submit: a done-report whose Enter is swallowed mid-paste-
+        # render leaves Lead idle with the report unsubmitted — it "won't run on"
+        # (issue #22 residual). Verify the submit landed and resend if not.
+        _delayed_enter_verified(
+            lead,
+            _notify_sess,
+            delay,
+            on_resend=lambda rem: _log_event(
+                "lead_notify_enter_resend", project=project_ns, remaining=rem
+            ),
+        )
         self.leadInjected.emit(body)
 
         if queue:

@@ -110,6 +110,98 @@ class TestDelayedEnterSessionGuard:
         sess_a.write.assert_not_called()
 
 
+class TestDelayedEnterVerified:
+    """_delayed_enter_verified() must resend the submitting CR when it was
+    swallowed mid-paste-render (#22) — detected by the pane STILL being at its
+    ready prompt after the Enter should have submitted — and stop as soon as
+    the submit lands (ready prompt drops) or the resend budget runs out."""
+
+    def _run_inline(self, pane, session, *, max_resends):
+        """Run _delayed_enter_verified with QTimer.singleShot firing inline so
+        the whole delay→submit→verify→resend chain executes synchronously."""
+        from agent_takkub.orchestrator import _delayed_enter_verified
+
+        resends: list[int] = []
+
+        def _inline(delay_ms, fn):
+            fn()
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot", _inline):
+            _delayed_enter_verified(
+                pane, session, 150, max_resends=max_resends, on_resend=resends.append
+            )
+        return resends
+
+    def test_no_resend_when_submit_lands(self) -> None:
+        """Submit landed → pane goes busy → is_at_ready_prompt False → one CR."""
+        sess = MagicMock()
+        sess.is_at_ready_prompt.return_value = False  # busy after submit
+        pane = MagicMock()
+        pane.session = sess
+
+        resends = self._run_inline(pane, sess, max_resends=3)
+
+        sess.write.assert_called_once_with(b"\r")
+        assert resends == []
+
+    def test_resends_until_ready_drops(self) -> None:
+        """Ready stays True for two checks (swallowed) then drops → 1 initial +
+        2 resend CRs, and stops once the submit lands."""
+        sess = MagicMock()
+        # verify #1 True (resend), verify #2 True (resend), verify #3 False (stop)
+        sess.is_at_ready_prompt.side_effect = [True, True, False]
+        pane = MagicMock()
+        pane.session = sess
+
+        resends = self._run_inline(pane, sess, max_resends=3)
+
+        assert sess.write.call_count == 3  # initial + 2 resends
+        assert all(c.args == (b"\r",) for c in sess.write.call_args_list)
+        assert len(resends) == 2
+
+    def test_resend_budget_is_bounded(self) -> None:
+        """A pane that never leaves the ready prompt must not loop forever —
+        resends are capped at max_resends."""
+        sess = MagicMock()
+        sess.is_at_ready_prompt.return_value = True  # never submits
+        pane = MagicMock()
+        pane.session = sess
+
+        resends = self._run_inline(pane, sess, max_resends=3)
+
+        # 1 initial + exactly 3 resends, then the budget is exhausted.
+        assert sess.write.call_count == 1 + 3
+        assert len(resends) == 3
+
+    def test_stops_when_session_replaced_before_verify(self) -> None:
+        """If the pane is respawned between the Enter and the verify, no resend
+        targets the replacement session."""
+        from agent_takkub.orchestrator import _delayed_enter_verified
+
+        sess_a = MagicMock()
+        sess_a.is_at_ready_prompt.return_value = True
+        sess_b = MagicMock()
+        pane = MagicMock()
+        pane.session = sess_a
+
+        # Fire the initial-enter timer (writes to sess_a), then swap the session
+        # before the verify timer runs, so the verify guard drops it.
+        timers: list = []
+
+        def _queue(delay_ms, fn):
+            timers.append(fn)
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot", _queue):
+            _delayed_enter_verified(pane, sess_a, 150, max_resends=3)
+            timers.pop(0)()  # delay → _send_then_verify → initial CR + schedule verify
+            pane.session = sess_b  # respawn before verify fires
+            while timers:
+                timers.pop(0)()
+
+        sess_a.write.assert_called_once_with(b"\r")  # only the initial CR
+        sess_b.write.assert_not_called()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # AgentPane._on_exit generation guard
 # ─────────────────────────────────────────────────────────────────────────────
