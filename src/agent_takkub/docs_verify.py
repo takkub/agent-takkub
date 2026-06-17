@@ -66,12 +66,8 @@ _DEFAULT_EXCLUDE_GLOBS: tuple[str, ...] = (
     #  - MACOS_PORT_PLAN.md — plan referencing intended _pty_posix.py/make_backend()
     #    that only exist once the macOS port is built.
     #  - code-review-issue-cli-*.md — a point-in-time code review (next_id() etc.).
-    #  - guides/*-teamtreader-usage.md — a guide GENERATED for the teamtreader
-    #    project; its refs (data/plans/latest.json …) are teamtreader-relative,
-    #    not agent-takkub files, so they can't resolve against this tree.
     "docs/MACOS_PORT_PLAN.md",
     "docs/code-review-issue-cli-*.md",
-    "docs/guides/*-teamtreader-usage.md",
 )
 
 
