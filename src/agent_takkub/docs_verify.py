@@ -36,7 +36,43 @@ class VerifyResult:
 
 _CODE_EXTENSIONS = (".py", ".md", ".json", ".yml", ".yaml", ".ts", ".tsx", ".js", ".sh", ".toml")
 
-_DEFAULT_EXCLUDE_GLOBS: tuple[str, ...] = ("docs/reviews/*",)
+# Point-in-time, design-process artifacts are excluded by default: they
+# reference intended/prototype names (e.g. a planned `settings_dialog.py` or
+# `provider_dialog.py`) that legitimately never match final code once a feature
+# is built differently or deferred. Verifying them produces only false drift
+# that drowns out real drift in *live* docs (architecture, guides, CLAUDE.md,
+# README), which stay checked. `docs/reviews/*` was already excluded for the
+# same reason (vendored review output); `plans/` and `specs/` are the same
+# category — design at a moment, not a contract with the current tree.
+# Point-in-time process artifacts: design plans/specs, code reviews, and QA
+# reports. They reference names *as of that moment* — prototype files that were
+# built differently or deferred (`settings_dialog.py`, `_pty_posix.py`), symbols
+# since renamed, test symbols (`TestX.test_y`, in tests/ not src/), and external
+# APIs (`QTimer.singleShot`, builtin `sorted()`). Verifying them yields only
+# false drift that buries real drift in *live* docs (guides, system-overview,
+# ARCHITECTURE.md, CLAUDE.md, README — all still checked). `docs/reviews/*` was
+# already excluded for exactly this reason; the rest are the same category.
+_DEFAULT_EXCLUDE_GLOBS: tuple[str, ...] = (
+    "docs/reviews/*",
+    "docs/review/*",
+    "docs/code-review/*",
+    "docs/design-review/*",
+    "docs/qa/*",
+    "docs/qa-reports/*",
+    "docs/eval/*",
+    "docs/superpowers/plans/*",
+    "docs/superpowers/specs/*",
+    # Loose top-level artifacts of the same nature (no dedicated dir to glob):
+    #  - MACOS_PORT_PLAN.md — plan referencing intended _pty_posix.py/make_backend()
+    #    that only exist once the macOS port is built.
+    #  - code-review-issue-cli-*.md — a point-in-time code review (next_id() etc.).
+    #  - guides/*-teamtreader-usage.md — a guide GENERATED for the teamtreader
+    #    project; its refs (data/plans/latest.json …) are teamtreader-relative,
+    #    not agent-takkub files, so they can't resolve against this tree.
+    "docs/MACOS_PORT_PLAN.md",
+    "docs/code-review-issue-cli-*.md",
+    "docs/guides/*-teamtreader-usage.md",
+)
 
 
 def strip_code_blocks(md_text: str) -> str:

@@ -309,6 +309,37 @@ def test_verify_docs_default_excludes_reviews_dir(tmp_path: Path) -> None:
     assert broken == []
 
 
+def test_verify_docs_default_excludes_point_in_time_artifacts(tmp_path: Path) -> None:
+    """Design plans/specs, code reviews and QA reports are excluded by default —
+    they reference prototype/renamed/test/external symbols that are false drift."""
+    for sub, fname in (
+        ("docs/code-review", "r.md"),
+        ("docs/qa-reports", "q.md"),
+        ("docs/superpowers/specs", "s.md"),
+        ("docs/superpowers/plans", "p.md"),
+    ):
+        d = tmp_path / sub
+        d.mkdir(parents=True)
+        (d / fname).write_text("ref `src/nonexistent_proto.py:1`\n")
+    # Loose-file artifacts too.
+    (tmp_path / "docs").mkdir(exist_ok=True)
+    (tmp_path / "docs" / "MACOS_PORT_PLAN.md").write_text("ref `src/_pty_posix.py:1`\n")
+    results = verify_docs(docs_dirs=(Path("docs"),), extras=(), repo_root=tmp_path)
+    assert [r for r in results if r.status != "ok"] == []
+
+
+def test_verify_docs_still_checks_live_guides(tmp_path: Path) -> None:
+    """The exclusions must NOT swallow agent-takkub's own live docs — a normal
+    guide with a broken ref must still be flagged (the gate keeps its value)."""
+    guides = tmp_path / "docs" / "guides"
+    guides.mkdir(parents=True)
+    (guides / "2026-06-09-cockpit-usage.md").write_text("see `src/nonexistent_live.py:1`\n")
+    results = verify_docs(docs_dirs=(Path("docs"),), extras=(), repo_root=tmp_path)
+    broken = [r for r in results if r.status != "ok"]
+    assert len(broken) == 1
+    assert "nonexistent_live" in broken[0].message
+
+
 def test_verify_docs_no_default_excludes_includes_reviews(tmp_path: Path) -> None:
     reviews_dir = tmp_path / "docs" / "reviews"
     reviews_dir.mkdir(parents=True)
