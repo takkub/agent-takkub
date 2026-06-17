@@ -5545,15 +5545,25 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             and write a proposal to docs/design-review/<date>-<view>.md
           * gemini — prepare to view images critic will send via `takkub send`
 
-        Respects the disabled-providers toggle: when gemini is off, critic
-        still fires alone (degraded mode) so user can iterate solo.
+        Substitution doctrine (CLAUDE.md "Claude รับตำแหน่งแทน"): when the
+        gemini CLI is unavailable — toggled off in the status bar OR not
+        installed — the gemini slot is **still spawned**. The spawn layer
+        (`effective_provider_for`) backs it with claude so the slot keeps its
+        identity (`gemini` pane) but runs claude, reading `.claude/agents/
+        gemini.md` (which knows it's a substitute and reports
+        `[claude-substitute for gemini]`). We never silently drop the slot —
+        that left critic's task pointing at a pane that was never spawned and
+        gave the user no second opinion at all (issue #61). The only cost is
+        lost model-diversity, which we flag in the returned label + log so the
+        user can decide whether to re-enable real gemini.
 
         Returns (count, role_names) for status-bar feedback. Roles ordered
-        consistently (critic first) so the UI message reads naturally.
+        consistently (critic first) so the UI message reads naturally; the
+        gemini entry reads `gemini (claude)` when it was substituted.
         """
         from datetime import datetime as _dt
 
-        from .provider_state import all_disabled
+        from .provider_config import GEMINI, effective_provider_for
 
         project_ns = self._resolve_project(project)
         today = _dt.now().strftime("%Y-%m-%d")
@@ -5587,21 +5597,30 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             "report กลับผ่าน `takkub done` เมื่อ critic บอกว่าจบรอบ"
         )
 
-        disabled = all_disabled()
+        # Will the gemini slot be backed by claude this spawn? (toggled off or
+        # CLI not installed). We still spawn it — only the label/log change.
+        gemini_substituted = effective_provider_for("gemini", project=project_ns) != GEMINI
+        if gemini_substituted:
+            gemini_task = (
+                "[ROLE: gemini slot — claude รับตำแหน่งแทน (gemini ปิด/ยังไม่ติดตั้ง)]\n"
+                "⚠️ คุณคือ Claude ที่รับบท gemini — second opinion ยังให้ได้ แต่ไม่ใช่ "
+                "model diversity จริง ขึ้น report ว่า `[claude-substitute for gemini]`\n\n"
+            ) + gemini_task
+
         spawned: list[str] = []
         ok_critic, _ = self.assign("critic", cwd=cwd, task=critic_task, project=project_ns)
         if ok_critic:
             spawned.append("critic")
-        if "gemini" not in disabled:
-            ok_gemini, _ = self.assign("gemini", cwd=cwd, task=gemini_task, project=project_ns)
-            if ok_gemini:
-                spawned.append("gemini")
+        ok_gemini, _ = self.assign("gemini", cwd=cwd, task=gemini_task, project=project_ns)
+        if ok_gemini:
+            spawned.append("gemini (claude)" if gemini_substituted else "gemini")
         _log_event(
             "broadcast_design_review",
             project=project_ns,
             count=len(spawned),
             roles=spawned,
             shot_dir=shot_dir,
+            gemini_substituted=gemini_substituted,
         )
         return len(spawned), spawned
 
