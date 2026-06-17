@@ -193,6 +193,20 @@ class AgentPane(QFrame):
         self._btn_export.clicked.connect(self._export_buffer)
         self._btn_export.hide()
 
+        # Input lock toggle (teammate panes only). Teammates are driven by the
+        # orchestrator (takkub assign/send), so the user almost never types into
+        # them — locking by default stops an accidental keypress from derailing a
+        # working agent. The Lead pane is the user's command surface and never
+        # gets a lock button. Default: teammates locked, Lead unlocked.
+        self._is_lead = role.name == LEAD.name
+        self._input_locked = not self._is_lead
+        self._btn_lock: QPushButton | None = None
+        if not self._is_lead:
+            self._btn_lock = QPushButton("🔒", header)
+            self._btn_lock.setFixedSize(22, 22)
+            self._btn_lock.clicked.connect(self._toggle_input_lock)
+            self._refresh_lock_button()
+
         self._btn_min = QPushButton("▾", header)
         self._btn_min.setFixedSize(22, 22)
         self._btn_min.setToolTip("Minimise pane (collapse body)")
@@ -214,6 +228,8 @@ class AgentPane(QFrame):
         hl.addWidget(self._token_label)
         hl.addWidget(self._btn_spawn)
         hl.addWidget(self._btn_export)
+        if self._btn_lock is not None:
+            hl.addWidget(self._btn_lock)
         hl.addWidget(self._btn_min)
         hl.addWidget(self._btn_close)
 
@@ -238,6 +254,8 @@ class AgentPane(QFrame):
         self._terminal = TerminalWidget()
         self._terminal.inputBytes.connect(lambda data: self.inputBytes.emit(self.role.name, data))
         self._terminal.fontSizeChanged.connect(self._save_font_size)
+        # Seed the terminal with this pane's default lock state (teammate=locked).
+        self._terminal.set_input_locked(self._input_locked)
         self._stack.addWidget(self._terminal)
 
         # restore last font size for this role
@@ -363,6 +381,11 @@ class AgentPane(QFrame):
         self._terminal.resized.connect(session.resize)
         self._update_title_with_cwd(cwd)
         self.set_state("active")
+        # Every (re)spawn of a teammate pane starts input-locked, even if the
+        # user had unlocked the previous session in this slot — an accidental
+        # keypress into a freshly-spawned agent is exactly what we guard against.
+        if not self._is_lead:
+            self.set_input_locked(True)
         self._terminal.setFocus()
         # explicit reset — start in busy (no local echo) until pyte
         # confirms we're at the ready prompt
@@ -575,6 +598,31 @@ class AgentPane(QFrame):
             self.setMaximumHeight(self._header_height())
         else:
             self.setMaximumHeight(16777215)  # Qt's QWIDGETSIZE_MAX
+
+    # ──────────────────────────────────────────────────────────────
+    # input lock — teammate panes only (Lead is never locked)
+    # ──────────────────────────────────────────────────────────────
+    def _toggle_input_lock(self) -> None:
+        self.set_input_locked(not self._input_locked)
+
+    def set_input_locked(self, locked: bool) -> None:
+        """Lock/unlock manual typing into this pane. No-op on the Lead pane
+        (its input is the user's command surface and must stay open)."""
+        if self._is_lead:
+            return
+        self._input_locked = bool(locked)
+        self._terminal.set_input_locked(self._input_locked)
+        self._refresh_lock_button()
+
+    def _refresh_lock_button(self) -> None:
+        if self._btn_lock is None:
+            return
+        if self._input_locked:
+            self._btn_lock.setText("🔒")
+            self._btn_lock.setToolTip("Input locked — click to unlock and type into this pane")
+        else:
+            self._btn_lock.setText("🔓")
+            self._btn_lock.setToolTip("Input unlocked — click to lock (block accidental typing)")
 
     def _header_height(self) -> int:
         # the header is the first child of the root layout

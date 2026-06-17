@@ -16,6 +16,9 @@
       top: 0; left: 0; right: 0; bottom: 0;
       padding: 4px;
     }
+    /* input-locked pane: thin amber top border as a passive "read-only" cue.
+       Output still renders normally; only manual typing is blocked. */
+    body.input-locked #term { box-shadow: inset 0 2px 0 0 #b45309; }
     /* xterm.js viewport scroll bar: subtle dark to match theme */
     .xterm-viewport::-webkit-scrollbar { width: 10px; }
     .xterm-viewport::-webkit-scrollbar-track { background: #18181b; }
@@ -132,10 +135,16 @@
     // lock-step.
     window.termSetIdle = function (_idle) { /* no-op since v0.3.6 */ };
 
+    // Input lock: when true, drop every user keystroke in JS before it even
+    // crosses the bridge (Python also guards, but stopping it here means no
+    // local feedback and no wasted IPC). Mirrored from Python via termSetLocked.
+    let inputLocked = false;
+
     new QWebChannel(qt.webChannelTransport, (channel) => {
       bridge = channel.objects.bridge;
 
       term.onData((data) => {
+        if (inputLocked) return;  // pane is input-locked — swallow keystrokes
         if (bridge && bridge.sendInput) bridge.sendInput(data);
       });
 
@@ -199,6 +208,18 @@
     window.termSetFontSize = function (px) {
       term.options.fontSize = px;
       fit.fit();
+    };
+
+    // Lock/unlock user input. Also hide the cursor while locked so the pane
+    // visibly reads as "you can't type here" (the orchestrator still writes
+    // to the PTY, so output keeps flowing — only manual input is blocked).
+    window.termSetLocked = function (locked) {
+      inputLocked = !!locked;
+      try {
+        term.options.cursorBlink = !inputLocked;
+        term.options.cursorStyle = inputLocked ? 'underline' : 'block';
+      } catch (e) {}
+      if (document.body) document.body.classList.toggle('input-locked', inputLocked);
     };
 
     window.termClear = function () {

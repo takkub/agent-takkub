@@ -292,6 +292,14 @@ class TerminalWidget(QWidget):
         self._pending_writes: list[str] = []
         self._page_ready = False
 
+        # Input lock: when True, every USER-originated input (keystrokes, image
+        # paste, file drop) is dropped before it reaches the PTY. The
+        # orchestrator's own writes go straight to PtySession.write() and are
+        # unaffected — only manual typing is gated. Teammate panes default to
+        # locked so an accidental keypress can't derail an agent the cockpit is
+        # driving; the Lead pane stays unlocked (it's the user's command surface).
+        self._input_locked = False
+
         # Coalesce multiple write_bytes() calls within the same event-loop
         # tick into a single runJavaScript IPC roundtrip. Each PTY chunk
         # used to fire its own runJavaScript — for chatty TUIs that meant
@@ -449,13 +457,37 @@ class TerminalWidget(QWidget):
     # ------------------------------------------------------------------
     # internal
     # ------------------------------------------------------------------
+    def set_input_locked(self, locked: bool) -> None:
+        """Lock/unlock USER input. Locked panes drop keystrokes, image pastes,
+        and file drops before they reach the PTY (orchestrator writes are
+        unaffected). Also tells xterm.js to drop local echo so a locked pane
+        gives no typing feedback at all."""
+        self._input_locked = bool(locked)
+        if self._page_ready:
+            try:
+                self._view.page().runJavaScript(
+                    f"termSetLocked({'true' if self._input_locked else 'false'});"
+                )
+            except Exception:
+                pass
+
+    def is_input_locked(self) -> bool:
+        return self._input_locked
+
     def _on_input_data(self, data: str) -> None:
         # xterm.js gives us already-encoded escape sequences for keys; just
-        # ship the bytes to the PTY.
+        # ship the bytes to the PTY — unless this pane is input-locked, in which
+        # case the keystroke is dropped (accidental-input guard).
+        if self._input_locked:
+            return
         self.inputBytes.emit(data.encode("utf-8"))
 
     def _on_page_ready(self) -> None:
         self._page_ready = True
+        # Re-assert the lock state now that JS can receive it — the initial
+        # set_input_locked() at construction ran before the page existed.
+        if self._input_locked:
+            self.set_input_locked(True)
         if self._pending_writes:
             joined = "".join(self._pending_writes)
             self._pending_writes.clear()
@@ -559,6 +591,8 @@ class TerminalWidget(QWidget):
                 return True
             elif t == QEvent.Type.Drop:
                 self._set_drop_highlight(False)
+                if self._input_locked:
+                    return True  # locked pane: swallow the drop, forward nothing
                 if event.mimeData().hasUrls():  # type: ignore[attr-defined]
                     local_paths = [
                         url.toLocalFile()
@@ -582,6 +616,8 @@ class TerminalWidget(QWidget):
     # ------------------------------------------------------------------
     def _on_image_pasted(self, b64data: str, _mime_type: str) -> None:
         """Receive base64 image from JS, save to disk, insert path into terminal."""
+        if self._input_locked:
+            return  # locked pane: ignore pasted images
         from .config import EVENTS_LOG, RUNTIME_DIR, ensure_runtime
 
         ensure_runtime()
