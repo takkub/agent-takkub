@@ -78,8 +78,7 @@ src/agent_takkub/
 ├── project_rules.py   injects Lead's constraint registry (MEMORY.md) pointers into teammates
 ├── pane_env.py        per-pane env allowlist (drop secrets), ECC mute, MCP_TOOL_TIMEOUT inject
 ├── shared_dev_tools.py shared MCP config management + role-aware tool filtering
-├── codex_agents_md.py auto-plant AGENTS.md into codex pane cwd
-├── gemini_md.py       auto-plant GEMINI.md into gemini pane cwd
+├── codex_agents_md.py auto-plant AGENTS.md into codex + gemini(agy) pane cwd (both auto-discover AGENTS.md)
 │ ── providers / pipelines / plan ──
 ├── provider_config.py per-role CLI mapping (claude/codex/gemini) — ~/.takkub/role-providers.json
 ├── provider_state.py  per-provider enable/disable state — ~/.takkub/disabled-providers.json
@@ -87,7 +86,7 @@ src/agent_takkub/
 ├── pipeline_dialog.py UI bridge for pipeline/role settings (Qt ↔ HTML/JS)
 ├── plan_tier.py       account plan tier (Pro vs Max) — gates [1m] model variant — ~/.takkub/plan.json
 ├── codex_helper.py    OpenAI Codex CLI one-shot wrapper (non-interactive)
-├── gemini_helper.py   Google Gemini CLI one-shot wrapper (mirror of codex_helper)
+├── gemini_helper.py   Google Antigravity CLI (`agy`) one-shot wrapper — backs `gemini` role (mirror of codex_helper)
 │ ── auth ──
 ├── claude_auth_config.py  optional Claude Code auth override (default = CC's own login)
 ├── claude_auth_dialog.py  Qt dialog for the auth override

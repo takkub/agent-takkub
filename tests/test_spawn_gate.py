@@ -540,8 +540,8 @@ class TestTier2FinalGate:
             patch("agent_takkub.orchestrator.QTimer.singleShot"),
             patch("agent_takkub.orchestrator._build_pane_env", return_value={}),
             patch("agent_takkub.provider_config.effective_provider_for", return_value=GEMINI),
-            patch("agent_takkub.gemini_helper.find_gemini_executable", return_value="gemini"),
-            patch("agent_takkub.gemini_md.ensure_gemini_md"),
+            patch("agent_takkub.gemini_helper.find_agy_executable", return_value="agy"),
+            patch("agent_takkub.codex_agents_md.ensure_agents_md"),
             patch("agent_takkub.orchestrator.inject_user_profile_env"),
         ):
             mock_pty = MagicMock()
@@ -964,8 +964,8 @@ class TestTier2InProgressResetNonClaude:
             patch("agent_takkub.orchestrator.QTimer.singleShot"),
             patch("agent_takkub.orchestrator._build_pane_env", return_value={}),
             patch("agent_takkub.provider_config.effective_provider_for", return_value=GEMINI),
-            patch("agent_takkub.gemini_helper.find_gemini_executable", return_value="gemini"),
-            patch("agent_takkub.gemini_md.ensure_gemini_md"),
+            patch("agent_takkub.gemini_helper.find_agy_executable", return_value="agy"),
+            patch("agent_takkub.codex_agents_md.ensure_agents_md"),
             patch("agent_takkub.orchestrator.inject_user_profile_env"),
         ):
             pane.attach_session = MagicMock()

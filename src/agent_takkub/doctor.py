@@ -466,20 +466,29 @@ def check_projects() -> list[Finding]:
 def check_providers() -> list[Finding]:
     findings: list[Finding] = []
 
-    for provider in ("codex", "gemini"):
-        path = shutil.which(provider)
+    # The `gemini` teammate role runs on Antigravity's `agy` binary
+    # (Google retired the standalone Gemini CLI on 2026-06-18). Probe the
+    # real binary name while keeping the role label "gemini" in the report.
+    for provider, binary in (("codex", "codex"), ("gemini", "agy")):
+        path = shutil.which(binary)
         if path:
-            rc, ver = _run([provider, "--version"])
+            rc, ver = _run([binary, "--version"])
             version = (ver.splitlines()[0] if ver else path) if rc == 0 else path
             findings.append(Finding("providers", provider, Status.INFO, version))
         else:
+            hint = (
+                "install the Antigravity CLI (https://antigravity.google/download) "
+                "to use the 'gemini' teammate role"
+                if provider == "gemini"
+                else f"install {binary} CLI to use '{provider}' teammate role"
+            )
             findings.append(
                 Finding(
                     "providers",
                     provider,
                     Status.SKIP,
                     "not installed (optional)",
-                    f"install {provider} CLI to use '{provider}' teammate role",
+                    hint,
                 )
             )
 

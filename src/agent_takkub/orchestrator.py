@@ -47,6 +47,8 @@ from .lead_context import (  # re-exported for test + doctor.py imports
     _LEAD_GUARD_ALLOW_TOOLS,
     _LEAD_GUARD_WRITE_TOOLS,
     _SAFE_PLUGINS,
+    BIG_FILE_GUARD,
+    STALE_FILE_GUARD,
     _allowed_project_roots,
     _default_plugin_dirs,
     _recent_session_brief,
@@ -1772,27 +1774,39 @@ class Orchestrator(QObject):
         effective_provider = effective_provider_for(base_role, project=project_ns)
 
         if effective_provider == GEMINI:
-            from .gemini_helper import find_gemini_executable
-            from .gemini_md import ensure_gemini_md
+            # The `gemini` role is now powered by Antigravity's `agy` binary
+            # (Google retired the standalone Gemini CLI on 2026-06-18). `agy`
+            # auto-discovers AGENTS.md/.agents/ — NOT GEMINI.md — so the pane
+            # reuses codex's AGENTS.md cheatsheet (one manager, one marker, no
+            # write race when codex + gemini share a project cwd).
+            from .codex_agents_md import ensure_agents_md
+            from .gemini_helper import find_agy_executable
 
-            gemini_bin = find_gemini_executable()
+            gemini_bin = find_agy_executable()
             if gemini_bin is None:
                 return False, (
-                    "gemini binary not on PATH. Install with "
-                    "`npm install -g @google/gemini-cli`, then run `gemini` once to log in."
+                    "agy binary not on PATH. Install the Antigravity CLI from "
+                    "https://antigravity.google/download, then run `agy` once to sign in."
                 )
             spawn_cwd = cwd or default_cwd_for_role(role_name, project=project_ns) or str(REPO_ROOT)
-            ensure_gemini_md(spawn_cwd)
+            ensure_agents_md(spawn_cwd)
             env = _build_pane_env()
             env["TAKKUB_ROLE"] = role_name
             env["TAKKUB_PROJECT"] = project_ns
             inject_user_profile_env(env, project_ns)
             bin_dir = str(REPO_ROOT / "bin")
-            env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+            # Put agy's own dir on the pane PATH too — the Antigravity
+            # installer doesn't reliably register it (find_agy_executable
+            # may have resolved the binary via its fixed install location,
+            # not PATH), and agy may shell out to itself / companion tools.
+            agy_dir = os.path.dirname(gemini_bin)
+            env["PATH"] = bin_dir + os.pathsep + agy_dir + os.pathsep + env.get("PATH", "")
             _gem_tok = self._mint_pane_token(env, project_ns, role_name)
             gemini_argv = [
                 gemini_bin,
-                "-y",  # yolo: skip per-command approval prompts (parity with codex --ask-for-approval never)
+                # yolo: skip per-command approval prompts (parity with codex
+                # --ask-for-approval never). Antigravity's flag is the long form.
+                "--dangerously-skip-permissions",
             ]
             return self._launch_session(
                 pane=pane,
@@ -2022,6 +2036,17 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                             f"`{_role_mem}` ด้วย Edit/Write เพื่อให้รอบหน้าเร็วขึ้น "
                             "เก็บเฉพาะของจริงที่มีค่า อย่าซ้ำ code/git\n"
                         )
+                # Big-file hygiene: every teammate gets the same guard the Lead
+                # does — a teammate assigned to port a 2.7MB game file would
+                # otherwise Read it wholesale and balloon its own per-turn
+                # context (re-charged as cache_read each turn). Always-on.
+                _appendix += BIG_FILE_GUARD
+                # Stale-file race guard (teammate-only): recognise the
+                # "File has been modified since read" loop caused by a running
+                # dev-server/IDE watcher and stop it instead of retry-looping
+                # for minutes. Lead delegates and rarely bulk-edits, so it's
+                # omitted there to save spawn tokens.
+                _appendix += STALE_FILE_GUARD
                 if _appendix:
                     role_md_path.write_text(_existing_md + _appendix, encoding="utf-8")
                 role_md_file = str(role_md_path)
@@ -2836,6 +2861,28 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         _log_event("inject_lead_prompt_queued", project=project_ns)
         return False
 
+    def _ready_wait_ms(self, role_name: str, project: str | None, max_wait_ms: int) -> int:
+        """Effective ready-prompt wait window for a pane.
+
+        agy (the gemini role's engine) cold-boots far slower than claude/codex
+        — a 146 MB self-contained binary that also scans the workspace on launch
+        routinely needs ~45-60s to render its first ready prompt, landing right
+        at the default 45s edge and forcing a fragile blind paste (#26). Give
+        gemini/agy panes a longer window so first-assign delivery is confirmed,
+        not blind. An explicit non-default ``max_wait_ms`` from the caller always
+        wins (e.g. the short-poll peer-send path).
+        """
+        if max_wait_ms != 45_000:
+            return max_wait_ms
+        try:
+            from .provider_config import GEMINI, effective_provider_for
+
+            if effective_provider_for(role_name, project=self._resolve_project(project)) == GEMINI:
+                return 90_000
+        except Exception:
+            pass
+        return max_wait_ms
+
     def _send_when_ready(
         self,
         role_name: str,
@@ -2849,6 +2896,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         or while claude is still bootstrapping. Falls back to a hard timeout
         so a hung claude doesn't silently swallow the task.
         """
+        max_wait_ms = self._ready_wait_ms(role_name, project, max_wait_ms)
         pane = self._project_panes(project).get(role_name)
         if pane is None:
             return

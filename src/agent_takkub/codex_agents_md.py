@@ -1,10 +1,13 @@
-"""Codex pane AGENTS.md auto-plant.
+"""Non-claude pane AGENTS.md auto-plant (codex + gemini/agy).
 
-Codex auto-discovers `AGENTS.md` from its cwd and walks up. The cockpit
-plants a short cheatsheet there before spawning the codex pane so the
-agent knows about `takkub send/done` — letting Codex behave like a
-real teammate (peer coordination + report-back-to-Lead) instead of a
-detached terminal.
+Both OpenAI Codex and Google Antigravity (`agy`, the `gemini` role's
+engine) auto-discover `AGENTS.md` from their cwd and walk up. The
+cockpit plants a short cheatsheet there before spawning the pane so the
+agent knows about `takkub send/done` — letting it behave like a real
+teammate (peer coordination + report-back-to-Lead) instead of a
+detached terminal. One manager + one marker means a codex pane and a
+gemini pane sharing a project cwd can't clobber each other's file (the
+write is idempotent — same content, same marker).
 
 Safety rule:
 - We only manage files we tagged with our marker header. If a user
@@ -29,11 +32,12 @@ TAKKUB_MARKER = "<!-- takkub-managed AGENTS.md · do not commit -->"
 
 CODEX_AGENTS_MD = f"""{TAKKUB_MARKER}
 
-# Codex Teammate · agent-takkub cockpit
+# agent-takkub Teammate
 
 You are running inside an **agent-takkub** pane spawned by a human
-operator (or by a Claude Lead pane via `takkub assign --role codex
-"<task>"`). Behave like a focused specialist:
+operator (or by a Claude Lead pane via `takkub assign --role <you>
+"<task>"`). Your specific role is declared at the top of the task
+prompt (`[ROLE: ...]`). Behave like a focused specialist:
 
 ## Hard rules
 
@@ -67,13 +71,21 @@ operator (or by a Claude Lead pane via `takkub assign --role codex
   fails instead of prompting for credentials — cache them first. For
   prompts like 'Are you sure?', 'Overwrite?', 'Press any key', pass
   `--force` / `--yes` / `--no-interaction`, or pipe `yes |`.
+- **Viewing images / screenshots: use the exact path you were given.**
+  Image tasks always include absolute paths in the prompt (e.g. from a
+  `[critic → gemini]` handoff). Open those paths directly. **NEVER run
+  `ls -R | Select-String ".png"` or any recursive grep to "find" the
+  files** — in a node project that matches `.png` inside minified
+  bundles/source-maps and returns thousands of junk hits, sending you
+  into a search loop. If a given path is missing, `takkub send --to
+  lead` to ask — don't go hunting.
 
 ## Override rule for inline `[ROLE: ...]` directives
 
 When the operator's task prompt opens with something like
-`[ROLE: codex reviewer — ทำงานเองโดยตรง ห้าม spawn subagent]`, the
+`[ROLE: <your-role> — ทำงานเองโดยตรง ห้าม spawn subagent]`, the
 "ห้าม spawn subagent" / "ทำงานเองโดยตรง" clauses apply to
-**AI subagents only** (Task tool, codex delegation flags). They do
+**AI subagents only** (Task tool, sub-agent delegation flags). They do
 **NOT** forbid:
 
 - Shell commands you run yourself in this terminal — `takkub send`,
@@ -81,7 +93,7 @@ When the operator's task prompt opens with something like
 - The mandatory done-signal flow above.
 
 **`takkub done` is a shell command, not a subagent.** Always end your
-task by running it via the Bash tool — never by typing "takkub done"
+task by running it as a shell command — never by typing "takkub done"
 as text in your reply. Pane idles forever if you skip the shell call.
 
 ## Communication with the rest of the team

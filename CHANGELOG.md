@@ -4,6 +4,24 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Changed (เปลี่ยน)
+- **role `gemini` เปลี่ยนเครื่องยนต์จาก Gemini CLI → Antigravity CLI (`agy`)** —
+  Google ปิดบริการ Gemini CLI standalone เมื่อ 2026-06-18 แทนที่ด้วย Antigravity
+  CLI (binary ชื่อ `agy`, ติดตั้งเป็น native installer จาก antigravity.google ลง
+  `%LOCALAPPDATA%\agy\bin`, auth = Google Sign-In / `ANTIGRAVITY_API_KEY`).
+  **role/provider ยังชื่อ `gemini` เหมือนเดิม** — เปลี่ยนแค่ binary ที่อยู่เบื้องหลัง:
+  one-shot `takkub gemini` ใช้ `agy -p` (เดิม `gemini -p`), pane spawn ใช้
+  `agy --dangerously-skip-permissions` (เดิม `gemini -y`), helper เปลี่ยนเป็น
+  `find_agy_executable()` (`which("agy")`). substitution (Claude รับตำแหน่งแทนเมื่อ
+  ไม่มี binary), routing, สี, grid, toggle ทั้งหมดทำงานเหมือนเดิม.
+
+### Removed (ลบ)
+- **`gemini_md.py` (auto-plant GEMINI.md) ถูกลบ** — `agy` auto-discover `AGENTS.md`/
+  `.agents/` ไม่ใช่ `GEMINI.md` แล้ว → gemini(agy) pane ใช้ `codex_agents_md.ensure_agents_md`
+  ร่วมกับ codex (AGENTS.md เดียว, marker เดียว, idempotent ไม่ชน race เมื่อ codex +
+  gemini แชร์ cwd เดียวกัน). cheatsheet กลางเปลี่ยน title เป็น "agent-takkub Teammate"
+  (เลิกผูกกับ codex) + เพิ่มกฎ "ใช้ path รูปตรงๆ ห้าม recursive grep หา .png".
+
 ## [v0.8.0] - 2026-06-16
 
 ### Added (เพิ่ม)

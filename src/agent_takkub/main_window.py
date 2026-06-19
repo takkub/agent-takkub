@@ -267,14 +267,15 @@ class MainWindow(QMainWindow):
 
                 installed = shutil.which(provider) is not None
         elif provider == "gemini":
+            # The `gemini` role runs on Antigravity's `agy` binary.
             try:
-                from .gemini_helper import find_gemini_executable
+                from .gemini_helper import find_agy_executable
 
-                installed = find_gemini_executable() is not None
+                installed = find_agy_executable() is not None
             except Exception:
                 import shutil
 
-                installed = shutil.which(provider) is not None
+                installed = shutil.which("agy") is not None
         else:
             installed = True
         return "available" if installed else "not_installed"

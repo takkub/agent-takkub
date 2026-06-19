@@ -5,7 +5,7 @@
 - **backend** — REST API, GraphQL, database, business logic
 - **mobile** — React Native, Capacitor.js, iOS/Android
 - **devops** — CI/CD, Docker, deployment, infrastructure
-- **gemini** — Google Gemini CLI "สมองที่ 3" สำหรับ planning / second opinion / brainstorm (1M context)
+- **gemini** — Google Antigravity CLI (`agy`) "สมองที่ 3" สำหรับ planning / second opinion / brainstorm (รัน Gemini 3.x; role ยังชื่อ `gemini` — Gemini CLI เดิมปิด 18 มิ.ย. 2026 เปลี่ยนมาใช้ agy)
 - **qa** — integration tests, e2e tests, edge cases, regression
 - **reviewer** — code review (quality, security, code-level performance)
 - **critic** — Design Critic: รีวิว UI หลัง QA, ส่งภาพให้ Gemini, เขียน proposal markdown ส่ง Lead
