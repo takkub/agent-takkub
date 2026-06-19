@@ -22,7 +22,7 @@
 ```
 
 - **Lead** = claude ตัวหลัก (อยู่ซ้าย) สั่งงาน, วางแผน, รับ report
-- **Teammates** = specialist agents ที่ spawn ตามคำสั่ง Lead — claude-backed (frontend / backend / mobile / devops / qa / reviewer / critic) + non-claude panes (**codex** + **gemini**) + ad-hoc **shell**
+- **Teammates** = specialist agents ที่ spawn ตามคำสั่ง Lead — claude-backed (frontend / backend / mobile / devops / qa / reviewer / critic) + non-claude panes (**codex** = OpenAI Codex CLI, **gemini** = Google Antigravity CLI `agy`) + ad-hoc **shell** · *codex/gemini เป็น optional — ถ้าไม่ได้ติดตั้ง CLI ของมัน role นั้นจะรันด้วย Claude แทนอัตโนมัติ (เสีย model diversity แต่ไม่ติดขัด)*
 - **takkub CLI** = ทุก pane เรียกคำสั่งหากันเองได้: `takkub assign --role backend "<task>"`, `takkub send --to qa "<msg>"`, `takkub done`
 - **Multi-project tabs** = เปิดหลาย project พร้อมกันใน tab แยก, แต่ละ tab มี Lead + teammates ของตัวเอง, ไม่ cross-talk
 - **Auto-everything** — session resume on restart, stuck-pane auto-recover, MCP pre-warm, decision log to Obsidian vault, daily digest, resume brief, hook noise meter
@@ -59,6 +59,13 @@
 - ถ้าใช้ → cockpit จะ auto-mirror decision logs + hot snapshot + daily digest + resume briefs เข้า vault
 - ไม่ใช้ก็ได้ — cockpit ทำงานปกติ แค่ skip vault mirror
 
+### (ทางเลือก) 6. AI CLIs ตัวอื่น — สำหรับ role `codex` / `gemini` (model diversity)
+cockpit ใช้ **Claude อย่างเดียวก็ทำงานครบ** — Lead + ทุก role รันด้วย Claude ได้ 2 ตัวนี้เป็น optional ให้ "สมองที่ 2/3" จากโมเดลอื่นเวลา cross-check:
+- **OpenAI Codex CLI** — `npm install -g @openai/codex` แล้ว `codex login` (role `codex`)
+- **Google Antigravity CLI (`agy`)** — ลงที่ <https://antigravity.google/download> (native installer ลง `%LOCALAPPDATA%\agy\bin`) แล้วรัน `agy` 1 ครั้งทำ Google Sign-In (role `gemini`; แทน Gemini CLI เดิมที่ Google ปิด 18 มิ.ย. 2026)
+- **ไม่ลงก็ได้** — role `codex`/`gemini` จะรันด้วย Claude แทนอัตโนมัติ (substitution) ไม่ติดขัด แค่ไม่ได้มุมมองจากโมเดลอื่น
+- `scripts/install.ps1` ลง codex + agy ให้แบบ best-effort อยู่แล้ว
+
 ---
 
 ## One-shot install (Windows, recommended for เครื่องใหม่)
@@ -86,14 +93,16 @@ scripts\install.bat -Update
 |---|---|---|
 | 1 | Python 3.11+, Git, Node.js LTS, Chrome, GitHub CLI | runtime + ผูก git update flow + Chrome สำหรับ chrome-devtools MCP |
 | 2 | npm registry → `registry.npmjs.org` | กัน corporate proxy block MCP fetch |
-| 3 | Claude Code CLI, OpenAI Codex CLI | backend ของ Lead pane + Codex pane |
+| 3 | Claude Code CLI (required) · OpenAI Codex CLI + Antigravity CLI `agy` (optional) | Claude = Lead + ทุก claude role · Codex/agy = backend ของ role codex/gemini (best-effort install — ไม่มีก็รันเป็น Claude แทน) |
 | 4 | Claude plugins: superpowers, agent-skills, Pordee | skills + reviewers + workflow utilities ที่ agents ใช้ผ่าน `/skill-name` (ECC ไม่ลงโดยตั้งใจ — SessionStart hook ทำ pane crash + กิน ~31k tok/session) |
 | 4b | MCP servers: `@playwright/mcp`, `chrome-devtools-mcp` + Playwright Chromium (~150 MB) | pre-warm npm cache + Playwright browser → Lead pane spawn ครั้งแรกไม่ต้องรอ MCP download |
 | 5 | rtk (Rust Token Killer) | optional — ลด token usage 60-90% ของ shell command output |
 | 6 | clone agent-takkub + `pip install -e .` | cockpit เอง |
 | 7 | `~/.takkub/role-providers.json` (empty `{}`), Obsidian vault skeleton | per-role provider config + vault placeholder สำหรับ session mirror |
 
-> Login (`claude login` / `codex login`) ไม่ได้รวมใน script — รันเองหลัง install เสร็จ (เปิด browser OAuth)
+> Login ไม่ได้รวมใน script — รันเองหลัง install เสร็จ (เปิด browser OAuth):
+> `claude login` (required) · `codex login` (optional) · `agy` (optional — first run ทำ Google Sign-In)
+> ติดตั้ง agy ผ่าน script แบบ best-effort; ถ้าพลาด ลงเองที่ <https://antigravity.google/download> แล้วรัน `agy` 1 ครั้ง
 
 **Flags:**
 
@@ -397,6 +406,8 @@ Cockpit อ่าน `~/.claude/projects/<encoded>/*.jsonl` (Claude Code's sessi
 | Browser MCPs prompt ทุกครั้ง | ปกติ — claude ขอ allow ครั้งแรกของ session ใหม่ |
 | `runtime/shared-mcp.json` race | restart cockpit (one-time, idempotent re-write) |
 | ECC GateGuard fact-force ขึ้นทุก Edit | cockpit auto-mute ตั้งแต่ v0.3.5+ — ถ้ายังขึ้น = pane เก่า, ปิด+spawn ใหม่ |
+| `gemini` pane รันเป็น Claude (ไม่ใช่ Gemini จริง) | ยังไม่ได้ลง Antigravity `agy` หรือ ยังไม่ได้ sign-in — ลงที่ <https://antigravity.google/download> แล้วรัน `agy` 1 ครั้ง · เช็ค: `takkub doctor` (ดู providers) · ถ้าลงแล้วแต่ `agy` ไม่อยู่บน PATH → cockpit หาเจอเองที่ `%LOCALAPPDATA%\agy\bin` |
+| `codex` pane รันเป็น Claude | ยังไม่ได้ลง/login Codex — `npm install -g @openai/codex` + `codex login` |
 
 ---
 
