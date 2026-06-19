@@ -48,6 +48,37 @@ Working directory ของคุณจะถูก inject โดย Lead ตอ
 5. ระวังเรื่อง secrets ห้าม commit ค่า secret จริง ให้ใช้ placeholder หรือ reference secret manager
 6. รายงานกลับ Lead ผ่าน `takkub done` เมื่อเสร็จ
 
+## 🚀 Pre-QA local bring-up (port-safe) — สำคัญ
+
+เมื่อ Lead สั่งให้ "bring up stack ก่อน QA" (verify gate ใหม่: DEV เสร็จหมด → **devops ยกstack ขึ้น** → QA เทสท้ายสุด) ทำตามนี้:
+
+1. **เช็ค port ที่ถูกใช้อยู่ก่อน** (ห้ามชนกับ docker ที่รันอยู่ — เครื่องนี้มักมีหลาย stack รันพร้อมกัน):
+   ```bash
+   docker ps --format '{{.Names}}\t{{.Ports}}'
+   # ดึงเฉพาะ published host ports ที่ถูกจองแล้ว:
+   docker ps --format '{{.Ports}}' | grep -oE '0\.0\.0\.0:[0-9]+' | grep -oE '[0-9]+$' | sort -un
+   ```
+2. **เลือก port ที่ว่าง** — อย่าใช้ default ถ้ามันชน ให้ offset (เช่น web 3000→3900, api 3001→3901, db 5432→5932) แล้ว **publish ผ่าน env/override ไม่แก้ compose ต้นฉบับ**:
+   ```bash
+   # ใช้ unique project name กัน container/network ชนกับ stack อื่น
+   WEB_PORT=3900 API_PORT=3901 DB_PORT=5932 \
+     docker compose -p <project>-qa up -d --wait
+   # ถ้า compose ไม่ parametrize port → เขียน docker-compose.override.yml ชั่วคราว (ports เท่านั้น)
+   ```
+   (ถ้า compose hardcode ports และแก้ไม่ได้เร็ว → `send --to lead` ขอตัดสินใจ อย่าทับ stack ที่รันอยู่)
+3. **detach เสมอ ห้าม foreground** — `up -d` (`--wait` รอ healthy) ห้าม `docker compose up` เปล่าๆ (block forever)
+4. **verify ว่า healthy จริง** ก่อน done:
+   ```bash
+   docker compose -p <project>-qa ps --format json   # ดู health column
+   curl -fsS http://localhost:3900/health             # หรือ endpoint จริง
+   ```
+5. **รายงาน live ports/URLs ใน `takkub done`** — QA ต้องรู้ว่าเทสที่ไหน:
+   ```bash
+   takkub done "stack up (project <project>-qa): web http://localhost:3900 · api :3901 · db :5932 · ทุก service healthy — QA เทสที่ URL พวกนี้"
+   ```
+
+> หลัง QA เสร็จ Lead อาจสั่ง `docker compose -p <project>-qa down` เพื่อคืน RAM/port — ทำเมื่อถูกสั่งเท่านั้น
+
 ## การสื่อสารระหว่าง agents (ผ่าน takkub CLI)
 
 ```bash

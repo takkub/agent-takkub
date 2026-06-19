@@ -71,22 +71,26 @@ takkub assign --role qa "smoke test /auth/login: happy path + invalid creds + ra
 
 ### Pattern ผสม (parallel ใน group, sequential ระหว่าง group)
 ```bash
-# Group 1: impl parallel
+# Group 1: impl parallel — DEV งานหลัก ทำให้จบ "ทุกอย่าง" ก่อน (ห้ามแทรก QA กลางทาง)
 takkub assign --role frontend "หน้า /login form" &
 takkub assign --role backend  "POST /auth/login endpoint" &
 wait
-# Group 2: verify parallel
-takkub assign --role qa       "e2e /login flow" &
-takkub assign --role reviewer "review diff ทั้ง 2 PR" &
-wait
+# Group 2: devops ยก stack ขึ้น local (เฉพาะโปรเจคที่มี docker compose) — port ห้ามชนกับ docker ที่รันอยู่
+takkub assign --role devops --cwd <api> "docker compose up -d local · เช็ค docker ps เลือก port ว่าง · healthcheck · report URLs"
+# (รอ devops done — QA ต้องการ stack ที่รันอยู่)
+# Group 3: QA ท้ายสุดเสมอ — เทสกับ stack จริงที่ devops ยกขึ้น
+takkub assign --role qa "e2e /login flow ที่ <urls จาก devops done note>"
 ```
 
-### Auto-chain (skip propose for verify hop)
-ใส่ `--auto-chain` บน impl assign → เมื่อ **ทุก** auto-chain pane ใน project report done, orchestrator inject handoff prompt เข้า Lead **อัตโนมัติ** สั่ง fire qa+reviewer ทันที one hop เท่านั้น (verify ห้าม chain ต่อ — qa/reviewer assigns ห้ามใส่ `--auto-chain`)
+> **กฎ verify flow:** QA = ปุ่มจบ รันท้ายสุดเสมอ ต่อเมื่อ **(1)** DEV งานหลักเสร็จหมดทุกอย่าง **และ (2)** ถ้าโปรเจคมี docker compose → devops ยก stack ขึ้นแล้ว (port ไม่ชน) ก่อน · โปรเจคที่ไม่มี compose ข้าม devops ตรงไป QA ได้ · reviewer = ตอน PR (ไม่อยู่ใน auto gate ยกเว้น trust-boundary/schema/migration)
+
+### Auto-chain (skip propose for verify sequence)
+ใส่ `--auto-chain` บน impl assign → เมื่อ **ทุก** auto-chain pane ใน project report done, orchestrator inject handoff prompt เข้า Lead **อัตโนมัติ** สั่งรัน **verify sequence**: (ถ้ามี docker compose) **devops ยก stack ขึ้น port-safe → รอ done → QA ท้ายสุด** — QA รันต่อเมื่อ DEV เสร็จหมด + stack พร้อม (devops/qa assigns ห้ามใส่ `--auto-chain` — เป็น terminal hop)
 ```bash
 takkub assign --role frontend --auto-chain --cwd <web> "หน้า /login form" &
 takkub assign --role backend  --auto-chain --cwd <api> "POST /auth/login endpoint" &
 wait
+# → ทุก impl done → handoff อัตโนมัติ: Lead fire devops (bring-up) → รอ → qa (ท้ายสุด)
 ```
 
 ### ส่ง spec เดียวกันให้หลาย role
@@ -245,7 +249,8 @@ Context ตอน spawn **ไม่ได้ preload vault** — เบาไว
 หลัง `[<role> done] <note>` เด้งเข้า Lead:
 1. อ่าน report สรุป 1-2 บรรทัด
 2. ตัดสิน next step:
-   - impl done → propose verify (qa + reviewer parallel) — *Exception:* `--auto-chain` panes ที่ done ครบ → orchestrator inject handoff prompt → Lead pre-authorized fire qa+reviewer ทันที (one-hop)
+   - impl done (DEV เสร็จ "ทุกอย่าง") → verify sequence: **(ถ้ามี docker compose) propose devops ยก stack ขึ้น port-safe ก่อน → รอ done → แล้ว QA ท้ายสุด** · ไม่มี compose → ตรงไป QA · *Exception:* `--auto-chain` panes ที่ done ครบ → orchestrator inject handoff prompt → Lead pre-authorized fire devops→qa sequence ทันที (QA ท้ายสุดเสมอ) · reviewer = ตอน PR
+   - DEV ยังไม่จบทุกอย่าง → **ห้ามเรียก QA** ให้ DEV ทำต่อจนครบก่อน (QA = ปุ่มจบ)
    - verify pass → propose ship (commit/PR — ห้าม push เอง)
    - verify fail → propose fix loop กลับ primary role
    - งานเสร็จ → สรุป "ปิด session?" ไม่ propose role ใหม่

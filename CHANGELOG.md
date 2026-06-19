@@ -5,6 +5,14 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 ## [vNEXT]
 
 ### Changed (เปลี่ยน)
+- **Verify flow ใหม่: DEV เสร็จทุกอย่าง → devops ยก stack ขึ้น (port-safe) → QA ท้ายสุด** —
+  เดิม impl done → fire qa+reviewer คู่ขนานทันที ตอนนี้ QA เป็น "ปุ่มจบ" รันท้ายสุด
+  ต่อเมื่อ DEV งานหลักเสร็จหมด **และ** (ถ้าโปรเจคมี docker compose) devops ยก stack
+  ขึ้น local บน **port ที่ไม่ชนกับ docker ที่รันอยู่** ก่อน (devops เช็ค `docker ps`
+  เลือก port ว่าง / offset + unique project name, `up -d --wait`, report URLs ให้ QA).
+  reviewer ย้ายเป็น gate ตอน PR (qa-only mid-cycle). กระทบ: auto-chain handoff prompt,
+  CLAUDE.md playbook, devops role file, built-in "feature" pipeline template
+  (hop: impl → devops → qa). โปรเจคที่ไม่มี compose ข้าม devops ตรงไป QA.
 - **role `gemini` เปลี่ยนเครื่องยนต์จาก Gemini CLI → Antigravity CLI (`agy`)** —
   Google ปิดบริการ Gemini CLI standalone เมื่อ 2026-06-18 แทนที่ด้วย Antigravity
   CLI (binary ชื่อ `agy`, ติดตั้งเป็น native installer จาก antigravity.google ลง
@@ -21,6 +29,21 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
   ร่วมกับ codex (AGENTS.md เดียว, marker เดียว, idempotent ไม่ชน race เมื่อ codex +
   gemini แชร์ cwd เดียวกัน). cheatsheet กลางเปลี่ยน title เป็น "agent-takkub Teammate"
   (เลิกผูกกับ codex) + เพิ่มกฎ "ใช้ path รูปตรงๆ ห้าม recursive grep หา .png".
+
+### Fixed (แก้)
+- **error spam: `idle_watchdog_pane_error` (#64)** — `_check_idle_teammates` มี
+  `except Exception` ที่กลืน error โดยไม่ log type/message + วนทุก 5s tick → events.log
+  เดียวมี 3279 entries ที่วินิจฉัยอะไรไม่ได้ (3210 = pms Lead pane ตัวเดียว). แก้:
+  capture `err=type+message` + rate-limit (log ครั้งเดียวต่อ error/pane, cooldown 5 นาที)
+  → ครั้งหน้าเห็นสาเหตุจริง 1 บรรทัด แทน spam เปล่า.
+- **docs-verify gate ครอบ point-in-time artifact ใน subdir ไม่ทั่ว** — `docs/code-review/*`
+  ไม่ครอบ `docs/code-review/<subdir>/*.md` (PurePath `*` ไม่ข้าม `/`, Python 3.11 ไม่มี
+  recursive `**`) → snapshot เก่าที่อ้างไฟล์ที่ลบแล้ว block commit. แก้: pattern `dir/*`
+  ครอบ nested path ด้วย (prefix match).
+- **error sources จาก runtime (#64)** — audit events.log: เพิ่มเอกสาร `main_thread_stall`
+  (989×, UI freeze 1-2.6s, ไม่ใช่ตอน spawn), big-file cache-bloat + "Error writing file"
+  retry-loop (แก้ด้วย BIG_FILE_GUARD/STALE_FILE_GUARD), delivery_unconfirmed (แก้ด้วย
+  agy ready-wait 90s) — รายละเอียด + action items ใน issue #64.
 
 ## [v0.8.0] - 2026-06-16
 

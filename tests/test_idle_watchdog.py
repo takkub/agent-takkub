@@ -481,3 +481,47 @@ class TestMalformedXmlWatchdog:
         orch._check_idle_teammates()
 
         lead.session.write.assert_not_called()
+
+
+class TestWatchdogExceptionLogging:
+    """The per-pane watchdog body's catch-all used to log a bare role/project
+    with NO exception detail, re-firing every 5s tick (3279 blind entries in one
+    events.log). It now captures the exception type+message and dedups per pane."""
+
+    def test_exception_logged_with_detail_and_deduped(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pane = _make_pane(state="working", at_ready_prompt=True)
+        # Raise from inside the watchdog body (the tty-prompt probe runs before
+        # the ready check) so the catch-all fires.
+        pane.session.is_blocked_on_tty_prompt.side_effect = RuntimeError("boom")
+        orch.panes["backend"] = pane
+
+        events: list[tuple[str, dict]] = []
+        monkeypatch.setattr(orch_mod, "_log_event", lambda ev, **kw: events.append((ev, kw)))
+        monkeypatch.setattr(orch_mod.time, "time", lambda: 1000.0)
+
+        orch._check_idle_teammates()
+        orch._check_idle_teammates()  # same fault, same tick window → deduped
+
+        errs = [kw for ev, kw in events if ev == "idle_watchdog_pane_error"]
+        assert len(errs) == 1, "persistent fault must log once, not per-tick"
+        assert "RuntimeError: boom" in errs[0]["err"]
+
+    def test_changed_error_logs_again(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pane = _make_pane(state="working", at_ready_prompt=True)
+        orch.panes["backend"] = pane
+        events: list[tuple[str, dict]] = []
+        monkeypatch.setattr(orch_mod, "_log_event", lambda ev, **kw: events.append((ev, kw)))
+        monkeypatch.setattr(orch_mod.time, "time", lambda: 1000.0)
+
+        pane.session.is_blocked_on_tty_prompt.side_effect = RuntimeError("first")
+        orch._check_idle_teammates()
+        pane.session.is_blocked_on_tty_prompt.side_effect = ValueError("second")
+        orch._check_idle_teammates()  # different error string → logs again
+
+        errs = [kw["err"] for ev, kw in events if ev == "idle_watchdog_pane_error"]
+        assert any("RuntimeError: first" in e for e in errs)
+        assert any("ValueError: second" in e for e in errs)

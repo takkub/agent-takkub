@@ -1224,6 +1224,11 @@ class Orchestrator(QObject):
         # semantics ("absent = not tracking") are relied on by the watchdog and
         # tests — pop() must remove the entry, not merely reset fields.
         self._idle_state: dict[str, dict[str, float | None]] = {}
+        # Per-pane last-logged watchdog exception (err_str, ts) — dedups the
+        # blind 5s-tick `idle_watchdog_pane_error` spam (was 3279 entries in one
+        # events.log) so a persistent fault is logged once with detail, not
+        # flooded. See _check_idle_teammates' except block.
+        self._idle_err_last: dict[str, tuple[str, float]] = {}
         self._idle_watchdog = QTimer(self)
         self._idle_watchdog.setInterval(IDLE_WATCHDOG_INTERVAL_MS)
         self._idle_watchdog.timeout.connect(self._check_idle_teammates)
@@ -3172,30 +3177,45 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             self._inject_auto_chain_handoff(project_ns)
 
     def _inject_auto_chain_handoff(self, project_ns: str) -> None:
-        """Send a pre-authorisation prompt to Lead telling it to fire
-        verify (qa + reviewer) in parallel WITHOUT proposing or waiting
-        for user confirmation. Fires after all panes assigned with
-        --auto-chain in the project have reported done.
+        """Send a pre-authorisation prompt to Lead telling it to run the final
+        verify SEQUENCE — devops local bring-up (port-safe), then QA last —
+        WITHOUT proposing or waiting for user confirmation. Fires after all
+        panes assigned with --auto-chain in the project have reported done.
 
-        If the Lead pane is absent, the prompt is queued via
+        QA always runs LAST: all dev work must be complete, and (when the
+        project ships a docker compose) the stack must be up on non-clashing
+        ports first, so QA tests the real running system as the single final
+        gate. If the Lead pane is absent, the prompt is queued via
         _pending_done_notices and delivered when Lead next spawns.
         """
         prompt = (
             "[auto-chain handoff] impl panes spawned with --auto-chain "
             "in this project have all reported done.\n"
-            "You are pre-authorized to fire verify (qa + reviewer) "
-            "in parallel WITHOUT proposing or waiting for user confirmation.\n"
+            "You are pre-authorized to run the FINAL VERIFY SEQUENCE below "
+            "WITHOUT proposing or waiting for user confirmation.\n"
+            "\n"
+            "Rule: QA runs LAST — only after ALL dev work is done AND (if the "
+            "project has docker compose) the stack is up on non-clashing ports.\n"
             "\n"
             "Steps:\n"
-            "1. Re-read the recent [<role> done] notes above\n"
-            "2. (Optional) `git -C <project_path> diff --stat` for changed files\n"
-            "3. Write a verify spec covering the implemented changes\n"
-            "4. Fire in parallel: takkub assign --role qa ... & "
-            "takkub assign --role reviewer ... & wait\n"
+            "1. Re-read the recent [<role> done] notes above; "
+            "(optional) `git -C <project_path> diff --stat`.\n"
+            "2. Bring-up gate — IF the project has a compose file "
+            "(docker-compose.yml / compose.yaml / compose.yml):\n"
+            "   fire devops FIRST to `docker compose up -d` locally on ports "
+            "that do NOT clash with already-running containers (devops checks "
+            "`docker ps`, picks free ports / offsets compose, healthchecks), "
+            "then WAIT for the devops done event. Tell devops to report the "
+            "live ports/URLs so QA knows where to test.\n"
+            "   IF no compose file: skip this step.\n"
+            "3. THEN fire QA LAST as the single final gate against the running "
+            "stack: `takkub assign --role qa ...` (no --auto-chain — QA is "
+            "terminal). Pass QA the live ports/URLs from devops.\n"
+            "4. After the qa done event: resume normal propose-then-confirm "
+            "flow. (reviewer = at PR time per policy, not in this auto gate "
+            "unless a trust-boundary / schema / migration change.)\n"
             "\n"
-            "Do NOT add --auto-chain on the verify fire (verify is the "
-            "terminal hop). After qa+reviewer done events arrive, resume "
-            "normal propose-then-confirm flow."
+            "Do NOT add --auto-chain on the devops or QA fire (terminal hops)."
         )
         self._notify_lead(project_ns, prompt)
         _log_event("auto_chain_handoff", project=project_ns)
@@ -5068,8 +5088,24 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                                 )
                                 _log_event("harvest_hint", role=name, project=project_name)
                                 self._ps(key).harvest_hint_ts = now
-                except Exception:
-                    _log_event("idle_watchdog_pane_error", role=name, project=project_name)
+                except Exception as e:
+                    # This block runs every 5s per pane; a persistent fault used
+                    # to re-log a bare role/project with NO exception detail on
+                    # every tick (3279 blind entries in one events.log — zero
+                    # diagnostic value). Capture the exception type+message and
+                    # rate-limit: log only when the error changes or after a
+                    # 5-min cooldown per pane, so the real cause surfaces once
+                    # instead of flooding the log.
+                    err = f"{type(e).__name__}: {e}"
+                    last = self._idle_err_last.get(key)
+                    if last is None or last[0] != err or (now - last[1]) >= 300:
+                        _log_event(
+                            "idle_watchdog_pane_error",
+                            role=name,
+                            project=project_name,
+                            err=err,
+                        )
+                        self._idle_err_last[key] = (err, now)
 
     def _check_stuck_panes(self, now: float) -> None:
         """Walk every teammate pane and auto-recover any that's been
