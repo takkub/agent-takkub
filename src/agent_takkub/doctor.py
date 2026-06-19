@@ -467,12 +467,30 @@ def check_providers() -> list[Finding]:
     findings: list[Finding] = []
 
     # The `gemini` teammate role runs on Antigravity's `agy` binary
-    # (Google retired the standalone Gemini CLI on 2026-06-18). Probe the
-    # real binary name while keeping the role label "gemini" in the report.
+    # (Google retired the standalone Gemini CLI on 2026-06-18). Resolve via the
+    # SAME helper the cockpit uses at spawn time — `find_agy_executable()` falls
+    # back to %LOCALAPPDATA%\agy\bin when the installer didn't register PATH, so
+    # doctor doesn't falsely report "not installed" for a gemini role that
+    # actually works. Use the resolved absolute path in `_run` so `--version`
+    # succeeds even when the binary is off-PATH.
+    def _resolve_provider_bin(provider: str, binary: str) -> str | None:
+        try:
+            if provider == "gemini":
+                from .gemini_helper import find_agy_executable
+
+                return find_agy_executable()
+            if provider == "codex":
+                from .codex_helper import find_codex_executable
+
+                return find_codex_executable()
+        except Exception:
+            pass
+        return shutil.which(binary)
+
     for provider, binary in (("codex", "codex"), ("gemini", "agy")):
-        path = shutil.which(binary)
+        path = _resolve_provider_bin(provider, binary)
         if path:
-            rc, ver = _run([binary, "--version"])
+            rc, ver = _run([path, "--version"])
             version = (ver.splitlines()[0] if ver else path) if rc == 0 else path
             findings.append(Finding("providers", provider, Status.INFO, version))
         else:
