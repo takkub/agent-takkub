@@ -247,6 +247,21 @@ def _render_lead_context(
         name, proj = active_project()
     paths = list((proj.get("paths") or {}).values()) if proj else []
 
+    # Guard: if the active project IS the cockpit repo itself (agent-takkub),
+    # skip BLOCKED_DIRS injection entirely — cockpit files are in the ✅ list
+    # (Lead can edit CLAUDE.md, projects.json, .claude/agents/*) so blocking
+    # the whole repo would contradict that policy.
+    if paths:
+        _proj_paths: dict = proj.get("paths") or {}
+        _proj_root_str: str | None = _proj_paths.get("main") or next(
+            iter(_proj_paths.values()), None
+        )
+        if _proj_root_str:
+            _proj_root = pathlib.Path(_proj_root_str).resolve()
+            if _proj_root == REPO_ROOT.resolve():
+                # Active project = cockpit → no BLOCKED_DIRS
+                paths = []
+
     if paths:
         blocked = "\n".join(f"- `{p}`" for p in paths)
         header = f"active project: **{name}**" if name else "active project:"

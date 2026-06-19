@@ -768,7 +768,10 @@ class MainWindow(QMainWindow):
             "Leave fields blank to use Claude Code's default login/session."
         )
         self._btn_claude_auth.setStyleSheet(self._ghost_button_style())
-        self._btn_claude_auth.clicked.connect(self._on_claude_auth_clicked)
+        # Claude Auth now lives as a tab inside the "Add / Remove user…" dialog
+        # (_on_claude_auth_clicked was folded in there). This hidden button, if
+        # ever restored, opens that combined dialog.
+        self._btn_claude_auth.clicked.connect(self._on_add_user_clicked)
         # Hidden per user request (kept for easy future restore). It's created +
         # wired but NOT added to the status bar; hide() so an unplaced child
         # doesn't render as a stray button at the window origin. To restore:
@@ -1262,12 +1265,11 @@ class MainWindow(QMainWindow):
 
         Built fresh on every click so user-profile state is always current.
         Menu sections:
-          1. Pipeline Settings… (opens the dialog)
-             Claude Auth…       (base URL / API key / token overrides)
+          1. Pipeline Settings…
           ─────────────────
           2. User profiles (checkable, one per profile)
           ─────────────────
-          3. Add / Remove user…
+          3. Add / Remove user… (now includes Claude Auth tab)
         """
         from PyQt6.QtGui import QAction
         from PyQt6.QtWidgets import QMenu
@@ -1287,10 +1289,6 @@ class MainWindow(QMainWindow):
         act_pipeline.triggered.connect(self._open_pipeline_settings_dialog)
         menu.addAction(act_pipeline)
 
-        act_claude_auth = QAction("Claude Auth…", self)
-        act_claude_auth.triggered.connect(self._on_claude_auth_clicked)
-        menu.addAction(act_claude_auth)
-
         menu.addSeparator()
 
         current_profile = user_profile.profile_for(_proj or "")
@@ -1309,18 +1307,6 @@ class MainWindow(QMainWindow):
         menu.addAction(act_manage)
 
         menu.exec(self._btn_pipelines.mapToGlobal(self._btn_pipelines.rect().bottomLeft()))
-
-    def _on_claude_auth_clicked(self) -> None:
-        """Open optional Claude auth override settings."""
-        from .claude_auth_dialog import ClaudeAuthDialog
-
-        dlg = ClaudeAuthDialog(self)
-        if dlg.exec() != dlg.DialogCode.Accepted:
-            return
-        self._status.showMessage(
-            "Claude auth saved — close and respawn Claude panes to use the new settings.",
-            7_000,
-        )
 
     # ──────────────────────────────────────────────────────────────
     # toolbar buttons
@@ -3505,34 +3491,51 @@ class MainWindow(QMainWindow):
             self._restart_lead_for_active_project()
 
     def _on_add_user_clicked(self) -> None:
+        from pathlib import Path
+
         from PyQt6.QtWidgets import (
+            QComboBox,
             QDialog,
             QDialogButtonBox,
             QFileDialog,
             QFormLayout,
+            QFrame,
             QHBoxLayout,
             QLabel,
             QLineEdit,
             QListWidget,
+            QMessageBox,
             QPushButton,
+            QTabWidget,
             QVBoxLayout,
+            QWidget,
         )
 
         from . import user_profile
+        from .claude_auth_config import ClaudeAuthConfig, load_claude_auth, save_claude_auth
 
         dlg = QDialog(self)
-        dlg.setWindowTitle("Manage Claude Config Profiles")
-        dlg.resize(460, 360)
-        lay = QVBoxLayout(dlg)
+        dlg.setWindowTitle("User Profiles & Claude Auth")
+        dlg.resize(560, 440)
+        main_lay = QVBoxLayout(dlg)
+
+        tabs = QTabWidget(dlg)
+        main_lay.addWidget(tabs)
+
+        # ──────────────────────────────────────────────────────────────
+        # Tab 1: Profiles (existing Add/Remove user content)
+        # ──────────────────────────────────────────────────────────────
+        profile_tab = QWidget()
+        lay = QVBoxLayout(profile_tab)
 
         lay.addWidget(QLabel("Existing profiles ('default' cannot be removed):"))
-        profile_list = QListWidget(dlg)
+        profile_list = QListWidget(profile_tab)
         profiles: list[dict] = user_profile.list_profiles()
         for p in profiles:
             profile_list.addItem(f"{p['name']}  →  {p['config_dir']}")
         lay.addWidget(profile_list)
 
-        btn_remove = QPushButton("Remove selected", dlg)
+        btn_remove = QPushButton("Remove selected", profile_tab)
         btn_remove.setEnabled(False)
         lay.addWidget(btn_remove)
 
@@ -3561,15 +3564,15 @@ class MainWindow(QMainWindow):
         lay.addWidget(sep)
         lay.addWidget(QLabel("Add new profile:"))
         form = QFormLayout()
-        name_edit = QLineEdit(dlg)
+        name_edit = QLineEdit(profile_tab)
         name_edit.setPlaceholderText("e.g. work, personal")
-        dir_edit = QLineEdit(dlg)
+        dir_edit = QLineEdit(profile_tab)
         dir_edit.setPlaceholderText("path to Claude config dir, e.g. ~/.claude-work")
-        dir_row_w = QWidget(dlg)
+        dir_row_w = QWidget(profile_tab)
         dir_row_l = QHBoxLayout(dir_row_w)
         dir_row_l.setContentsMargins(0, 0, 0, 0)
         dir_row_l.addWidget(dir_edit)
-        btn_browse = QPushButton("Browse…", dlg)
+        btn_browse = QPushButton("Browse…", profile_tab)
         btn_browse.setFixedWidth(72)
         dir_row_l.addWidget(btn_browse)
         form.addRow("Name:", name_edit)
@@ -3583,7 +3586,7 @@ class MainWindow(QMainWindow):
 
         btn_browse.clicked.connect(_do_browse)
 
-        btn_add = QPushButton("Add Profile", dlg)
+        btn_add = QPushButton("Add Profile", profile_tab)
         lay.addWidget(btn_add)
 
         def _do_add() -> None:
@@ -3604,9 +3607,194 @@ class MainWindow(QMainWindow):
 
         btn_add.clicked.connect(_do_add)
 
-        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, dlg)
-        btns.rejected.connect(dlg.accept)
-        lay.addWidget(btns)
+        tabs.addTab(profile_tab, "Profiles")
+
+        # ──────────────────────────────────────────────────────────────
+        # Tab 2: Claude Auth (embedded from ClaudeAuthDialog content)
+        # ──────────────────────────────────────────────────────────────
+        auth_tab = QWidget()
+        auth_lay = QVBoxLayout(auth_tab)
+        auth_lay.setSpacing(10)
+
+        intro = QLabel(
+            "Point a profile's Claude Code panes at a different backend — DeepSeek,\n"
+            "OpenRouter, a local model — instead of Anthropic. These settings are\n"
+            "saved *per profile*: leave them blank and that profile keeps its normal\n"
+            "Claude login; set a base URL and only that profile's panes use the API.\n"
+            "Applies to the next pane you spawn (restart open panes to pick it up)."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color: #d4d4d8;")
+        auth_lay.addWidget(intro)
+
+        # Which profile are we editing? Each profile stores its own auth file in
+        # its config_dir, so switching here loads/saves that profile in isolation.
+        auth_profiles = user_profile.list_profiles()  # [{name, config_dir}, ...]
+
+        def _auth_dir(profile_name: str):
+            """config_dir for *profile_name* (None → default ~/.claude)."""
+            for p in auth_profiles:
+                if p["name"] == profile_name:
+                    return Path(p["config_dir"])
+            return None
+
+        sel_row = QHBoxLayout()
+        sel_row.setContentsMargins(0, 0, 0, 0)
+        sel_row.addWidget(QLabel("Settings for profile:"))
+        auth_profile_combo = QComboBox(auth_tab)
+        for p in auth_profiles:
+            auth_profile_combo.addItem(p["name"])
+        auth_profile_combo.setToolTip(
+            "Each profile has its own auth. Switching reloads that profile's saved\n"
+            "values from disk — Save before switching to keep unsaved edits."
+        )
+        sel_row.addWidget(auth_profile_combo, 1)
+        auth_lay.addLayout(sel_row)
+
+        auth_form = QFormLayout()
+        auth_form.setHorizontalSpacing(16)
+        auth_form.setVerticalSpacing(8)
+        auth_lay.addLayout(auth_form)
+
+        base_url_edit = QLineEdit()
+        base_url_edit.setPlaceholderText(
+            "blank = Anthropic  ·  e.g. https://api.deepseek.com/anthropic"
+        )
+        auth_form.addRow("Base URL:", base_url_edit)
+
+        api_key_edit = QLineEdit()
+        api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        api_key_edit.setPlaceholderText("your provider's API key  ·  blank = none")
+        auth_form.addRow("API key:", api_key_edit)
+
+        auth_token_edit = QLineEdit()
+        auth_token_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        auth_token_edit.setPlaceholderText(
+            "usually blank — the API key above is reused as the bearer token"
+        )
+        auth_form.addRow("Auth token:", auth_token_edit)
+
+        note = QLabel(
+            "Examples:\n"
+            "• DeepSeek — Base URL: https://api.deepseek.com/anthropic + API key: your DeepSeek key\n"
+            "• OpenRouter — Base URL: https://openrouter.ai/api + Auth token: your OpenRouter key\n"
+            "  (then add ANTHROPIC_DEFAULT_SONNET_MODEL below to choose the model)"
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #a1a1aa;")
+        auth_lay.addWidget(note)
+
+        env_label = QLabel(
+            "Extra environment variables — sent to every pane. Use for a provider key,\n"
+            "or to pick a model (e.g. ANTHROPIC_DEFAULT_SONNET_MODEL = qwen/qwen3-coder:free):"
+        )
+        env_label.setWordWrap(True)
+        env_label.setStyleSheet("color: #d4d4d8; padding-top: 4px;")
+        auth_lay.addWidget(env_label)
+
+        env_rows: list[tuple[QLineEdit, QLineEdit, QWidget]] = []
+        rows_box = QVBoxLayout()
+        rows_box.setSpacing(4)
+        auth_lay.addLayout(rows_box)
+
+        def _add_env_row(name: str = "", value: str = "") -> None:
+            row = QWidget(auth_tab)
+            h = QHBoxLayout(row)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(6)
+
+            name_edit = QLineEdit(name)
+            name_edit.setPlaceholderText("NAME — e.g. ANTHROPIC_DEFAULT_SONNET_MODEL")
+            value_edit = QLineEdit(value)
+            value_edit.setPlaceholderText("value — e.g. qwen/qwen3-coder:free")
+            remove_btn = QPushButton("✕", row)
+            remove_btn.setFixedWidth(28)
+            remove_btn.setToolTip("Remove this variable")
+
+            h.addWidget(name_edit, 2)
+            h.addWidget(value_edit, 3)
+            h.addWidget(remove_btn, 0)
+
+            entry = (name_edit, value_edit, row)
+            env_rows.append(entry)
+            rows_box.addWidget(row)
+
+            def _remove() -> None:
+                if entry in env_rows:
+                    env_rows.remove(entry)
+                rows_box.removeWidget(row)
+                row.deleteLater()
+
+            remove_btn.clicked.connect(_remove)
+
+        add_env_btn = QPushButton("+ Add variable", auth_tab)
+        add_env_btn.clicked.connect(lambda: _add_env_row())
+        auth_lay.addWidget(add_env_btn)
+
+        def _clear_env_rows() -> None:
+            for _n, _v, row in list(env_rows):
+                rows_box.removeWidget(row)
+                row.deleteLater()
+            env_rows.clear()
+
+        def _load_auth_profile(profile_name: str) -> None:
+            """Populate the auth fields from *profile_name*'s saved config."""
+            loaded = load_claude_auth(_auth_dir(profile_name))
+            base_url_edit.setText(loaded.base_url)
+            api_key_edit.setText(loaded.api_key)
+            auth_token_edit.setText(loaded.auth_token)
+            _clear_env_rows()
+            for name, value in loaded.extra_env.items():
+                _add_env_row(name, value)
+            if not env_rows:
+                _add_env_row()
+
+        auth_profile_combo.currentTextChanged.connect(_load_auth_profile)
+        _load_auth_profile(auth_profile_combo.currentText())  # seed initial view
+
+        tabs.addTab(auth_tab, "Claude Auth")
+
+        # ──────────────────────────────────────────────────────────────
+        # Bottom buttons
+        # ──────────────────────────────────────────────────────────────
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Close, dlg
+        )
+
+        def _on_save() -> None:
+            # Save the Claude Auth tab to the *currently selected* profile only.
+            profile_name = auth_profile_combo.currentText()
+            env_dict: dict[str, str] = {}
+            for name_ed, value_ed, _row in env_rows:
+                name = name_ed.text().strip()
+                if name:
+                    env_dict[name] = value_ed.text()
+
+            try:
+                save_claude_auth(
+                    ClaudeAuthConfig(
+                        base_url=base_url_edit.text(),
+                        api_key=api_key_edit.text(),
+                        auth_token=auth_token_edit.text(),
+                        extra_env=env_dict,
+                    ),
+                    _auth_dir(profile_name),
+                )
+                self._status.showMessage(
+                    f"Claude auth saved for profile '{profile_name}' — respawn its "
+                    "panes to use the new settings.",
+                    7_000,
+                )
+            except OSError as e:
+                QMessageBox.critical(
+                    dlg, "Save failed", f"Couldn't write takkub-claude-auth.json:\n{e}"
+                )
+                return
+
+        btns.button(QDialogButtonBox.StandardButton.Save).clicked.connect(_on_save)
+        btns.button(QDialogButtonBox.StandardButton.Close).clicked.connect(dlg.accept)
+        main_lay.addWidget(btns)
+
         dlg.exec()
 
     # ──────────────────────────────────────────────────────────────

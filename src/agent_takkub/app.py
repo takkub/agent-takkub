@@ -341,16 +341,65 @@ def main(argv: list[str] | None = None) -> int:
     global _instance_lock
     _instance_lock = QLockFile(_LOCK_PATH)
     if not _instance_lock.tryLock(100):
-        _boot_log(f"[single-instance] lock held — refusing duplicate start (pid={os.getpid()})")
-        QMessageBox.warning(
-            None,
-            "agent-takkub already running",
-            "A cockpit window is already open.\n\n"
-            "Close the existing window before starting a new one.\n\n"
-            "If the old window is unresponsive, use Task Manager to end\n"
-            "the 'pythonw.exe' process and try again.",
+        _boot_log(
+            f"[single-instance] lock held — attempting auto-kill of stale process (pid={os.getpid()})"
         )
-        return 1
+        # Auto-kill the existing process if it's still running.
+        # getLockInfo() returns (success: bool, pid: int, hostname: str, appname: str).
+        lock_info = _instance_lock.getLockInfo()
+        success = lock_info[0] if lock_info else False
+        old_pid = lock_info[1] if (lock_info and len(lock_info) > 1) else 0
+        if success and old_pid > 0 and old_pid != os.getpid():
+            _boot_log(f"[single-instance] killing old process pid={old_pid}")
+            try:
+                import psutil
+
+                proc = psutil.Process(old_pid)
+                # Kill the whole process tree (cockpit + spawned panes/CLIs).
+                for child in proc.children(recursive=True):
+                    try:
+                        child.kill()
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+                proc.kill()
+                proc.wait(timeout=3)  # wait for process to die
+                _boot_log("[single-instance] old process killed, retrying lock")
+            except (
+                psutil.NoSuchProcess,
+                psutil.AccessDenied,
+                psutil.TimeoutExpired,
+                Exception,
+            ) as e:
+                _boot_log(f"[single-instance] kill failed: {e}")
+                # Fall through to dialog below.
+            # Retry lock after kill.
+            time.sleep(0.1)  # small delay for OS to release lock
+            if _instance_lock.tryLock(100):
+                _boot_log("[single-instance] lock acquired after auto-kill")
+            else:
+                _boot_log("[single-instance] lock still held after kill — showing dialog")
+                QMessageBox.warning(
+                    None,
+                    "agent-takkub already running",
+                    "A cockpit window is already open.\n\n"
+                    "Close the existing window before starting a new one.\n\n"
+                    "If the old window is unresponsive, use Task Manager to end\n"
+                    "the 'pythonw.exe' process and try again.",
+                )
+                return 1
+        else:
+            _boot_log(
+                f"[single-instance] cannot read PID from lock (success={success}, pid={old_pid}) — showing dialog"
+            )
+            QMessageBox.warning(
+                None,
+                "agent-takkub already running",
+                "A cockpit window is already open.\n\n"
+                "Close the existing window before starting a new one.\n\n"
+                "If the old window is unresponsive, use Task Manager to end\n"
+                "the 'pythonw.exe' process and try again.",
+            )
+            return 1
 
     w = MainWindow()
     _install_signal_handlers(w)

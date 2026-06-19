@@ -1,16 +1,27 @@
-"""Claude Code auth override config.
+"""Claude Code auth override config — stored *per user profile*.
 
 The normal/default path is Claude Code's own login state (Max OAuth or
 whatever `claude` already knows). This file only stores explicit cockpit
 overrides for proxy/API-key setups, and blank values mean "use default".
 
+**Per-profile storage:** the auth config lives *inside each profile's Claude
+config dir* (the same folder `CLAUDE_CONFIG_DIR` points at), as
+``<config_dir>/takkub-claude-auth.json``. The default profile uses
+``~/.claude/takkub-claude-auth.json``. This way each login account carries its
+own auth override — setting a base URL for the ``openrouter`` profile makes
+*only* that profile's panes use the API, while a profile with no override keeps
+its normal Claude CLI login. (Previously a single global file at
+``~/.takkub/claude-auth.json`` was applied to every pane, so one base URL
+turned every project into API mode — that file is now read only as a
+back-compat fallback for the default profile until it is re-saved.)
+
 Besides the three structured fields (base_url / api_key / auth_token), an
 optional `extra_env` map lets the user inject arbitrary NAME=value env vars
-into every spawned Claude pane (e.g. a backend's own key, a feature flag).
-Like the auth fields, these are applied *after* the pane-env allowlist filter
-(see orchestrator spawn), so they reach the pane regardless of the allowlist.
-The three structured fields always win on a name collision so a stray row can
-never clobber base_url / the auth headers.
+into the profile's spawned Claude panes (e.g. a backend's own key, a feature
+flag). Like the auth fields, these are applied *after* the pane-env allowlist
+filter (see orchestrator spawn), so they reach the pane regardless of the
+allowlist. The three structured fields always win on a name collision so a
+stray row can never clobber base_url / the auth headers.
 """
 
 from __future__ import annotations
@@ -19,7 +30,11 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-_CONFIG_PATH = Path.home() / ".takkub" / "claude-auth.json"
+_AUTH_FILENAME = "takkub-claude-auth.json"
+_DEFAULT_CONFIG_DIR = Path.home() / ".claude"
+# Legacy single global file. Read (never written) as a back-compat source for
+# the *default* profile only, so existing setups keep working until re-saved.
+_LEGACY_GLOBAL_PATH = Path.home() / ".takkub" / "claude-auth.json"
 
 
 @dataclass(frozen=True)
@@ -54,8 +69,23 @@ class ClaudeAuthConfig:
         return env
 
 
-def config_path() -> Path:
-    return _CONFIG_PATH
+def _is_default_dir(config_dir: Path | str | None) -> bool:
+    """True when *config_dir* is the implicit default profile (``~/.claude``)."""
+    if config_dir is None:
+        return True
+    try:
+        return Path(config_dir).resolve() == _DEFAULT_CONFIG_DIR.resolve()
+    except OSError:
+        return Path(config_dir) == _DEFAULT_CONFIG_DIR
+
+
+def config_path(config_dir: Path | str | None = None) -> Path:
+    """Path to the auth file for the profile rooted at *config_dir*.
+
+    ``None`` → the default profile (``~/.claude/takkub-claude-auth.json``).
+    """
+    base = Path(config_dir) if config_dir else _DEFAULT_CONFIG_DIR
+    return base / _AUTH_FILENAME
 
 
 def _clean_env_map(raw: object) -> dict[str, str]:
@@ -73,10 +103,19 @@ def _clean_env_map(raw: object) -> dict[str, str]:
     return out
 
 
-def load_claude_auth() -> ClaudeAuthConfig:
-    path = config_path()
+def load_claude_auth(config_dir: Path | str | None = None) -> ClaudeAuthConfig:
+    """Load the auth override for the profile rooted at *config_dir*.
+
+    ``None`` → default profile. If the per-profile file is missing, the default
+    profile falls back to the legacy global file (back-compat); any other
+    profile with no file resolves to a blank config (= normal Claude login).
+    """
+    path = config_path(config_dir)
     if not path.exists():
-        return ClaudeAuthConfig()
+        if _is_default_dir(config_dir) and _LEGACY_GLOBAL_PATH.exists():
+            path = _LEGACY_GLOBAL_PATH
+        else:
+            return ClaudeAuthConfig()
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -91,8 +130,8 @@ def load_claude_auth() -> ClaudeAuthConfig:
     )
 
 
-def save_claude_auth(config: ClaudeAuthConfig) -> None:
-    path = config_path()
+def save_claude_auth(config: ClaudeAuthConfig, config_dir: Path | str | None = None) -> None:
+    path = config_path(config_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     data = {
         "base_url": config.base_url.strip(),
@@ -104,9 +143,15 @@ def save_claude_auth(config: ClaudeAuthConfig) -> None:
 
 
 def apply_claude_auth_overrides(env: dict[str, str]) -> None:
-    """Mutate *env* with explicit Claude auth overrides, if configured.
+    """Mutate *env* with the auth override for *this pane's* profile.
+
+    The pane's profile is identified by ``CLAUDE_CONFIG_DIR`` (already injected
+    by ``inject_user_profile_env`` for non-default profiles; absent = default
+    profile → ``~/.claude``). Only that profile's auth file is applied, so a
+    base URL set for one profile never leaks into another's panes.
 
     Blank config values deliberately do nothing, preserving Claude Code's
     default auth/login behavior and any parent env already present.
     """
-    env.update(load_claude_auth().active_env())
+    config_dir = env.get("CLAUDE_CONFIG_DIR") or None
+    env.update(load_claude_auth(config_dir).active_env())
