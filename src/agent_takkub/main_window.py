@@ -1263,6 +1263,7 @@ class MainWindow(QMainWindow):
         Built fresh on every click so user-profile state is always current.
         Menu sections:
           1. Pipeline Settings… (opens the dialog)
+             Claude Auth…       (base URL / API key / token overrides)
           ─────────────────
           2. User profiles (checkable, one per profile)
           ─────────────────
@@ -1285,6 +1286,10 @@ class MainWindow(QMainWindow):
         act_pipeline = QAction("Pipeline Settings…", self)
         act_pipeline.triggered.connect(self._open_pipeline_settings_dialog)
         menu.addAction(act_pipeline)
+
+        act_claude_auth = QAction("Claude Auth…", self)
+        act_claude_auth.triggered.connect(self._on_claude_auth_clicked)
+        menu.addAction(act_claude_auth)
 
         menu.addSeparator()
 
