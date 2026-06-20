@@ -99,9 +99,14 @@ def _builtin_templates() -> list[dict]:
             "id": "feature",
             "name": "Feature (UI+API)",
             "builtin": True,
+            # Verify flow: DEV impl (parallel, auto-chained) → devops brings the
+            # stack up locally on non-clashing ports → QA tests LAST as the
+            # single final gate against the running stack. reviewer is a PR-time
+            # gate (qa-only mid-cycle), so it's not a default hop here.
             "hops": [
                 [_entry("frontend", auto_chain=True), _entry("backend", auto_chain=True)],
-                [_entry("qa"), _entry("reviewer")],
+                [_entry("devops")],
+                [_entry("qa")],
             ],
         },
         {

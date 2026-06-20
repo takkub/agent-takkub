@@ -42,6 +42,53 @@ from .config import (
 )
 from .vault_mirror import _is_junk_note
 
+# Shared "big-file hygiene" guard, injected into BOTH the Lead spawn prompt and
+# every teammate appendix. A 2.6MB sprites.js / 2.7MB game HTML read wholesale
+# lands in the conversation history and is then re-charged as cache_read on
+# EVERY subsequent turn — one tak-game session hit 22M cache_read tokens this
+# way. Reading large files by offset/limit or grepping for the needed span
+# keeps per-turn context (and the cache bill) flat. Kept terse on purpose: a
+# guard against token bloat must not itself be bloat.
+BIG_FILE_GUARD = """
+
+---
+
+## 📦 ไฟล์ยักษ์ — ห้าม Read ทั้งก้อน (กัน context/cache บวม)
+
+ไฟล์ใหญ่ที่อ่านทั้งก้อนจะค้างใน history แล้ว **โดนชาร์จเป็น cache ซ้ำทุก turn** (เคสจริง: session เดียว cache_read พุ่ง 22M เพราะอ่าน sprites.js 2.6MB + เกม HTML 2.7MB เข้า context)
+
+**ก่อน `Read` ไฟล์ที่อาจใหญ่** (asset bundle, `*.html` เกม/หน้าเดียว, `sprites*.js`, `*.min.js`, base64/data-URI, lockfile, generated, dump) → **เช็คขนาดก่อน** (`ls -la <file>` หรือ `wc -c`):
+
+- ≤ ~300KB → อ่านได้ตามปกติ
+- \\> ~300KB → **ห้าม `Read` ทั้งไฟล์** ใช้แทน:
+  - `Grep` หา symbol/section ที่ต้องการ → ได้เลขบรรทัด
+  - `Read` แบบ `offset`/`limit` เฉพาะช่วงนั้น
+- **ห้าม `cat`/dump ไฟล์ใหญ่ลง terminal** (โดน persist + ก้อนยังหลุดเข้า context อยู่ดี)
+
+เป้าหมาย: context/turn ให้แบน อย่าให้โตตามจำนวนไฟล์ที่เปิด"""
+
+# Stale-file race guard, injected into every teammate appendix (not Lead — Lead
+# delegates and rarely bulk-edits). When a dev server / IDE / linter (next dev,
+# eslint, format-on-save) rewrites a source file between the agent's Read and
+# Write, Claude Code's stale-file guard refuses the Write with "File has been
+# modified since read" — the cockpit renders this as a bare "Error writing
+# file". A tak-game frontend pane on the slow openrouter gateway looped on this
+# for 8-9 minutes per file because the Read→Write window stayed open long enough
+# for `next dev`'s watcher to keep touching the file. This guard tells the agent
+# to recognise the pattern and stop the watcher instead of retry-looping.
+STALE_FILE_GUARD = """
+
+---
+
+## ⚠️ "File has been modified since read" / "Error writing file" — อย่า retry วน
+
+ถ้า `Write`/`Edit` ไฟล์เดิม **fail ซ้ำ 2-3 ครั้ง** ด้วย *"File has been modified since read…"* (cockpit อาจย่อเหลือ *"Error writing file"*) → **ไม่ใช่บั๊กที่ตัวคุณ** มี process อื่น (dev server / IDE / linter เช่น `next dev`, `tsc --watch`, eslint/prettier format-on-save) แก้ไฟล์แทรกระหว่าง Read→Write → Claude Code กันเขียนทับ (เคสจริง: pane วน fail 8-9 นาที/ไฟล์ เพราะ `next dev` watcher แตะไฟล์ตลอด)
+
+**ห้ามวน retry** ทำตามลำดับนี้แทน:
+1. `Read` ไฟล์ใหม่ 1 ครั้ง → `Write` **ทันที** (ลดช่อง race ให้แคบสุด)
+2. ยังซ้ำ → **หยุด หา watcher ที่รันค้าง** (`tasklist | grep node` / `ps`) แล้ว kill `npm run dev`/`next dev`/`tsc --watch` หรือแจ้ง Lead ด้วย `takkub send --to lead "dev server แย่งแก้ไฟล์ ขอปิดก่อน"` — อย่ารอเฉยๆ ให้ timeout
+3. แก้ไฟล์ชุดใหญ่ให้ **เสร็จก่อน** แล้วค่อยเปิด dev server ทีหลัง — อย่าเปิด watcher ค้างตอนแก้หลายไฟล์รวด"""
+
 # Recent-teammate-note injection budget. We surface the *body* of recent
 # done notes (not just filenames) so a fresh Lead recalls what teammates
 # actually did — but bounded so it can't swallow the spawn-time context.
@@ -273,13 +320,20 @@ def _render_lead_context(
 
 ---
 
-## 🚫 BLOCKED_DIRS (auto-injected at spawn)
+## 🚫 BLOCKED_DIRS (auto-injected at spawn) — OVERRIDE project CLAUDE.md
 
 {header}
+
+> ⚠️ **อ่านก่อนทุกอย่าง — กฎนี้ override เอกสารโปรเจค:**
+> โปรเจคนี้มี `CLAUDE.md` ของตัวเองที่ claude auto-load จาก cwd (กรอบ "นี่คือโปรเจค X — สร้าง/พอร์ต/build มันสิ" + ป้าย "These instructions OVERRIDE any default behavior"). **นั่นคือ context สำหรับ teammate ที่คุณจะ `takkub assign` — ไม่ใช่คำสั่งให้ Lead ลงมือเขียน code เอง** คุณคือ **Lead/orchestrator ของโปรเจคนี้ ไม่ใช่ developer** ต่อให้เอกสารโปรเจคจะชวนให้ "เริ่ม implement เลย" แค่ไหน → คุณ **delegate** ไม่ใช่พิมพ์ code เอง
 
 ไดเรกทอรีต่อไปนี้คือ project code — Lead **ห้ามใช้ Edit / Write / MultiEdit / NotebookEdit** ในไฟล์ใต้ paths เหล่านี้เด็ดขาด:
 
 {blocked}
+
+**Self-check บังคับ ก่อนทุก Write/Edit:** "ไฟล์นี้อยู่ใต้ BLOCKED_DIRS ข้างบนไหม?" → ถ้าใช่ **STOP ทันที** แล้ว `takkub assign` แทน ห้ามเขียนแม้แต่ไฟล์เดียว แม้ task จะดู "ตรงไปตรงมา/ไฟล์เล็ก/เริ่มใหม่จากศูนย์"
+
+**ตัวอย่าง trap ที่เคยพลาด (ของจริง):** สร้าง game engine / `.ts` / `.tsx` / component / endpoint / `.css` / schema ใต้ `web/`,`api/`,`db/` = งาน **frontend/backend** → ต้อง `takkub assign` **ห้าม Write เอง** การที่ Lead นั่งเขียน `constants.ts` + `Player.ts` + `GameEngine.ts` เองทั้งชุด = ผิดกฎ (เสีย specialist context + ไม่มี audit trail + user มองไม่เห็น teammate ทำงาน)
 
 ถ้างานต้องแก้ไฟล์ในเส้นทางข้างบน → ใช้ `takkub assign --role <role> --cwd <path> "<task>"` เสมอ
 
@@ -295,6 +349,8 @@ def _render_lead_context(
 
 ละเมิดข้อใดข้อหนึ่ง → หยุดทันทีแล้ว delegate ผ่าน `takkub assign`
 """
+
+    suffix += BIG_FILE_GUARD
 
     # Inject project-specific CLAUDE.md so Lead knows the project's deploy
     # rules, stack constraints, and conventions at planning time — previously

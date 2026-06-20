@@ -128,6 +128,13 @@ def default_cwd_for_role(role_name: str, project: str | None = None) -> str | No
     paths = proj.get("paths", {})
     if not paths:
         return None
+    # per-project role→path-key override: lets a single project route a
+    # role to a non-default folder (e.g. tak-game devops→deployment)
+    # WITHOUT touching the global `_ROLE_PATH_PREFS` shared by every other
+    # project. Only projects that declare `role_paths` are affected.
+    override_key = (proj.get("role_paths") or {}).get(role_name)
+    if override_key and override_key in paths:
+        return paths[override_key]
     for k in _ROLE_PATH_PREFS.get(role_name, ()):
         if k in paths:
             return paths[k]

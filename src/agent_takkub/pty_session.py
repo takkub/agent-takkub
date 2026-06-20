@@ -127,8 +127,14 @@ _READY_HARD_BLOCKERS = (
 # beats codex's own banner. Changing the order changes behaviour — keep it.
 # (ready_when, marker)
 _READY_RULES: tuple[tuple[bool, str], ...] = (
-    (True, "type your message or"),  # gemini input prompt hint
-    (True, "gemini cli update available!"),  # gemini passive footer (#51)
+    # agy (Antigravity) — the gemini role's engine since 2026-06-19. Its idle
+    # TUI shows a '? for shortcuts' footer at the input prompt. Listed first so
+    # it wins before the codex 'update available!' blocker (parity with how
+    # gemini's footer used to). Busy state is covered by the 'esc to
+    # interrupt/cancel' hard blockers above, which override this when present.
+    (True, "? for shortcuts"),  # agy idle prompt footer
+    (True, "type your message or"),  # gemini CLI (legacy) input prompt hint
+    (True, "gemini cli update available!"),  # gemini CLI (legacy) passive footer (#51)
     (False, "update available!"),  # codex startup splash modal
     (True, "openai codex (v"),  # codex prompt banner
     (True, "bypass permissions"),  # claude footer
@@ -168,7 +174,11 @@ def _classify_ready(text_lower: str) -> bool:
 # marker going stale is caught by `takkub doctor` instead of silently breaking
 # the idle watchdog. Each tuple is (screen_text, expected_is_ready).
 _READY_SELFTEST_CASES: tuple[tuple[str, bool], ...] = (
-    ("Type your message or @path/to/file", True),  # gemini idle
+    ("> \n? for shortcuts            Gemini 3.5 Flash (Medium)", True),  # agy idle
+    # agy busy: even if the '? for shortcuts' footer persists, an active
+    # interrupt indicator is a hard blocker → not ready (no premature done-nudge).
+    ("Thinking... (esc to interrupt)\n? for shortcuts", False),  # agy busy
+    ("Type your message or @path/to/file", True),  # gemini CLI (legacy) idle
     ("Thinking... (esc to cancel, 12s)\nType your message or @path", False),  # gemini busy
     ("Gemini CLI update available! 0.46.0 -> 0.47.0\nType your message or @path", True),
     ("Gemini CLI update available! 0.46.0 -> 0.47.0", True),  # passive footer alone
@@ -663,15 +673,18 @@ class PtySession(QObject):
     def is_at_ready_prompt(self) -> bool:
         """True when the underlying TUI is idle at its main input prompt.
 
-        Handles claude, codex, and gemini panes:
+        Handles claude, codex, and gemini(agy) panes:
           - claude: bottom hint 'bypass permissions' or 'shift+tab to cycle',
                     never 'esc to interrupt' (working) or trust modal.
           - codex:  splash banner 'openai codex (v' visible, no modal
                     (`update available!`, `do you trust`, `press enter
                     to continue`) and no active interrupt indicator.
-          - gemini: prompt hint 'type your message or @path' visible.
-                    Without this marker, the idle watchdog never fired
-                    on gemini panes (root cause of 'gemini forgot
+          - gemini: now the Antigravity `agy` TUI — idle footer
+                    '? for shortcuts' visible, no active 'esc to
+                    interrupt/cancel' indicator. (The legacy Gemini CLI
+                    marker 'type your message or @path' is kept for
+                    backward-compat.) Without a matching idle marker the
+                    watchdog never fires (root cause of 'gemini forgot
                     takkub done' incidents 2026-05-20).
         """
         # Detection markers + their precedence live in the central table

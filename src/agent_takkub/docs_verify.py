@@ -277,6 +277,15 @@ def verify_docs(
         for pattern in active_excludes:
             if PurePath(rel_posix).match(pattern):
                 return True
+            # A `dir/*` exclude means "everything under this dir". PurePath.match's
+            # `*` doesn't cross `/` and Python 3.11 has no recursive `**`, so a
+            # nested artifact (e.g. docs/code-review/2026-05-29-system/codex.md)
+            # would otherwise slip past `docs/code-review/*` and flag stale refs
+            # from a point-in-time snapshot. Treat the pattern as a dir prefix too.
+            if pattern.endswith("/*"):
+                prefix = pattern[:-2]
+                if rel_posix == prefix or rel_posix.startswith(prefix + "/"):
+                    return True
         return False
 
     def _process(md_path: Path) -> None:

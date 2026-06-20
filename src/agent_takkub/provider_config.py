@@ -1,8 +1,9 @@
 """Per-role CLI provider mapping.
 
 The cockpit can spawn teammate panes backed by Claude Code
-(`claude.exe`), OpenAI Codex (`codex.CMD`), or Google Gemini CLI
-(`gemini`). By default every role except `codex` and `gemini` runs
+(`claude.exe`), OpenAI Codex (`codex.CMD`), or Google Antigravity
+(`agy`, the `gemini` role's engine). By default every role except
+`codex` and `gemini` runs
 claude. This module lets the user override the mapping globally —
 e.g. "backend always uses codex regardless of project" — by editing
 a small JSON file under `~/.takkub/`.
@@ -195,9 +196,9 @@ def _provider_available(provider: str) -> bool:
     # (2) CLI actually installed
     try:
         if provider == GEMINI:
-            from .gemini_helper import find_gemini_executable
+            from .gemini_helper import find_agy_executable
 
-            return find_gemini_executable() is not None
+            return find_agy_executable() is not None
         if provider == CODEX:
             from .codex_helper import find_codex_executable
 

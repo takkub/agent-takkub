@@ -42,10 +42,15 @@ def test_seed_matches_load_on_missing(tmp_path_json):
 def test_builtin_feature_pipeline_shape(tmp_path_json):
     feature = next(t for t in pipeline_config.load()["templates"] if t["id"] == "feature")
     assert feature["builtin"] is True
-    # Hop 1 = frontend + backend (parallel), both auto-chained; Hop 2 = qa + reviewer
+    # New verify flow: Hop 1 = frontend + backend (parallel, auto-chained);
+    # Hop 2 = devops (local bring-up, port-safe); Hop 3 = qa LAST (final gate).
+    # reviewer is a PR-time gate, not a default hop.
     assert [e["role"] for e in feature["hops"][0]] == ["frontend", "backend"]
     assert all(e["autoChain"] for e in feature["hops"][0])
-    assert [e["role"] for e in feature["hops"][1]] == ["qa", "reviewer"]
+    assert [e["role"] for e in feature["hops"][1]] == ["devops"]
+    assert [e["role"] for e in feature["hops"][2]] == ["qa"]
+    # qa is the terminal gate — never auto-chained.
+    assert feature["hops"][2][0]["autoChain"] is False
 
 
 def test_quickfix_requires_commit_flag(tmp_path_json):

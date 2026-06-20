@@ -10,7 +10,9 @@
     Sections:
       1.  System runtime   : Python 3.11+, Git, Node.js, Chrome, gh CLI
       2.  npm registry     : reset to public registry (gates MCP fetch)
-      3.  AI CLIs          : Claude Code, OpenAI Codex
+      3.  AI CLIs          : Claude Code (required), OpenAI Codex +
+                             Antigravity agy (both OPTIONAL — back the
+                             codex/gemini roles; absent → run as Claude)
       4.  Claude plugins   : superpowers, agent-skills, Pordee
       4b. MCP servers      : Playwright MCP + Chrome DevTools MCP +
                              Playwright Chromium browser (~150 MB)
@@ -18,11 +20,12 @@
       6.  Cockpit setup    : git clone (if needed) + pip install -e .
       7.  Cockpit config   : role-providers.json + optional vault dir
 
-    Login (claude / codex) is intentionally NOT automated — those
+    Login (claude / codex / agy) is intentionally NOT automated — those
     open browser OAuth flows that read better in a separate shell
     when the user is ready. Run them manually after install:
         claude login
-        codex login
+        codex login   # optional (codex role)
+        agy           # optional (gemini role) — first run does Google Sign-In
 
 .PARAMETER Update
     Re-install / upgrade everything even if already present.
@@ -164,6 +167,40 @@ function Install-NpmGlobal {
     }
 }
 
+function Install-Antigravity {
+    # OPTIONAL — backs the `gemini` role (Google's "third brain": planning /
+    # second opinion). Antigravity ships a NATIVE installer (not npm) that drops
+    # `agy.exe` under %LOCALAPPDATA%\agy\bin. The cockpit degrades the gemini
+    # role to Claude when agy is absent, so this is strictly best-effort: a
+    # failure here is logged as an optional skip and NEVER fails the install.
+    $agyExe = Join-Path $env:LOCALAPPDATA "agy\bin\agy.exe"
+    $present = (Test-Cmd agy) -or (Test-Path $agyExe)
+    if ($present -and -not $Update) {
+        Write-Skip "Antigravity (agy) already installed"
+        $script:Summary.Skipped += "Antigravity (agy)"
+        return
+    }
+    Write-Doing "installing Antigravity CLI (agy) - optional, backs the gemini role"
+    try {
+        $tmp = Join-Path $env:TEMP "agy-install.cmd"
+        curl.exe -fsSL "https://antigravity.google/cli/install.cmd" -o $tmp
+        if (-not (Test-Path $tmp)) { throw "installer download failed" }
+        cmd /c $tmp | Out-Null
+        Remove-Item $tmp -ErrorAction SilentlyContinue
+        if ((Test-Cmd agy) -or (Test-Path $agyExe)) {
+            Write-Ok "Antigravity (agy) installed - sign in later with: agy"
+            $script:Summary.Installed += "Antigravity (agy)"
+        } else {
+            throw "agy not found after install"
+        }
+    } catch {
+        Write-Host "  ~ Antigravity (agy) optional install skipped: $_" -ForegroundColor Yellow
+        Write-Host "    gemini role will run as Claude until you install it manually:" -ForegroundColor DarkGray
+        Write-Host "    https://antigravity.google/download  (then run 'agy' once to sign in)" -ForegroundColor DarkGray
+        $script:Summary.Skipped += "Antigravity (agy) (optional - install manually)"
+    }
+}
+
 function Install-ClaudePlugin {
     <#
     Claude Code's plugin system needs a *marketplace* registered
@@ -256,9 +293,10 @@ if (Test-Cmd npm) {
 # ─────────────────────────────────────────────────────────────
 # Phase 3 — AI CLIs
 # ─────────────────────────────────────────────────────────────
-Write-Step "Phase 3 - AI CLIs (Claude + Codex)"
+Write-Step "Phase 3 - AI CLIs (Claude required; Codex + Antigravity optional)"
 Install-NpmGlobal -Package "@anthropic-ai/claude-code" -ProbeCmd "claude"
 Install-NpmGlobal -Package "@openai/codex"             -ProbeCmd "codex"
+Install-Antigravity
 
 # ─────────────────────────────────────────────────────────────
 # Phase 4 — Claude plugins
@@ -434,8 +472,9 @@ if ($script:Summary.Failed.Count -gt 0) {
 
 Write-Host ""
 Write-Host "Next:" -ForegroundColor Cyan
-Write-Host "  claude login              # OAuth (skip if already logged in)"
-Write-Host "  codex login               # OAuth (skip if already logged in)"
+Write-Host "  claude login              # OAuth (required)"
+Write-Host "  codex login               # OAuth (optional - codex role)"
+Write-Host "  agy                       # Google Sign-In (optional - gemini role; first run)"
 Write-Host "  cd $cockpitDir"
 Write-Host "  python -m agent_takkub"
 Write-Host ""

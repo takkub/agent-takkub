@@ -117,7 +117,7 @@ class TestProviderChipState:
         dp.write_text("{}")
         with (
             patch("agent_takkub.provider_state._PATH", dp),
-            patch("agent_takkub.gemini_helper.find_gemini_executable", return_value=None),
+            patch("agent_takkub.gemini_helper.find_agy_executable", return_value=None),
         ):
             state = MainWindow._provider_chip_state("gemini")
         assert state == "not_installed"

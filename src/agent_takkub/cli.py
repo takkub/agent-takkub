@@ -478,16 +478,18 @@ def cmd_codex(args: argparse.Namespace) -> dict:
 
 
 def cmd_gemini(args: argparse.Namespace) -> dict:
-    """Fire Google Gemini CLI non-interactively and print the result.
+    """Fire Antigravity CLI (`agy`) non-interactively and print the result.
 
     Mirror of `cmd_codex`. Pure local invocation — no orchestrator IPC.
-    Gemini uses its own auth (Google login on first run or
-    `GEMINI_API_KEY` env); cockpit doesn't touch those credentials.
-    Works whether or not the cockpit is running.
+    Backs the `gemini` role: Google retired the standalone Gemini CLI on
+    2026-06-18, so this runs `agy -p`. Antigravity uses its own auth
+    (Google Sign-In on first run or `ANTIGRAVITY_API_KEY` env); cockpit
+    doesn't touch those credentials. Works whether or not the cockpit is
+    running.
 
     `cwd` defaults to the calling pane's working directory so a
     `takkub gemini "review this"` inside a project pane naturally
-    runs Gemini against that project's files.
+    runs Antigravity against that project's files.
     """
     from .gemini_helper import gemini_exec
 
@@ -1034,24 +1036,24 @@ def main(argv: list[str] | None = None) -> int:
 
     sg = sub.add_parser(
         "gemini",
-        help="one-shot Google Gemini CLI query (non-interactive, pure local)",
+        help="one-shot Antigravity CLI (agy) query (non-interactive, pure local)",
     )
-    sg.add_argument("prompt", help="prompt text to send to Gemini (positional)")
+    sg.add_argument("prompt", help="prompt text to send to Antigravity (positional)")
     sg.add_argument(
         "--cwd",
         default=None,
-        help="working directory for the Gemini run (default: current dir)",
+        help="working directory for the agy run (default: current dir)",
     )
     sg.add_argument(
         "--model",
         default=None,
-        help="override Gemini's default model (e.g. gemini-2.5-pro)",
+        help="override agy's default model (e.g. gemini-3.1-pro)",
     )
     sg.add_argument(
         "--timeout",
         type=float,
         default=120.0,
-        help="seconds to wait before killing the gemini process (default: 120)",
+        help="seconds to wait before killing the agy process (default: 120)",
     )
     sg.set_defaults(func=cmd_gemini)
 

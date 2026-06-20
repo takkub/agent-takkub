@@ -97,6 +97,47 @@ class TestDeliveryUnconfirmedWarning:
         assert any("#26" in c.args[0] for c in lead.session.write.call_args_list if c.args)
 
 
+class TestReadyWaitMs:
+    """agy (gemini role's engine) cold-boots ~46s — right at the 45s default
+    edge — forcing a fragile blind paste (#26). gemini/agy panes get a longer
+    ready window; an explicit caller override always wins."""
+
+    def test_gemini_gets_longer_window_on_default(self, orch, monkeypatch) -> None:
+        from agent_takkub import provider_config
+
+        monkeypatch.setattr(
+            provider_config, "effective_provider_for", lambda role, project=None: "gemini"
+        )
+        assert orch._ready_wait_ms("gemini", "P", 45_000) == 90_000
+
+    def test_claude_role_keeps_default(self, orch, monkeypatch) -> None:
+        from agent_takkub import provider_config
+
+        monkeypatch.setattr(
+            provider_config, "effective_provider_for", lambda role, project=None: "claude"
+        )
+        assert orch._ready_wait_ms("backend", "P", 45_000) == 45_000
+
+    def test_explicit_override_wins_even_for_gemini(self, orch, monkeypatch) -> None:
+        from agent_takkub import provider_config
+
+        # The peer-send short-poll path passes a small explicit wait — it must
+        # NOT be bumped to 90s just because the role resolves to agy.
+        monkeypatch.setattr(
+            provider_config, "effective_provider_for", lambda role, project=None: "gemini"
+        )
+        assert orch._ready_wait_ms("gemini", "P", 1000) == 1000
+
+    def test_provider_lookup_failure_falls_back_to_default(self, orch, monkeypatch) -> None:
+        from agent_takkub import provider_config
+
+        def boom(role, project=None):
+            raise RuntimeError("provider probe failed")
+
+        monkeypatch.setattr(provider_config, "effective_provider_for", boom)
+        assert orch._ready_wait_ms("gemini", "P", 45_000) == 45_000
+
+
 class TestVerifiedEnterWiring:
     """The swallowed-Enter self-heal (#22) must cover teammate-bound deliveries,
     not just Lead notices — _send_when_ready's task paste and the peer `send`

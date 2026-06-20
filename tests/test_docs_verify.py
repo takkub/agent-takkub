@@ -328,6 +328,18 @@ def test_verify_docs_default_excludes_point_in_time_artifacts(tmp_path: Path) ->
     assert [r for r in results if r.status != "ok"] == []
 
 
+def test_verify_docs_excludes_nested_point_in_time_artifacts(tmp_path: Path) -> None:
+    """A `dir/*` exclude must also cover files in SUBDIRS of that dir. The real
+    case: docs/code-review/2026-05-29-system/codex.md referenced gemini_md.py
+    (removed in the agy migration) and blocked the commit because PurePath's `*`
+    doesn't cross `/` and Python 3.11 lacks recursive `**`."""
+    nested = tmp_path / "docs" / "code-review" / "2026-05-29-system"
+    nested.mkdir(parents=True)
+    (nested / "codex.md").write_text("ref `src/agent_takkub/gemini_md.py:1`\n")
+    results = verify_docs(docs_dirs=(Path("docs"),), extras=(), repo_root=tmp_path)
+    assert [r for r in results if r.status != "ok"] == []
+
+
 def test_verify_docs_still_checks_live_guides(tmp_path: Path) -> None:
     """The exclusions must NOT swallow agent-takkub's own live docs — a normal
     guide with a broken ref must still be flagged (the gate keeps its value)."""

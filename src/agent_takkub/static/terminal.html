@@ -249,18 +249,28 @@
     new ResizeObserver(() => fit.fit()).observe(document.getElementById('term'));
 
     // ------------------------------------------------------------------
-    // Always-on render loop
+    // Throttled keep-alive render loop
     // ------------------------------------------------------------------
     // Chromium (and therefore QtWebEngine) is aggressive about pausing
     // requestAnimationFrame when a view isn't actively the foreground.
     // For a multi-pane cockpit that means non-focused panes display
     // stale frames — PTY output is delivered to xterm.js but the DOM
-    // paint never lands until the user clicks/types. We keep a forever
-    // RAF loop running so the render service is always ticking. The
-    // body is empty; just being scheduled is enough to keep Chrome
-    // honest. Cheap even on weak hardware, free on strong ones.
+    // paint never lands until the user clicks/types. We keep the render
+    // service ticking so background panes still flush.
+    //
+    // It used to be a tight 60fps `requestAnimationFrame(pulse)` forever,
+    // but that pinned every pane's compositor at full rate continuously —
+    // GPU/compositor tiles stayed hot across all panes and never got
+    // reclaimed, inflating the shared renderer processes' RAM (a 2-stack
+    // session showed renderers at ~2.2 GB each). A ~10fps tick (rAF to
+    // land one paint, then a 100 ms gap) keeps background panes flushing
+    // within 100 ms — imperceptible for terminal text — while letting
+    // Chromium idle the compositor between ticks. Active output still
+    // paints promptly: xterm.js schedules its own rAF on every write,
+    // independent of this keep-alive. Worst case this is RAM-neutral and
+    // still cuts CPU/GPU wakeups ~6x. (See cockpit RAM issue.)
     (function pulse() {
-      requestAnimationFrame(pulse);
+      requestAnimationFrame(() => setTimeout(pulse, 100));
     })();
   </script>
 </body>

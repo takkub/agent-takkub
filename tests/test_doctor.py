@@ -14,9 +14,45 @@ from agent_takkub.doctor import (
     check_mcps,
     check_plugins,
     check_projects,
+    check_providers,
     check_runtime,
     run_all_checks,
 )
+
+# ---------------------------------------------------------------------------
+# check_providers — agy resolved via the cockpit's own helper (off-PATH safe)
+# ---------------------------------------------------------------------------
+
+
+class TestCheckProviders:
+    def _gemini(self, findings: list[Finding]) -> Finding:
+        return next(f for f in findings if f.name == "gemini")
+
+    def test_gemini_found_off_path_reports_installed(self) -> None:
+        # agy installed under %LOCALAPPDATA%\agy\bin but NOT on PATH: doctor must
+        # resolve it via find_agy_executable (same as the cockpit) → INFO, not
+        # a misleading "not installed" SKIP.
+        with (
+            patch(
+                "agent_takkub.gemini_helper.find_agy_executable",
+                return_value="C:/x/agy/bin/agy.exe",
+            ),
+            patch("agent_takkub.doctor.shutil.which", return_value=None),  # off PATH
+            patch("agent_takkub.doctor._run", return_value=(0, "1.0.10")),
+        ):
+            g = self._gemini(check_providers())
+        assert g.status == Status.INFO
+        assert "1.0.10" in g.detail
+
+    def test_gemini_absent_reports_skip_with_antigravity_hint(self) -> None:
+        with (
+            patch("agent_takkub.gemini_helper.find_agy_executable", return_value=None),
+            patch("agent_takkub.doctor.shutil.which", return_value=None),
+        ):
+            g = self._gemini(check_providers())
+        assert g.status == Status.SKIP
+        assert "antigravity.google" in (g.fix_hint or "")
+
 
 # ---------------------------------------------------------------------------
 # Finding dataclass
