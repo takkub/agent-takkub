@@ -184,8 +184,10 @@ class TestBroadcastDesignReview:
         self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The audit event records whether gemini was substituted."""
+        import agent_takkub.broadcast_actions as _ba_mod
+
         events: list[tuple[str, dict]] = []
-        monkeypatch.setattr(orch_mod, "_log_event", lambda event, **d: events.append((event, d)))
+        monkeypatch.setattr(_ba_mod, "_log_event", lambda event, **d: events.append((event, d)))
         monkeypatch.setattr(orch, "assign", lambda *a, **k: (True, ""))
         monkeypatch.setattr(
             "agent_takkub.provider_config.effective_provider_for",
@@ -219,12 +221,14 @@ class TestBroadcastDesignReview:
 
     def test_logs_event(self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch) -> None:
         """Method must emit `broadcast_design_review` event for audit trail."""
+        import agent_takkub.broadcast_actions as _ba_mod
+
         events: list[tuple[str, dict]] = []
 
         def fake_log(event, **details):
             events.append((event, details))
 
-        monkeypatch.setattr(orch_mod, "_log_event", fake_log)
+        monkeypatch.setattr(_ba_mod, "_log_event", fake_log)
         monkeypatch.setattr(orch, "assign", lambda *a, **k: (True, ""))
         monkeypatch.setattr(
             "agent_takkub.provider_config.effective_provider_for",

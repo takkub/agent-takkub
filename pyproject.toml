@@ -55,6 +55,7 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["B011"]  # asserts in tests are intentional
+"src/agent_takkub/orchestrator.py" = ["F401"]  # re-export façade — moved symbols re-exported for tests/app/main_window
 
 [tool.ruff.format]
 quote-style = "double"
@@ -163,6 +164,30 @@ type = "forbidden"
 # pipeline_executor is an engine-layer module (mixed into Orchestrator). It must
 # NOT pull in UI or CLI modules — same constraint as orchestrator itself.
 source_modules = ["agent_takkub.pipeline_executor"]
+forbidden_modules = [
+    "agent_takkub.main_window",
+    "agent_takkub.app",
+    "agent_takkub.cli",
+]
+
+[[tool.importlinter.contracts]]
+name = "orchestrator-text-layer"
+type = "forbidden"
+# orchestrator_text is a pure-leaf helper (no Qt, no self). It must not import
+# UI/CLI modules or orchestrator itself (would create a circular import).
+source_modules = ["agent_takkub.orchestrator_text"]
+forbidden_modules = [
+    "agent_takkub.main_window",
+    "agent_takkub.app",
+    "agent_takkub.cli",
+    "agent_takkub.orchestrator",
+]
+
+[[tool.importlinter.contracts]]
+name = "broadcast-actions-layer"
+type = "forbidden"
+# broadcast_actions is an engine-layer mixin — no UI or CLI coupling allowed.
+source_modules = ["agent_takkub.broadcast_actions"]
 forbidden_modules = [
     "agent_takkub.main_window",
     "agent_takkub.app",

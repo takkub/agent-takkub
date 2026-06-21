@@ -29,6 +29,7 @@ from datetime import datetime
 from PyQt6.QtCore import QObject, QProcess, QTimer, pyqtSignal
 
 from .agent_pane import AgentPane
+from .broadcast_actions import BroadcastMixin
 from .claude_auth_config import apply_claude_auth_overrides
 from .config import (
     EVENTS_LOG,
@@ -54,6 +55,36 @@ from .lead_context import (  # re-exported for test + doctor.py imports
     _render_lead_context,
     render_lead_settings,
 )
+from .orchestrator_text import (  # re-exported for test/app/main_window imports
+    _CODEX_TASK_NOTICE,
+    _DEFAULT_TEAMMATE_TIER,
+    _EVENTS_LOG_MAX_BYTES,
+    _HARVEST_EXCLUDE_DIRS,
+    _HOT_MD_INTERVAL_MS,
+    _PASTE_END,
+    _PASTE_ENTER_DELAY_MS,
+    _PASTE_MAX_ENTER_DELAY_MS,
+    _PASTE_START,
+    _ROLE_MODEL_TIERS,
+    _TYPING_ENTER_DELAY_MS,
+    BRACKETED_PASTE_THRESHOLD,
+    _build_transcript_path,
+    _cwd_within_project,
+    _enter_delay_ms,
+    _exit_key,
+    _lead_model_override,
+    _log_event,
+    _paste_payload,
+    _read_tail_bytes,
+    _render_daily_digest,
+    _render_hot_md,
+    _resolve_project_memory,
+    _rewrite_task_for_codex,
+    _sanitize_pane_text,
+    _teammate_tier,
+    prune_old_transcripts,
+    scan_artifacts,
+)
 from .pane_env import (  # re-exported for test imports — see pane_env.py docstring
     _DEFAULT_MCP_TOOL_TIMEOUT_MS,
     _ECC_MUTED_HOOKS,
@@ -68,6 +99,7 @@ from .pane_env import (  # re-exported for test imports — see pane_env.py docs
 )
 from .pipeline_executor import (  # re-exported for test imports; mixin provides methods
     _SHARD_GROUP_TIMEOUT_MS,
+    _SPAWN_STAGGER_MS,
     PipelineMixin,
     PipelineRun,
     ShardGroup,
@@ -94,31 +126,6 @@ _ANSI = re.compile(r"\x1b\[[0-9;]*[mABCDHJKSThlsu]")
 # file every status call (just to keep the last few lines) is an unbounded memory
 # spike. 64 KiB is ample for the 5-line tail even with very long lines. (M4#22)
 _TRANSCRIPT_TAIL_BYTES = 64 * 1024
-
-
-def _read_tail_bytes(path: pathlib.Path, max_bytes: int) -> bytes:
-    """Return at most the last ``max_bytes`` bytes of ``path`` without reading
-    the whole file into memory. Pure (no Qt) so it can be unit-tested. Raises
-    OSError on read failure (caller handles)."""
-    with open(path, "rb") as fh:
-        fh.seek(0, 2)
-        size = fh.tell()
-        fh.seek(max(0, size - max_bytes))
-        return fh.read()
-
-
-# Artifact dirs excluded from harvest scans.
-_HARVEST_EXCLUDE_DIRS = frozenset(
-    {
-        "__pycache__",
-        ".git",
-        "node_modules",
-        ".venv",
-        ".next",
-        "dist",
-        "build",
-    }
-)
 
 # Harvest hint: inject a '[cockpit] <role> ไม่ active >Nm' message into Lead
 # when a teammate pane has been idle this long. 0 = disabled.
@@ -159,199 +166,7 @@ __all__ = [  # backwards-compat re-exports
 ]
 
 
-# Cap events.log so it can never grow unbounded. The LogsPanel dock and any
-# tail reader pay per-byte; a multi-MB log on the Qt main thread wedged the
-# cockpit (see logs_panel._TAIL_BYTES). When the file crosses the cap we
-# rotate it to events.log.old (single generation) and start fresh.
-_EVENTS_LOG_MAX_BYTES = 2 * 1024 * 1024
-
-
-def _log_event(event: str, **details) -> None:
-    """Append a JSONL event line to runtime/events.log. Best-effort; never
-    raises so an audit-log failure can't take down the orchestrator."""
-    try:
-        ensure_runtime()
-        try:
-            if EVENTS_LOG.exists() and EVENTS_LOG.stat().st_size > _EVENTS_LOG_MAX_BYTES:
-                os.replace(EVENTS_LOG, EVENTS_LOG.parent / (EVENTS_LOG.name + ".old"))
-        except OSError:
-            pass
-        line = json.dumps(
-            {"ts": datetime.now().isoformat(timespec="seconds"), "event": event, **details},
-            ensure_ascii=False,
-        )
-        with open(EVENTS_LOG, "a", encoding="utf-8") as f:
-            f.write(line + "\n")
-    except Exception:
-        pass
-
-
-# Per-pane PTY transcripts (runtime/sessions/<date>/<project>/<role>-*.transcript.log)
-# are append streams with no per-file cap — a single chatty/runaway pane once
-# produced a 203 MB transcript. We can't bound an open stream cleanly, so we
-# prune old ones at startup instead. The .md session notes are tiny and kept.
-_TRANSCRIPT_RETENTION_DAYS = 7
-
-
-def prune_old_transcripts(max_age_days: int = _TRANSCRIPT_RETENTION_DAYS) -> int:
-    """Delete `*.transcript.log` files under runtime/sessions older than
-    *max_age_days* (by mtime). Keeps `.md` session notes. Best-effort: never
-    raises, returns the number of files removed."""
-    import time as _time
-
-    sessions = RUNTIME_DIR / "sessions"
-    if not sessions.is_dir():
-        return 0
-    cutoff = _time.time() - max_age_days * 86_400
-    removed = 0
-    bytes_freed = 0
-    try:
-        for p in sessions.rglob("*.transcript.log"):
-            try:
-                st = p.stat()
-                if st.st_mtime < cutoff:
-                    bytes_freed += st.st_size
-                    p.unlink()
-                    removed += 1
-            except OSError:
-                continue
-    except OSError:
-        pass
-    if removed:
-        _log_event(
-            "transcript_prune",
-            removed=removed,
-            mb_freed=round(bytes_freed / 1_048_576, 1),
-            max_age_days=max_age_days,
-        )
-    return removed
-
-
-def scan_artifacts(
-    project_paths: list[pathlib.Path],
-    since_ts: float,
-    *,
-    limit: int = 100,
-) -> list[dict]:
-    """Scan project paths for files modified at or after `since_ts`.
-
-    Returns list[{path, mtime_ts, mtime_rel}] sorted by mtime descending,
-    capped at `limit`. Skips symlinks, directories, and any path whose parts
-    contain a name from _HARVEST_EXCLUDE_DIRS. Non-existent or unreadable
-    paths are silently skipped.
-    """
-    found: list[tuple[float, pathlib.Path]] = []
-    seen: set[pathlib.Path] = set()
-    now = time.time()
-
-    for base in project_paths:
-        if not base.exists():
-            continue
-        try:
-            for root, dirnames, filenames in os.walk(base, followlinks=False):
-                dirnames[:] = [d for d in dirnames if d not in _HARVEST_EXCLUDE_DIRS]
-                for fname in filenames:
-                    p = pathlib.Path(root) / fname
-                    if p.is_symlink():
-                        continue
-                    if p in seen:
-                        continue
-                    seen.add(p)
-                    if any(part in _HARVEST_EXCLUDE_DIRS for part in p.parts):
-                        continue
-                    try:
-                        mtime = p.stat().st_mtime
-                    except OSError:
-                        continue
-                    if mtime >= since_ts:
-                        found.append((mtime, p))
-        except OSError:
-            continue
-
-    found.sort(key=lambda t: t[0], reverse=True)
-    del found[limit:]
-
-    result: list[dict] = []
-    for mtime, p in found:
-        age = now - mtime
-        if age < 60:
-            rel = f"{int(age)}s ago"
-        elif age < 3600:
-            rel = f"{int(age // 60)}m ago"
-        else:
-            rel = f"{int(age // 3600)}h ago"
-        result.append({"path": str(p), "mtime_ts": mtime, "mtime_rel": rel})
-    return result
-
-
 RESUME_WINDOW_SEC = 5 * 60  # respawn within this window → claude --resume <uuid>
-
-# Per-role model tier: (model, effort, fallback-model). Picked per role
-# rather than one flat tier for all teammates because the cockpit owner runs
-# on Claude Max (per-token cost irrelevant), so the only real tradeoff is
-# latency. That lets us spend quality where a miss is expensive and stay snappy
-# where it isn't:
-#
-#   • Gate roles (reviewer, critic) — the last line before something ships.
-#     A missed bug / UX flaw leaks to production, and these run infrequently
-#     at verify/pre-ship hops where the user is already waiting, so latency
-#     barely matters. → Opus, high effort. Fallback Sonnet (not Haiku) so a
-#     degraded gate is still strong.
-#   • Correctness-sensitive impl (backend, devops) — API contracts, schema,
-#     migrations, and irreversible deploy/infra. High frequency, so stay on
-#     Sonnet for turn speed but raise effort to cut subtle-bug rework cycles.
-#   • Everything else (frontend, mobile, qa, designer) — execution-heavy,
-#     high frequency, low blast radius → Sonnet medium (the default tier) for
-#     snappy turns.
-#
-# The global TAKKUB_TEAMMATE_MODEL / _EFFORT / _FALLBACK env vars still win
-# when explicitly set — they override every role's per-role default at once.
-_DEFAULT_TEAMMATE_TIER: tuple[str, str, str] = (
-    "claude-sonnet-4-6",
-    "medium",
-    "claude-haiku-4-5",
-)
-_ROLE_MODEL_TIERS: dict[str, tuple[str, str, str]] = {
-    "reviewer": ("claude-opus-4-8", "high", "claude-sonnet-4-6"),
-    "critic": ("claude-opus-4-8", "high", "claude-sonnet-4-6"),
-    "backend": ("claude-sonnet-4-6", "high", "claude-haiku-4-5"),
-    "devops": ("claude-sonnet-4-6", "high", "claude-haiku-4-5"),
-    # codex/gemini substitutes: when the real binary is unavailable, Claude
-    # backs the role — use Opus/high so the cross-check has the same quality
-    # as reviewer/critic rather than falling to the default Sonnet tier.
-    "codex": ("claude-opus-4-8", "high", "claude-sonnet-4-6"),
-    "gemini": ("claude-opus-4-8", "high", "claude-sonnet-4-6"),
-}
-
-
-def _teammate_tier(role_name: str) -> tuple[str, str, str]:
-    """(model, effort, fallback) for a claude teammate role.
-
-    Non-claude panes (codex/gemini/shell) never reach this — they spawn via a
-    separate path that skips claude model flags entirely.
-    """
-    return _ROLE_MODEL_TIERS.get(role_name, _DEFAULT_TEAMMATE_TIER)
-
-
-def _lead_model_override() -> str | None:
-    """Explicit `--model` for the Lead pane, or None to inherit the user default.
-
-    The Lead normally spawns with no `--model` flag and rides the owner's
-    default model. On a Max account that default is often the `[1m]`
-    1M-context variant — fine on Max, but a hard error on Pro ("Usage credits
-    required for 1M context"). When the owner has marked the install as Pro
-    (see plan_tier), pin the Lead to a standard-context model so it doesn't
-    inherit a 1M default and fail. Max → None (unchanged: inherit user default).
-
-    Env override TAKKUB_PRO_LEAD_MODEL swaps the pinned model per-install; set
-    it to empty to disable the pin even under Pro (inherit user default again).
-    """
-    from . import plan_tier
-
-    if not plan_tier.is_pro():
-        return None
-    return os.environ.get("TAKKUB_PRO_LEAD_MODEL", plan_tier.PRO_LEAD_MODEL).strip() or None
-
 
 # Stall detection: if a `working` pane shows no detectable progress (no
 # transcript bytes, no new screenshots, no takkub send received) for this long,
@@ -489,51 +304,11 @@ CODEX_EARLY_CRASH_WINDOW_SEC = 90
 # event-loop-turn streak for that.
 _TOCTOU_RESAMPLE_N = 3
 
-# Bracketed-paste threshold for messages injected into a pane via the
-# orchestrator (assign / send / slash-command). Below this length we
-# write raw text — claude code's interactive input handles short typing
-# fine. At or above, we wrap with `ESC [200~ ... ESC [201~` so claude
-# treats the whole block as a single atomic paste instead of typing
-# char-by-char. Without this, long task specs occasionally lose the
-# head of the message when the pane is mid-render at write time (the
-# bug behind teammates complaining about "ข้อความถูกตัดส่วนต้น").
-BRACKETED_PASTE_THRESHOLD = 200
 # After this many consecutive 400-ms busy-retries (~30 s) the pump gives up
 # and spills remaining items to the durable _pending_done_notices queue.
 # Prevents unbounded memory growth and ensures delivery survives a crash that
 # occurs while Lead is alive-but-wedged.
 LEAD_NOTIFY_BUSY_CAP = 75
-_PASTE_START = "\x1b[200~"
-_PASTE_END = "\x1b[201~"
-
-# C0 controls (incl. bare ESC 0x1b and CR 0x0d) plus DEL (0x7f) and the 8-bit
-# C1 range (0x80-0x9f). C1 codepoints like U+009B (CSI), U+009D (OSC) and
-# U+0090 (DCS) are single-byte escape introducers that some terminals honour,
-# so a pane message containing them could start an escape sequence even after
-# ESC is stripped. TAB (0x09) and LF (0x0a) are deliberately excluded — both
-# are legitimate in multi-line task bodies.
-_CONTROL_STRIP = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
-
-
-def _sanitize_pane_text(text: str) -> str:
-    """Strip control sequences that could break out of bracketed-paste mode.
-
-    A message body containing ``\\x1b[201~`` closes the bracketed-paste bracket
-    early, letting the rest of the content execute as raw terminal input in any
-    pane running with ``--dangerously-skip-permissions``. Strip both the opening
-    and closing bracket sequences plus every C0/C1 control byte (incl. bare ESC,
-    CR, and 8-bit CSI/OSC/DCS introducers) so every write path (send,
-    _notify_lead, task inject) is safe regardless of input length.
-
-    TAB and LF are preserved — both are intentional in multi-line task bodies and
-    neither submits the input in bracketed-paste mode.
-    """
-    # Remove bracketed-paste control sequences first so their printable tail
-    # ("[200~") goes together with its ESC before the blanket control strip.
-    text = text.replace(_PASTE_END, "").replace(_PASTE_START, "")
-    # Strip C0 control bytes (incl. ESC + CR), DEL, and 8-bit C1 controls.
-    text = _CONTROL_STRIP.sub("", text)
-    return text
 
 
 def _delayed_enter(pane: AgentPane, session: PtySession, delay_ms: int) -> None:
@@ -604,95 +379,6 @@ def _delayed_enter_verified(
     QTimer.singleShot(delay_ms, lambda: _send_then_verify(max_resends))
 
 
-def _paste_payload(text: str) -> str:
-    """Return `text` wrapped in bracketed-paste escapes when long enough.
-
-    Used by every cockpit-driven write into a pane's PTY (Lead's task
-    specs, peer-to-peer takkub send, slash-command injection). Short
-    inputs are returned unchanged so single-character prompts still
-    feel like typing rather than a paste burst.
-    """
-    # M6#28: strip any embedded bracketed-paste markers from the content first.
-    # An attacker-influenced task/message carrying an ESC[201~ end-marker would
-    # otherwise terminate paste mode early, and the bytes after it (including a
-    # \r) would be interpreted as LIVE keystrokes — auto-submitting an injected
-    # command into the pane's TUI. The markers are never legitimate content, so
-    # removing them is always safe (do it regardless of length, since the short
-    # path writes the text straight through too).
-    if _PASTE_START in text or _PASTE_END in text:
-        text = text.replace(_PASTE_START, "").replace(_PASTE_END, "")
-    if len(text) < BRACKETED_PASTE_THRESHOLD:
-        return text
-    return _PASTE_START + text + _PASTE_END
-
-
-_CODEX_TASK_NOTICE = (
-    "[orchestrator note] อ่านก่อนเริ่มงาน:\n"
-    "- `ห้าม spawn subagent` ใน ROLE prefix หมายถึง AI subagent\n"
-    "  เท่านั้น (Task tool / codex delegation flags) — ไม่รวม shell\n"
-    "  command ที่คุณรันเองในเทอร์มินัลนี้\n"
-    "- เมื่อเสร็จงาน ต้อง **รัน shell command** ผ่าน Bash tool:\n"
-    '      takkub done "<one-line summary>"\n'
-    '  ห้ามพิมพ์ "takkub done" เป็นข้อความตอบในแชท (orchestrator\n'
-    "  มองไม่เห็น → Lead ไม่ทราบว่างานเสร็จ → pane idle ตลอด)\n"
-    "- review / analysis tasks: save findings ลงไฟล์ docs/ ก่อน\n"
-    "  แล้วค่อย `takkub done` (pane auto-close ~2.5s หลัง done)\n"
-    "\n"
-    "------ task ------\n"
-)
-
-
-def _rewrite_task_for_codex(task: str) -> str:
-    """Prepend an unambiguous override notice when sending a task to a codex pane.
-
-    Codex tends to over-interpret Lead's standard
-    `[ROLE: ... ห้าม spawn subagent]` prefix as forbidding any external
-    orchestration — including the mandatory `takkub done` shell command.
-    The planted AGENTS.md tries to prevent this but loses to the more-
-    proximal inline ROLE prefix. We inject a same-proximity clarification
-    before the task so the override cannot be ranked below the constraint.
-    Idempotent: if the notice marker is already present we return unchanged
-    (e.g. orchestrator replays the stored task after auto-respawn).
-    """
-    if _CODEX_TASK_NOTICE in task:
-        return task
-    return _CODEX_TASK_NOTICE + task
-
-
-# Delay between writing the payload and writing the submitting `\r`.
-# Claude Code v2.1.x collapses a bracketed-paste block into a
-# `[Pasted text #N +M lines]` placeholder before it accepts Enter as a
-# submit. Rendering that placeholder takes noticeably longer than the
-# 200 ms used for short typing-style writes; an Enter that lands
-# mid-render is consumed as a soft newline inside the paste and the
-# task never actually submits (the bug surfaced when a teammate pane
-# sat at `[Pasted text #1 +15 lines]` forever instead of running the
-# spec). Pick the longer delay only when the payload actually came
-# back from `_paste_payload` wrapped, so slash-command and short
-# message latency stay snappy.
-_PASTE_ENTER_DELAY_MS = 800
-_TYPING_ENTER_DELAY_MS = 200
-# Extra delay per KB of bracketed-paste payload. A very large paste renders
-# its `[Pasted text]` placeholder slower than the fixed 800 ms window, so the
-# submit \r can land mid-render and be swallowed as a soft newline (issue #22).
-# Scale the wait with payload size, capped so a huge spec can't stall input.
-_PASTE_PER_KB_DELAY_MS = 150
-_PASTE_MAX_ENTER_DELAY_MS = 3000
-
-
-def _enter_delay_ms(payload: str) -> int:
-    """Pick the post-write delay before sending Enter to submit input.
-
-    Short/typed payloads use the snappy typing delay. Bracketed pastes use a
-    base delay that grows with payload size — large pastes take longer to
-    render their placeholder, and an Enter sent before the render completes is
-    consumed inside the paste buffer instead of submitting (issue #22)."""
-    if not payload.startswith(_PASTE_START):
-        return _TYPING_ENTER_DELAY_MS
-    kb = len(payload.encode("utf-8")) // 1024
-    return min(_PASTE_ENTER_DELAY_MS + kb * _PASTE_PER_KB_DELAY_MS, _PASTE_MAX_ENTER_DELAY_MS)
-
-
 # Where teammate-pane state lives between cockpit restarts. Lead panes
 # are already restored by the open_tabs mechanism in projects.json
 # (one Lead per tab). Teammate panes — frontend/backend/qa/etc. that
@@ -708,225 +394,6 @@ def _enter_delay_ms(payload: str) -> int:
 # the right call.
 _LAST_SESSION_FILE = RUNTIME_DIR / "last-session.json"
 _LAST_SESSION_MAX_AGE_SEC = 60 * 60
-
-
-# How often the orchestrator rewrites `<vault>/hot.md`. The hot file is
-# a low-stakes status snapshot — open Obsidian, see what cockpit is
-# doing right now — so the cadence trades freshness for write churn.
-# A minute is plenty: the panes themselves render to xterm in real time.
-_HOT_MD_INTERVAL_MS = 60_000
-
-
-def _render_daily_digest(
-    project: str,
-    when: datetime,
-    sessions: list[tuple[str, str, str]],
-    decisions: list[dict] | None = None,
-) -> str:
-    """Render one Finish-Job digest section for a project.
-
-    `sessions` is a list of (HHMMSS, role, note_first_line) tuples
-    drawn from `runtime/sessions/<date>/<project>/*.md`. Most recent
-    first so the user scanning the daily note sees the latest work
-    at the top.
-
-    `decisions` (optional) is a list of {timestamp, heading, ...}
-    dicts from `chatlog_scanner.extract_decisions` — assistant
-    messages with H2 headings that look like recap / structured
-    output. Surfaces under a "Decisions today" sub-bullet so the
-    user can scan what was decided without opening any pane.
-
-    Output is a single H2 section so multiple Finish Job invocations
-    on the same day (different projects, different times) can append
-    without clobbering each other.
-    """
-    lines: list[str] = []
-    lines.append(f"## `{project}` · wrapped at {when.strftime('%H:%M:%S')}")
-    lines.append("")
-    if not sessions:
-        lines.append("_No `takkub done` events recorded today for this project._")
-        lines.append("")
-    else:
-        lines.append(f"**Sessions completed today: {len(sessions)}**")
-        lines.append("")
-        for stamp, role, note in sessions:
-            # First line of the note is the human summary; collapse multi-line
-            # notes to one line so the daily file stays scannable.
-            first = (note or "").strip().splitlines()[0] if (note or "").strip() else ""
-            if first:
-                lines.append(f"- `{stamp}` **{role}** — {first}")
-            else:
-                lines.append(f"- `{stamp}` **{role}**")
-        lines.append("")
-    if decisions:
-        lines.append(f"**Decisions today: {len(decisions)}**")
-        lines.append("")
-        for d in decisions:
-            ts = d.get("timestamp") or ""
-            ts_short = ts.replace("T", " ")[:16] if ts else ""
-            heading = (d.get("heading") or "").strip()
-            if heading:
-                lines.append(f"- `{ts_short}` {heading}")
-        lines.append("")
-    return "\n".join(lines)
-
-
-def _render_hot_md(
-    panes_by_project: dict[str, dict[str, str]],
-    active_project_name: str | None,
-    recent_sessions: list[tuple[str, str, str]],
-    now: datetime,
-    hook_counts: dict[str, int] | None = None,
-    friction: dict[str, int] | None = None,
-) -> str:
-    """Compose the body of `<vault>/hot.md` — the "what's happening
-    right now in cockpit" snapshot the user opens to orient themselves.
-
-    Inputs are plain values (no Pane / PtySession refs) so this can be
-    unit-tested without spinning up Qt. `panes_by_project` is
-    `{project: {role: state}}`. `recent_sessions` is a list of
-    `(project, role, filename)` tuples — most recent first.
-    `hook_counts` is `{hook_bucket: count}` from
-    `chatlog_scanner.count_hook_fires` — surfaces noisy hooks
-    (GateGuard, cost-critical, loop-warning, etc.) so the user can
-    spot which hook is more annoying than useful and decide whether
-    to mute it via ECC_DISABLED_HOOKS.
-    """
-    lines: list[str] = []
-    lines.append("# Hot — cockpit live state")
-    lines.append("")
-    lines.append(f"_Last updated: {now.isoformat(timespec='seconds')}_")
-    lines.append("")
-
-    if active_project_name:
-        lines.append(f"**Active project:** `{active_project_name}`")
-    else:
-        lines.append("**Active project:** _(none — projects.json `active` unset)_")
-    lines.append("")
-
-    if not panes_by_project:
-        lines.append("## Panes")
-        lines.append("")
-        lines.append("_No projects open in cockpit._")
-        lines.append("")
-    else:
-        lines.append("## Panes")
-        lines.append("")
-        for project in sorted(panes_by_project):
-            lines.append(f"### `{project}`")
-            roles = panes_by_project[project]
-            if not roles:
-                lines.append("- _(no panes)_")
-            else:
-                for role in sorted(roles):
-                    lines.append(f"- **{role}** — {roles[role]}")
-            lines.append("")
-
-    lines.append("## Recent `takkub done` (last 10)")
-    lines.append("")
-    if not recent_sessions:
-        lines.append("_(no done events this session)_")
-    else:
-        for project, role, fname in recent_sessions[:10]:
-            lines.append(f"- `{project}` · **{role}** · {fname}")
-    lines.append("")
-
-    # Hook noise meter — only render the section when there's
-    # something to report so a quiet day doesn't get a wall of zeros.
-    if hook_counts:
-        lines.append("## Hook noise today")
-        lines.append("")
-        # Loudest hook first so the eye lands on the worst offender.
-        for hook, count in sorted(hook_counts.items(), key=lambda kv: kv[1], reverse=True):
-            lines.append(f"- **{hook}** — {count}")
-        lines.append("")
-
-    # Friction heatmap — surface "user corrected claude" and
-    # "claude retried the same tool 3+ times" so the user sees
-    # where workflow was rough. Same omit-when-empty rule.
-    if friction and any(friction.values()):
-        lines.append("## Friction today")
-        lines.append("")
-        c = int(friction.get("corrections", 0))
-        r = int(friction.get("tool_retries", 0))
-        if c:
-            lines.append(f"- **user corrections** — {c}")
-        if r:
-            lines.append(f"- **tool retry storms** — {r}")
-        lines.append("")
-
-    lines.append("---")
-    lines.append("")
-    lines.append(
-        "_Auto-written by agent-takkub orchestrator every "
-        f"{_HOT_MD_INTERVAL_MS // 1000}s. Edit-safe target is the project "
-        "page; this file is overwritten on each tick._"
-    )
-    lines.append("")
-    return "\n".join(lines)
-
-
-def _cwd_within_project(cwd: str, project: str, role_name: str) -> bool:
-    """True when `cwd` resolves under one of `project`'s configured roots.
-
-    The cockpit repo-root bypass is intentionally restricted to Lead: teammates
-    of unrelated projects must not inherit Lead's self-edit privileges.
-    """
-    target = pathlib.Path(cwd).resolve()
-    if role_name == LEAD.name and (
-        target == REPO_ROOT.resolve() or REPO_ROOT.resolve() in target.parents
-    ):
-        return True
-    return any(target == root or root in target.parents for root in _allowed_project_roots(project))
-
-
-def _exit_key(project: str, role: str) -> str:
-    """Composite key for `_recent_exits` so the same role in different
-    project tabs never shares a resume record."""
-    return f"{project}::{role}"
-
-
-def _resolve_project_memory(cwd: str | None) -> pathlib.Path | None:
-    """Return the Lead's MEMORY.md path for the project rooted at *cwd*, or None.
-
-    Claude Code encodes the project directory as the key under
-    ``~/.claude/projects/`` by replacing the OS separator and colon with ``-``.
-    For example ``C:\\Users\\monch\\web`` → ``C--Users-monch-web``.
-
-    Returns None when *cwd* is absent or no memory file exists yet.
-    """
-    if not cwd:
-        return None
-    encoded = str(pathlib.Path(cwd).resolve())
-    encoded = encoded.replace(os.sep, "-").replace(":", "-")
-    mem = pathlib.Path.home() / ".claude" / "projects" / encoded / "memory" / "MEMORY.md"
-    return mem if mem.exists() else None
-
-
-def _build_transcript_path(project_ns: str, role_name: str) -> str | None:
-    """Return an absolute path for the PTY byte-stream transcript file, or
-    None to disable capture for this pane.
-
-    The path mirrors the decision-log layout so the two artefacts live
-    side-by-side under runtime/sessions/<date>/<project>/:
-        <role>-<HHMMSS>.transcript.log   ← raw bytes (this function)
-        <role>-<HHMMSS>.md               ← markdown summary (done())
-
-    Setting TAKKUB_DISABLE_TRANSCRIPTS=1 returns None so no raw PTY bytes are
-    persisted — an opt-out for sensitive projects whose panes may print
-    tokens/.env/OAuth URLs that would otherwise land in a durable file and be
-    re-injected into other agents via status/brief tails (issue #15). Every
-    transcript reader already guards on a falsy path, so None is safe.
-    """
-    if os.environ.get("TAKKUB_DISABLE_TRANSCRIPTS", "").strip().lower() in ("1", "true", "yes"):
-        return None
-    now = datetime.now()
-    day = RUNTIME_DIR / "sessions" / now.strftime("%Y-%m-%d") / project_ns
-    try:
-        day.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        pass
-    return str(day / f"{role_name}-{now.strftime('%H%M%S')}.transcript.log")
 
 
 @dataclass
@@ -1001,7 +468,7 @@ class PaneState:
     pipeline_run_id: str | None = None
 
 
-class Orchestrator(PipelineMixin, QObject):
+class Orchestrator(PipelineMixin, BroadcastMixin, QObject):
     """Owns the pane registry and routes commands.
 
     Layout policy: Lead is always pre-registered (created by main_window) and
@@ -5195,175 +4662,6 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         _delayed_enter(pane, _xml_sess, 150)
         ps.malformed_xml_notice_ts = now
         _log_event("malformed_tool_call_detected", role=role, project=project)
-
-    def broadcast_bug_check(self, project: str | None = None) -> tuple[int, list[str]]:
-        """Ask every active pane in `project` to introspect for cockpit bugs.
-
-        Each live pane gets a prompt instructing the agent to either:
-          * `takkub issue new ...` if it noticed a cockpit/orchestrator/CLI/UI bug
-          * `takkub send --to lead 'no bugs to report'` if the session was clean
-
-        Empty / dead-session slots are skipped silently. Cross-project panes
-        are not touched (multi-tab isolation).
-
-        Returns (count, role_names) for the cockpit's status-bar feedback.
-        """
-        project_ns = self._resolve_project(project)
-        prompted: list[str] = []
-        for role_name, pane in list(self._project_panes(project_ns).items()):
-            if pane.session is None or not pane.session.is_alive:
-                continue
-            # Teammates introspect ("did you notice a bug?"); the Lead gets an
-            # active-audit directive so the broadcast doesn't dead-end into
-            # everyone waiting for reports. Introspection only catches bugs an
-            # agent stumbled into — the Lead must actively run tests / diff /
-            # audit to surface latent ones.
-            if role_name == LEAD.name:
-                prompt = self._build_lead_bug_check_prompt(project_ns)
-            else:
-                prompt = self._build_bug_check_prompt(role_name, project_ns)
-            self._send_when_ready(role_name, prompt, project=project_ns)
-            prompted.append(role_name)
-        _log_event("broadcast_bug_check", project=project_ns, count=len(prompted), roles=prompted)
-        return len(prompted), prompted
-
-    @staticmethod
-    def _build_bug_check_prompt(role: str, project: str) -> str:
-        """Render the per-pane bug-introspection prompt.
-
-        Static-method so the test suite can call it without a full
-        Orchestrator + Qt event loop just to inspect the wording.
-        """
-        return (
-            "🐛 **Bug check** (orchestrator broadcast)\n\n"
-            "introspect session ของเรา — เจอบัค **ของ cockpit / orchestrator / CLI / UI** ไหม\n"
-            "(ไม่ใช่บัคของ code ที่เรากำลังทำงาน — **เฉพาะบัคของ cockpit เอง**)\n\n"
-            "**ถ้าเจอ:** เรียก (issue ลง agent-takkub repo อัตโนมัติ)\n"
-            "```\n"
-            f'takkub issue new "<title>" --severity <low|med|high> --noticed-in {project} --role {role} --tag <a,b,c> --body "<reproduce + impact>"\n'
-            "```\n\n"
-            "**ถ้าไม่เจอ:** เรียก\n"
-            "```\n"
-            'takkub send --to lead "no bugs to report"\n'
-            "```\n\n"
-            "รายงานกลับเมื่อเสร็จ"
-        )
-
-    @staticmethod
-    def _build_lead_bug_check_prompt(project: str) -> str:
-        """Render the Lead-side ACTIVE bug-audit prompt.
-
-        The teammate prompt is passive (introspect + report). If the Lead got
-        the same prompt the whole broadcast would dead-end into "everyone waits
-        for reports, nobody checks anything" — the exact stall the user hit.
-        This prompt makes the Lead *do* an audit: run the suite, diff recent
-        work, eyeball risk subsystems, and only then conclude. Lead's own
-        Read/test/diff are auto-fire; spawning an auditor stays propose-first.
-        """
-        return (
-            "🐛 **Bug check — Lead active audit** (orchestrator broadcast)\n\n"
-            "คุณคือ Lead — **อย่าแค่รอ report จาก teammate** (introspection จับได้แค่บัค "
-            "ที่ agent บังเอิญสะดุดเจอ ไม่ใช่บัคแฝง) ลงมือ audit เชิงรุก **อย่างน้อย 1 อย่างทันที** "
-            "ก่อนสรุป:\n\n"
-            "1. รัน test suite — `rtk proxy python -m pytest -q` (มี fail/regression ไหม)\n"
-            "2. ดู change ล่าสุด — `rtk git log --oneline -10` + `git diff` หา bug แฝง\n"
-            "3. ไล่ subsystem เสี่ยง/เพิ่งแตะ — encode path, routing, watchdog, env leak, paste\n"
-            "4. ถ้าต้องเจาะลึก → **propose** spawn reviewer/codex audit (pane visible รอ confirm)\n\n"
-            "**เจอบัค:** (issue ลง agent-takkub repo อัตโนมัติ — เฉพาะบัค cockpit)\n"
-            "```\n"
-            f'takkub issue new "<title>" --severity <low|med|high> --noticed-in {project} --body "<reproduce + impact>"\n'
-            "```\n"
-            "**ไม่เจอหลัง audit จริง:** สรุปสั้นๆ ว่า audit อะไรไปบ้าง + ผล\n\n"
-            '❗ ห้ามจบด้วยการ "รอ teammate" เฉยๆ — ต้องมี action เกิดขึ้นก่อนสรุปเสมอ'
-        )
-
-    def broadcast_design_review(self, project: str | None = None) -> tuple[int, list[str]]:
-        """Spawn the design-review pipeline for `project` — critic + gemini parallel.
-
-        Unlike `broadcast_bug_check` (prompts existing live panes), this
-        method assigns fresh tasks to the design-review duo:
-          * critic — read shots from runtime/exports/<date>/<project>/screenshots/
-            and write a proposal to docs/design-review/<date>-<view>.md
-          * gemini — prepare to view images critic will send via `takkub send`
-
-        Substitution doctrine (CLAUDE.md "Claude รับตำแหน่งแทน"): when the
-        gemini CLI is unavailable — toggled off in the status bar OR not
-        installed — the gemini slot is **still spawned**. The spawn layer
-        (`effective_provider_for`) backs it with claude so the slot keeps its
-        identity (`gemini` pane) but runs claude, reading `.claude/agents/
-        gemini.md` (which knows it's a substitute and reports
-        `[claude-substitute for gemini]`). We never silently drop the slot —
-        that left critic's task pointing at a pane that was never spawned and
-        gave the user no second opinion at all (issue #61). The only cost is
-        lost model-diversity, which we flag in the returned label + log so the
-        user can decide whether to re-enable real gemini.
-
-        Returns (count, role_names) for status-bar feedback. Roles ordered
-        consistently (critic first) so the UI message reads naturally; the
-        gemini entry reads `gemini (claude)` when it was substituted.
-        """
-        from datetime import datetime as _dt
-
-        from .provider_config import GEMINI, effective_provider_for
-
-        project_ns = self._resolve_project(project)
-        today = _dt.now().strftime("%Y-%m-%d")
-        shot_dir = f"runtime/exports/{today}/{project_ns}/screenshots/"
-        proposal_path = f"docs/design-review/{today}-<view>.md"
-        cwd = default_cwd_for_role("critic", project=project_ns)
-
-        critic_task = (
-            "[ROLE: Design Critic — ทำงานเองโดยตรง ห้าม spawn subagent]\n\n"
-            "🎨 **Design review** (orchestrator broadcast)\n\n"
-            f"อ่าน screenshots ที่ `{shot_dir}` (ถ้าโฟลเดอร์ยังว่าง บอก Lead ผ่าน "
-            "`takkub send --to lead` ขอให้ QA capture ก่อน) — เสนอ:\n"
-            "  • **เพิ่ม** — element/affordance ที่ขาด\n"
-            "  • **ลบ** — clutter หรือ widget ซ้ำซ้อน\n"
-            "  • **ปรับ** — spacing / typography / color / interaction\n\n"
-            "สื่อสารกับ gemini pane ผ่าน `takkub send --to gemini` เพื่อขอมุมที่ 2 "
-            "จากภาพเดียวกัน (cross-check confirmation bias)\n\n"
-            f"เขียน proposal markdown ไปที่ `{proposal_path}` พร้อม frontmatter "
-            "(date / scope / shots) แล้ว report กลับผ่าน `takkub done`"
-        )
-
-        gemini_task = (
-            "[ROLE: gemini — second opinion on visual design]\n\n"
-            "🖼️ **Image review co-pilot**\n\n"
-            "Design Critic pane จะส่ง path ของ screenshot images ให้ผ่าน "
-            "`takkub send` — โหลดภาพอ่านดู แล้วตอบกลับ 1-3 จุดที่:\n"
-            "  • รู้สึกขาด / clutter / ไม่ balance\n"
-            "  • เป็นไปได้ที่ user จะใช้ผิด\n"
-            "  • Heuristic ผิด (Nielsen / contrast / hierarchy)\n\n"
-            "ตอบสั้น focus — critic จะรวบรวมเขียน proposal เอง "
-            "report กลับผ่าน `takkub done` เมื่อ critic บอกว่าจบรอบ"
-        )
-
-        # Will the gemini slot be backed by claude this spawn? (toggled off or
-        # CLI not installed). We still spawn it — only the label/log change.
-        gemini_substituted = effective_provider_for("gemini", project=project_ns) != GEMINI
-        if gemini_substituted:
-            gemini_task = (
-                "[ROLE: gemini slot — claude รับตำแหน่งแทน (gemini ปิด/ยังไม่ติดตั้ง)]\n"
-                "⚠️ คุณคือ Claude ที่รับบท gemini — second opinion ยังให้ได้ แต่ไม่ใช่ "
-                "model diversity จริง ขึ้น report ว่า `[claude-substitute for gemini]`\n\n"
-            ) + gemini_task
-
-        spawned: list[str] = []
-        ok_critic, _ = self.assign("critic", cwd=cwd, task=critic_task, project=project_ns)
-        if ok_critic:
-            spawned.append("critic")
-        ok_gemini, _ = self.assign("gemini", cwd=cwd, task=gemini_task, project=project_ns)
-        if ok_gemini:
-            spawned.append("gemini (claude)" if gemini_substituted else "gemini")
-        _log_event(
-            "broadcast_design_review",
-            project=project_ns,
-            count=len(spawned),
-            roles=spawned,
-            shot_dir=shot_dir,
-            gemini_substituted=gemini_substituted,
-        )
-        return len(spawned), spawned
 
     def close_all_teammates(self, project: str | None = None) -> tuple[bool, str]:
         """Close every non-Lead pane in `project` (defaults to active).

@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 52,
+  "module_count": 54,
   "modules": [
     {
       "module": "agent_takkub",
@@ -67,6 +67,20 @@
       ],
       "fan_in": 1,
       "fan_out": 3
+    },
+    {
+      "module": "agent_takkub.broadcast_actions",
+      "imports": [
+        "agent_takkub.config",
+        "agent_takkub.orchestrator_text",
+        "agent_takkub.provider_config",
+        "agent_takkub.roles"
+      ],
+      "imported_by": [
+        "agent_takkub.orchestrator"
+      ],
+      "fan_in": 1,
+      "fan_out": 4
     },
     {
       "module": "agent_takkub.chatlog_scanner",
@@ -172,6 +186,7 @@
       "imports": [],
       "imported_by": [
         "agent_takkub.agent_pane",
+        "agent_takkub.broadcast_actions",
         "agent_takkub.claude_update",
         "agent_takkub.cli",
         "agent_takkub.cli_server",
@@ -181,6 +196,7 @@
         "agent_takkub.lead_context",
         "agent_takkub.main_window",
         "agent_takkub.orchestrator",
+        "agent_takkub.orchestrator_text",
         "agent_takkub.pipeline_executor",
         "agent_takkub.project_rules",
         "agent_takkub.role_memory",
@@ -191,7 +207,7 @@
         "agent_takkub.vault_graph",
         "agent_takkub.vault_mirror"
       ],
-      "fan_in": 19,
+      "fan_in": 21,
       "fan_out": 0
     },
     {
@@ -274,9 +290,10 @@
         "agent_takkub.vault_mirror"
       ],
       "imported_by": [
-        "agent_takkub.orchestrator"
+        "agent_takkub.orchestrator",
+        "agent_takkub.orchestrator_text"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 5
     },
     {
@@ -336,6 +353,7 @@
       "module": "agent_takkub.orchestrator",
       "imports": [
         "agent_takkub.agent_pane",
+        "agent_takkub.broadcast_actions",
         "agent_takkub.chatlog_scanner",
         "agent_takkub.claude_auth_config",
         "agent_takkub.codex_agents_md",
@@ -343,6 +361,7 @@
         "agent_takkub.config",
         "agent_takkub.gemini_helper",
         "agent_takkub.lead_context",
+        "agent_takkub.orchestrator_text",
         "agent_takkub.pane_env",
         "agent_takkub.pipeline_executor",
         "agent_takkub.plan_tier",
@@ -363,7 +382,22 @@
         "agent_takkub.main_window"
       ],
       "fan_in": 4,
-      "fan_out": 20
+      "fan_out": 22
+    },
+    {
+      "module": "agent_takkub.orchestrator_text",
+      "imports": [
+        "agent_takkub.config",
+        "agent_takkub.lead_context",
+        "agent_takkub.plan_tier",
+        "agent_takkub.roles"
+      ],
+      "imported_by": [
+        "agent_takkub.broadcast_actions",
+        "agent_takkub.orchestrator"
+      ],
+      "fan_in": 2,
+      "fan_out": 4
     },
     {
       "module": "agent_takkub.pane_env",
@@ -421,9 +455,10 @@
         "agent_takkub.agent_pane",
         "agent_takkub.lead_context",
         "agent_takkub.main_window",
-        "agent_takkub.orchestrator"
+        "agent_takkub.orchestrator",
+        "agent_takkub.orchestrator_text"
       ],
-      "fan_in": 4,
+      "fan_in": 5,
       "fan_out": 0
     },
     {
@@ -457,6 +492,7 @@
         "agent_takkub.provider_state"
       ],
       "imported_by": [
+        "agent_takkub.broadcast_actions",
         "agent_takkub.cli_server",
         "agent_takkub.lead_context",
         "agent_takkub.main_window",
@@ -464,7 +500,7 @@
         "agent_takkub.pipeline_dialog",
         "agent_takkub.pipeline_executor"
       ],
-      "fan_in": 6,
+      "fan_in": 7,
       "fan_out": 3
     },
     {
@@ -518,11 +554,13 @@
       "imports": [],
       "imported_by": [
         "agent_takkub.agent_pane",
+        "agent_takkub.broadcast_actions",
         "agent_takkub.main_window",
         "agent_takkub.orchestrator",
+        "agent_takkub.orchestrator_text",
         "agent_takkub.pipeline_config"
       ],
-      "fan_in": 4,
+      "fan_in": 6,
       "fan_out": 0
     },
     {
