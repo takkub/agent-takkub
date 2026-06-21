@@ -249,3 +249,16 @@ forbidden_modules = [
     "agent_takkub.app",
     "agent_takkub.cli",
 ]
+
+[[tool.importlinter.contracts]]
+name = "spawn-engine-layer"
+type = "forbidden"
+# spawn_engine is a pure-logic mixin. It must never import from the UI layer
+# or the orchestrator itself (which would create a cycle).
+source_modules = ["agent_takkub.spawn_engine"]
+forbidden_modules = [
+    "agent_takkub.orchestrator",
+    "agent_takkub.main_window",
+    "agent_takkub.app",
+    "agent_takkub.cli",
+]
