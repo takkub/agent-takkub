@@ -259,3 +259,14 @@ forbidden_modules = [
     "agent_takkub.app",
     "agent_takkub.cli",
 ]
+
+[[tool.importlinter.contracts]]
+name = "status-header-layer"
+type = "forbidden"
+# status_header is a UI-layer mixin (mixed into MainWindow). It must not pull
+# in app or cli — same constraint as main_window itself.
+source_modules = ["agent_takkub.status_header"]
+forbidden_modules = [
+    "agent_takkub.app",
+    "agent_takkub.cli",
+]
