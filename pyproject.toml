@@ -215,3 +215,25 @@ forbidden_modules = [
     "agent_takkub.app",
     "agent_takkub.cli",
 ]
+
+[[tool.importlinter.contracts]]
+name = "user-actions-layer"
+type = "forbidden"
+# user_actions is a UI-layer mixin (mixed into MainWindow). It must not pull
+# in app or cli — same constraint as main_window itself.
+source_modules = ["agent_takkub.user_actions"]
+forbidden_modules = [
+    "agent_takkub.app",
+    "agent_takkub.cli",
+]
+
+[[tool.importlinter.contracts]]
+name = "limit-panel-layer"
+type = "forbidden"
+# limit_panel is a UI-layer mixin (mixed into MainWindow). It must not pull
+# in app or cli — same constraint as main_window itself.
+source_modules = ["agent_takkub.limit_panel"]
+forbidden_modules = [
+    "agent_takkub.app",
+    "agent_takkub.cli",
+]
