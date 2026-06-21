@@ -135,14 +135,6 @@ class PipelineMixin:
     # Pipeline executor
     # ──────────────────────────────────────────────────────────────
 
-    def _inject_to_lead(
-        self, project_ns: str, message: str, log_event: str = "lead_inject"
-    ) -> None:
-        """Write *message* to the Lead pane. If Lead is absent, queue it in
-        _pending_done_notices so it is delivered when Lead next spawns."""
-        self._notify_lead(project_ns, message)
-        _log_event(log_event, project=project_ns)
-
     def pipeline_precheck(self, template_id: str, project: str | None = None) -> tuple[bool, str]:
         """Validate that *template_id* exists and has runnable hops, with no
         side effects.

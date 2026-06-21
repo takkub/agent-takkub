@@ -184,6 +184,18 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
+name = "lead-inbox-layer"
+type = "forbidden"
+# lead_inbox is an engine-layer mixin — must not import orchestrator (cycle) or UI/CLI.
+source_modules = ["agent_takkub.lead_inbox"]
+forbidden_modules = [
+    "agent_takkub.orchestrator",
+    "agent_takkub.main_window",
+    "agent_takkub.app",
+    "agent_takkub.cli",
+]
+
+[[tool.importlinter.contracts]]
 name = "broadcast-actions-layer"
 type = "forbidden"
 # broadcast_actions is an engine-layer mixin — no UI or CLI coupling allowed.
