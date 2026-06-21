@@ -1,0 +1,854 @@
+"""UserActionsMixin — toolbar/button handlers (refactor round 4, step A).
+
+Extracted from ``MainWindow`` as a mixin. All methods access ``self.*``
+attributes (``orch``, ``_status``, ``_btn_pipelines``, ``_chip_codex``,
+``_chip_gemini``, ``_chip_plan``, ``_limit_store``, etc.) initialised in
+``MainWindow.__init__``.
+
+**Import constraint:** this module MUST NOT import ``app`` or ``cli``.
+"""
+
+from __future__ import annotations
+
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import (
+    QDialog,
+    QHBoxLayout,
+    QInputDialog,
+    QLabel,
+    QMessageBox,
+    QPlainTextEdit,
+    QPushButton,
+    QVBoxLayout,
+)
+
+from .config import REPO_ROOT, active_project
+from .orchestrator import _log_event
+
+
+class UserActionsMixin:
+    """Mixin for cockpit toolbar / status-bar button handlers."""
+
+    # ──────────────────────────────────────────────────────────────
+    # pipeline settings dialog + menu
+    # ──────────────────────────────────────────────────────────────
+
+    def _open_pipeline_settings_dialog(self) -> None:
+        """Open the pipeline-settings dialog (drag-drop hops, templates,
+        provider/role enable) for the **active project**. On Save & Apply the
+        page persists templates + per-role enable + per-role CLI to that
+        project's files under `~/.takkub/projects/<project>/` via the bridge
+        (so tabs don't collide), and stashes the desired provider on/off. We
+        then route any *changed* provider through `orchestrator.toggle_provider`
+        — which stays GLOBAL (`disabled-providers.json`) — so it repaints the
+        status-bar chip AND broadcasts the `[system]` notice to live Lead panes,
+        identical to a chip click. Cancel / window-close discards (Rejected).
+        """
+        from .pipeline_dialog import PipelineSettingsDialog
+        from .provider_state import is_disabled
+
+        try:
+            from .config import active_project as _active_project
+
+            _proj, _ = _active_project()
+        except Exception:
+            _proj = None
+
+        dlg = PipelineSettingsDialog(self, project=_proj)
+        if dlg.exec() != dlg.DialogCode.Accepted:
+            return
+        # Apply only providers whose target state differs from disk — toggle_provider
+        # always broadcasts, so a no-op call would spam Lead panes spuriously.
+        for provider, target_disabled in dlg.bridge.pending_provider_disabled.items():
+            if target_disabled != is_disabled(provider):
+                self.orch.toggle_provider(provider, target_disabled)
+        self._status.showMessage(
+            "Pipeline settings saved — applies to the next pane you spawn.",
+            6_000,
+        )
+
+    def _show_pipelines_menu(self) -> None:
+        """Show the ⚙ Pipelines drop-down menu.
+
+        Built fresh on every click so user-profile state is always current.
+        Menu sections:
+          1. Pipeline Settings…
+          ─────────────────
+          2. User profiles (checkable, one per profile)
+          ─────────────────
+          3. Add / Remove user… (now includes Claude Auth tab)
+        """
+        from PyQt6.QtGui import QAction
+        from PyQt6.QtWidgets import QMenu
+
+        from . import user_profile
+
+        try:
+            from .config import active_project as _active_project
+
+            _proj, _ = _active_project()
+        except Exception:
+            _proj = None
+
+        menu = QMenu(self)
+
+        act_pipeline = QAction("Pipeline Settings…", self)
+        act_pipeline.triggered.connect(self._open_pipeline_settings_dialog)
+        menu.addAction(act_pipeline)
+
+        menu.addSeparator()
+
+        current_profile = user_profile.profile_for(_proj or "")
+        for profile in user_profile.list_profiles():
+            name = profile["name"]
+            act = QAction(name, self)
+            act.setCheckable(True)
+            act.setChecked(name == current_profile)
+            act.triggered.connect(lambda _checked, n=name: self._on_user_changed(n))
+            menu.addAction(act)
+
+        menu.addSeparator()
+
+        act_manage = QAction("Add / Remove user…", self)
+        act_manage.triggered.connect(self._on_add_user_clicked)
+        menu.addAction(act_manage)
+
+        menu.exec(self._btn_pipelines.mapToGlobal(self._btn_pipelines.rect().bottomLeft()))
+
+    # ──────────────────────────────────────────────────────────────
+    # session control
+    # ──────────────────────────────────────────────────────────────
+
+    def _on_resume_clicked(self) -> None:
+        """Send /resume to the active tab's Lead pane so claude opens its
+        session picker. No-op if Lead isn't ready yet — slash injection
+        helper drops silently in that case (max wait 45s)."""
+        active_project_name = None
+        try:
+            from .config import active_project as _active_project
+
+            name, _ = _active_project()
+            active_project_name = name
+        except Exception:
+            pass
+        self.orch.inject_slash_command_when_ready("lead", "/resume", project=active_project_name)
+
+    def _on_end_session_clicked(self) -> None:
+        """🏁 End-Session button: prompt for note → close teammates → write summary.
+
+        The note becomes the body of `runtime/sessions/<date>/<project>/lead-*.md`
+        and is auto-injected into the next Lead spawn for this project via
+        `_recent_session_brief`. So a good note here is what makes the next
+        session "remember" today's work.
+        """
+        try:
+            from .config import active_project as _active_project
+
+            project_name, _ = _active_project()
+        except Exception:
+            project_name = None
+        scope = project_name or "active project"
+
+        note, ok = QInputDialog.getMultiLineText(
+            self,
+            "End Session",
+            (
+                f"Session-end note for **{scope}**.\n\n"
+                "เขียนสั้นๆ ว่า:\n"
+                "• เสร็จอะไรไปวันนี้\n"
+                "• ค้างอะไรไว้ที่ session หน้าควรหยิบต่อ\n\n"
+                "(note นี้จะ auto-inject เข้า Lead's prompt ใน session หน้า)"
+            ),
+            "session ended",
+        )
+        if not ok:
+            return
+        note = note.strip() or "session ended"
+
+        _closed_ok, closed_msg = self.orch.close_all_teammates(project=project_name)
+        end_ok, end_msg = self.orch.end_session(project=project_name, note=note)
+        _log_event(
+            "ui_end_session",
+            project=project_name or "",
+            closed=closed_msg,
+            written=end_msg,
+            ok=end_ok,
+        )
+        if end_ok:
+            self._status.showMessage(f"✅ {closed_msg} · {end_msg}", 10_000)
+            self._show_end_session_summary(project_name, end_msg, closed_msg)
+        else:
+            QMessageBox.warning(self, "End Session failed", end_msg)
+
+    def _show_end_session_summary(
+        self, project_name: str | None, end_msg: str, closed_msg: str
+    ) -> None:
+        """Render the just-written `lead-*.md` in a modal so user sees what got logged.
+
+        Status-bar feedback alone is too quiet — vanishes after 10s and the
+        user can miss it entirely. This dialog presents the markdown body
+        of the session summary plus the close-teammates result line, so
+        "did anything happen?" has an unambiguous answer.
+        """
+        import pathlib
+        import re
+
+        from PyQt6.QtWidgets import (
+            QDialog,
+            QDialogButtonBox,
+            QTextBrowser,
+            QVBoxLayout,
+        )
+
+        m = re.search(r"written:\s*(.+)$", end_msg.strip())
+        if not m:
+            return
+        rel_path = m.group(1).strip()
+        abs_path = pathlib.Path(rel_path)
+        if not abs_path.is_absolute():
+            abs_path = REPO_ROOT / rel_path
+        if not abs_path.is_file():
+            return
+        try:
+            body = abs_path.read_text(encoding="utf-8")
+        except OSError:
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"🏁 Session ended — {project_name or 'project'}")
+        dlg.resize(640, 520)
+        layout = QVBoxLayout(dlg)
+
+        browser = QTextBrowser(dlg)
+        browser.setMarkdown(body)
+        browser.setOpenExternalLinks(False)
+        layout.addWidget(browser)
+
+        footer = QLabel(f"📍 {closed_msg}\n📄 {rel_path}", dlg)
+        footer.setStyleSheet("color: #6b7280; font-size: 11px; padding: 4px 0;")
+        footer.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(footer)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok, dlg)
+        buttons.accepted.connect(dlg.accept)
+        layout.addWidget(buttons)
+
+        dlg.exec()
+
+    # ──────────────────────────────────────────────────────────────
+    # broadcast actions (UI review, shell, bug check, doctor)
+    # ──────────────────────────────────────────────────────────────
+
+    def _on_ui_review_clicked(self) -> None:
+        """🎨 UI Review button: confirm → spawn critic + gemini design-review pair.
+
+        Resolves the project namespace, asks one Cancel/Ok dialog, then calls
+        `orch.broadcast_design_review` which assigns parallel tasks. Status
+        bar reflects the outcome with the list of spawned roles.
+        """
+        try:
+            from .config import active_project as _active_project
+
+            project_name, _ = _active_project()
+        except Exception:
+            project_name = None
+        scope = project_name or "active project"
+
+        confirm = QMessageBox.question(
+            self,
+            "Spawn design-review pipeline",
+            (
+                f"Spawn the design-review duo for **{scope}**?\n\n"
+                "• critic reads runtime/exports/<today>/<project>/screenshots/\n"
+                "  and writes a proposal to docs/design-review/<date>-<view>.md\n"
+                "• gemini cross-checks visual heuristics on the same shots\n\n"
+                "Fire this after QA captures screenshots."
+            ),
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Ok,
+        )
+        if confirm != QMessageBox.StandardButton.Ok:
+            return
+
+        count, roles = self.orch.broadcast_design_review(project=project_name)
+        _log_event("ui_design_review", project=project_name or "", count=count, roles=roles)
+        if count == 0:
+            self._status.showMessage(
+                "🎨 Could not spawn design-review panes (check providers / project paths)",
+                7_000,
+            )
+        else:
+            self._status.showMessage(f"🎨 Design review pipeline armed: {', '.join(roles)}", 10_000)
+
+    def _on_open_shell_clicked(self) -> None:
+        """💻 Shell button: spawn (or focus) a plain PowerShell pane.
+
+        Routes through `orch.spawn('shell', ...)` which hits the non-claude
+        shell branch added in orchestrator.spawn(). Re-clicking when the
+        pane is already alive surfaces it instead of double-spawning —
+        orchestrator returns "already running" and we just nudge focus.
+        """
+        try:
+            from .config import active_project as _active_project
+
+            project_name, _ = _active_project()
+        except Exception:
+            project_name = None
+
+        ok, msg = self.orch.spawn("shell", project=project_name)
+        _log_event("ui_open_shell", project=project_name or "", ok=ok, msg=msg)
+        if not ok:
+            self._status.showMessage(f"💻 Shell: {msg}", 7_000)
+            return
+
+        # Focus the freshly-spawned (or already-running) pane so the
+        # user's next keystroke lands in the shell, not the Lead.
+        tab = self._tab_for_project(project_name) if project_name else self._current_tab()
+        if tab is not None:
+            pane = tab.teammate_panes.get("shell")
+            if pane is not None:
+                pane.setFocus()
+                try:
+                    pane._terminal.setFocus()
+                except Exception:
+                    pass
+        self._status.showMessage(f"💻 {msg}", 5_000)
+
+    def _on_bug_check_clicked(self) -> None:
+        """🐛 Bug-Check button: confirm → broadcast introspection prompt to every pane.
+
+        Each pane's agent decides whether to file a `takkub issue new` or
+        send a 'no bugs' note back. No-op if no active panes exist.
+        """
+        try:
+            from .config import active_project as _active_project
+
+            project_name, _ = _active_project()
+        except Exception:
+            project_name = None
+        scope = project_name or "active project"
+
+        confirm = QMessageBox.question(
+            self,
+            "Broadcast bug check",
+            (
+                f"Send a bug-introspection prompt to every active pane in **{scope}**?\n\n"
+                "Each agent will either file a cockpit issue with\n"
+                "`takkub issue new` or report 'no bugs' back to Lead."
+            ),
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Ok,
+        )
+        if confirm != QMessageBox.StandardButton.Ok:
+            return
+
+        count, roles = self.orch.broadcast_bug_check(project=project_name)
+        _log_event("ui_bug_check", project=project_name or "", count=count, roles=roles)
+        if count == 0:
+            self._status.showMessage("🐛 No active panes to bug-check", 7_000)
+        else:
+            self._status.showMessage(
+                f"🐛 Bug-check sent to {count} pane(s): {', '.join(roles)}", 10_000
+            )
+
+    def _on_doctor_clicked(self) -> None:
+        """🩺 Doctor button: run environment checks and display a report dialog.
+
+        Shows doctor.format_report() in a scrollable monospace view.
+        A Fix button appears when at least one finding has auto_fix set;
+        clicking it runs doctor.run_auto_fixes() and refreshes the display.
+        """
+        from . import doctor as _doctor
+
+        self._status.showMessage("🩺 Running diagnostics…", 2_000)
+        findings = _doctor.run_all_checks()
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("🩺 Cockpit Doctor")
+        dlg.setMinimumSize(560, 480)
+        dlg.resize(640, 540)
+
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        report_view = QPlainTextEdit(dlg)
+        report_view.setReadOnly(True)
+        report_view.setFont(dlg.font())
+        report_view.setStyleSheet(
+            "QPlainTextEdit { background:#18181b; color:#d4d4d8; "
+            "border:1px solid #3f3f46; border-radius:4px; padding:6px; "
+            "font-family: 'Consolas', 'Courier New', monospace; font-size:12px; }"
+        )
+        report_view.setPlainText(_doctor.format_report(findings))
+        layout.addWidget(report_view, 1)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+
+        has_fixes = any(f.auto_fix is not None for f in findings)
+
+        btn_fix = QPushButton("Fix", dlg)
+        btn_fix.setEnabled(has_fixes)
+        btn_fix.setToolTip(
+            "Run auto-fixes for all fixable findings."
+            if has_fixes
+            else "No auto-fixable findings in this report."
+        )
+        btn_fix.setStyleSheet(
+            "QPushButton { background:#16a34a; color:#fff; border:none; "
+            "border-radius:5px; padding:4px 14px; font-weight:600; }"
+            "QPushButton:hover { background:#15803d; }"
+            "QPushButton:disabled { background:#3f3f46; color:#71717a; }"
+        )
+
+        def _on_fix() -> None:
+            _doctor.run_auto_fixes(findings)
+            refreshed = _doctor.run_all_checks()
+            report_view.setPlainText(_doctor.format_report(refreshed))
+            btn_fix.setEnabled(any(f.auto_fix is not None for f in refreshed))
+            self._status.showMessage("🩺 Auto-fixes applied", 4_000)
+
+        btn_fix.clicked.connect(_on_fix)
+
+        btn_close = QPushButton("Close", dlg)
+        btn_close.setStyleSheet(
+            "QPushButton { background:transparent; color:#a1a1aa; "
+            "border:1px solid #3f3f46; border-radius:5px; padding:4px 14px; }"
+            "QPushButton:hover { background:#27272a; color:#d4d4d8; }"
+        )
+        btn_close.clicked.connect(dlg.accept)
+
+        btn_row.addStretch()
+        btn_row.addWidget(btn_fix)
+        btn_row.addWidget(btn_close)
+        layout.addLayout(btn_row)
+
+        _log_event("ui_doctor_opened")
+        dlg.exec()
+
+    # ──────────────────────────────────────────────────────────────
+    # provider / plan chip handlers
+    # ──────────────────────────────────────────────────────────────
+
+    def _on_provider_chip_clicked(self, provider: str) -> None:
+        """Toggle a provider on the orchestrator. Orchestrator persists state,
+        broadcasts to all Lead panes, and emits providerStateChanged → we
+        update the chip style via _on_provider_state_changed."""
+        from .provider_state import is_disabled
+
+        currently_disabled = is_disabled(provider)
+        # Flip
+        ok, msg = self.orch.toggle_provider(provider, not currently_disabled)
+        if not ok:
+            self._status.showMessage(f"Toggle failed: {msg}", 4000)
+
+    def _on_provider_state_changed(self, provider: str, disabled: bool) -> None:
+        """Repaint the affected chip when provider state flips. Triggered by
+        Orchestrator.providerStateChanged so both user click and future
+        config-file changes from other sources land here."""
+        state = self._provider_chip_state(provider)
+        if provider == "codex" and hasattr(self, "_chip_codex"):
+            self._chip_codex.setStyleSheet(
+                self._provider_chip_style(
+                    "codex",
+                    disabled=state == "disabled",
+                    not_installed=state == "not_installed",
+                )
+            )
+            self._chip_codex.setToolTip(self._provider_chip_tooltip("codex", state))
+        elif provider == "gemini" and hasattr(self, "_chip_gemini"):
+            self._chip_gemini.setStyleSheet(
+                self._provider_chip_style(
+                    "gemini",
+                    disabled=state == "disabled",
+                    not_installed=state == "not_installed",
+                )
+            )
+            self._chip_gemini.setToolTip(self._provider_chip_tooltip("gemini", state))
+
+    def _on_plan_chip_clicked(self) -> None:
+        """Flip the account plan on the orchestrator. It persists state,
+        broadcasts to live Lead panes, and emits planTierChanged → we repaint
+        the chip via _on_plan_tier_changed."""
+        from .plan_tier import MAX, PRO, is_pro
+
+        target = MAX if is_pro() else PRO
+        ok, msg = self.orch.set_plan_tier(target)
+        if not ok:
+            self._status.showMessage(f"Plan switch failed: {msg}", 4000)
+
+    def _on_plan_tier_changed(self, tier: str) -> None:
+        """Repaint the plan chip when the tier flips. Triggered by
+        Orchestrator.planTierChanged so both user click and any future
+        programmatic change land here."""
+        if not hasattr(self, "_chip_plan"):
+            return
+        is_pro = tier == "pro"
+        self._chip_plan.setText("Pro" if is_pro else "Max")
+        self._chip_plan.setStyleSheet(self._plan_chip_style(is_pro))
+        self._chip_plan.setToolTip(self._plan_chip_tooltip(is_pro))
+
+    # ──────────────────────────────────────────────────────────────
+    # per-project user profile selector (accessed via ⚙ Pipelines menu)
+    # ──────────────────────────────────────────────────────────────
+
+    def _on_user_changed(self, name: str) -> None:
+        if not name:
+            return
+        project = active_project()[0] or ""
+        if not project:
+            return
+        from . import user_profile
+
+        old_name = user_profile.profile_for(project)
+        old_cd = user_profile.config_dir_for(project)
+        try:
+            user_profile.set_profile(project, name)
+        except ValueError:
+            return
+        new_cd = user_profile.config_dir_for(project)
+        changed = old_cd.resolve() != new_cd.resolve()
+
+        # When the account actually changes, the running Lead + teammate panes
+        # still carry the old CLAUDE_CONFIG_DIR (injected once at spawn time),
+        # so the switch is invisible until they respawn. Confirm, then kill +
+        # respawn so the new profile's login takes effect immediately. Same
+        # restart path the active-project switch uses.
+        if changed:
+            from PyQt6.QtWidgets import QMessageBox
+
+            confirm = QMessageBox.question(
+                self,
+                "Switch Claude account",
+                f"Switch '{project}' to profile '{name}'?\n\n"
+                f"Lead + every teammate pane for this project will be "
+                f"restarted so the new login takes effect.",
+                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Ok,
+            )
+            if confirm != QMessageBox.StandardButton.Ok:
+                # Backed out — restore the previous selection so the persisted
+                # state still matches the (unchanged) running panes.
+                try:
+                    user_profile.set_profile(project, old_name)
+                except ValueError:
+                    pass
+                return
+
+        if self._limit_store is not None:
+            if changed:
+                self._limit_store.unregister(old_cd)
+                self._limit_store.register(new_cd)
+            self._refresh_limit_label(self._limit_store.get(new_cd))
+
+        if changed:
+            self._status.showMessage(f"switching {project} → {name} · restarting panes…", 6_000)
+            self._restart_lead_for_active_project()
+
+    def _on_add_user_clicked(self) -> None:
+        from pathlib import Path
+
+        from PyQt6.QtWidgets import (
+            QComboBox,
+            QDialog,
+            QDialogButtonBox,
+            QFileDialog,
+            QFormLayout,
+            QFrame,
+            QHBoxLayout,
+            QLabel,
+            QLineEdit,
+            QListWidget,
+            QMessageBox,
+            QPushButton,
+            QTabWidget,
+            QVBoxLayout,
+            QWidget,
+        )
+
+        from . import user_profile
+        from .claude_auth_config import ClaudeAuthConfig, load_claude_auth, save_claude_auth
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("User Profiles & Claude Auth")
+        dlg.resize(560, 440)
+        main_lay = QVBoxLayout(dlg)
+
+        tabs = QTabWidget(dlg)
+        main_lay.addWidget(tabs)
+
+        # ──────────────────────────────────────────────────────────────
+        # Tab 1: Profiles (existing Add/Remove user content)
+        # ──────────────────────────────────────────────────────────────
+        profile_tab = QWidget()
+        lay = QVBoxLayout(profile_tab)
+
+        lay.addWidget(QLabel("Existing profiles ('default' cannot be removed):"))
+        profile_list = QListWidget(profile_tab)
+        profiles: list[dict] = user_profile.list_profiles()
+        for p in profiles:
+            profile_list.addItem(f"{p['name']}  →  {p['config_dir']}")
+        lay.addWidget(profile_list)
+
+        btn_remove = QPushButton("Remove selected", profile_tab)
+        btn_remove.setEnabled(False)
+        lay.addWidget(btn_remove)
+
+        def _on_sel(row: int) -> None:
+            btn_remove.setEnabled(row > 0)  # row 0 = "default", not removable
+
+        profile_list.currentRowChanged.connect(_on_sel)
+
+        def _do_remove() -> None:
+            row = profile_list.currentRow()
+            if row <= 0 or row >= len(profiles):
+                return
+            try:
+                user_profile.remove_profile(profiles[row]["name"])
+            except ValueError as exc:
+                QMessageBox.warning(dlg, "Cannot remove", str(exc))
+                return
+            profile_list.takeItem(row)
+            profiles.pop(row)
+
+        btn_remove.clicked.connect(_do_remove)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("color: #3f3f46;")
+        lay.addWidget(sep)
+        lay.addWidget(QLabel("Add new profile:"))
+        form = QFormLayout()
+        name_edit = QLineEdit(profile_tab)
+        name_edit.setPlaceholderText("e.g. work, personal")
+        dir_edit = QLineEdit(profile_tab)
+        dir_edit.setPlaceholderText("path to Claude config dir, e.g. ~/.claude-work")
+        dir_row_w = QWidget(profile_tab)
+        dir_row_l = QHBoxLayout(dir_row_w)
+        dir_row_l.setContentsMargins(0, 0, 0, 0)
+        dir_row_l.addWidget(dir_edit)
+        btn_browse = QPushButton("Browse…", profile_tab)
+        btn_browse.setFixedWidth(72)
+        dir_row_l.addWidget(btn_browse)
+        form.addRow("Name:", name_edit)
+        form.addRow("Config dir:", dir_row_w)
+        lay.addLayout(form)
+
+        def _do_browse() -> None:
+            d = QFileDialog.getExistingDirectory(dlg, "Select Claude config directory")
+            if d:
+                dir_edit.setText(d)
+
+        btn_browse.clicked.connect(_do_browse)
+
+        btn_add = QPushButton("Add Profile", profile_tab)
+        lay.addWidget(btn_add)
+
+        def _do_add() -> None:
+            n = name_edit.text().strip()
+            d = dir_edit.text().strip()
+            if not n or not d:
+                return
+            try:
+                user_profile.add_profile(n, d)
+            except ValueError as exc:
+                QMessageBox.warning(dlg, "Invalid profile", str(exc))
+                return
+            new_p = {"name": n, "config_dir": d}
+            profiles.append(new_p)
+            profile_list.addItem(f"{n}  →  {d}")
+            name_edit.clear()
+            dir_edit.clear()
+
+        btn_add.clicked.connect(_do_add)
+
+        tabs.addTab(profile_tab, "Profiles")
+
+        # ──────────────────────────────────────────────────────────────
+        # Tab 2: Claude Auth (embedded from ClaudeAuthDialog content)
+        # ──────────────────────────────────────────────────────────────
+        auth_tab = QWidget()
+        auth_lay = QVBoxLayout(auth_tab)
+        auth_lay.setSpacing(10)
+
+        intro = QLabel(
+            "Point a profile's Claude Code panes at a different backend — DeepSeek,\n"
+            "OpenRouter, a local model — instead of Anthropic. These settings are\n"
+            "saved *per profile*: leave them blank and that profile keeps its normal\n"
+            "Claude login; set a base URL and only that profile's panes use the API.\n"
+            "Applies to the next pane you spawn (restart open panes to pick it up)."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color: #d4d4d8;")
+        auth_lay.addWidget(intro)
+
+        # Which profile are we editing? Each profile stores its own auth file in
+        # its config_dir, so switching here loads/saves that profile in isolation.
+        auth_profiles = user_profile.list_profiles()  # [{name, config_dir}, ...]
+
+        def _auth_dir(profile_name: str):
+            """config_dir for *profile_name* (None → default ~/.claude)."""
+            for p in auth_profiles:
+                if p["name"] == profile_name:
+                    return Path(p["config_dir"])
+            return None
+
+        sel_row = QHBoxLayout()
+        sel_row.setContentsMargins(0, 0, 0, 0)
+        sel_row.addWidget(QLabel("Settings for profile:"))
+        auth_profile_combo = QComboBox(auth_tab)
+        for p in auth_profiles:
+            auth_profile_combo.addItem(p["name"])
+        auth_profile_combo.setToolTip(
+            "Each profile has its own auth. Switching reloads that profile's saved\n"
+            "values from disk — Save before switching to keep unsaved edits."
+        )
+        sel_row.addWidget(auth_profile_combo, 1)
+        auth_lay.addLayout(sel_row)
+
+        auth_form = QFormLayout()
+        auth_form.setHorizontalSpacing(16)
+        auth_form.setVerticalSpacing(8)
+        auth_lay.addLayout(auth_form)
+
+        base_url_edit = QLineEdit()
+        base_url_edit.setPlaceholderText(
+            "blank = Anthropic  ·  e.g. https://api.deepseek.com/anthropic"
+        )
+        auth_form.addRow("Base URL:", base_url_edit)
+
+        api_key_edit = QLineEdit()
+        api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        api_key_edit.setPlaceholderText("your provider's API key  ·  blank = none")
+        auth_form.addRow("API key:", api_key_edit)
+
+        auth_token_edit = QLineEdit()
+        auth_token_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        auth_token_edit.setPlaceholderText(
+            "usually blank — the API key above is reused as the bearer token"
+        )
+        auth_form.addRow("Auth token:", auth_token_edit)
+
+        note = QLabel(
+            "Examples:\n"
+            "• DeepSeek — Base URL: https://api.deepseek.com/anthropic + API key: your DeepSeek key\n"
+            "• OpenRouter — Base URL: https://openrouter.ai/api + Auth token: your OpenRouter key\n"
+            "  (then add ANTHROPIC_DEFAULT_SONNET_MODEL below to choose the model)"
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #a1a1aa;")
+        auth_lay.addWidget(note)
+
+        env_label = QLabel(
+            "Extra environment variables — sent to every pane. Use for a provider key,\n"
+            "or to pick a model (e.g. ANTHROPIC_DEFAULT_SONNET_MODEL = qwen/qwen3-coder:free):"
+        )
+        env_label.setWordWrap(True)
+        env_label.setStyleSheet("color: #d4d4d8; padding-top: 4px;")
+        auth_lay.addWidget(env_label)
+
+        env_rows: list[tuple[QLineEdit, QLineEdit, QWidget]] = []
+        rows_box = QVBoxLayout()
+        rows_box.setSpacing(4)
+        auth_lay.addLayout(rows_box)
+
+        def _add_env_row(name: str = "", value: str = "") -> None:
+            row = QWidget(auth_tab)
+            h = QHBoxLayout(row)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(6)
+
+            name_edit = QLineEdit(name)
+            name_edit.setPlaceholderText("NAME — e.g. ANTHROPIC_DEFAULT_SONNET_MODEL")
+            value_edit = QLineEdit(value)
+            value_edit.setPlaceholderText("value — e.g. qwen/qwen3-coder:free")
+            remove_btn = QPushButton("✕", row)
+            remove_btn.setFixedWidth(28)
+            remove_btn.setToolTip("Remove this variable")
+
+            h.addWidget(name_edit, 2)
+            h.addWidget(value_edit, 3)
+            h.addWidget(remove_btn, 0)
+
+            entry = (name_edit, value_edit, row)
+            env_rows.append(entry)
+            rows_box.addWidget(row)
+
+            def _remove() -> None:
+                if entry in env_rows:
+                    env_rows.remove(entry)
+                rows_box.removeWidget(row)
+                row.deleteLater()
+
+            remove_btn.clicked.connect(_remove)
+
+        add_env_btn = QPushButton("+ Add variable", auth_tab)
+        add_env_btn.clicked.connect(lambda: _add_env_row())
+        auth_lay.addWidget(add_env_btn)
+
+        def _clear_env_rows() -> None:
+            for _n, _v, row in list(env_rows):
+                rows_box.removeWidget(row)
+                row.deleteLater()
+            env_rows.clear()
+
+        def _load_auth_profile(profile_name: str) -> None:
+            """Populate the auth fields from *profile_name*'s saved config."""
+            loaded = load_claude_auth(_auth_dir(profile_name))
+            base_url_edit.setText(loaded.base_url)
+            api_key_edit.setText(loaded.api_key)
+            auth_token_edit.setText(loaded.auth_token)
+            _clear_env_rows()
+            for name, value in loaded.extra_env.items():
+                _add_env_row(name, value)
+            if not env_rows:
+                _add_env_row()
+
+        auth_profile_combo.currentTextChanged.connect(_load_auth_profile)
+        _load_auth_profile(auth_profile_combo.currentText())  # seed initial view
+
+        tabs.addTab(auth_tab, "Claude Auth")
+
+        # ──────────────────────────────────────────────────────────────
+        # Bottom buttons
+        # ──────────────────────────────────────────────────────────────
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Close, dlg
+        )
+
+        def _on_save() -> None:
+            # Save the Claude Auth tab to the *currently selected* profile only.
+            profile_name = auth_profile_combo.currentText()
+            env_dict: dict[str, str] = {}
+            for name_ed, value_ed, _row in env_rows:
+                name = name_ed.text().strip()
+                if name:
+                    env_dict[name] = value_ed.text()
+
+            try:
+                save_claude_auth(
+                    ClaudeAuthConfig(
+                        base_url=base_url_edit.text(),
+                        api_key=api_key_edit.text(),
+                        auth_token=auth_token_edit.text(),
+                        extra_env=env_dict,
+                    ),
+                    _auth_dir(profile_name),
+                )
+                self._status.showMessage(
+                    f"Claude auth saved for profile '{profile_name}' — respawn its "
+                    "panes to use the new settings.",
+                    7_000,
+                )
+            except OSError as e:
+                QMessageBox.critical(
+                    dlg, "Save failed", f"Couldn't write takkub-claude-auth.json:\n{e}"
+                )
+                return
+
+        btns.button(QDialogButtonBox.StandardButton.Save).clicked.connect(_on_save)
+        btns.button(QDialogButtonBox.StandardButton.Close).clicked.connect(dlg.accept)
+        main_lay.addWidget(btns)
+
+        dlg.exec()

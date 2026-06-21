@@ -33,6 +33,7 @@ import pytest
 _RUNTIME_DIR_MODULES = (
     "agent_takkub.config",
     "agent_takkub.orchestrator",
+    "agent_takkub.orchestrator_text",  # pure-helper leaf, copies RUNTIME_DIR at import time
     "agent_takkub.agent_pane",
     "agent_takkub.lead_bash_audit",
     "agent_takkub.shared_dev_tools",
@@ -40,6 +41,7 @@ _RUNTIME_DIR_MODULES = (
 _EVENTS_LOG_MODULES = (
     "agent_takkub.config",
     "agent_takkub.orchestrator",
+    "agent_takkub.orchestrator_text",  # _log_event reads EVENTS_LOG from this module
 )
 # Patched when present but never force-imported (heavy GUI deps).
 _OPTIONAL_MODULES = ("agent_takkub.main_window",)

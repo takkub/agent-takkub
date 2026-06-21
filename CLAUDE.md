@@ -13,6 +13,10 @@
 
 Lead spawn เฉพาะ role ที่จำเป็นต่องานนั้น — ไม่ต้องทุกครั้ง ใช้ `takkub` CLI สั่ง orchestrator (Python desktop app)
 
+> **ก่อน navigate/แก้ `src/agent_takkub/` (โดยเฉพาะ god-file `orchestrator.py` 5.8k LOC / `main_window.py` 4k LOC):**
+> อ่าน `docs/architecture/godfile-map.md` (function อยู่ cluster ไหน + hidden string/socket edges ที่ import มองไม่เห็น)
+> + `docs/architecture/depgraph.json` (import map + fan-in/out) — **อย่า grep มั่วแล้วเดา**.
+
 ### เมื่อไหร่ควรเรียก codex
 - **Refactor pattern ชัด** (`extract X to Y`, `migrate A → B`) — คู่ขนาน claude เทียบ diff
 - **Code review รอบสอง** — หา blind spot

@@ -22,6 +22,8 @@ dev = [
     "pytest>=8",
     "ruff>=0.7",
     "pre-commit>=3.7",
+    "grimp>=3.14",        # dep-graph generation for tools/gen_import_graph.py
+    "import-linter>=2.9", # architecture contracts (lint-imports)
 ]
 
 [build-system]
@@ -55,6 +57,7 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["B011"]  # asserts in tests are intentional
+"src/agent_takkub/orchestrator.py" = ["F401"]  # re-export façade — moved symbols re-exported for tests/app/main_window
 
 [tool.ruff.format]
 quote-style = "double"
@@ -67,3 +70,203 @@ indent-style = "space"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 addopts = "-q"
+
+# ──────────────────────────────────────────────────────────────────
+# import-linter: architecture guardrails
+# ──────────────────────────────────────────────────────────────────
+[tool.importlinter]
+root_packages = ["agent_takkub"]
+
+[[tool.importlinter.contracts]]
+name = "engine-ui-separation"
+type = "forbidden"
+source_modules = ["agent_takkub.orchestrator"]
+forbidden_modules = [
+    "agent_takkub.main_window",
+    "agent_takkub.app",
+]
+
+[[tool.importlinter.contracts]]
+name = "cli-ipc-boundary"
+type = "forbidden"
+# Intent: cli.py drives the running cockpit over the TCP socket (cli_server), it must NOT
+# pull the 5.8k-LOC orchestrator engine into the CLI process. _SAFE_PLUGINS was moved to
+# config.py (leaf hub) so doctor no longer imports orchestrator, removing the indirect edge.
+source_modules = ["agent_takkub.cli"]
+forbidden_modules = ["agent_takkub.orchestrator"]
+
+[[tool.importlinter.contracts]]
+name = "leaf-modules-pure"
+type = "forbidden"
+# config/roles/_win_console are pure-leaf (fan-in 18/top-used). List all architectural
+# siblings so any future sibling import is caught immediately.
+source_modules = [
+    "agent_takkub.config",
+    "agent_takkub._win_console",
+    "agent_takkub.roles",
+]
+forbidden_modules = [
+    "agent_takkub.orchestrator",
+    "agent_takkub.main_window",
+    "agent_takkub.app",
+    "agent_takkub.agent_pane",
+    "agent_takkub.cli_server",
+    "agent_takkub.cli",
+    "agent_takkub.pty_session",
+    "agent_takkub.lead_context",
+    "agent_takkub.pane_env",
+    "agent_takkub.vault_mirror",
+    "agent_takkub.routing_planner",
+    "agent_takkub.project_tab",
+    "agent_takkub.terminal_widget",
+    "agent_takkub.spawn_gate",
+    "agent_takkub.provider_config",
+    "agent_takkub.claude_auth_config",
+    "agent_takkub.claude_auth_dialog",
+    "agent_takkub.gemini_helper",
+    "agent_takkub.codex_helper",
+    "agent_takkub.pipeline_config",
+    "agent_takkub.pipeline_dialog",
+    "agent_takkub.lead_bash_audit",
+    "agent_takkub.vault_graph",
+    "agent_takkub.docs_verify",
+    "agent_takkub.doctor",
+    "agent_takkub.services",
+    "agent_takkub.issues",
+    "agent_takkub.token_meter",
+    "agent_takkub.limit_status",
+    "agent_takkub.chatlog_scanner",
+    "agent_takkub.logs_panel",
+    "agent_takkub.project_rules",
+    "agent_takkub.role_memory",
+    "agent_takkub.shared_dev_tools",
+    "agent_takkub.user_profile",
+    "agent_takkub.skill_audit",
+    "agent_takkub.verify",
+    "agent_takkub.update_helper",
+    "agent_takkub.update_worker",
+    "agent_takkub.rtk_helper",
+    "agent_takkub.plan_tier",
+    "agent_takkub.design_review_html",
+    "agent_takkub.release",
+    "agent_takkub.claude_update",
+    "agent_takkub.codex_agents_md",
+    "agent_takkub.provider_state",
+    "agent_takkub.claude_auth_config",
+]
+
+[[tool.importlinter.contracts]]
+name = "pipeline-executor-layer"
+type = "forbidden"
+# pipeline_executor is an engine-layer module (mixed into Orchestrator). It must
+# NOT pull in UI or CLI modules — same constraint as orchestrator itself.
+source_modules = ["agent_takkub.pipeline_executor"]
+forbidden_modules = [
+    "agent_takkub.main_window",
+    "agent_takkub.app",
+    "agent_takkub.cli",
+]
+
+[[tool.importlinter.contracts]]
+name = "orchestrator-text-layer"
+type = "forbidden"
+# orchestrator_text is a pure-leaf helper (no Qt, no self). It must not import
+# UI/CLI modules or orchestrator itself (would create a circular import).
+source_modules = ["agent_takkub.orchestrator_text"]
+forbidden_modules = [
+    "agent_takkub.main_window",
+    "agent_takkub.app",
+    "agent_takkub.cli",
+    "agent_takkub.orchestrator",
+]
+
+[[tool.importlinter.contracts]]
+name = "lead-inbox-layer"
+type = "forbidden"
+# lead_inbox is an engine-layer mixin — must not import orchestrator (cycle) or UI/CLI.
+source_modules = ["agent_takkub.lead_inbox"]
+forbidden_modules = [
+    "agent_takkub.orchestrator",
+    "agent_takkub.main_window",
+    "agent_takkub.app",
+    "agent_takkub.cli",
+]
+
+[[tool.importlinter.contracts]]
+name = "broadcast-actions-layer"
+type = "forbidden"
+# broadcast_actions is an engine-layer mixin — no UI or CLI coupling allowed.
+source_modules = ["agent_takkub.broadcast_actions"]
+forbidden_modules = [
+    "agent_takkub.main_window",
+    "agent_takkub.app",
+    "agent_takkub.cli",
+]
+
+[[tool.importlinter.contracts]]
+name = "update-panel-layer"
+type = "forbidden"
+# update_panel is a UI-layer mixin (mixed into MainWindow). It must not pull in
+# app or cli — same constraint as main_window itself.
+source_modules = ["agent_takkub.update_panel"]
+forbidden_modules = [
+    "agent_takkub.app",
+    "agent_takkub.cli",
+]
+
+[[tool.importlinter.contracts]]
+name = "project-wizard-layer"
+type = "forbidden"
+# project_wizard is a UI-layer mixin (mixed into MainWindow). It must not pull
+# in app or cli — same constraint as main_window itself.
+source_modules = ["agent_takkub.project_wizard"]
+forbidden_modules = [
+    "agent_takkub.app",
+    "agent_takkub.cli",
+]
+
+[[tool.importlinter.contracts]]
+name = "user-actions-layer"
+type = "forbidden"
+# user_actions is a UI-layer mixin (mixed into MainWindow). It must not pull
+# in app or cli — same constraint as main_window itself.
+source_modules = ["agent_takkub.user_actions"]
+forbidden_modules = [
+    "agent_takkub.app",
+    "agent_takkub.cli",
+]
+
+[[tool.importlinter.contracts]]
+name = "limit-panel-layer"
+type = "forbidden"
+# limit_panel is a UI-layer mixin (mixed into MainWindow). It must not pull
+# in app or cli — same constraint as main_window itself.
+source_modules = ["agent_takkub.limit_panel"]
+forbidden_modules = [
+    "agent_takkub.app",
+    "agent_takkub.cli",
+]
+
+[[tool.importlinter.contracts]]
+name = "spawn-engine-layer"
+type = "forbidden"
+# spawn_engine is a pure-logic mixin. It must never import from the UI layer
+# or the orchestrator itself (which would create a cycle).
+source_modules = ["agent_takkub.spawn_engine"]
+forbidden_modules = [
+    "agent_takkub.orchestrator",
+    "agent_takkub.main_window",
+    "agent_takkub.app",
+    "agent_takkub.cli",
+]
+
+[[tool.importlinter.contracts]]
+name = "status-header-layer"
+type = "forbidden"
+# status_header is a UI-layer mixin (mixed into MainWindow). It must not pull
+# in app or cli — same constraint as main_window itself.
+source_modules = ["agent_takkub.status_header"]
+forbidden_modules = [
+    "agent_takkub.app",
+    "agent_takkub.cli",
+]

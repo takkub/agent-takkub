@@ -16,6 +16,7 @@ from PyQt6.QtCore import QCoreApplication
 from PyQt6.QtWidgets import QMessageBox as _RealQMessageBox
 
 import agent_takkub.main_window as mw_mod
+import agent_takkub.update_panel as up_mod
 
 # Real enum values so comparisons inside _on_restart_cockpit_clicked work.
 _OK = _RealQMessageBox.StandardButton.Ok
@@ -51,12 +52,12 @@ def _make_window_stub(monkeypatch: pytest.MonkeyPatch) -> mw_mod.MainWindow:
 
 
 def _mock_msgbox(monkeypatch: pytest.MonkeyPatch, answer: _RealQMessageBox.StandardButton):
-    """Replace QMessageBox in main_window with a mock whose .question() returns `answer`."""
+    """Replace QMessageBox in update_panel with a mock whose .question() returns `answer`."""
     m = MagicMock()
     m.question.return_value = answer
     m.StandardButton.Ok = _OK
     m.StandardButton.Cancel = _CANCEL
-    monkeypatch.setattr(mw_mod, "QMessageBox", m)
+    monkeypatch.setattr(up_mod, "QMessageBox", m)
     return m
 
 
@@ -74,7 +75,7 @@ class TestRestartEmitsAuditEvent:
 
         logged: list[dict] = []
         monkeypatch.setattr(
-            mw_mod, "_log_event", lambda event, **kw: logged.append({"event": event, **kw})
+            up_mod, "_log_event", lambda event, **kw: logged.append({"event": event, **kw})
         )
         _mock_msgbox(monkeypatch, _OK)
 
@@ -94,7 +95,7 @@ class TestRestartEmitsAuditEvent:
 
         logged: list[dict] = []
         monkeypatch.setattr(
-            mw_mod, "_log_event", lambda event, **kw: logged.append({"event": event, **kw})
+            up_mod, "_log_event", lambda event, **kw: logged.append({"event": event, **kw})
         )
         _mock_msgbox(monkeypatch, _OK)
 
@@ -122,7 +123,7 @@ class TestRestartDelegatesToRestartCockpit:
         win.orch.close_all_teammates = MagicMock()
         win.orch.close = MagicMock(return_value=(True, "ok"))
 
-        monkeypatch.setattr(mw_mod, "_log_event", lambda *a, **kw: None)
+        monkeypatch.setattr(up_mod, "_log_event", lambda *a, **kw: None)
         _mock_msgbox(monkeypatch, _OK)
 
         win._on_restart_cockpit_clicked()
@@ -140,7 +141,7 @@ class TestRestartDelegatesToRestartCockpit:
         win.orch.close_all_teammates = MagicMock()
         win.orch.close = MagicMock(return_value=(True, "ok"))
 
-        monkeypatch.setattr(mw_mod, "_log_event", lambda *a, **kw: None)
+        monkeypatch.setattr(up_mod, "_log_event", lambda *a, **kw: None)
         _mock_msgbox(monkeypatch, _OK)
         win._restart_cockpit = MagicMock()
 
@@ -167,7 +168,7 @@ class TestRestartConfirmCancels:
         win.orch.close = MagicMock(return_value=(True, "ok"))
 
         logged: list = []
-        monkeypatch.setattr(mw_mod, "_log_event", lambda *a, **kw: logged.append(a))
+        monkeypatch.setattr(up_mod, "_log_event", lambda *a, **kw: logged.append(a))
         _mock_msgbox(monkeypatch, _CANCEL)
 
         win._on_restart_cockpit_clicked()
@@ -183,7 +184,7 @@ class TestRestartConfirmCancels:
         win.orch.close_all_teammates = MagicMock()
         win.orch.close = MagicMock(return_value=(True, "ok"))
 
-        monkeypatch.setattr(mw_mod, "_log_event", lambda *a, **kw: None)
+        monkeypatch.setattr(up_mod, "_log_event", lambda *a, **kw: None)
         _mock_msgbox(monkeypatch, _CANCEL)
 
         # Bind real method (the stub's _restart_cockpit is already mocked)
@@ -211,12 +212,12 @@ class TestRestartNoActivePanes:
             shown.append(text)
             return _OK
 
-        monkeypatch.setattr(mw_mod, "_log_event", lambda *a, **kw: None)
+        monkeypatch.setattr(up_mod, "_log_event", lambda *a, **kw: None)
         m = MagicMock()
         m.question.side_effect = _capture
         m.StandardButton.Ok = _OK
         m.StandardButton.Cancel = _CANCEL
-        monkeypatch.setattr(mw_mod, "QMessageBox", m)
+        monkeypatch.setattr(up_mod, "QMessageBox", m)
 
         win._on_restart_cockpit_clicked()
 
@@ -235,12 +236,12 @@ class TestRestartNoActivePanes:
             shown.append(text)
             return _CANCEL  # cancel so we don't need _restart_cockpit
 
-        monkeypatch.setattr(mw_mod, "_log_event", lambda *a, **kw: None)
+        monkeypatch.setattr(up_mod, "_log_event", lambda *a, **kw: None)
         m = MagicMock()
         m.question.side_effect = _capture
         m.StandardButton.Ok = _OK
         m.StandardButton.Cancel = _CANCEL
-        monkeypatch.setattr(mw_mod, "QMessageBox", m)
+        monkeypatch.setattr(up_mod, "QMessageBox", m)
 
         mw_mod.MainWindow._on_restart_cockpit_clicked(win)
 
@@ -272,8 +273,8 @@ class TestRestartReleasesPortFile:
     ) -> None:
         port_file = tmp_path / "port"
         port_file.write_text("12345", encoding="utf-8")
-        monkeypatch.setattr(mw_mod, "PORT_FILE", port_file)
-        monkeypatch.setattr(mw_mod, "QCoreApplication", MagicMock())
+        monkeypatch.setattr(up_mod, "PORT_FILE", port_file)
+        monkeypatch.setattr(up_mod, "QCoreApplication", MagicMock())
 
         win = self._make_restart_stub(tmp_path)
 
@@ -314,8 +315,8 @@ class TestRestartReleasesPortFile:
             side_effect=lambda: call_order.append("write_resume_briefs")
         )
 
-        monkeypatch.setattr(mw_mod, "PORT_FILE", tmp_path / "port")
-        monkeypatch.setattr(mw_mod, "QCoreApplication", MagicMock())
+        monkeypatch.setattr(up_mod, "PORT_FILE", tmp_path / "port")
+        monkeypatch.setattr(up_mod, "QCoreApplication", MagicMock())
 
         def _fake_popen(cmd, **kw):
             call_order.append("popen")

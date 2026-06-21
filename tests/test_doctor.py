@@ -246,7 +246,7 @@ class TestCheckPlugins:
 
     def test_plugin_present_ok(self, tmp_path: Path) -> None:
         self._make_plugin(tmp_path, "superpowers-dev", version="0.4.2")
-        with patch("agent_takkub.orchestrator._SAFE_PLUGINS", ("superpowers-dev",)):
+        with patch("agent_takkub.config._SAFE_PLUGINS", ("superpowers-dev",)):
             findings = check_plugins(cache_root=tmp_path)
 
         ok = next(f for f in findings if f.name == "superpowers-dev")
@@ -254,7 +254,7 @@ class TestCheckPlugins:
         assert "0.4.2" in ok.detail
 
     def test_plugin_missing_warns(self, tmp_path: Path) -> None:
-        with patch("agent_takkub.orchestrator._SAFE_PLUGINS", ("missing-plugin",)):
+        with patch("agent_takkub.config._SAFE_PLUGINS", ("missing-plugin",)):
             findings = check_plugins(cache_root=tmp_path)
 
         warn = next(f for f in findings if f.name == "missing-plugin")
@@ -265,7 +265,7 @@ class TestCheckPlugins:
         version_dir.mkdir(parents=True)
         (version_dir / "plugin.json").write_text("not json", encoding="utf-8")
 
-        with patch("agent_takkub.orchestrator._SAFE_PLUGINS", ("bad-plugin",)):
+        with patch("agent_takkub.config._SAFE_PLUGINS", ("bad-plugin",)):
             findings = check_plugins(cache_root=tmp_path)
 
         fail = next(f for f in findings if f.name == "bad-plugin")
@@ -273,7 +273,7 @@ class TestCheckPlugins:
 
     def test_ecc_warns_with_session_start_hint(self, tmp_path: Path) -> None:
         self._make_plugin(tmp_path, "ecc", version="2.0.0")
-        with patch("agent_takkub.orchestrator._SAFE_PLUGINS", ("ecc",)):
+        with patch("agent_takkub.config._SAFE_PLUGINS", ("ecc",)):
             findings = check_plugins(cache_root=tmp_path)
 
         ecc = next(f for f in findings if f.name == "ecc")
@@ -283,7 +283,7 @@ class TestCheckPlugins:
     def test_ecc_not_installed_is_skip_not_warn(self, tmp_path: Path) -> None:
         """ECC is intentionally not installed — doctor must not nag to install
         it (SKIP, no fix hint), unlike any other missing _SAFE_PLUGINS entry."""
-        with patch("agent_takkub.orchestrator._SAFE_PLUGINS", ("ecc",)):
+        with patch("agent_takkub.config._SAFE_PLUGINS", ("ecc",)):
             findings = check_plugins(cache_root=tmp_path)
 
         ecc = next(f for f in findings if f.name == "ecc")
@@ -296,7 +296,7 @@ class TestCheckPlugins:
         → should FAIL, not silently accept."""
         (tmp_path / "broken-mp" / "broken-plugin" / "1.0.0").mkdir(parents=True)
         # no plugin.json anywhere
-        with patch("agent_takkub.orchestrator._SAFE_PLUGINS", ("broken-mp",)):
+        with patch("agent_takkub.config._SAFE_PLUGINS", ("broken-mp",)):
             findings = check_plugins(cache_root=tmp_path)
         fail = next(f for f in findings if f.name == "broken-mp")
         assert fail.status == Status.FAIL
@@ -305,7 +305,7 @@ class TestCheckPlugins:
         """When multiple version dirs exist, doctor picks the highest (reverse-sorted)."""
         self._make_plugin(tmp_path, "ecc", "ecc", "1.0.0")
         self._make_plugin(tmp_path, "ecc", "ecc", "2.0.0-rc.1")
-        with patch("agent_takkub.orchestrator._SAFE_PLUGINS", ("ecc",)):
+        with patch("agent_takkub.config._SAFE_PLUGINS", ("ecc",)):
             findings = check_plugins(cache_root=tmp_path)
         ecc = next(f for f in findings if f.name == "ecc")
         assert "2.0.0-rc.1" in ecc.detail

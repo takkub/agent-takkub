@@ -15,15 +15,16 @@ moment a Lead pane starts:
    Currently bypassed by --dangerously-skip-permissions but kept for
    reference / future re-enable.
 
-3. `_default_plugin_dirs()` + `_SAFE_PLUGINS` — discover the on-disk
+3. `_default_plugin_dirs()` — discover the on-disk
    `~/.claude/plugins/cache/...` directory for each plugin the cockpit
    wants spawned panes to inherit (skipping claude-obsidian's broken
    SessionStart hook). Returns the list passed to `--plugin-dir`.
+   `_SAFE_PLUGINS` is the source-of-truth list; it lives in `config.py`
+   (leaf hub) so doctor.py can import it without pulling in this module.
 
 Extracted from orchestrator.py to keep that file focused on pane
 lifecycle. orchestrator.py re-exports the names so existing test
-imports (test_session_brief, test_lead_write_guard) and other
-modules (doctor.py imports _SAFE_PLUGINS) keep working without churn.
+imports (test_session_brief, test_lead_write_guard) keep working.
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ import pathlib
 import re
 
 from .config import (
+    _SAFE_PLUGINS,
     REPO_ROOT,
     RUNTIME_DIR,
     active_project,
@@ -118,22 +120,6 @@ def _extract_note_body(text: str) -> str:
             body = parts[2]
     kept = [ln for ln in body.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
     return "\n".join(kept).strip()
-
-
-# Plugins we want spawned agents to inherit *explicitly* (skipping user-level
-# settings to avoid claude-obsidian's broken SessionStart hook). Each entry
-# is a *marketplace name* under ~/.claude/plugins/cache/. We pick the highest
-# semver-ish version directory found.
-_SAFE_PLUGINS: tuple[str, ...] = (
-    "superpowers-dev",
-    "addy-agent-skills",
-    "pordee",
-    "ecc",
-    # claude-obsidian-marketplace is intentionally excluded: the cached 1.4.3
-    # build ships a SessionStart prompt-hook that crashed all panes in v0.2.0
-    # (ToolUseContext required error). Until a spawn smoke-test under cockpit
-    # flags confirms the hook no longer fires, do not add it here.
-)
 
 
 def _allowed_project_roots(project: str) -> list[pathlib.Path]:
