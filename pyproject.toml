@@ -193,3 +193,25 @@ forbidden_modules = [
     "agent_takkub.app",
     "agent_takkub.cli",
 ]
+
+[[tool.importlinter.contracts]]
+name = "update-panel-layer"
+type = "forbidden"
+# update_panel is a UI-layer mixin (mixed into MainWindow). It must not pull in
+# app or cli — same constraint as main_window itself.
+source_modules = ["agent_takkub.update_panel"]
+forbidden_modules = [
+    "agent_takkub.app",
+    "agent_takkub.cli",
+]
+
+[[tool.importlinter.contracts]]
+name = "project-wizard-layer"
+type = "forbidden"
+# project_wizard is a UI-layer mixin (mixed into MainWindow). It must not pull
+# in app or cli — same constraint as main_window itself.
+source_modules = ["agent_takkub.project_wizard"]
+forbidden_modules = [
+    "agent_takkub.app",
+    "agent_takkub.cli",
+]

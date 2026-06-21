@@ -1,0 +1,827 @@
+"""MainWindowUpdateMixin — cockpit/Claude-CLI self-update UX (refactor round 3, step A).
+
+Extracted from ``MainWindow`` as a mixin. All methods access ``self.*``
+attributes (``_btn_update``, ``_update_status_cache``, ``_update_worker_busy``,
+``_version_label``, ``orch``, etc.) initialised in ``MainWindow.__init__``.
+
+**Import constraint:** this module MUST NOT import ``app`` or ``cli``.
+"""
+
+from __future__ import annotations
+
+import os
+
+from PyQt6.QtCore import QCoreApplication, QThreadPool, QTimer
+from PyQt6.QtWidgets import QApplication, QMessageBox, QSystemTrayIcon
+
+from .config import PORT_FILE, REPO_ROOT, active_project, lead_cwd
+from .orchestrator import _log_event
+from .rtk_helper import install_rtk
+
+
+class MainWindowUpdateMixin:
+    """Mixin for cockpit self-update and Claude-CLI update UX."""
+
+    def _on_restart_cockpit_clicked(self) -> None:
+        """User-triggered full cockpit restart. Counts in-flight panes,
+        asks for confirmation, logs the event, then delegates to
+        `_restart_cockpit` which persists state and relaunches."""
+        working_count = sum(
+            1
+            for project_panes in self.orch._panes_by_project.values()
+            for pane in project_panes.values()
+            if getattr(pane, "state", None) in ("working", "active")
+        )
+
+        if working_count > 0:
+            body = (
+                f"{working_count} pane(s) currently working. "
+                "Restart will terminate in-flight tasks. Continue?"
+            )
+        else:
+            body = "Restart cockpit? All panes will be closed and the app will relaunch."
+
+        confirm = QMessageBox.question(
+            self,
+            "Restart cockpit",
+            body,
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if confirm != QMessageBox.StandardButton.Ok:
+            return
+
+        _log_event("cockpit_restart", reason="user_action", working_panes=working_count)
+
+        # Do NOT close panes here — _restart_cockpit() persists snapshot while
+        # panes are still alive (is_alive=True), then atexit kills them.
+        # Closing first would produce an empty snapshot → no teammate restore.
+        self._restart_cockpit()
+
+    # ------------------------------------------------------------------
+    # Threaded recurring update poll (Layer A)
+    # ------------------------------------------------------------------
+
+    def _schedule_update_check(self) -> None:
+        """Dispatch an UpdateCheckWorker to the global thread pool.
+        Skips silently if a previous worker is still running so we
+        never stack up parallel git fetches."""
+        if self._update_worker_busy:
+            return
+        from .update_worker import UpdateCheckWorker
+
+        self._update_worker_busy = True
+        worker = UpdateCheckWorker()
+        worker.signals.finished.connect(self._on_update_check_done)
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_update_check_done(self, status: dict) -> None:
+        """Receive result from UpdateCheckWorker, refresh UI, and emit
+        a subtle notification when the repo transitions from up-to-date
+        to behind — without pestering the user on every subsequent poll."""
+        prev = self._update_status_cache or {}
+        self._update_status_cache = status
+        self._update_worker_busy = False
+
+        # Detect transition: was up-to-date (behind==0, clean, ok),
+        # now behind.  Skip notification if previous state was dirty or
+        # errored — the tree was already in a non-pristine state.
+        prev_up_to_date = (
+            prev.get("ok", False) and prev.get("clean", False) and prev.get("behind", 0) == 0
+        )
+        now_behind = (
+            status.get("ok", False) and status.get("clean", False) and status.get("behind", 0) > 0
+        )
+        if prev_up_to_date and now_behind:
+            self._notify_update_available(status["behind"])
+
+        self._refresh_update_button()
+
+    def _notify_update_available(self, n_behind: int) -> None:
+        """Flash the update button border and show a system-tray balloon
+        when origin/main just gained new commits the user hasn't seen yet.
+        Keeps the notification subtle — user can dismiss or ignore."""
+        label = f"📦 {n_behind} new commit{'s' if n_behind != 1 else ''} — click to pull"
+        self._btn_update.setToolTip(label)
+
+        # Try system tray balloon first (non-modal, disappears on its own).
+        tray = getattr(self, "_tray_icon", None)
+        if tray is None:
+            tray = QSystemTrayIcon(self)
+            self._tray_icon = tray
+        if tray.isSystemTrayAvailable() and not tray.isVisible():
+            tray.setIcon(
+                self.windowIcon()
+                or self.style().standardIcon(self.style().StandardPixmap.SP_MessageBoxInformation)
+            )
+            tray.show()
+        if tray.isVisible():
+            tray.showMessage(
+                "Cockpit update available",
+                label,
+                QSystemTrayIcon.MessageIcon.Information,
+                8_000,
+            )
+        else:
+            # Fallback: orange pulsing border on the button (3 flashes).
+            self._pulse_update_button(flashes=3)
+
+    def _pulse_update_button(self, flashes: int = 3, _count: int = 0) -> None:
+        """Alternate button border between orange and normal 3 times."""
+        if _count >= flashes * 2:
+            # Restore to whatever _refresh_update_button would set.
+            self._refresh_update_button()
+            return
+        if _count % 2 == 0:
+            self._btn_update.setStyleSheet(
+                "QPushButton { color: #fde047; background: #422006; "
+                "border: 2px solid #f97316; border-radius: 4px; "
+                "padding: 2px 8px; font-weight: 600; }"
+            )
+        else:
+            self._btn_update.setStyleSheet(
+                "QPushButton { color: #fde047; background: #422006; "
+                "border: 1px solid #a16207; border-radius: 4px; "
+                "padding: 2px 8px; }"
+            )
+        QTimer.singleShot(
+            400,
+            lambda count=_count + 1: self._pulse_update_button(flashes, count),
+        )
+
+    # ------------------------------------------------------------------
+    # Legacy synchronous check — kept for the click handler's "cache is
+    # None" early-boot path only.  All recurring polls now go through
+    # _schedule_update_check.
+    # ------------------------------------------------------------------
+
+    def _run_update_check(self) -> None:
+        """Synchronous fallback used only when the user clicks the chip
+        before the first threaded poll has completed (~30 s after boot).
+        Runs on the Qt main thread; acceptable for a one-off user action."""
+        from .update_helper import fetch_remote, is_git_repo, local_status
+
+        if not is_git_repo():
+            self._update_status_cache = {"not_repo": True}
+            self._refresh_update_button()
+            return
+        fetch_remote()  # best effort; ignore failure
+        self._update_status_cache = local_status()
+        self._refresh_update_button()
+
+    def _refresh_version_label(self) -> None:
+        """Update the version chip — live every commit when possible.
+
+        Primary source: `git describe --tags --always --dirty`. Output
+        looks like `v0.3.9-3-g4a5b6c7` (3 commits past the v0.3.9 tag)
+        or just `4a5b6c7` if no tags exist yet. Adds `-dirty` suffix
+        when the working tree has uncommitted changes.
+
+        Fallback: when not in a git checkout (ZIP / wheel install)
+        read pyproject.toml and stitch with `@<sha>` if available.
+        """
+        from .update_helper import current_sha_short, current_version_describe
+
+        described = current_version_describe()
+        if described:
+            self._version_label.setText(described)
+            return
+        ver = "?"
+        try:
+            pyproj = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+            import re as _re
+
+            m = _re.search(r'^version\s*=\s*"([^"]+)"', pyproj, _re.MULTILINE)
+            if m:
+                ver = m.group(1)
+        except Exception:
+            try:
+                from importlib.metadata import version as _pkg_version
+
+                ver = _pkg_version("agent-takkub")
+            except Exception:
+                pass
+        sha = current_sha_short()
+        text = f"v{ver} · @{sha}" if sha else f"v{ver}"
+        self._version_label.setText(text)
+
+    def _copy_version_to_clipboard(self) -> None:
+        text = self._version_label.text().strip()
+        if not text:
+            return
+        QApplication.clipboard().setText(text)
+        self._status.showMessage(f"copied: {text}", 2000)
+
+    def _show_changelog(self) -> None:
+        """Version chip click → render CHANGELOG.md in a scrollable in-app
+        dialog (QTextBrowser.setMarkdown — no external browser). The old
+        copy-to-clipboard action moves to a button inside the dialog so it
+        isn't lost."""
+        from PyQt6.QtWidgets import (
+            QDialog,
+            QDialogButtonBox,
+            QPushButton,
+            QTextBrowser,
+            QVBoxLayout,
+        )
+
+        path = REPO_ROOT / "CHANGELOG.md"
+        try:
+            body = path.read_text(encoding="utf-8")
+        except OSError:
+            body = "# Changelog\n\n_ไม่พบ CHANGELOG.md ที่ repo root_"
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Changelog · {self._version_label.text().strip() or 'agent-takkub'}")
+        dlg.resize(760, 620)
+        layout = QVBoxLayout(dlg)
+
+        browser = QTextBrowser(dlg)
+        browser.setMarkdown(body)
+        browser.setOpenExternalLinks(True)
+        browser.setStyleSheet(
+            "QTextBrowser { background:#0e0e10; color:#e4e4e7; "
+            "border:1px solid #27272a; border-radius:6px; padding:8px; }"
+        )
+        layout.addWidget(browser)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, dlg)
+        copy_btn = QPushButton("📋 Copy version", dlg)
+        copy_btn.clicked.connect(self._copy_version_to_clipboard)
+        buttons.addButton(copy_btn, QDialogButtonBox.ButtonRole.ActionRole)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+
+        dlg.exec()
+
+    # ------------------------------------------------------------------
+    # Claude CLI update (separate from cockpit self-update above)
+    # ------------------------------------------------------------------
+
+    def _on_claude_update_clicked(self) -> None:
+        """⬆ Claude CLI clicked. Hand the version-check off to the active tab's
+        Lead pane instead of running a native worker+dialog flow — the Lead
+        checks `claude --version` vs npm and reports conversationally, so the
+        user decides from chat. (The native worker/dialog machinery below —
+        `_on_claude_update_check_done` etc. — is kept intact but no longer
+        wired to this button; the safe self-update still needs the close-panes
+        detached path it provides.)"""
+        try:
+            from .config import active_project as _active_project
+
+            active_project, _ = _active_project()
+        except Exception:
+            active_project = None
+
+        prompt = (
+            "[claude-cli check] ช่วยเช็ค Claude Code CLI ให้หน่อย:\n"
+            "1. version ที่ติดตั้ง: `claude --version`\n"
+            "2. version ล่าสุดบน npm: `npm view @anthropic-ai/claude-code version`\n"
+            "ถ้ามีตัวใหม่ → สรุป changelog สำคัญที่อาจกระทบ cockpit + แนะนำว่าควรอัพไหม\n"
+            "หมายเหตุ: บน Windows ห้าม `npm install -g` ตอน claude pane ยังรันอยู่ "
+            "(lock ทำ claude.exe brick) — ต้องปิด pane ก่อน หรือใช้ flow detached "
+            "updater ของ cockpit (build_updater_script) ที่ปิด pane ให้อัตโนมัติ"
+        )
+        delivered = self.orch.inject_lead_prompt(prompt, project=active_project)
+        if delivered:
+            self._status.showMessage("ยิงคำขอเช็ค Claude CLI เข้า Lead แล้ว ↗", 4_000)
+        else:
+            self._status.showMessage("Lead ยังไม่พร้อม — คำขอถูก queue ไว้ จะส่งเมื่อ Lead เปิด", 5_000)
+
+    def _on_claude_update_check_done(self, result: dict) -> None:
+        """Render the worker result: fatal error → warning; no update → toast;
+        update available → report dialog."""
+        from PyQt6.QtWidgets import QMessageBox
+
+        self._claude_update_busy = False
+        self._btn_claude_update.setEnabled(True)
+        self._btn_claude_update.setText("⬆ Claude CLI")
+        self._status.clearMessage()
+
+        if not result.get("ok"):
+            QMessageBox.warning(
+                self, "ตรวจ Claude CLI ไม่สำเร็จ", result.get("error", "unknown error")
+            )
+            return
+        cur = result.get("current") or "?"
+        latest = result.get("latest") or "?"
+        if not result.get("has_update"):
+            QMessageBox.information(
+                self,
+                "Claude CLI ล่าสุดแล้ว",
+                f"ติดตั้งอยู่: v{cur}\nล่าสุดบน npm: v{latest}\n\nไม่ต้องอัพเดต ✅",
+            )
+            return
+        self._show_claude_update_dialog(cur, latest, result)
+
+    def _show_claude_update_dialog(self, cur: str, latest: str, result: dict) -> None:
+        """Report dialog: version diff + AI compatibility analysis (markdown),
+        with [อัพเดตเลย] / [ปิด] buttons."""
+        from PyQt6.QtWidgets import (
+            QDialog,
+            QDialogButtonBox,
+            QLabel,
+            QPushButton,
+            QTextBrowser,
+            QVBoxLayout,
+        )
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"อัพเดต Claude CLI · v{cur} → v{latest}")
+        dlg.resize(760, 620)
+        layout = QVBoxLayout(dlg)
+
+        header = QLabel(f"<b>Claude Code CLI</b>: v{cur} → <b>v{latest}</b>", dlg)
+        header.setStyleSheet("color:#e4e4e7; font-size:13px; padding:2px;")
+        layout.addWidget(header)
+
+        # Issue auto-filing status (the user wants action-needed findings filed
+        # to GitHub so they can fix later). Show what happened.
+        issue_line = ""
+        if result.get("issue_error"):
+            issue_line = f"⚠️ เปิด issue ไม่สำเร็จ: {result['issue_error']}"
+            issue_color = "#fca5a5"
+        elif result.get("issue_skipped") and result.get("issue_number"):
+            issue_line = (
+                f"📋 มี issue เดิมสำหรับ version นี้อยู่แล้ว: #{result['issue_number']} "
+                f"({result.get('issue_url', '')})"
+            )
+            issue_color = "#94a3b8"
+        elif result.get("issue_number"):
+            issue_line = (
+                f"📋 เปิด GitHub issue ให้แล้ว: #{result['issue_number']} "
+                f"({result.get('issue_url', '')}) — มาสั่งแก้ทีหลังได้"
+            )
+            issue_color = "#4ade80"
+        elif result.get("analysis_ok") and not result.get("issue_action_required"):
+            issue_line = "✅ AI ประเมินว่าไม่ต้องแก้ระบบ — ไม่เปิด issue"
+            issue_color = "#94a3b8"
+        if issue_line:
+            issue_label = QLabel(issue_line, dlg)
+            issue_label.setWordWrap(True)
+            issue_label.setStyleSheet(f"color:{issue_color}; font-size:12px; padding:2px;")
+            layout.addWidget(issue_label)
+
+        if result.get("analysis_ok"):
+            body = result.get("analysis", "")
+        else:
+            # Analysis failed (offline / claude error). Don't block the update —
+            # just say we couldn't assess and surface why.
+            why = result.get("analysis", "ไม่ทราบสาเหตุ")
+            body = (
+                "## ⚠️ วิเคราะห์ความเข้ากันได้ไม่สำเร็จ\n\n"
+                f"`{why}`\n\n"
+                "ยังอัพเดตได้ แต่ไม่มีรายงานความเข้ากันได้ — ดู changelog เองที่ "
+                "https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md"
+            )
+            if not result.get("changelog_ok"):
+                body += "\n\n_(โหลด changelog ไม่ได้ด้วย — อาจ offline)_"
+
+        browser = QTextBrowser(dlg)
+        browser.setMarkdown(body)
+        browser.setOpenExternalLinks(True)
+        browser.setStyleSheet(
+            "QTextBrowser { background:#0e0e10; color:#e4e4e7; "
+            "border:1px solid #27272a; border-radius:6px; padding:8px; }"
+        )
+        layout.addWidget(browser)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, dlg)
+        update_btn = QPushButton(f"⬆ อัพเดตเป็น v{latest}", dlg)
+        update_btn.setStyleSheet(
+            "QPushButton { color:#fff; background:#2563eb; border:none; "
+            "border-radius:4px; padding:4px 12px; font-weight:500; }"
+            "QPushButton:hover { background:#1d4ed8; }"
+        )
+
+        def _do_update() -> None:
+            dlg.accept()
+            self._confirm_and_apply_claude_update(cur, latest)
+
+        update_btn.clicked.connect(_do_update)
+        buttons.addButton(update_btn, QDialogButtonBox.ButtonRole.AcceptRole)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+        dlg.exec()
+
+    def _count_live_claude_panes(self) -> int:
+        """How many alive panes are backed by claude.exe (Lead is always; a
+        teammate unless remapped/substituted to codex/gemini). These hold the
+        binary open and must die before `npm install -g` can replace it on
+        Windows."""
+        from .orchestrator import _split_shard as _mw_split_shard2
+        from .provider_config import effective_provider_for
+
+        n = 0
+        for project_panes in self.orch._panes_by_project.values():
+            for role, pane in project_panes.items():
+                sess = getattr(pane, "session", None)
+                if sess is not None and getattr(sess, "is_alive", False):
+                    if effective_provider_for(_mw_split_shard2(role)[0]) == "claude":
+                        n += 1
+        return n
+
+    def _confirm_and_apply_claude_update(self, cur: str, latest: str) -> None:
+        """Confirm, then update via a detached script + cockpit restart.
+
+        Why a detached script instead of inline `npm install`: on Windows the
+        live Lead + teammate claude processes lock the package files, so the
+        install can corrupt the CLI (the exact failure that disabled
+        autoupdate). We sidestep it: persist state, spawn a detached updater
+        that waits for this process (and its panes) to exit, runs the install
+        with nothing holding claude, then relaunches the cockpit.
+        """
+        import subprocess
+        import sys
+
+        from PyQt6.QtWidgets import QMessageBox
+
+        from .claude_update import _npm, build_updater_script
+
+        npm = _npm()
+        if not npm:
+            QMessageBox.warning(self, "อัพเดตไม่ได้", "หา npm ไม่เจอบน PATH")
+            return
+
+        live = self._count_live_claude_panes()
+        confirm = QMessageBox.question(
+            self,
+            "อัพเดต Claude CLI",
+            f"จะอัพเดต Claude Code CLI: v{cur} → v{latest}\n\n"
+            f"บน Windows ต้องปิด claude pane ที่รันอยู่ ({live} pane รวม Lead) ก่อน "
+            "เพื่อเลี่ยง file lock ที่ทำให้ install พัง\n\n"
+            "เมื่อกดตกลง ระบบจะ:\n"
+            "  1. บันทึก session + ปิด cockpit (panes ปิดทั้งหมด)\n"
+            "  2. รัน npm install -g (ตอนไม่มี claude รันอยู่)\n"
+            "  3. เปิด cockpit ใหม่อัตโนมัติ\n\n"
+            "ดำเนินการ?",
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if confirm != QMessageBox.StandardButton.Ok:
+            return
+
+        # Persist everything up-front (same as _restart_cockpit) — we quit()
+        # right after spawning the updater, can't rely on closeEvent.
+        for fn in (
+            self._save_window_state,
+            self._persist_open_tabs,
+            self.orch.write_session_snapshot,
+            self.orch.write_resume_briefs,
+        ):
+            try:
+                fn()
+            except Exception:
+                pass
+        try:
+            if PORT_FILE.exists():
+                PORT_FILE.unlink()
+        except Exception:
+            pass
+
+        is_win = sys.platform == "win32"
+        runtime_dir = REPO_ROOT / "runtime"
+        try:
+            runtime_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        log_path = runtime_dir / "claude_update.log"
+        script_path = runtime_dir / ("claude_update.ps1" if is_win else "claude_update.sh")
+        script = build_updater_script(
+            npm=npm,
+            python_exe=sys.executable,
+            repo_root=str(REPO_ROOT),
+            log_path=str(log_path),
+            is_windows=is_win,
+            cockpit_pid=os.getpid(),
+        )
+        try:
+            script_path.write_text(script, encoding="utf-8")
+        except Exception as e:
+            QMessageBox.critical(self, "อัพเดตไม่ได้", f"เขียน updater script ไม่ได้:\n{e}")
+            return
+
+        _log_event("claude_update_start", current=cur, latest=latest, live_panes=live)
+
+        try:
+            if is_win:
+                import shutil as _shutil
+
+                pwsh = _shutil.which("pwsh") or _shutil.which("powershell") or "powershell"
+                # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP so the updater
+                # outlives the cockpit we're about to quit. NOT CREATE_NO_WINDOW
+                # — Win32 forbids combining it with DETACHED_PROCESS; DETACHED
+                # already gives the child no inherited console.
+                flags = 0x00000008 | 0x00000200
+                subprocess.Popen(
+                    [pwsh, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
+                    cwd=str(REPO_ROOT),
+                    close_fds=True,
+                    creationflags=flags,
+                )
+            else:
+                subprocess.Popen(
+                    ["sh", str(script_path)],
+                    cwd=str(REPO_ROOT),
+                    close_fds=True,
+                    start_new_session=True,
+                )
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "อัพเดตไม่ได้",
+                f"spawn updater ไม่สำเร็จ:\n{e}\n\ncockpit ยังเปิดอยู่ตามเดิม",
+            )
+            return
+
+        QCoreApplication.quit()
+
+    def _refresh_update_button(self) -> None:
+        """Flip the update chip's label/colour based on the cached
+        status. Five visual states: not-a-repo, error, clean+up-to-date,
+        clean+behind, dirty."""
+        # Keep the version chip honest after every poll — pulling new
+        # commits or external `git pull` from a terminal both change
+        # HEAD and we want the chip to reflect that.
+        self._refresh_version_label()
+        status = self._update_status_cache or {}
+        if status.get("not_repo"):
+            self._btn_update.setText("🔧 Enable updates")
+            self._btn_update.setToolTip(
+                "This install isn't git-tracked. Click to convert it into a\n"
+                "git checkout linked to the official repo — enables one-click\n"
+                "updates from then on. Your projects.json / runtime/ / .venv/\n"
+                "are gitignored and stay safe."
+            )
+            self._btn_update.setStyleSheet(
+                "QPushButton { color: #fde047; background: #422006; "
+                "border: 1px solid #a16207; border-radius: 4px; "
+                "padding: 2px 8px; }"
+                "QPushButton:hover { background: #713f12; }"
+            )
+            return
+        if not status.get("ok"):
+            self._btn_update.setText("⚠ Update check failed")
+            self._btn_update.setToolTip(
+                f"Last error: {status.get('error', 'unknown')}\nRestart cockpit to retry."
+            )
+            self._btn_update.setStyleSheet(
+                "QPushButton { color: #fca5a5; background: #450a0a; "
+                "border: 1px solid #7f1d1d; border-radius: 4px; "
+                "padding: 2px 8px; }"
+            )
+            return
+        if not status.get("clean"):
+            n = len(status.get("dirty_files", []))
+            self._btn_update.setText(f"⚠ Local edits ({n})")
+            self._btn_update.setToolTip(
+                "Tracked files have uncommitted changes. Click to see\n"
+                "the list. Pull is blocked until you commit or stash."
+            )
+            self._btn_update.setStyleSheet(
+                "QPushButton { color: #fde047; background: #422006; "
+                "border: 1px solid #a16207; border-radius: 4px; "
+                "padding: 2px 8px; }"
+            )
+            return
+        behind = status.get("behind", 0)
+        if behind == 0:
+            self._btn_update.setText("🔄 Up to date")
+            self._btn_update.setToolTip("On origin/main. Next check in 5 min.")
+            self._btn_update.setStyleSheet(
+                "QPushButton { color: #4ade80; background: #052e16; "
+                "border: 1px solid #166534; border-radius: 4px; "
+                "padding: 2px 8px; }"
+                "QPushButton:hover { background: #14532d; }"
+            )
+        else:
+            self._btn_update.setText(f"📦 Update available ({behind})")
+            self._btn_update.setToolTip(
+                f"origin/main has {behind} new commit{'s' if behind != 1 else ''}. Click to pull."
+            )
+            self._btn_update.setStyleSheet(
+                "QPushButton { color: #1e3a8a; background: #93c5fd; "
+                "border: 1px solid #2563eb; border-radius: 4px; "
+                "padding: 2px 8px; font-weight: 500; }"
+                "QPushButton:hover { background: #bfdbfe; }"
+            )
+
+    def _on_update_clicked(self) -> None:
+        """User clicked the update chip. Branches by cached status:
+        not-a-repo (info), dirty (block + show file list), clean +
+        up-to-date (no-op toast), clean + behind (single confirm
+        dialog → pull → auto-restart).
+        """
+        from PyQt6.QtWidgets import QMessageBox
+
+        from .update_helper import pull_updates
+
+        # First poll fires 30 s after boot. If the user clicks during
+        # that window the cache is still None — don't render a fake
+        # "check failed" dialog. Kick the check off immediately and
+        # tell the user to retry in a moment.
+        if self._update_status_cache is None:
+            self._status.showMessage("Checking for updates… click again in a moment.", 4_000)
+            self._run_update_check()
+            return
+        status = self._update_status_cache
+        if status.get("not_repo"):
+            from .update_helper import OFFICIAL_REPO_URL, init_git_repo
+
+            convert = QMessageBox.question(
+                self,
+                "Convert to git checkout?",
+                "This install isn't git-tracked, so the cockpit can't pull\n"
+                "updates the usual way. Want to convert this folder into a\n"
+                f"proper git checkout linked to:\n\n  {OFFICIAL_REPO_URL}\n\n"
+                "Safe:  projects.json, runtime/, .venv/, *.log, and AGENTS.md\n"
+                "       are gitignored and won't be touched.\n"
+                "Lost:  any local edits you made to tracked cockpit files\n"
+                "       (README, CLAUDE.md, source code) — they'll be\n"
+                "       replaced with the upstream version.\n\n"
+                "After conversion the 🔄 update chip will work normally.",
+                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if convert != QMessageBox.StandardButton.Ok:
+                return
+            self._status.showMessage("Converting to git checkout — fetching origin/main…", 0)
+            ok, msg = init_git_repo()
+            self._status.clearMessage()
+            if not ok:
+                QMessageBox.critical(self, "Convert failed", msg)
+                return
+            QMessageBox.information(
+                self,
+                "Converted",
+                f"{msg}\n\nCockpit will restart now to apply the upstream version.",
+            )
+            self._restart_cockpit()
+            return
+        if not status.get("ok"):
+            QMessageBox.warning(
+                self,
+                "Update check failed",
+                f"Could not read git status:\n{status.get('error', 'unknown')}\n\n"
+                "The next 5-minute check will retry automatically.",
+            )
+            return
+        if not status.get("clean"):
+            # Cache is up to 5 min stale — user may have just committed
+            # in a terminal. Re-check synchronously (local-only, fast)
+            # before nagging them about dirty files.
+            from .update_helper import local_status
+
+            fresh = local_status()
+            self._update_status_cache = {**status, **fresh}
+            self._refresh_update_button()
+            if fresh.get("ok") and fresh.get("clean"):
+                self._status.showMessage("Up to date — chip refreshed.", 4_000)
+                return
+            files = fresh.get("dirty_files", status.get("dirty_files", []))
+            preview = "\n".join(f"  • {f}" for f in files[:20])
+            more = "" if len(files) <= 20 else f"\n  …and {len(files) - 20} more"
+            QMessageBox.warning(
+                self,
+                "Local edits block update",
+                "Tracked files have uncommitted changes:\n\n"
+                f"{preview}{more}\n\n"
+                "Commit, stash, or revert these before pulling. The\n"
+                "update chip will refresh on the next 5-minute tick.",
+            )
+            return
+        behind = status.get("behind", 0)
+        if behind == 0:
+            self._status.showMessage("Already up to date", 4_000)
+            return
+        # Single confirmation: pull + auto-restart. Predict the pip
+        # warning up front via the pre-pull diff so the user sees it
+        # in the same dialog rather than after the pull lands.
+        from .update_helper import pyproject_will_change_on_pull
+
+        pip_warn = (
+            "\n\n⚠ pyproject.toml is changing — you'll need to run\n"
+            "`pip install -e .` in `.venv` after the restart so the\n"
+            "new dependencies take effect."
+            if pyproject_will_change_on_pull()
+            else ""
+        )
+        confirm = QMessageBox.question(
+            self,
+            "Pull update + restart",
+            f"Pull {behind} commit{'s' if behind != 1 else ''} from origin/main "
+            "and restart cockpit to apply the new version?\n\n"
+            "⚠ Cockpit will restart immediately after the pull.\n\n"
+            "Your project paths (projects.json), session history\n"
+            "(runtime/), and venv are safe — only git-tracked files\n"
+            f"are touched.{pip_warn}",
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Ok,
+        )
+        if confirm != QMessageBox.StandardButton.Ok:
+            return
+        ok, msg = pull_updates()
+        if not ok:
+            QMessageBox.critical(self, "Pull failed", msg)
+            self._run_update_check()  # refresh chip with latest state
+            return
+        # Pull succeeded — restart immediately. No second confirm; the
+        # one dialog above already promised this behaviour.
+        self._status.showMessage(f"{msg} — restarting…", 6_000)
+        QTimer.singleShot(500, self._restart_cockpit)
+
+    def _restart_cockpit(self) -> None:
+        """Spawn a fresh agent-takkub process and quit this one.
+
+        Explicitly persists window state, open tabs, and the session-resume
+        snapshot BEFORE spawning the successor so data survives even when
+        QCoreApplication.quit() skips closeEvent (e.g. called from a
+        non-main-thread context or during a forced restart).
+        """
+        import subprocess
+        import sys
+
+        from ._win_console import SUBPROCESS_NO_WINDOW
+
+        # Persist state up-front — don't rely on closeEvent firing after quit().
+        try:
+            self._save_window_state()
+        except Exception:
+            pass
+        try:
+            self._persist_open_tabs()
+        except Exception:
+            pass
+        try:
+            self.orch.write_session_snapshot()
+        except Exception:
+            pass
+        try:
+            self.orch.write_resume_briefs()
+        except Exception:
+            pass
+        # Release port file so the successor can reclaim or renumber cleanly.
+        try:
+            if PORT_FILE.exists():
+                PORT_FILE.unlink()
+        except Exception:
+            pass
+
+        try:
+            subprocess.Popen(
+                [sys.executable, "-m", "agent_takkub"],
+                cwd=str(REPO_ROOT),
+                close_fds=True,
+                creationflags=SUBPROCESS_NO_WINDOW,
+            )
+        except Exception as e:
+            # If we can't spawn the successor, don't quit — leave the
+            # user in their current session and surface the error.
+            from PyQt6.QtWidgets import QMessageBox
+
+            QMessageBox.critical(
+                self,
+                "Restart failed",
+                f"Could not launch a new cockpit:\n{e}\n\n"
+                "Quit this cockpit manually and run agent-takkub.bat.",
+            )
+            return
+        QCoreApplication.quit()
+
+    def _on_install_rtk_clicked(self) -> None:
+        from PyQt6.QtWidgets import QMessageBox
+
+        root = lead_cwd()
+        if not root:
+            QMessageBox.warning(
+                self,
+                "rtk install",
+                "No active project — pick one in the dropdown first.",
+            )
+            return
+
+        proj_name = active_project()[0] or "(unnamed)"
+        confirm = QMessageBox.question(
+            self,
+            "Install rtk hook",
+            (
+                f"Add the rtk PreToolUse Bash hook to:\n\n"
+                f"  {root}/.claude/settings.json\n\n"
+                f"Every Bash tool call in panes under this project ({proj_name}) "
+                f"will be auto-rewritten with rtk (60-90% token savings on common "
+                f"dev output like git diff, docker logs, npm ci, pytest, tsc).\n\n"
+                f"This only touches the project's .claude/settings.json — no user-level "
+                f"settings, no CLAUDE.md changes."
+            ),
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Ok,
+        )
+        if confirm != QMessageBox.StandardButton.Ok:
+            return
+
+        ok, msg = install_rtk(root)
+        if ok:
+            self._status.showMessage(f"rtk: {msg}", 6_000)
+        else:
+            QMessageBox.critical(self, "rtk install failed", msg)
+        self._refresh_rtk_button()
