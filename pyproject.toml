@@ -67,3 +67,104 @@ indent-style = "space"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 addopts = "-q"
+
+# ──────────────────────────────────────────────────────────────────
+# import-linter: architecture guardrails
+# ──────────────────────────────────────────────────────────────────
+[tool.importlinter]
+root_packages = ["agent_takkub"]
+
+[[tool.importlinter.contracts]]
+name = "engine-ui-separation"
+type = "forbidden"
+source_modules = ["agent_takkub.orchestrator"]
+forbidden_modules = [
+    "agent_takkub.main_window",
+    "agent_takkub.app",
+]
+
+[[tool.importlinter.contracts]]
+name = "cli-ipc-boundary"
+type = "forbidden"
+# Intent: cli.py drives the running cockpit over the TCP socket (cli_server), it must NOT
+# pull the 5.8k-LOC orchestrator engine into the CLI process. import-linter checks INDIRECT
+# paths, which surfaced a real (lazy) edge: cli -> doctor -> orchestrator. That path is the
+# `takkub doctor` diagnostic reaching `_SAFE_PLUGINS` (doctor.py:204, a lazy in-fn import) —
+# legitimate but a known coupling. Whitelist ONLY that one edge so every OTHER indirect path
+# into orchestrator still fails. TODO: move `_SAFE_PLUGINS` to a leaf module so doctor no
+# longer imports the god-file, then drop this ignore.
+source_modules = ["agent_takkub.cli"]
+forbidden_modules = ["agent_takkub.orchestrator"]
+ignore_imports = ["agent_takkub.doctor -> agent_takkub.orchestrator"]
+
+[[tool.importlinter.contracts]]
+name = "leaf-modules-pure"
+type = "forbidden"
+# config/roles/_win_console are pure-leaf (fan-in 18/top-used). List all architectural
+# siblings so any future sibling import is caught immediately.
+source_modules = [
+    "agent_takkub.config",
+    "agent_takkub._win_console",
+    "agent_takkub.roles",
+]
+forbidden_modules = [
+    "agent_takkub.orchestrator",
+    "agent_takkub.main_window",
+    "agent_takkub.app",
+    "agent_takkub.agent_pane",
+    "agent_takkub.cli_server",
+    "agent_takkub.cli",
+    "agent_takkub.pty_session",
+    "agent_takkub.lead_context",
+    "agent_takkub.pane_env",
+    "agent_takkub.vault_mirror",
+    "agent_takkub.routing_planner",
+    "agent_takkub.project_tab",
+    "agent_takkub.terminal_widget",
+    "agent_takkub.spawn_gate",
+    "agent_takkub.provider_config",
+    "agent_takkub.claude_auth_config",
+    "agent_takkub.claude_auth_dialog",
+    "agent_takkub.gemini_helper",
+    "agent_takkub.codex_helper",
+    "agent_takkub.pipeline_config",
+    "agent_takkub.pipeline_dialog",
+    "agent_takkub.lead_bash_audit",
+    "agent_takkub.vault_graph",
+    "agent_takkub.docs_verify",
+    "agent_takkub.doctor",
+    "agent_takkub.services",
+    "agent_takkub.issues",
+    "agent_takkub.token_meter",
+    "agent_takkub.limit_status",
+    "agent_takkub.chatlog_scanner",
+    "agent_takkub.logs_panel",
+    "agent_takkub.project_rules",
+    "agent_takkub.role_memory",
+    "agent_takkub.shared_dev_tools",
+    "agent_takkub.user_profile",
+    "agent_takkub.skill_audit",
+    "agent_takkub.verify",
+    "agent_takkub.update_helper",
+    "agent_takkub.update_worker",
+    "agent_takkub.rtk_helper",
+    "agent_takkub.plan_tier",
+    "agent_takkub.design_review_html",
+    "agent_takkub.release",
+    "agent_takkub.claude_update",
+    "agent_takkub.codex_agents_md",
+    "agent_takkub.provider_state",
+    "agent_takkub.claude_auth_config",
+]
+
+[[tool.importlinter.contracts]]
+name = "pipeline-executor-layer"
+type = "forbidden"
+# pipeline_executor is an engine-layer module (mixed into Orchestrator). It must
+# NOT pull in UI or CLI modules — same constraint as orchestrator itself.
+source_modules = ["agent_takkub.pipeline_executor"]
+forbidden_modules = [
+    "agent_takkub.main_window",
+    "agent_takkub.app",
+    "agent_takkub.cli",
+]

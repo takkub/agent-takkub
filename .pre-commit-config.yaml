@@ -26,3 +26,29 @@ repos:
         pass_filenames: false
         always_run: true
         stages: [pre-commit]
+
+  # import-linter: architecture guardrail contracts
+  - repo: local
+    hooks:
+      - id: import-linter
+        name: import-linter architecture contracts
+        language: system
+        # bash -c wrapper: `language: system` can't resolve the relative .exe on
+        # Windows during commit (WinError 2); the same pattern works for depgraph-fresh.
+        entry: bash -c ".venv/Scripts/lint-imports.exe"
+        pass_filenames: false
+        stages: [pre-commit]
+
+  # depgraph freshness: regenerate and fail if stale
+  - repo: local
+    hooks:
+      - id: depgraph-fresh
+        name: depgraph freshness check
+        language: system
+        entry: >-
+          bash -c "
+          .venv/Scripts/python.exe tools/gen_import_graph.py &&
+          git diff --exit-code docs/architecture/depgraph.json
+          "
+        pass_filenames: false
+        stages: [pre-commit]
