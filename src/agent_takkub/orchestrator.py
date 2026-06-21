@@ -43,10 +43,9 @@ from .config import (
     lead_cwd,
     validate_name,
 )
-from .lead_context import (  # re-exported for test + doctor.py imports
+from .lead_context import (  # re-exported for test imports
     _LEAD_GUARD_ALLOW_TOOLS,
     _LEAD_GUARD_WRITE_TOOLS,
-    _SAFE_PLUGINS,
     BIG_FILE_GUARD,
     STALE_FILE_GUARD,
     _allowed_project_roots,
@@ -165,7 +164,6 @@ __all__ = [  # backwards-compat re-exports
     "_LEAD_GUARD_ALLOW_TOOLS",
     "_LEAD_GUARD_WRITE_TOOLS",
     "_PANE_ENV_ALLOWLIST",
-    "_SAFE_PLUGINS",
     "_VAULT_ENV",
     "_allowed_project_roots",
     "_apply_ecc_mute",

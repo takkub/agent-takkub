@@ -242,7 +242,6 @@
         "agent_takkub.codex_helper",
         "agent_takkub.config",
         "agent_takkub.gemini_helper",
-        "agent_takkub.orchestrator",
         "agent_takkub.pty_session",
         "agent_takkub.shared_dev_tools"
       ],
@@ -251,7 +250,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 2,
-      "fan_out": 7
+      "fan_out": 6
     },
     {
       "module": "agent_takkub.gemini_helper",
@@ -409,12 +408,11 @@
       "imported_by": [
         "agent_takkub.app",
         "agent_takkub.cli_server",
-        "agent_takkub.doctor",
         "agent_takkub.main_window",
         "agent_takkub.update_panel",
         "agent_takkub.user_actions"
       ],
-      "fan_in": 6,
+      "fan_in": 5,
       "fan_out": 18
     },
     {

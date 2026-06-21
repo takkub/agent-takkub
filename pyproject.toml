@@ -90,15 +90,10 @@ forbidden_modules = [
 name = "cli-ipc-boundary"
 type = "forbidden"
 # Intent: cli.py drives the running cockpit over the TCP socket (cli_server), it must NOT
-# pull the 5.8k-LOC orchestrator engine into the CLI process. import-linter checks INDIRECT
-# paths, which surfaced a real (lazy) edge: cli -> doctor -> orchestrator. That path is the
-# `takkub doctor` diagnostic reaching `_SAFE_PLUGINS` (doctor.py:204, a lazy in-fn import) —
-# legitimate but a known coupling. Whitelist ONLY that one edge so every OTHER indirect path
-# into orchestrator still fails. TODO: move `_SAFE_PLUGINS` to a leaf module so doctor no
-# longer imports the god-file, then drop this ignore.
+# pull the 5.8k-LOC orchestrator engine into the CLI process. _SAFE_PLUGINS was moved to
+# config.py (leaf hub) so doctor no longer imports orchestrator, removing the indirect edge.
 source_modules = ["agent_takkub.cli"]
 forbidden_modules = ["agent_takkub.orchestrator"]
-ignore_imports = ["agent_takkub.doctor -> agent_takkub.orchestrator"]
 
 [[tool.importlinter.contracts]]
 name = "leaf-modules-pure"

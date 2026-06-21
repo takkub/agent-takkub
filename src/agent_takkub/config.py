@@ -10,6 +10,19 @@ from pathlib import Path
 _SAFE_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _SAFE_SHARD_IDX = re.compile(r"^[1-9][0-9]{0,2}$")  # 1–999
 
+# Plugins cockpit wants spawned agents to inherit (skipping claude-obsidian's broken
+# SessionStart hook). Each entry is a marketplace name under ~/.claude/plugins/cache/.
+_SAFE_PLUGINS: tuple[str, ...] = (
+    "superpowers-dev",
+    "addy-agent-skills",
+    "pordee",
+    "ecc",
+    # claude-obsidian-marketplace is intentionally excluded: the cached 1.4.3
+    # build ships a SessionStart prompt-hook that crashed all panes in v0.2.0
+    # (ToolUseContext required error). Until a spawn smoke-test under cockpit
+    # flags confirms the hook no longer fires, do not add it here.
+)
+
 
 def validate_name(value: str, kind: str) -> str:
     """Normalise and validate a role or project name used as a path component.

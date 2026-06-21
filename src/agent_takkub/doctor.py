@@ -201,7 +201,7 @@ def _plugin_cache_root() -> Path:
 
 
 def check_plugins(cache_root: Path | None = None) -> list[Finding]:
-    from .orchestrator import _SAFE_PLUGINS
+    from .config import _SAFE_PLUGINS
 
     root = cache_root if cache_root is not None else _plugin_cache_root()
     findings: list[Finding] = []
