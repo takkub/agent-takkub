@@ -5,8 +5,17 @@
 > ไม่ใช่ section ในไฟล์. แผนที่นี้บอกว่า function ไหนอยู่ cluster ไหน, cluster ไหนถือ state อะไร,
 > และ **edge ที่ซ่อนอยู่** (ที่ import graph มองไม่เห็น) อยู่ตรงไหน — เพื่อไม่ให้ grep มั่วแล้วเดา.
 >
-> คู่กับ: `depgraph.json` (import map ระดับ module) · Serena MCP (`find_symbol` / `find_referencing_symbols`
-> ดึง caller จริงระดับ symbol — ใช้แทนการอ่านทั้งไฟล์ 5,828 บรรทัด).
+> คู่กับ: `depgraph.json` (import map ระดับ module — ground truth, auto-refresh ทุก commit).
+
+## ✅ สถานะ: แตก god-files ครบแล้ว (2026-06-21)
+
+`orchestrator.py` **5,828 → 2,618 LOC** · `main_window.py` **3,997 → 1,048 LOC** — แตกเป็น 10 โมดูล cohesive:
+
+- **engine mixins บน `Orchestrator`:** `pipeline_executor` · `orchestrator_text` · `broadcast_actions` · `lead_inbox` · `spawn_engine` (+ `PaneRegistry` dataclass รวม 7 state dicts)
+- **UI mixins บน `MainWindow`:** `update_panel` · `project_wizard` · `user_actions` · `limit_panel` · `status_header`
+- **guardrail:** import-linter 13 contracts (ทุกโมดูลมี layer contract) · `_SAFE_PLUGINS` ย้ายไป `config` (ลบ hidden edge `cli→doctor→orchestrator` ที่ต้นเหตุ)
+
+cluster sections ด้านล่าง = แผนที่ method→cluster เดิม (ตอนนี้แต่ละ cluster = โมดูลจริงแล้ว — ใช้นำทางต่อได้).
 
 ---
 
