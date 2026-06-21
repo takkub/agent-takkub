@@ -3,10 +3,11 @@
 Mixed into ``Orchestrator`` — never imported by main_window, app, or cli.
 See ``docs/architecture/godfile-map.md`` 'spawn_engine' cluster.
 
-STATE contract: all dicts live in ``Orchestrator.__init__``:
-    _pane_state, _recent_exits, _pane_tokens, _spawn_queue,
-    _spawn_deferred, _spawn_in_progress, _panes_by_project.
-This mixin never creates them; it only reads/writes via ``self``.
+STATE contract: all 7 spawn-engine dicts live in ``Orchestrator._registry``
+(a ``PaneRegistry`` dataclass).  Backward-compat properties on this mixin
+expose them as ``self._pane_state``, ``self._recent_exits``, etc. so every
+access site works unchanged.  This mixin never creates ``_registry``; it is
+created by ``Orchestrator.__init__``.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ import secrets
 import time
 import uuid as _uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from PyQt6.QtCore import QTimer
@@ -195,6 +196,35 @@ class PaneState:
     pipeline_run_id: str | None = None
 
 
+@dataclass
+class PaneRegistry:
+    """Groups all 7 spawn-engine state dicts under one object.
+
+    ``Orchestrator.__init__`` creates a single ``self._registry = PaneRegistry()``
+    instead of 7 separate dict attributes.  Backward-compat properties on
+    ``SpawnEngineMixin`` (``_pane_state``, ``_recent_exits``, …) delegate to the
+    fields here so every existing access site works unchanged.
+
+    Lifecycle notes (preserved from the original per-attribute comments):
+    - ``pane_state``: popped atomically by close()/done(); NOT persisted across restart.
+    - ``recent_exits``: NOT cleared by close() — persists so _do_respawn can find the
+      cwd entry after close() fires during stuck-recover; only cleared by spawn().
+    - ``pane_tokens``: entries removed when pane is closed; never written to disk.
+    - ``spawn_in_progress``: True while a ConPTY session.spawn() is executing.
+    - ``spawn_deferred``: per-(project::role) set; prevents duplicate QTimer callbacks.
+    - ``spawn_queue``: FIFO — serialises ConPTY construction so only one runs at a time.
+    - ``panes_by_project``: project-namespaced pane registry (multi-tab isolation).
+    """
+
+    pane_state: dict = field(default_factory=dict)
+    recent_exits: dict = field(default_factory=dict)
+    pane_tokens: dict = field(default_factory=dict)
+    spawn_queue: collections.deque = field(default_factory=collections.deque)
+    spawn_deferred: set = field(default_factory=set)
+    spawn_in_progress: bool = False
+    panes_by_project: dict = field(default_factory=dict)
+
+
 class SpawnEngineMixin:
     """Pane registry and session spawn/lifecycle mixin.
 
@@ -202,6 +232,97 @@ class SpawnEngineMixin:
     ``Orchestrator.__init__`` — this mixin only provides the methods that
     operate on that state.
     """
+
+    # ── PaneRegistry backward-compat properties ──────────────────────────────
+    # Delegate to self._registry so every existing access site
+    # (self._pane_state[...], self._spawn_in_progress = True, …) works unchanged.
+    # Setters handle all reassignment patterns found in spawn() and _ps().
+    # If _registry doesn't exist yet (test fixtures using Orchestrator.__new__
+    # without __init__), the setter creates it on first write.
+
+    @property
+    def _pane_state(self):  # type: ignore[override]
+        return self._registry.pane_state
+
+    @_pane_state.setter
+    def _pane_state(self, v):
+        try:
+            self._registry.pane_state = v
+        except (AttributeError, RuntimeError):
+            object.__setattr__(self, "_registry", PaneRegistry())
+            self._registry.pane_state = v
+
+    @property
+    def _recent_exits(self):  # type: ignore[override]
+        return self._registry.recent_exits
+
+    @_recent_exits.setter
+    def _recent_exits(self, v):
+        try:
+            self._registry.recent_exits = v
+        except (AttributeError, RuntimeError):
+            object.__setattr__(self, "_registry", PaneRegistry())
+            self._registry.recent_exits = v
+
+    @property
+    def _pane_tokens(self):  # type: ignore[override]
+        return self._registry.pane_tokens
+
+    @_pane_tokens.setter
+    def _pane_tokens(self, v):
+        try:
+            self._registry.pane_tokens = v
+        except (AttributeError, RuntimeError):
+            object.__setattr__(self, "_registry", PaneRegistry())
+            self._registry.pane_tokens = v
+
+    @property
+    def _spawn_queue(self):  # type: ignore[override]
+        return self._registry.spawn_queue
+
+    @_spawn_queue.setter
+    def _spawn_queue(self, v):
+        try:
+            self._registry.spawn_queue = v
+        except (AttributeError, RuntimeError):
+            object.__setattr__(self, "_registry", PaneRegistry())
+            self._registry.spawn_queue = v
+
+    @property
+    def _spawn_deferred(self):  # type: ignore[override]
+        return self._registry.spawn_deferred
+
+    @_spawn_deferred.setter
+    def _spawn_deferred(self, v):
+        try:
+            self._registry.spawn_deferred = v
+        except (AttributeError, RuntimeError):
+            object.__setattr__(self, "_registry", PaneRegistry())
+            self._registry.spawn_deferred = v
+
+    @property
+    def _spawn_in_progress(self):  # type: ignore[override]
+        return self._registry.spawn_in_progress
+
+    @_spawn_in_progress.setter
+    def _spawn_in_progress(self, v):
+        try:
+            self._registry.spawn_in_progress = v
+        except (AttributeError, RuntimeError):
+            object.__setattr__(self, "_registry", PaneRegistry())
+            self._registry.spawn_in_progress = v
+
+    @property
+    def _panes_by_project(self):  # type: ignore[override]
+        return self._registry.panes_by_project
+
+    @_panes_by_project.setter
+    def _panes_by_project(self, v):
+        try:
+            self._registry.panes_by_project = v
+        except (AttributeError, RuntimeError):
+            object.__setattr__(self, "_registry", PaneRegistry())
+            self._registry.panes_by_project = v
 
     # ──────────────────────────────────────────────────────────────
     # per-pane state helpers
@@ -212,14 +333,15 @@ class SpawnEngineMixin:
         Callers that only need to *read* without creating an entry should use
         ``self._pane_state.get(key)`` and guard against None.
 
-        Lazily initialises ``_pane_state`` so test fixtures that create a bare
-        ``Orchestrator.__new__`` instance without running ``__init__`` still work.
+        Lazily initialises ``_registry`` (and thus ``_pane_state``) so test
+        fixtures that create a bare ``Orchestrator.__new__`` instance without
+        running ``__init__`` still work.
         """
         try:
             d = self._pane_state
-        except AttributeError:
+        except (AttributeError, RuntimeError):
             d = {}
-            self._pane_state = d
+            self._pane_state = d  # setter creates _registry on first write
         try:
             return d[key]
         except KeyError:

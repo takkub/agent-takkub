@@ -123,6 +123,7 @@ from .spawn_engine import (  # re-exported for backward compat; mixin provides m
     AUTO_RESPAWN_MAX,
     CODEX_EARLY_CRASH_WINDOW_SEC,
     RESUME_WINDOW_SEC,
+    PaneRegistry,
     PaneState,
     SpawnEngineMixin,
 )
@@ -165,6 +166,7 @@ __all__ = [  # backwards-compat re-exports
     "_LEAD_GUARD_WRITE_TOOLS",
     "_PANE_ENV_ALLOWLIST",
     "_VAULT_ENV",
+    "PaneRegistry",
     "_allowed_project_roots",
     "_apply_ecc_mute",
     "_apply_mcp_timeout",
@@ -394,22 +396,11 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
             prune_old_browser_profiles()
         except Exception as e:
             _log_event("browser_profile_prune_error", error=repr(e))
-        # Panes are namespaced per project so the upcoming multi-tab UI
-        # (Plan B) can keep each project's Lead + teammates isolated. The
-        # `panes` property below resolves to the *active* project's inner
-        # dict so every existing caller (UI + tests) keeps the same shape.
-        # Until tabs land, only one project namespace is populated at a
-        # time and behavior is identical to the pre-refactor single-dict.
-        self._panes_by_project: dict[str, dict[str, AgentPane]] = {}
-        # Per-pane transient state. Created lazily by _ps(key) and popped
-        # atomically by close()/done() — single dict.pop replaces what was
-        # previously ~14 individual teardown pops (root cause of divergence bugs).
-        self._pane_state: dict[str, PaneState] = {}
-        # last-known cwd per role — kept as a separate dict because its lifecycle
-        # differs: close() does NOT clear it (unlike _pane_state) so _do_respawn
-        # can still read the entry after close() fires during stuck-recover.
-        # Only cleared by a successful spawn() (del after attach).
-        self._recent_exits: dict[str, dict] = {}  # "{project}::{role}" -> {cwd, ts}
+        # PaneRegistry groups all 7 spawn-engine state dicts under one object.
+        # Backward-compat properties on SpawnEngineMixin let every existing
+        # access site (self._pane_state[...] etc.) work unchanged.
+        # Lifecycle notes are in PaneRegistry's docstring (spawn_engine.py).
+        self._registry: PaneRegistry = PaneRegistry()
         # Peer CC durability: messages queued when Lead is not alive.
         # Keyed by project namespace; flushed to Lead on next Lead spawn.
         self._pending_lead_cc: dict[str, list[dict]] = {}
@@ -449,13 +440,6 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
         # Generated fresh each boot; never written to disk, logs, or argv.
         self._lead_token: str = secrets.token_urlsafe(32)
 
-        # Per-pane capability tokens.  token → (project_ns, role_name).
-        # Injected as TAKKUB_PANE_TOKEN into every non-Lead pane at spawn so
-        # the IPC server can derive caller identity from the token rather than
-        # trusting the caller-supplied `from`/`from_project` fields.  Entries
-        # are removed when the pane is closed.  Checked on `done` and `send`.
-        self._pane_tokens: dict[str, tuple[str, str]] = {}
-
         # Idle watchdog bookkeeping. Per-role:
         #   first_idle_ts   — when the pane was first seen idle in this streak
         #                     (None = currently processing or not "working")
@@ -491,15 +475,7 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
         # (tests, headless paths).  Win32 InSendMessageEx is always checked
         # directly inside _is_spawn_blocked() regardless of this predicate.
         self._spawn_gate_pred: Callable[[], bool] | None = None
-        # Per-(project::role) set of roles with a pending deferred-spawn timer.
-        # Prevents duplicate QTimer callbacks while the gate is still blocked.
-        self._spawn_deferred: set[str] = set()
-        # FIFO queue: serialise ConPTY construction so only one session.spawn()
-        # runs at a time (a second call while one is in progress is queued here
-        # and re-dispatched by _drain_spawn_queue when the current one finishes).
-        self._spawn_queue: collections.deque = collections.deque()
-        # True while a ConPTY session.spawn() call is executing on this thread.
-        self._spawn_in_progress: bool = False
+        # _spawn_deferred, _spawn_queue, _spawn_in_progress → self._registry
 
     # ──────────────────────────────────────────────────────────────
     # project-aware view onto the pane registry  (SpawnEngineMixin provides _ps + spawn methods)
