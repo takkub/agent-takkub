@@ -52,8 +52,3 @@ scratch/
 
 # Large local media tarballs (gameplay captures etc.) — never committed.
 *.tar
-
-# Serena MCP — machine-local symbol navigation. .mcp.json holds absolute paths to
-# serena.exe + project dir (this machine only); .serena/ holds the 8MB symbol cache.
-.mcp.json
-.serena/
