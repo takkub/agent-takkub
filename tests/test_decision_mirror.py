@@ -100,9 +100,9 @@ class TestRenderDecisionNote:
         now = dt.datetime(2026, 5, 17, 14, 30, 45)
         body = _render_decision_note("agent-takkub", "backend", "added /login endpoint to API", now)
         assert "backend done" in body
-        # Project line is now a wikilink so Obsidian's graph clusters
-        # every session of a project under the project page.
-        assert "**Project:** [[01-Projects/agent-takkub|agent-takkub]]" in body
+        # Log body no longer carries the false wikilink — project lives in
+        # frontmatter (Dataview-readable) but not as a graph backlink.
+        assert "[[01-Projects/agent-takkub" not in body
         assert "added /login endpoint to API" in body
 
     def test_body_has_frontmatter_tags_for_dataview(self) -> None:

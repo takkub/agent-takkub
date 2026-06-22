@@ -132,7 +132,7 @@ class TestSaveDecisionNoteRejectsTraversal:
         )
 
         # Vault write happened.
-        sessions_dir = vault / "01-Projects" / "myproject" / "sessions"
+        sessions_dir = vault / "99-Logs" / "sessions" / "myproject"
         assert sessions_dir.is_dir()
         written = list(sessions_dir.glob("*.md"))
         assert len(written) == 1
@@ -210,7 +210,7 @@ class TestEndSessionRejectsTraversal:
         ok, _ = orch.end_session(project=TEST_PROJECT, note="safe project note")
         assert ok is True
 
-        vault_sessions = vault / "01-Projects" / TEST_PROJECT / "sessions"
+        vault_sessions = vault / "99-Logs" / "sessions" / TEST_PROJECT
         assert vault_sessions.is_dir()
         written = list(vault_sessions.glob("*.md"))
         assert len(written) == 1
@@ -281,7 +281,7 @@ class TestWriteResumeBriefsRejectsTraversal:
         ):
             orch.write_resume_briefs()
 
-        briefs_dir = vault / "07-AI-Command-Center" / "briefs"
+        briefs_dir = vault / "99-Logs" / "briefs"
         written = list(briefs_dir.glob("safeproject-*.md"))
         assert len(written) == 1, "expected one brief file for safe project"
 

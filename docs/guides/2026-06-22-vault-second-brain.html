@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="th"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Design review · 2026-06-22-vault-second-brain</title><style>
+:root{
+  --bg:#0e0e10;--panel:#18181b;--panel2:#1f1f23;--border:#27272a;
+  --fg:#e4e4e7;--muted:#a1a1aa;--dim:#71717a;
+  --high:#ef4444;--med:#f59e0b;--low:#52525b;--keep:#22c55e;--gold:#f5c542;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--fg);
+  font:14px/1.6 "Segoe UI","Leelawadee UI",system-ui,sans-serif}
+a{color:#60a5fa;text-decoration:none}a:hover{text-decoration:underline}
+.wrap{max-width:980px;margin:0 auto;padding:28px 22px 80px}
+h1{font-size:22px;margin:0 0 6px;border-bottom:1px solid var(--border);padding-bottom:16px}
+h2{font-size:17px;margin:30px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+h3{font-size:15px;margin:18px 0 8px}
+p{color:var(--muted)}
+code{background:var(--panel2);border:1px solid var(--border);border-radius:4px;
+  padding:1px 5px;font:12.5px "Cascadia Mono","Consolas",monospace}
+pre{background:var(--panel2);border:1px solid var(--border);border-radius:8px;
+  padding:12px 14px;overflow:auto}
+pre code{border:0;background:none;padding:0}
+strong{color:var(--fg)}
+blockquote{margin:18px 0;padding:12px 16px;border-radius:10px;
+  background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.3);color:#fcd34d}
+blockquote p{color:#fcd34d;margin:4px 0}
+ul,ol{padding-left:0}
+li{list-style:none;background:var(--panel);border:1px solid var(--border);
+  border-left:4px solid var(--low);border-radius:10px;padding:11px 15px;margin:0 0 10px;color:var(--muted)}
+li strong:first-child{color:var(--fg)}
+li ul,li ol{margin-top:8px;padding-left:0}
+li li{background:var(--panel2);margin:6px 0;padding:7px 12px}
+li:has(.badge.high){border-left-color:var(--high)}
+li:has(.badge.med){border-left-color:var(--med)}
+li:has(.badge.low){border-left-color:var(--low)}
+ol.steps-numbered li{counter-increment:none}
+.badge{font-size:10.5px;font-weight:700;letter-spacing:.04em;padding:2px 8px;
+  border-radius:5px;text-transform:uppercase;white-space:nowrap}
+.badge.high{background:var(--high);color:#fff}
+.badge.med{background:var(--med);color:#3a2a00}
+.badge.low{background:var(--low);color:#fff}
+.meta{color:var(--muted);font-size:13px;margin:-4px 0 4px}
+figure{margin:22px 0 26px;border:1px solid var(--border);border-radius:12px;overflow:hidden;background:#000}
+figure img{display:block;width:100%;height:auto}
+figcaption{padding:9px 14px;color:var(--muted);font-size:12px;background:var(--panel)}
+.missing-shot{padding:10px 14px;color:#fca5a5;background:rgba(239,68,68,.08);
+  border:1px solid rgba(239,68,68,.3);border-radius:8px;margin:10px 0;font-size:13px}
+footer{margin-top:40px;padding-top:16px;border-top:1px solid var(--border);
+  color:var(--dim);font-size:12px}
+</style></head><body><div class="wrap"><div class="meta">2026-06-22</div><h1>🧠 คู่มือ Vault Second Brain (3-tier)</h1>
+<p>หลัง vault-knowledge-refactor — vault แยกเป็น 3 ชั้นชัดเจน เพื่อให้ <strong>graph มีความหมาย</strong> + เก็บเฉพาะของจำเป็น + ใช้ได้จริง</p>
+<h2>ปัญหาเดิม (ก่อนแก้)</h2>
+<p>vault มี 2,232 notes แต่ลิงก์ไปแค่ 53 target, 86% ชี้ project hub, เฉลี่ย <strong>0.86 link/note</strong> → graph เป็น <strong>hub-and-spoke</strong> (ดาวกระจาย) เพราะทุก <code>takkub done</code> ฝัง <code>[[project]]</code> backlink ปลอมตัวเดียว = log archive ปลอมตัวเป็น second brain</p>
+<h2>โครงสร้างใหม่ — 3 tier</h2>
+<table>
+<thead>
+<tr>
+<th>Tier</th>
+<th>คือ</th>
+<th>อยู่ที่</th>
+<th>ใน graph?</th>
+<th>เก็บนาน</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>🟢 <strong>Knowledge</strong></td>
+<td>decision+เหตุผล, bug pattern, สิ่งที่เรียนรู้</td>
+<td><code>02-Areas/</code> (MOC), <code>01-Projects/&lt;p&gt;.md</code></td>
+<td><strong>ใช่</strong> (ลิงก์จริง)</td>
+<td>ถาวร</td>
+</tr>
+<tr>
+<td>🟡 <strong>Log</strong></td>
+<td>resume brief, daily digest</td>
+<td><code>99-Logs/briefs/</code>, <code>05-Daily/</code></td>
+<td>ไม่</td>
+<td>brief 30 วัน</td>
+</tr>
+<tr>
+<td>🔴 <strong>Session log</strong></td>
+<td>บันทึกแต่ละ <code>takkub done</code></td>
+<td><code>99-Logs/sessions/</code></td>
+<td>ไม่</td>
+<td>14 วัน (เก็บ last 5/project)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>หลักคิด:</strong> <code>takkub done</code> = <strong>log</strong> ไม่ใช่ <strong>knowledge</strong> — log ไม่ฝัง backlink ปลอมอีก, ไปอยู่ <code>99-Logs/</code> (ซ่อนจาก graph), prune อัตโนมัติ</p>
+<h2>สิ่งที่เปลี่ยนในระบบ</h2>
+<ol>
+<li><strong>Session log → <code>99-Logs/sessions/&lt;project&gt;/</code></strong> (เดิม <code>01-Projects/&lt;p&gt;/sessions/</code>) + <strong>เลิกฝัง <code>[[project]]</code> backlink ปลอม</strong> บน log</li>
+<li><strong>Brief → <code>99-Logs/briefs/</code></strong> (resume value คงเดิม แค่ออกนอก graph)</li>
+<li><strong>Auto-prune:</strong> session log &gt;14 วันลบ (เก็บ last 5/project), brief &gt;30 วันลบ</li>
+<li><strong>Distill layer:</strong> ตอน session จบ → สกัด durable fact (decision/bug/pattern) → append <code>## Decisions &amp; Learnings</code> ลง <code>01-Projects/&lt;p&gt;.md</code> พร้อมลิงก์ไป MOC (best-effort ไม่ block)</li>
+<li><strong>Obsidian graph filter:</strong> ซ่อน <code>99-Logs / sessions / briefs / 05-Daily</code> + ปิด orphans → graph เหลือเฉพาะ knowledge</li>
+</ol>
+<h2>วิธีใช้งานจริง</h2>
+<h3>หา knowledge</h3>
+<p>เริ่มที่ [[../../second-brain/02-Areas/_index|02-Areas/_index.md]] (MOC กลาง) → ตามลิงก์ไป <code>architecture-decisions</code> / <code>bug-patterns</code> / project page</p>
+<h3>หา "เคยทำอะไรไว้" (resume)</h3>
+<p><code>99-Logs/briefs/&lt;project&gt;-&lt;วันที่&gt;.md</code> — transcript tail 20 exchange ล่าสุด (Lead ดึงอัตโนมัติตอน resume งานต่อ)</p>
+<h3>graph view</h3>
+<p>ตอนนี้โชว์เฉพาะ knowledge ที่ลิงก์กันจริง — ไม่มีก้อน log รก ถ้ายังเห็นก้อนเก่า: รัน migration (ด้านล่าง) เพื่อย้าย log เก่าออกจริง</p>
+<h2>One-time migration (รันเองตอนสะดวก)</h2>
+<p>log เก่า ~1,931 ไฟล์ยังอยู่ใน <code>01-Projects/*/sessions/</code> (graph ซ่อนให้แล้ว แต่ไฟล์ยังอยู่). ย้ายออกจริงด้วย:</p>
+<pre><code class="language-bash"># preview ก่อน (ไม่เขียนอะไร)
+python scripts/migrate_vault_logs.py --dry-run
+# รันจริง: move ~1,279 (&lt; 14 วัน) → 99-Logs, delete ~652 (เกิน 14 วัน)
+python scripts/migrate_vault_logs.py
+</code></pre>
+<blockquote>
+<p>⚠️ ลบ 652 ไฟล์ที่เกิน retention (knowledge สำคัญถูก distill/extract ออกมาแล้ว) — irreversible ตรวจ <code>--dry-run</code> ก่อน</p>
+</blockquote>
+<h2>ของที่ extract ไว้แล้ว (ตัวอย่าง knowledge layer)</h2>
+<ul>
+<li><code>02-Areas/architecture-decisions.md</code> — decision ของ cockpit</li>
+<li><code>02-Areas/bug-patterns.md</code> — bug pattern ที่ซ้ำ</li>
+<li><code>01-Projects/agent-takkub.md</code> — enriched + Decisions &amp; Learnings</li>
+</ul>
+<p>(gemini extract จาก brief/post-mortem เดิม 17 links — เป็น format ให้ distill layer เลียนแบบต่อ)</p><footer>Generated by agent_takkub.design_review_html · self-contained (screenshots inlined) · open in any browser</footer></div></body></html>

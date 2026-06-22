@@ -40,14 +40,13 @@ def _make_session_md(
         f"tags: [session, {role}, {project}]\n"
         f"---\n\n"
         f"# {role} done · {iso}\n\n"
-        f"**Project:** [[01-Projects/{project}|{project}]]\n"
         f"**Role:** {role}\n\n"
         f"## Note\n\n{note.strip()}\n"
     )
 
 
 def _sessions_dir(vault: pathlib.Path, project: str) -> pathlib.Path:
-    d = vault / "01-Projects" / project / "sessions"
+    d = vault / "99-Logs" / "sessions" / project
     d.mkdir(parents=True, exist_ok=True)
     return d
 

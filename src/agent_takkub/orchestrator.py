@@ -133,10 +133,14 @@ from .vault_mirror import (  # re-exported for test + script imports
     _JUNK_NOTE_MIN_LEN,
     _JUNK_PROJECT_PREFIXES,
     _VAULT_ENV,
+    _is_dedup_note,
     _is_junk_note,
     _is_junk_project,
     _render_decision_note,
     _resolve_vault_dir,
+    distill_session_facts,
+    prune_vault_logs,
+    write_obsidian_graph_filter,
 )
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*[mABCDHJKSThlsu]")
@@ -174,6 +178,7 @@ __all__ = [  # backwards-compat re-exports
     "_build_lead_env",
     "_build_pane_env",
     "_default_plugin_dirs",
+    "_is_dedup_note",
     "_is_junk_note",
     "_is_junk_project",
     "_recent_session_brief",
@@ -182,8 +187,10 @@ __all__ = [  # backwards-compat re-exports
     "_resolve_vault_dir",
     "inject_user_profile_env",
     "prune_old_transcripts",
+    "prune_vault_logs",
     "render_lead_settings",
     "scan_artifacts",
+    "write_obsidian_graph_filter",
 ]
 
 
@@ -1155,6 +1162,8 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
             return
         if _is_junk_project(project):
             return
+        if _is_dedup_note(project, role, note):
+            return
         if now is None:
             now = datetime.now()
         body = _render_decision_note(project, role, note, now, transcript_path=transcript_path)
@@ -1179,12 +1188,15 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
         if vault is None:
             return
         try:
-            sessions = vault / "01-Projects" / safe_project / "sessions"
+            sessions = vault / "99-Logs" / "sessions" / safe_project
             sessions.mkdir(parents=True, exist_ok=True)
             stamp = now.strftime("%Y-%m-%dT%H%M%S")
             (sessions / f"{stamp}-{role}.md").write_text(body, encoding="utf-8")
         except OSError:
             pass
+
+        # Phase B: distill durable facts into 01-Projects/<project>.md (best-effort)
+        distill_session_facts(project, role, note, vault, now=now)
 
     def end_session(self, project: str | None = None, note: str = "") -> tuple[bool, str]:
         """Write a Lead session summary to runtime/sessions and the vault mirror.
@@ -1235,7 +1247,6 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
             f"tags: [session, lead, {project_ns}]\n"
             f"---\n\n"
             f"# lead session end · {iso}\n\n"
-            f"**Project:** [[01-Projects/{project_ns}|{project_ns}]]\n"
             f"**Role:** lead\n\n"
             f"## Note\n\n{note.strip()}\n"
         )
@@ -1265,12 +1276,15 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
         vault = _resolve_vault_dir()
         if vault is not None:
             try:
-                vault_sessions = vault / "01-Projects" / project_ns / "sessions"
+                vault_sessions = vault / "99-Logs" / "sessions" / project_ns
                 vault_sessions.mkdir(parents=True, exist_ok=True)
                 stamp = now.strftime("%Y-%m-%dT%H%M%S")
                 (vault_sessions / f"{stamp}-lead.md").write_text(body, encoding="utf-8")
             except OSError:
                 pass
+
+            # Phase B: distill durable facts from the session note (best-effort)
+            distill_session_facts(project_ns, "lead", note, vault, now=now)
 
         # Append today's Finish-Job digest to the vault's 05-Daily note.
         # Best-effort: the local session summary above is the contract, so a
@@ -1732,7 +1746,7 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
             return 0
         now = datetime.now()
         stamp = now.strftime("%Y-%m-%dT%H%M%S")
-        briefs_dir = vault / "07-AI-Command-Center" / "briefs"
+        briefs_dir = vault / "99-Logs" / "briefs"
         # Cap the scan window so a long-dormant project doesn't drag
         # months of jsonls into the brief — last 24 h is plenty for
         # "where did we leave off."
@@ -1759,6 +1773,15 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
                 written += 1
             except OSError:
                 continue
+        # Prune stale log files and ensure graph filter is set — best-effort.
+        try:
+            prune_vault_logs(vault)
+        except Exception:
+            pass
+        try:
+            write_obsidian_graph_filter(vault)
+        except Exception:
+            pass
         return written
 
     def write_daily_digest(self, project: str) -> bool:
