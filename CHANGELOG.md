@@ -5,6 +5,19 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 ## [vNEXT]
 
 ### Changed (เปลี่ยน)
+- **Vault knowledge refactor (3-tier): แยก log ออกจาก knowledge** — vault เดิม 2,232
+  notes แต่ลิงก์แค่ 53 target (86% ชี้ project hub, 0.86 link/note) เพราะทุก `takkub done`
+  ฝัง `[[01-Projects/<p>]]` backlink ปลอมตัวเดียว → graph เป็น hub-and-spoke ไร้ประโยชน์
+  (log archive ปลอมตัวเป็น second brain). แก้เป็น 3-tier: 🟢 **knowledge**
+  (`02-Areas/` MOC + `01-Projects/<p>.md`, ลิงก์จริง, อยู่ใน graph), 🟡 **log**
+  (`99-Logs/`, ซ่อนจาก graph, prune), 🔴 **session** (14 วัน เก็บ last 5/project).
+  เปลี่ยน: session log → `99-Logs/sessions/`, brief → `99-Logs/briefs/`, **เลิกฝัง
+  backlink ปลอมบน log** (`_render_decision_note`), auto-prune (session 14d / brief 30d),
+  strengthen junk filter + dedup, **distill layer** (`distill_session_facts()` —
+  session จบ → สกัด durable fact → append `## Decisions & Learnings` + MOC scaffolding,
+  best-effort), Obsidian graph filter ซ่อน log/orphans. + migration script
+  `scripts/migrate_vault_logs.py` (move <14d → 99-Logs, delete >14d) + 64 tests.
+  design: `docs/design/vault-knowledge-refactor.md` · guide: `docs/guides/2026-06-22-vault-second-brain.md`.
 - **Verify flow ใหม่: DEV เสร็จทุกอย่าง → devops ยก stack ขึ้น (port-safe) → QA ท้ายสุด** —
   เดิม impl done → fire qa+reviewer คู่ขนานทันที ตอนนี้ QA เป็น "ปุ่มจบ" รันท้ายสุด
   ต่อเมื่อ DEV งานหลักเสร็จหมด **และ** (ถ้าโปรเจคมี docker compose) devops ยก stack

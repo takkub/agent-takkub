@@ -166,7 +166,7 @@ class TestEndSession:
     def test_vault_present_file_written(
         self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
     ) -> None:
-        """Vault configured → file written inside vault/01-Projects/<project>/sessions/."""
+        """Vault configured → file written inside vault/99-Logs/sessions/<project>/."""
         runtime = tmp_path / "runtime"
         fake_vault = tmp_path / "vault"
         (fake_vault / "01-Projects").mkdir(parents=True)
@@ -176,9 +176,7 @@ class TestEndSession:
         ok, _ = orch.end_session(project=TEST_PROJECT, note="vault write test for session")
         assert ok is True
 
-        vault_files = list(
-            (fake_vault / "01-Projects" / TEST_PROJECT / "sessions").rglob("*-lead.md")
-        )
+        vault_files = list((fake_vault / "99-Logs" / "sessions" / TEST_PROJECT).rglob("*-lead.md"))
         assert len(vault_files) == 1
 
     def test_done_events_listed_in_body(

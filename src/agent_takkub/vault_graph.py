@@ -1,7 +1,7 @@
 """vault_graph — analyse decision-note logs from the Obsidian vault sessions.
 
 Parses session .md files written by ``_save_decision_note`` (vault_mirror.py)
-under ``<vault>/01-Projects/<project>/sessions/`` and produces a project-health
+under ``<vault>/99-Logs/sessions/<project>/`` and produces a project-health
 report: decision chains, blocker frequency, role trend, and an overall health
 score.
 
@@ -166,7 +166,7 @@ def _parse_session_file(path: pathlib.Path) -> SessionEntry | None:
 # ── session loader ────────────────────────────────────────────────────────────
 def load_sessions(project: str, vault: pathlib.Path) -> list[SessionEntry]:
     """Load all session .md files for *project* from the vault mirror."""
-    sessions_dir = vault / "01-Projects" / project / "sessions"
+    sessions_dir = vault / "99-Logs" / "sessions" / project
     if not sessions_dir.is_dir():
         return []
 
@@ -332,7 +332,7 @@ def analyse(
     Parameters
     ----------
     project:
-        Project name as used in ``01-Projects/<project>/sessions/``.
+        Project name as used in ``99-Logs/sessions/<project>/``.
     date_str:
         Optional ``YYYY-MM-DD`` to filter entries to a single day.
     vault:
