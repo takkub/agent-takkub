@@ -424,6 +424,12 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
         # disk so a teammate's done report survives a cockpit restart while the
         # Lead is down (issue #13).
         self._pending_done_notices: dict[str, list[dict]] = {}
+        # Per-project timestamp of when the reaper first saw pending notices it
+        # could not flush because the Lead read as not-ready. Drives the
+        # staleness escalation that force-delivers when is_at_ready_prompt() is a
+        # perpetual false-negative (e.g. a blocker marker in the Lead's visible
+        # conversation reads as busy — #70/#20). Cleared on successful flush.
+        self._pending_done_since: dict[str, float] = {}
         self._load_pending_done_notices()
         # In-memory serialisation queue for live Lead writes (ready-prompt aware).
         # Keyed by project namespace.  Items are string bodies; a single pump
