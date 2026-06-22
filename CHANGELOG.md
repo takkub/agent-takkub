@@ -44,6 +44,17 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
   (เลิกผูกกับ codex) + เพิ่มกฎ "ใช้ path รูปตรงๆ ห้าม recursive grep หา .png".
 
 ### Fixed (แก้)
+- **ready-detection scope ทั้งจอ → conversation body poison ได้ (#20 ราก, ต่อจาก #70)** —
+  `is_at_ready_prompt()` / `is_at_update_splash()` match marker (`bypass permissions`,
+  `esc to interrupt`, `update available!` ฯลฯ) ทั่ว **ทั้งจอ** → text ใน conversation body
+  ที่บังเอิญมี marker string (เช่น Lead ที่กำลังคุยเรื่อง marker เอง) ทำ verdict ผิด —
+  เป็น root cause ของ #70 false-busy stall. แก้: scope detection เฉพาะ **bottom region**
+  (`_ready_region`, bottom 6 non-blank rows = footer/status/input chrome) เหมือนที่
+  `_TTY_PROMPT_RE` anchor bottom rows อยู่แล้ว → body text ที่ scroll เหนือ region ไม่ poison.
+  `is_at_trust_prompt` คง full-screen (modal ต้องการ 2 marker พร้อมกัน, poison แทบเป็นไปไม่ได้).
+  + regression tests (body-quote ไม่ busy, real footer ยัง detect, short screen ไม่เปลี่ยน).
+  หมายเหตุ: #20 ส่วน "structural signals (exit code/ANSI) แทน text" ยังเหลือ — fix นี้แก้ facet
+  conversation-poison ที่กระทบจริง, ลด fragility มาก แต่ยังเป็น text-marker อยู่.
 - **done-notice spill ไม่ถูก reap เมื่อมี >1 project active → Lead chain ค้าง (#70)** —
   teammate ทำเสร็จ + ส่ง `takkub done` จริง แต่ notice spill ลง durable แล้ว reaper
   (`_reap_pending_done_notices`) ไม่ flush กลับ Lead → autonomous/auto-chain run ค้างเงียบ

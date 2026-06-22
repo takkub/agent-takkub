@@ -360,3 +360,57 @@ class TestOrphanedWideCharStub:
         assert len(findings) == 1
         assert findings[0].status is Status.OK
         assert findings[0].category == "markers"
+
+
+# -- footer-region scoping: conversation body must not poison detection --------
+
+
+class TestReadyRegionScoping:
+    """Root fix for #20/#70: ready & blocker markers are matched only against the
+    bottom footer/status region, so a marker string quoted in the conversation
+    BODY (e.g. a Lead discussing 'esc to interrupt' or 'bypass permissions')
+    can't poison the verdict. This was the root cause of the #70 false-busy
+    stall — a Lead whose visible conversation mentioned a blocker read as busy,
+    so the done-notice reaper skipped it forever.
+    """
+
+    def test_blocker_quoted_in_body_does_not_read_busy(self) -> None:
+        # 'esc to interrupt' in the body (row 0), a real ready footer at bottom.
+        s = PtySession(cols=80, rows=24)
+        body = (
+            "discussing the esc to interrupt marker\r\n"
+            + ("filler line\r\n" * 18)
+            + "bypass permissions"
+        )
+        s._feed_and_log(body.encode())
+        assert s.is_at_ready_prompt() is True  # body mention must not poison → busy
+
+    def test_real_blocker_at_bottom_still_detected(self) -> None:
+        # The genuine spinner sits in the bottom region → must still read busy.
+        s = PtySession(cols=80, rows=24)
+        body = ("filler line\r\n" * 18) + "Thinking... (esc to interrupt)\r\nbypass permissions"
+        s._feed_and_log(body.encode())
+        assert s.is_at_ready_prompt() is False
+
+    def test_ready_marker_quoted_in_body_does_not_false_ready(self) -> None:
+        # 'bypass permissions' only in the body (row 0); no real footer below.
+        s = PtySession(cols=80, rows=24)
+        body = "I added bypass permissions to the config\r\n" + ("output line\r\n" * 20)
+        s._feed_and_log(body.encode())
+        assert s.is_at_ready_prompt() is False
+
+    def test_update_available_in_body_is_not_a_live_splash(self) -> None:
+        s = PtySession(cols=80, rows=24)
+        body = (
+            "the codex update available! message is annoying\r\n"
+            + ("x\r\n" * 18)
+            + "bypass permissions"
+        )
+        s._feed_and_log(body.encode())
+        assert s.is_at_update_splash() is False  # body mention, not a live splash
+
+    def test_short_screen_unchanged(self) -> None:
+        # <= tail rows -> whole screen is the region; legacy behaviour preserved.
+        s = PtySession(cols=80, rows=24)
+        s._feed_and_log(b"bypass permissions")
+        assert s.is_at_ready_prompt() is True
