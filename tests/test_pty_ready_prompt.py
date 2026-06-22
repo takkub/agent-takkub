@@ -11,6 +11,8 @@ a thinking gemini reads as idle and the watchdog floods it with reminders
 
 from __future__ import annotations
 
+import pytest
+
 from agent_takkub.pty_session import PtySession
 
 
@@ -297,6 +299,59 @@ class TestReadyMarkerTable:
 
         monkeypatch.setenv("TAKKUB_EXTRA_READY_MARKERS", "zzz-not-a-real-marker")
         assert ready_marker_selftest() == []
+
+
+# -- orphaned wide-char stub crash (pyte display IndexError) ------------------
+
+
+class TestOrphanedWideCharStub:
+    """A wide (width-2) char that gets overwritten by a narrower one on a TUI
+    redraw leaves pyte a `data=""` stub cell. pyte's own `Screen.display` then
+    crashes with `IndexError: string index out of range` on `wcwidth(char[0])`.
+
+    That read happens every idle-watchdog tick via display_lines() — when it
+    threw, the per-pane watchdog body aborted, so a teammate that forgot
+    `takkub done` was never nudged (and Lead-bound done notices stalled). The
+    pane looked "finished, closed, never reported back", worsening with many
+    panes open. _safe_screen_display() must render the stub as empty instead of
+    crashing. Repro: wide char, carriage-return, narrow overwrite on one row.
+    """
+
+    @staticmethod
+    def _poisoned() -> PtySession:
+        s = PtySession(cols=80, rows=24)
+        # 中 = CJK width-2 @ col0 (stub "" @ col1); \r returns cursor; x is a
+        # width-1 overwrite of col0, orphaning the "" stub at col1.
+        s._feed_and_log("中\rx".encode())
+        return s
+
+    def test_raw_pyte_display_still_has_the_bug(self) -> None:
+        # Guard the guard: prove the constructed screen really triggers pyte's
+        # crash, so this regression test stays meaningful if pyte is upgraded.
+        s = self._poisoned()
+        with pytest.raises(IndexError):
+            list(s.screen.display)
+
+    def test_display_lines_does_not_raise(self) -> None:
+        s = self._poisoned()
+        rows = s.display_lines()  # must not raise
+        assert isinstance(rows, list)
+        assert rows[0].startswith("x")  # the overwrite survived; stub dropped
+
+    def test_state_detectors_do_not_raise_on_poison_stub(self) -> None:
+        s = self._poisoned()
+        # All three readers route through _safe_screen_display now.
+        assert s.is_at_ready_prompt() in (True, False)
+        s.has_unparsed_tool_call()
+        s.is_blocked_on_tty_prompt()
+
+    def test_ready_marker_survives_poison_stub(self) -> None:
+        # The whole point: a poison stub elsewhere on screen must not block the
+        # watchdog from seeing the real ready marker (else the teammate never
+        # gets nudged to call `takkub done`).
+        s = PtySession(cols=80, rows=24)
+        s._feed_and_log("中\rx\r\nbypass permissions".encode())
+        assert s.is_at_ready_prompt() is True
 
     def test_doctor_check_reports_ok(self) -> None:
         from agent_takkub.doctor import Status, check_ready_markers
