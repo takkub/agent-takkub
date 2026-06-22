@@ -24,6 +24,7 @@ import collections
 import json
 import pathlib
 import sys as _sys
+import time
 
 from PyQt6.QtCore import QTimer
 
@@ -63,6 +64,15 @@ _SUBMIT_MAX_RESENDS = 3
 # Prevents unbounded memory growth and ensures delivery survives a crash that
 # occurs while Lead is alive-but-wedged.
 LEAD_NOTIFY_BUSY_CAP = 75
+
+# Staleness escalation for the durable reaper (#70). When spilled done-notices
+# can't be flushed because the Lead reads as not-ready for this long, the
+# reaper force-delivers them anyway — guarding against an is_at_ready_prompt()
+# false-negative (a blocker marker in the Lead's visible conversation makes an
+# idle Lead read as busy → notices stranded forever, the #70 multi-project
+# stall). 60 s ≫ a real Lead turn, so a genuinely-busy Lead is rarely hit; if it
+# is, claude buffers the pasted input and processes it next.
+_DONE_NOTICE_STALE_S = 60.0
 
 
 def _delayed_enter(pane: AgentPane, session: PtySession, delay_ms: int) -> None:
@@ -708,9 +718,65 @@ class LeadInboxMixin:
         pending = getattr(self, "_pending_done_notices", None)
         if not pending:
             return
+        if not hasattr(self, "_pending_done_since"):
+            self._pending_done_since = {}
+        now = time.time()
         for project_ns in list(pending.keys()):
             lead = self._project_panes(project_ns).get(LEAD.name)
             if not (lead and lead.session and lead.session.is_alive):
+                # Lead absent — leave items durable for the next spawn; reset the
+                # staleness clock so it only counts time the Lead was actually up.
+                self._pending_done_since.pop(project_ns, None)
                 continue
             if lead.session.is_at_ready_prompt():
+                self._pending_done_since.pop(project_ns, None)
                 self._flush_pending_done_notices(project_ns)
+            else:
+                # Lead alive but not-ready. Normally transient (Lead mid-turn);
+                # the next tick retries. But is_at_ready_prompt() can be a
+                # perpetual false-negative (a blocker marker in the Lead's own
+                # visible conversation reads as busy — #20), which silently
+                # stranded notices forever (#70: a second active project's Lead
+                # never reaped). Escalate: after _DONE_NOTICE_STALE_S of an
+                # alive-but-never-ready Lead, force delivery regardless of the
+                # gate so the chain can never stall indefinitely.
+                since = self._pending_done_since.setdefault(project_ns, now)
+                if now - since >= _DONE_NOTICE_STALE_S:
+                    _log_event(
+                        "done_notice_force_flush",
+                        project=project_ns,
+                        stalled_s=round(now - since),
+                        count=len(pending.get(project_ns, [])),
+                    )
+                    self._pending_done_since.pop(project_ns, None)
+                    self._force_deliver_done_notices(project_ns)
+
+    def _force_deliver_done_notices(self, project_ns: str) -> None:
+        """Last-resort delivery for spilled done-notices when the Lead reads as
+        perpetually not-ready (is_at_ready_prompt() false-negative). Bypasses the
+        ready gate that _flush/_pump honour, pasting the spilled notices as a
+        single combined message (one paste + one verified submit, so no
+        clobbering) into the live Lead. Used only by the reaper's staleness
+        escalation — see _DONE_NOTICE_STALE_S (#70)."""
+        pending = getattr(self, "_pending_done_notices", {}).get(project_ns)
+        if not pending:
+            return
+        lead = self._project_panes(project_ns).get(LEAD.name)
+        if not (lead and lead.session and lead.session.is_alive):
+            return
+        items = self._pending_done_notices.pop(project_ns)
+        self._save_pending_done_notices(project_ns)
+        body = "\n\n".join(_sanitize_pane_text(item["body"]) for item in items)
+        sess = lead.session
+        payload = _paste_payload(body)
+        sess.write(payload)
+        delay = _enter_delay_ms(payload)
+        _orch_attr("_delayed_enter_verified", _delayed_enter_verified)(
+            lead,
+            sess,
+            delay,
+            on_resend=lambda rem: _log_event(
+                "done_notice_force_enter_resend", project=project_ns, remaining=rem
+            ),
+        )
+        self.leadInjected.emit(body)

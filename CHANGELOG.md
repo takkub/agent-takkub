@@ -44,6 +44,18 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
   (เลิกผูกกับ codex) + เพิ่มกฎ "ใช้ path รูปตรงๆ ห้าม recursive grep หา .png".
 
 ### Fixed (แก้)
+- **done-notice spill ไม่ถูก reap เมื่อมี >1 project active → Lead chain ค้าง (#70)** —
+  teammate ทำเสร็จ + ส่ง `takkub done` จริง แต่ notice spill ลง durable แล้ว reaper
+  (`_reap_pending_done_notices`) ไม่ flush กลับ Lead → autonomous/auto-chain run ค้างเงียบ
+  (เจอตอน 2 project รันขนาน: tak-game flush ได้ แต่ agent-takkub starve ~10 นาที).
+  **Root cause (พิสูจน์โดย elimination + repro):** reaper logic ถูกต้องทุก project แต่ gate
+  ด้วย `is_at_ready_prompt()` ซึ่งเป็น false-negative ได้ (blocker marker ในจอ conversation
+  ของ Lead เองอ่านเป็น busy — marker fragility #20) → Lead alive แต่ never-ready →
+  reaper skip ถาวร ไม่มี escalation. **แก้:** staleness escalation — track
+  `_pending_done_since` ต่อ project, ถ้า Lead alive-but-not-ready นานเกิน
+  `_DONE_NOTICE_STALE_S` (60s) → `_force_deliver_done_notices()` paste รวมเป็นข้อความเดียว
+  (1 paste + verified submit, ไม่ clobber) bypass ready gate + log `done_notice_force_flush`.
+  guarantee delivery ไม่ค้างถาวรแม้ ready-detection พัง. + repro/regression tests.
 - **teammate pane ค้างที่ codex `update available!` splash (#62)** — codex CLI splash
   modal ถือเป็น soft-block (`is_at_ready_prompt()` = False ถาวร) → orchestrator ไม่
   deliver task + idle watchdog ไม่เตือน → pane ค้างไม่จำกัดเวลา Lead รอ `takkub done`
