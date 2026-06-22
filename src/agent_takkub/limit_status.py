@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import dataclasses
+import getpass
 import json
 import logging
 import random
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import urllib.error
 import urllib.parse
@@ -28,9 +30,20 @@ _HEADERS_BASE = {
 _DEFAULT_USER_AGENT = "claude-cli/2.1.146 (external, cli)"
 _TIMEOUT_S = 10.0
 _WINDOW_NAMES = ("five_hour", "seven_day", "seven_day_sonnet")
+_KEYCHAIN_SERVICE = "Claude Code-credentials"
 
 _log = logging.getLogger(__name__)
 _cached_ua: str | None = None
+
+
+@dataclass
+class _KeychainSink:
+    service: str
+    account: str
+
+
+# Sink for credential write-back: a file path or a macOS Keychain entry.
+_CredSink = Path | _KeychainSink
 
 
 @dataclass
@@ -147,7 +160,7 @@ def _request_json(
 
 
 def _write_refreshed_token(
-    credentials_path: Path,
+    sink: _CredSink,
     raw: dict[str, Any],
     access_token: str,
     refresh_token: str | None,
@@ -171,11 +184,31 @@ def _write_refreshed_token(
         if refresh_token:
             raw["refresh_token"] = refresh_token
         raw["expires_at"] = expires_at_ms // 1000
-    credentials_path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+
+    if isinstance(sink, Path):
+        sink.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+    else:
+        try:
+            subprocess.run(
+                [
+                    "security", "add-generic-password",
+                    "-U",
+                    "-s", sink.service,
+                    "-a", sink.account,
+                    "-w", json.dumps(raw),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            _log.warning("Failed to write refreshed token to keychain: %s", exc)
 
 
 def _refresh_and_persist(
-    credentials_path: Path,
+    sink: _CredSink,
     raw: dict[str, Any],
     refresh_token: str,
 ) -> str:
@@ -191,7 +224,7 @@ def _refresh_and_persist(
     new_refresh_token = token_data.get("refresh_token")
     expires_in = int(token_data.get("expires_in", 3600))
     _write_refreshed_token(
-        credentials_path,
+        sink,
         raw,
         access_token,
         str(new_refresh_token) if new_refresh_token else None,
@@ -210,14 +243,50 @@ def _parse_window(name: str, value: dict[str, Any] | None) -> LimitWindow | None
     )
 
 
+def _load_credentials(config_dir: Path | None) -> tuple[dict[str, Any] | None, _CredSink]:
+    """Load credentials from file, falling back to macOS Keychain when file absent.
+
+    Returns (raw_dict, sink) where sink is the write-back target for token refresh.
+    """
+    cred_path = (config_dir or Path.home() / ".claude") / ".credentials.json"
+    if cred_path.exists():
+        try:
+            return json.loads(cred_path.read_text(encoding="utf-8")), cred_path
+        except (OSError, ValueError) as exc:
+            _log.warning("Failed to read credentials file %s: %s", cred_path, exc)
+
+    if sys.platform == "darwin":
+        account = getpass.getuser()
+        sink = _KeychainSink(service=_KEYCHAIN_SERVICE, account=account)
+        try:
+            result = subprocess.run(
+                ["security", "find-generic-password", "-s", _KEYCHAIN_SERVICE, "-w"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return json.loads(result.stdout.strip()), sink
+        except (OSError, subprocess.SubprocessError, ValueError) as exc:
+            _log.warning("Keychain lookup failed: %s", exc)
+        return None, sink
+
+    return None, cred_path
+
+
 def fetch_usage(config_dir: Path | None = None) -> UsageData | None:
-    credentials_path = (config_dir or Path.home() / ".claude") / ".credentials.json"
     try:
-        raw = json.loads(credentials_path.read_text(encoding="utf-8"))
+        raw, sink = _load_credentials(config_dir)
+        if raw is None:
+            _log.error("No credentials found (checked file%s)",
+                       " and keychain" if sys.platform == "darwin" else "")
+            return None
         credentials = _normalize_credentials(raw)
         token = credentials["access_token"]
         if not token:
-            _log.error("No access token found in %s", credentials_path)
+            _log.error("No access token found in credentials")
             return None
 
         if credentials["expires_at"] <= datetime.now(tz=UTC).timestamp() + 300:
@@ -225,7 +294,7 @@ def fetch_usage(config_dir: Path | None = None) -> UsageData | None:
             if not refresh_token:
                 _log.error("Token expired and no refresh token is available")
                 return None
-            token = _refresh_and_persist(credentials_path, raw, refresh_token)
+            token = _refresh_and_persist(sink, raw, refresh_token)
 
         data = _request_json(
             _USAGE_URL,

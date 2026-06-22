@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from agent_takkub import limit_status
-from agent_takkub.limit_status import LimitStore, UsageData
+from agent_takkub.limit_status import LimitStore, UsageData, _KeychainSink, _load_credentials
 
 
 class _FakeResponse:
@@ -200,3 +202,150 @@ class TestLimitStore:
                 store.get(cd)
 
         assert fetch_count == count_after_register, "get() must not trigger any additional fetches"
+
+
+# ---------------------------------------------------------------------------
+# _load_credentials tests
+# ---------------------------------------------------------------------------
+
+
+def test_load_credentials_reads_file_when_present(tmp_path: Path) -> None:
+    config_dir = tmp_path / ".claude"
+    config_dir.mkdir()
+    cred = {"claudeAiOauth": {"accessToken": "tok", "expiresAt": 9_999_999_999_000}}
+    (config_dir / ".credentials.json").write_text(json.dumps(cred), encoding="utf-8")
+
+    raw, sink = _load_credentials(config_dir)
+
+    assert raw == cred
+    assert sink == config_dir / ".credentials.json"
+
+
+def test_load_credentials_returns_none_on_missing_file_non_darwin(tmp_path: Path, monkeypatch) -> None:
+    config_dir = tmp_path / ".claude"
+    config_dir.mkdir()
+    monkeypatch.setattr(limit_status.sys, "platform", "linux")
+
+    raw, sink = _load_credentials(config_dir)
+
+    assert raw is None
+    assert isinstance(sink, Path)
+
+
+def test_load_credentials_keychain_fallback_on_darwin(tmp_path: Path, monkeypatch) -> None:
+    config_dir = tmp_path / ".claude"
+    config_dir.mkdir()  # no .credentials.json inside
+    monkeypatch.setattr(limit_status.sys, "platform", "darwin")
+    monkeypatch.setattr(limit_status.getpass, "getuser", lambda: "testuser")
+
+    cred = {"claudeAiOauth": {"accessToken": "kc-tok", "expiresAt": 9_999_999_999_000}}
+
+    fake_result = MagicMock()
+    fake_result.returncode = 0
+    fake_result.stdout = json.dumps(cred) + "\n"
+
+    with patch("agent_takkub.limit_status.subprocess.run", return_value=fake_result) as mock_run:
+        raw, sink = _load_credentials(config_dir)
+
+    assert raw == cred
+    assert isinstance(sink, _KeychainSink)
+    assert sink.service == limit_status._KEYCHAIN_SERVICE
+    assert sink.account == "testuser"
+    call_args = mock_run.call_args[0][0]
+    assert "find-generic-password" in call_args
+    assert limit_status._KEYCHAIN_SERVICE in call_args
+
+
+def test_load_credentials_keychain_not_found_returns_none(tmp_path: Path, monkeypatch) -> None:
+    config_dir = tmp_path / ".claude"
+    config_dir.mkdir()
+    monkeypatch.setattr(limit_status.sys, "platform", "darwin")
+    monkeypatch.setattr(limit_status.getpass, "getuser", lambda: "testuser")
+
+    fake_result = MagicMock()
+    fake_result.returncode = 44  # security exit code when not found
+    fake_result.stdout = ""
+
+    with patch("agent_takkub.limit_status.subprocess.run", return_value=fake_result):
+        raw, sink = _load_credentials(config_dir)
+
+    assert raw is None
+    assert isinstance(sink, _KeychainSink)
+
+
+def test_fetch_usage_uses_keychain_on_darwin(tmp_path: Path, monkeypatch) -> None:
+    """fetch_usage returns UsageData when credentials come from macOS Keychain."""
+    config_dir = tmp_path / ".claude"
+    config_dir.mkdir()  # no credentials file
+    monkeypatch.setattr(limit_status.sys, "platform", "darwin")
+    monkeypatch.setattr(limit_status.getpass, "getuser", lambda: "testuser")
+
+    expires_at_ms = int(datetime(2099, 1, 1, tzinfo=UTC).timestamp() * 1000)
+    cred = {
+        "claudeAiOauth": {
+            "accessToken": "kc-access-tok",
+            "expiresAt": expires_at_ms,
+            "subscriptionType": "max",
+            "rateLimitTier": "default_claude_max_5x",
+        }
+    }
+    fake_security = MagicMock()
+    fake_security.returncode = 0
+    fake_security.stdout = json.dumps(cred) + "\n"
+
+    payload = {
+        "five_hour": {"utilization": 10.0, "resets_at": "2099-01-01T00:00:00+00:00"},
+        "extra_usage": {"is_enabled": False},
+    }
+
+    def fake_urlopen(request, timeout):
+        return _FakeResponse(payload)
+
+    with patch("agent_takkub.limit_status.subprocess.run", return_value=fake_security):
+        monkeypatch.setattr(limit_status.urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(limit_status, "_resolve_user_agent", lambda: "test-agent")
+        usage = limit_status.fetch_usage(config_dir)
+
+    assert usage is not None
+    assert usage.plan == "Max 5x"
+    assert len(usage.windows) == 1
+    assert usage.windows[0].name == "five_hour"
+
+
+def test_write_refreshed_token_keychain_sink(monkeypatch) -> None:
+    """_write_refreshed_token calls `security add-generic-password` for keychain sink."""
+    sink = _KeychainSink(service="Claude Code-credentials", account="bob")
+    raw = {"claudeAiOauth": {"accessToken": "old", "expiresAt": 0}}
+
+    calls = []
+
+    def fake_run(cmd, **_kwargs):
+        calls.append(cmd)
+        result = MagicMock()
+        result.returncode = 0
+        return result
+
+    with patch("agent_takkub.limit_status.subprocess.run", side_effect=fake_run):
+        limit_status._write_refreshed_token(sink, raw, "new-tok", None, 3600)
+
+    assert any("add-generic-password" in " ".join(c) for c in calls)
+    written_json = next(
+        calls[i][calls[i].index("-w") + 1]
+        for i in range(len(calls))
+        if "-w" in calls[i]
+    )
+    written = json.loads(written_json)
+    assert written["claudeAiOauth"]["accessToken"] == "new-tok"
+
+
+def test_write_refreshed_token_file_sink(tmp_path: Path) -> None:
+    """_write_refreshed_token writes to file when sink is a Path (no regression)."""
+    cred_file = tmp_path / ".credentials.json"
+    raw = {"claudeAiOauth": {"accessToken": "old", "expiresAt": 0}}
+    cred_file.write_text(json.dumps(raw), encoding="utf-8")
+
+    limit_status._write_refreshed_token(cred_file, raw, "new-file-tok", "rt", 3600)
+
+    written = json.loads(cred_file.read_text(encoding="utf-8"))
+    assert written["claudeAiOauth"]["accessToken"] == "new-file-tok"
+    assert written["claudeAiOauth"]["refreshToken"] == "rt"
