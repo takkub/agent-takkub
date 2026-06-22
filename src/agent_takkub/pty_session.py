@@ -24,6 +24,7 @@ import pyte
 from PyQt6.QtCore import QObject, QThread, QTimer, pyqtSignal
 from wcwidth import wcwidth
 
+from ._pty_backend import spawn_pty
 from ._win_console import hide_hwnds, snapshot_console_hwnds
 
 # CREATE_NO_WINDOW so the helper taskkill doesn't flash a console window.
@@ -72,28 +73,41 @@ def _safe_screen_display(screen: pyte.Screen) -> list[str]:
 
 
 def _tree_kill(pid: int | None) -> None:
-    """Force-kill `pid` and its entire descendant process tree (Windows).
+    """Force-kill `pid` and its entire descendant process tree.
 
-    pywinpty's PtyProcess.terminate() only reaps the root command (claude.exe);
-    grandchildren spawned by a teammate — most painfully a `next dev` / `npm run
-    dev` server and the postcss / jest-worker node subprocesses it forks — are
-    left orphaned and accumulate into thousands of zombie node procs. `taskkill
-    /T` walks the parent→child tree by PID and force-kills every descendant.
+    The PTY backend's terminate() only reaps the root command (claude); grand-
+    children spawned by a teammate — most painfully a `next dev` / `npm run dev`
+    server and the postcss / jest-worker node subprocesses it forks — are left
+    orphaned and accumulate into thousands of zombie node procs.
+
+    Windows: `taskkill /T` walks the parent→child tree by PID.
+    POSIX (macOS/Linux): ptyprocess spawns the child via ``setsid`` so it is the
+    leader of its own process group; ``killpg`` on that group reaps the whole
+    descendant chain in one signal — the POSIX equivalent of `taskkill /T`.
 
     Best-effort and non-blocking-ish: short timeout, never raises (a failure
     here must not prevent the rest of terminate() from running).
     """
-    if pid is None or sys.platform != "win32":
+    if pid is None:
         return
+    if sys.platform == "win32":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=_CREATE_NO_WINDOW,
+                timeout=5,
+                check=False,
+            )
+        except Exception:
+            pass
+        return
+    # POSIX: kill the child's whole process group (it is the session leader).
     try:
-        subprocess.run(
-            ["taskkill", "/PID", str(pid), "/T", "/F"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=_CREATE_NO_WINDOW,
-            timeout=5,
-            check=False,
-        )
+        import signal
+
+        os.killpg(os.getpgid(pid), signal.SIGKILL)
     except Exception:
         pass
 
@@ -499,39 +513,18 @@ class PtySession(QObject):
         env: dict | None = None,
         transcript_path: str | None = None,
     ) -> None:
-        import winpty  # `pywinpty` pkg, module name is `winpty`
-
         # Remember which Claude config home this pane uses so the token meter
         # can locate its session JSONL (non-default profiles redirect it).
         self._claude_config_dir = (env or {}).get("CLAUDE_CONFIG_DIR")
 
-        cmd = subprocess.list2cmdline(list(argv))
-
         # Snapshot console windows before spawn so we can hide whatever new
-        # console window (cmd.exe / conhost) pywinpty surfaces.
+        # console window (cmd.exe / conhost) pywinpty surfaces (Windows only).
         pre_hwnds = snapshot_console_hwnds() if sys.platform == "win32" else set()
 
-        # Prefer ConPTY backend for lowest latency. ConPTY sends ANSI directly
-        # instead of scraping the screen buffer like WinPTY, eliminating the
-        # "delay" and replacing-character symptoms users experience during fast typing.
-        try:
-            import winpty
-
-            self._proc = winpty.PtyProcess.spawn(
-                cmd,
-                dimensions=(self.rows, self.cols),
-                cwd=cwd,
-                env=env,
-                backend=winpty.Backend.ConPTY,
-            )
-        except Exception:
-            # fall back if ConPTY isn't available
-            self._proc = winpty.PtyProcess.spawn(
-                cmd,
-                dimensions=(self.rows, self.cols),
-                cwd=cwd,
-                env=env,
-            )
+        # Cross-platform PTY: pywinpty (ConPTY) on Windows, ptyprocess on
+        # macOS/Linux. The backend wrapper normalises read→bytes and accepts
+        # str/bytes on write, so the reader/writer threads below stay identical.
+        self._proc = spawn_pty(argv, cwd=cwd, env=env, rows=self.rows, cols=self.cols)
         self._alive = True
         try:
             self._pid = int(self._proc.pid)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 from pathlib import Path
 
 _SAFE_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
@@ -374,13 +375,27 @@ def find_claude_executable() -> str:
     if cmd_path:
         return cmd_path
 
-    # nvm4w default
-    nvm_exe = Path("C:/nvm4w/nodejs/node_modules/@anthropic-ai/claude-code/bin/claude.exe")
-    if nvm_exe.exists():
-        return str(nvm_exe)
-    nvm_cmd = Path("C:/nvm4w/nodejs/claude.cmd")
-    if nvm_cmd.exists():
-        return str(nvm_cmd)
+    # Platform-specific default install locations (when not on PATH).
+    if sys.platform == "win32":
+        # nvm4w default
+        nvm_exe = Path("C:/nvm4w/nodejs/node_modules/@anthropic-ai/claude-code/bin/claude.exe")
+        if nvm_exe.exists():
+            return str(nvm_exe)
+        nvm_cmd = Path("C:/nvm4w/nodejs/claude.cmd")
+        if nvm_cmd.exists():
+            return str(nvm_cmd)
+    else:
+        # macOS / Linux: common npm-global and Homebrew bin locations, plus the
+        # native installer's ~/.local/bin and ~/.claude/local fallbacks.
+        for cand in (
+            Path.home() / ".local" / "bin" / "claude",
+            Path.home() / ".claude" / "local" / "claude",
+            Path.home() / "bin" / "claude",
+            Path("/opt/homebrew/bin/claude"),
+            Path("/usr/local/bin/claude"),
+        ):
+            if cand.exists():
+                return str(cand)
 
     raise RuntimeError(
         "Could not locate claude CLI. Install Claude Code or set CLAUDE_EXE env var."

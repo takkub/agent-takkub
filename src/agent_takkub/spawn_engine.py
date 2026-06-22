@@ -16,6 +16,7 @@ import collections
 import os
 import pathlib
 import secrets
+import sys
 import time
 import uuid as _uuid
 from collections.abc import Callable
@@ -783,12 +784,25 @@ class SpawnEngineMixin:
             # fail fast with a clear message, then hand the **basename** to
             # winpty and let it resolve via PATH — which the cockpit
             # controls via _build_pane_env() + the bin/ prepend below.
-            pwsh_full = _shutil.which("pwsh") or _shutil.which("powershell")
-            if pwsh_full is None:
-                return False, "PowerShell not on PATH (looked for pwsh / powershell)"
-            pwsh_basename = (
-                "pwsh.exe" if pwsh_full.lower().endswith("pwsh.exe") else "powershell.exe"
-            )
+            if sys.platform == "win32":
+                pwsh_full = _shutil.which("pwsh") or _shutil.which("powershell")
+                if pwsh_full is None:
+                    return False, "PowerShell not on PATH (looked for pwsh / powershell)"
+                pwsh_basename = (
+                    "pwsh.exe" if pwsh_full.lower().endswith("pwsh.exe") else "powershell.exe"
+                )
+                shell_argv = [pwsh_basename, "-NoLogo"]
+            else:
+                # POSIX (macOS/Linux): use the user's login shell, falling back
+                # to zsh (macOS default) then bash. Interactive (-i) so it loads
+                # rc files and behaves like a normal terminal.
+                posix_shell = (
+                    os.environ.get("SHELL")
+                    or _shutil.which("zsh")
+                    or _shutil.which("bash")
+                    or "/bin/sh"
+                )
+                shell_argv = [posix_shell, "-i"]
             spawn_cwd = cwd or default_cwd_for_role(role_name, project=project_ns) or str(REPO_ROOT)
             env = _build_pane_env()
             env["TAKKUB_ROLE"] = role_name
@@ -797,7 +811,6 @@ class SpawnEngineMixin:
             bin_dir = str(REPO_ROOT / "bin")
             env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
             _shell_tok = self._mint_pane_token(env, project_ns, role_name)
-            shell_argv = [pwsh_basename, "-NoLogo"]
             return self._launch_session(
                 pane=pane,
                 role_name=role_name,
@@ -932,8 +945,6 @@ class SpawnEngineMixin:
             #
             # Linux/macOS: keep workspace-write so the OS sandbox still
             # constrains an off-the-rails codex to its cwd.
-            import sys
-
             if sys.platform == "win32":
                 codex_argv = [
                     codex_bin,
@@ -1186,11 +1197,27 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         # to remember to export the variable in every shell. Skip if
         # the user already provides CHROME_BIN at the cockpit level.
         if base_role == "qa" and "CHROME_BIN" not in env:
-            for cand in (
-                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-                r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-                str(pathlib.Path.home() / "AppData/Local/Google/Chrome/Application/chrome.exe"),
-            ):
+            if sys.platform == "win32":
+                chrome_candidates = (
+                    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+                    str(pathlib.Path.home() / "AppData/Local/Google/Chrome/Application/chrome.exe"),
+                )
+            elif sys.platform == "darwin":
+                chrome_candidates = (
+                    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                    str(
+                        pathlib.Path.home()
+                        / "Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+                    ),
+                )
+            else:  # linux
+                chrome_candidates = (
+                    "/usr/bin/google-chrome",
+                    "/usr/bin/chromium",
+                    "/usr/bin/chromium-browser",
+                )
+            for cand in chrome_candidates:
                 if pathlib.Path(cand).is_file():
                     env["CHROME_BIN"] = cand
                     break
