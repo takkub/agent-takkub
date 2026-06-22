@@ -288,25 +288,46 @@ def _start_deadman_watchdog(window: MainWindow, _stop: threading.Event | None = 
 
 
 def _install_signal_handlers(window: MainWindow) -> None:
-    """Ensure spawned claude/winpty-agent children die with us, even when the
-    Qt window crashes or the process is killed externally (Ctrl+Break, parent
-    terminal close, OOM). closeEvent only fires on graceful close — these
-    hooks cover the rest."""
+    """Ensure spawned claude/pty children die with us, and that every pane's
+    PTY reader/writer QThread is stopped BEFORE Qt tears the app down — even on
+    the quit paths that bypass ``closeEvent``.
+
+    ``closeEvent`` only fires when a window is actually closed (the red X / Alt+F4).
+    macOS ⌘Q, the app-menu Quit, ``QApplication.quit()`` and a SIGTERM all end the
+    event loop WITHOUT a ``closeEvent`` — leaving each pane's still-running QThread
+    to be destroyed by Qt, which is a fatal error ("QThread: Destroyed while thread
+    is still running" → SIGABRT). Connecting the same teardown to ``aboutToQuit``
+    (emitted for every quit path before QObject destruction) closes that gap, and
+    atexit + signal handlers cover hard kills / crashes."""
 
     def _kill_all() -> None:
-        for pane in list(window.orch.panes.values()):
-            if pane.session is not None:
-                try:
-                    pane.mark_expected_exit()
-                    pane.session.terminate()
-                except Exception:
-                    pass
+        # Walk EVERY project namespace, not just the active tab, so background
+        # tabs' panes are torn down too (mirrors MainWindow.closeEvent).
+        try:
+            projects = list(window.orch._panes_by_project.values())
+        except Exception:
+            projects = []
+        for project_panes in projects:
+            for pane in list(project_panes.values()):
+                if pane.session is not None:
+                    try:
+                        pane.mark_expected_exit()
+                        pane.session.terminate()
+                    except Exception:
+                        pass
         try:
             window.cli.close()
         except Exception:
             pass
 
     atexit.register(_kill_all)
+
+    # Primary graceful path for ⌘Q / menu-Quit / quit(): runs while the QThreads
+    # are still joinable, before Qt destroys them. terminate() is idempotent, so
+    # this is safe even when closeEvent already ran.
+    app = QApplication.instance()
+    if app is not None:
+        app.aboutToQuit.connect(_kill_all)
 
     # SIGINT (Ctrl+C in launching terminal) + SIGTERM. Windows raises
     # SIGBREAK on Ctrl+Break — handle it the same way.

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import sys
 
 import pytest
 
@@ -44,9 +45,14 @@ class TestResolveProjectMemory:
 
     def test_encoding_matches_claude_code_convention(self, tmp_path) -> None:
         """The encoded directory name must match Claude Code's own scheme."""
-        # Windows-style path: C:\Users\monch\project
-        cwd = r"C:\Users\monch\project"
-        expected_encoded = "C--Users-monch-project"
+        if sys.platform == "win32":
+            # Windows-style path: C:\Users\monch\project
+            cwd = r"C:\Users\monch\project"
+            expected_encoded = "C--Users-monch-project"
+        else:
+            # POSIX path: /Users/monch/project (leading "/" → "-")
+            cwd = "/Users/monch/project"
+            expected_encoded = "-Users-monch-project"
         mem_dir = tmp_path / ".claude" / "projects" / expected_encoded / "memory"
         mem_dir.mkdir(parents=True, exist_ok=True)
         (mem_dir / "MEMORY.md").write_text("# mem", encoding="utf-8")

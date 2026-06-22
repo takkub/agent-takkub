@@ -53,7 +53,7 @@ class _WinptyBackend(_BackendBase):
     """pywinpty (ConPTY) backend. ``read`` yields ``str``; normalise to bytes."""
 
     @classmethod
-    def spawn(cls, argv: Sequence[str], cwd, env, rows: int, cols: int) -> "_WinptyBackend":
+    def spawn(cls, argv: Sequence[str], cwd, env, rows: int, cols: int) -> _WinptyBackend:
         import winpty  # `pywinpty` package, imported module name is `winpty`
 
         cmd = subprocess.list2cmdline(list(argv))
@@ -83,7 +83,7 @@ class _PosixBackend(_BackendBase):
     """ptyprocess backend (macOS / Linux). ``read``/``write`` are already bytes."""
 
     @classmethod
-    def spawn(cls, argv: Sequence[str], cwd, env, rows: int, cols: int) -> "_PosixBackend":
+    def spawn(cls, argv: Sequence[str], cwd, env, rows: int, cols: int) -> _PosixBackend:
         from ptyprocess import PtyProcess
 
         # ptyprocess execs argv[0] via PATH, so a bare `claude` (no `.exe`)

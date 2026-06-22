@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 from agent_takkub.verify import (
@@ -86,7 +87,7 @@ def _make_check(name: str, cmd: list[str], stack: str = "python") -> Check:
 
 
 def test_run_checks_all_passing(tmp_path: Path) -> None:
-    checks = [_make_check("echo", ["python", "-c", "import sys; sys.exit(0)"])]
+    checks = [_make_check("echo", [sys.executable, "-c", "import sys; sys.exit(0)"])]
     result = run_checks(checks, cwd=tmp_path)
     assert result.all_passed is True
     assert result.checks[0].exit_code == 0
@@ -94,8 +95,8 @@ def test_run_checks_all_passing(tmp_path: Path) -> None:
 
 def test_run_checks_one_failing(tmp_path: Path) -> None:
     checks = [
-        _make_check("ok", ["python", "-c", "import sys; sys.exit(0)"]),
-        _make_check("fail", ["python", "-c", "import sys; sys.exit(1)"]),
+        _make_check("ok", [sys.executable, "-c", "import sys; sys.exit(0)"]),
+        _make_check("fail", [sys.executable, "-c", "import sys; sys.exit(1)"]),
     ]
     result = run_checks(checks, cwd=tmp_path)
     assert result.all_passed is False
@@ -103,7 +104,7 @@ def test_run_checks_one_failing(tmp_path: Path) -> None:
 
 def test_run_checks_captures_stdout_stderr(tmp_path: Path) -> None:
     long_out = "x" * 200
-    checks = [_make_check("print", ["python", "-c", f"print('{long_out}')"])]
+    checks = [_make_check("print", [sys.executable, "-c", f"print('{long_out}')"])]
     result = run_checks(checks, cwd=tmp_path)
     # stdout_tail captures last 50 lines — a single long line still appears
     assert "x" in result.checks[0].stdout_tail

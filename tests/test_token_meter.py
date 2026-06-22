@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import sys
 
 from agent_takkub.token_meter import (
     _TAIL_SCAN_BYTES,
@@ -58,8 +59,13 @@ class TestEncodePathForClaude:
         assert "-claude-monitor-x" in enc
 
     def test_separators_and_drive(self) -> None:
-        enc = encode_path_for_claude("C:/Users/monch/WebstormProjects/agent-takkub")
-        assert enc == "C--Users-monch-WebstormProjects-agent-takkub"
+        if sys.platform == "win32":
+            enc = encode_path_for_claude("C:/Users/monch/WebstormProjects/agent-takkub")
+            assert enc == "C--Users-monch-WebstormProjects-agent-takkub"
+        else:
+            # POSIX has no drive letter; an absolute path's leading "/" encodes to "-".
+            enc = encode_path_for_claude("/Users/monch/WebstormProjects/agent-takkub")
+            assert enc == "-Users-monch-WebstormProjects-agent-takkub"
 
     def test_only_alnum_and_dash_remain(self) -> None:
         enc = encode_path_for_claude("C:/a_b.c/d e/f")
