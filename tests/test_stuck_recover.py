@@ -50,6 +50,9 @@ class _FakePane:
             # Default: not blocked on a TTY prompt. Without this, MagicMock
             # returns a truthy stub and the TTY-block gate defers every recovery.
             sess.is_blocked_on_tty_prompt.return_value = None
+            # Default: no update splash (#62). MagicMock returns truthy otherwise,
+            # which would route every recovery through the splash path.
+            sess.is_at_update_splash.return_value = False
             self.session = sess
         else:
             self.session = None

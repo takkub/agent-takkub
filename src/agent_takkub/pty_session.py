@@ -734,6 +734,20 @@ class PtySession(QObject):
         # one-line patch and `takkub doctor` can self-test them. See M4#17.
         return _classify_ready("\n".join(self.display_lines()).lower())
 
+    def is_at_update_splash(self) -> bool:
+        """True when a codex 'update available!' startup splash is blocking the prompt.
+
+        The codex splash modal ('update available! run npm i -g @openai/codex')
+        prevents the CLI from reaching its ready state.  Distinguished from the
+        passive Gemini update footer ('gemini cli update available!') which is
+        already classified ready=True by _READY_RULES and must NOT match here.
+
+        Caller note: this is only meaningful when is_at_ready_prompt() is False;
+        pairing both ensures the splash, not some other block, is the cause. (#62)
+        """
+        text = "\n".join(self.display_lines()).lower()
+        return "update available!" in text and "gemini cli update available!" not in text
+
     def rate_limit_reset_at(self) -> float | None:
         """If the pane is showing claude's usage-limit banner, return the epoch
         the limit resets at; else None.
