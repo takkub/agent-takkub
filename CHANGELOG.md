@@ -2,7 +2,7 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
-## [vNEXT]
+## [v0.9.0] - 2026-06-22
 
 ### Added (เพิ่ม)
 - **`takkub doctor` รายงาน version-behind** (`check_version`) — เดิม "ตามหลัง main กี่ commit"
