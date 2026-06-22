@@ -1,7 +1,10 @@
 """takkub doctor — diagnose cockpit environment.
 
-Pure-logic checks: no orchestrator TCP, no network probes, no installs.
-Every subprocess call uses timeout=5 + SUBPROCESS_NO_WINDOW to prevent hangs.
+Pure-logic checks: no orchestrator TCP, no installs. Network is avoided except
+by `check_version`, which does ONE best-effort `git fetch` (short timeout,
+degrades to the last-known ref offline) so a CLI-only user learns they're behind
+origin/main. Every subprocess call uses a short timeout + SUBPROCESS_NO_WINDOW
+to prevent hangs.
 """
 
 from __future__ import annotations
@@ -589,6 +592,77 @@ def check_ready_markers() -> list[Finding]:
     ]
 
 
+def check_version() -> list[Finding]:
+    """Report the cockpit's own version + how far behind origin/main it is.
+
+    The GUI update chip already shows this, but a CLI-only user never sees it —
+    so `takkub doctor` surfaces "you're N commits behind, here's how to update"
+    too. This is the ONE check that touches the network: a best-effort
+    `git fetch` (short timeout) so the behind-count is live; offline it
+    degrades to the last-known origin/main ref and says so.
+    """
+    from .update_helper import (
+        current_version_describe,
+        fetch_remote,
+        is_git_repo,
+        local_status,
+        pyproject_will_change_on_pull,
+    )
+
+    if not is_git_repo():
+        return [
+            Finding(
+                "version",
+                "tracking",
+                Status.INFO,
+                "not a git checkout — version-behind / one-click update disabled",
+                "convert via the cockpit's update chip ('Enable updates') to enable updates",
+            )
+        ]
+
+    described = current_version_describe() or "(unknown)"
+    fetched, _ = fetch_remote(timeout=8.0)  # best-effort; offline → last-known ref
+    st = local_status()
+    if not st.get("ok"):
+        return [
+            Finding("version", "current", Status.WARN, described, f"git: {st.get('error', '?')}")
+        ]
+
+    freshness = "" if fetched else "  (offline — vs last-known origin/main)"
+    behind = st.get("behind", 0)
+    findings: list[Finding] = []
+    if behind == 0:
+        findings.append(
+            Finding("version", "current", Status.OK, f"{described} — up to date{freshness}")
+        )
+    else:
+        hint = "update via the cockpit chip, or `git pull --ff-only origin main`"
+        if pyproject_will_change_on_pull():
+            hint += " then `pip install -e .` (dependencies changed)"
+        findings.append(
+            Finding(
+                "version",
+                "behind",
+                Status.WARN,
+                f"{described} — {behind} commit{'s' if behind != 1 else ''} behind "
+                f"origin/main{freshness}",
+                hint,
+            )
+        )
+    if not st.get("clean", True):
+        n = len(st.get("dirty_files", []))
+        findings.append(
+            Finding(
+                "version",
+                "local-edits",
+                Status.INFO,
+                f"{n} tracked file{'s' if n != 1 else ''} with uncommitted changes",
+                "commit or stash before pulling",
+            )
+        )
+    return findings
+
+
 def run_all_checks() -> list[Finding]:
     findings: list[Finding] = []
     findings.extend(check_claude())
@@ -599,6 +673,7 @@ def run_all_checks() -> list[Finding]:
     findings.extend(check_providers())
     findings.extend(check_hooks())
     findings.extend(check_ready_markers())
+    findings.extend(check_version())
     return findings
 
 

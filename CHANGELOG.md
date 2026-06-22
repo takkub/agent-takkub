@@ -4,6 +4,14 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Added (เพิ่ม)
+- **`takkub doctor` รายงาน version-behind** (`check_version`) — เดิม "ตามหลัง main กี่ commit"
+  อยู่แค่ใน GUI update chip → user ที่ใช้ CLI ล้วน (เพื่อนที่เพิ่ง install) ไม่เห็น. เพิ่ม check
+  ใน doctor: โชว์ version (`git describe`) + behind count เทียบ origin/main + hint วิธีอัพ
+  (`git pull --ff-only` + `pip install -e .` ถ้า deps เปลี่ยน) + เตือน local edits. เป็น check
+  เดียวที่แตะ network (best-effort `git fetch` timeout สั้น, offline → ใช้ ref ล่าสุด + บอกว่า
+  offline). ไม่ใช่ git repo → INFO บอกแปลงเป็น checkout ก่อน. + tests.
+
 ### Changed (เปลี่ยน)
 - **self-update sync deps อัตโนมัติ — เครื่องอื่นอัพแล้ว "เท่า main" จริง (ไม่ใช่แค่ code)** —
   self-update chip ที่มีอยู่ (poll `origin/main` ทุก 5 นาที → tray balloon + ปุ่มกะพริบเตือน
