@@ -699,11 +699,17 @@ class MainWindowUpdateMixin:
         # in the same dialog rather than after the pull lands.
         from .update_helper import pyproject_will_change_on_pull
 
-        pip_warn = (
-            "\n\n⚠ pyproject.toml is changing — you'll need to run\n"
-            "`pip install -e .` in `.venv` after the restart so the\n"
-            "new dependencies take effect."
-            if pyproject_will_change_on_pull()
+        # Detect a dependency change up front. When pyproject.toml is in the
+        # incoming diff the restart must also re-run `pip install -e .` or the
+        # new version boots against stale deps — the gap that left other
+        # machines "code-updated but not really equal". We now sync deps
+        # automatically (detached, post-quit) instead of asking the user to.
+        deps_changing = pyproject_will_change_on_pull()
+        pip_note = (
+            "\n\n📦 New dependencies detected — they'll be installed\n"
+            "automatically (pip install -e .) before the cockpit\n"
+            "comes back, so this restart takes a little longer."
+            if deps_changing
             else ""
         )
         confirm = QMessageBox.question(
@@ -714,7 +720,7 @@ class MainWindowUpdateMixin:
             "⚠ Cockpit will restart immediately after the pull.\n\n"
             "Your project paths (projects.json), session history\n"
             "(runtime/), and venv are safe — only git-tracked files\n"
-            f"are touched.{pip_warn}",
+            f"are touched.{pip_note}",
             QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Ok,
         )
@@ -725,10 +731,94 @@ class MainWindowUpdateMixin:
             QMessageBox.critical(self, "Pull failed", msg)
             self._run_update_check()  # refresh chip with latest state
             return
-        # Pull succeeded — restart immediately. No second confirm; the
-        # one dialog above already promised this behaviour.
-        self._status.showMessage(f"{msg} — restarting…", 6_000)
-        QTimer.singleShot(500, self._restart_cockpit)
+        # Pull succeeded. If deps changed, restart through the pip-sync path so
+        # the new cockpit boots with the new dependencies installed; otherwise a
+        # plain restart is enough.
+        if deps_changing:
+            self._status.showMessage(f"{msg} — syncing dependencies + restarting…", 8_000)
+            QTimer.singleShot(500, self._restart_with_pip_sync)
+        else:
+            self._status.showMessage(f"{msg} — restarting…", 6_000)
+            QTimer.singleShot(500, self._restart_cockpit)
+
+    def _restart_with_pip_sync(self) -> None:
+        """Restart after a self-update that changed dependencies, re-running
+        `pip install -e .` first via a detached script so the new cockpit boots
+        with the new deps installed (#self-update completeness).
+
+        Mirrors the Claude-CLI detached-updater pattern: persist state, hand a
+        script to a DETACHED process, quit. The script waits for THIS process to
+        exit, runs pip in the venv (nothing holding it), then relaunches the
+        cockpit — relaunching even if pip fails so the user is never bricked.
+
+        On any failure to set up the detached path we fall back to a plain
+        restart: the code is already pulled, so worst case is the previous
+        behaviour (boot against stale deps + the user re-runs pip), never worse.
+        """
+        import subprocess
+        import sys
+
+        from .update_helper import build_pip_sync_script
+
+        # Persist up-front — we quit() right after spawning, can't rely on closeEvent.
+        for fn in (
+            self._save_window_state,
+            self._persist_open_tabs,
+            self.orch.write_session_snapshot,
+            self.orch.write_resume_briefs,
+        ):
+            try:
+                fn()
+            except Exception:
+                pass
+        try:
+            if PORT_FILE.exists():
+                PORT_FILE.unlink()
+        except Exception:
+            pass
+
+        is_win = sys.platform == "win32"
+        runtime_dir = REPO_ROOT / "runtime"
+        try:
+            runtime_dir.mkdir(parents=True, exist_ok=True)
+            log_path = runtime_dir / "pip_sync.log"
+            script_path = runtime_dir / ("pip_sync.ps1" if is_win else "pip_sync.sh")
+            script = build_pip_sync_script(
+                python_exe=sys.executable,
+                repo_root=str(REPO_ROOT),
+                log_path=str(log_path),
+                is_windows=is_win,
+                cockpit_pid=os.getpid(),
+            )
+            script_path.write_text(script, encoding="utf-8")
+            _log_event("pip_sync_start")
+            if is_win:
+                import shutil as _shutil
+
+                pwsh = _shutil.which("pwsh") or _shutil.which("powershell") or "powershell"
+                # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP so it outlives us.
+                flags = 0x00000008 | 0x00000200
+                subprocess.Popen(
+                    [pwsh, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
+                    cwd=str(REPO_ROOT),
+                    close_fds=True,
+                    creationflags=flags,
+                )
+            else:
+                subprocess.Popen(
+                    ["sh", str(script_path)],
+                    cwd=str(REPO_ROOT),
+                    close_fds=True,
+                    start_new_session=True,
+                )
+        except Exception as e:
+            # Couldn't set up the detached pip-sync — fall back to a plain
+            # restart (code is already pulled; this is the old behaviour).
+            _log_event("pip_sync_spawn_failed", err=f"{type(e).__name__}: {e}")
+            self._restart_cockpit()
+            return
+
+        QCoreApplication.quit()
 
     def _restart_cockpit(self) -> None:
         """Spawn a fresh agent-takkub process and quit this one.

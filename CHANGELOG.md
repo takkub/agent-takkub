@@ -5,6 +5,15 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 ## [vNEXT]
 
 ### Changed (เปลี่ยน)
+- **self-update sync deps อัตโนมัติ — เครื่องอื่นอัพแล้ว "เท่า main" จริง (ไม่ใช่แค่ code)** —
+  self-update chip ที่มีอยู่ (poll `origin/main` ทุก 5 นาที → tray balloon + ปุ่มกะพริบเตือน
+  เมื่อ behind → คลิก pull + auto-restart; ZIP install แปลงเป็น git checkout ได้) เดิม**แค่เตือน**
+  ให้ user รัน `pip install -e .` เองเมื่อ pull แล้ว `pyproject.toml` เปลี่ยน → ถ้าข้าม =
+  boot ทับ deps เก่า (ของไม่ครบ เครื่องอื่นไม่เท่า main จริง). แก้: เมื่อ pull เปลี่ยน deps →
+  `_restart_with_pip_sync()` spawn detached script (`build_pip_sync_script`, pattern เดียวกับ
+  Claude-CLI updater): รอ cockpit ตาย → `pip install -e .` ใน venv → relaunch (relaunch แม้ pip
+  fail = ไม่ brick, fallback เป็น restart ปกติถ้า spawn fail). + unit tests. → one-click update
+  ลง **code + deps ครบ** อัตโนมัติ ไม่ต้องทำ manual step.
 - **Vault knowledge refactor (3-tier): แยก log ออกจาก knowledge** — vault เดิม 2,232
   notes แต่ลิงก์แค่ 53 target (86% ชี้ project hub, 0.86 link/note) เพราะทุก `takkub done`
   ฝัง `[[01-Projects/<p>]]` backlink ปลอมตัวเดียว → graph เป็น hub-and-spoke ไร้ประโยชน์

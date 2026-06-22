@@ -219,6 +219,59 @@ def pyproject_changed_in_pull(before_sha: str, after_sha: str) -> bool:
     return "pyproject.toml" in {f.strip() for f in files}
 
 
+def build_pip_sync_script(
+    python_exe: str,
+    repo_root: str,
+    log_path: str,
+    is_windows: bool,
+    cockpit_pid: int,
+) -> str:
+    """Return a self-contained detached script that re-syncs dependencies after
+    a self-update pull that changed ``pyproject.toml``, then relaunches.
+
+    Why detached instead of inline: the cockpit's own venv Python is running, so
+    a `pip install -e .` from inside it can hit file locks (esp. on Windows if a
+    binary wheel like PyQt is upgraded). Mirroring ``claude_update`` we hand this
+    to a DETACHED process and quit: it polls until *cockpit_pid* exits (30 s
+    cap), gives the OS a 1 s grace to release handles, runs
+    ``<python> -m pip install -e <repo>`` so the freshly-pulled
+    ``pyproject.toml`` deps are installed, then relaunches the cockpit. This is
+    what makes a one-click update land *fully equal to upstream* — code AND
+    dependencies — instead of leaving the user a manual "now run pip install"
+    step they might skip (the gap that left other machines half-updated).
+
+    The relaunch happens EVEN IF pip fails (a ``<log_path>.failed`` sentinel is
+    written) so a dependency hiccup never leaves the user without a cockpit.
+    Pure string builder → unit-testable; caller writes it + spawns it detached.
+    """
+    failed_sentinel = f"{log_path}.failed"
+    if is_windows:
+        return (
+            "$ErrorActionPreference = 'Continue'\r\n"
+            "$deadline = (Get-Date).AddSeconds(30)\r\n"
+            f"while ((Get-Process -Id {cockpit_pid} -ErrorAction SilentlyContinue) "
+            "-and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 200 }\r\n"
+            "Start-Sleep -Seconds 1\r\n"
+            f'& "{python_exe}" -m pip install -e "{repo_root}" *>&1 '
+            f'| Tee-Object -FilePath "{log_path}"\r\n'
+            "$code = $LASTEXITCODE\r\n"
+            f'if ($code -ne 0) {{ "FAILED exit=$code" | Out-File -FilePath "{failed_sentinel}" }}\r\n'
+            f"Start-Process -FilePath \"{python_exe}\" -ArgumentList '-m','agent_takkub' "
+            f'-WorkingDirectory "{repo_root}"\r\n'
+        )
+    return (
+        "#!/bin/sh\n"
+        f"pid={cockpit_pid}\n"
+        "i=0\n"
+        'while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 150 ]; do sleep 0.2; i=$((i+1)); done\n'
+        "sleep 1\n"
+        f'"{python_exe}" -m pip install -e "{repo_root}" > "{log_path}" 2>&1\n'
+        "code=$?\n"
+        f'[ "$code" -ne 0 ] && echo "FAILED exit=$code" > "{failed_sentinel}"\n'
+        f'cd "{repo_root}" && "{python_exe}" -m agent_takkub &\n'
+    )
+
+
 def init_git_repo() -> tuple[bool, str]:
     """Convert a non-git install (ZIP download / pip install / copy)
     into a proper git checkout pointing at origin/main, so the user
