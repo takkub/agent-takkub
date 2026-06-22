@@ -144,8 +144,12 @@ bash scripts/install.sh          # หรือ double-click scripts/install.com
 | (none) | ลงเฉพาะที่ยังไม่มี |
 | `--update` | re-install / upgrade ทุกตัว |
 | `--skip-mcp-prewarm` | ข้าม Phase 4b (MCP download อัตโนมัติตอน spawn แทน) |
+| `--skip-rtk` | ข้าม Phase 5 (ไม่ลง rtk) |
 | `--vault-dir <path>` | ที่ตั้ง Obsidian vault skeleton (default `~/WebstormProjects/second-brain`) |
 | `--no-vault` | ข้ามการสร้าง vault skeleton |
+
+> **rtk** ลงจาก **prebuilt binary ของ `github.com/rtk-ai/rtk`** ตรงเข้า `~/.local/bin` (ไม่ต้องมี Rust)
+> — ⚠️ ห้าม `cargo install rtk` เพราะ crate ชื่อ `rtk` บน crates.io เป็นคนละตัว (Rust Type Kit) ไม่ใช่ Token Killer
 
 Login ไม่รวมใน script (เหมือนฝั่ง Windows) — รันเองหลังเสร็จ:
 `claude` (required) · `codex login` (optional) · `agy` (optional)

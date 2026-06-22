@@ -30,6 +30,7 @@
 # Flags:
 #   --update            re-install / upgrade everything even if already present
 #   --skip-mcp-prewarm  skip Phase 4b (MCP packages still auto-download via npx)
+#   --skip-rtk          skip Phase 5 (don't install rtk / bootstrap Rust)
 #   --vault-dir <path>  Obsidian vault skeleton location (default: ~/WebstormProjects/second-brain)
 #   --no-vault          skip the vault skeleton
 #   -h | --help         show this help
@@ -42,11 +43,13 @@ set -uo pipefail
 # ── flags ────────────────────────────────────────────────────────────────
 UPDATE=0
 SKIP_MCP_PREWARM=0
+SKIP_RTK=0
 VAULT_DIR="$HOME/WebstormProjects/second-brain"
 while [ $# -gt 0 ]; do
   case "$1" in
     --update) UPDATE=1 ;;
     --skip-mcp-prewarm) SKIP_MCP_PREWARM=1 ;;
+    --skip-rtk) SKIP_RTK=1 ;;
     --vault-dir) VAULT_DIR="${2:-}"; shift ;;
     --no-vault) VAULT_DIR="" ;;
     -h|--help) grep '^#' "$0" | grep -v '^#!' | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -294,21 +297,63 @@ else
 fi
 
 # ───────────────────────────────────────────────────────────────────────────
-# Phase 5 — rtk (optional)
+# Phase 5 — rtk (Rust Token Killer — github.com/rtk-ai/rtk)
 # ───────────────────────────────────────────────────────────────────────────
+# IMPORTANT: the cockpit's rtk is rtk-ai/rtk (the "Rust Token Killer" with a
+# `rtk hook claude` PreToolUse processor). The crates.io crate named `rtk` is a
+# DIFFERENT, unrelated tool ("Rust Type Kit") — so `cargo install rtk` installs
+# the wrong binary. We install the official prebuilt release binary into
+# ~/.local/bin (fast, no Rust toolchain), and only fall back to building from
+# source via `cargo install --git` when a prebuilt asset isn't available and
+# cargo already exists. Opt out entirely with --skip-rtk (rtk is a token
+# optimisation; the cockpit runs fine without it).
 step "Phase 5 - rtk (Rust Token Killer)"
-if have rtk; then
-  if [ "$UPDATE" -eq 1 ] && have cargo; then
-    doing "upgrading rtk via cargo"; cargo install --force rtk && UPGRADED+=("rtk")
-  else
-    skip "rtk already on PATH"; SKIPPED+=("rtk")
+
+# Download the official rtk-ai/rtk prebuilt binary for this OS/arch into
+# ~/.local/bin (first on PATH, no sudo). Returns 0 only when rtk ends up runnable.
+install_rtk_prebuilt() {
+  local asset tmp bin
+  case "$(uname -m)" in
+    arm64|aarch64) [ "$OS" = "Darwin" ] && asset="rtk-aarch64-apple-darwin.tar.gz" || asset="rtk-aarch64-unknown-linux-gnu.tar.gz" ;;
+    x86_64)        [ "$OS" = "Darwin" ] && asset="rtk-x86_64-apple-darwin.tar.gz"  || asset="rtk-x86_64-unknown-linux-musl.tar.gz" ;;
+    *) return 1 ;;
+  esac
+  tmp="$(mktemp -d)"
+  # /releases/latest/download/<asset> redirects to the newest release's asset.
+  if ! curl -fsSL -o "$tmp/rtk.tar.gz" "https://github.com/rtk-ai/rtk/releases/latest/download/$asset"; then
+    rm -rf "$tmp"; return 1
   fi
-elif have cargo; then
-  doing "installing rtk via cargo"
-  if cargo install rtk; then ok "rtk installed"; INSTALLED+=("rtk"); else fail "rtk install failed"; FAILED+=("rtk"); fi
+  tar -xzf "$tmp/rtk.tar.gz" -C "$tmp" 2>/dev/null || { rm -rf "$tmp"; return 1; }
+  bin="$(find "$tmp" -type f -name rtk | head -1)"
+  [ -n "$bin" ] || { rm -rf "$tmp"; return 1; }
+  mkdir -p "$HOME/.local/bin"
+  cp "$bin" "$HOME/.local/bin/rtk"; chmod +x "$HOME/.local/bin/rtk"
+  [ "$OS" = "Darwin" ] && xattr -d com.apple.quarantine "$HOME/.local/bin/rtk" 2>/dev/null || true
+  rm -rf "$tmp"; hash -r 2>/dev/null || true
+  have rtk
+}
+
+if [ "$SKIP_RTK" -eq 1 ]; then
+  skip "rtk skipped (--skip-rtk)"; SKIPPED+=("rtk")
+elif have rtk && [ "$UPDATE" -eq 0 ]; then
+  skip "rtk already on PATH"; SKIPPED+=("rtk")
 else
-  skip "rtk skipped - no cargo. Use cockpit's '[Install rtk]' button after launch, or grab a release binary."
-  SKIPPED+=("rtk (no cargo)")
+  doing "installing rtk (rtk-ai/rtk prebuilt binary)"
+  if install_rtk_prebuilt; then
+    ok "rtk $(rtk --version 2>/dev/null | awk '{print $2}') installed ($(command -v rtk))"
+    [ "$UPDATE" -eq 1 ] && UPGRADED+=("rtk") || INSTALLED+=("rtk")
+  elif have cargo; then
+    doing "prebuilt unavailable — building from source (cargo install --git rtk-ai/rtk)"
+    CARGO_FORCE=""; [ "$UPDATE" -eq 1 ] && CARGO_FORCE="--force"
+    if cargo install $CARGO_FORCE --git https://github.com/rtk-ai/rtk >/dev/null 2>&1 && have rtk; then
+      ok "rtk installed from source ($(command -v rtk))"; INSTALLED+=("rtk (source)")
+    else
+      fail "rtk build failed"; FAILED+=("rtk")
+    fi
+  else
+    fail "rtk: prebuilt download failed and no cargo to build from source — install manually from https://github.com/rtk-ai/rtk"
+    FAILED+=("rtk")
+  fi
 fi
 
 # ───────────────────────────────────────────────────────────────────────────
