@@ -44,6 +44,18 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
   (เลิกผูกกับ codex) + เพิ่มกฎ "ใช้ path รูปตรงๆ ห้าม recursive grep หา .png".
 
 ### Fixed (แก้)
+- **structural stale-marker detection — silent break ของ ready-detection ให้ดังขึ้น (#20)** —
+  marker ทั้งหมดเป็น natural-language text ของ upstream CLI → reword เมื่อไหร่ detection
+  พังเงียบ (idle watchdog stall). full structural rewrite (exit code/ANSI) ทำไม่ได้ (CLI เป็น
+  interactive TUI long-lived ไม่มี exit code ตอนรัน, raw mode เสมอ) → ใช้ layered mitigation
+  แทน: เพิ่ม **output-quiescence primitive** (`PtySession.seconds_since_output()` — structural
+  signal ไม่พึ่ง text: CLI ที่ generate จะ stream ตลอด) + **stale-marker detector**
+  (`Orchestrator._check_stale_markers`): pane alive + quiet เกิน `STALE_MARKER_QUIET_S` (20s) +
+  ไม่ match marker ใดเลย → log `ready_marker_possibly_stale` พร้อม footer text จริง (rate-limit
+  10 นาที/pane) → operator เห็น prompt ที่ reword แล้ว rescue ด้วย `TAKKUB_EXTRA_READY_MARKERS`
+  ได้ (silent stall → loud diagnostic). + version-dependence registry (เอกสาร marker ไหน
+  เปราะ blast radius เท่าไหร่) ใน pty_session. + tests. ปิด #20 (mitigation ครบ 4 ชั้น:
+  footer-scope + env-override + doctor selftest + field detector).
 - **ready-detection scope ทั้งจอ → conversation body poison ได้ (#20 ราก, ต่อจาก #70)** —
   `is_at_ready_prompt()` / `is_at_update_splash()` match marker (`bypass permissions`,
   `esc to interrupt`, `update available!` ฯลฯ) ทั่ว **ทั้งจอ** → text ใน conversation body

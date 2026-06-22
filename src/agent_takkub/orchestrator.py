@@ -217,6 +217,18 @@ _POST_COMPACT_DETECT_SEC = 5 * 60
 IDLE_REMIND_AFTER_S = 45
 IDLE_REMIND_COOLDOWN_S = 90
 
+# Structural stale-marker detector (#20). A pane that is alive, has produced no
+# output for STALE_MARKER_QUIET_S (a generating CLI streams continuously, so
+# this long a silence means it is NOT mid-generation), and is matched by NO
+# state marker (not ready, not a known tty/trust/splash prompt) is almost
+# certainly sitting at an idle prompt whose wording an upstream CLI update
+# changed out from under our markers — the silent-break failure mode of #20.
+# We log it (rate-limited per pane) WITH the bottom screen text so the operator
+# can see the real footer and rescue detection via TAKKUB_EXTRA_READY_MARKERS.
+STALE_MARKER_QUIET_S = 20.0
+STALE_MARKER_COOLDOWN_S = 600.0
+STALE_MARKER_TAIL_ROWS = 4
+
 # A teammate pane in `working` state with no PTY output for this long
 # is treated as hung — claude probably crashed silently, deadlocked on
 # a tool call, or got wedged behind a slow MCP server. Orchestrator
@@ -472,6 +484,11 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
         # events.log) so a persistent fault is logged once with detail, not
         # flooded. See _check_idle_teammates' except block.
         self._idle_err_last: dict[str, tuple[str, float]] = {}
+        # Per-pane last-logged "ready marker possibly stale" timestamp — rate-
+        # limits the #20 structural staleness detector (a pane alive + output-
+        # quiet + matched by NO state marker = likely an upstream prompt reword
+        # that silently broke detection). See _check_stale_markers.
+        self._stale_marker_last: dict[str, float] = {}
         self._idle_watchdog = QTimer(self)
         self._idle_watchdog.setInterval(IDLE_WATCHDOG_INTERVAL_MS)
         self._idle_watchdog.timeout.connect(self._check_idle_teammates)
@@ -1945,6 +1962,9 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
         # Handles the case where notices spilled to _pending_done_notices while
         # Lead was busy — delivers them without requiring a Lead restart.
         self._reap_pending_done_notices()
+        # Surface panes whose idle prompt no marker recognises (structural #20
+        # staleness detector) — makes an upstream-reword silent break LOUD.
+        self._check_stale_markers(now)
         for project_name, project_panes in list(self._panes_by_project.items()):
             for name, pane in list(project_panes.items()):
                 try:
@@ -2088,6 +2108,56 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
                             err=err,
                         )
                         self._idle_err_last[key] = (err, now)
+
+    def _check_stale_markers(self, now: float) -> None:
+        """Surface a pane whose idle prompt no state marker recognises — the
+        silent-break signature of #20 (an upstream CLI reworded its prompt so
+        is_at_ready_prompt no longer matches).
+
+        Structural gate: only consider a pane that has been output-QUIET for
+        STALE_MARKER_QUIET_S. A generating CLI streams continuously, so a long
+        silence means the pane is genuinely settled, not mid-generation — a
+        signal independent of the (fragile) text markers. If a settled pane is
+        recognised by NO marker (not ready, not a known tty/trust/splash
+        prompt), detection has gone blind; log it (rate-limited per pane) with
+        the bottom screen text so the operator sees the real footer and can
+        rescue it via TAKKUB_EXTRA_READY_MARKERS — a loud diagnostic instead of
+        a silent idle-watchdog stall.
+        """
+        for project_name, project_panes in list(self._panes_by_project.items()):
+            for name, pane in list(project_panes.items()):
+                try:
+                    sess = pane.session
+                    if sess is None or not sess.is_alive:
+                        continue
+                    if sess.seconds_since_output() < STALE_MARKER_QUIET_S:
+                        continue  # still streaming → genuinely busy, not blind
+                    if sess.is_at_ready_prompt():
+                        continue  # recognised idle → markers working
+                    if sess.is_blocked_on_tty_prompt() or sess.is_at_trust_prompt():
+                        continue  # recognised shell/trust prompt
+                    if sess.is_at_update_splash():
+                        continue  # recognised codex splash (handled elsewhere)
+                    # Alive + settled + unrecognised → markers likely stale.
+                    key = f"{project_name}::{name}"
+                    last = self._stale_marker_last.get(key)
+                    if last is not None and (now - last) < STALE_MARKER_COOLDOWN_S:
+                        continue
+                    tail = " | ".join(
+                        ln.strip()
+                        for ln in sess.display_lines()[-STALE_MARKER_TAIL_ROWS:]
+                        if ln.strip()
+                    )[:300]
+                    _log_event(
+                        "ready_marker_possibly_stale",
+                        role=name,
+                        project=project_name,
+                        quiet_s=round(sess.seconds_since_output()),
+                        footer=tail,
+                    )
+                    self._stale_marker_last[key] = now
+                except Exception:
+                    continue
 
     def _check_stuck_panes(self, now: float) -> None:
         """Walk every teammate pane and auto-recover any that's been

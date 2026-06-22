@@ -154,6 +154,29 @@ _TTY_PROMPT_TAIL_ROWS = 5
 # reword is a one-line patch, with an env override to rescue a reworded prompt
 # without shipping code, and a doctor self-test that flags a stale marker.
 #
+# Version-dependence registry (#20) — every marker below is natural-language UI
+# text owned by an upstream CLI, so ALL are version-dependent. By blast radius:
+#   HIGH  'esc to interrupt' / 'esc to cancel' — the busy indicators. A reword
+#         makes a working pane read idle (premature done-nudge / early gate).
+#   HIGH  'bypass permissions' / 'shift+tab to cycle' (claude), '? for shortcuts'
+#         (agy), 'type your message or' (gemini) — the idle footers. A reword
+#         makes an idle pane read busy (watchdog never nudges; #70-style stall).
+#   MED   'update available!' (codex splash), 'trust this folder' / 'do you trust'
+#         / 'press enter to continue' (trust modals) — transient spawn-time gates.
+#   LOW   'gemini cli update available!' / 'openai codex (v' — passive banners.
+# Replacing this text with structural signals (exit codes / pty mode / ANSI) is
+# largely infeasible: the CLI is one long-lived interactive TUI (no exit code
+# while running) always in raw mode (no discriminating pty flag). The mitigation
+# is layered instead of a rewrite:
+#   1. _ready_region() scopes matching to the bottom footer rows so conversation
+#      body text quoting a marker can't poison the verdict (#70 root fix).
+#   2. TAKKUB_EXTRA_READY_MARKERS lets an operator rescue a reword with no deploy.
+#   3. ready_marker_selftest() (takkub doctor) catches a stale shipped marker.
+#   4. The orchestrator's structural stale-marker detector (output-quiescence +
+#      no-marker-match → 'ready_marker_possibly_stale' log with the real footer)
+#      turns a field reword from a SILENT idle-watchdog stall into a loud,
+#      actionable diagnostic. See Orchestrator._check_stale_markers.
+#
 # Hard blockers: any present → NEVER ready (active interrupt / modal), even if a
 # ready marker is also on screen.
 _READY_HARD_BLOCKERS = (
@@ -458,6 +481,13 @@ class PtySession(QObject):
         # it so a pane on a non-default user profile finds its session JSONL
         # under <config_dir>/projects/ instead of ~/.claude/projects/.
         self._claude_config_dir: str | None = None
+        # Monotonic timestamp of the last PTY output chunk. A *structural*
+        # idle/busy signal (independent of TUI text markers, #20): a generating
+        # CLI streams output continuously (spinner repaint + token stream), so a
+        # long gap since the last chunk means the pane has gone quiet. 0.0 = no
+        # output seen yet. Written in the reader thread, read on the main thread;
+        # a plain float read/write is atomic under the GIL so no lock is needed.
+        self._last_output_ts: float = 0.0
 
     # ──────────────────────────────────────────────────────────────
     # lifecycle
@@ -543,6 +573,8 @@ class PtySession(QObject):
         """Runs in the reader thread. Does the heavy work off the Qt main
         thread: write the transcript and feed pyte (under the screen lock).
         Best-effort — never raises so a bad chunk can't kill the reader."""
+        # Structural quiescence signal (#20): stamp every real output chunk.
+        self._last_output_ts = time.monotonic()
         if self._transcript is not None:
             try:
                 self._transcript.write(data)
@@ -779,6 +811,21 @@ class PtySession(QObject):
         """
         text = _ready_region(self.display_lines())
         return "update available!" in text and "gemini cli update available!" not in text
+
+    def seconds_since_output(self) -> float:
+        """Monotonic seconds since the PTY last produced output — a structural
+        idle/busy signal that does NOT depend on TUI text wording (#20).
+
+        A generating CLI streams output continuously (animated spinner + token
+        stream), so a large value means the pane has gone quiet. Used to
+        corroborate text-marker detection and, in the orchestrator, to flag a
+        pane that is quiet-but-unrecognised (the signature of an upstream prompt
+        reword that silently broke the markers). Returns ``inf`` before any
+        output has been seen."""
+        ts = self._last_output_ts
+        if not ts:
+            return float("inf")
+        return max(0.0, time.monotonic() - ts)
 
     def rate_limit_reset_at(self) -> float | None:
         """If the pane is showing claude's usage-limit banner, return the epoch
