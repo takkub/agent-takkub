@@ -448,6 +448,62 @@ if ($VaultDir -and (-not (Test-Path (Join-Path $VaultDir "01-Projects")))) {
 }
 
 # ─────────────────────────────────────────────────────────────
+# Verify — sanity-check key invariants; push to Summary.Failed
+# ─────────────────────────────────────────────────────────────
+Write-Step "Verify - installation sanity check"
+
+# 1. Package importable (no venv on Windows — check system/user install)
+python -c "import agent_takkub" 2>$null
+if ($LASTEXITCODE -eq 0) {
+    Write-Ok "agent_takkub package importable"
+} else {
+    Write-Fail "agent_takkub not importable — pip install -e . may have failed"
+    $script:Summary.Failed += "verify: agent_takkub import"
+}
+
+# 2. claude CLI on PATH
+if (Test-Cmd claude) {
+    Write-Ok "claude CLI on PATH ($(( Get-Command claude ).Source))"
+} else {
+    Write-Fail "claude not found on PATH — run: npm install -g @anthropic-ai/claude-code"
+    $script:Summary.Failed += "verify: claude"
+}
+
+# 3. Node v20+
+if (Test-Cmd node) {
+    $nodeVer   = node -v                                    # e.g. "v22.1.0"
+    $nodeMajor = [int]($nodeVer -replace '^v(\d+).*', '$1')
+    if ($nodeMajor -ge 20) {
+        Write-Ok "Node $nodeVer (v20+)"
+    } else {
+        Write-Fail "Node $nodeVer found but v20+ required"
+        $script:Summary.Failed += "verify: node v20+"
+    }
+} else {
+    Write-Fail "node not found on PATH"
+    $script:Summary.Failed += "verify: node"
+}
+
+# 4. takkub list (fallback: python -m agent_takkub.cli list if takkub not on PATH)
+if (Test-Cmd takkub) {
+    takkub list 2>$null | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Ok "takkub list: exit 0"
+    } else {
+        Write-Fail "takkub list returned non-zero — CLI may not be installed correctly"
+        $script:Summary.Failed += "verify: takkub list"
+    }
+} else {
+    python -m agent_takkub.cli list 2>$null | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Ok "takkub CLI: exit 0 (via python -m agent_takkub.cli list)"
+    } else {
+        Write-Fail "takkub not on PATH and python -m agent_takkub.cli list failed"
+        $script:Summary.Failed += "verify: takkub list"
+    }
+}
+
+# ─────────────────────────────────────────────────────────────
 # Summary
 # ─────────────────────────────────────────────────────────────
 Write-Host ""

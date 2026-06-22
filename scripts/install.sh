@@ -378,6 +378,8 @@ else
     else fail "pip install failed"; FAILED+=("cockpit"); fi
   fi
 fi
+# Exec bit can be lost when cloning on Windows or extracting a zip — fix it.
+chmod +x "$REPO_ROOT"/bin/* 2>/dev/null || true
 
 # ───────────────────────────────────────────────────────────────────────────
 # Phase 7 — Cockpit config
@@ -397,6 +399,39 @@ if [ -n "$VAULT_DIR" ]; then
   else
     mkdir -p "$VAULT_DIR/01-Projects" && { ok "vault skeleton created at $VAULT_DIR/01-Projects"; INSTALLED+=("vault skeleton"); }
   fi
+fi
+
+# ───────────────────────────────────────────────────────────────────────────
+# Verify — sanity-check key invariants; push to FAILED so Summary flags them
+# ───────────────────────────────────────────────────────────────────────────
+step "Verify - installation sanity check"
+
+if [ -x "$VENV/bin/agent-takkub" ]; then
+  ok "agent-takkub launcher present ($VENV/bin/agent-takkub)"
+else
+  fail "agent-takkub launcher missing or not executable at $VENV/bin/agent-takkub"
+  FAILED+=("verify: agent-takkub launcher")
+fi
+
+if have claude; then
+  ok "claude CLI on PATH ($(command -v claude))"
+else
+  fail "claude not found on PATH — run: npm install -g @anthropic-ai/claude-code"
+  FAILED+=("verify: claude")
+fi
+
+if node_ok; then
+  ok "Node $(node -v) (v20+)"
+else
+  fail "Node v20+ not found on PATH"
+  FAILED+=("verify: node")
+fi
+
+if [ -x "$VENV/bin/takkub" ] && "$VENV/bin/takkub" list >/dev/null 2>&1; then
+  ok "takkub CLI: exit 0"
+else
+  fail "takkub list returned non-zero — CLI may not be installed correctly"
+  FAILED+=("verify: takkub list")
 fi
 
 # ───────────────────────────────────────────────────────────────────────────

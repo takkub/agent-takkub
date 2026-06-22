@@ -17,16 +17,15 @@
 # See install.sh for the full description of phases / flags.
 # ─────────────────────────────────────────────────────────────
 set -uo pipefail
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCRIPT="$HERE/install.sh"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_ROOT"
 
-if [ ! -f "$SCRIPT" ]; then
-  echo "[FAIL] install.sh not found next to this .command"
-  echo "       expected at: $SCRIPT"
+if [ ! -f "scripts/install.sh" ]; then
+  echo "[FAIL] scripts/install.sh not found under $REPO_ROOT"
   exit 1
 fi
 
-bash "$SCRIPT" "$@"
+bash scripts/install.sh "$@"
 RC=$?
 
 # Keep the window readable when launched by double-click. Skip in CI with

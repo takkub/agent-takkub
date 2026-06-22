@@ -17,6 +17,11 @@ Five concerns live here:
    interactive y/N or credential prompts (issue #52). Sets npm_config_yes
    and GIT_TERMINAL_PROMPT at process level so every shell command inside
    the pane is non-interactive by default.
+6. `_apply_color_env()` — force a colour-capable `TERM`/`COLORTERM` on POSIX
+   panes so claude (and any CLI using supports-color) emits ANSI colour. The
+   allowlist only *passes through* an inherited TERM; when the cockpit is
+   launched from Finder / a `.app` bundle / `install.command`, no TERM exists
+   to inherit, so claude falls back to a "dumb" terminal and renders all-white.
 
 Extracted from orchestrator.py to keep that file focused on pane
 lifecycle (spawn/send/done/close) rather than environment plumbing.
@@ -27,6 +32,7 @@ with existing test imports.
 from __future__ import annotations
 
 import os
+import sys
 
 # Env vars that MUST pass through to claude/codex/gemini panes for them to
 # function. Anything not in this list is dropped to avoid leaking secrets
@@ -229,6 +235,30 @@ def _apply_non_interactive_env(env: dict[str, str]) -> None:
     """
     env.setdefault("npm_config_yes", "true")
     env.setdefault("GIT_TERMINAL_PROMPT", "0")
+
+
+def _apply_color_env(env: dict[str, str]) -> None:
+    """Force a colour-capable terminal profile on POSIX panes.
+
+    claude (and most Node CLIs, via ``supports-color``) decide whether to emit
+    ANSI colour from ``TERM``/``COLORTERM`` plus a TTY check. The pane *is* a
+    real pty (TTY check passes), but ``_build_pane_env()`` only forwards an
+    *inherited* ``TERM`` — and a cockpit launched from Finder, a ``.app``
+    bundle, or ``install.command`` has no ``TERM`` in its environment to
+    forward. With ``TERM`` empty/``dumb`` claude disables colour entirely, so
+    Claude Code renders all-white inside every pane.
+
+    The cockpit's xterm.js terminal fully supports 256-colour + truecolor, so
+    we advertise both. ``setdefault`` keeps any real value the operator already
+    exported (e.g. launching from a terminal with ``TERM=screen-256color``).
+
+    POSIX-only: on Windows the ConPTY backend negotiates colour through the
+    Windows console virtual-terminal sequences, independent of ``TERM``.
+    """
+    if sys.platform == "win32":
+        return
+    env.setdefault("TERM", "xterm-256color")
+    env.setdefault("COLORTERM", "truecolor")
 
 
 def inject_user_profile_env(env: dict[str, str], project: str) -> None:

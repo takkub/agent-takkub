@@ -49,6 +49,7 @@ from .orchestrator_text import (
     _teammate_tier,
 )
 from .pane_env import (
+    _apply_color_env,
     _apply_ecc_mute,
     _apply_mcp_timeout,
     _apply_non_interactive_env,
@@ -810,6 +811,9 @@ class SpawnEngineMixin:
             inject_user_profile_env(env, project_ns)
             bin_dir = str(REPO_ROOT / "bin")
             env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+            venv_bin = str(pathlib.Path(sys.executable).parent)
+            if venv_bin not in env["PATH"].split(os.pathsep):
+                env["PATH"] = venv_bin + os.pathsep + env["PATH"]
             _shell_tok = self._mint_pane_token(env, project_ns, role_name)
             return self._launch_session(
                 pane=pane,
@@ -1173,6 +1177,9 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             pane_tok = self._mint_pane_token(env, project_ns, role_name)
         bin_dir = str(REPO_ROOT / "bin")
         env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+        venv_bin = str(pathlib.Path(sys.executable).parent)
+        if venv_bin not in env["PATH"].split(os.pathsep):
+            env["PATH"] = venv_bin + os.pathsep + env["PATH"]
 
         # If rtk lives somewhere `shutil.which` can't see (typical when
         # pythonw inherits a thinner PATH than the cmd that spawned the
@@ -1225,6 +1232,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         _apply_mcp_timeout(env)
         _apply_ecc_mute(env)
         _apply_non_interactive_env(env)
+        _apply_color_env(env)
         apply_claude_auth_overrides(env)
 
         # --setting-sources controls which settings.json layers claude loads.
