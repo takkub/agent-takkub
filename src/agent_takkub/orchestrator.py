@@ -1982,7 +1982,21 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
 
                     # Issue #59: pane is idle — check for malformed tool-call XML
                     # that the harness silently no-op'd (makes pane look hung).
-                    self._maybe_surface_malformed_xml(key, name, project_name, pane, now)
+                    # Defense-in-depth: this best-effort nudge sits in front of the
+                    # critical forgot-`takkub done` reminder below. A bug in the
+                    # detector (e.g. the pyte empty-stub IndexError, now fixed at
+                    # source) must never starve the reminder — otherwise a teammate
+                    # that forgot to report sits idle until the user closes it,
+                    # never reaching Lead. Isolate it so the reminder always runs.
+                    try:
+                        self._maybe_surface_malformed_xml(key, name, project_name, pane, now)
+                    except Exception as _mx_err:
+                        _log_event(
+                            "malformed_xml_check_error",
+                            role=name,
+                            project=project_name,
+                            err=f"{type(_mx_err).__name__}: {_mx_err}",
+                        )
 
                     if entry["first_idle_ts"] is None:
                         entry["first_idle_ts"] = now

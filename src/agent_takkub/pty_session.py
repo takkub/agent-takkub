@@ -22,11 +22,53 @@ from collections.abc import Sequence
 
 import pyte
 from PyQt6.QtCore import QObject, QThread, QTimer, pyqtSignal
+from wcwidth import wcwidth
 
 from ._win_console import hide_hwnds, snapshot_console_hwnds
 
 # CREATE_NO_WINDOW so the helper taskkill doesn't flash a console window.
 _CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def _safe_screen_display(screen: pyte.Screen) -> list[str]:
+    """``pyte.Screen.display`` rendered defensively against orphaned wide-char stubs.
+
+    pyte writes a ``data=""`` stub into the cell *after* a wide (width-2)
+    character. When a TUI redraw overwrites that wide char with a narrower one —
+    ubiquitous in the claude/agy/codex spinner + status lines that repaint a
+    progress glyph (emoji / CJK / box-drawing) many times a second — the stub is
+    orphaned, and pyte's own ``display`` property then crashes with
+    ``IndexError: string index out of range`` on ``wcwidth(char[0])`` (it indexes
+    ``char[0]`` without guarding ``char == ""``).
+
+    That exception fires on *every* idle-watchdog tick via ``display_lines()``
+    (``is_at_ready_prompt`` / ``has_unparsed_tool_call`` / ``is_blocked_on_tty_prompt``).
+    The per-pane try/except in ``_check_idle_teammates`` then swallowed it, which:
+      • on a teammate pane — skipped the forgot-``takkub done`` reminder + harvest
+        hint, so the pane sat idle until the user closed it, never reporting; and
+      • on a Lead pane — made ``is_at_ready_prompt`` raise inside the notify pump /
+        reaper, so queued done notices never reached the Lead.
+    Both surface as "pane finished, closed, never reported back" — and get worse
+    with many panes/projects open (more terminals → higher odds one holds a poison
+    stub). Rendering the stub as empty instead of indexing it removes the crash at
+    the source. See runtime/events.log ``idle_watchdog_pane_error`` entries.
+    """
+    rows: list[str] = []
+    for y in range(screen.lines):
+        line = screen.buffer[y]
+        chars: list[str] = []
+        skip_stub = False
+        for x in range(screen.columns):
+            if skip_stub:  # the legitimate stub right after a wide char
+                skip_stub = False
+                continue
+            data = line[x].data
+            if not data:  # orphaned stub / empty cell — pyte would IndexError here
+                continue
+            skip_stub = wcwidth(data[0]) == 2
+            chars.append(data)
+        rows.append("".join(chars))
+    return rows
 
 
 def _tree_kill(pid: int | None) -> None:
@@ -607,7 +649,7 @@ class PtySession(QObject):
     def display_lines(self) -> list[str]:
         """Return the visible screen as a list of rows (top → bottom)."""
         with self._screen_lock:
-            return list(self.screen.display)
+            return _safe_screen_display(self.screen)
 
     def cursor(self) -> tuple[int, int]:
         with self._screen_lock:
@@ -722,7 +764,7 @@ class PtySession(QObject):
         content of the matched line, suitable for watchdog log messages.
         """
         with self._screen_lock:
-            lines = list(self.screen.display)
+            lines = _safe_screen_display(self.screen)
             cursor_row = self.screen.cursor.y
         if not lines:
             return None
@@ -751,7 +793,7 @@ class PtySession(QObject):
         suitable for watchdog log messages.
         """
         with self._screen_lock:
-            lines = list(self.screen.display)
+            lines = _safe_screen_display(self.screen)
             cursor_row = self.screen.cursor.y
         if not lines:
             return None
