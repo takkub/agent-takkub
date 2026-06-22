@@ -31,6 +31,16 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
   (เลิกผูกกับ codex) + เพิ่มกฎ "ใช้ path รูปตรงๆ ห้าม recursive grep หา .png".
 
 ### Fixed (แก้)
+- **teammate pane ค้างที่ codex `update available!` splash (#62)** — codex CLI splash
+  modal ถือเป็น soft-block (`is_at_ready_prompt()` = False ถาวร) → orchestrator ไม่
+  deliver task + idle watchdog ไม่เตือน → pane ค้างไม่จำกัดเวลา Lead รอ `takkub done`
+  ที่ไม่มีวันมา. แก้: เพิ่ม `is_at_update_splash()` (detect splash, กัน false-trigger บน
+  gemini passive footer), `_check_stuck_panes` ส่ง Enter (`b"\r"`) dismiss + cooldown 30s
+  (`SPLASH_DISMISS_COOLDOWN_S`) → fall through ไป close→respawn ถ้ายังค้าง. Lead exempt.
+- **log noise: `spawn_still_blocked` ยิงทุก 50ms tick (#64)** — spawn-gate retry log
+  ทุก tick → 213 entries ที่เป็น normal flow ไม่ใช่ error. แก้: `_spawn_blocked_first_ts`
+  dedup — log ครั้งเดียวตอนเริ่ม block + เตือนอีกเมื่อ block นานเกิน
+  `SPAWN_BLOCK_WARN_AFTER_S` (5s), ลบ episode key เมื่อ gate เคลียร์.
 - **error spam: `idle_watchdog_pane_error` (#64)** — `_check_idle_teammates` มี
   `except Exception` ที่กลืน error โดยไม่ log type/message + วนทุก 5s tick → events.log
   เดียวมี 3279 entries ที่วินิจฉัยอะไรไม่ได้ (3210 = pms Lead pane ตัวเดียว). แก้:

@@ -303,6 +303,7 @@ class TestSpinnerBlindspotsFixed:
         sess = MagicMock()
         sess.is_alive = True
         sess.is_blocked_on_tty_prompt.return_value = None
+        sess.is_at_update_splash.return_value = False
         # Only spinner lines — non-spinner hash = blake2b("") on every tick
         sess.display_lines.return_value = [SPINNER_LINE, SPINNER_LINE]
         pane.session = sess
@@ -376,6 +377,7 @@ class TestSpinnerBlindspotsFixed:
         sess = MagicMock()
         sess.is_alive = True
         sess.is_blocked_on_tty_prompt.return_value = None
+        sess.is_at_update_splash.return_value = False
         sess.display_lines.return_value = ["some content"]
         pane.session = sess
 
@@ -908,6 +910,7 @@ class TestSpinnerFilterRobust:
         sess = MagicMock()
         sess.is_alive = True
         sess.is_blocked_on_tty_prompt.return_value = None
+        sess.is_at_update_splash.return_value = False
         # Counter line WITHOUT 'esc to interrupt' — would defeat old filter
         sess.display_lines.return_value = ["· 45s · ↑ 2.3k tokens", "· 45s · ↑ 2.3k tokens"]
         pane.session = sess
@@ -942,6 +945,7 @@ class TestSpinnerFilterRobust:
         sess = MagicMock()
         sess.is_alive = True
         sess.is_blocked_on_tty_prompt.return_value = None
+        sess.is_at_update_splash.return_value = False
         sess.display_lines.return_value = ["⠸ running  esc to stop"]
         pane.session = sess
 
@@ -974,6 +978,7 @@ class TestSpinnerFilterRobust:
         sess = MagicMock()
         sess.is_alive = True
         sess.is_blocked_on_tty_prompt.return_value = None
+        sess.is_at_update_splash.return_value = False
         sess.display_lines.return_value = ["↓ 100 tokens  · 12s ·"]
         pane.session = sess
 

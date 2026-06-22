@@ -238,6 +238,12 @@ STUCK_RECOVER_MAX = 3
 TTY_BLOCK_SURFACE_AFTER_S = 2 * 60  # first surface after 2 min of continuous block
 TTY_BLOCK_SURFACE_COOLDOWN_S = 3 * 60  # minimum gap between repeated surface notices
 
+# Update-splash dismissal (issue #62). When a codex pane is stuck at the
+# startup 'update available!' splash, send Enter once to dismiss it instead of
+# close→respawn. SPLASH_DISMISS_COOLDOWN_S is the grace period after the Enter
+# before we declare the dismiss a failure and fall back to close→respawn.
+SPLASH_DISMISS_COOLDOWN_S = 30
+
 # Malformed tool-call XML detection (issue #59). When a model outputs tool-call
 # XML without the `antml:` namespace prefix the harness silently no-ops it and
 # the pane appears to hang. Nudge the pane at most this often.
@@ -2188,6 +2194,27 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
                             self._surface_tty_block_notice(role, project_name, _tty_stuck)
                             _ps_tty.last_tty_block_surface_ts = now
                         continue
+                    # Issue #62: codex 'update available!' splash blocks ready-prompt.
+                    # Send Enter once to dismiss; if it doesn't clear within
+                    # SPLASH_DISMISS_COOLDOWN_S fall back to close→respawn.
+                    try:
+                        _at_splash = pane.session.is_at_update_splash()
+                    except Exception:
+                        _at_splash = False
+                    if _at_splash:
+                        _ps_sp = self._ps(key)
+                        if _ps_sp.splash_dismiss_ts == 0.0:
+                            pane.session.write(b"\r")
+                            _log_event(
+                                "pane_recovered_update_splash",
+                                role=role,
+                                project=project_name,
+                            )
+                            _ps_sp.splash_dismiss_ts = now
+                            continue
+                        if (now - _ps_sp.splash_dismiss_ts) < SPLASH_DISMISS_COOLDOWN_S:
+                            continue
+                        # Dismiss didn't clear the splash — fall through to close→respawn
                     self._auto_recover_stuck(role, project_name, pane, now)
                 except Exception:
                     _log_event("stuck_watchdog_pane_error", role=role, project=project_name)

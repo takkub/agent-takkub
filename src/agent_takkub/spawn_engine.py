@@ -123,6 +123,10 @@ CODEX_EARLY_CRASH_WINDOW_SEC = 90
 # event-loop-turn streak for that.
 _TOCTOU_RESAMPLE_N = 3
 
+# Dedup spawn_still_blocked log entries: only emit once per episode, then once
+# every SPAWN_BLOCK_WARN_AFTER_S seconds while the block persists (#64).
+SPAWN_BLOCK_WARN_AFTER_S = 5.0
+
 
 @dataclass
 class PaneState:
@@ -194,6 +198,8 @@ class PaneState:
     tp_warn_ts: float = 0.0
     # pipeline_run_id: set when this pane was spawned as part of a pipeline hop
     pipeline_run_id: str | None = None
+    # splash_dismiss_ts: last time Enter was sent to dismiss an update-splash modal (#62)
+    splash_dismiss_ts: float = 0.0
 
 
 @dataclass
@@ -418,7 +424,15 @@ class SpawnEngineMixin:
         if self._is_spawn_blocked():
             if _deferred is not None:
                 _deferred.add(deferred_key)
-            _log_event("spawn_still_blocked", role=role_name, project=project_ns)
+            # Dedup: log once per episode, then every SPAWN_BLOCK_WARN_AFTER_S (#64).
+            _now = time.time()
+            _bts: dict = getattr(self, "_spawn_blocked_first_ts", None)  # type: ignore[assignment]
+            if _bts is None:
+                _bts = {}
+                self._spawn_blocked_first_ts = _bts
+            if deferred_key not in _bts or (_now - _bts[deferred_key]) >= SPAWN_BLOCK_WARN_AFTER_S:
+                _log_event("spawn_still_blocked", role=role_name, project=project_ns)
+                _bts[deferred_key] = _now
             QTimer.singleShot(
                 50,
                 lambda r=role_name, c=cwd, p=project, a=_from_auto_respawn, s=_shard_total: (
@@ -426,6 +440,11 @@ class SpawnEngineMixin:
                 ),
             )
             return
+
+        # Gate cleared: clear the block-episode tracker for this key.
+        _bts2: dict | None = getattr(self, "_spawn_blocked_first_ts", None)  # type: ignore[assignment]
+        if _bts2 is not None:
+            _bts2.pop(deferred_key, None)
 
         # Gate cleared: wait ~35 ms (1 event-loop turn) then re-check to
         # close the check-to-call race, then re-enter spawn() which verifies once more.
