@@ -212,6 +212,31 @@ def _classify_ready(text_lower: str) -> bool:
     return False
 
 
+# Ready/blocker markers are bottom-row TUI chrome — the footer hint, the spinner
+# status line ('esc to interrupt'), the input box. Conversation BODY text scrolls
+# ABOVE that region. Scoping detection to the bottom rows stops body text that
+# merely *quotes* a marker string (e.g. a Lead discussing "esc to interrupt" or
+# "bypass permissions") from poisoning the verdict — the root of the #70 false-
+# busy stall and the #20 text-marker fragility. Mirrors _TTY_PROMPT_TAIL_ROWS,
+# which already anchors tty-prompt detection to the bottom for the same reason.
+_READY_TAIL_ROWS = 6
+
+
+def _ready_region(lines: list[str]) -> str:
+    """Lowercased bottom _READY_TAIL_ROWS non-blank rows of the screen — the
+    footer/status/input region where ready & blocker markers actually render.
+
+    Trailing blank rows are stripped first so the window lands on real chrome on
+    a partially-filled screen rather than empty padding. Short screens (≤ tail
+    rows, e.g. test fixtures and fresh panes) are returned whole, so existing
+    behaviour is unchanged there."""
+    end = len(lines)
+    while end > 0 and not lines[end - 1].strip():
+        end -= 1
+    start = max(0, end - _READY_TAIL_ROWS)
+    return "\n".join(lines[start:end]).lower()
+
+
 # Canonical sample screens with their expected verdict — bake the behaviour so a
 # marker going stale is caught by `takkub doctor` instead of silently breaking
 # the idle watchdog. Each tuple is (screen_text, expected_is_ready).
@@ -732,7 +757,10 @@ class PtySession(QObject):
         # Detection markers + their precedence live in the central table
         # (_READY_HARD_BLOCKERS / _READY_RULES) so an upstream reword is a
         # one-line patch and `takkub doctor` can self-test them. See M4#17.
-        return _classify_ready("\n".join(self.display_lines()).lower())
+        # Scoped to the bottom footer/status region (_ready_region) so a marker
+        # string quoted in the conversation body can't poison the verdict — the
+        # #70 false-busy stall / #20 fragility root fix.
+        return _classify_ready(_ready_region(self.display_lines()))
 
     def is_at_update_splash(self) -> bool:
         """True when a codex 'update available!' startup splash is blocking the prompt.
@@ -744,8 +772,12 @@ class PtySession(QObject):
 
         Caller note: this is only meaningful when is_at_ready_prompt() is False;
         pairing both ensures the splash, not some other block, is the cause. (#62)
+
+        Scoped to the bottom region (_ready_region) for the same reason as
+        is_at_ready_prompt: a conversation that merely mentions "update
+        available!" must not read as a live splash. (#70/#20)
         """
-        text = "\n".join(self.display_lines()).lower()
+        text = _ready_region(self.display_lines())
         return "update available!" in text and "gemini cli update available!" not in text
 
     def rate_limit_reset_at(self) -> float | None:
