@@ -202,6 +202,72 @@ class TestDelayedEnterVerified:
         sess_b.write.assert_not_called()
 
 
+class TestDelayedEnterVerifiedRepaste:
+    """#79: when ``payload`` is supplied, a submit that didn't land is recovered
+    by re-pasting (swallowed paste — input box empty, the #26 'pane stays empty'
+    symptom) rather than only resending the CR (swallowed Enter — content still
+    in the box, #22). The CR-only path must be unchanged when the input shows
+    pending content, and untouched entirely when no payload is supplied."""
+
+    PAYLOAD = "\x1b[200~[ROLE: qa] do the thing\x1b[201~"
+
+    def _run_inline(self, pane, session):
+        from agent_takkub.orchestrator import _delayed_enter_verified
+
+        resends: list[int] = []
+        repastes: list[int] = []
+
+        def _inline(delay_ms, fn):
+            fn()
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot", _inline):
+            _delayed_enter_verified(
+                pane,
+                session,
+                150,
+                max_resends=3,
+                payload=self.PAYLOAD,
+                content_fragment="[ROLE: qa] do the thing",
+                on_resend=resends.append,
+                on_repaste=repastes.append,
+            )
+        return resends, repastes
+
+    def test_repaste_when_input_empty(self) -> None:
+        """Paste swallowed (input empty) → re-paste payload then CR, not a bare
+        CR resend that would submit nothing into an empty box."""
+        sess = MagicMock()
+        # verify #1: still ready (submit didn't land); verify #2 after re-paste:
+        # busy (landed) → stop.
+        sess.is_at_ready_prompt.side_effect = [True, False]
+        sess.shows_pending_input.return_value = False  # input box empty
+        pane = MagicMock()
+        pane.session = sess
+
+        resends, repastes = self._run_inline(pane, sess)
+
+        writes = [c.args[0] for c in sess.write.call_args_list]
+        # initial CR, then re-paste payload, then submitting CR.
+        assert writes == [b"\r", self.PAYLOAD, b"\r"]
+        assert repastes == [3] and resends == []
+
+    def test_cr_only_when_content_present(self) -> None:
+        """Enter swallowed but the pasted content is still in the box (#22) →
+        resend CR only, never re-paste (would duplicate the content)."""
+        sess = MagicMock()
+        sess.is_at_ready_prompt.side_effect = [True, False]
+        sess.shows_pending_input.return_value = True  # content present
+        pane = MagicMock()
+        pane.session = sess
+
+        resends, repastes = self._run_inline(pane, sess)
+
+        writes = [c.args[0] for c in sess.write.call_args_list]
+        assert writes == [b"\r", b"\r"]  # initial + one CR resend, no payload
+        assert resends == [3] and repastes == []
+        sess.shows_pending_input.assert_called()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # AgentPane._on_exit generation guard
 # ─────────────────────────────────────────────────────────────────────────────

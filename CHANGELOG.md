@@ -2,6 +2,23 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed (แก้)
+- **delivery self-heal กู้ swallowed paste ได้ — pane ไม่ค้าง empty อีก (#79, follow-up #26)** —
+  `⚠️ [delivery-unconfirmed]` ยิงซ้ำ ~16 ครั้ง/2 สัปดาห์ ทุก role/provider (qa/backend/
+  frontend/devops/codex/gemini) เพราะ task paste โดน swallow ตอน race กับ TUI render →
+  pane ค้าง empty ไม่เคย report done (อาการเดิม #26). root cause: self-heal
+  (`_delayed_enter_verified`) กู้ได้แค่ **Enter ที่หาย** (resend CR) — ครอบ #22 (input box มี
+  `[Pasted text]` placeholder ค้าง) แต่ **กู้ paste ที่หายไม่ได้** เพราะ input ว่าง resend CR
+  ลงไปก็ไม่มีอะไร submit. แก้: ทำ self-heal ให้ **paste-aware** — ตอน verify ถ้า pane ยังอยู่
+  ที่ ready prompt ให้เช็คว่า input box มี content จริงไหม (`PtySession.shows_pending_input`:
+  หา `[Pasted text` placeholder หรือ fragment ของ task ใน bottom region, scoped กัน body
+  poison เหมือน `is_at_ready_prompt`): มี content → resend CR (#22), **input ว่าง → re-paste
+  payload แล้วค่อย submit (#26)**. ครอบทุก paste+submit path (task deliver, lead-notify pump,
+  force-deliver, peer send) + log event `*_repaste`. backward-compatible (ไม่ส่ง payload =
+  พฤติกรรมเดิม). + 6 tests.
+
 ## [v0.9.0] - 2026-06-22
 
 ### Added (เพิ่ม)

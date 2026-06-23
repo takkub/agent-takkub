@@ -94,16 +94,29 @@ def _delayed_enter_verified(
     *,
     max_resends: int = _SUBMIT_MAX_RESENDS,
     on_resend=None,
+    payload: str | None = None,
+    content_fragment: str = "",
+    on_repaste=None,
 ) -> None:
-    """Like `_delayed_enter`, but re-sends Enter if the submit was swallowed.
+    """Like `_delayed_enter`, but recovers a submit that was swallowed.
 
     Sends the submitting CR after ``delay_ms`` (same as `_delayed_enter`), then
     ``_SUBMIT_VERIFY_GRACE_MS`` later checks `is_at_ready_prompt()`. If the pane
-    is STILL at its ready prompt the CR did not submit (a real submit would have
-    flipped it to busy), so the CR is re-sent — bounded by ``max_resends``.
+    is STILL at its ready prompt the submit did not land (a real submit would
+    have flipped it to busy), so it recovers — bounded by ``max_resends``.
 
-    ``on_resend`` (optional) is invoked with the remaining-attempt count each
-    time a resend fires, so the caller can log/observe the recovery.
+    Two failure modes are distinguished when ``payload`` is supplied (#79):
+      • Enter swallowed mid-paste-render — the input box still holds the pasted
+        content (``shows_pending_input`` True). Re-send the CR only. (#22)
+      • Paste swallowed — the input box is empty (``shows_pending_input`` False),
+        so a CR resend has nothing to submit and the pane sits idle forever
+        ("pane stays empty" — the #26 symptom). Re-paste the payload, then submit
+        after the render settles.
+    When ``payload`` is None the old behaviour (CR resend only) is preserved.
+
+    ``on_resend`` / ``on_repaste`` (optional) are invoked with the
+    remaining-attempt count each time the respective recovery fires, so the
+    caller can log/observe it.
     """
 
     def _send_then_verify(remaining: int) -> None:
@@ -115,11 +128,25 @@ def _delayed_enter_verified(
             if pane.session is not session or remaining <= 0:
                 return
             # Submit landed → pane is busy → is_at_ready_prompt() is False → stop.
-            # Still ready → the CR was swallowed mid-paste-render → resend.
-            if session.is_at_ready_prompt():
-                if on_resend is not None:
-                    on_resend(remaining)
-                _send_then_verify(remaining - 1)
+            if not session.is_at_ready_prompt():
+                return
+            # Still ready → submit didn't land. If we have the payload and the
+            # input box is empty, the PASTE was swallowed (#26) — re-paste, then
+            # submit once the placeholder renders. A bare CR resend can't recover
+            # a missing paste.
+            if payload is not None and not session.shows_pending_input(content_fragment):
+                if on_repaste is not None:
+                    on_repaste(remaining)
+                session.write(payload)
+                QTimer.singleShot(
+                    _enter_delay_ms(payload),
+                    lambda: _send_then_verify(remaining - 1),
+                )
+                return
+            # Content present, CR swallowed mid-render (#22) — resend the CR.
+            if on_resend is not None:
+                on_resend(remaining)
+            _send_then_verify(remaining - 1)
 
         QTimer.singleShot(_SUBMIT_VERIFY_GRACE_MS, _verify)
 
@@ -297,8 +324,16 @@ class LeadInboxMixin:
                 pane,
                 _task_sess,
                 _enter_delay_ms(payload),
+                payload=payload,
+                content_fragment=task,
                 on_resend=lambda rem, r=role_name, p=project: _log_event(
                     "task_deliver_enter_resend",
+                    project=self._resolve_project(p),
+                    role=r,
+                    remaining=rem,
+                ),
+                on_repaste=lambda rem, r=role_name, p=project: _log_event(
+                    "task_deliver_repaste",
                     project=self._resolve_project(p),
                     role=r,
                     remaining=rem,
@@ -676,8 +711,13 @@ class LeadInboxMixin:
             lead,
             _notify_sess,
             delay,
+            payload=payload,
+            content_fragment=body,
             on_resend=lambda rem: _log_event(
                 "lead_notify_enter_resend", project=project_ns, remaining=rem
+            ),
+            on_repaste=lambda rem: _log_event(
+                "lead_notify_repaste", project=project_ns, remaining=rem
             ),
         )
         self.leadInjected.emit(body)
@@ -775,8 +815,13 @@ class LeadInboxMixin:
             lead,
             sess,
             delay,
+            payload=payload,
+            content_fragment=body,
             on_resend=lambda rem: _log_event(
                 "done_notice_force_enter_resend", project=project_ns, remaining=rem
+            ),
+            on_repaste=lambda rem: _log_event(
+                "done_notice_force_repaste", project=project_ns, remaining=rem
             ),
         )
         self.leadInjected.emit(body)

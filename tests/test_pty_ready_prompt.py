@@ -63,6 +63,36 @@ def test_gemini_idle_with_update_footer_is_ready_even_if_prompt_missing() -> Non
     assert s.is_at_ready_prompt() is True
 
 
+class TestShowsPendingInput:
+    """#79: distinguish a swallowed paste (input box empty) from a swallowed
+    Enter (pasted content still in the box) so the delivery self-heal re-pastes
+    vs. only resends the CR."""
+
+    def test_pasted_placeholder_is_pending(self) -> None:
+        s = _feed_screen("[Pasted text +42 lines]", "bypass permissions")
+        assert s.shows_pending_input() is True
+
+    def test_empty_box_is_not_pending(self) -> None:
+        s = _feed_screen("Welcome to Claude Code", "bypass permissions")
+        assert s.shows_pending_input("[ROLE: qa] verify the login flow") is False
+
+    def test_inline_fragment_is_pending(self) -> None:
+        # Short content rendered inline (no placeholder) is detected via a leading
+        # fragment of the expected text.
+        s = _feed_screen("> [ROLE: qa] verify the login flow", "bypass permissions")
+        assert s.shows_pending_input("[ROLE: qa] verify the login flow") is True
+
+    def test_body_quote_above_footer_does_not_poison(self) -> None:
+        # A '[pasted text]' mention scrolled up in the conversation body must not
+        # read as pending input — detection is scoped to the bottom region.
+        s = _feed_screen(
+            "we discussed [Pasted text +1 lines] earlier",
+            *["" for _ in range(8)],
+            "bypass permissions",
+        )
+        assert s.shows_pending_input() is False
+
+
 def test_gemini_thinking_with_update_footer_is_not_ready() -> None:
     # The update footer must not flip a *thinking* gemini to ready -- the
     # "esc to cancel" busy indicator still takes precedence.

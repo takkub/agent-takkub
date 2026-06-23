@@ -711,8 +711,13 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
             pane,
             _send_sess,
             _enter_delay_ms(body_payload),
+            payload=body_payload,
+            content_fragment=body,
             on_resend=lambda rem, r=to_role: _log_event(
                 "send_enter_resend", project=project_ns, role=r, remaining=rem
+            ),
+            on_repaste=lambda rem, r=to_role: _log_event(
+                "send_repaste", project=project_ns, role=r, remaining=rem
             ),
         )
 

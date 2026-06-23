@@ -260,6 +260,27 @@ def _ready_region(lines: list[str]) -> str:
     return "\n".join(lines[start:end]).lower()
 
 
+# Placeholder claude renders in its input box for a bracketed multi-line paste,
+# e.g. "[Pasted text +42 lines]". Its presence in the input region confirms the
+# paste actually landed (vs a swallowed paste that leaves the box empty — #26).
+_PASTED_PLACEHOLDER = "[pasted text"
+# Leading chars of the content to look for as a fallback presence signal when a
+# short paste rendered inline (no placeholder).
+_INPUT_FRAGMENT_LEN = 24
+
+
+def _input_has_content(region: str, fragment: str) -> bool:
+    """True when the bottom input region shows pasted/typed content.
+
+    Two signals: the multi-line paste placeholder, or — for short inline
+    content with no placeholder — a leading fragment of the expected text. The
+    region is already lowercased by ``_ready_region``."""
+    if _PASTED_PLACEHOLDER in region:
+        return True
+    frag = fragment.strip().lower()[:_INPUT_FRAGMENT_LEN]
+    return bool(frag) and frag in region
+
+
 # Canonical sample screens with their expected verdict — bake the behaviour so a
 # marker going stale is caught by `takkub doctor` instead of silently breaking
 # the idle watchdog. Each tuple is (screen_text, expected_is_ready).
@@ -793,6 +814,20 @@ class PtySession(QObject):
         # string quoted in the conversation body can't poison the verdict — the
         # #70 false-busy stall / #20 fragility root fix.
         return _classify_ready(_ready_region(self.display_lines()))
+
+    def shows_pending_input(self, fragment: str = "") -> bool:
+        """True when the bottom input region holds unsent content.
+
+        After a bracketed paste claude renders a ``[Pasted text +N lines]``
+        placeholder (or, for short inline content, the literal text) in its
+        input box. Detecting this lets the delivery self-heal tell a swallowed
+        *Enter* (content present but not submitted — #22) apart from a swallowed
+        *paste* (input box empty — #26): the first needs a CR resend, the second
+        needs the payload re-pasted (a CR resend can't recover a missing paste).
+        Scoped to the same bottom footer/input region as is_at_ready_prompt() so
+        conversation-body text quoting the content can't poison the verdict. (#79)
+        """
+        return _input_has_content(_ready_region(self.display_lines()), fragment)
 
     def is_at_update_splash(self) -> bool:
         """True when a codex 'update available!' startup splash is blocking the prompt.
