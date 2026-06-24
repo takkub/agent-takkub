@@ -59,6 +59,14 @@ def _orch_attr(name: str, default):
 _SUBMIT_VERIFY_GRACE_MS = 600
 _SUBMIT_MAX_RESENDS = 3
 
+# Ready-prompt poll cadence for _send_when_ready (task delivery). Lowered from
+# 1000/500 → 300/150 so a task lands almost as soon as the pane hits idle — the
+# old 1 s lead-in + 500 ms poll added up to ~1.5 s of avoidable lag even on an
+# already-idle pane. elapsed[] still accumulates by the poll interval so the 45 s
+# hard timeout stays wall-clock accurate.
+_READY_POLL_FIRST_MS = 300
+_READY_POLL_INTERVAL_MS = 150
+
 # After this many consecutive 400-ms busy-retries (~30 s) the pump gives up
 # and spills remaining items to the durable _pending_done_notices queue.
 # Prevents unbounded memory growth and ensures delivery survives a crash that
@@ -352,14 +360,14 @@ class LeadInboxMixin:
                 # Session absent or not yet alive — may be deferred by the
                 # spawn gate.  Keep waiting rather than silently dropping the
                 # task; the gate retry will attach the session within seconds.
-                elapsed[0] += 500
+                elapsed[0] += _READY_POLL_INTERVAL_MS
                 if elapsed[0] < max_wait_ms:
-                    QTimer.singleShot(500, _check)
+                    QTimer.singleShot(_READY_POLL_INTERVAL_MS, _check)
                 return
             if pane.session.is_at_ready_prompt():
                 _deliver()
                 return
-            elapsed[0] += 500
+            elapsed[0] += _READY_POLL_INTERVAL_MS
             if elapsed[0] >= max_wait_ms:
                 # Hard timeout: pane never reached the ready prompt. Paste
                 # best-effort (markers may be a false negative) but flag it as
@@ -367,9 +375,9 @@ class LeadInboxMixin:
                 # assuming the task landed (issue #26).
                 _deliver(unconfirmed=True)
                 return
-            QTimer.singleShot(500, _check)
+            QTimer.singleShot(_READY_POLL_INTERVAL_MS, _check)
 
-        QTimer.singleShot(1_000, _check)
+        QTimer.singleShot(_READY_POLL_FIRST_MS, _check)
 
     def _warn_lead_delivery_unconfirmed(self, role_name: str, project: str | None) -> None:
         """Tell the Lead that an assign hit the 45s hard timeout without the
