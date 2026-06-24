@@ -234,13 +234,18 @@ class TestDelayedEnterVerifiedRepaste:
         return resends, repastes
 
     def test_repaste_when_input_empty(self) -> None:
-        """Paste swallowed (input empty) → re-paste payload then CR, not a bare
-        CR resend that would submit nothing into an empty box."""
+        """Paste swallowed (input empty AND pane idle) → re-paste payload then
+        CR, not a bare CR resend that would submit nothing into an empty box.
+
+        A genuinely swallowed paste leaves the pane idle, so seconds_since_output
+        is large (≥ _RENDER_ACTIVE_S): the render-settle guard is skipped and the
+        repaste fires immediately, preserving the #26 fix."""
         sess = MagicMock()
         # verify #1: still ready (submit didn't land); verify #2 after re-paste:
         # busy (landed) → stop.
         sess.is_at_ready_prompt.side_effect = [True, False]
         sess.shows_pending_input.return_value = False  # input box empty
+        sess.seconds_since_output.return_value = 5.0  # idle → not still rendering
         pane = MagicMock()
         pane.session = sess
 
@@ -250,6 +255,45 @@ class TestDelayedEnterVerifiedRepaste:
         # initial CR, then re-paste payload, then submitting CR.
         assert writes == [b"\r", self.PAYLOAD, b"\r"]
         assert repastes == [3] and resends == []
+
+    def test_render_lag_waits_instead_of_repasting(self) -> None:
+        """Duplicate-paste spam fix: an empty-LOOKING box while the pane is still
+        producing output (placeholder mid-render under parallel-spawn load) must
+        NOT repaste. The guard re-polls until the placeholder appears, then the
+        already-landed paste only needs a CR — never a second [Pasted text]."""
+        sess = MagicMock()
+        # v1: ready + empty (rendering) → wait; v2: ready + placeholder now shows
+        # → CR resend; v3: busy (landed) → stop.
+        sess.is_at_ready_prompt.side_effect = [True, True, False]
+        sess.shows_pending_input.side_effect = [False, True]
+        sess.seconds_since_output.return_value = 0.2  # output recent → rendering
+        pane = MagicMock()
+        pane.session = sess
+
+        resends, repastes = self._run_inline(pane, sess)
+
+        writes = [c.args[0] for c in sess.write.call_args_list]
+        # initial CR, waited out the render, then one CR resend — payload pasted
+        # exactly once (by the caller), never re-pasted.
+        assert writes == [b"\r", b"\r"]
+        assert repastes == [] and resends == [3]
+
+    def test_render_lag_repaste_still_bounded(self) -> None:
+        """Pathological: pane keeps producing output yet the box never shows the
+        placeholder. The render-wait must be bounded so it still falls through to
+        a repaste rather than looping forever, and the repaste budget caps the
+        total so it cannot spam indefinitely."""
+        sess = MagicMock()
+        sess.is_at_ready_prompt.return_value = True  # never lands
+        sess.shows_pending_input.return_value = False  # box never shows content
+        sess.seconds_since_output.return_value = 0.1  # always "rendering"
+        pane = MagicMock()
+        pane.session = sess
+
+        resends, repastes = self._run_inline(pane, sess)
+
+        # Repastes are still capped at max_resends despite the render-wait guard.
+        assert repastes == [3, 2, 1] and resends == []
 
     def test_cr_only_when_content_present(self) -> None:
         """Enter swallowed but the pasted content is still in the box (#22) →

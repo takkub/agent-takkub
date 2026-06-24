@@ -59,6 +59,18 @@ def _orch_attr(name: str, default):
 _SUBMIT_VERIFY_GRACE_MS = 600
 _SUBMIT_MAX_RESENDS = 3
 
+# Render-settle guard for the repaste branch (duplicate-paste spam fix).
+# Under parallel-spawn CPU load claude renders its `[Pasted text +N lines]`
+# placeholder slower than _SUBMIT_VERIFY_GRACE_MS, so the input box momentarily
+# reads EMPTY and the self-heal mistakes a still-painting paste for a swallowed
+# one — repasting up to _SUBMIT_MAX_RESENDS times (the visible "4× [Pasted
+# text]" stack). A pane still rendering is producing output, so before repasting
+# we re-poll while output stayed recent within _RENDER_ACTIVE_S, bounded by
+# _RENDER_WAIT_MAX cycles. A truly swallowed paste leaves the pane idle (no
+# recent output) → skips the wait and repastes at once, preserving the #26 fix.
+_RENDER_ACTIVE_S = 1.0
+_RENDER_WAIT_MAX = 6
+
 # Ready-prompt poll cadence for _send_when_ready (task delivery). Lowered from
 # 1000/500 → 300/150 so a task lands almost as soon as the pane hits idle — the
 # old 1 s lead-in + 500 ms poll added up to ~1.5 s of avoidable lag even on an
@@ -132,7 +144,7 @@ def _delayed_enter_verified(
             return
         pane.session.write(b"\r")
 
-        def _verify() -> None:
+        def _verify(render_waits: int = _RENDER_WAIT_MAX) -> None:
             if pane.session is not session or remaining <= 0:
                 return
             # Submit landed → pane is busy → is_at_ready_prompt() is False → stop.
@@ -143,6 +155,16 @@ def _delayed_enter_verified(
             # submit once the placeholder renders. A bare CR resend can't recover
             # a missing paste.
             if payload is not None and not session.shows_pending_input(content_fragment):
+                # ...but an empty-LOOKING box under parallel-spawn load is usually
+                # a `[Pasted text]` placeholder that just hasn't finished painting,
+                # not a lost paste. A pane still rendering is producing output, so
+                # wait out a few grace cycles (bounded) before repasting —
+                # repasting into a slow-rendering box is what stacked 4× [Pasted
+                # text]. A truly swallowed paste leaves the pane idle (no recent
+                # output), so it skips the wait and repastes at once (#26 intact).
+                if render_waits > 0 and session.seconds_since_output() < _RENDER_ACTIVE_S:
+                    QTimer.singleShot(_SUBMIT_VERIFY_GRACE_MS, lambda: _verify(render_waits - 1))
+                    return
                 if on_repaste is not None:
                     on_repaste(remaining)
                 session.write(payload)
