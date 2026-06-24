@@ -11,6 +11,7 @@ import pytest
 from agent_takkub.doctor import (
     Finding,
     Status,
+    _check_claude_auth,
     check_mcps,
     check_plugins,
     check_projects,
@@ -18,6 +19,61 @@ from agent_takkub.doctor import (
     check_runtime,
     run_all_checks,
 )
+
+# ---------------------------------------------------------------------------
+# _check_claude_auth — correct path (.credentials.json) + macOS Keychain fallback
+# ---------------------------------------------------------------------------
+
+
+class TestCheckClaudeAuth:
+    def test_credentials_file_present(self, tmp_path: Path) -> None:
+        creds = tmp_path / ".claude" / ".credentials.json"
+        creds.parent.mkdir(parents=True)
+        creds.write_text(json.dumps({"claudeAiOauth": {"accessToken": "x"}}))
+        with patch("agent_takkub.doctor.Path.home", return_value=tmp_path):
+            f = _check_claude_auth()
+        assert f.status is Status.OK
+        assert "file" in f.detail
+
+    def test_credentials_file_unreadable(self, tmp_path: Path) -> None:
+        creds = tmp_path / ".claude" / ".credentials.json"
+        creds.parent.mkdir(parents=True)
+        creds.write_text("{ not json")
+        with patch("agent_takkub.doctor.Path.home", return_value=tmp_path):
+            f = _check_claude_auth()
+        assert f.status is Status.WARN
+        assert "unreadable" in f.detail
+
+    def test_darwin_keychain_fallback_ok(self, tmp_path: Path) -> None:
+        # No file → darwin reads creds from the Keychain via _load_credentials.
+        with (
+            patch("agent_takkub.doctor.Path.home", return_value=tmp_path),
+            patch("agent_takkub.doctor.sys.platform", "darwin"),
+            patch(
+                "agent_takkub.limit_status._load_credentials",
+                return_value=({"claudeAiOauth": {"accessToken": "x"}}, None),
+            ),
+        ):
+            f = _check_claude_auth()
+        assert f.status is Status.OK
+        assert "Keychain" in f.detail
+
+    def test_darwin_no_file_no_keychain_warns(self, tmp_path: Path) -> None:
+        with (
+            patch("agent_takkub.doctor.Path.home", return_value=tmp_path),
+            patch("agent_takkub.doctor.sys.platform", "darwin"),
+            patch("agent_takkub.limit_status._load_credentials", return_value=(None, None)),
+        ):
+            f = _check_claude_auth()
+        assert f.status is Status.WARN
+
+    def test_win32_no_file_skips(self, tmp_path: Path) -> None:
+        with (
+            patch("agent_takkub.doctor.Path.home", return_value=tmp_path),
+            patch("agent_takkub.doctor.sys.platform", "win32"),
+        ):
+            f = _check_claude_auth()
+        assert f.status is Status.SKIP
 
 # ---------------------------------------------------------------------------
 # check_providers — agy resolved via the cockpit's own helper (off-PATH safe)

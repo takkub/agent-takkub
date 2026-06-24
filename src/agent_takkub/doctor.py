@@ -88,65 +88,70 @@ def check_claude() -> list[Finding]:
         )
 
     # authenticated
-    if sys.platform == "win32":
-        # credentials may live in Windows Credential Manager — not directly checkable
-        creds = Path.home() / ".claude" / "credentials.json"
-        if creds.is_file():
-            try:
-                json.loads(creds.read_text(encoding="utf-8"))
-                findings.append(
-                    Finding("claude", "authenticated", Status.OK, "credentials.json present")
-                )
-            except Exception:
-                findings.append(
-                    Finding(
-                        "claude",
-                        "authenticated",
-                        Status.WARN,
-                        "credentials.json present but unreadable",
-                        "run 'claude login' from a terminal",
-                    )
-                )
-        else:
-            findings.append(
-                Finding(
-                    "claude",
-                    "authenticated",
-                    Status.SKIP,
-                    "auth state not directly checkable on Windows; try 'claude --print Hello' to verify",
-                    "run 'claude login' from a terminal if needed",
-                )
-            )
-    else:
-        creds = Path.home() / ".claude" / "credentials.json"
-        if creds.is_file():
-            try:
-                json.loads(creds.read_text(encoding="utf-8"))
-                findings.append(
-                    Finding("claude", "authenticated", Status.OK, "credentials.json present")
-                )
-            except Exception:
-                findings.append(
-                    Finding(
-                        "claude",
-                        "authenticated",
-                        Status.WARN,
-                        "credentials.json present but unreadable",
-                        "run 'claude login' from a terminal",
-                    )
-                )
-        else:
-            findings.append(
-                Finding(
-                    "claude",
-                    "authenticated",
-                    Status.WARN,
-                    "credentials.json not found",
-                    "run 'claude login' from a terminal",
-                )
-            )
+    findings.append(_check_claude_auth())
 
     return findings
+
+
+def _check_claude_auth() -> Finding:
+    """Verify Claude credentials exist.
+
+    The CLI writes `~/.claude/.credentials.json` (leading dot). When that file
+    is absent on macOS, the creds live in the login Keychain instead — so we
+    reuse the limit meter's loader (`_load_credentials`), which checks the file
+    then falls back to `security find-generic-password`. Without this, doctor
+    falsely warns "not found" on every macOS box that authed via Keychain.
+    """
+    creds = Path.home() / ".claude" / ".credentials.json"
+    if creds.is_file():
+        try:
+            json.loads(creds.read_text(encoding="utf-8"))
+            return Finding("claude", "authenticated", Status.OK, "credentials file present")
+        except Exception:
+            return Finding(
+                "claude",
+                "authenticated",
+                Status.WARN,
+                "credentials file present but unreadable",
+                "run 'claude login' from a terminal",
+            )
+
+    if sys.platform == "darwin":
+        # File absent — creds may be in the login Keychain ("Claude Code-credentials").
+        try:
+            from .limit_status import _load_credentials
+
+            raw, _sink = _load_credentials(None)
+        except Exception as e:
+            raw = None
+            _ = e
+        if raw is not None:
+            return Finding("claude", "authenticated", Status.OK, "credentials in macOS Keychain")
+        return Finding(
+            "claude",
+            "authenticated",
+            Status.WARN,
+            "no credentials file or Keychain entry",
+            "run 'claude login' from a terminal",
+        )
+
+    if sys.platform == "win32":
+        # credentials may live in Windows Credential Manager — not directly checkable
+        return Finding(
+            "claude",
+            "authenticated",
+            Status.SKIP,
+            "auth state not directly checkable on Windows; try 'claude --print Hello' to verify",
+            "run 'claude login' from a terminal if needed",
+        )
+
+    return Finding(
+        "claude",
+        "authenticated",
+        Status.WARN,
+        "credentials file not found",
+        "run 'claude login' from a terminal",
+    )
 
 
 # ---------------------------------------------------------------------------
