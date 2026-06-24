@@ -34,7 +34,7 @@ _SYSTEM_INSTRUCTION = (
     "be concise but complete; use headers, bullet points, and code snippets where needed."
 )
 
-_TIMEOUT = 150  # seconds — matches claude_update.py's headless timeout
+_TIMEOUT = 600  # seconds — long enough for a thorough multi-section CLAUDE.md generation
 
 
 def generate_project_rules_proc(prompt: str, project_name: str) -> subprocess.Popen:
