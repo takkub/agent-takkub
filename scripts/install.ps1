@@ -349,18 +349,23 @@ if ($SkipMCPPrewarm) {
 # Phase 5 — rtk (optional)
 # ─────────────────────────────────────────────────────────────
 Write-Step "Phase 5 - rtk (Rust Token Killer)"
+# NOTE: the cockpit's rtk is rtk-ai/rtk (Rust Token Killer — ships the
+# `rtk hook claude` PreToolUse processor). The crates.io crate plainly named
+# `rtk` is an UNRELATED tool, so `cargo install rtk` installs the WRONG binary —
+# always build from the repo with `cargo install --git https://github.com/rtk-ai/rtk`
+# (or grab the prebuilt rtk-x86_64-pc-windows-msvc.zip from its Releases page).
 if (Test-Cmd rtk) {
     if ($Update -and (Test-Cmd cargo)) {
-        Write-Doing "upgrading rtk via cargo"
-        cargo install --force rtk
+        Write-Doing "upgrading rtk via cargo (rtk-ai/rtk)"
+        cargo install --force --git https://github.com/rtk-ai/rtk
         $script:Summary.Upgraded += "rtk"
     } else {
         Write-Skip "rtk already on PATH"
         $script:Summary.Skipped += "rtk"
     }
 } elseif (Test-Cmd cargo) {
-    Write-Doing "installing rtk via cargo"
-    cargo install rtk
+    Write-Doing "installing rtk via cargo (rtk-ai/rtk)"
+    cargo install --git https://github.com/rtk-ai/rtk
     if ($LASTEXITCODE -eq 0) {
         Write-Ok "rtk installed"
         $script:Summary.Installed += "rtk"

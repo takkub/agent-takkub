@@ -118,6 +118,45 @@ scripts\install.bat -Update
 
 ---
 
+## One-shot install (macOS / Linux)
+
+`scripts/install.sh` คือคู่ขนานของ `install.ps1` สำหรับ macOS (Apple Silicon / Intel)
+และ Linux — ลงทุก phase เดียวกัน, ข้ามตัวที่มีแล้ว, idempotent
+
+```bash
+git clone https://github.com/takkub/agent-takkub.git
+cd agent-takkub
+bash scripts/install.sh          # หรือ double-click scripts/install.command ใน Finder
+```
+
+ความต่างจากฝั่ง Windows:
+
+- **System tools** ลงผ่าน **Homebrew** (`python@3.12`, `git`, `node`, Chrome cask, `gh`) แทน winget
+  ถ้าไม่มี Homebrew → ข้าม phase นั้นแล้วบอกวิธีติดตั้ง brew
+- **Node ต้อง v20+** — ถ้า node บนเครื่องเก่าเกินไปและ brew ใช้ไม่ได้ script จะ
+  **โหลด Node LTS ตรงจาก nodejs.org ลง `~/.local` ให้อัตโนมัติ** (ไม่ต้องใช้ sudo)
+- **Cockpit** ลงด้วย `uv` ถ้ามี (สร้าง `.venv` + editable install) ไม่งั้น fallback เป็น `python3 -m venv` + pip
+
+**Flags:**
+
+| Flag | ทำอะไร |
+|---|---|
+| (none) | ลงเฉพาะที่ยังไม่มี |
+| `--update` | re-install / upgrade ทุกตัว |
+| `--skip-mcp-prewarm` | ข้าม Phase 4b (MCP download อัตโนมัติตอน spawn แทน) |
+| `--skip-rtk` | ข้าม Phase 5 (ไม่ลง rtk) |
+| `--vault-dir <path>` | ที่ตั้ง Obsidian vault skeleton (default `~/WebstormProjects/second-brain`) |
+| `--no-vault` | ข้ามการสร้าง vault skeleton |
+
+> **rtk** ลงจาก **prebuilt binary ของ `github.com/rtk-ai/rtk`** ตรงเข้า `~/.local/bin` (ไม่ต้องมี Rust)
+> — ⚠️ ห้าม `cargo install rtk` เพราะ crate ชื่อ `rtk` บน crates.io เป็นคนละตัว (Rust Type Kit) ไม่ใช่ Token Killer
+
+Login ไม่รวมใน script (เหมือนฝั่ง Windows) — รันเองหลังเสร็จ:
+`claude` (required) · `codex login` (optional) · `agy` (optional)
+แล้วเปิด cockpit ด้วย `.venv/bin/agent-takkub`
+
+---
+
 ## Quick Install (สามขั้น — manual path)
 
 ```bat
@@ -420,7 +459,8 @@ agent-takkub/
 ├── projects.json                 # active project + paths + presets
 ├── pyproject.toml                # PyQt6 + dependencies
 ├── agent-takkub.bat              # one-click launcher (setup + launch)
-├── scripts/install.ps1           # one-shot dependency installer (+ install.bat wrapper)
+├── scripts/install.ps1           # one-shot dependency installer — Windows (+ install.bat wrapper)
+├── scripts/install.sh            # one-shot dependency installer — macOS/Linux (+ install.command wrapper)
 ├── .claude/agents/               # per-role agent definitions
 ├── bin/takkub  /  bin/takkub.cmd # POSIX + Windows CLI shims → agent_takkub.cli
 ├── runtime/                      # gitignored — port file, events.log, sessions, snapshots
