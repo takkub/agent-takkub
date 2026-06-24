@@ -13,9 +13,9 @@
 
 Lead spawn เฉพาะ role ที่จำเป็นต่องานนั้น — ไม่ต้องทุกครั้ง ใช้ `takkub` CLI สั่ง orchestrator (Python desktop app)
 
-> **ก่อน navigate/แก้ `src/agent_takkub/` (โดยเฉพาะ god-file `orchestrator.py` 5.8k LOC / `main_window.py` 4k LOC):**
-> อ่าน `docs/architecture/godfile-map.md` (function อยู่ cluster ไหน + hidden string/socket edges ที่ import มองไม่เห็น)
-> + `docs/architecture/depgraph.json` (import map + fan-in/out) — **อย่า grep มั่วแล้วเดา**.
+> **ก่อน navigate/แก้ `src/agent_takkub/`:** god-files แตกครบแล้ว (2026-06) — `orchestrator.py` 5.8k→2.7k LOC, `main_window.py` 4k→1k LOC, กระจายเป็น **10 cohesive mixins** (engine: `pipeline_executor` · `orchestrator_text` · `broadcast_actions` · `lead_inbox` · `spawn_engine` + `PaneRegistry`; UI: `update_panel` · `project_wizard` · `user_actions` · `limit_panel` · `status_header`). guardrail = import-linter 13 contracts.
+> อ่าน `docs/architecture/godfile-map.md` (method→โมดูลไหน + hidden string/socket edges ที่ import มองไม่เห็น)
+> + `docs/architecture/depgraph.json` (import map + fan-in/out, auto-refresh ทุก commit) — **อย่า grep มั่วแล้วเดา**.
 
 ### เมื่อไหร่ควรเรียก codex
 - **Refactor pattern ชัด** (`extract X to Y`, `migrate A → B`) — คู่ขนาน claude เทียบ diff
@@ -97,6 +97,9 @@ wait
 # → ทุก impl done → handoff อัตโนมัติ: Lead fire devops (bring-up) → รอ → qa (ท้ายสุด)
 ```
 
+### Shard fan-out (กระจายงาน role เดียวเป็น N panes)
+`takkub assign --role qa --shards 4 "<task>"` → spawn `qa#1…qa#4` คู่ขนาน แต่ละ pane ได้ env `TAKKUB_SHARD` / `TAKKUB_SHARD_TOTAL` ให้ split งานเอง (เช่น แบ่ง test suite, แบ่งไฟล์ที่ scan) — ใช้เมื่องานของ role เดียว parallelize ได้ตามจำนวน ไม่ต้องเขียน task แยกทีละ pane
+
 ### ส่ง spec เดียวกันให้หลาย role
 ตั้ง `SPEC="..."` แล้ว interpolate `$SPEC` เข้าทุก assign — กัน drift ระหว่าง frontend/backend prompts
 
@@ -118,15 +121,24 @@ wait
 
 ```bash
 takkub list                                            # ดูสถานะ panes ทั้งหมด
+takkub status                                           # per-pane progress + stall detection (post-compact awareness)
 takkub assign --role frontend "<task>"                 # spawn (ถ้ายังไม่เปิด) + ส่ง task
 takkub assign --role backend --cwd <path> "<task>"     # override role-aware default cwd
-takkub assign --role backend --requires-commit "<task>" # gate done: ต้อง git commit ก่อน
+takkub assign --role backend --requires-commit "<task>" # gate done: flag uncommitted changes ให้ Lead (Lead commit)
+takkub assign --role backend --auto-chain "<task>"     # impl done → auto verify sequence (devops→qa) ไม่ต้อง propose
+takkub assign --role qa --shards 4 "<task>"            # fan-out N parallel shard panes (<role>#1…#N · env TAKKUB_SHARD/_TOTAL)
 takkub send --to backend "<message>"                   # peer message (CC Lead อัตโนมัติ)
 takkub goal "<objective>"                              # ตั้งเป้าหมาย session — prepend เข้าทุก assign task หลังจากนี้
 takkub goal                                            # โชว์ goal ปัจจุบัน
 takkub goal --clear                                    # ล้าง goal
+takkub harvest --role <role>                           # กู้งานของ pane ที่ทำเสร็จแต่ลืม takkub done (scan artifacts)
 takkub close --role qa                                 # ปิด pane เดียว
 takkub close-all                                       # ปิด teammate ทั้งหมด (Lead รอด)
+takkub end-session --note "<สรุป>"                     # เขียน session summary ลง runtime/sessions + vault mirror
+takkub doctor                                          # diagnose cockpit env (claude/node/plugins/mcps/projects) · --fix auto-fix
+takkub search "<query>"                                # grep บทสนทนา Claude Code เก่าทุกโปรเจค (--days N · --all · --project)
+takkub services start|stop|ps|logs                     # docker compose ของ project ที่ active (cwd)
+takkub pipeline run <template>                         # start pipeline template (lead only)
 takkub issue list                                      # ดู cockpit issue queue
 takkub issue new "<title>" --severity <low|med|high> --tag <a,b> --body "..."  # ลง agent-takkub repo เสมอ (default)
 takkub issue new "<title>" --no-cockpit-bug --body "..."  # opt-out: ลง repo ของ project ที่ active (cwd) แทน
@@ -152,10 +164,13 @@ Context ตอน spawn **ไม่ได้ preload vault** — เบาไว
 - user **ถามถึงประวัติ/เหตุผล** decision เก่า ("ทำไมเลือก X", "เคยลองอะไรไปแล้ว")
 - งานแตะ subsystem ที่ **เคยมี bug/decision** บันทึกไว้ (routing, pane spawn, env leak, paste)
 
+> **โครงสร้าง vault 3-tier (refactor 2026-06 — แยก log ออกจาก knowledge):** `99-Logs/` = volatile log (briefs, raw sessions) · `01-Projects/` = knowledge ที่ distill แล้ว · `04-Archive/` = post-mortem ถาวร
+
 **ค้นที่ไหน** (`<vault>` = vault root ที่ระบุข้างบน — เรียงตามความสด):
-1. `<vault>/07-AI-Command-Center/briefs/agent-takkub-<ts>.md` — **resume brief สดสุด** (transcript tail 20 exchanges ล่าสุด ต่อ session) เอาไว้รู้ว่า session ก่อนทำอะไรค้างไว้
-2. `<vault>/04-Archive/agent-takkub/bugs/*.md` — bug post-mortem เก่า (root cause + fix)
-3. `<vault>/01-Projects/agent-takkub.md` — project page **(ระวัง: เขียนมือ อาจ stale/ขัดแย้ง — cross-check กับ git log ก่อนเชื่อ)**
+1. `<vault>/99-Logs/briefs/agent-takkub-<ts>.md` — **resume brief สดสุด** (transcript tail 20 exchanges ล่าสุด ต่อ session) เอาไว้รู้ว่า session ก่อนทำอะไรค้างไว้
+2. `<vault>/01-Projects/agent-takkub/sessions/<ts>-<role>.md` — session summary ราย role (`takkub end-session` เขียน)
+3. `<vault>/04-Archive/agent-takkub/bugs/*.md` — bug post-mortem เก่า (root cause + fix)
+4. `<vault>/01-Projects/agent-takkub.md` — project page (distilled durable facts) **(ระวัง: ส่วนเขียนมือ อาจ stale/ขัดแย้ง — cross-check กับ git log ก่อนเชื่อ)**
 
 **ข้อจำกัด:** ` ```dataview ` block อ่านด้วย `Read` ตรงๆ จะเห็นแค่ query ไม่ใช่ผลลัพธ์ — ถ้าต้อง resolve ใช้ obsidian-vault MCP
 
