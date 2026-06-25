@@ -8,7 +8,14 @@ on:
 
 jobs:
   lint-and-test:
-    runs-on: windows-latest
+    # Cockpit ships on both Windows (ConPTY) and macOS (_pty_backend) — both
+    # must stay green. fail-fast: false so one OS failing doesn't cancel the
+    # other (we want to see exactly which platform broke).
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 

@@ -17,6 +17,11 @@ Lead spawn เฉพาะ role ที่จำเป็นต่องานน
 > อ่าน `docs/architecture/godfile-map.md` (method→โมดูลไหน + hidden string/socket edges ที่ import มองไม่เห็น)
 > + `docs/architecture/depgraph.json` (import map + fan-in/out, auto-refresh ทุก commit) — **อย่า grep มั่วแล้วเดา**.
 
+> **Cross-platform (Windows + macOS) — บังคับทุกการเปลี่ยนแปลง:** cockpit รัน **ทั้ง Windows (ConPTY) และ macOS (`_pty_backend` — merge แล้ว)** ทุก feature/fix/refactor ต้องทำงานได้ **ทั้ง 2 OS คู่กัน** ห้ามทำให้ฝั่งใดฝั่งหนึ่งพัง:
+> - **ห้าม hardcode** path/command เฉพาะ platform — ใช้ `pathlib.Path` (ไม่ใช่ `\\` หรือ `.exe` ตรงๆ); อะไรที่ platform-specific ต้อง gate ด้วย `sys.platform == "win32"/"darwin"` **+ มี branch อีกฝั่งเสมอ** (อย่าปล่อยให้ mac ตกหล่น)
+> - **ก่อน push ต้องรัน full suite** (`pytest` ทั้งหมด) ไม่ใช่แค่ targeted tests — fake/mock ที่ signature drift จาก orchestrator/cli_server จริง จะ raise ใน QTimer slot → **PyQt6 abort process เงียบๆ (exit 127)** ที่ targeted run ไม่จับ
+> - **CI = matrix `windows-latest` + `macos-latest`** (`.github/workflows/ci.yml`) — **ทั้งคู่ต้องเขียว** ก่อน merge; ถ้าแก้อะไรแล้ว mac แดง = ยังไม่เสร็จ
+
 ### เมื่อไหร่ควรเรียก codex
 - **Refactor pattern ชัด** (`extract X to Y`, `migrate A → B`) — คู่ขนาน claude เทียบ diff
 - **Code review รอบสอง** — หา blind spot
