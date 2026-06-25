@@ -52,6 +52,7 @@ class _FakeOrch:
         requires_commit=False,
         auto_chain=False,
         shard_total=0,
+        plan=False,
         project=None,
     ):
         self.assign_calls.append((role, cwd, task, requires_commit, auto_chain))
