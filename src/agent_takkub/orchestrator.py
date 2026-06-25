@@ -2769,7 +2769,19 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
         self.close(role_name)
 
     def _on_pane_input(self, role_name: str, data: bytes) -> None:
-        pane = self.panes.get(role_name)
+        # Route the keystrokes to the pane that ACTUALLY emitted them, not to
+        # `self.panes[role_name]`. `self.panes` resolves to the *active project*
+        # only — a single-project-era assumption that predates multi-tab support.
+        # With several project tabs open, every project's same-role pane (e.g.
+        # both Leads) is wired to this one slot, so role-name lookup sent input
+        # into whichever project happened to be active — misdelivering keystrokes
+        # (incl. Shift+Tab, which cycles claude's permission mode) into the wrong
+        # pane. Qt's sender() is the emitting AgentPane, so it is project-correct
+        # by construction. Fall back to the role lookup for direct/test calls
+        # where there is no signal sender.
+        pane = self.sender()
+        if not isinstance(pane, AgentPane):
+            pane = self.panes.get(role_name)
         if pane is None or pane.session is None:
             return
         pane.session.write(data)
