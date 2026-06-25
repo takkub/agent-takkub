@@ -855,6 +855,18 @@ class PtySession(QObject):
             return float("inf")
         return max(0.0, time.monotonic() - ts)
 
+    def last_output_monotonic(self) -> float:
+        """Monotonic timestamp of the last PTY output, or 0.0 if none yet.
+
+        Unlike ``seconds_since_output`` (which says *how long ago*), this exposes
+        the raw timestamp so a caller can capture a baseline and later test
+        whether output arrived *after* it — i.e. did the TUI react to something
+        we wrote. The delivery self-heal uses this to tell a paste that LANDED
+        (claude rendered a placeholder / streamed a reply → timestamp advanced)
+        from one that was SWALLOWED (#26 — bytes dropped, pane stayed silent →
+        timestamp unchanged), which a same-clock comparison decides reliably."""
+        return self._last_output_ts or 0.0
+
     def rate_limit_reset_at(self) -> float | None:
         """If the pane is showing claude's usage-limit banner, return the epoch
         the limit resets at; else None.

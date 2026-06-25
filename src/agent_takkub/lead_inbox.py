@@ -139,6 +139,16 @@ def _delayed_enter_verified(
     caller can log/observe it.
     """
 
+    # Output-timestamp baseline captured the instant we begin verifying (the
+    # caller has just written the paste). Output that arrives AFTER this proves
+    # claude received the paste, which the repaste branch uses to avoid the
+    # duplicate-paste false-positive. A list cell so the repaste branch can
+    # re-baseline against its own write without `nonlocal`. Best-effort: a fake
+    # session without the accessor falls back to 0.0 (repaste path unchanged).
+    paste_baseline = [
+        session.last_output_monotonic() if hasattr(session, "last_output_monotonic") else 0.0
+    ]
+
     def _send_then_verify(remaining: int) -> None:
         if pane.session is not session:
             return
@@ -151,23 +161,50 @@ def _delayed_enter_verified(
             if not session.is_at_ready_prompt():
                 return
             # Still ready → submit didn't land. If we have the payload and the
-            # input box is empty, the PASTE was swallowed (#26) — re-paste, then
-            # submit once the placeholder renders. A bare CR resend can't recover
-            # a missing paste.
+            # input box is empty, the PASTE may have been swallowed (#26) — but
+            # "ready prompt + empty box" is ALSO exactly what a paste that was
+            # SUBMITTED successfully looks like once claude returns to idle, and
+            # what a landed paste whose `[Pasted text]` placeholder scrolled out
+            # of the scanned footer rows looks like. Repasting in those cases is
+            # the false-positive that stacked duplicate tasks in the input box —
+            # near-universal under concurrent multi-project load (the visible
+            # "เบิ้ลตามจำนวนโปรเจค"). Decide with a structural signal instead of
+            # the ambiguous box state.
             if payload is not None and not session.shows_pending_input(content_fragment):
-                # ...but an empty-LOOKING box under parallel-spawn load is usually
-                # a `[Pasted text]` placeholder that just hasn't finished painting,
-                # not a lost paste. A pane still rendering is producing output, so
-                # wait out a few grace cycles (bounded) before repasting —
-                # repasting into a slow-rendering box is what stacked 4× [Pasted
-                # text]. A truly swallowed paste leaves the pane idle (no recent
-                # output), so it skips the wait and repastes at once (#26 intact).
+                # Did claude produce ANY output since we pasted? A paste that
+                # landed renders a placeholder / streams a reply (timestamp
+                # advances past the baseline); a swallowed paste leaves the pane
+                # completely silent (timestamp unchanged). Output-since-paste ⇒
+                # the bytes were received, so an empty box now means it was
+                # SUBMITTED, not lost. Recover with a bare CR only (harmless
+                # no-op if already submitted; submits a swallowed-CR #22 paste) —
+                # never a second [Pasted text]. A fake session without the
+                # accessor degrades to the prior render-guard behaviour.
+                produced_output = (
+                    session.last_output_monotonic() > paste_baseline[0]
+                    if hasattr(session, "last_output_monotonic")
+                    else False
+                )
+                if produced_output:
+                    if on_resend is not None:
+                        on_resend(remaining)
+                    _send_then_verify(remaining - 1)
+                    return
+                # No output yet since the paste. Could be a genuine swallow, or a
+                # placeholder that hasn't started painting under load — wait out a
+                # bounded grace for output to appear before concluding the bytes
+                # were dropped (repasting into a slow-rendering box is what
+                # stacked 4× [Pasted text]).
                 if render_waits > 0 and session.seconds_since_output() < _RENDER_ACTIVE_S:
                     QTimer.singleShot(_SUBMIT_VERIFY_GRACE_MS, lambda: _verify(render_waits - 1))
                     return
+                # Silent through the grace window → genuine swallow (#26):
+                # re-paste, then submit once it renders. Re-baseline so the next
+                # verify measures output produced by THIS repaste.
                 if on_repaste is not None:
                     on_repaste(remaining)
                 session.write(payload)
+                paste_baseline[0] = session.last_output_monotonic()
                 QTimer.singleShot(
                     _enter_delay_ms(payload),
                     lambda: _send_then_verify(remaining - 1),

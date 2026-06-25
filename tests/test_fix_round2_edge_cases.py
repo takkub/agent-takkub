@@ -246,6 +246,9 @@ class TestDelayedEnterVerifiedRepaste:
         sess.is_at_ready_prompt.side_effect = [True, False]
         sess.shows_pending_input.return_value = False  # input box empty
         sess.seconds_since_output.return_value = 5.0  # idle → not still rendering
+        # Genuine swallow: the pane produced NO output since the paste, so the
+        # baseline never advances → produced_output is False → repaste fires.
+        sess.last_output_monotonic.return_value = 100.0
         pane = MagicMock()
         pane.session = sess
 
@@ -255,6 +258,30 @@ class TestDelayedEnterVerifiedRepaste:
         # initial CR, then re-paste payload, then submitting CR.
         assert writes == [b"\r", self.PAYLOAD, b"\r"]
         assert repastes == [3] and resends == []
+
+    def test_no_repaste_when_paste_landed_then_idle(self) -> None:
+        """Duplicate-task false-positive (the 'เบิ้ลตามจำนวนโปรเจค' report): a paste
+        that was SUBMITTED leaves the pane idle with an empty box — pixel-identical
+        to a swallowed paste. The discriminator is output: if claude produced any
+        output since the paste (placeholder/reply rendered), the bytes were
+        received, so an empty box means it was submitted, NOT lost. Must recover
+        with a bare CR (harmless no-op) and NEVER re-paste — re-pasting here is
+        what stacked duplicate task specs in the teammate's input box."""
+        sess = MagicMock()
+        sess.is_at_ready_prompt.side_effect = [True, False]  # idle, then stop
+        sess.shows_pending_input.return_value = False  # empty box (already sent)
+        sess.seconds_since_output.return_value = 5.0  # idle now
+        # Output advanced AFTER the baseline → claude received the paste.
+        sess.last_output_monotonic.side_effect = [100.0, 200.0]  # baseline, verify
+        pane = MagicMock()
+        pane.session = sess
+
+        resends, repastes = self._run_inline(pane, sess)
+
+        writes = [c.args[0] for c in sess.write.call_args_list]
+        assert self.PAYLOAD not in writes  # never a second [Pasted text]
+        assert writes == [b"\r", b"\r"]  # initial CR + one harmless CR resend
+        assert repastes == [] and resends == [3]
 
     def test_render_lag_waits_instead_of_repasting(self) -> None:
         """Duplicate-paste spam fix: an empty-LOOKING box while the pane is still
@@ -267,6 +294,10 @@ class TestDelayedEnterVerifiedRepaste:
         sess.is_at_ready_prompt.side_effect = [True, True, False]
         sess.shows_pending_input.side_effect = [False, True]
         sess.seconds_since_output.return_value = 0.2  # output recent → rendering
+        # No output since the paste yet (placeholder still painting), so the
+        # produced_output early-exit does NOT trigger — the render-settle wait
+        # owns this case and resolves it with a CR once the placeholder appears.
+        sess.last_output_monotonic.return_value = 100.0
         pane = MagicMock()
         pane.session = sess
 
@@ -287,6 +318,9 @@ class TestDelayedEnterVerifiedRepaste:
         sess.is_at_ready_prompt.return_value = True  # never lands
         sess.shows_pending_input.return_value = False  # box never shows content
         sess.seconds_since_output.return_value = 0.1  # always "rendering"
+        # Silent since the paste (baseline never advances) → produced_output stays
+        # False, so each attempt waits out the bounded grace then repastes.
+        sess.last_output_monotonic.return_value = 100.0
         pane = MagicMock()
         pane.session = sess
 
