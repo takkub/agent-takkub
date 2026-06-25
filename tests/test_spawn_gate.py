@@ -22,6 +22,7 @@ from PyQt6.QtCore import QCoreApplication
 # Import Orchestrator at module level so terminal_widget's QWebEngineView chain
 # is resolved during pytest collection — before QApplication is instantiated by
 # the session-scoped _qt_session_app fixture in conftest.py.
+from agent_takkub.lead_inbox import _READY_POLL_FIRST_MS, _READY_POLL_INTERVAL_MS
 from agent_takkub.orchestrator import Orchestrator
 
 TEST_PROJECT = "gatetest"
@@ -354,9 +355,9 @@ class TestSendWhenReadyRetry:
         with patch("agent_takkub.orchestrator.QTimer.singleShot", side_effect=fake_singleshot):
             orch._send_when_ready("backend", "do something", project=TEST_PROJECT)
 
-            # First call schedules 1000ms check
+            # First call schedules the initial ready-poll check
             assert timer_calls, "singleShot must be called"
-            assert timer_calls[0][0] == 1_000
+            assert timer_calls[0][0] == _READY_POLL_FIRST_MS
 
             # Fire the first _check() inside the patch so QTimer.singleShot is still mocked
             first_check = timer_calls[0][1]
@@ -364,7 +365,7 @@ class TestSendWhenReadyRetry:
             first_check()
 
             assert timer_calls, "_check must reschedule when session is None"
-            assert timer_calls[0][0] == 500, "retry must be 500ms"
+            assert timer_calls[0][0] == _READY_POLL_INTERVAL_MS, "retry uses the poll interval"
 
     def test_check_eventually_delivers_when_session_appears(self, qapp, monkeypatch):
         orch = Orchestrator.__new__(Orchestrator)
@@ -382,7 +383,7 @@ class TestSendWhenReadyRetry:
         with patch("agent_takkub.orchestrator.QTimer.singleShot", side_effect=fake_singleshot):
             orch._send_when_ready("backend", "do something", project=TEST_PROJECT)
 
-            # Fire initial 1000ms check inside the patch (session is None → reschedule)
+            # Fire the initial ready-poll check inside the patch (session is None → reschedule)
             initial = timer_calls[0][1]
             timer_calls.clear()
             initial()
@@ -394,7 +395,7 @@ class TestSendWhenReadyRetry:
             live_sess.is_at_ready_prompt.return_value = True
             pane.session = live_sess
 
-            # Fire the 500ms retry — session is now alive → delivers
+            # Fire the rescheduled retry — session is now alive → delivers
             retry_check = timer_calls[0][1]
             timer_calls.clear()
             retry_check()
