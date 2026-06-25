@@ -594,9 +594,14 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
         requires_commit: bool = False,
         auto_chain: bool = False,
         shard_total: int = 0,
+        plan: bool = False,
         project: str | None = None,
     ) -> tuple[bool, str]:
-        ok, msg = self.spawn(role_name, cwd=cwd, project=project, _shard_total=shard_total)
+        # Plan mode spawns a single PLANNER pane (not a shard) — it carries
+        # shard_total=0 so done() treats it as a normal pane; the fan-out it
+        # triggers later assigns the real shards with shard_total=N.
+        spawn_shard_total = 0 if plan else shard_total
+        ok, msg = self.spawn(role_name, cwd=cwd, project=project, _shard_total=spawn_shard_total)
         if not ok:
             # The CLI already acked "task queued" to the Lead's shell before
             # this async spawn ran, so a failure here is invisible unless we
@@ -604,7 +609,9 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
             self._warn_lead_spawn_failed(role_name, project, msg)
             # #5: record spawn-failed shard into its group so the aggregate
             # doesn't orphan forever (mirrors _warn_lead_respawn_capped path).
-            if shard_total > 0:
+            # Plan mode has no shard group yet (the planner failed before
+            # fan-out), so skip — the dead planner pane is visible to the user.
+            if shard_total > 0 and not plan:
                 pns_fail = self._resolve_project(project)
                 base_fail = _split_shard(role_name)[0]
                 gk_fail = f"{pns_fail}::{base_fail}"
@@ -650,6 +657,28 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
             ps_assign.requires_commit_on_done = True
         if auto_chain:
             ps_assign.auto_chain = True
+        if plan and shard_total > 0:
+            # Planner pane: wrap the task with planning instructions, remember
+            # the fan-out config, and let done() spawn the shards once the
+            # plan file is written. The planner itself is NOT a shard.
+            plan_file = self._qa_plan_file(project_ns, base_role_a)
+            planner_task = self._wrap_planner_task(task, plan_file, shard_total)
+            ps_assign.last_assigned_task = planner_task
+            ps_assign.plan_fanout = {
+                "shards": shard_total,
+                "cwd": cwd,
+                "task": task,
+                "plan_file": str(plan_file),
+            }
+            self._send_when_ready(role_name, planner_task, project=project)
+            _log_event(
+                "assign_plan",
+                role=role_name,
+                cwd=cwd,
+                shards=shard_total,
+                plan_file=str(plan_file),
+            )
+            return True, f"planner queued for {role_name} (fan-out {shard_total} on done)"
         if shard_total > 0:
             ps_assign.shard_total = shard_total
             # Create/update shard group for aggregate tracking.
@@ -1045,6 +1074,7 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
         had_auto_chain = _ps_done.auto_chain
         had_shard_total = _ps_done.shard_total
         had_pipeline_run_id = _ps_done.pipeline_run_id
+        had_plan_fanout = _ps_done.plan_fanout
 
         # Opt-in commit handoff: if assign() was called with requires_commit=True,
         # check for a dirty working tree and warn Lead (the agent isn't blocked —
@@ -1066,8 +1096,10 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
         notice = f"[{from_role} done] {note}".rstrip()
         # Shard panes: suppress per-shard notice to Lead — consolidated handoff
         # (_inject_shard_fanout_handoff) is the single message Lead sees.
-        # Non-shard panes (had_shard_total == 0) use the normal notice path.
-        if had_shard_total == 0:
+        # Planner panes: suppress too — the "[qa plan ready] fan-out …" message
+        # from _fire_qa_plan_fanout is the meaningful one Lead acts on.
+        # Non-shard, non-planner panes use the normal notice path.
+        if had_shard_total == 0 and not had_plan_fanout:
             # Route through _notify_lead so concurrent done notices are serialised
             # and never injected while Lead is mid-generation (the root cause of the
             # "Lead goes silent after parallel dispatch" bug).
@@ -1088,6 +1120,12 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
         # the project, inject a pre-authorisation prompt so Lead fires
         # verify (qa+reviewer) without proposing/confirming.
         self._maybe_fire_auto_chain_handoff(project_ns, had_auto_chain)
+
+        # Plan-then-fan-out: this pane was a planner (--plan). Read the bucket
+        # plan it just wrote and spawn the QA shards (each with its bucket).
+        if had_plan_fanout:
+            base_role_p, _ = _split_shard(from_role)
+            self._fire_qa_plan_fanout(project_ns, base_role_p, had_plan_fanout, planner_note=note)
 
         # Shard aggregate: record this shard's note and check if all N done.
         if had_shard_total > 0:

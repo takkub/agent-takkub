@@ -98,7 +98,14 @@ wait
 ```
 
 ### Shard fan-out (กระจายงาน role เดียวเป็น N panes)
-`takkub assign --role qa --shards 4 "<task>"` → spawn `qa#1…qa#4` คู่ขนาน แต่ละ pane ได้ env `TAKKUB_SHARD` / `TAKKUB_SHARD_TOTAL` ให้ split งานเอง (เช่น แบ่ง test suite, แบ่งไฟล์ที่ scan) — ใช้เมื่องานของ role เดียว parallelize ได้ตามจำนวน ไม่ต้องเขียน task แยกทีละ pane
+`takkub assign --role qa --shards 4 "<task>"` → spawn `qa#1…qa#4` คู่ขนาน แต่ละ pane ได้ env `TAKKUB_SHARD` / `TAKKUB_SHARD_TOTAL` ให้ split งานเอง (modulo — เช่น แบ่ง test suite, แบ่งไฟล์ที่ scan) — ใช้เมื่องานของ role เดียว parallelize ได้ตามจำนวน ไม่ต้องเขียน task แยกทีละ pane
+
+### Plan-first fan-out (`--plan` — แบ่งงานฉลาด ไม่ใช่ modulo)
+`takkub assign --role qa --plan --shards 4 "<task>"` → **2-phase อัตโนมัติ** ที่ orchestrator ขับเอง (Lead ไม่ต้อง parse plan):
+1. **planner pane** (`qa` เปล่า) วิเคราะห์แอป (routes/flows/api) → แบ่งงานเทสเป็น 4 buckets ที่ **balanced + independent** (flow ที่ depend กันอยู่ bucket เดียว) → เขียน plan JSON → `takkub done`
+2. orchestrator อ่าน plan → **auto fan-out `qa#1…qa#4`** โดย inject scope ของแต่ละ bucket เข้า task spec ของ shard นั้น → รันพร้อมกัน → consolidated handoff กลับ Lead เมื่อครบ
+
+**ใช้เมื่อ:** QA เป็น **browser e2e/smoke (Playwright / `mb`) ที่เทสหลายหน้า/flow** — งาน browser ช้าและแยก Chrome ขนานได้คุ้ม (แต่ละ shard มี port/profile ของตัวเอง) planner hop (~1 นาที) คุ้มเมื่องาน browser รวมแล้วเกิน ~5 นาที · **ไม่ใช้เมื่อ:** smoke flow เดียว หรือ test ที่ไม่ใช่ browser (unit-suite / API integration) — planner hop ไม่คุ้ม ใช้ `qa` ธรรมดา · ต้อง `--shards ≥ 2` (sweet spot 3–4) · ใช้ร่วม `--auto-chain` ไม่ได้ · plan อ่านไม่ได้ → degrade เป็น self-split อัตโนมัติ + เตือน Lead
 
 ### ส่ง spec เดียวกันให้หลาย role
 ตั้ง `SPEC="..."` แล้ว interpolate `$SPEC` เข้าทุก assign — กัน drift ระหว่าง frontend/backend prompts
@@ -127,6 +134,7 @@ takkub assign --role backend --cwd <path> "<task>"     # override role-aware def
 takkub assign --role backend --requires-commit "<task>" # gate done: flag uncommitted changes ให้ Lead (Lead commit)
 takkub assign --role backend --auto-chain "<task>"     # impl done → auto verify sequence (devops→qa) ไม่ต้อง propose
 takkub assign --role qa --shards 4 "<task>"            # fan-out N parallel shard panes (<role>#1…#N · env TAKKUB_SHARD/_TOTAL)
+takkub assign --role qa --plan --shards 4 "<task>"     # plan-first: planner pane แบ่ง N buckets → auto fan-out qa#1…#N ฉลาด (ต้อง --shards ≥ 2)
 takkub send --to backend "<message>"                   # peer message (CC Lead อัตโนมัติ)
 takkub goal "<objective>"                              # ตั้งเป้าหมาย session — prepend เข้าทุก assign task หลังจากนี้
 takkub goal                                            # โชว์ goal ปัจจุบัน
@@ -197,7 +205,8 @@ Context ตอน spawn **ไม่ได้ preload vault** — เบาไว
 | docker / CI / deploy / pipeline / infra / k8s / nginx | devops | — |
 | refactor / extract / migrate A→B / rename | primary (ตามไฟล์) | **+codex** เทียบ diff |
 | rollout / strategy / phase / migration plan | gemini | — |
-| test / smoke / e2e / regression | qa | — |
+| **UI e2e / smoke ผ่าน browser (Playwright / `mb`)** — เทสหลายหน้า/flow | **qa `--plan --shards N`** (planner แบ่ง bucket → fan-out ขนาน, แต่ละ shard ขับ Chrome ของตัวเอง) | — |
+| test แคบ (1 flow/หน้าเดียว) · หรือ non-browser (unit-suite / API integration) | qa | — |
 | review / code review / security | reviewer | — |
 | design review / รีวิว UI | critic | **+gemini** parallel |
 | **รีวิวระบบ / อธิบายระบบ / ระบบทำงานยังไง / explain architecture / system overview** | **Lead → HTML system explainer** | — |

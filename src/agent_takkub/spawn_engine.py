@@ -182,6 +182,11 @@ class PaneState:
     last_send_ts: float = 0.0
     # _shard_total: total shards in the fan-out group (0 = not a shard pane)
     shard_total: int = 0
+    # _plan_fanout: pending QA plan-then-fan-out config on a PLANNER pane
+    # (None = not a planner). Set by assign(..., plan=True); read in done() to
+    # spawn the shard fan-out from the plan file the planner just wrote.
+    # Shape: {"shards": int, "cwd": str|None, "task": str, "plan_file": str}
+    plan_fanout: dict | None = None
     # _harvest_hint_ts: cooldown for harvest-hint injection to Lead
     harvest_hint_ts: float = 0.0
     # _last_content_hash + _last_content_change_ts: content-delta stuck detection

@@ -176,6 +176,34 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                 "--auto-chain would double-fire a verify hop."
             ),
         }
+    plan = bool(getattr(args, "plan", False))
+    if plan:
+        # Plan-then-fan-out: one PLANNER pane analyses the app, writes a
+        # bucket plan, and on done the orchestrator auto-fans-out N shards
+        # (each carrying its bucket). A single request — the orchestrator
+        # drives the two-phase flow; the CLI never spawns shards directly.
+        if shards < 2:
+            return {
+                "ok": False,
+                "msg": (
+                    "--plan requires --shards >= 2: the planner splits work "
+                    "across N parallel QA shards, so N must be at least 2 "
+                    "(use a plain assign for a single tester)"
+                ),
+            }
+        return _request(
+            _with_project(
+                {
+                    "cmd": "assign",
+                    "role": args.role,
+                    "cwd": args.cwd,
+                    "task": args.task,
+                    "from": _from_role(),
+                    "plan": True,
+                    "shard_total": shards,
+                }
+            )
+        )
     if shards > 1:
         # Fan-out: spawn <role>#1 … <role>#N in parallel; each carries shard_total.
         results = []
@@ -748,6 +776,15 @@ def main(argv: list[str] | None = None) -> int:
         metavar="N",
         help="fan-out to N parallel shard panes (<role>#1 … <role>#N); "
         "each pane gets TAKKUB_SHARD / TAKKUB_SHARD_TOTAL env vars",
+    )
+    sa.add_argument(
+        "--plan",
+        action="store_true",
+        dest="plan",
+        default=False,
+        help="plan-first fan-out: spawn ONE planner pane that analyses the app "
+        "and writes a balanced bucket plan, then auto-fan-out --shards N "
+        "testers (each gets its bucket). Requires --shards >= 2",
     )
     sa.set_defaults(func=cmd_assign)
 

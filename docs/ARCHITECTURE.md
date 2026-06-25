@@ -163,7 +163,14 @@ src/agent_takkub/
 When Lead assigns a task with `--shards N` (clamped to 1–8), the orchestrator spawns `N` parallel panes named `<role>#1` to `<role>#N`.
 - **Isolation:** Each shard gets its own Chrome port-file and profile-dir (`.takkub/chrome/qa-${SHARD}.port`).
 - **Coordination:** Shards share a `ShardGroup` in the orchestrator. When the last shard calls `takkub done`, a consolidated handoff message is sent to Lead.
-- **Environment:** `TAKKUB_SHARD` and `TAKKUB_SHARD_TOTAL` are injected into each pane.
+- **Environment:** `TAKKUB_SHARD` and `TAKKUB_SHARD_TOTAL` are injected into each pane. Without a plan (below), shards self-split work by `TAKKUB_SHARD % TAKKUB_SHARD_TOTAL` (modulo).
+
+### Plan-first fan-out (`--plan`)
+
+`--plan --shards N` (requires `N ≥ 2`; mutually exclusive with `--auto-chain`) turns the fan-out into a **two-phase flow driven entirely by the orchestrator** — the Lead never parses the plan:
+1. **Plan phase:** `assign(plan=True)` spawns a single *planner* pane (the bare base role, e.g. `qa`, with `shard_total=0` so it is not itself a shard). `assign()` wraps the task with planner instructions (`_wrap_planner_task`) and records `PaneState.plan_fanout = {shards, cwd, task, plan_file}`. The planner analyses the app and writes a bucket plan JSON (`{"shards": [{"n", "scope", "focus"}, …]}`) to `runtime/qa-plans/<project>-<role>-plan.json` (`_qa_plan_file`), then `takkub done`.
+2. **Fan-out phase:** in `done()`, a non-zero `plan_fanout` triggers `_fire_qa_plan_fanout` (PipelineMixin): it reads the plan file and `assign()`s `<role>#1…#k` (staggered by `_SPAWN_STAGGER_MS`), injecting each bucket's `scope`/`focus` into that shard's task. From here it is an ordinary `ShardGroup` fan-out (consolidated handoff on completion). The planner's own per-pane done notice is suppressed in favour of the `[qa plan ready]` message.
+- **Degrade:** if the plan file is missing or unparseable, `_fire_qa_plan_fanout` falls back to a plain `k`-shard self-split (modulo) and warns Lead — the parallel run still proceeds instead of stalling. Bucket count is clamped to the requested `N`.
 
 ## Lifecycle states (AgentPane)
 

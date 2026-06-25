@@ -410,6 +410,12 @@ class PipelineMixin:
             "3. THEN fire QA LAST as the single final gate against the running "
             "stack: `takkub assign --role qa ...` (no --auto-chain — QA is "
             "terminal). Pass QA the live ports/URLs from devops.\n"
+            "   If QA is BROWSER e2e/smoke (Playwright / mb) spanning MULTIPLE "
+            "pages/flows, use `--plan --shards N` (N≈3–4): a planner pane splits "
+            "the pages into balanced parallel buckets so the slow browser work "
+            "finishes in parallel. For a single-flow smoke or non-browser test "
+            "(unit suite / API integration), use plain `qa` — the ~1-min planner "
+            "hop isn't worth it.\n"
             "4. After the qa done event: resume normal propose-then-confirm "
             "flow. (reviewer = at PR time per policy, not in this auto gate "
             "unless a trust-boundary / schema / migration change.)\n"
@@ -491,4 +497,138 @@ class PipelineMixin:
             done=len(group.done),
             failed=len(group.failed),
             total=group.total,
+        )
+
+    # ──────────────────────────────────────────────────────────────
+    # QA plan-then-fan-out (assign --role qa --plan --shards N)
+    # ──────────────────────────────────────────────────────────────
+
+    def _qa_plan_file(self, project_ns: str, base_role: str):
+        """Deterministic path for the planner's bucket plan, shared by the
+        assign side (writes the instruction) and the done side (reads the
+        result). One file per (project, role) — overwritten each plan run.
+        Pure path computation, no mkdir: the planner creates the parent dir."""
+        from .config import RUNTIME_DIR
+
+        safe = base_role.replace("#", "_")
+        return RUNTIME_DIR / "qa-plans" / f"{project_ns}-{safe}-plan.json"
+
+    @staticmethod
+    def _wrap_planner_task(base_task: str, plan_file, shards: int) -> str:
+        """Prefix the QA task with planner-mode instructions: analyse the app,
+        split test work into *shards* balanced + independent buckets, write the
+        plan JSON to *plan_file*, then ``takkub done``. The orchestrator fans
+        out the real shards from that file once the planner reports done."""
+        return (
+            "━━ QA PLANNER MODE — วางแผนแบ่งงานก่อน fan-out (ยังไม่เทส) ━━\n"
+            f"คุณคือ qa-planner — รอบนี้ไม่ใช่การเทส แต่คือวางแผนแบ่งงานเทสให้ {shards} "
+            "QA shards ทำพร้อมกันได้เร็วสุดโดยไม่ทับซ้อนกัน\n\n"
+            "ขั้นตอน:\n"
+            "1. วิเคราะห์แอป/codebase (routes, pages, flows, API, components) หาขอบเขตที่ต้องเทส\n"
+            f"2. แบ่งงานเทสเป็น {shards} buckets ที่: (ก) balanced พอๆ กัน "
+            "(ข) independent — flow ที่ depend กันอยู่ bucket เดียวกัน "
+            "(ค) ครอบคลุมทั้งหมดไม่ตกหล่น\n"
+            "3. เขียน plan เป็น JSON ลงไฟล์ path นี้เป๊ะๆ (สร้าง dir parent ก่อนถ้ายังไม่มี):\n"
+            f"   {plan_file}\n"
+            "   schema:\n"
+            '   {"shards": [{"n": 1, "scope": "<หน้า/flow ที่ shard นี้เทส>", '
+            '"focus": "<จุดเน้น/edge cases>"}, ...]}\n'
+            f"   ต้องมี {shards} entries (n=1..{shards}); scope เขียนเป็น route/flow รูปธรรม\n"
+            '4. `takkub done "แบ่ง N buckets: <สรุปสั้น>"`\n\n'
+            "ห้ามเริ่มเทสเอง — แค่วางแผน เขียนไฟล์ แล้ว done; "
+            "orchestrator จะ spawn shards ตาม plan ให้อัตโนมัติ\n\n"
+            "━━ โจทย์เทสต้นฉบับ (บริบทสำหรับวางแผน) ━━\n"
+            f"{base_task}"
+        )
+
+    def _fire_qa_plan_fanout(
+        self, project_ns: str, base_role: str, cfg: dict, planner_note: str = ""
+    ) -> None:
+        """Read the planner's bucket plan and fan out the QA shards.
+
+        Each shard gets the base task + its assigned bucket (scope/focus),
+        staggered like the pipeline-hop spawns. When the plan file is missing
+        or unparseable, degrade to a plain N-shard fan-out (shards self-split
+        via TAKKUB_SHARD) and warn Lead — the parallel run still happens
+        instead of stalling on a bad plan."""
+        import json
+        import pathlib
+
+        requested = int(cfg.get("shards", 0) or 0)
+        base_task = str(cfg.get("task", ""))
+        cwd = cfg.get("cwd")
+        plan_path = pathlib.Path(str(cfg.get("plan_file", "")))
+
+        buckets: list[tuple[str, str]] = []
+        parse_err = ""
+        try:
+            data = json.loads(plan_path.read_text(encoding="utf-8"))
+            raw_shards = data.get("shards") if isinstance(data, dict) else None
+            if isinstance(raw_shards, list):
+                for item in raw_shards:
+                    if isinstance(item, dict):
+                        scope = str(item.get("scope", "")).strip()
+                        focus = str(item.get("focus", "")).strip()
+                        if scope:
+                            buckets.append((scope, focus))
+        except FileNotFoundError:
+            parse_err = "plan file not found"
+        except (json.JSONDecodeError, ValueError, OSError) as exc:
+            parse_err = f"plan parse error: {exc}"
+
+        degraded = not buckets
+        if degraded:
+            k = max(1, requested)
+            buckets = [("", "")] * k
+        else:
+            # Never exceed what the operator asked for (--shards N).
+            if requested:
+                buckets = buckets[:requested]
+            k = len(buckets)
+
+        delay = 0
+        fired: list[str] = []
+        for n, (scope, focus) in enumerate(buckets, start=1):
+            shard_role = f"{base_role}#{n}"
+            if scope:
+                shard_task = (
+                    f"{base_task}\n\n"
+                    f"━━ SHARD {n}/{k} SCOPE (จาก qa-planner — เทสเฉพาะส่วนนี้) ━━\n"
+                    f"ขอบเขต: {scope}\n"
+                    + (f"โฟกัส: {focus}\n" if focus else "")
+                    + "อย่าเทสนอกขอบเขตนี้ — shard อื่นรับผิดชอบส่วนที่เหลือ"
+                )
+            else:
+                shard_task = base_task  # degraded: self-split via TAKKUB_SHARD
+            self._defer(
+                delay,
+                lambda r=shard_role, t=shard_task, kk=k: self.assign(
+                    r, cwd=cwd, task=t, shard_total=kk, project=project_ns
+                ),
+            )
+            fired.append(shard_role)
+            delay += _SPAWN_STAGGER_MS
+
+        if degraded:
+            self._notify_lead(
+                project_ns,
+                f"⚠️ [qa plan fallback] อ่าน plan ไม่ได้ ({parse_err or 'no buckets'}) — "
+                f"degrade เป็น {k}-shard self-split (modulo). fan-out: {', '.join(fired)}",
+            )
+        else:
+            lines = [
+                f"[qa plan ready] qa-planner แบ่งเป็น {k} buckets → "
+                f"fan-out {', '.join(fired)} (รันพร้อมกัน)"
+            ]
+            for n, (scope, _focus) in enumerate(buckets, start=1):
+                lines.append(f"  {base_role}#{n}: {scope[:90]}")
+            lines.append("รอ consolidated handoff เมื่อทุก shard report done")
+            self._notify_lead(project_ns, "\n".join(lines))
+        _log_event(
+            "qa_plan_fanout",
+            project=project_ns,
+            base_role=base_role,
+            shards=k,
+            degraded=degraded,
+            parse_err=parse_err,
         )

@@ -233,11 +233,23 @@ mb-start-chrome --port 0 --port-file "$CHROME_PORT_FILE" --user-data-dir "$CHROM
 export MB_CHROME_PORT_FILE="$CHROME_PORT_FILE"
 ```
 
-### แบ่งงานตาม planner plan (Approach A)
+### แบ่งงาน 2 แบบ
 
-Lead จะ spawn qa planner pane ก่อน แล้ว read plan → แบ่ง page list ให้แต่ละ shard ใน task spec
+**(A) Plan-first (`--plan` — แนะนำ, ฉลาดกว่า):** เมื่อ Lead ยิง `takkub assign --role qa --plan --shards N`,
+orchestrator spawn **planner pane ตัวเดียวก่อน** (role `qa` เปล่า ไม่มี `#`). planner วิเคราะห์แอป → แบ่งงานเทสเป็น
+N buckets ที่ balanced + independent → เขียน plan JSON → `takkub done`. orchestrator อ่าน plan แล้ว **auto fan-out
+`qa#1…qa#N`** โดย **inject ขอบเขต (scope/focus) ของแต่ละ bucket เข้า task spec** ของ shard นั้นโดยตรง
 
-ถ้าไม่มี planner step: อ่าน `TAKKUB_SHARD` + `TAKKUB_SHARD_TOTAL` แล้ว self-select:
+→ ในโหมดนี้ **shard ไม่ต้อง self-select** — อ่าน block `━━ SHARD n/N SCOPE ━━` ใน task ที่ได้รับ แล้วเทสเฉพาะ
+ขอบเขตนั้น (อย่าเทสนอก scope — shard อื่นรับผิดชอบส่วนที่เหลือ)
+
+planner เขียน plan schema นี้ลงไฟล์ path ที่ task ระบุ (สร้าง dir parent ก่อน):
+```json
+{"shards": [{"n": 1, "scope": "/login, /signup", "focus": "invalid creds + rate limit"}, ...]}
+```
+
+**(B) Self-split (`--shards N` เปล่า — ไม่มี planner):** ไม่มี scope block ใน task → อ่าน `TAKKUB_SHARD` +
+`TAKKUB_SHARD_TOTAL` แล้วแบ่งเอง (modulo):
 ```bash
 # ตัวอย่าง: แบ่ง routes array ตาม shard index
 ROUTES=("/login" "/dashboard" "/settings" "/profile" "/admin" "/reports")
@@ -250,6 +262,8 @@ for i in "${!ROUTES[@]}"; do
   fi
 done
 ```
+> ถ้า planner ใน mode (A) เขียน plan พลาด/อ่านไม่ได้ → orchestrator degrade มา mode (B) อัตโนมัติ (self-split) +
+> เตือน Lead — งาน parallel ยังเดินต่อ ไม่ค้าง
 
 ### Done report format (สำคัญ — Lead aggregate ดู)
 
