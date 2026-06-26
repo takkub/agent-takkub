@@ -1,6 +1,6 @@
 """Per-pane env construction — allowlist + mute helpers for spawned panes.
 
-Five concerns live here:
+Six concerns live here:
 1. `_PANE_ENV_ALLOWLIST` + `_build_pane_env()` — keep secret-bearing env
    vars (API keys, GH tokens, AWS creds) out of teammate panes by
    filtering to a known-safe set.
@@ -17,6 +17,11 @@ Five concerns live here:
    interactive y/N or credential prompts (issue #52). Sets npm_config_yes
    and GIT_TERMINAL_PROMPT at process level so every shell command inside
    the pane is non-interactive by default.
+6. `_apply_color_term()` — advertise a truecolor terminal so claude/ink
+   renders ANSI colours. The cockpit front-end is xterm.js on every OS
+   (full 256-colour + truecolor palette), but a GUI-launched cockpit on
+   macOS inherits no `TERM`, so the allowlist had nothing to forward and
+   claude fell back to monochrome.
 
 Extracted from orchestrator.py to keep that file focused on pane
 lifecycle (spawn/send/done/close) rather than environment plumbing.
@@ -229,6 +234,33 @@ def _apply_non_interactive_env(env: dict[str, str]) -> None:
     """
     env.setdefault("npm_config_yes", "true")
     env.setdefault("GIT_TERMINAL_PROMPT", "0")
+
+
+def _apply_color_term(env: dict[str, str]) -> None:
+    """Advertise a truecolor terminal so claude/ink renders ANSI colours.
+
+    Symptom this fixes: on macOS the text inside a pane (claude's TUI, qa
+    output) rendered monochrome while the window chrome was fine. Root cause
+    is colour *detection*, not the renderer — the cockpit front-end is
+    xterm.js on every OS and its theme ships the full 256-colour + truecolor
+    palette, so the screen is perfectly capable of colour.
+
+    The gap is the spawned child's environment. claude/ink decide whether to
+    emit colour from ``TERM`` + ``COLORTERM`` (plus isatty, which a PTY
+    satisfies). ``COLORTERM`` was never on the pane allowlist (always
+    stripped) and ``TERM`` was only *forwarded if present* in the cockpit
+    process. A GUI-launched cockpit on macOS (Finder/.app/Dock) inherits no
+    ``TERM`` at all, so the allowlist had nothing to forward → claude saw a
+    non-colour terminal → monochrome. Windows was unaffected because claude
+    forces colour through the Win32 console API regardless of ``TERM``.
+
+    Both are set via ``setdefault`` — same contract as the other ``_apply_*``
+    helpers — so a real terminal that *did* export ``TERM=xterm-256color``
+    (cockpit launched from iTerm/Terminal) still wins. ``xterm-256color`` is
+    the truthful descriptor for what xterm.js presents on both platforms.
+    """
+    env.setdefault("TERM", "xterm-256color")
+    env.setdefault("COLORTERM", "truecolor")
 
 
 def inject_user_profile_env(env: dict[str, str], project: str) -> None:
