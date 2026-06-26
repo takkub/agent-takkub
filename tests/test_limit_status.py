@@ -7,6 +7,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from agent_takkub import limit_status
 from agent_takkub.limit_status import LimitStore, UsageData
 
@@ -83,6 +85,82 @@ def test_fetch_usage_returns_three_windows_from_config_dir(
     assert request.full_url == limit_status._USAGE_URL
     assert request.get_header("Authorization") == "Bearer override-token"
     assert timeout == limit_status._TIMEOUT_S
+
+
+# ---------------------------------------------------------------------------
+# credential loading: file (Windows/Linux) vs macOS Keychain fallback
+# ---------------------------------------------------------------------------
+
+
+def test_load_raw_credentials_prefers_file(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / ".credentials.json"
+    path.write_text(json.dumps({"access_token": "from-file"}), encoding="utf-8")
+    # Keychain must not even be consulted when the file is present.
+    monkeypatch.setattr(
+        limit_status, "_read_keychain_credentials", lambda: pytest.fail("should not read")
+    )
+    raw, source = limit_status._load_raw_credentials(path)
+    assert source == "file"
+    assert raw == {"access_token": "from-file"}
+
+
+def test_load_raw_credentials_keychain_fallback(tmp_path: Path, monkeypatch) -> None:
+    missing = tmp_path / "nope" / ".credentials.json"  # does not exist (the Mac case)
+    monkeypatch.setattr(
+        limit_status,
+        "_read_keychain_credentials",
+        lambda: json.dumps({"claudeAiOauth": {"accessToken": "from-keychain"}}),
+    )
+    raw, source = limit_status._load_raw_credentials(missing)
+    assert source == "keychain"
+    assert raw["claudeAiOauth"]["accessToken"] == "from-keychain"
+
+
+def test_load_raw_credentials_none(tmp_path: Path, monkeypatch) -> None:
+    missing = tmp_path / "nope" / ".credentials.json"
+    monkeypatch.setattr(limit_status, "_read_keychain_credentials", lambda: None)
+    raw, source = limit_status._load_raw_credentials(missing)
+    assert raw is None
+    assert source == "none"
+
+
+def test_read_keychain_is_noop_off_mac(monkeypatch) -> None:
+    monkeypatch.setattr(limit_status.sys, "platform", "win32")
+    assert limit_status._read_keychain_credentials() is None
+
+
+def test_fetch_usage_reads_keychain_when_file_absent(tmp_path: Path, monkeypatch) -> None:
+    """The actual Mac fix: no credentials file, token lives in the Keychain →
+    usage still fetches instead of showing '—'."""
+    config_dir = tmp_path / ".claude"  # note: NOT created → no .credentials.json
+    expires_at_ms = int(datetime(2099, 1, 1, tzinfo=UTC).timestamp() * 1000)
+    monkeypatch.setattr(
+        limit_status,
+        "_read_keychain_credentials",
+        lambda: json.dumps(
+            {
+                "claudeAiOauth": {
+                    "accessToken": "keychain-token",
+                    "expiresAt": expires_at_ms,
+                    "subscriptionType": "max",
+                }
+            }
+        ),
+    )
+    payload = {"five_hour": {"utilization": 9.0, "resets_at": "2026-06-09T10:00:00+00:00"}}
+    captured = []
+
+    def fake_urlopen(request, timeout):
+        captured.append(request)
+        return _FakeResponse(payload)
+
+    monkeypatch.setattr(limit_status.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(limit_status, "_resolve_user_agent", lambda: "test-agent")
+
+    usage = limit_status.fetch_usage(config_dir)
+    assert usage is not None
+    assert [w.name for w in usage.windows] == ["five_hour"]
+    assert captured[0].get_header("Authorization") == "Bearer keychain-token"
 
 
 # ---------------------------------------------------------------------------

@@ -7,6 +7,7 @@ import random
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import urllib.error
 import urllib.parse
@@ -210,20 +211,78 @@ def _parse_window(name: str, value: dict[str, Any] | None) -> LimitWindow | None
     )
 
 
+# macOS stores Claude Code's OAuth credentials in the login Keychain, NOT in
+# ~/.claude/.credentials.json (the Windows/Linux location). Without this the
+# usage meter showed "—" on Mac because the file read just failed. (M-xplat)
+_KEYCHAIN_SERVICE = "Claude Code-credentials"
+
+
+def _read_keychain_credentials() -> str | None:
+    """Return the raw credentials JSON from the macOS login Keychain, or None.
+
+    No-op (returns None) off macOS, or when `security` / the entry is absent.
+    Read-only: we never write the Keychain, so Claude Code's own credential
+    management is never disturbed.
+    """
+    if sys.platform != "darwin":
+        return None
+    try:
+        proc = subprocess.run(
+            ["security", "find-generic-password", "-s", _KEYCHAIN_SERVICE, "-w"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    blob = proc.stdout.strip()
+    return blob if proc.returncode == 0 and blob else None
+
+
+def _load_raw_credentials(credentials_path: Path) -> tuple[dict[str, Any] | None, str]:
+    """Load Claude's OAuth credential blob. File first (Windows/Linux), then the
+    macOS Keychain. Returns (raw, source) where source is 'file'|'keychain'|'none'."""
+    try:
+        return json.loads(credentials_path.read_text(encoding="utf-8")), "file"
+    except (OSError, ValueError):
+        pass
+    blob = _read_keychain_credentials()
+    if blob:
+        try:
+            return json.loads(blob), "keychain"
+        except ValueError:
+            pass
+    return None, "none"
+
+
 def fetch_usage(config_dir: Path | None = None) -> UsageData | None:
     credentials_path = (config_dir or Path.home() / ".claude") / ".credentials.json"
     try:
-        raw = json.loads(credentials_path.read_text(encoding="utf-8"))
+        raw, source = _load_raw_credentials(credentials_path)
+        if raw is None:
+            _log.error(
+                "No Claude credentials: file %s missing and no macOS Keychain entry",
+                credentials_path,
+            )
+            return None
         credentials = _normalize_credentials(raw)
         token = credentials["access_token"]
         if not token:
-            _log.error("No access token found in %s", credentials_path)
+            _log.error("No access token in Claude credentials (source=%s)", source)
             return None
 
         if credentials["expires_at"] <= datetime.now(tz=UTC).timestamp() + 300:
             refresh_token = credentials["refresh_token"]
             if not refresh_token:
                 _log.error("Token expired and no refresh token is available")
+                return None
+            if source != "file":
+                # Creds came from the macOS Keychain. Refreshing would rotate the
+                # token and we'd have to write it back to the Keychain — which
+                # risks clobbering the entry Claude Code itself manages. Claude
+                # Code keeps the Keychain token fresh, so defer to it and try
+                # again next tick rather than touch its credential store.
+                _log.warning("Keychain token expired; deferring to Claude Code to refresh")
                 return None
             token = _refresh_and_persist(credentials_path, raw, refresh_token)
 
