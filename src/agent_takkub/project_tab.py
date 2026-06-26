@@ -1,35 +1,77 @@
-"""ProjectTab: one project's pane stack, hosted inside MainWindow's QTabWidget.
+"""ProjectTab: one project's panes, shown as a tab strip.
 
-Each tab owns its own Lead pane and a vertical splitter of teammate panes.
-Status bar buttons (Add Agent / Assign Task / Finish Job / Install rtk)
-are shared at the MainWindow level and always act on the *currently
-active* tab, resolved via QTabWidget.currentWidget(). The cockpit refuses
-to open the same project twice — one tab per project, strictly.
+Layout (2026-06-26 redesign — presentation only, no engine change):
+  projects live in MainWindow's left **sidebar** (`ProjectNav`); each ProjectTab
+  is the right-hand content for one project. Inside a ProjectTab every pane —
+  Lead + each teammate — is a **tab** in a `QTabWidget`, so the user sees one
+  full-size pane at a time and switches with the tab strip (was: Lead-left +
+  teammate vertical splitter grid).
+
+This pairs with the tab-visibility keep-alive (only the *visible* pane in the
+*visible* project paints; everything else suspends so Chromium can reclaim
+compositor RAM) and adds an unread **red dot** on the Lead tab when a notice
+arrives while the user is looking at another pane.
 
 Wiring:
   ProjectTab.project_name   — string, immutable after construction
-  ProjectTab.lead_pane      — the AgentPane sitting in column 0
-  ProjectTab.teammate_split — vertical QSplitter holding teammate panes
-  ProjectTab.teammate_panes — dict[role_name → AgentPane] for that tab
+  ProjectTab.lead_pane      — the Lead AgentPane (always pane-tab 0)
+  ProjectTab.pane_tabs      — QTabWidget holding every pane
+  ProjectTab.teammate_panes — dict[role_name → AgentPane]
 """
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QHBoxLayout, QSplitter, QWidget
+from PyQt6.QtCore import QSize, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QIcon, QPainter, QPixmap
+from PyQt6.QtWidgets import QTabWidget, QVBoxLayout, QWidget
 
 from .agent_pane import AgentPane
 
+# Modern flat tab strip for the panes inside a project. Accent = indigo.
+_PANE_TABS_QSS = """
+QTabWidget::pane {
+    border: none;
+    background: #0e0e10;
+}
+QTabBar {
+    background: #0e0e10;
+    qproperty-drawBase: 0;
+}
+QTabBar::tab {
+    background: transparent;
+    color: #71717a;
+    padding: 7px 16px;
+    margin: 0;
+    border: none;
+    border-bottom: 2px solid transparent;
+    font-size: 12px;
+}
+QTabBar::tab:hover {
+    color: #d4d4d8;
+    background: #18181b;
+}
+QTabBar::tab:selected {
+    color: #ffffff;
+    border-bottom: 2px solid #6366f1;
+    background: #18181b;
+}
+"""
+
 
 class ProjectTab(QWidget):
-    """Visual stack of one project's panes.
+    """Tabbed stack of one project's panes.
 
-    Construct with `lead_pane=None` and pass the tab through
-    `QTabWidget.addTab` *before* attaching the Lead via `attach_lead()`.
-    The deferred attach pattern keeps QWebEngineView from being
-    re-parented under a freshly-added tab — which crashes Chromium's
-    renderer on Windows during the first paint.
+    Construct with `lead_pane=None` and pass the tab through the sidebar's
+    `addTab` *before* attaching the Lead via `attach_lead()`. The deferred
+    attach keeps the Lead's QWebEngineView from being re-parented after its
+    first paint (which crashes Chromium's renderer on Windows).
     """
+
+    # Emitted when the user closes a teammate pane-tab via its × button. Carries
+    # the role name; MainWindow routes it through the orchestrator's close chain
+    # (same path as the pane header's own × button), which calls back into
+    # remove_teammate_tab — so there is exactly one teardown path, no race.
+    paneCloseRequested = pyqtSignal(str)
 
     def __init__(
         self,
@@ -41,86 +83,149 @@ class ProjectTab(QWidget):
         self.project_name = project_name
         self.lead_pane: AgentPane | None = None
 
-        # Horizontal split: Lead on the left, teammate stack on the right.
-        self.main_split = QSplitter(Qt.Orientation.Horizontal, self)
+        # Whether this tab is the currently visible project (set by MainWindow
+        # on every sidebar switch). Combined with the per-pane current-tab
+        # check so only the visible pane of the visible project paints.
+        self._keepalive = True
 
-        self.teammate_split = QSplitter(Qt.Orientation.Vertical, self)
-        self.teammate_split.setChildrenCollapsible(False)
-        self.teammate_split.hide()  # Lead fills 100% until first teammate
-
-        # Splitter starts with two empty slots — Lead is attached later
-        # via `attach_lead()` so its WebEngineView never sees a parent
-        # change after first paint.
-        self.main_split.addWidget(self.teammate_split)
+        self.pane_tabs = QTabWidget(self)
+        self.pane_tabs.setDocumentMode(True)
+        self.pane_tabs.setMovable(True)
+        self.pane_tabs.setTabsClosable(True)
+        self.pane_tabs.setStyleSheet(_PANE_TABS_QSS)
+        self.pane_tabs.tabCloseRequested.connect(self._on_pane_tab_close)
+        self.pane_tabs.currentChanged.connect(self._on_pane_tab_changed)
 
         self.teammate_panes: dict[str, AgentPane] = {}
-        # Whether this tab is the currently visible one. MainWindow flips this
-        # via set_keepalive() on every tab switch so panes in hidden tabs
-        # suspend their paint keep-alive and release Chromium compositor RAM.
-        # Stored so a pane attached while the tab is hidden inherits the right
-        # state instead of painting (and leaking) until the next switch.
-        self._keepalive = True
-        # Color overrides chosen via the "+ pane → custom..." flow stay
-        # scoped to the tab so two projects can use different palettes
-        # without clobbering each other.
+        # Color overrides chosen via the "+ pane → custom..." flow stay scoped
+        # to the tab so two projects can use different palettes independently.
         self.custom_role_colors: dict[str, str] = {}
 
-        layout = QHBoxLayout(self)
+        # Cached red-dot icon for the unread Lead indicator (built lazily).
+        self._unread_icon: QIcon | None = None
+
+        layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addWidget(self.main_split)
+        layout.addWidget(self.pane_tabs)
 
         if lead_pane is not None:
             # Backwards-compat path for callers that still pass Lead at
-            # construction time (e.g. tests). Same widget order as the
-            # original implementation.
+            # construction time (e.g. tests).
             self.attach_lead(lead_pane)
 
+    # ------------------------------------------------------------------
+    # pane tabs
+    # ------------------------------------------------------------------
     def attach_lead(self, lead_pane: AgentPane) -> None:
-        """Insert the Lead pane on the splitter's left side. Idempotent
+        """Insert the Lead pane as the first (non-closable) tab. Idempotent
         but only meant to be called once per tab."""
         if self.lead_pane is not None:
             return
         self.lead_pane = lead_pane
-        self.main_split.insertWidget(0, lead_pane)
-        self.main_split.setSizes([1500, 0])
-        # Inherit the tab's current visibility so a Lead attached into a
-        # hidden tab starts suspended rather than painting until next switch.
-        if not self._keepalive:
-            lead_pane.set_keepalive(False)
+        self.pane_tabs.insertTab(0, lead_pane, "Lead")
+        # Lead is never closable — strip its × so the only way out is closing
+        # the whole project from the sidebar.
+        self._strip_tab_close_button(0)
+        self.pane_tabs.setCurrentIndex(0)
+        self._apply_pane_keepalive()
 
-    def rebalance_teammates(self) -> None:
-        """Distribute vertical space evenly across teammate panes."""
-        n = self.teammate_split.count()
-        if n <= 0:
-            return
-        h = max(self.teammate_split.height(), 100)
-        each = max(120, h // n)
-        self.teammate_split.setSizes([each] * n)
+    def add_teammate_tab(self, role_name: str, pane: AgentPane, label: str) -> None:
+        """Register a teammate pane and add it as a new tab."""
+        self.teammate_panes[role_name] = pane
+        self.pane_tabs.addTab(pane, label)
+        self._apply_pane_keepalive()
 
-    def set_keepalive(self, active: bool) -> None:
-        """Suspend/resume background paint keep-alive for every pane in this tab.
-
-        MainWindow calls this on each tab switch: the visible tab gets True,
-        every hidden tab gets False. Hidden panes stop forcing repaints so
-        Chromium can release their renderer's compositor memory (the fix for
-        backgrounded-tab renderers ballooning to multi-GB). Idempotent."""
-        self._keepalive = bool(active)
-        if self.lead_pane is not None:
-            self.lead_pane.set_keepalive(self._keepalive)
-        for pane in self.teammate_panes.values():
-            pane.set_keepalive(self._keepalive)
+    def remove_teammate_tab(self, role_name: str) -> AgentPane | None:
+        """Drop a teammate pane's tab and registry entry. Returns the pane so
+        the caller can tear down its WebEngine view, or None if not present."""
+        pane = self.teammate_panes.pop(role_name, None)
+        if pane is None:
+            return None
+        idx = self.pane_tabs.indexOf(pane)
+        if idx >= 0:
+            self.pane_tabs.removeTab(idx)
+        self._apply_pane_keepalive()
+        return pane
 
     def has_teammates(self) -> bool:
         return bool(self.teammate_panes)
 
-    def show_teammate_split(self) -> None:
-        if not self.teammate_split.isVisible():
-            self.teammate_split.show()
-            # restore a usable lead/teammates split (~62/38) when the right
-            # column comes alive for the first time
-            self.main_split.setSizes([900, 600])
+    def _strip_tab_close_button(self, index: int) -> None:
+        bar = self.pane_tabs.tabBar()
+        for side in (bar.ButtonPosition.RightSide, bar.ButtonPosition.LeftSide):
+            btn = bar.tabButton(index, side)
+            if btn is not None:
+                btn.deleteLater()
+            bar.setTabButton(index, side, None)
 
-    def hide_teammate_split(self) -> None:
-        self.teammate_split.hide()
-        self.main_split.setSizes([self.width(), 0])
+    def _on_pane_tab_close(self, index: int) -> None:
+        w = self.pane_tabs.widget(index)
+        if w is None or w is self.lead_pane:
+            return  # Lead is never closable here
+        role = getattr(getattr(w, "role", None), "name", None)
+        if role:
+            # Reuse the pane's own close chain (orchestrator.close → paneClosed
+            # → remove_teammate_tab) instead of tearing down here directly.
+            self.paneCloseRequested.emit(role)
+
+    # ------------------------------------------------------------------
+    # keep-alive: only the visible pane of the visible project paints
+    # ------------------------------------------------------------------
+    def set_keepalive(self, active: bool) -> None:
+        """Mark this project visible/hidden. MainWindow calls it on every
+        sidebar switch (visible project → True, others → False). Idempotent."""
+        self._keepalive = bool(active)
+        self._apply_pane_keepalive()
+
+    def _apply_pane_keepalive(self) -> None:
+        """A pane paints iff this project is visible AND it's the current
+        pane-tab. Everything else suspends so its renderer can release RAM."""
+        cur = self.pane_tabs.currentWidget()
+        for i in range(self.pane_tabs.count()):
+            w = self.pane_tabs.widget(i)
+            setter = getattr(w, "set_keepalive", None)
+            if setter is not None:
+                setter(self._keepalive and w is cur)
+        # If the Lead tab is the one on screen, it's been seen → clear its dot.
+        if self._keepalive and cur is self.lead_pane:
+            self._clear_lead_unread()
+
+    def _on_pane_tab_changed(self, _index: int) -> None:
+        self._apply_pane_keepalive()
+
+    # ------------------------------------------------------------------
+    # unread red dot on the Lead tab
+    # ------------------------------------------------------------------
+    def _dot_icon(self) -> QIcon:
+        if self._unread_icon is None:
+            pix = QPixmap(10, 10)
+            pix.fill(Qt.GlobalColor.transparent)
+            p = QPainter(pix)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor("#ef4444"))
+            p.drawEllipse(1, 1, 8, 8)
+            p.end()
+            self._unread_icon = QIcon(pix)
+        return self._unread_icon
+
+    def mark_lead_unread(self) -> None:
+        """Put an unread red dot on the Lead pane-tab — unless the user is
+        already looking at it (visible project + Lead tab current)."""
+        if self.lead_pane is None:
+            return
+        idx = self.pane_tabs.indexOf(self.lead_pane)
+        if idx < 0:
+            return
+        if self._keepalive and self.pane_tabs.currentWidget() is self.lead_pane:
+            return  # already on screen — nothing unseen
+        self.pane_tabs.setIconSize(QSize(10, 10))
+        self.pane_tabs.setTabIcon(idx, self._dot_icon())
+
+    def _clear_lead_unread(self) -> None:
+        if self.lead_pane is None:
+            return
+        idx = self.pane_tabs.indexOf(self.lead_pane)
+        if idx >= 0:
+            self.pane_tabs.setTabIcon(idx, QIcon())

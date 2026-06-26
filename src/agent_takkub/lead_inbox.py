@@ -677,6 +677,13 @@ class LeadInboxMixin:
                 self._lead_notify_pumping = set()
             self._lead_notify_queue.setdefault(project_ns, collections.deque()).append(body)
             self._arm_lead_notify_pump(project_ns)
+            # Tell the UI Lead has new mail so it can red-dot the Lead pane-tab
+            # when the user is on another pane. Best-effort: a partial test
+            # fixture built via Orchestrator.__new__ won't have the bound signal.
+            try:
+                self.leadNotified.emit(project_ns)
+            except Exception:
+                pass
         else:
             if not hasattr(self, "_pending_done_notices"):
                 self._pending_done_notices = {}

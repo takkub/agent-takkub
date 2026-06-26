@@ -1,16 +1,13 @@
-"""Tab-visibility keep-alive suspend/resume contract.
+"""Pane-tab keep-alive + unread red-dot contract (panes-as-tabs layout).
 
-A pane in a HIDDEN project tab is never on screen, so the cockpit suspends its
-paint keep-alive (heartbeat + xterm.js rAF pulse) to let Chromium reclaim the
-renderer's compositor memory — the fix for backgrounded-tab QtWebEngineProcess
-renderers ballooning to multi-GB.
+After the 2026-06-26 redesign every pane is a tab inside its ProjectTab, and
+only the *visible pane of the visible project* paints — everything else
+suspends so Chromium can release the renderer's compositor RAM. A red dot lands
+on the Lead pane-tab when a notice arrives while the user is on another pane.
 
-These tests exercise the propagation logic (ProjectTab → panes) and the
-attach-time inheritance WITHOUT constructing a real QWebEngineView — a fake
-pane records set_keepalive() calls. The TerminalWidget side (heartbeat timer
-start/stop + JS bridge call) is intentionally not instantiated here: spawning
-a real QtWebEngineProcess in the suite is flaky cross-platform (see the note in
-test_terminal_widget.py), and the timer/JS logic is a thin, linear wrapper.
+These exercise the propagation/state logic with a fake pane (records keep-alive
+toggles) — no real QWebEngineView, which is flaky to spawn in the suite (see
+test_terminal_widget.py).
 """
 
 from __future__ import annotations
@@ -30,67 +27,106 @@ def qapp():
 
 
 class _FakePane(QWidget):
-    """Stand-in for AgentPane: a real QWidget (so it can sit in the splitter
-    like attach_lead expects) that just records keep-alive toggles."""
+    """Stand-in for AgentPane: a real QWidget (so it can live in the pane
+    QTabWidget) that records keep-alive toggles. `state` = last value seen."""
 
     def __init__(self) -> None:
         super().__init__()
         self.calls: list[bool] = []
+        self.state: bool | None = None
 
     def set_keepalive(self, active: bool) -> None:
         self.calls.append(bool(active))
+        self.state = bool(active)
 
 
-class TestProjectTabPropagation:
-    def _tab(self, qapp) -> ProjectTab:
-        return ProjectTab("proj", lead_pane=None)
+def _idx(tab, pane) -> int:
+    return tab.pane_tabs.indexOf(pane)
 
-    def test_defaults_visible(self, qapp):
-        tab = self._tab(qapp)
-        assert tab._keepalive is True
 
-    def test_suspend_propagates_to_lead_and_teammates(self, qapp):
-        tab = self._tab(qapp)
-        lead, t1, t2 = _FakePane(), _FakePane(), _FakePane()
-        tab.lead_pane = lead
-        tab.teammate_panes = {"qa": t1, "backend": t2}
+class TestPaneKeepalive:
+    def test_visible_project_only_current_pane_alive(self, qapp):
+        tab = ProjectTab("proj", lead_pane=None)
+        lead, qa = _FakePane(), _FakePane()
+        tab.attach_lead(lead)  # Lead is tab 0 and current
+        tab.add_teammate_tab("qa", qa, "qa")
 
-        tab.set_keepalive(False)
+        tab.set_keepalive(True)  # project visible
+        assert lead.state is True  # current pane → paints
+        assert qa.state is False  # background pane → suspended
 
-        assert tab._keepalive is False
-        assert lead.calls == [False]
-        assert t1.calls == [False]
-        assert t2.calls == [False]
+    def test_hidden_project_suspends_every_pane(self, qapp):
+        tab = ProjectTab("proj", lead_pane=None)
+        lead, qa = _FakePane(), _FakePane()
+        tab.attach_lead(lead)
+        tab.add_teammate_tab("qa", qa, "qa")
 
-    def test_resume_propagates(self, qapp):
-        tab = self._tab(qapp)
-        lead = _FakePane()
-        tab.lead_pane = lead
-        tab.set_keepalive(False)
+        tab.set_keepalive(False)  # project hidden
+        assert lead.state is False
+        assert qa.state is False
+
+    def test_switching_pane_tab_moves_aliveness(self, qapp):
+        tab = ProjectTab("proj", lead_pane=None)
+        lead, qa = _FakePane(), _FakePane()
+        tab.attach_lead(lead)
+        tab.add_teammate_tab("qa", qa, "qa")
         tab.set_keepalive(True)
-        assert tab._keepalive is True
-        assert lead.calls == [False, True]
 
-    def test_suspend_with_no_lead_is_safe(self, qapp):
-        """A tab whose Lead hasn't been attached yet (deferred-attach window)
-        must not raise when suspended."""
-        tab = self._tab(qapp)
-        tab.set_keepalive(False)  # lead_pane is None
-        assert tab._keepalive is False
+        tab.pane_tabs.setCurrentIndex(_idx(tab, qa))  # view the qa pane
+        assert qa.state is True
+        assert lead.state is False
 
-
-class TestAttachInheritsState:
-    def test_lead_attached_into_hidden_tab_starts_suspended(self, qapp):
-        tab = ProjectTab("proj", lead_pane=None)
-        tab.set_keepalive(False)  # tab hidden before Lead exists
-        lead = _FakePane()
-        tab.attach_lead(lead)
-        # attach_lead must push the hidden state onto the freshly-attached Lead.
-        assert lead.calls == [False]
-
-    def test_lead_attached_into_visible_tab_not_forced(self, qapp):
+    def test_teammate_added_into_hidden_project_starts_suspended(self, qapp):
         tab = ProjectTab("proj", lead_pane=None)
         lead = _FakePane()
         tab.attach_lead(lead)
-        # Visible tab: no redundant set_keepalive(True) — pane defaults to on.
-        assert lead.calls == []
+        tab.set_keepalive(False)  # project hidden
+        qa = _FakePane()
+        tab.add_teammate_tab("qa", qa, "qa")
+        assert qa.state is False  # born suspended, no paint/leak
+
+    def test_remove_teammate_tab_returns_pane(self, qapp):
+        tab = ProjectTab("proj", lead_pane=None)
+        lead, qa = _FakePane(), _FakePane()
+        tab.attach_lead(lead)
+        tab.add_teammate_tab("qa", qa, "qa")
+        out = tab.remove_teammate_tab("qa")
+        assert out is qa
+        assert "qa" not in tab.teammate_panes
+        assert tab.remove_teammate_tab("qa") is None
+
+
+class TestLeadUnreadDot:
+    def _tab_with_teammate(self):
+        tab = ProjectTab("proj", lead_pane=None)
+        lead, qa = _FakePane(), _FakePane()
+        tab.attach_lead(lead)
+        tab.add_teammate_tab("qa", qa, "qa")
+        tab.set_keepalive(True)
+        return tab, lead, qa
+
+    def test_dot_set_when_viewing_another_pane(self, qapp):
+        tab, lead, qa = self._tab_with_teammate()
+        tab.pane_tabs.setCurrentIndex(_idx(tab, qa))  # not looking at Lead
+        tab.mark_lead_unread()
+        assert not tab.pane_tabs.tabIcon(_idx(tab, lead)).isNull()
+
+    def test_no_dot_when_viewing_lead(self, qapp):
+        tab, lead, _qa = self._tab_with_teammate()
+        # Lead tab is current (attach_lead selected it) → nothing unseen.
+        tab.mark_lead_unread()
+        assert tab.pane_tabs.tabIcon(_idx(tab, lead)).isNull()
+
+    def test_dot_set_when_project_hidden(self, qapp):
+        tab, lead, _qa = self._tab_with_teammate()
+        tab.set_keepalive(False)  # whole project off-screen
+        tab.mark_lead_unread()
+        assert not tab.pane_tabs.tabIcon(_idx(tab, lead)).isNull()
+
+    def test_switching_to_lead_clears_dot(self, qapp):
+        tab, lead, qa = self._tab_with_teammate()
+        tab.pane_tabs.setCurrentIndex(_idx(tab, qa))
+        tab.mark_lead_unread()
+        assert not tab.pane_tabs.tabIcon(_idx(tab, lead)).isNull()
+        tab.pane_tabs.setCurrentIndex(_idx(tab, lead))  # user reads Lead
+        assert tab.pane_tabs.tabIcon(_idx(tab, lead)).isNull()

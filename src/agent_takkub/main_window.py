@@ -1,17 +1,20 @@
 """Main cockpit window.
 
-Layout policy:
-  - On startup: only the Lead pane is shown and fills the window.
+Layout (2026-06-26 redesign — presentation only):
+  - A left **sidebar** (`ProjectNav`) lists every open project; the selected
+    project's `ProjectTab` fills the right.
+  - Inside a ProjectTab every pane — Lead + each teammate — is a **tab**, so
+    one full-size pane shows at a time and the user switches with the tab strip.
   - When Lead does `takkub assign --role X`, the orchestrator emits
-    `paneRequested("X")`. MainWindow creates an AgentPane for that role and
-    adds it to the right-side vertical splitter, so the window grows to
-    accommodate it (Lead shrinks).
-  - When that role closes (`takkub done` or X button), the pane is removed.
-    If no teammates remain, the right splitter collapses and Lead fills the
-    window again.
+    `paneRequested("X")`; MainWindow creates an AgentPane and adds it as a new
+    pane-tab. `takkub done` / the pane × removes that tab.
+  - Only the visible pane of the visible project paints (keep-alive); the rest
+    suspend so Chromium can release their renderer RAM. A red dot lands on the
+    Lead pane-tab when a notice arrives while the user is on another pane.
 
-This mimics tmux pane splitting but pre-arranged on a Lead | TeammateStack
-axis — Lead always on the left, teammates stacked vertically on the right.
+`ProjectNav` exposes a QTabWidget-compatible API so MainWindow's project call
+sites (widget/count/addTab/removeTab/setCurrentIndex/currentChanged) are
+unchanged from the old top-tab-strip implementation.
 """
 
 from __future__ import annotations
@@ -33,7 +36,6 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QStyle,
     QSystemTrayIcon,
-    QTabWidget,
     QWidget,
 )
 
@@ -51,6 +53,7 @@ from .config import (
 from .limit_panel import LimitPanelMixin
 from .logs_panel import LogsPanel
 from .orchestrator import Orchestrator, _log_event
+from .project_nav import ProjectNav
 from .project_tab import ProjectTab
 from .project_wizard import ProjectWizardMixin
 from .roles import DEFAULT_TEAMMATES, LEAD, Role, by_name
@@ -137,14 +140,6 @@ class MainWindow(
         return self._current_tab().teammate_panes
 
     @property
-    def teammate_split(self):
-        return self._current_tab().teammate_split
-
-    @property
-    def main_split(self):
-        return self._current_tab().main_split
-
-    @property
     def _custom_role_colors(self) -> dict[str, str]:
         return self._current_tab().custom_role_colors
 
@@ -187,6 +182,7 @@ class MainWindow(
         self.orch.agentDone.connect(self._notify_agent_done)
         self.orch.paneResumed.connect(self._on_pane_resumed)
         self.orch.crossTabDone.connect(self._on_cross_tab_done)
+        self.orch.leadNotified.connect(self._on_lead_notified)
 
         # ── system tray for desktop notifications ───────────────
         self._tray = QSystemTrayIcon(self)
@@ -198,45 +194,36 @@ class MainWindow(
         # ── root layout ─────────────────────────────────────────
         root = QWidget(self)
         outer = QHBoxLayout(root)
-        outer.setContentsMargins(8, 8, 8, 8)
-        outer.setSpacing(8)
+        # Edge-to-edge app-shell: the sidebar sits flush against the window
+        # frame (modern look); ProjectNav paints its own panels/borders.
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
         self.setCentralWidget(root)
 
-        # Central QTabWidget hosts one ProjectTab per open project. The
-        # cockpit enforces strict one-tab-per-project. Helper accessors
-        # below (`self.lead_pane`, `self.teammate_split`, ...) resolve to
-        # the *currently active* tab so older MainWindow methods keep
-        # operating on the same widget set without explicit project
-        # plumbing.
-        self.tabs = QTabWidget(self)
-        self.tabs.setDocumentMode(True)
-        self.tabs.setMovable(False)
-        self.tabs.setTabsClosable(True)
-        self.tabs.tabCloseRequested.connect(self._on_tab_close_requested)
-        self.tabs.tabBarClicked.connect(self._on_tab_bar_clicked)
-        # Right-click on any project tab → context menu with "Edit project rules"
-        self.tabs.tabBar().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.tabs.tabBar().customContextMenuRequested.connect(self._on_tab_bar_context_menu)
-        # NOTE: `currentChanged` is connected at the end of __init__ — once
-        # the status bar widgets exist. QTabWidget emits currentChanged the
-        # moment the first tab is added, and our slot calls
-        # `_refresh_rtk_button` which touches `self._btn_install_rtk`.
-        # Connecting up-front means the slot fires while the button still
-        # doesn't exist, raising AttributeError inside a Qt slot — which
-        # the underlying event-dispatch path then surfaces as a silent
-        # Chromium renderer crash on Windows (pythonw shows nothing; the
-        # cockpit window never appears).
+        # Central navigator: a left sidebar lists open projects, the right side
+        # stacks each project's ProjectTab (whose panes are themselves tabs).
+        # ProjectNav exposes a QTabWidget-compatible API (widget/count/addTab/
+        # removeTab/setCurrentIndex/currentChanged) so the rest of MainWindow is
+        # unchanged; tab-bar-only concerns surface as dedicated signals.
+        self.tabs = ProjectNav(self)
+        self.tabs.addRequested.connect(self._on_new_tab_clicked)
+        self.tabs.closeRequested.connect(self._on_tab_close_requested)
+        self.tabs.contextMenuRequested.connect(self._on_tab_context_menu)
+        # NOTE: `currentChanged` is connected at the end of __init__ — once the
+        # status-bar widgets exist. It fires the moment the first row is added,
+        # and the slot calls `_refresh_rtk_button` which touches
+        # `self._btn_install_rtk`. Connecting up-front would fire the slot before
+        # that button exists, raising AttributeError inside a Qt slot — which the
+        # event-dispatch path then surfaces as a silent Chromium renderer crash
+        # on Windows (pythonw shows nothing; the cockpit window never appears).
 
         outer.addWidget(self.tabs, 1)
 
-        # Build the initial tab for the active project. Order matters
-        # here: QTabWidget.addTab re-parents the inserted widget under
-        # its internal stacked widget. If a QWebEngineView is already
-        # nested inside the tab when that re-parent happens, Chromium's
-        # renderer process crashes silently on Windows ("composition
-        # surface invalidated"). Adding the tab BEFORE creating the
-        # AgentPane that owns the WebEngineView keeps the chain stable
-        # from the QWebEngineView's first paint onward.
+        # Build the initial tab for the active project. Order matters: adding the
+        # ProjectTab to the stack re-parents it; if a QWebEngineView were already
+        # nested inside when that happens, Chromium's renderer crashes silently
+        # on Windows ("composition surface invalidated"). Adding the tab BEFORE
+        # creating the Lead AgentPane keeps the chain stable from first paint on.
         # Tracks which Lead panes have already auto-bridged `/remote-control`
         # in this cockpit session — keyed by project name. Populated by:
         #   - `_on_pane_resumed` (session-resume auto-fire)
@@ -247,75 +234,35 @@ class MainWindow(
         initial_project = active_project()[0] or "default"
         initial_tab = ProjectTab(initial_project, lead_pane=None)
         self.tabs.addTab(initial_tab, initial_project)
+        self._wire_project_tab(initial_tab)
         initial_lead = AgentPane(LEAD, parent=initial_tab)
         self.orch.register_pane(initial_lead, project=initial_project)
         initial_tab.attach_lead(initial_lead)
         initial_lead.inputBytes.connect(
             lambda role, data, proj=initial_project: self._on_lead_input(proj, role, data)
         )
-
-        # Append a permanent "+" pseudo-tab at the end of the strip. It
-        # has no widget content (an empty QWidget placeholder), is not
-        # closable, and intercepts clicks via `_on_tab_bar_clicked` to
-        # show the project picker instead of activating itself. Real new
-        # tabs always insert *before* the "+" via `_plus_tab_index()` so
-        # the "+" stays anchored on the right.
-        from PyQt6.QtWidgets import QWidget as _QW
-
-        self._plus_tab_placeholder = _QW(self)
-        plus_idx = self.tabs.addTab(self._plus_tab_placeholder, "+")
-        # Strip the close-button from the "+" tab; it must always be there.
-        bar = self.tabs.tabBar()
-        bar.setTabButton(plus_idx, bar.ButtonPosition.RightSide, None)
-        bar.setTabButton(plus_idx, bar.ButtonPosition.LeftSide, None)
-        self.tabs.setTabToolTip(plus_idx, "Open another project in a new tab")
-        # Restore focus to the real first tab — addTab on the "+" would
-        # otherwise make it the active tab (and Lead's pane would hide).
         self.tabs.setCurrentIndex(0)
 
-        # ── limit-status corner widget (top-right of tab bar) ───────────
-        _limit_container = QWidget(self)
-        _limit_hl = QHBoxLayout(_limit_container)
-        # Extra right margin keeps the readout from butting up against the
-        # window edge / pane chrome buttons (↓ ▾ ×) sitting just below it.
-        # Small top margin (2px) lifts the text clear of the tab-strip top edge
-        # without dropping it down toward the tab/content seam.
-        _limit_hl.setContentsMargins(6, 2, 14, 0)
-        _limit_hl.setSpacing(0)
-        self._limit_label = QLabel("—", _limit_container)
-        # Top-align the text so it sits high in the tab strip (next to the tab
-        # labels) instead of being centred in the taller corner band, which
-        # dropped it down onto the tab/content seam and clipped it.
-        self._limit_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
-        _limit_hl.setAlignment(self._limit_label, Qt.AlignmentFlag.AlignTop)
+        # Usage-window readout — now parked at the right end of the status bar
+        # (the old top-right tab-corner slot is gone with the tab strip).
+        self._limit_label = QLabel("—")
         self._limit_label.setStyleSheet(
             "QLabel { color:#52525b; font-size:11px; "
-            "font-variant-numeric:tabular-nums; padding:0 2px; }"
+            "font-variant-numeric:tabular-nums; padding:0 8px; }"
         )
         self._limit_label.setToolTip(
             "Claude usage windows (5h / 7d / 7d-Sonnet)\n"
             "Reflects the User: profile selected for this project.\n"
             "Updates every 5 min."
         )
-        _limit_hl.addWidget(self._limit_label)
-        self.tabs.setCornerWidget(_limit_container, Qt.Corner.TopRightCorner)
-        # Match the corner widget's height to the tab bar so the limit readout
-        # lines up flush with the tabs — but never let it be shorter than the
-        # label itself needs, or the text gets clipped at the top edge.
-        _limit_container.setFixedHeight(
-            max(
-                self.tabs.tabBar().sizeHint().height(),
-                self._limit_label.sizeHint().height(),
-            )
-        )
 
         # ── status bar ────────────────────────────────────
         self._build_status_bar()
+        self._status.addPermanentWidget(self._limit_label)
 
-        # Only NOW is it safe to listen for tab switches — the handler
-        # touches `_btn_install_rtk` via `_refresh_rtk_button`, which
-        # didn't exist when the first tab was added. See the comment
-        # next to the deferred connection at MW.11.
+        # Only NOW is it safe to listen for project switches — the handler
+        # touches `_btn_install_rtk` via `_refresh_rtk_button`, which didn't
+        # exist when the first row was added (see the deferred-connect note).
         self.tabs.currentChanged.connect(self._on_tab_switched)
 
         # ── limit-status store (background thread → GUI via signal) ───
@@ -385,6 +332,13 @@ class MainWindow(
     # ──────────────────────────────────────────────────────────────
     # teammate pane lifecycle
     # ──────────────────────────────────────────────────────────────
+    def _wire_project_tab(self, tab: ProjectTab) -> None:
+        """Route a ProjectTab's pane-tab × close button into the orchestrator
+        close chain — the same teardown path the pane header's own × uses."""
+        tab.paneCloseRequested.connect(
+            lambda role, proj=tab.project_name: self.orch.close(role, project=proj)
+        )
+
     def _ensure_teammate_pane(self, role_name: str, project: str) -> None:
         if role_name == LEAD.name:
             return
@@ -442,20 +396,15 @@ class MainWindow(
             )
 
         pane = AgentPane(role)
-        # close routing: AgentPane.closeRequested → orchestrator.close (via
-        # the connection set up in register_pane) → orchestrator.paneClosed
-        # → _remove_teammate_pane. One signal chain, no race.
-        tab.teammate_panes[role_name] = pane
+        # close routing: AgentPane.closeRequested (pane header ×) AND the
+        # pane-tab × both reach orchestrator.close → paneClosed →
+        # _remove_teammate_pane. One teardown path, no race.
         self.orch.register_pane(pane, project=tab.project_name)
-        tab.teammate_split.addWidget(pane)
-        # A teammate can spawn into a project whose tab isn't the visible one;
-        # inherit that tab's keep-alive state so a pane born into a hidden tab
-        # doesn't paint (and leak compositor RAM) until the next tab switch.
-        pane.set_keepalive(tab._keepalive)
-
-        # show right side and rebalance
-        tab.show_teammate_split()
-        tab.rebalance_teammates()
+        # add_teammate_tab registers the pane, adds its tab, and (via
+        # _apply_pane_keepalive) leaves it suspended unless it's the visible
+        # pane of the visible project — so a teammate spawned into a background
+        # project, or a non-focused pane-tab, doesn't paint or leak RAM.
+        tab.add_teammate_tab(role_name, pane, role.label)
         self._status.showMessage(f"added pane · {role_name} ({tab.project_name})", 4_000)
 
     def _tab_for_project(self, project: str) -> ProjectTab | None:
@@ -478,7 +427,7 @@ class MainWindow(
         tab = self._tab_for_project(project)
         if tab is None:
             return
-        pane = tab.teammate_panes.pop(role_name, None)
+        pane = tab.remove_teammate_tab(role_name)
         if pane is None:
             return
         self.orch.unregister_pane(role_name, project=project)
@@ -493,10 +442,6 @@ class MainWindow(
             pass
         pane.setParent(None)
         pane.deleteLater()
-        if not tab.teammate_panes:
-            tab.hide_teammate_split()
-        else:
-            tab.rebalance_teammates()
 
     # ──────────────────────────────────────────────────────────────
     def _boot(self) -> None:
@@ -646,6 +591,15 @@ class MainWindow(
         body = note.strip()[:80] if note.strip() else "task complete"
         self._status.showMessage(f"✓ [{role} done] in {project_ns}: {body}", 8_000)
 
+    def _on_lead_notified(self, project_ns: str) -> None:
+        """A notice was queued for `project_ns`'s Lead. Put an unread red dot on
+        that project's Lead pane-tab unless the user is already looking at it —
+        the panes-as-tabs layout shows one pane at a time, so a Lead handoff
+        could otherwise scroll by unseen behind a teammate tab."""
+        tab = self._tab_for_project(project_ns)
+        if tab is not None:
+            tab.mark_lead_unread()
+
     def _on_pane_resumed(self, role: str, project: str) -> None:
         """Auto-bridge `/remote-control` when a Lead pane was actually
         *resumed* (spawn picked up --continue). Teammate-pane resumes
@@ -744,31 +698,12 @@ class MainWindow(
     # multi-tab orchestration
     # ──────────────────────────────────────────────────────────────
     def _open_projects(self) -> list[str]:
-        """Project names of every tab currently open. Excludes the "+"
-        pseudo-tab automatically (its widget isn't a ProjectTab)."""
+        """Project names of every project currently open in the sidebar."""
         return [
             self.tabs.widget(i).project_name
             for i in range(self.tabs.count())
             if isinstance(self.tabs.widget(i), ProjectTab)
         ]
-
-    def _plus_tab_index(self) -> int:
-        """Index of the trailing "+" pseudo-tab, or -1 if it isn't in
-        the strip yet (e.g. during __init__ before it's added)."""
-        for i in range(self.tabs.count()):
-            if self.tabs.widget(i) is getattr(self, "_plus_tab_placeholder", None):
-                return i
-        return -1
-
-    def _on_tab_bar_clicked(self, index: int) -> None:
-        """Intercept clicks on the "+" pseudo-tab: prevent it from
-        becoming the active tab and open the new-project picker instead.
-        Other tab clicks fall through to QTabWidget's normal switch
-        behavior (which triggers `currentChanged` → `_on_tab_switched`)."""
-        if index == self._plus_tab_index():
-            # Defer slightly so Qt's own click handling doesn't race the
-            # `_on_new_tab_clicked` dialog (modal blocks until dismissed).
-            QTimer.singleShot(0, self._on_new_tab_clicked)
 
     def _persist_open_tabs(self) -> None:
         """Snapshot the current tab order into projects.json so the next
@@ -823,13 +758,8 @@ class MainWindow(
         self._refresh_project_list()
 
         tab = ProjectTab(project_name, lead_pane=None)
-        # Always insert *before* the trailing "+" pseudo-tab so the "+"
-        # stays anchored at the right edge of the strip.
-        plus_idx = self._plus_tab_index()
-        if plus_idx >= 0:
-            idx = self.tabs.insertTab(plus_idx, tab, project_name)
-        else:
-            idx = self.tabs.addTab(tab, project_name)
+        idx = self.tabs.addTab(tab, project_name)
+        self._wire_project_tab(tab)
         self.tabs.setCurrentIndex(idx)
         lead = AgentPane(LEAD, parent=tab)
         self.orch.register_pane(lead, project=project_name)
@@ -892,26 +822,17 @@ class MainWindow(
         self._status.showMessage(f"closed tab · {tab.project_name}", 4_000)
 
     def _on_tab_switched(self, index: int) -> None:
-        """User clicked a different tab. Sync `active` in projects.json so
-        the orchestrator's project-default resolution and the rtk button
-        match the visible tab. The "+" pseudo-tab is intercepted in
-        `_on_tab_bar_clicked` and never becomes the visible target, so we
-        defensively skip it here too."""
+        """User picked a different project in the sidebar. Sync `active` in
+        projects.json so the orchestrator's project-default resolution and the
+        rtk button match the visible project."""
         if index < 0:
             return
         tab = self.tabs.widget(index)
         if not isinstance(tab, ProjectTab):
-            # "+" pseudo-tab landed here through some unusual path
-            # (e.g. keyboard navigation). Snap back to the previous
-            # real tab so the cockpit never shows an empty pane area.
-            for i in range(self.tabs.count()):
-                if isinstance(self.tabs.widget(i), ProjectTab):
-                    self.tabs.setCurrentIndex(i)
-                    break
             return
-        # Only the visible tab keeps painting; every hidden tab suspends its
-        # paint keep-alive so its Chromium renderer can release compositor
-        # memory (fix for backgrounded-tab renderers ballooning to multi-GB).
+        # Only the visible project keeps painting; every hidden project suspends
+        # its panes' paint keep-alive so their Chromium renderers can release
+        # compositor memory (fix for backgrounded renderers ballooning to GBs).
         for i in range(self.tabs.count()):
             w = self.tabs.widget(i)
             if isinstance(w, ProjectTab):
@@ -955,16 +876,11 @@ class MainWindow(
         # `/remote-control` injection automatically because spawn() above
         # picks up --continue inside the 5-minute resume window.
 
-    def _on_tab_bar_context_menu(self, pos) -> None:
-        """Right-click on tab bar → context menu for project-level actions."""
+    def _on_tab_context_menu(self, index: int, global_pos) -> None:
+        """Right-click a sidebar project → project-level actions."""
         from PyQt6.QtWidgets import QMenu
 
-        bar = self.tabs.tabBar()
-        tab_idx = bar.tabAt(pos)
-        if tab_idx < 0 or tab_idx == self._plus_tab_index():
-            return
-
-        widget = self.tabs.widget(tab_idx)
+        widget = self.tabs.widget(index)
         if not isinstance(widget, ProjectTab):
             return
         proj_name = widget.project_name
@@ -972,11 +888,15 @@ class MainWindow(
         menu = QMenu(self)
         act_edit = menu.addAction("✏️ Edit project…")
         act_rules = menu.addAction("📋 Edit project rules…")
-        chosen = menu.exec(bar.mapToGlobal(pos))
+        menu.addSeparator()
+        act_close = menu.addAction("🗙 Close project")
+        chosen = menu.exec(global_pos)
         if chosen is act_edit:
             self._on_edit_project_clicked(proj_name)
         elif chosen is act_rules:
             self._on_edit_project_rules_clicked(proj_name)
+        elif chosen is act_close:
+            self._on_tab_close_requested(index)
 
     # ──────────────────────────────────────────────────────────────
     # window state persistence
@@ -985,16 +905,9 @@ class MainWindow(
         geo = self._settings.value("window/geometry")
         if geo is not None:
             self.restoreGeometry(geo)
-        main_sizes = self._settings.value("split/main")
-        if main_sizes:
-            try:
-                self.main_split.setSizes([int(x) for x in main_sizes])
-            except (TypeError, ValueError):
-                pass
 
     def _save_window_state(self) -> None:
         self._settings.setValue("window/geometry", self.saveGeometry())
-        self._settings.setValue("split/main", self.main_split.sizes())
         self._settings.sync()
 
     def _tick_heartbeat(self) -> None:

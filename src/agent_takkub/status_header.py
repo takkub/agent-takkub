@@ -618,13 +618,10 @@ class StatusHeaderMixin:
                         )
                 elif ratio < 0.70 and self._context_warned.get(key):
                     self._context_warned.pop(key, None)
-            if peak_limit:
-                # Tab shows only the % — the absolute count lives on the
-                # pane header (the canonical per-pane meter). Avoids the
-                # same number appearing in three places (tab/header/status).
-                self.tabs.setTabText(i, f"{tab.project_name} · {int(peak_ratio * 100)}%")
-            else:
-                self.tabs.setTabText(i, tab.project_name)
+            # Sidebar row shows only the % badge — the absolute count lives on
+            # the pane header (the canonical per-pane meter). Avoids the same
+            # number appearing in three places (sidebar/header/status).
+            self.tabs.set_usage(i, peak_ratio if peak_limit else None)
         port = self.cli._server.serverPort() if self.cli._server.isListening() else 0
         bits = [f"cockpit · cli {port}", f"{active} active"]
         if working:

@@ -370,6 +370,12 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
     # currently active tab. main_window connects this to show a status-bar
     # flash so the user sees background-tab activity without switching tabs.
     crossTabDone = pyqtSignal(str, str, str)  # project_ns, role, note
+    # Emitted whenever a notice is queued for a live Lead pane (done handoffs,
+    # peer-CCs, system messages). main_window connects this to put an unread
+    # red dot on that project's Lead pane-tab when the user is looking at a
+    # different pane — so a Lead notification can't slip by unseen now that the
+    # panes-as-tabs layout shows only one pane at a time.
+    leadNotified = pyqtSignal(str)  # project_ns
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)

@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 62,
+  "module_count": 63,
   "modules": [
     {
       "module": "agent_takkub",
@@ -374,6 +374,7 @@
         "agent_takkub.limit_panel",
         "agent_takkub.logs_panel",
         "agent_takkub.orchestrator",
+        "agent_takkub.project_nav",
         "agent_takkub.project_tab",
         "agent_takkub.project_wizard",
         "agent_takkub.roles",
@@ -387,7 +388,7 @@
         "agent_takkub.app"
       ],
       "fan_in": 1,
-      "fan_out": 14
+      "fan_out": 15
     },
     {
       "module": "agent_takkub.orchestrator",
@@ -503,6 +504,17 @@
       ],
       "fan_in": 6,
       "fan_out": 0
+    },
+    {
+      "module": "agent_takkub.project_nav",
+      "imports": [
+        "agent_takkub.token_meter"
+      ],
+      "imported_by": [
+        "agent_takkub.main_window"
+      ],
+      "fan_in": 1,
+      "fan_out": 1
     },
     {
       "module": "agent_takkub.project_rules",
@@ -753,9 +765,10 @@
       "imports": [],
       "imported_by": [
         "agent_takkub.agent_pane",
+        "agent_takkub.project_nav",
         "agent_takkub.status_header"
       ],
-      "fan_in": 2,
+      "fan_in": 3,
       "fan_out": 0
     },
     {
