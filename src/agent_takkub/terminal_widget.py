@@ -323,6 +323,15 @@ class TerminalWidget(QWidget):
         self._heartbeat.setInterval(250)
         self._heartbeat.timeout.connect(self._heartbeat_poke)
 
+        # Whether this pane's tab is currently visible. A pane in a HIDDEN
+        # project tab is never on screen, so we suspend its paint keep-alive
+        # (heartbeat + in-page rAF pulse) to let Chromium reclaim the
+        # renderer's compositor memory. Default True — the tab that's active
+        # at startup never receives a "switched to" event. Re-asserted in
+        # _on_page_ready so a tab hidden before its page finished booting
+        # still starts suspended.
+        self._keepalive = True
+
         # Pane cwd (set by AgentPane.attach_session) so clicked relative
         # paths resolve against the project this pane is working in.
         self._cwd: str | None = None
@@ -494,8 +503,17 @@ class TerminalWidget(QWidget):
             self._view.page().runJavaScript(f"termWrite({json.dumps(joined)});")
         # Start heartbeat once the page is alive — keeps the renderer warm
         # so stalled-frame bugs (output delivered but not painted) can't
-        # accumulate while the user is looking at another pane.
-        self._heartbeat.start()
+        # accumulate while the user is looking at another pane. If this pane's
+        # tab was hidden before the page booted, honour that now: stay
+        # suspended (heartbeat off + JS pulse paused) so the renderer can
+        # release memory.
+        if self._keepalive:
+            self._heartbeat.start()
+        else:
+            try:
+                self._view.page().runJavaScript("termSetKeepalive(false);")
+            except Exception:
+                pass
 
     def _heartbeat_poke(self) -> None:
         if not self._page_ready:
@@ -504,6 +522,36 @@ class TerminalWidget(QWidget):
         # queue and schedule a frame; xterm.js's render service will flush
         # any pending DOM writes on that tick.
         self._view.page().runJavaScript("void 0;")
+
+    def set_keepalive(self, active: bool) -> None:
+        """Enable/suspend the background paint keep-alive for this pane.
+
+        Called by the host tab when it gains/loses visibility. A pane in a
+        HIDDEN project tab is never on screen, so there is no stale-frame to
+        guard against — we stop the 250 ms heartbeat and tell xterm.js to
+        pause its rAF pulse so Chromium can reclaim the renderer's compositor
+        memory (otherwise a backgrounded tab's renderer balloons to multi-GB
+        because --disable-backgrounding-occluded-windows forbids reclamation
+        while we keep forcing paints). Re-enabling restarts the heartbeat and
+        forces one repaint so the latest buffer surfaces the instant the tab
+        is shown again. The PTY keeps streaming into the xterm.js buffer the
+        whole time — only painting is suspended, so no output is lost.
+        """
+        active = bool(active)
+        self._keepalive = active
+        if active:
+            if self._page_ready and not self._heartbeat.isActive():
+                self._heartbeat.start()
+        else:
+            if self._heartbeat.isActive():
+                self._heartbeat.stop()
+        if self._page_ready:
+            try:
+                self._view.page().runJavaScript(
+                    f"termSetKeepalive({'true' if active else 'false'});"
+                )
+            except Exception:
+                pass
 
     def setFocus(self) -> None:
         self._view.setFocus()

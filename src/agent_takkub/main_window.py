@@ -448,6 +448,10 @@ class MainWindow(
         tab.teammate_panes[role_name] = pane
         self.orch.register_pane(pane, project=tab.project_name)
         tab.teammate_split.addWidget(pane)
+        # A teammate can spawn into a project whose tab isn't the visible one;
+        # inherit that tab's keep-alive state so a pane born into a hidden tab
+        # doesn't paint (and leak compositor RAM) until the next tab switch.
+        pane.set_keepalive(tab._keepalive)
 
         # show right side and rebalance
         tab.show_teammate_split()
@@ -905,6 +909,13 @@ class MainWindow(
                     self.tabs.setCurrentIndex(i)
                     break
             return
+        # Only the visible tab keeps painting; every hidden tab suspends its
+        # paint keep-alive so its Chromium renderer can release compositor
+        # memory (fix for backgrounded-tab renderers ballooning to multi-GB).
+        for i in range(self.tabs.count()):
+            w = self.tabs.widget(i)
+            if isinstance(w, ProjectTab):
+                w.set_keepalive(i == index)
         if set_active_project(tab.project_name):
             self._refresh_rtk_button()
             from . import user_profile as _up_sw

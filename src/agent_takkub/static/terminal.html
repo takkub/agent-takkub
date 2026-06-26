@@ -269,9 +269,42 @@
     // paints promptly: xterm.js schedules its own rAF on every write,
     // independent of this keep-alive. Worst case this is RAM-neutral and
     // still cuts CPU/GPU wakeups ~6x. (See cockpit RAM issue.)
-    (function pulse() {
-      requestAnimationFrame(() => setTimeout(pulse, 100));
-    })();
+    //
+    // 10fps STILL wasn't enough for panes in a HIDDEN project tab: the user
+    // can't see them at all, yet the forced pulse kept Chromium compositing
+    // them forever and `--disable-backgrounding-occluded-windows` forbade it
+    // from reclaiming their tiles, so a backgrounded tab's renderer ballooned
+    // to multi-GB. Python now calls termSetKeepalive(false) when this pane's
+    // tab loses visibility — the loop self-terminates and the renderer's
+    // compositor memory can finally be released. termSetKeepalive(true) on
+    // tab re-show forces one repaint (latest buffer surfaces immediately) and
+    // restarts the loop. The PTY keeps writing into the xterm.js buffer the
+    // whole time; only PAINTING is suspended, so nothing is lost.
+    //
+    // pulseToken makes rapid hide→show toggles safe: every state change bumps
+    // the token, so only the single loop carrying the current token survives
+    // and no stale loops accumulate.
+    let keepAlive = true;
+    let pulseToken = 0;
+    function pulse(token) {
+      if (token !== pulseToken || !keepAlive) return;  // superseded or suspended
+      requestAnimationFrame(() => setTimeout(() => pulse(token), 100));
+    }
+    pulse(pulseToken);
+
+    window.termSetKeepalive = function (active) {
+      active = !!active;
+      if (active === keepAlive) return;  // no state change → no extra loop
+      keepAlive = active;
+      pulseToken++;                      // invalidate any in-flight loop
+      if (active) {
+        // Resume: force one paint so the buffer that arrived while hidden
+        // surfaces at once, then start exactly one fresh loop.
+        try { term.refresh(0, term.rows - 1); } catch (e) {}
+        pulse(pulseToken);
+      }
+      // Suspend: token bumped, no new loop → the in-flight loop dies next tick.
+    };
   </script>
 </body>
 </html>

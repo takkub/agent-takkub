@@ -54,6 +54,12 @@ class ProjectTab(QWidget):
         self.main_split.addWidget(self.teammate_split)
 
         self.teammate_panes: dict[str, AgentPane] = {}
+        # Whether this tab is the currently visible one. MainWindow flips this
+        # via set_keepalive() on every tab switch so panes in hidden tabs
+        # suspend their paint keep-alive and release Chromium compositor RAM.
+        # Stored so a pane attached while the tab is hidden inherits the right
+        # state instead of painting (and leaking) until the next switch.
+        self._keepalive = True
         # Color overrides chosen via the "+ pane → custom..." flow stay
         # scoped to the tab so two projects can use different palettes
         # without clobbering each other.
@@ -78,6 +84,10 @@ class ProjectTab(QWidget):
         self.lead_pane = lead_pane
         self.main_split.insertWidget(0, lead_pane)
         self.main_split.setSizes([1500, 0])
+        # Inherit the tab's current visibility so a Lead attached into a
+        # hidden tab starts suspended rather than painting until next switch.
+        if not self._keepalive:
+            lead_pane.set_keepalive(False)
 
     def rebalance_teammates(self) -> None:
         """Distribute vertical space evenly across teammate panes."""
@@ -87,6 +97,19 @@ class ProjectTab(QWidget):
         h = max(self.teammate_split.height(), 100)
         each = max(120, h // n)
         self.teammate_split.setSizes([each] * n)
+
+    def set_keepalive(self, active: bool) -> None:
+        """Suspend/resume background paint keep-alive for every pane in this tab.
+
+        MainWindow calls this on each tab switch: the visible tab gets True,
+        every hidden tab gets False. Hidden panes stop forcing repaints so
+        Chromium can release their renderer's compositor memory (the fix for
+        backgrounded-tab renderers ballooning to multi-GB). Idempotent."""
+        self._keepalive = bool(active)
+        if self.lead_pane is not None:
+            self.lead_pane.set_keepalive(self._keepalive)
+        for pane in self.teammate_panes.values():
+            pane.set_keepalive(self._keepalive)
 
     def has_teammates(self) -> bool:
         return bool(self.teammate_panes)

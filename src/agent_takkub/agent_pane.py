@@ -616,6 +616,11 @@ class AgentPane(QFrame):
         self._terminal.set_input_locked(self._input_locked)
         self._refresh_lock_button()
 
+    def set_keepalive(self, active: bool) -> None:
+        """Forward tab-visibility keep-alive state to the terminal widget so a
+        pane in a hidden project tab can release its Chromium compositor RAM."""
+        self._terminal.set_keepalive(active)
+
     def _refresh_lock_button(self) -> None:
         if self._btn_lock is None:
             return
