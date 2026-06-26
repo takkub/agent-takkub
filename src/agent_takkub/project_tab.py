@@ -131,9 +131,15 @@ class ProjectTab(QWidget):
         self._apply_pane_keepalive()
 
     def add_teammate_tab(self, role_name: str, pane: AgentPane, label: str) -> None:
-        """Register a teammate pane and add it as a new tab."""
+        """Register a teammate pane, add it as a tab, and **switch to it** so the
+        freshly-spawned agent is visible immediately — the panes-as-tabs
+        equivalent of the old grid where a new pane appeared on screen. Without
+        this the new tab is a hidden background tab and a spawn looks like
+        nothing happened. setCurrentIndex fires `_on_pane_tab_changed` →
+        `_apply_pane_keepalive`, so the new pane also resumes painting."""
         self.teammate_panes[role_name] = pane
-        self.pane_tabs.addTab(pane, label)
+        idx = self.pane_tabs.addTab(pane, label)
+        self.pane_tabs.setCurrentIndex(idx)
         self._apply_pane_keepalive()
 
     def remove_teammate_tab(self, role_name: str) -> AgentPane | None:

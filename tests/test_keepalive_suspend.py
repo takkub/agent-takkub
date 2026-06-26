@@ -45,13 +45,26 @@ def _idx(tab, pane) -> int:
 
 
 class TestPaneKeepalive:
+    def test_spawn_auto_switches_to_new_pane(self, qapp):
+        # Spawning must surface the new pane (the user's "nothing shows" fix):
+        # add_teammate_tab switches to it so it's visible + painting.
+        tab = ProjectTab("proj", lead_pane=None)
+        lead, qa = _FakePane(), _FakePane()
+        tab.attach_lead(lead)
+        tab.set_keepalive(True)
+        tab.add_teammate_tab("qa", qa, "qa")
+        assert tab.pane_tabs.currentWidget() is qa  # auto-focused
+        assert qa.state is True  # visible → paints
+        assert lead.state is False  # backgrounded
+
     def test_visible_project_only_current_pane_alive(self, qapp):
         tab = ProjectTab("proj", lead_pane=None)
         lead, qa = _FakePane(), _FakePane()
-        tab.attach_lead(lead)  # Lead is tab 0 and current
+        tab.attach_lead(lead)
         tab.add_teammate_tab("qa", qa, "qa")
-
         tab.set_keepalive(True)  # project visible
+
+        tab.pane_tabs.setCurrentIndex(_idx(tab, lead))  # view Lead
         assert lead.state is True  # current pane → paints
         assert qa.state is False  # background pane → suspended
 
@@ -72,7 +85,10 @@ class TestPaneKeepalive:
         tab.add_teammate_tab("qa", qa, "qa")
         tab.set_keepalive(True)
 
-        tab.pane_tabs.setCurrentIndex(_idx(tab, qa))  # view the qa pane
+        tab.pane_tabs.setCurrentIndex(_idx(tab, lead))  # view Lead
+        assert lead.state is True
+        assert qa.state is False
+        tab.pane_tabs.setCurrentIndex(_idx(tab, qa))  # back to qa
         assert qa.state is True
         assert lead.state is False
 
@@ -83,7 +99,7 @@ class TestPaneKeepalive:
         tab.set_keepalive(False)  # project hidden
         qa = _FakePane()
         tab.add_teammate_tab("qa", qa, "qa")
-        assert qa.state is False  # born suspended, no paint/leak
+        assert qa.state is False  # born suspended even though auto-focused
 
     def test_remove_teammate_tab_returns_pane(self, qapp):
         tab = ProjectTab("proj", lead_pane=None)
@@ -113,7 +129,7 @@ class TestLeadUnreadDot:
 
     def test_no_dot_when_viewing_lead(self, qapp):
         tab, lead, _qa = self._tab_with_teammate()
-        # Lead tab is current (attach_lead selected it) → nothing unseen.
+        tab.pane_tabs.setCurrentIndex(_idx(tab, lead))  # user is on Lead
         tab.mark_lead_unread()
         assert tab.pane_tabs.tabIcon(_idx(tab, lead)).isNull()
 
