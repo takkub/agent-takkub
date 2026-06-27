@@ -24,6 +24,7 @@ OS: Windows (win32). mac cross-platform notes flagged inline.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -576,7 +577,11 @@ class TestMainWindowGameBridge:
         orch_src = (
             Path(__file__).resolve().parents[1] / "src" / "agent_takkub" / "orchestrator.py"
         ).read_text(encoding="utf-8")
-        assert "agentDone = pyqtSignal(str, str, str)" in orch_src, (
+        # Whitespace-tolerant: ruff-format may wrap the signal across lines when
+        # the trailing comment is long, so match the token shape, not exact text.
+        assert re.search(
+            r"agentDone\s*=\s*pyqtSignal\(\s*str\s*,\s*str\s*,\s*str\s*\)", orch_src
+        ), (
             "agentDone must declare 3 str params (project_ns, role_name, note) "
             "to prevent cross-project game-view contamination"
         )
