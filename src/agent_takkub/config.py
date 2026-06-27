@@ -321,15 +321,22 @@ def agent_role_dir(role: str) -> Path:
     return d
 
 
+def _get_port_file() -> Path:
+    """Return the effective port file path (TAKKUB_PORT_FILE overrides default)."""
+    override = os.environ.get("TAKKUB_PORT_FILE", "").strip()
+    return Path(override) if override else PORT_FILE
+
+
 def write_port(port: int) -> None:
     ensure_runtime()
-    PORT_FILE.write_text(str(port), encoding="utf-8")
+    _get_port_file().write_text(str(port), encoding="utf-8")
 
 
 def read_port() -> int | None:
-    if PORT_FILE.exists():
+    p = _get_port_file()
+    if p.exists():
         try:
-            return int(PORT_FILE.read_text(encoding="utf-8").strip())
+            return int(p.read_text(encoding="utf-8").strip())
         except ValueError:
             return None
     return None

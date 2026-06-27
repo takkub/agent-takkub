@@ -110,6 +110,21 @@ else:
 
 os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", " ".join(_chromium_flags))
 
+
+def _should_allow_multi() -> bool:
+    """True when TAKKUB_ALLOW_MULTI=1 is set — dev/test multi-instance mode."""
+    return os.environ.get("TAKKUB_ALLOW_MULTI", "").strip() == "1"
+
+
+# When running in multi-instance mode, steer cli_server to a per-PID port file
+# so the second instance doesn't overwrite the main instance's runtime/port,
+# and panes (which inherit this env) auto-connect to the right cockpit.
+# Must be set BEFORE config is imported (config reads PORT_FILE at call time).
+if _should_allow_multi():
+    _multi_port_file = Path(tempfile.gettempdir()) / f"agent-takkub-port.{os.getpid()}"
+    os.environ.setdefault("TAKKUB_PORT_FILE", str(_multi_port_file))
+
+
 from PyQt6.QtCore import QLockFile  # noqa: E402
 from PyQt6.QtGui import QFont  # noqa: E402 — PyQt must import after env setup above
 from PyQt6.QtWidgets import QApplication, QMessageBox  # noqa: E402
@@ -359,9 +374,13 @@ def main(argv: list[str] | None = None) -> int:
 
     # Single-instance guard: refuse to open a second cockpit window.
     # tryLock(100) waits at most 100 ms so startup delay is imperceptible.
+    # TAKKUB_ALLOW_MULTI=1 skips the lock entirely for dev/test multi-instance runs.
     global _instance_lock
-    _instance_lock = QLockFile(_LOCK_PATH)
-    if not _instance_lock.tryLock(100):
+    if _should_allow_multi():
+        _boot_log(f"[single-instance] TAKKUB_ALLOW_MULTI=1 — skipping lock (pid={os.getpid()})")
+    else:
+        _instance_lock = QLockFile(_LOCK_PATH)
+    if not _should_allow_multi() and not _instance_lock.tryLock(100):
         _boot_log(
             f"[single-instance] lock held — attempting auto-kill of stale process (pid={os.getpid()})"
         )
