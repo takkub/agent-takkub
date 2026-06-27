@@ -16,7 +16,15 @@ Row index == stacked-widget index == list row, kept in lockstep at all times.
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QPoint, Qt, pyqtSignal
+from PyQt6.QtCore import (
+    QEasingCurve,
+    QParallelAnimationGroup,
+    QPoint,
+    QPropertyAnimation,
+    QSize,
+    Qt,
+    pyqtSignal,
+)
 from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -74,25 +82,75 @@ QListWidget#projectList::item:selected {
     border-color: #6366f1;
     color: #a5b4fc;
 }
+#sidebarToggleBtn {
+    background: transparent;
+    color: #52525b;
+    border: none;
+    border-radius: 8px;
+    padding: 7px;
+    margin: 6px 12px 0 12px;
+    font-size: 12px;
+    font-weight: 600;
+}
+#sidebarToggleBtn:hover {
+    background: #18181b;
+    color: #a1a1aa;
+}
+#sidebarUsage {
+    background: #0b0b0d;
+    border-top: 1px solid #1c1c1f;
+}
 """
+
+# Sidebar widths: full list vs. the collapsed avatar-only rail.
+_EXPANDED_W = 212
+_COLLAPSED_W = 64
+_AVATAR_PX = 34
+
+# Deterministic per-project avatar tint (hash of the name → fixed palette).
+_AVATAR_COLORS = (
+    "#6366f1",
+    "#8b5cf6",
+    "#ec4899",
+    "#f43f5e",
+    "#f59e0b",
+    "#10b981",
+    "#06b6d4",
+    "#3b82f6",
+    "#a855f7",
+    "#14b8a6",
+)
+
+
+def _avatar_color(name: str) -> str:
+    return _AVATAR_COLORS[sum(ord(c) for c in name) % len(_AVATAR_COLORS)]
+
+
+def _initials(name: str) -> str:
+    """First 2 non-space characters, upper-cased (e.g. 'agent takkub' → 'AG')."""
+    letters = [c for c in name if not c.isspace()]
+    return "".join(letters[:2]).upper() or "?"
 
 
 class _ProjectRow(QWidget):
-    """Custom sidebar row: project name + a right-aligned usage % badge.
+    """Custom sidebar row: a round initials avatar + project name + usage badge.
 
     Background stays transparent so the QListWidget's :selected / :hover
-    highlight shows through behind it.
+    highlight shows through behind it. In *collapsed* mode the name and badge
+    hide and only the centered avatar remains — the narrow-rail look.
     """
 
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, collapsed: bool = False) -> None:
         super().__init__()
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(12, 9, 12, 9)
-        lay.setSpacing(8)
+        self._name_text = name
+        self._selected = False
 
-        self._accent = QLabel("●")
-        self._accent.setStyleSheet("color: #6366f1; font-size: 9px;")
-        self._accent.setVisible(False)  # shown only on the selected row
+        self._lay = QHBoxLayout(self)
+        self._lay.setSpacing(9)
+
+        self._avatar = QLabel(_initials(name))
+        self._avatar.setFixedSize(_AVATAR_PX, _AVATAR_PX)
+        self._avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         self._name = QLabel(name)
         self._name.setStyleSheet("color: #d4d4d8; font-size: 13px; font-weight: 600;")
@@ -102,17 +160,35 @@ class _ProjectRow(QWidget):
             "color: #52525b; font-size: 11px; font-variant-numeric: tabular-nums;"
         )
 
-        lay.addWidget(self._accent)
-        lay.addWidget(self._name, 1)
-        lay.addWidget(self._badge)
+        self._lay.addWidget(self._avatar)
+        self._lay.addWidget(self._name, 1)
+        self._lay.addWidget(self._badge)
 
+        self._paint_avatar()
+        self.set_collapsed(collapsed)
+
+    # -- painting -----------------------------------------------------
+    def _paint_avatar(self) -> None:
+        ring = "#ffffff" if self._selected else "rgba(0,0,0,0)"
+        self._avatar.setStyleSheet(
+            f"background: {_avatar_color(self._name_text)};"
+            f" color: #ffffff; font-size: 12px; font-weight: 800;"
+            f" border-radius: {_AVATAR_PX // 2}px; border: 2px solid {ring};"
+        )
+
+    # -- state --------------------------------------------------------
     def set_name(self, name: str) -> None:
+        self._name_text = name
         self._name.setText(name)
+        self._avatar.setText(_initials(name))
+        self.setToolTip(name)
+        self._paint_avatar()
 
     def set_selected(self, selected: bool) -> None:
-        self._accent.setVisible(selected)
+        self._selected = selected
         color = "#ffffff" if selected else "#d4d4d8"
         self._name.setStyleSheet(f"color: {color}; font-size: 13px; font-weight: 600;")
+        self._paint_avatar()
 
     def set_usage(self, ratio: float | None) -> None:
         if ratio is None:
@@ -122,6 +198,20 @@ class _ProjectRow(QWidget):
         self._badge.setStyleSheet(
             f"color: {usage_color(ratio)}; font-size: 11px; font-variant-numeric: tabular-nums;"
         )
+
+    def set_collapsed(self, collapsed: bool) -> None:
+        """Hide/show the name + badge; re-center the avatar in the rail."""
+        self._name.setVisible(not collapsed)
+        self._badge.setVisible(not collapsed)
+        # Collapsed: center the avatar in the rail. The row is only ~48px wide
+        # (rail 64 − list padding 16), so a 34px avatar needs (48−34)/2 ≈ 7px
+        # side margins; the old 15px overflowed and shoved the avatar left.
+        if collapsed:
+            self._lay.setContentsMargins(7, 8, 7, 8)
+            self.setToolTip(self._name_text)
+        else:
+            self._lay.setContentsMargins(12, 8, 12, 8)
+            self.setToolTip("")
 
 
 class ProjectNav(QWidget):
@@ -142,15 +232,21 @@ class ProjectNav(QWidget):
         # ── left sidebar ────────────────────────────────────────────
         sidebar = QWidget(self)
         sidebar.setObjectName("projectSidebar")
-        sidebar.setFixedWidth(212)
+        sidebar.setFixedWidth(_EXPANDED_W)
         sidebar.setStyleSheet(_SIDEBAR_QSS)
+        # Held so the header's ☰ toggle can slide it between the full list and
+        # the narrow avatar rail. _collapsed tracks the rail state; _anim keeps
+        # the running width animation alive (else PyQt GCs it mid-flight).
+        self._sidebar = sidebar
+        self._collapsed = False
+        self._anim: QParallelAnimationGroup | None = None
         sb = QVBoxLayout(sidebar)
         sb.setContentsMargins(0, 0, 0, 0)
         sb.setSpacing(0)
 
-        header = QLabel("PROJECTS")
-        header.setObjectName("projectSidebarHeader")
-        sb.addWidget(header)
+        self._header = QLabel("PROJECTS")
+        self._header.setObjectName("projectSidebarHeader")
+        sb.addWidget(self._header)
 
         self._list = QListWidget(sidebar)
         self._list.setObjectName("projectList")
@@ -159,17 +255,93 @@ class ProjectNav(QWidget):
         self._list.customContextMenuRequested.connect(self._on_context_menu)
         sb.addWidget(self._list, 1)
 
+        # Sidebar collapse/expand toggle. Lives in the sidebar footer (right
+        # above "New project") so the control that hides the sidebar sits inside
+        # the thing it acts on, instead of off in the bottom status bar. The
+        # glyph flips with state: «  Collapse (expanded) ↔ » (rail).
+        self._toggle_btn = QPushButton("«  Collapse", sidebar)
+        self._toggle_btn.setObjectName("sidebarToggleBtn")
+        self._toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._toggle_btn.setToolTip("Collapse the projects sidebar to avatars / expand")
+        self._toggle_btn.clicked.connect(lambda: self.toggle_sidebar())
+        sb.addWidget(self._toggle_btn)
+
         self._add_btn = QPushButton("+   New project", sidebar)
         self._add_btn.setObjectName("addProjectBtn")
         self._add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._add_btn.clicked.connect(self.addRequested.emit)
         sb.addWidget(self._add_btn)
 
+        # ── usage/limit meter footer ────────────────────────────────
+        # The meter QLabel itself is owned by MainWindow (the limit_panel mixin
+        # keeps its text/colour in sync); the sidebar only reserves a stable,
+        # always-visible slot for it at the bottom edge. Parking it here — not
+        # in the bottom status bar — is what keeps it from being clipped off the
+        # right edge when the status bar's button row overflows on small/narrow
+        # displays. Hidden together with the rest of the chrome in the rail.
+        self._usage_footer = QWidget(sidebar)
+        self._usage_footer.setObjectName("sidebarUsage")
+        self._usage_widget: QWidget | None = None
+        self._usage_lay = QVBoxLayout(self._usage_footer)
+        self._usage_lay.setContentsMargins(12, 8, 12, 10)
+        self._usage_lay.setSpacing(0)
+        sb.addWidget(self._usage_footer)
+
         # ── right content ───────────────────────────────────────────
         self._stack = QStackedWidget(self)
 
         root.addWidget(sidebar)
         root.addWidget(self._stack, 1)
+
+    # ------------------------------------------------------------------
+    # sidebar collapse/expand (the ☰ "slide menu" toggle)
+    # ------------------------------------------------------------------
+    def toggle_sidebar(self) -> bool:
+        """Slide between the full list and the avatar rail. True if collapsed."""
+        self.set_sidebar_collapsed(not self._collapsed)
+        return self._collapsed
+
+    def set_sidebar_collapsed(self, collapsed: bool, *, animate: bool = True) -> None:
+        """Collapse to the narrow avatar-only rail, or expand to the full list."""
+        if collapsed == self._collapsed:
+            return
+        self._collapsed = collapsed
+
+        # Swap each row's presentation (name/badge hidden → centered avatar).
+        for i in range(self._list.count()):
+            rw = self._row_widget(i)
+            if rw is not None:
+                rw.set_collapsed(collapsed)
+        self._header.setVisible(not collapsed)
+        self._add_btn.setText("+" if collapsed else "+   New project")
+        self._toggle_btn.setText("»" if collapsed else "«  Collapse")
+        # The usage meter has no sensible rail form (its text needs ~150px), so
+        # it simply hides while collapsed; per-project usage is still on the
+        # avatar tooltip. Re-shows on expand.
+        self._usage_footer.setVisible(not collapsed)
+
+        target = _COLLAPSED_W if collapsed else _EXPANDED_W
+        if not animate:
+            self._sidebar.setFixedWidth(target)
+            return
+        self._animate_width(target)
+
+    def is_sidebar_collapsed(self) -> bool:
+        return self._collapsed
+
+    def _animate_width(self, target: int) -> None:
+        """Tween the sidebar's min+max width together for a smooth slide."""
+        start = self._sidebar.width()
+        group = QParallelAnimationGroup(self)
+        for prop in (b"minimumWidth", b"maximumWidth"):
+            anim = QPropertyAnimation(self._sidebar, prop, self)
+            anim.setDuration(190)
+            anim.setStartValue(start)
+            anim.setEndValue(target)
+            anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
+            group.addAnimation(anim)
+        self._anim = group  # keep a reference so PyQt doesn't GC it mid-run
+        group.start()
 
     # ------------------------------------------------------------------
     # internal
@@ -257,10 +429,24 @@ class ProjectNav(QWidget):
         if rw is not None:
             rw.set_usage(ratio)
 
+    def mount_usage_widget(self, widget: QWidget) -> None:
+        """Adopt an externally-owned usage/limit meter into the sidebar footer.
+
+        MainWindow owns the meter QLabel (the limit_panel mixin refreshes its
+        text/style); the sidebar just gives it a stable home so it can never be
+        clipped off the bottom status bar on small screens. Centered, and
+        hidden while the sidebar is collapsed to the avatar rail.
+        """
+        self._usage_widget = widget
+        self._usage_lay.addWidget(widget, 0, Qt.AlignmentFlag.AlignCenter)
+        widget.setVisible(not self._collapsed)
+
     # ------------------------------------------------------------------
     def _insert_list_row(self, index: int, label: str) -> None:
         item = QListWidgetItem()
-        row = _ProjectRow(label)
-        item.setSizeHint(row.sizeHint())
+        row = _ProjectRow(label, collapsed=self._collapsed)
+        # Fixed-height hint keeps rows aligned in both modes; the list clamps
+        # width to the (animating) sidebar, so only height matters here.
+        item.setSizeHint(QSize(0, _AVATAR_PX + 18))
         self._list.insertItem(index, item)
         self._list.setItemWidget(item, row)

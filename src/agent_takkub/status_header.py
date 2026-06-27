@@ -348,6 +348,17 @@ class StatusHeaderMixin:
         self._btn_help.setStyleSheet(self._ghost_button_style())
         self._btn_help.clicked.connect(self._show_help)
 
+        # Sidebar collapse/expand toggle moved into the sidebar footer itself
+        # (ProjectNav owns it now, right above "New project"). It used to live
+        # here in the status bar.
+
+        self._btn_game_view = QPushButton("🎮", self)
+        self._btn_game_view.setToolTip("Toggle Office Room game view ↔ text panes (🎮/📜)")
+        self._btn_game_view.setCheckable(True)
+        self._btn_game_view.setFixedWidth(32)
+        self._btn_game_view.setStyleSheet(self._ghost_button_style())
+        self._btn_game_view.clicked.connect(self._on_toggle_game_view)
+
         self._btn_logs = QPushButton("📋 Logs", self)
         self._btn_logs.setToolTip("Show/hide events log panel")
         self._btn_logs.setCheckable(True)
@@ -512,6 +523,7 @@ class StatusHeaderMixin:
             self._status.addPermanentWidget(w)
         self._status.addPermanentWidget(self._make_status_separator())
         for w in (
+            self._btn_game_view,
             self._btn_help,
             self._btn_logs,
             self._btn_resume,
@@ -558,6 +570,31 @@ class StatusHeaderMixin:
         self._status_timer.setInterval(2_000)
         self._status_timer.timeout.connect(self._update_status)
         self._status_timer.start()
+
+    # ──────────────────────────────────────────────────────────────
+    # game view toggle
+    # ──────────────────────────────────────────────────────────────
+
+    def _on_toggle_game_view(self) -> None:
+        """Toggle the active project tab between text panes and game view."""
+        from .project_tab import ProjectTab
+
+        tab = self._current_tab()
+        if not isinstance(tab, ProjectTab):
+            self._btn_game_view.setChecked(False)
+            return
+        game_on = tab.toggle_game_view()
+        self._btn_game_view.setChecked(game_on)
+        self._btn_game_view.setText("📜" if game_on else "🎮")
+        self._status.showMessage(
+            "Game view ON — Office Room" if game_on else "Game view OFF — text panes", 3_000
+        )
+        if game_on:
+            # Push a snapshot of every already-alive pane so the scene shows
+            # characters immediately instead of "Waiting for pane events…".
+            # Panes spawned before the view was created never fired paneRequested
+            # into the scene; this syncs the gap.
+            self._game_sync_all_states()
 
     # ──────────────────────────────────────────────────────────────
     # live status updates

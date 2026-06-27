@@ -271,3 +271,14 @@ forbidden_modules = [
     "agent_takkub.app",
     "agent_takkub.cli",
 ]
+
+[[tool.importlinter.contracts]]
+name = "office-room-view-layer"
+type = "forbidden"
+# office_room_view is a pure UI widget — must not import orchestrator, app, or cli.
+source_modules = ["agent_takkub.office_room_view"]
+forbidden_modules = [
+    "agent_takkub.orchestrator",
+    "agent_takkub.app",
+    "agent_takkub.cli",
+]

@@ -365,7 +365,9 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
     paneClosed = pyqtSignal(
         str, str
     )  # role_name, project — main_window removes pane from the matching tab
-    agentDone = pyqtSignal(str, str)  # role_name, note — for desktop notifications
+    agentDone = pyqtSignal(
+        str, str, str
+    )  # project_ns, role_name, note — includes project to prevent cross-tab contamination
     # Emitted when a teammate's done() fires for a project that is NOT the
     # currently active tab. main_window connects this to show a status-bar
     # flash so the user sees background-tab activity without switching tabs.
@@ -1196,7 +1198,7 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
         # Refresh hot.md immediately so Obsidian shows the done event
         # without waiting up to a minute for the periodic tick.
         self._write_hot_md()
-        self.agentDone.emit(from_role, note)
+        self.agentDone.emit(project_ns, from_role, note)
         return True, f"{from_role} reported done"
 
     @staticmethod

@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 63,
+  "module_count": 64,
   "modules": [
     {
       "module": "agent_takkub",
@@ -391,6 +391,15 @@
       "fan_out": 15
     },
     {
+      "module": "agent_takkub.office_room_view",
+      "imports": [],
+      "imported_by": [
+        "agent_takkub.project_tab"
+      ],
+      "fan_in": 1,
+      "fan_out": 0
+    },
+    {
       "module": "agent_takkub.orchestrator",
       "imports": [
         "agent_takkub.agent_pane",
@@ -531,7 +540,8 @@
     {
       "module": "agent_takkub.project_tab",
       "imports": [
-        "agent_takkub.agent_pane"
+        "agent_takkub.agent_pane",
+        "agent_takkub.office_room_view"
       ],
       "imported_by": [
         "agent_takkub.limit_panel",
@@ -540,7 +550,7 @@
         "agent_takkub.status_header"
       ],
       "fan_in": 4,
-      "fan_out": 1
+      "fan_out": 2
     },
     {
       "module": "agent_takkub.project_wizard",

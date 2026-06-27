@@ -183,6 +183,11 @@ class MainWindow(
         self.orch.paneResumed.connect(self._on_pane_resumed)
         self.orch.crossTabDone.connect(self._on_cross_tab_done)
         self.orch.leadNotified.connect(self._on_lead_notified)
+        # ── Office Room game bridge ──────────────────────────────
+        self.orch.paneRequested.connect(self._game_on_pane_requested)
+        self.orch.paneClosed.connect(self._game_on_pane_closed)
+        self.orch.agentDone.connect(self._game_on_agent_done)
+        self.orch.statusChanged.connect(self._game_sync_all_states)
 
         # ── system tray for desktop notifications ───────────────
         self._tray = QSystemTrayIcon(self)
@@ -243,8 +248,11 @@ class MainWindow(
         )
         self.tabs.setCurrentIndex(0)
 
-        # Usage-window readout — now parked at the right end of the status bar
-        # (the old top-right tab-corner slot is gone with the tab strip).
+        # Usage-window readout — parked in the sidebar footer (see mount below).
+        # It used to sit at the right end of the bottom status bar, but on small
+        # screens the status bar's button row overflowed horizontally and clipped
+        # this rightmost widget off-screen. The vertical sidebar footer can't be
+        # clipped that way, so the meter always stays visible.
         self._limit_label = QLabel("—")
         self._limit_label.setStyleSheet(
             "QLabel { color:#52525b; font-size:11px; "
@@ -258,7 +266,9 @@ class MainWindow(
 
         # ── status bar ────────────────────────────────────
         self._build_status_bar()
-        self._status.addPermanentWidget(self._limit_label)
+        # Meter lives in the sidebar footer now (clip-proof on small screens),
+        # not as a permanent status-bar widget at the overflow-prone right edge.
+        self.tabs.mount_usage_widget(self._limit_label)
 
         # Only NOW is it safe to listen for project switches — the handler
         # touches `_btn_install_rtk` via `_refresh_rtk_button`, which didn't
@@ -337,6 +347,11 @@ class MainWindow(
         close chain — the same teardown path the pane header's own × uses."""
         tab.paneCloseRequested.connect(
             lambda role, proj=tab.project_name: self.orch.close(role, project=proj)
+        )
+        tab.focusRoleRequested.connect(lambda role, t=tab: self._game_on_focus_role(role, t))
+        tab.leadClickedInGame.connect(lambda t=tab: self._game_on_focus_role("lead", t))
+        tab.messageToLead.connect(
+            lambda msg, proj=tab.project_name: self.orch.inject_lead_prompt(msg, project=proj)
         )
 
     def _ensure_teammate_pane(self, role_name: str, project: str) -> None:
@@ -442,6 +457,54 @@ class MainWindow(
             pass
         pane.setParent(None)
         pane.deleteLater()
+
+    # ──────────────────────────────────────────────────────────────
+    # Office Room game bridge helpers
+    # ──────────────────────────────────────────────────────────────
+    def _game_dispatch(self, role: str, state: str, project: str = "", note: str = "") -> None:
+        """Route a game event to the correct ProjectTab's OfficeRoomView."""
+        tab = self._tab_for_project(project) if project else self._current_tab()
+        if tab is None:
+            return
+        tab.dispatch_game_event(role, state, note=note, project=project)
+
+    def _game_on_pane_requested(self, role_name: str, project: str) -> None:
+        self._game_dispatch(role_name, "spawn", project=project)
+
+    def _game_on_pane_closed(self, role_name: str, project: str) -> None:
+        self._game_dispatch(role_name, "close", project=project)
+
+    def _game_on_agent_done(self, project: str, role_name: str, note: str) -> None:
+        self._game_dispatch(role_name, "done", project=project, note=note)
+
+    def _game_sync_all_states(self) -> None:
+        """On every statusChanged (and on game-view toggle-in), push busy/idle
+        state for every alive pane so the scene stays in sync."""
+        for project, panes in list(self.orch._panes_by_project.items()):
+            tab = self._tab_for_project(project)
+            if tab is None:
+                continue
+            for role, pane in list(panes.items()):
+                if pane.session is None or not pane.session.is_alive:
+                    continue
+                state = "busy" if pane.state == "working" else "idle"
+                tab.dispatch_game_event(role, state, project=project)
+
+    def _game_on_focus_role(self, role: str, tab: ProjectTab) -> None:
+        """Switch the cockpit to the pane-tab for `role` in `tab`."""
+        pane = tab.teammate_panes.get(role)
+        if pane is None and role == "lead":
+            pane = tab.lead_pane
+        if pane is None:
+            return
+        idx = tab.pane_tabs.indexOf(pane)
+        if idx >= 0:
+            tab.pane_tabs.setCurrentIndex(idx)
+        # Also switch back to text view
+        if tab.is_game_active():
+            tab.toggle_game_view()
+            self._btn_game_view.setChecked(False)
+            self._btn_game_view.setText("🎮")
 
     # ──────────────────────────────────────────────────────────────
     def _boot(self) -> None:
@@ -574,11 +637,10 @@ class MainWindow(
         # only called when a new pane is being created
         self._status.showMessage(f"opening pane · {role_name} ({project})", 3_000)
 
-    def _notify_agent_done(self, role_name: str, note: str) -> None:
+    def _notify_agent_done(self, project: str, role_name: str, note: str) -> None:
         """Show a desktop toast when an agent reports done."""
         title = f"{role_name} done"
         body = note.strip() if note else "task complete"
-        # mirror to status bar too in case tray is unavailable
         self._status.showMessage(f"✓ {title}: {body[:80]}", 6_000)
         if self._tray and QSystemTrayIcon.isSystemTrayAvailable():
             self._tray.showMessage(title, body, QSystemTrayIcon.MessageIcon.Information, 5_000)

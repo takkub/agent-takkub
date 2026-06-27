@@ -84,3 +84,69 @@ class TestProjectNavApi:
         assert nav.widget(1) is b
         assert nav.count() == 3
         assert nav._list.count() == 3
+
+
+class TestSidebarCollapse:
+    def test_toggle_flips_collapsed_state(self, qapp):
+        nav = ProjectNav()
+        nav.addTab(_page("a"), "alpha")
+        assert nav.is_sidebar_collapsed() is False
+        assert nav.toggle_sidebar() is True
+        assert nav.is_sidebar_collapsed() is True
+        assert nav.toggle_sidebar() is False
+        assert nav.is_sidebar_collapsed() is False
+
+    def test_collapse_hides_row_name_keeps_avatar(self, qapp):
+        nav = ProjectNav()
+        nav.addTab(_page("a"), "agent takkub")
+        row = nav._row_widget(0)
+        assert row._avatar.text() == "AG"  # first 2 non-space letters, upper
+        assert row._name.isHidden() is False
+        nav.set_sidebar_collapsed(True, animate=False)
+        assert row._name.isHidden() is True
+        assert row._badge.isHidden() is True
+        assert nav._sidebar.width() == 64
+
+    def test_rows_added_while_collapsed_start_collapsed(self, qapp):
+        nav = ProjectNav()
+        nav.set_sidebar_collapsed(True, animate=False)
+        nav.addTab(_page("a"), "beta")
+        row = nav._row_widget(0)
+        assert row._name.isHidden() is True
+        assert row._avatar.text() == "BE"
+
+    def test_set_collapsed_is_idempotent(self, qapp):
+        nav = ProjectNav()
+        nav.addTab(_page("a"), "alpha")
+        nav.set_sidebar_collapsed(False, animate=False)  # already expanded
+        assert nav.is_sidebar_collapsed() is False
+        nav.set_sidebar_collapsed(True, animate=False)
+        nav.set_sidebar_collapsed(True, animate=False)  # no-op
+        assert nav.is_sidebar_collapsed() is True
+
+
+class TestUsageMeterFooter:
+    def test_mount_places_widget_in_footer_and_shows_it(self, qapp):
+        nav = ProjectNav()
+        meter = QLabel("5h 12% / 7d 4%")
+        nav.mount_usage_widget(meter)
+        assert nav._usage_widget is meter
+        assert meter.parent() is nav._usage_footer
+        assert meter.isHidden() is False
+
+    def test_collapse_hides_meter_expand_restores(self, qapp):
+        nav = ProjectNav()
+        nav.addTab(_page("a"), "alpha")
+        meter = QLabel("5h 12% / 7d 4%")
+        nav.mount_usage_widget(meter)
+        nav.set_sidebar_collapsed(True, animate=False)
+        assert nav._usage_footer.isHidden() is True
+        nav.set_sidebar_collapsed(False, animate=False)
+        assert nav._usage_footer.isHidden() is False
+
+    def test_mount_while_collapsed_starts_hidden(self, qapp):
+        nav = ProjectNav()
+        nav.set_sidebar_collapsed(True, animate=False)
+        meter = QLabel("5h 12% / 7d 4%")
+        nav.mount_usage_widget(meter)
+        assert meter.isVisible() is False
