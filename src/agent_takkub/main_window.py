@@ -248,11 +248,10 @@ class MainWindow(
         )
         self.tabs.setCurrentIndex(0)
 
-        # Usage-window readout — parked in the sidebar footer (see mount below).
-        # It used to sit at the right end of the bottom status bar, but on small
-        # screens the status bar's button row overflowed horizontally and clipped
-        # this rightmost widget off-screen. The vertical sidebar footer can't be
-        # clipped that way, so the meter always stays visible.
+        # Usage-window readout — sits as the corner widget of the active
+        # project's pane_tabs (top-right, same row as the Lead/teammate tabs).
+        # On every project switch _on_tab_switched reparents this single label
+        # into the new active ProjectTab's corner via mount_usage_widget().
         self._limit_label = QLabel("—")
         self._limit_label.setStyleSheet(
             "QLabel { color:#52525b; font-size:11px; "
@@ -266,9 +265,11 @@ class MainWindow(
 
         # ── status bar ────────────────────────────────────
         self._build_status_bar()
-        # Meter lives in the sidebar footer now (clip-proof on small screens),
-        # not as a permanent status-bar widget at the overflow-prone right edge.
-        self.tabs.mount_usage_widget(self._limit_label)
+        # Mount meter into the initial tab's pane_tabs corner.
+        # _limit_label_host tracks the current owner so _on_tab_switched can
+        # explicitly clear the old corner before mounting on the new tab.
+        self._limit_label_host: ProjectTab | None = initial_tab
+        initial_tab.mount_usage_widget(self._limit_label)
 
         # Only NOW is it safe to listen for project switches — the handler
         # touches `_btn_install_rtk` via `_refresh_rtk_button`, which didn't
@@ -899,6 +900,14 @@ class MainWindow(
             w = self.tabs.widget(i)
             if isinstance(w, ProjectTab):
                 w.set_keepalive(i == index)
+        # Reparent the usage label: clear the old corner first so the previous
+        # tab doesn't keep a stale reference, then mount on the new active tab.
+        if self._limit_label_host is not None and self._limit_label_host is not tab:
+            self._limit_label_host.pane_tabs.setCornerWidget(
+                None, Qt.Corner.TopRightCorner
+            )
+        self._limit_label_host = tab
+        tab.mount_usage_widget(self._limit_label)
         if set_active_project(tab.project_name):
             self._refresh_rtk_button()
             from . import user_profile as _up_sw

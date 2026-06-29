@@ -8,7 +8,10 @@ from __future__ import annotations
 import pytest
 from PyQt6.QtWidgets import QApplication, QLabel, QWidget
 
+from PyQt6.QtCore import Qt
+
 from agent_takkub.project_nav import ProjectNav
+from agent_takkub.project_tab import ProjectTab
 
 
 @pytest.fixture(scope="module")
@@ -125,28 +128,24 @@ class TestSidebarCollapse:
         assert nav.is_sidebar_collapsed() is True
 
 
-class TestUsageMeterFooter:
-    def test_mount_places_widget_in_footer_and_shows_it(self, qapp):
-        nav = ProjectNav()
+class TestUsageMeterCorner:
+    """Usage meter now lives as corner widget on the active ProjectTab's pane_tabs."""
+
+    def test_mount_sets_corner_widget_and_shows_label(self, qapp):
+        tab = ProjectTab("proj-a")
         meter = QLabel("5h 12% / 7d 4%")
-        nav.mount_usage_widget(meter)
-        assert nav._usage_widget is meter
-        assert meter.parent() is nav._usage_footer
+        tab.mount_usage_widget(meter)
+        assert tab.pane_tabs.cornerWidget(Qt.Corner.TopRightCorner) is meter
         assert meter.isHidden() is False
 
-    def test_collapse_hides_meter_expand_restores(self, qapp):
-        nav = ProjectNav()
-        nav.addTab(_page("a"), "alpha")
-        meter = QLabel("5h 12% / 7d 4%")
-        nav.mount_usage_widget(meter)
-        nav.set_sidebar_collapsed(True, animate=False)
-        assert nav._usage_footer.isHidden() is True
-        nav.set_sidebar_collapsed(False, animate=False)
-        assert nav._usage_footer.isHidden() is False
-
-    def test_mount_while_collapsed_starts_hidden(self, qapp):
-        nav = ProjectNav()
-        nav.set_sidebar_collapsed(True, animate=False)
-        meter = QLabel("5h 12% / 7d 4%")
-        nav.mount_usage_widget(meter)
-        assert meter.isVisible() is False
+    def test_reparent_moves_meter_to_new_tab(self, qapp):
+        tab_a = ProjectTab("proj-a")
+        tab_b = ProjectTab("proj-b")
+        meter = QLabel("—")
+        tab_a.mount_usage_widget(meter)
+        assert tab_a.pane_tabs.cornerWidget(Qt.Corner.TopRightCorner) is meter
+        # Simulate MainWindow's _on_tab_switched: clear old corner before mounting new
+        tab_a.pane_tabs.setCornerWidget(None, Qt.Corner.TopRightCorner)
+        tab_b.mount_usage_widget(meter)
+        assert tab_b.pane_tabs.cornerWidget(Qt.Corner.TopRightCorner) is meter
+        assert tab_a.pane_tabs.cornerWidget(Qt.Corner.TopRightCorner) is None

@@ -272,21 +272,6 @@ class ProjectNav(QWidget):
         self._add_btn.clicked.connect(self.addRequested.emit)
         sb.addWidget(self._add_btn)
 
-        # ── usage/limit meter footer ────────────────────────────────
-        # The meter QLabel itself is owned by MainWindow (the limit_panel mixin
-        # keeps its text/colour in sync); the sidebar only reserves a stable,
-        # always-visible slot for it at the bottom edge. Parking it here — not
-        # in the bottom status bar — is what keeps it from being clipped off the
-        # right edge when the status bar's button row overflows on small/narrow
-        # displays. Hidden together with the rest of the chrome in the rail.
-        self._usage_footer = QWidget(sidebar)
-        self._usage_footer.setObjectName("sidebarUsage")
-        self._usage_widget: QWidget | None = None
-        self._usage_lay = QVBoxLayout(self._usage_footer)
-        self._usage_lay.setContentsMargins(12, 8, 12, 10)
-        self._usage_lay.setSpacing(0)
-        sb.addWidget(self._usage_footer)
-
         # ── right content ───────────────────────────────────────────
         self._stack = QStackedWidget(self)
 
@@ -315,11 +300,6 @@ class ProjectNav(QWidget):
         self._header.setVisible(not collapsed)
         self._add_btn.setText("+" if collapsed else "+   New project")
         self._toggle_btn.setText("»" if collapsed else "«  Collapse")
-        # The usage meter has no sensible rail form (its text needs ~150px), so
-        # it simply hides while collapsed; per-project usage is still on the
-        # avatar tooltip. Re-shows on expand.
-        self._usage_footer.setVisible(not collapsed)
-
         target = _COLLAPSED_W if collapsed else _EXPANDED_W
         if not animate:
             self._sidebar.setFixedWidth(target)
@@ -428,18 +408,6 @@ class ProjectNav(QWidget):
         rw = self._row_widget(index)
         if rw is not None:
             rw.set_usage(ratio)
-
-    def mount_usage_widget(self, widget: QWidget) -> None:
-        """Adopt an externally-owned usage/limit meter into the sidebar footer.
-
-        MainWindow owns the meter QLabel (the limit_panel mixin refreshes its
-        text/style); the sidebar just gives it a stable home so it can never be
-        clipped off the bottom status bar on small screens. Centered, and
-        hidden while the sidebar is collapsed to the avatar rail.
-        """
-        self._usage_widget = widget
-        self._usage_lay.addWidget(widget, 0, Qt.AlignmentFlag.AlignCenter)
-        widget.setVisible(not self._collapsed)
 
     # ------------------------------------------------------------------
     def _insert_list_row(self, index: int, label: str) -> None:
