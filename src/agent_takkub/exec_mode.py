@@ -26,6 +26,7 @@ an install that predates this setting).
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 SOLO = "solo"
@@ -66,6 +67,34 @@ def current() -> str:
 def is_parallel() -> bool:
     """True iff the Lead should fan out independent features across instances."""
     return current() == PARALLEL
+
+
+def machine_fanout_cap() -> int:
+    """Max instances-per-role this machine can comfortably run concurrently,
+    derived from CPU cores + free RAM, never above `MAX_FANOUT`.
+
+    Each extra instance is roughly another claude.exe pane (often plus a dev
+    server), so we budget ~2 logical cores and ~2 GB of *available* RAM per
+    concurrent pane and take the tighter limit. The Lead reads this so a request
+    with 10 features doesn't fan out 10 panes and thrash a small machine — it
+    caps K at what the box can take while still parallelising as much as is safe.
+
+    Falls back to a conservative 2 if psutil/cpu_count are unavailable, so this
+    never raises on an odd environment.
+    """
+    try:
+        cores = os.cpu_count() or 4
+    except Exception:
+        cores = 4
+    by_cpu = max(1, cores // 2)
+    try:
+        import psutil
+
+        free_gb = psutil.virtual_memory().available / (1024**3)
+        by_ram = max(1, int(free_gb // 2))
+    except Exception:
+        by_ram = 2
+    return max(1, min(MAX_FANOUT, by_cpu, by_ram))
 
 
 def set_current(mode: str) -> None:

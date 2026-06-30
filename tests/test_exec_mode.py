@@ -47,3 +47,35 @@ def test_non_dict_json_falls_back_to_solo(_isolated):
 def test_max_fanout_is_bounded():
     assert isinstance(exec_mode.MAX_FANOUT, int)
     assert 2 <= exec_mode.MAX_FANOUT <= 16
+
+
+def test_machine_fanout_cap_bounds():
+    cap = exec_mode.machine_fanout_cap()
+    assert isinstance(cap, int)
+    assert 1 <= cap <= exec_mode.MAX_FANOUT
+
+
+def test_machine_fanout_cap_limited_by_low_ram(monkeypatch):
+    # 1 GB free RAM → by_ram = 0 → clamped to 1, so the cap is 1 regardless of CPU.
+    monkeypatch.setattr(exec_mode.os, "cpu_count", lambda: 32)
+
+    class _VM:
+        available = 1 * 1024**3
+
+    import psutil
+
+    monkeypatch.setattr(psutil, "virtual_memory", lambda: _VM())
+    assert exec_mode.machine_fanout_cap() == 1
+
+
+def test_machine_fanout_cap_capped_at_max(monkeypatch):
+    # Huge machine → still never exceeds MAX_FANOUT.
+    monkeypatch.setattr(exec_mode.os, "cpu_count", lambda: 64)
+
+    class _VM:
+        available = 256 * 1024**3
+
+    import psutil
+
+    monkeypatch.setattr(psutil, "virtual_memory", lambda: _VM())
+    assert exec_mode.machine_fanout_cap() == exec_mode.MAX_FANOUT

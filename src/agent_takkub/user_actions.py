@@ -731,6 +731,35 @@ class UserActionsMixin:
         self._chip_plan.setStyleSheet(self._plan_chip_style(is_pro))
         self._chip_plan.setToolTip(self._plan_chip_tooltip(is_pro))
 
+    def _on_exec_mode_chip_clicked(self) -> None:
+        """Flip SOLO ↔ PARALLEL on the orchestrator. It persists state,
+        broadcasts to live Lead panes, and emits execModeChanged → we repaint
+        the chip via _on_exec_mode_changed."""
+        from . import exec_mode
+
+        target = exec_mode.SOLO if exec_mode.is_parallel() else exec_mode.PARALLEL
+        ok, msg = self.orch.set_exec_mode(target)
+        if not ok:
+            self._status.showMessage(f"Mode switch failed: {msg}", 4000)
+        elif target == exec_mode.PARALLEL:
+            cap = exec_mode.machine_fanout_cap()
+            self._status.showMessage(
+                f"👥 Multi mode — Lead fans out independent features (≤{cap}/role on this machine)",
+                6000,
+            )
+        else:
+            self._status.showMessage("👤 1:1 mode — one agent per role", 4000)
+
+    def _on_exec_mode_changed(self, mode: str) -> None:
+        """Repaint the execution-mode chip when it flips. Triggered by
+        Orchestrator.execModeChanged."""
+        if not hasattr(self, "_chip_exec_mode"):
+            return
+        is_parallel = mode == "parallel"
+        self._chip_exec_mode.setText("👥 Multi" if is_parallel else "👤 1:1")
+        self._chip_exec_mode.setStyleSheet(self._exec_mode_chip_style(is_parallel))
+        self._chip_exec_mode.setToolTip(self._exec_mode_chip_tooltip(is_parallel))
+
     # ──────────────────────────────────────────────────────────────
     # per-project user profile selector (accessed via ⚙ Pipelines menu)
     # ──────────────────────────────────────────────────────────────

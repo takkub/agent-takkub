@@ -350,6 +350,7 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
     # Emitted when user flips the account plan (Pro/Max) via the status bar.
     # main_window listens to repaint the plan chip without polling.
     planTierChanged = pyqtSignal(str)  # "pro" | "max"
+    execModeChanged = pyqtSignal(str)  # "solo" | "parallel"
     # Emitted at the tail of a successful spawn that picked up `--resume <uuid>`
     # (i.e. the role's previous session exited within RESUME_WINDOW_SEC).
     # main_window uses this to fire `/remote-control` only on resumes, so a
@@ -987,6 +988,53 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
         self.planTierChanged.emit(tier)
         _log_event("plan_tier_set", tier=tier)
         return True, f"plan set to {tier}"
+
+    def set_exec_mode(self, mode: str) -> tuple[bool, str]:
+        """Set the execution mode (solo/parallel) globally and persist it.
+
+        SOLO is the cockpit's original 1-agent-per-role behaviour. PARALLEL tells
+        the Lead, on the NEXT task, to decompose an independent-multi-feature
+        request and fan out several instances per role (frontend#1..#K, …) so the
+        features finish concurrently. The instruction reaches the Lead via the
+        system-prompt block in lead_context (read at spawn); we also broadcast a
+        `[system]` notice so a live Lead switches planning style immediately.
+
+        Returns (ok, message). Fails only on an unknown mode.
+        """
+        from . import exec_mode
+
+        mode = mode.lower().strip()
+        if mode not in exec_mode.MODES:
+            return False, f"unknown execution mode: {mode!r}"
+
+        exec_mode.set_current(mode)
+
+        if mode == exec_mode.PARALLEL:
+            cap = exec_mode.machine_fanout_cap()
+            notice = (
+                "[system] execution mode → PARALLEL (multi). When a request has "
+                "K independent features, plan a decomposition and fan out one "
+                f"instance per role per feature (frontend#1..#K, backend#1..#K). "
+                f"Cap K at {cap} for this machine (CPU/RAM) — split bigger batches "
+                "into waves. Independent features only; keep dependent work serial."
+            )
+        else:
+            notice = (
+                "[system] execution mode → SOLO (1:1). One agent per role; work "
+                "features sequentially. (No multi-instance fan-out.)"
+            )
+
+        for _project_ns, panes in self._panes_by_project.items():
+            lead = panes.get(LEAD.name)
+            if lead and lead.session and lead.session.is_alive:
+                _em_sess = lead.session
+                _em_sess.write(notice)
+                _delayed_enter(lead, _em_sess, 150)
+                self.leadInjected.emit(notice)
+
+        self.execModeChanged.emit(mode)
+        _log_event("exec_mode_set", mode=mode)
+        return True, f"execution mode set to {mode}"
 
     @staticmethod
     def _uncommitted_warning(from_role: str, porcelain_out: str) -> str | None:

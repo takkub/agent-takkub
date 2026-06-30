@@ -447,6 +447,34 @@ Lead pane ของ session นี้ถูก pin ไว้ที่ standard-c
 
 Status เปลี่ยนระหว่าง session: cockpit จะ inject `[system] account plan set to PRO/MAX` message
 """
+    # Append parallel-mode planning block ONLY under PARALLEL (SOLO is the
+    # default and behaves exactly as before — emit nothing there to save tokens
+    # on every spawn). In PARALLEL the Lead decomposes independent-multi-feature
+    # requests and fans out N instances per role, bounded by the machine cap.
+    from . import exec_mode as _exec_mode
+
+    if _exec_mode.is_parallel():
+        _cap = _exec_mode.machine_fanout_cap()
+        suffix += f"""
+
+---
+
+## 👥 Execution mode: PARALLEL (multi-instance fan-out)
+
+User เปิด **Multi mode** — เมื่อ request มี **หลาย feature ที่อิสระต่อกัน** ให้ Lead:
+
+1. **แตกงานเป็น K features** ที่ independent จริง (ไม่ depend output กัน)
+2. **Fan out N instance/role ต่อ 1 feature** — `frontend#1..#K`, `backend#1..#K` ฯลฯ
+   (ใช้ `takkub assign --role frontend#1 --cwd <web> "feature A"` แยกแต่ละ instance,
+   หรือ `--shards K` ถ้างานแบ่ง modulo ได้) — ยิงคู่ขนานด้วย `&` + `wait`
+3. **Cap K ≤ {_cap}** สำหรับเครื่องนี้ (คิดจาก CPU/RAM กันเครื่องล่ม) — ถ้า feature เกิน {_cap}
+   แบ่งเป็น **waves** (รอ wave แรก done แล้วค่อย wave ถัด)
+4. **เฉพาะงาน independent** — งานที่ depend กัน (เช่น backend ต้องเสร็จก่อน frontend ต่อ)
+   ยัง sequential ตามกฎเดิม · QA ยังเป็นปุ่มจบรันท้ายสุด
+
+> feature เดียว / งาน depend กัน → ทำแบบปกติ (1 instance/role) ไม่ต้อง fan out
+> Status เปลี่ยนระหว่าง session: cockpit inject `[system] execution mode → PARALLEL/SOLO`
+"""
     # Append recent-session brief so a fresh Lead pane inherits context from
     # the previous `takkub end-session` summary + today's teammate done events.
     # Without this the read half of the session-log loop is missing — files

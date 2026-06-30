@@ -154,6 +154,34 @@ class StatusHeaderMixin:
         )
 
     @staticmethod
+    def _exec_mode_chip_style(is_parallel: bool) -> str:
+        """Outline chip for the SOLO/PARALLEL execution-mode toggle. Parallel =
+        emerald (active fan-out), Solo = neutral zinc (calm default)."""
+        brand = "#10b981" if is_parallel else "#71717a"
+        return (
+            "QPushButton { "
+            f"background:transparent; color:{brand}; "
+            f"border:1px solid {brand}; border-radius:10px; "
+            "padding:2px 10px; font-weight:600; }"
+            "QPushButton:hover { background:rgba(255,255,255,0.06); }"
+        )
+
+    @staticmethod
+    def _exec_mode_chip_tooltip(is_parallel: bool) -> str:
+        """Tooltip for the execution-mode chip — states the consequence."""
+        if is_parallel:
+            return (
+                "Execution: PARALLEL (multi) — click to switch to 1:1.\n"
+                "Lead splits independent features across several instances per\n"
+                "role (frontend#1..#K, …), capped to what the machine can run."
+            )
+        return (
+            "Execution: 1:1 (solo) — click to switch to Multi.\n"
+            "Multi makes the Lead fan out multiple agents per role for\n"
+            "independent features so big work finishes faster."
+        )
+
+    @staticmethod
     def _ghost_button_style() -> str:
         """Neutral status-bar action button.
 
@@ -289,6 +317,18 @@ class StatusHeaderMixin:
         self._chip_plan.setToolTip(self._plan_chip_tooltip(_pro_now))
         self._chip_plan.setStyleSheet(self._plan_chip_style(_pro_now))
         self._chip_plan.clicked.connect(self._on_plan_chip_clicked)
+
+        # Execution-mode chip: SOLO (1:1, default) ↔ PARALLEL (multi). In
+        # PARALLEL the Lead decomposes multi-feature requests and fans out
+        # several instances per role. State in exec-mode.json; orchestrator owns
+        # persist + broadcast on flip.
+        from . import exec_mode as _exec_mode
+
+        _parallel_now = _exec_mode.is_parallel()
+        self._chip_exec_mode = QPushButton("👥 Multi" if _parallel_now else "👤 1:1", self)
+        self._chip_exec_mode.setToolTip(self._exec_mode_chip_tooltip(_parallel_now))
+        self._chip_exec_mode.setStyleSheet(self._exec_mode_chip_style(_parallel_now))
+        self._chip_exec_mode.clicked.connect(self._on_exec_mode_chip_clicked)
 
         # Self-update chip. Polls `git fetch` + `git status` every 5 min
         # so a user that pulled their friend's commit from another machine
@@ -521,6 +561,7 @@ class StatusHeaderMixin:
         self._status.addPermanentWidget(self._make_status_separator())
         for w in (
             self._chip_plan,
+            self._chip_exec_mode,
             self._chip_codex,
             self._chip_gemini,
             self._btn_install_rtk,
@@ -545,6 +586,7 @@ class StatusHeaderMixin:
         self.orch.statusChanged.connect(self._update_status)
         self.orch.providerStateChanged.connect(self._on_provider_state_changed)
         self.orch.planTierChanged.connect(self._on_plan_tier_changed)
+        self.orch.execModeChanged.connect(self._on_exec_mode_changed)
 
         # Refresh status bar every 2s so the working/active count tracks the
         # state transitions that don't emit statusChanged (e.g. working→done
