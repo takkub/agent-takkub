@@ -88,6 +88,21 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
         if mod is not None and hasattr(mod, attr):
             monkeypatch.setattr(mod, attr, value, raising=False)
 
+    # Neutralise TAKKUB_PORT_FILE + isolate PORT_FILE. Importing agent_takkub.app
+    # runs a module-level `os.environ.setdefault("TAKKUB_PORT_FILE", <tmp>/agent-
+    # takkub-port.<pid>)` whenever TAKKUB_ALLOW_MULTI is set (which it always is
+    # here — see above). That write is process-wide, not via monkeypatch, so once
+    # ANY test imports app the override leaks into every later test: read_port()
+    # then resolves to that stale per-PID file instead of the per-test PORT_FILE,
+    # and test_config's corrupt-file test reads a value another test wrote there.
+    # delenv per test (autouse runs first; tests that need the override re-set it
+    # themselves) + redirect PORT_FILE to the isolated runtime so no test can
+    # read or write the real runtime/port.
+    monkeypatch.delenv("TAKKUB_PORT_FILE", raising=False)
+    cfg = _maybe_module("agent_takkub.config", force=True)
+    if cfg is not None and hasattr(cfg, "PORT_FILE"):
+        monkeypatch.setattr(cfg, "PORT_FILE", runtime / "port", raising=False)
+
     # Redirect per-role provider config off the real ~/.takkub. effective_provider_for
     # is now on the spawn/assign stagger path (codex-gap detection, #38), so any
     # assign/spawn/run_pipeline test would otherwise read — and auto-create — the

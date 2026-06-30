@@ -627,7 +627,7 @@ class TestPtySessionTerminateJoinsThreads:
 
         writer.request_stop.assert_called_once()
         writer.quit.assert_called_once()
-        writer.wait.assert_called_once_with(500)
+        writer.wait.assert_called_once_with(2000)
 
     def test_terminate_calls_quit_and_wait_on_reader(self) -> None:
         from agent_takkub.pty_session import PtySession
@@ -645,7 +645,7 @@ class TestPtySessionTerminateJoinsThreads:
 
         reader.request_stop.assert_called_once()
         reader.quit.assert_called_once()
-        reader.wait.assert_called_once_with(500)
+        reader.wait.assert_called_once_with(2000)
 
     def test_terminate_terminates_proc_before_join(self) -> None:
         """proc must be killed before wait() so the reader's blocking read() unblocks."""
