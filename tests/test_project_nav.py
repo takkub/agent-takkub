@@ -6,9 +6,8 @@ stack index) so MainWindow's ~dozen call sites keep working unchanged.
 from __future__ import annotations
 
 import pytest
-from PyQt6.QtWidgets import QApplication, QLabel, QWidget
-
 from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QApplication, QLabel, QWidget
 
 from agent_takkub.project_nav import ProjectNav
 from agent_takkub.project_tab import ProjectTab
