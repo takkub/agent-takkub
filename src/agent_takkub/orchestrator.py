@@ -300,6 +300,43 @@ RUNAWAY_WARN_COOLDOWN_S = 300.0  # suppress repeat warnings for 5 min
 # once per this window so a burst of fan-out assigns doesn't spam. Non-blocking.
 OVERCAP_WARN_COOLDOWN_S = 60.0
 
+
+def _count_active_teammates(panes_by_project: dict) -> int:
+    """Total live non-Lead panes across every project (machine-wide).
+
+    Shared by the over-capacity advisory and the fan-out queue so the two can
+    never drift on what "machine is full" means. Lead panes (one per tab) are
+    excluded — they anchor the cockpit and aren't the resource hogs.
+    """
+    n = 0
+    for _panes in panes_by_project.values():
+        for _r, _p in _panes.items():
+            if _r == LEAD.name:
+                continue
+            sess = getattr(_p, "session", None)
+            if sess is not None and getattr(sess, "is_alive", False):
+                n += 1
+    return n
+
+
+def _fanout_queue_enabled() -> bool:
+    """True iff the flag-gated fan-out queue is enabled. Default OFF, so the
+    cockpit's spawn behaviour is unchanged unless the operator opts in via
+    TAKKUB_QUEUE_FANOUT (the over-capacity advisory still fires regardless).
+
+    When ON, a fresh teammate spawn that would exceed machine_total_pane_cap()
+    is deferred to a per-project queue and spawned automatically once a pane
+    frees a slot (done/close). See docs/reviews/2026-06-30-queue-gap.md.
+    """
+    return os.environ.get("TAKKUB_QUEUE_FANOUT", "").strip().lower() not in (
+        "",
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
 # Spinner-line filtering for content-delta stuck detection (Fix 3).
 # Lines matching any interrupt phrase or volatile counter pattern are excluded
 # from the hash so a pane that only emits spinner bytes is still detected as stuck.
@@ -610,6 +647,15 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
         plan: bool = False,
         project: str | None = None,
     ) -> tuple[bool, str]:
+        # Fan-out queue (flag-gated, default off): defer a fresh teammate spawn
+        # that would exceed the machine's total-pane budget. It spawns
+        # automatically when a pane frees a slot (see _drain_fanout_queue). No-op
+        # unless TAKKUB_QUEUE_FANOUT is set, so default behaviour is unchanged.
+        if self._should_queue_assign(role_name, project):
+            return self._enqueue_assign(
+                role_name, cwd, task, requires_commit, auto_chain, shard_total, plan, project
+            )
+
         # Plan mode spawns a single PLANNER pane (not a shard) — it carries
         # shard_total=0 so done() treats it as a normal pane; the fan-out it
         # triggers later assigns the real shards with shard_total=N.
@@ -898,6 +944,13 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
             self.paneClosed.emit(role_name, project_ns)
         self.statusChanged.emit()
         _log_event("close", role=role_name, force=force, reason=reason)
+        # Fan-out queue (flag-gated): a genuine teammate close frees a slot —
+        # drain one queued assign on the next event-loop tick (deferred so we
+        # never re-enter the close/paneClosed emit stack, per the 0xc0000409
+        # teardown-reentrancy lesson). Recovery-closes (suppress_pipeline) keep
+        # the pane, so they don't free a slot and don't drain.
+        if role_name != LEAD.name and not suppress_pipeline and _fanout_queue_enabled():
+            QTimer.singleShot(0, lambda p=project_ns: self._drain_fanout_queue(p))
         return True, f"{role_name} closed"
 
     def toggle_provider(self, provider: str, disabled: bool) -> tuple[bool, str]:
@@ -2667,18 +2720,9 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
             from . import exec_mode  # local import: matches the toggle handler's pattern
 
             cap = exec_mode.machine_total_pane_cap()
-            # Count live teammates across every project (machine-wide), excluding
-            # Lead panes (one per tab; not the resource hogs). The pane being
-            # spawned isn't alive yet, so `active` is the count BEFORE it —
-            # active >= cap means this fresh spawn is the (cap+1)-th → over.
-            active = 0
-            for _panes in self._panes_by_project.values():
-                for _r, _p in _panes.items():
-                    if _r == LEAD.name:
-                        continue
-                    sess = getattr(_p, "session", None)
-                    if sess is not None and getattr(sess, "is_alive", False):
-                        active += 1
+            # The pane being spawned isn't alive yet, so `active` is the count
+            # BEFORE it — active >= cap means this fresh spawn is the (cap+1)-th.
+            active = _count_active_teammates(self._panes_by_project)
             if active < cap:
                 return
             now = time.time()
@@ -2701,6 +2745,127 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
             _log_event("over_capacity_warn", role=role, project=project, active=active, cap=cap)
         except Exception:
             # A capacity advisory must never prevent a pane from spawning.
+            pass
+
+    # ── Fan-out queue (flag-gated, default OFF — TAKKUB_QUEUE_FANOUT) ─────────
+    # The over-capacity advisory above only *warns*. With the flag on, this queue
+    # actually *defers* a fresh teammate spawn that would exceed the machine's
+    # total-pane budget and spawns it later when a pane frees a slot — turning the
+    # Lead's self-limited fan-out into a machine-enforced wave executor. Default
+    # off so the cockpit's spawn behaviour is 100% unchanged until the operator
+    # opts in. See docs/reviews/2026-06-30-queue-gap.md.
+
+    def _should_queue_assign(self, role_name: str, project: str | None) -> bool:
+        """True iff this assign should be deferred to the fan-out queue rather
+        than spawned now: the flag is on, it's a *new* teammate pane (not a
+        re-assign to a live one, never Lead), and the machine is already at/over
+        its total-pane budget."""
+        if not _fanout_queue_enabled():
+            return False
+        base_role, _ = _split_shard(role_name)
+        if base_role == LEAD.name or role_name == LEAD.name:
+            return False
+        project_ns = self._resolve_project(project)
+        existing = self._project_panes(project_ns).get(role_name)
+        if (
+            existing is not None
+            and getattr(existing, "session", None) is not None
+            and getattr(existing.session, "is_alive", False)
+        ):
+            # Re-assigning a new task to an already-running pane spawns nothing,
+            # so it must never be queued (queuing it would strand the task).
+            return False
+        from . import exec_mode
+
+        cap = exec_mode.machine_total_pane_cap()
+        return _count_active_teammates(self._panes_by_project) >= cap
+
+    def _enqueue_assign(
+        self,
+        role_name: str,
+        cwd: str | None,
+        task: str,
+        requires_commit: bool,
+        auto_chain: bool,
+        shard_total: int,
+        plan: bool,
+        project: str | None,
+    ) -> tuple[bool, str]:
+        """Park an over-cap assign on the per-project queue and tell the Lead.
+        Replayed verbatim by `_drain_fanout_queue` once a slot frees, so every
+        flag (commit gate, auto-chain, shards, plan) survives unchanged."""
+        project_ns = self._resolve_project(project)
+        q = getattr(self, "_fanout_queue", None)
+        if q is None:
+            self._fanout_queue = q = {}
+        q.setdefault(project_ns, collections.deque()).append(
+            {
+                "role": role_name,
+                "cwd": cwd,
+                "task": task,
+                "requires_commit": requires_commit,
+                "auto_chain": auto_chain,
+                "shard_total": shard_total,
+                "plan": plan,
+                "project": project,
+            }
+        )
+        depth = len(q[project_ns])
+        _log_event("assign_queued", role=role_name, project=project_ns, queue_depth=depth)
+        lead = self._project_panes(project_ns).get(LEAD.name)
+        if lead and lead.session and lead.session.is_alive:
+            try:
+                from . import exec_mode
+
+                cap = exec_mode.machine_total_pane_cap()
+            except Exception:
+                cap = 0
+            msg = (
+                f"⏳ [queued] {role_name} เข้าคิวรอ slot ว่าง (เครื่องเต็ม ~{cap} panes) — "
+                f"คิวตอนนี้ {depth} งาน · จะ spawn อัตโนมัติเมื่อมี pane done/close"
+            )
+            _q_sess = lead.session
+            _q_sess.write(msg)
+            _delayed_enter(lead, _q_sess, 150)
+            self.leadInjected.emit(msg)
+        return True, f"{role_name} queued (machine at capacity; {depth} in queue)"
+
+    def _drain_fanout_queue(self, project: str | None) -> None:
+        """Pop ONE pending assign for `project` and run it, if the flag is on,
+        the queue is non-empty, and a slot is now free. Scheduled (deferred via
+        singleShot) after a genuine teammate close so it never re-enters the
+        close/emit stack. One slot freed → one dequeue; the next close drains the
+        next. Best-effort: a failure here must not break close()."""
+        try:
+            if not _fanout_queue_enabled():
+                return
+            project_ns = self._resolve_project(project)
+            q = getattr(self, "_fanout_queue", None)
+            queue = q.get(project_ns) if q else None
+            if not queue:
+                return
+            from . import exec_mode
+
+            cap = exec_mode.machine_total_pane_cap()
+            if _count_active_teammates(self._panes_by_project) >= cap:
+                return  # still full — leave the item queued for the next close
+            item = queue.popleft()
+            _log_event(
+                "assign_dequeued", role=item["role"], project=project_ns, remaining=len(queue)
+            )
+            # Replay through the normal assign() path. Its own gate re-checks
+            # capacity (now below cap) and proceeds to spawn rather than re-queue.
+            self.assign(
+                item["role"],
+                item["cwd"],
+                item["task"],
+                requires_commit=item["requires_commit"],
+                auto_chain=item["auto_chain"],
+                shard_total=item["shard_total"],
+                plan=item["plan"],
+                project=item["project"],
+            )
+        except Exception:
             pass
 
     def _rate_limit_suppressed(self, project: str, role: str, pane: AgentPane, now: float) -> bool:
