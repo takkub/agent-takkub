@@ -63,6 +63,41 @@ class _DoctorThread(QThread):
         self.ready.emit(findings)
 
 
+class _PluginInstallThread(QThread):
+    """Install a list of recommended plugins OFF the Qt main thread.
+
+    Each install is a ``claude plugin marketplace add`` + ``claude plugin
+    install`` (git clone + network) — bounded by per-call timeouts but still
+    multi-second, so it must not run on the Qt event loop. Emits ``progress``
+    before each plugin and ``done`` with the per-plugin results.
+
+    Signals
+    -------
+    progress(str)  — human label of the plugin about to install
+    done(object)   — list of (RecommendedPlugin, ok: bool, message: str)
+    """
+
+    progress: pyqtSignal = pyqtSignal(str)
+    done: pyqtSignal = pyqtSignal(object)
+
+    def __init__(self, plugins: list, parent=None) -> None:
+        super().__init__(parent)
+        self._plugins = plugins
+
+    def run(self) -> None:
+        from . import plugin_installer
+
+        results: list = []
+        for p in self._plugins:
+            self.progress.emit(p.label)
+            try:
+                ok, msg = plugin_installer.install_plugin(p)
+            except Exception as e:  # pragma: no cover - defensive
+                ok, msg = False, str(e)
+            results.append((p, ok, msg))
+        self.done.emit(results)
+
+
 class UserActionsMixin:
     """Mixin for cockpit toolbar / status-bar button handlers."""
 
@@ -498,6 +533,121 @@ class UserActionsMixin:
         layout.addLayout(btn_row)
 
         _log_event("ui_doctor_opened")
+        dlg.exec()
+
+    def _on_plugins_clicked(self) -> None:
+        """🧩 Plugins button: show the recommended dev-team plugin set with
+        install status and one-click install the missing ones.
+
+        Status is read from disk (fast, main-thread-safe). Installs run in a
+        background `_PluginInstallThread` — `claude plugin install` is a network
+        git-clone that must never block the Qt event loop (same rule as Doctor).
+        """
+        from . import plugin_installer
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("🧩 Dev-team Plugins")
+        dlg.setMinimumSize(560, 420)
+        dlg.resize(620, 460)
+
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        view = QPlainTextEdit(dlg)
+        view.setReadOnly(True)
+        view.setStyleSheet(
+            "QPlainTextEdit { background:#18181b; color:#d4d4d8; "
+            "border:1px solid #3f3f46; border-radius:4px; padding:6px; "
+            "font-family: 'Consolas', 'Courier New', monospace; font-size:12px; }"
+        )
+        layout.addWidget(view, 1)
+
+        btn_install = QPushButton("Install missing", dlg)
+        btn_install.setStyleSheet(
+            "QPushButton { background:#16a34a; color:#fff; border:none; "
+            "border-radius:5px; padding:4px 14px; font-weight:600; }"
+            "QPushButton:hover { background:#15803d; }"
+            "QPushButton:disabled { background:#3f3f46; color:#71717a; }"
+        )
+
+        def _render() -> None:
+            have = plugin_installer.installed_on_disk()
+            lines = ["Recommended dev-team plugins:\n"]
+            for p in plugin_installer.RECOMMENDED:
+                mark = "✓ installed" if p.key in have else "· missing  "
+                pane = "→ panes" if p.pane_loaded else "→ user-only (hook-heavy)"
+                lines.append(f"  {mark}  {p.label:16} {pane}")
+                lines.append(f"               {p.note}")
+            missing = plugin_installer.missing_plugins(have)
+            lines.append("")
+            if missing:
+                lines.append(f"{len(missing)} missing — click 'Install missing'.")
+            else:
+                lines.append("All recommended plugins installed. 🎉")
+            lines.append("\n(restart cockpit for panes to pick up new plugins)")
+            view.setPlainText("\n".join(lines))
+            btn_install.setEnabled(bool(missing))
+            btn_install.setToolTip(
+                f"Install {len(missing)} missing plugin(s)." if missing else "Nothing to install."
+            )
+
+        _render()
+
+        if not hasattr(self, "_plugin_threads"):
+            self._plugin_threads: set = set()
+
+        def _on_install() -> None:
+            missing = plugin_installer.missing_plugins()
+            if not missing:
+                return
+            btn_install.setEnabled(False)
+            worker = _PluginInstallThread(missing, parent=self)
+            self._plugin_threads.add(worker)
+
+            def _progress(label: str) -> None:
+                try:
+                    view.setPlainText(view.toPlainText() + f"\n  installing {label}…")
+                except RuntimeError:
+                    pass
+
+            def _done(results: object) -> None:
+                try:
+                    ok_n = sum(1 for _p, ok, _m in results if ok)
+                    self._status.showMessage(f"🧩 Plugins: {ok_n}/{len(results)} installed", 6_000)
+                    _render()
+                    fails = [f"{p.label}: {m}" for p, ok, m in results if not ok]
+                    if fails:
+                        view.setPlainText(
+                            view.toPlainText() + "\n\nFailed:\n  " + "\n  ".join(fails)
+                        )
+                except RuntimeError:
+                    pass
+
+            worker.progress.connect(_progress)
+            worker.done.connect(_done)
+            worker.finished.connect(lambda w=worker: self._plugin_threads.discard(w))
+            worker.finished.connect(worker.deleteLater)
+            worker.start()
+
+        btn_install.clicked.connect(_on_install)
+
+        btn_close = QPushButton("Close", dlg)
+        btn_close.setStyleSheet(
+            "QPushButton { background:transparent; color:#a1a1aa; "
+            "border:1px solid #3f3f46; border-radius:5px; padding:4px 14px; }"
+            "QPushButton:hover { background:#27272a; color:#d4d4d8; }"
+        )
+        btn_close.clicked.connect(dlg.accept)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        btn_row.addStretch()
+        btn_row.addWidget(btn_install)
+        btn_row.addWidget(btn_close)
+        layout.addLayout(btn_row)
+
+        _log_event("ui_plugins_opened")
         dlg.exec()
 
     # ──────────────────────────────────────────────────────────────
