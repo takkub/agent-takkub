@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="th"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Design review · 2026-06-30-jt-inbound-checker-install</title><style>
+:root{
+  --bg:#0e0e10;--panel:#18181b;--panel2:#1f1f23;--border:#27272a;
+  --fg:#e4e4e7;--muted:#a1a1aa;--dim:#71717a;
+  --high:#ef4444;--med:#f59e0b;--low:#52525b;--keep:#22c55e;--gold:#f5c542;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--fg);
+  font:14px/1.6 "Segoe UI","Leelawadee UI",system-ui,sans-serif}
+a{color:#60a5fa;text-decoration:none}a:hover{text-decoration:underline}
+.wrap{max-width:980px;margin:0 auto;padding:28px 22px 80px}
+h1{font-size:22px;margin:0 0 6px;border-bottom:1px solid var(--border);padding-bottom:16px}
+h2{font-size:17px;margin:30px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+h3{font-size:15px;margin:18px 0 8px}
+p{color:var(--muted)}
+code{background:var(--panel2);border:1px solid var(--border);border-radius:4px;
+  padding:1px 5px;font:12.5px "Cascadia Mono","Consolas",monospace}
+pre{background:var(--panel2);border:1px solid var(--border);border-radius:8px;
+  padding:12px 14px;overflow:auto}
+pre code{border:0;background:none;padding:0}
+strong{color:var(--fg)}
+blockquote{margin:18px 0;padding:12px 16px;border-radius:10px;
+  background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.3);color:#fcd34d}
+blockquote p{color:#fcd34d;margin:4px 0}
+ul,ol{padding-left:0}
+li{list-style:none;background:var(--panel);border:1px solid var(--border);
+  border-left:4px solid var(--low);border-radius:10px;padding:11px 15px;margin:0 0 10px;color:var(--muted)}
+li strong:first-child{color:var(--fg)}
+li ul,li ol{margin-top:8px;padding-left:0}
+li li{background:var(--panel2);margin:6px 0;padding:7px 12px}
+li:has(.badge.high){border-left-color:var(--high)}
+li:has(.badge.med){border-left-color:var(--med)}
+li:has(.badge.low){border-left-color:var(--low)}
+ol.steps-numbered li{counter-increment:none}
+.badge{font-size:10.5px;font-weight:700;letter-spacing:.04em;padding:2px 8px;
+  border-radius:5px;text-transform:uppercase;white-space:nowrap}
+.badge.high{background:var(--high);color:#fff}
+.badge.med{background:var(--med);color:#3a2a00}
+.badge.low{background:var(--low);color:#fff}
+.meta{color:var(--muted);font-size:13px;margin:-4px 0 4px}
+figure{margin:22px 0 26px;border:1px solid var(--border);border-radius:12px;overflow:hidden;background:#000}
+figure img{display:block;width:100%;height:auto}
+figcaption{padding:9px 14px;color:var(--muted);font-size:12px;background:var(--panel)}
+.missing-shot{padding:10px 14px;color:#fca5a5;background:rgba(239,68,68,.08);
+  border:1px solid rgba(239,68,68,.3);border-radius:8px;margin:10px 0;font-size:13px}
+footer{margin-top:40px;padding-top:16px;border-top:1px solid var(--border);
+  color:var(--dim);font-size:12px}
+</style></head><body><div class="wrap"><h1>J&amp;T Inbound Checker — คู่มือติดตั้ง + ใช้งาน + อัปเดต</h1>
+<p>repo: <strong>https://github.com/takkub/jt-inbound-checker</strong> · เวอร์ชันล่าสุด: <strong>v4.4.4</strong>
+รองรับ: <strong>Windows + Google Chrome</strong> (auto-update ต้องใช้ Windows)</p>
+<hr />
+<h1>ส่วนที่ 1 — ติดตั้งเครื่องใหม่ (ยังไม่เคยลง)</h1>
+<p>ใช้เวลา ~5 นาที ทำครั้งเดียว</p>
+<h2>ขั้นที่ 1 — โหลดโค้ด</h2>
+<p>เปิด https://github.com/takkub/jt-inbound-checker → ปุ่มเขียว <strong>Code → Download ZIP</strong> → แตกไฟล์ไว้ที่ถาวร เช่น <code>C:\jt-inbound-checker</code></p>
+<blockquote>
+<p>⚠️ ต้องโหลดจาก <strong>repo</strong> (Download ZIP) — <strong>ไม่ใช่</strong> ไฟล์ในหน้า Releases เพราะ Releases zip ไม่มีโฟลเดอร์ <code>tools/</code> (จำเป็นสำหรับ auto-update)</p>
+</blockquote>
+<h2>ขั้นที่ 2 — ติดตั้งลง Chrome</h2>
+<ol>
+<li>เปิด <code>chrome://extensions</code></li>
+<li>เปิด <strong>Developer mode</strong> (มุมขวาบน)</li>
+<li>กด <strong>Load unpacked</strong> → เลือกโฟลเดอร์ที่มี <code>manifest.json</code> (เช่น <code>C:\jt-inbound-checker</code>)</li>
+<li>ตรวจ: ชื่อ <strong>J&amp;T Inbound Checker</strong>, ID = <strong><code>oiglldeidblbehpagcjkjjojjpocgonb</code></strong></li>
+</ol>
+<h2>ขั้นที่ 3 — ติดตั้ง auto-updater (ทำครั้งเดียว, แนะนำ)</h2>
+<ol>
+<li>ดับเบิลคลิก <strong><code>tools\install-updater.bat</code></strong> (จะขึ้น "Installed successfully!")</li>
+<li>กลับไป <code>chrome://extensions</code> → กด <strong>Reload (⟳)</strong> 1 ครั้ง</li>
+</ol>
+<blockquote>
+<p>ถ้าไม่ทำขั้นนี้ ก็ใช้งานได้ปกติ แค่เวลาอัปเดตต้องโหลด zip เองผ่านปุ่ม "กดโหลด"</p>
+</blockquote>
+<h2>ขั้นที่ 4 — ตรวจว่าใช้ได้</h2>
+<p>เปิดหน้า J&amp;T (<code>https://home.jtexpress.co.th</code>) → เห็น <strong>badge เวอร์ชัน</strong> มุมขวาล่าง = พร้อมใช้ ✅</p>
+<hr />
+<h1>ส่วนที่ 2 — วิธีใช้งาน</h1>
+<ol>
+<li>เปิดหน้า <strong>J&amp;T Shipping Inbound</strong> (<code>home.jtexpress.co.th</code>) ก่อน แล้วกดไอคอน extension</li>
+<li>ป้อนข้อมูล 2 วิธี:
+   - <strong>อัปโหลด PDF ใบปะหน้า</strong> (มี QR/barcode) — กดปุ่ม "อัปโหลด PDF ใบปะหน้า"
+   - <strong>วางเลข waybill</strong> ตรงๆ ในช่อง textarea</li>
+<li>ตั้งค่า (ถ้าต้องการ): <strong>หน่วงเวลา (ms)</strong> ระหว่างยิงแต่ละใบ (default 1000), <strong>Retry รอบ</strong> จำนวนลองซ้ำเมื่อ fail (default 2)</li>
+<li>กด <strong>Start</strong> → ระบบกรอก waybill เข้า J&amp;T อัตโนมัติทีละใบ</li>
+<li>ดูผลในตาราง: <strong>Waybill / สถานะ / ข้อความ</strong> (pass / fail / ซ้ำ)</li>
+<li>แท็บ <strong>History (ไม่ผ่าน)</strong> = รายการที่ fail · ปุ่ม <strong>Retry failed</strong> = ลองยิงเฉพาะที่ fail ซ้ำ · <strong>Stop</strong> = หยุด</li>
+</ol>
+<blockquote>
+<p>รายละเอียดเต็มอยู่ใน <code>README.md</code> ของ repo</p>
+</blockquote>
+<hr />
+<h1>ส่วนที่ 3 — วิธีอัปเดต (สำหรับผู้ใช้)</h1>
+<p>เมื่อมีเวอร์ชันใหม่:
+1. เปิด popup (กดไอคอน) → จะเห็น banner 🔔 <strong>"มี vX.X.X ใหม่"</strong>
+2. <strong>กด "อัปเดตเดี๋ยวนี้"</strong> → ระบบโหลด + ทับไฟล์ + reload ให้อัตโนมัติ → ขึ้น "อัปเดตสำเร็จ" → เสร็จ ✅
+   - (ต้องลง <code>install-updater.bat</code> ในขั้นที่ 3 แล้ว)
+3. หรือกด <strong>"กดโหลด"</strong> = โหลด zip มาแตกทับเอง + reload เอง (วิธีสำรอง ใช้ได้ทุก OS)</p>
+<blockquote>
+<p>หมายเหตุ: เช็คอัปเดต<strong>ตอนเปิด popup เท่านั้น</strong> (ไม่เช็คเบื้องหลัง) · banner อาจช้าได้ถึง ~5 นาทีหลัง release ใหม่ (GitHub CDN cache)</p>
+</blockquote>
+<hr />
+<h1>ส่วนที่ 4 — วิธี release เวอร์ชันใหม่ (สำหรับ dev)</h1>
+<p>ทำที่โฟลเดอร์ repo:</p>
+<pre><code class="language-bash"># 1. แก้โค้ด/ฟีเจอร์ แล้ว bump เวอร์ชัน (ให้ manifest = version.json พอดี)
+#    - manifest.json : &quot;version&quot;: &quot;X.Y.Z&quot;
+#    - version.json  : &quot;version&quot;: &quot;X.Y.Z&quot; + notes
+
+# 2. commit + push
+git add . &amp;&amp; git commit -m &quot;...&quot; &amp;&amp; git push
+
+# 3. สร้าง zip (ตัด .git + tools ออก) ชื่อคงที่ jt-inbound-checker.zip
+#    (tools/ ไม่รวม เพื่อไม่ให้ auto-update ทับ host ที่กำลังรัน)
+
+# 4. release พร้อมแนบ zip
+gh release create vX.Y.Z jt-inbound-checker.zip --title vX.Y.Z --notes &quot;...&quot;
+</code></pre>
+<p>เครื่องที่ลง ≥ เวอร์ชันก่อนหน้า จะเห็น banner เด้งเอง</p>
+<blockquote>
+<p>⚠️ ชื่อ asset ต้องเป็น <strong><code>jt-inbound-checker.zip</code></strong> เป๊ะ (ไม่ใส่เลขเวอร์ชัน) ไม่งั้น URL <code>releases/latest/download/jt-inbound-checker.zip</code> พัง</p>
+</blockquote>
+<hr />
+<h1>แก้ปัญหาเบื้องต้น</h1>
+<table>
+<thead>
+<tr>
+<th>อาการ</th>
+<th>วิธีแก้</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>กด "อัปเดตเดี๋ยวนี้" → "ยังไม่ได้ติดตั้ง updater"</td>
+<td>รัน <code>tools\install-updater.bat</code> (ขั้นที่ 3) · เช็ค ID = <code>oiglld...</code> (ถ้าไม่ใช่ = โหลดผิดโฟลเดอร์)</td>
+</tr>
+<tr>
+<td>banner ไม่เด้งทั้งที่มีเวอร์ชันใหม่</td>
+<td>รอ ~5 นาที (GitHub cache) แล้วเปิด popup ใหม่</td>
+</tr>
+<tr>
+<td>extension เป็นสีเทา/หาย หลังรีสตาร์ท Chrome</td>
+<td><code>chrome://extensions</code> → Reload</td>
+</tr>
+<tr>
+<td>ย้ายโฟลเดอร์ extension แล้ว auto-update พัง</td>
+<td>รัน <code>tools\install-updater.bat</code> ใหม่</td>
+</tr>
+<tr>
+<td>auto-updater (Windows เท่านั้น)</td>
+<td>เครื่อง mac/linux ใช้ปุ่ม "กดโหลด" แทน</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>สรุปสั้น</h2>
+<ul>
+<li><strong>เครื่องใหม่:</strong> Download ZIP → Load unpacked → ดับเบิลคลิก <code>tools\install-updater.bat</code> → Reload</li>
+<li><strong>อัปเดต:</strong> เปิด popup → กด "อัปเดตเดี๋ยวนี้"</li>
+<li><strong>ใช้งาน:</strong> เปิดหน้า J&amp;T → กดไอคอน → อัปโหลด PDF/วางเลข → Start</li>
+</ul><footer>Generated by agent_takkub.design_review_html · self-contained (screenshots inlined) · open in any browser</footer></div></body></html>
