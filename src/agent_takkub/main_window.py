@@ -444,34 +444,40 @@ class MainWindow(
         tab = self._tab_for_project(project)
         if tab is None:
             return
-        pane = tab.remove_teammate_tab(role_name)
-        if pane is None:
-            return
-        self.orch.unregister_pane(role_name, project=project)
 
-        # Defer the WebEngine teardown to a fresh event-loop tick. This slot runs
-        # *synchronously* inside Orchestrator.close()'s `paneClosed.emit()` — the
-        # same stack as the sibling `_game_on_pane_closed` slot, which drives
-        # runJavaScript into the office-room view. Destroying this pane's
-        # QWebEngineView (destroy_terminal/setParent) reentrantly — nested in that
-        # signal emission, overlapping another live WebEngine op — tripped
-        # Qt6Core's __fastfail (0xc0000409) and hard-crashed the cockpit on every
-        # pane close (done auto-close, close-all, tab switch). The Qt 6.8 downgrade
-        # did NOT fix it because the fault is this reentrancy, not a Qt regression.
-        # Running teardown on the next tick lets the emit fully unwind first so no
-        # two WebEngine operations ever overlap.
-        #
-        # Explicit destroy_terminal (vs. relying on deleteLater) still matters:
-        # it stops the heartbeat/flush timers so no stray runJavaScript fires into
-        # a partially-destroyed page, and lets Chromium release the renderer +
-        # scrollback heap promptly instead of at next GC.
-        def _teardown(p=pane) -> None:
+        # Defer the ENTIRE removal (tab removal + WebEngine teardown) to a fresh
+        # event-loop tick. This slot runs *synchronously* inside
+        # Orchestrator.close()'s `paneClosed.emit()`, in the same stack as the
+        # sibling game slots (`_game_on_pane_closed`, and `_game_sync_all_states`
+        # off the immediately-following `statusChanged.emit()`) that drive
+        # runJavaScript into the office-room view. Mutating this pane's
+        # QWebEngineView — `remove_teammate_tab`'s `removeTab` reparents it, and
+        # `destroy_terminal` deletes it — reentrantly, nested in that emission and
+        # overlapping another live WebEngine op, tripped Qt6Core's __fastfail
+        # (0xc0000409) and hard-crashed the cockpit on every pane close (done
+        # auto-close, close-all, tab switch). The Qt 6.8 downgrade did NOT fix it
+        # because the fault is this reentrancy, not a Qt regression. The earlier
+        # partial fix deferred only destroy_terminal but left `removeTab` (which
+        # also reparents the live view) inside the emit, so the crash recurred.
+        # Running the whole teardown on the next tick lets the emit fully unwind
+        # first, so no WebEngine operation ever overlaps another.
+        def _teardown() -> None:
+            pane = tab.teammate_panes.get(role_name)
+            if pane is None:
+                return
+            # destroy_terminal FIRST: it removeEventFilter()s the view (so the
+            # later removeTab/setParent can't re-enter eventFilter on it), stops
+            # the heartbeat/flush timers (no stray runJavaScript into a dead
+            # page), and deleteLater()s the page+view so Chromium releases the
+            # renderer + scrollback heap promptly instead of at next GC.
             try:
-                p._terminal.destroy_terminal()
+                pane._terminal.destroy_terminal()
             except Exception:
                 pass
-            p.setParent(None)
-            p.deleteLater()
+            tab.remove_teammate_tab(role_name)
+            self.orch.unregister_pane(role_name, project=project)
+            pane.setParent(None)
+            pane.deleteLater()
 
         QTimer.singleShot(0, _teardown)
 

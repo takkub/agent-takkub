@@ -262,10 +262,25 @@ class TestProjectTabGameView:
         tab = ProjectTab("p")
         assert not tab.is_game_active()
 
-    def test_toggle_once_activates_game(self, qapp):
-        from agent_takkub.project_tab import ProjectTab
+    def test_toggle_noop_when_office_room_disabled(self, qapp, monkeypatch):
+        """Kill-switch: with the office-room feature off, toggling never creates
+        the second WebEngine view — it stays on the text panes (page 0). This is
+        the guard against the Qt6Core __fastfail on pane close."""
+        from agent_takkub import project_tab as _pt
 
-        tab = ProjectTab("p")
+        monkeypatch.setattr(_pt, "_OFFICE_ROOM_ENABLED", False)
+        tab = _pt.ProjectTab("p")
+        result = tab.toggle_game_view()
+        assert result is False
+        assert not tab.is_game_active()
+        assert tab.game_view is None
+        assert tab._view_stack.currentIndex() == 0
+
+    def test_toggle_once_activates_game(self, qapp, monkeypatch):
+        from agent_takkub import project_tab as _pt
+
+        monkeypatch.setattr(_pt, "_OFFICE_ROOM_ENABLED", True)
+        tab = _pt.ProjectTab("p")
         fake = _FakeGameView(tab)
         tab._ensure_game_view = lambda: _inject_fake_game(tab, fake)
 
@@ -274,10 +289,11 @@ class TestProjectTabGameView:
         assert tab.is_game_active()
         assert tab._view_stack.currentIndex() == 1
 
-    def test_toggle_twice_returns_to_text(self, qapp):
-        from agent_takkub.project_tab import ProjectTab
+    def test_toggle_twice_returns_to_text(self, qapp, monkeypatch):
+        from agent_takkub import project_tab as _pt
 
-        tab = ProjectTab("p")
+        monkeypatch.setattr(_pt, "_OFFICE_ROOM_ENABLED", True)
+        tab = _pt.ProjectTab("p")
         fake = _FakeGameView(tab)
         tab._ensure_game_view = lambda: _inject_fake_game(tab, fake)
 
@@ -300,8 +316,7 @@ class TestProjectTabGameView:
 
         tab = ProjectTab("test-proj")
         fake = _FakeGameView(tab)
-        tab._ensure_game_view = lambda: _inject_fake_game(tab, fake)
-        tab.toggle_game_view()  # triggers ensure, sets tab.game_view = fake
+        _inject_fake_game(tab, fake)  # set tab.game_view directly (toggle is gated off)
 
         tab.dispatch_game_event("qa", "busy", note="coding", project="test-proj")
         assert len(fake.events) == 1
@@ -315,8 +330,7 @@ class TestProjectTabGameView:
 
         tab = ProjectTab("test-proj")
         fake = _FakeGameView(tab)
-        tab._ensure_game_view = lambda: _inject_fake_game(tab, fake)
-        tab.toggle_game_view()
+        _inject_fake_game(tab, fake)  # set tab.game_view directly (toggle is gated off)
 
         tab.dispatch_game_event(
             "frontend", "idle"
@@ -595,10 +609,8 @@ class TestMainWindowGameBridge:
         tab_b = ProjectTab("project-b")
         fake_a = _FakeGameView(tab_a)
         fake_b = _FakeGameView(tab_b)
-        tab_a._ensure_game_view = lambda: _inject_fake_game(tab_a, fake_a)
-        tab_b._ensure_game_view = lambda: _inject_fake_game(tab_b, fake_b)
-        tab_a.toggle_game_view()
-        tab_b.toggle_game_view()
+        _inject_fake_game(tab_a, fake_a)  # set game_view directly (toggle is gated off)
+        _inject_fake_game(tab_b, fake_b)
 
         # Simulate a done event routed to project-b only
         tab_b.dispatch_game_event("qa", "done", note="sticker result", project="project-b")

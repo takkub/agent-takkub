@@ -45,6 +45,66 @@ def _boot_log(msg: str) -> None:
             pass
 
 
+def _log_unhandled(exc_type, exc_value, exc_tb, *, source: str) -> None:
+    import traceback
+
+    tb = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+    _boot_log(f"\n--- UNHANDLED EXCEPTION ({source}) pid={os.getpid()} ---\n{tb}")
+    try:
+        if sys.__stderr__ is not None:
+            sys.__stderr__.write(tb)
+    except Exception:
+        pass
+
+
+def _install_exception_guard() -> None:
+    """Stop PyQt6 from hard-aborting the process on a slot exception.
+
+    When a Python exception escapes a slot / virtual / eventFilter that Qt
+    invoked from C++, PyQt6's *default* behaviour is to call qFatal(), which
+    fast-fails the whole process: Qt6Core __fastfail, SEH code 0xc0000409,
+    exception subcode 0x7 (FAST_FAIL_FATAL_APP_EXIT). pythonw.exe has no
+    console, so the Python traceback is lost and the cockpit just "vanishes" —
+    this is the hard-crash seen on pane close (and the reason disabling the
+    office-room / deferring the teardown didn't help: the crash is whatever
+    slot raised, not those code paths).
+
+    Installing a NON-default sys.excepthook flips PyQt6 to route the exception
+    here and *continue* the event loop instead of aborting, and records the
+    real traceback in boot.log so the offending slot can be found and fixed.
+    Belt-and-suspenders: cover worker threads and unraisable (GC/__del__) paths
+    too.
+    """
+
+    def _hook(exc_type, exc_value, exc_tb):
+        _log_unhandled(exc_type, exc_value, exc_tb, source="sys.excepthook")
+
+    sys.excepthook = _hook
+
+    def _thread_hook(args):
+        name = args.thread.name if args.thread is not None else "?"
+        _log_unhandled(args.exc_type, args.exc_value, args.exc_traceback, source=f"thread:{name}")
+
+    threading.excepthook = _thread_hook
+
+    if hasattr(sys, "unraisablehook"):
+
+        def _unraisable(unr):
+            _log_unhandled(
+                type(unr.exc_value),
+                unr.exc_value,
+                unr.exc_traceback,
+                source="unraisable",
+            )
+
+        sys.unraisablehook = _unraisable
+
+
+# Install immediately so exceptions during MainWindow construction (slots fired
+# from C++ before the event loop even starts) are caught rather than aborting.
+_install_exception_guard()
+
+
 # Chromium throttles background timers, RAF and rendering for views that
 # aren't the foreground tab. Because we host many xterm.js panes in one
 # window, only one is "focused" at a time and the rest get paint-suppressed

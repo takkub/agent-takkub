@@ -28,6 +28,18 @@ from PyQt6.QtWidgets import QStackedWidget, QTabWidget, QVBoxLayout, QWidget
 from .agent_pane import AgentPane
 from .office_room_view import OfficeRoomView
 
+# Office-room game view kill-switch (disabled 2026-06-30).
+# The OfficeRoomView is a SECOND QWebEngineView. Its runJavaScript-driven
+# updates fire synchronously off `paneClosed`/`statusChanged` emits — the same
+# emit stack that tears down a closing pane's terminal QWebEngineView. Two
+# overlapping WebEngine operations in one emit trip Qt6Core's __fastfail
+# (0xc0000409) and hard-crash the cockpit on every pane close. With the view
+# never created, all game dispatch (`dispatch_game_event`, `_game_sync_all_states`)
+# short-circuits to a no-op, so no office-room WebEngine op can overlap a
+# teardown. Flip back to True once game dispatch is moved off the synchronous
+# emit stack (e.g. queued to a fresh event-loop tick).
+_OFFICE_ROOM_ENABLED = False
+
 # Modern flat tab strip for the panes inside a project. Accent = indigo.
 _PANE_TABS_QSS = """
 QTabWidget::pane {
@@ -225,6 +237,10 @@ class ProjectTab(QWidget):
     def toggle_game_view(self) -> bool:
         """Switch between text panes (page 0) and game view (page 1).
         Returns True if game is now active."""
+        if not _OFFICE_ROOM_ENABLED:
+            # Feature off — never create the office-room WebEngine view (see
+            # _OFFICE_ROOM_ENABLED). Stay on the text panes.
+            return False
         self._ensure_game_view()
         new_game = not self.is_game_active()
         self._view_stack.setCurrentIndex(1 if new_game else 0)
