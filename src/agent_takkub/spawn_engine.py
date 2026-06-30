@@ -237,6 +237,23 @@ class PaneRegistry:
     panes_by_project: dict = field(default_factory=dict)
 
 
+def _teammate_disallowed_tools() -> list[str]:
+    """Tools hard-blocked for teammate panes via claude ``--disallowedTools``.
+
+    Default blocks ``Task`` so a teammate can't spawn invisible subagents — the
+    cockpit policy "ห้าม spawn subagent" (CLAUDE.md), which until now was enforced
+    only by the role-prompt and a model could ignore. A teammate fanning out its
+    own Task subagents burns tokens and does work the cockpit can't see in a pane.
+
+    Override or clear via ``TAKKUB_TEAMMATE_DISALLOWED_TOOLS`` (space/comma-
+    separated tool names; empty string disables the block entirely). Only
+    teammates are restricted — the Lead orchestrates via the ``takkub`` CLI, not
+    the Task tool, and is left unrestricted.
+    """
+    raw = os.environ.get("TAKKUB_TEAMMATE_DISALLOWED_TOOLS", "Task").strip()
+    return raw.replace(",", " ").split()
+
+
 class SpawnEngineMixin:
     """Pane registry and session spawn/lifecycle mixin.
 
@@ -1304,6 +1321,13 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             teammate_fallback = os.environ.get("TAKKUB_TEAMMATE_FALLBACK", tier_fallback).strip()
             if teammate_fallback:
                 argv.extend(["--fallback-model", teammate_fallback])
+            # Hard-enforce "ห้าม spawn subagent" (CLAUDE.md) at the CLI level so a
+            # teammate can't fan out invisible Task subagents (was prompt-only).
+            # Teammates only; the Lead is left unrestricted. Override/clear via
+            # TAKKUB_TEAMMATE_DISALLOWED_TOOLS (see _teammate_disallowed_tools).
+            _disallowed_tools = _teammate_disallowed_tools()
+            if _disallowed_tools:
+                argv.extend(["--disallowedTools", *_disallowed_tools])
         else:
             # Lead normally rides the user's default model (Opus on this
             # install) with no --model flag. Under a Pro plan that default may

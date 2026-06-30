@@ -493,6 +493,13 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
         # conversation reads as busy — #70/#20). Cleared on successful flush.
         self._pending_done_since: dict[str, float] = {}
         self._load_pending_done_notices()
+        # Fan-out queue (flag-gated): per-project deque of deferred over-cap
+        # assigns. Persisted to disk so a still-queued assign survives a cockpit
+        # restart (parity with _pending_done_notices above). Loaded only when
+        # TAKKUB_QUEUE_FANOUT is on, so a stale file is ignored when the feature
+        # is off. See docs/reviews/2026-06-30-queue-gap.md.
+        self._fanout_queue: dict = {}
+        self._load_fanout_queue()
         # In-memory serialisation queue for live Lead writes (ready-prompt aware).
         # Keyed by project namespace.  Items are string bodies; a single pump
         # fires per project so concurrent done notices never overwrite each other
@@ -2811,6 +2818,7 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
             }
         )
         depth = len(q[project_ns])
+        self._save_fanout_queue(project_ns)  # survive a restart with work still queued
         _log_event("assign_queued", role=role_name, project=project_ns, queue_depth=depth)
         lead = self._project_panes(project_ns).get(LEAD.name)
         if lead and lead.session and lead.session.is_alive:
@@ -2850,6 +2858,7 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
             if _count_active_teammates(self._panes_by_project) >= cap:
                 return  # still full — leave the item queued for the next close
             item = queue.popleft()
+            self._save_fanout_queue(project_ns)  # persist the shrunk queue
             _log_event(
                 "assign_dequeued", role=item["role"], project=project_ns, remaining=len(queue)
             )
@@ -2865,6 +2874,50 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
                 plan=item["plan"],
                 project=item["project"],
             )
+        except Exception:
+            pass
+
+    # ── Fan-out queue durability (mirrors _save/_load_pending_done_notices) ──
+
+    def _fanout_queue_path(self, project_ns: str) -> pathlib.Path:
+        return RUNTIME_DIR / f"fanout-queue-{project_ns}.json"
+
+    def _save_fanout_queue(self, project_ns: str) -> None:
+        """Persist one project's pending queue so a still-queued assign survives
+        a cockpit restart. Empty queue → remove the file. Best-effort."""
+        try:
+            q = getattr(self, "_fanout_queue", None)
+            items = list(q.get(project_ns, [])) if q else []
+            path = self._fanout_queue_path(project_ns)
+            if items:
+                ensure_runtime()
+                path.write_text(json.dumps(items, ensure_ascii=False), encoding="utf-8")
+            elif path.exists():
+                path.unlink()
+        except Exception:
+            pass
+
+    def _load_fanout_queue(self) -> None:
+        """Reload persisted per-project queues on startup — only when the flag is
+        on, so a stale file from a prior flag-on session is ignored once the
+        feature is turned off. Best-effort; a corrupt file is skipped."""
+        try:
+            if not _fanout_queue_enabled():
+                return
+            runtime = RUNTIME_DIR
+            if not runtime.exists():
+                return
+            prefix = "fanout-queue-"
+            for p in runtime.glob(f"{prefix}*.json"):
+                try:
+                    proj = p.stem[len(prefix) :]
+                    items = json.loads(p.read_text(encoding="utf-8"))
+                    if isinstance(items, list) and items:
+                        if getattr(self, "_fanout_queue", None) is None:
+                            self._fanout_queue = {}
+                        self._fanout_queue[proj] = collections.deque(items)
+                except Exception:
+                    continue
         except Exception:
             pass
 

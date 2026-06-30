@@ -14,6 +14,7 @@ import pytest
 
 from agent_takkub import exec_mode
 from agent_takkub.orchestrator import LEAD, Orchestrator
+from agent_takkub.spawn_engine import _teammate_disallowed_tools
 
 
 class _Pane:
@@ -37,6 +38,13 @@ class _FakeOrch:
 
     def _project_panes(self, project):
         return self._panes_by_project.get(project, {})
+
+    # Bind the real durability methods so _enqueue/_drain's self._save calls
+    # resolve, and so persistence is exercised for real (they only touch
+    # _fanout_queue + the conftest-isolated RUNTIME_DIR).
+    _save_fanout_queue = Orchestrator._save_fanout_queue
+    _fanout_queue_path = Orchestrator._fanout_queue_path
+    _load_fanout_queue = Orchestrator._load_fanout_queue
 
 
 @pytest.fixture(autouse=True)
@@ -192,3 +200,59 @@ class TestDrain:
         self._drain(fake)
         assert fake.assign.call_count == 1
         assert len(fake._fanout_queue["p"]) == 2
+
+
+class TestDurability:
+    def test_enqueue_persists_and_load_restores(self, monkeypatch) -> None:
+        _enable(monkeypatch)
+        _cap(monkeypatch, 1)
+        fake = _FakeOrch()
+        fake._panes_by_project["p"] = {LEAD.name: _Pane(), "frontend": _Pane()}
+        Orchestrator._enqueue_assign(fake, "backend", "/cwd", "task-b", True, False, 3, False, "p")  # type: ignore[arg-type]
+        assert fake._fanout_queue_path("p").exists()
+        # A fresh orchestrator reloads the persisted queue.
+        fresh = _FakeOrch()
+        fresh._load_fanout_queue()
+        assert "p" in fresh._fanout_queue
+        item = fresh._fanout_queue["p"][0]
+        assert item["role"] == "backend"
+        assert item["shard_total"] == 3
+        assert item["requires_commit"] is True
+
+    def test_draining_to_empty_removes_file(self, monkeypatch) -> None:
+        _enable(monkeypatch)
+        _cap(monkeypatch, 2)
+        fake = _FakeOrch()
+        fake._panes_by_project["p"] = {LEAD.name: _Pane(), "frontend": _Pane()}
+        Orchestrator._enqueue_assign(fake, "backend", "/cwd", "t", False, False, 0, False, "p")  # type: ignore[arg-type]
+        path = fake._fanout_queue_path("p")
+        assert path.exists()
+        Orchestrator._drain_fanout_queue(fake, "p")  # type: ignore[arg-type]
+        assert not path.exists()  # emptied → file removed
+
+    def test_load_skipped_when_flag_off(self, monkeypatch) -> None:
+        _enable(monkeypatch)
+        _cap(monkeypatch, 1)
+        fake = _FakeOrch()
+        fake._panes_by_project["p"] = {LEAD.name: _Pane(), "frontend": _Pane()}
+        Orchestrator._enqueue_assign(fake, "backend", "/cwd", "t", False, False, 0, False, "p")  # type: ignore[arg-type]
+        assert fake._fanout_queue_path("p").exists()
+        # Restart with the flag OFF must NOT reload the stale queue.
+        monkeypatch.delenv("TAKKUB_QUEUE_FANOUT", raising=False)
+        fresh = _FakeOrch()
+        fresh._load_fanout_queue()
+        assert getattr(fresh, "_fanout_queue", None) in (None, {})
+
+
+class TestDisallowedTools:
+    def test_default_blocks_task(self, monkeypatch) -> None:
+        monkeypatch.delenv("TAKKUB_TEAMMATE_DISALLOWED_TOOLS", raising=False)
+        assert _teammate_disallowed_tools() == ["Task"]
+
+    def test_env_override_space_and_comma(self, monkeypatch) -> None:
+        monkeypatch.setenv("TAKKUB_TEAMMATE_DISALLOWED_TOOLS", "Task, WebFetch Agent")
+        assert _teammate_disallowed_tools() == ["Task", "WebFetch", "Agent"]
+
+    def test_empty_disables(self, monkeypatch) -> None:
+        monkeypatch.setenv("TAKKUB_TEAMMATE_DISALLOWED_TOOLS", "  ")
+        assert _teammate_disallowed_tools() == []
