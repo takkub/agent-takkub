@@ -448,17 +448,32 @@ class MainWindow(
         if pane is None:
             return
         self.orch.unregister_pane(role_name, project=project)
-        # Explicitly tear down the WebEngine view + its timers before
-        # deleteLater. Without this Chromium's renderer process can linger
-        # holding the scrollback heap until next GC, and a leftover
-        # heartbeat timer can fire runJavaScript into a partially-destroyed
-        # page on the way out.
-        try:
-            pane._terminal.destroy_terminal()
-        except Exception:
-            pass
-        pane.setParent(None)
-        pane.deleteLater()
+
+        # Defer the WebEngine teardown to a fresh event-loop tick. This slot runs
+        # *synchronously* inside Orchestrator.close()'s `paneClosed.emit()` — the
+        # same stack as the sibling `_game_on_pane_closed` slot, which drives
+        # runJavaScript into the office-room view. Destroying this pane's
+        # QWebEngineView (destroy_terminal/setParent) reentrantly — nested in that
+        # signal emission, overlapping another live WebEngine op — tripped
+        # Qt6Core's __fastfail (0xc0000409) and hard-crashed the cockpit on every
+        # pane close (done auto-close, close-all, tab switch). The Qt 6.8 downgrade
+        # did NOT fix it because the fault is this reentrancy, not a Qt regression.
+        # Running teardown on the next tick lets the emit fully unwind first so no
+        # two WebEngine operations ever overlap.
+        #
+        # Explicit destroy_terminal (vs. relying on deleteLater) still matters:
+        # it stops the heartbeat/flush timers so no stray runJavaScript fires into
+        # a partially-destroyed page, and lets Chromium release the renderer +
+        # scrollback heap promptly instead of at next GC.
+        def _teardown(p=pane) -> None:
+            try:
+                p._terminal.destroy_terminal()
+            except Exception:
+                pass
+            p.setParent(None)
+            p.deleteLater()
+
+        QTimer.singleShot(0, _teardown)
 
     # ──────────────────────────────────────────────────────────────
     # Office Room game bridge helpers

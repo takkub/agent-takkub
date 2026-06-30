@@ -420,6 +420,14 @@ class TerminalWidget(QWidget):
         deleteLater would eventually do most of this, but stopping timers
         explicitly avoids stray runJavaScript calls into a destroyed page.
         """
+        # Uninstall the drag-drop event filter FIRST. Tearing the view down
+        # (deleteLater / parent changes) can otherwise re-enter eventFilter on a
+        # half-destroyed QWebEngineView — one of the reentrant paths into the
+        # Qt6Core __fastfail (0xc0000409) hard-crash seen on every pane close.
+        try:
+            self._view.removeEventFilter(self)
+        except Exception:
+            pass
         for timer in (self._flush_timer, self._heartbeat):
             try:
                 if timer.isActive():
