@@ -176,6 +176,11 @@ def install_plugin(
     except Exception as e:  # pragma: no cover
         return False, str(e)
     if proc.returncode == 0:
-        return True, "installed"
+        # Exit 0 is necessary but not sufficient: a no-op/skip can also exit 0.
+        # Panes load from disk, so confirm the plugin actually landed there
+        # (the same <version>/.claude-plugin/plugin.json check panes use).
+        if plugin.key in installed_on_disk():
+            return True, "installed"
+        return False, "CLI reported success but plugin not found on disk (try restart)"
     tail = ((proc.stdout or "") + (proc.stderr or "")).strip().splitlines()
     return False, tail[-1] if tail else "install failed"

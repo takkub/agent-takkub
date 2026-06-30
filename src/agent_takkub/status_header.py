@@ -320,17 +320,11 @@ class StatusHeaderMixin:
         # queuing a second fetch before the first one completes.
         self._update_worker_busy: bool = False
 
-        # ── Claude CLI check button ────────────────────────────────
-        # Separate from _btn_update (which pulls agent-takkub source). Clicking
-        # this hands a version-check task to the active tab's Lead pane
-        # (_on_claude_update_clicked → orch.inject_lead_prompt) so the Lead
-        # reports `claude --version` vs npm in chat and the user decides there.
-        # The native worker+dialog self-update flow (_on_claude_update_check_done,
-        # _show_claude_update_dialog, _confirm_and_apply_claude_update) is kept
-        # below for the close-panes detached path but is no longer wired here.
-        # The ⬆ Claude CLI button was removed. The native worker+dialog
-        # self-update methods (_on_claude_update_check_done, …) stay below for
-        # the detached path; this flag still guards their re-entry.
+        # The ⬆ Claude CLI button and its _on_claude_update_clicked handler were
+        # removed. The native worker+dialog self-update methods
+        # (_on_claude_update_check_done, _show_claude_update_dialog,
+        # _confirm_and_apply_claude_update) stay in update_panel for the detached
+        # close-panes update path; this flag still guards their re-entry.
         self._claude_update_busy: bool = False
 
         # The "?" help button was removed — F1 still opens the help dialog

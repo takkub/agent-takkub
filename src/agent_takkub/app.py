@@ -327,7 +327,9 @@ def _install_signal_handlers(window: MainWindow) -> None:
                 if pane.session is not None:
                     try:
                         pane.mark_expected_exit()
-                        pane.session.terminate()
+                        # wait=True: finish taskkill /T inline before exit so the
+                        # process tree can't be orphaned by a half-run daemon.
+                        pane.session.terminate(wait=True)
                     except Exception:
                         pass
         try:

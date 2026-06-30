@@ -258,35 +258,11 @@ class MainWindowUpdateMixin:
     # Claude CLI update (separate from cockpit self-update above)
     # ------------------------------------------------------------------
 
-    def _on_claude_update_clicked(self) -> None:
-        """⬆ Claude CLI clicked. Hand the version-check off to the active tab's
-        Lead pane instead of running a native worker+dialog flow — the Lead
-        checks `claude --version` vs npm and reports conversationally, so the
-        user decides from chat. (The native worker/dialog machinery below —
-        `_on_claude_update_check_done` etc. — is kept intact but no longer
-        wired to this button; the safe self-update still needs the close-panes
-        detached path it provides.)"""
-        try:
-            from .config import active_project as _active_project
-
-            active_project, _ = _active_project()
-        except Exception:
-            active_project = None
-
-        prompt = (
-            "[claude-cli check] ช่วยเช็ค Claude Code CLI ให้หน่อย:\n"
-            "1. version ที่ติดตั้ง: `claude --version`\n"
-            "2. version ล่าสุดบน npm: `npm view @anthropic-ai/claude-code version`\n"
-            "ถ้ามีตัวใหม่ → สรุป changelog สำคัญที่อาจกระทบ cockpit + แนะนำว่าควรอัพไหม\n"
-            "หมายเหตุ: บน Windows ห้าม `npm install -g` ตอน claude pane ยังรันอยู่ "
-            "(lock ทำ claude.exe brick) — ต้องปิด pane ก่อน หรือใช้ flow detached "
-            "updater ของ cockpit (build_updater_script) ที่ปิด pane ให้อัตโนมัติ"
-        )
-        delivered = self.orch.inject_lead_prompt(prompt, project=active_project)
-        if delivered:
-            self._status.showMessage("ยิงคำขอเช็ค Claude CLI เข้า Lead แล้ว ↗", 4_000)
-        else:
-            self._status.showMessage("Lead ยังไม่พร้อม — คำขอถูก queue ไว้ จะส่งเมื่อ Lead เปิด", 5_000)
+    # NOTE: _on_claude_update_clicked was removed with the ⬆ Claude CLI button.
+    # The native worker/dialog self-update machinery below
+    # (_on_claude_update_check_done, _show_claude_update_dialog,
+    # _confirm_and_apply_claude_update) is kept for the detached close-panes
+    # update path but is not wired to any widget.
 
     def _on_claude_update_check_done(self, result: dict) -> None:
         """Render the worker result: fatal error → warning; no update → toast;

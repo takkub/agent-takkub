@@ -727,7 +727,7 @@ class MainWindow(
             "<code>takkub done [note]</code> — (agents) signal completion<br><br>"
             "<b>Shortcuts</b><br>"
             "F1 — this dialog<br>"
-            "Ctrl + L — show/hide events log panel<br>"
+            "Ctrl + Shift + L — show/hide events log panel<br>"
             "Ctrl + + / - / 0 — terminal font size (click pane first)<br>"
             "Wheel — scroll claude's history (click pane first)<br><br>"
             "<b>Default cwd</b> when <code>--cwd</code> omitted: active project's<br>"
@@ -745,9 +745,10 @@ class MainWindow(
         from PyQt6.QtGui import QKeySequence, QShortcut
 
         QShortcut(QKeySequence(Qt.Key.Key_F1), self).activated.connect(self._show_help)
-        # Ctrl+L toggles the events-log dock — the 📋 Logs button was removed, so
-        # this is the only affordance left to open it.
-        QShortcut(QKeySequence("Ctrl+L"), self).activated.connect(
+        # Ctrl+Shift+L toggles the events-log dock (replaces the removed 📋 Logs
+        # button). NOT plain Ctrl+L — that's the terminal clear-screen inside a
+        # focused claude/shell pane, and a window-level shortcut would shadow it.
+        QShortcut(QKeySequence("Ctrl+Shift+L"), self).activated.connect(
             lambda: self._on_toggle_logs(None)
         )
 
@@ -1060,18 +1061,12 @@ class MainWindow(
                 event.ignore()
                 return
 
-        # Wait out any background _DoctorThread / _PluginInstallThread still
-        # running (Doctor's git fetch, a plugin install). They're parented to
-        # this window, so letting Qt destroy them mid-run aborts with
-        # "QThread: Destroyed while thread is still running". A bounded wait lets
-        # them finish cleanly; the cap keeps Alt+F4 from hanging on a slow fetch.
-        for _attr in ("_doctor_threads", "_plugin_threads"):
-            for _w in list(getattr(self, _attr, ())):
-                try:
-                    if _w.isRunning():
-                        _w.wait(4000)
-                except RuntimeError:
-                    pass
+        # Background _DoctorThread / _PluginInstallThread workers are held at
+        # module level (user_actions._DOCTOR_THREADS/_PLUGIN_THREADS), NOT
+        # parented to this window, so window teardown can't destroy a running
+        # one. No wait needed — they finish in the background and the process
+        # reaps them on exit. (A Doctor git fetch or a 120s-per-plugin install
+        # would have blown any bounded close-time wait anyway.)
 
         self._save_window_state()
         self._persist_open_tabs()
@@ -1094,7 +1089,10 @@ class MainWindow(
             for pane in list(project_panes.values()):
                 if pane.session is not None:
                     pane.mark_expected_exit()
-                    pane.session.terminate()
+                    # wait=True: tear down inline on app exit so taskkill /T
+                    # finishes before the process dies — a detached daemon
+                    # teardown would be killed mid-kill and orphan the tree.
+                    pane.session.terminate(wait=True)
         if self._limit_store is not None:
             self._limit_store.stop()
             self._limit_store = None

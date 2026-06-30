@@ -88,17 +88,34 @@ class _PluginInstallThread(QThread):
         from . import plugin_installer
 
         results: list = []
-        # Add each shared marketplace once up front, then install each plugin
-        # without re-adding it (claude-plugins-official backs 4 of the 5).
-        plugin_installer.ensure_marketplaces(self._plugins)
+        # Add each shared marketplace once up front (claude-plugins-official
+        # backs 4 of the 5), then install each plugin without re-adding it. Keep
+        # the per-repo result so a failed marketplace add surfaces as ONE clear
+        # "marketplace unavailable" per plugin instead of a cryptic install error.
+        mp_results = plugin_installer.ensure_marketplaces(self._plugins)
         for p in self._plugins:
             self.progress.emit(p.label)
+            mp_ok, mp_msg = mp_results.get(p.marketplace_repo, (True, ""))
+            if not mp_ok:
+                results.append((p, False, f"marketplace unavailable ({mp_msg})"))
+                continue
             try:
                 ok, msg = plugin_installer.install_plugin(p, ensure_marketplace=False)
             except Exception as e:  # pragma: no cover - defensive
                 ok, msg = False, str(e)
             results.append((p, ok, msg))
         self.done.emit(results)
+
+
+# Background workers (_DoctorThread / _PluginInstallThread) are held HERE at
+# module level, NOT parented to the window. A worker parented to the window gets
+# destroyed when the user closes the cockpit mid-run, aborting with "QThread:
+# Destroyed while thread is still running" (a hard crash) whenever a check/install
+# outlives a short close-time wait. Keeping the only strong ref here means window
+# teardown never deletes a running thread; each worker removes itself on
+# `finished` (then deleteLater), so the sets stay small.
+_DOCTOR_THREADS: set = set()
+_PLUGIN_THREADS: set = set()
 
 
 class UserActionsMixin:
@@ -480,17 +497,14 @@ class UserActionsMixin:
         )
 
         # Track the running worker so it isn't garbage-collected mid-run and so a
-        # Fix re-check can't overlap the initial run. Parented to self (the long-
-        # lived window) so closing the dialog while checks run never destroys a
-        # live QThread.
-        if not hasattr(self, "_doctor_threads"):
-            self._doctor_threads: set = set()
-
+        # Workers are held in a MODULE-LEVEL set (not parented to the window) so
+        # closing the cockpit while a check runs can't destroy a live QThread —
+        # see _DOCTOR_THREADS. Each removes itself on `finished`.
         def _start(apply_fixes_to=None) -> None:
             btn_fix.setEnabled(False)
             btn_fix.setToolTip("Running checks…")
-            worker = _DoctorThread(apply_fixes_to=apply_fixes_to, parent=self)
-            self._doctor_threads.add(worker)
+            worker = _DoctorThread(apply_fixes_to=apply_fixes_to)
+            _DOCTOR_THREADS.add(worker)
 
             def _on_ready(findings: object) -> None:
                 # The dialog may have been closed while the worker ran; guard the
@@ -516,7 +530,7 @@ class UserActionsMixin:
                     pass
 
             worker.ready.connect(_on_ready)
-            worker.finished.connect(lambda w=worker: self._doctor_threads.discard(w))
+            worker.finished.connect(lambda w=worker: _DOCTOR_THREADS.discard(w))
             worker.finished.connect(worker.deleteLater)
             worker.start()
 
@@ -574,6 +588,10 @@ class UserActionsMixin:
             "QPushButton:disabled { background:#3f3f46; color:#71717a; }"
         )
 
+        # Holder so the click handler reuses the disk scan _render() just did
+        # instead of walking ~/.claude/plugins/cache a second time per click.
+        _missing_holder: list = []
+
         def _render() -> None:
             have = plugin_installer.installed_on_disk()
             lines = ["Recommended dev-team plugins:\n"]
@@ -583,6 +601,7 @@ class UserActionsMixin:
                 lines.append(f"  {mark}  {p.label:16} {pane}")
                 lines.append(f"               {p.note}")
             missing = plugin_installer.missing_plugins(have)
+            _missing_holder[:] = missing
             lines.append("")
             if missing:
                 lines.append(f"{len(missing)} missing — click 'Install missing'.")
@@ -597,16 +616,13 @@ class UserActionsMixin:
 
         _render()
 
-        if not hasattr(self, "_plugin_threads"):
-            self._plugin_threads: set = set()
-
         def _on_install() -> None:
-            missing = plugin_installer.missing_plugins()
+            missing = list(_missing_holder)  # reuse _render()'s scan
             if not missing:
                 return
             btn_install.setEnabled(False)
-            worker = _PluginInstallThread(missing, parent=self)
-            self._plugin_threads.add(worker)
+            worker = _PluginInstallThread(missing)  # no parent — see _PLUGIN_THREADS
+            _PLUGIN_THREADS.add(worker)
 
             def _progress(label: str) -> None:
                 try:
@@ -629,7 +645,7 @@ class UserActionsMixin:
 
             worker.progress.connect(_progress)
             worker.done.connect(_done)
-            worker.finished.connect(lambda w=worker: self._plugin_threads.discard(w))
+            worker.finished.connect(lambda w=worker: _PLUGIN_THREADS.discard(w))
             worker.finished.connect(worker.deleteLater)
             worker.start()
 

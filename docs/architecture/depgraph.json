@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 65,
+  "module_count": 66,
   "modules": [
     {
       "module": "agent_takkub",
@@ -263,6 +263,13 @@
       ],
       "fan_in": 2,
       "fan_out": 7
+    },
+    {
+      "module": "agent_takkub.exec_mode",
+      "imports": [],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 0
     },
     {
       "module": "agent_takkub.gemini_helper",

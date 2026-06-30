@@ -70,15 +70,33 @@ def test_ensure_marketplaces_dedupes_by_repo(monkeypatch):
 
 
 def test_install_plugin_success_by_exit_code(monkeypatch):
-    # Exit 0 with reworded output (no "successfully installed") is still success.
+    # Exit 0 with reworded output (no "successfully installed") + the plugin
+    # present on disk → success.
     class _P:
         returncode = 0
         stdout = "Installed frontend-design"
         stderr = ""
 
+    target = pi.RECOMMENDED[1]
     monkeypatch.setattr(pi, "_claude", lambda *a, **k: _P())
-    ok, _msg = pi.install_plugin(pi.RECOMMENDED[1], ensure_marketplace=False)
+    monkeypatch.setattr(pi, "installed_on_disk", lambda: {target.key})
+    ok, _msg = pi.install_plugin(target, ensure_marketplace=False)
     assert ok is True
+
+
+def test_install_plugin_exit0_but_missing_on_disk_is_failure(monkeypatch):
+    # Exit 0 but the plugin never landed on disk (a no-op skip) → NOT success,
+    # so the dialog doesn't falsely claim installed while panes can't load it.
+    class _P:
+        returncode = 0
+        stdout = "nothing to do"
+        stderr = ""
+
+    monkeypatch.setattr(pi, "_claude", lambda *a, **k: _P())
+    monkeypatch.setattr(pi, "installed_on_disk", lambda: set())
+    ok, msg = pi.install_plugin(pi.RECOMMENDED[1], ensure_marketplace=False)
+    assert ok is False
+    assert "disk" in msg.lower()
 
 
 def test_install_plugin_failure_by_exit_code(monkeypatch):

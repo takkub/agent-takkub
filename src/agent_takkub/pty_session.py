@@ -91,30 +91,23 @@ def _tree_kill(pid: int | None) -> None:
     if pid is None:
         return
     if sys.platform == "win32":
-        # Run taskkill on a short-lived daemon thread that DOES wait for it to
-        # finish. terminate() is called on the Qt main thread (orchestrator.close
-        # → session.terminate), and a blocking subprocess.run(timeout=5) here
-        # froze the UI for up to 5 s on every pane close — longer when `/T` walks
-        # a large tree (a leaked `next dev` with thousands of node children).
-        # boot.log caught this as a main-thread stall under `_close_if_same_session
-        # → close`. A pure fire-and-forget Popen fixed the freeze but let
-        # terminate() return before the tree was dead, racing an immediate
-        # respawn on the same port (EADDRINUSE). The background-thread + wait
-        # keeps the UI responsive AND guarantees the kill actually completes.
-        def _kill() -> None:
-            try:
-                subprocess.run(
-                    ["taskkill", "/PID", str(pid), "/T", "/F"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    creationflags=_CREATE_NO_WINDOW,
-                    timeout=10,
-                    check=False,
-                )
-            except Exception:
-                pass
-
-        threading.Thread(target=_kill, name=f"treekill-{pid}", daemon=True).start()
+        # Synchronous: `taskkill /T` must finish walking the LIVE parent→child
+        # tree before the caller kills the root, or the descendants orphan (a
+        # leaked `next dev` then survives — observed 3170 procs / 18 GB). This
+        # blocks, so terminate() runs it on a background thread (see terminate),
+        # NOT on the Qt main thread — keeping the ordering correct AND the UI
+        # responsive. (An earlier fire-and-forget Popen here broke the ordering.)
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=_CREATE_NO_WINDOW,
+                timeout=10,
+                check=False,
+            )
+        except Exception:
+            pass
         return
     # POSIX: kill the child's whole process group (it is the session leader).
     try:
@@ -657,10 +650,21 @@ class PtySession(QObject):
             except Exception:
                 pass
 
-    def terminate(self) -> None:
-        # PyQt6 raises RuntimeError (not AttributeError) for any attribute access on
-        # a QObject created via __new__ without __init__ (used by some test fixtures).
-        # Guard every attribute access here so terminate() is always safe to call.
+    def terminate(self, wait: bool = False) -> None:
+        """Tear the session down: kill the process tree, stop the reader/writer
+        threads, close the transcript.
+
+        The heavy part — ``taskkill /T`` (which can take seconds on a big leaked
+        tree) plus the thread joins — runs on a background daemon thread by
+        default so the Qt main thread (orchestrator.close → terminate) never
+        freezes. Pass ``wait=True`` on application shutdown so the teardown
+        finishes inline before the process exits, otherwise the detached daemon
+        thread would be killed mid-``taskkill`` and orphan the tree on exit.
+
+        PyQt6 raises RuntimeError (not AttributeError) for attribute access on a
+        QObject built via __new__ without __init__ (some test fixtures), so every
+        attribute read is guarded — terminate() is always safe to call.
+        """
         try:
             _writer = self._writer
         except (AttributeError, RuntimeError):
@@ -673,55 +677,57 @@ class PtySession(QObject):
             _writer.request_stop()  # enqueue sentinel → writer loop exits
         if _reader is not None:
             _reader.request_stop()  # set stop flag
-        # Tree-kill the whole descendant chain BEFORE killing the root. pywinpty's
-        # terminate(force=True) only reaps claude.exe itself; a teammate that ran
-        # `next dev` / `npm run dev` leaves the node dev server and its postcss /
-        # jest-worker subprocesses orphaned, which pile up into thousands of zombie
-        # node procs (observed: a single leaked `next dev` reached 3170 procs /
-        # 18 GB). `taskkill /T` walks the live parent→child tree, so it MUST run
-        # while the root is still alive — kill the root first and the descendants
-        # re-parent away from this PID and survive.
         try:
             _pid = self._pid
         except (AttributeError, RuntimeError):
             _pid = None
-        _tree_kill(_pid)
         try:
             _proc = self._proc
         except (AttributeError, RuntimeError):
             _proc = None
-        if _proc is not None:
-            try:
-                _proc.terminate(force=True)  # unblocks reader's proc.read()
-            except Exception:
-                pass
-        try:
-            self._alive = False
-        except (AttributeError, RuntimeError):
-            pass
-        # Bug-7 fix: join threads so they don't accumulate as zombies across
-        # many close/respawn cycles.  500 ms timeout avoids blocking the UI
-        # thread; if a thread hasn't exited by then we leave it — the process
-        # kill above ensures it will exit momentarily on its own.
-        if _writer is not None:
-            _writer.quit()
-            _writer.wait(500)
-        if _reader is not None:
-            _reader.quit()
-            _reader.wait(500)
         try:
             _transcript = self._transcript
         except (AttributeError, RuntimeError):
             _transcript = None
-        if _transcript is not None:
-            try:
-                _transcript.close()
-            except Exception:
-                pass
-            try:
-                self._transcript = None
-            except (AttributeError, RuntimeError):
-                pass
+        try:
+            self._alive = False
+        except (AttributeError, RuntimeError):
+            pass
+        try:
+            self._transcript = None
+        except (AttributeError, RuntimeError):
+            pass
+
+        def _teardown() -> None:
+            # ORDER MATTERS. `taskkill /T` walks the live parent→child tree, so
+            # it must finish while the root is still alive; pywinpty's
+            # terminate(force=True) only reaps claude.exe itself and would orphan
+            # the node dev-server subtree if it ran first. Running both here, in
+            # sequence, preserves that ordering off the Qt main thread.
+            _tree_kill(_pid)
+            if _proc is not None:
+                try:
+                    _proc.terminate(force=True)  # unblocks reader's proc.read()
+                except Exception:
+                    pass
+            # Join the reader/writer so they don't accumulate across many
+            # close/respawn cycles. Bounded so a wedged thread can't hang exit.
+            if _writer is not None:
+                _writer.quit()
+                _writer.wait(2000)
+            if _reader is not None:
+                _reader.quit()
+                _reader.wait(2000)
+            if _transcript is not None:
+                try:
+                    _transcript.close()
+                except Exception:
+                    pass
+
+        if wait:
+            _teardown()
+        else:
+            threading.Thread(target=_teardown, name="pty-teardown", daemon=True).start()
 
     @property
     def is_alive(self) -> bool:
