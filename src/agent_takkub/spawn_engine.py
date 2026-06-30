@@ -696,6 +696,17 @@ class SpawnEngineMixin:
         if pane.session is not None and pane.session.is_alive:
             return True, f"{role_name} already running"
 
+        # Fresh teammate spawn — flag machine oversubscription to Lead before we
+        # construct the session (best-effort, non-blocking; the warn method
+        # excludes Lead panes and is wrapped so it can never break spawning).
+        # See docs/reviews/2026-06-30-queue-gap.md (no central cap; advisory only).
+        _warn_over_cap = getattr(self, "_warn_lead_over_cap", None)
+        if _warn_over_cap is not None and not _from_auto_respawn:
+            try:
+                _warn_over_cap(role_name, project_ns)
+            except Exception:
+                pass
+
         # Fresh spawn — clear any stale watchdog tracking from a prior
         # session so the new claude conversation starts with a clean slate
         # (no leftover "blocked on lead" flag, no leftover idle streak).

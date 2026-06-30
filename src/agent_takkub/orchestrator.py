@@ -294,6 +294,12 @@ RUNAWAY_BYTES_S = 500_000  # 500 KB/s sustained output rate
 RUNAWAY_DURATION_S = 60.0  # seconds of sustained overrate before warning Lead
 RUNAWAY_WARN_COOLDOWN_S = 300.0  # suppress repeat warnings for 5 min
 
+# Over-capacity advisory (Queue-gap audit, docs/reviews/2026-06-30-queue-gap.md).
+# When a fresh teammate spawn pushes the TOTAL live pane count over what the
+# machine can comfortably run (exec_mode.machine_total_pane_cap()), warn the Lead
+# once per this window so a burst of fan-out assigns doesn't spam. Non-blocking.
+OVERCAP_WARN_COOLDOWN_S = 60.0
+
 # Spinner-line filtering for content-delta stuck detection (Fix 3).
 # Lines matching any interrupt phrase or volatile counter pattern are excluded
 # from the hash so a pane that only emits spinner bytes is still detected as stuck.
@@ -2638,6 +2644,64 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
         _delayed_enter(lead, _run_sess, 150)
         self.leadInjected.emit(msg)
         _log_event("runaway_pane_warn", role=role, project=project, rate_kb=int(rate_kb))
+
+    def _warn_lead_over_cap(self, role: str, project: str) -> None:
+        """Best-effort advisory: when a fresh teammate spawn pushes the TOTAL
+        live pane count (across *all* projects) over what the machine can
+        comfortably run (``exec_mode.machine_total_pane_cap()``), drop a one-line
+        notice into the spawning project's Lead. **Non-blocking** — the spawn
+        always proceeds; this only flags oversubscription so the Lead can split
+        the batch into waves or close idle panes.
+
+        machine_fanout_cap() is *per role* and ceilinged at MAX_FANOUT, so it
+        can't catch the case where every role is within its per-role cap yet the
+        aggregate (e.g. frontend#1..#3 + backend#1..#3 = 6 panes) overwhelms a
+        small box. This total guard does (see docs/reviews/2026-06-30-queue-gap.md).
+
+        Rate-limited machine-wide (OVERCAP_WARN_COOLDOWN_S) so a burst of fan-out
+        assigns doesn't spam. Wrapped so a warning can never break spawning.
+        """
+        try:
+            if role == LEAD.name:
+                return  # spawning a Lead pane is never an over-capacity event
+            from . import exec_mode  # local import: matches the toggle handler's pattern
+
+            cap = exec_mode.machine_total_pane_cap()
+            # Count live teammates across every project (machine-wide), excluding
+            # Lead panes (one per tab; not the resource hogs). The pane being
+            # spawned isn't alive yet, so `active` is the count BEFORE it —
+            # active >= cap means this fresh spawn is the (cap+1)-th → over.
+            active = 0
+            for _panes in self._panes_by_project.values():
+                for _r, _p in _panes.items():
+                    if _r == LEAD.name:
+                        continue
+                    sess = getattr(_p, "session", None)
+                    if sess is not None and getattr(sess, "is_alive", False):
+                        active += 1
+            if active < cap:
+                return
+            now = time.time()
+            last = getattr(self, "_last_overcap_warn_ts", 0.0)
+            if (now - last) < OVERCAP_WARN_COOLDOWN_S:
+                return
+            self._last_overcap_warn_ts = now
+            lead = self._project_panes(project).get(LEAD.name)
+            if not (lead and lead.session and lead.session.is_alive):
+                return
+            msg = (
+                f"⚠️ [over-capacity] กำลังเปิด pane teammate ตัวที่ {active + 1} — "
+                f"เกินที่เครื่องนี้รับไหวสบายๆ (~{cap} panes) · เสี่ยงช้า/ค้าง/RAM พุ่ง. "
+                f"พิจารณาแบ่งงานเป็น waves หรือ `takkub close` pane ที่ไม่ใช้แล้ว"
+            )
+            _cap_sess = lead.session
+            _cap_sess.write(msg)
+            _delayed_enter(lead, _cap_sess, 150)
+            self.leadInjected.emit(msg)
+            _log_event("over_capacity_warn", role=role, project=project, active=active, cap=cap)
+        except Exception:
+            # A capacity advisory must never prevent a pane from spawning.
+            pass
 
     def _rate_limit_suppressed(self, project: str, role: str, pane: AgentPane, now: float) -> bool:
         """Return True if `pane` is rate-limited and the watchdog should leave

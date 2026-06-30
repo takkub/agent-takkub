@@ -97,6 +97,39 @@ def machine_fanout_cap() -> int:
     return max(1, min(MAX_FANOUT, by_cpu, by_ram))
 
 
+def machine_total_pane_cap() -> int:
+    """Max **total** concurrent teammate panes this machine can run before it
+    starts to thrash — across *all* roles and *all* project tabs.
+
+    This is the machine-oversubscription guard, distinct from
+    `machine_fanout_cap()`: that one is *per role* and ceilinged at `MAX_FANOUT`
+    (so the Lead doesn't fan a single role into a swarm), whereas this bounds the
+    aggregate pane count. A machine can sit within the per-role cap for every
+    role yet still be oversubscribed in total (e.g. frontend#1..#3 + backend#1..#3
+    = 6 panes, each role within cap 3, but 6 claude.exe + dev servers together can
+    blow a small box's RAM). The cockpit uses this only to *warn* the Lead when a
+    fresh spawn would push the total over the line — it never blocks the spawn.
+
+    Same budget as `machine_fanout_cap()` (~2 logical cores + ~2 GB available per
+    pane, tighter wins) but WITHOUT the `MAX_FANOUT` ceiling, since a big box can
+    legitimately run more than `MAX_FANOUT` panes in total. Floor 1; falls back
+    conservatively to 2 if psutil/cpu_count are unavailable so it never raises.
+    """
+    try:
+        cores = os.cpu_count() or 4
+    except Exception:
+        cores = 4
+    by_cpu = max(1, cores // 2)
+    try:
+        import psutil
+
+        free_gb = psutil.virtual_memory().available / (1024**3)
+        by_ram = max(1, int(free_gb // 2))
+    except Exception:
+        by_ram = 2
+    return max(1, min(by_cpu, by_ram))
+
+
 def set_current(mode: str) -> None:
     """Persist `mode` atomically. Raises ValueError on an unknown mode."""
     mode = str(mode).lower().strip()
