@@ -102,44 +102,28 @@ def _claude(*args: str, timeout: float = 120.0) -> subprocess.CompletedProcess[s
     )
 
 
-def parse_installed_keys(plugin_list_stdout: str) -> set[str]:
-    """Extract installed plugin keys from ``claude plugin list`` output.
-
-    Lines look like ``  ❯ code-review@claude-plugins-official``. Pure (no IO)
-    so it's unit-testable; ``installed_plugin_keys`` does the subprocess call.
-    """
-    keys: set[str] = set()
-    for raw in plugin_list_stdout.splitlines():
-        line = raw.strip().lstrip("❯").strip()
-        if "@" in line and " " not in line:
-            keys.add(line.split("@", 1)[0])
-    return keys
-
-
-def installed_plugin_keys() -> set[str]:
-    """Set of installed plugin keys per ``claude plugin list``. Empty on error."""
-    try:
-        proc = _claude("plugin", "list", timeout=40)
-    except Exception:
-        return set()
-    return parse_installed_keys(proc.stdout or "")
-
-
 def installed_on_disk(home=None) -> set[str]:
-    """Recommended plugin keys present under ``~/.claude/plugins/cache`` — a
-    pure filesystem check (no subprocess), safe to call on the Qt main thread.
+    """Recommended plugin keys with a *loadable* install under
+    ``~/.claude/plugins/cache`` — a pure filesystem check (no subprocess), safe
+    on the Qt main thread.
 
-    Mirrors exactly where ``lead_context._default_plugin_dirs`` looks, so this
-    reflects what cockpit panes will actually load, not just what some other
-    CLAUDE_CONFIG_DIR has registered.
+    Applies the SAME condition as ``lead_context._default_plugin_dirs``: a
+    ``<marketplace>/<plugin>/<version>/.claude-plugin/plugin.json`` must exist.
+    Checking only the plugin folder would mark a half-populated cache dir (an
+    interrupted install) as installed while panes silently skip it.
     """
     import pathlib
 
     base = (home or pathlib.Path.home()) / ".claude" / "plugins" / "cache"
     have: set[str] = set()
     for p in RECOMMENDED:
-        if (base / p.marketplace / p.key).is_dir():
-            have.add(p.key)
+        plugin_dir = base / p.marketplace / p.key
+        if not plugin_dir.is_dir():
+            continue
+        for v in plugin_dir.iterdir():
+            if v.is_dir() and (v / ".claude-plugin" / "plugin.json").is_file():
+                have.add(p.key)
+                break
     return have
 
 
@@ -160,17 +144,38 @@ def _ensure_marketplace(repo: str) -> tuple[bool, str]:
     return ok, "marketplace ready" if ok else "marketplace add failed"
 
 
-def install_plugin(plugin: RecommendedPlugin) -> tuple[bool, str]:
-    """Add the marketplace if needed, then install one plugin. (ok, message)."""
-    ok, msg = _ensure_marketplace(plugin.marketplace_repo)
-    if not ok:
-        return False, msg
+def ensure_marketplaces(plugins: list[RecommendedPlugin]) -> dict[str, tuple[bool, str]]:
+    """Add each plugin's marketplace exactly once (deduped by repo).
+
+    The recommended set shares one marketplace across four plugins, so adding it
+    per-plugin would fire the same `claude plugin marketplace add` 4× (3 wasted
+    120s-bounded network calls). Callers run this once before the install loop.
+    """
+    results: dict[str, tuple[bool, str]] = {}
+    for repo in dict.fromkeys(p.marketplace_repo for p in plugins):
+        results[repo] = _ensure_marketplace(repo)
+    return results
+
+
+def install_plugin(
+    plugin: RecommendedPlugin, *, ensure_marketplace: bool = True
+) -> tuple[bool, str]:
+    """Install one plugin. (ok, message).
+
+    Success is decided by the CLI **exit code**, not by matching a substring of
+    stdout — a 0 exit with reworded output ("Installed X" / "already installed")
+    is still a success. Pass ``ensure_marketplace=False`` when the caller has
+    already run :func:`ensure_marketplaces` to avoid a redundant per-plugin add.
+    """
+    if ensure_marketplace:
+        ok, msg = _ensure_marketplace(plugin.marketplace_repo)
+        if not ok:
+            return False, msg
     try:
         proc = _claude("plugin", "install", f"{plugin.key}@{plugin.marketplace}", timeout=120)
     except Exception as e:  # pragma: no cover
         return False, str(e)
-    out = (proc.stdout or "") + (proc.stderr or "")
-    if proc.returncode == 0 and "successfully installed" in out.lower():
+    if proc.returncode == 0:
         return True, "installed"
-    tail = out.strip().splitlines()
+    tail = ((proc.stdout or "") + (proc.stderr or "")).strip().splitlines()
     return False, tail[-1] if tail else "install failed"

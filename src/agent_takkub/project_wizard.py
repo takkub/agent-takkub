@@ -263,14 +263,20 @@ class ProjectWizardMixin:
         thread.failed.connect(on_failed)
         btn_cancel.clicked.connect(on_cancel)
 
-        self._btn_add_project.setEnabled(False)
+        # The 📁 add-project button was removed (its flow now lives under the
+        # "+" new-tab menu); guard the enable/disable so the rules-gen path
+        # doesn't AttributeError when the button no longer exists.
+        _add_btn = getattr(self, "_btn_add_project", None)
+        if _add_btn is not None:
+            _add_btn.setEnabled(False)
         try:
             thread.start()
             busy.exec()
             thread.wait(5000)
             thread.deleteLater()
         finally:
-            self._btn_add_project.setEnabled(True)
+            if _add_btn is not None:
+                _add_btn.setEnabled(True)
 
         if result_holder[0] is not None:
             return result_holder[0]

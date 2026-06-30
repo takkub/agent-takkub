@@ -706,7 +706,11 @@ class MainWindow(
     # ──────────────────────────────────────────────────────────────
     # toolbar buttons
     # ──────────────────────────────────────────────────────────────
-    def _on_toggle_logs(self, checked: bool) -> None:
+    def _on_toggle_logs(self, checked: bool | None = None) -> None:
+        # `checked` comes from a checkable button; when invoked from the Ctrl+L
+        # shortcut (no button anymore) flip the dock's current visibility.
+        if checked is None:
+            checked = not self._logs_dock.isVisible()
         self._logs_dock.setVisible(checked)
 
     def _show_help(self) -> None:
@@ -722,7 +726,8 @@ class MainWindow(
             "<code>takkub close-all</code> — close every teammate (keeps Lead)<br>"
             "<code>takkub done [note]</code> — (agents) signal completion<br><br>"
             "<b>Shortcuts</b><br>"
-            "F1 / ? button — this dialog<br>"
+            "F1 — this dialog<br>"
+            "Ctrl + L — show/hide events log panel<br>"
             "Ctrl + + / - / 0 — terminal font size (click pane first)<br>"
             "Wheel — scroll claude's history (click pane first)<br><br>"
             "<b>Default cwd</b> when <code>--cwd</code> omitted: active project's<br>"
@@ -740,6 +745,11 @@ class MainWindow(
         from PyQt6.QtGui import QKeySequence, QShortcut
 
         QShortcut(QKeySequence(Qt.Key.Key_F1), self).activated.connect(self._show_help)
+        # Ctrl+L toggles the events-log dock — the 📋 Logs button was removed, so
+        # this is the only affordance left to open it.
+        QShortcut(QKeySequence("Ctrl+L"), self).activated.connect(
+            lambda: self._on_toggle_logs(None)
+        )
 
     # ──────────────────────────────────────────────────────────────
     # project switcher
@@ -790,24 +800,45 @@ class MainWindow(
             self._status.showMessage(f"⚠ failed to persist open tabs: {e}", 8_000)
 
     def _on_new_tab_clicked(self) -> None:
-        """Prompt for a project that isn't already open, then add it as a
-        new tab and spawn Lead in it. The picker enforces the "one tab per
-        project" rule by excluding open names."""
+        """New-project entry point — two modes (the 📁 add-project button was
+        folded in here):
+
+          1. **เลือกจากที่มีอยู่** — open a project already configured in
+             projects.json (the old "+" picker; excludes already-open ones).
+          2. **เพิ่มโปรเจคใหม่** — add a brand-new project via the wizard
+             (`_on_add_project_clicked`: New with AI rules, or Import existing).
+        """
         from PyQt6.QtWidgets import QMessageBox
 
         open_names = set(self._open_projects())
         available = [n for n in list_project_names() if n not in open_names]
+
+        box = QMessageBox(self)
+        box.setWindowTitle("New project")
+        box.setText("เปิดโปรเจคที่มีอยู่ หรือเพิ่มโปรเจคใหม่?")
+        box.setInformativeText(
+            "เลือกจากที่เคยตั้งไว้ในระบบ — หรือเพิ่มโปรเจคใหม่ (สร้างใหม่ / import folder ที่มีอยู่)"
+        )
+        btn_existing = box.addButton("📂 เลือกจากที่มีอยู่", QMessageBox.ButtonRole.AcceptRole)
+        btn_new = box.addButton("✨ เพิ่มโปรเจคใหม่", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("ยกเลิก", QMessageBox.ButtonRole.RejectRole)
+        # No existing-but-unopened project → steer straight to "add new".
         if not available:
-            QMessageBox.information(
-                self,
-                "Open tab",
-                "Every configured project is already open. Use 📁 to add a new one.",
-            )
+            btn_existing.setEnabled(False)
+            btn_existing.setToolTip("ทุกโปรเจคที่มีถูกเปิดหมดแล้ว")
+        box.exec()
+        clicked = box.clickedButton()
+
+        if clicked is btn_new:
+            self._on_add_project_clicked()
             return
+        if clicked is not btn_existing:
+            return  # cancelled / closed
+
         name, ok = QInputDialog.getItem(
             self,
-            "Open tab",
-            "Pick a project to open in a new tab:",
+            "เลือกโปรเจค",
+            "เปิดโปรเจคไหนในแท็บใหม่:",
             available,
             0,
             False,
@@ -1028,6 +1059,19 @@ class MainWindow(
             if confirm != QMessageBox.StandardButton.Ok:
                 event.ignore()
                 return
+
+        # Wait out any background _DoctorThread / _PluginInstallThread still
+        # running (Doctor's git fetch, a plugin install). They're parented to
+        # this window, so letting Qt destroy them mid-run aborts with
+        # "QThread: Destroyed while thread is still running". A bounded wait lets
+        # them finish cleanly; the cap keeps Alt+F4 from hanging on a slow fetch.
+        for _attr in ("_doctor_threads", "_plugin_threads"):
+            for _w in list(getattr(self, _attr, ())):
+                try:
+                    if _w.isRunning():
+                        _w.wait(4000)
+                except RuntimeError:
+                    pass
 
         self._save_window_state()
         self._persist_open_tabs()

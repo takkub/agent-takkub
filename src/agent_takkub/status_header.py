@@ -220,12 +220,9 @@ class StatusHeaderMixin:
         self._refresh_project_list()
         self._project_combo.currentTextChanged.connect(self._on_project_changed)
 
-        self._btn_add_project = QPushButton("📁", self)
-        self._btn_add_project.setToolTip(
-            "Add project — choose New (AI-generated CLAUDE.md rules) or Import existing"
-        )
-        self._btn_add_project.setFixedWidth(28)
-        self._btn_add_project.clicked.connect(self._on_add_project_clicked)
+        # The 📁 add-project button was removed; its function now lives in the
+        # "+" new-tab flow (_on_new_tab_clicked) which offers two modes: open an
+        # already-configured project, or add a brand-new one (_on_add_project_clicked).
 
         # user profile selector moved to ⚙ Pipelines QMenu
 
@@ -331,22 +328,13 @@ class StatusHeaderMixin:
         # The native worker+dialog self-update flow (_on_claude_update_check_done,
         # _show_claude_update_dialog, _confirm_and_apply_claude_update) is kept
         # below for the close-panes detached path but is no longer wired here.
-        self._btn_claude_update = QPushButton("⬆ Claude CLI", self)
-        self._btn_claude_update.setToolTip(
-            "ยิงคำขอเช็ค Claude Code CLI version เข้า Lead pane\n"
-            "Lead จะเทียบ version ที่ติดตั้ง vs ล่าสุดบน npm แล้วรายงานในแชต\n"
-            "(แทน native dialog เดิม — user ตัดสินใจอัพเดตจากบทสนทนา)"
-        )
-        self._btn_claude_update.setStyleSheet(self._ghost_button_style())
-        self._btn_claude_update.clicked.connect(self._on_claude_update_clicked)
-
-        # True while ClaudeUpdateCheckWorker runs — blocks re-entry.
+        # The ⬆ Claude CLI button was removed. The native worker+dialog
+        # self-update methods (_on_claude_update_check_done, …) stay below for
+        # the detached path; this flag still guards their re-entry.
         self._claude_update_busy: bool = False
 
-        self._btn_help = QPushButton("?", self)
-        self._btn_help.setToolTip("Show keyboard shortcuts and takkub CLI reference (also F1)")
-        self._btn_help.setStyleSheet(self._ghost_button_style())
-        self._btn_help.clicked.connect(self._show_help)
+        # The "?" help button was removed — F1 still opens the help dialog
+        # (_show_help, wired in main_window._install_shortcuts).
 
         # Sidebar collapse/expand toggle moved into the sidebar footer itself
         # (ProjectNav owns it now, right above "New project"). It used to live
@@ -358,12 +346,6 @@ class StatusHeaderMixin:
         self._btn_game_view.setFixedWidth(32)
         self._btn_game_view.setStyleSheet(self._ghost_button_style())
         self._btn_game_view.clicked.connect(self._on_toggle_game_view)
-
-        self._btn_logs = QPushButton("📋 Logs", self)
-        self._btn_logs.setToolTip("Show/hide events log panel")
-        self._btn_logs.setCheckable(True)
-        self._btn_logs.setStyleSheet(self._ghost_button_style())
-        self._btn_logs.clicked.connect(self._on_toggle_logs)
 
         self._btn_restart = QPushButton(self)
         self._btn_restart.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
@@ -528,16 +510,11 @@ class StatusHeaderMixin:
         #   Group 1 — Project context  (info you read, not click)
         #   Group 2 — Workflow actions (buttons that change pane state)
         #   Group 3 — System status    (cockpit-level toggles + updates)
-        for w in (
-            self._version_label,
-            self._btn_add_project,
-        ):
+        for w in (self._version_label,):
             self._status.addPermanentWidget(w)
         self._status.addPermanentWidget(self._make_status_separator())
         for w in (
             self._btn_game_view,
-            self._btn_help,
-            self._btn_logs,
             self._btn_resume,
             self._btn_open_shell,
             self._btn_bug_check,
@@ -558,7 +535,6 @@ class StatusHeaderMixin:
             # self._btn_claude_auth,  # hidden per user request — uncomment to restore.
             # The button + its handler are still created above; only its
             # placement in the status bar is removed so it can come back easily.
-            self._btn_claude_update,
             self._btn_update,
         ):
             self._status.addPermanentWidget(w)

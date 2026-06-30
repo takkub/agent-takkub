@@ -294,8 +294,12 @@ class MainWindowUpdateMixin:
         from PyQt6.QtWidgets import QMessageBox
 
         self._claude_update_busy = False
-        self._btn_claude_update.setEnabled(True)
-        self._btn_claude_update.setText("⬆ Claude CLI")
+        # The ⬆ Claude CLI button was removed; guard the native-path restore so
+        # this slot can't AttributeError if the detached worker ever fires.
+        _cu_btn = getattr(self, "_btn_claude_update", None)
+        if _cu_btn is not None:
+            _cu_btn.setEnabled(True)
+            _cu_btn.setText("⬆ Claude CLI")
         self._status.clearMessage()
 
         if not result.get("ok"):

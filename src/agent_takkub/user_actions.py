@@ -88,10 +88,13 @@ class _PluginInstallThread(QThread):
         from . import plugin_installer
 
         results: list = []
+        # Add each shared marketplace once up front, then install each plugin
+        # without re-adding it (claude-plugins-official backs 4 of the 5).
+        plugin_installer.ensure_marketplaces(self._plugins)
         for p in self._plugins:
             self.progress.emit(p.label)
             try:
-                ok, msg = plugin_installer.install_plugin(p)
+                ok, msg = plugin_installer.install_plugin(p, ensure_marketplace=False)
             except Exception as e:  # pragma: no cover - defensive
                 ok, msg = False, str(e)
             results.append((p, ok, msg))

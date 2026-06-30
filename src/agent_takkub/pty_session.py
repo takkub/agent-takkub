@@ -91,24 +91,30 @@ def _tree_kill(pid: int | None) -> None:
     if pid is None:
         return
     if sys.platform == "win32":
-        # Fire-and-forget: DON'T wait for taskkill. terminate() runs on the Qt
-        # main thread (orchestrator.close → session.terminate), and a blocking
-        # subprocess.run(timeout=5) here froze the whole UI for up to 5 s on
-        # every pane close — longer when `/T` walks a large tree (e.g. a leaked
-        # `next dev` with thousands of node children). boot.log caught this as a
-        # main-thread stall under `_close_if_same_session → close`. taskkill
-        # issues the termination synchronously to the OS; we don't need its
-        # result, so Popen-and-detach keeps the kill semantics without the block.
-        try:
-            subprocess.Popen(
-                ["taskkill", "/PID", str(pid), "/T", "/F"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                stdin=subprocess.DEVNULL,
-                creationflags=_CREATE_NO_WINDOW,
-            )
-        except Exception:
-            pass
+        # Run taskkill on a short-lived daemon thread that DOES wait for it to
+        # finish. terminate() is called on the Qt main thread (orchestrator.close
+        # → session.terminate), and a blocking subprocess.run(timeout=5) here
+        # froze the UI for up to 5 s on every pane close — longer when `/T` walks
+        # a large tree (a leaked `next dev` with thousands of node children).
+        # boot.log caught this as a main-thread stall under `_close_if_same_session
+        # → close`. A pure fire-and-forget Popen fixed the freeze but let
+        # terminate() return before the tree was dead, racing an immediate
+        # respawn on the same port (EADDRINUSE). The background-thread + wait
+        # keeps the UI responsive AND guarantees the kill actually completes.
+        def _kill() -> None:
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=_CREATE_NO_WINDOW,
+                    timeout=10,
+                    check=False,
+                )
+            except Exception:
+                pass
+
+        threading.Thread(target=_kill, name=f"treekill-{pid}", daemon=True).start()
         return
     # POSIX: kill the child's whole process group (it is the session leader).
     try:
