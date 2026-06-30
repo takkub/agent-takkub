@@ -52,3 +52,8 @@ scratch/
 
 # Large local media tarballs (gameplay captures etc.) — never committed.
 *.tar
+
+# VS Code extension build artifacts (built locally; no source tracked here).
+vscode-extension/node_modules/
+vscode-extension/out/
+vscode-extension/*.vsix
