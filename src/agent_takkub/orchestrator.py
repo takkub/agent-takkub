@@ -94,11 +94,9 @@ from .orchestrator_text import (  # re-exported for test/app/main_window imports
 )
 from .pane_env import (  # re-exported for test imports — see pane_env.py docstring
     _DEFAULT_MCP_TOOL_TIMEOUT_MS,
-    _ECC_MUTED_HOOKS,
     _LEAD_ENV_EXTRA_ALLOWLIST,
     _PANE_ENV_ALLOWLIST,
     _apply_color_term,
-    _apply_ecc_mute,
     _apply_mcp_timeout,
     _apply_non_interactive_env,
     _build_lead_env,
@@ -161,7 +159,6 @@ __all__ = [  # backwards-compat re-exports
     "LEAD_NOTIFY_BUSY_CAP",
     "_DEFAULT_MCP_TOOL_TIMEOUT_MS",
     "_DEFAULT_VAULT",
-    "_ECC_MUTED_HOOKS",
     "_HARVEST_EXCLUDE_DIRS",
     "_JUNK_NOTE_EXACT",
     "_JUNK_NOTE_MIN_LEN",
@@ -174,7 +171,6 @@ __all__ = [  # backwards-compat re-exports
     "PaneRegistry",
     "_allowed_project_roots",
     "_apply_color_term",
-    "_apply_ecc_mute",
     "_apply_mcp_timeout",
     "_apply_non_interactive_env",
     "_build_lead_env",

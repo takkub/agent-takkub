@@ -4,8 +4,16 @@ version = "0.9.0"
 description = "Desktop cockpit for orchestrating Claude Code dev teammates on Windows"
 requires-python = ">=3.11"
 dependencies = [
-    "PyQt6>=6.6",
-    "PyQt6-WebEngine>=6.6",
+    # Pinned to the Qt 6.8 LTS series. Qt 6.11.0 shipped a Qt6Core.dll regression
+    # that aborts the cockpit with 0xc0000409 (__fastfail) — a hard native crash
+    # with no Python traceback, observed recurring in the field (boot.log shows
+    # no watchdog stall; Windows WER faults in QtCore). 6.8 is the battle-tested
+    # LTS. Pin the Qt6 *binary* packages too (they carry Qt6Core.dll itself), not
+    # just the bindings, so a resolver can't pull 6.11 back in. Bump deliberately.
+    "PyQt6>=6.8,<6.9",
+    "PyQt6-Qt6>=6.8,<6.9",
+    "PyQt6-WebEngine>=6.8,<6.9",
+    "PyQt6-WebEngine-Qt6>=6.8,<6.9",
     "pywinpty>=2.0;sys_platform=='win32'",
     "ptyprocess>=0.7;sys_platform!='win32'",
     "pyte>=0.8",

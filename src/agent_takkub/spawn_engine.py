@@ -50,7 +50,6 @@ from .orchestrator_text import (
 )
 from .pane_env import (
     _apply_color_term,
-    _apply_ecc_mute,
     _apply_mcp_timeout,
     _apply_non_interactive_env,
     inject_user_profile_env,
@@ -1229,7 +1228,6 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                     break
 
         _apply_mcp_timeout(env)
-        _apply_ecc_mute(env)
         _apply_non_interactive_env(env)
         _apply_color_term(env)
         apply_claude_auth_overrides(env)

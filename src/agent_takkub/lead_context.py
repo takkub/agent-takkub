@@ -540,10 +540,23 @@ def render_lead_settings(project: str) -> pathlib.Path:
 #
 # Roles NOT in this map fall back to the teammate set, NOT the full set — a
 # future role should default to lean, not inherit addy-agent-skills by accident.
-_TEAMMATE_PLUGINS: frozenset[str] = frozenset({"superpowers-dev", "pordee"})
+_TEAMMATE_PLUGINS: frozenset[str] = frozenset(
+    {"superpowers-dev", "pordee", "claude-plugins-official"}
+)
 _ROLE_PLUGIN_POLICY: dict[str, frozenset[str]] = {
     "lead": frozenset({"pordee"}),
 }
+
+# Plugin DIRS (by plugin-dir name) to NEVER inject into a pane via --plugin-dir,
+# even when their marketplace is in that role's allowed set. claude-plugins-
+# official bundles skill-only plugins (frontend-design, code-review) together
+# with hook-heavy ones: `security-guidance` and `remember` register SessionStart
+# *command* hooks (a 180s agent-SDK setup / per-PostToolUse memory writes) that
+# would run on every pane spawn — slow startup + extra crash surface on every
+# teammate. They stay user-enabled (usable in the user's own claude sessions);
+# we just don't force them into cockpit panes. Skill-only plugins from the same
+# marketplace still load.
+_PANE_PLUGIN_DENYLIST: frozenset[str] = frozenset({"security-guidance", "remember"})
 
 
 def _default_plugin_dirs(role: str | None = None) -> list[str]:
@@ -568,10 +581,13 @@ def _default_plugin_dirs(role: str | None = None) -> list[str]:
         mp_dir = cache / marketplace
         if not mp_dir.is_dir():
             continue
-        # one plugin per marketplace; one version per plugin (typically)
+        # one plugin per marketplace historically; multi-plugin marketplaces
+        # (claude-plugins-official) iterate every plugin dir here.
         for plugin in sorted(mp_dir.iterdir()):
             if not plugin.is_dir():
                 continue
+            if plugin.name in _PANE_PLUGIN_DENYLIST:
+                continue  # hook-heavy plugin — never inject into a pane (see denylist)
             versions = sorted((v for v in plugin.iterdir() if v.is_dir()), reverse=True)
             for v in versions:
                 if (v / ".claude-plugin" / "plugin.json").exists():

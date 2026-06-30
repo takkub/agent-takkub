@@ -56,13 +56,17 @@ Use Approach A, but narrow it further:
   an env-based or credential-reference path that does not persist its bearer in
   a shared runtime JSON copied to every pane.
 
-For ECC specifically, the mute looks effective for the two named noisy hooks
-even when ECC is loaded via `--plugin-dir`: `_apply_ecc_mute()` mutates the
-process env before Claude is spawned, ECC's hook dispatcher reads
-`ECC_DISABLED_HOOKS` from `process.env` at hook execution, and GateGuard also
-reads `ECC_GATEGUARD` from `process.env`. The mute does not suppress ECC's
-separate `SessionStart` hook or any future ECC hook ids, so ECC still needs a
-spawn smoke when it becomes default.
+> **Historical (2026-06-30):** ECC was dropped from the cockpit entirely — the
+> mute helper and all ECC env plumbing were removed. The paragraph below is kept
+> for the record but no longer describes live code.
+
+For ECC specifically, the mute looked effective for the two named noisy hooks
+even when ECC was loaded via `--plugin-dir`: the (now-removed) ECC mute helper
+mutated the process env before Claude was spawned, ECC's hook dispatcher read
+ECC_DISABLED_HOOKS from process.env at hook execution, and GateGuard also
+read ECC_GATEGUARD from process.env. The mute did not suppress ECC's
+separate SessionStart hook or any future ECC hook ids, so ECC still needed a
+spawn smoke when it became default.
 
 ## Edge cases backend ต้องระวัง
 

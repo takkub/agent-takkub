@@ -1,6 +1,6 @@
 """Per-pane env construction — allowlist + mute helpers for spawned panes.
 
-Six concerns live here:
+Five concerns live here:
 1. `_PANE_ENV_ALLOWLIST` + `_build_pane_env()` — keep secret-bearing env
    vars (API keys, GH tokens, AWS creds) out of teammate panes by
    filtering to a known-safe set.
@@ -8,16 +8,14 @@ Six concerns live here:
    (commits, runs gh CLI, orchestrates) so it gets a wider allowlist, but
    still not `os.environ.copy()` — defense-in-depth against secrets leaking
    into Lead's subprocesses / MCP tools.
-3. `_apply_ecc_mute()` — silence ECC's two noisiest hooks when ECC is
-   loaded into a pane (escape hatch via `TAKKUB_ECC_FULL=1`).
-4. `_apply_mcp_timeout()` — raise the CC 2.1.142+ MCP per-call timeout
+3. `_apply_mcp_timeout()` — raise the CC 2.1.142+ MCP per-call timeout
    default from 60s to 3min so browser MCP work (Playwright, Chrome
    DevTools, Lighthouse) doesn't trip on first page load.
-5. `_apply_non_interactive_env()` — prevent npx/npm/git from blocking on
+4. `_apply_non_interactive_env()` — prevent npx/npm/git from blocking on
    interactive y/N or credential prompts (issue #52). Sets npm_config_yes
    and GIT_TERMINAL_PROMPT at process level so every shell command inside
    the pane is non-interactive by default.
-6. `_apply_color_term()` — advertise a truecolor terminal so claude/ink
+5. `_apply_color_term()` — advertise a truecolor terminal so claude/ink
    renders ANSI colours. The cockpit front-end is xterm.js on every OS
    (full 256-colour + truecolor palette), but a GUI-launched cockpit on
    macOS inherits no `TERM`, so the allowlist had nothing to forward and
@@ -86,9 +84,6 @@ _PANE_ENV_ALLOWLIST: frozenset[str] = frozenset(
         "TAKKUB_ROLE",
         "TAKKUB_PROJECT",
         "TAKKUB_SETTING_SOURCES",
-        "TAKKUB_ECC_FULL",
-        "ECC_GATEGUARD",
-        "ECC_DISABLED_HOOKS",
         # Browser MCP (chrome-devtools needs to find Chrome)
         "CHROME_BIN",
         # User override for MCP per-call timeout (default injected below).
@@ -169,38 +164,6 @@ def _build_lead_env() -> dict[str, str]:
         if k:
             allow.add(k.upper())
     return {k: v for k, v in os.environ.items() if k.upper() in allow}
-
-
-# ECC plugin hooks we mute in every pane. See cockpit CLAUDE.md
-# "ECC plugin noise — auto-muted ใน pane env" for the rationale.
-_ECC_MUTED_HOOKS: tuple[str, ...] = (
-    "pre:edit-write:gateguard-fact-force",
-    "post:ecc-context-monitor",
-)
-
-
-def _apply_ecc_mute(env: dict[str, str]) -> None:
-    """Mutate `env` in place so spawned claude sessions skip ECC's two
-    noisiest hooks: GateGuard fact-force and the cost-critical alerter.
-
-    Invariants the wire-ups depend on:
-      - Sets both `ECC_GATEGUARD=off` and `ECC_DISABLED_HOOKS`. Either
-        knob alone is enough to silence GateGuard, but `ecc-context-
-        monitor` only honours the disabled-hooks list, so both go in.
-      - Never clobbers a user-provided `ECC_GATEGUARD` (e.g. if the
-        operator deliberately set it elsewhere).
-      - Appends to any existing `ECC_DISABLED_HOOKS` rather than
-        replacing it, so a user-disabled hook stays disabled.
-      - Skipped entirely when `TAKKUB_ECC_FULL=1` is set — escape
-        hatch for the rare case a future ECC hook gets caught in the
-        mute net.
-    """
-    if os.environ.get("TAKKUB_ECC_FULL") == "1":
-        return
-    env.setdefault("ECC_GATEGUARD", "off")
-    extra = ",".join(_ECC_MUTED_HOOKS)
-    existing = env.get("ECC_DISABLED_HOOKS", "").strip()
-    env["ECC_DISABLED_HOOKS"] = f"{existing},{extra}" if existing else extra
 
 
 def _apply_mcp_timeout(env: dict[str, str]) -> None:

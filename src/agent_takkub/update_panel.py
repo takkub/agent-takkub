@@ -622,7 +622,11 @@ class MainWindowUpdateMixin:
         # tell the user to retry in a moment.
         if self._update_status_cache is None:
             self._status.showMessage("Checking for updates… click again in a moment.", 4_000)
-            self._run_update_check()
+            # Threaded — a synchronous fetch here froze the Qt main thread for up
+            # to ~10 s (git fetch network timeout) right after boot. The worker
+            # populates the cache via _on_update_check_done; the message already
+            # tells the user to retry in a moment.
+            self._schedule_update_check()
             return
         status = self._update_status_cache
         if status.get("not_repo"):
@@ -729,7 +733,7 @@ class MainWindowUpdateMixin:
         ok, msg = pull_updates()
         if not ok:
             QMessageBox.critical(self, "Pull failed", msg)
-            self._run_update_check()  # refresh chip with latest state
+            self._schedule_update_check()  # refresh chip (threaded — no main-thread fetch)
             return
         # Pull succeeded. If deps changed, restart through the pip-sync path so
         # the new cockpit boots with the new dependencies installed; otherwise a

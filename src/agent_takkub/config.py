@@ -17,7 +17,13 @@ _SAFE_PLUGINS: tuple[str, ...] = (
     "superpowers-dev",
     "addy-agent-skills",
     "pordee",
-    "ecc",
+    # Anthropic's official marketplace. The cockpit ships its dev-skill plugins
+    # (frontend-design, code-review) into panes; the hook-heavy ones in the same
+    # marketplace (remember, security-guidance — SessionStart command hooks that
+    # add a 180s agent-SDK setup / per-tool memory writes) are filtered out of
+    # pane injection by `lead_context._PANE_PLUGIN_DENYLIST` so they don't slow
+    # spawns, while staying user-enabled for the user's own sessions.
+    "claude-plugins-official",
     # claude-obsidian-marketplace is intentionally excluded: the cached 1.4.3
     # build ships a SessionStart prompt-hook that crashed all panes in v0.2.0
     # (ToolUseContext required error). Until a spawn smoke-test under cockpit
@@ -98,6 +104,21 @@ def active_project() -> tuple[str | None, dict]:
 def list_project_names() -> list[str]:
     """All known project names from projects.json."""
     return list(load_projects().get("projects", {}).keys())
+
+
+def project_folder_exists(name: str | None) -> bool:
+    """True if the project's Lead working directory still exists on disk.
+
+    A project can stay listed in projects.json after its folder is deleted
+    out from under the cockpit. Spawning Lead into that missing cwd hangs the
+    ConPTY backend (see `_pty_backend.spawn_pty`), so boot/tab-restore use this
+    to skip dead projects instead of spawning into a vanished directory.
+    Unknown name or a project with no configured paths → False.
+    """
+    if not name:
+        return False
+    cwd = lead_cwd(name)
+    return bool(cwd) and Path(cwd).is_dir()
 
 
 # preferred path key per role (first match wins; falls back to first path)

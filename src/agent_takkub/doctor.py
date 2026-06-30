@@ -212,30 +212,15 @@ def check_plugins(cache_root: Path | None = None) -> list[Finding]:
     for marketplace in _SAFE_PLUGINS:
         mp_dir = root / marketplace
         if not mp_dir.is_dir():
-            if marketplace == "ecc":
-                # ECC is intentionally NOT installed (its SessionStart prompt-hook
-                # crashed panes + cost ~31k tokens/session). It stays in
-                # _SAFE_PLUGINS only so the defensive mute kicks in if it ever
-                # shows up from another source — so "not installed" is the
-                # desired state here, not a problem to fix.
-                findings.append(
-                    Finding(
-                        "plugins",
-                        marketplace,
-                        Status.SKIP,
-                        "not installed (intentional — defensive mute stays active)",
-                    )
+            findings.append(
+                Finding(
+                    "plugins",
+                    marketplace,
+                    Status.WARN,
+                    "not installed",
+                    "install via /plugin in a Claude Code session",
                 )
-            else:
-                findings.append(
-                    Finding(
-                        "plugins",
-                        marketplace,
-                        Status.WARN,
-                        "not installed",
-                        "install via /plugin in a Claude Code session",
-                    )
-                )
+            )
             continue
 
         # 3-level walk: marketplace / plugin / version / .claude-plugin / plugin.json
@@ -263,18 +248,7 @@ def check_plugins(cache_root: Path | None = None) -> list[Finding]:
                     found = True
                     break
                 label = f"{marketplace}/{plugin_dir.name}@{v.name}"
-                if marketplace == "ecc":
-                    findings.append(
-                        Finding(
-                            "plugins",
-                            marketplace,
-                            Status.WARN,
-                            f"{label}   SessionStart hook present",
-                            'if Lead crashes set TAKKUB_EXTRA_PLUGINS=""',
-                        )
-                    )
-                else:
-                    findings.append(Finding("plugins", marketplace, Status.OK, label))
+                findings.append(Finding("plugins", marketplace, Status.OK, label))
                 found = True
                 break
             if found:

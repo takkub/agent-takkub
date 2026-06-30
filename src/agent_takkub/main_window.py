@@ -47,6 +47,7 @@ from .config import (
     get_open_tabs,
     list_project_names,
     preset_roles_for_active,
+    project_folder_exists,
     set_active_project,
     set_open_tabs,
 )
@@ -524,6 +525,16 @@ class MainWindow(
         active = active_project()[0]
         if active:
             self.lead_pane._title.setText(f"Lead · {active}")
+            # If the active project's folder was deleted on disk, Lead can't
+            # spawn there. _spawn_lead_when_quiet would fail gracefully (no
+            # freeze, since _pty_backend raises now), but warn up-front so the
+            # empty Lead pane isn't a mystery.
+            if not project_folder_exists(active):
+                self._status.showMessage(
+                    f"⚠ active project '{active}' folder is missing on disk — "
+                    f"Lead can't start. Restore the folder or pick another project.",
+                    0,
+                )
 
         # Project may have been picked before boot — sync the rtk button to
         # match its current installation state.
@@ -816,6 +827,17 @@ class MainWindow(
         first paint — re-parenting a WebEngine-containing widget
         crashes Chromium's renderer on Windows.
         """
+        # Guard: a project whose folder was deleted on disk would make Lead
+        # spawn into a missing cwd. _pty_backend now raises instead of hanging,
+        # but skip building a dead tab entirely and tell the user it's gone
+        # (covers both boot tab-restore and the manual `+` picker).
+        if not project_folder_exists(project_name):
+            self._status.showMessage(
+                f"⚠ project '{project_name}' folder is missing on disk — tab skipped. "
+                f"Restore the folder or remove the project from the list.",
+                15_000,
+            )
+            return
         # Set as active so spawn picks up lead_cwd() for the new project.
         set_active_project(project_name)
         self._refresh_project_list()
@@ -903,9 +925,7 @@ class MainWindow(
         # Reparent the usage label: clear the old corner first so the previous
         # tab doesn't keep a stale reference, then mount on the new active tab.
         if self._limit_label_host is not None and self._limit_label_host is not tab:
-            self._limit_label_host.pane_tabs.setCornerWidget(
-                None, Qt.Corner.TopRightCorner
-            )
+            self._limit_label_host.pane_tabs.setCornerWidget(None, Qt.Corner.TopRightCorner)
         self._limit_label_host = tab
         tab.mount_usage_widget(self._limit_label)
         if set_active_project(tab.project_name):

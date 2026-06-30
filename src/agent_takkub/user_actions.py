@@ -10,7 +10,7 @@ attributes (``orch``, ``_status``, ``_btn_pipelines``, ``_chip_codex``,
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtWidgets import (
     QDialog,
     QHBoxLayout,
@@ -24,6 +24,43 @@ from PyQt6.QtWidgets import (
 
 from .config import REPO_ROOT, active_project
 from .orchestrator import _log_event
+
+
+class _DoctorThread(QThread):
+    """Run doctor checks (and optional auto-fixes) OFF the Qt main thread.
+
+    ``doctor.run_all_checks()`` chains ~9 subprocess probes (claude/node/npx
+    ``--version``, plugin + mcp scans) plus a ``git fetch`` (up to ~8 s on a
+    slow/unreachable network). Calling it straight from the 🩺 button slot
+    blocked the Qt event loop for that whole duration, freezing the entire
+    cockpit. The field symptom "cockpit ดับ" was the user force-killing a UI
+    that was wedged here — boot.log's main-thread stack pinned it exactly:
+    ``_on_doctor_clicked → run_all_checks → check_version → fetch_remote →
+    subprocess.communicate``. Doing the work in this thread keeps the UI live.
+
+    Signals
+    -------
+    ready(object) — emits ``list[Finding]`` when the checks finish (never raises;
+                    emits ``[]`` on unexpected error so the dialog can recover).
+    """
+
+    ready: pyqtSignal = pyqtSignal(object)
+
+    def __init__(self, apply_fixes_to: object | None = None, parent=None) -> None:
+        super().__init__(parent)
+        # When set, run_auto_fixes(these) runs before the re-check (Fix button).
+        self._apply_fixes_to = apply_fixes_to
+
+    def run(self) -> None:
+        from . import doctor as _doctor
+
+        try:
+            if self._apply_fixes_to is not None:
+                _doctor.run_auto_fixes(self._apply_fixes_to)
+            findings = _doctor.run_all_checks()
+        except Exception:
+            findings = []
+        self.ready.emit(findings)
 
 
 class UserActionsMixin:
@@ -354,14 +391,17 @@ class UserActionsMixin:
     def _on_doctor_clicked(self) -> None:
         """🩺 Doctor button: run environment checks and display a report dialog.
 
-        Shows doctor.format_report() in a scrollable monospace view.
-        A Fix button appears when at least one finding has auto_fix set;
-        clicking it runs doctor.run_auto_fixes() and refreshes the display.
+        The checks (`doctor.run_all_checks()`) run in a background `_DoctorThread`
+        so the multi-second `git fetch` + subprocess probes never block the Qt
+        main thread — see `_DoctorThread` for why that freeze used to read as the
+        cockpit "dying". The dialog opens immediately showing a "running" state
+        and is populated when the worker emits its findings. A Fix button appears
+        when at least one finding has auto_fix set; clicking it runs the fixes +
+        re-check on the same background thread.
         """
         from . import doctor as _doctor
 
         self._status.showMessage("🩺 Running diagnostics…", 2_000)
-        findings = _doctor.run_all_checks()
 
         dlg = QDialog(self)
         dlg.setWindowTitle("🩺 Cockpit Doctor")
@@ -380,21 +420,20 @@ class UserActionsMixin:
             "border:1px solid #3f3f46; border-radius:4px; padding:6px; "
             "font-family: 'Consolas', 'Courier New', monospace; font-size:12px; }"
         )
-        report_view.setPlainText(_doctor.format_report(findings))
+        report_view.setPlainText(
+            "🩺 Running diagnostics…\n\n"
+            "  checking claude / node / npx / plugins / mcps / projects /\n"
+            "  providers / hooks / ready-markers / git version…\n\n"
+            "  (running in the background — the cockpit stays responsive)"
+        )
         layout.addWidget(report_view, 1)
 
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
 
-        has_fixes = any(f.auto_fix is not None for f in findings)
-
         btn_fix = QPushButton("Fix", dlg)
-        btn_fix.setEnabled(has_fixes)
-        btn_fix.setToolTip(
-            "Run auto-fixes for all fixable findings."
-            if has_fixes
-            else "No auto-fixable findings in this report."
-        )
+        btn_fix.setEnabled(False)
+        btn_fix.setToolTip("Running checks…")
         btn_fix.setStyleSheet(
             "QPushButton { background:#16a34a; color:#fff; border:none; "
             "border-radius:5px; padding:4px 14px; font-weight:600; }"
@@ -402,14 +441,48 @@ class UserActionsMixin:
             "QPushButton:disabled { background:#3f3f46; color:#71717a; }"
         )
 
-        def _on_fix() -> None:
-            _doctor.run_auto_fixes(findings)
-            refreshed = _doctor.run_all_checks()
-            report_view.setPlainText(_doctor.format_report(refreshed))
-            btn_fix.setEnabled(any(f.auto_fix is not None for f in refreshed))
-            self._status.showMessage("🩺 Auto-fixes applied", 4_000)
+        # Track the running worker so it isn't garbage-collected mid-run and so a
+        # Fix re-check can't overlap the initial run. Parented to self (the long-
+        # lived window) so closing the dialog while checks run never destroys a
+        # live QThread.
+        if not hasattr(self, "_doctor_threads"):
+            self._doctor_threads: set = set()
 
-        btn_fix.clicked.connect(_on_fix)
+        def _start(apply_fixes_to=None) -> None:
+            btn_fix.setEnabled(False)
+            btn_fix.setToolTip("Running checks…")
+            worker = _DoctorThread(apply_fixes_to=apply_fixes_to, parent=self)
+            self._doctor_threads.add(worker)
+
+            def _on_ready(findings: object) -> None:
+                # The dialog may have been closed while the worker ran; guard the
+                # C++-object access so a late signal can't raise in the slot.
+                try:
+                    report_view.setPlainText(_doctor.format_report(findings))
+                    has_fixes = any(f.auto_fix is not None for f in findings)
+                    btn_fix.setEnabled(has_fixes)
+                    btn_fix.setToolTip(
+                        "Run auto-fixes for all fixable findings."
+                        if has_fixes
+                        else "No auto-fixable findings in this report."
+                    )
+                    # Rebind Fix to operate on the freshest findings.
+                    try:
+                        btn_fix.clicked.disconnect()
+                    except (TypeError, RuntimeError):
+                        pass
+                    btn_fix.clicked.connect(lambda: _start(apply_fixes_to=findings))
+                    if apply_fixes_to is not None:
+                        self._status.showMessage("🩺 Auto-fixes applied", 4_000)
+                except RuntimeError:
+                    pass
+
+            worker.ready.connect(_on_ready)
+            worker.finished.connect(lambda w=worker: self._doctor_threads.discard(w))
+            worker.finished.connect(worker.deleteLater)
+            worker.start()
+
+        _start()
 
         btn_close = QPushButton("Close", dlg)
         btn_close.setStyleSheet(

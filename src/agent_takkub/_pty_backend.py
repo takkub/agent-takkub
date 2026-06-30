@@ -116,6 +116,17 @@ def spawn_pty(
 ):
     """Spawn ``argv`` in a PTY using the platform-appropriate backend and return
     a wrapper exposing read/write/isalive/terminate/setwinsize/pid/exitstatus."""
+    # A non-existent cwd makes pywinpty's ConPTY backend hang *forever* — it
+    # never returns and never raises, so the ConPTY→WinPTY except-fallback in
+    # _WinptyBackend.spawn never fires either. Because PtySession.spawn() runs
+    # synchronously on the Qt main thread, that freezes the whole cockpit GUI.
+    # (Repro: delete a project's folder on disk, then reopen the cockpit — Lead
+    # spawns into the now-missing lead_cwd and the window locks up.) ptyprocess
+    # would raise on a bad cwd, but guard centrally so BOTH backends fail fast
+    # and identically with a readable error that spawn()'s try/except turns into
+    # a clean "spawn failed: working directory does not exist" message.
+    if cwd is not None and not os.path.isdir(cwd):
+        raise NotADirectoryError(f"working directory does not exist: {cwd!r}")
     if sys.platform == "win32":
         return _WinptyBackend.spawn(argv, cwd, env, rows, cols)
     return _PosixBackend.spawn(argv, cwd, env, rows, cols)

@@ -24,6 +24,15 @@ import sys
 # first) is sufficient.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+# Declare the test process as a multi-instance run so it can NEVER take the
+# single-instance lock path in app.main(), whose auto-kill os.kill()s the PID
+# holding the cockpit lock (app.py `[single-instance] killing old process`).
+# Without this, running the suite while a real cockpit is open risks the test
+# process — or any code under test that reaches that path — terminating the
+# user's live dev instance. setdefault so an explicit outer value still wins.
+# Per-test env assertions (test_office_room) monkeypatch/delenv to override.
+os.environ.setdefault("TAKKUB_ALLOW_MULTI", "1")
+
 import pytest
 
 # Modules that bind RUNTIME_DIR / EVENTS_LOG as a module-level name. config is

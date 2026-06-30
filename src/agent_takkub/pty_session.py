@@ -91,14 +91,21 @@ def _tree_kill(pid: int | None) -> None:
     if pid is None:
         return
     if sys.platform == "win32":
+        # Fire-and-forget: DON'T wait for taskkill. terminate() runs on the Qt
+        # main thread (orchestrator.close → session.terminate), and a blocking
+        # subprocess.run(timeout=5) here froze the whole UI for up to 5 s on
+        # every pane close — longer when `/T` walks a large tree (e.g. a leaked
+        # `next dev` with thousands of node children). boot.log caught this as a
+        # main-thread stall under `_close_if_same_session → close`. taskkill
+        # issues the termination synchronously to the OS; we don't need its
+        # result, so Popen-and-detach keeps the kill semantics without the block.
         try:
-            subprocess.run(
+            subprocess.Popen(
                 ["taskkill", "/PID", str(pid), "/T", "/F"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
                 creationflags=_CREATE_NO_WINDOW,
-                timeout=5,
-                check=False,
             )
         except Exception:
             pass
