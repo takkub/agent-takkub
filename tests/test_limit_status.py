@@ -305,3 +305,95 @@ class TestLimitStore:
                 store.get(cd)
 
         assert fetch_count == count_after_register, "get() must not trigger any additional fetches"
+
+    def test_rate_limited_sets_backoff_and_emits_stale(self, tmp_path: Path) -> None:
+        """A 429 records a per-key backoff deadline and re-emits the last known
+        data marked ``rate_limited`` instead of blanking. Regression: the old
+        code swallowed RateLimited, never backed off, and kept hammering."""
+        cd = tmp_path / ".claude"
+        cd.mkdir()
+        key = limit_status._resolve_config_dir(cd)
+
+        emitted: list = []
+        store = LimitStore(interval_s=3600, on_update=lambda k, d: emitted.append(d))
+        store._refs[key] = 1  # register without spawning the immediate-fetch thread
+
+        # Seed the cache with a good fetch, then trip a 429.
+        with patch("agent_takkub.limit_status.fetch_usage", return_value=_fake_usage()):
+            store._do_fetch(key)
+        assert key not in store._backoff_until
+
+        with patch(
+            "agent_takkub.limit_status.fetch_usage",
+            side_effect=limit_status.RateLimited(3600.0),
+        ):
+            store._do_fetch(key)
+
+        assert key in store._backoff_until
+        assert store._backoff_until[key] > time.monotonic() + 3000
+        assert emitted[-1] is not None, "stale cached data should still be emitted"
+        assert emitted[-1].status == "rate_limited"
+
+    def test_rate_limited_backoff_honours_min_floor(self, tmp_path: Path) -> None:
+        """A tiny/absent Retry-After is floored to _min_backoff_s so a burst of
+        429s can never collapse the backoff to near-zero."""
+        cd = tmp_path / ".claude"
+        cd.mkdir()
+        key = limit_status._resolve_config_dir(cd)
+
+        store = LimitStore(interval_s=3600)
+        store._refs[key] = 1
+
+        with patch(
+            "agent_takkub.limit_status.fetch_usage",
+            side_effect=limit_status.RateLimited(None),
+        ):
+            store._do_fetch(key)
+
+        assert store._backoff_until[key] >= time.monotonic() + store._min_backoff_s - 1
+
+    def test_loop_skips_key_while_backed_off(self, tmp_path: Path) -> None:
+        """_loop must NOT fetch a key whose backoff deadline is in the future —
+        this is what stops the 429 penalty from re-arming itself."""
+        cd = tmp_path / ".claude"
+        cd.mkdir()
+        key = limit_status._resolve_config_dir(cd)
+
+        calls: list = []
+        store = LimitStore(interval_s=0)  # wake immediately, spin the loop hard
+        store._refs[key] = 1
+        store._backoff_until[key] = time.monotonic() + 3600  # long backoff
+
+        with patch(
+            "agent_takkub.limit_status.fetch_usage",
+            side_effect=lambda cfg=None: calls.append(1) or _fake_usage(),
+        ):
+            store.start()
+            time.sleep(0.25)
+            store.stop()
+
+        assert calls == [], "loop must skip a key that is still backing off"
+
+    def test_loop_resumes_after_backoff_expires(self, tmp_path: Path) -> None:
+        """Once the backoff deadline passes, _loop fetches the key again and a
+        successful fetch clears the deadline."""
+        cd = tmp_path / ".claude"
+        cd.mkdir()
+        key = limit_status._resolve_config_dir(cd)
+
+        fired = threading.Event()
+        store = LimitStore(interval_s=0)
+        store._refs[key] = 1
+        store._backoff_until[key] = time.monotonic() - 1  # already expired
+
+        def fake_fetch(cfg=None):
+            fired.set()
+            return _fake_usage()
+
+        with patch("agent_takkub.limit_status.fetch_usage", side_effect=fake_fetch):
+            store.start()
+            ok = fired.wait(timeout=2.0)
+            store.stop()
+
+        assert ok, "loop must fetch again once the backoff deadline has passed"
+        assert key not in store._backoff_until, "a successful fetch must clear backoff"
