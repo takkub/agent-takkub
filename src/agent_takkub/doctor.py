@@ -251,6 +251,120 @@ def check_runtime() -> list[Finding]:
 
 
 # ---------------------------------------------------------------------------
+# [qt] — Qt version pin + crash guard (cross-platform stability gate)
+# ---------------------------------------------------------------------------
+
+
+def check_qt() -> list[Finding]:
+    """[qt] — enforce the pinned Qt 6.8 LTS series + the runtime crash guard.
+
+    Qt 6.11.0 shipped a Qt6Core regression that hard-crashes the cockpit on pane
+    teardown (``0xc0000409`` __fastfail on Windows, abort on macOS). pyproject
+    pins the 6.8 LTS series, but a machine that ran a bare ``pip install PyQt6``
+    silently pulls the latest (6.11) and crashes — the exact "works on my box,
+    crashes on the other mac" trap. This surfaces the mismatch and, with
+    ``--fix``, reinstalls the pinned range.
+
+    The runtime slot-exception guard (``app._install_exception_guard``) is
+    checked *statically from source* so the CLI process never imports the GUI
+    stack (import-linter cli↔GUI boundary).
+    """
+    findings: list[Finding] = []
+
+    # 1. Qt runtime version vs the pinned 6.8 LTS series.
+    try:
+        from PyQt6.QtCore import QT_VERSION_STR
+    except Exception as e:
+        return [
+            Finding(
+                "qt",
+                "runtime",
+                Status.FAIL,
+                f"PyQt6 not importable: {e}",
+                "pip install -e .  (from the repo root)",
+            )
+        ]
+
+    ver = QT_VERSION_STR
+    try:
+        major, minor = (int(x) for x in ver.split(".")[:2])
+    except ValueError:
+        major, minor = 0, 0
+
+    if (major, minor) == (6, 8):
+        findings.append(Finding("qt", "version", Status.OK, f"Qt {ver} (pinned 6.8 LTS)"))
+    else:
+
+        def _reinstall_qt() -> tuple[bool, str]:
+            """--fix: force the 6.8 LTS pins back over whatever bare install pulled."""
+            from ._win_console import SUBPROCESS_NO_WINDOW
+
+            try:
+                r = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "pip",
+                        "install",
+                        "--upgrade",
+                        "PyQt6>=6.8,<6.9",
+                        "PyQt6-Qt6>=6.8,<6.9",
+                        "PyQt6-WebEngine>=6.8,<6.9",
+                        "PyQt6-WebEngine-Qt6>=6.8,<6.9",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
+                    creationflags=SUBPROCESS_NO_WINDOW,
+                )
+            except Exception as e:
+                return False, str(e)
+            if r.returncode == 0:
+                return True, "reinstalled PyQt6 6.8 LTS — restart the cockpit to load it"
+            return False, ((r.stderr or r.stdout or "").strip()[-200:] or "pip install failed")
+
+        known_bad = (major, minor) >= (6, 11)
+        why = (
+            "6.11+ has a pane-teardown crash regression"
+            if known_bad
+            else "untested outside the pinned 6.8 LTS"
+        )
+        findings.append(
+            Finding(
+                "qt",
+                "version",
+                Status.FAIL,
+                f"Qt {ver} — not the pinned 6.8 LTS ({why})",
+                "takkub doctor --fix  → reinstalls 6.8 LTS, then restart the cockpit",
+                auto_fix=_reinstall_qt,
+            )
+        )
+
+    # 2. Runtime crash guard — checked from source (importing app would pull the
+    #    GUI stack into the CLI process, crossing the import-linter boundary).
+    app_src = Path(__file__).with_name("app.py")
+    try:
+        has_guard = "_install_exception_guard" in app_src.read_text(encoding="utf-8")
+    except OSError:
+        has_guard = False
+    if has_guard:
+        findings.append(
+            Finding("qt", "crash-guard", Status.OK, "slot-exception guard present in app.py")
+        )
+    else:
+        findings.append(
+            Finding(
+                "qt",
+                "crash-guard",
+                Status.WARN,
+                "exception guard missing — pane teardown may hard-crash the process",
+                "git pull --ff-only origin main  (update to latest)",
+            )
+        )
+    return findings
+
+
+# ---------------------------------------------------------------------------
 # [plugins]
 # ---------------------------------------------------------------------------
 
@@ -697,6 +811,7 @@ def run_all_checks() -> list[Finding]:
     findings: list[Finding] = []
     findings.extend(check_claude())
     findings.extend(check_runtime())
+    findings.extend(check_qt())
     findings.extend(check_plugins())
     findings.extend(check_mcps())
     findings.extend(check_projects())
