@@ -504,9 +504,7 @@ class StatusHeaderMixin:
         # user can see at a glance what build they're on. Refreshed after
         # every update check + after a successful pull.
         self._version_label = QLabel("", self)
-        self._version_label.setStyleSheet(
-            "color: #6b7280; font-size: 11px; padding: 0 6px;"
-        )
+        self._version_label.setStyleSheet("color: #6b7280; font-size: 11px; padding: 0 6px;")
         self._version_label.setToolTip(
             "Cockpit version + commit SHA.\nClick to view the changelog "
             "(copy version from inside).\nClick the 🔄 chip to pull updates."

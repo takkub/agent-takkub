@@ -254,9 +254,7 @@ class MainWindow(
         # On every project switch _on_tab_switched reparents this single label
         # into the new active ProjectTab's corner via mount_usage_widget().
         self._limit_label = QLabel("—")
-        self._limit_label.setStyleSheet(
-            "QLabel { color:#52525b; font-size:11px; padding:0 8px; }"
-        )
+        self._limit_label.setStyleSheet("QLabel { color:#52525b; font-size:11px; padding:0 8px; }")
         self._limit_label.setToolTip(
             "Claude usage windows (5h / 7d / 7d-Sonnet)\n"
             "Reflects the User: profile selected for this project.\n"

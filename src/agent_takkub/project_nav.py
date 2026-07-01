@@ -156,9 +156,7 @@ class _ProjectRow(QWidget):
         self._name.setStyleSheet("color: #d4d4d8; font-size: 13px; font-weight: 600;")
 
         self._badge = QLabel("")
-        self._badge.setStyleSheet(
-            "color: #52525b; font-size: 11px;"
-        )
+        self._badge.setStyleSheet("color: #52525b; font-size: 11px;")
 
         self._lay.addWidget(self._avatar)
         self._lay.addWidget(self._name, 1)
@@ -195,9 +193,7 @@ class _ProjectRow(QWidget):
             self._badge.setText("")
             return
         self._badge.setText(f"{int(ratio * 100)}%")
-        self._badge.setStyleSheet(
-            f"color: {usage_color(ratio)}; font-size: 11px;"
-        )
+        self._badge.setStyleSheet(f"color: {usage_color(ratio)}; font-size: 11px;")
 
     def set_collapsed(self, collapsed: bool) -> None:
         """Hide/show the name + badge; re-center the avatar in the rail."""
