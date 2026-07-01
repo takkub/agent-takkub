@@ -131,6 +131,11 @@ class TestDetachFlushes:
         pane._last_usage = None
         pane._token_label = MagicMock()
         pane._terminal = MagicMock()
+        # detach_session reads self._exit_conn (added when processExited was
+        # wired into teardown). On a __new__-built pane a *missing* attr read
+        # raises RuntimeError ("super-class __init__ never called") rather than
+        # AttributeError, so getattr(..., None) can't swallow it — seed it here.
+        pane._exit_conn = None
 
         # Buffer some bytes — timer hasn't fired.
         pane._render_buf = bytearray(b"pending output")
