@@ -15,6 +15,7 @@ from agent_takkub.doctor import (
     check_plugins,
     check_projects,
     check_providers,
+    check_qt,
     check_runtime,
     run_all_checks,
 )
@@ -52,6 +53,42 @@ class TestCheckProviders:
             g = self._gemini(check_providers())
         assert g.status == Status.SKIP
         assert "antigravity.google" in (g.fix_hint or "")
+
+
+# ---------------------------------------------------------------------------
+# check_qt — Qt 6.8 LTS pin + crash-guard gate
+# ---------------------------------------------------------------------------
+
+
+class TestCheckQt:
+    def _f(self, findings: list[Finding], name: str) -> Finding:
+        return next(f for f in findings if f.name == name)
+
+    def test_pinned_68_is_ok_no_autofix(self) -> None:
+        with patch("PyQt6.QtCore.QT_VERSION_STR", "6.8.2"):
+            v = self._f(check_qt(), "version")
+        assert v.status == Status.OK
+        assert v.auto_fix is None
+        assert "6.8.2" in v.detail
+
+    def test_611_flagged_fail_with_autofix_and_regression_note(self) -> None:
+        with patch("PyQt6.QtCore.QT_VERSION_STR", "6.11.0"):
+            v = self._f(check_qt(), "version")
+        assert v.status == Status.FAIL
+        assert v.auto_fix is not None  # --fix can reinstall the 6.8 pin
+        assert "regression" in v.detail
+
+    def test_non_68_below_is_fail_but_marked_untested_not_regression(self) -> None:
+        with patch("PyQt6.QtCore.QT_VERSION_STR", "6.7.0"):
+            v = self._f(check_qt(), "version")
+        assert v.status == Status.FAIL
+        assert "untested" in v.detail
+        assert "regression" not in v.detail
+
+    def test_crash_guard_detected_in_shipped_source(self) -> None:
+        # The real app.py defines _install_exception_guard — static source read.
+        g = self._f(check_qt(), "crash-guard")
+        assert g.status == Status.OK
 
 
 # ---------------------------------------------------------------------------
@@ -416,6 +453,7 @@ class TestRunAllChecks:
                 "agent_takkub.doctor.check_runtime",
                 return_value=[Finding("runtime", "node", Status.OK)],
             ),
+            patch("agent_takkub.doctor.check_qt", return_value=[]),
             patch("agent_takkub.doctor.check_plugins", return_value=[]),
             patch("agent_takkub.doctor.check_mcps", return_value=[]),
             patch("agent_takkub.doctor.check_projects", return_value=[]),
