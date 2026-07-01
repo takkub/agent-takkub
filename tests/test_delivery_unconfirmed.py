@@ -110,6 +110,14 @@ class TestReadyWaitMs:
         )
         assert orch._ready_wait_ms("gemini", "P", 45_000) == 90_000
 
+    def test_codex_gets_longer_window_on_default(self, orch, monkeypatch) -> None:
+        from agent_takkub import provider_config
+
+        monkeypatch.setattr(
+            provider_config, "effective_provider_for", lambda role, project=None: "codex"
+        )
+        assert orch._ready_wait_ms("codex", "P", 45_000) == 90_000
+
     def test_claude_role_keeps_default(self, orch, monkeypatch) -> None:
         from agent_takkub import provider_config
 

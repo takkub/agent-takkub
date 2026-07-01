@@ -337,15 +337,21 @@ class LeadInboxMixin:
         routinely needs ~45-60s to render its first ready prompt, landing right
         at the default 45s edge and forcing a fragile blind paste (#26). Give
         gemini/agy panes a longer window so first-assign delivery is confirmed,
-        not blind. An explicit non-default ``max_wait_ms`` from the caller always
-        wins (e.g. the short-poll peer-send path).
+        not blind. codex gets the same extension: its ready banner
+        (``"openai codex (v"``) scrolls off the bottom-6-row scan window by the
+        time the UI finishes rendering, so the default 45s also forces a blind
+        paste there. An explicit non-default ``max_wait_ms`` from the caller
+        always wins (e.g. the short-poll peer-send path).
         """
         if max_wait_ms != 45_000:
             return max_wait_ms
         try:
-            from .provider_config import GEMINI, effective_provider_for
+            from .provider_config import CODEX, GEMINI, effective_provider_for
 
-            if effective_provider_for(role_name, project=self._resolve_project(project)) == GEMINI:
+            if effective_provider_for(role_name, project=self._resolve_project(project)) in (
+                GEMINI,
+                CODEX,
+            ):
                 return 90_000
         except Exception:
             pass
