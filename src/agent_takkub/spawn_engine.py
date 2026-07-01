@@ -1342,7 +1342,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             # — the Lead is the single pane the user is actually talking to,
             # so a hard failure there stalls the whole session. Set
             # TAKKUB_LEAD_FALLBACK="" to disable.
-            lead_fallback = os.environ.get("TAKKUB_LEAD_FALLBACK", "claude-sonnet-4-6").strip()
+            lead_fallback = os.environ.get("TAKKUB_LEAD_FALLBACK", "claude-sonnet-5").strip()
             if lead_fallback:
                 argv.extend(["--fallback-model", lead_fallback])
 

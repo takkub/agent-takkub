@@ -34,8 +34,8 @@ def test_pro_pins_standard_context_opus(tmp_plan):
 
 def test_pro_env_override_swaps_model(tmp_plan, monkeypatch):
     plan_tier.set_current(plan_tier.PRO)
-    monkeypatch.setenv("TAKKUB_PRO_LEAD_MODEL", "claude-sonnet-4-6")
-    assert orchestrator._lead_model_override() == "claude-sonnet-4-6"
+    monkeypatch.setenv("TAKKUB_PRO_LEAD_MODEL", "claude-sonnet-5")
+    assert orchestrator._lead_model_override() == "claude-sonnet-5"
 
 
 def test_pro_empty_env_disables_pin(tmp_plan, monkeypatch):

@@ -84,20 +84,20 @@ _HARVEST_EXCLUDE_DIRS = frozenset(
 # The global TAKKUB_TEAMMATE_MODEL / _EFFORT / _FALLBACK env vars still win
 # when explicitly set — they override every role's per-role default at once.
 _DEFAULT_TEAMMATE_TIER: tuple[str, str, str] = (
-    "claude-sonnet-4-6",
+    "claude-sonnet-5",
     "medium",
     "claude-haiku-4-5",
 )
 _ROLE_MODEL_TIERS: dict[str, tuple[str, str, str]] = {
-    "reviewer": ("claude-opus-4-8", "high", "claude-sonnet-4-6"),
-    "critic": ("claude-opus-4-8", "high", "claude-sonnet-4-6"),
-    "backend": ("claude-sonnet-4-6", "high", "claude-haiku-4-5"),
-    "devops": ("claude-sonnet-4-6", "high", "claude-haiku-4-5"),
+    "reviewer": ("claude-opus-4-8", "high", "claude-sonnet-5"),
+    "critic": ("claude-opus-4-8", "high", "claude-sonnet-5"),
+    "backend": ("claude-sonnet-5", "high", "claude-haiku-4-5"),
+    "devops": ("claude-sonnet-5", "high", "claude-haiku-4-5"),
     # codex/gemini substitutes: when the real binary is unavailable, Claude
     # backs the role — use Opus/high so the cross-check has the same quality
     # as reviewer/critic rather than falling to the default Sonnet tier.
-    "codex": ("claude-opus-4-8", "high", "claude-sonnet-4-6"),
-    "gemini": ("claude-opus-4-8", "high", "claude-sonnet-4-6"),
+    "codex": ("claude-opus-4-8", "high", "claude-sonnet-5"),
+    "gemini": ("claude-opus-4-8", "high", "claude-sonnet-5"),
 }
 
 # ── bracketed-paste framing ───────────────────────────────────────────────────

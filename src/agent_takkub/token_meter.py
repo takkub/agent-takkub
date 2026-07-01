@@ -32,8 +32,8 @@ _DEFAULT_LIMIT = 200_000
 # falls back to _DEFAULT_LIMIT.
 _MODEL_LIMITS: dict[str, int] = {
     # 1M variants — stamped with bracket suffix in some Code clients
-    "claude-opus-4-7[1m]": 1_000_000,
-    "claude-sonnet-4-6[1m]": 1_000_000,
+    "claude-opus-4-8[1m]": 1_000_000,
+    "claude-sonnet-5[1m]": 1_000_000,
 }
 
 
