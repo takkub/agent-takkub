@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -376,9 +377,14 @@ class LimitStore:
         self._interval_s = interval_s
         self._on_update = on_update
         self._stagger_s = stagger_s
+        self._min_backoff_s = 300.0
         self._lock = threading.Lock()
         self._refs: dict[Path, int] = {}
         self._cache: dict[Path, UsageData | None] = {}
+        # Per-key monotonic deadline (time.monotonic()) before which _loop must
+        # NOT re-fetch — set when the usage endpoint returns HTTP 429 so we
+        # honour its Retry-After instead of hammering through the penalty.
+        self._backoff_until: dict[Path, float] = {}
         self._running = False
         self._wake = threading.Event()
 
@@ -422,6 +428,7 @@ class LimitStore:
             if self._refs[key] <= 0:
                 self._refs.pop(key, None)
                 self._cache.pop(key, None)
+                self._backoff_until.pop(key, None)
 
     def get(self, config_dir: Path | None) -> UsageData | None:
         """Return cached data for *config_dir* without triggering any fetch."""
@@ -432,12 +439,34 @@ class LimitStore:
     # ── internal ──────────────────────────────────────────────────
 
     def _do_fetch(self, key: Path) -> None:
-        """Fetch usage for one config_dir, update cache, emit callback."""
+        """Fetch usage for one config_dir, update cache, emit callback.
+
+        On HTTP 429 we honour the server's Retry-After: record a per-key
+        backoff deadline so ``_loop`` stops hitting the endpoint until it
+        expires. The old code swallowed ``RateLimited`` and kept polling every
+        ``interval_s`` straight through the penalty window, which re-armed the
+        429 (Retry-After escalated all the way to 3600s) and left the meter
+        stuck on "—" forever. We also emit the last known data marked
+        ``rate_limited`` so a stale value can show instead of blanking.
+        Mirrors the backoff logic in ``Poller._do_poll``.
+        """
         try:
             data = fetch_usage(key)
-        except RateLimited:
-            _log.warning("Rate limited for %s, retaining cached data", key)
-            data = None
+        except RateLimited as exc:
+            backoff = max(exc.retry_after or 0.0, self._min_backoff_s)
+            _log.warning("Rate limited for %s; backing off %.0fs", key, backoff)
+            with self._lock:
+                if key not in self._refs:
+                    return  # unregistered while fetch was in-flight
+                self._backoff_until[key] = time.monotonic() + backoff
+                cached = self._cache.get(key)
+                emit_data = (
+                    dataclasses.replace(cached, status="rate_limited")
+                    if cached is not None
+                    else None
+                )
+            self._emit(key, emit_data)
+            return
         except Exception:
             _log.exception("Error fetching usage for %s", key)
             data = None
@@ -447,11 +476,15 @@ class LimitStore:
                 return  # unregistered while fetch was in-flight
             if data is not None:
                 self._cache[key] = data
+                self._backoff_until.pop(key, None)  # success clears any backoff
             emit_data = self._cache.get(key)
 
+        self._emit(key, emit_data)
+
+    def _emit(self, key: Path, data: UsageData | None) -> None:
         if self._on_update is not None:
             try:
-                self._on_update(key, emit_data)
+                self._on_update(key, data)
             except Exception:
                 _log.exception("Error in LimitStore on_update callback")
 
@@ -470,7 +503,10 @@ class LimitStore:
             for i, key in enumerate(keys):
                 if not self._running:
                     return
-                self._do_fetch(key)
+                with self._lock:
+                    backed_off = time.monotonic() < self._backoff_until.get(key, 0.0)
+                if not backed_off:
+                    self._do_fetch(key)
                 if i < len(keys) - 1:
                     # Small stagger between fetches to avoid burst
                     self._wake.wait(timeout=self._stagger_s)
