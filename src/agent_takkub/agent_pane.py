@@ -384,9 +384,7 @@ class AgentPane(QFrame):
         # explicit disconnect a late processExited would fire into a torn-down
         # widget. _on_exit also guards against that, but disconnecting is the
         # clean primary defense.
-        self._exit_conn = session.processExited.connect(
-            lambda code, g=_gen: self._on_exit(code, g)
-        )
+        self._exit_conn = session.processExited.connect(lambda code, g=_gen: self._on_exit(code, g))
         self._terminal.resized.connect(session.resize)
         self._update_title_with_cwd(cwd)
         self.set_state("active")
@@ -591,9 +589,7 @@ class AgentPane(QFrame):
         color = usage_color(pct)
         text = f"{format_tokens(prompt)}/{format_tokens(limit)} · {int(pct * 100)}%"
         self._token_label.setText(text)
-        self._token_label.setStyleSheet(
-            f"color: {color}; font-size: 11px;"
-        )
+        self._token_label.setStyleSheet(f"color: {color}; font-size: 11px;")
         self._token_label.setToolTip(
             f"model: {usage['model']}\n"
             f"prompt: {usage['prompt']:,} tokens  (input {usage['input']:,} + "
