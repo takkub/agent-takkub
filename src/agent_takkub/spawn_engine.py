@@ -254,6 +254,40 @@ def _teammate_disallowed_tools() -> list[str]:
     return raw.replace(",", " ").split()
 
 
+def _remap_pinned_model(model: str, env: dict[str, str]) -> str:
+    """Translate a concrete ``claude-*`` model pin through the profile's remap.
+
+    When a pane's Claude auth profile defines an ``ANTHROPIC_DEFAULT_<TIER>_MODEL``
+    remap (proxy setups that only serve non-Anthropic model ids — e.g. a gateway
+    exposing ``ocg/deepseek-v4-pro``), an explicit ``--model claude-sonnet-5``
+    *bypasses* that remap: the remap only rewrites the bare ``sonnet``/``opus``/
+    ``haiku`` tier alias, whereas a concrete id is sent verbatim. The proxy then
+    sees a ``claude-*`` model, routes it to provider ``anthropic``, and — having
+    no Anthropic credentials — returns ``404 model_not_found``. That killed every
+    teammate pane (each pinned a tier model) while the Lead (no ``--model``,
+    rides the alias) kept working.
+
+    So classify the pinned model's tier by name and, if this pane's ``env`` (post
+    ``apply_claude_auth_overrides``) carries the matching remap var, return the
+    remapped value. With no remap present (the normal, non-proxy case) the pin is
+    returned unchanged, so behavior is identical off-proxy.
+    """
+    if not model:
+        return model
+    lowered = model.lower()
+    if "opus" in lowered:
+        tier = "OPUS"
+    elif "sonnet" in lowered:
+        tier = "SONNET"
+    elif "haiku" in lowered:
+        tier = "HAIKU"
+    else:
+        # Already a proxy-native / non-Anthropic id (e.g. ocg/deepseek-v4-pro).
+        return model
+    remapped = env.get(f"ANTHROPIC_DEFAULT_{tier}_MODEL", "").strip()
+    return remapped or model
+
+
 class SpawnEngineMixin:
     """Pane registry and session spawn/lifecycle mixin.
 
@@ -1303,6 +1337,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         if role_name != LEAD.name:
             tier_model, tier_effort, tier_fallback = _teammate_tier(base_role)
             teammate_model = os.environ.get("TAKKUB_TEAMMATE_MODEL", tier_model).strip()
+            teammate_model = _remap_pinned_model(teammate_model, env)
             if teammate_model:
                 argv.extend(["--model", teammate_model])
             teammate_effort = os.environ.get("TAKKUB_TEAMMATE_EFFORT", tier_effort).strip()
@@ -1319,6 +1354,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             # erroring mid-task and forcing a respawn. Set
             # TAKKUB_TEAMMATE_FALLBACK="" to disable, or to another model id.
             teammate_fallback = os.environ.get("TAKKUB_TEAMMATE_FALLBACK", tier_fallback).strip()
+            teammate_fallback = _remap_pinned_model(teammate_fallback, env)
             if teammate_fallback:
                 argv.extend(["--fallback-model", teammate_fallback])
             # Hard-enforce "ห้าม spawn subagent" (CLAUDE.md) at the CLI level so a
@@ -1336,6 +1372,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             # to a standard-context model in that case (see plan_tier).
             lead_model = _lead_model_override()
             if lead_model:
+                lead_model = _remap_pinned_model(lead_model, env)
                 argv.extend(["--model", lead_model])
             # Degrade to Sonnet on overload/not-found so orchestration keeps
             # moving during peak load instead of the Lead turn erroring out
@@ -1343,6 +1380,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             # so a hard failure there stalls the whole session. Set
             # TAKKUB_LEAD_FALLBACK="" to disable.
             lead_fallback = os.environ.get("TAKKUB_LEAD_FALLBACK", "claude-sonnet-5").strip()
+            lead_fallback = _remap_pinned_model(lead_fallback, env)
             if lead_fallback:
                 argv.extend(["--fallback-model", lead_fallback])
 
