@@ -1011,7 +1011,15 @@ class SpawnEngineMixin:
             # same net trust as `-s danger-full-access` we already use.
             #
             # Linux/macOS: keep workspace-write so the OS sandbox still
-            # constrains an off-the-rails codex to its cwd.
+            # constrains an off-the-rails codex to its cwd. But `-s
+            # workspace-write` blocks outbound network by default (per codex
+            # docs), including loopback — and `takkub done` reports back over
+            # a loopback TCP socket to the cockpit's cli_server. Without the
+            # network_access override the socket connect gets sandboxed to a
+            # PermissionError, so codex finishes its task but can never call
+            # `takkub done` and the pane hangs "working" forever (issue #26
+            # Mode B). Opening network here is the codex-documented way to
+            # unblock that loopback call while still keeping cwd write-scoping.
             if sys.platform == "win32":
                 codex_argv = [
                     codex_bin,
@@ -1024,6 +1032,8 @@ class SpawnEngineMixin:
                     "never",
                     "-s",
                     "workspace-write",
+                    "-c",
+                    "sandbox_workspace_write.network_access=true",
                 ]
             return self._launch_session(
                 pane=pane,
