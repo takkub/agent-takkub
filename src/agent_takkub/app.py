@@ -431,7 +431,16 @@ def main(argv: list[str] | None = None) -> int:
 
     app = QApplication(argv or sys.argv)
     app.setApplicationName("agent-takkub")
-    f = QFont("Segoe UI", 10)
+    # Segoe UI ships on Windows; on macOS it is absent, which triggers a
+    # costly font-alias scan + fallback at startup. Pick the native UI font
+    # per platform (both branches present so neither OS is left out).
+    if sys.platform == "win32":
+        _ui_family = "Segoe UI"
+    elif sys.platform == "darwin":
+        _ui_family = "Helvetica Neue"
+    else:
+        _ui_family = "sans-serif"
+    f = QFont(_ui_family, 10)
     app.setFont(f)
 
     # Single-instance guard: refuse to open a second cockpit window.

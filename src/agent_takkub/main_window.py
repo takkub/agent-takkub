@@ -255,8 +255,7 @@ class MainWindow(
         # into the new active ProjectTab's corner via mount_usage_widget().
         self._limit_label = QLabel("—")
         self._limit_label.setStyleSheet(
-            "QLabel { color:#52525b; font-size:11px; "
-            "font-variant-numeric:tabular-nums; padding:0 8px; }"
+            "QLabel { color:#52525b; font-size:11px; padding:0 8px; }"
         )
         self._limit_label.setToolTip(
             "Claude usage windows (5h / 7d / 7d-Sonnet)\n"

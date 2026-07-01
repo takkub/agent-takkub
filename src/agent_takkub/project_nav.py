@@ -157,7 +157,7 @@ class _ProjectRow(QWidget):
 
         self._badge = QLabel("")
         self._badge.setStyleSheet(
-            "color: #52525b; font-size: 11px; font-variant-numeric: tabular-nums;"
+            "color: #52525b; font-size: 11px;"
         )
 
         self._lay.addWidget(self._avatar)
@@ -196,7 +196,7 @@ class _ProjectRow(QWidget):
             return
         self._badge.setText(f"{int(ratio * 100)}%")
         self._badge.setStyleSheet(
-            f"color: {usage_color(ratio)}; font-size: 11px; font-variant-numeric: tabular-nums;"
+            f"color: {usage_color(ratio)}; font-size: 11px;"
         )
 
     def set_collapsed(self, collapsed: bool) -> None:

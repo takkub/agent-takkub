@@ -68,8 +68,7 @@ class LimitPanelMixin:
         if data is None:
             self._limit_label.setText("—")
             self._limit_label.setStyleSheet(
-                "QLabel { color:#52525b; font-size:11px; "
-                "font-variant-numeric:tabular-nums; padding:0 2px; }"
+                "QLabel { color:#52525b; font-size:11px; padding:0 2px; }"
             )
             self._limit_label.setToolTip("Usage unavailable (offline or not logged in)")
             return
@@ -122,8 +121,7 @@ class LimitPanelMixin:
 
         self._limit_label.setText(text)
         self._limit_label.setStyleSheet(
-            f"QLabel {{ color:{color}; font-size:11px; "
-            "font-variant-numeric:tabular-nums; padding:0 2px; }"
+            f"QLabel {{ color:{color}; font-size:11px; padding:0 2px; }}"
         )
         plan = getattr(data, "plan", "")
         stale_note = " (rate-limited, showing last known)" if rate_limited else ""

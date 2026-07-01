@@ -16,6 +16,7 @@ import threading
 import time
 from datetime import datetime
 
+from PyQt6 import sip
 from PyQt6.QtCore import QSettings, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
@@ -378,7 +379,14 @@ class AgentPane(QFrame):
         # silently dropped by _on_exit's generation check.
         self._session_generation += 1
         _gen = self._session_generation
-        session.processExited.connect(lambda code, g=_gen: self._on_exit(code, g))
+        # Keep the connection handle so detach_session can sever it. The
+        # PtySession is parented to the engine (not this pane), so without an
+        # explicit disconnect a late processExited would fire into a torn-down
+        # widget. _on_exit also guards against that, but disconnecting is the
+        # clean primary defense.
+        self._exit_conn = session.processExited.connect(
+            lambda code, g=_gen: self._on_exit(code, g)
+        )
         self._terminal.resized.connect(session.resize)
         self._update_title_with_cwd(cwd)
         self.set_state("active")
@@ -464,6 +472,15 @@ class AgentPane(QFrame):
                 self.session.outputUpdated.disconnect(self._sync_idle_flag)
             except Exception:
                 pass
+            # Sever processExited so a late exit from this (engine-owned)
+            # session can't call back into a pane that's being torn down.
+            exit_conn = getattr(self, "_exit_conn", None)
+            if exit_conn is not None:
+                try:
+                    self.session.processExited.disconnect(exit_conn)
+                except Exception:
+                    pass
+                self._exit_conn = None
             self.session = None
         self._last_idle = None
         # Full reset (scrollback + heartbeat stop) so Lead's reused pane
@@ -478,6 +495,20 @@ class AgentPane(QFrame):
         self._token_label.hide()
 
     def _on_exit(self, code: int, gen: int | None = None) -> None:
+        # Teardown guard: the PtySession is parented to the engine, so it can
+        # outlive this pane and deliver a queued processExited after Qt has
+        # begun destroying the widget. Children (e.g. _tick_timer) are deleted
+        # before the parent, so set_state()'s _tick_timer.stop() would raise
+        # RuntimeError inside this slot → PyQt aborts the process (segfault).
+        # Drop the exit once the tick timer's C++ object is gone. The try guards
+        # the __new__-built pane doubles used in unit tests, where any missing
+        # attribute read raises RuntimeError instead of AttributeError.
+        try:
+            timer_deleted = sip.isdeleted(self._tick_timer)
+        except (RuntimeError, AttributeError):
+            timer_deleted = False
+        if timer_deleted:
+            return
         # Drop stale signals: if the generation captured at connection time no
         # longer matches the current generation, an old session emitted after a
         # replacement was attached — ignore it to protect the new session's state.
@@ -561,7 +592,7 @@ class AgentPane(QFrame):
         text = f"{format_tokens(prompt)}/{format_tokens(limit)} · {int(pct * 100)}%"
         self._token_label.setText(text)
         self._token_label.setStyleSheet(
-            f"color: {color}; font-size: 11px; font-variant-numeric: tabular-nums;"
+            f"color: {color}; font-size: 11px;"
         )
         self._token_label.setToolTip(
             f"model: {usage['model']}\n"

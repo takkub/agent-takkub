@@ -7,6 +7,7 @@ log file every second; only re-renders when the file's size has grown.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 from PyQt6.QtCore import QTimer
@@ -117,7 +118,15 @@ class LogsPanel(QWidget):
         self._view = QPlainTextEdit()
         self._view.setReadOnly(True)
         self._view.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        f = QFont("Cascadia Mono", 9)
+        # Cascadia Mono ships on Windows; on macOS it is absent (costly
+        # font-alias scan), so fall back to the native monospace per platform.
+        if sys.platform == "win32":
+            _mono_family = "Cascadia Mono"
+        elif sys.platform == "darwin":
+            _mono_family = "Menlo"
+        else:
+            _mono_family = "monospace"
+        f = QFont(_mono_family, 9)
         f.setStyleHint(QFont.StyleHint.Monospace)
         self._view.setFont(f)
         self._view.setStyleSheet(
