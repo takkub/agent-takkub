@@ -239,19 +239,48 @@ def _read_keychain_credentials() -> str | None:
     return blob if proc.returncode == 0 and blob else None
 
 
+def _has_access_token(raw: dict[str, Any]) -> bool:
+    """True when *raw* normalises to a usable OAuth access token."""
+    try:
+        return bool(_normalize_credentials(raw).get("access_token"))
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
 def _load_raw_credentials(credentials_path: Path) -> tuple[dict[str, Any] | None, str]:
     """Load Claude's OAuth credential blob. File first (Windows/Linux), then the
-    macOS Keychain. Returns (raw, source) where source is 'file'|'keychain'|'none'."""
+    macOS Keychain. Returns (raw, source) where source is 'file'|'keychain'|'none'.
+
+    A file is only preferred when it actually carries an access token. On macOS
+    Claude Code keeps the real credentials in the login Keychain and can leave a
+    *token-less* ``~/.claude/.credentials.json`` stub behind (migration residue,
+    or a file that only holds non-OAuth settings). The old "file first, no
+    questions asked" logic accepted that stub, never consulted the Keychain, and
+    the usage meter stuck on "—" forever. So: take the file if it has a token;
+    otherwise fall through to the Keychain; only then fall back to the (tokenless)
+    file so callers still log a consistent "no access token". (M-xplat)
+    """
+    file_raw: dict[str, Any] | None = None
     try:
-        return json.loads(credentials_path.read_text(encoding="utf-8")), "file"
+        parsed = json.loads(credentials_path.read_text(encoding="utf-8"))
+        file_raw = parsed if isinstance(parsed, dict) else None
     except (OSError, ValueError):
-        pass
+        file_raw = None
+
+    if file_raw is not None and _has_access_token(file_raw):
+        return file_raw, "file"
+
     blob = _read_keychain_credentials()
     if blob:
         try:
-            return json.loads(blob), "keychain"
+            kc_raw = json.loads(blob)
         except ValueError:
-            pass
+            kc_raw = None
+        if isinstance(kc_raw, dict) and _has_access_token(kc_raw):
+            return kc_raw, "keychain"
+
+    if file_raw is not None:
+        return file_raw, "file"
     return None, "none"
 
 

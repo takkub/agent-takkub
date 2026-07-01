@@ -116,6 +116,33 @@ def test_load_raw_credentials_keychain_fallback(tmp_path: Path, monkeypatch) -> 
     assert raw["claudeAiOauth"]["accessToken"] == "from-keychain"
 
 
+def test_tokenless_file_falls_through_to_keychain(tmp_path: Path, monkeypatch) -> None:
+    """The remaining Mac gap: a `.credentials.json` stub exists but holds no
+    access token (migration residue). It must NOT shadow the Keychain — the
+    meter should still read the real token from the Keychain."""
+    stub = tmp_path / ".credentials.json"
+    stub.write_text(json.dumps({"some": "other-setting"}), encoding="utf-8")
+    monkeypatch.setattr(
+        limit_status,
+        "_read_keychain_credentials",
+        lambda: json.dumps({"claudeAiOauth": {"accessToken": "from-keychain"}}),
+    )
+    raw, source = limit_status._load_raw_credentials(stub)
+    assert source == "keychain"
+    assert raw["claudeAiOauth"]["accessToken"] == "from-keychain"
+
+
+def test_tokenless_file_no_keychain_returns_file(tmp_path: Path, monkeypatch) -> None:
+    """Tokenless file + no Keychain entry → return the file blob (source
+    'file') so the caller logs a consistent 'no access token', not 'no creds'."""
+    stub = tmp_path / ".credentials.json"
+    stub.write_text(json.dumps({"some": "other-setting"}), encoding="utf-8")
+    monkeypatch.setattr(limit_status, "_read_keychain_credentials", lambda: None)
+    raw, source = limit_status._load_raw_credentials(stub)
+    assert source == "file"
+    assert raw == {"some": "other-setting"}
+
+
 def test_load_raw_credentials_none(tmp_path: Path, monkeypatch) -> None:
     missing = tmp_path / "nope" / ".credentials.json"
     monkeypatch.setattr(limit_status, "_read_keychain_credentials", lambda: None)
