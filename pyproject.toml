@@ -113,6 +113,7 @@ source_modules = [
     "agent_takkub.config",
     "agent_takkub._win_console",
     "agent_takkub.roles",
+    "agent_takkub.system_baseline",
 ]
 forbidden_modules = [
     "agent_takkub.orchestrator",

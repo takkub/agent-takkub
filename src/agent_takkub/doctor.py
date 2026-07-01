@@ -79,7 +79,25 @@ def check_claude() -> list[Finding]:
         path = find_claude_executable()
         _, out = _run([path, "--version"])
         version = out.splitlines()[0] if out else "(unknown)"
-        findings.append(Finding("claude", "binary", Status.OK, f"{version}  {path}"))
+        # Grade the CLI version against the shared baseline. The binary exists,
+        # so an old-but-working CLI is only a WARN nudge (never FAIL) — matches
+        # the non-breaking "recommended" policy for the core set.
+        from . import system_baseline as _bl
+
+        res = _bl.evaluate("claude", version)
+        note = _bl.baseline_note(_bl.TOOL_BY_KEY["claude"])
+        if res.level in (_bl.LEVEL_BELOW_MIN, _bl.LEVEL_RECOMMEND):
+            findings.append(
+                Finding(
+                    "claude",
+                    "binary",
+                    Status.WARN,
+                    f"{version}  {path}  (below recommended · {note})",
+                    _bl.TOOL_BY_KEY["claude"].upgrade_hint,
+                )
+            )
+        else:
+            findings.append(Finding("claude", "binary", Status.OK, f"{version}  {path}  ({note})"))
     except Exception as e:
         findings.append(
             Finding(
@@ -154,18 +172,62 @@ def check_claude() -> list[Finding]:
 # ---------------------------------------------------------------------------
 
 
+def _core_finding(category: str, key: str, version_text: str, path: str = "") -> Finding:
+    """Grade an installed tool version against the central system-core baseline
+    (:mod:`system_baseline`) and turn the result into a ``Finding``.
+
+    Below ``minimum`` → FAIL (unsupported); above ``minimum`` but below
+    ``recommended`` → WARN (fleet-parity nudge); at/above ``recommended`` → OK;
+    unparseable version → INFO. The baseline note ("min X · rec Y") is appended
+    so every machine reads the exact bar it's measured against — the whole point
+    of the shared manifest.
+    """
+    from . import system_baseline as _bl
+
+    tool = _bl.TOOL_BY_KEY[key]
+    res = _bl.evaluate(key, version_text)
+    note = _bl.baseline_note(tool)
+    shown = version_text.strip() or path or "(unknown)"
+
+    if res.level == _bl.LEVEL_BELOW_MIN:
+        return Finding(category, key, Status.FAIL, f"{shown}  ({note})", tool.upgrade_hint)
+    if res.level == _bl.LEVEL_RECOMMEND:
+        return Finding(
+            category,
+            key,
+            Status.WARN,
+            f"{shown}  (below recommended · {note})",
+            tool.upgrade_hint,
+        )
+    if res.level == _bl.LEVEL_UNKNOWN:
+        # Version couldn't be parsed. If the binary is present anyway (e.g. npx
+        # on Windows is a .CMD that CreateProcess can't run headless), that's a
+        # benign "present but not probed" — report OK, not an alarming INFO. Only
+        # a truly empty result (no path either) stays INFO.
+        if path:
+            return Finding(category, key, Status.OK, f"{path}  (present · not probed · {note})")
+        return Finding(category, key, Status.INFO, f"{shown}  (version unreadable · {note})")
+    return Finding(category, key, Status.OK, f"{shown}  ({note})")
+
+
 def check_runtime() -> list[Finding]:
+    """[runtime] — core interpreters/tooling graded against the shared baseline.
+
+    node / npx / python versions are compared to :mod:`system_baseline` so a
+    machine that has drifted below the fleet's minimum (FAIL) or recommended
+    (WARN) shows up here instead of every check inventing its own threshold.
+    """
     findings: list[Finding] = []
 
     # node
     node = shutil.which("node")
     if node:
         rc, ver = _run(["node", "--version"])
-        findings.append(Finding("runtime", "node", Status.OK, ver if rc == 0 and ver else node))
+        findings.append(_core_finding("runtime", "node", ver if rc == 0 else "", node))
     else:
         findings.append(
             Finding(
-                "runtime", "node", Status.FAIL, "not found", "install Node.js 18+ from nodejs.org"
+                "runtime", "node", Status.FAIL, "not found", "install Node.js 20+ from nodejs.org"
             )
         )
 
@@ -173,7 +235,7 @@ def check_runtime() -> list[Finding]:
     npx = shutil.which("npx")
     if npx:
         rc, ver = _run(["npx", "--version"])
-        findings.append(Finding("runtime", "npx", Status.OK, ver if rc == 0 and ver else npx))
+        findings.append(_core_finding("runtime", "npx", ver if rc == 0 else "", npx))
     else:
         findings.append(
             Finding(
@@ -181,15 +243,9 @@ def check_runtime() -> list[Finding]:
             )
         )
 
-    # python
+    # python (this interpreter — no subprocess needed)
     vi = sys.version_info
-    ver_str = f"{vi[0]}.{vi[1]}.{vi[2]}"
-    if (vi[0], vi[1]) < (3, 11):
-        findings.append(
-            Finding("runtime", "python", Status.WARN, ver_str, "upgrade to Python 3.11+")
-        )
-    else:
-        findings.append(Finding("runtime", "python", Status.OK, ver_str))
+    findings.append(_core_finding("runtime", "python", f"{vi[0]}.{vi[1]}.{vi[2]}"))
 
     return findings
 

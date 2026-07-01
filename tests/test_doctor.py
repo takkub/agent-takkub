@@ -129,14 +129,18 @@ class TestCheckRuntime:
         python = next(f for f in findings if f.name == "python")
         assert python.status == Status.OK
 
-    def test_python_old_version_warns(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_python_below_baseline_min_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Python 3.10 is below the system-core baseline minimum (3.11) → FAIL
+        # (the interpreter may not even import the cockpit). This is the
+        # baseline-driven behaviour: below-minimum is unsupported, not a nudge.
         monkeypatch.setattr("shutil.which", lambda x: None)
         import agent_takkub.doctor as _doc
 
         monkeypatch.setattr(_doc.sys, "version_info", (3, 10, 0))
         findings = check_runtime()
         python = next(f for f in findings if f.name == "python")
-        assert python.status == Status.WARN
+        assert python.status == Status.FAIL
+        assert "3.11" in python.fix_hint
 
 
 # ---------------------------------------------------------------------------

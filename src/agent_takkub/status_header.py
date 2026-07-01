@@ -424,28 +424,20 @@ class StatusHeaderMixin:
         self._btn_bug_check.setStyleSheet(self._ghost_button_style())
         self._btn_bug_check.clicked.connect(self._on_bug_check_clicked)
 
-        # 🩺 Doctor button: runs cockpit environment checks and shows a
-        # report with optional one-click auto-fix for fixable findings.
+        # 🩺 Doctor button: one-stop cockpit readiness check. Runs environment
+        # diagnostics AND folds in the recommended dev-team plugin set — the
+        # standalone 🧩 Plugins button was merged in here so "am I set up
+        # correctly + up to the shared baseline" is a single click. The report
+        # dialog carries both a Fix (auto-fixes) and an Install plugins action.
         self._btn_doctor = QPushButton("🩺 Doctor", self)
         self._btn_doctor.setToolTip(
-            "Run cockpit environment diagnostics (claude binary, runtime,\n"
-            "plugins, MCPs, projects, providers). Shows a report with\n"
-            "one-click Fix for auto-fixable findings."
+            "Cockpit readiness check in one place: core versions vs the shared\n"
+            "baseline (python/node/npx/claude — min & recommended), plugins,\n"
+            "MCPs, projects, providers. One-click Fix for auto-fixable findings\n"
+            "and Install for missing dev-team plugins."
         )
         self._btn_doctor.setStyleSheet(self._ghost_button_style())
         self._btn_doctor.clicked.connect(self._on_doctor_clicked)
-
-        # 🧩 Plugins button: install/refresh the recommended dev-team plugin set
-        # (Superpowers, Frontend Design, Code Review, Security Review, Claude Mem)
-        # via the claude CLI on a background thread.
-        self._btn_plugins = QPushButton("🧩 Plugins", self)
-        self._btn_plugins.setToolTip(
-            "Install / refresh the recommended dev-team plugins\n"
-            "(Superpowers, Frontend Design, Code Review, Security Review,\n"
-            "Claude Mem). Shows what's installed and one-click installs the rest."
-        )
-        self._btn_plugins.setStyleSheet(self._ghost_button_style())
-        self._btn_plugins.clicked.connect(self._on_plugins_clicked)
 
         # 🎨 UI Review button: 1-click design-review pipeline. Spawns critic +
         # gemini in parallel. Critic reads shots from runtime/exports/<date>/
@@ -553,7 +545,6 @@ class StatusHeaderMixin:
             self._btn_open_shell,
             self._btn_bug_check,
             self._btn_doctor,
-            self._btn_plugins,
             self._btn_ui_review,
             self._btn_end_session,
         ):

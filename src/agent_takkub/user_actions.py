@@ -496,6 +496,79 @@ class UserActionsMixin:
             "QPushButton:disabled { background:#3f3f46; color:#71717a; }"
         )
 
+        # 🧩 Install plugins — the old standalone Plugins button folded into
+        # Doctor. Installs any missing recommended dev-team plugins on the same
+        # background-thread pattern as everything else here (a `claude plugin
+        # install` git-clone must never touch the Qt event loop), then re-runs
+        # the checks so the [plugins] findings refresh in place.
+        btn_plugins = QPushButton("Install plugins", dlg)
+        btn_plugins.setStyleSheet(
+            "QPushButton { background:#2563eb; color:#fff; border:none; "
+            "border-radius:5px; padding:4px 14px; font-weight:600; }"
+            "QPushButton:hover { background:#1d4ed8; }"
+            "QPushButton:disabled { background:#3f3f46; color:#71717a; }"
+        )
+
+        def _refresh_plugins_btn() -> None:
+            """Label the plugins button with the live missing-count (disk scan,
+            main-thread-safe). No missing → disabled 'Plugins ✓'."""
+            from . import plugin_installer
+
+            try:
+                missing = plugin_installer.missing_plugins()
+            except Exception:
+                missing = []
+            if missing:
+                btn_plugins.setEnabled(True)
+                btn_plugins.setText(f"Install plugins ({len(missing)})")
+                btn_plugins.setToolTip(
+                    "Install the missing recommended dev-team plugins:\n  "
+                    + "\n  ".join(p.label for p in missing)
+                    + "\n(restart cockpit for panes to pick them up)"
+                )
+            else:
+                btn_plugins.setEnabled(False)
+                btn_plugins.setText("Plugins ✓")
+                btn_plugins.setToolTip("All recommended dev-team plugins are installed.")
+
+        def _install_plugins() -> None:
+            from . import plugin_installer
+
+            try:
+                missing = plugin_installer.missing_plugins()
+            except Exception:
+                missing = []
+            if not missing:
+                _refresh_plugins_btn()
+                return
+            btn_plugins.setEnabled(False)
+            btn_plugins.setText("Installing…")
+            worker = _PluginInstallThread(missing)  # no parent — see _PLUGIN_THREADS
+            _PLUGIN_THREADS.add(worker)
+
+            def _prog(label: str) -> None:
+                try:
+                    self._status.showMessage(f"🧩 installing {label}…", 4_000)
+                except RuntimeError:
+                    pass
+
+            def _plugins_done(results: object) -> None:
+                try:
+                    ok_n = sum(1 for _p, ok, _m in results if ok)
+                    self._status.showMessage(f"🧩 Plugins: {ok_n}/{len(results)} installed", 6_000)
+                    _refresh_plugins_btn()
+                    _start()  # re-run diagnostics so [plugins] findings refresh
+                except RuntimeError:
+                    pass
+
+            worker.progress.connect(_prog)
+            worker.done.connect(_plugins_done)
+            worker.finished.connect(lambda w=worker: _PLUGIN_THREADS.discard(w))
+            worker.finished.connect(worker.deleteLater)
+            worker.start()
+
+        btn_plugins.clicked.connect(_install_plugins)
+
         # Track the running worker so it isn't garbage-collected mid-run and so a
         # Workers are held in a MODULE-LEVEL set (not parented to the window) so
         # closing the cockpit while a check runs can't destroy a live QThread —
@@ -535,6 +608,7 @@ class UserActionsMixin:
             worker.start()
 
         _start()
+        _refresh_plugins_btn()
 
         btn_close = QPushButton("Close", dlg)
         btn_close.setStyleSheet(
@@ -545,128 +619,12 @@ class UserActionsMixin:
         btn_close.clicked.connect(dlg.accept)
 
         btn_row.addStretch()
+        btn_row.addWidget(btn_plugins)
         btn_row.addWidget(btn_fix)
         btn_row.addWidget(btn_close)
         layout.addLayout(btn_row)
 
         _log_event("ui_doctor_opened")
-        dlg.exec()
-
-    def _on_plugins_clicked(self) -> None:
-        """🧩 Plugins button: show the recommended dev-team plugin set with
-        install status and one-click install the missing ones.
-
-        Status is read from disk (fast, main-thread-safe). Installs run in a
-        background `_PluginInstallThread` — `claude plugin install` is a network
-        git-clone that must never block the Qt event loop (same rule as Doctor).
-        """
-        from . import plugin_installer
-
-        dlg = QDialog(self)
-        dlg.setWindowTitle("🧩 Dev-team Plugins")
-        dlg.setMinimumSize(560, 420)
-        dlg.resize(620, 460)
-
-        layout = QVBoxLayout(dlg)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(8)
-
-        view = QPlainTextEdit(dlg)
-        view.setReadOnly(True)
-        view.setStyleSheet(
-            "QPlainTextEdit { background:#18181b; color:#d4d4d8; "
-            "border:1px solid #3f3f46; border-radius:4px; padding:6px; "
-            "font-family: 'Consolas', 'Courier New', monospace; font-size:12px; }"
-        )
-        layout.addWidget(view, 1)
-
-        btn_install = QPushButton("Install missing", dlg)
-        btn_install.setStyleSheet(
-            "QPushButton { background:#16a34a; color:#fff; border:none; "
-            "border-radius:5px; padding:4px 14px; font-weight:600; }"
-            "QPushButton:hover { background:#15803d; }"
-            "QPushButton:disabled { background:#3f3f46; color:#71717a; }"
-        )
-
-        # Holder so the click handler reuses the disk scan _render() just did
-        # instead of walking ~/.claude/plugins/cache a second time per click.
-        _missing_holder: list = []
-
-        def _render() -> None:
-            have = plugin_installer.installed_on_disk()
-            lines = ["Recommended dev-team plugins:\n"]
-            for p in plugin_installer.RECOMMENDED:
-                mark = "✓ installed" if p.key in have else "· missing  "
-                pane = "→ panes" if p.pane_loaded else "→ user-only (hook-heavy)"
-                lines.append(f"  {mark}  {p.label:16} {pane}")
-                lines.append(f"               {p.note}")
-            missing = plugin_installer.missing_plugins(have)
-            _missing_holder[:] = missing
-            lines.append("")
-            if missing:
-                lines.append(f"{len(missing)} missing — click 'Install missing'.")
-            else:
-                lines.append("All recommended plugins installed. 🎉")
-            lines.append("\n(restart cockpit for panes to pick up new plugins)")
-            view.setPlainText("\n".join(lines))
-            btn_install.setEnabled(bool(missing))
-            btn_install.setToolTip(
-                f"Install {len(missing)} missing plugin(s)." if missing else "Nothing to install."
-            )
-
-        _render()
-
-        def _on_install() -> None:
-            missing = list(_missing_holder)  # reuse _render()'s scan
-            if not missing:
-                return
-            btn_install.setEnabled(False)
-            worker = _PluginInstallThread(missing)  # no parent — see _PLUGIN_THREADS
-            _PLUGIN_THREADS.add(worker)
-
-            def _progress(label: str) -> None:
-                try:
-                    view.setPlainText(view.toPlainText() + f"\n  installing {label}…")
-                except RuntimeError:
-                    pass
-
-            def _done(results: object) -> None:
-                try:
-                    ok_n = sum(1 for _p, ok, _m in results if ok)
-                    self._status.showMessage(f"🧩 Plugins: {ok_n}/{len(results)} installed", 6_000)
-                    _render()
-                    fails = [f"{p.label}: {m}" for p, ok, m in results if not ok]
-                    if fails:
-                        view.setPlainText(
-                            view.toPlainText() + "\n\nFailed:\n  " + "\n  ".join(fails)
-                        )
-                except RuntimeError:
-                    pass
-
-            worker.progress.connect(_progress)
-            worker.done.connect(_done)
-            worker.finished.connect(lambda w=worker: _PLUGIN_THREADS.discard(w))
-            worker.finished.connect(worker.deleteLater)
-            worker.start()
-
-        btn_install.clicked.connect(_on_install)
-
-        btn_close = QPushButton("Close", dlg)
-        btn_close.setStyleSheet(
-            "QPushButton { background:transparent; color:#a1a1aa; "
-            "border:1px solid #3f3f46; border-radius:5px; padding:4px 14px; }"
-            "QPushButton:hover { background:#27272a; color:#d4d4d8; }"
-        )
-        btn_close.clicked.connect(dlg.accept)
-
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(8)
-        btn_row.addStretch()
-        btn_row.addWidget(btn_install)
-        btn_row.addWidget(btn_close)
-        layout.addLayout(btn_row)
-
-        _log_event("ui_plugins_opened")
         dlg.exec()
 
     # ──────────────────────────────────────────────────────────────

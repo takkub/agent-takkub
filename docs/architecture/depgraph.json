@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 66,
+  "module_count": 67,
   "modules": [
     {
       "module": "agent_takkub",
@@ -255,6 +255,7 @@
         "agent_takkub.gemini_helper",
         "agent_takkub.pty_session",
         "agent_takkub.shared_dev_tools",
+        "agent_takkub.system_baseline",
         "agent_takkub.update_helper"
       ],
       "imported_by": [
@@ -262,7 +263,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 2,
-      "fan_out": 7
+      "fan_out": 8
     },
     {
       "module": "agent_takkub.exec_mode",
@@ -785,6 +786,15 @@
       ],
       "fan_in": 1,
       "fan_out": 9
+    },
+    {
+      "module": "agent_takkub.system_baseline",
+      "imports": [],
+      "imported_by": [
+        "agent_takkub.doctor"
+      ],
+      "fan_in": 1,
+      "fan_out": 0
     },
     {
       "module": "agent_takkub.terminal_widget",
