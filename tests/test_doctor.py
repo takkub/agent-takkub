@@ -11,6 +11,7 @@ import pytest
 from agent_takkub.doctor import (
     Finding,
     Status,
+    check_arch,
     check_mcps,
     check_plugins,
     check_projects,
@@ -19,6 +20,107 @@ from agent_takkub.doctor import (
     check_runtime,
     run_all_checks,
 )
+
+# ---------------------------------------------------------------------------
+# check_arch — Apple Silicon Rosetta / native-arm64 shell hygiene
+# ---------------------------------------------------------------------------
+
+
+class TestCheckArch:
+    def _sysctl(self, arm64: str, translated: str):
+        """side_effect for doctor._run keyed on the sysctl key being queried."""
+
+        def _side(argv: list[str]) -> tuple[int, str]:
+            key = argv[-1]
+            if key == "hw.optional.arm64":
+                return 0, arm64
+            if key == "sysctl.proc_translated":
+                return 0, translated
+            return 1, ""
+
+        return _side
+
+    def _f(self, findings: list[Finding], name: str) -> Finding:
+        return next(f for f in findings if f.name == name)
+
+    def test_non_darwin_returns_empty(self) -> None:
+        # Windows/Linux: the whole topic is moot — must not clutter the report.
+        with patch("agent_takkub.doctor.sys.platform", "win32"):
+            assert check_arch() == []
+
+    def test_intel_mac_reports_na(self) -> None:
+        # Genuine Intel Mac: no arm64 slice → single benign OK, no Rosetta nag.
+        with (
+            patch("agent_takkub.doctor.sys.platform", "darwin"),
+            patch("agent_takkub.doctor._run", side_effect=self._sysctl(arm64="0", translated="")),
+        ):
+            findings = check_arch()
+        assert len(findings) == 1
+        assert findings[0].name == "cpu"
+        assert findings[0].status is Status.OK
+
+    def test_apple_silicon_native_shell_all_ok(self) -> None:
+        with (
+            patch("agent_takkub.doctor.sys.platform", "darwin"),
+            patch("agent_takkub.doctor._run", side_effect=self._sysctl(arm64="1", translated="0")),
+            patch("agent_takkub.doctor._rosetta_installed", return_value=True),
+            patch("agent_takkub.doctor._zshrc_has_guard", return_value=True),
+        ):
+            findings = check_arch()
+        assert self._f(findings, "shell").status is Status.OK
+        assert self._f(findings, "rosetta").status is Status.OK
+        assert self._f(findings, "zshrc-guard").status is Status.OK
+
+    def test_apple_silicon_translated_shell_warns(self) -> None:
+        # The core trap: shell under Rosetta → x86_64 wheels. Must WARN.
+        with (
+            patch("agent_takkub.doctor.sys.platform", "darwin"),
+            patch("agent_takkub.doctor._run", side_effect=self._sysctl(arm64="1", translated="1")),
+            patch("agent_takkub.doctor._rosetta_installed", return_value=True),
+            patch("agent_takkub.doctor._zshrc_has_guard", return_value=True),
+        ):
+            findings = check_arch()
+        assert self._f(findings, "shell").status is Status.WARN
+
+    def test_missing_rosetta_and_guard_offer_auto_fix(self) -> None:
+        with (
+            patch("agent_takkub.doctor.sys.platform", "darwin"),
+            patch("agent_takkub.doctor._run", side_effect=self._sysctl(arm64="1", translated="0")),
+            patch("agent_takkub.doctor._rosetta_installed", return_value=False),
+            patch("agent_takkub.doctor._zshrc_has_guard", return_value=False),
+        ):
+            findings = check_arch()
+        rosetta = self._f(findings, "rosetta")
+        guard = self._f(findings, "zshrc-guard")
+        assert rosetta.status is Status.WARN and rosetta.auto_fix is not None
+        assert guard.status is Status.WARN and guard.auto_fix is not None
+
+    def test_zshrc_guard_auto_fix_appends_block(self, tmp_path) -> None:
+        # The auto_fix must append the marked, Rosetta-safe guard idempotently.
+        from agent_takkub.doctor import _ARM64_GUARD_MARKER
+
+        fake_home = tmp_path
+        zshrc = fake_home / ".zshrc"
+        zshrc.write_text("export PATH=/usr/bin\n", encoding="utf-8")
+        with (
+            patch("agent_takkub.doctor.sys.platform", "darwin"),
+            patch("agent_takkub.doctor._run", side_effect=self._sysctl(arm64="1", translated="1")),
+            patch("agent_takkub.doctor._rosetta_installed", return_value=True),
+            patch("agent_takkub.doctor.Path.home", return_value=fake_home),
+        ):
+            findings = check_arch()
+            guard = self._f(findings, "zshrc-guard")
+            assert guard.auto_fix is not None
+            ok, _ = guard.auto_fix()
+            assert ok
+            body = zshrc.read_text(encoding="utf-8")
+            assert _ARM64_GUARD_MARKER in body
+            assert body.startswith("export PATH=/usr/bin")  # original preserved
+            # idempotent: a second run must not duplicate the block
+            ok2, _ = guard.auto_fix()
+            assert ok2
+            assert zshrc.read_text(encoding="utf-8").count(_ARM64_GUARD_MARKER) == 1
+
 
 # ---------------------------------------------------------------------------
 # check_providers — agy resolved via the cockpit's own helper (off-PATH safe)
@@ -453,6 +555,7 @@ class TestRunAllChecks:
                 "agent_takkub.doctor.check_runtime",
                 return_value=[Finding("runtime", "node", Status.OK)],
             ),
+            patch("agent_takkub.doctor.check_arch", return_value=[]),
             patch("agent_takkub.doctor.check_qt", return_value=[]),
             patch("agent_takkub.doctor.check_plugins", return_value=[]),
             patch("agent_takkub.doctor.check_mcps", return_value=[]),
