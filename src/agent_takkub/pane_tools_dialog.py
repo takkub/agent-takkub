@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import pathlib
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -290,8 +291,7 @@ class PaneToolsDialog(QDialog):
                 container = QWidget(table)
                 cell_layout = QHBoxLayout(container)
                 cell_layout.setContentsMargins(0, 0, 0, 0)
-                cell_layout.addWidget(box)
-                cell_layout.setAlignment(box, box.property("alignment") or 0)
+                cell_layout.addWidget(box, alignment=Qt.AlignmentFlag.AlignCenter)
                 table.setCellWidget(row, col, container)
                 boxes[role][item] = box
         table.resizeColumnsToContents()

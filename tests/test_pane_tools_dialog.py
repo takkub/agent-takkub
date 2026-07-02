@@ -110,3 +110,32 @@ def test_roles_tuple_covers_expected_roles():
         "critic",
         "designer",
     }
+
+
+# ── Qt construction smoke test ────────────────────────────────────────────────
+# The pure-logic tests above structurally cannot catch a crash inside the
+# QDialog constructor (they never touch Qt). PaneToolsDialog.__init__ builds
+# both tabs eagerly, so simply constructing it exercises _fill_matrix_table for
+# real — the exact path where a bad `setAlignment(box, int)` call raised
+# TypeError and made the 🔧 Tools chip silently do nothing (Qt swallows the
+# exception in the clicked slot). Construct + drive save under the session
+# QApplication (conftest `_qt_session_app`, offscreen platform).
+
+
+def test_dialog_constructs_and_save_runs(monkeypatch, tmp_path):
+    from agent_takkub import pane_tools_policy as ptp
+    from agent_takkub.pane_tools_dialog import PaneToolsDialog
+
+    # Isolate the policy file so a real ~/.takkub/pane-tools.json is untouched.
+    monkeypatch.setattr(ptp, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
+
+    dlg = PaneToolsDialog()
+    try:
+        # Both matrices built without raising = the regression is gone.
+        assert set(dlg._mcp_boxes) == set(ROLES)
+        assert set(dlg._plugin_boxes) == set(ROLES)
+        # Save with no edits must run cleanly and report status, not throw.
+        dlg._on_save_clicked()
+        assert dlg._status_label.text()
+    finally:
+        dlg.deleteLater()
