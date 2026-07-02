@@ -206,6 +206,17 @@ class PaneState:
     pipeline_run_id: str | None = None
     # splash_dismiss_ts: last time Enter was sent to dismiss an update-splash modal (#62)
     splash_dismiss_ts: float = 0.0
+    # stop_gate_notified: True once the Stop-hook done-gate has already blocked
+    # this pane once for its CURRENT assignment. stop_hook_active alone only
+    # stops Claude Code from recursively re-entering the same Stop event — it
+    # does NOT stop a fresh Stop event a few seconds later if the model ignores
+    # the nudge and stops again, which would otherwise block forever (codex
+    # cross-check 2026-07-02, docs/reviews/2026-07-02-claude-hooks-design-crosscheck.md).
+    # Reset on every fresh spawn (see spawn()'s fresh-spawn-clear block), on a
+    # new assign(), and on a Lead→teammate send() that starts new real work —
+    # each gets exactly one nudge. done()/close() pop the whole PaneState, which
+    # implicitly clears this too.
+    stop_gate_notified: bool = False
 
 
 @dataclass
@@ -770,6 +781,10 @@ class SpawnEngineMixin:
         _ps_spawn_clear = getattr(self, "_pane_state", {}).get(key)
         if _ps_spawn_clear is not None:
             _ps_spawn_clear.blocked_on_lead_ts = None
+            # A fresh session (manual spawn OR auto-respawn) gets its own
+            # one-shot Stop-hook done-gate budget — a prior session's block
+            # must not suppress a nudge in the new one.
+            _ps_spawn_clear.stop_gate_notified = False
             if not _from_auto_respawn:
                 _ps_spawn_clear.auto_respawn_attempts = 0
                 # #41: a deliberate (manual / fresh-assign) spawn also clears the
@@ -1325,6 +1340,20 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             "--setting-sources",
             sources,
         ]
+
+        # Wire Stop/Notification hooks → `takkub _hook` so the orchestrator gets
+        # an authoritative turn-end/idle signal for THIS pane instead of relying
+        # solely on PTY-scraping's next poll tick. `--settings` takes a file path
+        # here (not inline JSON) to sidestep Windows argv-quoting risk for a
+        # JSON string (see hook_wiring.py docstring). Applies to every claude-
+        # backed pane (Lead + teammates); codex/gemini/shell panes returned
+        # earlier and never reach this branch.
+        try:
+            from .hook_wiring import ensure_hook_settings_file
+
+            argv.extend(["--settings", ensure_hook_settings_file()])
+        except Exception:
+            pass  # hook wiring must never block a spawn
 
         # Teammate model tier — picked PER ROLE (see _ROLE_MODEL_TIERS above),
         # not one flat tier for everyone. Lead does orchestration and stays on

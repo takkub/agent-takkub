@@ -681,6 +681,102 @@ def cmd_search(args: argparse.Namespace) -> dict:
     }
 
 
+def _read_hook_stdin() -> dict:
+    """Best-effort parse of the Claude Code hook JSON on stdin. Never raises —
+    an empty/malformed payload just means every gate below treats it as an
+    unrecognised event and allows the stop (fail open)."""
+    try:
+        raw = sys.stdin.read()
+    except Exception:
+        return {}
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _hook_request(payload: dict, timeout: float = 1.5) -> dict | None:
+    """Short-timeout, fail-silent request for the hook path only. Every other
+    CLI command uses `_request()` (15 s timeout, raises on no cockpit); a hook
+    runs synchronously inside the pane's Stop/Notification event, so it must
+    return fast and NEVER raise — any failure (cockpit not running, socket
+    error, malformed reply) just returns None and the caller allows the stop."""
+    try:
+        token = os.environ.get("TAKKUB_LEAD_TOKEN") or os.environ.get("TAKKUB_PANE_TOKEN")
+        if token:
+            payload["auth"] = token
+        port = read_port()
+        if port is None:
+            return None
+        s = socket.create_connection(("127.0.0.1", port), timeout=timeout)
+        try:
+            s.sendall((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
+            s.settimeout(timeout)
+            buf = b""
+            while b"\n" not in buf:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+            if not buf:
+                return None
+            return json.loads(buf.split(b"\n", 1)[0].decode("utf-8"))
+        finally:
+            s.close()
+    except Exception:
+        return None
+
+
+def cmd_hook(_: argparse.Namespace) -> dict:
+    """Internal command wired as the Stop/Notification `command` for every
+    cockpit-spawned claude pane (see hook_wiring.py). Reports the event to the
+    orchestrator as an authoritative turn-end/idle signal and, for a teammate
+    pane with an outstanding assigned task, may emit a Stop-hook block decision
+    nudging it to run `takkub done`.
+
+    Never raises and always exits 0 — a hook failure must never break the
+    pane's turn (guard required by the feature spec)."""
+    try:
+        payload = _read_hook_stdin()
+        role = _from_role()
+        if not role:
+            return {"ok": True, "msg": ""}  # manual / non-cockpit invocation
+        event = payload.get("hook_event_name", "")
+        # stop_hook_active guards Claude Code recursively re-entering THIS
+        # Stop event — skip entirely rather than risk a block loop.
+        if payload.get("stop_hook_active"):
+            return {"ok": True, "msg": ""}
+        resp = _hook_request(
+            _with_project(
+                {
+                    "cmd": "hook",
+                    "event": event,
+                    "notification_type": payload.get("notification_type", ""),
+                    "from": role,
+                }
+            )
+        )
+        if resp and resp.get("block"):
+            reason = resp.get("msg") or "รายงานผลด้วย takkub done ก่อนจบ"
+            print(
+                json.dumps(
+                    {
+                        "decision": "block",
+                        "hookSpecificOutput": {
+                            "hookEventName": "Stop",
+                            "additionalContext": reason,
+                        },
+                    }
+                )
+            )
+        return {"ok": True, "msg": ""}
+    except Exception:
+        return {"ok": True, "msg": ""}
+
+
 def cmd_services(args: argparse.Namespace) -> dict:
     """Local docker compose operations — no orchestrator IPC.
 
@@ -857,6 +953,12 @@ def main(argv: list[str] | None = None) -> int:
 
     sl = sub.add_parser("list", help="show pane status")
     sl.set_defaults(func=cmd_list)
+
+    # Internal — wired as the Stop/Notification hook `command` for every
+    # cockpit-spawned claude pane (see hook_wiring.py). Not a user-facing
+    # command, so it's hidden from --help.
+    shk = sub.add_parser("_hook", help=argparse.SUPPRESS)
+    shk.set_defaults(func=cmd_hook)
 
     sst = sub.add_parser(
         "status",

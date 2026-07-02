@@ -459,6 +459,7 @@ class TestRunAllChecks:
             patch("agent_takkub.doctor.check_projects", return_value=[]),
             patch("agent_takkub.doctor.check_providers", return_value=[]),
             patch("agent_takkub.doctor.check_hooks", return_value=[]),
+            patch("agent_takkub.doctor.check_hook_wiring", return_value=[]),
             patch("agent_takkub.doctor.check_ready_markers", return_value=[]),
             patch("agent_takkub.doctor.check_version", return_value=[]),
         ):

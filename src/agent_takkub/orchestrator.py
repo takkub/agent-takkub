@@ -719,6 +719,8 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
         key = _exit_key(project_ns, role_name)
         ps_assign = self._ps(key)
         ps_assign.last_assigned_task = task
+        # New task → fresh one-shot budget for the Stop-hook done-gate.
+        ps_assign.stop_gate_notified = False
         if requires_commit:
             ps_assign.requires_commit_on_done = True
         if auto_chain:
@@ -853,6 +855,9 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
             _ps_to = self._pane_state.get(f"{project_ns}::{to_role}")
             if _ps_to is not None:
                 _ps_to.blocked_on_lead_ts = None
+                # Lead sending new instructions counts as new real work —
+                # give the Stop-hook done-gate a fresh one-shot budget.
+                _ps_to.stop_gate_notified = False
 
         _MAX_LOG_BODY = 4_096
         _log_event(
@@ -1310,6 +1315,79 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
         self._write_hot_md()
         self.agentDone.emit(project_ns, from_role, note)
         return True, f"{from_role} reported done"
+
+    def consume_pane_hook(
+        self,
+        from_role: str,
+        project: str | None = None,
+        event: str = "",
+        notification_type: str = "",
+    ) -> tuple[bool, bool, str]:
+        """Consume a Claude Code hook signal (Stop / Notification) from a
+        claude-backed pane's `takkub _hook`, as an authoritative turn-end/idle
+        marker, and decide the Stop-hook done-gate.
+
+        Returns ``(ok, block, reason)``. ``block=True`` tells the caller to
+        emit a Stop-hook block decision nudging the pane to run `takkub done`.
+
+        Idle-state signal: reuses the exact idempotent pattern the PTY-scraping
+        watchdog (`_check_idle_teammates`) already uses — `first_idle_ts` is
+        only set the first time it's seen `None`, so a hook firing milliseconds
+        before/after the next poll tick is a no-op, not a double-count. PTY
+        scraping stays the fallback/ground truth (non-claude panes, or a claude
+        pane whose hook never fires) and self-corrects any staleness on its own
+        next tick (`is_at_ready_prompt()` returning False resets first_idle_ts).
+
+        Done-gate: one-shot per assignment via `PaneState.stop_gate_notified` —
+        `stop_hook_active` alone only guards against Claude Code recursively
+        re-entering the SAME Stop event, not a fresh Stop event a few seconds
+        later if the model ignores the nudge and stops again (would otherwise
+        block forever). Also honours the same suppressions the idle watchdog
+        does: not blocked-on-lead, not rate-limited, not TTY-prompt-blocked, and
+        only while the pane is live and `working` with an outstanding assigned
+        task (see docs/reviews/2026-07-02-claude-hooks-design-crosscheck.md).
+        """
+        try:
+            from_role = validate_name(from_role, "role")
+        except ValueError:
+            return False, False, "invalid role"
+        project_ns = self._resolve_project(project)
+        key = f"{project_ns}::{from_role}"
+
+        if from_role != LEAD.name and event in ("Stop", "Notification"):
+            entry = self._idle_state.setdefault(
+                key, {"first_idle_ts": None, "last_reminder_ts": 0.0}
+            )
+            if entry["first_idle_ts"] is None:
+                entry["first_idle_ts"] = time.time()
+
+        # Lead never gets the done-gate (it never calls `done` on itself);
+        # the gate only applies to a turn actually ending (Stop).
+        if from_role == LEAD.name or event != "Stop":
+            return True, False, ""
+
+        pane = self._project_panes(project_ns).get(from_role)
+        if pane is None or pane.session is None or not pane.session.is_alive:
+            return True, False, ""
+        if pane.state != "working":
+            return True, False, ""
+
+        ps = getattr(self, "_pane_state", {}).get(key)
+        if ps is None or not ps.last_assigned_task or ps.stop_gate_notified:
+            return True, False, ""
+
+        now = time.time()
+        # Same 30-minute window _check_idle_teammates uses to suppress the
+        # forgot-done reminder while genuinely waiting on Lead's reply.
+        if ps.blocked_on_lead_ts is not None and (now - ps.blocked_on_lead_ts) < 30 * 60:
+            return True, False, ""
+        if ps.rate_limited_until > now:
+            return True, False, ""
+        if ps.tty_blocked_since is not None:
+            return True, False, ""
+
+        ps.stop_gate_notified = True
+        return True, True, "รายงานผลด้วย takkub done ก่อนจบ"
 
     @staticmethod
     def _save_decision_note(

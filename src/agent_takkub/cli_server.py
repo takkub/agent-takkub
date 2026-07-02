@@ -2,7 +2,7 @@
 
 Protocol (newline-delimited JSON):
 
-  request:  {"cmd": "send|assign|spawn|close|done|list", ...args}
+  request:  {"cmd": "send|assign|spawn|close|done|list|hook", ...args}
   response: {"ok": bool, "msg": str, ...extras}
 
 Runs on the Qt main thread via QTcpServer so all calls into Orchestrator are
@@ -311,11 +311,13 @@ class CliServer(QObject):
         #
         # Raw clients that haven't been spawned by the orchestrator have no token
         # and are rejected for these two commands.
-        if cmd in ("done", "send"):
+        if cmd in ("done", "send", "hook"):
             caller_auth = req.get("auth") or ""
             pane_tokens: dict[str, tuple[str, str]] = getattr(self._orch, "_pane_tokens", {})
             # Lead token is valid for `send` (Lead sends task specs to teammates)
-            # but not for `done` (Lead cannot call done on itself).
+            # and `hook` (Lead's own claude session also fires Stop/Notification
+            # hooks — the done-gate itself is a no-op for Lead) but not `done`
+            # (Lead cannot call done on itself).
             lead_token = getattr(self._orch, "_lead_token", None)
             if (
                 lead_token
@@ -398,6 +400,15 @@ class CliServer(QObject):
                 ok, msg = self._orch.done(
                     req.get("from") or "", note=req.get("note", ""), project=from_project
                 )
+            elif cmd == "hook":
+                ok, blocked, msg = self._orch.consume_pane_hook(
+                    req.get("from") or "",
+                    project=from_project,
+                    event=req.get("event", ""),
+                    notification_type=req.get("notification_type", ""),
+                )
+                self._reply(sock, ok=ok, msg=msg, block=blocked)
+                return
             elif cmd == "end-session":
                 ok, msg = self._orch.end_session(project=from_project, note=req.get("note", ""))
             elif cmd == "goal":

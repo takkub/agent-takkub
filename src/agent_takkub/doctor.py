@@ -707,6 +707,67 @@ def check_hooks() -> list[Finding]:
     return findings
 
 
+def check_hook_wiring() -> list[Finding]:
+    """Verify the Stop/Notification → `takkub _hook` wiring every spawned
+    claude pane gets (hook_wiring.py) actually resolves: the generated
+    settings file is well-formed AND the internal `_hook` command runs
+    without crashing (invoked exactly like Claude Code would — hook JSON on
+    stdin, no TAKKUB_ROLE — so it must fail-open with exit 0, no output)."""
+    findings: list[Finding] = []
+    try:
+        from .hook_wiring import HOOK_COMMAND, ensure_hook_settings_file
+
+        settings_path = ensure_hook_settings_file()
+        data = json.loads(Path(settings_path).read_text(encoding="utf-8"))
+        stop_cmds = [
+            h.get("command")
+            for grp in data.get("hooks", {}).get("Stop", [])
+            for h in grp.get("hooks", [])
+        ]
+        notif_cmds = [
+            h.get("command")
+            for grp in data.get("hooks", {}).get("Notification", [])
+            for h in grp.get("hooks", [])
+        ]
+        if HOOK_COMMAND in stop_cmds and HOOK_COMMAND in notif_cmds:
+            findings.append(Finding("hooks", "settings-file", Status.OK, settings_path))
+        else:
+            findings.append(
+                Finding(
+                    "hooks",
+                    "settings-file",
+                    Status.FAIL,
+                    f"Stop/Notification not wired to {HOOK_COMMAND!r} in {settings_path}",
+                    "regenerate via hook_wiring.ensure_hook_settings_file()",
+                )
+            )
+    except Exception as e:
+        findings.append(Finding("hooks", "settings-file", Status.FAIL, str(e)))
+
+    try:
+        from ._win_console import SUBPROCESS_NO_WINDOW
+
+        r = subprocess.run(
+            [sys.executable, "-m", "agent_takkub.cli", "_hook"],
+            input="{}",
+            capture_output=True,
+            text=True,
+            timeout=5,
+            creationflags=SUBPROCESS_NO_WINDOW,
+        )
+        if r.returncode == 0 and not r.stdout.strip():
+            findings.append(
+                Finding("hooks", "_hook command", Status.OK, "exits 0, no output (fail-open)")
+            )
+        else:
+            detail = (r.stdout or r.stderr or "").strip()[:200] or f"exit {r.returncode}"
+            findings.append(Finding("hooks", "_hook command", Status.FAIL, detail))
+    except Exception as e:
+        findings.append(Finding("hooks", "_hook command", Status.FAIL, str(e)))
+
+    return findings
+
+
 # ---------------------------------------------------------------------------
 # runner
 # ---------------------------------------------------------------------------
@@ -817,6 +878,7 @@ def run_all_checks() -> list[Finding]:
     findings.extend(check_projects())
     findings.extend(check_providers())
     findings.extend(check_hooks())
+    findings.extend(check_hook_wiring())
     findings.extend(check_ready_markers())
     findings.extend(check_version())
     return findings
