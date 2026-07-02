@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 67,
+  "module_count": 68,
   "modules": [
     {
       "module": "agent_takkub",
@@ -204,6 +204,7 @@
         "agent_takkub.cli",
         "agent_takkub.cli_server",
         "agent_takkub.doctor",
+        "agent_takkub.hook_wiring",
         "agent_takkub.issues",
         "agent_takkub.lead_bash_audit",
         "agent_takkub.lead_context",
@@ -227,7 +228,7 @@
         "agent_takkub.vault_graph",
         "agent_takkub.vault_mirror"
       ],
-      "fan_in": 28,
+      "fan_in": 29,
       "fan_out": 0
     },
     {
@@ -253,6 +254,7 @@
         "agent_takkub.codex_helper",
         "agent_takkub.config",
         "agent_takkub.gemini_helper",
+        "agent_takkub.hook_wiring",
         "agent_takkub.pty_session",
         "agent_takkub.shared_dev_tools",
         "agent_takkub.system_baseline",
@@ -263,7 +265,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 2,
-      "fan_out": 8
+      "fan_out": 9
     },
     {
       "module": "agent_takkub.exec_mode",
@@ -290,6 +292,18 @@
         "agent_takkub.status_header"
       ],
       "fan_in": 5,
+      "fan_out": 1
+    },
+    {
+      "module": "agent_takkub.hook_wiring",
+      "imports": [
+        "agent_takkub.config"
+      ],
+      "imported_by": [
+        "agent_takkub.doctor",
+        "agent_takkub.spawn_engine"
+      ],
+      "fan_in": 2,
       "fan_out": 1
     },
     {
@@ -740,6 +754,7 @@
         "agent_takkub.codex_helper",
         "agent_takkub.config",
         "agent_takkub.gemini_helper",
+        "agent_takkub.hook_wiring",
         "agent_takkub.lead_context",
         "agent_takkub.orchestrator_text",
         "agent_takkub.pane_env",
@@ -756,7 +771,7 @@
         "agent_takkub.orchestrator"
       ],
       "fan_in": 1,
-      "fan_out": 17
+      "fan_out": 18
     },
     {
       "module": "agent_takkub.spawn_gate",

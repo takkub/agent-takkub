@@ -215,6 +215,22 @@ _POST_COMPACT_DETECT_SEC = 5 * 60
 IDLE_REMIND_AFTER_S = 45
 IDLE_REMIND_COOLDOWN_S = 90
 
+# Stuck-paste reaper. A task pasted at spawn renders "[Pasted text +N lines]"
+# in the input box; under parallel-spawn CPU load the submitting Enter (and the
+# delivery self-heal's 3 resends, all within ~3 s) can be swallowed while
+# claude is still initialising — leaving the pane idle-at-ready with the task
+# forever unsent. The idle reminder used to rescue this by accident (its
+# trailing Enter submitted the stuck paste), but any reminder-suppression gate
+# (e.g. a rate-limit flag) starves that rescue. This reaper is the DIRECT fix:
+# a "working" pane at its ready prompt showing pending input for
+# STUCK_PASTE_SUBMIT_AFTER_S gets a bare CR (harmless if a submit is somehow
+# in flight), retried every STUCK_PASTE_SUBMIT_COOLDOWN_S up to
+# STUCK_PASTE_SUBMIT_MAX times. It runs BEFORE every suppression gate so no
+# false flag can starve it.
+STUCK_PASTE_SUBMIT_AFTER_S = 15.0
+STUCK_PASTE_SUBMIT_COOLDOWN_S = 30.0
+STUCK_PASTE_SUBMIT_MAX = 4
+
 # Structural stale-marker detector (#20). A pane that is alive, has produced no
 # output for STALE_MARKER_QUIET_S (a generating CLI streams continuously, so
 # this long a silence means it is NOT mid-generation), and is matched by NO
@@ -2227,6 +2243,16 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
                         self._idle_state.pop(key, None)
                         continue
 
+                    # Stuck-paste reaper — MUST run before every suppression
+                    # gate below (rate-limit, blocked-on-lead, tty-block). A
+                    # swallowed task submit has to be recovered even when a
+                    # gate silences the idle reminder: the 2026-07-02 QA
+                    # fan-out incident was exactly this — a false rate-limit
+                    # flag (Fable-5 promo text) suppressed the reminder whose
+                    # trailing Enter used to rescue stuck pastes by accident,
+                    # so panes sat on "[Pasted text +N lines]" for hours.
+                    self._maybe_submit_stuck_paste(key, name, project_name, pane, now)
+
                     # Suppress the reminder while this pane is rate-limited: it's
                     # not idle-because-done, it physically can't work until the
                     # usage limit resets. Detection happens here (every tick) and
@@ -2998,6 +3024,55 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
                     continue
         except Exception:
             pass
+
+    def _maybe_submit_stuck_paste(
+        self, key: str, role: str, project: str, pane: AgentPane, now: float
+    ) -> None:
+        """Submit a task paste whose Enter was swallowed and never recovered.
+
+        Fires when a "working" pane sits at its ready prompt with a
+        "[Pasted text +N lines]" placeholder in the input box (structural
+        signal: ``shows_pending_input()``) for STUCK_PASTE_SUBMIT_AFTER_S —
+        the state a swallowed submit leaves behind once
+        ``_delayed_enter_verified`` has exhausted its resends (~3 s window,
+        too short under parallel-spawn CPU load). Sends a bare CR, which is
+        harmless if the submit is actually mid-flight, and retries on a
+        cooldown up to STUCK_PASTE_SUBMIT_MAX times so a pane a CR cannot fix
+        (e.g. wedged upstream TUI) is escalated to the log instead of poked
+        forever. State lives in PaneState and resets the moment the pending
+        input clears (submit landed → pane goes busy)."""
+        ps = self._ps(key)
+        try:
+            stuck = pane.session.is_at_ready_prompt() and pane.session.shows_pending_input()
+        except Exception:
+            stuck = False
+        if not stuck:
+            ps.pending_input_since = None
+            ps.pending_submit_attempts = 0
+            return
+        if ps.pending_input_since is None:
+            ps.pending_input_since = now
+            return
+        if (now - ps.pending_input_since) < STUCK_PASTE_SUBMIT_AFTER_S:
+            return
+        if (now - ps.last_pending_submit_ts) < STUCK_PASTE_SUBMIT_COOLDOWN_S:
+            return
+        if ps.pending_submit_attempts >= STUCK_PASTE_SUBMIT_MAX:
+            return
+        pane.session.write(b"\r")
+        ps.last_pending_submit_ts = now
+        ps.pending_submit_attempts += 1
+        _log_event(
+            "stuck_paste_submit",
+            role=role,
+            project=project,
+            attempt=ps.pending_submit_attempts,
+            stuck_for_s=int(now - ps.pending_input_since),
+        )
+        if ps.pending_submit_attempts >= STUCK_PASTE_SUBMIT_MAX:
+            # CRs aren't landing — leave a loud breadcrumb for the operator
+            # instead of silently giving up (no-silent-caps rule).
+            _log_event("stuck_paste_gave_up", role=role, project=project)
 
     def _rate_limit_suppressed(self, project: str, role: str, pane: AgentPane, now: float) -> bool:
         """Return True if `pane` is rate-limited and the watchdog should leave

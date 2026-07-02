@@ -352,11 +352,23 @@ def ready_marker_selftest() -> list[str]:
 # ⚠ The exact wording + time format are Claude-Code-version-dependent and must
 # be verified against a real limit banner. Override without a code change via
 # TAKKUB_RATE_LIMIT_MARKERS (comma-separated substrings, lower-case).
+#
+# Markers must be REACHED-STATE phrases, never the bare topic words. The bare
+# "usage limit" marker false-positived on Claude Code v2.1.198's Fable-5 promo
+# notice ("…use up to 50% of your plan's weekly usage limit on Fable 5. If you
+# hit your limit…"), shown on EVERY fresh pane during the promo window. The
+# false flag suppressed the idle watchdog for the 5 h fallback, which starved
+# the reminder that rescues a swallowed task submit — panes sat on
+# "[Pasted text +N lines]" forever (the QA fan-out stuck-paste incident,
+# events.log 2026-07-02 09:20 resets_in_s=18000 ×3). Promo/marketing text talks
+# about limits hypothetically ("if you hit your limit"); a real banner declares
+# the limit HIT ("limit reached", "you've reached your usage limit") or names
+# the reset ("your limit will reset at 3pm").
 _DEFAULT_RATE_LIMIT_MARKERS = (
-    "usage limit",
-    "limit reached",
-    "limit will reset",
-    "reached your usage",
+    "limit reached",  # "usage limit reached", "5-hour limit reached ∙ resets 3pm"
+    "limit will reset",  # "your limit will reset at 11pm"
+    "reached your usage",  # "you've reached your usage limit"
+    "hit your usage limit",  # "you've hit your usage limit"
     "out of usage",
 )
 

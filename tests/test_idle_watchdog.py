@@ -82,6 +82,11 @@ def _make_pane(
     pane.session.is_blocked_on_tty_prompt.return_value = tty_prompt
     # Default: no malformed tool-call XML on screen.
     pane.session.has_unparsed_tool_call.return_value = unparsed_xml
+    # Default: input box is empty (real PtySession returns False when no
+    # "[Pasted text +N lines]" placeholder is showing). Without this a
+    # MagicMock would return a truthy stub and the stuck-paste reaper would
+    # fire a recovery CR in every test.
+    pane.session.shows_pending_input.return_value = False
     return pane
 
 
@@ -210,6 +215,107 @@ class TestIdleWatchdog:
         clock[0] += orch_mod.IDLE_REMIND_COOLDOWN_S + 1
         orch._check_idle_teammates()
         assert pane.session.write.call_count == 2
+
+
+class TestStuckPasteReaper:
+    """The reaper that submits a task paste whose Enter was swallowed.
+
+    Regression for the 2026-07-02 QA fan-out incident: parallel spawn swallowed
+    the submitting Enter, the delivery self-heal exhausted within ~3 s, and a
+    false rate-limit flag (Fable-5 promo text) suppressed the idle reminder
+    whose trailing Enter used to rescue the pane by accident — leaving
+    "[Pasted text +N lines]" stuck in the input box for hours.
+    """
+
+    def _stuck_pane(self) -> MagicMock:
+        pane = _make_pane(state="working", at_ready_prompt=True)
+        pane.session.shows_pending_input.return_value = True
+        return pane
+
+    def test_submits_after_threshold(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pane = self._stuck_pane()
+        orch.panes["qa#3"] = pane
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+
+        orch._check_idle_teammates()  # first observation — starts the episode
+        pane.session.write.assert_not_called()
+
+        clock[0] += orch_mod.STUCK_PASTE_SUBMIT_AFTER_S + 1
+        orch._check_idle_teammates()
+        pane.session.write.assert_called_once_with(b"\r")
+        assert orch._ps(_key("qa#3")).pending_submit_attempts == 1
+
+    def test_fires_even_when_rate_limit_flag_suppresses_reminder(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The exact incident shape: pane falsely flagged rate-limited for 5 h.
+        # The idle reminder must stay suppressed, but the reaper must still
+        # submit the stuck paste.
+        pane = self._stuck_pane()
+        orch.panes["qa#3"] = pane
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        orch._ps(_key("qa#3")).rate_limited_until = clock[0] + 18000
+
+        orch._check_idle_teammates()
+        clock[0] += orch_mod.IDLE_REMIND_AFTER_S + 1  # past the reminder threshold too
+        orch._check_idle_teammates()
+
+        pane.session.write.assert_called_once_with(b"\r")  # reaper fired…
+        assert IDLE_REMINDER_TEXT not in [
+            c.args[0] for c in pane.session.write.call_args_list
+        ]  # …but the reminder stayed suppressed
+
+    def test_episode_resets_when_input_clears(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pane = self._stuck_pane()
+        orch.panes["backend"] = pane
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+
+        orch._check_idle_teammates()  # episode starts
+        pane.session.shows_pending_input.return_value = False  # submit landed
+        clock[0] += orch_mod.STUCK_PASTE_SUBMIT_AFTER_S + 1
+        orch._check_idle_teammates()
+
+        pane.session.write.assert_not_called()
+        ps = orch._ps(_key("backend"))
+        assert ps.pending_input_since is None
+        assert ps.pending_submit_attempts == 0
+
+    def test_cooldown_and_attempt_cap(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pane = self._stuck_pane()
+        orch.panes["backend"] = pane
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        events: list[str] = []
+        monkeypatch.setattr(orch_mod, "_log_event", lambda event, **kw: events.append(event))
+
+        orch._check_idle_teammates()  # episode starts
+        clock[0] += orch_mod.STUCK_PASTE_SUBMIT_AFTER_S + 1
+        orch._check_idle_teammates()  # attempt 1
+        orch._check_idle_teammates()  # inside cooldown — no attempt
+        cr_writes = [c for c in pane.session.write.call_args_list if c.args[0] == b"\r"]
+        assert len(cr_writes) == 1
+
+        # Walk the clock through every remaining attempt, then well past it.
+        for _ in range(orch_mod.STUCK_PASTE_SUBMIT_MAX + 2):
+            clock[0] += orch_mod.STUCK_PASTE_SUBMIT_COOLDOWN_S + 1
+            orch._check_idle_teammates()
+
+        cr_writes = [c for c in pane.session.write.call_args_list if c.args[0] == b"\r"]
+        assert len(cr_writes) == orch_mod.STUCK_PASTE_SUBMIT_MAX  # capped
+        assert "stuck_paste_gave_up" in events
 
 
 class TestIdleResetHooks:

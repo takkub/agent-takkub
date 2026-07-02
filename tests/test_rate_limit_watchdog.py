@@ -47,9 +47,34 @@ class TestParseRateLimitReset:
     def test_reset_time_is_always_in_future(self) -> None:
         # Whatever clock time is parsed, the epoch must be after `now`
         # (today if still ahead, else tomorrow).
-        for banner in ("usage limit · resets 1am", "usage limit · resets 11pm"):
+        for banner in ("usage limit reached · resets 1am", "usage limit reached · resets 11pm"):
             epoch = _parse_rate_limit_reset(banner, self.NOW)
             assert epoch is not None and epoch > self.NOW
+
+    def test_promo_notice_is_not_a_limit_banner(self) -> None:
+        # Claude Code v2.1.198 Fable-5 promo shows on EVERY fresh pane and
+        # merely *talks about* limits — it must not flag the pane as
+        # rate-limited. The false flag suppressed the idle watchdog for 5 h
+        # and starved the rescue of swallowed task submits (QA fan-out
+        # stuck-paste incident, 2026-07-02).
+        promo = (
+            "fable 5 is back.\n"
+            "until july 7, you can use up to 50% of your plan's weekly usage "
+            "limit on fable 5. if you hit your limit, you can continue on "
+            "fable 5 after it resets."
+        )
+        assert _parse_rate_limit_reset(promo, self.NOW) is None
+
+    def test_real_banners_still_detected(self) -> None:
+        # The tightened markers must keep matching genuine reached-state
+        # banners across known claude wordings.
+        for banner in (
+            "claude usage limit reached. your limit will reset at 11pm",
+            "you've reached your usage limit",
+            "you've hit your usage limit — upgrade or wait",
+            "5-hour limit reached ∙ resets 3pm",
+        ):
+            assert _parse_rate_limit_reset(banner, self.NOW) is not None, banner
 
     def test_12am_maps_to_midnight(self) -> None:
         epoch = _parse_rate_limit_reset("usage limit reached, resets 12am", self.NOW)

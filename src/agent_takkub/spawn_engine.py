@@ -217,6 +217,16 @@ class PaneState:
     # each gets exactly one nudge. done()/close() pop the whole PaneState, which
     # implicitly clears this too.
     stop_gate_notified: bool = False
+    # Stuck-paste reaper: a "working" pane sitting at the ready prompt with a
+    # "[Pasted text +N lines]" placeholder never submitted (Enter swallowed at
+    # spawn under parallel load and the delivery self-heal exhausted).
+    # pending_input_since = when the stuck state was first observed;
+    # last_pending_submit_ts gates the recovery-CR cadence;
+    # pending_submit_attempts caps recovery so a pane a CR can't fix
+    # doesn't get poked forever.
+    pending_input_since: float | None = None
+    last_pending_submit_ts: float = 0.0
+    pending_submit_attempts: int = 0
 
 
 @dataclass
