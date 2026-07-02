@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import pathlib
 import re
 import subprocess
@@ -107,7 +108,18 @@ def warm_browser_mcps() -> None:
     blip never blocks cockpit boot.
 
     Daemon threads so cockpit shutdown doesn't wait on them.
+
+    Guarded by TAKKUB_SKIP_MCP_WARM (any truthy value): every Orchestrator()
+    construction calls this, so a full pytest run building dozens of
+    Orchestrators would otherwise spawn dozens of real `npx @playwright/mcp`
+    + `npx chrome-devtools-mcp` processes that outlive individual tests and
+    pile up (#91 — CPU idle 0% mid-suite). conftest.py sets the env var for
+    every test; the check lives here (not just at the caller) so no import
+    path can bypass it.
     """
+    if os.environ.get("TAKKUB_SKIP_MCP_WARM", "").strip() not in ("", "0"):
+        _log.debug("warm_browser_mcps: skipped (TAKKUB_SKIP_MCP_WARM set)")
+        return
 
     def _warm_one(argv: list[str]) -> None:
         try:

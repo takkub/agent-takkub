@@ -33,6 +33,18 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 # Per-test env assertions (test_office_room) monkeypatch/delenv to override.
 os.environ.setdefault("TAKKUB_ALLOW_MULTI", "1")
 
+# Every Orchestrator() construction calls shared_dev_tools.warm_browser_mcps(),
+# which spawns real `npx @playwright/mcp` + `npx chrome-devtools-mcp` processes
+# in daemon threads to pre-warm the npx cache. A full pytest run constructs
+# dozens of Orchestrators, so without this guard the suite floods the machine
+# with concurrent npx/node children that outlive individual tests (#91 — CPU
+# idle 0%, 50-74 concurrent procs observed). Set before any test module (or
+# agent_takkub.shared_dev_tools) imports, so the very first Orchestrator() in
+# the suite is already covered. The autouse fixture below adds a second,
+# belt-and-suspenders layer (monkeypatch) in case a test explicitly clears
+# this env var.
+os.environ.setdefault("TAKKUB_SKIP_MCP_WARM", "1")
+
 import pytest
 
 # Modules that bind RUNTIME_DIR / EVENTS_LOG as a module-level name. config is
@@ -114,6 +126,16 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
         takkub_dir = tmp_path / "_isolated_takkub"
         monkeypatch.setattr(pc, "_BASE_DIR", takkub_dir, raising=False)
         monkeypatch.setattr(pc, "_CONFIG_PATH", takkub_dir / "role-providers.json", raising=False)
+
+    # Second layer for #91 (see the module-level os.environ.setdefault above):
+    # force the env guard back on per-test (in case a prior test cleared it)
+    # AND monkeypatch warm_browser_mcps to a no-op directly, so a stray import
+    # path that dodges the env check still can't spawn real npx/node children
+    # during the suite.
+    monkeypatch.setenv("TAKKUB_SKIP_MCP_WARM", "1")
+    sdt = _maybe_module("agent_takkub.shared_dev_tools", force=True)
+    if sdt is not None:
+        monkeypatch.setattr(sdt, "warm_browser_mcps", lambda: None, raising=False)
 
     yield
 
