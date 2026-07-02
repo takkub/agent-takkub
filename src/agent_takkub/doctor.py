@@ -251,6 +251,152 @@ def check_runtime() -> list[Finding]:
 
 
 # ---------------------------------------------------------------------------
+# [arch] — Apple Silicon Rosetta / native-arm64 shell hygiene (macOS only)
+# ---------------------------------------------------------------------------
+
+# The exact block appended to ~/.zshrc by --fix. Guarded three ways so it is a
+# no-op on Intel Macs (hw.optional.arm64 != 1) and non-macOS shells (OSTYPE), and
+# never loops (after `exec`, arch == arm64 → condition false). Kept in sync with
+# the `arch/zshrc-guard` check below via the marker line.
+_ARM64_GUARD_MARKER = "# takkub: force native arm64 shell on Apple Silicon"
+_ARM64_GUARD_BLOCK = f"""
+{_ARM64_GUARD_MARKER}
+# Safe on Intel Macs (skipped: hw.optional.arm64 != 1) and non-macOS (skipped: OSTYPE).
+# exec replaces the shell once, so no loop (after exec, arch == arm64 → guard false).
+if [[ "$OSTYPE" == darwin* ]] \\
+  && [[ "$(sysctl -n hw.optional.arm64 2>/dev/null)" == "1" ]] \\
+  && [[ "$(arch)" == "i386" ]]; then
+  exec arch -arm64 zsh
+fi
+"""
+
+
+def _rosetta_installed() -> bool:
+    """True if Rosetta 2 is present. Checks the runtime paths Apple installs; the
+    directory form is what a fresh `softwareupdate --install-rosetta` drops."""
+    return (
+        Path("/Library/Apple/usr/libexec/oah/libRosettaRuntime").exists()
+        or Path("/Library/Apple/usr/share/rosetta").exists()
+    )
+
+
+def _zshrc_has_guard() -> bool:
+    zshrc = Path.home() / ".zshrc"
+    try:
+        return _ARM64_GUARD_MARKER in zshrc.read_text(encoding="utf-8")
+    except OSError:
+        return False
+
+
+def check_arch() -> list[Finding]:
+    """[arch] — keep Apple Silicon Macs off the Rosetta trap.
+
+    On an Apple Silicon Mac a terminal with "Open using Rosetta" ticked runs the
+    shell (and everything it spawns) as x86_64. Universal python then builds
+    x86_64 wheels into venvs — which import-crash the moment that venv/code is
+    copied to a native-arm64 Mac. That's the "works here, breaks on the other
+    mac" report. This surfaces it and, with ``--fix``, installs Rosetta (for the
+    unavoidable Intel-only apps) AND drops a guarded ``exec arch -arm64`` into
+    ``~/.zshrc`` so every new shell lands native.
+
+    macOS-only: returns ``[]`` on Windows/Linux, and a single benign OK on a
+    genuine Intel Mac where the whole topic is moot.
+    """
+    if sys.platform != "darwin":
+        return []
+
+    _, arm64_opt = _run(["sysctl", "-n", "hw.optional.arm64"])
+    if arm64_opt.strip() != "1":
+        # Real Intel Mac — no arm64 slice exists, Rosetta/arm64 hygiene is N/A.
+        return [Finding("arch", "cpu", Status.OK, "Intel Mac — Rosetta/arm64 checks N/A")]
+
+    findings: list[Finding] = []
+
+    # 1. Is THIS shell (doctor's parent) running translated under Rosetta? This is
+    #    the process arch venvs/pip inherit, so it's the one that actually bites.
+    _, translated = _run(["sysctl", "-n", "sysctl.proc_translated"])
+    if translated.strip() == "1":
+        findings.append(
+            Finding(
+                "arch",
+                "shell",
+                Status.WARN,
+                "running under Rosetta (x86_64) — pip/venv build Intel wheels that "
+                "import-crash when moved to a native-arm64 Mac",
+                "takkub doctor --fix → adds the ~/.zshrc arm64 guard, then REOPEN the "
+                "terminal (and rebuild any .venv created while translated)",
+            )
+        )
+    else:
+        findings.append(Finding("arch", "shell", Status.OK, "native arm64"))
+
+    # 2. Rosetta present? Needed by the unavoidable Intel-only apps (games, some
+    #    dev tools). --fix installs it (long-running, so its own timeout).
+    if _rosetta_installed():
+        findings.append(Finding("arch", "rosetta", Status.OK, "installed"))
+    else:
+
+        def _install_rosetta() -> tuple[bool, str]:
+            from ._win_console import SUBPROCESS_NO_WINDOW
+
+            try:
+                r = subprocess.run(
+                    ["softwareupdate", "--install-rosetta", "--agree-to-license"],
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
+                    creationflags=SUBPROCESS_NO_WINDOW,
+                )
+            except Exception as e:
+                return False, str(e)
+            if r.returncode == 0:
+                return True, "Rosetta installed"
+            return False, ((r.stderr or r.stdout or "").strip()[-200:] or "install failed")
+
+        findings.append(
+            Finding(
+                "arch",
+                "rosetta",
+                Status.WARN,
+                "not installed — Intel-only apps (games, some dev tools) will fail to launch",
+                "takkub doctor --fix → installs Rosetta (needs network)",
+                auto_fix=_install_rosetta,
+            )
+        )
+
+    # 3. Does ~/.zshrc pin new shells to native arm64? This is the durable fix that
+    #    travels with the dotfile to every machine — the whole "all machines" ask.
+    if _zshrc_has_guard():
+        findings.append(Finding("arch", "zshrc-guard", Status.OK, "native-arm64 guard present"))
+    else:
+
+        def _add_zshrc_guard() -> tuple[bool, str]:
+            zshrc = Path.home() / ".zshrc"
+            try:
+                existing = zshrc.read_text(encoding="utf-8") if zshrc.exists() else ""
+                if _ARM64_GUARD_MARKER in existing:
+                    return True, "guard already present"
+                sep = "" if existing.endswith("\n") or not existing else "\n"
+                zshrc.write_text(existing + sep + _ARM64_GUARD_BLOCK, encoding="utf-8")
+            except OSError as e:
+                return False, str(e)
+            return True, "added arm64 guard to ~/.zshrc — reopen the terminal to take effect"
+
+        findings.append(
+            Finding(
+                "arch",
+                "zshrc-guard",
+                Status.WARN,
+                "~/.zshrc has no native-arm64 guard — a Rosetta-ticked terminal stays x86_64",
+                "takkub doctor --fix → appends a Rosetta-safe `exec arch -arm64` guard",
+                auto_fix=_add_zshrc_guard,
+            )
+        )
+
+    return findings
+
+
+# ---------------------------------------------------------------------------
 # [qt] — Qt version pin + crash guard (cross-platform stability gate)
 # ---------------------------------------------------------------------------
 
@@ -872,6 +1018,7 @@ def run_all_checks() -> list[Finding]:
     findings: list[Finding] = []
     findings.extend(check_claude())
     findings.extend(check_runtime())
+    findings.extend(check_arch())
     findings.extend(check_qt())
     findings.extend(check_plugins())
     findings.extend(check_mcps())
