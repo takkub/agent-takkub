@@ -65,9 +65,7 @@ class TestLeadNeverBlocks:
         orch.panes["lead"] = _make_pane(state="working")
         _assign_task(orch, "lead")
 
-        ok, block, reason = orch.consume_pane_hook(
-            "lead", project=TEST_PROJECT, event="Stop"
-        )
+        ok, block, reason = orch.consume_pane_hook("lead", project=TEST_PROJECT, event="Stop")
 
         assert ok is True
         assert block is False
@@ -79,9 +77,7 @@ class TestDoneGateBlocksOnce:
         orch.panes["backend"] = _make_pane(state="working")
         _assign_task(orch, "backend")
 
-        ok, block, reason = orch.consume_pane_hook(
-            "backend", project=TEST_PROJECT, event="Stop"
-        )
+        ok, block, reason = orch.consume_pane_hook("backend", project=TEST_PROJECT, event="Stop")
 
         assert ok is True
         assert block is True
@@ -113,9 +109,7 @@ class TestDoneGateBlocksOnce:
         orch.panes["backend"] = _make_pane(state="working")
         # No assign() ever happened — no PaneState / no last_assigned_task.
 
-        ok, block, _ = orch.consume_pane_hook(
-            "backend", project=TEST_PROJECT, event="Stop"
-        )
+        ok, block, _ = orch.consume_pane_hook("backend", project=TEST_PROJECT, event="Stop")
 
         assert ok is True
         assert block is False
@@ -124,9 +118,7 @@ class TestDoneGateBlocksOnce:
         orch.panes["backend"] = _make_pane(state="working")
         _assign_task(orch, "backend")
 
-        _, block, _ = orch.consume_pane_hook(
-            "backend", project=TEST_PROJECT, event="Notification"
-        )
+        _, block, _ = orch.consume_pane_hook("backend", project=TEST_PROJECT, event="Notification")
 
         assert block is False
 

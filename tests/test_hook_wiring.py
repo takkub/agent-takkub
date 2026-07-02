@@ -77,11 +77,7 @@ class TestHookSettingsFile:
         path = hook_wiring.ensure_hook_settings_file()
         data = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
 
-        stop_cmds = [
-            h.get("command")
-            for grp in data["hooks"]["Stop"]
-            for h in grp["hooks"]
-        ]
+        stop_cmds = [h.get("command") for grp in data["hooks"]["Stop"] for h in grp["hooks"]]
         notif_groups = data["hooks"]["Notification"]
         notif_cmds = [h.get("command") for grp in notif_groups for h in grp["hooks"]]
 
