@@ -18,13 +18,16 @@ import pathlib
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QPushButton,
     QTableWidget,
@@ -54,6 +57,136 @@ ROLES: tuple[str, ...] = (
 _FORCED_PLUGINS = frozenset({"security-guidance", "remember"})
 
 _PLUGINS_INSTALLED_FILE = pathlib.Path.home() / ".claude" / "plugins" / "installed_plugins.json"
+
+# Zinc dark theme, matched to the cockpit shell (MainWindow QSS + status-bar
+# chips): #09090b bg, #18181b/#27272a surfaces, zinc text ramp, #2563eb accent
+# for the one consequential action (Save). A QDialog stylesheet cascades to all
+# descendant widgets — including the child "add MCP" dialog and QMessageBoxes —
+# so styling here themes the whole feature in one place.
+_DIALOG_QSS = """
+QDialog { background-color: #09090b; color: #e4e4e7; font-size: 12px; }
+QLabel { color: #d4d4d8; background: transparent; }
+QLabel#toolsTitle { color: #fafafa; font-size: 16px; font-weight: 700; }
+QLabel#toolsSubtitle { color: #a1a1aa; font-size: 11px; }
+QLabel#emptyState { color: #a1a1aa; font-size: 12px; padding: 40px; }
+
+QTabWidget::pane {
+    border: 1px solid #27272a; border-radius: 8px; top: -1px; background: #18181b;
+}
+QTabBar::tab {
+    background: transparent; color: #a1a1aa; padding: 6px 18px; margin-right: 4px;
+    border: 1px solid transparent;
+    border-top-left-radius: 8px; border-top-right-radius: 8px; font-weight: 500;
+}
+QTabBar::tab:selected {
+    background: #18181b; color: #fafafa;
+    border: 1px solid #27272a; border-bottom-color: #18181b;
+}
+QTabBar::tab:hover:!selected { color: #e4e4e7; }
+
+QTableWidget {
+    background: #0c0c0e; alternate-background-color: #131316;
+    gridline-color: #1f1f23; border: none; border-radius: 8px;
+    color: #d4d4d8; outline: none;
+}
+QTableWidget::item { padding: 0; border-bottom: 1px solid #1f1f23; }
+QTableWidget::item:selected { background: rgba(37,99,235,0.16); }
+QTableWidget QWidget { background: transparent; }
+
+QHeaderView { background: transparent; }
+QHeaderView::section {
+    background: #18181b; color: #a1a1aa; padding: 7px 10px; border: none;
+    border-right: 1px solid #1f1f23; border-bottom: 1px solid #27272a;
+    font-weight: 600;
+}
+QHeaderView::section:hover { color: #e4e4e7; background: #1f1f23; }
+QHeaderView::section:vertical {
+    color: #e4e4e7; padding-left: 12px; border-right: 1px solid #27272a;
+}
+QTableCornerButton::section {
+    background: #18181b; border: none;
+    border-bottom: 1px solid #27272a; border-right: 1px solid #27272a;
+}
+
+QCheckBox { spacing: 0; }
+QCheckBox::indicator {
+    width: 16px; height: 16px; border: 1px solid #3f3f46;
+    border-radius: 4px; background: #18181b;
+}
+QCheckBox::indicator:hover { border-color: #52525b; }
+QCheckBox::indicator:checked { background: #2563eb; border-color: #2563eb;%CHECK% }
+QCheckBox::indicator:unchecked:disabled { background: #131316; border-color: #27272a; }
+
+QLineEdit {
+    background: #18181b; border: 1px solid #27272a; border-radius: 6px;
+    padding: 6px 8px; color: #e4e4e7; selection-background-color: #2563eb;
+}
+QLineEdit:focus { border-color: #2563eb; }
+
+QPushButton {
+    background: #18181b; color: #d4d4d8; border: 1px solid #27272a;
+    border-radius: 6px; padding: 8px 16px; font-weight: 500;
+}
+QPushButton:hover { background: #27272a; border-color: #3f3f46; }
+QPushButton:pressed { background: #131316; }
+QPushButton#primaryBtn {
+    background: #2563eb; color: #ffffff; border: 1px solid #2563eb; font-weight: 600;
+}
+QPushButton#primaryBtn:hover { background: #3b82f6; border-color: #3b82f6; }
+QPushButton#primaryBtn:pressed { background: #1d4ed8; }
+"""
+
+# Prettier role labels for the vertical header — logic keys stay lowercase
+# (see ``ROLES``); this is display-only.
+_ROLE_DISPLAY: dict[str, str] = {"qa": "QA", "devops": "DevOps"}
+
+
+def role_label(role: str) -> str:
+    """Human-facing role name for the matrix's vertical header."""
+    return _ROLE_DISPLAY.get(role, role.capitalize())
+
+
+def _checkmark_icon_path() -> str:
+    """Path to a small white ✓ PNG for the checked-checkbox indicator.
+
+    A solid blue square alone reads as "selected cell", and relies on colour
+    as the only state cue (fails shape-based/low-vision users). We draw the
+    tick once with QPainter — no bundled asset, no QtSvg dependency — cache it
+    under ``~/.takkub/cache``, and hand the path to the stylesheet. Any failure
+    returns ``""`` so the QSS simply falls back to the plain blue fill.
+    """
+    try:
+        cache = pathlib.Path.home() / ".takkub" / "cache"
+        path = cache / "tools-check.png"
+        if not path.exists():
+            from PyQt6.QtCore import QPointF
+            from PyQt6.QtGui import QColor, QImage, QPainter, QPen, QPolygonF
+
+            cache.mkdir(parents=True, exist_ok=True)
+            img = QImage(16, 16, QImage.Format.Format_ARGB32)
+            img.fill(0)  # transparent
+            painter = QPainter(img)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            pen = QPen(QColor("#ffffff"))
+            pen.setWidthF(2.0)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(pen)
+            painter.drawPolyline(
+                QPolygonF([QPointF(3.5, 8.5), QPointF(6.7, 11.5), QPointF(12.5, 4.7)])
+            )
+            painter.end()
+            img.save(str(path), "PNG")
+        return path.as_posix()
+    except Exception:
+        return ""
+
+
+def compose_qss() -> str:
+    """The dialog stylesheet with the checkmark asset URL substituted in."""
+    check = _checkmark_icon_path()
+    mark = f' image: url("{check}");' if check else ""
+    return _DIALOG_QSS.replace("%CHECK%", mark)
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -140,6 +273,30 @@ def parse_install_form(name: str, command: str, args_line: str) -> tuple[str, di
 # ──────────────────────────────────────────────────────────────────
 
 
+class _CheckCell(QWidget):
+    """Matrix cell whose *entire* area toggles the contained checkbox.
+
+    The checkbox indicator is only 16px; when it's the sole hit target,
+    clicks that land a few pixels off do nothing (or select the column).
+    Wrapping it here and toggling on any press makes the whole cell a
+    comfortable click target. Presses that land directly on the checkbox are
+    consumed by it, so there's no double-toggle.
+    """
+
+    def __init__(self, box: QCheckBox, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._box = box
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(box, alignment=Qt.AlignmentFlag.AlignCenter)
+
+    def mousePressEvent(self, ev) -> None:
+        if self._box.isEnabled():
+            self._box.toggle()
+        super().mousePressEvent(ev)
+
+
 class PaneToolsDialog(QDialog):
     """Settings dialog for per-role MCP + plugin visibility.
 
@@ -151,7 +308,8 @@ class PaneToolsDialog(QDialog):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Pane Tools — MCP & Plugin policy")
-        self.resize(760, 480)
+        self.resize(820, 540)
+        self.setStyleSheet(compose_qss())
 
         self._mcp_boxes: dict[str, dict[str, QCheckBox]] = {}
         self._plugin_boxes: dict[str, dict[str, QCheckBox]] = {}
@@ -159,14 +317,36 @@ class PaneToolsDialog(QDialog):
         self._orig_plugin_items: dict[str, list[str]] = {}
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 14)
+        layout.setSpacing(12)
+
+        # Header block — makes the dialog read as an intentional settings panel
+        # rather than a bare table dropped on a window. Title + subtitle are
+        # grouped in a tight sub-layout (proximity) so they read as one unit,
+        # distinct from the tabs below.
+        header = QVBoxLayout()
+        header.setSpacing(3)
+        title = QLabel("🔧 Pane Tools", self)
+        title.setObjectName("toolsTitle")
+        subtitle = QLabel(
+            "เปิด/ปิด MCP และ plugin ต่อ role — ติ๊กช่องแล้วกด Save (มีผลกับ pane ที่ spawn ใหม่)",
+            self,
+        )
+        subtitle.setObjectName("toolsSubtitle")
+        subtitle.setWordWrap(True)
+        header.addWidget(title)
+        header.addWidget(subtitle)
+        layout.addLayout(header)
+
         tabs = QTabWidget(self)
-        layout.addWidget(tabs)
+        layout.addWidget(tabs, 1)
 
         tabs.addTab(self._build_mcp_tab(), "MCP")
         tabs.addTab(self._build_plugin_tab(), "Plugins")
 
         self._status_label = QLabel("", self)
-        self._status_label.setStyleSheet("color: #71717a; font-size: 11px;")
+        self._status_label.setObjectName("toolsSubtitle")
+        self._status_label.setWordWrap(True)
         layout.addWidget(self._status_label)
 
         buttons = QDialogButtonBox(self)
@@ -174,6 +354,8 @@ class PaneToolsDialog(QDialog):
             "Reset to default", QDialogButtonBox.ButtonRole.ResetRole
         )
         self._btn_save = buttons.addButton("Save", QDialogButtonBox.ButtonRole.AcceptRole)
+        self._btn_save.setObjectName("primaryBtn")
+        self._btn_save.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_close = buttons.addButton("Close", QDialogButtonBox.ButtonRole.RejectRole)
         self._btn_reset.clicked.connect(self._on_reset_clicked)
         self._btn_save.clicked.connect(self._on_save_clicked)
@@ -185,21 +367,68 @@ class PaneToolsDialog(QDialog):
     def _build_mcp_tab(self) -> QWidget:
         tab = QWidget(self)
         outer = QVBoxLayout(tab)
+        outer.setContentsMargins(14, 14, 14, 14)
+        outer.setSpacing(10)
 
         add_row = QHBoxLayout()
+        add_row.setSpacing(8)
         self._btn_add_mcp = QPushButton("+ เพิ่ม MCP…", tab)
+        self._btn_add_mcp.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_add_mcp.clicked.connect(self._on_add_mcp_clicked)
         self._btn_remove_mcp = QPushButton("ลบ MCP ที่เลือก", tab)
+        self._btn_remove_mcp.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_remove_mcp.setToolTip("คลิกหัวคอลัมน์ MCP เพื่อเลือก แล้วกดปุ่มนี้ (หรือคลิกขวาที่หัวคอลัมน์)")
+        # Disabled until a column is selected — clicking it empty just to be
+        # scolded by a warning box is poor feedback.
+        self._btn_remove_mcp.setEnabled(False)
         self._btn_remove_mcp.clicked.connect(self._on_remove_mcp_clicked)
         add_row.addWidget(self._btn_add_mcp)
         add_row.addWidget(self._btn_remove_mcp)
         add_row.addStretch(1)
         outer.addLayout(add_row)
 
+        # Empty state — a blank matrix with only role headers looks like a
+        # failed load; say plainly there are no MCPs yet.
+        self._mcp_empty = QLabel(
+            "ยังไม่มี MCP server ใน master registry — กด “+ เพิ่ม MCP…” เพื่อเพิ่ม",
+            tab,
+        )
+        self._mcp_empty.setObjectName("emptyState")
+        self._mcp_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._mcp_empty.setWordWrap(True)
+        self._mcp_empty.hide()
+        outer.addWidget(self._mcp_empty)
+
         self._mcp_table = QTableWidget(tab)
         outer.addWidget(self._mcp_table)
+        # Right-click a column header → "Remove MCP <name>" (binds the
+        # destructive command to the MCP name; more discoverable than the
+        # select-then-button flow).
+        hh = self._mcp_table.horizontalHeader()
+        hh.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        hh.customContextMenuRequested.connect(self._on_mcp_header_menu)
+        self._mcp_table.selectionModel().selectionChanged.connect(self._sync_remove_mcp_enabled)
         self._reload_mcp_table()
         return tab
+
+    def _sync_remove_mcp_enabled(self, *_args) -> None:
+        cols = {idx.column() for idx in self._mcp_table.selectedIndexes()}
+        self._btn_remove_mcp.setEnabled(bool(cols))
+
+    def _on_mcp_header_menu(self, pos) -> None:
+        header = self._mcp_table.horizontalHeader()
+        col = header.logicalIndexAt(pos)
+        if col < 0:
+            return
+        header_item = self._mcp_table.horizontalHeaderItem(col)
+        if header_item is None:
+            return
+        name = header_item.text()
+        menu = QMenu(self)
+        act_remove = menu.addAction(f"ลบ MCP '{name}'")
+        chosen = menu.exec(header.mapToGlobal(pos))
+        if chosen is act_remove:
+            self._remove_mcps([name])
 
     def _master_mcps(self) -> list[str]:
         try:
@@ -237,19 +466,33 @@ class PaneToolsDialog(QDialog):
         self._orig_mcp_items = self._policy_role_items("mcps")
         matrix = build_matrix(ROLES, items, self._orig_mcp_items)
         self._mcp_boxes = self._fill_matrix_table(self._mcp_table, items, matrix)
+        self._mcp_table.setVisible(bool(items))
+        self._mcp_empty.setVisible(not items)
 
     def _build_plugin_tab(self) -> QWidget:
         tab = QWidget(self)
         outer = QVBoxLayout(tab)
+        outer.setContentsMargins(14, 14, 14, 14)
+        outer.setSpacing(10)
 
         note = QLabel(
             "security-guidance และ remember ถูก denylist ปิดเสมอทุก pane "
             "(hook หนัก ทำ spawn ช้า) — policy นี้เปิดให้ไม่ได้.",
             tab,
         )
-        note.setStyleSheet("color: #71717a; font-size: 11px;")
+        note.setObjectName("toolsSubtitle")
         note.setWordWrap(True)
         outer.addWidget(note)
+
+        self._plugin_empty = QLabel(
+            "ไม่พบ marketplace plugin — ยังไม่มีอะไรใน ~/.claude/plugins/installed_plugins.json",
+            tab,
+        )
+        self._plugin_empty.setObjectName("emptyState")
+        self._plugin_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._plugin_empty.setWordWrap(True)
+        self._plugin_empty.hide()
+        outer.addWidget(self._plugin_empty)
 
         self._plugin_table = QTableWidget(tab)
         outer.addWidget(self._plugin_table)
@@ -263,6 +506,8 @@ class PaneToolsDialog(QDialog):
         self._plugin_boxes = self._fill_matrix_table(
             self._plugin_table, items, matrix, disabled_items=_FORCED_PLUGINS
         )
+        self._plugin_table.setVisible(bool(items))
+        self._plugin_empty.setVisible(not items)
 
     # ── shared matrix table builder ─────────────────────────────
 
@@ -277,7 +522,46 @@ class PaneToolsDialog(QDialog):
         table.setRowCount(len(ROLES))
         table.setColumnCount(len(items))
         table.setHorizontalHeaderLabels(items)
-        table.setVerticalHeaderLabels(list(ROLES))
+        table.setVerticalHeaderLabels([role_label(r) for r in ROLES])
+        # Full package/plugin names on hover — headers elide when there are
+        # many columns.
+        for col, item in enumerate(items):
+            header_item = table.horizontalHeaderItem(col)
+            if header_item is not None:
+                header_item.setToolTip(item)
+
+        # Presentation: the cells hold checkbox widgets, not editable text, and
+        # the only meaningful selection is a whole column (→ "remove MCP"). Rows
+        # alternate-shade with a thin divider (grid off) for a calmer surface;
+        # a header click selects the column.
+        table.setAlternatingRowColors(True)
+        table.setShowGrid(False)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectColumns)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        table.setCornerButtonEnabled(False)
+        table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+        vheader = table.verticalHeader()
+        vheader.setDefaultSectionSize(38)
+        vheader.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        vheader.setMinimumWidth(96)
+
+        hheader = table.horizontalHeader()
+        hheader.setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
+        hheader.setMinimumSectionSize(104)
+        hheader.setHighlightSections(False)
+        vheader.setHighlightSections(False)
+        # Few columns → equal-stretch so the checkboxes distribute evenly and
+        # the grid fills the panel (looks balanced). Many columns → size to the
+        # (min-width-clamped) content and let the view scroll horizontally, so
+        # long package names stay readable instead of being squeezed to elision.
+        if items:
+            hheader.setSectionResizeMode(
+                QHeaderView.ResizeMode.Stretch
+                if len(items) <= 6
+                else QHeaderView.ResizeMode.ResizeToContents
+            )
 
         boxes: dict[str, dict[str, QCheckBox]] = {}
         for row, role in enumerate(ROLES):
@@ -286,15 +570,14 @@ class PaneToolsDialog(QDialog):
                 box = QCheckBox(table)
                 box.setChecked(matrix.get(role, {}).get(item, False))
                 if item in disabled_items:
-                    box.setChecked(True)
+                    # Blocked by the denylist — render UNCHECKED + disabled. A
+                    # checked-but-locked box would read as "enabled", the exact
+                    # opposite of "policy can never turn this on".
+                    box.setChecked(False)
                     box.setEnabled(False)
-                container = QWidget(table)
-                cell_layout = QHBoxLayout(container)
-                cell_layout.setContentsMargins(0, 0, 0, 0)
-                cell_layout.addWidget(box, alignment=Qt.AlignmentFlag.AlignCenter)
-                table.setCellWidget(row, col, container)
+                    box.setToolTip("denylist ปิดเสมอ — เปิดผ่าน policy ไม่ได้")
+                table.setCellWidget(row, col, _CheckCell(box, table))
                 boxes[role][item] = box
-        table.resizeColumnsToContents()
         return boxes
 
     # ── add/remove MCP ──────────────────────────────────────────
@@ -302,7 +585,11 @@ class PaneToolsDialog(QDialog):
     def _on_add_mcp_clicked(self) -> None:
         dlg = QDialog(self)
         dlg.setWindowTitle("เพิ่ม MCP")
+        dlg.setMinimumWidth(420)
         form = QFormLayout(dlg)
+        form.setContentsMargins(18, 18, 18, 14)
+        form.setHorizontalSpacing(14)
+        form.setVerticalSpacing(10)
         name_edit = QLineEdit(dlg)
         command_edit = QLineEdit(dlg)
         args_edit = QLineEdit(dlg)
@@ -313,6 +600,10 @@ class PaneToolsDialog(QDialog):
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dlg
         )
+        ok_btn = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        if ok_btn is not None:
+            ok_btn.setObjectName("primaryBtn")
+            ok_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         buttons.accepted.connect(dlg.accept)
         buttons.rejected.connect(dlg.reject)
         form.addRow(buttons)
@@ -340,6 +631,12 @@ class PaneToolsDialog(QDialog):
             QMessageBox.information(self, "ลบ MCP", "เลือกคอลัมน์ MCP ที่ต้องการลบก่อน")
             return
         names = [self._mcp_table.horizontalHeaderItem(c).text() for c in cols]
+        self._remove_mcps(names)
+
+    def _remove_mcps(self, names: list[str]) -> None:
+        """Confirm + drop *names* from the master MCP registry, then reload."""
+        if not names:
+            return
         confirm = QMessageBox.question(
             self,
             "ลบ MCP",
