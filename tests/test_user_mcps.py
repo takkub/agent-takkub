@@ -217,7 +217,9 @@ class TestPostgresPmsRemovedFromAllowlist:
 
     def test_postgres_pms_not_in_default_allow(self) -> None:
         assert "postgres-pms" not in sdt._USER_MCP_DEFAULT_ALLOW
-        assert "obsidian-vault" in sdt._USER_MCP_DEFAULT_ALLOW
+        # 2026-07-02: allowlist emptied entirely (obsidian-vault's provider
+        # plugin was uninstalled); nothing is trusted by default now.
+        assert sdt._USER_MCP_DEFAULT_ALLOW == frozenset()
 
     def test_postgres_pms_with_dsn_creds_is_skipped(
         self, isolated, monkeypatch: pytest.MonkeyPatch
@@ -264,7 +266,11 @@ class TestAllowlistedSecretWarns:
     ) -> None:
         mcp_file, claude_json = isolated
         mcp_file.write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
-        # obsidian-vault is the lone allowlisted name; give it a DSN secret.
+        # The shipped allowlist is empty now — pin one name so the
+        # allowlist-wins-with-warning MECHANISM stays covered regardless of
+        # what ships in _USER_MCP_DEFAULT_ALLOW.
+        monkeypatch.setattr(sdt, "_USER_MCP_DEFAULT_ALLOW", frozenset({"obsidian-vault"}))
+        # give the allowlisted entry a DSN secret.
         secretful = {
             "type": "stdio",
             "command": "npx",

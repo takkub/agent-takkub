@@ -331,6 +331,13 @@ class UserActionsMixin:
     # broadcast actions (UI review, shell, bug check, doctor)
     # ──────────────────────────────────────────────────────────────
 
+    def _on_pane_tools_clicked(self) -> None:
+        """🔧 Tools button: open the role x MCP/plugin policy matrix editor."""
+        from .pane_tools_dialog import PaneToolsDialog
+
+        dlg = PaneToolsDialog(self)
+        dlg.exec()
+
     def _on_ui_review_clicked(self) -> None:
         """🎨 UI Review button: confirm → spawn critic + gemini design-review pair.
 

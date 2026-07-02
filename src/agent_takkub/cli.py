@@ -836,6 +836,183 @@ def cmd_services(args: argparse.Namespace) -> dict:
     return {"ok": False, "msg": f"unknown services subcommand: {sub}"}
 
 
+# Mutating pane-tools-policy subcommands — everything except `list` changes
+# ~/.takkub/pane-tools.json (or the master shared-mcp.json for add/remove) and
+# is therefore lead-only, same rationale as LEAD_ONLY_COMMANDS above. `list`
+# stays open so teammates can see what tools they currently have.
+_MUTATING_MCP_SUBCOMMANDS = frozenset({"allow", "deny", "reset", "add", "remove"})
+_MUTATING_PLUGIN_SUBCOMMANDS = frozenset({"allow", "deny", "reset"})
+
+
+def _require_lead_for_pane_tools(action: str) -> str | None:
+    role = _from_role()
+    if role is None:
+        return None
+    if role.lower() != "lead":
+        return (
+            f"only lead can run 'takkub {action}'. you are '{role}'.\n"
+            f"       'takkub mcp list' / 'takkub plugins list' stay read-only for everyone; "
+            f"ask lead to change the policy."
+        )
+    return None
+
+
+def _pane_tools_table(kind: str, role_filter: str | None) -> dict:
+    """Print a role → items table for `kind` ("mcps" or "plugins"), marking
+    roles that have an explicit override in pane-tools.json with `*`."""
+    from . import pane_tools_policy as ptp
+    from . import shared_dev_tools as sdt
+
+    if role_filter is not None and role_filter not in ptp.KNOWN_ROLES:
+        return {
+            "ok": False,
+            "msg": f"unknown role {role_filter!r}. known roles: {', '.join(sorted(ptp.KNOWN_ROLES))}",
+        }
+
+    policy = ptp.load_policy()
+    roles = [role_filter] if role_filter else sorted(ptp.KNOWN_ROLES)
+
+    mcp_defaults: dict[str, frozenset[str]] = getattr(sdt, "_ROLE_MCP_POLICY", {})
+    try:
+        from .lead_context import _ROLE_PLUGIN_POLICY, _TEAMMATE_PLUGINS
+    except Exception:  # pragma: no cover — CLI must degrade, not crash
+        _ROLE_PLUGIN_POLICY, _TEAMMATE_PLUGINS = {}, frozenset()
+    rows: list[tuple[str, list[str] | None, bool]] = []
+    for role in roles:
+        overridden = role in policy
+        if kind == "mcps":
+            # None = no policy anywhere → the role receives the full master
+            # config (passthrough) — display that honestly, not as "(none)".
+            items = ptp.effective_mcps(role, mcp_defaults.get(role))
+        else:
+            items = ptp.effective_plugins(role, _ROLE_PLUGIN_POLICY.get(role, _TEAMMATE_PLUGINS))
+        rows.append((role, sorted(items) if items is not None else None, overridden))
+
+    label = "mcps" if kind == "mcps" else "plugins"
+    name_width = max([len("role")] + [len(r) + (1 if o else 0) for r, _, o in rows])
+    _utf8_print(f"{'role':<{name_width}}  {label}")
+    for role, items, overridden in rows:
+        name = role + ("*" if overridden else "")
+        if items is None:
+            shown = "(master passthrough — ทุกตัว)"
+        else:
+            shown = ", ".join(items) if items else "(none)"
+        _utf8_print(f"{name:<{name_width}}  {shown}")
+    return {"ok": True, "msg": ""}
+
+
+def cmd_mcp(args: argparse.Namespace) -> dict:
+    import shlex
+
+    from . import pane_tools_policy as ptp
+    from . import shared_dev_tools as sdt
+
+    sub = args.mcp_command
+    if sub in _MUTATING_MCP_SUBCOMMANDS:
+        gate_err = _require_lead_for_pane_tools(f"mcp {sub}")
+        if gate_err:
+            return {"ok": False, "msg": gate_err}
+
+    if sub == "list":
+        return _pane_tools_table("mcps", args.role)
+
+    if sub in ("allow", "deny"):
+        if args.role not in ptp.KNOWN_ROLES:
+            return {"ok": False, "msg": f"unknown role {args.role!r}"}
+        fn = ptp.allow_item if sub == "allow" else ptp.deny_item
+        if not fn(args.role, "mcps", args.name):
+            return {
+                "ok": False,
+                "msg": f"could not {sub} MCP {args.name!r} for {args.role} — invalid name?",
+            }
+        sdt.regen_role_variants()
+        _pane_tools_table("mcps", None)
+        return {"ok": True, "msg": f"{sub}ed {args.name!r} for {args.role}"}
+
+    if sub == "reset":
+        if args.role is not None and args.role not in ptp.KNOWN_ROLES:
+            return {"ok": False, "msg": f"unknown role {args.role!r}"}
+        roles = [args.role] if args.role else sorted(ptp.load_policy().keys())
+        if not roles:
+            _utf8_print("nothing to reset — no role overrides set")
+            return {"ok": True, "msg": ""}
+        for role in roles:
+            ptp.reset_role(role)
+        sdt.regen_role_variants()
+        _pane_tools_table("mcps", None)
+        return {"ok": True, "msg": f"reset {', '.join(roles)}"}
+
+    if sub == "add":
+        cfg = {"type": "stdio", "command": args.command, "args": shlex.split(args.args or "")}
+        if not sdt.add_mcp_server(args.name, cfg, force=args.force):
+            return {
+                "ok": False,
+                "msg": (
+                    f"could not add MCP {args.name!r} — either the name is invalid/reserved "
+                    f"(e.g. a browser MCP name), or the config looks like it carries a secret "
+                    f"(token/key/password in command or args). If that's intentional, retry "
+                    f"with --force."
+                ),
+            }
+        sdt.regen_role_variants()
+        _pane_tools_table("mcps", None)
+        return {"ok": True, "msg": f"added MCP {args.name!r}"}
+
+    if sub == "remove":
+        if not sdt.remove_mcp_server(args.name):
+            return {
+                "ok": False,
+                "msg": f"could not remove MCP {args.name!r} — not found, or it's a protected browser MCP",
+            }
+        sdt.regen_role_variants()
+        _pane_tools_table("mcps", None)
+        return {"ok": True, "msg": f"removed MCP {args.name!r}"}
+
+    return {"ok": False, "msg": f"unknown mcp subcommand: {sub}"}
+
+
+def cmd_plugins(args: argparse.Namespace) -> dict:
+    from . import pane_tools_policy as ptp
+    from . import shared_dev_tools as sdt
+
+    sub = args.plugins_command
+    if sub in _MUTATING_PLUGIN_SUBCOMMANDS:
+        gate_err = _require_lead_for_pane_tools(f"plugins {sub}")
+        if gate_err:
+            return {"ok": False, "msg": gate_err}
+
+    if sub == "list":
+        return _pane_tools_table("plugins", args.role)
+
+    if sub in ("allow", "deny"):
+        if args.role not in ptp.KNOWN_ROLES:
+            return {"ok": False, "msg": f"unknown role {args.role!r}"}
+        fn = ptp.allow_item if sub == "allow" else ptp.deny_item
+        if not fn(args.role, "plugins", args.name):
+            return {
+                "ok": False,
+                "msg": f"could not {sub} plugin {args.name!r} for {args.role} — invalid name?",
+            }
+        sdt.regen_role_variants()
+        _pane_tools_table("plugins", None)
+        return {"ok": True, "msg": f"{sub}ed {args.name!r} for {args.role}"}
+
+    if sub == "reset":
+        if args.role is not None and args.role not in ptp.KNOWN_ROLES:
+            return {"ok": False, "msg": f"unknown role {args.role!r}"}
+        roles = [args.role] if args.role else sorted(ptp.load_policy().keys())
+        if not roles:
+            _utf8_print("nothing to reset — no role overrides set")
+            return {"ok": True, "msg": ""}
+        for role in roles:
+            ptp.reset_role(role)
+        sdt.regen_role_variants()
+        _pane_tools_table("plugins", None)
+        return {"ok": True, "msg": f"reset {', '.join(roles)}"}
+
+    return {"ok": False, "msg": f"unknown plugins subcommand: {sub}"}
+
+
 def main(argv: list[str] | None = None) -> int:
     _ensure_utf8_stdio()
     p = argparse.ArgumentParser(prog="takkub", description="agent-takkub cockpit CLI")
@@ -1104,6 +1281,71 @@ def main(argv: list[str] | None = None) -> int:
         return fn(args)
 
     si.set_defaults(func=_cmd_issue)
+
+    # ── pane-tools policy: MCP servers ──────────────────────────────────────
+    sm = sub.add_parser("mcp", help="per-role MCP server policy (~/.takkub/pane-tools.json)")
+    sm_sub = sm.add_subparsers(dest="mcp_command", required=True)
+
+    sm_list = sm_sub.add_parser("list", help="show effective MCP allowlist per role")
+    sm_list.add_argument("--role", default=None, metavar="ROLE", help="show only this role")
+
+    sm_allow = sm_sub.add_parser("allow", help="allow an MCP for a role (lead only)")
+    sm_allow.add_argument("name")
+    sm_allow.add_argument("--role", required=True, metavar="ROLE")
+
+    sm_deny = sm_sub.add_parser("deny", help="deny an MCP for a role (lead only)")
+    sm_deny.add_argument("name")
+    sm_deny.add_argument("--role", required=True, metavar="ROLE")
+
+    sm_reset = sm_sub.add_parser(
+        "reset",
+        help="clear role override(s) back to defaults (lead only; clears both mcps+plugins for the role)",
+    )
+    sm_reset.add_argument(
+        "--role", default=None, metavar="ROLE", help="reset only this role (omit = reset all)"
+    )
+
+    sm_add = sm_sub.add_parser(
+        "add", help="register a new MCP server in the master config (lead only)"
+    )
+    sm_add.add_argument("name")
+    sm_add.add_argument("--command", required=True, metavar="CMD")
+    sm_add.add_argument("--args", default="", metavar='"..."', help="shell-quoted args string")
+    sm_add.add_argument(
+        "--force", action="store_true", help="bypass the credential-looking-value block"
+    )
+
+    sm_remove = sm_sub.add_parser(
+        "remove", help="remove an MCP server from the master config (lead only)"
+    )
+    sm_remove.add_argument("name")
+
+    sm.set_defaults(func=cmd_mcp)
+
+    # ── pane-tools policy: plugins ──────────────────────────────────────────
+    spl = sub.add_parser("plugins", help="per-role plugin policy (~/.takkub/pane-tools.json)")
+    spl_sub = spl.add_subparsers(dest="plugins_command", required=True)
+
+    spl_list = spl_sub.add_parser("list", help="show effective plugin allowlist per role")
+    spl_list.add_argument("--role", default=None, metavar="ROLE", help="show only this role")
+
+    spl_allow = spl_sub.add_parser("allow", help="allow a plugin for a role (lead only)")
+    spl_allow.add_argument("name")
+    spl_allow.add_argument("--role", required=True, metavar="ROLE")
+
+    spl_deny = spl_sub.add_parser("deny", help="deny a plugin for a role (lead only)")
+    spl_deny.add_argument("name")
+    spl_deny.add_argument("--role", required=True, metavar="ROLE")
+
+    spl_reset = spl_sub.add_parser(
+        "reset",
+        help="clear role override(s) back to defaults (lead only; clears both mcps+plugins for the role)",
+    )
+    spl_reset.add_argument(
+        "--role", default=None, metavar="ROLE", help="reset only this role (omit = reset all)"
+    )
+
+    spl.set_defaults(func=cmd_plugins)
 
     sdoc = sub.add_parser(
         "doctor",

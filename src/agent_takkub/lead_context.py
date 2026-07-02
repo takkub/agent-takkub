@@ -42,6 +42,7 @@ from .config import (
     lead_cwd,
     load_projects,
 )
+from .pane_tools_policy import effective_plugins
 from .vault_mirror import _is_junk_note
 
 # Shared "big-file hygiene" guard, injected into BOTH the Lead spawn prompt and
@@ -568,6 +569,7 @@ def render_lead_settings(project: str) -> pathlib.Path:
 #
 # Roles NOT in this map fall back to the teammate set, NOT the full set — a
 # future role should default to lean, not inherit addy-agent-skills by accident.
+# obsidian-vault removed from all roles 2026-07-02 (MCP-only, unused in plugin form).
 _TEAMMATE_PLUGINS: frozenset[str] = frozenset(
     {"superpowers-dev", "pordee", "claude-plugins-official"}
 )
@@ -592,12 +594,19 @@ def _default_plugin_dirs(role: str | None = None) -> list[str]:
     each plugin in `_SAFE_PLUGINS`, returning the directories that actually
     contain a `.claude-plugin/plugin.json`. Best-effort; never raises.
 
-    When `role` is given, the result is filtered through `_ROLE_PLUGIN_POLICY`
-    (lead → pordee only; any other role → teammate set) so each pane only
-    loads the plugins it actually uses. `role=None` keeps the full discovered
-    set for back-compat with direct callers (e.g. doctor / smoke tests).
+    When `role` is given, the result is filtered through the policy hierarchy:
+      1. File override in pane-tools.json (effective_plugins)
+      2. Built-in _ROLE_PLUGIN_POLICY
+      3. _TEAMMATE_PLUGINS fallback
+
+    `role=None` keeps the full discovered set for back-compat with direct
+    callers (e.g. doctor / smoke tests).
     """
-    allowed = None if role is None else _ROLE_PLUGIN_POLICY.get(role, _TEAMMATE_PLUGINS)
+    if role is not None:
+        allowed = effective_plugins(role, _ROLE_PLUGIN_POLICY.get(role, _TEAMMATE_PLUGINS))
+    else:
+        allowed = None  # None means allow all (full set)
+
     home = pathlib.Path.home()
     cache = home / ".claude" / "plugins" / "cache"
     out: list[str] = []

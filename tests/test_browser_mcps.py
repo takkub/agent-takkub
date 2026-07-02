@@ -43,9 +43,14 @@ def _udd(args: list[str], flag: str = "--user-data-dir") -> str:
 @pytest.fixture
 def isolated_mcp_file(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> pathlib.Path:
     """Redirect SHARED_MCP_FILE to a tmp path so tests don't stomp the
-    real cockpit config under `runtime/`."""
+    real cockpit config under `runtime/`. Also redirects the pane-tools
+    policy file so a real ~/.takkub/pane-tools.json on the dev machine
+    can't leak overrides into variant generation."""
+    from agent_takkub import pane_tools_policy as ptp
+
     target = tmp_path / "shared-mcp.json"
     monkeypatch.setattr(sdt, "SHARED_MCP_FILE", target)
+    monkeypatch.setattr(ptp, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
     return target
 
 
@@ -318,7 +323,20 @@ class TestBrowserProfileMcpConfigPath:
         for name, flag in _PROFILE_FLAGS.items():
             assert data["mcpServers"][name]["args"].count(flag) == 1
 
-    def test_preserves_non_browser_mcps_untouched(self, isolated_mcp_file: pathlib.Path) -> None:
+    def test_preserves_non_browser_mcps_untouched(
+        self, isolated_mcp_file: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # No shipped role carries a non-browser MCP anymore — grant qa one
+        # here so the "profile flag only touches browser MCPs" invariant
+        # stays covered.
+        monkeypatch.setattr(
+            sdt,
+            "_ROLE_MCP_POLICY",
+            {
+                **sdt._ROLE_MCP_POLICY,
+                "qa": frozenset({"playwright", "chrome-devtools", "obsidian-vault"}),
+            },
+        )
         ensure_browser_mcps()
         master = _read(isolated_mcp_file)
         master["mcpServers"]["obsidian-vault"] = {"type": "stdio", "command": "noop", "args": ["x"]}

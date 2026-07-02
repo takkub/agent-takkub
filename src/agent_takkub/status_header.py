@@ -330,6 +330,17 @@ class StatusHeaderMixin:
         self._chip_exec_mode.setStyleSheet(self._exec_mode_chip_style(_parallel_now))
         self._chip_exec_mode.clicked.connect(self._on_exec_mode_chip_clicked)
 
+        # 🔧 Pane Tools: opens the role x MCP/plugin policy matrix editor.
+        # Sits next to the exec-mode chip since both are "how panes get
+        # spawned" settings. Handler + dialog live in pane_tools_dialog.py.
+        self._btn_pane_tools = QPushButton("🔧 Tools", self)
+        self._btn_pane_tools.setToolTip(
+            "Configure which MCP servers and plugins each role's panes get.\n"
+            "Applies to the next pane you spawn for that role, no restart needed."
+        )
+        self._btn_pane_tools.setStyleSheet(self._ghost_button_style())
+        self._btn_pane_tools.clicked.connect(self._on_pane_tools_clicked)
+
         # Self-update chip. Polls `git fetch` + `git status` every 5 min
         # so a user that pulled their friend's commit from another machine
         # sees the update light up here without needing to touch a
@@ -551,6 +562,7 @@ class StatusHeaderMixin:
         for w in (
             self._chip_plan,
             self._chip_exec_mode,
+            self._btn_pane_tools,
             self._chip_codex,
             self._chip_gemini,
             self._btn_install_rtk,

@@ -35,6 +35,7 @@ import threading
 
 from ._win_console import SUBPROCESS_NO_WINDOW
 from .config import RUNTIME_DIR
+from .pane_tools_policy import effective_mcps
 
 _log = logging.getLogger(__name__)
 
@@ -162,14 +163,20 @@ def shared_mcp_config_path() -> str | None:
 
 def shared_mcp_config_path_for_role(role: str) -> str | None:
     """Role-aware MCP config path. Returns the per-role variant if the
-    role has a policy entry and its variant exists; otherwise falls back
-    to the master shared-mcp.json (full schema).
+    role has a policy entry (from pane-tools.json or built-in) and its
+    variant exists; otherwise falls back to the master shared-mcp.json.
 
     Why: lets the orchestrator send each claude pane only the MCPs that
     role actually uses, cutting browser-MCP schemas (~12-16k tokens) out
     of panes that never call them.
     """
-    if role in _ROLE_MCP_POLICY:
+    # Check if role has an override or built-in policy. None = no policy
+    # anywhere → master passthrough. An EMPTY set is a real policy ("this
+    # role gets no MCPs") and must go through the variant path so the empty
+    # variant returns None (skip --mcp-config) — `if allowed:` would flip
+    # that into the full master config.
+    allowed = effective_mcps(role, _ROLE_MCP_POLICY.get(role))
+    if allowed is not None:  # role has policy (override or built-in)
         variant = _role_variant_path(role)
         if variant.is_file():
             try:
@@ -402,7 +409,10 @@ _BROWSER_MCP_NAMES = frozenset(BROWSER_MCPS.keys())
 # carries inline credentials (postgresql://user:pass@host) in args, so it
 # is now skipped by the general secret check like any other credential-
 # bearing entry.
-_USER_MCP_DEFAULT_ALLOW = frozenset({"obsidian-vault"})
+# Emptied 2026-07-02: obsidian-vault's provider (claude-obsidian plugin) was
+# uninstalled after the usage audit; no user MCP is trusted by default now.
+# `takkub mcp add` / the Tools dialog are the supported install paths.
+_USER_MCP_DEFAULT_ALLOW: frozenset[str] = frozenset()
 
 # Role-aware MCP policy: which MCPs each role pane sees.
 #
@@ -430,16 +440,21 @@ _USER_MCP_DEFAULT_ALLOW = frozenset({"obsidian-vault"})
 #     usage audit found ~100 tool-call mentions across ~3,200 sessions
 #     (effectively unused) while its DSN carries inline credentials; DB
 #     work goes through psql/compose instead.
+# obsidian-vault removed from every role 2026-07-02: the claude-obsidian
+# plugin (its only provider) was uninstalled after a usage audit found 68
+# calls across ~3,200 sessions. Non-browser roles keep an explicit EMPTY
+# policy so they skip --mcp-config entirely (no schema tokens) instead of
+# falling through to the master file.
 _ROLE_MCP_POLICY: dict[str, frozenset[str]] = {
-    "lead": frozenset({"obsidian-vault"}),
-    "qa": frozenset({"playwright", "chrome-devtools", "obsidian-vault"}),
-    "critic": frozenset({"playwright", "chrome-devtools", "obsidian-vault"}),
-    "designer": frozenset({"playwright", "chrome-devtools", "obsidian-vault"}),
-    "reviewer": frozenset({"obsidian-vault"}),
-    "frontend": frozenset({"obsidian-vault"}),
-    "backend": frozenset({"obsidian-vault"}),
-    "mobile": frozenset({"obsidian-vault"}),
-    "devops": frozenset({"obsidian-vault"}),
+    "lead": frozenset(),
+    "qa": frozenset({"playwright", "chrome-devtools"}),
+    "critic": frozenset({"playwright", "chrome-devtools"}),
+    "designer": frozenset({"playwright", "chrome-devtools"}),
+    "reviewer": frozenset(),
+    "frontend": frozenset(),
+    "backend": frozenset(),
+    "mobile": frozenset(),
+    "devops": frozenset(),
 }
 
 
@@ -448,6 +463,118 @@ def _role_variant_path(role: str) -> pathlib.Path:
     Derived from SHARED_MCP_FILE so test fixtures that redirect that
     constant pick up the variants automatically."""
     return SHARED_MCP_FILE.parent / f"shared-mcp-{role}.json"
+
+
+def add_mcp_server(name: str, cfg: dict, force: bool = False) -> bool:
+    """Add or update an MCP server in the master shared-mcp.json.
+
+    name: MCP name (validated against pattern [a-z0-9][a-z0-9_-]*)
+    cfg: MCP config dict (type, command, args, env, etc.)
+    force: if False and cfg has secrets, log warning and skip; if True,
+           write despite secrets (for user opt-ins).
+
+    Returns True on success, False on validation/I/O error.
+    Blocks BROWSER_MCPS names from being overwritten (always returns False).
+    Never raises.
+    """
+    from .pane_tools_policy import _validate_name
+
+    if not isinstance(name, str) or not _validate_name(name):
+        _log.warning("add_mcp_server: invalid MCP name %r", name)
+        return False
+    if name in _BROWSER_MCP_NAMES:
+        _log.warning("add_mcp_server: cannot override browser MCP %r", name)
+        return False
+    if not isinstance(cfg, dict):
+        _log.warning("add_mcp_server: cfg for %r is not dict", name)
+        return False
+    if not force and _has_secrets(cfg):
+        _log.warning("add_mcp_server: skipping %r — credential-bearing entry", name)
+        return False
+
+    try:
+        config: dict = {}
+        if SHARED_MCP_FILE.is_file():
+            config = json.loads(SHARED_MCP_FILE.read_text(encoding="utf-8"))
+        servers = config.setdefault("mcpServers", {})
+        servers[name] = cfg
+        SHARED_MCP_FILE.parent.mkdir(parents=True, exist_ok=True)
+        SHARED_MCP_FILE.write_text(
+            json.dumps(config, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        _write_role_variants()
+        return True
+    except OSError as e:
+        _log.warning("add_mcp_server: could not write %s: %s", SHARED_MCP_FILE, e)
+        return False
+
+
+def remove_mcp_server(name: str) -> bool:
+    """Remove an MCP server from the master shared-mcp.json.
+
+    Blocks removal of browser MCPs (returns False without modifying file).
+    Returns True on success, False on I/O error or if name not found.
+    Never raises.
+    """
+    if name in _BROWSER_MCP_NAMES:
+        _log.warning("remove_mcp_server: cannot remove browser MCP %r", name)
+        return False
+
+    try:
+        if not SHARED_MCP_FILE.is_file():
+            return False
+        config = json.loads(SHARED_MCP_FILE.read_text(encoding="utf-8"))
+        servers = config.get("mcpServers") or {}
+        if name not in servers:
+            return False
+        del servers[name]
+        SHARED_MCP_FILE.write_text(
+            json.dumps(config, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        _write_role_variants()
+        return True
+    except OSError as e:
+        _log.warning("remove_mcp_server: could not update %s: %s", SHARED_MCP_FILE, e)
+        return False
+
+
+def list_master_mcps() -> dict[str, dict]:
+    """Return all MCP servers from the master shared-mcp.json.
+
+    Returns {} if file is missing or corrupt. Never raises.
+    """
+    if not SHARED_MCP_FILE.is_file():
+        return {}
+    try:
+        config = json.loads(SHARED_MCP_FILE.read_text(encoding="utf-8"))
+        return config.get("mcpServers") or {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def regen_role_variants() -> int:
+    """Regenerate all per-role MCP variant files from master.
+
+    Returns count of role variants written. Non-fatal on error (logging
+    only); never raises.
+    """
+    _write_role_variants()
+    # Count files that exist and have servers.
+    from .pane_tools_policy import load_policy
+
+    count = 0
+    for role in set(_ROLE_MCP_POLICY) | set(load_policy()):
+        variant = _role_variant_path(role)
+        if variant.is_file():
+            try:
+                data = json.loads(variant.read_text(encoding="utf-8"))
+                if data.get("mcpServers"):
+                    count += 1
+            except (OSError, json.JSONDecodeError):
+                pass
+    return count
 
 
 def _write_role_variants() -> None:
@@ -465,8 +592,20 @@ def _write_role_variants() -> None:
     except (OSError, json.JSONDecodeError):
         return
     master_servers: dict = master.get("mcpServers") or {}
-    for role, allowed in _ROLE_MCP_POLICY.items():
+    # Union of built-in roles and file-override roles: a role granted MCPs
+    # only via pane-tools.json still needs its variant generated, otherwise
+    # the UI/CLI edit silently never reaches a pane.
+    from .pane_tools_policy import load_policy
+
+    roles = set(_ROLE_MCP_POLICY) | set(load_policy())
+    for role in sorted(roles):
+        allowed = effective_mcps(role, _ROLE_MCP_POLICY.get(role))
+        if allowed is None:
+            continue  # no policy anywhere → master passthrough, no variant
         filtered = {name: cfg for name, cfg in master_servers.items() if name in allowed}
+        # An empty allowlist intentionally writes an EMPTY variant — that is
+        # what makes shared_mcp_config_path_for_role return None (skip
+        # --mcp-config) for the role.
         variant = {"mcpServers": filtered}
         try:
             _role_variant_path(role).write_text(
