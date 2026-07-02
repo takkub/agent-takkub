@@ -73,8 +73,22 @@ class TestParseRateLimitReset:
             "you've reached your usage limit",
             "you've hit your usage limit — upgrade or wait",
             "5-hour limit reached ∙ resets 3pm",
+            "you've hit your weekly limit · resets 8am",
         ):
             assert _parse_rate_limit_reset(banner, self.NOW) is not None, banner
+
+    def test_session_limit_banner_v2_1_198(self) -> None:
+        # Field-verified wording (screenshot 2026-07-02): the session-limit
+        # banner says "session limit", not "usage limit" — the marker set must
+        # match it AND parse the hh:mm reset time.
+        epoch = _parse_rate_limit_reset(
+            "you've hit your session limit · resets 1:10pm (asia/bangkok)\n"
+            "/upgrade to increase your usage limit.",
+            self.NOW,
+        )
+        assert epoch is not None
+        assert time.localtime(epoch).tm_hour == 13
+        assert time.localtime(epoch).tm_min == 10
 
     def test_12am_maps_to_midnight(self) -> None:
         epoch = _parse_rate_limit_reset("usage limit reached, resets 12am", self.NOW)
@@ -99,10 +113,11 @@ def _bare_orch():
     return o
 
 
-def _pane_reporting(reset_at):
+def _pane_reporting(reset_at, *, at_choice_modal: bool = False):
     pane = MagicMock()
     pane.session.is_alive = True
     pane.session.rate_limit_reset_at.return_value = reset_at
+    pane.session.is_at_limit_choice_modal.return_value = at_choice_modal
     return pane
 
 
@@ -119,6 +134,34 @@ class TestRateLimitGate:
         assert suppressed is True
         assert (o._pane_state.get("proj::frontend") or PaneState()).rate_limited_until == now + 3600
         timer.assert_called_once()  # reset notice scheduled
+
+    def test_choice_modal_confirmed_once_on_detection(self) -> None:
+        # v2.1.198 pairs the banner with a chooser whose preselected option 1
+        # is "Stop and wait for limit to reset" — first detection must confirm
+        # it with a single Enter so the pane waits instead of blocking.
+        o = _bare_orch()
+        now = time.time()
+        pane = _pane_reporting(now + 3600, at_choice_modal=True)
+        with (
+            patch("agent_takkub.orchestrator.QTimer.singleShot"),
+            patch("agent_takkub.orchestrator._log_event") as log,
+        ):
+            assert o._rate_limit_suppressed("proj", "qa", pane, now) is True
+            # Second tick: known-limited short-circuit — no second Enter.
+            assert o._rate_limit_suppressed("proj", "qa", pane, now + 5) is True
+        pane.session.write.assert_called_once_with(b"\r")
+        assert "rate_limit_modal_confirmed" in [c.args[0] for c in log.call_args_list]
+
+    def test_no_modal_no_enter(self) -> None:
+        o = _bare_orch()
+        now = time.time()
+        pane = _pane_reporting(now + 3600, at_choice_modal=False)
+        with (
+            patch("agent_takkub.orchestrator.QTimer.singleShot"),
+            patch("agent_takkub.orchestrator._log_event"),
+        ):
+            assert o._rate_limit_suppressed("proj", "qa", pane, now) is True
+        pane.session.write.assert_not_called()
 
     def test_not_limited_returns_false(self) -> None:
         o = _bare_orch()

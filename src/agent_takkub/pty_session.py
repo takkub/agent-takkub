@@ -369,6 +369,12 @@ _DEFAULT_RATE_LIMIT_MARKERS = (
     "limit will reset",  # "your limit will reset at 11pm"
     "reached your usage",  # "you've reached your usage limit"
     "hit your usage limit",  # "you've hit your usage limit"
+    # v2.1.198 real banner, field-verified 2026-07-02: "You've hit your
+    # session limit · resets 1:10pm (Asia/Bangkok)". Weekly variant assumed
+    # same shape. Neither is matchable by the promo text ("if you hit your
+    # limit" — no qualifier word).
+    "hit your session limit",
+    "hit your weekly limit",
     "out of usage",
 )
 
@@ -870,6 +876,23 @@ class PtySession(QObject):
         """
         text = _ready_region(self.display_lines())
         return "update available!" in text and "gemini cli update available!" not in text
+
+    def is_at_limit_choice_modal(self) -> bool:
+        """True when claude's usage/session-limit chooser is blocking the pane.
+
+        Claude Code v2.1.198 pairs the limit banner with an interactive modal
+        ("What do you want to do?" · "1. Stop and wait for limit to reset" ·
+        "2./3. Upgrade …" · "Enter to confirm · Esc to cancel"). Option 1 is
+        preselected, so a single Enter confirms stop-and-wait — the pane then
+        idles out the window and auto-resumes at reset instead of blocking on
+        the modal forever (field-verified screenshot 2026-07-02).
+
+        Whole-screen scan is safe here: the option string is imperative UI
+        chrome ("stop and wait for limit to reset") that conversation text has
+        no reason to quote verbatim, and the caller additionally gates on
+        rate_limit_reset_at() having detected a live banner."""
+        text = "\n".join(self.display_lines()).lower()
+        return "stop and wait for limit to reset" in text
 
     def seconds_since_output(self) -> float:
         """Monotonic seconds since the PTY last produced output — a structural

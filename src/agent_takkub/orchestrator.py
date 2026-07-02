@@ -3107,6 +3107,17 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
             project=project,
             resets_in_s=int(max(0, reset_at - now)),
         )
+        # v2.1.198 pairs the banner with an interactive chooser whose
+        # preselected option 1 is "Stop and wait for limit to reset" — confirm
+        # it once so the pane waits out the window and auto-resumes, instead of
+        # blocking on the modal until a human notices. Best-effort: fires only
+        # on first detection (this branch), so no repeat-Enter spam.
+        try:
+            if pane.session.is_at_limit_choice_modal():
+                pane.session.write(b"\r")
+                _log_event("rate_limit_modal_confirmed", role=role, project=project)
+        except Exception:
+            pass
         return True
 
     def _schedule_rate_limit_notice(self, project: str, role: str, reset_at: float) -> None:
