@@ -422,21 +422,24 @@ _USER_MCP_DEFAULT_ALLOW = frozenset({"obsidian-vault"})
 #   - lead: orchestrator only — delegates UI work, no direct browser use.
 #   - qa: smoke + e2e tests need playwright/chrome-devtools.
 #   - critic/designer: visual review reads shots, may inspect runtime DOM.
-#   - reviewer: code review may query DB for context; no browser.
-#   - frontend/mobile: UI dev but uses dev server + DOM directly, not MCPs.
-#   - backend/devops: may query DB; no browser.
+#   - reviewer/frontend/backend/mobile/devops: code roles work through the
+#     dev server / shell / psql directly, not MCPs.
 #   - codex/gemini: not claude — bypass --mcp-config entirely, listed here
 #     for documentation only (won't be used; argv builder skips for them).
+#   - postgres-pms: REMOVED cockpit-wide 2026-07-02 by operator decision —
+#     usage audit found ~100 tool-call mentions across ~3,200 sessions
+#     (effectively unused) while its DSN carries inline credentials; DB
+#     work goes through psql/compose instead.
 _ROLE_MCP_POLICY: dict[str, frozenset[str]] = {
-    "lead": frozenset({"obsidian-vault", "postgres-pms"}),
-    "qa": frozenset({"playwright", "chrome-devtools", "obsidian-vault", "postgres-pms"}),
+    "lead": frozenset({"obsidian-vault"}),
+    "qa": frozenset({"playwright", "chrome-devtools", "obsidian-vault"}),
     "critic": frozenset({"playwright", "chrome-devtools", "obsidian-vault"}),
     "designer": frozenset({"playwright", "chrome-devtools", "obsidian-vault"}),
-    "reviewer": frozenset({"obsidian-vault", "postgres-pms"}),
+    "reviewer": frozenset({"obsidian-vault"}),
     "frontend": frozenset({"obsidian-vault"}),
-    "backend": frozenset({"obsidian-vault", "postgres-pms"}),
+    "backend": frozenset({"obsidian-vault"}),
     "mobile": frozenset({"obsidian-vault"}),
-    "devops": frozenset({"obsidian-vault", "postgres-pms"}),
+    "devops": frozenset({"obsidian-vault"}),
 }
 
 
