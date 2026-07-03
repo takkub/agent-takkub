@@ -153,7 +153,10 @@ class TestAssignPlan:
         ps = orch._pane_state[ek]
         assert ps.plan_fanout is not None
         assert ps.plan_fanout["shards"] == 4
-        assert ps.plan_fanout["task"] == "smoke"
+        # The fan-out task carries the verify-fail reporting hint so the QA
+        # shards inherit it (they verify → must report --fail on failure).
+        assert ps.plan_fanout["task"].startswith("smoke")
+        assert "done --fail" in ps.plan_fanout["task"]
         assert ps.plan_fanout["plan_file"].endswith(f"{TEST_PROJECT}-qa-plan.json")
         # wrapped planner task is what gets sent + remembered for respawn replay
         assert "QA PLANNER MODE" in sent["task"]
