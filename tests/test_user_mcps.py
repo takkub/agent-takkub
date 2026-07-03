@@ -4,7 +4,7 @@ Covers:
 - Stale non-browser user MCP is removed when no longer in policy
 - Browser MCPs are never pruned (managed by ensure_browser_mcps)
 - Entries currently in policy are preserved
-- pms stays with TAKKUB_INCLUDE_PMS=1, gets pruned without it
+- Credential-bearing user MCPs (bearer header / inline DSN creds) are skipped
 """
 
 from __future__ import annotations
@@ -23,15 +23,17 @@ from agent_takkub.shared_dev_tools import (
 )
 
 _OBSIDIAN_CFG = {"type": "stdio", "command": "npx", "args": ["-y", "obsidian-vault-mcp"]}
-_POSTGRES_CFG = {"type": "stdio", "command": "npx", "args": ["-y", "postgres-pms-mcp"]}
-# Real-world postgres-pms shape: DSN with inline credentials passed as an arg.
-# Credentials here are synthetic placeholders — never commit real secrets.
-_POSTGRES_DSN_CFG = {
+# A credential-free stdio DB MCP — not a secret, so it merges.
+_CLEAN_DB_CFG = {"type": "stdio", "command": "npx", "args": ["-y", "some-db-mcp"]}
+# DSN with inline credentials passed as an arg. Credentials here are synthetic
+# placeholders — never commit real secrets.
+_DSN_SECRET_CFG = {
     "type": "stdio",
     "command": "npx",
-    "args": ["-y", "pg-mcp", "postgresql://dbuser:REDACTED@localhost:5432/exampledb"],
+    "args": ["-y", "some-db-mcp", "postgresql://dbuser:REDACTED@localhost:5432/exampledb"],
 }
-_PMS_CFG = {
+# An HTTP MCP carrying a bearer token in its Authorization header (a secret).
+_HTTP_SECRET_CFG = {
     "type": "http",
     "url": "http://localhost:3001/mcp",
     "headers": {"Authorization": "Bearer secret"},
@@ -133,50 +135,37 @@ class TestPruneStaleEntries:
         assert mcp_file.read_text(encoding="utf-8") == before
 
 
-class TestPmsOptIn:
-    def test_pms_stays_when_env_set(self, isolated, monkeypatch: pytest.MonkeyPatch) -> None:
+class TestCredentialBearingHttpSkipped:
+    def test_http_bearer_entry_is_pruned(self, isolated, monkeypatch: pytest.MonkeyPatch) -> None:
         mcp_file, claude_json = isolated
-        monkeypatch.setenv("TAKKUB_INCLUDE_PMS", "1")
-        # pms currently in shared-mcp.json, user has it in ~/.claude.json
+        # A stale HTTP+bearer entry sits in shared-mcp.json; it must be pruned
+        # because its Authorization header is a credential.
         mcp_file.write_text(
-            json.dumps({"mcpServers": {"pms": _PMS_CFG}}),
+            json.dumps(
+                {"mcpServers": {"internal-http": _HTTP_SECRET_CFG, "obsidian-vault": _OBSIDIAN_CFG}}
+            ),
             encoding="utf-8",
         )
-        _write_claude_json(claude_json, {"pms": _PMS_CFG, "obsidian-vault": _OBSIDIAN_CFG})
+        _write_claude_json(
+            claude_json, {"internal-http": _HTTP_SECRET_CFG, "obsidian-vault": _OBSIDIAN_CFG}
+        )
 
         ok, msg = ensure_user_mcps()
         assert ok, msg
         data = _read_mcp(mcp_file)
-        assert "pms" in data["mcpServers"]
-
-    def test_pms_pruned_when_env_not_set(self, isolated, monkeypatch: pytest.MonkeyPatch) -> None:
-        mcp_file, claude_json = isolated
-        monkeypatch.delenv("TAKKUB_INCLUDE_PMS", raising=False)
-        # pms is stale in shared-mcp.json (from a previous TAKKUB_INCLUDE_PMS=1 run)
-        mcp_file.write_text(
-            json.dumps({"mcpServers": {"pms": _PMS_CFG, "obsidian-vault": _OBSIDIAN_CFG}}),
-            encoding="utf-8",
-        )
-        _write_claude_json(claude_json, {"pms": _PMS_CFG, "obsidian-vault": _OBSIDIAN_CFG})
-
-        ok, msg = ensure_user_mcps()
-        assert ok, msg
-        data = _read_mcp(mcp_file)
-        assert "pms" not in data["mcpServers"]
+        assert "internal-http" not in data["mcpServers"]
         assert "obsidian-vault" in data["mcpServers"]
         assert "pruned" in msg
-        assert "pms" in msg
 
-    def test_pms_pruned_message_does_not_contain_bearer_value(
+    def test_pruned_message_does_not_contain_bearer_value(
         self, isolated, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         mcp_file, claude_json = isolated
-        monkeypatch.delenv("TAKKUB_INCLUDE_PMS", raising=False)
         mcp_file.write_text(
-            json.dumps({"mcpServers": {"pms": _PMS_CFG}}),
+            json.dumps({"mcpServers": {"internal-http": _HTTP_SECRET_CFG}}),
             encoding="utf-8",
         )
-        _write_claude_json(claude_json, {"pms": _PMS_CFG})
+        _write_claude_json(claude_json, {"internal-http": _HTTP_SECRET_CFG})
 
         ok, msg = ensure_user_mcps()
         assert ok, msg
@@ -207,54 +196,49 @@ class TestHasSecrets:
         assert _has_secrets(cfg) is True
 
 
-class TestPostgresPmsRemovedFromAllowlist:
-    """postgres-pms is no longer in _USER_MCP_DEFAULT_ALLOW (removed 2026-05-29).
-
-    Its real config carries DSN credentials in args, so it must now be
-    skipped by the general credential check — never merged into the
-    shared runtime file.
+class TestCredentialBearingDsnSkipped:
+    """A user MCP whose args carry an inline DSN credential must be skipped by
+    the general credential check — never merged into the shared runtime file.
+    The default allowlist is empty, so nothing is trusted by default.
     """
 
-    def test_postgres_pms_not_in_default_allow(self) -> None:
-        assert "postgres-pms" not in sdt._USER_MCP_DEFAULT_ALLOW
+    def test_default_allowlist_is_empty(self) -> None:
         # 2026-07-02: allowlist emptied entirely (obsidian-vault's provider
         # plugin was uninstalled); nothing is trusted by default now.
         assert sdt._USER_MCP_DEFAULT_ALLOW == frozenset()
 
-    def test_postgres_pms_with_dsn_creds_is_skipped(
+    def test_dsn_credential_entry_is_skipped(
         self, isolated, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         mcp_file, claude_json = isolated
         mcp_file.write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
-        # User has the real credential-bearing postgres-pms + a clean obsidian-vault.
+        # User has a credential-bearing DB MCP + a clean obsidian-vault.
         _write_claude_json(
             claude_json,
-            {"postgres-pms": _POSTGRES_DSN_CFG, "obsidian-vault": _OBSIDIAN_CFG},
+            {"db-mcp": _DSN_SECRET_CFG, "obsidian-vault": _OBSIDIAN_CFG},
         )
 
         ok, msg = ensure_user_mcps()
         assert ok, msg
         data = _read_mcp(mcp_file)
-        # Credential-bearing postgres-pms must NOT be merged.
-        assert "postgres-pms" not in data["mcpServers"]
+        # Credential-bearing entry must NOT be merged.
+        assert "db-mcp" not in data["mcpServers"]
         # Clean obsidian-vault still merges.
         assert "obsidian-vault" in data["mcpServers"]
         # The DSN password must never leak into the return message.
         assert "REDACTED" not in msg
 
-    def test_clean_postgres_pms_still_merges(
-        self, isolated, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # A credential-free postgres-pms (no inline DSN secret) is not a
-        # secret, so it falls through and merges even without allowlisting.
+    def test_clean_db_mcp_still_merges(self, isolated, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A credential-free DB MCP (no inline DSN secret) is not a secret, so
+        # it falls through and merges even without allowlisting.
         mcp_file, claude_json = isolated
         mcp_file.write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
-        _write_claude_json(claude_json, {"postgres-pms": _POSTGRES_CFG})
+        _write_claude_json(claude_json, {"db-mcp": _CLEAN_DB_CFG})
 
         ok, msg = ensure_user_mcps()
         assert ok, msg
         data = _read_mcp(mcp_file)
-        assert "postgres-pms" in data["mcpServers"]
+        assert "db-mcp" in data["mcpServers"]
 
 
 class TestAllowlistedSecretWarns:

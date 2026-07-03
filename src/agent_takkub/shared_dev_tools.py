@@ -9,11 +9,11 @@ requiring per-project `.claude/settings.json` edits:
     every pane via `runtime/shared-mcp.json` so smoke tests, UX checks,
     and crawls are available from any project's Lead without per-project
     wiring.
-  * **User MCPs** — user's own `~/.claude.json` mcpServers (obsidian-vault,
-    pms, postgres-pms, etc.) are merged into `runtime/shared-mcp.json` so
-    every cockpit pane inherits them automatically without manual setup.
-    Browser MCPs (playwright, chrome-devtools) take precedence on name
-    collision. Entries without a `type` field are skipped.
+  * **User MCPs** — allowlisted entries from the user's own `~/.claude.json`
+    mcpServers are merged into `runtime/shared-mcp.json` so every cockpit
+    pane inherits them automatically without manual setup. Browser MCPs
+    (playwright, chrome-devtools) take precedence on name collision.
+    Credential-bearing entries and entries without a `type` field are skipped.
   * **rtk hook** — still per-project (the PreToolUse Bash hook lives
     in `.claude/settings.json`). Use the `⚡ Install rtk` button to add
     it to a specific project.
@@ -399,16 +399,9 @@ _BROWSER_MCP_NAMES = frozenset(BROWSER_MCPS.keys())
 # set is evaluated by _has_secrets(); if that check fails the entry is
 # skipped with a warning.
 #
-# To include pms (HTTP + Authorization header) cockpit-wide, set env:
-#   TAKKUB_INCLUDE_PMS=1
-# This is opt-in because pms config carries a plaintext bearer token and
-# merging it into shared-mcp.json re-introduces the security regression
-# that was explicitly removed in the 2026-05-20 security audit.
-#
-# postgres-pms was removed from the default allow on 2026-05-29: its DSN
-# carries inline credentials (postgresql://user:pass@host) in args, so it
-# is now skipped by the general secret check like any other credential-
-# bearing entry.
+# Credential-bearing entries (bearer/API-key headers, or a DSN with inline
+# `user:pass@host` credentials in args) are always skipped by _has_secrets()
+# so a secret never lands in the world-readable shared runtime file.
 # Emptied 2026-07-02: obsidian-vault's provider (claude-obsidian plugin) was
 # uninstalled after the usage audit; no user MCP is trusted by default now.
 # `takkub mcp add` / the Tools dialog are the supported install paths.
@@ -436,10 +429,6 @@ _USER_MCP_DEFAULT_ALLOW: frozenset[str] = frozenset()
 #     dev server / shell / psql directly, not MCPs.
 #   - codex/gemini: not claude — bypass --mcp-config entirely, listed here
 #     for documentation only (won't be used; argv builder skips for them).
-#   - postgres-pms: REMOVED cockpit-wide 2026-07-02 by operator decision —
-#     usage audit found ~100 tool-call mentions across ~3,200 sessions
-#     (effectively unused) while its DSN carries inline credentials; DB
-#     work goes through psql/compose instead.
 # obsidian-vault removed from every role 2026-07-02: the claude-obsidian
 # plugin (its only provider) was uninstalled after a usage audit found 68
 # calls across ~3,200 sessions. Non-browser roles keep an explicit EMPTY
@@ -617,8 +606,7 @@ def _write_role_variants() -> None:
 
 
 # Patterns that indicate a credential-bearing MCP entry.  Any entry that
-# matches is skipped unless the user has opted in via TAKKUB_INCLUDE_PMS
-# (for pms specifically) or is explicitly in _USER_MCP_DEFAULT_ALLOW.
+# matches is skipped unless it is explicitly in _USER_MCP_DEFAULT_ALLOW.
 _SECRET_HEADER_KEYS = frozenset({"Authorization", "authorization"})
 _SECRET_ENV_SUBSTRINGS = ("TOKEN", "KEY", "SECRET", "PASSWORD", "PASS")
 
@@ -655,16 +643,12 @@ def ensure_user_mcps() -> tuple[bool, str]:
       token, API key, etc.) is skipped with a warning.
     - Browser MCP names (playwright, chrome-devtools) are never overwritten;
       user copies are skipped and logged.
-    - pms is skipped by default (HTTP + bearer token); set TAKKUB_INCLUDE_PMS=1
-      to include it despite the credential risk.
     - Authorization header values are never written to logs.
     - ~/.claude.json read failure → log warning, skip silently (non-fatal).
     - shared-mcp.json corrupt → refuse to touch it.
 
     Returns (ok, message) for logging only; failure is non-fatal.
     """
-    import os
-
     home = pathlib.Path.home()
     claude_json = home / ".claude.json"
 
@@ -682,8 +666,6 @@ def ensure_user_mcps() -> tuple[bool, str]:
     user_servers: dict = user_data.get("mcpServers") or {}
     if not user_servers:
         return True, "no mcpServers in ~/.claude.json; nothing to merge"
-
-    include_pms = os.environ.get("TAKKUB_INCLUDE_PMS", "").strip() == "1"
 
     # --- classify each entry ---
     to_merge: dict[str, dict] = {}
@@ -707,18 +689,6 @@ def ensure_user_mcps() -> tuple[bool, str]:
                 "credential-free config or env-based secret.",
                 name,
             )
-
-        # pms-specific opt-in gate — evaluate before the general secret check
-        # so that TAKKUB_INCLUDE_PMS=1 actually reaches to_merge.
-        if name == "pms":
-            if not include_pms:
-                skipped.append(
-                    f"{name} (skipped: HTTP+bearer; set TAKKUB_INCLUDE_PMS=1 to include)"
-                )
-                continue
-            # User explicitly opted in — include despite bearer token.
-            to_merge[name] = cfg
-            continue
 
         if not in_allowlist and is_secret:
             _log.warning(
