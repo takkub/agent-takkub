@@ -446,7 +446,7 @@ class AgentPane(QFrame):
             self._title.setText(self.role.label)
             return
         # show role + tail of the path (basename) so user knows where the
-        # agent is working. eg.  Frontend · pms-web
+        # agent is working. eg.  Frontend · app-web
         import os
 
         tail = os.path.basename(cwd.rstrip("/\\")) or cwd

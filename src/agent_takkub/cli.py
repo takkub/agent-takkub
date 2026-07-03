@@ -94,7 +94,7 @@ def _from_role() -> str | None:
 def _from_project() -> str | None:
     """The project namespace that owns the calling pane. Set by the
     orchestrator at spawn time so the cli_server can scope routing
-    (a Lead in unirecon never reaches into pms's pane registry)."""
+    (a Lead in project-a never reaches into project-b's pane registry)."""
     return os.environ.get("TAKKUB_PROJECT")
 
 

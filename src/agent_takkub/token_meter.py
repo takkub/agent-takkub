@@ -80,11 +80,11 @@ def encode_path_for_claude(cwd: str | Path) -> str:
     separators '\\' '/', and crucially '_' and '.'), keeping alphanumerics and
     the original drive-letter case that `Path.resolve()` produces:
 
-        C:\\Users\\monch\\WebstormProjects\\line_websupport\\client
-        → C--Users-monch-WebstormProjects-line-websupport-client
+        C:\\Users\\alice\\WebstormProjects\\my_app_web\\client
+        → C--Users-alice-WebstormProjects-my-app-web-client
 
     The earlier version only rewrote '\\', '/' and ':', so any project whose
-    path contained '_' or '.' (e.g. line_websupport) resolved to a directory
+    path contained '_' or '.' (e.g. my_app_web) resolved to a directory
     that doesn't exist — its token badge silently never appeared.
     """
     return _NON_ALNUM_RE.sub("-", str(Path(cwd).resolve()))

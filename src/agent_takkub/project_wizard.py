@@ -431,7 +431,7 @@ class ProjectWizardMixin:
 
         # Resolve the project root via the SAME logic Lead uses to find its
         # cwd (lead path key → common parent of all paths → first path).
-        # CLAUDE.md lives where Lead spawns — e.g. `pms/`, not the `pms-web/`
+        # CLAUDE.md lives where Lead spawns — e.g. `app/`, not the `app-web/`
         # subfolder. The old `paths.get("main")` lookup never matched (keys
         # are web/api/mobile, never "main") and fell back to the first
         # subfolder, so the editor opened empty / saved to the wrong place.

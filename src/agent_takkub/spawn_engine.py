@@ -1253,8 +1253,8 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         # Tag the pane with its project so the `takkub` CLI inside the
         # session can stamp every JSON request with `from_project`. The
         # cli_server uses that to scope routing to panes in the *same*
-        # project — under the multi-tab refactor a Lead in unirecon
-        # mustn't accidentally send to a backend pane that belongs to pms.
+        # project — under the multi-tab refactor a Lead in project-a
+        # mustn't accidentally send to a backend pane that belongs to project-b.
         env["TAKKUB_PROJECT"] = project_ns
         # pane_tok is only assigned in the else branch (non-Lead).  Pre-bind to
         # None so the Lead path through _toctou_redefer can pass it safely

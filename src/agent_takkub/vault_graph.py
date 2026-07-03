@@ -341,9 +341,7 @@ def analyse(
     if vault is None:
         vault = _resolve_vault_dir()
     if vault is None:
-        print(
-            "vault_graph: ไม่พบ Obsidian vault (set $TAKKUB_VAULT_DIR หรือ ~/WebstormProjects/second-brain)"
-        )
+        print("vault_graph: ไม่พบ Obsidian vault (ตั้ง $TAKKUB_VAULT_DIR ให้ชี้ไปโฟลเดอร์ vault)")
         return None
 
     entries = load_sessions(project, vault)

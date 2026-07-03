@@ -6,7 +6,7 @@ All operations delegate to the `gh` CLI.
 cockpit/orchestrator/CLI/UI bugs, so `new_issue` defaults `cockpit_bug=True`:
 issues land on the **agent-takkub install repo** regardless of which project's
 pane filed them. An agent forgetting a flag can no longer leak a cockpit bug
-onto, say, the pms-api repo. To deliberately file against the *active project's*
+onto, say, the app-api repo. To deliberately file against the *active project's*
 repo (cwd-detected), pass `cockpit_bug=False` (CLI: `--no-cockpit-bug`).
 """
 
@@ -189,8 +189,8 @@ def new_issue(
     `cockpit_bug` (default **True**) files the issue against the agent-takkub
     install repo (REPO_ROOT's git remote) regardless of cwd — the cockpit's
     tracker is for cockpit/orchestrator/CLI/UI bugs, so this is the safe
-    default that stops a bug noticed inside e.g. a pms-api pane from leaking
-    onto the pms-api repo. `noticed_in` still records where the bug surfaced
+    default that stops a bug noticed inside e.g. an app-api pane from leaking
+    onto the app-api repo. `noticed_in` still records where the bug surfaced
     (useful context, independent of the routing target).
 
     Pass `cockpit_bug=False` to deliberately route to the *active project's*

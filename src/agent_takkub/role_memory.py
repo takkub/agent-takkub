@@ -5,7 +5,7 @@ Each teammate role accumulates its own project-specific knowledge across runs in
 plus role-specific notes (qa: test login / accounts / flows). The orchestrator
 injects a pointer into the teammate's spawn prompt telling it to READ the file
 before working and APPEND concise learnings when it discovers something
-non-obvious — so e.g. frontend-on-PMS grows into its project instead of starting
+non-obvious — so e.g. frontend-on-app grows into its project instead of starting
 cold on every spawn.
 
 Cockpit-managed and gitignored (lives under ``runtime/``). Lead is intentionally

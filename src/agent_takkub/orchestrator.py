@@ -458,7 +458,7 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
             warm_browser_mcps()
         except Exception as e:
             _log_event("browser_mcp_init_error", error=repr(e))
-        # Merge user's ~/.claude.json mcpServers (obsidian-vault, pms, etc.)
+        # Merge user's ~/.claude.json mcpServers (obsidian-vault, etc.)
         # into shared-mcp.json so every pane inherits them automatically.
         # Browser MCP entries win on name collision. Non-fatal: failure logs
         # once and panes spawn without user MCPs until the issue is resolved.
@@ -1232,8 +1232,8 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
         self._idle_state.pop(key, None)
         getattr(self, "_pane_state", {}).pop(key, None)
 
-        # notify Lead in the same project (a teammate in unirecon mustn't
-        # nudge the Lead in pms by mistake)
+        # notify Lead in the same project (a teammate in project-a mustn't
+        # nudge the Lead in project-b by mistake)
         notice = f"[{from_role} done] {note}".rstrip()
         # Shard panes: suppress per-shard notice to Lead — consolidated handoff
         # (_inject_shard_fanout_handoff) is the single message Lead sees.
@@ -1587,8 +1587,8 @@ class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMix
     def list_status(self, project: str | None = None) -> dict[str, str]:
         """Snapshot of `role → state` for one project's panes.
 
-        Defaults to the active project's view, so a Lead in unirecon never
-        accidentally sees a backend pane that belongs to pms.
+        Defaults to the active project's view, so a Lead in project-a never
+        accidentally sees a backend pane that belongs to project-b.
         """
         return {name: p.state for name, p in self._project_panes(project).items()}
 

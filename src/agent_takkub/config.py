@@ -190,8 +190,8 @@ def lead_cwd(project: str | None = None) -> str | None:
     Priority:
       1. The project's `lead` path key (explicit pick), e.g.
          `"lead": "web"` reuses paths.web.
-      2. The shared parent of all configured project paths (`pms/` for
-         `pms-web` + `pms-api`), if that parent exists on disk.
+      2. The shared parent of all configured project paths (`app/` for
+         `app-web` + `app-api`), if that parent exists on disk.
       3. The project's first listed path (often `web`).
     Returns None if no project is resolved.
 

@@ -575,7 +575,7 @@ def _resolve_project_memory(cwd: str | None) -> pathlib.Path | None:
 
     Claude Code encodes the project directory as the key under
     ``~/.claude/projects/`` by replacing the OS separator and colon with ``-``.
-    For example ``C:\\Users\\monch\\web`` → ``C--Users-monch-web``.
+    For example ``C:\\Users\\alice\\web`` → ``C--Users-alice-web``.
 
     Returns None when *cwd* is absent or no memory file exists yet.
     """

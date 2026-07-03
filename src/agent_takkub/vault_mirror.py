@@ -1,9 +1,9 @@
 """Vault mirror — Obsidian write-side helpers for `takkub done` events.
 
 Handles three concerns:
-1. Vault discovery (`_resolve_vault_dir`) — find the `~/WebstormProjects/
-   second-brain` vault (or `$TAKKUB_VAULT_DIR` override) and verify it
-   has the `01-Projects/` layout before writing into it.
+1. Vault discovery (`_resolve_vault_dir`) — locate the Obsidian vault via
+   `$TAKKUB_VAULT_DIR` (or the built-in default path) and verify it has the
+   `01-Projects/` layout before writing into it.
 2. Junk filters (`_is_junk_note`, `_is_junk_project`) — drop "ok"/"wip"
    style stubs and test/scratch project namespaces so Obsidian's graph
    stays signal-dense.
@@ -34,7 +34,7 @@ _distill_log = logging.getLogger(__name__)
 # Where to look for the Obsidian vault that mirrors cockpit decision
 # logs. Resolution order:
 #   1. $TAKKUB_VAULT_DIR  — explicit override, wins over everything
-#   2. ~/WebstormProjects/second-brain — author's default vault layout
+#   2. the built-in `_DEFAULT_VAULT` fallback path (override via the env var)
 # We require an existing `01-Projects/` folder inside the candidate before
 # treating it as a vault: a stray empty dir at the default path mustn't
 # silently absorb session logs. Returns None when nothing matches, which
