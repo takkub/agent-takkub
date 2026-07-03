@@ -81,20 +81,6 @@
       "fan_out": 3
     },
     {
-      "module": "agent_takkub.broadcast_actions",
-      "imports": [
-        "agent_takkub.config",
-        "agent_takkub.orchestrator_text",
-        "agent_takkub.provider_config",
-        "agent_takkub.roles"
-      ],
-      "imported_by": [
-        "agent_takkub.orchestrator"
-      ],
-      "fan_in": 1,
-      "fan_out": 4
-    },
-    {
       "module": "agent_takkub.chatlog_scanner",
       "imports": [],
       "imported_by": [
@@ -203,7 +189,6 @@
       "imports": [],
       "imported_by": [
         "agent_takkub.agent_pane",
-        "agent_takkub.broadcast_actions",
         "agent_takkub.claude_update",
         "agent_takkub.cli",
         "agent_takkub.cli_server",
@@ -226,6 +211,7 @@
         "agent_takkub.spawn_engine",
         "agent_takkub.status_header",
         "agent_takkub.terminal_widget",
+        "agent_takkub.tutorial_overlay",
         "agent_takkub.update_helper",
         "agent_takkub.update_panel",
         "agent_takkub.update_worker",
@@ -417,7 +403,9 @@
         "agent_takkub.roles",
         "agent_takkub.spawn_gate",
         "agent_takkub.status_header",
+        "agent_takkub.tutorial_overlay",
         "agent_takkub.update_panel",
+        "agent_takkub.usage_meter",
         "agent_takkub.user_actions",
         "agent_takkub.user_profile"
       ],
@@ -425,22 +413,12 @@
         "agent_takkub.app"
       ],
       "fan_in": 1,
-      "fan_out": 15
-    },
-    {
-      "module": "agent_takkub.office_room_view",
-      "imports": [],
-      "imported_by": [
-        "agent_takkub.project_tab"
-      ],
-      "fan_in": 1,
-      "fan_out": 0
+      "fan_out": 17
     },
     {
       "module": "agent_takkub.orchestrator",
       "imports": [
         "agent_takkub.agent_pane",
-        "agent_takkub.broadcast_actions",
         "agent_takkub.chatlog_scanner",
         "agent_takkub.claude_auth_config",
         "agent_takkub.config",
@@ -467,7 +445,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 5,
-      "fan_out": 19
+      "fan_out": 18
     },
     {
       "module": "agent_takkub.orchestrator_text",
@@ -478,12 +456,11 @@
         "agent_takkub.roles"
       ],
       "imported_by": [
-        "agent_takkub.broadcast_actions",
         "agent_takkub.lead_inbox",
         "agent_takkub.orchestrator",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 4,
+      "fan_in": 3,
       "fan_out": 4
     },
     {
@@ -616,8 +593,7 @@
     {
       "module": "agent_takkub.project_tab",
       "imports": [
-        "agent_takkub.agent_pane",
-        "agent_takkub.office_room_view"
+        "agent_takkub.agent_pane"
       ],
       "imported_by": [
         "agent_takkub.limit_panel",
@@ -626,7 +602,7 @@
         "agent_takkub.status_header"
       ],
       "fan_in": 4,
-      "fan_out": 2
+      "fan_out": 1
     },
     {
       "module": "agent_takkub.project_wizard",
@@ -649,7 +625,6 @@
         "agent_takkub.provider_state"
       ],
       "imported_by": [
-        "agent_takkub.broadcast_actions",
         "agent_takkub.cli_server",
         "agent_takkub.lead_context",
         "agent_takkub.lead_inbox",
@@ -659,7 +634,7 @@
         "agent_takkub.spawn_engine",
         "agent_takkub.update_panel"
       ],
-      "fan_in": 9,
+      "fan_in": 8,
       "fan_out": 3
     },
     {
@@ -717,7 +692,6 @@
       "imports": [],
       "imported_by": [
         "agent_takkub.agent_pane",
-        "agent_takkub.broadcast_actions",
         "agent_takkub.lead_inbox",
         "agent_takkub.main_window",
         "agent_takkub.orchestrator",
@@ -725,7 +699,7 @@
         "agent_takkub.pipeline_config",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 8,
+      "fan_in": 7,
       "fan_out": 0
     },
     {
@@ -872,6 +846,17 @@
       "fan_out": 0
     },
     {
+      "module": "agent_takkub.tutorial_overlay",
+      "imports": [
+        "agent_takkub.config"
+      ],
+      "imported_by": [
+        "agent_takkub.main_window"
+      ],
+      "fan_in": 1,
+      "fan_out": 1
+    },
+    {
       "module": "agent_takkub.update_helper",
       "imports": [
         "agent_takkub._win_console",
@@ -918,6 +903,15 @@
       ],
       "fan_in": 2,
       "fan_out": 5
+    },
+    {
+      "module": "agent_takkub.usage_meter",
+      "imports": [],
+      "imported_by": [
+        "agent_takkub.main_window"
+      ],
+      "fan_in": 1,
+      "fan_out": 0
     },
     {
       "module": "agent_takkub.user_actions",

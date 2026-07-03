@@ -30,7 +30,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 # Without this, running the suite while a real cockpit is open risks the test
 # process — or any code under test that reaches that path — terminating the
 # user's live dev instance. setdefault so an explicit outer value still wins.
-# Per-test env assertions (test_office_room) monkeypatch/delenv to override.
+# Per-test env assertions can monkeypatch/delenv to override.
 os.environ.setdefault("TAKKUB_ALLOW_MULTI", "1")
 
 # Every Orchestrator() construction calls shared_dev_tools.warm_browser_mcps(),

@@ -338,47 +338,6 @@ class UserActionsMixin:
         dlg = PaneToolsDialog(self)
         dlg.exec()
 
-    def _on_ui_review_clicked(self) -> None:
-        """🎨 UI Review button: confirm → spawn critic + gemini design-review pair.
-
-        Resolves the project namespace, asks one Cancel/Ok dialog, then calls
-        `orch.broadcast_design_review` which assigns parallel tasks. Status
-        bar reflects the outcome with the list of spawned roles.
-        """
-        try:
-            from .config import active_project as _active_project
-
-            project_name, _ = _active_project()
-        except Exception:
-            project_name = None
-        scope = project_name or "active project"
-
-        confirm = QMessageBox.question(
-            self,
-            "Spawn design-review pipeline",
-            (
-                f"Spawn the design-review duo for **{scope}**?\n\n"
-                "• critic reads runtime/exports/<today>/<project>/screenshots/\n"
-                "  and writes a proposal to docs/design-review/<date>-<view>.md\n"
-                "• gemini cross-checks visual heuristics on the same shots\n\n"
-                "Fire this after QA captures screenshots."
-            ),
-            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Ok,
-        )
-        if confirm != QMessageBox.StandardButton.Ok:
-            return
-
-        count, roles = self.orch.broadcast_design_review(project=project_name)
-        _log_event("ui_design_review", project=project_name or "", count=count, roles=roles)
-        if count == 0:
-            self._status.showMessage(
-                "🎨 Could not spawn design-review panes (check providers / project paths)",
-                7_000,
-            )
-        else:
-            self._status.showMessage(f"🎨 Design review pipeline armed: {', '.join(roles)}", 10_000)
-
     def _on_open_shell_clicked(self) -> None:
         """💻 Shell button: spawn (or focus) a plain PowerShell pane.
 
@@ -412,43 +371,6 @@ class UserActionsMixin:
                 except Exception:
                     pass
         self._status.showMessage(f"💻 {msg}", 5_000)
-
-    def _on_bug_check_clicked(self) -> None:
-        """🐛 Bug-Check button: confirm → broadcast introspection prompt to every pane.
-
-        Each pane's agent decides whether to file a `takkub issue new` or
-        send a 'no bugs' note back. No-op if no active panes exist.
-        """
-        try:
-            from .config import active_project as _active_project
-
-            project_name, _ = _active_project()
-        except Exception:
-            project_name = None
-        scope = project_name or "active project"
-
-        confirm = QMessageBox.question(
-            self,
-            "Broadcast bug check",
-            (
-                f"Send a bug-introspection prompt to every active pane in **{scope}**?\n\n"
-                "Each agent will either file a cockpit issue with\n"
-                "`takkub issue new` or report 'no bugs' back to Lead."
-            ),
-            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Ok,
-        )
-        if confirm != QMessageBox.StandardButton.Ok:
-            return
-
-        count, roles = self.orch.broadcast_bug_check(project=project_name)
-        _log_event("ui_bug_check", project=project_name or "", count=count, roles=roles)
-        if count == 0:
-            self._status.showMessage("🐛 No active panes to bug-check", 7_000)
-        else:
-            self._status.showMessage(
-                f"🐛 Bug-check sent to {count} pane(s): {', '.join(roles)}", 10_000
-            )
 
     def _on_doctor_clicked(self) -> None:
         """🩺 Doctor button: run environment checks and display a report dialog.

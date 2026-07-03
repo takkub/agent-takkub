@@ -29,7 +29,6 @@ from datetime import datetime
 from PyQt6.QtCore import QObject, QProcess, QTimer, pyqtSignal
 
 from .agent_pane import AgentPane
-from .broadcast_actions import BroadcastMixin
 from .claude_auth_config import apply_claude_auth_overrides
 from .config import (
     EVENTS_LOG,
@@ -392,7 +391,7 @@ _LAST_SESSION_MAX_AGE_SEC = 60 * 60
 # PaneState moved to spawn_engine.py; re-exported above via SpawnEngineMixin import
 
 
-class Orchestrator(PipelineMixin, BroadcastMixin, LeadInboxMixin, SpawnEngineMixin, QObject):
+class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, QObject):
     """Owns the pane registry and routes commands.
 
     Layout policy: Lead is always pre-registered (created by main_window) and

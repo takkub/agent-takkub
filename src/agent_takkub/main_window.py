@@ -31,7 +31,6 @@ from PyQt6.QtWidgets import (
     QDockWidget,
     QHBoxLayout,
     QInputDialog,
-    QLabel,
     QMainWindow,
     QMessageBox,
     QStyle,
@@ -59,7 +58,9 @@ from .project_tab import ProjectTab
 from .project_wizard import ProjectWizardMixin
 from .roles import DEFAULT_TEAMMATES, LEAD, Role, by_name
 from .status_header import StatusHeaderMixin
+from .tutorial_overlay import TutorialOverlay, TutorialStep, has_seen_tutorial
 from .update_panel import MainWindowUpdateMixin
+from .usage_meter import UsageMeter
 from .user_actions import UserActionsMixin
 
 # Tier 1 quiet-boot constants: event-driven debounce before Lead spawn.
@@ -189,11 +190,6 @@ class MainWindow(
         self.orch.paneResumed.connect(self._on_pane_resumed)
         self.orch.crossTabDone.connect(self._on_cross_tab_done)
         self.orch.leadNotified.connect(self._on_lead_notified)
-        # ── Office Room game bridge ──────────────────────────────
-        self.orch.paneRequested.connect(self._game_on_pane_requested)
-        self.orch.paneClosed.connect(self._game_on_pane_closed)
-        self.orch.agentDone.connect(self._game_on_agent_done)
-        self.orch.statusChanged.connect(self._game_sync_all_states)
 
         # ── system tray for desktop notifications ───────────────
         self._tray = QSystemTrayIcon(self)
@@ -258,10 +254,9 @@ class MainWindow(
         # project's pane_tabs (top-right, same row as the Lead/teammate tabs).
         # On every project switch _on_tab_switched reparents this single label
         # into the new active ProjectTab's corner via mount_usage_widget().
-        self._limit_label = QLabel("—")
-        self._limit_label.setStyleSheet("QLabel { color:#52525b; font-size:11px; padding:0 8px; }")
+        self._limit_label = UsageMeter()
         self._limit_label.setToolTip(
-            "Claude usage windows (5h / 7d / 7d-Sonnet)\n"
+            "Claude usage windows (5h / 7d)\n"
             "Reflects the User: profile selected for this project.\n"
             "Updates every 5 min."
         )
@@ -284,6 +279,11 @@ class MainWindow(
         self._usageUpdated.connect(self._on_usage_updated)
         # Defer 3 s so the boot sequence settles before the first HTTP hit.
         QTimer.singleShot(3_000, self._init_limit_store)
+
+        # First-run guided tour — fire once the window is up and the status-bar
+        # chips it points at exist. Persisted flag makes it once-per-install;
+        # replayable from the ❓ Tour button.
+        QTimer.singleShot(1_500, self._maybe_autostart_tutorial)
 
         # ── bottom logs dock (hidden by default) ────────────────
         self._logs_dock = QDockWidget("events", self)
@@ -351,11 +351,6 @@ class MainWindow(
         close chain — the same teardown path the pane header's own × uses."""
         tab.paneCloseRequested.connect(
             lambda role, proj=tab.project_name: self.orch.close(role, project=proj)
-        )
-        tab.focusRoleRequested.connect(lambda role, t=tab: self._game_on_focus_role(role, t))
-        tab.leadClickedInGame.connect(lambda t=tab: self._game_on_focus_role("lead", t))
-        tab.messageToLead.connect(
-            lambda msg, proj=tab.project_name: self.orch.inject_lead_prompt(msg, project=proj)
         )
 
     def _ensure_teammate_pane(self, role_name: str, project: str) -> None:
@@ -449,13 +444,10 @@ class MainWindow(
 
         # Defer the ENTIRE removal (tab removal + WebEngine teardown) to a fresh
         # event-loop tick. This slot runs *synchronously* inside
-        # Orchestrator.close()'s `paneClosed.emit()`, in the same stack as the
-        # sibling game slots (`_game_on_pane_closed`, and `_game_sync_all_states`
-        # off the immediately-following `statusChanged.emit()`) that drive
-        # runJavaScript into the office-room view. Mutating this pane's
+        # Orchestrator.close()'s `paneClosed.emit()`. Mutating this pane's
         # QWebEngineView — `remove_teammate_tab`'s `removeTab` reparents it, and
-        # `destroy_terminal` deletes it — reentrantly, nested in that emission and
-        # overlapping another live WebEngine op, tripped Qt6Core's __fastfail
+        # `destroy_terminal` deletes it — reentrantly, nested in that emission,
+        # tripped Qt6Core's __fastfail
         # (0xc0000409) and hard-crashed the cockpit on every pane close (done
         # auto-close, close-all, tab switch). The Qt 6.8 downgrade did NOT fix it
         # because the fault is this reentrancy, not a Qt regression. The earlier
@@ -484,52 +476,70 @@ class MainWindow(
         QTimer.singleShot(0, _teardown)
 
     # ──────────────────────────────────────────────────────────────
-    # Office Room game bridge helpers
+    # first-run guided tour
     # ──────────────────────────────────────────────────────────────
-    def _game_dispatch(self, role: str, state: str, project: str = "", note: str = "") -> None:
-        """Route a game event to the correct ProjectTab's OfficeRoomView."""
-        tab = self._tab_for_project(project) if project else self._current_tab()
-        if tab is None:
-            return
-        tab.dispatch_game_event(role, state, note=note, project=project)
+    def _build_tutorial_steps(self) -> list[TutorialStep]:
+        """Steps for the guided tour — "how to start", in order."""
 
-    def _game_on_pane_requested(self, role_name: str, project: str) -> None:
-        self._game_dispatch(role_name, "spawn", project=project)
+        def _lead_pane():
+            tab = self._current_tab()
+            return getattr(tab, "lead_pane", None) if tab is not None else None
 
-    def _game_on_pane_closed(self, role_name: str, project: str) -> None:
-        self._game_dispatch(role_name, "close", project=project)
+        return [
+            TutorialStep(
+                lambda: getattr(self.tabs, "_add_btn", None),
+                "1 · เพิ่มโปรเจค",
+                "เริ่มที่นี่ — กด “+ New project” เพื่อเปิดหรือ import โปรเจคที่อยากให้ทีมช่วยทำ "
+                "แต่ละโปรเจคมี Lead + teammates แยกกัน",
+            ),
+            TutorialStep(
+                _lead_pane,
+                "2 · คุยกับ Lead",
+                "พิมพ์บอก Lead ตรงนี้ว่าอยากทำอะไร (เช่น “เพิ่มหน้า login”) แล้วกด Enter — "
+                "Lead จะวางแผนแล้ว spawn teammate ที่เหมาะกับงานให้เอง",
+            ),
+            TutorialStep(
+                lambda: getattr(self, "_chip_exec_mode", None),
+                "3 · โหมดทำงาน",
+                "สลับ 1:1 (ทีละงาน) ↔ Multi (แตกงานอิสระให้หลาย agent ทำขนานกัน) — "
+                "งานใหญ่หลายส่วนเปิด Multi แล้วจบไวขึ้น",
+            ),
+            TutorialStep(
+                lambda: getattr(self, "_btn_pane_tools", None),
+                "4 · Tools",
+                "ตั้งค่าว่าแต่ละ role จะได้ MCP / plugin อะไรบ้าง (เช่น browser automation ให้ QA) "
+                "มีผลกับ pane ที่ spawn ใหม่ทันที",
+            ),
+            TutorialStep(
+                lambda: getattr(self, "_btn_doctor", None),
+                "5 · Doctor",
+                "เช็คว่าเครื่องพร้อม — เวอร์ชัน core, plugins, MCPs, providers ครบไหม "
+                "กด Fix ซ่อมอัตโนมัติได้เลย",
+            ),
+            TutorialStep(
+                lambda: getattr(self, "_btn_end_session", None),
+                "6 · จบงาน",
+                "พอเสร็จกด End Session — เขียนสรุปสั้นๆ ปิด teammate ทั้งหมด แล้วบันทึกไว้ "
+                "session หน้าเปิดมา Lead จะจำได้ว่าทำอะไรค้างไว้",
+            ),
+        ]
 
-    def _game_on_agent_done(self, project: str, role_name: str, note: str) -> None:
-        self._game_dispatch(role_name, "done", project=project, note=note)
+    def _start_tutorial(self) -> None:
+        """Show the guided-tour overlay (from the ❓ Tour button or first run)."""
+        existing = getattr(self, "_tutorial", None)
+        if existing is not None:
+            try:
+                existing.finish(mark=False)
+            except RuntimeError:
+                pass
+        self._tutorial = TutorialOverlay(self, self._build_tutorial_steps())
+        self._tutorial.start()
 
-    def _game_sync_all_states(self) -> None:
-        """On every statusChanged (and on game-view toggle-in), push busy/idle
-        state for every alive pane so the scene stays in sync."""
-        for project, panes in list(self.orch._panes_by_project.items()):
-            tab = self._tab_for_project(project)
-            if tab is None:
-                continue
-            for role, pane in list(panes.items()):
-                if pane.session is None or not pane.session.is_alive:
-                    continue
-                state = "busy" if pane.state == "working" else "idle"
-                tab.dispatch_game_event(role, state, project=project)
-
-    def _game_on_focus_role(self, role: str, tab: ProjectTab) -> None:
-        """Switch the cockpit to the pane-tab for `role` in `tab`."""
-        pane = tab.teammate_panes.get(role)
-        if pane is None and role == "lead":
-            pane = tab.lead_pane
-        if pane is None:
-            return
-        idx = tab.pane_tabs.indexOf(pane)
-        if idx >= 0:
-            tab.pane_tabs.setCurrentIndex(idx)
-        # Also switch back to text view
-        if tab.is_game_active():
-            tab.toggle_game_view()
-            self._btn_game_view.setChecked(False)
-            self._btn_game_view.setText("🎮")
+    def _maybe_autostart_tutorial(self) -> None:
+        """Open the tour once per install (first launch), then never again unless
+        replayed from the ❓ Tour button."""
+        if not has_seen_tutorial():
+            self._start_tutorial()
 
     # ──────────────────────────────────────────────────────────────
     def _boot(self) -> None:
@@ -949,12 +959,13 @@ class MainWindow(
             from . import user_profile as _up_tc
 
             self._limit_store.unregister(_up_tc.config_dir_for(tab.project_name))
-        # The usage meter is a single QLabel parked as this tab's corner widget.
-        # If we're closing the tab that currently hosts it, detach it BEFORE
-        # deleteLater — otherwise Qt destroys the C++ QLabel along with the tab
-        # while Python keeps `_limit_label` pointing at the dead wrapper, and
-        # every subsequent usage poll throws "QLabel has been deleted", so the
-        # meter vanishes until the cockpit restarts. removeTab below re-mounts
+        # The usage meter is a single UsageMeter widget parked as this tab's
+        # corner widget. If we're closing the tab that currently hosts it,
+        # detach it BEFORE deleteLater — otherwise Qt destroys the C++ widget
+        # along with the tab while Python keeps `_limit_label` pointing at the
+        # dead wrapper, and every subsequent usage poll throws "has been
+        # deleted", so the meter vanishes until the cockpit restarts. removeTab
+        # below re-mounts
         # it on the new active tab via _on_tab_switched (host is None now, so it
         # skips the stale-clear and just mounts).
         if self._limit_label_host is tab:

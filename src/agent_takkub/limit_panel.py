@@ -74,10 +74,7 @@ class LimitPanelMixin:
         if sip.isdeleted(self._limit_label):
             return
         if data is None:
-            self._limit_label.setText("—")
-            self._limit_label.setStyleSheet(
-                "QLabel { color:#52525b; font-size:11px; padding:0 2px; }"
-            )
+            self._limit_label.set_offline()
             self._limit_label.setToolTip("Usage unavailable (offline or not logged in)")
             return
 
@@ -103,6 +100,9 @@ class LimitPanelMixin:
             return f"{hours}:{mins:02d}"
 
         def _fmt(key: str) -> str:
+            """Inline readout: countdown-to-reset + utilisation, e.g. '3:45 52%'.
+            The clock (time left until the window resets) is the thing worth
+            glancing at — not which window it is — so no '5h'/'7d' label."""
             w = window_map.get(key)
             if w is None:
                 return "—"
@@ -110,12 +110,7 @@ class LimitPanelMixin:
             eta = _fmt_eta(w)
             return f"{eta} {pct}" if eta else pct
 
-        text = " / ".join(
-            [
-                _fmt("five_hour"),
-                _fmt("seven_day"),
-            ]
-        )
+        text = " / ".join([_fmt("five_hour"), _fmt("seven_day")])
 
         max_util = max((w.utilization for w in (data.windows or [])), default=0.0)
         if rate_limited:
@@ -125,12 +120,11 @@ class LimitPanelMixin:
         elif max_util >= 50:
             color = "#fbbf24"
         else:
-            color = "#71717a"
+            # Calm state → Claude coral so the little spark reads as "a bit of
+            # Claude" in the corner instead of a neutral grey system chip.
+            color = "#d97757"
 
-        self._limit_label.setText(text)
-        self._limit_label.setStyleSheet(
-            f"QLabel {{ color:{color}; font-size:11px; padding:0 2px; }}"
-        )
+        self._limit_label.apply(text, color)
         plan = getattr(data, "plan", "")
         stale_note = " (rate-limited, showing last known)" if rate_limited else ""
         reset_lines = []

@@ -203,17 +203,6 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
-name = "broadcast-actions-layer"
-type = "forbidden"
-# broadcast_actions is an engine-layer mixin — no UI or CLI coupling allowed.
-source_modules = ["agent_takkub.broadcast_actions"]
-forbidden_modules = [
-    "agent_takkub.main_window",
-    "agent_takkub.app",
-    "agent_takkub.cli",
-]
-
-[[tool.importlinter.contracts]]
 name = "update-panel-layer"
 type = "forbidden"
 # update_panel is a UI-layer mixin (mixed into MainWindow). It must not pull in
@@ -282,10 +271,21 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
-name = "office-room-view-layer"
+name = "usage-meter-layer"
 type = "forbidden"
-# office_room_view is a pure UI widget — must not import orchestrator, app, or cli.
-source_modules = ["agent_takkub.office_room_view"]
+# usage_meter is a pure-leaf UI widget — must not import orchestrator, app, or cli.
+source_modules = ["agent_takkub.usage_meter"]
+forbidden_modules = [
+    "agent_takkub.orchestrator",
+    "agent_takkub.app",
+    "agent_takkub.cli",
+]
+
+[[tool.importlinter.contracts]]
+name = "tutorial-overlay-layer"
+type = "forbidden"
+# tutorial_overlay is a pure-leaf UI widget — must not import orchestrator, app, or cli.
+source_modules = ["agent_takkub.tutorial_overlay"]
 forbidden_modules = [
     "agent_takkub.orchestrator",
     "agent_takkub.app",

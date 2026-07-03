@@ -1,14 +1,13 @@
-"""Regression: the usage meter must not crash the app when its QLabel dies.
+"""Regression: the usage meter must not crash the app when its widget dies.
 
-boot.log showed `RuntimeError: wrapped C/C++ object of type QLabel has been
-deleted` firing 387× — every 120 s usage poll after a project tab that was
-hosting the meter got closed. `_on_tab_close_requested` deleted the tab (and
-its corner-widget QLabel) without detaching the label, leaving `_limit_label`
-a dead wrapper; the next `_refresh_limit_label` call threw, so the meter
-vanished until restart.
+boot.log showed `RuntimeError: wrapped C/C++ object ... has been deleted`
+firing 387× — every 120 s usage poll after a project tab that was hosting the
+meter got closed. `_on_tab_close_requested` deleted the tab (and its
+corner-widget) without detaching it, leaving `_limit_label` a dead wrapper; the
+next `_refresh_limit_label` call threw, so the meter vanished until restart.
 
 These tests pin the defensive guard: `_refresh_limit_label` on a torn-down
-QLabel is a silent no-op, for both the data-present and data-None paths.
+meter widget is a silent no-op, for both the data-present and data-None paths.
 """
 
 from __future__ import annotations
@@ -16,17 +15,17 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from PyQt6 import sip
-from PyQt6.QtWidgets import QLabel
 
 from agent_takkub.limit_panel import LimitPanelMixin
 from agent_takkub.limit_status import LimitWindow, UsageData
+from agent_takkub.usage_meter import UsageMeter
 
 
 class _Holder(LimitPanelMixin):
     """Minimal carrier exposing just the attribute the mixin touches."""
 
     def __init__(self) -> None:
-        self._limit_label = QLabel("—")
+        self._limit_label = UsageMeter()
 
 
 def _usage() -> UsageData:
@@ -61,6 +60,6 @@ def test_refresh_on_deleted_label_is_noop_data_none() -> None:
 def test_refresh_on_live_label_still_updates() -> None:
     holder = _Holder()
     holder._refresh_limit_label(_usage())
-    # 42% util window → label carries the percentage; proves the guard doesn't
-    # short-circuit a healthy label.
-    assert "42%" in holder._limit_label.text()
+    # 42% util window → meter carries the percentage; proves the guard doesn't
+    # short-circuit a healthy widget.
+    assert "42%" in holder._limit_label._label.text()

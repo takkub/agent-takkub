@@ -23,22 +23,9 @@ from __future__ import annotations
 
 from PyQt6.QtCore import QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QIcon, QPainter, QPixmap
-from PyQt6.QtWidgets import QStackedWidget, QTabWidget, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QTabWidget, QVBoxLayout, QWidget
 
 from .agent_pane import AgentPane
-from .office_room_view import OfficeRoomView
-
-# Office-room game view kill-switch (disabled 2026-06-30).
-# The OfficeRoomView is a SECOND QWebEngineView. Its runJavaScript-driven
-# updates fire synchronously off `paneClosed`/`statusChanged` emits — the same
-# emit stack that tears down a closing pane's terminal QWebEngineView. Two
-# overlapping WebEngine operations in one emit trip Qt6Core's __fastfail
-# (0xc0000409) and hard-crash the cockpit on every pane close. With the view
-# never created, all game dispatch (`dispatch_game_event`, `_game_sync_all_states`)
-# short-circuits to a no-op, so no office-room WebEngine op can overlap a
-# teardown. Flip back to True once game dispatch is moved off the synchronous
-# emit stack (e.g. queued to a fresh event-loop tick).
-_OFFICE_ROOM_ENABLED = False
 
 # Modern flat tab strip for the panes inside a project. Accent = indigo.
 _PANE_TABS_QSS = """
@@ -86,13 +73,6 @@ class ProjectTab(QWidget):
     # remove_teammate_tab — so there is exactly one teardown path, no race.
     paneCloseRequested = pyqtSignal(str)
 
-    # Emitted when the user clicks the Lead character inside the game view.
-    leadClickedInGame = pyqtSignal()
-    # Emitted when the user sends a message via the game chat overlay.
-    messageToLead = pyqtSignal(str)
-    # Emitted when the user clicks any role desk in the game → focus that pane.
-    focusRoleRequested = pyqtSignal(str)
-
     def __init__(
         self,
         project_name: str,
@@ -124,19 +104,10 @@ class ProjectTab(QWidget):
         # Cached red-dot icon for the unread Lead indicator (built lazily).
         self._unread_icon: QIcon | None = None
 
-        # ── Office Room game view (lazy) ──────────────────────────────
-        # _view_stack page 0 = pane_tabs (text view), page 1 = game view.
-        # OfficeRoomView (QWebEngineView) is created LAZILY on first toggle to
-        # avoid crashing headless test environments that create ProjectTab
-        # without a real display or Qt renderer available.
-        self._view_stack = QStackedWidget(self)
-        self._view_stack.addWidget(self.pane_tabs)  # page 0 always present
-        self.game_view: OfficeRoomView | None = None  # created on first toggle
-
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addWidget(self._view_stack)
+        layout.addWidget(self.pane_tabs)
 
         if lead_pane is not None:
             # Backwards-compat path for callers that still pass Lead at
@@ -218,41 +189,6 @@ class ProjectTab(QWidget):
     # ------------------------------------------------------------------
     # keep-alive: only the visible pane of the visible project paints
     # ------------------------------------------------------------------
-    # ------------------------------------------------------------------
-    # game view toggle + lazy init
-    # ------------------------------------------------------------------
-    def _ensure_game_view(self) -> OfficeRoomView:
-        """Create OfficeRoomView on first use (lazy to avoid crashing tests)."""
-        if self.game_view is None:
-            self.game_view = OfficeRoomView(self)
-            self.game_view.leadClickedInGame.connect(self.leadClickedInGame)
-            self.game_view.messageToLead.connect(self.messageToLead)
-            self.game_view.focusRoleRequested.connect(self.focusRoleRequested)
-            self._view_stack.addWidget(self.game_view)  # page 1
-        return self.game_view
-
-    def is_game_active(self) -> bool:
-        return self._view_stack.currentIndex() == 1
-
-    def toggle_game_view(self) -> bool:
-        """Switch between text panes (page 0) and game view (page 1).
-        Returns True if game is now active."""
-        if not _OFFICE_ROOM_ENABLED:
-            # Feature off — never create the office-room WebEngine view (see
-            # _OFFICE_ROOM_ENABLED). Stay on the text panes.
-            return False
-        self._ensure_game_view()
-        new_game = not self.is_game_active()
-        self._view_stack.setCurrentIndex(1 if new_game else 0)
-        self._apply_pane_keepalive()
-        return new_game
-
-    def dispatch_game_event(self, role: str, state: str, note: str = "", project: str = "") -> None:
-        """Forward a pane-state event to the game view (no-op if not yet created)."""
-        if self.game_view is None:
-            return
-        self.game_view.dispatch_event(role, state, project=project or self.project_name, note=note)
-
     def set_keepalive(self, active: bool) -> None:
         """Mark this project visible/hidden. MainWindow calls it on every
         sidebar switch (visible project → True, others → False). Idempotent."""
@@ -263,18 +199,13 @@ class ProjectTab(QWidget):
         """A pane paints iff this project is visible AND it's the current
         pane-tab. Everything else suspends so its renderer can release RAM."""
         cur = self.pane_tabs.currentWidget()
-        game_on = self.is_game_active()
         for i in range(self.pane_tabs.count()):
             w = self.pane_tabs.widget(i)
             setter = getattr(w, "set_keepalive", None)
             if setter is not None:
-                # Panes suspend when game view is showing (game covers them)
-                setter(self._keepalive and not game_on and w is cur)
-        # Game view keepalive: paint when this project is visible + game is shown
-        if self.game_view is not None:
-            self.game_view.set_keepalive(self._keepalive and game_on)
+                setter(self._keepalive and w is cur)
         # If the Lead tab is the one on screen, it's been seen → clear its dot.
-        if self._keepalive and not game_on and cur is self.lead_pane:
+        if self._keepalive and cur is self.lead_pane:
             self._clear_lead_unread()
 
     def _on_pane_tab_changed(self, _index: int) -> None:

@@ -385,13 +385,6 @@ class StatusHeaderMixin:
         # (ProjectNav owns it now, right above "New project"). It used to live
         # here in the status bar.
 
-        self._btn_game_view = QPushButton("🎮", self)
-        self._btn_game_view.setToolTip("Toggle Office Room game view ↔ text panes (🎮/📜)")
-        self._btn_game_view.setCheckable(True)
-        self._btn_game_view.setFixedWidth(32)
-        self._btn_game_view.setStyleSheet(self._ghost_button_style())
-        self._btn_game_view.clicked.connect(self._on_toggle_game_view)
-
         self._btn_restart = QPushButton(self)
         self._btn_restart.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
         self._btn_restart.setToolTip("Restart cockpit (kills all panes, relaunches app)")
@@ -420,21 +413,6 @@ class StatusHeaderMixin:
         self._btn_end_session.setStyleSheet(self._danger_button_style())
         self._btn_end_session.clicked.connect(self._on_end_session_clicked)
 
-        # Bug-Check button: broadcasts an introspection prompt to every
-        # active pane. Each agent decides on its own whether to file a
-        # cockpit issue or report "no bugs" back to Lead. Keeps bug
-        # capture cheap — user doesn't have to context-switch to write
-        # an issue while still mid-task.
-        self._btn_bug_check = QPushButton("🐛 Bug Check", self)
-        self._btn_bug_check.setToolTip(
-            "Ask every active pane to introspect this session for cockpit\n"
-            "bugs (orchestrator / CLI / UI). Each agent runs\n"
-            "`takkub issue new` if it found something, or sends a clean\n"
-            "report back to Lead. Project-scoped — other tabs untouched."
-        )
-        self._btn_bug_check.setStyleSheet(self._ghost_button_style())
-        self._btn_bug_check.clicked.connect(self._on_bug_check_clicked)
-
         # 🩺 Doctor button: one-stop cockpit readiness check. Runs environment
         # diagnostics AND folds in the recommended dev-team plugin set — the
         # standalone 🧩 Plugins button was merged in here so "am I set up
@@ -449,20 +427,6 @@ class StatusHeaderMixin:
         )
         self._btn_doctor.setStyleSheet(self._ghost_button_style())
         self._btn_doctor.clicked.connect(self._on_doctor_clicked)
-
-        # 🎨 UI Review button: 1-click design-review pipeline. Spawns critic +
-        # gemini in parallel. Critic reads shots from runtime/exports/<date>/
-        # <project>/screenshots/ (left by QA's `mb shot` runs) and writes a
-        # proposal to docs/design-review/. Gemini cross-checks visually so
-        # the proposal isn't single-agent confirmation bias.
-        self._btn_ui_review = QPushButton("🎨 UI Review", self)
-        self._btn_ui_review.setToolTip(
-            "Run the design-review pipeline: spawn critic + gemini parallel\n"
-            "to read today's QA screenshots and propose add/remove/refine.\n"
-            "Fire after QA smoke; proposals land in docs/design-review/."
-        )
-        self._btn_ui_review.setStyleSheet(self._ghost_button_style())
-        self._btn_ui_review.clicked.connect(self._on_ui_review_clicked)
 
         # 💻 Open Shell: drops a raw PowerShell into the cockpit grid as
         # the `shell` pane. No claude, no codex, no gemini — just pwsh in
@@ -549,12 +513,9 @@ class StatusHeaderMixin:
             self._status.addPermanentWidget(w)
         self._status.addPermanentWidget(self._make_status_separator())
         for w in (
-            self._btn_game_view,
             self._btn_resume,
             self._btn_open_shell,
-            self._btn_bug_check,
             self._btn_doctor,
-            self._btn_ui_review,
             self._btn_end_session,
         ):
             self._status.addPermanentWidget(w)
@@ -596,31 +557,6 @@ class StatusHeaderMixin:
         self._status_timer.setInterval(2_000)
         self._status_timer.timeout.connect(self._update_status)
         self._status_timer.start()
-
-    # ──────────────────────────────────────────────────────────────
-    # game view toggle
-    # ──────────────────────────────────────────────────────────────
-
-    def _on_toggle_game_view(self) -> None:
-        """Toggle the active project tab between text panes and game view."""
-        from .project_tab import ProjectTab
-
-        tab = self._current_tab()
-        if not isinstance(tab, ProjectTab):
-            self._btn_game_view.setChecked(False)
-            return
-        game_on = tab.toggle_game_view()
-        self._btn_game_view.setChecked(game_on)
-        self._btn_game_view.setText("📜" if game_on else "🎮")
-        self._status.showMessage(
-            "Game view ON — Office Room" if game_on else "Game view OFF — text panes", 3_000
-        )
-        if game_on:
-            # Push a snapshot of every already-alive pane so the scene shows
-            # characters immediately instead of "Waiting for pane events…".
-            # Panes spawned before the view was created never fired paneRequested
-            # into the scene; this syncs the gap.
-            self._game_sync_all_states()
 
     # ──────────────────────────────────────────────────────────────
     # live status updates
