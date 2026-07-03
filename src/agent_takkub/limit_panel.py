@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from PyQt6 import sip
+
 from .config import active_project
 
 
@@ -65,6 +67,12 @@ class LimitPanelMixin:
             self._refresh_limit_label(data)
 
     def _refresh_limit_label(self, data) -> None:
+        # Defensive: the underlying QLabel can be torn down (e.g. its host tab
+        # closed) while a queued usage-poll signal is still in flight. hasattr
+        # only proves the Python attr exists, not that the C++ object is alive,
+        # so check liveness here — the choke point every caller routes through.
+        if sip.isdeleted(self._limit_label):
+            return
         if data is None:
             self._limit_label.setText("—")
             self._limit_label.setStyleSheet(

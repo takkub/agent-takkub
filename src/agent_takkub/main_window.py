@@ -944,6 +944,18 @@ class MainWindow(
             from . import user_profile as _up_tc
 
             self._limit_store.unregister(_up_tc.config_dir_for(tab.project_name))
+        # The usage meter is a single QLabel parked as this tab's corner widget.
+        # If we're closing the tab that currently hosts it, detach it BEFORE
+        # deleteLater — otherwise Qt destroys the C++ QLabel along with the tab
+        # while Python keeps `_limit_label` pointing at the dead wrapper, and
+        # every subsequent usage poll throws "QLabel has been deleted", so the
+        # meter vanishes until the cockpit restarts. removeTab below re-mounts
+        # it on the new active tab via _on_tab_switched (host is None now, so it
+        # skips the stale-clear and just mounts).
+        if self._limit_label_host is tab:
+            tab.pane_tabs.setCornerWidget(None, Qt.Corner.TopRightCorner)
+            self._limit_label.setParent(None)
+            self._limit_label_host = None
         self.tabs.removeTab(index)
         # ProjectTab still holds references to AgentPane/TerminalWidget;
         # explicitly destroy them so Chromium releases the renderer.
