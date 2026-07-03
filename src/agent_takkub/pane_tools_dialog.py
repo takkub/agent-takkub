@@ -50,12 +50,6 @@ ROLES: tuple[str, ...] = (
     "designer",
 )
 
-# Always-DENIED regardless of policy — lead_context._PANE_PLUGIN_DENYLIST
-# hard-blocks these hook-heavy plugins from every pane (slow spawn / crash
-# surface). The dialog disables their checkboxes so the UI doesn't pretend
-# a click could enable them.
-_FORCED_PLUGINS = frozenset({"security-guidance", "remember"})
-
 _PLUGINS_INSTALLED_FILE = pathlib.Path.home() / ".claude" / "plugins" / "installed_plugins.json"
 
 # Zinc dark theme, matched to the cockpit shell (MainWindow QSS + status-bar
@@ -254,6 +248,47 @@ def discover_marketplace_plugins(
     if not isinstance(plugins, dict):
         return []
     return sorted(plugins.keys())
+
+
+def discover_marketplaces(
+    installed_file: pathlib.Path = _PLUGINS_INSTALLED_FILE,
+) -> list[str]:
+    """Marketplace names the pane plugin-policy can actually govern.
+
+    The plugin policy is **marketplace-granular**: ``_default_plugin_dirs``
+    filters by marketplace and loads every plugin dir under an allowed one, so a
+    role's effective plugin set is a set of *marketplace* names
+    (``superpowers-dev``, ``pordee``, ``claude-plugins-official``) — never
+    ``name@marketplace``. The Plugins matrix must therefore offer **marketplace
+    columns** so a checkbox's identity matches what the policy stores and reads.
+
+    Using ``discover_marketplace_plugins`` (``name@marketplace``) as columns made
+    every cell compare e.g. ``code-review@claude-plugins-official`` against a
+    ``claude-plugins-official`` policy entry — never equal, so the whole grid
+    rendered unchecked even when the plugins were enabled, and a Save then wrote
+    an empty deny-all override for every role. That was the 2026-07-02 wipe.
+
+    Returns the installed marketplaces intersected with ``_SAFE_PLUGINS`` (the
+    only ones pane injection can load), sorted. Missing/unreadable file → [].
+    """
+    from .config import _SAFE_PLUGINS
+
+    try:
+        data = json.loads(installed_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    plugins = data.get("plugins") or {}
+    if not isinstance(plugins, dict):
+        return []
+    governable = set(_SAFE_PLUGINS)
+    # Install-registry keys are ``name@marketplace``; the segment after ``@`` is
+    # the marketplace. Keep only marketplaces the pane loader can inject.
+    found = {
+        key.partition("@")[2]
+        for key in plugins
+        if isinstance(key, str) and key.partition("@")[2] in governable
+    }
+    return sorted(found)
 
 
 def parse_install_form(name: str, command: str, args_line: str) -> tuple[str, dict] | None:
@@ -500,12 +535,16 @@ class PaneToolsDialog(QDialog):
         return tab
 
     def _reload_plugin_table(self) -> None:
-        items = discover_marketplace_plugins()
+        # Marketplace-granular columns (NOT name@marketplace): the policy stores
+        # marketplace names, so only these make a checkbox's identity match what
+        # is read back — otherwise the grid renders all-unchecked and Save wipes
+        # every role. security-guidance/remember have no column of their own (they
+        # live inside claude-plugins-official); the pane loader force-denies them
+        # regardless, as the tab's note explains.
+        items = discover_marketplaces()
         self._orig_plugin_items = self._policy_role_items("plugins")
         matrix = build_matrix(ROLES, items, self._orig_plugin_items)
-        self._plugin_boxes = self._fill_matrix_table(
-            self._plugin_table, items, matrix, disabled_items=_FORCED_PLUGINS
-        )
+        self._plugin_boxes = self._fill_matrix_table(self._plugin_table, items, matrix)
         self._plugin_table.setVisible(bool(items))
         self._plugin_empty.setVisible(not items)
 

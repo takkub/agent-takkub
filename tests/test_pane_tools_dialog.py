@@ -9,6 +9,7 @@ from agent_takkub.pane_tools_dialog import (
     build_matrix,
     diff_role_items,
     discover_marketplace_plugins,
+    discover_marketplaces,
     matrix_to_role_items,
     parse_install_form,
 )
@@ -78,6 +79,43 @@ def test_discover_marketplace_plugins_malformed_json_returns_empty(tmp_path):
     bad = tmp_path / "installed_plugins.json"
     bad.write_text("{not json", encoding="utf-8")
     assert discover_marketplace_plugins(bad) == []
+
+
+def test_discover_marketplaces_intersects_safe_plugins(tmp_path):
+    installed = tmp_path / "installed_plugins.json"
+    installed.write_text(
+        json.dumps(
+            {
+                "plugins": {
+                    "superpowers@superpowers-dev": [],
+                    "pordee@pordee": [],
+                    "code-review@claude-plugins-official": [],
+                    "frontend-design@claude-plugins-official": [],  # dedups → one column
+                    "agent-skills@addy-agent-skills": [],
+                    "claude-obsidian@claude-obsidian-marketplace": [],  # not in _SAFE_PLUGINS
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    # Marketplace names (not name@marketplace), deduped, ∩ _SAFE_PLUGINS, sorted.
+    # claude-obsidian-marketplace is dropped — pane injection can never load it.
+    assert discover_marketplaces(installed) == [
+        "addy-agent-skills",
+        "claude-plugins-official",
+        "pordee",
+        "superpowers-dev",
+    ]
+
+
+def test_discover_marketplaces_missing_file_returns_empty(tmp_path):
+    assert discover_marketplaces(tmp_path / "nope.json") == []
+
+
+def test_discover_marketplaces_malformed_json_returns_empty(tmp_path):
+    bad = tmp_path / "installed_plugins.json"
+    bad.write_text("{not json", encoding="utf-8")
+    assert discover_marketplaces(bad) == []
 
 
 def test_parse_install_form_splits_args_on_whitespace():
@@ -183,5 +221,52 @@ def test_save_plugins_only_change_does_not_wipe_mcps(monkeypatch, tmp_path):
         dlg._on_save_clicked()
         # qa's MCPs must be preserved, NOT collapsed to an empty deny override.
         assert ptp.effective_mcps("qa", None) == frozenset({"playwright", "chrome-devtools"})
+    finally:
+        dlg.deleteLater()
+
+
+def test_plugin_matrix_renders_marketplace_defaults_checked(monkeypatch, tmp_path):
+    """Regression: the Plugins matrix must render each role's default
+    marketplaces CHECKED, and a no-op Save must NOT write a deny-all override.
+
+    The matrix once used ``name@marketplace`` columns while the policy stores
+    *marketplace* names, so every plugin cell rendered unchecked even when the
+    plugins were enabled, and any Save wiped every role's plugins (the
+    2026-07-02 deny-all). Columns are now marketplace-granular, so a checkbox's
+    identity matches what ``effective_plugins`` reads back.
+    """
+    from agent_takkub import pane_tools_dialog as ptd
+    from agent_takkub import pane_tools_policy as ptp
+    from agent_takkub.pane_tools_dialog import PaneToolsDialog
+
+    monkeypatch.setattr(ptp, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
+    # Deterministic marketplace columns regardless of the host's install registry
+    # (CI runners have no cockpit plugins installed).
+    monkeypatch.setattr(
+        ptd,
+        "discover_marketplaces",
+        lambda: ["addy-agent-skills", "claude-plugins-official", "pordee", "superpowers-dev"],
+    )
+
+    dlg = PaneToolsDialog()
+    try:
+        # frontend inherits the teammate default: superpowers-dev + pordee +
+        # claude-plugins-official checked; addy-agent-skills is safe-but-off.
+        fe = dlg._plugin_boxes["frontend"]
+        assert fe["superpowers-dev"].isChecked()
+        assert fe["pordee"].isChecked()
+        assert fe["claude-plugins-official"].isChecked()
+        assert not fe["addy-agent-skills"].isChecked()
+        # lead gets only pordee.
+        lead = dlg._plugin_boxes["lead"]
+        assert lead["pordee"].isChecked()
+        assert not lead["superpowers-dev"].isChecked()
+
+        # A Save with no edits is a true no-op: no plugin override is written, so
+        # effective_plugins still falls through to the built-in default (None
+        # here = no override), NOT an empty deny.
+        dlg._on_save_clicked()
+        assert "frontend" not in ptp.load_policy()
+        assert ptp.effective_plugins("frontend", None) is None
     finally:
         dlg.deleteLater()
