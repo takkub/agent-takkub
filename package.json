@@ -1,0 +1,24 @@
+{
+  "name": "agent-takkub",
+  "version": "0.9.0",
+  "description": "Desktop cockpit for orchestrating Claude Code dev teammates (Windows + macOS)",
+  "bin": {
+    "agent-takkub": "npm/bin/agent-takkub.js",
+    "takkub": "npm/bin/takkub.js"
+  },
+  "scripts": {
+    "postinstall": "node npm/scripts/postinstall.js"
+  },
+  "files": [
+    "npm/",
+    "dist/*.whl"
+  ],
+  "os": [
+    "win32",
+    "darwin"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "UNLICENSED"
+}
