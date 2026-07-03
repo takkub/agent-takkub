@@ -542,7 +542,18 @@ class PaneToolsDialog(QDialog):
         # live inside claude-plugins-official); the pane loader force-denies them
         # regardless, as the tab's note explains.
         items = discover_marketplaces()
-        self._orig_plugin_items = self._policy_role_items("plugins")
+        full_orig = self._policy_role_items("plugins")
+        rendered = set(items)
+        # A role's built-in default can include a marketplace that isn't installed
+        # yet (e.g. ui-ux-pro-max-skill scoped to design roles) → it has no column
+        # here. Compare + render only marketplaces that HAVE a column, and stash
+        # the rest so a Save never silently drops a default that just isn't
+        # installed (otherwise a no-op Save writes a lossy override — issue caught
+        # by test_plugin_matrix_renders_marketplace_defaults_checked).
+        self._hidden_plugin_defaults = {
+            r: [m for m in v if m not in rendered] for r, v in full_orig.items()
+        }
+        self._orig_plugin_items = {r: [m for m in v if m in rendered] for r, v in full_orig.items()}
         matrix = build_matrix(ROLES, items, self._orig_plugin_items)
         self._plugin_boxes = self._fill_matrix_table(self._plugin_table, items, matrix)
         self._plugin_table.setVisible(bool(items))
@@ -723,9 +734,14 @@ class PaneToolsDialog(QDialog):
             # matrix keeps the untouched kind at its real value instead of an
             # accidental deny. Redundant when a role's kind equals its default,
             # but never wrong; a silent deny is far worse than a redundant entry.
+            hidden = getattr(self, "_hidden_plugin_defaults", {})
             for role in set(mcp_changes) | set(plugin_changes):
                 pane_tools_policy.set_role_items(role, "mcps", updated_mcps[role])
-                pane_tools_policy.set_role_items(role, "plugins", updated_plugins[role])
+                # Re-add default marketplaces that have no column (not installed)
+                # so a scoped role (e.g. design → ui-ux-pro-max-skill) keeps them.
+                pane_tools_policy.set_role_items(
+                    role, "plugins", updated_plugins[role] + hidden.get(role, [])
+                )
             shared_dev_tools.regen_role_variants()
         except Exception as e:
             QMessageBox.warning(self, "Save ไม่สำเร็จ", str(e))
