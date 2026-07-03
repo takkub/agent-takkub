@@ -1,8 +1,8 @@
 """UsageMeter — the little Claude-usage readout that lives in the pane-tabs corner.
 
 Replaces the old bare QLabel ("3:45 52% / 2:12 18%") with a friendlier widget:
-a small Claude "spark" that gently breathes (fade + scale pulse) next to a
-compact 5h / 7d usage line. The spark + text share one colour that tracks the
+a small static Claude "spark" next to a compact 5h / 7d countdown line. The
+spark + text share one colour that tracks the
 peak utilisation window (Claude-coral when calm → amber → red), so a glance at
 the corner tells you how close you are to a rate-limit reset.
 
@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import math
 
-from PyQt6.QtCore import QPointF, Qt, QTimer
+from PyQt6.QtCore import QPointF, Qt
 from PyQt6.QtGui import QBrush, QColor, QPainter, QPolygonF
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QWidget
 
@@ -27,25 +27,17 @@ _CLAUDE_CORAL = "#d97757"
 
 
 class _Spark(QWidget):
-    """A 4-point Claude sparkle that breathes (opacity + scale) on a timer.
+    """A 4-point Claude sparkle — static (drawn once, no animation).
 
     Drawn with QPainter (no image asset → scales crisply at any DPI and never
-    ships a binary). The pulse is a slow sine so it reads as "alive / tracking"
-    without being distracting in the corner of the eye.
+    ships a binary). Deliberately still: an animated pulse in the corner of the
+    eye is distracting, so the mark just sits calmly and re-tints by usage.
     """
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setFixedSize(18, 18)
         self._color = QColor(_CLAUDE_CORAL)
-        self._phase = 0.0  # 0..2π, advanced by the timer
-        # ~25 fps is plenty for a gentle breathe and stays cheap for an 18px
-        # widget. Advance a phase counter rather than reading the clock so the
-        # animation is deterministic and needs no wall-time source.
-        self._timer = QTimer(self)
-        self._timer.setInterval(40)
-        self._timer.timeout.connect(self._tick)
-        self._timer.start()
 
     def set_color(self, color: str) -> None:
         c = QColor(color)
@@ -53,22 +45,11 @@ class _Spark(QWidget):
             self._color = c
             self.update()
 
-    def _tick(self) -> None:
-        # 2π over ~1.6 s (40 steps) → one calm breath per ~1.6 s.
-        self._phase = (self._phase + (2 * math.pi / 40)) % (2 * math.pi)
-        self.update()
-
     def paintEvent(self, _ev) -> None:
-        # Breathe: opacity 0.5↔1.0 and scale 0.82↔1.0, in sync off the sine.
-        wave = (math.sin(self._phase) + 1) / 2  # 0..1
-        opacity = 0.5 + 0.5 * wave
-        scale = 0.82 + 0.18 * wave
-
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.setOpacity(opacity)
         cx, cy = self.width() / 2, self.height() / 2
-        r = (self.width() / 2 - 1) * scale
+        r = self.width() / 2 - 1
         inner = r * 0.34  # waist of the sparkle → concave 4-point star
 
         # 8 vertices: outer tip, inner waist, outer tip, … around the circle.
