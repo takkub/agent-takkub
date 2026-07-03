@@ -127,7 +127,8 @@ wait
 1. **planner pane** (`qa` เปล่า) วิเคราะห์แอป (routes/flows/api) → แบ่งงานเทสเป็น 4 buckets ที่ **balanced + independent** (flow ที่ depend กันอยู่ bucket เดียว) → เขียน plan JSON → `takkub done`
 2. orchestrator อ่าน plan → **auto fan-out `qa#1…qa#4`** โดย inject scope ของแต่ละ bucket เข้า task spec ของ shard นั้น → รันพร้อมกัน → consolidated handoff กลับ Lead เมื่อครบ
 
-**ใช้เมื่อ:** QA เป็น **browser e2e/smoke (Playwright / `mb`) ที่เทสหลายหน้า/flow** — งาน browser ช้าและแยก Chrome ขนานได้คุ้ม (แต่ละ shard มี port/profile ของตัวเอง) planner hop (~1 นาที) คุ้มเมื่องาน browser รวมแล้วเกิน ~5 นาที · **ไม่ใช้เมื่อ:** smoke flow เดียว หรือ test ที่ไม่ใช่ browser (unit-suite / API integration) — planner hop ไม่คุ้ม ใช้ `qa` ธรรมดา · ต้อง `--shards ≥ 2` (sweet spot 3–4) · ใช้ร่วม `--auto-chain` ไม่ได้ · plan อ่านไม่ได้ → degrade เป็น self-split อัตโนมัติ + เตือน Lead
+**ใช้เมื่อ:** QA เป็น **browser e2e/smoke ที่เทสหลายหน้า/flow ผ่าน Playwright MCP** — งาน browser ช้าและแยก Chrome ขนานได้คุ้ม (cockpit แยก browser-profile ต่อ shard ให้: `runtime/shared-mcp-<project>-qa-shard<N>.json`) planner hop (~1 นาที) คุ้มเมื่องาน browser รวมแล้วเกิน ~5 นาที · **ไม่ใช้เมื่อ:** smoke flow เดียว หรือ test ที่ไม่ใช่ browser (unit-suite / API integration) — planner hop ไม่คุ้ม ใช้ `qa` ธรรมดา · ต้อง `--shards ≥ 2` (sweet spot 3–4) · ใช้ร่วม `--auto-chain` ไม่ได้ · plan อ่านไม่ได้ → degrade เป็น self-split อัตโนมัติ + เตือน Lead
+> ⚠️ **`mb` (mini-browser) ห้ามใช้กับ `--plan/--shards`** — mb client hardcode CDP `127.0.0.1:9222` (mb 0.7.0 ไม่มี flag/env ให้ target port อื่น · `start-chrome.sh` มี `CHROME_PORT` แต่ client ไม่อ่าน) → ทุก shard ขับ Chrome ตัวเดียวกัน navigation/click แทรกกัน (issue #92). Sharded browser QA = **Playwright MCP เท่านั้น** · งาน `mb` ใช้ `qa` shard เดียว
 
 ### ส่ง spec เดียวกันให้หลาย role
 ตั้ง `SPEC="..."` แล้ว interpolate `$SPEC` เข้าทุก assign — กัน drift ระหว่าง frontend/backend prompts
@@ -226,7 +227,7 @@ Context ตอน spawn **ไม่ได้ preload vault** — เบาไว
 | docker / CI / deploy / pipeline / infra / k8s / nginx | devops | — |
 | refactor / extract / migrate A→B / rename | primary (ตามไฟล์) | **+codex** เทียบ diff |
 | rollout / strategy / phase / migration plan | gemini | — |
-| **UI e2e / smoke ผ่าน browser (Playwright / `mb`)** — เทสหลายหน้า/flow | **qa `--plan --shards N`** (planner แบ่ง bucket → fan-out ขนาน, แต่ละ shard ขับ Chrome ของตัวเอง) | — |
+| **UI e2e / smoke ผ่าน browser (Playwright MCP)** — เทสหลายหน้า/flow | **qa `--plan --shards N`** (planner แบ่ง bucket → fan-out ขนาน · cockpit แยก browser-profile ต่อ shard) · ⚠️ **`mb` ชน CDP 9222 → ห้าม shard** ใช้ `qa` เดี่ยว (#92) | — |
 | test แคบ (1 flow/หน้าเดียว) · หรือ non-browser (unit-suite / API integration) | qa | — |
 | review / code review / security | reviewer | — |
 | design review / รีวิว UI | critic | **+gemini** parallel |
