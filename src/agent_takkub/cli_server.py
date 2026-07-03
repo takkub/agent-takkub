@@ -398,7 +398,10 @@ class CliServer(QObject):
                 ok, msg = self._orch.close_all_teammates(project=from_project)
             elif cmd == "done":
                 ok, msg = self._orch.done(
-                    req.get("from") or "", note=req.get("note", ""), project=from_project
+                    req.get("from") or "",
+                    note=req.get("note", ""),
+                    project=from_project,
+                    failed=bool(req.get("failed", False)),
                 )
             elif cmd == "hook":
                 ok, blocked, msg = self._orch.consume_pane_hook(

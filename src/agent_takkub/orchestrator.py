@@ -1193,7 +1193,27 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, QObject):
         timeout.start()
         proc.start("git", ["status", "--porcelain"])
 
-    def done(self, from_role: str, note: str = "", project: str | None = None) -> tuple[bool, str]:
+    @staticmethod
+    def _build_verify_fail_handoff(from_role: str, note: str) -> str:
+        """Lead-facing prompt when a pane reports `done --fail` (QA/verify failed).
+
+        Surfaces the failure and tells Lead to PROPOSE a fix loop — never
+        auto-fire. Feedback routing stays human-in-the-loop (propose-then-fire),
+        matching the cockpit's safety doctrine.
+        """
+        body = note.strip() or "(no detail given)"
+        return (
+            f"[{from_role} FAILED] {body}\n\n"
+            "⚠️ verify/QA รายงาน FAIL — เสนอ fix loop (propose-then-fire, ห้าม auto):\n"
+            "1. อ่าน failure ข้างบน หา root cause\n"
+            "2. Propose assign role ที่ทำงานนั้นให้แก้ (propose table + cwd + รอ confirm)\n"
+            "3. แก้เสร็จ → re-verify (QA ท้ายสุดเสมอ)\n"
+            "อย่าเพิ่ง fire — render proposal ให้ user confirm ก่อน"
+        )
+
+    def done(
+        self, from_role: str, note: str = "", project: str | None = None, failed: bool = False
+    ) -> tuple[bool, str]:
         try:
             from_role = validate_name(from_role, "role")
         except ValueError as exc:
@@ -1232,8 +1252,14 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, QObject):
         getattr(self, "_pane_state", {}).pop(key, None)
 
         # notify Lead in the same project (a teammate in project-a mustn't
-        # nudge the Lead in project-b by mistake)
-        notice = f"[{from_role} done] {note}".rstrip()
+        # nudge the Lead in project-b by mistake). `done --fail` swaps the plain
+        # done notice for a fix-loop proposal prompt (feedback routing MVP) —
+        # Lead proposes the fix, never auto-fires.
+        if failed:
+            notice = self._build_verify_fail_handoff(from_role, note)
+            _log_event("verify_failed", project=project_ns, role=from_role, note=(note or "")[:200])
+        else:
+            notice = f"[{from_role} done] {note}".rstrip()
         # Shard panes: suppress per-shard notice to Lead — consolidated handoff
         # (_inject_shard_fanout_handoff) is the single message Lead sees.
         # Planner panes: suppress too — the "[qa plan ready] fan-out …" message

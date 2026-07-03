@@ -89,6 +89,18 @@ Tier 3  worktree isolation pilot (opt-in, clean-git, no auto-merge, + env/dep st
 - Start with: QA/verify failure → reassign the originating role with the failure
   excerpt. Add an event-log line (who/why) for observability.
 
+**Mechanism SHIPPED (part 1):** `takkub done --fail "<reason>"` threads
+cli → cli_server → `Orchestrator.done(failed=True)`. On a failed done the plain
+`[role done]` notice is swapped for a fix-loop PROPOSAL prompt
+(`_build_verify_fail_handoff`): Lead is told to propose the fix + re-verify,
+never auto-fire (human-in-the-loop = the "safe" option chosen). Logs a
+`verify_failed` event for observability. Tests in `test_cross_tab_done`.
+
+**Follow-up (part 2, not done):** make QA/verify task specs actually emit
+`--fail` on failure (a prompt/routing integration), and optionally let the Lead
+pre-fill which impl role to route back to. Until part 2, the mechanism exists
+but nothing emits `--fail` automatically.
+
 ### Tier 2b — self-correction memory (suggested-rule flow)
 - Build on existing `role_memory` (already caps 16 KB / 120 entries, inline tail
   200 lines). Do NOT auto-write. Capture a user correction → propose a "suggested

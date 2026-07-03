@@ -256,7 +256,16 @@ def cmd_close_all(_: argparse.Namespace) -> dict:
 
 
 def cmd_done(args: argparse.Namespace) -> dict:
-    return _request(_with_project({"cmd": "done", "from": _from_role(), "note": args.note or ""}))
+    return _request(
+        _with_project(
+            {
+                "cmd": "done",
+                "from": _from_role(),
+                "note": args.note or "",
+                "failed": bool(getattr(args, "fail", False)),
+            }
+        )
+    )
 
 
 def cmd_end_session(args: argparse.Namespace) -> dict:
@@ -1116,6 +1125,11 @@ def main(argv: list[str] | None = None) -> int:
 
     sd = sub.add_parser("done", help="(agent) report done to Lead")
     sd.add_argument("note", nargs="?", default="")
+    sd.add_argument(
+        "--fail",
+        action="store_true",
+        help="report a FAILED result (QA/verify failed) → Lead proposes a fix loop",
+    )
     sd.set_defaults(func=cmd_done)
 
     ses = sub.add_parser(

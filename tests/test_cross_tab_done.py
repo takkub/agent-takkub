@@ -163,6 +163,51 @@ class TestCrossTabDoneSignal:
 
 
 # ─────────────────────────────────────────────────────────────
+# Feedback routing — `done --fail` surfaces a fix-loop proposal
+# ─────────────────────────────────────────────────────────────
+
+
+class TestVerifyFailFeedbackRouting:
+    def test_done_fail_surfaces_fix_loop_proposal(self, orch, monkeypatch):
+        """`done --fail` swaps the plain done note for a fix-loop PROPOSAL to
+        Lead (feedback routing MVP) — human-in-the-loop, never auto-fired."""
+        monkeypatch.setattr(orch_mod, "active_project", lambda: ("vp", {}))
+        _mock_done(orch)
+
+        captured: list[str] = []
+        monkeypatch.setattr(orch, "_notify_lead", lambda ns, notice, **kw: captured.append(notice))
+
+        proj = "vp"
+        _register_pane(orch, LEAD.name, proj, _make_alive_session())
+        _register_pane(orch, "qa", proj, _make_alive_session())
+
+        orch.done("qa", note="login smoke failed: 500 on submit", project=proj, failed=True)
+
+        assert captured, "Lead must get a notice"
+        notice = captured[0]
+        assert "FAILED" in notice  # framed as a failure, not a clean done
+        assert "login smoke failed" in notice  # failure detail preserved
+        assert "fix loop" in notice  # proposes the remediation loop
+        assert "[qa done]" not in notice
+
+    def test_done_success_keeps_plain_note(self, orch, monkeypatch):
+        """A normal done (failed=False) still yields the plain `[role done]` note."""
+        monkeypatch.setattr(orch_mod, "active_project", lambda: ("vp", {}))
+        _mock_done(orch)
+
+        captured: list[str] = []
+        monkeypatch.setattr(orch, "_notify_lead", lambda ns, notice, **kw: captured.append(notice))
+
+        proj = "vp"
+        _register_pane(orch, LEAD.name, proj, _make_alive_session())
+        _register_pane(orch, "qa", proj, _make_alive_session())
+
+        orch.done("qa", note="all green", project=proj, failed=False)
+
+        assert captured and captured[0] == "[qa done] all green"
+
+
+# ─────────────────────────────────────────────────────────────
 # Fix B — done-notice queue
 # ─────────────────────────────────────────────────────────────
 
