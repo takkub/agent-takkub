@@ -75,8 +75,8 @@ function main() {
     console.log('     • claude CLI not found → install: npm i -g @anthropic-ai/claude-code');
   }
   console.log('     1) claude login          # authenticate (one-time, your account)');
-  console.log('     2) agent-takkub          # launch the cockpit');
-  console.log('     3) takkub doctor --fix   # (optional) top up missing plugins/MCPs — detect-first, never overwrites\n');
+  console.log('     2) takkub provision      # install recommended plugins + browser MCPs (idempotent, detect-first)');
+  console.log('     3) agent-takkub          # launch the cockpit\n');
 }
 
 try {

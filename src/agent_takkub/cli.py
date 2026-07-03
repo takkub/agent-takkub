@@ -1013,6 +1013,47 @@ def cmd_plugins(args: argparse.Namespace) -> dict:
     return {"ok": False, "msg": f"unknown plugins subcommand: {sub}"}
 
 
+def cmd_provision(args: argparse.Namespace) -> dict:
+    """Install the recommended plugin set + browser MCPs — detect-first, idempotent.
+
+    Meant to run once after ``npm install -g agent-takkub`` (or any fresh setup):
+    it detects what's already present and fills ONLY the gaps, so a machine that
+    already has everything is a clean no-op. Uses the ``claude plugin`` CLI, so it
+    touches ``~/.claude`` (shared) — an intentional, conscious step, never
+    automatic. Requires the ``claude`` CLI to be installed + logged in.
+    """
+    from . import plugin_installer, shared_dev_tools
+
+    _utf8_print("takkub provision — detect-first, non-clobbering\n")
+
+    have = plugin_installer.installed_on_disk()
+    missing = plugin_installer.missing_plugins(have)
+    _utf8_print(
+        f"plugins: {len(have)} present"
+        + (f", installing {len(missing)} missing…" if missing else " — all recommended present ✓")
+    )
+    installed_now: list[dict] = []
+    if missing:
+        plugin_installer.ensure_marketplaces(missing)
+        for p in missing:
+            ok, msg = plugin_installer.install_plugin(p, ensure_marketplace=False)
+            _utf8_print(f"   {'✓' if ok else '✗'} {p.key}@{p.marketplace} — {msg}")
+            installed_now.append({"plugin": p.key, "ok": ok, "msg": msg})
+
+    ok_mcp, msg_mcp = shared_dev_tools.ensure_browser_mcps()
+    _utf8_print(f"browser MCPs: {msg_mcp}")
+
+    failed = [x for x in installed_now if not x["ok"]]
+    summary = "provisioned" if not failed else f"provisioned ({len(failed)} plugin failure(s))"
+    _utf8_print(f"\n{summary}. next: `claude login` (ถ้ายัง) → `agent-takkub`")
+    return {
+        "ok": not failed,
+        "msg": summary,
+        "plugins_installed": installed_now,
+        "mcps": {"ok": ok_mcp, "msg": msg_mcp},
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     _ensure_utf8_stdio()
     p = argparse.ArgumentParser(prog="takkub", description="agent-takkub cockpit CLI")
@@ -1362,6 +1403,12 @@ def main(argv: list[str] | None = None) -> int:
         help="emit JSON instead of text report",
     )
     sdoc.set_defaults(func=cmd_doctor)
+
+    sprov = sub.add_parser(
+        "provision",
+        help="install recommended plugins + browser MCPs (idempotent, detect-first; run after npm install)",
+    )
+    sprov.set_defaults(func=cmd_provision)
 
     # ── pipeline ────────────────────────────────────────────────────────────
     spipe = sub.add_parser("pipeline", help="pipeline template commands (lead only)")

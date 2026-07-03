@@ -150,6 +150,7 @@
         "agent_takkub.issues",
         "agent_takkub.lead_context",
         "agent_takkub.pane_tools_policy",
+        "agent_takkub.plugin_installer",
         "agent_takkub.release",
         "agent_takkub.services",
         "agent_takkub.shared_dev_tools",
@@ -158,7 +159,7 @@
       ],
       "imported_by": [],
       "fan_in": 0,
-      "fan_out": 14
+      "fan_out": 15
     },
     {
       "module": "agent_takkub.cli_server",
@@ -583,9 +584,10 @@
         "agent_takkub._win_console"
       ],
       "imported_by": [
+        "agent_takkub.cli",
         "agent_takkub.user_actions"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 1
     },
     {
