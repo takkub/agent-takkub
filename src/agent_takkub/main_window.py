@@ -148,7 +148,12 @@ class MainWindow(
         super().__init__()
         self.setWindowTitle("agent-takkub — dev team cockpit")
 
-        icon_path = Path(__file__).parent.parent.parent / "assets" / "icon.png"
+        # Shipped inside the package (wheel) as static/icon.png so the taskbar /
+        # title-bar icon works from an `npm install`/pip install; fall back to
+        # the repo-root assets/ for an editable dev checkout.
+        icon_path = Path(__file__).parent / "static" / "icon.png"
+        if not icon_path.exists():
+            icon_path = Path(__file__).parent.parent.parent / "assets" / "icon.png"
         app_icon = (
             QIcon(str(icon_path))
             if icon_path.exists()

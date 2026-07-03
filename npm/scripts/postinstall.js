@@ -30,6 +30,17 @@ function run(cmd, args) {
   return spawnSync(cmd, args, { stdio: 'inherit' }).status === 0;
 }
 
+// Install the claude CLI only when it's missing — never overwrite an existing
+// (possibly version-pinned) global install. Returns true if claude is available
+// afterward. Best-effort: a failure just falls back to a "install it yourself"
+// hint in the next-steps.
+function ensureClaudeCli(present) {
+  if (present) return true;
+  const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+  console.log('[agent-takkub] claude CLI not found — installing @anthropic-ai/claude-code…');
+  return run(npm, ['install', '-g', '@anthropic-ai/claude-code']);
+}
+
 function main() {
   const env = preflight.detect();
   preflight.report(env);
@@ -68,6 +79,8 @@ function main() {
     process.exit(1);
   }
 
+  const claudeOk = ensureClaudeCli(env.claudeCli.present);
+
   console.log(`\n[agent-takkub] ✓ cockpit ready (isolated in ${agentTakkubHome()}).`);
   try {
     const sc = require('./shortcut').create();
@@ -75,14 +88,14 @@ function main() {
   } catch (_e) {
     /* best-effort — a missing shortcut never fails the install */
   }
-  console.log('   Left untouched: global claude CLI, ~/.claude plugins, ~/.takkub config.');
+  console.log('   Left untouched: ~/.claude plugins, ~/.takkub config (nothing overwritten).');
   console.log('\n   Next steps:');
-  if (!env.claudeCli.present) {
-    console.log('     • claude CLI not found → install: npm i -g @anthropic-ai/claude-code');
+  if (!claudeOk) {
+    console.log('     • install the claude CLI: npm i -g @anthropic-ai/claude-code');
   }
   console.log('     1) claude login          # authenticate (one-time, your account)');
-  console.log('     2) takkub provision      # install recommended plugins + browser MCPs (idempotent, detect-first)');
-  console.log('     3) agent-takkub          # launch the cockpit\n');
+  console.log('     2) takkub provision      # install recommended plugins + browser MCPs (idempotent)');
+  console.log('     3) double-click "Takkub Cockpit" on the Desktop  (or run: agent-takkub)\n');
 }
 
 try {
