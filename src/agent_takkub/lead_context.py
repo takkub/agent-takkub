@@ -573,8 +573,16 @@ def render_lead_settings(project: str) -> pathlib.Path:
 _TEAMMATE_PLUGINS: frozenset[str] = frozenset(
     {"superpowers-dev", "pordee", "claude-plugins-official"}
 )
+# Design roles additionally get the UI/UX Pro Max marketplace (design-system
+# generator + a11y KB). Non-design teammates never see it — it's pure per-pane
+# context bloat for backend/devops/qa, so it stays scoped to who actually
+# designs UI. Installed for everyone by provision, injected only here.
+_DESIGN_PLUGINS: frozenset[str] = _TEAMMATE_PLUGINS | {"ui-ux-pro-max-skill"}
 _ROLE_PLUGIN_POLICY: dict[str, frozenset[str]] = {
     "lead": frozenset({"pordee"}),
+    "frontend": _DESIGN_PLUGINS,
+    "designer": _DESIGN_PLUGINS,
+    "critic": _DESIGN_PLUGINS,
 }
 
 # Plugin DIRS (by plugin-dir name) to NEVER inject into a pane via --plugin-dir,

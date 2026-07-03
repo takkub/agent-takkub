@@ -1,7 +1,8 @@
 """Recommended dev-team plugin set + installer — backs the 🧩 Plugins button.
 
 The cockpit ships a curated plugin team (Superpowers, Frontend Design, Code
-Review, Security Review, Claude Mem). This module knows that set, can report
+Review, Security Review, Claude Mem, UI/UX Pro Max). This module knows that set,
+can report
 which are installed, and can install the missing ones via the ``claude plugin``
 CLI. Installs are git-clone + network operations, so the UI runs them on a
 background thread (see ``user_actions._PluginInstallThread``) — never on the Qt
@@ -83,6 +84,13 @@ RECOMMENDED: tuple[RecommendedPlugin, ...] = (
         "Claude Mem",
         "continuous memory · hook-heavy (user-only)",
         pane_loaded=False,
+    ),
+    RecommendedPlugin(
+        "ui-ux-pro-max",
+        "ui-ux-pro-max-skill",
+        "nextlevelbuilder/ui-ux-pro-max-skill",
+        "UI/UX Pro Max",
+        "design-system generator (67 styles/161 palettes/a11y) · design roles only",
     ),
 )
 

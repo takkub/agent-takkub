@@ -33,7 +33,7 @@ def fake_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> pathl
     home = tmp_path / "home"
     cache = home / ".claude" / "plugins" / "cache"
     cache.mkdir(parents=True)
-    for mp in ("superpowers-dev", "addy-agent-skills", "pordee"):
+    for mp in ("superpowers-dev", "addy-agent-skills", "pordee", "ui-ux-pro-max-skill"):
         _make_plugin(cache, mp)
     monkeypatch.setattr(pathlib.Path, "home", lambda: home)
     return cache
@@ -79,3 +79,17 @@ class TestRolePluginPolicy:
         assert "superpowers-dev" in joined
         assert "pordee" in joined
         assert "addy-agent-skills" not in joined
+
+    def test_design_roles_get_ui_ux_pro_max(self, fake_cache: pathlib.Path) -> None:
+        """frontend/critic/designer inject the UI/UX Pro Max design skill."""
+        for role in ("frontend", "critic", "designer"):
+            joined = " ".join(_default_plugin_dirs(role))
+            assert "ui-ux-pro-max-skill" in joined, role
+            # still get the normal teammate set too
+            assert "superpowers-dev" in joined
+
+    def test_non_design_roles_do_not_get_ui_ux(self, fake_cache: pathlib.Path) -> None:
+        """backend/qa/devops must NOT pay for the design skill's context."""
+        for role in ("backend", "qa", "devops", "reviewer", "lead"):
+            joined = " ".join(_default_plugin_dirs(role))
+            assert "ui-ux-pro-max-skill" not in joined, role

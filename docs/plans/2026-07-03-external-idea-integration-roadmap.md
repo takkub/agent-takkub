@@ -1,7 +1,7 @@
 # External-idea integration roadmap (post cross-check)
 
 **Date:** 2026-07-03
-**Status:** plan — awaiting owner sign-off before Tier 1+ execution
+**Status:** Tier 1 SHIPPED (ui-ux-pro-max, design-scoped). Tier 2+ awaiting sign-off.
 **Inputs:** 5 repos scouted + a 2-model adversarial cross-check (codex + gemini,
 both saved under `docs/reviews/2026-07-03-crosscheck-*.md`).
 
@@ -68,20 +68,19 @@ Tier 2  feedback-routing MVP  +  self-correction (suggested-rule)  +  lightweigh
 Tier 3  worktree isolation pilot (opt-in, clean-git, no auto-merge, + env/dep strategy)
 ```
 
-### Tier 1 — ui-ux-pro-max scoped to design roles
-- **Exact install identifiers (confirmed from the repo):**
-  - marketplace add: `nextlevelbuilder/ui-ux-pro-max-skill` (marketplace name `ui-ux-pro-max-skill`)
-  - plugin install: `ui-ux-pro-max@ui-ux-pro-max-skill`
-- **Gap found tonight:** `pane_tools_policy.py` is only the *user-override* layer
-  (`~/.takkub/pane-tools.json`). The *default* per-role plugin set is decided by
-  the injection caller (`lead_context`, `_PANE_PLUGIN_DENYLIST` + the `pane_loaded`
-  flag), which today is global (all `pane_loaded` plugins → all panes). There is
-  **no per-role default scoping** yet. So "design-roles-only by default" needs a
-  small new mechanism (e.g. an optional `roles=(...)` field on `RecommendedPlugin`
-  honoured by the pane injector), NOT just a new `RECOMMENDED` entry.
-- **Decision needed:** adding it to the shipped `RECOMMENDED` set is outward-facing
-  (every `takkub provision` installs it for all users). Confirm before shipping.
-- **Effort:** low-medium. Risk: low (provision is fault-tolerant per-plugin).
+### Tier 1 — ui-ux-pro-max scoped to design roles  ✅ SHIPPED
+- **Install identifiers:** marketplace `nextlevelbuilder/ui-ux-pro-max-skill`,
+  plugin `ui-ux-pro-max@ui-ux-pro-max-skill`.
+- **Correction to the "gap" note:** `lead_context._ROLE_PLUGIN_POLICY` already
+  provides built-in per-role default scoping (roles → allowed marketplaces).
+  No new mechanism was needed — the earlier "no per-role default scoping" worry
+  was wrong. `pane_tools_policy.py` sits on top as the user-override layer.
+- **What shipped:** added the marketplace to `config._SAFE_PLUGINS`, a
+  `RecommendedPlugin` entry (so `takkub provision` installs it), and
+  `_ROLE_PLUGIN_POLICY` entries for `frontend`/`critic`/`designer` only, so
+  backend/devops/qa/lead never pay its context. Skill is lazy (loads on UI/UX
+  requests, local BM25 — no hook tax). Tests: `test_plugin_policy` +
+  `test_plugin_installer`.
 
 ### Tier 2a — feedback routing MVP
 - Route a failing verify/CI/test result (and merge conflicts) back to the pane

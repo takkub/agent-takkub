@@ -24,6 +24,10 @@ _SAFE_PLUGINS: tuple[str, ...] = (
     # pane injection by `lead_context._PANE_PLUGIN_DENYLIST` so they don't slow
     # spawns, while staying user-enabled for the user's own sessions.
     "claude-plugins-official",
+    # UI/UX design-intelligence skill (design-system generator + BM25 KB). Its
+    # own marketplace; scoped to design roles only via lead_context's
+    # _ROLE_PLUGIN_POLICY so backend/devops/qa panes never pay for it.
+    "ui-ux-pro-max-skill",
     # claude-obsidian-marketplace is intentionally excluded: the cached 1.4.3
     # build ships a SessionStart prompt-hook that crashed all panes in v0.2.0
     # (ToolUseContext required error). Until a spawn smoke-test under cockpit

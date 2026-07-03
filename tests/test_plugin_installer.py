@@ -13,13 +13,14 @@ from agent_takkub import plugin_installer as pi
 
 def test_recommended_set_shape():
     keys = [p.key for p in pi.RECOMMENDED]
-    # The five dev-team plugins, in display order.
+    # The dev-team plugins, in display order.
     assert keys == [
         "superpowers",
         "frontend-design",
         "code-review",
         "security-guidance",
         "remember",
+        "ui-ux-pro-max",
     ]
     # Hook-heavy ones are user-only (not pushed into panes).
     by_key = {p.key: p for p in pi.RECOMMENDED}
@@ -27,6 +28,10 @@ def test_recommended_set_shape():
     assert by_key["code-review"].pane_loaded is True
     assert by_key["security-guidance"].pane_loaded is False
     assert by_key["remember"].pane_loaded is False
+    # UI/UX Pro Max is a skill (pane-loadable); role-scoping to design panes
+    # lives in lead_context._ROLE_PLUGIN_POLICY, not here.
+    assert by_key["ui-ux-pro-max"].pane_loaded is True
+    assert by_key["ui-ux-pro-max"].marketplace == "ui-ux-pro-max-skill"
 
 
 def _make_installed(cache, marketplace, plugin, version="1.0.0"):
@@ -47,7 +52,7 @@ def test_installed_on_disk(tmp_path):
     assert have == {"frontend-design", "code-review", "superpowers"}
 
     missing = {p.key for p in pi.missing_plugins(have)}
-    assert missing == {"security-guidance", "remember"}
+    assert missing == {"security-guidance", "remember", "ui-ux-pro-max"}
 
 
 def test_installed_on_disk_ignores_partial_install(tmp_path):
@@ -64,9 +69,9 @@ def test_ensure_marketplaces_dedupes_by_repo(monkeypatch):
 
     pi.ensure_marketplaces(list(pi.RECOMMENDED))
 
-    # 5 plugins but only 2 distinct marketplace repos → 2 adds, not 5.
+    # 6 plugins but only 3 distinct marketplace repos → 3 adds, not 6.
     assert calls == list(dict.fromkeys(p.marketplace_repo for p in pi.RECOMMENDED))
-    assert len(calls) == 2
+    assert len(calls) == 3
 
 
 def test_install_plugin_success_by_exit_code(monkeypatch):
