@@ -74,10 +74,18 @@ function main() {
   const vpy = venvPython();
   run(vpy, ['-m', 'pip', 'install', '--upgrade', 'pip', '--quiet']);
   console.log('[agent-takkub] installing/upgrading cockpit + PyQt6 (may take a few minutes)…');
+  // Step 1: install/upgrade the cockpit + its deps (PyQt etc.) normally.
   if (!run(vpy, ['-m', 'pip', 'install', '--upgrade', wheel])) {
     console.error('[agent-takkub] pip install failed.');
     process.exit(1);
   }
+  // Step 2: force-refresh the app package itself. pip's --upgrade treats an
+  // equal version as "already satisfied" and SKIPS it, so a same-version
+  // reinstall (a repair, or a rebuilt wheel whose version didn't bump) would
+  // otherwise keep stale code. --no-deps scopes this to the tiny app package —
+  // PyQt was already handled in step 1, so this stays fast. Best-effort: step 1
+  // already succeeded, so a hiccup here shouldn't fail the whole install.
+  run(vpy, ['-m', 'pip', 'install', '--force-reinstall', '--no-deps', wheel]);
 
   const claudeOk = ensureClaudeCli(env.claudeCli.present);
 

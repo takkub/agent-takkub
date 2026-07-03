@@ -526,6 +526,25 @@ class MainWindowUpdateMixin:
         self._refresh_version_label()
         status = self._update_status_cache or {}
         if status.get("not_repo"):
+            from .config import is_installed_package
+
+            if is_installed_package():
+                # npm/pip install → updates come from the package manager, NOT
+                # by converting site-packages into a checkout of the (private)
+                # upstream repo. Offer the correct path instead.
+                self._btn_update.setText("🔄 Update via npm")
+                self._btn_update.setToolTip(
+                    "Installed via npm. Click for the update command:\n"
+                    "  npm update -g agent-takkub\n"
+                    "Your projects + config in ~/.agent-takkub stay untouched."
+                )
+                self._btn_update.setStyleSheet(
+                    "QPushButton { color: #4ade80; background: #052e16; "
+                    "border: 1px solid #166534; border-radius: 4px; "
+                    "padding: 2px 8px; }"
+                    "QPushButton:hover { background: #14532d; }"
+                )
+                return
             self._btn_update.setText("🔧 Enable updates")
             self._btn_update.setToolTip(
                 "This install isn't git-tracked. Click to convert it into a\n"
@@ -610,6 +629,19 @@ class MainWindowUpdateMixin:
             return
         status = self._update_status_cache
         if status.get("not_repo"):
+            from .config import is_installed_package
+
+            if is_installed_package():
+                QMessageBox.information(
+                    self,
+                    "Update via npm",
+                    "This is an npm install. To update, run in a terminal:\n\n"
+                    "    npm update -g agent-takkub\n\n"
+                    "Your projects.json, runtime/, and config under\n"
+                    "~/.agent-takkub stay untouched.",
+                )
+                return
+
             from .update_helper import OFFICIAL_REPO_URL, init_git_repo
 
             convert = QMessageBox.question(

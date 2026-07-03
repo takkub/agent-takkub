@@ -65,9 +65,52 @@ def _write_json_atomic(path: Path, data: dict) -> None:
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-PROJECTS_JSON = REPO_ROOT / "projects.json"
+
+
+def _resolve_data_home() -> Path:
+    """Where mutable *user data* (projects.json, runtime/) lives.
+
+    Split from REPO_ROOT so a pip/npm install never writes user data inside
+    ``site-packages`` (a pip upgrade could sweep it, and users can't find it):
+
+    * ``AGENT_TAKKUB_HOME`` set  → honour it verbatim (tests, sandbox installs).
+    * dev checkout (pyproject.toml + src/ next to REPO_ROOT) → REPO_ROOT, so a
+      from-source run behaves EXACTLY as before (dev + existing tests untouched).
+    * installed (config.py sits in …/venv/…/site-packages) → derive the isolated
+      home from the ``venv`` ancestor (honours a custom home chosen at install
+      time); fall back to the documented default ``~/.agent-takkub``.
+
+    Structural, app-shipped paths (bin/, .claude/agents/, CLAUDE.md, git remote)
+    stay on REPO_ROOT — only user data moves.
+    """
+    env = os.environ.get("AGENT_TAKKUB_HOME")
+    if env:
+        return Path(env)
+    if (REPO_ROOT / "pyproject.toml").is_file() and (REPO_ROOT / "src").is_dir():
+        return REPO_ROOT
+    for parent in Path(__file__).resolve().parents:
+        if parent.name == "venv":
+            return parent.parent
+    return Path.home() / ".agent-takkub"
+
+
+DATA_HOME = _resolve_data_home()
+
+
+def is_installed_package() -> bool:
+    """True when the cockpit runs from an installed wheel
+    (…/site-packages/agent_takkub/…), not a dev source checkout (…/src/…).
+
+    Steers the self-update UX: an installed build updates via its package
+    manager (``npm update -g agent-takkub``), never by converting its
+    site-packages folder into a git checkout of the (private) upstream repo.
+    """
+    return "site-packages" in Path(__file__).resolve().parts
+
+
+PROJECTS_JSON = DATA_HOME / "projects.json"
 AGENTS_DIR = REPO_ROOT / ".claude" / "agents"
-RUNTIME_DIR = REPO_ROOT / "runtime"
+RUNTIME_DIR = DATA_HOME / "runtime"
 PORT_FILE = RUNTIME_DIR / "port"
 EVENTS_LOG = RUNTIME_DIR / "events.log"
 

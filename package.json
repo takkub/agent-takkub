@@ -1,7 +1,18 @@
 {
   "name": "agent-takkub",
   "version": "0.9.0",
-  "description": "Desktop cockpit for orchestrating Claude Code dev teammates (Windows + macOS)",
+  "description": "Desktop cockpit for orchestrating a team of Claude Code agents (Windows + macOS)",
+  "keywords": [
+    "claude",
+    "claude-code",
+    "ai-agents",
+    "agent-orchestration",
+    "cockpit",
+    "desktop",
+    "cli",
+    "developer-tools"
+  ],
+  "author": "takkub",
   "bin": {
     "agent-takkub": "npm/bin/agent-takkub.js",
     "takkub": "npm/bin/takkub.js"
