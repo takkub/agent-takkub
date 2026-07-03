@@ -40,7 +40,7 @@ _distill_log = logging.getLogger(__name__)
 # silently absorb session logs. Returns None when nothing matches, which
 # tells callers to skip the mirror without raising.
 _VAULT_ENV = "TAKKUB_VAULT_DIR"
-_DEFAULT_VAULT = pathlib.Path.home() / "WebstormProjects" / "second-brain"
+_DEFAULT_VAULT = pathlib.Path.home() / "second-brain"
 
 
 def _resolve_vault_dir() -> pathlib.Path | None:

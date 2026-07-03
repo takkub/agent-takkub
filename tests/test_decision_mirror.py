@@ -89,10 +89,11 @@ class TestResolveVaultDir:
 
     def test_default_constant_points_at_expected_layout(self) -> None:
         # Guard against an accidental rename of the default location.
-        # The author's vault is the documented default; renaming this
-        # without updating CLAUDE.md / project page is a footgun.
+        # Default is a neutral `~/second-brain`; users point at their real
+        # vault via $TAKKUB_VAULT_DIR. Renaming this without updating the
+        # README / docs is a footgun.
         assert _DEFAULT_VAULT.name == "second-brain"
-        assert _DEFAULT_VAULT.parent.name == "WebstormProjects"
+        assert _DEFAULT_VAULT.parent == _DEFAULT_VAULT.home()
 
 
 class TestRenderDecisionNote:
