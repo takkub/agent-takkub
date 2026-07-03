@@ -139,3 +139,49 @@ def test_dialog_constructs_and_save_runs(monkeypatch, tmp_path):
         assert dlg._status_label.text()
     finally:
         dlg.deleteLater()
+
+
+def test_save_plugins_only_change_does_not_wipe_mcps(monkeypatch, tmp_path):
+    """Regression: a plugins-only Save must not silently deny a role's MCPs.
+
+    ``set_role_items`` seeds a *fresh* role entry's sibling kind to ``[]`` (an
+    explicit deny). So persisting only a plugin change once stripped
+    playwright + chrome-devtools from qa/critic/designer — QA silently lost the
+    ability to drive a browser. ``_on_save_clicked`` now writes BOTH kinds for
+    any changed role; qa's MCPs must survive a plugins-only edit.
+    """
+    from agent_takkub import pane_tools_policy as ptp
+    from agent_takkub import shared_dev_tools as sdt
+    from agent_takkub.pane_tools_dialog import PaneToolsDialog
+
+    # Isolate the policy file AND the master MCP registry so real config and
+    # the runtime shared-mcp.json are untouched and the matrix is deterministic.
+    monkeypatch.setattr(ptp, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
+    master = tmp_path / "shared-mcp.json"
+    master.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "playwright": {"type": "stdio", "command": "npx", "args": []},
+                    "chrome-devtools": {"type": "stdio", "command": "npx", "args": []},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sdt, "SHARED_MCP_FILE", master)
+
+    dlg = PaneToolsDialog()
+    try:
+        # qa's MCP boxes are checked by built-in default (playwright + chrome-devtools).
+        assert dlg._mcp_boxes["qa"]["playwright"].isChecked()
+        assert dlg._mcp_boxes["qa"]["chrome-devtools"].isChecked()
+        # Simulate a plugins-ONLY change for qa (a plugin that no longer has a
+        # matrix column — e.g. uninstalled — reads as "removed" on Save).
+        dlg._orig_plugin_items = {role: [] for role in dlg._orig_plugin_items}
+        dlg._orig_plugin_items["qa"] = ["pordee"]
+        dlg._on_save_clicked()
+        # qa's MCPs must be preserved, NOT collapsed to an empty deny override.
+        assert ptp.effective_mcps("qa", None) == frozenset({"playwright", "chrome-devtools"})
+    finally:
+        dlg.deleteLater()

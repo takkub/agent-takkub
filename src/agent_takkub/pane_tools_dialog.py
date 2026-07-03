@@ -674,9 +674,18 @@ class PaneToolsDialog(QDialog):
         try:
             from . import pane_tools_policy, shared_dev_tools
 
-            for role in mcp_changes:
+            # Write BOTH kinds for every role that changed EITHER. set_role_items
+            # seeds a *fresh* role entry's sibling kind to [] (an explicit deny
+            # override), so persisting a plugins-only change would silently wipe
+            # that role's MCPs — the exact bug that stripped playwright +
+            # chrome-devtools from qa/critic/designer and left QA unable to drive
+            # a browser. The matrix already holds the correct value for BOTH
+            # kinds (built from effective defaults), so writing both from the
+            # matrix keeps the untouched kind at its real value instead of an
+            # accidental deny. Redundant when a role's kind equals its default,
+            # but never wrong; a silent deny is far worse than a redundant entry.
+            for role in set(mcp_changes) | set(plugin_changes):
                 pane_tools_policy.set_role_items(role, "mcps", updated_mcps[role])
-            for role in plugin_changes:
                 pane_tools_policy.set_role_items(role, "plugins", updated_plugins[role])
             shared_dev_tools.regen_role_variants()
         except Exception as e:
