@@ -69,6 +69,12 @@ function main() {
   }
 
   console.log(`\n[agent-takkub] ✓ cockpit ready (isolated in ${agentTakkubHome()}).`);
+  try {
+    const sc = require('./shortcut').create();
+    if (sc) console.log(`[agent-takkub] ✓ Desktop launcher created: ${sc}`);
+  } catch (_e) {
+    /* best-effort — a missing shortcut never fails the install */
+  }
   console.log('   Left untouched: global claude CLI, ~/.claude plugins, ~/.takkub config.');
   console.log('\n   Next steps:');
   if (!env.claudeCli.present) {

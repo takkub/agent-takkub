@@ -31,4 +31,13 @@ function venvPythonIfExists() {
   return fs.existsSync(p) ? p : null;
 }
 
-module.exports = { agentTakkubHome, venvDir, venvPython, venvPythonIfExists };
+// Windowless python for GUI launchers (Windows: pythonw.exe = no console
+// window pops up behind the cockpit). macOS has no separate pythonw.
+function venvPythonw() {
+  const dir = venvDir();
+  return process.platform === 'win32'
+    ? path.join(dir, 'Scripts', 'pythonw.exe')
+    : path.join(dir, 'bin', 'python');
+}
+
+module.exports = { agentTakkubHome, venvDir, venvPython, venvPythonIfExists, venvPythonw };
