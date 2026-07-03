@@ -297,6 +297,9 @@ Context ตอน spawn **ไม่ได้ preload vault** — เบาไว
 
 ### Done-handoff rule
 หลัง `[<role> done] <note>` เด้งเข้า Lead:
+
+> **สัญญาณ fail:** qa/reviewer ที่ verify **ไม่ผ่าน** จะเด้ง `[<role> FAILED] <reason>` แทน `[<role> done]` (มาจาก `takkub done --fail` ที่ orchestrator inject คำสั่งให้ verify-role อัตโนมัติ) — notice นั้นสั่ง Lead ให้ **propose fix loop กลับ role ที่ทำงาน แล้ว re-verify** ทันที (propose-then-fire ห้าม auto)
+
 1. อ่าน report สรุป 1-2 บรรทัด
 2. ตัดสิน next step:
    - impl done (DEV เสร็จ "ทุกอย่าง") → verify sequence: **(ถ้ามี docker compose) propose devops ยก stack ขึ้น port-safe ก่อน → รอ done → แล้ว QA ท้ายสุด** · ไม่มี compose → ตรงไป QA · *Exception:* `--auto-chain` panes ที่ done ครบ → orchestrator inject handoff prompt → Lead pre-authorized fire devops→qa sequence ทันที (QA ท้ายสุดเสมอ) · reviewer = ตอน PR

@@ -96,10 +96,13 @@ cli → cli_server → `Orchestrator.done(failed=True)`. On a failed done the pl
 never auto-fire (human-in-the-loop = the "safe" option chosen). Logs a
 `verify_failed` event for observability. Tests in `test_cross_tab_done`.
 
-**Follow-up (part 2, not done):** make QA/verify task specs actually emit
-`--fail` on failure (a prompt/routing integration), and optionally let the Lead
-pre-fill which impl role to route back to. Until part 2, the mechanism exists
-but nothing emits `--fail` automatically.
+**Part 2 SHIPPED — loop closed.** `assign()` now auto-appends a `takkub done
+--fail` reporting instruction to qa/reviewer task specs
+(`orchestrator_text._append_verify_fail_hint`, marker-guarded so auto-respawn
+replay doesn't stack). critic is excluded (it proposes, never pass/fails). So a
+failing check now emits `--fail` on its own → Lead gets the fix-loop proposal.
+Tests: `test_verify_fail_hint`. Documented in CLAUDE.md's Done-handoff rule.
+Optional later: let the Lead pre-fill which impl role to route back to.
 
 ### Tier 2b — self-correction memory (suggested-rule flow)
 - Build on existing `role_memory` (already caps 16 KB / 120 entries, inline tail

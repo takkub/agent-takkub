@@ -384,6 +384,35 @@ def _rewrite_task_for_codex(task: str) -> str:
     return _CODEX_TASK_NOTICE + task
 
 
+# Verify/gate roles whose FAILING result should route back into a fix loop via
+# `takkub done --fail`. critic is excluded on purpose: design critique always
+# proposes improvements (it never "passes/fails"), so a --fail hint would make it
+# always report failure.
+_VERIFY_ROLES: frozenset[str] = frozenset({"qa", "reviewer"})
+
+_VERIFY_FAIL_APPENDIX = (
+    "\n\n------ verify reporting ------\n"
+    "ถ้า verify/test **ไม่ผ่าน** (fail / regression / blocking issue): รายงานด้วย\n"
+    '      takkub done --fail "<สรุป fail + root cause ถ้ารู้>"\n'
+    "แทน `takkub done` ปกติ → Lead จะเสนอ fix loop ให้อัตโนมัติ "
+    "(ผ่านหมด = `takkub done` ปกติ)"
+)
+
+
+def _append_verify_fail_hint(task: str, base_role: str) -> str:
+    """For verify roles (qa/reviewer), append the `takkub done --fail` reporting
+    instruction so a failed check routes back into a Lead-proposed fix loop.
+
+    No-op for non-verify roles. Idempotent (marker-guarded) so the orchestrator
+    replaying a stored task on auto-respawn doesn't stack duplicate copies.
+    """
+    if base_role not in _VERIFY_ROLES:
+        return task
+    if "verify reporting" in task:
+        return task
+    return task + _VERIFY_FAIL_APPENDIX
+
+
 def _enter_delay_ms(payload: str) -> int:
     """Pick the post-write delay before sending Enter to submit input.
 

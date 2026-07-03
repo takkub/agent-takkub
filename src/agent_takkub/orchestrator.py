@@ -74,6 +74,7 @@ from .orchestrator_text import (  # re-exported for test/app/main_window imports
     _ROLE_MODEL_TIERS,
     _TYPING_ENTER_DELAY_MS,
     BRACKETED_PASTE_THRESHOLD,
+    _append_verify_fail_hint,
     _build_transcript_path,
     _cwd_within_project,
     _enter_delay_ms,
@@ -731,6 +732,10 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, QObject):
         base_role_a = _split_shard(role_name)[0]
         if effective_provider_for(base_role_a, project=project_ns) == CODEX:
             task = _rewrite_task_for_codex(task)
+        # Verify roles (qa/reviewer): tell them to report a failing result with
+        # `takkub done --fail` so the orchestrator can offer a fix loop (Tier 2a
+        # part 2 — completes the feedback loop the --fail mechanism enables).
+        task = _append_verify_fail_hint(task, base_role_a)
         key = _exit_key(project_ns, role_name)
         ps_assign = self._ps(key)
         ps_assign.last_assigned_task = task
