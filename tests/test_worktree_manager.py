@@ -476,3 +476,65 @@ class TestRemoveUnlinksFirst:
         # Phase-1 dicts (no links key) still load
         legacy = {"path": "/w", "branch": "b", "git_root": "/r"}
         assert WorktreeInfo.from_dict(legacy).links == ()
+
+
+# ── Port allocator (P2.3) ───────────────────────────────────────────────────
+
+
+class TestAllocatePort:
+    def test_zero_base_means_no_allocation(self):
+        from agent_takkub.worktree_manager import allocate_port
+
+        assert allocate_port(0, probe=lambda p: True) == 0
+
+    def test_first_free_port_from_base(self):
+        from agent_takkub.worktree_manager import allocate_port
+
+        assert allocate_port(5310, probe=lambda p: True) == 5310
+
+    def test_skips_bound_ports(self):
+        from agent_takkub.worktree_manager import allocate_port
+
+        taken = {5310, 5311}
+        assert allocate_port(5310, probe=lambda p: p not in taken) == 5312
+
+    def test_skips_excluded_sibling_ports_even_if_bind_free(self):
+        from agent_takkub.worktree_manager import allocate_port
+
+        # sibling reserved 5310 but its dev server hasn't started (bind-free) —
+        # the exclude set must still keep it off-limits
+        assert allocate_port(5310, exclude={5310}, probe=lambda p: True) == 5311
+
+    def test_exhausted_pool_returns_zero(self):
+        from agent_takkub.worktree_manager import allocate_port
+
+        assert allocate_port(5310, probe=lambda p: False, tries=5) == 0
+
+    def test_create_reserves_port_when_config_has_base(self, tmp_path, monkeypatch):
+        import json as _json
+
+        from agent_takkub import worktree_manager as wm
+
+        cfgdir = tmp_path / ".takkub"
+        cfgdir.mkdir()
+        (cfgdir / "worktree.json").write_text(_json.dumps({"base_port": 5310}), encoding="utf-8")
+        monkeypatch.setattr(wm, "_port_free", lambda p: True)
+        r = FakeRunner(
+            [
+                (["rev-parse", "--show-toplevel"], _ok(str(tmp_path) + "\n")),
+                (["rev-parse", "HEAD"], _ok("sha\n")),
+            ]
+        )
+        info, warn = WorktreeManager(r).create(str(tmp_path), "proj", "frontend", 7)
+        assert info is not None and warn == ""
+        assert info.port == 5310
+        # sibling exclusion path: same create with 5310 excluded → next port
+        info2, _ = WorktreeManager(r).create(
+            str(tmp_path), "proj", "frontend#2", 8, exclude_ports={5310}
+        )
+        assert info2.port == 5311
+
+    def test_port_roundtrips_through_dict(self):
+        info = WorktreeInfo(path="/w", branch="wt/x-1", base_sha="b", git_root="/r", port=5312)
+        assert WorktreeInfo.from_dict(info.as_dict()).port == 5312
+        assert WorktreeInfo.from_dict({"path": "/w", "branch": "b", "git_root": "/r"}).port == 0

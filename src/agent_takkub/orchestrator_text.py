@@ -413,7 +413,9 @@ def _append_verify_fail_hint(task: str, base_role: str) -> str:
     return task + _VERIFY_FAIL_APPENDIX
 
 
-def _append_worktree_hint(task: str, branch: str, post_create: tuple[str, ...] = ()) -> str:
+def _append_worktree_hint(
+    task: str, branch: str, post_create: tuple[str, ...] = (), port: int = 0
+) -> str:
     """For a `--isolation worktree` pane, append the commit-on-your-branch
     instruction (issue #81), plus the project's postCreate setup commands.
 
@@ -438,6 +440,13 @@ def _append_worktree_hint(task: str, branch: str, post_create: tuple[str, ...] =
             "\n**ก่อนเริ่มงาน** รัน setup ของ worktree นี้ให้จบก่อน (ตามลำดับ · "
             "ถ้าตัวไหน fail ให้รายงาน Lead ผ่าน takkub send แล้วทำงานต่อเท่าที่ทำได้):\n"
             f"{cmds}\n"
+        )
+    if port:
+        setup += (
+            f"\n**dev server ของ worktree นี้ = port {port} เท่านั้น** "
+            f"(`export PORT={port}` หรือ flag ของ framework) — ห้ามใช้ port default "
+            "ของโปรเจค เพราะ pane อื่นใช้อยู่ · long-running ต้อง background เสมอ "
+            f"(`nohup ... > /tmp/dev-{port}.log 2>&1 &`)\n"
         )
     return task + (
         "\n\n------ workspace isolation ------\n"

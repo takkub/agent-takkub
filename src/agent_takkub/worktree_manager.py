@@ -72,6 +72,10 @@ class WorktreeInfo:
     # one explicitly BEFORE any recursive delete — deleting through a junction
     # would wipe the main tree's real node_modules.
     links: tuple[str, ...] = ()
+    # Dev-server port reserved for this worktree (P2.3). 0 = none allocated
+    # (config has no base_port). The orchestrator excludes ports of live sibling
+    # worktrees so two same-second assigns can't be handed the same number.
+    port: int = 0
 
     def as_dict(self) -> dict:
         return {
@@ -80,6 +84,7 @@ class WorktreeInfo:
             "base_sha": self.base_sha,
             "git_root": self.git_root,
             "links": list(self.links),
+            "port": self.port,
         }
 
     @classmethod
@@ -90,6 +95,7 @@ class WorktreeInfo:
             base_sha=d.get("base_sha", ""),
             git_root=d["git_root"],
             links=tuple(d.get("links") or ()),
+            port=int(d.get("port") or 0),
         )
 
 
@@ -266,6 +272,42 @@ def worktree_dest(project_ns: str, role: str, ts: int) -> Path:
     return dest
 
 
+def _port_free(port: int) -> bool:
+    """True when nothing is listening on 127.0.0.1:*port* (probe by bind)."""
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind(("127.0.0.1", port))
+            return True
+        except OSError:
+            return False
+
+
+def allocate_port(
+    base: int,
+    exclude: frozenset[int] | set[int] = frozenset(),
+    probe: Callable[[int], bool] | None = None,
+    tries: int = 50,
+) -> int:
+    """Pick the first free dev-server port at/after *base* (P2.3).
+
+    *exclude* carries ports already handed to live sibling worktrees — a bind
+    probe alone can't see those because their dev servers may not have started
+    yet (two same-second assigns would otherwise both get *base*). Returns 0
+    when *base* is 0 (no allocation configured) or the pool is exhausted.
+    """
+    if base <= 0:
+        return 0
+    is_free = probe or _port_free
+    for p in range(base, base + tries):
+        if p in exclude:
+            continue
+        if is_free(p):
+            return p
+    return 0
+
+
 def _make_link(src: Path, dst: Path) -> str | None:
     """Link *src* (in the main tree) into the worktree at *dst*.
 
@@ -336,7 +378,12 @@ class WorktreeManager:
     # -- create -------------------------------------------------------------
 
     def create(
-        self, base_cwd: str, project_ns: str, role: str, ts: int
+        self,
+        base_cwd: str,
+        project_ns: str,
+        role: str,
+        ts: int,
+        exclude_ports: frozenset[int] | set[int] = frozenset(),
     ) -> tuple[WorktreeInfo | None, str]:
         """Create an isolated worktree+branch off *base_cwd*'s HEAD.
 
@@ -377,7 +424,13 @@ class WorktreeManager:
         # back on the (info, reason) success channel for the Lead notice.
         cfg, cfg_warn = load_worktree_config(root)
         linked, link_warns = self._apply_links(root, dest, cfg)
-        warns = "; ".join(w for w in [cfg_warn, *link_warns] if w)
+        port = allocate_port(cfg.base_port, exclude_ports)
+        port_warn = (
+            f"port pool จาก base {cfg.base_port} เต็ม — worktree นี้ไม่ได้ port"
+            if cfg.base_port and not port
+            else ""
+        )
+        warns = "; ".join(w for w in [cfg_warn, *link_warns, port_warn] if w)
         return (
             WorktreeInfo(
                 path=str(dest),
@@ -385,6 +438,7 @@ class WorktreeManager:
                 base_sha=base_sha,
                 git_root=root,
                 links=tuple(linked),
+                port=port,
             ),
             warns,
         )

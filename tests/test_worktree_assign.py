@@ -63,7 +63,8 @@ class _FakeMgr:
         self._remove = (remove_ok, remove_reason)
         self.safe_remove_calls = 0
 
-    def create(self, base_cwd, project_ns, role, ts):
+    def create(self, base_cwd, project_ns, role, ts, exclude_ports=frozenset()):
+        self.last_exclude_ports = set(exclude_ports)
         return self._info, self._reason
 
     def commit_count(self, info):
@@ -211,3 +212,14 @@ class TestWorktreeHint:
 
         out = _append_worktree_hint("build X", "wt/x-1")
         assert "ก่อนเริ่มงาน" not in out
+
+    def test_hint_carries_dev_port(self):
+        from agent_takkub.orchestrator_text import _append_worktree_hint
+
+        out = _append_worktree_hint("build X", "wt/x-1", (), 5311)
+        assert "port 5311" in out and "PORT=5311" in out
+
+    def test_hint_no_port_line_when_zero(self):
+        from agent_takkub.orchestrator_text import _append_worktree_hint
+
+        assert "dev server" not in _append_worktree_hint("build X", "wt/x-1")

@@ -895,7 +895,17 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, QObject):
             return _fallback("ไม่มี cwd ให้สร้าง worktree (ระบุ --cwd)")
 
         mgr = WorktreeManager()
-        info, reason = mgr.create(base_cwd, project_ns, role_name, int(time.time()))
+        # Exclude ports already reserved by live sibling worktrees in THIS
+        # project — a bind probe can't see them (their dev servers may not have
+        # started yet), so two same-second assigns would both get base_port.
+        sibling_ports = {
+            ps.worktree.get("port", 0)
+            for key, ps in getattr(self, "_pane_state", {}).items()
+            if key.startswith(f"{project_ns}::") and ps.worktree
+        } - {0}
+        info, reason = mgr.create(
+            base_cwd, project_ns, role_name, int(time.time()), exclude_ports=sibling_ports
+        )
         if info is None:
             return _fallback(reason)
 
@@ -906,11 +916,14 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, QObject):
             branch=info.branch,
             path=info.path,
             links=list(info.links),
+            port=info.port,
         )
         # Non-fatal env-propagation warnings (P2.2): the worktree exists and is
         # usable, but some configured links/config entries were skipped.
         env_note = f" · ⚠️ {reason}" if reason else ""
         linked_note = f" · linked: {', '.join(info.links)}" if info.links else ""
+        if info.port:
+            linked_note += f" · dev port {info.port}"
         self._notify_lead(
             project_ns,
             f"🌿 [{role_name}] isolated worktree — branch `{info.branch}` "
@@ -929,7 +942,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, QObject):
             info.path,
             # Scoped policy override: the pane must commit on ITS OWN branch or
             # finalize can never produce a merge proposal (e2e finding, #81).
-            _append_worktree_hint(task, info.branch, wt_cfg.post_create),
+            _append_worktree_hint(task, info.branch, wt_cfg.post_create, info.port),
             requires_commit=requires_commit,
             auto_chain=auto_chain,
             shard_total=shard_total,
