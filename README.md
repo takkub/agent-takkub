@@ -12,7 +12,7 @@
 
 ## 🖥️ The Desktop Cockpit
 
-![Takkub Cockpit — Lead + specialist teammates working in parallel](https://raw.githubusercontent.com/takkub/agent-takkub/main/assets/cockpit-main.png)
+![Takkub Cockpit — Lead + specialist teammates working in parallel](https://cdn.jsdelivr.net/npm/agent-takkub@latest/assets/cockpit-main.png)
 
 *One window: you talk to the **Lead**, it spawns and drives specialist teammates (frontend · backend · qa · …) as live Claude Code panes.*
 

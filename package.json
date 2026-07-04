@@ -1,6 +1,6 @@
 {
   "name": "agent-takkub",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Desktop cockpit for orchestrating a team of Claude Code agents (Windows + macOS)",
   "keywords": [
     "claude",
@@ -32,7 +32,8 @@
     "npm/",
     "dist/*.whl",
     "assets/icon.ico",
-    "assets/icon.png"
+    "assets/icon.png",
+    "assets/cockpit-main.png"
   ],
   "os": [
     "win32",
