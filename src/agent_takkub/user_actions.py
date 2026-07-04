@@ -460,6 +460,13 @@ class UserActionsMixin:
                 btn_plugins.setText("Plugins ✓")
                 btn_plugins.setToolTip("All recommended dev-team plugins are installed.")
 
+        # Per-plugin install results, shown inside the dialog. The status-bar
+        # toast alone proved invisible in the field: the doctor dialog covers
+        # the main window's status bar, so a user who clicks Install sees only
+        # a grayed button for the 15s–2min git clone and reads it as "dead"
+        # (then closes the app, killing the install mid-clone).
+        plugin_notes: list[str] = []
+
         def _install_plugins() -> None:
             from . import plugin_installer
 
@@ -472,19 +479,36 @@ class UserActionsMixin:
                 return
             btn_plugins.setEnabled(False)
             btn_plugins.setText("Installing…")
+            report_view.setPlainText(
+                "🧩 Installing recommended plugins…\n\n  "
+                + "\n  ".join(f"· {p.label}" for p in missing)
+                + "\n\n  (git clone + network — may take 1–2 minutes;\n"
+                "   keep this dialog open until results appear)"
+            )
             worker = _PluginInstallThread(missing)  # no parent — see _PLUGIN_THREADS
             _PLUGIN_THREADS.add(worker)
 
             def _prog(label: str) -> None:
                 try:
                     self._status.showMessage(f"🧩 installing {label}…", 4_000)
+                    report_view.appendPlainText(f"\n  → installing {label}…")
                 except RuntimeError:
                     pass
 
             def _plugins_done(results: object) -> None:
                 try:
                     ok_n = sum(1 for _p, ok, _m in results if ok)
+                    plugin_notes.clear()
+                    plugin_notes.extend(
+                        f"  {'✓' if ok else '✗'} {p.label} — {msg}" for p, ok, msg in results
+                    )
+                    _log_event("ui_plugin_install", ok=ok_n, total=len(results))
                     self._status.showMessage(f"🧩 Plugins: {ok_n}/{len(results)} installed", 6_000)
+                    report_view.setPlainText(
+                        f"🧩 Plugin install finished — {ok_n}/{len(results)} ok\n\n"
+                        + "\n".join(plugin_notes)
+                        + "\n\n🩺 Re-running diagnostics…"
+                    )
                     _refresh_plugins_btn()
                     _start()  # re-run diagnostics so [plugins] findings refresh
                 except RuntimeError:
@@ -513,6 +537,10 @@ class UserActionsMixin:
                 # C++-object access so a late signal can't raise in the slot.
                 try:
                     report_view.setPlainText(_doctor.format_report(findings))
+                    if plugin_notes:
+                        report_view.appendPlainText(
+                            "\n[plugin install — last run]\n" + "\n".join(plugin_notes)
+                        )
                     has_fixes = any(f.auto_fix is not None for f in findings)
                     btn_fix.setEnabled(has_fixes)
                     btn_fix.setToolTip(
