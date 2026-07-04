@@ -11,6 +11,8 @@ from __future__ import annotations
 import subprocess
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from agent_takkub import update_worker
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -182,15 +184,17 @@ class TestTrySilentSelfUpdate:
             "dirty_files": [] if clean else ["src/foo.py"],
         }
 
-    def _fake_run(self, pull_rc: int = 0):
-        """Return a subprocess.run replacement for pull + rev-parse calls."""
+    def _fake_git(self, pull_rc: int = 0):
+        """Return an `update_helper._git` replacement for the pull + rev-parse
+        calls that `try_silent_self_update` now routes through `_git` (so it
+        inherits the credential-prompt hardening)."""
 
-        def _run(cmd, **kw):
-            if "pull" in cmd:
+        def _git(*args, **kw):
+            if "pull" in args:
                 return _proc(returncode=pull_rc)
             return _proc(stdout="abc1234\n")
 
-        return _run
+        return _git
 
     def test_execv_called_when_clean_and_behind(self) -> None:
         mock_execv = MagicMock()
@@ -198,7 +202,7 @@ class TestTrySilentSelfUpdate:
             patch.object(update_worker, "is_git_repo", return_value=True),
             patch.object(update_worker, "fetch_remote", return_value=(True, "fetched")),
             patch.object(update_worker, "local_status", return_value=self._make_status()),
-            patch("agent_takkub.update_worker.subprocess.run", side_effect=self._fake_run()),
+            patch.object(update_worker, "_git", side_effect=self._fake_git()),
             patch("agent_takkub.update_worker.os.execv", mock_execv),
         ):
             update_worker.try_silent_self_update()
@@ -216,7 +220,7 @@ class TestTrySilentSelfUpdate:
             patch.object(
                 update_worker, "local_status", return_value=self._make_status(clean=False)
             ),
-            patch("agent_takkub.update_worker.subprocess.run", side_effect=self._fake_run()),
+            patch.object(update_worker, "_git", side_effect=self._fake_git()),
             patch("agent_takkub.update_worker.os.execv", mock_execv),
         ):
             update_worker.try_silent_self_update()
@@ -228,7 +232,7 @@ class TestTrySilentSelfUpdate:
             patch.object(update_worker, "is_git_repo", return_value=True),
             patch.object(update_worker, "fetch_remote", return_value=(True, "fetched")),
             patch.object(update_worker, "local_status", return_value=self._make_status(behind=0)),
-            patch("agent_takkub.update_worker.subprocess.run", side_effect=self._fake_run()),
+            patch.object(update_worker, "_git", side_effect=self._fake_git()),
             patch("agent_takkub.update_worker.os.execv", mock_execv),
         ):
             result = update_worker.try_silent_self_update()
@@ -241,7 +245,7 @@ class TestTrySilentSelfUpdate:
             patch.object(update_worker, "is_git_repo", return_value=True),
             patch.object(update_worker, "fetch_remote", return_value=(False, "timeout")),
             patch.object(update_worker, "local_status", return_value=self._make_status()),
-            patch("agent_takkub.update_worker.subprocess.run", side_effect=self._fake_run()),
+            patch.object(update_worker, "_git", side_effect=self._fake_git()),
             patch("agent_takkub.update_worker.os.execv", mock_execv),
         ):
             result = update_worker.try_silent_self_update()
@@ -254,9 +258,7 @@ class TestTrySilentSelfUpdate:
             patch.object(update_worker, "is_git_repo", return_value=True),
             patch.object(update_worker, "fetch_remote", return_value=(True, "fetched")),
             patch.object(update_worker, "local_status", return_value=self._make_status()),
-            patch(
-                "agent_takkub.update_worker.subprocess.run", side_effect=self._fake_run(pull_rc=1)
-            ),
+            patch.object(update_worker, "_git", side_effect=self._fake_git(pull_rc=1)),
             patch("agent_takkub.update_worker.os.execv", mock_execv),
         ):
             update_worker.try_silent_self_update()
@@ -279,3 +281,34 @@ class TestTrySilentSelfUpdate:
             ),
         ):
             assert update_worker.try_silent_self_update() is False
+
+
+# ── _safe_emit (torn-down receiver guard) ────────────────────────────────────
+
+
+class TestSafeEmit:
+    """A pool-thread worker can outlive its `_WorkerSignals` when the cockpit is
+    restarting/shutting down. `_safe_emit` must deliver normally but swallow the
+    exact `RuntimeError: wrapped C/C++ object ... deleted` that a deleted
+    receiver raises — that unhandled error is what littered boot.log during the
+    restart storm."""
+
+    def test_forwards_payload_on_happy_path(self) -> None:
+        signals = MagicMock()
+        payload = {"ok": True, "behind": 2}
+        update_worker._safe_emit(signals, payload)
+        signals.finished.emit.assert_called_once_with(payload)
+
+    def test_swallows_runtimeerror_from_deleted_receiver(self) -> None:
+        signals = MagicMock()
+        signals.finished.emit.side_effect = RuntimeError(
+            "wrapped C/C++ object of type _WorkerSignals has been deleted"
+        )
+        # Must not propagate — there is nobody left to receive the signal.
+        update_worker._safe_emit(signals, {"ok": True})
+
+    def test_does_not_swallow_unrelated_exceptions(self) -> None:
+        signals = MagicMock()
+        signals.finished.emit.side_effect = ValueError("real bug, must surface")
+        with pytest.raises(ValueError):
+            update_worker._safe_emit(signals, {"ok": True})

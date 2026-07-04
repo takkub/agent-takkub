@@ -5,6 +5,24 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 ## [Unreleased]
 
 ### Fixed (แก้)
+- **self-update ค้างที่ `git fetch/pull` → restart storm + false "cockpit ไม่ได้เปิด"** —
+  pane เจอ `connection refused (10061)` ทั้งที่ cockpit เปิดอยู่ — สืบจาก stack trace ใน
+  `boot.log` เจอ **2 บั๊กซ้อน**: **(1)** `update_helper._git` เรียก git โดยไม่ปิด interactive
+  credential prompt → บน Windows `git fetch/pull` ผ่าน HTTPS spawn `git-credential-manager`
+  ที่ **สืบทอด (inherit) pipe stdout/stderr** ไปด้วย พอ `timeout=` เตะ มันฆ่าแค่ process `git`
+  แต่ไม่ฆ่า credential helper ที่แยกตัวไป → pipe ไม่มีวันถึง EOF → `communicate()` join
+  reader-thread **ค้างนิรันดร์** = timeout เป็นหมัน → updater thread + main thread ค้าง →
+  watchdog wedge → launch ใหม่ไล่ auto-kill ตัวเก่ารัวๆ (restart storm) → pane ที่ spawn ตอน
+  cockpit ครึ่งตายเลยต่อ cli_server ไม่ติด. `try_silent_self_update` (pre-UI, ก่อน
+  single-instance lock) ก็ค้างท่าเดียวกัน → เหลือซาก process 1-thread/5MB ค้างเครื่อง.
+  **(2)** `update_worker` `emit()` `finished` signal หลัง `_WorkerSignals` ถูก Qt ลบทิ้งตอน
+  restart → `RuntimeError: wrapped C/C++ object ... has been deleted` (unhandled) รก boot.log.
+  **แก้:** เพิ่ม `git_env()` (`GIT_TERMINAL_PROMPT=0` + `GCM_INTERACTIVE=never`) + ใส่
+  `-c credential.helper=` ทุก git call ผ่าน `_git` → ไม่มี credential helper ถูก spawn เลย =
+  ไม่มี grandchild มาถือ pipe ค้าง → timeout ทำงานจริง; route git call ตรงๆ ใน
+  `try_silent_self_update` (rev-parse/pull) ให้ผ่าน `_git` ด้วย (เดิมเป็น `subprocess.run`
+  เปล่า ไม่ได้ hardening) → ตัดต้นตอ husk; ครอบ `emit()` ด้วย `_safe_emit` กลืนเฉพาะ
+  `RuntimeError` ของ receiver ที่ถูกลบ. + 9 tests (git_env / `-c credential.helper=` / `_safe_emit`).
 - **pane ต่อ cli_server ผิด instance — `TAKKUB_PORT_FILE` ตกจาก env allowlist** —
   `_build_pane_env()`/`_build_lead_env()` กรอง env ของ pane ด้วย allowlist แต่ **ไม่มี
   `TAKKUB_PORT_FILE`** ในลิสต์ → ตอน multi-instance mode ที่ `app.py` ตั้ง per-PID port file

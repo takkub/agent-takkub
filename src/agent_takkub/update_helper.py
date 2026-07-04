@@ -25,6 +25,7 @@ Design rules:
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -39,13 +40,43 @@ from .config import REPO_ROOT
 OFFICIAL_REPO_URL = "https://github.com/takkub/agent-takkub.git"
 
 
+def git_env() -> dict[str, str]:
+    """Return an environment that forbids git from ever blocking on an
+    interactive credential prompt.
+
+    This is the single most important safety property of the self-update path.
+    On Windows, `git fetch`/`git pull` over HTTPS can spawn
+    `git-credential-manager`, which INHERITS our stdout/stderr pipes and blocks
+    on an interactive prompt. subprocess's `timeout=` then kills the `git`
+    process but NOT the detached helper, so the pipe never reaches EOF and
+    `communicate()`'s reader-thread join hangs FOREVER — defeating the timeout
+    and wedging the caller. That wedged the pre-UI updater into a 1-thread husk
+    and the 5-minute UpdateCheckWorker into a watchdog-triggering stall, which in
+    turn produced the auto-kill "restart storm" and the false "cockpit not
+    running" (connection-refused) seen in panes.
+
+    `GIT_TERMINAL_PROMPT=0` + `GCM_INTERACTIVE=never` make the helper fail fast
+    instead of prompting. Pairing this with `-c credential.helper=` on the
+    command line (see `_git`) means no credential helper is spawned at all, so
+    there is no detached grandchild left to hold the pipe open."""
+    env = dict(os.environ)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GCM_INTERACTIVE"] = "never"
+    return env
+
+
 def _git(*args: str, timeout: float = 30.0) -> subprocess.CompletedProcess[str]:
     """Run a git subcommand inside the repo root with text output.
     Caller checks returncode; this helper never raises on non-zero,
     just returns the CompletedProcess so the caller can inspect
-    stderr and decide what to surface."""
+    stderr and decide what to surface.
+
+    Hardened against credential-prompt hangs: `-c credential.helper=` disables
+    any configured credential helper for this invocation and `git_env()`
+    disables interactive prompting, so the `timeout=` is actually enforceable
+    (no detached helper can hold the output pipe open). See `git_env()`."""
     return subprocess.run(
-        ["git", *args],
+        ["git", "-c", "credential.helper=", *args],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
@@ -54,6 +85,7 @@ def _git(*args: str, timeout: float = 30.0) -> subprocess.CompletedProcess[str]:
         encoding="utf-8",
         errors="replace",
         creationflags=SUBPROCESS_NO_WINDOW,
+        env=git_env(),
     )
 
 

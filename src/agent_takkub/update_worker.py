@@ -16,16 +16,30 @@ from __future__ import annotations
 
 import logging
 import os
-import subprocess
 import sys
 
 from PyQt6.QtCore import QObject, QRunnable, pyqtSignal
 
-from ._win_console import SUBPROCESS_NO_WINDOW
 from .config import REPO_ROOT
-from .update_helper import fetch_remote, is_git_repo, local_status
+from .update_helper import _git, fetch_remote, is_git_repo, local_status
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_emit(signals: _WorkerSignals, payload: dict) -> None:
+    """Emit `finished` while tolerating a receiver that was torn down mid-flight.
+
+    These workers run on a QThreadPool thread and can outlive their creator: a
+    cockpit restart/shutdown may delete the `_WorkerSignals` QObject (on the Qt
+    thread) before the pool thread's git/network work returns. Calling `emit()`
+    on a deleted C++ object raises `RuntimeError: wrapped C/C++ object of type
+    _WorkerSignals has been deleted` — previously unhandled, which surfaced as a
+    noisy boot.log traceback on the dying instance. If the receiver is gone there
+    is nobody to deliver to anyway, so swallow exactly that RuntimeError."""
+    try:
+        signals.finished.emit(payload)
+    except RuntimeError:
+        logger.debug("update worker: receiver deleted before emit — dropping result")
 
 
 # ── Worker signals carrier ────────────────────────────────────────────────────
@@ -53,7 +67,7 @@ class UpdateCheckWorker(QRunnable):
 
     def run(self) -> None:  # called by QThreadPool
         if not is_git_repo():
-            self.signals.finished.emit({"not_repo": True, "ok": False})
+            _safe_emit(self.signals, {"not_repo": True, "ok": False})
             return
         try:
             fetch_remote(timeout=10.0)
@@ -63,7 +77,7 @@ class UpdateCheckWorker(QRunnable):
             status = local_status()
         except Exception as exc:
             status = {"ok": False, "error": str(exc)}
-        self.signals.finished.emit(status)
+        _safe_emit(self.signals, status)
 
 
 class ClaudeUpdateCheckWorker(QRunnable):
@@ -122,21 +136,21 @@ class ClaudeUpdateCheckWorker(QRunnable):
             ok_latest, latest = latest_version()
             if not ok_latest:
                 result.update(ok=False, error=f"เช็ค version ล่าสุดไม่ได้: {latest}")
-                self.signals.finished.emit(result)
+                _safe_emit(self.signals, result)
                 return
             result["latest"] = latest
             if cur is None:
                 result.update(
                     ok=False, error="หา version ของ claude ปัจจุบันไม่ได้ (claude ไม่อยู่บน PATH?)"
                 )
-                self.signals.finished.emit(result)
+                _safe_emit(self.signals, result)
                 return
 
             from .claude_update import compare_versions
 
             result["has_update"] = compare_versions(cur, latest) < 0
             if not result["has_update"]:
-                self.signals.finished.emit(result)
+                _safe_emit(self.signals, result)
                 return
 
             ok_cl, changelog = fetch_changelog()
@@ -152,7 +166,7 @@ class ClaudeUpdateCheckWorker(QRunnable):
         except Exception as exc:  # never let the pool thread die silently
             logger.debug("claude update worker raised %s", exc)
             result.update(ok=False, error=f"ตรวจสอบล้มเหลว: {exc}")
-        self.signals.finished.emit(result)
+        _safe_emit(self.signals, result)
 
     @staticmethod
     def _maybe_file_issue(result: dict, cur: str, latest: str, report: str) -> None:
@@ -248,42 +262,24 @@ def try_silent_self_update(*, timeout_fetch: float = 5.0, timeout_pull: float = 
         if behind == 0:
             return False  # already up to date — no log needed (common case)
 
-        from_sha_proc = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=REPO_ROOT,
-            capture_output=True,
-            text=True,
-            timeout=5.0,
-            check=False,
-            creationflags=SUBPROCESS_NO_WINDOW,
-        )
-        from_sha = (from_sha_proc.stdout or "").strip()
+        # Route every git call through update_helper._git so the pre-UI updater
+        # inherits the same credential-prompt hardening as the in-app worker.
+        # This is the path that produced the 1-thread startup husk: a bare
+        # `git pull` here could hang past its timeout on a detached credential
+        # helper (see update_helper.git_env), wedging the process before the
+        # single-instance lock or QApplication ever ran.
+        from_sha = (_git("rev-parse", "HEAD", timeout=5.0).stdout or "").strip()
 
-        result = subprocess.run(
-            ["git", "-C", str(REPO_ROOT), "pull", "--ff-only", "origin", "main"],
-            capture_output=True,
-            timeout=timeout_pull,
-            check=False,
-            creationflags=SUBPROCESS_NO_WINDOW,
-        )
+        result = _git("pull", "--ff-only", "origin", "main", timeout=timeout_pull)
         if result.returncode != 0:
             _log_startup_pull(
                 "pull_failed",
                 returncode=result.returncode,
-                stderr=(result.stderr or b"").decode("utf-8", errors="replace").strip()[-200:],
+                stderr=(result.stderr or "").strip()[-200:],
             )
             return False
 
-        to_sha_proc = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=REPO_ROOT,
-            capture_output=True,
-            text=True,
-            timeout=5.0,
-            check=False,
-            creationflags=SUBPROCESS_NO_WINDOW,
-        )
-        to_sha = (to_sha_proc.stdout or "").strip()
+        to_sha = (_git("rev-parse", "HEAD", timeout=5.0).stdout or "").strip()
         _log_startup_pull("pulled", from_sha=from_sha, to_sha=to_sha, behind=behind)
 
         print(

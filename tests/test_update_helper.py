@@ -249,3 +249,44 @@ class TestCurrentSha:
         monkeypatch.setattr(update_helper, "is_git_repo", lambda: True)
         with patch.object(update_helper, "_git", return_value=_proc(0, stdout="abc1234def567\n")):
             assert update_helper.current_sha() == "abc1234def567"
+
+
+class TestGitEnv:
+    """The credential-prompt hardening that keeps the self-update path from
+    hanging past its timeout on a detached git-credential-manager (the
+    restart-storm / false 'cockpit not running' root cause)."""
+
+    def test_disables_interactive_prompting(self) -> None:
+        env = update_helper.git_env()
+        assert env["GIT_TERMINAL_PROMPT"] == "0"
+        assert env["GCM_INTERACTIVE"] == "never"
+
+    def test_preserves_the_rest_of_the_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("PATH_MARKER_FOR_TEST", "keep-me")
+        env = update_helper.git_env()
+        assert env["PATH_MARKER_FOR_TEST"] == "keep-me"
+
+    def test_returns_a_copy_not_the_live_environ(self) -> None:
+        env = update_helper.git_env()
+        env["GIT_TERMINAL_PROMPT"] = "mutated"
+        # os.environ must be untouched by mutating the returned dict.
+        assert update_helper.os.environ.get("GIT_TERMINAL_PROMPT") != "mutated"
+
+
+class TestGitInvocation:
+    """`_git` must actually apply the hardening on every call: no credential
+    helper is spawned (so nothing can inherit + hold the output pipe) and the
+    prompt-disabling env is passed through."""
+
+    def test_git_call_disables_credential_helper_and_passes_env(self) -> None:
+        with patch.object(update_helper.subprocess, "run", return_value=_proc(0)) as run:
+            update_helper._git("fetch", "origin", "main")
+        args, kwargs = run.call_args
+        cmd = args[0]
+        # `-c credential.helper=` must sit before the subcommand so no helper runs.
+        assert cmd[:3] == ["git", "-c", "credential.helper="]
+        assert cmd[3] == "fetch"
+        assert kwargs["env"]["GIT_TERMINAL_PROMPT"] == "0"
+        assert kwargs["env"]["GCM_INTERACTIVE"] == "never"
+        # A finite timeout must always be handed to subprocess.run.
+        assert kwargs["timeout"] == 30.0

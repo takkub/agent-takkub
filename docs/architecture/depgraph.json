@@ -41,10 +41,9 @@
         "agent_takkub.services",
         "agent_takkub.shared_dev_tools",
         "agent_takkub.update_helper",
-        "agent_takkub.update_panel",
-        "agent_takkub.update_worker"
+        "agent_takkub.update_panel"
       ],
-      "fan_in": 12,
+      "fan_in": 11,
       "fan_out": 0
     },
     {
@@ -918,7 +917,6 @@
     {
       "module": "agent_takkub.update_worker",
       "imports": [
-        "agent_takkub._win_console",
         "agent_takkub.claude_update",
         "agent_takkub.config",
         "agent_takkub.issues",
@@ -929,7 +927,7 @@
         "agent_takkub.update_panel"
       ],
       "fan_in": 2,
-      "fan_out": 5
+      "fan_out": 4
     },
     {
       "module": "agent_takkub.usage_meter",
