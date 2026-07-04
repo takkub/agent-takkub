@@ -8,7 +8,7 @@ You direct a **Lead**; the Lead orchestrates specialist teammates
 (frontend · backend · qa · reviewer · devops · …) as live panes.
 
 [![npm](https://img.shields.io/npm/v/agent-takkub)](https://www.npmjs.com/package/agent-takkub)
-[![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![license](https://img.shields.io/badge/license-MIT-green)](https://github.com/takkub/agent-takkub/blob/main/LICENSE)
 ![platforms](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-blue)
 
 `runs entirely on your machine`
@@ -75,8 +75,9 @@ their results, runs verification, and proposes the ship — you stay in control.
 
 ## More
 
-- **Architecture & flow diagrams** — [`docs/system-overview/`](docs/system-overview/)
-- **How it’s built** — [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
-- **From source / one-shot installer** (Chrome, gh, codex, rtk, …) — [`docs/INSTALL.md`](docs/INSTALL.md)
+- **GitHub** — [takkub/agent-takkub](https://github.com/takkub/agent-takkub)
+- **Architecture & flow diagrams** — [docs/system-overview](https://github.com/takkub/agent-takkub/tree/main/docs/system-overview)
+- **How it’s built** — [docs/ARCHITECTURE.md](https://github.com/takkub/agent-takkub/blob/main/docs/ARCHITECTURE.md)
+- **From source / one-shot installer** (Chrome, gh, codex, rtk, …) — [docs/INSTALL.md](https://github.com/takkub/agent-takkub/blob/main/docs/INSTALL.md)
 
 <div align="center"><sub>Windows + macOS · built on PyQt6 · powered by the Claude Code CLI · MIT</sub></div>

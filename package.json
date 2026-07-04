@@ -1,6 +1,6 @@
 {
   "name": "agent-takkub",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Desktop cockpit for orchestrating a team of Claude Code agents (Windows + macOS)",
   "keywords": [
     "claude",
@@ -13,6 +13,14 @@
     "developer-tools"
   ],
   "author": "takkub",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/takkub/agent-takkub.git"
+  },
+  "homepage": "https://github.com/takkub/agent-takkub#readme",
+  "bugs": {
+    "url": "https://github.com/takkub/agent-takkub/issues"
+  },
   "bin": {
     "agent-takkub": "npm/bin/agent-takkub.js",
     "takkub": "npm/bin/takkub.js"
