@@ -621,13 +621,19 @@ class TestEnvPathCheck:
     """[env] npm-global-bin — the PATH-health check born from the 2026-07-04
     field incident (npm bin dir dropped off PATH → claude/takkub vanished)."""
 
-    def test_dir_on_path_case_and_slash_insensitive(self) -> None:
+    def test_dir_on_path_normalized_membership(self) -> None:
+        # Windows: case + trailing-slash insensitive. POSIX: trailing-slash
+        # insensitive, case-sensitive (normcase is identity there).
         from agent_takkub.doctor import _dir_on_path
 
-        sep = os.pathsep
-        path_value = sep.join([r"C:\Windows", r"c:\users\x\appdata\roaming\NPM" + "\\"])
-        assert _dir_on_path(r"C:\Users\X\AppData\Roaming\npm", path_value)
-        assert not _dir_on_path(r"C:\Users\X\other", path_value)
+        if sys.platform == "win32":
+            path_value = os.pathsep.join([r"C:\Windows", "c:\\users\\x\\appdata\\roaming\\NPM\\"])
+            assert _dir_on_path(r"C:\Users\X\AppData\Roaming\npm", path_value)
+            assert not _dir_on_path(r"C:\Users\X\other", path_value)
+        else:
+            path_value = os.pathsep.join(["/usr/bin", "/Users/x/.npm-global/bin/"])
+            assert _dir_on_path("/Users/x/.npm-global/bin", path_value)
+            assert not _dir_on_path("/Users/x/other", path_value)
 
     def test_skips_when_npm_missing(self) -> None:
         from agent_takkub import doctor
