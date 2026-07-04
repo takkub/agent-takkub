@@ -118,7 +118,7 @@ class TestEnqueue:
         fake._panes_by_project["p"] = {LEAD.name: lead, "frontend": _Pane()}
 
         ok, msg = Orchestrator._enqueue_assign(
-            fake, "backend", "/cwd", "do it", False, True, 0, False, "p"
+            fake, "backend", "/cwd", "do it", False, True, 0, False, "shared", "p"
         )  # type: ignore[arg-type]
 
         assert ok is True
@@ -143,7 +143,9 @@ class TestDrain:
         fake = _FakeOrch()
         # 1 active teammate (< cap 2) and one item queued → drain replays it.
         fake._panes_by_project["p"] = {LEAD.name: _Pane(), "frontend": _Pane()}
-        Orchestrator._enqueue_assign(fake, "backend", "/cwd", "task-b", True, False, 0, False, "p")  # type: ignore[arg-type]
+        Orchestrator._enqueue_assign(
+            fake, "backend", "/cwd", "task-b", True, False, 0, False, "shared", "p"
+        )  # type: ignore[arg-type]
 
         self._drain(fake)
 
@@ -159,7 +161,9 @@ class TestDrain:
         fake = _FakeOrch()
         # 1 active teammate == cap → still full → leave the item queued.
         fake._panes_by_project["p"] = {LEAD.name: _Pane(), "frontend": _Pane()}
-        Orchestrator._enqueue_assign(fake, "backend", "/cwd", "task-b", False, False, 0, False, "p")  # type: ignore[arg-type]
+        Orchestrator._enqueue_assign(
+            fake, "backend", "/cwd", "task-b", False, False, 0, False, "shared", "p"
+        )  # type: ignore[arg-type]
 
         self._drain(fake)
 
@@ -171,7 +175,9 @@ class TestDrain:
         _cap(monkeypatch, 2)
         fake = _FakeOrch()
         fake._panes_by_project["p"] = {LEAD.name: _Pane()}
-        Orchestrator._enqueue_assign(fake, "backend", "/cwd", "task-b", False, False, 0, False, "p")  # type: ignore[arg-type]
+        Orchestrator._enqueue_assign(
+            fake, "backend", "/cwd", "task-b", False, False, 0, False, "shared", "p"
+        )  # type: ignore[arg-type]
         # Now turn the flag off — drain must not replay.
         monkeypatch.delenv("TAKKUB_QUEUE_FANOUT", raising=False)
 
@@ -194,7 +200,7 @@ class TestDrain:
         fake._panes_by_project["p"] = {LEAD.name: _Pane()}
         for i in range(3):
             Orchestrator._enqueue_assign(
-                fake, f"backend#{i}", "/cwd", f"t{i}", False, False, 0, False, "p"
+                fake, f"backend#{i}", "/cwd", f"t{i}", False, False, 0, False, "shared", "p"
             )  # type: ignore[arg-type]
 
         self._drain(fake)
@@ -208,7 +214,9 @@ class TestDurability:
         _cap(monkeypatch, 1)
         fake = _FakeOrch()
         fake._panes_by_project["p"] = {LEAD.name: _Pane(), "frontend": _Pane()}
-        Orchestrator._enqueue_assign(fake, "backend", "/cwd", "task-b", True, False, 3, False, "p")  # type: ignore[arg-type]
+        Orchestrator._enqueue_assign(
+            fake, "backend", "/cwd", "task-b", True, False, 3, False, "shared", "p"
+        )  # type: ignore[arg-type]
         assert fake._fanout_queue_path("p").exists()
         # A fresh orchestrator reloads the persisted queue.
         fresh = _FakeOrch()
@@ -224,7 +232,9 @@ class TestDurability:
         _cap(monkeypatch, 2)
         fake = _FakeOrch()
         fake._panes_by_project["p"] = {LEAD.name: _Pane(), "frontend": _Pane()}
-        Orchestrator._enqueue_assign(fake, "backend", "/cwd", "t", False, False, 0, False, "p")  # type: ignore[arg-type]
+        Orchestrator._enqueue_assign(
+            fake, "backend", "/cwd", "t", False, False, 0, False, "shared", "p"
+        )  # type: ignore[arg-type]
         path = fake._fanout_queue_path("p")
         assert path.exists()
         Orchestrator._drain_fanout_queue(fake, "p")  # type: ignore[arg-type]
@@ -235,7 +245,9 @@ class TestDurability:
         _cap(monkeypatch, 1)
         fake = _FakeOrch()
         fake._panes_by_project["p"] = {LEAD.name: _Pane(), "frontend": _Pane()}
-        Orchestrator._enqueue_assign(fake, "backend", "/cwd", "t", False, False, 0, False, "p")  # type: ignore[arg-type]
+        Orchestrator._enqueue_assign(
+            fake, "backend", "/cwd", "t", False, False, 0, False, "shared", "p"
+        )  # type: ignore[arg-type]
         assert fake._fanout_queue_path("p").exists()
         # Restart with the flag OFF must NOT reload the stale queue.
         monkeypatch.delenv("TAKKUB_QUEUE_FANOUT", raising=False)

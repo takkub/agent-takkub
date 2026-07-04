@@ -183,6 +183,34 @@ class TestArgparse:
         assert payload["cmd"] == "assign"
         assert payload.get("requires_commit") is False
 
+    def test_assign_isolation_defaults_shared(self, fake_request: list[dict[str, Any]]) -> None:
+        """Without --isolation the payload carries the shared default (#81)."""
+        cli.main(["assign", "--role", "frontend", "build X"])
+        assert fake_request[-1]["isolation"] == "shared"
+
+    def test_assign_isolation_worktree_forwarded(self, fake_request: list[dict[str, Any]]) -> None:
+        """--isolation worktree is parsed and forwarded (#81)."""
+        cli.main(["assign", "--role", "frontend", "--isolation", "worktree", "build X"])
+        assert fake_request[-1]["isolation"] == "worktree"
+
+    def test_assign_isolation_forwarded_on_shards(self, fake_request: list[dict[str, Any]]) -> None:
+        """Each shard inherits the isolation choice so a fan-out can isolate too."""
+        cli.main(["assign", "--role", "qa", "--shards", "2", "--isolation", "worktree", "build X"])
+        # last two payloads are the two shard assigns
+        assert fake_request[-1]["isolation"] == "worktree"
+        assert fake_request[-2]["isolation"] == "worktree"
+
+    def test_assign_isolation_worktree_rejects_plan(
+        self, fake_request: list[dict[str, Any]]
+    ) -> None:
+        """--isolation worktree + --plan is refused before any request is sent."""
+        n_before = len(fake_request)
+        rc = cli.main(
+            ["assign", "--role", "qa", "--plan", "--shards", "2", "--isolation", "worktree", "t"]
+        )
+        assert rc != 0
+        assert len(fake_request) == n_before  # nothing dispatched
+
 
 class TestHarvestPayload:
     """Regression for the harvest dead-on-arrival bug (review 2026-06-16). The

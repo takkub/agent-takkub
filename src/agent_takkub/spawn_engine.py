@@ -227,6 +227,12 @@ class PaneState:
     pending_input_since: float | None = None
     last_pending_submit_ts: float = 0.0
     pending_submit_attempts: int = 0
+    # worktree: set by assign(..., isolation="worktree") when a per-pane git
+    # worktree was created (issue #81). Shape = WorktreeInfo.as_dict()
+    # {"path","branch","base_sha","git_root"}; None = shared cwd (default).
+    # Read (captured before the pop) in done()/close() to finalize the worktree:
+    # propose a merge to Lead if the branch has commits, else safe-remove it.
+    worktree: dict | None = None
 
 
 @dataclass

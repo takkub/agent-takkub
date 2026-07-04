@@ -90,6 +90,10 @@ class AgentPane(QFrame):
         # is held until the pane detaches.
         self._spawn_ts: float = 0.0
         self._session_cwd: str | None = None
+        # Isolated git worktree branch (issue #81), shown as a 🌿 chip in the
+        # header so the user can tell an isolated pane from a shared one. None =
+        # shared cwd (default). Set via set_worktree_branch() from the orchestrator.
+        self._worktree_branch: str | None = None
         self._session_jsonl = None  # type: object | None
         self._last_usage: dict | None = None
         # Known context cap for the token badge. Teammates use per-model limits
@@ -441,16 +445,26 @@ class AgentPane(QFrame):
             # never let a JS bridge hiccup tear the signal chain down
             pass
 
+    def set_worktree_branch(self, branch: str | None) -> None:
+        """Tag (or clear) the isolated-worktree branch chip (issue #81).
+
+        Re-renders the header so the 🌿 <branch> marker appears immediately.
+        """
+        self._worktree_branch = branch or None
+        self._update_title_with_cwd(self._session_cwd)
+
     def _update_title_with_cwd(self, cwd: str | None) -> None:
+        # Isolated worktree (issue #81): a 🌿 chip makes the isolation obvious.
+        wt = f"  🌿 {self._worktree_branch}" if self._worktree_branch else ""
         if not cwd:
-            self._title.setText(self.role.label)
+            self._title.setText(f"{self.role.label}{wt}")
             return
         # show role + tail of the path (basename) so user knows where the
         # agent is working. eg.  Frontend · app-web
         import os
 
         tail = os.path.basename(cwd.rstrip("/\\")) or cwd
-        self._title.setText(f"{self.role.label} · {tail}")
+        self._title.setText(f"{self.role.label} · {tail}{wt}")
 
     def detach_session(self) -> None:
         # Flush any pending render bytes before tearing down so no output is

@@ -13,8 +13,14 @@ repos:
       - id: takkub-docs-verify
         name: takkub docs-verify
         language: system
-        # exclude planning/spec docs that deliberately reference future files
+        # exclude planning/spec docs that deliberately reference future files.
+        # Skipped inside a LINKED WORKTREE (#81): gitignored runtime/ artifacts
+        # the docs reference don't exist there, so refs break spuriously; the
+        # Lead's merge commit in the main tree re-runs the full check.
         entry: >-
+          bash -c '
+          if [ "$(git rev-parse --git-dir)" != "$(git rev-parse --git-common-dir)" ]; then
+          echo "[worktree] docs-verify skipped (runtime/ absent here; re-runs on merge in main)"; exit 0; fi;
           takkub docs-verify --exit-on-broken
           --exclude "docs/MACOS_PORT_PLAN.md"
           --exclude "docs/superpowers/plans/*.md"
@@ -23,6 +29,7 @@ repos:
           --exclude "docs/code-review-*.md"
           --exclude "docs/qa-reports/*.md"
           --exclude "docs/guides/*.md"
+          '
         pass_filenames: false
         always_run: true
         stages: [pre-commit]
@@ -35,7 +42,13 @@ repos:
         language: system
         # bash -c wrapper: `language: system` can't resolve the relative .exe on
         # Windows during commit (WinError 2); the same pattern works for depgraph-fresh.
-        entry: bash -c ".venv/Scripts/lint-imports.exe"
+        # .venv resolves from the MAIN worktree root (git-common-dir) so the hook
+        # also works inside per-pane linked worktrees (#81), which have no .venv.
+        entry: >-
+          bash -c '
+          ROOT="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")";
+          "$ROOT/.venv/Scripts/lint-imports.exe"
+          '
         pass_filenames: false
         stages: [pre-commit]
 
@@ -46,9 +59,10 @@ repos:
         name: depgraph freshness check
         language: system
         entry: >-
-          bash -c "
-          .venv/Scripts/python.exe tools/gen_import_graph.py &&
+          bash -c '
+          ROOT="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")";
+          "$ROOT/.venv/Scripts/python.exe" tools/gen_import_graph.py &&
           git diff --exit-code docs/architecture/depgraph.json
-          "
+          '
         pass_filenames: false
         stages: [pre-commit]

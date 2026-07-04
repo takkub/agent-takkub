@@ -75,6 +75,7 @@ from .orchestrator_text import (  # re-exported for test/app/main_window imports
     _TYPING_ENTER_DELAY_MS,
     BRACKETED_PASTE_THRESHOLD,
     _append_verify_fail_hint,
+    _append_worktree_hint,
     _build_transcript_path,
     _cwd_within_project,
     _enter_delay_ms,
@@ -668,6 +669,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, QObject):
         auto_chain: bool = False,
         shard_total: int = 0,
         plan: bool = False,
+        isolation: str = "shared",
         project: str | None = None,
     ) -> tuple[bool, str]:
         # Fan-out queue (flag-gated, default off): defer a fresh teammate spawn
@@ -676,9 +678,52 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, QObject):
         # unless TAKKUB_QUEUE_FANOUT is set, so default behaviour is unchanged.
         if self._should_queue_assign(role_name, project):
             return self._enqueue_assign(
-                role_name, cwd, task, requires_commit, auto_chain, shard_total, plan, project
+                role_name,
+                cwd,
+                task,
+                requires_commit,
+                auto_chain,
+                shard_total,
+                plan,
+                isolation,
+                project,
             )
 
+        # Per-pane git worktree isolation (issue #81): create the worktree +
+        # branch, then dispatch the pane into it. On any failure this falls back
+        # to a shared-cwd dispatch and warns the Lead — never blocks the assign.
+        if isolation == "worktree":
+            return self._assign_with_worktree(
+                role_name, cwd, task, requires_commit, auto_chain, shard_total, plan, project
+            )
+        return self._assign_dispatch(
+            role_name,
+            cwd,
+            task,
+            requires_commit=requires_commit,
+            auto_chain=auto_chain,
+            shard_total=shard_total,
+            plan=plan,
+            project=project,
+            worktree=None,
+        )
+
+    def _assign_dispatch(
+        self,
+        role_name: str,
+        cwd: str | None,
+        task: str,
+        requires_commit: bool = False,
+        auto_chain: bool = False,
+        shard_total: int = 0,
+        plan: bool = False,
+        project: str | None = None,
+        worktree: dict | None = None,
+    ) -> tuple[bool, str]:
+        # Spawn the pane and run all post-spawn wiring (goal, provider rewrite,
+        # verify hint, shard/plan bookkeeping, send). Shared by the normal assign
+        # path and the worktree path (which passes the worktree checkout as cwd +
+        # the WorktreeInfo dict so done()/close() can finalize it).
         # Plan mode spawns a single PLANNER pane (not a shard) — it carries
         # shard_total=0 so done() treats it as a normal pane; the fan-out it
         # triggers later assigns the real shards with shard_total=N.
@@ -745,6 +790,10 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, QObject):
             ps_assign.requires_commit_on_done = True
         if auto_chain:
             ps_assign.auto_chain = True
+        if worktree:
+            # Remember the isolated worktree so done()/close() can finalize it
+            # (merge proposal if the branch has commits, else safe-remove).
+            ps_assign.worktree = worktree
         if plan and shard_total > 0:
             # Planner pane: wrap the task with planning instructions, remember
             # the fan-out config, and let done() spawn the shards once the
@@ -796,6 +845,162 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, QObject):
             shard_total=shard_total,
         )
         return True, f"task queued for {role_name} (sending when ready)"
+
+    def _assign_with_worktree(
+        self,
+        role_name: str,
+        cwd: str | None,
+        task: str,
+        requires_commit: bool,
+        auto_chain: bool,
+        shard_total: int,
+        plan: bool,
+        project: str | None,
+    ) -> tuple[bool, str]:
+        """Create an isolated git worktree for the pane, then dispatch into it.
+
+        Any failure (not a git repo, no resolvable cwd, git error) degrades to a
+        normal shared-cwd dispatch + a one-line Lead warning — a `--isolation
+        worktree` assign must never be worse than a plain assign. The worktree
+        add is a bounded synchronous git op (matches the existing on-thread spawn
+        cost envelope; a Phase-2 optimisation can move it to QProcess).
+        """
+        from .worktree_manager import WorktreeManager
+
+        project_ns = self._resolve_project(project)
+        base_role = _split_shard(role_name)[0]
+        base_cwd = cwd or default_cwd_for_role(base_role, project=project_ns)
+
+        def _fallback(reason: str) -> tuple[bool, str]:
+            _log_event("worktree_fallback", role=role_name, project=project_ns, reason=reason[:200])
+            self._notify_lead(
+                project_ns,
+                f"⚠️ [{role_name}] worktree isolation ใช้ไม่ได้ → รันแบบ shared cwd แทน · {reason}",
+                from_role=role_name,
+                note="",
+            )
+            return self._assign_dispatch(
+                role_name,
+                cwd,
+                task,
+                requires_commit=requires_commit,
+                auto_chain=auto_chain,
+                shard_total=shard_total,
+                plan=plan,
+                project=project,
+                worktree=None,
+            )
+
+        if not base_cwd:
+            return _fallback("ไม่มี cwd ให้สร้าง worktree (ระบุ --cwd)")
+
+        mgr = WorktreeManager()
+        info, reason = mgr.create(base_cwd, project_ns, role_name, int(time.time()))
+        if info is None:
+            return _fallback(reason)
+
+        _log_event(
+            "worktree_created",
+            role=role_name,
+            project=project_ns,
+            branch=info.branch,
+            path=info.path,
+        )
+        self._notify_lead(
+            project_ns,
+            f"🌿 [{role_name}] isolated worktree — branch `{info.branch}` "
+            f"(build แยก ไม่ชนกับ pane อื่น · merge เป็น proposal ตอน done)",
+            from_role=role_name,
+            note="",
+        )
+        result = self._assign_dispatch(
+            role_name,
+            info.path,
+            # Scoped policy override: the pane must commit on ITS OWN branch or
+            # finalize can never produce a merge proposal (e2e finding, #81).
+            _append_worktree_hint(task, info.branch),
+            requires_commit=requires_commit,
+            auto_chain=auto_chain,
+            shard_total=shard_total,
+            plan=plan,
+            project=project,
+            worktree=info.as_dict(),
+        )
+        # Tag the pane title with the branch so the isolation is unmistakable in
+        # the cockpit (best-effort; the pane exists once dispatch's spawn emitted
+        # paneRequested). Never let a UI tag failure affect the assign result.
+        try:
+            self._tag_pane_worktree(project_ns, role_name, info.branch)
+        except Exception:
+            pass
+        return result
+
+    def _tag_pane_worktree(self, project_ns: str, role_name: str, branch: str) -> None:
+        """Set the worktree-branch chip on a pane's header (🌿 <branch>)."""
+        pane = self._project_panes(project_ns).get(role_name)
+        if pane is not None:
+            setter = getattr(pane, "set_worktree_branch", None)
+            if callable(setter):
+                setter(branch)
+
+    def _finalize_worktree(self, project_ns: str, from_role: str, worktree: dict) -> None:
+        """Wrap up an isolated pane's worktree when it reports done/close.
+
+        * branch has commits  → send Lead a MERGE PROPOSAL (propose-then-fire,
+          never auto) and KEEP the worktree until the Lead merges.
+        * no commits, clean    → safe-remove the worktree + its throwaway branch.
+        * no commits but dirty → safe_remove refuses; keep it and warn the Lead
+          so uncommitted work is never silently discarded.
+
+        Phase-1 worktrees are build-only (no dev-server / node_modules copied in),
+        so they contain only tracked source and every git op here is sub-second;
+        the WorktreeManager runner's 30s timeout is the hard backstop. Best-effort
+        throughout — a git hiccup here must never break the done() flow.
+        """
+        try:
+            from .worktree_manager import WorktreeInfo, WorktreeManager, build_merge_proposal
+
+            info = WorktreeInfo.from_dict(worktree)
+            mgr = WorktreeManager()
+            commits = mgr.commit_count(info)
+            if commits > 0:
+                proposal = build_merge_proposal(from_role, info, commits, mgr.diffstat(info))
+                _log_event(
+                    "worktree_merge_proposed",
+                    role=from_role,
+                    project=project_ns,
+                    branch=info.branch,
+                    commits=commits,
+                )
+                self._notify_lead(project_ns, proposal, from_role=from_role, note="")
+                return
+            removed, reason = mgr.safe_remove(info)
+            if removed:
+                _log_event(
+                    "worktree_removed", role=from_role, project=project_ns, branch=info.branch
+                )
+            else:
+                _log_event(
+                    "worktree_kept",
+                    role=from_role,
+                    project=project_ns,
+                    branch=info.branch,
+                    reason=reason[:200],
+                )
+                self._notify_lead(
+                    project_ns,
+                    f"🌿 [{from_role}] worktree `{info.branch}` เก็บไว้ (ไม่ลบ) — {reason} · "
+                    f"path: {info.path}",
+                    from_role=from_role,
+                    note="",
+                )
+        except Exception as exc:  # never let worktree cleanup break done()
+            _log_event(
+                "worktree_finalize_error",
+                role=from_role,
+                project=project_ns,
+                error=str(exc)[:200],
+            )
 
     def send(
         self,
@@ -938,9 +1143,16 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, QObject):
         _ps_close = getattr(self, "_pane_state", {}).get(key)
         had_auto_chain_close = _ps_close.auto_chain if _ps_close is not None else False
         had_pipeline_run_id_close = _ps_close.pipeline_run_id if _ps_close is not None else None
+        # #81: a pane closed WITHOUT a done() (manual close / tab close) still
+        # holds worktree state here (done() pops it first, so this is None on the
+        # done→auto-close path — no double finalize).
+        had_worktree_close = _ps_close.worktree if _ps_close is not None else None
 
         self._idle_state.pop(key, None)
         getattr(self, "_pane_state", {}).pop(key, None)
+
+        if had_worktree_close:
+            self._finalize_worktree(project_ns, role_name, had_worktree_close)
         # Revoke the pane's capability token so stale done/send requests from
         # the closing pane are rejected after it terminates.
         _pane_tokens = getattr(self, "_pane_tokens", {})
@@ -1240,6 +1452,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, QObject):
         had_shard_total = _ps_done.shard_total
         had_pipeline_run_id = _ps_done.pipeline_run_id
         had_plan_fanout = _ps_done.plan_fanout
+        had_worktree = _ps_done.worktree
 
         # Opt-in commit handoff: if assign() was called with requires_commit=True,
         # check for a dirty working tree and warn Lead (the agent isn't blocked —
@@ -1285,6 +1498,12 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, QObject):
             active_ns = None
         if active_ns and project_ns != active_ns:
             self.crossTabDone.emit(project_ns, from_role, note)
+
+        # Worktree isolation (issue #81): the pane ran in its own git worktree.
+        # If its branch has commits, send Lead a MERGE PROPOSAL (never auto);
+        # otherwise safe-remove the empty worktree.
+        if had_worktree:
+            self._finalize_worktree(project_ns, from_role, had_worktree)
 
         # Auto-chain handoff: if this pane was tagged --auto-chain at
         # assign time, and it was the LAST pending auto-chain pane in
@@ -2930,11 +3149,12 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, QObject):
         auto_chain: bool,
         shard_total: int,
         plan: bool,
+        isolation: str,
         project: str | None,
     ) -> tuple[bool, str]:
         """Park an over-cap assign on the per-project queue and tell the Lead.
         Replayed verbatim by `_drain_fanout_queue` once a slot frees, so every
-        flag (commit gate, auto-chain, shards, plan) survives unchanged."""
+        flag (commit gate, auto-chain, shards, plan, isolation) survives unchanged."""
         project_ns = self._resolve_project(project)
         q = getattr(self, "_fanout_queue", None)
         if q is None:
@@ -2948,6 +3168,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, QObject):
                 "auto_chain": auto_chain,
                 "shard_total": shard_total,
                 "plan": plan,
+                "isolation": isolation,
                 "project": project,
             }
         )
@@ -3006,6 +3227,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, QObject):
                 auto_chain=item["auto_chain"],
                 shard_total=item["shard_total"],
                 plan=item["plan"],
+                isolation=item.get("isolation", "shared"),
                 project=item["project"],
             )
         except Exception:

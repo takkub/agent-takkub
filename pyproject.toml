@@ -214,6 +214,24 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
+name = "worktree-manager-leaf"
+type = "forbidden"
+# worktree_manager (#81) is a pure leaf: stdlib + config only. It's imported by
+# the engine (orchestrator) AND the leaf helper orchestrator_text, so it must
+# stay dependency-free of UI/CLI/engine or it would create an import cycle.
+source_modules = ["agent_takkub.worktree_manager"]
+forbidden_modules = [
+    "agent_takkub.orchestrator",
+    "agent_takkub.orchestrator_text",
+    "agent_takkub.spawn_engine",
+    "agent_takkub.main_window",
+    "agent_takkub.app",
+    "agent_takkub.cli",
+    "agent_takkub.cli_server",
+    "agent_takkub.agent_pane",
+]
+
+[[tool.importlinter.contracts]]
 name = "project-wizard-layer"
 type = "forbidden"
 # project_wizard is a UI-layer mixin (mixed into MainWindow). It must not pull

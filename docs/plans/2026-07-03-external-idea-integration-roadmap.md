@@ -123,6 +123,43 @@ Optional later: let the Lead pre-fill which impl role to route back to.
   2–4 shards, **no auto-merge** — emit a patch/diff proposal the Lead merges
   behind a confirm. Must solve blind spots #1–#4 first. Highest effort; do last.
 
+**Phase 1 SHIPPED (2026-07-04) — build-only isolation, manual merge.**
+`takkub assign --isolation worktree` spawns the pane in its own git worktree +
+branch (`wt/<role>-<ts>`) under `<DATA_HOME>/worktrees/<project>` (gitignored).
+New leaf module `worktree_manager.py` (pure-logic + injectable git runner, 22
+unit tests) does the lifecycle; `orchestrator._assign_with_worktree` creates it
+and dispatches the pane in, degrading to shared-cwd + a Lead warning on any
+failure (not a git repo / no cwd / git error — blind spot #3). On done()/close()
+`_finalize_worktree` either sends the Lead a **merge PROPOSAL** (never auto —
+same propose-then-fire doctrine as verify-fail) when the branch has commits, or
+**safe-removes** an empty one; a dirty worktree is *kept, never force-deleted*
+(2-tier destroy adopted from `agent-orchestrator`'s gitworktree adapter). Pane
+header shows a `🌿 <branch>` chip (blind spot #4 observability). `_cwd_within_project`
+allowlists the managed root; import contract `worktree-manager-leaf` keeps the
+module pure. **Deliberately deferred to Phase 2** (the heavy blind spots): NO
+dev-server in the worktree → sidesteps node_modules propagation (#1) + Windows
+file locks (#2); dev-server port allocation, cross-worktree `takkub send`, and
+auto-merge-on-QA-pass are follow-ups. `--isolation worktree` + `--plan` is
+rejected (planner writes no code). Tests: `test_worktree_manager` (22),
+`test_worktree_assign` (9), `test_cli` isolation cases (4). Phase-2 blueprint for
+#1: `agent-orchestrator`'s `symlinks: [.env.local, node_modules] + postCreate:
+[install]` opt-in config (mined 2026-07-04, see #81 comment).
+
+**Live e2e (2026-07-04, 2 rounds on the cockpit repo) — 2 real findings, both fixed:**
+1. *Role-policy conflict:* the teammate doctrine "อย่า commit เอง รอ Lead" made the
+   pane stage-but-refuse-to-commit → finalize could only keep-and-warn (the
+   dirty-keep safety worked exactly as designed — no work lost). Fix:
+   `_append_worktree_hint` auto-appends a scoped override to every worktree
+   assign ("commit on YOUR branch yourself; no push; Lead merges").
+2. *Pre-commit hooks are part of blind spot #1:* repo hooks referencing relative
+   `.venv/Scripts/*` and gitignored `runtime/*` artifacts fail inside a linked
+   worktree (exit 127 / spurious broken refs). Fix for the cockpit repo:
+   `.pre-commit-config.yaml` now resolves `.venv` from the MAIN root via
+   `git rev-parse --git-common-dir` and docs-verify self-skips in linked
+   worktrees (re-runs at merge in main). Other projects' hooks remain a Phase-2
+   concern (same symlink/postCreate answer). Full loop verified live: create →
+   spawn-in → 🌿 notice → commit on branch → done → merge PROPOSAL with diffstat.
+
 ---
 
 ## 4. Recommended first execution step

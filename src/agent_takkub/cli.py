@@ -176,7 +176,17 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                 "--auto-chain would double-fire a verify hop."
             ),
         }
+    isolation = getattr(args, "isolation", "shared") or "shared"
     plan = bool(getattr(args, "plan", False))
+    if isolation == "worktree" and plan:
+        return {
+            "ok": False,
+            "msg": (
+                "--isolation worktree cannot be combined with --plan: the planner "
+                "pane only analyses the app and writes a bucket plan (no code "
+                "changes to isolate). Use --isolation worktree on the impl assign."
+            ),
+        }
     if plan:
         # Plan-then-fan-out: one PLANNER pane analyses the app, writes a
         # bucket plan, and on done the orchestrator auto-fans-out N shards
@@ -220,6 +230,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                         "requires_commit": bool(getattr(args, "requires_commit", False)),
                         "auto_chain": bool(getattr(args, "auto_chain", False)),
                         "shard_total": shards,
+                        "isolation": isolation,
                     }
                 )
             )
@@ -236,6 +247,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                 "from": _from_role(),
                 "requires_commit": bool(getattr(args, "requires_commit", False)),
                 "auto_chain": bool(getattr(args, "auto_chain", False)),
+                "isolation": isolation,
             }
         )
     )
@@ -1108,6 +1120,16 @@ def main(argv: list[str] | None = None) -> int:
         help="plan-first fan-out: spawn ONE planner pane that analyses the app "
         "and writes a balanced bucket plan, then auto-fan-out --shards N "
         "testers (each gets its bucket). Requires --shards >= 2",
+    )
+    sa.add_argument(
+        "--isolation",
+        choices=("shared", "worktree"),
+        default="shared",
+        help="pane workspace isolation (issue #81). 'shared' (default) = all "
+        "panes share the project's git worktree. 'worktree' = spawn the pane "
+        "in its OWN git worktree + branch (wt/<role>-<ts>) so parallel feature "
+        "builds don't race; on done the Lead gets a merge PROPOSAL (never "
+        "auto-merged). Falls back to shared + warns if the cwd isn't a git repo.",
     )
     sa.set_defaults(func=cmd_assign)
 

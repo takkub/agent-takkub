@@ -378,6 +378,7 @@ class CliServer(QObject):
                             auto_chain=bool(req.get("auto_chain", False)),
                             shard_total=int(req.get("shard_total", 0)),
                             plan=bool(req.get("plan", False)),
+                            isolation=str(req.get("isolation", "shared") or "shared"),
                             project=from_project,
                         ),
                     )

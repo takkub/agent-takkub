@@ -413,6 +413,30 @@ def _append_verify_fail_hint(task: str, base_role: str) -> str:
     return task + _VERIFY_FAIL_APPENDIX
 
 
+def _append_worktree_hint(task: str, branch: str) -> str:
+    """For a `--isolation worktree` pane, append the commit-on-your-branch
+    instruction (issue #81).
+
+    Teammate role policy says "อย่า commit เอง รอ Lead" — correct for the SHARED
+    tree, but on an isolated worktree the pane MUST commit its own branch or the
+    done() finalize finds 0 commits + a dirty tree and can only keep-and-warn
+    instead of sending the Lead a merge proposal (found live in the first e2e:
+    backend staged the file then refused to commit, citing that policy). This
+    hint scopes the override to the isolated branch only. Idempotent
+    (marker-guarded) so auto-respawn task replay doesn't stack copies.
+    """
+    if "workspace isolation" in task:
+        return task
+    return task + (
+        "\n\n------ workspace isolation ------\n"
+        f"คุณทำงานบน **git worktree + branch แยกของคุณเอง** (`{branch}`) — "
+        "เมื่องานเสร็จ **ต้อง `git add` + `git commit` บน branch นี้ด้วยตัวเอง** "
+        "(นโยบาย 'รอ Lead commit' ใช้กับ shared tree เท่านั้น — branch นี้ override) "
+        "ห้าม push · ห้าม switch/merge branch เอง · Lead จะ review + merge กลับ base "
+        "หลังคุณ `takkub done`"
+    )
+
+
 def _enter_delay_ms(payload: str) -> int:
     """Pick the post-write delay before sending Enter to submit input.
 
@@ -590,6 +614,19 @@ def _cwd_within_project(cwd: str, project: str, role_name: str) -> bool:
         target == _repo_root.resolve() or _repo_root.resolve() in target.parents
     ):
         return True
+    # Per-pane git worktrees (issue #81) live under the cockpit-managed root
+    # (<DATA_HOME>/worktrees/<project>), NOT under a configured project path, so
+    # they'd fail the check below. They are a controlled location the
+    # orchestrator itself creates for THIS project, so allow a cwd resolving
+    # under this project's managed worktree root.
+    try:
+        from .worktree_manager import worktree_root
+
+        wt_root = worktree_root(project)
+        if target == wt_root or wt_root in target.parents:
+            return True
+    except Exception:
+        pass
     return any(target == root or root in target.parents for root in _allowed_project_roots(project))
 
 

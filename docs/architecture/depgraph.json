@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 70,
+  "module_count": 71,
   "modules": [
     {
       "module": "agent_takkub",
@@ -217,9 +217,10 @@
         "agent_takkub.update_worker",
         "agent_takkub.user_actions",
         "agent_takkub.vault_graph",
-        "agent_takkub.vault_mirror"
+        "agent_takkub.vault_mirror",
+        "agent_takkub.worktree_manager"
       ],
-      "fan_in": 30,
+      "fan_in": 31,
       "fan_out": 0
     },
     {
@@ -435,7 +436,8 @@
         "agent_takkub.roles",
         "agent_takkub.shared_dev_tools",
         "agent_takkub.spawn_engine",
-        "agent_takkub.vault_mirror"
+        "agent_takkub.vault_mirror",
+        "agent_takkub.worktree_manager"
       ],
       "imported_by": [
         "agent_takkub.app",
@@ -445,7 +447,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 5,
-      "fan_out": 18
+      "fan_out": 19
     },
     {
       "module": "agent_takkub.orchestrator_text",
@@ -453,7 +455,8 @@
         "agent_takkub.config",
         "agent_takkub.lead_context",
         "agent_takkub.plan_tier",
-        "agent_takkub.roles"
+        "agent_takkub.roles",
+        "agent_takkub.worktree_manager"
       ],
       "imported_by": [
         "agent_takkub.lead_inbox",
@@ -461,7 +464,7 @@
         "agent_takkub.spawn_engine"
       ],
       "fan_in": 3,
-      "fan_out": 4
+      "fan_out": 5
     },
     {
       "module": "agent_takkub.pane_env",
@@ -977,6 +980,18 @@
       ],
       "fan_in": 1,
       "fan_out": 0
+    },
+    {
+      "module": "agent_takkub.worktree_manager",
+      "imports": [
+        "agent_takkub.config"
+      ],
+      "imported_by": [
+        "agent_takkub.orchestrator",
+        "agent_takkub.orchestrator_text"
+      ],
+      "fan_in": 2,
+      "fan_out": 1
     }
   ]
 }
