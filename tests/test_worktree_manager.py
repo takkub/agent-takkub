@@ -328,3 +328,151 @@ class TestWorktreeConfig:
         root = self._write(tmp_path, ["not", "a", "dict"])
         cfg, warn = load_worktree_config(root)
         assert cfg.is_empty and "object" in warn
+
+
+# ── Link engine (P2.2) ──────────────────────────────────────────────────────
+
+
+class TestApplyLinks:
+    """_apply_links against a real tmp filesystem but a monkeypatched
+    _make_link recorder — semantics without platform-specific link calls."""
+
+    def _mgr_and_dirs(self, tmp_path):
+        main = tmp_path / "main"
+        wt = tmp_path / "wt"
+        (main / "node_modules").mkdir(parents=True)
+        (main / ".env.local").write_text("SECRET=1", encoding="utf-8")
+        wt.mkdir()
+        return WorktreeManager(FakeRunner()), main, wt
+
+    def test_links_existing_sources(self, tmp_path, monkeypatch):
+        from agent_takkub import worktree_manager as wm
+
+        made = []
+        monkeypatch.setattr(wm, "_make_link", lambda s, d: made.append((s, d)) or None)
+        mgr, main, wt = self._mgr_and_dirs(tmp_path)
+        cfg = wm.WorktreeConfig(symlinks=("node_modules", ".env.local"))
+        linked, warns = mgr._apply_links(str(main), wt, cfg)
+        assert linked == ["node_modules", ".env.local"]
+        assert warns == []
+        assert [d.name for _, d in made] == ["node_modules", ".env.local"]
+
+    def test_missing_source_skipped_with_warning(self, tmp_path, monkeypatch):
+        from agent_takkub import worktree_manager as wm
+
+        monkeypatch.setattr(wm, "_make_link", lambda s, d: None)
+        mgr, main, wt = self._mgr_and_dirs(tmp_path)
+        cfg = wm.WorktreeConfig(symlinks=("does-not-exist",))
+        linked, warns = mgr._apply_links(str(main), wt, cfg)
+        assert linked == []
+        assert len(warns) == 1 and "does-not-exist" in warns[0]
+
+    def test_existing_destination_not_overwritten(self, tmp_path, monkeypatch):
+        from agent_takkub import worktree_manager as wm
+
+        monkeypatch.setattr(wm, "_make_link", lambda s, d: None)
+        mgr, main, wt = self._mgr_and_dirs(tmp_path)
+        (wt / ".env.local").write_text("tracked", encoding="utf-8")  # already in checkout
+        cfg = wm.WorktreeConfig(symlinks=(".env.local",))
+        linked, warns = mgr._apply_links(str(main), wt, cfg)
+        assert linked == []
+        assert "มีอยู่แล้ว" in warns[0]
+        assert (wt / ".env.local").read_text(encoding="utf-8") == "tracked"  # untouched
+
+    def test_link_failure_warns_and_continues(self, tmp_path, monkeypatch):
+        from agent_takkub import worktree_manager as wm
+
+        monkeypatch.setattr(
+            wm, "_make_link", lambda s, d: "boom" if s.name == "node_modules" else None
+        )
+        mgr, main, wt = self._mgr_and_dirs(tmp_path)
+        cfg = wm.WorktreeConfig(symlinks=("node_modules", ".env.local"))
+        linked, warns = mgr._apply_links(str(main), wt, cfg)
+        assert linked == [".env.local"]  # failure of one didn't stop the other
+        assert any("boom" in w for w in warns)
+
+
+class TestRemoveLinkSafety:
+    """_remove_link must NEVER recurse — the whole point of P2.2 safety."""
+
+    def test_removes_file(self, tmp_path):
+        from agent_takkub.worktree_manager import _remove_link
+
+        f = tmp_path / "x.txt"
+        f.write_text("hi", encoding="utf-8")
+        _remove_link(f)
+        assert not f.exists()
+
+    def test_removes_empty_dir_or_junction_point(self, tmp_path):
+        from agent_takkub.worktree_manager import _remove_link
+
+        d = tmp_path / "emptydir"
+        d.mkdir()
+        _remove_link(d)  # rmdir path — same call that removes a junction point
+        assert not d.exists()
+
+    def test_never_deletes_real_dir_with_content(self, tmp_path):
+        from agent_takkub.worktree_manager import _remove_link
+
+        d = tmp_path / "real"
+        d.mkdir()
+        (d / "keep.txt").write_text("data", encoding="utf-8")
+        _remove_link(d)  # os.rmdir fails on non-empty → swallowed → intact
+        assert (d / "keep.txt").exists()
+
+    def test_missing_path_is_noop(self, tmp_path):
+        from agent_takkub.worktree_manager import _remove_link
+
+        _remove_link(tmp_path / "ghost")  # no raise
+
+
+class TestRemoveUnlinksFirst:
+    def _info_with_links(self):
+        return WorktreeInfo(
+            path="/w",
+            branch="wt/x-1",
+            base_sha="base",
+            git_root="/repo",
+            links=("node_modules", ".env.local"),
+        )
+
+    def test_safe_remove_unlinks_before_git_remove(self, monkeypatch):
+        from agent_takkub import worktree_manager as wm
+
+        order = []
+        monkeypatch.setattr(wm, "_remove_link", lambda p: order.append(("unlink", p.name)))
+        r = FakeRunner(
+            [
+                (["status", "--porcelain"], _ok("")),
+                (["rev-list", "--count"], _ok("0\n")),
+            ]
+        )
+
+        class Spy(FakeRunner):
+            pass
+
+        mgr = WorktreeManager(
+            lambda a, c: order.append(("git", a[2] if len(a) > 2 else a[0])) or r(a, c)
+        )
+        removed, _ = mgr.safe_remove(self._info_with_links())
+        assert removed is True
+        unlink_idx = [i for i, (k, _) in enumerate(order) if k == "unlink"]
+        git_remove_idx = [i for i, (k, v) in enumerate(order) if k == "git" and v == "worktree"]
+        assert unlink_idx and git_remove_idx
+        assert max(unlink_idx) < min(git_remove_idx)  # ALL unlinks before git touches it
+
+    def test_force_remove_unlinks_too(self, monkeypatch):
+        from agent_takkub import worktree_manager as wm
+
+        unlinked = []
+        monkeypatch.setattr(wm, "_remove_link", lambda p: unlinked.append(p.name))
+        mgr = WorktreeManager(FakeRunner())
+        mgr.force_remove(self._info_with_links())
+        assert unlinked == ["node_modules", ".env.local"]
+
+    def test_info_links_roundtrip_and_backcompat(self):
+        info = self._info_with_links()
+        assert WorktreeInfo.from_dict(info.as_dict()) == info
+        # Phase-1 dicts (no links key) still load
+        legacy = {"path": "/w", "branch": "b", "git_root": "/r"}
+        assert WorktreeInfo.from_dict(legacy).links == ()

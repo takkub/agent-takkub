@@ -905,20 +905,31 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, QObject):
             project=project_ns,
             branch=info.branch,
             path=info.path,
+            links=list(info.links),
         )
+        # Non-fatal env-propagation warnings (P2.2): the worktree exists and is
+        # usable, but some configured links/config entries were skipped.
+        env_note = f" · ⚠️ {reason}" if reason else ""
+        linked_note = f" · linked: {', '.join(info.links)}" if info.links else ""
         self._notify_lead(
             project_ns,
             f"🌿 [{role_name}] isolated worktree — branch `{info.branch}` "
-            f"(build แยก ไม่ชนกับ pane อื่น · merge เป็น proposal ตอน done)",
+            f"(build แยก ไม่ชนกับ pane อื่น · merge เป็น proposal ตอน done)"
+            f"{linked_note}{env_note}",
             from_role=role_name,
             note="",
         )
+        # postCreate runs in the pane's own shell via the task hint (visible,
+        # off the Qt thread — pnpm install can take minutes).
+        from .worktree_manager import load_worktree_config
+
+        wt_cfg, _ = load_worktree_config(info.git_root)
         result = self._assign_dispatch(
             role_name,
             info.path,
             # Scoped policy override: the pane must commit on ITS OWN branch or
             # finalize can never produce a merge proposal (e2e finding, #81).
-            _append_worktree_hint(task, info.branch),
+            _append_worktree_hint(task, info.branch, wt_cfg.post_create),
             requires_commit=requires_commit,
             auto_chain=auto_chain,
             shard_total=shard_total,

@@ -32,8 +32,11 @@ lifecycle is unit-tested on both OS without a real repository.
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 import subprocess
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -64,6 +67,11 @@ class WorktreeInfo:
     branch: str  # e.g. "wt/frontend-1-1720000000"
     base_sha: str  # HEAD sha at creation — the merge base for diff/rev-list
     git_root: str  # toplevel of the source repo the worktree belongs to
+    # Repo-relative paths that were LINKED (junction/symlink) or copied in from
+    # the main tree per the P2.1 config. Recorded so removal can unlink each
+    # one explicitly BEFORE any recursive delete — deleting through a junction
+    # would wipe the main tree's real node_modules.
+    links: tuple[str, ...] = ()
 
     def as_dict(self) -> dict:
         return {
@@ -71,6 +79,7 @@ class WorktreeInfo:
             "branch": self.branch,
             "base_sha": self.base_sha,
             "git_root": self.git_root,
+            "links": list(self.links),
         }
 
     @classmethod
@@ -80,6 +89,7 @@ class WorktreeInfo:
             branch=d["branch"],
             base_sha=d.get("base_sha", ""),
             git_root=d["git_root"],
+            links=tuple(d.get("links") or ()),
         )
 
 
@@ -256,6 +266,47 @@ def worktree_dest(project_ns: str, role: str, ts: int) -> Path:
     return dest
 
 
+def _make_link(src: Path, dst: Path) -> str | None:
+    """Link *src* (in the main tree) into the worktree at *dst*.
+
+    Windows: directories become NTFS junctions (``_winapi.CreateJunction`` —
+    works without admin/Developer Mode, unlike ``os.symlink``); files are
+    copied (file symlinks need privileges). macOS/Linux: plain symlinks for
+    both. Returns an error string on failure, None on success. Module-level so
+    tests monkeypatch it and never touch the real filesystem semantics.
+    """
+    try:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if sys.platform == "win32":
+            if src.is_dir():
+                import _winapi
+
+                _winapi.CreateJunction(str(src), str(dst))
+            else:
+                shutil.copy2(src, dst)
+        else:
+            os.symlink(str(src), str(dst))
+        return None
+    except OSError as exc:
+        return str(exc)
+
+
+def _remove_link(p: Path) -> None:
+    """Remove a link point WITHOUT ever recursing into its target.
+
+    Symlinks and copied files → unlink; junctions / directory symlinks →
+    ``os.rmdir`` (removes the reparse point only). A REAL non-empty directory
+    fails both safely (OSError swallowed) — this function can never rmtree.
+    """
+    try:
+        if p.is_symlink() or p.is_file():
+            p.unlink()
+        elif p.is_dir():
+            os.rmdir(p)
+    except OSError:
+        pass  # best-effort; git worktree remove reports anything left behind
+
+
 class WorktreeManager:
     """Stateless lifecycle wrapper around ``git worktree`` for one repo.
 
@@ -321,10 +372,54 @@ class WorktreeManager:
             reason = (add.stderr or add.stdout).strip().splitlines()
             tail = reason[-1] if reason else f"exit {add.returncode}"
             return None, f"git worktree add ล้มเหลว ({tail}) — ใช้ shared cwd แทน"
+        # P2.2: env propagation per the project's opt-in config. Failures here
+        # are NON-fatal — the worktree exists and is usable bare; warnings ride
+        # back on the (info, reason) success channel for the Lead notice.
+        cfg, cfg_warn = load_worktree_config(root)
+        linked, link_warns = self._apply_links(root, dest, cfg)
+        warns = "; ".join(w for w in [cfg_warn, *link_warns] if w)
         return (
-            WorktreeInfo(path=str(dest), branch=branch, base_sha=base_sha, git_root=root),
-            "",
+            WorktreeInfo(
+                path=str(dest),
+                branch=branch,
+                base_sha=base_sha,
+                git_root=root,
+                links=tuple(linked),
+            ),
+            warns,
         )
+
+    def _apply_links(
+        self, git_root: str, dest: Path, cfg: WorktreeConfig
+    ) -> tuple[list[str], list[str]]:
+        """Link each configured entry from the main tree into the worktree.
+
+        Returns ``(linked_rel_paths, warnings)``. Skips (with a warning) any
+        source missing in the main tree or destination already present in the
+        checkout (a tracked path — linking over it would shadow repo content).
+        """
+        linked: list[str] = []
+        warns: list[str] = []
+        for rel in cfg.symlinks:
+            src = Path(git_root) / rel
+            dst = dest / rel
+            if not src.exists():
+                warns.append(f"link ข้าม {rel}: ไม่มีใน main tree")
+                continue
+            if dst.exists():
+                warns.append(f"link ข้าม {rel}: มีอยู่แล้วใน worktree (tracked?)")
+                continue
+            err = _make_link(src, dst)
+            if err is not None:
+                warns.append(f"link {rel} ล้มเหลว: {err}")
+            else:
+                linked.append(rel)
+        return linked, warns
+
+    def _unlink_links(self, info: WorktreeInfo) -> None:
+        """Remove every recorded link point before any worktree removal."""
+        for rel in info.links:
+            _remove_link(Path(info.path) / rel)
 
     # -- inspect ------------------------------------------------------------
 
@@ -368,6 +463,9 @@ class WorktreeManager:
         """
         if self.is_dirty(info):
             return False, "worktree มี uncommitted changes — เก็บไว้ (ไม่ลบทิ้ง)"
+        # Unlink junctions/symlinks FIRST — a recursive delete that followed a
+        # junction would destroy the main tree's real node_modules (#81 P2.2).
+        self._unlink_links(info)
         rm = self._run(["-C", info.git_root, "worktree", "remove", info.path], None)
         self._run(["-C", info.git_root, "worktree", "prune"], None)
         if not rm.ok:
@@ -382,6 +480,7 @@ class WorktreeManager:
     def force_remove(self, info: WorktreeInfo) -> tuple[bool, str]:
         """Unconditional teardown (``--force`` + prune + branch -D). Used for
         explicit cleanup where losing uncommitted scratch is acceptable."""
+        self._unlink_links(info)  # never recurse through a junction (#81 P2.2)
         rm = self._run(["-C", info.git_root, "worktree", "remove", "--force", info.path], None)
         self._run(["-C", info.git_root, "worktree", "prune"], None)
         self._run(["-C", info.git_root, "branch", "-D", info.branch], None)

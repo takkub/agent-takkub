@@ -198,3 +198,16 @@ class TestWorktreeHint:
         once = _append_worktree_hint("build X", "wt/x-1")
         twice = _append_worktree_hint(once, "wt/x-1")
         assert twice == once
+
+    def test_hint_carries_post_create_commands(self):
+        from agent_takkub.orchestrator_text import _append_worktree_hint
+
+        out = _append_worktree_hint("build X", "wt/x-1", ("pnpm install", "pnpm build"))
+        assert "pnpm install" in out and "pnpm build" in out
+        assert out.index("pnpm install") < out.index("pnpm build")  # order preserved
+
+    def test_hint_without_post_create_has_no_setup_block(self):
+        from agent_takkub.orchestrator_text import _append_worktree_hint
+
+        out = _append_worktree_hint("build X", "wt/x-1")
+        assert "ก่อนเริ่มงาน" not in out
