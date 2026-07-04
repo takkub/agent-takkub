@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Takkub Cockpit — Detailed Flowchart</title>
+<style>
+  :root{--bg:#09090b;--surface:#18181b;--surface2:#27272a;--text:#e4e4e7;--muted:#a1a1aa;--dim:#71717a;--line:#3f3f46}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,"Sarabun",sans-serif;line-height:1.5}
+  .wrap{max-width:920px;margin:0 auto;padding:28px 16px 80px}
+  h1{font-size:25px;margin:0 0 4px}
+  h2{font-size:19px;margin:40px 0 4px;padding:8px 12px;background:var(--surface);border-left:4px solid #3b82f6;border-radius:0 8px 8px 0}
+  .sub{color:var(--muted);font-size:13.5px;margin:2px 0 6px}
+  .lead{color:var(--dim);font-size:12px}
+  code{background:var(--surface2);padding:1px 6px;border-radius:5px;font-size:.85em;font-family:Consolas,monospace;color:#fcd34d}
+  .scroll{overflow-x:auto;margin:12px 0}
+  svg{display:block;height:auto;margin:0 auto}
+  .legend{display:flex;flex-wrap:wrap;gap:14px;margin:14px 0;font-size:12px;color:var(--muted)}
+  .legend b{display:inline-block;width:24px;height:13px;border-radius:3px;vertical-align:-2px;margin-right:5px}
+  table{width:100%;border-collapse:collapse;margin:10px 0;font-size:13px}
+  th,td{text-align:left;padding:6px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.4px}
+  td:first-child{white-space:nowrap;color:var(--text);font-weight:600}
+  .note{background:var(--surface);border:1px solid var(--line);border-left:3px solid #f59e0b;border-radius:8px;padding:9px 13px;font-size:12.5px;color:var(--muted);margin:12px 0}
+  /* shared svg node styles */
+  .proc{fill:#18181b;stroke:#3f3f46;stroke-width:1.4}
+  .dec{fill:#1e293b;stroke:#3b82f6;stroke-width:1.4}
+  .term{fill:#052e16;stroke:#15803d;stroke-width:1.4}
+  .termr{fill:#3b0764;stroke:#a855f7;stroke-width:1.4}
+  .edge{fill:none;stroke:#8b8b93;stroke-width:1.6;marker-end:url(#ah)}
+  .loop{fill:none;stroke:#a16207;stroke-width:1.5;stroke-dasharray:5 4;marker-end:url(#ahl)}
+  .t{fill:#e4e4e7;font:600 12px "Segoe UI","Sarabun",sans-serif;text-anchor:middle}
+  .ts{fill:#cbd5e1;font:400 10.5px "Segoe UI","Sarabun",sans-serif;text-anchor:middle}
+  .tl{fill:#e4e4e7;font:600 11.5px "Segoe UI","Sarabun",sans-serif}
+  .tls{fill:#94a3b8;font:400 10px Consolas,monospace}
+  .el{fill:#a1a1aa;font:600 10px "Segoe UI","Sarabun",sans-serif}
+  .elp{fill:#d6a441;font:600 10px "Segoe UI","Sarabun",sans-serif}
+  @media(prefers-color-scheme:light){
+    :root{--bg:#fafafa;--surface:#fff;--surface2:#f1f1f4;--text:#18181b;--muted:#52525b;--dim:#71717a;--line:#d4d4d8}
+    code{color:#b45309}
+    .proc{fill:#fff;stroke:#d4d4d8}.dec{fill:#eff6ff;stroke:#3b82f6}.term{fill:#dcfce7;stroke:#15803d}.termr{fill:#f5e8ff;stroke:#a855f7}
+    .t{fill:#18181b}.ts{fill:#475569}.tl{fill:#18181b}.tls{fill:#64748b}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🛩️ Takkub Cockpit — Flowchart ละเอียด (6 phase)</h1>
+  <p class="sub">เจาะลึกทุก decision + branch + loop จริงจากโค้ด — routing, dispatch, spawn, recovery, verify, sinks</p>
+  <p class="lead">2026-07-03 · self-contained ในเครื่อง · svg รองรับ light/dark</p>
+
+  <div class="legend">
+    <span><b style="background:#052e16;border:1px solid #15803d"></b>เริ่ม/จบ (สำเร็จ)</span>
+    <span><b style="background:#3b0764;border:1px solid #a855f7"></b>terminal state</span>
+    <span><b style="background:#18181b;border:1px solid #3f3f46"></b>process</span>
+    <span><b style="background:#1e293b;border:1px solid #3b82f6"></b>◇ decision</span>
+    <span><b style="background:none;border:1px dashed #a16207"></b>loop ย้อนกลับ</span>
+  </div>
+
+  <svg width="0" height="0"><defs>
+    <marker id="ah" markerWidth="10" markerHeight="10" refX="7.5" refY="3" orient="auto"><path d="M0,0 L7.5,3 L0,6 Z" fill="#8b8b93"/></marker>
+    <marker id="ahl" markerWidth="10" markerHeight="10" refX="7.5" refY="3" orient="auto"><path d="M0,0 L7.5,3 L0,6 Z" fill="#a16207"/></marker>
+  </defs></svg>
+
+  <!-- ══════════ PHASE A — ROUTING ══════════ -->
+  <h2>Phase A · Intent routing — <code>routing_planner.classify()</code></h2>
+  <p class="sub">ข้อความคุณถูกจับเข้า 1 ใน 7 kind (เช็คตามลำดับ บนลงล่าง — เจอก่อนชนะ)</p>
+  <div class="scroll">
+  <svg viewBox="0 0 700 800" style="max-width:700px;width:100%">
+    <!-- edges -->
+    <path class="edge" d="M230,60 L230,96"/>
+    <path class="edge" d="M230,150 L230,190"/>
+    <path class="edge" d="M300,220 L470,220"/><text class="el" x="360" y="212">ใช่</text>
+    <path class="edge" d="M230,250 L230,300"/><text class="el" x="238" y="278">ไม่</text>
+    <path class="edge" d="M300,330 L470,330"/><text class="el" x="360" y="322">ใช่</text>
+    <path class="edge" d="M230,360 L230,410"/><text class="el" x="238" y="388">ไม่</text>
+    <path class="edge" d="M300,440 L470,440"/><text class="el" x="360" y="432">ใช่</text>
+    <path class="edge" d="M230,470 L230,520"/><text class="el" x="238" y="498">ไม่</text>
+    <path class="edge" d="M300,550 L470,550"/><text class="el" x="360" y="542">ใช่</text>
+    <path class="edge" d="M230,580 L230,630"/><text class="el" x="238" y="608">ไม่</text>
+    <path class="edge" d="M300,660 L470,660"/><text class="el" x="345" y="652">ไม่มี verb</text>
+    <path class="edge" d="M230,690 L230,738"/><text class="el" x="238" y="716">actionable</text>
+    <!-- start -->
+    <rect class="term" x="120" y="18" width="220" height="42" rx="21"/><text class="t" x="230" y="44">ข้อความจากคุณ</text>
+    <!-- classify -->
+    <rect class="proc" x="120" y="96" width="220" height="54" rx="9"/><text class="t" x="230" y="118">classify()</text><text class="ts" x="230" y="135">normalize + match</text>
+    <!-- D1 -->
+    <polygon class="dec" points="230,190 300,220 230,250 160,220"/><text class="ts" x="230" y="218">ระบุ role ตรงๆ?</text><text class="ts" x="230" y="232">("ให้ backend…")</text>
+    <rect class="termr" x="470" y="200" width="200" height="40" rx="8"/><text class="t" x="570" y="225">FIRE_ASSIGN</text>
+    <!-- D2 -->
+    <polygon class="dec" points="230,300 300,330 230,360 160,330"/><text class="ts" x="230" y="328">one-shot</text><text class="ts" x="230" y="342">codex/gemini?</text>
+    <rect class="termr" x="470" y="310" width="200" height="40" rx="8"/><text class="t" x="570" y="330">FIRE_ONESHOT</text><text class="ts" x="570" y="344">*ปิด→degrade assign</text>
+    <!-- D3 -->
+    <polygon class="dec" points="230,410 300,440 230,470 160,440"/><text class="ts" x="230" y="438">เขียน guide/</text><text class="ts" x="230" y="452">คู่มือ?</text>
+    <rect class="termr" x="470" y="420" width="200" height="40" rx="8"/><text class="t" x="570" y="440">GENERATE_GUIDE</text><text class="ts" x="570" y="454">md → HTML</text>
+    <!-- D4 -->
+    <polygon class="dec" points="230,520 300,550 230,580 160,550"/><text class="ts" x="230" y="548">อธิบาย/รีวิว</text><text class="ts" x="230" y="562">ระบบ?</text>
+    <rect class="termr" x="470" y="530" width="200" height="40" rx="8"/><text class="t" x="570" y="550">EXPLAIN_SYSTEM</text><text class="ts" x="570" y="564">→ HTML explainer</text>
+    <!-- D5 -->
+    <polygon class="dec" points="230,630 305,660 230,690 155,660"/><text class="ts" x="230" y="658">มี actionable</text><text class="ts" x="230" y="672">verb?</text>
+    <rect class="termr" x="470" y="640" width="200" height="40" rx="8"/><text class="t" x="570" y="665">INFORMATIONAL</text><text class="ts" x="570" y="678">ตอบในแชตเลย</text>
+    <!-- route table -->
+    <rect class="proc" x="110" y="738" width="240" height="52" rx="9"/><text class="t" x="230" y="759">route table → PROPOSE</text><text class="ts" x="230" y="776">+ cross_check (codex/gemini)</text>
+  </svg>
+  </div>
+  <table>
+    <tr><th>keyword (ตัวอย่าง)</th><th>primary</th><th>cross-check</th></tr>
+    <tr><td>UI / page / form / button / CSS</td><td>frontend</td><td>—</td></tr>
+    <tr><td>endpoint / API / schema / migration</td><td>backend</td><td>—</td></tr>
+    <tr><td>refactor / extract / migrate A→B</td><td>ตามไฟล์</td><td>+codex</td></tr>
+    <tr><td>design review / รีวิว UI</td><td>critic</td><td>+gemini</td></tr>
+    <tr><td>UI e2e/smoke หลายหน้า (browser)</td><td>qa <code>--plan --shards</code></td><td>—</td></tr>
+    <tr><td>feature ใหญ่ (UI+API)</td><td>frontend + backend (parallel)</td><td>—</td></tr>
+    <tr><td>complex / สงสัย approach</td><td>primary</td><td>+gemini (1M ctx)</td></tr>
+  </table>
+
+  <!-- ══════════ PHASE B — CONFIRM + EXEC MODE ══════════ -->
+  <h2>Phase B · Confirm &amp; dispatch — propose → fire → fan-out</h2>
+  <p class="sub">PROPOSE รอ user ตอบ · แล้ว exec-mode ตัดสินว่า 1 ตัว หรือ แตกขนาน</p>
+  <div class="scroll">
+  <svg viewBox="0 0 720 640" style="max-width:720px;width:100%">
+    <path class="edge" d="M180,58 L180,96"/>
+    <path class="edge" d="M180,150 L180,188"/>
+    <!-- reply branches -->
+    <path class="edge" d="M250,218 L430,218"/><text class="el" x="300" y="210">"ลุย/ok"</text>
+    <path class="edge" d="M250,246 L430,270"/><text class="el" x="285" y="262">"แก้แล้วลุย"</text>
+    <path class="edge" d="M180,248 L180,300"/><text class="el" x="120" y="278">"แก้ X"→re-propose</text>
+    <path class="edge" d="M110,218 L40,218 L40,360"/><text class="el" x="30" y="210">"ไม่เอา"</text>
+    <path class="edge" d="M470,240 L470,300 L300,300"/>
+    <!-- exec mode -->
+    <path class="edge" d="M180,352 L180,392"/>
+    <path class="edge" d="M250,422 L440,422"/><text class="el" x="320" y="414">👥 Multi</text>
+    <path class="edge" d="M180,452 L180,500"/><text class="el" x="188" y="480">👤 1:1</text>
+    <path class="edge" d="M540,452 L540,540 L300,540"/>
+    <!-- nodes -->
+    <rect class="proc" x="80" y="18" width="200" height="40" rx="8"/><text class="t" x="180" y="43">PROPOSE table</text>
+    <polygon class="dec" points="180,96 265,127 180,158 95,127"/><text class="ts" x="180" y="124">user ตอบ?</text><text class="ts" x="180" y="138">(confirm handling)</text>
+    <rect class="proc" x="95" y="300" width="170" height="42" rx="8"/><text class="ts" x="180" y="325">ASK_CLARIFY →</text><text class="ts" x="180" y="338">แก้ table รอ confirm</text>
+    <rect class="term" x="10" y="340" width="120" height="38" rx="8" style="fill:#450a0a;stroke:#b91c1c"/><text class="t" x="70" y="363">abort</text>
+    <rect class="proc" x="430" y="200" width="90" height="40" rx="8"/><text class="ts" x="475" y="224">FIRE</text>
+    <!-- exec decision -->
+    <polygon class="dec" points="180,392 270,422 180,452 90,422"/><text class="ts" x="180" y="420">exec mode?</text>
+    <rect class="proc" x="440" y="380" width="270" height="86" rx="9"/>
+    <text class="tl" x="452" y="402">PARALLEL (Multi):</text>
+    <text class="tls" x="452" y="419">แตก K feature อิสระ</text>
+    <text class="tls" x="452" y="434">→ fan-out frontend#1..K / --shards</text>
+    <text class="tls" x="452" y="449">→ cap = machine_fanout_cap()</text>
+    <text class="tls" x="452" y="462">เกิน cap → ทำเป็น waves</text>
+    <rect class="proc" x="95" y="500" width="170" height="42" rx="8"/><text class="ts" x="180" y="524">SOLO: 1 instance</text><text class="ts" x="180" y="537">/role ตามปกติ</text>
+    <rect class="term" x="200" y="588" width="320" height="40" rx="8"/><text class="t" x="360" y="612">takkub assign … (&amp; + wait ถ้า parallel)</text>
+  </svg>
+  </div>
+  <div class="note"><b>auto-chain:</b> ใส่ <code>--auto-chain</code> บน impl assign → ทุก pane done ครบ → orchestrator inject handoff เข้า Lead อัตโนมัติ → fire verify sequence เอง (devops→qa) ไม่ต้อง propose</div>
+
+  <!-- ══════════ PHASE C — SPAWN PIPELINE ══════════ -->
+  <h2>Phase C · Spawn pipeline — assign แล้วเกิดอะไรใน pane</h2>
+  <p class="sub">orchestrator สร้าง pane + inject ทุกอย่างก่อน paste task (เจาะลึก argv + env จริง)</p>
+  <div class="scroll">
+  <svg viewBox="0 0 760 660" style="max-width:760px;width:100%">
+    <path class="edge" d="M200,54 L200,92"/>
+    <path class="edge" d="M270,122 L470,122"/><text class="el" x="330" y="114">เปิดอยู่แล้ว</text>
+    <path class="edge" d="M200,152 L200,196"/><text class="el" x="208" y="180">ยังไม่เปิด → spawn</text>
+    <path class="edge" d="M200,250 L200,290"/>
+    <path class="edge" d="M200,410 L200,450"/>
+    <path class="edge" d="M200,504 L200,544"/>
+    <path class="edge" d="M540,142 L540,574 L360,574"/>
+    <!-- nodes -->
+    <rect class="proc" x="90" y="14" width="220" height="40" rx="8"/><text class="t" x="200" y="39">takkub assign → orchestrator</text>
+    <polygon class="dec" points="200,92 275,122 200,152 125,122"/><text class="ts" x="200" y="126">pane เปิด?</text>
+    <rect class="proc" x="470" y="102" width="150" height="40" rx="8"/><text class="ts" x="545" y="126">paste task เลย</text>
+    <!-- step 1 -->
+    <rect class="proc" x="70" y="196" width="260" height="54" rx="9"/><text class="tl" x="82" y="217">① ensure_role_memory</text><text class="tls" x="82" y="234">inline learned notes (role×project)</text>
+    <!-- step 2 argv -->
+    <rect class="proc" x="40" y="290" width="320" height="120" rx="9"/>
+    <text class="tl" x="52" y="311">② build argv: claude.exe</text>
+    <text class="tls" x="52" y="330">--setting-sources project,local</text>
+    <text class="tls" x="52" y="346">--plugin-dir &lt;plugins ของ role&gt;</text>
+    <text class="tls" x="52" y="362">--mcp-config &lt;shared-mcp-role.json&gt;</text>
+    <text class="tls" x="52" y="378">--strict-mcp-config</text>
+    <text class="tls" x="52" y="396" style="fill:#71717a">(user ~/.claude.json ไม่เข้า pane)</text>
+    <!-- step 3 env -->
+    <rect class="proc" x="40" y="450" width="320" height="54" rx="9"/>
+    <text class="tl" x="52" y="471">③ env (allowlist — ไม่ใช่ copy ทั้ง shell)</text>
+    <text class="tls" x="52" y="488">TAKKUB_ROLE/PROJECT/SHARD · MCP_TOOL_TIMEOUT=180s · CLAUDE_CONFIG_DIR</text>
+    <!-- step 4 pty -->
+    <rect class="proc" x="70" y="544" width="260" height="54" rx="9"/><text class="tl" x="82" y="565">④ PTY spawn</text><text class="tls" x="82" y="582">ConPTY (win) / _pty_backend (mac)</text>
+    <!-- right column: inject -->
+    <rect class="proc" x="440" y="300" width="290" height="120" rx="9"/>
+    <text class="tl" x="452" y="322">⑤ inject เข้า pane:</text>
+    <text class="tls" x="452" y="341">• cwd (role-aware default / --cwd)</text>
+    <text class="tls" x="452" y="357">• goal prepend (ถ้าตั้ง takkub goal)</text>
+    <text class="tls" x="452" y="373">• BLOCKED_DIRS / lead-guard</text>
+    <text class="tls" x="452" y="389">• task ("[ROLE:…]" + "รายงาน done")</text>
+    <text class="tls" x="452" y="405" style="fill:#71717a">via bracketed paste</text>
+    <path class="edge" d="M330,571 L440,571 L440,540 L500,540 M500,540 L500,424"/>
+    <rect class="term" x="200" y="614" width="320" height="40" rx="8"/><text class="t" x="360" y="639">⑥ Enter (verified self-heal) → pane ทำงาน</text>
+  </svg>
+  </div>
+
+  <!-- ══════════ PHASE D — WATCHDOG / RECOVERY ══════════ -->
+  <h2>Phase D · Work &amp; recovery — watchdog ทุก 5 วินาที</h2>
+  <p class="sub"><code>_check_idle_teammates</code> วิ่งทุก tick ผ่าน gauntlet นี้ (เรียงตามลำดับ gate จริง)</p>
+  <div class="scroll">
+  <svg viewBox="0 0 720 700" style="max-width:720px;width:100%">
+    <path class="edge" d="M200,54 L200,92"/>
+    <path class="edge" d="M200,146 L200,186"/>
+    <path class="edge" d="M270,216 L470,216"/><text class="el" x="345" y="208">rate-limited</text>
+    <path class="edge" d="M200,246 L200,290"/>
+    <path class="edge" d="M270,320 L470,320"/><text class="el" x="330" y="312">รอ Lead</text>
+    <path class="edge" d="M200,350 L200,394"/>
+    <path class="edge" d="M270,424 L470,424"/><text class="el" x="325" y="416">tty prompt</text>
+    <path class="edge" d="M200,454 L200,498"/>
+    <path class="edge" d="M270,528 L470,528"/><text class="el" x="320" y="520">idle&gt;45s</text>
+    <path class="edge" d="M200,558 L200,604"/><text class="el" x="208" y="586">ยัง busy/ทำงาน</text>
+    <rect class="proc" x="90" y="14" width="220" height="40" rx="8"/><text class="t" x="200" y="39">pane working · tick 5s</text>
+    <rect class="proc" x="60" y="92" width="280" height="54" rx="9"/><text class="tl" x="72" y="113">⓪ stuck-paste reaper</text><text class="tls" x="72" y="130">paste ที่ swallow → re-submit/re-paste (#22/#26)</text>
+    <polygon class="dec" points="200,186 275,216 200,246 125,216"/><text class="ts" x="200" y="220">rate limit?</text>
+    <rect class="proc" x="470" y="196" width="230" height="40" rx="8"/><text class="ts" x="585" y="216">suppress reminder</text><text class="ts" x="585" y="230">(Fable promo ไม่นับ)</text>
+    <polygon class="dec" points="200,290 275,320 200,350 125,320"/><text class="ts" x="200" y="324">blocked on Lead?</text>
+    <rect class="proc" x="470" y="300" width="230" height="40" rx="8"/><text class="ts" x="585" y="324">suppress (รอ clarify)</text>
+    <polygon class="dec" points="200,394 275,424 200,454 125,424"/><text class="ts" x="200" y="428">tty prompt block?</text>
+    <rect class="proc" x="470" y="404" width="230" height="40" rx="8"/><text class="ts" x="585" y="428">surface notice → Lead</text>
+    <polygon class="dec" points="200,498 275,528 200,558 125,528"/><text class="ts" x="200" y="526">idle&gt;45s ที่</text><text class="ts" x="200" y="540">ready+working?</text>
+    <rect class="proc" x="470" y="508" width="230" height="40" rx="8"/><text class="ts" x="585" y="528">inject 🔔 reminder</text><text class="ts" x="585" y="542">(cooldown 90s)</text>
+    <rect class="term" x="70" y="604" width="260" height="40" rx="8"/><text class="t" x="200" y="629">รอ takkub done · stale-marker check</text>
+    <path class="loop" d="M330,624 L560,624 L560,60 L310,34"/><text class="elp" x="450" y="616">วนทุก 5s จน done</text>
+  </svg>
+  </div>
+  <div class="note"><b>delivery self-heal (#22/#26):</b> หลัง paste ถ้า pane ยัง ready → เช็ค input box: <b>มี content</b> = Enter หาย → resend CR · <b>ว่างเปล่า</b> = paste หาย → re-paste payload ใหม่แล้วค่อย submit</div>
+
+  <!-- ══════════ PHASE E — DONE → VERIFY → SHIP ══════════ -->
+  <h2>Phase E · Done-handoff → verify → ship</h2>
+  <p class="sub">done เด้งเข้า Lead → verify sequence (QA ท้ายสุดเสมอ) → propose ship</p>
+  <div class="scroll">
+  <svg viewBox="0 0 720 940" style="max-width:720px;width:100%">
+    <path class="edge" d="M300,54 L300,92"/>
+    <path class="edge" d="M370,122 L520,122"/><text class="el" x="430" y="114">ใช่</text>
+    <path class="edge" d="M300,152 L300,196"/><text class="el" x="308" y="178">ไม่</text>
+    <path class="edge" d="M300,250 L300,300"/>
+    <path class="edge" d="M370,330 L520,330"/><text class="el" x="435" y="322">มี</text>
+    <path class="edge" d="M300,360 L300,410"/><text class="el" x="308" y="388">ไม่มี</text>
+    <path class="edge" d="M520,350 L520,470 L410,470"/>
+    <path class="edge" d="M300,464 L300,510"/>
+    <path class="edge" d="M300,600 L300,650"/><text class="el" x="308" y="628">pass</text>
+    <path class="edge" d="M370,690 L520,690"/><text class="el" x="405" y="682">trust-boundary</text>
+    <path class="edge" d="M300,720 L300,770"/>
+    <path class="edge" d="M520,710 L520,800 L410,800"/>
+    <path class="edge" d="M300,824 L300,872"/>
+    <rect class="proc" x="180" y="14" width="240" height="40" rx="8"/><text class="t" x="300" y="39">takkub done → lead_inbox → Lead</text>
+    <polygon class="dec" points="300,92 375,122 300,152 225,122"/><text class="ts" x="300" y="126">auto-chain?</text>
+    <rect class="proc" x="520" y="102" width="190" height="40" rx="8"/><text class="ts" x="615" y="122">auto fire verify</text><text class="ts" x="615" y="136">(pre-authorized)</text>
+    <polygon class="dec" points="300,196 380,226 300,256 220,226"/><text class="ts" x="300" y="224">DEV เสร็จ</text><text class="ts" x="300" y="238">หมดทุกอย่าง?</text>
+    <path class="loop" d="M220,226 L60,226 L60,34 L180,34"/><text class="elp" x="66" y="216">ยัง → ทำต่อ (ห้ามเรียก QA)</text>
+    <polygon class="dec" points="300,300 375,330 300,360 225,330"/><text class="ts" x="300" y="328">มี docker</text><text class="ts" x="300" y="342">compose?</text>
+    <rect class="proc" x="520" y="310" width="190" height="40" rx="8"/><text class="ts" x="615" y="330">devops ยก stack</text><text class="ts" x="615" y="344">healthcheck · port-safe</text>
+    <rect class="proc" x="200" y="510" width="200" height="52" rx="9"/><text class="t" x="300" y="532">QA ท้ายสุด</text><text class="ts" x="300" y="549">e2e/smoke กับ stack จริง</text>
+    <polygon class="dec" points="300,600 375,630 300,660 225,630" style="stroke:#3b82f6"/><text class="ts" x="300" y="634">verify pass?</text>
+    <path class="loop" d="M300,660 L110,660 L110,470 L200,470"/><text class="elp" x="116" y="650">fail → fix loop กลับ primary</text>
+    <polygon class="dec" points="300,770 375,800 300,830 225,800"/><text class="ts" x="300" y="798">trust-boundary/</text><text class="ts" x="300" y="812">schema/migration?</text>
+    <rect class="proc" x="520" y="670" width="190" height="40" rx="8"/><text class="ts" x="615" y="690">+ reviewer (PR)</text>
+    <rect class="proc" x="185" y="650" width="230" height="0" rx="8" style="opacity:0"/>
+    <rect class="term" x="150" y="872" width="300" height="44" rx="10"/><text class="t" x="300" y="893">propose ship</text><text class="ts" x="300" y="908">commit / PR — คุณสั่ง (ห้าม push เอง)</text>
+  </svg>
+  </div>
+
+  <!-- ══════════ PHASE F — SINKS ══════════ -->
+  <h2>Phase F · ปลายทางข้อมูล (sinks) — จบที่ไหนบ้าง</h2>
+  <div class="scroll">
+  <svg viewBox="0 0 720 300" style="max-width:720px;width:100%">
+    <rect class="proc" x="270" y="14" width="180" height="42" rx="9"/><text class="t" x="360" y="40">event: takkub done</text>
+    <path class="edge" d="M360,56 L120,110"/><path class="edge" d="M360,56 L360,110"/><path class="edge" d="M360,56 L600,110"/>
+    <rect class="termr" x="30" y="112" width="180" height="52" rx="9"/><text class="t" x="120" y="134">runtime/sessions/</text><text class="ts" x="120" y="151">log ราย role (gitignored)</text>
+    <rect class="termr" x="270" y="112" width="180" height="52" rx="9"/><text class="t" x="360" y="134">Obsidian vault</text><text class="ts" x="360" y="151">99-Logs / 01-Projects</text>
+    <rect class="termr" x="510" y="112" width="180" height="52" rx="9"/><text class="t" x="600" y="134">role-memory</text><text class="ts" x="600" y="151">สะสม role×project</text>
+    <path class="edge" d="M120,164 L120,210"/><path class="edge" d="M360,164 L360,210"/><path class="edge" d="M600,164 L600,210"/>
+    <rect class="proc" x="30" y="212" width="180" height="46" rx="9"/><text class="ts" x="120" y="232">ใช้รอบหน้า:</text><text class="ts" x="120" y="248">Lead pull-on-demand</text>
+    <rect class="proc" x="270" y="212" width="180" height="46" rx="9"/><text class="ts" x="360" y="232">resume brief +</text><text class="ts" x="360" y="248">Dataview dashboard</text>
+    <rect class="proc" x="510" y="212" width="180" height="46" rx="9"/><text class="ts" x="600" y="232">inline เข้า spawn</text><text class="ts" x="600" y="248">prompt รอบถัดไป</text>
+    <rect class="termr" x="270" y="270" width="180" height="26" rx="8" style="opacity:0"/>
+  </svg>
+  </div>
+  <div class="note" style="border-left-color:#a855f7">อื่นๆ: <code>takkub issue</code> → <b>GitHub issue queue</b> · <code>takkub end-session</code> → session summary + vault mirror · commit/PR → git (Lead เท่านั้น หลัง verify)</div>
+
+  <div class="note" style="border-left-color:#22c55e"><b>ทั้งหมดใน 1 บรรทัด:</b> classify → (propose/confirm) → dispatch (solo/parallel) → spawn+inject → work (watchdog คุ้มกัน) → done → verify (QA ท้ายสุด) → ship → log จบที่ sessions+vault+role-memory (แล้ววนใช้รอบหน้า)</div>
+
+</div>
+</body>
+</html>

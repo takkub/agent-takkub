@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Takkub Cockpit — Flowchart</title>
+<style>
+  :root{--bg:#09090b;--text:#e4e4e7;--muted:#a1a1aa;--dim:#71717a;--line:#3f3f46}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font-family:"Segoe UI",system-ui,"Sarabun",sans-serif}
+  .wrap{max-width:860px;margin:0 auto;padding:28px 16px 70px}
+  h1{font-size:24px;margin:0 0 4px}
+  .sub{color:var(--muted);font-size:14px;margin:0 0 6px}
+  .lead{color:var(--dim);font-size:12px}
+  .legend{display:flex;flex-wrap:wrap;gap:14px;margin:16px 0 4px;font-size:12px;color:var(--muted)}
+  .legend b{display:inline-block;width:26px;height:14px;border-radius:3px;vertical-align:-2px;margin-right:5px}
+  .scroll{overflow-x:auto;margin-top:10px}
+  svg{display:block;width:100%;max-width:660px;height:auto;margin:0 auto}
+  .cap{color:var(--dim);font-size:12px;text-align:center;margin-top:8px}
+  @media(prefers-color-scheme:light){:root{--bg:#fafafa;--text:#18181b;--muted:#52525b;--dim:#71717a}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🛩️ Takkub Cockpit — Flowchart</h1>
+  <p class="sub">คำสั่ง 1 อันเดินทางยังไง · จุดตัดสินใจ (◇) · loop ย้อนกลับ · จบตรงไหน</p>
+  <p class="lead">2026-07-03 · self-contained ในเครื่อง</p>
+
+  <div class="legend">
+    <span><b style="background:#052e16;border:1px solid #15803d"></b>เริ่ม/จบ</span>
+    <span><b style="background:#18181b;border:1px solid #3f3f46"></b>ขั้นตอน (process)</span>
+    <span><b style="background:#1e293b;border:1px solid #3b82f6;border-radius:0;transform:rotate(0)"></b>◇ ตัดสินใจ</span>
+    <span><b style="background:none;border:1px dashed #a16207"></b>loop ย้อนกลับ</span>
+  </div>
+
+  <div class="scroll">
+  <svg viewBox="0 0 720 1470" role="img" aria-label="Takkub cockpit flowchart">
+    <defs>
+      <marker id="ah" markerWidth="10" markerHeight="10" refX="7.5" refY="3" orient="auto">
+        <path d="M0,0 L7.5,3 L0,6 Z" fill="#8b8b93"/></marker>
+      <marker id="ahl" markerWidth="10" markerHeight="10" refX="7.5" refY="3" orient="auto">
+        <path d="M0,0 L7.5,3 L0,6 Z" fill="#a16207"/></marker>
+    </defs>
+    <style>
+      .proc{fill:#18181b;stroke:#3f3f46;stroke-width:1.4}
+      .dec{fill:#1e293b;stroke:#3b82f6;stroke-width:1.4}
+      .term{fill:#052e16;stroke:#15803d;stroke-width:1.4}
+      .edge{fill:none;stroke:#8b8b93;stroke-width:1.6;marker-end:url(#ah)}
+      .loop{fill:none;stroke:#a16207;stroke-width:1.5;stroke-dasharray:5 4;marker-end:url(#ahl)}
+      .t{fill:#e4e4e7;font:600 12px "Segoe UI","Sarabun",sans-serif;text-anchor:middle}
+      .ts{fill:#cbd5e1;font:400 11px "Segoe UI","Sarabun",sans-serif;text-anchor:middle}
+      .el{fill:#a1a1aa;font:600 10.5px "Segoe UI","Sarabun",sans-serif}
+      .elp{fill:#d6a441;font:600 10.5px "Segoe UI","Sarabun",sans-serif}
+      @media(prefers-color-scheme:light){
+        .proc{fill:#fff;stroke:#d4d4d8}.dec{fill:#eff6ff;stroke:#3b82f6}
+        .term{fill:#dcfce7;stroke:#15803d}.t{fill:#18181b}.ts{fill:#334155}
+      }
+    </style>
+
+    <!-- edges first (under nodes) -->
+    <path class="edge" d="M300,64 L300,113"/>
+    <path class="edge" d="M300,167 L300,208"/>
+    <path class="edge" d="M300,304 L300,372"/>
+    <text class="el" x="308" y="342">ชัด ✓</text>
+    <path class="edge" d="M410,256 L503,256"/>
+    <text class="el" x="420" y="246">ไม่ชัด</text>
+    <path class="edge" d="M630,288 L630,400 L472,400"/>
+    <text class="elp" x="560" y="392" style="fill:#a1a1aa">ok → fire</text>
+    <path class="edge" d="M300,428 L300,490"/>
+    <path class="edge" d="M300,550 L300,613"/>
+    <path class="edge" d="M300,667 L300,711"/>
+    <path class="edge" d="M300,809 L300,856"/>
+    <text class="el" x="312" y="838">เสร็จหมด ✓</text>
+    <path class="edge" d="M300,954 L300,998"/>
+    <text class="el" x="312" y="980">ไม่มี</text>
+    <path class="edge" d="M415,905 L503,905"/>
+    <text class="el" x="425" y="895">มี</text>
+    <path class="edge" d="M630,933 L630,1025 L427,1025"/>
+    <path class="edge" d="M300,1052 L300,1098"/>
+    <path class="edge" d="M300,1192 L300,1240"/>
+    <text class="el" x="312" y="1220">pass ✓</text>
+    <path class="edge" d="M300,1292 L300,1342"/>
+
+    <!-- loops -->
+    <path class="loop" d="M185,760 L46,760 L46,398 L128,398"/>
+    <text class="elp" x="52" y="750">ยังไม่เสร็จ → ทำต่อ</text>
+    <path class="loop" d="M195,1145 L82,1145 L82,414 L128,414"/>
+    <text class="elp" x="88" y="1135">fail → fix กลับ primary</text>
+
+    <!-- nodes -->
+    <!-- 1 start -->
+    <rect class="term" x="180" y="18" width="240" height="46" rx="23"/>
+    <text class="t" x="300" y="45">① คุณพิมพ์ req → Lead pane</text>
+
+    <!-- 2 routing -->
+    <rect class="proc" x="140" y="114" width="320" height="53" rx="9"/>
+    <text class="t" x="300" y="137">② Lead: routing_planner.classify()</text>
+    <text class="ts" x="300" y="154">แยก role + parallel / sequential</text>
+
+    <!-- 3 decision clear -->
+    <polygon class="dec" points="300,208 412,256 300,304 188,256"/>
+    <text class="t" x="300" y="253">ชัด</text>
+    <text class="ts" x="300" y="269">single-best?</text>
+
+    <!-- 3R propose -->
+    <rect class="proc" x="503" y="224" width="212" height="64" rx="9"/>
+    <text class="t" x="609" y="249">เสนอ propose table</text>
+    <text class="ts" x="609" y="266">รอ user confirm</text>
+    <text class="ts" x="609" y="281">(ไม่ ok = หยุด/แก้)</text>
+
+    <!-- 4 assign -->
+    <rect class="proc" x="128" y="373" width="344" height="55" rx="9"/>
+    <text class="t" x="300" y="396">③ takkub assign</text>
+    <text class="ts" x="300" y="414">cli → cli_server (TCP) → orchestrator</text>
+
+    <!-- 5 spawn -->
+    <rect class="proc" x="122" y="491" width="356" height="59" rx="9"/>
+    <text class="t" x="300" y="513">④ spawn_engine → claude.exe pane</text>
+    <text class="ts" x="300" y="531">ConPTY/pty + role MCP+plugin+env, cwd, task</text>
+    <text class="ts" x="300" y="545" style="fill:#71717a">(pane เปิดอยู่แล้ว → ข้าม spawn)</text>
+
+    <!-- 6 work+done -->
+    <rect class="proc" x="140" y="614" width="320" height="53" rx="9"/>
+    <text class="t" x="300" y="637">⑤ pane ทำงาน → takkub done</text>
+    <text class="ts" x="300" y="654">→ lead_inbox → เด้งเข้า Lead</text>
+
+    <!-- 7 decision DEV done -->
+    <polygon class="dec" points="300,712 418,760 300,808 182,760"/>
+    <text class="t" x="300" y="757">DEV เสร็จ</text>
+    <text class="ts" x="300" y="773">หมดทุกอย่าง?</text>
+
+    <!-- 8 decision docker -->
+    <polygon class="dec" points="300,857 418,905 300,953 182,905"/>
+    <text class="t" x="300" y="902">มี docker</text>
+    <text class="ts" x="300" y="918">compose?</text>
+
+    <!-- 8R devops -->
+    <rect class="proc" x="503" y="878" width="212" height="54" rx="9"/>
+    <text class="t" x="609" y="900">devops ยก stack</text>
+    <text class="ts" x="609" y="917">(port-safe) ก่อน</text>
+
+    <!-- 9 QA -->
+    <rect class="proc" x="175" y="999" width="250" height="52" rx="9"/>
+    <text class="t" x="300" y="1021">⑥ QA ท้ายสุด</text>
+    <text class="ts" x="300" y="1038">e2e / smoke</text>
+
+    <!-- 10 decision verify -->
+    <polygon class="dec" points="300,1099 406,1145 300,1191 194,1145"/>
+    <text class="t" x="300" y="1149">verify pass?</text>
+
+    <!-- 11 ship -->
+    <rect class="proc" x="155" y="1240" width="290" height="52" rx="9"/>
+    <text class="t" x="300" y="1262">⑦ propose ship</text>
+    <text class="ts" x="300" y="1279">commit / PR — คุณสั่ง</text>
+
+    <!-- 12 end -->
+    <rect class="term" x="120" y="1343" width="360" height="54" rx="27"/>
+    <text class="t" x="300" y="1366">🏁 จบ: log → sessions</text>
+    <text class="ts" x="300" y="1384" style="fill:#86efac">+ Obsidian vault + role-memory</text>
+  </svg>
+  </div>
+  <p class="cap">◇ = จุดตัดสินใจ · เส้นประส้ม = loop ย้อนกลับ (ยังไม่เสร็จ / verify fail) · เขียว = เริ่ม–จบ</p>
+
+</div>
+</body>
+</html>

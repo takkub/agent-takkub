@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Takkub Cockpit — System Flow</title>
+<style>
+  :root{
+    --bg:#09090b; --surface:#18181b; --surface2:#27272a; --line:#3f3f46;
+    --text:#e4e4e7; --muted:#a1a1aa; --dim:#71717a;
+    --ui:#3b82f6; --engine:#f59e0b; --pane:#22c55e; --sink:#a855f7; --user:#ec4899;
+    --accent:#2563eb;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font-family:"Segoe UI",system-ui,-apple-system,"Sarabun",sans-serif;line-height:1.55}
+  .wrap{max-width:1080px;margin:0 auto;padding:32px 20px 80px}
+  h1{font-size:26px;margin:0 0 4px;letter-spacing:.3px}
+  h2{font-size:19px;margin:44px 0 6px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+  .sub{color:var(--muted);margin:0 0 8px;font-size:14px}
+  .lead{color:var(--dim);font-size:13px;margin-top:2px}
+  code{background:var(--surface2);padding:1px 6px;border-radius:5px;font-size:.85em;
+    font-family:"Cascadia Code",Consolas,monospace;color:#fcd34d}
+  .legend{display:flex;flex-wrap:wrap;gap:10px;margin:14px 0 4px}
+  .tag{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)}
+  .dot{width:11px;height:11px;border-radius:3px;display:inline-block}
+
+  /* window mock */
+  .win{border:1px solid var(--line);border-radius:10px;overflow:hidden;margin:14px 0;background:var(--surface)}
+  .win .titlebar{background:#0f0f11;padding:7px 12px;font-size:12px;color:var(--muted);border-bottom:1px solid var(--line)}
+  .win .body{display:flex;min-height:210px}
+  .win .side{width:150px;border-right:1px solid var(--line);padding:10px;font-size:12px;background:#0d0d0f}
+  .win .side b{color:var(--dim);font-size:10px;letter-spacing:.6px;text-transform:uppercase}
+  .win .proj{display:flex;align-items:center;gap:7px;padding:6px 4px;border-radius:6px;margin-top:6px}
+  .win .proj.active{background:var(--surface2)}
+  .av{width:20px;height:20px;border-radius:5px;background:var(--accent);color:#fff;font-size:10px;
+    display:inline-flex;align-items:center;justify-content:center;font-weight:600}
+  .win .main{flex:1;display:flex;flex-direction:column}
+  .win .tabs{display:flex;gap:2px;padding:8px 10px 0;border-bottom:1px solid var(--line)}
+  .win .tab{padding:5px 12px;font-size:12px;background:var(--surface2);border-radius:6px 6px 0 0;color:var(--text)}
+  .win .panes{flex:1;display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:10px}
+  .pane{border:1px solid var(--line);border-radius:7px;background:#0d0d0f;padding:0;overflow:hidden;min-height:66px}
+  .pane .ph{display:flex;align-items:center;gap:6px;padding:5px 7px;background:var(--surface2);font-size:11px}
+  .pane.lead .ph{background:#1e293b}
+  .pane .pb{padding:8px;font-size:10px;color:var(--dim)}
+  .mini{margin-left:auto;display:flex;gap:3px}
+  .mini span{width:16px;height:16px;border:1px solid var(--line);border-radius:4px;font-size:9px;
+    display:inline-flex;align-items:center;justify-content:center;color:var(--muted)}
+  .statusbar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:7px 10px;border-top:1px solid var(--line);background:#0d0d0f}
+  .chip{font-size:11px;padding:3px 9px;border-radius:13px;border:1px solid var(--line);color:var(--text);white-space:nowrap}
+  .chip.on{border-color:#1d4ed8;color:#93c5fd}
+  .chip.meter{margin-left:auto;color:#4ade80;border-color:#166534}
+
+  /* flow */
+  .flow{display:flex;flex-direction:column;gap:0;margin:16px 0}
+  .step{display:flex;gap:14px;align-items:flex-start}
+  .rail{display:flex;flex-direction:column;align-items:center;flex:0 0 34px}
+  .num{width:30px;height:30px;border-radius:50%;background:var(--surface2);border:1px solid var(--line);
+    display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:600;color:var(--text)}
+  .line-v{width:2px;flex:1;min-height:20px;background:linear-gradient(var(--line),var(--line))}
+  .card{flex:1;background:var(--surface);border:1px solid var(--line);border-radius:9px;padding:11px 14px;margin-bottom:12px}
+  .card .who{font-size:11px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;margin-bottom:3px}
+  .card p{margin:2px 0;font-size:13.5px;color:var(--text)}
+  .card .meta{font-size:12px;color:var(--muted);margin-top:4px}
+  .b-user{border-left:3px solid var(--user)} .w-user{color:var(--user)}
+  .b-ui{border-left:3px solid var(--ui)} .w-ui{color:#93c5fd}
+  .b-engine{border-left:3px solid var(--engine)} .w-engine{color:#fcd34d}
+  .b-pane{border-left:3px solid var(--pane)} .w-pane{color:#86efac}
+  .b-sink{border-left:3px solid var(--sink)} .w-sink{color:#d8b4fe}
+
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13px}
+  th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.5px}
+  td:first-child{white-space:nowrap;color:var(--text);font-weight:600}
+  .k{display:inline-block;background:var(--surface2);border:1px solid var(--line);border-radius:5px;
+    padding:1px 7px;font-size:12px;margin:1px 0}
+
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:14px 0}
+  .box{background:var(--surface);border:1px solid var(--line);border-radius:9px;padding:12px 14px}
+  .box h3{margin:0 0 6px;font-size:14px}
+  .box ul{margin:4px 0 0;padding-left:18px}
+  .box li{font-size:12.5px;color:var(--muted);margin:3px 0}
+  .arrowrow{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:10px 0;font-size:12.5px}
+  .node{background:var(--surface2);border:1px solid var(--line);border-radius:7px;padding:6px 11px;white-space:nowrap}
+  .node.eng{border-color:#a16207;color:#fcd34d}
+  .node.pane{border-color:#15803d;color:#86efac}
+  .ar{color:var(--dim);font-weight:700}
+  .note{background:#0d0d0f;border:1px solid var(--line);border-left:3px solid var(--engine);
+    border-radius:8px;padding:10px 14px;font-size:12.5px;color:var(--muted);margin:14px 0}
+  @media(max-width:720px){.grid2{grid-template-columns:1fr}.win .panes{grid-template-columns:1fr}
+    .win .side{width:110px}}
+  @media(prefers-color-scheme:light){
+    :root{--bg:#fafafa;--surface:#fff;--surface2:#f1f1f4;--line:#d4d4d8;--text:#18181b;--muted:#52525b;--dim:#71717a}
+    code{color:#b45309}.win .titlebar,.win .side,.win .panes .pb,.statusbar,.note{background:#f4f4f5}
+    .pane{background:#fbfbfc}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>🛩️ Takkub Cockpit — ระบบทำงานยังไง</h1>
+  <p class="sub">Desktop app (PyQt6) ที่คุณคุมทีม dev หลายคน (Claude Code) ในหน้าต่างเดียว — อะไรเชื่อมอะไร ข้อมูลไหลไปไหน จบตรงไหน</p>
+  <p class="lead">2026-07-03 · หน้านี้ self-contained อยู่ในเครื่องคุณ ไม่ได้ host ที่ไหน</p>
+
+  <div class="legend">
+    <span class="tag"><i class="dot" style="background:var(--user)"></i>คุณ (User)</span>
+    <span class="tag"><i class="dot" style="background:var(--ui)"></i>UI (หน้าต่าง/ปุ่ม)</span>
+    <span class="tag"><i class="dot" style="background:var(--engine)"></i>Engine (orchestrator · Python)</span>
+    <span class="tag"><i class="dot" style="background:var(--pane)"></i>Pane (claude.exe จริง)</span>
+    <span class="tag"><i class="dot" style="background:var(--sink)"></i>ปลายทาง (ข้อมูลจบที่นี่)</span>
+  </div>
+
+  <!-- ═══ WINDOW MOCK ═══ -->
+  <h2>1 · หน้าตาหน้าต่าง — อะไรอยู่ตรงไหน</h2>
+  <div class="win">
+    <div class="titlebar">agent-takkub — dev team cockpit</div>
+    <div class="body">
+      <div class="side">
+        <b>Projects</b>
+        <div class="proj active"><span class="av">AG</span> agent-takkub</div>
+        <div class="proj"><span class="av" style="background:#7c3aed">LI</span> line_websupport</div>
+        <div style="margin-top:10px;color:var(--dim);font-size:11px">＋ Add project</div>
+        <div style="margin-top:6px;color:var(--dim);font-size:11px">« Collapse</div>
+      </div>
+      <div class="main">
+        <div class="tabs"><div class="tab">Lead</div></div>
+        <div class="panes">
+          <div class="pane lead">
+            <div class="ph">🧠 Lead <span class="mini"><span>▾</span><span>×</span></span></div>
+            <div class="pb">คุณคุยกับ Lead ที่นี่ · Lead สั่งงานทีม</div>
+          </div>
+          <div class="pane">
+            <div class="ph">🟢 frontend <span class="mini"><span>⤓</span><span>🔒</span><span>▾</span><span>×</span></span></div>
+            <div class="pb">teammate pane = claude.exe จริง 1 ตัว</div>
+          </div>
+          <div class="pane">
+            <div class="ph">🟡 qa <span class="mini"><span>⤓</span><span>🔒</span><span>▾</span><span>×</span></span></div>
+            <div class="pb">มี browser MCP (playwright/chrome)</div>
+          </div>
+          <div class="pane" style="border-style:dashed">
+            <div class="ph" style="background:transparent;color:var(--dim)">＋ backend <span class="mini"><span style="color:var(--muted)">Spawn</span></span></div>
+            <div class="pb">ยังไม่เปิด — กด Spawn หรือ Lead assign</div>
+          </div>
+        </div>
+        <div class="statusbar">
+          <span class="chip">Max</span>
+          <span class="chip on">👥 Multi</span>
+          <span class="chip">🔧 Tools</span>
+          <span class="chip">● Codex</span>
+          <span class="chip">● Gemini</span>
+          <span class="chip">⚡ Install rtk</span>
+          <span class="chip meter">2:03 · 26% ↓</span>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="lead"><b>กฎหลัก:</b> 1 tab = 1 project = 1 Lead · Lead คือสมอง (คุณสั่ง Lead, Lead สั่งทีม) · teammate pane แต่ละอัน = claude.exe แยกกระบวนการจริง</p>
+
+  <!-- ═══ CORE DATA FLOW ═══ -->
+  <h2>2 · Data flow หลัก — คำสั่ง 1 อันเดินทางยังไง จบตรงไหน</h2>
+  <p class="sub">ตามลูกศรจากบนลงล่าง: คุณพิมพ์ → Lead → assign → engine → pane ทำงาน → done → กลับ Lead → verify → ปิดงาน</p>
+
+  <div class="flow">
+    <div class="step"><div class="rail"><div class="num">1</div><div class="line-v"></div></div>
+      <div class="card b-user"><div class="who w-user">คุณ (User)</div>
+        <p>พิมพ์สิ่งที่อยากได้ลงใน <b>Lead pane</b> — เช่น "ทำหน้า login + API"</p></div></div>
+
+    <div class="step"><div class="rail"><div class="num">2</div><div class="line-v"></div></div>
+      <div class="card b-ui"><div class="who w-ui">Lead · routing</div>
+        <p>Lead อ่าน → <code>routing_planner.classify()</code> ตัดสินว่าใช้ role ไหน (frontend? backend? qa?) แบบ parallel หรือ sequential</p>
+        <p class="meta">ถ้าชัด → fire เลย · ถ้า ambiguous/irreversible → เสนอ propose table รอคุณ confirm ก่อน</p></div></div>
+
+    <div class="step"><div class="rail"><div class="num">3</div><div class="line-v"></div></div>
+      <div class="card b-ui"><div class="who w-ui">Lead → CLI</div>
+        <p>Lead รัน <code>takkub assign --role frontend --cwd &lt;path&gt; "task"</code></p>
+        <p class="meta">เขียนงานขึ้นต้น <code>[ROLE: …]</code> ปิดท้าย "รายงานด้วย takkub done"</p></div></div>
+
+    <div class="step"><div class="rail"><div class="num">4</div><div class="line-v"></div></div>
+      <div class="card b-engine"><div class="who w-engine">CLI → cli_server → orchestrator</div>
+        <p><code>cli.py</code> ส่งคำสั่งผ่าน <b>TCP socket</b> → <code>cli_server</code> → <code>orchestrator</code> (engine กลาง)</p>
+        <p class="meta">แยก process: CLI เบา ไม่ลาก engine 2.7k LOC เข้ามา (import-linter บังคับ)</p></div></div>
+
+    <div class="step"><div class="rail"><div class="num">5</div><div class="line-v"></div></div>
+      <div class="card b-engine"><div class="who w-engine">orchestrator → spawn_engine</div>
+        <p>ถ้า pane ยังไม่เปิด → <code>spawn_engine</code> สร้าง PTY (<b>ConPTY</b> บน Windows / <b>_pty_backend</b> บน macOS) แล้ว spawn <code>claude.exe</code></p>
+        <p class="meta">inject ให้ pane: role config (<code>--mcp-config</code> variant เฉพาะ role) + <code>--plugin-dir</code> (plugin ของ role) + env <code>TAKKUB_ROLE/PROJECT/SHARD…</code> + cwd + paste task + Enter</p></div></div>
+
+    <div class="step"><div class="rail"><div class="num">6</div><div class="line-v"></div></div>
+      <div class="card b-pane"><div class="who w-pane">Teammate pane ทำงาน</div>
+        <p>claude.exe ตัวนั้นทำงานจริง (แก้โค้ด/เทส) เห็นสดในหน้าต่าง · คุยกับเพื่อนได้ <code>takkub send --to backend</code> (CC Lead อัตโนมัติ)</p></div></div>
+
+    <div class="step"><div class="rail"><div class="num">7</div><div class="line-v"></div></div>
+      <div class="card b-pane"><div class="who w-pane">เสร็จ → takkub done</div>
+        <p>pane รัน <code>takkub done "&lt;สรุป&gt;"</code> → กลับผ่าน socket → orchestrator → <code>lead_inbox</code></p></div></div>
+
+    <div class="step"><div class="rail"><div class="num">8</div><div class="line-v"></div></div>
+      <div class="card b-ui"><div class="who w-ui">Lead รับ done → ตัดสินใจต่อ</div>
+        <p><code>[frontend done] …</code> เด้งเข้า Lead → Lead ใช้ done-handoff rule:</p>
+        <p class="meta">DEV เสร็จหมด → verify sequence (มี docker? → devops ยก stack → <b>QA ท้ายสุด</b>) · ผ่าน → propose ship (commit/PR) · fail → propose fix loop</p></div></div>
+
+    <div class="step"><div class="rail"><div class="num">9</div></div>
+      <div class="card b-sink"><div class="who w-sink">ปลายทาง (จบที่นี่)</div>
+        <p>done ทุกครั้ง → เขียน <b>runtime/sessions/</b> + mirror ไป <b>Obsidian vault</b> + อัปเดต <b>role-memory</b> ของ role นั้น</p>
+        <p class="meta">งานจบ → Lead สรุป "ปิด session?" · <code>takkub end-session</code> เขียน summary · issue → GitHub</p></div></div>
+  </div>
+
+  <!-- ═══ ENGINE INTERNALS ═══ -->
+  <h2>3 · ข้างใน 1 คำสั่ง — อะไรเชื่อมอะไร (เส้นทางจริง)</h2>
+  <div class="arrowrow">
+    <span class="node">คุณพิมพ์</span><span class="ar">→</span>
+    <span class="node">Lead pane</span><span class="ar">→</span>
+    <span class="node eng">cli.py</span><span class="ar">→</span>
+    <span class="node eng">cli_server (TCP)</span><span class="ar">→</span>
+    <span class="node eng">orchestrator</span>
+  </div>
+  <div class="arrowrow">
+    <span class="node eng">orchestrator</span><span class="ar">→</span>
+    <span class="node eng">spawn_engine</span><span class="ar">→</span>
+    <span class="node eng">ConPTY / pty</span><span class="ar">→</span>
+    <span class="node pane">claude.exe (role config)</span>
+  </div>
+  <div class="arrowrow">
+    <span class="node pane">pane · takkub done</span><span class="ar">→</span>
+    <span class="node eng">cli_server</span><span class="ar">→</span>
+    <span class="node eng">orchestrator · lead_inbox</span><span class="ar">→</span>
+    <span class="node">Lead (inject)</span><span class="ar">→</span>
+    <span class="node" style="border-color:#7e22ce;color:#d8b4fe">verify → ship</span>
+  </div>
+  <div class="note"><b>Engine ถูกแตกเป็น 10 mixins</b> (2026-06): pipeline_executor · orchestrator_text · broadcast_actions · lead_inbox · spawn_engine + PaneRegistry (ฝั่ง engine) · update_panel · project_wizard · user_actions · limit_panel · status_header (ฝั่ง UI) — คุมด้วย import-linter 13 contracts กันไม่ให้ UI/CLI ลาก engine เข้าหากันมั่ว</div>
+
+  <!-- ═══ BUTTONS ═══ -->
+  <h2>4 · ทุกปุ่มที่มี — กดแล้วเกิดอะไร</h2>
+
+  <p class="sub" style="margin-top:14px">🔻 Status bar (แถบล่าง)</p>
+  <table>
+    <tr><th>ปุ่ม/chip</th><th>ทำอะไร</th><th>เชื่อมไปไหน</th></tr>
+    <tr><td><span class="k">Pro / Max</span></td><td>สลับ plan tier (Pro↔Max) — มีผลกับการอ่าน limit/usage</td><td><code>plan_tier</code></td></tr>
+    <tr><td><span class="k">👤 1:1 / 👥 Multi</span></td><td>โหมดทำงาน: SOLO (1 agent/role) ↔ PARALLEL (แตกงานหลาย instance/role พร้อมกัน)</td><td><code>exec_mode.py</code> → Lead อ่าน flag แล้ว fan-out</td></tr>
+    <tr><td><span class="k">🔧 Tools</span></td><td>เปิด dialog matrix เปิด/ปิด <b>MCP + Plugin ต่อ role</b> (browser MCP ให้ qa/critic/designer ฯลฯ)</td><td><code>pane_tools_dialog</code> → <code>~/.takkub/pane-tools.json</code> → มีผล pane ที่ spawn ใหม่</td></tr>
+    <tr><td><span class="k">● Codex</span> <span class="k">● Gemini</span></td><td>เปิด/ปิด provider — ปิดแล้ว role นั้น Claude รับแทน (substitute)</td><td><code>provider_config</code> → <code>~/.takkub/disabled-providers.json</code></td></tr>
+    <tr><td><span class="k">⚡ Install rtk</span></td><td>ติดตั้ง rtk PreToolUse hook เข้า <code>.claude/settings.json</code> ของ project ที่ active</td><td>project settings</td></tr>
+    <tr><td><span class="k">2:03 · 26% ↓</span></td><td>usage meter สด — เวลา reset + % ที่ใช้ไป (poll ทุก 120s)</td><td><code>limit_status</code> / <code>limit_panel</code></td></tr>
+  </table>
+
+  <p class="sub">🔻 หัว pane แต่ละอัน</p>
+  <table>
+    <tr><th>ปุ่ม</th><th>ทำอะไร</th></tr>
+    <tr><td><span class="k">Spawn</span></td><td>เปิด pane (spawn claude.exe) — โผล่เมื่อ pane ยังไม่เปิด</td></tr>
+    <tr><td><span class="k">⤓</span></td><td>export buffer ของ pane เป็นไฟล์ .txt</td></tr>
+    <tr><td><span class="k">🔒</span></td><td>ล็อก/ปลดล็อก input (teammate เริ่มมาล็อกไว้ กันพิมพ์แทรก)</td></tr>
+    <tr><td><span class="k">▾</span></td><td>ย่อ pane (collapse body)</td></tr>
+    <tr><td><span class="k">×</span></td><td>ปิด pane นั้น</td></tr>
+  </table>
+
+  <p class="sub">🔻 Sidebar (ซ้าย)</p>
+  <table>
+    <tr><th>ปุ่ม</th><th>ทำอะไร</th></tr>
+    <tr><td><span class="k">โปรเจคในลิสต์</span></td><td>คลิกสลับ project (1 project = 1 tab = 1 Lead)</td></tr>
+    <tr><td><span class="k">＋ Add project</span></td><td>wizard: <b>New</b> (สร้าง + AI เขียน rules) หรือ <b>Import</b> (มีอยู่แล้ว) → <code>project_wizard</code></td></tr>
+    <tr><td><span class="k">right-click</span></td><td>project actions (แก้ path/ปิด ฯลฯ)</td></tr>
+    <tr><td><span class="k">« Collapse</span></td><td>ย่อ sidebar</td></tr>
+  </table>
+
+  <!-- ═══ CLI + SINKS ═══ -->
+  <h2>5 · คำสั่ง CLI (Lead/pane ใช้) + ปลายทางข้อมูล</h2>
+  <div class="grid2">
+    <div class="box">
+      <h3>⌨️ CLI หลัก (<code>takkub …</code>)</h3>
+      <ul>
+        <li><code>assign</code> — spawn + ส่ง task ให้ role</li>
+        <li><code>send</code> — peer message (CC Lead)</li>
+        <li><code>done</code> — pane รายงานเสร็จ → Lead</li>
+        <li><code>list / status</code> — สถานะ pane ทั้งหมด</li>
+        <li><code>goal</code> — ตั้งเป้า session (prepend ทุก assign)</li>
+        <li><code>harvest</code> — กู้งาน pane ที่ลืม done</li>
+        <li><code>doctor --fix</code> — diagnose/ซ่อม env (claude/plugins/mcp)</li>
+        <li><code>services</code> — docker compose ของ project</li>
+        <li><code>pipeline / issue / end-session / mcp / plugins</code></li>
+      </ul>
+    </div>
+    <div class="box">
+      <h3>📤 ข้อมูลจบที่ไหน (sinks)</h3>
+      <ul>
+        <li><b>Lead inbox</b> — done/report เด้งเข้า Lead ให้ตัดสินใจต่อ</li>
+        <li><b>runtime/sessions/</b> — log ราย role (per-machine, gitignored)</li>
+        <li><b>Obsidian vault</b> — mirror decision notes (99-Logs / 01-Projects)</li>
+        <li><b>role-memory</b> — ความรู้สะสมต่อ (role × project) ใช้รอบหน้า</li>
+        <li><b>GitHub</b> — <code>takkub issue</code> → issue queue</li>
+        <li><b>git commit/PR</b> — เฉพาะ Lead หลัง verify ผ่าน (คุณสั่ง)</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="note" style="border-left-color:var(--pane)">
+    <b>สรุปทั้งระบบใน 1 ประโยค:</b> คุณสั่ง <span class="w-ui">Lead</span> → Lead <span class="w-engine">assign ผ่าน engine</span> → engine <span class="w-pane">spawn claude.exe pane</span> ที่มี tool เฉพาะ role → pane ทำงานเสร็จ <span class="w-engine">done กลับ Lead</span> → Lead พา <b>verify (QA ท้ายสุด)</b> → เสนอ <span class="w-sink">ship</span> → log จบที่ sessions + vault + role-memory
+  </div>
+
+</div>
+</body>
+</html>
