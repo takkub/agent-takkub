@@ -190,6 +190,9 @@ class MainWindow(
         self.orch.paneResumed.connect(self._on_pane_resumed)
         self.orch.crossTabDone.connect(self._on_cross_tab_done)
         self.orch.leadNotified.connect(self._on_lead_notified)
+        # `takkub restart` — same persist+relaunch path as the status-bar 🔄
+        # button, minus the confirm dialog (typing the command IS the confirm).
+        self.orch.restartRequested.connect(self._restart_cockpit)
 
         # ── system tray for desktop notifications ───────────────
         self._tray = QSystemTrayIcon(self)

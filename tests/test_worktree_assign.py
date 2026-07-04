@@ -223,3 +223,25 @@ class TestWorktreeHint:
         from agent_takkub.orchestrator_text import _append_worktree_hint
 
         assert "dev server" not in _append_worktree_hint("build X", "wt/x-1")
+
+
+class TestRequestRestart:
+    """`takkub restart` → Orchestrator.request_restart() → deferred signal →
+    main_window._restart_cockpit (persist + relaunch)."""
+
+    def test_replies_ok_and_emits_deferred(self, orch, qapp):
+        fired: list[bool] = []
+        orch.restartRequested.connect(lambda: fired.append(True))
+
+        ok, msg = orch.request_restart()
+        assert ok
+        assert "restart" in msg.lower()
+        # Deferred: NOT emitted synchronously — the IPC reply must flush first.
+        assert fired == []
+        # Fires on the event loop after the 200 ms timer.
+        import time as _time
+
+        deadline = _time.monotonic() + 2.0
+        while not fired and _time.monotonic() < deadline:
+            qapp.processEvents()
+        assert fired == [True]

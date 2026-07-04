@@ -51,6 +51,7 @@ _LEAD_ONLY_CMDS = frozenset(
         "pipeline-run",
         "goal",
         "end-session",  # Lead-only: only Lead summarises + closes the session
+        "restart",  # Lead-only: kills every pane and relaunches the app
     }
 )
 
@@ -397,6 +398,10 @@ class CliServer(QObject):
                 ok, msg = self._orch.close(req["role"], project=from_project)
             elif cmd == "close-all":
                 ok, msg = self._orch.close_all_teammates(project=from_project)
+            elif cmd == "restart":
+                # Full cockpit restart (persist state → relaunch). The
+                # orchestrator emits deferred so this reply flushes first.
+                ok, msg = self._orch.request_restart()
             elif cmd == "done":
                 ok, msg = self._orch.done(
                     req.get("from") or "",

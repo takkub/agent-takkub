@@ -38,6 +38,7 @@ LEAD_ONLY_COMMANDS = frozenset(
         "pipeline",
         "goal",
         "worktree",
+        "restart",
     }
 )
 
@@ -330,6 +331,12 @@ def cmd_close(args: argparse.Namespace) -> dict:
 
 def cmd_close_all(_: argparse.Namespace) -> dict:
     return _request(_with_project({"cmd": "close-all", "from": _from_role()}))
+
+
+def cmd_restart(_: argparse.Namespace) -> dict:
+    """Full cockpit restart from the terminal — no button needed. State/tabs/
+    session snapshot persist first, then the app relaunches and panes respawn."""
+    return _request(_with_project({"cmd": "restart", "from": _from_role()}))
 
 
 def cmd_done(args: argparse.Namespace) -> dict:
@@ -1197,6 +1204,12 @@ def main(argv: list[str] | None = None) -> int:
         "auto-merged). Falls back to shared + warns if the cwd isn't a git repo.",
     )
     sa.set_defaults(func=cmd_assign)
+
+    srs = sub.add_parser(
+        "restart",
+        help="restart the whole cockpit (persist state → relaunch; panes respawn) — lead/terminal only",
+    )
+    srs.set_defaults(func=cmd_restart)
 
     swt = sub.add_parser(
         "worktree",

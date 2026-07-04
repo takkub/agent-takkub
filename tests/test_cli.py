@@ -668,3 +668,23 @@ class TestWorktreeCli:
     def test_clean_failed_line_sets_exit(self):
         self._FakeWtMgr.clean_lines = ["FAILED wt/qa-7 — locked"]
         assert cli.main(["worktree", "clean", "--force"]) != 0
+
+
+class TestRestartCli:
+    """`takkub restart` — full cockpit restart from the terminal (no button)."""
+
+    def test_restart_sends_payload(self, fake_request, monkeypatch):
+        monkeypatch.delenv("TAKKUB_ROLE", raising=False)
+        assert cli.main(["restart"]) == 0
+        assert fake_request[-1]["cmd"] == "restart"
+
+    def test_lead_allowed(self, fake_request, monkeypatch):
+        monkeypatch.setenv("TAKKUB_ROLE", "lead")
+        assert cli.main(["restart"]) == 0
+        assert fake_request[-1]["cmd"] == "restart"
+
+    def test_teammate_blocked(self, fake_request, monkeypatch):
+        n = len(fake_request)
+        monkeypatch.setenv("TAKKUB_ROLE", "backend")
+        assert cli.main(["restart"]) != 0
+        assert len(fake_request) == n  # never reached the socket

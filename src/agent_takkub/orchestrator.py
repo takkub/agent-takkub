@@ -429,6 +429,9 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, QObject):
     # currently active tab. main_window connects this to show a status-bar
     # flash so the user sees background-tab activity without switching tabs.
     crossTabDone = pyqtSignal(str, str, str)  # project_ns, role, note
+    # `takkub restart` (CLI) → main_window._restart_cockpit (persist + relaunch).
+    # Emitted deferred so the IPC reply flushes before the app starts quitting.
+    restartRequested = pyqtSignal()
     # Emitted whenever a notice is queued for a live Lead pane (done handoffs,
     # peer-CCs, system messages). main_window connects this to put an unread
     # red dot on that project's Lead pane-tab when the user is looking at a
@@ -958,6 +961,19 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, QObject):
         except Exception:
             pass
         return result
+
+    def request_restart(self) -> tuple[bool, str]:
+        """`takkub restart` — full cockpit restart without touching the GUI.
+
+        Rides the SAME path as the status-bar 🔄 button (_restart_cockpit):
+        state/tabs/session-snapshot/resume-briefs are persisted before the
+        successor spawns, so teammates restore. The signal is emitted on a
+        short timer so the CLI gets its reply before the app starts quitting.
+        Typing the command IS the confirmation — no dialog on this path.
+        """
+        _log_event("cockpit_restart", reason="cli")
+        QTimer.singleShot(200, self.restartRequested.emit)
+        return True, "restarting cockpit — state persisted, app relaunching (panes respawn)"
 
     def _tag_pane_worktree(self, project_ns: str, role_name: str, branch: str) -> None:
         """Set the worktree-branch chip on a pane's header (🌿 <branch>)."""
