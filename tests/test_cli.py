@@ -587,3 +587,84 @@ class TestEnsureUtf8Stdio:
         monkeypatch.setattr("sys.stdout", _BadStream())
         monkeypatch.setattr("sys.stderr", _BadStream())
         cli._ensure_utf8_stdio()  # must not propagate the OSError
+
+
+class TestWorktreeCli:
+    """`takkub worktree list/merge/clean` (P2.4) — pure-local, lead-gated."""
+
+    class _FakeWtMgr:
+        # ClassVar: shared scripted state, reset by the autouse fixture per test
+        from typing import ClassVar
+
+        rows: ClassVar[list] = []
+        merge_result: ClassVar[tuple] = (True, "merged wt/frontend-9 + cleanup เรียบร้อย")
+        clean_lines: ClassVar[list] = ["REMOVED wt/qa-7"]
+        merge_calls: ClassVar[list] = []
+
+        def __init__(self, *a, **k):
+            pass
+
+        def git_root(self, cwd):
+            return "/repo"
+
+        def list_isolated(self, root):
+            return type(self).rows
+
+        def merge_isolated(self, root, branch, keep=False):
+            type(self).merge_calls.append((branch, keep))
+            return type(self).merge_result
+
+        def clean_isolated(self, root, force=False):
+            return type(self).clean_lines
+
+    @pytest.fixture(autouse=True)
+    def _fake_mgr(self, monkeypatch):
+        from agent_takkub import worktree_manager as wm
+
+        self._FakeWtMgr.rows = []
+        self._FakeWtMgr.merge_calls = []
+        self._FakeWtMgr.clean_lines = ["REMOVED wt/qa-7"]
+        self._FakeWtMgr.merge_result = (True, "merged")
+        monkeypatch.setattr(wm, "WorktreeManager", self._FakeWtMgr)
+        monkeypatch.delenv("TAKKUB_ROLE", raising=False)
+
+    def test_teammate_blocked_by_role_gate(self, monkeypatch):
+        monkeypatch.setenv("TAKKUB_ROLE", "backend")
+        rc = cli.main(["worktree", "list"])
+        assert rc != 0
+
+    def test_lead_allowed(self, monkeypatch):
+        monkeypatch.setenv("TAKKUB_ROLE", "lead")
+        assert cli.main(["worktree", "list"]) == 0
+
+    def test_list_empty_ok(self):
+        assert cli.main(["worktree", "list"]) == 0
+
+    def test_merge_resolves_newest_branch_for_role(self):
+        self._FakeWtMgr.rows = [
+            {"path": "/w1", "branch": "wt/frontend-100", "sha": "a", "ahead": 1, "dirty": False},
+            {"path": "/w2", "branch": "wt/frontend-200", "sha": "b", "ahead": 1, "dirty": False},
+            {"path": "/w3", "branch": "wt/qa-300", "sha": "c", "ahead": 0, "dirty": False},
+        ]
+        rc = cli.main(["worktree", "merge", "--role", "frontend"])
+        assert rc == 0
+        assert self._FakeWtMgr.merge_calls == [("wt/frontend-200", False)]  # newest ts
+
+    def test_merge_exact_branch_and_keep(self):
+        rc = cli.main(["worktree", "merge", "--branch", "wt/qa-300", "--keep"])
+        assert rc == 0
+        assert self._FakeWtMgr.merge_calls == [("wt/qa-300", True)]
+
+    def test_merge_requires_role_or_branch(self):
+        assert cli.main(["worktree", "merge"]) != 0
+
+    def test_merge_no_candidates_for_role(self):
+        self._FakeWtMgr.rows = []
+        assert cli.main(["worktree", "merge", "--role", "ghost"]) != 0
+
+    def test_clean_reports_lines(self):
+        assert cli.main(["worktree", "clean"]) == 0
+
+    def test_clean_failed_line_sets_exit(self):
+        self._FakeWtMgr.clean_lines = ["FAILED wt/qa-7 — locked"]
+        assert cli.main(["worktree", "clean", "--force"]) != 0

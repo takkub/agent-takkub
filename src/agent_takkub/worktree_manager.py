@@ -535,6 +535,107 @@ class WorktreeManager:
             self._run(["-C", info.git_root, "branch", "-D", info.branch], None)
         return True, ""
 
+    # -- CLI ops (P2.4: takkub worktree list / merge / clean) ----------------
+
+    def list_isolated(self, git_root: str) -> list[dict]:
+        """All ``wt/*`` worktrees of the repo with commits-ahead + dirty flags.
+
+        Row shape: {"path", "branch", "sha", "ahead": int, "dirty": bool}.
+        Works from git state alone — no PaneState needed (usable after a
+        cockpit crash, or with the cockpit closed entirely).
+        """
+        res = self._run(["-C", git_root, "worktree", "list", "--porcelain"], None)
+        if not res.ok:
+            return []
+        rows: list[dict] = []
+        for ent in parse_worktree_list(res.stdout):
+            branch = ent.get("branch")
+            if not branch or not branch.startswith(f"{_BRANCH_PREFIX}/"):
+                continue
+            ahead_res = self._run(["-C", git_root, "rev-list", "--count", f"HEAD..{branch}"], None)
+            try:
+                ahead = int(ahead_res.stdout.strip() or "0") if ahead_res.ok else 0
+            except ValueError:
+                ahead = 0
+            dirty_res = self._run(["-C", ent["path"], "status", "--porcelain"], None)
+            rows.append(
+                {
+                    "path": ent["path"],
+                    "branch": branch,
+                    "sha": ent.get("sha", ""),
+                    "ahead": ahead,
+                    "dirty": bool(dirty_res.ok and dirty_res.stdout.strip()),
+                }
+            )
+        return rows
+
+    def merge_isolated(self, git_root: str, branch: str, keep: bool = False) -> tuple[bool, str]:
+        """``merge --no-ff`` an isolated branch into the main tree's HEAD, then
+        (unless *keep*) remove its worktree + branch.
+
+        On a merge conflict the merge is aborted and the worktree left intact —
+        the caller reports the conflict instead of leaving the main tree in a
+        conflicted state. The pre-removal link sweep makes cleanup safe even
+        when the links record died with a crashed cockpit.
+        """
+        rows = [r for r in self.list_isolated(git_root) if r["branch"] == branch]
+        if not rows:
+            return False, f"ไม่พบ worktree ของ branch {branch}"
+        row = rows[0]
+        if row["dirty"]:
+            return False, (
+                f"worktree ของ {branch} มี uncommitted changes — ให้ pane commit ก่อน "
+                f"หรือเข้าไปเก็บงานที่ {row['path']}"
+            )
+        merge = self._run(["-C", git_root, "merge", "--no-ff", "--no-edit", branch], None)
+        if not merge.ok:
+            self._run(["-C", git_root, "merge", "--abort"], None)
+            tail = (merge.stderr or merge.stdout).strip().splitlines()
+            return False, (
+                f"merge conflict/ล้มเหลว ({tail[-1] if tail else merge.returncode}) — "
+                f"abort แล้ว worktree ยังอยู่ครบที่ {row['path']}"
+            )
+        if keep:
+            return True, f"merged {branch} (–keep: worktree ยังอยู่)"
+        sweep_link_points(Path(row["path"]))
+        self._run(["-C", git_root, "worktree", "remove", row["path"]], None)
+        self._run(["-C", git_root, "worktree", "prune"], None)
+        self._run(["-C", git_root, "branch", "-d", branch], None)
+        return True, f"merged {branch} + cleanup เรียบร้อย"
+
+    def clean_isolated(self, git_root: str, force: bool = False) -> list[str]:
+        """Sweep leftover ``wt/*`` worktrees (crashed panes, forgotten probes).
+
+        Default: remove only SAFE leftovers — clean tree AND no commits ahead
+        (nothing of value can be lost). ``force=True`` removes every wt/*
+        worktree + branch regardless (dirty work and unmerged commits are
+        dropped — the CLI makes the caller opt in explicitly). Returns
+        human-readable result lines.
+        """
+        out: list[str] = []
+        for row in self.list_isolated(git_root):
+            keep_reason = ""
+            if not force:
+                if row["dirty"]:
+                    keep_reason = "dirty (มี uncommitted changes)"
+                elif row["ahead"]:
+                    keep_reason = f"{row['ahead']} commit ยังไม่ merge"
+            if keep_reason:
+                out.append(f"KEEP  {row['branch']} — {keep_reason}")
+                continue
+            sweep_link_points(Path(row["path"]))
+            args = ["-C", git_root, "worktree", "remove"]
+            if force:
+                args.append("--force")
+            rm = self._run([*args, row["path"]], None)
+            self._run(["-C", git_root, "worktree", "prune"], None)
+            self._run(["-C", git_root, "branch", "-D", row["branch"]], None)
+            out.append(
+                f"{'REMOVED' if rm.ok else 'FAILED '} {row['branch']}"
+                + ("" if rm.ok else f" — {(rm.stderr or rm.stdout).strip()[:120]}")
+            )
+        return out
+
     def force_remove(self, info: WorktreeInfo) -> tuple[bool, str]:
         """Unconditional teardown (``--force`` + prune + branch -D). Used for
         explicit cleanup where losing uncommitted scratch is acceptable."""
@@ -546,6 +647,84 @@ class WorktreeManager:
             tail = (rm.stderr or rm.stdout).strip().splitlines()
             return False, tail[-1] if tail else f"worktree remove --force exit {rm.returncode}"
         return True, ""
+
+
+def _is_link_point(p: Path) -> bool:
+    """True for anything that must be unlinked, never recursed into: symlinks
+    (both OS) and Windows reparse points (junctions — ``is_symlink()`` is False
+    for those, so check the FILE_ATTRIBUTE_REPARSE_POINT bit)."""
+    if p.is_symlink():
+        return True
+    if sys.platform == "win32":
+        try:
+            import stat as _stat
+
+            attrs = p.stat(follow_symlinks=False).st_file_attributes
+            return bool(attrs & _stat.FILE_ATTRIBUTE_REPARSE_POINT)
+        except OSError:
+            return False
+    return False
+
+
+def sweep_link_points(top: Path) -> list[str]:
+    """Remove every link point under *top* without ever following one (P2.4).
+
+    Crash-recovery safety net for `takkub worktree clean/merge`: when the
+    cockpit died, the WorktreeInfo.links record is gone, so before ANY
+    recursive removal we walk the tree with ``followlinks=False``, unlink each
+    symlink/junction found, and prune it from the walk. Returns the removed
+    relative paths. A tree swept by this function contains no traversable link
+    into the main tree, making the follow-up ``git worktree remove`` safe.
+    """
+    removed: list[str] = []
+    top = Path(top)
+    if not top.is_dir() or _is_link_point(top):
+        return removed
+    for dirpath, dirnames, filenames in os.walk(top, followlinks=False):
+        base = Path(dirpath)
+        keep_dirs = []
+        for name in dirnames:
+            child = base / name
+            if _is_link_point(child):
+                _remove_link(child)
+                removed.append(str(child.relative_to(top)))
+            else:
+                keep_dirs.append(name)
+        dirnames[:] = keep_dirs  # never descend into (now-removed) link dirs
+        for name in filenames:
+            child = base / name
+            if child.is_symlink():
+                _remove_link(child)
+                removed.append(str(child.relative_to(top)))
+    return removed
+
+
+def parse_worktree_list(porcelain: str) -> list[dict]:
+    """Parse ``git worktree list --porcelain`` into dicts (pure, unit-tested).
+
+    Returns ``[{"path": str, "sha": str, "branch": str|None}]`` — branch is
+    None for a detached/bare entry. Isolated cockpit worktrees are the entries
+    whose branch starts with ``wt/``.
+    """
+    out: list[dict] = []
+    cur: dict = {}
+    for line in porcelain.splitlines():
+        line = line.strip()
+        if not line:
+            if cur:
+                out.append(cur)
+                cur = {}
+            continue
+        if line.startswith("worktree "):
+            cur = {"path": line[len("worktree ") :], "sha": "", "branch": None}
+        elif line.startswith("HEAD "):
+            cur["sha"] = line[len("HEAD ") :]
+        elif line.startswith("branch "):
+            ref = line[len("branch ") :]
+            cur["branch"] = ref.removeprefix("refs/heads/")
+    if cur:
+        out.append(cur)
+    return out
 
 
 def build_merge_proposal(role: str, info: WorktreeInfo, commits: int, diffstat: str) -> str:

@@ -141,11 +141,12 @@
         "agent_takkub.services",
         "agent_takkub.shared_dev_tools",
         "agent_takkub.skill_audit",
-        "agent_takkub.verify"
+        "agent_takkub.verify",
+        "agent_takkub.worktree_manager"
       ],
       "imported_by": [],
       "fan_in": 0,
-      "fan_out": 15
+      "fan_out": 16
     },
     {
       "module": "agent_takkub.cli_server",
@@ -987,10 +988,11 @@
         "agent_takkub.config"
       ],
       "imported_by": [
+        "agent_takkub.cli",
         "agent_takkub.orchestrator",
         "agent_takkub.orchestrator_text"
       ],
-      "fan_in": 2,
+      "fan_in": 3,
       "fan_out": 1
     }
   ]

@@ -160,6 +160,9 @@ takkub assign --role backend --auto-chain "<task>"     # impl done → auto veri
 takkub assign --role qa --shards 4 "<task>"            # fan-out N parallel shard panes (<role>#1…#N · env TAKKUB_SHARD/_TOTAL)
 takkub assign --role qa --plan --shards 4 "<task>"     # plan-first: planner pane แบ่ง N buckets → auto fan-out qa#1…#N ฉลาด (ต้อง --shards ≥ 2)
 takkub assign --role frontend --isolation worktree "<task>" # pane รันใน git worktree+branch แยก (wt/<role>-<ts>) — build ขนานไม่ชนกัน · done → Lead ได้ merge PROPOSAL (ไม่ auto) · ไม่ใช่ git repo → fallback shared+warn (#81)
+takkub worktree list [--cwd <path>]                    # ดู wt/* worktrees + commits-ahead + dirty (lead only · ใช้ได้แม้ cockpit ปิด)
+takkub worktree merge --role <r> [--keep]              # merge --no-ff branch ล่าสุดของ role กลับ main + cleanup (conflict → auto-abort, worktree อยู่ครบ) · หรือ --branch wt/... ระบุเอง
+takkub worktree clean [--force]                        # เก็บกวาด wt/* ที่เหลือค้าง — default ลบเฉพาะ clean+ไม่มี commit · --force ลบหมด (งาน dirty หาย!)
 takkub send --to backend "<message>"                   # peer message (CC Lead อัตโนมัติ)
 takkub goal "<objective>"                              # ตั้งเป้าหมาย session — prepend เข้าทุก assign task หลังจากนี้
 takkub goal                                            # โชว์ goal ปัจจุบัน

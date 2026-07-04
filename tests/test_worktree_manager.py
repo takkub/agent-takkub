@@ -538,3 +538,220 @@ class TestAllocatePort:
         info = WorktreeInfo(path="/w", branch="wt/x-1", base_sha="b", git_root="/r", port=5312)
         assert WorktreeInfo.from_dict(info.as_dict()).port == 5312
         assert WorktreeInfo.from_dict({"path": "/w", "branch": "b", "git_root": "/r"}).port == 0
+
+
+# ── CLI ops engine (P2.4) ───────────────────────────────────────────────────
+
+
+_PORCELAIN = """\
+worktree /repo
+HEAD aaaa111
+branch refs/heads/main
+
+worktree /repo/worktrees/p/frontend-9
+HEAD bbbb222
+branch refs/heads/wt/frontend-9
+
+worktree /repo/worktrees/p/qa-7
+HEAD cccc333
+branch refs/heads/wt/qa-7
+
+worktree /repo/detached
+HEAD dddd444
+"""
+
+
+class TestParseWorktreeList:
+    def test_parses_paths_shas_branches(self):
+        from agent_takkub.worktree_manager import parse_worktree_list
+
+        rows = parse_worktree_list(_PORCELAIN)
+        assert [r["branch"] for r in rows] == ["main", "wt/frontend-9", "wt/qa-7", None]
+        assert rows[1]["path"].endswith("frontend-9")
+        assert rows[3]["branch"] is None  # detached entry survives parsing
+
+    def test_empty_input(self):
+        from agent_takkub.worktree_manager import parse_worktree_list
+
+        assert parse_worktree_list("") == []
+
+
+class TestSweepLinkPoints:
+    """Real filesystem link points: junction on Windows, symlink elsewhere —
+    genuine platform coverage on both CI runners."""
+
+    def _make_dir_link(self, src, dst):
+        import sys as _sys
+
+        if _sys.platform == "win32":
+            import _winapi
+
+            _winapi.CreateJunction(str(src), str(dst))
+        else:
+            import os as _os
+
+            _os.symlink(str(src), str(dst))
+
+    def test_sweeps_link_and_never_touches_target(self, tmp_path):
+        from agent_takkub.worktree_manager import sweep_link_points
+
+        main = tmp_path / "main" / "node_modules"
+        main.mkdir(parents=True)
+        (main / "pkg.js").write_text("real", encoding="utf-8")
+        wt = tmp_path / "wt"
+        (wt / "src").mkdir(parents=True)
+        (wt / "src" / "app.ts").write_text("code", encoding="utf-8")
+        self._make_dir_link(main, wt / "node_modules")
+
+        removed = sweep_link_points(wt)
+
+        assert removed == ["node_modules"]
+        assert not (wt / "node_modules").exists()  # link gone
+        assert (main / "pkg.js").exists()  # TARGET intact — the whole point
+        assert (wt / "src" / "app.ts").exists()  # real content untouched
+
+    def test_nested_link_found_without_following(self, tmp_path):
+        from agent_takkub.worktree_manager import sweep_link_points
+
+        target = tmp_path / "outside"
+        target.mkdir()
+        (target / "keep.txt").write_text("x", encoding="utf-8")
+        wt = tmp_path / "wt" / "deep" / "dir"
+        wt.mkdir(parents=True)
+        self._make_dir_link(target, wt / "linked")
+
+        removed = sweep_link_points(tmp_path / "wt")
+        assert removed and removed[0].endswith("linked")
+        assert (target / "keep.txt").exists()
+
+    def test_plain_tree_untouched(self, tmp_path):
+        from agent_takkub.worktree_manager import sweep_link_points
+
+        wt = tmp_path / "wt"
+        (wt / "a").mkdir(parents=True)
+        (wt / "a" / "f.txt").write_text("1", encoding="utf-8")
+        assert sweep_link_points(wt) == []
+        assert (wt / "a" / "f.txt").exists()
+
+
+class TestListIsolated:
+    def _runner(self, extra=None):
+        rules = (extra or []) + [
+            (["worktree", "list", "--porcelain"], _ok(_PORCELAIN)),
+            (["rev-list", "--count"], _ok("2\n")),
+            (["status", "--porcelain"], _ok("")),
+        ]
+        return FakeRunner(rules)
+
+    def test_only_wt_branches_listed(self):
+        mgr = WorktreeManager(self._runner())
+        rows = mgr.list_isolated("/repo")
+        assert [r["branch"] for r in rows] == ["wt/frontend-9", "wt/qa-7"]
+        assert all(r["ahead"] == 2 for r in rows)
+        assert all(r["dirty"] is False for r in rows)
+
+    def test_dirty_flag_surfaces(self):
+        mgr = WorktreeManager(self._runner(extra=[(["status", "--porcelain"], _ok(" M x.ts\n"))]))
+        rows = mgr.list_isolated("/repo")
+        assert all(r["dirty"] for r in rows)
+
+
+class TestMergeIsolated:
+    def _runner(self, extra=None):
+        rules = (extra or []) + [
+            (["worktree", "list", "--porcelain"], _ok(_PORCELAIN)),
+            (["rev-list", "--count"], _ok("1\n")),
+            (["status", "--porcelain"], _ok("")),
+        ]
+        return FakeRunner(rules)
+
+    def test_merge_success_cleans_up(self, monkeypatch):
+        from agent_takkub import worktree_manager as wm
+
+        swept = []
+        monkeypatch.setattr(wm, "sweep_link_points", lambda p: swept.append(str(p)) or [])
+        r = self._runner()
+        ok, msg = WorktreeManager(r).merge_isolated("/repo", "wt/frontend-9")
+        assert ok, msg
+        assert r.ran("merge", "--no-ff", "--no-edit", "wt/frontend-9")
+        assert swept  # link sweep before removal
+        assert r.ran("worktree", "remove")
+        assert r.ran("branch", "-d", "wt/frontend-9")
+
+    def test_merge_conflict_aborts_and_keeps_worktree(self, monkeypatch):
+        from agent_takkub import worktree_manager as wm
+
+        monkeypatch.setattr(wm, "sweep_link_points", lambda p: [])
+        r = self._runner(extra=[(["merge", "--no-ff"], _fail("CONFLICT (content): x.ts", 1))])
+        ok, msg = WorktreeManager(r).merge_isolated("/repo", "wt/frontend-9")
+        assert not ok
+        assert "conflict" in msg.lower()
+        assert r.ran("merge", "--abort")
+        assert not r.ran("worktree", "remove")  # left intact
+
+    def test_dirty_worktree_refused(self):
+        r = self._runner(extra=[(["status", "--porcelain"], _ok(" M y.ts\n"))])
+        ok, msg = WorktreeManager(r).merge_isolated("/repo", "wt/frontend-9")
+        assert not ok and "uncommitted" in msg
+
+    def test_unknown_branch_refused(self):
+        ok, msg = WorktreeManager(self._runner()).merge_isolated("/repo", "wt/ghost-1")
+        assert not ok and "ไม่พบ" in msg
+
+    def test_keep_skips_cleanup(self, monkeypatch):
+        from agent_takkub import worktree_manager as wm
+
+        monkeypatch.setattr(wm, "sweep_link_points", lambda p: [])
+        r = self._runner()
+        ok, _ = WorktreeManager(r).merge_isolated("/repo", "wt/qa-7", keep=True)
+        assert ok
+        assert not r.ran("worktree", "remove")
+
+
+class TestCleanIsolated:
+    def test_default_keeps_dirty_and_unmerged(self, monkeypatch):
+        from agent_takkub import worktree_manager as wm
+
+        monkeypatch.setattr(wm, "sweep_link_points", lambda p: [])
+        # ahead=2 for all rows -> both kept
+        r = FakeRunner(
+            [
+                (["worktree", "list", "--porcelain"], _ok(_PORCELAIN)),
+                (["rev-list", "--count"], _ok("2\n")),
+                (["status", "--porcelain"], _ok("")),
+            ]
+        )
+        lines = WorktreeManager(r).clean_isolated("/repo")
+        assert all(line.startswith("KEEP") for line in lines)
+        assert not r.ran("worktree", "remove")
+
+    def test_default_removes_true_leftovers(self, monkeypatch):
+        from agent_takkub import worktree_manager as wm
+
+        monkeypatch.setattr(wm, "sweep_link_points", lambda p: [])
+        r = FakeRunner(
+            [
+                (["worktree", "list", "--porcelain"], _ok(_PORCELAIN)),
+                (["rev-list", "--count"], _ok("0\n")),  # nothing ahead
+                (["status", "--porcelain"], _ok("")),  # clean
+            ]
+        )
+        lines = WorktreeManager(r).clean_isolated("/repo")
+        assert all(line.startswith("REMOVED") for line in lines)
+        assert r.ran("worktree", "remove")
+        assert r.ran("branch", "-D")
+
+    def test_force_removes_everything(self, monkeypatch):
+        from agent_takkub import worktree_manager as wm
+
+        monkeypatch.setattr(wm, "sweep_link_points", lambda p: [])
+        r = FakeRunner(
+            [
+                (["worktree", "list", "--porcelain"], _ok(_PORCELAIN)),
+                (["rev-list", "--count"], _ok("5\n")),
+                (["status", "--porcelain"], _ok(" M x\n")),  # dirty!
+            ]
+        )
+        lines = WorktreeManager(r).clean_isolated("/repo", force=True)
+        assert all(line.startswith("REMOVED") for line in lines)
+        assert r.ran("worktree", "remove", "--force")

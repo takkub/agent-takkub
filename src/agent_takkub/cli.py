@@ -37,6 +37,7 @@ LEAD_ONLY_COMMANDS = frozenset(
         "release",
         "pipeline",
         "goal",
+        "worktree",
     }
 )
 
@@ -251,6 +252,70 @@ def cmd_assign(args: argparse.Namespace) -> dict:
             }
         )
     )
+
+
+def cmd_worktree(args: argparse.Namespace) -> dict:
+    """`takkub worktree list|merge|clean` — Lead merge assist for #81 worktrees.
+
+    Pure-local git operations (no orchestrator socket): the git state is the
+    source of truth, so this works after a cockpit crash or with the cockpit
+    closed — exactly when cleanup is most needed. Mutations are lead-gated at
+    the CLI layer like assign/close.
+    """
+    from .worktree_manager import WorktreeManager
+
+    cwd = getattr(args, "cwd", None) or os.getcwd()
+    mgr = WorktreeManager()
+    root = mgr.git_root(cwd)
+    if root is None:
+        return {"ok": False, "msg": f"'{cwd}' ไม่อยู่ใน git repo (ใช้ --cwd ชี้โปรเจค)"}
+
+    sub = args.wt_cmd
+    if sub == "list":
+        rows = mgr.list_isolated(root)
+        if not rows:
+            print("(no isolated wt/* worktrees)")
+            return {"ok": True, "msg": "0 worktrees"}
+        for r in rows:
+            flags = []
+            if r["ahead"]:
+                flags.append(f"{r['ahead']} commit ahead")
+            if r["dirty"]:
+                flags.append("dirty")
+            _utf8_print(
+                f"  {r['branch']:<32} {(' · '.join(flags) or 'clean/empty'):<28} {r['path']}"
+            )
+        return {"ok": True, "msg": f"{len(rows)} worktree(s)"}
+
+    if sub == "merge":
+        branch = args.branch
+        if not branch and not args.role:
+            return {"ok": False, "msg": "ระบุ --role <r> (branch ล่าสุดของ role) หรือ --branch wt/..."}
+        if not branch:
+            # resolve the newest wt/<role>-* branch for --role
+            from .worktree_manager import sanitize_ref_component
+
+            prefix = f"wt/{sanitize_ref_component(args.role or '')}-"
+            cands = sorted(
+                (r["branch"] for r in mgr.list_isolated(root) if r["branch"].startswith(prefix)),
+            )
+            if not cands:
+                return {"ok": False, "msg": f"ไม่พบ worktree branch ของ role '{args.role}'"}
+            branch = cands[-1]  # highest ts = newest
+        ok, msg = mgr.merge_isolated(root, branch, keep=bool(args.keep))
+        return {"ok": ok, "msg": msg}
+
+    if sub == "clean":
+        lines = mgr.clean_isolated(root, force=bool(args.force))
+        if not lines:
+            print("(nothing to clean)")
+            return {"ok": True, "msg": "0 cleaned"}
+        for line in lines:
+            _utf8_print(f"  {line}")
+        failed = sum(1 for line in lines if line.startswith("FAILED"))
+        return {"ok": failed == 0, "msg": f"{len(lines)} processed, {failed} failed"}
+
+    return {"ok": False, "msg": f"unknown worktree subcommand: {sub}"}
 
 
 def cmd_send(args: argparse.Namespace) -> dict:
@@ -1132,6 +1197,33 @@ def main(argv: list[str] | None = None) -> int:
         "auto-merged). Falls back to shared + warns if the cwd isn't a git repo.",
     )
     sa.set_defaults(func=cmd_assign)
+
+    swt = sub.add_parser(
+        "worktree",
+        help="manage isolated per-pane worktrees (#81): list / merge / clean (lead only)",
+    )
+    swt_sub = swt.add_subparsers(dest="wt_cmd", required=True)
+    swl = swt_sub.add_parser("list", help="show wt/* worktrees + commits-ahead + dirty flags")
+    swl.add_argument("--cwd", default=None, help="project dir (default: current dir)")
+    swm = swt_sub.add_parser(
+        "merge",
+        help="merge --no-ff an isolated branch into the main tree, then clean it up",
+    )
+    swm.add_argument("--role", default=None, help="merge the NEWEST wt/<role>-* branch")
+    swm.add_argument("--branch", default=None, help="merge this exact wt/* branch")
+    swm.add_argument("--keep", action="store_true", help="merge but keep the worktree")
+    swm.add_argument("--cwd", default=None, help="project dir (default: current dir)")
+    swc = swt_sub.add_parser(
+        "clean",
+        help="remove leftover wt/* worktrees (safe ones only; --force drops dirty/unmerged too)",
+    )
+    swc.add_argument(
+        "--force",
+        action="store_true",
+        help="also remove dirty / unmerged worktrees (their work is LOST)",
+    )
+    swc.add_argument("--cwd", default=None, help="project dir (default: current dir)")
+    swt.set_defaults(func=cmd_worktree)
 
     ss = sub.add_parser("send", help="send a message to a running pane")
     ss.add_argument("--to", required=True)
