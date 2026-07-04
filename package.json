@@ -1,6 +1,6 @@
 {
   "name": "agent-takkub",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "description": "Desktop cockpit for orchestrating a team of Claude Code agents (Windows + macOS)",
   "keywords": [
     "claude",
