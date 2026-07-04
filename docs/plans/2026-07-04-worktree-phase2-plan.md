@@ -1,7 +1,12 @@
 # Worktree isolation — Phase 2 plan (#81)
 
 **Date:** 2026-07-04
-**Status:** PLANNED — Phase 1 (`8ecc770`) + Phase 1.5 Multi-mode wiring (`563cd62`) shipped, CI green.
+**Status:** P2.1–P2.4 + Tier 2c SHIPPED overnight 2026-07-04 (`4aa315b` config,
+`450e8c5` link engine, `2c28259` ports, `6da3c74` worktree CLI, `93a12e7`
+routing DAG; `00f869c` cross-platform fix CI-caught). **Remaining: P2.5
+acceptance e2e (needs the user: real web project + cockpit restart) and the
+token limiter (deliberately after P2.5 measurements).**
+Phase 1 (`8ecc770`) + Phase 1.5 Multi-mode wiring (`563cd62`) shipped earlier, CI green.
 **Prereq reading:** `docs/plans/2026-07-03-external-idea-integration-roadmap.md` (Tier 3 section
 carries the Phase-1 design, the live-e2e findings, and the agent-orchestrator blueprint).
 
