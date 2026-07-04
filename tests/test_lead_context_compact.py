@@ -87,3 +87,32 @@ class TestPostCompactBriefInjection:
         text = pathlib.Path(result_path).read_text(encoding="utf-8")
         assert "prev session note" in text
         assert "Post-compact status" in text
+
+
+class TestParallelModeWorktreeRule:
+    """The PARALLEL exec-mode block must teach the Lead to isolate same-repo
+    fan-out instances with --isolation worktree (#81 Phase 1.5) — and SOLO
+    spawns must not pay for the block at all."""
+
+    def test_parallel_block_includes_worktree_rule(
+        self, runtime_tmp: pathlib.Path, cockpit_md: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from agent_takkub import exec_mode
+
+        monkeypatch.setattr(exec_mode, "current", lambda: exec_mode.PARALLEL)
+        result_path = _render_lead_context("default")
+        text = pathlib.Path(result_path).read_text(encoding="utf-8")
+        assert "Execution mode: PARALLEL" in text
+        assert "--isolation worktree" in text
+        assert "merge proposal" in text
+
+    def test_solo_mode_has_no_parallel_block(
+        self, runtime_tmp: pathlib.Path, cockpit_md: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from agent_takkub import exec_mode
+
+        monkeypatch.setattr(exec_mode, "current", lambda: exec_mode.SOLO)
+        result_path = _render_lead_context("default")
+        text = pathlib.Path(result_path).read_text(encoding="utf-8")
+        assert "Execution mode: PARALLEL" not in text
+        assert "--isolation worktree" not in text
