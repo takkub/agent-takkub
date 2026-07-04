@@ -470,14 +470,25 @@ def find_claude_executable() -> str:
         return cmd_path
 
     # Platform-specific default install locations (when not on PATH).
+    # Field incident 2026-07-04: a Node update dropped %APPDATA%\npm from the
+    # user PATH — claude vanished and every pane spawn failed. These probes must
+    # cover every npm-prefix layout we've seen so the cockpit survives a broken
+    # PATH; _heal_process_path() then repairs PATH for this process + children.
     if sys.platform == "win32":
-        # nvm4w default
-        nvm_exe = Path("C:/nvm4w/nodejs/node_modules/@anthropic-ai/claude-code/bin/claude.exe")
-        if nvm_exe.exists():
-            return str(nvm_exe)
-        nvm_cmd = Path("C:/nvm4w/nodejs/claude.cmd")
-        if nvm_cmd.exists():
-            return str(nvm_cmd)
+        appdata = os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming"))
+        roots = [
+            Path("C:/nvm4w/nodejs"),  # nvm4w
+            Path(appdata) / "npm",  # classic npm prefix
+            Path("C:/Program Files/nodejs"),  # system node
+        ]
+        for root in roots:
+            exe = root / "node_modules" / "@anthropic-ai" / "claude-code" / "bin" / "claude.exe"
+            if exe.exists():
+                return _heal_process_path(str(exe))
+        for root in roots:
+            cmd = root / "claude.cmd"
+            if cmd.exists():
+                return _heal_process_path(str(cmd))
     else:
         # macOS / Linux: common npm-global and Homebrew bin locations, plus the
         # native installer's ~/.local/bin and ~/.claude/local fallbacks.
@@ -489,8 +500,26 @@ def find_claude_executable() -> str:
             Path("/usr/local/bin/claude"),
         ):
             if cand.exists():
-                return str(cand)
+                return _heal_process_path(str(cand))
 
     raise RuntimeError(
         "Could not locate claude CLI. Install Claude Code or set CLAUDE_EXE env var."
     )
+
+
+def _heal_process_path(resolved: str) -> str:
+    """Self-heal: *resolved* was found by probing (claude is NOT on PATH).
+
+    Prepend its directory to this process's PATH so every child that invokes
+    plain ``claude`` (pane spawns, ``claude plugin install`` subprocesses,
+    teammate shells) works for the rest of the session even though the user's
+    persistent PATH is broken. `takkub doctor --fix` repairs the persistent
+    PATH; this keeps the cockpit alive in the meantime. Returns *resolved*
+    unchanged so callers can use it inline.
+    """
+    from shutil import which
+
+    if not (which("claude") or which("claude.cmd")):
+        shim_dir = str(Path(resolved).parent)
+        os.environ["PATH"] = shim_dir + os.pathsep + os.environ.get("PATH", "")
+    return resolved

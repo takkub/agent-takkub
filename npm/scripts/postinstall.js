@@ -89,6 +89,21 @@ function main() {
 
   const claudeOk = ensureClaudeCli(env.claudeCli.present);
 
+  // Keep the npm global bin dir on the persistent PATH — otherwise a broken
+  // PATH makes claude/takkub/agent-takkub "command not found" in new shells
+  // (field incident 2026-07-04). Best-effort; never fails the install.
+  let pathAdded = false;
+  try {
+    pathAdded = require('./pathfix').ensureGlobalBinOnPath();
+    if (pathAdded) {
+      console.log(
+        '[agent-takkub] ✓ npm global bin dir added to your PATH (open a NEW terminal to use takkub/claude).'
+      );
+    }
+  } catch (_e) {
+    /* pathfix already printed its own hint */
+  }
+
   console.log(`\n[agent-takkub] ✓ cockpit ready (isolated in ${agentTakkubHome()}).`);
   try {
     const sc = require('./shortcut').create();

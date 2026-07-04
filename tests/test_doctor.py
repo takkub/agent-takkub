@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -555,6 +557,7 @@ class TestRunAllChecks:
                 "agent_takkub.doctor.check_runtime",
                 return_value=[Finding("runtime", "node", Status.OK)],
             ),
+            patch("agent_takkub.doctor.check_env_path", return_value=[]),
             patch("agent_takkub.doctor.check_arch", return_value=[]),
             patch("agent_takkub.doctor.check_qt", return_value=[]),
             patch("agent_takkub.doctor.check_plugins", return_value=[]),
@@ -612,3 +615,54 @@ class TestCmdDoctorExitCode:
         assert len(parsed) == 2
         assert parsed[0]["status"] == "ok"
         assert parsed[1]["status"] == "fail"
+
+
+class TestEnvPathCheck:
+    """[env] npm-global-bin — the PATH-health check born from the 2026-07-04
+    field incident (npm bin dir dropped off PATH → claude/takkub vanished)."""
+
+    def test_dir_on_path_case_and_slash_insensitive(self) -> None:
+        from agent_takkub.doctor import _dir_on_path
+
+        sep = os.pathsep
+        path_value = sep.join([r"C:\Windows", r"c:\users\x\appdata\roaming\NPM" + "\\"])
+        assert _dir_on_path(r"C:\Users\X\AppData\Roaming\npm", path_value)
+        assert not _dir_on_path(r"C:\Users\X\other", path_value)
+
+    def test_skips_when_npm_missing(self) -> None:
+        from agent_takkub import doctor
+
+        with patch("agent_takkub.doctor._npm_global_bin_dir", return_value=None):
+            findings = doctor.check_env_path()
+        assert len(findings) == 1
+        assert findings[0].status == Status.SKIP
+
+    def test_warn_with_auto_fix_when_dir_missing_from_path(self) -> None:
+        from agent_takkub import doctor
+
+        fake_bin = r"C:\fake\npm-bin" if sys.platform == "win32" else "/fake/npm-bin"
+        with patch("agent_takkub.doctor._npm_global_bin_dir", return_value=fake_bin):
+            if sys.platform == "win32":
+                with (
+                    patch("agent_takkub.doctor._read_win_user_path", return_value=(r"C:\other", 1)),
+                    patch.dict(os.environ, {"PATH": r"C:\other"}),
+                ):
+                    findings = doctor.check_env_path()
+            else:
+                with patch.dict(os.environ, {"PATH": "/usr/bin"}):
+                    findings = doctor.check_env_path()
+        assert findings[0].status == Status.WARN
+        assert findings[0].auto_fix is not None
+
+    def test_posix_rc_fix_is_idempotent(self, tmp_path, monkeypatch) -> None:
+        from agent_takkub import doctor
+
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        ok, _msg = doctor._append_posix_rc_path("/fake/bin")
+        assert ok
+        zshrc = tmp_path / ".zshrc"
+        first = zshrc.read_text(encoding="utf-8")
+        assert "/fake/bin" in first
+        ok, msg = doctor._append_posix_rc_path("/fake/bin")
+        assert ok and "already" in msg
+        assert zshrc.read_text(encoding="utf-8") == first

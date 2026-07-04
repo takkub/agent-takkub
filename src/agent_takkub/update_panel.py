@@ -11,12 +11,79 @@ from __future__ import annotations
 
 import os
 
-from PyQt6.QtCore import QCoreApplication, QThreadPool, QTimer
+from PyQt6.QtCore import QCoreApplication, QThread, QThreadPool, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QApplication, QMessageBox, QSystemTrayIcon
 
 from .config import PORT_FILE, REPO_ROOT, active_project, lead_cwd
 from .orchestrator import _log_event
 from .rtk_helper import install_rtk
+
+
+class _NpmUpdateThread(QThread):
+    """npm registry check / global update OFF the Qt main thread.
+
+    mode="check"   → emits done(ok, current, latest, msg)
+    mode="install" → runs `npm install -g agent-takkub@latest` (postinstall
+                     upgrades the ~/.agent-takkub venv wheel) then emits done.
+    Held in the module-level _NPM_THREADS set — same lifetime rules as the
+    doctor/plugin workers in user_actions (never parented to the window).
+    """
+
+    done: pyqtSignal = pyqtSignal(bool, str, str, str)  # ok, current, latest, msg
+
+    def __init__(self, mode: str, parent=None) -> None:
+        super().__init__(parent)
+        self._mode = mode
+
+    def run(self) -> None:  # pragma: no cover - thin subprocess wrapper
+        import shutil as _shutil
+        import subprocess as _subprocess
+        from importlib import metadata as _metadata
+
+        from ._win_console import SUBPROCESS_NO_WINDOW
+
+        try:
+            current = _metadata.version("agent-takkub")
+        except Exception:
+            current = "?"
+        npm = _shutil.which("npm.cmd") or _shutil.which("npm")
+        if not npm:
+            self.done.emit(False, current, "", "npm not found on PATH")
+            return
+        try:
+            if self._mode == "check":
+                r = _subprocess.run(
+                    [npm, "view", "agent-takkub", "version"],
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    creationflags=SUBPROCESS_NO_WINDOW,
+                )
+                latest = (r.stdout or "").strip()
+                if r.returncode != 0 or not latest:
+                    self.done.emit(
+                        False, current, "", (r.stderr or "registry check failed").strip()[-200:]
+                    )
+                    return
+                self.done.emit(True, current, latest, "")
+            else:
+                r = _subprocess.run(
+                    [npm, "install", "-g", "agent-takkub@latest"],
+                    capture_output=True,
+                    text=True,
+                    timeout=900,
+                    creationflags=SUBPROCESS_NO_WINDOW,
+                )
+                if r.returncode != 0:
+                    tail = ((r.stderr or "") + (r.stdout or "")).strip().splitlines()
+                    self.done.emit(False, current, "", tail[-1] if tail else "npm install failed")
+                    return
+                self.done.emit(True, current, "", "updated")
+        except Exception as e:
+            self.done.emit(False, current, "", str(e))
+
+
+_NPM_THREADS: set = set()
 
 
 class MainWindowUpdateMixin:
@@ -516,6 +583,79 @@ class MainWindowUpdateMixin:
 
         QCoreApplication.quit()
 
+    # ── npm-install update flow (installed builds have no git checkout) ──
+
+    def _start_npm_update_check(self) -> None:
+        """Check the npm registry for a newer agent-takkub, then offer a
+        one-click update + auto-restart. Both subprocesses run off the Qt
+        main thread (_NpmUpdateThread)."""
+        self._status.showMessage("🔄 Checking npm registry…", 8_000)
+        worker = _NpmUpdateThread("check")
+        _NPM_THREADS.add(worker)
+
+        def _checked(ok: bool, current: str, latest: str, msg: str) -> None:
+            try:
+                if not ok:
+                    QMessageBox.warning(self, "Update check failed", msg)
+                    return
+                if latest == current:
+                    self._status.showMessage(f"🔄 Up to date (v{current})", 6_000)
+                    return
+                confirm = QMessageBox.question(
+                    self,
+                    "Update available",
+                    f"agent-takkub v{latest} is available (you have v{current}).\n\n"
+                    "Update now? The cockpit will restart itself when done —\n"
+                    "pane state is saved and teammates respawn automatically.\n"
+                    "Your projects + config in ~/.agent-takkub stay untouched.",
+                    QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Ok,
+                )
+                if confirm == QMessageBox.StandardButton.Ok:
+                    self._start_npm_update_install(latest)
+            except RuntimeError:
+                pass  # window closed while the worker ran
+
+        worker.done.connect(_checked)
+        worker.finished.connect(lambda w=worker: _NPM_THREADS.discard(w))
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+
+    def _start_npm_update_install(self, latest: str) -> None:
+        self._btn_update.setEnabled(False)
+        self._btn_update.setText(f"⬇ Updating to v{latest}…")
+        self._status.showMessage(
+            f"⬇ npm install -g agent-takkub@{latest} — venv upgrade may take a few minutes…", 0
+        )
+        worker = _NpmUpdateThread("install")
+        _NPM_THREADS.add(worker)
+
+        def _installed(ok: bool, current: str, _latest: str, msg: str) -> None:
+            try:
+                self._btn_update.setEnabled(True)
+                self._status.clearMessage()
+                if not ok:
+                    self._btn_update.setText("🔄 Update via npm")
+                    QMessageBox.critical(
+                        self,
+                        "Update failed",
+                        f"{msg}\n\nNothing was restarted — the cockpit keeps running\n"
+                        "on the current version. You can retry, or run\n"
+                        "`npm install -g agent-takkub@latest` in a terminal.",
+                    )
+                    return
+                _log_event("cockpit_npm_update", version=latest)
+                # Same no-dialog restart path as `takkub restart`: state is
+                # persisted, the successor waits on the single-instance lock.
+                self._restart_cockpit()
+            except RuntimeError:
+                pass
+
+        worker.done.connect(_installed)
+        worker.finished.connect(lambda w=worker: _NPM_THREADS.discard(w))
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+
     def _refresh_update_button(self) -> None:
         """Flip the update chip's label/colour based on the cached
         status. Five visual states: not-a-repo, error, clean+up-to-date,
@@ -534,8 +674,8 @@ class MainWindowUpdateMixin:
                 # upstream repo. Offer the correct path instead.
                 self._btn_update.setText("🔄 Update via npm")
                 self._btn_update.setToolTip(
-                    "Installed via npm. Click for the update command:\n"
-                    "  npm update -g agent-takkub\n"
+                    "Installed via npm. Click to check the registry and update\n"
+                    "in one go — the cockpit restarts itself afterwards.\n"
                     "Your projects + config in ~/.agent-takkub stay untouched."
                 )
                 self._btn_update.setStyleSheet(
@@ -632,14 +772,7 @@ class MainWindowUpdateMixin:
             from .config import is_installed_package
 
             if is_installed_package():
-                QMessageBox.information(
-                    self,
-                    "Update via npm",
-                    "This is an npm install. To update, run in a terminal:\n\n"
-                    "    npm update -g agent-takkub\n\n"
-                    "Your projects.json, runtime/, and config under\n"
-                    "~/.agent-takkub stay untouched.",
-                )
+                self._start_npm_update_check()
                 return
 
             from .update_helper import OFFICIAL_REPO_URL, init_git_repo

@@ -10,6 +10,7 @@ to prevent hangs.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -1016,9 +1017,163 @@ def check_version() -> list[Finding]:
     return findings
 
 
+# ---------------------------------------------------------------------------
+# [env] — persistent PATH health (npm global bin dir must stay on PATH)
+# ---------------------------------------------------------------------------
+# Field incident 2026-07-04: a Node update dropped %APPDATA%\npm from the user
+# PATH → claude/takkub/agent-takkub all "command not found", panes couldn't
+# spawn, and the user had to hand-repair the registry. This check makes that a
+# one-click `takkub doctor --fix`.
+
+
+def _npm_global_bin_dir() -> str | None:
+    """The directory npm puts global shims in (None when npm is missing)."""
+    from shutil import which as _which
+
+    from ._win_console import SUBPROCESS_NO_WINDOW
+
+    npm = _which("npm.cmd") or _which("npm")
+    if not npm:
+        return None
+    try:
+        r = subprocess.run(
+            [npm, "prefix", "-g"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            creationflags=SUBPROCESS_NO_WINDOW,
+        )
+    except Exception:
+        return None
+    prefix = (r.stdout or "").strip()
+    if r.returncode != 0 or not prefix:
+        return None
+    return prefix if sys.platform == "win32" else str(Path(prefix) / "bin")
+
+
+def _dir_on_path(target: str, path_value: str) -> bool:
+    """Case/format-insensitive membership test for one dir in a PATH string."""
+
+    def _norm(p: str) -> str:
+        return os.path.normcase(os.path.normpath(os.path.expandvars(p.strip())))
+
+    want = _norm(target)
+    return any(_norm(p) == want for p in path_value.split(os.pathsep) if p.strip())
+
+
+def _read_win_user_path() -> tuple[str, int]:
+    """(value, registry value-kind) of HKCU\\Environment\\Path ('' if absent)."""
+    import winreg
+
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+        try:
+            value, kind = winreg.QueryValueEx(key, "Path")
+            return str(value), int(kind)
+        except FileNotFoundError:
+            return "", winreg.REG_EXPAND_SZ
+
+
+def _append_win_user_path(bin_dir: str) -> tuple[bool, str]:
+    """Append *bin_dir* to the persistent user PATH, preserving the existing
+    registry value kind (REG_SZ vs REG_EXPAND_SZ), then broadcast
+    WM_SETTINGCHANGE so new shells pick it up without a re-login."""
+    import ctypes
+    import winreg
+
+    try:
+        value, kind = _read_win_user_path()
+        if _dir_on_path(bin_dir, value):
+            return True, "already on PATH"
+        new_value = (value.rstrip(";") + ";" if value else "") + bin_dir
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_SET_VALUE
+        ) as key:
+            winreg.SetValueEx(key, "Path", 0, kind, new_value)
+        # HWND_BROADCAST / WM_SETTINGCHANGE / SMTO_ABORTIFHUNG
+        ctypes.windll.user32.SendMessageTimeoutW(0xFFFF, 0x1A, 0, "Environment", 0x0002, 5000, None)
+    except OSError as e:
+        return False, str(e)
+    return True, f"added {bin_dir} to user PATH — open a NEW terminal to pick it up"
+
+
+_PATHFIX_MARKER = "# >>> agent-takkub PATH >>>"
+
+
+def _append_posix_rc_path(bin_dir: str) -> tuple[bool, str]:
+    """Idempotently append an export block to ~/.zshrc (and ~/.bashrc if it
+    exists) so login shells regain the npm global bin dir."""
+    block = f'\n{_PATHFIX_MARKER}\nexport PATH="$PATH:{bin_dir}"\n# <<< agent-takkub PATH <<<\n'
+    touched: list[str] = []
+    try:
+        rcs = [Path.home() / ".zshrc"]
+        bashrc = Path.home() / ".bashrc"
+        if bashrc.exists():
+            rcs.append(bashrc)
+        for rc in rcs:
+            existing = rc.read_text(encoding="utf-8") if rc.exists() else ""
+            if _PATHFIX_MARKER in existing:
+                continue
+            rc.write_text(existing + block, encoding="utf-8")
+            touched.append(rc.name)
+    except OSError as e:
+        return False, str(e)
+    if not touched:
+        return True, "already configured"
+    return True, f"added PATH export to {', '.join(touched)} — restart the terminal"
+
+
+def check_env_path() -> list[Finding]:
+    """[env] — is the npm global bin dir on the *persistent* PATH?"""
+    findings: list[Finding] = []
+    bin_dir = _npm_global_bin_dir()
+    if not bin_dir:
+        findings.append(Finding("env", "npm-global-bin", Status.SKIP, "npm not found"))
+        return findings
+
+    if sys.platform == "win32":
+        try:
+            persistent, _kind = _read_win_user_path()
+        except OSError as e:
+            findings.append(Finding("env", "npm-global-bin", Status.WARN, f"registry: {e}"))
+            return findings
+        # The MACHINE PATH may also carry it (e.g. nvm4w installs system-wide).
+        on_path = _dir_on_path(bin_dir, persistent) or _dir_on_path(
+            bin_dir, os.environ.get("PATH", "")
+        )
+        if on_path:
+            findings.append(Finding("env", "npm-global-bin", Status.OK, f"{bin_dir} on PATH"))
+        else:
+            findings.append(
+                Finding(
+                    "env",
+                    "npm-global-bin",
+                    Status.WARN,
+                    f"{bin_dir} NOT on user PATH — claude/takkub can vanish from new terminals",
+                    "takkub doctor --fix → appends it to the user PATH (registry-safe)",
+                    auto_fix=lambda d=bin_dir: _append_win_user_path(d),
+                )
+            )
+    else:
+        if _dir_on_path(bin_dir, os.environ.get("PATH", "")):
+            findings.append(Finding("env", "npm-global-bin", Status.OK, f"{bin_dir} on PATH"))
+        else:
+            findings.append(
+                Finding(
+                    "env",
+                    "npm-global-bin",
+                    Status.WARN,
+                    f"{bin_dir} NOT on PATH — claude/takkub unavailable in new shells",
+                    "takkub doctor --fix → adds an export block to ~/.zshrc",
+                    auto_fix=lambda d=bin_dir: _append_posix_rc_path(d),
+                )
+            )
+    return findings
+
+
 def run_all_checks() -> list[Finding]:
     findings: list[Finding] = []
     findings.extend(check_claude())
+    findings.extend(check_env_path())
     findings.extend(check_runtime())
     findings.extend(check_arch())
     findings.extend(check_qt())
