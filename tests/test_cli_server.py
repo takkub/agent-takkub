@@ -53,9 +53,10 @@ class _FakeOrch:
         auto_chain=False,
         shard_total=0,
         plan=False,
+        isolation="shared",
         project=None,
     ):
-        self.assign_calls.append((role, cwd, task, requires_commit, auto_chain))
+        self.assign_calls.append((role, cwd, task, requires_commit, auto_chain, isolation))
         return True, "ok"
 
     def spawn(self, role, cwd=None, project=None):
@@ -88,7 +89,7 @@ class TestAsyncSpawnDispatch:
 
         # Runs on the next event-loop tick.
         qapp.processEvents()
-        assert orch.assign_calls == [("backend", None, "do x", False, False)]
+        assert orch.assign_calls == [("backend", None, "do x", False, False, "shared")]
 
     def test_assign_passes_flags(self, qapp: QCoreApplication) -> None:
         orch = _FakeOrch()
@@ -104,11 +105,12 @@ class TestAsyncSpawnDispatch:
                     "task": "t",
                     "requires_commit": True,
                     "auto_chain": True,
+                    "isolation": "worktree",
                 }
             ),
         )
         qapp.processEvents()
-        assert orch.assign_calls == [("backend", "C:/x", "t", True, True)]
+        assert orch.assign_calls == [("backend", "C:/x", "t", True, True, "worktree")]
 
     def test_spawn_acked_immediately_then_deferred(self, qapp: QCoreApplication) -> None:
         orch = _FakeOrch()
