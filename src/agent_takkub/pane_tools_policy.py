@@ -28,6 +28,8 @@ import pathlib
 import re
 import tempfile
 
+from .config import SETTINGS_HOME
+
 _log = logging.getLogger(__name__)
 
 # All known roles in cockpit (controls which keys are valid in policy file).
@@ -47,7 +49,7 @@ KNOWN_ROLES = frozenset(
     }
 )
 
-PANE_TOOLS_POLICY_FILE = pathlib.Path.home() / ".takkub" / "pane-tools.json"
+PANE_TOOLS_POLICY_FILE = SETTINGS_HOME / "pane-tools.json"
 
 
 def _policy_dir() -> pathlib.Path:

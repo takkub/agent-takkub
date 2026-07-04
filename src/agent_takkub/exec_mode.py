@@ -29,6 +29,8 @@ import json
 import os
 from pathlib import Path
 
+from .config import SETTINGS_HOME
+
 SOLO = "solo"
 PARALLEL = "parallel"
 
@@ -42,7 +44,7 @@ _DEFAULT = SOLO
 # this module env-free and trivially testable).
 MAX_FANOUT = 4
 
-_PATH = Path.home() / ".takkub" / "exec-mode.json"
+_PATH = SETTINGS_HOME / "exec-mode.json"
 
 
 def path() -> Path:

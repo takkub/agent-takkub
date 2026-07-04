@@ -7,8 +7,6 @@ state degrades to Max rather than crashing the cockpit on startup.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from agent_takkub import plan_tier
@@ -72,12 +70,10 @@ def test_pro_lead_model_has_no_1m_suffix():
     assert "[1m]" not in plan_tier.PRO_LEAD_MODEL
 
 
-def test_default_path_is_under_home_takkub(monkeypatch, tmp_path):
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
-    import importlib
+def test_default_path_follows_settings_home():
+    # Contract: the store lives under config.SETTINGS_HOME (dev → ~/.takkub,
+    # installed build → DATA_HOME) so an installed cockpit never shares
+    # settings with a dev checkout on the same machine.
+    from agent_takkub.config import SETTINGS_HOME
 
-    import agent_takkub.plan_tier as pt_module
-
-    importlib.reload(pt_module)
-    assert pt_module._PATH == tmp_path / ".takkub" / "plan.json"
-    importlib.reload(pt_module)
+    assert plan_tier._PATH == SETTINGS_HOME / "plan.json"

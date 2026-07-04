@@ -25,7 +25,8 @@ import re
 import tempfile
 from pathlib import Path
 
-_BASE_DIR = Path.home() / ".takkub"
+from .config import SETTINGS_HOME as _BASE_DIR
+
 _REGISTRY_PATH = _BASE_DIR / "user-profiles.json"
 _DEFAULT_CONFIG_DIR = Path.home() / ".claude"
 DEFAULT_PROFILE = "default"

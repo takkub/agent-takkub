@@ -30,11 +30,15 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .config import SETTINGS_HOME as _SETTINGS_HOME
+
 _AUTH_FILENAME = "takkub-claude-auth.json"
 _DEFAULT_CONFIG_DIR = Path.home() / ".claude"
 # Legacy single global file. Read (never written) as a back-compat source for
 # the *default* profile only, so existing setups keep working until re-saved.
-_LEGACY_GLOBAL_PATH = Path.home() / ".takkub" / "claude-auth.json"
+# Rooted at SETTINGS_HOME so an installed build never reads a dev checkout's
+# auth override (installed SETTINGS_HOME has no legacy file — clean start).
+_LEGACY_GLOBAL_PATH = _SETTINGS_HOME / "claude-auth.json"
 
 
 @dataclass(frozen=True)

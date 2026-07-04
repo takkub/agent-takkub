@@ -32,6 +32,8 @@ import re
 from collections.abc import Iterable
 from pathlib import Path
 
+from .config import SETTINGS_HOME as _BASE_DIR
+
 CLAUDE = "claude"
 CODEX = "codex"
 GEMINI = "gemini"
@@ -49,7 +51,6 @@ _FORCED_PROVIDER = {
 # Roles whose CLI is fixed and must not be offered as an override in the UI.
 FORCED_ROLES = frozenset(_FORCED_PROVIDER)
 
-_BASE_DIR = Path.home() / ".takkub"
 # Global mapping — the cross-project default. Kept as a module global so tests
 # can monkeypatch ``_CONFIG_PATH``; per-project mappings live under
 # ``_BASE_DIR/projects/<slug>/`` (monkeypatch ``_BASE_DIR`` to redirect those).

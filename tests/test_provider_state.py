@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from agent_takkub import provider_state
@@ -64,15 +62,10 @@ def test_set_disabled_unknown_provider_raises(tmp_state_path):
         provider_state.set_disabled("bogus", True)
 
 
-def test_default_path_is_under_home_takkub(monkeypatch, tmp_path):
-    # Sanity check: the real default points at ~/.takkub/disabled-providers.json
-    # (use the module-level _PATH before any monkeypatch from other fixtures)
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
-    import importlib
+def test_default_path_follows_settings_home():
+    # Contract: the store lives under config.SETTINGS_HOME (dev → ~/.takkub,
+    # installed build → DATA_HOME) so an installed cockpit never shares
+    # settings with a dev checkout on the same machine.
+    from agent_takkub.config import SETTINGS_HOME
 
-    import agent_takkub.provider_state as ps_module
-
-    importlib.reload(ps_module)
-    assert ps_module._PATH == tmp_path / ".takkub" / "disabled-providers.json"
-    # Reload back so other tests aren't affected
-    importlib.reload(ps_module)
+    assert provider_state._PATH == SETTINGS_HOME / "disabled-providers.json"

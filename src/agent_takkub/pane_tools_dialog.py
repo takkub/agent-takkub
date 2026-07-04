@@ -150,7 +150,9 @@ def _checkmark_icon_path() -> str:
     returns ``""`` so the QSS simply falls back to the plain blue fill.
     """
     try:
-        cache = pathlib.Path.home() / ".takkub" / "cache"
+        from .config import SETTINGS_HOME
+
+        cache = SETTINGS_HOME / "cache"
         path = cache / "tools-check.png"
         if not path.exists():
             from PyQt6.QtCore import QPointF

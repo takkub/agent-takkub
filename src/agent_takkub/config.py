@@ -101,6 +101,25 @@ def _resolve_data_home() -> Path:
 DATA_HOME = _resolve_data_home()
 
 
+def _resolve_settings_home() -> Path:
+    """Where user-level cockpit *settings* live (user-profiles.json,
+    exec-mode.json, pane-tools.json, disabled-providers.json, plan.json,
+    projects/<slug>/ per-project files, cache/).
+
+    Dev checkouts keep the historical ``~/.takkub`` (shared across checkouts
+    on purpose). Installed builds keep settings inside DATA_HOME
+    (``~/.agent-takkub``) so an installed cockpit NEVER shares mutable state
+    with a dev checkout on the same machine — field report: the installed
+    copy listed the dev machine's user profiles and couldn't switch them.
+    """
+    if DATA_HOME == REPO_ROOT:
+        return Path.home() / ".takkub"
+    return DATA_HOME
+
+
+SETTINGS_HOME = _resolve_settings_home()
+
+
 def is_installed_package() -> bool:
     """True when the cockpit runs from an installed wheel
     (…/site-packages/agent_takkub/…), not a dev source checkout (…/src/…).

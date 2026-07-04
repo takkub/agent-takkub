@@ -18,6 +18,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from .config import SETTINGS_HOME
+
 CODEX = "codex"
 GEMINI = "gemini"
 
@@ -26,7 +28,7 @@ GEMINI = "gemini"
 # (3) update routing_planner if it has provider-specific routing rules.
 TOGGLABLE: frozenset[str] = frozenset({CODEX, GEMINI})
 
-_PATH = Path.home() / ".takkub" / "disabled-providers.json"
+_PATH = SETTINGS_HOME / "disabled-providers.json"
 
 
 def path() -> Path:

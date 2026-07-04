@@ -29,6 +29,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from .config import SETTINGS_HOME
+
 MAX = "max"
 PRO = "pro"
 
@@ -43,7 +45,7 @@ _DEFAULT = MAX
 # orchestrator, not here, to keep this module env-free and trivially testable).
 PRO_LEAD_MODEL = "claude-opus-4-8"
 
-_PATH = Path.home() / ".takkub" / "plan.json"
+_PATH = SETTINGS_HOME / "plan.json"
 
 
 def path() -> Path:

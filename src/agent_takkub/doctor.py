@@ -804,7 +804,9 @@ def check_providers() -> list[Finding]:
             )
 
     # disabled-providers.json
-    dp_file = Path.home() / ".takkub" / "disabled-providers.json"
+    from .config import SETTINGS_HOME
+
+    dp_file = SETTINGS_HOME / "disabled-providers.json"
     if dp_file.is_file():
         try:
             json.loads(dp_file.read_text(encoding="utf-8"))

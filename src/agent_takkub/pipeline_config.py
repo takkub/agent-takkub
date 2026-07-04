@@ -35,6 +35,7 @@ import re
 from collections.abc import Iterable
 from pathlib import Path
 
+from .config import SETTINGS_HOME as _BASE_DIR
 from .roles import DEFAULT_TEAMMATES
 
 # Roles selectable in a pipeline = every default teammate. Lead is the locked
@@ -46,7 +47,6 @@ _VALID_ROLE_SET: frozenset[str] = frozenset(VALID_ROLES)
 # fork). Re-asserted from code on every load/save so they can't drift.
 BUILTIN_IDS: frozenset[str] = frozenset({"feature", "design", "quickfix"})
 
-_BASE_DIR = Path.home() / ".takkub"
 # Global file — the cross-project default. Kept as a module global so existing
 # tests can monkeypatch ``_PATH``; per-project files live under
 # ``_BASE_DIR/projects/<slug>/`` (monkeypatch ``_BASE_DIR`` to redirect those).

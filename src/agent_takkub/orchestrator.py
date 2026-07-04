@@ -2288,6 +2288,11 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, QObject):
                             f"[cockpit restart] {role} pane restored from last session "
                             f"and last task re-sent automatically."
                         )
+                    elif role == "shell":
+                        # A plain PowerShell pane never carries an assigned task —
+                        # restoring it fresh is its normal state, so no ⚠️/re-assign
+                        # noise (field report: scary warning on every restart).
+                        notice_body = "[cockpit restart] shell pane restored from last session."
                     else:
                         notice_body = (
                             f"⚠️ [cockpit restart] {role} pane restored from last session "
