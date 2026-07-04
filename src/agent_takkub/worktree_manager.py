@@ -31,6 +31,7 @@ lifecycle is unit-tested on both OS without a real repository.
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 from collections.abc import Callable
@@ -95,6 +96,97 @@ class GitResult:
 
 class UnsafePathError(Exception):
     """A resolved worktree destination escaped the managed root."""
+
+
+# ── Env-propagation config (Phase 2 — P2.1) ────────────────────────────────
+#
+# Opt-in, per project: `<git root>/.takkub/worktree.json` declares what an
+# isolated worktree needs before it is buildable. Absent / invalid file =
+# Phase-1 behavior (bare worktree). Blueprint: agent-orchestrator's workspaces
+# plugin (`symlinks:` + `postCreate:`), mined 2026-07-04 — see issue #81.
+#
+#   {
+#     "symlinks":   [".env.local", "node_modules"],   // linked FROM the main tree
+#     "postCreate": ["pnpm install --prefer-offline"], // run in the new worktree
+#     "base_port":  5310                               // dev-server port pool base
+#   }
+
+_WORKTREE_CONFIG_RELPATH = Path(".takkub") / "worktree.json"
+
+# Guardrails on config values so a malformed/hostile file can't turn the link
+# step into an arbitrary-path primitive: entries must be RELATIVE paths inside
+# the repo (no absolute, no drive letter, no parent traversal).
+_MAX_SYMLINKS = 16
+_MAX_POST_CREATE = 8
+
+
+@dataclass(frozen=True)
+class WorktreeConfig:
+    """Validated env-propagation settings for one project's worktrees."""
+
+    symlinks: tuple[str, ...] = ()
+    post_create: tuple[str, ...] = ()
+    base_port: int = 0  # 0 = no dev-server port allocation
+
+    @property
+    def is_empty(self) -> bool:
+        return not (self.symlinks or self.post_create or self.base_port)
+
+
+def _safe_rel_entry(entry: object) -> str | None:
+    """Return the entry as a validated repo-relative path string, else None."""
+    if not isinstance(entry, str) or not entry.strip():
+        return None
+    rel = entry.strip().replace("\\", "/")
+    p = Path(rel)
+    # p.root catches "/abs" too — on Windows Path("/abs").is_absolute() is
+    # False (no drive), but it still escapes the repo when joined.
+    if p.is_absolute() or p.drive or p.root or ".." in p.parts:
+        return None
+    return rel
+
+
+def load_worktree_config(git_root: str) -> tuple[WorktreeConfig, str]:
+    """Load + validate `<git_root>/.takkub/worktree.json`.
+
+    Returns ``(config, "")`` — an empty config when the file is absent — or
+    ``(empty, warning)`` when the file exists but is malformed, so the caller
+    can tell the Lead the config was ignored rather than silently dropping it.
+    Never raises.
+    """
+    path = Path(git_root) / _WORKTREE_CONFIG_RELPATH
+    try:
+        if not path.is_file():
+            return WorktreeConfig(), ""
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return WorktreeConfig(), f"worktree.json อ่านไม่ได้ ({exc}) — ข้าม env propagation"
+    if not isinstance(raw, dict):
+        return WorktreeConfig(), "worktree.json ต้องเป็น JSON object — ข้าม env propagation"
+
+    warnings: list[str] = []
+    links: list[str] = []
+    for entry in (raw.get("symlinks") or [])[:_MAX_SYMLINKS]:
+        rel = _safe_rel_entry(entry)
+        if rel is None:
+            warnings.append(f"symlinks entry ไม่ปลอดภัย/ไม่ใช่ relative path: {entry!r}")
+        else:
+            links.append(rel)
+
+    cmds: list[str] = []
+    for cmd in (raw.get("postCreate") or [])[:_MAX_POST_CREATE]:
+        if isinstance(cmd, str) and cmd.strip():
+            cmds.append(cmd.strip())
+        else:
+            warnings.append(f"postCreate entry ต้องเป็น string: {cmd!r}")
+
+    base_port = raw.get("base_port", 0)
+    if not isinstance(base_port, int) or not (0 == base_port or 1024 <= base_port <= 65000):
+        warnings.append(f"base_port ต้องเป็น int ช่วง 1024-65000: {base_port!r}")
+        base_port = 0
+
+    cfg = WorktreeConfig(symlinks=tuple(links), post_create=tuple(cmds), base_port=base_port)
+    return cfg, "; ".join(warnings)
 
 
 # A runner maps (args, cwd) -> GitResult. Injectable so tests never shell out.

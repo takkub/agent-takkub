@@ -256,3 +256,75 @@ class TestMergeProposal:
         assert "src/x.ts" in msg  # diffstat carried through
         # propose-then-fire doctrine — must tell Lead to confirm, not auto-merge
         assert "confirm" in msg.lower()
+
+
+# ── Env-propagation config (P2.1) ───────────────────────────────────────────
+
+
+class TestWorktreeConfig:
+    def _write(self, tmp_path, payload) -> str:
+        import json as _json
+
+        cfgdir = tmp_path / ".takkub"
+        cfgdir.mkdir(parents=True, exist_ok=True)
+        (cfgdir / "worktree.json").write_text(
+            payload if isinstance(payload, str) else _json.dumps(payload), encoding="utf-8"
+        )
+        return str(tmp_path)
+
+    def test_absent_file_is_empty_config_no_warning(self, tmp_path):
+        from agent_takkub.worktree_manager import load_worktree_config
+
+        cfg, warn = load_worktree_config(str(tmp_path))
+        assert cfg.is_empty and warn == ""
+
+    def test_valid_config_roundtrip(self, tmp_path):
+        from agent_takkub.worktree_manager import load_worktree_config
+
+        root = self._write(
+            tmp_path,
+            {
+                "symlinks": [".env.local", "node_modules"],
+                "postCreate": ["pnpm install"],
+                "base_port": 5310,
+            },
+        )
+        cfg, warn = load_worktree_config(root)
+        assert warn == ""
+        assert cfg.symlinks == (".env.local", "node_modules")
+        assert cfg.post_create == ("pnpm install",)
+        assert cfg.base_port == 5310
+
+    def test_malformed_json_warns_and_returns_empty(self, tmp_path):
+        from agent_takkub.worktree_manager import load_worktree_config
+
+        root = self._write(tmp_path, "{not json")
+        cfg, warn = load_worktree_config(root)
+        assert cfg.is_empty
+        assert "worktree.json" in warn
+
+    def test_unsafe_symlink_entries_rejected_with_warning(self, tmp_path):
+        from agent_takkub.worktree_manager import load_worktree_config
+
+        root = self._write(
+            tmp_path,
+            {"symlinks": ["../secrets", "C:/evil", "/abs", "ok/dir", 42]},
+        )
+        cfg, warn = load_worktree_config(root)
+        assert cfg.symlinks == ("ok/dir",)  # only the safe relative entry survives
+        assert "ไม่ปลอดภัย" in warn
+
+    def test_bad_base_port_zeroed_with_warning(self, tmp_path):
+        from agent_takkub.worktree_manager import load_worktree_config
+
+        root = self._write(tmp_path, {"base_port": 80})
+        cfg, warn = load_worktree_config(root)
+        assert cfg.base_port == 0
+        assert "base_port" in warn
+
+    def test_non_dict_top_level_rejected(self, tmp_path):
+        from agent_takkub.worktree_manager import load_worktree_config
+
+        root = self._write(tmp_path, ["not", "a", "dict"])
+        cfg, warn = load_worktree_config(root)
+        assert cfg.is_empty and "object" in warn
