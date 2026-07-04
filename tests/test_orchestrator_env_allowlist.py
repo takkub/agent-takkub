@@ -6,7 +6,7 @@ import os
 
 import pytest
 
-from agent_takkub.orchestrator import _build_pane_env
+from agent_takkub.orchestrator import _build_lead_env, _build_pane_env
 
 
 def test_build_pane_env_includes_path(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -86,3 +86,22 @@ def test_build_pane_env_includes_sessionname(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("SESSIONNAME", "Console")
     env = _build_pane_env()
     assert "SESSIONNAME" in env
+
+
+def test_build_pane_env_forwards_port_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Regression: in multi-instance mode app.py sets TAKKUB_PORT_FILE in the
+    # cockpit process env so panes dial *this* cockpit's cli_server. If the
+    # allowlist drops it, the pane's `takkub` CLI falls back to a stale
+    # runtime/port and gets connection-refused.
+    monkeypatch.setenv("TAKKUB_PORT_FILE", "/tmp/agent-takkub-port.4242")
+    env = _build_pane_env()
+    assert env.get("TAKKUB_PORT_FILE") == "/tmp/agent-takkub-port.4242"
+
+
+def test_build_lead_env_forwards_port_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Lead is a pane too — it must reach its own cockpit's cli_server for
+    # every `takkub assign/list/status`, so the port file must survive the
+    # Lead allowlist as well.
+    monkeypatch.setenv("TAKKUB_PORT_FILE", "/tmp/agent-takkub-port.4242")
+    env = _build_lead_env()
+    assert env.get("TAKKUB_PORT_FILE") == "/tmp/agent-takkub-port.4242"

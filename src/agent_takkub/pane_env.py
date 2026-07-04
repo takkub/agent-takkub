@@ -84,6 +84,16 @@ _PANE_ENV_ALLOWLIST: frozenset[str] = frozenset(
         "TAKKUB_ROLE",
         "TAKKUB_PROJECT",
         "TAKKUB_SETTING_SOURCES",
+        # Per-PID port file — in multi-instance mode app.py sets this in the
+        # cockpit process env so panes dial *this* cockpit's cli_server instead
+        # of a stale runtime/port fossil left by a dead instance. Without it on
+        # the allowlist the value is filtered out here and the pane's `takkub`
+        # CLI falls back to the default runtime/port → connection refused when
+        # that file points at a dead port left by a previous instance.
+        # Not a secret (a temp path); safe to forward. Unset in single-instance
+        # mode → pane correctly falls back to runtime/port, which the lone
+        # server owns.
+        "TAKKUB_PORT_FILE",
         # Browser MCP (chrome-devtools needs to find Chrome)
         "CHROME_BIN",
         # User override for MCP per-call timeout (default injected below).

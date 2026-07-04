@@ -5,6 +5,16 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 ## [Unreleased]
 
 ### Fixed (แก้)
+- **pane ต่อ cli_server ผิด instance — `TAKKUB_PORT_FILE` ตกจาก env allowlist** —
+  `_build_pane_env()`/`_build_lead_env()` กรอง env ของ pane ด้วย allowlist แต่ **ไม่มี
+  `TAKKUB_PORT_FILE`** ในลิสต์ → ตอน multi-instance mode ที่ `app.py` ตั้ง per-PID port file
+  ไว้ (`agent-takkub-port.<pid>`) มันโดนตัดทิ้งตอน spawn → pane ไม่เคยได้ port file ของ
+  cockpit ตัวเอง เลย fall back ไปอ่าน `runtime/port` ที่เป็นซากของ instance เก่าที่ตายแล้ว →
+  `takkub list/assign` เจอ `connection refused` ทั้งที่ cockpit เปิดอยู่ (comment ที่ `app.py`
+  ว่า "panes inherit this env" เป็นเท็จมาตลอด — allowlist ตัดทิ้ง). แก้: เพิ่ม
+  `TAKKUB_PORT_FILE` เข้า `_PANE_ENV_ALLOWLIST` (ไม่ใช่ secret — เป็น path temp) → pane ต่อ
+  cli_server ถูก instance ทั้ง single mode (fall back `runtime/port` ที่ server เดียวเป็นเจ้าของ)
+  และ multi mode (per-PID file). + 2 regression tests.
 - **delivery self-heal กู้ swallowed paste ได้ — pane ไม่ค้าง empty อีก (#79, follow-up #26)** —
   `⚠️ [delivery-unconfirmed]` ยิงซ้ำ ~16 ครั้ง/2 สัปดาห์ ทุก role/provider (qa/backend/
   frontend/devops/codex/gemini) เพราะ task paste โดน swallow ตอน race กับ TUI render →
