@@ -370,6 +370,12 @@ class StatusHeaderMixin:
         # True while a background UpdateCheckWorker is running; prevents
         # queuing a second fetch before the first one completes.
         self._update_worker_busy: bool = False
+        # For npm/pip-installed cockpits (no git checkout): the most recent
+        # npm-registry version check, so the "Update via npm" chip can flip
+        # colour when a newer build is published — parity with the git
+        # behind-count. `{"ok", "current", "latest"}` or None before first poll.
+        self._npm_update_cache: dict | None = None
+        self._npm_check_busy: bool = False
 
         # The ⬆ Claude CLI button and its _on_claude_update_clicked handler were
         # removed. The native worker+dialog self-update methods

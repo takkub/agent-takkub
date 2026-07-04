@@ -162,7 +162,47 @@ class MainWindowUpdateMixin:
         if prev_up_to_date and now_behind:
             self._notify_update_available(status["behind"])
 
+        # npm/pip installs have no git checkout, so the git poll returns
+        # `not_repo` and can't tell whether a newer build was published. Kick
+        # off a background npm-registry check so the chip can flip colour just
+        # like the git behind-state does.
+        if status.get("not_repo"):
+            from .config import is_installed_package
+
+            if is_installed_package():
+                self._schedule_npm_update_check()
+
         self._refresh_update_button()
+
+    def _schedule_npm_update_check(self) -> None:
+        """Background (modal-free) npm-registry version check for installed
+        cockpits. Runs on the same 5-min cadence as the git poll via
+        `_on_update_check_done`; a quiet sibling of `_start_npm_update_check`
+        (the click path, which shows dialogs). Skips if one is already in
+        flight so polls never stack."""
+        if self._npm_check_busy:
+            return
+        self._npm_check_busy = True
+        worker = _NpmUpdateThread("check")
+        _NPM_THREADS.add(worker)
+        worker.done.connect(self._on_npm_update_check_done)
+        worker.finished.connect(lambda w=worker: _NPM_THREADS.discard(w))
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+
+    def _on_npm_update_check_done(self, ok: bool, current: str, latest: str, msg: str) -> None:
+        """Cache the npm-registry result and recolour the chip. Best-effort:
+        a failed check keeps the last good cache (chip stays neutral green)
+        rather than false-alarming."""
+        self._npm_check_busy = False
+        if ok and latest:
+            self._npm_update_cache = {"ok": True, "current": current, "latest": latest}
+        elif self._npm_update_cache is None:
+            self._npm_update_cache = {"ok": False, "current": current, "latest": ""}
+        try:
+            self._refresh_update_button()
+        except RuntimeError:
+            pass  # window closed while the check ran
 
     def _notify_update_available(self, n_behind: int) -> None:
         """Flash the update button border and show a system-tray balloon
@@ -671,7 +711,29 @@ class MainWindowUpdateMixin:
             if is_installed_package():
                 # npm/pip install → updates come from the package manager, NOT
                 # by converting site-packages into a checkout of the (private)
-                # upstream repo. Offer the correct path instead.
+                # upstream repo. Colour by the cached npm-registry check so the
+                # chip stands out (blue) when a newer build is published and
+                # stays neutral (green) when up-to-date — parity with the
+                # git-checkout behind-state.
+                from .claude_update import compare_versions
+
+                npm = self._npm_update_cache or {}
+                cur = npm.get("current") or ""
+                latest = npm.get("latest") or ""
+                if npm.get("ok") and cur and latest and compare_versions(cur, latest) < 0:
+                    self._btn_update.setText(f"📦 Update available (v{latest})")
+                    self._btn_update.setToolTip(
+                        f"agent-takkub v{latest} is on npm (you have v{cur}).\n"
+                        "Click to update in one go — the cockpit restarts itself\n"
+                        "afterwards. Your projects + config in ~/.agent-takkub stay untouched."
+                    )
+                    self._btn_update.setStyleSheet(
+                        "QPushButton { color: #1e3a8a; background: #93c5fd; "
+                        "border: 1px solid #2563eb; border-radius: 4px; "
+                        "padding: 2px 8px; font-weight: 500; }"
+                        "QPushButton:hover { background: #bfdbfe; }"
+                    )
+                    return
                 self._btn_update.setText("🔄 Update via npm")
                 self._btn_update.setToolTip(
                     "Installed via npm. Click to check the registry and update\n"

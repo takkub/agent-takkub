@@ -5,6 +5,14 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 ## [Unreleased]
 
 ### Fixed (แก้)
+- **chip "Update via npm" เขียวตลอดแม้มีอัพเดต (npm/pip install)** — cockpit ที่ติดตั้งผ่าน
+  npm/pip (ไม่ใช่ git checkout) เข้า branch `not_repo` ของ `_refresh_update_button` ที่
+  **hardcode เขียวตลอด** — ไม่เคย query npm registry ว่ามี version ใหม่ไหม เลยเขียวแม้มีอัพเดต
+  จริง (ฝั่ง git checkout ยังเปลี่ยน เขียว→น้ำเงิน ตามปกติ). แก้: poll npm registry เบื้องหลังทุก
+  5 นาที (ผ่าน `_NpmUpdateThread("check")` แบบ modal-free — sibling ของ click path) → cache
+  latest เทียบ current → chip เปลี่ยนเป็น **น้ำเงิน "📦 Update available (vX)"** เมื่อมีของใหม่
+  (สีเดียวกับ git behind-state) และเขียว "🔄 Update via npm" เมื่อ up-to-date / ยังไม่ได้เช็ค /
+  เช็คไม่ผ่าน (ไม่ false-alarm). + 8 tests.
 - **self-update ค้างที่ `git fetch/pull` → restart storm + false "cockpit ไม่ได้เปิด"** —
   pane เจอ `connection refused (10061)` ทั้งที่ cockpit เปิดอยู่ — สืบจาก stack trace ใน
   `boot.log` เจอ **2 บั๊กซ้อน**: **(1)** `update_helper._git` เรียก git โดยไม่ปิด interactive
