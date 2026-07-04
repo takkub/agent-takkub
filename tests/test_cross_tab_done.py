@@ -438,3 +438,24 @@ class TestDoneNoticeDiskPersistence:
 
         assert (tmp_path / "pending-done-notices-proj_z.json").exists()
         assert len(orch._pending_done_notices.get("proj_z", [])) == 1
+
+
+class TestVerifyFailHandoffSuggestion:
+    """Tier 2c: the fix-loop proposal carries a signature-based role suggestion."""
+
+    def test_backend_signature_suggested(self):
+        from agent_takkub.orchestrator import Orchestrator
+
+        msg = Orchestrator._build_verify_fail_handoff(
+            "qa", "login fail: POST /auth 500 traceback in api log"
+        )
+        assert "[qa FAILED]" in msg
+        assert "**backend**" in msg  # suggestion present
+        assert "propose-then-fire" in msg  # doctrine unchanged
+
+    def test_unknown_signature_no_suggestion_line(self):
+        from agent_takkub.orchestrator import Orchestrator
+
+        msg = Orchestrator._build_verify_fail_handoff("qa", "ผลไม่ตรง spec")
+        assert "[qa FAILED]" in msg
+        assert "signature ชี้" not in msg  # falls back to manual diagnosis flow

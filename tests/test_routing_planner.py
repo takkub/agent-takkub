@@ -11,7 +11,7 @@ Coverage:
 
 from __future__ import annotations
 
-from agent_takkub.routing_planner import ActionKind, RoutingAction, classify
+from agent_takkub.routing_planner import ActionKind, RoutingAction, classify, classify_failure
 
 # ─────────────────────────────────────────────────────────────────────
 # Helpers
@@ -957,3 +957,70 @@ class TestExplainSystem:
         action = classify("create a rollout plan for the new auth system")
         assert action.kind != ActionKind.EXPLAIN_SYSTEM
         assert action.role == "gemini"
+
+
+# ── Tier 2c — dependency sequencing + failure classification ────────────────
+
+
+class TestDependencySequencing:
+    """UI+API tasks with a data dependency must come back SEQUENCED
+    (backend→frontend), not parallel — a wrong parallel split now costs a
+    worktree each under Multi×worktree."""
+
+    def test_independent_ui_api_stays_parallel(self):
+        act = classify("เพิ่มหน้า /login form และ endpoint POST /auth/login")
+        assert act.kind == ActionKind.PROPOSE
+        assert act.roles == ["frontend", "backend"]
+        assert act.sequence is None  # independent → parallel OK
+
+    def test_thai_dependency_signal_sequences(self):
+        act = classify("สร้างหน้า form โปรไฟล์ ใช้ข้อมูลจาก endpoint /api/profile ที่ backend ทำ")
+        assert act.roles == ["frontend", "backend"]
+        assert act.sequence == ["backend", "frontend"]
+        assert "SEQUENCE" in act.reason
+
+    def test_english_dependency_signal_sequences(self):
+        act = classify("build the settings page UI based on the API response from the backend db")
+        assert act.sequence == ["backend", "frontend"]
+
+    def test_ta_m_schema_signal(self):
+        act = classify("ทำหน้า checkout form ตาม schema ที่ API ส่งมา พร้อม endpoint ใหม่")
+        assert act.sequence == ["backend", "frontend"]
+
+    def test_single_role_never_sequences(self):
+        act = classify("เพิ่มปุ่ม logout ที่หน้า navbar")
+        assert act.sequence is None
+
+
+class TestClassifyFailure:
+    def test_infra_signature_beats_backend(self):
+        # container down produces API errors too — root cause wins
+        role, why = classify_failure("QA fail: API 500 เพราะ container ยังไม่ขึ้น ECONNREFUSED :5310")
+        assert role == "devops"
+        assert "infra" in why
+
+    def test_backend_signature(self):
+        role, _ = classify_failure("POST /auth/login returns 500, traceback ใน log: sql error")
+        assert role == "backend"
+
+    def test_auth_signature_is_backend(self):
+        role, _ = classify_failure("expected 200 got 401 unauthorized, jwt token expired")
+        assert role == "backend"
+
+    def test_frontend_signature(self):
+        role, _ = classify_failure(
+            "หน้า dashboard เพี้ยน — console error: undefined is not a function"
+        )
+        assert role == "frontend"
+
+    def test_qa_flaky_signature(self):
+        role, why = classify_failure("test flaky: timeout รอ element #submit แต่ retry passed")
+        assert role == "qa"
+        assert "test" in why
+
+    def test_unknown_returns_none(self):
+        role, why = classify_failure("ผลไม่ตรง spec นิดหน่อย")
+        assert role is None and why == ""
+
+    def test_empty_note(self):
+        assert classify_failure("") == (None, "")

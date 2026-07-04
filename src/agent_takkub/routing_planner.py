@@ -42,6 +42,11 @@ class RoutingAction:
     cross_check: list[str] | None = None  # extra roles to auto-fire (codex/gemini)
     reason: str = ""  # human-readable explanation
     mixed: bool = False  # has both informational + actionable intent
+    # Tier 2c: ordered execution when the message signals a data dependency
+    # between the multi-role split (e.g. "form ตาม schema ที่ backend ส่ง").
+    # None = independent, parallel dispatch is fine. Non-None = dispatch in
+    # THIS order, waiting for each done (Multi-mode must not fan these out).
+    sequence: list[str] | None = None
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -395,6 +400,87 @@ def _handle_confirm(msg: str) -> RoutingAction | None:
     return None
 
 
+# ─────────────────────────────────────────────────────────────────────
+# Tier 2c — dependency sequencing + verify-failure classification
+# ─────────────────────────────────────────────────────────────────────
+
+# Signals that the frontend half of a UI+API task CONSUMES the backend half's
+# output (schema/contract/response) — parallel dispatch would build the form
+# against a guessed contract and fail integration. Ordered dispatch instead.
+_FRONTEND_NEEDS_BACKEND = re.compile(
+    r"(ตาม\s*(schema|contract|spec|response)|"
+    r"ใช้\s*(ข้อมูล|response|ผลลัพธ์|result)\s*จาก|"
+    r"จาก\s*endpoint|ที่\s*api\s*(ส่ง|ให้|คืน)|"
+    r"รอ\s*backend|หลัง(จาก)?\s*backend\s*(เสร็จ|done)|"
+    r"depends?\s+on\s+the\s+(api|backend|schema|contract)|"
+    r"based\s+on\s+the\s+(api|schema|contract|response)|"
+    r"(after|once)\s+the\s+backend)",
+    re.IGNORECASE,
+)
+
+# Verify-failure signatures → the role a fix loop should route back to.
+# Ordered by root-cause priority: infra failures masquerade as API errors and
+# API errors masquerade as UI errors, so devops > backend > frontend > qa.
+_FAILURE_RULES: list[tuple[re.Pattern, str, str]] = [
+    (
+        re.compile(
+            r"(docker|compose|container|econnrefused|connection\s+refused|"
+            r"service\s+(down|unavailable)|healthcheck|stack\s*ไม่ขึ้น|"
+            r"port\s+(ชน|conflict|in\s+use)|ยังไม่ได้\s*(รัน|start))",
+            re.IGNORECASE,
+        ),
+        "devops",
+        "infra/stack signature (container/port/healthcheck)",
+    ),
+    (
+        re.compile(
+            r"(\b50[0-4]\b|\b40[13]\b|api\s*(error|fail)|exception|traceback|"
+            r"stack\s*trace|database|migration|\bsql\b|endpoint.{0,20}(fail|error|พัง)|"
+            r"unauthorized|jwt|token\s+(invalid|expired))",
+            re.IGNORECASE,
+        ),
+        "backend",
+        "server/API signature (5xx/auth/db/exception)",
+    ),
+    (
+        re.compile(
+            r"(selector|hydration|\bcss\b|layout|render|component|"
+            r"undefined\s+is\s+not|console\s+error|หน้า(เพี้ยน|พัง|ขาว)|"
+            r"ปุ่ม.{0,15}(หาย|กดไม่ได้)|ui\s+(broken|ผิด))",
+            re.IGNORECASE,
+        ),
+        "frontend",
+        "UI signature (render/selector/console)",
+    ),
+    (
+        re.compile(
+            r"(flaky|intermittent|เทสไม่เสถียร|timeout\s*รอ|"
+            r"wait(ed)?\s+for\s+(element|selector)|retry\s+passed)",
+            re.IGNORECASE,
+        ),
+        "qa",
+        "test-side flakiness (fix the test, not the app)",
+    ),
+]
+
+
+def classify_failure(note: str) -> tuple[str | None, str]:
+    """Map a verify-fail note to the role a fix loop should target (Tier 2c).
+
+    Returns ``(role, reason)`` from the first matching signature, or
+    ``(None, "")`` when nothing matches — the Lead diagnoses manually then.
+    Rule order encodes root-cause priority (infra > server > UI > test);
+    this is a SUGGESTION for the fix-loop proposal, never an auto-route.
+    """
+    s = (note or "").strip()
+    if not s:
+        return None, ""
+    for pattern, role, reason in _FAILURE_RULES:
+        if pattern.search(s):
+            return role, reason
+    return None, ""
+
+
 def _derive_primary_role(msg: str) -> str:
     """Guess the primary role from content when the routing rule has role=None."""
     if _HAS_UI.search(msg):
@@ -421,6 +507,17 @@ def _route(msg: str) -> dict:
     # ordered route table so reviewer/qa/critic/codex cross-check rules win.
     has_impl_intent = bool(_IMPLEMENTATION_EN.search(msg) or _IMPLEMENTATION_TH.search(msg))
     if has_impl_intent and _HAS_UI.search(msg) and _HAS_API.search(msg):
+        # Tier 2c: a data dependency between the halves forbids parallel
+        # dispatch — the frontend would code against a guessed contract.
+        if _FRONTEND_NEEDS_BACKEND.search(msg):
+            return {
+                "roles": ["frontend", "backend"],
+                "sequence": ["backend", "frontend"],
+                "reason": (
+                    "UI + API with data dependency (frontend consumes backend "
+                    "schema/response) — SEQUENCE backend→frontend, ห้าม parallel"
+                ),
+            }
         return {
             "roles": ["frontend", "backend"],
             "reason": "UI + API keywords detected — parallel roles",
@@ -568,4 +665,5 @@ def classify(user_message: str, context: dict | None = None) -> RoutingAction:
         cross_check=cross_check,
         reason=reason,
         mixed=is_mixed,
+        sequence=routing.get("sequence"),
     )

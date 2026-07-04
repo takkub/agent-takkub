@@ -435,6 +435,7 @@
         "agent_takkub.provider_state",
         "agent_takkub.pty_session",
         "agent_takkub.roles",
+        "agent_takkub.routing_planner",
         "agent_takkub.shared_dev_tools",
         "agent_takkub.spawn_engine",
         "agent_takkub.vault_mirror",
@@ -448,7 +449,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 5,
-      "fan_out": 19
+      "fan_out": 20
     },
     {
       "module": "agent_takkub.orchestrator_text",
@@ -709,8 +710,10 @@
     {
       "module": "agent_takkub.routing_planner",
       "imports": [],
-      "imported_by": [],
-      "fan_in": 0,
+      "imported_by": [
+        "agent_takkub.orchestrator"
+      ],
+      "fan_in": 1,
       "fan_out": 0
     },
     {

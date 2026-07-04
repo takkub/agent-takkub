@@ -1443,9 +1443,21 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, QObject):
         matching the cockpit's safety doctrine.
         """
         body = note.strip() or "(no detail given)"
+        # Tier 2c: signature-based suggestion for which role the fix loop
+        # should target. A suggestion only — the Lead proposes, user confirms.
+        suggest = ""
+        try:
+            from .routing_planner import classify_failure
+
+            fix_role, why = classify_failure(body)
+            if fix_role:
+                suggest = f"🔎 signature ชี้ไปที่ **{fix_role}** ({why}) — เสนอ route กลับ role นี้ก่อน\n"
+        except Exception:
+            pass
         return (
             f"[{from_role} FAILED] {body}\n\n"
             "⚠️ verify/QA รายงาน FAIL — เสนอ fix loop (propose-then-fire, ห้าม auto):\n"
+            f"{suggest}"
             "1. อ่าน failure ข้างบน หา root cause\n"
             "2. Propose assign role ที่ทำงานนั้นให้แก้ (propose table + cwd + รอ confirm)\n"
             "3. แก้เสร็จ → re-verify (QA ท้ายสุดเสมอ)\n"
