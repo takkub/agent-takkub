@@ -154,6 +154,10 @@ def _safe_rel_entry(entry: object) -> str | None:
     if not isinstance(entry, str) or not entry.strip():
         return None
     rel = entry.strip().replace("\\", "/")
+    # Windows drive prefix must be caught by pattern, not Path.drive — on a
+    # POSIX runner Path("C:/evil") has no drive and would pass (CI macos catch).
+    if re.match(r"^[A-Za-z]:", rel):
+        return None
     p = Path(rel)
     # p.root catches "/abs" too — on Windows Path("/abs").is_absolute() is
     # False (no drive), but it still escapes the repo when joined.
