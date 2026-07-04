@@ -777,12 +777,27 @@ class UserActionsMixin:
             profile_list.addItem(f"{p['name']}  →  {p['config_dir']}")
         lay.addWidget(profile_list)
 
+        btn_row_w = QWidget(profile_tab)
+        btn_row_l = QHBoxLayout(btn_row_w)
+        btn_row_l.setContentsMargins(0, 0, 0, 0)
         btn_remove = QPushButton("Remove selected", profile_tab)
         btn_remove.setEnabled(False)
-        lay.addWidget(btn_remove)
+        btn_share = QPushButton("🔗 Share sessions with default", profile_tab)
+        btn_share.setEnabled(False)
+        btn_share.setToolTip(
+            "Convert this profile to shared-session mode: its existing\n"
+            "sessions/todos/plugins/skills are merged into the default\n"
+            "profile (nothing overwritten, originals kept as *.pre-share-backup),\n"
+            "then linked — from then on switching users changes ONLY the\n"
+            "account; history and plugins are the same everywhere."
+        )
+        btn_row_l.addWidget(btn_remove)
+        btn_row_l.addWidget(btn_share)
+        lay.addWidget(btn_row_w)
 
         def _on_sel(row: int) -> None:
             btn_remove.setEnabled(row > 0)  # row 0 = "default", not removable
+            btn_share.setEnabled(row > 0)
 
         profile_list.currentRowChanged.connect(_on_sel)
 
@@ -795,10 +810,44 @@ class UserActionsMixin:
             except ValueError as exc:
                 QMessageBox.warning(dlg, "Cannot remove", str(exc))
                 return
+            # Unlink shared junctions FIRST so a later manual delete of the
+            # profile folder can't traverse a junction into ~/.claude data.
+            try:
+                user_profile.cleanup_profile_links(profiles[row]["config_dir"])
+            except Exception:
+                pass
             profile_list.takeItem(row)
             profiles.pop(row)
 
         btn_remove.clicked.connect(_do_remove)
+
+        def _do_share() -> None:
+            row = profile_list.currentRow()
+            if row <= 0 or row >= len(profiles):
+                return
+            p = profiles[row]
+            confirm = QMessageBox.question(
+                dlg,
+                "Share sessions?",
+                f"Convert '{p['name']}' ({p['config_dir']}) to shared-session mode?\n\n"
+                "• Its sessions/todos/plugins/skills merge into the default\n"
+                "  profile — nothing is overwritten, originals are kept as\n"
+                "  *.pre-share-backup inside the profile dir.\n"
+                "• Login/credentials stay separate — only the account differs.\n"
+                "• Panes already open keep their old view until respawned.",
+                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Ok,
+            )
+            if confirm != QMessageBox.StandardButton.Ok:
+                return
+            results = user_profile.convert_profile_to_shared(p["config_dir"])
+            QMessageBox.information(
+                dlg,
+                "Shared-session conversion",
+                "\n".join(f"{k}: {v}" for k, v in results.items()),
+            )
+
+        btn_share.clicked.connect(_do_share)
 
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
@@ -819,6 +868,17 @@ class UserActionsMixin:
         dir_row_l.addWidget(btn_browse)
         form.addRow("Name:", name_edit)
         form.addRow("Config dir:", dir_row_w)
+        from PyQt6.QtWidgets import QCheckBox
+
+        share_chk = QCheckBox("🔗 Share sessions/plugins with default (switch account only)")
+        share_chk.setChecked(True)
+        share_chk.setToolTip(
+            "Recommended. The new profile links sessions/todos/plugins/skills\n"
+            "to the default profile — switching users changes ONLY the login.\n"
+            "Uncheck for a fully isolated profile (old behaviour).\n"
+            "Leave Config dir blank to use ~/.claude-<name>."
+        )
+        form.addRow("", share_chk)
         lay.addLayout(form)
 
         def _do_browse() -> None:
@@ -834,18 +894,31 @@ class UserActionsMixin:
         def _do_add() -> None:
             n = name_edit.text().strip()
             d = dir_edit.text().strip()
-            if not n or not d:
+            if not n:
                 return
+            if not d:
+                if not share_chk.isChecked():
+                    return  # isolated profiles must name their dir explicitly
+                from pathlib import Path as _P
+
+                d = str(_P.home() / f".claude-{n}")
             try:
-                user_profile.add_profile(n, d)
+                linked = user_profile.add_profile(n, d, share_sessions=share_chk.isChecked())
             except ValueError as exc:
                 QMessageBox.warning(dlg, "Invalid profile", str(exc))
                 return
             new_p = {"name": n, "config_dir": d}
             profiles.append(new_p)
-            profile_list.addItem(f"{n}  →  {d}")
+            suffix = "  🔗shared" if linked else ""
+            profile_list.addItem(f"{n}  →  {d}{suffix}")
             name_edit.clear()
             dir_edit.clear()
+            if linked:
+                self._status.showMessage(
+                    f"👤 profile '{n}' created — shares {', '.join(linked)} with default · "
+                    "run 'claude login' in a pane of that profile to sign in",
+                    9_000,
+                )
 
         btn_add.clicked.connect(_do_add)
 

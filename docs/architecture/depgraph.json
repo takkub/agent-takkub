@@ -964,7 +964,8 @@
     {
       "module": "agent_takkub.user_profile",
       "imports": [
-        "agent_takkub.config"
+        "agent_takkub.config",
+        "agent_takkub.worktree_manager"
       ],
       "imported_by": [
         "agent_takkub.limit_panel",
@@ -973,7 +974,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 4,
-      "fan_out": 1
+      "fan_out": 2
     },
     {
       "module": "agent_takkub.vault_graph",
@@ -1015,9 +1016,10 @@
       "imported_by": [
         "agent_takkub.cli",
         "agent_takkub.orchestrator",
-        "agent_takkub.orchestrator_text"
+        "agent_takkub.orchestrator_text",
+        "agent_takkub.user_profile"
       ],
-      "fan_in": 3,
+      "fan_in": 4,
       "fan_out": 1
     }
   ]

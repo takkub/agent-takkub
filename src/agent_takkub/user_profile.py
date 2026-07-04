@@ -92,8 +92,144 @@ def list_profiles() -> list[dict]:
     return [default_entry, *registered]
 
 
-def add_profile(name: str, config_dir: str | Path) -> None:
+# Items shared with the default profile when a profile is created with
+# share_sessions=True ("สลับเฉพาะบัญชี — session เดิมอยู่ครบ"):
+#   projects/ — Claude Code transcripts + resume state (the actual sessions)
+#   todos/    — per-session todo state
+#   plugins/  — installed plugin cache (skills keep working)
+#   skills/   — user-level skills
+# Directories become junctions (win) / symlinks (posix) into ~/.claude, so BOTH
+# profiles literally read and write the same session store. Credentials,
+# settings.json, .claude.json, statsig/ stay per-profile — that's the account.
+SHARED_ITEMS: tuple[str, ...] = ("projects", "todos", "plugins", "skills")
+
+
+def provision_shared_profile(config_dir: str | Path, share_from: Path | None = None) -> list[str]:
+    """Create *config_dir* as a shared-session profile home.
+
+    Links each :data:`SHARED_ITEMS` dir from *share_from* (default
+    ``~/.claude``) into *config_dir*. Missing source dirs are created first so
+    the link target is always valid. Existing destination entries are left
+    untouched (never clobbered). Returns the list of item names linked.
+    Raises ``OSError`` only when the profile dir itself cannot be created.
+    """
+    from .worktree_manager import _make_link
+
+    src_home = Path(share_from) if share_from else _DEFAULT_CONFIG_DIR
+    dest_home = Path(config_dir).expanduser()
+    dest_home.mkdir(parents=True, exist_ok=True)
+    linked: list[str] = []
+    for item in SHARED_ITEMS:
+        src = src_home / item
+        dst = dest_home / item
+        if dst.exists() or dst.is_symlink():
+            continue  # never clobber whatever is already there
+        try:
+            src.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            continue
+        if _make_link(src, dst) is None:
+            linked.append(item)
+    return linked
+
+
+def _merge_tree(src: Path, dst: Path) -> tuple[int, int]:
+    """Copy every file under *src* into *dst* that doesn't already exist there
+    (never overwrites — existing files win). Returns (copied, skipped)."""
+    import shutil as _shutil
+
+    copied = skipped = 0
+    for p in src.rglob("*"):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(src)
+        target = dst / rel
+        if target.exists():
+            skipped += 1
+            continue
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            _shutil.copy2(p, target)
+            copied += 1
+        except OSError:
+            skipped += 1
+    return copied, skipped
+
+
+def convert_profile_to_shared(
+    config_dir: str | Path, share_from: Path | None = None
+) -> dict[str, str]:
+    """Convert an EXISTING profile dir (already-split data) to shared-session.
+
+    Per :data:`SHARED_ITEMS` item: merge the profile's own files into the
+    default home (existing files there win — nothing is overwritten), rename
+    the original dir to ``<item>.pre-share-backup`` (kept — user deletes it
+    when confident), then link the default home's dir in its place. Items that
+    are already link points are skipped (idempotent). Returns
+    {item: summary} for display.
+    """
+    from .worktree_manager import _is_link_point, _make_link
+
+    src_home = Path(share_from) if share_from else _DEFAULT_CONFIG_DIR
+    dest_home = Path(config_dir).expanduser()
+    results: dict[str, str] = {}
+    for item in SHARED_ITEMS:
+        p = dest_home / item
+        if _is_link_point(p):
+            results[item] = "already shared"
+            continue
+        try:
+            main = src_home / item
+            main.mkdir(parents=True, exist_ok=True)
+            if p.is_dir():
+                copied, skipped = _merge_tree(p, main)
+                backup = dest_home / f"{item}.pre-share-backup"
+                n = 1
+                while backup.exists():
+                    n += 1
+                    backup = dest_home / f"{item}.pre-share-backup{n}"
+                p.rename(backup)
+                note = f"merged {copied} file(s) in"
+                if skipped:
+                    note += f", {skipped} already present"
+                note += f" · original kept as {backup.name}"
+            else:
+                note = "created"
+            err = _make_link(main, p)
+            results[item] = note if err is None else f"link failed: {err}"
+        except OSError as e:
+            results[item] = f"failed: {e}"
+    return results
+
+
+def cleanup_profile_links(config_dir: str | Path) -> list[str]:
+    """Remove the shared-item LINK POINTS under *config_dir* (never their
+    targets, never real directories). Call before a profile dir is deleted so
+    a recursive delete by the user/Explorer cannot traverse a junction and
+    wipe the shared ~/.claude session store. Returns removed item names."""
+    from .worktree_manager import _is_link_point, _remove_link
+
+    dest_home = Path(config_dir).expanduser()
+    removed: list[str] = []
+    for item in SHARED_ITEMS:
+        p = dest_home / item
+        try:
+            if p.exists() or p.is_symlink():
+                if _is_link_point(p):
+                    _remove_link(p)
+                    removed.append(item)
+        except OSError:
+            continue
+    return removed
+
+
+def add_profile(name: str, config_dir: str | Path, share_sessions: bool = False) -> list[str]:
     """Register a new profile.
+
+    ``share_sessions=True`` provisions *config_dir* so sessions/plugins are
+    shared with the default profile (see :func:`provision_shared_profile`) —
+    switching users changes ONLY the login/credentials. Returns the list of
+    shared items linked ([] when not sharing).
 
     Raises ``ValueError`` if *name* is invalid or already taken.
     No-ops on I/O errors to keep callers fault-tolerant (caller should
@@ -113,11 +249,20 @@ def add_profile(name: str, config_dir: str | Path) -> None:
     profiles = _load_registry()
     if any(p["name"] == name for p in profiles):
         raise ValueError(f"Profile {name!r} already exists")
+
+    linked: list[str] = []
+    if share_sessions:
+        try:
+            linked = provision_shared_profile(config_dir_s)
+        except OSError as e:
+            raise ValueError(f"Cannot create profile dir {config_dir_s}: {e}") from e
+
     profiles.append({"name": name, "config_dir": config_dir_s})
     try:
         _atomic_write(_REGISTRY_PATH, profiles)
     except OSError:
         pass
+    return linked
 
 
 def remove_profile(name: str) -> None:

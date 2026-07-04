@@ -211,3 +211,78 @@ class TestInjectUserProfileEnv:
         env: dict[str, str] = {}
         pane_env.inject_user_profile_env(env, "any")  # must not raise
         assert "CLAUDE_CONFIG_DIR" not in env
+
+
+class TestSharedSessionProfiles:
+    """Shared-session profiles — switch the ACCOUNT, keep sessions/plugins.
+
+    Uses real links (junction on win / symlink on posix) in tmp dirs via the
+    worktree_manager link helpers.
+    """
+
+    @pytest.fixture()
+    def homes(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        main = tmp_path / "claude-main"
+        (main / "projects" / "proj-a").mkdir(parents=True)
+        (main / "projects" / "proj-a" / "s1.jsonl").write_text("main", encoding="utf-8")
+        monkeypatch.setattr(up, "_DEFAULT_CONFIG_DIR", main)
+        return main, tmp_path / "claude-second"
+
+    def test_provision_links_shared_items(self, homes) -> None:
+        main, second = homes
+        linked = up.provision_shared_profile(second)
+        assert set(linked) == set(up.SHARED_ITEMS)
+        # writing through the link lands in the main home = shared for real
+        via_link = second / "projects" / "proj-a" / "s2.jsonl"
+        via_link.parent.mkdir(parents=True, exist_ok=True)
+        via_link.write_text("x", encoding="utf-8")
+        assert (main / "projects" / "proj-a" / "s2.jsonl").exists()
+
+    def test_provision_never_clobbers_existing(self, homes) -> None:
+        _main, second = homes
+        (second / "projects").mkdir(parents=True)
+        (second / "projects" / "own.txt").write_text("mine", encoding="utf-8")
+        linked = up.provision_shared_profile(second)
+        assert "projects" not in linked  # left alone
+        assert (second / "projects" / "own.txt").read_text(encoding="utf-8") == "mine"
+
+    def test_convert_merges_then_links_with_backup(self, homes) -> None:
+        main, second = homes
+        old = second / "projects" / "proj-b"
+        old.mkdir(parents=True)
+        (old / "old-session.jsonl").write_text("old", encoding="utf-8")
+        # collision: same rel path in both — the MAIN copy must win
+        dup = second / "projects" / "proj-a"
+        dup.mkdir(parents=True)
+        (dup / "s1.jsonl").write_text("second-copy", encoding="utf-8")
+
+        results = up.convert_profile_to_shared(second)
+        assert "merged 1 file(s) in" in results["projects"]
+        # old data now visible from the MAIN home
+        assert (main / "projects" / "proj-b" / "old-session.jsonl").exists()
+        # collision: main's file untouched
+        assert (main / "projects" / "proj-a" / "s1.jsonl").read_text(encoding="utf-8") == "main"
+        # original kept as backup, live path is now a link
+        assert (second / "projects.pre-share-backup").is_dir()
+        from agent_takkub.worktree_manager import _is_link_point
+
+        assert _is_link_point(second / "projects")
+        # idempotent
+        again = up.convert_profile_to_shared(second)
+        assert again["projects"] == "already shared"
+
+    def test_cleanup_removes_links_only(self, homes) -> None:
+        main, second = homes
+        up.provision_shared_profile(second)
+        removed = up.cleanup_profile_links(second)
+        assert set(removed) == set(up.SHARED_ITEMS)
+        # link points gone, shared data in the main home untouched
+        assert not (second / "projects").exists()
+        assert (main / "projects" / "proj-a" / "s1.jsonl").exists()
+
+    def test_add_profile_share_sessions(self, homes, tmp_path, monkeypatch) -> None:
+        _main, second = homes
+        monkeypatch.setattr(up, "_REGISTRY_PATH", tmp_path / "reg.json")
+        linked = up.add_profile("work2", second, share_sessions=True)
+        assert set(linked) == set(up.SHARED_ITEMS)
+        assert any(p["name"] == "work2" for p in up.list_profiles())
