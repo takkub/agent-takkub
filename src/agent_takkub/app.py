@@ -176,6 +176,32 @@ def _should_allow_multi() -> bool:
     return os.environ.get("TAKKUB_ALLOW_MULTI", "").strip() == "1"
 
 
+def _wait_predecessor_exit(
+    lock,
+    timeout_s: float = 20.0,
+    poll_s: float = 0.25,
+    _sleep=None,
+    _clock=None,
+) -> bool:
+    """Poll the single-instance lock until the exiting predecessor releases it.
+
+    Used only on the `takkub restart` successor path (TAKKUB_RESTART_SUCCESSOR):
+    the old cockpit is shutting down GRACEFULLY, so killing it or showing the
+    "already running" dialog would be wrong — WebEngine teardown just takes a
+    few seconds. Returns True once the lock is acquired, False on timeout
+    (caller falls through to the normal auto-kill/dialog path).
+    `_sleep`/`_clock` are injectable for tests.
+    """
+    sleep = _sleep or time.sleep
+    clock = _clock or time.monotonic
+    deadline = clock() + timeout_s
+    while clock() < deadline:
+        sleep(poll_s)
+        if lock.tryLock(100):
+            return True
+    return False
+
+
 # When running in multi-instance mode, steer cli_server to a per-PID port file
 # so the second instance doesn't overwrite the main instance's runtime/port,
 # and panes (which inherit this env) auto-connect to the right cockpit.
@@ -452,6 +478,19 @@ def main(argv: list[str] | None = None) -> int:
     else:
         _instance_lock = QLockFile(_LOCK_PATH)
     if not _should_allow_multi() and not _instance_lock.tryLock(100):
+        # `takkub restart` successor: the predecessor is EXPECTED to still be
+        # exiting (WebEngine teardown takes seconds) — wait for it to release
+        # the lock instead of racing into auto-kill / the "already running"
+        # dialog. Falls through to the normal path only if the wait times out.
+        if os.environ.pop("TAKKUB_RESTART_SUCCESSOR", None) == "1" and _wait_predecessor_exit(
+            _instance_lock
+        ):
+            _boot_log("[single-instance] restart successor — predecessor exited, lock acquired")
+            w = MainWindow()
+            _install_signal_handlers(w)
+            _start_deadman_watchdog(w)
+            w.show()
+            return app.exec()
         _boot_log(
             f"[single-instance] lock held — attempting auto-kill of stale process (pid={os.getpid()})"
         )

@@ -874,11 +874,19 @@ class MainWindowUpdateMixin:
             pass
 
         try:
+            import os as _os
+
+            # Tag the successor so its single-instance guard WAITS for this
+            # process to exit (WebEngine teardown takes seconds) instead of
+            # racing into auto-kill or the "already running" OK dialog.
+            _succ_env = _os.environ.copy()
+            _succ_env["TAKKUB_RESTART_SUCCESSOR"] = "1"
             subprocess.Popen(
                 [sys.executable, "-m", "agent_takkub"],
                 cwd=str(REPO_ROOT),
                 close_fds=True,
                 creationflags=SUBPROCESS_NO_WINDOW,
+                env=_succ_env,
             )
         except Exception as e:
             # If we can't spawn the successor, don't quit — leave the

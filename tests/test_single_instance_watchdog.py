@@ -342,3 +342,51 @@ class TestMainWindowHeartbeat:
         mw_mod.MainWindow._tick_heartbeat(win)
         age = time.monotonic() - win._heartbeat_ts
         assert age < 1.0, "_tick_heartbeat must set _heartbeat_ts to a recent monotonic value"
+
+
+class TestWaitPredecessorExit:
+    """Restart-successor lock wait (no auto-kill, no 'already running' dialog)."""
+
+    class _Lock:
+        def __init__(self, free_after_tries: int):
+            self.free_after = free_after_tries
+            self.tries = 0
+
+        def tryLock(self, _ms):
+            self.tries += 1
+            return self.tries >= self.free_after
+
+    def test_acquires_once_predecessor_exits(self):
+        from agent_takkub.app import _wait_predecessor_exit
+
+        clock = {"t": 0.0}
+
+        def fake_sleep(s):
+            clock["t"] += s
+
+        lock = self._Lock(free_after_tries=4)  # frees after ~1s of polling
+        assert (
+            _wait_predecessor_exit(
+                lock, timeout_s=20.0, poll_s=0.25, _sleep=fake_sleep, _clock=lambda: clock["t"]
+            )
+            is True
+        )
+        assert lock.tries == 4
+
+    def test_times_out_when_lock_never_frees(self):
+        from agent_takkub.app import _wait_predecessor_exit
+
+        clock = {"t": 0.0}
+
+        def fake_sleep(s):
+            clock["t"] += s
+
+        lock = self._Lock(free_after_tries=10**9)
+        assert (
+            _wait_predecessor_exit(
+                lock, timeout_s=2.0, poll_s=0.25, _sleep=fake_sleep, _clock=lambda: clock["t"]
+            )
+            is False
+        )
+        # bounded: ~timeout/poll attempts, not unbounded
+        assert lock.tries <= 9
