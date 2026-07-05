@@ -88,20 +88,25 @@ def test_build_pane_env_includes_sessionname(monkeypatch: pytest.MonkeyPatch) ->
     assert "SESSIONNAME" in env
 
 
-def test_build_pane_env_forwards_port_file(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_build_pane_env_forwards_port_file(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     # Regression: in multi-instance mode app.py sets TAKKUB_PORT_FILE in the
     # cockpit process env so panes dial *this* cockpit's cli_server. If the
     # allowlist drops it, the pane's `takkub` CLI falls back to a stale
-    # runtime/port and gets connection-refused.
-    monkeypatch.setenv("TAKKUB_PORT_FILE", "/tmp/agent-takkub-port.4242")
+    # runtime/port and gets connection-refused. Value is recomputed via
+    # config._get_port_file() (see _apply_port_file in pane_env.py), which
+    # honours this same override — use a native-separator path so the
+    # str(Path(...)) round-trip is exact on every OS.
+    override = str(tmp_path / "agent-takkub-port.4242")
+    monkeypatch.setenv("TAKKUB_PORT_FILE", override)
     env = _build_pane_env()
-    assert env.get("TAKKUB_PORT_FILE") == "/tmp/agent-takkub-port.4242"
+    assert env.get("TAKKUB_PORT_FILE") == override
 
 
-def test_build_lead_env_forwards_port_file(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_build_lead_env_forwards_port_file(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     # Lead is a pane too — it must reach its own cockpit's cli_server for
     # every `takkub assign/list/status`, so the port file must survive the
     # Lead allowlist as well.
-    monkeypatch.setenv("TAKKUB_PORT_FILE", "/tmp/agent-takkub-port.4242")
+    override = str(tmp_path / "agent-takkub-port.4242")
+    monkeypatch.setenv("TAKKUB_PORT_FILE", override)
     env = _build_lead_env()
-    assert env.get("TAKKUB_PORT_FILE") == "/tmp/agent-takkub-port.4242"
+    assert env.get("TAKKUB_PORT_FILE") == override

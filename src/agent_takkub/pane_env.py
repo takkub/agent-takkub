@@ -1,6 +1,6 @@
 """Per-pane env construction — allowlist + mute helpers for spawned panes.
 
-Five concerns live here:
+Six concerns live here:
 1. `_PANE_ENV_ALLOWLIST` + `_build_pane_env()` — keep secret-bearing env
    vars (API keys, GH tokens, AWS creds) out of teammate panes by
    filtering to a known-safe set.
@@ -8,14 +8,18 @@ Five concerns live here:
    (commits, runs gh CLI, orchestrates) so it gets a wider allowlist, but
    still not `os.environ.copy()` — defense-in-depth against secrets leaking
    into Lead's subprocesses / MCP tools.
-3. `_apply_mcp_timeout()` — raise the CC 2.1.142+ MCP per-call timeout
+3. `_apply_port_file()` — stamp the effective cli_server port-file path
+   into every pane (teammate and Lead alike) so its `takkub` CLI always
+   dials *this* cockpit's server, even in single-instance mode where
+   `TAKKUB_PORT_FILE` was never set in the host process env.
+4. `_apply_mcp_timeout()` — raise the CC 2.1.142+ MCP per-call timeout
    default from 60s to 3min so browser MCP work (Playwright, Chrome
    DevTools, Lighthouse) doesn't trip on first page load.
-4. `_apply_non_interactive_env()` — prevent npx/npm/git from blocking on
+5. `_apply_non_interactive_env()` — prevent npx/npm/git from blocking on
    interactive y/N or credential prompts (issue #52). Sets npm_config_yes
    and GIT_TERMINAL_PROMPT at process level so every shell command inside
    the pane is non-interactive by default.
-5. `_apply_color_term()` — advertise a truecolor terminal so claude/ink
+6. `_apply_color_term()` — advertise a truecolor terminal so claude/ink
    renders ANSI colours. The cockpit front-end is xterm.js on every OS
    (full 256-colour + truecolor palette), but a GUI-launched cockpit on
    macOS inherits no `TERM`, so the allowlist had nothing to forward and
@@ -86,13 +90,11 @@ _PANE_ENV_ALLOWLIST: frozenset[str] = frozenset(
         "TAKKUB_SETTING_SOURCES",
         # Per-PID port file — in multi-instance mode app.py sets this in the
         # cockpit process env so panes dial *this* cockpit's cli_server instead
-        # of a stale runtime/port fossil left by a dead instance. Without it on
-        # the allowlist the value is filtered out here and the pane's `takkub`
-        # CLI falls back to the default runtime/port → connection refused when
-        # that file points at a dead port left by a previous instance.
-        # Not a secret (a temp path); safe to forward. Unset in single-instance
-        # mode → pane correctly falls back to runtime/port, which the lone
-        # server owns.
+        # of a stale runtime/port fossil left by a dead instance. Listed here
+        # for clarity only: `_apply_port_file()` (below) recomputes and stamps
+        # the effective value into every pane's env unconditionally, in both
+        # single- and multi-instance mode, so this allowlist entry is never
+        # actually relied on to carry the value through.
         "TAKKUB_PORT_FILE",
         # Browser MCP (chrome-devtools needs to find Chrome)
         "CHROME_BIN",
@@ -130,7 +132,9 @@ def _build_pane_env() -> dict[str, str]:
         k = k.strip()
         if k:
             allow.add(k.upper())
-    return {k: v for k, v in os.environ.items() if k.upper() in allow}
+    env = {k: v for k, v in os.environ.items() if k.upper() in allow}
+    _apply_port_file(env)
+    return env
 
 
 # Additional env vars that Lead needs beyond the base teammate allowlist.
@@ -173,7 +177,34 @@ def _build_lead_env() -> dict[str, str]:
         k = k.strip()
         if k:
             allow.add(k.upper())
-    return {k: v for k, v in os.environ.items() if k.upper() in allow}
+    env = {k: v for k, v in os.environ.items() if k.upper() in allow}
+    _apply_port_file(env)
+    return env
+
+
+def _apply_port_file(env: dict[str, str]) -> None:
+    """Stamp the effective cli_server port-file path into every pane's env.
+
+    ``TAKKUB_PORT_FILE`` is only present in ``os.environ`` in multi-instance
+    mode (app.py sets it per-PID so panes dial *this* cockpit's cli_server
+    instead of a stale runtime/port fossil left by a dead instance). In
+    single-instance mode nothing sets it, so the allowlist copy above simply
+    omits the key — the pane's ``takkub`` CLI then falls back to whichever
+    ``runtime/port`` its own DATA_HOME resolves to, which can be a *different*
+    cockpit's file entirely when a dev checkout's ``bin/`` sits ahead of an
+    installed prod cockpit's on PATH → the CLI dials the wrong server and every
+    ``takkub send/assign/done`` call fails with connection refused.
+
+    ``config._get_port_file()`` already honours a ``TAKKUB_PORT_FILE`` env
+    override when present and falls back to this process's own
+    ``RUNTIME_DIR/port`` otherwise — exactly the value every pane should use
+    regardless of instance mode. Stamping it here unconditionally (not
+    ``setdefault``) is safe: in multi-instance mode the allowlist copy already
+    equals what this recomputes, so overwriting is a no-op in value.
+    """
+    from . import config
+
+    env["TAKKUB_PORT_FILE"] = str(config._get_port_file())
 
 
 def _apply_mcp_timeout(env: dict[str, str]) -> None:

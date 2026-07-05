@@ -5,7 +5,17 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 ## [Unreleased]
 
 ### Fixed (แก้)
-- **chip "Update via npm" เขียวตลอดแม้มีอัพเดต (npm/pip install)** — cockpit ที่ติดตั้งผ่าน
+- **prod cockpit spawn teammate ไม่ได้ (connection refused ทั้งที่ cockpit เปิดอยู่)** — pane ของ
+  cockpit ที่ติดตั้งผ่าน npm/pip (single-instance, DATA_HOME=`~/.agent-takkub`) resolve `takkub`
+  บน PATH ไปเจอ CLI ของ **dev checkout** (repo/bin มาก่อนใน user PATH) → CLI อ่าน port file
+  ของ DATA_HOME **ตัวเอง** (`repo/runtime/port` — port เก่าที่ตายแล้ว) แทนของ cockpit ที่ spawn
+  มัน → `takkub assign/send/done` โดน `WinError 10061` ทุกครั้ง Lead เลย spawn role อื่นไม่ได้เลย
+  (ถ้า dev cockpit เปิดคู่กัน อาการยิ่งแย่กว่า: คำสั่งวิ่งเข้า **ผิด instance**). Root cause:
+  `TAKKUB_PORT_FILE` ถูก set เฉพาะ multi-instance mode (`app.py`) — single-instance ไม่มี env นี้
+  ให้ forward. แก้: `_apply_port_file()` ใน `pane_env.py` stamp `config._get_port_file()` เข้า env
+  ของ**ทุก pane ทุก role รวม Lead เสมอ** (ทั้ง single/multi-instance) → CLI copy ไหนบน PATH ก็
+  dial cockpit ที่ spawn ตัวเองถูกตัว. + 8 tests (`test_pane_port_file.py`) + integration verify
+  3 scenario (single/multi/CLI-side read).
   npm/pip (ไม่ใช่ git checkout) เข้า branch `not_repo` ของ `_refresh_update_button` ที่
   **hardcode เขียวตลอด** — ไม่เคย query npm registry ว่ามี version ใหม่ไหม เลยเขียวแม้มีอัพเดต
   จริง (ฝั่ง git checkout ยังเปลี่ยน เขียว→น้ำเงิน ตามปกติ). แก้: poll npm registry เบื้องหลังทุก

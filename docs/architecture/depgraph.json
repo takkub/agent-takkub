@@ -206,6 +206,7 @@
         "agent_takkub.main_window",
         "agent_takkub.orchestrator",
         "agent_takkub.orchestrator_text",
+        "agent_takkub.pane_env",
         "agent_takkub.pane_tools_dialog",
         "agent_takkub.pane_tools_policy",
         "agent_takkub.pipeline_config",
@@ -230,7 +231,7 @@
         "agent_takkub.vault_mirror",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 39,
+      "fan_in": 40,
       "fan_out": 0
     },
     {
@@ -482,6 +483,7 @@
     {
       "module": "agent_takkub.pane_env",
       "imports": [
+        "agent_takkub.config",
         "agent_takkub.user_profile"
       ],
       "imported_by": [
@@ -489,7 +491,7 @@
         "agent_takkub.spawn_engine"
       ],
       "fan_in": 2,
-      "fan_out": 1
+      "fan_out": 2
     },
     {
       "module": "agent_takkub.pane_tools_dialog",
