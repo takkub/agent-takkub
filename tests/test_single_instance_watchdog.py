@@ -390,7 +390,7 @@ class TestBootstrapProdClaudeProfile:
     def test_logs_event_when_a_clone_happens(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import agent_takkub.user_profile as up_mod
 
-        monkeypatch.setattr(up_mod, "bootstrap_default_profile", lambda: True)
+        monkeypatch.setattr(up_mod, "bootstrap_default_profile", lambda log_event=None: True)
         monkeypatch.setattr(up_mod, "_DEFAULT_CONFIG_DIR", Path("/fake/claude-config"))
 
         logged: list[dict] = []
@@ -407,7 +407,7 @@ class TestBootstrapProdClaudeProfile:
     def test_no_log_when_nothing_cloned(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import agent_takkub.user_profile as up_mod
 
-        monkeypatch.setattr(up_mod, "bootstrap_default_profile", lambda: False)
+        monkeypatch.setattr(up_mod, "bootstrap_default_profile", lambda log_event=None: False)
 
         logged: list[dict] = []
         with patch(
@@ -422,7 +422,9 @@ class TestBootstrapProdClaudeProfile:
         import agent_takkub.user_profile as up_mod
 
         monkeypatch.setattr(
-            up_mod, "bootstrap_default_profile", lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+            up_mod,
+            "bootstrap_default_profile",
+            lambda log_event=None: (_ for _ in ()).throw(RuntimeError("boom")),
         )
         app_mod._bootstrap_prod_claude_profile()  # must not raise
 

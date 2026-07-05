@@ -21,8 +21,11 @@ on missing/corrupt data).  The user's panes must always be able to spawn.
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 from .config import SETTINGS_HOME as _BASE_DIR
@@ -338,14 +341,121 @@ def config_dir_for(project: str) -> Path:
     return _DEFAULT_CONFIG_DIR
 
 
-def bootstrap_default_profile() -> bool:
+# ── First-boot profile clone (installed instances only) ─────────────────────
+#
+# ~/.claude can be multiple GB (projects/ transcripts, security/, plugins
+# cache, shell-snapshots/, file-history/, ...). A synchronous full-tree copy
+# of that on the main thread before the window paints was observed blocking
+# startup 8+ minutes on a 2.9GB real-world profile — the window never
+# appeared, the user assumed the app was dead, and a second launch's
+# auto-kill couldn't even kill the wedged (I/O-bound) process. The fix:
+#   1. Allowlist — clone only what gives a NEW profile a head start (config,
+#      skills, agents, plugins), plus a bounded number of each project's most
+#      recent session transcripts (see `_clone_recent_sessions`) so
+#      chatlog_scanner/resume aren't starting from a totally empty slate.
+#      An allowlist (not a denylist) means any future/unrecognized
+#      ~/.claude item defaults to "don't copy" instead of silently
+#      ballooning the copy again.
+#   2. Atomicity — build the clone in a `.partial` sibling dir, write a
+#      completion marker, then a single `os.replace()` into place. A kill
+#      mid-copy leaves only the `.partial` (cleaned up on the next boot),
+#      never a half-written `dest`.
+_BOOTSTRAP_CORE_ITEMS: tuple[str, ...] = (
+    "CLAUDE.md",
+    "settings.json",
+    "settings.local.json",
+    "keybindings.json",
+    "agents",
+    "commands",
+    "skills",
+    "plugins",
+)
+_BOOTSTRAP_MARKER = ".bootstrap-complete"
+
+# Per-project cap on recent session transcripts cloned (not a total cap —
+# each project subdir under ~/.claude/projects/ gets its own most-recent N).
+RECENT_SESSIONS_CLONE = 10
+# Single-session-file safety valve: an abnormally large transcript is
+# skipped rather than cloned, so one giant session can't turn a "cheap
+# bounded copy" back into the slow unbounded copy this fix exists to avoid.
+_RECENT_SESSION_MAX_BYTES = 50 * 1024 * 1024
+
+
+def _clone_core_items(src: Path, dest: Path) -> None:
+    for name in _BOOTSTRAP_CORE_ITEMS:
+        s = src / name
+        if not s.exists():
+            continue
+        d = dest / name
+        try:
+            if s.is_dir():
+                shutil.copytree(s, d)
+            else:
+                shutil.copy2(s, d)
+        except OSError:
+            continue
+
+
+def _clone_recent_sessions(src: Path, dest: Path) -> int:
+    """Copy the :data:`RECENT_SESSIONS_CLONE` most-recently-modified
+    ``*.jsonl`` session files from EACH project subdir under
+    ``src/projects/`` into ``dest/projects/``, preserving the
+    ``<encoded-cwd>/<session>.jsonl`` layout so chatlog_scanner/resume find
+    them without any special-casing. A file over
+    :data:`_RECENT_SESSION_MAX_BYTES` is skipped rather than counted/copied
+    (ponytail: no backfill from the 11th-most-recent file when one of the
+    top N is skipped for size — simplest behavior that satisfies "bounded,
+    cheap, and safe"). Returns the number of oversized files skipped.
+    """
+    projects_src = src / "projects"
+    if not projects_src.is_dir():
+        return 0
+    skipped_oversized = 0
+    for project_dir in projects_src.iterdir():
+        if not project_dir.is_dir():
+            continue
+        sessions = sorted(
+            (p for p in project_dir.glob("*.jsonl") if p.is_file()),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        for p in sessions[:RECENT_SESSIONS_CLONE]:
+            try:
+                if p.stat().st_size > _RECENT_SESSION_MAX_BYTES:
+                    skipped_oversized += 1
+                    continue
+                target = dest / "projects" / project_dir.name / p.name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(p, target)
+            except OSError:
+                continue
+    return skipped_oversized
+
+
+def bootstrap_default_profile(
+    log_event: Callable[..., None] | None = None,
+) -> bool:
     """First-boot only: give an installed instance's default Claude profile
-    (``DATA_HOME/claude-config``) a head start by cloning the user's existing
-    ``~/.claude`` into it — everything except ``.credentials.json`` (login is
-    per-instance; session history/settings/plugins are not). No-op for dev
-    checkouts (default profile already IS ``~/.claude``) and a no-op once the
-    destination exists (never clobbers a profile that's already been used or
-    logged into). Returns True iff a clone actually happened.
+    (``DATA_HOME/claude-config``) a head start by cloning a small allowlist
+    of items from the user's existing ``~/.claude``: CLAUDE.md, settings,
+    keybindings, agents/commands/skills/plugins, plus each project's most
+    recent session transcripts (see :data:`RECENT_SESSIONS_CLONE`). Never
+    copies ``.credentials.json`` (login is per-instance).
+
+    No-op for dev checkouts (default profile already IS ``~/.claude``).
+    *dest* is left completely untouched if it already holds a real profile —
+    either the completion marker from a prior successful bootstrap, or
+    ``.credentials.json`` proving the user has logged in there. A *dest*
+    that exists with neither (torn: a `.partial` promoted mid-copy by a
+    killed process, or a stray dir with no real user data — never logged
+    into) is discarded and re-cloned, since there is nothing of the user's
+    to lose.
+
+    *log_event* (if given) is called with
+    ``"profile_recent_sessions_oversized_skipped"`` and a ``count`` kwarg
+    when one or more session files were skipped for size.
+
+    Returns True iff a clone actually happened.
     """
     from .config import DATA_HOME, REPO_ROOT
 
@@ -353,20 +463,33 @@ def bootstrap_default_profile() -> bool:
         return False
     dest = _DEFAULT_CONFIG_DIR
     if dest.exists():
-        return False
+        if (dest / _BOOTSTRAP_MARKER).exists() or (dest / ".credentials.json").exists():
+            return False  # real profile — never touch
+        shutil.rmtree(dest, ignore_errors=True)  # torn from an earlier interrupted clone
+
     src = Path.home() / ".claude"
     if not src.is_dir():
         return False
 
-    import shutil
+    partial = dest.with_name(dest.name + ".partial")
+    shutil.rmtree(partial, ignore_errors=True)  # stale partial from a killed prior attempt
+    try:
+        partial.mkdir(parents=True)
+    except OSError:
+        return False
 
-    def _skip_credentials(dirpath: str, names: list[str]) -> set[str]:
-        if Path(dirpath) == src:
-            return {n for n in names if n == ".credentials.json"}
-        return set()
+    _clone_core_items(src, partial)
+    skipped_oversized = _clone_recent_sessions(src, partial)
+    if skipped_oversized and log_event is not None:
+        try:
+            log_event("profile_recent_sessions_oversized_skipped", count=skipped_oversized)
+        except Exception:
+            pass
 
     try:
-        shutil.copytree(src, dest, ignore=_skip_credentials)
+        (partial / _BOOTSTRAP_MARKER).write_text("", encoding="utf-8")
+        os.replace(partial, dest)
     except OSError:
+        shutil.rmtree(partial, ignore_errors=True)
         return False
     return True

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -320,17 +321,64 @@ class TestBootstrapDefaultProfile:
 
         assert up.bootstrap_default_profile() is False
 
-    def test_noop_when_dest_already_exists(
+    def test_noop_when_dest_has_completion_marker(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
+        """A dest with the marker is a completed profile — never re-touched,
+        even though the real ~/.claude on the test machine may exist."""
         import agent_takkub.config as config_mod
 
         monkeypatch.setattr(config_mod, "DATA_HOME", tmp_path / "agent-takkub-home")
         monkeypatch.setattr(config_mod, "REPO_ROOT", tmp_path / "venv-lib")
-        dest = tmp_path / "dot-claude"  # matches the `isolate` fixture's _DEFAULT_CONFIG_DIR
+        dest = tmp_path / "dot-claude"
         dest.mkdir()
+        (dest / up._BOOTSTRAP_MARKER).write_text("", encoding="utf-8")
+        (dest / "own-file.txt").write_text("mine", encoding="utf-8")
 
         assert up.bootstrap_default_profile() is False
+        assert (dest / "own-file.txt").read_text(encoding="utf-8") == "mine"
+
+    def test_noop_when_dest_has_credentials(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A dest with credentials proves the user already logged in there
+        (e.g. a profile predating the completion marker) — never re-touched."""
+        import agent_takkub.config as config_mod
+
+        monkeypatch.setattr(config_mod, "DATA_HOME", tmp_path / "agent-takkub-home")
+        monkeypatch.setattr(config_mod, "REPO_ROOT", tmp_path / "venv-lib")
+        dest = tmp_path / "dot-claude"
+        dest.mkdir()
+        (dest / ".credentials.json").write_text('{"token": "secret"}', encoding="utf-8")
+
+        assert up.bootstrap_default_profile() is False
+        assert (dest / ".credentials.json").exists()
+
+    def test_torn_dest_without_marker_or_credentials_is_recloned(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A dest with neither the marker nor credentials has no real user
+        data (never logged in) — discarded and re-cloned rather than left
+        as a permanently stuck torn profile."""
+        import agent_takkub.config as config_mod
+
+        monkeypatch.setattr(config_mod, "DATA_HOME", tmp_path / "agent-takkub-home")
+        monkeypatch.setattr(config_mod, "REPO_ROOT", tmp_path / "venv-lib")
+
+        home = tmp_path / "real-home"
+        src = home / ".claude"
+        src.mkdir(parents=True)
+        (src / "settings.json").write_text('{"fresh": true}', encoding="utf-8")
+        monkeypatch.setattr(Path, "home", lambda: home)
+
+        dest = tmp_path / "dot-claude"
+        dest.mkdir()
+        (dest / "stray-leftover.txt").write_text("torn junk", encoding="utf-8")
+
+        assert up.bootstrap_default_profile() is True
+        assert not (dest / "stray-leftover.txt").exists()
+        assert (dest / "settings.json").read_text(encoding="utf-8") == '{"fresh": true}'
+        assert (dest / up._BOOTSTRAP_MARKER).exists()
 
     def test_noop_when_no_source_claude_dir(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -344,9 +392,13 @@ class TestBootstrapDefaultProfile:
         assert up.bootstrap_default_profile() is False
         assert not (tmp_path / "dot-claude").exists()
 
-    def test_clones_everything_except_credentials(
+    def test_clones_allowlisted_items_only(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
+        """Core clone is selective: config/agents/skills/plugins come along,
+        and a bounded number of recent session transcripts per project (see
+        TestCloneRecentSessions) — but credentials and unrecognized heavy
+        caches never do."""
         import agent_takkub.config as config_mod
 
         monkeypatch.setattr(config_mod, "DATA_HOME", tmp_path / "agent-takkub-home")
@@ -356,18 +408,64 @@ class TestBootstrapDefaultProfile:
         src = home / ".claude"
         (src / "projects" / "proj-a").mkdir(parents=True)
         (src / "projects" / "proj-a" / "s1.jsonl").write_text("hi", encoding="utf-8")
+        (src / "agents").mkdir(parents=True)
+        (src / "agents" / "backend.md").write_text("role", encoding="utf-8")
         (src / "settings.json").write_text("{}", encoding="utf-8")
         (src / ".credentials.json").write_text('{"token": "secret"}', encoding="utf-8")
+        (src / "shell-snapshots").mkdir(parents=True)
+        (src / "shell-snapshots" / "snap.sh").write_text("junk", encoding="utf-8")
         monkeypatch.setattr(Path, "home", lambda: home)
 
         dest = tmp_path / "dot-claude"  # fixture's _DEFAULT_CONFIG_DIR
         assert up.bootstrap_default_profile() is True
 
         assert (dest / "settings.json").exists()
-        assert (dest / "projects" / "proj-a" / "s1.jsonl").read_text(encoding="utf-8") == "hi"
+        assert (dest / "agents" / "backend.md").read_text(encoding="utf-8") == "role"
         assert not (dest / ".credentials.json").exists()
+        # recent sessions ARE cloned per project (bounded — see TestCloneRecentSessions)
+        assert (dest / "projects" / "proj-a" / "s1.jsonl").read_text(encoding="utf-8") == "hi"
+        assert not (dest / "shell-snapshots").exists()  # not allowlisted
+        assert (dest / up._BOOTSTRAP_MARKER).exists()
 
-    def test_never_clobbers_existing_dest_even_if_partial(
+    def test_stale_partial_from_killed_attempt_is_cleaned(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A `.partial` sibling left over from a killed prior clone is wiped
+        before a fresh attempt, never merged/left half-written."""
+        import agent_takkub.config as config_mod
+
+        monkeypatch.setattr(config_mod, "DATA_HOME", tmp_path / "agent-takkub-home")
+        monkeypatch.setattr(config_mod, "REPO_ROOT", tmp_path / "venv-lib")
+
+        home = tmp_path / "real-home"
+        src = home / ".claude"
+        src.mkdir(parents=True)
+        (src / "settings.json").write_text('{"fresh": true}', encoding="utf-8")
+        monkeypatch.setattr(Path, "home", lambda: home)
+
+        dest = tmp_path / "dot-claude"
+        partial = tmp_path / "dot-claude.partial"
+        partial.mkdir(parents=True)
+        (partial / "half-written.txt").write_text("torn", encoding="utf-8")
+
+        assert up.bootstrap_default_profile() is True
+        assert not partial.exists()
+        assert (dest / "settings.json").read_text(encoding="utf-8") == '{"fresh": true}'
+        assert not (dest / "half-written.txt").exists()
+
+
+# ─────────────────── recent-session cloning (per project) ─────────────────
+# Part of bootstrap_default_profile's atomic .partial clone: each project
+# subdir under ~/.claude/projects/ contributes its own most-recent N
+# transcripts, so chatlog_scanner/resume aren't starting from nothing.
+
+
+class TestCloneRecentSessions:
+    def _touch_with_mtime(self, path: Path, content: str, mtime: float) -> None:
+        path.write_text(content, encoding="utf-8")
+        os.utime(path, (mtime, mtime))
+
+    def test_takes_n_most_recent_per_project(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         import agent_takkub.config as config_mod
@@ -376,12 +474,77 @@ class TestBootstrapDefaultProfile:
         monkeypatch.setattr(config_mod, "REPO_ROOT", tmp_path / "venv-lib")
 
         home = tmp_path / "real-home"
-        (home / ".claude").mkdir(parents=True)
+        proj_a = home / ".claude" / "projects" / "proj-a"
+        proj_b = home / ".claude" / "projects" / "proj-b"
+        proj_a.mkdir(parents=True)
+        proj_b.mkdir(parents=True)
+        for i in range(15):  # more than RECENT_SESSIONS_CLONE (10)
+            self._touch_with_mtime(proj_a / f"s{i:02d}.jsonl", "a", mtime=1_700_000_000 + i)
+        for i in range(12):
+            self._touch_with_mtime(proj_b / f"s{i:02d}.jsonl", "b", mtime=1_700_000_000 + i)
         monkeypatch.setattr(Path, "home", lambda: home)
 
-        dest = tmp_path / "dot-claude"
-        dest.mkdir()
-        (dest / "own-file.txt").write_text("mine", encoding="utf-8")
+        assert up.bootstrap_default_profile() is True
 
-        assert up.bootstrap_default_profile() is False
-        assert (dest / "own-file.txt").read_text(encoding="utf-8") == "mine"
+        dest_a = tmp_path / "dot-claude" / "projects" / "proj-a"
+        dest_b = tmp_path / "dot-claude" / "projects" / "proj-b"
+        assert {p.name for p in dest_a.glob("*.jsonl")} == {
+            f"s{i:02d}.jsonl" for i in range(5, 15)
+        }  # the 10 most-recently-modified of proj-a's 15
+        assert {p.name for p in dest_b.glob("*.jsonl")} == {
+            f"s{i:02d}.jsonl" for i in range(2, 12)
+        }  # the 10 most-recently-modified of proj-b's 12
+
+    def test_oversized_session_file_is_skipped_and_reported(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import agent_takkub.config as config_mod
+
+        monkeypatch.setattr(config_mod, "DATA_HOME", tmp_path / "agent-takkub-home")
+        monkeypatch.setattr(config_mod, "REPO_ROOT", tmp_path / "venv-lib")
+
+        home = tmp_path / "real-home"
+        proj = home / ".claude" / "projects" / "proj-a"
+        proj.mkdir(parents=True)
+        self._touch_with_mtime(proj / "small.jsonl", "ok", mtime=1_700_000_100)
+        big = proj / "big.jsonl"
+        with open(big, "wb") as f:
+            f.seek(up._RECENT_SESSION_MAX_BYTES + 1)
+            f.write(b"\0")
+        os.utime(big, (1_700_000_200, 1_700_000_200))
+        monkeypatch.setattr(Path, "home", lambda: home)
+
+        events: list[tuple[str, dict]] = []
+        assert (
+            up.bootstrap_default_profile(log_event=lambda name, **kw: events.append((name, kw)))
+            is True
+        )
+
+        dest = tmp_path / "dot-claude" / "projects" / "proj-a"
+        assert (dest / "small.jsonl").exists()
+        assert not (dest / "big.jsonl").exists()
+        assert events == [("profile_recent_sessions_oversized_skipped", {"count": 1})]
+
+    def test_non_jsonl_files_and_non_dirs_are_ignored(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import agent_takkub.config as config_mod
+
+        monkeypatch.setattr(config_mod, "DATA_HOME", tmp_path / "agent-takkub-home")
+        monkeypatch.setattr(config_mod, "REPO_ROOT", tmp_path / "venv-lib")
+
+        home = tmp_path / "real-home"
+        projects = home / ".claude" / "projects"
+        proj = projects / "proj-a"
+        proj.mkdir(parents=True)
+        self._touch_with_mtime(proj / "s1.jsonl", "hi", mtime=1_700_000_000)
+        (proj / "notes.txt").write_text("not a session", encoding="utf-8")
+        (projects / "stray-file.jsonl").write_text("not a project dir", encoding="utf-8")
+        monkeypatch.setattr(Path, "home", lambda: home)
+
+        assert up.bootstrap_default_profile() is True
+
+        dest = tmp_path / "dot-claude" / "projects" / "proj-a"
+        assert (dest / "s1.jsonl").exists()
+        assert not (dest / "notes.txt").exists()
+        assert not (tmp_path / "dot-claude" / "projects" / "stray-file.jsonl").exists()

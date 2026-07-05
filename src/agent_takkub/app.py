@@ -557,9 +557,10 @@ def _configure_webengine_profile() -> None:
 
 def _bootstrap_prod_claude_profile() -> None:
     """First-boot only: an installed instance's default Claude profile
-    (``DATA_HOME/claude-config``) is cloned from ``~/.claude`` (minus
-    ``.credentials.json``) so a fresh prod cockpit's `takkub search` /
-    resume-briefs / token-meter immediately see the user's existing session
+    (``DATA_HOME/claude-config``) is cloned from a small allowlist of
+    ``~/.claude`` items (CLAUDE.md, settings, agents/commands/skills/plugins,
+    plus the most recent session transcripts — never credentials) so a
+    fresh prod cockpit starts with the user's config and recent chat
     history instead of an empty slate. The account itself still needs a
     fresh `claude login` under that CLAUDE_CONFIG_DIR — see the
     `prod_profile_authenticated` doctor check. No-op for dev checkouts and
@@ -569,7 +570,7 @@ def _bootstrap_prod_claude_profile() -> None:
         from . import user_profile
         from .orchestrator import _log_event
 
-        if user_profile.bootstrap_default_profile():
+        if user_profile.bootstrap_default_profile(log_event=_log_event):
             _log_event(
                 "prod_claude_profile_bootstrapped",
                 dest=str(user_profile._DEFAULT_CONFIG_DIR),
