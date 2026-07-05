@@ -157,8 +157,21 @@ def _qt_session_app():
     destroyed between modules.  Module-scoped ``qapp`` fixtures in test files
     call ``QCoreApplication.instance()`` / ``QApplication.instance()`` first
     and reuse this instance — no second construction ever happens.
+
+    PyQt6 is OPTIONAL here: the CI ``installed-gate`` job runs only
+    tests/test_installed_mode_gate.py in a minimal env (pytest + build, no
+    PyQt6 — every assertion executes inside a throwaway venv via subprocess),
+    but pytest still imports this conftest at collection. An unconditional
+    import made the whole gate error out before running a single test
+    (2026-07-05, run 28729942340 — both OSes). Qt-dependent tests still fail
+    loudly if PyQt6 is genuinely missing in the full-suite env: they import
+    Qt themselves at module level.
     """
-    from PyQt6.QtWidgets import QApplication
+    try:
+        from PyQt6.QtWidgets import QApplication
+    except ModuleNotFoundError:
+        yield None
+        return
 
     app = QApplication.instance()
     if app is None:
