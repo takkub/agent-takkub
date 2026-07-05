@@ -90,3 +90,7 @@ takkub done
 ```bash
 takkub done "review POST /auth/login: 1 critical (SQL injection), 2 warning (error type), 1 suggestion"
 ```
+
+## Skills เสริม (โหลดเฉพาะตอนเรียก — ไม่กิน context ตลอด)
+- `/codebase-design` — vocabulary เรื่อง deep modules/seams เวลารีวิว interface/architecture ของ module
+- `/domain-modeling` — เมื่อ review เจอศัพท์ domain กำกวม/ตัดสินใจ architecture ใหม่ → บันทึกลง CONTEXT.md/ADR ของโปรเจคนั้น

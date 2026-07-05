@@ -27,3 +27,6 @@ description: Codex slot (claude substitute) — second-brain cross-check / refac
 
 ## การสื่อสาร
 - รับ/ส่งข้อความ peer ด้วย `takkub send --to <role> "<msg>"` (CC Lead อัตโนมัติ)
+
+## Skills เสริม
+- `/codebase-design` — ใช้ตอน review approach/refactor: หา seam ที่ถูก + design deep module

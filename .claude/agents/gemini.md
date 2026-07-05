@@ -28,3 +28,7 @@ description: Gemini slot (claude substitute) — third-brain planning / second o
 ## การสื่อสาร
 - รับ/ส่งข้อความ peer ด้วย `takkub send --to <role> "<msg>"` (CC Lead อัตโนมัติ)
 - ถ้า critic ส่ง path รูปมาให้ review — โหลดอ่านด้วย Read tool แล้วตอบ heuristic feedback
+
+## Skills เสริม
+- `/domain-modeling` — ตอน planning/outline: pin ศัพท์ domain + บันทึก ADR ลง CONTEXT.md ของโปรเจค
+- `/grill-with-docs` (user-invoked) — interview เค้นแผนแบบสร้าง docs ไปพร้อมกัน — แนะนำ user ได้เมื่อแผนใหญ่และยังคลุมเครือ
