@@ -225,6 +225,7 @@ class _Bridge(QObject):
     imageDataPasted = pyqtSignal(str, str)  # base64_data, mime_type
     openUrlRequested = pyqtSignal(str)  # web URL clicked in a pane
     openPathRequested = pyqtSignal(str)  # file path clicked in a pane
+    fontZoomedSig = pyqtSignal(int)  # pt size after a Ctrl/Cmd+wheel zoom or Ctrl/Cmd+0 reset
 
     @pyqtSlot(str)
     def sendInput(self, data: str) -> None:
@@ -243,6 +244,11 @@ class _Bridge(QObject):
     @pyqtSlot(int, int)
     def resize(self, cols: int, rows: int) -> None:
         self.sizeChanged.emit(cols, rows)
+
+    @pyqtSlot(int)
+    def fontZoomed(self, pt: int) -> None:
+        """Called from JS after a Ctrl/Cmd+wheel zoom or Ctrl/Cmd+0 reset."""
+        self.fontZoomedSig.emit(pt)
 
     @pyqtSlot()
     def ready(self) -> None:
@@ -342,6 +348,7 @@ class TerminalWidget(QWidget):
         self._bridge.imageDataPasted.connect(self._on_image_pasted)
         self._bridge.openUrlRequested.connect(self._on_open_url)
         self._bridge.openPathRequested.connect(self._on_open_path)
+        self._bridge.fontZoomedSig.connect(self._on_font_zoomed)
 
         # Enable drag-and-drop for file path insertion (Level 1).
         # We install an event filter on the child view so we see Qt-level
@@ -444,11 +451,17 @@ class TerminalWidget(QWidget):
             pass
 
     def set_font_point_size(self, size: int) -> None:
-        size = max(7, min(28, int(size)))
+        size = max(8, min(24, int(size)))
         # xterm.js wants pixel size; rough conversion: pt * 1.333 ≈ px
         px = int(size * 1.333)
         self._view.page().runJavaScript(f"termSetFontSize({px});")
         self.fontSizeChanged.emit(size)
+
+    def _on_font_zoomed(self, pt: int) -> None:
+        """JS already applied the new size (Ctrl/Cmd+wheel or +0 reset) and
+        refit the terminal; just propagate the resulting pt size so the host
+        (AgentPane) persists it the same way as a menu-driven font change."""
+        self.fontSizeChanged.emit(int(pt))
 
     def request_buffer_text(self, callback) -> None:
         """Async fetch the current visible+scrollback buffer as text.

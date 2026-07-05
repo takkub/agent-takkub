@@ -684,12 +684,19 @@ class AgentPane(QFrame):
     # ──────────────────────────────────────────────────────────────
     # font size persistence (per role)
     # ──────────────────────────────────────────────────────────────
+    _FONT_SIZE_DEFAULT_KEY = "pane/_default/font_pt"
+
     def _settings_key(self) -> str:
         return f"pane/{self.role.name}/font_pt"
 
     def _restore_font_size(self) -> None:
         s = QSettings("agent-takkub", "cockpit")
         v = s.value(self._settings_key())
+        if v is None:
+            # No size recorded for this exact role yet — fall back to the
+            # most recent zoom from any pane, so a newly spawned pane picks
+            # up where the user last left the font (Ctrl/Cmd+wheel zoom).
+            v = s.value(self._FONT_SIZE_DEFAULT_KEY)
         if v is None:
             return
         try:
@@ -701,6 +708,7 @@ class AgentPane(QFrame):
     def _save_font_size(self, size: int) -> None:
         s = QSettings("agent-takkub", "cockpit")
         s.setValue(self._settings_key(), int(size))
+        s.setValue(self._FONT_SIZE_DEFAULT_KEY, int(size))
 
     # ──────────────────────────────────────────────────────────────
     # export current pane buffer to a text file under runtime/exports/

@@ -115,6 +115,48 @@
     term.focus();
 
     // ------------------------------------------------------------------
+    // Ctrl/Cmd + mouse-wheel font zoom
+    // ------------------------------------------------------------------
+    // pt/px conversion mirrors terminal_widget.py's set_font_point_size
+    // (px = round(pt * 1.333)) so Python-restored sizes and JS-driven wheel
+    // zoom land on the same values.
+    const FONT_MIN_PT = 8;
+    const FONT_MAX_PT = 24;
+    const DEFAULT_FONT_PT = 10;  // matches the initial fontSize:13 above
+    const PT_TO_PX = 1.333;
+    let currentFontPt = DEFAULT_FONT_PT;
+
+    function applyFontPt(pt) {
+      pt = Math.max(FONT_MIN_PT, Math.min(FONT_MAX_PT, Math.round(pt)));
+      currentFontPt = pt;
+      term.options.fontSize = Math.round(pt * PT_TO_PX);
+      fit.fit();  // recompute cols/rows; term.onResize reports the PTY resize
+      return pt;
+    }
+
+    // Ctrl+wheel (Windows/Linux) / Cmd+wheel (macOS) zooms the terminal font
+    // instead of Chromium's page-zoom. preventDefault() on a non-passive
+    // wheel listener is what stops Chromium's own ctrl+wheel page-zoom
+    // default action — without it Windows shows a blurry double-zoom (page
+    // zoom stacked on top of our font-size change).
+    document.getElementById('term').addEventListener('wheel', function (e) {
+      if (!(e.ctrlKey || e.metaKey)) return;  // plain wheel: normal scroll
+      e.preventDefault();
+      e.stopPropagation();
+      const pt = applyFontPt(currentFontPt + (e.deltaY < 0 ? 1 : -1));
+      if (bridge && bridge.fontZoomed) bridge.fontZoomed(pt);
+    }, { passive: false });
+
+    // Ctrl/Cmd+0 resets to the default size.
+    document.addEventListener('keydown', function (e) {
+      if ((e.ctrlKey || e.metaKey) && e.key === '0') {
+        e.preventDefault();
+        const pt = applyFontPt(DEFAULT_FONT_PT);
+        if (bridge && bridge.fontZoomed) bridge.fontZoomed(pt);
+      }
+    }, true);
+
+    // ------------------------------------------------------------------
     // Qt bridge — exchange bytes with the Python side over QWebChannel
     // ------------------------------------------------------------------
     let bridge = null;
@@ -207,6 +249,7 @@
 
     window.termSetFontSize = function (px) {
       term.options.fontSize = px;
+      currentFontPt = Math.round(px / PT_TO_PX);
       fit.fit();
     };
 
