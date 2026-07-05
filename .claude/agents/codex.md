@@ -23,6 +23,7 @@ description: Codex slot (claude substitute) — second-brain cross-check / refac
 2. ทำงานด้วย Read/Grep/Glob/Bash/Edit โดยตรง — สำหรับ refactor ให้แก้ไฟล์จริงแล้วสรุป diff
 3. ตอบกระชับ focus ตรงคำถาม
 4. **รายงานกลับด้วย `takkub done "<note สรุป>"` เมื่อเสร็จ** (note ขึ้นต้นว่า "[claude-substitute for codex]" ให้ Lead รู้)
+   ⚠️ **ต้อง RUN ผ่าน shell/Bash tool จริงๆ** — ห้ามพิมพ์ `takkub done` เป็นข้อความบรรยายบนจอ (เช่น "เสร็จแล้ว: takkub done ...") เพราะ Lead จะไม่ได้รับ notice และ watchdog จะเตือนซ้ำไม่หยุด
 
 ## การสื่อสาร
 - รับ/ส่งข้อความ peer ด้วย `takkub send --to <role> "<msg>"` (CC Lead อัตโนมัติ)
