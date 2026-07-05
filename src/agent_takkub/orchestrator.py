@@ -62,6 +62,7 @@ from .lead_inbox import (  # re-exported for test/compat imports; mixin provides
     _delayed_enter,
     _delayed_enter_verified,
 )
+from .limit_autoresume import AutoResumeMixin  # mixin providing auto-resume methods
 from .orchestrator_text import (  # re-exported for test/app/main_window imports
     _CODEX_TASK_NOTICE,
     _DEFAULT_TEAMMATE_TIER,
@@ -396,7 +397,7 @@ _LAST_SESSION_MAX_AGE_SEC = 60 * 60
 # PaneState moved to spawn_engine.py; re-exported above via SpawnEngineMixin import
 
 
-class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, QObject):
+class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMixin, QObject):
     """Owns the pane registry and routes commands.
 
     Layout policy: Lead is always pre-registered (created by main_window) and
@@ -414,6 +415,13 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, QObject):
     # main_window listens to repaint the plan chip without polling.
     planTierChanged = pyqtSignal(str)  # "pro" | "max"
     execModeChanged = pyqtSignal(str)  # "solo" | "parallel"
+    # Emitted when user flips the auto-resume (🌙) toggle via the status bar.
+    # main_window listens to repaint the chip without polling.
+    autoResumeChanged = pyqtSignal(bool)
+    # Emitted by AutoResumeMixin's background usage-confirm fetch (signal b)
+    # once it has an answer, so the actual park decision runs on the Qt
+    # thread instead of the fetch's daemon thread. (project, role, confirmed)
+    limitUsageConfirmed = pyqtSignal(str, str, bool)
     # Emitted at the tail of a successful spawn that picked up `--resume <uuid>`
     # (i.e. the role's previous session exited within RESUME_WINDOW_SEC).
     # main_window uses this to fire `/remote-control` only on resumes, so a
@@ -574,6 +582,10 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, QObject):
         self._idle_watchdog.timeout.connect(self._check_idle_teammates)
         if IDLE_REMIND_AFTER_S > 0:
             self._idle_watchdog.start()
+        # Auto-resume (🌙): the signal-(b) confirm fetch runs in a background
+        # thread and reports back via this signal so the park decision itself
+        # always executes on the Qt thread.
+        self.limitUsageConfirmed.connect(self._on_limit_usage_confirmed)
 
         # Periodic snapshot of cockpit state to `<vault>/hot.md`. Skipped
         # silently when no vault is configured (see `_resolve_vault_dir`).
@@ -792,6 +804,14 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, QObject):
         ps_assign.last_assigned_task = task
         # New task → fresh one-shot budget for the Stop-hook done-gate.
         ps_assign.stop_gate_notified = False
+        # New task → fresh auto-resume park/wake budget (issue: limit-aware
+        # auto-resume). A pane that gave up on its previous task must get
+        # another chance on this one.
+        ps_assign.limit_parked = False
+        ps_assign.limit_confirm_pending = False
+        ps_assign.limit_park_rounds = 0
+        ps_assign.limit_park_wake_ts = 0.0
+        ps_assign.limit_park_stopped = False
         if requires_commit:
             ps_assign.requires_commit_on_done = True
         if auto_chain:
@@ -2568,6 +2588,10 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, QObject):
                     # schedules a one-shot reset notice the first time it's seen.
                     if self._rate_limit_suppressed(project_name, name, pane, now):
                         self._idle_state.pop(key, None)
+                        # Limit-aware auto-resume (🌙): inert unless the user
+                        # opted in via the status-bar toggle — see
+                        # limit_autoresume.py for the confirm/park/wake flow.
+                        self._maybe_auto_resume_park(project_name, name, pane, now)
                         continue
 
                     # Suppress the reminder while this teammate is waiting on a

@@ -181,6 +181,36 @@ class StatusHeaderMixin:
         )
 
     @staticmethod
+    def _auto_resume_chip_style(enabled: bool) -> str:
+        """Outline chip for the 🌙 auto-resume toggle. ON = amber (quietly
+        acting on your behalf while you're away), OFF = neutral zinc
+        (calm default — matches the exec-mode chip's OFF treatment)."""
+        brand = "#f59e0b" if enabled else "#71717a"
+        return (
+            "QPushButton { "
+            f"background:transparent; color:{brand}; "
+            f"border:1px solid {brand}; border-radius:10px; "
+            "padding:2px 10px; font-weight:600; }"
+            "QPushButton:hover { background:rgba(255,255,255,0.06); }"
+        )
+
+    @staticmethod
+    def _auto_resume_chip_tooltip(enabled: bool) -> str:
+        """Tooltip for the auto-resume chip — states the consequence."""
+        if enabled:
+            return (
+                "Auto-resume 🌙: ON — click to turn off.\n"
+                "A teammate pane that hits its usage limit while a task is\n"
+                "still pending is parked and woken automatically when the\n"
+                "window resets (max 3 park/wake cycles per task)."
+            )
+        return (
+            "Auto-resume 🌙: OFF — click to turn on.\n"
+            "Usage-limit panes stay notify-only (current behaviour):\n"
+            "you get pinged, but nothing auto-resumes."
+        )
+
+    @staticmethod
     def _ghost_button_style() -> str:
         """Neutral status-bar action button.
 
@@ -328,6 +358,20 @@ class StatusHeaderMixin:
         self._chip_exec_mode.setToolTip(self._exec_mode_chip_tooltip(_parallel_now))
         self._chip_exec_mode.setStyleSheet(self._exec_mode_chip_style(_parallel_now))
         self._chip_exec_mode.clicked.connect(self._on_exec_mode_chip_clicked)
+
+        # Auto-resume chip (🌙): park panes that hit their usage limit while a
+        # task is pending and wake them automatically at reset, instead of
+        # only notifying. Default OFF. State in autoresume.json; orchestrator
+        # owns persist + broadcast on flip (mirrors the exec-mode chip).
+        from . import auto_resume as _auto_resume
+
+        _auto_resume_now = _auto_resume.is_enabled()
+        self._chip_auto_resume = QPushButton(
+            "🌙 Auto-resume" if _auto_resume_now else "🌙 Auto-resume: off", self
+        )
+        self._chip_auto_resume.setToolTip(self._auto_resume_chip_tooltip(_auto_resume_now))
+        self._chip_auto_resume.setStyleSheet(self._auto_resume_chip_style(_auto_resume_now))
+        self._chip_auto_resume.clicked.connect(self._on_auto_resume_chip_clicked)
 
         # 🔧 Pane Tools: opens the role x MCP/plugin policy matrix editor.
         # Sits next to the exec-mode chip since both are "how panes get
@@ -512,6 +556,7 @@ class StatusHeaderMixin:
         for w in (
             self._chip_plan,
             self._chip_exec_mode,
+            self._chip_auto_resume,
             self._btn_pane_tools,
             self._chip_codex,
             self._chip_gemini,
@@ -538,6 +583,7 @@ class StatusHeaderMixin:
         self.orch.providerStateChanged.connect(self._on_provider_state_changed)
         self.orch.planTierChanged.connect(self._on_plan_tier_changed)
         self.orch.execModeChanged.connect(self._on_exec_mode_changed)
+        self.orch.autoResumeChanged.connect(self._on_auto_resume_changed)
 
         # Refresh status bar every 2s so the working/active count tracks the
         # state transitions that don't emit statusChanged (e.g. working→done

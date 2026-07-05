@@ -675,6 +675,34 @@ class UserActionsMixin:
         self._chip_exec_mode.setStyleSheet(self._exec_mode_chip_style(is_parallel))
         self._chip_exec_mode.setToolTip(self._exec_mode_chip_tooltip(is_parallel))
 
+    def _on_auto_resume_chip_clicked(self) -> None:
+        """Flip auto-resume ON ↔ OFF on the orchestrator. It persists state,
+        broadcasts to live Lead panes, and emits autoResumeChanged → we
+        repaint the chip via _on_auto_resume_changed."""
+        from . import auto_resume
+
+        target = not auto_resume.is_enabled()
+        ok, msg = self.orch.set_auto_resume(target)
+        if not ok:
+            self._status.showMessage(f"Auto-resume toggle failed: {msg}", 4000)
+        elif target:
+            self._status.showMessage(
+                "🌙 Auto-resume ON — usage-limit panes with a pending task park "
+                "and wake automatically at reset",
+                6000,
+            )
+        else:
+            self._status.showMessage("🌙 Auto-resume OFF — back to notify-only", 4000)
+
+    def _on_auto_resume_changed(self, enabled: bool) -> None:
+        """Repaint the auto-resume chip when it flips. Triggered by
+        Orchestrator.autoResumeChanged."""
+        if not hasattr(self, "_chip_auto_resume"):
+            return
+        self._chip_auto_resume.setText("🌙 Auto-resume" if enabled else "🌙 Auto-resume: off")
+        self._chip_auto_resume.setStyleSheet(self._auto_resume_chip_style(enabled))
+        self._chip_auto_resume.setToolTip(self._auto_resume_chip_tooltip(enabled))
+
     # ──────────────────────────────────────────────────────────────
     # per-project user profile selector (accessed via ⚙ Pipelines menu)
     # ──────────────────────────────────────────────────────────────

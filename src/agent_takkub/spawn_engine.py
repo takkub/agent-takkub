@@ -234,6 +234,29 @@ class PaneState:
     # Read (captured before the pop) in done()/close() to finalize the worktree:
     # propose a merge to Lead if the branch has commits, else safe-remove it.
     worktree: dict | None = None
+    # ── auto-resume (🌙, limit_autoresume.py) — park/wake bookkeeping ────────
+    # limit_parked: True while this pane is currently parked awaiting its
+    # usage-limit window to reset (auto-resume ON path only).
+    limit_parked: bool = False
+    # limit_confirm_pending: True while a background fetch is confirming
+    # signal (b) (limit_status utilization) before parking — guards against
+    # firing a second confirm fetch on every watchdog tick while one is
+    # already in flight for the same episode.
+    limit_confirm_pending: bool = False
+    # limit_park_rounds: park→wake cycles used so far for the CURRENT
+    # assigned task (capped at auto_resume.MAX_PARK_ROUNDS). Reset to 0 on
+    # every fresh assign() — a new task gets a fresh budget.
+    limit_park_rounds: int = 0
+    # limit_park_wake_ts: epoch of the last auto-resume wake injection, or 0.0
+    # if never woken for this task. Used to detect "hit the limit again
+    # within auto_resume.RELIMIT_GRACE_S of waking" — a signal the window
+    # (or the task) is systemically stuck, at which point we stop retrying.
+    limit_park_wake_ts: float = 0.0
+    # limit_park_stopped: True once the round cap or the re-limit grace
+    # tripped — the watchdog leaves auto-resume alone for this pane (falls
+    # back to the pre-existing notify-only behaviour) until a new task is
+    # assigned.
+    limit_park_stopped: bool = False
 
 
 @dataclass

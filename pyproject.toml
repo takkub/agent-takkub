@@ -215,6 +215,19 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
+name = "limit-autoresume-layer"
+type = "forbidden"
+# limit_autoresume is an engine-layer mixin (mixed into Orchestrator) — must
+# not import orchestrator (cycle) or UI/CLI, same constraint as lead_inbox.
+source_modules = ["agent_takkub.limit_autoresume"]
+forbidden_modules = [
+    "agent_takkub.orchestrator",
+    "agent_takkub.main_window",
+    "agent_takkub.app",
+    "agent_takkub.cli",
+]
+
+[[tool.importlinter.contracts]]
 name = "update-panel-layer"
 type = "forbidden"
 # update_panel is a UI-layer mixin (mixed into MainWindow). It must not pull in
