@@ -15,6 +15,7 @@ from agent_takkub.doctor import (
     Status,
     check_arch,
     check_claude,
+    check_installed_integrity,
     check_mcps,
     check_plugins,
     check_projects,
@@ -598,6 +599,118 @@ class TestCheckClaudeProdProfile:
 
 
 # ---------------------------------------------------------------------------
+# check_installed_integrity — Phase D installed-mode gate
+# ---------------------------------------------------------------------------
+
+
+class TestCheckInstalledIntegrity:
+    def test_dev_checkout_is_a_no_op(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import agent_takkub.config as config_mod
+
+        monkeypatch.setattr(config_mod, "DATA_HOME", config_mod.REPO_ROOT)
+
+        assert check_installed_integrity() == []
+
+    def _fake_installed_layout(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        import agent_takkub.config as config_mod
+
+        data_home = tmp_path / "data-home"
+        assets_root = tmp_path / "assets"
+        agents_dir = assets_root / ".claude" / "agents"
+        agents_dir.mkdir(parents=True)
+        (assets_root / "CLAUDE.md").write_text("# lead", encoding="utf-8")
+        (agents_dir / "backend.md").write_text("# backend", encoding="utf-8")
+        cli_bin_dir = tmp_path / "scripts"
+        cli_bin_dir.mkdir()
+        script_name = "takkub.exe" if sys.platform == "win32" else "takkub"
+        (cli_bin_dir / script_name).write_text("", encoding="utf-8")
+
+        monkeypatch.setattr(config_mod, "DATA_HOME", data_home)
+        monkeypatch.setattr(config_mod, "REPO_ROOT", tmp_path / "venv-lib")
+        monkeypatch.setattr(config_mod, "ASSETS_ROOT", assets_root)
+        monkeypatch.setattr(config_mod, "AGENTS_DIR", agents_dir)
+        monkeypatch.setattr(config_mod, "CLI_BIN_DIR", cli_bin_dir)
+        monkeypatch.setattr(config_mod, "RUNTIME_DIR", data_home / "runtime")
+        return data_home
+
+    def test_all_ok_when_wheel_shipped_correctly(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._fake_installed_layout(monkeypatch, tmp_path)
+
+        findings = check_installed_integrity()
+
+        assert findings
+        assert all(f.status == Status.OK for f in findings)
+        names = {f.name for f in findings}
+        assert names == {
+            "assets-claude-md",
+            "assets-role-files",
+            "cli-bin",
+            "runtime-writable",
+        }
+
+    def test_fails_when_claude_md_missing(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._fake_installed_layout(monkeypatch, tmp_path)
+        import agent_takkub.config as config_mod
+
+        (config_mod.ASSETS_ROOT / "CLAUDE.md").unlink()
+
+        findings = check_installed_integrity()
+
+        f = next(x for x in findings if x.name == "assets-claude-md")
+        assert f.status == Status.FAIL
+
+    def test_fails_when_role_files_missing(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._fake_installed_layout(monkeypatch, tmp_path)
+        import agent_takkub.config as config_mod
+
+        for f in config_mod.AGENTS_DIR.glob("*.md"):
+            f.unlink()
+
+        findings = check_installed_integrity()
+
+        f = next(x for x in findings if x.name == "assets-role-files")
+        assert f.status == Status.FAIL
+
+    def test_fails_when_cli_bin_missing(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._fake_installed_layout(monkeypatch, tmp_path)
+        import agent_takkub.config as config_mod
+
+        script_name = "takkub.exe" if sys.platform == "win32" else "takkub"
+        (config_mod.CLI_BIN_DIR / script_name).unlink()
+
+        findings = check_installed_integrity()
+
+        f = next(x for x in findings if x.name == "cli-bin")
+        assert f.status == Status.FAIL
+
+    def test_fails_when_runtime_dir_not_writable(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        data_home = self._fake_installed_layout(monkeypatch, tmp_path)
+        import agent_takkub.config as config_mod
+
+        # Simulate an unwritable DATA_HOME by pointing RUNTIME_DIR at a path
+        # whose parent is a file, not a directory — mkdir(parents=True) then
+        # raises NotADirectoryError (an OSError subclass).
+        blocker = data_home.parent / "blocker-file"
+        blocker.write_text("x", encoding="utf-8")
+        monkeypatch.setattr(config_mod, "RUNTIME_DIR", blocker / "runtime")
+
+        findings = check_installed_integrity()
+
+        f = next(x for x in findings if x.name == "runtime-writable")
+        assert f.status == Status.FAIL
+
+
+# ---------------------------------------------------------------------------
 # run_all_checks
 # ---------------------------------------------------------------------------
 
@@ -613,6 +726,7 @@ class TestRunAllChecks:
                 "agent_takkub.doctor.check_runtime",
                 return_value=[Finding("runtime", "node", Status.OK)],
             ),
+            patch("agent_takkub.doctor.check_installed_integrity", return_value=[]),
             patch("agent_takkub.doctor.check_env_path", return_value=[]),
             patch("agent_takkub.doctor.check_arch", return_value=[]),
             patch("agent_takkub.doctor.check_qt", return_value=[]),

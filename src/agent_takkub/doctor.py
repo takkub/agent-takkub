@@ -785,6 +785,94 @@ def check_projects() -> list[Finding]:
 
 
 # ---------------------------------------------------------------------------
+# [installed] — integrity checks for a pip/npm-installed build (skipped for
+# dev checkouts, which read these paths straight from the repo already).
+# ---------------------------------------------------------------------------
+
+
+def check_installed_integrity() -> list[Finding]:
+    """[installed] — installed-build-only sanity checks (Phase D gate).
+
+    A dev checkout's ASSETS_ROOT/CLI_BIN_DIR are just REPO_ROOT/bin — always
+    present, so this whole category is a no-op there (``DATA_HOME ==
+    REPO_ROOT``). Catches the "prod cockpit boots but can't spawn teammates"
+    bug class: a packaging regression that ships a wheel missing CLAUDE.md,
+    the role files, or the console script, or a DATA_HOME that turned out
+    not to be writable after all.
+    """
+    from .config import AGENTS_DIR, ASSETS_ROOT, CLI_BIN_DIR, DATA_HOME, REPO_ROOT, RUNTIME_DIR
+
+    if DATA_HOME == REPO_ROOT:
+        return []
+
+    findings: list[Finding] = []
+
+    claude_md = ASSETS_ROOT / "CLAUDE.md"
+    if claude_md.is_file():
+        findings.append(Finding("installed", "assets-claude-md", Status.OK, str(claude_md)))
+    else:
+        findings.append(
+            Finding(
+                "installed",
+                "assets-claude-md",
+                Status.FAIL,
+                f"missing: {claude_md}",
+                "reinstall — the wheel shipped without its Lead playbook",
+            )
+        )
+
+    agent_files = sorted(AGENTS_DIR.glob("*.md")) if AGENTS_DIR.is_dir() else []
+    if agent_files:
+        findings.append(
+            Finding("installed", "assets-role-files", Status.OK, f"{len(agent_files)} role file(s)")
+        )
+    else:
+        findings.append(
+            Finding(
+                "installed",
+                "assets-role-files",
+                Status.FAIL,
+                f"no *.md role files under {AGENTS_DIR}",
+                "reinstall — the wheel shipped with no .claude/agents",
+            )
+        )
+
+    script_name = "takkub.exe" if sys.platform == "win32" else "takkub"
+    script_path = CLI_BIN_DIR / script_name
+    if script_path.exists():
+        findings.append(Finding("installed", "cli-bin", Status.OK, str(script_path)))
+    else:
+        findings.append(
+            Finding(
+                "installed",
+                "cli-bin",
+                Status.FAIL,
+                f"missing: {script_path}",
+                "reinstall — pip did not place a takkub console script next to python",
+            )
+        )
+
+    try:
+        RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+        probe = RUNTIME_DIR / ".doctor-write-probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        findings.append(Finding("installed", "runtime-writable", Status.OK, str(RUNTIME_DIR)))
+    except OSError as e:
+        findings.append(
+            Finding(
+                "installed",
+                "runtime-writable",
+                Status.FAIL,
+                f"{RUNTIME_DIR} not writable: {e}",
+                "check permissions on the DATA_HOME directory",
+            )
+        )
+
+    return findings
+
+
+# ---------------------------------------------------------------------------
 # [providers]
 # ---------------------------------------------------------------------------
 
@@ -1214,6 +1302,7 @@ def run_all_checks() -> list[Finding]:
     findings.extend(check_claude())
     findings.extend(check_env_path())
     findings.extend(check_runtime())
+    findings.extend(check_installed_integrity())
     findings.extend(check_arch())
     findings.extend(check_qt())
     findings.extend(check_plugins())

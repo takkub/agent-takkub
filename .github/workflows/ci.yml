@@ -42,3 +42,35 @@ jobs:
 
       - name: Run tests
         run: python -m pytest -v
+
+  installed-gate:
+    # Separate from lint-and-test so a packaging regression (wheel missing
+    # CLAUDE.md/role-files/console-script, DATA_HOME/ASSETS_ROOT/CLI_BIN_DIR/
+    # pane-env resolving wrong under an installed layout) shows up as its own
+    # named check instead of buried in the full suite. tests/test_installed_
+    # mode_gate.py never imports agent_takkub in THIS process — every
+    # assertion runs via subprocess inside a wheel it builds into a fresh,
+    # throwaway venv — so this job only needs pytest + build, no PyQt6/no
+    # `pip install -e .`. Keeps it fast (~20-30s) and independent of the
+    # heavier lint-and-test install.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install test-only deps (no PyQt6, no editable install)
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest build
+
+      - name: Run installed-mode gate
+        run: python -m pytest tests/test_installed_mode_gate.py -v

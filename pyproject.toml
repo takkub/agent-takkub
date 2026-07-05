@@ -34,6 +34,7 @@ dev = [
     "pre-commit>=3.7",
     "grimp>=3.14",        # dep-graph generation for tools/gen_import_graph.py
     "import-linter>=2.9", # architecture contracts (lint-imports)
+    "build>=1.0",         # wheel builder used by the installed-mode gate tests
 ]
 
 [build-system]
