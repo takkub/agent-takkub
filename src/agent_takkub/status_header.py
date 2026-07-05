@@ -9,11 +9,10 @@ MainWindow method can touch them unchanged.
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import (
     QComboBox,
     QFrame,
-    QLabel,
     QPushButton,
     QStatusBar,
     QStyle,
@@ -478,20 +477,8 @@ class StatusHeaderMixin:
         # Hidden per user request (kept for easy future restore). It's created +
         # wired but NOT added to the status bar; hide() so an unplaced child
         # doesn't render as a stray button at the window origin. To restore:
-        # delete this hide() line and re-add it to the Group-3 widget tuple below.
+        # delete this hide() line and re-add it to the Group-2 widget tuple below.
         self._btn_claude_auth.hide()
-
-        # Cockpit version chip: shows `v<pyproject> · @<short-sha>` so the
-        # user can see at a glance what build they're on. Refreshed after
-        # every update check + after a successful pull.
-        self._version_label = QLabel("", self)
-        self._version_label.setStyleSheet("color: #6b7280; font-size: 11px; padding: 0 6px;")
-        self._version_label.setToolTip(
-            "Cockpit version + commit SHA.\nClick to view the changelog "
-            "(copy version from inside).\nClick the 🔄 chip to pull updates."
-        )
-        self._version_label.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._version_label.mousePressEvent = lambda _ev: self._show_changelog()
 
         # Per-pane "context >= 80%" warning state. Keyed
         # `<project>::<role>`. We toast (status bar + tray) the first
@@ -506,18 +493,14 @@ class StatusHeaderMixin:
         # project switcher — the combo would just duplicate it visually.
         self._project_combo.hide()
 
-        # Status bar is laid out in 3 semantic groups separated by thin
-        # vertical lines. Without grouping, 14+ widgets scan as one long
+        # Status bar is laid out in 2 semantic groups separated by a thin
+        # vertical line. Without grouping, 14+ widgets scan as one long
         # blob and the user has to recall (not recognize) which button
         # does what. Order within each group stays stable across cockpit
         # versions so muscle memory survives upgrades.
         #
-        #   Group 1 — Project context  (info you read, not click)
-        #   Group 2 — Workflow actions (buttons that change pane state)
-        #   Group 3 — System status    (cockpit-level toggles + updates)
-        for w in (self._version_label,):
-            self._status.addPermanentWidget(w)
-        self._status.addPermanentWidget(self._make_status_separator())
+        #   Group 1 — Workflow actions (buttons that change pane state)
+        #   Group 2 — System status    (cockpit-level toggles + updates)
         for w in (
             self._btn_resume,
             self._btn_open_shell,

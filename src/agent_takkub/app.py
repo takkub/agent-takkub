@@ -590,9 +590,6 @@ def main(argv: list[str] | None = None) -> int:
 
     app = QApplication(argv or sys.argv)
     app.setApplicationName("agent-takkub")
-    from .config import instance_identity_label
-
-    app.setApplicationDisplayName(f"agent-takkub [{instance_identity_label()}]")
     _configure_webengine_profile()
     # Segoe UI ships on Windows; on macOS it is absent, which triggers a
     # costly font-alias scan + fallback at startup. Pick the native UI font

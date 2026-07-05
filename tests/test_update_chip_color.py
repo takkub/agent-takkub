@@ -32,7 +32,6 @@ def _make_window_stub() -> mw_mod.MainWindow:
         win = mw_mod.MainWindow.__new__(mw_mod.MainWindow)
     win._btn_update = MagicMock()
     win._status = MagicMock()
-    win._refresh_version_label = MagicMock()
     win._update_status_cache = {"not_repo": True}
     win._npm_update_cache = None
     win._npm_check_busy = False

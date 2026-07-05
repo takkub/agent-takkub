@@ -2,7 +2,7 @@
 
 Extracted from ``MainWindow`` as a mixin. All methods access ``self.*``
 attributes (``_btn_update``, ``_update_status_cache``, ``_update_worker_busy``,
-``_version_label``, ``orch``, etc.) initialised in ``MainWindow.__init__``.
+``orch``, etc.) initialised in ``MainWindow.__init__``.
 
 **Import constraint:** this module MUST NOT import ``app`` or ``cli``.
 """
@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 
 from PyQt6.QtCore import QCoreApplication, QThread, QThreadPool, QTimer, pyqtSignal
-from PyQt6.QtWidgets import QApplication, QMessageBox, QSystemTrayIcon
+from PyQt6.QtWidgets import QMessageBox, QSystemTrayIcon
 
 from . import config
 from .config import REPO_ROOT, active_project, lead_cwd
@@ -292,91 +292,6 @@ class MainWindowUpdateMixin:
         fetch_remote()  # best effort; ignore failure
         self._update_status_cache = local_status()
         self._refresh_update_button()
-
-    def _refresh_version_label(self) -> None:
-        """Update the version chip — live every commit when possible.
-
-        Primary source: `git describe --tags --always --dirty`. Output
-        looks like `v0.3.9-3-g4a5b6c7` (3 commits past the v0.3.9 tag)
-        or just `4a5b6c7` if no tags exist yet. Adds `-dirty` suffix
-        when the working tree has uncommitted changes.
-
-        Fallback: when not in a git checkout (ZIP / wheel install)
-        read pyproject.toml and stitch with `@<sha>` if available.
-        """
-        from .update_helper import current_sha_short, current_version_describe
-
-        described = current_version_describe()
-        if described:
-            self._version_label.setText(described)
-            return
-        ver = "?"
-        try:
-            pyproj = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-            import re as _re
-
-            m = _re.search(r'^version\s*=\s*"([^"]+)"', pyproj, _re.MULTILINE)
-            if m:
-                ver = m.group(1)
-        except Exception:
-            try:
-                from importlib.metadata import version as _pkg_version
-
-                ver = _pkg_version("agent-takkub")
-            except Exception:
-                pass
-        sha = current_sha_short()
-        text = f"v{ver} · @{sha}" if sha else f"v{ver}"
-        self._version_label.setText(text)
-
-    def _copy_version_to_clipboard(self) -> None:
-        text = self._version_label.text().strip()
-        if not text:
-            return
-        QApplication.clipboard().setText(text)
-        self._status.showMessage(f"copied: {text}", 2000)
-
-    def _show_changelog(self) -> None:
-        """Version chip click → render CHANGELOG.md in a scrollable in-app
-        dialog (QTextBrowser.setMarkdown — no external browser). The old
-        copy-to-clipboard action moves to a button inside the dialog so it
-        isn't lost."""
-        from PyQt6.QtWidgets import (
-            QDialog,
-            QDialogButtonBox,
-            QPushButton,
-            QTextBrowser,
-            QVBoxLayout,
-        )
-
-        path = REPO_ROOT / "CHANGELOG.md"
-        try:
-            body = path.read_text(encoding="utf-8")
-        except OSError:
-            body = "# Changelog\n\n_ไม่พบ CHANGELOG.md ที่ repo root_"
-
-        dlg = QDialog(self)
-        dlg.setWindowTitle(f"Changelog · {self._version_label.text().strip() or 'agent-takkub'}")
-        dlg.resize(760, 620)
-        layout = QVBoxLayout(dlg)
-
-        browser = QTextBrowser(dlg)
-        browser.setMarkdown(body)
-        browser.setOpenExternalLinks(True)
-        browser.setStyleSheet(
-            "QTextBrowser { background:#0e0e10; color:#e4e4e7; "
-            "border:1px solid #27272a; border-radius:6px; padding:8px; }"
-        )
-        layout.addWidget(browser)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, dlg)
-        copy_btn = QPushButton("📋 Copy version", dlg)
-        copy_btn.clicked.connect(self._copy_version_to_clipboard)
-        buttons.addButton(copy_btn, QDialogButtonBox.ButtonRole.ActionRole)
-        buttons.rejected.connect(dlg.reject)
-        layout.addWidget(buttons)
-
-        dlg.exec()
 
     # ------------------------------------------------------------------
     # Claude CLI update (separate from cockpit self-update above)
@@ -713,10 +628,6 @@ class MainWindowUpdateMixin:
         """Flip the update chip's label/colour based on the cached
         status. Five visual states: not-a-repo, error, clean+up-to-date,
         clean+behind, dirty."""
-        # Keep the version chip honest after every poll — pulling new
-        # commits or external `git pull` from a terminal both change
-        # HEAD and we want the chip to reflect that.
-        self._refresh_version_label()
         status = self._update_status_cache or {}
         if status.get("not_repo"):
             from .config import is_installed_package

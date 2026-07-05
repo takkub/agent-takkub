@@ -178,12 +178,28 @@ def instance_display_version() -> str:
 
 def instance_identity_label() -> str:
     """Short identity tag distinguishing this running instance — shown in the
-    window title / taskbar / app display name so an installed prod cockpit
-    and a dev checkout (or two different dev checkouts) open side by side are
-    never mistaken for each other."""
+    window title so an installed cockpit and a dev checkout (or two different
+    dev checkouts) open side by side are never mistaken for each other.
+
+    A dev checkout still needs the ``dev · <repo>`` tag since two checkouts
+    can run side by side with the same version. An installed build only
+    needs its version — the literal word "prod" added no information the
+    version number didn't already carry."""
     if DATA_HOME == REPO_ROOT:
         return f"dev · {REPO_ROOT.name}"
-    return f"prod v{instance_display_version()}"
+    return f"v{instance_display_version()}"
+
+
+def instance_window_title() -> str:
+    """Full ``agent-takkub …`` window-title identity segment.
+
+    Dev checkouts keep the bracketed tag (``agent-takkub [dev · repo]``) so
+    it reads as a qualifier; an installed build shows the version bare
+    (``agent-takkub v1.0.14``) since there's nothing to disambiguate it from."""
+    label = instance_identity_label()
+    if DATA_HOME == REPO_ROOT:
+        return f"agent-takkub [{label}]"
+    return f"agent-takkub {label}"
 
 
 def _resolve_assets_root() -> Path:

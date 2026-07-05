@@ -280,7 +280,7 @@ class TestInstanceIdentityLabel:
         monkeypatch.setattr(config, "REPO_ROOT", tmp_path / "venv-lib")
         monkeypatch.setattr(config, "DATA_HOME", tmp_path / "agent-takkub-home")
         monkeypatch.setattr(config, "instance_display_version", lambda: "1.2.3")
-        assert config.instance_identity_label() == "prod v1.2.3"
+        assert config.instance_identity_label() == "v1.2.3"
 
     def test_dev_version_reads_pyproject(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -299,3 +299,27 @@ class TestInstanceIdentityLabel:
         monkeypatch.setattr(config, "DATA_HOME", tmp_path / "agent-takkub-home")
         with patch("importlib.metadata.version", return_value="2.0.0"):
             assert config.instance_display_version() == "2.0.0"
+
+
+class TestInstanceWindowTitle:
+    """Full window-title identity segment — dev keeps a bracketed tag,
+    installed builds show the bare version (no literal "prod" word)."""
+
+    def test_dev_checkout_is_bracketed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo = tmp_path / "agent-takkub"
+        repo.mkdir()
+        monkeypatch.setattr(config, "REPO_ROOT", repo)
+        monkeypatch.setattr(config, "DATA_HOME", repo)
+        assert config.instance_window_title() == f"agent-takkub [dev · {repo.name}]"
+
+    def test_installed_is_bare_version_no_prod_word(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(config, "REPO_ROOT", tmp_path / "venv-lib")
+        monkeypatch.setattr(config, "DATA_HOME", tmp_path / "agent-takkub-home")
+        monkeypatch.setattr(config, "instance_display_version", lambda: "1.0.14")
+        title = config.instance_window_title()
+        assert title == "agent-takkub v1.0.14"
+        assert "prod" not in title

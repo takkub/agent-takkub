@@ -147,9 +147,9 @@ class MainWindow(
 
     def __init__(self) -> None:
         super().__init__()
-        from .config import instance_identity_label
+        from .config import instance_window_title
 
-        self.setWindowTitle(f"agent-takkub [{instance_identity_label()}] — dev team cockpit")
+        self.setWindowTitle(f"{instance_window_title()} — dev team cockpit")
 
         # Shipped inside the package (wheel) as static/icon.png so the taskbar /
         # title-bar icon works from an `npm install`/pip install; fall back to
@@ -335,9 +335,6 @@ class MainWindow(
         # Start after the singleShot so the first background fetch doesn't
         # race with the boot fetch.
         QTimer.singleShot(30_000, self._update_poll_timer.start)
-        # Populate the version chip immediately so the user doesn't see
-        # an empty slot for the first 30 s until the update check runs.
-        self._refresh_version_label()
 
         self._install_shortcuts()
 

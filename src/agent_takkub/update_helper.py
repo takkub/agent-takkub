@@ -377,13 +377,6 @@ def current_sha() -> str:
     return (proc.stdout or "").strip()
 
 
-def current_sha_short() -> str:
-    """First 7 chars of the HEAD SHA, for status-bar display. Empty
-    string when not in a git repo or git is unavailable."""
-    full = current_sha()
-    return full[:7] if full else ""
-
-
 def current_version_describe() -> str:
     """Live `git describe` output — `<tag>-<count>-g<sha>` if any tags
     exist, otherwise just `g<sha>`. Adds `-dirty` if the working tree
