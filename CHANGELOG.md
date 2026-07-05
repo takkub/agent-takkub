@@ -4,6 +4,18 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+### Added (ใหม่)
+- **ซูม font ใน pane ด้วยเมาส์** — Ctrl+scroll (Mac: Cmd+scroll) บน pane ไหน font pane นั้น
+  ใหญ่/เล็กทันที (8–24pt) · Ctrl/Cmd+0 reset · ขนาดล่าสุด persist เป็น default ของ pane
+  ใหม่ข้าม restart (ต่อ role) · scroll เปล่าเลื่อนปกติ + กัน Chromium page-zoom ซ้อน +
+  แจ้ง PTY resize ให้ TUI ข้างใน reflow ถูก
+
+### Changed (ปรับ)
+- **Title bar สะอาดขึ้น** — แก้ identity ซ้ำ 2 รอบ (`agent-takkub [prod v..] — ... -
+  agent-takkub [prod v..]`) · ตัดคำว่า `prod` เหลือ `agent-takkub v1.0.15 — dev team cockpit`
+  (ฝั่ง dev ยังมี `[dev · <repo>]` ไว้แยก instance) · ถอด version chip + Changelog dialog
+  ออกจาก status bar ล่าง (version มีบน title แล้ว · update chip npm/git ยังอยู่ครบ)
+
 ### Fixed (แก้)
 - **first-boot ของ prod ค้าง 8+ นาที (หน้าต่างไม่ขึ้น นึกว่าแอปดับ) + โปรไฟล์ torn** — bootstrap
   clone ของ 1.0.13 `copytree` ทั้ง `~/.claude` (สนามจริง 2.9GB — ประวัติแชต 2.2GB) บน main
