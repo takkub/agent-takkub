@@ -164,6 +164,7 @@ def lead_context_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     from agent_takkub import lead_context as lc_mod
 
     monkeypatch.setattr(lc_mod, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(lc_mod, "ASSETS_ROOT", tmp_path)
     monkeypatch.setattr(lc_mod, "RUNTIME_DIR", runtime)
     monkeypatch.setattr(config_mod, "PROJECTS_JSON", projects_json)
     monkeypatch.setattr(config_mod, "REPO_ROOT", tmp_path)
@@ -298,6 +299,28 @@ class TestLeadContextProjectRulesInjection:
         content = Path(out_path).read_text(encoding="utf-8")
         assert "📋 Project rules" not in content
         assert "deploy to Fly.io" not in content
+
+
+class TestLeadContextMissingAssets:
+    """Prod-bug follow-up: an installed build whose _assets/CLAUDE.md never
+    got shipped must not fail silently — it should log so the gap is
+    diagnosable instead of Lead just spawning without a playbook."""
+
+    def test_missing_cockpit_md_logs_and_returns_none(
+        self, lead_context_env: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from agent_takkub import lead_context as lc_mod
+
+        (lead_context_env / "CLAUDE.md").unlink()
+        logged: list[tuple[str, dict]] = []
+        monkeypatch.setattr(
+            lc_mod, "_log_event", lambda event, **details: logged.append((event, details))
+        )
+
+        result = lc_mod._render_lead_context("default")
+
+        assert result is None
+        assert logged and logged[0][0] == "lead_context_missing"
 
 
 # ─────────────────────────────────────────────────────────────────────

@@ -1,0 +1,10 @@
+# App-shipped assets (CLAUDE.md playbook + .claude/agents role files) live at
+# the repo root, outside src/agent_takkub — setuptools' sdist command only
+# auto-includes package source files, so these need explicit inclusion here.
+# setup.py's custom build_py stages them into src/agent_takkub/_assets/ right
+# before package_data is collected (see pyproject.toml); that staging step
+# needs these files to exist relative to setup.py, which is true for both a
+# repo checkout AND an sdist built from one (see docs/audit/2026-07-05
+# isolation-plan-crosscheck-codex.md, finding 4).
+include CLAUDE.md
+recursive-include .claude/agents *.md

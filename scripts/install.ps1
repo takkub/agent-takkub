@@ -382,7 +382,19 @@ if (Test-Cmd rtk) {
 # Phase 6 — Cockpit clone + pip install
 # ─────────────────────────────────────────────────────────────
 Write-Step "Phase 6 - Cockpit (agent-takkub)"
-$cockpitDir = Join-Path $env:USERPROFILE "WebstormProjects\agent-takkub"
+# Parity with install.sh (which always derives REPO_ROOT from its own
+# location via BASH_SOURCE): if this script is itself running from inside an
+# existing checkout, reuse that checkout instead of the hardcoded default —
+# a dev who cloned to e.g. C:\Projects\agent-takkub and ran THIS script from
+# there must not get a second, unwanted clone under ~\WebstormProjects.
+# Falls back to the historical default only for the true fresh-bootstrap
+# case (script run standalone, no local checkout yet).
+$scriptRepoRoot = Split-Path $PSScriptRoot -Parent
+if (Test-Path (Join-Path $scriptRepoRoot ".git")) {
+    $cockpitDir = $scriptRepoRoot
+} else {
+    $cockpitDir = Join-Path $env:USERPROFILE "WebstormProjects\agent-takkub"
+}
 if (Test-Path (Join-Path $cockpitDir ".git")) {
     Write-Skip "agent-takkub already cloned at $cockpitDir"
     $script:Summary.Skipped += "agent-takkub clone"

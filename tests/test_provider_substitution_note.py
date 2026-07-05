@@ -34,6 +34,7 @@ def ctx(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> pathlib.Path
     monkeypatch.setattr(cfg_mod, "RUNTIME_DIR", runtime)
     monkeypatch.setattr(cfg_mod, "PROJECTS_JSON", cockpit / "projects.json")
     monkeypatch.setattr(lc_mod, "REPO_ROOT", cockpit)
+    monkeypatch.setattr(lc_mod, "ASSETS_ROOT", cockpit)
     monkeypatch.setattr(lc_mod, "RUNTIME_DIR", runtime)
 
     # Suppress Pro-plan note — not under test here.

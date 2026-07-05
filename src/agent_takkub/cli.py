@@ -687,8 +687,15 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
 
 def cmd_release(args: argparse.Namespace) -> dict:
     """Bump version + roll CHANGELOG's [vNEXT] + git commit & tag."""
-    from .config import REPO_ROOT
+    from .config import REPO_ROOT, is_installed_package
     from .release import release
+
+    if is_installed_package():
+        return {
+            "ok": False,
+            "msg": "takkub release is only available in dev checkouts (installed builds "
+            "update via `npm update -g agent-takkub`, not this command)",
+        }
 
     do_github_release = getattr(args, "github_release", True)
     res = release(

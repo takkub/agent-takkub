@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -192,3 +193,50 @@ class TestAgentRoleDir:
             assert "QA role body" in content
         finally:
             config.AGENTS_DIR = old_agents_dir
+
+
+class TestAssetsRootAndCliBinDir:
+    """installed prod builds resolve REPO_ROOT into an empty venv/Lib
+    ancestor (no CLAUDE.md, no .claude/agents/, no bin/) — ASSETS_ROOT and
+    CLI_BIN_DIR must route around that instead of assuming REPO_ROOT is the
+    real repo checkout."""
+
+    def test_agents_dir_derives_from_assets_root(self) -> None:
+        # Locks the relationship so a future edit can't silently point
+        # AGENTS_DIR back at REPO_ROOT.
+        assert config.AGENTS_DIR == config.ASSETS_ROOT / ".claude" / "agents"
+
+    def test_dev_checkout_assets_root_is_repo_root(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(config, "REPO_ROOT", tmp_path)
+        monkeypatch.setattr(config, "DATA_HOME", tmp_path)
+        assert config._resolve_assets_root() == tmp_path
+
+    def test_dev_checkout_cli_bin_dir_is_repo_root_bin(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(config, "REPO_ROOT", tmp_path)
+        monkeypatch.setattr(config, "DATA_HOME", tmp_path)
+        assert config._resolve_cli_bin_dir() == tmp_path / "bin"
+
+    def test_installed_assets_root_is_package_assets_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Simulate an installed layout: REPO_ROOT resolves into a venv
+        # ancestor that isn't DATA_HOME (the isolated ~/.agent-takkub).
+        venv_lib = tmp_path / "venv" / "Lib"
+        monkeypatch.setattr(config, "REPO_ROOT", venv_lib)
+        monkeypatch.setattr(config, "DATA_HOME", tmp_path / "agent-takkub-home")
+        expected = Path(config.__file__).resolve().parent / "_assets"
+        assert config._resolve_assets_root() == expected
+
+    def test_installed_cli_bin_dir_derives_from_sys_executable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        venv_lib = tmp_path / "venv" / "Lib"
+        scripts_dir = tmp_path / "venv" / "Scripts"
+        monkeypatch.setattr(config, "REPO_ROOT", venv_lib)
+        monkeypatch.setattr(config, "DATA_HOME", tmp_path / "agent-takkub-home")
+        monkeypatch.setattr(sys, "executable", str(scripts_dir / "pythonw.exe"))
+        assert config._resolve_cli_bin_dir() == scripts_dir

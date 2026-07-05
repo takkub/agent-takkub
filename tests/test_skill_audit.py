@@ -45,6 +45,33 @@ def test_load_role_docs_empty_dir(tmp_path: Path) -> None:
     assert result == {}
 
 
+def test_load_role_docs_falls_back_to_agents_dir_when_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A nonexistent cwd-relative dir (e.g. `takkub audit-skills` run from an
+    installed build, outside any repo checkout) must fall back to
+    config.AGENTS_DIR instead of silently returning nothing."""
+    fake_agents_dir = tmp_path / "_assets" / ".claude" / "agents"
+    fake_agents_dir.mkdir(parents=True)
+    (fake_agents_dir / "backend.md").write_text("REST API database")
+    monkeypatch.setattr("agent_takkub.config.AGENTS_DIR", fake_agents_dir)
+
+    missing_dir = tmp_path / "does-not-exist" / ".claude" / "agents"
+    result = load_role_docs(missing_dir)
+
+    assert set(result.keys()) == {"backend"}
+
+
+def test_load_role_docs_missing_agents_dir_returns_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both the passed dir AND the AGENTS_DIR fallback are missing → empty,
+    not a crash."""
+    monkeypatch.setattr("agent_takkub.config.AGENTS_DIR", tmp_path / "also-missing")
+    result = load_role_docs(tmp_path / "does-not-exist")
+    assert result == {}
+
+
 # ---------------------------------------------------------------------------
 # tokenize
 # ---------------------------------------------------------------------------

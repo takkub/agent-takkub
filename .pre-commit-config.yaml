@@ -29,6 +29,7 @@ repos:
           --exclude "docs/code-review-*.md"
           --exclude "docs/qa-reports/*.md"
           --exclude "docs/guides/*.md"
+          --exclude "docs/audit/*.md"
           '
         pass_filenames: false
         always_run: true

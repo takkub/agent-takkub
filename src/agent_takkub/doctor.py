@@ -964,13 +964,20 @@ def check_version() -> list[Finding]:
     )
 
     if not is_git_repo():
+        from .config import is_installed_package
+
+        remedy = (
+            "run `npm update -g agent-takkub` to update"
+            if is_installed_package()
+            else "convert via the cockpit's update chip ('Enable updates') to enable updates"
+        )
         return [
             Finding(
                 "version",
                 "tracking",
                 Status.INFO,
                 "not a git checkout — version-behind / one-click update disabled",
-                "convert via the cockpit's update chip ('Enable updates') to enable updates",
+                remedy,
             )
         ]
 

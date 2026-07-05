@@ -20,7 +20,7 @@ import sys
 
 from PyQt6.QtCore import QObject, QRunnable, pyqtSignal
 
-from .config import REPO_ROOT
+from .config import REPO_ROOT, RUNTIME_DIR
 from .update_helper import _git, fetch_remote, is_git_repo, local_status
 
 logger = logging.getLogger(__name__)
@@ -220,7 +220,7 @@ def _log_startup_pull(event: str, **kw: object) -> None:
     import json
     from datetime import datetime
 
-    log_path = REPO_ROOT / "runtime" / "startup_pull.log"
+    log_path = RUNTIME_DIR / "startup_pull.log"
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         record = {"ts": datetime.now().isoformat(timespec="seconds"), "event": event, **kw}

@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .config import REPO_ROOT
+from .config import DATA_HOME, REPO_ROOT
 
 _SEVERITY_VALUES = ("low", "med", "high")
 
@@ -149,6 +149,23 @@ def _ensure_labels(labels: list[str], repo: str, cwd: str | Path | None = None) 
 # ── public API ────────────────────────────────────────────────────────────────
 
 
+def _local_store_cwd(cwd: str | Path | None) -> str | Path | None:
+    """Where the LOCAL fallback ``.takkub_issues.json`` actually lives, given
+    the cwd used for git-remote detection.
+
+    Cockpit-bug operations detect the repo at ``REPO_ROOT`` (that's where the
+    agent-takkub git remote lives, dev checkout or not) — but in an installed
+    build ``REPO_ROOT`` resolves into a read-only/ephemeral venv ancestor, so
+    local issues filed there would vanish on the next ``pip install --upgrade``
+    (see docs/audit/2026-07-05-installed-build-audit-gemini.md, finding 3).
+    Redirect just the local-fallback file to ``DATA_HOME`` instead — a no-op
+    in a dev checkout, where ``DATA_HOME == REPO_ROOT`` already.
+    """
+    if cwd is not None and Path(cwd).resolve() == REPO_ROOT.resolve():
+        return DATA_HOME
+    return cwd
+
+
 def _get_local_issues_path(cwd: str | Path | None) -> Path:
     return Path(cwd or ".").resolve() / ".takkub_issues.json"
 
@@ -243,7 +260,7 @@ def new_issue(
     # Local fallback — when cockpit_bug=True, write to REPO_ROOT's
     # .takkub_issues.json so a flaky `gh` doesn't scatter cockpit-bug
     # JSON files across every project the user touches.
-    issues = _load_local_issues(detect_cwd)
+    issues = _load_local_issues(_local_store_cwd(detect_cwd))
     number = max([iss.get("number", 0) for iss in issues] or [0]) + 1
     import datetime
 
@@ -262,7 +279,7 @@ def new_issue(
         "closed_at": "",
     }
     issues.append(new_iss)
-    _save_local_issues(issues, detect_cwd)
+    _save_local_issues(issues, _local_store_cwd(detect_cwd))
     return number, new_iss["url"]
 
 
@@ -357,7 +374,7 @@ def list_issues(
             use_local = True
 
     # Local fallback
-    issues = _load_local_issues(cwd)
+    issues = _load_local_issues(_local_store_cwd(cwd))
     results = []
     for iss in issues:
         status = iss.get("status", "open").lower()
@@ -402,7 +419,8 @@ def close_issue(
             use_local = True
 
     # Local fallback
-    issues = _load_local_issues(cwd)
+    local_cwd = _local_store_cwd(cwd)
+    issues = _load_local_issues(local_cwd)
     found = False
     import datetime
 
@@ -419,7 +437,7 @@ def close_issue(
             break
     if not found:
         raise RuntimeError(f"local issue #{number} not found")
-    _save_local_issues(issues, cwd)
+    _save_local_issues(issues, local_cwd)
     return f"local://issue/{number}"
 
 
@@ -439,7 +457,7 @@ def show_issue(issue_id: str, *, cwd: str | Path | None = None) -> str:
             use_local = True
 
     # Local fallback
-    issues = _load_local_issues(cwd)
+    issues = _load_local_issues(_local_store_cwd(cwd))
     iss = next((i for i in issues if i.get("number") == number), None)
     if not iss:
         raise RuntimeError(f"local issue #{number} not found")

@@ -6,6 +6,7 @@ venv/
 *.egg-info/
 build/
 dist/
+src/agent_takkub/_assets/
 .idea/
 .vscode/
 projects.json

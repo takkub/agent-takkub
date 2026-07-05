@@ -32,9 +32,11 @@ from __future__ import annotations
 import json
 import pathlib
 import re
+import sys
 
 from .config import (
     _SAFE_PLUGINS,
+    ASSETS_ROOT,
     REPO_ROOT,
     RUNTIME_DIR,
     active_project,
@@ -236,6 +238,16 @@ def _recent_session_brief(project: str) -> str | None:
     return brief
 
 
+def _log_event(event: str, **details) -> None:
+    """Proxy to orchestrator._log_event (lazy import to dodge a cycle:
+    orchestrator_text already imports from lead_context, so lead_context
+    can't import orchestrator_text back at module load time). Best-effort —
+    the real implementation swallows its own errors."""
+    _orch = sys.modules.get("agent_takkub.orchestrator")
+    if _orch is not None:
+        _orch._log_event(event, **details)
+
+
 def _claude_autoloads(claude_cwd: pathlib.Path, md_dir: pathlib.Path) -> bool:
     """True if claude, started in ``claude_cwd``, will auto-discover the CLAUDE.md
     living in ``md_dir`` — i.e. ``md_dir`` is the cwd itself or an ancestor of it,
@@ -268,8 +280,9 @@ def _render_lead_context(
     Returns the rendered file path (string), or None if there's no cockpit
     CLAUDE.md to render from.
     """
-    cockpit_md = REPO_ROOT / "CLAUDE.md"
+    cockpit_md = ASSETS_ROOT / "CLAUDE.md"
     if not cockpit_md.exists():
+        _log_event("lead_context_missing", assets_root=str(ASSETS_ROOT))
         return None
 
     base = cockpit_md.read_text(encoding="utf-8")

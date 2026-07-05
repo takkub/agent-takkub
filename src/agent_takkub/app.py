@@ -12,11 +12,19 @@ import threading
 import time
 from pathlib import Path
 
+# config.py is a pure-leaf module (stdlib only, no agent_takkub imports), so
+# importing it this early carries no circular-import risk despite app.py
+# being the GUI entry point.
+from .config import RUNTIME_DIR
+
 # Boot-time crash dump. pythonw.exe has no console, so a segfault or
 # uncaught exception during MainWindow init looks like a silent
 # disappearance. Route faulthandler + a small textual trace into
-# runtime/boot.log so we can read it post-mortem.
-_BOOT_LOG = Path(__file__).resolve().parents[2] / "runtime" / "boot.log"
+# runtime/boot.log so we can read it post-mortem. Uses config.RUNTIME_DIR
+# (not a REPO_ROOT-relative path) so an installed build writes this under
+# DATA_HOME instead of the read-only venv/site-packages tree it's running
+# from (see docs/audit/2026-07-05-installed-build-audit-gemini.md, finding 1).
+_BOOT_LOG = RUNTIME_DIR / "boot.log"
 try:
     _BOOT_LOG.parent.mkdir(parents=True, exist_ok=True)
     # boot.log is append-only across every launch. Cap it so stale faulthandler
@@ -449,11 +457,39 @@ def _install_signal_handlers(window: MainWindow) -> None:
                 pass
 
 
+def _check_cli_bin_present() -> None:
+    """Installed builds must find a real ``takkub`` binary in
+    ``config.CLI_BIN_DIR`` — that's the dir every spawned pane's PATH is
+    prefixed with so it dials back into *this* cockpit instead of a stale
+    ``takkub`` elsewhere on PATH (code-version skew). If the console script
+    is missing (e.g. a wheel install without proper entry-point generation,
+    or a `pythonw`/shortcut launch whose executable dir differs from the
+    venv's script dir), every pane's `send`/`done`/`_hook` silently breaks.
+    This never crashes the app — it only leaves a `cli_bin_missing`
+    breadcrumb in events.log so the failure is diagnosable instead of
+    silently eating every pane's cross-process command (see
+    docs/audit/2026-07-05-isolation-plan-crosscheck-codex.md, finding 1)."""
+    from . import config
+
+    if not config.is_installed_package():
+        return
+    names = ("takkub.exe", "takkub") if sys.platform == "win32" else ("takkub",)
+    if any((config.CLI_BIN_DIR / name).exists() for name in names):
+        return
+    try:
+        from .orchestrator import _log_event
+
+        _log_event("cli_bin_missing", cli_bin_dir=str(config.CLI_BIN_DIR))
+    except Exception:
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
     # Layer C: silent fast-forward pull before UI starts.  If a pull
     # succeeds, os.execv re-execs into the new code — execution never
     # reaches the next line.  Any failure returns False silently.
     try_silent_self_update()
+    _check_cli_bin_present()
 
     app = QApplication(argv or sys.argv)
     app.setApplicationName("agent-takkub")

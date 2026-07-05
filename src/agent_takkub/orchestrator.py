@@ -31,8 +31,9 @@ from PyQt6.QtCore import QObject, QProcess, QTimer, pyqtSignal
 from .agent_pane import AgentPane
 from .claude_auth_config import apply_claude_auth_overrides
 from .config import (
+    DATA_HOME,
     EVENTS_LOG,
-    REPO_ROOT,
+    REPO_ROOT,  # re-exported: tests patch agent_takkub.orchestrator.REPO_ROOT
     RUNTIME_DIR,
     active_project,
     agent_role_dir,
@@ -1515,7 +1516,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, QObject):
         # The main done notice below goes out immediately; if the tree turns out
         # dirty, a follow-up `[requires-commit]` warning is delivered to Lead.
         if had_requires_commit:
-            spawn_cwd = getattr(pane, "_session_cwd", None) or str(REPO_ROOT)
+            spawn_cwd = getattr(pane, "_session_cwd", None) or str(DATA_HOME)
             self._check_uncommitted_async(project_ns, from_role, spawn_cwd)
 
         # Agent finished cleanly — pop all per-pane state atomically.

@@ -53,7 +53,18 @@ _STOPWORDS = frozenset(
 
 
 def load_role_docs(skills_dir: Path = Path(".claude/agents")) -> dict[str, str]:
-    """Return {role_name: doc_text} for every .md file in skills_dir."""
+    """Return {role_name: doc_text} for every .md file in skills_dir.
+
+    ``skills_dir`` defaults to a cwd-relative path (only correct when run
+    from the repo root). If that doesn't exist, fall back to
+    ``config.AGENTS_DIR`` — the cockpit's real role-file location in both a
+    dev checkout and an installed build (see
+    docs/audit/2026-07-05-installed-build-audit-gemini.md, finding 5).
+    """
+    if not skills_dir.exists():
+        from .config import AGENTS_DIR
+
+        skills_dir = AGENTS_DIR
     if not skills_dir.exists():
         return {}
     return {

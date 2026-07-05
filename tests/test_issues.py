@@ -533,6 +533,56 @@ def test_new_issue_default_routes_to_agent_takkub_repo(tmp_path) -> None:
     assert detected_cwds == [str(REPO_ROOT)]
 
 
+# ── installed-build local-fallback redirect (issues.py, DATA_HOME vs REPO_ROOT) ──
+
+
+def test_local_store_cwd_passthrough_when_dev_checkout(tmp_path, monkeypatch) -> None:
+    """DATA_HOME == REPO_ROOT in a dev checkout, so redirecting is a no-op —
+    any cwd that isn't REPO_ROOT stays untouched."""
+    from agent_takkub.issues import _local_store_cwd
+
+    assert _local_store_cwd(str(tmp_path)) == str(tmp_path)
+    assert _local_store_cwd(None) is None
+
+
+def test_local_store_cwd_redirects_repo_root_to_data_home(tmp_path, monkeypatch) -> None:
+    """Installed build: REPO_ROOT resolves into a throwaway venv ancestor —
+    the local-fallback JSON must redirect to DATA_HOME instead so it survives
+    a `pip install --upgrade` (docs/audit/2026-07-05-installed-build-audit-gemini.md,
+    finding 3)."""
+    from agent_takkub.issues import _local_store_cwd
+
+    fake_repo_root = tmp_path / "venv" / "Lib"
+    fake_repo_root.mkdir(parents=True)
+    fake_data_home = tmp_path / "agent-takkub-home"
+    monkeypatch.setattr("agent_takkub.issues.REPO_ROOT", fake_repo_root)
+    monkeypatch.setattr("agent_takkub.issues.DATA_HOME", fake_data_home)
+
+    assert _local_store_cwd(str(fake_repo_root)) == fake_data_home
+    # An unrelated cwd (active project pane) is left alone.
+    other = tmp_path / "some-other-project"
+    assert _local_store_cwd(str(other)) == str(other)
+
+
+def test_new_issue_cockpit_bug_local_fallback_writes_to_data_home(tmp_path, monkeypatch) -> None:
+    """End-to-end: cockpit_bug=True + gh unavailable + installed build → the
+    local .takkub_issues.json lands under DATA_HOME, not the venv ancestor
+    REPO_ROOT resolves to."""
+    fake_repo_root = tmp_path / "venv" / "Lib"
+    fake_repo_root.mkdir(parents=True)
+    fake_data_home = tmp_path / "agent-takkub-home"
+    fake_data_home.mkdir()
+    monkeypatch.setattr("agent_takkub.issues.REPO_ROOT", fake_repo_root)
+    monkeypatch.setattr("agent_takkub.issues.DATA_HOME", fake_data_home)
+
+    with patch("agent_takkub.issues._detect_repo", side_effect=RuntimeError("no gh")):
+        number, _url = new_issue("installed cockpit bug", "body", cockpit_bug=True)
+
+    assert number == 1
+    assert (fake_data_home / ".takkub_issues.json").exists()
+    assert not (fake_repo_root / ".takkub_issues.json").exists()
+
+
 # ── --issues-dir CLI backward compat ─────────────────────────────────────────
 
 

@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (
     QSystemTrayIcon,
 )
 
-from .config import lead_cwd
+from .config import RUNTIME_DIR, lead_cwd
 from .rtk_helper import is_rtk_installed, rtk_binary_available
 
 
@@ -642,7 +642,6 @@ class StatusHeaderMixin:
         doesn't already carry the rtk hook. Hidden when rtk isn't on PATH or
         no project is active."""
         import time as _t
-        from pathlib import Path as _P
 
         bin_ok = rtk_binary_available()
         root = lead_cwd()
@@ -667,7 +666,7 @@ class StatusHeaderMixin:
         # path (vs. running a stale cached process / older code). Remove
         # after visibility is verified.
         try:
-            log = _P(__file__).resolve().parents[2] / "runtime" / "rtk_button.log"
+            log = RUNTIME_DIR / "rtk_button.log"
             log.parent.mkdir(parents=True, exist_ok=True)
             visible = self._btn_install_rtk.isVisible()
             with log.open("a", encoding="utf-8") as f:

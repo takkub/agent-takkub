@@ -28,7 +28,8 @@ from PyQt6.QtCore import QTimer
 from .agent_pane import AgentPane
 from .claude_auth_config import apply_claude_auth_overrides
 from .config import (
-    REPO_ROOT,
+    CLI_BIN_DIR,
+    DATA_HOME,
     agent_role_dir,
     default_cwd_for_role,
     lead_cwd,
@@ -901,12 +902,12 @@ class SpawnEngineMixin:
                     or "/bin/sh"
                 )
                 shell_argv = [posix_shell, "-i"]
-            spawn_cwd = cwd or default_cwd_for_role(role_name, project=project_ns) or str(REPO_ROOT)
+            spawn_cwd = cwd or default_cwd_for_role(role_name, project=project_ns) or str(DATA_HOME)
             env = _build_pane_env()
             env["TAKKUB_ROLE"] = role_name
             env["TAKKUB_PROJECT"] = project_ns
             inject_user_profile_env(env, project_ns)
-            bin_dir = str(REPO_ROOT / "bin")
+            bin_dir = str(CLI_BIN_DIR)
             env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
             _shell_tok = self._mint_pane_token(env, project_ns, role_name)
             return self._launch_session(
@@ -968,13 +969,13 @@ class SpawnEngineMixin:
                     "agy binary not on PATH. Install the Antigravity CLI from "
                     "https://antigravity.google/download, then run `agy` once to sign in."
                 )
-            spawn_cwd = cwd or default_cwd_for_role(role_name, project=project_ns) or str(REPO_ROOT)
+            spawn_cwd = cwd or default_cwd_for_role(role_name, project=project_ns) or str(DATA_HOME)
             ensure_agents_md(spawn_cwd)
             env = _build_pane_env()
             env["TAKKUB_ROLE"] = role_name
             env["TAKKUB_PROJECT"] = project_ns
             inject_user_profile_env(env, project_ns)
-            bin_dir = str(REPO_ROOT / "bin")
+            bin_dir = str(CLI_BIN_DIR)
             # Put agy's own dir on the pane PATH too — the Antigravity
             # installer doesn't reliably register it (find_agy_executable
             # may have resolved the binary via its fixed install location,
@@ -1014,7 +1015,7 @@ class SpawnEngineMixin:
                     "codex binary not on PATH. Install with "
                     "`npm install -g @openai/codex`, then run `codex login` once."
                 )
-            spawn_cwd = cwd or default_cwd_for_role(role_name, project=project_ns) or str(REPO_ROOT)
+            spawn_cwd = cwd or default_cwd_for_role(role_name, project=project_ns) or str(DATA_HOME)
             # Plant the takkub cheatsheet so Codex auto-discovers it on
             # boot and knows how to call `takkub send/done`. Safe: only
             # writes when the file is absent or already takkub-managed
@@ -1024,7 +1025,7 @@ class SpawnEngineMixin:
             env["TAKKUB_ROLE"] = role_name
             env["TAKKUB_PROJECT"] = project_ns
             inject_user_profile_env(env, project_ns)
-            bin_dir = str(REPO_ROOT / "bin")
+            bin_dir = str(CLI_BIN_DIR)
             env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
             _cdx_tok = self._mint_pane_token(env, project_ns, role_name)
             # Autonomy flags so Codex can call `takkub done` and edit
@@ -1098,12 +1099,12 @@ class SpawnEngineMixin:
             # user's actual codebase. The cockpit's CLAUDE.md (takkub
             # cheatsheet + role guide) is appended as system prompt so
             # Lead still knows about `takkub assign / send / done / ...`.
-            spawn_cwd = cwd or lead_cwd(project=project_ns) or str(REPO_ROOT)
+            spawn_cwd = cwd or lead_cwd(project=project_ns) or str(DATA_HOME)
             # Render Lead's system prompt fresh each spawn so BLOCKED_DIRS
             # tracks whatever project is active in projects.json right now.
             # Skip injection when Lead is anchored at the cockpit itself
             # (no project context to enforce).
-            if spawn_cwd != str(REPO_ROOT):
+            if spawn_cwd != str(DATA_HOME):
                 post_compact_brief = self._build_post_compact_brief(project_ns)
                 role_md_file = _render_lead_context(
                     project_ns,
@@ -1279,7 +1280,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             # `from`/`from_project` fields, preventing a compromised or forged pane
             # from impersonating another role or project.
             pane_tok = self._mint_pane_token(env, project_ns, role_name)
-        bin_dir = str(REPO_ROOT / "bin")
+        bin_dir = str(CLI_BIN_DIR)
         env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
 
         # If rtk lives somewhere `shutil.which` can't see (typical when

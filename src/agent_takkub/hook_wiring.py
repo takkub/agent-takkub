@@ -10,8 +10,9 @@ non-claude panes and for any claude pane whose hook never fires).
 
 The command is a bare `takkub _hook` (no args, no embedded JSON) so it needs
 no shell quoting on either OS — `spawn_engine.py` already prepends
-`REPO_ROOT/bin` (containing `bin/takkub` + `bin/takkub.cmd`) to every pane's
-PATH. The settings content itself never varies per pane, so it's written once
+`config.CLI_BIN_DIR` (`REPO_ROOT/bin` in a dev checkout, the venv's own
+console-script dir in an installed build) to every pane's PATH. The settings
+content itself never varies per pane, so it's written once
 to a shared file under `runtime/` rather than passed as an inline JSON argv
 string (Windows `list2cmdline` quote-leakage risk — see
 docs/reviews/2026-07-02-claude-hooks-design-crosscheck.md, section 3).

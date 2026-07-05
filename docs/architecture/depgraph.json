@@ -69,6 +69,7 @@
     {
       "module": "agent_takkub.app",
       "imports": [
+        "agent_takkub.config",
         "agent_takkub.main_window",
         "agent_takkub.orchestrator",
         "agent_takkub.update_worker"
@@ -77,7 +78,7 @@
         "agent_takkub.__main__"
       ],
       "fan_in": 1,
-      "fan_out": 3
+      "fan_out": 4
     },
     {
       "module": "agent_takkub.chatlog_scanner",
@@ -191,6 +192,7 @@
       "imports": [],
       "imported_by": [
         "agent_takkub.agent_pane",
+        "agent_takkub.app",
         "agent_takkub.claude_auth_config",
         "agent_takkub.claude_update",
         "agent_takkub.cli",
@@ -218,6 +220,7 @@
         "agent_takkub.provider_state",
         "agent_takkub.role_memory",
         "agent_takkub.shared_dev_tools",
+        "agent_takkub.skill_audit",
         "agent_takkub.spawn_engine",
         "agent_takkub.status_header",
         "agent_takkub.terminal_widget",
@@ -231,7 +234,7 @@
         "agent_takkub.vault_mirror",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 40,
+      "fan_in": 42,
       "fan_out": 0
     },
     {
@@ -778,12 +781,14 @@
     },
     {
       "module": "agent_takkub.skill_audit",
-      "imports": [],
+      "imports": [
+        "agent_takkub.config"
+      ],
       "imported_by": [
         "agent_takkub.cli"
       ],
       "fan_in": 1,
-      "fan_out": 0
+      "fan_out": 1
     },
     {
       "module": "agent_takkub.spawn_engine",

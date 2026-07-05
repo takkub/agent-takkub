@@ -41,10 +41,35 @@ def _find(findings, name):
 
 def test_not_a_git_repo_is_info(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch(monkeypatch, is_repo=False)
+    monkeypatch.setattr("agent_takkub.config.is_installed_package", lambda: False)
     findings = check_version()
     f = _find(findings, "tracking")
     assert f is not None and f.status is Status.INFO
     assert "not a git checkout" in f.detail
+    assert "Enable updates" in f.fix_hint
+
+
+def test_not_a_git_repo_dev_checkout_suggests_update_chip(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch(monkeypatch, is_repo=False)
+    monkeypatch.setattr("agent_takkub.config.is_installed_package", lambda: False)
+    f = _find(check_version(), "tracking")
+    assert f is not None
+    assert "Enable updates" in f.fix_hint
+    assert "npm update" not in f.fix_hint
+
+
+def test_not_a_git_repo_installed_build_suggests_npm_update(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Installed builds don't have the update chip's git-conversion path — the
+    hint must point at npm instead (docs/audit/2026-07-05-installed-build-audit-gemini.md,
+    finding 7)."""
+    _patch(monkeypatch, is_repo=False)
+    monkeypatch.setattr("agent_takkub.config.is_installed_package", lambda: True)
+    f = _find(check_version(), "tracking")
+    assert f is not None
+    assert "npm update -g agent-takkub" in f.fix_hint
+    assert "Enable updates" not in f.fix_hint
 
 
 def test_up_to_date_is_ok(monkeypatch: pytest.MonkeyPatch) -> None:

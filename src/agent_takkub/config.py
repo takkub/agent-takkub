@@ -131,8 +131,47 @@ def is_installed_package() -> bool:
     return "site-packages" in Path(__file__).resolve().parts
 
 
+def _resolve_assets_root() -> Path:
+    """Where app-shipped, read-only assets live: the cockpit ``CLAUDE.md``
+    and ``.claude/agents/*.md`` role files that get materialised into every
+    Lead/teammate spawn prompt.
+
+    * dev checkout (``DATA_HOME == REPO_ROOT``) → ``REPO_ROOT`` unchanged —
+      dev behaviour must not shift at all.
+    * installed (pip/npm wheel) → ``REPO_ROOT`` resolves into an empty venv
+      ancestor (``…/venv/Lib``) that ships none of the repo's structural
+      files, so assets are shipped inside the package itself instead, at
+      ``agent_takkub/_assets/`` (see ``package_data`` in pyproject.toml).
+    """
+    if DATA_HOME == REPO_ROOT:
+        return REPO_ROOT
+    return Path(__file__).resolve().parent / "_assets"
+
+
+ASSETS_ROOT = _resolve_assets_root()
+
+
+def _resolve_cli_bin_dir() -> Path:
+    """Where the ``takkub`` CLI binary that spawned panes should PATH-prefer
+    lives — so a pane always dials back into *this* running cockpit instead
+    of a different ``takkub`` checkout that happens to sit earlier on the
+    user's PATH (code-version skew).
+
+    * dev checkout → ``REPO_ROOT/bin`` (``bin/takkub`` + ``bin/takkub.cmd``),
+      unchanged.
+    * installed → the venv's own console-script directory (``Scripts/`` on
+      Windows, ``bin/`` on macOS/Linux), derived from ``sys.executable`` so
+      it always tracks whichever venv this process is actually running in.
+    """
+    if DATA_HOME == REPO_ROOT:
+        return REPO_ROOT / "bin"
+    return Path(sys.executable).resolve().parent
+
+
+CLI_BIN_DIR = _resolve_cli_bin_dir()
+
 PROJECTS_JSON = DATA_HOME / "projects.json"
-AGENTS_DIR = REPO_ROOT / ".claude" / "agents"
+AGENTS_DIR = ASSETS_ROOT / ".claude" / "agents"
 RUNTIME_DIR = DATA_HOME / "runtime"
 PORT_FILE = RUNTIME_DIR / "port"
 EVENTS_LOG = RUNTIME_DIR / "events.log"

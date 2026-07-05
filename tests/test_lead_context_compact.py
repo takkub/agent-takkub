@@ -36,6 +36,7 @@ def cockpit_md(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> pathl
     from agent_takkub import lead_context as lc_mod
 
     monkeypatch.setattr(lc_mod, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(lc_mod, "ASSETS_ROOT", tmp_path)
     monkeypatch.setattr(orch_m, "REPO_ROOT", tmp_path)
     return md
 

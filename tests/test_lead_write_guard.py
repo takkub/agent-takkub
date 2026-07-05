@@ -79,6 +79,7 @@ def two_project_json(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) ->
 
     monkeypatch.setattr(lc_mod, "RUNTIME_DIR", runtime)
     monkeypatch.setattr(lc_mod, "REPO_ROOT", cockpit)
+    monkeypatch.setattr(lc_mod, "ASSETS_ROOT", cockpit)
     return pj
 
 
