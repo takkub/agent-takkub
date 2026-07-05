@@ -5,6 +5,14 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 ## [Unreleased]
 
 ### Fixed (แก้)
+- **first-boot ของ prod ค้าง 8+ นาที (หน้าต่างไม่ขึ้น นึกว่าแอปดับ) + โปรไฟล์ torn** — bootstrap
+  clone ของ 1.0.13 `copytree` ทั้ง `~/.claude` (สนามจริง 2.9GB — ประวัติแชต 2.2GB) บน main
+  thread ก่อน UI ขึ้น เปิดซ้ำก็ auto-kill ไม่ลง (ติด I/O) เจอ dialog "already running" และถ้าโดน
+  kill กลางทางจะเหลือโปรไฟล์ครึ่งๆ ที่ `dest.exists()` เช็คผ่านตลอดไป. แก้ 3 ชั้น: **allowlist**
+  (clone เฉพาะ CLAUDE.md/settings/keybindings/agents/commands/skills/plugins — ขยะ
+  cache/security/snapshots ไม่มีทางหลุดมา) + **ประวัติแชตเอาเฉพาะ 10 session ล่าสุดต่อโปรเจค**
+  (ข้ามไฟล์เดี่ยว >50MB) + **atomic** (build ใน `.partial` + marker + `os.replace` — kill
+  กลางทางกี่รอบก็ไม่มี torn profile, โปรไฟล์ที่ login แล้วไม่มีวันถูกแตะ). boot แรกจบใน <10 วินาที
 - **prod install ไม่มี playbook/role files เลย (Lead ไม่รู้จัก `takkub assign`)** — wheel ship แค่ `.py`
   ส่วน `REPO_ROOT` ของ installed build ชี้ `venv/Lib` ที่ว่างเปล่า → `render_lead_context()` คืน
   `None` เงียบๆ (Lead spawn มาแบบไม่มีคู่มือ), `AGENTS_DIR` ว่าง (role files teammate หายทุก role),
