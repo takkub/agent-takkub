@@ -5,6 +5,33 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 ## [Unreleased]
 
 ### Fixed (แก้)
+- **prod install ไม่มี playbook/role files เลย (Lead ไม่รู้จัก `takkub assign`)** — wheel ship แค่ `.py`
+  ส่วน `REPO_ROOT` ของ installed build ชี้ `venv/Lib` ที่ว่างเปล่า → `render_lead_context()` คืน
+  `None` เงียบๆ (Lead spawn มาแบบไม่มีคู่มือ), `AGENTS_DIR` ว่าง (role files teammate หายทุก role),
+  `REPO_ROOT/bin` ไม่มีจริง (pane ตกไปใช้ takkub CLI ตัว dev จาก user PATH = code-version skew).
+  แก้: `ASSETS_ROOT` (installed → `agent_takkub/_assets` ship ใน wheel ผ่าน setup.py build_py —
+  root files ยังเป็น single source, build **fail ทันที**ถ้า assets หาย) + `CLI_BIN_DIR` prepend
+  venv Scripts เข้า pane PATH + lead-context หายต้อง log event ไม่เงียบอีก
+- **REPO_ROOT sweep 9 จุด (audit โดย gemini + adversarial check โดย codex — ดู `docs/audit/`)** —
+  `boot.log`/`rtk_button.log`/`startup_pull.log` เขียนลง `venv/Lib` → ย้ายไป `RUNTIME_DIR` ·
+  `takkub issue` fallback DB อยู่ใน `venv/Lib` โดนลบทุกครั้งที่ update → ย้ายไป DATA_HOME ·
+  pane cwd fallback เลิก spawn ลง `venv/Lib` · `skill_audit`→`AGENTS_DIR` · doctor แนะ
+  `npm update -g` ฝั่ง installed · `install.ps1` เลิก hardcode path · `takkub release` fail สวยๆ
+
+### Added (ใหม่)
+- **เปิด dev + prod คู่กันได้จริง** — single-instance lock เปลี่ยนจาก global ไฟล์เดียว (ที่ทำให้
+  instance เปิดทีหลัง **auto-kill process tree ของตัวแรกทั้งยวง** — ต้นเหตุ "prod หายเอง" ที่ไล่กัน
+  มาหลายรอบ) → lock **ต่อ DATA_HOME** · เปิดซ้ำ home เดิมยังกันเหมือนเดิม 100%
+- **Instance identity** — window title/taskbar แยกชัด: `agent-takkub [prod v1.0.13]` vs
+  `[dev · <repo>]` + breadcrumb `instance_boot` ลง events.log ทุก boot (DATA_HOME/ASSETS_ROOT/
+  CLI_BIN_DIR/port/lock ครบ — debug "ตัวไหนเป็นตัวไหน" จาก log ได้เลย)
+- **Prod Claude profile แยกจาก dev** — installed default `CLAUDE_CONFIG_DIR` =
+  `~/.agent-takkub/claude-config` + first-boot **โคลนจาก `~/.claude` อัตโนมัติ** (ทุกอย่างรวม
+  ประวัติแชต ยกเว้น `.credentials.json` — login ใหม่ครั้งเดียว, doctor เตือนถ้ายังไม่ login) ·
+  `chatlog_scanner`/`takkub search`/resume-brief ตาม profile ของ instance · dev = `~/.claude` เดิมเป๊ะ
+- **Installed-mode CI gate** — job ใหม่ build wheel → ติดตั้ง venv จริง → เทสจาก installed layout
+  บน Windows+macOS ทุก commit (ปิดช่องโหว่ "dev test เขียวแต่ prod พัง" ที่ทำให้บั๊กชุดนี้รอดมา
+  ถึง 1.0.12) + doctor หมวด `[installed]` + `docs/release-checklist.md`
 - **prod cockpit spawn teammate ไม่ได้ (connection refused ทั้งที่ cockpit เปิดอยู่)** — pane ของ
   cockpit ที่ติดตั้งผ่าน npm/pip (single-instance, DATA_HOME=`~/.agent-takkub`) resolve `takkub`
   บน PATH ไปเจอ CLI ของ **dev checkout** (repo/bin มาก่อนใน user PATH) → CLI อ่าน port file
