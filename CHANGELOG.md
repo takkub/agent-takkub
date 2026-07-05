@@ -5,6 +5,15 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 ## [Unreleased]
 
 ### Added (ใหม่)
+- **🌙 Auto-resume ข้าม usage limit** — pane ที่ชน quota ระหว่างมี task ค้าง จะถูก park
+  แล้ว**ปลุกทำต่ออัตโนมัติตอน window reset จริง** (เวลาอ่านจาก usage API ไม่ใช่เดา):
+  detection 2 ชั้น (banner บนจอ + usage API ยืนยัน) กัน false positive · cap ≤3 รอบ/task
+  + ชน limit ซ้ำใน 10 นาทีหลังปลุก = หยุดถาวรคืนการตัดสินใจให้ Lead · ปลุกเฉพาะงานที่สั่ง
+  ค้างไว้ ไม่รับงานใหม่เอง · **default OFF** — เปิดด้วย chip 🌙 ใน status bar (persist +
+  broadcast [system] เหมือน exec-mode) · ตอน OFF ระบบ inert สนิท พฤติกรรมเดิม 100%
+- **Skills เสริมจาก mattpocock/skills (คัด 4 จาก 38)** — `/grill-with-docs` + `/grilling`
+  (interview เค้นแผนพร้อมสร้าง ADR/glossary), `/domain-modeling` (gemini/reviewer),
+  `/codebase-design` (reviewer/codex) — ติดที่ user skills, role files ชี้การใช้แล้ว
 - **ซูม font ใน pane ด้วยเมาส์** — Ctrl+scroll (Mac: Cmd+scroll) บน pane ไหน font pane นั้น
   ใหญ่/เล็กทันที (8–24pt) · Ctrl/Cmd+0 reset · ขนาดล่าสุด persist เป็น default ของ pane
   ใหม่ข้าม restart (ต่อ role) · scroll เปล่าเลื่อนปกติ + กัน Chromium page-zoom ซ้อน +
