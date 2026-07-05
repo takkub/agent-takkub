@@ -26,9 +26,12 @@ import tempfile
 from pathlib import Path
 
 from .config import SETTINGS_HOME as _BASE_DIR
+from .config import default_claude_config_dir as _default_claude_config_dir
 
 _REGISTRY_PATH = _BASE_DIR / "user-profiles.json"
-_DEFAULT_CONFIG_DIR = Path.home() / ".claude"
+# Installed builds isolate this under DATA_HOME (~/.agent-takkub/claude-config);
+# dev checkouts keep the historical ~/.claude. See config.default_claude_config_dir.
+_DEFAULT_CONFIG_DIR = _default_claude_config_dir()
 DEFAULT_PROFILE = "default"
 
 # Valid profile names: 1-64 chars, alphanumeric + hyphens + underscores,
@@ -333,3 +336,37 @@ def config_dir_for(project: str) -> Path:
         if p["name"] == name:
             return Path(p["config_dir"])
     return _DEFAULT_CONFIG_DIR
+
+
+def bootstrap_default_profile() -> bool:
+    """First-boot only: give an installed instance's default Claude profile
+    (``DATA_HOME/claude-config``) a head start by cloning the user's existing
+    ``~/.claude`` into it — everything except ``.credentials.json`` (login is
+    per-instance; session history/settings/plugins are not). No-op for dev
+    checkouts (default profile already IS ``~/.claude``) and a no-op once the
+    destination exists (never clobbers a profile that's already been used or
+    logged into). Returns True iff a clone actually happened.
+    """
+    from .config import DATA_HOME, REPO_ROOT
+
+    if DATA_HOME == REPO_ROOT:
+        return False
+    dest = _DEFAULT_CONFIG_DIR
+    if dest.exists():
+        return False
+    src = Path.home() / ".claude"
+    if not src.is_dir():
+        return False
+
+    import shutil
+
+    def _skip_credentials(dirpath: str, names: list[str]) -> set[str]:
+        if Path(dirpath) == src:
+            return {n for n in names if n == ".credentials.json"}
+        return set()
+
+    try:
+        shutil.copytree(src, dest, ignore=_skip_credentials)
+    except OSError:
+        return False
+    return True

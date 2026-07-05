@@ -254,6 +254,180 @@ class TestWatchdogThreadBehaviour:
 
 
 # ─────────────────────────────────────────────────────────────
+# 5. Per-DATA_HOME instance lock key (isolation plan, finding C1)
+# ─────────────────────────────────────────────────────────────
+
+
+class TestInstanceLockKey:
+    """dev and prod (different DATA_HOME) must never collide on the same
+    single-instance lock file — each gets a stable key derived from its own
+    DATA_HOME."""
+
+    def test_same_data_home_yields_same_key(self, tmp_path: Path) -> None:
+        home = tmp_path / "agent-takkub-home"
+        assert app_mod._instance_lock_key(home) == app_mod._instance_lock_key(home)
+
+    def test_different_data_home_yields_different_key(self, tmp_path: Path) -> None:
+        a = tmp_path / "dev-checkout"
+        b = tmp_path / "installed-home"
+        assert app_mod._instance_lock_key(a) != app_mod._instance_lock_key(b)
+
+    def test_key_is_short_hex(self, tmp_path: Path) -> None:
+        key = app_mod._instance_lock_key(tmp_path / "home")
+        assert len(key) == 12
+        int(key, 16)  # raises ValueError if not hex
+
+    def test_defaults_to_module_data_home(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(app_mod, "DATA_HOME", tmp_path / "some-home")
+        assert app_mod._instance_lock_key() == app_mod._instance_lock_key(tmp_path / "some-home")
+
+    def test_restart_successor_computes_identical_key(self, tmp_path: Path) -> None:
+        """The restart-successor process inherits the SAME env (hence the
+        same resolved DATA_HOME) as its predecessor, so it must land on the
+        identical lock key/path — this is what lets _wait_predecessor_exit
+        actually wait on the right lock."""
+        home = tmp_path / "same-data-home"
+        predecessor_key = app_mod._instance_lock_key(home)
+        successor_key = app_mod._instance_lock_key(home)
+        assert predecessor_key == successor_key
+
+
+# ─────────────────────────────────────────────────────────────
+# 6. Startup audit breadcrumb (isolation plan, finding C2)
+# ─────────────────────────────────────────────────────────────
+
+
+class TestLogInstanceBoot:
+    def test_logs_dev_mode_with_full_identity(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import agent_takkub.config as config_mod
+
+        monkeypatch.setattr(config_mod, "DATA_HOME", tmp_path)
+        monkeypatch.setattr(config_mod, "REPO_ROOT", tmp_path)
+        monkeypatch.setattr(config_mod, "SETTINGS_HOME", tmp_path / "settings")
+        monkeypatch.setattr(config_mod, "ASSETS_ROOT", tmp_path)
+        monkeypatch.setattr(config_mod, "CLI_BIN_DIR", tmp_path / "bin")
+
+        logged: list[dict] = []
+        with patch(
+            "agent_takkub.orchestrator._log_event",
+            side_effect=lambda event, **kw: logged.append({"event": event, **kw}),
+        ):
+            app_mod._log_instance_boot()
+
+        assert len(logged) == 1
+        rec = logged[0]
+        assert rec["event"] == "instance_boot"
+        assert rec["mode"] == "dev"
+        assert rec["data_home"] == str(tmp_path)
+        assert rec["cli_bin_dir"] == str(tmp_path / "bin")
+        assert "lock_path" in rec and "port_file" in rec
+
+    def test_logs_installed_mode_when_data_home_differs(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import agent_takkub.config as config_mod
+
+        monkeypatch.setattr(config_mod, "DATA_HOME", tmp_path / "data-home")
+        monkeypatch.setattr(config_mod, "REPO_ROOT", tmp_path / "venv-lib")
+
+        logged: list[dict] = []
+        with patch(
+            "agent_takkub.orchestrator._log_event",
+            side_effect=lambda event, **kw: logged.append({"event": event, **kw}),
+        ):
+            app_mod._log_instance_boot()
+
+        assert logged[0]["mode"] == "installed"
+
+    def test_never_raises_on_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        with patch("agent_takkub.orchestrator._log_event", side_effect=RuntimeError("boom")):
+            app_mod._log_instance_boot()  # must not raise
+
+
+# ─────────────────────────────────────────────────────────────
+# 7. QtWebEngine per-instance cache/storage path (isolation plan, finding C4)
+# ─────────────────────────────────────────────────────────────
+
+
+class TestConfigureWebengineProfile:
+    def test_sets_storage_and_cache_under_runtime_dir(
+        self, qapp: QCoreApplication, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import agent_takkub.config as config_mod
+
+        monkeypatch.setattr(config_mod, "RUNTIME_DIR", tmp_path / "runtime")
+
+        fake_profile = MagicMock()
+        fake_cls = MagicMock()
+        fake_cls.defaultProfile.return_value = fake_profile
+        with patch("PyQt6.QtWebEngineCore.QWebEngineProfile", fake_cls):
+            app_mod._configure_webengine_profile()
+
+        fake_profile.setPersistentStoragePath.assert_called_once_with(
+            str(tmp_path / "runtime" / "webengine" / "storage")
+        )
+        fake_profile.setCachePath.assert_called_once_with(
+            str(tmp_path / "runtime" / "webengine" / "cache")
+        )
+
+    def test_never_raises_on_failure(self) -> None:
+        fake_cls = MagicMock()
+        fake_cls.defaultProfile.side_effect = RuntimeError("boom")
+        with patch("PyQt6.QtWebEngineCore.QWebEngineProfile", fake_cls):
+            app_mod._configure_webengine_profile()  # must not raise
+
+
+# ─────────────────────────────────────────────────────────────
+# 8. First-boot prod Claude profile bootstrap (isolation plan, finding C5)
+# ─────────────────────────────────────────────────────────────
+
+
+class TestBootstrapProdClaudeProfile:
+    def test_logs_event_when_a_clone_happens(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import agent_takkub.user_profile as up_mod
+
+        monkeypatch.setattr(up_mod, "bootstrap_default_profile", lambda: True)
+        monkeypatch.setattr(up_mod, "_DEFAULT_CONFIG_DIR", Path("/fake/claude-config"))
+
+        logged: list[dict] = []
+        with patch(
+            "agent_takkub.orchestrator._log_event",
+            side_effect=lambda event, **kw: logged.append({"event": event, **kw}),
+        ):
+            app_mod._bootstrap_prod_claude_profile()
+
+        assert len(logged) == 1
+        assert logged[0]["event"] == "prod_claude_profile_bootstrapped"
+        assert logged[0]["dest"] == str(Path("/fake/claude-config"))
+
+    def test_no_log_when_nothing_cloned(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import agent_takkub.user_profile as up_mod
+
+        monkeypatch.setattr(up_mod, "bootstrap_default_profile", lambda: False)
+
+        logged: list[dict] = []
+        with patch(
+            "agent_takkub.orchestrator._log_event",
+            side_effect=lambda event, **kw: logged.append({"event": event, **kw}),
+        ):
+            app_mod._bootstrap_prod_claude_profile()
+
+        assert logged == []
+
+    def test_never_raises_on_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import agent_takkub.user_profile as up_mod
+
+        monkeypatch.setattr(
+            up_mod, "bootstrap_default_profile", lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+        )
+        app_mod._bootstrap_prod_claude_profile()  # must not raise
+
+
+# ─────────────────────────────────────────────────────────────
 # 3b. Sub-hard-kill stall tracker — _StallTracker (pure logic)
 # ─────────────────────────────────────────────────────────────
 

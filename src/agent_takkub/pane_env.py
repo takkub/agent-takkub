@@ -268,17 +268,24 @@ def _apply_color_term(env: dict[str, str]) -> None:
 
 
 def inject_user_profile_env(env: dict[str, str], project: str) -> None:
-    """Set ``CLAUDE_CONFIG_DIR`` in *env* when the project uses a non-default profile.
+    """Set ``CLAUDE_CONFIG_DIR`` in *env* when it should differ from a plain
+    ``claude`` default invocation.
 
-    When the selected profile is ``"default"`` (or missing/corrupt) the env
-    var is intentionally left unset so the existing ``~/.claude`` setup is
-    used unchanged — this keeps the current behaviour for every project that
-    hasn't opted into a named profile.
+    For a dev checkout, the implicit default profile IS ``~/.claude`` (what
+    ``claude`` uses when the var is unset at all), so the var is left unset
+    for the ``"default"`` profile — unchanged historical behaviour. Installed
+    builds isolate their default profile under DATA_HOME
+    (``config.default_claude_config_dir()``), so even the ``"default"``
+    profile must set the var there — otherwise every pane would fall through
+    to the OS-wide ``~/.claude`` instead of the prod-scoped profile. A
+    project's own explicit profile choice always wins either way.
     """
+    from . import config
     from .user_profile import DEFAULT_PROFILE, config_dir_for, profile_for
 
     try:
-        if profile_for(project) != DEFAULT_PROFILE:
+        name = profile_for(project)
+        if name != DEFAULT_PROFILE or config.DATA_HOME != config.REPO_ROOT:
             env["CLAUDE_CONFIG_DIR"] = str(config_dir_for(project))
     except Exception:
         pass

@@ -14,6 +14,7 @@ from agent_takkub.doctor import (
     Finding,
     Status,
     check_arch,
+    check_claude,
     check_mcps,
     check_plugins,
     check_projects,
@@ -539,6 +540,61 @@ class TestCheckMcps:
         assert ok
         assert "browser" in called
         assert "user" in called
+
+
+# ---------------------------------------------------------------------------
+# check_claude — prod-instance default Claude profile login state
+# (isolation plan, finding C5)
+# ---------------------------------------------------------------------------
+
+
+class TestCheckClaudeProdProfile:
+    def test_dev_checkout_has_no_prod_profile_finding(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import agent_takkub.config as config_mod
+
+        monkeypatch.setattr(config_mod, "DATA_HOME", config_mod.REPO_ROOT)
+
+        findings = check_claude()
+
+        assert not any(f.name == "prod_profile_authenticated" for f in findings)
+
+    def test_installed_instance_ok_when_credentials_present(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import agent_takkub.config as config_mod
+        import agent_takkub.user_profile as up_mod
+
+        monkeypatch.setattr(config_mod, "DATA_HOME", tmp_path / "data-home")
+        monkeypatch.setattr(config_mod, "REPO_ROOT", tmp_path / "venv-lib")
+        prod_dir = tmp_path / "claude-config"
+        prod_dir.mkdir()
+        (prod_dir / ".credentials.json").write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(up_mod, "_DEFAULT_CONFIG_DIR", prod_dir)
+
+        findings = check_claude()
+
+        f = next(x for x in findings if x.name == "prod_profile_authenticated")
+        assert f.status == Status.OK
+
+    def test_installed_instance_warns_when_not_logged_in(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import agent_takkub.config as config_mod
+        import agent_takkub.user_profile as up_mod
+
+        monkeypatch.setattr(config_mod, "DATA_HOME", tmp_path / "data-home")
+        monkeypatch.setattr(config_mod, "REPO_ROOT", tmp_path / "venv-lib")
+        prod_dir = tmp_path / "claude-config"  # does not exist yet
+        monkeypatch.setattr(up_mod, "_DEFAULT_CONFIG_DIR", prod_dir)
+
+        findings = check_claude()
+
+        f = next(x for x in findings if x.name == "prod_profile_authenticated")
+        assert f.status == Status.WARN
+        assert "claude login" in f.fix_hint
+        assert str(prod_dir) in f.fix_hint
 
 
 # ---------------------------------------------------------------------------

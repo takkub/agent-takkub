@@ -14,9 +14,26 @@ import os
 from PyQt6.QtCore import QCoreApplication, QThread, QThreadPool, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QApplication, QMessageBox, QSystemTrayIcon
 
-from .config import PORT_FILE, REPO_ROOT, active_project, lead_cwd
+from . import config
+from .config import REPO_ROOT, active_project, lead_cwd
 from .orchestrator import _log_event
 from .rtk_helper import install_rtk
+
+
+def _release_port_file() -> None:
+    """Delete the *effective* port file (``config._get_port_file()``) so a
+    successor cockpit / fresh boot never reconnects to a stale port number.
+
+    Uses the effective path (honours a multi-instance/custom
+    ``TAKKUB_PORT_FILE`` override) rather than the static ``config.PORT_FILE``
+    constant — see docs/audit/2026-07-05-isolation-plan-crosscheck-codex.md,
+    finding 5."""
+    try:
+        pf = config._get_port_file()
+        if pf.exists():
+            pf.unlink()
+    except Exception:
+        pass
 
 
 class _NpmUpdateThread(QThread):
@@ -560,11 +577,7 @@ class MainWindowUpdateMixin:
                 fn()
             except Exception:
                 pass
-        try:
-            if PORT_FILE.exists():
-                PORT_FILE.unlink()
-        except Exception:
-            pass
+        _release_port_file()
 
         is_win = sys.platform == "win32"
         runtime_dir = REPO_ROOT / "runtime"
@@ -982,11 +995,7 @@ class MainWindowUpdateMixin:
                 fn()
             except Exception:
                 pass
-        try:
-            if PORT_FILE.exists():
-                PORT_FILE.unlink()
-        except Exception:
-            pass
+        _release_port_file()
 
         is_win = sys.platform == "win32"
         runtime_dir = REPO_ROOT / "runtime"
@@ -1062,11 +1071,7 @@ class MainWindowUpdateMixin:
         except Exception:
             pass
         # Release port file so the successor can reclaim or renumber cleanly.
-        try:
-            if PORT_FILE.exists():
-                PORT_FILE.unlink()
-        except Exception:
-            pass
+        _release_port_file()
 
         try:
             import os as _os

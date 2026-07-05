@@ -15,7 +15,7 @@ from pathlib import Path
 # config.py is a pure-leaf module (stdlib only, no agent_takkub imports), so
 # importing it this early carries no circular-import risk despite app.py
 # being the GUI entry point.
-from .config import RUNTIME_DIR
+from .config import DATA_HOME, RUNTIME_DIR
 
 # Boot-time crash dump. pythonw.exe has no console, so a segfault or
 # uncaught exception during MainWindow init looks like a silent
@@ -226,10 +226,33 @@ from PyQt6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 from .main_window import MainWindow  # noqa: E402
 from .update_worker import try_silent_self_update  # noqa: E402
 
-# Temp-dir lock file prevents two cockpit processes from co-existing.
-# OS-level advisory lock: automatically released when the process exits
-# (even on force-kill), so a crashed cockpit never permanently blocks restart.
-_LOCK_PATH = str(Path(tempfile.gettempdir()) / "agent-takkub-cockpit.lock")
+
+def _instance_lock_key(data_home: Path | str | None = None) -> str:
+    """Short stable key derived from DATA_HOME.
+
+    Used to scope the single-instance lock (and the boot-audit breadcrumb) to
+    *this* cockpit's data home rather than a single machine-wide lock file.
+    Without this, opening a dev checkout and an installed prod build at the
+    same time auto-kills whichever one loses the lock race — they have
+    different DATA_HOME (and thus different runtime/state) but shared one
+    lock (see docs/audit/2026-07-05-isolation-plan-crosscheck-codex.md,
+    finding C1). `TAKKUB_RESTART_SUCCESSOR` still works unchanged: the
+    successor process inherits the same env, so it resolves the identical
+    DATA_HOME and therefore the identical key/lock path as its predecessor.
+    """
+    import hashlib
+
+    home = Path(data_home if data_home is not None else DATA_HOME).resolve()
+    return hashlib.sha1(str(home).encode("utf-8")).hexdigest()[:12]
+
+
+# Temp-dir lock file prevents two cockpit processes SHARING A DATA_HOME from
+# co-existing. OS-level advisory lock: automatically released when the
+# process exits (even on force-kill), so a crashed cockpit never permanently
+# blocks restart. Keyed by DATA_HOME so a dev checkout and an installed prod
+# build (different DATA_HOME) can run concurrently without either auto-killing
+# the other.
+_LOCK_PATH = str(Path(tempfile.gettempdir()) / f"agent-takkub-cockpit-{_instance_lock_key()}.lock")
 _instance_lock: QLockFile | None = None  # module-level ref keeps GC from releasing the lock
 
 # Dead-man watchdog constants.
@@ -484,15 +507,92 @@ def _check_cli_bin_present() -> None:
         pass
 
 
+def _log_instance_boot() -> None:
+    """One events.log breadcrumb per boot with the fully-resolved instance
+    identity — DATA_HOME, SETTINGS_HOME, ASSETS_ROOT, CLI_BIN_DIR, effective
+    port file, and single-instance lock path. Lets a two-instance session (or
+    a "pane dialed the wrong cockpit" report) be diagnosed straight from
+    events.log instead of re-deriving path resolution by hand (see
+    docs/audit/2026-07-05-isolation-plan-crosscheck-codex.md, finding C2)."""
+    try:
+        from . import config
+        from .orchestrator import _log_event
+
+        _log_event(
+            "instance_boot",
+            mode="installed" if config.DATA_HOME != config.REPO_ROOT else "dev",
+            pid=os.getpid(),
+            data_home=str(config.DATA_HOME),
+            settings_home=str(config.SETTINGS_HOME),
+            assets_root=str(config.ASSETS_ROOT),
+            cli_bin_dir=str(config.CLI_BIN_DIR),
+            port_file=str(config._get_port_file()),
+            lock_path=_LOCK_PATH,
+        )
+    except Exception:
+        pass
+
+
+def _configure_webengine_profile() -> None:
+    """Give QtWebEngine's default profile a DATA_HOME-scoped cache/storage
+    path so two cockpit instances with different DATA_HOME (dev + prod, or
+    two different AGENT_TAKKUB_HOME overrides) never share Chromium's on-disk
+    cache/cookies/local-storage — same ``applicationName`` would otherwise
+    point both at the same OS-default profile directory (see
+    docs/audit/2026-07-05-isolation-plan-crosscheck-codex.md, finding C4).
+    Must run before any QWebEngineView is constructed — the default
+    profile's storage paths are fixed at first use."""
+    try:
+        from PyQt6.QtWebEngineCore import QWebEngineProfile
+
+        from .config import RUNTIME_DIR
+
+        base = RUNTIME_DIR / "webengine"
+        profile = QWebEngineProfile.defaultProfile()
+        profile.setPersistentStoragePath(str(base / "storage"))
+        profile.setCachePath(str(base / "cache"))
+    except Exception:
+        pass
+
+
+def _bootstrap_prod_claude_profile() -> None:
+    """First-boot only: an installed instance's default Claude profile
+    (``DATA_HOME/claude-config``) is cloned from ``~/.claude`` (minus
+    ``.credentials.json``) so a fresh prod cockpit's `takkub search` /
+    resume-briefs / token-meter immediately see the user's existing session
+    history instead of an empty slate. The account itself still needs a
+    fresh `claude login` under that CLAUDE_CONFIG_DIR — see the
+    `prod_profile_authenticated` doctor check. No-op for dev checkouts and
+    for any installed instance where the profile dir already exists (see
+    docs/audit/2026-07-05-isolation-plan-crosscheck-codex.md, finding C5)."""
+    try:
+        from . import user_profile
+        from .orchestrator import _log_event
+
+        if user_profile.bootstrap_default_profile():
+            _log_event(
+                "prod_claude_profile_bootstrapped",
+                dest=str(user_profile._DEFAULT_CONFIG_DIR),
+            )
+    except Exception:
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
     # Layer C: silent fast-forward pull before UI starts.  If a pull
     # succeeds, os.execv re-execs into the new code — execution never
     # reaches the next line.  Any failure returns False silently.
     try_silent_self_update()
     _check_cli_bin_present()
+    _log_instance_boot()
+    _bootstrap_prod_claude_profile()
 
     app = QApplication(argv or sys.argv)
     app.setApplicationName("agent-takkub")
+    from .config import instance_identity_label
+
+    app.setApplicationDisplayName(f"agent-takkub [{instance_identity_label()}]")
+    _configure_webengine_profile()
     # Segoe UI ships on Windows; on macOS it is absent, which triggers a
     # costly font-alias scan + fallback at startup. Pick the native UI font
     # per platform (both branches present so neither OS is left out).

@@ -32,8 +32,19 @@ from datetime import datetime
 
 
 def claude_projects_dir() -> pathlib.Path:
-    """Where Claude Code stores per-project session jsonl files."""
-    return pathlib.Path.home() / ".claude" / "projects"
+    """Where Claude Code stores per-project session jsonl files for *this
+    cockpit instance's* default Claude profile.
+
+    Dev checkouts keep the historical ``~/.claude/projects``. Installed
+    builds default to an isolated profile under DATA_HOME (see
+    ``config.default_claude_config_dir``), so `takkub search` / resume-briefs
+    on a prod cockpit see that instance's own sessions instead of always
+    reading a dev checkout's ``~/.claude`` on the same machine (see
+    docs/audit/2026-07-05-isolation-plan-crosscheck-codex.md, finding C5).
+    """
+    from .config import default_claude_config_dir
+
+    return default_claude_config_dir() / "projects"
 
 
 def decode_project_dir(name: str) -> pathlib.Path:

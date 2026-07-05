@@ -147,7 +147,9 @@ class MainWindow(
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("agent-takkub — dev team cockpit")
+        from .config import instance_identity_label
+
+        self.setWindowTitle(f"agent-takkub [{instance_identity_label()}] — dev team cockpit")
 
         # Shipped inside the package (wheel) as static/icon.png so the taskbar /
         # title-bar icon works from an `npm install`/pip install; fall back to

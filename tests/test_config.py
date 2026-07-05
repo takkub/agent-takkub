@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -240,3 +241,61 @@ class TestAssetsRootAndCliBinDir:
         monkeypatch.setattr(config, "DATA_HOME", tmp_path / "agent-takkub-home")
         monkeypatch.setattr(sys, "executable", str(scripts_dir / "pythonw.exe"))
         assert config._resolve_cli_bin_dir() == scripts_dir
+
+
+class TestDefaultClaudeConfigDir:
+    """Per-instance default Claude profile home (isolation plan, finding C5)."""
+
+    def test_dev_checkout_is_dot_claude_under_home(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(config, "REPO_ROOT", tmp_path)
+        monkeypatch.setattr(config, "DATA_HOME", tmp_path)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+        assert config.default_claude_config_dir() == tmp_path / "home" / ".claude"
+
+    def test_installed_is_isolated_under_data_home(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(config, "REPO_ROOT", tmp_path / "venv-lib")
+        monkeypatch.setattr(config, "DATA_HOME", tmp_path / "agent-takkub-home")
+        assert (
+            config.default_claude_config_dir() == tmp_path / "agent-takkub-home" / "claude-config"
+        )
+
+
+class TestInstanceIdentityLabel:
+    """Window-title / app-display-name identity tag (isolation plan, finding C2)."""
+
+    def test_dev_checkout_label(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        repo = tmp_path / "agent-takkub"
+        repo.mkdir()
+        monkeypatch.setattr(config, "REPO_ROOT", repo)
+        monkeypatch.setattr(config, "DATA_HOME", repo)
+        assert config.instance_identity_label() == f"dev · {repo.name}"
+
+    def test_installed_label_includes_version(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(config, "REPO_ROOT", tmp_path / "venv-lib")
+        monkeypatch.setattr(config, "DATA_HOME", tmp_path / "agent-takkub-home")
+        monkeypatch.setattr(config, "instance_display_version", lambda: "1.2.3")
+        assert config.instance_identity_label() == "prod v1.2.3"
+
+    def test_dev_version_reads_pyproject(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(config, "REPO_ROOT", tmp_path)
+        monkeypatch.setattr(config, "DATA_HOME", tmp_path)
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "agent-takkub"\nversion = "9.9.9"\n', encoding="utf-8"
+        )
+        assert config.instance_display_version() == "9.9.9"
+
+    def test_installed_version_uses_importlib_metadata(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(config, "REPO_ROOT", tmp_path / "venv-lib")
+        monkeypatch.setattr(config, "DATA_HOME", tmp_path / "agent-takkub-home")
+        with patch("importlib.metadata.version", return_value="2.0.0"):
+            assert config.instance_display_version() == "2.0.0"

@@ -212,6 +212,24 @@ class TestInjectUserProfileEnv:
         pane_env.inject_user_profile_env(env, "any")  # must not raise
         assert "CLAUDE_CONFIG_DIR" not in env
 
+    def test_installed_instance_sets_var_even_for_default_profile(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Installed builds isolate their default profile under DATA_HOME, so
+        even the 'default' profile must set CLAUDE_CONFIG_DIR — otherwise
+        every pane falls through to the OS-wide ~/.claude instead of the
+        prod-scoped profile (isolation plan, finding C5)."""
+        import agent_takkub.config as config_mod
+        from agent_takkub.pane_env import inject_user_profile_env
+
+        monkeypatch.setattr(config_mod, "DATA_HOME", tmp_path / "agent-takkub-home")
+        monkeypatch.setattr(config_mod, "REPO_ROOT", tmp_path / "venv-lib")
+
+        env: dict[str, str] = {}
+        inject_user_profile_env(env, "myproject")
+
+        assert env["CLAUDE_CONFIG_DIR"] == str(up._DEFAULT_CONFIG_DIR)
+
 
 class TestSharedSessionProfiles:
     """Shared-session profiles — switch the ACCOUNT, keep sessions/plugins.
@@ -286,3 +304,84 @@ class TestSharedSessionProfiles:
         linked = up.add_profile("work2", second, share_sessions=True)
         assert set(linked) == set(up.SHARED_ITEMS)
         assert any(p["name"] == "work2" for p in up.list_profiles())
+
+
+# ─────────────────────── bootstrap_default_profile ────────────────────────
+# First-boot clone of ~/.claude into an installed instance's isolated
+# default profile (DATA_HOME/claude-config), minus .credentials.json.
+# (isolation plan, finding C5)
+
+
+class TestBootstrapDefaultProfile:
+    def test_noop_for_dev_checkout(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        import agent_takkub.config as config_mod
+
+        monkeypatch.setattr(config_mod, "DATA_HOME", config_mod.REPO_ROOT)
+
+        assert up.bootstrap_default_profile() is False
+
+    def test_noop_when_dest_already_exists(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import agent_takkub.config as config_mod
+
+        monkeypatch.setattr(config_mod, "DATA_HOME", tmp_path / "agent-takkub-home")
+        monkeypatch.setattr(config_mod, "REPO_ROOT", tmp_path / "venv-lib")
+        dest = tmp_path / "dot-claude"  # matches the `isolate` fixture's _DEFAULT_CONFIG_DIR
+        dest.mkdir()
+
+        assert up.bootstrap_default_profile() is False
+
+    def test_noop_when_no_source_claude_dir(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import agent_takkub.config as config_mod
+
+        monkeypatch.setattr(config_mod, "DATA_HOME", tmp_path / "agent-takkub-home")
+        monkeypatch.setattr(config_mod, "REPO_ROOT", tmp_path / "venv-lib")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "no-home-claude-here")
+
+        assert up.bootstrap_default_profile() is False
+        assert not (tmp_path / "dot-claude").exists()
+
+    def test_clones_everything_except_credentials(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import agent_takkub.config as config_mod
+
+        monkeypatch.setattr(config_mod, "DATA_HOME", tmp_path / "agent-takkub-home")
+        monkeypatch.setattr(config_mod, "REPO_ROOT", tmp_path / "venv-lib")
+
+        home = tmp_path / "real-home"
+        src = home / ".claude"
+        (src / "projects" / "proj-a").mkdir(parents=True)
+        (src / "projects" / "proj-a" / "s1.jsonl").write_text("hi", encoding="utf-8")
+        (src / "settings.json").write_text("{}", encoding="utf-8")
+        (src / ".credentials.json").write_text('{"token": "secret"}', encoding="utf-8")
+        monkeypatch.setattr(Path, "home", lambda: home)
+
+        dest = tmp_path / "dot-claude"  # fixture's _DEFAULT_CONFIG_DIR
+        assert up.bootstrap_default_profile() is True
+
+        assert (dest / "settings.json").exists()
+        assert (dest / "projects" / "proj-a" / "s1.jsonl").read_text(encoding="utf-8") == "hi"
+        assert not (dest / ".credentials.json").exists()
+
+    def test_never_clobbers_existing_dest_even_if_partial(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import agent_takkub.config as config_mod
+
+        monkeypatch.setattr(config_mod, "DATA_HOME", tmp_path / "agent-takkub-home")
+        monkeypatch.setattr(config_mod, "REPO_ROOT", tmp_path / "venv-lib")
+
+        home = tmp_path / "real-home"
+        (home / ".claude").mkdir(parents=True)
+        monkeypatch.setattr(Path, "home", lambda: home)
+
+        dest = tmp_path / "dot-claude"
+        dest.mkdir()
+        (dest / "own-file.txt").write_text("mine", encoding="utf-8")
+
+        assert up.bootstrap_default_profile() is False
+        assert (dest / "own-file.txt").read_text(encoding="utf-8") == "mine"

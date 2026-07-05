@@ -131,6 +131,61 @@ def is_installed_package() -> bool:
     return "site-packages" in Path(__file__).resolve().parts
 
 
+def default_claude_config_dir() -> Path:
+    """Default ``CLAUDE_CONFIG_DIR`` for *this cockpit instance's* implicit
+    default Claude profile (the one a project uses when it hasn't picked a
+    named profile — see ``user_profile.py``).
+
+    * dev checkout (``DATA_HOME == REPO_ROOT``) → ``~/.claude``, unchanged.
+    * installed build → isolated under ``DATA_HOME`` (e.g.
+      ``~/.agent-takkub/claude-config``) so a prod cockpit never shares
+      session history/auth/plugins with a dev checkout's ``~/.claude``
+      running on the same machine (see
+      docs/audit/2026-07-05-isolation-plan-crosscheck-codex.md, finding C5).
+
+    Computed fresh on every call (never cached) so tests can monkeypatch
+    ``Path.home`` / ``config.DATA_HOME`` and see it reflected immediately.
+    """
+    if DATA_HOME == REPO_ROOT:
+        return Path.home() / ".claude"
+    return DATA_HOME / "claude-config"
+
+
+def instance_display_version() -> str:
+    """Best-effort version string for the window title / audit breadcrumb.
+
+    Installed builds resolve via ``importlib.metadata`` (the package really
+    is installed under that name). Dev checkouts read ``pyproject.toml``
+    directly since a from-source run has no installed distribution record
+    to query (mirrors the version-chip fallback in ``update_panel.py``).
+    """
+    if DATA_HOME == REPO_ROOT:
+        try:
+            text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+            m = re.search(r'^version\s*=\s*"([^"]+)"', text, re.MULTILINE)
+            if m:
+                return m.group(1)
+        except OSError:
+            pass
+        return "0.0.0"
+    try:
+        from importlib.metadata import version as _pkg_version
+
+        return _pkg_version("agent-takkub")
+    except Exception:
+        return "?"
+
+
+def instance_identity_label() -> str:
+    """Short identity tag distinguishing this running instance — shown in the
+    window title / taskbar / app display name so an installed prod cockpit
+    and a dev checkout (or two different dev checkouts) open side by side are
+    never mistaken for each other."""
+    if DATA_HOME == REPO_ROOT:
+        return f"dev · {REPO_ROOT.name}"
+    return f"prod v{instance_display_version()}"
+
+
 def _resolve_assets_root() -> Path:
     """Where app-shipped, read-only assets live: the cockpit ``CLAUDE.md``
     and ``.claude/agents/*.md`` role files that get materialised into every

@@ -1029,3 +1029,18 @@ class TestIterSessionFiles:
     ) -> None:
         monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
         assert claude_projects_dir() == tmp_path / ".claude" / "projects"
+
+    def test_claude_projects_dir_installed_instance_is_isolated(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        """Installed builds must read *this instance's* claude-config, not a
+        dev checkout's ~/.claude on the same machine (isolation plan,
+        finding C5)."""
+        import agent_takkub.config as config_mod
+
+        monkeypatch.setattr(config_mod, "DATA_HOME", tmp_path / "agent-takkub-home")
+        monkeypatch.setattr(config_mod, "REPO_ROOT", tmp_path / "venv-lib")
+
+        assert (
+            claude_projects_dir() == tmp_path / "agent-takkub-home" / "claude-config" / "projects"
+        )

@@ -165,6 +165,38 @@ def check_claude() -> list[Finding]:
                 )
             )
 
+    # Installed instances get an isolated default Claude profile
+    # (DATA_HOME/claude-config) — separate from a dev checkout's ~/.claude on
+    # the same machine. That profile is cloned from ~/.claude on first boot
+    # (session history/plugins), but login is NOT — it needs its own
+    # `claude login` under that CLAUDE_CONFIG_DIR. See
+    # docs/audit/2026-07-05-isolation-plan-crosscheck-codex.md, finding C5.
+    from .config import DATA_HOME, REPO_ROOT
+
+    if DATA_HOME != REPO_ROOT:
+        from .user_profile import _DEFAULT_CONFIG_DIR
+
+        prod_creds = _DEFAULT_CONFIG_DIR / ".credentials.json"
+        if prod_creds.is_file():
+            findings.append(
+                Finding(
+                    "claude",
+                    "prod_profile_authenticated",
+                    Status.OK,
+                    f"{_DEFAULT_CONFIG_DIR} has credentials",
+                )
+            )
+        else:
+            findings.append(
+                Finding(
+                    "claude",
+                    "prod_profile_authenticated",
+                    Status.WARN,
+                    f"prod Claude profile not logged in yet ({_DEFAULT_CONFIG_DIR})",
+                    f"run 'claude login' with CLAUDE_CONFIG_DIR={_DEFAULT_CONFIG_DIR}",
+                )
+            )
+
     return findings
 
 

@@ -72,23 +72,26 @@
         "agent_takkub.config",
         "agent_takkub.main_window",
         "agent_takkub.orchestrator",
-        "agent_takkub.update_worker"
+        "agent_takkub.update_worker",
+        "agent_takkub.user_profile"
       ],
       "imported_by": [
         "agent_takkub.__main__"
       ],
       "fan_in": 1,
-      "fan_out": 4
+      "fan_out": 5
     },
     {
       "module": "agent_takkub.chatlog_scanner",
-      "imports": [],
+      "imports": [
+        "agent_takkub.config"
+      ],
       "imported_by": [
         "agent_takkub.cli",
         "agent_takkub.orchestrator"
       ],
       "fan_in": 2,
-      "fan_out": 0
+      "fan_out": 1
     },
     {
       "module": "agent_takkub.claude_auth_config",
@@ -193,6 +196,7 @@
       "imported_by": [
         "agent_takkub.agent_pane",
         "agent_takkub.app",
+        "agent_takkub.chatlog_scanner",
         "agent_takkub.claude_auth_config",
         "agent_takkub.claude_update",
         "agent_takkub.cli",
@@ -234,7 +238,7 @@
         "agent_takkub.vault_mirror",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 42,
+      "fan_in": 43,
       "fan_out": 0
     },
     {
@@ -264,14 +268,15 @@
         "agent_takkub.pty_session",
         "agent_takkub.shared_dev_tools",
         "agent_takkub.system_baseline",
-        "agent_takkub.update_helper"
+        "agent_takkub.update_helper",
+        "agent_takkub.user_profile"
       ],
       "imported_by": [
         "agent_takkub.cli",
         "agent_takkub.user_actions"
       ],
       "fan_in": 2,
-      "fan_out": 9
+      "fan_out": 10
     },
     {
       "module": "agent_takkub.exec_mode",
@@ -973,12 +978,14 @@
         "agent_takkub.worktree_manager"
       ],
       "imported_by": [
+        "agent_takkub.app",
+        "agent_takkub.doctor",
         "agent_takkub.limit_panel",
         "agent_takkub.main_window",
         "agent_takkub.pane_env",
         "agent_takkub.user_actions"
       ],
-      "fan_in": 4,
+      "fan_in": 6,
       "fan_out": 2
     },
     {

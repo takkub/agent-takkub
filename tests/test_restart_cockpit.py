@@ -273,7 +273,10 @@ class TestRestartReleasesPortFile:
     ) -> None:
         port_file = tmp_path / "port"
         port_file.write_text("12345", encoding="utf-8")
-        monkeypatch.setattr(up_mod, "PORT_FILE", port_file)
+        # TAKKUB_PORT_FILE (the effective override) drives config._get_port_file(),
+        # which _release_port_file() now uses instead of the static PORT_FILE
+        # constant (see finding 5 in the isolation-plan crosscheck).
+        monkeypatch.setenv("TAKKUB_PORT_FILE", str(port_file))
         monkeypatch.setattr(up_mod, "QCoreApplication", MagicMock())
 
         win = self._make_restart_stub(tmp_path)
@@ -315,7 +318,7 @@ class TestRestartReleasesPortFile:
             side_effect=lambda: call_order.append("write_resume_briefs")
         )
 
-        monkeypatch.setattr(up_mod, "PORT_FILE", tmp_path / "port")
+        monkeypatch.setenv("TAKKUB_PORT_FILE", str(tmp_path / "port"))
         monkeypatch.setattr(up_mod, "QCoreApplication", MagicMock())
 
         def _fake_popen(cmd, **kw):
@@ -330,3 +333,40 @@ class TestRestartReleasesPortFile:
         popen_idx = call_order.index("popen")
         for step in ("save_window_state", "write_session_snapshot"):
             assert call_order.index(step) < popen_idx, f"{step} must happen before Popen"
+
+
+# ─────────────────────────────────────────────────────────────
+# 6. _release_port_file — uses the EFFECTIVE port file, not the static
+#    config.PORT_FILE constant (finding 5, isolation-plan crosscheck)
+# ─────────────────────────────────────────────────────────────
+
+
+class TestReleasePortFile:
+    def test_deletes_effective_override_port_file(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        pf = tmp_path / "custom-port"
+        pf.write_text("1234", encoding="utf-8")
+        monkeypatch.setenv("TAKKUB_PORT_FILE", str(pf))
+
+        up_mod._release_port_file()
+
+        assert not pf.exists()
+
+    def test_missing_file_is_a_noop(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        monkeypatch.setenv("TAKKUB_PORT_FILE", str(tmp_path / "does-not-exist"))
+        up_mod._release_port_file()  # must not raise
+
+    def test_falls_back_to_static_port_file_when_no_override(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        monkeypatch.delenv("TAKKUB_PORT_FILE", raising=False)
+        pf = tmp_path / "port"
+        pf.write_text("1", encoding="utf-8")
+        monkeypatch.setattr(up_mod.config, "PORT_FILE", pf)
+
+        up_mod._release_port_file()
+
+        assert not pf.exists()
