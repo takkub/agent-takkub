@@ -1,0 +1,45 @@
+version: 2
+# Automated dependency + GitHub Actions updates. Grouped and weekly to keep the
+# PR volume sane for a solo maintainer. Security updates from GitHub's advisory
+# database are opened regardless of schedule.
+updates:
+  # Python cockpit deps (pyproject.toml).
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "python"]
+    groups:
+      python-deps:
+        patterns: ["*"]
+
+  # npm wrapper (root package.json — dev/wrapper only, zero runtime deps).
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "npm"]
+
+  # VS Code extension dev deps.
+  - package-ecosystem: "npm"
+    directory: "/vscode-extension"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "vscode-extension"]
+    groups:
+      vscode-ext-deps:
+        patterns: ["*"]
+
+  # Pin/refresh the actions used in CI (supply-chain hygiene).
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels: ["dependencies", "ci"]

@@ -1,0 +1,64 @@
+name: security
+
+# Secret scanning + Python dependency CVE audit. Runs on every push/PR to main
+# and weekly. gitleaks is a HARD gate (a leaked secret must never merge);
+# pip-audit is informational (Dependabot opens the remediation PRs).
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 4 * * 1" # weekly, Monday 04:00 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  gitleaks:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history so gitleaks scans every commit, not just HEAD
+
+      - name: Install gitleaks
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
+            https://api.github.com/repos/gitleaks/gitleaks/releases/latest \
+            | grep -m1 '"tag_name"' | cut -d'"' -f4)
+          VER=${TAG#v}
+          curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/${TAG}/gitleaks_${VER}_linux_x64.tar.gz" -o /tmp/gitleaks.tar.gz
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          sudo install /tmp/gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+
+      - name: Run gitleaks
+        run: gitleaks detect --source . --redact --verbose --no-banner
+
+  pip-audit:
+    name: Python dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install project + pip-audit
+        run: |
+          python -m pip install --upgrade pip pip-audit
+          pip install -e .
+
+      # Audit resolved deps (skip the editable project itself). Informational:
+      # an unfixable transitive advisory shouldn't block every PR.
+      - name: pip-audit
+        continue-on-error: true
+        run: pip-audit --skip-editable --desc

@@ -1,4 +1,12 @@
 repos:
+  # gitleaks: block secrets (API keys, tokens, private keys) before they ever
+  # land in a commit. Mirrors the CI `security` workflow's hard gate locally.
+  # Bump with: pre-commit autoupdate.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.4
+    hooks:
+      - id: gitleaks
+
   # ruff: lint + format (matches pyproject.toml [tool.ruff] config)
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.13
