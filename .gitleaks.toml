@@ -1,0 +1,15 @@
+# gitleaks config — extends the default ruleset, adds project allowlists.
+# Used by BOTH the CI `security` workflow and the pre-commit hook (gitleaks
+# auto-discovers this file at repo root).
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Known public identifiers that are not secrets."
+regexes = [
+  # Claude Code CLI's public OAuth client_id (src/agent_takkub/limit_status.py).
+  # OAuth client IDs identify the app; they ship inside every distributed CLI
+  # and are public by design — not a credential. gitleaks' generic-api-key rule
+  # flags the UUID purely on entropy.
+  '''9d1c250a-e61b-44d9-88ed-5944d1962f5e''',
+]
