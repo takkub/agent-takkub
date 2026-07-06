@@ -15,6 +15,7 @@ driftable copy on disk between builds.
 
 from __future__ import annotations
 
+import re
 import shutil
 from pathlib import Path
 
@@ -23,6 +24,38 @@ from setuptools.command.build_py import build_py as _build_py
 
 _ROOT = Path(__file__).resolve().parent
 _ASSETS = _ROOT / "src" / "agent_takkub" / "_assets"
+
+# Personal home-path leak guard: staged assets ship inside the wheel to every
+# installer, so a hardcoded `C:\Users\<me>\...` / `/Users/<me>/...` path would
+# expose the maintainer's username. Match the home-dir segment and allow only
+# obvious placeholders (docs legitimately use `~`, `<vault>`, `alice`, etc.).
+# Regression cover for the 1.0.13–1.0.17 leak (redacted 2026-07-06).
+_HOME_PATH_RE = re.compile(r"(?:[A-Za-z]:\\Users\\|/Users/|/home/)([^\\/\s\"'`<>|]+)")
+_PLACEHOLDER_USERS = frozenset(
+    {"user", "username", "name", "you", "youruser", "alice", "bob", "me", "home"}
+)
+
+
+def _assert_no_home_path_leak() -> None:
+    """Refuse to ship any staged asset carrying a real home-dir username."""
+    offenders: list[str] = []
+    for path in sorted(_ASSETS.rglob("*")):
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        for lineno, line in enumerate(text.splitlines(), 1):
+            for user in _HOME_PATH_RE.findall(line):
+                if user.lower() not in _PLACEHOLDER_USERS:
+                    rel = path.relative_to(_ASSETS)
+                    offenders.append(f"  {rel}:{lineno}  →  {line.strip()}")
+    if offenders:
+        raise RuntimeError(
+            "asset staging failed: real home-dir path(s) found in shipped assets "
+            "— redact to `~/...` or a `<placeholder>` before building:\n" + "\n".join(offenders)
+        )
 
 
 def _stage_assets() -> None:
@@ -46,6 +79,7 @@ def _stage_assets() -> None:
     shutil.copy2(claude_md, _ASSETS / "CLAUDE.md")
     for f in agent_files:
         shutil.copy2(f, agents_dst / f.name)
+    _assert_no_home_path_leak()
 
 
 class build_py(_build_py):

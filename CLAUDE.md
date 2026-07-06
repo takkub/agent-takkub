@@ -192,7 +192,7 @@ takkub issue new "<title>" --no-cockpit-bug --body "..."  # opt-out: ลง repo
 - **MCP timeout** — `MCP_TOOL_TIMEOUT=180000` (3 นาที) inject ทุก pane โดย default — กัน browser MCP timeout 60s ที่ทำ Lighthouse audit/page load พังบ่อย override ที่ cockpit env ได้ถ้าต้องการ
 - **rtk CLI** — token-optimized wrappers (ดูรายละเอียดใน `~/.claude/CLAUDE.md`)
 
-vault สำหรับโปรเจคนี้: `C:\Users\monch\WebstormProjects\second-brain` มีหน้า [[../second-brain/01-Projects/agent-takkub|01-Projects/agent-takkub.md]] + Dataview ดึง sessions/ มาแสดง
+vault สำหรับโปรเจคนี้: `~/WebstormProjects/second-brain` มีหน้า [[../second-brain/01-Projects/agent-takkub|01-Projects/agent-takkub.md]] + Dataview ดึง sessions/ มาแสดง
 
 ### เมื่อไหร่ Lead ควรค้น vault ก่อนเริ่มงาน (pull-on-demand)
 
