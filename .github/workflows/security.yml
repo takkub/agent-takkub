@@ -24,15 +24,12 @@ jobs:
           fetch-depth: 0 # full history so gitleaks scans every commit, not just HEAD
 
       - name: Install gitleaks
-        env:
-          GH_TOKEN: ${{ github.token }}
+        # Pinned version (matches the pre-commit hook). No GitHub API call — the
+        # old `curl … | grep -m1` closed the pipe early, sent curl a SIGPIPE and
+        # failed the step under `pipefail` (curl exit 23). Bump with the hook.
         run: |
-          set -euo pipefail
-          TAG=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
-            https://api.github.com/repos/gitleaks/gitleaks/releases/latest \
-            | grep -m1 '"tag_name"' | cut -d'"' -f4)
-          VER=${TAG#v}
-          curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/${TAG}/gitleaks_${VER}_linux_x64.tar.gz" -o /tmp/gitleaks.tar.gz
+          VER=8.18.4
+          curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${VER}/gitleaks_${VER}_linux_x64.tar.gz" -o /tmp/gitleaks.tar.gz
           tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
           sudo install /tmp/gitleaks /usr/local/bin/gitleaks
           gitleaks version
