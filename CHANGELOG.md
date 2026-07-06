@@ -4,6 +4,25 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.17] - 2026-07-06
+
+### Security (ความปลอดภัย)
+- **ชุด security hardening ครบวงจร** (repo infra — ไม่กระทบ package ที่ผู้ใช้โหลด):
+  - **SECURITY.md** — นโยบายแจ้งช่องโหว่ + threat model (ระบุชัด: loopback IPC socket
+    + รัน shell = by design ไม่ใช่ช่องโหว่ · in-scope = secret leak/RCE/token bypass)
+  - **Dependabot** — สแกน+อัปเดต dependency อัตโนมัติทุกจันทร์ (pip · npm · vscode-ext · github-actions)
+  - **CodeQL** — code scanning Python + JS/TS (query `security-extended`) ทุก push/PR + weekly
+  - **gitleaks** — secret scan ทั้ง git history (CI hard-fail) + pre-commit hook บล็อกก่อน commit
+  - **pip-audit** — เช็ก CVE ใน Python deps (informational)
+- **GitHub repo settings** (เปิดผ่าน gh api): vulnerability alerts + automated security fixes +
+  private vulnerability reporting + **secret scanning & push protection** + **branch protection บน main** (solo-friendly)
+- sync `__version__` ใน `__init__.py` (0.7.0 → ตรงกับ package version)
+
+### Housekeeping
+- เคลียร์ stale branches → เหลือ `main` อย่างเดียว (ลบ vscode-ide-migration + branch ที่ merge/superseded/obsolete แล้ว)
+
+## [1.0.16] - 2026-07-05
+
 ### Added (ใหม่)
 - **🌙 Auto-resume ข้าม usage limit** — pane ที่ชน quota ระหว่างมี task ค้าง จะถูก park
   แล้ว**ปลุกทำต่ออัตโนมัติตอน window reset จริง** (เวลาอ่านจาก usage API ไม่ใช่เดา):
