@@ -3,6 +3,9 @@ __pycache__/
 *.pyo
 .venv/
 venv/
+# Spawn-safe launcher copied from .venv by agent-takkub.bat (issue #94) —
+# machine-specific (embeds the venv python path); regenerated every launch.
+bin/takkub.exe
 *.egg-info/
 build/
 dist/

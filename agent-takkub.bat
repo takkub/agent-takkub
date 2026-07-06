@@ -64,6 +64,15 @@ if not exist ".venv\Lib\site-packages\PyQt6\QtWebEngineWidgets.pyd" (
 )
 echo  [ok] dependencies ready
 
+REM --- 4b. Spawn-safe `takkub` launcher (issue #94)
+REM  Rust's std (rtk, and any Rust/Node spawner) REFUSES to pass multi-line /
+REM  Unicode args to a .bat/.cmd since CVE-2024-24576 -> `rtk takkub assign`
+REM  with a long Thai task died with "batch file arguments are invalid".
+REM  Fix: drop the pip-built takkub.exe into bin\ (PATHEXT ranks .exe above
+REM  .cmd, so `takkub` now resolves to the .exe, which Rust spawns cleanly).
+REM  Idempotent; runs every launch so it self-heals after a venv rebuild.
+if exist ".venv\Scripts\takkub.exe" copy /Y ".venv\Scripts\takkub.exe" "bin\takkub.exe" >nul
+
 REM --- 5. projects.json
 if not exist "projects.json" (
   echo.
