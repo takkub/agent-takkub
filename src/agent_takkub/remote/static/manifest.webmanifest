@@ -1,0 +1,25 @@
+{
+  "name": "Takkub Remote",
+  "short_name": "Takkub",
+  "description": "Remote control for the Takkub dev-team cockpit — Lead console + pulse count",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#09090b",
+  "theme_color": "#09090b",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'%3E%3Crect width='192' height='192' rx='36' fill='%2309090b'/%3E%3Ctext x='96' y='132' font-family='sans-serif' font-size='104' font-weight='700' fill='%2314b8a6' text-anchor='middle'%3ET%3C/text%3E%3C/svg%3E",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect width='512' height='512' rx='96' fill='%2309090b'/%3E%3Ctext x='256' y='352' font-family='sans-serif' font-size='280' font-weight='700' fill='%2314b8a6' text-anchor='middle'%3ET%3C/text%3E%3C/svg%3E",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}
