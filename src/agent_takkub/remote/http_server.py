@@ -68,9 +68,20 @@ class _Bridge(QObject):
     """The only door a handler thread has into Orchestrator. Constructed on
     the Qt main thread; `request` is emitted from arbitrary handler
     threads and Qt auto-queues delivery of `_handle` onto the main thread.
+
+    M-5: `pulse`/`lead_say` do real loopback-socket I/O to `cli_server`
+    (up to several seconds under load) — that must never block the Qt
+    event loop. They never touch Orchestrator/pane state directly (only
+    the already-thread-safe `orch._lead_token` attribute), so the actual
+    socket call is kicked off on a throwaway worker thread instead of
+    running inline here. `projects`/`sse_ticket` stay inline: cheap,
+    in-process reads that DO need the Qt-thread ownership guarantee (the
+    same thread that writes `projects.json` on tab switch/import).
     """
 
     request = pyqtSignal(object)
+
+    _OFF_THREAD_ACTIONS = frozenset({"pulse", "lead_say"})
 
     def __init__(self, orch) -> None:
         super().__init__()
@@ -78,60 +89,101 @@ class _Bridge(QObject):
         self.request.connect(self._handle)
 
     def _handle(self, pending: _PendingRequest) -> None:
+        if pending.action in self._OFF_THREAD_ACTIONS:
+            threading.Thread(target=self._run_off_thread, args=(pending,), daemon=True).start()
+            return
         try:
-            if pending.action == "pulse":
-                pending.reply.put((200, api.pulse(self._orch, None)))
-            elif pending.action == "projects":
-                pending.reply.put((200, api.projects(None)))
-            elif pending.action == "lead_say":
-                api.lead_say(self._orch, pending.params.get("text", ""), None)
-                pending.reply.put((200, {"ok": True}))
+            if pending.action == "projects":
+                mode = pending.params.get("mode", "view")
+                pending.reply.put((200, api.projects(None, mode)))
+            elif pending.action == "sse_ticket":
+                pending.reply.put((200, {"project_ns": self._orch._resolve_project(None)}))
             else:
                 pending.reply.put((404, {"ok": False, "msg": "unknown action"}))
-        except api.RemoteApiError as exc:
-            pending.reply.put((exc.status, {"ok": False, "msg": exc.msg}))
         except Exception:
             # A handler-thread request must never be able to take down the
             # Qt main loop — log and answer with a generic 500 instead.
             _log.exception("remote api dispatch failed: %s", pending.action)
             pending.reply.put((500, {"ok": False, "msg": "internal error"}))
 
+    def _run_off_thread(self, pending: _PendingRequest) -> None:
+        try:
+            if pending.action == "pulse":
+                pending.reply.put((200, api.pulse(self._orch, None)))
+            elif pending.action == "lead_say":
+                api.lead_say(self._orch, pending.params.get("text", ""), None)
+                pending.reply.put((200, {"ok": True}))
+        except api.RemoteApiError as exc:
+            pending.reply.put((exc.status, {"ok": False, "msg": exc.msg}))
+        except Exception:
+            _log.exception("remote api dispatch failed: %s", pending.action)
+            pending.reply.put((500, {"ok": False, "msg": "internal error"}))
+
+
+_ALLOWED_SSE_EVENTS = frozenset({"done", "lead"})
+
 
 class SSEBroadcaster:
     """Fan-out for `/api/lead`. One bounded queue per connected client
     (finding B3): a full queue drops its oldest event instead of blocking
-    the Qt-thread caller of `push`."""
+    the Qt-thread caller of `push`.
+
+    Each client is registered with the project namespace its ticket was
+    issued for (H-A) — `push` only ever reaches clients whose namespace
+    matches the event's `project_ns`, so a `done`/`lead` event from one
+    project can never leak into another project's mobile session.
+    """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._clients: list[queue.Queue] = []
+        self._clients: list[tuple[queue.Queue, str]] = []
 
-    def register(self) -> queue.Queue | None:
+    def register(self, project_ns: str) -> queue.Queue | None:
         with self._lock:
             if len(self._clients) >= _MAX_SSE_CLIENTS:
                 return None
             q: queue.Queue = queue.Queue(maxsize=_SSE_QUEUE_MAXSIZE)
-            self._clients.append(q)
+            self._clients.append((q, project_ns))
             return q
 
     def unregister(self, q: queue.Queue) -> None:
         with self._lock:
-            if q in self._clients:
-                self._clients.remove(q)
+            self._clients = [(cq, ns) for cq, ns in self._clients if cq is not q]
 
-    def push(self, event: str, data: str) -> None:
+    def push(self, event: str, data: str, project_ns: str | None = None) -> None:
+        """H-C: `data` is JSON-encoded before it ever reaches the wire, so a
+        payload containing raw newlines can neither break SSE line framing
+        nor inject a fake `event:`/`data:` line into the stream. `event` is
+        checked against a fixed allowlist for the same reason."""
+        if event not in _ALLOWED_SSE_EVENTS:
+            return
+        payload = json.dumps({"text": data}, ensure_ascii=False)
         with self._lock:
             clients = list(self._clients)
-        for q in clients:
+        for q, ns in clients:
+            if project_ns is not None and ns != project_ns:
+                continue
             while True:
                 try:
-                    q.put_nowait((event, data))
+                    q.put_nowait((event, payload))
                     break
                 except queue.Full:
                     try:
                         q.get_nowait()
                     except queue.Empty:
                         break
+
+    def close_all(self) -> None:
+        """M-4: wake every blocked SSE handler thread (each sits in a
+        `q.get(timeout=...)`) so it notices the server's stop event and
+        exits immediately instead of lingering until the next keepalive."""
+        with self._lock:
+            clients = list(self._clients)
+        for q, _ns in clients:
+            try:
+                q.put_nowait((None, None))
+            except queue.Full:
+                pass
 
 
 class _RemoteHandler(http.server.BaseHTTPRequestHandler):
@@ -148,11 +200,15 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
 
     # ── routing ──────────────────────────────────────────────────────────
     def _match_secret_path(self) -> tuple[str, dict] | None:
+        """M-6: this only checks the secret path — it must NOT record idle
+        activity. A wrong-token request that merely knows the secret path
+        would otherwise keep resetting the idle-expire clock forever
+        (`touch()` now only runs after bearer/ticket auth actually succeeds,
+        see `_check_bearer`/`_handle_sse`)."""
         parsed = urllib.parse.urlsplit(self.path)
         segments = parsed.path.split("/", 2)
         if len(segments) < 2 or not self.server.auth.check_secret_path(segments[1]):
             return None
-        self.server.auth.touch()
         rest = "/" + segments[2] if len(segments) > 2 else "/"
         return rest, dict(urllib.parse.parse_qsl(parsed.query))
 
@@ -180,6 +236,7 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         if not self.server.auth.check_token(token):
             self._reject()
             return False
+        self.server.auth.touch()  # M-6: only a *successful* auth counts as activity
         return True
 
     def do_GET(self) -> None:
@@ -195,7 +252,7 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
                 self._respond_marshaled("pulse", {})
         elif rest == "/api/projects":
             if self._check_bearer():
-                self._respond_marshaled("projects", {})
+                self._respond_marshaled("projects", {"mode": self.server.config.mode})
         elif rest.startswith("/api/"):
             self._reject()
         else:
@@ -218,7 +275,7 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         body = self.rfile.read(length) if length else b""
         if rest == "/api/sse-ticket":
             if self._check_bearer():
-                self._send_json(200, {"ticket": self.server.auth.issue_ticket()})
+                self._issue_sse_ticket()
         elif rest == "/api/lead/say":
             if not self._check_bearer():
                 return
@@ -244,6 +301,25 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
             # give up instead of blocking this worker thread forever.
             status, payload = 504, {"ok": False, "msg": "orchestrator did not respond"}
         self._send_json(status, payload)
+
+    def _issue_sse_ticket(self) -> None:
+        """H-A: stamp the ticket with whichever project is active *right
+        now* (read on the Qt main thread via the bridge, same ownership
+        rule as every other orchestrator touch) — `_handle_sse` later scopes
+        that client's events to this namespace for the life of the
+        connection."""
+        pending = _PendingRequest(action="sse_ticket", params={})
+        self.server.bridge.request.emit(pending)
+        try:
+            status, payload = pending.reply.get(timeout=_BRIDGE_TIMEOUT_SEC)
+        except queue.Empty:
+            status, payload = 504, {"ok": False, "msg": "orchestrator did not respond"}
+        if status != 200:
+            self._send_json(status, payload)
+            return
+        project_ns = payload.get("project_ns") or "default"
+        ticket = self.server.auth.issue_ticket(project_ns)
+        self._send_json(200, {"ticket": ticket})
 
     # ── static PWA shell ─────────────────────────────────────────────────
     def _serve_static(self, rest: str) -> None:
@@ -271,10 +347,12 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
 
     # ── SSE (§6.2/6.3, B3) ──────────────────────────────────────────────
     def _handle_sse(self, query: dict) -> None:
-        if not self.server.auth.consume_ticket(query.get("ticket")):
+        project_ns = self.server.auth.consume_ticket(query.get("ticket"))
+        if project_ns is None:
             self._reject()
             return
-        q = self.server.broadcaster.register()
+        self.server.auth.touch()  # M-6: a valid ticket is a successful auth
+        q = self.server.broadcaster.register(project_ns)
         if q is None:
             self.send_response(503)
             self.send_header("Content-Length", "0")
@@ -287,13 +365,17 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.connection.settimeout(_SSE_WRITE_TIMEOUT_SEC)
-            while True:
+            while not self.server.stop_event.is_set():
                 try:
                     event, data = q.get(timeout=_SSE_KEEPALIVE_SEC)
-                    chunk = f"event: {event}\ndata: {data}\n\n".encode()
                 except queue.Empty:
-                    chunk = b": keep-alive\n\n"
-                self.wfile.write(chunk)
+                    self.wfile.write(b": keep-alive\n\n")
+                    continue
+                if event is None:
+                    # M-4: `SSEBroadcaster.close_all()`'s wake-up sentinel —
+                    # the server is stopping, don't write it as a real event.
+                    break
+                self.wfile.write(f"event: {event}\ndata: {data}\n\n".encode())
         except OSError:
             pass  # client gone / stalled (write timeout) — B3: cut it, don't hang the thread
         finally:
@@ -310,6 +392,7 @@ class RemoteHttpServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
         self.auth = AuthGate(config)
         self.bridge = _Bridge(orch)
         self.broadcaster = SSEBroadcaster()
+        self.stop_event = threading.Event()
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
@@ -319,6 +402,12 @@ class RemoteHttpServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
         self._thread.start()
 
     def stop(self) -> None:
+        # M-4: without this, an open `/api/lead` SSE connection's handler
+        # thread stays blocked in `q.get(timeout=_SSE_KEEPALIVE_SEC)` for up
+        # to 15s after stop() returns — `shutdown()`/`server_close()` only
+        # ever touch the listening socket, never an already-accepted one.
+        self.stop_event.set()
+        self.broadcaster.close_all()
         try:
             self.shutdown()
         except Exception:

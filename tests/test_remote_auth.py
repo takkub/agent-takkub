@@ -77,23 +77,28 @@ class TestBearerTokenAndLockout:
 class TestSSETicket:
     def test_issued_ticket_is_consumable_once(self):
         gate = _gate()
-        ticket = gate.issue_ticket()
-        assert gate.consume_ticket(ticket) is True
-        assert gate.consume_ticket(ticket) is False, "ticket must be single-use"
+        ticket = gate.issue_ticket("proj-a")
+        assert gate.consume_ticket(ticket) == "proj-a"
+        assert gate.consume_ticket(ticket) is None, "ticket must be single-use"
+
+    def test_ticket_carries_its_issued_project_namespace(self):
+        gate = _gate()
+        ticket = gate.issue_ticket("proj-b")
+        assert gate.consume_ticket(ticket) == "proj-b"
 
     def test_unknown_ticket_rejected(self):
-        assert _gate().consume_ticket("bogus") is False
+        assert _gate().consume_ticket("bogus") is None
 
     def test_empty_ticket_rejected(self):
-        assert _gate().consume_ticket(None) is False
-        assert _gate().consume_ticket("") is False
+        assert _gate().consume_ticket(None) is None
+        assert _gate().consume_ticket("") is None
 
     def test_expired_ticket_rejected(self, monkeypatch):
         gate = _gate()
-        ticket = gate.issue_ticket()
+        ticket = gate.issue_ticket("proj-a")
         future = time.time() + 3600
         monkeypatch.setattr(time, "time", lambda: future)
-        assert gate.consume_ticket(ticket) is False
+        assert gate.consume_ticket(ticket) is None
 
 
 class TestModeGate:

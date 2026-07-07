@@ -27,6 +27,9 @@ from agent_takkub.remote.config import RemoteConfig
 class _FakeOrch:
     _lead_token = "lead-tok"
 
+    def _resolve_project(self, project):
+        return "default"
+
 
 def _pump_until(app: QCoreApplication, predicate, timeout: float = 5.0) -> bool:
     deadline = time.time() + timeout
@@ -42,7 +45,9 @@ def _pump_until(app: QCoreApplication, predicate, timeout: float = 5.0) -> bool:
 def server(monkeypatch):
     monkeypatch.setattr(api, "pulse", lambda orch, project: {"working": 1, "total": 2})
     monkeypatch.setattr(
-        api, "projects", lambda project: {"projects": [], "active": None, "open_tabs": []}
+        api,
+        "projects",
+        lambda project, mode: {"projects": [], "mode": mode, "open_tabs": []},
     )
     monkeypatch.setattr(api, "lead_say", lambda orch, text, project: {"ok": True})
 
@@ -64,6 +69,37 @@ def _get_status(url: str, headers: dict | None = None) -> tuple[int, bytes]:
             return resp.status, resp.read()
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read()
+
+
+def _run_pumped(fn):
+    """Any route that reaches the `_Bridge` (pulse/projects/sse-ticket) needs
+    the Qt main thread pumped to deliver the queued signal — run `fn` on a
+    background thread while the test thread pumps `QCoreApplication`."""
+    app = QCoreApplication.instance()
+    result: dict = {}
+
+    def _do() -> None:
+        result["value"] = fn()
+
+    t = threading.Thread(target=_do)
+    t.start()
+    assert _pump_until(app, lambda: not t.is_alive())
+    t.join(timeout=1)
+    return result["value"]
+
+
+def _issue_ticket(server) -> str:
+    def _do() -> str:
+        req = urllib.request.Request(
+            _url(server, "/sek/api/sse-ticket"),
+            data=b"",
+            headers={"Authorization": "Bearer tok"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return json.loads(resp.read())["ticket"]
+
+    return _run_pumped(_do)
 
 
 class TestSecretPathAndAuth:
@@ -94,8 +130,34 @@ class TestSecretPathAndAuth:
             return orig_touch(self)
 
         monkeypatch.setattr(AuthGate, "touch", _touch)
-        _get_status(_url(server, "/sek/api/pulse"))  # no bearer -> 404, but touch() ran first
+        # Successful bearer auth (not just a secret-path match, see M-6 below)
+        # still must never run on the Qt main thread.
+        _run_pumped(
+            lambda: _get_status(_url(server, "/sek/api/pulse"), {"Authorization": "Bearer tok"})
+        )
         assert seen["thread"] is not threading.main_thread()
+
+    def test_wrong_bearer_does_not_touch_idle_clock(self, monkeypatch, server):
+        """M-6: a request that only knows the secret path (wrong/no bearer)
+        must never reset the idle-expire clock — only a *successful* auth
+        counts as activity."""
+        from agent_takkub.remote.auth import AuthGate
+
+        touched = []
+        monkeypatch.setattr(AuthGate, "touch", lambda self: touched.append(True))
+        _get_status(_url(server, "/sek/api/pulse"))  # no bearer -> 404
+        _get_status(_url(server, "/sek/api/pulse"), {"Authorization": "Bearer wrong"})
+        assert touched == []
+
+    def test_correct_bearer_touches_idle_clock(self, monkeypatch, server):
+        from agent_takkub.remote.auth import AuthGate
+
+        touched = []
+        monkeypatch.setattr(AuthGate, "touch", lambda self: touched.append(True))
+        _run_pumped(
+            lambda: _get_status(_url(server, "/sek/api/pulse"), {"Authorization": "Bearer tok"})
+        )
+        assert touched == [True]
 
 
 class TestMarshaledRoutes:
@@ -131,7 +193,7 @@ class TestMarshaledRoutes:
         assert _pump_until(app, lambda: not t.is_alive())
         t.join(timeout=1)
         assert outcome["status"] == 200
-        assert outcome["body"] == {"projects": [], "active": None, "open_tabs": []}
+        assert outcome["body"] == {"projects": [], "mode": "control", "open_tabs": []}
 
     def test_lead_say_in_control_mode_returns_ok(self, server):
         app = QCoreApplication.instance()
@@ -182,32 +244,73 @@ class TestMarshaledRoutes:
 class TestSSEBroadcaster:
     def test_drops_oldest_when_full(self):
         broadcaster = http_server.SSEBroadcaster()
-        q = broadcaster.register()
+        q = broadcaster.register("proj")
         for i in range(http_server._SSE_QUEUE_MAXSIZE + 50):
             broadcaster.push("lead", str(i))
         assert q.qsize() <= http_server._SSE_QUEUE_MAXSIZE
         items = []
         while not q.empty():
             items.append(q.get_nowait()[1])
-        assert items[-1] == str(http_server._SSE_QUEUE_MAXSIZE + 49)
+        assert items[-1] == json.dumps({"text": str(http_server._SSE_QUEUE_MAXSIZE + 49)})
 
     def test_rejects_beyond_max_clients(self):
         broadcaster = http_server.SSEBroadcaster()
-        clients = [broadcaster.register() for _ in range(http_server._MAX_SSE_CLIENTS)]
+        clients = [broadcaster.register("proj") for _ in range(http_server._MAX_SSE_CLIENTS)]
         assert all(c is not None for c in clients)
-        assert broadcaster.register() is None
+        assert broadcaster.register("proj") is None
+
+    def test_cross_project_events_are_filtered(self):
+        """H-A: a client registered for one project's ticket must never see
+        a `done`/`lead` event stamped with a different project."""
+        broadcaster = http_server.SSEBroadcaster()
+        q_a = broadcaster.register("proj-a")
+        q_b = broadcaster.register("proj-b")
+
+        broadcaster.push("done", "backend: shipped it", "proj-a")
+
+        assert q_a.get_nowait() == ("done", json.dumps({"text": "backend: shipped it"}))
+        assert q_b.empty()
+
+    def test_push_without_project_ns_reaches_every_client(self):
+        broadcaster = http_server.SSEBroadcaster()
+        q_a = broadcaster.register("proj-a")
+        q_b = broadcaster.register("proj-b")
+
+        broadcaster.push("lead", "hello")
+
+        assert not q_a.empty()
+        assert not q_b.empty()
+
+    def test_unknown_event_name_is_dropped(self):
+        """Defense-in-depth allowlist (H-C): only `done`/`lead` are ever
+        forwarded to a client, regardless of what a caller passes in."""
+        broadcaster = http_server.SSEBroadcaster()
+        q = broadcaster.register("proj")
+        broadcaster.push("evil\nevent: fake", "x")
+        assert q.empty()
+
+    def test_data_with_embedded_newline_is_json_encoded_not_broken_in_two(self):
+        """H-C: a payload containing a raw newline must never produce a
+        second `data:`/`event:` line — it comes back as one JSON string."""
+        broadcaster = http_server.SSEBroadcaster()
+        q = broadcaster.register("proj")
+        broadcaster.push("lead", "line one\nline two\nevent: fake\ndata: injected")
+        event, payload = q.get_nowait()
+        assert event == "lead"
+        assert "\n" not in payload
+        decoded = json.loads(payload)
+        assert decoded == {"text": "line one\nline two\nevent: fake\ndata: injected"}
+
+    def test_close_all_wakes_every_registered_client(self):
+        broadcaster = http_server.SSEBroadcaster()
+        q = broadcaster.register("proj")
+        broadcaster.close_all()
+        assert q.get_nowait() == (None, None)
 
 
 class TestSSEEndToEnd:
     def test_ticket_flow_delivers_a_pushed_event(self, server):
-        req = urllib.request.Request(
-            _url(server, "/sek/api/sse-ticket"),
-            data=b"",
-            headers={"Authorization": "Bearer tok"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            ticket = json.loads(resp.read())["ticket"]
+        ticket = _issue_ticket(server)
 
         conn = http.client.HTTPConnection("127.0.0.1", server.port, timeout=5)
         try:
@@ -215,23 +318,16 @@ class TestSSEEndToEnd:
             resp = conn.getresponse()
             assert resp.status == 200
 
-            server.broadcaster.push("lead", "hello mobile")
+            server.broadcaster.push("lead", "hello mobile", "default")
 
-            expected = b"event: lead\ndata: hello mobile\n\n"
+            expected = f"event: lead\ndata: {json.dumps({'text': 'hello mobile'})}\n\n".encode()
             chunk = resp.read(len(expected))
             assert chunk == expected
         finally:
             conn.close()
 
     def test_ticket_is_single_use(self, server):
-        req = urllib.request.Request(
-            _url(server, "/sek/api/sse-ticket"),
-            data=b"",
-            headers={"Authorization": "Bearer tok"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            ticket = json.loads(resp.read())["ticket"]
+        ticket = _issue_ticket(server)
 
         conn = http.client.HTTPConnection("127.0.0.1", server.port, timeout=5)
         try:
@@ -249,6 +345,66 @@ class TestSSEEndToEnd:
             assert second.status == 404
         finally:
             conn2.close()
+
+
+class TestSSEClosesOnStop:
+    def test_sse_connection_closes_promptly_on_server_stop(self, monkeypatch):
+        """M-4: stop() must wake an open `/api/lead` handler thread instead
+        of leaving it blocked for up to `_SSE_KEEPALIVE_SEC` — the client
+        must observe the connection close well before that."""
+        monkeypatch.setattr(api, "pulse", lambda orch, project: {"working": 0, "total": 0})
+        monkeypatch.setattr(
+            api,
+            "projects",
+            lambda project, mode: {"projects": [], "mode": mode, "open_tabs": []},
+        )
+        monkeypatch.setattr(api, "lead_say", lambda orch, text, project: {"ok": True})
+        config = RemoteConfig(bind_port=0, secret_path="sek", token="tok", mode="control")
+        srv = http_server.start_server(config, _FakeOrch())
+        try:
+            ticket = _issue_ticket(srv)
+
+            sock = socket.create_connection(("127.0.0.1", srv.port), timeout=5)
+            sock.sendall(f"GET /sek/api/lead?ticket={ticket} HTTP/1.0\r\n\r\n".encode())
+            sock.recv(4096)  # response headers
+
+            srv.stop()
+
+            sock.settimeout(2.0)  # well under _SSE_KEEPALIVE_SEC (15s)
+            tail = sock.recv(4096)
+            assert tail == b"", "handler must close the connection, not hang until keepalive"
+            sock.close()
+        finally:
+            try:
+                srv.stop()
+            except Exception:
+                pass
+
+
+class TestBridgeOffMainThreadDispatch:
+    def test_pulse_dispatch_never_blocks_the_calling_thread(self, monkeypatch):
+        """M-5: `_Bridge._handle` runs on the Qt main thread — `pulse`'s
+        loopback socket I/O must be kicked off on a worker thread instead of
+        executing inline, or a slow/stuck cli_server would freeze the GUI."""
+        gate = threading.Event()
+
+        def _slow_pulse(orch, project):
+            gate.wait(timeout=5)
+            return {"working": 0, "total": 0}
+
+        monkeypatch.setattr(api, "pulse", _slow_pulse)
+        bridge = http_server._Bridge(_FakeOrch())
+        pending = http_server._PendingRequest(action="pulse", params={})
+
+        start = time.time()
+        bridge._handle(pending)
+        elapsed = time.time() - start
+        assert elapsed < 1.0
+
+        assert pending.reply.empty(), "api.pulse should still be blocked on the gate"
+        gate.set()
+        status, payload = pending.reply.get(timeout=5)
+        assert (status, payload) == (200, {"working": 0, "total": 0})
 
 
 class TestStaticFileTraversal:

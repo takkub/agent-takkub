@@ -84,11 +84,16 @@
   function apiFetch(path, opts) {
     opts = opts || {};
     var headers = Object.assign({}, opts.headers || {});
+    var hadToken = !!state.token;
     if (state.token) headers["Authorization"] = "Bearer " + state.token;
     return fetch(apiUrl(path), Object.assign({}, opts, { headers: headers }))
       .then(function (res) {
         setOffline(false);
-        if (res.status === 401) {
+        // Server is a zero-surface design: every auth failure (bad secret
+        // path, bad/expired token) answers with a bare 404 — never a 401.
+        // A 404 on an /api/ call while we believe we hold a token means the
+        // token is no longer valid (server restarted, rotated, revoked).
+        if (res.status === 404 && hadToken && /^api\//.test(path.replace(/^\/+/, ""))) {
           forgetToken();
           throw new Error("unauthorized");
         }
@@ -196,20 +201,33 @@
   // Projects
   // ---------------------------------------------------------------
 
+  // Fetches /api/projects once: feeds both the projects list and the
+  // view/control mode (P1 has no dedicated mode endpoint — the same
+  // response carries `mode`, so this is the single source of truth).
+  function fetchProjectsAndMode() {
+    return apiFetch("api/projects")
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (data && (data.mode === "view" || data.mode === "control")) {
+          state.mode = data.mode;
+          updateControlNote();
+        }
+        return Array.isArray(data && data.projects) ? data.projects : [];
+      });
+  }
+
   function loadProjects() {
     var list = $("projects-list");
     list.innerHTML = '<div class="empty-state">กำลังโหลด…</div>';
-    apiFetch("api/projects")
-      .then(function (r) { return r.json(); })
-      .then(function (data) {
-        var names = Array.isArray(data) ? data : (Array.isArray(data && data.projects) ? data.projects : []);
-        renderProjects(names);
-      })
+    fetchProjectsAndMode()
+      .then(renderProjects)
       .catch(function () {
         list.innerHTML = '<div class="empty-state">โหลด projects ไม่สำเร็จ<br>ลองใหม่อีกครั้ง</div>';
       });
   }
 
+  // P1 is read-only: no project/open route exists on the server, so this
+  // only ever renders the list + an "active" indicator — no click-to-switch.
   function renderProjects(items) {
     var list = $("projects-list");
     list.innerHTML = "";
@@ -234,29 +252,8 @@
         tag.textContent = "active";
         row.appendChild(tag);
       }
-      row.addEventListener("click", function () { openProject(name); });
       list.appendChild(row);
     });
-  }
-
-  function openProject(name) {
-    apiFetch("api/project/open", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: name }),
-    })
-      .then(function (res) {
-        if (res.status === 403) {
-          toast("ต้องเปิด control mode ก่อนถึงจะสลับ project ได้");
-          return;
-        }
-        if (!res.ok) {
-          toast("เปิด project ไม่สำเร็จ");
-          return;
-        }
-        toast("เปิด " + name);
-      })
-      .catch(function () { toast("เปิด project ไม่สำเร็จ"); });
   }
 
   // ---------------------------------------------------------------
@@ -295,6 +292,22 @@
       });
   }
 
+  // data-min: only ever surface the Lead's own text field, whether the
+  // server sends a bare string or a JSON-wrapped {text|message} payload.
+  function parseSseData(raw) {
+    try {
+      var payload = JSON.parse(raw);
+      if (typeof payload === "string") return payload;
+      if (payload && typeof payload === "object") {
+        var text = payload.text || payload.message;
+        return typeof text === "string" ? text : null;
+      }
+      return null;
+    } catch (e) {
+      return typeof raw === "string" ? raw : null;
+    }
+  }
+
   function connectSse(ticket) {
     var url = apiUrl("api/lead?ticket=" + encodeURIComponent(ticket));
     var es = new EventSource(url);
@@ -302,17 +315,14 @@
     es.onopen = function () {
       state.esRetries = 0;
     };
-    es.onmessage = function (evt) {
-      var text = null;
-      try {
-        var payload = JSON.parse(evt.data);
-        // data-min: only ever surface the Lead's own text field.
-        text = typeof payload === "object" && payload ? (payload.text || payload.message) : null;
-      } catch (e) {
-        text = evt.data;
-      }
-      appendMsg("lead", typeof text === "string" ? text : null);
-    };
+    // Server emits named SSE events (`event: lead` / `event: done`), never
+    // the default unnamed "message" type — must use addEventListener.
+    es.addEventListener("lead", function (evt) {
+      appendMsg("lead", parseSseData(evt.data));
+    });
+    es.addEventListener("done", function (evt) {
+      appendMsg("sys", parseSseData(evt.data));
+    });
     es.onerror = function () {
       es.close();
       state.es = null;
@@ -411,20 +421,6 @@
   }
 
   // ---------------------------------------------------------------
-  // Mode discovery (view vs control) — best-effort from /api/projects response
-  // or a dedicated field if the backend ever adds one; defaults to view.
-  // ---------------------------------------------------------------
-
-  function detectMode() {
-    apiFetch("api/lead/say", { method: "OPTIONS" })
-      .then(function (res) {
-        state.mode = res.status === 403 ? "view" : "control";
-        updateControlNote();
-      })
-      .catch(function () { /* stay in view mode assumption */ });
-  }
-
-  // ---------------------------------------------------------------
   // Service worker
   // ---------------------------------------------------------------
 
@@ -444,7 +440,7 @@
       return;
     }
     showApp();
-    detectMode();
+    fetchProjectsAndMode().catch(function () { /* stay in view mode assumption */ });
   }
 
   init();

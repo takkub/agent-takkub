@@ -184,12 +184,20 @@ class TestLeadSay:
 
 class TestProjects:
     def test_reads_active_and_known_projects(self, monkeypatch):
+        # M-1/M-3: each project is `{name, active}`, and `mode` rides along
+        # in the same response — the PWA has no dedicated mode endpoint.
         monkeypatch.setattr(api._config, "active_project", lambda: ("proj-a", {}))
         monkeypatch.setattr(api._config, "list_project_names", lambda: ["proj-a", "proj-b"])
         monkeypatch.setattr(api._config, "get_open_tabs", lambda: ["proj-a"])
-        result = api.projects(None)
+        result = api.projects(None, "control")
         assert result == {
-            "projects": ["proj-a", "proj-b"],
-            "active": "proj-a",
+            "projects": [{"name": "proj-a", "active": True}, {"name": "proj-b", "active": False}],
+            "mode": "control",
             "open_tabs": ["proj-a"],
         }
+
+    def test_mode_defaults_to_view(self, monkeypatch):
+        monkeypatch.setattr(api._config, "active_project", lambda: (None, {}))
+        monkeypatch.setattr(api._config, "list_project_names", lambda: [])
+        monkeypatch.setattr(api._config, "get_open_tabs", lambda: [])
+        assert api.projects(None)["mode"] == "view"

@@ -97,14 +97,19 @@ def lead_say(orch, text: str, from_project: str | None) -> dict:
     return {"ok": True}
 
 
-def projects(from_project: str | None) -> dict:
+def projects(from_project: str | None, mode: str = "view") -> dict:
     """View-mode. In-process, no loopback: reads the same `projects.json`
     the desktop UI reads. Safe from the H2 cross-thread race because this
     only ever runs on the Qt main thread (the same thread that writes the
-    file on tab switch/import)."""
+    file on tab switch/import).
+
+    M-3/M-1 contract: `mode` rides along in the same response (the PWA has
+    no dedicated mode endpoint), and each project is `{name, active}` —
+    not a bare string — so the frontend can render the active-project tag
+    without a second lookup."""
     active, _ = _config.active_project()
     return {
-        "projects": _config.list_project_names(),
-        "active": active,
+        "projects": [{"name": n, "active": n == active} for n in _config.list_project_names()],
+        "mode": mode,
         "open_tabs": _config.get_open_tabs(),
     }

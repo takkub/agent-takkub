@@ -33,7 +33,7 @@ class AuthGate:
         self._lock = threading.Lock()
         self._fail_count = 0
         self._locked_until = 0.0
-        self._tickets: dict[str, float] = {}
+        self._tickets: dict[str, tuple[float, str]] = {}
         self.last_request_ts = time.time()
 
     # ── secret path — second secret ahead of the token (§7.5) ───────────
@@ -81,25 +81,33 @@ class AuthGate:
     # ── single-use SSE ticket (X-check 3.3): EventSource can't send an
     # Authorization header, so `/api/lead?ticket=...` substitutes a
     # short-lived single-use ticket for the long-lived bearer token, which
-    # never has to touch a URL. ──────────────────────────────────────────
-    def issue_ticket(self) -> str:
+    # never has to touch a URL. The ticket also carries the project
+    # namespace that was active when it was issued (H-A): the SSE client
+    # that consumes it can only ever be scoped to that one project, so a
+    # `done`/`lead` event from a different project can never reach it.
+    def issue_ticket(self, project_ns: str) -> str:
         with self._lock:
             self._prune_tickets_locked()
             ticket = secrets.token_urlsafe(24)
-            self._tickets[ticket] = time.time() + _TICKET_TTL_SEC
+            self._tickets[ticket] = (time.time() + _TICKET_TTL_SEC, project_ns)
             return ticket
 
-    def consume_ticket(self, ticket: str | None) -> bool:
+    def consume_ticket(self, ticket: str | None) -> str | None:
+        """Returns the project namespace stamped on the ticket, or ``None``
+        if the ticket is missing/unknown/expired."""
         if not ticket:
-            return False
+            return None
         with self._lock:
             self._prune_tickets_locked()
-            expiry = self._tickets.pop(ticket, None)
-            return expiry is not None and expiry >= time.time()
+            entry = self._tickets.pop(ticket, None)
+            if entry is None:
+                return None
+            expiry, project_ns = entry
+            return project_ns if expiry >= time.time() else None
 
     def _prune_tickets_locked(self) -> None:
         now = time.time()
-        for t in [t for t, exp in self._tickets.items() if exp < now]:
+        for t in [t for t, (exp, _ns) in self._tickets.items() if exp < now]:
             self._tickets.pop(t, None)
 
     # ── mode gate (§6.3): view = read-only, control = unlocks lead/say ──

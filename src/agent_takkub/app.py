@@ -433,6 +433,18 @@ def _install_signal_handlers(window: MainWindow) -> None:
     atexit + signal handlers cover hard kills / crashes."""
 
     def _kill_all() -> None:
+        # H-E: stop the remote-control bolt-on (HTTP server + tunnel
+        # subprocess) on every teardown path this function already covers —
+        # atexit, aboutToQuit, and SIGINT/SIGTERM/SIGBREAK — not just
+        # aboutToQuit (RemoteControl's own hookup). A crash/kill that skips
+        # aboutToQuit would otherwise leave the tunnel subprocess running,
+        # pointed at a now-dead loopback port a future process could reuse.
+        try:
+            remote = getattr(window, "_remote", None)
+            if remote is not None:
+                remote.stop()
+        except Exception:
+            pass
         # Walk EVERY project namespace, not just the active tab, so background
         # tabs' panes are torn down too (mirrors MainWindow.closeEvent).
         try:

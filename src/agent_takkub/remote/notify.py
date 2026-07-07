@@ -16,6 +16,11 @@ signals, not something a handler thread ever touches.
 Scoping (ponytail, matches `api.py`): tracks the orchestrator's
 currently-active project's Lead pane only. Upgrade path: accept a project
 name (e.g. stamped on the SSE ticket) once the PWA offers a project picker.
+
+Cross-project isolation (H-A): `orch.agentDone` fires for *every* project,
+not just the active one, so every push is stamped with the event's own
+`project_ns` and `SSEBroadcaster.push` drops it for any client whose ticket
+was issued for a different project.
 """
 
 from __future__ import annotations
@@ -35,6 +40,7 @@ class LeadNotifier(QObject):
         self._orch = orch
         self._broadcaster = broadcaster
         self._session = None
+        self._project_ns: str | None = None
         self._buf = bytearray()
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
@@ -53,6 +59,7 @@ class LeadNotifier(QObject):
         return panes_by_project.get(project_ns, {}).get(role)
 
     def _resync_lead_session(self) -> None:
+        self._project_ns = self._orch._resolve_project(None)
         pane = self._pane_for_role("lead")
         session = getattr(pane, "session", None) if pane is not None else None
         if session is self._session:
@@ -80,11 +87,13 @@ class LeadNotifier(QObject):
             return
         text = bytes(self._buf).decode("utf-8", errors="replace")[-_MAX_EVENT_CHARS:]
         self._buf.clear()
-        self._broadcaster.push("lead", text)
+        self._broadcaster.push("lead", text, self._project_ns)
 
     # ── done events ───────────────────────────────────────────────────
     def _on_done(self, project_ns: str, role: str, note: str) -> None:
-        self._broadcaster.push("done", f"{role}: {note}"[:_MAX_EVENT_CHARS])
+        # H-A: stamp the event's own project, not whatever project happens
+        # to be active right now — `agentDone` fires for every project.
+        self._broadcaster.push("done", f"{role}: {note}"[:_MAX_EVENT_CHARS], project_ns)
 
     def stop(self) -> None:
         for signal, slot in (

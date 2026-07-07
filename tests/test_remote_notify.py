@@ -26,20 +26,21 @@ class _FakeOrch(QObject):
     agentDone = pyqtSignal(str, str, str)
     statusChanged = pyqtSignal()
 
-    def __init__(self) -> None:
+    def __init__(self, active_project: str = "proj") -> None:
         super().__init__()
         self._panes_by_project = {"proj": {}}
+        self._active_project = active_project
 
     def _resolve_project(self, project):
-        return "proj"
+        return self._active_project
 
 
 class _FakeBroadcaster:
     def __init__(self) -> None:
-        self.events: list[tuple[str, str]] = []
+        self.events: list[tuple[str, str, str | None]] = []
 
-    def push(self, event: str, data: str) -> None:
-        self.events.append((event, data))
+    def push(self, event: str, data: str, project_ns: str | None = None) -> None:
+        self.events.append((event, data, project_ns))
 
 
 @pytest.fixture
@@ -60,7 +61,21 @@ class TestDoneEvents:
         notifier = LeadNotifier(orch, broadcaster)
         try:
             orch.agentDone.emit("proj", "backend", "added /auth/login")
-            assert broadcaster.events == [("done", "backend: added /auth/login")]
+            assert broadcaster.events == [("done", "backend: added /auth/login", "proj")]
+        finally:
+            notifier.stop()
+
+    def test_done_from_a_different_project_is_stamped_with_its_own_namespace(self, qapp):
+        # H-A: `agentDone` fires for every project, not just whichever one
+        # is active — the notifier must forward the *event's* project, so
+        # the broadcaster (not the notifier) is what keeps it from leaking
+        # into a different project's SSE client.
+        orch = _FakeOrch(active_project="proj")
+        broadcaster = _FakeBroadcaster()
+        notifier = LeadNotifier(orch, broadcaster)
+        try:
+            orch.agentDone.emit("other-proj", "backend", "did a thing")
+            assert broadcaster.events == [("done", "backend: did a thing", "other-proj")]
         finally:
             notifier.stop()
 
@@ -78,7 +93,7 @@ class TestLeadOutputHook:
             session.bytesIn.emit(b"hello ")
             session.bytesIn.emit(b"lead")
             _pump(qapp)
-            assert broadcaster.events == [("lead", "hello lead")]
+            assert broadcaster.events == [("lead", "hello lead", "proj")]
         finally:
             notifier.stop()
 
@@ -93,7 +108,7 @@ class TestLeadOutputHook:
             orch.statusChanged.emit()
             session.bytesIn.emit(b"\x1b[31mred text\x1b[0m")
             _pump(qapp)
-            assert broadcaster.events == [("lead", "red text")]
+            assert broadcaster.events == [("lead", "red text", "proj")]
         finally:
             notifier.stop()
 
@@ -116,7 +131,7 @@ class TestLeadOutputHook:
 
             new_session.bytesIn.emit(b"fresh output")
             _pump(qapp)
-            assert broadcaster.events == [("lead", "fresh output")]
+            assert broadcaster.events == [("lead", "fresh output", "proj")]
         finally:
             notifier.stop()
 

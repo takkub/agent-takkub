@@ -9,11 +9,15 @@ from __future__ import annotations
 
 import json
 import sys
+import types
 
 import pytest
+import yaml
 
 from agent_takkub.remote import tunnel
 from agent_takkub.remote.config import TunnelConfig
+
+_UUID = "12345678-1234-1234-1234-123456789abc"
 
 
 class _FakeProc:
@@ -30,16 +34,19 @@ class _FakeProc:
 class TestNamedTunnelConfigGeneration:
     def test_reads_tunnel_id_and_renders_template(self, tmp_path):
         creds = tmp_path / "creds.json"
-        creds.write_text(json.dumps({"TunnelID": "abc-123"}), encoding="utf-8")
+        creds.write_text(json.dumps({"TunnelID": _UUID}), encoding="utf-8")
         cfg = TunnelConfig(type="cloudflared", credentials_json=str(creds))
 
         out = tunnel._write_named_config(cfg, "https://agent-takkub.example.com", 8899)
 
-        text = out.read_text(encoding="utf-8")
-        assert "tunnel: abc-123" in text
-        assert f"credentials-file: {creds}" in text
-        assert "hostname: agent-takkub.example.com" in text
-        assert "service: http://localhost:8899" in text  # never host.docker.internal
+        parsed = yaml.safe_load(out.read_text(encoding="utf-8"))
+        assert parsed["tunnel"] == _UUID
+        assert parsed["credentials-file"] == str(creds)
+        assert parsed["ingress"][0] == {
+            "hostname": "agent-takkub.example.com",
+            "service": "http://localhost:8899",  # never host.docker.internal
+        }
+        assert parsed["ingress"][1] == {"service": "http_status:404"}
 
     def test_missing_tunnel_id_raises(self, tmp_path):
         creds = tmp_path / "creds.json"
@@ -48,10 +55,55 @@ class TestNamedTunnelConfigGeneration:
         with pytest.raises(tunnel.TunnelError):
             tunnel._write_named_config(cfg, "https://x.example.com", 8899)
 
+    def test_non_uuid_tunnel_id_raises(self, tmp_path):
+        creds = tmp_path / "creds.json"
+        creds.write_text(json.dumps({"TunnelID": "abc-123"}), encoding="utf-8")
+        cfg = TunnelConfig(type="cloudflared", credentials_json=str(creds))
+        with pytest.raises(tunnel.TunnelError):
+            tunnel._write_named_config(cfg, "https://x.example.com", 8899)
+
     def test_unreadable_credentials_raises(self, tmp_path):
         cfg = TunnelConfig(type="cloudflared", credentials_json=str(tmp_path / "missing.json"))
         with pytest.raises(tunnel.TunnelError):
             tunnel._write_named_config(cfg, "https://x.example.com", 8899)
+
+    def test_relative_credentials_path_rejected(self, tmp_path):
+        cfg = TunnelConfig(type="cloudflared", credentials_json="creds.json")
+        with pytest.raises(tunnel.TunnelError):
+            tunnel._write_named_config(cfg, "https://x.example.com", 8899)
+
+
+class TestPublicUrlInjectionGuard:
+    """H-D: public_url ends up as an ingress hostname in generated YAML —
+    anything but a bare https hostname must be rejected before it ever
+    reaches the template, not just safely escaped."""
+
+    def _cfg(self, tmp_path):
+        creds = tmp_path / "creds.json"
+        creds.write_text(json.dumps({"TunnelID": _UUID}), encoding="utf-8")
+        return TunnelConfig(type="cloudflared", credentials_json=str(creds))
+
+    def test_newline_injection_rejected(self, tmp_path):
+        evil = "https://x.example.com\ningress:\n  - hostname: evil.example.com"
+        with pytest.raises(tunnel.TunnelError):
+            tunnel._write_named_config(self._cfg(tmp_path), evil, 8899)
+
+    def test_path_rejected(self, tmp_path):
+        with pytest.raises(tunnel.TunnelError):
+            tunnel._write_named_config(self._cfg(tmp_path), "https://x.example.com/path", 8899)
+
+    def test_non_https_scheme_rejected(self, tmp_path):
+        with pytest.raises(tunnel.TunnelError):
+            tunnel._write_named_config(self._cfg(tmp_path), "http://x.example.com", 8899)
+
+    def test_userinfo_rejected(self, tmp_path):
+        with pytest.raises(tunnel.TunnelError):
+            tunnel._write_named_config(self._cfg(tmp_path), "https://user@x.example.com", 8899)
+
+    def test_valid_hostname_accepted(self, tmp_path):
+        out = tunnel._write_named_config(self._cfg(tmp_path), "https://x.example.com", 8899)
+        parsed = yaml.safe_load(out.read_text(encoding="utf-8"))
+        assert parsed["ingress"][0]["hostname"] == "x.example.com"
 
 
 class TestPlatformSpecificLaunch:
@@ -133,6 +185,69 @@ class TestStopTreeKill:
         cfg = TunnelConfig(type="bat", credentials_json="./quick-tunnel.sh")
         t = tunnel.Tunnel(cfg, public_url="", port=8899)
         t.stop()  # must not raise
+
+
+class TestKillOnCloseJob:
+    """H-E: Windows Job Object with KILL_ON_JOB_CLOSE — kernel-enforced
+    cleanup for the case our own process dies without calling Tunnel.stop()."""
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Job Objects are Windows-only")
+    def test_real_job_object_kills_process_on_handle_close(self):
+        import subprocess
+        import time
+
+        job = tunnel._create_kill_on_close_job()
+        assert job is not None
+        proc = subprocess.Popen(
+            ["ping", "-t", "127.0.0.1"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        try:
+            tunnel._assign_to_job(job, proc.pid)
+            time.sleep(0.3)
+            assert proc.poll() is None, "process should still be running before the job closes"
+            tunnel.ctypes.windll.kernel32.CloseHandle(job)
+            proc.wait(timeout=5)
+            assert proc.returncode is not None
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+
+    def test_own_job_is_a_no_op_off_windows(self, monkeypatch):
+        monkeypatch.setattr(tunnel.sys, "platform", "linux")
+        cfg = TunnelConfig(type="bat", credentials_json="./quick-tunnel.sh")
+        t = tunnel.Tunnel(cfg, public_url="", port=8899)
+        t._proc = _FakeProc(pid=1234)
+        t._own_job_if_windows()
+        assert t._job is None
+
+    def test_own_job_assigns_the_spawned_process_when_windows(self, monkeypatch):
+        monkeypatch.setattr(tunnel.sys, "platform", "win32")
+        calls = {}
+        monkeypatch.setattr(tunnel, "_create_kill_on_close_job", lambda: 555)
+        monkeypatch.setattr(
+            tunnel, "_assign_to_job", lambda job, pid: calls.setdefault((job, pid), True)
+        )
+        cfg = TunnelConfig(type="bat", credentials_json="./quick-tunnel.sh")
+        t = tunnel.Tunnel(cfg, public_url="", port=8899)
+        t._proc = _FakeProc(pid=4242)
+        t._own_job_if_windows()
+        assert t._job == 555
+        assert calls == {(555, 4242): True}
+
+    def test_stop_closes_the_job_handle(self, monkeypatch):
+        closed = []
+        fake_kernel32 = types.SimpleNamespace(CloseHandle=lambda h: closed.append(h))
+        monkeypatch.setattr(
+            tunnel.ctypes, "windll", types.SimpleNamespace(kernel32=fake_kernel32), raising=False
+        )
+        monkeypatch.setattr(tunnel, "_tree_kill", lambda pid: None)
+        cfg = TunnelConfig(type="bat", credentials_json="./quick-tunnel.sh")
+        t = tunnel.Tunnel(cfg, public_url="", port=8899)
+        t._proc = _FakeProc(pid=1234)
+        t._job = 424242
+        t.stop()
+        assert closed == [424242]
+        assert t._job is None
 
 
 class TestStartRouting:
