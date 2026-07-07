@@ -348,6 +348,19 @@ _READY_SELFTEST_CASES: tuple[tuple[str, bool], ...] = (
     ),
     ("bypass permissions", True),  # claude idle
     ("(esc to interrupt) building...\nbypass permissions", False),  # claude busy
+    # --- #26 hardening (558fcbe cross-check, gemini+codex) ---
+    # codex update splash + status bar footer: the 'update available!' blocker
+    # precedes 'fast off/on' in _READY_RULES → stays not-ready.
+    (
+        "update available! run npm i -g @openai/codex\ngpt-5.5 medium · ~/project · Fast off",
+        False,
+    ),
+    # codex idle, 'Fast on' variant — the on/off toggle both mark ready.
+    ("gpt-5.5 medium · ~/project · weekly 86% left · Fast on", True),  # codex idle (fast on)
+    # cross-provider contamination: a busy pane whose bottom rows quote
+    # 'fast off' still shows its hard blocker, which wins before ready rules.
+    # (_classify_ready checks hard blockers first, before any ready marker.)
+    ("(esc to interrupt) building...\nsomeone mentions fast off", False),
 )
 
 
