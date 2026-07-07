@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import time
 
-from agent_takkub.remote.auth import AuthGate
+from agent_takkub.remote.auth import AuthGate, hash_password, verify_password
 from agent_takkub.remote.config import RemoteConfig
 
 
@@ -129,6 +129,73 @@ class TestIdleExpire:
         gate.touch()
         monkeypatch.setattr(time, "time", lambda: base + 150)
         assert gate.idle_expired() is False
+
+
+class TestPasswordHashing:
+    """Third auth factor (addendum 2) — plaintext never persisted, only a
+    salted PBKDF2 hash (see `RemoteConfig.password_hash`)."""
+
+    def test_correct_password_verifies(self):
+        assert verify_password("hunter2", hash_password("hunter2")) is True
+
+    def test_wrong_password_fails(self):
+        assert verify_password("wrong", hash_password("hunter2")) is False
+
+    def test_empty_password_never_verifies(self):
+        assert verify_password("", hash_password("hunter2")) is False
+
+    def test_empty_hash_never_verifies(self):
+        assert verify_password("hunter2", "") is False
+
+    def test_hash_is_salted_differently_each_time(self):
+        assert hash_password("hunter2") != hash_password("hunter2")
+
+    def test_malformed_hash_fails_closed(self):
+        assert verify_password("hunter2", "not-a-valid-hash") is False
+        assert verify_password("hunter2", "zz$zz") is False
+
+
+class TestPasswordGate:
+    """`check_password`/`password_ok`/`mark_password_verified` — the
+    server-side half of the third auth factor gate."""
+
+    def _pw_gate(self, password: str = "hunter2", **kw) -> AuthGate:
+        return AuthGate(
+            RemoteConfig(
+                secret_path="s3cr3t", token="tok123", password_hash=hash_password(password), **kw
+            )
+        )
+
+    def test_no_password_configured_is_always_ok(self):
+        gate = _gate()  # _gate() leaves password_hash empty
+        assert gate.password_ok() is True
+
+    def test_not_yet_verified_blocks(self):
+        assert self._pw_gate().password_ok() is False
+
+    def test_correct_password_unlocks_gate(self):
+        gate = self._pw_gate()
+        assert gate.check_password("hunter2") is True
+        assert gate.password_ok() is True
+
+    def test_wrong_password_stays_blocked(self):
+        gate = self._pw_gate()
+        assert gate.check_password("nope") is False
+        assert gate.password_ok() is False
+
+    def test_mark_password_verified_unlocks_without_a_check(self):
+        gate = self._pw_gate()
+        gate.mark_password_verified()
+        assert gate.password_ok() is True
+
+    def test_password_fails_share_the_token_lockout_counter(self):
+        gate = self._pw_gate(lockout_after_fails=2)
+        assert gate.check_password("wrong") is False
+        assert gate.check_token("wrong") is False
+        # Two combined fails hit the threshold — even the correct password
+        # is now rejected until the backoff window clears.
+        assert gate.check_password("hunter2") is False
+        assert gate.is_locked_out() is True
 
     def test_zero_disables_idle_expire(self, monkeypatch):
         gate = _gate(idle_expire_min=0)

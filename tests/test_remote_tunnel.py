@@ -302,6 +302,47 @@ class TestStartRouting:
             t.start()
 
 
+class TestQuickTunnelMode:
+    """Addendum (no-domain path): cockpit spawns cloudflared's own quick
+    tunnel directly — no credentials file, no config.yml, no public_url up
+    front — and scrapes the random URL the same way Mode B (bat) does."""
+
+    def _patched(self, monkeypatch):
+        captured = {}
+
+        def _fake_spawn(argv, extra_env=None):
+            captured["argv"] = argv
+            captured["extra_env"] = extra_env
+            return _FakeProc(lines=[b"https://random-name.trycloudflare.com\n"])
+
+        monkeypatch.setattr(tunnel, "_spawn", _fake_spawn)
+        monkeypatch.setattr(tunnel.Tunnel, "_own_job_if_windows", lambda self: None)
+        return captured
+
+    def test_needs_no_credentials_or_public_url(self, monkeypatch):
+        captured = self._patched(monkeypatch)
+        cfg = TunnelConfig(type="quick")
+        t = tunnel.Tunnel(cfg, public_url="", port=9999)
+        t.start()  # must not raise
+        assert captured["argv"] == ["cloudflared", "tunnel", "--url", "http://localhost:9999"]
+
+    def test_uses_configured_cloudflared_bin_over_path(self, monkeypatch):
+        captured = self._patched(monkeypatch)
+        cfg = TunnelConfig(type="quick", cloudflared_bin="/opt/tunnel/cloudflared")
+        t = tunnel.Tunnel(cfg, public_url="", port=9999)
+        t.start()
+        assert captured["argv"][0] == "/opt/tunnel/cloudflared"
+
+    def test_scrapes_the_random_url_from_stdout(self, monkeypatch):
+        self._patched(monkeypatch)
+        cfg = TunnelConfig(type="quick")
+        t = tunnel.Tunnel(cfg, public_url="", port=9999)
+        assert t.captured_url is None
+        t.start()
+        t._reader.join(timeout=1)
+        assert t.captured_url == "https://random-name.trycloudflare.com"
+
+
 def test_real_platform_constant_is_sane():
     # Sanity check the module imported cleanly on whatever OS is running
     # this test — CI runs both windows-latest and macos-latest.

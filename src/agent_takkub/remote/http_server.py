@@ -248,10 +248,10 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         if rest == "/api/lead":
             self._handle_sse(query)
         elif rest == "/api/pulse":
-            if self._check_bearer():
+            if self._check_bearer() and self._check_password_gate():
                 self._respond_marshaled("pulse", {})
         elif rest == "/api/projects":
-            if self._check_bearer():
+            if self._check_bearer() and self._check_password_gate():
                 self._respond_marshaled("projects", {"mode": self.server.config.mode})
         elif rest.startswith("/api/"):
             self._reject()
@@ -273,11 +273,14 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
             self._reject()
             return
         body = self.rfile.read(length) if length else b""
-        if rest == "/api/sse-ticket":
+        if rest == "/api/verify-password":
             if self._check_bearer():
+                self._handle_verify_password(body)
+        elif rest == "/api/sse-ticket":
+            if self._check_bearer() and self._check_password_gate():
                 self._issue_sse_ticket()
         elif rest == "/api/lead/say":
-            if not self._check_bearer():
+            if not self._check_bearer() or not self._check_password_gate():
                 return
             if not self.server.auth.allows_control():
                 self._send_json(403, {"ok": False, "msg": "view mode: control is disabled"})
@@ -290,6 +293,36 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
             self._respond_marshaled("lead_say", {"text": payload.get("text", "")})
         else:
             self._reject()
+
+    def _check_password_gate(self) -> bool:
+        """Third auth factor (addendum): every authenticated route besides
+        verify-password itself is blocked until the cockpit-set password has
+        been POSTed correctly this server run. `msg` is a stable literal the
+        PWA matches on to show its password prompt instead of a generic
+        error (never the pairing-URL/QR flow — the password never travels
+        there)."""
+        if self.server.auth.password_ok():
+            return True
+        self._send_json(403, {"ok": False, "msg": "password_required"})
+        return False
+
+    def _handle_verify_password(self, body: bytes) -> None:
+        try:
+            payload = json.loads(body.decode("utf-8")) if body else {}
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            self._send_json(400, {"ok": False, "msg": "bad json"})
+            return
+        password = payload.get("password", "")
+        if not self.server.config.password_hash:
+            # No password configured — nothing to verify (backward
+            # compatible with configs/tests predating this feature).
+            self.server.auth.mark_password_verified()
+            self._send_json(200, {"ok": True})
+            return
+        if not isinstance(password, str) or not self.server.auth.check_password(password):
+            self._send_json(401, {"ok": False, "msg": "wrong password"})
+            return
+        self._send_json(200, {"ok": True})
 
     def _respond_marshaled(self, action: str, params: dict) -> None:
         pending = _PendingRequest(action=action, params=params)

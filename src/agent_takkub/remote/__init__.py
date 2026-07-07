@@ -78,7 +78,14 @@ class RemoteControl:
         self._server = http_server.start_server(self.config, self._orch)
         self._notifier = notify.LeadNotifier(self._orch, self._server.broadcaster)
 
-        if self.config.auto_start_tunnel and self.config.tunnel.credentials_json:
+        # Quick-tunnel mode (addendum) needs neither a credentials file nor
+        # a known public_url up front — cloudflared assigns a random
+        # *.trycloudflare.com URL on connect — so it can't gate on
+        # `credentials_json` like the other two modes do.
+        needs_no_credentials_file = self.config.tunnel.type == "quick"
+        if self.config.auto_start_tunnel and (
+            needs_no_credentials_file or self.config.tunnel.credentials_json
+        ):
             try:
                 self._tunnel = tunnel.Tunnel(
                     self.config.tunnel, self.config.public_url, self._server.port

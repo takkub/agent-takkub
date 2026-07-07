@@ -241,6 +241,94 @@ class TestMarshaledRoutes:
             srv.stop()
 
 
+class TestPasswordGate:
+    """Third auth factor (addendum 2): a cockpit-set password gates every
+    authenticated route besides `/api/verify-password` itself, and is never
+    embedded in the pairing URL/QR — see `auth.py`'s `check_password`/
+    `password_ok`."""
+
+    @pytest.fixture
+    def pw_server(self, monkeypatch):
+        from agent_takkub.remote.auth import hash_password
+
+        monkeypatch.setattr(api, "pulse", lambda orch, project: {"working": 1, "total": 2})
+        config = RemoteConfig(
+            bind_port=0,
+            secret_path="sek",
+            token="tok",
+            mode="control",
+            password_hash=hash_password("hunter2"),
+        )
+        srv = http_server.start_server(config, _FakeOrch())
+        yield srv
+        srv.stop()
+
+    def _verify_password(self, server, password: str) -> tuple[int, dict]:
+        req = urllib.request.Request(
+            _url(server, "/sek/api/verify-password"),
+            data=json.dumps({"password": password}).encode("utf-8"),
+            headers={"Authorization": "Bearer tok", "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return resp.status, json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read())
+
+    def test_pulse_blocked_before_password_verified(self, pw_server):
+        status, body = _get_status(
+            _url(pw_server, "/sek/api/pulse"), {"Authorization": "Bearer tok"}
+        )
+        assert status == 403
+        assert json.loads(body)["msg"] == "password_required"
+
+    def test_wrong_password_is_401_and_stays_blocked(self, pw_server):
+        # verify-password itself never touches the bridge (no _run_pumped
+        # needed) — it's a plain thread-safe AuthGate check.
+        status, body = self._verify_password(pw_server, "wrong")
+        assert status == 401
+        assert body["ok"] is False
+        status2, _ = _get_status(_url(pw_server, "/sek/api/pulse"), {"Authorization": "Bearer tok"})
+        assert status2 == 403
+
+    def test_correct_password_unlocks_pulse(self, pw_server):
+        status, body = self._verify_password(pw_server, "hunter2")
+        assert status == 200
+        assert body["ok"] is True
+
+        status2, pulse_body = _run_pumped(
+            lambda: _get_status(_url(pw_server, "/sek/api/pulse"), {"Authorization": "Bearer tok"})
+        )
+        assert status2 == 200
+        assert json.loads(pulse_body) == {"working": 1, "total": 2}
+
+    def test_verify_password_requires_bearer_too(self, pw_server):
+        req = urllib.request.Request(
+            _url(pw_server, "/sek/api/verify-password"),
+            data=json.dumps({"password": "hunter2"}).encode("utf-8"),
+            method="POST",
+        )
+        try:
+            urllib.request.urlopen(req, timeout=5)
+            pytest.fail("expected HTTPError")
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 404  # no/wrong bearer -> zero-surface 404 (§7.5)
+
+    def test_no_password_configured_skips_the_gate(self, server):
+        """`server` fixture (no password_hash) — pulse works with bearer
+        alone, exactly as before this feature existed."""
+        status, _ = _run_pumped(
+            lambda: _get_status(_url(server, "/sek/api/pulse"), {"Authorization": "Bearer tok"})
+        )
+        assert status == 200
+
+    def test_verify_password_with_no_password_configured_is_a_no_op_success(self, server):
+        status, body = self._verify_password(server, "anything")
+        assert status == 200
+        assert body["ok"] is True
+
+
 class TestSSEBroadcaster:
     def test_drops_oldest_when_full(self):
         broadcaster = http_server.SSEBroadcaster()

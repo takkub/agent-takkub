@@ -211,6 +211,30 @@ class StatusHeaderMixin:
         )
 
     @staticmethod
+    def _remote_chip_style(enabled: bool) -> str:
+        """Outline chip for the 🌐 Remote toggle. ON = teal (server live,
+        reachable from outside this machine), OFF = neutral zinc — same
+        treatment as the exec-mode/auto-resume chips."""
+        brand = "#14b8a6" if enabled else "#71717a"
+        return (
+            "QPushButton { "
+            f"background:transparent; color:{brand}; "
+            f"border:1px solid {brand}; border-radius:10px; "
+            "padding:2px 10px; font-weight:600; }"
+            "QPushButton:hover { background:rgba(255,255,255,0.06); }"
+        )
+
+    @staticmethod
+    def _remote_chip_tooltip(enabled: bool) -> str:
+        """Tooltip for the remote chip — states the consequence."""
+        if enabled:
+            return (
+                "Remote control: ON — this cockpit is reachable from your phone.\n"
+                "Click to open settings / disable."
+            )
+        return "Remote control: OFF — click to set up phone pairing (Cloudflare tunnel)."
+
+    @staticmethod
     def _ghost_button_style() -> str:
         """Neutral status-bar action button.
 
@@ -372,6 +396,18 @@ class StatusHeaderMixin:
         self._chip_auto_resume.setToolTip(self._auto_resume_chip_tooltip(_auto_resume_now))
         self._chip_auto_resume.setStyleSheet(self._auto_resume_chip_style(_auto_resume_now))
         self._chip_auto_resume.clicked.connect(self._on_auto_resume_chip_clicked)
+
+        # 🌐 Remote chip: opens the remote-control (phone pairing) settings
+        # dialog. `remote/` is a delete-to-uninstall bolt-on (see
+        # remote/__init__.py) — this chip only ever reaches it through
+        # importlib.import_module (never a static import, so import-linter's
+        # remote-bolt-on-isolation contract stays green and `rm -rf remote/`
+        # just hides the chip instead of crashing boot). Text/style/visibility
+        # are set by _refresh_remote_chip, called here and again once
+        # main_window._boot() knows whether config.json said enabled=true.
+        self._chip_remote = QPushButton(self)
+        self._chip_remote.clicked.connect(self._on_remote_chip_clicked)
+        self._refresh_remote_chip()
 
         # 🔧 Pane Tools: opens the role x MCP/plugin policy matrix editor.
         # Sits next to the exec-mode chip since both are "how panes get
@@ -557,6 +593,7 @@ class StatusHeaderMixin:
             self._chip_plan,
             self._chip_exec_mode,
             self._chip_auto_resume,
+            self._chip_remote,
             self._btn_pane_tools,
             self._chip_codex,
             self._chip_gemini,
@@ -661,6 +698,40 @@ class StatusHeaderMixin:
         if working:
             bits.append(f"{working} working")
         self._status.showMessage("  ·  ".join(bits))
+
+    # ──────────────────────────────────────────────────────────────
+    # 🌐 Remote chip visibility + state
+    # ──────────────────────────────────────────────────────────────
+
+    def _refresh_remote_chip(self) -> None:
+        """Repaint the 🌐 Remote chip from live state, or hide it silently
+        if the `remote/` bolt-on isn't importable (deleted / broken install
+        — B4/separability). Dynamic import only, per the
+        remote-bolt-on-isolation import-linter contract.
+
+        Uses a plain `__dict__` membership check rather than `hasattr` —
+        this is called from `_boot()`, which some tests exercise on a
+        `MainWindow.__new__()` stub whose Qt C++ side was never
+        constructed; `hasattr`/`getattr` on a truly absent attribute in
+        that state raises `RuntimeError` instead of behaving like a normal
+        missing-attribute check (PyQt6/sip quirk), which `__dict__` access
+        alone doesn't trigger.
+        """
+        if "_chip_remote" not in self.__dict__:
+            return
+        import importlib
+
+        try:
+            importlib.import_module("agent_takkub.remote")
+        except Exception:
+            self._chip_remote.hide()
+            return
+
+        self._chip_remote.show()
+        enabled = getattr(self, "_remote", None) is not None
+        self._chip_remote.setText("🌐 Remote ●" if enabled else "🌐 Remote")
+        self._chip_remote.setStyleSheet(self._remote_chip_style(enabled))
+        self._chip_remote.setToolTip(self._remote_chip_tooltip(enabled))
 
     # ──────────────────────────────────────────────────────────────
     # rtk install button visibility

@@ -117,6 +117,11 @@ class _PluginInstallThread(QThread):
 _DOCTOR_THREADS: set = set()
 _PLUGIN_THREADS: set = set()
 
+# 🌐 Remote quick-tunnel mode: how long _apply_remote_config blocks the
+# Enable click waiting for cloudflared to print its *.trycloudflare.com URL.
+_QUICK_TUNNEL_WAIT_S = 6.0
+_QUICK_TUNNEL_POLL_S = 0.2
+
 
 class UserActionsMixin:
     """Mixin for cockpit toolbar / status-bar button handlers."""
@@ -702,6 +707,95 @@ class UserActionsMixin:
         self._chip_auto_resume.setText("🌙 Auto-resume" if enabled else "🌙 Auto-resume: off")
         self._chip_auto_resume.setStyleSheet(self._auto_resume_chip_style(enabled))
         self._chip_auto_resume.setToolTip(self._auto_resume_chip_tooltip(enabled))
+
+    # ──────────────────────────────────────────────────────────────
+    # 🌐 Remote chip: settings dialog + live enable/disable
+    # ──────────────────────────────────────────────────────────────
+
+    def _on_remote_chip_clicked(self) -> None:
+        """🌐 Remote chip: open the phone-pairing settings dialog.
+
+        Dynamic import only (import-linter's remote-bolt-on-isolation
+        contract, pyproject.toml) — a deleted `remote/` package degrades
+        this to a status-bar message instead of an ImportError.
+        """
+        import importlib
+
+        try:
+            _dialog_mod = importlib.import_module("agent_takkub.remote.settings_dialog")
+            _config_mod = importlib.import_module("agent_takkub.remote.config")
+        except ModuleNotFoundError:
+            self._status.showMessage("Remote control unavailable — remote/ package not found", 4000)
+            self._refresh_remote_chip()
+            return
+
+        dlg = _dialog_mod.RemoteSettingsDialog(
+            self,
+            is_live=getattr(self, "_remote", None) is not None,
+            current=_config_mod.RemoteConfig.load(),
+            on_apply=self._apply_remote_config,
+        )
+        dlg.exec()
+        self._refresh_remote_chip()
+
+    def _apply_remote_config(self, config, enable: bool) -> tuple[bool, str, str]:
+        """Enable/disable the live remote-control server. Injected into
+        `RemoteSettingsDialog` as `on_apply` so `remote/` never needs to
+        import (or even know the shape of) MainWindow. Dynamic import only,
+        same contract as `_on_remote_chip_clicked`.
+
+        Re-enabling while already live (or flipping settings) always stops
+        the old handle first, then starts fresh from whatever was just
+        saved to disk — `RemoteControl.maybe_start` reloads config from
+        disk rather than trusting the `config` argument directly.
+        """
+        import importlib
+
+        try:
+            _remote_mod = importlib.import_module("agent_takkub.remote")
+        except ModuleNotFoundError:
+            return False, "remote/ package not found", ""
+
+        old = getattr(self, "_remote", None)
+        if old is not None:
+            old.stop()
+            self._remote = None
+
+        if not enable:
+            try:
+                _config_mod = importlib.import_module("agent_takkub.remote.config")
+                cfg = _config_mod.RemoteConfig.load()
+                cfg.enabled = False
+                cfg.save()
+            except ModuleNotFoundError:
+                pass
+            return True, "", ""
+
+        config.enabled = True
+        config.save()
+        self._remote = _remote_mod.RemoteControl.maybe_start(self.orch)
+        if self._remote is None:
+            return False, "Failed to start the remote server — check logs.", ""
+
+        # Quick-tunnel mode (addendum): the *.trycloudflare.com URL isn't
+        # known until cloudflared prints it, a second or two after start().
+        # ponytail: block this click briefly rather than wire a QTimer poll
+        # into a dialog that's otherwise fully Qt-event-loop-decoupled.
+        # Ceiling: if a real quick tunnel is ever slower than this, the
+        # dialog just shows no pairing URL until reopened — upgrade path is
+        # a background poll instead of this bounded wait.
+        tunnel_obj = getattr(self._remote, "_tunnel", None)
+        if tunnel_obj is not None and self._remote.config.tunnel.type == "quick":
+            import time as _time
+
+            deadline = _time.monotonic() + _QUICK_TUNNEL_WAIT_S
+            while tunnel_obj.captured_url is None and _time.monotonic() < deadline:
+                _time.sleep(_QUICK_TUNNEL_POLL_S)
+            if tunnel_obj.captured_url:
+                self._remote.config.public_url = tunnel_obj.captured_url
+                self._remote.config.save()
+
+        return True, "", self._remote.config.pairing_url()
 
     # ──────────────────────────────────────────────────────────────
     # per-project user profile selector (accessed via ⚙ Pipelines menu)

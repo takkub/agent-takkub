@@ -274,6 +274,8 @@ class Tunnel:
     def start(self) -> None:
         if self._config.type == "cloudflared":
             self._start_named()
+        elif self._config.type == "quick":
+            self._start_quick()
         else:
             self._start_bat()
 
@@ -311,6 +313,18 @@ class Tunnel:
         self._proc = _spawn(argv)
         self._own_job_if_windows()
         self._drain_output()
+
+    def _start_quick(self) -> None:
+        """Mode "quick" (addendum, no-domain path): cockpit spawns
+        cloudflared's own quick-tunnel mode directly — no credentials file,
+        no config.yml, no `public_url` up front. The random
+        `*.trycloudflare.com` URL cloudflared prints to stdout is scraped by
+        the same `_scan_for_url` Mode B (bat) already uses."""
+        argv = [self._cloudflared_bin(), "tunnel", "--url", f"http://localhost:{self._port}"]
+        self._proc = _spawn(argv)
+        self._own_job_if_windows()
+        self._reader = threading.Thread(target=self._scan_for_url, daemon=True)
+        self._reader.start()
 
     def _start_bat(self) -> None:
         script = self._config.credentials_json

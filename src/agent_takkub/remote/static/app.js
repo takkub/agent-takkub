@@ -97,6 +97,26 @@
           forgetToken();
           throw new Error("unauthorized");
         }
+        // Third auth factor (addendum): a cockpit-set password gates every
+        // authenticated route until verified — never encoded in the pairing
+        // URL/QR, so a leaked link alone can't get in. `res.clone()` so the
+        // caller can still read the original body when this isn't the gate.
+        if (res.status === 403) {
+          return res
+            .clone()
+            .json()
+            .then(function (data) {
+              if (data && data.msg === "password_required") {
+                showPasswordPrompt();
+                throw new Error("password_required");
+              }
+              return res;
+            })
+            .catch(function (err) {
+              if (err instanceof Error && err.message === "password_required") throw err;
+              return res;
+            });
+        }
         return res;
       })
       .catch(function (err) {
@@ -146,6 +166,7 @@
   // ---------------------------------------------------------------
 
   function showPairing(errorMsg) {
+    appEl.classList.remove("gate-mode");
     appEl.classList.add("pairing-mode");
     document.querySelectorAll(".view").forEach(function (v) { v.classList.remove("active"); });
     $("view-pairing").classList.add("active");
@@ -154,8 +175,22 @@
     stopPulsePolling();
   }
 
-  function showApp() {
+  // Third auth factor (addendum): shown whenever the server answers an
+  // authenticated call with 403 password_required. Never reachable via the
+  // pairing URL/QR alone — the password is asked for here, not embedded
+  // anywhere in the link.
+  function showPasswordPrompt(errorMsg) {
     appEl.classList.remove("pairing-mode");
+    appEl.classList.add("gate-mode");
+    document.querySelectorAll(".view").forEach(function (v) { v.classList.remove("active"); });
+    $("view-password").classList.add("active");
+    $("password-error").textContent = errorMsg || "";
+    stopLeadStream();
+    stopPulsePolling();
+  }
+
+  function showApp() {
+    appEl.classList.remove("pairing-mode", "gate-mode");
     switchView(state.view);
   }
 
@@ -199,6 +234,34 @@
     localStorage.setItem(LS_BASE, state.base);
     $("pairing-error").textContent = "";
     init();
+  });
+
+  // ---------------------------------------------------------------
+  // Password gate (third auth factor — never sent via URL/QR)
+  // ---------------------------------------------------------------
+
+  $("password-form").addEventListener("submit", function (evt) {
+    evt.preventDefault();
+    var input = $("password-input");
+    var password = input.value;
+    if (!password) return;
+    apiFetch("api/verify-password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: password }),
+    })
+      .then(function (r) {
+        input.value = "";
+        if (r.ok) {
+          showApp();
+          fetchProjectsAndMode().catch(function () { /* stay in view mode assumption */ });
+        } else {
+          $("password-error").textContent = "รหัสผ่านไม่ถูกต้อง";
+        }
+      })
+      .catch(function () {
+        $("password-error").textContent = "เชื่อมต่อไม่ได้ ลองใหม่อีกครั้ง";
+      });
   });
 
   // ---------------------------------------------------------------

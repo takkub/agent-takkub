@@ -73,6 +73,69 @@ class TestMaybeStart:
         assert set(threading.enumerate()) == before
 
 
+class TestQuickTunnelAutoStart:
+    """Addendum: quick-tunnel mode (no domain/credentials file) still
+    auto-starts the tunnel subprocess — the auto_start_tunnel gate in
+    `_start()` must not require `credentials_json` for this mode."""
+
+    def test_quick_mode_starts_tunnel_without_credentials(self, _isolated, monkeypatch):
+        import agent_takkub.remote.tunnel as tunnel_mod
+
+        started = {}
+
+        class _FakeTunnel:
+            def __init__(self, tunnel_config, public_url, port):
+                started["config"] = tunnel_config
+
+            def start(self):
+                started["started"] = True
+
+            def stop(self):
+                pass
+
+        monkeypatch.setattr(tunnel_mod, "Tunnel", _FakeTunnel)
+        RemoteConfig(
+            enabled=True,
+            bind_port=0,
+            auto_start_tunnel=True,
+            tunnel=TunnelConfig(type="quick"),
+        ).save()
+        rc = RemoteControl.maybe_start(MagicMock())
+        try:
+            assert started.get("started") is True
+            assert started["config"].type == "quick"
+        finally:
+            rc.stop()
+
+    def test_named_mode_without_credentials_does_not_start_tunnel(self, _isolated, monkeypatch):
+        import agent_takkub.remote.tunnel as tunnel_mod
+
+        created = {}
+
+        class _FakeTunnel:
+            def __init__(self, *a, **kw):
+                created["yes"] = True
+
+            def start(self):
+                pass
+
+            def stop(self):
+                pass
+
+        monkeypatch.setattr(tunnel_mod, "Tunnel", _FakeTunnel)
+        RemoteConfig(
+            enabled=True,
+            bind_port=0,
+            auto_start_tunnel=True,
+            tunnel=TunnelConfig(type="cloudflared", credentials_json=""),
+        ).save()
+        rc = RemoteControl.maybe_start(MagicMock())
+        try:
+            assert "yes" not in created
+        finally:
+            rc.stop()
+
+
 # ---------------------------------------------------------------------------
 # RemoteConfig — load/save, atomic, missing/corrupt -> default (off)
 # ---------------------------------------------------------------------------

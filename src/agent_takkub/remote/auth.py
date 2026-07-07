@@ -10,6 +10,8 @@ brute-force attempts could slip past the lockout threshold.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import secrets
 import threading
 import time
@@ -19,6 +21,40 @@ from .config import RemoteConfig
 _TICKET_TTL_SEC = 30.0
 _LOCKOUT_BASE_SEC = 5.0
 _LOCKOUT_MAX_SEC = 300.0
+
+# Third auth factor (addendum, user-confirmed): a cockpit-set password, never
+# embedded in the pairing URL/QR, so a leaked link alone still can't get in.
+# Stored on RemoteConfig.password_hash as "<salt-hex>$<digest-hex>" — the
+# plaintext password never touches disk (hash_password runs once, in the
+# settings dialog, before RemoteConfig.save()).
+_PBKDF2_ITERATIONS = 200_000
+
+
+def hash_password(password: str) -> str:
+    """One-way hash for `RemoteConfig.password_hash` — called by the
+    settings dialog right before `save()`; the plaintext never reaches
+    disk, a log line, or an API response."""
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, _PBKDF2_ITERATIONS)
+    return f"{salt.hex()}${digest.hex()}"
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    """Constant-time check of `password` against a `hash_password` digest.
+    Any malformed `password_hash` (corrupt config, wrong format) fails
+    closed rather than raising."""
+    if not password or not password_hash:
+        return False
+    salt_hex, sep, digest_hex = password_hash.partition("$")
+    if not sep:
+        return False
+    try:
+        salt = bytes.fromhex(salt_hex)
+        expected = bytes.fromhex(digest_hex)
+    except ValueError:
+        return False
+    actual = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, _PBKDF2_ITERATIONS)
+    return hmac.compare_digest(actual, expected)
 
 
 class AuthGate:
@@ -35,6 +71,11 @@ class AuthGate:
         self._locked_until = 0.0
         self._tickets: dict[str, tuple[float, str]] = {}
         self.last_request_ts = time.time()
+        # Third auth factor: True once a correct password has been POSTed to
+        # /api/verify-password this server run. A fresh AuthGate is created
+        # per server start (see class docstring), so this — like the fail
+        # counter — never needs to survive a restart.
+        self._password_verified = False
 
     # ── secret path — second secret ahead of the token (§7.5) ───────────
     def check_secret_path(self, segment: str) -> bool:
@@ -67,16 +108,50 @@ class AuthGate:
                 and bool(expected)
                 and secrets.compare_digest(token.encode(), expected.encode())
             )
-            if ok:
-                self._fail_count = 0
-            else:
-                self._fail_count += 1
-                threshold = max(1, self._config.lockout_after_fails)
-                if self._fail_count >= threshold:
-                    overflow = self._fail_count - threshold
-                    backoff = min(_LOCKOUT_MAX_SEC, _LOCKOUT_BASE_SEC * (2 ** min(overflow, 6)))
-                    self._locked_until = time.time() + backoff
+            self._record_result_locked(ok)
             return ok
+
+    # ── password — third auth factor (addendum), never in the pairing URL/QR:
+    # a leaked link (secret path + token) still isn't enough to get in. Shares
+    # the same global lockout counter as `check_token` per spec (§ADDENDUM 2).
+    def check_password(self, password: str) -> bool:
+        with self._lock:
+            if time.time() < self._locked_until:
+                return False
+            ok = verify_password(password, self._config.password_hash)
+            self._record_result_locked(ok)
+            if ok:
+                self._password_verified = True
+            return ok
+
+    def mark_password_verified(self) -> None:
+        """No password configured (`password_hash` empty) = feature off —
+        called instead of `check_password` so `password_ok()` passes without
+        ever asking the client for one."""
+        with self._lock:
+            self._password_verified = True
+
+    def password_ok(self) -> bool:
+        """Gate for every authenticated route besides verify-password
+        itself: true when no password is configured, or once it's been
+        verified this server run."""
+        if not self._config.password_hash:
+            return True
+        with self._lock:
+            return self._password_verified
+
+    def _record_result_locked(self, ok: bool) -> None:
+        """Shared fail-counter/backoff bump for `check_token`/`check_password`
+        — call only while holding `self._lock`."""
+        if ok:
+            self._fail_count = 0
+        else:
+            self._fail_count += 1
+            threshold = max(1, self._config.lockout_after_fails)
+            if self._fail_count >= threshold:
+                overflow = self._fail_count - threshold
+                backoff = min(_LOCKOUT_MAX_SEC, _LOCKOUT_BASE_SEC * (2 ** min(overflow, 6)))
+                self._locked_until = time.time() + backoff
 
     # ── single-use SSE ticket (X-check 3.3): EventSource can't send an
     # Authorization header, so `/api/lead?ticket=...` substitutes a

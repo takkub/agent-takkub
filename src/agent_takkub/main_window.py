@@ -566,6 +566,7 @@ class MainWindow(
         except Exception:  # any other error: never leave a half-open socket
             self._remote = None
             _log_event("remote_boot_failed")
+        self._refresh_remote_chip()
 
         # Reflect orchestrator errors (eg. claude.exe not found) into the
         # status bar instead of swallowing them silently.
