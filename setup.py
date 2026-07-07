@@ -24,6 +24,10 @@ from setuptools.command.build_py import build_py as _build_py
 
 _ROOT = Path(__file__).resolve().parent
 _ASSETS = _ROOT / "src" / "agent_takkub" / "_assets"
+# remote/ (P0 scaffold) ships straight from the repo tree, no staging step
+# (unlike _ASSETS) — scan it too so a future app.js/static asset can't leak a
+# home-dir path into the wheel the same way the 1.0.13-1.0.17 leak did.
+_REMOTE = _ROOT / "src" / "agent_takkub" / "remote"
 
 # Personal home-path leak guard: staged assets ship inside the wheel to every
 # installer, so a hardcoded `C:\Users\<me>\...` / `/Users/<me>/...` path would
@@ -37,20 +41,23 @@ _PLACEHOLDER_USERS = frozenset(
 
 
 def _assert_no_home_path_leak() -> None:
-    """Refuse to ship any staged asset carrying a real home-dir username."""
+    """Refuse to ship any staged/shipped asset carrying a real home-dir username."""
     offenders: list[str] = []
-    for path in sorted(_ASSETS.rglob("*")):
-        if not path.is_file():
+    for root in (_ASSETS, _REMOTE):
+        if not root.is_dir():
             continue
-        try:
-            text = path.read_text(encoding="utf-8")
-        except (UnicodeDecodeError, OSError):
-            continue
-        for lineno, line in enumerate(text.splitlines(), 1):
-            for user in _HOME_PATH_RE.findall(line):
-                if user.lower() not in _PLACEHOLDER_USERS:
-                    rel = path.relative_to(_ASSETS)
-                    offenders.append(f"  {rel}:{lineno}  →  {line.strip()}")
+        for path in sorted(root.rglob("*")):
+            if not path.is_file():
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue
+            for lineno, line in enumerate(text.splitlines(), 1):
+                for user in _HOME_PATH_RE.findall(line):
+                    if user.lower() not in _PLACEHOLDER_USERS:
+                        rel = path.relative_to(root)
+                        offenders.append(f"  {rel}:{lineno}  →  {line.strip()}")
     if offenders:
         raise RuntimeError(
             "asset staging failed: real home-dir path(s) found in shipped assets "

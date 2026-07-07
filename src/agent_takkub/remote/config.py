@@ -1,0 +1,74 @@
+"""RemoteConfig — persisted settings for the remote-control bolt-on.
+
+P0 scaffold only: this defines the on-disk shape and safe load/save. Nothing
+in P0 reads `enabled=true` as license to open a socket — see `__init__.py`.
+Full field semantics: `remote-control-plan/2026-07-07-remote-control.md` §6.1.
+
+State file: ``~/.takkub/remote.json`` (atomic tmp+rename, same pattern as
+`exec_mode.py`). Missing file or corrupt JSON -> default (`enabled=False`),
+and `load()` never creates the file — booting with remote off must cost zero
+disk writes.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+
+from ..config import SETTINGS_HOME
+
+_PATH = SETTINGS_HOME / "remote.json"
+
+
+def path() -> Path:
+    """Where state lives. Function form so tests can monkeypatch `_PATH`."""
+    return _PATH
+
+
+@dataclass
+class TunnelConfig:
+    type: str = "cloudflared"
+    credentials_json: str = ""
+    cloudflared_bin: str = ""
+
+
+@dataclass
+class RemoteConfig:
+    enabled: bool = False
+    mode: str = "view"
+    bind_port: int = 8899
+    public_url: str = ""
+    secret_path: str = ""
+    token: str = ""
+    tunnel: TunnelConfig = field(default_factory=TunnelConfig)
+    auto_start_tunnel: bool = True
+    idle_expire_min: int = 240
+    lockout_after_fails: int = 5
+    tier2_terminal: bool = False
+
+    @classmethod
+    def load(cls) -> RemoteConfig:
+        """Read `~/.takkub/remote.json`. Missing/corrupt -> default (off);
+        never creates the file as a side effect of reading it."""
+        if not _PATH.exists():
+            return cls()
+        try:
+            data = json.loads(_PATH.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return cls()
+            tunnel_data = data.pop("tunnel", None)
+            tunnel = (
+                TunnelConfig(**tunnel_data) if isinstance(tunnel_data, dict) else TunnelConfig()
+            )
+            known = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
+            return cls(tunnel=tunnel, **known)
+        except (OSError, json.JSONDecodeError, TypeError):
+            return cls()
+
+    def save(self) -> None:
+        """Persist atomically (tmp+rename), same pattern as `exec_mode.py`."""
+        _PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _PATH.with_suffix(_PATH.suffix + ".tmp")
+        tmp.write_text(json.dumps(asdict(self), indent=2) + "\n", encoding="utf-8")
+        tmp.replace(_PATH)

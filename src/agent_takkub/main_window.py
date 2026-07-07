@@ -552,6 +552,21 @@ class MainWindow(
             _handle_cli_bind_error(str(e))
             return  # QApplication.quit() is pending; don't proceed
 
+        # Remote-control bolt-on (P0 scaffold, off-by-default). Dynamic import
+        # so deleting src/agent_takkub/remote/ is just a ModuleNotFoundError
+        # no-op and import-linter never sees a static core->remote edge. See
+        # remote-control-plan/2026-07-07-remote-control.md §4/§13 (B4/C1/C2/C6).
+        try:
+            import importlib
+
+            _remote_mod = importlib.import_module("agent_takkub.remote")
+            self._remote = _remote_mod.RemoteControl.maybe_start(self.orch)
+        except ModuleNotFoundError:  # folder deleted = uninstall no-op (B4)
+            self._remote = None
+        except Exception:  # any other error: never leave a half-open socket
+            self._remote = None
+            _log_event("remote_boot_failed")
+
         # Reflect orchestrator errors (eg. claude.exe not found) into the
         # status bar instead of swallowing them silently.
         self.orch.paneRequested.connect(self._track_pane_request)

@@ -55,6 +55,9 @@ agent_takkub = [
     # config.py's ASSETS_ROOT for the installed-vs-dev-checkout read path.
     "_assets/CLAUDE.md",
     "_assets/.claude/agents/*.md",
+    # remote/ (P0 scaffold) mobile PWA — glob stays empty (no error) until
+    # P1 adds files; deleting remote/ makes it empty again, build still works.
+    "remote/static/*",
 ]
 
 # ──────────────────────────────────────────────────────────────────
@@ -334,3 +337,33 @@ forbidden_modules = [
     "agent_takkub.app",
     "agent_takkub.cli",
 ]
+
+[[tool.importlinter.contracts]]
+name = "remote-bolt-on-isolation"
+type = "forbidden"
+# remote/ (P0 scaffold — remote-control-plan/2026-07-07-remote-control.md) is a
+# delete-to-uninstall bolt-on: the rest of the codebase must never structurally
+# depend on it. The one core touch point (main_window.py::_boot) reaches it via
+# importlib.import_module, which grimp doesn't see as a static edge, so this
+# contract stays green with the wiring in place *and* after `rm -rf remote/`.
+# source can't be the umbrella `agent_takkub` (remote is its descendant →
+# import-linter "shared descendants" error); list the entry points + engine +
+# every UI/CLI module that could plausibly wire remote instead.
+source_modules = [
+    "agent_takkub.app",
+    "agent_takkub.main_window",
+    "agent_takkub.cli",
+    "agent_takkub.cli_server",
+    "agent_takkub.orchestrator",
+    "agent_takkub.spawn_engine",
+    "agent_takkub.agent_pane",
+    "agent_takkub.pipeline_executor",
+    "agent_takkub.lead_inbox",
+    "agent_takkub.update_panel",
+    "agent_takkub.project_wizard",
+    "agent_takkub.user_actions",
+    "agent_takkub.status_header",
+    "agent_takkub.doctor",
+    "agent_takkub.config",
+]
+forbidden_modules = ["agent_takkub.remote"]

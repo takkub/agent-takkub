@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 73,
+  "module_count": 75,
   "modules": [
     {
       "module": "agent_takkub",
@@ -237,6 +237,7 @@
         "agent_takkub.project_wizard",
         "agent_takkub.provider_config",
         "agent_takkub.provider_state",
+        "agent_takkub.remote.config",
         "agent_takkub.role_memory",
         "agent_takkub.shared_dev_tools",
         "agent_takkub.skill_audit",
@@ -253,7 +254,7 @@
         "agent_takkub.vault_mirror",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 44,
+      "fan_in": 45,
       "fan_out": 0
     },
     {
@@ -746,6 +747,26 @@
       ],
       "fan_in": 1,
       "fan_out": 0
+    },
+    {
+      "module": "agent_takkub.remote",
+      "imports": [
+        "agent_takkub.remote.config"
+      ],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 1
+    },
+    {
+      "module": "agent_takkub.remote.config",
+      "imports": [
+        "agent_takkub.config"
+      ],
+      "imported_by": [
+        "agent_takkub.remote"
+      ],
+      "fan_in": 1,
+      "fan_out": 1
     },
     {
       "module": "agent_takkub.role_memory",
