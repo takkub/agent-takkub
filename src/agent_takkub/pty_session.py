@@ -179,8 +179,9 @@ _TTY_PROMPT_TAIL_ROWS = 5
 #   HIGH  'esc to interrupt' / 'esc to cancel' — the busy indicators. A reword
 #         makes a working pane read idle (premature done-nudge / early gate).
 #   HIGH  'bypass permissions' / 'shift+tab to cycle' (claude), '? for shortcuts'
-#         (agy), 'type your message or' (gemini) — the idle footers. A reword
-#         makes an idle pane read busy (watchdog never nudges; #70-style stall).
+#         (agy), 'type your message or' (gemini), 'fast off' / 'fast on' (codex
+#         composer status bar) — the idle footers. A reword makes an idle pane
+#         read busy (watchdog never nudges; #70-style stall).
 #   MED   'update available!' (codex splash), 'trust this folder' / 'do you trust'
 #         / 'press enter to continue' (trust modals) — transient spawn-time gates.
 #   LOW   'gemini cli update available!' / 'openai codex (v' — passive banners.
@@ -222,6 +223,18 @@ _READY_RULES: tuple[tuple[bool, str], ...] = (
     (True, "gemini cli update available!"),  # gemini CLI (legacy) passive footer (#51)
     (False, "update available!"),  # codex startup splash modal
     (True, "openai codex (v"),  # codex prompt banner
+    # codex composer status bar: "<model> · <cwd> · <usage> · Fast off/on".
+    # Rendered on the row directly under the input box for as long as the
+    # composer is on screen — including once the startup banner (the
+    # 'openai codex (v' rule above) has scrolled out of the _READY_TAIL_ROWS
+    # window as the conversation grows, which previously left codex matching
+    # NO rule at all and reading not-ready forever (#26 delivery-unconfirmed
+    # false alarms). "esc to interrupt" (a hard blocker, checked first) still
+    # correctly overrides this during an active turn or MCP boot — verified
+    # by direct pty capture: the status bar is present but blocked at that
+    # point because "esc to interrupt" is also on screen.
+    (True, "fast off"),
+    (True, "fast on"),
     (True, "bypass permissions"),  # claude footer
     (True, "shift+tab to cycle"),  # claude footer
 )
@@ -314,6 +327,25 @@ _READY_SELFTEST_CASES: tuple[tuple[str, bool], ...] = (
     ("Gemini CLI update available! 0.46.0 -> 0.47.0\nType your message or @path", True),
     ("Gemini CLI update available! 0.46.0 -> 0.47.0", True),  # passive footer alone
     ("OpenAI Codex (v1.2.3)\nupdate available! run npm i -g @openai/codex", False),  # codex splash
+    # codex idle: banner has scrolled off, only the composer status bar remains
+    # in the tail region (captured via direct pty spawn, issue #26).
+    (
+        "gpt-5.5 medium · ~/project · 5h 79% left · weekly 86% left · Fast off",
+        True,
+    ),
+    # codex busy: "esc to interrupt" hard blocker overrides the status bar,
+    # which is still on screen mid-turn.
+    (
+        "Thinking...(esc to interrupt)\ngpt-5.5 medium · ~/project · Fast off",
+        False,
+    ),
+    # codex MCP boot: same hard blocker covers the "Booting MCP server:
+    # codex_apps" phase, which also renders the status bar underneath.
+    (
+        "• Booting MCP server: codex_apps (0s • esc to interrupt)\n"
+        "gpt-5.5 medium · ~/project · Fast off",
+        False,
+    ),
     ("bypass permissions", True),  # claude idle
     ("(esc to interrupt) building...\nbypass permissions", False),  # claude busy
 )
