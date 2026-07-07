@@ -33,6 +33,65 @@ _MAX_EVENT_CHARS = 4000
 _COALESCE_MS = 150
 _ANSI_RE = re.compile(rb"\x1b\[[0-9;?]*[a-zA-Z]")
 
+# ── junk-line filter (best-effort heuristic, see UI-junkfilter-backend.md):
+# strips TUI chrome (composer box, spinner/status footer, tool-call bullets)
+# from decoded Lead output before it reaches the SSE broadcaster, keeping
+# only the actual conversation text + done/summary content.
+_BOX_LINE_RE = re.compile(r"^\s*[│┃╭╮╯╰┌┐└┘├┤┬┴┼═║╔╗╚╝╠╣╦╩╬]")
+_GLYPH_ONLY_RE = re.compile(
+    r"^[\s│─┃┄┅┆┇┈┉┊┋╭╮╯╰╱╲╳┌┐└┘├┤┬┴┼═║╔╗╚╝╠╣╦╩╬"
+    r"✻✶✳✢✽⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏·•]*$"
+)
+_TOOL_BULLET_RE = re.compile(r"^\s*⏺")
+_SPINNER_PREFIX_RE = re.compile(r"^\s*[✻✶✳✢✽⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]")
+_XML_TAG_LINE_RE = re.compile(r"^\s*</?[a-zA-Z][\w:.-]*(?:\s[^>]*)?/?>\s*$")
+_CHROME_RE = re.compile(
+    r"esc to interrupt"
+    r"|for shortcuts"
+    r"|bypass permissions"
+    r"|booting mcp"
+    r"|context left"
+    r"|auto-compact"
+    r"|usage limit"
+    r"|\d[\d,.]*\s*[kmb]?\s*tokens?\b",
+    re.IGNORECASE,
+)
+
+
+def _is_junk_line(line: str) -> bool:
+    if _GLYPH_ONLY_RE.match(line) and line.strip():
+        return True
+    if _BOX_LINE_RE.match(line):
+        return True
+    if _TOOL_BULLET_RE.match(line):
+        return True
+    if _SPINNER_PREFIX_RE.match(line):
+        return True
+    if _XML_TAG_LINE_RE.match(line):
+        return True
+    if _CHROME_RE.search(line):
+        return True
+    return False
+
+
+def _filter_junk(text: str) -> str:
+    kept: list[str] = []
+    prev_blank = True  # drop leading blank lines
+    for line in text.split("\n"):
+        if _is_junk_line(line):
+            continue
+        if not line.strip():
+            if prev_blank:
+                continue
+            kept.append("")
+            prev_blank = True
+            continue
+        kept.append(line)
+        prev_blank = False
+    while kept and kept[-1] == "":
+        kept.pop()
+    return "\n".join(kept)
+
 
 class LeadNotifier(QObject):
     def __init__(self, orch, broadcaster) -> None:
@@ -108,7 +167,8 @@ class LeadNotifier(QObject):
         chunks = self._buf
         self._buf = []
         for ns, chunk in chunks:
-            text = bytes(chunk).decode("utf-8", errors="replace")[-_MAX_EVENT_CHARS:]
+            raw = bytes(chunk).decode("utf-8", errors="replace")
+            text = _filter_junk(raw)[-_MAX_EVENT_CHARS:]
             if text:
                 self._broadcaster.push("lead", text, ns)
 

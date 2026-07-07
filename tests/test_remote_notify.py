@@ -10,7 +10,7 @@ import time
 import pytest
 from PyQt6.QtCore import QCoreApplication, QObject, pyqtSignal
 
-from agent_takkub.remote.notify import LeadNotifier
+from agent_takkub.remote.notify import LeadNotifier, _filter_junk
 
 
 class _FakeSession(QObject):
@@ -52,6 +52,52 @@ def _pump(qapp: QCoreApplication, ms: int = 250) -> None:
     deadline = time.time() + ms / 1000
     while time.time() < deadline:
         qapp.processEvents()
+
+
+class TestFilterJunk:
+    def test_keeps_plain_conversation_text_untouched(self):
+        assert _filter_junk("hello lead") == "hello lead"
+
+    def test_drops_composer_box_and_spinner_status_but_keeps_reply(self):
+        raw = (
+            "╭──────────────────────────────────────────╮\n"
+            "│ > add auth middleware                     │\n"
+            "╰──────────────────────────────────────────╯\n"
+            "\n"
+            "✻ Pondering… (12s · 1.2k tokens · esc to interrupt)\n"
+            "\n"
+            "⏺ Read(src/auth.py)\n"
+            "\n"
+            "I added JWT-based auth middleware to src/auth.py.\n"
+            "It validates the Bearer token and attaches the user to the request.\n"
+            "\n"
+            "  ⠋ Compacting context…\n"
+            "\n"
+            "? for shortcuts                    bypass permissions on (shift+tab to cycle)\n"
+        )
+        result = _filter_junk(raw)
+        assert result == (
+            "I added JWT-based auth middleware to src/auth.py.\n"
+            "It validates the Bearer token and attaches the user to the request."
+        )
+
+    def test_drops_tool_call_xml_rendering(self):
+        raw = (
+            '<function_calls>\n<invoke name="Read">\n</invoke>\n</function_calls>\nreal reply here'
+        )
+        assert _filter_junk(raw) == "real reply here"
+
+    def test_collapses_repeated_blank_lines_to_one(self):
+        raw = "first line\n\n\n\nsecond line"
+        assert _filter_junk(raw) == "first line\n\nsecond line"
+
+    def test_drops_leading_and_trailing_blank_lines(self):
+        raw = "\n\n  \nactual content\n\n\n"
+        assert _filter_junk(raw) == "actual content"
+
+    def test_empty_or_pure_junk_input_yields_empty_string(self):
+        assert _filter_junk("") == ""
+        assert _filter_junk("──────\n✻ Thinking… (esc to interrupt)\n") == ""
 
 
 class TestDoneEvents:

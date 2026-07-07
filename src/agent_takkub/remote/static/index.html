@@ -10,28 +10,46 @@
 <style>
   :root {
     --bg: #09090b;
-    --panel: #18181b;
-    --line: #3f3f46;
+    --panel: #0c0c0f;
+    --card: #18181b;
+    --card2: #1c1c20;
+    --line: #27272a;
+    --line2: #3f3f46;
     --fg: #e4e4e7;
     --fg-dim: #a1a1aa;
-    --accent: #14b8a6;
+    --faint: #71717a;
+    --accent: #2dd4bf;
+    --accent-ink: #032c26;
     --accent-dim: #0f766e;
+    --lead: #c084fc;
+    --lead-ink: #f3e8ff;
+    --work: #fbbf24;
+    --done: #34d399;
     --danger: #ef4444;
+    --mono: ui-monospace, "SFMono-Regular", Menlo, "Cascadia Code", Consolas, monospace;
   }
-  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
   html, body {
     height: 100%;
     margin: 0;
+    overflow: hidden; /* the inner <main> owns scrolling — a scrollable body
+                          double-scrolls and reads as "scroll ไม่ได้" on iOS */
     background: var(--bg);
     color: var(--fg);
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    -webkit-text-size-adjust: 100%;
     overscroll-behavior-y: contain;
   }
   #app {
     display: flex;
     flex-direction: column;
-    height: 100dvh;
     height: 100vh;
+    height: 100dvh; /* dvh wins on mobile — 100vh includes browser chrome and
+                       pushed the bottom-nav below the visible fold (untappable) */
+    background:
+      radial-gradient(900px 480px at 85% -12%, #10201e 0%, transparent 60%),
+      radial-gradient(700px 420px at -5% 0%, #16121c 0%, transparent 55%),
+      var(--bg);
   }
 
   /* ---------- offline banner ---------- */
@@ -48,10 +66,11 @@
 
   /* ---------- header ---------- */
   header {
-    padding: 14px 16px 10px;
-    padding-top: max(14px, env(safe-area-inset-top));
+    padding: 12px 16px;
+    padding-top: max(12px, env(safe-area-inset-top));
     border-bottom: 1px solid var(--line);
     flex: none;
+    background: rgba(9, 9, 11, 0.6);
   }
   header .header-row {
     display: flex;
@@ -61,21 +80,22 @@
   }
   header h1 {
     margin: 0;
-    font-size: 1.05rem;
-    font-weight: 600;
-    letter-spacing: 0.01em;
+    font-size: 0.95rem;
+    font-weight: 640;
+    letter-spacing: -0.01em;
   }
   #header-status {
     flex: none;
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 8px;
   }
   #status-conn {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
-    font-size: 0.72rem;
+    gap: 6px;
+    font-family: var(--mono);
+    font-size: 0.68rem;
     color: var(--fg-dim);
   }
   #status-conn .dot {
@@ -83,20 +103,33 @@
     width: 7px; height: 7px;
     border-radius: 50%;
     background: var(--accent);
+    animation: pulse-dot 2.2s infinite;
   }
-  #status-conn.offline .dot { background: var(--danger); }
+  #status-conn.offline .dot { background: var(--danger); animation: none; }
   #status-mode {
-    font-size: 0.68rem;
+    font-family: var(--mono);
+    font-size: 0.62rem;
     font-weight: 700;
-    letter-spacing: 0.03em;
+    letter-spacing: 0.04em;
     border-radius: 999px;
-    padding: 2px 9px;
-    border: 1px solid var(--line);
+    padding: 4px 9px;
+    border: 1px solid var(--line2);
+    background: var(--card);
     color: var(--fg-dim);
   }
   #status-mode.control {
-    color: var(--accent);
-    border-color: var(--accent-dim);
+    color: var(--work);
+    background: rgba(251, 191, 36, 0.1);
+    border-color: rgba(251, 191, 36, 0.34);
+  }
+
+  @keyframes pulse-dot {
+    0% { box-shadow: 0 0 0 0 rgba(45, 212, 191, 0.5); }
+    70% { box-shadow: 0 0 0 8px rgba(45, 212, 191, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(45, 212, 191, 0); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    #status-conn .dot, .msg.sys::before { animation: none; }
   }
 
   main {
@@ -104,6 +137,7 @@
     min-height: 0;
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
+    overscroll-behavior-y: contain;
   }
 
   .view { display: none; height: 100%; flex-direction: column; }
@@ -120,68 +154,95 @@
   #view-pairing .card, #view-password .card {
     width: 100%;
     max-width: 360px;
-    background: var(--panel);
+    background: var(--card);
     border: 1px solid var(--line);
-    border-radius: 14px;
-    padding: 20px;
+    border-radius: 16px;
+    padding: 22px;
+    box-shadow: 0 20px 40px -20px rgba(0, 0, 0, 0.7);
   }
-  #view-pairing h2, #view-password h2 { margin: 0 0 6px; font-size: 1.05rem; }
-  #view-pairing p, #view-password p { margin: 0 0 14px; color: var(--fg-dim); font-size: 0.85rem; line-height: 1.5; }
+  #view-pairing h2, #view-password h2 { margin: 0 0 6px; font-size: 1.1rem; font-weight: 640; }
+  #view-pairing p, #view-password p { margin: 0 0 16px; color: var(--fg-dim); font-size: 0.85rem; line-height: 1.5; }
   #view-pairing input, #view-password input {
     width: 100%;
     background: var(--bg);
-    border: 1px solid var(--line);
+    border: 1px solid var(--line2);
     color: var(--fg);
-    border-radius: 8px;
-    padding: 10px 12px;
-    font-size: 0.9rem;
+    border-radius: 10px;
+    padding: 13px 14px;
+    /* keep >= 16px: iOS Safari auto-zooms on focus for any input below that */
+    font-size: 16px;
+    min-height: 44px;
     margin-bottom: 10px;
+  }
+  #view-pairing input:focus, #view-password input:focus {
+    outline: none;
+    border-color: var(--accent);
   }
   #view-pairing button, #view-password button, .btn {
     width: 100%;
     background: var(--accent);
-    color: #04302b;
+    color: var(--accent-ink);
     border: none;
-    border-radius: 8px;
-    padding: 11px 12px;
-    font-size: 0.9rem;
-    font-weight: 600;
+    border-radius: 10px;
+    padding: 13px 12px;
+    min-height: 44px;
+    font-size: 0.95rem;
+    font-weight: 640;
     cursor: pointer;
   }
   #view-pairing button:active, #view-password button:active, .btn:active { background: var(--accent-dim); color: #dff8f3; }
   #pairing-error, #password-error { color: var(--danger); font-size: 0.8rem; min-height: 1.1em; margin-top: 4px; }
 
   /* ---------- projects ---------- */
-  #view-projects { padding: 12px 14px 24px; gap: 8px; }
+  #view-projects { padding: 14px 14px 24px; gap: 10px; }
   .project-row {
-    background: var(--panel);
+    background: var(--card);
     border: 1px solid var(--line);
-    border-radius: 10px;
-    padding: 14px;
-    margin-bottom: 8px;
+    border-radius: 13px;
+    padding: 12px 13px;
+    margin-bottom: 10px;
     display: flex;
     align-items: center;
-    justify-content: space-between;
+    gap: 12px;
     font-size: 0.92rem;
   }
-  .project-row {
-    box-shadow: none;
+  .project-row.active {
+    border-color: rgba(45, 212, 191, 0.4);
+    background: rgba(45, 212, 191, 0.06);
   }
-  .project-row .name-col { display: flex; flex-direction: column; gap: 2px; }
-  .project-row .name { font-weight: 500; }
+  .project-row .icon-box {
+    flex: 0 0 auto;
+    width: 32px;
+    height: 32px;
+    border-radius: 9px;
+    background: var(--card2);
+    border: 1px solid var(--line);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 15px;
+  }
+  .project-row.active .icon-box {
+    background: rgba(45, 212, 191, 0.14);
+    border-color: rgba(45, 212, 191, 0.35);
+  }
+  .project-row .name-col { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .project-row .name { font-weight: 600; font-family: var(--mono); font-size: 0.86rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .project-row .hint {
-    font-size: 0.72rem;
-    color: var(--fg-dim);
+    font-size: 0.7rem;
+    color: var(--faint);
   }
   .project-row .tag {
-    font-size: 0.72rem;
+    flex: 0 0 auto;
+    font-family: var(--mono);
+    font-size: 0.68rem;
     color: var(--accent);
     border: 1px solid var(--accent-dim);
     border-radius: 999px;
-    padding: 2px 8px;
+    padding: 3px 9px;
   }
   .project-row .tag.idle {
-    color: var(--fg-dim);
+    color: var(--faint);
     border-color: var(--line);
   }
   .empty-state {
@@ -203,9 +264,9 @@
     gap: 10px;
   }
   .msg {
-    max-width: 88%;
+    max-width: 85%;
     padding: 10px 13px;
-    border-radius: 12px;
+    border-radius: 14px;
     font-size: 0.88rem;
     line-height: 1.5;
     white-space: pre-wrap;
@@ -213,23 +274,62 @@
   }
   .msg.lead {
     align-self: flex-start;
-    background: var(--panel);
+    background: var(--card);
     border: 1px solid var(--line);
-    border-bottom-left-radius: 4px;
+    border-bottom-left-radius: 5px;
+    padding-top: 20px;
+    position: relative;
+  }
+  .msg.lead::before {
+    content: "";
+    position: absolute;
+    top: 12px;
+    left: 13px;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--lead);
+  }
+  .msg.lead::after {
+    content: "Lead";
+    position: absolute;
+    top: 7px;
+    left: 24px;
+    font-family: var(--mono);
+    font-size: 0.66rem;
+    color: var(--lead);
   }
   .msg.me {
     align-self: flex-end;
-    background: var(--accent-dim);
-    color: #eafffb;
-    border-bottom-right-radius: 4px;
+    background: rgba(45, 212, 191, 0.14);
+    border: 1px solid rgba(45, 212, 191, 0.3);
+    color: #d7fff7;
+    border-bottom-right-radius: 5px;
   }
   .msg.sys {
     align-self: center;
     color: var(--fg-dim);
-    font-size: 0.76rem;
-    background: none;
-    max-width: 100%;
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    background: var(--card2);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 6px 14px 6px 24px;
+    max-width: 90%;
     text-align: center;
+    position: relative;
+  }
+  .msg.sys::before {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 12px;
+    transform: translateY(-50%);
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--work);
+    animation: pulse-dot 1.4s infinite;
   }
   #lead-empty {
     margin: auto;
@@ -243,6 +343,7 @@
   #lead-composer {
     flex: none;
     display: flex;
+    align-items: flex-end;
     gap: 8px;
     padding: 10px 12px;
     padding-bottom: max(10px, env(safe-area-inset-bottom));
@@ -252,14 +353,20 @@
   #lead-input {
     flex: 1 1 auto;
     resize: none;
-    background: var(--panel);
+    background: var(--card);
     border: 1px solid var(--line);
     color: var(--fg);
-    border-radius: 10px;
-    padding: 10px 12px;
-    font-size: 0.9rem;
+    border-radius: 12px;
+    padding: 12px 13px;
+    /* keep >= 16px: iOS Safari auto-zooms on focus for any input below that */
+    font-size: 16px;
+    min-height: 44px;
     max-height: 100px;
     font-family: inherit;
+  }
+  #lead-input:focus {
+    outline: none;
+    border-color: var(--accent);
   }
   #lead-input:disabled {
     opacity: 0.5;
@@ -272,7 +379,7 @@
     border-radius: 10px;
     border: none;
     background: var(--accent);
-    color: #04302b;
+    color: var(--accent-ink);
     font-size: 1.1rem;
     font-weight: 700;
     cursor: pointer;
@@ -294,10 +401,10 @@
     padding: 24px;
   }
   #pulse-ring {
-    width: 220px;
-    height: 220px;
+    width: 208px;
+    height: 208px;
     border-radius: 50%;
-    background: conic-gradient(var(--accent) 0deg, var(--line) 0deg);
+    background: conic-gradient(var(--work) 0deg, var(--line) 0deg);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -307,7 +414,7 @@
   #pulse-ring::before {
     content: "";
     position: absolute;
-    inset: 12px;
+    inset: 16px;
     border-radius: 50%;
     background: var(--bg);
   }
@@ -317,25 +424,30 @@
     z-index: 1;
   }
   #pulse-working {
-    font-size: 2.6rem;
-    font-weight: 700;
+    font-size: 3.2rem;
+    font-weight: 720;
+    letter-spacing: -0.03em;
     line-height: 1;
   }
   #pulse-total {
-    font-size: 0.85rem;
+    font-family: var(--mono);
+    font-size: 0.8rem;
     color: var(--fg-dim);
-    margin-top: 6px;
   }
   #pulse-label {
-    color: var(--fg-dim);
-    font-size: 0.85rem;
+    font-family: var(--mono);
+    color: var(--work);
+    font-size: 0.7rem;
+    letter-spacing: 0.06em;
+    margin-top: 6px;
   }
   #pulse-caption {
-    color: var(--fg-dim);
+    font-family: var(--mono);
+    color: var(--faint);
     font-size: 0.72rem;
     text-align: center;
-    max-width: 260px;
-    line-height: 1.5;
+    max-width: 240px;
+    line-height: 1.6;
     margin-top: -8px;
   }
 
@@ -344,24 +456,27 @@
     flex: none;
     display: flex;
     border-top: 1px solid var(--line);
-    background: var(--panel);
+    background: rgba(9, 9, 11, 0.6);
     padding-bottom: env(safe-area-inset-bottom);
   }
   nav#bottom-nav button {
     flex: 1 1 0;
+    min-height: 48px;
     background: none;
     border: none;
-    color: var(--fg-dim);
-    padding: 10px 0 8px;
-    font-size: 0.72rem;
+    color: var(--faint);
+    padding: 9px 0 10px;
+    font-family: var(--mono);
+    font-size: 0.66rem;
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 3px;
+    gap: 4px;
     cursor: pointer;
   }
-  nav#bottom-nav button .icon { font-size: 1.2rem; line-height: 1; }
+  nav#bottom-nav button .icon { font-size: 1.15rem; line-height: 1; color: var(--faint); }
   nav#bottom-nav button.active { color: var(--accent); }
+  nav#bottom-nav button.active .icon { color: var(--accent); }
   #app.pairing-mode nav#bottom-nav,
   #app.pairing-mode header,
   #app.gate-mode nav#bottom-nav,
@@ -372,8 +487,8 @@
     left: 50%;
     bottom: 90px;
     transform: translateX(-50%);
-    background: var(--panel);
-    border: 1px solid var(--line);
+    background: var(--card);
+    border: 1px solid var(--line2);
     color: var(--fg);
     padding: 10px 16px;
     border-radius: 10px;
@@ -384,6 +499,7 @@
     opacity: 0;
     pointer-events: none;
     transition: opacity 0.25s ease;
+    box-shadow: 0 14px 30px -12px rgba(0, 0, 0, 0.8);
   }
   .toast.show { opacity: 1; }
 </style>
@@ -449,11 +565,11 @@
       <div id="pulse-ring">
         <div id="pulse-numbers">
           <div id="pulse-working">–</div>
-          <div id="pulse-total">/ – total</div>
+          <div id="pulse-label">กำลังทำงาน</div>
         </div>
       </div>
-      <div id="pulse-label">กำลังทำงาน</div>
-      <div id="pulse-caption">แสดงจำนวนรวมเท่านั้น — ไม่ระบุรายตัว (privacy by design)</div>
+      <div id="pulse-total">จาก – ตำแหน่งที่เปิด</div>
+      <div id="pulse-caption">ไม่แสดงว่าใครทำอะไร — ดูความคืบหน้าที่หน้า Lead</div>
     </section>
   </main>
 

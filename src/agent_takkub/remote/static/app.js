@@ -308,7 +308,11 @@
       if (!name) return;
       var active = typeof item === "object" && item.active;
       var row = document.createElement("div");
-      row.className = "project-row";
+      row.className = "project-row" + (active ? " active" : "");
+      var iconBox = document.createElement("span");
+      iconBox.className = "icon-box";
+      iconBox.textContent = active ? "📂" : "📁";
+      row.appendChild(iconBox);
       var nameCol = document.createElement("div");
       nameCol.className = "name-col";
       var label = document.createElement("span");
@@ -496,10 +500,10 @@
 
   function renderPulse(working, total) {
     $("pulse-working").textContent = String(working);
-    $("pulse-total").textContent = "/ " + total + " total";
+    $("pulse-total").textContent = "จาก " + total + " ตำแหน่งที่เปิด";
     var pct = total > 0 ? Math.min(100, Math.round((working / total) * 100)) : 0;
     $("pulse-ring").style.background =
-      "conic-gradient(var(--accent) " + (pct * 3.6) + "deg, var(--line) 0deg)";
+      "conic-gradient(var(--work) " + (pct * 3.6) + "deg, var(--line) 0deg)";
   }
 
   // ---------------------------------------------------------------
