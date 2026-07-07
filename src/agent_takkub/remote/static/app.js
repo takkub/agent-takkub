@@ -116,11 +116,15 @@
   // ---------------------------------------------------------------
 
   var offlineBanner = $("offline-banner");
+  var statusConn = $("status-conn");
+  var statusConnText = $("status-conn-text");
   var isOffline = false;
   function setOffline(v) {
     if (v === isOffline) return;
     isOffline = v;
     offlineBanner.classList.toggle("show", v);
+    statusConn.classList.toggle("offline", v);
+    statusConnText.textContent = v ? "Offline" : "Online";
   }
 
   // ---------------------------------------------------------------
@@ -242,16 +246,21 @@
       var active = typeof item === "object" && item.active;
       var row = document.createElement("div");
       row.className = "project-row";
+      var nameCol = document.createElement("div");
+      nameCol.className = "name-col";
       var label = document.createElement("span");
       label.className = "name";
       label.textContent = name;
-      row.appendChild(label);
-      if (active) {
-        var tag = document.createElement("span");
-        tag.className = "tag";
-        tag.textContent = "active";
-        row.appendChild(tag);
-      }
+      nameCol.appendChild(label);
+      var hint = document.createElement("span");
+      hint.className = "hint";
+      hint.textContent = "อ่านอย่างเดียว — สลับ project ที่ cockpit";
+      nameCol.appendChild(hint);
+      row.appendChild(nameCol);
+      var tag = document.createElement("span");
+      tag.className = "tag" + (active ? "" : " idle");
+      tag.textContent = active ? "active" : "idle";
+      row.appendChild(tag);
       list.appendChild(row);
     });
   }
@@ -265,6 +274,8 @@
   function appendMsg(kind, text) {
     if (typeof text !== "string" || !text) return;
     var log = $("lead-log");
+    var emptyEl = $("lead-empty");
+    if (emptyEl) emptyEl.remove();
     var atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 24;
     var div = document.createElement("div");
     div.className = "msg " + kind;
@@ -351,9 +362,17 @@
   }
 
   function updateControlNote() {
-    $("view-control-note").textContent =
-      state.mode === "control" ? "" : "โหมด view — ส่งข้อความไม่ได้จนกว่าจะเปิด control";
-    $("lead-send").disabled = state.mode !== "control";
+    var isControl = state.mode === "control";
+    $("view-control-note").textContent = isControl
+      ? ""
+      : "โหมด view — ส่งข้อความไม่ได้ · เปิด control ได้จาก cockpit บนเดสก์ท็อป";
+    $("lead-send").disabled = !isControl;
+    var input = $("lead-input");
+    input.disabled = !isControl;
+    input.placeholder = isControl ? "พิมพ์ถึง Lead…" : "อ่านอย่างเดียว (view mode)";
+    var modePill = $("status-mode");
+    modePill.textContent = isControl ? "CONTROL" : "VIEW";
+    modePill.classList.toggle("control", isControl);
   }
 
   $("lead-composer").addEventListener("submit", function (evt) {

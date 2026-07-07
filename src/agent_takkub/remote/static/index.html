@@ -53,19 +53,50 @@
     border-bottom: 1px solid var(--line);
     flex: none;
   }
+  header .header-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
   header h1 {
     margin: 0;
     font-size: 1.05rem;
     font-weight: 600;
     letter-spacing: 0.01em;
   }
-  header h1 .dot {
+  #header-status {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  #status-conn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 0.72rem;
+    color: var(--fg-dim);
+  }
+  #status-conn .dot {
     display: inline-block;
-    width: 8px; height: 8px;
+    width: 7px; height: 7px;
     border-radius: 50%;
     background: var(--accent);
-    margin-right: 8px;
-    vertical-align: middle;
+  }
+  #status-conn.offline .dot { background: var(--danger); }
+  #status-mode {
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    border-radius: 999px;
+    padding: 2px 9px;
+    border: 1px solid var(--line);
+    color: var(--fg-dim);
+  }
+  #status-mode.control {
+    color: var(--accent);
+    border-color: var(--accent-dim);
   }
 
   main {
@@ -133,13 +164,25 @@
     justify-content: space-between;
     font-size: 0.92rem;
   }
+  .project-row {
+    box-shadow: none;
+  }
+  .project-row .name-col { display: flex; flex-direction: column; gap: 2px; }
   .project-row .name { font-weight: 500; }
+  .project-row .hint {
+    font-size: 0.72rem;
+    color: var(--fg-dim);
+  }
   .project-row .tag {
     font-size: 0.72rem;
     color: var(--accent);
     border: 1px solid var(--accent-dim);
     border-radius: 999px;
     padding: 2px 8px;
+  }
+  .project-row .tag.idle {
+    color: var(--fg-dim);
+    border-color: var(--line);
   }
   .empty-state {
     color: var(--fg-dim);
@@ -188,6 +231,15 @@
     max-width: 100%;
     text-align: center;
   }
+  #lead-empty {
+    margin: auto;
+    text-align: center;
+    color: var(--fg-dim);
+    font-size: 0.85rem;
+    line-height: 1.6;
+    padding: 24px;
+  }
+  #lead-empty .icon { font-size: 1.8rem; display: block; margin-bottom: 8px; }
   #lead-composer {
     flex: none;
     display: flex;
@@ -209,6 +261,10 @@
     max-height: 100px;
     font-family: inherit;
   }
+  #lead-input:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
   #lead-send {
     flex: none;
     width: 44px;
@@ -226,7 +282,8 @@
     font-size: 0.72rem;
     color: var(--fg-dim);
     text-align: center;
-    padding: 4px 0 8px;
+    padding: 4px 12px 8px;
+    line-height: 1.5;
   }
 
   /* ---------- pulse ---------- */
@@ -272,6 +329,14 @@
   #pulse-label {
     color: var(--fg-dim);
     font-size: 0.85rem;
+  }
+  #pulse-caption {
+    color: var(--fg-dim);
+    font-size: 0.72rem;
+    text-align: center;
+    max-width: 260px;
+    line-height: 1.5;
+    margin-top: -8px;
   }
 
   /* ---------- bottom nav ---------- */
@@ -326,7 +391,13 @@
   <div id="offline-banner">cockpit ออฟไลน์ — กำลังลองเชื่อมต่อใหม่</div>
 
   <header>
-    <h1><span class="dot"></span>Takkub Remote</h1>
+    <div class="header-row">
+      <h1>Takkub Remote</h1>
+      <div id="header-status">
+        <span id="status-conn"><span class="dot"></span><span id="status-conn-text">Online</span></span>
+        <span id="status-mode">VIEW</span>
+      </div>
+    </div>
   </header>
 
   <main>
@@ -348,7 +419,9 @@
 
     <!-- lead console -->
     <section id="view-lead" class="view">
-      <div id="lead-log"></div>
+      <div id="lead-log">
+        <div id="lead-empty"><span class="icon">💬</span>ยังไม่มีข้อความ — พิมพ์ถึง Lead ด้านล่างเพื่อเริ่ม</div>
+      </div>
       <div id="view-control-note"></div>
       <form id="lead-composer">
         <textarea id="lead-input" rows="1" placeholder="พิมพ์ถึง Lead…"></textarea>
@@ -365,13 +438,14 @@
         </div>
       </div>
       <div id="pulse-label">กำลังทำงาน</div>
+      <div id="pulse-caption">แสดงจำนวนรวมเท่านั้น — ไม่ระบุรายตัว (privacy by design)</div>
     </section>
   </main>
 
   <nav id="bottom-nav">
     <button data-view="projects"><span class="icon">📁</span>Projects</button>
     <button data-view="lead"><span class="icon">💬</span>Lead</button>
-    <button data-view="pulse"><span class="icon">🟢</span>Pulse</button>
+    <button data-view="pulse"><span class="icon">◎</span>Pulse</button>
   </nav>
 
   <div id="toast" class="toast"></div>
