@@ -56,11 +56,21 @@ class TestMaybeStart:
                 s.close()
         assert created == []
 
-    def test_enabled_returns_instance_but_still_no_server(self, _isolated):
-        RemoteConfig(enabled=True).save()
+    def test_enabled_starts_a_real_server_and_stop_tears_it_down(self, _isolated):
+        # P1: enabled=true now actually starts the HTTP server (§9). bind_port=0
+        # lets the OS pick a free ephemeral port so this test never collides
+        # with a real cockpit's remote port or another test worker.
+        RemoteConfig(enabled=True, bind_port=0, auto_start_tunnel=False).save()
+        before = set(threading.enumerate())
         rc = RemoteControl.maybe_start(MagicMock())
-        assert isinstance(rc, RemoteControl)
-        assert rc.config.enabled is True
+        try:
+            assert isinstance(rc, RemoteControl)
+            assert rc.config.enabled is True
+            assert rc._server is not None
+            assert rc._server.port != 0
+        finally:
+            rc.stop()
+        assert set(threading.enumerate()) == before
 
 
 # ---------------------------------------------------------------------------
@@ -192,8 +202,14 @@ class TestBootWiring:
         import agent_takkub.remote.config as remote_config
 
         monkeypatch.setattr(remote_config, "_PATH", tmp_path / "remote.json")
-        RemoteConfig(enabled=True).save()
+        # bind_port=0: OS-assigned ephemeral port, never the real remote
+        # port a dev's own running cockpit might already hold.
+        RemoteConfig(enabled=True, bind_port=0, auto_start_tunnel=False).save()
         win = self._make_window_stub(monkeypatch)
-        win._boot()
-        assert win._remote is not None
-        assert win._remote.config.enabled is True
+        try:
+            win._boot()
+            assert win._remote is not None
+            assert win._remote.config.enabled is True
+        finally:
+            if win._remote is not None:
+                win._remote.stop()

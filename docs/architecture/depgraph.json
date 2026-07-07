@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 75,
+  "module_count": 80,
   "modules": [
     {
       "module": "agent_takkub",
@@ -237,7 +237,9 @@
         "agent_takkub.project_wizard",
         "agent_takkub.provider_config",
         "agent_takkub.provider_state",
+        "agent_takkub.remote.api",
         "agent_takkub.remote.config",
+        "agent_takkub.remote.tunnel",
         "agent_takkub.role_memory",
         "agent_takkub.shared_dev_tools",
         "agent_takkub.skill_audit",
@@ -254,7 +256,7 @@
         "agent_takkub.vault_mirror",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 45,
+      "fan_in": 47,
       "fan_out": 0
     },
     {
@@ -734,9 +736,10 @@
         "agent_takkub.doctor",
         "agent_takkub.lead_inbox",
         "agent_takkub.orchestrator",
+        "agent_takkub.remote.tunnel",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 5,
+      "fan_in": 6,
       "fan_out": 2
     },
     {
@@ -751,10 +754,35 @@
     {
       "module": "agent_takkub.remote",
       "imports": [
-        "agent_takkub.remote.config"
+        "agent_takkub.remote.config",
+        "agent_takkub.remote.http_server",
+        "agent_takkub.remote.notify",
+        "agent_takkub.remote.tunnel"
       ],
       "imported_by": [],
       "fan_in": 0,
+      "fan_out": 4
+    },
+    {
+      "module": "agent_takkub.remote.api",
+      "imports": [
+        "agent_takkub.config"
+      ],
+      "imported_by": [
+        "agent_takkub.remote.http_server"
+      ],
+      "fan_in": 1,
+      "fan_out": 1
+    },
+    {
+      "module": "agent_takkub.remote.auth",
+      "imports": [
+        "agent_takkub.remote.config"
+      ],
+      "imported_by": [
+        "agent_takkub.remote.http_server"
+      ],
+      "fan_in": 1,
       "fan_out": 1
     },
     {
@@ -763,10 +791,48 @@
         "agent_takkub.config"
       ],
       "imported_by": [
+        "agent_takkub.remote",
+        "agent_takkub.remote.auth",
+        "agent_takkub.remote.http_server",
+        "agent_takkub.remote.tunnel"
+      ],
+      "fan_in": 4,
+      "fan_out": 1
+    },
+    {
+      "module": "agent_takkub.remote.http_server",
+      "imports": [
+        "agent_takkub.remote.api",
+        "agent_takkub.remote.auth",
+        "agent_takkub.remote.config"
+      ],
+      "imported_by": [
         "agent_takkub.remote"
       ],
       "fan_in": 1,
-      "fan_out": 1
+      "fan_out": 3
+    },
+    {
+      "module": "agent_takkub.remote.notify",
+      "imports": [],
+      "imported_by": [
+        "agent_takkub.remote"
+      ],
+      "fan_in": 1,
+      "fan_out": 0
+    },
+    {
+      "module": "agent_takkub.remote.tunnel",
+      "imports": [
+        "agent_takkub.config",
+        "agent_takkub.pty_session",
+        "agent_takkub.remote.config"
+      ],
+      "imported_by": [
+        "agent_takkub.remote"
+      ],
+      "fan_in": 1,
+      "fan_out": 3
     },
     {
       "module": "agent_takkub.role_memory",
