@@ -41,7 +41,12 @@ class LeadNotifier(QObject):
         self._broadcaster = broadcaster
         self._session = None
         self._project_ns: str | None = None
-        self._buf = bytearray()
+        # list of (project_ns, bytearray) — project_ns is captured per-chunk at
+        # receipt time (B1), not read fresh at flush time. A mid-coalesce
+        # project switch (_resync_lead_session changes self._project_ns before
+        # the 150ms timer fires) would otherwise stamp buffered bytes from the
+        # old project with the new project's namespace.
+        self._buf: list[tuple[str | None, bytearray]] = []
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self._flush)
@@ -75,19 +80,37 @@ class LeadNotifier(QObject):
 
     # ── live output: coalesce + cap before it ever reaches SSE (B3) ─────
     def _on_lead_bytes(self, data: bytes) -> None:
-        self._buf.extend(_ANSI_RE.sub(b"", data))
+        cleaned = _ANSI_RE.sub(b"", data)
+        if not cleaned:
+            return
+        ns = self._project_ns
+        if self._buf and self._buf[-1][0] == ns:
+            self._buf[-1][1].extend(cleaned)
+        else:
+            self._buf.append((ns, bytearray(cleaned)))
         cap = _MAX_EVENT_CHARS * 4
-        if len(self._buf) > cap:
-            del self._buf[: len(self._buf) - cap]
+        total = sum(len(chunk) for _, chunk in self._buf)
+        while total > cap and self._buf:
+            overflow = total - cap
+            _, oldest = self._buf[0]
+            if len(oldest) <= overflow:
+                total -= len(oldest)
+                self._buf.pop(0)
+            else:
+                del oldest[:overflow]
+                total -= overflow
         if not self._timer.isActive():
             self._timer.start(_COALESCE_MS)
 
     def _flush(self) -> None:
         if not self._buf:
             return
-        text = bytes(self._buf).decode("utf-8", errors="replace")[-_MAX_EVENT_CHARS:]
-        self._buf.clear()
-        self._broadcaster.push("lead", text, self._project_ns)
+        chunks = self._buf
+        self._buf = []
+        for ns, chunk in chunks:
+            text = bytes(chunk).decode("utf-8", errors="replace")[-_MAX_EVENT_CHARS:]
+            if text:
+                self._broadcaster.push("lead", text, ns)
 
     # ── done events ───────────────────────────────────────────────────
     def _on_done(self, project_ns: str, role: str, note: str) -> None:

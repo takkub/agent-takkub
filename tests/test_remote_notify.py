@@ -135,6 +135,41 @@ class TestLeadOutputHook:
         finally:
             notifier.stop()
 
+    def test_project_switch_mid_coalesce_does_not_leak_across_projects(self, qapp):
+        # B1 regression: `_resync_lead_session` used to stamp *all* buffered
+        # bytes with whatever `self._project_ns` happens to be at flush time.
+        # If the active project switches mid-coalesce (before the 150ms
+        # timer fires), bytes captured while proj-a was active would be
+        # flushed under proj-b's namespace — proj-b's mobile client would
+        # see proj-a's live Lead output.
+        orch = _FakeOrch(active_project="proj-a")
+        session_a = _FakeSession()
+        session_b = _FakeSession()
+        orch._panes_by_project = {
+            "proj-a": {"lead": _FakePane(session_a)},
+            "proj-b": {"lead": _FakePane(session_b)},
+        }
+        broadcaster = _FakeBroadcaster()
+
+        notifier = LeadNotifier(orch, broadcaster)
+        try:
+            orch.statusChanged.emit()  # resyncs to proj-a's lead pane
+            session_a.bytesIn.emit(b"from proj-a")
+
+            # switch the active project before the coalesce timer fires
+            orch._active_project = "proj-b"
+            orch.statusChanged.emit()
+            session_b.bytesIn.emit(b"from proj-b")
+
+            _pump(qapp)
+            assert ("lead", "from proj-a", "proj-a") in broadcaster.events
+            assert ("lead", "from proj-b", "proj-b") in broadcaster.events
+            for _event, text, ns in broadcaster.events:
+                if ns == "proj-b":
+                    assert "proj-a" not in text
+        finally:
+            notifier.stop()
+
     def test_no_lead_pane_is_a_safe_no_op(self, qapp):
         orch = _FakeOrch()  # no "lead" key registered
         broadcaster = _FakeBroadcaster()

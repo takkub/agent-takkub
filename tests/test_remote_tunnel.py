@@ -234,6 +234,44 @@ class TestKillOnCloseJob:
         assert t._job == 555
         assert calls == {(555, 4242): True}
 
+    def test_own_job_leaves_job_none_and_closes_handle_when_assign_fails(self, monkeypatch):
+        # Job Object hardening: `_assign_to_job` returning False (e.g.
+        # OpenProcess denied) must not leave `_job` set — a caller reading
+        # `_job is not None` as "this process is crash-protected" would
+        # otherwise be wrong.
+        monkeypatch.setattr(tunnel.sys, "platform", "win32")
+        closed = []
+        fake_kernel32 = types.SimpleNamespace(CloseHandle=lambda h: closed.append(h))
+        monkeypatch.setattr(
+            tunnel.ctypes, "windll", types.SimpleNamespace(kernel32=fake_kernel32), raising=False
+        )
+        monkeypatch.setattr(tunnel, "_create_kill_on_close_job", lambda: 777)
+        monkeypatch.setattr(tunnel, "_assign_to_job", lambda job, pid: False)
+        cfg = TunnelConfig(type="bat", credentials_json="./quick-tunnel.sh")
+        t = tunnel.Tunnel(cfg, public_url="", port=8899)
+        t._proc = _FakeProc(pid=4242)
+        t._own_job_if_windows()
+        assert t._job is None
+        assert closed == [777]
+
+    def test_assign_to_job_returns_false_when_open_process_fails(self, monkeypatch):
+        fake_kernel32 = types.SimpleNamespace(OpenProcess=lambda *a, **kw: 0)
+        monkeypatch.setattr(
+            tunnel.ctypes, "windll", types.SimpleNamespace(kernel32=fake_kernel32), raising=False
+        )
+        assert tunnel._assign_to_job(555, 4242) is False
+
+    def test_assign_to_job_returns_false_when_assign_call_fails(self, monkeypatch):
+        fake_kernel32 = types.SimpleNamespace(
+            OpenProcess=lambda *a, **kw: 99,
+            AssignProcessToJobObject=lambda job, handle: 0,
+            CloseHandle=lambda h: None,
+        )
+        monkeypatch.setattr(
+            tunnel.ctypes, "windll", types.SimpleNamespace(kernel32=fake_kernel32), raising=False
+        )
+        assert tunnel._assign_to_job(555, 4242) is False
+
     def test_stop_closes_the_job_handle(self, monkeypatch):
         closed = []
         fake_kernel32 = types.SimpleNamespace(CloseHandle=lambda h: closed.append(h))

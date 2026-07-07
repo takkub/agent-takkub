@@ -238,19 +238,23 @@ def _create_kill_on_close_job() -> int | None:
         return None
 
 
-def _assign_to_job(job: int, pid: int) -> None:
+def _assign_to_job(job: int, pid: int) -> bool:
+    """Returns whether the process is actually now protected by `job` — a
+    caller that ignores this and assumes success believes a crash kills the
+    child when in fact assignment silently failed (e.g. OpenProcess denied,
+    already assigned to another job on old Windows without job nesting)."""
     try:
         kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
         _PROCESS_ALL_ACCESS = 0x1F0FFF
         handle = kernel32.OpenProcess(_PROCESS_ALL_ACCESS, False, pid)
         if not handle:
-            return
+            return False
         try:
-            kernel32.AssignProcessToJobObject(job, handle)
+            return bool(kernel32.AssignProcessToJobObject(job, handle))
         finally:
             kernel32.CloseHandle(handle)
     except Exception:
-        pass
+        return False
 
 
 class Tunnel:
@@ -280,9 +284,16 @@ class Tunnel:
         if sys.platform != "win32" or self._proc is None:
             return
         job = _create_kill_on_close_job()
-        if job is not None:
-            _assign_to_job(job, self._proc.pid)
+        if job is None:
+            return
+        if _assign_to_job(job, self._proc.pid):
             self._job = job
+        else:
+            _log.warning("remote tunnel: process not assigned to kill-on-close job object")
+            try:
+                ctypes.windll.kernel32.CloseHandle(job)  # type: ignore[attr-defined]
+            except Exception:
+                pass
 
     def _start_named(self) -> None:
         if not self._config.credentials_json or not self._public_url:
