@@ -18,6 +18,22 @@
 
 ---
 
+## 📱 Mobile Remote Control (PWA)
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/takkub/agent-takkub/main/assets/mobile-remote.png" alt="Takkub Remote — drive your Lead from your phone" width="300">
+</p>
+
+*Step away from the desk — pair your phone once (link / QR) and watch **and steer** the Lead from anywhere, through an install-free PWA.*
+
+* **📲 Install-free PWA** — open the paired link, *Add to Home Screen*, done. Offline-capable app shell, no store.
+* **💬 Live Lead console** — the Lead's replies stream to your phone in real time (with a "still working…" indicator so you always know it's alive); type back to steer it.
+* **📊 Pulse** — a glanceable, project-grouped view of which teammates are running and for how long.
+* **🎛️ View vs. control** — read-only by default; flip to control mode to send prompts or open projects remotely.
+* **🔒 Three-factor, off by default** — secret path + bearer token (never in the QR) + a password gate, on a loopback-only server behind a Cloudflare tunnel, with per-client sessions & brute-force lockout. Data-minimized: never ships raw tool output, commands, or filesystem paths. Turn it on from the cockpit's **🌐 Remote** chip when you want it.
+
+---
+
 ## ✨ Why agent-takkub?
 
 A single AI agent struggles with big features: context fills up, sub-tasks conflict, and everything runs serially. `agent-takkub` uses the **Lead–Specialist pattern**: you prompt one **Lead** agent, and it delegates isolated, specialized sub-tasks to real `claude` processes running concurrently.
