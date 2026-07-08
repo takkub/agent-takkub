@@ -184,14 +184,37 @@ class TestRemoteConfig:
         remote_config.path().write_text("[1, 2, 3]", encoding="utf-8")
         assert RemoteConfig.load() == RemoteConfig()
 
-    def test_corrupt_tunnel_subdict_falls_back_to_default(self, _isolated):
+    def test_unknown_tunnel_subkey_is_ignored_not_reset(self, _isolated):
+        """L1 fix (2026-07-07 audit): an unknown `tunnel` key from a newer
+        build used to raise TypeError and silently reset the *entire*
+        config to default (remote off) — it must now just be filtered out,
+        same as the top-level unknown-key handling."""
         import agent_takkub.remote.config as remote_config
 
         remote_config.path().parent.mkdir(parents=True, exist_ok=True)
         remote_config.path().write_text(
             json.dumps({"enabled": True, "tunnel": {"bogus_field": 1}}), encoding="utf-8"
         )
-        assert RemoteConfig.load() == RemoteConfig()
+        cfg = RemoteConfig.load()
+        assert cfg.enabled is True
+        assert cfg.tunnel == TunnelConfig()
+
+    def test_unknown_tunnel_subkey_alongside_known_ones_preserves_known(self, _isolated):
+        import agent_takkub.remote.config as remote_config
+
+        remote_config.path().parent.mkdir(parents=True, exist_ok=True)
+        remote_config.path().write_text(
+            json.dumps(
+                {
+                    "enabled": True,
+                    "tunnel": {"type": "bat", "credentials_json": "c.json", "bogus_field": 1},
+                }
+            ),
+            encoding="utf-8",
+        )
+        cfg = RemoteConfig.load()
+        assert cfg.enabled is True
+        assert cfg.tunnel == TunnelConfig(type="bat", credentials_json="c.json")
 
     def test_unknown_top_level_keys_are_ignored(self, _isolated):
         import agent_takkub.remote.config as remote_config

@@ -135,6 +135,15 @@ class TestPulseDataMinimization:
         assert sent["cmd"] == "list", "B2: pulse must never use cmd:'status'"
         assert sent["auth"] == "lead-tok"
 
+    def test_forwards_from_project_to_cli_server(self, monkeypatch, fake_orch):
+        srv = _FakeCliServer({"ok": True, "msg": "status", "status": {}})
+        _patch_port(monkeypatch, srv.port)
+        try:
+            api.pulse(fake_orch, "proj-b")
+        finally:
+            srv.close()
+        assert srv.received[0]["from_project"] == "proj-b"
+
     def test_no_port_file_raises_service_unavailable(self, monkeypatch, fake_orch):
         monkeypatch.setattr(api._config, "read_port", lambda: None)
         with pytest.raises(api.RemoteApiError) as excinfo:
@@ -171,6 +180,15 @@ class TestLeadSay:
         assert sent["from"] == "remote"
         assert sent["msg"] == "hello lead"
 
+    def test_forwards_from_project_to_cli_server(self, monkeypatch, fake_orch):
+        srv = _FakeCliServer({"ok": True, "msg": "sent to lead"})
+        _patch_port(monkeypatch, srv.port)
+        try:
+            api.lead_say(fake_orch, "hello", "proj-b")
+        finally:
+            srv.close()
+        assert srv.received[0]["from_project"] == "proj-b"
+
     def test_cli_server_failure_propagates(self, monkeypatch, fake_orch):
         srv = _FakeCliServer({"ok": False, "msg": "lead is not running"})
         _patch_port(monkeypatch, srv.port)
@@ -182,19 +200,190 @@ class TestLeadSay:
         assert excinfo.value.status == 502
 
 
+class _FakeMainWindow:
+    def __init__(self) -> None:
+        self.opened: list[str] = []
+        self._on_open: object = None
+
+    def _open_project_tab(self, project_name: str) -> None:
+        self.opened.append(project_name)
+        if self._on_open is not None:
+            self._on_open(project_name)
+
+
+class _FakeOrchWithParent:
+    """`open_project` reaches main_window via `orch.parent()` — the Qt
+    parent `main_window.py` passes to `Orchestrator(self)` at construction
+    (never a static import, see api.py's docstring)."""
+
+    def __init__(self, main_window) -> None:
+        self._main_window = main_window
+
+    def parent(self):
+        return self._main_window
+
+
+class TestOpenProject:
+    def test_rejects_project_not_in_projects_json(self, monkeypatch):
+        monkeypatch.setattr(api._config, "list_project_names", lambda: ["proj-a"])
+        monkeypatch.setattr(api._config, "get_open_tabs", lambda: [])
+        with pytest.raises(api.RemoteApiError) as excinfo:
+            api.open_project(_FakeOrchWithParent(_FakeMainWindow()), "ghost-project")
+        assert excinfo.value.status == 400
+
+    def test_rejects_non_string_project(self, monkeypatch):
+        monkeypatch.setattr(api._config, "list_project_names", lambda: ["proj-a"])
+        monkeypatch.setattr(api._config, "get_open_tabs", lambda: [])
+        with pytest.raises(api.RemoteApiError) as excinfo:
+            api.open_project(_FakeOrchWithParent(_FakeMainWindow()), 123)
+        assert excinfo.value.status == 400
+
+    def test_already_open_is_idempotent_noop(self, monkeypatch):
+        monkeypatch.setattr(api._config, "list_project_names", lambda: ["proj-a"])
+        monkeypatch.setattr(api._config, "get_open_tabs", lambda: ["proj-a"])
+        main_window = _FakeMainWindow()
+        result = api.open_project(_FakeOrchWithParent(main_window), "proj-a")
+        assert result == {"ok": True, "project": "proj-a"}
+        assert main_window.opened == [], (
+            "already-open project must not re-trigger _open_project_tab"
+        )
+
+    def test_success_opens_new_project_via_main_window(self, monkeypatch):
+        monkeypatch.setattr(api._config, "list_project_names", lambda: ["proj-a", "proj-b"])
+        open_tabs = ["proj-a"]
+        monkeypatch.setattr(api._config, "get_open_tabs", lambda: open_tabs)
+        main_window = _FakeMainWindow()
+        main_window._on_open = open_tabs.append
+        result = api.open_project(_FakeOrchWithParent(main_window), "proj-b")
+        assert result == {"ok": True, "project": "proj-b"}
+        assert main_window.opened == ["proj-b"]
+
+    def test_folder_missing_surfaces_as_conflict(self, monkeypatch):
+        """`_open_project_tab` silently no-ops (status-bar message only) when
+        the project's folder is missing on disk — `open_project` must not
+        report a false `ok` in that case."""
+        monkeypatch.setattr(api._config, "list_project_names", lambda: ["proj-a"])
+        monkeypatch.setattr(api._config, "get_open_tabs", lambda: [])
+        main_window = _FakeMainWindow()  # opened stays [] — simulates the no-op
+        with pytest.raises(api.RemoteApiError) as excinfo:
+            api.open_project(_FakeOrchWithParent(main_window), "proj-a")
+        assert excinfo.value.status == 409
+
+    def test_main_window_unreachable_raises_server_error(self, monkeypatch):
+        monkeypatch.setattr(api._config, "list_project_names", lambda: ["proj-a"])
+        monkeypatch.setattr(api._config, "get_open_tabs", lambda: [])
+
+        class _NoOpenTabMethod:
+            pass
+
+        with pytest.raises(api.RemoteApiError) as excinfo:
+            api.open_project(_FakeOrchWithParent(_NoOpenTabMethod()), "proj-a")
+        assert excinfo.value.status == 500
+
+
+class TestLeadHistory:
+    """Gemini CRITICAL/HIGH: `/api/lead/history` lets the PWA repopulate its
+    chat log on connect/reconnect/project-switch instead of a blank screen.
+    Reuses `notify.py`'s uuid->jsonl resolution + text extraction verbatim
+    so this can never disagree with the live SSE tail on what counts as a
+    reply."""
+
+    class _Orch:
+        pass
+
+    def test_no_resolvable_session_returns_empty_messages(self, monkeypatch):
+        monkeypatch.setattr(api.notify, "resolve_lead_jsonl", lambda orch, ns: None)
+        result = api.lead_history(self._Orch(), "proj-a")
+        assert result == {"project": "proj-a", "messages": []}
+
+    def test_reads_recent_messages_oldest_first_with_kind_field(self, monkeypatch, tmp_path):
+        path = tmp_path / "uuid-1.jsonl"
+        monkeypatch.setattr(api.notify, "resolve_lead_jsonl", lambda orch, ns: path)
+        monkeypatch.setattr(
+            api.notify,
+            "read_recent_lead_messages",
+            lambda p, limit: [
+                {"text": "first", "kind": "me"},
+                {"text": "second", "kind": "lead"},
+            ],
+        )
+        result = api.lead_history(self._Orch(), "proj-a", limit=2)
+        assert result == {
+            "project": "proj-a",
+            "messages": [
+                {"text": "first", "kind": "me"},
+                {"text": "second", "kind": "lead"},
+            ],
+        }
+
+    def test_limit_defaults_to_200(self, monkeypatch, tmp_path):
+        seen = {}
+        monkeypatch.setattr(api.notify, "resolve_lead_jsonl", lambda orch, ns: tmp_path)
+
+        def _fake_read(path, limit):
+            seen["limit"] = limit
+            return []
+
+        monkeypatch.setattr(api.notify, "read_recent_lead_messages", _fake_read)
+        api.lead_history(self._Orch(), "proj-a")
+        assert seen["limit"] == 200
+
+    def test_limit_is_clamped_to_the_max(self, monkeypatch, tmp_path):
+        seen = {}
+        monkeypatch.setattr(api.notify, "resolve_lead_jsonl", lambda orch, ns: tmp_path)
+
+        def _fake_read(path, limit):
+            seen["limit"] = limit
+            return []
+
+        monkeypatch.setattr(api.notify, "read_recent_lead_messages", _fake_read)
+        api.lead_history(self._Orch(), "proj-a", limit=99999)
+        assert seen["limit"] == 200
+
+    def test_non_numeric_limit_falls_back_to_default(self, monkeypatch, tmp_path):
+        seen = {}
+        monkeypatch.setattr(api.notify, "resolve_lead_jsonl", lambda orch, ns: tmp_path)
+
+        def _fake_read(path, limit):
+            seen["limit"] = limit
+            return []
+
+        monkeypatch.setattr(api.notify, "read_recent_lead_messages", _fake_read)
+        api.lead_history(self._Orch(), "proj-a", limit="not-a-number")
+        assert seen["limit"] == 200
+
+
 class TestProjects:
     def test_reads_active_and_known_projects(self, monkeypatch):
-        # M-1/M-3: each project is `{name, active}`, and `mode` rides along
-        # in the same response — the PWA has no dedicated mode endpoint.
+        # M-1/M-3: each project is `{name, active, path}`, and `mode` rides
+        # along in the same response — the PWA has no dedicated mode
+        # endpoint. `path` is the project's real Lead cwd (project picker),
+        # not the placeholder the PWA used to fake client-side.
         monkeypatch.setattr(api._config, "active_project", lambda: ("proj-a", {}))
         monkeypatch.setattr(api._config, "list_project_names", lambda: ["proj-a", "proj-b"])
         monkeypatch.setattr(api._config, "get_open_tabs", lambda: ["proj-a"])
+        monkeypatch.setattr(
+            api._config,
+            "lead_cwd",
+            lambda name: {"proj-a": "/repos/proj-a", "proj-b": "/repos/proj-b"}.get(name),
+        )
         result = api.projects(None, "control")
         assert result == {
-            "projects": [{"name": "proj-a", "active": True}, {"name": "proj-b", "active": False}],
+            "projects": [
+                {"name": "proj-a", "active": True, "path": "/repos/proj-a"},
+                {"name": "proj-b", "active": False, "path": "/repos/proj-b"},
+            ],
             "mode": "control",
             "open_tabs": ["proj-a"],
         }
+
+    def test_path_falls_back_to_empty_string_when_unresolved(self, monkeypatch):
+        monkeypatch.setattr(api._config, "active_project", lambda: (None, {}))
+        monkeypatch.setattr(api._config, "list_project_names", lambda: ["proj-a"])
+        monkeypatch.setattr(api._config, "get_open_tabs", lambda: [])
+        monkeypatch.setattr(api._config, "lead_cwd", lambda name: None)
+        result = api.projects(None)
+        assert result["projects"] == [{"name": "proj-a", "active": False, "path": ""}]
 
     def test_mode_defaults_to_view(self, monkeypatch):
         monkeypatch.setattr(api._config, "active_project", lambda: (None, {}))

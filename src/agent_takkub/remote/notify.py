@@ -4,93 +4,311 @@ orchestrator, not guessed):
 
 * done events: `orch.agentDone` (orchestrator.py, emitted on every
   `takkub done`).
-* live Lead output: `orch.statusChanged` re-discovers which pane is
-  currently "lead" for the active project, then hooks that pane's
-  `PtySession.bytesIn` — never `register_pane` monkeypatching (ruled out
-  as too invasive during design cross-check).
+* live Lead output: tails each open project's Lead pane **structured
+  session JSONL** — `<CLAUDE_CONFIG_DIR>/projects/<encoded-cwd>/<uuid>.jsonl`
+  (same store `chatlog_scanner.py` / `takkub search` read) — instead of
+  scraping raw PTY bytes.
+
+Why the switch (mobile junk-elimination, proven not guessed): a raw Lead
+transcript is TUI-redraw churn (`\\r`=4200, `\\n`=0 in a real capture) — the
+spinner, startup splash, resume menu and cursor-redraw shrapnel a regex
+filter can reduce but never fully eliminate. Claude Code's own JSONL event
+log is the same conversation with none of that: `type=="assistant"` records
+carry `message.content[]` blocks, and only `type=="text"` blocks are real
+reply prose — no spinner, no box-drawing, no ANSI, ever. Reading that
+instead of the pty stream makes the junk-filter obsolete rather than better.
+
+Session resolution: `Orchestrator._pane_state[_exit_key(project_ns, "lead")]`
+carries `session_uuid` (stamped at spawn — spawn_engine.py's `--session-id`/
+`--resume`). A UUID is unique across the whole `~/.claude` (or profile-
+isolated `<DATA_HOME>/claude-config`) store, so the file is found by
+`glob("*/{uuid}.jsonl")` under `user_profile.config_dir_for(project_ns) /
+"projects"` — the exact `CLAUDE_CONFIG_DIR` that project's panes were
+spawned with (`pane_env.inject_user_profile_env`), so a project pinned to a
+non-default profile still resolves correctly.
 
 Runs entirely on the Qt main thread (constructed inside
-`RemoteControl._start`) — this is a normal Qt object wired to normal Qt
-signals, not something a handler thread ever touches.
+`RemoteControl._start`) — a normal Qt object on a normal `QTimer`, not
+something a handler thread ever touches. Each poll tick only reads the byte
+range appended since the last tick (per-project `offset`), never re-reads
+the whole file — a Lead session log can grow into the tens of MB over a
+long run.
 
-Scoping (ponytail, matches `api.py`): tracks the orchestrator's
-currently-active project's Lead pane only. Upgrade path: accept a project
-name (e.g. stamped on the SSE ticket) once the PWA offers a project picker.
+Multi-project (project picker): every open project's Lead session is tailed
+independently, each stamped with its own `project_ns` at emit time — no
+shared "current project" pointer a mid-poll switch could mis-stamp.
 
 Cross-project isolation (H-A): `orch.agentDone` fires for *every* project,
 not just the active one, so every push is stamped with the event's own
 `project_ns` and `SSEBroadcaster.push` drops it for any client whose ticket
-was issued for a different project.
+was issued for a different project. Live Lead output is stamped the same
+way, per-project, for the same reason.
 """
 
 from __future__ import annotations
 
-import re
+import json
+from dataclasses import dataclass
+from pathlib import Path
 
 from PyQt6.QtCore import QObject, QTimer
 
-_MAX_EVENT_CHARS = 4000
-_COALESCE_MS = 150
-_ANSI_RE = re.compile(rb"\x1b\[[0-9;?]*[a-zA-Z]")
+from ..orchestrator_text import _exit_key
+from ..user_profile import config_dir_for
 
-# ── junk-line filter (best-effort heuristic, see UI-junkfilter-backend.md):
-# strips TUI chrome (composer box, spinner/status footer, tool-call bullets)
-# from decoded Lead output before it reaches the SSE broadcaster, keeping
-# only the actual conversation text + done/summary content.
-_BOX_LINE_RE = re.compile(r"^\s*[│┃╭╮╯╰┌┐└┘├┤┬┴┼═║╔╗╚╝╠╣╦╩╬]")
-_GLYPH_ONLY_RE = re.compile(
-    r"^[\s│─┃┄┅┆┇┈┉┊┋╭╮╯╰╱╲╳┌┐└┘├┤┬┴┼═║╔╗╚╝╠╣╦╩╬"
-    r"✻✶✳✢✽⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏·•]*$"
-)
-_TOOL_BULLET_RE = re.compile(r"^\s*⏺")
-_SPINNER_PREFIX_RE = re.compile(r"^\s*[✻✶✳✢✽⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]")
-_XML_TAG_LINE_RE = re.compile(r"^\s*</?[a-zA-Z][\w:.-]*(?:\s[^>]*)?/?>\s*$")
-_CHROME_RE = re.compile(
-    r"esc to interrupt"
-    r"|for shortcuts"
-    r"|bypass permissions"
-    r"|booting mcp"
-    r"|context left"
-    r"|auto-compact"
-    r"|usage limit"
-    r"|\d[\d,.]*\s*[kmb]?\s*tokens?\b",
-    re.IGNORECASE,
-)
+# Per-message cap for a single Lead reply (live SSE event, history entry, and
+# done note). Generous on purpose — the phone should show the WHOLE message
+# (long plans/tables/summaries included), not a cut-off fragment. Still bounded
+# so one pathological megabyte reply can't blow up the SSE payload / mobile DOM.
+_MAX_EVENT_CHARS = 16000
+_POLL_MS = 500
+_DEFAULT_HISTORY_LIMIT = 200
+# History reads are one-shot (reconnect/project-switch), not the live poll
+# tail, but a long-running Lead session's JSONL can grow into the tens of
+# MB — bound how much of it a single request reads instead of loading the
+# whole file every time. 8 MB comfortably covers 200 assistant replies plus
+# the tool_use/tool_result/thinking records interleaved between them.
+_HISTORY_MAX_BYTES = 8 * 1024 * 1024
 
 
-def _is_junk_line(line: str) -> bool:
-    if _GLYPH_ONLY_RE.match(line) and line.strip():
-        return True
-    if _BOX_LINE_RE.match(line):
-        return True
-    if _TOOL_BULLET_RE.match(line):
-        return True
-    if _SPINNER_PREFIX_RE.match(line):
-        return True
-    if _XML_TAG_LINE_RE.match(line):
-        return True
-    if _CHROME_RE.search(line):
-        return True
-    return False
+@dataclass
+class _Tail:
+    """Per-project incremental-read state for one Lead session's JSONL."""
+
+    path: Path
+    session_uuid: str
+    offset: int = 0
+    # bytes held back from the previous read because they didn't end in a
+    # `\n` yet — Claude Code writes one JSON object per line, and a poll can
+    # land mid-write.
+    partial: bytes = b""
 
 
-def _filter_junk(text: str) -> str:
-    kept: list[str] = []
-    prev_blank = True  # drop leading blank lines
-    for line in text.split("\n"):
-        if _is_junk_line(line):
+# Map a Claude tool name → a coarse activity category the phone can show as
+# "กำลัง<…>". Data-min on purpose: only the *kind* of work travels to the
+# client — never the tool's arguments (file paths, command strings, query
+# text), which would leak workstation detail the remote deliberately hides.
+_TOOL_ACTIVITY = {
+    "read": "reading",
+    "glob": "reading",
+    "grep": "reading",
+    "edit": "editing",
+    "write": "editing",
+    "notebookedit": "editing",
+    "bash": "running",
+    "powershell": "running",
+    "webfetch": "web",
+    "websearch": "web",
+    "task": "delegating",
+    "agent": "delegating",
+    "workflow": "delegating",
+    "skill": "skill",
+}
+
+
+def _lead_activity(rec: dict) -> str | None:
+    """Coarse activity category for a `type=="assistant"` record whose content
+    is tool_use/thinking (no reply prose yet), or None if it isn't that. Used
+    to give the PWA a readable "กำลัง…" status instead of a bare spinner."""
+    if rec.get("type") != "assistant":
+        return None
+    msg = rec.get("message")
+    if not isinstance(msg, dict):
+        return None
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return None
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "tool_use":
+            name = str(block.get("name") or "").lower()
+            return _TOOL_ACTIVITY.get(name, "working")
+    return None
+
+
+def _lead_text_blocks(rec: dict) -> list[str]:
+    """Return the reply prose in a `type=="assistant"` JSONL record.
+
+    Only `type=="text"` content blocks qualify — `tool_use`, `tool_result`
+    and `thinking` blocks are deliberately skipped (per spec: assistant text
+    only, everything else is not conversation the Lead "said").
+    """
+    if rec.get("type") != "assistant":
+        return []
+    msg = rec.get("message")
+    if not isinstance(msg, dict):
+        return []
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return []
+    out: list[str] = []
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "text":
             continue
-        if not line.strip():
-            if prev_blank:
-                continue
-            kept.append("")
-            prev_blank = True
+        text = (block.get("text") or "").strip()
+        if text:
+            out.append(text)
+    return out
+
+
+# Claude Code local-command / caveat wrapper markup — command internals and
+# stdout that Claude Code itself injects as a `type=="user"` record, not
+# something a human typed (e.g. running `/compact`).
+_COMMAND_WRAPPER_PREFIXES = (
+    "<command-name>",
+    "<command-message>",
+    "<command-args>",
+    "<local-command-stdout>",
+    "<local-command-caveat>",
+)
+
+
+def _lead_user_text(rec: dict) -> str | None:
+    """Return the user-typed text in a `type=="user"` JSONL record, or None
+    if it carries no human-typed prose. Mirrors `chatlog_scanner._user_text_only`
+    — only `text` content blocks (or a bare string `content`) count; a
+    `tool_result` block is a "user"-role record generated by a tool, not
+    something a human typed, and is deliberately skipped. `isMeta` records
+    (image placeholders, resume injection, skill-injected prompts, caveats —
+    which can leak absolute workstation paths) and Claude Code's own
+    slash-command wrapper markup are also not human-typed prose and are
+    skipped."""
+    if rec.get("type") != "user":
+        return None
+    if rec.get("isMeta"):
+        return None
+    msg = rec.get("message")
+    if not isinstance(msg, dict):
+        return None
+    content = msg.get("content")
+    if isinstance(content, str):
+        text = content.strip()
+        if not text or text.startswith(_COMMAND_WRAPPER_PREFIXES):
+            return None
+        return text
+    if not isinstance(content, list):
+        return None
+    parts: list[str] = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "text":
+            text = (block.get("text") or "").strip()
+            if text:
+                parts.append(text)
+    joined = "\n".join(parts).strip()
+    if not joined or joined.startswith(_COMMAND_WRAPPER_PREFIXES):
+        return None
+    return joined
+
+
+# `orchestrator.send()`'s header for a remote-originated Lead message
+# (`from_role="remote"`) — stripped from history so the PWA doesn't echo its
+# own routing prefix back as part of the bubble text.
+_REMOTE_PREFIX = "[remote → lead] "
+
+
+def _strip_remote_prefix(text: str) -> str:
+    return text[len(_REMOTE_PREFIX) :] if text.startswith(_REMOTE_PREFIX) else text
+
+
+def _resolve_jsonl_path(project_ns: str, session_uuid: str) -> Path | None:
+    try:
+        base = config_dir_for(project_ns) / "projects"
+        matches = list(base.glob(f"*/{session_uuid}.jsonl"))
+    except OSError:
+        return None
+    return matches[0] if matches else None
+
+
+def _lead_session_uuid(orch, project_ns: str) -> str | None:
+    panes_by_project = getattr(orch, "_panes_by_project", None)
+    pane_state = getattr(orch, "_pane_state", None)
+    if not isinstance(panes_by_project, dict) or not isinstance(pane_state, dict):
+        return None
+    if "lead" not in panes_by_project.get(project_ns, ()):
+        return None
+    ps = pane_state.get(_exit_key(project_ns, "lead"))
+    return getattr(ps, "session_uuid", None) if ps is not None else None
+
+
+def resolve_lead_jsonl(orch, project_ns: str) -> Path | None:
+    """Locate the open Lead pane's session JSONL for `project_ns` — used by
+    the one-shot `/api/lead/history` endpoint (`api.lead_history`). Returns
+    None if there is no open Lead pane, no session uuid yet, or the file
+    hasn't been created/flushed."""
+    session_uuid = _lead_session_uuid(orch, project_ns)
+    if not session_uuid:
+        return None
+    return _resolve_jsonl_path(project_ns, session_uuid)
+
+
+def _tail_start_offset(path: Path, size: int) -> int:
+    """Where a newly-created tail should start reading from: the current
+    EOF, backed up to the last complete line boundary if EOF currently
+    lands mid-record (Claude Code is still writing that JSON object and
+    hasn't appended its trailing `\\n` yet). Without this, the tail's first
+    read would only ever see the *tail end* of that record once the
+    newline finally lands, fail to parse as JSON, and drop it for good."""
+    if size == 0:
+        return 0
+    try:
+        with path.open("rb") as fh:
+            fh.seek(size - 1)
+            if fh.read(1) == b"\n":
+                return size
+            chunk_size = 65536
+            pos = size
+            while pos > 0:
+                read_size = min(chunk_size, pos)
+                pos -= read_size
+                fh.seek(pos)
+                chunk = fh.read(read_size)
+                idx = chunk.rfind(b"\n")
+                if idx != -1:
+                    return pos + idx + 1
+            return 0
+    except OSError:
+        return size
+
+
+def read_recent_lead_messages(path: Path, limit: int = _DEFAULT_HISTORY_LIMIT) -> list[dict]:
+    """Read (at most the last `_HISTORY_MAX_BYTES` of) `path` and return the
+    last `limit` conversation turns, oldest first, **in the exact order they
+    occurred** in the JSONL — assistant reply text (`kind: "lead"`) and
+    user-typed prompts (`kind: "me"`) interleaved. `tool_result`/`tool_use`/
+    `thinking` blocks and other non-conversation records never produce an
+    entry (mobile junk-elimination — same contract the live tail enforces)."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return []
+    truncated = size > _HISTORY_MAX_BYTES
+    try:
+        with path.open("rb") as fh:
+            if truncated:
+                fh.seek(size - _HISTORY_MAX_BYTES)
+            raw = fh.read()
+    except OSError:
+        return []
+    lines = raw.split(b"\n")
+    if truncated:
+        lines = lines[1:]  # first fragment after an arbitrary seek may be mid-line
+    out: list[dict] = []
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
             continue
-        kept.append(line)
-        prev_blank = False
-    while kept and kept[-1] == "":
-        kept.pop()
-    return "\n".join(kept)
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        lead_texts = _lead_text_blocks(rec)
+        if lead_texts:
+            out.append({"text": "\n".join(lead_texts)[:_MAX_EVENT_CHARS], "kind": "lead"})
+            continue
+        user_text = _lead_user_text(rec)
+        if user_text:
+            user_text = _strip_remote_prefix(user_text)
+            out.append({"text": user_text[:_MAX_EVENT_CHARS], "kind": "me"})
+    return out[-limit:]
 
 
 class LeadNotifier(QObject):
@@ -98,79 +316,118 @@ class LeadNotifier(QObject):
         super().__init__()
         self._orch = orch
         self._broadcaster = broadcaster
-        self._session = None
-        self._project_ns: str | None = None
-        # list of (project_ns, bytearray) — project_ns is captured per-chunk at
-        # receipt time (B1), not read fresh at flush time. A mid-coalesce
-        # project switch (_resync_lead_session changes self._project_ns before
-        # the 150ms timer fires) would otherwise stamp buffered bytes from the
-        # old project with the new project's namespace.
-        self._buf: list[tuple[str | None, bytearray]] = []
+        # project_ns -> _Tail for every open project's live Lead session.
+        self._tails: dict[str, _Tail] = {}
         self._timer = QTimer(self)
-        self._timer.setSingleShot(True)
-        self._timer.timeout.connect(self._flush)
+        self._timer.setInterval(_POLL_MS)
+        self._timer.timeout.connect(self._poll_all)
+        self._timer.start()
 
         orch.agentDone.connect(self._on_done)
-        orch.statusChanged.connect(self._resync_lead_session)
-        self._resync_lead_session()
+        orch.statusChanged.connect(self._resync)
+        self._resync()
 
-    # ── discover / rediscover the live Lead pane's session ──────────────
-    def _pane_for_role(self, role: str):
+    # ── discover / rediscover every open project's Lead session uuid ────
+    def _lead_uuids_by_project(self) -> dict[str, str]:
         panes_by_project = getattr(self._orch, "_panes_by_project", None)
-        if not isinstance(panes_by_project, dict):
-            return None
-        project_ns = self._orch._resolve_project(None)
-        return panes_by_project.get(project_ns, {}).get(role)
+        pane_state = getattr(self._orch, "_pane_state", None)
+        if not isinstance(panes_by_project, dict) or not isinstance(pane_state, dict):
+            return {}
+        found: dict[str, str] = {}
+        for project_ns, panes in panes_by_project.items():
+            if "lead" not in panes:
+                continue
+            ps = pane_state.get(_exit_key(project_ns, "lead"))
+            uuid = getattr(ps, "session_uuid", None) if ps is not None else None
+            if uuid:
+                found[project_ns] = uuid
+        return found
 
-    def _resync_lead_session(self) -> None:
-        self._project_ns = self._orch._resolve_project(None)
-        pane = self._pane_for_role("lead")
-        session = getattr(pane, "session", None) if pane is not None else None
-        if session is self._session:
-            return
-        if self._session is not None:
+    def _resolve_jsonl(self, project_ns: str, session_uuid: str) -> Path | None:
+        return _resolve_jsonl_path(project_ns, session_uuid)
+
+    def _resync(self) -> None:
+        wanted = self._lead_uuids_by_project()
+
+        # drop projects that closed, or whose Lead session uuid changed
+        # (respawn/resume) — a stale tail must never keep feeding events.
+        for project_ns, tail in list(self._tails.items()):
+            if wanted.get(project_ns) != tail.session_uuid:
+                del self._tails[project_ns]
+
+        # start tailing newly-discovered sessions only — a project already
+        # tailing its current session is left untouched (offset preserved).
+        # A project whose jsonl hasn't been created/flushed yet (path is
+        # still None) simply stays out of `_tails` and is retried here on
+        # every call — `_poll_all()` calls `_resync()` on every tick, so a
+        # session that resolves late (fresh spawn/resume timing) is picked
+        # up on the very next poll instead of only on the next
+        # `statusChanged` signal.
+        for project_ns, session_uuid in wanted.items():
+            if project_ns in self._tails:
+                continue
+            path = self._resolve_jsonl(project_ns, session_uuid)
+            if path is None:
+                continue
             try:
-                self._session.bytesIn.disconnect(self._on_lead_bytes)
-            except (TypeError, RuntimeError):
-                pass
-        self._session = session
-        if session is not None:
-            session.bytesIn.connect(self._on_lead_bytes)
+                size = path.stat().st_size
+            except OSError:
+                size = 0
+            offset = _tail_start_offset(path, size)
+            self._tails[project_ns] = _Tail(path=path, session_uuid=session_uuid, offset=offset)
 
-    # ── live output: coalesce + cap before it ever reaches SSE (B3) ─────
-    def _on_lead_bytes(self, data: bytes) -> None:
-        cleaned = _ANSI_RE.sub(b"", data)
-        if not cleaned:
+    # ── incremental tail: read only the delta appended since last poll ──
+    def _poll_all(self) -> None:
+        self._resync()
+        for project_ns, tail in list(self._tails.items()):
+            self._poll_one(project_ns, tail)
+
+    def _poll_one(self, project_ns: str, tail: _Tail) -> None:
+        try:
+            size = tail.path.stat().st_size
+        except OSError:
             return
-        ns = self._project_ns
-        if self._buf and self._buf[-1][0] == ns:
-            self._buf[-1][1].extend(cleaned)
-        else:
-            self._buf.append((ns, bytearray(cleaned)))
-        cap = _MAX_EVENT_CHARS * 4
-        total = sum(len(chunk) for _, chunk in self._buf)
-        while total > cap and self._buf:
-            overflow = total - cap
-            _, oldest = self._buf[0]
-            if len(oldest) <= overflow:
-                total -= len(oldest)
-                self._buf.pop(0)
+        if size <= tail.offset:
+            return
+        try:
+            with tail.path.open("rb") as fh:
+                fh.seek(tail.offset)
+                chunk = fh.read(size - tail.offset)
+        except OSError:
+            return
+        tail.offset = size
+        data = tail.partial + chunk
+        lines = data.split(b"\n")
+        tail.partial = lines.pop()  # last line may be mid-write; hold it back
+        activity: str | None = None
+        pushed_text = False
+        for raw_line in lines:
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            texts = _lead_text_blocks(rec)
+            if texts:
+                joined = "\n".join(texts)[:_MAX_EVENT_CHARS]
+                self._broadcaster.push("lead", joined, project_ns)
+                pushed_text = True
             else:
-                del oldest[:overflow]
-                total -= overflow
-        if not self._timer.isActive():
-            self._timer.start(_COALESCE_MS)
-
-    def _flush(self) -> None:
-        if not self._buf:
-            return
-        chunks = self._buf
-        self._buf = []
-        for ns, chunk in chunks:
-            raw = bytes(chunk).decode("utf-8", errors="replace")
-            text = _filter_junk(raw)[-_MAX_EVENT_CHARS:]
-            if text:
-                self._broadcaster.push("lead", text, ns)
+                # Assistant record with only tool_use/thinking blocks (no reply
+                # prose yet) = the Lead is mid-turn, actively working. We never
+                # forward the tool junk itself (user asked for text-only), but a
+                # coarse activity category ("reading"/"running"/…) lets the PWA
+                # show a readable "กำลัง…" status so a long tool-heavy turn
+                # doesn't look frozen. Last activity in the batch wins.
+                found = _lead_activity(rec)
+                if found is not None:
+                    activity = found
+        # Only signal "working" when this batch showed activity but produced no
+        # reply text — a real text push already tells the PWA to drop the "…".
+        if activity is not None and not pushed_text:
+            self._broadcaster.push("working", activity, project_ns)
 
     # ── done events ───────────────────────────────────────────────────
     def _on_done(self, project_ns: str, role: str, note: str) -> None:
@@ -181,16 +438,11 @@ class LeadNotifier(QObject):
     def stop(self) -> None:
         for signal, slot in (
             (self._orch.agentDone, self._on_done),
-            (self._orch.statusChanged, self._resync_lead_session),
+            (self._orch.statusChanged, self._resync),
         ):
             try:
                 signal.disconnect(slot)
             except (TypeError, RuntimeError):
                 pass
-        if self._session is not None:
-            try:
-                self._session.bytesIn.disconnect(self._on_lead_bytes)
-            except (TypeError, RuntimeError):
-                pass
-            self._session = None
+        self._tails.clear()
         self._timer.stop()

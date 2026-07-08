@@ -7,7 +7,7 @@
  * Web Push (needs VAPID keys) is out of scope for this phase.
  */
 
-var CACHE_NAME = "takkub-remote-shell-v2";
+var CACHE_NAME = "takkub-remote-shell-v13";
 var SHELL_FILES = ["./", "./index.html", "./app.js", "./manifest.webmanifest"];
 
 self.addEventListener("install", function (event) {

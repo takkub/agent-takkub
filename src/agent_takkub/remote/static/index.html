@@ -36,7 +36,7 @@
                           double-scrolls and reads as "scroll ไม่ได้" on iOS */
     background: var(--bg);
     color: var(--fg);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Sarabun", Roboto, sans-serif;
     -webkit-text-size-adjust: 100%;
     overscroll-behavior-y: contain;
   }
@@ -66,11 +66,13 @@
 
   /* ---------- header ---------- */
   header {
-    padding: 12px 16px;
-    padding-top: max(12px, env(safe-area-inset-top));
+    padding: 10px 16px;
+    padding-top: max(10px, env(safe-area-inset-top));
     border-bottom: 1px solid var(--line);
     flex: none;
     background: rgba(9, 9, 11, 0.6);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
   }
   header .header-row {
     display: flex;
@@ -78,11 +80,25 @@
     justify-content: space-between;
     gap: 8px;
   }
+  #header-title-container {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
   header h1 {
     margin: 0;
-    font-size: 0.95rem;
+    font-size: 0.94rem;
     font-weight: 640;
     letter-spacing: -0.01em;
+    line-height: 1.2;
+  }
+  #header-subtitle {
+    display: block;
+    color: var(--faint);
+    font-weight: 400;
+    font-size: 0.68rem;
+    font-family: var(--mono);
+    line-height: 1.2;
   }
   #header-status {
     flex: none;
@@ -135,9 +151,9 @@
   main {
     flex: 1 1 auto;
     min-height: 0;
-    overflow-y: auto;
-    -webkit-overflow-scrolling: touch;
-    overscroll-behavior-y: contain;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
   }
 
   .view { display: none; height: 100%; flex-direction: column; }
@@ -210,6 +226,25 @@
     border-color: rgba(45, 212, 191, 0.4);
     background: rgba(45, 212, 191, 0.06);
   }
+  .project-row.tappable { cursor: pointer; }
+  .project-row.tappable:active { background: var(--card2); }
+  .project-row.readonly { opacity: 0.55; }
+  .project-row.opening { opacity: 0.75; pointer-events: none; }
+  .spin-icon {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border: 2px solid var(--line2);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.6s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .spin-icon { animation: none; } }
+  .project-row.selected {
+    border-color: var(--accent);
+    box-shadow: inset 0 0 0 1px var(--accent);
+  }
   .project-row .icon-box {
     flex: 0 0 auto;
     width: 32px;
@@ -261,46 +296,49 @@
     padding: 14px;
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 4px;
   }
   .msg {
-    max-width: 85%;
+    max-width: 100%;
+    min-width: 5.5em;
     padding: 10px 13px;
     border-radius: 14px;
-    font-size: 0.88rem;
-    line-height: 1.5;
-    white-space: pre-wrap;
+    font-size: 0.94rem;
+    line-height: 1.55;
+    text-align: left;
     word-break: break-word;
   }
-  .msg.lead {
-    align-self: flex-start;
-    background: var(--card);
-    border: 1px solid var(--line);
-    border-bottom-left-radius: 5px;
-    padding-top: 20px;
-    position: relative;
+  .msg.me, .msg.sys { white-space: pre-wrap; }
+  .msg.group-start { margin-top: 6px; }
+  #lead-log > .msg:first-child { margin-top: 0; }
+  .msg .who {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--mono);
+    font-size: 0.66rem;
+    color: var(--lead);
+    margin-bottom: 6px;
   }
-  .msg.lead::before {
-    content: "";
-    position: absolute;
-    top: 12px;
-    left: 13px;
+  .msg .who .dot {
     width: 6px;
     height: 6px;
     border-radius: 50%;
     background: var(--lead);
+    flex: none;
   }
-  .msg.lead::after {
-    content: "Lead";
-    position: absolute;
-    top: 7px;
-    left: 24px;
-    font-family: var(--mono);
-    font-size: 0.66rem;
-    color: var(--lead);
+  .msg .who .time {
+    color: var(--faint);
+    font-weight: 400;
+  }
+  .msg.lead {
+    align-self: stretch;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-bottom-left-radius: 5px;
   }
   .msg.me {
-    align-self: flex-end;
+    align-self: stretch;
     background: rgba(45, 212, 191, 0.14);
     border: 1px solid rgba(45, 212, 191, 0.3);
     color: #d7fff7;
@@ -392,6 +430,143 @@
     padding: 4px 12px 8px;
     line-height: 1.5;
   }
+  #projects-list {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    min-height: 0;
+    padding-bottom: 24px;
+  }
+  .sect {
+    font-family: var(--mono);
+    font-size: 0.62rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--faint);
+    margin: 12px 2px 8px;
+  }
+  .newnote {
+    font-family: var(--mono);
+    font-size: 0.62rem;
+    color: var(--faint);
+    text-align: center;
+    margin-top: 14px;
+    line-height: 1.5;
+  }
+  .project-row .ck {
+    margin-left: auto;
+    color: var(--accent);
+    font-size: 0.95rem;
+    font-weight: bold;
+  }
+  .msg.ok {
+    border-color: rgba(52, 211, 153, 0.4);
+  }
+  .msg.ok strong {
+    color: var(--done);
+  }
+  .msg-body {
+    word-break: break-word;
+  }
+  .msg-body > *:first-child { margin-top: 0; }
+  .msg-body > *:last-child { margin-bottom: 0; }
+  .msg-body p { margin: 0 0 8px; }
+  .msg-body h1, .msg-body h2, .msg-body h3 {
+    margin: 12px 0 6px;
+    font-weight: 700;
+    line-height: 1.3;
+  }
+  .msg-body h1 { font-size: 1.15rem; }
+  .msg-body h2 { font-size: 1.05rem; }
+  .msg-body h3 { font-size: 0.96rem; }
+  .msg-body ul, .msg-body ol {
+    margin: 4px 0 8px;
+    padding-left: 22px;
+  }
+  .msg-body li { margin: 3px 0; }
+  .msg-body blockquote {
+    margin: 6px 0;
+    padding: 4px 12px;
+    border-left: 3px solid var(--line2);
+    color: var(--fg-dim);
+  }
+  .msg-body hr {
+    border: none;
+    border-top: 1px solid var(--line2);
+    margin: 10px 0;
+  }
+  .msg-body a {
+    color: var(--accent);
+    text-decoration: underline;
+    word-break: break-all;
+  }
+  .msg-body del { opacity: 0.6; }
+  .msg-body code {
+    font-family: var(--mono);
+    font-size: 0.82rem;
+    background: rgba(255, 255, 255, 0.08);
+    padding: 2px 5px;
+    border-radius: 4px;
+  }
+  .msg-body pre {
+    margin: 8px 0;
+    background: #0a0a0c;
+    border: 1px solid var(--line2);
+    border-radius: 10px;
+    padding: 10px 12px;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .msg-body pre code {
+    background: none;
+    padding: 0;
+    font-size: 0.8rem;
+    line-height: 1.45;
+    white-space: pre;
+  }
+  .tbl-wrap {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    margin: 8px 0;
+  }
+  .msg-body table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 0.82rem;
+  }
+  .msg-body th, .msg-body td {
+    border: 1px solid var(--line2);
+    padding: 6px 9px;
+    text-align: left;
+    white-space: nowrap;
+  }
+  .msg-body th {
+    background: var(--card2);
+    font-weight: 640;
+  }
+  .thinking-label {
+    vertical-align: middle;
+  }
+  .thinking-dots {
+    display: inline-flex;
+    gap: 4px;
+    align-items: center;
+    padding: 4px 2px;
+    vertical-align: middle;
+  }
+  .thinking-dots span {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--faint);
+    animation: think-bounce 1.2s infinite ease-in-out;
+  }
+  .thinking-dots span:nth-child(2) { animation-delay: 0.15s; }
+  .thinking-dots span:nth-child(3) { animation-delay: 0.3s; }
+  @keyframes think-bounce {
+    0%, 60%, 100% { transform: translateY(0); opacity: 0.5; }
+    30% { transform: translateY(-4px); opacity: 1; }
+  }
+  @media (prefers-reduced-motion: reduce) { .thinking-dots span { animation: none; } }
 
   /* ---------- pulse ---------- */
   #view-pulse {
@@ -404,19 +579,20 @@
     width: 208px;
     height: 208px;
     border-radius: 50%;
-    background: conic-gradient(var(--work) 0deg, var(--line) 0deg);
+    position: relative;
     display: flex;
     align-items: center;
     justify-content: center;
-    position: relative;
-    transition: background 0.4s ease;
   }
   #pulse-ring::before {
     content: "";
     position: absolute;
-    inset: 16px;
+    inset: 0;
     border-radius: 50%;
-    background: var(--bg);
+    background: conic-gradient(var(--work) var(--pulse-deg, 0deg), var(--line) var(--pulse-deg, 0deg));
+    transition: background 0.4s ease;
+    -webkit-mask: radial-gradient(circle 88px at center, transparent 87px, #000 88px);
+            mask: radial-gradient(circle 88px at center, transparent 87px, #000 88px);
   }
   #pulse-numbers {
     position: relative;
@@ -424,31 +600,41 @@
     z-index: 1;
   }
   #pulse-working {
-    font-size: 3.2rem;
+    font-size: 3.6rem;
     font-weight: 720;
     letter-spacing: -0.03em;
     line-height: 1;
+    color: var(--fg);
+  }
+  .pulse-wrap {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
   }
   #pulse-total {
     font-family: var(--mono);
-    font-size: 0.8rem;
+    font-size: 0.76rem;
     color: var(--fg-dim);
+    margin-top: 2px;
   }
   #pulse-label {
     font-family: var(--mono);
     color: var(--work);
     font-size: 0.7rem;
     letter-spacing: 0.06em;
-    margin-top: 6px;
+    margin-top: 8px;
   }
   #pulse-caption {
     font-family: var(--mono);
     color: var(--faint);
-    font-size: 0.72rem;
+    font-size: 0.68rem;
     text-align: center;
-    max-width: 240px;
+    max-width: 22ch;
     line-height: 1.6;
-    margin-top: -8px;
+    margin-top: 8px;
   }
 
   /* ---------- bottom nav ---------- */
@@ -457,6 +643,8 @@
     display: flex;
     border-top: 1px solid var(--line);
     background: rgba(9, 9, 11, 0.6);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
     padding-bottom: env(safe-area-inset-bottom);
   }
   nav#bottom-nav button {
@@ -510,7 +698,10 @@
 
   <header>
     <div class="header-row">
-      <h1>Takkub Remote</h1>
+      <div id="header-title-container">
+        <h1 id="header-title">Takkub Remote</h1>
+        <small id="header-subtitle"></small>
+      </div>
       <div id="header-status">
         <span id="status-conn"><span class="dot"></span><span id="status-conn-text">Online</span></span>
         <span id="status-mode">VIEW</span>
@@ -551,7 +742,10 @@
     <!-- lead console -->
     <section id="view-lead" class="view">
       <div id="lead-log">
-        <div id="lead-empty"><span class="icon">💬</span>ยังไม่มีข้อความ — พิมพ์ถึง Lead ด้านล่างเพื่อเริ่ม</div>
+        <div id="lead-empty">
+          <span class="icon">💬</span>
+          <span class="text">ยังไม่มีข้อความ — พิมพ์ถึง Lead ด้านล่างเพื่อเริ่ม</span>
+        </div>
       </div>
       <div id="view-control-note"></div>
       <form id="lead-composer">
@@ -562,21 +756,23 @@
 
     <!-- pulse -->
     <section id="view-pulse" class="view">
-      <div id="pulse-ring">
-        <div id="pulse-numbers">
-          <div id="pulse-working">–</div>
-          <div id="pulse-label">กำลังทำงาน</div>
+      <div class="pulse-wrap">
+        <div id="pulse-ring">
+          <div id="pulse-numbers">
+            <div id="pulse-working">–</div>
+          </div>
         </div>
+        <div id="pulse-label">กำลังทำงาน</div>
+        <div id="pulse-total">จาก – ตำแหน่งที่เปิด</div>
+        <div id="pulse-caption">ไม่แสดงว่าใครทำอะไร — ดูความคืบหน้าที่หน้า Lead</div>
       </div>
-      <div id="pulse-total">จาก – ตำแหน่งที่เปิด</div>
-      <div id="pulse-caption">ไม่แสดงว่าใครทำอะไร — ดูความคืบหน้าที่หน้า Lead</div>
     </section>
   </main>
 
   <nav id="bottom-nav">
-    <button data-view="projects"><span class="icon">📁</span>Projects</button>
-    <button data-view="lead"><span class="icon">💬</span>Lead</button>
-    <button data-view="pulse"><span class="icon">◎</span>Pulse</button>
+    <button data-view="projects"><span class="icon">📂</span>Projects</button>
+    <button data-view="lead"><span class="icon">🧠</span>Lead</button>
+    <button data-view="pulse"><span class="icon">◍</span>Pulse</button>
   </nav>
 
   <div id="toast" class="toast"></div>

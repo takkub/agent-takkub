@@ -185,7 +185,7 @@ class TestDialogEnableValidation:
         on_apply = MagicMock()
         dlg = self._dlg(on_apply)
         monkeypatch.setattr(sd.QMessageBox, "warning", lambda *a, **kw: None)
-        dlg._password_edit.setText("hunter2")
+        dlg._password_edit.setText("hunter22")
         dlg._on_toggle()
         on_apply.assert_not_called()
 
@@ -196,17 +196,26 @@ class TestDialogEnableValidation:
         dlg._on_toggle()
         on_apply.assert_not_called()
 
+    def test_too_short_password_warns_and_skips_apply(self, monkeypatch):
+        on_apply = MagicMock()
+        dlg = self._dlg(on_apply, tunnel=TunnelConfig(type="quick"))
+        monkeypatch.setattr(sd.QMessageBox, "warning", lambda *a, **kw: None)
+        dlg._password_edit.setText("short1")
+        assert len("short1") < sd._MIN_PASSWORD_LENGTH
+        dlg._on_toggle()
+        on_apply.assert_not_called()
+
     def test_successful_enable_hashes_password_and_calls_on_apply(self):
         on_apply = MagicMock(return_value=(True, "", "https://pair.example.com/sek/#token=tok"))
         dlg = self._dlg(on_apply, tunnel=TunnelConfig(type="quick"))
-        dlg._password_edit.setText("hunter2")
+        dlg._password_edit.setText("hunter22")
         dlg._on_toggle()
 
         on_apply.assert_called_once()
         config, enable = on_apply.call_args[0]
         assert enable is True
         assert config.tunnel.type == "quick"
-        assert verify_password("hunter2", config.password_hash) is True
+        assert verify_password("hunter22", config.password_hash) is True
         assert dlg._is_live is True
         assert dlg._toggle_btn.text() == "Disable"
         assert dlg._pairing_edit.text() == "https://pair.example.com/sek/#token=tok"
@@ -214,7 +223,7 @@ class TestDialogEnableValidation:
     def test_failed_enable_shows_error_and_stays_off(self, monkeypatch):
         on_apply = MagicMock(return_value=(False, "boom", ""))
         dlg = self._dlg(on_apply, tunnel=TunnelConfig(type="quick"))
-        dlg._password_edit.setText("hunter2")
+        dlg._password_edit.setText("hunter22")
         critical_calls = []
         monkeypatch.setattr(sd.QMessageBox, "critical", lambda *a, **kw: critical_calls.append(a))
         dlg._on_toggle()

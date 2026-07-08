@@ -50,6 +50,7 @@ def server(monkeypatch):
         lambda project, mode: {"projects": [], "mode": mode, "open_tabs": []},
     )
     monkeypatch.setattr(api, "lead_say", lambda orch, text, project: {"ok": True})
+    monkeypatch.setattr(api, "open_project", lambda orch, project: {"ok": True, "project": project})
 
     config = RemoteConfig(bind_port=0, secret_path="sek", token="tok", mode="control")
     srv = http_server.start_server(config, _FakeOrch())
@@ -88,12 +89,12 @@ def _run_pumped(fn):
     return result["value"]
 
 
-def _issue_ticket(server) -> str:
+def _issue_ticket(server, project: str | None = None) -> str:
     def _do() -> str:
         req = urllib.request.Request(
             _url(server, "/sek/api/sse-ticket"),
-            data=b"",
-            headers={"Authorization": "Bearer tok"},
+            data=json.dumps({"project": project}).encode("utf-8") if project else b"",
+            headers={"Authorization": "Bearer tok", "Content-Type": "application/json"},
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=5) as resp:
@@ -240,6 +241,313 @@ class TestMarshaledRoutes:
         finally:
             srv.stop()
 
+    def test_open_in_control_mode_returns_ok(self, server):
+        app = QCoreApplication.instance()
+        outcome: dict = {}
+
+        def _do() -> None:
+            req = urllib.request.Request(
+                _url(server, "/sek/api/open"),
+                data=json.dumps({"project": "proj-a"}).encode("utf-8"),
+                headers={"Authorization": "Bearer tok", "Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    outcome["status"] = resp.status
+                    outcome["body"] = json.loads(resp.read())
+            except urllib.error.HTTPError as exc:
+                outcome["status"] = exc.code
+                outcome["body"] = json.loads(exc.read())
+
+        t = threading.Thread(target=_do)
+        t.start()
+        assert _pump_until(app, lambda: not t.is_alive())
+        t.join(timeout=1)
+        assert outcome["status"] == 200
+        assert outcome["body"] == {"ok": True, "project": "proj-a"}
+
+    def test_open_in_view_mode_is_forbidden_without_marshaling(self, monkeypatch):
+        monkeypatch.setattr(
+            api, "open_project", lambda orch, project: {"ok": True, "project": project}
+        )
+        config = RemoteConfig(bind_port=0, secret_path="sek", token="tok", mode="view")
+        srv = http_server.start_server(config, _FakeOrch())
+        try:
+            req = urllib.request.Request(
+                _url(srv, "/sek/api/open"),
+                data=json.dumps({"project": "proj-a"}).encode("utf-8"),
+                headers={"Authorization": "Bearer tok"},
+                method="POST",
+            )
+            try:
+                urllib.request.urlopen(req, timeout=5)
+                pytest.fail("expected HTTPError")
+            except urllib.error.HTTPError as exc:
+                assert exc.code == 403
+        finally:
+            srv.stop()
+
+    def test_open_rejects_unknown_project_via_bridge_error(self, monkeypatch):
+        """The route must surface `api.open_project`'s `RemoteApiError`
+        status/msg verbatim, not flatten it to a generic 500 — an unlisted
+        project name is a client error (400), not a server fault."""
+
+        def _fake_open(orch, project):
+            raise api.RemoteApiError(400, "unknown project")
+
+        monkeypatch.setattr(api, "open_project", _fake_open)
+        config = RemoteConfig(bind_port=0, secret_path="sek", token="tok", mode="control")
+        srv = http_server.start_server(config, _FakeOrch())
+
+        def _do() -> tuple[int, dict]:
+            req = urllib.request.Request(
+                _url(srv, "/sek/api/open"),
+                data=json.dumps({"project": "ghost"}).encode("utf-8"),
+                headers={"Authorization": "Bearer tok", "Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    return resp.status, json.loads(resp.read())
+            except urllib.error.HTTPError as exc:
+                return exc.code, json.loads(exc.read())
+
+        try:
+            status, body = _run_pumped(_do)
+        finally:
+            srv.stop()
+        assert status == 400
+        assert body == {"ok": False, "msg": "unknown project"}
+
+
+class TestProjectScoping:
+    """Project picker: a client can scope `/api/lead` (SSE), `/api/pulse`,
+    and `/api/lead/say` to any project it can see in `/api/projects` —
+    never to one it can't. Missing/unknown/forged names always fall back
+    to the orchestrator's active project, never error and never leak."""
+
+    def test_bridge_resolves_requested_project_when_open(self, monkeypatch):
+        monkeypatch.setattr(http_server._config, "get_open_tabs", lambda: ["proj-a", "proj-b"])
+        bridge = http_server._Bridge(_FakeOrch())
+        assert bridge._resolve_scoped_project("proj-b") == "proj-b"
+
+    def test_bridge_falls_back_to_active_when_project_not_open(self, monkeypatch):
+        monkeypatch.setattr(http_server._config, "get_open_tabs", lambda: ["proj-a"])
+        bridge = http_server._Bridge(_FakeOrch())
+        assert bridge._resolve_scoped_project("proj-forged") == "default"
+
+    def test_bridge_falls_back_to_active_when_project_missing(self, monkeypatch):
+        monkeypatch.setattr(http_server._config, "get_open_tabs", lambda: ["proj-a"])
+        bridge = http_server._Bridge(_FakeOrch())
+        assert bridge._resolve_scoped_project(None) == "default"
+
+    def test_sse_ticket_scopes_to_the_requested_open_project(self, monkeypatch):
+        monkeypatch.setattr(http_server._config, "get_open_tabs", lambda: ["proj-a", "proj-b"])
+        config = RemoteConfig(bind_port=0, secret_path="sek", token="tok", mode="control")
+        srv = http_server.start_server(config, _FakeOrch())
+        try:
+            ticket = _issue_ticket(srv, project="proj-b")
+            conn = http.client.HTTPConnection("127.0.0.1", srv.port, timeout=5)
+            try:
+                conn.request("GET", f"/sek/api/lead?ticket={ticket}")
+                resp = conn.getresponse()
+                assert resp.status == 200
+
+                srv.broadcaster.push("lead", "hi proj-b", "proj-b")
+                expected = f"event: lead\ndata: {json.dumps({'text': 'hi proj-b'})}\n\n".encode()
+                assert resp.read(len(expected)) == expected
+            finally:
+                conn.close()
+        finally:
+            srv.stop()
+
+    def test_sse_ticket_ignores_a_project_name_that_is_not_open(self, monkeypatch):
+        monkeypatch.setattr(http_server._config, "get_open_tabs", lambda: ["proj-a"])
+        config = RemoteConfig(bind_port=0, secret_path="sek", token="tok", mode="control")
+        srv = http_server.start_server(config, _FakeOrch())
+        try:
+            ticket = _issue_ticket(srv, project="proj-forged")
+            conn = http.client.HTTPConnection("127.0.0.1", srv.port, timeout=5)
+            try:
+                conn.request("GET", f"/sek/api/lead?ticket={ticket}")
+                resp = conn.getresponse()
+                assert resp.status == 200
+
+                # never scoped to the forged name — falls back to
+                # `_FakeOrch._resolve_project(None)` == "default".
+                srv.broadcaster.push("lead", "should not arrive", "proj-forged")
+                srv.broadcaster.push("lead", "hi default", "default")
+                expected = f"event: lead\ndata: {json.dumps({'text': 'hi default'})}\n\n".encode()
+                assert resp.read(len(expected)) == expected
+            finally:
+                conn.close()
+        finally:
+            srv.stop()
+
+    def test_pulse_forwards_validated_project_to_api(self, monkeypatch):
+        monkeypatch.setattr(http_server._config, "get_open_tabs", lambda: ["proj-a", "proj-b"])
+        seen: dict = {}
+
+        def _fake_pulse(orch, project):
+            seen["project"] = project
+            return {"working": 0, "total": 0}
+
+        monkeypatch.setattr(api, "pulse", _fake_pulse)
+        config = RemoteConfig(bind_port=0, secret_path="sek", token="tok", mode="control")
+        srv = http_server.start_server(config, _FakeOrch())
+        try:
+            _run_pumped(
+                lambda: _get_status(
+                    _url(srv, "/sek/api/pulse?project=proj-b"), {"Authorization": "Bearer tok"}
+                )
+            )
+        finally:
+            srv.stop()
+        assert seen["project"] == "proj-b"
+
+    def test_pulse_falls_back_when_requested_project_is_not_open(self, monkeypatch):
+        monkeypatch.setattr(http_server._config, "get_open_tabs", lambda: ["proj-a"])
+        seen: dict = {}
+
+        def _fake_pulse(orch, project):
+            seen["project"] = project
+            return {"working": 0, "total": 0}
+
+        monkeypatch.setattr(api, "pulse", _fake_pulse)
+        config = RemoteConfig(bind_port=0, secret_path="sek", token="tok", mode="control")
+        srv = http_server.start_server(config, _FakeOrch())
+        try:
+            _run_pumped(
+                lambda: _get_status(
+                    _url(srv, "/sek/api/pulse?project=proj-forged"),
+                    {"Authorization": "Bearer tok"},
+                )
+            )
+        finally:
+            srv.stop()
+        assert seen["project"] == "default"
+
+    def test_lead_say_forwards_validated_project_to_api(self, monkeypatch):
+        monkeypatch.setattr(http_server._config, "get_open_tabs", lambda: ["proj-a", "proj-b"])
+        seen: dict = {}
+
+        def _fake_lead_say(orch, text, project):
+            seen["project"] = project
+            return {"ok": True}
+
+        monkeypatch.setattr(api, "lead_say", _fake_lead_say)
+        config = RemoteConfig(bind_port=0, secret_path="sek", token="tok", mode="control")
+        srv = http_server.start_server(config, _FakeOrch())
+
+        def _do() -> int:
+            req = urllib.request.Request(
+                _url(srv, "/sek/api/lead/say"),
+                data=json.dumps({"text": "hi", "project": "proj-b"}).encode("utf-8"),
+                headers={"Authorization": "Bearer tok", "Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return resp.status
+
+        try:
+            status = _run_pumped(_do)
+        finally:
+            srv.stop()
+        assert status == 200
+        assert seen["project"] == "proj-b"
+
+
+class TestLeadHistoryRoute:
+    """Gemini CRITICAL/HIGH: `/api/lead/history` — read-only, works in view
+    mode, scoped to the requested (validated) project like pulse/projects."""
+
+    def test_returns_bridge_result_and_forwards_limit(self, monkeypatch):
+        seen: dict = {}
+
+        def _fake_history(orch, project_ns, limit):
+            seen["project_ns"] = project_ns
+            seen["limit"] = limit
+            return {"project": project_ns, "messages": [{"text": "hi"}]}
+
+        monkeypatch.setattr(api, "lead_history", _fake_history)
+        config = RemoteConfig(bind_port=0, secret_path="sek", token="tok", mode="control")
+        srv = http_server.start_server(config, _FakeOrch())
+        try:
+            status, body = _run_pumped(
+                lambda: _get_status(
+                    _url(srv, "/sek/api/lead/history?limit=50"),
+                    {"Authorization": "Bearer tok"},
+                )
+            )
+        finally:
+            srv.stop()
+        assert status == 200
+        assert json.loads(body) == {"project": "default", "messages": [{"text": "hi"}]}
+        assert seen["project_ns"] == "default"
+        assert seen["limit"] == "50"
+
+    def test_forwards_validated_project_to_api(self, monkeypatch):
+        monkeypatch.setattr(http_server._config, "get_open_tabs", lambda: ["proj-a", "proj-b"])
+        seen: dict = {}
+
+        def _fake_history(orch, project_ns, limit):
+            seen["project_ns"] = project_ns
+            return {"project": project_ns, "messages": []}
+
+        monkeypatch.setattr(api, "lead_history", _fake_history)
+        config = RemoteConfig(bind_port=0, secret_path="sek", token="tok", mode="control")
+        srv = http_server.start_server(config, _FakeOrch())
+        try:
+            _run_pumped(
+                lambda: _get_status(
+                    _url(srv, "/sek/api/lead/history?project=proj-b"),
+                    {"Authorization": "Bearer tok"},
+                )
+            )
+        finally:
+            srv.stop()
+        assert seen["project_ns"] == "proj-b"
+
+    def test_works_in_view_mode(self, monkeypatch):
+        monkeypatch.setattr(
+            api,
+            "lead_history",
+            lambda orch, project_ns, limit: {"project": project_ns, "messages": []},
+        )
+        config = RemoteConfig(bind_port=0, secret_path="sek", token="tok", mode="view")
+        srv = http_server.start_server(config, _FakeOrch())
+        try:
+            status, _body = _run_pumped(
+                lambda: _get_status(
+                    _url(srv, "/sek/api/lead/history"), {"Authorization": "Bearer tok"}
+                )
+            )
+        finally:
+            srv.stop()
+        assert status == 200
+
+    def test_requires_password_when_configured(self, monkeypatch):
+        from agent_takkub.remote.auth import hash_password
+
+        monkeypatch.setattr(api, "lead_history", lambda orch, project_ns, limit: {"messages": []})
+        config = RemoteConfig(
+            bind_port=0,
+            secret_path="sek",
+            token="tok",
+            mode="view",
+            password_hash=hash_password("hunter2"),
+        )
+        srv = http_server.start_server(config, _FakeOrch())
+        try:
+            status, body = _get_status(
+                _url(srv, "/sek/api/lead/history"), {"Authorization": "Bearer tok"}
+            )
+        finally:
+            srv.stop()
+        assert status == 403
+        assert json.loads(body)["msg"] == "password_required"
+
 
 class TestPasswordGate:
     """Third auth factor (addendum 2): a cockpit-set password gates every
@@ -292,16 +600,79 @@ class TestPasswordGate:
         status2, _ = _get_status(_url(pw_server, "/sek/api/pulse"), {"Authorization": "Bearer tok"})
         assert status2 == 403
 
-    def test_correct_password_unlocks_pulse(self, pw_server):
+    def test_correct_password_unlocks_pulse_with_session_header(self, pw_server):
         status, body = self._verify_password(pw_server, "hunter2")
         assert status == 200
         assert body["ok"] is True
+        session = body["session"]
+        assert session
 
         status2, pulse_body = _run_pumped(
-            lambda: _get_status(_url(pw_server, "/sek/api/pulse"), {"Authorization": "Bearer tok"})
+            lambda: _get_status(
+                _url(pw_server, "/sek/api/pulse"),
+                {"Authorization": "Bearer tok", "X-Session": session},
+            )
         )
         assert status2 == 200
         assert json.loads(pulse_body) == {"working": 1, "total": 2}
+
+    def test_bearer_alone_without_session_stays_blocked_after_another_client_verified(
+        self, pw_server
+    ):
+        """H1 fix: this is the exact leaked-link repro from the audit — a
+        holder of just the bearer token must NOT be let in merely because
+        some other client already verified the password this server run."""
+        status, body = self._verify_password(pw_server, "hunter2")
+        assert status == 200
+        assert body["session"]
+
+        # A different client — same bearer token, no session of its own.
+        status2, body2 = _get_status(
+            _url(pw_server, "/sek/api/pulse"), {"Authorization": "Bearer tok"}
+        )
+        assert status2 == 403
+        assert json.loads(body2)["msg"] == "password_required"
+
+    def test_forged_session_header_is_rejected(self, pw_server):
+        self._verify_password(pw_server, "hunter2")
+        status, body = _get_status(
+            _url(pw_server, "/sek/api/pulse"),
+            {"Authorization": "Bearer tok", "X-Session": "totally-made-up"},
+        )
+        assert status == 403
+        assert json.loads(body)["msg"] == "password_required"
+
+    def test_sse_ticket_requires_session_when_password_configured(self, pw_server):
+        req = urllib.request.Request(
+            _url(pw_server, "/sek/api/sse-ticket"),
+            data=b"",
+            headers={"Authorization": "Bearer tok"},
+            method="POST",
+        )
+        try:
+            urllib.request.urlopen(req, timeout=5)
+            pytest.fail("expected HTTPError")
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 403
+            assert json.loads(exc.read())["msg"] == "password_required"
+
+    def test_sse_ticket_issued_once_session_present(self, pw_server):
+        _, body = self._verify_password(pw_server, "hunter2")
+        session = body["session"]
+
+        def _do():
+            req = urllib.request.Request(
+                _url(pw_server, "/sek/api/sse-ticket"),
+                data=b"",
+                headers={"Authorization": "Bearer tok", "X-Session": session},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return resp.status, json.loads(resp.read())
+
+        status, body2 = _run_pumped(_do)
+        assert status == 200
+        assert body2["ticket"]
 
     def test_verify_password_requires_bearer_too(self, pw_server):
         req = urllib.request.Request(
@@ -341,11 +712,61 @@ class TestSSEBroadcaster:
             items.append(q.get_nowait()[1])
         assert items[-1] == json.dumps({"text": str(http_server._SSE_QUEUE_MAXSIZE + 49)})
 
-    def test_rejects_beyond_max_clients(self):
+    def test_evicts_oldest_beyond_max_clients(self):
+        # At the cap the broadcaster admits the newcomer by evicting the oldest
+        # slot (cloudflared keeps dead origin sockets around after the phone
+        # reloads, so a full table is stale reconnects, not real viewers). The
+        # newcomer must get a live queue — never a 503-triggering None — and
+        # the evicted client's handler must be woken with the close sentinel.
         broadcaster = http_server.SSEBroadcaster()
         clients = [broadcaster.register("proj") for _ in range(http_server._MAX_SSE_CLIENTS)]
         assert all(c is not None for c in clients)
-        assert broadcaster.register("proj") is None
+        oldest = clients[0]
+        newcomer = broadcaster.register("proj")
+        assert newcomer is not None
+        # oldest was woken with the (None, None) close sentinel so its SSE
+        # handler thread breaks out of q.get() and unregisters itself.
+        assert oldest.get_nowait() == (None, None)
+        # table stays at the cap (oldest dropped, newcomer added).
+        assert len(broadcaster._clients) == http_server._MAX_SSE_CLIENTS
+
+    def test_evicted_client_is_woken_even_when_its_queue_is_full(self):
+        # codex MED: `put_nowait((None, None))` used to be dropped silently
+        # if the evicted client's queue was already full, leaving its
+        # handler thread blocked in `q.get()` until the next 15s keepalive
+        # instead of exiting promptly.
+        broadcaster = http_server.SSEBroadcaster()
+        clients = [broadcaster.register("proj") for _ in range(http_server._MAX_SSE_CLIENTS)]
+        oldest = clients[0]
+        for i in range(http_server._SSE_QUEUE_MAXSIZE):
+            oldest.put_nowait(("lead", str(i)))
+        assert oldest.full()
+
+        newcomer = broadcaster.register("proj")
+        assert newcomer is not None
+
+        saw_sentinel = False
+        while not oldest.empty():
+            if oldest.get_nowait() == (None, None):
+                saw_sentinel = True
+                break
+        assert saw_sentinel
+
+    def test_close_all_wakes_a_client_even_when_its_queue_is_full(self):
+        broadcaster = http_server.SSEBroadcaster()
+        q = broadcaster.register("proj")
+        for i in range(http_server._SSE_QUEUE_MAXSIZE):
+            q.put_nowait(("lead", str(i)))
+        assert q.full()
+
+        broadcaster.close_all()
+
+        saw_sentinel = False
+        while not q.empty():
+            if q.get_nowait() == (None, None):
+                saw_sentinel = True
+                break
+        assert saw_sentinel
 
     def test_cross_project_events_are_filtered(self):
         """H-A: a client registered for one project's ticket must never see
@@ -505,3 +926,42 @@ class TestStaticFileTraversal:
     def test_missing_static_file_is_404(self, server):
         status, _ = _get_status(_url(server, "/sek/does-not-exist.js"))
         assert status == 404
+
+
+class TestStaticSecurityHeaders:
+    """L2: a network-exposed page that innerHTMLs Lead-authored text should
+    carry a strict CSP as defense-in-depth (cheap, since the shell has no
+    inline <script>)."""
+
+    def test_static_response_carries_csp_header(self, server):
+        with urllib.request.urlopen(_url(server, "/sek/"), timeout=5) as resp:
+            csp = resp.headers.get("Content-Security-Policy")
+        assert csp is not None
+        assert "default-src 'self'" in csp
+        assert "script-src 'self'" in csp
+        assert "object-src 'none'" in csp
+
+    def test_json_response_carries_csp_and_nosniff_headers(self, server):
+        """L2: `_send_json` used to omit CSP entirely — the one response
+        type with no CSP at all. Uses verify-password with no password
+        configured (server fixture) so this never touches the bridge."""
+        req = urllib.request.Request(
+            _url(server, "/sek/api/verify-password"),
+            data=b"{}",
+            headers={"Authorization": "Bearer tok", "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            assert resp.status == 200
+            csp = resp.headers.get("Content-Security-Policy")
+            assert csp is not None
+            assert "default-src 'self'" in csp
+            assert resp.headers.get("X-Content-Type-Options") == "nosniff"
+
+
+class TestHandlerSocketTimeout:
+    """M1: no timeout on `_RemoteHandler` lets a trickled request line/body
+    pin a handler thread forever, pre-auth — bound every socket read."""
+
+    def test_handler_has_a_bounded_socket_timeout(self):
+        assert http_server._RemoteHandler.timeout == 30

@@ -21,6 +21,9 @@ from .config import RemoteConfig
 _TICKET_TTL_SEC = 30.0
 _LOCKOUT_BASE_SEC = 5.0
 _LOCKOUT_MAX_SEC = 300.0
+# Fallback TTL for a password session when idle-expire is disabled
+# (idle_expire_min <= 0) — see `_password_session_ttl_sec`.
+_PASSWORD_SESSION_FALLBACK_SEC = 4 * 3600.0
 
 # Third auth factor (addendum, user-confirmed): a cockpit-set password, never
 # embedded in the pairing URL/QR, so a leaked link alone still can't get in.
@@ -69,13 +72,24 @@ class AuthGate:
         self._lock = threading.Lock()
         self._fail_count = 0
         self._locked_until = 0.0
+        # H1 (2026-07-07 audit): the password factor gets its own
+        # counter/backoff, entirely independent of the token counter above.
+        # A valid-token holder brute-forcing the password used to zero
+        # `_fail_count` on every request (via `check_token`'s success),
+        # which meant the shared counter never reached the lockout
+        # threshold — see `check_password`/`_record_password_result_locked`.
+        self._pw_fail_count = 0
+        self._pw_locked_until = 0.0
         self._tickets: dict[str, tuple[float, str]] = {}
         self.last_request_ts = time.time()
-        # Third auth factor: True once a correct password has been POSTed to
-        # /api/verify-password this server run. A fresh AuthGate is created
-        # per server start (see class docstring), so this — like the fail
-        # counter — never needs to survive a restart.
-        self._password_verified = False
+        # Third auth factor (H1 fix): password success is bound to a
+        # per-client session credential, not a server-global flag — a
+        # leaked bearer token alone is no longer enough once *any* client
+        # has logged in (see `issue_password_session`/`check_password_session`).
+        # token -> expiry epoch. A fresh AuthGate is created per server
+        # start, so — like the fail counter — this never needs to survive
+        # a restart.
+        self._sessions: dict[str, float] = {}
 
     # ── secret path — second secret ahead of the token (§7.5) ───────────
     def check_secret_path(self, segment: str) -> bool:
@@ -112,37 +126,70 @@ class AuthGate:
             return ok
 
     # ── password — third auth factor (addendum), never in the pairing URL/QR:
-    # a leaked link (secret path + token) still isn't enough to get in. Shares
-    # the same global lockout counter as `check_token` per spec (§ADDENDUM 2).
+    # a leaked link (secret path + token) still isn't enough to get in.
+    # H1 fix (2026-07-07 audit): this used to share `check_token`'s global
+    # lockout counter, which meant a valid-token holder's password guesses
+    # got the counter reset to 0 by their own (successful) token check on
+    # every request — the lockout never armed. Password fails/backoff now
+    # live in `_pw_fail_count`/`_pw_locked_until`, touched only here.
     def check_password(self, password: str) -> bool:
+        """Verify the password only — does NOT mint a session (H1 fix: the
+        caller mints one via `issue_password_session()` on success, keeping
+        verification and session-issuance separate so a no-password-configured
+        server can issue a session without a fake "verify" call)."""
         with self._lock:
-            if time.time() < self._locked_until:
+            if time.time() < self._pw_locked_until:
                 return False
             ok = verify_password(password, self._config.password_hash)
-            self._record_result_locked(ok)
-            if ok:
-                self._password_verified = True
+            self._record_password_result_locked(ok)
             return ok
 
-    def mark_password_verified(self) -> None:
-        """No password configured (`password_hash` empty) = feature off —
-        called instead of `check_password` so `password_ok()` passes without
-        ever asking the client for one."""
+    def is_password_locked_out(self) -> bool:
         with self._lock:
-            self._password_verified = True
+            return time.time() < self._pw_locked_until
 
-    def password_ok(self) -> bool:
+    def _password_session_ttl_sec(self) -> float:
+        idle_min = self._config.idle_expire_min
+        return idle_min * 60.0 if idle_min > 0 else _PASSWORD_SESSION_FALLBACK_SEC
+
+    def issue_password_session(self) -> str:
+        """H1 fix: mint a per-client session credential once a client has
+        proven the password (or once, harmlessly, when no password is
+        configured at all — see `_handle_verify_password`). The client must
+        send this back as `X-Session` on every subsequent authed request;
+        unlike the old global flag, a bearer token alone is never enough."""
+        with self._lock:
+            self._prune_sessions_locked()
+            token = secrets.token_urlsafe(24)
+            self._sessions[token] = time.time() + self._password_session_ttl_sec()
+            return token
+
+    def check_password_session(self, session_token: str | None) -> bool:
+        if not session_token:
+            return False
+        with self._lock:
+            self._prune_sessions_locked()
+            expiry = self._sessions.get(session_token)
+            return expiry is not None and expiry >= time.time()
+
+    def _prune_sessions_locked(self) -> None:
+        now = time.time()
+        for t in [t for t, exp in self._sessions.items() if exp < now]:
+            self._sessions.pop(t, None)
+
+    def password_ok(self, session_token: str | None) -> bool:
         """Gate for every authenticated route besides verify-password
-        itself: true when no password is configured, or once it's been
-        verified this server run."""
+        itself: true when no password is configured, or when the request
+        carries a live per-client session minted by a successful verify
+        (H1 fix — no longer a server-global flag)."""
         if not self._config.password_hash:
             return True
-        with self._lock:
-            return self._password_verified
+        return self.check_password_session(session_token)
 
     def _record_result_locked(self, ok: bool) -> None:
-        """Shared fail-counter/backoff bump for `check_token`/`check_password`
-        — call only while holding `self._lock`."""
+        """Fail-counter/backoff bump for `check_token` only (H1 fix — no
+        longer shared with `check_password`) — call only while holding
+        `self._lock`."""
         if ok:
             self._fail_count = 0
         else:
@@ -152,6 +199,21 @@ class AuthGate:
                 overflow = self._fail_count - threshold
                 backoff = min(_LOCKOUT_MAX_SEC, _LOCKOUT_BASE_SEC * (2 ** min(overflow, 6)))
                 self._locked_until = time.time() + backoff
+
+    def _record_password_result_locked(self, ok: bool) -> None:
+        """Fail-counter/backoff bump for `check_password` only (H1 fix) —
+        call only while holding `self._lock`. Deliberately separate from
+        `_record_result_locked` so a *token* success can never reset
+        evidence of *password* brute-forcing (the H1 bug)."""
+        if ok:
+            self._pw_fail_count = 0
+        else:
+            self._pw_fail_count += 1
+            threshold = max(1, self._config.lockout_after_fails)
+            if self._pw_fail_count >= threshold:
+                overflow = self._pw_fail_count - threshold
+                backoff = min(_LOCKOUT_MAX_SEC, _LOCKOUT_BASE_SEC * (2 ** min(overflow, 6)))
+                self._pw_locked_until = time.time() + backoff
 
     # ── single-use SSE ticket (X-check 3.3): EventSource can't send an
     # Authorization header, so `/api/lead?ticket=...` substitutes a

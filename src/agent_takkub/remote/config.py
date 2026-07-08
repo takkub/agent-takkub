@@ -63,9 +63,13 @@ class RemoteConfig:
             if not isinstance(data, dict):
                 return cls()
             tunnel_data = data.pop("tunnel", None)
-            tunnel = (
-                TunnelConfig(**tunnel_data) if isinstance(tunnel_data, dict) else TunnelConfig()
-            )
+            if isinstance(tunnel_data, dict):
+                known_tunnel = {
+                    k: v for k, v in tunnel_data.items() if k in TunnelConfig.__dataclass_fields__
+                }
+                tunnel = TunnelConfig(**known_tunnel)
+            else:
+                tunnel = TunnelConfig()
             known = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
             return cls(tunnel=tunnel, **known)
         except (OSError, json.JSONDecodeError, TypeError):

@@ -27,6 +27,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
+from .. import config as _config
 from . import api
 from .auth import AuthGate
 from .config import RemoteConfig
@@ -37,7 +38,7 @@ _STATIC_ROOT = Path(__file__).resolve().parent / "static"
 _MAX_BODY_BYTES = 64 * 1024
 _BRIDGE_TIMEOUT_SEC = 8.0
 _MAX_PORT_SCAN = 50
-_MAX_SSE_CLIENTS = 4
+_MAX_SSE_CLIENTS = 6
 _SSE_QUEUE_MAXSIZE = 200
 _SSE_KEEPALIVE_SEC = 15.0
 _SSE_WRITE_TIMEOUT_SEC = 10.0
@@ -57,6 +58,16 @@ def _content_type(suffix: str) -> str:
     return _CONTENT_TYPES.get(suffix, "application/octet-stream")
 
 
+# L2: the PWA shell has no inline <script> (only <script src="app.js">) and
+# its markdown renderer is XSS-safe by construction, but a network-exposed
+# page that innerHTMLs Lead-authored text should carry a CSP as
+# defense-in-depth against any future renderer regression.
+_CSP_HEADER = (
+    "default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; "
+    "img-src 'self' data:; style-src 'self' 'unsafe-inline'"
+)
+
+
 @dataclass
 class _PendingRequest:
     action: str
@@ -74,9 +85,14 @@ class _Bridge(QObject):
     event loop. They never touch Orchestrator/pane state directly (only
     the already-thread-safe `orch._lead_token` attribute), so the actual
     socket call is kicked off on a throwaway worker thread instead of
-    running inline here. `projects`/`sse_ticket` stay inline: cheap,
-    in-process reads that DO need the Qt-thread ownership guarantee (the
-    same thread that writes `projects.json` on tab switch/import).
+    running inline here. Their client-supplied `project` param is still
+    resolved inline first (`_resolve_scoped_project`, a cheap in-process
+    read) so the open-tabs check happens on the Qt thread before the
+    worker thread ever starts. `projects`/`sse_ticket`/`open`/`lead_history`
+    stay fully inline: cheap, in-process work (a single project-scoped
+    JSONL read for `lead_history`) that DOES need the Qt-thread ownership
+    guarantee (the same thread that writes `projects.json` on tab
+    switch/import, and the only thread allowed to touch `main_window`).
     """
 
     request = pyqtSignal(object)
@@ -88,8 +104,21 @@ class _Bridge(QObject):
         self._orch = orch
         self.request.connect(self._handle)
 
+    def _resolve_scoped_project(self, requested: object) -> str:
+        """Validate a client-supplied project name against the open tabs
+        (project picker) — read here, on the Qt main thread, the same
+        ownership rule `api.py` documents for every other `projects.json`
+        touch. Anything not currently open (missing, wrong type, stale,
+        or a forged name) falls back to the orchestrator's active project,
+        so a client can never scope a request to a project it can't
+        already see in `/api/projects`."""
+        if isinstance(requested, str) and requested in _config.get_open_tabs():
+            return requested
+        return self._orch._resolve_project(None)
+
     def _handle(self, pending: _PendingRequest) -> None:
         if pending.action in self._OFF_THREAD_ACTIONS:
+            pending.params["project"] = self._resolve_scoped_project(pending.params.get("project"))
             threading.Thread(target=self._run_off_thread, args=(pending,), daemon=True).start()
             return
         try:
@@ -97,7 +126,20 @@ class _Bridge(QObject):
                 mode = pending.params.get("mode", "view")
                 pending.reply.put((200, api.projects(None, mode)))
             elif pending.action == "sse_ticket":
-                pending.reply.put((200, {"project_ns": self._orch._resolve_project(None)}))
+                project_ns = self._resolve_scoped_project(pending.params.get("project"))
+                pending.reply.put((200, {"project_ns": project_ns}))
+            elif pending.action == "open":
+                try:
+                    pending.reply.put(
+                        (200, api.open_project(self._orch, pending.params.get("project")))
+                    )
+                except api.RemoteApiError as exc:
+                    pending.reply.put((exc.status, {"ok": False, "msg": exc.msg}))
+            elif pending.action == "lead_history":
+                project_ns = self._resolve_scoped_project(pending.params.get("project"))
+                pending.reply.put(
+                    (200, api.lead_history(self._orch, project_ns, pending.params.get("limit")))
+                )
             else:
                 pending.reply.put((404, {"ok": False, "msg": "unknown action"}))
         except Exception:
@@ -109,9 +151,11 @@ class _Bridge(QObject):
     def _run_off_thread(self, pending: _PendingRequest) -> None:
         try:
             if pending.action == "pulse":
-                pending.reply.put((200, api.pulse(self._orch, None)))
+                pending.reply.put((200, api.pulse(self._orch, pending.params.get("project"))))
             elif pending.action == "lead_say":
-                api.lead_say(self._orch, pending.params.get("text", ""), None)
+                api.lead_say(
+                    self._orch, pending.params.get("text", ""), pending.params.get("project")
+                )
                 pending.reply.put((200, {"ok": True}))
         except api.RemoteApiError as exc:
             pending.reply.put((exc.status, {"ok": False, "msg": exc.msg}))
@@ -120,7 +164,24 @@ class _Bridge(QObject):
             pending.reply.put((500, {"ok": False, "msg": "internal error"}))
 
 
-_ALLOWED_SSE_EVENTS = frozenset({"done", "lead"})
+_ALLOWED_SSE_EVENTS = frozenset({"done", "lead", "working"})
+
+
+def _force_wake(q: queue.Queue) -> None:
+    """Put the `(None, None)` close/evict sentinel on `q`, guaranteed —
+    if the queue is already full, drop its oldest entry first (same
+    drop-oldest policy `SSEBroadcaster.push` uses) instead of silently
+    discarding the sentinel and leaving the handler blocked until its next
+    15s keepalive timeout."""
+    while True:
+        try:
+            q.put_nowait((None, None))
+            return
+        except queue.Full:
+            try:
+                q.get_nowait()
+            except queue.Empty:
+                return
 
 
 class SSEBroadcaster:
@@ -139,12 +200,21 @@ class SSEBroadcaster:
         self._clients: list[tuple[queue.Queue, str]] = []
 
     def register(self, project_ns: str) -> queue.Queue | None:
+        # Never hard-503 at the cap. This is a single-user tool reached through
+        # cloudflared, which keeps the *origin* TCP socket open after the phone
+        # reloads or switches projects — so a full table is almost always dead
+        # reconnects, not real concurrent viewers. Evict the oldest slot (wake
+        # its handler with the close sentinel so it exits and unregisters) and
+        # admit the newcomer instead of locking the user out with a 503.
+        evicted: queue.Queue | None = None
         with self._lock:
             if len(self._clients) >= _MAX_SSE_CLIENTS:
-                return None
+                evicted, _ = self._clients.pop(0)
             q: queue.Queue = queue.Queue(maxsize=_SSE_QUEUE_MAXSIZE)
             self._clients.append((q, project_ns))
-            return q
+        if evicted is not None:
+            _force_wake(evicted)
+        return q
 
     def unregister(self, q: queue.Queue) -> None:
         with self._lock:
@@ -180,10 +250,7 @@ class SSEBroadcaster:
         with self._lock:
             clients = list(self._clients)
         for q, _ns in clients:
-            try:
-                q.put_nowait((None, None))
-            except queue.Full:
-                pass
+            _force_wake(q)
 
 
 class _RemoteHandler(http.server.BaseHTTPRequestHandler):
@@ -192,6 +259,11 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
     # short lifetime (H4 — SSE is the only intentionally long-lived thread,
     # capped separately by _MAX_SSE_CLIENTS).
     protocol_version = "HTTP/1.0"
+    # M1: BaseHTTPRequestHandler.timeout defaults to None, so a connection
+    # trickling its request line/headers or body one byte at a time pins a
+    # handler thread forever (pre-auth — no secret path/token needed). This
+    # bounds every socket read (setup/request-line/headers/body) to 30s.
+    timeout = 30
 
     def log_message(self, format: str, *args) -> None:
         # H3: BaseHTTPRequestHandler's default log echoes the full request
@@ -224,6 +296,10 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        # L2: JSON isn't rendered as a document, but a CSP costs one header
+        # line and closes the gap for any client that mis-sniffs the body.
+        self.send_header("Content-Security-Policy", _CSP_HEADER)
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         try:
             self.wfile.write(body)
@@ -249,10 +325,16 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
             self._handle_sse(query)
         elif rest == "/api/pulse":
             if self._check_bearer() and self._check_password_gate():
-                self._respond_marshaled("pulse", {})
+                self._respond_marshaled("pulse", {"project": query.get("project")})
         elif rest == "/api/projects":
             if self._check_bearer() and self._check_password_gate():
                 self._respond_marshaled("projects", {"mode": self.server.config.mode})
+        elif rest == "/api/lead/history":
+            if self._check_bearer() and self._check_password_gate():
+                self._respond_marshaled(
+                    "lead_history",
+                    {"project": query.get("project"), "limit": query.get("limit")},
+                )
         elif rest.startswith("/api/"):
             self._reject()
         else:
@@ -278,7 +360,12 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
                 self._handle_verify_password(body)
         elif rest == "/api/sse-ticket":
             if self._check_bearer() and self._check_password_gate():
-                self._issue_sse_ticket()
+                try:
+                    payload = json.loads(body.decode("utf-8")) if body else {}
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    payload = {}
+                requested = payload.get("project") if isinstance(payload, dict) else None
+                self._issue_sse_ticket(requested)
         elif rest == "/api/lead/say":
             if not self._check_bearer() or not self._check_password_gate():
                 return
@@ -290,18 +377,35 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
             except (json.JSONDecodeError, UnicodeDecodeError):
                 self._send_json(400, {"ok": False, "msg": "bad json"})
                 return
-            self._respond_marshaled("lead_say", {"text": payload.get("text", "")})
+            self._respond_marshaled(
+                "lead_say", {"text": payload.get("text", ""), "project": payload.get("project")}
+            )
+        elif rest == "/api/open":
+            if not self._check_bearer() or not self._check_password_gate():
+                return
+            if not self.server.auth.allows_control():
+                self._send_json(403, {"ok": False, "msg": "view mode: control is disabled"})
+                return
+            try:
+                payload = json.loads(body.decode("utf-8")) if body else {}
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                self._send_json(400, {"ok": False, "msg": "bad json"})
+                return
+            self._respond_marshaled("open", {"project": payload.get("project")})
         else:
             self._reject()
 
     def _check_password_gate(self) -> bool:
-        """Third auth factor (addendum): every authenticated route besides
-        verify-password itself is blocked until the cockpit-set password has
-        been POSTed correctly this server run. `msg` is a stable literal the
-        PWA matches on to show its password prompt instead of a generic
-        error (never the pairing-URL/QR flow — the password never travels
-        there)."""
-        if self.server.auth.password_ok():
+        """Third auth factor (H1 fix): every authenticated route besides
+        verify-password itself is blocked unless the request carries a
+        live per-client session credential in `X-Session`, minted by a
+        successful `/api/verify-password` POST — a bearer token alone
+        (e.g. from a leaked pairing link) is never enough. `msg` is a
+        stable literal the PWA matches on to show its password prompt
+        instead of a generic error (never the pairing-URL/QR flow — the
+        password never travels there)."""
+        session_token = self.headers.get("X-Session")
+        if self.server.auth.password_ok(session_token):
             return True
         self._send_json(403, {"ok": False, "msg": "password_required"})
         return False
@@ -315,14 +419,17 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         password = payload.get("password", "")
         if not self.server.config.password_hash:
             # No password configured — nothing to verify (backward
-            # compatible with configs/tests predating this feature).
-            self.server.auth.mark_password_verified()
-            self._send_json(200, {"ok": True})
+            # compatible with configs/tests predating this feature). Still
+            # mint a session so the client's X-Session contract is uniform
+            # regardless of whether a password is configured.
+            session = self.server.auth.issue_password_session()
+            self._send_json(200, {"ok": True, "session": session})
             return
         if not isinstance(password, str) or not self.server.auth.check_password(password):
             self._send_json(401, {"ok": False, "msg": "wrong password"})
             return
-        self._send_json(200, {"ok": True})
+        session = self.server.auth.issue_password_session()
+        self._send_json(200, {"ok": True, "session": session})
 
     def _respond_marshaled(self, action: str, params: dict) -> None:
         pending = _PendingRequest(action=action, params=params)
@@ -335,13 +442,14 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
             status, payload = 504, {"ok": False, "msg": "orchestrator did not respond"}
         self._send_json(status, payload)
 
-    def _issue_sse_ticket(self) -> None:
-        """H-A: stamp the ticket with whichever project is active *right
-        now* (read on the Qt main thread via the bridge, same ownership
-        rule as every other orchestrator touch) — `_handle_sse` later scopes
-        that client's events to this namespace for the life of the
-        connection."""
-        pending = _PendingRequest(action="sse_ticket", params={})
+    def _issue_sse_ticket(self, requested_project: object = None) -> None:
+        """H-A / project picker: stamp the ticket with `requested_project`
+        if it names a project the user actually has open right now
+        (validated on the Qt main thread via the bridge, same ownership
+        rule as every other orchestrator touch) — otherwise fall back to
+        whichever project is active. `_handle_sse` later scopes that
+        client's events to this namespace for the life of the connection."""
+        pending = _PendingRequest(action="sse_ticket", params={"project": requested_project})
         self.server.bridge.request.emit(pending)
         try:
             status, payload = pending.reply.get(timeout=_BRIDGE_TIMEOUT_SEC)
@@ -372,6 +480,7 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", _content_type(candidate.suffix))
         self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Security-Policy", _CSP_HEADER)
         self.end_headers()
         try:
             self.wfile.write(data)

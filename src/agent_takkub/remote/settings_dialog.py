@@ -58,6 +58,10 @@ from .config import RemoteConfig, TunnelConfig
 _FIXED_PORT = 9999
 _IDLE_EXPIRE_MIN = 240
 _LOCKOUT_AFTER_FAILS = 5
+# L4: a password reachable with just secret-path + token (it *is* the
+# password gate) needs a minimum length so it can't be brute-forced in a
+# practical window even under the PBKDF2 + lockout throttling in auth.py.
+_MIN_PASSWORD_LENGTH = 8
 
 _CLOUDFLARED_BIN_NAMES = ("cloudflared.exe", "cloudflared")
 
@@ -240,7 +244,9 @@ class RemoteSettingsDialog(QDialog):
         pw_row = QHBoxLayout()
         self._password_edit = QLineEdit()
         self._password_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self._password_edit.setPlaceholderText("required — asked again on every Enable")
+        self._password_edit.setPlaceholderText(
+            f"required, min {_MIN_PASSWORD_LENGTH} chars — asked again on every Enable"
+        )
         self._password_show_btn = QPushButton("👁")
         self._password_show_btn.setCheckable(True)
         self._password_show_btn.setFixedWidth(32)
@@ -380,11 +386,12 @@ class RemoteSettingsDialog(QDialog):
                 "Enter the tunnel's public URL (couldn't auto-derive it from a sibling config.yml).",
             )
             return
-        if not password:
+        if len(password) < _MIN_PASSWORD_LENGTH:
             QMessageBox.warning(
                 self,
-                "Missing password",
-                "Set a password — it's the last line of defense if the pairing URL leaks.",
+                "Password too short",
+                f"Set a password of at least {_MIN_PASSWORD_LENGTH} characters — it's the "
+                "last line of defense if the pairing URL leaks.",
             )
             return
 

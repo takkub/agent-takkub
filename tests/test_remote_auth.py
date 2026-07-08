@@ -156,8 +156,12 @@ class TestPasswordHashing:
 
 
 class TestPasswordGate:
-    """`check_password`/`password_ok`/`mark_password_verified` — the
-    server-side half of the third auth factor gate."""
+    """`check_password`/`password_ok`/session issuance (H1 fix) — the
+    server-side half of the third auth factor gate. Password success is
+    bound to a per-client session credential, not a server-global flag: a
+    bearer token alone (e.g. from a leaked pairing link) is never enough
+    once *any* client has logged in — each client must present its own
+    `X-Session` token."""
 
     def _pw_gate(self, password: str = "hunter2", **kw) -> AuthGate:
         return AuthGate(
@@ -168,34 +172,108 @@ class TestPasswordGate:
 
     def test_no_password_configured_is_always_ok(self):
         gate = _gate()  # _gate() leaves password_hash empty
-        assert gate.password_ok() is True
+        assert gate.password_ok(None) is True
+        assert gate.password_ok("bogus") is True
 
     def test_not_yet_verified_blocks(self):
-        assert self._pw_gate().password_ok() is False
+        assert self._pw_gate().password_ok(None) is False
 
-    def test_correct_password_unlocks_gate(self):
+    def test_correct_password_then_issued_session_unlocks_gate(self):
         gate = self._pw_gate()
         assert gate.check_password("hunter2") is True
-        assert gate.password_ok() is True
+        session = gate.issue_password_session()
+        assert gate.password_ok(session) is True
+
+    def test_check_password_alone_does_not_unlock_the_gate(self):
+        """H1 fix: verifying the password no longer flips a global flag —
+        the caller must separately mint a session via
+        `issue_password_session()`."""
+        gate = self._pw_gate()
+        assert gate.check_password("hunter2") is True
+        assert gate.password_ok(None) is False
 
     def test_wrong_password_stays_blocked(self):
         gate = self._pw_gate()
         assert gate.check_password("nope") is False
-        assert gate.password_ok() is False
+        assert gate.password_ok(None) is False
 
-    def test_mark_password_verified_unlocks_without_a_check(self):
+    def test_session_is_per_client_not_global(self):
+        """The defining H1 fix behavior: a bogus/guessed token must not
+        unlock the gate just because some *other* client already logged
+        in — only a request carrying the actual minted session does."""
         gate = self._pw_gate()
-        gate.mark_password_verified()
-        assert gate.password_ok() is True
+        gate.check_password("hunter2")
+        session = gate.issue_password_session()
+        assert gate.password_ok("not-the-real-session") is False
+        assert gate.password_ok(session) is True
 
-    def test_password_fails_share_the_token_lockout_counter(self):
+    def test_unknown_session_token_rejected(self):
+        assert self._pw_gate().check_password_session("bogus") is False
+
+    def test_empty_session_token_rejected(self):
+        gate = self._pw_gate()
+        assert gate.check_password_session(None) is False
+        assert gate.check_password_session("") is False
+
+    def test_session_expires_after_ttl(self, monkeypatch):
+        gate = self._pw_gate(idle_expire_min=10)
+        gate.check_password("hunter2")
+        session = gate.issue_password_session()
+        assert gate.check_password_session(session) is True
+        future = time.time() + 3600  # well past a 10-minute idle_expire TTL
+        monkeypatch.setattr(time, "time", lambda: future)
+        assert gate.check_password_session(session) is False
+
+    def test_session_ttl_falls_back_when_idle_expire_disabled(self, monkeypatch):
+        gate = self._pw_gate(idle_expire_min=0)
+        gate.check_password("hunter2")
+        session = gate.issue_password_session()
+        # Within the 4h fallback the session is still valid...
+        soon = time.time() + 3600
+        monkeypatch.setattr(time, "time", lambda: soon)
+        assert gate.check_password_session(session) is True
+        # ...but not forever.
+        much_later = time.time() + 5 * 3600
+        monkeypatch.setattr(time, "time", lambda: much_later)
+        assert gate.check_password_session(session) is False
+
+    def test_each_verify_mints_a_distinct_session(self):
+        gate = self._pw_gate()
+        gate.check_password("hunter2")
+        s1 = gate.issue_password_session()
+        s2 = gate.issue_password_session()
+        assert s1 != s2
+        assert gate.check_password_session(s1) is True
+        assert gate.check_password_session(s2) is True
+
+    def test_password_and_token_lockouts_are_independent(self):
+        """H1 fix: password fails no longer share the token's lockout
+        counter — a token fail must not contribute to arming the password
+        lockout, and vice versa."""
         gate = self._pw_gate(lockout_after_fails=2)
         assert gate.check_password("wrong") is False
         assert gate.check_token("wrong") is False
-        # Two combined fails hit the threshold — even the correct password
-        # is now rejected until the backoff window clears.
+        # Only one fail against *each* counter — neither threshold (2) is
+        # hit yet, so the correct password must still be accepted.
+        assert gate.check_password("hunter2") is True
+        assert gate.is_locked_out() is False
+        assert gate.is_password_locked_out() is False
+
+    def test_valid_token_does_not_defeat_password_lockout(self):
+        """H1 regression (2026-07-07 audit): a leaked-link holder who owns a
+        *valid* token but not the password used to reset the shared fail
+        counter on every successful `check_token` call, so the password
+        lockout never armed no matter how many wrong passwords were tried.
+        Interleaving a valid token with wrong passwords must still arm the
+        password-specific lockout once the threshold is reached."""
+        gate = self._pw_gate(lockout_after_fails=5)
+        for i in range(5):
+            assert gate.check_token("tok123") is True
+            assert gate.check_password(f"wrong{i}") is False
+        assert gate.is_password_locked_out() is True
+        # Locked out now — even the *correct* password is rejected until
+        # the backoff window clears.
         assert gate.check_password("hunter2") is False
-        assert gate.is_locked_out() is True
 
     def test_zero_disables_idle_expire(self, monkeypatch):
         gate = _gate(idle_expire_min=0)

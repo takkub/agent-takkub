@@ -8,11 +8,13 @@ Data minimization (§7.3 / finding B2): `pulse` strips the `list` response
 down to a bare `{working, total}` count. It never uses `cmd:"status"` and
 never lets role/task/state/transcript text anywhere near the response.
 
-Multi-project scoping (ponytail): v1 always targets the orchestrator's
-currently-active project (`from_project=None` -> cli_server's documented
-"falls back to the active project" default). The design doc's `from_project`
-stamp is for a future per-connection project picker; upgrade path is to
-thread an actual project name through here once the PWA offers that choice.
+Multi-project scoping (project picker): `from_project` is threaded through
+from the HTTP layer (`http_server.py`'s `_Bridge._resolve_scoped_project`
+validates the client-supplied project name against the open tabs before it
+ever reaches here). `from_project=None` falls back to cli_server's
+documented "falls back to the active project" default — unchanged for
+callers that don't pass a project (e.g. tests, or a client that hasn't
+picked one yet).
 """
 
 from __future__ import annotations
@@ -21,6 +23,10 @@ import json
 import socket
 
 from .. import config as _config
+from . import notify
+
+_HISTORY_DEFAULT_LIMIT = 200
+_HISTORY_MAX_LIMIT = 200
 
 
 class RemoteApiError(Exception):
@@ -97,6 +103,53 @@ def lead_say(orch, text: str, from_project: str | None) -> dict:
     return {"ok": True}
 
 
+def open_project(orch, project: object) -> dict:
+    """control-mode only (enforced by the HTTP handler's mode gate before
+    this runs, same as `lead_say`). Validates `project` against
+    `projects.json` before ever touching main_window — a non-string or
+    unlisted name is rejected outright, never opened blind from client
+    input. Already-open is a no-op (idempotent — the picker may retry).
+
+    Reaches main_window dynamically via `orch.parent()` — the Qt parent
+    `main_window.py` passes to `Orchestrator(self)` at construction — so
+    this module never needs a static import of `main_window` (bolt-on
+    isolation, X-check C2/U5)."""
+    if not isinstance(project, str) or project not in _config.list_project_names():
+        raise RemoteApiError(400, "unknown project")
+    if project in _config.get_open_tabs():
+        return {"ok": True, "project": project}
+    open_tab = getattr(orch.parent(), "_open_project_tab", None)
+    if open_tab is None:
+        raise RemoteApiError(500, "cannot reach main window")
+    open_tab(project)
+    if project not in _config.get_open_tabs():
+        # `_open_project_tab` skips silently if the project's folder is
+        # missing on disk (status-bar message only) — surface that here
+        # as a real error instead of a false "ok".
+        raise RemoteApiError(409, "project could not be opened")
+    return {"ok": True, "project": project}
+
+
+def lead_history(orch, project_ns: str, limit: object = None) -> dict:
+    """View-mode safe (read-only) — lets the PWA repopulate its chat log on
+    connect/reconnect/project-switch instead of showing a blank screen for
+    whatever happened while no SSE client was registered (`notify.py`'s live
+    tail only ever reaches currently-connected clients). Reuses `notify.py`'s
+    uuid→jsonl resolution and assistant-text extraction so this and the live
+    tail can never disagree on what counts as a reply. Also surfaces
+    user-typed turns (`kind: "me"`) interleaved in JSONL order, so a
+    tab-switch/reconnect repopulates both sides of the conversation instead
+    of only the Lead's."""
+    try:
+        limit = int(limit) if limit is not None else _HISTORY_DEFAULT_LIMIT
+    except (TypeError, ValueError):
+        limit = _HISTORY_DEFAULT_LIMIT
+    limit = max(1, min(limit, _HISTORY_MAX_LIMIT))
+    path = notify.resolve_lead_jsonl(orch, project_ns)
+    messages = notify.read_recent_lead_messages(path, limit) if path is not None else []
+    return {"project": project_ns, "messages": messages}
+
+
 def projects(from_project: str | None, mode: str = "view") -> dict:
     """View-mode. In-process, no loopback: reads the same `projects.json`
     the desktop UI reads. Safe from the H2 cross-thread race because this
@@ -104,12 +157,17 @@ def projects(from_project: str | None, mode: str = "view") -> dict:
     file on tab switch/import).
 
     M-3/M-1 contract: `mode` rides along in the same response (the PWA has
-    no dedicated mode endpoint), and each project is `{name, active}` —
-    not a bare string — so the frontend can render the active-project tag
-    without a second lookup."""
+    no dedicated mode endpoint), and each project is `{name, active, path}`
+    — not a bare string — so the frontend can render the active-project tag
+    and the real working directory without a second lookup. `path` is the
+    project's Lead cwd (`config.lead_cwd`, same resolution main_window uses
+    to spawn Lead) — empty string if the project has no configured paths."""
     active, _ = _config.active_project()
     return {
-        "projects": [{"name": n, "active": n == active} for n in _config.list_project_names()],
+        "projects": [
+            {"name": n, "active": n == active, "path": _config.lead_cwd(n) or ""}
+            for n in _config.list_project_names()
+        ],
         "mode": mode,
         "open_tabs": _config.get_open_tabs(),
     }
