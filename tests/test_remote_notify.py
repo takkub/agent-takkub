@@ -290,78 +290,42 @@ class TestLeadWorkingIndicator:
             notifier.stop()
 
 
-class TestSessionUuidDriftFallback:
-    """After `takkub restart`/`--resume`, `pane_state.session_uuid` can point
-    at a jsonl Claude never wrote (id drift) while the live conversation is in
-    a different `<uuid>.jsonl`. `_resolve_jsonl_path` must fall back to the
-    newest jsonl in the Lead's own cwd dir instead of returning None — which
-    showed a blank mobile chat (history + live tail both dead)."""
+class TestExactSessionResolutionOnly:
+    """The mobile console is a *mirror* of the desktop Lead pane, so
+    `_resolve_jsonl_path` returns the pane's exact recorded session or None —
+    never a guess. An earlier newest-jsonl fallback (removed) dug up an
+    unrelated old session on the phone when the pane had no current
+    conversation (fresh open, nothing resumed), which broke the mirror. A real
+    session-id drift is fixed at its source (keep pane_state.session_uuid
+    accurate), never papered over with a newest-file guess here."""
 
-    @pytest.fixture
-    def lead_dir(self, monkeypatch):
-        # `_newest_lead_jsonl` derives the Lead cwd dir from lead_cwd + encode;
-        # pin both so the fallback scans `<config>/projects/C--proj`.
-        monkeypatch.setattr(notify_mod, "lead_cwd", lambda project: "C:/proj")
-        monkeypatch.setattr(notify_mod, "encode_path_for_claude", lambda cwd: "C--proj")
-
-    def test_missing_uuid_falls_back_to_newest_jsonl(self, tmp_path, config_dir, lead_dir):
-        old = _write_jsonl(tmp_path, "C--proj", "old-uuid", [_assistant_line("old")])
-        new = _write_jsonl(tmp_path, "C--proj", "new-uuid", [_assistant_line("new")])
-        os.utime(old, (1000, 1000))
-        os.utime(new, (2000, 2000))
-        assert notify_mod._resolve_jsonl_path("proj", "ghost-uuid") == new
-
-    def test_valid_uuid_never_falls_back(self, tmp_path, config_dir, lead_dir):
+    def test_exact_uuid_resolves_even_when_another_is_newer(self, tmp_path, config_dir):
         real = _write_jsonl(tmp_path, "C--proj", "real-uuid", [])
         newer = _write_jsonl(tmp_path, "C--proj", "newer-uuid", [])
         os.utime(real, (1000, 1000))
         os.utime(newer, (2000, 2000))
-        # an exact-uuid hit wins even though another file is newer — no fallback
+        # exact-uuid hit wins even though another file is newer — no mtime race
         assert notify_mod._resolve_jsonl_path("proj", "real-uuid") == real
 
-    def test_no_jsonl_anywhere_returns_none(self, config_dir, lead_dir):
-        assert notify_mod._resolve_jsonl_path("proj", "ghost-uuid") is None
-
-    def test_fallback_scoped_to_lead_cwd_ignores_other_dirs(self, tmp_path, config_dir, lead_dir):
-        # a jsonl in a DIFFERENT cwd dir (teammate / other project) is newest
-        # overall but must never be picked — scoping is by lead_cwd.
-        other = _write_jsonl(tmp_path, "C--other-proj", "team-uuid", [])
+    def test_missing_uuid_returns_none_never_guesses(self, tmp_path, config_dir):
+        # A newer, unrelated session sits in the same dir — the removed
+        # fallback would have surfaced it on the phone. Now a miss is a miss:
+        # the mirror shows nothing, not a stale old conversation.
+        other = _write_jsonl(tmp_path, "C--proj", "old-session", [_assistant_line("stale")])
         os.utime(other, (9999, 9999))
         assert notify_mod._resolve_jsonl_path("proj", "ghost-uuid") is None
 
-    def test_fallback_excludes_teammate_sharing_lead_cwd(self, tmp_path, config_dir, lead_dir):
-        # A specialist assigned --cwd == the Lead's own repo writes its session
-        # JSONL into the SAME encoded dir; while it's actively working its file
-        # is the newest one there. On uuid drift the fallback must skip it (by
-        # the teammate's recorded session_uuid) and pick the Lead's own — not
-        # the teammate's live transcript (mobile showed backend under Lead).
-        orch = _FakeOrch()
-        orch.set_lead("proj", "ghost-uuid")  # recorded uuid drifted → file missing
-        orch._panes_by_project["proj"]["backend"] = _FakePane()
-        orch._pane_state["proj::backend"] = _PaneState("backend-uuid")
-        lead = _write_jsonl(tmp_path, "C--proj", "lead-live-uuid", [_assistant_line("lead")])
-        team = _write_jsonl(tmp_path, "C--proj", "backend-uuid", [_assistant_line("backend")])
-        os.utime(lead, (1000, 1000))
-        os.utime(team, (2000, 2000))  # teammate is newer — must still be skipped
-        assert notify_mod._resolve_jsonl_path("proj", "ghost-uuid", orch) == lead
+    def test_no_jsonl_anywhere_returns_none(self, config_dir):
+        assert notify_mod._resolve_jsonl_path("proj", "ghost-uuid") is None
 
-    def test_fallback_without_orch_keeps_newest(self, tmp_path, config_dir, lead_dir):
-        # Backward-compat: no orch → old newest-by-mtime behavior (no exclusion).
-        old = _write_jsonl(tmp_path, "C--proj", "old-uuid", [])
-        new = _write_jsonl(tmp_path, "C--proj", "new-uuid", [])
-        os.utime(old, (1000, 1000))
-        os.utime(new, (2000, 2000))
-        assert notify_mod._resolve_jsonl_path("proj", "ghost-uuid") == new
-
-    def test_history_endpoint_recovers_via_fallback(self, tmp_path, config_dir, lead_dir):
-        # resolve_lead_jsonl (the /api/lead/history path) inherits the fallback:
-        # a recorded-but-missing uuid still yields the live conversation.
+    def test_history_endpoint_returns_none_on_missing_session(self, tmp_path, config_dir):
+        # resolve_lead_jsonl (the /api/lead/history path): a recorded-but-
+        # missing uuid yields None — the phone stays blank until the user
+        # actually resumes, it never digs up an unrelated old file.
         orch = _FakeOrch()
         orch.set_lead("proj", "ghost-uuid")
-        _write_jsonl(tmp_path, "C--proj", "live-uuid", [_assistant_line("hello")])
-        path = notify_mod.resolve_lead_jsonl(orch, "proj")
-        assert path is not None
-        assert notify_mod.read_recent_lead_messages(path) == [{"text": "hello", "kind": "lead"}]
+        _write_jsonl(tmp_path, "C--proj", "unrelated-old", [_assistant_line("stale")])
+        assert notify_mod.resolve_lead_jsonl(orch, "proj") is None
 
 
 class TestLeadHistoryHelpers:

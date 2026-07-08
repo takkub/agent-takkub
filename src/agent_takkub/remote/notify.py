@@ -53,9 +53,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import QObject, QTimer
 
-from ..config import lead_cwd
 from ..orchestrator_text import _exit_key
-from ..token_meter import encode_path_for_claude
 from ..user_profile import config_dir_for
 
 # Per-message cap for a single Lead reply (live SSE event, history entry, and
@@ -216,85 +214,26 @@ def _strip_remote_prefix(text: str) -> str:
     return text[len(_REMOTE_PREFIX) :] if text.startswith(_REMOTE_PREFIX) else text
 
 
-def _teammate_session_uuids(orch, project_ns: str) -> set[str]:
-    """session_uuids of every open *non-lead* pane in ``project_ns``.
+def _resolve_jsonl_path(project_ns: str, session_uuid: str) -> Path | None:
+    """Resolve the JSONL for the pane's *exact* recorded session — and only
+    that. The mobile console is a mirror of the desktop Lead pane, so it must
+    show the session that pane is actually on, nothing else: if that file
+    doesn't exist yet (a fresh pane the user hasn't resumed), the honest
+    answer is "nothing", not a guess.
 
-    The newest-jsonl drift fallback (`_newest_lead_jsonl`) globs the Lead's
-    own cwd dir — but the earlier assumption that "a teammate runs in a
-    different cwd → different encoded dir" is FALSE when a teammate is
-    assigned with ``--cwd`` equal to the Lead's own repo: its session JSONL
-    then lands in the *same* encoded dir, and while it's actively working its
-    file is newer than the Lead's, so a bare newest-by-mtime pick returns the
-    teammate's transcript (mobile showed a teammate's output under the Lead
-    tab). Excluding these uuids first keeps that from ever happening. Best-
-    effort: a missing/odd orch shape → empty set (fallback stays as before)."""
-    out: set[str] = set()
-    panes_by_project = getattr(orch, "_panes_by_project", None)
-    pane_state = getattr(orch, "_pane_state", None)
-    if not isinstance(panes_by_project, dict) or not isinstance(pane_state, dict):
-        return out
-    for role in panes_by_project.get(project_ns, ()):
-        if role == "lead":
-            continue
-        ps = pane_state.get(_exit_key(project_ns, role))
-        uuid = getattr(ps, "session_uuid", None) if ps is not None else None
-        if uuid:
-            out.add(str(uuid))
-    return out
-
-
-def _newest_lead_jsonl(project_ns: str, exclude_uuids: set[str] | None = None) -> Path | None:
-    """Fallback when the recorded ``session_uuid``'s JSONL does not exist.
-
-    A ``takkub restart`` / ``--resume`` can leave
-    ``pane_state.session_uuid`` pointing at a session id Claude never wrote a
-    file for (id drift) while the live conversation lives in a *different*
-    ``<uuid>.jsonl``. The Lead's real session is then the most-recently-
-    modified JSONL in its own cwd dir — **except** any file belonging to a
-    teammate that shares the Lead's cwd (see `_teammate_session_uuids`);
-    ``exclude_uuids`` drops those before the newest-by-mtime pick so an
-    actively-writing teammate can't shadow the Lead's own transcript."""
-    try:
-        cwd = lead_cwd(project_ns)
-        if not cwd:
-            return None
-        lead_dir = config_dir_for(project_ns) / "projects" / encode_path_for_claude(cwd)
-        candidates = list(lead_dir.glob("*.jsonl"))
-    except OSError:
-        return None
-    exclude = exclude_uuids or set()
-    newest: Path | None = None
-    newest_mtime = -1.0
-    for p in candidates:
-        if p.stem in exclude:
-            continue
-        try:
-            m = p.stat().st_mtime
-        except OSError:
-            continue
-        if m > newest_mtime:
-            newest_mtime = m
-            newest = p
-    return newest
-
-
-def _resolve_jsonl_path(project_ns: str, session_uuid: str, orch=None) -> Path | None:
+    An earlier newest-jsonl fallback lived here — it dug up the most-recently-
+    modified JSONL in the cwd dir when the exact uuid didn't resolve, meant to
+    rescue a blank chat after id drift. But that broke the mirror: on a fresh
+    open with no resumed session it surfaced an unrelated *old* session on the
+    phone the desktop wasn't showing. Removed on purpose — a genuine
+    session-id drift is a bug to fix at its source (keep pane_state.session_uuid
+    accurate), never to paper over with a guess here."""
     try:
         base = config_dir_for(project_ns) / "projects"
         matches = list(base.glob(f"*/{session_uuid}.jsonl"))
     except OSError:
-        matches = []
-    if matches:
-        return matches[0]
-    # Id drift after restart/resume: the recorded uuid's file is gone, so the
-    # live conversation is in a different jsonl. Fall back to the newest one
-    # in the Lead's own cwd dir instead of silently returning None (which
-    # showed a blank chat on mobile — history + live tail both dead) — but
-    # never a teammate's session that happens to share that dir (a specialist
-    # assigned --cwd == the Lead's repo), which its live writes would
-    # otherwise make the newest file.
-    exclude = _teammate_session_uuids(orch, project_ns) if orch is not None else None
-    return _newest_lead_jsonl(project_ns, exclude)
+        return None
+    return matches[0] if matches else None
 
 
 def _lead_session_uuid(orch, project_ns: str) -> str | None:
@@ -316,7 +255,7 @@ def resolve_lead_jsonl(orch, project_ns: str) -> Path | None:
     session_uuid = _lead_session_uuid(orch, project_ns)
     if not session_uuid:
         return None
-    return _resolve_jsonl_path(project_ns, session_uuid, orch)
+    return _resolve_jsonl_path(project_ns, session_uuid)
 
 
 def _tail_start_offset(path: Path, size: int) -> int:
@@ -428,7 +367,7 @@ class LeadNotifier(QObject):
         return found
 
     def _resolve_jsonl(self, project_ns: str, session_uuid: str) -> Path | None:
-        return _resolve_jsonl_path(project_ns, session_uuid, self._orch)
+        return _resolve_jsonl_path(project_ns, session_uuid)
 
     def _resync(self) -> None:
         wanted = self._lead_uuids_by_project()
