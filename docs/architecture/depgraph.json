@@ -240,6 +240,7 @@
         "agent_takkub.remote.api",
         "agent_takkub.remote.config",
         "agent_takkub.remote.http_server",
+        "agent_takkub.remote.notify",
         "agent_takkub.remote.tunnel",
         "agent_takkub.role_memory",
         "agent_takkub.shared_dev_tools",
@@ -257,7 +258,7 @@
         "agent_takkub.vault_mirror",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 48,
+      "fan_in": 49,
       "fan_out": 0
     },
     {
@@ -821,7 +822,9 @@
     {
       "module": "agent_takkub.remote.notify",
       "imports": [
+        "agent_takkub.config",
         "agent_takkub.orchestrator_text",
+        "agent_takkub.token_meter",
         "agent_takkub.user_profile"
       ],
       "imported_by": [
@@ -829,7 +832,7 @@
         "agent_takkub.remote.api"
       ],
       "fan_in": 2,
-      "fan_out": 2
+      "fan_out": 4
     },
     {
       "module": "agent_takkub.remote.settings_dialog",
@@ -1025,9 +1028,10 @@
       "imported_by": [
         "agent_takkub.agent_pane",
         "agent_takkub.project_nav",
+        "agent_takkub.remote.notify",
         "agent_takkub.status_header"
       ],
-      "fan_in": 3,
+      "fan_in": 4,
       "fan_out": 0
     },
     {

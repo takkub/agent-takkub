@@ -53,7 +53,9 @@ from pathlib import Path
 
 from PyQt6.QtCore import QObject, QTimer
 
+from ..config import lead_cwd
 from ..orchestrator_text import _exit_key
+from ..token_meter import encode_path_for_claude
 from ..user_profile import config_dir_for
 
 # Per-message cap for a single Lead reply (live SSE event, history entry, and
@@ -209,13 +211,50 @@ def _strip_remote_prefix(text: str) -> str:
     return text[len(_REMOTE_PREFIX) :] if text.startswith(_REMOTE_PREFIX) else text
 
 
+def _newest_lead_jsonl(project_ns: str) -> Path | None:
+    """Fallback when the recorded ``session_uuid``'s JSONL does not exist.
+
+    A ``takkub restart`` / ``--resume`` can leave
+    ``pane_state.session_uuid`` pointing at a session id Claude never wrote a
+    file for (id drift) while the live conversation lives in a *different*
+    ``<uuid>.jsonl``. The Lead's real session is then the most-recently-
+    modified JSONL in its own cwd dir. Scoping to ``lead_cwd(project_ns)``
+    keeps a teammate's or another project's session from ever being picked
+    up (a teammate runs in a different cwd → different encoded dir)."""
+    try:
+        cwd = lead_cwd(project_ns)
+        if not cwd:
+            return None
+        lead_dir = config_dir_for(project_ns) / "projects" / encode_path_for_claude(cwd)
+        candidates = list(lead_dir.glob("*.jsonl"))
+    except OSError:
+        return None
+    newest: Path | None = None
+    newest_mtime = -1.0
+    for p in candidates:
+        try:
+            m = p.stat().st_mtime
+        except OSError:
+            continue
+        if m > newest_mtime:
+            newest_mtime = m
+            newest = p
+    return newest
+
+
 def _resolve_jsonl_path(project_ns: str, session_uuid: str) -> Path | None:
     try:
         base = config_dir_for(project_ns) / "projects"
         matches = list(base.glob(f"*/{session_uuid}.jsonl"))
     except OSError:
-        return None
-    return matches[0] if matches else None
+        matches = []
+    if matches:
+        return matches[0]
+    # Id drift after restart/resume: the recorded uuid's file is gone, so the
+    # live conversation is in a different jsonl. Fall back to the newest one
+    # in the Lead's own cwd dir instead of silently returning None (which
+    # showed a blank chat on mobile — history + live tail both dead).
+    return _newest_lead_jsonl(project_ns)
 
 
 def _lead_session_uuid(orch, project_ns: str) -> str | None:
