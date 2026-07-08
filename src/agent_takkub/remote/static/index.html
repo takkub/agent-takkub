@@ -308,7 +308,7 @@
     text-align: left;
     word-break: break-word;
   }
-  .msg.me, .msg.sys { white-space: pre-wrap; }
+  .msg.me, .msg.sys, .msg.done { white-space: pre-wrap; }
   .msg.group-start { margin-top: 6px; }
   #lead-log > .msg:first-child { margin-top: 0; }
   .msg .who {
@@ -369,6 +369,32 @@
     background: var(--work);
     animation: pulse-dot 1.4s infinite;
   }
+  /* Multi-line sys text (future edge case) must not stretch the pill into an
+     oval — fall back to a left-aligned card like .msg.done instead. */
+  .msg.sys.sys-wrap {
+    align-self: stretch;
+    border-radius: 14px;
+    padding: 10px 13px;
+    max-width: 100%;
+    text-align: left;
+  }
+  .msg.sys.sys-wrap::before { display: none; }
+  .msg.done {
+    align-self: stretch;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--done);
+    border-radius: 14px;
+    text-align: left;
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    line-height: 1.5;
+    color: var(--fg-dim);
+  }
+  .msg.done .done-chip {
+    color: var(--done);
+  }
+  .msg.done .done-chip .time { color: var(--faint); }
   #lead-empty {
     margin: auto;
     text-align: center;

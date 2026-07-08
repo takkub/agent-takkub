@@ -754,8 +754,13 @@
     lastMsgKind = kind;
     var isOk = kind === "lead" && text.indexOf("✅") >= 0;
 
+    // A 'sys' message is meant to be a short one-liner pill; if a caller ever
+    // hands it long or multi-line text, fall back to the wrapped card style
+    // instead of letting it stretch into an unreadable oval.
+    var isSysWrap = kind === "sys" && (text.length > 60 || text.indexOf("\n") >= 0);
+
     var div = document.createElement("div");
-    div.className = "msg " + kind + (isGroupStart ? " group-start" : "") + (isOk ? " ok" : "");
+    div.className = "msg " + kind + (isGroupStart ? " group-start" : "") + (isOk ? " ok" : "") + (isSysWrap ? " sys-wrap" : "");
 
     if (kind === "lead" && isGroupStart) {
       var who = document.createElement("div");
@@ -769,6 +774,15 @@
       time.textContent = timeLabel();
       who.appendChild(time);
       div.appendChild(who);
+    } else if (kind === "done") {
+      var doneChip = document.createElement("div");
+      doneChip.className = "who done-chip";
+      doneChip.appendChild(document.createTextNode("✅ done"));
+      var doneTime = document.createElement("span");
+      doneTime.className = "time";
+      doneTime.textContent = timeLabel();
+      doneChip.appendChild(doneTime);
+      div.appendChild(doneChip);
     }
 
     var body = document.createElement("div");
@@ -940,7 +954,7 @@
     });
     es.addEventListener("done", function (evt) {
       state.leadWorking = false;
-      appendMsg("sys", parseSseData(evt.data));
+      appendMsg("done", parseSseData(evt.data));
     });
     es.onerror = function () {
       es.close();
