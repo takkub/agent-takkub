@@ -427,7 +427,7 @@ class TestLeadHistoryHelpers:
             "uuid-1",
             [
                 _meta_user_line(
-                    r"[Image: source: C:\Users\monch\.claude-work\image-cache\abc\1.png]"
+                    r"[Image: source: C:\Users\alice\.claude-work\image-cache\abc\1.png]"
                 ),
                 _meta_user_line("Continue from where you left off."),
                 _user_line("real question"),
@@ -487,7 +487,7 @@ class TestLeadUserText:
 
     def test_skips_is_meta_image_placeholder(self):
         rec = json.loads(
-            _meta_user_line(r"[Image: source: C:\Users\monch\.claude-work\image-cache\abc\1.png]")
+            _meta_user_line(r"[Image: source: C:\Users\alice\.claude-work\image-cache\abc\1.png]")
         )
         assert notify_mod._lead_user_text(rec) is None
 

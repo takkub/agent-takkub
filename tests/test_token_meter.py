@@ -49,23 +49,23 @@ class TestEncodePathForClaude:
 
     def test_underscore_becomes_dash(self) -> None:
         # This is the regression: '_' MUST encode to '-' like Claude does.
-        enc = encode_path_for_claude("C:/Users/monch/WebstormProjects/line_websupport/client")
+        enc = encode_path_for_claude("C:/Users/alice/WebstormProjects/line_websupport/client")
         assert "line-websupport-client" in enc
         assert "_" not in enc
 
     def test_dot_becomes_dash(self) -> None:
-        enc = encode_path_for_claude("C:/Users/monch/.claude-monitor/x")
+        enc = encode_path_for_claude("C:/Users/alice/.claude-monitor/x")
         assert "." not in enc
         assert "-claude-monitor-x" in enc
 
     def test_separators_and_drive(self) -> None:
         if sys.platform == "win32":
-            enc = encode_path_for_claude("C:/Users/monch/WebstormProjects/agent-takkub")
-            assert enc == "C--Users-monch-WebstormProjects-agent-takkub"
+            enc = encode_path_for_claude("C:/Users/alice/WebstormProjects/agent-takkub")
+            assert enc == "C--Users-alice-WebstormProjects-agent-takkub"
         else:
             # POSIX has no drive letter; an absolute path's leading "/" encodes to "-".
-            enc = encode_path_for_claude("/Users/monch/WebstormProjects/agent-takkub")
-            assert enc == "-Users-monch-WebstormProjects-agent-takkub"
+            enc = encode_path_for_claude("/Users/alice/WebstormProjects/agent-takkub")
+            assert enc == "-Users-alice-WebstormProjects-agent-takkub"
 
     def test_only_alnum_and_dash_remain(self) -> None:
         enc = encode_path_for_claude("C:/a_b.c/d e/f")

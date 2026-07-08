@@ -63,7 +63,7 @@ Each held connection pins one thread indefinitely → thread/FD/memory exhaustio
 ### L1 — `/api/projects` discloses each project's absolute filesystem path to the authenticated remote
 **File:** `api.py:150-170` (`path: _config.lead_cwd(n)`)
 
-`projects()` returns `{name, active, path}` for **every** imported project, where `path` is the full Lead cwd (e.g. `C:\Users\monch\WebstormProjects\…`). That leaks the OS username and directory layout to the phone — wider than `pulse`'s strict count-only data-min (`api.py:77-86`) that the design otherwise prizes ("hides workstation detail", `notify.py:90-92`). It is behind full auth and intentional (the picker renders it), so **Low**, but it is the one place the "workstation detail stays hidden" principle is relaxed. Consider showing only a basename/leaf, or gating the full path behind an explicit toggle.
+`projects()` returns `{name, active, path}` for **every** imported project, where `path` is the full Lead cwd (e.g. `C:\Users\alice\WebstormProjects\…`). That leaks the OS username and directory layout to the phone — wider than `pulse`'s strict count-only data-min (`api.py:77-86`) that the design otherwise prizes ("hides workstation detail", `notify.py:90-92`). It is behind full auth and intentional (the picker renders it), so **Low**, but it is the one place the "workstation detail stays hidden" principle is relaxed. Consider showing only a basename/leaf, or gating the full path behind an explicit toggle.
 
 ### L2 — No Content-Security-Policy on the PWA shell
 **File:** `static/index.html` (no CSP `<meta>`) · `http_server.py:441-462` (`_serve_static` sets no CSP header)

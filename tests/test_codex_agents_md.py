@@ -78,10 +78,10 @@ class TestEnsureAgentsMd:
         # Drive-relative / relative paths must be refused — otherwise
         # `mkdir(parents=True)` creates junk dirs under the process cwd.
         monkeypatch.chdir(tmp_path)
-        ok, reason = ensure_agents_md("UsersmonchWebstormProjectsagent-takkub")
+        ok, reason = ensure_agents_md("UsersaliceWebstormProjectsagent-takkub")
         assert ok is False
         assert "invalid spawn_cwd" in reason
-        assert not (tmp_path / "UsersmonchWebstormProjectsagent-takkub").exists()
+        assert not (tmp_path / "UsersaliceWebstormProjectsagent-takkub").exists()
 
     def test_rejects_nonexistent_absolute_path(self, tmp_path: Path) -> None:
         ghost = tmp_path / "does-not-exist"

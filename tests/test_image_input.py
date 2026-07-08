@@ -28,15 +28,15 @@ from agent_takkub.terminal_widget import (
 
 class TestNormalizePath:
     def test_backslash_to_forward(self):
-        assert _normalize_path("C:\\Users\\monch\\file.png") == "C:/Users/monch/file.png"
+        assert _normalize_path("C:\\Users\\alice\\file.png") == "C:/Users/alice/file.png"
 
     def test_forward_slash_unchanged(self):
-        assert _normalize_path("C:/Users/monch/file.png") == "C:/Users/monch/file.png"
+        assert _normalize_path("C:/Users/alice/file.png") == "C:/Users/alice/file.png"
 
     def test_mixed_slashes(self):
-        result = _normalize_path("C:\\Users/monch\\file.png")
+        result = _normalize_path("C:\\Users/alice\\file.png")
         assert "\\" not in result
-        assert result == "C:/Users/monch/file.png"
+        assert result == "C:/Users/alice/file.png"
 
     def test_empty_string(self):
         assert _normalize_path("") == ""

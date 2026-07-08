@@ -35,7 +35,7 @@ JSONLs). `_lead_user_text` **would extract** all of these as `kind:"me"`:
 
 | Record | `isMeta` | Example (verbatim from store) | Leak |
 |---|---|---|---|
-| Image placeholder | ✅ | `[Image: source: C:\Users\monch\.claude-work\image-cache\4c39ff23-…\1.png]` | **absolute workstation path** |
+| Image placeholder | ✅ | `[Image: source: C:\Users\alice\.claude-work\image-cache\4c39ff23-…\1.png]` | **absolute workstation path** |
 | Image dims | ✅ | `[Image: original 1284x2778, displayed at 924x2000…]` | — |
 | Resume injection | ✅ | `Continue from where you left off.` | internal control text |
 | Skill-injected prompt | ✅ | `Approach this as the design lead at a small studio…` / `Run the "deep-research" workflow…` | skill internals, not conversation |

@@ -54,16 +54,16 @@ class TestDecodeProjectDir:
         # names like "agent-takkub", so there's no way to recover the
         # exact original cwd. We just confirm the drive letter + colon
         # prefix and that recognisable name tokens survive.
-        out = decode_project_dir("C--Users-monch-WebstormProjects-agent-takkub")
+        out = decode_project_dir("C--Users-alice-WebstormProjects-agent-takkub")
         s = str(out).replace("\\", "/")
         assert s.startswith("C:/")
-        assert "Users" in s and "monch" in s and "WebstormProjects" in s
+        assert "Users" in s and "alice" in s and "WebstormProjects" in s
         assert "agent" in s and "takkub" in s
 
     def test_no_drive_prefix_falls_back_to_root(self) -> None:
-        out = decode_project_dir("home-monch-repo")
+        out = decode_project_dir("home-alice-repo")
         # Just confirm dashes are turned into separators
-        assert "monch" in str(out)
+        assert "alice" in str(out)
         assert "repo" in str(out)
 
     def test_empty_name_returns_cwd(self) -> None:
@@ -311,7 +311,7 @@ class TestCountHookFires:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
     ) -> None:
         monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
-        proj = tmp_path / ".claude" / "projects" / "C--Users-monch-foo"
+        proj = tmp_path / ".claude" / "projects" / "C--Users-alice-foo"
         proj.mkdir(parents=True)
         _write_jsonl(
             proj / "s.jsonl",
@@ -331,8 +331,8 @@ class TestCountHookFires:
     ) -> None:
         monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
         base = tmp_path / ".claude" / "projects"
-        keep = base / "C--Users-monch-agent-takkub"
-        other = base / "C--Users-monch-other"
+        keep = base / "C--Users-alice-agent-takkub"
+        other = base / "C--Users-alice-other"
         for d in (keep, other):
             d.mkdir(parents=True)
         _write_jsonl(
@@ -352,7 +352,7 @@ class TestCountHookFires:
         # Conversational text that happens to contain "COST CRITICAL"
         # must not bump the counter — only `system` records do.
         monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
-        proj = tmp_path / ".claude" / "projects" / "C--Users-monch-x"
+        proj = tmp_path / ".claude" / "projects" / "C--Users-alice-x"
         proj.mkdir(parents=True)
         _write_jsonl(
             proj / "s.jsonl",
@@ -371,7 +371,7 @@ class TestUserCorrections:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
     ) -> None:
         monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
-        proj = tmp_path / ".claude" / "projects" / "C--Users-monch-foo"
+        proj = tmp_path / ".claude" / "projects" / "C--Users-alice-foo"
         proj.mkdir(parents=True)
         _write_jsonl(
             proj / "s.jsonl",
@@ -407,7 +407,7 @@ class TestUserCorrections:
         # A single message with multiple correction tokens still
         # counts as 1 — it's the same "user pushed back" event.
         monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
-        proj = tmp_path / ".claude" / "projects" / "C--Users-monch-foo"
+        proj = tmp_path / ".claude" / "projects" / "C--Users-alice-foo"
         proj.mkdir(parents=True)
         _write_jsonl(
             proj / "s.jsonl",
@@ -435,7 +435,7 @@ class TestUserCorrections:
         # not the human. They sometimes contain "broken" or "wrong"
         # in error text — must NOT count as user corrections.
         monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
-        proj = tmp_path / ".claude" / "projects" / "C--Users-monch-foo"
+        proj = tmp_path / ".claude" / "projects" / "C--Users-alice-foo"
         proj.mkdir(parents=True)
         _write_jsonl(
             proj / "s.jsonl",
@@ -466,7 +466,7 @@ class TestUserCorrections:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
     ) -> None:
         monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
-        proj = tmp_path / ".claude" / "projects" / "C--Users-monch-foo"
+        proj = tmp_path / ".claude" / "projects" / "C--Users-alice-foo"
         proj.mkdir(parents=True)
         _write_jsonl(
             proj / "s.jsonl",
@@ -488,7 +488,7 @@ class TestToolRetries:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
     ) -> None:
         monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
-        proj = tmp_path / ".claude" / "projects" / "C--Users-monch-foo"
+        proj = tmp_path / ".claude" / "projects" / "C--Users-alice-foo"
         proj.mkdir(parents=True)
         same_call = {
             "type": "tool_use",
@@ -510,7 +510,7 @@ class TestToolRetries:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
     ) -> None:
         monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
-        proj = tmp_path / ".claude" / "projects" / "C--Users-monch-foo"
+        proj = tmp_path / ".claude" / "projects" / "C--Users-alice-foo"
         proj.mkdir(parents=True)
         recs = [
             {
@@ -538,7 +538,7 @@ class TestToolRetries:
         # Threshold is 3 identical in a row. Two isn't a storm —
         # retrying once after a failure is normal.
         monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
-        proj = tmp_path / ".claude" / "projects" / "C--Users-monch-foo"
+        proj = tmp_path / ".claude" / "projects" / "C--Users-alice-foo"
         proj.mkdir(parents=True)
         same = {
             "type": "tool_use",
@@ -570,7 +570,7 @@ class TestExtractDecisions:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
     ) -> None:
         monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
-        proj = tmp_path / ".claude" / "projects" / "C--Users-monch-foo"
+        proj = tmp_path / ".claude" / "projects" / "C--Users-alice-foo"
         proj.mkdir(parents=True)
         _write_jsonl(
             proj / "s.jsonl",
@@ -609,7 +609,7 @@ class TestExtractDecisions:
         # but they're not "claude decided X" — only assistant H2s
         # qualify as decisions.
         monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
-        proj = tmp_path / ".claude" / "projects" / "C--Users-monch-foo"
+        proj = tmp_path / ".claude" / "projects" / "C--Users-alice-foo"
         proj.mkdir(parents=True)
         _write_jsonl(
             proj / "s.jsonl",
@@ -632,7 +632,7 @@ class TestExtractDecisions:
         # H1 is for top-level reply titles (often boilerplate); only
         # H2 buckets a message as a decision.
         monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
-        proj = tmp_path / ".claude" / "projects" / "C--Users-monch-foo"
+        proj = tmp_path / ".claude" / "projects" / "C--Users-alice-foo"
         proj.mkdir(parents=True)
         _write_jsonl(
             proj / "s.jsonl",
@@ -653,7 +653,7 @@ class TestExtractDecisions:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
     ) -> None:
         monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
-        proj = tmp_path / ".claude" / "projects" / "C--Users-monch-foo"
+        proj = tmp_path / ".claude" / "projects" / "C--Users-alice-foo"
         proj.mkdir(parents=True)
         _write_jsonl(
             proj / "s.jsonl",
@@ -681,7 +681,7 @@ class TestExtractDecisions:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
     ) -> None:
         monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
-        proj = tmp_path / ".claude" / "projects" / "C--Users-monch-foo"
+        proj = tmp_path / ".claude" / "projects" / "C--Users-alice-foo"
         proj.mkdir(parents=True)
         recs = [
             {
@@ -703,7 +703,7 @@ class TestSearchSessions:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
     ) -> None:
         monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
-        proj = tmp_path / ".claude" / "projects" / "C--Users-monch-foo"
+        proj = tmp_path / ".claude" / "projects" / "C--Users-alice-foo"
         proj.mkdir(parents=True)
         _write_jsonl(
             proj / "s.jsonl",
@@ -735,7 +735,7 @@ class TestSearchSessions:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
     ) -> None:
         monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
-        proj = tmp_path / ".claude" / "projects" / "C--Users-monch-foo"
+        proj = tmp_path / ".claude" / "projects" / "C--Users-alice-foo"
         proj.mkdir(parents=True)
         _write_jsonl(
             proj / "s.jsonl",
@@ -757,7 +757,7 @@ class TestSearchSessions:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
     ) -> None:
         monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
-        proj = tmp_path / ".claude" / "projects" / "C--Users-monch-foo"
+        proj = tmp_path / ".claude" / "projects" / "C--Users-alice-foo"
         proj.mkdir(parents=True)
         _write_jsonl(
             proj / "s.jsonl",
@@ -782,7 +782,7 @@ class TestSearchSessions:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
     ) -> None:
         monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
-        proj = tmp_path / ".claude" / "projects" / "C--Users-monch-foo"
+        proj = tmp_path / ".claude" / "projects" / "C--Users-alice-foo"
         proj.mkdir(parents=True)
         recs = [
             {
@@ -809,8 +809,8 @@ class TestSearchSessions:
     ) -> None:
         monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
         base = tmp_path / ".claude" / "projects"
-        keep = base / "C--Users-monch-agent-takkub"
-        skip = base / "C--Users-monch-other"
+        keep = base / "C--Users-alice-agent-takkub"
+        skip = base / "C--Users-alice-other"
         for d in (keep, skip):
             d.mkdir(parents=True)
         _write_jsonl(
@@ -847,7 +847,7 @@ class TestSearchSessions:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
     ) -> None:
         monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
-        proj = tmp_path / ".claude" / "projects" / "C--Users-monch-foo"
+        proj = tmp_path / ".claude" / "projects" / "C--Users-alice-foo"
         proj.mkdir(parents=True)
         long_text = "A" * 500 + " needle " + "Z" * 500
         _write_jsonl(
@@ -880,7 +880,7 @@ class TestBuildResumeBrief:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
     ) -> None:
         monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
-        proj = tmp_path / ".claude" / "projects" / "C--Users-monch-foo"
+        proj = tmp_path / ".claude" / "projects" / "C--Users-alice-foo"
         proj.mkdir(parents=True)
         _write_jsonl(
             proj / "s.jsonl",
@@ -913,7 +913,7 @@ class TestBuildResumeBrief:
 
     def test_caps_at_last_n(self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
         monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
-        proj = tmp_path / ".claude" / "projects" / "C--Users-monch-foo"
+        proj = tmp_path / ".claude" / "projects" / "C--Users-alice-foo"
         proj.mkdir(parents=True)
         recs = [
             {
@@ -939,7 +939,7 @@ class TestBuildResumeBrief:
     ) -> None:
         # Keeps the brief scannable; truncates per-line at 160 chars.
         monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
-        proj = tmp_path / ".claude" / "projects" / "C--Users-monch-foo"
+        proj = tmp_path / ".claude" / "projects" / "C--Users-alice-foo"
         proj.mkdir(parents=True)
         long = "x" * 500
         _write_jsonl(
@@ -967,8 +967,8 @@ class TestBuildResumeBrief:
     ) -> None:
         monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
         base = tmp_path / ".claude" / "projects"
-        keep = base / "C--Users-monch-agent-takkub"
-        skip = base / "C--Users-monch-other"
+        keep = base / "C--Users-alice-agent-takkub"
+        skip = base / "C--Users-alice-other"
         for d in (keep, skip):
             d.mkdir(parents=True)
         _write_jsonl(
@@ -1015,8 +1015,8 @@ class TestIterSessionFiles:
     ) -> None:
         monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
         base = tmp_path / ".claude" / "projects"
-        keep = base / "C--Users-monch-WebstormProjects-agent-takkub"
-        skip = base / "C--Users-monch-OtherRepo"
+        keep = base / "C--Users-alice-WebstormProjects-agent-takkub"
+        skip = base / "C--Users-alice-OtherRepo"
         for d in (keep, skip):
             d.mkdir(parents=True)
             _write_jsonl(d / "session.jsonl", [{"type": "user"}])

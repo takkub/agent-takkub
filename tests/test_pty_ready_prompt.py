@@ -158,7 +158,7 @@ class TestIsBlockedOnTtyPrompt:
         assert s.is_blocked_on_tty_prompt() is not None
 
     def test_password_prompt_detected(self) -> None:
-        s = _feed_screen("Username for 'https://github.com': monch", "Password:")
+        s = _feed_screen("Username for 'https://github.com': alice", "Password:")
         assert s.is_blocked_on_tty_prompt() is not None
 
     def test_username_prompt_detected(self) -> None:

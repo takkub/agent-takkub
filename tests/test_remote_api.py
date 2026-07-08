@@ -99,7 +99,7 @@ class TestPulseDataMinimization:
                     "backend": {
                         "task": "implement /auth/login",
                         "transcript_tail": "secret internal chatter",
-                        "last_screenshot": "C:/Users/monch/shot.png",
+                        "last_screenshot": "C:/Users/alice/shot.png",
                     }
                 },
             }
