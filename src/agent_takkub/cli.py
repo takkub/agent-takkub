@@ -877,6 +877,43 @@ def cmd_hook(_: argparse.Namespace) -> dict:
         return {"ok": True, "msg": ""}
 
 
+def cmd_session_report(_: argparse.Namespace) -> dict:
+    """Internal command wired as the `SessionStart` hook `command` for every
+    cockpit-spawned claude pane (see hook_wiring.py). Fires on every session
+    start — initial spawn, `/resume`, `/clear`, and post-compact — carrying
+    the CURRENT `session_id` in the hook's stdin JSON. Reports it to the
+    orchestrator so `PaneState.session_uuid` never drifts from the transcript
+    claude is actually writing to (the bug: a manual `/resume` inside a pane
+    switches claude to a different uuid that the orchestrator, which only
+    stamped `session_uuid` once at spawn time, never learns about).
+
+    Never raises and always exits 0 — same fail-open contract as `cmd_hook`;
+    a hook failure (cockpit not running, missing env, malformed JSON) must
+    never break the pane's session start."""
+    try:
+        payload = _read_hook_stdin()
+        role = _from_role()
+        if not role:
+            return {"ok": True, "msg": ""}  # manual / non-cockpit invocation
+        session_id = payload.get("session_id") or ""
+        if not session_id:
+            return {"ok": True, "msg": ""}  # malformed payload — nothing to report
+        _hook_request(
+            _with_project(
+                {
+                    "cmd": "session-report",
+                    "session_id": session_id,
+                    "source": payload.get("source", ""),
+                    "cwd": payload.get("cwd", ""),
+                    "from": role,
+                }
+            )
+        )
+        return {"ok": True, "msg": ""}
+    except Exception:
+        return {"ok": True, "msg": ""}
+
+
 def cmd_services(args: argparse.Namespace) -> dict:
     """Local docker compose operations — no orchestrator IPC.
 
@@ -1325,6 +1362,14 @@ def main(argv: list[str] | None = None) -> int:
     # command, so it's hidden from --help.
     shk = sub.add_parser("_hook", help=argparse.SUPPRESS)
     shk.set_defaults(func=cmd_hook)
+
+    # Internal — wired as the SessionStart hook `command` for every
+    # cockpit-spawned claude pane (see hook_wiring.py). Not a user-facing
+    # command, so it's hidden from --help. Not lead-only / teammate-only:
+    # every pane (Lead + every teammate role) fires SessionStart and must
+    # be able to report it.
+    ssr = sub.add_parser("session-report", help=argparse.SUPPRESS)
+    ssr.set_defaults(func=cmd_session_report)
 
     sst = sub.add_parser(
         "status",

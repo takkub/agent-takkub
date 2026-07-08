@@ -1729,6 +1729,54 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         ps.stop_gate_notified = True
         return True, True, "รายงานผลด้วย takkub done ก่อนจบ"
 
+    def consume_session_report(
+        self,
+        from_role: str,
+        project: str | None = None,
+        session_id: str = "",
+        source: str = "",
+        cwd: str = "",
+    ) -> tuple[bool, str]:
+        """Consume a Claude Code `SessionStart` hook signal from a claude-backed
+        pane's `takkub session-report`, keeping `PaneState.session_uuid` truthful
+        across manual `/resume` / `/clear` / post-compact session switches.
+
+        Root cause this fixes: `session_uuid` used to be stamped ONLY at spawn
+        time (spawn_engine.py's `--session-id`/`--resume` decision). If the
+        user later runs `/resume` inside the pane, claude silently switches to
+        writing a DIFFERENT transcript uuid that the orchestrator never learns
+        about, so the remote/mobile mirror's exact-uuid lookup misses and shows
+        a blank chat (see `remote/notify.py`). `SessionStart` fires on every
+        session start (startup/resume/clear/compact) carrying the real, current
+        session_id — reporting it here keeps `pane_state.session_uuid` correct
+        without ever guessing (no newest-file heuristic — deliberately removed;
+        do not re-add).
+
+        Fails open: malformed input (invalid role, empty session_id) is
+        reported back but never raises — a hook must never break the pane's
+        session start.
+        """
+        try:
+            from_role = validate_name(from_role, "role")
+        except ValueError:
+            return False, "invalid role"
+        if not session_id:
+            return False, "missing session_id"
+        project_ns = self._resolve_project(project)
+        key = f"{project_ns}::{from_role}"
+        ps = self._ps(key)
+        ps.session_uuid = session_id
+        if cwd:
+            ps.session_uuid_cwd = cwd
+        _log_event(
+            "session_report",
+            project=project_ns,
+            role=from_role,
+            source=source,
+            uuid=session_id[:8],
+        )
+        return True, ""
+
     @staticmethod
     def _save_decision_note(
         project: str,

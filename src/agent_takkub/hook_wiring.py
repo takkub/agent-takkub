@@ -8,8 +8,19 @@ detected the instant it happens, instead of waiting on the next PTY-scraping
 poll tick (`pty_session.is_at_ready_prompt()`, which stays the fallback for
 non-claude panes and for any claude pane whose hook never fires).
 
-The command is a bare `takkub _hook` (no args, no embedded JSON) so it needs
-no shell quoting on either OS — `spawn_engine.py` already prepends
+It also wires `SessionStart` (fires on startup / resume / clear / compact,
+carrying the real `session_id` in the hook's stdin JSON) to
+`takkub session-report`. This is the authoritative fix for session_uuid
+drift: `PaneState.session_uuid` is otherwise only stamped once, at spawn
+time — if the user manually runs `/resume` inside a pane, claude switches to
+writing a different transcript uuid that the orchestrator never learns
+about, so the remote mirror's exact-uuid lookup misses and shows a blank
+chat. `takkub session-report` reports the CURRENT session_id every time one
+starts, keeping `pane_state.session_uuid` truthful without ever guessing
+(no newest-file heuristic — see `remote/notify.py`).
+
+Both commands are bare (no args, no embedded JSON) so they need no shell
+quoting on either OS — `spawn_engine.py` already prepends
 `config.CLI_BIN_DIR` (`REPO_ROOT/bin` in a dev checkout, the venv's own
 console-script dir in an installed build) to every pane's PATH. The settings
 content itself never varies per pane, so it's written once
@@ -25,6 +36,7 @@ import json
 from . import config
 
 HOOK_COMMAND = "takkub _hook"
+SESSION_REPORT_COMMAND = "takkub session-report"
 
 _HOOK_SETTINGS: dict = {
     "hooks": {
@@ -35,6 +47,7 @@ _HOOK_SETTINGS: dict = {
                 "hooks": [{"type": "command", "command": HOOK_COMMAND}],
             }
         ],
+        "SessionStart": [{"hooks": [{"type": "command", "command": SESSION_REPORT_COMMAND}]}],
     }
 }
 

@@ -85,6 +85,15 @@ class TestHookSettingsFile:
         assert hook_wiring.HOOK_COMMAND in notif_cmds
         assert notif_groups[0]["matcher"] == "idle_prompt"
 
+    def test_session_start_wired_to_session_report_command(self, tmp_env: pathlib.Path) -> None:
+        path = hook_wiring.ensure_hook_settings_file()
+        data = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+
+        start_cmds = [
+            h.get("command") for grp in data["hooks"]["SessionStart"] for h in grp["hooks"]
+        ]
+        assert hook_wiring.SESSION_REPORT_COMMAND in start_cmds
+
     def test_resolves_runtime_dir_at_call_time(
         self, tmp_env: pathlib.Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

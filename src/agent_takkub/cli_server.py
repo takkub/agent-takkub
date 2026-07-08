@@ -2,7 +2,7 @@
 
 Protocol (newline-delimited JSON):
 
-  request:  {"cmd": "send|assign|spawn|close|done|list|hook", ...args}
+  request:  {"cmd": "send|assign|spawn|close|done|list|hook|session-report", ...args}
   response: {"ok": bool, "msg": str, ...extras}
 
 Runs on the Qt main thread via QTcpServer so all calls into Orchestrator are
@@ -312,13 +312,13 @@ class CliServer(QObject):
         #
         # Raw clients that haven't been spawned by the orchestrator have no token
         # and are rejected for these two commands.
-        if cmd in ("done", "send", "hook"):
+        if cmd in ("done", "send", "hook", "session-report"):
             caller_auth = req.get("auth") or ""
             pane_tokens: dict[str, tuple[str, str]] = getattr(self._orch, "_pane_tokens", {})
-            # Lead token is valid for `send` (Lead sends task specs to teammates)
-            # and `hook` (Lead's own claude session also fires Stop/Notification
-            # hooks — the done-gate itself is a no-op for Lead) but not `done`
-            # (Lead cannot call done on itself).
+            # Lead token is valid for `send` (Lead sends task specs to teammates),
+            # `hook` and `session-report` (Lead's own claude session also fires
+            # Stop/Notification/SessionStart hooks — the done-gate itself is a
+            # no-op for Lead) but not `done` (Lead cannot call done on itself).
             lead_token = getattr(self._orch, "_lead_token", None)
             if (
                 lead_token
@@ -418,6 +418,14 @@ class CliServer(QObject):
                 )
                 self._reply(sock, ok=ok, msg=msg, block=blocked)
                 return
+            elif cmd == "session-report":
+                ok, msg = self._orch.consume_session_report(
+                    req.get("from") or "",
+                    project=from_project,
+                    session_id=req.get("session_id", ""),
+                    source=req.get("source", ""),
+                    cwd=req.get("cwd", ""),
+                )
             elif cmd == "end-session":
                 ok, msg = self._orch.end_session(project=from_project, note=req.get("note", ""))
             elif cmd == "goal":
