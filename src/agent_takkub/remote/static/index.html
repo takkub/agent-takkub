@@ -570,71 +570,94 @@
 
   /* ---------- pulse ---------- */
   #view-pulse {
-    align-items: center;
-    justify-content: center;
-    gap: 18px;
-    padding: 24px;
-  }
-  #pulse-ring {
-    width: 208px;
-    height: 208px;
-    border-radius: 50%;
-    position: relative;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-  #pulse-ring::before {
-    content: "";
-    position: absolute;
-    inset: 0;
-    border-radius: 50%;
-    background: conic-gradient(var(--work) var(--pulse-deg, 0deg), var(--line) var(--pulse-deg, 0deg));
-    transition: background 0.4s ease;
-    -webkit-mask: radial-gradient(circle 88px at center, transparent 87px, #000 88px);
-            mask: radial-gradient(circle 88px at center, transparent 87px, #000 88px);
-  }
-  #pulse-numbers {
-    position: relative;
-    text-align: center;
-    z-index: 1;
-  }
-  #pulse-working {
-    font-size: 3.6rem;
-    font-weight: 720;
-    letter-spacing: -0.03em;
-    line-height: 1;
-    color: var(--fg);
+    align-items: stretch;
+    justify-content: flex-start;
+    padding: 16px 14px 24px;
   }
   .pulse-wrap {
     flex: 1 1 auto;
     display: flex;
     flex-direction: column;
-    align-items: center;
-    justify-content: center;
+    gap: 12px;
+    min-height: 0;
+  }
+  #pulse-count {
+    font-family: var(--mono);
+    font-size: 0.74rem;
+    color: var(--work);
+    letter-spacing: 0.04em;
+    padding: 2px 2px 0;
+  }
+  #pulse-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    overflow-y: auto;
+  }
+  .pulse-card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 13px;
+    padding: 12px 13px;
+  }
+  .pulse-card-header {
+    font-family: var(--mono);
+    font-weight: 600;
+    font-size: 0.86rem;
+    color: var(--fg);
+    margin-bottom: 10px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .pulse-chips {
+    display: flex;
+    flex-wrap: wrap;
     gap: 8px;
   }
-  #pulse-total {
-    font-family: var(--mono);
-    font-size: 0.76rem;
-    color: var(--fg-dim);
-    margin-top: 2px;
+  .role-chip {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    background: var(--card2);
+    border: 1px solid var(--role-color, var(--line2));
+    border-radius: 999px;
+    padding: 5px 10px 5px 11px;
   }
-  #pulse-label {
+  .role-chip-name {
     font-family: var(--mono);
-    color: var(--work);
+    font-size: 0.74rem;
+    font-weight: 600;
+    color: var(--role-color, var(--fg));
+  }
+  .role-chip-time {
+    font-family: var(--mono);
     font-size: 0.7rem;
-    letter-spacing: 0.06em;
-    margin-top: 8px;
+    color: var(--fg-dim);
+    background: rgba(0, 0, 0, 0.25);
+    border-radius: 999px;
+    padding: 2px 7px;
   }
+  .pulse-empty {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    color: var(--faint);
+    padding: 60px 20px;
+    text-align: center;
+  }
+  .pulse-empty .icon { font-size: 2.2rem; }
+  .pulse-empty .text { font-family: var(--mono); font-size: 0.8rem; }
   #pulse-caption {
     font-family: var(--mono);
     color: var(--faint);
     font-size: 0.68rem;
     text-align: center;
-    max-width: 22ch;
     line-height: 1.6;
-    margin-top: 8px;
+    padding: 4px 4px 0;
   }
 
   /* ---------- bottom nav ---------- */
@@ -757,14 +780,9 @@
     <!-- pulse -->
     <section id="view-pulse" class="view">
       <div class="pulse-wrap">
-        <div id="pulse-ring">
-          <div id="pulse-numbers">
-            <div id="pulse-working">–</div>
-          </div>
-        </div>
-        <div id="pulse-label">กำลังทำงาน</div>
-        <div id="pulse-total">จาก – ตำแหน่งที่เปิด</div>
-        <div id="pulse-caption">ไม่แสดงว่าใครทำอะไร — ดูความคืบหน้าที่หน้า Lead</div>
+        <div id="pulse-count">–</div>
+        <div id="pulse-list"></div>
+        <div id="pulse-caption">ไม่แสดงว่าใครทำ task อะไร — ดูรายละเอียดที่หน้า Lead</div>
       </div>
     </section>
   </main>
