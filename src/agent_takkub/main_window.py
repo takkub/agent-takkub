@@ -1160,6 +1160,20 @@ class MainWindow(
         if self._limit_store is not None:
             self._limit_store.stop()
             self._limit_store = None
+        # Don't rely on app.aboutToQuit alone (app.py::_kill_all / the
+        # remote module's own hookup both connect to it) — a system tray
+        # icon or another live top-level widget can keep the QApplication
+        # event loop alive past this window closing, in which case
+        # aboutToQuit never fires and the remote HTTP server's daemon
+        # thread keeps serving on a process that looks closed to the user.
+        # stop() is idempotent (disconnects its own aboutToQuit hookup
+        # first), so calling it here is safe even if aboutToQuit does
+        # still fire afterwards.
+        try:
+            if self._remote is not None:
+                self._remote.stop()
+        except Exception:
+            pass
         self.cli.close()
         super().closeEvent(event)
 
