@@ -236,6 +236,60 @@ class TestTailStartOffset:
         assert notify_mod._tail_start_offset(path, size) == 0
 
 
+class TestLeadWorkingIndicator:
+    """`_emit_lead_working_transitions` drives the phone's persistent "…" off
+    the Lead pane's own `state == "working"` (desktop-spinner signal), pushing
+    a 'working'/'idle' SSE event only on change."""
+
+    def test_transitions_emit_only_on_change(self, qapp):
+        orch = _FakeOrch()
+        broadcaster = _FakeBroadcaster()
+        notifier = LeadNotifier(orch, broadcaster)
+        try:
+            orch.set_lead("proj", "uuid-1")
+            pane = orch._panes_by_project["proj"]["lead"]
+
+            pane.state = "idle"
+            broadcaster.events.clear()
+            notifier._emit_lead_working_transitions()
+            assert broadcaster.events == []  # idle matches default → silent
+
+            pane.state = "working"
+            notifier._emit_lead_working_transitions()
+            assert broadcaster.events == [("working", "", "proj")]
+
+            broadcaster.events.clear()
+            notifier._emit_lead_working_transitions()
+            assert broadcaster.events == []  # still working → no repeat
+
+            pane.state = "working"  # unchanged
+            notifier._emit_lead_working_transitions()
+            assert broadcaster.events == []
+
+            pane.state = "idle"
+            notifier._emit_lead_working_transitions()
+            assert broadcaster.events == [("idle", "", "proj")]
+        finally:
+            notifier.stop()
+
+    def test_closed_lead_pane_is_forgotten_without_idle_spam(self, qapp):
+        orch = _FakeOrch()
+        broadcaster = _FakeBroadcaster()
+        notifier = LeadNotifier(orch, broadcaster)
+        try:
+            orch.set_lead("proj", "uuid-1")
+            orch._panes_by_project["proj"]["lead"].state = "working"
+            notifier._emit_lead_working_transitions()
+            assert ("working", "", "proj") in broadcaster.events
+            orch.drop_project("proj")
+            broadcaster.events.clear()
+            notifier._emit_lead_working_transitions()
+            assert broadcaster.events == []
+            assert "proj" not in notifier._lead_working
+        finally:
+            notifier.stop()
+
+
 class TestSessionUuidDriftFallback:
     """After `takkub restart`/`--resume`, `pane_state.session_uuid` can point
     at a jsonl Claude never wrote (id drift) while the live conversation is in

@@ -362,6 +362,11 @@ class LeadNotifier(QObject):
         self._broadcaster = broadcaster
         # project_ns -> _Tail for every open project's live Lead session.
         self._tails: dict[str, _Tail] = {}
+        # project_ns -> last-emitted Lead-pane working state, so a 'working' /
+        # 'idle' transition is pushed to the phone only on change (not every
+        # tick). Drives the persistent "…" indicator (see
+        # `_emit_lead_working_transitions`).
+        self._lead_working: dict[str, bool] = {}
         self._timer = QTimer(self)
         self._timer.setInterval(_POLL_MS)
         self._timer.timeout.connect(self._poll_all)
@@ -420,11 +425,37 @@ class LeadNotifier(QObject):
             offset = _tail_start_offset(path, size)
             self._tails[project_ns] = _Tail(path=path, session_uuid=session_uuid, offset=offset)
 
+    def _emit_lead_working_transitions(self) -> None:
+        """Push a 'working' / 'idle' SSE event whenever the Lead pane's own
+        working state flips — the same signal the desktop header spinner and
+        `/api/activity` read (`pane.state == "working"`).
+
+        The old indicator was driven purely off JSONL tool_use batches, so a
+        pure-thinking stretch between two text blocks (which writes no record)
+        let the phone's "…" vanish while the Lead was clearly still Honking —
+        it looked idle/done. Tying it to the pane's live state keeps "…" up for
+        the whole turn and drops it the instant the Lead goes idle."""
+        panes_by_project = getattr(self._orch, "_panes_by_project", None)
+        if not isinstance(panes_by_project, dict):
+            return
+        seen: set[str] = set()
+        for project_ns, panes in panes_by_project.items():
+            pane = panes.get("lead") if isinstance(panes, dict) else None
+            working = getattr(pane, "state", None) == "working"
+            seen.add(project_ns)
+            if working == self._lead_working.get(project_ns, False):
+                continue
+            self._lead_working[project_ns] = working
+            self._broadcaster.push("working" if working else "idle", "", project_ns)
+        for gone in [p for p in self._lead_working if p not in seen]:
+            del self._lead_working[gone]
+
     # ── incremental tail: read only the delta appended since last poll ──
     def _poll_all(self) -> None:
         self._resync()
         for project_ns, tail in list(self._tails.items()):
             self._poll_one(project_ns, tail)
+        self._emit_lead_working_transitions()
 
     def _poll_one(self, project_ns: str, tail: _Tail) -> None:
         try:

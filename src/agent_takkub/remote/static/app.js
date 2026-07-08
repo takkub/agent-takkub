@@ -778,6 +778,9 @@
 
     log.appendChild(div);
     if (atBottom) log.scrollTop = log.scrollHeight;
+    // Keep the "…" alive *below* the message we just added whenever the Lead
+    // is still working — a text block mid-turn must not read as "done".
+    if (state.leadWorking) showThinking();
   }
 
   // Live SSE 'lead' events land one-per-backend-record (notify.py pushes
@@ -802,6 +805,7 @@
       lastLeadBodyEl.insertAdjacentHTML("beforeend", renderMarkdown(text));
       lastLeadAt = now;
       if (atBottom) log.scrollTop = log.scrollHeight;
+      if (state.leadWorking) showThinking();
       return;
     }
     appendMsg("lead", text);
@@ -913,6 +917,7 @@
       // into the pre-reconnect run (codex x-check).
       lastMsgKind = null;
       lastLeadBodyEl = null;
+      state.leadWorking = false;
       setLeadEmptyText("ยังไม่มีข้อความ — พิมพ์ถึง Lead ด้านล่างเพื่อเริ่ม");
     };
     // Backend sends 'working' whenever the Lead is actively doing something
@@ -921,12 +926,20 @@
     // web/delegating/skill/working, mapped to a Thai label so the remote
     // shows *what* the Lead is doing, not just a bare "…".
     es.addEventListener("working", function (evt) {
+      state.leadWorking = true;
       showThinking(parseSseData(evt.data));
+    });
+    // Lead pane went idle (turn finished) — drop the "…" the instant the
+    // desktop spinner stops, so the phone never shows a stale "working" state.
+    es.addEventListener("idle", function () {
+      state.leadWorking = false;
+      hideThinking();
     });
     es.addEventListener("lead", function (evt) {
       appendLeadLive(parseSseData(evt.data));
     });
     es.addEventListener("done", function (evt) {
+      state.leadWorking = false;
       appendMsg("sys", parseSseData(evt.data));
     });
     es.onerror = function () {
@@ -957,6 +970,7 @@
     if (state.esTimer) { clearTimeout(state.esTimer); state.esTimer = null; }
     state.esRetries = 0;
     state.historyLoaded = false;
+    state.leadWorking = false;
     hideThinking();
   }
 
