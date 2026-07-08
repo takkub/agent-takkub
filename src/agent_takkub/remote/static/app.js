@@ -3,9 +3,9 @@
 /*
  * Takkub Remote — vanilla JS SPA, no build step, no external requests.
  * Data-minimization contract (design doc §7.3): only ever render (1) the
- * Lead's own conversation/report text and (2) a working/total count. Any
- * other field the API might accidentally include (role, task, pane id,
- * transcript, state) is never read into the DOM, even defensively.
+ * Lead's own conversation/report text and (2) on Pulse, role name + runtime
+ * per project. Any other field the API might accidentally include (task
+ * detail, pane id, transcript, state) is never read into the DOM.
  */
 (function () {
   var LS_TOKEN = "takkub_remote_token";
@@ -1028,25 +1028,98 @@
     if (state.pulseTimer) { clearInterval(state.pulseTimer); state.pulseTimer = null; }
   }
 
+  var ROLE_COLORS = {
+    frontend: "#38bdf8",
+    backend: "#a78bfa",
+    mobile: "#fb923c",
+    devops: "#f472b6",
+    qa: "#4ade80",
+    reviewer: "#facc15",
+    critic: "#f87171",
+    codex: "#93c5fd",
+    gemini: "#67e8f9",
+    designer: "#f0abfc",
+  };
+
+  function roleColor(role) {
+    var base = String(role || "").split("#")[0].toLowerCase();
+    return ROLE_COLORS[base] || "var(--accent)";
+  }
+
+  function fmtRuntime(sec) {
+    sec = Math.max(0, Math.floor(Number(sec) || 0));
+    var m = Math.floor(sec / 60);
+    var s = sec % 60;
+    return m + ":" + (s < 10 ? "0" : "") + s;
+  }
+
   function fetchPulse() {
-    var path = "api/pulse";
-    if (state.selectedProject) path += "?project=" + encodeURIComponent(state.selectedProject);
+    var path = "api/activity";
     apiFetch(path)
       .then(function (r) { return r.json(); })
       .then(function (data) {
-        // data-min: pull only numeric working/total, ignore anything else.
-        var working = Number(data && data.working);
-        var total = Number(data && data.total);
-        renderPulse(Number.isFinite(working) ? working : 0, Number.isFinite(total) ? total : 0);
+        // tolerant: unknown/missing fields are skipped, never break the view.
+        var projects = (data && Array.isArray(data.projects)) ? data.projects : [];
+        renderPulse(projects);
       })
       .catch(function () { /* keep last known value on transient failure */ });
   }
 
-  function renderPulse(working, total) {
-    $("pulse-working").textContent = String(working);
-    $("pulse-total").textContent = "จาก " + total + " ตำแหน่งที่เปิด";
-    var pct = total > 0 ? Math.min(100, Math.round((working / total) * 100)) : 0;
-    $("pulse-ring").style.setProperty("--pulse-deg", (pct * 3.6) + "deg");
+  function renderPulse(projects) {
+    var wrap = $("pulse-list");
+    if (!wrap) return;
+    wrap.innerHTML = "";
+
+    var totalRoles = 0;
+    projects.forEach(function (p) {
+      if (p && Array.isArray(p.roles)) totalRoles += p.roles.length;
+    });
+
+    if (!projects.length || totalRoles === 0) {
+      var empty = document.createElement("div");
+      empty.className = "pulse-empty";
+      empty.innerHTML = '<span class="icon">🌙</span><span class="text">ไม่มีงานกำลังรันอยู่</span>';
+      wrap.appendChild(empty);
+      $("pulse-count").textContent = "0 ตำแหน่งกำลังทำงาน";
+      return;
+    }
+
+    $("pulse-count").textContent = totalRoles + " ตำแหน่งกำลังทำงาน";
+
+    projects.forEach(function (p) {
+      if (!p || !p.project || !Array.isArray(p.roles) || !p.roles.length) return;
+      var card = document.createElement("div");
+      card.className = "pulse-card";
+
+      var header = document.createElement("div");
+      header.className = "pulse-card-header";
+      header.textContent = String(p.project);
+      card.appendChild(header);
+
+      var chips = document.createElement("div");
+      chips.className = "pulse-chips";
+      p.roles.forEach(function (r) {
+        if (!r || !r.role) return;
+        var chip = document.createElement("div");
+        chip.className = "role-chip";
+        chip.style.setProperty("--role-color", roleColor(r.role));
+
+        var name = document.createElement("span");
+        name.className = "role-chip-name";
+        name.textContent = String(r.role);
+        chip.appendChild(name);
+
+        var badge = document.createElement("span");
+        badge.className = "role-chip-time";
+        badge.textContent = fmtRuntime(r.runtime_sec);
+        chip.appendChild(badge);
+
+        chips.appendChild(chip);
+      });
+      card.appendChild(chips);
+
+      wrap.appendChild(card);
+    });
   }
 
   // ---------------------------------------------------------------
