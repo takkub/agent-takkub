@@ -63,7 +63,12 @@ from ..user_profile import config_dir_for
 # (long plans/tables/summaries included), not a cut-off fragment. Still bounded
 # so one pathological megabyte reply can't blow up the SSE payload / mobile DOM.
 _MAX_EVENT_CHARS = 16000
-_POLL_MS = 500
+# JSONL tail poll cadence. 200 ms (down from 500) so a completed Lead text
+# block reaches the phone ~2.5x sooner, closing the perceived lag vs the
+# desktop's live stream. Only a stat + delta-read per open project — cheap.
+# Cannot go token-by-token: the JSONL holds whole records, and streaming raw
+# PTY bytes (the pre-rewrite source) is exactly the TUI junk we removed.
+_POLL_MS = 200
 _DEFAULT_HISTORY_LIMIT = 200
 # History reads are one-shot (reconnect/project-switch), not the live poll
 # tail, but a long-running Lead session's JSONL can grow into the tens of
