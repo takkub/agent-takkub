@@ -31,6 +31,12 @@ class TunnelConfig:
     type: str = "cloudflared"
     credentials_json: str = ""
     cloudflared_bin: str = ""
+    # ngrok only (`type == "ngrok"`): "random" (cockpit scrapes the
+    # *.ngrok-free.app URL from stdout, same as quick-tunnel mode) or
+    # "fixed" (user's reserved domain, known upfront -> `ngrok_domain`).
+    url_mode: str = "random"
+    ngrok_domain: str = ""
+    ngrok_bin: str = ""
 
 
 @dataclass

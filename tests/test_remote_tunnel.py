@@ -343,6 +343,97 @@ class TestQuickTunnelMode:
         assert t.captured_url == "https://random-name.trycloudflare.com"
 
 
+class TestNgrokMode:
+    """ngrok provider (addendum): "random" scrapes a *.ngrok-free.app URL
+    from stdout the same way quick-tunnel does; "fixed" passes the user's
+    reserved domain via `--url` and needs no scraping (`captured_url` is
+    pre-set from `public_url` by the caller)."""
+
+    def _patched(self, monkeypatch, lines=None):
+        captured = {}
+
+        def _fake_spawn(argv, extra_env=None):
+            captured["argv"] = argv
+            captured["extra_env"] = extra_env
+            return _FakeProc(lines=lines or [])
+
+        monkeypatch.setattr(tunnel, "_spawn", _fake_spawn)
+        monkeypatch.setattr(tunnel.Tunnel, "_own_job_if_windows", lambda self: None)
+        # Deterministic regardless of whether this machine happens to have a
+        # real ngrok on PATH — tests that care about a configured/PATH bin
+        # override `shutil.which` themselves.
+        monkeypatch.setattr(tunnel.shutil, "which", lambda name: None)
+        return captured
+
+    def test_random_mode_argv(self, monkeypatch):
+        captured = self._patched(monkeypatch)
+        cfg = TunnelConfig(type="ngrok", url_mode="random")
+        t = tunnel.Tunnel(cfg, public_url="", port=9999)
+        t.start()
+        assert captured["argv"] == ["ngrok", "http", "9999", "--log", "stdout"]
+
+    def test_uses_configured_ngrok_bin_over_path(self, monkeypatch):
+        captured = self._patched(monkeypatch)
+        cfg = TunnelConfig(type="ngrok", url_mode="random", ngrok_bin="/opt/homebrew/bin/ngrok")
+        t = tunnel.Tunnel(cfg, public_url="", port=9999)
+        t.start()
+        assert captured["argv"][0] == "/opt/homebrew/bin/ngrok"
+
+    def test_fixed_mode_uses_configured_ngrok_bin_over_path(self, monkeypatch):
+        captured = self._patched(monkeypatch)
+        cfg = TunnelConfig(
+            type="ngrok",
+            url_mode="fixed",
+            ngrok_domain="takkub.ngrok-free.app",
+            ngrok_bin="/usr/local/bin/ngrok",
+        )
+        t = tunnel.Tunnel(cfg, public_url="https://takkub.ngrok-free.app", port=9999)
+        t.start()
+        assert captured["argv"][0] == "/usr/local/bin/ngrok"
+
+    def test_random_mode_scrapes_url_from_stdout(self, monkeypatch):
+        self._patched(monkeypatch, lines=[b"url=https://abcd1234.ngrok-free.app\n"])
+        cfg = TunnelConfig(type="ngrok", url_mode="random")
+        t = tunnel.Tunnel(cfg, public_url="", port=9999)
+        assert t.captured_url is None
+        t.start()
+        t._reader.join(timeout=1)
+        assert t.captured_url == "https://abcd1234.ngrok-free.app"
+
+    def test_fixed_mode_argv(self, monkeypatch):
+        captured = self._patched(monkeypatch)
+        cfg = TunnelConfig(type="ngrok", url_mode="fixed", ngrok_domain="takkub.ngrok-free.app")
+        t = tunnel.Tunnel(cfg, public_url="https://takkub.ngrok-free.app", port=9999)
+        t.start()
+        assert captured["argv"] == [
+            "ngrok",
+            "http",
+            "9999",
+            "--url",
+            "https://takkub.ngrok-free.app",
+            "--log",
+            "stdout",
+        ]
+
+    def test_fixed_mode_keeps_the_configured_public_url(self, monkeypatch):
+        self._patched(monkeypatch)
+        cfg = TunnelConfig(type="ngrok", url_mode="fixed", ngrok_domain="takkub.ngrok-free.app")
+        t = tunnel.Tunnel(cfg, public_url="https://takkub.ngrok-free.app", port=9999)
+        assert t.captured_url == "https://takkub.ngrok-free.app"
+
+    def test_fixed_mode_missing_domain_raises(self):
+        cfg = TunnelConfig(type="ngrok", url_mode="fixed", ngrok_domain="")
+        t = tunnel.Tunnel(cfg, public_url="", port=9999)
+        with pytest.raises(tunnel.TunnelError):
+            t.start()
+
+    def test_fixed_mode_invalid_domain_raises(self):
+        cfg = TunnelConfig(type="ngrok", url_mode="fixed", ngrok_domain="not a hostname!")
+        t = tunnel.Tunnel(cfg, public_url="", port=9999)
+        with pytest.raises(tunnel.TunnelError):
+            t.start()
+
+
 def test_real_platform_constant_is_sane():
     # Sanity check the module imported cleanly on whatever OS is running
     # this test — CI runs both windows-latest and macos-latest.

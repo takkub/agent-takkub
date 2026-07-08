@@ -78,11 +78,14 @@ class RemoteControl:
         self._server = http_server.start_server(self.config, self._orch)
         self._notifier = notify.LeadNotifier(self._orch, self._server.broadcaster)
 
-        # Quick-tunnel mode (addendum) needs neither a credentials file nor
-        # a known public_url up front — cloudflared assigns a random
-        # *.trycloudflare.com URL on connect — so it can't gate on
-        # `credentials_json` like the other two modes do.
-        needs_no_credentials_file = self.config.tunnel.type == "quick"
+        # Quick-tunnel (cloudflared) and ngrok modes need neither a
+        # credentials file nor a known public_url up front — cloudflared's
+        # quick tunnel and ngrok's random URL are both assigned on connect
+        # — so they can't gate on `credentials_json` like named-tunnel mode
+        # does. ngrok's fixed-domain sub-mode also has no credentials file
+        # (its auth lives in the ngrok CLI's own config, set once via
+        # `ngrok config add-authtoken` at Enable time in the dialog).
+        needs_no_credentials_file = self.config.tunnel.type in ("quick", "ngrok")
         if self.config.auto_start_tunnel and (
             needs_no_credentials_file or self.config.tunnel.credentials_json
         ):

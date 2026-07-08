@@ -30,7 +30,7 @@
 * **💬 Live Lead console** — the Lead's replies stream to your phone in real time (with a "still working…" indicator so you always know it's alive); type back to steer it.
 * **📊 Pulse** — a glanceable, project-grouped view of which teammates are running and for how long.
 * **🎛️ View vs. control** — read-only by default; flip to control mode to send prompts or open projects remotely.
-* **🔒 Three-factor, off by default** — secret path + bearer token (never in the QR) + a password gate, on a loopback-only server behind a Cloudflare tunnel, with per-client sessions & brute-force lockout. Data-minimized: never ships raw tool output, commands, or filesystem paths. Turn it on from the cockpit's **🌐 Remote** chip when you want it.
+* **🔒 Three-factor, off by default** — secret path + bearer token (never in the QR) + a password gate, on a loopback-only server behind a Cloudflare or ngrok tunnel, with per-client sessions & brute-force lockout. Data-minimized: never ships raw tool output, commands, or filesystem paths. Turn it on from the cockpit's **🌐 Remote** chip when you want it.
 
 ---
 

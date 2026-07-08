@@ -276,11 +276,16 @@ class Tunnel:
             self._start_named()
         elif self._config.type == "quick":
             self._start_quick()
+        elif self._config.type == "ngrok":
+            self._start_ngrok()
         else:
             self._start_bat()
 
     def _cloudflared_bin(self) -> str:
         return self._config.cloudflared_bin or shutil.which("cloudflared") or "cloudflared"
+
+    def _ngrok_bin(self) -> str:
+        return self._config.ngrok_bin or shutil.which("ngrok") or "ngrok"
 
     def _own_job_if_windows(self) -> None:
         if sys.platform != "win32" or self._proc is None:
@@ -321,6 +326,36 @@ class Tunnel:
         `*.trycloudflare.com` URL cloudflared prints to stdout is scraped by
         the same `_scan_for_url` Mode B (bat) already uses."""
         argv = [self._cloudflared_bin(), "tunnel", "--url", f"http://localhost:{self._port}"]
+        self._proc = _spawn(argv)
+        self._own_job_if_windows()
+        self._reader = threading.Thread(target=self._scan_for_url, daemon=True)
+        self._reader.start()
+
+    def _start_ngrok(self) -> None:
+        """ngrok provider (addendum): "random" scrapes the assigned
+        `*.ngrok-free.app` URL from stdout via `_scan_for_url`, same as
+        quick-tunnel mode; "fixed" passes the user's reserved domain via
+        `--url` — its `captured_url` is already set from `public_url`
+        (`RemoteControl._start()`/dialog set it upfront), so the reader
+        thread only drains stdout in that case. Authtoken setup (`ngrok
+        config add-authtoken`) is the dialog's job at Enable time, not
+        this class's — by the time `start()` runs, ngrok is assumed to
+        already be authenticated on this machine."""
+        if self._config.url_mode == "fixed":
+            domain = self._config.ngrok_domain.strip()
+            if not domain or not _HOSTNAME_RE.match(domain):
+                raise TunnelError("ngrok fixed mode needs a valid domain")
+            argv = [
+                self._ngrok_bin(),
+                "http",
+                str(self._port),
+                "--url",
+                f"https://{domain}",
+                "--log",
+                "stdout",
+            ]
+        else:
+            argv = [self._ngrok_bin(), "http", str(self._port), "--log", "stdout"]
         self._proc = _spawn(argv)
         self._own_job_if_windows()
         self._reader = threading.Thread(target=self._scan_for_url, daemon=True)

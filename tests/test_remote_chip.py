@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import QPushButton
 
 import agent_takkub.status_header as sh_mod
 import agent_takkub.user_actions as ua_mod
-from agent_takkub.remote.config import RemoteConfig
+from agent_takkub.remote.config import RemoteConfig, TunnelConfig
 
 
 class _Stub(sh_mod.StatusHeaderMixin, ua_mod.UserActionsMixin):
@@ -183,6 +183,63 @@ class TestApplyRemoteConfig:
 
         old_remote.stop.assert_called_once()
         assert stub._remote is new_remote
+
+    def test_ngrok_random_mode_copies_the_captured_url(self, monkeypatch, tmp_path):
+        """Mirrors quick-tunnel's scrape-and-copy — ngrok "random" mode has
+        no `public_url` known upfront either, so the enable click waits for
+        `Tunnel.captured_url` and persists it as `config.public_url`."""
+        _isolate_remote_json(monkeypatch, tmp_path)
+        stub = _Stub()
+        stub._remote = None
+
+        fake_tunnel = MagicMock()
+        fake_tunnel.captured_url = "https://abcd1234.ngrok-free.app"
+        fake_remote = MagicMock()
+        fake_remote._tunnel = fake_tunnel
+        fake_remote.config = RemoteConfig(tunnel=TunnelConfig(type="ngrok", url_mode="random"))
+        monkeypatch.setattr(
+            "agent_takkub.remote.RemoteControl.maybe_start", lambda orch: fake_remote
+        )
+
+        config = RemoteConfig(tunnel=TunnelConfig(type="ngrok", url_mode="random"))
+        ok, _msg, _pairing_url = stub._apply_remote_config(config, True)
+
+        assert ok is True
+        assert fake_remote.config.public_url == "https://abcd1234.ngrok-free.app"
+        assert RemoteConfig.load().public_url == "https://abcd1234.ngrok-free.app"
+
+    def test_ngrok_fixed_mode_skips_the_scrape_wait(self, monkeypatch, tmp_path):
+        """Fixed-domain ngrok already knows its URL (set by `build_config`
+        before `_apply_remote_config` ever runs) — the wait/copy block must
+        not touch it even though `_tunnel` is present."""
+        _isolate_remote_json(monkeypatch, tmp_path)
+        stub = _Stub()
+        stub._remote = None
+
+        fake_tunnel = MagicMock()
+        fake_tunnel.captured_url = "https://takkub.ngrok-free.app"
+        fake_remote = MagicMock()
+        fake_remote._tunnel = fake_tunnel
+        fake_remote.config = RemoteConfig(
+            public_url="https://takkub.ngrok-free.app",
+            tunnel=TunnelConfig(
+                type="ngrok", url_mode="fixed", ngrok_domain="takkub.ngrok-free.app"
+            ),
+        )
+        monkeypatch.setattr(
+            "agent_takkub.remote.RemoteControl.maybe_start", lambda orch: fake_remote
+        )
+
+        config = RemoteConfig(
+            public_url="https://takkub.ngrok-free.app",
+            tunnel=TunnelConfig(
+                type="ngrok", url_mode="fixed", ngrok_domain="takkub.ngrok-free.app"
+            ),
+        )
+        ok, _msg, _pairing_url = stub._apply_remote_config(config, True)
+
+        assert ok is True
+        assert fake_remote.config.public_url == "https://takkub.ngrok-free.app"
 
     def test_missing_remote_package_fails_gracefully(self, monkeypatch):
         stub = _Stub()

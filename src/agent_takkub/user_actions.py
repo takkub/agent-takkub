@@ -777,15 +777,22 @@ class UserActionsMixin:
         if self._remote is None:
             return False, "Failed to start the remote server — check logs.", ""
 
-        # Quick-tunnel mode (addendum): the *.trycloudflare.com URL isn't
-        # known until cloudflared prints it, a second or two after start().
+        # Quick-tunnel (cloudflared) and ngrok-random mode: the public URL
+        # isn't known until the provider prints it, a second or two after
+        # start(). ngrok-fixed already knows its URL upfront (set at
+        # build_config time) so it's excluded here — `captured_url` is
+        # already non-None for it and this loop would just no-op anyway.
         # ponytail: block this click briefly rather than wire a QTimer poll
         # into a dialog that's otherwise fully Qt-event-loop-decoupled.
         # Ceiling: if a real quick tunnel is ever slower than this, the
         # dialog just shows no pairing URL until reopened — upgrade path is
         # a background poll instead of this bounded wait.
         tunnel_obj = getattr(self._remote, "_tunnel", None)
-        if tunnel_obj is not None and self._remote.config.tunnel.type == "quick":
+        tunnel_cfg = self._remote.config.tunnel
+        needs_url_scrape = tunnel_cfg.type == "quick" or (
+            tunnel_cfg.type == "ngrok" and tunnel_cfg.url_mode == "random"
+        )
+        if tunnel_obj is not None and needs_url_scrape:
             import time as _time
 
             deadline = _time.monotonic() + _QUICK_TUNNEL_WAIT_S

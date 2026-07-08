@@ -107,6 +107,35 @@ class TestQuickTunnelAutoStart:
         finally:
             rc.stop()
 
+    def test_ngrok_mode_starts_tunnel_without_credentials(self, _isolated, monkeypatch):
+        import agent_takkub.remote.tunnel as tunnel_mod
+
+        started = {}
+
+        class _FakeTunnel:
+            def __init__(self, tunnel_config, public_url, port):
+                started["config"] = tunnel_config
+
+            def start(self):
+                started["started"] = True
+
+            def stop(self):
+                pass
+
+        monkeypatch.setattr(tunnel_mod, "Tunnel", _FakeTunnel)
+        RemoteConfig(
+            enabled=True,
+            bind_port=0,
+            auto_start_tunnel=True,
+            tunnel=TunnelConfig(type="ngrok", url_mode="fixed", ngrok_domain="x.ngrok-free.app"),
+        ).save()
+        rc = RemoteControl.maybe_start(MagicMock())
+        try:
+            assert started.get("started") is True
+            assert started["config"].type == "ngrok"
+        finally:
+            rc.stop()
+
     def test_named_mode_without_credentials_does_not_start_tunnel(self, _isolated, monkeypatch):
         import agent_takkub.remote.tunnel as tunnel_mod
 
@@ -169,6 +198,43 @@ class TestRemoteConfig:
         )
         cfg.save()
         assert RemoteConfig.load() == cfg
+
+    def test_save_then_load_round_trip_ngrok_fixed(self, _isolated):
+        cfg = RemoteConfig(
+            enabled=True,
+            tunnel=TunnelConfig(
+                type="ngrok", url_mode="fixed", ngrok_domain="takkub.ngrok-free.app"
+            ),
+        )
+        cfg.save()
+        loaded = RemoteConfig.load()
+        assert loaded == cfg
+        assert loaded.tunnel.url_mode == "fixed"
+        assert loaded.tunnel.ngrok_domain == "takkub.ngrok-free.app"
+
+    def test_ngrok_fields_default_backward_compatible(self, _isolated):
+        """A `tunnel` dict from before this addendum has neither key —
+        must load to the same safe defaults as a fresh `TunnelConfig()`."""
+        import agent_takkub.remote.config as remote_config
+
+        remote_config.path().parent.mkdir(parents=True, exist_ok=True)
+        remote_config.path().write_text(
+            json.dumps({"enabled": True, "tunnel": {"type": "quick"}}), encoding="utf-8"
+        )
+        cfg = RemoteConfig.load()
+        assert cfg.tunnel.url_mode == "random"
+        assert cfg.tunnel.ngrok_domain == ""
+        assert cfg.tunnel.ngrok_bin == ""
+
+    def test_save_then_load_round_trip_ngrok_bin(self, _isolated):
+        cfg = RemoteConfig(
+            enabled=True,
+            tunnel=TunnelConfig(type="ngrok", ngrok_bin="/opt/homebrew/bin/ngrok"),
+        )
+        cfg.save()
+        loaded = RemoteConfig.load()
+        assert loaded == cfg
+        assert loaded.tunnel.ngrok_bin == "/opt/homebrew/bin/ngrok"
 
     def test_corrupt_file_falls_back_to_default(self, _isolated):
         import agent_takkub.remote.config as remote_config
