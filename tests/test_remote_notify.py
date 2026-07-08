@@ -329,6 +329,30 @@ class TestSessionUuidDriftFallback:
         os.utime(other, (9999, 9999))
         assert notify_mod._resolve_jsonl_path("proj", "ghost-uuid") is None
 
+    def test_fallback_excludes_teammate_sharing_lead_cwd(self, tmp_path, config_dir, lead_dir):
+        # A specialist assigned --cwd == the Lead's own repo writes its session
+        # JSONL into the SAME encoded dir; while it's actively working its file
+        # is the newest one there. On uuid drift the fallback must skip it (by
+        # the teammate's recorded session_uuid) and pick the Lead's own — not
+        # the teammate's live transcript (mobile showed backend under Lead).
+        orch = _FakeOrch()
+        orch.set_lead("proj", "ghost-uuid")  # recorded uuid drifted → file missing
+        orch._panes_by_project["proj"]["backend"] = _FakePane()
+        orch._pane_state["proj::backend"] = _PaneState("backend-uuid")
+        lead = _write_jsonl(tmp_path, "C--proj", "lead-live-uuid", [_assistant_line("lead")])
+        team = _write_jsonl(tmp_path, "C--proj", "backend-uuid", [_assistant_line("backend")])
+        os.utime(lead, (1000, 1000))
+        os.utime(team, (2000, 2000))  # teammate is newer — must still be skipped
+        assert notify_mod._resolve_jsonl_path("proj", "ghost-uuid", orch) == lead
+
+    def test_fallback_without_orch_keeps_newest(self, tmp_path, config_dir, lead_dir):
+        # Backward-compat: no orch → old newest-by-mtime behavior (no exclusion).
+        old = _write_jsonl(tmp_path, "C--proj", "old-uuid", [])
+        new = _write_jsonl(tmp_path, "C--proj", "new-uuid", [])
+        os.utime(old, (1000, 1000))
+        os.utime(new, (2000, 2000))
+        assert notify_mod._resolve_jsonl_path("proj", "ghost-uuid") == new
+
     def test_history_endpoint_recovers_via_fallback(self, tmp_path, config_dir, lead_dir):
         # resolve_lead_jsonl (the /api/lead/history path) inherits the fallback:
         # a recorded-but-missing uuid still yields the live conversation.
