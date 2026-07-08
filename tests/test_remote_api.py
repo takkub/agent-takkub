@@ -159,6 +159,76 @@ class TestPulseDataMinimization:
         assert excinfo.value.status == 500
 
 
+class _FakePane:
+    def __init__(self, state: str, working_start: float | None) -> None:
+        self.state = state
+        self._working_start = working_start
+        # decoys — activity() must never surface any of these
+        self.last_note = "implement /auth/login"
+        self._transcript_path = "C:/secret/transcript.jsonl"
+        self.cwd = "/repos/secret-project"
+
+
+class _FakeOrchWithPanes:
+    def __init__(self, panes_by_project: dict) -> None:
+        self._panes_by_project = panes_by_project
+
+
+class TestActivity:
+    """Pulse page (project-grouped active panes). DATA-MIN: role + project +
+    runtime only — never task text, cwd, command, or status detail."""
+
+    def test_groups_only_working_panes_by_project(self, monkeypatch):
+        now = 1_000_000.0
+        monkeypatch.setattr(api.time, "time", lambda: now)
+        orch = _FakeOrchWithPanes(
+            {
+                "proj-a": {
+                    "backend": _FakePane("working", now - 30),
+                    "frontend": _FakePane("done", now - 999),
+                },
+                "proj-b": {
+                    "qa": _FakePane("working", now - 120),
+                },
+            }
+        )
+        result = api.activity(orch)
+        assert result == {
+            "projects": [
+                {"project": "proj-a", "roles": [{"role": "backend", "runtime_sec": 30}]},
+                {"project": "proj-b", "roles": [{"role": "qa", "runtime_sec": 120}]},
+            ]
+        }
+
+    def test_project_with_no_working_panes_is_omitted(self, monkeypatch):
+        orch = _FakeOrchWithPanes(
+            {"proj-a": {"backend": _FakePane("idle", None), "frontend": _FakePane("done", None)}}
+        )
+        result = api.activity(orch)
+        assert result == {"projects": []}
+
+    def test_working_pane_without_a_start_ts_is_skipped(self, monkeypatch):
+        # Defensive: set_state("working") always stamps _working_start, but
+        # activity() must not fabricate a runtime if it's ever None/missing.
+        orch = _FakeOrchWithPanes({"proj-a": {"backend": _FakePane("working", None)}})
+        result = api.activity(orch)
+        assert result == {"projects": []}
+
+    def test_no_open_panes_returns_empty_projects(self):
+        result = api.activity(_FakeOrchWithPanes({}))
+        assert result == {"projects": []}
+
+    def test_never_leaks_task_cwd_or_transcript_fields(self, monkeypatch):
+        now = 500.0
+        monkeypatch.setattr(api.time, "time", lambda: now)
+        orch = _FakeOrchWithPanes({"proj-a": {"backend": _FakePane("working", now - 10)}})
+        result = api.activity(orch)
+        dumped = json.dumps(result)
+        assert set(result["projects"][0]["roles"][0].keys()) == {"role", "runtime_sec"}
+        for leaked in ("implement", "/auth/login", "transcript.jsonl", "secret-project"):
+            assert leaked not in dumped
+
+
 class TestLeadSay:
     def test_empty_message_rejected(self, fake_orch):
         with pytest.raises(api.RemoteApiError) as excinfo:

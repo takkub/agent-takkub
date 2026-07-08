@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import socket
+import time
 
 from .. import config as _config
 from . import notify
@@ -84,6 +85,34 @@ def pulse(orch, from_project: str | None) -> dict:
         1 for state in status.values() if isinstance(state, str) and state.startswith("working")
     )
     return {"working": working, "total": len(status)}
+
+
+def activity(orch) -> dict:
+    """Pulse page (project-grouped active panes). DATA-MIN (§7.3, same bar as
+    `pulse`): role + project + runtime only — never task text, cwd, command,
+    or status detail. Runs inline on the Qt main thread (like `projects`/
+    `lead_history`, not `pulse`'s off-thread loopback call) since it reads
+    `orch._panes_by_project` directly rather than going through cli_server.
+
+    `pane._working_start` (the same wall-clock the pane header's own
+    elapsed-time spinner reads, see `agent_pane.py:set_state`) is the
+    "started" timestamp — a pane can be spawned long before it's actually
+    given work, so runtime is measured from the current task starting, not
+    from spawn."""
+    now = time.time()
+    projects_out: list[dict] = []
+    for project_ns, panes in (getattr(orch, "_panes_by_project", None) or {}).items():
+        roles: list[dict] = []
+        for role, pane in panes.items():
+            if getattr(pane, "state", None) != "working":
+                continue
+            started = getattr(pane, "_working_start", None)
+            if started is None:
+                continue
+            roles.append({"role": role, "runtime_sec": max(0, int(now - started))})
+        if roles:
+            projects_out.append({"project": project_ns, "roles": roles})
+    return {"projects": projects_out}
 
 
 def lead_say(orch, text: str, from_project: str | None) -> dict:

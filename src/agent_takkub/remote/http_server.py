@@ -88,11 +88,12 @@ class _Bridge(QObject):
     running inline here. Their client-supplied `project` param is still
     resolved inline first (`_resolve_scoped_project`, a cheap in-process
     read) so the open-tabs check happens on the Qt thread before the
-    worker thread ever starts. `projects`/`sse_ticket`/`open`/`lead_history`
-    stay fully inline: cheap, in-process work (a single project-scoped
-    JSONL read for `lead_history`) that DOES need the Qt-thread ownership
-    guarantee (the same thread that writes `projects.json` on tab
-    switch/import, and the only thread allowed to touch `main_window`).
+    worker thread ever starts. `projects`/`sse_ticket`/`open`/`lead_history`/
+    `activity` stay fully inline: cheap, in-process work (a single
+    project-scoped JSONL read for `lead_history`, a direct pane-registry
+    read for `activity`) that DOES need the Qt-thread ownership guarantee
+    (the same thread that writes `projects.json` on tab switch/import, and
+    the only thread allowed to touch `main_window`/pane state).
     """
 
     request = pyqtSignal(object)
@@ -140,6 +141,8 @@ class _Bridge(QObject):
                 pending.reply.put(
                     (200, api.lead_history(self._orch, project_ns, pending.params.get("limit")))
                 )
+            elif pending.action == "activity":
+                pending.reply.put((200, api.activity(self._orch)))
             else:
                 pending.reply.put((404, {"ok": False, "msg": "unknown action"}))
         except Exception:
@@ -335,6 +338,9 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
                     "lead_history",
                     {"project": query.get("project"), "limit": query.get("limit")},
                 )
+        elif rest == "/api/activity":
+            if self._check_bearer() and self._check_password_gate():
+                self._respond_marshaled("activity", {})
         elif rest.startswith("/api/"):
             self._reject()
         else:
