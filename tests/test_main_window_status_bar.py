@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from agent_takkub.main_window import MainWindow
 
@@ -183,3 +183,22 @@ class TestDoctorIntegration:
         findings = [Finding("test", "item", Status.OK, "all good")]
         # Should be a no-op, not raise
         doctor.run_auto_fixes(findings)
+
+
+# ---------------------------------------------------------------------------
+# #102 -- closing the last tab must not leave a stale `active` project
+# ---------------------------------------------------------------------------
+
+
+class TestOnTabSwitchedNoTabsLeft:
+    def test_negative_index_clears_active_project(self) -> None:
+        """QTabWidget emits currentChanged(-1) once the last tab is removed.
+        That path used to `return` immediately, skipping set_active_project
+        entirely and leaving projects.json's `active` pointing at a project
+        with no open tab."""
+        fake_self = Mock()
+        with patch("agent_takkub.main_window.clear_active_project") as mock_clear:
+            MainWindow._on_tab_switched(fake_self, -1)
+        mock_clear.assert_called_once_with()
+        # Nothing past the early-return branch should be touched.
+        fake_self.tabs.widget.assert_not_called()

@@ -43,6 +43,7 @@ from .cli_server import CliServer
 from .config import (
     EVENTS_LOG,
     active_project,
+    clear_active_project,
     get_open_tabs,
     list_project_names,
     preset_roles_for_active,
@@ -985,6 +986,9 @@ class MainWindow(
         projects.json so the orchestrator's project-default resolution and the
         rtk button match the visible project."""
         if index < 0:
+            # No tabs left (e.g. the last one just closed) — `active` must
+            # not keep pointing at a project with no open tab (#102).
+            clear_active_project()
             return
         tab = self.tabs.widget(index)
         if not isinstance(tab, ProjectTab):
