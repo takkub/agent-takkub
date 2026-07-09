@@ -54,6 +54,7 @@ from .lead_context import (  # re-exported for test imports
     _render_lead_context,
     render_lead_settings,
 )
+from .lead_draft_state import LeadDraftState  # re-exported for test imports
 from .lead_inbox import (  # re-exported for test/compat imports; mixin provides methods
     _SUBMIT_MAX_RESENDS,
     _SUBMIT_VERIFY_GRACE_MS,
@@ -551,6 +552,13 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         # don't drift on scope. Volatile (never persisted) and per-project
         # so a goal set in one tab never leaks into another.
         self._session_goals: dict[str, str] = {}
+        # Lead draft-typing guard (#3, 2026-07-09 core-upgrade plan): tracks
+        # whether each project's Lead pane input line currently holds
+        # unsubmitted user text, so _pump_lead_notify / _flush_pending_lead_cc
+        # / inject_slash_command_when_ready never paste an engine message on
+        # top of a draft the user hasn't submitted yet. Fed by _on_pane_input
+        # via LeadInboxMixin._track_lead_draft_input; see lead_inbox.py.
+        self._lead_draft_state: dict[str, LeadDraftState] = {}
 
         # Per-cockpit-run capability token. Injected only into the Lead pane
         # env (TAKKUB_LEAD_TOKEN) so the Lead takkub CLI can authenticate
@@ -626,6 +634,17 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         callers can hold a reference and mutate it directly — that's how
         `self.panes` works for the active project."""
         return self._panes_by_project.setdefault(self._resolve_project(project), {})
+
+    def _project_ns_for_pane(self, pane: AgentPane) -> str | None:
+        """Reverse-lookup: which project namespace owns *pane* (identity
+        match). Needed because every project's Lead pane shares
+        ``role.name == LEAD.name``, so a role-name lookup alone can't tell
+        which project's draft tracker a Lead keystroke belongs to (issue #3).
+        """
+        for project_ns, panes in self._panes_by_project.items():
+            if panes.get(pane.role.name) is pane:
+                return project_ns
+        return None
 
     @property
     def panes(self) -> dict[str, AgentPane]:
@@ -3668,4 +3687,12 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             pane = self.panes.get(role_name)
         if pane is None or pane.session is None:
             return
+        # Feed the Lead draft-typing guard (#3) with every keystroke the
+        # Lead pane's terminal actually emits — engine-originated writes
+        # (done notices, CC flushes, …) go straight to session.write() and
+        # never pass through here, so they can't feed the tracker.
+        if pane.role.name == LEAD.name:
+            project_ns = self._project_ns_for_pane(pane)
+            if project_ns is not None:
+                self._track_lead_draft_input(project_ns, data)
         pane.session.write(data)

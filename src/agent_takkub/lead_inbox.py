@@ -8,14 +8,23 @@ Also houses the pane submit helpers (_delayed_enter / _delayed_enter_verified)
 that the cluster methods depend on and that were previously module-level in
 orchestrator.py.
 
+Also houses the Lead draft-typing guard (issue #3, 2026-07-09 core-upgrade
+plan): `_track_lead_draft_input` / `_lead_can_accept_injection` /
+`_lead_draft_hold_expired`, backed by the pure state machine in
+`lead_draft_state.py`. `Orchestrator._on_pane_input` feeds every Lead-pane
+keystroke into the tracker; `_pump_lead_notify`, `_flush_pending_lead_cc`, and
+`inject_slash_command_when_ready` all gate through the same
+`_lead_can_accept_injection()` so a done-notice/CC/slash-command paste never
+lands on top of the user's unsubmitted draft.
+
 Layer rule (enforced by import-linter "lead-inbox-layer" contract):
   lead_inbox MUST NOT import orchestrator / main_window / app / cli.
 
 State ownership rule: _lead_notify_queue, _pending_lead_cc,
-_pending_done_notices, _lead_notify_pumping, _lead_notify_retry MUST stay in
-Orchestrator.__init__.  This mixin only defines methods — never the initial
-dict assignments — so queue ownership stays centralised and divergence bugs
-cannot creep back in.
+_pending_done_notices, _lead_notify_pumping, _lead_notify_retry,
+_lead_draft_state MUST stay in Orchestrator.__init__.  This mixin only
+defines methods — never the initial dict assignments — so queue ownership
+stays centralised and divergence bugs cannot creep back in.
 """
 
 from __future__ import annotations
@@ -31,6 +40,12 @@ from PyQt6.QtCore import QTimer
 from .agent_pane import AgentPane
 from .config import RUNTIME_DIR as _RUNTIME_DIR_DEFAULT
 from .config import ensure_runtime as _ensure_runtime_default
+from .lead_draft_state import (
+    LeadDraftState,
+    advance_draft_state,
+    draft_hold_expired,
+    draft_state_allows_injection,
+)
 from .orchestrator_text import (
     _enter_delay_ms,
     _log_event,
@@ -228,8 +243,9 @@ class LeadInboxMixin:
 
     All methods resolve through the combined MRO; state dicts
     (_lead_notify_queue, _pending_lead_cc, _pending_done_notices,
-    _lead_notify_pumping, _lead_notify_retry) are initialised in
-    Orchestrator.__init__ — never here — so ownership stays centralised.
+    _lead_notify_pumping, _lead_notify_retry, _lead_draft_state) are
+    initialised in Orchestrator.__init__ — never here — so ownership stays
+    centralised.
 
     Dependencies on the host class (Orchestrator):
       _project_panes(project)          — spawn_engine cluster
@@ -253,6 +269,39 @@ class LeadInboxMixin:
         _log_event(log_event, project=project_ns)
 
     # ------------------------------------------------------------------
+    # Lead draft-typing guard (#3, 2026-07-09 core-upgrade plan)
+    #
+    # `is_at_ready_prompt()` only tells us the pane is idle — it can't see a
+    # user draft sitting unsubmitted in the input line. Without this guard, a
+    # done-notice/CC/slash-command paste lands on top of that draft and the
+    # delayed Enter submits both together, silently dragging the user's
+    # half-typed text along with it. `_track_lead_draft_input` is fed every
+    # byte the Lead pane's terminal emits (wired from
+    # `Orchestrator._on_pane_input`); `_lead_can_accept_injection` is the
+    # single gate `_pump_lead_notify`, `_flush_pending_lead_cc`, and
+    # `inject_slash_command_when_ready` all share.
+    # ------------------------------------------------------------------
+
+    def _track_lead_draft_input(self, project_ns: str, data: bytes) -> None:
+        if not hasattr(self, "_lead_draft_state"):
+            self._lead_draft_state = {}
+        prev = self._lead_draft_state.get(project_ns) or LeadDraftState()
+        self._lead_draft_state[project_ns] = advance_draft_state(prev, data, time.time())
+
+    def _lead_can_accept_injection(self, project_ns: str) -> bool:
+        """True when the Lead pane's input line reads empty — safe to paste
+        an engine-originated message without dragging in an unsubmitted draft."""
+        state = getattr(self, "_lead_draft_state", {}).get(project_ns)
+        return draft_state_allows_injection(state)
+
+    def _lead_draft_hold_expired(self, project_ns: str) -> bool:
+        """True once a held draft has blocked injection long enough that the
+        caller should give up waiting and spill instead (see
+        lead_draft_state.DRAFT_HOLD_TIMEOUT_S)."""
+        state = getattr(self, "_lead_draft_state", {}).get(project_ns)
+        return draft_hold_expired(state, time.time())
+
+    # ------------------------------------------------------------------
     # Delivery helpers
     # ------------------------------------------------------------------
 
@@ -270,6 +319,7 @@ class LeadInboxMixin:
         `max_wait_ms`, the command is silently dropped (we'd rather skip than
         paste into a half-built UI).
         """
+        project_ns = self._resolve_project(project)
         pane = self._project_panes(project).get(role_name)
         if pane is None:
             return
@@ -295,7 +345,12 @@ class LeadInboxMixin:
                 return
             if pane.session is None or not pane.session.is_alive:
                 return
-            if pane.session.is_at_ready_prompt():
+            # Same draft guard as _pump_lead_notify/_flush_pending_lead_cc —
+            # only meaningful for the Lead pane (teammates have no draft
+            # tracker fed for them, so the check is a no-op there).
+            if pane.session.is_at_ready_prompt() and (
+                role_name != LEAD.name or self._lead_can_accept_injection(project_ns)
+            ):
                 _deliver()
                 return
             elapsed[0] += 500
@@ -618,6 +673,11 @@ class LeadInboxMixin:
         lead = self._project_panes(project_ns).get(LEAD.name)
         if not (lead and lead.session and lead.session.is_alive):
             return  # Lead still not alive — keep queue, retry later
+        if not self._lead_can_accept_injection(project_ns):
+            # User has an unsubmitted draft — leave the queue intact for the
+            # next retry (spawn's timer or the next live send()) rather than
+            # paste the CC over it.
+            return
         # Deliver-then-dequeue: write each CC first and drop ONLY what was
         # actually delivered. The previous code popped + persisted-empty BEFORE
         # writing, so a write that raised mid-flush (Lead session torn down
@@ -775,6 +835,34 @@ class LeadInboxMixin:
                 return
             # Retry after a short delay without consuming the item.
             QTimer.singleShot(400, lambda: self._pump_lead_notify(project_ns))
+            return
+
+        if not self._lead_can_accept_injection(project_ns):
+            # Lead is idle but the user has an unsubmitted draft in its input
+            # line (issue #3) — holding here instead of pasting over it is
+            # the actual fix. Distinct from the busy-retry cap above: this is
+            # gated on wall-clock (LeadDraftState.pending_since), not a retry
+            # count, since other callers of the same gate poll on different
+            # cadences. Past the hold timeout, spill rather than clobber the
+            # draft indefinitely — same durable fallback + red-dot mechanism
+            # as the busy-cap spill above.
+            if self._lead_draft_hold_expired(project_ns):
+                items = list(queue)
+                queue.clear()
+                pumping = getattr(self, "_lead_notify_pumping", set())
+                pumping.discard(project_ns)
+                getattr(self, "_lead_notify_retry", {}).pop(project_ns, None)
+                if not hasattr(self, "_pending_done_notices"):
+                    self._pending_done_notices = {}
+                for b in items:
+                    self._pending_done_notices.setdefault(project_ns, []).append(
+                        {"role": "system", "note": "notify_draft_spill", "body": b}
+                    )
+                if items:
+                    self._save_pending_done_notices(project_ns)
+                _log_event("lead_notify_draft_spill", project=project_ns, count=len(items))
+            else:
+                QTimer.singleShot(400, lambda: self._pump_lead_notify(project_ns))
             return
 
         # Lead is alive and idle — deliver one item; reset retry counter.

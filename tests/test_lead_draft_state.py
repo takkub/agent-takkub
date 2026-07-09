@@ -1,0 +1,219 @@
+"""Tests for the pure Lead draft-typing state machine (issue #3).
+
+Scope: byte-level transitions only — no Qt, no Orchestrator. Integration
+(gate wired into _pump_lead_notify / _flush_pending_lead_cc /
+inject_slash_command_when_ready / _on_pane_input) is covered by
+test_lead_draft_guard.py.
+"""
+
+from __future__ import annotations
+
+from agent_takkub.lead_draft_state import (
+    DRAFT_HOLD_TIMEOUT_S,
+    EMPTY,
+    NONEMPTY,
+    UNKNOWN_NONEMPTY,
+    LeadDraftState,
+    advance_draft_state,
+    draft_hold_expired,
+    draft_state_allows_injection,
+)
+
+NOW = 1_000_000.0
+
+
+def _advance(state: LeadDraftState, data: bytes, now: float = NOW) -> LeadDraftState:
+    return advance_draft_state(state, data, now)
+
+
+class TestPrintableText:
+    def test_typing_ascii_marks_nonempty(self):
+        st = _advance(LeadDraftState(), b"hello")
+        assert st.state == NONEMPTY
+        assert st.draft_len == 5
+
+    def test_pending_since_stamped_on_first_char(self):
+        st = _advance(LeadDraftState(), b"h", now=NOW)
+        assert st.pending_since == NOW
+
+    def test_pending_since_not_restamped_on_further_typing(self):
+        st = _advance(LeadDraftState(), b"h", now=NOW)
+        st2 = _advance(st, b"i", now=NOW + 10)
+        assert st2.pending_since == NOW
+        assert st2.draft_len == 2
+
+
+class TestBackspaceToEmpty:
+    def test_n_chars_then_n_backspaces_clears(self):
+        st = _advance(LeadDraftState(), b"abc")
+        assert st.state == NONEMPTY and st.draft_len == 3
+        st = _advance(st, b"\x7f\x7f\x7f")
+        assert st.state == EMPTY
+        assert st.draft_len == 0
+        assert st.pending_since == 0.0
+
+    def test_partial_backspace_stays_nonempty(self):
+        st = _advance(LeadDraftState(), b"abc")
+        st = _advance(st, b"\x7f")
+        assert st.state == NONEMPTY
+        assert st.draft_len == 2
+
+    def test_backspace_on_empty_is_noop(self):
+        st = _advance(LeadDraftState(), b"\x7f")
+        assert st.state == EMPTY
+        assert st.draft_len == 0
+
+    def test_ctrl_h_backspace_variant_also_clears(self):
+        st = _advance(LeadDraftState(), b"a")
+        st = _advance(st, b"\x08")
+        assert st.state == EMPTY
+
+
+class TestExplicitClears:
+    def test_enter_cr_clears(self):
+        st = _advance(LeadDraftState(), b"task text")
+        st = _advance(st, b"\r")
+        assert st.state == EMPTY
+        assert st.draft_len == 0
+
+    def test_enter_lf_clears(self):
+        st = _advance(LeadDraftState(), b"task text")
+        st = _advance(st, b"\n")
+        assert st.state == EMPTY
+
+    def test_esc_clears(self):
+        st = _advance(LeadDraftState(), b"draft")
+        st = _advance(st, b"\x1b")
+        assert st.state == EMPTY
+
+    def test_ctrl_c_clears(self):
+        st = _advance(LeadDraftState(), b"draft")
+        st = _advance(st, b"\x03")
+        assert st.state == EMPTY
+
+    def test_ctrl_u_clears(self):
+        st = _advance(LeadDraftState(), b"draft")
+        st = _advance(st, b"\x15")
+        assert st.state == EMPTY
+
+    def test_clears_also_reset_unknown_nonempty(self):
+        st = _advance(LeadDraftState(), b"\x1b[A")  # Up arrow -> unknown hold
+        assert st.state == UNKNOWN_NONEMPTY
+        st = _advance(st, b"\r")
+        assert st.state == EMPTY
+
+
+class TestArrowsAndHistoryRecall:
+    def test_up_arrow_from_empty_becomes_unknown_nonempty(self):
+        st = _advance(LeadDraftState(), b"\x1b[A")
+        assert st.state == UNKNOWN_NONEMPTY
+
+    def test_down_arrow_becomes_unknown_nonempty(self):
+        st = _advance(LeadDraftState(), b"\x1b[B")
+        assert st.state == UNKNOWN_NONEMPTY
+
+    def test_ss3_up_arrow_variant_becomes_unknown_nonempty(self):
+        st = _advance(LeadDraftState(), b"\x1bOA")
+        assert st.state == UNKNOWN_NONEMPTY
+
+    def test_left_arrow_is_noop(self):
+        st = _advance(LeadDraftState(), b"abc")
+        st2 = _advance(st, b"\x1b[D")
+        assert st2 == st
+
+    def test_right_arrow_is_noop(self):
+        st = _advance(LeadDraftState(), b"abc")
+        st2 = _advance(st, b"\x1b[C")
+        assert st2 == st
+
+    def test_left_arrow_on_empty_stays_empty(self):
+        st = _advance(LeadDraftState(), b"\x1b[D")
+        assert st.state == EMPTY
+
+    def test_unknown_nonempty_ignores_further_typing_and_backspace(self):
+        st = _advance(LeadDraftState(), b"\x1b[A")
+        assert st.state == UNKNOWN_NONEMPTY
+        st = _advance(st, b"xyz\x7f\x7f\x7f\x7f\x7f")
+        assert st.state == UNKNOWN_NONEMPTY
+
+
+class TestCtrlAE:
+    def test_ctrl_a_is_noop(self):
+        st = _advance(LeadDraftState(), b"abc")
+        st2 = _advance(st, b"\x01")
+        assert st2 == st
+
+    def test_ctrl_e_is_noop(self):
+        st = _advance(LeadDraftState(), b"abc")
+        st2 = _advance(st, b"\x05")
+        assert st2 == st
+
+
+class TestBracketedPaste:
+    def test_paste_start_marker_becomes_unknown_nonempty(self):
+        st = _advance(LeadDraftState(), b"\x1b[200~pasted content\x1b[201~")
+        assert st.state == UNKNOWN_NONEMPTY
+
+    def test_paste_content_not_counted_toward_draft_len(self):
+        st = _advance(LeadDraftState(), b"\x1b[200~" + b"x" * 500 + b"\x1b[201~")
+        assert st.state == UNKNOWN_NONEMPTY
+        # draft_len tracking is meaningless in unknown_nonempty; the state
+        # itself (not the length) is what the injection gate reads.
+        assert draft_state_allows_injection(st) is False
+
+
+class TestUnrecognizedCsi:
+    def test_home_end_delete_do_not_change_state(self):
+        st = _advance(LeadDraftState(), b"abc")
+        for seq in (b"\x1b[H", b"\x1b[F", b"\x1b[3~", b"\x1b[5~"):
+            st2 = _advance(st, seq)
+            assert st2 == st, f"{seq!r} must not change draft state"
+
+
+class TestMultibyteThai:
+    def test_thai_chars_counted_as_characters_not_bytes(self):
+        thai = "สวัสดี"  # 6 Thai characters, >1 byte each in UTF-8
+        st = _advance(LeadDraftState(), thai.encode("utf-8"))
+        assert st.state == NONEMPTY
+        assert st.draft_len == len(thai)
+
+    def test_one_backspace_per_thai_character_reaches_empty(self):
+        thai = "สวัสดี"
+        st = _advance(LeadDraftState(), thai.encode("utf-8"))
+        st = _advance(st, b"\x7f" * len(thai))
+        assert st.state == EMPTY
+        assert st.draft_len == 0
+
+
+class TestInjectionGate:
+    def test_none_state_allows_injection(self):
+        assert draft_state_allows_injection(None) is True
+
+    def test_empty_state_allows_injection(self):
+        assert draft_state_allows_injection(LeadDraftState()) is True
+
+    def test_nonempty_blocks_injection(self):
+        assert draft_state_allows_injection(LeadDraftState(state=NONEMPTY, draft_len=1)) is False
+
+    def test_unknown_nonempty_blocks_injection(self):
+        assert draft_state_allows_injection(LeadDraftState(state=UNKNOWN_NONEMPTY)) is False
+
+
+class TestHoldExpiry:
+    def test_none_state_never_expired(self):
+        assert draft_hold_expired(None, NOW) is False
+
+    def test_empty_state_never_expired(self):
+        assert draft_hold_expired(LeadDraftState(), NOW) is False
+
+    def test_fresh_hold_not_expired(self):
+        st = LeadDraftState(state=NONEMPTY, draft_len=1, pending_since=NOW)
+        assert draft_hold_expired(st, NOW + 5) is False
+
+    def test_hold_expires_after_timeout(self):
+        st = LeadDraftState(state=NONEMPTY, draft_len=1, pending_since=NOW)
+        assert draft_hold_expired(st, NOW + DRAFT_HOLD_TIMEOUT_S) is True
+
+    def test_hold_expires_for_unknown_nonempty_too(self):
+        st = LeadDraftState(state=UNKNOWN_NONEMPTY, pending_since=NOW)
+        assert draft_hold_expired(st, NOW + DRAFT_HOLD_TIMEOUT_S + 1) is True
