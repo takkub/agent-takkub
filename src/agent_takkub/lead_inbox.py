@@ -347,8 +347,60 @@ class LeadInboxMixin:
         that never reached ready in time lost `/remote-control` with zero
         trace in events.log). `on_delivered`/`on_dropped(reason)` let a
         caller react (e.g. retry later) instead of only reading the log.
+
+        #113: serialised per (project, role) — the `/remote-control` auto-
+        bridge (fires on every Lead spawn) and the ↻ Resume button (fires
+        `/resume`) both call this for the SAME Lead pane, independently of
+        each other. Without a lock, two concurrent polls can both observe
+        `ready=True` around the same tick and both `_deliver()`, writing
+        payload+Enter into the pane interleaved — the Enter meant for one
+        command lands mid-render of the other's picker (e.g. `/resume`'s
+        session list, which has no prior arrow-key navigation to absorb a
+        stray Enter), producing "Resume cancelled" on an otherwise-idle
+        fresh boot. A second call for a (project, role) already in flight is
+        queued — not dropped — and starts its own fresh poll only once the
+        first call's delivery has fully settled (write + the delayed
+        submitting Enter, not merely the synchronous write).
         """
         project_ns = self._resolve_project(project)
+        lock_key = f"{project_ns}::{role_name}"
+        if not hasattr(self, "_slash_inject_busy"):
+            self._slash_inject_busy = set()
+        if not hasattr(self, "_slash_inject_queue"):
+            self._slash_inject_queue = {}
+        busy = self._slash_inject_busy
+        queue = self._slash_inject_queue
+
+        if lock_key in busy:
+            queue.setdefault(lock_key, collections.deque()).append(
+                (role_name, command, max_wait_ms, project, on_delivered, on_dropped)
+            )
+            return
+        busy.add(lock_key)
+
+        def _release_and_advance() -> None:
+            busy.discard(lock_key)
+            pending = queue.get(lock_key)
+            if not pending:
+                return
+            next_args = pending.popleft()
+            (
+                next_role,
+                next_command,
+                next_max_wait_ms,
+                next_project,
+                next_on_delivered,
+                next_on_dropped,
+            ) = next_args
+            self.inject_slash_command_when_ready(
+                next_role,
+                next_command,
+                max_wait_ms=next_max_wait_ms,
+                project=next_project,
+                on_delivered=next_on_delivered,
+                on_dropped=next_on_dropped,
+            )
+
         pane = self._project_panes(project).get(role_name)
         if pane is None:
             _log_event(
@@ -356,6 +408,7 @@ class LeadInboxMixin:
             )
             if on_dropped is not None:
                 on_dropped("pane_missing")
+            _release_and_advance()
             return
         elapsed = [0]
         sent = [False]
@@ -366,6 +419,7 @@ class LeadInboxMixin:
             _log_event("auto_slash_command_dropped", role=role_name, command=command, reason=reason)
             if on_dropped is not None:
                 on_dropped(reason)
+            _release_and_advance()
 
         def _deliver() -> None:
             if sent[0]:
@@ -380,16 +434,20 @@ class LeadInboxMixin:
                 )
                 if on_dropped is not None:
                     on_dropped("session_dead")
+                _release_and_advance()
                 return
             _slash_sess = pane.session
             payload = _paste_payload(command)
             _slash_sess.write(payload)
-            _orch_attr("_delayed_enter", _delayed_enter)(
-                pane, _slash_sess, _enter_delay_ms(payload)
-            )
+            delay_ms = _enter_delay_ms(payload)
+            _orch_attr("_delayed_enter", _delayed_enter)(pane, _slash_sess, delay_ms)
             _log_event("auto_slash_command", role=role_name, command=command)
             if on_delivered is not None:
                 on_delivered()
+            # Hold the lock through the delayed submitting Enter, not just
+            # the synchronous paste write — a queued call must not start its
+            # own poll until this command has actually been submitted.
+            QTimer.singleShot(delay_ms, _release_and_advance)
 
         def _check() -> None:
             if sent[0]:

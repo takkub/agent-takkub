@@ -623,6 +623,16 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         # free, with no separate invalidation step needed.
         self._lead_remote_bridge_delivered_session: dict[str, object] = {}
 
+        # Per-(project, role) in-flight lock for inject_slash_command_when_ready
+        # (#113): keyed f"{project_ns}::{role_name}" -> present while a call's
+        # poll-through-delivery is in flight for that pane. A second call for
+        # the same key (e.g. the /remote-control auto-bridge and the ↻ Resume
+        # button both targeting the Lead pane) queues in _slash_inject_queue
+        # instead of racing a concurrent write+Enter into the same pane — see
+        # LeadInboxMixin.inject_slash_command_when_ready.
+        self._slash_inject_busy: set[str] = set()
+        self._slash_inject_queue: dict[str, collections.deque] = {}
+
         # Per-cockpit-run capability token. Injected only into the Lead pane
         # env (TAKKUB_LEAD_TOKEN) so the Lead takkub CLI can authenticate
         # Lead-only server commands. Teammates don't get it — their CLI calls
