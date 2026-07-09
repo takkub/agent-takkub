@@ -189,7 +189,6 @@ class MainWindow(
         self.orch.paneRequested.connect(self._ensure_teammate_pane)
         self.orch.paneClosed.connect(self._remove_teammate_pane)
         self.orch.agentDone.connect(self._notify_agent_done)
-        self.orch.paneResumed.connect(self._on_pane_resumed)
         self.orch.crossTabDone.connect(self._on_cross_tab_done)
         self.orch.leadNotified.connect(self._on_lead_notified)
         # `takkub restart` — same persist+relaunch path as the status-bar 🔄
@@ -236,13 +235,6 @@ class MainWindow(
         # nested inside when that happens, Chromium's renderer crashes silently
         # on Windows ("composition surface invalidated"). Adding the tab BEFORE
         # creating the Lead AgentPane keeps the chain stable from first paint on.
-        # Tracks which Lead panes have already auto-bridged `/remote-control`
-        # in this cockpit session — keyed by project name. Populated by:
-        #   - `_on_pane_resumed` (session-resume auto-fire)
-        #   - `_on_lead_input` (first user Enter in Lead pane)
-        # Membership prevents double-firing across both paths.
-        self._lead_first_input_fired: set[str] = set()
-
         initial_project = active_project()[0] or "default"
         initial_tab = ProjectTab(initial_project, lead_pane=None)
         self.tabs.addTab(initial_tab, initial_project)
@@ -250,9 +242,6 @@ class MainWindow(
         initial_lead = AgentPane(LEAD, parent=initial_tab)
         self.orch.register_pane(initial_lead, project=initial_project)
         initial_tab.attach_lead(initial_lead)
-        initial_lead.inputBytes.connect(
-            lambda role, data, proj=initial_project: self._on_lead_input(proj, role, data)
-        )
         self.tabs.setCurrentIndex(0)
 
         # Usage-window readout — sits as the corner widget of the active
@@ -599,11 +588,10 @@ class MainWindow(
         self._boot_quiet_count = 0
         QTimer.singleShot(_BOOT_LEAD_INITIAL_MS, self._spawn_lead_when_quiet)
 
-        # No auto-/remote-control on fresh boot. The cockpit listens for
-        # orch.paneResumed and only injects the bridge command on session
-        # resume (i.e. the Lead was respawned with --continue inside the
-        # 5-minute window). Manual trigger via the clickable hint chip
-        # below for fresh boots when the user wants to drive from a phone.
+        # `/remote-control` auto-bridges on every successful Lead spawn,
+        # fresh boot included — see SpawnEngineMixin._maybe_fire_remote_bridge
+        # (spawn_engine.py). The 🌐 Remote chip remains as a manual fallback
+        # (reconfigure pairing, or re-fire if the bridge command timed out).
 
         # Auto-spawn project presets after Lead has had a moment to boot.
         # Stagger 3s apart so we don't hammer the system or race on auto-trust.
@@ -724,35 +712,6 @@ class MainWindow(
         tab = self._tab_for_project(project_ns)
         if tab is not None:
             tab.mark_lead_unread()
-
-    def _on_pane_resumed(self, role: str, project: str) -> None:
-        """Auto-bridge `/remote-control` when a Lead pane was actually
-        *resumed* (spawn picked up --continue). Teammate-pane resumes
-        are ignored — they're spawned to do task work, not to bridge."""
-        if role != LEAD.name:
-            return
-        if project in self._lead_first_input_fired:
-            return
-        self._lead_first_input_fired.add(project)
-        self.orch.inject_slash_command_when_ready(LEAD.name, "/remote-control", project=project)
-
-    def _on_lead_input(self, project: str, role: str, data: bytes) -> None:
-        """First-task auto-bridge: when the user hits Enter in a Lead pane
-        for the first time this session, fire `/remote-control` so the
-        bridge command lands right after their task. Fresh boot + idle
-        Lead → silent. Click the hint chip to bridge without typing.
-        """
-        if role != LEAD.name:
-            return
-        if project in self._lead_first_input_fired:
-            return
-        # Treat any Enter (CR or LF) as "task submitted". False positives
-        # (user pressed Enter on empty input) are benign — claude no-ops
-        # on /remote-control when already active.
-        if b"\r" not in data and b"\n" not in data:
-            return
-        self._lead_first_input_fired.add(project)
-        self.orch.inject_slash_command_when_ready(LEAD.name, "/remote-control", project=project)
 
     # ──────────────────────────────────────────────────────────────
     # toolbar buttons
@@ -932,17 +891,14 @@ class MainWindow(
         lead = AgentPane(LEAD, parent=tab)
         self.orch.register_pane(lead, project=project_name)
         tab.attach_lead(lead)
-        lead.inputBytes.connect(
-            lambda role, data, proj=project_name: self._on_lead_input(proj, role, data)
-        )
 
         ok, msg = self.orch.spawn(LEAD.name, project=project_name)
         if not ok:
             self._status.showMessage(f"⚠ Lead spawn failed for {project_name}: {msg}", 15_000)
             return
         lead._title.setText(f"Lead · {project_name}")
-        # No auto-/remote-control on tab open. Resume case is handled by
-        # the orch.paneResumed signal; manual case via the hint chip.
+        # `/remote-control` auto-bridges here too — spawn() above fires it
+        # for every successful Lead spawn (see _maybe_fire_remote_bridge).
         self._refresh_rtk_button()
         if self._limit_store is not None:
             from . import user_profile as _up_ot
@@ -1081,9 +1037,8 @@ class MainWindow(
         active = active_project()[0]
         if active:
             self.lead_pane._title.setText(f"Lead · {active}")
-        # Resume after self-update restart: orch.paneResumed handles the
-        # `/remote-control` injection automatically because spawn() above
-        # picks up --continue inside the 5-minute resume window.
+        # `/remote-control` auto-bridges here too — spawn() above fires it
+        # for every successful Lead spawn (see _maybe_fire_remote_bridge).
 
     def _on_tab_context_menu(self, index: int, global_pos) -> None:
         """Right-click a sidebar project → project-level actions."""

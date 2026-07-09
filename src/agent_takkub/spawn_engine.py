@@ -1626,10 +1626,8 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
 
             self._auto_trust(role_name, project=project_ns)
             self.statusChanged.emit()
-            if resumed:
-                # main_window listens for this to auto-bridge `/remote-control`
-                # exclusively on resumes — fresh boots stay silent.
-                self.paneResumed.emit(role_name, project_ns)
+            if role_name == LEAD.name:
+                self._maybe_fire_remote_bridge(project_ns, _ekey_spawn)
             # Flush any CC messages queued while Lead was offline.
             # Give the session a few seconds to reach the ready prompt before
             # trying to write; if Lead isn't ready yet, _flush_pending_lead_cc
@@ -1671,6 +1669,30 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         finally:
             self._spawn_in_progress = False
             self._drain_spawn_queue()
+
+    def _maybe_fire_remote_bridge(self, project_ns: str, exit_key: str) -> None:
+        """Auto-bridge `/remote-control` after every successful Lead spawn
+        (#4, 2026-07-09 core-upgrade plan) — fresh boot, tab open, respawn,
+        and crash recovery all funnel through `spawn()`, so hooking here
+        covers every path uniformly instead of the two narrower call sites
+        (session-resume signal, first-Enter-in-pane) this replaces.
+
+        Dedup key is project+session-uuid, not just project: a brand new
+        Lead session (new uuid — resume window expired, or genuinely fresh)
+        must fire again, while re-entering the same still-live session must
+        not. `inject_slash_command_when_ready` already gates on the Lead
+        draft guard (issue #3) and no-ops harmlessly if the bridge is
+        already active, so a same-uuid double-call would be safe too — the
+        set purely avoids the noise/latency of doing it twice.
+        """
+        session_uuid = self._ps(exit_key).session_uuid
+        if not session_uuid:
+            return
+        key = f"{project_ns}::{session_uuid}"
+        if key in self._lead_remote_bridge_fired:
+            return
+        self._lead_remote_bridge_fired.add(key)
+        self.inject_slash_command_when_ready(LEAD.name, "/remote-control", project=project_ns)
 
     def _on_codex_exit(
         self,

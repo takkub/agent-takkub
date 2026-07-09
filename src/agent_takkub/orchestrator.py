@@ -423,11 +423,6 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
     # once it has an answer, so the actual park decision runs on the Qt
     # thread instead of the fetch's daemon thread. (project, role, confirmed)
     limitUsageConfirmed = pyqtSignal(str, str, bool)
-    # Emitted at the tail of a successful spawn that picked up `--resume <uuid>`
-    # (i.e. the role's previous session exited within RESUME_WINDOW_SEC).
-    # main_window uses this to fire `/remote-control` only on resumes, so a
-    # fresh project open doesn't spam the Lead pane with the bridge command.
-    paneResumed = pyqtSignal(str, str)  # role_name, project
     paneRequested = pyqtSignal(
         str, str
     )  # role_name, project — main_window adds pane to the matching tab
@@ -559,6 +554,12 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         # top of a draft the user hasn't submitted yet. Fed by _on_pane_input
         # via LeadInboxMixin._track_lead_draft_input; see lead_inbox.py.
         self._lead_draft_state: dict[str, LeadDraftState] = {}
+        # `/remote-control` auto-bridge dedupe (#4, 2026-07-09 core-upgrade
+        # plan): keyed f"{project_ns}::{session_uuid}" so every distinct Lead
+        # session (fresh boot, tab open, respawn, crash recovery) fires the
+        # bridge exactly once, but a *new* session (new uuid after a respawn
+        # outside the resume window) fires again. Set in SpawnEngineMixin.spawn().
+        self._lead_remote_bridge_fired: set[str] = set()
 
         # Per-cockpit-run capability token. Injected only into the Lead pane
         # env (TAKKUB_LEAD_TOKEN) so the Lead takkub CLI can authenticate
