@@ -52,6 +52,10 @@ STATUS_COLORS = {
 
 SPINNER_FRAMES = "◐◓◑◒"
 
+# Auto clear-view tuning (teammate panes only — see AgentPane.__init__).
+_DONE_AUTO_CLEAR_DELAY_MS = 5_000
+_IDLE_AUTO_CLEAR_THRESHOLD_S = 600  # 10 minutes
+
 
 class AgentPane(QFrame):
     """One agent slot. Owns its PtySession when active."""
@@ -135,6 +139,27 @@ class AgentPane(QFrame):
         # Monotonically increasing byte counter used by the orchestrator's
         # throughput watchdog to detect runaway-output panes.
         self._tp_total_bytes: int = 0
+
+        # Auto clear-view (teammate panes only, never Lead):
+        #  - "done": clear scrollback ~5s after a done report, unless the
+        #    user is looking at this pane right now — then defer until it
+        #    stops being the active tab.
+        #  - idle: clear if a teammate pane sits with no PTY output for
+        #    _IDLE_AUTO_CLEAR_THRESHOLD_S while not the active tab.
+        # `_keepalive_active` mirrors set_keepalive() — True while this pane
+        # is the one currently on screen (project tab visible AND pane tab
+        # current), which is the existing "active tab" signal the tab-visibility
+        # keep-alive feature already computes.
+        self._keepalive_active: bool = True
+        self._pending_auto_clear: bool = False
+        self._idle_auto_cleared: bool = False
+        self._done_clear_timer = QTimer(self)
+        self._done_clear_timer.setSingleShot(True)
+        self._done_clear_timer.timeout.connect(self._on_done_clear_timeout)
+        self._idle_clear_timer = QTimer(self)
+        self._idle_clear_timer.setInterval(60_000)  # poll once/min — cheap
+        self._idle_clear_timer.timeout.connect(self._check_idle_auto_clear)
+        self._idle_clear_timer.start()
 
         # Qt CSS ID selectors use "#id" syntax; a "#" inside the name itself
         # breaks the parser (e.g. "pane_qa#1" → "#pane_qa#1" is invalid CSS).
@@ -311,6 +336,17 @@ class AgentPane(QFrame):
         # always has an escape hatch regardless of pane state.
         self._btn_close.show()
 
+        # Auto clear-view: arm a delayed clear on entering "done", disarm on
+        # leaving it (e.g. respawned before the delay elapsed). Lead is never
+        # auto-cleared — it's the user's main screen and manages its own
+        # context via /compact.
+        if state == "done" and self.role.name != LEAD.name:
+            self._pending_auto_clear = False
+            self._done_clear_timer.start(_DONE_AUTO_CLEAR_DELAY_MS)
+        else:
+            self._done_clear_timer.stop()
+            self._pending_auto_clear = False
+
     def _tick(self) -> None:
         self._spinner_idx = (self._spinner_idx + 1) % len(SPINNER_FRAMES)
         self._refresh_note()
@@ -367,6 +403,7 @@ class AgentPane(QFrame):
         wall-clock so the orchestrator's stuck-pane watchdog can tell a
         live working pane from a silently-hung one."""
         self._last_output_ts = time.time()
+        self._idle_auto_cleared = False
 
     def attach_session(self, session: PtySession, cwd: str | None = None) -> None:
         """Bind a PtySession to this pane's terminal widget. `cwd` (optional)
@@ -382,6 +419,7 @@ class AgentPane(QFrame):
         # from whatever the previous session left behind.
         self._last_output_ts = time.time()
         self._tp_total_bytes = 0
+        self._idle_auto_cleared = False
         session.bytesIn.connect(self._mark_output_ts)
         # pyte still parses the bytes in parallel — use that to push the
         # "claude is idle at the ready prompt" signal into the terminal
@@ -503,6 +541,15 @@ class AgentPane(QFrame):
                     pass
                 self._exit_conn = None
             self.session = None
+        # __new__-built pane doubles (see test_render_coalesce.py) never ran
+        # __init__, so this attr may not exist — and reading a missing attr on
+        # such a double raises RuntimeError, not AttributeError, so getattr's
+        # default alone can't swallow it.
+        try:
+            self._done_clear_timer.stop()
+        except (RuntimeError, AttributeError):
+            pass
+        self._pending_auto_clear = False
         self._last_idle = None
         # Full reset (scrollback + heartbeat stop) so Lead's reused pane
         # doesn't carry the prior project's transcript and timers across
@@ -668,8 +715,20 @@ class AgentPane(QFrame):
 
     def set_keepalive(self, active: bool) -> None:
         """Forward tab-visibility keep-alive state to the terminal widget so a
-        pane in a hidden project tab can release its Chromium compositor RAM."""
+        pane in a hidden project tab can release its Chromium compositor RAM.
+
+        Also doubles as the "active tab" signal for auto clear-view: a done
+        clear that fired while this pane was on screen is deferred (see
+        _on_done_clear_timeout) and flushed here the moment the pane stops
+        being the active tab.
+        """
+        active = bool(active)
+        became_inactive = self._keepalive_active and not active
+        self._keepalive_active = active
         self._terminal.set_keepalive(active)
+        if became_inactive and self._pending_auto_clear:
+            self._pending_auto_clear = False
+            self._clear_pane_view()
 
     def _refresh_lock_button(self) -> None:
         if self._btn_lock is None:
@@ -731,6 +790,33 @@ class AgentPane(QFrame):
                 self.session.write("\x0c")
             except Exception:
                 pass
+
+    def _on_done_clear_timeout(self) -> None:
+        """Fired _DONE_AUTO_CLEAR_DELAY_MS after entering "done". Clears the
+        view unless the user is currently looking at this pane, in which case
+        the clear is deferred until set_keepalive(False) flushes it."""
+        if self.state != "done" or self.role.name == LEAD.name:
+            return
+        if self._keepalive_active:
+            self._pending_auto_clear = True
+            return
+        self._clear_pane_view()
+
+    def _check_idle_auto_clear(self) -> None:
+        """Polled every 60s: clear a teammate pane that has been idle (no PTY
+        output) for _IDLE_AUTO_CLEAR_THRESHOLD_S while it isn't the active tab."""
+        if self.role.name == LEAD.name:
+            return
+        if self._keepalive_active:
+            return
+        if self.state == "empty" or self._idle_auto_cleared:
+            return
+        if self._last_output_ts <= 0:
+            return
+        if time.time() - self._last_output_ts < _IDLE_AUTO_CLEAR_THRESHOLD_S:
+            return
+        self._idle_auto_cleared = True
+        self._clear_pane_view()
 
     # ──────────────────────────────────────────────────────────────
     # export current pane buffer to a text file under runtime/exports/
