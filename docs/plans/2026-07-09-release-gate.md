@@ -175,3 +175,178 @@ respawns.
 ✅ **PASS** — 0 regressions (3374 tests, 2 pre-existing env-dependent fails only), independent events.log-timeline
 repro confirms the fix holds and is falsifiable (caught the bug pre-fix, passes post-fix). Safe to
 restart cockpit at this HEAD.
+
+## #113 — `/remote-control` bridge races ↻ Resume button, no lock (2026-07-09, HEAD = `2fd4dec`)
+
+Gate for `2fd4dec` (per-`(project, role)` in-flight lock on `inject_slash_command_when_ready` —
+`lead_inbox.py` + `orchestrator.py`, new tests in `tests/test_slash_inject_serialize.py`).
+
+### 1. Full pytest suite
+
+```
+rtk proxy python -m pytest -q --junitxml=runtime/tasks/agent-takkub/2026-07-09/qa-junit-181524.xml
+```
+
+```
+tests=3382 failures=2 errors=0 skipped=2 time=163.286s
+```
+
+**2 failures — same baseline as every prior gate, both `tests/test_plugin_policy.py`:**
+- `TestRolePluginPolicy::test_teammate_gets_superpowers_and_pordee_not_addy`
+- `TestRolePluginPolicy::test_design_roles_get_ui_ux_pro_max`
+
+Root cause unchanged (sandbox has no `~/.claude/plugins/cache` populated → env-dependent, not a
+code regression). Test count rose 3374 → 3382 (+8, from `tests/test_slash_inject_serialize.py`'s
+new #113 tests). No other failures, 0 regressions.
+
+### 2. Falsifiability check — revert fix, prove the race reproduces; restore, prove it serializes
+
+Reverted `lead_inbox.py` + `orchestrator.py` to the pre-fix parent commit (`2fd4dec^` = `ae2d845`)
+via `git checkout ae2d845 -- src/agent_takkub/lead_inbox.py src/agent_takkub/orchestrator.py`
+(kept the new `tests/test_slash_inject_serialize.py` at HEAD — same file, unrevert), then ran the
+new #113 regression tests against that pre-fix code:
+
+```
+rtk proxy python -m pytest -q tests/test_slash_inject_serialize.py
+```
+
+```
+FAILED tests/test_slash_inject_serialize.py::TestConcurrentCallsSerialize::test_second_call_queues_instead_of_racing
+  assert len(calls) == 1  # second call still queued
+  AssertionError: assert 2 == 1
+FAILED tests/test_slash_inject_serialize.py::TestConcurrentCallsSerialize::test_queued_call_delivers_even_if_first_drops
+```
+
+Confirmed the race genuinely reproduces pre-fix: the bridge call (`/remote-control`) and the
+Resume-button call (`/resume`) both queue an independent QTimer.singleShot-driven ready-poll for
+the same Lead pane (`calls` has 2 entries instead of 1 serialized-behind-lock entry) — exactly the
+"both `_deliver()` on the same tick, interleaved payload+Enter" mechanism described in the fix
+commit message.
+
+Restored the fix (`git checkout 2fd4dec -- src/agent_takkub/lead_inbox.py
+src/agent_takkub/orchestrator.py`, verified `git status` clean) and re-ran:
+
+```
+rtk proxy python -m pytest -q tests/test_slash_inject_serialize.py
+```
+
+```
+.. [100%]   (all tests pass — second call queues behind the lock, only 1 poll in flight)
+```
+
+Verified with real code (not test-file assertions alone) — the fix genuinely serializes the two
+callers instead of racing them, and is falsifiable (caught the bug pre-fix, passes post-fix).
+
+### Verdict (#113 gate)
+
+✅ **PASS** — 0 regressions (3382 tests, 2 pre-existing env-dependent fails only), falsifiability
+check confirms the race is real pre-fix and is fixed post-fix (per-(project,role) lock genuinely
+serializes the bridge vs. Resume-button race). Safe to restart cockpit at this HEAD.
+
+## #113 (final root cause) — `auto_submit_enter=False` for `/resume`, gate before restart (2026-07-09, HEAD = `b1a5700`)
+
+Gate for `b1a5700`/`ae2d845` (↻ Resume button UI feedback) + the actual #113 root-cause fix layered
+on top: `/resume` opens claude's interactive session picker, and the normal delayed auto-Enter
+(which safely submits self-contained slash commands like `/remote-control`) lands right as the
+picker paints and is read as an empty confirm ("Resume cancelled") — even on a fully idle pane.
+Fix: `inject_slash_command_when_ready` gained an `auto_submit_enter: bool = True` param
+(`lead_inbox.py`); `_on_resume_clicked` (`user_actions.py`) is the only caller that passes
+`auto_submit_enter=False` — text lands in the composer unsubmitted, user presses Enter by hand to
+pick a session. `on_delivered` now fires immediately in that path (no delayed-Enter to wait on), so
+the Resume button restores right away instead of holding "⏳ Resuming..." for up to 45s.
+
+### 1. Full pytest suite
+
+```
+rtk proxy python -m pytest -q --junitxml=runtime/tasks/agent-takkub/2026-07-09/qa-junit-183046.xml
+```
+
+```
+tests=3386 failures=2 errors=0 skipped=2 time=136.872s
+```
+
+**2 failures — same baseline as every prior gate, both `tests/test_plugin_policy.py`:**
+- `TestRolePluginPolicy::test_teammate_gets_superpowers_and_pordee_not_addy`
+- `TestRolePluginPolicy::test_design_roles_get_ui_ux_pro_max`
+
+Root cause unchanged (sandbox has no `~/.claude/plugins/cache` populated → env-dependent, not a
+code regression). Test count rose 3382 → 3386 (+4, from `tests/test_resume_button_feedback.py`'s
+new assertions). No other failures, 0 regressions.
+
+### 2. Regression guard — bridge/#107/#110/#112/#113 auto-Enter behavior unchanged
+
+```
+rtk proxy python -m pytest -q tests/test_remote_bridge_autofire.py tests/test_remote_bridge_repro.py \
+  tests/test_slash_inject_serialize.py tests/test_resume_button_feedback.py tests/test_lead_draft_state.py \
+  --junitxml=runtime/tasks/agent-takkub/2026-07-09/qa-regression-183046.xml
+```
+
+```
+tests=84 failures=0 errors=0 skipped=0
+```
+
+All 84 green. Also verified by reading source: `auto_submit_enter` (new param, default `True`) is
+only ever passed `False` by `_on_resume_clicked` (`user_actions.py:269`) — the `/remote-control`
+auto-bridge call (`spawn_engine.py:1869`) doesn't pass it at all, so it keeps the original
+auto-Enter behavior unchanged. No other caller of `inject_slash_command_when_ready` was touched.
+
+### Verdict (#113 final gate)
+
+✅ **PASS** — 0 regressions (3386 tests, 2 pre-existing env-dependent fails only), 84/84 targeted
+bridge/#107/#110/#112/#113 regression tests green, source-read confirms `/remote-control` and all
+other auto-Enter slash commands are unaffected — only `/resume` opts out via the new
+`auto_submit_enter=False` param. Safe to restart cockpit at this HEAD.
+
+## #113 (SUPERSEDED → native `--resume`) — ↻ Resume drops the TUI `/resume` path entirely (2026-07-10, HEAD = `1d7b5bc`)
+
+The `auto_submit_enter=False` fix above (`b1a5700`) stopped the phantom "Resume cancelled", but at
+a UX cost: the button now only *typed* `/resume` into the composer and left it unsubmitted, so a
+user who clicked it saw nothing happen until they pressed Enter themselves in the pane — it read as
+a dead button (field report, 2026-07-10). `1d7b5bc` supersedes that approach: the ↻ Resume button no
+longer drives claude's interactive TUI picker at all. It now uses the **native resume path the
+mobile PWA already uses** — pop a Qt session picker of the project's recent Lead sessions, then
+`orch.close(lead, force=True)` + `orch.spawn(lead, resume_uuid=…)` (i.e. `claude --resume <uuid>`).
+One click, pick, done; no auto-Enter, so the cancellation failure mode is structurally gone.
+
+Because `_on_resume_clicked` was the *only* caller that ever passed `auto_submit_enter=False`, the
+param + its opt-out branch in `inject_slash_command_when_ready` (and its two flag-specific tests)
+were removed as dead code — the function is back to always submitting, exactly as it behaved before
+`b1a5700`. The per-`(project, role)` in-flight lock from `2fd4dec` is untouched and still guards the
+`/remote-control` bridge vs. any concurrent slash injection.
+
+**Boundary note (`remote-bolt-on-isolation`):** the session-list scan was placed in core
+(`chatlog_scanner.list_recent_lead_sessions`), NOT imported from `agent_takkub.remote`, so the
+desktop UI never crosses the remote-bolt-on isolation contract. `remote.notify` keeps its own
+sibling (data-min + remote-prefix strip) untouched.
+
+**Multi-provider (#103):** `--resume` and the JSONL-backed session list are claude-CLI specifics. A
+non-claude Lead simply yields an empty picker ("ไม่พบ session", never a crash) — the same graceful
+degrade `resume_lead` already documents. Not solved here; tracked in #103.
+
+### 1. Full pytest suite (HEAD `1d7b5bc`)
+
+```
+rtk proxy python -m pytest tests/ -q -p no:cacheprovider
+```
+
+Full suite ran to 100%; the only failures are the same two pre-existing, env-dependent
+`tests/test_plugin_policy.py` cases (`~/.claude/plugins/cache` not populated on this machine) that
+every prior gate in this file also records. **0 code regressions.**
+
+### 2. Targeted + guardrails
+
+- `tests/test_resume_button_feedback.py` (rewritten for the picker→close→spawn flow),
+  `tests/test_resume_session_picker.py` (+3 new `TestCoreListRecentLeadSessions` cases for the core
+  scanner), `tests/test_slash_inject_serialize.py` (flag tests removed, serialization + default
+  auto-Enter guard kept) — **37/37 green.**
+- `rtk lint-imports` — **18/18 contracts KEPT** (incl. `remote-bolt-on-isolation`); `depgraph.json`
+  refreshed by the pre-commit hook (new edges: `user_actions → chatlog_scanner`,
+  `chatlog_scanner → user_profile`).
+- Runtime smoke: `chatlog_scanner.list_recent_lead_sessions(active_project)` imports + runs with no
+  error against the live store.
+
+### Verdict (#113 native-resume gate)
+
+✅ **PASS** — the button is functional on a single click, the `b1a5700` auto-Enter workaround and its
+dead param are gone, no core→remote boundary break, 0 code regressions. Runtime click-through still
+needs a `takkub restart` to load the new Python into the running cockpit.
