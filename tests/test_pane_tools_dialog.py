@@ -147,6 +147,9 @@ def test_roles_tuple_covers_expected_roles():
         "reviewer",
         "critic",
         "designer",
+        "analyst",
+        "security",
+        "docs",
     }
 
 

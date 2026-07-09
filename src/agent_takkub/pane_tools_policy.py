@@ -46,6 +46,9 @@ KNOWN_ROLES = frozenset(
         "designer",
         "codex",
         "gemini",
+        "analyst",
+        "security",
+        "docs",
     }
 )
 

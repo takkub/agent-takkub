@@ -48,6 +48,9 @@ ROLES: tuple[str, ...] = (
     "reviewer",
     "critic",
     "designer",
+    "analyst",
+    "security",
+    "docs",
 )
 
 _PLUGINS_INSTALLED_FILE = pathlib.Path.home() / ".claude" / "plugins" / "installed_plugins.json"

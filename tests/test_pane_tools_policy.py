@@ -78,6 +78,19 @@ class TestLoadPolicy:
         # Invalid names are filtered; valid ones remain
         assert "qa" in result
 
+    def test_accepts_analyst_security_docs_roles(self, policy_file: Path) -> None:
+        payload = {
+            "version": 1,
+            "roles": {
+                "analyst": {"mcps": [], "plugins": []},
+                "security": {"mcps": [], "plugins": []},
+                "docs": {"mcps": [], "plugins": []},
+            },
+        }
+        policy_file.write_text(json.dumps(payload), encoding="utf-8")
+        result = pane_tools_policy.load_policy()
+        assert set(result) == {"analyst", "security", "docs"}
+
     def test_skips_role_with_invalid_format(self, policy_file: Path) -> None:
         payload = {
             "version": 1,
