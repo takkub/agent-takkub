@@ -98,16 +98,18 @@
     {
       "module": "agent_takkub.chatlog_scanner",
       "imports": [
-        "agent_takkub.config"
+        "agent_takkub.config",
+        "agent_takkub.user_profile"
       ],
       "imported_by": [
         "agent_takkub.cli",
         "agent_takkub.orchestrator",
         "agent_takkub.remote.notify",
-        "agent_takkub.spawn_engine"
+        "agent_takkub.spawn_engine",
+        "agent_takkub.user_actions"
       ],
-      "fan_in": 4,
-      "fan_out": 1
+      "fan_in": 5,
+      "fan_out": 2
     },
     {
       "module": "agent_takkub.claude_auth_config",
@@ -911,9 +913,10 @@
         "agent_takkub.orchestrator_text",
         "agent_takkub.pipeline_config",
         "agent_takkub.remote.api",
-        "agent_takkub.spawn_engine"
+        "agent_takkub.spawn_engine",
+        "agent_takkub.user_actions"
       ],
-      "fan_in": 9,
+      "fan_in": 10,
       "fan_out": 0
     },
     {
@@ -1137,6 +1140,7 @@
       "module": "agent_takkub.user_actions",
       "imports": [
         "agent_takkub.auto_resume",
+        "agent_takkub.chatlog_scanner",
         "agent_takkub.claude_auth_config",
         "agent_takkub.config",
         "agent_takkub.doctor",
@@ -1147,13 +1151,14 @@
         "agent_takkub.plan_tier",
         "agent_takkub.plugin_installer",
         "agent_takkub.provider_state",
+        "agent_takkub.roles",
         "agent_takkub.user_profile"
       ],
       "imported_by": [
         "agent_takkub.main_window"
       ],
       "fan_in": 1,
-      "fan_out": 12
+      "fan_out": 14
     },
     {
       "module": "agent_takkub.user_profile",
@@ -1163,6 +1168,7 @@
       ],
       "imported_by": [
         "agent_takkub.app",
+        "agent_takkub.chatlog_scanner",
         "agent_takkub.doctor",
         "agent_takkub.limit_autoresume",
         "agent_takkub.limit_panel",
@@ -1172,7 +1178,7 @@
         "agent_takkub.spawn_engine",
         "agent_takkub.user_actions"
       ],
-      "fan_in": 9,
+      "fan_in": 10,
       "fan_out": 2
     },
     {

@@ -121,6 +121,73 @@ def _spawn_capture(
     return (captured[0] if captured else []), result
 
 
+class TestCoreListRecentLeadSessions:
+    """`chatlog_scanner.list_recent_lead_sessions` — the core (non-remote)
+    sibling that backs the desktop ↻ Resume picker. Same cwd-encoded scan as
+    `notify.list_recent_lead_sessions`, but importable without pulling in
+    `agent_takkub.remote` (the remote-bolt-on-isolation contract)."""
+
+    @staticmethod
+    def _plant(proj_dir: pathlib.Path, uuid: str, text: str, mtime: float) -> None:
+        import os
+
+        rec = {
+            "type": "user",
+            "message": {"role": "user", "content": [{"type": "text", "text": text}]},
+        }
+        f = proj_dir / f"{uuid}.jsonl"
+        f.write_text(json.dumps(rec) + "\n", encoding="utf-8")
+        os.utime(f, (mtime, mtime))
+
+    def test_lists_newest_first_with_uuid_mtime_preview(
+        self, hyphen_free_root: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from agent_takkub import chatlog_scanner as scanner
+
+        config_dir = hyphen_free_root / "claude_config"
+        monkeypatch.setattr(user_profile, "_DEFAULT_CONFIG_DIR", config_dir)
+        cwd = hyphen_free_root / "proj"
+        cwd.mkdir()
+        monkeypatch.setattr(_config, "lead_cwd", lambda name=None: str(cwd))
+        proj_dir = config_dir / "projects" / _encode_cwd(cwd)
+        proj_dir.mkdir(parents=True)
+        self._plant(proj_dir, "older", "งานเก่า", 1_000.0)
+        self._plant(proj_dir, "newer", "งานใหม่", 2_000.0)
+
+        out = scanner.list_recent_lead_sessions("default")
+        assert [s["uuid"] for s in out] == ["newer", "older"]
+        assert out[0]["preview"] == "งานใหม่"
+        assert out[0]["mtime"] == 2_000.0
+
+    def test_skips_dirs_that_decode_to_a_different_cwd(
+        self, hyphen_free_root: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from agent_takkub import chatlog_scanner as scanner
+
+        config_dir = hyphen_free_root / "claude_config"
+        monkeypatch.setattr(user_profile, "_DEFAULT_CONFIG_DIR", config_dir)
+        cwd = hyphen_free_root / "proj"
+        cwd.mkdir()
+        other = hyphen_free_root / "other"
+        other.mkdir()
+        monkeypatch.setattr(_config, "lead_cwd", lambda name=None: str(cwd))
+        mine = config_dir / "projects" / _encode_cwd(cwd)
+        mine.mkdir(parents=True)
+        theirs = config_dir / "projects" / _encode_cwd(other)
+        theirs.mkdir(parents=True)
+        self._plant(mine, "mine", "ของเรา", 1_000.0)
+        self._plant(theirs, "theirs", "ของคนอื่น", 3_000.0)
+
+        out = scanner.list_recent_lead_sessions("default")
+        assert [s["uuid"] for s in out] == ["mine"]
+
+    def test_no_cwd_returns_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from agent_takkub import chatlog_scanner as scanner
+
+        monkeypatch.setattr(_config, "lead_cwd", lambda name=None: None)
+        assert scanner.list_recent_lead_sessions("default") == []
+
+
 class TestResumeUuidMatchesCwd:
     def test_matches_when_encoded_dir_decodes_to_cwd(
         self, hyphen_free_root: pathlib.Path, monkeypatch: pytest.MonkeyPatch

@@ -161,82 +161,17 @@ class TestConcurrentCallsSerialize:
         assert writes == ["/resume", b"\r"]
 
 
-class TestAutoSubmitEnterFlag:
-    """#113 final root cause: /resume's session picker reads a trailing
-    auto-Enter as an empty confirm ("Resume cancelled") even on an idle
-    pane. `auto_submit_enter=False` must write the command text without
-    ever scheduling the delayed Enter, while every other caller (e.g.
-    /remote-control) keeps auto-Enter exactly as before."""
+class TestAutoEnterSubmit:
+    """Every command routed through `inject_slash_command_when_ready` is
+    submitted with a trailing auto-Enter. (The ↻ Resume button used to opt
+    out of this for `/resume`, but it now drives the native `--resume <uuid>`
+    respawn and never touches this path — so there is no opt-out flag left.)"""
 
-    def test_auto_submit_enter_false_writes_text_without_enter(
+    def test_slash_command_gets_trailing_enter(
         self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        pane = _make_pane()
-        orch._panes_by_project.setdefault(TEST_PROJECT, {})[LEAD.name] = pane
-
-        calls: list[tuple[int, object]] = []
-        monkeypatch.setattr(
-            lead_inbox_mod.QTimer, "singleShot", lambda ms, fn: calls.append((ms, fn))
-        )
-        delivered = []
-
-        orch.inject_slash_command_when_ready(
-            LEAD.name,
-            "/resume",
-            project=TEST_PROJECT,
-            on_delivered=lambda: delivered.append("/resume"),
-            auto_submit_enter=False,
-        )
-        _drive_timer_chain(calls, max_iterations=10)
-
-        assert delivered == ["/resume"]
-        writes = [c.args[0] for c in pane.session.write.call_args_list]
-        # Only the command text — no trailing b"\r" scheduled or sent.
-        assert writes == ["/resume"]
-
-    def test_auto_submit_enter_false_does_not_hold_lock(
-        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Delivery with auto_submit_enter=False has nothing left to wait
-        on, so a second queued call for the same (project, role) must start
-        its own poll immediately after — not stay queued waiting for an
-        Enter that will never be scheduled."""
-        pane = _make_pane()
-        orch._panes_by_project.setdefault(TEST_PROJECT, {})[LEAD.name] = pane
-
-        calls: list[tuple[int, object]] = []
-        monkeypatch.setattr(
-            lead_inbox_mod.QTimer, "singleShot", lambda ms, fn: calls.append((ms, fn))
-        )
-        delivered = []
-
-        orch.inject_slash_command_when_ready(
-            LEAD.name,
-            "/resume",
-            project=TEST_PROJECT,
-            on_delivered=lambda: delivered.append("/resume"),
-            auto_submit_enter=False,
-        )
-        orch.inject_slash_command_when_ready(
-            LEAD.name,
-            "/remote-control",
-            project=TEST_PROJECT,
-            on_delivered=lambda: delivered.append("/remote-control"),
-        )
-
-        _drive_timer_chain(calls, max_iterations=20)
-
-        assert delivered == ["/resume", "/remote-control"]
-        writes = [c.args[0] for c in pane.session.write.call_args_list]
-        # /resume gets no Enter; /remote-control (default) still auto-Enters.
-        assert writes == ["/resume", "/remote-control", b"\r"]
-
-    def test_default_auto_submit_enter_true_unchanged(
-        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Regression guard: omitting auto_submit_enter keeps the original
-        auto-Enter behaviour for every other command (#4/#107/#110/#112 must
-        not regress)."""
+        """Regression guard: a slash command is written then submitted with
+        b"\\r" (#4/#107/#110/#112 must not regress)."""
         pane = _make_pane()
         orch._panes_by_project.setdefault(TEST_PROJECT, {})[LEAD.name] = pane
 

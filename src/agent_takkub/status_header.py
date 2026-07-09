@@ -477,8 +477,9 @@ class StatusHeaderMixin:
 
         self._btn_resume = QPushButton("↻ Resume", self)
         self._btn_resume.setToolTip(
-            "Send /resume to the Lead pane — opens claude's session picker\n"
-            "so you can hop back into a previous conversation."
+            "Resume a previous Lead conversation — pops a picker of this\n"
+            "project's recent sessions, then restarts the Lead pane on the\n"
+            "one you choose (claude --resume). One click, pick, done."
         )
         self._btn_resume.setStyleSheet(self._ghost_button_style())
         self._btn_resume.clicked.connect(self._on_resume_clicked)
