@@ -33,11 +33,15 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from .config import SETTINGS_HOME as _BASE_DIR
+from .provider_spec import PROVIDER_REGISTRY
 
 CLAUDE = "claude"
 CODEX = "codex"
 GEMINI = "gemini"
-VALID_PROVIDERS = frozenset({CLAUDE, CODEX, GEMINI})
+# Dynamic — derived from the registry (issue #103 Phase 0) instead of a
+# hand-maintained frozenset, so a new PROVIDER_REGISTRY entry is
+# automatically a valid provider everywhere this constant is consulted.
+VALID_PROVIDERS = frozenset(PROVIDER_REGISTRY.keys())
 
 # Roles whose provider is hard-coded — cannot be overridden by config.
 # Lead has too much claude-specific plumbing (CLAUDE.md, JSONL token
@@ -183,6 +187,13 @@ def _provider_available(provider: str) -> bool:
     if claude itself is missing the spawn fails far louder elsewhere).
     Imports are lazy so this stays a thin per-role config module with no
     hard dependency on provider_state / the CLI helpers at import time.
+
+    Discovery goes through the registered spec's ``custom_discovery_fn``
+    (issue #103 Phase 0) instead of a hand-written per-provider branch —
+    each wrapper (``provider_spec._discover_codex`` etc.) still does its
+    ``from .codex_helper import find_codex_executable`` lazily *inside* the
+    call, so a test that monkeypatches ``codex_helper.find_codex_executable``
+    keeps working exactly as before.
     """
     if provider == CLAUDE:
         return True
@@ -196,14 +207,9 @@ def _provider_available(provider: str) -> bool:
         pass
     # (2) CLI actually installed
     try:
-        if provider == GEMINI:
-            from .gemini_helper import find_agy_executable
-
-            return find_agy_executable() is not None
-        if provider == CODEX:
-            from .codex_helper import find_codex_executable
-
-            return find_codex_executable() is not None
+        spec = PROVIDER_REGISTRY.get(provider)
+        if spec is not None and spec.custom_discovery_fn is not None:
+            return spec.custom_discovery_fn() is not None
     except Exception:
         return False
     return True

@@ -1031,6 +1031,7 @@ class SpawnEngineMixin:
         # when the binary resolved), but kept in case PATH changes between
         # the availability probe and the spawn.
         from .provider_config import CODEX, GEMINI, effective_provider_for
+        from .provider_spec import PROVIDER_REGISTRY
 
         # Per-project role→CLI mapping (project_ns resolved at spawn entry):
         # the same role can be backed by a different CLI in different tabs.
@@ -1043,14 +1044,11 @@ class SpawnEngineMixin:
             # reuses codex's AGENTS.md cheatsheet (one manager, one marker, no
             # write race when codex + gemini share a project cwd).
             from .codex_agents_md import ensure_agents_md
-            from .gemini_helper import find_agy_executable
 
-            gemini_bin = find_agy_executable()
+            spec = PROVIDER_REGISTRY[GEMINI]
+            gemini_bin = spec.custom_discovery_fn() if spec.custom_discovery_fn else None
             if gemini_bin is None:
-                return False, (
-                    "agy binary not on PATH. Install the Antigravity CLI from "
-                    "https://antigravity.google/download, then run `agy` once to sign in."
-                )
+                return False, spec.install_instructions
             spawn_cwd = cwd or default_cwd_for_role(role_name, project=project_ns) or str(DATA_HOME)
             ensure_agents_md(spawn_cwd)
             env = _build_pane_env()
@@ -1066,11 +1064,13 @@ class SpawnEngineMixin:
             agy_dir = os.path.dirname(gemini_bin)
             env["PATH"] = bin_dir + os.pathsep + agy_dir + os.pathsep + env.get("PATH", "")
             _gem_tok = self._mint_pane_token(env, project_ns, role_name)
+            # yolo: skip per-command approval prompts (parity with codex
+            # --ask-for-approval never). Antigravity's flag is the long form.
+            # Sourced from PROVIDER_REGISTRY["gemini"].autonomy_flags instead
+            # of a hardcoded literal (issue #103 Phase 0) — same value.
             gemini_argv = [
                 gemini_bin,
-                # yolo: skip per-command approval prompts (parity with codex
-                # --ask-for-approval never). Antigravity's flag is the long form.
-                "--dangerously-skip-permissions",
+                *spec.autonomy_flags.get(sys.platform, spec.autonomy_flags.get("default", [])),
             ]
             return self._launch_session(
                 pane=pane,
@@ -1090,14 +1090,11 @@ class SpawnEngineMixin:
 
         if effective_provider == CODEX:
             from .codex_agents_md import ensure_agents_md
-            from .codex_helper import find_codex_executable
 
-            codex_bin = find_codex_executable()
+            codex_spec = PROVIDER_REGISTRY[CODEX]
+            codex_bin = codex_spec.custom_discovery_fn() if codex_spec.custom_discovery_fn else None
             if codex_bin is None:
-                return False, (
-                    "codex binary not on PATH. Install with "
-                    "`npm install -g @openai/codex`, then run `codex login` once."
-                )
+                return False, codex_spec.install_instructions
             spawn_cwd = cwd or default_cwd_for_role(role_name, project=project_ns) or str(DATA_HOME)
             # Plant the takkub cheatsheet so Codex auto-discovers it on
             # boot and knows how to call `takkub send/done`. Safe: only
@@ -1136,21 +1133,16 @@ class SpawnEngineMixin:
             # `takkub done` and the pane hangs "working" forever (issue #26
             # Mode B). Opening network here is the codex-documented way to
             # unblock that loopback call while still keeping cwd write-scoping.
-            if sys.platform == "win32":
-                codex_argv = [
-                    codex_bin,
-                    "--dangerously-bypass-approvals-and-sandbox",
-                ]
-            else:
-                codex_argv = [
-                    codex_bin,
-                    "--ask-for-approval",
-                    "never",
-                    "-s",
-                    "workspace-write",
-                    "-c",
-                    "sandbox_workspace_write.network_access=true",
-                ]
+            #
+            # Sourced from PROVIDER_REGISTRY["codex"].autonomy_flags instead of
+            # a hardcoded if/else (issue #103 Phase 0) — same per-platform
+            # values, keyed the same way ("win32" vs "default").
+            codex_argv = [
+                codex_bin,
+                *codex_spec.autonomy_flags.get(
+                    sys.platform, codex_spec.autonomy_flags.get("default", [])
+                ),
+            ]
             return self._launch_session(
                 pane=pane,
                 role_name=role_name,

@@ -21,6 +21,7 @@ from datetime import datetime
 
 from .config import EVENTS_LOG, RUNTIME_DIR, ensure_runtime
 from .lead_context import _allowed_project_roots
+from .provider_spec import PROVIDER_REGISTRY
 from .roles import LEAD
 
 
@@ -122,20 +123,12 @@ _PASTE_END = "\x1b[201~"
 _CONTROL_STRIP = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
 # ── codex task preamble ───────────────────────────────────────────────────────
-_CODEX_TASK_NOTICE = (
-    "[orchestrator note] อ่านก่อนเริ่มงาน:\n"
-    "- `ห้าม spawn subagent` ใน ROLE prefix หมายถึง AI subagent\n"
-    "  เท่านั้น (Task tool / codex delegation flags) — ไม่รวม shell\n"
-    "  command ที่คุณรันเองในเทอร์มินัลนี้\n"
-    "- เมื่อเสร็จงาน ต้อง **รัน shell command** ผ่าน Bash tool:\n"
-    '      takkub done "<one-line summary>"\n'
-    '  ห้ามพิมพ์ "takkub done" เป็นข้อความตอบในแชท (orchestrator\n'
-    "  มองไม่เห็น → Lead ไม่ทราบว่างานเสร็จ → pane idle ตลอด)\n"
-    "- review / analysis tasks: save findings ลงไฟล์ docs/ ก่อน\n"
-    "  แล้วค่อย `takkub done` (pane auto-close ~2.5s หลัง done)\n"
-    "\n"
-    "------ task ------\n"
-)
+# Sourced from PROVIDER_REGISTRY["codex"].task_notice_preamble (issue #103
+# Phase 0) instead of owning the text here — provider_spec.py is now the
+# single source of truth; this name stays for every existing call site
+# (orchestrator.py re-export, _rewrite_task_for_codex, tests) to keep working
+# unchanged.
+_CODEX_TASK_NOTICE = PROVIDER_REGISTRY["codex"].task_notice_preamble
 
 # ── paste enter-delay constants ───────────────────────────────────────────────
 # Delay between writing the payload and writing the submitting `\r`.

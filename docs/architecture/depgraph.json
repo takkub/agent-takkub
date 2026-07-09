@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 82,
+  "module_count": 83,
   "modules": [
     {
       "module": "agent_takkub",
@@ -102,9 +102,11 @@
       ],
       "imported_by": [
         "agent_takkub.cli",
-        "agent_takkub.orchestrator"
+        "agent_takkub.orchestrator",
+        "agent_takkub.remote.notify",
+        "agent_takkub.spawn_engine"
       ],
-      "fan_in": 2,
+      "fan_in": 4,
       "fan_out": 1
     },
     {
@@ -197,11 +199,10 @@
       "imported_by": [
         "agent_takkub.cli",
         "agent_takkub.doctor",
-        "agent_takkub.provider_config",
-        "agent_takkub.spawn_engine",
+        "agent_takkub.provider_spec",
         "agent_takkub.status_header"
       ],
-      "fan_in": 5,
+      "fan_in": 4,
       "fan_out": 1
     },
     {
@@ -236,10 +237,12 @@
         "agent_takkub.project_rules",
         "agent_takkub.project_wizard",
         "agent_takkub.provider_config",
+        "agent_takkub.provider_spec",
         "agent_takkub.provider_state",
         "agent_takkub.remote.api",
         "agent_takkub.remote.config",
         "agent_takkub.remote.http_server",
+        "agent_takkub.remote.notify",
         "agent_takkub.remote.tunnel",
         "agent_takkub.role_memory",
         "agent_takkub.shared_dev_tools",
@@ -257,7 +260,7 @@
         "agent_takkub.vault_mirror",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 48,
+      "fan_in": 50,
       "fan_out": 0
     },
     {
@@ -319,11 +322,10 @@
       "imported_by": [
         "agent_takkub.cli",
         "agent_takkub.doctor",
-        "agent_takkub.provider_config",
-        "agent_takkub.spawn_engine",
+        "agent_takkub.provider_spec",
         "agent_takkub.status_header"
       ],
-      "fan_in": 5,
+      "fan_in": 4,
       "fan_out": 1
     },
     {
@@ -529,6 +531,7 @@
         "agent_takkub.config",
         "agent_takkub.lead_context",
         "agent_takkub.plan_tier",
+        "agent_takkub.provider_spec",
         "agent_takkub.roles",
         "agent_takkub.worktree_manager"
       ],
@@ -540,7 +543,7 @@
         "agent_takkub.spawn_engine"
       ],
       "fan_in": 5,
-      "fan_out": 5
+      "fan_out": 6
     },
     {
       "module": "agent_takkub.pane_env",
@@ -705,9 +708,8 @@
     {
       "module": "agent_takkub.provider_config",
       "imports": [
-        "agent_takkub.codex_helper",
         "agent_takkub.config",
-        "agent_takkub.gemini_helper",
+        "agent_takkub.provider_spec",
         "agent_takkub.provider_state"
       ],
       "imported_by": [
@@ -721,7 +723,23 @@
         "agent_takkub.update_panel"
       ],
       "fan_in": 8,
-      "fan_out": 4
+      "fan_out": 3
+    },
+    {
+      "module": "agent_takkub.provider_spec",
+      "imports": [
+        "agent_takkub.codex_helper",
+        "agent_takkub.config",
+        "agent_takkub.gemini_helper"
+      ],
+      "imported_by": [
+        "agent_takkub.orchestrator_text",
+        "agent_takkub.provider_config",
+        "agent_takkub.pty_session",
+        "agent_takkub.spawn_engine"
+      ],
+      "fan_in": 4,
+      "fan_out": 3
     },
     {
       "module": "agent_takkub.provider_state",
@@ -743,7 +761,8 @@
       "module": "agent_takkub.pty_session",
       "imports": [
         "agent_takkub._pty_backend",
-        "agent_takkub._win_console"
+        "agent_takkub._win_console",
+        "agent_takkub.provider_spec"
       ],
       "imported_by": [
         "agent_takkub.agent_pane",
@@ -754,7 +773,7 @@
         "agent_takkub.spawn_engine"
       ],
       "fan_in": 6,
-      "fan_out": 2
+      "fan_out": 3
     },
     {
       "module": "agent_takkub.release",
@@ -834,6 +853,8 @@
     {
       "module": "agent_takkub.remote.notify",
       "imports": [
+        "agent_takkub.chatlog_scanner",
+        "agent_takkub.config",
         "agent_takkub.orchestrator_text",
         "agent_takkub.user_profile"
       ],
@@ -842,7 +863,7 @@
         "agent_takkub.remote.api"
       ],
       "fan_in": 2,
-      "fan_out": 2
+      "fan_out": 4
     },
     {
       "module": "agent_takkub.remote.settings_dialog",
@@ -958,30 +979,31 @@
       "module": "agent_takkub.spawn_engine",
       "imports": [
         "agent_takkub.agent_pane",
+        "agent_takkub.chatlog_scanner",
         "agent_takkub.claude_auth_config",
         "agent_takkub.codex_agents_md",
-        "agent_takkub.codex_helper",
         "agent_takkub.config",
-        "agent_takkub.gemini_helper",
         "agent_takkub.hook_wiring",
         "agent_takkub.lead_context",
         "agent_takkub.orchestrator_text",
         "agent_takkub.pane_env",
         "agent_takkub.pipeline_executor",
         "agent_takkub.provider_config",
+        "agent_takkub.provider_spec",
         "agent_takkub.pty_session",
         "agent_takkub.role_memory",
         "agent_takkub.roles",
         "agent_takkub.rtk_helper",
         "agent_takkub.shared_dev_tools",
-        "agent_takkub.spawn_gate"
+        "agent_takkub.spawn_gate",
+        "agent_takkub.user_profile"
       ],
       "imported_by": [
         "agent_takkub.limit_autoresume",
         "agent_takkub.orchestrator"
       ],
       "fan_in": 2,
-      "fan_out": 18
+      "fan_out": 19
     },
     {
       "module": "agent_takkub.spawn_gate",
@@ -1147,9 +1169,10 @@
         "agent_takkub.main_window",
         "agent_takkub.pane_env",
         "agent_takkub.remote.notify",
+        "agent_takkub.spawn_engine",
         "agent_takkub.user_actions"
       ],
-      "fan_in": 8,
+      "fan_in": 9,
       "fan_out": 2
     },
     {

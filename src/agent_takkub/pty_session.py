@@ -26,6 +26,9 @@ from wcwidth import wcwidth
 
 from ._pty_backend import spawn_pty
 from ._win_console import hide_hwnds, snapshot_console_hwnds
+from .provider_spec import PROVIDER_REGISTRY
+from .provider_spec import READY_HARD_BLOCKERS as _READY_HARD_BLOCKERS
+from .provider_spec import READY_RULES as _READY_RULES
 
 # CREATE_NO_WINDOW so the helper taskkill doesn't flash a console window.
 _CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -201,54 +204,27 @@ _TTY_PROMPT_TAIL_ROWS = 5
 #
 # Hard blockers: any present → NEVER ready (active interrupt / modal), even if a
 # ready marker is also on screen.
-_READY_HARD_BLOCKERS = (
-    "trust this folder",
-    "do you trust the contents of this directory",
-    "press enter to continue",
-    "esc to interrupt",
-    "esc to cancel",
-)
-# Ordered ready/soft-block rules — FIRST match wins. The order ENCODES the
-# per-provider precedence: gemini's persistent input hint + passive update
-# footer must beat the codex "update available!" splash blocker. Changing the
-# order changes behaviour — keep it.
-# (ready_when, marker)
-_READY_RULES: tuple[tuple[bool, str], ...] = (
-    # agy (Antigravity) — the gemini role's engine since 2026-06-19. Its idle
-    # TUI shows a '? for shortcuts' footer at the input prompt. Listed first so
-    # it wins before the codex 'update available!' blocker (parity with how
-    # gemini's footer used to). Busy state is covered by the 'esc to
-    # interrupt/cancel' hard blockers above, which override this when present.
-    (True, "? for shortcuts"),  # agy idle prompt footer
-    (True, "type your message or"),  # gemini CLI (legacy) input prompt hint
-    (True, "gemini cli update available!"),  # gemini CLI (legacy) passive footer (#51)
-    (False, "update available!"),  # codex startup splash modal
-    # NOTE: codex's startup banner ("OpenAI Codex (vX.Y.Z)") is deliberately
-    # NOT a ready marker (#99). It renders on the very first paint, before
-    # codex has finished auto-booting its configured MCP servers — a screen
-    # showing only the banner (composer footer not painted yet) used to read
-    # ready=True and let task delivery race the MCP-boot phase, pasting into a
-    # composer that was about to start showing the "esc to interrupt" busy
-    # marker underneath the still-unsubmitted paste. Ready for task delivery
-    # now depends solely on the composer status bar below, which — verified by
-    # direct pty capture — only renders once codex has actually reached its
-    # interactive prompt.
-    #
-    # codex composer status bar: "<model> · <cwd> · <usage> · Fast off/on".
-    # Rendered on the row directly under the input box for as long as the
-    # composer is on screen — including once the startup banner has scrolled
-    # out of the _READY_TAIL_ROWS window as the conversation grows, which
-    # previously left codex matching NO rule at all and reading not-ready
-    # forever (#26 delivery-unconfirmed false alarms). "esc to interrupt" (a
-    # hard blocker, checked first) still correctly overrides this during an
-    # active turn or MCP boot — verified by direct pty capture: the status bar
-    # is present but blocked at that point because "esc to interrupt" is also
-    # on screen.
-    (True, "fast off"),
-    (True, "fast on"),
-    (True, "bypass permissions"),  # claude footer
-    (True, "shift+tab to cycle"),  # claude footer
-)
+#
+# _READY_HARD_BLOCKERS / _READY_RULES now come from provider_spec.py's
+# PROVIDER_REGISTRY (issue #103 Phase 0) — imported above as
+# READY_HARD_BLOCKERS / READY_RULES and aliased back to these names for every
+# existing call site (is_at_ready_prompt, ready_marker_selftest, etc.) to keep
+# working unchanged. provider_spec.py builds them by ORDERED CONCAT across the
+# three shipped specs (gemini, then codex, then claude) — reproducing this
+# exact table byte-for-byte — instead of a hand-written flat tuple, so a new
+# provider only needs a new ProviderSpec entry, not an edit here.
+#
+# The concat order still matters and is still enforced there: gemini's
+# persistent input hint + passive update footer must beat codex's bare
+# "update available!" splash blocker (substring collision — gemini's "gemini
+# cli update available!" contains codex's "update available!"). Codex's
+# startup banner ("OpenAI Codex (vX.Y.Z)") is deliberately NOT a ready marker
+# (#99) — it paints before codex finishes auto-booting its MCP servers, so
+# treating the banner alone as ready raced task delivery into a still-busy
+# composer. Codex readiness depends solely on its composer status bar ("Fast
+# off"/"Fast on"), verified by direct pty capture to only render once codex
+# has actually reached its interactive prompt. See provider_spec.py's
+# codex_spec.ready_rules comment for the full detail.
 
 
 def _extra_ready_markers() -> tuple[str, ...]:
@@ -327,34 +303,48 @@ def _input_has_content(region: str, fragment: str) -> bool:
 
 # Canonical sample screens with their expected verdict — bake the behaviour so a
 # marker going stale is caught by `takkub doctor` instead of silently breaking
-# the idle watchdog. Each tuple is (screen_text, expected_is_ready).
-_READY_SELFTEST_CASES: tuple[tuple[str, bool], ...] = (
-    ("> \n? for shortcuts            Gemini 3.5 Flash (Medium)", True),  # agy idle
+# the idle watchdog. Each tuple is (screen_text, expected_is_ready, provider) —
+# the provider tag (issue #103 Phase 0, design §5.6) says which spec the case
+# "belongs to" and is used by ready_marker_selftest() to ALSO verify the case
+# classifies correctly under that provider's own rules alone (no help from
+# the other two specs' markers) — see _classify_ready_for_provider below.
+_READY_SELFTEST_CASES: tuple[tuple[str, bool, str], ...] = (
+    ("> \n? for shortcuts            Gemini 3.5 Flash (Medium)", True, "gemini"),  # agy idle
     # agy busy: even if the '? for shortcuts' footer persists, an active
     # interrupt indicator is a hard blocker → not ready (no premature done-nudge).
-    ("Thinking... (esc to interrupt)\n? for shortcuts", False),  # agy busy
-    ("Type your message or @path/to/file", True),  # gemini CLI (legacy) idle
-    ("Thinking... (esc to cancel, 12s)\nType your message or @path", False),  # gemini busy
-    ("Gemini CLI update available! 0.46.0 -> 0.47.0\nType your message or @path", True),
-    ("Gemini CLI update available! 0.46.0 -> 0.47.0", True),  # passive footer alone
-    ("OpenAI Codex (v1.2.3)\nupdate available! run npm i -g @openai/codex", False),  # codex splash
+    ("Thinking... (esc to interrupt)\n? for shortcuts", False, "gemini"),  # agy busy
+    ("Type your message or @path/to/file", True, "gemini"),  # gemini CLI (legacy) idle
+    ("Thinking... (esc to cancel, 12s)\nType your message or @path", False, "gemini"),  # busy
+    (
+        "Gemini CLI update available! 0.46.0 -> 0.47.0\nType your message or @path",
+        True,
+        "gemini",
+    ),
+    ("Gemini CLI update available! 0.46.0 -> 0.47.0", True, "gemini"),  # passive footer alone
+    (
+        "OpenAI Codex (v1.2.3)\nupdate available! run npm i -g @openai/codex",
+        False,
+        "codex",
+    ),  # codex splash
     # codex banner alone, no composer status bar yet (#99): the earliest paint
     # after spawn, before codex has finished booting its own MCP servers. Must
     # NOT read ready — task delivery racing this window pasted into a composer
     # that was about to go busy with its own "esc to interrupt" MCP-boot
     # indicator, stranding the paste unsubmitted (root cause, issue #99).
-    ("OpenAI Codex (v1.2.3)", False),  # codex banner alone (no status bar)
+    ("OpenAI Codex (v1.2.3)", False, "codex"),  # codex banner alone (no status bar)
     # codex idle: banner has scrolled off, only the composer status bar remains
     # in the tail region (captured via direct pty spawn, issue #26).
     (
         "gpt-5.5 medium · ~/project · 5h 79% left · weekly 86% left · Fast off",
         True,
+        "codex",
     ),
     # codex busy: "esc to interrupt" hard blocker overrides the status bar,
     # which is still on screen mid-turn.
     (
         "Thinking...(esc to interrupt)\ngpt-5.5 medium · ~/project · Fast off",
         False,
+        "codex",
     ),
     # codex MCP boot: same hard blocker covers the "Booting MCP server:
     # codex_apps" phase, which also renders the status bar underneath.
@@ -362,23 +352,49 @@ _READY_SELFTEST_CASES: tuple[tuple[str, bool], ...] = (
         "• Booting MCP server: codex_apps (0s • esc to interrupt)\n"
         "gpt-5.5 medium · ~/project · Fast off",
         False,
+        "codex",
     ),
-    ("bypass permissions", True),  # claude idle
-    ("(esc to interrupt) building...\nbypass permissions", False),  # claude busy
+    ("bypass permissions", True, "claude"),  # claude idle
+    ("(esc to interrupt) building...\nbypass permissions", False, "claude"),  # claude busy
     # --- #26 hardening (558fcbe cross-check, gemini+codex) ---
     # codex update splash + status bar footer: the 'update available!' blocker
     # precedes 'fast off/on' in _READY_RULES → stays not-ready.
     (
         "update available! run npm i -g @openai/codex\ngpt-5.5 medium · ~/project · Fast off",
         False,
+        "codex",
     ),
     # codex idle, 'Fast on' variant — the on/off toggle both mark ready.
-    ("gpt-5.5 medium · ~/project · weekly 86% left · Fast on", True),  # codex idle (fast on)
+    (
+        "gpt-5.5 medium · ~/project · weekly 86% left · Fast on",
+        True,
+        "codex",
+    ),  # codex idle (fast on)
     # cross-provider contamination: a busy pane whose bottom rows quote
     # 'fast off' still shows its hard blocker, which wins before ready rules.
     # (_classify_ready checks hard blockers first, before any ready marker.)
-    ("(esc to interrupt) building...\nsomeone mentions fast off", False),
+    # Tagged "claude" for the per-provider pass — claude's own hard blockers
+    # include 'esc to interrupt' too, so the case is self-contained there
+    # without needing codex's 'fast off' rule at all.
+    ("(esc to interrupt) building...\nsomeone mentions fast off", False, "claude"),
 )
+
+
+def _classify_ready_for_provider(text_lower: str, provider: str) -> bool:
+    """Same precedence as _classify_ready, scoped to ONE provider's own spec.
+
+    Used only by ready_marker_selftest() to prove a tagged case classifies
+    correctly from that provider's rules alone — i.e. it doesn't secretly
+    depend on another provider's marker being present in the compat concat.
+    Ignores TAKKUB_EXTRA_READY_MARKERS, like the shipped-table self-test
+    itself. (issue #103 Phase 0, design §5.6)"""
+    spec = PROVIDER_REGISTRY[provider]
+    if any(b in text_lower for b in spec.ready_hard_blockers):
+        return False
+    for rule in spec.ready_rules:
+        if rule.marker in text_lower:
+            return rule.ready_when
+    return False
 
 
 def ready_marker_selftest() -> list[str]:
@@ -386,16 +402,29 @@ def ready_marker_selftest() -> list[str]:
     list of human-readable failures (empty = all good). Called by doctor so a
     stale ready marker surfaces as a diagnostic rather than a silent stall. The
     env override is intentionally ignored here — the self-test validates the
-    SHIPPED table. (M4#17)"""
+    SHIPPED table. (M4#17)
+
+    Each case is also checked against its tagged provider's spec ALONE
+    (issue #103 Phase 0) — this is the check that would have caught the
+    "gemini cli update available!" / "update available!" substring collision
+    independent of concat order, since it fails if a case secretly relies on
+    another provider's rule being present in the combined table."""
     failures: list[str] = []
     saved = os.environ.pop("TAKKUB_EXTRA_READY_MARKERS", None)
     try:
-        for text, expected in _READY_SELFTEST_CASES:
+        for text, expected, provider in _READY_SELFTEST_CASES:
             got = _classify_ready(text.lower())
             if got != expected:
                 first = text.splitlines()[0] if text else ""
                 failures.append(
                     f"ready-marker selftest: {first!r} expected ready={expected}, got {got}"
+                )
+            got_spec_only = _classify_ready_for_provider(text.lower(), provider)
+            if got_spec_only != expected:
+                first = text.splitlines()[0] if text else ""
+                failures.append(
+                    f"ready-marker selftest ({provider} spec alone): {first!r} "
+                    f"expected ready={expected}, got {got_spec_only}"
                 )
     finally:
         if saved is not None:

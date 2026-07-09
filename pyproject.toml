@@ -293,6 +293,27 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
+name = "provider-spec-pure"
+type = "forbidden"
+# provider_spec (issue #103 Phase 0) is a pure data layer (dataclass registry).
+# provider_config/spawn_engine/pty_session/orchestrator_text all import it, so
+# it must stay free of all of them (and the engine/UI/CLI layers) or the edge
+# becomes a cycle.
+source_modules = ["agent_takkub.provider_spec"]
+forbidden_modules = [
+    "agent_takkub.orchestrator",
+    "agent_takkub.main_window",
+    "agent_takkub.app",
+    "agent_takkub.cli",
+    "agent_takkub.cli_server",
+    "agent_takkub.spawn_engine",
+    "agent_takkub.pty_session",
+    "agent_takkub.orchestrator_text",
+    "agent_takkub.lead_inbox",
+    "agent_takkub.provider_config",
+]
+
+[[tool.importlinter.contracts]]
 name = "spawn-engine-layer"
 type = "forbidden"
 # spawn_engine is a pure-logic mixin. It must never import from the UI layer

@@ -21,7 +21,7 @@ Lead spawn เฉพาะ role ที่จำเป็นต่องานน
 
 > **Cross-platform (Windows + macOS) — บังคับทุกการเปลี่ยนแปลง:** cockpit รัน **ทั้ง Windows (ConPTY) และ macOS (`_pty_backend` — merge แล้ว)** ทุก feature/fix/refactor ต้องทำงานได้ **ทั้ง 2 OS คู่กัน** ห้ามทำให้ฝั่งใดฝั่งหนึ่งพัง:
 > - **ห้าม hardcode** path/command เฉพาะ platform — ใช้ `pathlib.Path` (ไม่ใช่ `\\` หรือ `.exe` ตรงๆ); อะไรที่ platform-specific ต้อง gate ด้วย `sys.platform == "win32"/"darwin"` **+ มี branch อีกฝั่งเสมอ** (อย่าปล่อยให้ mac ตกหล่น)
-> - **ก่อน push ต้องรัน full suite** (`pytest` ทั้งหมด) ไม่ใช่แค่ targeted tests — fake/mock ที่ signature drift จาก orchestrator/cli_server จริง จะ raise ใน QTimer slot → **PyQt6 abort process เงียบๆ (exit 127)** ที่ targeted run ไม่จับ
+> - **Test tiers (user directive 2026-07-09 — ห้ามเทสเปลือง):** งานย่อยระหว่างทางรัน **targeted tests เฉพาะที่แตะ** เท่านั้น — **full suite รันครั้งเดียวที่ qa batch gate** ก่อน merge/push (เหตุผลที่ qa gate ยังต้อง full: fake/mock ที่ signature drift จาก orchestrator/cli_server จริง จะ raise ใน QTimer slot → **PyQt6 abort process เงียบๆ (exit 127)** ที่ targeted run ไม่จับ) · ข้อยกเว้นเดียวที่ full suite กลางทาง: refactor ที่เคลม behavior-neutral (proof = suite เดิมเขียวโดยไม่แก้ expected values)
 > - **CI = matrix `windows-latest` + `macos-latest`** (`.github/workflows/ci.yml`) — **ทั้งคู่ต้องเขียว** ก่อน merge; ถ้าแก้อะไรแล้ว mac แดง = ยังไม่เสร็จ
 
 ### เมื่อไหร่ควรเรียก codex
