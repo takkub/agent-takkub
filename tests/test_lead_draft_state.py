@@ -170,6 +170,31 @@ class TestUnrecognizedCsi:
             assert st2 == st, f"{seq!r} must not change draft state"
 
 
+class TestFocusInOut:
+    """xterm focus-tracking sequences (\\x1b[I focus-in, \\x1b[O focus-out) are
+    plain CSI with no final-byte special-case — they must be pure no-ops, not
+    a false-positive nonempty (#108 investigation: ruled out as the cause of
+    a draft reading pending for minutes, but pinned here as a regression)."""
+
+    def test_focus_in_is_noop_on_empty(self):
+        st = _advance(LeadDraftState(), b"\x1b[I")
+        assert st.state == EMPTY
+
+    def test_focus_out_is_noop_on_empty(self):
+        st = _advance(LeadDraftState(), b"\x1b[O")
+        assert st.state == EMPTY
+
+    def test_focus_in_out_do_not_disturb_existing_draft(self):
+        st = _advance(LeadDraftState(), b"abc")
+        st2 = _advance(st, b"\x1b[O\x1b[I")
+        assert st2 == st
+
+    def test_focus_events_around_typing_do_not_inflate_length(self):
+        st = _advance(LeadDraftState(), b"\x1b[Oab\x1b[Ic")
+        assert st.state == NONEMPTY
+        assert st.draft_len == 3
+
+
 class TestMultibyteThai:
     def test_thai_chars_counted_as_characters_not_bytes(self):
         thai = "สวัสดี"  # 6 Thai characters, >1 byte each in UTF-8

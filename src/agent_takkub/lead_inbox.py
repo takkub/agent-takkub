@@ -963,6 +963,16 @@ class LeadInboxMixin:
         lead = self._project_panes(project_ns).get(LEAD.name)
         if not (lead and lead.session and lead.session.is_alive):
             return
+        if not self._lead_can_accept_injection(project_ns):
+            # User has an unsubmitted draft — leave items durable and back off
+            # silently. Handing them to _notify_lead here would move them into
+            # the live queue only for _pump_lead_notify's own draft-hold gate to
+            # spill them straight back to durable (draft-hold-expired is sticky
+            # once past DRAFT_HOLD_TIMEOUT_S), and doing that per item produced
+            # a duplicate spill log per notice, every reaper tick (#108). The
+            # reaper's own staleness clock (_pending_done_since) is the safety
+            # net for a draft that never clears.
+            return
         items = self._pending_done_notices.pop(project_ns)
         self._save_pending_done_notices(project_ns)
         for item in items:
@@ -990,18 +1000,23 @@ class LeadInboxMixin:
                 # staleness clock so it only counts time the Lead was actually up.
                 self._pending_done_since.pop(project_ns, None)
                 continue
-            if lead.session.is_at_ready_prompt():
+            if lead.session.is_at_ready_prompt() and self._lead_can_accept_injection(project_ns):
                 self._pending_done_since.pop(project_ns, None)
                 self._flush_pending_done_notices(project_ns)
             else:
-                # Lead alive but not-ready. Normally transient (Lead mid-turn);
-                # the next tick retries. But is_at_ready_prompt() can be a
-                # perpetual false-negative (a blocker marker in the Lead's own
-                # visible conversation reads as busy — #20), which silently
-                # stranded notices forever (#70: a second active project's Lead
-                # never reaped). Escalate: after _DONE_NOTICE_STALE_S of an
-                # alive-but-never-ready Lead, force delivery regardless of the
-                # gate so the chain can never stall indefinitely.
+                # Lead alive but either not-ready or holding an unsubmitted
+                # draft (#108: back off flushing while a draft is pending —
+                # see _flush_pending_done_notices — so this is the same
+                # staleness-accumulating branch, not a separate reset-every-
+                # tick path). Normally transient (Lead mid-turn, or a draft
+                # that will clear soon); the next tick retries. But
+                # is_at_ready_prompt() can be a perpetual false-negative (a
+                # blocker marker in the Lead's own visible conversation reads
+                # as busy — #20), which silently stranded notices forever
+                # (#70: a second active project's Lead never reaped). Escalate:
+                # after _DONE_NOTICE_STALE_S of an alive-but-never-flushable
+                # Lead, force delivery regardless of the gate (including the
+                # draft-hold gate) so the chain can never stall indefinitely.
                 since = self._pending_done_since.setdefault(project_ns, now)
                 if now - since >= _DONE_NOTICE_STALE_S:
                     _log_event(
