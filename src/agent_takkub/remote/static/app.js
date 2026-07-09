@@ -28,6 +28,7 @@
     selectedProject: "",
     openTabs: [],
     opening: null,
+    closing: null,
   };
 
   var VIEW_LABELS = { projects: "Projects", lead: "Lead", pulse: "Pulse" };
@@ -392,6 +393,18 @@
 
     if (open) {
       row.addEventListener("click", function () { selectProject(name); });
+      if (state.mode === "control") {
+        var closeBtn = document.createElement("button");
+        closeBtn.type = "button";
+        closeBtn.className = "close-btn";
+        closeBtn.textContent = "✕";
+        closeBtn.setAttribute("aria-label", "ปิด " + name);
+        closeBtn.addEventListener("click", function (ev) {
+          ev.stopPropagation();
+          closeProject(name, row);
+        });
+        row.appendChild(closeBtn);
+      }
     } else if (canOpen) {
       row.addEventListener("click", function () { openProject(name, row); });
     }
@@ -449,6 +462,48 @@
         row.classList.remove("opening");
         if (iconBox) iconBox.textContent = iconFor(name);
         if (nameSpan) nameSpan.textContent = origName;
+      });
+  }
+
+  // Closes an open project tab on the desktop cockpit — terminates Lead +
+  // every teammate pane for it. Confirms on the phone first (the desktop
+  // dialog is skipped server-side for remote-originated closes; see
+  // MainWindow._close_project_tab(confirm=False)).
+  function closeProject(name, row) {
+    if (state.closing) return; // debounce — one close in flight at a time
+    if (!window.confirm("ปิด '" + name + "'? Lead และทุก teammate pane ของ project นี้จะถูกปิด")) return;
+    state.closing = name;
+    row.classList.add("closing");
+
+    apiFetch("api/close", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ project: name }),
+    })
+      .then(function (r) {
+        return r.json().then(function (data) { return { status: r.status, data: data }; });
+      })
+      .then(function (res) {
+        if (res.status === 200 && res.data && res.data.ok) {
+          state.openTabs = (state.openTabs || []).filter(function (n) { return n !== name; });
+          if (state.selectedProject === name) state.selectedProject = null;
+          fetchProjectsAndMode().then(renderProjects).catch(function () {});
+          loadProjects();
+          return;
+        }
+        var msg = "ปิดไม่สำเร็จ";
+        if (res.status === 400) msg = "ไม่พบ project";
+        else if (res.status === 403 && res.data && res.data.msg === "view mode: control is disabled") msg = "อยู่โหมด view ปิดไม่ได้";
+        else if (res.status === 409) msg = "ปิดไม่สำเร็จ ลองใหม่อีกครั้ง";
+        toast(msg);
+      })
+      .catch(function (err) {
+        if (err instanceof Error && (err.message === "password_required" || err.message === "unauthorized")) return;
+        toast("ปิดไม่สำเร็จ ลองใหม่");
+      })
+      .then(function () {
+        state.closing = null;
+        row.classList.remove("closing");
       });
   }
 
@@ -1093,17 +1148,39 @@
       .catch(function () { /* keep last known value on transient failure */ });
   }
 
+  function makeRoleChip(role, runtimeSec, idle) {
+    var chip = document.createElement("div");
+    chip.className = "role-chip" + (idle ? " idle" : "");
+    chip.style.setProperty("--role-color", roleColor(role));
+
+    var name = document.createElement("span");
+    name.className = "role-chip-name";
+    name.textContent = String(role);
+    chip.appendChild(name);
+
+    var badge = document.createElement("span");
+    badge.className = "role-chip-time";
+    badge.textContent = idle ? "idle" : fmtRuntime(runtimeSec);
+    chip.appendChild(badge);
+
+    return chip;
+  }
+
   function renderPulse(projects) {
     var wrap = $("pulse-list");
     if (!wrap) return;
     wrap.innerHTML = "";
 
     var totalRoles = 0;
+    var totalWorking = 0;
     projects.forEach(function (p) {
-      if (p && Array.isArray(p.roles)) totalRoles += p.roles.length;
+      if (!p) return;
+      if (Array.isArray(p.roles)) totalRoles += p.roles.length;
+      if (p.lead) totalWorking += 1; // every open Lead counts as a visible position
+      totalWorking += (Array.isArray(p.roles) ? p.roles.length : 0);
     });
 
-    if (!projects.length || totalRoles === 0) {
+    if (!projects.length || totalWorking === 0) {
       var empty = document.createElement("div");
       empty.className = "pulse-empty";
       empty.innerHTML = '<span class="icon">🌙</span><span class="text">ไม่มีงานกำลังรันอยู่</span>';
@@ -1115,7 +1192,9 @@
     $("pulse-count").textContent = totalRoles + " ตำแหน่งกำลังทำงาน";
 
     projects.forEach(function (p) {
-      if (!p || !p.project || !Array.isArray(p.roles) || !p.roles.length) return;
+      if (!p || !p.project) return;
+      var roles = Array.isArray(p.roles) ? p.roles : [];
+      if (!roles.length && !p.lead) return;
       var card = document.createElement("div");
       card.className = "pulse-card";
 
@@ -1126,23 +1205,13 @@
 
       var chips = document.createElement("div");
       chips.className = "pulse-chips";
-      p.roles.forEach(function (r) {
+
+      if (p.lead && p.lead.state) {
+        chips.appendChild(makeRoleChip("lead", p.lead.runtime_sec, p.lead.state !== "working"));
+      }
+      roles.forEach(function (r) {
         if (!r || !r.role) return;
-        var chip = document.createElement("div");
-        chip.className = "role-chip";
-        chip.style.setProperty("--role-color", roleColor(r.role));
-
-        var name = document.createElement("span");
-        name.className = "role-chip-name";
-        name.textContent = String(r.role);
-        chip.appendChild(name);
-
-        var badge = document.createElement("span");
-        badge.className = "role-chip-time";
-        badge.textContent = fmtRuntime(r.runtime_sec);
-        chip.appendChild(badge);
-
-        chips.appendChild(chip);
+        chips.appendChild(makeRoleChip(r.role, r.runtime_sec, false));
       });
       card.appendChild(chips);
 

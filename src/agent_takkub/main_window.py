@@ -952,24 +952,45 @@ class MainWindow(
         self._status.showMessage(f"opened tab · {project_name}", 4_000)
 
     def _on_tab_close_requested(self, index: int) -> None:
-        """Close the tab at `index`. Confirms first, then tears down every
-        pane for that project (Lead + teammates). If the last tab closes,
-        the cockpit shows the empty state — the user can `+` a new one."""
-        from PyQt6.QtWidgets import QMessageBox
-
+        """Close the tab at `index`. Confirms first, then delegates the
+        actual teardown to `_close_project_tab`."""
         tab = self.tabs.widget(index)
         if not isinstance(tab, ProjectTab):
             return
-        confirm = QMessageBox.question(
-            self,
-            "Close tab",
-            f"Close '{tab.project_name}' tab? Lead + every teammate pane for "
-            f"this project will be terminated.",
-            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Ok,
-        )
-        if confirm != QMessageBox.StandardButton.Ok:
-            return
+        self._close_project_tab(tab.project_name, confirm=True)
+
+    def _close_project_tab(self, project: str, confirm: bool = False) -> tuple[bool, str]:
+        """Tear down every pane for `project` (Lead + teammates) and remove
+        its tab. Shared by the desktop close-tab path (`confirm=True` shows
+        the Qt dialog) and the remote `close_project` API (`confirm=False` —
+        the phone confirms on its own side before calling in). If the last
+        tab closes, the cockpit shows the empty state — the user can `+` a
+        new one.
+
+        Returns `(ok, message)`.
+        """
+        index = -1
+        tab: ProjectTab | None = None
+        for i in range(self.tabs.count()):
+            w = self.tabs.widget(i)
+            if isinstance(w, ProjectTab) and w.project_name == project:
+                index, tab = i, w
+                break
+        if tab is None:
+            return False, f"no open tab for project '{project}'"
+
+        if confirm:
+            answer = QMessageBox.question(
+                self,
+                "Close tab",
+                f"Close '{tab.project_name}' tab? Lead + every teammate pane for "
+                f"this project will be terminated.",
+                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Ok,
+            )
+            if answer != QMessageBox.StandardButton.Ok:
+                return False, "cancelled"
+
         self.orch.close_all_teammates(project=tab.project_name)
         self.orch.close(LEAD.name, project=tab.project_name, force=True, reason="tab_close")
         self.orch.unregister_pane(LEAD.name, project=tab.project_name, force=True)
@@ -1001,6 +1022,7 @@ class MainWindow(
         tab.deleteLater()
         self._persist_open_tabs()
         self._status.showMessage(f"closed tab · {tab.project_name}", 4_000)
+        return True, f"closed tab · {tab.project_name}"
 
     def _on_tab_switched(self, index: int) -> None:
         """User picked a different project in the sidebar. Sync `active` in

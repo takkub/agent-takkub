@@ -24,6 +24,7 @@ import socket
 import time
 
 from .. import config as _config
+from ..roles import LEAD
 from . import notify
 
 _HISTORY_DEFAULT_LIMIT = 200
@@ -98,20 +99,38 @@ def activity(orch) -> dict:
     elapsed-time spinner reads, see `agent_pane.py:set_state`) is the
     "started" timestamp — a pane can be spawned long before it's actually
     given work, so runtime is measured from the current task starting, not
-    from spawn."""
+    from spawn.
+
+    Lead is surfaced separately from `roles` (W4): every project with an open
+    Lead pane gets a `lead` entry with `state: "working"|"idle"` regardless of
+    whether it's currently working, so the phone always shows whether Lead is
+    home. Idle Lead's `_working_start` is `None` (cleared by `set_state` —
+    see `agent_pane.py`), so idle never reuses a stale/previous runtime; it's
+    reported as 0."""
     now = time.time()
     projects_out: list[dict] = []
     for project_ns, panes in (getattr(orch, "_panes_by_project", None) or {}).items():
         roles: list[dict] = []
+        lead_out: dict | None = None
         for role, pane in panes.items():
-            if getattr(pane, "state", None) != "working":
+            state = getattr(pane, "state", None)
+            if role == LEAD.name:
+                working = state == "working"
+                started = getattr(pane, "_working_start", None) if working else None
+                runtime_sec = max(0, int(now - started)) if started is not None else 0
+                lead_out = {"state": "working" if working else "idle", "runtime_sec": runtime_sec}
+                continue
+            if state != "working":
                 continue
             started = getattr(pane, "_working_start", None)
             if started is None:
                 continue
             roles.append({"role": role, "runtime_sec": max(0, int(now - started))})
-        if roles:
-            projects_out.append({"project": project_ns, "roles": roles})
+        if roles or lead_out is not None:
+            entry: dict = {"project": project_ns, "roles": roles}
+            if lead_out is not None:
+                entry["lead"] = lead_out
+            projects_out.append(entry)
     return {"projects": projects_out}
 
 
@@ -156,6 +175,28 @@ def open_project(orch, project: object) -> dict:
         # missing on disk (status-bar message only) — surface that here
         # as a real error instead of a false "ok".
         raise RemoteApiError(409, "project could not be opened")
+    return {"ok": True, "project": project}
+
+
+def close_project(orch, project: object) -> dict:
+    """control-mode only (enforced by the HTTP handler's mode gate before
+    this runs, same as `open_project`). Validates `project` against
+    `projects.json` before touching main_window. Already-closed is a
+    no-op (idempotent — the phone may retry). Delegates to
+    `MainWindow._close_project_tab(project, confirm=False)` — the same
+    teardown the desktop close-tab path uses, minus the Qt confirm dialog
+    (the phone confirms on its own side, e.g. a tap-to-confirm sheet,
+    before ever calling in)."""
+    if not isinstance(project, str) or project not in _config.list_project_names():
+        raise RemoteApiError(400, "unknown project")
+    if project not in _config.get_open_tabs():
+        return {"ok": True, "project": project}
+    close_tab = getattr(orch.parent(), "_close_project_tab", None)
+    if close_tab is None:
+        raise RemoteApiError(500, "cannot reach main window")
+    ok, msg = close_tab(project, confirm=False)
+    if not ok:
+        raise RemoteApiError(409, msg or "project could not be closed")
     return {"ok": True, "project": project}
 
 
