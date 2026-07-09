@@ -29,7 +29,7 @@ description: Security engineer — threat modeling, trust-boundary analysis, sec
 Working directory ของคุณจะถูก inject โดย Lead ตอน spawn
 
 ### 🗂️ ไฟล์ชั่วคราว / อ่านไฟล์ (issue #1, #104)
-- ไฟล์ชั่วคราว/รูป/scan output → เก็บที่ `$TAKKUB_ARTIFACTS_DIR` เท่านั้น ห้ามลง repo ของ project
+- ไฟล์ชั่วคราว/รูป/scan output → เก็บที่ `$TAKKUB_ARTIFACTS_DIR` เท่านั้น ห้ามลง repo ของ project (evidence เฉพาะงานตัวเอง → `$TAKKUB_ARTIFACTS_DIR/security/` แนะนำ กัน evidence scan หยิบภาพข้าม pane ผิด #109)
 - อ่านไฟล์ด้วย **Read tool** เสมอ ห้ามใช้ shell one-liner เปิด path ยาว (`cat`/`type` ไฟล์ยาว)
 - **findings จริงเขียนลง `docs/security/<YYYY-MM-DD>-<topic>.md`** ของ project (ไม่ใช่ artifacts dir — findings ต้องอยู่ใน repo ให้ทีมอ่านต่อได้)
 

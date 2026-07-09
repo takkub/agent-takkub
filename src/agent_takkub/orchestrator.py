@@ -182,6 +182,13 @@ _EVIDENCE_MAX_FILES = 10
 # warning line (everyone else silently gets nothing when they have no shots).
 _EVIDENCE_WARN_ROLES = ("qa", "critic", "designer")
 
+# Windows Open-With dialog tripwire (issue #104): a shell one-liner that
+# mangles a bare file path into command position gets ShellExecute'd by
+# Windows, popping this exact dialog title text. The dialog is a native GUI
+# modal — the pane's PTY shows no error, just silence, so the transcript
+# watchdog is the only way to catch it without a human noticing the popup.
+_SHELL_OPEN_DIALOG_MARKER = "How do you want to open"
+
 __all__ = [  # backwards-compat re-exports
     "HARVEST_HINT_SEC",
     "LEAD_NOTIFY_BUSY_CAP",
@@ -1557,28 +1564,14 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         return None
 
     @classmethod
-    def _scan_done_evidence(cls, project_ns: str, from_role: str, assign_ts: float) -> str:
-        """Scan the pane's artifacts dir for screenshots newer than `assign_ts`.
-
-        Returns a `'📸 evidence: <paths>'` suffix to append to the done notice,
-        a bare `'⚠ no screenshot evidence'` warning when `from_role` is one of
-        the screenshot-expected roles (qa/critic/designer) and none were
-        found, or `''` otherwise. Degrades silently on any filesystem hiccup —
-        a missing/unreadable artifacts dir just yields no evidence, never an
-        exception (issue #5).
-        """
-        if assign_ts <= 0:
-            # No tracked assignment (pane never went through _assign_dispatch,
-            # e.g. a bare `takkub done` in a test or a legacy PaneState) — we
-            # have no window to scan, so say nothing rather than guess.
-            return ""
-
-        base_role, _ = _split_shard(from_role)
-        now = time.time()
-        today = datetime.now().strftime("%Y-%m-%d")
-        artifacts_dir = RUNTIME_DIR / "exports" / today / project_ns
+    def _find_evidence_files(
+        cls, directory: pathlib.Path, assign_ts: float, now: float
+    ) -> list[tuple[float, pathlib.Path]]:
+        """Recursively collect `(mtime, path)` for settled evidence images
+        under `directory` that landed after `assign_ts`. Empty list on a
+        missing/unreadable dir — never raises (issue #5)."""
         try:
-            candidates = list(artifacts_dir.rglob("*")) if artifacts_dir.is_dir() else []
+            candidates = list(directory.rglob("*")) if directory.is_dir() else []
         except OSError:
             candidates = []
 
@@ -1593,12 +1586,52 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             if mt is None or mt < assign_ts or mt > now - _EVIDENCE_SETTLE_SEC:
                 continue
             found.append((mt, path))
+        return found
+
+    @classmethod
+    def _scan_done_evidence(cls, project_ns: str, from_role: str, assign_ts: float) -> str:
+        """Scan the pane's artifacts dir for screenshots newer than `assign_ts`.
+
+        Returns a `'📸 evidence: <paths>'` suffix to append to the done notice,
+        a bare `'⚠ no screenshot evidence'` warning when `from_role` is one of
+        the screenshot-expected roles (qa/critic/designer) and none were
+        found, or `''` otherwise. Degrades silently on any filesystem hiccup —
+        a missing/unreadable artifacts dir just yields no evidence, never an
+        exception (issue #5).
+
+        Issue #109: a flat scan over the whole project artifacts dir attaches
+        *any* pane's screenshot to *any* other pane's done() if the mtimes
+        overlap. To attribute evidence correctly, prefer the pane's own
+        `<artifacts_dir>/<role>/` subdir (including its own `screenshots/`)
+        first; only fall back to the old flat project-wide scan — tagged
+        `(shared dir)` since it can't be pinned to just this pane — when the
+        role subdir has nothing. This keeps the qa→critic shared
+        `screenshots/` pickup convention working unchanged for panes that
+        haven't adopted a per-role subdir yet.
+        """
+        if assign_ts <= 0:
+            # No tracked assignment (pane never went through _assign_dispatch,
+            # e.g. a bare `takkub done` in a test or a legacy PaneState) — we
+            # have no window to scan, so say nothing rather than guess.
+            return ""
+
+        base_role, _ = _split_shard(from_role)
+        now = time.time()
+        today = datetime.now().strftime("%Y-%m-%d")
+        artifacts_dir = RUNTIME_DIR / "exports" / today / project_ns
+
+        found = cls._find_evidence_files(artifacts_dir / base_role, assign_ts, now)
+        shared = False
+        if not found:
+            found = cls._find_evidence_files(artifacts_dir, assign_ts, now)
+            shared = True
 
         if found:
             found.sort(key=lambda item: item[0], reverse=True)
             newest = found[:_EVIDENCE_MAX_FILES]
             paths = ", ".join(str(p).replace("\\", "/") for _, p in newest)
-            return f"📸 evidence: {paths}"
+            suffix = " (shared dir)" if shared else ""
+            return f"📸 evidence: {paths}{suffix}"
         return "⚠ no screenshot evidence" if base_role in _EVIDENCE_WARN_ROLES else ""
 
     @staticmethod
@@ -2986,6 +3019,37 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                 except Exception:
                     continue
 
+    def _check_shell_open_dialog(
+        self, project_name: str, role: str, pane: AgentPane, key: str
+    ) -> None:
+        """Issue #104 tripwire: nudge Lead once if `pane`'s transcript tail
+        shows the Windows Open-With dialog marker — a shell one-liner
+        ShellExecute'd a bare file path instead of the pane using Read/Grep.
+        Degrades silently on any I/O hiccup; never raises into the watchdog
+        tick (mirrors `_scan_done_evidence`'s degrade-silently contract)."""
+        ps = self._ps(key)
+        if ps.shell_open_dialog_notified:
+            return
+        transcript_path = getattr(pane, "_transcript_path", None)
+        if not transcript_path:
+            return
+        try:
+            raw = _read_tail_bytes(pathlib.Path(transcript_path), _TRANSCRIPT_TAIL_BYTES)
+            tail = raw.decode("utf-8", errors="replace")
+        except OSError:
+            return
+        if _SHELL_OPEN_DIALOG_MARKER not in tail:
+            return
+        ps.shell_open_dialog_notified = True
+        self._notify_lead(
+            project_name,
+            f"[cockpit] {role} pane อาจติด Windows 'How do you want to open this file?' "
+            "dialog (ShellExecute path แทน Read tool, #104) — เช็ค/ปิด dialog บนเครื่อง "
+            "แล้วเตือน pane ให้ใช้ Read/Grep tool อ่านไฟล์แทน shell one-liner",
+            from_role=role,
+            note="",
+        )
+
     def _check_stuck_panes(self, now: float) -> None:
         """Walk every teammate pane and auto-recover any that's been
         sitting in `working` state with no PTY output for longer than
@@ -3005,10 +3069,15 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                         continue
                     if pane.session is None or not pane.session.is_alive:
                         continue
+                    key = f"{project_name}::{role}"
+                    # Issue #104: independent of stuck/idle detection below —
+                    # a ShellExecute Open-With dialog doesn't necessarily stop
+                    # PTY output (the offending command may return immediately),
+                    # so this must run whether or not the pane looks stuck.
+                    self._check_shell_open_dialog(project_name, role, pane, key)
                     # A rate-limited pane is silent on purpose — never force-respawn
                     # it (the fresh session would just hit the same limit). The idle
                     # walker owns detection; here we only read the recorded state.
-                    key = f"{project_name}::{role}"
                     if (self._pane_state.get(key) or PaneState()).rate_limited_until > now:
                         continue
                     last_out = getattr(pane, "_last_output_ts", 0.0)

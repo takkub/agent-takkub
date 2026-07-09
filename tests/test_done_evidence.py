@@ -238,6 +238,98 @@ class TestEvidenceScanFiltering:
 
 
 # ─────────────────────────────────────────────────────────────
+# Per-role subdir attribution (issue #109)
+# ─────────────────────────────────────────────────────────────
+
+
+class TestPerRoleSubdirAttribution:
+    def test_role_subdir_evidence_preferred_over_shared(self, orch, tmp_path):
+        """A pane's own <artifacts_dir>/<role>/ image wins over the flat
+        project dir and is NOT tagged (shared dir) — confidently attributed."""
+        assign_ts = time.time() - 60
+        today = time.strftime("%Y-%m-%d")
+        role_dir = tmp_path / "exports" / today / "proj" / "backend"
+        role_dir.mkdir(parents=True, exist_ok=True)
+        _touch_old_enough(role_dir / "mine.png", assign_ts, age=10)
+
+        result = Orchestrator._scan_done_evidence("proj", "backend", assign_ts)
+
+        assert "📸 evidence:" in result
+        assert "mine.png" in result
+        assert "(shared dir)" not in result
+
+    def test_role_subdir_screenshots_nested_also_found(self, orch, tmp_path):
+        assign_ts = time.time() - 60
+        role_shots = _shot_dir(tmp_path, "proj/qa", sub="screenshots")
+        _touch_old_enough(role_shots / "own.png", assign_ts, age=10)
+
+        result = Orchestrator._scan_done_evidence("proj", "qa", assign_ts)
+
+        assert "own.png" in result
+        assert "(shared dir)" not in result
+
+    def test_falls_back_to_shared_dir_when_no_role_subdir(self, orch, tmp_path):
+        """No per-role subdir at all (e.g. qa's shots saved flat, the
+        pre-existing convention critic pickup relies on) — old flat scan
+        still runs, tagged (shared dir) since it's not pane-attributable."""
+        assign_ts = time.time() - 60
+        shots = _shot_dir(tmp_path, "proj")
+        _touch_old_enough(shots / "qa-shot.png", assign_ts, age=10)
+
+        result = Orchestrator._scan_done_evidence("proj", "backend", assign_ts)
+
+        assert "📸 evidence:" in result
+        assert "qa-shot.png" in result
+        assert "(shared dir)" in result
+
+    def test_role_subdir_scan_scoped_to_own_role_only(self, orch, tmp_path):
+        """The #109 repro fixed: with both panes using their own subdir,
+        backend's done() sees only backend's file, never qa's sibling one —
+        role_dir scanning is scoped to that one subdir, not the whole tree."""
+        assign_ts = time.time() - 60
+        today = time.strftime("%Y-%m-%d")
+        qa_dir = tmp_path / "exports" / today / "proj" / "qa"
+        qa_dir.mkdir(parents=True, exist_ok=True)
+        _touch_old_enough(qa_dir / "qa-only.png", assign_ts, age=10)
+        backend_dir = tmp_path / "exports" / today / "proj" / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        _touch_old_enough(backend_dir / "backend-only.png", assign_ts, age=10)
+
+        result = Orchestrator._scan_done_evidence("proj", "backend", assign_ts)
+
+        assert "backend-only.png" in result
+        assert "qa-only.png" not in result
+        assert "(shared dir)" not in result
+
+    def test_fallback_can_still_cross_attribute_when_own_subdir_empty(self, orch, tmp_path):
+        """Documents the residual, tagged case: if backend has no subdir
+        evidence of its own, the old flat/recursive fallback still runs
+        (backward compat) and can surface qa's file — but callers can tell
+        it's not pane-exclusive from the (shared dir) tag."""
+        assign_ts = time.time() - 60
+        today = time.strftime("%Y-%m-%d")
+        qa_dir = tmp_path / "exports" / today / "proj" / "qa"
+        qa_dir.mkdir(parents=True, exist_ok=True)
+        _touch_old_enough(qa_dir / "qa-only.png", assign_ts, age=10)
+
+        result = Orchestrator._scan_done_evidence("proj", "backend", assign_ts)
+
+        assert "qa-only.png" in result
+        assert "(shared dir)" in result
+
+    def test_shared_tag_does_not_break_max_files_cap(self, orch, tmp_path):
+        assign_ts = time.time() - 60
+        shots = _shot_dir(tmp_path, "proj")
+        for i in range(15):
+            _touch_old_enough(shots / f"shot{i}.png", assign_ts, age=10 + i)
+
+        result = Orchestrator._scan_done_evidence("proj", "qa", assign_ts)
+
+        assert result.count(".png") == 10
+        assert result.endswith("(shared dir)")
+
+
+# ─────────────────────────────────────────────────────────────
 # PermissionError retry
 # ─────────────────────────────────────────────────────────────
 

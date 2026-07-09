@@ -47,6 +47,20 @@ DRAFT_HOLD_TIMEOUT_S = 180.0
 _CSI = re.compile(rb"\x1b\[[0-9;]*[A-Za-z~]")
 _SS3 = re.compile(rb"\x1bO[A-Za-z]")
 
+# Mouse-report sequences: `_CSI` above requires digits/';' right after `[`,
+# so these never match it (SGR starts with the literal `<`; X10 packs raw,
+# non-digit coordinate bytes) and fell through to the printable-run branch
+# instead — every digit/';'/M/m of a mouse click or wheel tick got counted as
+# typed characters (confirmed repro: a single SGR press/release event read as
+# 10 chars of "typed" draft, #108 root cause). Both forms are pure mouse
+# telemetry — always a no-op, never a state transition, matching the
+# Left/Right-arrow/Home/End precedent above.
+# SGR (`\x1b[<Cb;Cx;CyM` press, `...m` release — wheel ticks use the same
+# encoding with button codes 64+).
+_SGR_MOUSE = re.compile(rb"\x1b\[<[0-9]+;[0-9]+;[0-9]+[Mm]")
+# Legacy X10 (`\x1b[M` + 3 raw bytes: button, x, y — not necessarily ASCII).
+_X10_MOUSE = re.compile(rb"\x1b\[M[\x00-\xff]{3}")
+
 _UP_DOWN = {b"\x1b[A", b"\x1bOA", b"\x1b[B", b"\x1bOB"}
 _PASTE_START = b"\x1b[200~"
 
@@ -87,6 +101,10 @@ def advance_draft_state(prev: LeadDraftState, data: bytes, now: float) -> LeadDr
     while i < n:
         b = data[i]
         if b == _ESC:
+            m_mouse = _SGR_MOUSE.match(data, i) or _X10_MOUSE.match(data, i)
+            if m_mouse is not None:
+                i = m_mouse.end()  # mouse click/release/wheel — always a no-op
+                continue
             m = _CSI.match(data, i) or _SS3.match(data, i)
             if m is None:
                 st = _cleared()  # bare Esc key

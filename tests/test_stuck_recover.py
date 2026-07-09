@@ -71,6 +71,7 @@ class _FakeOrch:
         self.close_calls: list[tuple[str, str]] = []
         self.spawn_calls: list[tuple[str, str | None, str]] = []
         self.tty_surface_calls: list[tuple[str, str, str]] = []
+        self.notify_calls: list[tuple[str, str, str | None]] = []
 
     def _ps(self, key: str) -> PaneState:
         try:
@@ -124,6 +125,14 @@ class _FakeOrch:
     def _surface_tty_block_notice(self, role, project, prompt_line) -> None:
         # Record that Lead was notified so tests can assert surface behaviour.
         self.tty_surface_calls.append((role, project, prompt_line))
+
+    def _check_shell_open_dialog(self, project_name, role, pane, key) -> None:
+        # Delegate to the real method (#104) — driven for real so its
+        # transcript-tail read + dedupe + _notify_lead call are exercised.
+        Orchestrator._check_shell_open_dialog(self, project_name, role, pane, key)  # type: ignore[arg-type]
+
+    def _notify_lead(self, project, notice, from_role=None, note="") -> None:
+        self.notify_calls.append((project, notice, from_role))
 
 
 @pytest.fixture(autouse=True)
@@ -658,3 +667,93 @@ class TestTtyBlockStuckDefer:
         _check(fake, now)
         assert len(fake.close_calls) == 1, "non-blocked stuck pane must still be recovered"
         assert fake.spawn_calls[0][0] == "backend"
+
+
+# ─────────────────────────────────────────────────────────────
+# Issue #104: Windows Open-With dialog transcript tripwire
+# ─────────────────────────────────────────────────────────────
+
+
+class TestShellOpenDialogTripwire:
+    def _pane_with_transcript(self, tmp_path, text: str, **kw):
+        pane = _FakePane(**kw)
+        p = tmp_path / "transcript.log"
+        p.write_text(text, encoding="utf-8")
+        pane._transcript_path = str(p)
+        return pane
+
+    def test_marker_present_notifies_lead_once(self, tmp_path) -> None:
+        fake = _FakeOrch()
+        now = 1_000_000.0
+        pane = self._pane_with_transcript(
+            tmp_path,
+            "some output\nHow do you want to open this file?\nmore output",
+            last_out=now - 1,
+        )
+        fake._panes_by_project["p"] = {"backend": pane}
+
+        _check(fake, now)
+
+        assert len(fake.notify_calls) == 1
+        project, notice, from_role = fake.notify_calls[0]
+        assert project == "p"
+        assert from_role == "backend"
+        assert "How do you want to open this file?" in notice
+        assert "#104" in notice
+
+    def test_marker_dedupes_across_ticks(self, tmp_path) -> None:
+        fake = _FakeOrch()
+        now = 1_000_000.0
+        pane = self._pane_with_transcript(
+            tmp_path,
+            "How do you want to open this file?",
+            last_out=now - 1,
+        )
+        fake._panes_by_project["p"] = {"backend": pane}
+
+        _check(fake, now)
+        _check(fake, now + 5)
+        _check(fake, now + 10)
+
+        assert len(fake.notify_calls) == 1, "must nudge Lead once per pane, not every tick"
+
+    def test_no_marker_no_notification(self, tmp_path) -> None:
+        fake = _FakeOrch()
+        now = 1_000_000.0
+        pane = self._pane_with_transcript(
+            tmp_path, "normal claude output\nno dialogs here", last_out=now - 1
+        )
+        fake._panes_by_project["p"] = {"backend": pane}
+
+        _check(fake, now)
+
+        assert fake.notify_calls == []
+
+    def test_missing_transcript_path_is_noop(self) -> None:
+        """No `_transcript_path` attribute at all (e.g. bootstrap) — must not
+        raise or notify, just skip (mirrors `_scan_done_evidence` degrade)."""
+        fake = _FakeOrch()
+        now = 1_000_000.0
+        pane = _FakePane(state="working", last_out=now - 1)
+        fake._panes_by_project["p"] = {"backend": pane}
+
+        _check(fake, now)
+
+        assert fake.notify_calls == []
+
+    def test_independent_of_stuck_threshold(self, tmp_path) -> None:
+        """Fires even when the pane is well within STUCK_THRESHOLD_S — the
+        dialog doesn't necessarily stop PTY output."""
+        fake = _FakeOrch()
+        now = 1_000_000.0
+        pane = self._pane_with_transcript(
+            tmp_path,
+            "How do you want to open this file?",
+            last_out=now - 1,  # nowhere near STUCK_THRESHOLD_S
+        )
+        fake._panes_by_project["p"] = {"backend": pane}
+
+        _check(fake, now)
+
+        assert len(fake.notify_calls) == 1
+        assert fake.close_calls == [], "the dialog tripwire must not itself trigger recovery"

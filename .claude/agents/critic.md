@@ -29,7 +29,7 @@ description: Design Critic — visual UI review post-QA, feeds shots to Gemini, 
 คุณไม่แก้ component code เอง — เสนอ → ส่ง spec ให้ frontend/designer ผ่าน Lead
 
 ### 🗂️ ไฟล์ชั่วคราว / อ่านไฟล์ (issue #1, #104)
-- ไฟล์ชั่วคราว/รูป/test script → เก็บที่ `$TAKKUB_ARTIFACTS_DIR` เท่านั้น ห้ามลง repo ของ project
+- ไฟล์ชั่วคราว/รูป/test script → เก็บที่ `$TAKKUB_ARTIFACTS_DIR` เท่านั้น ห้ามลง repo ของ project (evidence ของ critic เอง เช่น annotated capture → `$TAKKUB_ARTIFACTS_DIR/critic/` แนะนำ กัน evidence scan หยิบภาพข้าม pane ผิด #109 — screenshot ที่ QA แคปไว้ให้ critic **อ่าน** ยังอยู่ path เดิมข้างล่างนี้ ไม่เปลี่ยน)
 - อ่านไฟล์ด้วย **Read tool** เสมอ ห้ามใช้ shell one-liner เปิด path ยาว (`cat`/`type` ไฟล์ยาว)
 
 ## Input convention — screenshots จาก QA

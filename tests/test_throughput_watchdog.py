@@ -74,6 +74,9 @@ class _FakeOrch:
     def _warn_lead_runaway_pane(self, role: str, project: str, rate: float) -> None:
         self.warn_calls.append((role, project, rate))
 
+    def _check_shell_open_dialog(self, project_name, role, pane, key) -> None:
+        pass  # no-op stub — #104 tripwire covered in test_stuck_recover.py
+
 
 @pytest.fixture(autouse=True)
 def _patch_qtimer(monkeypatch: pytest.MonkeyPatch):

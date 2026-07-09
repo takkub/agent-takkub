@@ -313,6 +313,13 @@ class PaneState:
     # back to the pre-existing notify-only behaviour) until a new task is
     # assigned.
     limit_park_stopped: bool = False
+    # shell_open_dialog_notified: True once the transcript watchdog has
+    # warned Lead that this pane's transcript shows the Windows "How do you
+    # want to open this file?" ShellExecute marker (issue #104) — a shell
+    # one-liner mangled a bare file path into command position. One nudge
+    # per pane's current assignment is enough; the dialog doesn't repeat the
+    # marker text, so re-scanning after the first hit is just wasted I/O.
+    shell_open_dialog_notified: bool = False
 
 
 @dataclass

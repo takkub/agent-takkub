@@ -26,7 +26,7 @@ description: Gemini slot (claude substitute) — third-brain planning / second o
    ⚠️ **ต้อง RUN ผ่าน shell/Bash tool จริงๆ** — ห้ามพิมพ์ `takkub done` เป็นข้อความบรรยายบนจอ (เช่น "เสร็จแล้ว: takkub done ...") เพราะ Lead จะไม่ได้รับ notice และ watchdog จะเตือนซ้ำไม่หยุด
 
 ### 🗂️ ไฟล์ชั่วคราว / อ่านไฟล์ (issue #1, #104)
-- ไฟล์ชั่วคราว/รูป/test script → เก็บที่ `$TAKKUB_ARTIFACTS_DIR` เท่านั้น ห้ามลง repo ของ project
+- ไฟล์ชั่วคราว/รูป/test script → เก็บที่ `$TAKKUB_ARTIFACTS_DIR` เท่านั้น ห้ามลง repo ของ project (evidence เฉพาะงานตัวเอง → `$TAKKUB_ARTIFACTS_DIR/gemini/` แนะนำ กัน evidence scan หยิบภาพข้าม pane ผิด #109)
 - อ่านไฟล์ด้วย **Read tool** เสมอ ห้ามใช้ shell one-liner เปิด path ยาว (`cat`/`type` ไฟล์ยาว)
 
 ## การสื่อสาร

@@ -195,6 +195,55 @@ class TestFocusInOut:
         assert st.draft_len == 3
 
 
+class TestMouseSequences:
+    """SGR (`\\x1b[<Cb;Cx;CyM`/`m`) and legacy X10 (`\\x1b[M` + 3 raw bytes)
+    mouse reports must be pure no-ops — their digit/';'/M/m bytes were
+    previously mis-counted as typed characters since `_CSI` requires
+    digits/';' right after `[` and never matches the `<` SGR prefix (#108
+    root cause: a single mouse press/release read as 10 "typed" chars)."""
+
+    def test_sgr_mouse_press_is_noop_on_empty(self):
+        st = _advance(LeadDraftState(), b"\x1b[<0;42;13M")
+        assert st.state == EMPTY
+        assert st.draft_len == 0
+
+    def test_sgr_mouse_release_is_noop(self):
+        st = _advance(LeadDraftState(), b"\x1b[<0;42;13m")
+        assert st.state == EMPTY
+
+    def test_sgr_mouse_does_not_disturb_existing_draft(self):
+        st = _advance(LeadDraftState(), b"abc")
+        st2 = _advance(st, b"\x1b[<0;42;13M\x1b[<0;42;13m")
+        assert st2 == st
+
+    def test_sgr_mouse_wheel_burst_is_noop(self):
+        st = _advance(LeadDraftState(), b"abc")
+        wheel = b"\x1b[<64;10;20M" * 8  # rapid wheel ticks (button code 64+)
+        st2 = _advance(st, wheel)
+        assert st2 == st
+
+    def test_sgr_mouse_drag_sequence_is_noop(self):
+        st = _advance(LeadDraftState(), b"abc")
+        drag = b"\x1b[<32;1;1M\x1b[<32;2;2M\x1b[<32;3;3M\x1b[<0;3;3m"  # button-32 = motion-while-pressed
+        st2 = _advance(st, drag)
+        assert st2 == st
+
+    def test_legacy_x10_mouse_is_noop_on_empty(self):
+        st = _advance(LeadDraftState(), b"\x1b[M" + bytes([0x20, 0x21, 0x22]))
+        assert st.state == EMPTY
+        assert st.draft_len == 0
+
+    def test_legacy_x10_mouse_does_not_disturb_existing_draft(self):
+        st = _advance(LeadDraftState(), b"abc")
+        st2 = _advance(st, b"\x1b[M" + bytes([0x20, 0x21, 0x22]))
+        assert st2 == st
+
+    def test_typing_around_mouse_events_counts_only_typed_chars(self):
+        st = _advance(LeadDraftState(), b"ab\x1b[<0;42;13Mcd\x1b[<0;42;13me")
+        assert st.state == NONEMPTY
+        assert st.draft_len == 5
+
+
 class TestMultibyteThai:
     def test_thai_chars_counted_as_characters_not_bytes(self):
         thai = "สวัสดี"  # 6 Thai characters, >1 byte each in UTF-8
