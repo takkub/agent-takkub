@@ -871,6 +871,16 @@ class TestSSEBroadcaster:
         assert not q_a.empty()
         assert not q_b.empty()
 
+    def test_blocked_on_picker_event_is_forwarded(self):
+        """W2a SHOULD-FIX: the AskUserQuestion picker fallback event must be
+        allowlisted, not silently dropped like an unknown event name."""
+        broadcaster = http_server.SSEBroadcaster()
+        q = broadcaster.register("proj")
+        broadcaster.push("blocked_on_picker", "ไปทางไหนดี?", "proj")
+        event, payload = q.get_nowait()
+        assert event == "blocked_on_picker"
+        assert json.loads(payload) == {"text": "ไปทางไหนดี?"}
+
     def test_unknown_event_name_is_dropped(self):
         """Defense-in-depth allowlist (H-C): only `done`/`lead` are ever
         forwarded to a client, regardless of what a caller passes in."""
