@@ -469,7 +469,8 @@ def _task_handoff_pointer(task: str, project_ns: str, role_name: str) -> tuple[s
     forward_path = str(path).replace(os.sep, "/")
     pointer = (
         f"[ROLE: {role_name}] อ่าน task spec เต็มจากไฟล์: {forward_path} "
-        "ด้วย Read tool (ห้าม shell one-liner เปิดไฟล์ — issue #104) แล้วทำตามทั้งหมด · "
+        "เปิดอ่านไฟล์นี้ด้วยเครื่องมืออ่านไฟล์ของคุณ (file-read tool) — ห้ามรัน path "
+        "เป็นคำสั่ง shell (#104) แล้วทำตามทั้งหมด · "
         "รายงาน takkub done เมื่อเสร็จ"
     )
     return pointer, forward_path

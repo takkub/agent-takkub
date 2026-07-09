@@ -65,7 +65,8 @@ class TestTaskHandoffPointer:
         assert task_file is not None
         assert paste_text != task
         assert "[ROLE: backend]" in paste_text
-        assert "Read tool" in paste_text
+        assert "file-read tool" in paste_text
+        assert "ห้ามรัน path เป็นคำสั่ง shell" in paste_text
         assert "takkub done" in paste_text
         assert task_file in paste_text
 
