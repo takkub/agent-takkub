@@ -10,13 +10,17 @@ Two modes, toggled from the status bar and persisted across restart (same UX as
     the Lead fans out K instances per relevant role (frontend#1..#K,
     backend#1..#K) and runs them concurrently, like a team of several devs per
     position, to finish faster. K is the Lead's call (one per independent
-    feature), bounded by `MAX_FANOUT` so a vague request can't explode the
-    machine.
+    feature); the Lead is told to sequence large batches in waves rather than
+    given a hard numeric ceiling (#2, 2026-07-09 core-upgrade plan — a
+    machine-derived cap in the planning prompt read as an artificial limit on
+    "unlimited" fan-out). `MAX_FANOUT` / `machine_fanout_cap()` below remain for
+    the total-pane oversubscription telemetry (`machine_total_pane_cap()`,
+    `orchestrator._warn_lead_over_cap` / the opt-in `TAKKUB_QUEUE_FANOUT` queue)
+    — that safety path is unchanged and never fed into the Lead's planning text.
 
-This module only stores the *intent* (a flag + the cap). The Lead's planning
-behaviour reads it via the system-prompt block injected in `lead_context`, and
-the engine already supports the `role#N` instances this produces (`takkub assign
---role <role> --shards N`, and direct `--role frontend#2` assigns).
+This module only stores the *intent* (a flag + the cap). The engine already
+supports the `role#N` instances this produces (`takkub assign --role <role>
+--shards N`, and direct `--role frontend#2` assigns).
 
 State file: ``~/.takkub/exec-mode.json``  Format: ``{"mode": "solo"}`` |
 ``{"mode": "parallel"}``. Missing / corrupt → SOLO (no surprise parallelism for
@@ -37,11 +41,9 @@ PARALLEL = "parallel"
 MODES: frozenset[str] = frozenset({SOLO, PARALLEL})
 _DEFAULT = SOLO
 
-# Hard ceiling on instances-per-role the Lead may fan out in PARALLEL mode, so a
-# broad request ("build the whole app") can't spawn an unbounded swarm. The Lead
-# picks K = number of independent features up to this cap. Override per-install
-# via TAKKUB_MAX_FANOUT (read in the orchestrator/Lead context, not here, to keep
-# this module env-free and trivially testable).
+# Ceiling used by machine_fanout_cap() below. NOT surfaced to the Lead's
+# planning prompt (see module docstring, #2 2026-07-09) — kept only as the
+# per-role component of the total-pane oversubscription telemetry.
 MAX_FANOUT = 4
 
 _PATH = SETTINGS_HOME / "exec-mode.json"
@@ -77,9 +79,11 @@ def machine_fanout_cap() -> int:
 
     Each extra instance is roughly another claude.exe pane (often plus a dev
     server), so we budget ~2 logical cores and ~2 GB of *available* RAM per
-    concurrent pane and take the tighter limit. The Lead reads this so a request
-    with 10 features doesn't fan out 10 panes and thrash a small machine — it
-    caps K at what the box can take while still parallelising as much as is safe.
+    concurrent pane and take the tighter limit. NOT injected into the Lead's
+    planning prompt (that block gives a qualitative wave-sequencing advisory
+    instead, #2 2026-07-09) — this stays as a component of the total-pane
+    oversubscription telemetry (`machine_total_pane_cap()`) and is exercised
+    directly by tests for that reason.
 
     Falls back to a conservative 2 if psutil/cpu_count are unavailable, so this
     never raises on an odd environment.

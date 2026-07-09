@@ -1376,13 +1376,13 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         exec_mode.set_current(mode)
 
         if mode == exec_mode.PARALLEL:
-            cap = exec_mode.machine_fanout_cap()
             notice = (
                 "[system] execution mode → PARALLEL (multi). When a request has "
                 "K independent features, plan a decomposition and fan out one "
-                f"instance per role per feature (frontend#1..#K, backend#1..#K). "
-                f"Cap K at {cap} for this machine (CPU/RAM) — split bigger batches "
-                "into waves. Independent features only; keep dependent work serial."
+                "instance per role per feature (frontend#1..#K, backend#1..#K). "
+                "No hard numeric cap — sequence independent tasks in waves by "
+                "per-role cost instead of firing everything at once. Independent "
+                "features only; keep dependent work serial."
             )
         else:
             notice = (

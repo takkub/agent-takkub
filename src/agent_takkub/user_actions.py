@@ -662,9 +662,9 @@ class UserActionsMixin:
         if not ok:
             self._status.showMessage(f"Mode switch failed: {msg}", 4000)
         elif target == exec_mode.PARALLEL:
-            cap = exec_mode.machine_fanout_cap()
             self._status.showMessage(
-                f"👥 Multi mode — Lead fans out independent features (≤{cap}/role on this machine)",
+                "👥 Multi mode — Lead fans out independent features (sequenced in waves by "
+                "per-role cost, no fixed cap)",
                 6000,
             )
         else:
