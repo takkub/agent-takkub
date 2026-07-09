@@ -145,6 +145,11 @@ class TestAutoRespawnReplay:
         `takkub done` as a shell command (regression guard for 9fd6001).
         Asserts the call-site, not just the rewriter helper, so removing
         the assign() integration breaks a test.
+
+        The rewritten (notice + task) payload is long enough to trip the
+        file-based task-handoff pointer (issue #1) — the FULL text still
+        lives in last_assigned_task (crash-replay unit) but what actually
+        gets pasted into the pane is a short pointer to the handoff file.
         """
         from agent_takkub.orchestrator import _CODEX_TASK_NOTICE
 
@@ -166,8 +171,18 @@ class TestAutoRespawnReplay:
 
         cached = orch._pane_state[ekey].last_assigned_task
         assert cached.startswith(_CODEX_TASK_NOTICE)
+
+        # The pasted payload is a pointer, not the rewritten task itself.
         sent_task = mock_send.call_args.args[1]
-        assert sent_task.startswith(_CODEX_TASK_NOTICE)
+        assert sent_task != cached
+        assert sent_task.startswith("[ROLE: codex]")
+
+        task_file = orch._pane_state[ekey].last_assigned_task_file
+        assert task_file is not None
+        assert task_file.replace("\\", "/") in sent_task
+        import pathlib
+
+        assert pathlib.Path(task_file).read_text(encoding="utf-8") == cached
 
     def test_assign_does_not_rewrite_non_codex_task(self, orch: Orchestrator) -> None:
         """Non-codex roles must NOT receive the codex-specific override

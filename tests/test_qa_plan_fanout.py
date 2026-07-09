@@ -158,10 +158,22 @@ class TestAssignPlan:
         assert ps.plan_fanout["task"].startswith("smoke")
         assert "done --fail" in ps.plan_fanout["task"]
         assert ps.plan_fanout["plan_file"].endswith(f"{TEST_PROJECT}-qa-plan.json")
-        # wrapped planner task is what gets sent + remembered for respawn replay
-        assert "QA PLANNER MODE" in sent["task"]
-        assert "smoke" in sent["task"]
-        assert ps.last_assigned_task == sent["task"]
+        # wrapped planner task is remembered whole for respawn replay (issue #1
+        # — last_assigned_task is always the FULL text, never a pointer).
+        assert "QA PLANNER MODE" in ps.last_assigned_task
+        assert "smoke" in ps.last_assigned_task
+        # The wrapped planner task is long enough to trip the file-based
+        # task-handoff pointer — what actually gets pasted is a short pointer
+        # to the on-disk copy, not the wrapped text itself.
+        assert sent["task"] != ps.last_assigned_task
+        assert ps.last_assigned_task_file is not None
+        assert ps.last_assigned_task_file.replace("\\", "/") in sent["task"]
+        import pathlib
+
+        assert (
+            pathlib.Path(ps.last_assigned_task_file).read_text(encoding="utf-8")
+            == ps.last_assigned_task
+        )
 
     def test_wrap_planner_task_has_schema_and_path(self, orch: Orchestrator) -> None:
         import pathlib

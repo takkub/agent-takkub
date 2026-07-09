@@ -443,6 +443,28 @@ def cmd_harvest(args: argparse.Namespace) -> dict:
     return {"ok": False, "msg": done_resp.get("msg", "harvest-done failed"), "exit_code": 1}
 
 
+def cmd_task(args: argparse.Namespace) -> dict:
+    """`takkub task show --role <r>` — print the full text of the last task
+    assigned to `role` (issue #1 file-based task handoff).
+
+    Works whether the assign pasted the task inline (short task, no handoff
+    file) or a pointer (long task, read back from the on-disk handoff file)
+    — the CLI always resolves to the full text either way.
+    """
+    if args.t_cmd == "show":
+        resp = _request(
+            _with_project({"cmd": "task-show", "role": args.role, "from": _from_role()})
+        )
+        if not resp.get("ok"):
+            return {"ok": False, "msg": resp.get("msg", "task-show failed"), "exit_code": 1}
+        task_file = resp.get("task_file")
+        if task_file:
+            print(f"[task file] {task_file}\n")
+        _utf8_print(resp.get("task", ""))
+        return {"ok": True, "msg": "task"}
+    return {"ok": False, "msg": f"unknown task subcommand: {args.t_cmd}"}
+
+
 def cmd_list(_: argparse.Namespace) -> dict:
     return _request(_with_project({"cmd": "list"}))
 
@@ -1356,6 +1378,15 @@ def main(argv: list[str] | None = None) -> int:
 
     sl = sub.add_parser("list", help="show pane status")
     sl.set_defaults(func=cmd_list)
+
+    st = sub.add_parser(
+        "task",
+        help="read back a role's last assigned task (issue #1 file-based task handoff)",
+    )
+    st_sub = st.add_subparsers(dest="t_cmd", required=True)
+    sts = st_sub.add_parser("show", help="print the full text of a role's last assigned task")
+    sts.add_argument("--role", required=True, help="role name to look up")
+    st.set_defaults(func=cmd_task)
 
     # Internal — wired as the Stop/Notification hook `command` for every
     # cockpit-spawned claude pane (see hook_wiring.py). Not a user-facing

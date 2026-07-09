@@ -77,6 +77,7 @@ from .orchestrator_text import (  # re-exported for test/app/main_window imports
     _ROLE_MODEL_TIERS,
     _TYPING_ENTER_DELAY_MS,
     BRACKETED_PASTE_THRESHOLD,
+    TASK_HANDOFF_THRESHOLD,
     _append_verify_fail_hint,
     _append_worktree_hint,
     _build_transcript_path,
@@ -92,6 +93,8 @@ from .orchestrator_text import (  # re-exported for test/app/main_window imports
     _resolve_project_memory,
     _rewrite_task_for_codex,
     _sanitize_pane_text,
+    _task_handoff_dir,
+    _task_handoff_pointer,
     _teammate_tier,
     prune_old_transcripts,
     scan_artifacts,
@@ -846,20 +849,28 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             # plan file is written. The planner itself is NOT a shard.
             plan_file = self._qa_plan_file(project_ns, base_role_a)
             planner_task = self._wrap_planner_task(task, plan_file, shard_total)
+            # Full text always lives in last_assigned_task for crash replay
+            # (spawn_engine._auto_respawn) — only the pasted payload may be a
+            # pointer (issue #1).
             ps_assign.last_assigned_task = planner_task
+            paste_planner, planner_task_file = _task_handoff_pointer(
+                planner_task, project_ns, role_name
+            )
+            ps_assign.last_assigned_task_file = planner_task_file
             ps_assign.plan_fanout = {
                 "shards": shard_total,
                 "cwd": cwd,
                 "task": task,
                 "plan_file": str(plan_file),
             }
-            self._send_when_ready(role_name, planner_task, project=project)
+            self._send_when_ready(role_name, paste_planner, project=project)
             _log_event(
                 "assign_plan",
                 role=role_name,
                 cwd=cwd,
                 shards=shard_total,
                 plan_file=str(plan_file),
+                task_file=planner_task_file,
             )
             return True, f"planner queued for {role_name} (fan-out {shard_total} on done)"
         if shard_total > 0:
@@ -880,7 +891,11 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                 )
             else:
                 self._shard_groups[group_key].total = shard_total
-        self._send_when_ready(role_name, task, project=project)
+        # Full text already lives in last_assigned_task (set above) for crash
+        # replay — only the pasted payload may be a pointer file (issue #1).
+        paste_text, task_file = _task_handoff_pointer(task, project_ns, role_name)
+        ps_assign.last_assigned_task_file = task_file
+        self._send_when_ready(role_name, paste_text, project=project)
         _log_event(
             "assign",
             role=role_name,
@@ -889,6 +904,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             requires_commit=requires_commit,
             auto_chain=auto_chain,
             shard_total=shard_total,
+            task_file=task_file,
         )
         return True, f"task queued for {role_name} (sending when ready)"
 
@@ -2198,6 +2214,30 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                 "artifacts": artifacts,
             },
         )
+
+    def task_show_info(self, role: str, project: str | None = None) -> tuple[bool, str, dict]:
+        """Return the full text of the last task assigned to `role` for `takkub
+        task show` (issue #1 file-based task handoff).
+
+        A short task never got a handoff file (paste stayed inline) — in that
+        case this reads straight from `PaneState.last_assigned_task`, the same
+        full-text field the crash-replay path uses, so the CLI works
+        uniformly whether or not a pointer was used. Payload keys: `task`
+        (full text), `task_file` (path or None).
+        """
+        project_ns = self._resolve_project(project)
+        key = _exit_key(project_ns, role)
+        ps = self._pane_state.get(key)
+        if ps is None or not ps.last_assigned_task:
+            return False, f"no task assigned to '{role}' yet", {}
+        task_file = ps.last_assigned_task_file
+        if task_file:
+            try:
+                content = pathlib.Path(task_file).read_text(encoding="utf-8")
+            except OSError as e:
+                return False, f"task file unreadable: {task_file} ({e})", {}
+            return True, "task", {"task": content, "task_file": task_file}
+        return True, "task", {"task": ps.last_assigned_task, "task_file": None}
 
     def _build_post_compact_brief(self, project_ns: str) -> str | None:
         """Return a markdown snippet summarising alive teammates for post-compact injection.

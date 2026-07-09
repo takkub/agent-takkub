@@ -50,6 +50,7 @@ from .orchestrator_text import (
     _teammate_tier,
 )
 from .pane_env import (
+    _apply_artifacts_dir,
     _apply_color_term,
     _apply_mcp_timeout,
     _apply_non_interactive_env,
@@ -159,8 +160,17 @@ class PaneState:
     rate_limited_until: float = 0.0
     # _auto_respawn_attempts: consecutive crash-respawn count (capped at AUTO_RESPAWN_MAX)
     auto_respawn_attempts: int = 0
-    # _last_assigned_task: last task pasted by assign(); replayed after crash-respawn
+    # _last_assigned_task: FULL composed task text (never a pointer); replayed
+    # after crash-respawn regardless of whether the pane was only pasted a
+    # pointer at assign time (issue #1 — file-based task handoff).
     last_assigned_task: str | None = None
+    # last_assigned_task_file: path to the on-disk task-handoff file written
+    # by _assign_dispatch when the composed payload was long enough to paste
+    # a pointer instead of the full text. None when the task pasted directly
+    # (short task, or the write failed and we fell back to inline). Forward
+    # slashes always (`takkub task show` and the pointer text share this
+    # value verbatim).
+    last_assigned_task_file: str | None = None
     # _requires_commit_on_done: warns Lead of uncommitted changes when done() fires
     requires_commit_on_done: bool = False
     # _auto_chain_panes: pane is tagged --auto-chain; done() fires verify-hop when last
@@ -929,6 +939,7 @@ class SpawnEngineMixin:
             env = _build_pane_env()
             env["TAKKUB_ROLE"] = role_name
             env["TAKKUB_PROJECT"] = project_ns
+            _apply_artifacts_dir(env, project_ns)
             inject_user_profile_env(env, project_ns)
             bin_dir = str(CLI_BIN_DIR)
             env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
@@ -997,6 +1008,7 @@ class SpawnEngineMixin:
             env = _build_pane_env()
             env["TAKKUB_ROLE"] = role_name
             env["TAKKUB_PROJECT"] = project_ns
+            _apply_artifacts_dir(env, project_ns)
             inject_user_profile_env(env, project_ns)
             bin_dir = str(CLI_BIN_DIR)
             # Put agy's own dir on the pane PATH too — the Antigravity
@@ -1047,6 +1059,7 @@ class SpawnEngineMixin:
             env = _build_pane_env()
             env["TAKKUB_ROLE"] = role_name
             env["TAKKUB_PROJECT"] = project_ns
+            _apply_artifacts_dir(env, project_ns)
             inject_user_profile_env(env, project_ns)
             bin_dir = str(CLI_BIN_DIR)
             env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
@@ -1270,6 +1283,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
 
         env = _build_lead_env() if role_name == LEAD.name else _build_pane_env()
         env["TAKKUB_ROLE"] = role_name
+        _apply_artifacts_dir(env, project_ns)
         inject_user_profile_env(env, project_ns)
         # Shard env: let the agent know its instance identity vs behaviour identity.
         # TAKKUB_BASE_ROLE = base role name (loads qa.md, correct Chrome config, etc.)

@@ -27,6 +27,10 @@ description: DevOps engineer — CI/CD, Docker, deployment, infrastructure, env 
 
 Working directory ของคุณจะถูก inject โดย Lead ตอน spawn
 
+### 🗂️ ไฟล์ชั่วคราว / อ่านไฟล์ (issue #1, #104)
+- ไฟล์ชั่วคราว/รูป/test script → เก็บที่ `$TAKKUB_ARTIFACTS_DIR` เท่านั้น ห้ามลง repo ของ project
+- อ่านไฟล์ด้วย **Read tool** เสมอ ห้ามใช้ shell one-liner เปิด path ยาว (`cat`/`type` ไฟล์ยาว)
+
 ## 🎯 Minimal-code (ponytail) — config น้อยที่สุดที่ใช้ได้จริง
 
 **ขี้เกียจแบบฉลาด** (efficient ไม่ใช่ careless) — config/pipeline ที่ดีที่สุดคือที่ไม่ต้องเขียน **ก่อนเพิ่ม หยุดที่ขั้นแรกที่ตอบได้:**

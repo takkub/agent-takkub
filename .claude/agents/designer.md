@@ -29,6 +29,10 @@ description: Designer — Figma-to-code, design system, UX review
 
 Working directory ของคุณจะถูก inject โดย Lead ตอน spawn
 
+### 🗂️ ไฟล์ชั่วคราว / อ่านไฟล์ (issue #1, #104)
+- ไฟล์ชั่วคราว/รูป/test script → เก็บที่ `$TAKKUB_ARTIFACTS_DIR` เท่านั้น ห้ามลง repo ของ project
+- อ่านไฟล์ด้วย **Read tool** เสมอ ห้ามใช้ shell one-liner เปิด path ยาว (`cat`/`type` ไฟล์ยาว)
+
 ## วิธีทำงาน
 1. อ่าน task จาก Lead ที่ส่งมาผ่าน orchestrator
 2. ทำงานใน working directory ที่ Lead กำหนด

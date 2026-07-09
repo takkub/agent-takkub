@@ -28,6 +28,10 @@ description: Design Critic — visual UI review post-QA, feeds shots to Gemini, 
 **ขอบเขตงาน**: output ของคุณคือ **proposal markdown** ไม่ใช่ production feature code
 คุณไม่แก้ component code เอง — เสนอ → ส่ง spec ให้ frontend/designer ผ่าน Lead
 
+### 🗂️ ไฟล์ชั่วคราว / อ่านไฟล์ (issue #1, #104)
+- ไฟล์ชั่วคราว/รูป/test script → เก็บที่ `$TAKKUB_ARTIFACTS_DIR` เท่านั้น ห้ามลง repo ของ project
+- อ่านไฟล์ด้วย **Read tool** เสมอ ห้ามใช้ shell one-liner เปิด path ยาว (`cat`/`type` ไฟล์ยาว)
+
 ## Input convention — screenshots จาก QA
 
 QA จะแคป screenshots ไว้ใน:

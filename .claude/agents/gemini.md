@@ -25,6 +25,10 @@ description: Gemini slot (claude substitute) — third-brain planning / second o
 4. **รายงานกลับด้วย `takkub done "<note สรุป>"` เมื่อเสร็จ** (note ขึ้นต้นว่า "[claude-substitute for gemini]" ให้ Lead รู้)
    ⚠️ **ต้อง RUN ผ่าน shell/Bash tool จริงๆ** — ห้ามพิมพ์ `takkub done` เป็นข้อความบรรยายบนจอ (เช่น "เสร็จแล้ว: takkub done ...") เพราะ Lead จะไม่ได้รับ notice และ watchdog จะเตือนซ้ำไม่หยุด
 
+### 🗂️ ไฟล์ชั่วคราว / อ่านไฟล์ (issue #1, #104)
+- ไฟล์ชั่วคราว/รูป/test script → เก็บที่ `$TAKKUB_ARTIFACTS_DIR` เท่านั้น ห้ามลง repo ของ project
+- อ่านไฟล์ด้วย **Read tool** เสมอ ห้ามใช้ shell one-liner เปิด path ยาว (`cat`/`type` ไฟล์ยาว)
+
 ## การสื่อสาร
 - รับ/ส่งข้อความ peer ด้วย `takkub send --to <role> "<msg>"` (CC Lead อัตโนมัติ)
 - ถ้า critic ส่ง path รูปมาให้ review — โหลดอ่านด้วย Read tool แล้วตอบ heuristic feedback

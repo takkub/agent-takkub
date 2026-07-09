@@ -413,6 +413,68 @@ def _append_verify_fail_hint(task: str, base_role: str) -> str:
     return task + _VERIFY_FAIL_APPENDIX
 
 
+# Composed payloads shorter than this paste directly, same as before the
+# file-based handoff existed — short tasks never hit paste-swallow issues
+# and a pointer would just add a hop for no reason. Measured on the fully
+# composed payload (goal block + role decl + verify hint), matching the
+# final-review note (issue #1).
+TASK_HANDOFF_THRESHOLD = 400
+
+
+def _task_handoff_dir(project_ns: str) -> pathlib.Path:
+    """Return today's task-handoff directory for *project_ns*, creating it.
+
+    Mirrors ``_build_transcript_path``'s ``runtime/sessions/<date>/<project>/``
+    convention. No ``<session>`` path segment: at assign time there is no
+    live ``PaneState.session_uuid`` yet (the pane hasn't spawned/attached a
+    claude session), so the file is addressed by timestamp+role only — good
+    enough to be unique per assign (issue #1 final-review note).
+    """
+    day = RUNTIME_DIR / "tasks" / project_ns / datetime.now().strftime("%Y-%m-%d")
+    try:
+        day.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return day
+
+
+def _task_handoff_pointer(task: str, project_ns: str, role_name: str) -> tuple[str, str | None]:
+    """Write *task* to a handoff file when it's long, returning what to paste.
+
+    Returns ``(paste_text, task_file_path)``. For a short composed task
+    (< ``TASK_HANDOFF_THRESHOLD`` chars) this is a no-op: ``paste_text is
+    task`` and ``task_file_path is None``, so pasting behaves exactly as
+    before the handoff mechanism existed. For a long task, the full text is
+    written to ``RUNTIME_DIR/tasks/<project>/<date>/<HHMMSS>-<role>.md`` and
+    a short pointer instructing the pane to ``Read`` it is returned instead —
+    this is the only thing that gets pasted into the pane's PTY, so it can't
+    hit the paste-swallow bug family (#22/#26) the way a multi-KB task can.
+
+    The caller MUST still store the full, untouched *task* (not the pointer)
+    in ``PaneState.last_assigned_task`` — that field is the crash-replay unit
+    (``spawn_engine._auto_respawn``) and must keep working even if the
+    handoff file is later deleted/moved.
+
+    On a write failure (disk full, permissions) this degrades to returning
+    the full task unchanged rather than losing the assignment.
+    """
+    if len(task) < TASK_HANDOFF_THRESHOLD:
+        return task, None
+    day = _task_handoff_dir(project_ns)
+    path = day / f"{datetime.now().strftime('%H%M%S')}-{role_name}.md"
+    try:
+        path.write_text(task, encoding="utf-8")
+    except OSError:
+        return task, None
+    forward_path = str(path).replace(os.sep, "/")
+    pointer = (
+        f"[ROLE: {role_name}] อ่าน task spec เต็มจากไฟล์: {forward_path} "
+        "ด้วย Read tool (ห้าม shell one-liner เปิดไฟล์ — issue #104) แล้วทำตามทั้งหมด · "
+        "รายงาน takkub done เมื่อเสร็จ"
+    )
+    return pointer, forward_path
+
+
 def _append_worktree_hint(
     task: str, branch: str, post_create: tuple[str, ...] = (), port: int = 0
 ) -> str:

@@ -34,6 +34,7 @@ with existing test imports.
 from __future__ import annotations
 
 import os
+from datetime import datetime
 
 # Env vars that MUST pass through to claude/codex/gemini panes for them to
 # function. Anything not in this list is dropped to avoid leaking secrets
@@ -100,6 +101,11 @@ _PANE_ENV_ALLOWLIST: frozenset[str] = frozenset(
         "CHROME_BIN",
         # User override for MCP per-call timeout (default injected below).
         "MCP_TOOL_TIMEOUT",
+        # Scratch dir for temp files/screenshots/test scripts, out of the
+        # project repo (plan item #1). Listed here for clarity only —
+        # `_apply_artifacts_dir()` stamps the effective value into every
+        # pane's env unconditionally, same contract as TAKKUB_PORT_FILE.
+        "TAKKUB_ARTIFACTS_DIR",
     }
 )
 
@@ -205,6 +211,29 @@ def _apply_port_file(env: dict[str, str]) -> None:
     from . import config
 
     env["TAKKUB_PORT_FILE"] = str(config._get_port_file())
+
+
+def _apply_artifacts_dir(env: dict[str, str], project_ns: str) -> None:
+    """Stamp ``TAKKUB_ARTIFACTS_DIR`` and create it, per pane spawn (plan #1).
+
+    Reuses the existing ``runtime/exports/<date>/<project>/`` convention the
+    screenshot scanner already reads (``orchestrator._compute_last_progress_ts``
+    checks ``.../screenshots``) so shots keep landing where they always have —
+    this just gives every pane an explicit, allowlisted scratch dir for temp
+    files/images/test scripts instead of littering the project repo. Stamped
+    unconditionally at spawn time (not just allowlisted) so every pane sees a
+    real, already-existing directory rather than an env var that may or may
+    not resolve depending on what the host process happened to export.
+    """
+    from . import config
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    artifacts_dir = config.RUNTIME_DIR / "exports" / today / project_ns
+    try:
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    env["TAKKUB_ARTIFACTS_DIR"] = str(artifacts_dir)
 
 
 def _apply_mcp_timeout(env: dict[str, str]) -> None:

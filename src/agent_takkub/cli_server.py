@@ -520,6 +520,14 @@ class CliServer(QObject):
                 else:
                     self._reply(sock, ok=False, msg=msg_h)
                 return
+            elif cmd == "task-show":
+                task_role = req.get("role", "")
+                ok_t, msg_t, payload_t = self._orch.task_show_info(task_role, project=from_project)
+                if ok_t:
+                    self._reply(sock, ok=True, msg=msg_t, **payload_t)
+                else:
+                    self._reply(sock, ok=False, msg=msg_t)
+                return
             elif cmd == "harvest-done":
                 harvest_role = req.get("role", "")
                 harvest_note = req.get("note", "harvested by lead")
