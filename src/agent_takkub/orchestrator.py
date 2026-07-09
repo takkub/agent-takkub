@@ -583,6 +583,11 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         # bridge exactly once, but a *new* session (new uuid after a respawn
         # outside the resume window) fires again. Set in SpawnEngineMixin.spawn().
         self._lead_remote_bridge_fired: set[str] = set()
+        # In-flight polls for the bridge above (#107) — a session leaves this
+        # set on delivery (→ _fired) or on drop (→ retried by the idle-
+        # watchdog reaper, see SpawnEngineMixin._reap_remote_bridge), never
+        # left stuck as neither "handled" nor "retryable".
+        self._lead_remote_bridge_pending: set[str] = set()
 
         # Per-cockpit-run capability token. Injected only into the Lead pane
         # env (TAKKUB_LEAD_TOKEN) so the Lead takkub CLI can authenticate
@@ -1888,6 +1893,17 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         Fails open: malformed input (invalid role, empty session_id) is
         reported back but never raises — a hook must never break the pane's
         session start.
+
+        #107 follow-up: also (re-)fires the `/remote-control` auto-bridge for
+        the Lead role. `spawn()`'s own `_maybe_fire_remote_bridge` call only
+        ever sees the uuid it stamped at spawn time — a manual `/resume`
+        (or `/clear`, post-compact) *inside* the pane swaps claude to a
+        different transcript uuid that `spawn()` never learns about, so
+        without this the bridge silently never re-establishes for that new
+        session. Safe to call unconditionally (every source, not just
+        "resume"): `_maybe_fire_remote_bridge` dedupes per session-uuid, so
+        the common "startup" source (same uuid `spawn()` already fired/is
+        polling for) is a harmless no-op here.
         """
         try:
             from_role = validate_name(from_role, "role")
@@ -1908,6 +1924,8 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             source=source,
             uuid=session_id[:8],
         )
+        if from_role == LEAD.name:
+            self._maybe_fire_remote_bridge(project_ns, key)
         return True, ""
 
     @staticmethod
@@ -2769,6 +2787,10 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                             and pane.session.is_at_ready_prompt()
                         ):
                             self._maybe_surface_malformed_xml(key, name, project_name, pane, now)
+                        # #107: retry a dropped `/remote-control` bridge once this
+                        # Lead pane is next observed ready — no-op for a session
+                        # that already fired or is still mid-poll.
+                        self._reap_remote_bridge(project_name, pane)
                         continue
                     if pane.state != "working":
                         self._idle_state.pop(key, None)

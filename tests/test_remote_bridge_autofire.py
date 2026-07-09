@@ -23,8 +23,22 @@ from agent_takkub import config
 from agent_takkub import orchestrator as orch_mod
 from agent_takkub.orchestrator import RESUME_WINDOW_SEC, Orchestrator, _exit_key
 from agent_takkub.roles import LEAD
+from agent_takkub.spawn_engine import _REMOTE_BRIDGE_MAX_WAIT_MS
 
 _PROJECT = "default"
+
+
+def _assert_bridge_call(call, project: str = _PROJECT) -> None:
+    """A `_maybe_fire_remote_bridge` call to `inject_slash_command_when_ready`
+    now carries the #107 slow-boot window + delivery/drop callbacks on top of
+    the original (role, command, project) triple — assert the shape without
+    hard-coding the exact positional/keyword split."""
+    args, kwargs = call
+    assert (LEAD.name, "/remote-control") == args
+    assert kwargs["project"] == project
+    assert kwargs["max_wait_ms"] == _REMOTE_BRIDGE_MAX_WAIT_MS
+    assert callable(kwargs["on_delivered"])
+    assert callable(kwargs["on_dropped"])
 
 
 @pytest.fixture(scope="module")
@@ -98,9 +112,8 @@ def _simulate_exit(orch: Orchestrator, role_name: str, cwd: str, project: str = 
 class TestFreshSpawnFiresOnce:
     def test_fresh_lead_spawn_fires_bridge(self, orch: Orchestrator) -> None:
         _spawn_capture(orch, LEAD.name)
-        orch.inject_slash_command_when_ready.assert_called_once_with(
-            LEAD.name, "/remote-control", project=_PROJECT
-        )
+        orch.inject_slash_command_when_ready.assert_called_once()
+        _assert_bridge_call(orch.inject_slash_command_when_ready.call_args)
 
 
 class TestRespawnNewUuidFiresAgain:

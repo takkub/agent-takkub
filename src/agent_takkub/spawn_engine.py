@@ -152,6 +152,15 @@ _PANE_ROWS = 36
 # live debugger session.
 CODEX_EARLY_CRASH_WINDOW_SEC = 90
 
+# #107: the generic inject_slash_command_when_ready default (45s) is sized
+# for a routine slash injection into an already-warm pane. A fresh Lead boot
+# competes with cold claude startup, boot-storm main-thread stalls, and the
+# auto-trust-modal poll — all observed to push past 45s under real timing —
+# so the bridge gets its own longer window (matches the gemini/codex
+# slow-boot extension precedent in lead_inbox._ready_wait_ms) instead of
+# racing the default and silently dropping.
+_REMOTE_BRIDGE_MAX_WAIT_MS = 90_000
+
 # Tier 2: tight re-samples of InSendMessageEx immediately before each native
 # ConPTY call to narrow the TOCTOU window between the early gate check and the
 # actual winpty.PtyProcess.spawn().  Not a temporal quiet guarantee — use Tier 1
@@ -1749,22 +1758,67 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         covers every path uniformly instead of the two narrower call sites
         (session-resume signal, first-Enter-in-pane) this replaces.
 
+        Also called from `Orchestrator.consume_session_report` (#107 follow-
+        up) for every `SessionStart` hook firing (startup/resume/clear/
+        compact): the `--session-id`/`--resume` decision in `spawn()` only
+        ever stamps `PaneState.session_uuid` once, so a manual `/resume`
+        *inside* the Lead pane swaps to a brand-new transcript uuid that
+        `spawn()` never sees again — without this second call site the
+        bridge would never (re-)fire for that new session at all.
+
         Dedup key is project+session-uuid, not just project: a brand new
-        Lead session (new uuid — resume window expired, or genuinely fresh)
-        must fire again, while re-entering the same still-live session must
-        not. `inject_slash_command_when_ready` already gates on the Lead
-        draft guard (issue #3) and no-ops harmlessly if the bridge is
-        already active, so a same-uuid double-call would be safe too — the
-        set purely avoids the noise/latency of doing it twice.
+        Lead session (new uuid — resume window expired, manual /resume, or
+        genuinely fresh) must fire again, while re-entering the same
+        still-live session must not. `inject_slash_command_when_ready`
+        already gates on the Lead draft guard (issue #3).
+
+        #107: a session only ever joins `_lead_remote_bridge_fired` once
+        `inject_slash_command_when_ready` actually confirms delivery — a
+        fresh-boot timeout or a session dying mid-poll leaves the key out of
+        `_fired` (dropped, logged) instead of being marked "handled" forever.
+        `_lead_remote_bridge_pending` prevents two concurrent polls for the
+        same session (this call site + the idle-watchdog reaper below both
+        route through here) from double-pasting once ready.
         """
         session_uuid = self._ps(exit_key).session_uuid
         if not session_uuid:
+            _log_event("remote_bridge_dropped", project=project_ns, reason="uuid_empty")
             return
         key = f"{project_ns}::{session_uuid}"
-        if key in self._lead_remote_bridge_fired:
+        if key in self._lead_remote_bridge_fired or key in self._lead_remote_bridge_pending:
             return
-        self._lead_remote_bridge_fired.add(key)
-        self.inject_slash_command_when_ready(LEAD.name, "/remote-control", project=project_ns)
+        self._lead_remote_bridge_pending.add(key)
+
+        def _on_delivered() -> None:
+            self._lead_remote_bridge_pending.discard(key)
+            self._lead_remote_bridge_fired.add(key)
+
+        def _on_dropped(_reason: str) -> None:
+            # Left out of _fired on purpose: _reap_remote_bridge (idle
+            # watchdog tick) retries once this Lead pane is next observed
+            # ready instead of the bridge being lost for the session.
+            self._lead_remote_bridge_pending.discard(key)
+
+        self.inject_slash_command_when_ready(
+            LEAD.name,
+            "/remote-control",
+            max_wait_ms=_REMOTE_BRIDGE_MAX_WAIT_MS,
+            project=project_ns,
+            on_delivered=_on_delivered,
+            on_dropped=_on_dropped,
+        )
+
+    def _reap_remote_bridge(self, project_ns: str, pane) -> None:
+        """Idle-watchdog-tick retry for a Lead `/remote-control` bridge that
+        timed out or died mid-poll (#107). `_maybe_fire_remote_bridge` is
+        idempotent per session-uuid (`_lead_remote_bridge_fired` /
+        `_lead_remote_bridge_pending`), so calling it again here on every
+        tick is a harmless no-op once a session has fired or is still
+        polling — it only does real work for a session that was dropped.
+        """
+        if not (pane.session and pane.session.is_alive and pane.session.is_at_ready_prompt()):
+            return
+        self._maybe_fire_remote_bridge(project_ns, _exit_key(project_ns, LEAD.name))
 
     def _on_codex_exit(
         self,

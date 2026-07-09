@@ -334,26 +334,52 @@ class LeadInboxMixin:
         command: str,
         max_wait_ms: int = 45_000,
         project: str | None = None,
+        on_delivered=None,
+        on_dropped=None,
     ) -> None:
         """Type a Claude Code slash command (e.g. `/remote-control`) into a
         pane as soon as it reaches the idle prompt. Unlike `_send_when_ready`,
         this does *not* flip the pane to the `working` state — slash commands
         are housekeeping, not tasks. If the pane never becomes ready within
-        `max_wait_ms`, the command is silently dropped (we'd rather skip than
-        paste into a half-built UI).
+        `max_wait_ms`, or its session dies mid-poll, the command is dropped —
+        every drop path now logs `auto_slash_command_dropped` with a reason
+        (#4/#107: these used to be silent, which is why a fresh-boot Lead
+        that never reached ready in time lost `/remote-control` with zero
+        trace in events.log). `on_delivered`/`on_dropped(reason)` let a
+        caller react (e.g. retry later) instead of only reading the log.
         """
         project_ns = self._resolve_project(project)
         pane = self._project_panes(project).get(role_name)
         if pane is None:
+            _log_event(
+                "auto_slash_command_dropped", role=role_name, command=command, reason="pane_missing"
+            )
+            if on_dropped is not None:
+                on_dropped("pane_missing")
             return
         elapsed = [0]
         sent = [False]
+        last_wait_reason = ["not_ready"]
+
+        def _drop(reason: str) -> None:
+            sent[0] = True
+            _log_event("auto_slash_command_dropped", role=role_name, command=command, reason=reason)
+            if on_dropped is not None:
+                on_dropped(reason)
 
         def _deliver() -> None:
             if sent[0]:
                 return
             sent[0] = True
             if pane.session is None or not pane.session.is_alive:
+                _log_event(
+                    "auto_slash_command_dropped",
+                    role=role_name,
+                    command=command,
+                    reason="session_dead",
+                )
+                if on_dropped is not None:
+                    on_dropped("session_dead")
                 return
             _slash_sess = pane.session
             payload = _paste_payload(command)
@@ -362,23 +388,26 @@ class LeadInboxMixin:
                 pane, _slash_sess, _enter_delay_ms(payload)
             )
             _log_event("auto_slash_command", role=role_name, command=command)
+            if on_delivered is not None:
+                on_delivered()
 
         def _check() -> None:
             if sent[0]:
                 return
             if pane.session is None or not pane.session.is_alive:
+                _drop("session_dead")
                 return
             # Same draft guard as _pump_lead_notify/_flush_pending_lead_cc —
             # only meaningful for the Lead pane (teammates have no draft
             # tracker fed for them, so the check is a no-op there).
-            if pane.session.is_at_ready_prompt() and (
-                role_name != LEAD.name or self._lead_can_accept_injection(project_ns)
-            ):
+            ready = pane.session.is_at_ready_prompt()
+            if ready and (role_name != LEAD.name or self._lead_can_accept_injection(project_ns)):
                 _deliver()
                 return
+            last_wait_reason[0] = "not_ready" if not ready else "draft_blocked"
             elapsed[0] += 500
             if elapsed[0] >= max_wait_ms:
-                # Quiet timeout: skip rather than paste while still booting.
+                _drop(f"timeout_{last_wait_reason[0]}")
                 return
             QTimer.singleShot(500, _check)
 
