@@ -184,7 +184,8 @@ _TTY_PROMPT_TAIL_ROWS = 5
 #         read busy (watchdog never nudges; #70-style stall).
 #   MED   'update available!' (codex splash), 'trust this folder' / 'do you trust'
 #         / 'press enter to continue' (trust modals) — transient spawn-time gates.
-#   LOW   'gemini cli update available!' / 'openai codex (v' — passive banners.
+#   LOW   'gemini cli update available!' — passive banner. ('openai codex (v'
+#         is intentionally NOT a ready marker — see #99 note by _READY_RULES.)
 # Replacing this text with structural signals (exit codes / pty mode / ANSI) is
 # largely infeasible: the CLI is one long-lived interactive TUI (no exit code
 # while running) always in raw mode (no discriminating pty flag). The mitigation
@@ -209,8 +210,8 @@ _READY_HARD_BLOCKERS = (
 )
 # Ordered ready/soft-block rules — FIRST match wins. The order ENCODES the
 # per-provider precedence: gemini's persistent input hint + passive update
-# footer must beat the codex "update available!" splash blocker, which in turn
-# beats codex's own banner. Changing the order changes behaviour — keep it.
+# footer must beat the codex "update available!" splash blocker. Changing the
+# order changes behaviour — keep it.
 # (ready_when, marker)
 _READY_RULES: tuple[tuple[bool, str], ...] = (
     # agy (Antigravity) — the gemini role's engine since 2026-06-19. Its idle
@@ -222,17 +223,27 @@ _READY_RULES: tuple[tuple[bool, str], ...] = (
     (True, "type your message or"),  # gemini CLI (legacy) input prompt hint
     (True, "gemini cli update available!"),  # gemini CLI (legacy) passive footer (#51)
     (False, "update available!"),  # codex startup splash modal
-    (True, "openai codex (v"),  # codex prompt banner
+    # NOTE: codex's startup banner ("OpenAI Codex (vX.Y.Z)") is deliberately
+    # NOT a ready marker (#99). It renders on the very first paint, before
+    # codex has finished auto-booting its configured MCP servers — a screen
+    # showing only the banner (composer footer not painted yet) used to read
+    # ready=True and let task delivery race the MCP-boot phase, pasting into a
+    # composer that was about to start showing the "esc to interrupt" busy
+    # marker underneath the still-unsubmitted paste. Ready for task delivery
+    # now depends solely on the composer status bar below, which — verified by
+    # direct pty capture — only renders once codex has actually reached its
+    # interactive prompt.
+    #
     # codex composer status bar: "<model> · <cwd> · <usage> · Fast off/on".
     # Rendered on the row directly under the input box for as long as the
-    # composer is on screen — including once the startup banner (the
-    # 'openai codex (v' rule above) has scrolled out of the _READY_TAIL_ROWS
-    # window as the conversation grows, which previously left codex matching
-    # NO rule at all and reading not-ready forever (#26 delivery-unconfirmed
-    # false alarms). "esc to interrupt" (a hard blocker, checked first) still
-    # correctly overrides this during an active turn or MCP boot — verified
-    # by direct pty capture: the status bar is present but blocked at that
-    # point because "esc to interrupt" is also on screen.
+    # composer is on screen — including once the startup banner has scrolled
+    # out of the _READY_TAIL_ROWS window as the conversation grows, which
+    # previously left codex matching NO rule at all and reading not-ready
+    # forever (#26 delivery-unconfirmed false alarms). "esc to interrupt" (a
+    # hard blocker, checked first) still correctly overrides this during an
+    # active turn or MCP boot — verified by direct pty capture: the status bar
+    # is present but blocked at that point because "esc to interrupt" is also
+    # on screen.
     (True, "fast off"),
     (True, "fast on"),
     (True, "bypass permissions"),  # claude footer
@@ -327,6 +338,12 @@ _READY_SELFTEST_CASES: tuple[tuple[str, bool], ...] = (
     ("Gemini CLI update available! 0.46.0 -> 0.47.0\nType your message or @path", True),
     ("Gemini CLI update available! 0.46.0 -> 0.47.0", True),  # passive footer alone
     ("OpenAI Codex (v1.2.3)\nupdate available! run npm i -g @openai/codex", False),  # codex splash
+    # codex banner alone, no composer status bar yet (#99): the earliest paint
+    # after spawn, before codex has finished booting its own MCP servers. Must
+    # NOT read ready — task delivery racing this window pasted into a composer
+    # that was about to go busy with its own "esc to interrupt" MCP-boot
+    # indicator, stranding the paste unsubmitted (root cause, issue #99).
+    ("OpenAI Codex (v1.2.3)", False),  # codex banner alone (no status bar)
     # codex idle: banner has scrolled off, only the composer status bar remains
     # in the tail region (captured via direct pty spawn, issue #26).
     (
@@ -592,6 +609,11 @@ class PtySession(QObject):
         # output seen yet. Written in the reader thread, read on the main thread;
         # a plain float read/write is atomic under the GIL so no lock is needed.
         self._last_output_ts: float = 0.0
+        # Ready-state computed by the reader thread from the SAME feed that
+        # just updated the screen (#106) — see is_at_ready_prompt_cached().
+        # Plain bool read/write is atomic under the GIL, same reasoning as
+        # _last_output_ts above, so main-thread reads need no lock either.
+        self._cached_ready: bool = False
 
     # ──────────────────────────────────────────────────────────────
     # lifecycle
@@ -654,8 +676,9 @@ class PtySession(QObject):
 
     def _feed_and_log(self, data: bytes) -> None:
         """Runs in the reader thread. Does the heavy work off the Qt main
-        thread: write the transcript and feed pyte (under the screen lock).
-        Best-effort — never raises so a bad chunk can't kill the reader."""
+        thread: write the transcript, feed pyte, and classify the ready state
+        (all under the screen lock). Best-effort — never raises so a bad
+        chunk can't kill the reader."""
         # Structural quiescence signal (#20): stamp every real output chunk.
         self._last_output_ts = time.monotonic()
         if self._transcript is not None:
@@ -668,6 +691,14 @@ class PtySession(QObject):
         try:
             with self._screen_lock:
                 self.stream.feed(data)
+                # Classify ready state here, while we already hold the lock
+                # feed() just used — the reader thread pays this cost instead
+                # of the Qt main thread (#106: agent_pane._sync_idle_flag was
+                # calling is_at_ready_prompt() on every outputUpdated, taking
+                # this SAME lock and contending with this exact feed()).
+                self._cached_ready = _classify_ready(
+                    _ready_region(_safe_screen_display(self.screen))
+                )
         except Exception:
             # pyte sometimes chokes on partial sequences; skip and continue
             pass
@@ -871,7 +902,9 @@ class PtySession(QObject):
         Handles claude, codex, and gemini(agy) panes:
           - claude: bottom hint 'bypass permissions' or 'shift+tab to cycle',
                     never 'esc to interrupt' (working) or trust modal.
-          - codex:  splash banner 'openai codex (v' visible, no modal
+          - codex:  composer status bar 'fast off'/'fast on' visible (the
+                    startup banner alone does NOT count — #99, it renders
+                    before codex finishes booting its MCP servers), no modal
                     (`update available!`, `do you trust`, `press enter
                     to continue`) and no active interrupt indicator.
           - gemini: now the Antigravity `agy` TUI — idle footer
@@ -889,6 +922,24 @@ class PtySession(QObject):
         # string quoted in the conversation body can't poison the verdict — the
         # #70 false-busy stall / #20 fragility root fix.
         return _classify_ready(_ready_region(self.display_lines()))
+
+    def is_at_ready_prompt_cached(self) -> bool:
+        """Lock-free read of the ready state the reader thread already
+        computed for the current screen (#106).
+
+        `is_at_ready_prompt()` takes `_screen_lock` to read the live pyte
+        screen — correct when a caller needs the freshest possible verdict
+        (e.g. the self-healing submit verify loop), but a UI poll that just
+        wants "is this pane idle right now" doesn't need that freshness, and
+        taking the lock on the Qt main thread contends with the reader
+        thread's own `stream.feed()` under the SAME lock. This reads the
+        value `_feed_and_log` classified while it already held the lock for
+        the feed — staleness is bounded by one PTY read chunk (during active
+        output, several times a second; while idle, the last computed value
+        holds, which is what "idle" means). NOT a substitute for
+        `is_at_ready_prompt()` anywhere correctness depends on the freshest
+        read."""
+        return self._cached_ready
 
     def shows_pending_input(self, fragment: str = "") -> bool:
         """True when the bottom input region holds unsent content.

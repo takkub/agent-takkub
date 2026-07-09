@@ -73,6 +73,40 @@ def test_concurrent_feed_and_read_no_crash() -> None:
     assert not errors, f"concurrent feed/read raised: {errors!r}"
 
 
+def test_feed_and_log_caches_ready_state() -> None:
+    """#106: _feed_and_log must classify ready state under the SAME lock
+    acquisition it already uses to feed pyte, so is_at_ready_prompt_cached()
+    (the lock-free accessor _sync_idle_flag polls) reflects the screen
+    without a separate lock-guarded call on the main thread."""
+    s = PtySession(cols=80, rows=24)
+    assert s.is_at_ready_prompt_cached() is False  # nothing fed yet
+
+    s._feed_and_log(b"bypass permissions")
+    assert s.is_at_ready_prompt_cached() is True
+    assert s.is_at_ready_prompt_cached() == s.is_at_ready_prompt()
+
+    s._feed_and_log(b"\r\n(esc to interrupt) working...")
+    assert s.is_at_ready_prompt_cached() is False
+    assert s.is_at_ready_prompt_cached() == s.is_at_ready_prompt()
+
+
+def test_feed_and_log_bad_chunk_leaves_cached_ready_unchanged() -> None:
+    """A chunk that makes stream.feed() raise must not corrupt the cached
+    verdict — it just stays at whatever the last good feed computed, same as
+    display_lines() staying at its last good content (see
+    test_feed_and_log_never_raises_on_bad_chunk)."""
+    s = PtySession(cols=80, rows=24)
+    s._feed_and_log(b"bypass permissions")
+    assert s.is_at_ready_prompt_cached() is True
+
+    def _boom(data: bytes) -> None:
+        raise ValueError("simulated pyte choke")
+
+    s.stream.feed = _boom  # type: ignore[method-assign]
+    s._feed_and_log(b"anything")  # must not raise out of _feed_and_log
+    assert s.is_at_ready_prompt_cached() is True
+
+
 def test_resize_is_thread_safe_with_feed() -> None:
     s = PtySession(cols=80, rows=24)
     errors: list[Exception] = []

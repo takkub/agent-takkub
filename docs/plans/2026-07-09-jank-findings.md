@@ -66,3 +66,49 @@ it already moved the file glob + JSONL read to a background thread
   (b) move the ready-prompt classification off the main thread the same way
   the token meter was moved (background thread + signal handback), which
   would resolve the contention regardless of whether it's the sole cause.
+
+## Fix applied (2026-07-09, issue #106, option (b))
+
+`PtySession._feed_and_log` (reader thread) now classifies ready state
+**inside the same `with self._screen_lock:` block** it already uses to
+`stream.feed(data)` — one extra `_classify_ready(_ready_region(...))` call,
+paid for by the reader thread that was already holding the lock, and stashed
+in a new `self._cached_ready: bool` attribute. `PtySession.is_at_ready_prompt_cached()`
+is a lock-free read of that attribute (plain bool assignment is atomic under
+the GIL, same reasoning already used for `_last_output_ts`).
+`agent_pane.AgentPane._sync_idle_flag` — the exact call site named in the
+suspect section above, connected to `outputUpdated` and firing on every PTY
+read chunk (150 ms-throttled) — now calls `is_at_ready_prompt_cached()`
+instead of `is_at_ready_prompt()`, so the Qt main thread no longer takes
+`_screen_lock` on this path at all. Every OTHER caller of
+`is_at_ready_prompt()` (the self-healing submit verify loop, the idle
+watchdog's `_maybe_submit_stuck_paste`, `_send_when_ready`'s ready poll, etc.)
+is intentionally left on the locked/authoritative path — those need the
+freshest possible verdict for correctness, not just a fast UI poll, and
+widening the change would trade a proven-safe cached read for an unproven
+one on paths where staleness could reintroduce a delivery bug. Net change in
+observable behaviour: the idle-flag chip can lag the true screen state by up
+to one PTY read chunk (bounded to the existing 150 ms throttle window while a
+pane is actively streaming; unchanged while idle, since no new chunk means no
+new classification). Tests: `tests/test_pty_session_threading.py` (cache
+populated under lock, survives a `stream.feed()` exception) and
+`tests/test_agent_pane_idle_flag.py` (`_sync_idle_flag` calls the cached
+accessor and never the locked one — a mock that raises if the locked
+`is_at_ready_prompt()` is called catches a future regression back to this
+exact bug).
+
+**Honest status — not yet re-profiled live.** This removes the specific
+`_screen_lock` contention path the suspect section above named as primary
+(main thread vs. reader thread racing the SAME lock on every `outputUpdated`
+across every pane), but this task did not re-run the cockpit under real
+multi-pane load to re-measure `main_thread_stall` counts against the 86/day
+baseline — that requires a live session with panes actively streaming, which
+is out of scope for this change. If stalls persist after this ships, the
+remaining suspects to check next, in order: (1) `AgentPane._coalesce_bytes` /
+the xterm.js render path itself (QWebEngine bridge calls stay on the main
+thread and were never profiled in isolation from the lock-contention
+hypothesis); (2) other `is_at_ready_prompt()` callers that DO still run on
+the main thread outside `_sync_idle_flag` — e.g. anything in
+`orchestrator.py`'s idle-watchdog tick that reads pane state directly rather
+than through `AgentPane`; (3) `display_rich()` (used by copy/select), which
+was not touched here and still takes `_screen_lock` unconditionally.

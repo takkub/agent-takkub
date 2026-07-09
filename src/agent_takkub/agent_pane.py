@@ -480,7 +480,11 @@ class AgentPane(QFrame):
             return
         self._idle_check_at = now
         try:
-            idle = self.session.is_at_ready_prompt()
+            # Lock-free cached read (#106) — avoids taking PtySession's
+            # _screen_lock on the main thread on every outputUpdated, which
+            # was contending with the reader thread's stream.feed() under the
+            # same lock. See PtySession.is_at_ready_prompt_cached().
+            idle = self.session.is_at_ready_prompt_cached()
         except Exception:
             idle = False
         if idle == self._last_idle:

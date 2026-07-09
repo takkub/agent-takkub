@@ -290,9 +290,10 @@ class TestDelayedEnterVerifiedRepaste:
         already-landed paste only needs a CR — never a second [Pasted text]."""
         sess = MagicMock()
         # v1: ready + empty (rendering) → wait; v2: ready + placeholder now shows
-        # → CR resend; v3: busy (landed) → stop.
+        # → CR resend; v3: busy (landed), box cleared → stop (#99 cross-check
+        # sees no pending input, so it doesn't fire a second resend here).
         sess.is_at_ready_prompt.side_effect = [True, True, False]
-        sess.shows_pending_input.side_effect = [False, True]
+        sess.shows_pending_input.side_effect = [False, True, False]
         sess.seconds_since_output.return_value = 0.2  # output recent → rendering
         # No output since the paste yet (placeholder still painting), so the
         # produced_output early-exit does NOT trigger — the render-settle wait
@@ -333,17 +334,83 @@ class TestDelayedEnterVerifiedRepaste:
         """Enter swallowed but the pasted content is still in the box (#22) →
         resend CR only, never re-paste (would duplicate the content)."""
         sess = MagicMock()
-        sess.is_at_ready_prompt.side_effect = [True, False]
-        sess.shows_pending_input.return_value = True  # content present
+        # verify #1: ready + content → resend. verify #2: not-ready + content
+        # still present (#99 cross-check) → resend again. verify #3: not-ready,
+        # box finally cleared → stop.
+        sess.is_at_ready_prompt.side_effect = [True, False, False]
+        sess.shows_pending_input.side_effect = [True, True, False]
         pane = MagicMock()
         pane.session = sess
 
         resends, repastes = self._run_inline(pane, sess)
 
         writes = [c.args[0] for c in sess.write.call_args_list]
-        assert writes == [b"\r", b"\r"]  # initial + one CR resend, no payload
-        assert resends == [3] and repastes == []
+        # initial CR, ready+content resend, then not-ready+content resend
+        # (#99: not-ready is cross-checked against the box before trusting it).
+        assert writes == [b"\r", b"\r", b"\r"]
+        assert resends == [3, 2] and repastes == []
         sess.shows_pending_input.assert_called()
+
+    def test_not_ready_stops_when_content_cleared(self) -> None:
+        """Not-ready + input box empty (content genuinely submitted, or a
+        payload-less caller) must still stop — the #99 cross-check only
+        overrides the stop when the box demonstrably still holds the paste."""
+        sess = MagicMock()
+        sess.is_at_ready_prompt.return_value = False  # busy after submit
+        sess.shows_pending_input.return_value = False  # box empty — landed
+        pane = MagicMock()
+        pane.session = sess
+
+        resends, repastes = self._run_inline(pane, sess)
+
+        sess.write.assert_called_once_with(b"\r")  # only the initial CR
+        assert resends == [] and repastes == []
+
+    def test_not_ready_busy_marker_unrelated_to_submit_recovers(self) -> None:
+        """Regression for #99: a busy marker unrelated to this submit (codex
+        auto-booting its configured MCP servers shows 'esc to interrupt' while
+        the composer still holds the unsubmitted paste underneath it) must not
+        be mistaken for "submit landed, pane now genuinely busy". Sequence
+        lifted from the observed transcript (codex-085447.transcript.log):
+        paste delivered → pane reads not-ready during MCP boot with the paste
+        placeholder still in the box → must resend, not fall silent forever →
+        once MCP boot finishes and the CR lands the box finally clears."""
+        sess = MagicMock()
+        # verify #1: not-ready (MCP boot's "esc to interrupt") — resend.
+        # verify #2: not-ready still (MCP boot ongoing) — resend again.
+        # verify #3: not-ready, MCP boot done + resent CR landed — box clears → stop.
+        sess.is_at_ready_prompt.return_value = False
+        sess.shows_pending_input.side_effect = [True, True, False]
+        pane = MagicMock()
+        pane.session = sess
+
+        resends, repastes = self._run_inline(pane, sess)
+
+        writes = [c.args[0] for c in sess.write.call_args_list]
+        assert writes == [b"\r", b"\r", b"\r"]  # initial + 2 recovery resends
+        assert resends == [3, 2] and repastes == []
+
+    def test_transcript_sequence_busy_mcp_boot_then_ready_still_pending(self) -> None:
+        """Regression for #99, exact chronology from the transcript: paste →
+        NOT-ready during MCP boot with the paste still stuck (#99 cross-check
+        fires, resend #1) → MCP boot finishes, pane reads READY but the
+        resent CR was ALSO swallowed mid-render so the box still shows the
+        paste (pre-existing #22 branch fires, resend #2) → the second resend
+        finally lands and codex starts working the task (not-ready, box
+        clear) → stop. Proves the new not-ready cross-check and the
+        pre-existing ready+content-present recovery chain into each other
+        instead of the first one giving up before the second ever runs."""
+        sess = MagicMock()
+        sess.is_at_ready_prompt.side_effect = [False, True, False]
+        sess.shows_pending_input.side_effect = [True, True, False]
+        pane = MagicMock()
+        pane.session = sess
+
+        resends, repastes = self._run_inline(pane, sess)
+
+        writes = [c.args[0] for c in sess.write.call_args_list]
+        assert writes == [b"\r", b"\r", b"\r"]  # initial + 2 recovery resends
+        assert resends == [3, 2] and repastes == []
 
 
 # ─────────────────────────────────────────────────────────────────────────────

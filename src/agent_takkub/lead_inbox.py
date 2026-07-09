@@ -149,6 +149,12 @@ def _delayed_enter_verified(
         after the render settles.
     When ``payload`` is None the old behaviour (CR resend only) is preserved.
 
+    A not-ready verdict is cross-checked against the input box too (#99):
+    a busy marker unrelated to this submit (e.g. codex booting its own MCP
+    servers) can read as not-ready while the paste is still visibly stuck in
+    the composer. When that happens the CR is resent instead of the verify
+    chain concluding "submitted" and stopping for good.
+
     ``on_resend`` / ``on_repaste`` (optional) are invoked with the
     remaining-attempt count each time the respective recovery fires, so the
     caller can log/observe it.
@@ -173,7 +179,24 @@ def _delayed_enter_verified(
             if pane.session is not session or remaining <= 0:
                 return
             # Submit landed → pane is busy → is_at_ready_prompt() is False → stop.
+            # But "not ready" is ambiguous: it's ALSO what a busy marker
+            # UNRELATED to this submit looks like — e.g. codex auto-booting its
+            # configured MCP servers shows the "esc to interrupt" hard blocker
+            # on screen while the composer still holds the unsubmitted paste
+            # underneath it (#99, observed via direct transcript capture: pane
+            # sits on "Booting MCP server: ... esc to interrupt" with the paste
+            # placeholder still visible in the input row). Trusting the ready
+            # verdict alone there means the false-stop below fires and the
+            # submit chain gives up for good — no more resends ever fire.
+            # Cross-check the input box itself before trusting it: if the
+            # pasted content is still visibly sitting there, the CR hasn't
+            # landed yet regardless of why the pane reads not-ready, so keep
+            # retrying (same bounded resend budget) instead of stopping.
             if not session.is_at_ready_prompt():
+                if payload is not None and session.shows_pending_input(content_fragment):
+                    if on_resend is not None:
+                        on_resend(remaining)
+                    _send_then_verify(remaining - 1)
                 return
             # Still ready → submit didn't land. If we have the payload and the
             # input box is empty, the PASTE may have been swallowed (#26) — but
@@ -392,11 +415,13 @@ class LeadInboxMixin:
         routinely needs ~45-60s to render its first ready prompt, landing right
         at the default 45s edge and forcing a fragile blind paste (#26). Give
         gemini/agy panes a longer window so first-assign delivery is confirmed,
-        not blind. codex gets the same extension: its ready banner
-        (``"openai codex (v"``) scrolls off the bottom-6-row scan window by the
-        time the UI finishes rendering, so the default 45s also forces a blind
-        paste there. An explicit non-default ``max_wait_ms`` from the caller
-        always wins (e.g. the short-poll peer-send path).
+        not blind. codex gets the same extension: it only counts ready once the
+        composer status bar ('fast off'/'fast on') renders, which lands after
+        codex finishes cold-booting AND auto-booting its configured MCP servers
+        (#99 — the startup banner alone is deliberately not a ready marker), so
+        the default 45s can also force a blind paste there. An explicit
+        non-default ``max_wait_ms`` from the caller always wins (e.g. the
+        short-poll peer-send path).
         """
         if max_wait_ms != 45_000:
             return max_wait_ms
