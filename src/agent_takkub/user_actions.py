@@ -217,11 +217,23 @@ class UserActionsMixin:
     # ──────────────────────────────────────────────────────────────
 
     def _on_resume_clicked(self) -> None:
-        """Send /resume to the active tab's Lead pane so claude opens its
+        """Type /resume into the active tab's Lead pane so claude opens its
         session picker. Button disables + shows a busy label while the
         slash-injection helper polls for Lead-ready (up to 45s); on_delivered/
         on_dropped restore it and report the outcome via the status bar so a
-        drop (Lead not ready in time, pane gone) is no longer silent (#4)."""
+        drop (Lead not ready in time, pane gone) is no longer silent (#4).
+
+        #113 (final root cause): /resume opens an interactive session picker,
+        and the auto-Enter that normally submits a slash command lands right
+        as the picker paints, which claude reads as an empty confirm ("Resume
+        cancelled") — even on an idle pane. Typing /resume by hand and
+        pressing Enter manually never cancels. So this call passes
+        auto_submit_enter=False: the text lands in the input line but is
+        NOT auto-submitted — the user presses Enter themselves to pick a
+        session. Delivery here just means "the text is sitting in the
+        composer", so on_delivered fires immediately (no delayed-Enter to
+        wait on) and the button restores right away instead of holding the
+        busy state for up to 45s."""
         if not self._btn_resume.isEnabled():
             return
         active_project_name = None
@@ -238,7 +250,7 @@ class UserActionsMixin:
         def _on_delivered() -> None:
             self._btn_resume.setText("↻ Resume")
             self._btn_resume.setEnabled(True)
-            self._status.showMessage("/resume sent to Lead", 3000)
+            self._status.showMessage("/resume พิมพ์ไว้แล้ว กด Enter เพื่อเลือก session", 5000)
 
         def _on_dropped(reason: str) -> None:
             self._btn_resume.setText("↻ Resume")
@@ -254,6 +266,7 @@ class UserActionsMixin:
             project=active_project_name,
             on_delivered=_on_delivered,
             on_dropped=_on_dropped,
+            auto_submit_enter=False,
         )
 
     def _on_end_session_clicked(self) -> None:

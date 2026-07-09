@@ -336,6 +336,7 @@ class LeadInboxMixin:
         project: str | None = None,
         on_delivered=None,
         on_dropped=None,
+        auto_submit_enter: bool = True,
     ) -> None:
         """Type a Claude Code slash command (e.g. `/remote-control`) into a
         pane as soon as it reaches the idle prompt. Unlike `_send_when_ready`,
@@ -348,8 +349,18 @@ class LeadInboxMixin:
         trace in events.log). `on_delivered`/`on_dropped(reason)` let a
         caller react (e.g. retry later) instead of only reading the log.
 
-        #113: serialised per (project, role) — the `/remote-control` auto-
-        bridge (fires on every Lead spawn) and the ↻ Resume button (fires
+        #113 (final root cause): most slash commands are self-contained and
+        the delayed Enter that submits them is safe to send automatically.
+        `/resume` is different — it opens claude's interactive session
+        picker, and an auto-Enter arriving right after the picker paints is
+        interpreted as an empty confirm, i.e. "Resume cancelled", even on a
+        perfectly idle pane (confirmed: typing `/resume` by hand and pressing
+        Enter manually never cancels). Set ``auto_submit_enter=False`` to
+        write the command text into the pane WITHOUT the trailing auto-Enter,
+        leaving the user to press Enter themselves once the picker is up.
+
+        #113 (race): serialised per (project, role) — the `/remote-control`
+        auto-bridge (fires on every Lead spawn) and the ↻ Resume button (fires
         `/resume`) both call this for the SAME Lead pane, independently of
         each other. Without a lock, two concurrent polls can both observe
         `ready=True` around the same tick and both `_deliver()`, writing
@@ -360,7 +371,8 @@ class LeadInboxMixin:
         fresh boot. A second call for a (project, role) already in flight is
         queued — not dropped — and starts its own fresh poll only once the
         first call's delivery has fully settled (write + the delayed
-        submitting Enter, not merely the synchronous write).
+        submitting Enter — or, with ``auto_submit_enter=False``, the write
+        alone, since there is no Enter to wait on).
         """
         project_ns = self._resolve_project(project)
         lock_key = f"{project_ns}::{role_name}"
@@ -439,9 +451,19 @@ class LeadInboxMixin:
             _slash_sess = pane.session
             payload = _paste_payload(command)
             _slash_sess.write(payload)
+            _log_event("auto_slash_command", role=role_name, command=command)
+            if not auto_submit_enter:
+                # No auto-Enter (e.g. /resume — see docstring): the text is
+                # written and left unsubmitted for the user to confirm by
+                # hand. Nothing further to wait on, so notify and release
+                # the lock right away instead of holding it for a delay that
+                # will never fire.
+                if on_delivered is not None:
+                    on_delivered()
+                _release_and_advance()
+                return
             delay_ms = _enter_delay_ms(payload)
             _orch_attr("_delayed_enter", _delayed_enter)(pane, _slash_sess, delay_ms)
-            _log_event("auto_slash_command", role=role_name, command=command)
             if on_delivered is not None:
                 on_delivered()
             # Hold the lock through the delayed submitting Enter, not just

@@ -36,6 +36,14 @@ class TestOnResumeClicked:
         assert callable(kwargs["on_delivered"])
         assert callable(kwargs["on_dropped"])
 
+    def test_passes_auto_submit_enter_false(self) -> None:
+        """#113 final fix: /resume must never get the auto-Enter — the
+        picker it opens reads a trailing Enter as an empty confirm."""
+        stub = _Stub()
+        stub._on_resume_clicked()
+        _, kwargs = stub.orch.inject_slash_command_when_ready.call_args
+        assert kwargs["auto_submit_enter"] is False
+
     def test_on_delivered_restores_button_and_shows_success(self) -> None:
         stub = _Stub()
         stub._on_resume_clicked()
@@ -44,7 +52,9 @@ class TestOnResumeClicked:
         assert stub._btn_resume.isEnabled() is True
         assert stub._btn_resume.text() == "↻ Resume"
         stub._status.showMessage.assert_called_once()
-        assert "/resume sent to Lead" in stub._status.showMessage.call_args[0][0]
+        msg = stub._status.showMessage.call_args[0][0]
+        assert "/resume" in msg
+        assert "กด Enter" in msg
 
     def test_on_dropped_restores_button_and_shows_reason(self) -> None:
         stub = _Stub()
