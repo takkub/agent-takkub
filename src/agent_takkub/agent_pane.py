@@ -198,6 +198,12 @@ class AgentPane(QFrame):
         self._btn_export.clicked.connect(self._export_buffer)
         self._btn_export.hide()
 
+        self._btn_clear_view = QPushButton("🧹", header)
+        self._btn_clear_view.setFixedSize(22, 22)
+        self._btn_clear_view.setToolTip("ล้างหน้าจอ pane (โปรแกรมยังรันต่อ ไม่กระทบงาน)")
+        self._btn_clear_view.clicked.connect(self._clear_pane_view)
+        self._btn_clear_view.hide()
+
         # Input lock toggle (orchestrator-driven panes only). Teammates are
         # driven by takkub assign/send, so the user almost never types into
         # them — locking by default stops an accidental keypress from derailing a
@@ -234,6 +240,7 @@ class AgentPane(QFrame):
         hl.addWidget(self._token_label)
         hl.addWidget(self._btn_spawn)
         hl.addWidget(self._btn_export)
+        hl.addWidget(self._btn_clear_view)
         if self._btn_lock is not None:
             hl.addWidget(self._btn_lock)
         hl.addWidget(self._btn_min)
@@ -294,10 +301,12 @@ class AgentPane(QFrame):
             self._stack.setCurrentIndex(1)
             self._btn_spawn.hide()
             self._btn_export.show()
+            self._btn_clear_view.show()
         else:
             self._stack.setCurrentIndex(0)
             self._btn_spawn.show()
             self._btn_export.hide()
+            self._btn_clear_view.hide()
         # × is now always visible (see _btn_close init comment) — user
         # always has an escape hatch regardless of pane state.
         self._btn_close.show()
@@ -709,6 +718,19 @@ class AgentPane(QFrame):
         s = QSettings("agent-takkub", "cockpit")
         s.setValue(self._settings_key(), int(size))
         s.setValue(self._FONT_SIZE_DEFAULT_KEY, int(size))
+
+    # ──────────────────────────────────────────────────────────────
+    # clear pane view — wipes xterm.js scrollback without touching the
+    # live PTY session, then nudges the TUI to redraw its current screen
+    # (Ctrl+L) so the pane doesn't sit blank until new output arrives.
+    # ──────────────────────────────────────────────────────────────
+    def _clear_pane_view(self) -> None:
+        self._terminal.clear_view()
+        if self.session is not None:
+            try:
+                self.session.write("\x0c")
+            except Exception:
+                pass
 
     # ──────────────────────────────────────────────────────────────
     # export current pane buffer to a text file under runtime/exports/

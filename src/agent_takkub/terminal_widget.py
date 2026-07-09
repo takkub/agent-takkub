@@ -398,6 +398,20 @@ class TerminalWidget(QWidget):
             return
         self._view.page().runJavaScript("termClear();")
 
+    def clear_view(self) -> None:
+        """Wipe the on-screen buffer + scrollback while the session stays live.
+
+        Same JS wipe as `reset()` (`termReset()` = term.reset() + term.clear())
+        but does NOT touch the write buffers or UTF-8 decoder state — PTY
+        output keeps flowing through write_bytes() during and after this call,
+        so nothing must be dropped. Driven by the pane's 🧹 clear-view button.
+        """
+        if self._page_ready:
+            try:
+                self._view.page().runJavaScript("termReset();")
+            except Exception:
+                pass
+
     def reset(self) -> None:
         """Wipe scrollback + pending writes when a session detaches but the
         widget itself lives on (Lead pane reused across project switches).
