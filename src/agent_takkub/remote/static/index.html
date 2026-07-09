@@ -138,6 +138,98 @@
     background: rgba(251, 191, 36, 0.1);
     border-color: rgba(251, 191, 36, 0.34);
   }
+  #lead-resume-btn {
+    display: none;
+    background: var(--card);
+    border: 1px solid var(--line2);
+    color: var(--fg-dim);
+    border-radius: 999px;
+    width: 26px;
+    height: 26px;
+    font-size: 0.95rem;
+    line-height: 1;
+    cursor: pointer;
+  }
+  #lead-resume-btn.show { display: inline-flex; align-items: center; justify-content: center; }
+  #lead-resume-btn:active { background: var(--card2); color: var(--fg); }
+
+  /* ---------- resume / session picker sheet ---------- */
+  .sheet-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    z-index: 60;
+    align-items: flex-end;
+    justify-content: center;
+  }
+  .sheet-overlay.show { display: flex; }
+  .sheet {
+    width: 100%;
+    max-width: 480px;
+    max-height: 70vh;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-bottom: none;
+    border-radius: 18px 18px 0 0;
+    display: flex;
+    flex-direction: column;
+    padding-bottom: env(safe-area-inset-bottom);
+    box-shadow: 0 -20px 50px -20px rgba(0, 0, 0, 0.8);
+  }
+  .sheet-header {
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--line);
+    font-weight: 640;
+    font-size: 0.92rem;
+  }
+  .sheet-header button {
+    background: none;
+    border: none;
+    color: var(--fg-dim);
+    font-size: 1rem;
+    cursor: pointer;
+    padding: 4px 6px;
+  }
+  #resume-sheet-list {
+    overflow-y: auto;
+    padding: 8px 12px 20px;
+  }
+  .resume-row {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 11px 12px;
+    border-radius: 12px;
+    margin-bottom: 6px;
+    background: var(--card);
+    border: 1px solid var(--line);
+    cursor: pointer;
+  }
+  .resume-row:active { background: var(--card2); }
+  .resume-row .resume-time {
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    color: var(--faint);
+  }
+  .resume-row .resume-preview {
+    font-size: 0.85rem;
+    color: var(--fg);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .resume-empty {
+    text-align: center;
+    color: var(--fg-dim);
+    font-size: 0.82rem;
+    padding: 30px 16px;
+    line-height: 1.6;
+  }
 
   @keyframes pulse-dot {
     0% { box-shadow: 0 0 0 0 rgba(45, 212, 191, 0.5); }
@@ -820,6 +912,7 @@
         <small id="header-subtitle"></small>
       </div>
       <div id="header-status">
+        <button id="lead-resume-btn" type="button" aria-label="Resume session">⟳</button>
         <span id="status-conn"><span class="dot"></span><span id="status-conn-text">Online</span></span>
         <span id="status-mode">VIEW</span>
       </div>
@@ -890,6 +983,17 @@
   </nav>
 
   <div id="toast" class="toast"></div>
+
+  <!-- resume / session picker sheet (W3) -->
+  <div id="resume-sheet" class="sheet-overlay">
+    <div class="sheet">
+      <div class="sheet-header">
+        <span>Resume session</span>
+        <button id="resume-sheet-close" type="button" aria-label="ปิด">✕</button>
+      </div>
+      <div id="resume-sheet-list"></div>
+    </div>
+  </div>
 </div>
 <script src="app.js"></script>
 </body>

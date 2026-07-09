@@ -89,11 +89,13 @@ class _Bridge(QObject):
     resolved inline first (`_resolve_scoped_project`, a cheap in-process
     read) so the open-tabs check happens on the Qt thread before the
     worker thread ever starts. `projects`/`sse_ticket`/`open`/`lead_history`/
-    `activity` stay fully inline: cheap, in-process work (a single
-    project-scoped JSONL read for `lead_history`, a direct pane-registry
-    read for `activity`) that DOES need the Qt-thread ownership guarantee
-    (the same thread that writes `projects.json` on tab switch/import, and
-    the only thread allowed to touch `main_window`/pane state).
+    `lead_sessions`/`lead_resume`/`activity` stay fully inline: cheap,
+    in-process work (a single project-scoped JSONL read for `lead_history`, a
+    JSONL-root scan for `lead_sessions`, a direct pane-registry read for
+    `activity`) that DOES need the Qt-thread ownership guarantee (the same
+    thread that writes `projects.json` on tab switch/import, and the only
+    thread allowed to touch `main_window`/pane state — `lead_resume` calls
+    `orch.close`/`orch.spawn` directly, same ownership rule as `open`/`close`).
     """
 
     request = pyqtSignal(object)
@@ -148,6 +150,25 @@ class _Bridge(QObject):
                 pending.reply.put(
                     (200, api.lead_history(self._orch, project_ns, pending.params.get("limit")))
                 )
+            elif pending.action == "lead_sessions":
+                project_ns = self._resolve_scoped_project(pending.params.get("project"))
+                pending.reply.put(
+                    (200, api.lead_sessions(self._orch, project_ns, pending.params.get("limit")))
+                )
+            elif pending.action == "lead_resume":
+                try:
+                    pending.reply.put(
+                        (
+                            200,
+                            api.resume_lead(
+                                self._orch,
+                                pending.params.get("project"),
+                                pending.params.get("session_uuid"),
+                            ),
+                        )
+                    )
+                except api.RemoteApiError as exc:
+                    pending.reply.put((exc.status, {"ok": False, "msg": exc.msg}))
             elif pending.action == "activity":
                 pending.reply.put((200, api.activity(self._orch)))
             else:
@@ -345,6 +366,12 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
                     "lead_history",
                     {"project": query.get("project"), "limit": query.get("limit")},
                 )
+        elif rest == "/api/lead/sessions":
+            if self._check_bearer() and self._check_password_gate():
+                self._respond_marshaled(
+                    "lead_sessions",
+                    {"project": query.get("project"), "limit": query.get("limit")},
+                )
         elif rest == "/api/activity":
             if self._check_bearer() and self._check_password_gate():
                 self._respond_marshaled("activity", {})
@@ -417,6 +444,21 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
                 self._send_json(400, {"ok": False, "msg": "bad json"})
                 return
             self._respond_marshaled("close", {"project": payload.get("project")})
+        elif rest == "/api/lead/resume":
+            if not self._check_bearer() or not self._check_password_gate():
+                return
+            if not self.server.auth.allows_control():
+                self._send_json(403, {"ok": False, "msg": "view mode: control is disabled"})
+                return
+            try:
+                payload = json.loads(body.decode("utf-8")) if body else {}
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                self._send_json(400, {"ok": False, "msg": "bad json"})
+                return
+            self._respond_marshaled(
+                "lead_resume",
+                {"project": payload.get("project"), "session_uuid": payload.get("session_uuid")},
+            )
         else:
             self._reject()
 
