@@ -1664,6 +1664,33 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             "อย่าเพิ่ง fire — render proposal ให้ user confirm ก่อน"
         )
 
+    @staticmethod
+    def _condense_done_note(
+        raw_note: str, merged_note: str, evidence_line: str, session_md_path: str | None
+    ) -> str:
+        """Build the Lead-facing body for a clean (non-``--fail``) `done()` report.
+
+        Symmetrizes the return path with the file-based task handoff (issue
+        #1): a note at/above ``TASK_HANDOFF_THRESHOLD`` chars condenses to its
+        first line (truncated to ~200 chars) plus a pointer at the session-md
+        file ``_save_decision_note`` already wrote — mirroring
+        ``_task_handoff_pointer``'s task→pane wording for the pane→Lead
+        direction. Short notes, or a note whose file failed to write (no
+        ``session_md_path``), paste inline unchanged — same as before this
+        existed. The evidence line always stays on the notice tail regardless
+        of truncation (it's the signal qa/critic/designer workflows depend
+        on).
+        """
+        if len(raw_note) < TASK_HANDOFF_THRESHOLD or not session_md_path:
+            return merged_note.rstrip()
+        headline = raw_note.strip().splitlines()[0] if raw_note.strip() else ""
+        if len(headline) > 200:
+            headline = headline[:200].rstrip() + "…"
+        body = f"{headline} · 📄 รายงานเต็ม: {session_md_path} (เปิดด้วย file-read tool)"
+        if evidence_line:
+            body = f"{body}\n{evidence_line}"
+        return body
+
     def done(
         self, from_role: str, note: str = "", project: str | None = None, failed: bool = False
     ) -> tuple[bool, str]:
@@ -1711,19 +1738,35 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         # `note` so every downstream consumer (the done/FAIL notice, the shard
         # aggregate, the decision note) carries it — `done --fail` gets
         # evidence exactly the same way a clean done does.
+        raw_note = note
         evidence_line = self._scan_done_evidence(project_ns, from_role, had_assign_ts)
         if evidence_line:
             note = f"{note}\n{evidence_line}" if note else evidence_line
 
+        # Symmetrize the return path with the file-based task handoff (#1):
+        # persist the session note to disk BEFORE the Lead-facing notice is
+        # built/sent, so a long note's notice can point at the file instead of
+        # carrying the full text inline. `now` is shared with the
+        # `_recent_done` stamp further below so the two never disagree.
+        now = datetime.now()
+        transcript_path = getattr(pane, "_transcript_path", None)
+        session_md_path = self._save_decision_note(
+            project_ns, from_role, note, now=now, transcript_path=transcript_path
+        )
+
         # notify Lead in the same project (a teammate in project-a mustn't
         # nudge the Lead in project-b by mistake). `done --fail` swaps the plain
         # done notice for a fix-loop proposal prompt (feedback routing MVP) —
-        # Lead proposes the fix, never auto-fires.
+        # Lead proposes the fix, never auto-fires, and ALWAYS keeps the full
+        # note (Lead's fix-loop propose + classify_failure both read it) — only
+        # the clean-done path gets the file-pointer condensation.
         if failed:
+            notice_body = note
             notice = self._build_verify_fail_handoff(from_role, note)
             _log_event("verify_failed", project=project_ns, role=from_role, note=(note or "")[:200])
         else:
-            notice = f"[{from_role} done] {note}".rstrip()
+            notice_body = self._condense_done_note(raw_note, note, evidence_line, session_md_path)
+            notice = f"[{from_role} done] {notice_body}".rstrip()
         # Shard panes: suppress per-shard notice to Lead — consolidated handoff
         # (_inject_shard_fanout_handoff) is the single message Lead sees.
         # Planner panes: suppress too — the "[qa plan ready] fan-out …" message
@@ -1763,13 +1806,17 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             base_role_p, _ = _split_shard(from_role)
             self._fire_qa_plan_fanout(project_ns, base_role_p, had_plan_fanout, planner_note=note)
 
-        # Shard aggregate: record this shard's note and check if all N done.
+        # Shard aggregate: record this shard's (possibly condensed) note and
+        # check if all N done. Reusing `notice_body` here means the
+        # consolidated handoff (_inject_shard_fanout_handoff) gets the same
+        # threshold/pointer treatment as a non-shard done notice (#1
+        # symmetrization, item 4) instead of stitching N full notes together.
         if had_shard_total > 0:
             base_role_d, _ = _split_shard(from_role)
             group_key = f"{project_ns}::{base_role_d}"
             group = self._shard_groups.get(group_key)
             if group and not group.closed:
-                group.done[from_role] = note
+                group.done[from_role] = notice_body
                 if len(group.done) + len(group.failed) >= group.total:
                     group.closed = True
                     self._inject_shard_fanout_handoff(project_ns, group)
@@ -1813,11 +1860,9 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
 
         QTimer.singleShot(2_500, _close_if_same_session)
         _log_event("done", role=from_role, note=note[:200])
-        now = datetime.now()
-        transcript_path = getattr(pane, "_transcript_path", None)
-        self._save_decision_note(
-            project_ns, from_role, note, now=now, transcript_path=transcript_path
-        )
+        # `now`/`transcript_path`/the actual _save_decision_note write already
+        # happened above, ahead of the notice — see the comment there. Reuse
+        # the same `now` so this stamp can't disagree with the written file.
         stamp = now.strftime("%Y-%m-%dT%H%M%S")
         self._recent_done.insert(0, (project_ns, from_role, f"{stamp}-{from_role}.md"))
         del self._recent_done[20:]
@@ -1968,7 +2013,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         note: str,
         now: datetime | None = None,
         transcript_path: str | None = None,
-    ) -> None:
+    ) -> str | None:
         """Persist a teammate's `takkub done` note as a small markdown
         file under `runtime/sessions/<YYYY-MM-DD>/<project>/<role>-<HHMMSS>.md`,
         then mirror the same file into the Obsidian vault (if one is
@@ -1987,19 +2032,25 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         `now` is injected by `done()` so the caller and this writer
         agree on the timestamp — otherwise the hot.md "Recent" entry
         and the on-disk filename could disagree by a second under load.
+
+        Returns the forward-slashed absolute path of the runtime session
+        file actually written, or ``None`` if nothing was written (empty/junk
+        note, junk project, dedup, invalid project name, or a write failure)
+        — the caller (``done()``) uses this to decide whether a long-note
+        pointer notice has somewhere to point at (issue #symmetrize-return).
         """
         if not (note or "").strip():
-            return
+            return None
         # Junk filter: skip 1-word "ok" / "wip" / "done" stubs and
         # scratch/test workspaces. Keeps the Obsidian vault from
         # filling up with content-less session files that don't
         # connect to anything (no useful note body to backlink from).
         if _is_junk_note(note):
-            return
+            return None
         if _is_junk_project(project):
-            return
+            return None
         if _is_dedup_note(project, role, note):
-            return
+            return None
         if now is None:
             now = datetime.now()
         body = _render_decision_note(project, role, note, now, transcript_path=transcript_path)
@@ -2011,28 +2062,31 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             logging.getLogger(__name__).warning(
                 "_save_decision_note: rejected unsafe project name %r", project
             )
-            return
+            return None
+        session_md_path: str | None = None
         try:
             day = RUNTIME_DIR / "sessions" / now.strftime("%Y-%m-%d") / safe_project
             day.mkdir(parents=True, exist_ok=True)
             path = day / f"{role}-{now.strftime('%H%M%S')}.md"
             path.write_text(body, encoding="utf-8")
+            session_md_path = str(path).replace(os.sep, "/")
         except OSError:
             pass
 
         vault = _resolve_vault_dir()
-        if vault is None:
-            return
-        try:
-            sessions = vault / "99-Logs" / "sessions" / safe_project
-            sessions.mkdir(parents=True, exist_ok=True)
-            stamp = now.strftime("%Y-%m-%dT%H%M%S")
-            (sessions / f"{stamp}-{role}.md").write_text(body, encoding="utf-8")
-        except OSError:
-            pass
+        if vault is not None:
+            try:
+                sessions = vault / "99-Logs" / "sessions" / safe_project
+                sessions.mkdir(parents=True, exist_ok=True)
+                stamp = now.strftime("%Y-%m-%dT%H%M%S")
+                (sessions / f"{stamp}-{role}.md").write_text(body, encoding="utf-8")
+            except OSError:
+                pass
 
-        # Phase B: distill durable facts into 01-Projects/<project>.md (best-effort)
-        distill_session_facts(project, role, note, vault, now=now)
+            # Phase B: distill durable facts into 01-Projects/<project>.md (best-effort)
+            distill_session_facts(project, role, note, vault, now=now)
+
+        return session_md_path
 
     def end_session(self, project: str | None = None, note: str = "") -> tuple[bool, str]:
         """Write a Lead session summary to runtime/sessions and the vault mirror.
