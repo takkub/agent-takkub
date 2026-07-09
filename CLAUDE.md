@@ -17,6 +17,8 @@ Lead spawn เฉพาะ role ที่จำเป็นต่องานน
 > อ่าน `docs/architecture/godfile-map.md` (method→โมดูลไหน + hidden string/socket edges ที่ import มองไม่เห็น)
 > + `docs/architecture/depgraph.json` (import map + fan-in/out, auto-refresh ทุก commit) — **อย่า grep มั่วแล้วเดา**.
 
+> **Multi-provider — บังคับทุกการเปลี่ยนแปลง (user directive 2026-07-09):** ระบบไม่ fix กับ claude อีกต่อไป — ทุก feature/fix ต้องคำนึงถึง **ทุก provider** (claude / codex / gemini-agy / CLI ใหม่ในอนาคต — ProviderSpec #103): engine feature ใหม่ (delivery, notices, evidence, env) ต้องทำงานกับ pane ที่ไม่ใช่ claude ด้วยหรือระบุ gap ชัดๆ · wording ใน task/pointer อย่าผูก claude-only (เช่น "Read tool") โดยไม่มี fallback · claude-only shortcut ที่เลี่ยงไม่ได้ต้อง flag เข้า #103 เสมอ ห้ามเงียบ
+
 > **Cross-platform (Windows + macOS) — บังคับทุกการเปลี่ยนแปลง:** cockpit รัน **ทั้ง Windows (ConPTY) และ macOS (`_pty_backend` — merge แล้ว)** ทุก feature/fix/refactor ต้องทำงานได้ **ทั้ง 2 OS คู่กัน** ห้ามทำให้ฝั่งใดฝั่งหนึ่งพัง:
 > - **ห้าม hardcode** path/command เฉพาะ platform — ใช้ `pathlib.Path` (ไม่ใช่ `\\` หรือ `.exe` ตรงๆ); อะไรที่ platform-specific ต้อง gate ด้วย `sys.platform == "win32"/"darwin"` **+ มี branch อีกฝั่งเสมอ** (อย่าปล่อยให้ mac ตกหล่น)
 > - **ก่อน push ต้องรัน full suite** (`pytest` ทั้งหมด) ไม่ใช่แค่ targeted tests — fake/mock ที่ signature drift จาก orchestrator/cli_server จริง จะ raise ใน QTimer slot → **PyQt6 abort process เงียบๆ (exit 127)** ที่ targeted run ไม่จับ
