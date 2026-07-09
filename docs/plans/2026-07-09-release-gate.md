@@ -58,3 +58,46 @@ rtk git diff 3ce3600^..HEAD -- lead_inbox.py orchestrator.py spawn_engine.py \
 
 ✅ **PASS** — 0 regressions, all 4 integration areas verified, no multi-provider wording leaks.
 Safe to publish 1.0.22.
+
+## Final HEAD re-stamp (2026-07-09, HEAD = `a8ce971`)
+
+Re-ran the gate after `a8ce971` (done-note return-path symmetrize — note >400 chars → notice
+keeps first line + 📄 pointer to session md written before the notice; `done --fail` keeps the
+full note; evidence/shard handoff unchanged).
+
+### 1. Full pytest suite
+
+```
+rtk proxy python -m pytest -q --junitxml=runtime/exports/2026-07-09/final-restamp-junit.xml
+```
+
+```
+tests=3364 failures=2 errors=0 skipped=2 time=233.821s
+```
+
+**2 failures — same baseline as before, both `tests/test_plugin_policy.py`:**
+- `TestRolePluginPolicy::test_teammate_gets_superpowers_and_pordee_not_addy`
+- `TestRolePluginPolicy::test_design_roles_get_ui_ux_pro_max`
+
+Root cause unchanged: sandbox has no `~/.claude/plugins/cache` populated → env-dependent, not a
+code regression. Test count rose 3352 → 3364 (+12) matching the 12 new tests added in
+`tests/test_done_note_symmetrize.py`. No other failures, 0 regressions.
+
+### 2. Focused — done-note symmetrize
+
+```
+rtk proxy python -m pytest -q tests/test_done_note_symmetrize.py
+```
+
+```
+12 passed
+```
+
+Covers: >400-char boundary split (notice = first line + 📄 session-md pointer), `--fail` exemption
+(full note preserved for fix-loop), write-before-notice ordering (session md exists before the
+shortened notice fires), and shard handoff parity with the non-shard path.
+
+### Verdict (re-stamp)
+
+✅ **PASS** — full suite green modulo the same 2 pre-existing env-dependent failures, symmetrize
+suite 12/12 green. Safe to ship 1.0.22 at this HEAD.

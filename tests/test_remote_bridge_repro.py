@@ -262,21 +262,101 @@ class TestReapRemoteBridgeRetriesDrop:
         orch.inject_slash_command_when_ready.assert_not_called()
 
 
+class TestDoubleFireRealPollingRepro:
+    """End-to-end #110 repro through the REAL `inject_slash_command_when_ready`
+    polling loop (not mocked out) — proves the actual observed symptom
+    (`/remote-control` pasted into the pane TWICE) is fixed, not just that
+    `_maybe_fire_remote_bridge` was called an expected number of times."""
+
+    def test_startup_then_resume_hook_for_same_session_pastes_once(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Reproduces events.log 2026-07-09 16:10:42-55 exactly: spawn()'s
+        own call fires the bridge using the stale prior uuid it had at spawn
+        time, then claude's SessionStart hook reports "startup" with a
+        transient uuid for the SAME live session before the pane is ready —
+        both must collapse into a single `/remote-control` paste once ready."""
+        pane = _make_pane(ready_sequence=[False, False, True])
+        orch._panes_by_project.setdefault(TEST_PROJECT, {})[LEAD.name] = pane
+
+        calls: list[tuple[int, object]] = []
+        monkeypatch.setattr(
+            lead_inbox_mod.QTimer, "singleShot", lambda ms, fn: calls.append((ms, fn))
+        )
+
+        exit_key = f"{TEST_PROJECT}::{LEAD.name}"
+        # spawn()'s own call: stale prior uuid tracked from before this boot.
+        orch._ps(exit_key).session_uuid = "uuid-stale"
+        orch._maybe_fire_remote_bridge(TEST_PROJECT, exit_key)
+
+        # claude's SessionStart hook fires moments later, same live pane,
+        # reason="startup", a DIFFERENT (transient) uuid.
+        ok, _ = orch.consume_session_report(
+            LEAD.name, project=TEST_PROJECT, session_id="uuid-transient-startup", source="startup"
+        )
+        assert ok is True
+
+        _drive_timer_chain(calls, max_iterations=20)
+
+        remote_control_writes = [
+            c for c in pane.session.write.call_args_list if c.args == ("/remote-control",)
+        ]
+        assert len(remote_control_writes) == 1
+
+
 class TestSessionReportRefiresBridgeForNewSession:
     """#107 point 4: a manual /resume inside the Lead pane must re-fire the
     bridge for the new session-uuid — spawn()'s own call only ever sees the
-    uuid it stamped at spawn time."""
+    uuid it stamped at spawn time. #110: this must only happen once the
+    PRIOR poll has actually resolved (delivered/dropped) — two session_report
+    events for the same still-in-flight pane boot must not race two polls."""
 
-    def test_resume_with_new_uuid_fires_bridge(
+    def test_resume_with_new_uuid_does_not_refire_while_same_session_pending(
         self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """#110 repro: claude's SessionStart hook fires twice for one
+        `--resume` boot (startup with a transient uuid, then resume with the
+        real uuid) — for the SAME live PtySession object — before the Lead
+        pane ever reaches ready. The second session_report must not start a
+        second concurrent poll: one in-flight poll per physical process is
+        enough since delivery never touches the uuid, only the live session."""
         orch.inject_slash_command_when_ready = MagicMock()  # type: ignore[method-assign]
+        pane = MagicMock()
+        pane.session = MagicMock()  # same object across both hook firings
+        orch._panes_by_project.setdefault(TEST_PROJECT, {})[LEAD.name] = pane
 
         ok, _ = orch.consume_session_report(
             LEAD.name, project=TEST_PROJECT, session_id="uuid-boot", source="startup"
         )
         assert ok is True
         assert orch.inject_slash_command_when_ready.call_count == 1
+
+        ok, _ = orch.consume_session_report(
+            LEAD.name, project=TEST_PROJECT, session_id="uuid-resumed", source="resume"
+        )
+        assert ok is True
+        assert orch.inject_slash_command_when_ready.call_count == 1
+
+    def test_resume_with_new_uuid_fires_bridge_after_prior_poll_resolves(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A genuinely later manual /resume on the SAME still-live pane —
+        after the first bridge already delivered or dropped — must still
+        re-fire for the new session (the #107 contract this guard must not
+        regress)."""
+        orch.inject_slash_command_when_ready = MagicMock()  # type: ignore[method-assign]
+        pane = MagicMock()
+        pane.session = MagicMock()
+        orch._panes_by_project.setdefault(TEST_PROJECT, {})[LEAD.name] = pane
+
+        ok, _ = orch.consume_session_report(
+            LEAD.name, project=TEST_PROJECT, session_id="uuid-boot", source="startup"
+        )
+        assert ok is True
+        assert orch.inject_slash_command_when_ready.call_count == 1
+        # Simulate the first poll finishing (delivered) before the resume.
+        _, first_kwargs = orch.inject_slash_command_when_ready.call_args
+        first_kwargs["on_delivered"]()
 
         ok, _ = orch.consume_session_report(
             LEAD.name, project=TEST_PROJECT, session_id="uuid-resumed", source="resume"

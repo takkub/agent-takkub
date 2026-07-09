@@ -1786,6 +1786,29 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         `_lead_remote_bridge_pending` prevents two concurrent polls for the
         same session (this call site + the idle-watchdog reaper below both
         route through here) from double-pasting once ready.
+
+        #110: the uuid-keyed dedup above is NOT enough on its own. Proven via
+        events.log (2026-07-09 16:10:42-55): on a `--resume <uuid>` boot,
+        claude's own `SessionStart` hook fires TWICE for the SAME physical
+        pane boot — once immediately with reason="startup" and a
+        transient/placeholder uuid, then again moments later with
+        reason="resume" and the real target uuid. Each
+        `consume_session_report` call re-reads `ps.session_uuid`, which the
+        second hook has since overwritten, so the uuid-keyed pending check
+        computes a DIFFERENT key each time and never catches the second
+        call — two independent `inject_slash_command_when_ready` polls race
+        the same ready-prompt check and both deliver `/remote-control` ~1s
+        apart. Fixed with a second guard keyed on the pane's *session
+        object identity* (`_lead_remote_bridge_pending_session`): while a
+        poll is in flight for a given live PtySession object, a second call
+        for that SAME object (whatever uuid it reports this time) is a
+        no-op — `_deliver()` only ever writes into the live session, never
+        touches the uuid, so one in-flight poll per physical process is
+        always enough. A genuinely NEW process (crash respawn, window
+        expiry) gets a NEW session object, so this guard never blocks a
+        real respawn — only the uuid-keyed dedup above governs those (see
+        test_remote_bridge_autofire.py's TestRespawnNewUuidFiresAgain /
+        TestResumePathDoesNotDoubleFire for that contract).
         """
         session_uuid = self._ps(exit_key).session_uuid
         if not session_uuid:
@@ -1794,10 +1817,20 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         key = f"{project_ns}::{session_uuid}"
         if key in self._lead_remote_bridge_fired or key in self._lead_remote_bridge_pending:
             return
+        pane = self._project_panes(project_ns).get(LEAD.name)
+        current_session = pane.session if pane is not None else None
+        if (
+            current_session is not None
+            and self._lead_remote_bridge_pending_session.get(exit_key) is current_session
+        ):
+            return
         self._lead_remote_bridge_pending.add(key)
+        if current_session is not None:
+            self._lead_remote_bridge_pending_session[exit_key] = current_session
 
         def _on_delivered() -> None:
             self._lead_remote_bridge_pending.discard(key)
+            self._lead_remote_bridge_pending_session.pop(exit_key, None)
             self._lead_remote_bridge_fired.add(key)
 
         def _on_dropped(_reason: str) -> None:
@@ -1805,6 +1838,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             # watchdog tick) retries once this Lead pane is next observed
             # ready instead of the bridge being lost for the session.
             self._lead_remote_bridge_pending.discard(key)
+            self._lead_remote_bridge_pending_session.pop(exit_key, None)
 
         self.inject_slash_command_when_ready(
             LEAD.name,

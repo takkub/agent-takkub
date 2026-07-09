@@ -595,6 +595,17 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         # watchdog reaper, see SpawnEngineMixin._reap_remote_bridge), never
         # left stuck as neither "handled" nor "retryable".
         self._lead_remote_bridge_pending: set[str] = set()
+        # #110: session-OBJECT-identity guard layered on top of the uuid
+        # dedup above — keyed f"{project_ns}::{role}" -> the PtySession the
+        # in-flight poll was started against. Closes a race the uuid keys
+        # alone can't: on a `--resume` boot, claude's SessionStart hook can
+        # fire twice with two DIFFERENT uuids for the SAME physical pane
+        # (startup then resume), which raced two uuid-keyed polls into
+        # delivering `/remote-control` twice. A genuinely new process
+        # (crash respawn, resume-window expiry) gets a new session object,
+        # so this guard never blocks a real respawn. See
+        # SpawnEngineMixin._maybe_fire_remote_bridge.
+        self._lead_remote_bridge_pending_session: dict[str, object] = {}
 
         # Per-cockpit-run capability token. Injected only into the Lead pane
         # env (TAKKUB_LEAD_TOKEN) so the Lead takkub CLI can authenticate
