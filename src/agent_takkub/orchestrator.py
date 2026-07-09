@@ -162,6 +162,26 @@ _TRANSCRIPT_TAIL_BYTES = 64 * 1024
 # when a teammate pane has been idle this long. 0 = disabled.
 HARVEST_HINT_SEC = int(os.environ.get("TAKKUB_HARVEST_HINT_SEC", "600"))
 
+# ── Screenshot evidence auto-attach (issue #5) ──────────────────────────────
+# Extensions done() treats as "evidence" when scanning the pane's artifacts
+# dir. Case-insensitive match against Path.suffix.
+_EVIDENCE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
+# A file must be at least this old before it's trusted as "fully written" —
+# guards against picking up a screenshot mid-write (half a PNG has a valid
+# mtime but garbage bytes).
+_EVIDENCE_SETTLE_SEC = 1.0
+# Windows can hold a brief exclusive lock on a just-written image (AV scan,
+# the writer's own fsync); retry stat() a couple of times before giving up
+# on that one file rather than letting done() blow up.
+_EVIDENCE_STAT_RETRIES = 3
+_EVIDENCE_STAT_RETRY_SLEEP_SEC = 0.05
+# Cap how many paths get pasted into a done notice — a shot-happy QA run can
+# produce dozens; Lead only needs the most recent handful.
+_EVIDENCE_MAX_FILES = 10
+# Roles expected to always produce fresh evidence; a done with none gets a
+# warning line (everyone else silently gets nothing when they have no shots).
+_EVIDENCE_WARN_ROLES = ("qa", "critic", "designer")
+
 __all__ = [  # backwards-compat re-exports
     "HARVEST_HINT_SEC",
     "LEAD_NOTIFY_BUSY_CAP",
@@ -825,6 +845,10 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         key = _exit_key(project_ns, role_name)
         ps_assign = self._ps(key)
         ps_assign.last_assigned_task = task
+        # New task → fresh assign timestamp so done()'s evidence scan only
+        # picks up screenshots captured for THIS task, not a stale one left
+        # over from a previous assignment to the same pane (issue #5).
+        ps_assign.assign_ts = time.time()
         # New task → fresh one-shot budget for the Stop-hook done-gate.
         ps_assign.stop_gate_notified = False
         # New task → fresh auto-resume park/wake budget (issue: limit-aware
@@ -1510,6 +1534,69 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         proc.start("git", ["status", "--porcelain"])
 
     @staticmethod
+    def _evidence_stat_mtime(path: pathlib.Path) -> float | None:
+        """`path.stat().st_mtime`, retrying past a transient Windows lock.
+
+        Returns None (skip this file) if every attempt fails — done() must
+        never blow up because a screenshot was mid-write or briefly locked.
+        """
+        for attempt in range(_EVIDENCE_STAT_RETRIES):
+            try:
+                return path.stat().st_mtime
+            except PermissionError:
+                if attempt == _EVIDENCE_STAT_RETRIES - 1:
+                    return None
+                time.sleep(_EVIDENCE_STAT_RETRY_SLEEP_SEC)
+            except OSError:
+                return None
+        return None
+
+    @classmethod
+    def _scan_done_evidence(cls, project_ns: str, from_role: str, assign_ts: float) -> str:
+        """Scan the pane's artifacts dir for screenshots newer than `assign_ts`.
+
+        Returns a `'📸 evidence: <paths>'` suffix to append to the done notice,
+        a bare `'⚠ no screenshot evidence'` warning when `from_role` is one of
+        the screenshot-expected roles (qa/critic/designer) and none were
+        found, or `''` otherwise. Degrades silently on any filesystem hiccup —
+        a missing/unreadable artifacts dir just yields no evidence, never an
+        exception (issue #5).
+        """
+        if assign_ts <= 0:
+            # No tracked assignment (pane never went through _assign_dispatch,
+            # e.g. a bare `takkub done` in a test or a legacy PaneState) — we
+            # have no window to scan, so say nothing rather than guess.
+            return ""
+
+        base_role, _ = _split_shard(from_role)
+        now = time.time()
+        today = datetime.now().strftime("%Y-%m-%d")
+        artifacts_dir = RUNTIME_DIR / "exports" / today / project_ns
+        try:
+            candidates = list(artifacts_dir.rglob("*")) if artifacts_dir.is_dir() else []
+        except OSError:
+            candidates = []
+
+        found: list[tuple[float, pathlib.Path]] = []
+        for path in candidates:
+            try:
+                if not path.is_file() or path.suffix.lower() not in _EVIDENCE_EXTENSIONS:
+                    continue
+            except OSError:
+                continue
+            mt = cls._evidence_stat_mtime(path)
+            if mt is None or mt < assign_ts or mt > now - _EVIDENCE_SETTLE_SEC:
+                continue
+            found.append((mt, path))
+
+        if found:
+            found.sort(key=lambda item: item[0], reverse=True)
+            newest = found[:_EVIDENCE_MAX_FILES]
+            paths = ", ".join(str(p).replace("\\", "/") for _, p in newest)
+            return f"📸 evidence: {paths}"
+        return "⚠ no screenshot evidence" if base_role in _EVIDENCE_WARN_ROLES else ""
+
+    @staticmethod
     def _build_verify_fail_handoff(from_role: str, note: str) -> str:
         """Lead-facing prompt when a pane reports `done --fail` (QA/verify failed).
 
@@ -1564,6 +1651,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         had_pipeline_run_id = _ps_done.pipeline_run_id
         had_plan_fanout = _ps_done.plan_fanout
         had_worktree = _ps_done.worktree
+        had_assign_ts = _ps_done.assign_ts
 
         # Opt-in commit handoff: if assign() was called with requires_commit=True,
         # check for a dirty working tree and warn Lead (the agent isn't blocked —
@@ -1579,6 +1667,15 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         # close() (scheduled 2.5 s below) will also pop; second pop is a no-op.
         self._idle_state.pop(key, None)
         getattr(self, "_pane_state", {}).pop(key, None)
+
+        # Screenshot evidence auto-attach (issue #5): scan the pane's artifacts
+        # dir for images newer than its assign_ts and fold the result into
+        # `note` so every downstream consumer (the done/FAIL notice, the shard
+        # aggregate, the decision note) carries it — `done --fail` gets
+        # evidence exactly the same way a clean done does.
+        evidence_line = self._scan_done_evidence(project_ns, from_role, had_assign_ts)
+        if evidence_line:
+            note = f"{note}\n{evidence_line}" if note else evidence_line
 
         # notify Lead in the same project (a teammate in project-a mustn't
         # nudge the Lead in project-b by mistake). `done --fail` swaps the plain

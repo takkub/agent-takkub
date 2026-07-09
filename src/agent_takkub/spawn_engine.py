@@ -171,6 +171,11 @@ class PaneState:
     # slashes always (`takkub task show` and the pointer text share this
     # value verbatim).
     last_assigned_task_file: str | None = None
+    # assign_ts: wall-clock when this pane's current task was dispatched
+    # (_assign_dispatch). done() reads this BEFORE popping the PaneState so it
+    # can scan the artifacts dir for screenshots newer than the assignment
+    # (issue #5 — screenshot evidence auto-attach). 0.0 = never assigned.
+    assign_ts: float = 0.0
     # _requires_commit_on_done: warns Lead of uncommitted changes when done() fires
     requires_commit_on_done: bool = False
     # _auto_chain_panes: pane is tagged --auto-chain; done() fires verify-hop when last
