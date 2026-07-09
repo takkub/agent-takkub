@@ -136,6 +136,13 @@ class _Bridge(QObject):
                     )
                 except api.RemoteApiError as exc:
                     pending.reply.put((exc.status, {"ok": False, "msg": exc.msg}))
+            elif pending.action == "close":
+                try:
+                    pending.reply.put(
+                        (200, api.close_project(self._orch, pending.params.get("project")))
+                    )
+                except api.RemoteApiError as exc:
+                    pending.reply.put((exc.status, {"ok": False, "msg": exc.msg}))
             elif pending.action == "lead_history":
                 project_ns = self._resolve_scoped_project(pending.params.get("project"))
                 pending.reply.put(
@@ -398,6 +405,18 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
                 self._send_json(400, {"ok": False, "msg": "bad json"})
                 return
             self._respond_marshaled("open", {"project": payload.get("project")})
+        elif rest == "/api/close":
+            if not self._check_bearer() or not self._check_password_gate():
+                return
+            if not self.server.auth.allows_control():
+                self._send_json(403, {"ok": False, "msg": "view mode: control is disabled"})
+                return
+            try:
+                payload = json.loads(body.decode("utf-8")) if body else {}
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                self._send_json(400, {"ok": False, "msg": "bad json"})
+                return
+            self._respond_marshaled("close", {"project": payload.get("project")})
         else:
             self._reject()
 

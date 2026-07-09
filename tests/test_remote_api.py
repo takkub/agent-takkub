@@ -228,6 +228,61 @@ class TestActivity:
         for leaked in ("implement", "/auth/login", "transcript.jsonl", "secret-project"):
             assert leaked not in dumped
 
+    def test_working_lead_included_with_runtime(self, monkeypatch):
+        now = 1_000.0
+        monkeypatch.setattr(api.time, "time", lambda: now)
+        orch = _FakeOrchWithPanes({"proj-a": {"lead": _FakePane("working", now - 45)}})
+        result = api.activity(orch)
+        assert result == {
+            "projects": [
+                {"project": "proj-a", "roles": [], "lead": {"state": "working", "runtime_sec": 45}}
+            ]
+        }
+
+    def test_idle_lead_included_with_zero_runtime_not_stale_working_start(self, monkeypatch):
+        # W4: an idle Lead's _working_start is cleared by set_state, but even
+        # if a caller left a stale value there, idle must never reuse it.
+        now = 1_000.0
+        monkeypatch.setattr(api.time, "time", lambda: now)
+        orch = _FakeOrchWithPanes({"proj-a": {"lead": _FakePane("idle", now - 500)}})
+        result = api.activity(orch)
+        assert result == {
+            "projects": [
+                {"project": "proj-a", "roles": [], "lead": {"state": "idle", "runtime_sec": 0}}
+            ]
+        }
+
+    def test_lead_and_working_teammates_both_reported(self, monkeypatch):
+        now = 2_000.0
+        monkeypatch.setattr(api.time, "time", lambda: now)
+        orch = _FakeOrchWithPanes(
+            {
+                "proj-a": {
+                    "lead": _FakePane("idle", None),
+                    "backend": _FakePane("working", now - 10),
+                }
+            }
+        )
+        result = api.activity(orch)
+        assert result == {
+            "projects": [
+                {
+                    "project": "proj-a",
+                    "roles": [{"role": "backend", "runtime_sec": 10}],
+                    "lead": {"state": "idle", "runtime_sec": 0},
+                }
+            ]
+        }
+
+    def test_project_with_only_idle_lead_and_no_working_roles_is_not_omitted(self, monkeypatch):
+        orch = _FakeOrchWithPanes({"proj-a": {"lead": _FakePane("idle", None)}})
+        result = api.activity(orch)
+        assert result == {
+            "projects": [
+                {"project": "proj-a", "roles": [], "lead": {"state": "idle", "runtime_sec": 0}}
+            ]
+        }
+
 
 class TestLeadSay:
     def test_empty_message_rejected(self, fake_orch):
@@ -348,6 +403,71 @@ class TestOpenProject:
 
         with pytest.raises(api.RemoteApiError) as excinfo:
             api.open_project(_FakeOrchWithParent(_NoOpenTabMethod()), "proj-a")
+        assert excinfo.value.status == 500
+
+
+class _FakeMainWindowClose:
+    def __init__(self, ok: bool = True, msg: str = "closed") -> None:
+        self.closed: list[str] = []
+        self._ok = ok
+        self._msg = msg
+
+    def _close_project_tab(self, project: str, confirm: bool = False):
+        self.closed.append(project)
+        assert confirm is False, "remote close must never trigger the desktop Qt confirm dialog"
+        return self._ok, self._msg
+
+
+class TestCloseProject:
+    def test_rejects_project_not_in_projects_json(self, monkeypatch):
+        monkeypatch.setattr(api._config, "list_project_names", lambda: ["proj-a"])
+        monkeypatch.setattr(api._config, "get_open_tabs", lambda: ["proj-a"])
+        with pytest.raises(api.RemoteApiError) as excinfo:
+            api.close_project(_FakeOrchWithParent(_FakeMainWindowClose()), "ghost-project")
+        assert excinfo.value.status == 400
+
+    def test_rejects_non_string_project(self, monkeypatch):
+        monkeypatch.setattr(api._config, "list_project_names", lambda: ["proj-a"])
+        monkeypatch.setattr(api._config, "get_open_tabs", lambda: ["proj-a"])
+        with pytest.raises(api.RemoteApiError) as excinfo:
+            api.close_project(_FakeOrchWithParent(_FakeMainWindowClose()), 123)
+        assert excinfo.value.status == 400
+
+    def test_already_closed_is_idempotent_noop(self, monkeypatch):
+        monkeypatch.setattr(api._config, "list_project_names", lambda: ["proj-a"])
+        monkeypatch.setattr(api._config, "get_open_tabs", lambda: [])
+        main_window = _FakeMainWindowClose()
+        result = api.close_project(_FakeOrchWithParent(main_window), "proj-a")
+        assert result == {"ok": True, "project": "proj-a"}
+        assert main_window.closed == [], (
+            "already-closed project must not re-trigger _close_project_tab"
+        )
+
+    def test_success_closes_via_main_window_without_confirm_dialog(self, monkeypatch):
+        monkeypatch.setattr(api._config, "list_project_names", lambda: ["proj-a"])
+        monkeypatch.setattr(api._config, "get_open_tabs", lambda: ["proj-a"])
+        main_window = _FakeMainWindowClose(ok=True, msg="closed tab · proj-a")
+        result = api.close_project(_FakeOrchWithParent(main_window), "proj-a")
+        assert result == {"ok": True, "project": "proj-a"}
+        assert main_window.closed == ["proj-a"]
+
+    def test_teardown_failure_surfaces_as_conflict(self, monkeypatch):
+        monkeypatch.setattr(api._config, "list_project_names", lambda: ["proj-a"])
+        monkeypatch.setattr(api._config, "get_open_tabs", lambda: ["proj-a"])
+        main_window = _FakeMainWindowClose(ok=False, msg="no open tab for project 'proj-a'")
+        with pytest.raises(api.RemoteApiError) as excinfo:
+            api.close_project(_FakeOrchWithParent(main_window), "proj-a")
+        assert excinfo.value.status == 409
+
+    def test_main_window_unreachable_raises_server_error(self, monkeypatch):
+        monkeypatch.setattr(api._config, "list_project_names", lambda: ["proj-a"])
+        monkeypatch.setattr(api._config, "get_open_tabs", lambda: ["proj-a"])
+
+        class _NoCloseTabMethod:
+            pass
+
+        with pytest.raises(api.RemoteApiError) as excinfo:
+            api.close_project(_FakeOrchWithParent(_NoCloseTabMethod()), "proj-a")
         assert excinfo.value.status == 500
 
 

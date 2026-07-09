@@ -51,6 +51,9 @@ def server(monkeypatch):
     )
     monkeypatch.setattr(api, "lead_say", lambda orch, text, project: {"ok": True})
     monkeypatch.setattr(api, "open_project", lambda orch, project: {"ok": True, "project": project})
+    monkeypatch.setattr(
+        api, "close_project", lambda orch, project: {"ok": True, "project": project}
+    )
 
     config = RemoteConfig(bind_port=0, secret_path="sek", token="tok", mode="control")
     srv = http_server.start_server(config, _FakeOrch())
@@ -303,6 +306,84 @@ class TestMarshaledRoutes:
         def _do() -> tuple[int, dict]:
             req = urllib.request.Request(
                 _url(srv, "/sek/api/open"),
+                data=json.dumps({"project": "ghost"}).encode("utf-8"),
+                headers={"Authorization": "Bearer tok", "Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    return resp.status, json.loads(resp.read())
+            except urllib.error.HTTPError as exc:
+                return exc.code, json.loads(exc.read())
+
+        try:
+            status, body = _run_pumped(_do)
+        finally:
+            srv.stop()
+        assert status == 400
+        assert body == {"ok": False, "msg": "unknown project"}
+
+    def test_close_in_control_mode_returns_ok(self, server):
+        app = QCoreApplication.instance()
+        outcome: dict = {}
+
+        def _do() -> None:
+            req = urllib.request.Request(
+                _url(server, "/sek/api/close"),
+                data=json.dumps({"project": "proj-a"}).encode("utf-8"),
+                headers={"Authorization": "Bearer tok", "Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    outcome["status"] = resp.status
+                    outcome["body"] = json.loads(resp.read())
+            except urllib.error.HTTPError as exc:
+                outcome["status"] = exc.code
+                outcome["body"] = json.loads(exc.read())
+
+        t = threading.Thread(target=_do)
+        t.start()
+        assert _pump_until(app, lambda: not t.is_alive())
+        t.join(timeout=1)
+        assert outcome["status"] == 200
+        assert outcome["body"] == {"ok": True, "project": "proj-a"}
+
+    def test_close_in_view_mode_is_forbidden_without_marshaling(self, monkeypatch):
+        monkeypatch.setattr(
+            api, "close_project", lambda orch, project: {"ok": True, "project": project}
+        )
+        config = RemoteConfig(bind_port=0, secret_path="sek", token="tok", mode="view")
+        srv = http_server.start_server(config, _FakeOrch())
+        try:
+            req = urllib.request.Request(
+                _url(srv, "/sek/api/close"),
+                data=json.dumps({"project": "proj-a"}).encode("utf-8"),
+                headers={"Authorization": "Bearer tok"},
+                method="POST",
+            )
+            try:
+                urllib.request.urlopen(req, timeout=5)
+                pytest.fail("expected HTTPError")
+            except urllib.error.HTTPError as exc:
+                assert exc.code == 403
+        finally:
+            srv.stop()
+
+    def test_close_rejects_unknown_project_via_bridge_error(self, monkeypatch):
+        """The route must surface `api.close_project`'s `RemoteApiError`
+        status/msg verbatim, not flatten it to a generic 500."""
+
+        def _fake_close(orch, project):
+            raise api.RemoteApiError(400, "unknown project")
+
+        monkeypatch.setattr(api, "close_project", _fake_close)
+        config = RemoteConfig(bind_port=0, secret_path="sek", token="tok", mode="control")
+        srv = http_server.start_server(config, _FakeOrch())
+
+        def _do() -> tuple[int, dict]:
+            req = urllib.request.Request(
+                _url(srv, "/sek/api/close"),
                 data=json.dumps({"project": "ghost"}).encode("utf-8"),
                 headers={"Authorization": "Bearer tok", "Content-Type": "application/json"},
                 method="POST",

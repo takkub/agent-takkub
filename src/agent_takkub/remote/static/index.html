@@ -484,6 +484,21 @@
     font-size: 0.95rem;
     font-weight: bold;
   }
+  .project-row .close-btn {
+    flex: 0 0 auto;
+    margin-left: auto;
+    width: 30px;
+    height: 30px;
+    border-radius: 9px;
+    background: var(--card2);
+    border: 1px solid var(--line);
+    color: var(--fg-dim);
+    font-size: 0.85rem;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .project-row .close-btn:active { background: var(--danger-dim, rgba(248, 113, 113, 0.15)); color: var(--danger); }
+  .project-row.closing { opacity: 0.55; pointer-events: none; }
   .msg.ok {
     border-color: rgba(52, 211, 153, 0.4);
   }
@@ -664,6 +679,15 @@
     border-radius: 999px;
     padding: 2px 7px;
   }
+  .role-chip.idle { opacity: 0.55; }
+  .pulse-card-header-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+  .pulse-card-header-row .pulse-card-header { margin-bottom: 0; }
   .pulse-empty {
     flex: 1 1 auto;
     display: flex;
