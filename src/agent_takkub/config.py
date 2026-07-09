@@ -410,6 +410,18 @@ def set_active_project(name: str) -> bool:
     return True
 
 
+def clear_active_project() -> None:
+    """Clear `active` in projects.json (e.g. the last open tab was closed).
+
+    `active_project()` already treats a missing/empty `active` as "no active
+    project" (`if not name: return None, {}`), so writing `None` here is safe
+    for old readers too — they'll just see no active project instead of a
+    stale name pointing at a project with no open tab."""
+    data = load_projects()
+    data["active"] = None
+    _write_json_atomic(PROJECTS_JSON, data)
+
+
 def get_open_tabs() -> list[str]:
     """Project names of every tab the user wants restored on next launch.
 

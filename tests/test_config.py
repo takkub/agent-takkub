@@ -82,6 +82,24 @@ class TestSetActiveProject:
         assert data["active"] == "demo"  # unchanged
 
 
+class TestClearActiveProject:
+    def test_clears_active(self, projects_file: Path) -> None:
+        config.clear_active_project()
+        data = json.loads(projects_file.read_text(encoding="utf-8"))
+        assert data["active"] is None
+
+    def test_active_project_after_clear_returns_none(self, projects_file: Path) -> None:
+        config.clear_active_project()
+        name, proj = config.active_project()
+        assert name is None
+        assert proj == {}
+
+    def test_projects_dict_untouched(self, projects_file: Path) -> None:
+        config.clear_active_project()
+        data = json.loads(projects_file.read_text(encoding="utf-8"))
+        assert set(data["projects"]) == {"demo", "empty"}
+
+
 class TestDefaultCwdForRole:
     def test_frontend_picks_web(self, projects_file: Path) -> None:
         assert config.default_cwd_for_role("frontend") == "/tmp/demo/web"
