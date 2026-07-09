@@ -309,7 +309,11 @@ class TestSessionReportRefiresBridgeForNewSession:
     bridge for the new session-uuid — spawn()'s own call only ever sees the
     uuid it stamped at spawn time. #110: this must only happen once the
     PRIOR poll has actually resolved (delivered/dropped) — two session_report
-    events for the same still-in-flight pane boot must not race two polls."""
+    events for the same still-in-flight pane boot must not race two polls.
+    #112: refiring for a new uuid is only correct when it's a genuinely NEW
+    session object (real respawn) — for the SAME still-alive PtySession
+    object, delivery is lifetime-once regardless of how many more uuids
+    later `SessionStart` hooks report for it."""
 
     def test_resume_with_new_uuid_does_not_refire_while_same_session_pending(
         self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
@@ -337,13 +341,47 @@ class TestSessionReportRefiresBridgeForNewSession:
         assert ok is True
         assert orch.inject_slash_command_when_ready.call_count == 1
 
-    def test_resume_with_new_uuid_fires_bridge_after_prior_poll_resolves(
+    def test_same_session_object_never_refires_after_delivery_even_with_new_uuid(
         self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A genuinely later manual /resume on the SAME still-live pane —
-        after the first bridge already delivered or dropped — must still
-        re-fire for the new session (the #107 contract this guard must not
-        regress)."""
+        """#112 repro — the actual events.log 2026-07-09 16:49:51-16:50:26
+        shape: two `SessionStart` hooks for the SAME live PtySession object,
+        29s apart (long enough that the FIRST poll had already delivered and
+        been popped out of the transient pending-session guard) each report
+        a DIFFERENT uuid (startup's transient uuid, then resume's real one).
+        Since it's the same physical session object that already got
+        `/remote-control` once, the second hook must NOT refire it — this is
+        the corrected invariant ('at most once per session object, ever'),
+        superseding the old (buggy) per-uuid-only expectation."""
+        orch.inject_slash_command_when_ready = MagicMock()  # type: ignore[method-assign]
+        pane = MagicMock()
+        pane.session = MagicMock()  # same object across both hook firings
+        orch._panes_by_project.setdefault(TEST_PROJECT, {})[LEAD.name] = pane
+
+        ok, _ = orch.consume_session_report(
+            LEAD.name, project=TEST_PROJECT, session_id="uuid-boot", source="startup"
+        )
+        assert ok is True
+        assert orch.inject_slash_command_when_ready.call_count == 1
+        # Simulate the first poll finishing (delivered) well before the
+        # second, later hook — matches the real 29s gap, not a concurrent race.
+        _, first_kwargs = orch.inject_slash_command_when_ready.call_args
+        first_kwargs["on_delivered"]()
+
+        ok, _ = orch.consume_session_report(
+            LEAD.name, project=TEST_PROJECT, session_id="uuid-resumed", source="resume"
+        )
+        assert ok is True
+        assert orch.inject_slash_command_when_ready.call_count == 1
+
+    def test_new_session_object_after_delivery_still_refires(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A genuine respawn (crash/window-expiry) after the prior session
+        already delivered must still fire — `spawn()` always constructs a
+        brand-new PtySession object, so the lifetime delivered-session guard
+        (keyed on object identity) never blocks a real new process, only a
+        later uuid report for the SAME still-alive one (#112)."""
         orch.inject_slash_command_when_ready = MagicMock()  # type: ignore[method-assign]
         pane = MagicMock()
         pane.session = MagicMock()
@@ -354,12 +392,14 @@ class TestSessionReportRefiresBridgeForNewSession:
         )
         assert ok is True
         assert orch.inject_slash_command_when_ready.call_count == 1
-        # Simulate the first poll finishing (delivered) before the resume.
         _, first_kwargs = orch.inject_slash_command_when_ready.call_args
         first_kwargs["on_delivered"]()
 
+        # Genuine respawn: a brand-new PtySession object is attached.
+        pane.session = MagicMock()
+
         ok, _ = orch.consume_session_report(
-            LEAD.name, project=TEST_PROJECT, session_id="uuid-resumed", source="resume"
+            LEAD.name, project=TEST_PROJECT, session_id="uuid-after-respawn", source="startup"
         )
         assert ok is True
         assert orch.inject_slash_command_when_ready.call_count == 2

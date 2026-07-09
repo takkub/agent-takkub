@@ -1809,6 +1809,25 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         real respawn — only the uuid-keyed dedup above governs those (see
         test_remote_bridge_autofire.py's TestRespawnNewUuidFiresAgain /
         TestResumePathDoesNotDoubleFire for that contract).
+
+        #112: the uuid-keyed + pending-session guards above still aren't
+        enough once the FIRST poll already finished delivering. Proven via
+        events.log (2026-07-09 16:49:51-16:50:26): the same `--resume` boot's
+        two `SessionStart` hooks landed 29s apart — long enough that the
+        first poll (uuid A) had already delivered, run `_on_delivered`, and
+        been popped out of `_lead_remote_bridge_pending_session` before the
+        second hook (uuid B, same physical session) arrived. Neither the
+        uuid-keyed dedup (different key) nor the pending-session guard
+        (nothing pending anymore) catches that. Fixed with a third,
+        NON-transient guard keyed on session-object identity that survives
+        past delivery: `_lead_remote_bridge_delivered_session`. Checked here
+        before starting a new poll and set (never cleared) in
+        `_on_delivered()` — a session object that already got
+        `/remote-control` never gets it again, no matter how many more
+        `SessionStart` hooks report new uuids for it. A genuinely new
+        process (respawn/crash/window-expiry) gets a new PtySession object
+        from `spawn()`, so identity comparison alone invalidates the guard
+        for real respawns without any separate reset step.
         """
         session_uuid = self._ps(exit_key).session_uuid
         if not session_uuid:
@@ -1819,6 +1838,11 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             return
         pane = self._project_panes(project_ns).get(LEAD.name)
         current_session = pane.session if pane is not None else None
+        if (
+            current_session is not None
+            and self._lead_remote_bridge_delivered_session.get(exit_key) is current_session
+        ):
+            return
         if (
             current_session is not None
             and self._lead_remote_bridge_pending_session.get(exit_key) is current_session
@@ -1832,6 +1856,8 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             self._lead_remote_bridge_pending.discard(key)
             self._lead_remote_bridge_pending_session.pop(exit_key, None)
             self._lead_remote_bridge_fired.add(key)
+            if current_session is not None:
+                self._lead_remote_bridge_delivered_session[exit_key] = current_session
 
         def _on_dropped(_reason: str) -> None:
             # Left out of _fired on purpose: _reap_remote_bridge (idle

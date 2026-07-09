@@ -606,6 +606,22 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         # so this guard never blocks a real respawn. See
         # SpawnEngineMixin._maybe_fire_remote_bridge.
         self._lead_remote_bridge_pending_session: dict[str, object] = {}
+        # #112: `_lead_remote_bridge_pending_session` above only guards while
+        # a poll is *in flight* — it's cleared the moment that poll finishes
+        # (delivered or dropped), so it can't stop a SECOND, LATER
+        # `SessionStart` hook (a `--resume` boot's "startup" then "resume"
+        # firings can land 10s+ apart, well after the first poll already
+        # delivered) from re-firing the bridge for the same still-alive
+        # session under its new uuid. This dict is the "lifetime" sibling:
+        # keyed f"{project_ns}::{role}" -> the PtySession object that has
+        # ALREADY had `/remote-control` delivered, and — unlike the pending
+        # dict — is never cleared on delivery/drop. It's only ever
+        # overwritten, and only with a genuinely NEW PtySession object,
+        # which happens exactly once per real respawn (SpawnEngineMixin.spawn
+        # constructs a fresh PtySession every call) — so identity comparison
+        # alone gives "invalidate on new process, not on uuid change" for
+        # free, with no separate invalidation step needed.
+        self._lead_remote_bridge_delivered_session: dict[str, object] = {}
 
         # Per-cockpit-run capability token. Injected only into the Lead pane
         # env (TAKKUB_LEAD_TOKEN) so the Lead takkub CLI can authenticate
