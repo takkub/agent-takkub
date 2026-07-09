@@ -72,6 +72,13 @@ _CTRL_A = 0x01
 _CTRL_E = 0x05
 _ESC = 0x1B
 
+# Real SGR/X10 mouse and CSI/SS3 sequences never exceed this many bytes
+# (the longest realistic case is an SGR report with 4-5 digit coordinates).
+# Caps how long an unresolved tail is buffered waiting for a terminator, so
+# a stream that never produces one (garbage, or a genuinely bare `[`/`O`
+# typed as literal text right after Esc) can't grow the buffer forever.
+_MAX_ESCAPE_TAIL = 64
+
 
 @dataclass(frozen=True)
 class LeadDraftState:
@@ -80,6 +87,13 @@ class LeadDraftState:
     # Wall-clock (time.time()) when this project's draft first became
     # non-"empty"; 0.0 while "empty". Drives `draft_hold_expired()`.
     pending_since: float = 0.0
+    # Raw bytes held back from the *end* of the previous chunk because they
+    # were a syntactically valid but not-yet-terminated prefix of an escape
+    # sequence (mouse/CSI/SS3) or a UTF-8 multibyte character — a PTY under
+    # load can split either across two separate reads (issue #111). The next
+    # `advance_draft_state()` call prepends this before parsing so the
+    # sequence is reassembled instead of being misread as printable text.
+    pending_tail: bytes = b""
 
 
 def _cleared() -> LeadDraftState:
@@ -90,12 +104,76 @@ def _held(state: str, draft_len: int, prev: LeadDraftState, now: float) -> LeadD
     return LeadDraftState(state=state, draft_len=draft_len, pending_since=prev.pending_since or now)
 
 
+def _incomplete_escape_tail(tail: bytes) -> bool:
+    """True when `tail` (the unconsumed bytes from an Esc byte through the
+    end of the currently available data — already proven not to fully match
+    a mouse/CSI/SS3 sequence) is still a valid, unterminated prefix of one,
+    i.e. more bytes are needed before it can be classified either way. Only
+    resolves to "definitely not incomplete" (False) once a byte is seen that
+    could never continue any of these families — bare Esc is proven, never
+    assumed, per issue #111."""
+    if len(tail) > _MAX_ESCAPE_TAIL:
+        return False  # runaway — stop waiting, fall back to bare-Esc handling
+    if len(tail) == 1:
+        return True  # just Esc — next byte ('['/'O' vs. anything else) unseen
+    c1 = tail[1]
+    if c1 not in (0x5B, 0x4F):  # not '[' and not 'O'
+        return False  # can only be a genuine bare Esc
+    if c1 == 0x4F:  # SS3: \x1bO + exactly one terminator letter
+        return len(tail) == 2
+    # c1 == '[' — CSI family, including both mouse encodings.
+    if len(tail) == 2:
+        return True  # '[' seen, but mouse-marker-vs-CSI-param byte unseen
+    c2 = tail[2]
+    if c2 == 0x3C:  # '<' — SGR mouse: digits ';' digits ';' digits (M|m)
+        body = tail[3:]
+        return all(0x30 <= ch <= 0x39 or ch == 0x3B for ch in body)
+    if c2 == 0x4D:  # 'M' — X10 mouse: exactly 3 raw coordinate bytes follow
+        return len(tail) - 3 < 3
+    # Generic CSI: [0-9;]* then a terminator letter/`~` (Home/End/Delete/…).
+    body = tail[2:]
+    return all(0x30 <= ch <= 0x39 or ch == 0x3B for ch in body)
+
+
+def _split_incomplete_utf8_tail(chunk: bytes) -> tuple[bytes, bytes]:
+    """Split a printable-byte run whose end coincides with the end of the
+    currently available data into `(complete, incomplete_tail)` — if the run
+    ends mid-way through a multibyte UTF-8 character (e.g. Thai, split
+    across two PTY reads), the partial lead/continuation bytes are returned
+    as `incomplete_tail` instead of being decode-and-dropped by
+    `errors="ignore"`, which would silently undercount the character."""
+    n = len(chunk)
+    for back in range(1, min(4, n) + 1):
+        b0 = chunk[n - back]
+        if b0 & 0xC0 == 0x80:
+            continue  # continuation byte — keep looking further back
+        if b0 & 0x80 == 0x00:
+            break  # plain ASCII — nothing multibyte pending
+        if b0 & 0xE0 == 0xC0:
+            need = 2
+        elif b0 & 0xF0 == 0xE0:
+            need = 3
+        elif b0 & 0xF8 == 0xF0:
+            need = 4
+        else:
+            break  # not a valid UTF-8 lead byte — leave to errors="ignore"
+        if back < need:
+            return chunk[: n - back], chunk[n - back :]
+        break
+    return chunk, b""
+
+
 def advance_draft_state(prev: LeadDraftState, data: bytes, now: float) -> LeadDraftState:
     """Fold one chunk of raw Lead-pane input bytes into `prev`, returning the
     next `LeadDraftState`. `now` is the wall-clock the caller observed the
     bytes at (`time.time()`) — used only to stamp `pending_since` on the
     empty→non-empty transition."""
-    st = prev
+    if prev.pending_tail:
+        data = prev.pending_tail + data
+    st = LeadDraftState(
+        state=prev.state, draft_len=prev.draft_len, pending_since=prev.pending_since
+    )
+    pending_tail = b""
     i = 0
     n = len(data)
     while i < n:
@@ -105,9 +183,14 @@ def advance_draft_state(prev: LeadDraftState, data: bytes, now: float) -> LeadDr
             if m_mouse is not None:
                 i = m_mouse.end()  # mouse click/release/wheel — always a no-op
                 continue
+            tail = data[i:n]
+            if _incomplete_escape_tail(tail):
+                pending_tail = bytes(tail)  # wait for the rest — see docstring
+                i = n
+                continue
             m = _CSI.match(data, i) or _SS3.match(data, i)
             if m is None:
-                st = _cleared()  # bare Esc key
+                st = _cleared()  # proven bare Esc key
                 i += 1
                 continue
             seq = m.group()
@@ -141,13 +224,29 @@ def advance_draft_state(prev: LeadDraftState, data: bytes, now: float) -> LeadDr
         j = i
         while j < n and data[j] >= 0x20 and data[j] != 0x7F:
             j += 1
-        added = len(data[i:j].decode("utf-8", errors="ignore"))
-        i = j
+        run = data[i:j]
+        if j == n:
+            run, utf8_tail = _split_incomplete_utf8_tail(run)
+        else:
+            utf8_tail = b""
+        added = len(run.decode("utf-8", errors="ignore"))
+        if utf8_tail:
+            pending_tail = utf8_tail
+            i = n
+        else:
+            i = j
         if added == 0:
             continue
         if st.state == UNKNOWN_NONEMPTY:
             continue  # length already unknowable; stay held
         st = _held(NONEMPTY, st.draft_len + added, st, now)
+    if pending_tail:
+        return LeadDraftState(
+            state=st.state,
+            draft_len=st.draft_len,
+            pending_since=st.pending_since,
+            pending_tail=pending_tail,
+        )
     return st
 
 

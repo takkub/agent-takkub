@@ -81,10 +81,26 @@ class TestExplicitClears:
         st = _advance(st, b"\n")
         assert st.state == EMPTY
 
-    def test_esc_clears(self):
+    def test_esc_clears_in_one_call_when_next_byte_rules_out_a_sequence(self):
+        st = _advance(LeadDraftState(), b"draft")
+        st = _advance(st, b"\x1bx")  # Esc + a byte that can't start CSI/SS3
+        assert st.state == NONEMPTY
+        assert st.draft_len == 1  # "draft" cleared, "x" typed anew
+
+    def test_lone_esc_stays_ambiguous_until_the_next_byte_arrives(self):
+        """A standalone Esc keypress can be delivered as a single byte with
+        nothing else in that read() — indistinguishable, from the byte
+        stream alone, from the opening byte of a CSI/SS3/mouse sequence a
+        PTY under load split across two reads. It can only be proven bare
+        once a following byte rules out '['/'O' (issue #111); resolving
+        eagerly is exactly the bug this guards against."""
         st = _advance(LeadDraftState(), b"draft")
         st = _advance(st, b"\x1b")
-        assert st.state == EMPTY
+        assert st.state == NONEMPTY  # not yet proven — still holding "draft"
+        assert st.draft_len == 5
+        st = _advance(st, b"x")  # next byte proves it: genuine bare Esc
+        assert st.state == NONEMPTY
+        assert st.draft_len == 1
 
     def test_ctrl_c_clears(self):
         st = _advance(LeadDraftState(), b"draft")
@@ -257,6 +273,79 @@ class TestMultibyteThai:
         st = _advance(st, b"\x7f" * len(thai))
         assert st.state == EMPTY
         assert st.draft_len == 0
+
+
+class TestSplitMouseSequences:
+    """A PTY under load can flush a single logical write across two
+    separate reads — if the split lands inside a mouse-report escape
+    sequence, the first half matches nothing on its own, and (pre-fix) the
+    second half fell through to the printable-run branch and got counted as
+    typed characters that could never be un-typed by any real keystroke,
+    leaving the draft stuck forever (issue #111, 100% repro). Every interior
+    split point of the sequence must reassemble losslessly across the two
+    `advance_draft_state()` calls."""
+
+    SGR = b"\x1b[<0;42;13M"
+
+    def test_sgr_split_at_every_interior_byte_reassembles_to_noop(self):
+        for cut in range(1, len(self.SGR)):
+            first, second = self.SGR[:cut], self.SGR[cut:]
+            st = _advance(LeadDraftState(), first)
+            st = _advance(st, second)
+            assert st.state == EMPTY, f"cut={cut} first={first!r} second={second!r}"
+            assert st.draft_len == 0, f"cut={cut}"
+            assert st.pending_tail == b"", f"cut={cut}"
+
+    def test_sgr_split_does_not_disturb_existing_draft(self):
+        for cut in range(1, len(self.SGR)):
+            first, second = self.SGR[:cut], self.SGR[cut:]
+            st = _advance(LeadDraftState(), b"abc")
+            st = _advance(st, first)
+            st = _advance(st, second)
+            assert st.state == NONEMPTY, f"cut={cut}"
+            assert st.draft_len == 3, f"cut={cut}"
+
+    X10 = b"\x1b[M" + bytes([0x20, 0x21, 0x22])
+
+    def test_x10_legacy_split_at_every_interior_byte_reassembles_to_noop(self):
+        for cut in range(1, len(self.X10)):
+            first, second = self.X10[:cut], self.X10[cut:]
+            st = _advance(LeadDraftState(), first)
+            st = _advance(st, second)
+            assert st.state == EMPTY, f"cut={cut} first={first!r} second={second!r}"
+            assert st.draft_len == 0, f"cut={cut}"
+            assert st.pending_tail == b"", f"cut={cut}"
+
+    def test_sgr_split_byte_at_a_time_streaming(self):
+        st = LeadDraftState()
+        for byte in self.SGR:
+            st = _advance(st, bytes([byte]))
+        assert st.state == EMPTY
+        assert st.draft_len == 0
+        assert st.pending_tail == b""
+
+
+class TestSplitMultibyteThai:
+    def test_thai_char_split_across_chunk_boundary_still_counts_as_one(self):
+        thai = "สวัสดี"
+        encoded = thai.encode("utf-8")
+        for cut in range(1, len(encoded)):
+            first, second = encoded[:cut], encoded[cut:]
+            st = _advance(LeadDraftState(), first)
+            st = _advance(st, second)
+            assert st.state == NONEMPTY, f"cut={cut}"
+            assert st.draft_len == len(thai), f"cut={cut} got {st.draft_len}"
+            assert st.pending_tail == b"", f"cut={cut}"
+
+    def test_thai_char_split_byte_at_a_time_streaming(self):
+        thai = "สวัสดี"
+        encoded = thai.encode("utf-8")
+        st = LeadDraftState()
+        for byte in encoded:
+            st = _advance(st, bytes([byte]))
+        assert st.state == NONEMPTY
+        assert st.draft_len == len(thai)
+        assert st.pending_tail == b""
 
 
 class TestInjectionGate:
