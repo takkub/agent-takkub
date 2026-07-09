@@ -456,6 +456,50 @@
     padding: 4px 12px 8px;
     line-height: 1.5;
   }
+  #lead-picker-banner {
+    display: none;
+    margin: 0 12px 8px;
+    padding: 10px 12px;
+    border-radius: 12px;
+    background: rgba(251, 191, 36, 0.12);
+    border: 1px solid rgba(251, 191, 36, 0.4);
+    color: var(--work);
+    font-size: 0.78rem;
+    line-height: 1.5;
+  }
+  #lead-picker-banner.show { display: block; }
+  #lead-picker-banner .q {
+    display: block;
+    margin-top: 4px;
+    color: var(--fg-dim);
+    font-family: var(--mono);
+    font-size: 0.72rem;
+  }
+  #quick-replies {
+    display: none;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 0 12px 8px;
+  }
+  #quick-replies.show { display: flex; }
+  .qr-chip {
+    flex: none;
+    background: var(--card2);
+    border: 1px solid var(--line2);
+    color: var(--fg);
+    border-radius: 999px;
+    padding: 7px 13px;
+    font-size: 0.78rem;
+    font-family: inherit;
+    cursor: pointer;
+  }
+  .qr-chip:active { background: var(--accent-dim); color: #dff8f3; border-color: var(--accent-dim); }
+  .qr-chip.qr-num {
+    font-family: var(--mono);
+    font-weight: 700;
+    color: var(--accent);
+    border-color: var(--accent-dim);
+  }
   #projects-list {
     flex: 1 1 auto;
     overflow-y: auto;
@@ -820,6 +864,8 @@
           <span class="text">ยังไม่มีข้อความ — พิมพ์ถึง Lead ด้านล่างเพื่อเริ่ม</span>
         </div>
       </div>
+      <div id="lead-picker-banner"></div>
+      <div id="quick-replies"></div>
       <div id="view-control-note"></div>
       <form id="lead-composer">
         <textarea id="lead-input" rows="1" placeholder="พิมพ์ถึง Lead…"></textarea>

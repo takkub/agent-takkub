@@ -523,6 +523,8 @@
     state.selectedProject = name;
     lastMsgKind = null;
     lastLeadBodyEl = null;
+    lastLeadRawAccum = "";
+    hidePickerBanner();
     hideThinking();
     var log = $("lead-log");
     if (log) {
@@ -847,6 +849,11 @@
 
     log.appendChild(div);
     if (atBottom) log.scrollTop = log.scrollHeight;
+    if (kind === "lead") {
+      lastLeadRawAccum = text;
+      hidePickerBanner();
+      renderQuickReplies();
+    }
     // Keep the "…" alive *below* the message we just added whenever the Lead
     // is still working — a text block mid-turn must not read as "done".
     if (state.leadWorking) showThinking();
@@ -863,9 +870,14 @@
   var LEAD_MERGE_WINDOW_MS = 4000;
   var lastLeadBodyEl = null;
   var lastLeadAt = 0;
+  // Accumulated raw text of the *current* Lead reply group (reset each new
+  // group, appended on merge) — quick-reply numbered-option detection reads
+  // this rather than the rendered DOM.
+  var lastLeadRawAccum = "";
 
   function appendLeadLive(text) {
     if (typeof text !== "string" || !text) return;
+    hidePickerBanner();
     var now = Date.now();
     if (lastLeadBodyEl && lastMsgKind === "lead" && (now - lastLeadAt) <= LEAD_MERGE_WINDOW_MS) {
       hideThinking();
@@ -873,6 +885,8 @@
       var atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 24;
       lastLeadBodyEl.insertAdjacentHTML("beforeend", renderMarkdown(text));
       lastLeadAt = now;
+      lastLeadRawAccum += "\n" + text;
+      renderQuickReplies();
       if (atBottom) log.scrollTop = log.scrollHeight;
       if (state.leadWorking) showThinking();
       return;
@@ -881,6 +895,92 @@
     lastLeadAt = now;
     var bodies = document.querySelectorAll("#lead-log .msg.lead .msg-body");
     lastLeadBodyEl = bodies.length ? bodies[bodies.length - 1] : null;
+  }
+
+  // ---------------------------------------------------------------
+  // Quick-reply chips (W2a MVP) + AskUserQuestion picker fallback banner
+  // ---------------------------------------------------------------
+
+  var STANDARD_QUICK_REPLIES = ["ok ลุยเลย", "ไม่เอา หยุดก่อน", "ขอดูแผนก่อน"];
+
+  // Numbered-option auto-detect: matches "1. ...", "2) ...", "ข้อ 3 ..." at
+  // the start of a line in the Lead's latest reply text, up to 6 distinct
+  // numbers, in first-seen order.
+  function detectNumberedOptions(text) {
+    if (typeof text !== "string" || !text) return [];
+    var re = /(?:^|\n)\s*(?:ข้อ\s*)?(\d{1,2})[.\)]\s+/g;
+    var nums = [];
+    var m;
+    while ((m = re.exec(text)) && nums.length < 6) {
+      if (nums.indexOf(m[1]) === -1) nums.push(m[1]);
+    }
+    return nums;
+  }
+
+  function makeQuickChip(label, isNum, onClick) {
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "qr-chip" + (isNum ? " qr-num" : "");
+    btn.textContent = label;
+    btn.addEventListener("click", onClick);
+    return btn;
+  }
+
+  function renderQuickReplies() {
+    var wrap = $("quick-replies");
+    if (!wrap) return;
+    wrap.innerHTML = "";
+    if (state.mode !== "control") {
+      wrap.classList.remove("show");
+      return;
+    }
+    wrap.classList.add("show");
+    detectNumberedOptions(lastLeadRawAccum).forEach(function (n) {
+      wrap.appendChild(makeQuickChip(n, true, function () { sendLeadMessage(n); }));
+    });
+    STANDARD_QUICK_REPLIES.forEach(function (label) {
+      wrap.appendChild(makeQuickChip(label, false, function () { sendLeadMessage(label); }));
+    });
+  }
+
+  function showPickerBanner(question) {
+    var el = $("lead-picker-banner");
+    if (!el) return;
+    el.innerHTML = "";
+    var main = document.createElement("span");
+    main.textContent = "⏸️ Lead รอคำตอบจาก picker บน desktop — ตอบบนจอคอมก่อน";
+    el.appendChild(main);
+    if (typeof question === "string" && question.trim()) {
+      var q = document.createElement("span");
+      q.className = "q";
+      q.textContent = question.trim();
+      el.appendChild(q);
+    }
+    el.classList.add("show");
+  }
+
+  function hidePickerBanner() {
+    var el = $("lead-picker-banner");
+    if (el) el.classList.remove("show");
+  }
+
+  // Shared send path for both the composer submit and quick-reply chip taps.
+  function sendLeadMessage(text) {
+    if (state.mode !== "control") return;
+    text = (text || "").trim();
+    if (!text) return;
+    appendMsg("me", text);
+    showThinking();
+    var sayBody = { text: text };
+    if (state.selectedProject) sayBody.project = state.selectedProject;
+    apiFetch("api/lead/say", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(sayBody),
+    }).catch(function () {
+      hideThinking();
+      toast("ส่งข้อความไม่สำเร็จ");
+    });
   }
 
   function setLeadEmptyText(text) {
@@ -914,6 +1014,8 @@
         }
         lastMsgKind = null;
         lastLeadBodyEl = null;
+        lastLeadRawAccum = "";
+        hidePickerBanner();
         var messages = Array.isArray(data && data.messages) ? data.messages : [];
         messages.forEach(function (m) {
           var text = m && typeof m.text === "string" ? m.text : null;
@@ -986,6 +1088,8 @@
       // into the pre-reconnect run (codex x-check).
       lastMsgKind = null;
       lastLeadBodyEl = null;
+      lastLeadRawAccum = "";
+      hidePickerBanner();
       state.leadWorking = false;
       setLeadEmptyText("ยังไม่มีข้อความ — พิมพ์ถึง Lead ด้านล่างเพื่อเริ่ม");
     };
@@ -1010,6 +1114,12 @@
     es.addEventListener("done", function (evt) {
       state.leadWorking = false;
       appendMsg("done", parseSseData(evt.data));
+    });
+    // W2a SHOULD-FIX: a real AskUserQuestion picker fired on the desktop —
+    // surface a banner instead of hanging silently; cleared by the next
+    // 'lead' text event (appendMsg/appendLeadLive both call hidePickerBanner).
+    es.addEventListener("blocked_on_picker", function (evt) {
+      showPickerBanner(parseSseData(evt.data));
     });
     es.onerror = function () {
       es.close();
@@ -1041,6 +1151,7 @@
     state.historyLoaded = false;
     state.leadWorking = false;
     hideThinking();
+    hidePickerBanner();
   }
 
   function updateControlNote() {
@@ -1055,6 +1166,7 @@
     var modePill = $("status-mode");
     modePill.textContent = isControl ? "CONTROL" : "VIEW";
     modePill.classList.toggle("control", isControl);
+    renderQuickReplies();
   }
 
   $("lead-composer").addEventListener("submit", function (evt) {
@@ -1070,18 +1182,7 @@
     if (!text) return;
     input.value = "";
     autosizeInput();
-    appendMsg("me", text);
-    showThinking();
-    var sayBody = { text: text };
-    if (state.selectedProject) sayBody.project = state.selectedProject;
-    apiFetch("api/lead/say", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(sayBody),
-    }).catch(function () {
-      hideThinking();
-      toast("ส่งข้อความไม่สำเร็จ");
-    });
+    sendLeadMessage(text);
   });
 
   var leadInput = $("lead-input");

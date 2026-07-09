@@ -111,6 +111,41 @@ _TOOL_ACTIVITY = {
 }
 
 
+# W2a SHOULD-FIX: notify deliberately drops tool_use payloads (data-min), but
+# a real `AskUserQuestion` picker leaves the remote user silently stuck — the
+# Lead is waiting on a desktop-only TUI picker the phone can never drive. This
+# extracts only the short question text (never the options payload) so the
+# PWA can surface "Lead is waiting on a desktop picker" instead of hanging.
+_MAX_ASK_QUESTION_CHARS = 200
+
+
+def _ask_question_prompt(rec: dict) -> str | None:
+    """Return the short question text if `rec` is an assistant record whose
+    content includes an `AskUserQuestion` tool_use block, else None. Only the
+    first question's `question` field travels — never the `options` list."""
+    if rec.get("type") != "assistant":
+        return None
+    msg = rec.get("message")
+    if not isinstance(msg, dict):
+        return None
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return None
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "tool_use":
+            continue
+        if str(block.get("name") or "").lower() != "askuserquestion":
+            continue
+        question = ""
+        inp = block.get("input")
+        if isinstance(inp, dict):
+            questions = inp.get("questions")
+            if isinstance(questions, list) and questions and isinstance(questions[0], dict):
+                question = str(questions[0].get("question") or "").strip()
+        return question[:_MAX_ASK_QUESTION_CHARS]
+    return None
+
+
 def _lead_activity(rec: dict) -> str | None:
     """Coarse activity category for a `type=="assistant"` record whose content
     is tool_use/thinking (no reply prose yet), or None if it isn't that. Used
@@ -449,6 +484,7 @@ class LeadNotifier(QObject):
         lines = data.split(b"\n")
         tail.partial = lines.pop()  # last line may be mid-write; hold it back
         activity: str | None = None
+        ask_prompt: str | None = None
         pushed_text = False
         for raw_line in lines:
             line = raw_line.strip()
@@ -463,6 +499,7 @@ class LeadNotifier(QObject):
                 joined = "\n".join(texts)[:_MAX_EVENT_CHARS]
                 self._broadcaster.push("lead", joined, project_ns)
                 pushed_text = True
+                ask_prompt = None  # a real reply supersedes any earlier picker
             else:
                 # Assistant record with only tool_use/thinking blocks (no reply
                 # prose yet) = the Lead is mid-turn, actively working. We never
@@ -473,9 +510,21 @@ class LeadNotifier(QObject):
                 found = _lead_activity(rec)
                 if found is not None:
                     activity = found
-        # Only signal "working" when this batch showed activity but produced no
-        # reply text — a real text push already tells the PWA to drop the "…".
-        if activity is not None and not pushed_text:
+                ask = _ask_question_prompt(rec)
+                if ask is not None:
+                    ask_prompt = ask
+        # W2a SHOULD-FIX: a real AskUserQuestion picker fired and nothing has
+        # answered it yet in this batch — surface the "waiting on desktop"
+        # banner instead of the phone hanging silently. Takes priority over
+        # the generic "working" signal for the same batch (AskUserQuestion's
+        # tool_use would otherwise also map to a coarse "working" activity —
+        # the picker banner is the more specific, more useful signal).
+        if ask_prompt is not None and not pushed_text:
+            self._broadcaster.push("blocked_on_picker", ask_prompt, project_ns)
+        elif activity is not None and not pushed_text:
+            # Only signal "working" when this batch showed activity but
+            # produced no reply text — a real text push already tells the
+            # PWA to drop the "…".
             self._broadcaster.push("working", activity, project_ns)
 
     # ── done events ───────────────────────────────────────────────────

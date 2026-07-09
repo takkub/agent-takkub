@@ -81,6 +81,35 @@ def _tool_use_line() -> str:
     )
 
 
+def _ask_user_question_line(question: str = "ต่อยังไงดี?") -> str:
+    return json.dumps(
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "name": "AskUserQuestion",
+                        "input": {
+                            "questions": [
+                                {
+                                    "question": question,
+                                    "header": "next step",
+                                    "options": [
+                                        {"label": "A", "description": "do A"},
+                                        {"label": "B", "description": "do B"},
+                                    ],
+                                }
+                            ]
+                        },
+                    }
+                ],
+            },
+        }
+    )
+
+
 def _thinking_line() -> str:
     return json.dumps(
         {
@@ -494,6 +523,112 @@ class TestLeadUserText:
             )
         )
         assert notify_mod._lead_user_text(rec) is None
+
+
+class TestAskQuestionPrompt:
+    """`_ask_question_prompt` (W2a SHOULD-FIX): detects a real `AskUserQuestion`
+    tool_use block and returns only the short question text — never the
+    options list (data-min)."""
+
+    def test_extracts_first_question_text(self):
+        rec = json.loads(_ask_user_question_line("เลือกแนวทางไหนดี?"))
+        assert notify_mod._ask_question_prompt(rec) == "เลือกแนวทางไหนดี?"
+
+    def test_never_leaks_options_payload(self):
+        rec = json.loads(_ask_user_question_line("q"))
+        prompt = notify_mod._ask_question_prompt(rec)
+        assert "description" not in prompt
+        assert "label" not in prompt
+
+    def test_truncates_long_question(self):
+        long_q = "x" * 500
+        rec = json.loads(_ask_user_question_line(long_q))
+        prompt = notify_mod._ask_question_prompt(rec)
+        assert len(prompt) == notify_mod._MAX_ASK_QUESTION_CHARS
+
+    def test_non_ask_tool_use_is_none(self):
+        rec = json.loads(_tool_use_line())
+        assert notify_mod._ask_question_prompt(rec) is None
+
+    def test_text_only_record_is_none(self):
+        rec = json.loads(_assistant_line("hi"))
+        assert notify_mod._ask_question_prompt(rec) is None
+
+    def test_non_assistant_record_is_none(self):
+        rec = json.loads(_user_line("hi"))
+        assert notify_mod._ask_question_prompt(rec) is None
+
+
+class TestLeadOutputTailAskQuestion:
+    def test_ask_user_question_pushes_blocked_on_picker(self, qapp, tmp_path, config_dir):
+        orch = _FakeOrch()
+        broadcaster = _FakeBroadcaster()
+        _write_jsonl(tmp_path, "C--proj", "uuid-1", [])
+        path = config_dir / "projects" / "C--proj" / "uuid-1.jsonl"
+
+        notifier = LeadNotifier(orch, broadcaster)
+        try:
+            orch.set_lead("proj", "uuid-1")
+            orch.statusChanged.emit()
+
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(_ask_user_question_line("ไปทางไหนดี?") + "\n")
+            notifier._poll_all()
+            assert broadcaster.events == [("blocked_on_picker", "ไปทางไหนดี?", "proj")]
+        finally:
+            notifier.stop()
+
+    def test_answer_text_in_same_batch_supersedes_the_picker_signal(
+        self, qapp, tmp_path, config_dir
+    ):
+        # A picker followed immediately (same poll batch) by real reply text
+        # means it was already resolved — no stuck-banner signal needed.
+        orch = _FakeOrch()
+        broadcaster = _FakeBroadcaster()
+        _write_jsonl(tmp_path, "C--proj", "uuid-1", [])
+        path = config_dir / "projects" / "C--proj" / "uuid-1.jsonl"
+
+        notifier = LeadNotifier(orch, broadcaster)
+        try:
+            orch.set_lead("proj", "uuid-1")
+            orch.statusChanged.emit()
+
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(_ask_user_question_line("q") + "\n")
+                fh.write(_assistant_line("answered already") + "\n")
+            notifier._poll_all()
+            assert broadcaster.events == [("lead", "answered already", "proj")]
+        finally:
+            notifier.stop()
+
+    def test_later_text_in_a_subsequent_poll_does_not_retroactively_clear(
+        self, qapp, tmp_path, config_dir
+    ):
+        # The picker event already reached the client in its own poll tick;
+        # a later poll's real text is just a normal 'lead' push — the PWA
+        # itself clears the banner on receiving it.
+        orch = _FakeOrch()
+        broadcaster = _FakeBroadcaster()
+        _write_jsonl(tmp_path, "C--proj", "uuid-1", [])
+        path = config_dir / "projects" / "C--proj" / "uuid-1.jsonl"
+
+        notifier = LeadNotifier(orch, broadcaster)
+        try:
+            orch.set_lead("proj", "uuid-1")
+            orch.statusChanged.emit()
+
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(_ask_user_question_line("q") + "\n")
+            notifier._poll_all()
+            assert broadcaster.events == [("blocked_on_picker", "q", "proj")]
+
+            broadcaster.events.clear()
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(_assistant_line("finally answered") + "\n")
+            notifier._poll_all()
+            assert broadcaster.events == [("lead", "finally answered", "proj")]
+        finally:
+            notifier.stop()
 
 
 class TestStripRemotePrefix:
