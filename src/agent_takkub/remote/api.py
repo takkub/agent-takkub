@@ -220,6 +220,55 @@ def lead_history(orch, project_ns: str, limit: object = None) -> dict:
     return {"project": project_ns, "messages": messages}
 
 
+_SESSIONS_MAX_LIMIT = 20
+
+
+def lead_sessions(orch, project_ns: str, limit: object = None) -> dict:
+    """View-mode safe (read-only) — W3 resume/session picker. Lists recent
+    Lead sessions for `project_ns`'s cwd so the phone can resume a closed or
+    crashed Lead without the desktop cockpit's help. Data-min per
+    `notify.list_recent_lead_sessions`: `{uuid, mtime, preview}` only."""
+    try:
+        limit = int(limit) if limit is not None else notify._SESSION_LIST_DEFAULT_LIMIT
+    except (TypeError, ValueError):
+        limit = notify._SESSION_LIST_DEFAULT_LIMIT
+    limit = max(1, min(limit, _SESSIONS_MAX_LIMIT))
+    return {"project": project_ns, "sessions": notify.list_recent_lead_sessions(project_ns, limit)}
+
+
+def resume_lead(orch, project: object, session_uuid: object) -> dict:
+    """control-mode only (enforced by the HTTP handler's mode gate before this
+    runs, same as `open_project`/`close_project`). Terminates the project's
+    current Lead pane (same lifecycle `close_project` uses — protected-pane
+    force-close) then respawns Lead with `--resume <session_uuid>`.
+
+    `session_uuid`/cwd match is re-validated inside `spawn()` itself
+    (`_resume_uuid_matches_cwd`) — this is only the request-shape check
+    (project open, session_uuid present) before ever touching orch state.
+
+    Multi-provider note (#103/#101): `--resume` is a claude-CLI-specific
+    capability. Lead here means whichever provider is currently backing the
+    project's Lead pane — if that's ever a non-claude provider without an
+    equivalent resume flag, this call will simply fail at `spawn()` (unknown
+    flag / provider mismatch) rather than silently no-op. Gating this
+    endpoint on a capability flag is tracked in #103, not solved here."""
+    if not isinstance(project, str) or project not in _config.list_project_names():
+        raise RemoteApiError(400, "unknown project")
+    if project not in _config.get_open_tabs():
+        raise RemoteApiError(409, "project not open")
+    if not isinstance(session_uuid, str) or not session_uuid.strip():
+        raise RemoteApiError(400, "missing session_uuid")
+    session_uuid = session_uuid.strip()
+    cwd = _config.lead_cwd(project)
+    if not cwd:
+        raise RemoteApiError(409, "project has no lead cwd")
+    orch.close(LEAD.name, project=project, force=True, reason="remote resume")
+    ok, msg = orch.spawn(LEAD.name, cwd=cwd, project=project, resume_uuid=session_uuid)
+    if not ok:
+        raise RemoteApiError(409, msg or "resume failed")
+    return {"ok": True, "project": project}
+
+
 def projects(from_project: str | None, mode: str = "view") -> dict:
     """View-mode. In-process, no loopback: reads the same `projects.json`
     the desktop UI reads. Safe from the H2 cross-thread race because this

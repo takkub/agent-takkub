@@ -293,6 +293,92 @@ def resolve_lead_jsonl(orch, project_ns: str) -> Path | None:
     return _resolve_jsonl_path(project_ns, session_uuid)
 
 
+_SESSION_LIST_DEFAULT_LIMIT = 10
+_SESSION_LIST_MAX_LIMIT = 20
+# First-user-line preview is deliberately short (data-min, W3): enough to
+# recognize which session to resume, never a conversation excerpt.
+_SESSION_PREVIEW_CHARS = 140
+
+
+def _first_user_preview(path: Path) -> str:
+    """Best-effort: the first human-typed line in `path`, truncated. Returns
+    "" on any read/parse failure or if the session has no user turn yet —
+    never raises (this feeds a listing endpoint, one bad file must not break
+    the whole picker)."""
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                text = _lead_user_text(rec)
+                if text:
+                    return _strip_remote_prefix(text).strip()[:_SESSION_PREVIEW_CHARS]
+    except OSError:
+        pass
+    return ""
+
+
+def list_recent_lead_sessions(
+    project_ns: str, limit: int = _SESSION_LIST_DEFAULT_LIMIT
+) -> list[dict]:
+    """W3 (resume/session picker): recent Lead sessions for `project_ns`'s cwd,
+    newest first. Unlike `resolve_lead_jsonl` (which only knows the *currently
+    open* pane's session uuid), this scans every JSONL under the project's
+    cwd-encoded directory so a closed or crashed Lead can still be resumed
+    from the mobile picker.
+
+    Data-min: each entry is only `{uuid, mtime, preview}` — preview is the
+    first user-typed line, truncated (`_first_user_preview`), never the full
+    conversation. Corrupt/empty files and directories that don't decode to
+    this project's cwd are skipped silently — best-effort, matches
+    `chatlog_scanner`'s read-only contract."""
+    from .. import config as _config
+    from ..chatlog_scanner import decode_project_dir
+
+    cwd = _config.lead_cwd(project_ns)
+    if not cwd:
+        return []
+    try:
+        cwd_resolved = Path(cwd).resolve()
+    except OSError:
+        return []
+    try:
+        base = config_dir_for(project_ns) / "projects"
+        if not base.is_dir():
+            return []
+        dirs = list(base.iterdir())
+    except OSError:
+        return []
+    found: list[tuple[float, Path]] = []
+    for d in dirs:
+        if not d.is_dir():
+            continue
+        try:
+            if decode_project_dir(d.name).resolve() != cwd_resolved:
+                continue
+        except OSError:
+            continue
+        try:
+            for jsonl in d.glob("*.jsonl"):
+                try:
+                    found.append((jsonl.stat().st_mtime, jsonl))
+                except OSError:
+                    continue
+        except OSError:
+            continue
+    found.sort(key=lambda t: t[0], reverse=True)
+    capped = max(1, min(limit, _SESSION_LIST_MAX_LIMIT))
+    return [
+        {"uuid": jsonl.stem, "mtime": mtime, "preview": _first_user_preview(jsonl)}
+        for mtime, jsonl in found[:capped]
+    ]
+
+
 def _tail_start_offset(path: Path, size: int) -> int:
     """Where a newly-created tail should start reading from: the current
     EOF, backed up to the last complete line boundary if EOF currently

@@ -1,0 +1,573 @@
+"""Tests for W3 (resume button + session picker):
+
+* engine: `spawn(resume_uuid=...)` validates the uuid actually belongs to
+  the target cwd (`_resume_uuid_matches_cwd`) before using `--resume`.
+* `notify.list_recent_lead_sessions` scans the JSONL store for a project's
+  cwd, newest first, skipping corrupt/empty files silently.
+* `api.lead_sessions` (view-safe) / `api.resume_lead` (control-mode).
+* HTTP route gating for `/api/lead/sessions` (GET, view-safe) and
+  `/api/lead/resume` (POST, control-mode only).
+"""
+
+from __future__ import annotations
+
+import json
+import pathlib
+import shutil
+import tempfile
+import threading
+import time
+import urllib.error
+import urllib.request
+from unittest.mock import MagicMock, patch
+
+import pytest
+from PyQt6.QtCore import QCoreApplication
+
+from agent_takkub import config as _config
+from agent_takkub import orchestrator as orch_mod
+from agent_takkub import user_profile
+from agent_takkub.orchestrator import Orchestrator, _exit_key
+from agent_takkub.remote import api, http_server
+from agent_takkub.remote import notify as notify_mod
+from agent_takkub.remote.config import RemoteConfig
+from agent_takkub.roles import LEAD
+
+_PROJECT = "default"
+
+
+def _encode_cwd(path: pathlib.Path) -> str:
+    """Inverse of `chatlog_scanner.decode_project_dir` — build the encoded
+    directory name Claude Code would have created for `path`, so tests can
+    plant fixture JSONL files that decode back to a known cwd."""
+    s = str(path.resolve()).replace("\\", "/")
+    if len(s) >= 2 and s[1] == ":":
+        drive = s[0]
+        rest = s[2:].lstrip("/")
+        return f"{drive}--{rest.replace('/', '-')}"
+    return s.strip("/").replace("/", "-")
+
+
+@pytest.fixture
+def hyphen_free_root():
+    """`decode_project_dir`'s dash-based encoding is inherently lossy for any
+    ancestor directory whose real name contains a literal hyphen (it can't
+    tell "was a path separator" from "was already a dash") — and pytest's own
+    `tmp_path` always nests under hyphenated dirs (`pytest-of-<user>/
+    pytest-<N>/...`), which breaks the encode/decode round-trip these tests
+    rely on. Use a dedicated hyphen-free temp root instead."""
+    root = pathlib.Path(tempfile.mkdtemp(prefix="w3resume_"))
+    try:
+        yield root
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+# ─────────────────────────────────────────────────────────────
+# Engine: _resume_uuid_matches_cwd + spawn(resume_uuid=...)
+# ─────────────────────────────────────────────────────────────
+
+
+@pytest.fixture(scope="module")
+def qapp() -> QCoreApplication:
+    return QCoreApplication.instance() or QCoreApplication([])
+
+
+@pytest.fixture
+def tmp_env(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> pathlib.Path:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    cockpit = tmp_path / "cockpit"
+    cockpit.mkdir(parents=True, exist_ok=True)
+    (cockpit / "CLAUDE.md").write_text("# Lead\n", encoding="utf-8")
+    monkeypatch.setattr(_config, "RUNTIME_DIR", runtime)
+    monkeypatch.setattr(orch_mod, "RUNTIME_DIR", runtime)
+    monkeypatch.setattr(_config, "REPO_ROOT", cockpit)
+    monkeypatch.setattr(orch_mod, "REPO_ROOT", cockpit)
+    monkeypatch.setattr(orch_mod, "find_claude_executable", lambda: "claude")
+    return tmp_path
+
+
+@pytest.fixture
+def orch(qapp: QCoreApplication, tmp_env: pathlib.Path) -> Orchestrator:
+    o = Orchestrator()
+    o._idle_watchdog.stop()
+    return o
+
+
+def _spawn_capture(
+    orch: Orchestrator, role_name: str, cwd: str, **kwargs
+) -> tuple[list[str], tuple]:
+    fake_pane = MagicMock()
+    fake_pane.session = None
+    fake_pane.state = "empty"
+    fake_pane.attach_session = MagicMock()
+    fake_pane._transcript_path = None
+    orch._panes_by_project.setdefault(_PROJECT, {})[role_name] = fake_pane
+
+    captured: list[list[str]] = []
+    fake_session = MagicMock()
+    fake_session.processExited = MagicMock()
+    fake_session.processExited.connect = MagicMock()
+
+    with patch.object(orch_mod.PtySession, "__new__", return_value=fake_session):
+        with patch.object(
+            fake_session,
+            "spawn",
+            side_effect=lambda argv, cwd, env, **kw: captured.append(list(argv)),
+        ):
+            result = orch.spawn(role_name, cwd=cwd, project=_PROJECT, **kwargs)
+
+    return (captured[0] if captured else []), result
+
+
+class TestResumeUuidMatchesCwd:
+    def test_matches_when_encoded_dir_decodes_to_cwd(
+        self, hyphen_free_root: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from agent_takkub.spawn_engine import _resume_uuid_matches_cwd
+
+        config_dir = hyphen_free_root / "claude_config"
+        monkeypatch.setattr(user_profile, "_DEFAULT_CONFIG_DIR", config_dir)
+        cwd = hyphen_free_root / "proj"
+        cwd.mkdir()
+        proj_dir = config_dir / "projects" / _encode_cwd(cwd)
+        proj_dir.mkdir(parents=True)
+        (proj_dir / "abc123.jsonl").write_text("{}\n", encoding="utf-8")
+
+        assert _resume_uuid_matches_cwd("default", "abc123", str(cwd)) is True
+
+    def test_false_when_cwd_differs(
+        self, hyphen_free_root: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from agent_takkub.spawn_engine import _resume_uuid_matches_cwd
+
+        config_dir = hyphen_free_root / "claude_config"
+        monkeypatch.setattr(user_profile, "_DEFAULT_CONFIG_DIR", config_dir)
+        cwd_a = hyphen_free_root / "proj_a"
+        cwd_a.mkdir()
+        cwd_b = hyphen_free_root / "proj_b"
+        cwd_b.mkdir()
+        proj_dir = config_dir / "projects" / _encode_cwd(cwd_a)
+        proj_dir.mkdir(parents=True)
+        (proj_dir / "abc123.jsonl").write_text("{}\n", encoding="utf-8")
+
+        assert _resume_uuid_matches_cwd("default", "abc123", str(cwd_b)) is False
+
+    def test_false_when_uuid_not_found(
+        self, hyphen_free_root: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from agent_takkub.spawn_engine import _resume_uuid_matches_cwd
+
+        config_dir = hyphen_free_root / "claude_config"
+        monkeypatch.setattr(user_profile, "_DEFAULT_CONFIG_DIR", config_dir)
+        (config_dir / "projects").mkdir(parents=True)
+
+        assert _resume_uuid_matches_cwd("default", "ghost_uuid", str(hyphen_free_root)) is False
+
+
+class TestSpawnResumeUuid:
+    # role_name deliberately not "lead" — a lead spawn also renders
+    # runtime/lead-context.md via lead_context.py, which reads its own
+    # module-level RUNTIME_DIR (not patched by tmp_env here) and would write
+    # to the real repo path. The resume_uuid mechanism itself is role-agnostic
+    # (validated at the engine layer regardless of role); `api.resume_lead`'s
+    # own tests cover the Lead-specific call shape with a mocked orchestrator.
+    def test_valid_resume_uuid_uses_resume_flag(
+        self, orch: Orchestrator, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cwd = tmp_path / "proj"
+        cwd.mkdir()
+        monkeypatch.setattr(
+            "agent_takkub.spawn_engine._resume_uuid_matches_cwd", lambda p, u, c: True
+        )
+        argv, result = _spawn_capture(orch, "backend", str(cwd), resume_uuid="picked-uuid")
+        assert result[0] is True
+        assert "--resume" in argv
+        assert argv[argv.index("--resume") + 1] == "picked-uuid"
+        assert "--session-id" not in argv
+        key = _exit_key(_PROJECT, "backend")
+        assert orch._pane_state[key].session_uuid == "picked-uuid"
+        assert orch._pane_state[key].session_uuid_cwd == str(cwd)
+
+    def test_invalid_resume_uuid_rejected_before_spawn(
+        self, orch: Orchestrator, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cwd = tmp_path / "proj"
+        cwd.mkdir()
+        monkeypatch.setattr(
+            "agent_takkub.spawn_engine._resume_uuid_matches_cwd", lambda p, u, c: False
+        )
+        argv, result = _spawn_capture(orch, "backend", str(cwd), resume_uuid="forged-uuid")
+        assert result[0] is False
+        assert argv == []  # native session.spawn() never reached
+
+    def test_resume_uuid_bypasses_5min_window_check(
+        self, orch: Orchestrator, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No prior exit recorded at all (never a same-run auto-resume
+        candidate) — an explicit resume_uuid must still work."""
+        cwd = tmp_path / "proj"
+        cwd.mkdir()
+        monkeypatch.setattr(
+            "agent_takkub.spawn_engine._resume_uuid_matches_cwd", lambda p, u, c: True
+        )
+        assert _exit_key(_PROJECT, "backend") not in orch._recent_exits
+        argv, result = _spawn_capture(orch, "backend", str(cwd), resume_uuid="old-session")
+        assert result[0] is True
+        assert argv[argv.index("--resume") + 1] == "old-session"
+
+
+# ─────────────────────────────────────────────────────────────
+# notify.list_recent_lead_sessions
+# ─────────────────────────────────────────────────────────────
+
+
+class TestListRecentLeadSessions:
+    def _setup(
+        self, root: pathlib.Path, monkeypatch: pytest.MonkeyPatch, cwd: pathlib.Path
+    ) -> pathlib.Path:
+        config_dir = root / "claude_config"
+        monkeypatch.setattr(notify_mod, "config_dir_for", lambda project: config_dir)
+        monkeypatch.setattr(_config, "lead_cwd", lambda project=None: str(cwd))
+        return config_dir
+
+    def test_empty_store_returns_empty_list(
+        self, hyphen_free_root: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cwd = hyphen_free_root / "proj"
+        cwd.mkdir()
+        self._setup(hyphen_free_root, monkeypatch, cwd)
+        assert notify_mod.list_recent_lead_sessions("default") == []
+
+    def test_no_lead_cwd_returns_empty_list(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(_config, "lead_cwd", lambda project=None: None)
+        assert notify_mod.list_recent_lead_sessions("default") == []
+
+    def test_lists_sessions_newest_first_with_preview(
+        self, hyphen_free_root: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cwd = hyphen_free_root / "proj"
+        cwd.mkdir()
+        config_dir = self._setup(hyphen_free_root, monkeypatch, cwd)
+        proj_dir = config_dir / "projects" / _encode_cwd(cwd)
+        proj_dir.mkdir(parents=True)
+
+        old = proj_dir / "old-uuid.jsonl"
+        old.write_text(
+            json.dumps({"type": "user", "message": {"role": "user", "content": "first task"}})
+            + "\n",
+            encoding="utf-8",
+        )
+        new = proj_dir / "new-uuid.jsonl"
+        new.write_text(
+            json.dumps({"type": "user", "message": {"role": "user", "content": "second task"}})
+            + "\n",
+            encoding="utf-8",
+        )
+        old_time = time.time() - 100
+        new_time = time.time()
+        import os
+
+        os.utime(old, (old_time, old_time))
+        os.utime(new, (new_time, new_time))
+
+        sessions = notify_mod.list_recent_lead_sessions("default")
+        assert [s["uuid"] for s in sessions] == ["new-uuid", "old-uuid"]
+        assert sessions[0]["preview"] == "second task"
+        assert sessions[1]["preview"] == "first task"
+
+    def test_skips_directories_for_a_different_cwd(
+        self, hyphen_free_root: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cwd = hyphen_free_root / "proj"
+        cwd.mkdir()
+        other_cwd = hyphen_free_root / "other_proj"
+        other_cwd.mkdir()
+        config_dir = self._setup(hyphen_free_root, monkeypatch, cwd)
+        other_dir = config_dir / "projects" / _encode_cwd(other_cwd)
+        other_dir.mkdir(parents=True)
+        (other_dir / "unrelated-uuid.jsonl").write_text("{}\n", encoding="utf-8")
+
+        assert notify_mod.list_recent_lead_sessions("default") == []
+
+    def test_corrupt_jsonl_still_listed_with_empty_preview(
+        self, hyphen_free_root: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cwd = hyphen_free_root / "proj"
+        cwd.mkdir()
+        config_dir = self._setup(hyphen_free_root, monkeypatch, cwd)
+        proj_dir = config_dir / "projects" / _encode_cwd(cwd)
+        proj_dir.mkdir(parents=True)
+        (proj_dir / "corrupt-uuid.jsonl").write_text("not json at all\n", encoding="utf-8")
+
+        sessions = notify_mod.list_recent_lead_sessions("default")
+        assert len(sessions) == 1
+        assert sessions[0]["uuid"] == "corrupt-uuid"
+        assert sessions[0]["preview"] == ""
+
+    def test_limit_is_capped(
+        self, hyphen_free_root: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cwd = hyphen_free_root / "proj"
+        cwd.mkdir()
+        config_dir = self._setup(hyphen_free_root, monkeypatch, cwd)
+        proj_dir = config_dir / "projects" / _encode_cwd(cwd)
+        proj_dir.mkdir(parents=True)
+        for i in range(5):
+            (proj_dir / f"uuid-{i}.jsonl").write_text("{}\n", encoding="utf-8")
+
+        assert len(notify_mod.list_recent_lead_sessions("default", limit=2)) == 2
+
+
+# ─────────────────────────────────────────────────────────────
+# api.lead_sessions / api.resume_lead
+# ─────────────────────────────────────────────────────────────
+
+
+class TestApiLeadSessions:
+    def test_clamps_limit_and_forwards_to_notify(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        seen: dict = {}
+
+        def _fake(project_ns, limit):
+            seen["project_ns"] = project_ns
+            seen["limit"] = limit
+            return []
+
+        monkeypatch.setattr(notify_mod, "list_recent_lead_sessions", _fake)
+        result = api.lead_sessions(object(), "myproj", limit=999)
+        assert seen["project_ns"] == "myproj"
+        assert seen["limit"] == api._SESSIONS_MAX_LIMIT
+        assert result == {"project": "myproj", "sessions": []}
+
+    def test_bad_limit_falls_back_to_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        seen: dict = {}
+        monkeypatch.setattr(
+            notify_mod,
+            "list_recent_lead_sessions",
+            lambda project_ns, limit: seen.setdefault("limit", limit) or [],
+        )
+        api.lead_sessions(object(), "myproj", limit="not-a-number")
+        assert seen["limit"] == notify_mod._SESSION_LIST_DEFAULT_LIMIT
+
+
+class TestApiResumeLead:
+    def test_unknown_project_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(_config, "list_project_names", lambda: [])
+        with pytest.raises(api.RemoteApiError) as exc:
+            api.resume_lead(object(), "ghost", "uuid-1")
+        assert exc.value.status == 400
+
+    def test_not_open_project_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(_config, "list_project_names", lambda: ["proj"])
+        monkeypatch.setattr(_config, "get_open_tabs", lambda: [])
+        with pytest.raises(api.RemoteApiError) as exc:
+            api.resume_lead(object(), "proj", "uuid-1")
+        assert exc.value.status == 409
+
+    def test_missing_session_uuid_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(_config, "list_project_names", lambda: ["proj"])
+        monkeypatch.setattr(_config, "get_open_tabs", lambda: ["proj"])
+        with pytest.raises(api.RemoteApiError) as exc:
+            api.resume_lead(object(), "proj", "")
+        assert exc.value.status == 400
+
+    def test_closes_and_respawns_lead_with_resume_uuid(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(_config, "list_project_names", lambda: ["proj"])
+        monkeypatch.setattr(_config, "get_open_tabs", lambda: ["proj"])
+        monkeypatch.setattr(_config, "lead_cwd", lambda project=None: "/proj/web")
+
+        fake_orch = MagicMock()
+        fake_orch.spawn.return_value = (True, "ok")
+        result = api.resume_lead(fake_orch, "proj", "uuid-xyz")
+
+        fake_orch.close.assert_called_once_with(
+            LEAD.name, project="proj", force=True, reason="remote resume"
+        )
+        fake_orch.spawn.assert_called_once_with(
+            LEAD.name, cwd="/proj/web", project="proj", resume_uuid="uuid-xyz"
+        )
+        assert result == {"ok": True, "project": "proj"}
+
+    def test_spawn_failure_surfaces_as_409(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(_config, "list_project_names", lambda: ["proj"])
+        monkeypatch.setattr(_config, "get_open_tabs", lambda: ["proj"])
+        monkeypatch.setattr(_config, "lead_cwd", lambda project=None: "/proj/web")
+
+        fake_orch = MagicMock()
+        fake_orch.spawn.return_value = (False, "resume_uuid does not match cwd for lead")
+        with pytest.raises(api.RemoteApiError) as exc:
+            api.resume_lead(fake_orch, "proj", "uuid-xyz")
+        assert exc.value.status == 409
+
+    def test_no_lead_cwd_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(_config, "list_project_names", lambda: ["proj"])
+        monkeypatch.setattr(_config, "get_open_tabs", lambda: ["proj"])
+        monkeypatch.setattr(_config, "lead_cwd", lambda project=None: None)
+        with pytest.raises(api.RemoteApiError) as exc:
+            api.resume_lead(MagicMock(), "proj", "uuid-xyz")
+        assert exc.value.status == 409
+
+
+# ─────────────────────────────────────────────────────────────
+# HTTP route gating
+# ─────────────────────────────────────────────────────────────
+
+
+class _FakeOrch:
+    _lead_token = "lead-tok"
+
+    def _resolve_project(self, project):
+        return "default"
+
+
+def _pump_until(app: QCoreApplication, predicate, timeout: float = 5.0) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        app.processEvents()
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def _run_pumped(fn):
+    app = QCoreApplication.instance() or QCoreApplication([])
+    result: dict = {}
+
+    def _do() -> None:
+        result["value"] = fn()
+
+    t = threading.Thread(target=_do)
+    t.start()
+    assert _pump_until(app, lambda: not t.is_alive())
+    t.join(timeout=1)
+    return result["value"]
+
+
+def _url(srv, path: str) -> str:
+    return f"http://127.0.0.1:{srv.port}{path}"
+
+
+def _get(url: str, headers: dict | None = None) -> tuple[int, bytes]:
+    try:
+        with urllib.request.urlopen(
+            urllib.request.Request(url, headers=headers or {}), timeout=5
+        ) as resp:
+            return resp.status, resp.read()
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read()
+
+
+def _post(url: str, payload: dict, headers: dict | None = None) -> tuple[int, bytes]:
+    hdrs = {"Content-Type": "application/json"}
+    hdrs.update(headers or {})
+    req = urllib.request.Request(
+        url, data=json.dumps(payload).encode("utf-8"), headers=hdrs, method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status, resp.read()
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read()
+
+
+class TestLeadSessionsRoute:
+    def test_works_in_view_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            api,
+            "lead_sessions",
+            lambda orch, project_ns, limit: {"project": project_ns, "sessions": []},
+        )
+        config = RemoteConfig(bind_port=0, secret_path="sek", token="tok", mode="view")
+        srv = http_server.start_server(config, _FakeOrch())
+        try:
+            status, body = _run_pumped(
+                lambda: _get(_url(srv, "/sek/api/lead/sessions"), {"Authorization": "Bearer tok"})
+            )
+        finally:
+            srv.stop()
+        assert status == 200
+        assert json.loads(body) == {"project": "default", "sessions": []}
+
+    def test_forwards_project_and_limit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        seen: dict = {}
+
+        def _fake(orch, project_ns, limit):
+            seen["project_ns"] = project_ns
+            seen["limit"] = limit
+            return {"project": project_ns, "sessions": []}
+
+        monkeypatch.setattr(api, "lead_sessions", _fake)
+        config = RemoteConfig(bind_port=0, secret_path="sek", token="tok", mode="control")
+        srv = http_server.start_server(config, _FakeOrch())
+        try:
+            _run_pumped(
+                lambda: _get(
+                    _url(srv, "/sek/api/lead/sessions?limit=5"), {"Authorization": "Bearer tok"}
+                )
+            )
+        finally:
+            srv.stop()
+        assert seen["project_ns"] == "default"
+        assert seen["limit"] == "5"
+
+
+class TestLeadResumeRoute:
+    def test_forbidden_in_view_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            api, "resume_lead", lambda orch, project, session_uuid: {"ok": True, "project": project}
+        )
+        config = RemoteConfig(bind_port=0, secret_path="sek", token="tok", mode="view")
+        srv = http_server.start_server(config, _FakeOrch())
+        try:
+            status, body = _post(
+                _url(srv, "/sek/api/lead/resume"),
+                {"project": "proj", "session_uuid": "u1"},
+                {"Authorization": "Bearer tok"},
+            )
+        finally:
+            srv.stop()
+        assert status == 403
+        assert json.loads(body)["msg"] == "view mode: control is disabled"
+
+    def test_control_mode_returns_ok(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            api, "resume_lead", lambda orch, project, session_uuid: {"ok": True, "project": project}
+        )
+        config = RemoteConfig(bind_port=0, secret_path="sek", token="tok", mode="control")
+        srv = http_server.start_server(config, _FakeOrch())
+        try:
+            status, body = _run_pumped(
+                lambda: _post(
+                    _url(srv, "/sek/api/lead/resume"),
+                    {"project": "proj", "session_uuid": "u1"},
+                    {"Authorization": "Bearer tok"},
+                )
+            )
+        finally:
+            srv.stop()
+        assert status == 200
+        assert json.loads(body) == {"ok": True, "project": "proj"}
+
+    def test_bridge_error_surfaces_status_and_msg(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _fake_resume(orch, project, session_uuid):
+            raise api.RemoteApiError(409, "resume failed")
+
+        monkeypatch.setattr(api, "resume_lead", _fake_resume)
+        config = RemoteConfig(bind_port=0, secret_path="sek", token="tok", mode="control")
+        srv = http_server.start_server(config, _FakeOrch())
+        try:
+            status, body = _run_pumped(
+                lambda: _post(
+                    _url(srv, "/sek/api/lead/resume"),
+                    {"project": "proj", "session_uuid": "u1"},
+                    {"Authorization": "Bearer tok"},
+                )
+            )
+        finally:
+            srv.stop()
+        assert status == 409
+        assert json.loads(body) == {"ok": False, "msg": "resume failed"}

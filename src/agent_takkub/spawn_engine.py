@@ -86,6 +86,38 @@ def _from_orch(name: str):
 
 RESUME_WINDOW_SEC = 5 * 60  # respawn within this window → claude --resume <uuid>
 
+
+def _resume_uuid_matches_cwd(project_ns: str, session_uuid: str, cwd: str) -> bool:
+    """W3: verify a caller-chosen resume session (mobile session picker)
+    actually belongs to `cwd` before handing it to `--resume`.
+
+    Same cwd-disambiguation guarantee the 5-min auto-resume path enforces via
+    the in-memory pane-state cache — but this checks the JSONL store instead,
+    since a user-picked session may belong to a pane that closed long ago (not
+    something this run's `_pane_state` cache would still know about). Claude
+    Code encodes a session's launch cwd into its jsonl parent directory name
+    (`chatlog_scanner.decode_project_dir`), so decoding that name and
+    comparing against the resolved spawn cwd is a read-only, forgery-proof
+    check with no dependency on any in-memory state.
+    """
+    from .chatlog_scanner import decode_project_dir
+    from .user_profile import config_dir_for
+
+    try:
+        base = config_dir_for(project_ns) / "projects"
+        matches = list(base.glob(f"*/{session_uuid}.jsonl"))
+    except OSError:
+        return False
+    if not matches:
+        return False
+    try:
+        decoded = decode_project_dir(matches[0].parent.name).resolve()
+        target = pathlib.Path(cwd).resolve()
+    except OSError:
+        return False
+    return decoded == target
+
+
 # Continue-nudge injected after a *resumed* stuck-recovery. `--resume` restores
 # the conversation but leaves claude idle at the ready prompt — it does NOT
 # auto-continue the interrupted turn, so without a prompt the recovered pane
@@ -528,6 +560,7 @@ class SpawnEngineMixin:
         project: str | None,
         _from_auto_respawn: bool,
         _shard_total: int,
+        resume_uuid: str | None = None,
     ) -> None:
         """QTimer callback: re-evaluate gate and spawn when safe, or re-defer."""
         project_ns = self._resolve_project(project)
@@ -558,8 +591,8 @@ class SpawnEngineMixin:
                 _bts[deferred_key] = _now
             QTimer.singleShot(
                 50,
-                lambda r=role_name, c=cwd, p=project, a=_from_auto_respawn, s=_shard_total: (
-                    self._retry_deferred_spawn(r, c, p, a, s)
+                lambda r=role_name, c=cwd, p=project, a=_from_auto_respawn, s=_shard_total, u=resume_uuid: (
+                    self._retry_deferred_spawn(r, c, p, a, s, u)
                 ),
             )
             return
@@ -573,8 +606,8 @@ class SpawnEngineMixin:
         # close the check-to-call race, then re-enter spawn() which verifies once more.
         QTimer.singleShot(
             35,
-            lambda r=role_name, c=cwd, p=project, a=_from_auto_respawn, s=_shard_total: self.spawn(
-                r, cwd=c, project=p, _from_auto_respawn=a, _shard_total=s
+            lambda r=role_name, c=cwd, p=project, a=_from_auto_respawn, s=_shard_total, u=resume_uuid: (
+                self.spawn(r, cwd=c, project=p, _from_auto_respawn=a, _shard_total=s, resume_uuid=u)
             ),
         )
 
@@ -583,7 +616,11 @@ class SpawnEngineMixin:
         _queue = getattr(self, "_spawn_queue", None)
         if not _queue:
             return
-        role, cwd, project, from_auto_respawn, shard_total = _queue.popleft()
+        # Tolerate a legacy 5-item entry (no resume_uuid) — some call sites /
+        # tests still push the pre-W3 shape.
+        item = _queue.popleft()
+        resume_uuid = item[5] if len(item) > 5 else None
+        role, cwd, project, from_auto_respawn, shard_total = item[:5]
         project_ns = self._resolve_project(project)
         pane = self._project_panes(project_ns).get(role)
         if pane is not None and pane.session is not None and pane.session.is_alive:
@@ -592,8 +629,8 @@ class SpawnEngineMixin:
         _log_event("spawn_queue_drain", role=role, project=project_ns)
         QTimer.singleShot(
             0,
-            lambda r=role, c=cwd, p=project, a=from_auto_respawn, s=shard_total: self.spawn(
-                r, cwd=c, project=p, _from_auto_respawn=a, _shard_total=s
+            lambda r=role, c=cwd, p=project, a=from_auto_respawn, s=shard_total, u=resume_uuid: (
+                self.spawn(r, cwd=c, project=p, _from_auto_respawn=a, _shard_total=s, resume_uuid=u)
             ),
         )
 
@@ -622,6 +659,7 @@ class SpawnEngineMixin:
         _from_auto_respawn: bool,
         _shard_total: int,
         pane_tok: str | None = None,
+        resume_uuid: str | None = None,
     ) -> None:
         """Clean re-defer after Tier 2 final-gate failure.
 
@@ -643,8 +681,8 @@ class SpawnEngineMixin:
         )
         QTimer.singleShot(
             50,
-            lambda r=role_name, c=cwd, p=project, a=_from_auto_respawn, s=_shard_total: (
-                self._retry_deferred_spawn(r, c, p, a, s)
+            lambda r=role_name, c=cwd, p=project, a=_from_auto_respawn, s=_shard_total, u=resume_uuid: (
+                self._retry_deferred_spawn(r, c, p, a, s, u)
             ),
         )
 
@@ -715,6 +753,10 @@ class SpawnEngineMixin:
             if not self._final_gate_clear():
                 session.setParent(None)
                 session.deleteLater()
+                # resume_uuid omitted (defaults None): shell/gemini/codex never
+                # carry a resume_uuid — that's a claude-branch-only concept
+                # (`--resume` support, #103) and this helper is never called
+                # for the claude branch (see docstring).
                 self._toctou_redefer(
                     role_name,
                     cwd,
@@ -773,6 +815,7 @@ class SpawnEngineMixin:
         project: str | None = None,
         _from_auto_respawn: bool = False,
         _shard_total: int = 0,
+        resume_uuid: str | None = None,
     ) -> tuple[bool, str]:
         # Resolve test-mockable deps from orchestrator's live namespace so that
         # tests using `patch("agent_takkub.orchestrator.PtySession")` etc. work.
@@ -882,8 +925,8 @@ class SpawnEngineMixin:
             _log_event("spawn_deferred_gate", role=role_name, project=project_ns)
             QTimer.singleShot(
                 50,
-                lambda r=role_name, c=cwd, p=project, a=_from_auto_respawn, s=_shard_total: (
-                    self._retry_deferred_spawn(r, c, p, a, s)
+                lambda r=role_name, c=cwd, p=project, a=_from_auto_respawn, s=_shard_total, u=resume_uuid: (
+                    self._retry_deferred_spawn(r, c, p, a, s, u)
                 ),
             )
             return True, f"{role_name} spawn deferred (gate blocked)"
@@ -898,7 +941,7 @@ class SpawnEngineMixin:
             _queue = getattr(self, "_spawn_queue", None)
             if _queue is None:
                 self._spawn_queue = _queue = collections.deque()
-            _queue.append((role_name, cwd, project, _from_auto_respawn, _shard_total))
+            _queue.append((role_name, cwd, project, _from_auto_respawn, _shard_total, resume_uuid))
             _log_event("spawn_queued_fifo", role=role_name, project=project_ns)
             return True, f"{role_name} spawn queued (arbiter busy)"
         # ── /Spawn gate + FIFO arbiter ──────────────────────────────
@@ -1571,27 +1614,44 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         # could each inherit the other's history via --continue.
         # On a fresh spawn (no prior UUID or expired window), generate a new
         # UUIDv4 and pass --session-id so claude tracks the session from the start.
+        #
+        # W3: `resume_uuid` is a caller-chosen override (mobile Resume/session
+        # picker) that bypasses the 5-min auto-resume window entirely — it can
+        # rejoin a session from hours/days ago. Validated against the JSONL
+        # store (not the in-memory pane-state cache, which only knows sessions
+        # from panes that were open *this run*) so a forged/mismatched uuid can
+        # never bleed another project's conversation into this cwd, same
+        # cwd-disambiguation guarantee the auto-resume path below relies on.
         resumed = False
         _ekey_spawn = _exit_key(project_ns, role_name)
-        _ps_pre = self._pane_state.get(_ekey_spawn)
-        prior_uuid = _ps_pre.session_uuid if _ps_pre is not None else None
-        prior_uuid_cwd = _ps_pre.session_uuid_cwd if _ps_pre is not None else ""
-        prior_exit = self._recent_exits.get(_ekey_spawn)
-        can_resume = (
-            prior_uuid is not None
-            and prior_uuid_cwd == spawn_cwd
-            and prior_exit is not None
-            and (time.time() - prior_exit.get("ts", 0)) < RESUME_WINDOW_SEC
-        )
-        if can_resume:
-            argv.extend(["--resume", prior_uuid])
+        if resume_uuid:
+            if not _resume_uuid_matches_cwd(project_ns, resume_uuid, spawn_cwd):
+                return False, f"resume_uuid does not match cwd for {role_name}"
+            argv.extend(["--resume", resume_uuid])
             resumed = True
-        else:
-            new_uuid = str(_uuid.uuid4())
-            argv.extend(["--session-id", new_uuid])
             _ps_new = self._ps(_ekey_spawn)
-            _ps_new.session_uuid = new_uuid
+            _ps_new.session_uuid = resume_uuid
             _ps_new.session_uuid_cwd = spawn_cwd
+        else:
+            _ps_pre = self._pane_state.get(_ekey_spawn)
+            prior_uuid = _ps_pre.session_uuid if _ps_pre is not None else None
+            prior_uuid_cwd = _ps_pre.session_uuid_cwd if _ps_pre is not None else ""
+            prior_exit = self._recent_exits.get(_ekey_spawn)
+            can_resume = (
+                prior_uuid is not None
+                and prior_uuid_cwd == spawn_cwd
+                and prior_exit is not None
+                and (time.time() - prior_exit.get("ts", 0)) < RESUME_WINDOW_SEC
+            )
+            if can_resume:
+                argv.extend(["--resume", prior_uuid])
+                resumed = True
+            else:
+                new_uuid = str(_uuid.uuid4())
+                argv.extend(["--session-id", new_uuid])
+                _ps_new = self._ps(_ekey_spawn)
+                _ps_new.session_uuid = new_uuid
+                _ps_new.session_uuid_cwd = spawn_cwd
 
         session = PtySession(cols=_PANE_COLS, rows=_PANE_ROWS, parent=self)
         _t_path = _build_transcript_path(project_ns, role_name)
@@ -1611,6 +1671,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                     _from_auto_respawn,
                     _shard_total,
                     pane_tok=pane_tok,
+                    resume_uuid=resume_uuid,
                 )
                 return True, f"{role_name} spawn deferred (final re-sample blocked)"
             _t0 = time.time()

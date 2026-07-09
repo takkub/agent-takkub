@@ -238,6 +238,7 @@
     if (name === "pulse") startPulsePolling();
     else stopPulsePolling();
     if (name !== "lead") stopLeadStream();
+    updateResumeButtonVisibility();
   }
 
   document.querySelectorAll("#bottom-nav button").forEach(function (btn) {
@@ -1167,7 +1168,110 @@
     modePill.textContent = isControl ? "CONTROL" : "VIEW";
     modePill.classList.toggle("control", isControl);
     renderQuickReplies();
+    updateResumeButtonVisibility();
   }
+
+  // ---------------------------------------------------------------
+  // Resume / session picker (W3) — control-mode only. Lists recent Lead
+  // sessions for the selected project (GET api/lead/sessions) and lets the
+  // user pick one to resume (POST api/lead/resume), which closes + respawns
+  // the project's Lead pane on the desktop with `--resume <uuid>`.
+  // ---------------------------------------------------------------
+
+  function updateResumeButtonVisibility() {
+    var btn = $("lead-resume-btn");
+    if (!btn) return;
+    btn.classList.toggle("show", state.view === "lead" && state.mode === "control");
+  }
+
+  function resumeTimeLabel(mtime) {
+    var ms = Number(mtime) * 1000;
+    if (!isFinite(ms) || ms <= 0) return "";
+    var d = new Date(ms);
+    var hh = String(d.getHours()).padStart(2, "0");
+    var mm = String(d.getMinutes()).padStart(2, "0");
+    return d.toLocaleDateString() + " " + hh + ":" + mm;
+  }
+
+  function openResumeSheet() {
+    var sheet = $("resume-sheet");
+    var list = $("resume-sheet-list");
+    if (!sheet || !list) return;
+    sheet.classList.add("show");
+    list.innerHTML = '<div class="resume-empty">กำลังโหลด…</div>';
+    var path = "api/lead/sessions?limit=10";
+    if (state.selectedProject) path += "&project=" + encodeURIComponent(state.selectedProject);
+    apiFetch(path)
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        renderResumeList(Array.isArray(data && data.sessions) ? data.sessions : []);
+      })
+      .catch(function () {
+        list.innerHTML = '<div class="resume-empty">โหลดรายการไม่สำเร็จ ลองใหม่</div>';
+      });
+  }
+
+  function closeResumeSheet() {
+    var sheet = $("resume-sheet");
+    if (sheet) sheet.classList.remove("show");
+  }
+
+  function renderResumeList(sessions) {
+    var list = $("resume-sheet-list");
+    if (!list) return;
+    list.innerHTML = "";
+    if (!sessions.length) {
+      list.innerHTML = '<div class="resume-empty">ยังไม่มี session ก่อนหน้าให้ resume</div>';
+      return;
+    }
+    sessions.forEach(function (s) {
+      if (!s || typeof s.uuid !== "string") return;
+      var row = document.createElement("div");
+      row.className = "resume-row";
+      var time = document.createElement("span");
+      time.className = "resume-time";
+      time.textContent = resumeTimeLabel(s.mtime);
+      row.appendChild(time);
+      var preview = document.createElement("span");
+      preview.className = "resume-preview";
+      preview.textContent = (typeof s.preview === "string" && s.preview) || "(ไม่มี preview)";
+      row.appendChild(preview);
+      row.addEventListener("click", function () { confirmResume(s.uuid); });
+      list.appendChild(row);
+    });
+  }
+
+  function confirmResume(sessionUuid) {
+    if (!window.confirm("Resume session นี้? Lead pane ปัจจุบันจะถูกปิดแล้วโหลด session นี้กลับมา")) return;
+    var body = { session_uuid: sessionUuid };
+    if (state.selectedProject) body.project = state.selectedProject;
+    apiFetch("api/lead/resume", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    })
+      .then(function (r) { return r.json().then(function (data) { return { status: r.status, data: data }; }); })
+      .then(function (res) {
+        if (res.status === 200 && res.data && res.data.ok) {
+          closeResumeSheet();
+          toast("กำลัง resume session…");
+          stopLeadStream();
+          startLeadStream();
+          return;
+        }
+        toast((res.data && res.data.msg) || "resume ไม่สำเร็จ");
+      })
+      .catch(function (err) {
+        if (err instanceof Error && (err.message === "password_required" || err.message === "unauthorized")) return;
+        toast("resume ไม่สำเร็จ ลองใหม่");
+      });
+  }
+
+  $("lead-resume-btn").addEventListener("click", openResumeSheet);
+  $("resume-sheet-close").addEventListener("click", closeResumeSheet);
+  $("resume-sheet").addEventListener("click", function (evt) {
+    if (evt.target === $("resume-sheet")) closeResumeSheet();
+  });
 
   $("lead-composer").addEventListener("submit", function (evt) {
     evt.preventDefault();
