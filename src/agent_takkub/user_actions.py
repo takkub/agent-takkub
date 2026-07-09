@@ -218,8 +218,12 @@ class UserActionsMixin:
 
     def _on_resume_clicked(self) -> None:
         """Send /resume to the active tab's Lead pane so claude opens its
-        session picker. No-op if Lead isn't ready yet — slash injection
-        helper drops silently in that case (max wait 45s)."""
+        session picker. Button disables + shows a busy label while the
+        slash-injection helper polls for Lead-ready (up to 45s); on_delivered/
+        on_dropped restore it and report the outcome via the status bar so a
+        drop (Lead not ready in time, pane gone) is no longer silent (#4)."""
+        if not self._btn_resume.isEnabled():
+            return
         active_project_name = None
         try:
             from .config import active_project as _active_project
@@ -228,7 +232,29 @@ class UserActionsMixin:
             active_project_name = name
         except Exception:
             pass
-        self.orch.inject_slash_command_when_ready("lead", "/resume", project=active_project_name)
+        self._btn_resume.setEnabled(False)
+        self._btn_resume.setText("⏳ Resuming…")
+
+        def _on_delivered() -> None:
+            self._btn_resume.setText("↻ Resume")
+            self._btn_resume.setEnabled(True)
+            self._status.showMessage("/resume sent to Lead", 3000)
+
+        def _on_dropped(reason: str) -> None:
+            self._btn_resume.setText("↻ Resume")
+            self._btn_resume.setEnabled(True)
+            self._status.showMessage(
+                f"Resume ไม่สำเร็จ: {reason} — Lead ไม่ ready หรือ pane หาย ลองใหม่หรือพิมพ์ /resume เอง",
+                6000,
+            )
+
+        self.orch.inject_slash_command_when_ready(
+            "lead",
+            "/resume",
+            project=active_project_name,
+            on_delivered=_on_delivered,
+            on_dropped=_on_dropped,
+        )
 
     def _on_end_session_clicked(self) -> None:
         """🏁 End-Session button: prompt for note → close teammates → write summary.

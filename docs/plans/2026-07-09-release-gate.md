@@ -101,3 +101,77 @@ shortened notice fires), and shard handoff parity with the non-shard path.
 
 ✅ **PASS** — full suite green modulo the same 2 pre-existing env-dependent failures, symmetrize
 suite 12/12 green. Safe to ship 1.0.22 at this HEAD.
+
+## #112 — remote-bridge double-fire on `--resume` boot, gate before restart (2026-07-09, HEAD = `b2a543b`)
+
+Gate for `b2a543b` (`_lead_remote_bridge_delivered_session` persistent identity guard —
+`orchestrator.py` + `spawn_engine.py`, tests in `tests/test_remote_bridge_repro.py`).
+
+### 1. Full pytest suite
+
+```
+rtk proxy python -m pytest -q --junitxml=runtime/tasks/agent-takkub/2026-07-09/qa-junit-165951.xml
+```
+
+```
+tests=3374 failures=2 errors=0 skipped=2 time=139.938s
+```
+
+**2 failures — same baseline as every prior gate, both `tests/test_plugin_policy.py`:**
+- `TestRolePluginPolicy::test_teammate_gets_superpowers_and_pordee_not_addy`
+- `TestRolePluginPolicy::test_design_roles_get_ui_ux_pro_max`
+
+Root cause unchanged (sandbox has no `~/.claude/plugins/cache`, env-dependent). Test count rose
+3364 → 3374 (+10, from `tests/test_remote_bridge_repro.py`'s #112 additions). No other failures,
+0 regressions.
+
+### 2. Independent repro — NOT reusing `tests/test_remote_bridge_repro.py`
+
+Wrote a standalone script (`runtime/tasks/agent-takkub/2026-07-09/repro_112_qa.py`) that drives
+the real `Orchestrator.consume_session_report` against the **exact timeline recorded in
+`runtime/events.log` for the actual incident** (2026-07-09 16:49:51–16:50:26):
+
+```
+16:49:52  session_report source=startup uuid=2546cb62
+16:50:21  session_report source=resume  uuid=54013ded   (29s later, SAME PtySession object)
+16:50:22  auto_slash_command  /remote-control            <- fired #1 (real log)
+16:50:26  auto_slash_command  /remote-control            <- fired #2 (real log, the bug)
+```
+
+The script: fires `consume_session_report` for uuid A (startup) against a shared fake `pane.session`
+object, fires the captured on_delivered callback (simulating the first poll's real delivery),
+then — 29s later in the timeline — fires `consume_session_report` again for a *different* uuid B
+(resume) on the *same* session object, and asserts `inject_slash_command_when_ready` was called
+exactly once total. It also checks the companion contract that a genuine respawn (brand-new
+session object) still re-fires correctly.
+
+**Falsifiability check** (not just trusting the script — proved it actually catches the bug):
+temporarily reverted `spawn_engine.py`/`orchestrator.py` to `b2a543b^` (pre-fix) via
+`git checkout b2a543b^ -- <files>`, re-ran the script:
+
+```
+[t=29s] session_report resume  uuid=54013ded -> inject_calls=2
+FAIL (#112 REGRESSION): /remote-control fired 2 times ... double-fire reproduced.
+EXIT=1
+```
+
+Confirmed the repro genuinely detects the pre-fix bug (2 fires), then restored the fix
+(`git checkout b2a543b -- <files>`, verified `git status` clean) and re-ran:
+
+```
+[t=29s] session_report resume  uuid=54013ded -> inject_calls=1
+PASS: /remote-control fired exactly once across both hooks — #112 fix holds.
+[respawn] ... inject_calls=2
+PASS: genuine respawn (new session object) still re-fires correctly.
+EXIT=0
+```
+
+Verified with real code (not test-file assertions alone) — `_lead_remote_bridge_delivered_session`
+correctly makes delivery lifetime-once per session object, and does not over-block genuine
+respawns.
+
+### Verdict (#112 gate)
+
+✅ **PASS** — 0 regressions (3374 tests, 2 pre-existing env-dependent fails only), independent events.log-timeline
+repro confirms the fix holds and is falsifiable (caught the bug pre-fix, passes post-fix). Safe to
+restart cockpit at this HEAD.
