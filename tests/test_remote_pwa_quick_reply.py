@@ -53,13 +53,16 @@ class TestAppJsWiring:
         assert "sendLeadMessage(n)" in js
         assert "sendLeadMessage(label)" in js
 
-    def test_banner_never_forwards_full_options_payload(self):
-        # data-min: the client only ever renders whatever text the server
-        # sent (already stripped of options server-side) — this just checks
-        # the client doesn't independently render an `options`/`label` field.
+    def test_picker_renders_options_as_tappable_chips_safely(self):
+        # B2: the server now forwards AskUserQuestion options (notify.py no
+        # longer strips them) so the client can render tappable chips instead
+        # of a plain-text "answer on desktop" banner. This supersedes the
+        # older data-min assumption (options always stripped server-side) —
+        # what still matters is that the client renders option labels safely
+        # (textContent, never innerHTML) rather than trusting the shape blindly.
         js = _read("app.js")
-        assert "payload.options" not in js
-        assert "question.options" not in js
+        assert "Array.isArray(payload.options)" in js  # guards a malformed payload
+        assert "btn.textContent = label" in js  # chip labels never go through innerHTML
 
     def test_hide_picker_banner_wired_into_new_lead_text_paths(self):
         js = _read("app.js")
