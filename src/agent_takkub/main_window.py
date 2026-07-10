@@ -59,6 +59,7 @@ from .project_tab import ProjectTab
 from .project_wizard import ProjectWizardMixin
 from .roles import DEFAULT_TEAMMATES, LEAD, Role, by_name
 from .status_header import StatusHeaderMixin
+from .task_dock import TaskDockWidget
 from .tutorial_overlay import TutorialOverlay, TutorialStep, has_seen_tutorial
 from .update_panel import MainWindowUpdateMixin
 from .usage_meter import UsageMeter
@@ -287,6 +288,20 @@ class MainWindow(
         self._logs_dock.setMinimumHeight(140)
         self._logs_dock.hide()
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self._logs_dock)
+
+        # ── right-side task-tree dock (A8, hidden by default) ───
+        self._tasks_dock = QDockWidget("Tasks", self)
+        self._tasks_dock.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea)
+        self._tasks_dock_widget = TaskDockWidget()
+        self._tasks_dock.setWidget(self._tasks_dock_widget)
+        self._tasks_dock.setMinimumWidth(260)
+        self._tasks_dock.hide()
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._tasks_dock)
+        # Live refresh: the Task Ledger (A7) writes on every assign/done/
+        # fail/close; Orchestrator emits ledgerChanged right after each write
+        # lands, so the dock repaints only the one project card that changed
+        # instead of polling the state file on a timer.
+        self.orch.ledgerChanged.connect(self._tasks_dock_widget.refresh_project)
 
         # Periodic session snapshot so a hard crash (Alt+F4 mishandled,
         # power loss, force-kill from Task Manager) still leaves a recent
@@ -723,6 +738,16 @@ class MainWindow(
             checked = not self._logs_dock.isVisible()
         self._logs_dock.setVisible(checked)
 
+    def _on_toggle_tasks(self, checked: bool | None = None) -> None:
+        if checked is None:
+            checked = not self._tasks_dock.isVisible()
+        self._tasks_dock.setVisible(checked)
+        if checked:
+            # Rebuild from disk on open — cheap (small JSON reads) and covers
+            # any ledger write that landed while the dock was hidden (no
+            # live-signal connection needed for that gap).
+            self._tasks_dock_widget.refresh_all()
+
     def _show_help(self) -> None:
         from PyQt6.QtWidgets import QMessageBox
 
@@ -738,6 +763,7 @@ class MainWindow(
             "<b>Shortcuts</b><br>"
             "F1 — this dialog<br>"
             "Ctrl + Shift + L — show/hide events log panel<br>"
+            "Ctrl + Shift + T — show/hide task tree panel<br>"
             "Ctrl + + / - / 0 — terminal font size (click pane first)<br>"
             "Wheel — scroll claude's history (click pane first)<br><br>"
             "<b>Default cwd</b> when <code>--cwd</code> omitted: active project's<br>"
@@ -760,6 +786,10 @@ class MainWindow(
         # focused claude/shell pane, and a window-level shortcut would shadow it.
         QShortcut(QKeySequence("Ctrl+Shift+L"), self).activated.connect(
             lambda: self._on_toggle_logs(None)
+        )
+        # Ctrl+Shift+T toggles the right-hand Task Tree dock (A8).
+        QShortcut(QKeySequence("Ctrl+Shift+T"), self).activated.connect(
+            lambda: self._on_toggle_tasks(None)
         )
 
     # ──────────────────────────────────────────────────────────────

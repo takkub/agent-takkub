@@ -21,14 +21,22 @@ rendered) so ``mark_done`` never has to parse markdown back into structured
 data — ``INDEX.md`` is a pure regenerated view of the JSON, written
 atomically (temp file + ``os.replace``) alongside every mutation.
 
-**Design note left for Lead (per task spec — flagging, not guessing):**
-auto-respawn replay calls ``assign()`` again with the same task after a pane
-crash/restart, which (by design here) appends a FRESH ledger row rather than
-reusing/deduping the previous one — the stale `[~]` row is left exactly as
-the "unfinished nag" rule intends. If auto-respawn churn turns out to be
-frequent enough to clutter INDEX.md with duplicate rows for the same logical
-assignment, that's a follow-up call for Lead (no obviously-correct dedup key
-without risking hiding a genuinely-different reassignment).
+**Orphan/double-count fix (A7-followup):** ``state["open"]`` is keyed by
+``role`` alone. If ``create_assignment`` is called again for a role that
+still has an open (``working``) row — a fresh re-assign before the previous
+task ever called ``takkub done`` — the old open pointer used to be silently
+overwritten, leaving the first row stuck at ``[~]`` forever (an orphan that
+also double-counts against ``progress: done/total``). Fixed by having
+``create_assignment`` resolve any stale open row for the role to a terminal
+``superseded`` marker before opening the new one, so a role has at most one
+open row at any time.
+
+This does **not** touch crash-respawn replay: ``spawn_engine._auto_respawn``
+re-sends the cached ``last_assigned_task`` via ``_send_when_ready`` directly
+— it never calls ``create_assignment`` (only ``Orchestrator.assign`` /
+``_assign_dispatch`` do, for a genuine fresh assign) — so the "unfinished
+nag" row from a crashed pane is untouched by this fix. No ``is_replay`` flag
+is needed: the two code paths already never collide.
 """
 
 from __future__ import annotations
@@ -46,8 +54,9 @@ logger = logging.getLogger(__name__)
 _FALLBACK_GOAL = "(ไม่ระบุเป้าหมาย)"
 _FALLBACK_FEATURE = "งานทั่วไป"
 
-_ROW_SYMBOL = {"working": "~", "ok": "x", "fail": "!", "closed": "-"}
+_ROW_SYMBOL = {"working": "~", "ok": "x", "fail": "!", "closed": "-", "superseded": ">"}
 _VALID_STATUSES = ("ok", "fail", "closed")
+_TERMINAL_STATUSES = frozenset({"ok", "closed", "superseded"})
 
 
 def _ledger_dir(project: str) -> pathlib.Path:
@@ -78,6 +87,18 @@ def _load_state(project: str) -> dict:
         return json.loads(_state_path(project).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {"groups": [], "open": {}}
+
+
+def load_state(project: str) -> dict:
+    """Public loader for the ledger's JSON state — the Task Tree dock (A8)
+    reads this directly instead of parsing INDEX.md markdown, so the tree
+    view can never drift from the ledger's own structured data."""
+    return _load_state(project)
+
+
+def index_path(project: str) -> pathlib.Path:
+    """Public accessor for *project*'s rendered INDEX.md path (A8's ↗ button)."""
+    return _index_path(project)
 
 
 def _save_state(project: str, state: dict) -> None:
@@ -179,6 +200,14 @@ def create_assignment(
     }
 
     state = _load_state(project)
+    # Orphan/double-count fix: a re-assign to a role that still has an open
+    # (never-`done`) row must resolve that stale row first, else its open
+    # pointer is clobbered below and the old row is stuck at `[~]` forever
+    # while also double-counting against `progress: done/total`.
+    _, stale_warning = _resolve_open_row(state, project, role, "superseded", now)
+    if stale_warning:
+        warning = f"{warning}\n{stale_warning}" if warning else stale_warning
+
     group = _find_or_create_group(state, date, goal_text)
     feat = _find_or_create_feature(group, feature_text)
     feat["rows"].append(row)
@@ -207,6 +236,45 @@ def _flip_detail_status(path: pathlib.Path, status: str) -> None:
         _atomic_write(path, new_text)
 
 
+def _resolve_open_row(
+    state: dict, project: str, role: str, status: str, ts: datetime
+) -> tuple[bool, str]:
+    """Pop *role*'s open-row pointer (if any) and flip that row to *status*.
+
+    Shared by `mark_done` (external ok/fail/closed) and `create_assignment`'s
+    stale-open resolution (a fresh re-assign superseding a still-open row
+    left by a previous assignment that never called `takkub done`). Mutates
+    `state` in place but does not persist it — callers save + regen the
+    index themselves, and only when this returns `True` (a row actually
+    changed), matching the prior no-op-on-missing-pointer behavior.
+    """
+    open_map = state.get("open", {})
+    ptr = open_map.pop(role, None)
+    if ptr is None:
+        return False, ""
+
+    group = _find_group(state, ptr["date"], ptr["goal"])
+    feat = _find_feature(group, ptr["feature"]) if group is not None else None
+    rows = feat["rows"] if feat is not None else []
+    idx = ptr["row_index"]
+    if not (0 <= idx < len(rows)):
+        return False, ""
+
+    rows[idx]["status"] = status
+    rows[idx]["done_hhmmss"] = ts.strftime("%H:%M:%S")
+
+    warning = ""
+    detail_rel = rows[idx].get("detail_rel")
+    if detail_rel:
+        try:
+            _flip_detail_status(_ledger_dir(project) / detail_rel, status)
+        except OSError as exc:
+            warning = f"⚠️ [ledger] อัปเดต detail file ของ {role} ไม่สำเร็จ: {exc}"
+            logger.warning("task_ledger detail flip failed for %s/%s: %s", project, role, exc)
+
+    return True, warning
+
+
 def mark_done(project: str, role: str, status: str, ts: datetime | None = None) -> str:
     """Flip the currently-open ledger row for *role* to *status*.
 
@@ -222,29 +290,9 @@ def mark_done(project: str, role: str, status: str, ts: datetime | None = None) 
         raise ValueError(f"invalid status: {status!r}")
     ts = ts or datetime.now()
     state = _load_state(project)
-    open_map = state.get("open", {})
-    ptr = open_map.pop(role, None)
-    if ptr is None:
+    changed, warning = _resolve_open_row(state, project, role, status, ts)
+    if not changed:
         return ""
-
-    group = _find_group(state, ptr["date"], ptr["goal"])
-    feat = _find_feature(group, ptr["feature"]) if group is not None else None
-    rows = feat["rows"] if feat is not None else []
-    idx = ptr["row_index"]
-    if not (0 <= idx < len(rows)):
-        return ""
-
-    rows[idx]["status"] = status
-    rows[idx]["done_hhmmss"] = ts.strftime("%H:%M:%S")
-
-    warning = ""
-    detail_rel = rows[idx].get("detail_rel")
-    if detail_rel:
-        try:
-            _flip_detail_status(_ledger_dir(project) / detail_rel, status)
-        except OSError as exc:
-            warning = f"⚠️ [ledger] อัปเดต detail file ของ {role} ไม่สำเร็จ: {exc}"
-            logger.warning("task_ledger detail flip failed for %s/%s: %s", project, role, exc)
 
     try:
         _save_state(project, state)
@@ -268,6 +316,8 @@ def _status_suffix(row: dict) -> str:
         return f"❌ FAILED `{done_hhmm}`"
     if status == "closed":
         return f"➖ ปิด `{done_hhmm}`"
+    if status == "superseded":
+        return f"🔁 แทนที่ด้วยงานใหม่ `{done_hhmm}`"
     return ""
 
 
@@ -279,7 +329,7 @@ def _feature_emoji(feat: dict) -> str:
         return "🔨"
     if "fail" in statuses:
         return "⚠️"
-    if statuses <= {"ok", "closed"}:
+    if statuses <= _TERMINAL_STATUSES:
         return "✅"
     return "⏳"
 
@@ -317,7 +367,8 @@ def _regen_index(project: str, state: dict) -> None:
         f"# 📋 Task Ledger — {project}\n\n"
         "> สารบัญงานทั้งหมด · เปิดไฟล์เดียวเห็นว่า **สั่งอะไร · ใครทำ · เสร็จยัง** · "
         "คลิกชื่อไฟล์อ่าน detail เต็ม\n"
-        "> สถานะ: `[ ]` รอคิว · `[~]` กำลังทำ · `[x]` เสร็จ · `[!]` FAILED · `[-]` ปิด/ยกเลิก\n\n"
+        "> สถานะ: `[ ]` รอคิว · `[~]` กำลังทำ · `[x]` เสร็จ · `[!]` FAILED · "
+        "`[-]` ปิด/ยกเลิก · `[>]` แทนที่ด้วยงานใหม่ (re-assign ก่อน done)\n\n"
         "---\n\n"
     )
     body = "\n---\n\n".join(_render_group(g) for g in state.get("groups", []))

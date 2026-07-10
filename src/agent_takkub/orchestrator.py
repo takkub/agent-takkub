@@ -475,6 +475,11 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
     # different pane — so a Lead notification can't slip by unseen now that the
     # panes-as-tabs layout shows only one pane at a time.
     leadNotified = pyqtSignal(str)  # project_ns
+    # Emitted after every successful Task Ledger (A7) write — assign/done/
+    # fail/close. The Task Tree dock (A8) connects this straight to its
+    # refresh_project(project_ns) slot instead of polling the state file, so
+    # the dock repaints the instant the write it's showing actually lands.
+    ledgerChanged = pyqtSignal(str)  # project_ns
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -896,6 +901,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             )
             if ledger_warning:
                 self._notify_lead(project_ns, ledger_warning, from_role=role_name, note="")
+            self.ledgerChanged.emit(project_ns)
         except Exception:
             _log_event("ledger_hook_error", role=role_name, project=project_ns, stage="assign")
         # New task → fresh one-shot budget for the Stop-hook done-gate.
@@ -1335,6 +1341,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                 ledger_warning = mark_done(project_ns, role_name, "closed")
                 if ledger_warning:
                     self._notify_lead(project_ns, ledger_warning, from_role=role_name, note="")
+                self.ledgerChanged.emit(project_ns)
             except Exception:
                 _log_event("ledger_hook_error", role=role_name, project=project_ns, stage="close")
 
@@ -1812,6 +1819,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             ledger_warning = mark_done(project_ns, from_role, "fail" if failed else "ok", ts=now)
             if ledger_warning:
                 self._notify_lead(project_ns, ledger_warning, from_role=from_role, note="")
+            self.ledgerChanged.emit(project_ns)
         except Exception:
             _log_event("ledger_hook_error", role=from_role, project=project_ns, stage="done")
         transcript_path = getattr(pane, "_transcript_path", None)

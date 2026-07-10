@@ -84,6 +84,58 @@ class TestCreateAssignment:
         assert "2. feature-B" in index_text
 
 
+class TestReassignBeforeDone:
+    """A7-followup: re-assign to the same role before its open row is `done`
+    must not leave an orphaned `[~]` row or double-count progress."""
+
+    def test_stale_open_row_is_superseded_not_orphaned(self) -> None:
+        task_ledger.create_assignment(
+            PROJECT, "backend", "/api", "first task", "goal", "feat", "claude"
+        )
+        task_ledger.create_assignment(
+            PROJECT, "backend", "/api", "second task", "goal", "feat", "claude"
+        )
+        state = task_ledger._load_state(PROJECT)
+        rows = state["groups"][0]["features"][0]["rows"]
+        assert len(rows) == 2
+        assert rows[0]["status"] == "superseded"
+        assert rows[1]["status"] == "working"
+        # Only the second (fresh) row is tracked as open for the role.
+        assert state["open"]["backend"]["row_index"] == 1
+
+        index_text = _index_text()
+        assert "[>]" in index_text
+        assert "🔁 แทนที่ด้วยงานใหม่" in index_text
+        # No stray `[~]` row left for the superseded first row (the legend
+        # line also contains the literal text `[~]`, so count row markers).
+        assert index_text.count("- [~]") == 1
+
+    def test_progress_counts_open_row_once_not_double(self) -> None:
+        task_ledger.create_assignment(
+            PROJECT, "backend", "/api", "first task", "goal", "feat", "claude"
+        )
+        task_ledger.create_assignment(
+            PROJECT, "backend", "/api", "second task", "goal", "feat", "claude"
+        )
+        task_ledger.mark_done(PROJECT, "backend", "ok")
+        index_text = _index_text()
+        assert "progress: 1/2 เสร็จ · 0 กำลังทำ" in index_text
+
+    def test_mark_done_after_reassign_flips_only_the_new_row(self) -> None:
+        task_ledger.create_assignment(
+            PROJECT, "backend", "/api", "first task", "goal", "feat", "claude"
+        )
+        task_ledger.create_assignment(
+            PROJECT, "backend", "/api", "second task", "goal", "feat", "claude"
+        )
+        task_ledger.mark_done(PROJECT, "backend", "ok")
+        state = task_ledger._load_state(PROJECT)
+        rows = state["groups"][0]["features"][0]["rows"]
+        assert rows[0]["status"] == "superseded"
+        assert rows[1]["status"] == "ok"
+        assert "backend" not in state.get("open", {})
+
+
 class TestMarkDone:
     def test_flip_ok_shows_done_checkbox(self) -> None:
         task_ledger.create_assignment(
