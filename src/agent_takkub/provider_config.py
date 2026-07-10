@@ -129,7 +129,9 @@ def save_providers(mapping: dict[str, str], project: str | None = None) -> None:
         for role, provider in mapping.items()
         if str(provider).lower() in VALID_PROVIDERS
     }
-    path.write_text(json.dumps(cleaned, indent=2) + "\n", encoding="utf-8")
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(cleaned, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(path)
 
 
 def role_provider_map(roles: Iterable[str], project: str | None = None) -> dict[str, str]:
@@ -142,7 +144,12 @@ def role_provider_map(roles: Iterable[str], project: str | None = None) -> dict[
     return {r: provider_for(r, project) for r in roles}
 
 
-def save_role_overrides(mapping: dict[str, str], project: str | None = None) -> None:
+def save_role_overrides(
+    mapping: dict[str, str],
+    project: str | None = None,
+    *,
+    scope: Iterable[str] | None = None,
+) -> None:
     """Persist only real overrides from a page payload (per-project when
     ``project`` given, else global).
 
@@ -150,8 +157,18 @@ def save_role_overrides(mapping: dict[str, str], project: str | None = None) -> 
     defaults (claude is the implicit default, storing it adds noise), then
     writes the result via :func:`save_providers`. Mirrors the old
     RoleProviderDialog save behavior so the file stays minimal.
+
+    ``scope`` — when given, this call only owns overrides for roles in
+    ``scope``: any pre-existing override for a role OUTSIDE ``scope`` (e.g. a
+    custom role a UI page doesn't render a control for) is preserved instead
+    of being silently dropped. Omit (default ``None``) to keep the historic
+    full-replace behavior, where ``mapping`` is the complete desired mapping
+    and anything missing from it is deleted.
     """
     overrides: dict[str, str] = {}
+    if scope is not None:
+        scope_set = {str(r).lower().strip() for r in scope}
+        overrides = {r: p for r, p in load_providers(project).items() if r not in scope_set}
     for role, provider in (mapping or {}).items():
         r = str(role).lower().strip()
         p = str(provider).lower().strip()

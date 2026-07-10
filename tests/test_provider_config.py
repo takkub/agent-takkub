@@ -213,6 +213,26 @@ class TestSaveRoleOverrides:
         provider_config.save_role_overrides({"backend": "gemini"})
         assert provider_config.load_providers() == {"backend": "gemini"}
 
+    def test_scope_preserves_overrides_outside_scope(self, redirect_config_path: Path) -> None:
+        """Codex High #1 — a page that only renders controls for a subset of
+        roles (e.g. Settings' Providers & Roles view, which excludes custom
+        roles) must not delete overrides for roles it never showed."""
+        provider_config.save_providers({"custom-role": "codex", "backend": "codex"})
+        # Only "backend" is in scope this call — "custom-role" is untouched
+        # on disk and must survive even though it's absent from `mapping`.
+        provider_config.save_role_overrides({"backend": "gemini"}, scope=["backend", "qa"])
+        assert provider_config.load_providers() == {
+            "custom-role": "codex",
+            "backend": "gemini",
+        }
+
+    def test_scope_still_drops_claude_default_within_scope(
+        self, redirect_config_path: Path
+    ) -> None:
+        provider_config.save_providers({"backend": "codex"})
+        provider_config.save_role_overrides({"backend": "claude"}, scope=["backend"])
+        assert provider_config.load_providers() == {}
+
 
 class TestPerProject:
     def test_projects_keep_independent_mappings(self, redirect_config_path: Path) -> None:

@@ -1402,7 +1402,10 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         pane in every project so live sessions notice the change without
         having to poll the file.
 
-        Returns (ok, message). Currently only fails on unknown provider.
+        Returns (ok, message). Fails on unknown provider or if the state
+        file can't be written (disk full/permissions) — callers must not
+        assume this always succeeds and should surface `message` to the user
+        rather than proceeding as if the toggle took effect.
         """
         from .provider_state import TOGGLABLE, set_disabled
 
@@ -1410,7 +1413,10 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         if provider not in TOGGLABLE:
             return False, f"unknown provider: {provider!r}"
 
-        set_disabled(provider, disabled)
+        try:
+            set_disabled(provider, disabled)
+        except OSError as e:
+            return False, f"could not persist provider state: {e}"
 
         word = "DISABLED" if disabled else "ENABLED"
         suffix = (

@@ -154,6 +154,51 @@ class TestCreateRole:
         assert ok is True
         assert custom_roles.load_custom_roles()["data-eng"].label == "Data-eng"
 
+    def test_role_file_commit_failure_rolls_back_registry(
+        self, registry_files: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Codex High #4 — role markdown is written to a temp file and
+        renamed into place LAST; if that rename fails, the registry write
+        that already happened must be rolled back so a retry doesn't collide
+        on "already exists" against an entry with no matching role file."""
+        original_replace = Path.replace
+
+        def _boom(self: Path, target: object) -> Path:
+            if str(target).endswith(".md"):
+                raise OSError("disk full")
+            return original_replace(self, target)
+
+        monkeypatch.setattr(Path, "replace", _boom)
+
+        ok, err = custom_roles.create_role("data-eng", "Data Eng", "#112233", 1, 5, "x")
+
+        assert ok is False
+        assert err
+        assert "data-eng" not in custom_roles.load_custom_roles()
+        assert not custom_roles.role_file_path("data-eng").exists()
+
+    def test_role_file_commit_failure_restores_previous_entry(
+        self, registry_files: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Overwriting an EXISTING custom role whose role-file rename fails
+        must restore the prior registry entry, not just delete the name."""
+        custom_roles.create_role("data-eng", "Data Eng (old)", "#112233", 1, 5, "old")
+        original_replace = Path.replace
+
+        def _boom(self: Path, target: object) -> Path:
+            if str(target).endswith(".md"):
+                raise OSError("disk full")
+            return original_replace(self, target)
+
+        monkeypatch.setattr(Path, "replace", _boom)
+
+        ok, _err = custom_roles.create_role("data-eng", "Data Eng (new)", "#654321", 2, 9, "new")
+
+        assert ok is False
+        restored = custom_roles.load_custom_roles()["data-eng"]
+        assert restored.label == "Data Eng (old)"
+        assert restored.color == "#112233"
+
 
 class TestDeleteRole:
     def test_delete_removes_from_registry(self, registry_files: Path) -> None:

@@ -361,9 +361,14 @@ class UserActionsMixin:
         # providers whose target state differs from disk through
         # orchestrator.toggle_provider (it always broadcasts, so a no-op call
         # would spam Lead panes spuriously).
+        errors: list[str] = []
         for provider, target_disabled in dlg.pending_provider_disabled.items():
             if target_disabled != is_disabled(provider):
-                self.orch.toggle_provider(provider, target_disabled)
+                ok, msg = self.orch.toggle_provider(provider, target_disabled)
+                if not ok:
+                    errors.append(msg)
+        if errors:
+            self._status.showMessage("Provider toggle ไม่สำเร็จบางส่วน: " + "; ".join(errors), 8_000)
 
     def _on_open_shell_clicked(self) -> None:
         """💻 Shell button: spawn (or focus) a plain PowerShell pane.

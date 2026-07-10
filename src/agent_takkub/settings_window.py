@@ -1,35 +1,41 @@
-"""SettingsWindow — the unified Takkub Cockpit Settings window (Phase 1).
+"""SettingsWindow — the unified Takkub Cockpit Settings window.
 
 Implements the gold/IBM-Plex design system from
 `docs/design-review/2026-07-10-cockpit-settings-design-system.md`: a
 titlebar + status strip + sidebar (PIPELINE/POLICY sections + "+ New Role")
 + content (header, a 7-view ``QStackedWidget``, footer).
 
-Phase 1 wires two views for real:
+Phase 1 wired **Providers & Roles** and **New Role**. Phase 2 wires the
+remaining five:
 
-* **New Role** — reuses :mod:`custom_roles` (``create_role`` + its existing
-  validation) exactly like the old guided-create form in
-  :mod:`pane_tools_dialog` did, just re-laid-out to the new design. MCP/plugin
-  policy assignment (the old form's per-tool checkbox grid) is intentionally
-  NOT wired here — the design collapses that to a single "use column
-  defaults" toggle that has no backing concept in :mod:`pane_tools_policy`
-  yet, so it's decorative pending Phase 2. Use 🔧 Tools ▸ Team & Roles for
-  per-tool policy on a freshly created role in the meantime.
-* **Providers & Roles** — reuses :mod:`provider_state` (provider on/off) and
-  :mod:`provider_config` / :mod:`pipeline_config` (per-role CLI override +
-  per-role pipeline-enable), the same three modules
-  :mod:`pipeline_dialog`'s HTML settings page already bridges to. Provider
-  on/off is staged into :attr:`SettingsWindow.pending_provider_disabled`
-  (mirroring ``_PipelineBridge.pending_provider_disabled``) rather than
-  written directly, so the caller can route it through
-  ``orchestrator.toggle_provider`` and get the same live "[system] ...
-  ENABLED/DISABLED" broadcast + status-bar repaint a chip click produces.
+* **MCP Matrix** / **Plugins Matrix** — native ``QGridLayout`` role×item
+  toggle grids, backed by the SAME pure logic :mod:`pane_tools_dialog`'s old
+  teal dialog uses (``build_matrix``/``matrix_to_role_items``/
+  ``diff_role_items``/``discover_marketplaces``/``master_mcps``/
+  ``policy_role_items`` — module-level functions on that module, not
+  duplicated here) so both surfaces read/write :mod:`pane_tools_policy`
+  identically. Plugins Matrix keeps the denylist banner (security-guidance/
+  remember are never toggleable — see :mod:`lead_context`'s
+  ``_PANE_PLUGIN_DENYLIST``, enforced at pane-spawn time, not in this UI).
+* **Skill Catalog** — role list + read-only mono doc viewer, backed by
+  :mod:`skill_audit` (``load_all_role_docs`` + the new
+  ``audit_existing_role`` — "✓ won't overlap" for the selected role).
+* **Pipeline Builder** / **Templates** — native hop editor + template
+  list/detail, backed by :mod:`pipeline_config` directly (a from-scratch
+  reimplementation of :mod:`pipeline_dialog`'s QWebEngineView page per the
+  task spec, not a wrapper around it). Structural template edits (Duplicate/
+  Delete) write immediately, mirroring the Add/Remove MCP pattern; in-flight
+  hop edits are staged in :attr:`SettingsWindow._pb_hops` and only persist on
+  Save & Apply, mirroring the toggle-matrix staging pattern.
+* **New Role**'s "use default MCP+Plugins ตาม column" toggle now actually
+  seeds :mod:`pane_tools_policy` on create (checked → the same MCP/plugin
+  defaults the matching dev/support-column built-in roles get; unchecked →
+  an explicit empty policy the operator configures via the Matrix views).
 
-The remaining 5 views (Pipeline Builder / Templates / MCP Matrix / Plugins
-Matrix / Skill Catalog) are placeholders — their real logic still lives in
-:mod:`pipeline_dialog` (the Pipeline Settings page) and :mod:`pane_tools_dialog`
-(🔧 Tools), both of which are kept alive during this transition per the task
-spec (not deleted).
+:mod:`pipeline_dialog` (the old Pipeline Settings page) and
+:mod:`pane_tools_dialog` (🔧 Tools) are kept alive per the task spec (not
+deleted) — both still work as an alternate entry point to the same
+underlying config.
 
 **Import constraint:** mirrors ``pane_tools_dialog``'s — this module MUST NOT
 import ``app`` or ``cli`` (plain UI dialog, no engine/CLI coupling).
@@ -38,13 +44,19 @@ import ``app`` or ``cli`` (plain UI dialog, no engine/CLI coupling).
 from __future__ import annotations
 
 from PyQt6.QtCore import QLocale, Qt
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
+    QDialogButtonBox,
+    QFormLayout,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -59,10 +71,14 @@ from . import __version__ as _COCKPIT_VERSION
 from . import (
     cockpit_theme,
     custom_roles,
+    pane_tools_dialog,
+    pane_tools_policy,
     pipeline_config,
     project_nav,
     provider_config,
     provider_state,
+    shared_dev_tools,
+    skill_audit,
 )
 from . import roles as roles_mod
 
@@ -111,6 +127,29 @@ _PROVIDER_DESC: dict[str, str] = {
     "gemini": "Google Antigravity (agy) — planning / long-context second opinion",
 }
 
+# Roles rendered as rows in the MCP/Plugins matrices — same set (and order)
+# pane_tools_dialog's teal dialog uses, so a role's policy reads identically
+# from either surface.
+_MATRIX_ROLES: tuple[str, ...] = pane_tools_dialog.ROLES
+
+# Roles offered in the Pipeline Builder's role palette / per-hop add-role
+# select. Every VALID_ROLES entry except "shell" — an ad-hoc terminal pane,
+# not a directed pipeline participant (see _OVERRIDABLE_ROLES's own note).
+_PIPELINE_PALETTE_ROLES: tuple[str, ...] = tuple(
+    r for r in pipeline_config.VALID_ROLES if r != "shell"
+)
+
+# New Role's "use default MCP+Plugins ตาม column" toggle (#6): no per-role
+# policy exists yet for a freshly created custom role, so this maps the
+# form's existing Dev(1)/Support(2) column choice onto the same MCP
+# defaults the matching built-in roles already get in
+# shared_dev_tools._ROLE_MCP_POLICY (dev column = frontend/backend/devops,
+# lean; support column = qa/critic/designer, browser-driving).
+_NEW_ROLE_COLUMN_MCPS: dict[int, frozenset[str]] = {
+    1: frozenset(),
+    2: frozenset({"playwright", "chrome-devtools"}),
+}
+
 
 class SettingsWindow(QDialog):
     """The unified Settings window. One instance per open — construct fresh
@@ -126,6 +165,13 @@ class SettingsWindow(QDialog):
         super().__init__(parent)
         self._project = project
         self._dirty = False
+        # Which views (VIEW_* indices) have unsaved staged edits right now —
+        # per-view so Reset on one view doesn't clear another view's dirty
+        # state, and so a fresh dialog with nothing touched keeps Save &
+        # Apply disabled (#6/#16). `_dirty` above is kept as a plain bool
+        # mirror (`bool(self._dirty_views)`) since existing call sites/tests
+        # read it as "is anything unsaved" — see `_refresh_dirty_indicator`.
+        self._dirty_views: set[int] = set()
         # Staged provider on/off — mirrors pipeline_dialog._PipelineBridge's
         # pending_provider_disabled contract: {provider: desired_disabled},
         # only for providers whose target differs from disk. Populated on
@@ -133,6 +179,10 @@ class SettingsWindow(QDialog):
         # AFTER exec() returns Accepted, so live Lead panes get the same
         # broadcast a status-bar chip click produces.
         self.pending_provider_disabled: dict[str, bool] = {}
+        # Pipeline Builder/Templates share this in-memory copy of pipelines.json
+        # (structural edits — Duplicate/Delete — write through immediately and
+        # refresh it; hop edits stay staged here until Save & Apply).
+        self._pipeline_payload = pipeline_config.load(self._project)
 
         self.setObjectName("settingsWindow")
         self.setWindowTitle("Takkub Cockpit — Settings")
@@ -245,6 +295,7 @@ class SettingsWindow(QDialog):
         lay.setSpacing(0)
 
         self._nav_buttons: dict[int, QPushButton] = {}
+        self._nav_indicators: dict[int, QFrame] = {}
         last_section: str | None = None
         for view_idx, label, section in _NAV_VIEWS:
             if section != last_section:
@@ -260,8 +311,24 @@ class SettingsWindow(QDialog):
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setProperty("active", False)
             btn.clicked.connect(lambda _checked=False, v=view_idx: self._goto_view(v))
-            lay.addWidget(btn)
+
+            # Gemini #13 — the active-view marker is a 5px rounded color bar
+            # in the design spec; QSS's `border-left` can't round only one
+            # side of a box, so a real QFrame stands in for it instead.
+            nav_row = QWidget(sidebar)
+            nav_row_lay = QHBoxLayout(nav_row)
+            nav_row_lay.setContentsMargins(0, 0, 0, 0)
+            nav_row_lay.setSpacing(0)
+            indicator = QFrame(nav_row)
+            indicator.setObjectName("navIndicator")
+            indicator.setFixedWidth(5)
+            indicator.setVisible(False)
+            nav_row_lay.addWidget(indicator)
+            nav_row_lay.addWidget(btn, 1)
+            lay.addWidget(nav_row)
+
             self._nav_buttons[view_idx] = btn
+            self._nav_indicators[view_idx] = indicator
 
         lay.addStretch(1)
 
@@ -278,6 +345,8 @@ class SettingsWindow(QDialog):
             btn.setProperty("active", idx == view_idx)
             btn.style().unpolish(btn)
             btn.style().polish(btn)
+        for idx, indicator in self._nav_indicators.items():
+            indicator.setVisible(idx == view_idx)
         self._stack.setCurrentIndex(view_idx)
         title, sub = _VIEW_HEADERS.get(view_idx, ("", ""))
         self._content_title.setText(title)
@@ -338,7 +407,11 @@ class SettingsWindow(QDialog):
         lay.setContentsMargins(24, 0, 24, 0)
         lay.setSpacing(10)
 
-        reset_btn = cockpit_theme.secondary_button("↺ Reset to default", footer)
+        # Codex Medium #5 — this button reloads the CURRENT view's on-disk
+        # state (i.e. discards staged edits), it does not restore factory
+        # defaults. "Reset to default" over-promised; label it for what it
+        # actually does.
+        reset_btn = cockpit_theme.secondary_button("↺ Revert unsaved changes", footer)
         reset_btn.clicked.connect(self._on_reset_clicked)
         lay.addWidget(reset_btn)
         lay.addStretch(1)
@@ -358,35 +431,94 @@ class SettingsWindow(QDialog):
 
         self._save_btn = cockpit_theme.gold_button("Save && Apply", footer)
         self._save_btn.clicked.connect(self._on_save_apply_clicked)
+        # Gemini #16 — nothing staged yet at open time, so there's nothing
+        # to apply; `_refresh_dirty_indicator` re-enables it the moment any
+        # view goes dirty.
+        self._save_btn.setEnabled(False)
         lay.addWidget(self._save_btn)
 
         return footer
 
     def _mark_dirty(self, *_args: object) -> None:
-        self._dirty = True
-        self._unsaved_dot.setVisible(True)
-        self._unsaved_label.setVisible(True)
+        self._dirty_views.add(self._stack.currentIndex())
+        self._refresh_dirty_indicator()
 
     def _clear_dirty(self) -> None:
-        self._dirty = False
-        self._unsaved_dot.setVisible(False)
-        self._unsaved_label.setVisible(False)
+        self._dirty_views.clear()
+        self._refresh_dirty_indicator()
+
+    def _refresh_dirty_indicator(self) -> None:
+        """Recompute the aggregate `_dirty` flag from `_dirty_views` and sync
+        the footer's unsaved-dot/label + Save & Apply enabled state."""
+        self._dirty = bool(self._dirty_views)
+        self._unsaved_dot.setVisible(self._dirty)
+        self._unsaved_label.setVisible(self._dirty)
+        self._save_btn.setEnabled(self._dirty)
 
     def _on_reset_clicked(self) -> None:
-        """Reset the currently-visible view's editable fields back to the
-        on-disk state. Placeholder views have nothing to reset (no-op)."""
+        """Revert the currently-visible view's editable fields back to the
+        on-disk state, clearing only THIS view's dirty flag — a different
+        view's still-staged edits (#6) must survive. Templates/Skill Catalog
+        have nothing staged to reset (structural template edits write
+        immediately; the catalog is read-only), so they no-op."""
         idx = self._stack.currentIndex()
         if idx == VIEW_PROVIDERS_ROLES:
             self._reset_providers_roles_view()
         elif idx == VIEW_NEW_ROLE:
             self._reset_new_role_form()
-        self._clear_dirty()
+        elif idx == VIEW_MCP_MATRIX:
+            self._reload_mcp_matrix()
+        elif idx == VIEW_PLUGINS_MATRIX:
+            self._reload_plugins_matrix()
+        elif idx == VIEW_PIPELINE_BUILDER and getattr(self, "_pb_template_id", None):
+            self._load_pb_hops(self._pb_template_id)
+        self._dirty_views.discard(idx)
+        self._refresh_dirty_indicator()
 
     def _on_save_apply_clicked(self) -> None:
-        """Persist Providers & Roles edits. New Role commits independently
-        via its own "+ Create Role" button — this only ever touches
-        provider/role state, so it's a safe no-op if the user never opened
-        that view."""
+        """Persist every staged edit across all views in one Save & Apply:
+        Providers & Roles, Pipeline Builder's in-flight hop edits (rolled
+        into the same pipelines.json write as rolesEnabled), and the
+        MCP/Plugins matrices. Templates' Duplicate/Delete commit
+        independently (their own buttons), so this is a safe no-op for
+        whichever of those the user never touched.
+
+        New Role (#2) is a special case: the footer button doesn't "save
+        provider/pipeline state" while that view is showing — it dispatches
+        to the exact same create transaction as the in-view "+ Create Role"
+        button, and only closes the dialog when that create actually
+        succeeds (an invalid/incomplete form must not discard the user's
+        typed input by accepting anyway).
+        """
+        if self._stack.currentIndex() == VIEW_NEW_ROLE:
+            if self._on_create_role_clicked():
+                self._dirty_views.discard(VIEW_NEW_ROLE)
+                self._refresh_dirty_indicator()
+                self.accept()
+            return
+
+        # Snapshot every on-disk store this transaction can touch so a
+        # failure partway through (#3) rolls back instead of leaving stores
+        # inconsistent — e.g. a role-provider override written but the
+        # pipelines.json write failing right after, or a tools-policy write
+        # failing after providers/roles already landed.
+        snapshot_paths = (
+            provider_config.config_path(self._project),
+            pipeline_config.path(self._project),
+            pane_tools_policy.PANE_TOOLS_POLICY_FILE,
+        )
+        snapshots = {p: (p.read_bytes() if p.exists() else None) for p in snapshot_paths}
+
+        def _rollback() -> None:
+            for p, content in snapshots.items():
+                try:
+                    if content is None:
+                        p.unlink(missing_ok=True)
+                    else:
+                        p.write_bytes(content)
+                except OSError:
+                    pass
+
         try:
             self.pending_provider_disabled = {}
             for provider, toggle in self._provider_toggles.items():
@@ -397,16 +529,72 @@ class SettingsWindow(QDialog):
             role_providers = {
                 role: combo.currentData() for role, combo in self._role_provider_combos.items()
             }
-            provider_config.save_role_overrides(role_providers, self._project)
+            # scope=_OVERRIDABLE_ROLES (#1): this page only renders a control
+            # for these roles — anything else already on disk (a custom
+            # role's override, say) must be preserved, not silently dropped
+            # by a naive full-replace write.
+            provider_config.save_role_overrides(
+                role_providers, self._project, scope=_OVERRIDABLE_ROLES
+            )
 
             payload = pipeline_config.load(self._project)
             roles_enabled = dict(payload.get("rolesEnabled", {}))
             for role, toggle in self._role_toggles.items():
                 roles_enabled[role] = toggle.isChecked()
             payload["rolesEnabled"] = roles_enabled
+
+            pb_template_id = getattr(self, "_pb_template_id", None)
+            if pb_template_id:
+                for t in payload["templates"]:
+                    if t["id"] == pb_template_id:
+                        t["hops"] = [[dict(entry) for entry in hop] for hop in self._pb_hops]
+                        break
+
             pipeline_config.save(payload, self._project)
+            self._pipeline_payload = pipeline_config.load(self._project)
+
+            updated_mcps = pane_tools_dialog.matrix_to_role_items(
+                {
+                    role: {item: t.isChecked() for item, t in items.items()}
+                    for role, items in self._mcp_toggles.items()
+                }
+            )
+            updated_plugins = pane_tools_dialog.matrix_to_role_items(
+                {
+                    role: {item: t.isChecked() for item, t in items.items()}
+                    for role, items in self._plugin_toggles.items()
+                }
+            )
+            mcp_changes = pane_tools_dialog.diff_role_items(self._orig_mcp_items, updated_mcps)
+            plugin_changes = pane_tools_dialog.diff_role_items(
+                self._orig_plugin_items, updated_plugins
+            )
+            # Write BOTH kinds for every role that changed EITHER — see
+            # pane_tools_dialog._on_save_clicked's own note: set_role_items
+            # seeds a fresh role entry's sibling kind to [] (an explicit deny),
+            # so a plugins-only persist would silently wipe that role's MCPs.
+            # set_role_items() never raises (validation/IO failures return
+            # False) — check it explicitly so a failed write here triggers
+            # the same rollback+error path as the other stages instead of
+            # silently continuing as if it had succeeded.
+            hidden = getattr(self, "_hidden_plugin_defaults", {})
+            for role in set(mcp_changes) | set(plugin_changes):
+                if not pane_tools_policy.set_role_items(role, "mcps", updated_mcps[role]):
+                    raise OSError(f"เขียน tools policy ของ role '{role}' (mcps) ไม่สำเร็จ")
+                if not pane_tools_policy.set_role_items(
+                    role, "plugins", updated_plugins[role] + hidden.get(role, [])
+                ):
+                    raise OSError(f"เขียน tools policy ของ role '{role}' (plugins) ไม่สำเร็จ")
+            if mcp_changes or plugin_changes:
+                shared_dev_tools.regen_role_variants()
+            self._orig_mcp_items = updated_mcps
+            self._orig_plugin_items = updated_plugins
         except OSError as e:
-            QMessageBox.critical(self, "Save failed", f"บันทึกไม่สำเร็จ: {e}")
+            _rollback()
+            self._pipeline_payload = pipeline_config.load(self._project)
+            QMessageBox.critical(
+                self, "Save failed", f"บันทึกไม่สำเร็จ (rolled back ทุก store ที่แก้ไปแล้ว): {e}"
+            )
             return
         self._clear_dirty()
         self.accept()
@@ -456,6 +644,7 @@ class SettingsWindow(QDialog):
             toggle = cockpit_theme.ToggleSwitch(
                 row, checked=not provider_state.is_disabled(provider)
             )
+            toggle.setAccessibleName(f"{provider.capitalize()} provider")
             toggle.toggled.connect(self._mark_dirty)
             row_lay.addWidget(toggle)
             self._provider_toggles[provider] = toggle
@@ -476,6 +665,7 @@ class SettingsWindow(QDialog):
 
         self._role_toggles = {}
         self._role_provider_combos = {}
+        self._role_provider_badges: dict[str, QLabel] = {}
 
         lead_row = self._build_role_row(
             "lead",
@@ -534,6 +724,12 @@ class SettingsWindow(QDialog):
             row_lay.addWidget(locked_lbl)
             toggle = cockpit_theme.ToggleSwitch(row, checked=True)
             toggle.setEnabled(False)
+            # Gemini #8/#15 — the switch is now painted muted (see
+            # ToggleSwitch.paintEvent's isEnabled() branch); pair that with
+            # an accessible name/tooltip so keyboard/screen-reader users get
+            # the same "locked on, not a live control" signal.
+            toggle.setAccessibleName(f"{label} provider — always on, locked")
+            toggle.setToolTip("Lead provider เป็น Claude เสมอ — ปิด/สลับไม่ได้")
             row_lay.addWidget(toggle)
             return row
 
@@ -542,15 +738,42 @@ class SettingsWindow(QDialog):
             combo.addItem(provider.capitalize(), provider)
         idx = combo.findData(current_provider)
         combo.setCurrentIndex(idx if idx >= 0 else 0)
-        combo.currentIndexChanged.connect(self._mark_dirty)
         row_lay.addWidget(combo)
         self._role_provider_combos[role] = combo
 
+        # Gemini #12 — surface when the role's configured provider would
+        # actually be substituted by Claude right now (toggled off or not
+        # installed), as a styled badge rather than plain banner text.
+        badge = QLabel("→ Claude", row)
+        badge.setObjectName("substituteBadge")
+        badge.setToolTip("provider นี้ปิดหรือยังไม่ติดตั้ง — Claude รับตำแหน่งแทน")
+        row_lay.addWidget(badge)
+        self._role_provider_badges[role] = badge
+
+        combo.currentIndexChanged.connect(lambda _i=0, r=role: self._sync_role_provider_badge(r))
+        combo.currentIndexChanged.connect(self._mark_dirty)
+        self._sync_role_provider_badge(role)
+
         toggle = cockpit_theme.ToggleSwitch(row, checked=enabled)
+        toggle.setAccessibleName(f"{label} role — {'enabled' if enabled else 'disabled'}")
+        toggle.setToolTip(f"เปิด/ปิด role {label} ในทีม")
         toggle.toggled.connect(self._mark_dirty)
         row_lay.addWidget(toggle)
         self._role_toggles[role] = toggle
         return row
+
+    def _sync_role_provider_badge(self, role: str) -> None:
+        """Show/hide the "→ Claude" substitute badge for `role` based on its
+        combo's CURRENT selection (not what's on disk) — reflects what would
+        happen if the user saves with this selection right now."""
+        combo = self._role_provider_combos.get(role)
+        badge = self._role_provider_badges.get(role)
+        if combo is None or badge is None:
+            return
+        from .provider_config import CLAUDE, _provider_available
+
+        provider = combo.currentData()
+        badge.setVisible(provider != CLAUDE and not _provider_available(provider))
 
     def _reset_providers_roles_view(self) -> None:
         for provider, toggle in self._provider_toggles.items():
@@ -570,6 +793,7 @@ class SettingsWindow(QDialog):
             idx = combo.findData(role_providers.get(role, provider_config.CLAUDE))
             combo.setCurrentIndex(idx if idx >= 0 else 0)
             combo.blockSignals(False)
+            self._sync_role_provider_badge(role)
 
     # ──────────────────────────────────────────────────────────
     # view: New Role (real)
@@ -592,6 +816,7 @@ class SettingsWindow(QDialog):
         name_col.addWidget(QLabel("Name (--role)", form))
         self._nr_name = QLineEdit(form)
         self._nr_name.setPlaceholderText("data-eng (a-z0-9-_ เท่านั้น)")
+        self._nr_name.textChanged.connect(self._mark_dirty)
         name_col.addWidget(self._nr_name)
         name_row.addLayout(name_col, 1)
 
@@ -599,6 +824,7 @@ class SettingsWindow(QDialog):
         label_col.addWidget(QLabel("Label", form))
         self._nr_label = QLineEdit(form)
         self._nr_label.setPlaceholderText("🧬 Data Eng")
+        self._nr_label.textChanged.connect(self._mark_dirty)
         label_col.addWidget(self._nr_label)
         name_row.addLayout(label_col, 1)
         f_lay.addLayout(name_row)
@@ -610,6 +836,7 @@ class SettingsWindow(QDialog):
         self._nr_column.addItem("1 · Dev column", 1)
         self._nr_column.addItem("2 · Support column", 2)
         self._nr_column.setCurrentIndex(1)
+        self._nr_column.currentIndexChanged.connect(self._mark_dirty)
         col_col.addWidget(self._nr_column)
         grid_row.addLayout(col_col)
 
@@ -623,6 +850,7 @@ class SettingsWindow(QDialog):
         self._nr_row.setLocale(QLocale(QLocale.Language.C))
         self._nr_row.setRange(0, 99)
         self._nr_row.setValue(99)
+        self._nr_row.valueChanged.connect(self._mark_dirty)
         row_col.addWidget(self._nr_row)
         grid_row.addLayout(row_col)
         grid_row.addStretch(1)
@@ -631,7 +859,10 @@ class SettingsWindow(QDialog):
         f_lay.addWidget(QLabel("Accent", form))
         swatch_row = QHBoxLayout()
         swatch_row.setSpacing(6)
-        self._nr_color = "#94a3b8"
+        # Codex/Gemini #17 — a gray not in the selectable palette meant no
+        # swatch showed as "selected" on first open; default to the
+        # palette's own first color instead.
+        self._nr_color = project_nav._AVATAR_COLORS[0]
         self._nr_swatch_btns: list[QPushButton] = []
         for color in project_nav._AVATAR_COLORS:
             sw = QPushButton("", form)
@@ -647,11 +878,13 @@ class SettingsWindow(QDialog):
         toggle_row = QHBoxLayout()
         toggle_row.addWidget(QLabel("ใช้ default MCP+Plugins ตาม column (แนะนำ)", form), 1)
         self._nr_default_tools_toggle = cockpit_theme.ToggleSwitch(form, checked=True)
+        self._nr_default_tools_toggle.toggled.connect(self._mark_dirty)
         toggle_row.addWidget(self._nr_default_tools_toggle)
         f_lay.addLayout(toggle_row)
         tools_hint = QLabel(
-            "Phase 1: toggle นี้ยังไม่ต่อ policy จริง — ตั้ง MCP/Plugins ต่อ role ผ่าน "
-            "🔧 Tools ▸ Team & Roles ตามปกติ (Phase 2 จะรวมเข้าที่นี่)",
+            "เปิด (แนะนำ) = role นี้ได้ default MCP/Plugins ตาม column (Dev=เปล่า, "
+            "Support=playwright+chrome-devtools) · ปิด = ไม่มี MCP/Plugins เลย ตั้งเองทีหลังผ่าน "
+            "MCP Matrix / Plugins Matrix",
             form,
         )
         tools_hint.setObjectName("panelHint")
@@ -662,6 +895,7 @@ class SettingsWindow(QDialog):
         self._nr_instructions = QPlainTextEdit(form)
         self._nr_instructions.setPlaceholderText("บอก role ตัวเองว่าทำหน้าที่อะไร ขอบเขตงานคืออะไร...")
         self._nr_instructions.setMinimumHeight(90)
+        self._nr_instructions.textChanged.connect(self._mark_dirty)
         f_lay.addWidget(self._nr_instructions)
 
         self._nr_status = QLabel("", form)
@@ -683,6 +917,7 @@ class SettingsWindow(QDialog):
     def _on_swatch_clicked(self, color: str) -> None:
         self._nr_color = color
         self._update_swatch_selection()
+        self._mark_dirty()
 
     def _update_swatch_selection(self) -> None:
         for btn, color in zip(self._nr_swatch_btns, project_nav._AVATAR_COLORS, strict=False):
@@ -691,7 +926,11 @@ class SettingsWindow(QDialog):
                 f"background:{color}; border-radius:10px; border: 2px solid {border};"
             )
 
-    def _on_create_role_clicked(self) -> None:
+    def _on_create_role_clicked(self) -> bool:
+        """Validate + persist the New Role form. Returns True iff the role
+        was actually created — the footer Save & Apply button (#2) uses this
+        return value to decide whether it's safe to close the dialog; an
+        invalid/incomplete form must not accept() and discard typed input."""
         name = self._nr_name.text().strip().lower()
         label = self._nr_label.text().strip()
         column = self._nr_column.currentData()
@@ -701,7 +940,7 @@ class SettingsWindow(QDialog):
         ok, err = custom_roles.create_role(name, label, self._nr_color, column, row, instructions)
         if not ok:
             self._nr_status.setText(f"⚠️ {err}")
-            return
+            return False
 
         # Register in THIS process immediately so `--role <name>` spawns
         # without waiting for a cockpit restart (roles.py otherwise only
@@ -711,62 +950,700 @@ class SettingsWindow(QDialog):
         if role is not None:
             roles_mod.register_role(role)
 
-        self._nr_status.setText(
+        tools_ok = self._apply_new_role_tools_policy(name, column)
+
+        status = (
             f"✓ สร้าง role '{name}' แล้ว — spawn ได้ทันทีด้วย "
             f'`takkub assign --role {name} "..."` (ไม่ต้อง restart cockpit)'
         )
+        if not tools_ok:
+            status += "\n⚠️ แต่บันทึก MCP/Plugins default ไม่สำเร็จ — ตั้งเองผ่าน MCP/Plugins Matrix"
+        self._nr_status.setText(status)
         self._reset_new_role_form(clear_status=False)
+        return True
+
+    def _apply_new_role_tools_policy(self, name: str, column: int) -> bool:
+        """Seed pane_tools_policy for a freshly created role. Checked "use
+        default" → the same MCP defaults the matching dev/support-column
+        built-in role gets, plus the lean teammate plugin set; unchecked →
+        an explicit empty policy the operator fills in later via the
+        MCP/Plugins Matrix views.
+
+        Returns True iff both writes succeeded — `set_role_items()` never
+        raises (validation/IO failures return False), so the caller must
+        check this explicitly rather than assume the seed always lands (and
+        `regen_role_variants()` only runs when it actually did)."""
+        if self._nr_default_tools_toggle.isChecked():
+            from .lead_context import _TEAMMATE_PLUGINS
+
+            mcps = list(_NEW_ROLE_COLUMN_MCPS.get(column, frozenset()))
+            plugins = list(_TEAMMATE_PLUGINS)
+        else:
+            mcps, plugins = [], []
+        mcps_ok = pane_tools_policy.set_role_items(name, "mcps", mcps)
+        plugins_ok = pane_tools_policy.set_role_items(name, "plugins", plugins)
+        if mcps_ok and plugins_ok:
+            shared_dev_tools.regen_role_variants()
+        return mcps_ok and plugins_ok
 
     def _reset_new_role_form(self, clear_status: bool = True) -> None:
-        self._nr_name.clear()
-        self._nr_label.clear()
-        self._nr_instructions.clear()
-        self._nr_column.setCurrentIndex(1)
-        self._nr_row.setValue(99)
-        self._nr_color = "#94a3b8"
+        # Block signals while programmatically resetting — every field is
+        # wired to _mark_dirty (#6) so a plain .clear()/.setValue() here
+        # would immediately re-mark the view dirty right after a successful
+        # create, or right after the user asked to revert it.
+        for w in (
+            self._nr_name,
+            self._nr_label,
+            self._nr_instructions,
+            self._nr_column,
+            self._nr_row,
+            self._nr_default_tools_toggle,
+        ):
+            w.blockSignals(True)
+        try:
+            self._nr_name.clear()
+            self._nr_label.clear()
+            self._nr_instructions.clear()
+            self._nr_column.setCurrentIndex(1)
+            self._nr_row.setValue(99)
+            self._nr_default_tools_toggle.setChecked(True)
+        finally:
+            for w in (
+                self._nr_name,
+                self._nr_label,
+                self._nr_instructions,
+                self._nr_column,
+                self._nr_row,
+                self._nr_default_tools_toggle,
+            ):
+                w.blockSignals(False)
+        self._nr_color = project_nav._AVATAR_COLORS[0]
         self._update_swatch_selection()
-        self._nr_default_tools_toggle.setChecked(True)
         if clear_status:
             self._nr_status.setText("")
 
     # ──────────────────────────────────────────────────────────
-    # views: placeholders (Phase 2)
+    # shared: role×item toggle matrix (MCP Matrix / Plugins Matrix)
     # ──────────────────────────────────────────────────────────
 
-    def _build_placeholder(self, note: str) -> QWidget:
-        w = QWidget(self)
-        lay = QVBoxLayout(w)
-        lay.addStretch(1)
-        badge = QLabel(f"🚧 Phase 2\n\n{note}", w)
-        badge.setObjectName("placeholderBadge")
-        badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        badge.setWordWrap(True)
-        lay.addWidget(badge)
-        lay.addStretch(1)
-        return w
+    @staticmethod
+    def _clear_grid(grid: QGridLayout) -> None:
+        while grid.count():
+            item = grid.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
 
-    def _build_pipeline_builder_view(self) -> QWidget:
-        return self._build_placeholder(
-            "Pipeline Builder — hop drag/drop editor ยังอยู่ที่ Pipeline Settings เดิม "
-            "(👥 Team ▸ คลิกขวา) จนกว่า Phase 2 จะย้ายเข้ามาที่นี่"
-        )
+    def _populate_matrix_grid(
+        self,
+        grid: QGridLayout,
+        roles: tuple[str, ...],
+        items: list[str],
+        matrix: dict[str, dict[str, bool]],
+    ) -> dict[str, dict[str, cockpit_theme.ToggleSwitch]]:
+        """Fill *grid* (already parented to a panel widget) with a role×item
+        toggle matrix: col 0 = 180px role-chip column, cols 1..N = 1fr item
+        columns of centered ``ToggleSwitch`` cells. Clears any prior content
+        first, so this doubles as the reload/refresh path."""
+        self._clear_grid(grid)
+        panel = grid.parentWidget()
+        grid.setColumnMinimumWidth(0, 160)
+        grid.setColumnStretch(0, 0)
+        for col, item in enumerate(items, start=1):
+            header = QLabel(item, panel)
+            header.setObjectName("panelHint")
+            header.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            header.setToolTip(item)
+            grid.addWidget(header, 0, col)
+            grid.setColumnStretch(col, 1)
 
-    def _build_templates_view(self) -> QWidget:
-        return self._build_placeholder(
-            "Templates — list เดิมอยู่ใน Pipeline Settings (👥 Team ▸ คลิกขวา) จนกว่า Phase 2"
-        )
+        boxes: dict[str, dict[str, cockpit_theme.ToggleSwitch]] = {}
+        for row, role in enumerate(roles, start=1):
+            r = roles_mod.by_name(role)
+            label = r.label if r else role.capitalize()
+            color = cockpit_theme.ROLE_COLORS.get(role, r.color if r else "#94a3b8")
+            grid.addWidget(cockpit_theme.role_chip(label, color, panel), row, 0)
+            boxes[role] = {}
+            for col, item in enumerate(items, start=1):
+                checked = matrix.get(role, {}).get(item, False)
+                toggle = cockpit_theme.ToggleSwitch(panel, checked=checked)
+                toggle.toggled.connect(self._mark_dirty)
+                cell = QWidget(panel)
+                cell_lay = QHBoxLayout(cell)
+                cell_lay.setContentsMargins(0, 4, 0, 4)
+                cell_lay.addWidget(toggle, alignment=Qt.AlignmentFlag.AlignCenter)
+                grid.addWidget(cell, row, col)
+                boxes[role][item] = toggle
+        return boxes
+
+    # ──────────────────────────────────────────────────────────
+    # view: MCP Matrix (real)
+    # ──────────────────────────────────────────────────────────
 
     def _build_mcp_matrix_view(self) -> QWidget:
-        return self._build_placeholder(
-            "MCP Matrix — role × MCP server เดิมอยู่ใน 🔧 Tools จนกว่า Phase 2 จะย้ายเข้ามาที่นี่"
+        view = QWidget(self)
+        lay = QVBoxLayout(view)
+        lay.setContentsMargins(0, 0, 0, 16)
+        lay.setSpacing(12)
+
+        add_row = QHBoxLayout()
+        add_btn = cockpit_theme.secondary_button("+ Add MCP server", view)
+        add_btn.clicked.connect(self._on_add_mcp_server_clicked)
+        add_row.addWidget(add_btn)
+        add_row.addStretch(1)
+        lay.addLayout(add_row)
+
+        self._mcp_empty = QLabel(
+            "ยังไม่มี MCP server ใน master registry — กด “+ Add MCP server”", view
         )
+        self._mcp_empty.setObjectName("panelHint")
+        self._mcp_empty.setWordWrap(True)
+        self._mcp_empty.hide()
+        lay.addWidget(self._mcp_empty)
+
+        matrix_panel = QWidget(view)
+        matrix_panel.setObjectName("panel")
+        self._mcp_grid = QGridLayout(matrix_panel)
+        self._mcp_grid.setContentsMargins(14, 12, 14, 12)
+        self._mcp_grid.setHorizontalSpacing(6)
+        self._mcp_grid.setVerticalSpacing(4)
+        lay.addWidget(matrix_panel)
+        lay.addStretch(1)
+
+        self._reload_mcp_matrix()
+        return view
+
+    def _reload_mcp_matrix(self) -> None:
+        items = pane_tools_dialog.master_mcps()
+        self._orig_mcp_items = pane_tools_dialog.policy_role_items(_MATRIX_ROLES, "mcps")
+        matrix = pane_tools_dialog.build_matrix(_MATRIX_ROLES, items, self._orig_mcp_items)
+        self._mcp_toggles = self._populate_matrix_grid(self._mcp_grid, _MATRIX_ROLES, items, matrix)
+        self._mcp_empty.setVisible(not items)
+
+    def _on_add_mcp_server_clicked(self) -> None:
+        dlg = QDialog(self)
+        dlg.setWindowTitle("+ Add MCP server")
+        dlg.setStyleSheet(self.styleSheet())
+        dlg.setMinimumWidth(420)
+        form = QFormLayout(dlg)
+        form.setContentsMargins(18, 18, 18, 14)
+        form.setHorizontalSpacing(14)
+        form.setVerticalSpacing(10)
+        name_edit = QLineEdit(dlg)
+        command_edit = QLineEdit(dlg)
+        args_edit = QLineEdit(dlg)
+        args_edit.setPlaceholderText("-y some-mcp-package (เว้นวรรคคั่น)")
+        form.addRow("ชื่อ", name_edit)
+        form.addRow("Command", command_edit)
+        form.addRow("Args", args_edit)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dlg
+        )
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        form.addRow(buttons)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        parsed = pane_tools_dialog.parse_install_form(
+            name_edit.text(), command_edit.text(), args_edit.text()
+        )
+        if parsed is None:
+            QMessageBox.warning(self, "Add MCP server", "กรอกชื่อและ command ให้ครบ")
+            return
+        name, cfg = parsed
+        try:
+            if not shared_dev_tools.add_mcp_server(name, cfg):
+                QMessageBox.warning(self, "Add MCP server ไม่สำเร็จ", f"เพิ่ม '{name}' ไม่ได้")
+                return
+        except Exception as e:
+            QMessageBox.warning(self, "Add MCP server ไม่สำเร็จ", str(e))
+            return
+        self._reload_mcp_matrix()
+        self._mark_dirty()
+
+    # ──────────────────────────────────────────────────────────
+    # view: Plugins Matrix (real)
+    # ──────────────────────────────────────────────────────────
 
     def _build_plugins_matrix_view(self) -> QWidget:
-        return self._build_placeholder(
-            "Plugins Matrix — role × plugin เดิมอยู่ใน 🔧 Tools จนกว่า Phase 2"
+        view = QWidget(self)
+        lay = QVBoxLayout(view)
+        lay.setContentsMargins(0, 0, 0, 16)
+        lay.setSpacing(12)
+
+        banner = QLabel(
+            "security-guidance และ remember ถูก denylist ปิดเสมอทุก pane "
+            "(hook หนัก ทำ spawn ช้า) — policy นี้เปิดให้ไม่ได้",
+            view,
         )
+        banner.setObjectName("infoBanner")
+        banner.setWordWrap(True)
+        lay.addWidget(banner)
+
+        self._plugins_empty = QLabel(
+            "ไม่พบ marketplace plugin — ยังไม่มีอะไรใน installed_plugins.json", view
+        )
+        self._plugins_empty.setObjectName("panelHint")
+        self._plugins_empty.setWordWrap(True)
+        self._plugins_empty.hide()
+        lay.addWidget(self._plugins_empty)
+
+        matrix_panel = QWidget(view)
+        matrix_panel.setObjectName("panel")
+        self._plugins_grid = QGridLayout(matrix_panel)
+        self._plugins_grid.setContentsMargins(14, 12, 14, 12)
+        self._plugins_grid.setHorizontalSpacing(6)
+        self._plugins_grid.setVerticalSpacing(4)
+        lay.addWidget(matrix_panel)
+        lay.addStretch(1)
+
+        self._reload_plugins_matrix()
+        return view
+
+    def _reload_plugins_matrix(self) -> None:
+        # Marketplace-granular columns (NOT name@marketplace) — see
+        # pane_tools_dialog.discover_marketplaces's own note: the policy
+        # stores marketplace names, so only these make a checkbox's identity
+        # match what gets read back on Save.
+        items = pane_tools_dialog.discover_marketplaces()
+        full_orig = pane_tools_dialog.policy_role_items(_MATRIX_ROLES, "plugins")
+        rendered = set(items)
+        # A role's built-in default can name a marketplace with no column
+        # here (not installed on this machine) — stash it so Save re-adds it
+        # instead of silently dropping it as "unchecked".
+        self._hidden_plugin_defaults = {
+            r: [m for m in v if m not in rendered] for r, v in full_orig.items()
+        }
+        self._orig_plugin_items = {r: [m for m in v if m in rendered] for r, v in full_orig.items()}
+        matrix = pane_tools_dialog.build_matrix(_MATRIX_ROLES, items, self._orig_plugin_items)
+        self._plugin_toggles = self._populate_matrix_grid(
+            self._plugins_grid, _MATRIX_ROLES, items, matrix
+        )
+        self._plugins_empty.setVisible(not items)
+
+    # ──────────────────────────────────────────────────────────
+    # view: Skill Catalog (real)
+    # ──────────────────────────────────────────────────────────
 
     def _build_skill_catalog_view(self) -> QWidget:
-        return self._build_placeholder(
-            "Skill Catalog — browse skill เดิมอยู่ใน 🔧 Tools ▸ Team & Roles จนกว่า Phase 2"
+        view = QWidget(self)
+        lay = QHBoxLayout(view)
+        lay.setContentsMargins(0, 0, 0, 16)
+        lay.setSpacing(12)
+
+        self._skill_docs = skill_audit.load_all_role_docs()
+
+        list_panel = QWidget(view)
+        list_panel.setObjectName("panel")
+        list_panel.setFixedWidth(200)
+        list_lay = QVBoxLayout(list_panel)
+        list_lay.setContentsMargins(6, 6, 6, 6)
+        self._skill_list = QListWidget(list_panel)
+        self._skill_list.setFrameShape(QFrame.Shape.NoFrame)
+        for name in sorted(self._skill_docs):
+            r = roles_mod.by_name(name)
+            item = QListWidgetItem(r.label if r else name.capitalize(), self._skill_list)
+            item.setData(Qt.ItemDataRole.UserRole, name)
+        self._skill_list.currentItemChanged.connect(self._on_skill_role_selected)
+        list_lay.addWidget(self._skill_list)
+        lay.addWidget(list_panel)
+
+        detail_panel = QWidget(view)
+        detail_panel.setObjectName("panel")
+        detail_lay = QVBoxLayout(detail_panel)
+        detail_lay.setContentsMargins(14, 12, 14, 12)
+        detail_lay.setSpacing(8)
+        self._skill_overlap_badge = QLabel("", detail_panel)
+        self._skill_overlap_badge.setObjectName("panelHint")
+        self._skill_overlap_badge.setWordWrap(True)
+        detail_lay.addWidget(self._skill_overlap_badge)
+        self._skill_detail_text = QPlainTextEdit(detail_panel)
+        self._skill_detail_text.setReadOnly(True)
+        self._skill_detail_text.setStyleSheet(f'font-family: "{self._fonts["mono"]}";')
+        detail_lay.addWidget(self._skill_detail_text, 1)
+        lay.addWidget(detail_panel, 1)
+
+        if self._skill_list.count():
+            self._skill_list.setCurrentRow(0)
+        return view
+
+    def _on_skill_role_selected(self, current: QListWidgetItem | None, *_args: object) -> None:
+        if current is None:
+            return
+        role = current.data(Qt.ItemDataRole.UserRole)
+        self._skill_detail_text.setPlainText(self._skill_docs.get(role, ""))
+        overlaps = skill_audit.audit_existing_role(role, self._skill_docs)
+        if overlaps:
+            names = ", ".join(f"{other} ({sim:.2f})" for other, sim in overlaps)
+            self._skill_overlap_badge.setText(f"⚠️ overlap กับ scope role อื่น: {names}")
+        else:
+            self._skill_overlap_badge.setText("✓ won't overlap — ไม่ทับ scope role อื่น")
+
+    # ──────────────────────────────────────────────────────────
+    # view: Pipeline Builder (real)
+    # ──────────────────────────────────────────────────────────
+
+    def _build_pipeline_builder_view(self) -> QWidget:
+        view = QWidget(self)
+        lay = QVBoxLayout(view)
+        lay.setContentsMargins(0, 0, 0, 16)
+        lay.setSpacing(12)
+
+        sel_row = QHBoxLayout()
+        sel_row.addWidget(QLabel("Editing template:", view))
+        self._pb_template_combo = QComboBox(view)
+        sel_row.addWidget(self._pb_template_combo, 1)
+        lay.addLayout(sel_row)
+
+        palette_panel = QWidget(view)
+        palette_panel.setObjectName("panel")
+        pal_lay = QHBoxLayout(palette_panel)
+        pal_lay.setContentsMargins(12, 10, 12, 10)
+        pal_lay.setSpacing(6)
+        pal_hint = QLabel("+ hop เดี่ยวจาก role:", palette_panel)
+        pal_hint.setObjectName("panelHint")
+        pal_lay.addWidget(pal_hint)
+        for role in _PIPELINE_PALETTE_ROLES:
+            r = roles_mod.by_name(role)
+            label = r.label if r else role.capitalize()
+            color = cockpit_theme.ROLE_COLORS.get(role, r.color if r else "#94a3b8")
+            btn = QPushButton(label, palette_panel)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet(
+                f"QPushButton {{ background: transparent; border: 1px solid {color};"
+                f" border-radius: 999px; color: {color}; padding: 3px 10px; font-weight: 600;"
+                f" font-size: 11px; }}"
+                f"QPushButton:hover {{ background: rgba(255,255,255,0.06); }}"
+            )
+            btn.clicked.connect(
+                lambda _checked=False, role_=role: self._on_palette_role_clicked(role_)
+            )
+            pal_lay.addWidget(btn)
+        pal_lay.addStretch(1)
+        lay.addWidget(palette_panel)
+
+        self._pb_hops_container = QWidget(view)
+        self._pb_hops_lay = QVBoxLayout(self._pb_hops_container)
+        self._pb_hops_lay.setContentsMargins(0, 0, 0, 0)
+        self._pb_hops_lay.setSpacing(4)
+        lay.addWidget(self._pb_hops_container)
+
+        add_hop_btn = QPushButton("+ Add hop", view)
+        add_hop_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        add_hop_btn.setStyleSheet(
+            f"QPushButton {{ border: 1px dashed {cockpit_theme.BORDER_STRONG}; border-radius:"
+            f" {cockpit_theme.RADIUS_SM}px; color: {cockpit_theme.TEXT_MUTED}; padding: 8px; }}"
+            f"QPushButton:hover {{ color: {cockpit_theme.TEXT_PRIMARY}; border-color:"
+            f" {cockpit_theme.ACCENT_GOLD}; }}"
         )
+        add_hop_btn.clicked.connect(self._on_add_hop_clicked)
+        lay.addWidget(add_hop_btn)
+        lay.addStretch(1)
+
+        self._reload_pb_template_combo()
+        self._pb_template_combo.currentIndexChanged.connect(self._on_pb_template_changed)
+        self._load_pb_hops(self._pipeline_payload.get("activeTemplate", ""))
+        return view
+
+    def _reload_pb_template_combo(self) -> None:
+        self._pb_template_combo.blockSignals(True)
+        self._pb_template_combo.clear()
+        for t in self._pipeline_payload.get("templates", []):
+            badge = "  ·  BUILT-IN" if t.get("builtin") else ""
+            self._pb_template_combo.addItem(f"{t['name']}{badge}", t["id"])
+        active = self._pipeline_payload.get("activeTemplate", "")
+        idx = self._pb_template_combo.findData(active)
+        self._pb_template_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self._pb_template_combo.blockSignals(False)
+
+    def _on_pb_template_changed(self, _index: int) -> None:
+        template_id = self._pb_template_combo.currentData()
+        if template_id:
+            self._load_pb_hops(template_id)
+
+    def _load_pb_hops(self, template_id: str) -> None:
+        tpl = next((t for t in self._pipeline_payload["templates"] if t["id"] == template_id), None)
+        self._pb_template_id = template_id
+        self._pb_hops: list[list[dict]] = (
+            [[dict(entry) for entry in hop] for hop in tpl["hops"]] if tpl else []
+        )
+        self._render_pb_hops()
+
+    def _render_pb_hops(self) -> None:
+        while self._pb_hops_lay.count():
+            item = self._pb_hops_lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+
+        for idx, hop in enumerate(self._pb_hops):
+            panel = QWidget(self._pb_hops_container)
+            panel.setObjectName("panel")
+            p_lay = QVBoxLayout(panel)
+            p_lay.setContentsMargins(12, 10, 12, 10)
+            p_lay.setSpacing(6)
+
+            head_row = QHBoxLayout()
+            head_lbl = QLabel(f"HOP {idx + 1}", panel)
+            head_lbl.setObjectName("panelTitle")
+            head_row.addWidget(head_lbl)
+            if len(hop) > 1:
+                chip = QLabel("parallel", panel)
+                chip.setStyleSheet(
+                    f"background: {cockpit_theme.PARALLEL_CHIP_BG}; border: 1px solid"
+                    f" {cockpit_theme.PARALLEL_CHIP_BORDER}; border-radius: 999px; color:"
+                    f" {cockpit_theme.PARALLEL_CHIP_TEXT}; padding: 2px 8px; font-size: 11px;"
+                    f" font-weight: 600;"
+                )
+                head_row.addWidget(chip)
+            head_row.addStretch(1)
+            remove_hop_btn = QPushButton("✕", panel)
+            remove_hop_btn.setFixedSize(22, 22)
+            remove_hop_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            remove_hop_btn.setToolTip("ลบ hop นี้")
+            remove_hop_btn.clicked.connect(
+                lambda _checked=False, i=idx: self._on_remove_hop_clicked(i)
+            )
+            head_row.addWidget(remove_hop_btn)
+            p_lay.addLayout(head_row)
+
+            roles_row = QHBoxLayout()
+            roles_row.setSpacing(6)
+            for entry in hop:
+                role = entry["role"]
+                r = roles_mod.by_name(role)
+                label = r.label if r else role.capitalize()
+                color = cockpit_theme.ROLE_COLORS.get(role, r.color if r else "#94a3b8")
+                pill = QWidget(panel)
+                pill.setStyleSheet("background: rgba(255,255,255,0.05); border-radius: 999px;")
+                pill_lay = QHBoxLayout(pill)
+                pill_lay.setContentsMargins(8, 3, 4, 3)
+                pill_lay.setSpacing(4)
+                pill_lay.addWidget(cockpit_theme.role_chip(label, color, pill))
+                rm_btn = QPushButton("✕", pill)
+                rm_btn.setFixedSize(16, 16)
+                rm_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                rm_btn.setStyleSheet(
+                    "QPushButton { border: none; background: transparent; font-size: 10px; }"
+                )
+                rm_btn.clicked.connect(
+                    lambda _checked=False, i=idx, ro=role: self._on_remove_hop_role_clicked(i, ro)
+                )
+                pill_lay.addWidget(rm_btn)
+                roles_row.addWidget(pill)
+
+            add_combo = QComboBox(panel)
+            add_combo.addItem("+ add role", None)
+            used = {e["role"] for e in hop}
+            for role in _PIPELINE_PALETTE_ROLES:
+                if role in used:
+                    continue
+                r = roles_mod.by_name(role)
+                add_combo.addItem(r.label if r else role.capitalize(), role)
+            add_combo.currentIndexChanged.connect(
+                lambda _index=0, i=idx, combo=add_combo: self._on_hop_add_role_selected(i, combo)
+            )
+            roles_row.addWidget(add_combo)
+            roles_row.addStretch(1)
+            p_lay.addLayout(roles_row)
+
+            self._pb_hops_lay.addWidget(panel)
+
+            if idx < len(self._pb_hops) - 1:
+                conn = QLabel("↓ wait for all", self._pb_hops_container)
+                conn.setObjectName("panelHint")
+                conn.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                self._pb_hops_lay.addWidget(conn)
+
+    def _on_add_hop_clicked(self) -> None:
+        self._pb_hops.append([])
+        self._render_pb_hops()
+        self._mark_dirty()
+
+    def _on_remove_hop_clicked(self, idx: int) -> None:
+        if 0 <= idx < len(self._pb_hops):
+            del self._pb_hops[idx]
+            self._render_pb_hops()
+            self._mark_dirty()
+
+    def _on_remove_hop_role_clicked(self, idx: int, role: str) -> None:
+        if 0 <= idx < len(self._pb_hops):
+            self._pb_hops[idx] = [e for e in self._pb_hops[idx] if e["role"] != role]
+            self._render_pb_hops()
+            self._mark_dirty()
+
+    def _on_hop_add_role_selected(self, idx: int, combo: QComboBox) -> None:
+        role = combo.currentData()
+        if role is None or not (0 <= idx < len(self._pb_hops)):
+            return
+        self._pb_hops[idx].append(
+            {"role": role, "cwd": "", "requiresCommit": False, "autoChain": False}
+        )
+        self._render_pb_hops()
+        self._mark_dirty()
+
+    def _on_palette_role_clicked(self, role: str) -> None:
+        self._pb_hops.append(
+            [{"role": role, "cwd": "", "requiresCommit": False, "autoChain": False}]
+        )
+        self._render_pb_hops()
+        self._mark_dirty()
+
+    # ──────────────────────────────────────────────────────────
+    # view: Templates (real)
+    # ──────────────────────────────────────────────────────────
+
+    def _build_templates_view(self) -> QWidget:
+        view = QWidget(self)
+        lay = QHBoxLayout(view)
+        lay.setContentsMargins(0, 0, 0, 16)
+        lay.setSpacing(12)
+
+        list_panel = QWidget(view)
+        list_panel.setObjectName("panel")
+        list_panel.setFixedWidth(220)
+        list_lay = QVBoxLayout(list_panel)
+        list_lay.setContentsMargins(6, 6, 6, 6)
+        self._tpl_list = QListWidget(list_panel)
+        self._tpl_list.setFrameShape(QFrame.Shape.NoFrame)
+        self._tpl_list.currentItemChanged.connect(self._on_template_selected)
+        list_lay.addWidget(self._tpl_list)
+        lay.addWidget(list_panel)
+
+        detail_panel = QWidget(view)
+        detail_panel.setObjectName("panel")
+        d_lay = QVBoxLayout(detail_panel)
+        d_lay.setContentsMargins(14, 12, 14, 12)
+        d_lay.setSpacing(10)
+
+        self._tpl_title = QLabel("", detail_panel)
+        self._tpl_title.setObjectName("panelTitle")
+        d_lay.addWidget(self._tpl_title)
+
+        self._tpl_hops_summary = QLabel("", detail_panel)
+        self._tpl_hops_summary.setWordWrap(True)
+        self._tpl_hops_summary.setObjectName("panelHint")
+        d_lay.addWidget(self._tpl_hops_summary)
+        d_lay.addStretch(1)
+
+        btn_row = QHBoxLayout()
+        self._tpl_edit_btn = cockpit_theme.secondary_button("Edit hops →", detail_panel)
+        self._tpl_edit_btn.clicked.connect(self._on_template_edit_hops_clicked)
+        btn_row.addWidget(self._tpl_edit_btn)
+        self._tpl_duplicate_btn = cockpit_theme.secondary_button("Duplicate", detail_panel)
+        self._tpl_duplicate_btn.clicked.connect(self._on_template_duplicate_clicked)
+        btn_row.addWidget(self._tpl_duplicate_btn)
+        self._tpl_delete_btn = cockpit_theme.secondary_button("Delete", detail_panel)
+        self._tpl_delete_btn.clicked.connect(self._on_template_delete_clicked)
+        btn_row.addWidget(self._tpl_delete_btn)
+        btn_row.addStretch(1)
+        d_lay.addLayout(btn_row)
+
+        lay.addWidget(detail_panel, 1)
+
+        self._reload_templates_list()
+        return view
+
+    def _reload_templates_list(self) -> None:
+        self._tpl_list.blockSignals(True)
+        self._tpl_list.clear()
+        for t in self._pipeline_payload.get("templates", []):
+            text = t["name"] + ("  ·  BUILT-IN" if t.get("builtin") else "")
+            item = QListWidgetItem(text, self._tpl_list)
+            item.setData(Qt.ItemDataRole.UserRole, t["id"])
+            if t.get("builtin"):
+                item.setForeground(QColor(cockpit_theme.ACCENT_GOLD))
+        self._tpl_list.blockSignals(False)
+        if self._tpl_list.count():
+            self._tpl_list.setCurrentRow(0)
+        else:
+            self._on_template_selected(None, None)
+
+    def _on_template_selected(
+        self, current: QListWidgetItem | None, _previous: QListWidgetItem | None
+    ) -> None:
+        if current is None:
+            self._tpl_selected_id = None
+            self._tpl_title.setText("")
+            self._tpl_hops_summary.setText("")
+            self._tpl_delete_btn.setEnabled(False)
+            return
+        tid = current.data(Qt.ItemDataRole.UserRole)
+        tpl = next((t for t in self._pipeline_payload["templates"] if t["id"] == tid), None)
+        if tpl is None:
+            return
+        self._tpl_selected_id = tid
+        self._tpl_title.setText(tpl["name"])
+        lines = [
+            f"HOP {i}: " + (", ".join(e["role"] for e in hop) or "(ว่าง)")
+            for i, hop in enumerate(tpl["hops"], start=1)
+        ]
+        self._tpl_hops_summary.setText("\n↓ wait for all\n".join(lines) or "(ไม่มี hop)")
+        self._tpl_delete_btn.setEnabled(not tpl.get("builtin"))
+
+    def _on_template_edit_hops_clicked(self) -> None:
+        tid = getattr(self, "_tpl_selected_id", None)
+        if not tid:
+            return
+        self._load_pb_hops(tid)
+        idx = self._pb_template_combo.findData(tid)
+        if idx >= 0:
+            self._pb_template_combo.blockSignals(True)
+            self._pb_template_combo.setCurrentIndex(idx)
+            self._pb_template_combo.blockSignals(False)
+        self._goto_view(VIEW_PIPELINE_BUILDER)
+
+    def _on_template_duplicate_clicked(self) -> None:
+        tid = getattr(self, "_tpl_selected_id", None)
+        tpl = next((t for t in self._pipeline_payload["templates"] if t["id"] == tid), None)
+        if tpl is None:
+            return
+        base = f"{tpl['id']}-copy"
+        existing_ids = {t["id"] for t in self._pipeline_payload["templates"]}
+        new_id = base
+        n = 2
+        while new_id in existing_ids:
+            new_id = f"{base}{n}"
+            n += 1
+        new_tpl = {
+            "id": new_id,
+            "name": f"{tpl['name']} (copy)",
+            "builtin": False,
+            "hops": [[dict(e) for e in hop] for hop in tpl["hops"]],
+        }
+        self._pipeline_payload["templates"].append(new_tpl)
+        if not self._persist_pipeline_payload():
+            return
+        self._reload_templates_list()
+        self._reload_pb_template_combo()
+
+    def _on_template_delete_clicked(self) -> None:
+        tid = getattr(self, "_tpl_selected_id", None)
+        tpl = next((t for t in self._pipeline_payload["templates"] if t["id"] == tid), None)
+        if tpl is None or tpl.get("builtin"):
+            return
+        confirm = QMessageBox.question(self, "Delete template", f"ลบ template '{tpl['name']}'?")
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        self._pipeline_payload["templates"] = [
+            t for t in self._pipeline_payload["templates"] if t["id"] != tid
+        ]
+        if self._pipeline_payload.get("activeTemplate") == tid:
+            self._pipeline_payload["activeTemplate"] = self._pipeline_payload["templates"][0]["id"]
+        if not self._persist_pipeline_payload():
+            return
+        self._reload_templates_list()
+        self._reload_pb_template_combo()
+
+    def _persist_pipeline_payload(self) -> bool:
+        """Write ``self._pipeline_payload`` (Duplicate/Delete's immediate-commit
+        path — same "writes right away" pattern as Add/Remove MCP) then
+        re-read it back so built-in-hop-normalization stays in sync."""
+        try:
+            pipeline_config.save(self._pipeline_payload, self._project)
+        except OSError as e:
+            QMessageBox.critical(self, "Save failed", str(e))
+            return False
+        self._pipeline_payload = pipeline_config.load(self._project)
+        return True

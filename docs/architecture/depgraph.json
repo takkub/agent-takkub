@@ -408,9 +408,10 @@
         "agent_takkub.orchestrator",
         "agent_takkub.orchestrator_text",
         "agent_takkub.pane_tools_dialog",
+        "agent_takkub.settings_window",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 5,
+      "fan_in": 6,
       "fan_out": 8
     },
     {
@@ -607,9 +608,10 @@
         "agent_takkub.user_profile"
       ],
       "imported_by": [
+        "agent_takkub.settings_window",
         "agent_takkub.user_actions"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 10
     },
     {
@@ -622,9 +624,10 @@
         "agent_takkub.cli",
         "agent_takkub.lead_context",
         "agent_takkub.pane_tools_dialog",
+        "agent_takkub.settings_window",
         "agent_takkub.shared_dev_tools"
       ],
-      "fan_in": 4,
+      "fan_in": 5,
       "fan_out": 2
     },
     {
@@ -1005,17 +1008,22 @@
         "agent_takkub",
         "agent_takkub.cockpit_theme",
         "agent_takkub.custom_roles",
+        "agent_takkub.lead_context",
+        "agent_takkub.pane_tools_dialog",
+        "agent_takkub.pane_tools_policy",
         "agent_takkub.pipeline_config",
         "agent_takkub.project_nav",
         "agent_takkub.provider_config",
         "agent_takkub.provider_state",
-        "agent_takkub.roles"
+        "agent_takkub.roles",
+        "agent_takkub.shared_dev_tools",
+        "agent_takkub.skill_audit"
       ],
       "imported_by": [
         "agent_takkub.user_actions"
       ],
       "fan_in": 1,
-      "fan_out": 8
+      "fan_out": 13
     },
     {
       "module": "agent_takkub.shared_dev_tools",
@@ -1029,9 +1037,10 @@
         "agent_takkub.doctor",
         "agent_takkub.orchestrator",
         "agent_takkub.pane_tools_dialog",
+        "agent_takkub.settings_window",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 5,
+      "fan_in": 6,
       "fan_out": 3
     },
     {
@@ -1041,9 +1050,10 @@
       ],
       "imported_by": [
         "agent_takkub.cli",
-        "agent_takkub.pane_tools_dialog"
+        "agent_takkub.pane_tools_dialog",
+        "agent_takkub.settings_window"
       ],
-      "fan_in": 2,
+      "fan_in": 3,
       "fan_out": 1
     },
     {

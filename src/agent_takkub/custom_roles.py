@@ -180,22 +180,51 @@ def create_role(
     if column not in (1, 2):
         return False, "column ต้องเป็น 1 (dev) หรือ 2 (support)"
 
-    roles = load_custom_roles()
     label = (label or "").strip() or name.capitalize()
-    roles[name] = Role(name=name, label=label, color=color, column=column, row=row)
-    if not save_custom_roles(roles):
-        return False, "เขียน custom-roles.json ไม่สำเร็จ"
+    content = (
+        instructions
+        if instructions and instructions.strip()
+        else _default_role_template(name, label)
+    )
 
+    # Write the role markdown to a temp file FIRST (not committed under its
+    # final name yet), then commit the registry, then rename the temp file
+    # into place last. If the rename fails, the registry write is rolled
+    # back — the old order (registry write, then role-file write) left a
+    # partial-commit on role-file failure: a registry entry with no matching
+    # file, which then made a retry collide as "already exists".
     role_file = CUSTOM_AGENTS_DIR / f"{name}.md"
+    tmp_path: Path | None = None
     try:
         CUSTOM_AGENTS_DIR.mkdir(parents=True, exist_ok=True)
-        role_file.write_text(
-            instructions
-            if instructions and instructions.strip()
-            else _default_role_template(name, label),
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            dir=CUSTOM_AGENTS_DIR,
+            suffix=".md",
+            delete=False,
             encoding="utf-8",
-        )
+        ) as tmp:
+            tmp.write(content)
+            tmp_path = Path(tmp.name)
     except OSError as e:
+        return False, f"เขียน role file ไม่สำเร็จ: {e}"
+
+    roles = load_custom_roles()
+    previous = roles.get(name)
+    roles[name] = Role(name=name, label=label, color=color, column=column, row=row)
+    if not save_custom_roles(roles):
+        tmp_path.unlink(missing_ok=True)
+        return False, "เขียน custom-roles.json ไม่สำเร็จ"
+
+    try:
+        tmp_path.replace(role_file)
+    except OSError as e:
+        if previous is None:
+            roles.pop(name, None)
+        else:
+            roles[name] = previous
+        save_custom_roles(roles)
+        tmp_path.unlink(missing_ok=True)
         return False, f"เขียน role file ไม่สำเร็จ: {e}"
 
     return True, ""

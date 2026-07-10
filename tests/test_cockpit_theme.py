@@ -36,8 +36,35 @@ class TestEnsureFontsLoaded:
         monkeypatch.setattr(cockpit_theme, "_FONTS_DIR", tmp_path / "nope")
         result = cockpit_theme.ensure_fonts_loaded()
         assert result["bundled"] is False
-        assert result["sans"] == cockpit_theme.FONT_SANS_FALLBACK
-        assert result["mono"] == cockpit_theme.FONT_MONO_FALLBACK
+        # Codex Low #10 — the fallback is resolved per-platform among a
+        # candidate list (a single hardcoded Windows name would be wrong on
+        # macOS/Linux), so assert membership rather than exact equality to
+        # one hardcoded name.
+        assert result["sans"] in cockpit_theme.FONT_SANS_FALLBACK_CANDIDATES
+        assert result["mono"] in cockpit_theme.FONT_MONO_FALLBACK_CANDIDATES
+
+    def test_missing_fonts_dir_logs_warning(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Gemini #18 — a fallback-from-bundled event must not be silent."""
+        monkeypatch.setattr(cockpit_theme, "_FONTS_DIR", tmp_path / "nope")
+        with caplog.at_level("WARNING", logger="agent_takkub.cockpit_theme"):
+            cockpit_theme.ensure_fonts_loaded()
+        assert any("bundled" in rec.message for rec in caplog.records)
+
+    def test_resolve_fallback_family_prefers_first_installed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            cockpit_theme.QFontDatabase, "families", staticmethod(lambda: ["Zzz", "Arial"])
+        )
+        assert cockpit_theme._resolve_fallback_family(("Segoe UI", "Arial")) == "Arial"
+
+    def test_resolve_fallback_family_defaults_when_none_installed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(cockpit_theme.QFontDatabase, "families", staticmethod(lambda: []))
+        assert cockpit_theme._resolve_fallback_family(("Segoe UI", "Arial")) == "Segoe UI"
 
     def test_result_is_cached_across_calls(self, monkeypatch: pytest.MonkeyPatch) -> None:
         first = cockpit_theme.ensure_fonts_loaded()
@@ -68,6 +95,38 @@ class TestBuildStylesheet:
         ):
             assert selector in qss
 
+    def test_dark_qss_styles_combobox_spinbox_and_scrollbars(self) -> None:
+        """Codex Low #9 — these subcontrols previously fell back to native
+        rendering, breaking the dark theme on some platform styles."""
+        qss = cockpit_theme.build_stylesheet("Sans", "Mono")
+        for selector in (
+            "QComboBox::drop-down",
+            "QSpinBox::up-button",
+            "QSpinBox:focus",
+            "QScrollBar:vertical",
+            "QScrollBar::handle:vertical",
+        ):
+            assert selector in qss
+
+    def test_nav_indicator_selector_present(self) -> None:
+        """Gemini #13 — the active-nav 5px rounded bar is a real QFrame, not
+        a border-left (QSS can't round only one side of a border)."""
+        qss = cockpit_theme.build_stylesheet("Sans", "Mono")
+        assert "#navIndicator" in qss
+
+
+class TestGoldButtonGlow:
+    def test_gold_button_has_drop_shadow_effect(self) -> None:
+        """Gemini #11 — QSS can't render a drop-shadow; a real
+        QGraphicsDropShadowEffect must back every gold CTA (Save & Apply,
+        Create Role — both built via this same factory)."""
+        from PyQt6.QtWidgets import QGraphicsDropShadowEffect
+
+        btn = cockpit_theme.gold_button("Save & Apply")
+        effect = btn.graphicsEffect()
+        assert isinstance(effect, QGraphicsDropShadowEffect)
+        assert effect.blurRadius() == 18
+
 
 class TestToggleSwitch:
     def test_default_unchecked(self) -> None:
@@ -83,6 +142,17 @@ class TestToggleSwitch:
         sw = cockpit_theme.ToggleSwitch(checked=False)
         sw.toggle()
         assert sw.isChecked() is True
+
+    def test_disabled_toggle_still_reports_enabled_state(self) -> None:
+        """Codex Low #8 / Gemini #15 — paintEvent now branches on
+        isEnabled(); this doesn't visually assert pixels, but pins the
+        contract the paint logic reads (a disabled+checked switch, e.g. the
+        locked Lead row, must not be indistinguishable from a live one)."""
+        sw = cockpit_theme.ToggleSwitch(checked=True)
+        sw.setEnabled(False)
+        assert sw.isEnabled() is False
+        assert sw.isChecked() is True
+        sw.repaint()  # exercises paintEvent's disabled branch without raising
 
 
 class TestWidgetHelpers:

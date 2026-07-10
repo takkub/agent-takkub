@@ -1,10 +1,11 @@
-"""Widget smoke tests for settings_window.SettingsWindow (Phase 1).
+"""Widget smoke tests for settings_window.SettingsWindow.
 
 Offscreen QPA (session-scoped QApplication from tests/conftest.py) —
 "tofu" widget-property assertions per the task spec: stacked-page count, nav
-switching, real create_role wiring, gold button style. Full interactive
-visual verification is left to the user per the project's targeted-tests
-rule.
+switching, matrix cell toggle state, pipeline hop rendering, and real
+config-persist wiring (create_role, pane_tools_policy, pipeline_config).
+Full interactive visual verification is left to the user per the project's
+targeted-tests rule.
 """
 
 from __future__ import annotations
@@ -12,14 +13,18 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from PyQt6.QtWidgets import QDialog
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QDialog, QMessageBox
 
 from agent_takkub import (
     custom_roles,
+    pane_tools_policy,
     pipeline_config,
+    project_nav,
     provider_config,
     provider_state,
     settings_window,
+    shared_dev_tools,
 )
 from agent_takkub import roles as roles_mod
 
@@ -35,6 +40,8 @@ def _isolate_settings_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(pipeline_config, "_BASE_DIR", tmp_path)
     monkeypatch.setattr(pipeline_config, "_PATH", tmp_path / "pipelines.json")
     monkeypatch.setattr(provider_state, "_PATH", tmp_path / "disabled-providers.json")
+    monkeypatch.setattr(pane_tools_policy, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
+    monkeypatch.setattr(shared_dev_tools, "SHARED_MCP_FILE", tmp_path / "shared-mcp.json")
     saved = dict(roles_mod._CUSTOM)
     roles_mod._CUSTOM.clear()
     yield
@@ -102,6 +109,50 @@ class TestNewRoleView:
         assert dlg._nr_status.text().startswith("⚠️")
         dlg.deleteLater()
 
+    def test_footer_save_apply_creates_role_and_accepts(self) -> None:
+        """Codex High #2 — footer Save & Apply while on the New Role view
+        must dispatch to the real create transaction, not just save
+        provider/pipeline state and close over an untouched form."""
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_NEW_ROLE)
+        dlg._nr_name.setText("data-eng")
+        dlg._nr_label.setText("Data Eng")
+
+        dlg._on_save_apply_clicked()
+
+        assert "data-eng" in custom_roles.load_custom_roles()
+        assert dlg.result() == QDialog.DialogCode.Accepted
+        dlg.deleteLater()
+
+    def test_footer_save_apply_invalid_form_does_not_close_dialog(self) -> None:
+        """A reserved/invalid name must not accept() and discard the form —
+        the old behavior saved provider/pipeline state and closed regardless
+        of whether New Role's own form was valid."""
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_NEW_ROLE)
+        dlg._nr_name.setText("lead")  # reserved, create_role() rejects it
+
+        dlg._on_save_apply_clicked()
+
+        assert dlg.result() != QDialog.DialogCode.Accepted
+        assert dlg._nr_status.text().startswith("⚠️")
+        dlg.deleteLater()
+
+    def test_new_role_fields_mark_dirty(self) -> None:
+        """Codex Medium #6 — New Role's fields didn't feed _mark_dirty at
+        all, so no unsaved-changes indicator ever showed for this view."""
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_NEW_ROLE)
+        assert dlg._dirty is False
+        dlg._nr_name.setText("data-eng")
+        assert dlg._dirty is True
+        dlg.deleteLater()
+
+    def test_default_swatch_color_is_in_palette(self) -> None:
+        """Codex/Gemini #17 — the initial swatch color must be one of the
+        selectable palette colors so a swatch shows selected on first open."""
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_NEW_ROLE)
+        assert dlg._nr_color == project_nav._AVATAR_COLORS[0]
+        assert dlg._nr_color in project_nav._AVATAR_COLORS
+        dlg.deleteLater()
+
 
 class TestProvidersRolesView:
     def test_save_apply_persists_role_enabled_and_provider(self) -> None:
@@ -142,4 +193,286 @@ class TestProvidersRolesView:
         dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
         assert "lead" not in dlg._role_toggles
         assert "lead" not in dlg._role_provider_combos
+        dlg.deleteLater()
+
+    def test_save_apply_preserves_out_of_scope_role_override(self) -> None:
+        """Codex High #1 — save_role_overrides() used to full-replace the
+        entire role-providers file with only the roles this page renders a
+        combo for; a custom role's pre-existing override (never shown here)
+        must survive a Save & Apply of an unrelated built-in role."""
+        provider_config.save_providers({"data-eng": "codex"})
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+        combo = dlg._role_provider_combos["backend"]
+        combo.setCurrentIndex(combo.findData("gemini"))
+
+        dlg._on_save_apply_clicked()
+
+        assert provider_config.load_providers() == {"data-eng": "codex", "backend": "gemini"}
+        dlg.deleteLater()
+
+    def test_save_apply_disabled_until_dirty(self) -> None:
+        """Gemini #16 — nothing staged at open time means nothing to apply."""
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+        assert dlg._save_btn.isEnabled() is False
+        dlg._role_toggles["qa"].setChecked(False)
+        assert dlg._save_btn.isEnabled() is True
+        dlg.deleteLater()
+
+    def test_reset_on_one_view_keeps_another_views_dirty_state(self) -> None:
+        """Codex Medium #6 — dirty must be tracked per-view, not globally."""
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+        dlg._role_toggles["qa"].setChecked(False)
+        dlg._goto_view(settings_window.VIEW_NEW_ROLE)
+        dlg._nr_name.setText("data-eng")
+        assert dlg._dirty is True
+
+        dlg._on_reset_clicked()  # reverts the New Role view only
+
+        assert dlg._nr_name.text() == ""
+        # Providers & Roles' staged qa-disable must still be dirty/unsaved.
+        assert dlg._dirty is True
+        assert dlg._role_toggles["qa"].isChecked() is False
+        dlg.deleteLater()
+
+    def test_substitute_badge_shown_when_selected_provider_unavailable(self) -> None:
+        """Gemini #12 — the "→ Claude" substitute badge reflects the combo's
+        current selection, not just the on-disk value. (Offscreen tests never
+        `.show()` the dialog, so `isVisible()` always reads False regardless
+        of state — `isHidden()` reflects the widget's own `setVisible()`
+        call, same pattern as `_mcp_empty`/`_plugins_empty` above.)"""
+        provider_state.set_disabled("codex", True)
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+        combo = dlg._role_provider_combos["backend"]
+        badge = dlg._role_provider_badges["backend"]
+        assert badge.isHidden() is True  # default is claude — no substitution
+
+        combo.setCurrentIndex(combo.findData("codex"))
+        assert badge.isHidden() is False
+
+        combo.setCurrentIndex(combo.findData("claude"))
+        assert badge.isHidden() is True
+        dlg.deleteLater()
+
+
+class TestMcpMatrixView:
+    def test_grid_has_a_toggle_per_role_per_item(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            shared_dev_tools, "list_master_mcps", lambda: ["playwright", "context7"]
+        )
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_MCP_MATRIX)
+        assert set(dlg._mcp_toggles.keys()) == set(settings_window._MATRIX_ROLES)
+        for items in dlg._mcp_toggles.values():
+            assert set(items.keys()) == {"playwright", "context7"}
+        # Widgets never .show()'n in offscreen tests always report
+        # isVisible()=False regardless of state (ancestor-chain visibility);
+        # isHidden() reflects the widget's own explicit setVisible() call.
+        assert dlg._mcp_empty.isHidden()
+        dlg.deleteLater()
+
+    def test_empty_registry_shows_empty_hint(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(shared_dev_tools, "list_master_mcps", lambda: [])
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_MCP_MATRIX)
+        assert not dlg._mcp_empty.isHidden()
+        dlg.deleteLater()
+
+    def test_toggle_cell_marks_dirty_and_save_persists(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(shared_dev_tools, "list_master_mcps", lambda: ["playwright"])
+        monkeypatch.setattr(shared_dev_tools, "regen_role_variants", lambda: 0)
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_MCP_MATRIX)
+        toggle = dlg._mcp_toggles["backend"]["playwright"]
+        assert toggle.isChecked() is False
+        toggle.setChecked(True)
+        assert dlg._dirty is True
+
+        dlg._on_save_apply_clicked()
+
+        assert pane_tools_policy.effective_mcps("backend") == frozenset({"playwright"})
+        dlg.deleteLater()
+
+
+class TestPluginsMatrixView:
+    def test_denylist_banner_present(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from PyQt6.QtWidgets import QLabel
+
+        monkeypatch.setattr(settings_window.pane_tools_dialog, "discover_marketplaces", lambda: [])
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PLUGINS_MATRIX)
+        view = dlg._stack.widget(settings_window.VIEW_PLUGINS_MATRIX).widget()
+        banner_texts = [
+            lbl.text() for lbl in view.findChildren(QLabel) if lbl.objectName() == "infoBanner"
+        ]
+        assert any("denylist" in t for t in banner_texts)
+        dlg.deleteLater()
+
+    def test_grid_has_a_toggle_per_role_per_marketplace(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            settings_window.pane_tools_dialog, "discover_marketplaces", lambda: ["pordee"]
+        )
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PLUGINS_MATRIX)
+        assert set(dlg._plugin_toggles.keys()) == set(settings_window._MATRIX_ROLES)
+        for items in dlg._plugin_toggles.values():
+            assert set(items.keys()) == {"pordee"}
+        assert dlg._plugins_empty.isHidden()
+        dlg.deleteLater()
+
+    def test_toggle_cell_marks_dirty_and_save_persists(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # "backend" has no built-in plugin-policy override (falls back to
+        # _TEAMMATE_PLUGINS, which does NOT include ui-ux-pro-max-skill — a
+        # design-only marketplace), so this cell starts unchecked, unlike
+        # e.g. "pordee" which every teammate gets by default.
+        monkeypatch.setattr(
+            settings_window.pane_tools_dialog,
+            "discover_marketplaces",
+            lambda: ["ui-ux-pro-max-skill"],
+        )
+        monkeypatch.setattr(shared_dev_tools, "regen_role_variants", lambda: 0)
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PLUGINS_MATRIX)
+        toggle = dlg._plugin_toggles["backend"]["ui-ux-pro-max-skill"]
+        assert toggle.isChecked() is False
+        toggle.setChecked(True)
+        assert dlg._dirty is True
+
+        dlg._on_save_apply_clicked()
+
+        # The role's built-in defaults not rendered as a column here (this
+        # machine's marketplace list) are preserved via _hidden_plugin_defaults
+        # (see settings_window._reload_plugins_matrix's own note) — Save adds
+        # the newly-checked column on TOP of them, it doesn't replace them.
+        assert pane_tools_policy.effective_plugins("backend") == frozenset(
+            {"ui-ux-pro-max-skill", "superpowers-dev", "pordee", "claude-plugins-official"}
+        )
+        dlg.deleteLater()
+
+
+class TestSkillCatalogView:
+    def test_selecting_role_updates_detail_and_overlap_badge(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        docs = {"backend": "database schema api endpoint", "frontend": "react component css"}
+        monkeypatch.setattr(settings_window.skill_audit, "load_all_role_docs", lambda: docs)
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_SKILL_CATALOG)
+        assert dlg._skill_list.count() == 2
+
+        row = next(
+            i
+            for i in range(dlg._skill_list.count())
+            if dlg._skill_list.item(i).data(Qt.ItemDataRole.UserRole) == "backend"
+        )
+        dlg._skill_list.setCurrentRow(row)
+        assert dlg._skill_detail_text.toPlainText() == docs["backend"]
+        assert dlg._skill_overlap_badge.text().startswith("✓")
+        dlg.deleteLater()
+
+
+class TestPipelineBuilderView:
+    def test_hops_render_for_active_template(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PIPELINE_BUILDER)
+        assert dlg._pb_hops_lay.count() > 0
+        dlg.deleteLater()
+
+    def test_palette_click_appends_a_solo_hop(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PIPELINE_BUILDER)
+        before = len(dlg._pb_hops)
+        dlg._on_palette_role_clicked("backend")
+        assert len(dlg._pb_hops) == before + 1
+        assert dlg._pb_hops[-1] == [
+            {"role": "backend", "cwd": "", "requiresCommit": False, "autoChain": False}
+        ]
+        assert dlg._dirty is True
+        dlg.deleteLater()
+
+    def test_remove_hop_shrinks_list(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PIPELINE_BUILDER)
+        dlg._on_palette_role_clicked("backend")
+        n = len(dlg._pb_hops)
+        dlg._on_remove_hop_clicked(n - 1)
+        assert len(dlg._pb_hops) == n - 1
+        dlg.deleteLater()
+
+    def test_save_apply_persists_staged_hop_edit(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PIPELINE_BUILDER)
+        template_id = dlg._pb_template_id
+        dlg._on_palette_role_clicked("backend")
+        expected_len = len(dlg._pb_hops)
+
+        dlg._on_save_apply_clicked()
+
+        payload = pipeline_config.load(None)
+        tpl = next(t for t in payload["templates"] if t["id"] == template_id)
+        assert len(tpl["hops"]) == expected_len
+        dlg.deleteLater()
+
+
+class TestSaveApplyAtomicity:
+    def test_failed_tools_policy_write_rolls_back_provider_and_pipeline_writes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Codex High #3 — Save & Apply writes 3 separate JSON stores
+        (role-providers, pipelines, pane-tools policy) in sequence; a
+        failure in the LAST stage must not leave the first two committed
+        (previously each store wrote through independently with no shared
+        transaction, so a late failure left an inconsistent, half-applied
+        state and still reported "Save failed" as if nothing landed)."""
+        monkeypatch.setattr(shared_dev_tools, "list_master_mcps", lambda: ["playwright"])
+        monkeypatch.setattr(QMessageBox, "critical", lambda *a, **k: None)
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+        dlg._role_toggles["qa"].setChecked(False)
+        combo = dlg._role_provider_combos["backend"]
+        combo.setCurrentIndex(combo.findData("codex"))
+        dlg._goto_view(settings_window.VIEW_MCP_MATRIX)
+        dlg._mcp_toggles["backend"]["playwright"].setChecked(True)
+
+        monkeypatch.setattr(pane_tools_policy, "set_role_items", lambda *a, **k: False)
+
+        dlg._on_save_apply_clicked()
+
+        assert provider_config.load_providers().get("backend") != "codex"
+        assert pipeline_config.load(None)["rolesEnabled"].get("qa", True) is True
+        assert dlg.result() != QDialog.DialogCode.Accepted
+        assert dlg._dirty is True
+        dlg.deleteLater()
+
+
+class TestTemplatesView:
+    def test_builtin_template_listed_and_delete_disabled(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_TEMPLATES)
+        assert dlg._tpl_list.count() >= 1
+        assert dlg._tpl_delete_btn.isEnabled() is False  # first row is builtin
+        dlg.deleteLater()
+
+    def test_duplicate_creates_non_builtin_copy(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_TEMPLATES)
+        before = len(dlg._pipeline_payload["templates"])
+        dlg._on_template_duplicate_clicked()
+
+        assert len(dlg._pipeline_payload["templates"]) == before + 1
+        payload = pipeline_config.load(None)
+        assert len(payload["templates"]) == before + 1
+        new_tpl = payload["templates"][-1]
+        assert new_tpl["builtin"] is False
+        dlg.deleteLater()
+
+    def test_delete_removes_duplicated_template(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_TEMPLATES)
+        dlg._on_template_duplicate_clicked()
+        dlg._reload_templates_list()
+        dlg._tpl_list.setCurrentRow(dlg._tpl_list.count() - 1)
+        before = len(dlg._pipeline_payload["templates"])
+
+        monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+        dlg._on_template_delete_clicked()
+
+        assert len(dlg._pipeline_payload["templates"]) == before - 1
+        dlg.deleteLater()
+
+    def test_edit_hops_switches_to_pipeline_builder_view(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_TEMPLATES)
+        dlg._tpl_list.setCurrentRow(0)
+        dlg._on_template_edit_hops_clicked()
+        assert dlg._stack.currentIndex() == settings_window.VIEW_PIPELINE_BUILDER
         dlg.deleteLater()
