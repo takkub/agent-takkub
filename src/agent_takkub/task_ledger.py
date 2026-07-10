@@ -137,6 +137,36 @@ def _find_or_create_feature(group: dict, feature: str) -> dict:
     return f
 
 
+def _derive_summary(task: str) -> str:
+    """Pick the task's meaningful line for the ledger row summary.
+
+    Every task spec starts with a `[ROLE: ...]` declaration line and ends
+    with a "รายงานกลับด้วย takkub done" trailer — neither is useful as a
+    row summary. Skip both and take the first real content line instead.
+    Falls back to the raw first line if the task is declaration-only.
+    """
+    stripped = task.strip()
+    if not stripped:
+        return ""
+    lines = stripped.splitlines()
+    summary = ""
+    for raw in lines:
+        line = raw.strip()
+        if not line:
+            continue
+        if line.lower().startswith("[role:"):
+            continue
+        if line.startswith("รายงานกลับด้วย"):
+            continue
+        summary = line
+        break
+    if not summary:
+        summary = lines[0].strip()
+    if len(summary) > 100:
+        summary = summary[:100].rstrip() + "…"
+    return summary
+
+
 def create_assignment(
     project: str,
     role: str,
@@ -160,9 +190,7 @@ def create_assignment(
     feature_text = (feature or "").strip() or _FALLBACK_FEATURE
     role = role.strip()
     cwd_disp = _display_path(cwd) if cwd else "—"
-    summary = task.strip().splitlines()[0].strip() if task.strip() else ""
-    if len(summary) > 100:
-        summary = summary[:100].rstrip() + "…"
+    summary = _derive_summary(task)
 
     detail_name = f"{hhmmss}-{role}-ledger.md"
     detail_rel = f"{date}/{detail_name}"

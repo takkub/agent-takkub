@@ -24,7 +24,15 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtCore import QSettings, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import (
+    QEasingCurve,
+    QParallelAnimationGroup,
+    QPropertyAnimation,
+    QSettings,
+    Qt,
+    QTimer,
+    pyqtSignal,
+)
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QApplication,
@@ -59,6 +67,8 @@ from .project_tab import ProjectTab
 from .project_wizard import ProjectWizardMixin
 from .roles import DEFAULT_TEAMMATES, LEAD, Role, by_name
 from .status_header import StatusHeaderMixin
+from .task_dock import COLLAPSED_W as _TASKS_DOCK_COLLAPSED_W
+from .task_dock import EXPANDED_MIN_W as _TASKS_DOCK_EXPANDED_W
 from .task_dock import TaskDockWidget
 from .tutorial_overlay import TutorialOverlay, TutorialStep, has_seen_tutorial
 from .update_panel import MainWindowUpdateMixin
@@ -290,13 +300,20 @@ class MainWindow(
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self._logs_dock)
 
         # ── right-side task-tree dock (A8, hidden by default) ───
-        self._tasks_dock = QDockWidget("Tasks", self)
+        self._tasks_dock = QDockWidget("Task List", self)
         self._tasks_dock.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea)
+        # No X (close) / float-drag-out — the user collapses it to a rail via
+        # the in-dock «  Collapse button instead (Ctrl+Shift+T still toggles
+        # hide/show); DockWidgetMovable alone keeps it reorderable within the
+        # right dock area but drops the titlebar close/float buttons.
+        self._tasks_dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetMovable)
         self._tasks_dock_widget = TaskDockWidget()
         self._tasks_dock.setWidget(self._tasks_dock_widget)
-        self._tasks_dock.setMinimumWidth(260)
+        self._tasks_dock.setMinimumWidth(_TASKS_DOCK_EXPANDED_W)
         self._tasks_dock.hide()
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._tasks_dock)
+        self._tasks_dock_anim: QParallelAnimationGroup | None = None
+        self._tasks_dock_widget.collapseToggled.connect(self._on_tasks_dock_collapse_toggled)
         # Live refresh: the Task Ledger (A7) writes on every assign/done/
         # fail/close; Orchestrator emits ledgerChanged right after each write
         # lands, so the dock repaints only the one project card that changed
@@ -747,6 +764,29 @@ class MainWindow(
             # any ledger write that landed while the dock was hidden (no
             # live-signal connection needed for that gap).
             self._tasks_dock_widget.refresh_all()
+
+    def _on_tasks_dock_collapse_toggled(self, collapsed: bool) -> None:
+        """Slide the Task List dock between its full width and the narrow
+        avatar rail — mirrors project_nav's sidebar width tween, just applied
+        to the QDockWidget instead of a plain child widget (TaskDockWidget
+        only owns its own internal layout, not the dock's outer size)."""
+        target = _TASKS_DOCK_COLLAPSED_W if collapsed else _TASKS_DOCK_EXPANDED_W
+        start = self._tasks_dock.width()
+        group = QParallelAnimationGroup(self)
+        for prop in (b"minimumWidth", b"maximumWidth"):
+            anim = QPropertyAnimation(self._tasks_dock, prop, self)
+            anim.setDuration(190)
+            anim.setStartValue(start)
+            anim.setEndValue(target)
+            anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
+            group.addAnimation(anim)
+        if not collapsed:
+            # Expanding: release the temporary maximumWidth lock so the user
+            # can still drag the dock wider afterwards (collapsed keeps
+            # min == max == the rail width, deliberately non-resizable).
+            group.finished.connect(lambda: self._tasks_dock.setMaximumWidth(16_777_215))
+        self._tasks_dock_anim = group  # keep alive so PyQt doesn't GC it mid-run
+        group.start()
 
     def _show_help(self) -> None:
         from PyQt6.QtWidgets import QMessageBox

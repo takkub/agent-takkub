@@ -240,3 +240,39 @@ class TestAtomicWrite:
         for src, dst in calls:
             assert src != dst
             assert ".tmp" in src
+
+
+class TestDeriveSummary:
+    def test_declaration_only_falls_back_to_first_line(self) -> None:
+        task = "[ROLE: backend developer — ทำงานเองโดยตรง ห้าม spawn subagent]"
+        assert task_ledger._derive_summary(task) == task
+
+    def test_declaration_plus_task_skips_declaration_line(self) -> None:
+        task = (
+            "[ROLE: backend developer — ทำงานเองโดยตรง ห้าม spawn subagent]\n"
+            "งาน A8-tweak: ปรับ Task dock ให้อ่านง่ายขึ้น\n"
+        )
+        assert task_ledger._derive_summary(task) == "งาน A8-tweak: ปรับ Task dock ให้อ่านง่ายขึ้น"
+
+    def test_trailer_is_excluded_even_if_only_meaningful_looking_line(self) -> None:
+        task = "[ROLE: backend developer — ...]\n\nรายงานกลับด้วย takkub done เมื่อเสร็จ\n"
+        assert task_ledger._derive_summary(task) == "[ROLE: backend developer — ...]"
+
+    def test_declaration_task_and_trailer_picks_middle_line(self) -> None:
+        task = (
+            "[ROLE: backend developer — ...]\n"
+            "งาน: เพิ่ม endpoint /health\n"
+            "รายงานกลับด้วย takkub done เมื่อเสร็จ\n"
+        )
+        assert task_ledger._derive_summary(task) == "งาน: เพิ่ม endpoint /health"
+
+    def test_empty_task_returns_empty_string(self) -> None:
+        assert task_ledger._derive_summary("") == ""
+        assert task_ledger._derive_summary("   \n  \n") == ""
+
+    def test_truncates_over_100_chars(self) -> None:
+        long_line = "งาน: " + ("x" * 120)
+        task = f"[ROLE: backend]\n{long_line}\n"
+        result = task_ledger._derive_summary(task)
+        assert len(result) == 101  # 100 chars + '…'
+        assert result.endswith("…")

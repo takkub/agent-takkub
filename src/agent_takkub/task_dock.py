@@ -19,12 +19,14 @@ color) so the same project shows the same avatar tint in both places.
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtCore import Qt, QUrl, pyqtSignal
 from PyQt6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QProgressBar,
+    QPushButton,
     QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
@@ -36,6 +38,13 @@ from . import task_ledger
 from .config import list_project_names
 from .project_nav import _avatar_color, _initials
 from .token_meter import usage_color
+
+# Dock width targets for the collapse-to-rail toggle (mirrors project_nav's
+# _EXPANDED_W/_COLLAPSED_W pattern) — exported so main_window can animate the
+# containing QDockWidget's width in lockstep with this widget's own layout
+# swap (a QDockWidget's width isn't a property this widget controls itself).
+EXPANDED_MIN_W = 260
+COLLAPSED_W = 64
 
 # (glyph, hex color) per ledger row status — mirrors task_ledger._ROW_SYMBOL
 # but with the dock's own richer glyphs/colors (INDEX.md uses plain ASCII
@@ -90,6 +99,23 @@ QTreeWidget#taskTree::branch {
     background: transparent;
     border-image: none;
     image: none;
+}
+#taskDockToggleBtn {
+    background: transparent;
+    color: #52525b;
+    border: none;
+    border-radius: 8px;
+    padding: 7px;
+    margin: 4px 0 0 0;
+    font-size: 12px;
+    font-weight: 600;
+}
+#taskDockToggleBtn:hover {
+    background: #18181b;
+    color: #a1a1aa;
+}
+#taskRail {
+    background: transparent;
 }
 """
 
@@ -175,6 +201,11 @@ def _row_status_icon(glyph: str, color: str) -> QIcon:
 class TaskDockWidget(QWidget):
     """Right-dock panel body: a QTreeWidget of every open project's ledger."""
 
+    # Emitted after a collapse/expand toggle so main_window can animate the
+    # containing QDockWidget's width in lockstep (this widget only controls
+    # its own internal layout, not the dock's outer size).
+    collapseToggled = pyqtSignal(bool)
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("taskDockRoot")
@@ -184,15 +215,45 @@ class TaskDockWidget(QWidget):
         root.setContentsMargins(6, 4, 6, 6)
         root.setSpacing(4)
 
-        title = QLabel("TASK LEDGER")
-        title.setObjectName("taskDockHeader")
-        root.addWidget(title)
+        self._title = QLabel("Task List")
+        self._title.setObjectName("taskDockHeader")
+        root.addWidget(self._title)
 
         self._tree = QTreeWidget()
         self._tree.setObjectName("taskTree")
         self._tree.setHeaderHidden(True)
         self._tree.setIndentation(16)
+        # No ellipsis anywhere — project/goal/feature/task labels show in
+        # full; a column too narrow to fit them scrolls horizontally instead
+        # of clipping the text down to "pms (3..." / "จบ ro...".
+        self._tree.setTextElideMode(Qt.TextElideMode.ElideNone)
+        self._tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        header = self._tree.header()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         root.addWidget(self._tree, 1)
+
+        # Collapsed-rail body: one avatar per open project, stacked vertically
+        # (mirrors project_nav's collapsed sidebar). Hidden until collapsed.
+        self._rail = QWidget()
+        self._rail.setObjectName("taskRail")
+        self._rail_layout = QVBoxLayout(self._rail)
+        self._rail_layout.setContentsMargins(0, 4, 0, 4)
+        self._rail_layout.setSpacing(6)
+        self._rail_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
+        self._rail.hide()
+        root.addWidget(self._rail, 1)
+        self._rail_avatars: dict[str, QLabel] = {}
+
+        # Collapse toggle — same idiom as project_nav's #sidebarToggleBtn
+        # («  Collapse ↔ »), sitting at the very bottom of the dock body.
+        self._collapsed = False
+        self._toggle_btn = QPushButton("«  Collapse")
+        self._toggle_btn.setObjectName("taskDockToggleBtn")
+        self._toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._toggle_btn.setToolTip("ยุบ Task List เป็นแถบ avatar")
+        self._toggle_btn.clicked.connect(self.toggle_collapsed)
+        root.addWidget(self._toggle_btn)
 
         # Chevron toggle button per open project card, keyed by project name
         # (not item identity — the item/widget are rebuilt on every refresh,
@@ -210,6 +271,28 @@ class TaskDockWidget(QWidget):
         self._tree.itemExpanded.connect(self._on_item_expanded)
 
         self.refresh_all()
+
+    # ──────────────────────────────────────────────────────────────
+    # collapse-to-rail toggle
+    # ──────────────────────────────────────────────────────────────
+    def toggle_collapsed(self) -> bool:
+        """Flip between the full tree and the narrow avatar rail."""
+        self.set_collapsed(not self._collapsed)
+        return self._collapsed
+
+    def is_collapsed(self) -> bool:
+        return self._collapsed
+
+    def set_collapsed(self, collapsed: bool) -> None:
+        if collapsed == self._collapsed:
+            return
+        self._collapsed = collapsed
+        self._title.setVisible(not collapsed)
+        self._tree.setVisible(not collapsed)
+        self._rail.setVisible(collapsed)
+        self._toggle_btn.setText("»" if collapsed else "«  Collapse")
+        self._toggle_btn.setToolTip("ขยาย Task List" if collapsed else "ยุบ Task List เป็นแถบ avatar")
+        self.collapseToggled.emit(collapsed)
 
     # ──────────────────────────────────────────────────────────────
     def _remember(self, item: QTreeWidgetItem, expanded: bool) -> None:
@@ -272,6 +355,7 @@ class TaskDockWidget(QWidget):
             if existing is not None:
                 self._tree.takeTopLevelItem(self._tree.indexOfTopLevelItem(existing))
                 self._chevron_labels.pop(project, None)
+            self._remove_rail_avatar(project)
             return
         if existing is not None:
             self._tree.takeTopLevelItem(self._tree.indexOfTopLevelItem(existing))
@@ -283,6 +367,33 @@ class TaskDockWidget(QWidget):
         self._tree.addTopLevelItem(item)
         self._mount_widgets(project, item, state)
         self._restore_expansion(item)
+        self._update_rail_avatar(project, state)
+
+    def _update_rail_avatar(self, project: str, state: dict) -> None:
+        """Add/refresh *project*'s avatar in the collapsed rail — kept in
+        sync with the tree so the rail is never stale after the user
+        collapses the dock."""
+        done, total = project_progress(state)
+        label = self._rail_avatars.get(project)
+        if label is None:
+            label = QLabel()
+            label.setFixedSize(28, 28)
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            label.setToolTip(project)
+            self._rail_layout.addWidget(label)
+            self._rail_avatars[project] = label
+        label.setText(_initials(project))
+        label.setStyleSheet(
+            f"background: {_avatar_color(project)}; color: #ffffff; font-size: 10px;"
+            f" font-weight: 800; border-radius: 14px;"
+        )
+        label.setToolTip(f"{project}  ({done}/{total})")
+
+    def _remove_rail_avatar(self, project: str) -> None:
+        label = self._rail_avatars.pop(project, None)
+        if label is not None:
+            self._rail_layout.removeWidget(label)
+            label.deleteLater()
 
     def _find_top_level(self, key: str) -> QTreeWidgetItem | None:
         for i in range(self._tree.topLevelItemCount()):
