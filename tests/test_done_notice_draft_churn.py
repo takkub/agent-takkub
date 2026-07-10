@@ -18,9 +18,16 @@ repeat the whole cycle.
 
 Fix: `_flush_pending_done_notices` now checks `_lead_can_accept_injection`
 before moving anything out of the durable queue (park silently while a draft
-blocks); `_reap_pending_done_notices` folds "ready but draft-blocked" into the
-same staleness-accumulating branch as "not ready" so the #70 force-flush
-safety net still eventually fires for a draft that's been stuck for real.
+blocks).
+
+#118 follow-up: the original fix folded "ready but draft-blocked" into the
+same staleness-accumulating branch as "not ready", so the #70 force-flush
+safety net would eventually bypass a genuinely-stuck draft too — clobbering
+whatever the user was mid-typing. `_reap_pending_done_notices` now keeps the
+two conditions separate: only "not ready" (a transient, non-user-caused
+state) escalates to force-flush after `_DONE_NOTICE_STALE_S`; "ready but
+draft-blocked" (user-caused) parks indefinitely in the durable queue — no
+timeout, no force — until the draft clears on its own.
 """
 
 from __future__ import annotations
@@ -136,12 +143,15 @@ class TestDraftPendingParksInsteadOfChurning:
         lead.session.write.assert_not_called()
         assert len(orch._pending_done_notices.get(PROJECT, [])) == 2
 
-    def test_stale_force_flush_still_fires_for_a_genuinely_stuck_draft(
+    def test_stale_force_flush_never_fires_for_a_genuinely_stuck_draft(
         self, orch: Orchestrator
     ) -> None:
-        """Safety net (#70) must survive: after _DONE_NOTICE_STALE_S of an
-        alive Lead that can never accept injection (draft never clears), the
-        reaper force-delivers regardless of the draft gate."""
+        """#118: a genuinely-stuck draft must NEVER be force-bypassed, no
+        matter how long it's been pending — force-flushing over an
+        unsubmitted draft clobbers whatever the user is mid-typing, which is
+        worse than a late notice. Only the *not-ready* branch escalates to
+        force-flush (see test_perpetually_not_ready_lead_force_flushes below
+        / tests/test_reap_multiproject.py)."""
         lead = _lead(ready=True)
         orch._panes_by_project[PROJECT] = {"lead": lead}
         orch._pending_done_notices = {PROJECT: [{"role": "backend", "note": "n", "body": "DONE-1"}]}
@@ -157,7 +167,9 @@ class TestDraftPendingParksInsteadOfChurning:
             c.args[0].decode() if isinstance(c.args[0], bytes) else str(c.args[0])
             for c in lead.session.write.call_args_list
         )
-        assert PROJECT in orch._pending_done_since
+        # Draft-blocked never arms the staleness clock — it isn't the
+        # escalation path.
+        assert PROJECT not in orch._pending_done_since
 
         later = now + _DONE_NOTICE_STALE_S + 1
         with (
@@ -170,6 +182,67 @@ class TestDraftPendingParksInsteadOfChurning:
             c.args[0].decode() if isinstance(c.args[0], bytes) else str(c.args[0])
             for c in lead.session.write.call_args_list
         )
-        assert "DONE-1" in written, "force-flush safety net must still deliver"
-        assert not orch._pending_done_notices.get(PROJECT)
+        assert "DONE-1" not in written, "draft-hold must never be force-bypassed (#118)"
+        assert orch._pending_done_notices.get(PROJECT), "notice must stay parked, not dropped"
         assert PROJECT not in orch._pending_done_since
+
+    def test_draft_clears_then_flushes_normally(self, orch: Orchestrator) -> None:
+        """A parked notice must deliver as soon as the draft clears — parking
+        is not a dead end."""
+        lead = _lead(ready=True)
+        orch._panes_by_project[PROJECT] = {"lead": lead}
+        orch._pending_done_notices = {PROJECT: [{"role": "backend", "note": "n", "body": "DONE-1"}]}
+        now = 1_000_000.0
+        orch._lead_draft_state = {PROJECT: _stuck_draft(now, 500.0)}
+
+        with (
+            patch("agent_takkub.orchestrator.QTimer.singleShot"),
+            patch("agent_takkub.lead_inbox.time.time", return_value=now),
+        ):
+            orch._reap_pending_done_notices()
+        assert orch._pending_done_notices.get(PROJECT), "still parked while draft blocks"
+
+        # Draft clears (submitted or deleted).
+        from agent_takkub.lead_draft_state import LeadDraftState
+
+        orch._lead_draft_state = {PROJECT: LeadDraftState()}
+        later = now + 1
+        with (
+            patch("agent_takkub.orchestrator.QTimer.singleShot"),
+            patch("agent_takkub.lead_inbox.time.time", return_value=later),
+        ):
+            orch._reap_pending_done_notices()
+
+        assert not orch._pending_done_notices.get(PROJECT), "must flush once draft clears"
+
+    def test_not_ready_still_force_flushes_even_with_stale_draft_state(
+        self, orch: Orchestrator
+    ) -> None:
+        """The not-ready escalation path is independent of draft state — a
+        stale/irrelevant draft record left over from an earlier ready window
+        must not block the #70 not-ready safety net."""
+        lead = _lead(ready=False)
+        orch._panes_by_project[PROJECT] = {"lead": lead}
+        orch._pending_done_notices = {PROJECT: [{"role": "backend", "note": "n", "body": "DONE-1"}]}
+        now = 1_000_000.0
+        orch._lead_draft_state = {PROJECT: _stuck_draft(now, 200.0)}
+
+        with (
+            patch("agent_takkub.orchestrator.QTimer.singleShot"),
+            patch("agent_takkub.lead_inbox.time.time", return_value=now),
+        ):
+            orch._reap_pending_done_notices()
+
+        later = now + _DONE_NOTICE_STALE_S + 1
+        with (
+            patch("agent_takkub.orchestrator.QTimer.singleShot"),
+            patch("agent_takkub.lead_inbox.time.time", return_value=later),
+        ):
+            orch._reap_pending_done_notices()
+
+        written = "".join(
+            c.args[0].decode() if isinstance(c.args[0], bytes) else str(c.args[0])
+            for c in lead.session.write.call_args_list
+        )
+        assert "DONE-1" in written, "not-ready escalation must still fire"
+        assert not orch._pending_done_notices.get(PROJECT)

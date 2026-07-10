@@ -1027,9 +1027,12 @@ class LeadInboxMixin:
             # the live queue only for _pump_lead_notify's own draft-hold gate to
             # spill them straight back to durable (draft-hold-expired is sticky
             # once past DRAFT_HOLD_TIMEOUT_S), and doing that per item produced
-            # a duplicate spill log per notice, every reaper tick (#108). The
-            # reaper's own staleness clock (_pending_done_since) is the safety
-            # net for a draft that never clears.
+            # a duplicate spill log per notice, every reaper tick (#108). Items
+            # stay parked here indefinitely — the reaper's staleness clock
+            # (_pending_done_since) never force-bypasses a genuine draft-hold
+            # (#118: force-flush clobbering an unsubmitted draft mid-keystroke
+            # is worse than a late notice); it only escalates the not-ready
+            # branch.
             return
         items = self._pending_done_notices.pop(project_ns)
         self._save_pending_done_notices(project_ns)
@@ -1058,23 +1061,15 @@ class LeadInboxMixin:
                 # staleness clock so it only counts time the Lead was actually up.
                 self._pending_done_since.pop(project_ns, None)
                 continue
-            if lead.session.is_at_ready_prompt() and self._lead_can_accept_injection(project_ns):
-                self._pending_done_since.pop(project_ns, None)
-                self._flush_pending_done_notices(project_ns)
-            else:
-                # Lead alive but either not-ready or holding an unsubmitted
-                # draft (#108: back off flushing while a draft is pending —
-                # see _flush_pending_done_notices — so this is the same
-                # staleness-accumulating branch, not a separate reset-every-
-                # tick path). Normally transient (Lead mid-turn, or a draft
-                # that will clear soon); the next tick retries. But
-                # is_at_ready_prompt() can be a perpetual false-negative (a
-                # blocker marker in the Lead's own visible conversation reads
-                # as busy — #20), which silently stranded notices forever
-                # (#70: a second active project's Lead never reaped). Escalate:
-                # after _DONE_NOTICE_STALE_S of an alive-but-never-flushable
-                # Lead, force delivery regardless of the gate (including the
-                # draft-hold gate) so the chain can never stall indefinitely.
+            if not lead.session.is_at_ready_prompt():
+                # Not-ready is a transient, non-user-caused condition (Lead
+                # mid-turn, or an is_at_ready_prompt() false-negative from a
+                # blocker marker in its own visible conversation — #20) that
+                # silently stranded notices forever (#70: a second active
+                # project's Lead never reaped). Escalate: after
+                # _DONE_NOTICE_STALE_S of an alive-but-never-ready Lead, force
+                # delivery regardless of the gate so the chain can never stall
+                # indefinitely.
                 since = self._pending_done_since.setdefault(project_ns, now)
                 if now - since >= _DONE_NOTICE_STALE_S:
                     _log_event(
@@ -1085,6 +1080,21 @@ class LeadInboxMixin:
                     )
                     self._pending_done_since.pop(project_ns, None)
                     self._force_deliver_done_notices(project_ns)
+            elif self._lead_can_accept_injection(project_ns):
+                self._pending_done_since.pop(project_ns, None)
+                self._flush_pending_done_notices(project_ns)
+            else:
+                # Ready but a draft is genuinely sitting unsubmitted in the
+                # input line (#108/#118: user typing, not a stuck engine
+                # state). Unlike not-ready, this is user-caused and must NEVER
+                # be force-bypassed — clobbering a live draft mid-keystroke is
+                # worse than a late notice. Park indefinitely in the durable
+                # queue (still visible via the red-dot) until the draft clears
+                # on its own, then the ready+can-accept branch above flushes
+                # it normally. Reset the staleness clock so a prior not-ready
+                # streak can't leak into a force-flush once the state flips to
+                # draft-blocked.
+                self._pending_done_since.pop(project_ns, None)
 
     def _force_deliver_done_notices(self, project_ns: str) -> None:
         """Last-resort delivery for spilled done-notices when the Lead reads as
