@@ -362,6 +362,125 @@ class TestInjectionGate:
         assert draft_state_allows_injection(LeadDraftState(state=UNKNOWN_NONEMPTY)) is False
 
 
+class TestWordDeleteCtrlW:
+    """Ctrl+W ('delete previous word', 0x17) — issue #114 A3-secondary. Prior
+    behavior treated it as an untracked no-op, which overcounted draft_len
+    and could leave state stuck "nonempty" (or, worse, only reach "empty"
+    after backspacing *past* the real end of text — see module docstring for
+    why overcounting, not undercounting, is the safe direction)."""
+
+    def test_ctrl_w_deletes_the_word_just_typed(self):
+        st = _advance(LeadDraftState(), b"takkub status")
+        st = _advance(st, b"\x17")
+        assert st.state == NONEMPTY
+        assert st.draft_len == 7  # "takkub " remains
+
+    def test_typed_word_ctrl_w_then_backspaces_reaches_empty_without_underflow(self):
+        st = _advance(LeadDraftState(), b"takkub status")
+        st = _advance(st, b"\x17")  # deletes "status" -> "takkub "
+        assert st.draft_len == 7
+        st = _advance(st, b"\x7f" * 10)  # far more backspaces than remain
+        assert st.state == EMPTY
+        assert st.draft_len == 0
+
+    def test_ctrl_w_on_empty_is_noop(self):
+        st = _advance(LeadDraftState(), b"\x17")
+        assert st.state == EMPTY
+        assert st.draft_len == 0
+
+    def test_ctrl_w_clears_when_it_consumes_the_whole_draft(self):
+        st = _advance(LeadDraftState(), b"solo")
+        st = _advance(st, b"\x17")
+        assert st.state == EMPTY
+        assert st.draft_len == 0
+
+    def test_repeated_ctrl_w_falls_back_to_conservative_single_char_steps(self):
+        """After the tracked word is consumed, word_len resets — a second
+        Ctrl+W in a row has no boundary to work from, so it must step
+        conservatively (1 char) rather than guess a possibly-too-large
+        amount that could undercount past the real remaining text."""
+        st = _advance(LeadDraftState(), b"ab cd")  # draft_len=5, word_len=2 ("cd")
+        st = _advance(st, b"\x17")  # -> "ab " draft_len=3
+        assert st.draft_len == 3
+        st = _advance(st, b"\x17")  # word_len now 0 -> conservative -1
+        assert st.state == NONEMPTY
+        assert st.draft_len == 2
+
+    def test_ctrl_w_in_unknown_nonempty_is_noop(self):
+        st = _advance(LeadDraftState(), b"\x1b[A")  # Up arrow -> unknown hold
+        assert st.state == UNKNOWN_NONEMPTY
+        st2 = _advance(st, b"\x17")
+        assert st2 == st
+
+    def test_word_len_resets_on_whitespace_mid_run(self):
+        st = _advance(LeadDraftState(), b"foo bar baz")
+        st = _advance(st, b"\x17")  # deletes "baz" only, not "bar baz"
+        assert st.draft_len == 8  # "foo bar "
+
+
+class TestWordDeleteAltBackspace:
+    """Alt+Backspace commonly arrives PTY-side as Esc immediately followed by
+    a backspace byte (`\\x1b\\x7f` / `\\x1b\\x08`). Unlike a lone Esc this
+    2-byte encoding is unambiguous — Claude CLI never uses it to dismiss a
+    menu — so it is safe to special-case as a word-delete."""
+
+    def test_esc_del_deletes_the_word_just_typed(self):
+        st = _advance(LeadDraftState(), b"takkub status")
+        st = _advance(st, b"\x1b\x7f")
+        assert st.state == NONEMPTY
+        assert st.draft_len == 7
+
+    def test_esc_ctrl_h_variant_also_deletes_the_word(self):
+        st = _advance(LeadDraftState(), b"takkub status")
+        st = _advance(st, b"\x1b\x08")
+        assert st.state == NONEMPTY
+        assert st.draft_len == 7
+
+    def test_esc_del_split_across_two_chunks_still_deletes_the_word(self):
+        """The lone-Esc byte alone is ambiguous (issue #111) until the next
+        byte arrives, even when that next byte turns out to prove Alt+Backspace
+        rather than a bare Esc."""
+        st = _advance(LeadDraftState(), b"takkub status")
+        st = _advance(st, b"\x1b")
+        assert st.state == NONEMPTY and st.draft_len == 13  # still held, unproven
+        st = _advance(st, b"\x7f")
+        assert st.state == NONEMPTY
+        assert st.draft_len == 7
+
+    def test_esc_del_then_backspaces_reaches_empty_without_underflow(self):
+        st = _advance(LeadDraftState(), b"takkub status")
+        st = _advance(st, b"\x1b\x7f")
+        st = _advance(st, b"\x7f" * 10)
+        assert st.state == EMPTY
+        assert st.draft_len == 0
+
+
+class TestBareEscFailSafeUnchanged:
+    """Issue #114 (A3-secondary): a lone Esc that proves out as neither
+    CSI/SS3/mouse/Alt+Backspace is Claude CLI's own overload for *both*
+    clearing a draft in progress and dismissing its own slash-menu/dialog
+    overlay. This module only observes bytes typed *into* the pane — it has
+    no visibility into which the CLI is currently showing — so the two are
+    provably indistinguishable from the input byte stream alone (confirmed:
+    `advance_draft_state` is fed exclusively from `Orchestrator._on_pane_input`,
+    never from render/output bytes). Recommendation to Lead: over-clearing
+    (current behavior, pinned below) is the safer of the two unprovable
+    guesses — it can only make an injection land a keystroke earlier than a
+    human would've typed into the line, where guessing "don't clear" wrong
+    would leave state stuck "nonempty" over text that's actually gone,
+    silently blocking injection for up to `DRAFT_HOLD_TIMEOUT_S`. Distinguishing
+    the two correctly would require render-side menu-open detection, which is
+    out of scope for this pure byte-level input-only module. This test pins
+    the deliberately-unchanged behavior as a regression guard, not an
+    endorsement that it's fully correct."""
+
+    def test_bare_esc_still_clears_a_real_in_progress_draft(self):
+        st = _advance(LeadDraftState(), b"draft")
+        st = _advance(st, b"\x1bx")
+        assert st.state == NONEMPTY  # "draft" cleared, "x" typed anew
+        assert st.draft_len == 1
+
+
 class TestHoldExpiry:
     def test_none_state_never_expired(self):
         assert draft_hold_expired(None, NOW) is False
