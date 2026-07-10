@@ -587,6 +587,7 @@
         "agent_takkub.custom_roles",
         "agent_takkub.lead_context",
         "agent_takkub.pane_tools_policy",
+        "agent_takkub.project_nav",
         "agent_takkub.roles",
         "agent_takkub.shared_dev_tools",
         "agent_takkub.skill_audit"
@@ -595,7 +596,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 1,
-      "fan_out": 7
+      "fan_out": 8
     },
     {
       "module": "agent_takkub.pane_tools_policy",
@@ -689,9 +690,10 @@
       ],
       "imported_by": [
         "agent_takkub.main_window",
+        "agent_takkub.pane_tools_dialog",
         "agent_takkub.task_dock"
       ],
-      "fan_in": 2,
+      "fan_in": 3,
       "fan_out": 1
     },
     {

@@ -164,9 +164,13 @@ class UserActionsMixin:
             6_000,
         )
 
-    def _show_pipelines_menu(self) -> None:
-        """Show the ⚙ Pipelines drop-down menu.
+    def _show_pipelines_menu(self, *_args) -> None:
+        """Show the Pipeline Settings / user-profile drop-down menu.
 
+        A6-redesign moved this off the 👥 Team chip's left-click (now
+        ``_on_team_chip_clicked`` — straight to Team & Roles) onto its
+        RIGHT-click (``customContextMenuRequested``, which passes a QPoint
+        this method ignores in favor of anchoring off the button's own rect).
         Built fresh on every click so user-profile state is always current.
         Menu sections:
           1. Pipeline Settings…
@@ -327,6 +331,16 @@ class UserActionsMixin:
         from .pane_tools_dialog import PaneToolsDialog
 
         dlg = PaneToolsDialog(self)
+        dlg.exec()
+
+    def _on_team_chip_clicked(self) -> None:
+        """👥 Team chip (A6-redesign): open 🔧 Tools straight to the
+        "Team & Roles" tab — team roster + guided custom-role create.
+        Right-click on the same chip still reaches Pipeline Settings / user
+        profile switch / Add-Remove-user via ``_show_pipelines_menu``."""
+        from .pane_tools_dialog import TAB_TEAM, PaneToolsDialog
+
+        dlg = PaneToolsDialog(self, initial_tab=TAB_TEAM)
         dlg.exec()
 
     def _on_open_shell_clicked(self) -> None:
@@ -791,7 +805,7 @@ class UserActionsMixin:
         return True, "", self._remote.config.pairing_url()
 
     # ──────────────────────────────────────────────────────────────
-    # per-project user profile selector (accessed via ⚙ Pipelines menu)
+    # per-project user profile selector (accessed via 👥 Team chip's right-click menu)
     # ──────────────────────────────────────────────────────────────
 
     def _on_user_changed(self, name: str) -> None:

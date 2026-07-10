@@ -117,3 +117,13 @@ class TestCustomRoles:
         roles.register_role(shadow)
         assert roles.by_name("backend") is roles.by_name("backend")
         assert roles.by_name("backend").label == "Backend"
+
+    def test_unregister_role_forgets_it(self, clean_custom_registry) -> None:
+        r = roles.Role("data-eng", "Data Eng", "#112233", column=1, row=5)
+        roles.register_role(r)
+        roles.unregister_role("data-eng")
+        assert roles.by_name("data-eng") is None
+        assert roles.custom_roles() == ()
+
+    def test_unregister_role_unknown_name_is_a_noop(self, clean_custom_registry) -> None:
+        roles.unregister_role("never-registered")  # must not raise

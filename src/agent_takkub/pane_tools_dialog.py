@@ -1,8 +1,10 @@
-"""PaneToolsDialog — per-role MCP/plugin policy editor.
+"""PaneToolsDialog — per-role MCP/plugin policy editor + Team & Roles manager.
 
-Two-tab QDialog: a role x MCP checkbox matrix and a role x plugin checkbox
-matrix. Backed by ``pane_tools_policy`` (persisted policy) and
-``shared_dev_tools`` (master MCP registry + role-variant regeneration).
+Three-tab QDialog: a role x MCP checkbox matrix, a role x plugin checkbox
+matrix, and a "Team & Roles" tab (team list + guided 3-step custom-role
+create, A6-redesign). Backed by ``pane_tools_policy`` (persisted MCP/plugin
+policy), ``shared_dev_tools`` (master MCP registry + role-variant
+regeneration), and ``custom_roles`` (A6 custom-role registry).
 
 The matrix-building, diffing, and marketplace-plugin-discovery logic is kept
 as plain functions (no ``QDialog``/``QApplication`` needed) so it's testable
@@ -25,27 +27,28 @@ from PyQt6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QFrame,
+    QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
-    QListWidget,
     QMenu,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QTableWidget,
     QTabWidget,
-    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
 from . import custom_roles
 
-# A6 (Role & Skill Manager): pure logic used by the New Role / Skill Catalog
-# tabs is kept in `custom_roles` / `skill_audit` (no Qt), so it's testable
+# A6 (Role & Skill Manager): pure logic used by the Team & Roles tab (guided
+# create) is kept in `custom_roles` / `skill_audit` (no Qt), so it's testable
 # without a display — this module only wires it to widgets.
 
 # Roles that get a row in the matrix. Order matches the cockpit's
@@ -64,6 +67,32 @@ ROLES: tuple[str, ...] = (
     "security",
     "docs",
 )
+
+# Tab indices, exposed so callers (status_header/user_actions) can open the
+# dialog straight to a specific tab instead of always landing on MCP.
+TAB_MCP, TAB_PLUGINS, TAB_TEAM = 0, 1, 2
+
+# Short "what does this do" blurbs for the Step-2 tool cards (A6-redesign) — a
+# bare checkbox next to a package name makes the user guess; these are just
+# enough to decide without leaving the dialog. Unknown tools (a freshly added
+# MCP, a marketplace this map hasn't caught up with) fall back to a generic
+# label rather than showing nothing.
+_TOOL_HINTS: dict[str, str] = {
+    "playwright": "เปิด browser เทส",
+    "chrome-devtools": "debug เว็บ",
+    "obsidian-vault": "อ่าน/เขียน vault บันทึก",
+    "context7": "ดึง doc library ล่าสุด",
+    "superpowers-dev": "skill library เสริม",
+    "addy-agent-skills": "skill เสริมจาก addy",
+    "pordee": "workflow เฉพาะทีม",
+    "claude-plugins-official": "ปลั๊กอินทางการ Anthropic",
+    "ui-ux-pro-max-skill": "AI ช่วยออกแบบ UI/UX",
+}
+
+
+def tool_hint(name: str) -> str:
+    """Short description for a Step-2 tool card. Unknown name -> generic label."""
+    return _TOOL_HINTS.get(name, "เครื่องมือเสริม")
 
 
 def _default_plugins_installed_file() -> pathlib.Path:
@@ -142,21 +171,19 @@ QLineEdit {
 }
 QLineEdit:focus { border-color: #2563eb; }
 
-/* A6 New Role / Skill Catalog tabs — QComboBox/QSpinBox/QPlainTextEdit/
-   QTextEdit/QListWidget have no dark styling by default (plain-white
-   background), unlike QLineEdit above which the rest of this dialog relies
-   on — without this block they'd render as a jarring white patch. */
-QComboBox, QSpinBox, QPlainTextEdit, QTextEdit, QListWidget {
+/* Team & Roles tab (A6-redesign) — QComboBox/QSpinBox/QPlainTextEdit have no
+   dark styling by default (plain-white background), unlike QLineEdit above
+   which the rest of this dialog relies on — without this block they'd
+   render as a jarring white patch. */
+QComboBox, QSpinBox, QPlainTextEdit {
     background: #18181b; border: 1px solid #27272a; border-radius: 6px;
     padding: 4px 8px; color: #e4e4e7; selection-background-color: #2563eb;
 }
-QComboBox:focus, QSpinBox:focus, QPlainTextEdit:focus, QTextEdit:focus { border-color: #2563eb; }
+QComboBox:focus, QSpinBox:focus, QPlainTextEdit:focus { border-color: #2563eb; }
 QComboBox QAbstractItemView {
     background: #18181b; color: #e4e4e7; border: 1px solid #27272a;
     selection-background-color: #2563eb;
 }
-QListWidget::item { padding: 4px 6px; border-radius: 4px; }
-QListWidget::item:selected { background: #2563eb; color: #ffffff; }
 QSpinBox::up-button, QSpinBox::down-button { background: #27272a; border: none; width: 16px; }
 
 QPushButton {
@@ -278,36 +305,6 @@ def diff_role_items(
     return changes
 
 
-def _preview_text(text: str, limit: int = 320) -> str:
-    """First `limit` chars of a role doc, stripped, for a catalog list preview."""
-    stripped = text.strip()
-    return stripped if len(stripped) <= limit else stripped[:limit] + "…"
-
-
-def catalog_entries(docs: dict[str, str], threshold: float = 0.6) -> list[dict]:
-    """One entry per role doc for the Skill Catalog tab: name, preview text,
-    and `overlaps` — [(other_role, similarity), ...] >= threshold, desc-sorted.
-
-    Pure/no-Qt so it's testable without a display; `PaneToolsDialog` just
-    renders whatever this returns.
-    """
-    from .skill_audit import compute_tfidf, cosine_similarity
-
-    tfidf = compute_tfidf(docs)
-    entries: list[dict] = []
-    for name in sorted(docs):
-        overlaps = []
-        for other in docs:
-            if other == name:
-                continue
-            sim = cosine_similarity(tfidf[name], tfidf[other])
-            if sim >= threshold:
-                overlaps.append((other, sim))
-        overlaps.sort(key=lambda x: x[1], reverse=True)
-        entries.append({"name": name, "preview": _preview_text(docs[name]), "overlaps": overlaps})
-    return entries
-
-
 def discover_marketplace_plugins(
     installed_file: pathlib.Path | None = None,
 ) -> list[str]:
@@ -410,18 +407,74 @@ class _CheckCell(QWidget):
         super().mousePressEvent(ev)
 
 
+class _ToolCard(QWidget):
+    """Step-2 guided-create tool toggle: a clickable card with a title + a
+    one-line hint, not a bare checkbox — the A6-redesign problem was that a
+    checkbox next to a raw package name ("chrome-devtools") gives the user
+    nothing to decide on. Same whole-card-toggles pattern as ``_CheckCell``.
+    """
+
+    def __init__(self, name: str, hint: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("toolCard")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.box = QCheckBox(self)
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(9, 8, 9, 8)
+        lay.setSpacing(8)
+        lay.addWidget(self.box, alignment=Qt.AlignmentFlag.AlignTop)
+
+        text_col = QVBoxLayout()
+        text_col.setSpacing(1)
+        title = QLabel(name, self)
+        title.setStyleSheet("font-size: 12px; font-weight: 700; color: #e4e4e7;")
+        desc = QLabel(hint, self)
+        desc.setStyleSheet("font-size: 11px; color: #a1a1aa;")
+        desc.setWordWrap(True)
+        text_col.addWidget(title)
+        text_col.addWidget(desc)
+        lay.addLayout(text_col, 1)
+
+        self.box.toggled.connect(self._apply_style)
+        self._apply_style(False)
+
+    def isChecked(self) -> bool:
+        return self.box.isChecked()
+
+    def setChecked(self, value: bool) -> None:
+        self.box.setChecked(value)
+
+    def mousePressEvent(self, ev) -> None:
+        self.box.toggle()
+        super().mousePressEvent(ev)
+
+    def _apply_style(self, checked: bool) -> None:
+        if checked:
+            self.setStyleSheet(
+                "QWidget#toolCard { border: 1.5px solid #6366f1; border-radius: 10px;"
+                " background: rgba(99,102,241,0.14); }"
+            )
+        else:
+            self.setStyleSheet(
+                "QWidget#toolCard { border: 1.5px solid #27272a; border-radius: 10px;"
+                " background: #1a1a1e; }"
+            )
+
+
 class PaneToolsDialog(QDialog):
-    """Settings dialog for per-role MCP + plugin visibility.
+    """Settings dialog for per-role MCP + plugin visibility, plus the A6-redesign
+    "Team & Roles" tab (team list + guided 3-step custom-role create).
 
     Loads the current policy on open, lets the user tick/untick per-role
     checkboxes, and only writes back (``pane_tools_policy.save_policy`` +
     ``shared_dev_tools.regen_role_variants``) when Save is clicked.
     """
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, initial_tab: int = TAB_MCP) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Pane Tools — MCP & Plugin policy")
-        self.resize(820, 540)
+        self.setWindowTitle("Pane Tools — MCP, Plugins & Team")
+        self.resize(920, 600)
         self.setStyleSheet(compose_qss())
 
         self._mcp_boxes: dict[str, dict[str, QCheckBox]] = {}
@@ -451,13 +504,13 @@ class PaneToolsDialog(QDialog):
         header.addWidget(subtitle)
         layout.addLayout(header)
 
-        tabs = QTabWidget(self)
-        layout.addWidget(tabs, 1)
+        self._tabs = QTabWidget(self)
+        layout.addWidget(self._tabs, 1)
 
-        tabs.addTab(self._build_mcp_tab(), "MCP")
-        tabs.addTab(self._build_plugin_tab(), "Plugins")
-        tabs.addTab(self._build_new_role_tab(), "+ New Role")
-        tabs.addTab(self._build_skill_catalog_tab(), "Skill Catalog")
+        self._tabs.addTab(self._build_mcp_tab(), "MCP")
+        self._tabs.addTab(self._build_plugin_tab(), "Plugins")
+        self._tabs.addTab(self._build_team_roles_tab(), "👥 Team & Roles")
+        self._tabs.setCurrentIndex(initial_tab)
 
         self._status_label = QLabel("", self)
         self._status_label.setObjectName("toolsSubtitle")
@@ -639,114 +692,377 @@ class PaneToolsDialog(QDialog):
         self._plugin_table.setVisible(bool(items))
         self._plugin_empty.setVisible(not items)
 
-    # ── New Role tab (A6) ────────────────────────────────────────
+    # ── Team & Roles tab (A6-redesign) ──────────────────────────
 
-    def _build_new_role_tab(self) -> QWidget:
+    def _build_team_roles_tab(self) -> QWidget:
+        """Two columns: a team list (left) + a guided 3-step custom-role
+        create form with live preview (right). Replaces the old flat
+        "+ New Role" form (name/color/tools/instructions all in one
+        undifferentiated block, which is what made users unsure what to fill
+        in first) and the separate "Skill Catalog" browsing tab (folded into
+        the live overlap-warning in step 3 — nobody actually browsed the full
+        corpus, they wanted to know "does MY new role step on anything").
+        """
         tab = QWidget(self)
-        outer = QVBoxLayout(tab)
-        outer.setContentsMargins(14, 14, 14, 14)
-        outer.setSpacing(10)
+        outer = QHBoxLayout(tab)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
-        form = QFormLayout()
-        form.setHorizontalSpacing(14)
-        form.setVerticalSpacing(8)
+        # LEFT — team list
+        left = QWidget(tab)
+        left.setFixedWidth(240)
+        left_lay = QVBoxLayout(left)
+        left_lay.setContentsMargins(10, 12, 6, 10)
+        left_lay.setSpacing(6)
 
-        self._nr_name = QLineEdit(tab)
+        list_scroll = QScrollArea(left)
+        list_scroll.setWidgetResizable(True)
+        list_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._team_list_container = QWidget()
+        self._team_list_layout = QVBoxLayout(self._team_list_container)
+        self._team_list_layout.setContentsMargins(0, 0, 0, 0)
+        self._team_list_layout.setSpacing(2)
+        list_scroll.setWidget(self._team_list_container)
+        left_lay.addWidget(list_scroll, 1)
+
+        self._btn_add_role = QPushButton("＋ สร้าง role ใหม่", left)
+        self._btn_add_role.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_add_role.clicked.connect(self._on_reset_new_role_form)
+        left_lay.addWidget(self._btn_add_role)
+        outer.addWidget(left)
+
+        divider = QFrame(tab)
+        divider.setFrameShape(QFrame.Shape.VLine)
+        divider.setStyleSheet("color: #27272a;")
+        outer.addWidget(divider)
+
+        # RIGHT — guided create, scrollable (steps + tool grid can outgrow a
+        # small screen's dialog height).
+        right_scroll = QScrollArea(tab)
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        right = QWidget()
+        outer_r = QVBoxLayout(right)
+        outer_r.setContentsMargins(16, 14, 16, 14)
+        outer_r.setSpacing(14)
+
+        create_title = QLabel("✨ สร้าง role ใหม่ · 3 ขั้น", right)
+        create_title.setObjectName("toolsTitle")
+        create_title.setStyleSheet("font-size: 14px;")
+        outer_r.addWidget(create_title)
+
+        # Step 1 — identity. Default avatar color auto-follows the typed name
+        # (same hash-to-palette function project_nav uses for project
+        # avatars) until the user overrides it via a swatch/custom pick.
+        step1 = QLabel("① role นี้ชื่ออะไร", right)
+        step1.setStyleSheet("font-weight: 700; font-size: 13px;")
+        outer_r.addWidget(step1)
+        hint1 = QLabel("ชื่อสั้นๆ ตัวเล็ก ใช้สั่งงานผ่าน --role · avatar สร้างสีให้อัตโนมัติ", right)
+        hint1.setObjectName("toolsSubtitle")
+        outer_r.addWidget(hint1)
+
+        name_row = QHBoxLayout()
+        name_col = QVBoxLayout()
+        name_col.addWidget(QLabel("ชื่อ (สั่งงาน)", right))
+        self._nr_name = QLineEdit(right)
         self._nr_name.setPlaceholderText("data-eng (a-z0-9-_ เท่านั้น, ห้ามชนกับ role เดิม)")
         self._nr_name.textChanged.connect(self._on_new_role_changed)
-        form.addRow("Name (--role)", self._nr_name)
-
-        self._nr_label = QLineEdit(tab)
+        name_col.addWidget(self._nr_name)
+        label_col = QVBoxLayout()
+        label_col.addWidget(QLabel("ป้าย + อีโมจิ", right))
+        self._nr_label = QLineEdit(right)
         self._nr_label.setPlaceholderText("🧬 Data Eng")
-        form.addRow("Label", self._nr_label)
+        self._nr_label.textChanged.connect(self._update_preview)
+        label_col.addWidget(self._nr_label)
+        name_row.addLayout(name_col, 1)
+        name_row.addLayout(label_col, 1)
+        outer_r.addLayout(name_row)
 
-        self._nr_column = QComboBox(tab)
+        from . import project_nav
+
+        swatch_row = QHBoxLayout()
+        swatch_row.setSpacing(6)
+        self._nr_color = "#94a3b8"
+        self._nr_color_touched = False
+        self._nr_swatch_btns: list[QPushButton] = []
+        for color in project_nav._AVATAR_COLORS:
+            sw = QPushButton("", right)
+            sw.setFixedSize(22, 22)
+            sw.setCursor(Qt.CursorShape.PointingHandCursor)
+            sw.clicked.connect(lambda _checked=False, c=color: self._on_swatch_clicked(c))
+            self._nr_swatch_btns.append(sw)
+            swatch_row.addWidget(sw)
+        self._nr_color_btn = QPushButton("…", right)
+        self._nr_color_btn.setFixedSize(22, 22)
+        self._nr_color_btn.setToolTip("เลือกสีเอง")
+        self._nr_color_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._nr_color_btn.clicked.connect(self._on_pick_color)
+        swatch_row.addWidget(self._nr_color_btn)
+        swatch_row.addStretch(1)
+        outer_r.addLayout(swatch_row)
+        self._update_color_swatch()
+
+        # Step 2 — tools: toggle CARDS (title + one-line "what this does"
+        # hint), not bare checkboxes next to a raw package name.
+        step2 = QLabel("② ให้ใช้เครื่องมืออะไรได้", right)
+        step2.setStyleSheet("font-weight: 700; font-size: 13px;")
+        outer_r.addWidget(step2)
+        hint2 = QLabel("เลือกเฉพาะที่จำเป็น — default ไม่มี MCP เพื่อประหยัด token", right)
+        hint2.setObjectName("toolsSubtitle")
+        outer_r.addWidget(hint2)
+
+        mcp_label = QLabel("MCP", right)
+        mcp_label.setObjectName("toolsSubtitle")
+        outer_r.addWidget(mcp_label)
+        mcp_grid = QGridLayout()
+        mcp_grid.setSpacing(8)
+        self._nr_mcp_boxes: dict[str, QCheckBox] = {}
+        for i, name in enumerate(self._master_mcps()):
+            card = _ToolCard(name, tool_hint(name), right)
+            self._nr_mcp_boxes[name] = card.box
+            mcp_grid.addWidget(card, i // 2, i % 2)
+        outer_r.addLayout(mcp_grid)
+
+        plugin_label = QLabel("Plugins", right)
+        plugin_label.setObjectName("toolsSubtitle")
+        outer_r.addWidget(plugin_label)
+        plugin_grid = QGridLayout()
+        plugin_grid.setSpacing(8)
+        self._nr_plugin_boxes: dict[str, QCheckBox] = {}
+        for i, name in enumerate(discover_marketplaces()):
+            card = _ToolCard(name, tool_hint(name), right)
+            self._nr_plugin_boxes[name] = card.box
+            plugin_grid.addWidget(card, i // 2, i % 2)
+        outer_r.addLayout(plugin_grid)
+
+        # Step 3 — habits (optional): instructions + an "advanced" collapsible
+        # that hides fields most users never touch (grid position,
+        # provider/model) so they don't compete with the ones that matter.
+        step3 = QLabel("③ role นี้ถนัดอะไร (ไม่บังคับ)", right)
+        step3.setStyleSheet("font-weight: 700; font-size: 13px;")
+        outer_r.addWidget(step3)
+        hint3 = QLabel("เขียนสั้นๆ — ปล่อยว่างได้ ระบบเติม template ให้", right)
+        hint3.setObjectName("toolsSubtitle")
+        outer_r.addWidget(hint3)
+
+        self._nr_instructions = QPlainTextEdit(right)
+        self._nr_instructions.setPlaceholderText(
+            "บอก role ตัวเองว่าทำหน้าที่อะไร ขอบเขตงานคืออะไร รายงานยังไง..."
+        )
+        self._nr_instructions.setMinimumHeight(80)
+        self._nr_instructions.textChanged.connect(self._on_new_role_changed)
+        outer_r.addWidget(self._nr_instructions)
+
+        self._nr_advanced_toggle = QPushButton("▸ ตั้งค่าขั้นสูง", right)
+        self._nr_advanced_toggle.setFlat(True)
+        self._nr_advanced_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._nr_advanced_toggle.setStyleSheet(
+            "text-align: left; color: #71717a; font-family: monospace;"
+            " border: none; padding: 2px 0;"
+        )
+        self._nr_advanced_toggle.clicked.connect(self._on_toggle_advanced)
+        outer_r.addWidget(self._nr_advanced_toggle)
+
+        self._nr_advanced_body = QWidget(right)
+        adv_form = QFormLayout(self._nr_advanced_body)
+        adv_form.setHorizontalSpacing(14)
+        adv_form.setVerticalSpacing(8)
+        self._nr_column = QComboBox(right)
         self._nr_column.addItem("1 · Dev column (ใต้ codex)", 1)
         self._nr_column.addItem("2 · Support column (ใต้ shell)", 2)
         self._nr_column.setCurrentIndex(1)
-        form.addRow("Grid column", self._nr_column)
-
-        self._nr_row = QSpinBox(tab)
+        adv_form.addRow("Grid column", self._nr_column)
+        self._nr_row = QSpinBox(right)
         self._nr_row.setRange(0, 99)
         self._nr_row.setValue(99)
         self._nr_row.setToolTip(
             "แถวในกริด — ถ้าซ้ำกับ role อื่นในคอลัมน์เดียวกัน จะซ้อนทับกันในหน้าจอ "
             "(ยังไม่มี auto-collision — ปรับเลขเองถ้าไม่ต้องการซ้อน)"
         )
-        form.addRow("Grid row", self._nr_row)
-
-        color_row = QHBoxLayout()
-        self._nr_color = "#94a3b8"
-        self._nr_color_btn = QPushButton("", tab)
-        self._nr_color_btn.setFixedSize(28, 28)
-        self._nr_color_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._nr_color_btn.clicked.connect(self._on_pick_color)
-        self._nr_color_label = QLabel(self._nr_color, tab)
-        self._nr_color_label.setObjectName("toolsSubtitle")
-        self._update_color_swatch()
-        color_row.addWidget(self._nr_color_btn)
-        color_row.addWidget(self._nr_color_label)
-        color_row.addStretch(1)
-        form.addRow("Accent color", color_row)
-
-        outer.addLayout(form)
-
-        tools_title = QLabel("Default skills/tools", tab)
-        tools_title.setObjectName("toolsSubtitle")
-        outer.addWidget(tools_title)
-
-        tools_row = QHBoxLayout()
-        mcp_col = QVBoxLayout()
-        mcp_col.addWidget(QLabel("MCP", tab))
-        self._nr_mcp_boxes: dict[str, QCheckBox] = {}
-        for name in self._master_mcps():
-            cb = QCheckBox(name, tab)
-            self._nr_mcp_boxes[name] = cb
-            mcp_col.addWidget(cb)
-        plugin_col = QVBoxLayout()
-        plugin_col.addWidget(QLabel("Plugins", tab))
-        self._nr_plugin_boxes: dict[str, QCheckBox] = {}
-        for name in discover_marketplaces():
-            cb = QCheckBox(name, tab)
-            self._nr_plugin_boxes[name] = cb
-            plugin_col.addWidget(cb)
-        tools_row.addLayout(mcp_col)
-        tools_row.addLayout(plugin_col)
-        tools_row.addStretch(1)
-        outer.addLayout(tools_row)
-
-        instr_title = QLabel("Instructions (role file — เว้นว่างใช้ template default)", tab)
-        instr_title.setObjectName("toolsSubtitle")
-        outer.addWidget(instr_title)
-        self._nr_instructions = QPlainTextEdit(tab)
-        self._nr_instructions.setPlaceholderText(
-            "บอก role ตัวเองว่าทำหน้าที่อะไร ขอบเขตงานคืออะไร รายงานยังไง..."
+        adv_form.addRow("Grid row", self._nr_row)
+        # #103: custom-role provider isn't wired yet — every custom role
+        # spawns on Claude regardless of what's picked here. Shown-but-disabled
+        # (not hidden) so the field is discoverable, not a surprise later.
+        self._nr_provider_combo = QComboBox(right)
+        self._nr_provider_combo.addItem("Claude (default)")
+        self._nr_provider_combo.setEnabled(False)
+        self._nr_provider_combo.setToolTip(
+            "รองรับ provider อื่น (codex/gemini) เร็วๆ นี้ — ตอนนี้ custom role รันบน Claude เท่านั้น (#103)"
         )
-        self._nr_instructions.setMinimumHeight(90)
-        self._nr_instructions.textChanged.connect(self._on_new_role_changed)
-        outer.addWidget(self._nr_instructions)
+        adv_form.addRow("Provider/model", self._nr_provider_combo)
+        self._nr_advanced_body.hide()
+        outer_r.addWidget(self._nr_advanced_body)
 
-        self._nr_overlap_label = QLabel("", tab)
+        self._nr_overlap_label = QLabel("", right)
         self._nr_overlap_label.setObjectName("toolsSubtitle")
         self._nr_overlap_label.setWordWrap(True)
-        outer.addWidget(self._nr_overlap_label)
+        outer_r.addWidget(self._nr_overlap_label)
+
+        # Live preview — the exact avatar + `takkub assign` invocation Create
+        # is about to produce, before committing.
+        preview_box = QFrame(right)
+        preview_box.setFrameShape(QFrame.Shape.StyledPanel)
+        preview_box.setStyleSheet(
+            "QFrame { border: 1px solid #27272a; border-radius: 8px; background: #0c0c0e; }"
+        )
+        preview_lay = QVBoxLayout(preview_box)
+        preview_lay.setContentsMargins(12, 10, 12, 10)
+        preview_head = QLabel("พรีวิว — role นี้จะเป็นแบบนี้", preview_box)
+        preview_head.setObjectName("toolsSubtitle")
+        preview_lay.addWidget(preview_head)
+        chip_row = QHBoxLayout()
+        self._nr_preview_avatar = QLabel("?", preview_box)
+        self._nr_preview_avatar.setFixedSize(26, 26)
+        self._nr_preview_avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        chip_row.addWidget(self._nr_preview_avatar)
+        self._nr_preview_label = QLabel("", preview_box)
+        self._nr_preview_label.setStyleSheet("font-weight: 700; font-size: 13px;")
+        chip_row.addWidget(self._nr_preview_label)
+        chip_row.addStretch(1)
+        preview_lay.addLayout(chip_row)
+        self._nr_preview_cmd = QLabel("", preview_box)
+        self._nr_preview_cmd.setStyleSheet(
+            "font-family: monospace; font-size: 11px; color: #a1a1aa;"
+        )
+        self._nr_preview_cmd.setWordWrap(True)
+        preview_lay.addWidget(self._nr_preview_cmd)
+        outer_r.addWidget(preview_box)
 
         create_row = QHBoxLayout()
-        self._nr_create_btn = QPushButton("+ Create Role", tab)
+        self._nr_create_btn = QPushButton("สร้าง role", right)
         self._nr_create_btn.setObjectName("primaryBtn")
         self._nr_create_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._nr_create_btn.clicked.connect(self._on_create_role_clicked)
         create_row.addWidget(self._nr_create_btn)
         create_row.addStretch(1)
-        outer.addLayout(create_row)
-        outer.addStretch(1)
+        outer_r.addLayout(create_row)
+        outer_r.addStretch(1)
+
+        right_scroll.setWidget(right)
+        outer.addWidget(right_scroll, 1)
+
+        self._reload_team_list()
+        self._update_preview()
         return tab
 
-    def _update_color_swatch(self) -> None:
-        self._nr_color_btn.setStyleSheet(
-            f"background-color: {self._nr_color}; border: 1px solid #3f3f46; border-radius: 6px;"
+    # ── team list (left column) ─────────────────────────────────
+
+    def _reload_team_list(self) -> None:
+        from . import custom_roles as cr
+        from . import roles as roles_mod
+
+        layout = self._team_list_layout
+        while layout.count():
+            item = layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+
+        built_header = QLabel("Built-in · ลบไม่ได้", self._team_list_container)
+        built_header.setObjectName("toolsSubtitle")
+        layout.addWidget(built_header)
+        for role in roles_mod.ALL_DEFAULT:
+            layout.addWidget(self._build_role_row(role.name, role.label, removable=False))
+
+        custom = cr.load_custom_roles()
+        if custom:
+            custom_header = QLabel("Custom · ของคุณ", self._team_list_container)
+            custom_header.setObjectName("toolsSubtitle")
+            layout.addWidget(custom_header)
+            for name in sorted(custom):
+                r = custom[name]
+                layout.addWidget(self._build_role_row(r.name, r.label, removable=True))
+
+        layout.addStretch(1)
+
+    def _build_role_row(self, name: str, label: str, removable: bool) -> QWidget:
+        from . import project_nav
+
+        row = QWidget(self._team_list_container)
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(4, 4, 4, 4)
+        lay.setSpacing(8)
+
+        avatar = QLabel(project_nav._initials(label), row)
+        avatar.setFixedSize(26, 26)
+        avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        avatar.setStyleSheet(
+            f"background: {project_nav._avatar_color(name)}; color: #fff;"
+            f" font-weight: 800; font-size: 10px; border-radius: 13px;"
         )
-        self._nr_color_label.setText(self._nr_color)
+        lay.addWidget(avatar)
+
+        text_col = QVBoxLayout()
+        text_col.setSpacing(0)
+        name_lbl = QLabel(label, row)
+        name_lbl.setStyleSheet("font-size: 12.5px; font-weight: 600; color: #e4e4e7;")
+        mono_lbl = QLabel(name, row)
+        mono_lbl.setStyleSheet("font-family: monospace; font-size: 10px; color: #71717a;")
+        text_col.addWidget(name_lbl)
+        text_col.addWidget(mono_lbl)
+        lay.addLayout(text_col, 1)
+
+        if removable:
+            rm = QPushButton("✕", row)
+            rm.setFixedSize(22, 22)
+            rm.setCursor(Qt.CursorShape.PointingHandCursor)
+            rm.setToolTip(f"ลบ role '{name}'")
+            rm.clicked.connect(lambda _checked=False, n=name: self._on_delete_role_clicked(n))
+            lay.addWidget(rm)
+        else:
+            lock = QLabel("🔒", row)
+            lock.setToolTip("built-in — ลบไม่ได้")
+            lock.setStyleSheet("color: #3f3f46;")
+            lay.addWidget(lock)
+
+        return row
+
+    def _on_delete_role_clicked(self, name: str) -> None:
+        confirm = QMessageBox.question(
+            self,
+            "ลบ role",
+            f"ลบ role '{name}' ออกจากทีม? (spawn ด้วย --role {name} จะใช้ไม่ได้อีก — "
+            "ไฟล์ instructions เดิมยังอยู่ ไม่ถูกลบ)",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        from . import custom_roles as cr
+        from . import roles as roles_mod
+
+        if not cr.delete_role(name):
+            QMessageBox.warning(self, "ลบไม่สำเร็จ", "เขียน custom-roles.json ไม่สำเร็จ")
+            return
+        roles_mod.unregister_role(name)
+        self._status_label.setText(f"ลบ role '{name}' แล้ว")
+        self._reload_team_list()
+
+    # ── guided create: color / preview / overlap / advanced ──────
+
+    def _update_color_swatch(self) -> None:
+        for sw, color in zip(self._nr_swatch_btns, self._avatar_palette(), strict=False):
+            ring = (
+                "2px solid #fafafa"
+                if color.lower() == self._nr_color.lower()
+                else "2px solid transparent"
+            )
+            sw.setStyleSheet(f"background-color: {color}; border-radius: 11px; border: {ring};")
+        self._nr_color_btn.setStyleSheet(
+            f"background-color: {self._nr_color}; border: 1px solid #3f3f46; border-radius: 11px;"
+        )
+        self._nr_color_btn.setToolTip(f"สีปัจจุบัน: {self._nr_color} — คลิกเพื่อเลือกเอง")
+
+    @staticmethod
+    def _avatar_palette() -> tuple[str, ...]:
+        from . import project_nav
+
+        return project_nav._AVATAR_COLORS
+
+    def _on_swatch_clicked(self, color: str) -> None:
+        self._nr_color = color
+        self._nr_color_touched = True
+        self._update_color_swatch()
+        self._update_preview()
 
     def _on_pick_color(self) -> None:
         from PyQt6.QtGui import QColor
@@ -755,12 +1071,44 @@ class PaneToolsDialog(QDialog):
         if not picked.isValid():
             return
         self._nr_color = picked.name()
+        self._nr_color_touched = True
         self._update_color_swatch()
+        self._update_preview()
+
+    def _on_toggle_advanced(self) -> None:
+        # isHidden() reflects the widget's OWN explicit hide()/setVisible()
+        # flag; isVisible() also folds in ancestor-chain visibility, which is
+        # always False before the dialog's first exec()/show() — using it
+        # here would make this only ever expand, never collapse, pre-show.
+        hidden = self._nr_advanced_body.isHidden()
+        self._nr_advanced_body.setVisible(hidden)
+        self._nr_advanced_toggle.setText("▾ ตั้งค่าขั้นสูง" if hidden else "▸ ตั้งค่าขั้นสูง")
+
+    def _update_preview(self, *_args) -> None:
+        from . import project_nav
+
+        name = self._nr_name.text().strip().lower()
+        label = self._nr_label.text().strip() or (name.capitalize() if name else "role")
+        self._nr_preview_avatar.setStyleSheet(
+            f"background: {self._nr_color}; color: #fff; font-weight: 800;"
+            " font-size: 10px; border-radius: 13px;"
+        )
+        self._nr_preview_avatar.setText(project_nav._initials(label))
+        self._nr_preview_label.setText(label if name else "—")
+        self._nr_preview_cmd.setText(f'takkub assign --role {name or "<name>"} "..."')
 
     def _on_new_role_changed(self, *_args) -> None:
-        """Live overlap warning as the user types a name/instructions —
-        checked BEFORE Create so a near-duplicate role is caught early."""
+        """Live auto-color + overlap warning as the user types a
+        name/instructions — checked BEFORE Create so a near-duplicate role is
+        caught early."""
+        from . import project_nav
+
         name = self._nr_name.text().strip().lower()
+        if name and not self._nr_color_touched:
+            self._nr_color = project_nav._avatar_color(name)
+            self._update_color_swatch()
+        self._update_preview()
+
         if not name:
             self._nr_overlap_label.setText("")
             return
@@ -777,9 +1125,29 @@ class PaneToolsDialog(QDialog):
         overlaps = skill_audit.audit_new_role_text(name, text)
         if overlaps:
             parts = ", ".join(f"{r} ({sim:.0%})" for r, sim in overlaps)
-            self._nr_overlap_label.setText(f"⚠️ ทับซ้อนกับ: {parts} — พิจารณารวม role หรือแก้ scope")
+            self._nr_overlap_label.setText(f"💡 คล้าย {parts} นิดๆ — ตั้งใจแยก ok เลย")
         else:
             self._nr_overlap_label.setText("✓ ไม่ทับซ้อนกับ role อื่น")
+
+    def _on_reset_new_role_form(self) -> None:
+        self._reset_new_role_form()
+        self._nr_name.setFocus()
+
+    def _reset_new_role_form(self) -> None:
+        self._nr_name.clear()
+        self._nr_label.clear()
+        self._nr_instructions.clear()
+        for cb in {**self._nr_mcp_boxes, **self._nr_plugin_boxes}.values():
+            cb.setChecked(False)
+        self._nr_column.setCurrentIndex(1)
+        self._nr_row.setValue(99)
+        self._nr_color = "#94a3b8"
+        self._nr_color_touched = False
+        self._nr_advanced_body.hide()
+        self._nr_advanced_toggle.setText("▸ ตั้งค่าขั้นสูง")
+        self._update_color_swatch()
+        self._nr_overlap_label.setText("")
+        self._update_preview()
 
     def _on_create_role_clicked(self) -> None:
         name = self._nr_name.text().strip().lower()
@@ -816,71 +1184,8 @@ class PaneToolsDialog(QDialog):
             f"สร้าง role '{name}' แล้ว — spawn ได้ทันทีด้วย "
             f'`takkub assign --role {name} "..."` (ไม่ต้อง restart cockpit)'
         )
-        self._nr_name.clear()
-        self._nr_label.clear()
-        self._nr_instructions.clear()
-        for cb in {**self._nr_mcp_boxes, **self._nr_plugin_boxes}.values():
-            cb.setChecked(False)
-        self._nr_overlap_label.setText("")
-        self._reload_skill_catalog()
-
-    # ── Skill Catalog tab (A6) ───────────────────────────────────
-
-    def _build_skill_catalog_tab(self) -> QWidget:
-        tab = QWidget(self)
-        outer = QHBoxLayout(tab)
-        outer.setContentsMargins(14, 14, 14, 14)
-        outer.setSpacing(10)
-
-        self._catalog_list = QListWidget(tab)
-        self._catalog_list.setMaximumWidth(220)
-        self._catalog_list.currentItemChanged.connect(self._on_catalog_selection_changed)
-        outer.addWidget(self._catalog_list)
-
-        right = QVBoxLayout()
-        self._catalog_overlap_label = QLabel("", tab)
-        self._catalog_overlap_label.setObjectName("toolsSubtitle")
-        self._catalog_overlap_label.setWordWrap(True)
-        right.addWidget(self._catalog_overlap_label)
-        self._catalog_preview = QTextEdit(tab)
-        self._catalog_preview.setReadOnly(True)
-        right.addWidget(self._catalog_preview)
-        outer.addLayout(right, 1)
-
-        self._catalog_docs: dict[str, str] = {}
-        self._catalog_entries: dict[str, dict] = {}
-        self._reload_skill_catalog()
-        return tab
-
-    def _reload_skill_catalog(self) -> None:
-        from . import skill_audit
-
-        docs = skill_audit.load_all_role_docs()
-        self._catalog_docs = docs
-        self._catalog_entries = {e["name"]: e for e in catalog_entries(docs)}
-        self._catalog_list.clear()
-        for name in sorted(docs):
-            self._catalog_list.addItem(name)
-        if self._catalog_list.count():
-            self._catalog_list.setCurrentRow(0)
-        else:
-            self._catalog_preview.clear()
-            self._catalog_overlap_label.setText("")
-
-    def _on_catalog_selection_changed(self, current, _previous) -> None:
-        if current is None:
-            self._catalog_preview.clear()
-            self._catalog_overlap_label.setText("")
-            return
-        name = current.text()
-        entry = self._catalog_entries.get(name, {})
-        self._catalog_preview.setPlainText(self._catalog_docs.get(name, ""))
-        overlaps = entry.get("overlaps", [])
-        if overlaps:
-            parts = ", ".join(f"{r} ({sim:.0%})" for r, sim in overlaps)
-            self._catalog_overlap_label.setText(f"⚠️ ทับซ้อนกับ: {parts}")
-        else:
-            self._catalog_overlap_label.setText("✓ ไม่ทับซ้อนกับ role อื่น")
+        self._reset_new_role_form()
+        self._reload_team_list()
 
     # ── shared matrix table builder ─────────────────────────────
 

@@ -81,6 +81,12 @@ def register_role(role: Role) -> None:
     _CUSTOM[role.name] = role
 
 
+def unregister_role(name: str) -> None:
+    """Forget a runtime-registered custom role (A6 delete). No-op if `name`
+    was never registered — e.g. built-in names, or a role deleted twice."""
+    _CUSTOM.pop(name, None)
+
+
 def custom_roles() -> tuple[Role, ...]:
     """Every runtime-registered custom role, in registration order."""
     return tuple(_CUSTOM.values())

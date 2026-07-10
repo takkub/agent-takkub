@@ -5,17 +5,21 @@ from __future__ import annotations
 import json
 from unittest.mock import patch
 
+from PyQt6.QtWidgets import QMessageBox
+
 from agent_takkub.pane_tools_dialog import (
     ROLES,
+    TAB_MCP,
+    TAB_PLUGINS,
+    TAB_TEAM,
     _default_plugins_installed_file,
-    _preview_text,
     build_matrix,
-    catalog_entries,
     diff_role_items,
     discover_marketplace_plugins,
     discover_marketplaces,
     matrix_to_role_items,
     parse_install_form,
+    tool_hint,
 )
 
 
@@ -316,61 +320,39 @@ def test_plugin_matrix_renders_marketplace_defaults_checked(monkeypatch, tmp_pat
 
 
 # ---------------------------------------------------------------------------
-# A6: catalog_entries / _preview_text (Skill Catalog tab pure logic)
+# A6-redesign: tool_hint (Step-2 tool card blurbs) + tab index constants
 # ---------------------------------------------------------------------------
 
 
-def test_preview_text_short_text_unchanged():
-    assert _preview_text("hello world") == "hello world"
+def test_tool_hint_known_name_returns_specific_blurb():
+    assert tool_hint("playwright") == "เปิด browser เทส"
 
 
-def test_preview_text_truncates_long_text():
-    long_text = "x" * 500
-    preview = _preview_text(long_text, limit=320)
-    assert len(preview) == 321  # 320 chars + ellipsis
-    assert preview.endswith("…")
+def test_tool_hint_unknown_name_falls_back_to_generic():
+    assert tool_hint("some-brand-new-mcp") == "เครื่องมือเสริม"
 
 
-def test_preview_text_strips_whitespace():
-    assert _preview_text("  hello  \n") == "hello"
-
-
-def test_catalog_entries_lists_every_role_sorted():
-    docs = {"qa": "playwright browser test", "backend": "REST API database"}
-    entries = catalog_entries(docs, threshold=0.9)
-    assert [e["name"] for e in entries] == ["backend", "qa"]
-
-
-def test_catalog_entries_flags_overlap_above_threshold():
-    # A third, unrelated doc keeps IDF from zeroing out every shared term
-    # (a term present in every doc has idf=log(N/df)=0 when df==N).
-    docs = {
-        "backend": "REST API endpoint database schema migration handler",
-        "shadow-backend": "REST API endpoint database schema migration handler",
-        "designer": "figma color palette typography spacing layout",
-    }
-    entries = catalog_entries(docs, threshold=0.5)
-    by_name = {e["name"]: e for e in entries}
-    assert by_name["backend"]["overlaps"]
-    assert by_name["backend"]["overlaps"][0][0] == "shadow-backend"
-    assert by_name["shadow-backend"]["overlaps"][0][0] == "backend"
-
-
-def test_catalog_entries_no_overlap_below_threshold():
-    docs = {"qa": "playwright browser test", "designer": "figma color palette"}
-    entries = catalog_entries(docs, threshold=0.6)
-    assert all(e["overlaps"] == [] for e in entries)
-
-
-def test_catalog_entries_never_self_overlaps():
-    docs = {"qa": "playwright browser test smoke e2e"}
-    entries = catalog_entries(docs, threshold=0.0)
-    assert entries[0]["overlaps"] == []
+def test_tab_indices_are_distinct_and_ordered():
+    assert (TAB_MCP, TAB_PLUGINS, TAB_TEAM) == (0, 1, 2)
 
 
 # ---------------------------------------------------------------------------
-# A6: New Role tab — end-to-end create flow under a real (offscreen) QApplication
+# A6-redesign: Team & Roles tab — guided create, end-to-end under a real
+# (offscreen) QApplication
 # ---------------------------------------------------------------------------
+
+
+def test_dialog_opens_to_requested_tab(monkeypatch, tmp_path):
+    from agent_takkub import pane_tools_policy as ptp
+    from agent_takkub.pane_tools_dialog import PaneToolsDialog
+
+    monkeypatch.setattr(ptp, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
+
+    dlg = PaneToolsDialog(initial_tab=TAB_TEAM)
+    try:
+        assert dlg._tabs.currentIndex() == TAB_TEAM
+    finally:
+        dlg.deleteLater()
 
 
 def test_new_role_tab_creates_and_registers_role(monkeypatch, tmp_path):
@@ -425,7 +407,7 @@ def test_new_role_tab_rejects_collision_with_builtin(monkeypatch, tmp_path):
         dlg.deleteLater()
 
 
-def test_skill_catalog_tab_lists_created_role(monkeypatch, tmp_path):
+def test_team_list_shows_created_custom_role_as_removable(monkeypatch, tmp_path):
     from agent_takkub import custom_roles, roles
     from agent_takkub import pane_tools_policy as ptp
     from agent_takkub.pane_tools_dialog import PaneToolsDialog
@@ -441,10 +423,152 @@ def test_skill_catalog_tab_lists_created_role(monkeypatch, tmp_path):
         dlg._nr_name.setText("data-eng")
         dlg._nr_instructions.setPlainText("Handles ETL pipelines.")
         dlg._on_create_role_clicked()
-        assert "data-eng" in dlg._catalog_docs
-        items = [dlg._catalog_list.item(i).text() for i in range(dlg._catalog_list.count())]
-        assert "data-eng" in items
+
+        # The freshly created custom role gets its own row in the left list,
+        # distinct from `roles.ALL_DEFAULT` (which stays fixed regardless of
+        # what gets created — the built-in section never changes size).
+        row_count = dlg._team_list_layout.count()
+        assert row_count > len(roles.ALL_DEFAULT)
     finally:
         dlg.deleteLater()
         roles._CUSTOM.clear()
         roles._CUSTOM.update(saved_custom)
+
+
+def test_delete_role_removes_from_registry_and_live_process(monkeypatch, tmp_path):
+    from agent_takkub import custom_roles, roles
+    from agent_takkub import pane_tools_policy as ptp
+    from agent_takkub.pane_tools_dialog import PaneToolsDialog
+
+    monkeypatch.setattr(ptp, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
+    monkeypatch.setattr(custom_roles, "CUSTOM_ROLES_FILE", tmp_path / "custom-roles.json")
+    monkeypatch.setattr(custom_roles, "CUSTOM_AGENTS_DIR", tmp_path / "agents")
+    saved_custom = dict(roles._CUSTOM)
+    roles._CUSTOM.clear()
+
+    dlg = PaneToolsDialog()
+    try:
+        dlg._nr_name.setText("data-eng")
+        dlg._on_create_role_clicked()
+        assert roles.by_name("data-eng") is not None
+
+        with patch(
+            "agent_takkub.pane_tools_dialog.QMessageBox.question",
+            return_value=QMessageBox.StandardButton.Yes,
+        ):
+            dlg._on_delete_role_clicked("data-eng")
+
+        assert "data-eng" not in custom_roles.load_custom_roles()
+        assert roles.by_name("data-eng") is None
+    finally:
+        dlg.deleteLater()
+        roles._CUSTOM.clear()
+        roles._CUSTOM.update(saved_custom)
+
+
+def test_delete_role_declined_confirm_keeps_role(monkeypatch, tmp_path):
+    from agent_takkub import custom_roles, roles
+    from agent_takkub import pane_tools_policy as ptp
+    from agent_takkub.pane_tools_dialog import PaneToolsDialog
+
+    monkeypatch.setattr(ptp, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
+    monkeypatch.setattr(custom_roles, "CUSTOM_ROLES_FILE", tmp_path / "custom-roles.json")
+    monkeypatch.setattr(custom_roles, "CUSTOM_AGENTS_DIR", tmp_path / "agents")
+    saved_custom = dict(roles._CUSTOM)
+    roles._CUSTOM.clear()
+
+    dlg = PaneToolsDialog()
+    try:
+        dlg._nr_name.setText("data-eng")
+        dlg._on_create_role_clicked()
+
+        with patch(
+            "agent_takkub.pane_tools_dialog.QMessageBox.question",
+            return_value=QMessageBox.StandardButton.No,
+        ):
+            dlg._on_delete_role_clicked("data-eng")
+
+        assert "data-eng" in custom_roles.load_custom_roles()
+        assert roles.by_name("data-eng") is not None
+    finally:
+        dlg.deleteLater()
+        roles._CUSTOM.clear()
+        roles._CUSTOM.update(saved_custom)
+
+
+def test_new_role_auto_color_follows_typed_name_until_touched(monkeypatch, tmp_path):
+    from agent_takkub import custom_roles, project_nav
+    from agent_takkub import pane_tools_policy as ptp
+    from agent_takkub.pane_tools_dialog import PaneToolsDialog
+
+    monkeypatch.setattr(ptp, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
+    monkeypatch.setattr(custom_roles, "CUSTOM_ROLES_FILE", tmp_path / "custom-roles.json")
+    monkeypatch.setattr(custom_roles, "CUSTOM_AGENTS_DIR", tmp_path / "agents")
+
+    dlg = PaneToolsDialog()
+    try:
+        dlg._nr_name.setText("data-eng")
+        assert dlg._nr_color == project_nav._avatar_color("data-eng")
+
+        # Picking a swatch marks the color as user-touched — further name
+        # edits must NOT clobber the explicit choice.
+        other = next(c for c in project_nav._AVATAR_COLORS if c != dlg._nr_color)
+        dlg._on_swatch_clicked(other)
+        dlg._nr_name.setText("data-eng-2")
+        assert dlg._nr_color == other
+    finally:
+        dlg.deleteLater()
+
+
+def test_new_role_overlap_warning_uses_friendly_wording(monkeypatch, tmp_path):
+    from agent_takkub import custom_roles, skill_audit
+    from agent_takkub import pane_tools_policy as ptp
+    from agent_takkub.pane_tools_dialog import PaneToolsDialog
+
+    monkeypatch.setattr(ptp, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
+    monkeypatch.setattr(custom_roles, "CUSTOM_ROLES_FILE", tmp_path / "custom-roles.json")
+    monkeypatch.setattr(custom_roles, "CUSTOM_AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr(skill_audit, "audit_new_role_text", lambda name, text: [("qa", 0.72)])
+
+    dlg = PaneToolsDialog()
+    try:
+        dlg._nr_name.setText("shadow-qa")
+        dlg._nr_instructions.setPlainText("some instructions")
+        text = dlg._nr_overlap_label.text()
+        assert "qa (72%)" in text
+        assert "ตั้งใจแยก ok เลย" in text
+    finally:
+        dlg.deleteLater()
+
+
+def test_advanced_section_starts_collapsed_and_toggles(monkeypatch, tmp_path):
+    from agent_takkub import pane_tools_policy as ptp
+    from agent_takkub.pane_tools_dialog import PaneToolsDialog
+
+    monkeypatch.setattr(ptp, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
+
+    dlg = PaneToolsDialog()
+    try:
+        # The dialog is never shown in this test (offscreen QPA, no exec()),
+        # so isVisible() is always False regardless of state (ancestor-chain
+        # visibility) — isHidden() reflects the widget's own explicit
+        # hide()/setVisible() flag instead, which is what `_on_toggle_advanced`
+        # actually toggles.
+        assert dlg._nr_advanced_body.isHidden()
+        dlg._on_toggle_advanced()
+        assert not dlg._nr_advanced_body.isHidden()
+    finally:
+        dlg.deleteLater()
+
+
+def test_advanced_provider_field_disabled_pending_103(monkeypatch, tmp_path):
+    from agent_takkub import pane_tools_policy as ptp
+    from agent_takkub.pane_tools_dialog import PaneToolsDialog
+
+    monkeypatch.setattr(ptp, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
+
+    dlg = PaneToolsDialog()
+    try:
+        assert not dlg._nr_provider_combo.isEnabled()
+    finally:
+        dlg.deleteLater()

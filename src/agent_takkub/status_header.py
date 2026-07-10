@@ -9,7 +9,7 @@ MainWindow method can touch them unchanged.
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
     QComboBox,
     QFrame,
@@ -305,7 +305,8 @@ class StatusHeaderMixin:
         # "+" new-tab flow (_on_new_tab_clicked) which offers two modes: open an
         # already-configured project, or add a brand-new one (_on_add_project_clicked).
 
-        # user profile selector moved to ⚙ Pipelines QMenu
+        # user profile selector moved to the 👥 Team chip's right-click QMenu
+        # (was ⚙ Pipelines' left-click menu before the A6-redesign)
 
         # One-click rtk install for the active project. Only visible when
         # the project hasn't been initialised yet — once `.claude/settings.json`
@@ -525,21 +526,27 @@ class StatusHeaderMixin:
         self._btn_open_shell.setStyleSheet(self._ghost_button_style())
         self._btn_open_shell.clicked.connect(self._on_open_shell_clicked)
 
-        self._btn_pipelines = QPushButton("⚙ Pipelines", self)
+        # 👥 Team chip (A6-redesign, renamed from "⚙ Pipelines"): opens the
+        # 🔧 Tools dialog straight to its "Team & Roles" tab — team roster +
+        # guided custom-role create, the thing users actually reach for here.
+        # Pipeline Settings / user-profile switch / Add-Remove-user (Claude
+        # Auth) used to live in this chip's left-click dropdown; they still
+        # exist (nothing was deleted) but the dropdown moved to RIGHT-click so
+        # the common case (manage the team) is a single click, not a menu.
+        self._btn_pipelines = QPushButton("👥 Team", self)
         self._btn_pipelines.setToolTip(
-            "Build dev pipelines: drag roles into hops, save reusable templates,\n"
-            "toggle providers, enable/disable roles, and pick each role's CLI\n"
-            "(claude/codex/gemini). Templates + per-role CLI are saved PER PROJECT\n"
-            "(~/.takkub/projects/<project>/) so tabs don't collide; provider on/off\n"
-            "stays global. Applies to the next pane you spawn, no restart needed."
+            "Click: open Team & Roles (roster + create a custom role).\n"
+            "Right-click: Pipeline Settings, switch user profile, Add/Remove user."
         )
         self._btn_pipelines.setStyleSheet(self._ghost_button_style())
-        self._btn_pipelines.clicked.connect(self._show_pipelines_menu)
+        self._btn_pipelines.clicked.connect(self._on_team_chip_clicked)
+        self._btn_pipelines.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._btn_pipelines.customContextMenuRequested.connect(self._show_pipelines_menu)
 
         # ▶ Run button removed per user request — it rendered as a stray widget
         # at the window origin (parent=self, never placed in a layout) and
         # covered the first project tab. Pipelines are still fired via the
-        # ⚙ Pipelines editor + orch.run_pipeline(id) / CLI.
+        # Pipeline Settings editor (👥 Team chip right-click) + orch.run_pipeline(id) / CLI.
 
         self._btn_claude_auth = QPushButton("Claude Auth", self)
         self._btn_claude_auth.setToolTip(
