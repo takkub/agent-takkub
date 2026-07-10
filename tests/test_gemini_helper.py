@@ -81,7 +81,12 @@ class TestDefaultAgyPaths:
         monkeypatch.setattr(gemini_helper.sys, "platform", "win32")
         monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\alice\AppData\Local")
         candidates = gemini_helper._default_agy_paths()
-        assert Path(r"C:\Users\alice\AppData\Local\agy\bin\agy.exe") in candidates
+        # Build the expected path the SAME way the code does (Path(local) / ...)
+        # rather than a hardcoded backslash literal: pathlib is OS-flavoured, so
+        # on a POSIX CI host `Path(r"C:\...\agy.exe")` is a different PosixPath
+        # than `Path(r"C:\...") / "agy" / "bin" / "agy.exe"` (mixed separators).
+        expected = Path(r"C:\Users\alice\AppData\Local") / "agy" / "bin" / "agy.exe"
+        assert expected in candidates
         assert not any(str(c).startswith("/Applications") for c in candidates)
 
     def test_mac_candidates_present(self, monkeypatch: pytest.MonkeyPatch) -> None:
