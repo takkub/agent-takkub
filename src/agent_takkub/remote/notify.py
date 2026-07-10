@@ -118,6 +118,56 @@ _TOOL_ACTIVITY = {
 # PWA can surface "Lead is waiting on a desktop picker" instead of hanging.
 _MAX_ASK_QUESTION_CHARS = 200
 
+# B2: per-option picker — unlike `_ask_question_prompt` above (data-min,
+# question text only), this forwards the option labels too so the phone can
+# render tappable chips instead of forcing the user to type a number blind.
+# Only Claude's JSONL `AskUserQuestion` tool_use shape is understood here —
+# codex/gemini panes have no equivalent structured event, so a picker on
+# those panes still degrades to the plain "blocked on desktop" banner
+# (multi-provider #103 gap, flagged not silently swallowed).
+_MAX_ASK_OPTIONS = 6
+_MAX_OPTION_LABEL_CHARS = 80
+
+
+def _ask_question_options(rec: dict) -> dict | None:
+    """Return `{"prompt": str, "options": [{"index": int, "label": str}],
+    "multiSelect": bool}` for `rec`'s first `AskUserQuestion` question, else
+    None. Mirrors `_ask_question_prompt`'s record-shape checks but forwards
+    option labels (B2 tappable picker) instead of dropping them."""
+    if rec.get("type") != "assistant":
+        return None
+    msg = rec.get("message")
+    if not isinstance(msg, dict):
+        return None
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return None
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "tool_use":
+            continue
+        if str(block.get("name") or "").lower() != "askuserquestion":
+            continue
+        inp = block.get("input")
+        if not isinstance(inp, dict):
+            return None
+        questions = inp.get("questions")
+        if not isinstance(questions, list) or not questions or not isinstance(questions[0], dict):
+            return None
+        q = questions[0]
+        prompt = str(q.get("question") or "").strip()[:_MAX_ASK_QUESTION_CHARS]
+        options: list[dict] = []
+        raw_options = q.get("options")
+        if isinstance(raw_options, list):
+            for idx, opt in enumerate(raw_options[:_MAX_ASK_OPTIONS]):
+                if not isinstance(opt, dict):
+                    continue
+                label = str(opt.get("label") or "").strip()[:_MAX_OPTION_LABEL_CHARS]
+                if not label:
+                    continue
+                options.append({"index": idx, "label": label})
+        return {"prompt": prompt, "options": options, "multiSelect": bool(q.get("multiSelect"))}
+    return None
+
 
 def _ask_question_prompt(rec: dict) -> str | None:
     """Return the short question text if `rec` is an assistant record whose
@@ -594,7 +644,7 @@ class LeadNotifier(QObject):
         lines = data.split(b"\n")
         tail.partial = lines.pop()  # last line may be mid-write; hold it back
         activity: str | None = None
-        ask_prompt: str | None = None
+        ask_payload: dict | None = None
         pushed_text = False
         for raw_line in lines:
             line = raw_line.strip()
@@ -609,7 +659,7 @@ class LeadNotifier(QObject):
                 joined = "\n".join(texts)[:_MAX_EVENT_CHARS]
                 self._broadcaster.push("lead", joined, project_ns)
                 pushed_text = True
-                ask_prompt = None  # a real reply supersedes any earlier picker
+                ask_payload = None  # a real reply supersedes any earlier picker
             else:
                 # Assistant record with only tool_use/thinking blocks (no reply
                 # prose yet) = the Lead is mid-turn, actively working. We never
@@ -620,17 +670,17 @@ class LeadNotifier(QObject):
                 found = _lead_activity(rec)
                 if found is not None:
                     activity = found
-                ask = _ask_question_prompt(rec)
+                ask = _ask_question_options(rec)
                 if ask is not None:
-                    ask_prompt = ask
-        # W2a SHOULD-FIX: a real AskUserQuestion picker fired and nothing has
-        # answered it yet in this batch — surface the "waiting on desktop"
-        # banner instead of the phone hanging silently. Takes priority over
-        # the generic "working" signal for the same batch (AskUserQuestion's
-        # tool_use would otherwise also map to a coarse "working" activity —
-        # the picker banner is the more specific, more useful signal).
-        if ask_prompt is not None and not pushed_text:
-            self._broadcaster.push("blocked_on_picker", ask_prompt, project_ns)
+                    ask_payload = ask
+        # W2a/B2: a real AskUserQuestion picker fired and nothing has answered
+        # it yet in this batch — surface the tappable-option payload instead
+        # of the phone hanging silently. Takes priority over the generic
+        # "working" signal for the same batch (AskUserQuestion's tool_use
+        # would otherwise also map to a coarse "working" activity — the
+        # picker payload is the more specific, more useful signal).
+        if ask_payload is not None and not pushed_text:
+            self._broadcaster.push("blocked_on_picker", ask_payload, project_ns)
         elif activity is not None and not pushed_text:
             # Only signal "working" when this batch showed activity but
             # produced no reply text — a real text push already tells the

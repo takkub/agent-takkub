@@ -251,14 +251,19 @@ class SSEBroadcaster:
         with self._lock:
             self._clients = [(cq, ns) for cq, ns in self._clients if cq is not q]
 
-    def push(self, event: str, data: str, project_ns: str | None = None) -> None:
+    def push(self, event: str, data: str | dict, project_ns: str | None = None) -> None:
         """H-C: `data` is JSON-encoded before it ever reaches the wire, so a
         payload containing raw newlines can neither break SSE line framing
         nor inject a fake `event:`/`data:` line into the stream. `event` is
-        checked against a fixed allowlist for the same reason."""
+        checked against a fixed allowlist for the same reason.
+
+        `data` is normally a plain string, wrapped as `{"text": data}` for the
+        client's generic parser. B2's `blocked_on_picker` event instead needs
+        a structured payload (prompt + option chips) — passing a `dict` sends
+        it as-is, unwrapped."""
         if event not in _ALLOWED_SSE_EVENTS:
             return
-        payload = json.dumps({"text": data}, ensure_ascii=False)
+        payload = json.dumps(data if isinstance(data, dict) else {"text": data}, ensure_ascii=False)
         with self._lock:
             clients = list(self._clients)
         for q, ns in clients:

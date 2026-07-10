@@ -944,18 +944,69 @@
     });
   }
 
-  function showPickerBanner(question) {
+  // B2: renders tappable option chips from the AskUserQuestion payload
+  // instead of forcing the phone user to answer on the desktop. Only
+  // understands Claude's JSONL AskUserQuestion shape (server-side
+  // notify.py) — codex/gemini panes have no structured picker event, so
+  // those still fall back to the plain "answer on desktop" text below
+  // (multi-provider #103 gap).
+  function showPickerBanner(payload) {
     var el = $("lead-picker-banner");
     if (!el) return;
     el.innerHTML = "";
+    var prompt = "";
+    var options = [];
+    var multiSelect = false;
+    if (payload && typeof payload === "object") {
+      prompt = typeof payload.prompt === "string" ? payload.prompt : "";
+      if (Array.isArray(payload.options)) options = payload.options;
+      multiSelect = !!payload.multiSelect;
+    } else if (typeof payload === "string") {
+      prompt = payload;
+    }
+    var isControl = state.mode === "control";
     var main = document.createElement("span");
-    main.textContent = "⏸️ Lead รอคำตอบจาก picker บน desktop — ตอบบนจอคอมก่อน";
+    main.textContent = options.length
+      ? (isControl ? "⏸️ Lead ถามคำถาม — แตะเพื่อตอบ" : "⏸️ Lead รอคำตอบ — เปิด control mode เพื่อตอบ")
+      : "⏸️ Lead รอคำตอบจาก picker บน desktop — ตอบบนจอคอมก่อน";
     el.appendChild(main);
-    if (typeof question === "string" && question.trim()) {
+    if (prompt.trim()) {
       var q = document.createElement("span");
       q.className = "q";
-      q.textContent = question.trim();
+      q.textContent = prompt.trim();
       el.appendChild(q);
+    }
+    if (options.length) {
+      var chipsWrap = document.createElement("div");
+      chipsWrap.className = "picker-chips";
+      var selected = [];
+      options.forEach(function (opt, i) {
+        var label = String((opt && opt.label) || "");
+        if (!label) return;
+        var idx = opt && typeof opt.index === "number" ? opt.index : i;
+        var chip = makeQuickChip((idx + 1) + ". " + label, false, function () {
+          if (state.mode !== "control") return;
+          if (multiSelect) {
+            chip.classList.toggle("picked");
+            var pos = selected.indexOf(label);
+            if (pos === -1) selected.push(label); else selected.splice(pos, 1);
+          } else {
+            sendLeadMessage(label);
+          }
+        });
+        if (!isControl) chip.disabled = true;
+        chipsWrap.appendChild(chip);
+      });
+      el.appendChild(chipsWrap);
+      if (multiSelect) {
+        var confirmBtn = makeQuickChip("ยืนยัน", false, function () {
+          if (state.mode !== "control" || !selected.length) return;
+          sendLeadMessage(selected.join(", "));
+        });
+        confirmBtn.className += " picker-confirm";
+        confirmBtn.disabled = !isControl;
+        el.appendChild(confirmBtn);
+      }
     }
     el.classList.add("show");
   }
@@ -1116,11 +1167,20 @@
       state.leadWorking = false;
       appendMsg("done", parseSseData(evt.data));
     });
-    // W2a SHOULD-FIX: a real AskUserQuestion picker fired on the desktop —
-    // surface a banner instead of hanging silently; cleared by the next
-    // 'lead' text event (appendMsg/appendLeadLive both call hidePickerBanner).
+    // W2a/B2: a real AskUserQuestion picker fired on the desktop — surface a
+    // banner with tappable option chips instead of hanging silently; cleared
+    // by the next 'lead' text event (appendMsg/appendLeadLive both call
+    // hidePickerBanner). Payload is the structured
+    // {prompt, options[], multiSelect} shape (server: notify.py), not the
+    // generic {text} shape parseSseData understands, so it's parsed directly.
     es.addEventListener("blocked_on_picker", function (evt) {
-      showPickerBanner(parseSseData(evt.data));
+      var payload = null;
+      try {
+        payload = JSON.parse(evt.data);
+      } catch (e) {
+        payload = null;
+      }
+      showPickerBanner(payload);
     });
     es.onerror = function () {
       es.close();
@@ -1168,6 +1228,13 @@
     modePill.textContent = isControl ? "CONTROL" : "VIEW";
     modePill.classList.toggle("control", isControl);
     renderQuickReplies();
+    // Picker chips (B2) were rendered with isControl baked in at showPickerBanner
+    // time — if the mode toggles while a banner is still showing (no new picker
+    // event to re-render it), flip their disabled state directly instead of
+    // leaving stale-enabled chips a view-mode user could still tap.
+    document.querySelectorAll("#lead-picker-banner button").forEach(function (btn) {
+      btn.disabled = !isControl;
+    });
     updateResumeButtonVisibility();
   }
 

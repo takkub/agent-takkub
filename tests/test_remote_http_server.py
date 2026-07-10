@@ -881,6 +881,18 @@ class TestSSEBroadcaster:
         assert event == "blocked_on_picker"
         assert json.loads(payload) == {"text": "ไปทางไหนดี?"}
 
+    def test_dict_payload_is_sent_unwrapped(self):
+        """B2: a dict `data` (the picker's structured prompt/options/
+        multiSelect shape) must reach the wire as-is, not double-wrapped
+        under a `text` key like the plain-string case."""
+        broadcaster = http_server.SSEBroadcaster()
+        q = broadcaster.register("proj")
+        structured = {"prompt": "q", "options": [{"index": 0, "label": "A"}], "multiSelect": False}
+        broadcaster.push("blocked_on_picker", structured, "proj")
+        event, payload = q.get_nowait()
+        assert event == "blocked_on_picker"
+        assert json.loads(payload) == structured
+
     def test_unknown_event_name_is_dropped(self):
         """Defense-in-depth allowlist (H-C): only `done`/`lead` are ever
         forwarded to a client, regardless of what a caller passes in."""

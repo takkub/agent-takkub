@@ -559,6 +559,35 @@ class TestAskQuestionPrompt:
         assert notify_mod._ask_question_prompt(rec) is None
 
 
+class TestAskQuestionOptions:
+    """`_ask_question_options` (B2): forwards the full picker payload
+    (prompt + option labels + multiSelect) so the remote can render
+    tappable chips."""
+
+    def test_extracts_prompt_options_and_multi_select(self):
+        rec = json.loads(_ask_user_question_line("เลือกแนวทางไหนดี?"))
+        assert notify_mod._ask_question_options(rec) == {
+            "prompt": "เลือกแนวทางไหนดี?",
+            "options": [{"index": 0, "label": "A"}, {"index": 1, "label": "B"}],
+            "multiSelect": False,
+        }
+
+    def test_caps_option_count(self):
+        rec = json.loads(_ask_user_question_line("q"))
+        opts = [{"label": f"opt{i}"} for i in range(10)]
+        rec["message"]["content"][0]["input"]["questions"][0]["options"] = opts
+        result = notify_mod._ask_question_options(rec)
+        assert len(result["options"]) == notify_mod._MAX_ASK_OPTIONS
+
+    def test_non_ask_tool_use_is_none(self):
+        rec = json.loads(_tool_use_line())
+        assert notify_mod._ask_question_options(rec) is None
+
+    def test_non_assistant_record_is_none(self):
+        rec = json.loads(_user_line("hi"))
+        assert notify_mod._ask_question_options(rec) is None
+
+
 class TestLeadOutputTailAskQuestion:
     def test_ask_user_question_pushes_blocked_on_picker(self, qapp, tmp_path, config_dir):
         orch = _FakeOrch()
@@ -574,7 +603,12 @@ class TestLeadOutputTailAskQuestion:
             with path.open("a", encoding="utf-8") as fh:
                 fh.write(_ask_user_question_line("ไปทางไหนดี?") + "\n")
             notifier._poll_all()
-            assert broadcaster.events == [("blocked_on_picker", "ไปทางไหนดี?", "proj")]
+            expected = {
+                "prompt": "ไปทางไหนดี?",
+                "options": [{"index": 0, "label": "A"}, {"index": 1, "label": "B"}],
+                "multiSelect": False,
+            }
+            assert broadcaster.events == [("blocked_on_picker", expected, "proj")]
         finally:
             notifier.stop()
 
@@ -620,7 +654,12 @@ class TestLeadOutputTailAskQuestion:
             with path.open("a", encoding="utf-8") as fh:
                 fh.write(_ask_user_question_line("q") + "\n")
             notifier._poll_all()
-            assert broadcaster.events == [("blocked_on_picker", "q", "proj")]
+            expected = {
+                "prompt": "q",
+                "options": [{"index": 0, "label": "A"}, {"index": 1, "label": "B"}],
+                "multiSelect": False,
+            }
+            assert broadcaster.events == [("blocked_on_picker", expected, "proj")]
 
             broadcaster.events.clear()
             with path.open("a", encoding="utf-8") as fh:
