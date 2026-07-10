@@ -71,6 +71,7 @@
       "module": "agent_takkub.app",
       "imports": [
         "agent_takkub.config",
+        "agent_takkub.custom_roles",
         "agent_takkub.main_window",
         "agent_takkub.orchestrator",
         "agent_takkub.update_worker",
@@ -80,7 +81,7 @@
         "agent_takkub.__main__"
       ],
       "fan_in": 1,
-      "fan_out": 5
+      "fan_out": 6
     },
     {
       "module": "agent_takkub.auto_resume",
@@ -271,8 +272,12 @@
         "agent_takkub.config",
         "agent_takkub.roles"
       ],
-      "imported_by": [],
-      "fan_in": 0,
+      "imported_by": [
+        "agent_takkub.app",
+        "agent_takkub.pane_tools_dialog",
+        "agent_takkub.pane_tools_policy"
+      ],
+      "fan_in": 3,
       "fan_out": 2
     },
     {
@@ -579,20 +584,24 @@
       "module": "agent_takkub.pane_tools_dialog",
       "imports": [
         "agent_takkub.config",
+        "agent_takkub.custom_roles",
         "agent_takkub.lead_context",
         "agent_takkub.pane_tools_policy",
-        "agent_takkub.shared_dev_tools"
+        "agent_takkub.roles",
+        "agent_takkub.shared_dev_tools",
+        "agent_takkub.skill_audit"
       ],
       "imported_by": [
         "agent_takkub.user_actions"
       ],
       "fan_in": 1,
-      "fan_out": 4
+      "fan_out": 7
     },
     {
       "module": "agent_takkub.pane_tools_policy",
       "imports": [
-        "agent_takkub.config"
+        "agent_takkub.config",
+        "agent_takkub.custom_roles"
       ],
       "imported_by": [
         "agent_takkub.cli",
@@ -601,7 +610,7 @@
         "agent_takkub.shared_dev_tools"
       ],
       "fan_in": 4,
-      "fan_out": 1
+      "fan_out": 2
     },
     {
       "module": "agent_takkub.pipeline_config",
@@ -930,11 +939,12 @@
         "agent_takkub.main_window",
         "agent_takkub.orchestrator",
         "agent_takkub.orchestrator_text",
+        "agent_takkub.pane_tools_dialog",
         "agent_takkub.pipeline_config",
         "agent_takkub.remote.api",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 10,
+      "fan_in": 11,
       "fan_out": 0
     },
     {
@@ -991,9 +1001,10 @@
         "agent_takkub.config"
       ],
       "imported_by": [
-        "agent_takkub.cli"
+        "agent_takkub.cli",
+        "agent_takkub.pane_tools_dialog"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 1
     },
     {

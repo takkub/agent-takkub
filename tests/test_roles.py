@@ -2,7 +2,19 @@
 
 from __future__ import annotations
 
+import pytest
+
 from agent_takkub import roles
+
+
+@pytest.fixture
+def clean_custom_registry():
+    """Isolate roles._CUSTOM (the A6 runtime custom-role registry) per test."""
+    saved = dict(roles._CUSTOM)
+    roles._CUSTOM.clear()
+    yield
+    roles._CUSTOM.clear()
+    roles._CUSTOM.update(saved)
 
 
 class TestDefaults:
@@ -81,3 +93,27 @@ class TestByName:
 
     def test_lead_is_findable(self) -> None:
         assert roles.by_name("lead") is roles.LEAD
+
+
+class TestCustomRoles:
+    def test_register_role_resolves_via_by_name(self, clean_custom_registry) -> None:
+        r = roles.Role("data-eng", "Data Eng", "#112233", column=1, row=5)
+        roles.register_role(r)
+        assert roles.by_name("data-eng") is r
+
+    def test_unregistered_custom_role_still_none(self, clean_custom_registry) -> None:
+        assert roles.by_name("data-eng") is None
+
+    def test_custom_roles_accessor_returns_registered(self, clean_custom_registry) -> None:
+        r = roles.Role("data-eng", "Data Eng", "#112233", column=1, row=5)
+        roles.register_role(r)
+        assert roles.custom_roles() == (r,)
+
+    def test_builtin_roles_take_priority_over_custom(self, clean_custom_registry) -> None:
+        # Can't actually happen via custom_roles.validate_role_name (blocks
+        # the collision), but by_name's own lookup order should still favor
+        # ALL_DEFAULT if it were ever attempted.
+        shadow = roles.Role("backend", "Shadow Backend", "#000000", column=1, row=99)
+        roles.register_role(shadow)
+        assert roles.by_name("backend") is roles.by_name("backend")
+        assert roles.by_name("backend").label == "Backend"

@@ -126,6 +126,49 @@ def cosine_similarity(vec_a: dict[str, float], vec_b: dict[str, float]) -> float
     return dot / (norm_a * norm_b)
 
 
+def load_all_role_docs() -> dict[str, str]:
+    """Merge built-in (`config.AGENTS_DIR`) + custom (`config.CUSTOM_AGENTS_DIR`,
+    A6 user-created roles) docs into one corpus. Custom entries win on a name
+    collision, though `custom_roles.validate_role_name` already rejects
+    collisions with built-in names at creation time, so this should never
+    actually trigger in practice."""
+    from .config import AGENTS_DIR, CUSTOM_AGENTS_DIR
+
+    docs = load_role_docs(AGENTS_DIR)
+    docs.update(load_role_docs(CUSTOM_AGENTS_DIR))
+    return docs
+
+
+def audit_new_role_text(
+    name: str,
+    text: str,
+    threshold: float = 0.6,
+    existing: dict[str, str] | None = None,
+) -> list[tuple[str, float]]:
+    """Overlap of a NOT-YET-SAVED candidate role doc against every existing
+    role. Used by the New-Role dialog to warn before the user commits a
+    name/instructions that heavily duplicate an existing role's territory.
+
+    Returns [(other_role, similarity), ...] >= threshold, sorted desc.
+    `existing` lets callers pass an already-loaded corpus (e.g. the dialog
+    caches it once per open) instead of re-reading the filesystem per
+    keystroke; defaults to `load_all_role_docs()`.
+    """
+    docs = dict(existing if existing is not None else load_all_role_docs())
+    docs[name] = text
+    tfidf = compute_tfidf(docs)
+    target = tfidf.get(name, {})
+    out: list[tuple[str, float]] = []
+    for other, vec in tfidf.items():
+        if other == name:
+            continue
+        sim = cosine_similarity(target, vec)
+        if sim >= threshold:
+            out.append((other, sim))
+    out.sort(key=lambda x: x[1], reverse=True)
+    return out
+
+
 def audit_skills(
     skills_dir: Path = Path(".claude/agents"),
     threshold: float = 0.6,

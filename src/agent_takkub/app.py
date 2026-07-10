@@ -567,6 +567,19 @@ def _configure_webengine_profile() -> None:
         pass
 
 
+def _load_custom_roles() -> None:
+    """Boot hook (A6): register every user-created role from
+    ~/.takkub/custom-roles.json so `roles.by_name()` resolves it and
+    `--role <custom>` spawns work from a cold start, not just after the Role
+    Manager dialog registers one live. Never blocks boot on failure."""
+    try:
+        from . import custom_roles
+
+        custom_roles.load_and_register_all()
+    except Exception:
+        pass
+
+
 def _bootstrap_prod_claude_profile() -> None:
     """First-boot only: an installed instance's default Claude profile
     (``DATA_HOME/claude-config``) is cloned from a small allowlist of
@@ -599,6 +612,7 @@ def main(argv: list[str] | None = None) -> int:
     _check_cli_bin_present()
     _log_instance_boot()
     _bootstrap_prod_claude_profile()
+    _load_custom_roles()
 
     app = QApplication(argv or sys.argv)
     app.setApplicationName("agent-takkub")

@@ -8,7 +8,9 @@ from unittest.mock import patch
 from agent_takkub.pane_tools_dialog import (
     ROLES,
     _default_plugins_installed_file,
+    _preview_text,
     build_matrix,
+    catalog_entries,
     diff_role_items,
     discover_marketplace_plugins,
     discover_marketplaces,
@@ -311,3 +313,138 @@ def test_plugin_matrix_renders_marketplace_defaults_checked(monkeypatch, tmp_pat
         assert ptp.effective_plugins("frontend", None) is None
     finally:
         dlg.deleteLater()
+
+
+# ---------------------------------------------------------------------------
+# A6: catalog_entries / _preview_text (Skill Catalog tab pure logic)
+# ---------------------------------------------------------------------------
+
+
+def test_preview_text_short_text_unchanged():
+    assert _preview_text("hello world") == "hello world"
+
+
+def test_preview_text_truncates_long_text():
+    long_text = "x" * 500
+    preview = _preview_text(long_text, limit=320)
+    assert len(preview) == 321  # 320 chars + ellipsis
+    assert preview.endswith("…")
+
+
+def test_preview_text_strips_whitespace():
+    assert _preview_text("  hello  \n") == "hello"
+
+
+def test_catalog_entries_lists_every_role_sorted():
+    docs = {"qa": "playwright browser test", "backend": "REST API database"}
+    entries = catalog_entries(docs, threshold=0.9)
+    assert [e["name"] for e in entries] == ["backend", "qa"]
+
+
+def test_catalog_entries_flags_overlap_above_threshold():
+    # A third, unrelated doc keeps IDF from zeroing out every shared term
+    # (a term present in every doc has idf=log(N/df)=0 when df==N).
+    docs = {
+        "backend": "REST API endpoint database schema migration handler",
+        "shadow-backend": "REST API endpoint database schema migration handler",
+        "designer": "figma color palette typography spacing layout",
+    }
+    entries = catalog_entries(docs, threshold=0.5)
+    by_name = {e["name"]: e for e in entries}
+    assert by_name["backend"]["overlaps"]
+    assert by_name["backend"]["overlaps"][0][0] == "shadow-backend"
+    assert by_name["shadow-backend"]["overlaps"][0][0] == "backend"
+
+
+def test_catalog_entries_no_overlap_below_threshold():
+    docs = {"qa": "playwright browser test", "designer": "figma color palette"}
+    entries = catalog_entries(docs, threshold=0.6)
+    assert all(e["overlaps"] == [] for e in entries)
+
+
+def test_catalog_entries_never_self_overlaps():
+    docs = {"qa": "playwright browser test smoke e2e"}
+    entries = catalog_entries(docs, threshold=0.0)
+    assert entries[0]["overlaps"] == []
+
+
+# ---------------------------------------------------------------------------
+# A6: New Role tab — end-to-end create flow under a real (offscreen) QApplication
+# ---------------------------------------------------------------------------
+
+
+def test_new_role_tab_creates_and_registers_role(monkeypatch, tmp_path):
+    from agent_takkub import custom_roles, roles
+    from agent_takkub import pane_tools_policy as ptp
+    from agent_takkub.pane_tools_dialog import PaneToolsDialog
+
+    monkeypatch.setattr(ptp, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
+    monkeypatch.setattr(custom_roles, "CUSTOM_ROLES_FILE", tmp_path / "custom-roles.json")
+    monkeypatch.setattr(custom_roles, "CUSTOM_AGENTS_DIR", tmp_path / "agents")
+    saved_custom = dict(roles._CUSTOM)
+    roles._CUSTOM.clear()
+
+    dlg = PaneToolsDialog()
+    try:
+        dlg._nr_name.setText("data-eng")
+        dlg._nr_label.setText("Data Eng")
+        dlg._nr_instructions.setPlainText("Handles ETL pipelines and warehouse schemas.")
+        dlg._on_create_role_clicked()
+
+        assert "data-eng" in dlg._status_label.text()
+        resolved = roles.by_name("data-eng")
+        assert resolved is not None
+        assert resolved.label == "Data Eng"
+        assert custom_roles.role_file_path("data-eng").exists()
+        # Form clears after a successful create.
+        assert dlg._nr_name.text() == ""
+    finally:
+        dlg.deleteLater()
+        roles._CUSTOM.clear()
+        roles._CUSTOM.update(saved_custom)
+
+
+def test_new_role_tab_rejects_collision_with_builtin(monkeypatch, tmp_path):
+    from agent_takkub import custom_roles
+    from agent_takkub import pane_tools_policy as ptp
+    from agent_takkub.pane_tools_dialog import PaneToolsDialog
+
+    monkeypatch.setattr(ptp, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
+    monkeypatch.setattr(custom_roles, "CUSTOM_ROLES_FILE", tmp_path / "custom-roles.json")
+    monkeypatch.setattr(custom_roles, "CUSTOM_AGENTS_DIR", tmp_path / "agents")
+
+    dlg = PaneToolsDialog()
+    try:
+        dlg._nr_name.setText("qa")
+        dlg._nr_instructions.setPlainText("shadow qa")
+        with patch("agent_takkub.pane_tools_dialog.QMessageBox.warning") as warn:
+            dlg._on_create_role_clicked()
+        warn.assert_called_once()
+        assert not custom_roles.role_file_path("qa").exists()
+    finally:
+        dlg.deleteLater()
+
+
+def test_skill_catalog_tab_lists_created_role(monkeypatch, tmp_path):
+    from agent_takkub import custom_roles, roles
+    from agent_takkub import pane_tools_policy as ptp
+    from agent_takkub.pane_tools_dialog import PaneToolsDialog
+
+    monkeypatch.setattr(ptp, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
+    monkeypatch.setattr(custom_roles, "CUSTOM_ROLES_FILE", tmp_path / "custom-roles.json")
+    monkeypatch.setattr(custom_roles, "CUSTOM_AGENTS_DIR", tmp_path / "agents")
+    saved_custom = dict(roles._CUSTOM)
+    roles._CUSTOM.clear()
+
+    dlg = PaneToolsDialog()
+    try:
+        dlg._nr_name.setText("data-eng")
+        dlg._nr_instructions.setPlainText("Handles ETL pipelines.")
+        dlg._on_create_role_clicked()
+        assert "data-eng" in dlg._catalog_docs
+        items = [dlg._catalog_list.item(i).text() for i in range(dlg._catalog_list.count())]
+        assert "data-eng" in items
+    finally:
+        dlg.deleteLater()
+        roles._CUSTOM.clear()
+        roles._CUSTOM.update(saved_custom)

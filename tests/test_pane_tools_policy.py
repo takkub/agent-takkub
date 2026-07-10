@@ -361,6 +361,51 @@ class TestValidateName:
         assert not pane_tools_policy._validate_name("playwright tool")  # space
 
 
+class TestKnownRoles:
+    """A6: known_roles() unions the static KNOWN_ROLES set with any
+    registered custom role, so custom roles can get an MCP/plugin policy
+    entry written the same way a built-in role can."""
+
+    @pytest.fixture
+    def custom_role_files(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        from agent_takkub import custom_roles
+
+        monkeypatch.setattr(custom_roles, "CUSTOM_ROLES_FILE", tmp_path / "custom-roles.json")
+        monkeypatch.setattr(custom_roles, "CUSTOM_AGENTS_DIR", tmp_path / "agents")
+        return tmp_path
+
+    def test_defaults_to_static_known_roles_when_custom_module_errors(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from agent_takkub import custom_roles
+
+        def boom():
+            raise RuntimeError("simulated failure")
+
+        monkeypatch.setattr(custom_roles, "list_role_names", boom)
+        assert pane_tools_policy.known_roles() == pane_tools_policy.KNOWN_ROLES
+
+    def test_includes_registered_custom_role(self, custom_role_files: Path) -> None:
+        from agent_takkub import custom_roles
+
+        custom_roles.create_role("data-eng", "Data Eng", "#112233", 1, 5, "x")
+        known = pane_tools_policy.known_roles()
+        assert "data-eng" in known
+        assert pane_tools_policy.KNOWN_ROLES < known
+
+    def test_set_role_items_accepts_custom_role(
+        self, policy_file: Path, custom_role_files: Path
+    ) -> None:
+        from agent_takkub import custom_roles
+
+        custom_roles.create_role("data-eng", "Data Eng", "#112233", 1, 5, "x")
+        assert pane_tools_policy.set_role_items("data-eng", "mcps", ["playwright"]) is True
+        assert pane_tools_policy.load_policy()["data-eng"]["mcps"] == ["playwright"]
+
+    def test_set_role_items_rejects_unregistered_role(self, policy_file: Path) -> None:
+        assert pane_tools_policy.set_role_items("totally-unknown", "mcps", []) is False
+
+
 class TestNoneVsEmptyContract:
     """The None-vs-empty distinction that keeps role MCP filtering honest.
 

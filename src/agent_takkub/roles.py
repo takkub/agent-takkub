@@ -6,7 +6,8 @@ The cockpit reserves 8 slots in a 3-column grid:
   col 1 (middle): frontend / backend / mobile / devops / codex
   col 2 (right):  gemini / qa / reviewer + dynamic add-slot
 
-Custom roles can be added at runtime via Orchestrator.register_role.
+Custom roles (A6) can be added at runtime via `register_role()` — boot-loaded
+from ~/.takkub/custom-roles.json by `custom_roles.load_and_register_all()`.
 """
 
 from __future__ import annotations
@@ -67,6 +68,24 @@ DEFAULT_TEAMMATES: tuple[Role, ...] = (
 
 ALL_DEFAULT: tuple[Role, ...] = (LEAD, *DEFAULT_TEAMMATES)
 
+# Runtime registry for user-created roles (A6 — Role & Skill Manager). Populated
+# at boot from ~/.takkub/custom-roles.json via `custom_roles.load_and_register_all()`
+# and updated live when the Role Manager dialog creates a role, so a freshly
+# created role is spawnable in the same process without a cockpit restart.
+_CUSTOM: dict[str, Role] = {}
+
+
+def register_role(role: Role) -> None:
+    """Register a custom role so `by_name` resolves it. Overwrites silently
+    if `role.name` was already registered (re-registering on edit is fine)."""
+    _CUSTOM[role.name] = role
+
+
+def custom_roles() -> tuple[Role, ...]:
+    """Every runtime-registered custom role, in registration order."""
+    return tuple(_CUSTOM.values())
+
+
 # Panes the USER types into directly, so they are never auto-locked by the
 # accidental-input guard: the Lead (the command surface) and an ad-hoc Shell
 # (opened explicitly to run commands). Every other role is orchestrator-driven
@@ -80,4 +99,4 @@ def by_name(name: str) -> Role | None:
     for r in ALL_DEFAULT:
         if r.name == name:
             return r
-    return None
+    return _CUSTOM.get(name)

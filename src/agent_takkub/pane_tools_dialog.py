@@ -20,6 +20,8 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
+    QColorDialog,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -27,14 +29,24 @@ from PyQt6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QListWidget,
     QMenu,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
+    QSpinBox,
     QTableWidget,
     QTabWidget,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
+
+from . import custom_roles
+
+# A6 (Role & Skill Manager): pure logic used by the New Role / Skill Catalog
+# tabs is kept in `custom_roles` / `skill_audit` (no Qt), so it's testable
+# without a display — this module only wires it to widgets.
 
 # Roles that get a row in the matrix. Order matches the cockpit's
 # role-declaration convention (lead first, then specialists).
@@ -129,6 +141,23 @@ QLineEdit {
     padding: 6px 8px; color: #e4e4e7; selection-background-color: #2563eb;
 }
 QLineEdit:focus { border-color: #2563eb; }
+
+/* A6 New Role / Skill Catalog tabs — QComboBox/QSpinBox/QPlainTextEdit/
+   QTextEdit/QListWidget have no dark styling by default (plain-white
+   background), unlike QLineEdit above which the rest of this dialog relies
+   on — without this block they'd render as a jarring white patch. */
+QComboBox, QSpinBox, QPlainTextEdit, QTextEdit, QListWidget {
+    background: #18181b; border: 1px solid #27272a; border-radius: 6px;
+    padding: 4px 8px; color: #e4e4e7; selection-background-color: #2563eb;
+}
+QComboBox:focus, QSpinBox:focus, QPlainTextEdit:focus, QTextEdit:focus { border-color: #2563eb; }
+QComboBox QAbstractItemView {
+    background: #18181b; color: #e4e4e7; border: 1px solid #27272a;
+    selection-background-color: #2563eb;
+}
+QListWidget::item { padding: 4px 6px; border-radius: 4px; }
+QListWidget::item:selected { background: #2563eb; color: #ffffff; }
+QSpinBox::up-button, QSpinBox::down-button { background: #27272a; border: none; width: 16px; }
 
 QPushButton {
     background: #18181b; color: #d4d4d8; border: 1px solid #27272a;
@@ -247,6 +276,36 @@ def diff_role_items(
         if added or removed:
             changes[role] = (added, removed)
     return changes
+
+
+def _preview_text(text: str, limit: int = 320) -> str:
+    """First `limit` chars of a role doc, stripped, for a catalog list preview."""
+    stripped = text.strip()
+    return stripped if len(stripped) <= limit else stripped[:limit] + "…"
+
+
+def catalog_entries(docs: dict[str, str], threshold: float = 0.6) -> list[dict]:
+    """One entry per role doc for the Skill Catalog tab: name, preview text,
+    and `overlaps` — [(other_role, similarity), ...] >= threshold, desc-sorted.
+
+    Pure/no-Qt so it's testable without a display; `PaneToolsDialog` just
+    renders whatever this returns.
+    """
+    from .skill_audit import compute_tfidf, cosine_similarity
+
+    tfidf = compute_tfidf(docs)
+    entries: list[dict] = []
+    for name in sorted(docs):
+        overlaps = []
+        for other in docs:
+            if other == name:
+                continue
+            sim = cosine_similarity(tfidf[name], tfidf[other])
+            if sim >= threshold:
+                overlaps.append((other, sim))
+        overlaps.sort(key=lambda x: x[1], reverse=True)
+        entries.append({"name": name, "preview": _preview_text(docs[name]), "overlaps": overlaps})
+    return entries
 
 
 def discover_marketplace_plugins(
@@ -397,6 +456,8 @@ class PaneToolsDialog(QDialog):
 
         tabs.addTab(self._build_mcp_tab(), "MCP")
         tabs.addTab(self._build_plugin_tab(), "Plugins")
+        tabs.addTab(self._build_new_role_tab(), "+ New Role")
+        tabs.addTab(self._build_skill_catalog_tab(), "Skill Catalog")
 
         self._status_label = QLabel("", self)
         self._status_label.setObjectName("toolsSubtitle")
@@ -577,6 +638,249 @@ class PaneToolsDialog(QDialog):
         self._plugin_boxes = self._fill_matrix_table(self._plugin_table, items, matrix)
         self._plugin_table.setVisible(bool(items))
         self._plugin_empty.setVisible(not items)
+
+    # ── New Role tab (A6) ────────────────────────────────────────
+
+    def _build_new_role_tab(self) -> QWidget:
+        tab = QWidget(self)
+        outer = QVBoxLayout(tab)
+        outer.setContentsMargins(14, 14, 14, 14)
+        outer.setSpacing(10)
+
+        form = QFormLayout()
+        form.setHorizontalSpacing(14)
+        form.setVerticalSpacing(8)
+
+        self._nr_name = QLineEdit(tab)
+        self._nr_name.setPlaceholderText("data-eng (a-z0-9-_ เท่านั้น, ห้ามชนกับ role เดิม)")
+        self._nr_name.textChanged.connect(self._on_new_role_changed)
+        form.addRow("Name (--role)", self._nr_name)
+
+        self._nr_label = QLineEdit(tab)
+        self._nr_label.setPlaceholderText("🧬 Data Eng")
+        form.addRow("Label", self._nr_label)
+
+        self._nr_column = QComboBox(tab)
+        self._nr_column.addItem("1 · Dev column (ใต้ codex)", 1)
+        self._nr_column.addItem("2 · Support column (ใต้ shell)", 2)
+        self._nr_column.setCurrentIndex(1)
+        form.addRow("Grid column", self._nr_column)
+
+        self._nr_row = QSpinBox(tab)
+        self._nr_row.setRange(0, 99)
+        self._nr_row.setValue(99)
+        self._nr_row.setToolTip(
+            "แถวในกริด — ถ้าซ้ำกับ role อื่นในคอลัมน์เดียวกัน จะซ้อนทับกันในหน้าจอ "
+            "(ยังไม่มี auto-collision — ปรับเลขเองถ้าไม่ต้องการซ้อน)"
+        )
+        form.addRow("Grid row", self._nr_row)
+
+        color_row = QHBoxLayout()
+        self._nr_color = "#94a3b8"
+        self._nr_color_btn = QPushButton("", tab)
+        self._nr_color_btn.setFixedSize(28, 28)
+        self._nr_color_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._nr_color_btn.clicked.connect(self._on_pick_color)
+        self._nr_color_label = QLabel(self._nr_color, tab)
+        self._nr_color_label.setObjectName("toolsSubtitle")
+        self._update_color_swatch()
+        color_row.addWidget(self._nr_color_btn)
+        color_row.addWidget(self._nr_color_label)
+        color_row.addStretch(1)
+        form.addRow("Accent color", color_row)
+
+        outer.addLayout(form)
+
+        tools_title = QLabel("Default skills/tools", tab)
+        tools_title.setObjectName("toolsSubtitle")
+        outer.addWidget(tools_title)
+
+        tools_row = QHBoxLayout()
+        mcp_col = QVBoxLayout()
+        mcp_col.addWidget(QLabel("MCP", tab))
+        self._nr_mcp_boxes: dict[str, QCheckBox] = {}
+        for name in self._master_mcps():
+            cb = QCheckBox(name, tab)
+            self._nr_mcp_boxes[name] = cb
+            mcp_col.addWidget(cb)
+        plugin_col = QVBoxLayout()
+        plugin_col.addWidget(QLabel("Plugins", tab))
+        self._nr_plugin_boxes: dict[str, QCheckBox] = {}
+        for name in discover_marketplaces():
+            cb = QCheckBox(name, tab)
+            self._nr_plugin_boxes[name] = cb
+            plugin_col.addWidget(cb)
+        tools_row.addLayout(mcp_col)
+        tools_row.addLayout(plugin_col)
+        tools_row.addStretch(1)
+        outer.addLayout(tools_row)
+
+        instr_title = QLabel("Instructions (role file — เว้นว่างใช้ template default)", tab)
+        instr_title.setObjectName("toolsSubtitle")
+        outer.addWidget(instr_title)
+        self._nr_instructions = QPlainTextEdit(tab)
+        self._nr_instructions.setPlaceholderText(
+            "บอก role ตัวเองว่าทำหน้าที่อะไร ขอบเขตงานคืออะไร รายงานยังไง..."
+        )
+        self._nr_instructions.setMinimumHeight(90)
+        self._nr_instructions.textChanged.connect(self._on_new_role_changed)
+        outer.addWidget(self._nr_instructions)
+
+        self._nr_overlap_label = QLabel("", tab)
+        self._nr_overlap_label.setObjectName("toolsSubtitle")
+        self._nr_overlap_label.setWordWrap(True)
+        outer.addWidget(self._nr_overlap_label)
+
+        create_row = QHBoxLayout()
+        self._nr_create_btn = QPushButton("+ Create Role", tab)
+        self._nr_create_btn.setObjectName("primaryBtn")
+        self._nr_create_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._nr_create_btn.clicked.connect(self._on_create_role_clicked)
+        create_row.addWidget(self._nr_create_btn)
+        create_row.addStretch(1)
+        outer.addLayout(create_row)
+        outer.addStretch(1)
+        return tab
+
+    def _update_color_swatch(self) -> None:
+        self._nr_color_btn.setStyleSheet(
+            f"background-color: {self._nr_color}; border: 1px solid #3f3f46; border-radius: 6px;"
+        )
+        self._nr_color_label.setText(self._nr_color)
+
+    def _on_pick_color(self) -> None:
+        from PyQt6.QtGui import QColor
+
+        picked = QColorDialog.getColor(QColor(self._nr_color), self, "เลือกสี Role")
+        if not picked.isValid():
+            return
+        self._nr_color = picked.name()
+        self._update_color_swatch()
+
+    def _on_new_role_changed(self, *_args) -> None:
+        """Live overlap warning as the user types a name/instructions —
+        checked BEFORE Create so a near-duplicate role is caught early."""
+        name = self._nr_name.text().strip().lower()
+        if not name:
+            self._nr_overlap_label.setText("")
+            return
+        ok, err = custom_roles.validate_role_name(name)
+        if not ok:
+            self._nr_overlap_label.setText(f"⚠️ {err}")
+            return
+        text = self._nr_instructions.toPlainText().strip()
+        if not text:
+            self._nr_overlap_label.setText("")
+            return
+        from . import skill_audit
+
+        overlaps = skill_audit.audit_new_role_text(name, text)
+        if overlaps:
+            parts = ", ".join(f"{r} ({sim:.0%})" for r, sim in overlaps)
+            self._nr_overlap_label.setText(f"⚠️ ทับซ้อนกับ: {parts} — พิจารณารวม role หรือแก้ scope")
+        else:
+            self._nr_overlap_label.setText("✓ ไม่ทับซ้อนกับ role อื่น")
+
+    def _on_create_role_clicked(self) -> None:
+        name = self._nr_name.text().strip().lower()
+        label = self._nr_label.text().strip()
+        column = self._nr_column.currentData()
+        row = self._nr_row.value()
+        instructions = self._nr_instructions.toPlainText().strip() or None
+
+        ok, err = custom_roles.create_role(name, label, self._nr_color, column, row, instructions)
+        if not ok:
+            QMessageBox.warning(self, "สร้าง Role ไม่สำเร็จ", err)
+            return
+
+        # Register in THIS process immediately so `--role <name>` spawns
+        # without waiting for a cockpit restart (roles.py otherwise only
+        # loads custom-roles.json at boot).
+        from . import roles as roles_mod
+
+        role = custom_roles.load_custom_roles().get(name)
+        if role is not None:
+            roles_mod.register_role(role)
+
+        mcp_names = [n for n, cb in self._nr_mcp_boxes.items() if cb.isChecked()]
+        plugin_names = [n for n, cb in self._nr_plugin_boxes.items() if cb.isChecked()]
+        try:
+            from . import pane_tools_policy
+
+            pane_tools_policy.set_role_items(name, "mcps", mcp_names)
+            pane_tools_policy.set_role_items(name, "plugins", plugin_names)
+        except Exception as e:
+            QMessageBox.warning(self, "สร้าง role สำเร็จ แต่ตั้ง tools policy ไม่สำเร็จ", str(e))
+
+        self._status_label.setText(
+            f"สร้าง role '{name}' แล้ว — spawn ได้ทันทีด้วย "
+            f'`takkub assign --role {name} "..."` (ไม่ต้อง restart cockpit)'
+        )
+        self._nr_name.clear()
+        self._nr_label.clear()
+        self._nr_instructions.clear()
+        for cb in {**self._nr_mcp_boxes, **self._nr_plugin_boxes}.values():
+            cb.setChecked(False)
+        self._nr_overlap_label.setText("")
+        self._reload_skill_catalog()
+
+    # ── Skill Catalog tab (A6) ───────────────────────────────────
+
+    def _build_skill_catalog_tab(self) -> QWidget:
+        tab = QWidget(self)
+        outer = QHBoxLayout(tab)
+        outer.setContentsMargins(14, 14, 14, 14)
+        outer.setSpacing(10)
+
+        self._catalog_list = QListWidget(tab)
+        self._catalog_list.setMaximumWidth(220)
+        self._catalog_list.currentItemChanged.connect(self._on_catalog_selection_changed)
+        outer.addWidget(self._catalog_list)
+
+        right = QVBoxLayout()
+        self._catalog_overlap_label = QLabel("", tab)
+        self._catalog_overlap_label.setObjectName("toolsSubtitle")
+        self._catalog_overlap_label.setWordWrap(True)
+        right.addWidget(self._catalog_overlap_label)
+        self._catalog_preview = QTextEdit(tab)
+        self._catalog_preview.setReadOnly(True)
+        right.addWidget(self._catalog_preview)
+        outer.addLayout(right, 1)
+
+        self._catalog_docs: dict[str, str] = {}
+        self._catalog_entries: dict[str, dict] = {}
+        self._reload_skill_catalog()
+        return tab
+
+    def _reload_skill_catalog(self) -> None:
+        from . import skill_audit
+
+        docs = skill_audit.load_all_role_docs()
+        self._catalog_docs = docs
+        self._catalog_entries = {e["name"]: e for e in catalog_entries(docs)}
+        self._catalog_list.clear()
+        for name in sorted(docs):
+            self._catalog_list.addItem(name)
+        if self._catalog_list.count():
+            self._catalog_list.setCurrentRow(0)
+        else:
+            self._catalog_preview.clear()
+            self._catalog_overlap_label.setText("")
+
+    def _on_catalog_selection_changed(self, current, _previous) -> None:
+        if current is None:
+            self._catalog_preview.clear()
+            self._catalog_overlap_label.setText("")
+            return
+        name = current.text()
+        entry = self._catalog_entries.get(name, {})
+        self._catalog_preview.setPlainText(self._catalog_docs.get(name, ""))
+        overlaps = entry.get("overlaps", [])
+        if overlaps:
+            parts = ", ".join(f"{r} ({sim:.0%})" for r, sim in overlaps)
+            self._catalog_overlap_label.setText(f"⚠️ ทับซ้อนกับ: {parts}")
+        else:
+            self._catalog_overlap_label.setText("✓ ไม่ทับซ้อนกับ role อื่น")
 
     # ── shared matrix table builder ─────────────────────────────
 

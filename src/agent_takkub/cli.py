@@ -1025,14 +1025,15 @@ def _pane_tools_table(kind: str, role_filter: str | None) -> dict:
     from . import pane_tools_policy as ptp
     from . import shared_dev_tools as sdt
 
-    if role_filter is not None and role_filter not in ptp.KNOWN_ROLES:
+    known = ptp.known_roles()
+    if role_filter is not None and role_filter not in known:
         return {
             "ok": False,
-            "msg": f"unknown role {role_filter!r}. known roles: {', '.join(sorted(ptp.KNOWN_ROLES))}",
+            "msg": f"unknown role {role_filter!r}. known roles: {', '.join(sorted(known))}",
         }
 
     policy = ptp.load_policy()
-    roles = [role_filter] if role_filter else sorted(ptp.KNOWN_ROLES)
+    roles = [role_filter] if role_filter else sorted(known)
 
     mcp_defaults: dict[str, frozenset[str]] = getattr(sdt, "_ROLE_MCP_POLICY", {})
     try:
@@ -1079,7 +1080,7 @@ def cmd_mcp(args: argparse.Namespace) -> dict:
         return _pane_tools_table("mcps", args.role)
 
     if sub in ("allow", "deny"):
-        if args.role not in ptp.KNOWN_ROLES:
+        if args.role not in ptp.known_roles():
             return {"ok": False, "msg": f"unknown role {args.role!r}"}
         fn = ptp.allow_item if sub == "allow" else ptp.deny_item
         if not fn(args.role, "mcps", args.name):
@@ -1092,7 +1093,7 @@ def cmd_mcp(args: argparse.Namespace) -> dict:
         return {"ok": True, "msg": f"{sub}ed {args.name!r} for {args.role}"}
 
     if sub == "reset":
-        if args.role is not None and args.role not in ptp.KNOWN_ROLES:
+        if args.role is not None and args.role not in ptp.known_roles():
             return {"ok": False, "msg": f"unknown role {args.role!r}"}
         roles = [args.role] if args.role else sorted(ptp.load_policy().keys())
         if not roles:
@@ -1147,7 +1148,7 @@ def cmd_plugins(args: argparse.Namespace) -> dict:
         return _pane_tools_table("plugins", args.role)
 
     if sub in ("allow", "deny"):
-        if args.role not in ptp.KNOWN_ROLES:
+        if args.role not in ptp.known_roles():
             return {"ok": False, "msg": f"unknown role {args.role!r}"}
         fn = ptp.allow_item if sub == "allow" else ptp.deny_item
         if not fn(args.role, "plugins", args.name):
@@ -1160,7 +1161,7 @@ def cmd_plugins(args: argparse.Namespace) -> dict:
         return {"ok": True, "msg": f"{sub}ed {args.name!r} for {args.role}"}
 
     if sub == "reset":
-        if args.role is not None and args.role not in ptp.KNOWN_ROLES:
+        if args.role is not None and args.role not in ptp.known_roles():
             return {"ok": False, "msg": f"unknown role {args.role!r}"}
         roles = [args.role] if args.role else sorted(ptp.load_policy().keys())
         if not roles:

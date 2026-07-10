@@ -39,6 +39,7 @@ def projects_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(config, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(config, "RUNTIME_DIR", tmp_path / "runtime")
     monkeypatch.setattr(config, "AGENTS_DIR", tmp_path / ".claude" / "agents")
+    monkeypatch.setattr(config, "CUSTOM_AGENTS_DIR", tmp_path / ".takkub-agents")
     monkeypatch.setattr(config, "EVENTS_LOG", tmp_path / "runtime" / "events.log")
     monkeypatch.setattr(config, "PORT_FILE", tmp_path / "runtime" / "port")
     return pj
@@ -212,6 +213,39 @@ class TestAgentRoleDir:
             assert "QA role body" in content
         finally:
             config.AGENTS_DIR = old_agents_dir
+
+
+class TestAgentRoleDirCustomFallback:
+    """A6: agent_role_dir() falls back to CUSTOM_AGENTS_DIR (writable, unlike
+    the app-shipped AGENTS_DIR on an installed build) for user-created roles.
+    """
+
+    def test_falls_back_to_custom_agents_dir(self, projects_file: Path) -> None:
+        config.CUSTOM_AGENTS_DIR.mkdir(parents=True, exist_ok=True)
+        (config.CUSTOM_AGENTS_DIR / "data-eng.md").write_text(
+            "# Data Eng\nHandles pipelines.\n", encoding="utf-8"
+        )
+        d = config.agent_role_dir("data-eng")
+        content = (d / "CLAUDE.md").read_text(encoding="utf-8")
+        assert "Handles pipelines." in content
+        # Hygiene blocks still get appended to custom roles too.
+        assert "next build && next start" in content
+
+    def test_builtin_agents_dir_wins_on_name_collision(self, projects_file: Path) -> None:
+        # Shouldn't happen in practice (custom names are validated against
+        # built-ins), but AGENTS_DIR must still take priority if it does.
+        config.AGENTS_DIR.mkdir(parents=True, exist_ok=True)
+        (config.AGENTS_DIR / "qa.md").write_text("# Built-in QA\n", encoding="utf-8")
+        config.CUSTOM_AGENTS_DIR.mkdir(parents=True, exist_ok=True)
+        (config.CUSTOM_AGENTS_DIR / "qa.md").write_text("# Custom QA\n", encoding="utf-8")
+        d = config.agent_role_dir("qa")
+        content = (d / "CLAUDE.md").read_text(encoding="utf-8")
+        assert "Built-in QA" in content
+        assert "Custom QA" not in content
+
+    def test_no_claude_md_when_neither_dir_has_the_file(self, projects_file: Path) -> None:
+        d = config.agent_role_dir("nonexistent-role")
+        assert not (d / "CLAUDE.md").exists()
 
 
 class TestAssetsRootAndCliBinDir:

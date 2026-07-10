@@ -243,6 +243,13 @@ CLI_BIN_DIR = _resolve_cli_bin_dir()
 
 PROJECTS_JSON = DATA_HOME / "projects.json"
 AGENTS_DIR = ASSETS_ROOT / ".claude" / "agents"
+# Writable counterpart to AGENTS_DIR for user-created custom roles (A6). AGENTS_DIR
+# sits under ASSETS_ROOT, which is READ-ONLY app-shipped assets on an installed
+# build (see `_resolve_assets_root`) — a custom role's .md file can never be
+# written there. SETTINGS_HOME is always a per-user, writable dir on both dev
+# and installed builds, so custom role files live at SETTINGS_HOME/agents/
+# instead. `agent_role_dir()` checks AGENTS_DIR first, then this dir.
+CUSTOM_AGENTS_DIR = SETTINGS_HOME / "agents"
 RUNTIME_DIR = DATA_HOME / "runtime"
 PORT_FILE = RUNTIME_DIR / "port"
 EVENTS_LOG = RUNTIME_DIR / "events.log"
@@ -529,6 +536,12 @@ def agent_role_dir(role: str) -> Path:
         raise ValueError(f"role path escapes runtime: {role!r}")
     d.mkdir(parents=True, exist_ok=True)
     src = AGENTS_DIR / f"{role}.md"
+    if not src.exists():
+        # Not a built-in role file — check the writable custom-role dir
+        # (A6: user-created roles via the Role Manager dialog).
+        custom_src = CUSTOM_AGENTS_DIR / f"{role}.md"
+        if custom_src.exists():
+            src = custom_src
     if src.exists():
         # strip frontmatter (between leading --- and the next ---)
         text = src.read_text(encoding="utf-8")

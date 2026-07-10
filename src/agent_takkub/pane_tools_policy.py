@@ -55,6 +55,25 @@ KNOWN_ROLES = frozenset(
 PANE_TOOLS_POLICY_FILE = SETTINGS_HOME / "pane-tools.json"
 
 
+def known_roles() -> frozenset[str]:
+    """`KNOWN_ROLES` plus any A6 user-created custom role names.
+
+    Custom roles register themselves in ``~/.takkub/custom-roles.json``, not
+    in this module's static set — a dynamic union is what lets the Role
+    Manager dialog's skill/tool checkboxes (and `takkub mcp/plugins
+    allow|deny|reset --role <custom>`) write a policy entry for a role this
+    module has never heard of at import time. Lazy import avoids a hard
+    dependency on `custom_roles` (and its own `roles` import) for the common
+    case where every caller only ever touches built-in roles.
+    """
+    try:
+        from . import custom_roles
+
+        return KNOWN_ROLES | custom_roles.list_role_names()
+    except Exception:
+        return KNOWN_ROLES
+
+
 def _policy_dir() -> pathlib.Path:
     """Ensure ~/.takkub/ directory exists; idempotent."""
     d = PANE_TOOLS_POLICY_FILE.parent
@@ -98,7 +117,7 @@ def load_policy() -> dict[str, dict[str, list[str]]]:
     # Filter to known roles only; log if unrecognized role in file.
     out: dict[str, dict[str, list[str]]] = {}
     for role, entry in roles.items():
-        if not isinstance(role, str) or role not in KNOWN_ROLES:
+        if not isinstance(role, str) or role not in known_roles():
             if isinstance(role, str):
                 _log.debug("load_policy: skipping unknown role %r", role)
             continue
@@ -147,7 +166,7 @@ def save_policy(policy: dict[str, dict[str, list[str]]]) -> bool:
 
     # Validate input.
     for role, entry in policy.items():
-        if not isinstance(role, str) or role not in KNOWN_ROLES:
+        if not isinstance(role, str) or role not in known_roles():
             _log.warning("save_policy: rejecting invalid role %r", role)
             return False
         if not isinstance(entry, dict):
@@ -240,7 +259,7 @@ def set_role_items(role: str, kind: str, names: list[str]) -> bool:
     if kind not in ("mcps", "plugins"):
         _log.warning("set_role_items: invalid kind %r", kind)
         return False
-    if role not in KNOWN_ROLES:
+    if role not in known_roles():
         _log.warning("set_role_items: invalid role %r", role)
         return False
     if not all(isinstance(n, str) and _validate_name(n) for n in names):
@@ -259,7 +278,7 @@ def allow_item(role: str, kind: str, name: str) -> bool:
 
     Returns True on success, False on validation/I/O error.
     """
-    if kind not in ("mcps", "plugins") or role not in KNOWN_ROLES:
+    if kind not in ("mcps", "plugins") or role not in known_roles():
         return False
     if not _validate_name(name):
         _log.warning("allow_item: invalid name %r", name)
@@ -281,7 +300,7 @@ def deny_item(role: str, kind: str, name: str) -> bool:
 
     Returns True on success, False on validation/I/O error.
     """
-    if kind not in ("mcps", "plugins") or role not in KNOWN_ROLES:
+    if kind not in ("mcps", "plugins") or role not in known_roles():
         return False
     if not _validate_name(name):
         _log.warning("deny_item: invalid name %r", name)
@@ -305,7 +324,7 @@ def reset_role(role: str) -> bool:
 
     Returns True on success, False on I/O error.
     """
-    if role not in KNOWN_ROLES:
+    if role not in known_roles():
         _log.warning("reset_role: invalid role %r", role)
         return False
 

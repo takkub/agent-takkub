@@ -8,12 +8,14 @@ from pathlib import Path
 import pytest
 
 from agent_takkub.skill_audit import (
+    audit_new_role_text,
     audit_skills,
     compute_idf,
     compute_tf,
     compute_tfidf,
     cosine_similarity,
     format_report,
+    load_all_role_docs,
     load_role_docs,
     tokenize,
 )
@@ -252,3 +254,77 @@ def test_audit_skills_real_agents_dir_no_crash() -> None:
         pytest.skip(".claude/agents not found")
     result = audit_skills(agents_dir, threshold=0.5)
     assert isinstance(result, list)
+
+
+# ---------------------------------------------------------------------------
+# A6: load_all_role_docs (merged built-in + custom corpus) / audit_new_role_text
+# ---------------------------------------------------------------------------
+
+
+class TestLoadAllRoleDocs:
+    def test_merges_builtin_and_custom_dirs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from agent_takkub import config
+
+        builtin_dir = tmp_path / "builtin"
+        custom_dir = tmp_path / "custom"
+        builtin_dir.mkdir()
+        custom_dir.mkdir()
+        (builtin_dir / "backend.md").write_text("REST API database", encoding="utf-8")
+        (custom_dir / "data-eng.md").write_text("ETL pipelines warehouse", encoding="utf-8")
+        monkeypatch.setattr(config, "AGENTS_DIR", builtin_dir)
+        monkeypatch.setattr(config, "CUSTOM_AGENTS_DIR", custom_dir)
+
+        docs = load_all_role_docs()
+        assert set(docs.keys()) == {"backend", "data-eng"}
+
+    def test_custom_dir_missing_does_not_crash(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from agent_takkub import config
+
+        builtin_dir = tmp_path / "builtin"
+        builtin_dir.mkdir()
+        (builtin_dir / "backend.md").write_text("REST API", encoding="utf-8")
+        monkeypatch.setattr(config, "AGENTS_DIR", builtin_dir)
+        monkeypatch.setattr(config, "CUSTOM_AGENTS_DIR", tmp_path / "does-not-exist")
+
+        docs = load_all_role_docs()
+        assert set(docs.keys()) == {"backend"}
+
+
+class TestAuditNewRoleText:
+    def test_flags_high_overlap_with_existing_role(self) -> None:
+        # A third, unrelated doc keeps IDF from zeroing out every shared term
+        # (a term present in every doc has idf=log(N/df)=0 when df==N).
+        existing = {
+            "backend": "REST API endpoint database schema migration handler",
+            "designer": "figma color palette typography spacing layout",
+        }
+        overlaps = audit_new_role_text(
+            "shadow-backend",
+            "REST API endpoint database schema migration handler",
+            threshold=0.5,
+            existing=existing,
+        )
+        assert overlaps
+        assert overlaps[0][0] == "backend"
+        assert overlaps[0][1] >= 0.5
+
+    def test_no_overlap_for_distinct_text(self) -> None:
+        existing = {"backend": "REST API endpoint database schema migration handler"}
+        overlaps = audit_new_role_text(
+            "designer",
+            "figma color palette typography spacing layout",
+            threshold=0.6,
+            existing=existing,
+        )
+        assert overlaps == []
+
+    def test_candidate_never_compared_against_itself(self) -> None:
+        existing = {"qa": "playwright browser test smoke e2e"}
+        overlaps = audit_new_role_text(
+            "qa2", "playwright browser test smoke e2e", threshold=0.9, existing=existing
+        )
+        assert all(name != "qa2" for name, _sim in overlaps)
