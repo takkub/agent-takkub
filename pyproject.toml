@@ -52,6 +52,7 @@ agent_takkub = [
     "static/*.png",
     "static/fonts/*.ttf",
     "static/fonts/LICENSE.txt",
+    "static/icons/*.svg",
     # Staged by setup.py's custom build_py from the repo-root CLAUDE.md /
     # .claude/agents/*.md right before this list is collected — see
     # config.py's ASSETS_ROOT for the installed-vs-dev-checkout read path.
@@ -153,7 +154,6 @@ forbidden_modules = [
     "agent_takkub.gemini_helper",
     "agent_takkub.codex_helper",
     "agent_takkub.pipeline_config",
-    "agent_takkub.pipeline_dialog",
     "agent_takkub.lead_bash_audit",
     "agent_takkub.vault_graph",
     "agent_takkub.docs_verify",

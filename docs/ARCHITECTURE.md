@@ -83,7 +83,6 @@ src/agent_takkub/
 ├── provider_config.py per-role CLI mapping (claude/codex/gemini) — ~/.takkub/role-providers.json
 ├── provider_state.py  per-provider enable/disable state — ~/.takkub/disabled-providers.json
 ├── pipeline_config.py pipeline template store (feature/design/quickfix) — ~/.takkub/pipelines.json
-├── pipeline_dialog.py UI bridge for pipeline/role settings (Qt ↔ HTML/JS)
 ├── plan_tier.py       account plan tier (Pro vs Max) — gates [1m] model variant — ~/.takkub/plan.json
 ├── codex_helper.py    OpenAI Codex CLI one-shot wrapper (non-interactive)
 ├── gemini_helper.py   Google Antigravity CLI (`agy`) one-shot wrapper — backs `gemini` role (mirror of codex_helper)

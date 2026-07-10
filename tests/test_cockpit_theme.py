@@ -114,6 +114,48 @@ class TestBuildStylesheet:
         qss = cockpit_theme.build_stylesheet("Sans", "Mono")
         assert "#navIndicator" in qss
 
+    def test_spinbox_arrows_use_svg_image_not_border_triangle(self) -> None:
+        """Critic #2026-07-10 v2 (bug #3 loop 2) — Qt stylesheets do not
+        render ::up-arrow/::down-arrow from border-* (that's a CSS-only
+        trick); Qt only draws sub-control arrows from image:/border-image:.
+        The old border-triangle QSS left the New Role QSpinBox arrows
+        invisible on a real display even though tofu-only tests passed."""
+        qss = cockpit_theme.build_stylesheet("Sans", "Mono")
+        assert "QSpinBox::up-arrow" in qss
+        assert "QSpinBox::down-arrow" in qss
+        assert "image: url(" in qss
+        # the old broken approaches must be gone, not just additively present
+        assert "border-bottom: 5px solid" not in qss
+        assert "border-top: 5px solid" not in qss
+
+    def test_spinbox_arrow_uses_real_svg_file_not_data_uri(self) -> None:
+        """Critic #2026-07-10 v3 (bug #3 loop 3) — pixel-measured proof that
+        Qt QSS url(data:image/svg+xml;...) does NOT render (0 bright pixels
+        in the button strip on a real display, both utf8 and base64
+        encodings); only url() pointing at a real file on disk rendered the
+        glyph (evidence-spinbox-filefix-works.png). The data-URI approach
+        must be fully gone, replaced by a real file path."""
+        qss = cockpit_theme.build_stylesheet("Sans", "Mono")
+        assert "data:image/svg+xml" not in qss
+        assert "spin-up.svg" in qss
+        assert "spin-down.svg" in qss
+        # as_posix() must be used — a raw Windows path would leak backslashes
+        # into the QSS url(), which Qt's stylesheet parser does not accept.
+        assert "\\" not in qss
+
+    def test_spinbox_arrow_svg_files_exist_on_disk(self) -> None:
+        """The QSS references image: url("<path>") — the referenced files
+        must actually exist on disk at build_stylesheet() time, not just be
+        a plausible-looking path string."""
+        icons_dir = Path(cockpit_theme.__file__).parent / "static" / "icons"
+        for name in (
+            "spin-up.svg",
+            "spin-down.svg",
+            "spin-up-disabled.svg",
+            "spin-down-disabled.svg",
+        ):
+            assert (icons_dir / name).exists()
+
 
 class TestGoldButtonGlow:
     def test_gold_button_has_drop_shadow_effect(self) -> None:
@@ -172,3 +214,12 @@ class TestWidgetHelpers:
     def test_gold_soft_chip_shows_text(self) -> None:
         chip = cockpit_theme.gold_soft_chip("feature")
         assert chip.text() == "feature"
+
+    def test_gold_soft_chip_compact_uses_smaller_padding_and_font(self) -> None:
+        """Critic #2026-07-10 v2 — the BUILT-IN chip in a narrow Templates
+        list row was crowding out the template name; compact=True must
+        shrink its footprint, not just be a no-op alias."""
+        default_chip = cockpit_theme.gold_soft_chip("BUILT-IN")
+        compact_chip = cockpit_theme.gold_soft_chip("BUILT-IN", compact=True)
+        assert "10px" in compact_chip.styleSheet()
+        assert compact_chip.styleSheet() != default_chip.styleSheet()

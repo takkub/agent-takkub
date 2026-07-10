@@ -130,57 +130,24 @@ class UserActionsMixin:
     """Mixin for cockpit toolbar / status-bar button handlers."""
 
     # ──────────────────────────────────────────────────────────────
-    # pipeline settings dialog + menu
+    # user-profile menu
     # ──────────────────────────────────────────────────────────────
 
-    def _open_pipeline_settings_dialog(self) -> None:
-        """Open the pipeline-settings dialog (drag-drop hops, templates,
-        provider/role enable) for the **active project**. On Save & Apply the
-        page persists templates + per-role enable + per-role CLI to that
-        project's files under `~/.takkub/projects/<project>/` via the bridge
-        (so tabs don't collide), and stashes the desired provider on/off. We
-        then route any *changed* provider through `orchestrator.toggle_provider`
-        — which stays GLOBAL (`disabled-providers.json`) — so it repaints the
-        status-bar chip AND broadcasts the `[system]` notice to live Lead panes,
-        identical to a chip click. Cancel / window-close discards (Rejected).
-        """
-        from .pipeline_dialog import PipelineSettingsDialog
-        from .provider_state import is_disabled
-
-        try:
-            from .config import active_project as _active_project
-
-            _proj, _ = _active_project()
-        except Exception:
-            _proj = None
-
-        dlg = PipelineSettingsDialog(self, project=_proj)
-        if dlg.exec() != dlg.DialogCode.Accepted:
-            return
-        # Apply only providers whose target state differs from disk — toggle_provider
-        # always broadcasts, so a no-op call would spam Lead panes spuriously.
-        for provider, target_disabled in dlg.bridge.pending_provider_disabled.items():
-            if target_disabled != is_disabled(provider):
-                self.orch.toggle_provider(provider, target_disabled)
-        self._status.showMessage(
-            "Pipeline settings saved — applies to the next pane you spawn.",
-            6_000,
-        )
-
     def _show_pipelines_menu(self, *_args) -> None:
-        """Show the Pipeline Settings / user-profile drop-down menu.
+        """Show the user-profile drop-down menu.
 
         A6-redesign moved this off the 👥 Team chip's left-click (now
         ``_on_team_chip_clicked`` — straight to Team & Roles) onto its
         RIGHT-click (``customContextMenuRequested``, which passes a QPoint
         this method ignores in favor of anchoring off the button's own rect).
         Built fresh on every click so user-profile state is always current.
-        Menu sections:
-          1. Pipeline Settings…
+        "Pipeline Settings…" used to be the first section here, opening
+        :class:`pipeline_dialog.PipelineSettingsDialog`; removed 2026-07-10 —
+        100% redundant with 👥 Team's own Pipeline Builder / Templates views
+        (see settings_window.py). Menu sections:
+          1. User profiles (checkable, one per profile)
           ─────────────────
-          2. User profiles (checkable, one per profile)
-          ─────────────────
-          3. Add / Remove user… (now includes Claude Auth tab)
+          2. Add / Remove user… (now includes Claude Auth tab)
         """
         from PyQt6.QtGui import QAction
         from PyQt6.QtWidgets import QMenu
@@ -195,12 +162,6 @@ class UserActionsMixin:
             _proj = None
 
         menu = QMenu(self)
-
-        act_pipeline = QAction("Pipeline Settings…", self)
-        act_pipeline.triggered.connect(self._open_pipeline_settings_dialog)
-        menu.addAction(act_pipeline)
-
-        menu.addSeparator()
 
         current_profile = user_profile.profile_for(_proj or "")
         for profile in user_profile.list_profiles():
@@ -329,21 +290,16 @@ class UserActionsMixin:
     # broadcast actions (UI review, shell, bug check, doctor)
     # ──────────────────────────────────────────────────────────────
 
-    def _on_pane_tools_clicked(self) -> None:
-        """🔧 Tools button: open the role x MCP/plugin policy matrix editor."""
-        from .pane_tools_dialog import PaneToolsDialog
-
-        dlg = PaneToolsDialog(self)
-        dlg.exec()
-
     def _on_team_chip_clicked(self) -> None:
-        """👥 Team chip: open the new gold/IBM-Plex Settings window straight to
-        "Providers & Roles" (design system, 2026-07-10 — supersedes the old
-        PaneToolsDialog "Team & Roles" tab for this entry point; that dialog
-        is kept alive for 🔧 Tools / MCP-Plugins-Skill editing during the
-        Phase 1→2 transition, see settings_window.py's module docstring).
-        Right-click on the same chip still reaches Pipeline Settings / user
-        profile switch / Add-Remove-user via ``_show_pipelines_menu``."""
+        """👥 Team chip: open the gold/IBM-Plex Settings window straight to
+        "Providers & Roles" (design system, 2026-07-10 — fully supersedes the
+        old standalone "🔧 Tools" PaneToolsDialog, removed the same day; this
+        SettingsWindow is now the single place for MCP/Plugins/Team&Roles
+        editing, see settings_window.py's module docstring).
+        Right-click on the same chip still reaches user profile switch /
+        Add-Remove-user via ``_show_pipelines_menu`` ("Pipeline Settings…"
+        used to be the first section there — removed 2026-07-10, redundant
+        with this same window's Pipeline Builder / Templates views)."""
         from .provider_state import is_disabled
         from .settings_window import VIEW_PROVIDERS_ROLES, SettingsWindow
 
@@ -896,12 +852,12 @@ def open_user_profiles_dialog(
     parent: QWidget, on_status: Callable[[str], None] | None = None
 ) -> None:
     """The "User Profiles & Claude Auth" dialog (Add/Remove user + per-profile
-    Claude Auth overrides) — a free function (not a MainWindow method) so it
-    can be reused from both the 👥 Team chip's right-click menu
-    (`UserActionsMixin._on_add_user_clicked`) and `PaneToolsDialog`'s Team &
-    Roles tab ("Users / บัญชี" section) without duplicating this ~350-line
-    dialog. *on_status*, if given, receives a one-line status string instead
-    of this function assuming a `self._status` status bar exists on *parent*.
+    Claude Auth overrides) — a free function (not a MainWindow method), reached
+    via the 👥 Team chip's right-click menu (`UserActionsMixin._on_add_user_clicked`).
+    Previously also reused by the now-removed `PaneToolsDialog`'s Team & Roles
+    tab ("Users / บัญชี" section, 2026-07-10). *on_status*, if given, receives
+    a one-line status string instead of this function assuming a
+    `self._status` status bar exists on *parent*.
     """
     from pathlib import Path
 

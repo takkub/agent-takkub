@@ -190,7 +190,7 @@ takkub issue new "<title>" --no-cockpit-bug --body "..."  # opt-out: ลง repo
 ## Tooling ที่ pane มี
 
 - **superpowers / agent-skills** — skill libraries เรียกผ่าน `/skill-name`
-- **MCP servers + plugins ต่อ role = policy เดียว** (`~/.takkub/pane-tools.json` · module `pane_tools_policy.py`) — default: qa/critic/designer ได้ playwright + chrome-devtools, role อื่นไม่มี MCP เลย (ประหยัด ~15k tokens/pane) · ปรับได้ 3 ทาง: แก้ไฟล์ตรง / `takkub mcp|plugins list·allow·deny·reset·add·remove` (mutation lead-only) / chip **🔧 Tools** ใน status bar (matrix + install form) · มีผลกับ pane ที่ spawn ใหม่ทันที · **user-level `~/.claude.json` mcpServers ไม่เข้า pane เด็ดขาด** (`--strict-mcp-config` + `--setting-sources project,local`)
+- **MCP servers + plugins ต่อ role = policy เดียว** (`~/.takkub/pane-tools.json` · module `pane_tools_policy.py`) — default: qa/critic/designer ได้ playwright + chrome-devtools, role อื่นไม่มี MCP เลย (ประหยัด ~15k tokens/pane) · ปรับได้ 3 ทาง: แก้ไฟล์ตรง / `takkub mcp|plugins list·allow·deny·reset·add·remove` (mutation lead-only) / chip **👥 Team → MCP Matrix / Plugins Matrix** ใน status bar (matrix + install form — เดิมเป็นปุ่ม 🔧 Tools แยก ถูกรวมเข้า 👥 Team's SettingsWindow แล้ว 2026-07-10) · มีผลกับ pane ที่ spawn ใหม่ทันที · **user-level `~/.claude.json` mcpServers ไม่เข้า pane เด็ดขาด** (`--strict-mcp-config` + `--setting-sources project,local`)
 - **MCP timeout** — `MCP_TOOL_TIMEOUT=180000` (3 นาที) inject ทุก pane โดย default — กัน browser MCP timeout 60s ที่ทำ Lighthouse audit/page load พังบ่อย override ที่ cockpit env ได้ถ้าต้องการ
 - **rtk CLI** — token-optimized wrappers (ดูรายละเอียดใน `~/.claude/CLAUDE.md`)
 

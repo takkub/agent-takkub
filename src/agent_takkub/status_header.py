@@ -410,17 +410,6 @@ class StatusHeaderMixin:
         self._chip_remote.clicked.connect(self._on_remote_chip_clicked)
         self._refresh_remote_chip()
 
-        # 🔧 Pane Tools: opens the role x MCP/plugin policy matrix editor.
-        # Sits next to the exec-mode chip since both are "how panes get
-        # spawned" settings. Handler + dialog live in pane_tools_dialog.py.
-        self._btn_pane_tools = QPushButton("🔧 Tools", self)
-        self._btn_pane_tools.setToolTip(
-            "Configure which MCP servers and plugins each role's panes get.\n"
-            "Applies to the next pane you spawn for that role, no restart needed."
-        )
-        self._btn_pane_tools.setStyleSheet(self._ghost_button_style())
-        self._btn_pane_tools.clicked.connect(self._on_pane_tools_clicked)
-
         # Self-update chip. Polls `git fetch` + `git status` every 5 min
         # so a user that pulled their friend's commit from another machine
         # sees the update light up here without needing to touch a
@@ -535,16 +524,21 @@ class StatusHeaderMixin:
         self._chip_tasks.clicked.connect(lambda: self._on_toggle_tasks(None))
 
         # 👥 Team chip (A6-redesign, renamed from "⚙ Pipelines"): opens the
-        # 🔧 Tools dialog straight to its "Team & Roles" tab — team roster +
-        # guided custom-role create, the thing users actually reach for here.
-        # Pipeline Settings / user-profile switch / Add-Remove-user (Claude
-        # Auth) used to live in this chip's left-click dropdown; they still
-        # exist (nothing was deleted) but the dropdown moved to RIGHT-click so
-        # the common case (manage the team) is a single click, not a menu.
+        # gold/IBM-Plex SettingsWindow straight to "Providers & Roles" — team
+        # roster + guided custom-role create, the thing users actually reach
+        # for here (see user_actions._on_team_chip_clicked; the old standalone
+        # "🔧 Tools" dialog it used to open was removed 2026-07-10, superseded
+        # 100% by this same SettingsWindow). User-profile switch / Add-Remove-user
+        # (Claude Auth) used to live in this chip's left-click dropdown alongside
+        # "Pipeline Settings…"; that menu item (and the standalone
+        # PipelineSettingsDialog it opened) was removed 2026-07-10 — 100%
+        # redundant with 👥 Team's own Pipeline Builder / Templates views. The
+        # profile-switch section stayed on RIGHT-click so the common case
+        # (manage the team) is a single click, not a menu.
         self._btn_pipelines = QPushButton("👥 Team", self)
         self._btn_pipelines.setToolTip(
             "Click: open Team & Roles (roster + create a custom role).\n"
-            "Right-click: Pipeline Settings, switch user profile, Add/Remove user."
+            "Right-click: switch user profile, Add/Remove user."
         )
         self._btn_pipelines.setStyleSheet(self._ghost_button_style())
         self._btn_pipelines.clicked.connect(self._on_team_chip_clicked)
@@ -554,7 +548,7 @@ class StatusHeaderMixin:
         # ▶ Run button removed per user request — it rendered as a stray widget
         # at the window origin (parent=self, never placed in a layout) and
         # covered the first project tab. Pipelines are still fired via the
-        # Pipeline Settings editor (👥 Team chip right-click) + orch.run_pipeline(id) / CLI.
+        # Pipeline Builder / Templates views (👥 Team chip left-click) + orch.run_pipeline(id) / CLI.
 
         self._btn_claude_auth = QPushButton("Claude Auth", self)
         self._btn_claude_auth.setToolTip(
@@ -606,7 +600,6 @@ class StatusHeaderMixin:
             self._chip_exec_mode,
             self._chip_auto_resume,
             self._chip_remote,
-            self._btn_pane_tools,
             self._chip_codex,
             self._chip_gemini,
             self._btn_install_rtk,

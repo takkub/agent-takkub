@@ -231,6 +231,14 @@ def ensure_fonts_loaded() -> dict[str, object]:
 def build_stylesheet(sans_family: str, mono_family: str) -> str:
     """Return the full QSS for the Settings window, parameterized by the
     resolved font families (bundled IBM Plex or the platform fallback)."""
+    # Qt QSS's url(data:image/svg+xml;...) does not render (proven by pixel
+    # measurement — see docs/design-review/2026-07-10-settings-ui-visual-critic.md
+    # round 3): only url() pointing at a real file on disk renders the glyph.
+    _icons_dir = Path(__file__).parent / "static" / "icons"
+    _up_arrow_svg = (_icons_dir / "spin-up.svg").as_posix()
+    _down_arrow_svg = (_icons_dir / "spin-down.svg").as_posix()
+    _up_arrow_svg_disabled = (_icons_dir / "spin-up-disabled.svg").as_posix()
+    _down_arrow_svg_disabled = (_icons_dir / "spin-down-disabled.svg").as_posix()
     return f"""
     QDialog#settingsWindow {{
         background: {GROUND_WINDOW};
@@ -438,6 +446,39 @@ def build_stylesheet(sans_family: str, mono_family: str) -> str:
     QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
         background: {BORDER_STRONG};
     }}
+    QSpinBox::up-arrow {{
+        image: url("{_up_arrow_svg}");
+        width: 8px;
+        height: 5px;
+    }}
+    QSpinBox::up-arrow:disabled {{
+        image: url("{_up_arrow_svg_disabled}");
+    }}
+    QSpinBox::down-arrow {{
+        image: url("{_down_arrow_svg}");
+        width: 8px;
+        height: 5px;
+    }}
+    QSpinBox::down-arrow:disabled {{
+        image: url("{_down_arrow_svg_disabled}");
+    }}
+    QListWidget {{
+        background: {GROUND_PANEL};
+        border: 1px solid {BORDER_MED};
+        border-radius: {RADIUS_SM}px;
+        color: {TEXT_PRIMARY};
+        outline: none;
+    }}
+    QListWidget::item {{
+        padding: 6px 8px;
+    }}
+    QListWidget::item:selected {{
+        background: {GROUND_SELECT};
+        color: {TEXT_PRIMARY};
+    }}
+    QListWidget::item:hover {{
+        background: {GROUND_INPUT};
+    }}
     QScrollBar:vertical {{
         background: transparent;
         width: 10px;
@@ -593,13 +634,26 @@ def role_chip(label: str, color: str, parent: QWidget | None = None) -> QWidget:
     return chip
 
 
-def gold_soft_chip(text: str, parent: QWidget | None = None) -> QLabel:
-    """The gold "soft chip" — e.g. the active-template badge in the status strip."""
+#: Horizontal padding + border of the `compact=True` gold_soft_chip, in px —
+#: kept as a constant so callers that need to reserve layout space for the
+#: chip (e.g. eliding a sibling label) can compute its width without a shown
+#: widget (see settings_window._compact_chip_width).
+COMPACT_CHIP_HPAD = 6 * 2
+COMPACT_CHIP_BORDER = 1 * 2
+
+
+def gold_soft_chip(text: str, parent: QWidget | None = None, *, compact: bool = False) -> QLabel:
+    """The gold "soft chip" — e.g. the active-template badge in the status strip.
+
+    ``compact=True`` shrinks padding/font-size for tight spaces (e.g. a
+    QListWidget row) so it stops crowding out the sibling label's text."""
     mono = ensure_fonts_loaded()["mono"]
     chip = QLabel(text, parent)
+    pad = f"1px {COMPACT_CHIP_HPAD // 2}px" if compact else "2px 10px"
+    font_size = "10px" if compact else "11px"
     chip.setStyleSheet(
         f'font-family: "{mono}"; background: {GOLD_CHIP_BG}; border: 1px solid {GOLD_CHIP_BORDER};'
-        f" border-radius: 999px; color: {GOLD_CHIP_TEXT}; padding: 2px 10px;"
-        f" font-size: 11px; font-weight: 600;"
+        f" border-radius: 999px; color: {GOLD_CHIP_TEXT}; padding: {pad};"
+        f" font-size: {font_size}; font-weight: 600;"
     )
     return chip

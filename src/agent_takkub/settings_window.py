@@ -9,12 +9,13 @@ Phase 1 wired **Providers & Roles** and **New Role**. Phase 2 wires the
 remaining five:
 
 * **MCP Matrix** / **Plugins Matrix** — native ``QGridLayout`` role×item
-  toggle grids, backed by the SAME pure logic :mod:`pane_tools_dialog`'s old
-  teal dialog uses (``build_matrix``/``matrix_to_role_items``/
+  toggle grids, backed by the pure per-role policy helpers in
+  :mod:`pane_tools_dialog` (``build_matrix``/``matrix_to_role_items``/
   ``diff_role_items``/``discover_marketplaces``/``master_mcps``/
-  ``policy_role_items`` — module-level functions on that module, not
-  duplicated here) so both surfaces read/write :mod:`pane_tools_policy`
-  identically. Plugins Matrix keeps the denylist banner (security-guidance/
+  ``policy_role_items`` — module-level functions, no Qt) so this view reads/
+  writes :mod:`pane_tools_policy` identically to how the old standalone
+  "🔧 Tools" dialog did before it was removed (2026-07-10, fully superseded
+  by this window). Plugins Matrix keeps the denylist banner (security-guidance/
   remember are never toggleable — see :mod:`lead_context`'s
   ``_PANE_PLUGIN_DENYLIST``, enforced at pane-spawn time, not in this UI).
 * **Skill Catalog** — role list + read-only mono doc viewer, backed by
@@ -32,10 +33,14 @@ remaining five:
   defaults the matching dev/support-column built-in roles get; unchecked →
   an explicit empty policy the operator configures via the Matrix views).
 
-:mod:`pipeline_dialog` (the old Pipeline Settings page) and
-:mod:`pane_tools_dialog` (🔧 Tools) are kept alive per the task spec (not
-deleted) — both still work as an alternate entry point to the same
-underlying config.
+:mod:`pipeline_dialog` (the old Pipeline Settings page, still reachable via
+the 👥 Team chip's right-click menu — see :mod:`user_actions`'s
+``_show_pipelines_menu``) is kept alive as an alternate entry point to the
+same underlying config. The old standalone "🔧 Tools" dialog
+(:mod:`pane_tools_dialog`'s ``PaneToolsDialog`` — 100% redundant with this
+window's Providers & Roles / MCP Matrix / Plugins Matrix / Skill Catalog /
+New Role views) was removed 2026-07-10; only its pure per-role policy
+helper functions remain in that module, imported below.
 
 **Import constraint:** mirrors ``pane_tools_dialog``'s — this module MUST NOT
 import ``app`` or ``cli`` (plain UI dialog, no engine/CLI coupling).
@@ -43,8 +48,8 @@ import ``app`` or ``cli`` (plain UI dialog, no engine/CLI coupling).
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QLocale, Qt
-from PyQt6.QtGui import QColor
+from PyQt6.QtCore import QLocale, QSize, Qt
+from PyQt6.QtGui import QFontMetrics
 from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -153,8 +158,9 @@ _NEW_ROLE_COLUMN_MCPS: dict[int, frozenset[str]] = {
 
 class SettingsWindow(QDialog):
     """The unified Settings window. One instance per open — construct fresh
-    each time (mirrors ``PaneToolsDialog``/``PipelineSettingsDialog``, no
-    singleton/caching), so it always reflects on-disk state at open time."""
+    each time (mirrors the old, now-removed ``PaneToolsDialog``/
+    ``PipelineSettingsDialog``'s no-singleton/no-caching pattern), so it
+    always reflects on-disk state at open time."""
 
     def __init__(
         self,
@@ -1510,6 +1516,7 @@ class SettingsWindow(QDialog):
         self._tpl_list.currentItemChanged.connect(self._on_template_selected)
         list_lay.addWidget(self._tpl_list)
         lay.addWidget(list_panel)
+        lay.setAlignment(list_panel, Qt.AlignmentFlag.AlignTop)
 
         detail_panel = QWidget(view)
         detail_panel.setObjectName("panel")
@@ -1545,17 +1552,64 @@ class SettingsWindow(QDialog):
         self._reload_templates_list()
         return view
 
+    _TPL_ROW_HEIGHT = 34
+    # list_panel.setFixedWidth(220) in _build_templates_view — the panel's
+    # width never changes, so the label's available width can be computed
+    # once here instead of chasing live resize events.
+    _TPL_LIST_PANEL_WIDTH = 220
+    _TPL_LIST_ROW_PADDING = 6 + 6 + 6 + 6 + 2  # list_lay margins + row_lay margins + border
+
+    @staticmethod
+    def _compact_chip_width(metrics: QFontMetrics, text: str) -> int:
+        """Predicted pixel width of a `gold_soft_chip(..., compact=True)` —
+        mirrors its QSS padding/border so callers can reserve layout space
+        for it without needing a shown widget (critic #2026-07-10 v2:
+        BUILT-IN chip was crowding out the template name)."""
+        return (
+            metrics.horizontalAdvance(text)
+            + cockpit_theme.COMPACT_CHIP_HPAD
+            + cockpit_theme.COMPACT_CHIP_BORDER
+        )
+
+    @staticmethod
+    def _elide_template_name(metrics: QFontMetrics, name: str, avail_width: int) -> str:
+        """Ellipsize `name` to fit `avail_width` px — critic #2026-07-10 v2:
+        the raw QLabel used to hard-clip mid-glyph ("Feature (UI+API)" -> "Feature (UI+AP")
+        instead of showing "…"."""
+        return metrics.elidedText(name, Qt.TextElideMode.ElideRight, max(avail_width, 0))
+
     def _reload_templates_list(self) -> None:
         self._tpl_list.blockSignals(True)
         self._tpl_list.clear()
+        metrics = QFontMetrics(self._tpl_list.font())
+        row_spacing = 6
         for t in self._pipeline_payload.get("templates", []):
-            text = t["name"] + ("  ·  BUILT-IN" if t.get("builtin") else "")
-            item = QListWidgetItem(text, self._tpl_list)
+            item = QListWidgetItem(self._tpl_list)
             item.setData(Qt.ItemDataRole.UserRole, t["id"])
-            if t.get("builtin"):
-                item.setForeground(QColor(cockpit_theme.ACCENT_GOLD))
+            item.setSizeHint(QSize(0, self._TPL_ROW_HEIGHT))
+            row = QWidget(self._tpl_list)
+            row_lay = QHBoxLayout(row)
+            row_lay.setContentsMargins(6, 0, 6, 0)
+            row_lay.setSpacing(row_spacing)
+
+            builtin = bool(t.get("builtin"))
+            chip_width = (
+                self._compact_chip_width(metrics, "BUILT-IN") + row_spacing if builtin else 0
+            )
+            avail = self._TPL_LIST_PANEL_WIDTH - self._TPL_LIST_ROW_PADDING - chip_width
+            name_label = QLabel(self._elide_template_name(metrics, t["name"], avail), row)
+            name_label.setToolTip(t["name"])
+            row_lay.addWidget(name_label, 1)
+            if builtin:
+                row_lay.addWidget(cockpit_theme.gold_soft_chip("BUILT-IN", row, compact=True))
+            self._tpl_list.setItemWidget(item, row)
         self._tpl_list.blockSignals(False)
-        if self._tpl_list.count():
+        # Cap the list's height to fit its item count instead of stretching
+        # to the row's full height (critic #2026-07-10: 600px panel with 3
+        # items) — the +8 covers the panel's 6px top/bottom content margins.
+        count = self._tpl_list.count()
+        self._tpl_list.setMaximumHeight(max(count, 1) * self._TPL_ROW_HEIGHT + 8)
+        if count:
             self._tpl_list.setCurrentRow(0)
         else:
             self._on_template_selected(None, None)

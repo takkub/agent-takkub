@@ -476,3 +476,47 @@ class TestTemplatesView:
         dlg._on_template_edit_hops_clicked()
         assert dlg._stack.currentIndex() == settings_window.VIEW_PIPELINE_BUILDER
         dlg.deleteLater()
+
+    def test_long_template_name_is_elided_not_hard_clipped(self) -> None:
+        """Critic #2026-07-10 v2 regression — 'Feature (UI+API)' rendered as
+        'Feature (UI+AP' (clipped mid-glyph, no ellipsis) because the
+        fixed-width BUILT-IN chip left too little room for the label."""
+        from PyQt6.QtGui import QFontMetrics
+
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_TEMPLATES)
+        metrics = QFontMetrics(dlg._tpl_list.font())
+        long_name = "A Very Long Template Name That Cannot Possibly Fit (UI+API)"
+        elided = dlg._elide_template_name(metrics, long_name, avail_width=60)
+        assert elided != long_name
+        assert elided.endswith("…")  # real ellipsis, not a mid-word hard clip
+        assert long_name.startswith(elided[:-1])
+        dlg.deleteLater()
+
+    def test_short_template_name_not_elided(self) -> None:
+        from PyQt6.QtGui import QFontMetrics
+
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_TEMPLATES)
+        metrics = QFontMetrics(dlg._tpl_list.font())
+        short_name = "Blank"
+        elided = dlg._elide_template_name(metrics, short_name, avail_width=500)
+        assert elided == short_name
+        dlg.deleteLater()
+
+    def test_compact_chip_width_reserves_space_for_builtin_badge(self) -> None:
+        from PyQt6.QtGui import QFontMetrics
+
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_TEMPLATES)
+        metrics = QFontMetrics(dlg._tpl_list.font())
+        width = dlg._compact_chip_width(metrics, "BUILT-IN")
+        assert width > metrics.horizontalAdvance("BUILT-IN")
+        dlg.deleteLater()
+
+    def test_builtin_row_label_carries_full_name_as_tooltip(self) -> None:
+        """Even when elided, the full name must stay reachable (tooltip) —
+        eliding must not be a silent data loss."""
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_TEMPLATES)
+        first_tpl = dlg._pipeline_payload["templates"][0]
+        row_widget = dlg._tpl_list.itemWidget(dlg._tpl_list.item(0))
+        name_label = row_widget.layout().itemAt(0).widget()
+        assert name_label.toolTip() == first_tpl["name"]
+        dlg.deleteLater()

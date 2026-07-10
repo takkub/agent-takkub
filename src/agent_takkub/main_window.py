@@ -533,10 +533,10 @@ class MainWindow(
                 "งานใหญ่หลายส่วนเปิด Multi แล้วจบไวขึ้น",
             ),
             TutorialStep(
-                lambda: getattr(self, "_btn_pane_tools", None),
-                "4 · Tools",
+                lambda: getattr(self, "_btn_pipelines", None),
+                "4 · Team",
                 "ตั้งค่าว่าแต่ละ role จะได้ MCP / plugin อะไรบ้าง (เช่น browser automation ให้ QA) "
-                "มีผลกับ pane ที่ spawn ใหม่ทันที",
+                "หรือสร้าง role ใหม่ — มีผลกับ pane ที่ spawn ใหม่ทันที",
             ),
             TutorialStep(
                 lambda: getattr(self, "_btn_doctor", None),

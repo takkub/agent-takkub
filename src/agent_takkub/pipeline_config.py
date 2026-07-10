@@ -6,8 +6,12 @@ per-role enable/disable map and the active-template pointer.
 
 It deliberately does **not** own provider (codex/gemini) enable/disable — that
 lives in :mod:`provider_state` (``disabled-providers.json``) so the status-bar
-toggle and the Pipeline-Settings dialog share one source of truth. The dialog
-bridge (:mod:`pipeline_dialog`) composes the two on load and splits them on save.
+toggle and the 👥 Team chip's Pipeline Builder / Templates views (see
+:mod:`settings_window`) share one source of truth. ``with_providers`` /
+``provider_disabled_targets`` compose the two — used by the old standalone
+Pipeline-Settings dialog (:mod:`pipeline_dialog`, removed 2026-07-10); kept
+here (still covered by tests) as the documented seam for any future caller
+that needs the same provider on/off ↔ pipeline-payload composition.
 
 File shape (matches the settings page's JS ``STATE`` / ``TEMPLATES`` 1:1)::
 
