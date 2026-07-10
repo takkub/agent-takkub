@@ -420,7 +420,6 @@ Cockpit อ่าน `~/.claude/projects/<encoded>/*.jsonl` (Claude Code's sessi
 | `TAKKUB_TEAMMATE_EFFORT` | บังคับ effort ให้ **ทุก role** (override per-role tier; default per-role: reviewer/critic/backend/devops→`high`, อื่นๆ→`medium`) |
 | `TAKKUB_TEAMMATE_FALLBACK` | claude `--fallback-model` ของ teammate ตอน overload/not-found (default `claude-haiku-4-5`, `""` = ปิด) |
 | `TAKKUB_LEAD_FALLBACK` | claude `--fallback-model` ของ Lead ตอน overload/not-found (default `claude-sonnet-5`, `""` = ปิด) |
-| `TAKKUB_AUTO_REMOTE_CONTROL=0` | skip auto `/remote-control` ใน Lead |
 | `TAKKUB_ALLOW_TASK=1` | un-block built-in `Task` tool ให้ panes (default block, ใช้ `takkub assign` แทน) |
 
 ตั้ง env vars **ก่อน** launch cockpit จาก terminal เดียวกัน, หรือใส่ใน Windows system env vars

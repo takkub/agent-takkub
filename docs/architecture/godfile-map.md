@@ -110,12 +110,7 @@ UI god-object เดินสายทุก subsystem. ส่วนใหญ่
 - เก็บ `_ensure_teammate_pane`, `_remove_teammate_pane`, `_on_cross_tab_done`, `_track_pane_request` **ไว้กับ** tab-lifecycle (mutate ProjectTab map เดียวกัน)
 - tab: `_current_tab`, `lead_pane`, `teammate_panes`, `teammate_split`, `main_split`, `_tab_for_project`, `_open_project_tab`, `_on_new_tab_clicked`, `_on_tab_close_requested`, `_on_tab_switched`, `_on_tab_bar_clicked`, `_plus_tab_index`, `_persist_open_tabs`, `_open_projects`, `_refresh_project_list`, `_on_project_changed`, `_restart_lead_for_active_project`, `_respawn_lead_post_restart`, `_on_tab_bar_context_menu`
 - bridge: `_boot`, `_spawn_lead_when_quiet`, `_restore_teammates_from_snapshot`, `_notify_agent_done`, `keyPressEvent`, `_install_shortcuts`, `_tick_heartbeat`, `_restore_window_state`, `_save_window_state`, `closeEvent`, `_on_toggle_logs`, `_show_help`
-- `/remote-control` auto-bridge (#4, 2026-07-09 core-upgrade plan) **moved out of main_window** into
-  `SpawnEngineMixin._maybe_fire_remote_bridge` (spawn_engine.py) — fires after every successful Lead
-  spawn (`spawn()`'s success path), deduped by `project_ns::session_uuid` in
-  `Orchestrator._lead_remote_bridge_fired`. `_on_pane_resumed`/`_on_lead_input`/`paneResumed` and the
-  project-only `_lead_first_input_fired` dedupe set are gone; main_window no longer has any wiring for
-  this feature.
+- `/remote-control` auto-bridge (#4) — **REMOVED 2026-07-10** (ตีกับ `/resume` picker ที่ paint พร้อมกันแล้ว Enter cancel — 2-วัน saga). ผู้ใช้พิมพ์ `/remote-control` + `/resume` เองแทน. `_maybe_fire_remote_bridge`/`_reap_remote_bridge`/`is_at_resume_picker` + dedupe sets (`_lead_remote_bridge_fired` ฯลฯ) ถูกลบหมด; generic `inject_slash_command_when_ready` ใน lead_inbox.py ยังอยู่แต่ไม่มี caller.
 
 ---
 
