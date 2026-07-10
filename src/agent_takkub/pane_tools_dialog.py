@@ -530,6 +530,34 @@ class PaneToolsDialog(QDialog):
         self._btn_close.clicked.connect(self.reject)
         layout.addWidget(buttons)
 
+    # ── responsive tool-card grids (guided-create step 2) ──────────
+    # 2 columns fits the dialog's default width; below 600px a 2nd column
+    # leaves each card too narrow for its name+hint and they clip/overlap.
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._adjust_grids()
+
+    def _adjust_grids(self) -> None:
+        # Guard: __init__ calls self.resize() before the Team & Roles tab
+        # (and its grids) exist — a resizeEvent that lands in that window
+        # must no-op instead of raising.
+        if not hasattr(self, "_nr_mcp_grid"):
+            return
+        cols = 1 if self.width() < 600 else 2
+        self._regrid_cards(self._nr_mcp_grid, self._nr_mcp_cards, cols)
+        self._regrid_cards(self._nr_plugin_grid, self._nr_plugin_cards, cols)
+
+    @staticmethod
+    def _regrid_cards(grid: QGridLayout, cards: list[_ToolCard], target_cols: int) -> None:
+        # Detach before re-adding — QGridLayout can leave a stale cell entry
+        # behind if a widget is re-added to a different cell without first
+        # being removed from its current one.
+        for card in cards:
+            grid.removeWidget(card)
+        for idx, card in enumerate(cards):
+            grid.addWidget(card, idx // target_cols, idx % target_cols)
+
     # ── MCP tab ──────────────────────────────────────────────────
 
     def _build_mcp_tab(self) -> QWidget:
@@ -729,6 +757,32 @@ class PaneToolsDialog(QDialog):
         self._btn_add_role.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_add_role.clicked.connect(self._on_reset_new_role_form)
         left_lay.addWidget(self._btn_add_role)
+
+        # "Users / บัญชี" section: a live summary of registered Claude user
+        # profiles + a button into the existing Add/Remove-user dialog
+        # (moved here from the 👥 Team chip's right-click-only menu per user
+        # request — same dialog, reused via `open_user_profiles_dialog`, not
+        # rebuilt here, so add/remove/Claude-Auth logic has one home).
+        users_sep = QFrame(left)
+        users_sep.setFrameShape(QFrame.Shape.HLine)
+        users_sep.setStyleSheet("color: #27272a;")
+        left_lay.addWidget(users_sep)
+
+        users_label = QLabel("👤 Users / บัญชี", left)
+        users_label.setObjectName("toolsSubtitle")
+        left_lay.addWidget(users_label)
+
+        self._users_summary = QLabel("", left)
+        self._users_summary.setWordWrap(True)
+        self._users_summary.setStyleSheet("color: #a1a1aa; font-size: 11px;")
+        left_lay.addWidget(self._users_summary)
+
+        self._btn_manage_users = QPushButton("จัดการบัญชี…", left)
+        self._btn_manage_users.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_manage_users.setToolTip("เพิ่ม/ลบ user profile + ตั้งค่า Claude Auth ต่อ profile")
+        self._btn_manage_users.clicked.connect(self._on_manage_users_clicked)
+        left_lay.addWidget(self._btn_manage_users)
+
         outer.addWidget(left)
 
         divider = QFrame(tab)
@@ -814,26 +868,30 @@ class PaneToolsDialog(QDialog):
         mcp_label = QLabel("MCP", right)
         mcp_label.setObjectName("toolsSubtitle")
         outer_r.addWidget(mcp_label)
-        mcp_grid = QGridLayout()
-        mcp_grid.setSpacing(8)
+        self._nr_mcp_grid = QGridLayout()
+        self._nr_mcp_grid.setSpacing(8)
         self._nr_mcp_boxes: dict[str, QCheckBox] = {}
-        for i, name in enumerate(self._master_mcps()):
+        self._nr_mcp_cards: list[_ToolCard] = []
+        for name in self._master_mcps():
             card = _ToolCard(name, tool_hint(name), right)
             self._nr_mcp_boxes[name] = card.box
-            mcp_grid.addWidget(card, i // 2, i % 2)
-        outer_r.addLayout(mcp_grid)
+            self._nr_mcp_cards.append(card)
+        outer_r.addLayout(self._nr_mcp_grid)
 
         plugin_label = QLabel("Plugins", right)
         plugin_label.setObjectName("toolsSubtitle")
         outer_r.addWidget(plugin_label)
-        plugin_grid = QGridLayout()
-        plugin_grid.setSpacing(8)
+        self._nr_plugin_grid = QGridLayout()
+        self._nr_plugin_grid.setSpacing(8)
         self._nr_plugin_boxes: dict[str, QCheckBox] = {}
-        for i, name in enumerate(discover_marketplaces()):
+        self._nr_plugin_cards: list[_ToolCard] = []
+        for name in discover_marketplaces():
             card = _ToolCard(name, tool_hint(name), right)
             self._nr_plugin_boxes[name] = card.box
-            plugin_grid.addWidget(card, i // 2, i % 2)
-        outer_r.addLayout(plugin_grid)
+            self._nr_plugin_cards.append(card)
+        outer_r.addLayout(self._nr_plugin_grid)
+        self._regrid_cards(self._nr_mcp_grid, self._nr_mcp_cards, 2)
+        self._regrid_cards(self._nr_plugin_grid, self._nr_plugin_cards, 2)
 
         # Step 3 — habits (optional): instructions + an "advanced" collapsible
         # that hides fields most users never touch (grid position,
@@ -942,8 +1000,23 @@ class PaneToolsDialog(QDialog):
         outer.addWidget(right_scroll, 1)
 
         self._reload_team_list()
+        self._reload_users_summary()
         self._update_preview()
         return tab
+
+    # ── users / บัญชี (left column) ──────────────────────────────
+
+    def _reload_users_summary(self) -> None:
+        from . import user_profile
+
+        names = [p["name"] for p in user_profile.list_profiles()]
+        self._users_summary.setText(" · ".join(names) if names else "(default only)")
+
+    def _on_manage_users_clicked(self) -> None:
+        from .user_actions import open_user_profiles_dialog
+
+        open_user_profiles_dialog(self, lambda msg: self._status_label.setText(msg))
+        self._reload_users_summary()
 
     # ── team list (left column) ─────────────────────────────────
 

@@ -590,13 +590,15 @@
         "agent_takkub.project_nav",
         "agent_takkub.roles",
         "agent_takkub.shared_dev_tools",
-        "agent_takkub.skill_audit"
+        "agent_takkub.skill_audit",
+        "agent_takkub.user_actions",
+        "agent_takkub.user_profile"
       ],
       "imported_by": [
         "agent_takkub.user_actions"
       ],
       "fan_in": 1,
-      "fan_out": 8
+      "fan_out": 10
     },
     {
       "module": "agent_takkub.pane_tools_policy",
@@ -1214,9 +1216,10 @@
         "agent_takkub.user_profile"
       ],
       "imported_by": [
-        "agent_takkub.main_window"
+        "agent_takkub.main_window",
+        "agent_takkub.pane_tools_dialog"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 12
     },
     {
@@ -1233,11 +1236,12 @@
         "agent_takkub.limit_panel",
         "agent_takkub.main_window",
         "agent_takkub.pane_env",
+        "agent_takkub.pane_tools_dialog",
         "agent_takkub.remote.notify",
         "agent_takkub.spawn_engine",
         "agent_takkub.user_actions"
       ],
-      "fan_in": 10,
+      "fan_in": 11,
       "fan_out": 2
     },
     {

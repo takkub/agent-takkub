@@ -526,6 +526,14 @@ class StatusHeaderMixin:
         self._btn_open_shell.setStyleSheet(self._ghost_button_style())
         self._btn_open_shell.clicked.connect(self._on_open_shell_clicked)
 
+        # 📋 Tasks: toggle the right-hand Task List dock (A8) — previously
+        # only reachable via the Ctrl+Shift+T shortcut, which nobody
+        # discovers on their own (default-hidden, no visible entry point).
+        self._chip_tasks = QPushButton("📋 Tasks", self)
+        self._chip_tasks.setToolTip("Toggle the Task List dock (Ctrl+Shift+T)")
+        self._chip_tasks.setStyleSheet(self._ghost_button_style())
+        self._chip_tasks.clicked.connect(lambda: self._on_toggle_tasks(None))
+
         # 👥 Team chip (A6-redesign, renamed from "⚙ Pipelines"): opens the
         # 🔧 Tools dialog straight to its "Team & Roles" tab — team roster +
         # guided custom-role create, the thing users actually reach for here.
@@ -587,6 +595,7 @@ class StatusHeaderMixin:
         #   Group 2 — System status    (cockpit-level toggles + updates)
         for w in (
             self._btn_open_shell,
+            self._chip_tasks,
             self._btn_doctor,
             self._btn_end_session,
         ):

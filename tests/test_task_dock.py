@@ -12,6 +12,9 @@ from __future__ import annotations
 import pathlib
 
 import pytest
+from PyQt6.QtCore import QSize
+from PyQt6.QtGui import QResizeEvent
+from PyQt6.QtWidgets import QHeaderView
 
 from agent_takkub import task_dock, task_ledger
 
@@ -131,3 +134,65 @@ class TestTaskDockWidget:
         widget = task_dock.TaskDockWidget()
         widget.refresh_project("neverassigned")
         assert widget._tree.topLevelItemCount() == 0
+
+
+# ──────────────────────────────────────────────────────────────
+# A8-polish item 1: responsive word-wrap tree config
+# ──────────────────────────────────────────────────────────────
+class TestTreeWrapConfig:
+    def test_tree_wraps_and_hides_horizontal_scrollbar(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(task_dock, "list_project_names", lambda: [])
+        widget = task_dock.TaskDockWidget()
+        assert widget._tree.wordWrap() is True
+        from PyQt6.QtCore import Qt
+
+        assert widget._tree.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+
+    def test_header_stretches_single_column(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(task_dock, "list_project_names", lambda: [])
+        widget = task_dock.TaskDockWidget()
+        header = widget._tree.header()
+        assert header.stretchLastSection() is True
+        assert header.sectionResizeMode(0) == QHeaderView.ResizeMode.Stretch
+
+
+# ──────────────────────────────────────────────────────────────
+# A8-polish item 2: ProjectCardWidget responsiveness
+# ──────────────────────────────────────────────────────────────
+class TestProjectCardWidget:
+    def _make_card(self, monkeypatch: pytest.MonkeyPatch) -> tuple:
+        monkeypatch.setattr(task_dock, "list_project_names", lambda: [])
+        widget = task_dock.TaskDockWidget()
+        task_ledger.create_assignment(
+            PROJECT, "backend", "/api", "add /health endpoint", "ship v1", "A8 dock", "claude"
+        )
+        widget.refresh_project(PROJECT)
+        item = widget._tree.topLevelItem(0)
+        card = widget._tree.itemWidget(item, 0)
+        assert isinstance(card, task_dock.ProjectCardWidget)
+        return widget, item, card
+
+    def test_card_bg_is_transparent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _widget, _item, card = self._make_card(monkeypatch)
+        assert "background: transparent" in card.styleSheet()
+
+    def test_narrow_width_hides_progress_and_open_button(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _widget, _item, card = self._make_card(monkeypatch)
+        card.resizeEvent(QResizeEvent(QSize(300, 32), card.size()))
+        assert card._progress_container.isHidden() is False
+        assert card._open_btn.isHidden() is False
+
+        card.resizeEvent(QResizeEvent(QSize(150, 32), QSize(300, 32)))
+        assert card._progress_container.isHidden() is True
+        assert card._open_btn.isHidden() is True
+
+    def test_resize_propagates_height_into_item_size_hint(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _widget, item, card = self._make_card(monkeypatch)
+        card.resizeEvent(QResizeEvent(QSize(150, 32), card.size()))
+        assert item.sizeHint(0).height() > 0

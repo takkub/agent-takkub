@@ -19,7 +19,7 @@ color) so the same project shows the same avatar tint in both places.
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, QUrl, pyqtSignal
+from PyQt6.QtCore import QSize, Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QHBoxLayout,
@@ -224,13 +224,18 @@ class TaskDockWidget(QWidget):
         self._tree.setHeaderHidden(True)
         self._tree.setIndentation(16)
         # No ellipsis anywhere — project/goal/feature/task labels show in
-        # full; a column too narrow to fit them scrolls horizontally instead
-        # of clipping the text down to "pms (3..." / "จบ ro...".
+        # full; word-wrap (not horizontal scroll) is what makes a long
+        # label fit a narrow dock (A8-polish, gemini spec Method A).
         self._tree.setTextElideMode(Qt.TextElideMode.ElideNone)
-        self._tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._tree.setWordWrap(True)
+        self._tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         header = self._tree.header()
-        header.setStretchLastSection(False)
-        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        header.setStretchLastSection(True)
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        # QTreeView caches row heights and won't recompute them just because
+        # the column got narrower/wider — force the cache to drop on every
+        # resize so wrapped rows don't overlap the row below them.
+        header.sectionResized.connect(lambda *_a: self._tree.updateGeometries())
         root.addWidget(self._tree, 1)
 
         # Collapsed-rail body: one avatar per open project, stacked vertically
@@ -460,41 +465,78 @@ class TaskDockWidget(QWidget):
         self._mount_project_row(project, item, state)
 
     def _mount_project_row(self, project: str, item: QTreeWidgetItem, state: dict) -> None:
-        """Replace the project item's column-0 rendering with a sidebar-style
-        card: chevron toggle + avatar (color shared with the PROJECTS
-        sidebar via `_avatar_color`) + name + progress badge + mini bar +
-        ↗ open-INDEX.md button."""
-        done, total = project_progress(state)
-        ratio = (done / total) if total else 0.0
-        color = usage_color(ratio) if total else "#52525b"
+        """Replace the project item's column-0 rendering with a `ProjectCardWidget`."""
+        card = ProjectCardWidget(item, self._tree, project, state)
+        self._chevron_labels[project] = card.chevron
+        self._tree.setItemWidget(item, 0, card)
 
-        holder = QWidget()
-        holder.setObjectName("taskProjectCard")
-        holder.setStyleSheet(
+    @staticmethod
+    def _open_index(project: str) -> None:
+        path = task_ledger.index_path(project)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+
+class ProjectCardWidget(QWidget):
+    """Sidebar-style project row: chevron toggle + avatar (color shared with
+    the PROJECTS sidebar via `_avatar_color`) + word-wrapped name + progress
+    badge/mini-bar + ↗ open-INDEX.md button.
+
+    `QTreeWidget` never queries an item-widget's own layout to size its row
+    (unlike native text items, which `setWordWrap`+`updateGeometries` handle
+    for free) — this widget propagates its post-layout height into the
+    owning `QTreeWidgetItem.setSizeHint()` on every resize so a wrapped
+    2-line name doesn't overlap the row below it. Below `_NARROW_W` the
+    progress bar/badge and open button hide so the name keeps room to wrap
+    instead of clipping (A8-polish, gemini spec section 2).
+    """
+
+    _NARROW_W = 230
+
+    def __init__(
+        self,
+        item: QTreeWidgetItem,
+        tree: QTreeWidget,
+        project: str,
+        state: dict,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.item = item
+        self.tree = tree
+        self.project = project
+        self.setObjectName("taskProjectCard")
+        # Transparent — an opaque fill here sat on top of the tree item and
+        # hid QTreeWidget#taskTree::item:hover/:selected underneath it,
+        # making hover/selection look broken (A8-polish, gemini spec §3).
+        self.setStyleSheet(
             "#taskProjectCard {"
-            " background: #1a1a1e;"
+            " background: transparent;"
             " border: 1px solid #27272a;"
             " border-radius: 10px;"
             "}"
         )
-        row = QHBoxLayout(holder)
-        row.setContentsMargins(8, 6, 8, 6)
-        row.setSpacing(8)
 
-        chevron = QToolButton()
-        chevron.setText("▸")
-        chevron.setAutoRaise(True)
-        chevron.setFixedSize(16, 16)
-        chevron.setCursor(Qt.CursorShape.PointingHandCursor)
-        chevron.setStyleSheet(
+        done, total = project_progress(state)
+        ratio = (done / total) if total else 0.0
+        color = usage_color(ratio) if total else "#52525b"
+
+        self._row = QHBoxLayout(self)
+        self._row.setContentsMargins(8, 6, 8, 6)
+        self._row.setSpacing(8)
+
+        self.chevron = QToolButton()
+        self.chevron.setText("▸")
+        self.chevron.setAutoRaise(True)
+        self.chevron.setFixedSize(16, 16)
+        self.chevron.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.chevron.setStyleSheet(
             "QToolButton {"
             " color: #71717a; background: transparent; border: none;"
             " font-size: 10px; font-weight: 700; }"
             "QToolButton:hover { color: #d4d4d8; }"
         )
-        chevron.clicked.connect(lambda: item.setExpanded(not item.isExpanded()))
-        row.addWidget(chevron)
-        self._chevron_labels[project] = chevron
+        self.chevron.clicked.connect(lambda: item.setExpanded(not item.isExpanded()))
+        self._row.addWidget(self.chevron)
 
         avatar = QLabel(_initials(project))
         avatar.setFixedSize(24, 24)
@@ -503,15 +545,21 @@ class TaskDockWidget(QWidget):
             f"background: {_avatar_color(project)}; color: #ffffff; font-size: 10px;"
             f" font-weight: 800; border-radius: 12px;"
         )
-        row.addWidget(avatar)
+        self._row.addWidget(avatar)
 
         name = QLabel(project)
+        name.setWordWrap(True)
         name.setStyleSheet("color: #e4e4e7; font-size: 13px; font-weight: 700;")
-        row.addWidget(name, 1)
+        self._row.addWidget(name, 1)
+
+        self._progress_container = QWidget()
+        prog_lay = QHBoxLayout(self._progress_container)
+        prog_lay.setContentsMargins(0, 0, 0, 0)
+        prog_lay.setSpacing(6)
 
         badge = QLabel(f"{done}/{total}")
         badge.setStyleSheet(f"color: {color}; font-size: 11px; font-weight: 700;")
-        row.addWidget(badge)
+        prog_lay.addWidget(badge)
 
         bar = QProgressBar()
         bar.setObjectName("taskMiniBar")
@@ -526,24 +574,45 @@ class TaskDockWidget(QWidget):
             "QProgressBar#taskMiniBar::chunk {"
             f" background: {color}; border-radius: 3px; }}"
         )
-        row.addWidget(bar)
+        prog_lay.addWidget(bar)
+        self._row.addWidget(self._progress_container)
 
-        open_btn = QToolButton()
-        open_btn.setText("↗")  # ↗
-        open_btn.setToolTip(f"เปิด INDEX.md เต็ม ({project})")
-        open_btn.setFixedSize(20, 20)
-        open_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        open_btn.setStyleSheet(
+        self._open_btn = QToolButton()
+        self._open_btn.setText("↗")  # ↗
+        self._open_btn.setToolTip(f"เปิด INDEX.md เต็ม ({project})")
+        self._open_btn.setFixedSize(20, 20)
+        self._open_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._open_btn.setStyleSheet(
             "QToolButton {"
             " color: #71717a; background: transparent; border: none; border-radius: 6px; }"
             "QToolButton:hover { background: #27272a; color: #d4d4d8; }"
         )
-        open_btn.clicked.connect(lambda: self._open_index(project))
-        row.addWidget(open_btn)
+        self._open_btn.clicked.connect(lambda: TaskDockWidget._open_index(project))
+        self._row.addWidget(self._open_btn)
 
-        self._tree.setItemWidget(item, 0, holder)
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        width = event.size().width()
 
-    @staticmethod
-    def _open_index(project: str) -> None:
-        path = task_ledger.index_path(project)
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+        is_narrow = width < self._NARROW_W
+        self._progress_container.setVisible(not is_narrow)
+        self._open_btn.setVisible(not is_narrow)
+        if is_narrow:
+            self._row.setContentsMargins(4, 4, 4, 4)
+            self._row.setSpacing(4)
+        else:
+            self._row.setContentsMargins(8, 6, 8, 6)
+            self._row.setSpacing(8)
+
+        # Force the layout to recompute under the new width, then push the
+        # resulting height into the owning QTreeWidgetItem's size hint so
+        # QTreeWidget allocates enough row space for a wrapped name.
+        self._row.activate()
+        needed_height = self._row.sizeHint().height()
+        current_hint = self.item.sizeHint(0)
+        if current_hint.height() != needed_height:
+            self.item.setSizeHint(0, QSize(0, needed_height))
+            # Deferred: calling updateGeometries() synchronously from inside
+            # resizeEvent can recurse (it may trigger another resize of this
+            # same widget) — a single-shot timer lets this resize finish first.
+            QTimer.singleShot(0, self.tree.updateGeometries)

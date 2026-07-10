@@ -302,16 +302,20 @@ class MainWindow(
         # ── right-side task-tree dock (A8, hidden by default) ───
         self._tasks_dock = QDockWidget("Task List", self)
         self._tasks_dock.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea)
-        # No X (close) / float-drag-out — the user collapses it to a rail via
-        # the in-dock «  Collapse button instead (Ctrl+Shift+T still toggles
-        # hide/show); DockWidgetMovable alone keeps it reorderable within the
-        # right dock area but drops the titlebar close/float buttons.
-        self._tasks_dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetMovable)
+        self._configure_tasks_dock_chrome(self._tasks_dock)
         self._tasks_dock_widget = TaskDockWidget()
         self._tasks_dock.setWidget(self._tasks_dock_widget)
         self._tasks_dock.setMinimumWidth(_TASKS_DOCK_EXPANDED_W)
         self._tasks_dock.hide()
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._tasks_dock)
+        # Belt-and-suspenders: DockWidgetFloatable is intentionally never set
+        # (see _configure_tasks_dock_chrome), so the user can't drag it into
+        # a floating top-level window — but if anything ever flips
+        # isFloating() anyway (e.g. a future features change), snap it back
+        # instead of letting it render with OS window chrome.
+        self._tasks_dock.topLevelChanged.connect(
+            lambda floating: self._tasks_dock.setFloating(False) if floating else None
+        )
         self._tasks_dock_anim: QParallelAnimationGroup | None = None
         self._tasks_dock_widget.collapseToggled.connect(self._on_tasks_dock_collapse_toggled)
         # Live refresh: the Task Ledger (A7) writes on every assign/done/
@@ -754,6 +758,30 @@ class MainWindow(
         if checked is None:
             checked = not self._logs_dock.isVisible()
         self._logs_dock.setVisible(checked)
+
+    @staticmethod
+    def _configure_tasks_dock_chrome(dock: QDockWidget) -> None:
+        """Chrome setup for the Task List dock — factored out so a test can
+        exercise it against a bare `QDockWidget()` without booting the full
+        `MainWindow` (which needs a live orchestrator/CLI server).
+
+        - No X (close) / float-drag-out: the user collapses it to a rail via
+          the in-dock «  Collapse button instead (Ctrl+Shift+T still toggles
+          hide/show); DockWidgetMovable alone keeps it reorderable within the
+          right dock area but drops the titlebar close/float buttons.
+        - Blank titlebar widget: `QDockWidget("Task List", ...)`'s native
+          titlebar duplicated `TaskDockWidget`'s own inner "Task List"
+          header — a fixed-height-0 widget removes the native one entirely
+          so only the inner header renders (A8-polish item 3).
+        - `setFloating(False)`: paired with the topLevelChanged safety-net
+          connected at the call site — belt-and-suspenders against the dock
+          ever rendering as a top-level window with OS min/max/close chrome.
+        """
+        dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetMovable)
+        blank_titlebar = QWidget()
+        blank_titlebar.setFixedHeight(0)
+        dock.setTitleBarWidget(blank_titlebar)
+        dock.setFloating(False)
 
     def _on_toggle_tasks(self, checked: bool | None = None) -> None:
         if checked is None:

@@ -572,3 +572,143 @@ def test_advanced_provider_field_disabled_pending_103(monkeypatch, tmp_path):
         assert not dlg._nr_provider_combo.isEnabled()
     finally:
         dlg.deleteLater()
+
+
+# ---------------------------------------------------------------------------
+# A8-polish item 2: responsive 2col→1col tool-card grid on narrow resize
+# ---------------------------------------------------------------------------
+
+
+def _card_column(grid, card) -> int:
+    idx = grid.indexOf(card)
+    _row, col, _rspan, _cspan = grid.getItemPosition(idx)
+    return col
+
+
+def _seed_deterministic_tool_cards(monkeypatch, tmp_path):
+    """Both grids need >=2 cards for a meaningful 2col/1col regrid assertion
+    — a fresh test env has no master MCP registry / installed marketplaces,
+    so `_nr_mcp_cards`/`_nr_plugin_cards` would otherwise be empty."""
+    from agent_takkub import pane_tools_dialog as ptd
+    from agent_takkub import pane_tools_policy as ptp
+    from agent_takkub import shared_dev_tools
+
+    monkeypatch.setattr(ptp, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
+    monkeypatch.setattr(
+        shared_dev_tools, "list_master_mcps", lambda: ["playwright", "obsidian-vault"]
+    )
+    monkeypatch.setattr(ptd, "discover_marketplaces", lambda: ["pordee", "superpowers-dev"])
+
+
+def test_tool_grid_starts_two_columns(monkeypatch, tmp_path):
+    from agent_takkub.pane_tools_dialog import PaneToolsDialog
+
+    _seed_deterministic_tool_cards(monkeypatch, tmp_path)
+
+    dlg = PaneToolsDialog(initial_tab=TAB_TEAM)
+    try:
+        assert len(dlg._nr_mcp_cards) >= 2
+        assert _card_column(dlg._nr_mcp_grid, dlg._nr_mcp_cards[1]) == 1
+    finally:
+        dlg.deleteLater()
+
+
+def test_tool_grid_collapses_to_one_column_under_600px(monkeypatch, tmp_path):
+    """A resizeEvent narrower than 600px must re-flow both grids to 1 column
+    (gemini spec §4) — driven directly via a synthetic QResizeEvent since an
+    unshown top-level QDialog doesn't deliver resize events from a plain
+    `.resize()` call under offscreen QPA."""
+    from PyQt6.QtCore import QSize
+    from PyQt6.QtGui import QResizeEvent
+
+    from agent_takkub.pane_tools_dialog import PaneToolsDialog
+
+    _seed_deterministic_tool_cards(monkeypatch, tmp_path)
+
+    dlg = PaneToolsDialog(initial_tab=TAB_TEAM)
+    try:
+        old_size = dlg.size()
+        dlg.resize(500, dlg.height())
+        dlg.resizeEvent(QResizeEvent(QSize(500, dlg.height()), old_size))
+        for card in dlg._nr_mcp_cards:
+            assert _card_column(dlg._nr_mcp_grid, card) == 0
+        for card in dlg._nr_plugin_cards:
+            assert _card_column(dlg._nr_plugin_grid, card) == 0
+    finally:
+        dlg.deleteLater()
+
+
+def test_tool_grid_returns_to_two_columns_above_600px(monkeypatch, tmp_path):
+    from PyQt6.QtCore import QSize
+    from PyQt6.QtGui import QResizeEvent
+
+    from agent_takkub.pane_tools_dialog import PaneToolsDialog
+
+    _seed_deterministic_tool_cards(monkeypatch, tmp_path)
+
+    dlg = PaneToolsDialog(initial_tab=TAB_TEAM)
+    try:
+        dlg.resizeEvent(QResizeEvent(QSize(500, dlg.height()), dlg.size()))
+        dlg.resize(900, dlg.height())
+        dlg.resizeEvent(QResizeEvent(QSize(900, dlg.height()), QSize(500, dlg.height())))
+        assert len(dlg._nr_mcp_cards) >= 2
+        assert _card_column(dlg._nr_mcp_grid, dlg._nr_mcp_cards[1]) == 1
+    finally:
+        dlg.deleteLater()
+
+
+# ---------------------------------------------------------------------------
+# Users / บัญชี section (Team & Roles tab) — reuses UserActionsMixin's
+# Add/Remove-user dialog via `open_user_profiles_dialog`, no duplicate logic.
+# ---------------------------------------------------------------------------
+
+
+def test_users_summary_lists_profile_names(monkeypatch, tmp_path):
+    from agent_takkub import pane_tools_policy as ptp
+    from agent_takkub import user_profile
+    from agent_takkub.pane_tools_dialog import PaneToolsDialog
+
+    monkeypatch.setattr(ptp, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
+    monkeypatch.setattr(
+        user_profile,
+        "list_profiles",
+        lambda: [
+            {"name": "default", "config_dir": "~/.claude"},
+            {"name": "work", "config_dir": "x"},
+        ],
+    )
+
+    dlg = PaneToolsDialog(initial_tab=TAB_TEAM)
+    try:
+        assert "default" in dlg._users_summary.text()
+        assert "work" in dlg._users_summary.text()
+    finally:
+        dlg.deleteLater()
+
+
+def test_manage_users_button_reuses_shared_dialog_and_refreshes(monkeypatch, tmp_path):
+    """Clicking "จัดการบัญชี…" must call the SAME dialog-building function the
+    👥 Team chip's right-click menu uses (`user_actions.open_user_profiles_dialog`)
+    instead of re-implementing add/remove/Claude-Auth here."""
+    from agent_takkub import pane_tools_policy as ptp
+    from agent_takkub import user_actions
+    from agent_takkub.pane_tools_dialog import PaneToolsDialog
+
+    monkeypatch.setattr(ptp, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
+
+    calls = []
+    monkeypatch.setattr(
+        user_actions,
+        "open_user_profiles_dialog",
+        lambda parent, on_status=None: calls.append((parent, on_status)),
+    )
+
+    dlg = PaneToolsDialog(initial_tab=TAB_TEAM)
+    try:
+        dlg._on_manage_users_clicked()
+        assert len(calls) == 1
+        parent, on_status = calls[0]
+        assert parent is dlg
+        assert callable(on_status)
+    finally:
+        dlg.deleteLater()
