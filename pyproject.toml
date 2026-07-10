@@ -50,6 +50,8 @@ agent_takkub = [
     "static/*.js",
     "static/*.css",
     "static/*.png",
+    "static/fonts/*.ttf",
+    "static/fonts/LICENSE.txt",
     # Staged by setup.py's custom build_py from the repo-root CLAUDE.md /
     # .claude/agents/*.md right before this list is collected — see
     # config.py's ASSETS_ROOT for the installed-vs-dev-checkout read path.

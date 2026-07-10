@@ -337,14 +337,33 @@ class UserActionsMixin:
         dlg.exec()
 
     def _on_team_chip_clicked(self) -> None:
-        """👥 Team chip (A6-redesign): open 🔧 Tools straight to the
-        "Team & Roles" tab — team roster + guided custom-role create.
+        """👥 Team chip: open the new gold/IBM-Plex Settings window straight to
+        "Providers & Roles" (design system, 2026-07-10 — supersedes the old
+        PaneToolsDialog "Team & Roles" tab for this entry point; that dialog
+        is kept alive for 🔧 Tools / MCP-Plugins-Skill editing during the
+        Phase 1→2 transition, see settings_window.py's module docstring).
         Right-click on the same chip still reaches Pipeline Settings / user
         profile switch / Add-Remove-user via ``_show_pipelines_menu``."""
-        from .pane_tools_dialog import TAB_TEAM, PaneToolsDialog
+        from .provider_state import is_disabled
+        from .settings_window import VIEW_PROVIDERS_ROLES, SettingsWindow
 
-        dlg = PaneToolsDialog(self, initial_tab=TAB_TEAM)
-        dlg.exec()
+        try:
+            from .config import active_project as _active_project
+
+            _proj, _ = _active_project()
+        except Exception:
+            _proj = None
+
+        dlg = SettingsWindow(self, project=_proj, initial_view=VIEW_PROVIDERS_ROLES)
+        if dlg.exec() != dlg.DialogCode.Accepted:
+            return
+        # Same apply pattern as _open_pipeline_settings_dialog: only route
+        # providers whose target state differs from disk through
+        # orchestrator.toggle_provider (it always broadcasts, so a no-op call
+        # would spam Lead panes spuriously).
+        for provider, target_disabled in dlg.pending_provider_disabled.items():
+            if target_disabled != is_disabled(provider):
+                self.orch.toggle_provider(provider, target_disabled)
 
     def _on_open_shell_clicked(self) -> None:
         """💻 Shell button: spawn (or focus) a plain PowerShell pane.

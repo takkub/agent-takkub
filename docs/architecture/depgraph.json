@@ -1,12 +1,14 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 86,
+  "module_count": 88,
   "modules": [
     {
       "module": "agent_takkub",
       "imports": [],
-      "imported_by": [],
-      "fan_in": 0,
+      "imported_by": [
+        "agent_takkub.settings_window"
+      ],
+      "fan_in": 1,
       "fan_out": 0
     },
     {
@@ -182,6 +184,15 @@
       "fan_out": 3
     },
     {
+      "module": "agent_takkub.cockpit_theme",
+      "imports": [],
+      "imported_by": [
+        "agent_takkub.settings_window"
+      ],
+      "fan_in": 1,
+      "fan_out": 0
+    },
+    {
       "module": "agent_takkub.codex_agents_md",
       "imports": [],
       "imported_by": [
@@ -275,9 +286,10 @@
       "imported_by": [
         "agent_takkub.app",
         "agent_takkub.pane_tools_dialog",
-        "agent_takkub.pane_tools_policy"
+        "agent_takkub.pane_tools_policy",
+        "agent_takkub.settings_window"
       ],
-      "fan_in": 3,
+      "fan_in": 4,
       "fan_out": 2
     },
     {
@@ -623,9 +635,10 @@
       ],
       "imported_by": [
         "agent_takkub.pipeline_dialog",
-        "agent_takkub.pipeline_executor"
+        "agent_takkub.pipeline_executor",
+        "agent_takkub.settings_window"
       ],
-      "fan_in": 2,
+      "fan_in": 3,
       "fan_out": 2
     },
     {
@@ -693,9 +706,10 @@
       "imported_by": [
         "agent_takkub.main_window",
         "agent_takkub.pane_tools_dialog",
+        "agent_takkub.settings_window",
         "agent_takkub.task_dock"
       ],
-      "fan_in": 3,
+      "fan_in": 4,
       "fan_out": 1
     },
     {
@@ -751,10 +765,11 @@
         "agent_takkub.orchestrator",
         "agent_takkub.pipeline_dialog",
         "agent_takkub.pipeline_executor",
+        "agent_takkub.settings_window",
         "agent_takkub.spawn_engine",
         "agent_takkub.update_panel"
       ],
-      "fan_in": 8,
+      "fan_in": 9,
       "fan_out": 3
     },
     {
@@ -783,10 +798,11 @@
         "agent_takkub.orchestrator",
         "agent_takkub.pipeline_dialog",
         "agent_takkub.provider_config",
+        "agent_takkub.settings_window",
         "agent_takkub.status_header",
         "agent_takkub.user_actions"
       ],
-      "fan_in": 6,
+      "fan_in": 7,
       "fan_out": 1
     },
     {
@@ -946,9 +962,10 @@
         "agent_takkub.pane_tools_dialog",
         "agent_takkub.pipeline_config",
         "agent_takkub.remote.api",
+        "agent_takkub.settings_window",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 11,
+      "fan_in": 12,
       "fan_out": 0
     },
     {
@@ -981,6 +998,24 @@
       ],
       "fan_in": 1,
       "fan_out": 1
+    },
+    {
+      "module": "agent_takkub.settings_window",
+      "imports": [
+        "agent_takkub",
+        "agent_takkub.cockpit_theme",
+        "agent_takkub.custom_roles",
+        "agent_takkub.pipeline_config",
+        "agent_takkub.project_nav",
+        "agent_takkub.provider_config",
+        "agent_takkub.provider_state",
+        "agent_takkub.roles"
+      ],
+      "imported_by": [
+        "agent_takkub.user_actions"
+      ],
+      "fan_in": 1,
+      "fan_out": 8
     },
     {
       "module": "agent_takkub.shared_dev_tools",
@@ -1213,6 +1248,7 @@
         "agent_takkub.plan_tier",
         "agent_takkub.plugin_installer",
         "agent_takkub.provider_state",
+        "agent_takkub.settings_window",
         "agent_takkub.user_profile"
       ],
       "imported_by": [
@@ -1220,7 +1256,7 @@
         "agent_takkub.pane_tools_dialog"
       ],
       "fan_in": 2,
-      "fan_out": 12
+      "fan_out": 13
     },
     {
       "module": "agent_takkub.user_profile",
