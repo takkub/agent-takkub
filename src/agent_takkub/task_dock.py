@@ -229,6 +229,10 @@ class TaskDockWidget(QWidget):
         self._tree.setTextElideMode(Qt.TextElideMode.ElideNone)
         self._tree.setWordWrap(True)
         self._tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # Explicit (Qt's own default is already False) — uniform row heights
+        # would force every row to the tallest single-line height instead of
+        # letting a wrapped 2-line goal/feature label grow its own row.
+        self._tree.setUniformRowHeights(False)
         header = self._tree.header()
         header.setStretchLastSection(True)
         header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
@@ -361,6 +365,7 @@ class TaskDockWidget(QWidget):
                 self._tree.takeTopLevelItem(self._tree.indexOfTopLevelItem(existing))
                 self._chevron_labels.pop(project, None)
             self._remove_rail_avatar(project)
+            self._relayout_tree()
             return
         if existing is not None:
             self._tree.takeTopLevelItem(self._tree.indexOfTopLevelItem(existing))
@@ -373,6 +378,22 @@ class TaskDockWidget(QWidget):
         self._mount_widgets(project, item, state)
         self._restore_expansion(item)
         self._update_rail_avatar(project, state)
+        self._relayout_tree()
+
+    def _relayout_tree(self) -> None:
+        """Force Qt to recompute wrapped-row heights right after a rebuild.
+
+        `QTreeView` only recomputes a wrapped text item's row height as a
+        *side effect* of a column resize (see the `sectionResized` connection
+        above) — it does not do so just because rows were added/replaced, so
+        a goal/feature label that needs 2 lines renders clipped to 1 line
+        until the user happens to resize the dock (A8-regression item 3).
+        `updateGeometries()` drops the cached geometry immediately;
+        `scheduleDelayedItemsLayout()` queues the full item layout pass
+        (row heights included) that actually re-measures wrapped text.
+        """
+        self._tree.updateGeometries()
+        self._tree.scheduleDelayedItemsLayout()
 
     def _update_rail_avatar(self, project: str, state: dict) -> None:
         """Add/refresh *project*'s avatar in the collapsed rail — kept in
@@ -469,6 +490,13 @@ class TaskDockWidget(QWidget):
         card = ProjectCardWidget(item, self._tree, project, state)
         self._chevron_labels[project] = card.chevron
         self._tree.setItemWidget(item, 0, card)
+        # The item's own text (set in _build_project_item) is only a
+        # placeholder for before the widget mounts — leaving it set makes
+        # Qt paint it *underneath* the (partly transparent) card, doubling
+        # the project name/progress visually (A8-regression item 1). The
+        # card widget is the sole renderer for this row from here on; no
+        # data is lost since project/done/total already live in `state`.
+        item.setText(0, "")
 
     @staticmethod
     def _open_index(project: str) -> None:

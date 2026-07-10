@@ -765,10 +765,17 @@ class MainWindow(
         exercise it against a bare `QDockWidget()` without booting the full
         `MainWindow` (which needs a live orchestrator/CLI server).
 
-        - No X (close) / float-drag-out: the user collapses it to a rail via
-          the in-dock «  Collapse button instead (Ctrl+Shift+T still toggles
-          hide/show); DockWidgetMovable alone keeps it reorderable within the
-          right dock area but drops the titlebar close/float buttons.
+        - No features at all (`NoDockWidgetFeatures`): `DockWidgetMovable`
+          alone still let the user drag the dock out into a floating
+          top-level window with OS min/max/close chrome (A8-regression item
+          2 — `setFloating(False)` + the topLevelChanged safety-net weren't
+          enough since the drag-to-float gesture doesn't go through either
+          of those). The dock only ever lives in one place (its allowed
+          areas are RightDockWidgetArea only, and it's the sole widget
+          there), so movability between areas buys nothing; the user
+          collapses it to a rail via the in-dock «  Collapse button instead
+          (Ctrl+Shift+T still toggles hide/show, which doesn't need any
+          dock feature — it's driven by `setVisible()`).
         - Blank titlebar widget: `QDockWidget("Task List", ...)`'s native
           titlebar duplicated `TaskDockWidget`'s own inner "Task List"
           header — a fixed-height-0 widget removes the native one entirely
@@ -777,7 +784,7 @@ class MainWindow(
           connected at the call site — belt-and-suspenders against the dock
           ever rendering as a top-level window with OS min/max/close chrome.
         """
-        dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetMovable)
+        dock.setFeatures(QDockWidget.DockWidgetFeature.NoDockWidgetFeatures)
         blank_titlebar = QWidget()
         blank_titlebar.setFixedHeight(0)
         dock.setTitleBarWidget(blank_titlebar)

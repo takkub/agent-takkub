@@ -14,11 +14,16 @@ from PyQt6.QtWidgets import QDockWidget, QMainWindow
 from agent_takkub.main_window import MainWindow
 
 
-def test_movable_only_no_closable_or_floatable() -> None:
+def test_no_features_at_all_no_closable_movable_or_floatable() -> None:
+    """DockWidgetMovable alone (the previous fix) still let the dock be
+    dragged out into a floating top-level window (A8-regression item 2) —
+    the dock never needs to move between areas (it's the only widget in its
+    one allowed area), so all features are dropped."""
     dock = QDockWidget("Task List")
     MainWindow._configure_tasks_dock_chrome(dock)
     features = dock.features()
-    assert features & QDockWidget.DockWidgetFeature.DockWidgetMovable
+    assert features == QDockWidget.DockWidgetFeature.NoDockWidgetFeatures
+    assert not (features & QDockWidget.DockWidgetFeature.DockWidgetMovable)
     assert not (features & QDockWidget.DockWidgetFeature.DockWidgetClosable)
     assert not (features & QDockWidget.DockWidgetFeature.DockWidgetFloatable)
 

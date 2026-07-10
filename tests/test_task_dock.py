@@ -119,13 +119,14 @@ class TestTaskDockWidget:
         widget.refresh_project(PROJECT)
         assert widget._tree.topLevelItemCount() == 1
         project_item = widget._tree.topLevelItem(0)
-        assert PROJECT in project_item.text(0)
-        assert "(0/1)" in project_item.text(0)
+        # Item text is cleared on mount (A8-regression item 1) — the
+        # ProjectCardWidget item-widget is the sole renderer now.
+        card = widget._tree.itemWidget(project_item, 0)
+        assert isinstance(card, task_dock.ProjectCardWidget)
 
         task_ledger.mark_done(PROJECT, "backend", "ok")
         widget.refresh_project(PROJECT)
         project_item = widget._tree.topLevelItem(0)
-        assert "(1/1)" in project_item.text(0)
         row_item = project_item.child(0).child(0).child(0)
         assert row_item.text(0).startswith("✓")
 
@@ -196,3 +197,70 @@ class TestProjectCardWidget:
         _widget, item, card = self._make_card(monkeypatch)
         card.resizeEvent(QResizeEvent(QSize(150, 32), card.size()))
         assert item.sizeHint(0).height() > 0
+
+
+# ──────────────────────────────────────────────────────────────
+# A8-regression: 3 bugs seen in the user's real screenshots
+# ──────────────────────────────────────────────────────────────
+class TestProjectItemTextClearedOnMount:
+    """Item 1: the project item's own text used to bleed through the
+    (partly transparent) ProjectCardWidget, doubling the project name/
+    progress visually ("pms...5)pms")."""
+
+    def test_item_text_is_empty_once_card_is_mounted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(task_dock, "list_project_names", lambda: [])
+        widget = task_dock.TaskDockWidget()
+        task_ledger.create_assignment(
+            PROJECT, "backend", "/api", "add /health endpoint", "ship v1", "A8 dock", "claude"
+        )
+        widget.refresh_project(PROJECT)
+        project_item = widget._tree.topLevelItem(0)
+        assert project_item.text(0) == ""
+
+    def test_chevron_toggle_still_works_without_item_text(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """_apply_expanded_visual for a project item repaints the card's own
+        chevron button (looked up by project name), not item.text(0) — so
+        clearing the item text must not break expand/collapse."""
+        monkeypatch.setattr(task_dock, "list_project_names", lambda: [])
+        widget = task_dock.TaskDockWidget()
+        task_ledger.create_assignment(
+            PROJECT, "backend", "/api", "add /health endpoint", "ship v1", "A8 dock", "claude"
+        )
+        widget.refresh_project(PROJECT)
+        project_item = widget._tree.topLevelItem(0)
+        widget._on_item_collapsed(project_item)
+        assert widget._chevron_labels[PROJECT].text() == "▸"
+        widget._on_item_expanded(project_item)
+        assert widget._chevron_labels[PROJECT].text() == "▾"
+
+
+class TestRowWrapRelayout:
+    """Item 3: goal/feature/task rows need `updateGeometries()` +
+    `scheduleDelayedItemsLayout()` forced right after a rebuild, not just on
+    a later `sectionResized` — otherwise a wrapped 2-line label renders
+    clipped to 1 line until the user happens to resize the dock."""
+
+    def test_uniform_row_heights_disabled(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(task_dock, "list_project_names", lambda: [])
+        widget = task_dock.TaskDockWidget()
+        assert widget._tree.uniformRowHeights() is False
+
+    def test_refresh_project_triggers_relayout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(task_dock, "list_project_names", lambda: [])
+        widget = task_dock.TaskDockWidget()
+        calls: list[str] = []
+        monkeypatch.setattr(
+            widget._tree, "updateGeometries", lambda: calls.append("updateGeometries")
+        )
+        monkeypatch.setattr(
+            widget._tree,
+            "scheduleDelayedItemsLayout",
+            lambda: calls.append("scheduleDelayedItemsLayout"),
+        )
+        task_ledger.create_assignment(
+            PROJECT, "backend", "/api", "add /health endpoint", "ship v1", "A8 dock", "claude"
+        )
+        widget.refresh_project(PROJECT)
+        assert calls == ["updateGeometries", "scheduleDelayedItemsLayout"]
