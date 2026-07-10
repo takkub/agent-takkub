@@ -1,0 +1,190 @@
+"""Tests for the Task Ledger (A7): `src/agent_takkub/task_ledger.py`.
+
+Covers: create_assignment writes a detail file + upserts an INDEX.md row,
+mark_done flips ok/fail/closed markers, write-failure degrades without
+raising, atomic writes leave no stray temp files, --feature groups rows
+under distinct '### N. <feature>' sections, and a missing goal falls back
+to a placeholder string instead of an empty/blank group header.
+"""
+
+from __future__ import annotations
+
+import pathlib
+
+import pytest
+
+from agent_takkub import task_ledger
+
+PROJECT = "ledgertest"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_runtime_dir(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(task_ledger, "RUNTIME_DIR", tmp_path)
+
+
+def _index_text() -> str:
+    return task_ledger._index_path(PROJECT).read_text(encoding="utf-8")
+
+
+class TestCreateAssignment:
+    def test_writes_detail_file_and_index_row(self) -> None:
+        warning = task_ledger.create_assignment(
+            PROJECT,
+            "backend",
+            "/api",
+            "[ROLE: backend] add /health endpoint",
+            "ship v1",
+            "A7 ledger",
+            "claude",
+        )
+        assert warning == ""
+
+        state = task_ledger._load_state(PROJECT)
+        row = state["groups"][0]["features"][0]["rows"][0]
+        detail_path = task_ledger._ledger_dir(PROJECT) / row["detail_rel"]
+        assert detail_path.exists()
+        detail_text = detail_path.read_text(encoding="utf-8")
+        assert "role: backend" in detail_text
+        assert "status: working" in detail_text
+        assert "[ROLE: backend] add /health endpoint" in detail_text
+
+        index_text = _index_text()
+        assert "🎯 เป้าหมาย: ship v1" in index_text
+        assert "### " in index_text and "A7 ledger" in index_text
+        assert "[~]" in index_text
+        assert "**backend**" in index_text
+        assert "add /health endpoint" in index_text
+
+    def test_no_goal_falls_back_to_placeholder(self) -> None:
+        task_ledger.create_assignment(
+            PROJECT, "qa", "/api", "smoke test", None, "general", "claude"
+        )
+        assert task_ledger._FALLBACK_GOAL in _index_text()
+
+    def test_no_feature_falls_back_to_general(self) -> None:
+        task_ledger.create_assignment(PROJECT, "qa", "/api", "smoke test", "goal", None, "claude")
+        assert task_ledger._FALLBACK_FEATURE in _index_text()
+
+    def test_feature_grouping_separates_sections(self) -> None:
+        task_ledger.create_assignment(
+            PROJECT, "backend", "/api", "task A", "shared goal", "feature-A", "claude"
+        )
+        task_ledger.create_assignment(
+            PROJECT, "frontend", "/web", "task B", "shared goal", "feature-B", "claude"
+        )
+        state = task_ledger._load_state(PROJECT)
+        # Same date+goal → one group, two distinct feature buckets.
+        assert len(state["groups"]) == 1
+        names = [f["name"] for f in state["groups"][0]["features"]]
+        assert names == ["feature-A", "feature-B"]
+
+        index_text = _index_text()
+        assert "1. feature-A" in index_text
+        assert "2. feature-B" in index_text
+
+
+class TestMarkDone:
+    def test_flip_ok_shows_done_checkbox(self) -> None:
+        task_ledger.create_assignment(
+            PROJECT, "backend", "/api", "do the thing", "goal", "feat", "claude"
+        )
+        warning = task_ledger.mark_done(PROJECT, "backend", "ok")
+        assert warning == ""
+        index_text = _index_text()
+        assert "[x]" in index_text
+        assert "✅ done" in index_text
+
+        state = task_ledger._load_state(PROJECT)
+        assert "backend" not in state.get("open", {})
+
+    def test_flip_fail_shows_failed_marker(self) -> None:
+        task_ledger.create_assignment(PROJECT, "qa", "/api", "smoke test", "goal", "feat", "claude")
+        task_ledger.mark_done(PROJECT, "qa", "fail")
+        index_text = _index_text()
+        assert "[!]" in index_text
+        assert "❌ FAILED" in index_text
+
+    def test_flip_closed_shows_closed_marker(self) -> None:
+        task_ledger.create_assignment(
+            PROJECT, "reviewer", "/api", "review pr", "goal", "feat", "claude"
+        )
+        task_ledger.mark_done(PROJECT, "reviewer", "closed")
+        index_text = _index_text()
+        assert "[-]" in index_text
+        assert "➖ ปิด" in index_text
+
+    def test_flip_updates_detail_file_frontmatter(self) -> None:
+        task_ledger.create_assignment(
+            PROJECT, "backend", "/api", "do the thing", "goal", "feat", "claude"
+        )
+        state = task_ledger._load_state(PROJECT)
+        detail_rel = state["groups"][0]["features"][0]["rows"][0]["detail_rel"]
+        task_ledger.mark_done(PROJECT, "backend", "ok")
+        detail_text = (task_ledger._ledger_dir(PROJECT) / detail_rel).read_text(encoding="utf-8")
+        assert "status: ok" in detail_text
+        assert "status: working" not in detail_text
+
+    def test_no_open_row_is_a_noop_not_a_crash(self) -> None:
+        warning = task_ledger.mark_done(PROJECT, "nobody-assigned-this-role", "ok")
+        assert warning == ""
+
+    def test_invalid_status_raises(self) -> None:
+        with pytest.raises(ValueError):
+            task_ledger.mark_done(PROJECT, "backend", "bogus")
+
+
+class TestWriteFailureDegrades:
+    def test_create_assignment_detail_write_failure_degrades(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _boom(*_a, **_kw):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(pathlib.Path, "write_text", _boom)
+        warning = task_ledger.create_assignment(
+            PROJECT, "backend", "/api", "task", "goal", "feat", "claude"
+        )
+        assert warning != ""
+        assert "backend" in warning
+
+    def test_mark_done_detail_flip_failure_degrades(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        task_ledger.create_assignment(PROJECT, "backend", "/api", "task", "goal", "feat", "claude")
+
+        real_replace = task_ledger._atomic_write
+
+        def _boom_on_second_call(path, content):
+            if "-ledger.md" in str(path):
+                raise OSError("disk full")
+            real_replace(path, content)
+
+        monkeypatch.setattr(task_ledger, "_atomic_write", _boom_on_second_call)
+        warning = task_ledger.mark_done(PROJECT, "backend", "ok")
+        assert warning != ""
+        # INDEX.md still gets regenerated (only the detail-file flip failed).
+        assert "[x]" in _index_text()
+
+
+class TestAtomicWrite:
+    def test_no_stray_temp_files_left_behind(self) -> None:
+        task_ledger.create_assignment(PROJECT, "backend", "/api", "task", "goal", "feat", "claude")
+        task_ledger.mark_done(PROJECT, "backend", "ok")
+        leftovers = list(task_ledger._ledger_dir(PROJECT).rglob("*.tmp*"))
+        assert leftovers == []
+
+    def test_index_write_uses_replace_not_truncate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls = []
+        import os as _os
+
+        real_replace = _os.replace
+
+        def _spy_replace(src, dst):
+            calls.append((str(src), str(dst)))
+            real_replace(src, dst)
+
+        monkeypatch.setattr(task_ledger.os, "replace", _spy_replace)
+        task_ledger.create_assignment(PROJECT, "backend", "/api", "task", "goal", "feat", "claude")
+        assert calls  # os.replace was used at least once (temp → final)
+        for src, dst in calls:
+            assert src != dst
+            assert ".tmp" in src

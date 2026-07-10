@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 83,
+  "module_count": 84,
   "modules": [
     {
       "module": "agent_takkub",
@@ -248,6 +248,7 @@
         "agent_takkub.skill_audit",
         "agent_takkub.spawn_engine",
         "agent_takkub.status_header",
+        "agent_takkub.task_ledger",
         "agent_takkub.terminal_widget",
         "agent_takkub.tutorial_overlay",
         "agent_takkub.update_helper",
@@ -259,7 +260,7 @@
         "agent_takkub.vault_mirror",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 51,
+      "fan_in": 52,
       "fan_out": 0
     },
     {
@@ -514,6 +515,7 @@
         "agent_takkub.routing_planner",
         "agent_takkub.shared_dev_tools",
         "agent_takkub.spawn_engine",
+        "agent_takkub.task_ledger",
         "agent_takkub.vault_mirror",
         "agent_takkub.worktree_manager"
       ],
@@ -525,7 +527,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 5,
-      "fan_out": 22
+      "fan_out": 23
     },
     {
       "module": "agent_takkub.orchestrator_text",
@@ -1048,6 +1050,17 @@
       ],
       "fan_in": 1,
       "fan_out": 0
+    },
+    {
+      "module": "agent_takkub.task_ledger",
+      "imports": [
+        "agent_takkub.config"
+      ],
+      "imported_by": [
+        "agent_takkub.orchestrator"
+      ],
+      "fan_in": 1,
+      "fan_out": 1
     },
     {
       "module": "agent_takkub.terminal_widget",

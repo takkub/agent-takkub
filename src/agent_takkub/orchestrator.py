@@ -743,6 +743,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         plan: bool = False,
         isolation: str = "shared",
         project: str | None = None,
+        feature: str = "",
     ) -> tuple[bool, str]:
         # Fan-out queue (flag-gated, default off): defer a fresh teammate spawn
         # that would exceed the machine's total-pane budget. It spawns
@@ -759,6 +760,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                 plan,
                 isolation,
                 project,
+                feature,
             )
 
         # Per-pane git worktree isolation (issue #81): create the worktree +
@@ -766,7 +768,15 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         # to a shared-cwd dispatch and warns the Lead — never blocks the assign.
         if isolation == "worktree":
             return self._assign_with_worktree(
-                role_name, cwd, task, requires_commit, auto_chain, shard_total, plan, project
+                role_name,
+                cwd,
+                task,
+                requires_commit,
+                auto_chain,
+                shard_total,
+                plan,
+                project,
+                feature,
             )
         return self._assign_dispatch(
             role_name,
@@ -778,6 +788,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             plan=plan,
             project=project,
             worktree=None,
+            feature=feature,
         )
 
     def _assign_dispatch(
@@ -791,6 +802,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         plan: bool = False,
         project: str | None = None,
         worktree: dict | None = None,
+        feature: str = "",
     ) -> tuple[bool, str]:
         # Spawn the pane and run all post-spawn wiring (goal, provider rewrite,
         # verify hint, shard/plan bookkeeping, send). Shared by the normal assign
@@ -835,6 +847,11 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         from .provider_config import CODEX, effective_provider_for
 
         project_ns = self._resolve_project(project)
+        # Task Ledger (A7): the ledger records what the CALLER actually asked
+        # for, not the delivery-mechanics text (goal-prefix / codex-rewrite /
+        # verify-fail hint) added below — capture before any of that mutates
+        # `task`.
+        raw_task_for_ledger = task
 
         # #50: prepend the session objective (if Lead set one) so every
         # teammate sees the big picture. Done before the codex rewrite and
@@ -847,7 +864,8 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         # task rewriting would only confuse the standing-in claude pane.
         # Scoped to project_ns so the per-project role→CLI mapping decides.
         base_role_a = _split_shard(role_name)[0]
-        if effective_provider_for(base_role_a, project=project_ns) == CODEX:
+        effective_provider = effective_provider_for(base_role_a, project=project_ns)
+        if effective_provider == CODEX:
             task = _rewrite_task_for_codex(task)
         # Verify roles (qa/reviewer): tell them to report a failing result with
         # `takkub done --fail` so the orchestrator can offer a fix loop (Tier 2a
@@ -860,6 +878,26 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         # picks up screenshots captured for THIS task, not a stale one left
         # over from a previous assignment to the same pane (issue #5).
         ps_assign.assign_ts = time.time()
+        # Task Ledger (A7): write-on-assign — every task, not just long ones,
+        # so a role that never calls `takkub done` leaves a visible `[~]` row
+        # behind. Degrades on failure (never blocks the assign itself).
+        try:
+            from .task_ledger import create_assignment
+
+            ledger_cwd = cwd or default_cwd_for_role(base_role_a, project=project_ns)
+            ledger_warning = create_assignment(
+                project_ns,
+                role_name,
+                ledger_cwd,
+                raw_task_for_ledger,
+                self.get_session_goal(project=project_ns),
+                feature,
+                effective_provider,
+            )
+            if ledger_warning:
+                self._notify_lead(project_ns, ledger_warning, from_role=role_name, note="")
+        except Exception:
+            _log_event("ledger_hook_error", role=role_name, project=project_ns, stage="assign")
         # New task → fresh one-shot budget for the Stop-hook done-gate.
         ps_assign.stop_gate_notified = False
         # New task → fresh auto-resume park/wake budget (issue: limit-aware
@@ -953,6 +991,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         shard_total: int,
         plan: bool,
         project: str | None,
+        feature: str = "",
     ) -> tuple[bool, str]:
         """Create an isolated git worktree for the pane, then dispatch into it.
 
@@ -986,6 +1025,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                 plan=plan,
                 project=project,
                 worktree=None,
+                feature=feature,
             )
 
         if not base_cwd:
@@ -1046,6 +1086,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             plan=plan,
             project=project,
             worktree=info.as_dict(),
+            feature=feature,
         )
         # Tag the pane title with the branch so the isolation is unmistakable in
         # the cockpit (best-effort; the pane exists once dispatch's spawn emitted
@@ -1281,6 +1322,21 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         # holds worktree state here (done() pops it first, so this is None on the
         # done→auto-close path — no double finalize).
         had_worktree_close = _ps_close.worktree if _ps_close is not None else None
+
+        # Task Ledger (A7): same "still holds state" signal as worktree above —
+        # `_ps_close is not None` means this pane never called done(), so flip
+        # its open row to "closed" (abandoned). The done()→auto-close 2.5s later
+        # is a no-op here since done() already popped the state (and already
+        # flipped the row to ok/fail).
+        if _ps_close is not None:
+            try:
+                from .task_ledger import mark_done
+
+                ledger_warning = mark_done(project_ns, role_name, "closed")
+                if ledger_warning:
+                    self._notify_lead(project_ns, ledger_warning, from_role=role_name, note="")
+            except Exception:
+                _log_event("ledger_hook_error", role=role_name, project=project_ns, stage="close")
 
         self._idle_state.pop(key, None)
         getattr(self, "_pane_state", {}).pop(key, None)
@@ -1748,6 +1804,16 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         # carrying the full text inline. `now` is shared with the
         # `_recent_done` stamp further below so the two never disagree.
         now = datetime.now()
+        # Task Ledger (A7): flip the role's open row to ok/fail. Best-effort —
+        # never blocks the done() report itself.
+        try:
+            from .task_ledger import mark_done
+
+            ledger_warning = mark_done(project_ns, from_role, "fail" if failed else "ok", ts=now)
+            if ledger_warning:
+                self._notify_lead(project_ns, ledger_warning, from_role=from_role, note="")
+        except Exception:
+            _log_event("ledger_hook_error", role=from_role, project=project_ns, stage="done")
         transcript_path = getattr(pane, "_transcript_path", None)
         session_md_path = self._save_decision_note(
             project_ns, from_role, note, now=now, transcript_path=transcript_path
@@ -3576,10 +3642,11 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         plan: bool,
         isolation: str,
         project: str | None,
+        feature: str = "",
     ) -> tuple[bool, str]:
         """Park an over-cap assign on the per-project queue and tell the Lead.
         Replayed verbatim by `_drain_fanout_queue` once a slot frees, so every
-        flag (commit gate, auto-chain, shards, plan, isolation) survives unchanged."""
+        flag (commit gate, auto-chain, shards, plan, isolation, feature) survives unchanged."""
         project_ns = self._resolve_project(project)
         q = getattr(self, "_fanout_queue", None)
         if q is None:
@@ -3595,6 +3662,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                 "plan": plan,
                 "isolation": isolation,
                 "project": project,
+                "feature": feature,
             }
         )
         depth = len(q[project_ns])
@@ -3654,6 +3722,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                 plan=item["plan"],
                 isolation=item.get("isolation", "shared"),
                 project=item["project"],
+                feature=item.get("feature", ""),
             )
         except Exception:
             pass

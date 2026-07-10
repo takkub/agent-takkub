@@ -381,6 +381,7 @@ class CliServer(QObject):
                             plan=bool(req.get("plan", False)),
                             isolation=str(req.get("isolation", "shared") or "shared"),
                             project=from_project,
+                            feature=str(req.get("feature", "") or ""),
                         ),
                     )
                     self._reply(

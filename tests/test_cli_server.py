@@ -55,6 +55,7 @@ class _FakeOrch:
         plan=False,
         isolation="shared",
         project=None,
+        feature="",
     ):
         self.assign_calls.append((role, cwd, task, requires_commit, auto_chain, isolation))
         return True, "ok"

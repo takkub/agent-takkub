@@ -213,6 +213,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                     "from": _from_role(),
                     "plan": True,
                     "shard_total": shards,
+                    "feature": getattr(args, "feature", "") or "",
                 }
             )
         )
@@ -233,6 +234,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                         "auto_chain": bool(getattr(args, "auto_chain", False)),
                         "shard_total": shards,
                         "isolation": isolation,
+                        "feature": getattr(args, "feature", "") or "",
                     }
                 )
             )
@@ -250,6 +252,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                 "requires_commit": bool(getattr(args, "requires_commit", False)),
                 "auto_chain": bool(getattr(args, "auto_chain", False)),
                 "isolation": isolation,
+                "feature": getattr(args, "feature", "") or "",
             }
         )
     )
@@ -1268,6 +1271,13 @@ def main(argv: list[str] | None = None) -> int:
         "in its OWN git worktree + branch (wt/<role>-<ts>) so parallel feature "
         "builds don't race; on done the Lead gets a merge PROPOSAL (never "
         "auto-merged). Falls back to shared + warns if the cwd isn't a git repo.",
+    )
+    sa.add_argument(
+        "--feature",
+        default="",
+        help="feature/work-item label for the Task Ledger (A7) — groups this "
+        "assign's row under '### N. <feature>' in runtime/tasks/<project>/"
+        "INDEX.md. Omit for 'งานทั่วไป' (general work).",
     )
     sa.set_defaults(func=cmd_assign)
 
