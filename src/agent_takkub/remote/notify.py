@@ -298,6 +298,18 @@ _SESSION_LIST_MAX_LIMIT = 20
 # First-user-line preview is deliberately short (data-min, W3): enough to
 # recognize which session to resume, never a conversation excerpt.
 _SESSION_PREVIEW_CHARS = 140
+# Every cockpit task spec (any provider) starts a teammate pane's first
+# user-typed line with this literal prefix (see CLAUDE.md's task-prompt
+# template) — Lead sessions never do. Mirrors
+# `chatlog_scanner._TEAMMATE_TASK_PREFIX` so the mobile picker filters
+# teammate sessions out the same way the desktop one does.
+_TEAMMATE_TASK_PREFIX = "[ROLE:"
+# When a session goal is set (`Orchestrator._SESSION_GOAL_HEADER`), `assign()`
+# prepends this header before `[ROLE:` on the *same* first user line — Lead
+# spawns never go through `_apply_session_goal`, so this prefix is also
+# assign-only. Mirrors `chatlog_scanner._SESSION_GOAL_TASK_PREFIX`.
+_SESSION_GOAL_TASK_PREFIX = "[SESSION GOAL"
+_TEAMMATE_TASK_PREFIXES = (_TEAMMATE_TASK_PREFIX, _SESSION_GOAL_TASK_PREFIX)
 
 
 def _first_user_preview(path: Path) -> str:
@@ -336,47 +348,59 @@ def list_recent_lead_sessions(
     first user-typed line, truncated (`_first_user_preview`), never the full
     conversation. Corrupt/empty files and directories that don't decode to
     this project's cwd are skipped silently — best-effort, matches
-    `chatlog_scanner`'s read-only contract."""
+    `chatlog_scanner`'s read-only contract.
+
+    Lists the cwd's encoded project dir directly (`token_meter.
+    session_project_dir_for_cwd`) instead of scanning every project dir and
+    reverse-decoding names for an equality check — `decode_project_dir()` is
+    lossy (every non-alnum char, not just separators, becomes '-'), so a cwd
+    containing '-', '_', '.', or a space (e.g. `agent-takkub`) would silently
+    match zero directories under the old scan-and-decode approach.
+
+    Teammate panes (backend/reviewer/qa/…) share the Lead's cwd, so their
+    session jsonls land in this same encoded dir and would otherwise crowd
+    out genuine Lead sessions from the capped list. They're filtered out by
+    reading each candidate's first human-typed line (newest mtime first,
+    stopping as soon as `limit` non-teammate sessions are found) and
+    skipping any that start with a mandatory teammate task prefix
+    (`_TEAMMATE_TASK_PREFIXES` — the `[ROLE:` declaration itself, or the
+    `[SESSION GOAL` header `assign()` prepends ahead of it when a session
+    goal is set) — this avoids reading all of a project's jsonls on every
+    picker poll when most are teammate sessions. A session whose first
+    line can't be read (or has none yet) is kept as a Lead-candidate
+    rather than silently dropped."""
     from .. import config as _config
-    from ..chatlog_scanner import decode_project_dir
+    from ..token_meter import session_project_dir_for_cwd
 
     cwd = _config.lead_cwd(project_ns)
     if not cwd:
         return []
     try:
-        cwd_resolved = Path(cwd).resolve()
+        proj_dir = session_project_dir_for_cwd(config_dir_for(project_ns), cwd)
     except OSError:
         return []
-    try:
-        base = config_dir_for(project_ns) / "projects"
-        if not base.is_dir():
-            return []
-        dirs = list(base.iterdir())
-    except OSError:
+    if not proj_dir.is_dir():
         return []
     found: list[tuple[float, Path]] = []
-    for d in dirs:
-        if not d.is_dir():
-            continue
-        try:
-            if decode_project_dir(d.name).resolve() != cwd_resolved:
+    try:
+        for jsonl in proj_dir.glob("*.jsonl"):
+            try:
+                found.append((jsonl.stat().st_mtime, jsonl))
+            except OSError:
                 continue
-        except OSError:
-            continue
-        try:
-            for jsonl in d.glob("*.jsonl"):
-                try:
-                    found.append((jsonl.stat().st_mtime, jsonl))
-                except OSError:
-                    continue
-        except OSError:
-            continue
+    except OSError:
+        return []
     found.sort(key=lambda t: t[0], reverse=True)
     capped = max(1, min(limit, _SESSION_LIST_MAX_LIMIT))
-    return [
-        {"uuid": jsonl.stem, "mtime": mtime, "preview": _first_user_preview(jsonl)}
-        for mtime, jsonl in found[:capped]
-    ]
+    out: list[dict] = []
+    for mtime, jsonl in found:
+        preview = _first_user_preview(jsonl)
+        if preview.startswith(_TEAMMATE_TASK_PREFIXES):
+            continue
+        out.append({"uuid": jsonl.stem, "mtime": mtime, "preview": preview})
+        if len(out) >= capped:
+            break
+    return out
 
 
 def _tail_start_offset(path: Path, size: int) -> int:

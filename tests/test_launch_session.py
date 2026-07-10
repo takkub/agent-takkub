@@ -159,3 +159,16 @@ class TestLaunchSessionCommonTail:
         _launch(orch, _pane(), label="shell")
         assert orch._spawn_in_progress is False
         orch._drain_spawn_queue.assert_called()
+
+    def test_resets_stale_last_spawn_resumed_flag(self, orch):
+        """FU1 (2026-07-10 cross-platform followup): shell/gemini/codex never
+        set last_spawn_resumed (that's a claude-`--resume`-only concept), so a
+        role slot that previously spawned via the claude branch (provider
+        substitution) and set it True must NOT carry that stale True into a
+        later codex/gemini spawn — _auto_respawn reads it to decide whether to
+        replay the cached task, and a stale True would wrongly suppress replay
+        after a crash on this branch."""
+        ps = orch._ps(f"{TEST_PROJECT}::gemini")
+        ps.last_spawn_resumed = True
+        _launch(orch, _pane(), label="gemini", auto_trust=True)
+        assert orch._ps(f"{TEST_PROJECT}::gemini").last_spawn_resumed is False

@@ -589,10 +589,9 @@ class MainWindow(
         self._boot_quiet_count = 0
         QTimer.singleShot(_BOOT_LEAD_INITIAL_MS, self._spawn_lead_when_quiet)
 
-        # `/remote-control` auto-bridges on every successful Lead spawn,
-        # fresh boot included — see SpawnEngineMixin._maybe_fire_remote_bridge
-        # (spawn_engine.py). The 🌐 Remote chip remains as a manual fallback
-        # (reconfigure pairing, or re-fire if the bridge command timed out).
+        # (The /remote-control auto-bridge was removed 2026-07-10 — it raced
+        # claude's /resume picker. The 🌐 Remote chip configures pairing; type
+        # /remote-control by hand to bridge a session to claude.ai/code.)
 
         # Auto-spawn project presets after Lead has had a moment to boot.
         # Stagger 3s apart so we don't hammer the system or race on auto-trust.
@@ -898,8 +897,8 @@ class MainWindow(
             self._status.showMessage(f"⚠ Lead spawn failed for {project_name}: {msg}", 15_000)
             return
         lead._title.setText(f"Lead · {project_name}")
-        # `/remote-control` auto-bridges here too — spawn() above fires it
-        # for every successful Lead spawn (see _maybe_fire_remote_bridge).
+        # (The /remote-control auto-bridge was removed 2026-07-10 — type
+        # /remote-control by hand to bridge a session to claude.ai/code.)
         self._refresh_rtk_button()
         if self._limit_store is not None:
             from . import user_profile as _up_ot
@@ -1041,8 +1040,8 @@ class MainWindow(
         active = active_project()[0]
         if active:
             self.lead_pane._title.setText(f"Lead · {active}")
-        # `/remote-control` auto-bridges here too — spawn() above fires it
-        # for every successful Lead spawn (see _maybe_fire_remote_bridge).
+        # (The /remote-control auto-bridge was removed 2026-07-10 — type
+        # /remote-control by hand to bridge a session to claude.ai/code.)
 
     def _on_tab_context_menu(self, index: int, global_pos) -> None:
         """Right-click a sidebar project → project-level actions."""

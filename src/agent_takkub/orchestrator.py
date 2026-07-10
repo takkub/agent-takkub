@@ -584,44 +584,6 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         # top of a draft the user hasn't submitted yet. Fed by _on_pane_input
         # via LeadInboxMixin._track_lead_draft_input; see lead_inbox.py.
         self._lead_draft_state: dict[str, LeadDraftState] = {}
-        # `/remote-control` auto-bridge dedupe (#4, 2026-07-09 core-upgrade
-        # plan): keyed f"{project_ns}::{session_uuid}" so every distinct Lead
-        # session (fresh boot, tab open, respawn, crash recovery) fires the
-        # bridge exactly once, but a *new* session (new uuid after a respawn
-        # outside the resume window) fires again. Set in SpawnEngineMixin.spawn().
-        self._lead_remote_bridge_fired: set[str] = set()
-        # In-flight polls for the bridge above (#107) — a session leaves this
-        # set on delivery (→ _fired) or on drop (→ retried by the idle-
-        # watchdog reaper, see SpawnEngineMixin._reap_remote_bridge), never
-        # left stuck as neither "handled" nor "retryable".
-        self._lead_remote_bridge_pending: set[str] = set()
-        # #110: session-OBJECT-identity guard layered on top of the uuid
-        # dedup above — keyed f"{project_ns}::{role}" -> the PtySession the
-        # in-flight poll was started against. Closes a race the uuid keys
-        # alone can't: on a `--resume` boot, claude's SessionStart hook can
-        # fire twice with two DIFFERENT uuids for the SAME physical pane
-        # (startup then resume), which raced two uuid-keyed polls into
-        # delivering `/remote-control` twice. A genuinely new process
-        # (crash respawn, resume-window expiry) gets a new session object,
-        # so this guard never blocks a real respawn. See
-        # SpawnEngineMixin._maybe_fire_remote_bridge.
-        self._lead_remote_bridge_pending_session: dict[str, object] = {}
-        # #112: `_lead_remote_bridge_pending_session` above only guards while
-        # a poll is *in flight* — it's cleared the moment that poll finishes
-        # (delivered or dropped), so it can't stop a SECOND, LATER
-        # `SessionStart` hook (a `--resume` boot's "startup" then "resume"
-        # firings can land 10s+ apart, well after the first poll already
-        # delivered) from re-firing the bridge for the same still-alive
-        # session under its new uuid. This dict is the "lifetime" sibling:
-        # keyed f"{project_ns}::{role}" -> the PtySession object that has
-        # ALREADY had `/remote-control` delivered, and — unlike the pending
-        # dict — is never cleared on delivery/drop. It's only ever
-        # overwritten, and only with a genuinely NEW PtySession object,
-        # which happens exactly once per real respawn (SpawnEngineMixin.spawn
-        # constructs a fresh PtySession every call) — so identity comparison
-        # alone gives "invalidate on new process, not on uuid change" for
-        # free, with no separate invalidation step needed.
-        self._lead_remote_bridge_delivered_session: dict[str, object] = {}
 
         # Per-(project, role) in-flight lock for inject_slash_command_when_ready
         # (#113): keyed f"{project_ns}::{role_name}" -> present while a call's
@@ -2009,16 +1971,10 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         reported back but never raises — a hook must never break the pane's
         session start.
 
-        #107 follow-up: also (re-)fires the `/remote-control` auto-bridge for
-        the Lead role. `spawn()`'s own `_maybe_fire_remote_bridge` call only
-        ever sees the uuid it stamped at spawn time — a manual `/resume`
-        (or `/clear`, post-compact) *inside* the pane swaps claude to a
-        different transcript uuid that `spawn()` never learns about, so
-        without this the bridge silently never re-establishes for that new
-        session. Safe to call unconditionally (every source, not just
-        "resume"): `_maybe_fire_remote_bridge` dedupes per session-uuid, so
-        the common "startup" source (same uuid `spawn()` already fired/is
-        polling for) is a harmless no-op here.
+        (Historical: this used to also (re-)fire the `/remote-control`
+        auto-bridge for the Lead role. That bridge was removed 2026-07-10 — it
+        kept racing claude's `/resume` picker and cancelling it. This method now
+        only keeps `pane_state.session_uuid` in sync for the mobile mirror.)
         """
         try:
             from_role = validate_name(from_role, "role")
@@ -2039,8 +1995,10 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             source=source,
             uuid=session_id[:8],
         )
-        if from_role == LEAD.name:
-            self._maybe_fire_remote_bridge(project_ns, key)
+        # (The /remote-control auto-bridge was removed 2026-07-10 at user
+        # request — it kept racing claude's /resume picker. `session_uuid` is
+        # still stamped above so the mobile mirror tracks the live session;
+        # /remote-control is now typed by hand when the user wants it.)
         return True, ""
 
     @staticmethod
@@ -2911,10 +2869,6 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                             and pane.session.is_at_ready_prompt()
                         ):
                             self._maybe_surface_malformed_xml(key, name, project_name, pane, now)
-                        # #107: retry a dropped `/remote-control` bridge once this
-                        # Lead pane is next observed ready — no-op for a session
-                        # that already fired or is still mid-poll.
-                        self._reap_remote_bridge(project_name, pane)
                         continue
                     if pane.state != "working":
                         self._idle_state.pop(key, None)

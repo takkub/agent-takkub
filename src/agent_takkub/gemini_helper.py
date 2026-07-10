@@ -31,6 +31,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from ._win_console import SUBPROCESS_NO_WINDOW
@@ -46,7 +47,7 @@ _INSTALL_HINT = (
 
 
 def _default_agy_paths() -> list[Path]:
-    """Known fixed install locations for `agy.exe` (PATH-independent).
+    """Known fixed install locations for `agy` (PATH-independent).
 
     The Antigravity Windows installer drops the binary under
     %LOCALAPPDATA%\\agy\\bin\\agy.exe but does NOT reliably add that dir
@@ -55,13 +56,25 @@ def _default_agy_paths() -> list[Path]:
     the real `agy.exe` off PATH). Probing the canonical location keeps
     the cockpit from falsely degrading the `gemini` role to a Claude
     substitute when `agy` is in fact installed and working.
+
+    L2 (cross-platform audit 2026-07-10): this fallback used to be
+    Windows-only — a mac install with `agy` not on PATH had nothing to
+    probe, so `gemini` silently degraded to Claude-substitute even when
+    Antigravity was genuinely installed. Adds the mac equivalents: the
+    `.app` bundle's CLI shim and the two common Homebrew prefixes
+    (`/opt/homebrew` on Apple Silicon, `/usr/local` on Intel).
     """
     candidates: list[Path] = []
-    local = os.environ.get("LOCALAPPDATA")
-    if local:
-        candidates.append(Path(local) / "agy" / "bin" / "agy.exe")
-    home = Path.home()
-    candidates.append(home / "AppData" / "Local" / "agy" / "bin" / "agy.exe")
+    if sys.platform == "win32":
+        local = os.environ.get("LOCALAPPDATA")
+        if local:
+            candidates.append(Path(local) / "agy" / "bin" / "agy.exe")
+        candidates.append(Path.home() / "AppData" / "Local" / "agy" / "bin" / "agy.exe")
+    elif sys.platform == "darwin":
+        candidates.append(Path("/Applications/Antigravity.app/Contents/MacOS/agy"))
+        candidates.append(Path("/opt/homebrew/bin/agy"))
+        candidates.append(Path("/usr/local/bin/agy"))
+        candidates.append(Path.home() / ".local" / "bin" / "agy")
     return candidates
 
 

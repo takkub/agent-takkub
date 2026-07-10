@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+from unittest.mock import patch
 
 from agent_takkub.pane_tools_dialog import (
     ROLES,
+    _default_plugins_installed_file,
     build_matrix,
     diff_role_items,
     discover_marketplace_plugins,
@@ -121,6 +123,42 @@ def test_discover_marketplaces_malformed_json_returns_empty(tmp_path):
 def test_parse_install_form_splits_args_on_whitespace():
     result = parse_install_form("my-mcp", "npx", "-y some-pkg@1.0.0")
     assert result == ("my-mcp", {"command": "npx", "args": ["-y", "some-pkg@1.0.0"]})
+
+
+# ---------------------------------------------------------------------------
+# M2: default installed-registry path resolves via
+# config.default_claude_config_dir() (profile/isolated-mode aware), not a
+# hardcoded ~/.claude — docs/reviews/2026-07-10-xplatform-CONSOLIDATED.md
+# ---------------------------------------------------------------------------
+
+
+def test_default_plugins_installed_file_uses_config_dir(tmp_path):
+    with patch(
+        "agent_takkub.config.default_claude_config_dir",
+        return_value=tmp_path / "claude-config",
+    ):
+        path = _default_plugins_installed_file()
+    assert path == tmp_path / "claude-config" / "plugins" / "installed_plugins.json"
+
+
+def test_discover_marketplace_plugins_no_arg_resolves_default_file(tmp_path):
+    cfg_dir = tmp_path / "claude-config"
+    (cfg_dir / "plugins").mkdir(parents=True)
+    (cfg_dir / "plugins" / "installed_plugins.json").write_text(
+        json.dumps({"plugins": {"pordee@pordee": []}}), encoding="utf-8"
+    )
+    with patch("agent_takkub.config.default_claude_config_dir", return_value=cfg_dir):
+        assert discover_marketplace_plugins() == ["pordee@pordee"]
+
+
+def test_discover_marketplaces_no_arg_resolves_default_file(tmp_path):
+    cfg_dir = tmp_path / "claude-config"
+    (cfg_dir / "plugins").mkdir(parents=True)
+    (cfg_dir / "plugins" / "installed_plugins.json").write_text(
+        json.dumps({"plugins": {"superpowers@superpowers-dev": []}}), encoding="utf-8"
+    )
+    with patch("agent_takkub.config.default_claude_config_dir", return_value=cfg_dir):
+        assert discover_marketplaces() == ["superpowers-dev"]
 
 
 def test_parse_install_form_strips_whitespace_from_name_and_command():

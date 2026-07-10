@@ -382,21 +382,34 @@ def lead_cwd(project: str | None = None) -> str | None:
     if not paths:
         return None
 
+    def _absolutize(p: str) -> str:
+        # L6: a raw configured path can be relative (e.g. a hand-edited
+        # projects.json entry, or `os.path.commonpath()` below collapsing to
+        # a relative prefix). Handing a relative string straight to the
+        # native spawn call resolves it against the *cockpit process's* cwd,
+        # not the project — Lead silently lands in the wrong directory.
+        # `expanduser().resolve()` absolutizes it at the source so every
+        # caller of `lead_cwd()` gets a real, unambiguous path.
+        try:
+            return str(Path(p).expanduser().resolve())
+        except OSError:
+            return p
+
     # 1. explicit lead path key
     lead_key = proj.get("lead")
     if isinstance(lead_key, str) and lead_key in paths:
-        return paths[lead_key]
+        return _absolutize(paths[lead_key])
 
     # 2. common parent of all paths
     try:
         common = os.path.commonpath([str(p) for p in paths.values()])
         if common and Path(common).is_dir() and Path(common).parent != Path(common):
-            return common
+            return _absolutize(common)
     except ValueError:
         pass
 
     # 3. first listed path
-    return next(iter(paths.values()))
+    return _absolutize(next(iter(paths.values())))
 
 
 def set_active_project(name: str) -> bool:

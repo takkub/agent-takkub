@@ -37,15 +37,16 @@ _PROJECT = "default"
 
 
 def _encode_cwd(path: pathlib.Path) -> str:
-    """Inverse of `chatlog_scanner.decode_project_dir` — build the encoded
-    directory name Claude Code would have created for `path`, so tests can
-    plant fixture JSONL files that decode back to a known cwd."""
-    s = str(path.resolve()).replace("\\", "/")
-    if len(s) >= 2 and s[1] == ":":
-        drive = s[0]
-        rest = s[2:].lstrip("/")
-        return f"{drive}--{rest.replace('/', '-')}"
-    return s.strip("/").replace("/", "-")
+    """Build the encoded directory name Claude Code would have created for
+    `path`, so tests can plant fixture JSONL files findable via their real
+    cwd. Delegates to the canonical `token_meter.encode_path_for_claude`
+    (C1) rather than reimplementing the mapping — a hand-rolled partial
+    encoder here (e.g. one that only rewrites path separators) would silently
+    diverge from what the code under test actually does for any cwd
+    containing '_', '.', or a space."""
+    from agent_takkub.token_meter import encode_path_for_claude
+
+    return encode_path_for_claude(path)
 
 
 @pytest.fixture
@@ -121,71 +122,65 @@ def _spawn_capture(
     return (captured[0] if captured else []), result
 
 
-class TestCoreListRecentLeadSessions:
-    """`chatlog_scanner.list_recent_lead_sessions` — the core (non-remote)
-    sibling that backs the desktop ↻ Resume picker. Same cwd-encoded scan as
-    `notify.list_recent_lead_sessions`, but importable without pulling in
-    `agent_takkub.remote` (the remote-bolt-on-isolation contract)."""
+class TestSurvivesLossyPathChars:
+    """C1 regression: a cwd containing '-', '_', '.', or a space (e.g. this
+    very project, `agent-takkub`) must resolve correctly now that lookups
+    encode forward (`token_meter.encode_path_for_claude`) instead of
+    scanning every project dir and reverse-decoding names to compare.
+    `decode_project_dir()` maps every non-alnum char to '-', so it can't
+    tell "was a path separator" from "was already one of those chars" apart
+    — the old scan-and-decode approach silently found zero sessions for any
+    project whose cwd contained one. Uses ordinary `tmp_path` (itself nested
+    under a hyphenated pytest-internal dir) rather than `hyphen_free_root`,
+    proving the fix no longer needs a hyphen-free root at all."""
 
     @staticmethod
-    def _plant(proj_dir: pathlib.Path, uuid: str, text: str, mtime: float) -> None:
-        import os
+    def _plant_real_encoded(config_dir: pathlib.Path, cwd: pathlib.Path, uuid: str) -> None:
+        from agent_takkub.token_meter import encode_path_for_claude
 
+        proj_dir = config_dir / "projects" / encode_path_for_claude(cwd)
+        proj_dir.mkdir(parents=True)
         rec = {
             "type": "user",
-            "message": {"role": "user", "content": [{"type": "text", "text": text}]},
+            "message": {"role": "user", "content": [{"type": "text", "text": "hi"}]},
         }
-        f = proj_dir / f"{uuid}.jsonl"
-        f.write_text(json.dumps(rec) + "\n", encoding="utf-8")
-        os.utime(f, (mtime, mtime))
+        (proj_dir / f"{uuid}.jsonl").write_text(json.dumps(rec) + "\n", encoding="utf-8")
 
-    def test_lists_newest_first_with_uuid_mtime_preview(
-        self, hyphen_free_root: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize(
+        "subdir_name",
+        ["agent-takkub", "my_app_web", "release.candidate", "my project name"],
+        ids=["hyphen", "underscore", "dot", "space"],
+    )
+    def test_notify_finds_session_for_lossy_cwd(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, subdir_name: str
     ) -> None:
-        from agent_takkub import chatlog_scanner as scanner
-
-        config_dir = hyphen_free_root / "claude_config"
-        monkeypatch.setattr(user_profile, "_DEFAULT_CONFIG_DIR", config_dir)
-        cwd = hyphen_free_root / "proj"
+        config_dir = tmp_path / "claude_config"
+        monkeypatch.setattr(notify_mod, "config_dir_for", lambda project: config_dir)
+        cwd = tmp_path / subdir_name
         cwd.mkdir()
-        monkeypatch.setattr(_config, "lead_cwd", lambda name=None: str(cwd))
-        proj_dir = config_dir / "projects" / _encode_cwd(cwd)
-        proj_dir.mkdir(parents=True)
-        self._plant(proj_dir, "older", "งานเก่า", 1_000.0)
-        self._plant(proj_dir, "newer", "งานใหม่", 2_000.0)
+        monkeypatch.setattr(_config, "lead_cwd", lambda project=None: str(cwd))
+        self._plant_real_encoded(config_dir, cwd, "sess-1")
 
-        out = scanner.list_recent_lead_sessions("default")
-        assert [s["uuid"] for s in out] == ["newer", "older"]
-        assert out[0]["preview"] == "งานใหม่"
-        assert out[0]["mtime"] == 2_000.0
+        out = notify_mod.list_recent_lead_sessions("default")
+        assert [s["uuid"] for s in out] == ["sess-1"]
 
-    def test_skips_dirs_that_decode_to_a_different_cwd(
-        self, hyphen_free_root: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize(
+        "subdir_name",
+        ["agent-takkub", "my_app_web", "release.candidate", "my project name"],
+        ids=["hyphen", "underscore", "dot", "space"],
+    )
+    def test_resume_uuid_matches_cwd_for_lossy_cwd(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, subdir_name: str
     ) -> None:
-        from agent_takkub import chatlog_scanner as scanner
+        from agent_takkub.spawn_engine import _resume_uuid_matches_cwd
 
-        config_dir = hyphen_free_root / "claude_config"
+        config_dir = tmp_path / "claude_config"
         monkeypatch.setattr(user_profile, "_DEFAULT_CONFIG_DIR", config_dir)
-        cwd = hyphen_free_root / "proj"
+        cwd = tmp_path / subdir_name
         cwd.mkdir()
-        other = hyphen_free_root / "other"
-        other.mkdir()
-        monkeypatch.setattr(_config, "lead_cwd", lambda name=None: str(cwd))
-        mine = config_dir / "projects" / _encode_cwd(cwd)
-        mine.mkdir(parents=True)
-        theirs = config_dir / "projects" / _encode_cwd(other)
-        theirs.mkdir(parents=True)
-        self._plant(mine, "mine", "ของเรา", 1_000.0)
-        self._plant(theirs, "theirs", "ของคนอื่น", 3_000.0)
+        self._plant_real_encoded(config_dir, cwd, "sess-1")
 
-        out = scanner.list_recent_lead_sessions("default")
-        assert [s["uuid"] for s in out] == ["mine"]
-
-    def test_no_cwd_returns_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from agent_takkub import chatlog_scanner as scanner
-
-        monkeypatch.setattr(_config, "lead_cwd", lambda name=None: None)
-        assert scanner.list_recent_lead_sessions("default") == []
+        assert _resume_uuid_matches_cwd("default", "sess-1", str(cwd)) is True
 
 
 class TestResumeUuidMatchesCwd:
@@ -231,6 +226,62 @@ class TestResumeUuidMatchesCwd:
         (config_dir / "projects").mkdir(parents=True)
 
         assert _resume_uuid_matches_cwd("default", "ghost_uuid", str(hyphen_free_root)) is False
+
+    def test_false_for_path_traversal_uuid_even_when_target_jsonl_exists(
+        self, hyphen_free_root: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """F1 regression: `../<other-encoded-dir>/<real-uuid>` must be
+        rejected before it ever reaches the filesystem, even though the
+        target `.jsonl` genuinely exists under a *different* project's
+        encoded dir (proving the old `Path.is_file()` join would otherwise
+        have resolved outside `cwd`'s own encoded dir and returned True)."""
+        from agent_takkub.spawn_engine import _resume_uuid_matches_cwd
+
+        config_dir = hyphen_free_root / "claude_config"
+        monkeypatch.setattr(user_profile, "_DEFAULT_CONFIG_DIR", config_dir)
+        cwd = hyphen_free_root / "proj_a"
+        cwd.mkdir()
+        other = hyphen_free_root / "proj_b"
+        other.mkdir()
+        other_dir = config_dir / "projects" / _encode_cwd(other)
+        other_dir.mkdir(parents=True)
+        (other_dir / "real-uuid.jsonl").write_text("{}\n", encoding="utf-8")
+
+        traversal_uuid = f"../{_encode_cwd(other)}/real-uuid"
+
+        assert _resume_uuid_matches_cwd("default", traversal_uuid, str(cwd)) is False
+
+    @pytest.mark.parametrize(
+        "bad_uuid",
+        ["../evil", "a/b", "a\\b", "..", "foo/../bar", "trailing/"],
+    )
+    def test_false_for_any_uuid_with_path_separators_or_dotdot(
+        self, hyphen_free_root: pathlib.Path, monkeypatch: pytest.MonkeyPatch, bad_uuid: str
+    ) -> None:
+        from agent_takkub.spawn_engine import _resume_uuid_matches_cwd
+
+        config_dir = hyphen_free_root / "claude_config"
+        monkeypatch.setattr(user_profile, "_DEFAULT_CONFIG_DIR", config_dir)
+        (config_dir / "projects").mkdir(parents=True)
+
+        assert _resume_uuid_matches_cwd("default", bad_uuid, str(hyphen_free_root)) is False
+
+    def test_normal_uuid_still_passes(
+        self, hyphen_free_root: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression guard: the new charset check must not reject ordinary
+        uuids (hex + hyphens, or claude's underscore-suffixed shard ids)."""
+        from agent_takkub.spawn_engine import _resume_uuid_matches_cwd
+
+        config_dir = hyphen_free_root / "claude_config"
+        monkeypatch.setattr(user_profile, "_DEFAULT_CONFIG_DIR", config_dir)
+        cwd = hyphen_free_root / "proj"
+        cwd.mkdir()
+        proj_dir = config_dir / "projects" / _encode_cwd(cwd)
+        proj_dir.mkdir(parents=True)
+        (proj_dir / "abc-123_def.jsonl").write_text("{}\n", encoding="utf-8")
+
+        assert _resume_uuid_matches_cwd("default", "abc-123_def", str(cwd)) is True
 
 
 class TestSpawnResumeUuid:
@@ -386,6 +437,126 @@ class TestListRecentLeadSessions:
 
         assert len(notify_mod.list_recent_lead_sessions("default", limit=2)) == 2
 
+    def test_filters_out_teammate_sessions(
+        self, hyphen_free_root: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Mirrors the chatlog_scanner regression: teammate panes share the
+        Lead's cwd, so a "[ROLE: backend] ..." first line must be filtered
+        out of the mobile picker too."""
+        import os
+
+        cwd = hyphen_free_root / "proj"
+        cwd.mkdir()
+        config_dir = self._setup(hyphen_free_root, monkeypatch, cwd)
+        proj_dir = config_dir / "projects" / _encode_cwd(cwd)
+        proj_dir.mkdir(parents=True)
+
+        teammate = proj_dir / "teammate-uuid.jsonl"
+        teammate.write_text(
+            json.dumps(
+                {
+                    "type": "user",
+                    "message": {"role": "user", "content": "[ROLE: backend] เพิ่ม endpoint"},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        lead = proj_dir / "lead-uuid.jsonl"
+        lead.write_text(
+            json.dumps({"type": "user", "message": {"role": "user", "content": "คุยกับ Lead ปกติ"}})
+            + "\n",
+            encoding="utf-8",
+        )
+        now = time.time()
+        os.utime(teammate, (now, now))
+        os.utime(lead, (now - 100, now - 100))
+
+        sessions = notify_mod.list_recent_lead_sessions("default")
+        assert [s["uuid"] for s in sessions] == ["lead-uuid"]
+
+    def test_filters_out_goal_scoped_teammate_sessions(
+        self, hyphen_free_root: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Mirrors the chatlog_scanner regression: when a session goal is
+        set, `assign()` prepends `[SESSION GOAL ...]` ahead of `[ROLE:` on
+        the teammate's first user line, so the plain `[ROLE:` check alone
+        lets these leak into the mobile picker too."""
+        import os
+
+        cwd = hyphen_free_root / "proj"
+        cwd.mkdir()
+        config_dir = self._setup(hyphen_free_root, monkeypatch, cwd)
+        proj_dir = config_dir / "projects" / _encode_cwd(cwd)
+        proj_dir.mkdir(parents=True)
+
+        teammate = proj_dir / "goal-teammate-uuid.jsonl"
+        teammate.write_text(
+            json.dumps(
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": "[SESSION GOAL — ทุก role ในงานนี้ยึดเป้าหมายเดียวกัน]\n"
+                        "ship RBAC v1\n\n[ROLE: backend] add POST /roles",
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        lead = proj_dir / "lead-uuid.jsonl"
+        lead.write_text(
+            json.dumps({"type": "user", "message": {"role": "user", "content": "คุยกับ Lead ปกติ"}})
+            + "\n",
+            encoding="utf-8",
+        )
+        now = time.time()
+        os.utime(teammate, (now, now))
+        os.utime(lead, (now - 100, now - 100))
+
+        sessions = notify_mod.list_recent_lead_sessions("default")
+        assert [s["uuid"] for s in sessions] == ["lead-uuid"]
+
+    def test_limit_counted_after_filtering_teammates(
+        self, hyphen_free_root: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`limit` caps the number of Lead sessions returned, not the number
+        of jsonls scanned before filtering."""
+        import os
+
+        cwd = hyphen_free_root / "proj"
+        cwd.mkdir()
+        config_dir = self._setup(hyphen_free_root, monkeypatch, cwd)
+        proj_dir = config_dir / "projects" / _encode_cwd(cwd)
+        proj_dir.mkdir(parents=True)
+
+        now = time.time()
+        for i in range(5):
+            f = proj_dir / f"teammate-{i}.jsonl"
+            f.write_text(
+                json.dumps(
+                    {
+                        "type": "user",
+                        "message": {"role": "user", "content": "[ROLE: qa] smoke test"},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            os.utime(f, (now + i, now + i))
+        for name, ts in (("lead-old", now - 200), ("lead-new", now - 100)):
+            f = proj_dir / f"{name}.jsonl"
+            f.write_text(
+                json.dumps({"type": "user", "message": {"role": "user", "content": "งานปกติ"}})
+                + "\n",
+                encoding="utf-8",
+            )
+            os.utime(f, (ts, ts))
+
+        sessions = notify_mod.list_recent_lead_sessions("default", limit=2)
+        assert [s["uuid"] for s in sessions] == ["lead-new", "lead-old"]
+
 
 # ─────────────────────────────────────────────────────────────
 # api.lead_sessions / api.resume_lead
@@ -445,6 +616,9 @@ class TestApiResumeLead:
         monkeypatch.setattr(_config, "list_project_names", lambda: ["proj"])
         monkeypatch.setattr(_config, "get_open_tabs", lambda: ["proj"])
         monkeypatch.setattr(_config, "lead_cwd", lambda project=None: "/proj/web")
+        monkeypatch.setattr(
+            "agent_takkub.spawn_engine._resume_uuid_matches_cwd", lambda p, u, c: True
+        )
 
         fake_orch = MagicMock()
         fake_orch.spawn.return_value = (True, "ok")
@@ -462,6 +636,9 @@ class TestApiResumeLead:
         monkeypatch.setattr(_config, "list_project_names", lambda: ["proj"])
         monkeypatch.setattr(_config, "get_open_tabs", lambda: ["proj"])
         monkeypatch.setattr(_config, "lead_cwd", lambda project=None: "/proj/web")
+        monkeypatch.setattr(
+            "agent_takkub.spawn_engine._resume_uuid_matches_cwd", lambda p, u, c: True
+        )
 
         fake_orch = MagicMock()
         fake_orch.spawn.return_value = (False, "resume_uuid does not match cwd for lead")
@@ -476,6 +653,24 @@ class TestApiResumeLead:
         with pytest.raises(api.RemoteApiError) as exc:
             api.resume_lead(MagicMock(), "proj", "uuid-xyz")
         assert exc.value.status == 409
+
+    def test_mismatched_uuid_rejected_before_close(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """C1: a uuid that doesn't belong to `cwd` must be rejected BEFORE
+        `orch.close()` runs — never tear down the live Lead pane for a
+        resume that's going to fail anyway."""
+        monkeypatch.setattr(_config, "list_project_names", lambda: ["proj"])
+        monkeypatch.setattr(_config, "get_open_tabs", lambda: ["proj"])
+        monkeypatch.setattr(_config, "lead_cwd", lambda project=None: "/proj/web")
+        monkeypatch.setattr(
+            "agent_takkub.spawn_engine._resume_uuid_matches_cwd", lambda p, u, c: False
+        )
+
+        fake_orch = MagicMock()
+        with pytest.raises(api.RemoteApiError) as exc:
+            api.resume_lead(fake_orch, "proj", "forged-uuid")
+        assert exc.value.status == 409
+        fake_orch.close.assert_not_called()
+        fake_orch.spawn.assert_not_called()
 
 
 # ─────────────────────────────────────────────────────────────

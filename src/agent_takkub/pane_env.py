@@ -25,6 +25,15 @@ Six concerns live here:
    macOS inherits no `TERM`, so the allowlist had nothing to forward and
    claude fell back to monochrome.
 
+H1 (cross-platform audit 2026-07-10): #4-6 used to be called explicitly only
+from `spawn_engine.py`'s claude branch, *after* the shell/codex/gemini
+branches had already early-returned — so non-claude panes got no truecolor
+fix (breaks-mac: codex/agy rendered monochrome) and no non-interactive env
+(both-OS: those panes could hang on an `npx`/`git` y/N prompt). Calling them
+from inside `_build_pane_env()`/`_build_lead_env()` themselves means every
+branch gets all three for free the moment it calls either builder — no
+per-branch call site to forget.
+
 Extracted from orchestrator.py to keep that file focused on pane
 lifecycle (spawn/send/done/close) rather than environment plumbing.
 The orchestrator re-exports these names for backwards-compatibility
@@ -82,6 +91,18 @@ _PANE_ENV_ALLOWLIST: frozenset[str] = frozenset(
         "LC_ALL",
         "LC_CTYPE",
         "TERM",
+        # L3 (cross-platform audit 2026-07-10): TEMP/TMP above are the
+        # Windows env vars; POSIX's equivalent is TMPDIR, which was missing
+        # — a mac pane lost its per-user tmp dir and fell back to bare
+        # `/tmp`. XDG_* cover the modern Linux/POSIX user-dir convention
+        # some CLI tools (npm, git, browsers) consult for cache/config/data
+        # homes instead of hardcoding `~/.cache` etc.
+        "TMPDIR",
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "XDG_RUNTIME_DIR",
         # Node / npm tooling (used by some claude internals + RTK)
         "NODE_PATH",
         "NPM_CONFIG_PREFIX",
@@ -140,6 +161,9 @@ def _build_pane_env() -> dict[str, str]:
             allow.add(k.upper())
     env = {k: v for k, v in os.environ.items() if k.upper() in allow}
     _apply_port_file(env)
+    _apply_mcp_timeout(env)
+    _apply_non_interactive_env(env)
+    _apply_color_term(env)
     return env
 
 
@@ -185,6 +209,9 @@ def _build_lead_env() -> dict[str, str]:
             allow.add(k.upper())
     env = {k: v for k, v in os.environ.items() if k.upper() in allow}
     _apply_port_file(env)
+    _apply_mcp_timeout(env)
+    _apply_non_interactive_env(env)
+    _apply_color_term(env)
     return env
 
 

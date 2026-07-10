@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import pathlib
 import re
+import sys
 import time
 from unittest.mock import MagicMock, patch
 
@@ -200,6 +201,44 @@ class TestRespawnAfterWindowUsesNewSessionId:
         assert "--continue" not in argv2
         uuid2 = argv2[argv2.index("--session-id") + 1]
         assert uuid2 != uuid1, "Expected a fresh UUID after window expiry"
+
+
+# ─────────────────────────────────────────────────────────────
+# 3b. L5: superficial cwd spelling differences must still resume
+# ─────────────────────────────────────────────────────────────
+
+
+class TestRespawnCwdNormalization:
+    """L5 (cross-platform audit 2026-07-10): the 5-min auto-resume cwd check
+    must survive superficial spelling differences of the *same* directory
+    (trailing slash, mixed separators, and on Windows, case) — a raw string
+    compare would otherwise treat a respawn into the same real directory as
+    a different cwd and start a fresh session instead of resuming."""
+
+    def test_trailing_slash_still_resumes(self, orch: Orchestrator) -> None:
+        argv1 = _spawn_capture(orch, "backend", cwd="/proj")
+        uuid1 = argv1[argv1.index("--session-id") + 1]
+
+        _simulate_exit(orch, "backend", cwd="/proj")
+
+        argv2 = _spawn_capture(orch, "backend", cwd="/proj/")
+        assert "--resume" in argv2
+        assert argv2[argv2.index("--resume") + 1] == uuid1
+        assert "--session-id" not in argv2
+
+    @pytest.mark.skipif(
+        sys.platform != "win32", reason="case-insensitive filesystem is Windows-specific"
+    )
+    def test_case_difference_still_resumes_on_windows(self, orch: Orchestrator) -> None:
+        argv1 = _spawn_capture(orch, "frontend", cwd="C:/Proj")
+        uuid1 = argv1[argv1.index("--session-id") + 1]
+
+        _simulate_exit(orch, "frontend", cwd="C:/Proj")
+
+        argv2 = _spawn_capture(orch, "frontend", cwd="C:/PROJ")
+        assert "--resume" in argv2
+        assert argv2[argv2.index("--resume") + 1] == uuid1
+        assert "--session-id" not in argv2
 
 
 # ─────────────────────────────────────────────────────────────

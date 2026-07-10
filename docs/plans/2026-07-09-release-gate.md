@@ -105,7 +105,7 @@ suite 12/12 green. Safe to ship 1.0.22 at this HEAD.
 ## #112 — remote-bridge double-fire on `--resume` boot, gate before restart (2026-07-09, HEAD = `b2a543b`)
 
 Gate for `b2a543b` (`_lead_remote_bridge_delivered_session` persistent identity guard —
-`orchestrator.py` + `spawn_engine.py`, tests in `tests/test_remote_bridge_repro.py`).
+`orchestrator.py` + `spawn_engine.py`, tests in tests/test_remote_bridge_repro.py (removed 2026-07-10)).
 
 ### 1. Full pytest suite
 
@@ -122,10 +122,10 @@ tests=3374 failures=2 errors=0 skipped=2 time=139.938s
 - `TestRolePluginPolicy::test_design_roles_get_ui_ux_pro_max`
 
 Root cause unchanged (sandbox has no `~/.claude/plugins/cache`, env-dependent). Test count rose
-3364 → 3374 (+10, from `tests/test_remote_bridge_repro.py`'s #112 additions). No other failures,
+3364 → 3374 (+10, from tests/test_remote_bridge_repro.py (removed 2026-07-10)'s #112 additions). No other failures,
 0 regressions.
 
-### 2. Independent repro — NOT reusing `tests/test_remote_bridge_repro.py`
+### 2. Independent repro — NOT reusing tests/test_remote_bridge_repro.py (removed 2026-07-10)
 
 Wrote a standalone script (`runtime/tasks/agent-takkub/2026-07-09/repro_112_qa.py`) that drives
 the real `Orchestrator.consume_session_report` against the **exact timeline recorded in
@@ -270,7 +270,7 @@ tests=3386 failures=2 errors=0 skipped=2 time=136.872s
 - `TestRolePluginPolicy::test_design_roles_get_ui_ux_pro_max`
 
 Root cause unchanged (sandbox has no `~/.claude/plugins/cache` populated → env-dependent, not a
-code regression). Test count rose 3382 → 3386 (+4, from `tests/test_resume_button_feedback.py`'s
+code regression). Test count rose 3382 → 3386 (+4, from tests/test_resume_button_feedback.py (removed 2026-07-10)'s
 new assertions). No other failures, 0 regressions.
 
 ### 2. Regression guard — bridge/#107/#110/#112/#113 auto-Enter behavior unchanged
@@ -335,7 +335,7 @@ every prior gate in this file also records. **0 code regressions.**
 
 ### 2. Targeted + guardrails
 
-- `tests/test_resume_button_feedback.py` (rewritten for the picker→close→spawn flow),
+- tests/test_resume_button_feedback.py (removed 2026-07-10) (rewritten for the picker→close→spawn flow),
   `tests/test_resume_session_picker.py` (+3 new `TestCoreListRecentLeadSessions` cases for the core
   scanner), `tests/test_slash_inject_serialize.py` (flag tests removed, serialization + default
   auto-Enter guard kept) — **37/37 green.**

@@ -107,14 +107,22 @@ def check_claude() -> list[Finding]:
         )
 
     # authenticated
-    if sys.platform == "win32":
-        # credentials may live in Windows Credential Manager — not directly checkable
-        creds = Path.home() / ".claude" / "credentials.json"
-        if creds.is_file():
+    # The real file is `.credentials.json` (leading dot) — Windows/Linux only.
+    # macOS keeps the OAuth token in the login Keychain instead (see
+    # limit_status._read_keychain_credentials), not a file at all.
+    creds = Path.home() / ".claude" / ".credentials.json"
+    if sys.platform == "darwin":
+        from .limit_status import _read_keychain_credentials
+
+        if _read_keychain_credentials():
+            findings.append(
+                Finding("claude", "authenticated", Status.OK, "found in macOS Keychain")
+            )
+        elif creds.is_file():
             try:
                 json.loads(creds.read_text(encoding="utf-8"))
                 findings.append(
-                    Finding("claude", "authenticated", Status.OK, "credentials.json present")
+                    Finding("claude", "authenticated", Status.OK, ".credentials.json present")
                 )
             except Exception:
                 findings.append(
@@ -122,7 +130,35 @@ def check_claude() -> list[Finding]:
                         "claude",
                         "authenticated",
                         Status.WARN,
-                        "credentials.json present but unreadable",
+                        ".credentials.json present but unreadable",
+                        "run 'claude login' from a terminal",
+                    )
+                )
+        else:
+            findings.append(
+                Finding(
+                    "claude",
+                    "authenticated",
+                    Status.WARN,
+                    "not found in macOS Keychain or .credentials.json",
+                    "run 'claude login' from a terminal",
+                )
+            )
+    elif sys.platform == "win32":
+        # credentials may also live in Windows Credential Manager — not directly checkable
+        if creds.is_file():
+            try:
+                json.loads(creds.read_text(encoding="utf-8"))
+                findings.append(
+                    Finding("claude", "authenticated", Status.OK, ".credentials.json present")
+                )
+            except Exception:
+                findings.append(
+                    Finding(
+                        "claude",
+                        "authenticated",
+                        Status.WARN,
+                        ".credentials.json present but unreadable",
                         "run 'claude login' from a terminal",
                     )
                 )
@@ -137,12 +173,11 @@ def check_claude() -> list[Finding]:
                 )
             )
     else:
-        creds = Path.home() / ".claude" / "credentials.json"
         if creds.is_file():
             try:
                 json.loads(creds.read_text(encoding="utf-8"))
                 findings.append(
-                    Finding("claude", "authenticated", Status.OK, "credentials.json present")
+                    Finding("claude", "authenticated", Status.OK, ".credentials.json present")
                 )
             except Exception:
                 findings.append(
@@ -150,7 +185,7 @@ def check_claude() -> list[Finding]:
                         "claude",
                         "authenticated",
                         Status.WARN,
-                        "credentials.json present but unreadable",
+                        ".credentials.json present but unreadable",
                         "run 'claude login' from a terminal",
                     )
                 )
@@ -160,7 +195,7 @@ def check_claude() -> list[Finding]:
                     "claude",
                     "authenticated",
                     Status.WARN,
-                    "credentials.json not found",
+                    ".credentials.json not found",
                     "run 'claude login' from a terminal",
                 )
             )

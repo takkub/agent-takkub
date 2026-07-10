@@ -29,6 +29,62 @@ class TestFindCodexExecutable:
         assert codex_helper.find_codex_executable() is None
 
 
+class TestFindCodexExecutableAvoidsCmdShim:
+    """L4 (cross-platform audit 2026-07-10): mirrors find_claude_executable's
+    `.cmd`-avoidance — on Windows, invoking the npm `.cmd` shim through
+    ConPTY flashes a visible cmd.exe console. Prefer the real vendored
+    `codex.exe` (confirmed shipped by @openai/codex, nested under its
+    platform-specific optional-dependency package) when it's found next to
+    the shim; fall back to the `.cmd` path otherwise."""
+
+    def test_windows_prefers_vendored_exe_when_present(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        npm_dir = tmp_path / "npm"
+        native = (
+            npm_dir
+            / "node_modules"
+            / "@openai"
+            / "codex"
+            / "node_modules"
+            / "@openai"
+            / "codex-win32-x64"
+            / "vendor"
+            / "x86_64-pc-windows-msvc"
+            / "bin"
+            / "codex.exe"
+        )
+        native.parent.mkdir(parents=True)
+        native.write_text("")
+        cmd_shim = npm_dir / "codex.CMD"
+        cmd_shim.write_text("")
+
+        monkeypatch.setattr(codex_helper.sys, "platform", "win32")
+        monkeypatch.setattr(codex_helper.shutil, "which", lambda name: str(cmd_shim))
+
+        assert codex_helper.find_codex_executable() == str(native)
+
+    def test_windows_falls_back_to_cmd_shim_when_exe_absent(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        npm_dir = tmp_path / "npm"
+        npm_dir.mkdir()
+        cmd_shim = npm_dir / "codex.CMD"
+        cmd_shim.write_text("")
+
+        monkeypatch.setattr(codex_helper.sys, "platform", "win32")
+        monkeypatch.setattr(codex_helper.shutil, "which", lambda name: str(cmd_shim))
+
+        assert codex_helper.find_codex_executable() == str(cmd_shim)
+
+    def test_non_windows_never_probes_for_exe(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # POSIX has no console-flash problem — shutil.which's result is
+        # returned as-is, no extra filesystem probing.
+        monkeypatch.setattr(codex_helper.sys, "platform", "darwin")
+        monkeypatch.setattr(codex_helper.shutil, "which", lambda name: "/usr/local/bin/codex")
+        assert codex_helper.find_codex_executable() == "/usr/local/bin/codex"
+
+
 class TestCodexExec:
     def test_returns_install_hint_when_binary_missing(
         self, monkeypatch: pytest.MonkeyPatch

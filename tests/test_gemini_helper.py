@@ -71,6 +71,34 @@ class TestFindAgyExecutable:
         assert gemini_helper.find_agy_executable() == "/on/path/agy"
 
 
+class TestDefaultAgyPaths:
+    """L2 (cross-platform audit 2026-07-10): the fixed-install-path fallback
+    used to be Windows-only, so a mac install with `agy` off PATH had no
+    fallback at all and `gemini` silently degraded to a Claude substitute
+    even when Antigravity was genuinely installed."""
+
+    def test_windows_candidates(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(gemini_helper.sys, "platform", "win32")
+        monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\alice\AppData\Local")
+        candidates = gemini_helper._default_agy_paths()
+        assert Path(r"C:\Users\alice\AppData\Local\agy\bin\agy.exe") in candidates
+        assert not any(str(c).startswith("/Applications") for c in candidates)
+
+    def test_mac_candidates_present(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(gemini_helper.sys, "platform", "darwin")
+        candidates = gemini_helper._default_agy_paths()
+        assert Path("/Applications/Antigravity.app/Contents/MacOS/agy") in candidates
+        assert Path("/opt/homebrew/bin/agy") in candidates  # Apple Silicon Homebrew
+        assert Path("/usr/local/bin/agy") in candidates  # Intel Homebrew
+        assert not any("AppData" in str(c) for c in candidates)
+
+    def test_linux_gets_no_candidates(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # No latent-risk claim for Linux here — audit only covered mac; a
+        # bare `linux` platform still relies on PATH alone, same as before.
+        monkeypatch.setattr(gemini_helper.sys, "platform", "linux")
+        assert gemini_helper._default_agy_paths() == []
+
+
 class TestGeminiExec:
     def test_returns_install_hint_when_binary_missing(
         self, monkeypatch: pytest.MonkeyPatch

@@ -349,26 +349,18 @@ class LeadInboxMixin:
         caller react (e.g. retry later) instead of only reading the log.
 
         Every command routed here is self-contained and gets the delayed
-        Enter that submits it automatically. (The ↻ Resume button used to be
-        the one exception — `/resume` opens an interactive picker that read a
-        trailing auto-Enter as "Resume cancelled" — but it no longer flows
-        through this path at all: it drives the native `--resume <uuid>`
-        respawn directly, so no slash-command injection is involved. See
-        `UserActionsMixin._on_resume_clicked`.)
+        Enter that submits it automatically. Calls are serialised per
+        (project, role): a second call for a pane already in flight is queued —
+        not dropped — and starts its own fresh poll only once the first call's
+        delivery has fully settled (write + the delayed submitting Enter), so
+        two concurrent injections can't interleave payload+Enter into the same
+        pane.
 
-        #113 (race): serialised per (project, role) — the `/remote-control`
-        auto-bridge (fires on every Lead spawn) and the ↻ Resume button (fires
-        `/resume`) both call this for the SAME Lead pane, independently of
-        each other. Without a lock, two concurrent polls can both observe
-        `ready=True` around the same tick and both `_deliver()`, writing
-        payload+Enter into the pane interleaved — the Enter meant for one
-        command lands mid-render of the other's picker (e.g. `/resume`'s
-        session list, which has no prior arrow-key navigation to absorb a
-        stray Enter), producing "Resume cancelled" on an otherwise-idle
-        fresh boot. A second call for a (project, role) already in flight is
-        queued — not dropped — and starts its own fresh poll only once the
-        first call's delivery has fully settled (write + the delayed
-        submitting Enter).
+        NOTE (2026-07-10): the only production callers of this — the
+        `/remote-control` auto-bridge and the ↻ Resume button — were removed
+        (they raced claude's `/resume` picker and cancelled it). This method is
+        kept as generic slash-command-injection infrastructure but currently
+        has no callers.
         """
         project_ns = self._resolve_project(project)
         lock_key = f"{project_ns}::{role_name}"

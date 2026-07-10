@@ -242,9 +242,13 @@ def resume_lead(orch, project: object, session_uuid: object) -> dict:
     current Lead pane (same lifecycle `close_project` uses — protected-pane
     force-close) then respawns Lead with `--resume <session_uuid>`.
 
-    `session_uuid`/cwd match is re-validated inside `spawn()` itself
-    (`_resume_uuid_matches_cwd`) — this is only the request-shape check
-    (project open, session_uuid present) before ever touching orch state.
+    `session_uuid`/cwd match is prevalidated here (`_resume_uuid_matches_cwd`)
+    BEFORE `orch.close()` runs, and re-checked again inside `spawn()` itself
+    as defense in depth — prevalidating means a forged/mismatched uuid never
+    tears down the live Lead pane in the first place (previously the mismatch
+    was only caught inside `spawn()`, by which point `close()` had already
+    run — leaving the project with no Lead pane at all and a rejected
+    resume).
 
     Multi-provider note (#103/#101): `--resume` is a claude-CLI-specific
     capability. Lead here means whichever provider is currently backing the
@@ -262,6 +266,10 @@ def resume_lead(orch, project: object, session_uuid: object) -> dict:
     cwd = _config.lead_cwd(project)
     if not cwd:
         raise RemoteApiError(409, "project has no lead cwd")
+    from ..spawn_engine import _resume_uuid_matches_cwd
+
+    if not _resume_uuid_matches_cwd(project, session_uuid, cwd):
+        raise RemoteApiError(409, "resume_uuid does not match cwd")
     orch.close(LEAD.name, project=project, force=True, reason="remote resume")
     ok, msg = orch.spawn(LEAD.name, cwd=cwd, project=project, resume_uuid=session_uuid)
     if not ok:

@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
+from pathlib import Path
 
 from ._win_console import SUBPROCESS_NO_WINDOW
 
@@ -33,10 +35,41 @@ def find_codex_executable() -> str | None:
     it isn't on PATH. Caller surfaces a friendly "install with
     `npm install -g @openai/codex`" message in the None case.
 
-    On Windows npm installs `codex` as a `.cmd` shim alongside the
-    Node script; `shutil.which` handles the extension probing
-    automatically (uses %PATHEXT%)."""
-    return shutil.which("codex")
+    On Windows npm installs `codex` as a `.cmd` shim alongside the Node
+    script; `shutil.which` resolves to that shim (verified on this
+    machine's install — `where codex` → `codex.CMD`).
+
+    L4 (cross-platform audit 2026-07-10): invoking the `.cmd` shim through
+    pywinpty/ConPTY briefly flashes a visible cmd.exe console window
+    (mitigated but not eliminated by `_win_console`'s hwnd-sweep).
+    `find_claude_executable` avoids this by preferring claude's real
+    `.exe` inside its npm package; codex ships the same shape — the
+    `@openai/codex` package vendors a native `codex.exe` under a nested
+    platform-specific optional-dependency package (confirmed present on
+    this machine: `@openai/codex/node_modules/@openai/codex-win32-x64/
+    vendor/x86_64-pc-windows-msvc/bin/codex.exe`). Prefer that binary when
+    found; fall back to the `.cmd` shim (console flash, but still works)
+    when it isn't — e.g. an older codex release without the vendored exe.
+    """
+    cmd_path = shutil.which("codex")
+    if sys.platform == "win32" and cmd_path:
+        cmd_dir = Path(cmd_path).resolve().parent
+        native = (
+            cmd_dir
+            / "node_modules"
+            / "@openai"
+            / "codex"
+            / "node_modules"
+            / "@openai"
+            / "codex-win32-x64"
+            / "vendor"
+            / "x86_64-pc-windows-msvc"
+            / "bin"
+            / "codex.exe"
+        )
+        if native.is_file():
+            return str(native)
+    return cmd_path
 
 
 def codex_exec(

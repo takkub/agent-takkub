@@ -90,6 +90,22 @@ def encode_path_for_claude(cwd: str | Path) -> str:
     return _NON_ALNUM_RE.sub("-", str(Path(cwd).resolve()))
 
 
+def session_project_dir_for_cwd(config_dir: str | Path | None, cwd: str | Path) -> Path:
+    """Return the exact ``<config_dir>/projects/<encoded-cwd>`` directory
+    Claude Code writes `cwd`'s session JSONLs into.
+
+    Callers that need "sessions belonging to this cwd" (resume pickers,
+    resume-uuid validation) should list/glob straight from this directory
+    instead of scanning every project dir and reverse-decoding names for an
+    equality check. `chatlog_scanner.decode_project_dir()` is lossy — Claude
+    maps *every* non-alphanumeric char (not just separators) to '-', so
+    decoding can't tell a literal '-' in the original path apart from an
+    encoded separator. Encoding forward (this function) and comparing
+    directory names/globbing directly sidesteps that ambiguity entirely.
+    """
+    return _claude_projects_dir(config_dir) / encode_path_for_claude(cwd)
+
+
 def _claude_projects_dir(config_dir: str | Path | None = None) -> Path:
     """Return the `projects/` dir holding Claude Code session JSONLs.
 

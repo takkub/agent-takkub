@@ -15,6 +15,7 @@ from __future__ import annotations
 import collections
 import os
 import pathlib
+import re
 import secrets
 import sys
 import time
@@ -51,9 +52,6 @@ from .orchestrator_text import (
 )
 from .pane_env import (
     _apply_artifacts_dir,
-    _apply_color_term,
-    _apply_mcp_timeout,
-    _apply_non_interactive_env,
     inject_user_profile_env,
 )
 from .pipeline_executor import _split_shard
@@ -87,6 +85,30 @@ def _from_orch(name: str):
 RESUME_WINDOW_SEC = 5 * 60  # respawn within this window → claude --resume <uuid>
 
 
+def _normalize_cwd_for_compare(cwd: str) -> str:
+    """Normalize a cwd string for the 5-min auto-resume equality check (L5).
+
+    Windows case-insensitivity + multiple string spellings of the same
+    directory (`/` vs `\\`, trailing slash, short/long name), or a POSIX
+    symlink, can make a raw string compare miss two paths that are actually
+    the same directory — silently disabling `--resume` recovery (a fresh
+    session starts instead) even though this is genuinely the same pane
+    respawning into the same cwd. `Path.resolve()` collapses separators/
+    relative segments/symlinks; `os.path.normcase()` folds case (Windows
+    only — a no-op on POSIX, where case is significant). Falls back to a
+    normcase'd raw string on any resolve failure (e.g. the dir no longer
+    exists) rather than raising — a transient FS hiccup should degrade to
+    the old exact-match behaviour for that one comparison, not crash a spawn.
+    """
+    try:
+        return os.path.normcase(str(pathlib.Path(cwd).resolve()))
+    except OSError:
+        return os.path.normcase(cwd)
+
+
+_SAFE_SESSION_UUID_RE = re.compile(r"^[0-9A-Za-z_-]+$")
+
+
 def _resume_uuid_matches_cwd(project_ns: str, session_uuid: str, cwd: str) -> bool:
     """W3: verify a caller-chosen resume session (mobile session picker)
     actually belongs to `cwd` before handing it to `--resume`.
@@ -95,27 +117,33 @@ def _resume_uuid_matches_cwd(project_ns: str, session_uuid: str, cwd: str) -> bo
     the in-memory pane-state cache — but this checks the JSONL store instead,
     since a user-picked session may belong to a pane that closed long ago (not
     something this run's `_pane_state` cache would still know about). Claude
-    Code encodes a session's launch cwd into its jsonl parent directory name
-    (`chatlog_scanner.decode_project_dir`), so decoding that name and
-    comparing against the resolved spawn cwd is a read-only, forgery-proof
-    check with no dependency on any in-memory state.
+    Code encodes a session's launch cwd into its jsonl parent directory name,
+    so this checks for `<session_uuid>.jsonl` inside the exact encoded dir for
+    `cwd` (`token_meter.session_project_dir_for_cwd`) — a read-only, forgery-
+    proof check with no dependency on any in-memory state. Encoding `cwd`
+    forward and checking the exact dir (rather than globbing every project
+    dir and reverse-decoding names to compare) avoids `decode_project_dir()`'s
+    lossiness: it maps every non-alnum char to '-', so a cwd containing '-',
+    '_', '.', or a space can't be told apart from an encoded separator once
+    decoded.
+
+    `session_uuid` may originate from an unvalidated remote request (F1 fix:
+    the old `base.glob(f"*/{session_uuid}.jsonl")` treated a `..` segment as a
+    literal child name to match, so it was traversal-safe; the `Path / str`
+    join below is not, so any path-separator/`..` shaped value is rejected
+    up front before it ever reaches the filesystem).
     """
-    from .chatlog_scanner import decode_project_dir
+    if not _SAFE_SESSION_UUID_RE.match(session_uuid):
+        return False
+
+    from .token_meter import session_project_dir_for_cwd
     from .user_profile import config_dir_for
 
     try:
-        base = config_dir_for(project_ns) / "projects"
-        matches = list(base.glob(f"*/{session_uuid}.jsonl"))
+        proj_dir = session_project_dir_for_cwd(config_dir_for(project_ns), cwd)
     except OSError:
         return False
-    if not matches:
-        return False
-    try:
-        decoded = decode_project_dir(matches[0].parent.name).resolve()
-        target = pathlib.Path(cwd).resolve()
-    except OSError:
-        return False
-    return decoded == target
+    return (proj_dir / f"{session_uuid}.jsonl").is_file()
 
 
 # Continue-nudge injected after a *resumed* stuck-recovery. `--resume` restores
@@ -793,6 +821,16 @@ class SpawnEngineMixin:
             )
             pane.attach_session(session, cwd=spawn_cwd)
             _ekey = _exit_key(project_ns, role_name)
+            # FU1 (cross-platform audit 2026-07-10 followup): shell/gemini/codex
+            # have no `--resume` concept (claude-branch-only, see docstring
+            # above), so this spawn is never a resume. Explicit False (not a
+            # no-op) matters when the SAME role slot previously spawned via the
+            # claude branch (provider substitution toggled a codex/gemini role
+            # to claude, which sets this True on an actual --resume) — without
+            # this reset, a later crash-respawn on this branch would read the
+            # stale True and _auto_respawn would wrongly skip replaying the
+            # cached last_assigned_task (#103 multi-provider parity).
+            self._ps(_ekey).last_spawn_resumed = False
             _sess = session
             if codex_exit:
                 self._ps(_ekey).codex_spawn_ts = time.time()
@@ -973,12 +1011,18 @@ class SpawnEngineMixin:
         if role_name == "shell":
             import shutil as _shutil
 
-            # winpty's ConPTY backend can't handle full paths that contain
-            # spaces (e.g. `"C:\Program Files\PowerShell\7\pwsh.EXE"` gets
-            # split at the space before quoting takes effect, surfacing as
-            # `command not found: C:\Program`). Detect the binary so we
-            # fail fast with a clear message, then hand the **basename** to
-            # winpty and let it resolve via PATH — which the cockpit
+            # L1 (cross-platform audit 2026-07-10): _pty_backend.py's
+            # _WinptyBackend.spawn now passes argv as a list (not a
+            # pre-quoted cmdline string), so a spaced full path like
+            # `C:\Program Files\PowerShell\7\pwsh.EXE` spawns fine — repro'd
+            # fixed on this machine. This basename+PATH indirection predates
+            # that fix and is kept as-is (still correct, zero behaviour
+            # change, one less thing to touch in the same audit pass) rather
+            # than swapped for the full path now that both work.
+            #
+            # Detect the binary so we fail fast with a clear message if
+            # PowerShell isn't installed at all, then hand the **basename**
+            # to winpty and let it resolve via PATH — which the cockpit
             # controls via _build_pane_env() + the bin/ prepend below.
             if sys.platform == "win32":
                 pwsh_full = _shutil.which("pwsh") or _shutil.which("powershell")
@@ -1424,9 +1468,10 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                     env["CHROME_BIN"] = cand
                     break
 
-        _apply_mcp_timeout(env)
-        _apply_non_interactive_env(env)
-        _apply_color_term(env)
+        # H1: MCP timeout / non-interactive env / truecolor term are applied
+        # inside _build_pane_env()/_build_lead_env() itself now (pane_env.py)
+        # so every branch (shell/codex/gemini/claude) gets them, not just
+        # this claude path.
         apply_claude_auth_overrides(env)
 
         # --setting-sources controls which settings.json layers claude loads.
@@ -1537,7 +1582,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         # Set TAKKUB_EXTRA_PLUGINS env var to a `;`-separated list of plugin
         # root dirs (must each contain `.claude-plugin/plugin.json`) to add
         # more, or set it to empty string to suppress the defaults.
-        plugin_default = ";".join(_default_plugin_dirs(base_role))
+        plugin_default = ";".join(_default_plugin_dirs(base_role, project=project_ns))
         plugin_dirs_raw = os.environ.get("TAKKUB_EXTRA_PLUGINS", plugin_default)
         for pdir in [p.strip() for p in plugin_dirs_raw.split(";") if p.strip()]:
             if (pathlib.Path(pdir) / ".claude-plugin" / "plugin.json").exists():
@@ -1645,9 +1690,14 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             prior_uuid = _ps_pre.session_uuid if _ps_pre is not None else None
             prior_uuid_cwd = _ps_pre.session_uuid_cwd if _ps_pre is not None else ""
             prior_exit = self._recent_exits.get(_ekey_spawn)
+            # L5: normalize both sides before comparing — see
+            # _normalize_cwd_for_compare's docstring for why a raw string
+            # compare can miss two spellings of the same directory.
             can_resume = (
                 prior_uuid is not None
-                and prior_uuid_cwd == spawn_cwd
+                and bool(prior_uuid_cwd)
+                and _normalize_cwd_for_compare(prior_uuid_cwd)
+                == _normalize_cwd_for_compare(spawn_cwd)
                 and prior_exit is not None
                 and (time.time() - prior_exit.get("ts", 0)) < RESUME_WINDOW_SEC
             )
@@ -1714,8 +1764,8 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
 
             self._auto_trust(role_name, project=project_ns)
             self.statusChanged.emit()
-            if role_name == LEAD.name:
-                self._maybe_fire_remote_bridge(project_ns, _ekey_spawn)
+            # (The /remote-control auto-bridge was removed 2026-07-10 — it kept
+            # racing claude's /resume picker. Type /remote-control by hand.)
             # Flush any CC messages queued while Lead was offline.
             # Give the session a few seconds to reach the ready prompt before
             # trying to write; if Lead isn't ready yet, _flush_pending_lead_cc
@@ -1757,135 +1807,6 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         finally:
             self._spawn_in_progress = False
             self._drain_spawn_queue()
-
-    def _maybe_fire_remote_bridge(self, project_ns: str, exit_key: str) -> None:
-        """Auto-bridge `/remote-control` after every successful Lead spawn
-        (#4, 2026-07-09 core-upgrade plan) — fresh boot, tab open, respawn,
-        and crash recovery all funnel through `spawn()`, so hooking here
-        covers every path uniformly instead of the two narrower call sites
-        (session-resume signal, first-Enter-in-pane) this replaces.
-
-        Also called from `Orchestrator.consume_session_report` (#107 follow-
-        up) for every `SessionStart` hook firing (startup/resume/clear/
-        compact): the `--session-id`/`--resume` decision in `spawn()` only
-        ever stamps `PaneState.session_uuid` once, so a manual `/resume`
-        *inside* the Lead pane swaps to a brand-new transcript uuid that
-        `spawn()` never sees again — without this second call site the
-        bridge would never (re-)fire for that new session at all.
-
-        Dedup key is project+session-uuid, not just project: a brand new
-        Lead session (new uuid — resume window expired, manual /resume, or
-        genuinely fresh) must fire again, while re-entering the same
-        still-live session must not. `inject_slash_command_when_ready`
-        already gates on the Lead draft guard (issue #3).
-
-        #107: a session only ever joins `_lead_remote_bridge_fired` once
-        `inject_slash_command_when_ready` actually confirms delivery — a
-        fresh-boot timeout or a session dying mid-poll leaves the key out of
-        `_fired` (dropped, logged) instead of being marked "handled" forever.
-        `_lead_remote_bridge_pending` prevents two concurrent polls for the
-        same session (this call site + the idle-watchdog reaper below both
-        route through here) from double-pasting once ready.
-
-        #110: the uuid-keyed dedup above is NOT enough on its own. Proven via
-        events.log (2026-07-09 16:10:42-55): on a `--resume <uuid>` boot,
-        claude's own `SessionStart` hook fires TWICE for the SAME physical
-        pane boot — once immediately with reason="startup" and a
-        transient/placeholder uuid, then again moments later with
-        reason="resume" and the real target uuid. Each
-        `consume_session_report` call re-reads `ps.session_uuid`, which the
-        second hook has since overwritten, so the uuid-keyed pending check
-        computes a DIFFERENT key each time and never catches the second
-        call — two independent `inject_slash_command_when_ready` polls race
-        the same ready-prompt check and both deliver `/remote-control` ~1s
-        apart. Fixed with a second guard keyed on the pane's *session
-        object identity* (`_lead_remote_bridge_pending_session`): while a
-        poll is in flight for a given live PtySession object, a second call
-        for that SAME object (whatever uuid it reports this time) is a
-        no-op — `_deliver()` only ever writes into the live session, never
-        touches the uuid, so one in-flight poll per physical process is
-        always enough. A genuinely NEW process (crash respawn, window
-        expiry) gets a NEW session object, so this guard never blocks a
-        real respawn — only the uuid-keyed dedup above governs those (see
-        test_remote_bridge_autofire.py's TestRespawnNewUuidFiresAgain /
-        TestResumePathDoesNotDoubleFire for that contract).
-
-        #112: the uuid-keyed + pending-session guards above still aren't
-        enough once the FIRST poll already finished delivering. Proven via
-        events.log (2026-07-09 16:49:51-16:50:26): the same `--resume` boot's
-        two `SessionStart` hooks landed 29s apart — long enough that the
-        first poll (uuid A) had already delivered, run `_on_delivered`, and
-        been popped out of `_lead_remote_bridge_pending_session` before the
-        second hook (uuid B, same physical session) arrived. Neither the
-        uuid-keyed dedup (different key) nor the pending-session guard
-        (nothing pending anymore) catches that. Fixed with a third,
-        NON-transient guard keyed on session-object identity that survives
-        past delivery: `_lead_remote_bridge_delivered_session`. Checked here
-        before starting a new poll and set (never cleared) in
-        `_on_delivered()` — a session object that already got
-        `/remote-control` never gets it again, no matter how many more
-        `SessionStart` hooks report new uuids for it. A genuinely new
-        process (respawn/crash/window-expiry) gets a new PtySession object
-        from `spawn()`, so identity comparison alone invalidates the guard
-        for real respawns without any separate reset step.
-        """
-        session_uuid = self._ps(exit_key).session_uuid
-        if not session_uuid:
-            _log_event("remote_bridge_dropped", project=project_ns, reason="uuid_empty")
-            return
-        key = f"{project_ns}::{session_uuid}"
-        if key in self._lead_remote_bridge_fired or key in self._lead_remote_bridge_pending:
-            return
-        pane = self._project_panes(project_ns).get(LEAD.name)
-        current_session = pane.session if pane is not None else None
-        if (
-            current_session is not None
-            and self._lead_remote_bridge_delivered_session.get(exit_key) is current_session
-        ):
-            return
-        if (
-            current_session is not None
-            and self._lead_remote_bridge_pending_session.get(exit_key) is current_session
-        ):
-            return
-        self._lead_remote_bridge_pending.add(key)
-        if current_session is not None:
-            self._lead_remote_bridge_pending_session[exit_key] = current_session
-
-        def _on_delivered() -> None:
-            self._lead_remote_bridge_pending.discard(key)
-            self._lead_remote_bridge_pending_session.pop(exit_key, None)
-            self._lead_remote_bridge_fired.add(key)
-            if current_session is not None:
-                self._lead_remote_bridge_delivered_session[exit_key] = current_session
-
-        def _on_dropped(_reason: str) -> None:
-            # Left out of _fired on purpose: _reap_remote_bridge (idle
-            # watchdog tick) retries once this Lead pane is next observed
-            # ready instead of the bridge being lost for the session.
-            self._lead_remote_bridge_pending.discard(key)
-            self._lead_remote_bridge_pending_session.pop(exit_key, None)
-
-        self.inject_slash_command_when_ready(
-            LEAD.name,
-            "/remote-control",
-            max_wait_ms=_REMOTE_BRIDGE_MAX_WAIT_MS,
-            project=project_ns,
-            on_delivered=_on_delivered,
-            on_dropped=_on_dropped,
-        )
-
-    def _reap_remote_bridge(self, project_ns: str, pane) -> None:
-        """Idle-watchdog-tick retry for a Lead `/remote-control` bridge that
-        timed out or died mid-poll (#107). `_maybe_fire_remote_bridge` is
-        idempotent per session-uuid (`_lead_remote_bridge_fired` /
-        `_lead_remote_bridge_pending`), so calling it again here on every
-        tick is a harmless no-op once a session has fired or is still
-        polling — it only does real work for a session that was dropped.
-        """
-        if not (pane.session and pane.session.is_alive and pane.session.is_at_ready_prompt()):
-            return
-        self._maybe_fire_remote_bridge(project_ns, _exit_key(project_ns, LEAD.name))
 
     def _on_codex_exit(
         self,

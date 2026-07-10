@@ -475,14 +475,10 @@ class StatusHeaderMixin:
         self._btn_restart.setToolTip("Restart cockpit (kills all panes, relaunches app)")
         self._btn_restart.clicked.connect(self._on_restart_cockpit_clicked)
 
-        self._btn_resume = QPushButton("↻ Resume", self)
-        self._btn_resume.setToolTip(
-            "Resume a previous Lead conversation — pops a picker of this\n"
-            "project's recent sessions, then restarts the Lead pane on the\n"
-            "one you choose (claude --resume). One click, pick, done."
-        )
-        self._btn_resume.setStyleSheet(self._ghost_button_style())
-        self._btn_resume.clicked.connect(self._on_resume_clicked)
+        # ↻ Resume button removed (2026-07-10, user request): injecting /resume
+        # into the Lead pane raced claude's own picker against the
+        # /remote-control auto-bridge and kept cancelling. Use claude's native
+        # /resume typed directly in the pane instead.
 
         # End-Session button: prompts for a session-summary note then runs
         # close_all_teammates + end_session. The summary feeds Lead's
@@ -583,7 +579,6 @@ class StatusHeaderMixin:
         #   Group 1 — Workflow actions (buttons that change pane state)
         #   Group 2 — System status    (cockpit-level toggles + updates)
         for w in (
-            self._btn_resume,
             self._btn_open_shell,
             self._btn_doctor,
             self._btn_end_session,

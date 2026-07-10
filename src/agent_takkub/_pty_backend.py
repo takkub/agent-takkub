@@ -22,7 +22,6 @@ has matching names on both libraries and is passed straight through.
 from __future__ import annotations
 
 import os
-import subprocess
 import sys
 from collections.abc import Sequence
 
@@ -56,15 +55,34 @@ class _WinptyBackend(_BackendBase):
     def spawn(cls, argv: Sequence[str], cwd, env, rows: int, cols: int) -> _WinptyBackend:
         import winpty  # `pywinpty` package, imported module name is `winpty`
 
-        cmd = subprocess.list2cmdline(list(argv))
+        # L1 (cross-platform audit 2026-07-10, repro'd on this machine): pass
+        # argv as a LIST, never a pre-joined cmdline string. pywinpty's own
+        # PtyProcess.spawn() only re-splits a *string* argv via
+        # `shlex.split(argv, posix=False)` — which does NOT strip quote
+        # characters — before doing its own `shutil.which(argv[0])`
+        # existence check. If we pre-quote argv[0] ourselves (the old
+        # `subprocess.list2cmdline(list(argv))` here), a spaced full path
+        # like `"C:\Program Files\PowerShell\7\pwsh.EXE"` comes back out of
+        # that re-split *still wearing its quote characters*, `which()` looks
+        # for a file literally named with quotes in it, finds nothing, and
+        # pywinpty raises `FileNotFoundError` before ConPTY ever starts.
+        # Passing a list instead skips that string-reparsing branch
+        # entirely — pywinpty takes `argv[0]` verbatim and quotes
+        # `argv[1:]` itself via the same `list2cmdline` internally, so
+        # quoting for the remaining args still happens, just exactly once.
+        argv_list = list(argv)
         # Prefer ConPTY for lowest latency (sends ANSI directly instead of
         # scraping the screen buffer like WinPTY). Fall back if unavailable.
         try:
             proc = winpty.PtyProcess.spawn(
-                cmd, dimensions=(rows, cols), cwd=cwd, env=env, backend=winpty.Backend.ConPTY
+                argv_list,
+                dimensions=(rows, cols),
+                cwd=cwd,
+                env=env,
+                backend=winpty.Backend.ConPTY,
             )
         except Exception:
-            proc = winpty.PtyProcess.spawn(cmd, dimensions=(rows, cols), cwd=cwd, env=env)
+            proc = winpty.PtyProcess.spawn(argv_list, dimensions=(rows, cols), cwd=cwd, env=env)
         return cls(proc)
 
     def read(self, size: int) -> bytes:

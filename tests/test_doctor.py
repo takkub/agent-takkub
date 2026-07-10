@@ -787,6 +787,100 @@ class TestCmdDoctorExitCode:
         assert parsed[1]["status"] == "fail"
 
 
+class TestCheckClaudeAuthenticated:
+    """[claude] authenticated — must read `.credentials.json` (leading dot,
+    not `credentials.json`) and probe the macOS Keychain before warning
+    (M1, docs/reviews/2026-07-10-xplatform-CONSOLIDATED.md)."""
+
+    def _auth(self, findings: list[Finding]) -> Finding:
+        return next(f for f in findings if f.name == "authenticated")
+
+    def _import_limit_status_before_platform_spoof(self):
+        # limit_status.py imports urllib.request at module level, which itself
+        # lazily imports the macOS-only `_scproxy` the FIRST time it sees
+        # sys.platform == "darwin" — importing it now (real platform) caches
+        # the module so a later darwin spoof doesn't retrigger that import.
+        import agent_takkub.limit_status  # noqa: F401
+
+    def test_darwin_keychain_present_is_ok(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._import_limit_status_before_platform_spoof()
+        monkeypatch.setattr("agent_takkub.doctor.sys.platform", "darwin")
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        monkeypatch.setattr(
+            "agent_takkub.limit_status._read_keychain_credentials", lambda: "raw-blob"
+        )
+        f = self._auth(check_claude())
+        assert f.status == Status.OK
+        assert "Keychain" in f.detail
+
+    def test_darwin_keychain_absent_no_file_warns(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._import_limit_status_before_platform_spoof()
+        monkeypatch.setattr("agent_takkub.doctor.sys.platform", "darwin")
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        monkeypatch.setattr("agent_takkub.limit_status._read_keychain_credentials", lambda: None)
+        f = self._auth(check_claude())
+        assert f.status == Status.WARN
+        assert "claude login" in f.fix_hint
+
+    def test_darwin_keychain_absent_but_file_present_is_ok(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._import_limit_status_before_platform_spoof()
+        monkeypatch.setattr("agent_takkub.doctor.sys.platform", "darwin")
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        monkeypatch.setattr("agent_takkub.limit_status._read_keychain_credentials", lambda: None)
+        creds_dir = tmp_path / ".claude"
+        creds_dir.mkdir()
+        (creds_dir / ".credentials.json").write_text("{}", encoding="utf-8")
+        f = self._auth(check_claude())
+        assert f.status == Status.OK
+        assert ".credentials.json" in f.detail
+
+    def test_posix_dotfile_present_is_ok(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("agent_takkub.doctor.sys.platform", "linux")
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        creds_dir = tmp_path / ".claude"
+        creds_dir.mkdir()
+        (creds_dir / ".credentials.json").write_text("{}", encoding="utf-8")
+        f = self._auth(check_claude())
+        assert f.status == Status.OK
+        assert ".credentials.json" in f.detail
+
+    def test_posix_dotfile_missing_warns(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("agent_takkub.doctor.sys.platform", "linux")
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        f = self._auth(check_claude())
+        assert f.status == Status.WARN
+        assert ".credentials.json" in f.detail
+
+    def test_windows_dotfile_present_is_ok(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("agent_takkub.doctor.sys.platform", "win32")
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        creds_dir = tmp_path / ".claude"
+        creds_dir.mkdir()
+        (creds_dir / ".credentials.json").write_text("{}", encoding="utf-8")
+        f = self._auth(check_claude())
+        assert f.status == Status.OK
+
+    def test_windows_dotfile_missing_skips(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("agent_takkub.doctor.sys.platform", "win32")
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        f = self._auth(check_claude())
+        assert f.status == Status.SKIP
+
+
 class TestEnvPathCheck:
     """[env] npm-global-bin — the PATH-health check born from the 2026-07-04
     field incident (npm bin dir dropped off PATH → claude/takkub vanished)."""

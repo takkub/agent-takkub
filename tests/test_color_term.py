@@ -52,11 +52,15 @@ class TestColorTermInAllowlist:
         env = _build_pane_env()
         assert env.get("TERM") == "xterm-kitty"
 
-    def test_colorterm_is_stripped_by_allowlist(self, monkeypatch) -> None:
-        # COLORTERM is intentionally NOT on the allowlist — this is exactly
-        # why the helper must default it. Pin that the allowlist strips it,
-        # so the helper stays load-bearing (if someone adds COLORTERM to the
-        # allowlist later this test flags that the helper's role changed).
-        monkeypatch.setenv("COLORTERM", "truecolor")
+    def test_colorterm_is_stripped_by_allowlist_then_reapplied_by_default(
+        self, monkeypatch
+    ) -> None:
+        # COLORTERM is intentionally NOT on the allowlist — the host value is
+        # dropped by the filter, not forwarded. H1: _build_pane_env() now
+        # calls _apply_color_term() internally (so every spawn branch gets
+        # it, not just claude's), which then re-adds COLORTERM at its own
+        # default. A distinct host value here proves it's the default that
+        # lands, not a leaked host env var.
+        monkeypatch.setenv("COLORTERM", "24bit")
         env = _build_pane_env()
-        assert "COLORTERM" not in env
+        assert env["COLORTERM"] == "truecolor"

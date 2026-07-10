@@ -53,7 +53,17 @@ ROLES: tuple[str, ...] = (
     "docs",
 )
 
-_PLUGINS_INSTALLED_FILE = pathlib.Path.home() / ".claude" / "plugins" / "installed_plugins.json"
+
+def _default_plugins_installed_file() -> pathlib.Path:
+    """``<config.default_claude_config_dir()>/plugins/installed_plugins.json``
+    — plain ``~/.claude`` for a dev checkout, the isolated per-instance profile
+    for an installed build. Resolved fresh (not a module constant) so it tracks
+    ``config.DATA_HOME`` / ``Path.home`` even when a test monkeypatches them
+    after import."""
+    from .config import default_claude_config_dir
+
+    return default_claude_config_dir() / "plugins" / "installed_plugins.json"
+
 
 # Zinc dark theme, matched to the cockpit shell (MainWindow QSS + status-bar
 # chips): #09090b bg, #18181b/#27272a surfaces, zinc text ramp, #2563eb accent
@@ -240,11 +250,13 @@ def diff_role_items(
 
 
 def discover_marketplace_plugins(
-    installed_file: pathlib.Path = _PLUGINS_INSTALLED_FILE,
+    installed_file: pathlib.Path | None = None,
 ) -> list[str]:
     """Plugin names (``name@marketplace``) known to this machine's Claude
     plugin install registry. Missing/unreadable file -> empty list (dialog
     just shows no plugin columns, doesn't crash)."""
+    if installed_file is None:
+        installed_file = _default_plugins_installed_file()
     try:
         data = json.loads(installed_file.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -256,7 +268,7 @@ def discover_marketplace_plugins(
 
 
 def discover_marketplaces(
-    installed_file: pathlib.Path = _PLUGINS_INSTALLED_FILE,
+    installed_file: pathlib.Path | None = None,
 ) -> list[str]:
     """Marketplace names the pane plugin-policy can actually govern.
 
@@ -278,6 +290,8 @@ def discover_marketplaces(
     """
     from .config import _SAFE_PLUGINS
 
+    if installed_file is None:
+        installed_file = _default_plugins_installed_file()
     try:
         data = json.loads(installed_file.read_text(encoding="utf-8"))
     except (OSError, ValueError):

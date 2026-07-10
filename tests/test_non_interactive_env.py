@@ -47,22 +47,18 @@ class TestApplyNonInteractiveEnv:
 
 class TestNonInteractiveEnvInAllowlist:
     def test_npm_config_yes_host_override_passes_through(self, monkeypatch) -> None:
-        # npm_config_yes is NOT in the allowlist (it's injected after env
-        # construction), so a host-level override won't pass through _build_pane_env.
-        # This test documents that behaviour: the env var is always injected
-        # at spawn time regardless of the host env.
+        # npm_config_yes is NOT in the allowlist, so a host-level override
+        # doesn't survive the filter. H1: _build_pane_env() now calls
+        # _apply_non_interactive_env() internally (every spawn branch gets
+        # it, not just claude's), so the default 'true' is already set on
+        # the dict this function returns — no separate call needed.
         monkeypatch.setenv("npm_config_yes", "false")
         env = _build_pane_env()
-        # npm_config_yes not in allowlist → not in raw pane env
-        assert "npm_config_yes" not in env
-        # After _apply_non_interactive_env the default 'true' is set
-        _apply_non_interactive_env(env)
         assert env["npm_config_yes"] == "true"
 
     def test_git_terminal_prompt_host_override_passes_through(self, monkeypatch) -> None:
-        # GIT_TERMINAL_PROMPT is NOT in the allowlist — injected at spawn.
+        # GIT_TERMINAL_PROMPT is NOT in the allowlist — injected inside
+        # _build_pane_env() itself now (H1), same reasoning as above.
         monkeypatch.setenv("GIT_TERMINAL_PROMPT", "1")
         env = _build_pane_env()
-        assert "GIT_TERMINAL_PROMPT" not in env
-        _apply_non_interactive_env(env)
         assert env["GIT_TERMINAL_PROMPT"] == "0"

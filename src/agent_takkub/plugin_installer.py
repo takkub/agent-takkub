@@ -8,15 +8,17 @@ CLI. Installs are git-clone + network operations, so the UI runs them on a
 background thread (see ``user_actions._PluginInstallThread``) — never on the Qt
 main thread.
 
-Config home: the cockpit GUI reads plugins from ``~/.claude/plugins`` (see
-``lead_context._default_plugin_dirs``), so installs inherit the GUI process's
-default ``CLAUDE_CONFIG_DIR`` and land where panes actually look. A session that
-overrides ``CLAUDE_CONFIG_DIR`` (e.g. a ``.claude-work`` profile) would install
-elsewhere — the GUI does not, which is exactly why the button lives in the GUI.
+Config home: the cockpit GUI reads plugins from
+``config.default_claude_config_dir()/plugins`` (see
+``lead_context._default_plugin_dirs``). ``_claude()`` explicitly sets
+``CLAUDE_CONFIG_DIR`` to that same dir (unless the GUI process's own env
+already overrides it) before installing, so installs land exactly where the
+GUI — and spawned panes on the default profile — actually look.
 """
 
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass
 
@@ -95,11 +97,33 @@ RECOMMENDED: tuple[RecommendedPlugin, ...] = (
 )
 
 
+def _claude_env() -> dict[str, str]:
+    """Subprocess env for a ``claude`` install call: the GUI process's own env
+    plus an explicit ``CLAUDE_CONFIG_DIR`` so installs land in the active
+    profile (a user's existing override wins; otherwise the cockpit's default
+    profile — plain ``~/.claude`` for a dev checkout, the isolated
+    ``DATA_HOME/claude-config`` for an installed build) instead of silently
+    falling through to whatever ``claude`` itself defaults to."""
+    from .config import default_claude_config_dir
+
+    env = dict(os.environ)
+    env.setdefault("CLAUDE_CONFIG_DIR", str(default_claude_config_dir()))
+    return env
+
+
 def _claude(*args: str, timeout: float = 120.0) -> subprocess.CompletedProcess[str]:
     """Run a ``claude`` subcommand with NO console window + a finite timeout.
-    Never inherits a shell; caller inspects returncode/stdout."""
+    Never inherits a shell; caller inspects returncode/stdout.
+
+    Resolves the real executable via ``config.find_claude_executable()``
+    (an absolute path) instead of a bare ``"claude"`` — on Windows a bare name
+    resolves through the ``claude.cmd`` npm shim, which ``shell=False``
+    subprocess calls can't launch (``FileNotFoundError``).
+    """
+    from .config import find_claude_executable
+
     return subprocess.run(
-        ["claude", *args],
+        [find_claude_executable(), *args],
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -107,22 +131,35 @@ def _claude(*args: str, timeout: float = 120.0) -> subprocess.CompletedProcess[s
         encoding="utf-8",
         errors="replace",
         creationflags=SUBPROCESS_NO_WINDOW,
+        env=_claude_env(),
     )
 
 
 def installed_on_disk(home=None) -> set[str]:
     """Recommended plugin keys with a *loadable* install under
-    ``~/.claude/plugins/cache`` — a pure filesystem check (no subprocess), safe
-    on the Qt main thread.
+    ``<config.default_claude_config_dir()>/plugins/cache`` — a pure filesystem
+    check (no subprocess), safe on the Qt main thread.
 
     Applies the SAME condition as ``lead_context._default_plugin_dirs``: a
     ``<marketplace>/<plugin>/<version>/.claude-plugin/plugin.json`` must exist.
     Checking only the plugin folder would mark a half-populated cache dir (an
     interrupted install) as installed while panes silently skip it.
+
+    ``home`` overrides the base ``~/.claude`` dir directly (dev-checkout
+    default) — kept for tests; leave it unset to resolve the real config dir
+    for this instance (plain ``~/.claude`` for a dev checkout, the isolated
+    ``DATA_HOME/claude-config`` for an installed build — see
+    ``config.default_claude_config_dir``), matching where ``_claude_env()``
+    actually installs plugins.
     """
     import pathlib
 
-    base = (home or pathlib.Path.home()) / ".claude" / "plugins" / "cache"
+    from .config import default_claude_config_dir
+
+    if home is not None:
+        base = pathlib.Path(home) / ".claude" / "plugins" / "cache"
+    else:
+        base = default_claude_config_dir() / "plugins" / "cache"
     have: set[str] = set()
     for p in RECOMMENDED:
         plugin_dir = base / p.marketplace / p.key

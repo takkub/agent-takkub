@@ -8,6 +8,8 @@ parser; the network call itself is not unit-tested.
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 from agent_takkub import plugin_installer as pi
 
 
@@ -53,6 +55,34 @@ def test_installed_on_disk(tmp_path):
 
     missing = {p.key for p in pi.missing_plugins(have)}
     assert missing == {"security-guidance", "remember", "ui-ux-pro-max"}
+
+
+def test_installed_on_disk_matches_install_target_when_data_home_differs(monkeypatch, tmp_path):
+    # F2 regression: an installed build's DATA_HOME != REPO_ROOT, so
+    # default_claude_config_dir() != ~/.claude. installed_on_disk() must read
+    # plugins from the SAME dir _claude_env() installs them into — otherwise
+    # install_plugin() reports "not found on disk" right after a real install.
+    isolated_config_dir = tmp_path / "agent-takkub-data" / "claude-config"
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+
+    with patch(
+        "agent_takkub.config.default_claude_config_dir",
+        return_value=isolated_config_dir,
+    ):
+        install_target = pi._claude_env()["CLAUDE_CONFIG_DIR"]
+        assert install_target == str(isolated_config_dir)
+
+        cache = isolated_config_dir / "plugins" / "cache"
+        _make_installed(cache, "claude-plugins-official", "frontend-design")
+
+        have = pi.installed_on_disk()
+        assert have == {"frontend-design"}
+
+        # A ~/.claude-only cache (the pre-fix hardcoded base) must NOT be
+        # seen — proves installed_on_disk() no longer reads the wrong dir.
+        home_cache = tmp_path / ".claude" / "plugins" / "cache"
+        _make_installed(home_cache, "claude-plugins-official", "code-review")
+        assert pi.installed_on_disk() == {"frontend-design"}
 
 
 def test_installed_on_disk_ignores_partial_install(tmp_path):
@@ -119,3 +149,80 @@ def test_install_plugin_failure_by_exit_code(monkeypatch):
 def test_missing_plugins_all_when_empty():
     missing = pi.missing_plugins(set())
     assert len(missing) == len(pi.RECOMMENDED)
+
+
+# ---------------------------------------------------------------------------
+# _claude — resolved exe (M3: bare "claude" fails Windows .cmd shim under
+# shell=False) + explicit CLAUDE_CONFIG_DIR propagation
+# ---------------------------------------------------------------------------
+
+
+def test_claude_uses_resolved_executable_not_bare_name(monkeypatch, tmp_path):
+    class _P:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    captured: dict = {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        captured["env"] = kwargs.get("env")
+        return _P()
+
+    monkeypatch.setattr(pi.subprocess, "run", fake_run)
+    with patch(
+        "agent_takkub.config.find_claude_executable",
+        return_value=r"C:\resolved\claude.exe",
+    ):
+        pi._claude("plugin", "list")
+
+    assert captured["argv"][0] == r"C:\resolved\claude.exe"
+    assert captured["argv"][1:] == ["plugin", "list"]
+
+
+def test_claude_env_sets_config_dir_when_unset(monkeypatch, tmp_path):
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    with patch(
+        "agent_takkub.config.default_claude_config_dir",
+        return_value=tmp_path / "claude-config",
+    ):
+        env = pi._claude_env()
+    assert env["CLAUDE_CONFIG_DIR"] == str(tmp_path / "claude-config")
+
+
+def test_claude_env_preserves_existing_config_dir_override(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/profile/override")
+    with patch(
+        "agent_takkub.config.default_claude_config_dir",
+        return_value=tmp_path / "claude-config",
+    ):
+        env = pi._claude_env()
+    assert env["CLAUDE_CONFIG_DIR"] == "/profile/override"
+
+
+def test_claude_passes_env_to_subprocess_run(monkeypatch, tmp_path):
+    class _P:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    captured: dict = {}
+
+    def fake_run(argv, **kwargs):
+        captured["env"] = kwargs.get("env")
+        return _P()
+
+    monkeypatch.setattr(pi.subprocess, "run", fake_run)
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    with (
+        patch("agent_takkub.config.find_claude_executable", return_value="claude"),
+        patch(
+            "agent_takkub.config.default_claude_config_dir",
+            return_value=tmp_path / "claude-config",
+        ),
+    ):
+        pi._claude("plugin", "list")
+
+    assert captured["env"] is not None
+    assert captured["env"]["CLAUDE_CONFIG_DIR"] == str(tmp_path / "claude-config")

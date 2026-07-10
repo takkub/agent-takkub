@@ -16,9 +16,10 @@ moment a Lead pane starts:
    reference / future re-enable.
 
 3. `_default_plugin_dirs()` — discover the on-disk
-   `~/.claude/plugins/cache/...` directory for each plugin the cockpit
-   wants spawned panes to inherit (skipping claude-obsidian's broken
-   SessionStart hook). Returns the list passed to `--plugin-dir`.
+   `<config.default_claude_config_dir()>/plugins/cache/...` directory for
+   each plugin the cockpit wants spawned panes to inherit (skipping
+   claude-obsidian's broken SessionStart hook). Returns the list passed
+   to `--plugin-dir`.
    `_SAFE_PLUGINS` is the source-of-truth list; it lives in `config.py`
    (leaf hub) so doctor.py can import it without pulling in this module.
 
@@ -40,11 +41,13 @@ from .config import (
     REPO_ROOT,
     RUNTIME_DIR,
     active_project,
+    default_claude_config_dir,
     ensure_runtime,
     lead_cwd,
     load_projects,
 )
 from .pane_tools_policy import effective_plugins
+from .user_profile import config_dir_for
 from .vault_mirror import _is_junk_note
 
 # Shared "big-file hygiene" guard, injected into BOTH the Lead spawn prompt and
@@ -618,10 +621,21 @@ _ROLE_PLUGIN_POLICY: dict[str, frozenset[str]] = {
 _PANE_PLUGIN_DENYLIST: frozenset[str] = frozenset({"security-guidance", "remember"})
 
 
-def _default_plugin_dirs(role: str | None = None) -> list[str]:
-    """Resolve ~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/ for
+def _default_plugin_dirs(role: str | None = None, project: str | None = None) -> list[str]:
+    """Resolve <config_dir>/plugins/cache/<marketplace>/<plugin>/<version>/ for
     each plugin in `_SAFE_PLUGINS`, returning the directories that actually
     contain a `.claude-plugin/plugin.json`. Best-effort; never raises.
+
+    `<config_dir>` is `user_profile.config_dir_for(project)` when `project` is
+    given — plain `~/.claude` for the default profile, but that project's own
+    `CLAUDE_CONFIG_DIR` override when one is registered (FU2, 2026-07-10;
+    previously always fell through to `config.default_claude_config_dir()`,
+    the isolated per-instance profile for an installed build, ignoring a
+    project-specific profile override entirely). `project=None` (the
+    back-compat default for direct callers with no project context, e.g.
+    doctor / smoke tests) keeps the old `default_claude_config_dir()` behaviour.
+    This matches the profile spawned panes actually run under (see
+    `pane_env.inject_user_profile_env`, which resolves the same way).
 
     When `role` is given, the result is filtered through the policy hierarchy:
       1. File override in pane-tools.json (effective_plugins)
@@ -636,8 +650,8 @@ def _default_plugin_dirs(role: str | None = None) -> list[str]:
     else:
         allowed = None  # None means allow all (full set)
 
-    home = pathlib.Path.home()
-    cache = home / ".claude" / "plugins" / "cache"
+    config_dir = config_dir_for(project) if project is not None else default_claude_config_dir()
+    cache = config_dir / "plugins" / "cache"
     out: list[str] = []
     if not cache.exists():
         return out

@@ -233,3 +233,43 @@ class TestAutoRespawnReplay:
             orch._auto_respawn("reviewer", "/some/cwd", TEST_PROJECT)
 
         mock_send_after.assert_not_called()
+
+    def test_provider_self_update_exit_replays_task(self, orch: Orchestrator) -> None:
+        """FU1 (2026-07-10 followup): a provider pane (codex/gemini) that
+        self-updates and exits mid-task — an unexpected exit, not
+        takkub done/close — must auto-respawn once (within AUTO_RESPAWN_MAX)
+        and re-deliver the in-flight task, exactly like a crash. codex/gemini
+        never set last_spawn_resumed (claude-`--resume`-only concept), so a
+        stale True left over from an earlier claude-substituted spawn of this
+        same role slot must not suppress the replay (see the FU1 fix in
+        `_launch_session`)."""
+        ekey = _exit_key(TEST_PROJECT, "codex")
+        orch._ps(ekey).last_assigned_task = SAMPLE_TASK
+        orch._ps(ekey).last_spawn_resumed = True  # stale, from a prior claude-substitute spawn
+
+        # Simulate: codex pane was "working" when its own auto-update printed
+        # "Update ran successfully! Please restart Codex." and exited — the
+        # generic exit path (agent_pane._on_exit) sets state "exited" since
+        # neither takkub done() nor close() marked the exit expected.
+        crashed_pane = MagicMock()
+        crashed_pane.session = None
+        crashed_pane.state = "exited"
+        orch._panes_by_project.setdefault(TEST_PROJECT, {})["codex"] = crashed_pane
+
+        def _fake_spawn(role_name, cwd=None, project=None, **kw):
+            # A real spawn() would route to the codex branch's _launch_session,
+            # which resets last_spawn_resumed to False (FU1 fix) since codex
+            # never resumes via --resume.
+            orch._ps(_exit_key(project, role_name)).last_spawn_resumed = False
+            return True, "spawned"
+
+        with (
+            patch.object(orch, "spawn", side_effect=_fake_spawn) as mock_spawn,
+            patch.object(orch, "_send_when_ready") as mock_send,
+        ):
+            orch._auto_respawn("codex", "/some/cwd", TEST_PROJECT)
+
+        mock_spawn.assert_called_once_with(
+            "codex", cwd="/some/cwd", project=TEST_PROJECT, _from_auto_respawn=True
+        )
+        mock_send.assert_called_once_with("codex", SAMPLE_TASK, project=TEST_PROJECT)

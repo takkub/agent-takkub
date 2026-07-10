@@ -110,3 +110,23 @@ def test_build_lead_env_forwards_port_file(monkeypatch: pytest.MonkeyPatch, tmp_
     monkeypatch.setenv("TAKKUB_PORT_FILE", override)
     env = _build_lead_env()
     assert env.get("TAKKUB_PORT_FILE") == override
+
+
+def test_build_pane_env_includes_tmpdir(monkeypatch: pytest.MonkeyPatch) -> None:
+    # L3 (cross-platform audit 2026-07-10): TEMP/TMP are the Windows env
+    # vars; POSIX's equivalent is TMPDIR, which was missing from the
+    # allowlist — a mac/Linux pane lost its per-user tmp dir and fell back
+    # to bare `/tmp`.
+    monkeypatch.setenv("TMPDIR", "/private/var/folders/xy/abc123/T")
+    env = _build_pane_env()
+    assert env.get("TMPDIR") == "/private/var/folders/xy/abc123/T"
+
+
+@pytest.mark.parametrize(
+    "var",
+    ["XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR"],
+)
+def test_build_pane_env_includes_xdg_vars(monkeypatch: pytest.MonkeyPatch, var: str) -> None:
+    monkeypatch.setenv(var, "/tmp/xdg-test")
+    env = _build_pane_env()
+    assert env.get(var) == "/tmp/xdg-test"

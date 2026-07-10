@@ -341,3 +341,99 @@ class TestInstanceWindowTitle:
         title = config.instance_window_title()
         assert title == "agent-takkub v1.0.14"
         assert "prod" not in title
+
+
+class TestLeadCwd:
+    """L6 (cross-platform audit 2026-07-10): `lead_cwd()` must always return
+    an absolute path. A relative configured path handed straight to the
+    native spawn call resolves against the *cockpit process's* cwd, not the
+    project — Lead silently lands in the wrong directory (or the cockpit's
+    own cwd)."""
+
+    def test_explicit_lead_key_absolutized(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        web = tmp_path / "web"
+        web.mkdir()
+        pj = tmp_path / "projects.json"
+        pj.write_text(
+            json.dumps(
+                {
+                    "active": "demo",
+                    "projects": {"demo": {"paths": {"web": "web"}, "lead": "web"}},
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(config, "PROJECTS_JSON", pj)
+        monkeypatch.chdir(tmp_path)
+
+        result = config.lead_cwd("demo")
+        assert result == str(web.resolve())
+        assert Path(result).is_absolute()
+
+    def test_already_absolute_path_returned_resolved(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        web = tmp_path / "web"
+        web.mkdir()
+        pj = tmp_path / "projects.json"
+        pj.write_text(
+            json.dumps(
+                {
+                    "active": "demo",
+                    "projects": {"demo": {"paths": {"web": str(web)}, "lead": "web"}},
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(config, "PROJECTS_JSON", pj)
+
+        assert config.lead_cwd("demo") == str(web.resolve())
+
+    def test_first_listed_path_absolutized(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # No `lead` key and no shared existing parent → falls through to
+        # branch 3 (first listed path), which must also come back absolute.
+        web = tmp_path / "sub" / "web"
+        web.mkdir(parents=True)
+        pj = tmp_path / "projects.json"
+        pj.write_text(
+            json.dumps({"active": "demo", "projects": {"demo": {"paths": {"web": "sub/web"}}}}),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(config, "PROJECTS_JSON", pj)
+        monkeypatch.chdir(tmp_path)
+
+        result = config.lead_cwd("demo")
+        assert result == str(web.resolve())
+        assert Path(result).is_absolute()
+
+    def test_common_parent_branch_absolutized(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = tmp_path / "app"
+        (root / "web").mkdir(parents=True)
+        (root / "api").mkdir(parents=True)
+        pj = tmp_path / "projects.json"
+        pj.write_text(
+            json.dumps(
+                {
+                    "active": "demo",
+                    "projects": {
+                        "demo": {"paths": {"web": str(root / "web"), "api": str(root / "api")}}
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(config, "PROJECTS_JSON", pj)
+
+        result = config.lead_cwd("demo")
+        assert result == str(root.resolve())
+        assert Path(result).is_absolute()
+
+    def test_no_project_returns_none(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(config, "PROJECTS_JSON", tmp_path / "nope.json")
+        assert config.lead_cwd("ghost") is None
