@@ -323,6 +323,45 @@ def discover_marketplace_plugins(
     return sorted(plugins.keys())
 
 
+def master_mcps() -> list[str]:
+    """Master MCP registry names (``shared_dev_tools.list_master_mcps()``),
+    empty on any failure. Module-level so non-Qt callers (settings_window's
+    native MCP Matrix view) can build a matrix without instantiating
+    ``PaneToolsDialog``."""
+    try:
+        from . import shared_dev_tools
+
+        return list(shared_dev_tools.list_master_mcps())
+    except Exception:
+        return []
+
+
+def policy_role_items(roles: tuple[str, ...], kind: str) -> dict[str, list[str]]:
+    """Current per-role item names for *kind* ('mcps'/'plugins'), resolved
+    through ``pane_tools_policy`` defaults. Module-level so it's shared
+    between ``PaneToolsDialog`` and settings_window's native matrix views
+    instead of being duplicated."""
+    try:
+        from . import pane_tools_policy, shared_dev_tools
+        from .lead_context import _ROLE_PLUGIN_POLICY, _TEAMMATE_PLUGINS
+
+        defaults = getattr(shared_dev_tools, "_ROLE_MCP_POLICY", {})
+        result: dict[str, list[str]] = {}
+        for role in roles:
+            if kind == "mcps":
+                default = frozenset(defaults.get(role, ()))
+                result[role] = list(pane_tools_policy.effective_mcps(role, default) or ())
+            else:
+                # Real built-in default, NOT [] — otherwise the matrix
+                # renders every plugin unchecked and a naive Save writes
+                # deny-all overrides for every role.
+                default = _ROLE_PLUGIN_POLICY.get(role, _TEAMMATE_PLUGINS)
+                result[role] = list(pane_tools_policy.effective_plugins(role, default) or ())
+        return result
+    except Exception:
+        return {role: [] for role in roles}
+
+
 def discover_marketplaces(
     installed_file: pathlib.Path | None = None,
 ) -> list[str]:
@@ -627,35 +666,12 @@ class PaneToolsDialog(QDialog):
             self._remove_mcps([name])
 
     def _master_mcps(self) -> list[str]:
-        try:
-            from . import shared_dev_tools
-
-            return list(shared_dev_tools.list_master_mcps())
-        except Exception:
-            return []
+        return master_mcps()
 
     def _policy_role_items(self, kind: str) -> dict[str, list[str]]:
         """Current per-role item names for *kind* ('mcps'/'plugins'),
         resolved through ``pane_tools_policy`` defaults."""
-        try:
-            from . import pane_tools_policy, shared_dev_tools
-            from .lead_context import _ROLE_PLUGIN_POLICY, _TEAMMATE_PLUGINS
-
-            defaults = getattr(shared_dev_tools, "_ROLE_MCP_POLICY", {})
-            result: dict[str, list[str]] = {}
-            for role in ROLES:
-                if kind == "mcps":
-                    default = frozenset(defaults.get(role, ()))
-                    result[role] = list(pane_tools_policy.effective_mcps(role, default) or ())
-                else:
-                    # Real built-in default, NOT [] — otherwise the matrix
-                    # renders every plugin unchecked and a naive Save writes
-                    # deny-all overrides for every role.
-                    default = _ROLE_PLUGIN_POLICY.get(role, _TEAMMATE_PLUGINS)
-                    result[role] = list(pane_tools_policy.effective_plugins(role, default) or ())
-            return result
-        except Exception:
-            return {role: [] for role in ROLES}
+        return policy_role_items(ROLES, kind)
 
     def _reload_mcp_table(self) -> None:
         items = self._master_mcps()

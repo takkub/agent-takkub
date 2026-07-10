@@ -169,6 +169,30 @@ def audit_new_role_text(
     return out
 
 
+def audit_existing_role(
+    role: str,
+    docs: dict[str, str],
+    threshold: float = 0.6,
+) -> list[tuple[str, float]]:
+    """Overlap of an EXISTING role's doc (already a key in ``docs``) against
+    every other role in the same corpus. Used by the Skill Catalog view to
+    show "✓ won't overlap" for the currently-selected role.
+
+    Returns [(other_role, similarity), ...] >= threshold, sorted desc.
+    """
+    tfidf = compute_tfidf(docs)
+    target = tfidf.get(role, {})
+    out: list[tuple[str, float]] = []
+    for other, vec in tfidf.items():
+        if other == role:
+            continue
+        sim = cosine_similarity(target, vec)
+        if sim >= threshold:
+            out.append((other, sim))
+    out.sort(key=lambda x: x[1], reverse=True)
+    return out
+
+
 def audit_skills(
     skills_dir: Path = Path(".claude/agents"),
     threshold: float = 0.6,
