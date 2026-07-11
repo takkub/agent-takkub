@@ -305,6 +305,7 @@
         "agent_takkub.remote.tunnel",
         "agent_takkub.role_memory",
         "agent_takkub.rtk_helper",
+        "agent_takkub.settings_management.__main__",
         "agent_takkub.settings_management.repositories.skills",
         "agent_takkub.settings_management.services.cleanup",
         "agent_takkub.settings_window",
@@ -327,7 +328,7 @@
         "agent_takkub.vault_mirror",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 63,
+      "fan_in": 64,
       "fan_out": 0
     },
     {
@@ -884,6 +885,7 @@
         "agent_takkub.orchestrator",
         "agent_takkub.pipeline_executor",
         "agent_takkub.remote.api",
+        "agent_takkub.settings_management.pages.roles_page",
         "agent_takkub.settings_management.repositories.providers",
         "agent_takkub.settings_management.repositories.roles",
         "agent_takkub.settings_management.services.cleanup",
@@ -892,7 +894,7 @@
         "agent_takkub.spawn_engine",
         "agent_takkub.update_panel"
       ],
-      "fan_in": 13,
+      "fan_in": 14,
       "fan_out": 3
     },
     {
@@ -1148,11 +1150,13 @@
     {
       "module": "agent_takkub.settings_management.__main__",
       "imports": [
-        "agent_takkub.settings_management.window"
+        "agent_takkub.config",
+        "agent_takkub.settings_management.window",
+        "agent_takkub.settings_window"
       ],
       "imported_by": [],
       "fan_in": 0,
-      "fan_out": 1
+      "fan_out": 3
     },
     {
       "module": "agent_takkub.settings_management.commands",
@@ -1270,6 +1274,7 @@
       "imports": [
         "agent_takkub.cockpit_theme",
         "agent_takkub.pane_tools_dialog",
+        "agent_takkub.provider_config",
         "agent_takkub.provider_spec",
         "agent_takkub.settings_management.commands",
         "agent_takkub.settings_management.models",
@@ -1286,7 +1291,7 @@
         "agent_takkub.settings_management.window"
       ],
       "fan_in": 1,
-      "fan_out": 13
+      "fan_out": 14
     },
     {
       "module": "agent_takkub.settings_management.pages.skills_page",
@@ -1591,9 +1596,10 @@
         "agent_takkub.user_profile"
       ],
       "imported_by": [
+        "agent_takkub.settings_management.__main__",
         "agent_takkub.user_actions"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 18
     },
     {

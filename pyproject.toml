@@ -414,6 +414,14 @@ forbidden_modules = [
     "agent_takkub.main_window",
     "agent_takkub.settings_window",
 ]
+# Sole sanctioned exception: the standalone dev entry point's "Open legacy
+# settings" hook (critic R3 MED — the button was a dead no-op in standalone
+# mode without it). Function-level lazy import, one-way convenience glue for
+# `python -m agent_takkub.settings_management` only — the window/pages/
+# repositories tree itself still never touches legacy.
+ignore_imports = [
+    "agent_takkub.settings_management.__main__ -> agent_takkub.settings_window",
+]
 
 [[tool.importlinter.contracts]]
 name = "agent-pane-model-headless"
