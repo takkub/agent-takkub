@@ -339,6 +339,9 @@ class ProjectWizardMixin:
                 form.addRow(sub.name, le)
                 inputs[sub.name] = (sub, le)
 
+        if not inputs:
+            return {"main": str(p.resolve().as_posix())}
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
