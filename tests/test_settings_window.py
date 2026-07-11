@@ -691,6 +691,147 @@ class TestSkillCatalogView:
         dlg.deleteLater()
 
 
+class TestNewSkillForm:
+    """+ New Skill / delete — closes the create+delete half of the Skill
+    Catalog lifecycle loop (list/select already existed)."""
+
+    @pytest.fixture(autouse=True)
+    def _isolate_skill_roots(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Keep the bundled cockpit-checkout scan roots empty/isolated so
+        # only the fake "active project" root (tmp_path) has skills.
+        monkeypatch.setattr(config, "REPO_ROOT", tmp_path / "no-bundle-here")
+        monkeypatch.setattr(config, "ASSETS_ROOT", tmp_path / "no-bundle-here")
+        monkeypatch.setattr(settings_window, "_allowed_project_roots", lambda _project: [tmp_path])
+
+    def test_create_writes_file_and_refreshes_list(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        dlg = settings_window.SettingsWindow(
+            project="demo", initial_view=settings_window.VIEW_SKILL_CATALOG
+        )
+        dlg._ns_name.setText("my-new-skill")
+        dlg._ns_desc.setText("does a thing")
+        dlg._ns_instructions.setPlainText("body content")
+        dlg._on_create_skill_clicked()
+
+        assert (tmp_path / ".claude" / "skills" / "my-new-skill" / "SKILL.md").is_file()
+        assert dlg._ns_status.text().startswith("✓")
+        assert dlg._ns_name.text() == ""
+        assert "my-new-skill" in {s.name for s in dlg._catalog_skills}
+        dlg.deleteLater()
+
+    def test_create_without_active_project_shows_warning(self, tmp_path: Path) -> None:
+        dlg = settings_window.SettingsWindow(
+            project=None, initial_view=settings_window.VIEW_SKILL_CATALOG
+        )
+        dlg._ns_name.setText("orphan-skill")
+        dlg._on_create_skill_clicked()
+
+        assert dlg._ns_status.text().startswith("⚠️")
+        assert not (tmp_path / ".claude" / "skills" / "orphan-skill").exists()
+        dlg.deleteLater()
+
+    def test_invalid_name_rejected(self, tmp_path: Path) -> None:
+        dlg = settings_window.SettingsWindow(
+            project="demo", initial_view=settings_window.VIEW_SKILL_CATALOG
+        )
+        dlg._ns_name.setText("../escape")
+        dlg._on_create_skill_clicked()
+
+        assert dlg._ns_status.text().startswith("⚠️")
+        assert not (tmp_path / ".claude" / "skills").exists()
+        dlg.deleteLater()
+
+    def test_duplicate_name_rejected(self, tmp_path: Path) -> None:
+        dlg = settings_window.SettingsWindow(
+            project="demo", initial_view=settings_window.VIEW_SKILL_CATALOG
+        )
+        dlg._ns_name.setText("dup-skill")
+        dlg._on_create_skill_clicked()
+        dlg._ns_name.setText("dup-skill")
+        dlg._on_create_skill_clicked()
+
+        assert dlg._ns_status.text().startswith("⚠️")
+        dlg.deleteLater()
+
+    def test_created_skill_shows_delete_button(self, tmp_path: Path) -> None:
+        dlg = settings_window.SettingsWindow(
+            project="demo", initial_view=settings_window.VIEW_SKILL_CATALOG
+        )
+        dlg._ns_name.setText("deletable-skill")
+        dlg._on_create_skill_clicked()
+
+        assert dlg._catalog_delete_btn.isHidden() is False
+        dlg.deleteLater()
+
+    def test_bundled_skill_has_no_delete_button(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from agent_takkub import skill_scan
+
+        bundled = skill_scan.SkillInfo(
+            name="bundled",
+            description="ships with cockpit",
+            path=config.REPO_ROOT / ".claude" / "skills" / "bundled" / "SKILL.md",
+        )
+        monkeypatch.setattr(settings_window.skill_scan, "scan_skills", lambda _roots: [bundled])
+        dlg = settings_window.SettingsWindow(
+            project="demo", initial_view=settings_window.VIEW_SKILL_CATALOG
+        )
+        assert dlg._catalog_delete_btn.isHidden() is True
+        dlg.deleteLater()
+
+    def test_delete_confirmed_removes_skill_and_refreshes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        dlg = settings_window.SettingsWindow(
+            project="demo", initial_view=settings_window.VIEW_SKILL_CATALOG
+        )
+        dlg._ns_name.setText("goner")
+        dlg._on_create_skill_clicked()
+        assert (tmp_path / ".claude" / "skills" / "goner").is_dir()
+
+        monkeypatch.setattr(
+            settings_window.QMessageBox,
+            "question",
+            staticmethod(lambda *a, **k: settings_window.QMessageBox.StandardButton.Yes),
+        )
+        dlg._on_delete_skill_clicked()
+
+        assert not (tmp_path / ".claude" / "skills" / "goner").exists()
+        assert "goner" not in {s.name for s in dlg._catalog_skills}
+        dlg.deleteLater()
+
+    def test_delete_declined_keeps_skill(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        dlg = settings_window.SettingsWindow(
+            project="demo", initial_view=settings_window.VIEW_SKILL_CATALOG
+        )
+        dlg._ns_name.setText("keeper")
+        dlg._on_create_skill_clicked()
+
+        monkeypatch.setattr(
+            settings_window.QMessageBox,
+            "question",
+            staticmethod(lambda *a, **k: settings_window.QMessageBox.StandardButton.No),
+        )
+        dlg._on_delete_skill_clicked()
+
+        assert (tmp_path / ".claude" / "skills" / "keeper").is_dir()
+        dlg.deleteLater()
+
+    def test_created_skill_appears_in_new_role_picker(self, tmp_path: Path) -> None:
+        dlg = settings_window.SettingsWindow(
+            project="demo", initial_view=settings_window.VIEW_SKILL_CATALOG
+        )
+        dlg._ns_name.setText("picker-visible")
+        dlg._on_create_skill_clicked()
+
+        assert "picker-visible" in {s.name for s, _chk in dlg._nr_skill_checks}
+        dlg.deleteLater()
+
+
 class TestPipelineBuilderView:
     def test_hops_render_for_active_template(self) -> None:
         dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PIPELINE_BUILDER)
