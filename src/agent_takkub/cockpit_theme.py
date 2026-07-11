@@ -85,19 +85,120 @@ PARALLEL_CHIP_BG = "rgba(164,114,240,.14)"
 PARALLEL_CHIP_BORDER = "rgba(164,114,240,.3)"
 PARALLEL_CHIP_TEXT = "#c39cf5"
 
-# Role colors per the design doc — a superset/override of roles.py's own
-# Role.color (which serves the main grid, a different surface). Custom roles
-# or any name not listed here fall back to their own Role.color at the
-# call site, not to a value from this dict.
+# ──────────────────────────────────────────────────────────────
+# Provider brand colors (codex/gemini panes) — identity, NOT "active/
+# primary". Kept distinct from the gold accent. Mirrored by roles.py
+# Role.color for the matching roles; equality is guarded by
+# tests/test_role_registry_sync.py so the two never drift.
+# ──────────────────────────────────────────────────────────────
+PROVIDER_CODEX = "#10a37f"  # OpenAI teal
+PROVIDER_GEMINI = "#4285f4"  # Google blue
+
+# ──────────────────────────────────────────────────────────────
+# State colors — status semantics (ok/warn/error/info). The *meaning* is
+# intentional and survives migration: never turn these gold, only tokenize
+# the value. `_BRIGHT` variants are for small dots/glyphs on dark grounds
+# where the base ramp reads too dim (task_dock / agent_pane status dots).
+# ──────────────────────────────────────────────────────────────
+STATE_OK = "#43B562"
+STATE_WARN = "#d97706"
+STATE_ERROR = "#ef4444"
+STATE_INFO = "#4E86F7"
+STATE_OK_BRIGHT = "#22c55e"
+STATE_WARN_BRIGHT = "#facc15"
+STATE_ERROR_BRIGHT = "#f87171"
+STATE_INFO_BRIGHT = "#0ea5e9"
+STATE_EXITED = "#f97316"  # orange — a pane exited unexpectedly (respawnable)
+# Amber used for "pro/enabled/attention" chips (status_header, main_window) —
+# a brighter amber than STATE_WARN's provider-warn tone; kept distinct so both
+# survive migration at their exact values.
+STATE_WARN_ALT = "#f59e0b"
+
+# ──────────────────────────────────────────────────────────────
+# Status-bar chip identity accents (status_header toggles). Each toggle has
+# its own meaning-carrying "on" color, distinct from the gold primary accent;
+# tokenized (not gold) so the identities survive migration. The "off" state of
+# all of them is the neutral TEXT_MUTED.
+# ──────────────────────────────────────────────────────────────
+CHIP_PLAN_MAX = "#8b5cf6"  # violet — Max plan (1M context)
+CHIP_EXEC_PARALLEL = "#10b981"  # emerald — PARALLEL execution mode active
+CHIP_REMOTE_ON = "#14b8a6"  # teal — Remote server live
+
+# Neutral slate fallback for a role with no ROLE_COLORS/Role.color entry
+# (e.g. an unknown/legacy role name at a chip call site). Same hue as the
+# shell role.
+ROLE_COLOR_FALLBACK = "#94a3b8"
+
+# ──────────────────────────────────────────────────────────────
+# Anthropic clay — the token/usage-meter accent. A real 4th brand color,
+# distinct from gold; meters/usage surfaces only.
+# ──────────────────────────────────────────────────────────────
+METER_CLAY = "#d97757"
+METER_CLAY_ALT = "#e08968"
+# Meter/usage state ramp amber (token_meter/usage_meter/limit_panel + the rtk
+# install nudge) — the mid "getting full / attention" fill.
+METER_AMBER = "#fbbf24"
+METER_AMBER_LIGHT = "#fcd34d"
+
+# ──────────────────────────────────────────────────────────────
+# Banner state triples (bg / border / text) for inline notice banners
+# (update_panel). Meaning-preserving tokenization of the old literals.
+# ──────────────────────────────────────────────────────────────
+BANNER_WARN_BG = "#422006"
+BANNER_WARN_BORDER = "#a16207"
+BANNER_WARN_TEXT = "#fde047"
+BANNER_WARN_HOVER = "#713f12"
+BANNER_OK_BG = "#052e16"
+BANNER_OK_BORDER = "#166534"
+BANNER_OK_TEXT = "#4ade80"
+BANNER_OK_HOVER = "#14532d"
+BANNER_ERROR_BG = "#450a0a"
+BANNER_ERROR_BORDER = "#7f1d1d"
+BANNER_ERROR_TEXT = "#fca5a5"
+# INFO banner is used as a light-filled button in update_panel (dark text on a
+# light-blue fill), so the "text"/"bg" here read inverted vs the dark warn/ok/
+# error banners — the values are what matters and are shared by both uses.
+BANNER_INFO_BG = "#1e3a8a"
+BANNER_INFO_BORDER = "#2563eb"
+BANNER_INFO_TEXT = "#93c5fd"
+BANNER_INFO_HOVER = "#bfdbfe"
+
+# Deterministic per-project avatar tints (hash → palette) — a distinct
+# purpose from ROLE_COLORS (role identity), intentionally its own 10-color
+# spread so adjacent projects read apart. Canonical home for what
+# project_nav historically defined inline as `_AVATAR_COLORS` (values kept
+# verbatim so existing project avatars don't change hue).
+AVATAR_TINTS: tuple[str, ...] = (
+    "#6366f1",
+    "#8b5cf6",
+    "#ec4899",
+    "#f43f5e",
+    "#f59e0b",
+    "#10b981",
+    "#06b6d4",
+    "#3b82f6",
+    "#a855f7",
+    "#14b8a6",
+)
+
+# Role colors — the SINGLE source of truth for role identity across every
+# cockpit surface (grid + Settings). roles.py Role.color mirrors these exact
+# values for its built-in roles (guarded by tests/test_role_registry_sync.py);
+# call sites read `ROLE_COLORS.get(name, role.color)` so a custom role not in
+# this dict falls back to its own Role.color. codex/gemini reuse the
+# PROVIDER_* brand tokens; shell is a neutral slate.
 ROLE_COLORS: dict[str, str] = {
     "lead": "#E3B341",
     "frontend": "#34B7AC",
     "backend": "#4E86F7",
     "mobile": "#A472F0",
     "devops": "#43B562",
+    "gemini": PROVIDER_GEMINI,
     "qa": "#E39A3C",
     "reviewer": "#F26D6D",
+    "codex": PROVIDER_CODEX,
     "critic": "#F0619A",
+    "shell": "#94a3b8",
     "designer": "#C77DF0",
     "analyst": "#45C4D6",
     "security": "#E0574F",

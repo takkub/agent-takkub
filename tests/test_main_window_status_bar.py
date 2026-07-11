@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from agent_takkub import cockpit_theme
 from agent_takkub.main_window import MainWindow
 
 # ---------------------------------------------------------------------------
@@ -30,7 +31,7 @@ class TestProviderChipStyle:
 
     def test_disabled_is_gray(self) -> None:
         style = MainWindow._provider_chip_style("codex", disabled=True)
-        assert "#71717a" in style
+        assert cockpit_theme.TEXT_MUTED in style
 
     def test_not_installed_is_amber(self) -> None:
         style = MainWindow._provider_chip_style("codex", disabled=False, not_installed=True)

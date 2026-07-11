@@ -46,6 +46,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from . import cockpit_theme
 from .agent_pane import AgentPane
 from .cli_server import CliServer
 from .config import (
@@ -180,10 +181,11 @@ class MainWindow(
 
         self._settings = QSettings("agent-takkub", "cockpit")
         self.setStyleSheet(
-            "QMainWindow { background-color: #09090b; }"
-            "QStatusBar { background: #18181b; color: #a1a1aa; }"
-            "QSplitter::handle { background: #27272a; }"
-            "QSplitter::handle:hover { background: #3f3f46; }"
+            f"QMainWindow {{ background-color: {cockpit_theme.GROUND_BODY}; }}"
+            f"QStatusBar {{ background: {cockpit_theme.GROUND_PANEL}; "
+            f"color: {cockpit_theme.TEXT_MUTED}; }}"
+            f"QSplitter::handle {{ background: {cockpit_theme.GROUND_SELECT}; }}"
+            f"QSplitter::handle:hover {{ background: {cockpit_theme.BORDER_STRONG2}; }}"
         )
 
         # ── orchestrator + cli server ───────────────────────────
@@ -418,7 +420,7 @@ class MainWindow(
         role = by_name(base_role_mw) if shard_idx_mw is not None else by_name(role_name)
         if role is None:
             # custom role — use user-picked color if available, else default gray
-            color = tab.custom_role_colors.get(role_name, "#94a3b8")
+            color = tab.custom_role_colors.get(role_name, cockpit_theme.ROLE_COLOR_FALLBACK)
             role = Role(
                 name=role_name,
                 label=role_name.capitalize(),

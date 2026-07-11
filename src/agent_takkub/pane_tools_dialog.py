@@ -2,9 +2,12 @@
 
 Originally backed a standalone "🔧 Tools" QDialog (role x MCP/plugin
 checkbox matrix + a "Team & Roles" tab). That dialog was removed
-2026-07-10 — 100% superseded by SettingsWindow's native "👥 Team" view
-(VIEW_MCP_MATRIX / VIEW_PLUGINS_MATRIX / VIEW_SKILL_CATALOG / VIEW_NEW_ROLE),
-which reads the SAME policy via the module-level functions below
+2026-07-10 — 100% superseded by SettingsWindow's native "👥 Team" view.
+The policy this module owns is consumed only by the per-role MCP/plugin
+views (VIEW_MCP_MATRIX / VIEW_PLUGINS_MATRIX / VIEW_NEW_ROLE); the
+skill-facing views (Role Overlap, Skill Catalog — split apart 2026-07-11)
+read role/skill docs, not this policy. Those consumers reach the SAME
+policy via the module-level functions below
 (``build_matrix``/``matrix_to_role_items``/``diff_role_items``/
 ``master_mcps``/``policy_role_items``/``discover_marketplaces``/
 ``parse_install_form``). Kept as plain functions (no Qt) so both this

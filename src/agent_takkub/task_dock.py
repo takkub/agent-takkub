@@ -20,13 +20,15 @@ color) so the same project shows the same avatar tint in both places.
 from __future__ import annotations
 
 from PyQt6.QtCore import QSize, Qt, QTimer, QUrl, pyqtSignal
-from PyQt6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPixmap
+from PyQt6.QtGui import QColor, QDesktopServices, QFontMetrics, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QProgressBar,
     QPushButton,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
     QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
@@ -34,7 +36,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from . import task_ledger
+from . import cockpit_theme, task_ledger
 from .config import list_project_names
 from .project_nav import _avatar_color, _initials
 from .token_meter import usage_color
@@ -48,76 +50,129 @@ COLLAPSED_W = 64
 
 # (glyph, hex color) per ledger row status — mirrors task_ledger._ROW_SYMBOL
 # but with the dock's own richer glyphs/colors (INDEX.md uses plain ASCII
-# checkboxes since markdown can't carry color).
+# checkboxes since markdown can't carry color). Colors are cockpit_theme state
+# tokens (semantic — never gold): the value survives migration, only the
+# literal is tokenized. superseded reuses the parallel-chip purple.
 _STATUS_GLYPH = {
-    "working": ("◔", "#facc15"),  # ◔ amber
-    "ok": ("✓", "#22c55e"),  # ✓ green
-    "fail": ("✕", "#ef4444"),  # ✕ red
-    "closed": ("➖", "#71717a"),  # ➖ gray
-    "superseded": ("›", "#a78bfa"),  # › purple
+    "working": ("◔", cockpit_theme.STATE_WARN_BRIGHT),  # ◔ amber
+    "ok": ("✓", cockpit_theme.STATE_OK_BRIGHT),  # ✓ green
+    "fail": ("✕", cockpit_theme.STATE_ERROR),  # ✕ red
+    "closed": ("➖", cockpit_theme.TEXT_MUTED),  # ➖ gray
+    "superseded": ("›", cockpit_theme.PARALLEL_CHIP_TEXT),  # › purple
 }
 # Any status the ledger doesn't emit yet (e.g. a future "queued" row) falls
 # back to an empty checkbox in neutral gray instead of crashing render.
-_STATUS_FALLBACK = ("☐", "#71717a")  # ☐
+_STATUS_FALLBACK = ("☐", cockpit_theme.TEXT_MUTED)  # ☐
 
 # Extra QTreeWidgetItem data role (column 0): the row's un-prefixed label
 # text — goal/feature items re-derive their ▸/▾-prefixed text from this on
 # every expand/collapse.
 _ROLE_BASE_LABEL = Qt.ItemDataRole.UserRole + 1
 
-_DOCK_QSS = """
-#taskDockRoot {
-    background: #0e0e10;
-}
-#taskDockHeader {
-    color: #52525b;
+_DOCK_QSS = f"""
+#taskDockRoot {{
+    background: {cockpit_theme.GROUND_SIDEBAR};
+}}
+#taskDockHeader {{
+    color: {cockpit_theme.TEXT_FAINT};
     font-size: 10px;
     font-weight: 700;
     letter-spacing: 2px;
     padding: 6px 6px 4px 6px;
-}
-QTreeWidget#taskTree {
-    background: #0e0e10;
-    color: #d4d4d8;
-    border: 1px solid #27272a;
-    border-radius: 8px;
+}}
+QTreeWidget#taskTree {{
+    background: {cockpit_theme.GROUND_SIDEBAR};
+    color: {cockpit_theme.TEXT_SECONDARY};
+    border: 1px solid {cockpit_theme.BORDER_STRONG};
+    border-radius: {cockpit_theme.RADIUS_SM}px;
     outline: 0;
     padding: 4px;
-}
-QTreeWidget#taskTree::item {
-    border-radius: 8px;
+}}
+QTreeWidget#taskTree::item {{
+    border-radius: {cockpit_theme.RADIUS_SM}px;
     padding: 3px 2px;
     margin: 1px 0;
-}
-QTreeWidget#taskTree::item:hover {
-    background: #18181b;
-}
-QTreeWidget#taskTree::item:selected {
-    background: #1e1b2e;
-}
-QTreeWidget#taskTree::branch {
+}}
+QTreeWidget#taskTree::item:hover {{
+    background: {cockpit_theme.GROUND_PANEL};
+}}
+QTreeWidget#taskTree::item:selected {{
+    background: {cockpit_theme.GROUND_SELECT};
+}}
+QTreeWidget#taskTree::branch {{
     background: transparent;
     border-image: none;
     image: none;
-}
-#taskDockToggleBtn {
+}}
+#taskDockToggleBtn {{
     background: transparent;
-    color: #52525b;
+    color: {cockpit_theme.TEXT_FAINT};
     border: none;
-    border-radius: 8px;
+    border-radius: {cockpit_theme.RADIUS_SM}px;
     padding: 7px;
     margin: 4px 0 0 0;
     font-size: 12px;
     font-weight: 600;
-}
-#taskDockToggleBtn:hover {
-    background: #18181b;
-    color: #a1a1aa;
-}
-#taskRail {
+}}
+#taskDockToggleBtn:hover {{
+    background: {cockpit_theme.GROUND_PANEL};
+    color: {cockpit_theme.TEXT_MUTED};
+}}
+#taskRail {{
     background: transparent;
-}
+}}
 """
+
+
+# Content-width padding for the wrap delegate: the status icon column (16px)
+# plus item padding/spacing. Approximate — the delegate only needs a width
+# close enough to grow the row to the right line count.
+_WRAP_ICON_PAD = 30
+_WRAP_V_PAD = 6
+
+
+class _WrapItemDelegate(QStyledItemDelegate):
+    """Grow a plain tree row to fit its word-wrapped text.
+
+    `QTreeView` paints wrapped text when `wordWrap(True)` is set, but it never
+    *grows the row* to fit it — row heights come from a single-line sizeHint,
+    so a long goal/feature/task label clips to one line (proven: an identical
+    tree with a 110-char row stayed the same 12px height as a 10-char row).
+    Only the project row escaped this because it's an item widget that sizes
+    itself. This delegate measures the wrapped height against the row's actual
+    content width (viewport minus this row's indentation) and returns it, so
+    the view allocates enough vertical space. Rows with no text (the project
+    row, whose text is cleared once its `ProjectCardWidget` mounts) fall
+    through to the base single-line/explicit-sizeHint behavior untouched.
+    """
+
+    def __init__(self, tree: QTreeWidget) -> None:
+        super().__init__(tree)
+        self._tree = tree
+
+    def _content_width(self, index) -> int:
+        depth = 0
+        parent = index.parent()
+        while parent.isValid():
+            depth += 1
+            parent = parent.parent()
+        indent = self._tree.indentation()
+        viewport_w = self._tree.viewport().width()
+        return max(viewport_w - (depth + 1) * indent - _WRAP_ICON_PAD, 40)
+
+    def sizeHint(self, option: QStyleOptionViewItem, index) -> QSize:
+        base = super().sizeHint(option, index)
+        text = index.data(Qt.ItemDataRole.DisplayRole)
+        if not text:
+            return base
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        width = self._content_width(index)
+        metrics = QFontMetrics(opt.font)
+        wrapped = metrics.boundingRect(
+            0, 0, width, 100_000, int(Qt.TextFlag.TextWordWrap), str(text)
+        )
+        return QSize(base.width(), max(base.height(), wrapped.height() + _WRAP_V_PAD))
 
 
 def status_glyph(status: str) -> tuple[str, str]:
@@ -233,6 +288,11 @@ class TaskDockWidget(QWidget):
         # would force every row to the tallest single-line height instead of
         # letting a wrapped 2-line goal/feature label grow its own row.
         self._tree.setUniformRowHeights(False)
+        # The default delegate word-wraps painting but never grows the row —
+        # this delegate returns the wrapped height so long goal/feature/task
+        # labels actually reflow to a 2nd line instead of clipping (the
+        # project row is an item widget and sizes itself, so it's unaffected).
+        self._tree.setItemDelegate(_WrapItemDelegate(self._tree))
         header = self._tree.header()
         header.setStretchLastSection(True)
         header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
@@ -410,8 +470,8 @@ class TaskDockWidget(QWidget):
             self._rail_avatars[project] = label
         label.setText(_initials(project))
         label.setStyleSheet(
-            f"background: {_avatar_color(project)}; color: #ffffff; font-size: 10px;"
-            f" font-weight: 800; border-radius: 14px;"
+            f"background: {_avatar_color(project)}; color: {cockpit_theme.TEXT_PRIMARY};"
+            f" font-size: 10px; font-weight: 800; border-radius: 14px;"
         )
         label.setToolTip(f"{project}  ({done}/{total})")
 
@@ -451,7 +511,7 @@ class TaskDockWidget(QWidget):
         font = item.font(0)
         font.setBold(True)
         item.setFont(0, font)
-        item.setForeground(0, QColor("#e4e4e7"))
+        item.setForeground(0, QColor(cockpit_theme.TEXT_PRIMARY_ALT))
         for feat in group.get("features", []):
             item.addChild(self._build_feature_item(project, group, feat))
         return item
@@ -463,7 +523,7 @@ class TaskDockWidget(QWidget):
         item = QTreeWidgetItem([f"▸  {base_label}"])
         item.setData(0, Qt.ItemDataRole.UserRole, key)
         item.setData(0, _ROLE_BASE_LABEL, base_label)
-        item.setForeground(0, QColor("#a1a1aa"))
+        item.setForeground(0, QColor(cockpit_theme.TEXT_MUTED))
         for row in feature.get("rows", []):
             item.addChild(self._build_row_item(row))
         return item
@@ -474,7 +534,7 @@ class TaskDockWidget(QWidget):
         label = f"{glyph} {row.get('role', '')} · {summary}"
         item = QTreeWidgetItem([label])
         item.setIcon(0, _row_status_icon(glyph, color))
-        item.setForeground(0, QColor("#a1a1aa"))
+        item.setForeground(0, QColor(cockpit_theme.TEXT_MUTED))
         item.setToolTip(0, f"{row.get('cwd', '')}\n{summary}")
         return item
 
@@ -539,14 +599,14 @@ class ProjectCardWidget(QWidget):
         self.setStyleSheet(
             "#taskProjectCard {"
             " background: transparent;"
-            " border: 1px solid #27272a;"
-            " border-radius: 10px;"
+            f" border: 1px solid {cockpit_theme.BORDER_STRONG};"
+            f" border-radius: {cockpit_theme.RADIUS_MD}px;"
             "}"
         )
 
         done, total = project_progress(state)
         ratio = (done / total) if total else 0.0
-        color = usage_color(ratio) if total else "#52525b"
+        color = usage_color(ratio) if total else cockpit_theme.TEXT_FAINT
 
         self._row = QHBoxLayout(self)
         self._row.setContentsMargins(8, 6, 8, 6)
@@ -559,9 +619,9 @@ class ProjectCardWidget(QWidget):
         self.chevron.setCursor(Qt.CursorShape.PointingHandCursor)
         self.chevron.setStyleSheet(
             "QToolButton {"
-            " color: #71717a; background: transparent; border: none;"
+            f" color: {cockpit_theme.TEXT_MUTED}; background: transparent; border: none;"
             " font-size: 10px; font-weight: 700; }"
-            "QToolButton:hover { color: #d4d4d8; }"
+            f"QToolButton:hover {{ color: {cockpit_theme.TEXT_SECONDARY}; }}"
         )
         self.chevron.clicked.connect(lambda: item.setExpanded(not item.isExpanded()))
         self._row.addWidget(self.chevron)
@@ -570,14 +630,16 @@ class ProjectCardWidget(QWidget):
         avatar.setFixedSize(24, 24)
         avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
         avatar.setStyleSheet(
-            f"background: {_avatar_color(project)}; color: #ffffff; font-size: 10px;"
-            f" font-weight: 800; border-radius: 12px;"
+            f"background: {_avatar_color(project)}; color: {cockpit_theme.TEXT_PRIMARY};"
+            f" font-size: 10px; font-weight: 800; border-radius: 12px;"
         )
         self._row.addWidget(avatar)
 
         name = QLabel(project)
         name.setWordWrap(True)
-        name.setStyleSheet("color: #e4e4e7; font-size: 13px; font-weight: 700;")
+        name.setStyleSheet(
+            f"color: {cockpit_theme.TEXT_PRIMARY_ALT}; font-size: 13px; font-weight: 700;"
+        )
         self._row.addWidget(name, 1)
 
         self._progress_container = QWidget()
@@ -598,7 +660,7 @@ class ProjectCardWidget(QWidget):
         bar.setFixedHeight(6)
         bar.setStyleSheet(
             "QProgressBar#taskMiniBar {"
-            " background: #27272a; border: none; border-radius: 3px; }"
+            f" background: {cockpit_theme.GROUND_SELECT}; border: none; border-radius: 3px; }}"
             "QProgressBar#taskMiniBar::chunk {"
             f" background: {color}; border-radius: 3px; }}"
         )
@@ -612,8 +674,10 @@ class ProjectCardWidget(QWidget):
         self._open_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._open_btn.setStyleSheet(
             "QToolButton {"
-            " color: #71717a; background: transparent; border: none; border-radius: 6px; }"
-            "QToolButton:hover { background: #27272a; color: #d4d4d8; }"
+            f" color: {cockpit_theme.TEXT_MUTED}; background: transparent; border: none;"
+            f" border-radius: {cockpit_theme.RADIUS_SM}px; }}"
+            f"QToolButton:hover {{ background: {cockpit_theme.GROUND_SELECT};"
+            f" color: {cockpit_theme.TEXT_SECONDARY}; }}"
         )
         self._open_btn.clicked.connect(lambda: TaskDockWidget._open_index(project))
         self._row.addWidget(self._open_btn)

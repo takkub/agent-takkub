@@ -14,7 +14,7 @@ import os
 from PyQt6.QtCore import QCoreApplication, QThread, QThreadPool, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QMessageBox, QSystemTrayIcon
 
-from . import config
+from . import cockpit_theme, config
 from .config import REPO_ROOT, active_project, lead_cwd
 from .orchestrator import _log_event
 from .rtk_helper import install_rtk
@@ -258,14 +258,16 @@ class MainWindowUpdateMixin:
             return
         if _count % 2 == 0:
             self._btn_update.setStyleSheet(
-                "QPushButton { color: #fde047; background: #422006; "
-                "border: 2px solid #f97316; border-radius: 4px; "
+                f"QPushButton {{ color: {cockpit_theme.BANNER_WARN_TEXT}; "
+                f"background: {cockpit_theme.BANNER_WARN_BG}; "
+                f"border: 2px solid {cockpit_theme.STATE_EXITED}; border-radius: 4px; "
                 "padding: 2px 8px; font-weight: 600; }"
             )
         else:
             self._btn_update.setStyleSheet(
-                "QPushButton { color: #fde047; background: #422006; "
-                "border: 1px solid #a16207; border-radius: 4px; "
+                f"QPushButton {{ color: {cockpit_theme.BANNER_WARN_TEXT}; "
+                f"background: {cockpit_theme.BANNER_WARN_BG}; "
+                f"border: 1px solid {cockpit_theme.BANNER_WARN_BORDER}; border-radius: 4px; "
                 "padding: 2px 8px; }"
             )
         QTimer.singleShot(
@@ -351,7 +353,9 @@ class MainWindowUpdateMixin:
         layout = QVBoxLayout(dlg)
 
         header = QLabel(f"<b>Claude Code CLI</b>: v{cur} → <b>v{latest}</b>", dlg)
-        header.setStyleSheet("color:#e4e4e7; font-size:13px; padding:2px;")
+        header.setStyleSheet(
+            f"color:{cockpit_theme.TEXT_PRIMARY_ALT}; font-size:13px; padding:2px;"
+        )
         layout.addWidget(header)
 
         # Issue auto-filing status (the user wants action-needed findings filed
@@ -359,22 +363,22 @@ class MainWindowUpdateMixin:
         issue_line = ""
         if result.get("issue_error"):
             issue_line = f"⚠️ เปิด issue ไม่สำเร็จ: {result['issue_error']}"
-            issue_color = "#fca5a5"
+            issue_color = cockpit_theme.BANNER_ERROR_TEXT
         elif result.get("issue_skipped") and result.get("issue_number"):
             issue_line = (
                 f"📋 มี issue เดิมสำหรับ version นี้อยู่แล้ว: #{result['issue_number']} "
                 f"({result.get('issue_url', '')})"
             )
-            issue_color = "#94a3b8"
+            issue_color = cockpit_theme.ROLE_COLOR_FALLBACK
         elif result.get("issue_number"):
             issue_line = (
                 f"📋 เปิด GitHub issue ให้แล้ว: #{result['issue_number']} "
                 f"({result.get('issue_url', '')}) — มาสั่งแก้ทีหลังได้"
             )
-            issue_color = "#4ade80"
+            issue_color = cockpit_theme.BANNER_OK_TEXT
         elif result.get("analysis_ok") and not result.get("issue_action_required"):
             issue_line = "✅ AI ประเมินว่าไม่ต้องแก้ระบบ — ไม่เปิด issue"
-            issue_color = "#94a3b8"
+            issue_color = cockpit_theme.ROLE_COLOR_FALLBACK
         if issue_line:
             issue_label = QLabel(issue_line, dlg)
             issue_label.setWordWrap(True)
@@ -400,17 +404,20 @@ class MainWindowUpdateMixin:
         browser.setMarkdown(body)
         browser.setOpenExternalLinks(True)
         browser.setStyleSheet(
-            "QTextBrowser { background:#0e0e10; color:#e4e4e7; "
-            "border:1px solid #27272a; border-radius:6px; padding:8px; }"
+            f"QTextBrowser {{ background:{cockpit_theme.GROUND_SIDEBAR}; "
+            f"color:{cockpit_theme.TEXT_PRIMARY_ALT}; "
+            f"border:1px solid {cockpit_theme.BORDER_STRONG}; border-radius:6px; padding:8px; }}"
         )
         layout.addWidget(browser)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, dlg)
         update_btn = QPushButton(f"⬆ อัพเดตเป็น v{latest}", dlg)
+        # Primary CTA → gold (was a blue #2563eb fill).
         update_btn.setStyleSheet(
-            "QPushButton { color:#fff; background:#2563eb; border:none; "
-            "border-radius:4px; padding:4px 12px; font-weight:500; }"
-            "QPushButton:hover { background:#1d4ed8; }"
+            f"QPushButton {{ color:{cockpit_theme.GOLD_TEXT_ON}; "
+            f"background:{cockpit_theme.GOLD_GRAD_BOTTOM}; border:none; "
+            "border-radius:4px; padding:4px 12px; font-weight:700; }"
+            f"QPushButton:hover {{ background:{cockpit_theme.GOLD_GRAD_TOP}; }}"
         )
 
         def _do_update() -> None:
@@ -652,10 +659,11 @@ class MainWindowUpdateMixin:
                         "afterwards. Your projects + config in ~/.agent-takkub stay untouched."
                     )
                     self._btn_update.setStyleSheet(
-                        "QPushButton { color: #1e3a8a; background: #93c5fd; "
-                        "border: 1px solid #2563eb; border-radius: 4px; "
-                        "padding: 2px 8px; font-weight: 500; }"
-                        "QPushButton:hover { background: #bfdbfe; }"
+                        f"QPushButton {{ color: {cockpit_theme.BANNER_INFO_BG}; "
+                        f"background: {cockpit_theme.BANNER_INFO_TEXT}; "
+                        f"border: 1px solid {cockpit_theme.BANNER_INFO_BORDER}; "
+                        "border-radius: 4px; padding: 2px 8px; font-weight: 500; }"
+                        f"QPushButton:hover {{ background: {cockpit_theme.BANNER_INFO_HOVER}; }}"
                     )
                     return
                 self._btn_update.setText("🔄 Update via npm")
@@ -665,10 +673,11 @@ class MainWindowUpdateMixin:
                     "Your projects + config in ~/.agent-takkub stay untouched."
                 )
                 self._btn_update.setStyleSheet(
-                    "QPushButton { color: #4ade80; background: #052e16; "
-                    "border: 1px solid #166534; border-radius: 4px; "
-                    "padding: 2px 8px; }"
-                    "QPushButton:hover { background: #14532d; }"
+                    f"QPushButton {{ color: {cockpit_theme.BANNER_OK_TEXT}; "
+                    f"background: {cockpit_theme.BANNER_OK_BG}; "
+                    f"border: 1px solid {cockpit_theme.BANNER_OK_BORDER}; "
+                    "border-radius: 4px; padding: 2px 8px; }"
+                    f"QPushButton:hover {{ background: {cockpit_theme.BANNER_OK_HOVER}; }}"
                 )
                 return
             self._btn_update.setText("🔧 Enable updates")
@@ -679,10 +688,11 @@ class MainWindowUpdateMixin:
                 "are gitignored and stay safe."
             )
             self._btn_update.setStyleSheet(
-                "QPushButton { color: #fde047; background: #422006; "
-                "border: 1px solid #a16207; border-radius: 4px; "
-                "padding: 2px 8px; }"
-                "QPushButton:hover { background: #713f12; }"
+                f"QPushButton {{ color: {cockpit_theme.BANNER_WARN_TEXT}; "
+                f"background: {cockpit_theme.BANNER_WARN_BG}; "
+                f"border: 1px solid {cockpit_theme.BANNER_WARN_BORDER}; "
+                "border-radius: 4px; padding: 2px 8px; }"
+                f"QPushButton:hover {{ background: {cockpit_theme.BANNER_WARN_HOVER}; }}"
             )
             return
         if not status.get("ok"):
@@ -691,9 +701,10 @@ class MainWindowUpdateMixin:
                 f"Last error: {status.get('error', 'unknown')}\nRestart cockpit to retry."
             )
             self._btn_update.setStyleSheet(
-                "QPushButton { color: #fca5a5; background: #450a0a; "
-                "border: 1px solid #7f1d1d; border-radius: 4px; "
-                "padding: 2px 8px; }"
+                f"QPushButton {{ color: {cockpit_theme.BANNER_ERROR_TEXT}; "
+                f"background: {cockpit_theme.BANNER_ERROR_BG}; "
+                f"border: 1px solid {cockpit_theme.BANNER_ERROR_BORDER}; "
+                "border-radius: 4px; padding: 2px 8px; }"
             )
             return
         if not status.get("clean"):
@@ -704,9 +715,10 @@ class MainWindowUpdateMixin:
                 "the list. Pull is blocked until you commit or stash."
             )
             self._btn_update.setStyleSheet(
-                "QPushButton { color: #fde047; background: #422006; "
-                "border: 1px solid #a16207; border-radius: 4px; "
-                "padding: 2px 8px; }"
+                f"QPushButton {{ color: {cockpit_theme.BANNER_WARN_TEXT}; "
+                f"background: {cockpit_theme.BANNER_WARN_BG}; "
+                f"border: 1px solid {cockpit_theme.BANNER_WARN_BORDER}; "
+                "border-radius: 4px; padding: 2px 8px; }"
             )
             return
         behind = status.get("behind", 0)
@@ -714,10 +726,11 @@ class MainWindowUpdateMixin:
             self._btn_update.setText("🔄 Up to date")
             self._btn_update.setToolTip("On origin/main. Next check in 5 min.")
             self._btn_update.setStyleSheet(
-                "QPushButton { color: #4ade80; background: #052e16; "
-                "border: 1px solid #166534; border-radius: 4px; "
-                "padding: 2px 8px; }"
-                "QPushButton:hover { background: #14532d; }"
+                f"QPushButton {{ color: {cockpit_theme.BANNER_OK_TEXT}; "
+                f"background: {cockpit_theme.BANNER_OK_BG}; "
+                f"border: 1px solid {cockpit_theme.BANNER_OK_BORDER}; "
+                "border-radius: 4px; padding: 2px 8px; }"
+                f"QPushButton:hover {{ background: {cockpit_theme.BANNER_OK_HOVER}; }}"
             )
         else:
             self._btn_update.setText(f"📦 Update available ({behind})")
@@ -725,10 +738,11 @@ class MainWindowUpdateMixin:
                 f"origin/main has {behind} new commit{'s' if behind != 1 else ''}. Click to pull."
             )
             self._btn_update.setStyleSheet(
-                "QPushButton { color: #1e3a8a; background: #93c5fd; "
-                "border: 1px solid #2563eb; border-radius: 4px; "
-                "padding: 2px 8px; font-weight: 500; }"
-                "QPushButton:hover { background: #bfdbfe; }"
+                f"QPushButton {{ color: {cockpit_theme.BANNER_INFO_BG}; "
+                f"background: {cockpit_theme.BANNER_INFO_TEXT}; "
+                f"border: 1px solid {cockpit_theme.BANNER_INFO_BORDER}; "
+                "border-radius: 4px; padding: 2px 8px; font-weight: 500; }"
+                f"QPushButton:hover {{ background: {cockpit_theme.BANNER_INFO_HOVER}; }}"
             )
 
     def _on_update_clicked(self) -> None:

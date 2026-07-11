@@ -18,9 +18,15 @@ remaining five:
   by this window). Plugins Matrix keeps the denylist banner (security-guidance/
   remember are never toggleable — see :mod:`lead_context`'s
   ``_PANE_PLUGIN_DENYLIST``, enforced at pane-spawn time, not in this UI).
-* **Skill Catalog** — role list + read-only mono doc viewer, backed by
-  :mod:`skill_audit` (``load_all_role_docs`` + the new
-  ``audit_existing_role`` — "✓ won't overlap" for the selected role).
+* **Role Overlap** (ROLE section) — role list + read-only mono doc viewer,
+  backed by :mod:`skill_audit` (``load_all_role_docs`` + ``audit_existing_
+  role`` — "✓ won't overlap" for the selected role). This is a ROLE-scope
+  audit (TF-IDF), *not* a skill browser — it was mislabeled "Skill Catalog"
+  before 2026-07-11.
+* **Skill Catalog** (SKILL section) — the real skill browser: lists
+  ``.claude/skills/*/SKILL.md`` via :mod:`skill_scan` (the scanner the New
+  Role picker uses) with each skill's description + which role docs mention
+  it. Read-only browse, like Role Overlap.
 * **Pipeline Builder** / **Templates** — native hop editor + template
   list/detail, backed by :mod:`pipeline_config` directly (a from-scratch
   reimplementation of :mod:`pipeline_dialog`'s QWebEngineView page per the
@@ -54,6 +60,7 @@ import ``app`` or ``cli`` (plain UI dialog, no engine/CLI coupling).
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from PyQt6.QtCore import QLocale, QSize, Qt
@@ -104,24 +111,36 @@ from .claude_auth_config import ClaudeAuthConfig, load_claude_auth, save_claude_
 from .lead_context import _allowed_project_roots
 
 # ── view indices (QStackedWidget page order) ────────────────────
+# Order is stable for indices 0–7 (external callers/tests reference these
+# constants); the real Skill Catalog was appended as index 8 rather than
+# renumbering. VIEW_ROLE_OVERLAP (5) is the old "Skill Catalog" page — it was
+# never a skill browser, it audits ROLE-doc scope overlap (TF-IDF), so it was
+# renamed to say what it does. VIEW_SKILL_CATALOG (8) is the new, real skill
+# browser backed by `skill_scan` (the same scanner the New Role picker uses).
 VIEW_PIPELINE_BUILDER = 0
 VIEW_TEMPLATES = 1
 VIEW_PROVIDERS_ROLES = 2
 VIEW_MCP_MATRIX = 3
 VIEW_PLUGINS_MATRIX = 4
-VIEW_SKILL_CATALOG = 5
+VIEW_ROLE_OVERLAP = 5
 VIEW_NEW_ROLE = 6
 VIEW_USERS = 7
+VIEW_SKILL_CATALOG = 8
 
 # (view index, nav label, sidebar section) — New Role is reached via the
 # dedicated "+ New Role" button, not this list, so it isn't a normal nav item.
+# Sections keep the two orthogonal concepts apart: ROLE = team seats (who),
+# TOOLS = per-role MCP/plugin policy, SKILL = reusable knowledge files (what a
+# role can *read*). "Skill Catalog" lives under its own SKILL section, NOT
+# mixed in with role/policy views.
 _NAV_VIEWS: tuple[tuple[int, str, str], ...] = (
     (VIEW_PIPELINE_BUILDER, "Pipeline Builder", "PIPELINE"),
     (VIEW_TEMPLATES, "Templates", "PIPELINE"),
-    (VIEW_PROVIDERS_ROLES, "Providers & Roles", "POLICY"),
-    (VIEW_MCP_MATRIX, "MCP Matrix", "POLICY"),
-    (VIEW_PLUGINS_MATRIX, "Plugins Matrix", "POLICY"),
-    (VIEW_SKILL_CATALOG, "Skill Catalog", "POLICY"),
+    (VIEW_PROVIDERS_ROLES, "Providers & Roles", "ROLE"),
+    (VIEW_ROLE_OVERLAP, "Role Overlap", "ROLE"),
+    (VIEW_MCP_MATRIX, "MCP Matrix", "TOOLS"),
+    (VIEW_PLUGINS_MATRIX, "Plugins Matrix", "TOOLS"),
+    (VIEW_SKILL_CATALOG, "Skill Catalog", "SKILL"),
     (VIEW_USERS, "Users", "ACCOUNT"),
 )
 
@@ -134,11 +153,18 @@ _VIEW_HEADERS: dict[int, tuple[str, str]] = {
     ),
     VIEW_MCP_MATRIX: ("MCP Matrix", "role × MCP server policy"),
     VIEW_PLUGINS_MATRIX: ("Plugins Matrix", "role × plugin policy"),
-    VIEW_SKILL_CATALOG: ("Skill Catalog", "browse skill ที่ role ใช้ได้"),
+    VIEW_ROLE_OVERLAP: (
+        "Role Overlap",
+        "ตรวจว่า scope (instructions) ของแต่ละ role ทับกันแค่ไหน — TF-IDF ไม่ใช่ skill browser",
+    ),
     VIEW_NEW_ROLE: ("New Role", "สร้าง custom role ใหม่"),
     VIEW_USERS: (
         "Users",
         "จัดการ Claude profile (add/remove, share sessions) + per-profile auth override",
+    ),
+    VIEW_SKILL_CATALOG: (
+        "Skill Catalog",
+        "skill จริงใน .claude/skills/ (SKILL.md) — ความรู้ที่ role อ้างถึง/อ่านได้",
     ),
 }
 
@@ -437,15 +463,17 @@ class SettingsWindow(QDialog):
         hb_lay.addSpacing(8)
 
         self._stack = QStackedWidget(header_body)
-        # Index order MUST match the VIEW_* constants above.
+        # Index order MUST match the VIEW_* constants above (0–7 unchanged;
+        # the real Skill Catalog is index 8, appended last).
         self._stack.addWidget(self._wrap_scroll(self._build_pipeline_builder_view()))
         self._stack.addWidget(self._wrap_scroll(self._build_templates_view()))
         self._stack.addWidget(self._wrap_scroll(self._build_providers_roles_view()))
         self._stack.addWidget(self._wrap_scroll(self._build_mcp_matrix_view()))
         self._stack.addWidget(self._wrap_scroll(self._build_plugins_matrix_view()))
-        self._stack.addWidget(self._wrap_scroll(self._build_skill_catalog_view()))
+        self._stack.addWidget(self._wrap_scroll(self._build_role_overlap_view()))
         self._stack.addWidget(self._wrap_scroll(self._build_new_role_view()))
         self._stack.addWidget(self._wrap_scroll(self._build_users_view()))
+        self._stack.addWidget(self._wrap_scroll(self._build_skill_catalog_view()))
         hb_lay.addWidget(self._stack, 1)
 
         outer.addWidget(header_body, 1)
@@ -518,9 +546,10 @@ class SettingsWindow(QDialog):
     def _on_reset_clicked(self) -> None:
         """Revert the currently-visible view's editable fields back to the
         on-disk state, clearing only THIS view's dirty flag — a different
-        view's still-staged edits (#6) must survive. Templates/Skill Catalog
-        have nothing staged to reset (structural template edits write
-        immediately; the catalog is read-only), so they no-op."""
+        view's still-staged edits (#6) must survive. Templates/Role Overlap/
+        Skill Catalog have nothing staged to reset (structural template edits
+        write immediately; the audit and catalog are read-only), so they
+        no-op."""
         idx = self._stack.currentIndex()
         if idx == VIEW_PROVIDERS_ROLES:
             self._reset_providers_roles_view()
@@ -695,7 +724,8 @@ class SettingsWindow(QDialog):
             row_lay.setSpacing(10)
             provider_role = roles_mod.by_name(provider)
             color = cockpit_theme.ROLE_COLORS.get(
-                provider, provider_role.color if provider_role else "#94a3b8"
+                provider,
+                provider_role.color if provider_role else cockpit_theme.ROLE_COLOR_FALLBACK,
             )
             row_lay.addWidget(cockpit_theme.role_chip(provider.capitalize(), color, row))
             desc = QLabel(_PROVIDER_DESC.get(provider, ""), row)
@@ -740,7 +770,9 @@ class SettingsWindow(QDialog):
         for role in _overridable_roles():
             r = roles_mod.by_name(role)
             label = r.label if r else role.capitalize()
-            color = cockpit_theme.ROLE_COLORS.get(role, r.color if r else "#94a3b8")
+            color = cockpit_theme.ROLE_COLORS.get(
+                role, r.color if r else cockpit_theme.ROLE_COLOR_FALLBACK
+            )
             row = self._build_role_row(
                 role,
                 label,
@@ -1602,7 +1634,9 @@ class SettingsWindow(QDialog):
         for row, role in enumerate(roles, start=1):
             r = roles_mod.by_name(role)
             label = r.label if r else role.capitalize()
-            color = cockpit_theme.ROLE_COLORS.get(role, r.color if r else "#94a3b8")
+            color = cockpit_theme.ROLE_COLORS.get(
+                role, r.color if r else cockpit_theme.ROLE_COLOR_FALLBACK
+            )
             grid.addWidget(cockpit_theme.role_chip(label, color, panel), row, 0)
             boxes[role] = {}
             for col, item in enumerate(items, start=1):
@@ -1766,7 +1800,79 @@ class SettingsWindow(QDialog):
         self._plugins_empty.setVisible(not items)
 
     # ──────────────────────────────────────────────────────────
-    # view: Skill Catalog (real)
+    # view: Role Overlap (real — ROLE section)
+    #
+    # NOT a skill browser: it audits how much each ROLE's instruction doc
+    # overlaps every other role's scope (TF-IDF cosine on `.claude/agents/*`),
+    # so an operator can see whether a role duplicates territory. Historically
+    # mislabeled "Skill Catalog"; renamed 2026-07-11 to say what it does. The
+    # real skill browser is `_build_skill_catalog_view` (SKILL section) below.
+    # ──────────────────────────────────────────────────────────
+
+    def _build_role_overlap_view(self) -> QWidget:
+        view = QWidget(self)
+        lay = QHBoxLayout(view)
+        lay.setContentsMargins(0, 0, 0, 16)
+        lay.setSpacing(12)
+
+        self._overlap_docs = skill_audit.load_all_role_docs()
+
+        list_panel = QWidget(view)
+        list_panel.setObjectName("panel")
+        list_panel.setFixedWidth(200)
+        list_lay = QVBoxLayout(list_panel)
+        list_lay.setContentsMargins(6, 6, 6, 6)
+        self._overlap_list = QListWidget(list_panel)
+        self._overlap_list.setFrameShape(QFrame.Shape.NoFrame)
+        for name in sorted(self._overlap_docs):
+            r = roles_mod.by_name(name)
+            item = QListWidgetItem(r.label if r else name.capitalize(), self._overlap_list)
+            item.setData(Qt.ItemDataRole.UserRole, name)
+        self._overlap_list.currentItemChanged.connect(self._on_overlap_role_selected)
+        list_lay.addWidget(self._overlap_list)
+        lay.addWidget(list_panel)
+
+        detail_panel = QWidget(view)
+        detail_panel.setObjectName("panel")
+        detail_lay = QVBoxLayout(detail_panel)
+        detail_lay.setContentsMargins(14, 12, 14, 12)
+        detail_lay.setSpacing(8)
+        self._overlap_badge = QLabel("", detail_panel)
+        self._overlap_badge.setObjectName("panelHint")
+        self._overlap_badge.setWordWrap(True)
+        detail_lay.addWidget(self._overlap_badge)
+        self._overlap_detail_text = QPlainTextEdit(detail_panel)
+        self._overlap_detail_text.setReadOnly(True)
+        self._overlap_detail_text.setStyleSheet(f'font-family: "{self._fonts["mono"]}";')
+        detail_lay.addWidget(self._overlap_detail_text, 1)
+        lay.addWidget(detail_panel, 1)
+
+        if self._overlap_list.count():
+            self._overlap_list.setCurrentRow(0)
+        return view
+
+    def _on_overlap_role_selected(self, current: QListWidgetItem | None, *_args: object) -> None:
+        if current is None:
+            return
+        role = current.data(Qt.ItemDataRole.UserRole)
+        self._overlap_detail_text.setPlainText(self._overlap_docs.get(role, ""))
+        overlaps = skill_audit.audit_existing_role(role, self._overlap_docs)
+        if overlaps:
+            names = ", ".join(f"{other} ({sim:.2f})" for other, sim in overlaps)
+            self._overlap_badge.setText(f"⚠️ overlap กับ scope role อื่น: {names}")
+        else:
+            self._overlap_badge.setText("✓ won't overlap — ไม่ทับ scope role อื่น")
+
+    # ──────────────────────────────────────────────────────────
+    # view: Skill Catalog (real — SKILL section)
+    #
+    # The genuine skill browser: lists real Claude Code skills scanned from
+    # `.claude/skills/*/SKILL.md` (same `skill_scan` the New Role picker uses,
+    # across the active project's roots + the cockpit checkout). For each
+    # skill it shows name + description + which ROLE instruction docs mention
+    # it (substring match on the skill name over `skill_audit.load_all_role_
+    # docs()`), so an operator sees who already relies on a given skill.
+    # Read-only browse — no dirty-tracking / Save (mirrors Role Overlap).
     # ──────────────────────────────────────────────────────────
 
     def _build_skill_catalog_view(self) -> QWidget:
@@ -1775,21 +1881,22 @@ class SettingsWindow(QDialog):
         lay.setContentsMargins(0, 0, 0, 16)
         lay.setSpacing(12)
 
-        self._skill_docs = skill_audit.load_all_role_docs()
+        self._catalog_skills = skill_scan.scan_skills(self._new_role_skill_roots())
+        self._catalog_role_docs = skill_audit.load_all_role_docs()
 
         list_panel = QWidget(view)
         list_panel.setObjectName("panel")
-        list_panel.setFixedWidth(200)
+        list_panel.setFixedWidth(220)
         list_lay = QVBoxLayout(list_panel)
         list_lay.setContentsMargins(6, 6, 6, 6)
-        self._skill_list = QListWidget(list_panel)
-        self._skill_list.setFrameShape(QFrame.Shape.NoFrame)
-        for name in sorted(self._skill_docs):
-            r = roles_mod.by_name(name)
-            item = QListWidgetItem(r.label if r else name.capitalize(), self._skill_list)
-            item.setData(Qt.ItemDataRole.UserRole, name)
-        self._skill_list.currentItemChanged.connect(self._on_skill_role_selected)
-        list_lay.addWidget(self._skill_list)
+        self._catalog_list = QListWidget(list_panel)
+        self._catalog_list.setFrameShape(QFrame.Shape.NoFrame)
+        for skill in self._catalog_skills:
+            item = QListWidgetItem(skill.name, self._catalog_list)
+            item.setData(Qt.ItemDataRole.UserRole, skill.name)
+            item.setToolTip(skill.description or skill.name)
+        self._catalog_list.currentItemChanged.connect(self._on_catalog_skill_selected)
+        list_lay.addWidget(self._catalog_list)
         lay.addWidget(list_panel)
 
         detail_panel = QWidget(view)
@@ -1797,31 +1904,63 @@ class SettingsWindow(QDialog):
         detail_lay = QVBoxLayout(detail_panel)
         detail_lay.setContentsMargins(14, 12, 14, 12)
         detail_lay.setSpacing(8)
-        self._skill_overlap_badge = QLabel("", detail_panel)
-        self._skill_overlap_badge.setObjectName("panelHint")
-        self._skill_overlap_badge.setWordWrap(True)
-        detail_lay.addWidget(self._skill_overlap_badge)
-        self._skill_detail_text = QPlainTextEdit(detail_panel)
-        self._skill_detail_text.setReadOnly(True)
-        self._skill_detail_text.setStyleSheet(f'font-family: "{self._fonts["mono"]}";')
-        detail_lay.addWidget(self._skill_detail_text, 1)
+
+        self._catalog_name = QLabel("", detail_panel)
+        self._catalog_name.setObjectName("panelTitle")
+        detail_lay.addWidget(self._catalog_name)
+        self._catalog_desc = QLabel("", detail_panel)
+        self._catalog_desc.setObjectName("panelHint")
+        self._catalog_desc.setWordWrap(True)
+        detail_lay.addWidget(self._catalog_desc)
+        self._catalog_roles = QLabel("", detail_panel)
+        self._catalog_roles.setObjectName("panelHint")
+        self._catalog_roles.setWordWrap(True)
+        detail_lay.addWidget(self._catalog_roles)
+        self._catalog_path = QLabel("", detail_panel)
+        self._catalog_path.setObjectName("panelHint")
+        self._catalog_path.setWordWrap(True)
+        detail_lay.addWidget(self._catalog_path)
+        detail_lay.addStretch(1)
         lay.addWidget(detail_panel, 1)
 
-        if self._skill_list.count():
-            self._skill_list.setCurrentRow(0)
+        if self._catalog_list.count():
+            self._catalog_list.setCurrentRow(0)
+        else:
+            self._catalog_name.setText("— ไม่พบ skill —")
+            self._catalog_desc.setText(
+                "ยังไม่มี .claude/skills/*/SKILL.md ในโปรเจคนี้หรือ cockpit checkout"
+            )
         return view
 
-    def _on_skill_role_selected(self, current: QListWidgetItem | None, *_args: object) -> None:
+    def _roles_referencing_skill(self, skill_name: str) -> list[str]:
+        """Role instruction docs that reference `skill_name` as a whole word
+        (case-insensitive, word-boundary regex — NOT a raw substring). This
+        matches both the generated ``อ่าน skill: <name>`` marker that
+        `_append_skill_references` embeds and hand-authored prose that names the
+        skill directly, while a short/common name (``git``, ``test``) no longer
+        false-positives on unrelated words like "github" or "latest"."""
+        pattern = re.compile(rf"\b{re.escape(skill_name)}\b", re.IGNORECASE)
+        hits = [role for role, doc in self._catalog_role_docs.items() if pattern.search(doc)]
+        return sorted(hits)
+
+    def _on_catalog_skill_selected(self, current: QListWidgetItem | None, *_args: object) -> None:
         if current is None:
             return
-        role = current.data(Qt.ItemDataRole.UserRole)
-        self._skill_detail_text.setPlainText(self._skill_docs.get(role, ""))
-        overlaps = skill_audit.audit_existing_role(role, self._skill_docs)
-        if overlaps:
-            names = ", ".join(f"{other} ({sim:.2f})" for other, sim in overlaps)
-            self._skill_overlap_badge.setText(f"⚠️ overlap กับ scope role อื่น: {names}")
+        name = current.data(Qt.ItemDataRole.UserRole)
+        skill = next((s for s in self._catalog_skills if s.name == name), None)
+        if skill is None:
+            return
+        self._catalog_name.setText(skill.name)
+        self._catalog_desc.setText(skill.description or "(ไม่มี description ใน frontmatter)")
+        refs = self._roles_referencing_skill(skill.name)
+        if refs:
+            labels = ", ".join(
+                (roles_mod.by_name(r).label if roles_mod.by_name(r) else r) for r in refs
+            )
+            self._catalog_roles.setText(f"อ้างถึงโดย role: {labels}")
         else:
-            self._skill_overlap_badge.setText("✓ won't overlap — ไม่ทับ scope role อื่น")
+            self._catalog_roles.setText("ยังไม่มี role ไหนอ้างถึง skill นี้")
+        self._catalog_path.setText(f"📄 {skill.path}")
 
     # ──────────────────────────────────────────────────────────
     # view: Pipeline Builder (real)
@@ -1850,7 +1989,9 @@ class SettingsWindow(QDialog):
         for role in _pipeline_palette_roles():
             r = roles_mod.by_name(role)
             label = r.label if r else role.capitalize()
-            color = cockpit_theme.ROLE_COLORS.get(role, r.color if r else "#94a3b8")
+            color = cockpit_theme.ROLE_COLORS.get(
+                role, r.color if r else cockpit_theme.ROLE_COLOR_FALLBACK
+            )
             btn = QPushButton(label, palette_panel)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setStyleSheet(
@@ -1957,7 +2098,9 @@ class SettingsWindow(QDialog):
                 role = entry["role"]
                 r = roles_mod.by_name(role)
                 label = r.label if r else role.capitalize()
-                color = cockpit_theme.ROLE_COLORS.get(role, r.color if r else "#94a3b8")
+                color = cockpit_theme.ROLE_COLORS.get(
+                    role, r.color if r else cockpit_theme.ROLE_COLOR_FALLBACK
+                )
                 pill = QWidget(panel)
                 pill.setStyleSheet("background: rgba(255,255,255,0.05); border-radius: 999px;")
                 pill_lay = QHBoxLayout(pill)

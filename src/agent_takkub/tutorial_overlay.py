@@ -27,9 +27,10 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from . import cockpit_theme
 from .config import RUNTIME_DIR
 
-_CLAUDE_CORAL = "#d97757"
+_CLAUDE_CORAL = cockpit_theme.METER_CLAY
 
 
 def _seen_flag_path():
@@ -78,8 +79,10 @@ class TutorialOverlay(QWidget):
         self._callout.setFixedWidth(360)
         self._callout.setStyleSheet(
             "#tutorialCallout {"
-            " background:#18181b; border:1px solid #3f3f46;"
-            f" border-left:3px solid {_CLAUDE_CORAL}; border-radius:10px; }}"
+            f" background:{cockpit_theme.GROUND_PANEL}; "
+            f"border:1px solid {cockpit_theme.BORDER_STRONG2};"
+            f" border-left:3px solid {_CLAUDE_CORAL}; "
+            f"border-radius:{cockpit_theme.RADIUS_MD}px; }}"
         )
         cl = QVBoxLayout(self._callout)
         cl.setContentsMargins(16, 14, 16, 12)
@@ -89,27 +92,28 @@ class TutorialOverlay(QWidget):
         self._title_lbl.setStyleSheet(f"color:{_CLAUDE_CORAL}; font-size:14px; font-weight:700;")
         self._body_lbl = QLabel(self._callout)
         self._body_lbl.setWordWrap(True)
-        self._body_lbl.setStyleSheet("color:#d4d4d8; font-size:12px;")
+        self._body_lbl.setStyleSheet(f"color:{cockpit_theme.TEXT_SECONDARY}; font-size:12px;")
         cl.addWidget(self._title_lbl)
         cl.addWidget(self._body_lbl)
 
         row = QHBoxLayout()
         row.setSpacing(8)
         self._step_lbl = QLabel(self._callout)
-        self._step_lbl.setStyleSheet("color:#71717a; font-size:11px;")
+        self._step_lbl.setStyleSheet(f"color:{cockpit_theme.TEXT_MUTED}; font-size:11px;")
         self._skip_btn = QPushButton("ข้าม", self._callout)
         self._skip_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._skip_btn.setStyleSheet(
-            "QPushButton { color:#a1a1aa; background:transparent;"
-            " border:1px solid #3f3f46; border-radius:6px; padding:4px 12px; }"
-            "QPushButton:hover { background:#27272a; }"
+            f"QPushButton {{ color:{cockpit_theme.TEXT_MUTED}; background:transparent;"
+            f" border:1px solid {cockpit_theme.BORDER_STRONG}; border-radius:6px;"
+            " padding:4px 12px; }"
+            f"QPushButton:hover {{ background:{cockpit_theme.GROUND_SELECT}; }}"
         )
         self._next_btn = QPushButton("ถัดไป →", self._callout)
         self._next_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._next_btn.setStyleSheet(
-            "QPushButton { color:#18181b; background:" + _CLAUDE_CORAL + ";"
+            f"QPushButton {{ color:{cockpit_theme.GROUND_PANEL}; background:{_CLAUDE_CORAL};"
             " border:none; border-radius:6px; padding:4px 14px; font-weight:600; }"
-            "QPushButton:hover { background:#e08968; }"
+            f"QPushButton:hover {{ background:{cockpit_theme.METER_CLAY_ALT}; }}"
         )
         self._skip_btn.clicked.connect(lambda: self.finish(mark=True))
         self._next_btn.clicked.connect(self._advance)

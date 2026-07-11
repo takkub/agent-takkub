@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
     QSystemTrayIcon,
 )
 
+from . import cockpit_theme
 from .config import RUNTIME_DIR, lead_cwd
 from .rtk_helper import is_rtk_installed, rtk_binary_available
 
@@ -41,7 +42,10 @@ class StatusHeaderMixin:
         sep.setFrameShape(QFrame.Shape.VLine)
         sep.setFrameShadow(QFrame.Shadow.Plain)
         sep.setFixedWidth(1)
-        sep.setStyleSheet("QFrame { color: #3f3f46; background: #3f3f46; }")
+        sep.setStyleSheet(
+            f"QFrame {{ color: {cockpit_theme.BORDER_STRONG}; "
+            f"background: {cockpit_theme.BORDER_STRONG}; }}"
+        )
         sep.setContentsMargins(2, 4, 2, 4)
         return sep
 
@@ -57,29 +61,34 @@ class StatusHeaderMixin:
         if disabled:
             return (
                 "QPushButton { "
-                "background:transparent; color:#71717a; "
-                "border:1px solid #3f3f46; border-radius:10px; "
+                f"background:transparent; color:{cockpit_theme.TEXT_MUTED}; "
+                f"border:1px solid {cockpit_theme.BORDER_STRONG}; "
+                f"border-radius:{cockpit_theme.RADIUS_MD}px; "
                 "padding:2px 10px; font-weight:500; "
                 "text-decoration: line-through; "
                 "}"
-                "QPushButton:hover { background:#27272a; color:#a1a1aa; }"
+                f"QPushButton:hover {{ background:{cockpit_theme.GROUND_SELECT}; "
+                f"color:{cockpit_theme.TEXT_SECONDARY}; }}"
             )
         if not_installed:
             # Amber: enabled in config but CLI not on PATH → Claude will substitute
             return (
                 "QPushButton { "
-                "background:transparent; color:#d97706; "
-                "border:1px solid #d97706; border-radius:10px; "
+                f"background:transparent; color:{cockpit_theme.STATE_WARN}; "
+                f"border:1px solid {cockpit_theme.STATE_WARN}; "
+                f"border-radius:{cockpit_theme.RADIUS_MD}px; "
                 "padding:2px 10px; font-weight:500; "
                 "}"
                 "QPushButton:hover { background:rgba(217,119,6,0.08); }"
             )
-        # Brand colors: codex teal (#10a37f) / gemini blue (#4285f4)
-        brand = "#10a37f" if provider == "codex" else "#4285f4"
+        # Brand colors: codex teal / gemini blue (provider identity tokens)
+        brand = (
+            cockpit_theme.PROVIDER_CODEX if provider == "codex" else cockpit_theme.PROVIDER_GEMINI
+        )
         return (
             "QPushButton { "
             f"background:transparent; color:{brand}; "
-            f"border:1px solid {brand}; border-radius:10px; "
+            f"border:1px solid {brand}; border-radius:{cockpit_theme.RADIUS_MD}px; "
             "padding:2px 10px; font-weight:600; "
             "}"
             "QPushButton:hover { background:rgba(255,255,255,0.06); }"
@@ -142,11 +151,11 @@ class StatusHeaderMixin:
         signals a clickable mode-toggle without shouting. Max = violet
         (full access incl. 1M context), Pro = amber (1M capped).
         """
-        brand = "#8b5cf6" if not is_pro else "#f59e0b"
+        brand = cockpit_theme.CHIP_PLAN_MAX if not is_pro else cockpit_theme.STATE_WARN_ALT
         return (
             "QPushButton { "
             f"background:transparent; color:{brand}; "
-            f"border:1px solid {brand}; border-radius:10px; "
+            f"border:1px solid {brand}; border-radius:{cockpit_theme.RADIUS_MD}px; "
             "padding:2px 10px; font-weight:600; "
             "}"
             "QPushButton:hover { background:rgba(255,255,255,0.06); }"
@@ -156,11 +165,11 @@ class StatusHeaderMixin:
     def _exec_mode_chip_style(is_parallel: bool) -> str:
         """Outline chip for the SOLO/PARALLEL execution-mode toggle. Parallel =
         emerald (active fan-out), Solo = neutral zinc (calm default)."""
-        brand = "#10b981" if is_parallel else "#71717a"
+        brand = cockpit_theme.CHIP_EXEC_PARALLEL if is_parallel else cockpit_theme.TEXT_MUTED
         return (
             "QPushButton { "
             f"background:transparent; color:{brand}; "
-            f"border:1px solid {brand}; border-radius:10px; "
+            f"border:1px solid {brand}; border-radius:{cockpit_theme.RADIUS_MD}px; "
             "padding:2px 10px; font-weight:600; }"
             "QPushButton:hover { background:rgba(255,255,255,0.06); }"
         )
@@ -185,11 +194,11 @@ class StatusHeaderMixin:
         """Outline chip for the 🌙 auto-resume toggle. ON = amber (quietly
         acting on your behalf while you're away), OFF = neutral zinc
         (calm default — matches the exec-mode chip's OFF treatment)."""
-        brand = "#f59e0b" if enabled else "#71717a"
+        brand = cockpit_theme.STATE_WARN_ALT if enabled else cockpit_theme.TEXT_MUTED
         return (
             "QPushButton { "
             f"background:transparent; color:{brand}; "
-            f"border:1px solid {brand}; border-radius:10px; "
+            f"border:1px solid {brand}; border-radius:{cockpit_theme.RADIUS_MD}px; "
             "padding:2px 10px; font-weight:600; }"
             "QPushButton:hover { background:rgba(255,255,255,0.06); }"
         )
@@ -215,11 +224,11 @@ class StatusHeaderMixin:
         """Outline chip for the 🌐 Remote toggle. ON = teal (server live,
         reachable from outside this machine), OFF = neutral zinc — same
         treatment as the exec-mode/auto-resume chips."""
-        brand = "#14b8a6" if enabled else "#71717a"
+        brand = cockpit_theme.CHIP_REMOTE_ON if enabled else cockpit_theme.TEXT_MUTED
         return (
             "QPushButton { "
             f"background:transparent; color:{brand}; "
-            f"border:1px solid {brand}; border-radius:10px; "
+            f"border:1px solid {brand}; border-radius:{cockpit_theme.RADIUS_MD}px; "
             "padding:2px 10px; font-weight:600; }"
             "QPushButton:hover { background:rgba(255,255,255,0.06); }"
         )
@@ -245,10 +254,12 @@ class StatusHeaderMixin:
         toggle-style Logs button.
         """
         return (
-            "QPushButton { color:#d4d4d8; background:transparent; "
-            "border:1px solid #3f3f46; border-radius:4px; padding:2px 8px; }"
-            "QPushButton:hover { background:#27272a; border-color:#52525b; }"
-            "QPushButton:checked { background:#27272a; color:#e4e4e7; border-color:#52525b; }"
+            f"QPushButton {{ color:{cockpit_theme.TEXT_SECONDARY}; background:transparent; "
+            f"border:1px solid {cockpit_theme.BORDER_STRONG}; border-radius:4px; padding:2px 8px; }}"
+            f"QPushButton:hover {{ background:{cockpit_theme.GROUND_SELECT}; "
+            f"border-color:{cockpit_theme.BORDER_STRONG2}; }}"
+            f"QPushButton:checked {{ background:{cockpit_theme.GROUND_SELECT}; "
+            f"color:{cockpit_theme.TEXT_PRIMARY_ALT}; border-color:{cockpit_theme.BORDER_STRONG2}; }}"
         )
 
     @staticmethod
@@ -261,9 +272,11 @@ class StatusHeaderMixin:
         without re-introducing the rainbow.
         """
         return (
-            "QPushButton { color:#fca5a5; background:transparent; "
-            "border:1px solid #7f1d1d; border-radius:4px; padding:2px 8px; }"
-            "QPushButton:hover { background:#450a0a; border-color:#b91c1c; }"
+            f"QPushButton {{ color:{cockpit_theme.BANNER_ERROR_TEXT}; background:transparent; "
+            f"border:1px solid {cockpit_theme.BANNER_ERROR_BORDER}; border-radius:4px; "
+            "padding:2px 8px; }"
+            f"QPushButton:hover {{ background:{cockpit_theme.BANNER_ERROR_BG}; "
+            f"border-color:{cockpit_theme.STATE_ERROR}; }}"
         )
 
     @staticmethod
@@ -322,10 +335,11 @@ class StatusHeaderMixin:
         # without screaming. Original 2px border + bold made it look like
         # the cockpit's primary CTA when it's actually optional optimisation.
         self._btn_install_rtk.setStyleSheet(
-            "QPushButton { color: #000; background: #fbbf24; "
-            "border: 1px solid #b45309; border-radius: 4px; "
+            f"QPushButton {{ color: {cockpit_theme.GOLD_TEXT_ON}; "
+            f"background: {cockpit_theme.METER_AMBER}; "
+            f"border: 1px solid {cockpit_theme.STATE_WARN}; border-radius: 4px; "
             "padding: 2px 8px; font-size: 12px; }"
-            "QPushButton:hover { background: #fcd34d; }"
+            f"QPushButton:hover {{ background: {cockpit_theme.METER_AMBER_LIGHT}; }}"
         )
         self._btn_install_rtk.clicked.connect(self._on_install_rtk_clicked)
 
@@ -427,9 +441,9 @@ class StatusHeaderMixin:
             "tracked files block the pull until you commit or stash."
         )
         self._btn_update.setStyleSheet(
-            "QPushButton { color: #71717a; background: transparent; "
+            f"QPushButton {{ color: {cockpit_theme.TEXT_MUTED}; background: transparent; "
             "border: none; padding: 2px 6px; font-size: 12px; }"
-            "QPushButton:hover { color: #94a3b8; }"
+            f"QPushButton:hover {{ color: {cockpit_theme.TEXT_SECONDARY}; }}"
         )
         self._btn_update.clicked.connect(self._on_update_clicked)
         # Cached result from the most recent poll. Populated lazily so

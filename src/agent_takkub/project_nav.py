@@ -36,70 +36,71 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from . import cockpit_theme
 from .token_meter import usage_color
 
-_SIDEBAR_QSS = """
-#projectSidebar {
-    background: #0e0e10;
-    border-right: 1px solid #27272a;
-}
-#projectSidebarHeader {
-    color: #52525b;
+_SIDEBAR_QSS = f"""
+#projectSidebar {{
+    background: {cockpit_theme.GROUND_SIDEBAR};
+    border-right: 1px solid {cockpit_theme.BORDER_HAIRLINE};
+}}
+#projectSidebarHeader {{
+    color: {cockpit_theme.TEXT_FAINT};
     font-size: 10px;
     font-weight: 700;
     letter-spacing: 2px;
     padding: 14px 16px 8px 16px;
-}
-QListWidget#projectList {
+}}
+QListWidget#projectList {{
     background: transparent;
     border: none;
     outline: 0;
     padding: 2px 8px;
-}
-QListWidget#projectList::item {
-    border-radius: 8px;
+}}
+QListWidget#projectList::item {{
+    border-radius: {cockpit_theme.RADIUS_SM}px;
     margin: 2px 0;
     padding: 0;
-}
-QListWidget#projectList::item:hover {
-    background: #18181b;
-}
-QListWidget#projectList::item:selected {
-    background: #1e1b2e;
-}
-#addProjectBtn {
-    background: transparent;
-    color: #818cf8;
-    border: 1px dashed #3f3f46;
-    border-radius: 8px;
+}}
+QListWidget#projectList::item:hover {{
+    background: {cockpit_theme.GROUND_PANEL};
+}}
+QListWidget#projectList::item:selected {{
+    background: {cockpit_theme.GROUND_SELECT};
+}}
+#addProjectBtn {{
+    background: {cockpit_theme.GOLD_CHIP_BG};
+    color: {cockpit_theme.GOLD_CHIP_TEXT};
+    border: 1px dashed {cockpit_theme.GOLD_CHIP_BORDER};
+    border-radius: {cockpit_theme.RADIUS_SM}px;
     padding: 9px;
     margin: 8px 12px 12px 12px;
     font-size: 12px;
     font-weight: 600;
-}
-#addProjectBtn:hover {
-    background: #18181b;
-    border-color: #6366f1;
-    color: #a5b4fc;
-}
-#sidebarToggleBtn {
+}}
+#addProjectBtn:hover {{
+    background: rgba(227,179,65,0.18);
+    border-color: {cockpit_theme.ACCENT_GOLD};
+    color: {cockpit_theme.ACCENT_GOLD};
+}}
+#sidebarToggleBtn {{
     background: transparent;
-    color: #52525b;
+    color: {cockpit_theme.TEXT_FAINT};
     border: none;
-    border-radius: 8px;
+    border-radius: {cockpit_theme.RADIUS_SM}px;
     padding: 7px;
     margin: 6px 12px 0 12px;
     font-size: 12px;
     font-weight: 600;
-}
-#sidebarToggleBtn:hover {
-    background: #18181b;
-    color: #a1a1aa;
-}
-#sidebarUsage {
-    background: #0b0b0d;
-    border-top: 1px solid #1c1c1f;
-}
+}}
+#sidebarToggleBtn:hover {{
+    background: {cockpit_theme.GROUND_PANEL};
+    color: {cockpit_theme.TEXT_MUTED};
+}}
+#sidebarUsage {{
+    background: {cockpit_theme.GROUND_BODY};
+    border-top: 1px solid {cockpit_theme.BORDER_HAIRLINE};
+}}
 """
 
 # Sidebar widths: full list vs. the collapsed avatar-only rail.
@@ -108,18 +109,10 @@ _COLLAPSED_W = 64
 _AVATAR_PX = 34
 
 # Deterministic per-project avatar tint (hash of the name → fixed palette).
-_AVATAR_COLORS = (
-    "#6366f1",
-    "#8b5cf6",
-    "#ec4899",
-    "#f43f5e",
-    "#f59e0b",
-    "#10b981",
-    "#06b6d4",
-    "#3b82f6",
-    "#a855f7",
-    "#14b8a6",
-)
+# Canonical values now live in cockpit_theme.AVATAR_TINTS (a distinct purpose
+# from role identity); aliased here so existing `project_nav._AVATAR_COLORS`
+# references keep working.
+_AVATAR_COLORS = cockpit_theme.AVATAR_TINTS
 
 
 def _avatar_color(name: str) -> str:
@@ -153,10 +146,12 @@ class _ProjectRow(QWidget):
         self._avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         self._name = QLabel(name)
-        self._name.setStyleSheet("color: #d4d4d8; font-size: 13px; font-weight: 600;")
+        self._name.setStyleSheet(
+            f"color: {cockpit_theme.TEXT_SECONDARY}; font-size: 13px; font-weight: 600;"
+        )
 
         self._badge = QLabel("")
-        self._badge.setStyleSheet("color: #52525b; font-size: 11px;")
+        self._badge.setStyleSheet(f"color: {cockpit_theme.TEXT_FAINT}; font-size: 11px;")
 
         self._lay.addWidget(self._avatar)
         self._lay.addWidget(self._name, 1)
@@ -167,10 +162,12 @@ class _ProjectRow(QWidget):
 
     # -- painting -----------------------------------------------------
     def _paint_avatar(self) -> None:
-        ring = "#ffffff" if self._selected else "rgba(0,0,0,0)"
+        # Selection ring = gold (the design system's one selection accent),
+        # replacing the old white ring.
+        ring = cockpit_theme.ACCENT_GOLD if self._selected else "rgba(0,0,0,0)"
         self._avatar.setStyleSheet(
             f"background: {_avatar_color(self._name_text)};"
-            f" color: #ffffff; font-size: 12px; font-weight: 800;"
+            f" color: {cockpit_theme.TEXT_PRIMARY}; font-size: 12px; font-weight: 800;"
             f" border-radius: {_AVATAR_PX // 2}px; border: 2px solid {ring};"
         )
 
@@ -184,7 +181,7 @@ class _ProjectRow(QWidget):
 
     def set_selected(self, selected: bool) -> None:
         self._selected = selected
-        color = "#ffffff" if selected else "#d4d4d8"
+        color = cockpit_theme.TEXT_PRIMARY if selected else cockpit_theme.TEXT_SECONDARY
         self._name.setStyleSheet(f"color: {color}; font-size: 13px; font-weight: 600;")
         self._paint_avatar()
 

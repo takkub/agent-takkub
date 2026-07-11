@@ -25,36 +25,38 @@ from PyQt6.QtCore import QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import QTabWidget, QVBoxLayout, QWidget
 
+from . import cockpit_theme
 from .agent_pane import AgentPane
 
-# Modern flat tab strip for the panes inside a project. Accent = indigo.
-_PANE_TABS_QSS = """
-QTabWidget::pane {
+# Modern flat tab strip for the panes inside a project. Selected accent = gold
+# (the design system's one active accent — was indigo #6366f1).
+_PANE_TABS_QSS = f"""
+QTabWidget::pane {{
     border: none;
-    background: #0e0e10;
-}
-QTabBar {
-    background: #0e0e10;
+    background: {cockpit_theme.GROUND_SIDEBAR};
+}}
+QTabBar {{
+    background: {cockpit_theme.GROUND_SIDEBAR};
     qproperty-drawBase: 0;
-}
-QTabBar::tab {
+}}
+QTabBar::tab {{
     background: transparent;
-    color: #71717a;
+    color: {cockpit_theme.TEXT_MUTED};
     padding: 7px 16px;
     margin: 0;
     border: none;
     border-bottom: 2px solid transparent;
     font-size: 12px;
-}
-QTabBar::tab:hover {
-    color: #d4d4d8;
-    background: #18181b;
-}
-QTabBar::tab:selected {
-    color: #ffffff;
-    border-bottom: 2px solid #6366f1;
-    background: #18181b;
-}
+}}
+QTabBar::tab:hover {{
+    color: {cockpit_theme.TEXT_SECONDARY};
+    background: {cockpit_theme.GROUND_PANEL};
+}}
+QTabBar::tab:selected {{
+    color: {cockpit_theme.TEXT_PRIMARY};
+    border-bottom: 2px solid {cockpit_theme.ACCENT_GOLD};
+    background: {cockpit_theme.GROUND_PANEL};
+}}
 """
 
 
@@ -221,7 +223,7 @@ class ProjectTab(QWidget):
             p = QPainter(pix)
             p.setRenderHint(QPainter.RenderHint.Antialiasing)
             p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QColor("#ef4444"))
+            p.setBrush(QColor(cockpit_theme.STATE_ERROR))
             p.drawEllipse(1, 1, 8, 8)
             p.end()
             self._unread_icon = QIcon(pix)

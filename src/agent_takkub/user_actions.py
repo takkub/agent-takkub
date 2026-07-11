@@ -22,6 +22,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
+from . import cockpit_theme
 from .config import REPO_ROOT, active_project
 from .orchestrator import _log_event
 
@@ -273,7 +274,9 @@ class UserActionsMixin:
         layout.addWidget(browser)
 
         footer = QLabel(f"📍 {closed_msg}\n📄 {rel_path}", dlg)
-        footer.setStyleSheet("color: #6b7280; font-size: 11px; padding: 4px 0;")
+        footer.setStyleSheet(
+            f"color: {cockpit_theme.TEXT_FAINT_ALT}; font-size: 11px; padding: 4px 0;"
+        )
         footer.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(footer)
 
@@ -396,10 +399,12 @@ class UserActionsMixin:
         report_view = QPlainTextEdit(dlg)
         report_view.setReadOnly(True)
         report_view.setFont(dlg.font())
+        _mono = cockpit_theme.ensure_fonts_loaded()["mono"]
         report_view.setStyleSheet(
-            "QPlainTextEdit { background:#18181b; color:#d4d4d8; "
-            "border:1px solid #3f3f46; border-radius:4px; padding:6px; "
-            "font-family: 'Consolas', 'Courier New', monospace; font-size:12px; }"
+            f"QPlainTextEdit {{ background:{cockpit_theme.GROUND_PANEL}; "
+            f"color:{cockpit_theme.TEXT_SECONDARY}; "
+            f"border:1px solid {cockpit_theme.BORDER_STRONG}; border-radius:4px; padding:6px; "
+            f'font-family: "{_mono}"; font-size:12px; }}'
         )
         report_view.setPlainText(
             "🩺 Running diagnostics…\n\n"
@@ -415,11 +420,15 @@ class UserActionsMixin:
         btn_fix = QPushButton("Fix", dlg)
         btn_fix.setEnabled(False)
         btn_fix.setToolTip("Running checks…")
+        # Primary action → gold (was a green fill — the design system has one
+        # primary accent, gold).
         btn_fix.setStyleSheet(
-            "QPushButton { background:#16a34a; color:#fff; border:none; "
-            "border-radius:5px; padding:4px 14px; font-weight:600; }"
-            "QPushButton:hover { background:#15803d; }"
-            "QPushButton:disabled { background:#3f3f46; color:#71717a; }"
+            f"QPushButton {{ background:{cockpit_theme.GOLD_GRAD_BOTTOM}; "
+            f"color:{cockpit_theme.GOLD_TEXT_ON}; border:none; "
+            "border-radius:5px; padding:4px 14px; font-weight:700; }"
+            f"QPushButton:hover {{ background:{cockpit_theme.GOLD_GRAD_TOP}; }}"
+            f"QPushButton:disabled {{ background:{cockpit_theme.GROUND_SELECT}; "
+            f"color:{cockpit_theme.TEXT_FAINT}; }}"
         )
 
         # 🧩 Install plugins — the old standalone Plugins button folded into
@@ -428,11 +437,16 @@ class UserActionsMixin:
         # install` git-clone must never touch the Qt event loop), then re-runs
         # the checks so the [plugins] findings refresh in place.
         btn_plugins = QPushButton("Install plugins", dlg)
+        # Secondary action → bordered secondary treatment (was a blue #2563eb
+        # fill competing with the primary button).
         btn_plugins.setStyleSheet(
-            "QPushButton { background:#2563eb; color:#fff; border:none; "
+            f"QPushButton {{ background:transparent; color:{cockpit_theme.TEXT_SECONDARY}; "
+            f"border:1px solid {cockpit_theme.BORDER_STRONG}; "
             "border-radius:5px; padding:4px 14px; font-weight:600; }"
-            "QPushButton:hover { background:#1d4ed8; }"
-            "QPushButton:disabled { background:#3f3f46; color:#71717a; }"
+            f"QPushButton:hover {{ background:rgba(255,255,255,0.05); "
+            f"color:{cockpit_theme.TEXT_PRIMARY}; }}"
+            f"QPushButton:disabled {{ background:{cockpit_theme.GROUND_SELECT}; "
+            f"color:{cockpit_theme.TEXT_FAINT}; }}"
         )
 
         def _refresh_plugins_btn() -> None:
@@ -566,9 +580,11 @@ class UserActionsMixin:
 
         btn_close = QPushButton("Close", dlg)
         btn_close.setStyleSheet(
-            "QPushButton { background:transparent; color:#a1a1aa; "
-            "border:1px solid #3f3f46; border-radius:5px; padding:4px 14px; }"
-            "QPushButton:hover { background:#27272a; color:#d4d4d8; }"
+            f"QPushButton {{ background:transparent; color:{cockpit_theme.TEXT_MUTED}; "
+            f"border:1px solid {cockpit_theme.BORDER_STRONG}; border-radius:5px; "
+            "padding:4px 14px; }"
+            f"QPushButton:hover {{ background:{cockpit_theme.GROUND_SELECT}; "
+            f"color:{cockpit_theme.TEXT_SECONDARY}; }}"
         )
         btn_close.clicked.connect(dlg.accept)
 

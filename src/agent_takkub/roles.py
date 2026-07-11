@@ -24,13 +24,19 @@ class Role:
     row: int
 
 
-LEAD = Role("lead", "Lead", "#f5c542", column=0, row=0)
+# Role colors mirror cockpit_theme.ROLE_COLORS EXACTLY (the single source of
+# truth for role identity — gold #E3B341 + IBM-Plex design system). They are
+# duplicated here as plain hex literals, not imported, so this module stays a
+# pure leaf (no PyQt6 pulled into the CLI import path); equality with
+# ROLE_COLORS is guarded by tests/test_role_registry_sync.py so the two can
+# never silently drift. Update BOTH together.
+LEAD = Role("lead", "Lead", "#E3B341", column=0, row=0)
 
 DEFAULT_TEAMMATES: tuple[Role, ...] = (
-    Role("frontend", "Frontend", "#22d3ee", column=1, row=0),
-    Role("backend", "Backend", "#3b82f6", column=1, row=1),
-    Role("mobile", "Mobile", "#a855f7", column=1, row=2),
-    Role("devops", "DevOps", "#22c55e", column=1, row=3),
+    Role("frontend", "Frontend", "#34B7AC", column=1, row=0),
+    Role("backend", "Backend", "#4E86F7", column=1, row=1),
+    Role("mobile", "Mobile", "#A472F0", column=1, row=2),
+    Role("devops", "DevOps", "#43B562", column=1, row=3),
     # Gemini is a non-claude pane: orchestrator launches the `gemini`
     # binary directly (interactive TUI) and skips all claude flags +
     # ECC mutes. Sits at col=2 row=0 (the slot designer used to occupy)
@@ -41,8 +47,8 @@ DEFAULT_TEAMMATES: tuple[Role, ...] = (
     # Colour is Google's signature blue so it visually stands apart
     # from claude-backed (cyan) and codex (teal) roles.
     Role("gemini", "Gemini", "#4285f4", column=2, row=0),
-    Role("qa", "QA", "#f97316", column=2, row=1),
-    Role("reviewer", "Reviewer", "#ef4444", column=2, row=2),
+    Role("qa", "QA", "#E39A3C", column=2, row=1),
+    Role("reviewer", "Reviewer", "#F26D6D", column=2, row=2),
     # Codex is a non-claude pane: orchestrator launches the `codex`
     # binary directly (interactive TUI) and skips all claude flags +
     # ECC mutes. Sits in column 1 (dev specialists) below devops
@@ -57,7 +63,7 @@ DEFAULT_TEAMMATES: tuple[Role, ...] = (
     # Sits below reviewer in the support/review column — design critique
     # is to UI what code review is to code. Pink keeps it distinct from
     # reviewer (red) and gemini (google-blue) right above it.
-    Role("critic", "Design Critic", "#ec4899", column=2, row=3),
+    Role("critic", "Design Critic", "#F0619A", column=2, row=3),
     # Plain PowerShell pane — no claude, no codex, no gemini. Spawned via
     # the "Open Shell" status-bar button when the user wants a quick
     # ad-hoc shell inside the cockpit grid (run a one-off command, tail a

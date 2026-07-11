@@ -21,9 +21,11 @@ from PyQt6.QtCore import QPointF, Qt
 from PyQt6.QtGui import QBrush, QColor, QPainter, QPolygonF
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QWidget
 
+from . import cockpit_theme
+
 # Claude's brand coral — the spark's calm/default colour so the corner always
-# reads as "a little Claude", not a grey system chip.
-_CLAUDE_CORAL = "#d97757"
+# reads as "a little Claude", not a grey system chip (cockpit_theme.METER_CLAY).
+_CLAUDE_CORAL = cockpit_theme.METER_CLAY
 
 
 class _Spark(QWidget):
@@ -77,7 +79,7 @@ class UsageMeter(QWidget):
         lay.setSpacing(5)
         self._spark = _Spark(self)
         self._label = QLabel("—", self)
-        self._label.setStyleSheet("QLabel { color:#71717a; font-size:11px; }")
+        self._label.setStyleSheet(f"QLabel {{ color:{cockpit_theme.TEXT_MUTED}; font-size:11px; }}")
         lay.addWidget(self._spark)
         lay.addWidget(self._label)
 
@@ -89,6 +91,6 @@ class UsageMeter(QWidget):
 
     def set_offline(self) -> None:
         """Dim state when usage is unavailable (offline / not logged in)."""
-        self._spark.set_color("#52525b")
+        self._spark.set_color(cockpit_theme.TEXT_FAINT)
         self._label.setText("—")
-        self._label.setStyleSheet("QLabel { color:#52525b; font-size:11px; }")
+        self._label.setStyleSheet(f"QLabel {{ color:{cockpit_theme.TEXT_FAINT}; font-size:11px; }}")

@@ -23,6 +23,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from . import cockpit_theme
+
 # Only read the tail of events.log — never the whole file. The panel shows
 # the last ~120 lines, so a fixed-size tail is always enough. Reading the
 # entire file on the Qt main thread every second wedged the cockpit once the
@@ -56,11 +58,11 @@ def read_log_tail(path: Path, tail_bytes: int = _TAIL_BYTES) -> str:
 
 
 _EVENT_COLOR = {
-    "spawn": "#22c55e",
-    "assign": "#facc15",
-    "send": "#22d3ee",
-    "done": "#0ea5e9",
-    "close": "#f97316",
+    "spawn": cockpit_theme.STATE_OK_BRIGHT,
+    "assign": cockpit_theme.STATE_WARN_BRIGHT,
+    "send": cockpit_theme.STATE_INFO_BRIGHT,
+    "done": cockpit_theme.CHIP_REMOTE_ON,
+    "close": cockpit_theme.STATE_EXITED,
 }
 
 
@@ -82,7 +84,9 @@ class LogsPanel(QWidget):
 
         header = QHBoxLayout()
         title = QLabel("events log")
-        title.setStyleSheet("color: #9ca3af; font-size: 11px; font-weight: bold;")
+        title.setStyleSheet(
+            f"color: {cockpit_theme.TEXT_MUTED}; font-size: 11px; font-weight: bold;"
+        )
 
         self._event_combo = QComboBox()
         self._event_combo.addItems(["all", "spawn", "assign", "send", "done", "close"])
@@ -131,9 +135,9 @@ class LogsPanel(QWidget):
         self._view.setFont(f)
         self._view.setStyleSheet(
             "QPlainTextEdit {"
-            "  background-color: #0e0e10;"
-            "  color: #d4d4d8;"
-            "  border: 1px solid #27272a;"
+            f"  background-color: {cockpit_theme.GROUND_SIDEBAR};"
+            f"  color: {cockpit_theme.TEXT_SECONDARY};"
+            f"  border: 1px solid {cockpit_theme.BORDER_STRONG};"
             "  border-radius: 4px;"
             "  padding: 4px;"
             "}"

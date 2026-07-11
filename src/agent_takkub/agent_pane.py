@@ -29,6 +29,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from . import cockpit_theme
 from .config import RUNTIME_DIR
 from .pty_session import PtySession
 from .roles import LEAD, USER_DRIVEN_ROLES, Role
@@ -41,13 +42,16 @@ from .token_meter import (
     usage_color,
 )
 
+# Pane state → dot color, using cockpit_theme state tokens (semantic — never
+# gold). "empty" is a neutral faint grey; the rest are the ok/warn/info/exit/
+# error ramp.
 STATUS_COLORS = {
-    "empty": "#3f3f46",
-    "active": "#22c55e",
-    "working": "#facc15",
-    "done": "#0ea5e9",
-    "exited": "#f97316",  # orange — unexpected exit, can respawn
-    "error": "#ef4444",
+    "empty": cockpit_theme.TEXT_FAINT,
+    "active": cockpit_theme.STATE_OK_BRIGHT,
+    "working": cockpit_theme.STATE_WARN_BRIGHT,
+    "done": cockpit_theme.STATE_INFO_BRIGHT,
+    "exited": cockpit_theme.STATE_EXITED,  # orange — unexpected exit, can respawn
+    "error": cockpit_theme.STATE_ERROR,
 }
 
 SPINNER_FRAMES = "◐◓◑◒"
@@ -200,16 +204,17 @@ class AgentPane(QFrame):
         f = QFont()
         f.setBold(True)
         self._title.setFont(f)
-        self._title.setStyleSheet(f"color: {role.color};")
+        title_color = cockpit_theme.ROLE_COLORS.get(role.name, role.color)
+        self._title.setStyleSheet(f"color: {title_color};")
 
         self._note = QLabel("", header)
-        self._note.setStyleSheet("color: #9ca3af; font-size: 11px;")
+        self._note.setStyleSheet(f"color: {cockpit_theme.TEXT_MUTED}; font-size: 11px;")
 
         # Token-usage badge: shows "52k/200k" of the current claude session
         # for this pane, refreshed on a slow timer. Hidden until the pane has
         # an active session with at least one assistant turn on disk.
         self._token_label = QLabel("", header)
-        self._token_label.setStyleSheet("color: #6b7280; font-size: 11px;")
+        self._token_label.setStyleSheet(f"color: {cockpit_theme.TEXT_FAINT_ALT}; font-size: 11px;")
         self._token_label.setToolTip("Last-turn context occupancy (prompt tokens / limit)")
         self._token_label.hide()
 
@@ -284,7 +289,7 @@ class AgentPane(QFrame):
         phl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         msg = QLabel(f"{role.label}\nempty slot")
         msg.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        msg.setStyleSheet("color: #525252; font-size: 13px;")
+        msg.setStyleSheet(f"color: {cockpit_theme.TEXT_FAINT}; font-size: 13px;")
         phl.addWidget(msg)
         self._stack.addWidget(ph)
 
@@ -321,7 +326,9 @@ class AgentPane(QFrame):
             self._tick_timer.stop()
 
         self._refresh_note()
-        self._dot.setStyleSheet(f"color: {STATUS_COLORS.get(state, '#3f3f46')}; font-size: 14px;")
+        self._dot.setStyleSheet(
+            f"color: {STATUS_COLORS.get(state, cockpit_theme.TEXT_FAINT)}; font-size: 14px;"
+        )
         if state in ("active", "working"):
             self._stack.setCurrentIndex(1)
             self._btn_spawn.hide()
@@ -847,21 +854,21 @@ class AgentPane(QFrame):
         _css_safe = self.role.name.replace("#", "-")
         return (
             f"#pane_{_css_safe} {{"
-            "  background-color: #18181b;"
-            "  border: 1px solid #27272a;"
+            f"  background-color: {cockpit_theme.GROUND_PANEL};"
+            f"  border: 1px solid {cockpit_theme.BORDER_STRONG};"
             "  border-radius: 6px;"
             "}"
             "#paneHeader {"
-            "  background-color: #1c1c20;"
-            "  border-bottom: 1px solid #27272a;"
+            f"  background-color: {cockpit_theme.GROUND_INPUT};"
+            f"  border-bottom: 1px solid {cockpit_theme.BORDER_STRONG};"
             "}"
             "QPushButton {"
-            "  background-color: #27272a;"
-            "  color: #e5e7eb;"
-            "  border: 1px solid #3f3f46;"
+            f"  background-color: {cockpit_theme.GROUND_SELECT};"
+            f"  color: {cockpit_theme.TEXT_PRIMARY_ALT};"
+            f"  border: 1px solid {cockpit_theme.BORDER_STRONG2};"
             "  border-radius: 3px;"
             "  padding: 2px 8px;"
             "  font-size: 11px;"
             "}"
-            "QPushButton:hover { background-color: #3f3f46; }"
+            f"QPushButton:hover {{ background-color: {cockpit_theme.BORDER_STRONG2}; }}"
         )

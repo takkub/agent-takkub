@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 
 from PyQt6 import sip
 
+from . import cockpit_theme
 from .config import active_project
 
 
@@ -114,15 +115,15 @@ class LimitPanelMixin:
 
         max_util = max((w.utilization for w in (data.windows or [])), default=0.0)
         if rate_limited:
-            color = "#a16207"
+            color = cockpit_theme.BANNER_WARN_BORDER
         elif max_util >= 80:
-            color = "#f87171"
+            color = cockpit_theme.STATE_ERROR_BRIGHT
         elif max_util >= 50:
-            color = "#fbbf24"
+            color = cockpit_theme.METER_AMBER
         else:
             # Calm state → Claude coral so the little spark reads as "a bit of
             # Claude" in the corner instead of a neutral grey system chip.
-            color = "#d97757"
+            color = cockpit_theme.METER_CLAY
 
         self._limit_label.apply(text, color)
         plan = getattr(data, "plan", "")

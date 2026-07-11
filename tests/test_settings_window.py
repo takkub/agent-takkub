@@ -59,9 +59,10 @@ def _isolate_settings_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 class TestSettingsWindowStructure:
-    def test_has_eight_stacked_views(self) -> None:
+    def test_has_nine_stacked_views(self) -> None:
+        # 8 original views + the new real Skill Catalog (index 8).
         dlg = settings_window.SettingsWindow()
-        assert dlg._stack.count() == 8
+        assert dlg._stack.count() == 9
         dlg.deleteLater()
 
     def test_initial_view_defaults_to_providers_roles(self) -> None:
@@ -440,23 +441,109 @@ class TestPluginsMatrixView:
         dlg.deleteLater()
 
 
-class TestSkillCatalogView:
+class TestRoleOverlapView:
+    """The renamed old "Skill Catalog" — a ROLE-scope TF-IDF overlap audit,
+    not a skill browser (2026-07-11 rename)."""
+
     def test_selecting_role_updates_detail_and_overlap_badge(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         docs = {"backend": "database schema api endpoint", "frontend": "react component css"}
         monkeypatch.setattr(settings_window.skill_audit, "load_all_role_docs", lambda: docs)
-        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_SKILL_CATALOG)
-        assert dlg._skill_list.count() == 2
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_ROLE_OVERLAP)
+        assert dlg._overlap_list.count() == 2
 
         row = next(
             i
-            for i in range(dlg._skill_list.count())
-            if dlg._skill_list.item(i).data(Qt.ItemDataRole.UserRole) == "backend"
+            for i in range(dlg._overlap_list.count())
+            if dlg._overlap_list.item(i).data(Qt.ItemDataRole.UserRole) == "backend"
         )
-        dlg._skill_list.setCurrentRow(row)
-        assert dlg._skill_detail_text.toPlainText() == docs["backend"]
-        assert dlg._skill_overlap_badge.text().startswith("✓")
+        dlg._overlap_list.setCurrentRow(row)
+        assert dlg._overlap_detail_text.toPlainText() == docs["backend"]
+        assert dlg._overlap_badge.text().startswith("✓")
+        dlg.deleteLater()
+
+
+class TestSkillCatalogView:
+    """The new, real skill browser backed by skill_scan (SKILL section)."""
+
+    def test_lists_scanned_skills_with_desc_and_referencing_roles(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from agent_takkub import skill_scan
+
+        skills = [
+            skill_scan.SkillInfo(
+                name="cockpit-ui-style",
+                description="design system for the cockpit UI",
+                path=Path("/x/.claude/skills/cockpit-ui-style/SKILL.md"),
+            ),
+            skill_scan.SkillInfo(
+                name="debug-mantra", description="debugging discipline", path=Path("/x/db.md")
+            ),
+        ]
+        monkeypatch.setattr(settings_window.skill_scan, "scan_skills", lambda _roots: list(skills))
+        monkeypatch.setattr(
+            settings_window.skill_audit,
+            "load_all_role_docs",
+            lambda: {"frontend": "must read cockpit-ui-style before UI work", "qa": "run tests"},
+        )
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_SKILL_CATALOG)
+        assert dlg._catalog_list.count() == 2
+
+        row = next(
+            i
+            for i in range(dlg._catalog_list.count())
+            if dlg._catalog_list.item(i).data(Qt.ItemDataRole.UserRole) == "cockpit-ui-style"
+        )
+        dlg._catalog_list.setCurrentRow(row)
+        assert dlg._catalog_name.text() == "cockpit-ui-style"
+        assert "design system" in dlg._catalog_desc.text()
+        # frontend's doc mentions the skill name → surfaced as a referencing role
+        assert "Frontend" in dlg._catalog_roles.text()
+        dlg.deleteLater()
+
+    def test_short_skill_name_does_not_false_match_on_prose(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A short/common skill name must reference the skill as a whole word —
+        it must NOT surface a role just because its letters appear inside an
+        unrelated word (raw substring: ``"git" in "github"`` → True)."""
+        from agent_takkub import skill_scan
+
+        skills = [
+            skill_scan.SkillInfo(name="git", description="git workflow", path=Path("/x/git.md")),
+        ]
+        monkeypatch.setattr(settings_window.skill_scan, "scan_skills", lambda _roots: list(skills))
+        monkeypatch.setattr(
+            settings_window.skill_audit,
+            "load_all_role_docs",
+            lambda: {
+                # substring "git" is present (github / digital) but never as a
+                # standalone word → must NOT count as referencing the skill
+                "backend": "push to github and deploy the digital dashboard",
+                # whole-word reference → SHOULD count
+                "devops": "อ่าน skill: git ก่อนเริ่มงานที่เกี่ยวข้อง",
+            },
+        )
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_SKILL_CATALOG)
+        row = next(
+            i
+            for i in range(dlg._catalog_list.count())
+            if dlg._catalog_list.item(i).data(Qt.ItemDataRole.UserRole) == "git"
+        )
+        dlg._catalog_list.setCurrentRow(row)
+        text = dlg._catalog_roles.text()
+        assert "DevOps" in text  # whole-word "git" reference surfaces
+        assert "Backend" not in text  # github/digital substring must not
+        dlg.deleteLater()
+
+    def test_empty_catalog_shows_placeholder(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(settings_window.skill_scan, "scan_skills", lambda _roots: [])
+        monkeypatch.setattr(settings_window.skill_audit, "load_all_role_docs", lambda: {})
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_SKILL_CATALOG)
+        assert dlg._catalog_list.count() == 0
+        assert "ไม่พบ skill" in dlg._catalog_name.text()
         dlg.deleteLater()
 
 

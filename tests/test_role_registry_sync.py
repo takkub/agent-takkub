@@ -16,6 +16,7 @@ from __future__ import annotations
 import pytest
 
 from agent_takkub import (
+    cockpit_theme,
     config,
     custom_roles,
     pane_tools_dialog,
@@ -101,6 +102,32 @@ def test_unregistering_role_drops_it_from_every_surface(tmp_path, monkeypatch):
     roles.unregister_role(name)
     assert name not in pipeline_config.valid_roles()
     assert name not in pane_tools_dialog.matrix_roles()
+
+
+def test_builtin_role_colors_mirror_cockpit_theme_role_colors():
+    """Single-source-of-truth guard for role identity color (2026-07-11 UI
+    migration): roles.py Role.color is duplicated as plain hex (pure-leaf, no
+    PyQt6 import) so it MUST equal cockpit_theme.ROLE_COLORS for every built-in
+    role listed there. A drift here is exactly the "grid vs Settings render
+    different role hues" bug the reconciliation fixed."""
+    for role in roles.ALL_DEFAULT:
+        canonical = cockpit_theme.ROLE_COLORS.get(role.name)
+        if canonical is None:
+            continue  # a built-in with no design-system entry keeps its own hex
+        assert role.color == canonical, (
+            f"role '{role.name}' color {role.color} != ROLE_COLORS {canonical} — "
+            "update BOTH roles.py and cockpit_theme.ROLE_COLORS together"
+        )
+
+
+def test_every_builtin_role_has_a_cockpit_theme_color():
+    """Every built-in role should have a canonical ROLE_COLORS entry so no
+    surface has to fall back to Role.color for a built-in (fallback is for
+    custom roles only)."""
+    for role in roles.ALL_DEFAULT:
+        assert role.name in cockpit_theme.ROLE_COLORS, (
+            f"built-in role '{role.name}' missing from cockpit_theme.ROLE_COLORS"
+        )
 
 
 def test_pipeline_hop_with_custom_role_survives_save_load_roundtrip(

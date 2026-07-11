@@ -264,3 +264,58 @@ class TestRowWrapRelayout:
         )
         widget.refresh_project(PROJECT)
         assert calls == ["updateGeometries", "scheduleDelayedItemsLayout"]
+
+
+class TestWrapItemDelegate:
+    """The bug Lead flagged from a real screenshot: goal/feature/task labels
+    still showed `...` instead of reflowing to a 2nd line. Proven root cause —
+    QTreeView's default delegate word-wraps the *painting* but never grows the
+    row, so a long label stays one clipped line. `_WrapItemDelegate.sizeHint`
+    returns the wrapped height so the view allocates a taller row.
+    """
+
+    def _delegate_and_tree(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr(task_dock, "list_project_names", lambda: [])
+        widget = task_dock.TaskDockWidget()
+        tree = widget._tree
+        tree.setFixedWidth(240)
+        return tree, tree.itemDelegate(), widget
+
+    def test_tree_uses_the_wrap_delegate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _tree, delegate, _w = self._delegate_and_tree(monkeypatch)
+        assert isinstance(delegate, task_dock._WrapItemDelegate)
+
+    def test_long_label_row_grows_taller_than_short_label_row(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from PyQt6.QtWidgets import QStyleOptionViewItem, QTreeWidgetItem
+
+        tree, delegate, _w = self._delegate_and_tree(monkeypatch)
+        short = QTreeWidgetItem(["🎯 short goal"])
+        long = QTreeWidgetItem(
+            [
+                "🎯 a genuinely long goal label that clearly exceeds one narrow dock "
+                "line and must reflow onto a second line instead of ending in an ellipsis"
+            ]
+        )
+        tree.addTopLevelItem(short)
+        tree.addTopLevelItem(long)
+        opt = QStyleOptionViewItem()
+        short_h = delegate.sizeHint(opt, tree.indexFromItem(short)).height()
+        long_h = delegate.sizeHint(opt, tree.indexFromItem(long)).height()
+        assert long_h > short_h
+
+    def test_empty_text_row_uses_base_height(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The project row clears its text once its ProjectCardWidget mounts —
+        # the delegate must not try to grow an empty row (it sizes itself).
+        from PyQt6.QtWidgets import QStyleOptionViewItem, QTreeWidgetItem
+
+        tree, delegate, _w = self._delegate_and_tree(monkeypatch)
+        blank = QTreeWidgetItem([""])
+        tree.addTopLevelItem(blank)
+        opt = QStyleOptionViewItem()
+        idx = tree.indexFromItem(blank)
+        assert (
+            delegate.sizeHint(opt, idx).height()
+            == super(task_dock._WrapItemDelegate, delegate).sizeHint(opt, idx).height()
+        )
