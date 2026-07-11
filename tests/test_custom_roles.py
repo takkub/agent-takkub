@@ -206,6 +206,12 @@ class TestDeleteRole:
         assert custom_roles.delete_role("data-eng") is True
         assert "data-eng" not in custom_roles.load_custom_roles()
 
+    def test_delete_removes_role_file(self, registry_files: Path) -> None:
+        custom_roles.create_role("data-eng", "Data Eng", "#112233", 1, 5, "x")
+        assert custom_roles.role_file_path("data-eng").exists()
+        assert custom_roles.delete_role("data-eng") is True
+        assert not custom_roles.role_file_path("data-eng").exists()
+
     def test_delete_missing_role_is_noop_success(self, registry_files: Path) -> None:
         assert custom_roles.delete_role("nope") is True
 

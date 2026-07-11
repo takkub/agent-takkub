@@ -325,7 +325,18 @@ class SettingsWindow(QDialog):
             (t["name"] for t in payload.get("templates", []) if t.get("id") == active_id), active_id
         )
         if active_name:
-            lay.addWidget(cockpit_theme.gold_soft_chip(str(active_name), strip))
+            # Critic visual-review round-2 #3 — a bare template name (e.g.
+            # "Feature (UI+API)") read as an unlabeled, unexplained pill that
+            # looked like it had leaked in from the main window's plan chip.
+            # It's a real per-project summary (see the walkthrough #56 note
+            # below), so it stays — just prefixed + given a tooltip so its
+            # purpose is self-evident instead of relying on the reader
+            # already knowing what a "template" is in this cockpit.
+            chip = cockpit_theme.gold_soft_chip(f"Template: {active_name}", strip)
+            chip.setToolTip(
+                "Pipeline template ที่ active อยู่สำหรับโปรเจคนี้ — เปลี่ยนได้ที่ Templates / Pipeline Builder"
+            )
+            lay.addWidget(chip)
 
         # UI walkthrough #56 — this used to also render a role-chip per
         # enabled role, duplicating the Providers & Roles view's own Roles
@@ -761,6 +772,7 @@ class SettingsWindow(QDialog):
                 locked=False,
                 enabled=roles_enabled.get(role, True),
                 current_provider=role_providers.get(role, provider_config.CLAUDE),
+                deletable=role in custom_roles.list_role_names(),
             )
             rp_lay.addWidget(row)
 
@@ -779,6 +791,7 @@ class SettingsWindow(QDialog):
         locked: bool,
         enabled: bool = True,
         current_provider: str | None = None,
+        deletable: bool = False,
     ) -> QWidget:
         row = QWidget(parent)
         row_lay = QHBoxLayout(row)
@@ -831,7 +844,45 @@ class SettingsWindow(QDialog):
         toggle.toggled.connect(self._mark_dirty)
         row_lay.addWidget(toggle)
         self._role_toggles[role] = toggle
+
+        # Critic visual-review round-2 #1 — a custom role could be created
+        # but never removed from this view (Nielsen #3, user control &
+        # freedom). Built-in roles never get this button (deletable=False
+        # is the caller's default), so there's no way to delete a shipped
+        # role by mistake.
+        if deletable:
+            delete_btn = QPushButton("✕", row)
+            delete_btn.setFixedWidth(28)
+            delete_btn.setToolTip(f"ลบ custom role '{role}'")
+            delete_btn.setAccessibleName(f"Delete {label} role")
+            delete_btn.clicked.connect(
+                lambda _checked=False, r=role, w=row: self._on_delete_custom_role_clicked(r, w)
+            )
+            row_lay.addWidget(delete_btn)
+
         return row
+
+    def _on_delete_custom_role_clicked(self, role: str, row: QWidget) -> None:
+        role_file = custom_roles.role_file_path(role)
+        confirm = QMessageBox.question(
+            self,
+            "Delete role",
+            f"ลบ custom role '{role}'?\n\n"
+            f"จะลบทั้ง registry entry และไฟล์ instructions ({role_file.name}) — undo ไม่ได้",
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        if not custom_roles.delete_role(role):
+            QMessageBox.critical(self, "Delete failed", f"ลบ role '{role}' ไม่สำเร็จ")
+            return
+        roles_mod.unregister_role(role)
+        self._role_toggles.pop(role, None)
+        self._role_provider_combos.pop(role, None)
+        self._role_provider_badges.pop(role, None)
+        layout = row.parentWidget().layout() if row.parentWidget() else None
+        if layout is not None:
+            layout.removeWidget(row)
+        row.deleteLater()
 
     def _sync_role_provider_badge(self, role: str) -> None:
         """Show/hide the "→ Claude" substitute badge for `role` based on its
@@ -965,7 +1016,8 @@ class SettingsWindow(QDialog):
         f_lay.addWidget(QLabel("Skills ที่ role นี้ควรรู้จัก", form))
         skills_hint = QLabel(
             "สแกนจาก .claude/skills/ จริงในโปรเจค — ติ๊กเพื่อฝัง reference "
-            "เข้า instructions ให้อัตโนมัติตอนกด Create Role",
+            "เข้า instructions ให้อัตโนมัติตอนบันทึก role นี้ (ปุ่ม Create Role "
+            "หรือ Save & Apply ด้านล่างทำเหมือนกัน)",
             form,
         )
         skills_hint.setObjectName("panelHint")

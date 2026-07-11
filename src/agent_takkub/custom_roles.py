@@ -236,15 +236,24 @@ def role_file_path(name: str) -> Path:
 
 
 def delete_role(name: str) -> bool:
-    """Remove a custom role from the registry. The role .md file under
-    CUSTOM_AGENTS_DIR is left in place (harmless, keeps a backup/history) —
-    caller is responsible for also calling `roles._CUSTOM.pop(name, None)`
-    equivalent if it wants the live process to forget the role immediately."""
+    """Remove a custom role from the registry AND its role .md file under
+    CUSTOM_AGENTS_DIR (critic visual-review round-2 #1 — a role a user
+    deletes from the UI must actually disappear, not just lose its registry
+    entry while the file lingers). Caller is responsible for also calling
+    `roles.unregister_role(name)` if it wants the live process to forget the
+    role immediately (this module has no import-time dependency on mutating
+    the live registry — same tradeoff as `create_role`)."""
     roles = load_custom_roles()
     if name not in roles:
         return True
     del roles[name]
-    return save_custom_roles(roles)
+    if not save_custom_roles(roles):
+        return False
+    try:
+        role_file_path(name).unlink(missing_ok=True)
+    except OSError as e:
+        _log.warning("delete_role: could not remove role file for %r: %s", name, e)
+    return True
 
 
 def load_and_register_all() -> int:

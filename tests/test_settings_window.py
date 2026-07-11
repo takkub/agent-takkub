@@ -345,6 +345,60 @@ class TestProvidersRolesView:
         assert badge.isHidden() is True
         dlg.deleteLater()
 
+    def test_builtin_role_has_no_delete_button(self) -> None:
+        """Built-in roles must never render the delete affordance custom
+        roles get (critic visual-review round-2 #1)."""
+        from PyQt6.QtWidgets import QPushButton
+
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+        row = dlg._role_toggles["qa"].parent()
+        assert not any(
+            isinstance(w, QPushButton) and w.text() == "✕" for w in row.findChildren(QPushButton)
+        )
+        dlg.deleteLater()
+
+    def test_custom_role_has_delete_button_that_removes_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Critic visual-review round-2 #1 — a custom role can be created but
+        was previously never removable from the UI (Nielsen #3)."""
+        from PyQt6.QtWidgets import QPushButton
+
+        custom_roles.create_role("data-eng", "Data Eng", "#112233", 1, 5, "x")
+        role = custom_roles.load_custom_roles()["data-eng"]
+        roles_mod.register_role(role)
+        monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+        row = dlg._role_toggles["data-eng"].parent()
+        delete_btn = next(w for w in row.findChildren(QPushButton) if w.text() == "✕")
+
+        delete_btn.click()
+
+        assert "data-eng" not in custom_roles.load_custom_roles()
+        assert not custom_roles.role_file_path("data-eng").exists()
+        assert roles_mod.by_name("data-eng") is None
+        assert "data-eng" not in dlg._role_toggles
+        dlg.deleteLater()
+
+    def test_delete_declined_keeps_custom_role(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from PyQt6.QtWidgets import QPushButton
+
+        custom_roles.create_role("data-eng", "Data Eng", "#112233", 1, 5, "x")
+        role = custom_roles.load_custom_roles()["data-eng"]
+        roles_mod.register_role(role)
+        monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.No)
+
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+        row = dlg._role_toggles["data-eng"].parent()
+        delete_btn = next(w for w in row.findChildren(QPushButton) if w.text() == "✕")
+
+        delete_btn.click()
+
+        assert "data-eng" in custom_roles.load_custom_roles()
+        assert "data-eng" in dlg._role_toggles
+        dlg.deleteLater()
+
 
 class TestMcpMatrixView:
     def test_grid_has_a_toggle_per_role_per_item(self, monkeypatch: pytest.MonkeyPatch) -> None:
