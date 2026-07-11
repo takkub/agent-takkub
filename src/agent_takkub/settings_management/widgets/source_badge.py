@@ -18,6 +18,8 @@ _TINTS: dict[Ownership, tuple[str, str, str]] = {
     Ownership.MANAGED: (theme.NEUTRAL_CHIP_BG, theme.NEUTRAL_CHIP_BORDER, theme.NEUTRAL_CHIP_TEXT),
     Ownership.EXTERNAL: (theme.NEUTRAL_CHIP_BG, theme.NEUTRAL_CHIP_BORDER, theme.TEXT_MUTED),
     Ownership.PROJECT: (theme.GOLD_CHIP_BG, theme.GOLD_CHIP_BORDER, theme.GOLD_CHIP_TEXT),
+    Ownership.SHIPPED: (theme.NEUTRAL_CHIP_BG, theme.NEUTRAL_CHIP_BORDER, theme.NEUTRAL_CHIP_TEXT),
+    Ownership.USER: (theme.GOLD_CHIP_BG, theme.GOLD_CHIP_BORDER, theme.GOLD_CHIP_TEXT),
 }
 
 

@@ -157,6 +157,60 @@ def create_skill(
     return True, ""
 
 
+def read_skill(path: Path) -> tuple[dict, str]:
+    """Return ``(frontmatter, body)`` for an existing ``SKILL.md`` — the
+    public counterpart of ``_parse_frontmatter`` that also hands back the
+    body text after the ``---`` fence, so callers (the Settings UI's Skill
+    detail pane) can show/edit instructions without re-implementing the
+    split. Never raises: unreadable/malformed files return ``({}, "")``."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}, ""
+    fm = _parse_frontmatter(text)
+    if not text.startswith("---"):
+        return fm, text
+    parts = text.split("---", 2)
+    body = parts[2].lstrip("\n") if len(parts) == 3 else text
+    return fm, body
+
+
+def update_skill(path: Path, description: str, instructions: str) -> tuple[bool, str]:
+    """Read-modify-write an existing ``SKILL.md`` in place, changing only
+    ``description`` and the body — every OTHER frontmatter key (``name``,
+    plus any hand-authored extra like ``license``) is preserved verbatim.
+    ``name`` is immutable via this path (a skill's identity is its
+    directory name; renaming means create+delete). Returns ``(ok, message)``
+    — ``message`` is "" on success. Never raises."""
+    fm, _old_body = read_skill(path)
+    if not fm:
+        return False, f"อ่านหรือ parse frontmatter ของ {path} ไม่สำเร็จ"
+
+    fm["description"] = (description or "").strip()
+    body = (
+        instructions or ""
+    ).strip() or f"# {fm.get('name', path.parent.name)}\n\n_(เพิ่มเนื้อหา skill นี้)_\n"
+    try:
+        frontmatter_text = yaml.safe_dump(fm, allow_unicode=True, sort_keys=False).strip()
+    except yaml.YAMLError as e:
+        return False, f"เขียน frontmatter ไม่สำเร็จ: {e}"
+    content = f"---\n{frontmatter_text}\n---\n\n{body}\n"
+
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", dir=path.parent, suffix=".md", delete=False, encoding="utf-8"
+        ) as tmp:
+            tmp.write(content)
+            tmp_path = Path(tmp.name)
+        tmp_path.replace(path)
+    except OSError as e:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
+        return False, f"เขียน SKILL.md ไม่สำเร็จ: {e}"
+    return True, ""
+
+
 def delete_skill(path: Path) -> bool:
     """Remove a skill given the `SkillInfo.path` `scan_skills` returned for
     it. Nested layout (`.../<name>/SKILL.md`) removes the whole skill

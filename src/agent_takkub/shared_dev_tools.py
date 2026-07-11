@@ -631,6 +631,37 @@ def _has_secrets(cfg: dict) -> bool:
     return False
 
 
+def mask_secrets(cfg: dict) -> dict:
+    """Return a copy of *cfg* with credential-bearing values replaced by a
+    masked placeholder — same patterns `_has_secrets` detects, so a UI can
+    show that a server carries a credential without ever displaying it
+    (SPEC.md "MCP Servers" credential handling). Never raises."""
+    out = dict(cfg)
+    headers = out.get("headers")
+    if isinstance(headers, dict):
+        out["headers"] = {
+            k: ("••••••••" if k in _SECRET_HEADER_KEYS else v) for k, v in headers.items()
+        }
+    env = out.get("env")
+    if isinstance(env, dict):
+        out["env"] = {
+            k: ("••••••••" if any(s in str(k).upper() for s in _SECRET_ENV_SUBSTRINGS) else v)
+            for k, v in env.items()
+        }
+    args = out.get("args")
+    if isinstance(args, list):
+        out["args"] = [re.sub(r"(://[^/@\s]+):[^/@\s]+@", r"\1:••••••••@", str(a)) for a in args]
+    return out
+
+
+def default_role_mcp_policy() -> dict[str, frozenset[str]]:
+    """Public read accessor for the built-in per-role MCP visibility table
+    (`_ROLE_MCP_POLICY`), used by `settings_management`'s MCP repository to
+    compute which roles see a given MCP absent any `pane_tools_policy`
+    override."""
+    return dict(_ROLE_MCP_POLICY)
+
+
 def ensure_user_mcps() -> tuple[bool, str]:
     """Merge allowlisted user MCPs from ~/.claude.json into shared-mcp.json.
 
