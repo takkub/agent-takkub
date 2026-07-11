@@ -1,6 +1,6 @@
 [project]
 name = "agent-takkub"
-version = "1.0.22"
+version = "1.0.23"
 description = "Desktop cockpit for orchestrating Claude Code dev teammates on Windows"
 requires-python = ">=3.11"
 license = "MIT"
@@ -11,10 +11,10 @@ dependencies = [
     # no watchdog stall; Windows WER faults in QtCore). 6.8 is the battle-tested
     # LTS. Pin the Qt6 *binary* packages too (they carry Qt6Core.dll itself), not
     # just the bindings, so a resolver can't pull 6.11 back in. Bump deliberately.
-    "PyQt6>=6.8,<6.12",
-    "PyQt6-Qt6>=6.8,<6.12",
-    "PyQt6-WebEngine>=6.8,<6.12",
-    "PyQt6-WebEngine-Qt6>=6.8,<6.12",
+    "PyQt6>=6.8,<6.9",
+    "PyQt6-Qt6>=6.8,<6.9",
+    "PyQt6-WebEngine>=6.8,<6.9",
+    "PyQt6-WebEngine-Qt6>=6.8,<6.9",
     "pywinpty>=2.0;sys_platform=='win32'",
     "ptyprocess>=0.7;sys_platform!='win32'",
     "pyte>=0.8",
