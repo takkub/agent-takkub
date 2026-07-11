@@ -31,6 +31,7 @@ from .claude_auth_config import apply_claude_auth_overrides
 from .config import (
     CLI_BIN_DIR,
     DATA_HOME,
+    REPO_ROOT,
     agent_role_dir,
     default_cwd_for_role,
     lead_cwd,
@@ -39,6 +40,7 @@ from .config import (
 from .lead_context import (
     BIG_FILE_GUARD,
     STALE_FILE_GUARD,
+    _allowed_project_roots,
     _default_plugin_dirs,
     _render_lead_context,
 )
@@ -107,6 +109,18 @@ def _normalize_cwd_for_compare(cwd: str) -> str:
 
 
 _SAFE_SESSION_UUID_RE = re.compile(r"^[0-9A-Za-z_-]+$")
+
+
+def _skill_roots_for_project(project_ns: str) -> list[pathlib.Path]:
+    """Where to look for real `.claude/skills/` at spawn time — every
+    configured path of `project_ns` first (project-specific skills win a
+    name collision), plus the cockpit's own checkout as a fallback (same
+    roots `settings_window._new_role_skill_roots` scans, so the Skill
+    Matrix and the actual spawn-time injection agree on what "exists").
+    """
+    roots = list(_allowed_project_roots(project_ns)) if project_ns else []
+    roots.append(REPO_ROOT)
+    return roots
 
 
 def _resume_uuid_matches_cwd(project_ns: str, session_uuid: str, cwd: str) -> bool:
@@ -1102,7 +1116,12 @@ class SpawnEngineMixin:
             if gemini_bin is None:
                 return False, spec.install_instructions
             spawn_cwd = cwd or default_cwd_for_role(role_name, project=project_ns) or str(DATA_HOME)
-            ensure_agents_md(spawn_cwd)
+            from . import skill_policy
+
+            _skill_extra = skill_policy.render_skill_appendix(
+                base_role, _skill_roots_for_project(project_ns), spec.context_strategy
+            )
+            ensure_agents_md(spawn_cwd, extra=_skill_extra)
             env = _build_pane_env()
             env["TAKKUB_ROLE"] = role_name
             env["TAKKUB_PROJECT"] = project_ns
@@ -1151,8 +1170,15 @@ class SpawnEngineMixin:
             # Plant the takkub cheatsheet so Codex auto-discovers it on
             # boot and knows how to call `takkub send/done`. Safe: only
             # writes when the file is absent or already takkub-managed
-            # (marker check inside the helper).
-            ensure_agents_md(spawn_cwd)
+            # (marker check inside the helper). `extra` bridges this role's
+            # Skill Matrix assignment (#103 phase 4) — codex has no Skill
+            # tool, so it's an instruction-style block, not real skill access.
+            from . import skill_policy
+
+            _skill_extra = skill_policy.render_skill_appendix(
+                base_role, _skill_roots_for_project(project_ns), codex_spec.context_strategy
+            )
+            ensure_agents_md(spawn_cwd, extra=_skill_extra)
             env = _build_pane_env()
             env["TAKKUB_ROLE"] = role_name
             env["TAKKUB_PROJECT"] = project_ns
@@ -1353,6 +1379,18 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                             f"`{_role_mem}` ด้วย Edit/Write เพื่อให้รอบหน้าเร็วขึ้น "
                             "เก็บเฉพาะของจริงที่มีค่า อย่าซ้ำ code/git\n"
                         )
+                # Skill Matrix (#103 phase 4): a role's own Skill tool already
+                # auto-discovers .claude/skills/ project-wide regardless of
+                # this policy — this appendix just names which ones the
+                # operator flagged as relevant to THIS role, so it reads them
+                # proactively instead of waiting to stumble onto them.
+                from . import skill_policy
+
+                _appendix += skill_policy.render_skill_appendix(
+                    base_role,
+                    _skill_roots_for_project(project_ns),
+                    PROVIDER_REGISTRY["claude"].context_strategy,
+                )
                 # Big-file hygiene: every teammate gets the same guard the Lead
                 # does — a teammate assigned to port a 2.7MB game file would
                 # otherwise Read it wholesale and balloon its own per-turn

@@ -114,6 +114,43 @@ class TestCodexAgentsMdGitGuard:
         assert "commit when explicitly asked" not in CODEX_AGENTS_MD
 
 
+class TestEnsureAgentsMdExtra:
+    """`extra` (#103 phase 4) bridges Skill Matrix content into AGENTS.md."""
+
+    def test_appends_extra_after_base_cheatsheet(self, tmp_path: Path) -> None:
+        ok, reason = ensure_agents_md(tmp_path, extra="\n\n## Skills\n- debug-mantra\n")
+        assert ok is True
+        assert reason == "written"
+        body = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+        assert "takkub send" in body  # base cheatsheet still present
+        assert "## Skills" in body
+        assert "debug-mantra" in body
+        # extra comes after the base content
+        assert body.index("takkub send") < body.index("## Skills")
+
+    def test_empty_extra_is_unchanged_from_before(self, tmp_path: Path) -> None:
+        from agent_takkub.codex_agents_md import CODEX_AGENTS_MD
+
+        ensure_agents_md(tmp_path)
+        assert (tmp_path / "AGENTS.md").read_text(encoding="utf-8") == CODEX_AGENTS_MD
+
+    def test_refresh_replaces_stale_extra(self, tmp_path: Path) -> None:
+        ensure_agents_md(tmp_path, extra="\n\n## Skills\n- old-skill\n")
+        ensure_agents_md(tmp_path, extra="\n\n## Skills\n- new-skill\n")
+        body = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+        assert "new-skill" in body
+        assert "old-skill" not in body
+
+    def test_user_owned_file_still_skipped_with_extra(self, tmp_path: Path) -> None:
+        target = tmp_path / "AGENTS.md"
+        original = "# Project AGENTS\n\nrules: be careful.\n"
+        target.write_text(original, encoding="utf-8")
+        ok, reason = ensure_agents_md(tmp_path, extra="\n\n## Skills\n- debug-mantra\n")
+        assert ok is False
+        assert reason == "user-owned"
+        assert target.read_text(encoding="utf-8") == original
+
+
 class TestCodexAgentsMdOverrideRule:
     """Guards the section that prevents codex from misreading
     Lead's `[ROLE: ... ห้าม spawn subagent]` prefix as forbidding the
