@@ -87,10 +87,13 @@ class TestCharacterizationDefaultVsExplicitEmpty:
 
 
 class TestCharacterizationForcedProviders:
-    def test_lead_forced_provider_survives_repository_get(self) -> None:
+    def test_lead_provider_unlocked_but_defaults_to_claude(self) -> None:
+        # #101 (2026-07-11) removed lead from _FORCED_PROVIDER — degraded-mode
+        # unlock. Lead still DEFAULTS to claude, but is no longer forced, so
+        # the Access tab may offer an override (with capability-loss notice).
         detail = roles_repo.get("lead")
         assert detail.access.provider == "claude"
-        assert detail.access.provider_forced is True
+        assert detail.access.provider_forced is False
 
     def test_codex_forced_provider_cannot_be_overridden_via_write_access(self) -> None:
         result = relationships.write_access("codex", _access_draft(provider="claude"))

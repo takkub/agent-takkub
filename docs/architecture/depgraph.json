@@ -1123,8 +1123,10 @@
     {
       "module": "agent_takkub.settings_management.feature_flags",
       "imports": [],
-      "imported_by": [],
-      "fan_in": 0,
+      "imported_by": [
+        "agent_takkub.user_actions"
+      ],
+      "fan_in": 1,
       "fan_out": 0
     },
     {
@@ -1507,9 +1509,10 @@
         "agent_takkub.settings_management.pages.skills_page"
       ],
       "imported_by": [
-        "agent_takkub.settings_management.__main__"
+        "agent_takkub.settings_management.__main__",
+        "agent_takkub.user_actions"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 6
     },
     {
@@ -1818,6 +1821,8 @@
         "agent_takkub.plan_tier",
         "agent_takkub.plugin_installer",
         "agent_takkub.provider_state",
+        "agent_takkub.settings_management.feature_flags",
+        "agent_takkub.settings_management.window",
         "agent_takkub.settings_window",
         "agent_takkub.user_profile"
       ],
@@ -1825,7 +1830,7 @@
         "agent_takkub.main_window"
       ],
       "fan_in": 1,
-      "fan_out": 11
+      "fan_out": 13
     },
     {
       "module": "agent_takkub.user_profile",
