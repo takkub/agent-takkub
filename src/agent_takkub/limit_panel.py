@@ -100,18 +100,20 @@ class LimitPanelMixin:
                 return f"{days}:{hours:02d}:{mins:02d}"
             return f"{hours}:{mins:02d}"
 
-        def _fmt(key: str) -> str:
-            """Inline readout: countdown-to-reset + utilisation, e.g. '3:45 52%'.
-            The clock (time left until the window resets) is the thing worth
-            glancing at — not which window it is — so no '5h'/'7d' label."""
+        def _fmt(key: str, label: str) -> str:
+            """Inline readout: window label + countdown-to-reset + utilisation,
+            e.g. '5h 3:45 52%'. The bare '3:45 52% / 2:12 18%' this used to
+            render told you two numbers with no way to tell which was the
+            5-hour window and which was the 7-day one without opening the
+            tooltip — the label makes that legible at a glance."""
             w = window_map.get(key)
             if w is None:
-                return "—"
+                return f"{label} —"
             pct = f"{round(w.utilization)}%"
             eta = _fmt_eta(w)
-            return f"{eta} {pct}" if eta else pct
+            return f"{label} {eta} {pct}" if eta else f"{label} {pct}"
 
-        text = " / ".join([_fmt("five_hour"), _fmt("seven_day")])
+        text = " · ".join([_fmt("five_hour", "5h"), _fmt("seven_day", "7d")])
 
         max_util = max((w.utilization for w in (data.windows or [])), default=0.0)
         if rate_limited:
