@@ -29,6 +29,13 @@ def test_legacy_is_case_insensitive(monkeypatch: pytest.MonkeyPatch) -> None:
     assert feature_flags.resolve() is feature_flags.SettingsUI.LEGACY
 
 
-def test_compare(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_compare_no_longer_a_recognized_value_falls_back_to_new(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # MED-4: `compare` was dropped (see feature_flags module docstring) — it
+    # was never actually implemented (routing only special-cased `new`), so
+    # an existing `TAKKUB_SETTINGS_UI=compare` env now degrades to the same
+    # unknown-value fallback as any typo, not a distinct enum member.
     monkeypatch.setenv("TAKKUB_SETTINGS_UI", "compare")
-    assert feature_flags.resolve() is feature_flags.SettingsUI.COMPARE
+    assert feature_flags.resolve() is feature_flags.SettingsUI.NEW
+    assert not hasattr(feature_flags.SettingsUI, "COMPARE")

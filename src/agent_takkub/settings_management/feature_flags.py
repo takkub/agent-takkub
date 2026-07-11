@@ -1,10 +1,22 @@
-"""Resolve which Settings surface opens — ``new`` (default), ``legacy``, or
-``compare`` (both, dev-only) — from ``TAKKUB_SETTINGS_UI``.
+"""Resolve which Settings surface opens — ``new`` (default) or ``legacy`` —
+from ``TAKKUB_SETTINGS_UI``.
 
 Single resolution point (SPEC.md "Coexistence") — every entry point (the
 status-bar Settings button, this package's ``__main__``, tests) reads
 ``resolve()`` instead of the env var directly, so a future config-file-backed
 override only needs to change this one function.
+
+MED-4 (2026-07-11 codex cross-check): the original design sketched a third
+``compare`` value ("both, dev-only"), but the only router
+(``user_actions._open_settings_window``) never special-cased it — every
+value except ``new`` opened legacy only, so ``compare`` silently behaved
+like ``legacy`` while the docs claimed it opened both surfaces. Actually
+opening both windows side by side is a real feature, not a one-line fix —
+it belongs with whoever owns the window shell (``window.py``/
+``user_actions.py``, out of this change's scope), so ``compare`` is
+dropped here rather than left promising behavior that doesn't exist. Any
+unrecognized value (including a stale ``compare`` in an existing env)
+falls back to NEW, same as any other unknown value.
 """
 
 from __future__ import annotations
@@ -18,7 +30,6 @@ _ENV_VAR = "TAKKUB_SETTINGS_UI"
 class SettingsUI(StrEnum):
     LEGACY = "legacy"
     NEW = "new"
-    COMPARE = "compare"
 
 
 def resolve() -> SettingsUI:

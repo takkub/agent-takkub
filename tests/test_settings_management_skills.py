@@ -137,6 +137,25 @@ class TestCreateUpdateDelete:
         result = skills_repo.delete("shipped-skill", plan.version)
         assert not result.ok
 
+    def test_delete_rolls_back_skill_file_when_policy_save_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """HIGH-3: SKILL.md + skill-policy are one FileTransaction — a
+        policy-save failure must restore the just-deleted SKILL.md instead
+        of orphaning the policy reference to a now-missing skill."""
+        skills_repo.create(CreateSkillCommand(name="skill-a", description="", instructions=""))
+        skill_policy.set_role_skills("backend", ["skill-a"])
+        plan = skills_repo.delete_plan("skill-a")
+        path = Path(skills_repo.get("skill-a").path)
+
+        monkeypatch.setattr(skill_policy, "save_policy", lambda policy: False)
+        result = skills_repo.delete("skill-a", plan.version)
+
+        assert not result.ok
+        assert path.is_file()
+        assert "skill-a" in {s.name for s in skills_repo.list()}
+        assert "skill-a" in skill_policy.effective_skills("backend")
+
 
 class TestAssignedRoles:
     def test_assigned_roles_from_skill_policy(self) -> None:
@@ -149,6 +168,18 @@ class TestAssignedRoles:
         skills_repo.create(CreateSkillCommand(name="skill-a", description="", instructions=""))
         detail = skills_repo.get("skill-a")
         assert detail.assigned_roles == ()
+
+
+class TestAssignableNames:
+    """LOW-2: Role Access's checklist source must see shipped skills too,
+    not just the project root."""
+
+    def test_includes_project_and_shipped_skills(self, tmp_path: Path) -> None:
+        skills_repo.create(CreateSkillCommand(name="my-skill", description="", instructions=""))
+        _write_shipped_skill(tmp_path)
+        names = skills_repo.assignable_names()
+        assert "my-skill" in names
+        assert "shipped-skill" in names
 
 
 class TestList:

@@ -13,6 +13,7 @@ from ... import roles as roles_mod
 from ..commands import CreateRoleCommand, UpdateRoleCommand
 from ..models import Capability, DeletePlan, OperationResult, Ownership, RoleDetail, RoleSummary
 from ..services import cleanup, relationships, validation
+from ..transaction import FileTransaction
 
 
 class RoleNotFoundError(KeyError):
@@ -94,6 +95,21 @@ def capabilities(entity_id: str | None = None) -> Capability:
     return Capability(can_create=True, can_update=True, can_delete=True)
 
 
+def _aggregate_paths(name: str, *, include_registry: bool) -> list:
+    """Every path role create/update/delete touches, for one outer
+    `FileTransaction` (HIGH-2) — registry + role markdown (when the caller
+    is about to mutate them) plus all four Access-tab relationship stores
+    (`relationships._relationship_paths`, itself now including MCP role
+    variants per HIGH-4)."""
+    # NOTE: this module defines its own `list()` (the repository contract,
+    # below) which shadows the builtin — `[*iterable]` instead of
+    # `list(iterable)`.
+    paths = [*relationships._relationship_paths()]
+    if include_registry:
+        paths += [custom_roles.CUSTOM_ROLES_FILE, custom_roles.role_file_path(name)]
+    return paths
+
+
 def create(command: CreateRoleCommand) -> OperationResult:
     ok, err = validation.validate_role_name(command.name)
     if not ok:
@@ -101,16 +117,28 @@ def create(command: CreateRoleCommand) -> OperationResult:
     if not validation.validate_color(command.general.color):
         return OperationResult(ok=False, message="สีต้องเป็นรูปแบบ #rrggbb")
 
-    ok, err = custom_roles.create_role(
-        command.name,
-        command.general.label,
-        command.general.color,
-        command.general.column,
-        command.general.row,
-        instructions=command.general.instructions,
-    )
-    if not ok:
-        return OperationResult(ok=False, message=err)
+    # Aggregate transaction (HIGH-2): registry + role .md + all four Access
+    # stores are snapshotted BEFORE the first mutation. The live in-memory
+    # registry is staged (register_role) only AFTER every disk write commits
+    # — a failure anywhere rolls disk back to pre-create AND never touches
+    # the live registry, instead of the old "role exists half-configured"
+    # partial state.
+    paths = _aggregate_paths(command.name, include_registry=True)
+    try:
+        with FileTransaction(paths):
+            ok, err = custom_roles.create_role(
+                command.name,
+                command.general.label,
+                command.general.color,
+                command.general.column,
+                command.general.row,
+                instructions=command.general.instructions,
+            )
+            if not ok:
+                raise RuntimeError(err)
+            relationships._apply_access(command.name, command.access)
+    except (RuntimeError, OSError) as e:
+        return OperationResult(ok=False, message=str(e))
 
     role = roles_mod.Role(
         name=command.name,
@@ -120,18 +148,6 @@ def create(command: CreateRoleCommand) -> OperationResult:
         row=command.general.row,
     )
     roles_mod.register_role(role)
-
-    access_result = relationships.write_access(command.name, command.access)
-    if not access_result.ok:
-        # Role file/registry already committed; surface the access failure
-        # but don't roll back role creation itself — the role exists and is
-        # editable, just without the requested access yet (matches
-        # create_role's own "commit what succeeded" philosophy).
-        return OperationResult(
-            ok=True,
-            message=f"สร้าง role สำเร็จ แต่ตั้งค่า access ไม่สำเร็จ: {access_result.message}",
-            entity_id=command.name,
-        )
     return OperationResult(ok=True, entity_id=command.name)
 
 
@@ -140,32 +156,39 @@ def update(entity_id: str, command: UpdateRoleCommand) -> OperationResult:
     if role is None:
         return OperationResult(ok=False, message="ไม่พบ role นี้")
 
-    if _ownership(entity_id) is Ownership.CUSTOM:
-        if not validation.validate_color(command.general.color):
-            return OperationResult(ok=False, message="สีต้องเป็นรูปแบบ #rrggbb")
+    is_custom = _ownership(entity_id) is Ownership.CUSTOM
+    if is_custom and not validation.validate_color(command.general.color):
+        return OperationResult(ok=False, message="สีต้องเป็นรูปแบบ #rrggbb")
 
-        current = custom_roles.load_custom_roles()
-        current[entity_id] = roles_mod.Role(
-            name=entity_id,
-            label=(command.general.label or "").strip() or entity_id.capitalize(),
-            color=command.general.color,
-            column=command.general.column,
-            row=command.general.row,
-        )
-        if not custom_roles.save_custom_roles(current):
-            return OperationResult(ok=False, message="เขียน custom-roles.json ไม่สำเร็จ")
-        roles_mod.register_role(current[entity_id])
+    paths = _aggregate_paths(entity_id, include_registry=is_custom)
+    new_role: roles_mod.Role | None = None
+    try:
+        with FileTransaction(paths):
+            if is_custom:
+                current = custom_roles.load_custom_roles()
+                new_role = roles_mod.Role(
+                    name=entity_id,
+                    label=(command.general.label or "").strip() or entity_id.capitalize(),
+                    color=command.general.color,
+                    column=command.general.column,
+                    row=command.general.row,
+                )
+                current[entity_id] = new_role
+                if not custom_roles.save_custom_roles(current):
+                    raise RuntimeError("เขียน custom-roles.json ไม่สำเร็จ")
+                path = custom_roles.role_file_path(entity_id)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(command.general.instructions, encoding="utf-8")
 
-        path = custom_roles.role_file_path(entity_id)
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(command.general.instructions, encoding="utf-8")
-        except OSError as e:
-            return OperationResult(ok=False, message=f"เขียน role file ไม่สำเร็จ: {e}")
+            relationships._apply_access(entity_id, command.access)
+    except (RuntimeError, OSError) as e:
+        return OperationResult(ok=False, message=str(e), entity_id=entity_id)
 
-    result = relationships.write_access(entity_id, command.access)
-    if not result.ok:
-        return result
+    # Live registry staged only after every disk write for this update
+    # committed (HIGH-2) — a markdown/access failure above never leaves the
+    # in-process registry pointing at a label/color the disk doesn't have.
+    if new_role is not None:
+        roles_mod.register_role(new_role)
     return OperationResult(ok=True, entity_id=entity_id)
 
 
@@ -188,20 +211,30 @@ def delete(entity_id: str, confirmed_plan_version: str) -> OperationResult:
             entity_id=entity_id,
         )
 
-    if not custom_roles.delete_role(entity_id):
-        return OperationResult(ok=False, message="ลบ role ไม่สำเร็จ", entity_id=entity_id)
+    paths = _aggregate_paths(entity_id, include_registry=True)
+    try:
+        with FileTransaction(paths):
+            if not custom_roles.delete_role(entity_id):
+                raise RuntimeError("ลบ role ไม่สำเร็จ")
+
+            from ...pane_tools_policy import reset_role as _reset_tools_policy
+            from ...provider_config import save_role_overrides as _save_provider_overrides
+            from ...skill_policy import load_policy as _load_skill_policy
+            from ...skill_policy import save_policy as _save_skill_policy
+
+            if not _reset_tools_policy(entity_id):
+                raise RuntimeError("ลบ MCP/plugin policy ไม่สำเร็จ")
+            _save_provider_overrides({}, scope=[entity_id])
+            skills = _load_skill_policy()
+            if entity_id in skills:
+                del skills[entity_id]
+                if not _save_skill_policy(skills):
+                    raise RuntimeError("ลบ skill policy ไม่สำเร็จ")
+    except (RuntimeError, OSError) as e:
+        return OperationResult(ok=False, message=str(e), entity_id=entity_id)
+
+    # Live registry unregistered only after every disk cleanup committed
+    # (HIGH-2) — a policy-cleanup failure above never leaves a role
+    # unregistered in-process while its files/overrides still exist on disk.
     roles_mod.unregister_role(entity_id)
-
-    from ...pane_tools_policy import reset_role as _reset_tools_policy
-    from ...provider_config import save_role_overrides as _save_provider_overrides
-    from ...skill_policy import load_policy as _load_skill_policy
-    from ...skill_policy import save_policy as _save_skill_policy
-
-    _reset_tools_policy(entity_id)
-    _save_provider_overrides({}, scope=[entity_id])
-    skills = _load_skill_policy()
-    if entity_id in skills:
-        del skills[entity_id]
-        _save_skill_policy(skills)
-
     return OperationResult(ok=True, entity_id=entity_id)

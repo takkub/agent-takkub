@@ -40,3 +40,13 @@ Repository contract: `list / get / capabilities / create / update / delete_plan 
 ## Open items ที่ต้อง sync
 - ผล central-home audit (maintainer กำลังทำ) อาจย้าย path ของ skills/ledger → กระทบแค่ชั้น repository (ออกแบบกันไว้แล้ว)
 - Plugin installer + custom provider registry = data gap จริง — ห้ามโชว์ปุ่มจนมี service
+
+## Addendum (2026-07-11, codex cross-check MED-4): `compare` dropped
+
+`TAKKUB_SETTINGS_UI=compare` (row "Coexistence" ด้านบน + Phase 5) ไม่เคย implement จริง —
+`user_actions._open_settings_window` special-case แค่ `new`, ทุกค่าอื่น (รวม `compare`) เปิด
+legacy อย่างเดียว ทำให้ doc สัญญา "เปิดทั้งคู่" แต่ code ไม่ทำ. แก้โดยตัด `compare` ออกจาก
+`feature_flags.SettingsUI` (ค่าที่ไม่รู้จัก fallback เป็น `new` เหมือนเดิม) แทนที่จะ implement
+dual-window จริง — การเปิดสองหน้าต่างพร้อมกันเป็น feature ใหม่ที่อยู่ชั้น window shell
+(`window.py`/`user_actions.py`), ไม่ใช่ one-line fix ในชั้น flag resolution นี้. Phase 5's
+dogfood step is now just `legacy → new` (no compare stage).

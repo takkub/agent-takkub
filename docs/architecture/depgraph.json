@@ -1319,13 +1319,14 @@
         "agent_takkub.settings_management.services.cleanup",
         "agent_takkub.settings_management.services.relationships",
         "agent_takkub.settings_management.services.validation",
+        "agent_takkub.settings_management.transaction",
         "agent_takkub.skill_policy"
       ],
       "imported_by": [
         "agent_takkub.settings_management.pages.roles_page"
       ],
       "fan_in": 1,
-      "fan_out": 10
+      "fan_out": 11
     },
     {
       "module": "agent_takkub.settings_management.repositories.skills",
@@ -1333,6 +1334,7 @@
         "agent_takkub.config",
         "agent_takkub.settings_management.commands",
         "agent_takkub.settings_management.models",
+        "agent_takkub.settings_management.transaction",
         "agent_takkub.skill_audit",
         "agent_takkub.skill_policy",
         "agent_takkub.skill_scan"
@@ -1341,7 +1343,7 @@
         "agent_takkub.settings_management.pages.skills_page"
       ],
       "fan_in": 1,
-      "fan_out": 6
+      "fan_out": 7
     },
     {
       "module": "agent_takkub.settings_management.services",
@@ -1375,13 +1377,14 @@
         "agent_takkub.settings_management.commands",
         "agent_takkub.settings_management.models",
         "agent_takkub.settings_management.transaction",
+        "agent_takkub.shared_dev_tools",
         "agent_takkub.skill_policy"
       ],
       "imported_by": [
         "agent_takkub.settings_management.repositories.roles"
       ],
       "fan_in": 1,
-      "fan_out": 6
+      "fan_out": 7
     },
     {
       "module": "agent_takkub.settings_management.services.validation",
@@ -1400,9 +1403,11 @@
       "imports": [],
       "imported_by": [
         "agent_takkub.settings_management.repositories.mcps",
+        "agent_takkub.settings_management.repositories.roles",
+        "agent_takkub.settings_management.repositories.skills",
         "agent_takkub.settings_management.services.relationships"
       ],
-      "fan_in": 2,
+      "fan_in": 4,
       "fan_out": 0
     },
     {
@@ -1558,9 +1563,10 @@
         "agent_takkub.pane_tools_dialog",
         "agent_takkub.settings_management.pages.roles_page",
         "agent_takkub.settings_management.repositories.mcps",
+        "agent_takkub.settings_management.services.relationships",
         "agent_takkub.settings_window"
       ],
-      "fan_in": 8,
+      "fan_in": 9,
       "fan_out": 3
     },
     {

@@ -125,6 +125,105 @@ class TestSecretMasking:
         assert detail.has_secrets is False
 
 
+class TestMaskedSecretWriteback:
+    """HIGH-1: an unrelated field edit must never clobber a stored
+    credential with the masked placeholder — the masked read → unrelated
+    edit → update → raw-store round trip the original review flagged as
+    untested."""
+
+    def test_editing_unrelated_field_preserves_real_env_secret(self) -> None:
+        mcps_repo.create(
+            CreateMcpCommand(name="obsidian", config=_draft(env={"API_TOKEN": "sekrit-value"}))
+        )
+        detail = mcps_repo.get("obsidian")  # masked read, like the real UI does
+        assert detail.config["env"]["API_TOKEN"] == "••••••••"
+
+        draft = _draft(command="new-command", env=dict(detail.config["env"]))
+        result = mcps_repo.update("obsidian", UpdateMcpCommand(config=draft))
+        assert result.ok
+
+        raw = shared_dev_tools.list_master_mcps()["obsidian"]
+        assert raw["command"] == "new-command"
+        assert raw["env"]["API_TOKEN"] == "sekrit-value"
+
+    def test_editing_the_secret_field_itself_still_takes_the_new_value(self) -> None:
+        mcps_repo.create(
+            CreateMcpCommand(name="obsidian", config=_draft(env={"API_TOKEN": "old-value"}))
+        )
+        draft = _draft(env={"API_TOKEN": "brand-new-value"})
+        result = mcps_repo.update("obsidian", UpdateMcpCommand(config=draft))
+        assert result.ok
+        raw = shared_dev_tools.list_master_mcps()["obsidian"]
+        assert raw["env"]["API_TOKEN"] == "brand-new-value"
+
+    def test_credential_bearing_dsn_arg_survives_unrelated_edit(self) -> None:
+        mcps_repo.create(
+            CreateMcpCommand(
+                name="obsidian",
+                config=_draft(args=["--dsn", "postgres://user:sekrit@host/db"]),
+            )
+        )
+        detail = mcps_repo.get("obsidian")
+        assert "sekrit" not in str(detail.config["args"])
+
+        draft = _draft(command="new-command", args=list(detail.config["args"]))
+        result = mcps_repo.update("obsidian", UpdateMcpCommand(config=draft))
+        assert result.ok
+        raw = shared_dev_tools.list_master_mcps()["obsidian"]
+        assert raw["args"] == ["--dsn", "postgres://user:sekrit@host/db"]
+
+    def test_secret_header_survives_unrelated_edit(self) -> None:
+        mcps_repo.create(CreateMcpCommand(name="obsidian", config=_draft()))
+        # Headers aren't form-editable — hand-add one the way an existing
+        # ~/.claude.json import might carry, mirroring
+        # test_update_preserves_unknown_config_keys's pattern.
+        raw = shared_dev_tools.list_master_mcps()
+        raw["obsidian"]["headers"] = {"Authorization": "Bearer sekrit-token"}
+        shared_dev_tools.SHARED_MCP_FILE.write_text(
+            __import__("json").dumps({"mcpServers": raw}), encoding="utf-8"
+        )
+
+        result = mcps_repo.update("obsidian", UpdateMcpCommand(config=_draft(command="new-cmd")))
+        assert result.ok
+        cfg = shared_dev_tools.list_master_mcps()["obsidian"]
+        assert cfg["headers"]["Authorization"] == "Bearer sekrit-token"
+        assert cfg["command"] == "new-cmd"
+
+
+class TestMcpRoleVariantRegen:
+    """HIGH-4: MCP role-variant regeneration is checked and transactional —
+    a failure rolls the master config back too instead of leaving
+    master/variants disagreeing."""
+
+    def test_create_regenerates_role_variant(self) -> None:
+        pane_tools_policy.set_role_items("backend", "mcps", [])
+        mcps_repo.create(CreateMcpCommand(name="obsidian", config=_draft()))
+        pane_tools_policy.set_role_items("backend", "mcps", ["obsidian"])
+        result = mcps_repo.update("obsidian", UpdateMcpCommand(config=_draft(command="changed")))
+        assert result.ok
+        variant = shared_dev_tools._role_variant_path("backend")
+        data = __import__("json").loads(variant.read_text(encoding="utf-8"))
+        assert "obsidian" in data["mcpServers"]
+        assert data["mcpServers"]["obsidian"]["command"] == "changed"
+
+    def test_variant_regen_failure_rolls_back_master_write(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mcps_repo.create(CreateMcpCommand(name="obsidian", config=_draft()))
+        before = shared_dev_tools.list_master_mcps()
+
+        def boom() -> tuple[bool, list[str]]:
+            return False, ["backend"]
+
+        monkeypatch.setattr(shared_dev_tools, "regen_role_variants_checked", boom)
+        result = mcps_repo.update(
+            "obsidian", UpdateMcpCommand(config=_draft(command="should-not-stick"))
+        )
+        assert not result.ok
+        after = shared_dev_tools.list_master_mcps()
+        assert after == before  # master rolled back, not left half-applied
+
+
 class TestList:
     def test_list_includes_managed_and_user(self) -> None:
         shared_dev_tools.ensure_browser_mcps()

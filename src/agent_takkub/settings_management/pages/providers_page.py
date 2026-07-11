@@ -131,6 +131,21 @@ class ProvidersPage(ManagementPage):
         hook-attribute like `load_rows`/`on_select`, not a Qt signal, so the
         page stays importable/testable without a shell present."""
 
+    def toggle_provider_requested(self, name: str, disabled: bool) -> tuple[bool, str] | None:
+        """Reassigned by the window shell to route an enable/disable change
+        through `orchestrator.toggle_provider` — the operational API that
+        both persists AND broadcasts a `[system] <provider> ENABLED/DISABLED`
+        notice to every live Lead pane (the legacy Settings window's toggle
+        already routes through it; this page didn't, MED-1). A
+        hook-attribute like `manage_roles_requested`, not a Qt signal, so
+        the page stays importable/testable without a shell/orchestrator
+        present.
+
+        Return `None` when unset — `_save()` then falls back to
+        repository-only persistence (no broadcast). Return `(ok, message)`
+        when the shell handled it end to end."""
+        return None
+
     # ── data plumbing ─────────────────────────────────────────────
 
     def _load_rows(self) -> list[tuple[str, str]]:
@@ -197,12 +212,21 @@ class ProvidersPage(ManagementPage):
     def _save(self) -> bool:
         if self._current is None:
             return False
-        result = providers_repo.update(
-            self._current.name, UpdateProviderCommand(enabled=self.enabled_toggle.isChecked())
-        )
-        if not result.ok:
-            self._show_error(result.message)
-            return False
+        enabled = self.enabled_toggle.isChecked()
+        if enabled != self._current.enabled:
+            hook_result = self.toggle_provider_requested(self._current.name, not enabled)
+            if hook_result is not None:
+                ok, message = hook_result
+                if not ok:
+                    self._show_error(message)
+                    return False
+            else:
+                result = providers_repo.update(
+                    self._current.name, UpdateProviderCommand(enabled=enabled)
+                )
+                if not result.ok:
+                    self._show_error(result.message)
+                    return False
 
         self._dirty = False
         self.footer.set_dirty(False)

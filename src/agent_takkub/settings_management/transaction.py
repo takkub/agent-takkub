@@ -17,6 +17,26 @@ from pathlib import Path
 _log = logging.getLogger(__name__)
 
 
+class TransactionRollbackError(RuntimeError):
+    """Raised from ``FileTransaction.__exit__`` when the ``with`` block
+    failed AND best-effort rollback could not fully restore every
+    snapshotted path.
+
+    Callers must not treat this like an ordinary operation failure: some of
+    the involved stores may still hold the failed write's partial state,
+    not the pre-transaction one. ``__cause__`` is the original exception
+    that triggered the transaction; ``paths`` names what rollback could not
+    restore.
+    """
+
+    def __init__(self, original: BaseException, paths: list[str]) -> None:
+        self.paths = paths
+        super().__init__(
+            f"{original}; ROLLBACK INCOMPLETE for: {', '.join(paths)} "
+            "— these stores may still hold partially-applied changes"
+        )
+
+
 class FileTransaction:
     """Snapshot a set of paths; restore all of them if the block raises.
 
@@ -43,17 +63,30 @@ class FileTransaction:
         self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: object
     ) -> bool:
         if exc_type is not None:
-            self.rollback()
+            errors = self.rollback()
+            if errors:
+                raise TransactionRollbackError(exc, errors) from exc
         return False
 
-    def rollback(self) -> None:
-        """Best-effort restore of every snapshotted path to its pre-``with`` state."""
+    def rollback(self) -> list[str]:
+        """Best-effort restore of every snapshotted path to its pre-``with``
+        state, via temp-write + atomic replace (never a direct in-place
+        write, so a crash mid-restore can't leave a half-written file).
+
+        Returns the paths (as ``str``) that could NOT be restored — empty
+        means every path was fully restored.
+        """
+        errors: list[str] = []
         for p, content in self._snapshots.items():
             try:
                 if content is None:
                     p.unlink(missing_ok=True)
                 else:
                     p.parent.mkdir(parents=True, exist_ok=True)
-                    p.write_bytes(content)
+                    tmp = p.parent / f"{p.name}.rollback.tmp"
+                    tmp.write_bytes(content)
+                    tmp.replace(p)
             except OSError as e:
                 _log.warning("FileTransaction.rollback: could not restore %s: %s", p, e)
+                errors.append(str(p))
+        return errors

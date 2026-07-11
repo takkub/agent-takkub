@@ -25,6 +25,7 @@ from ... import skill_audit, skill_scan
 from ... import skill_policy as skill_policy_mod
 from ..commands import CreateSkillCommand, UpdateSkillCommand
 from ..models import Capability, DeletePlan, OperationResult, Ownership, SkillDetail, SkillSummary
+from ..transaction import FileTransaction
 
 
 class SkillNotFoundError(KeyError):
@@ -86,6 +87,16 @@ def _signature(skill: skill_scan.SkillInfo) -> str:
         content = b""
     policy_blob = json.dumps(skill_policy_mod.load_policy(), sort_keys=True).encode("utf-8")
     return hashlib.sha256(content + policy_blob).hexdigest()[:16]
+
+
+def assignable_names() -> list[str]:
+    """Every skill name eligible for a Role's Access-tab checklist — same
+    roots the Skills page lists from (`_all_roots()`: project + shipped),
+    not just the project root. A Role's Access tab that instead imports
+    `skill_scan` directly with a narrower root set (``Path.cwd()`` only)
+    can't assign a shipped skill this repository shows elsewhere in the
+    same UI (LOW-2)."""
+    return sorted(s.name for s in skill_scan.scan_skills(_all_roots()))
 
 
 def list(query: str = "") -> list[SkillSummary]:  # contract name (models.py Repository contract)
@@ -229,16 +240,29 @@ def delete(entity_id: str, confirmed_plan_version: str) -> OperationResult:
         )
 
     skill = _find(entity_id)
-    if skill is None or not skill_scan.delete_skill(skill.path):
-        return OperationResult(ok=False, message="ลบ skill ไม่สำเร็จ", entity_id=entity_id)
+    if skill is None:
+        return OperationResult(ok=False, message="ไม่พบ skill นี้", entity_id=entity_id)
 
-    policy = skill_policy_mod.load_policy()
-    changed = False
-    for role, names in policy.items():
-        if entity_id in names:
-            policy[role] = [n for n in names if n != entity_id]
-            changed = True
-    if changed:
-        skill_policy_mod.save_policy(policy)
+    # `skill.path` is the SKILL.md file — FileTransaction snapshots/restores
+    # that one file if the block raises (HIGH-3). `delete_skill` on a nested
+    # layout removes the whole skill folder (scripts/references alongside
+    # SKILL.md); only the SKILL.md content itself is restorable this way —
+    # a documented FileTransaction limitation (files, not directory trees),
+    # matching the review's exact ask (restore the skill *file*).
+    paths = [skill.path, skill_policy_mod.SKILL_POLICY_FILE]
+    try:
+        with FileTransaction(paths):
+            if not skill_scan.delete_skill(skill.path):
+                raise RuntimeError("ลบ skill ไม่สำเร็จ")
+            policy = skill_policy_mod.load_policy()
+            changed = False
+            for role, names in policy.items():
+                if entity_id in names:
+                    policy[role] = [n for n in names if n != entity_id]
+                    changed = True
+            if changed and not skill_policy_mod.save_policy(policy):
+                raise RuntimeError("ลบ skill-policy reference ไม่สำเร็จ")
+    except (RuntimeError, OSError) as e:
+        return OperationResult(ok=False, message=str(e), entity_id=entity_id)
 
     return OperationResult(ok=True, entity_id=entity_id)

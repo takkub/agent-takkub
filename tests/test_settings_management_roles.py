@@ -12,7 +12,14 @@ from pathlib import Path
 
 import pytest
 
-from agent_takkub import custom_roles, pane_tools_policy, provider_config, roles, skill_policy
+from agent_takkub import (
+    custom_roles,
+    pane_tools_policy,
+    provider_config,
+    roles,
+    shared_dev_tools,
+    skill_policy,
+)
 from agent_takkub.settings_management.commands import (
     CreateRoleCommand,
     RoleAccessDraft,
@@ -34,6 +41,9 @@ def redirect_stores(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setattr(skill_policy, "SKILL_POLICY_FILE", tmp_path / "skill-policy.json")
     monkeypatch.setattr(provider_config, "_CONFIG_PATH", tmp_path / "role-providers.json")
     monkeypatch.setattr(provider_config, "_BASE_DIR", tmp_path)
+    # Access-tab MCP writes now regen role variants (HIGH-4) — redirect the
+    # master file so that never touches the real ~/.takkub runtime dir.
+    monkeypatch.setattr(shared_dev_tools, "SHARED_MCP_FILE", tmp_path / "shared-mcp.json")
 
     saved = dict(roles._CUSTOM)
     roles._CUSTOM.clear()
@@ -265,6 +275,117 @@ class TestRoleRepositoryCreateUpdateDelete:
         assert "data-eng" not in custom_roles.load_custom_roles()
         assert "data-eng" not in pane_tools_policy.load_policy()
         assert "data-eng" not in skill_policy.load_policy()
+
+
+class TestRelationshipWriteExceptionBoundary:
+    """MED-5: a filesystem error from any of the four Access-tab stores
+    must come back as a failed OperationResult, not escape write_access
+    uncaught (provider_config.save_role_overrides can raise OSError from
+    mkdir/write/replace — only RuntimeError was caught before)."""
+
+    def test_provider_store_oserror_is_caught_not_propagated(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def boom(*a: object, **k: object) -> None:
+            raise OSError("simulated disk failure")
+
+        monkeypatch.setattr(provider_config, "save_role_overrides", boom)
+        result = relationships.write_access("backend", _access_draft(provider="codex"))
+        assert not result.ok
+        assert "simulated disk failure" in result.message
+
+    def test_late_store_failure_rolls_back_earlier_stores_in_same_call(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Seed pre-call state, then attempt a write that changes BOTH the
+        # provider and skills before the (last) mcps write fails.
+        relationships.write_access("backend", _access_draft(provider="codex"))
+
+        def boom(role: str, kind: str, names: list[str]) -> bool:
+            raise OSError("simulated disk failure")
+
+        monkeypatch.setattr(pane_tools_policy, "set_role_items", boom)
+        result = relationships.write_access(
+            "backend",
+            _access_draft(provider="claude", skills=["cockpit-ui-style"], mcps=["playwright"]),
+        )
+        assert not result.ok
+        # Both the provider write and the skills write already landed on
+        # disk earlier in this same call — both must be rolled back.
+        assert provider_config.provider_for("backend") == "codex"
+        assert relationships.get_role_access("backend").skills == ()
+
+
+class TestAggregateTransactionRollback:
+    """HIGH-2: role create/update/delete is one aggregate transaction —
+    a failure partway through must roll back every store already written
+    AND never stage the live in-memory registry mutation."""
+
+    def test_create_rolls_back_registry_and_file_when_access_write_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(skill_policy, "set_role_skills", lambda role, names: False)
+        result = roles_repo.create(
+            CreateRoleCommand(
+                name="data-eng",
+                general=_general_draft(),
+                access=_access_draft(skills=["cockpit-ui-style"]),
+            )
+        )
+        assert not result.ok
+        assert "data-eng" not in custom_roles.load_custom_roles()
+        assert not custom_roles.role_file_path("data-eng").is_file()
+        # Live registry never staged — the role must not be spawnable.
+        assert roles.by_name("data-eng") is None
+
+    def test_update_rolls_back_registry_when_md_write_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        roles_repo.create(
+            CreateRoleCommand(name="data-eng", general=_general_draft(), access=_access_draft())
+        )
+
+        from pathlib import Path as _Path
+
+        real_write_text = _Path.write_text
+
+        def flaky_write_text(self: _Path, *a: object, **k: object) -> int:
+            if self.name == "data-eng.md":
+                raise OSError("simulated disk failure")
+            return real_write_text(self, *a, **k)
+
+        monkeypatch.setattr(_Path, "write_text", flaky_write_text)
+
+        result = roles_repo.update(
+            "data-eng",
+            UpdateRoleCommand(general=_general_draft(label="Hacked Label"), access=_access_draft()),
+        )
+        assert not result.ok
+        # Registry entry rolled back to the pre-update label.
+        assert custom_roles.load_custom_roles()["data-eng"].label == "Data Eng"
+        # Live registry never re-staged with the failed update's label.
+        assert roles.by_name("data-eng").label == "Data Eng"
+
+    def test_delete_rolls_back_registry_when_skill_policy_cleanup_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        roles_repo.create(
+            CreateRoleCommand(
+                name="data-eng",
+                general=_general_draft(),
+                access=_access_draft(skills=["cockpit-ui-style"]),
+            )
+        )
+        plan = roles_repo.delete_plan("data-eng")
+
+        monkeypatch.setattr(skill_policy, "save_policy", lambda policy: False)
+        result = roles_repo.delete("data-eng", plan.version)
+
+        assert not result.ok
+        assert "data-eng" in custom_roles.load_custom_roles()
+        assert custom_roles.role_file_path("data-eng").is_file()
+        # Live registry never unregistered — the role stays spawnable.
+        assert roles.by_name("data-eng") is not None
 
 
 class TestReferenceAwareDelete:

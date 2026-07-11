@@ -566,20 +566,34 @@ def regen_role_variants() -> int:
     return count
 
 
-def _write_role_variants() -> None:
-    """Regenerate every per-role MCP variant file from the master
-    shared-mcp.json. Called after ensure_browser_mcps/ensure_user_mcps
-    mutates the master so variants stay in sync.
+def role_variant_paths() -> list[pathlib.Path]:
+    """Every per-role MCP variant file path `regen_role_variants_checked`
+    may write — for callers that need to include them in a
+    :class:`~.settings_management.transaction.FileTransaction` alongside
+    the master file and pane-tools policy, so a partial variant regen
+    rolls back together with them instead of leaving master/policy/variants
+    disagreeing (HIGH-4)."""
+    from .pane_tools_policy import load_policy
 
-    Failure is non-fatal: a missing variant simply causes the orchestrator
-    to fall back to the master file for that role (back-compat).
+    roles = set(_ROLE_MCP_POLICY) | set(load_policy())
+    return [_role_variant_path(r) for r in sorted(roles)]
+
+
+def regen_role_variants_checked() -> tuple[bool, list[str]]:
+    """Regenerate every per-role MCP variant file from the master
+    shared-mcp.json, same filtering as `_write_role_variants`, but
+    CHECKED: returns ``(all_ok, failed_role_names)`` instead of only
+    logging a warning per failure. Lets a caller inside a
+    `FileTransaction` treat a partial variant write as a transaction
+    failure (roll back master/policy alongside it) rather than silently
+    leaving master/policy/variants disagreeing (HIGH-4).
     """
     if not SHARED_MCP_FILE.is_file():
-        return
+        return True, []
     try:
         master = json.loads(SHARED_MCP_FILE.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return
+        return False, ["<master>"]
     master_servers: dict = master.get("mcpServers") or {}
     # Union of built-in roles and file-override roles: a role granted MCPs
     # only via pane-tools.json still needs its variant generated, otherwise
@@ -587,6 +601,7 @@ def _write_role_variants() -> None:
     from .pane_tools_policy import load_policy
 
     roles = set(_ROLE_MCP_POLICY) | set(load_policy())
+    failed: list[str] = []
     for role in sorted(roles):
         allowed = effective_mcps(role, _ROLE_MCP_POLICY.get(role))
         if allowed is None:
@@ -602,7 +617,22 @@ def _write_role_variants() -> None:
                 encoding="utf-8",
             )
         except OSError as e:
-            _log.warning("_write_role_variants: could not write %s: %s", role, e)
+            _log.warning("regen_role_variants_checked: could not write %s: %s", role, e)
+            failed.append(role)
+    return not failed, failed
+
+
+def _write_role_variants() -> None:
+    """Regenerate every per-role MCP variant file from the master
+    shared-mcp.json. Called after ensure_browser_mcps/ensure_user_mcps
+    mutates the master so variants stay in sync.
+
+    Best-effort wrapper around `regen_role_variants_checked` for callers
+    that don't need to know which roles failed — a missing variant simply
+    causes the orchestrator to fall back to the master file for that role
+    (back-compat).
+    """
+    regen_role_variants_checked()
 
 
 # Patterns that indicate a credential-bearing MCP entry.  Any entry that
@@ -651,6 +681,60 @@ def mask_secrets(cfg: dict) -> dict:
     args = out.get("args")
     if isinstance(args, list):
         out["args"] = [re.sub(r"(://[^/@\s]+):[^/@\s]+@", r"\1:••••••••@", str(a)) for a in args]
+    return out
+
+
+def restore_masked_secrets(cfg: dict, raw_existing: dict) -> dict:
+    """Undo ``mask_secrets()`` for fields the caller didn't actually change.
+
+    ``cfg`` is a draft the UI submitted after loading a masked ``get()`` and
+    letting the user edit some fields — any secret value the user never
+    touched still equals the placeholder ``mask_secrets(raw_existing)``
+    produced. Restore those fields (env values, header values, DSN
+    credentials embedded in args) to their raw value from ``raw_existing``;
+    anything that differs from the masked baseline is a real edit and
+    passes through untouched.
+
+    Prevents the HIGH-1 data-loss bug: saving an unrelated field change
+    (e.g. only ``command``) would otherwise clobber a stored credential
+    with ``••••••••`` because the draft's env/args came from a masked
+    ``get()`` and were written back verbatim. Never raises.
+    """
+    masked_existing = mask_secrets(raw_existing)
+    out = dict(cfg)
+
+    raw_env = raw_existing.get("env") or {}
+    masked_env = masked_existing.get("env") or {}
+    if isinstance(out.get("env"), dict):
+        out["env"] = {
+            k: (raw_env[k] if k in masked_env and v == masked_env[k] and k in raw_env else v)
+            for k, v in out["env"].items()
+        }
+
+    raw_headers = raw_existing.get("headers") or {}
+    masked_headers = masked_existing.get("headers") or {}
+    if isinstance(out.get("headers"), dict):
+        out["headers"] = {
+            k: (
+                raw_headers[k]
+                if k in masked_headers and v == masked_headers[k] and k in raw_headers
+                else v
+            )
+            for k, v in out["headers"].items()
+        }
+
+    raw_args = raw_existing.get("args") or []
+    masked_args = masked_existing.get("args") or []
+    if isinstance(out.get("args"), list):
+        out["args"] = [
+            (
+                raw_args[i]
+                if i < len(masked_args) and v == masked_args[i] and i < len(raw_args)
+                else v
+            )
+            for i, v in enumerate(out["args"])
+        ]
+
     return out
 
 
