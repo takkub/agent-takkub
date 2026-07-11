@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from agent_takkub import config
+import pytest
+
+from agent_takkub import config, skill_scan
 from agent_takkub.skill_scan import (
     SkillInfo,
     create_skill,
     delete_skill,
+    ensure_project_skill_links,
     is_writable_skill,
     scan_skills,
     validate_skill_name,
@@ -197,3 +200,153 @@ class TestIsWritableSkill:
         create_skill(tmp_path, "x", "x", "x")
         skill_md = tmp_path / ".claude" / "skills" / "x" / "SKILL.md"
         assert is_writable_skill(skill_md, []) is False
+
+
+# ── Central-home skills: real file lives in project_skills_dir, project path
+# holds a junction (Windows) / symlink (POSIX). These run natively on both
+# OSes — the CI win+mac matrix is what exercises both link kinds — so the
+# create→link→scan→delete round-trip is real, not mocked.
+@pytest.fixture
+def central_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point PROJECT_SKILLS_HOME at a throwaway dir so central skills never
+    touch the developer's real ~/.agent-takkub."""
+    home = tmp_path / "central" / "project-skills"
+    monkeypatch.setattr(config, "PROJECT_SKILLS_HOME", home)
+    return home
+
+
+class TestCentralSkills:
+    def test_create_writes_central_and_links_into_project(
+        self, tmp_path: Path, central_home: Path
+    ) -> None:
+        project = tmp_path / "proj"
+        project.mkdir()
+        ok, err = create_skill(
+            project, "central-skill", "does a thing", "body", project_ns="myproj"
+        )
+        assert ok, err
+        # Real file lives centrally, keyed by project_ns…
+        central_md = central_home / "myproj" / "central-skill" / "SKILL.md"
+        assert central_md.is_file()
+        assert "does a thing" in central_md.read_text(encoding="utf-8")
+        # …and the project path resolves (through the link) to that same file.
+        link = project / ".claude" / "skills" / "central-skill"
+        assert link.exists()
+        assert (link / "SKILL.md").read_text(encoding="utf-8") == central_md.read_text(
+            encoding="utf-8"
+        )
+
+    def test_scan_discovers_central_skill_via_project_path(
+        self, tmp_path: Path, central_home: Path
+    ) -> None:
+        project = tmp_path / "proj"
+        project.mkdir()
+        create_skill(project, "linked-skill", "d", "b", project_ns="myproj")
+        # scan_skills only looks at <project>/.claude/skills — the link makes
+        # the central skill show up there transparently (this is why no
+        # spawn-time root change is needed).
+        names = {s.name for s in scan_skills(project)}
+        assert "linked-skill" in names
+
+    def test_is_writable_skill_via_central_extra_dir(
+        self, tmp_path: Path, central_home: Path
+    ) -> None:
+        project = tmp_path / "proj"
+        project.mkdir()
+        create_skill(project, "w-skill", "d", "b", project_ns="myproj")
+        skill_md = next(s.path for s in scan_skills(project) if s.name == "w-skill")
+        # The junctioned path resolves into the central store, so the project
+        # root alone doesn't mark it writable — the central extra_dir does.
+        assert is_writable_skill(skill_md, [project]) is False
+        assert (
+            is_writable_skill(skill_md, [project], extra_dirs=[config.project_skills_dir("myproj")])
+            is True
+        )
+
+    def test_delete_removes_link_and_central_real_dir(
+        self, tmp_path: Path, central_home: Path
+    ) -> None:
+        project = tmp_path / "proj"
+        project.mkdir()
+        create_skill(project, "gone", "d", "b", project_ns="myproj")
+        skill_md = next(s.path for s in scan_skills(project) if s.name == "gone")
+
+        assert delete_skill(skill_md) is True
+
+        # Both the project-side link AND the central real dir are gone — the
+        # junction-safe delete removed the reparse point first, so the central
+        # store wasn't deleted THROUGH a still-live link (and isn't orphaned).
+        assert not (project / ".claude" / "skills" / "gone").exists()
+        assert not (central_home / "myproj" / "gone").exists()
+        assert scan_skills(project) == []
+
+    def test_ensure_links_recreates_missing_link(self, tmp_path: Path, central_home: Path) -> None:
+        project = tmp_path / "proj"
+        project.mkdir()
+        create_skill(project, "relink", "d", "b", project_ns="myproj")
+        link = project / ".claude" / "skills" / "relink"
+        # Simulate a lost link between sessions (remove just the reparse point).
+        skill_scan._remove_link(link)
+        assert not link.exists()
+
+        errors = ensure_project_skill_links(project, "myproj")
+        assert errors == []
+        assert (link / "SKILL.md").is_file()
+
+    def test_ensure_links_does_not_clobber_real_user_skill(
+        self, tmp_path: Path, central_home: Path
+    ) -> None:
+        project = tmp_path / "proj"
+        # A real (committed) user skill sharing the name must be left intact.
+        real = project / ".claude" / "skills" / "shared"
+        real.mkdir(parents=True)
+        (real / "SKILL.md").write_text(
+            "---\nname: shared\ndescription: user-owned\n---\nuser body", encoding="utf-8"
+        )
+        # A central skill of the same name also exists.
+        (central_home / "myproj" / "shared").mkdir(parents=True)
+        (central_home / "myproj" / "shared" / "SKILL.md").write_text(
+            "---\nname: shared\ndescription: central\n---\ncentral body", encoding="utf-8"
+        )
+        ensure_project_skill_links(project, "myproj")
+        # The user's file is untouched (not replaced by a link to central).
+        assert "user-owned" in (real / "SKILL.md").read_text(encoding="utf-8")
+
+    def test_create_rolls_back_central_on_link_failure(
+        self, tmp_path: Path, central_home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        project = tmp_path / "proj"
+        project.mkdir()
+        monkeypatch.setattr(skill_scan, "_make_link", lambda src, dst: "simulated link failure")
+        ok, err = create_skill(project, "doomed", "d", "b", project_ns="myproj")
+        assert ok is False
+        assert "junction" in err
+        # No orphaned central skill left behind (would never show in the project).
+        assert not (central_home / "myproj" / "doomed").exists()
+
+    def test_legacy_no_project_ns_writes_into_project(self, tmp_path: Path) -> None:
+        # Bare/no-active-project path (project_ns=None) keeps writing directly
+        # under the project root — no central store, no link.
+        ok, err = create_skill(tmp_path, "legacy", "d", "b")
+        assert ok, err
+        assert (tmp_path / ".claude" / "skills" / "legacy" / "SKILL.md").is_file()
+
+
+class TestConfigCentralPaths:
+    def test_project_skills_dir_under_home(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        d = config.project_skills_dir("myproj")
+        assert d.name == "myproj"
+        assert d.parent == config.PROJECT_SKILLS_HOME.resolve()
+
+    def test_project_skills_dir_rejects_traversal(self) -> None:
+        with pytest.raises(ValueError):
+            config.project_skills_dir("../escape")
+
+    def test_project_docs_dir_under_docs(self) -> None:
+        d = config.project_docs_dir("myproj")
+        assert d.name == "myproj"
+        assert d.parent == config.DOCS_DIR.resolve()
+
+    def test_project_docs_dir_rejects_traversal(self) -> None:
+        with pytest.raises(ValueError):
+            config.project_docs_dir("../../etc")

@@ -144,6 +144,50 @@ focused on. Treat that as your workspace root. Read files, run tests.
 """
 
 
+def _ensure_git_excluded(repo_cwd: Path, filename: str) -> None:
+    """Add `filename` to `<repo_cwd>/.git/info/exclude` so a cockpit-planted
+    file (AGENTS.md) never shows up in the user's `git status`.
+
+    `.git/info/exclude` is the per-clone, never-committed ignore list — the
+    right place for a locally-generated file, as opposed to `.gitignore`
+    which is the user's committed project config (we must never touch it).
+    No-op when:
+      - `repo_cwd` is not a git work tree (no `.git` dir), or
+      - the exact line already present.
+    Never raises — an ignore-write failure just means the file stays visible
+    in `git status`, which is cosmetic, not a spawn blocker. Only walks up
+    to the nearest `.git` so a subdir cwd inside a repo still finds it.
+    """
+    try:
+        git_dir: Path | None = None
+        for base in (repo_cwd, *repo_cwd.parents):
+            cand = base / ".git"
+            if cand.is_dir():
+                git_dir = cand
+                break
+            if cand.is_file():
+                # A git worktree/submodule uses a `.git` FILE ("gitdir: ...").
+                # Skip auto-exclude there rather than parse it — the marker
+                # already says "do not commit"; visibility is the only cost.
+                return
+        if git_dir is None:
+            return
+        exclude = git_dir / "info" / "exclude"
+        line = filename
+        existing = ""
+        if exclude.is_file():
+            existing = exclude.read_text(encoding="utf-8", errors="replace")
+            lines = {ln.strip() for ln in existing.splitlines()}
+            if line in lines:
+                return
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        prefix = "" if (not existing or existing.endswith("\n")) else "\n"
+        with exclude.open("a", encoding="utf-8") as f:
+            f.write(f"{prefix}{line}\n")
+    except OSError:
+        return
+
+
 def ensure_agents_md(spawn_cwd: str | Path, extra: str = "") -> tuple[bool, str]:
     """Plant `<spawn_cwd>/AGENTS.md` with the cockpit cheatsheet.
 
@@ -186,6 +230,11 @@ def ensure_agents_md(spawn_cwd: str | Path, extra: str = "") -> tuple[bool, str]
             if TAKKUB_MARKER not in first:
                 return False, "user-owned"
         target.write_text(CODEX_AGENTS_MD + extra, encoding="utf-8")
+        # We just planted (or refreshed) a file WE own — keep it out of the
+        # user's `git status` via the per-clone exclude list. Only ever runs
+        # for the marker-tagged file, never a user-owned AGENTS.md (that path
+        # returned "user-owned" above and never reaches here).
+        _ensure_git_excluded(spawn_path, "AGENTS.md")
         return True, "written"
     except OSError as e:
         return False, f"write failed: {e}"

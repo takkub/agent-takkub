@@ -30,12 +30,12 @@ Working directory ของคุณจะถูก inject โดย Lead ตอ
 ### 🗂️ ไฟล์ชั่วคราว / อ่านไฟล์ (issue #1, #104)
 - ไฟล์ชั่วคราว/draft/screenshot → เก็บที่ `$TAKKUB_ARTIFACTS_DIR` เท่านั้น ห้ามลง repo ของ project (evidence เฉพาะงานตัวเอง → `$TAKKUB_ARTIFACTS_DIR/docs/` แนะนำ กัน evidence scan หยิบภาพข้าม pane ผิด #109)
 - อ่านไฟล์ด้วย **Read tool** เสมอ ห้ามใช้ shell one-liner เปิด path ยาว (`cat`/`type` ไฟล์ยาว)
-- **guide จริงเขียนลง `docs/guides/<YYYY-MM-DD>-<topic>.md`** ของ project (md ปกติ — ไม่ใช่ artifacts dir)
+- **guide จริงเขียนลง `$TAKKUB_DOCS_DIR/guides/<YYYY-MM-DD>-<topic>.md`** (central, นอก repo — cockpit ตั้ง `$TAKKUB_DOCS_DIR` ให้ทุก pane)
 
 ### 🖨️ ต้องการ HTML ให้ user เปิดอ่านง่าย?
 project นี้มี converter pipeline อยู่แล้ว — เขียน md เสร็จแล้วรันแปลงเป็น self-contained HTML ได้:
 ```bash
-python -m agent_takkub.design_review_html docs/guides/<date>-<topic>.md
+python -m agent_takkub.design_review_html "$TAKKUB_DOCS_DIR/guides/<date>-<topic>.md"
 ```
 (ใช้เฉพาะเมื่อ task ระบุว่าต้องการ HTML — ถ้าไม่ระบุ md เปล่าก็พอ)
 
@@ -53,7 +53,7 @@ python -m agent_takkub.design_review_html docs/guides/<date>-<topic>.md
 3. **นิยาม audience**: ผู้อ่านคือใคร (มือใหม่/dev มีประสบการณ์) รู้อะไรมาก่อนแล้ว จะเจอ doc นี้ตอนไหนของ journey
 4. **outline โครงก่อนเขียน prose** — เลือกประเภทตาม Divio system ให้ตรงงาน
 5. เขียน draft → ทดสอบทุก code snippet ในสภาพแวดล้อมจริงถ้าทำได้
-6. เขียนลง `docs/guides/<date>-<topic>.md` — แปลงเป็น HTML ถ้า task ต้องการ (ดูด้านบน)
+6. เขียนลง `$TAKKUB_DOCS_DIR/guides/<date>-<topic>.md` — แปลงเป็น HTML ถ้า task ต้องการ (ดูด้านบน)
 7. รายงานกลับ Lead ผ่าน `takkub done` พร้อม path ของไฟล์เสมอ
 
 ## การสื่อสารระหว่าง agents (ผ่าน takkub CLI)
@@ -91,7 +91,7 @@ takkub done
 
 หรือพร้อม note สรุป (แนะนำ — Lead ใช้ตัดสินใจขั้นถัดไป):
 ```bash
-takkub done "เขียน setup guide onboarding dev ใหม่ + ทดสอบทุกคำสั่งจริง · docs/guides/2026-07-09-dev-onboarding.md"
+takkub done "เขียน setup guide onboarding dev ใหม่ + ทดสอบทุกคำสั่งจริง · \$TAKKUB_DOCS_DIR/guides/2026-07-09-dev-onboarding.md"
 ```
 
 orchestrator จะแจ้ง Lead + ปิด pane ของคุณอัตโนมัติ ห้ามละเว้นไม่ว่ากรณีใด

@@ -1,7 +1,15 @@
 """Tests for the rtk install helper.
 
-We patch `rtk_binary_available` in tests that exercise the install path so
-the suite works on machines where the user hasn't yet downloaded rtk.exe.
+Post central-home migration (A3): rtk is a PERSONAL, central toggle — a flag
+file under ``SETTINGS_HOME`` — not a per-project ``.claude/settings.json``
+hook. The hook itself is injected at spawn time via ``hook_wiring`` /
+``--settings``. `install_rtk` flips the flag + scrubs any legacy per-project
+entry; `uninstall_rtk` removes that legacy entry.
+
+Every test that touches the enable flag monkeypatches ``config.SETTINGS_HOME``
+to a tmp dir so it never reads/writes the developer's real ``~/.takkub``.
+Install-path tests also stub ``rtk_binary_available`` so the suite works on
+machines where the user hasn't yet downloaded rtk.exe.
 """
 
 from __future__ import annotations
@@ -11,50 +19,134 @@ from pathlib import Path
 
 import pytest
 
-from agent_takkub import rtk_helper
+from agent_takkub import config, rtk_helper
 
 
-class TestIsInstalled:
-    def test_returns_false_when_no_settings_dir(self, tmp_path: Path) -> None:
-        assert rtk_helper.is_rtk_installed(tmp_path) is False
+@pytest.fixture(autouse=True)
+def _isolate_settings_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point the central flag file at a throwaway SETTINGS_HOME."""
+    monkeypatch.setattr(config, "SETTINGS_HOME", tmp_path / "settings-home")
 
-    def test_returns_false_for_none(self) -> None:
-        assert rtk_helper.is_rtk_installed(None) is False
 
-    def test_returns_false_when_settings_missing_rtk_hook(self, tmp_path: Path) -> None:
-        claude = tmp_path / ".claude"
-        claude.mkdir()
-        (claude / "settings.json").write_text(
-            json.dumps({"hooks": {"PreToolUse": [{"matcher": "Read", "hooks": []}]}}),
-            encoding="utf-8",
-        )
-        assert rtk_helper.is_rtk_installed(tmp_path) is False
-
-    def test_returns_true_when_rtk_hook_present(self, tmp_path: Path) -> None:
-        claude = tmp_path / ".claude"
-        claude.mkdir()
-        (claude / "settings.json").write_text(
-            json.dumps(
+def _write_project_rtk(project_root: Path, extra: dict | None = None) -> Path:
+    """Write a legacy project settings.json carrying the rtk Bash hook (plus
+    any `extra` top-level keys) and return the file path."""
+    claude = project_root / ".claude"
+    claude.mkdir(parents=True, exist_ok=True)
+    data: dict = {
+        "hooks": {
+            "PreToolUse": [
                 {
-                    "hooks": {
-                        "PreToolUse": [
-                            {
-                                "matcher": "Bash",
-                                "hooks": [{"type": "command", "command": "rtk hook claude"}],
-                            }
-                        ]
-                    }
+                    "matcher": "Bash",
+                    "hooks": [{"type": "command", "command": "rtk hook claude"}],
                 }
-            ),
-            encoding="utf-8",
-        )
-        assert rtk_helper.is_rtk_installed(tmp_path) is True
+            ]
+        }
+    }
+    if extra:
+        data.update(extra)
+    path = claude / "settings.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    return path
 
-    def test_tolerates_flag_variants_in_hook_command(self, tmp_path: Path) -> None:
-        """A hook command like `rtk hook claude --ultra-compact` should still
-        be recognised — we match on a substring marker, not exact equality."""
-        claude = tmp_path / ".claude"
-        claude.mkdir()
+
+class TestEnableFlag:
+    def test_disabled_by_default(self) -> None:
+        assert rtk_helper.rtk_hook_enabled() is False
+        assert rtk_helper.is_rtk_installed() is False
+        # `project_root` arg accepted but ignored (state is central now).
+        assert rtk_helper.is_rtk_installed(Path("/whatever")) is False
+
+    def test_set_and_read(self) -> None:
+        rtk_helper.set_rtk_enabled(True)
+        assert rtk_helper.rtk_hook_enabled() is True
+        assert rtk_helper.is_rtk_installed() is True
+        rtk_helper.set_rtk_enabled(False)
+        assert rtk_helper.rtk_hook_enabled() is False
+
+    def test_tolerates_malformed_flag(self) -> None:
+        path = rtk_helper._enabled_flag_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{not json", encoding="utf-8")
+        assert rtk_helper.rtk_hook_enabled() is False
+
+
+class TestShouldInject:
+    def test_requires_enabled_and_binary(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(rtk_helper, "rtk_binary_available", lambda: True)
+        assert rtk_helper.rtk_should_inject() is False  # not enabled yet
+        rtk_helper.set_rtk_enabled(True)
+        assert rtk_helper.rtk_should_inject() is True
+
+    def test_false_when_binary_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        rtk_helper.set_rtk_enabled(True)
+        monkeypatch.setattr(rtk_helper, "rtk_binary_available", lambda: False)
+        assert rtk_helper.rtk_should_inject() is False
+
+    def test_hook_fragment_shape(self) -> None:
+        frag = rtk_helper.rtk_hook_fragment()
+        assert frag["matcher"] == "Bash"
+        assert frag["hooks"][0]["command"] == "rtk hook claude"
+        # Fresh dict each call — a caller can't mutate shared state.
+        assert rtk_helper.rtk_hook_fragment() is not frag
+
+
+class TestInstall:
+    @pytest.fixture(autouse=True)
+    def _stub_binary(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(rtk_helper, "rtk_binary_available", lambda: True)
+
+    def test_enables_central_flag(self, tmp_path: Path) -> None:
+        ok, msg = rtk_helper.install_rtk()
+        assert ok, msg
+        assert rtk_helper.rtk_hook_enabled() is True
+        # No project file is written when no project_root is given.
+
+    def test_cleans_up_legacy_project_hook(self, tmp_path: Path) -> None:
+        project = tmp_path / "proj"
+        path = _write_project_rtk(project, extra={"permissions": {"allow": ["Bash(ls *)"]}})
+
+        ok, _ = rtk_helper.install_rtk(project)
+        assert ok
+        assert rtk_helper.rtk_hook_enabled() is True
+
+        data = json.loads(path.read_text(encoding="utf-8"))
+        # User's own key preserved…
+        assert data["permissions"]["allow"] == ["Bash(ls *)"]
+        # …but the rtk hook is gone (and empty containers pruned).
+        assert "hooks" not in data
+
+    def test_refuses_when_binary_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(rtk_helper, "rtk_binary_available", lambda: False)
+        ok, msg = rtk_helper.install_rtk()
+        assert not ok
+        assert "not on path" in msg.lower()
+        assert rtk_helper.rtk_hook_enabled() is False
+
+
+class TestUninstall:
+    def test_removes_rtk_keeps_other_keys(self, tmp_path: Path) -> None:
+        project = tmp_path / "proj"
+        other_hook = {"matcher": "Read", "hooks": [{"type": "command", "command": "echo r"}]}
+        path = _write_project_rtk(project, extra={"permissions": {"deny": ["x"]}})
+        # Add a second matcher so we verify only the rtk entry is scrubbed.
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["hooks"]["PreToolUse"].append(other_hook)
+        path.write_text(json.dumps(data), encoding="utf-8")
+
+        ok, msg = rtk_helper.uninstall_rtk(project)
+        assert ok, msg
+
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert data["permissions"]["deny"] == ["x"]
+        matchers = [e["matcher"] for e in data["hooks"]["PreToolUse"]]
+        assert matchers == ["Read"]  # Bash/rtk entry removed, Read kept
+
+    def test_keeps_coexisting_bash_hook(self, tmp_path: Path) -> None:
+        """A Bash matcher that also holds a non-rtk hook keeps that hook."""
+        project = tmp_path / "proj"
+        claude = project / ".claude"
+        claude.mkdir(parents=True)
         (claude / "settings.json").write_text(
             json.dumps(
                 {
@@ -63,10 +155,8 @@ class TestIsInstalled:
                             {
                                 "matcher": "Bash",
                                 "hooks": [
-                                    {
-                                        "type": "command",
-                                        "command": "rtk hook claude --ultra-compact",
-                                    }
+                                    {"type": "command", "command": "node guard.mjs"},
+                                    {"type": "command", "command": "rtk hook claude"},
                                 ],
                             }
                         ]
@@ -75,127 +165,37 @@ class TestIsInstalled:
             ),
             encoding="utf-8",
         )
-        assert rtk_helper.is_rtk_installed(tmp_path) is True
-
-    def test_returns_false_on_malformed_json(self, tmp_path: Path) -> None:
-        claude = tmp_path / ".claude"
-        claude.mkdir()
-        (claude / "settings.json").write_text("{not valid json", encoding="utf-8")
-        assert rtk_helper.is_rtk_installed(tmp_path) is False
-
-
-class TestInstall:
-    @pytest.fixture(autouse=True)
-    def _stub_binary(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Pretend rtk is on PATH for every install test."""
-        monkeypatch.setattr(rtk_helper, "rtk_binary_available", lambda: True)
-
-    def test_creates_settings_file_from_scratch(self, tmp_path: Path) -> None:
-        ok, msg = rtk_helper.install_rtk(tmp_path)
-        assert ok, msg
-
-        path = tmp_path / ".claude" / "settings.json"
-        assert path.is_file()
-        data = json.loads(path.read_text(encoding="utf-8"))
-        bash_entries = [e for e in data["hooks"]["PreToolUse"] if e["matcher"] == "Bash"]
-        assert len(bash_entries) == 1
-        assert bash_entries[0]["hooks"][0]["command"] == "rtk hook claude"
-
-    def test_merges_into_existing_settings(self, tmp_path: Path) -> None:
-        claude = tmp_path / ".claude"
-        claude.mkdir()
-        existing = {
-            "permissions": {"allow": ["Bash(ls *)"]},
-            "hooks": {
-                "PreToolUse": [
-                    {"matcher": "Read", "hooks": [{"type": "command", "command": "echo r"}]}
-                ]
-            },
-        }
-        (claude / "settings.json").write_text(json.dumps(existing), encoding="utf-8")
-
-        ok, _ = rtk_helper.install_rtk(tmp_path)
+        ok, _ = rtk_helper.uninstall_rtk(project)
         assert ok
-
         data = json.loads((claude / "settings.json").read_text(encoding="utf-8"))
-        # Existing permissions section untouched
-        assert data["permissions"]["allow"] == ["Bash(ls *)"]
-        # Existing Read matcher untouched
-        matchers = [e["matcher"] for e in data["hooks"]["PreToolUse"]]
-        assert "Read" in matchers and "Bash" in matchers
-        # rtk hook was appended to a Bash matcher
-        bash_entry = next(e for e in data["hooks"]["PreToolUse"] if e["matcher"] == "Bash")
-        assert any("rtk hook claude" in h["command"] for h in bash_entry["hooks"])
+        bash = next(e for e in data["hooks"]["PreToolUse"] if e["matcher"] == "Bash")
+        cmds = [h["command"] for h in bash["hooks"]]
+        assert cmds == ["node guard.mjs"]
 
-    def test_idempotent_when_already_installed(self, tmp_path: Path) -> None:
-        rtk_helper.install_rtk(tmp_path)
-        # Capture the file's first-install state
-        path = tmp_path / ".claude" / "settings.json"
-        before = path.read_text(encoding="utf-8")
-
-        ok, msg = rtk_helper.install_rtk(tmp_path)
+    def test_noop_when_no_file(self, tmp_path: Path) -> None:
+        ok, msg = rtk_helper.uninstall_rtk(tmp_path / "nope")
         assert ok
-        assert "already" in msg.lower()
-        # File unchanged on second install.
-        assert path.read_text(encoding="utf-8") == before
+        assert "nothing to clean" in msg.lower()
 
-    def test_appends_rtk_to_existing_bash_matcher(self, tmp_path: Path) -> None:
-        """A Bash matcher may already exist (e.g. cam-worker-guard.mjs).
-        rtk should slot in alongside, not replace it."""
-        claude = tmp_path / ".claude"
-        claude.mkdir()
+    def test_noop_when_no_rtk_hook(self, tmp_path: Path) -> None:
+        project = tmp_path / "proj"
+        claude = project / ".claude"
+        claude.mkdir(parents=True)
         (claude / "settings.json").write_text(
-            json.dumps(
-                {
-                    "hooks": {
-                        "PreToolUse": [
-                            {
-                                "matcher": "Bash",
-                                "hooks": [{"type": "command", "command": "node guard.mjs"}],
-                            }
-                        ]
-                    }
-                }
-            ),
-            encoding="utf-8",
+            json.dumps({"permissions": {"allow": []}}), encoding="utf-8"
         )
-
-        ok, _ = rtk_helper.install_rtk(tmp_path)
+        ok, msg = rtk_helper.uninstall_rtk(project)
         assert ok
+        assert "nothing to clean" in msg.lower()
 
-        data = json.loads((claude / "settings.json").read_text(encoding="utf-8"))
-        bash_entry = next(e for e in data["hooks"]["PreToolUse"] if e["matcher"] == "Bash")
-        commands = [h["command"] for h in bash_entry["hooks"]]
-        assert "node guard.mjs" in commands
-        assert any("rtk hook claude" in c for c in commands)
-
-    def test_refuses_malformed_existing_settings(self, tmp_path: Path) -> None:
-        claude = tmp_path / ".claude"
-        claude.mkdir()
+    def test_leaves_malformed_untouched(self, tmp_path: Path) -> None:
+        project = tmp_path / "proj"
+        claude = project / ".claude"
+        claude.mkdir(parents=True)
         (claude / "settings.json").write_text("{bad json", encoding="utf-8")
-
-        ok, msg = rtk_helper.install_rtk(tmp_path)
+        ok, msg = rtk_helper.uninstall_rtk(project)
         assert not ok
         assert "malformed" in msg.lower()
-
-
-class TestBinaryGuard:
-    def test_refuses_install_when_rtk_not_on_path(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(rtk_helper, "rtk_binary_available", lambda: False)
-        ok, msg = rtk_helper.install_rtk(tmp_path)
-        assert not ok
-        assert "not on path" in msg.lower()
-
-    def test_refuses_install_when_project_root_missing(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(rtk_helper, "rtk_binary_available", lambda: True)
-        bogus = tmp_path / "does-not-exist"
-        ok, msg = rtk_helper.install_rtk(bogus)
-        assert not ok
-        assert "not a directory" in msg.lower()
 
 
 class TestFindRtkBinaryCache:

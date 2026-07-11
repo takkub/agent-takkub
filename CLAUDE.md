@@ -43,16 +43,16 @@ Lead spawn เฉพาะ role ที่จำเป็นต่องานน
 
 **Pipeline (3 hops):**
 ```bash
-# Hop 1: QA smoke + shots
-takkub assign --role qa --cwd <web> "smoke /login → /dashboard · save shots to runtime/exports/\$(date +%F)/<project>/screenshots/"
+# Hop 1: QA smoke + shots — เขียนลง $TAKKUB_ARTIFACTS_DIR (central, นอก repo)
+takkub assign --role qa --cwd <web> "smoke /login → /dashboard · save shots to \$TAKKUB_ARTIFACTS_DIR/screenshots/"
 # (รอ qa done)
-# Hop 2: critic + gemini parallel
+# Hop 2: critic + gemini parallel — design-review เขียนลง $TAKKUB_DOCS_DIR/design-review/
 takkub assign --role critic --cwd <web> "design review screenshots — เสนอ เพิ่ม/ลบ/ปรับ" &
 takkub assign --role gemini --cwd <web> "เตรียม view images ที่ critic จะส่งมาผ่าน takkub send"   &
 wait
-# (รอ critic done → อ่าน docs/design-review/<date>-<view>.md)
+# (รอ critic done → อ่าน $TAKKUB_DOCS_DIR/design-review/<date>-<view>.md)
 # Hop 3: frontend implement proposals (focus high-impact ก่อน)
-takkub assign --role frontend --cwd <web> "implement proposals จาก docs/design-review/<date>-<view>.md"
+takkub assign --role frontend --cwd <web> "implement proposals จาก \$TAKKUB_DOCS_DIR/design-review/<date>-<view>.md"
 ```
 
 routing_planner ใส่ `gemini` เป็น cross_check ของ `critic` อัตโนมัติเมื่อ user พูด "design review / รีวิว UI"
@@ -250,10 +250,10 @@ Context ตอน spawn **ไม่ได้ preload vault** — เบาไว
 
 เมื่อ user สั่ง **"รีวิวระบบ / อธิบายระบบ / ระบบทำงานยังไง / explain the architecture / system overview"** (intent = เข้าใจว่าระบบทำงานยังไง ไม่ใช่ code review/design review) → `routing_planner.classify()` คืน `ActionKind.EXPLAIN_SYSTEM`. Lead ทำ **ไม่ใช่ตอบในแชตเฉยๆ** แต่ผลิต **HTML explainer**:
 
-1. วิเคราะห์ codebase ของโปรเจคนั้น → เขียน system-overview เป็น **markdown** (source) ที่ `docs/system-overview/<YYYY-MM-DD>-<project>.md` (front matter `shots:` ใส่ diagram/screenshot ถ้ามี)
+1. วิเคราะห์ codebase ของโปรเจคนั้น → เขียน system-overview เป็น **markdown** (source) ที่ `$TAKKUB_DOCS_DIR/system-overview/<YYYY-MM-DD>-<project>.md` (central, นอก repo · front matter `shots:` ใส่ diagram/screenshot ถ้ามี)
 2. รัน converter → **self-contained HTML**:
    ```bash
-   python -m agent_takkub.design_review_html docs/system-overview/<date>-<project>.md
+   python -m agent_takkub.design_review_html "$TAKKUB_DOCS_DIR/system-overview/<date>-<project>.md"
    ```
 3. ส่ง path `.html` ให้ user (คลิกใน pane เปิด browser ได้เลย — terminal คลิก path ได้)
 
@@ -267,10 +267,10 @@ Context ตอน spawn **ไม่ได้ preload vault** — เบาไว
 
 เมื่อ user สั่ง **"เขียน setup guide / how-to / checklist / คู่มือ / วิธีตั้งค่า / วิธีใช้ / เอกสารติดตั้ง / เขียน docs ให้ user"** (intent = ผลิต **เอกสาร user-facing ให้คนอ่าน/ทำตาม** ไม่ใช่ explain ระบบ ไม่ใช่ code/design review) → `routing_planner.classify()` คืน `ActionKind.GENERATE_GUIDE_HTML`. Lead ผลิต **md source + HTML** เหมือน explainer:
 
-1. เขียน guide เป็น **markdown** ที่ `docs/guides/<YYYY-MM-DD>-<topic>.md`
+1. เขียน guide เป็น **markdown** ที่ `$TAKKUB_DOCS_DIR/guides/<YYYY-MM-DD>-<topic>.md` (central, นอก repo)
 2. รัน converter → **self-contained HTML**:
    ```bash
-   python -m agent_takkub.design_review_html docs/guides/<date>-<topic>.md
+   python -m agent_takkub.design_review_html "$TAKKUB_DOCS_DIR/guides/<date>-<topic>.md"
    ```
 3. ส่ง path `.html` ให้ user
 

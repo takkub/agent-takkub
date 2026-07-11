@@ -702,6 +702,10 @@ class TestNewSkillForm:
         monkeypatch.setattr(config, "REPO_ROOT", tmp_path / "no-bundle-here")
         monkeypatch.setattr(config, "ASSETS_ROOT", tmp_path / "no-bundle-here")
         monkeypatch.setattr(settings_window, "_allowed_project_roots", lambda _project: [tmp_path])
+        # Route central skill storage (create_skill writes here + junctions
+        # back into tmp_path/.claude/skills) at a throwaway dir so tests never
+        # write into the real ~/.agent-takkub / repo project-skills.
+        monkeypatch.setattr(config, "PROJECT_SKILLS_HOME", tmp_path / "central-skills")
 
     def test_create_writes_file_and_refreshes_list(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -259,11 +259,60 @@ CUSTOM_AGENTS_DIR = SETTINGS_HOME / "agents"
 RUNTIME_DIR = DATA_HOME / "runtime"
 PORT_FILE = RUNTIME_DIR / "port"
 EVENTS_LOG = RUNTIME_DIR / "events.log"
+# Central home for custom *skills* a project's New-Skill form creates —
+# the writable counterpart of the read-only shipped `SKILLS_DIR` bundle,
+# mirroring how CUSTOM_AGENTS_DIR is the writable counterpart of AGENTS_DIR
+# for custom roles. Skills MUST still be discoverable at `<project>/.claude/
+# skills/<name>` (claude auto-discovers from cwd; codex/agy walk up), so a
+# per-skill junction (win) / symlink (mac) links the project path back here.
+# Keeping the real files central means the New-Skill button never dirties the
+# user's repo (`git status` stays clean, nothing to accidentally commit).
+PROJECT_SKILLS_HOME = DATA_HOME / "project-skills"
+# Central home for LLM-authored docs (design-review / reviews / guides /
+# system-overview) a pane produces per the CLAUDE.md routing. Panes read the
+# effective path from the `TAKKUB_DOCS_DIR` env var (`pane_env`), so the
+# instruction wording points at `$TAKKUB_DOCS_DIR/...` instead of a repo-
+# relative `docs/...` that would land inside the user's project.
+DOCS_DIR = RUNTIME_DIR / "docs"
 
 
 def ensure_runtime() -> Path:
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     return RUNTIME_DIR
+
+
+def project_skills_dir(project_ns: str) -> Path:
+    """Central storage dir for one project's custom skills:
+    ``PROJECT_SKILLS_HOME/<project_ns>``.
+
+    Each skill lives at ``<this>/<name>/SKILL.md``; the project side gets a
+    junction/symlink ``<project>/.claude/skills/<name>`` pointing here so
+    every CLI still discovers it from cwd. ``project_ns`` is validated as a
+    path component (same rule as roles/projects) so a crafted name can't
+    escape ``PROJECT_SKILLS_HOME``.
+    """
+    ns = validate_name(project_ns, "project")
+    base = PROJECT_SKILLS_HOME.resolve()
+    d = (PROJECT_SKILLS_HOME / ns).resolve()
+    if d != base and base not in d.parents:
+        raise ValueError(f"project-skills path escapes home: {project_ns!r}")
+    return d
+
+
+def project_docs_dir(project_ns: str) -> Path:
+    """Central per-project docs dir: ``RUNTIME_DIR/docs/<project_ns>``.
+
+    Stamped into every pane's env as ``TAKKUB_DOCS_DIR`` (see
+    ``pane_env._apply_artifacts_dir``) so design-review/reviews/guides/
+    system-overview markdown+html land out of the user's repo. Same
+    traversal-safe validation as ``project_skills_dir``.
+    """
+    ns = validate_name(project_ns, "project")
+    base = DOCS_DIR.resolve()
+    d = (DOCS_DIR / ns).resolve()
+    if d != base and base not in d.parents:
+        raise ValueError(f"docs path escapes home: {project_ns!r}")
+    return d
 
 
 def load_projects() -> dict:

@@ -72,3 +72,23 @@ class TestRender:
         assert "<style>" in html
         assert ":has(.badge.high)" in html  # cards coloured purely via CSS
         assert 'src="data:' not in html or True  # no external asset refs required
+
+    def test_expands_env_var_in_shot_path(self, tmp_path, monkeypatch):
+        """Central-home item C: a shot path written as
+        ``$TAKKUB_ARTIFACTS_DIR/screenshots/x.png`` in the front matter (not
+        shell-expanded, since it's file content) resolves at convert time."""
+        shots_dir = tmp_path / "artifacts" / "screenshots"
+        shots_dir.mkdir(parents=True)
+        (shots_dir / "login.png").write_bytes(_PNG)
+        monkeypatch.setenv("TAKKUB_ARTIFACTS_DIR", str(tmp_path / "artifacts"))
+        md = _write_review(tmp_path, "shots:\n  - $TAKKUB_ARTIFACTS_DIR/screenshots/login.png\n")
+        html = render(md).read_text(encoding="utf-8")
+        assert base64.b64encode(_PNG).decode() in html  # resolved + inlined
+        assert "screenshot not found" not in html
+
+    def test_absolute_shot_path_resolves(self, tmp_path):
+        shot = tmp_path / "abs.png"
+        shot.write_bytes(_PNG)
+        md = _write_review(tmp_path, f"shots:\n  - {shot}\n")
+        html = render(md).read_text(encoding="utf-8")
+        assert base64.b64encode(_PNG).decode() in html

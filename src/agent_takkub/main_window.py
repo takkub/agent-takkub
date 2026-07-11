@@ -973,6 +973,30 @@ class MainWindow(
             return
         self._open_project_tab(name)
 
+    def _ensure_project_skill_links(self, project_name: str) -> None:
+        """Re-link every central custom skill of `project_name` into its
+        project `.claude/skills/` (junction on Windows, symlink on POSIX).
+
+        Best-effort: any link failure is logged to the status bar, never
+        raised — a missing junction only means that one skill won't be
+        discovered from cwd, not a broken tab. Targets the same project path
+        the New-Skill form writes into (`_allowed_project_roots(...)[0]`)."""
+        try:
+            from . import skill_scan
+            from .lead_context import _allowed_project_roots
+
+            roots = _allowed_project_roots(project_name)
+            if not roots:
+                return
+            errors = skill_scan.ensure_project_skill_links(roots[0], project_name)
+            if errors:
+                self._status.showMessage(
+                    f"⚠ skill link repair: {len(errors)} issue(s) — {errors[0]}",
+                    8_000,
+                )
+        except Exception as e:  # never let link repair break tab open
+            self._status.showMessage(f"⚠ skill link repair failed: {e}", 6_000)
+
     def _open_project_tab(self, project_name: str) -> None:
         """Create a ProjectTab for `project_name`, register a fresh Lead
         pane in the orchestrator's per-project namespace, spawn the
@@ -998,6 +1022,10 @@ class MainWindow(
         # Set as active so spawn picks up lead_cwd() for the new project.
         set_active_project(project_name)
         self._refresh_project_list()
+        # Repair the central-skills junctions/symlinks for this project so a
+        # skill created in an earlier session (or a link broken between
+        # sessions) is discoverable from cwd before Lead/teammates spawn.
+        self._ensure_project_skill_links(project_name)
 
         tab = ProjectTab(project_name, lead_pane=None)
         idx = self.tabs.addTab(tab, project_name)
