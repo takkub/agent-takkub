@@ -19,8 +19,13 @@ from unittest.mock import MagicMock
 def _make_pane():
     """Build a minimal AgentPane without the Qt event loop."""
     from agent_takkub.agent_pane import AgentPane
+    from agent_takkub.agent_pane_model import AgentPaneModel
+    from agent_takkub.roles import by_name
 
     pane = AgentPane.__new__(AgentPane)
+
+    # session/_tp_total_bytes/... live on self.model (issue #105 Phase A).
+    pane.model = AgentPaneModel(by_name("backend"))
 
     # Minimal state that __init__ would normally set.
     pane._render_buf = bytearray()

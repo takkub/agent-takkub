@@ -19,6 +19,8 @@ from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QFrame
 
 from agent_takkub.agent_pane import AgentPane
+from agent_takkub.agent_pane_model import AgentPaneModel
+from agent_takkub.roles import by_name
 
 
 def _bare_pane() -> AgentPane:
@@ -26,10 +28,12 @@ def _bare_pane() -> AgentPane:
 
     Built via __new__ + QFrame.__init__ so the widget has a real C++ object
     (sip.isdeleted works) without paying for full AgentPane construction
-    (TerminalWidget / QWebEngine).
+    (TerminalWidget / QWebEngine). session/state live on self.model
+    (issue #105 Phase A) — seed a bare model too.
     """
     pane = AgentPane.__new__(AgentPane)
     QFrame.__init__(pane)
+    pane.model = AgentPaneModel(by_name("backend"))
     pane._tick_timer = QTimer(pane)
     pane._session_generation = 1
     pane.session = None
