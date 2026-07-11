@@ -17,6 +17,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QDialog, QMessageBox
 
 from agent_takkub import (
+    claude_auth_config,
     custom_roles,
     pane_tools_policy,
     pipeline_config,
@@ -25,6 +26,7 @@ from agent_takkub import (
     provider_state,
     settings_window,
     shared_dev_tools,
+    user_profile,
 )
 from agent_takkub import roles as roles_mod
 
@@ -42,6 +44,12 @@ def _isolate_settings_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(provider_state, "_PATH", tmp_path / "disabled-providers.json")
     monkeypatch.setattr(pane_tools_policy, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
     monkeypatch.setattr(shared_dev_tools, "SHARED_MCP_FILE", tmp_path / "shared-mcp.json")
+    # Users view (VIEW_USERS) touches user_profile's registry on every
+    # SettingsWindow() construction (list_profiles() is called eagerly to
+    # build the Profiles/Claude Auth tabs) — isolate it like every other
+    # store above so tests never read/write the real ~/.takkub registry.
+    monkeypatch.setattr(user_profile, "_REGISTRY_PATH", tmp_path / "user-profiles.json")
+    monkeypatch.setattr(user_profile, "_DEFAULT_CONFIG_DIR", tmp_path / "default-claude-config")
     saved = dict(roles_mod._CUSTOM)
     roles_mod._CUSTOM.clear()
     yield
@@ -50,9 +58,9 @@ def _isolate_settings_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 class TestSettingsWindowStructure:
-    def test_has_seven_stacked_views(self) -> None:
+    def test_has_eight_stacked_views(self) -> None:
         dlg = settings_window.SettingsWindow()
-        assert dlg._stack.count() == 7
+        assert dlg._stack.count() == 8
         dlg.deleteLater()
 
     def test_initial_view_defaults_to_providers_roles(self) -> None:
@@ -519,4 +527,122 @@ class TestTemplatesView:
         row_widget = dlg._tpl_list.itemWidget(dlg._tpl_list.item(0))
         name_label = row_widget.layout().itemAt(0).widget()
         assert name_label.toolTip() == first_tpl["name"]
+        dlg.deleteLater()
+
+
+class TestUsersView:
+    """2026-07-11 — Users tab (#8), ported from the old standalone
+    open_user_profiles_dialog modal QDialog. Covers the task spec's tofu
+    checklist: nav item present + clickable, widgets present, real profile
+    list render, and the config-persist wiring (add/remove profile,
+    Claude Auth save) — mirrors TestNewRoleView's pattern for a non-matrix
+    "list ธรรมดา" view."""
+
+    def test_users_nav_item_present_and_clickable(self) -> None:
+        dlg = settings_window.SettingsWindow()
+        assert settings_window.VIEW_USERS in dlg._nav_buttons
+        dlg._nav_buttons[settings_window.VIEW_USERS].click()
+        assert dlg._stack.currentIndex() == settings_window.VIEW_USERS
+        assert dlg._content_title.text() == "Users"
+        dlg.deleteLater()
+
+    def test_profiles_tab_renders_real_profile_list(self, tmp_path: Path) -> None:
+        user_profile.add_profile("work", str(tmp_path / "work-cfg"), share_sessions=False)
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_USERS)
+        assert dlg._up_profile_list.count() == 2
+        assert dlg._up_auth_combo.count() == 2
+        assert "work" in dlg._up_profile_list.item(1).text()
+        dlg.deleteLater()
+
+    def test_remove_and_share_disabled_for_default_row(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_USERS)
+        dlg._up_profile_list.setCurrentRow(0)
+        assert dlg._up_remove_btn.isEnabled() is False
+        assert dlg._up_share_btn.isEnabled() is False
+        dlg.deleteLater()
+
+    def test_add_profile_persists_and_updates_both_tabs(self, tmp_path: Path) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_USERS)
+        dlg._up_add_name.setText("work")
+        dlg._up_add_dir.setText(str(tmp_path / "work-cfg"))
+        dlg._up_add_share_chk.setChecked(False)  # isolated — skip junction provisioning
+
+        dlg._on_users_add_profile_clicked()
+
+        assert any(p["name"] == "work" for p in user_profile.list_profiles())
+        assert dlg._up_profile_list.count() == 2
+        assert dlg._up_auth_combo.count() == 2
+        assert dlg._up_add_name.text() == ""  # form clears on success
+        dlg.deleteLater()
+
+    def test_invalid_profile_name_rejected_without_creating(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: None)
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_USERS)
+        dlg._up_add_name.setText("default")  # reserved name
+        dlg._up_add_dir.setText("whatever")
+
+        dlg._on_users_add_profile_clicked()
+
+        assert dlg._up_profile_list.count() == 1  # unchanged — still just default
+        dlg.deleteLater()
+
+    def test_remove_profile_persists_and_updates_auth_combo(self, tmp_path: Path) -> None:
+        user_profile.add_profile("work", str(tmp_path / "work-cfg"), share_sessions=False)
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_USERS)
+        row = next(
+            i
+            for i in range(dlg._up_profile_list.count())
+            if "work" in dlg._up_profile_list.item(i).text()
+        )
+        dlg._up_profile_list.setCurrentRow(row)
+
+        dlg._on_users_remove_profile_clicked()
+
+        assert not any(p["name"] == "work" for p in user_profile.list_profiles())
+        assert dlg._up_profile_list.count() == 1
+        assert dlg._up_auth_combo.count() == 1
+        dlg.deleteLater()
+
+    def test_claude_auth_save_persists_per_profile(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_USERS)
+        dlg._up_base_url.setText("https://api.deepseek.com/anthropic")
+        dlg._up_api_key.setText("sk-test")
+
+        dlg._on_users_save_auth_clicked()
+
+        saved = claude_auth_config.load_claude_auth(dlg._users_auth_dir("default"))
+        assert saved.base_url == "https://api.deepseek.com/anthropic"
+        assert saved.api_key == "sk-test"
+        assert "Claude auth saved" in dlg._up_status.text()
+        dlg.deleteLater()
+
+    def test_env_var_row_save_persists_extra_env(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_USERS)
+        # _load_users_auth_profile always seeds one blank row on open.
+        assert len(dlg._up_env_rows) == 1
+        name_edit, value_edit, _row = dlg._up_env_rows[0]
+        name_edit.setText("ANTHROPIC_DEFAULT_SONNET_MODEL")
+        value_edit.setText("qwen/qwen3-coder:free")
+
+        dlg._on_users_save_auth_clicked()
+
+        saved = claude_auth_config.load_claude_auth(dlg._users_auth_dir("default"))
+        assert saved.extra_env == {"ANTHROPIC_DEFAULT_SONNET_MODEL": "qwen/qwen3-coder:free"}
+        dlg.deleteLater()
+
+    def test_switching_auth_profile_reloads_fields(self, tmp_path: Path) -> None:
+        work_dir = tmp_path / "work-cfg"
+        user_profile.add_profile("work", str(work_dir), share_sessions=False)
+        claude_auth_config.save_claude_auth(
+            claude_auth_config.ClaudeAuthConfig(base_url="https://openrouter.ai/api"), work_dir
+        )
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_USERS)
+        assert dlg._up_base_url.text() == ""  # default profile has no override
+
+        idx = dlg._up_auth_combo.findText("work")
+        dlg._up_auth_combo.setCurrentIndex(idx)
+
+        assert dlg._up_base_url.text() == "https://openrouter.ai/api"
         dlg.deleteLater()

@@ -118,8 +118,8 @@
       "imported_by": [
         "agent_takkub.claude_auth_dialog",
         "agent_takkub.orchestrator",
-        "agent_takkub.spawn_engine",
-        "agent_takkub.user_actions"
+        "agent_takkub.settings_window",
+        "agent_takkub.spawn_engine"
       ],
       "fan_in": 4,
       "fan_out": 1
@@ -980,6 +980,7 @@
       "module": "agent_takkub.settings_window",
       "imports": [
         "agent_takkub",
+        "agent_takkub.claude_auth_config",
         "agent_takkub.cockpit_theme",
         "agent_takkub.custom_roles",
         "agent_takkub.lead_context",
@@ -991,13 +992,14 @@
         "agent_takkub.provider_state",
         "agent_takkub.roles",
         "agent_takkub.shared_dev_tools",
-        "agent_takkub.skill_audit"
+        "agent_takkub.skill_audit",
+        "agent_takkub.user_profile"
       ],
       "imported_by": [
         "agent_takkub.user_actions"
       ],
       "fan_in": 1,
-      "fan_out": 13
+      "fan_out": 15
     },
     {
       "module": "agent_takkub.shared_dev_tools",
@@ -1221,7 +1223,6 @@
       "module": "agent_takkub.user_actions",
       "imports": [
         "agent_takkub.auto_resume",
-        "agent_takkub.claude_auth_config",
         "agent_takkub.config",
         "agent_takkub.doctor",
         "agent_takkub.exec_mode",
@@ -1236,7 +1237,7 @@
         "agent_takkub.main_window"
       ],
       "fan_in": 1,
-      "fan_out": 11
+      "fan_out": 10
     },
     {
       "module": "agent_takkub.user_profile",
@@ -1253,10 +1254,11 @@
         "agent_takkub.main_window",
         "agent_takkub.pane_env",
         "agent_takkub.remote.notify",
+        "agent_takkub.settings_window",
         "agent_takkub.spawn_engine",
         "agent_takkub.user_actions"
       ],
-      "fan_in": 10,
+      "fan_in": 11,
       "fan_out": 2
     },
     {

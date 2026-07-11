@@ -533,6 +533,44 @@ def build_stylesheet(sans_family: str, mono_family: str) -> str:
     QScrollArea > QWidget > QWidget {{
         background: transparent;
     }}
+    QTabWidget::pane {{
+        border: 1px solid {BORDER_HAIRLINE};
+        border-radius: {RADIUS_MD}px;
+        background: {GROUND_PANEL};
+        top: -1px;
+    }}
+    QTabBar::tab {{
+        background: transparent;
+        color: {TEXT_MUTED};
+        padding: 8px 16px;
+        margin-right: 2px;
+        border: none;
+        border-bottom: 2px solid transparent;
+        font-weight: 600;
+        font-size: 12px;
+    }}
+    QTabBar::tab:hover {{
+        color: {TEXT_PRIMARY};
+    }}
+    QTabBar::tab:selected {{
+        color: {ACCENT_GOLD};
+        border-bottom: 2px solid {ACCENT_GOLD};
+    }}
+    QCheckBox {{
+        color: {TEXT_SECONDARY};
+        spacing: 8px;
+    }}
+    QCheckBox::indicator {{
+        width: 14px;
+        height: 14px;
+        border: 1px solid {BORDER_STRONG};
+        border-radius: 3px;
+        background: {GROUND_INPUT};
+    }}
+    QCheckBox::indicator:checked {{
+        background: {ACCENT_GOLD};
+        border: 1px solid {ACCENT_GOLD};
+    }}
     """
 
 
