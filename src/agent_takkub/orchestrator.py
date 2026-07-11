@@ -43,6 +43,7 @@ from .config import (
     lead_cwd,
     validate_name,
 )
+from .headless_pane import HeadlessPane
 from .lead_context import (  # re-exported for test imports
     _LEAD_GUARD_ALLOW_TOOLS,
     _LEAD_GUARD_WRITE_TOOLS,
@@ -149,6 +150,13 @@ from .vault_mirror import (  # re-exported for test + script imports
     prune_vault_logs,
     write_obsidian_graph_filter,
 )
+
+# #105 Phase B: the pane registry accepts either a real (display-backed)
+# AgentPane or a display-free HeadlessPane — both expose the same
+# session/state/signal surface (see headless_pane.py), so the engine drives
+# either one identically. HeadlessWindow registers HeadlessPane instances;
+# MainWindow keeps registering AgentPane instances unchanged.
+AgentPaneLike = AgentPane | HeadlessPane
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*[mABCDHJKSThlsu]")
 
@@ -657,7 +665,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         name, _ = active_project()
         return name or "default"
 
-    def _project_panes(self, project: str | None = None) -> dict[str, AgentPane]:
+    def _project_panes(self, project: str | None = None) -> dict[str, AgentPaneLike]:
         """Return (and lazily create) the inner pane dict for `project`.
 
         Always returns the same dict instance for a given project, so
@@ -665,7 +673,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         `self.panes` works for the active project."""
         return self._panes_by_project.setdefault(self._resolve_project(project), {})
 
-    def _project_ns_for_pane(self, pane: AgentPane) -> str | None:
+    def _project_ns_for_pane(self, pane: AgentPaneLike) -> str | None:
         """Reverse-lookup: which project namespace owns *pane* (identity
         match). Needed because every project's Lead pane shares
         ``role.name == LEAD.name``, so a role-name lookup alone can't tell
@@ -677,7 +685,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         return None
 
     @property
-    def panes(self) -> dict[str, AgentPane]:
+    def panes(self) -> dict[str, AgentPaneLike]:
         """Active project's pane dict. Backwards-compatible with the
         pre-Phase-1 single-namespace API — existing callers that read or
         write `orch.panes["backend"]` continue to operate on the active
@@ -4030,7 +4038,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         # by construction. Fall back to the role lookup for direct/test calls
         # where there is no signal sender.
         pane = self.sender()
-        if not isinstance(pane, AgentPane):
+        if not isinstance(pane, AgentPane | HeadlessPane):
             pane = self.panes.get(role_name)
         if pane is None or pane.session is None:
             return

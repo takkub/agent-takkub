@@ -1,0 +1,31 @@
+# agent-takkub headless (#105 Phase B). See docs/guides/2026-07-11-headless-docker.md.
+#
+# Mounts:
+#   - claude-creds: host ~/.claude bind-mounted straight onto the container's
+#     default-profile CLAUDE_CONFIG_DIR (config.default_claude_config_dir()
+#     resolves to $AGENT_TAKKUB_HOME/claude-config whenever AGENT_TAKKUB_HOME
+#     is set, which the Dockerfile does) — so the container inherits an
+#     already-logged-in `claude` session instead of needing an interactive
+#     OAuth login with no browser available inside the container.
+#   - codex-creds: host ~/.codex bind-mounted onto the container's own
+#     ~/.codex (codex reads $HOME/.codex, and HOME=/root here — no
+#     AGENT_TAKKUB_HOME-style override exists for codex in this codebase).
+#   - data: named volume for /data — projects.json, runtime/, agents/,
+#     remote.json, everything else config.DATA_HOME/SETTINGS_HOME touches —
+#     survives container restarts/recreates.
+services:
+  agent-takkub:
+    build: .
+    ports:
+      - "8899:8899"
+    environment:
+      - AGENT_TAKKUB_HOME=/data
+      - HOME=/root
+    volumes:
+      - data:/data
+      - ${HOME}/.claude:/data/claude-config
+      - ${HOME}/.codex:/root/.codex
+    restart: unless-stopped
+
+volumes:
+  data:

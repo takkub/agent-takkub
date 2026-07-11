@@ -37,6 +37,7 @@ from .config import (
     lead_cwd,
     validate_name,
 )
+from .headless_pane import HeadlessPane
 from .lead_context import (
     BIG_FILE_GUARD,
     STALE_FILE_GUARD,
@@ -564,7 +565,7 @@ class SpawnEngineMixin:
     # ──────────────────────────────────────────────────────────────
     # registration (main_window builds panes and registers them)
     # ──────────────────────────────────────────────────────────────
-    def register_pane(self, pane: AgentPane, project: str | None = None) -> None:
+    def register_pane(self, pane: AgentPane | HeadlessPane, project: str | None = None) -> None:
         self._project_panes(project)[pane.role.name] = pane
         pane.spawnRequested.connect(self._on_pane_spawn_clicked)
         pane.closeRequested.connect(self._on_pane_close_clicked)

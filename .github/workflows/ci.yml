@@ -8,13 +8,15 @@ on:
 
 jobs:
   lint-and-test:
-    # Cockpit ships on both Windows (ConPTY) and macOS (_pty_backend) — both
-    # must stay green. fail-fast: false so one OS failing doesn't cancel the
-    # other (we want to see exactly which platform broke).
+    # Cockpit ships on Windows (ConPTY), macOS (_pty_backend) and — since
+    # #105 Phase B's headless entrypoint — Linux (ptyprocess + a bare
+    # QCoreApplication, no display). All three must stay green. fail-fast:
+    # false so one OS failing doesn't cancel the others (we want to see
+    # exactly which platform broke).
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest]
+        os: [windows-latest, macos-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -24,6 +26,20 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
+
+      # No display server on the ubuntu runner — PyQt6/PyQt6-WebEngine need
+      # these shared libs to even import (offscreen QPA plugin still dlopens
+      # WebEngine's Chromium deps). Same list as the headless Docker image's
+      # Dockerfile.
+      - name: Install Qt runtime libs (Linux only)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libnss3 libxcomposite1 libxdamage1 libxrandr2 libgbm1 \
+            libxkbcommon0 libasound2t64 libatk1.0-0t64 libatk-bridge2.0-0t64 \
+            libcups2t64 libdrm2 libxfixes3 libxi6 libxtst6 libdbus-1-3 \
+            libglib2.0-0t64 libegl1 fonts-liberation
 
       - name: Install dependencies
         run: |
