@@ -52,11 +52,18 @@ repos:
         # bash -c wrapper: `language: system` can't resolve the relative .exe on
         # Windows during commit (WinError 2); the same pattern works for depgraph-fresh.
         # .venv resolves from the MAIN worktree root (git-common-dir) so the hook
-        # also works inside per-pane linked worktrees (#81), which have no .venv.
+        # also works inside per-pane linked worktrees (#81), which have no .venv —
+        # but that shared venv's editable install (a plain .pth sys.path entry) is
+        # baked to the MAIN worktree's src/, so a linked worktree's own new modules
+        # (added there, not yet merged) are invisible to it. PYTHONPATH is prepended
+        # with THIS checkout's src/ (git-dir, not git-common-dir) so Python resolves
+        # agent_takkub from wherever the hook is actually running — a no-op in the
+        # main worktree (cwd's src == the .pth target already) and the fix for a
+        # linked worktree.
         entry: >-
           bash -c '
           ROOT="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")";
-          "$ROOT/.venv/Scripts/lint-imports.exe"
+          PYTHONPATH="$(pwd)/src" "$ROOT/.venv/Scripts/lint-imports.exe"
           '
         pass_filenames: false
         stages: [pre-commit]
@@ -67,10 +74,13 @@ repos:
       - id: depgraph-fresh
         name: depgraph freshness check
         language: system
+        # See import-linter hook above for why PYTHONPATH is prepended with this
+        # checkout's own src/ — same shared-venv/linked-worktree module-visibility
+        # gap, same fix.
         entry: >-
           bash -c '
           ROOT="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")";
-          "$ROOT/.venv/Scripts/python.exe" tools/gen_import_graph.py &&
+          PYTHONPATH="$(pwd)/src" "$ROOT/.venv/Scripts/python.exe" tools/gen_import_graph.py &&
           git diff --exit-code docs/architecture/depgraph.json
           '
         pass_filenames: false

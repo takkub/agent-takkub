@@ -25,6 +25,7 @@ dependencies = [
 
 [project.scripts]
 agent-takkub = "agent_takkub.app:main"
+agent-takkub-headless = "agent_takkub.headless:main"
 takkub = "agent_takkub.cli:main"
 
 [project.optional-dependencies]
@@ -432,4 +433,41 @@ forbidden_modules = [
     "agent_takkub.app",
     "agent_takkub.cli",
     "agent_takkub.orchestrator",
+]
+
+[[tool.importlinter.contracts]]
+name = "headless-pane-no-display"
+type = "forbidden"
+# headless_pane (#105 Phase B) is the QObject-signal adapter that lets
+# HeadlessPane sit in the pane registry alongside AgentPane — it wraps
+# agent_pane_model.AgentPaneModel but must stay just as display-free: no
+# QWidget/QWebEngineView, no orchestrator (headless_window imports THIS
+# module, never the other way — importing orchestrator here would cycle).
+source_modules = ["agent_takkub.headless_pane"]
+forbidden_modules = [
+    "agent_takkub.agent_pane",
+    "agent_takkub.terminal_widget",
+    "agent_takkub.main_window",
+    "agent_takkub.app",
+    "agent_takkub.cli",
+    "agent_takkub.orchestrator",
+]
+
+[[tool.importlinter.contracts]]
+name = "headless-window-no-display"
+type = "forbidden"
+# headless_window (#105 Phase B) is MainWindow's display-free counterpart —
+# every pane it creates is a HeadlessPane, never a real AgentPane. It must
+# never import the desktop entry points directly (main_window, app). NOTE:
+# it can't also forbid agent_pane/terminal_widget here — it legitimately
+# imports orchestrator, which still imports agent_pane today for one
+# isinstance() check (existing architecture, not a Phase B leak); import-
+# linter's "forbidden" check is transitive, so that indirect edge would
+# always trip. headless_window's real "no display" guarantee is that it
+# never *constructs* an AgentPane/QWidget — see its module docstring — which
+# is a runtime property, not an import-graph one.
+source_modules = ["agent_takkub.headless_window"]
+forbidden_modules = [
+    "agent_takkub.main_window",
+    "agent_takkub.app",
 ]
