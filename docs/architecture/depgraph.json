@@ -257,6 +257,7 @@
         "agent_takkub.remote.notify",
         "agent_takkub.remote.tunnel",
         "agent_takkub.role_memory",
+        "agent_takkub.settings_window",
         "agent_takkub.shared_dev_tools",
         "agent_takkub.skill_audit",
         "agent_takkub.spawn_engine",
@@ -274,7 +275,7 @@
         "agent_takkub.vault_mirror",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 54,
+      "fan_in": 55,
       "fan_out": 0
     },
     {
@@ -986,6 +987,7 @@
         "agent_takkub",
         "agent_takkub.claude_auth_config",
         "agent_takkub.cockpit_theme",
+        "agent_takkub.config",
         "agent_takkub.custom_roles",
         "agent_takkub.lead_context",
         "agent_takkub.pane_tools_dialog",
@@ -997,13 +999,14 @@
         "agent_takkub.roles",
         "agent_takkub.shared_dev_tools",
         "agent_takkub.skill_audit",
+        "agent_takkub.skill_scan",
         "agent_takkub.user_profile"
       ],
       "imported_by": [
         "agent_takkub.user_actions"
       ],
       "fan_in": 1,
-      "fan_out": 15
+      "fan_out": 17
     },
     {
       "module": "agent_takkub.shared_dev_tools",
@@ -1038,8 +1041,10 @@
     {
       "module": "agent_takkub.skill_scan",
       "imports": [],
-      "imported_by": [],
-      "fan_in": 0,
+      "imported_by": [
+        "agent_takkub.settings_window"
+      ],
+      "fan_in": 1,
       "fan_out": 0
     },
     {

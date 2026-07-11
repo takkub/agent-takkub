@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import QDialog, QMessageBox
 
 from agent_takkub import (
     claude_auth_config,
+    config,
     custom_roles,
     pane_tools_policy,
     pipeline_config,
@@ -159,6 +160,88 @@ class TestNewRoleView:
         dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_NEW_ROLE)
         assert dlg._nr_color == project_nav._AVATAR_COLORS[0]
         assert dlg._nr_color in project_nav._AVATAR_COLORS
+        dlg.deleteLater()
+
+
+class TestNewRoleSkillPicker:
+    """New Role form's real-skill checkbox list (scans .claude/skills/)."""
+
+    @staticmethod
+    def _write_skill(root: Path, name: str, description: str) -> None:
+        d = root / ".claude" / "skills" / name
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: {description}\n---\n\nbody\n", encoding="utf-8"
+        )
+
+    def test_checkbox_list_populated_from_scanned_skills(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(config, "REPO_ROOT", tmp_path)
+        self._write_skill(tmp_path, "test-skill", "does a thing")
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_NEW_ROLE)
+        assert [s.name for s, _chk in dlg._nr_skill_checks] == ["test-skill"]
+        dlg.deleteLater()
+
+    def test_no_skills_dir_shows_empty_list_without_crashing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(config, "REPO_ROOT", tmp_path)
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_NEW_ROLE)
+        assert dlg._nr_skill_checks == []
+        dlg.deleteLater()
+
+    def test_selected_skill_embedded_into_default_template(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#4 in the task spec — an empty Instructions box still gets the
+        skill reference embedded into the generated default template."""
+        monkeypatch.setattr(config, "REPO_ROOT", tmp_path)
+        self._write_skill(tmp_path, "test-skill", "does a thing")
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_NEW_ROLE)
+        dlg._nr_name.setText("data-eng")
+        dlg._nr_label.setText("Data Eng")
+        dlg._nr_skill_checks[0][1].setChecked(True)
+
+        assert dlg._on_create_role_clicked() is True
+
+        role_file = custom_roles.CUSTOM_AGENTS_DIR / "data-eng.md"
+        text = role_file.read_text(encoding="utf-8")
+        assert "อ่าน skill: test-skill — does a thing" in text
+        dlg.deleteLater()
+
+    def test_selected_skill_embedded_into_typed_instructions(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(config, "REPO_ROOT", tmp_path)
+        self._write_skill(tmp_path, "test-skill", "does a thing")
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_NEW_ROLE)
+        dlg._nr_name.setText("data-eng")
+        dlg._nr_instructions.setPlainText("custom instructions here")
+        dlg._nr_skill_checks[0][1].setChecked(True)
+
+        assert dlg._on_create_role_clicked() is True
+
+        role_file = custom_roles.CUSTOM_AGENTS_DIR / "data-eng.md"
+        text = role_file.read_text(encoding="utf-8")
+        assert "custom instructions here" in text
+        assert "อ่าน skill: test-skill — does a thing" in text
+        dlg.deleteLater()
+
+    def test_unchecked_skill_not_embedded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(config, "REPO_ROOT", tmp_path)
+        self._write_skill(tmp_path, "test-skill", "does a thing")
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_NEW_ROLE)
+        dlg._nr_name.setText("data-eng")
+        dlg._nr_instructions.setPlainText("custom instructions here")
+
+        assert dlg._on_create_role_clicked() is True
+
+        role_file = custom_roles.CUSTOM_AGENTS_DIR / "data-eng.md"
+        text = role_file.read_text(encoding="utf-8")
+        assert "test-skill" not in text
         dlg.deleteLater()
 
 

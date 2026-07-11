@@ -169,6 +169,7 @@ forbidden_modules = [
     "agent_takkub.shared_dev_tools",
     "agent_takkub.user_profile",
     "agent_takkub.skill_audit",
+    "agent_takkub.skill_scan",
     "agent_takkub.verify",
     "agent_takkub.update_helper",
     "agent_takkub.update_worker",

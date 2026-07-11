@@ -86,6 +86,7 @@ from PyQt6.QtWidgets import (
 from . import __version__ as _COCKPIT_VERSION
 from . import (
     cockpit_theme,
+    config,
     custom_roles,
     pane_tools_dialog,
     pane_tools_policy,
@@ -95,10 +96,12 @@ from . import (
     provider_state,
     shared_dev_tools,
     skill_audit,
+    skill_scan,
     user_profile,
 )
 from . import roles as roles_mod
 from .claude_auth_config import ClaudeAuthConfig, load_claude_auth, save_claude_auth
+from .lead_context import _allowed_project_roots
 
 # ── view indices (QStackedWidget page order) ────────────────────
 VIEW_PIPELINE_BUILDER = 0
@@ -189,6 +192,21 @@ _NEW_ROLE_COLUMN_MCPS: dict[int, frozenset[str]] = {
     1: frozenset(),
     2: frozenset({"playwright", "chrome-devtools"}),
 }
+
+
+def _append_skill_references(instructions: str, skills: list[skill_scan.SkillInfo]) -> str:
+    """Embed a "## Skills ที่เกี่ยวข้อง" section listing every selected skill
+    into the role's generated instructions text — applies whether
+    `instructions` is the user's own typed text or the default template
+    (custom_roles._default_role_template), so a selected skill is never
+    silently dropped just because the Instructions box was left empty."""
+    lines = "\n".join(
+        f"- อ่าน skill: {s.name} — {s.description} ก่อนเริ่มงานที่เกี่ยวข้อง"
+        if s.description
+        else f"- อ่าน skill: {s.name} ก่อนเริ่มงานที่เกี่ยวข้อง"
+        for s in skills
+    )
+    return f"{instructions.rstrip()}\n\n## Skills ที่เกี่ยวข้อง\n{lines}\n"
 
 
 class SettingsWindow(QDialog):
@@ -933,6 +951,23 @@ class SettingsWindow(QDialog):
         tools_hint.setWordWrap(True)
         f_lay.addWidget(tools_hint)
 
+        f_lay.addWidget(QLabel("Skills ที่ role นี้ควรรู้จัก", form))
+        skills_hint = QLabel(
+            "สแกนจาก .claude/skills/ จริงในโปรเจค — ติ๊กเพื่อฝัง reference "
+            "เข้า instructions ให้อัตโนมัติตอนกด Create Role",
+            form,
+        )
+        skills_hint.setObjectName("panelHint")
+        skills_hint.setWordWrap(True)
+        f_lay.addWidget(skills_hint)
+        self._nr_skills_container = QWidget(form)
+        self._nr_skills_lay = QVBoxLayout(self._nr_skills_container)
+        self._nr_skills_lay.setContentsMargins(0, 2, 0, 2)
+        self._nr_skills_lay.setSpacing(4)
+        f_lay.addWidget(self._nr_skills_container)
+        self._nr_skill_checks: list[tuple[skill_scan.SkillInfo, QCheckBox]] = []
+        self._reload_new_role_skills()
+
         f_lay.addWidget(QLabel("Instructions", form))
         self._nr_instructions = QPlainTextEdit(form)
         self._nr_instructions.setPlaceholderText("บอก role ตัวเองว่าทำหน้าที่อะไร ขอบเขตงานคืออะไร...")
@@ -968,6 +1003,45 @@ class SettingsWindow(QDialog):
                 f"background:{color}; border-radius:10px; border: 2px solid {border};"
             )
 
+    def _new_role_skill_roots(self) -> list[Path]:
+        """Where to look for real `.claude/skills/` — every configured path
+        of the currently-active project first (so project-specific skills
+        win a name collision), plus the cockpit's own checkout as a
+        fallback/supplement (dogfooding: cockpit-ui-style etc. are relevant
+        to any role, and this keeps the picker non-empty even when no
+        project is open, e.g. in tests that construct SettingsWindow()
+        bare)."""
+        roots: list[Path] = []
+        if self._project:
+            roots.extend(_allowed_project_roots(self._project))
+        roots.append(config.REPO_ROOT)
+        return roots
+
+    def _reload_new_role_skills(self) -> None:
+        while self._nr_skills_lay.count():
+            item = self._nr_skills_lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        self._nr_skill_checks = []
+
+        skills = skill_scan.scan_skills(self._new_role_skill_roots())
+        if not skills:
+            empty = QLabel("ไม่พบ skill ใน .claude/skills/ ของโปรเจคนี้", self._nr_skills_container)
+            empty.setObjectName("panelHint")
+            self._nr_skills_lay.addWidget(empty)
+            return
+        for skill in skills:
+            text = f"{skill.name} — {skill.description}" if skill.description else skill.name
+            chk = QCheckBox(text, self._nr_skills_container)
+            chk.setToolTip(skill.description or skill.name)
+            chk.toggled.connect(self._mark_dirty)
+            self._nr_skills_lay.addWidget(chk)
+            self._nr_skill_checks.append((skill, chk))
+
+    def _selected_new_role_skills(self) -> list[skill_scan.SkillInfo]:
+        return [skill for skill, chk in self._nr_skill_checks if chk.isChecked()]
+
     def _on_create_role_clicked(self) -> bool:
         """Validate + persist the New Role form. Returns True iff the role
         was actually created — the footer Save & Apply button (#2) uses this
@@ -977,7 +1051,15 @@ class SettingsWindow(QDialog):
         label = self._nr_label.text().strip()
         column = self._nr_column.currentData()
         row = self._nr_row.value()
-        instructions = self._nr_instructions.toPlainText().strip() or None
+        instructions_text = self._nr_instructions.toPlainText().strip()
+        selected_skills = self._selected_new_role_skills()
+        if selected_skills:
+            base = instructions_text or custom_roles._default_role_template(
+                name, label or name.capitalize()
+            )
+            instructions = _append_skill_references(base, selected_skills)
+        else:
+            instructions = instructions_text or None
 
         ok, err = custom_roles.create_role(name, label, self._nr_color, column, row, instructions)
         if not ok:
@@ -1059,6 +1141,10 @@ class SettingsWindow(QDialog):
                 self._nr_default_tools_toggle,
             ):
                 w.blockSignals(False)
+        for _skill, chk in self._nr_skill_checks:
+            chk.blockSignals(True)
+            chk.setChecked(False)
+            chk.blockSignals(False)
         self._nr_color = project_nav._AVATAR_COLORS[0]
         self._update_swatch_selection()
         if clear_status:
