@@ -2,8 +2,11 @@
 
 Implements the gold/IBM-Plex design system from
 `docs/design-review/2026-07-10-cockpit-settings-design-system.md`: a
-titlebar + status strip + sidebar (PIPELINE/POLICY/ACCOUNT sections + "+ New
-Role") + content (header, an 8-view ``QStackedWidget``, footer).
+status strip + sidebar (PIPELINE/POLICY/ACCOUNT sections + "+ New
+Role") + content (header, an 8-view ``QStackedWidget``, footer). The
+original design also had a decorative faux titlebar above the status
+strip — dropped 2026-07-11 (UI walkthrough #55): it duplicated the OS
+title bar's "Takkub Cockpit — Settings" text with no other function.
 
 Phase 1 wired **Providers & Roles** and **New Role**. Phase 2 wires the
 remaining five:
@@ -282,7 +285,12 @@ class SettingsWindow(QDialog):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
-        outer.addWidget(self._build_titlebar())
+        # UI walkthrough #55 ("Header ซ้ำ 3 ที่ใน Settings") — the OS title
+        # bar (setWindowTitle above), this faux titlebar, and the status
+        # strip's brand label all said "takkub cockpit / settings" back to
+        # back. Dropped the faux titlebar (purely decorative — traffic-light
+        # dots + a duplicate title string); the OS titlebar + status strip
+        # brand still identify the window.
         outer.addWidget(self._build_status_strip())
 
         body = QWidget(self)
@@ -298,29 +306,6 @@ class SettingsWindow(QDialog):
     # ──────────────────────────────────────────────────────────
     # chrome: titlebar / status strip
     # ──────────────────────────────────────────────────────────
-
-    def _build_titlebar(self) -> QWidget:
-        bar = QWidget(self)
-        bar.setObjectName("titlebar")
-        bar.setFixedHeight(38)
-        lay = QHBoxLayout(bar)
-        lay.setContentsMargins(14, 0, 14, 0)
-        lay.setSpacing(8)
-
-        square = QLabel(bar)
-        square.setFixedSize(10, 10)
-        square.setStyleSheet(f"background: {cockpit_theme.ACCENT_GOLD}; border-radius: 2px;")
-        lay.addWidget(square)
-
-        label = QLabel("takkub cockpit — settings", bar)
-        label.setObjectName("titlebarLabel")
-        lay.addWidget(label)
-        lay.addStretch(1)
-
-        dots = QLabel("● ● ●", bar)
-        dots.setObjectName("titlebarDots")
-        lay.addWidget(dots)
-        return bar
 
     def _build_status_strip(self) -> QWidget:
         strip = QWidget(self)
@@ -342,16 +327,10 @@ class SettingsWindow(QDialog):
         if active_name:
             lay.addWidget(cockpit_theme.gold_soft_chip(str(active_name), strip))
 
-        roles_enabled = payload.get("rolesEnabled", {})
-        for role in pipeline_config.valid_roles():
-            if not roles_enabled.get(role, True):
-                continue
-            r = roles_mod.by_name(role)
-            if r is None:
-                continue
-            color = cockpit_theme.ROLE_COLORS.get(role, r.color)
-            lay.addWidget(cockpit_theme.role_chip(r.label, color, strip))
-
+        # UI walkthrough #56 — this used to also render a role-chip per
+        # enabled role, duplicating the Providers & Roles view's own Roles
+        # list (same names, same colors) one click away. Dropped; the active
+        # template chip is the only per-project summary this strip needs.
         lay.addStretch(1)
 
         for provider in sorted(provider_state.TOGGLABLE):
