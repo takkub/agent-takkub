@@ -222,9 +222,10 @@
       "module": "agent_takkub.codex_agents_md",
       "imports": [],
       "imported_by": [
+        "agent_takkub.lead_context",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 0
     },
     {
@@ -430,6 +431,7 @@
     {
       "module": "agent_takkub.lead_context",
       "imports": [
+        "agent_takkub.codex_agents_md",
         "agent_takkub.config",
         "agent_takkub.exec_mode",
         "agent_takkub.pane_tools_policy",
@@ -450,7 +452,7 @@
         "agent_takkub.spawn_engine"
       ],
       "fan_in": 8,
-      "fan_out": 8
+      "fan_out": 9
     },
     {
       "module": "agent_takkub.lead_draft_state",
@@ -817,6 +819,7 @@
         "agent_takkub.lead_inbox",
         "agent_takkub.orchestrator",
         "agent_takkub.pipeline_executor",
+        "agent_takkub.remote.api",
         "agent_takkub.settings_management.repositories.providers",
         "agent_takkub.settings_management.repositories.roles",
         "agent_takkub.settings_management.services.cleanup",
@@ -825,7 +828,7 @@
         "agent_takkub.spawn_engine",
         "agent_takkub.update_panel"
       ],
-      "fan_in": 12,
+      "fan_in": 13,
       "fan_out": 3
     },
     {
@@ -907,6 +910,7 @@
       "module": "agent_takkub.remote.api",
       "imports": [
         "agent_takkub.config",
+        "agent_takkub.provider_config",
         "agent_takkub.remote.notify",
         "agent_takkub.roles",
         "agent_takkub.spawn_engine"
@@ -915,7 +919,7 @@
         "agent_takkub.remote.http_server"
       ],
       "fan_in": 1,
-      "fan_out": 4
+      "fan_out": 5
     },
     {
       "module": "agent_takkub.remote.auth",

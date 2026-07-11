@@ -304,10 +304,35 @@ class TestProvidersRolesView:
         assert dlg._dirty is False
         dlg.deleteLater()
 
-    def test_lead_row_is_locked(self) -> None:
+    def test_lead_row_is_unlocked_but_has_no_pipeline_toggle(self) -> None:
+        # Issue #101: Lead's CLI is no longer forced to claude, so it now
+        # gets a provider combo like any other role — but it's still not a
+        # dev-pipeline participant, so no enable/disable toggle for it.
         dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
         assert "lead" not in dlg._role_toggles
-        assert "lead" not in dlg._role_provider_combos
+        assert "lead" in dlg._role_provider_combos
+        assert dlg._role_provider_combos["lead"].currentData() == "claude"
+        assert dlg._lead_warning_lbl is not None
+        # Offscreen tests never `.show()` the dialog, so `isVisible()` always
+        # reads False regardless of state — `isHidden()` reflects the
+        # widget's own `setVisible()` call (same pattern as the substitute
+        # badge test below).
+        assert dlg._lead_warning_lbl.isHidden() is True
+        dlg.deleteLater()
+
+    def test_lead_warning_shows_when_switched_off_claude(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+        combo = dlg._role_provider_combos["lead"]
+        combo.setCurrentIndex(combo.findData("codex"))
+        assert dlg._lead_warning_lbl.isHidden() is False
+        dlg.deleteLater()
+
+    def test_lead_provider_override_saves(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+        combo = dlg._role_provider_combos["lead"]
+        combo.setCurrentIndex(combo.findData("codex"))
+        dlg._on_save_apply_clicked()
+        assert provider_config.provider_for("lead") == "codex"
         dlg.deleteLater()
 
     def test_save_apply_preserves_out_of_scope_role_override(self) -> None:

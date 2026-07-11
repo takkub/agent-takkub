@@ -1,9 +1,10 @@
 """Tests for `provider_config` — the per-role CLI provider mapping
 that decides whether `takkub assign --role <X>` spawns a claude or
 codex pane. Hard rules:
-  - `lead` is always claude (cockpit plumbing demands it).
   - `codex` role is always codex.
-  - Everything else: user override via JSON, default claude.
+  - `gemini` role is always gemini.
+  - Everything else (including `lead` since issue #101's degraded-mode
+    unlock): user override via JSON, default claude.
 """
 
 from __future__ import annotations
@@ -28,11 +29,17 @@ def redirect_config_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Pat
 
 
 class TestProviderFor:
-    def test_lead_is_always_claude(self, redirect_config_path: Path) -> None:
-        # Even if user config says otherwise, Lead stays claude — too
-        # much claude-specific plumbing depends on it.
-        redirect_config_path.write_text('{"lead": "codex"}', encoding="utf-8")
+    def test_lead_defaults_to_claude(self) -> None:
+        # No override on disk → default stays claude (issue #101: unlock is
+        # opt-in, not a default change).
         assert provider_config.provider_for("lead") == "claude"
+
+    def test_lead_is_overridable(self, redirect_config_path: Path) -> None:
+        # Issue #101 degraded-mode unlock: lead is no longer in
+        # _FORCED_PROVIDER, so a user override now takes effect like any
+        # other role.
+        redirect_config_path.write_text('{"lead": "codex"}', encoding="utf-8")
+        assert provider_config.provider_for("lead") == "codex"
 
     def test_codex_role_is_always_codex(self, redirect_config_path: Path) -> None:
         # User mapping a "codex" key to "claude" would be nonsensical;
@@ -190,12 +197,16 @@ class TestSaveRoleOverrides:
                 "frontend": "claude",  # default → dropped
                 "backend": "codex",  # real override → kept
                 "qa": "gemini",  # real override → kept
-                "lead": "codex",  # forced → dropped
+                "lead": "codex",  # #101: no longer forced → real override, kept
                 "codex": "codex",  # forced → dropped
                 "gemini": "gemini",  # forced → dropped
             }
         )
-        assert provider_config.load_providers() == {"backend": "codex", "qa": "gemini"}
+        assert provider_config.load_providers() == {
+            "backend": "codex",
+            "qa": "gemini",
+            "lead": "codex",
+        }
 
     def test_drops_invalid_providers(self, redirect_config_path: Path) -> None:
         provider_config.save_role_overrides({"backend": "codex", "ml": "openrouter"})
@@ -250,3 +261,34 @@ class TestPerProject:
         provider_config.save_role_overrides({"backend": "codex"}, project="proj-a")
         # Global stays default (claude) — the per-project save didn't touch it.
         assert provider_config.provider_for("backend") == "claude"
+
+
+class TestLeadCapabilityGap:
+    """Issue #101: Lead degradation must be visible, never silent. This is
+    the function the Settings UI badge and the remote API responses consult
+    to tell the user which claude-only features are gone."""
+
+    def test_claude_lead_has_no_gap(self) -> None:
+        assert provider_config.lead_capability_gap() is None
+
+    def test_codex_lead_reports_provider_and_missing_features(
+        self, redirect_config_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        redirect_config_path.write_text('{"lead": "codex"}', encoding="utf-8")
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: True)
+        gap = provider_config.lead_capability_gap()
+        assert gap is not None
+        provider, missing = gap
+        assert provider == "codex"
+        assert missing  # codex_spec has every supports_* flag False
+        assert any("mirror" in m for m in missing)
+
+    def test_unavailable_codex_lead_degrades_to_claude_no_gap(
+        self, redirect_config_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Same substitution rule as any other role: an unusable codex Lead
+        # silently falls back to claude at spawn time, so there's no
+        # capability gap to report — the *effective* engine is claude.
+        redirect_config_path.write_text('{"lead": "codex"}', encoding="utf-8")
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: False)
+        assert provider_config.lead_capability_gap() is None

@@ -526,6 +526,14 @@ def build_stylesheet(sans_family: str, mono_family: str) -> str:
         font-size: 11px;
         font-weight: 600;
     }}
+    QLabel#capabilityWarning {{
+        color: {SUBSTITUTE_BADGE_TEXT};
+        border: 1px solid {SUBSTITUTE_BADGE_BORDER};
+        border-radius: 999px;
+        padding: 1px 8px;
+        font-size: 11px;
+        font-weight: 700;
+    }}
     QLineEdit, QPlainTextEdit, QComboBox, QSpinBox {{
         background: {GROUND_INPUT};
         border: 1px solid {BORDER_MED};

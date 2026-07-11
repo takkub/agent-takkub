@@ -484,7 +484,7 @@ class TestLeadHistory:
     def test_no_resolvable_session_returns_empty_messages(self, monkeypatch):
         monkeypatch.setattr(api.notify, "resolve_lead_jsonl", lambda orch, ns: None)
         result = api.lead_history(self._Orch(), "proj-a")
-        assert result == {"project": "proj-a", "messages": []}
+        assert result == {"project": "proj-a", "messages": [], "lead_provider_note": None}
 
     def test_reads_recent_messages_oldest_first_with_kind_field(self, monkeypatch, tmp_path):
         path = tmp_path / "uuid-1.jsonl"
@@ -504,7 +504,21 @@ class TestLeadHistory:
                 {"text": "first", "kind": "me"},
                 {"text": "second", "kind": "lead"},
             ],
+            "lead_provider_note": None,
         }
+
+    def test_provider_note_set_for_non_claude_lead(self, monkeypatch):
+        """Issue #101: a codex/agy-backed Lead's mobile history response
+        carries a human-readable note explaining the degraded state instead
+        of just quietly returning whatever jsonl-based history it can find."""
+        monkeypatch.setattr(api.notify, "resolve_lead_jsonl", lambda orch, ns: None)
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.effective_provider_for",
+            lambda role, project=None: "codex",
+        )
+        result = api.lead_history(self._Orch(), "proj-a")
+        assert result["lead_provider_note"] is not None
+        assert "codex" in result["lead_provider_note"]
 
     def test_limit_defaults_to_200(self, monkeypatch, tmp_path):
         seen = {}
