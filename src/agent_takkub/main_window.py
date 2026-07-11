@@ -234,6 +234,7 @@ class MainWindow(
         self.tabs.addRequested.connect(self._on_new_tab_clicked)
         self.tabs.closeRequested.connect(self._on_tab_close_requested)
         self.tabs.contextMenuRequested.connect(self._on_tab_context_menu)
+        self.tabs.openProjectRequested.connect(self._open_project_tab)
         # NOTE: `currentChanged` is connected at the end of __init__ — once the
         # status-bar widgets exist. It fires the moment the first row is added,
         # and the slot calls `_refresh_rtk_button` which touches
