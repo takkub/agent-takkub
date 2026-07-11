@@ -29,6 +29,8 @@ class Ownership(StrEnum):
     MANAGED = "managed"
     EXTERNAL = "external"
     PROJECT = "project"
+    SHIPPED = "shipped"
+    USER = "user"
 
 
 # Tri-state sentinel for MCP/Plugin access — must stay distinguishable from
@@ -118,4 +120,49 @@ class RoleDetail:
     instructions: str
     instructions_path: str
     access: RoleAccess
+    capabilities: Capability = field(default_factory=Capability)
+
+
+@dataclass(frozen=True)
+class SkillSummary:
+    """One row in the Skills list."""
+
+    name: str
+    description: str
+    ownership: Ownership
+
+
+@dataclass(frozen=True)
+class SkillDetail:
+    """Everything the Skill detail pane (General + Assigned roles) needs."""
+
+    name: str
+    description: str
+    instructions: str
+    path: str
+    ownership: Ownership
+    assigned_roles: tuple[str, ...] = ()
+    capabilities: Capability = field(default_factory=Capability)
+
+
+@dataclass(frozen=True)
+class McpSummary:
+    """One row in the MCP Servers list."""
+
+    name: str
+    command: str
+    ownership: Ownership
+
+
+@dataclass(frozen=True)
+class McpDetail:
+    """Everything the MCP Server detail pane (General + Allowed roles +
+    Diagnostics) needs. ``config`` is already secret-masked — repositories
+    must never hand the UI an unmasked credential (SPEC.md "MCP Servers")."""
+
+    name: str
+    config: dict
+    ownership: Ownership
+    has_secrets: bool
+    allowed_roles: tuple[str, ...] = ()
     capabilities: Capability = field(default_factory=Capability)
