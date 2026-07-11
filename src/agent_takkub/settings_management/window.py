@@ -9,6 +9,8 @@ at the window root (SPEC.md "Visual").
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -44,6 +46,10 @@ class SettingsManagementWindow(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
+        sidebar_col = QVBoxLayout()
+        sidebar_col.setContentsMargins(0, 0, 0, 0)
+        sidebar_col.setSpacing(0)
+
         self.sidebar = QListWidget(self)
         self.sidebar.setObjectName("sidebar")
         self.sidebar.setFixedWidth(200)
@@ -51,7 +57,20 @@ class SettingsManagementWindow(QWidget):
             item = QListWidgetItem(name if name in _WIRED else f"{name} (soon)")
             self.sidebar.addItem(item)
         self.sidebar.currentRowChanged.connect(self._on_nav_changed)
-        root.addWidget(self.sidebar)
+        sidebar_col.addWidget(self.sidebar, 1)
+
+        # SPEC.md "Coexistence" — the redesign hasn't reached every legacy
+        # view yet (Pipeline Builder/Templates/Users/Role Overlap/matrix), so
+        # this window always offers a way back instead of trapping the user
+        # in an incomplete surface. Hook, not a signal, so the page stays
+        # importable/testable standalone (see manage_roles_requested).
+        self.open_legacy_requested: Callable[[], None] = lambda: None
+        self._legacy_link = theme.secondary_button("Open legacy settings", self)
+        self._legacy_link.setFixedWidth(200)
+        self._legacy_link.clicked.connect(lambda: self.open_legacy_requested())
+        sidebar_col.addWidget(self._legacy_link)
+
+        root.addLayout(sidebar_col)
 
         content = QVBoxLayout()
         content.setContentsMargins(20, 20, 20, 20)

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from PyQt6.QtCore import QLocale
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -68,6 +69,14 @@ class RolesPage(ManagementPage):
         self._build_general_tab()
         self._build_access_tab()
         self._build_advanced_tab()
+
+        # Danger zone lives below the tabs (same fixed spot Skills/Plugins/MCP
+        # use — SPEC.md consistency: delete must be findable in the same
+        # place regardless of entity, not buried inside a tab that only this
+        # page happens to have).
+        self.danger_zone = DangerZone(self._detail)
+        self.danger_zone.delete_requested.connect(self._on_delete_confirmed)
+        detail_layout.addWidget(self.danger_zone)
 
         self.footer = DetailFooter(self._detail)
         self.footer.save_clicked.connect(self._on_save_clicked)
@@ -144,17 +153,18 @@ class RolesPage(ManagementPage):
         tab = QWidget()
         layout = QVBoxLayout(tab)
         form = QFormLayout()
+        # QSpinBox renders digits with the OS locale's native numeral system
+        # (Thai on a Thai-locale Windows box) unless pinned to C — same fix
+        # as settings_window.py's legacy spin row.
         self.column_spin = QSpinBox()
+        self.column_spin.setLocale(QLocale(QLocale.Language.C))
         self.column_spin.setRange(1, 2)
         self.row_spin = QSpinBox()
+        self.row_spin.setLocale(QLocale(QLocale.Language.C))
         self.row_spin.setRange(0, 99)
         form.addRow("Column (1=Dev, 2=Support)", self.column_spin)
         form.addRow("Row", self.row_spin)
         layout.addLayout(form)
-
-        self.danger_zone = DangerZone()
-        self.danger_zone.delete_requested.connect(self._on_delete_confirmed)
-        layout.addWidget(self.danger_zone)
         layout.addStretch(1)
 
         self.tabs.addTab(tab, "Advanced")
@@ -384,4 +394,8 @@ class RolesPage(ManagementPage):
     def _show_error(self, message: str) -> None:
         from PyQt6.QtWidgets import QMessageBox
 
-        QMessageBox.warning(self, self.entity_label, message or "เกิดข้อผิดพลาด")
+        box = theme.themed_message_box(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(self.entity_label)
+        box.setText(message or "เกิดข้อผิดพลาด")
+        box.exec()

@@ -283,4 +283,8 @@ class PluginsPage(ManagementPage):
     def _show_error(self, message: str) -> None:
         from PyQt6.QtWidgets import QMessageBox
 
-        QMessageBox.warning(self, self.entity_label, message or "เกิดข้อผิดพลาด")
+        box = theme.themed_message_box(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(self.entity_label)
+        box.setText(message or "เกิดข้อผิดพลาด")
+        box.exec()

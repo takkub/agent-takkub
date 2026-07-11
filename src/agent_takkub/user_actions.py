@@ -305,13 +305,50 @@ class UserActionsMixin:
         self._open_settings_window(VIEW_PROVIDERS_ROLES)
 
     def _open_settings_window(self, initial_view: int) -> None:
-        """Open the gold/IBM-Plex Settings window at *initial_view*, then
-        apply any staged provider on/off toggle exactly like a status-bar
-        chip click would — shared by every entry point that can land on this
-        window (👥 Team chip → Providers & Roles, "Add / Remove user…" menu
-        entry → Users tab) so a provider toggled from a non-default landing
-        view (e.g. the user navigates away from Users to Providers & Roles
-        mid-visit) still gets applied on Save & Apply."""
+        """Single choke point every entry point calls (👥 Team chip →
+        Providers & Roles, "Add / Remove user…" menu entry → Users tab).
+        Resolves ``TAKKUB_SETTINGS_UI`` (feature_flags.resolve()) and routes
+        to whichever Settings surface owns *initial_view*: the redesigned
+        ``SettingsManagementWindow`` only covers Roles/Skills/MCP/Plugins/
+        Providers so far — anything legacy-only (Pipeline Builder/Templates/
+        Users/Role Overlap/matrix) still opens the old window directly,
+        flag or no flag, so none of those features go missing."""
+        from .settings_management import feature_flags
+        from .settings_window import VIEW_PROVIDERS_ROLES
+
+        if (
+            feature_flags.resolve() is feature_flags.SettingsUI.NEW
+            and initial_view == VIEW_PROVIDERS_ROLES
+        ):
+            self._open_settings_management_window()
+            return
+        self._open_legacy_settings_window(initial_view)
+
+    def _open_settings_management_window(self) -> None:
+        """The redesigned Settings window (gold/IBM-Plex, list-detail CRUD
+        shell) — a plain top-level QWidget, not a modal QDialog, so it's kept
+        alive on ``self`` to survive past this method returning (nothing
+        else would hold a reference and PyQt would garbage-collect + close
+        it immediately). "Open legacy settings" inside it (SPEC.md
+        "Coexistence") jumps back to the old window at the same landing
+        view for anything this window doesn't cover yet."""
+        from .settings_management.window import SettingsManagementWindow
+        from .settings_window import VIEW_PROVIDERS_ROLES
+
+        win = SettingsManagementWindow()
+        win.setWindowFlag(Qt.WindowType.Window, True)
+        win.open_legacy_requested = lambda: self._open_legacy_settings_window(VIEW_PROVIDERS_ROLES)
+        self._settings_management_window = win
+        win.show()
+        win.raise_()
+        win.activateWindow()
+
+    def _open_legacy_settings_window(self, initial_view: int) -> None:
+        """Open the gold/IBM-Plex legacy Settings window at *initial_view*,
+        then apply any staged provider on/off toggle exactly like a
+        status-bar chip click would — a provider toggled from a non-default
+        landing view (e.g. the user navigates away from Users to Providers &
+        Roles mid-visit) still gets applied on Save & Apply."""
         from .provider_state import is_disabled
         from .settings_window import SettingsWindow
 
