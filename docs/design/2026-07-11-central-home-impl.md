@@ -108,8 +108,53 @@ scanner พวกนั้น scan `<project>/.claude/skills` อยู่แล
 ruff + ruff format + import-linter (19/19 KEPT) ผ่าน.
 
 ## เหลือ / follow-up (ไม่อยู่ scope Part 1)
-1. **one-time migration ของ legacy `<project>/.claude/skills` ที่ cockpit สร้างไว้ก่อน** — audit 3.4
-   (แยก git-tracked=user vs untracked=cockpit) ยังไม่ทำอัตโนมัติ (เสี่ยงลากของ user ไป central ผิด) —
-   ปัจจุบัน skill เก่ายังใช้ได้ (real dir ใน project), ของใหม่ไป central. เสนอทำเป็น explicit migrate ปุ่ม.
-2. **rtk enable/disable UI ที่ชัดกว่าปุ่ม Install** (toggle + disable) — Part 1 แค่ repurpose ปุ่มเดิม.
-3. spawn_engine ฝั่ง backend#2: ยืนยันว่า `ensure_hook_settings_file()` ยังถูกเรียกใน argv หลัง settings-redesign.
+1. ~~**one-time migration ของ legacy `<project>/.claude/skills` ที่ cockpit สร้างไว้ก่อน**~~ —
+   ✅ **ทำแล้ว (Part 2, 2026-07-11).** ดู §Part 2.1 ด้านล่าง.
+2. ~~**rtk enable/disable UI ที่ชัดกว่าปุ่ม Install** (toggle + disable)~~ —
+   ✅ **ทำแล้ว (Part 2, 2026-07-11).** ดู §Part 2.2 ด้านล่าง.
+3. ~~spawn_engine: ยืนยันว่า `ensure_hook_settings_file()` ยังถูกเรียกใน argv~~ —
+   ✅ **verify แล้ว (Part 2, 2026-07-11).** ดู §Part 2.3 ด้านล่าง.
+
+---
+
+## Part 2 — follow-ups (2026-07-11, maintainer)
+
+### 2.1 Legacy skill one-time migration (auto on open + dry-run)
+
+`skill_scan.migrate_legacy_project_skills(project_root, project_ns, *, dry_run=False)`
+— ย้าย skill เก่าที่ cockpit เขียนเป็น **real dir** ใน `<project>/.claude/skills/` ไป central
+(`project_skills_dir(ns)`) แล้ววาง junction/symlink แทน. **ปลอดภัยด้วย 2 เงื่อนไข** (ต้องครบทั้งคู่):
+- เป็น real dir จริง (ไม่ใช่ junction/symlink อยู่แล้ว — `_is_reparse_point()` เช็ค junction ที่
+  `Path.is_symlink()` ไม่จับ)
+- **git-untracked** (`_git_tracked_skill_names()` รัน `git ls-files -- .claude/skills`) — tracked =
+  user commit เอง (ของ user) → **ไม่แตะ**; untracked = cockpit เขียน → ย้าย
+
+**guardrails:** ไม่ใช่ git repo → skip ทั้งหมด (พิสูจน์ ownership ไม่ได้) · ชื่อชนกับ central ที่มีอยู่
+→ skip (ไม่ทับ) · ไม่มีการลบไฟล์เลย · link fail หลัง move → move central กลับ project (ไม่หายงาน) ·
+idempotent (รอบ 2 เห็น junction → skipped-linked).
+
+- **auto:** `main_window._ensure_project_skill_links` เรียก migrate ก่อน ensure links ตอนเปิด tab ทุกครั้ง
+  (best-effort, status bar โชว์ว่าย้ายอะไร)
+- **dry-run/manual:** `takkub migrate-skills [--project NAME] [--dry-run]` (CLI local, ไม่แตะ orchestrator)
+- tests: `TestLegacySkillMigration` (untracked→migrate · tracked→skip · non-git→skip · dry-run ·
+  idempotent · central-conflict · mixed) — รันจริง native (junction บน win, symlink บน mac)
+
+### 2.2 rtk toggle UI (real on/off)
+
+เดิมปุ่ม "Install rtk" ซ่อนตัวเองเมื่อ enabled → **ปิดไม่ได้จาก UI**. เปลี่ยนเป็น **toggle จริง**:
+- `status_header._refresh_rtk_button`: ปุ่มโชว์ตราบใดที่ rtk binary อยู่บน PATH (central toggle
+  ไม่ผูก project อีกต่อไป) · enabled → "⚡ rtk: on" (gold-soft-chip = toggle-on ตาม design system) ·
+  disabled → "⚡ Enable rtk" (amber nudge) · สถานะอ่านจาก `is_rtk_installed()` (central flag)
+- `update_panel._on_install_rtk_clicked`: enabled → `set_rtk_enabled(False)` ทันที (reversible ไม่ถามซ้ำ) ·
+  disabled → confirm + `install_rtk()` (root=None ก็ได้ — flag กลาง) · refresh ปุ่มหลัง toggle
+- สี/label ใช้ token จาก `cockpit_theme` (GOLD_CHIP_*, METER_AMBER, STATE_WARN) ไม่ inline hex
+
+### 2.3 rtk hook fires on new panes — verified
+
+ยืนยัน end-to-end (isolated tmp SETTINGS_HOME/RUNTIME):
+- `spawn_engine` :1565 ยัง `argv += ["--settings", ensure_hook_settings_file()]` (ไม่ถูกย้าย/ลบ)
+- rtk **disabled** → ไม่มี `PreToolUse` ใน settings file · rtk **enabled + binary on PATH** →
+  `rtk_should_inject()=True` → settings file มี `PreToolUse: [{matcher:Bash, command:"rtk hook claude"}]`
+- Stop/Notification/SessionStart ยังครบ (rtk additive, ไม่ perturb pane-state hooks)
+- `ensure_hook_settings_file()` rewrite เมื่อ content ต่าง → enable/disable mid-session ติดที่ spawn ถัดไป
+  ไม่ต้อง restart cockpit

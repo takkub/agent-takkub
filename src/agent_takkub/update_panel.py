@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import QMessageBox, QSystemTrayIcon
 from . import cockpit_theme, config
 from .config import REPO_ROOT, active_project, lead_cwd
 from .orchestrator import _log_event
-from .rtk_helper import install_rtk
+from .rtk_helper import install_rtk, rtk_hook_enabled, set_rtk_enabled
 
 
 def _release_port_file() -> None:
@@ -1028,18 +1028,29 @@ class MainWindowUpdateMixin:
         QCoreApplication.quit()
 
     def _on_install_rtk_clicked(self) -> None:
+        """Toggle the central rtk hook on/off. It's a personal, central switch
+        now (injected at spawn via --settings) — not a per-project install — so
+        turning it off simply flips the flag; no repo files are touched either
+        way. Legacy per-project cleanup still runs on enable when a project is
+        active."""
         from PyQt6.QtWidgets import QMessageBox
 
         root = lead_cwd()
-        if not root:
-            QMessageBox.warning(
-                self,
-                "rtk install",
-                "No active project — pick one in the dropdown first.",
+        if rtk_hook_enabled():
+            # Currently ON → turn OFF. No confirm needed (fully reversible, no
+            # files written); newly spawned panes just stop getting the hook.
+            set_rtk_enabled(False)
+            self._status.showMessage(
+                "rtk disabled — new panes won't get the hook (existing panes keep it)",
+                6_000,
             )
+            self._refresh_rtk_button()
             return
 
-        proj_name = active_project()[0] or "(unnamed)"
+        # Currently OFF → turn ON (confirm once, since it changes every pane's
+        # Bash behavior). A project isn't required — the toggle is central — but
+        # when one is active we also scrub any legacy per-project rtk hook.
+        proj_name = active_project()[0] or "(no active project)"
         confirm = QMessageBox.question(
             self,
             "Enable rtk hook",
@@ -1052,7 +1063,8 @@ class MainWindowUpdateMixin:
                 f"spawn time via --settings, so NO project files are written and "
                 f"nothing lands in {proj_name}'s repo. Any legacy rtk hook a "
                 f"previous cockpit build wrote into this project's "
-                f".claude/settings.json is cleaned up."
+                f".claude/settings.json is cleaned up.\n\n"
+                f"You can turn it back off anytime from this same button."
             ),
             QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Ok,
@@ -1060,9 +1072,9 @@ class MainWindowUpdateMixin:
         if confirm != QMessageBox.StandardButton.Ok:
             return
 
-        ok, msg = install_rtk(root)
+        ok, msg = install_rtk(root)  # root=None is fine — central flag + no cleanup
         if ok:
             self._status.showMessage(f"rtk: {msg}", 6_000)
         else:
-            QMessageBox.critical(self, "rtk install failed", msg)
+            QMessageBox.critical(self, "rtk enable failed", msg)
         self._refresh_rtk_button()

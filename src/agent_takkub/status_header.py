@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
 )
 
 from . import cockpit_theme
-from .config import RUNTIME_DIR, lead_cwd
+from .config import RUNTIME_DIR
 from .rtk_helper import is_rtk_installed, rtk_binary_available
 
 
@@ -339,26 +339,12 @@ class StatusHeaderMixin:
         # user profile selector moved to the 👥 Team chip's right-click QMenu
         # (was ⚙ Pipelines' left-click menu before the A6-redesign)
 
-        # One-click rtk install for the active project. Only visible when
-        # the project hasn't been initialised yet — once `.claude/settings.json`
-        # carries the Bash hook, the button hides itself so it never nags.
-        # Detection runs on startup, on project switch, and after install.
-        self._btn_install_rtk = QPushButton("⚡ Install rtk", self)
-        self._btn_install_rtk.setToolTip(
-            "Add the rtk PreToolUse Bash hook to this project's .claude/settings.json\n"
-            "so every Bash tool call gets auto-rewritten with rtk (60-90% token savings\n"
-            "on git / docker / npm / pytest / next / prisma output)."
-        )
-        # Amber color + emoji is enough nudge — keep the button visible
-        # without screaming. Original 2px border + bold made it look like
-        # the cockpit's primary CTA when it's actually optional optimisation.
-        self._btn_install_rtk.setStyleSheet(
-            f"QPushButton {{ color: {cockpit_theme.GOLD_TEXT_ON}; "
-            f"background: {cockpit_theme.METER_AMBER}; "
-            f"border: 1px solid {cockpit_theme.STATE_WARN}; border-radius: 4px; "
-            "padding: 2px 8px; font-size: 12px; }"
-            f"QPushButton:hover {{ background: {cockpit_theme.METER_AMBER_LIGHT}; }}"
-        )
+        # Central rtk toggle. rtk is a PERSONAL, central switch now (injected at
+        # spawn via --settings, not written into any repo), so this is a real
+        # on/off button — its label + style reflect the true state and clicking
+        # flips it. Visible whenever the rtk binary is on PATH; hidden only when
+        # rtk isn't installed at all. `_refresh_rtk_button` sets text/style/tip.
+        self._btn_install_rtk = QPushButton("⚡ Enable rtk", self)
         self._btn_install_rtk.clicked.connect(self._on_install_rtk_clicked)
 
         # ── provider toggle chips (codex / gemini) ─────────────────
@@ -792,28 +778,59 @@ class StatusHeaderMixin:
     # ──────────────────────────────────────────────────────────────
 
     def _refresh_rtk_button(self) -> None:
-        """Show the install button only when the active project's lead_cwd()
-        doesn't already carry the rtk hook. Hidden when rtk isn't on PATH or
-        no project is active."""
+        """Drive the central rtk toggle's visibility, label, and style so it
+        always tells the truth. rtk is a personal/central switch (injected at
+        spawn via --settings), independent of any project — so the button is:
+          - HIDDEN when the rtk binary isn't on PATH (nothing to toggle), else
+          - shown as "⚡ rtk: on" (gold pill) when enabled, or
+          - shown as "⚡ Enable rtk" (amber nudge) when disabled.
+        """
         import time as _t
 
         bin_ok = rtk_binary_available()
-        root = lead_cwd()
-        installed = is_rtk_installed(root) if root else None
+        enabled = is_rtk_installed()  # central flag — project-independent
 
         if not bin_ok:
             self._btn_install_rtk.hide()
             decision = "hide:no-rtk-binary"
-        elif not root:
-            self._btn_install_rtk.hide()
-            decision = "hide:no-lead-cwd"
-        elif installed:
-            self._btn_install_rtk.hide()
-            decision = "hide:already-installed"
-        else:
+        elif enabled:
+            self._btn_install_rtk.setText("⚡ rtk: on")
+            self._btn_install_rtk.setToolTip(
+                "rtk hook is ON (personal, central) — every Bash tool call in\n"
+                "spawned panes is auto-rewritten with rtk for token savings.\n"
+                "Injected at spawn time via --settings; no project files touched.\n"
+                "Click to turn it OFF."
+            )
+            # Toggle-on = gold (design system): a soft-gold "active" pill.
+            self._btn_install_rtk.setStyleSheet(
+                f"QPushButton {{ color: {cockpit_theme.GOLD_CHIP_TEXT}; "
+                f"background: {cockpit_theme.GOLD_CHIP_BG}; "
+                f"border: 1px solid {cockpit_theme.GOLD_CHIP_BORDER}; "
+                "border-radius: 4px; padding: 2px 8px; font-size: 12px; }"
+                f"QPushButton:hover {{ border-color: {cockpit_theme.ACCENT_GOLD}; }}"
+            )
             self._btn_install_rtk.show()
             self._btn_install_rtk.raise_()
-            decision = "show:not-installed"
+            decision = "show:on"
+        else:
+            self._btn_install_rtk.setText("⚡ Enable rtk")
+            self._btn_install_rtk.setToolTip(
+                "Enable the rtk PreToolUse Bash hook (personal, central).\n"
+                "Every Bash tool call in spawned panes gets auto-rewritten with\n"
+                "rtk (60-90% token savings on git / docker / npm / pytest / next\n"
+                "output). Injected via --settings — no project files are written."
+            )
+            # Amber CTA nudge — visible without screaming (it's optional).
+            self._btn_install_rtk.setStyleSheet(
+                f"QPushButton {{ color: {cockpit_theme.GOLD_TEXT_ON}; "
+                f"background: {cockpit_theme.METER_AMBER}; "
+                f"border: 1px solid {cockpit_theme.STATE_WARN}; border-radius: 4px; "
+                "padding: 2px 8px; font-size: 12px; }"
+                f"QPushButton:hover {{ background: {cockpit_theme.METER_AMBER_LIGHT}; }}"
+            )
+            self._btn_install_rtk.show()
+            self._btn_install_rtk.raise_()
+            decision = "show:off"
 
         # Diagnostic breadcrumb. Written to runtime/rtk_button.log so we
         # can confirm whether the cockpit's pythonw actually executed this
@@ -826,8 +843,7 @@ class StatusHeaderMixin:
             with log.open("a", encoding="utf-8") as f:
                 f.write(
                     f"{_t.strftime('%H:%M:%S')} bin_ok={bin_ok} "
-                    f"root={root!r} installed={installed} "
-                    f"decision={decision} isVisible={visible}\n"
+                    f"enabled={enabled} decision={decision} isVisible={visible}\n"
                 )
         except Exception:
             pass
