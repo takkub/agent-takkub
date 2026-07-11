@@ -1073,11 +1073,19 @@ class SettingsWindow(QDialog):
         fallback/supplement (dogfooding: cockpit-ui-style etc. are relevant
         to any role, and this keeps the picker non-empty even when no
         project is open, e.g. in tests that construct SettingsWindow()
-        bare)."""
+        bare).
+
+        `config.REPO_ROOT` only has a real `.claude/skills/` on a dev
+        checkout — on an installed (pip/npm) build it resolves to an empty
+        venv ancestor. `config.ASSETS_ROOT` is the read path that actually
+        has the shipped default skill bundle there (dev checkout:
+        `ASSETS_ROOT == REPO_ROOT`, harmless duplicate; installed: staged
+        wheel data — see `config.SKILLS_DIR`), so both are listed."""
         roots: list[Path] = []
         if self._project:
             roots.extend(_allowed_project_roots(self._project))
         roots.append(config.REPO_ROOT)
+        roots.append(config.ASSETS_ROOT)
         return roots
 
     def _reload_new_role_skills(self) -> None:

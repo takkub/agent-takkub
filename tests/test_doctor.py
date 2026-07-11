@@ -620,6 +620,9 @@ class TestCheckInstalledIntegrity:
         agents_dir.mkdir(parents=True)
         (assets_root / "CLAUDE.md").write_text("# lead", encoding="utf-8")
         (agents_dir / "backend.md").write_text("# backend", encoding="utf-8")
+        skills_dir = assets_root / ".claude" / "skills"
+        (skills_dir / "debug-mantra").mkdir(parents=True)
+        (skills_dir / "debug-mantra" / "SKILL.md").write_text("# debug-mantra", encoding="utf-8")
         cli_bin_dir = tmp_path / "scripts"
         cli_bin_dir.mkdir()
         script_name = "takkub.exe" if sys.platform == "win32" else "takkub"
@@ -629,6 +632,7 @@ class TestCheckInstalledIntegrity:
         monkeypatch.setattr(config_mod, "REPO_ROOT", tmp_path / "venv-lib")
         monkeypatch.setattr(config_mod, "ASSETS_ROOT", assets_root)
         monkeypatch.setattr(config_mod, "AGENTS_DIR", agents_dir)
+        monkeypatch.setattr(config_mod, "SKILLS_DIR", skills_dir)
         monkeypatch.setattr(config_mod, "CLI_BIN_DIR", cli_bin_dir)
         monkeypatch.setattr(config_mod, "RUNTIME_DIR", data_home / "runtime")
         return data_home
@@ -646,9 +650,24 @@ class TestCheckInstalledIntegrity:
         assert names == {
             "assets-claude-md",
             "assets-role-files",
+            "assets-skill-files",
             "cli-bin",
             "runtime-writable",
         }
+
+    def test_warns_when_skill_files_missing(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._fake_installed_layout(monkeypatch, tmp_path)
+        import agent_takkub.config as config_mod
+
+        for f in config_mod.SKILLS_DIR.glob("*/SKILL.md"):
+            f.unlink()
+
+        findings = check_installed_integrity()
+
+        f = next(x for x in findings if x.name == "assets-skill-files")
+        assert f.status == Status.WARN
 
     def test_fails_when_claude_md_missing(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

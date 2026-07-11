@@ -81,6 +81,34 @@ class TestStageAssets:
         setup_mod._stage_assets()
         assert not (setup_mod._ASSETS / ".claude" / "agents" / "README.txt").exists()
 
+    def test_stages_skill_files(self, fake_root: Path) -> None:
+        skill_dir = fake_root / ".claude" / "skills" / "debug-mantra"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("# debug-mantra", encoding="utf-8")
+
+        setup_mod._stage_assets()
+
+        staged = setup_mod._ASSETS / ".claude" / "skills" / "debug-mantra" / "SKILL.md"
+        assert staged.read_text(encoding="utf-8") == "# debug-mantra"
+
+    def test_missing_skills_dir_does_not_raise(self, fake_root: Path) -> None:
+        # Unlike CLAUDE.md/agents, the skill bundle is optional — a repo/sdist
+        # tree with no .claude/skills still builds a valid wheel.
+        setup_mod._stage_assets()
+        assert not (setup_mod._ASSETS / ".claude" / "skills").exists()
+
+    def test_ignores_flat_md_files_in_skills_dir(self, fake_root: Path) -> None:
+        # Staging only follows the real Claude Code skill layout
+        # (<name>/SKILL.md) — a stray flat *.md under .claude/skills/ is not
+        # a skill and must not leak into the wheel.
+        skills_dir = fake_root / ".claude" / "skills"
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "README.md").write_text("x", encoding="utf-8")
+
+        setup_mod._stage_assets()
+
+        assert not (setup_mod._ASSETS / ".claude" / "skills" / "README.md").exists()
+
 
 class TestManifestIncludesRootAssets:
     """Guards the sdist path: CLAUDE.md and .claude/agents/*.md live outside
@@ -95,3 +123,4 @@ class TestManifestIncludesRootAssets:
         text = manifest.read_text(encoding="utf-8")
         assert "CLAUDE.md" in text
         assert ".claude/agents" in text
+        assert ".claude/skills" in text
