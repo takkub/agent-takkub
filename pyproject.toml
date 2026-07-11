@@ -393,3 +393,22 @@ source_modules = [
     "agent_takkub.config",
 ]
 forbidden_modules = ["agent_takkub.remote"]
+
+[[tool.importlinter.contracts]]
+name = "settings-management-layer"
+type = "forbidden"
+# settings_management/ (#103 follow-up — Settings redesign) is a bolt-on
+# module tree that adapts existing data-layer modules; it must never pull
+# in the engine/UI-chrome/CLI layers it coexists alongside (SPEC.md
+# "Coexistence" — legacy settings_window.py and the new module tree share
+# storage but never import each other or the orchestrator/app/cli entry
+# points). source can't be the umbrella `agent_takkub` (settings_management
+# is its descendant -> import-linter "shared descendants" error).
+source_modules = ["agent_takkub.settings_management"]
+forbidden_modules = [
+    "agent_takkub.orchestrator",
+    "agent_takkub.app",
+    "agent_takkub.cli",
+    "agent_takkub.main_window",
+    "agent_takkub.settings_window",
+]
