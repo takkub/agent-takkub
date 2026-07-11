@@ -273,6 +273,26 @@ _LEAD_CAPABILITY_LABELS: tuple[tuple[str, str], ...] = (
 )
 
 
+def lead_capability_gap_for_provider(provider: str) -> list[str]:
+    """Missing Lead-only capability labels if Lead were backed by `provider`.
+
+    Pure function of a provider name — no role/project lookup, no disk
+    read — so callers can warn reactively on an unsaved selection (e.g. the
+    Roles-page Access tab's provider combo while the user is still editing
+    a draft) without touching provider-overrides.json. `lead_capability_gap`
+    below is the disk-backed sibling that resolves the role's *current*
+    provider first, then delegates here.
+    """
+    from .provider_spec import PROVIDER_REGISTRY
+
+    if provider == CLAUDE:
+        return []
+    spec = PROVIDER_REGISTRY.get(provider)
+    if spec is None:
+        return [label for _, label in _LEAD_CAPABILITY_LABELS]
+    return [label for flag, label in _LEAD_CAPABILITY_LABELS if not getattr(spec, flag, False)]
+
+
 def lead_capability_gap(project: str | None = None) -> tuple[str, list[str]] | None:
     """Return `(provider, [missing feature labels])` when Lead is currently
     backed by something other than claude, or `None` when it's claude (no
@@ -283,16 +303,10 @@ def lead_capability_gap(project: str | None = None) -> tuple[str, list[str]] | N
     user WHY a claude-only feature is unavailable instead of silently doing
     nothing — issue #101 requires visible degradation, never a silent break.
     """
-    from .provider_spec import PROVIDER_REGISTRY
-
     provider = effective_provider_for("lead", project)
     if provider == CLAUDE:
         return None
-    spec = PROVIDER_REGISTRY.get(provider)
-    if spec is None:
-        return provider, [label for _, label in _LEAD_CAPABILITY_LABELS]
-    missing = [label for flag, label in _LEAD_CAPABILITY_LABELS if not getattr(spec, flag, False)]
-    return provider, missing
+    return provider, lead_capability_gap_for_provider(provider)
 
 
 def lead_missing_capability(flag: str, project: str | None = None) -> str | None:
