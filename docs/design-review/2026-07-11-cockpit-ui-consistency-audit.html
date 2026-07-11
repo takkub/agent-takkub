@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="th"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Design review · agent-takkub</title><style>
+:root{
+  --bg:#0e0e10;--panel:#18181b;--panel2:#1f1f23;--border:#27272a;
+  --fg:#e4e4e7;--muted:#a1a1aa;--dim:#71717a;
+  --high:#ef4444;--med:#f59e0b;--low:#52525b;--keep:#22c55e;--gold:#f5c542;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--fg);
+  font:14px/1.6 "Segoe UI","Leelawadee UI",system-ui,sans-serif}
+a{color:#60a5fa;text-decoration:none}a:hover{text-decoration:underline}
+.wrap{max-width:980px;margin:0 auto;padding:28px 22px 80px}
+h1{font-size:22px;margin:0 0 6px;border-bottom:1px solid var(--border);padding-bottom:16px}
+h2{font-size:17px;margin:30px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+h3{font-size:15px;margin:18px 0 8px}
+p{color:var(--muted)}
+code{background:var(--panel2);border:1px solid var(--border);border-radius:4px;
+  padding:1px 5px;font:12.5px "Cascadia Mono","Consolas",monospace}
+pre{background:var(--panel2);border:1px solid var(--border);border-radius:8px;
+  padding:12px 14px;overflow:auto}
+pre code{border:0;background:none;padding:0}
+strong{color:var(--fg)}
+blockquote{margin:18px 0;padding:12px 16px;border-radius:10px;
+  background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.3);color:#fcd34d}
+blockquote p{color:#fcd34d;margin:4px 0}
+ul,ol{padding-left:0}
+li{list-style:none;background:var(--panel);border:1px solid var(--border);
+  border-left:4px solid var(--low);border-radius:10px;padding:11px 15px;margin:0 0 10px;color:var(--muted)}
+li strong:first-child{color:var(--fg)}
+li ul,li ol{margin-top:8px;padding-left:0}
+li li{background:var(--panel2);margin:6px 0;padding:7px 12px}
+li:has(.badge.high){border-left-color:var(--high)}
+li:has(.badge.med){border-left-color:var(--med)}
+li:has(.badge.low){border-left-color:var(--low)}
+ol.steps-numbered li{counter-increment:none}
+.badge{font-size:10.5px;font-weight:700;letter-spacing:.04em;padding:2px 8px;
+  border-radius:5px;text-transform:uppercase;white-space:nowrap}
+.badge.high{background:var(--high);color:#fff}
+.badge.med{background:var(--med);color:#3a2a00}
+.badge.low{background:var(--low);color:#fff}
+.meta{color:var(--muted);font-size:13px;margin:-4px 0 4px}
+figure{margin:22px 0 26px;border:1px solid var(--border);border-radius:12px;overflow:hidden;background:#000}
+figure img{display:block;width:100%;height:auto}
+figcaption{padding:9px 14px;color:var(--muted);font-size:12px;background:var(--panel)}
+.missing-shot{padding:10px 14px;color:#fca5a5;background:rgba(239,68,68,.08);
+  border:1px solid rgba(239,68,68,.3);border-radius:8px;margin:10px 0;font-size:13px}
+footer{margin-top:40px;padding-top:16px;border-top:1px solid var(--border);
+  color:var(--dim);font-size:12px}
+</style></head><body><div class="wrap"><div class="meta">2026-07-11 · agent-takkub · critic</div><h1>UI consistency audit · cockpit design system · 2026-07-11</h1>
+<h2>📸 Scope</h2>
+<p>Not a screenshot review — a <strong>code-level color/font audit</strong> of every PyQt6 UI
+module in <code>src/agent_takkub/</code>, tracing the user's complaint that the cockpit
+"ไม่เป็นไปในทางเดียวกันเลย." Root cause confirmed: <code>cockpit_theme.py</code> (built
+2026-07-10, gold <code>#E3B341</code> + IBM Plex, pixel-verified 4 rounds) is a complete
+design system <strong>scoped to <code>settings_window.py</code> only</strong>. Every other UI file
+predates it and hardcodes its own palette. Every hex below was read directly from
+source (grep <code>#[0-9a-fA-F]{6}</code> per file) — none guessed. Deliverables: this audit
++ migration spec, and the skill <code>.claude/skills/cockpit-ui-style/SKILL.md</code>.</p>
+<h2>✅ ของดีที่ควรเก็บไว้</h2>
+<ul>
+<li><strong><code>cockpit_theme.py</code> is genuinely complete</strong> — grounds, borders, text ramp,
+  gold accent family, role palette, fonts-with-fallback, reusable widget helpers
+  (<code>gold_button</code>, <code>secondary_button</code>, <code>role_chip</code>, <code>gold_soft_chip</code>,
+  <code>ToggleSwitch</code>), and a full objectName-driven <code>build_stylesheet()</code>. It is the
+  right single source of truth. <span class="badge high">high</span></li>
+<li><strong>Font resolution is already cross-platform</strong> — <code>ensure_fonts_loaded()</code> bundles
+  IBM Plex with a per-OS fallback chain and never blocks boot. Reuse it verbatim;
+  don't re-solve fonts anywhere. <span class="badge med">med</span></li>
+<li><strong>Semantic color intent is sound</strong> — provider brand (codex teal / gemini blue),
+  status states (red/amber/green), and the Anthropic clay meters are meaningful
+  distinctions, not noise. Migration must <strong>preserve meaning, tokenize value</strong> —
+  not flatten everything to gold. <span class="badge high">high</span></li>
+</ul>
+<h2>🎯 Decision: <code>cockpit_theme.py</code> is the single source of truth</h2>
+<p>Newest, most complete, pixel-verified 4 rounds, and already the reference the
+user signed off on for Settings. All other UI files migrate <strong>to</strong> it, not the
+reverse. Migration is <strong>mechanical + semantic-preserving</strong>: swap literal greys →
+<code>GROUND_*</code>/<code>TEXT_*</code>, solid zinc borders → <code>BORDER_*</code>, the <em>primary</em> accent
+(active/selected/focus/CTA) → gold, fonts → <code>ensure_fonts_loaded()</code>. Keep
+role/provider/state/meter colors as <strong>tokens</strong>, not as gold.</p>
+<h2>➖ ลบ (competing systems to delete/collapse)</h2>
+<ul>
+<li><strong>Indigo/violet accent as "active/primary"</strong> — <code>#6366f1</code>,<code>#818cf8</code>,<code>#8b5cf6</code>,
+  <code>#a855f7</code> in <code>project_nav.py</code> (active nav/selection) and <code>project_tab.py</code>
+  (<code>#6366f1</code> active). This is a whole second accent system competing with gold.
+  Replace with <code>ACCENT_GOLD</code> / <code>GOLD_CHIP_*</code> for all active/selected/focus states.
+  <span class="badge high">high</span></li>
+<li><strong>Blue/green primary buttons</strong> — <code>update_panel.py</code> CTA <code>#2563eb</code>/<code>#1d4ed8</code>,
+  <code>user_actions.py</code> <code>#16a34a</code> + <code>#2563eb</code>. Delete the inline QSS; use
+  <code>theme.gold_button()</code> (primary) / <code>theme.secondary_button()</code>. <span class="badge high">high</span></li>
+<li><strong>Second role palette</strong> — <code>roles.py Role.color</code> (<code>lead=#f5c542</code>,
+  <code>frontend=#22d3ee</code> cyan …) disagrees with <code>cockpit_theme.ROLE_COLORS</code>
+  (<code>lead=#E3B341</code>, <code>frontend=#34B7AC</code> teal …) on <strong>every</strong> role. Two palettes for
+  the same concept = guaranteed mismatch between grid and Settings. Collapse to
+  one. <span class="badge high">high</span></li>
+</ul>
+<h2>🔧 ปรับ — per-file migration spec (actionable for frontend/backend)</h2>
+<p>Each row: the file, the literals found (verified), and the exact token to swap to.
+"Grounds→<code>GROUND_*</code>, greys→<code>TEXT_*</code>, borders→<code>BORDER_*</code>" is the standard swap;
+specifics called out where they differ.</p>
+<ul>
+<li><strong><code>status_header.py</code></strong> — greys <code>#3f3f46</code>/<code>#71717a</code>/<code>#27272a</code>/<code>#52525b</code>/<code>#a1a1aa</code>
+  /<code>#d4d4d8</code>/<code>#e4e4e7</code> → <code>TEXT_*</code>; separator <code>_make_status_separator()</code> uses solid
+  <code>#3f3f46</code> (line 44) → <code>BORDER_STRONG</code>; amber <code>#d97706</code>/<code>#f59e0b</code> provider-warn →
+  keep as a <strong>state-amber token</strong> (add <code>STATE_WARN = "#d97706"</code>); provider chips
+  codex <code>#10a37f</code>/gemini <code>#4285f4</code> (line 77-78) → keep, move to
+  <code>PROVIDER_CODEX</code>/<code>PROVIDER_GEMINI</code> tokens; radii <code>10px</code>→<code>RADIUS_MD</code>. <span class="badge high">high</span></li>
+<li><strong><code>project_nav.py</code></strong> — grounds <code>#0e0e10</code>/<code>#18181b</code>/<code>#0b0b0d</code>/<code>#1c1c1f</code> →
+  <code>GROUND_*</code>; <strong>indigo active accent</strong> <code>#6366f1</code>/<code>#818cf8</code>/<code>#8b5cf6</code>/<code>#a5b4fc</code>
+  (lines 68-83,112-113) → <code>ACCENT_GOLD</code>/<code>GOLD_CHIP_*</code>; text <code>#52525b</code>/<code>#a1a1aa</code>/
+  <code>#d4d4d8</code>/<code>#ffffff</code> → <code>TEXT_*</code>. <strong>Keep</strong> <code>_AVATAR_COLORS</code> (lines 111-121) — it's
+  a deterministic per-project avatar tint (hash→palette), a distinct purpose;
+  optionally relocate to a named <code>AVATAR_TINTS</code> token so it reads as intentional.
+  <span class="badge high">high</span></li>
+<li><strong><code>task_dock.py</code></strong> — status dots <code>#facc15</code>/<code>#22c55e</code>/<code>#ef4444</code> (lines 53-55) →
+  state tokens (warn/ok/error); violet <code>#a78bfa</code> (line 57) → <code>ROLE_COLORS</code>/gold as
+  appropriate; grounds <code>#0e0e10</code>/<code>#18181b</code>/<code>#1e1b2e</code> → <code>GROUND_*</code> (the <code>#1e1b2e</code>
+  indigo-tint ground has no equivalent — use <code>GROUND_PANEL</code>); greys → <code>TEXT_*</code>.
+  <span class="badge high">high</span></li>
+<li><strong><code>agent_pane.py</code></strong> — state dots green/gold/blue/orange/red <code>#22c55e</code>/<code>#facc15</code>/
+  <code>#0ea5e9</code>/<code>#f97316</code>/<code>#ef4444</code> (lines 46-50) → state tokens; grounds <code>#18181b</code>/
+  <code>#1c1c20</code>/<code>#27272a</code> → <code>GROUND_*</code>; text <code>#e5e7eb</code>/<code>#9ca3af</code>/<code>#6b7280</code>/<code>#525252</code> →
+  <code>TEXT_*</code>. <span class="badge med">med</span></li>
+<li><strong><code>update_panel.py</code></strong> — CTA <code>#2563eb</code>/<code>#1d4ed8</code> → <code>gold_button</code>; banner sets
+  amber <code>#fde047</code>/<code>#422006</code>/<code>#a16207</code>, green <code>#4ade80</code>/<code>#166534</code>, red <code>#fca5a5</code>/
+  <code>#7f1d1d</code>, blue <code>#1e3a8a</code>/<code>#93c5fd</code> → <strong>state banner tokens</strong> (add
+  <code>BANNER_WARN/OK/ERROR/INFO</code> bg+border+text triples). <span class="badge med">med</span></li>
+<li><strong><code>user_actions.py</code></strong> — buttons <code>#16a34a</code>(green)/<code>#2563eb</code>(blue) →
+  <code>gold_button</code>/<code>secondary_button</code>; greys <code>#6b7280</code>/<code>#3f3f46</code>/<code>#27272a</code>/<code>#71717a</code>/
+  <code>#a1a1aa</code>/<code>#d4d4d8</code> → <code>TEXT_*</code>/<code>BORDER_*</code>; grounds <code>#18181b</code> → <code>GROUND_PANEL</code>.
+  <span class="badge med">med</span></li>
+<li><strong><code>main_window.py</code></strong> — app-chrome grounds <code>#09090b</code>/<code>#18181b</code>/<code>#27272a</code>/
+  <code>#3f3f46</code> (lines 183-186) → <code>GROUND_BODY</code>/<code>GROUND_PANEL</code>/<code>BORDER_*</code>; <code>#a1a1aa</code>/
+  <code>#94a3b8</code> → <code>TEXT_MUTED</code>/<code>TEXT_SECONDARY</code>. This sets base chrome, so fixing it
+  cascades to inheritors like <code>project_wizard.py</code>. <span class="badge high">high</span></li>
+<li><strong><code>project_tab.py</code></strong> — indigo <code>#6366f1</code> active (line 55) → <code>ACCENT_GOLD</code>;
+  grounds <code>#0e0e10</code>/<code>#18181b</code> → <code>GROUND_*</code>; <code>#71717a</code>/<code>#d4d4d8</code>/<code>#ffffff</code> →
+  <code>TEXT_*</code>; error <code>#ef4444</code> → state token. <span class="badge med">med</span></li>
+<li><strong><code>token_meter.py</code> / <code>usage_meter.py</code> / <code>limit_panel.py</code></strong> — Anthropic clay
+  <code>#d97757</code> + amber <code>#fbbf24</code>/<code>#a16207</code> + red <code>#f87171</code>/<code>#ef4444</code> + green
+  <code>#22c55e</code> are <strong>semantic meter fills — keep the meaning</strong>. Add tokens
+  <code>METER_CLAY = "#d97757"</code> + the state ramp to <code>cockpit_theme</code>, then import.
+  Greys → <code>TEXT_*</code>. <span class="badge low">low</span></li>
+<li><strong><code>logs_panel.py</code></strong> — clay <code>#d97757</code> + status <code>#22c55e</code>/<code>#facc15</code>/<code>#22d3ee</code>/
+  <code>#0ea5e9</code>/<code>#f97316</code> → state/provider tokens; grounds/greys → <code>GROUND_*</code>/<code>TEXT_*</code>.
+  <span class="badge low">low</span></li>
+<li><strong><code>tutorial_overlay.py</code></strong> — greys <code>#18181b</code>/<code>#3f3f46</code>/<code>#27272a</code>/<code>#a1a1aa</code>/
+  <code>#71717a</code>/<code>#d4d4d8</code> → <code>GROUND_*</code>/<code>TEXT_*</code>/<code>BORDER_*</code>; clay <code>#e08968</code> →
+  <code>METER_CLAY</code> neighbor / accent per context. <span class="badge low">low</span></li>
+<li><strong><code>roles.py</code></strong> — reconcile <code>Role.color</code> with <code>cockpit_theme.ROLE_COLORS</code>.
+  Recommended: keep <code>roles.py</code> structural (name/label/column/row) and source the
+  color from <code>ROLE_COLORS</code>, with <code>Role.color</code> as fallback for custom roles only —
+  so grid and Settings render identical role hues. <strong>Flag for user sign-off:</strong> the
+  main-grid role colors are long-familiar; changing them is user-visible. <span class="badge high">high</span></li>
+<li><strong><code>settings_window.py</code></strong> — already on-system, but has 5 stray <code>#94a3b8</code>
+  (lines 664,709,1503,1749,1856) not in the token set → map to <code>TEXT_SECONDARY</code>
+  or add <code>TEXT_SLATE</code> if the slate is intentional. <span class="badge low">low</span></li>
+<li><strong><code>issues.py</code></strong> — <code>#d73a4a</code>/<code>#fbca04</code>/<code>#c5def5</code>/<code>#e4e669</code> are <strong>GitHub label
+  colors</strong> (external data), not cockpit chrome → <strong>leave as-is</strong>. <span class="badge low">low</span></li>
+</ul>
+<h2>🚩 Heuristic violations (Nielsen)</h2>
+<ul>
+<li><strong>#4 Consistency &amp; standards</strong> — the core violation: same concepts (active
+  state, primary button, role identity) rendered differently across surfaces
+  (gold vs indigo vs blue; <code>#E3B341</code> vs <code>#f5c542</code>). Fix = one token set. <span class="badge high">high</span></li>
+<li><strong>#8 Aesthetic &amp; minimalist design</strong> — four parallel accent systems (gold /
+  indigo / amber / clay) create visual noise with no semantic payoff for three of
+  them. Collapse to gold-primary + kept semantics. <span class="badge med">med</span></li>
+</ul>
+<h2>🎯 Recommended next steps (สำหรับ Lead)</h2>
+<ol>
+<li><strong>[high]</strong> Extend <code>cockpit_theme.py</code> with the missing <strong>semantic tokens</strong> first
+   (state ramp <code>STATE_WARN/OK/ERROR/INFO</code>, <code>BANNER_*</code> triples, <code>PROVIDER_CODEX/
+   GEMINI</code>, <code>METER_CLAY</code>, optional <code>AVATAR_TINTS</code>). This unblocks every file
+   migration below without new literals. → <strong>backend</strong> (leaf module, no UI risk).</li>
+<li><strong>[high]</strong> Migrate the high-impact chrome files (<code>main_window.py</code>,
+   <code>status_header.py</code>, <code>project_nav.py</code>, <code>task_dock.py</code>, <code>update_panel.py</code>,
+   <code>user_actions.py</code>) to import tokens per the spec above. → <strong>frontend</strong>,
+   one file per commit, pixel-diff each against before.</li>
+<li><strong>[high]</strong> Reconcile the role palette (<code>roles.py</code> ↔ <code>ROLE_COLORS</code>) — <strong>get
+   user sign-off</strong> on the final role hues before changing the familiar grid.</li>
+<li><strong>[med]</strong> Migrate the meters/overlay (<code>token_meter</code>, <code>usage_meter</code>,
+   <code>limit_panel</code>, <code>logs_panel</code>, <code>tutorial_overlay</code>) once semantic tokens land.</li>
+<li><strong>[low]</strong> Clean <code>settings_window.py</code>'s 5 stray <code>#94a3b8</code>; give
+   <code>project_wizard.py</code>'s parent the theme stylesheet so it inherits for free.</li>
+<li><strong>[low]</strong> After migration, add an import-linter/grep guard: no raw
+   <code>#[0-9a-fA-F]{6}</code> in UI <code>.py</code> files except <code>cockpit_theme.py</code> + <code>issues.py</code>
+   (external data) — keeps drift from re-entering.</li>
+</ol><footer>Generated by agent_takkub.design_review_html · self-contained (screenshots inlined) · open in any browser</footer></div></body></html>
