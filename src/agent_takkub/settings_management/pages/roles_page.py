@@ -269,7 +269,9 @@ class RolesPage(ManagementPage):
 
         self._populate_access(d.access, d.access.skills)
 
-        self.danger_zone.set_plan(roles_repo.delete_plan(d.name) if is_custom else None)
+        self.danger_zone.set_plan(
+            roles_repo.delete_plan(d.name) if d.capabilities.can_delete else None
+        )
 
         self.footer.set_create_mode(False)
         self._dirty = False

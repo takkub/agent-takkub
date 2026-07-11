@@ -102,3 +102,67 @@ def test_danger_zone_enabled_for_custom_role() -> None:
     page.refresh()
     page.on_select("data-eng")
     assert page.danger_zone._delete_btn.isEnabled() is True
+
+
+def test_danger_zone_hidden_for_builtin_role() -> None:
+    page = RolesPage()
+    page.refresh()
+    page.on_select("backend")
+    assert page.danger_zone.isHidden() is True
+
+
+def test_danger_zone_visible_for_custom_role() -> None:
+    from agent_takkub.settings_management.repositories import roles as roles_repo
+
+    roles_repo.create(
+        CreateRoleCommand(
+            name="data-eng",
+            general=RoleGeneralDraft(
+                label="Data Eng", color="#94a3b8", column=2, row=50, instructions=""
+            ),
+            access=RoleAccessDraft(provider="claude", skills=[], mcps=None, plugins=None),
+        )
+    )
+    page = RolesPage()
+    page.refresh()
+    page.on_select("data-eng")
+    assert page.danger_zone.isHidden() is False
+
+
+def test_search_filters_role_list() -> None:
+    page = RolesPage()
+    page.refresh()
+    total = page.list._list.count()
+    page.list._search.setText("backend")
+    assert page.list._list.count() < total
+    names = [page.list._list.item(i).text() for i in range(page.list._list.count())]
+    assert all("backend" in n.lower() for n in names)
+    page.list._search.setText("")
+    assert page.list._list.count() == total
+
+
+def test_filter_chip_filters_role_list_to_builtin_only() -> None:
+    from agent_takkub.settings_management.repositories import roles as roles_repo
+
+    roles_repo.create(
+        CreateRoleCommand(
+            name="data-eng",
+            general=RoleGeneralDraft(
+                label="Data Eng", color="#94a3b8", column=2, row=50, instructions=""
+            ),
+            access=RoleAccessDraft(provider="claude", skills=[], mcps=None, plugins=None),
+        )
+    )
+    page = RolesPage()
+    page.refresh()
+    page._on_filter_changed("Built-in")
+    names = {page.list._list.item(i).text() for i in range(page.list._list.count())}
+    assert all("built-in" in n.lower() for n in names)
+    assert not any("data eng" in n.lower() for n in names)
+    page._on_filter_changed("All")
+    assert page.list._list.count() >= len(roles.ALL_DEFAULT) + 1
+
+
+def test_settings_window_has_object_name_for_theming() -> None:
+    window = SettingsManagementWindow()
+    assert window.objectName() == "settingsWindow"

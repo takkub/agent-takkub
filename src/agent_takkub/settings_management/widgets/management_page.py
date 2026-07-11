@@ -70,6 +70,9 @@ class ManagementPage(QWidget):
         self.detail_stack.setCurrentWidget(self.empty_placeholder)
 
         self._current_id: str | None = None
+        self._all_rows: list[tuple[str, str]] = []
+        self._search_text = ""
+        self._active_filter = filters[0] if filters else "All"
 
         # Hooks — the concrete page overwrites these.
         self.load_rows: Callable[[], list[tuple[str, str]]] = lambda: []
@@ -81,9 +84,30 @@ class ManagementPage(QWidget):
 
         self.list.selection_changed.connect(self._on_selection_changed)
         self.list.new_clicked.connect(self._on_new_clicked)
+        self.list.search_changed.connect(self._on_search_changed)
+        self.list.filter_changed.connect(self._on_filter_changed)
 
     def refresh(self) -> None:
-        self.list.set_items(self.load_rows())
+        self._all_rows = self.load_rows()
+        self._apply_filter()
+
+    def _on_search_changed(self, text: str) -> None:
+        self._search_text = text
+        self._apply_filter()
+
+    def _on_filter_changed(self, name: str) -> None:
+        self._active_filter = name
+        self._apply_filter()
+
+    def _apply_filter(self) -> None:
+        query = self._search_text.strip().lower()
+        chip = self._active_filter.strip().lower()
+        rows = self._all_rows
+        if chip and chip != "all":
+            rows = [row for row in rows if chip in row[1].lower()]
+        if query:
+            rows = [row for row in rows if query in row[0].lower() or query in row[1].lower()]
+        self.list.set_items(rows)
 
     def show_empty(self) -> None:
         self._current_id = None

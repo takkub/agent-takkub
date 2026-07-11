@@ -42,9 +42,14 @@ class DangerZone(QWidget):
     def set_plan(self, plan: DeletePlan | None) -> None:
         self._plan = plan
         if plan is None:
+            # No plan at all == delete isn't a capability of this entity
+            # (e.g. built-in role, read-only skill/MCP) — the whole section
+            # must disappear, not show a dead-looking disabled button.
+            self.setVisible(False)
             self._delete_btn.setEnabled(False)
             self._reason.setText("")
             return
+        self.setVisible(True)
         if not plan.deletable:
             self._delete_btn.setEnabled(False)
             self._reason.setText(" · ".join(plan.blockers) or "ลบไม่ได้")

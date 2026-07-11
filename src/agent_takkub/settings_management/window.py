@@ -31,6 +31,7 @@ _WIRED = {"Roles", "Skills", "MCP Servers"}
 class SettingsManagementWindow(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.setObjectName("settingsWindow")
         self.setWindowTitle("Takkub Cockpit — Settings (new)")
         self.resize(1320, 848)
 
