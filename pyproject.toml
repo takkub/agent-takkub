@@ -140,6 +140,7 @@ forbidden_modules = [
     "agent_takkub.main_window",
     "agent_takkub.app",
     "agent_takkub.agent_pane",
+    "agent_takkub.agent_pane_model",
     "agent_takkub.cli_server",
     "agent_takkub.cli",
     "agent_takkub.pty_session",
@@ -411,4 +412,24 @@ forbidden_modules = [
     "agent_takkub.cli",
     "agent_takkub.main_window",
     "agent_takkub.settings_window",
+]
+
+[[tool.importlinter.contracts]]
+name = "agent-pane-model-headless"
+type = "forbidden"
+# agent_pane_model (issue #105 Phase A) is the display-free half of the
+# AgentPane split — session/state bookkeeping the orchestrator's watchdogs
+# read, importable without QtWidgets/QtWebEngineWidgets/a display so a
+# future headless engine (Phase B) can construct it directly. It must never
+# import the view (agent_pane, terminal_widget) or UI/CLI/app entry points —
+# a leak here would silently reintroduce the display dependency this split
+# exists to remove.
+source_modules = ["agent_takkub.agent_pane_model"]
+forbidden_modules = [
+    "agent_takkub.agent_pane",
+    "agent_takkub.terminal_widget",
+    "agent_takkub.main_window",
+    "agent_takkub.app",
+    "agent_takkub.cli",
+    "agent_takkub.orchestrator",
 ]
