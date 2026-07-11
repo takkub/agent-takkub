@@ -204,6 +204,14 @@ def has_any_rows(state: dict) -> bool:
     return project_progress(state)[1] > 0
 
 
+def _is_fallback_goal(goal: str) -> bool:
+    """True for a ledger group with no real goal — `task_ledger`'s own
+    `_FALLBACK_GOAL` placeholder, or blank (defensive: any future writer that
+    forgets to fall back)."""
+    goal = (goal or "").strip()
+    return not goal or goal == task_ledger._FALLBACK_GOAL
+
+
 def feature_emoji(feature: dict) -> str:
     """Mirrors `task_ledger._feature_emoji` (rows-in-progress → 🔨, any
     failure → ⚠️, all terminal → ✅, empty → ⏳) so the dock and INDEX.md
@@ -496,7 +504,18 @@ class TaskDockWidget(QWidget):
         item = QTreeWidgetItem([f"{project}  ({done}/{total})"])
         item.setData(0, Qt.ItemDataRole.UserRole, f"project:{project}")
         for group in state.get("groups", []):
-            item.addChild(self._build_group_item(project, group))
+            # Goalless assigns (`create_assignment(..., goal=None)`) each land
+            # in their own ledger group keyed by date — a project assigned-to
+            # goalless on 2 different days rendered 2 separate "(ไม่ระบุ
+            # เป้าหมาย)" 🎯 headers, each with its own confusing sub-count
+            # (walkthrough cluster D item 3). Skip the 🎯 header for these and
+            # add their features straight under the project row instead — one
+            # flat list, no duplicate noise.
+            if _is_fallback_goal(group.get("goal", "")):
+                for feat in group.get("features", []):
+                    item.addChild(self._build_feature_item(project, group, feat))
+            else:
+                item.addChild(self._build_group_item(project, group))
         return item
 
     def _build_group_item(self, project: str, group: dict) -> QTreeWidgetItem:

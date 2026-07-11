@@ -138,6 +138,68 @@ class TestTaskDockWidget:
 
 
 # ──────────────────────────────────────────────────────────────
+# walkthrough cluster D item 3: goalless assigns on different days used to
+# render as N separate "(ไม่ระบุเป้าหมาย)" 🎯 headers — flatten them instead.
+# ──────────────────────────────────────────────────────────────
+class TestFallbackGoalFlattening:
+    def test_is_fallback_goal(self) -> None:
+        assert task_dock._is_fallback_goal("") is True
+        assert task_dock._is_fallback_goal("   ") is True
+        assert task_dock._is_fallback_goal(task_ledger._FALLBACK_GOAL) is True
+        assert task_dock._is_fallback_goal("ship v1") is False
+
+    def test_goalless_groups_have_no_goal_header(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(task_dock, "list_project_names", lambda: [])
+        widget = task_dock.TaskDockWidget()
+        task_ledger.create_assignment(PROJECT, "backend", "/api", "task one", None, None, "claude")
+        widget.refresh_project(PROJECT)
+        project_item = widget._tree.topLevelItem(0)
+        # Feature row lands directly under the project — no intervening
+        # 🎯 "(ไม่ระบุเป้าหมาย)" child.
+        assert project_item.childCount() == 1
+        feature_item = project_item.child(0)
+        assert "ไม่ระบุเป้าหมาย" not in feature_item.text(0)
+        assert feature_item.data(0, task_dock._ROLE_BASE_LABEL) is not None
+
+    def test_goalless_groups_on_different_dates_merge_flat_not_duplicated(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(task_dock, "list_project_names", lambda: [])
+        widget = task_dock.TaskDockWidget()
+        task_ledger.create_assignment(
+            PROJECT, "backend", "/api", "task one", None, "feature A", "claude"
+        )
+        state = task_ledger.load_state(PROJECT)
+        # Simulate a second goalless group from an earlier/later date so it
+        # doesn't collide with today's group key (date, "(ไม่ระบุเป้าหมาย)").
+        state["groups"].append(
+            {
+                "date": "2000-01-01",
+                "goal": task_ledger._FALLBACK_GOAL,
+                "features": [{"name": "feature B", "rows": [{"status": "ok", "role": "qa"}]}],
+            }
+        )
+        item = widget._build_project_item(PROJECT, state)
+        # Both goalless groups' features land as direct children — flat, no
+        # duplicate "(ไม่ระบุเป้าหมาย)" headers for either date.
+        assert item.childCount() == 2
+        for i in range(item.childCount()):
+            assert "ไม่ระบุเป้าหมาย" not in item.child(i).text(0)
+
+    def test_real_goal_group_keeps_its_header(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(task_dock, "list_project_names", lambda: [])
+        widget = task_dock.TaskDockWidget()
+        task_ledger.create_assignment(
+            PROJECT, "backend", "/api", "task one", "ship v1", "feature A", "claude"
+        )
+        widget.refresh_project(PROJECT)
+        project_item = widget._tree.topLevelItem(0)
+        assert project_item.childCount() == 1
+        goal_item = project_item.child(0)
+        assert "ship v1" in goal_item.text(0)
+
+
+# ──────────────────────────────────────────────────────────────
 # A8-polish item 1: responsive word-wrap tree config
 # ──────────────────────────────────────────────────────────────
 class TestTreeWrapConfig:

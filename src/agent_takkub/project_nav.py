@@ -23,6 +23,7 @@ from PyQt6.QtCore import (
     QPropertyAnimation,
     QSize,
     Qt,
+    QTimer,
     pyqtSignal,
 )
 from PyQt6.QtWidgets import (
@@ -36,8 +37,14 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from . import cockpit_theme
+from . import cockpit_theme, task_ledger
+from .config import list_project_names
 from .token_meter import usage_color
+
+# Poll interval for the "other projects with pending tasks" section — no
+# ledgerChanged signal is wired to this widget (that connection lives in
+# main_window.py, out of this widget's scope), so it self-refreshes instead.
+_PENDING_POLL_MS = 6_000
 
 _SIDEBAR_QSS = f"""
 #projectSidebar {{
@@ -100,6 +107,30 @@ QListWidget#projectList::item:selected {{
 #sidebarUsage {{
     background: {cockpit_theme.GROUND_BODY};
     border-top: 1px solid {cockpit_theme.BORDER_HAIRLINE};
+}}
+#pendingHeader {{
+    color: {cockpit_theme.TEXT_FAINT};
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    padding: 8px 16px 4px 16px;
+}}
+QListWidget#pendingList {{
+    background: transparent;
+    border: none;
+    outline: 0;
+    padding: 0 8px;
+}}
+QListWidget#pendingList::item {{
+    border-radius: {cockpit_theme.RADIUS_SM}px;
+    margin: 1px 0;
+    padding: 5px 8px;
+    color: {cockpit_theme.TEXT_MUTED};
+    font-size: 12px;
+}}
+QListWidget#pendingList::item:hover {{
+    background: {cockpit_theme.GROUND_PANEL};
+    color: {cockpit_theme.TEXT_SECONDARY};
 }}
 """
 
@@ -188,9 +219,17 @@ class _ProjectRow(QWidget):
     def set_usage(self, ratio: float | None) -> None:
         if ratio is None:
             self._badge.setText("")
+            self._badge.setToolTip("")
             return
-        self._badge.setText(f"{int(ratio * 100)}%")
+        pct = int(ratio * 100)
+        # 🧠 prefix + tooltip: the bare "33%" had no legend (walkthrough
+        # cluster D item 2) — nothing said whether it was token budget, disk,
+        # or something else. It's the busiest pane's context-window fill
+        # (status_header._update_status: peak prompt/limit ratio across the
+        # project's panes), so label it as that, in-place, no extra dialog.
+        self._badge.setText(f"\U0001f9e0 {pct}%")
         self._badge.setStyleSheet(f"color: {usage_color(ratio)}; font-size: 11px;")
+        self._badge.setToolTip(f"Context window usage {pct}% — pane ที่ใช้เยอะสุดในโปรเจคนี้ตอนนี้")
 
     def set_collapsed(self, collapsed: bool) -> None:
         """Hide/show the name + badge; re-center the avatar in the rail."""
@@ -214,6 +253,11 @@ class ProjectNav(QWidget):
     addRequested = pyqtSignal()
     closeRequested = pyqtSignal(int)
     contextMenuRequested = pyqtSignal(int, QPoint)
+    # Emitted when the user clicks a row in the "โปรเจคอื่นที่มี task ค้าง"
+    # section (walkthrough cluster D item 1) — the sidebar only knows the
+    # project *name* to open, not how to build/register its tab (that's
+    # main_window._open_project_tab's job), so it hands the request up.
+    openProjectRequested = pyqtSignal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -248,6 +292,37 @@ class ProjectNav(QWidget):
         self._list.customContextMenuRequested.connect(self._on_context_menu)
         sb.addWidget(self._list, 1)
 
+        # "โปรเจคอื่นที่มี task ค้าง" — sidebar only lists projects with an
+        # *open tab*, but the task dock (right side) shows every project with
+        # a ledger row, open tab or not. That mismatch read as "sidebar and
+        # dock disagree about which projects exist" (walkthrough cluster D
+        # item 1). This section closes the gap: any project with an open
+        # (`working`) ledger row that ISN'T already an open tab gets listed
+        # here — click to open it. Hidden entirely when there's nothing to
+        # show, so it costs no space on the common case.
+        self._pending_header = QLabel("โปรเจคอื่นที่มี task ค้าง")
+        self._pending_header.setObjectName("pendingHeader")
+        self._pending_header.hide()
+        sb.addWidget(self._pending_header)
+
+        self._pending_list = QListWidget(sidebar)
+        self._pending_list.setObjectName("pendingList")
+        self._pending_list.setFrameShape(QListWidget.Shape.NoFrame)
+        self._pending_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._pending_list.setMaximumHeight(96)
+        self._pending_list.itemClicked.connect(self._on_pending_item_clicked)
+        self._pending_list.hide()
+        sb.addWidget(self._pending_list)
+
+        # No ledgerChanged hookup here (that connection lives in
+        # main_window.py, out of this widget's scope) — poll instead so a
+        # fresh assign in another tab still surfaces here within a few
+        # seconds without any wiring on the caller's side.
+        self._pending_timer = QTimer(self)
+        self._pending_timer.setInterval(_PENDING_POLL_MS)
+        self._pending_timer.timeout.connect(self.refresh_pending_projects)
+        self._pending_timer.start()
+
         # Sidebar collapse/expand toggle. Lives in the sidebar footer (right
         # above "New project") so the control that hides the sidebar sits inside
         # the thing it acts on, instead of off in the bottom status bar. The
@@ -271,6 +346,60 @@ class ProjectNav(QWidget):
         root.addWidget(sidebar)
         root.addWidget(self._stack, 1)
 
+        self.refresh_pending_projects()
+
+    # ------------------------------------------------------------------
+    # "other projects with pending tasks" section
+    # ------------------------------------------------------------------
+    def refresh_pending_projects(self) -> None:
+        """Rebuild the pending-projects section from the task ledger.
+
+        A project qualifies when it has at least one `working` ledger row
+        (an assign that never called `takkub done`) and isn't already an
+        open tab. Cheap: `task_ledger.load_state` is a small JSON read per
+        project, and there are only ever a handful of configured projects.
+        """
+        open_names = {self._row_widget(i)._name_text for i in range(self._list.count())}
+        try:
+            all_names = list_project_names()
+        except Exception:
+            all_names = []
+
+        self._pending_list.clear()
+        for name in all_names:
+            if name in open_names:
+                continue
+            count = self._pending_task_count(name)
+            if count <= 0:
+                continue
+            item = QListWidgetItem(f"○  {name}  ({count})")
+            item.setData(Qt.ItemDataRole.UserRole, name)
+            item.setToolTip(f"เปิด '{name}' ({count} task ค้าง)")
+            self._pending_list.addItem(item)
+
+        has_pending = self._pending_list.count() > 0
+        self._pending_header.setVisible(has_pending and not self._collapsed)
+        self._pending_list.setVisible(has_pending and not self._collapsed)
+
+    @staticmethod
+    def _pending_task_count(project: str) -> int:
+        try:
+            state = task_ledger.load_state(project)
+        except Exception:
+            return 0
+        count = 0
+        for group in state.get("groups", []):
+            for feat in group.get("features", []):
+                for row in feat.get("rows", []):
+                    if row.get("status") == "working":
+                        count += 1
+        return count
+
+    def _on_pending_item_clicked(self, item: QListWidgetItem) -> None:
+        name = item.data(Qt.ItemDataRole.UserRole)
+        if isinstance(name, str) and name:
+            self.openProjectRequested.emit(name)
+
     # ------------------------------------------------------------------
     # sidebar collapse/expand (the ☰ "slide menu" toggle)
     # ------------------------------------------------------------------
@@ -293,6 +422,10 @@ class ProjectNav(QWidget):
         self._header.setVisible(not collapsed)
         self._add_btn.setText("+" if collapsed else "+   New project")
         self._toggle_btn.setText("»" if collapsed else "«  Collapse")
+        # Pending section only makes sense expanded (it's read as list rows,
+        # not avatars) — re-run refresh_pending_projects() so it re-applies
+        # its own has_pending && !collapsed visibility check.
+        self.refresh_pending_projects()
         target = _COLLAPSED_W if collapsed else _EXPANDED_W
         if not animate:
             self._sidebar.setFixedWidth(target)
@@ -370,11 +503,13 @@ class ProjectNav(QWidget):
     def addTab(self, w: QWidget, label: str) -> int:
         index = self._stack.addWidget(w)
         self._insert_list_row(index, label)
+        self.refresh_pending_projects()  # opened project drops out of "pending"
         return index
 
     def insertTab(self, index: int, w: QWidget, label: str) -> int:
         self._stack.insertWidget(index, w)
         self._insert_list_row(index, label)
+        self.refresh_pending_projects()
         return index
 
     def removeTab(self, index: int) -> None:
@@ -384,6 +519,7 @@ class ProjectNav(QWidget):
         item = self._list.takeItem(index)
         if item is not None:
             del item
+        self.refresh_pending_projects()  # closed project may reappear as pending
 
     def setTabText(self, index: int, text: str) -> None:
         rw = self._row_widget(index)
