@@ -403,6 +403,162 @@ class TestSendWhenReadyRetry:
         live_sess.write.assert_called()  # task was delivered
 
 
+class TestSendWhenReadyOutlivesGateBlock:
+    """2026-07-11 dogfooding bug: a spawn deferred by the ConPTY safety gate
+    for longer than _send_when_ready's max_wait_ms silently dropped the task
+    — _check() gave up on the max_wait_ms edge even though pane.session was
+    still None and the gate retry (_retry_deferred_spawn, no timeout of its
+    own) was still working towards eventually spawning the pane."""
+
+    def test_keeps_polling_past_max_wait_ms_while_gate_deferred(self, qapp, monkeypatch):
+        orch = Orchestrator.__new__(Orchestrator)
+        orch._panes_by_project = {}
+        orch._pane_state = {}
+        orch._spawn_deferred = {f"{TEST_PROJECT}::backend"}
+
+        pane = _make_dead_pane("backend")
+        orch._panes_by_project[TEST_PROJECT] = {"backend": pane}
+
+        timer_calls = []
+        with patch(
+            "agent_takkub.orchestrator.QTimer.singleShot",
+            side_effect=lambda d, fn, *a, **kw: timer_calls.append((d, fn)),
+        ):
+            # Tiny max_wait_ms — a single poll already exceeds it — proving
+            # the gate-deferred signal, not the timer, decides whether to
+            # give up.
+            orch._send_when_ready("backend", "do something", max_wait_ms=1, project=TEST_PROJECT)
+
+            check_fn = timer_calls[0][1]
+            timer_calls.clear()
+            check_fn()
+
+        assert timer_calls, (
+            "_check must keep polling past max_wait_ms while the role is still "
+            "gate-deferred — giving up here is exactly how the task got dropped"
+        )
+
+    def test_survives_toctou_gap_between_gate_clear_and_session_attach(self, qapp, monkeypatch):
+        """_retry_deferred_spawn discards the deferred marker BEFORE its
+        follow-up spawn() call actually attaches a session (its own 35ms
+        quiet-window re-check). A poll landing in that narrow gap, after
+        max_wait_ms has already elapsed, must not resurrect the drop."""
+        orch = Orchestrator.__new__(Orchestrator)
+        orch._panes_by_project = {}
+        orch._pane_state = {}
+        orch._spawn_deferred = {f"{TEST_PROJECT}::backend"}
+
+        pane = _make_dead_pane("backend")
+        orch._panes_by_project[TEST_PROJECT] = {"backend": pane}
+
+        timer_calls = []
+        with patch(
+            "agent_takkub.orchestrator.QTimer.singleShot",
+            side_effect=lambda d, fn, *a, **kw: timer_calls.append((d, fn)),
+        ):
+            orch._send_when_ready("backend", "do something", max_wait_ms=1, project=TEST_PROJECT)
+
+            # First poll: session None, gate-deferred, already past max_wait_ms
+            # → sticky gate_seen flips True, must still reschedule.
+            check_fn = timer_calls[0][1]
+            timer_calls.clear()
+            check_fn()
+            assert timer_calls, "must reschedule on the first past-timeout deferred poll"
+
+            # Simulate the TOCTOU gap: gate clears (marker removed) but the
+            # session isn't attached yet.
+            orch._spawn_deferred.discard(f"{TEST_PROJECT}::backend")
+            gap_fn = timer_calls[0][1]
+            timer_calls.clear()
+            gap_fn()
+            assert timer_calls, (
+                "must NOT give up in the gate-cleared/session-not-yet-attached gap "
+                "just because the deferred marker was momentarily absent"
+            )
+
+            # The deferred retry's follow-up spawn() now completes for real.
+            live_sess = MagicMock()
+            live_sess.is_alive = True
+            live_sess.is_at_ready_prompt.return_value = True
+            pane.session = live_sess
+
+            final_fn = timer_calls[0][1]
+            timer_calls.clear()
+            final_fn()
+
+        live_sess.write.assert_called()  # task still landed
+
+    def test_gate_never_deferred_still_times_out_and_warns(self, qapp, monkeypatch):
+        """A pane that never gets a session AND was never gate-deferred (some
+        other spawn failure) must still hit the hard timeout and warn the
+        Lead — the fix must not turn this into an infinite hang."""
+        orch = _make_orchestrator(qapp, monkeypatch)
+        orch._spawn_deferred = set()
+
+        pane = _make_dead_pane("backend")
+        lead = _make_dead_pane("lead")
+        lead.session = MagicMock()
+        lead.session.is_alive = True
+        orch._panes_by_project[TEST_PROJECT] = {"backend": pane, "lead": lead}
+
+        with patch(
+            "agent_takkub.orchestrator.QTimer.singleShot",
+            side_effect=lambda d, fn, *a, **kw: fn(),
+        ):
+            with patch("agent_takkub.orchestrator._log_event"):
+                orch._send_when_ready(
+                    "backend", "do something", max_wait_ms=1, project=TEST_PROJECT
+                )
+
+        assert any(
+            "delivery-unconfirmed" in c.args[0] for c in lead.session.write.call_args_list if c.args
+        )
+
+    def test_gives_up_if_pane_torn_down_mid_extended_wait(self, qapp, monkeypatch):
+        """Once gate_seen is sticky, the ONLY way out (besides the pane
+        coming alive) is the pane itself being replaced/closed — must not
+        poll forever against an abandoned closure."""
+        orch = _make_orchestrator(qapp, monkeypatch)
+        orch._spawn_deferred = {f"{TEST_PROJECT}::backend"}
+
+        pane = _make_dead_pane("backend")
+        lead = _make_dead_pane("lead")
+        lead.session = MagicMock()
+        lead.session.is_alive = True
+        orch._panes_by_project[TEST_PROJECT] = {"backend": pane, "lead": lead}
+
+        timer_calls = []
+        with patch(
+            "agent_takkub.orchestrator.QTimer.singleShot",
+            side_effect=lambda d, fn, *a, **kw: timer_calls.append((d, fn)),
+        ):
+            with patch("agent_takkub.orchestrator._log_event"):
+                orch._send_when_ready(
+                    "backend", "do something", max_wait_ms=1, project=TEST_PROJECT
+                )
+
+                check_fn = timer_calls[0][1]
+                timer_calls.clear()
+                check_fn()  # gate_seen flips True, reschedules
+                assert timer_calls
+
+                # Pane is torn down / replaced by a fresh spawn under the
+                # same role — the old closure's `pane` is now orphaned.
+                orch._panes_by_project[TEST_PROJECT]["backend"] = _make_dead_pane("backend")
+
+                stale_fn = timer_calls[0][1]
+                timer_calls.clear()
+                stale_fn()
+
+        # The old (torn-down) backend pane was never delivered into — only
+        # the Lead's warning notice went out (which itself schedules a
+        # submit-verify timer, hence not asserting timer_calls is empty here).
+        assert not pane.session
+        assert any(
+            "delivery-unconfirmed" in c.args[0] for c in lead.session.write.call_args_list if c.args
+        )
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Tier 2: final re-sample gate — all 4 provider branches
 # ──────────────────────────────────────────────────────────────────────────────

@@ -97,6 +97,71 @@ class TestDeliveryUnconfirmedWarning:
         assert any("#26" in c.args[0] for c in lead.session.write.call_args_list if c.args)
 
 
+class TestGateDeferredSpawnDeliversEventually:
+    """2026-07-11 dogfooding bug: an assign() whose spawn was deferred by the
+    ConPTY safety gate (modal/popup blocking construction) for longer than
+    max_wait_ms silently dropped the task — _check() gave up the moment
+    elapsed[0] crossed max_wait_ms even though pane.session was still None,
+    with no paste and no Lead warning. The gate's own retry loop
+    (spawn_engine._retry_deferred_spawn) has no timeout and keeps trying
+    every 50ms until it clears, so the poller must keep waiting too as long
+    as the role stays in the gate's deferred set."""
+
+    def test_polls_past_timeout_while_gate_deferred_then_delivers(
+        self, orch: Orchestrator, monkeypatch
+    ) -> None:
+        reviewer = _pane(session=None)  # no session yet — spawn still deferred
+        orch._panes_by_project["P"] = {"lead": _pane(_live_session()), "reviewer": reviewer}
+        # Role is parked in the gate's deferred set the whole time the poll
+        # would otherwise time out.
+        orch._spawn_deferred = {"P::reviewer"}
+
+        calls = {"n": 0}
+
+        def _fake_single_shot(_ms, fn):
+            calls["n"] += 1
+            if calls["n"] == 5:
+                # Gate clears and the pane finally comes alive, mid-poll —
+                # exactly like the real spawn succeeding after several
+                # deferred retries.
+                orch._spawn_deferred.discard("P::reviewer")
+                session = _live_session()
+                session.is_at_ready_prompt.return_value = True
+                reviewer.session = session
+            fn()
+
+        monkeypatch.setattr(orch_mod.QTimer, "singleShot", staticmethod(_fake_single_shot))
+
+        with patch("agent_takkub.orchestrator._log_event"):
+            # max_wait_ms is tiny — far shorter than the 5 polls it takes for
+            # the gate to clear — so a correct fix must keep polling anyway.
+            orch._send_when_ready("reviewer", "run smoke", max_wait_ms=300, project="P")
+
+        assert reviewer.session.write.called
+        # No unconfirmed-delivery warning: this was a clean, confirmed
+        # ready-prompt delivery, not a blind/timeout paste.
+        lead = orch._panes_by_project["P"]["lead"]
+        assert not any("#26" in c.args[0] for c in lead.session.write.call_args_list if c.args)
+
+    def test_gives_up_and_warns_once_truly_not_gate_deferred(
+        self, orch: Orchestrator, monkeypatch
+    ) -> None:
+        """A pane that never gets a session AND is never in the gate's
+        deferred set (e.g. spawn silently failed some other way) must still
+        hit the hard timeout and warn the Lead — no infinite hang, no silent
+        drop either."""
+        reviewer = _pane(session=None)
+        lead = _pane(_live_session())
+        orch._panes_by_project["P"] = {"lead": lead, "reviewer": reviewer}
+        orch._spawn_deferred = set()
+        monkeypatch.setattr(orch_mod.QTimer, "singleShot", staticmethod(lambda _ms, fn: fn()))
+
+        with patch("agent_takkub.orchestrator._log_event"):
+            orch._send_when_ready("reviewer", "run smoke", max_wait_ms=300, project="P")
+
+        assert any("#26" in c.args[0] for c in lead.session.write.call_args_list if c.args)
+
+
 class TestReadyWaitMs:
     """agy (gemini role's engine) cold-boots ~46s — right at the 45s default
     edge — forcing a fragile blind paste (#26). gemini/agy panes get a longer

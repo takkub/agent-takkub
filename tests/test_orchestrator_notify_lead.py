@@ -339,6 +339,174 @@ class TestBusyRetryCapSpill:
         assert TEST_PROJECT not in retry, "retry counter must be cleared after delivery"
 
 
+class TestPumpWriteFailureDoesNotLoseItems:
+    """HIGH#1 (docs/reviews/2026-07-11-full-system-review-codex.md): a
+    session.write() exception (session torn down between the liveness check
+    and the write) must never drop a notice — it must land in the durable
+    queue instead of vanishing from both live and durable state."""
+
+    def test_write_fails_on_only_item_spills_to_durable(self, orch: Orchestrator) -> None:
+        """Single queued item; write() raises → item must survive in durable
+        queue, not vanish from both live_queue and durable_queue."""
+        lead = _make_lead_pane(ready=True)
+        lead.session.write.side_effect = RuntimeError("session torn down")
+        orch._panes_by_project[TEST_PROJECT] = {"lead": lead}
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            orch._notify_lead(TEST_PROJECT, "only item")
+
+        # Live queue must be empty (spilled), not silently holding a stale item.
+        live = getattr(orch, "_lead_notify_queue", {}).get(TEST_PROJECT)
+        assert not live, "live queue must be cleared after a failed write"
+
+        # The item must have survived into the durable queue.
+        durable = orch._pending_done_notices.get(TEST_PROJECT, [])
+        bodies = [item["body"] for item in durable]
+        assert any("only item" in b for b in bodies), (
+            "item must survive in the durable queue after a write() exception"
+        )
+
+    def test_write_fails_on_item_n_preserves_all_queued_items(self, orch: Orchestrator) -> None:
+        """3 items queued while busy; when ready, write() raises on the very
+        first delivery attempt (item N in a multi-item durable replay) — ALL
+        3 items (not just the one being written) must survive durably."""
+        lead = _make_lead_pane(ready=False)
+        orch._panes_by_project[TEST_PROJECT] = {"lead": lead}
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            orch._notify_lead(TEST_PROJECT, "item one")
+            orch._notify_lead(TEST_PROJECT, "item two")
+            orch._notify_lead(TEST_PROJECT, "item three")
+
+        live_before = getattr(orch, "_lead_notify_queue", {}).get(TEST_PROJECT)
+        assert live_before and len(live_before) == 3
+
+        # Lead becomes ready but its write() is now broken (torn down).
+        lead.session.is_at_ready_prompt.return_value = True
+        lead.session.write.side_effect = RuntimeError("session torn down")
+        pumping: set = getattr(orch, "_lead_notify_pumping", set())
+        pumping.discard(TEST_PROJECT)
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            orch._pump_lead_notify(TEST_PROJECT)
+
+        live_after = getattr(orch, "_lead_notify_queue", {}).get(TEST_PROJECT)
+        assert not live_after, "live queue must be cleared after a failed write"
+
+        durable = orch._pending_done_notices.get(TEST_PROJECT, [])
+        bodies = [item["body"] for item in durable]
+        for expected in ("item one", "item two", "item three"):
+            assert any(expected in b for b in bodies), (
+                f"{expected!r} must survive in the durable queue — "
+                "no notice may be lost when write() raises mid-pump"
+            )
+
+
+class TestFlushWriteFailureDoesNotLoseItems:
+    """HIGH#1: _flush_pending_done_notices must not pop the whole durable
+    list and persist it empty before attempting delivery — a write failure on
+    the first or a middle item must leave every unacknowledged item durable."""
+
+    def test_write_fails_on_first_replayed_item_rest_stay_durable(self, orch: Orchestrator) -> None:
+        lead = _make_lead_pane(ready=True)
+        lead.session.write.side_effect = RuntimeError("session torn down")
+        orch._panes_by_project[TEST_PROJECT] = {"lead": lead}
+
+        orch._pending_done_notices[TEST_PROJECT] = [
+            {"role": "backend", "note": "notify", "body": "[backend done] first"},
+            {"role": "qa", "note": "notify", "body": "[qa done] second"},
+            {"role": "frontend", "note": "notify", "body": "[frontend done] third"},
+        ]
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            orch._flush_pending_done_notices(TEST_PROJECT)
+
+        durable = orch._pending_done_notices.get(TEST_PROJECT, [])
+        bodies = [item["body"] for item in durable]
+        for expected in ("first", "second", "third"):
+            assert any(expected in b for b in bodies), (
+                f"{expected!r} must remain durable when the first replayed "
+                "item's write fails — the old pop-all-persist-empty bug lost "
+                "everything in this scenario"
+            )
+
+    def test_write_fails_on_middle_item_earlier_and_later_items_both_survive(
+        self, orch: Orchestrator
+    ) -> None:
+        lead = _make_lead_pane(ready=True)
+        orch._panes_by_project[TEST_PROJECT] = {"lead": lead}
+
+        calls = {"n": 0}
+
+        def _write(payload):
+            calls["n"] += 1
+            if calls["n"] >= 2:
+                # Session tears down starting with the 2nd write and stays
+                # down (realistic: a torn-down session doesn't recover
+                # mid-flush) — so the first item still delivers cleanly while
+                # everything from the failure point on must stay durable.
+                raise RuntimeError("session torn down")
+
+        lead.session.write.side_effect = _write
+
+        orch._pending_done_notices[TEST_PROJECT] = [
+            {"role": "backend", "note": "notify", "body": "[backend done] alpha"},
+            {"role": "qa", "note": "notify", "body": "[qa done] beta"},
+            {"role": "frontend", "note": "notify", "body": "[frontend done] gamma"},
+        ]
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            orch._flush_pending_done_notices(TEST_PROJECT)
+
+        durable = orch._pending_done_notices.get(TEST_PROJECT, [])
+        bodies = [item["body"] for item in durable]
+        # alpha (item 1) delivered successfully — no longer durable.
+        assert not any("alpha" in b for b in bodies)
+        # beta (item 2) failed to write — must still be durable.
+        assert any("beta" in b for b in bodies), "middle item must survive its own write failure"
+        # gamma (item 3) never reached this flush call — must still be durable.
+        assert any("gamma" in b for b in bodies), (
+            "items behind a failed item must remain durable, not be lost"
+        )
+
+
+class TestForceDeliverWriteFailureDoesNotLoseItems:
+    """HIGH#1: _force_deliver_done_notices must apply the same deliver-then-ack
+    rule as the live pump and the replay flush."""
+
+    def test_write_fails_items_stay_durable(self, orch: Orchestrator) -> None:
+        lead = _make_lead_pane(ready=True)
+        lead.session.write.side_effect = RuntimeError("session torn down")
+        orch._panes_by_project[TEST_PROJECT] = {"lead": lead}
+
+        orch._pending_done_notices[TEST_PROJECT] = [
+            {"role": "backend", "note": "notify_spill", "body": "[backend done] one"},
+            {"role": "qa", "note": "notify_spill", "body": "[qa done] two"},
+        ]
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            orch._force_deliver_done_notices(TEST_PROJECT)
+
+        durable = orch._pending_done_notices.get(TEST_PROJECT, [])
+        bodies = [item["body"] for item in durable]
+        assert any("one" in b for b in bodies)
+        assert any("two" in b for b in bodies)
+
+    def test_write_succeeds_clears_durable_queue(self, orch: Orchestrator) -> None:
+        lead = _make_lead_pane(ready=True)
+        orch._panes_by_project[TEST_PROJECT] = {"lead": lead}
+
+        orch._pending_done_notices[TEST_PROJECT] = [
+            {"role": "backend", "note": "notify_spill", "body": "[backend done] one"},
+        ]
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            orch._force_deliver_done_notices(TEST_PROJECT)
+
+        assert lead.session.write.called
+        assert not orch._pending_done_notices.get(TEST_PROJECT)
+
+
 class TestReapPendingDoneNotices:
     """Periodic reaper flushes durable done-notices when Lead returns to idle.
 

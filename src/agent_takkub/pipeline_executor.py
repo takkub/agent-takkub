@@ -182,6 +182,27 @@ class PipelineMixin:
         if not hops:
             return False, f"pipeline {template_id!r}: no runnable hops"
 
+        # HIGH#2 fix (docs/reviews/2026-07-11-full-system-review-codex.md):
+        # reject a new run instead of silently overwriting an existing
+        # pipeline's pane ownership. Without this check, _fire_pipeline_hop's
+        # _spawn_one unconditionally clobbers PaneState.pipeline_run_id for
+        # every role in hop 0 — if that role is still the pending owner of an
+        # older, non-closed run, the older run is orphaned forever (no
+        # timeout, no other owner left to advance it). "One active owner per
+        # pane" is the simpler, safer model (codex's recommendation) — a role
+        # with no existing owner (never assigned to a pipeline, or a manually
+        # assigned live pane with no pipeline_run_id) is still freely adopted.
+        conflicts = self._pipeline_hop_conflicts(project_ns, hops[0])
+        if conflicts:
+            conflict_desc = ", ".join(
+                f"{role} (already owned by run {rid})" for role, rid in sorted(conflicts.items())
+            )
+            return (
+                False,
+                f"pipeline {template_id!r}: rejected — {conflict_desc}; "
+                "finish or close the running pipeline first",
+            )
+
         import uuid as _uuid
 
         run_id = str(_uuid.uuid4())[:8]
@@ -203,6 +224,32 @@ class PipelineMixin:
         )
         self._fire_pipeline_hop(project_ns, run_id, run)
         return True, f"pipeline {tpl['name']!r} started (run {run_id}, {len(hops)} hops)"
+
+    def _pipeline_hop_conflicts(self, project_ns: str, hop: list) -> dict:
+        """Return ``{role: existing_run_id}`` for every role in *hop* that is
+        currently owned by a different, non-closed pipeline run in this
+        project.
+
+        A role with no ``pipeline_run_id`` (never touched by a pipeline, or a
+        live pane that was manually assigned) is not a conflict — the new run
+        is free to adopt it. Read-only: uses ``_pane_state.get`` rather than
+        ``_ps`` so a conflict check never creates PaneState entries as a side
+        effect.
+        """
+        conflicts: dict = {}
+        pane_state = getattr(self, "_pane_state", {})
+        for entry in hop:
+            role = entry.get("role")
+            if not role:
+                continue
+            ps = pane_state.get(f"{project_ns}::{role}")
+            existing_id = ps.pipeline_run_id if ps is not None else None
+            if not existing_id:
+                continue
+            existing_run = self._pipeline_runs.get(f"{project_ns}::{existing_id}")
+            if existing_run is not None and not existing_run.closed:
+                conflicts[role] = existing_id
+        return conflicts
 
     def _defer(self, delay_ms: int, fn) -> None:
         """Run *fn* on the Qt event loop after *delay_ms* (non-blocking seam).

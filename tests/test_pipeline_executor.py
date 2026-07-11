@@ -340,6 +340,125 @@ class TestRunPipelineHop0:
 
 
 # ──────────────────────────────────────────────────────────────
+# HIGH#2 fix: overlapping pipelines must not clobber pane ownership
+# (docs/reviews/2026-07-11-full-system-review-codex.md)
+# ──────────────────────────────────────────────────────────────
+
+
+class TestOverlappingPipelineOwnership:
+    """run_pipeline() must reject a new run when a requested current-hop role
+    is already the non-closed owner of a running pipeline, instead of
+    silently overwriting PaneState.pipeline_run_id and orphaning the older
+    run (which would then have no timeout and no other owner to advance it)."""
+
+    def test_second_one_hop_run_on_same_role_is_rejected(
+        self,
+        qapp: QCoreApplication,
+        two_project_json: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        orch, _ = _make_orch_with_panes("proj_a", ["lead", "backend"])
+        monkeypatch.setattr(orch, "spawn", MagicMock(return_value=(True, "ok")))
+        from agent_takkub import pipeline_config
+
+        monkeypatch.setattr(
+            pipeline_config,
+            "load",
+            lambda *a, **k: _simple_pipeline(
+                [[{"role": "backend", "cwd": "", "requiresCommit": False, "autoChain": False}]],
+                template_id="one-hop",
+            ),
+        )
+
+        ok1, _msg1 = orch.run_pipeline("one-hop", project="proj_a")
+        assert ok1
+        run1_keys = [k for k in orch._pipeline_runs if k.startswith("proj_a::")]
+        assert len(run1_keys) == 1
+        run1_id = run1_keys[0].split("::", 1)[1]
+        ps = orch._pane_state.get("proj_a::backend")
+        assert ps is not None and ps.pipeline_run_id == run1_id
+
+        # Second one-hop run against the same role in the same project must
+        # be rejected outright — never silently overwrite the first run's
+        # ownership.
+        ok2, msg2 = orch.run_pipeline("one-hop", project="proj_a")
+        assert not ok2
+        assert "backend" in msg2
+        assert "rejected" in msg2
+
+        # First run must survive untouched — no orphan, no clobbered tag.
+        assert len(orch._pipeline_runs) == 1
+        assert orch._pane_state["proj_a::backend"].pipeline_run_id == run1_id
+
+    def test_run_on_different_role_not_blocked_by_unrelated_running_pipeline(
+        self,
+        qapp: QCoreApplication,
+        two_project_json: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A running pipeline that owns 'backend' must not block a new
+        pipeline targeting an unrelated role ('frontend') — the conflict
+        check is per-role, not a blanket one-pipeline-per-project lock."""
+        orch, _ = _make_orch_with_panes("proj_a", ["lead", "backend", "frontend"])
+        monkeypatch.setattr(orch, "spawn", MagicMock(return_value=(True, "ok")))
+        from agent_takkub import pipeline_config
+
+        templates = {
+            "be-only": _simple_pipeline(
+                [[{"role": "backend", "cwd": "", "requiresCommit": False, "autoChain": False}]],
+                template_id="be-only",
+            ),
+            "fe-only": _simple_pipeline(
+                [[{"role": "frontend", "cwd": "", "requiresCommit": False, "autoChain": False}]],
+                template_id="fe-only",
+            ),
+        }
+        # pipeline_config.load(project=...) doesn't take the template id, so
+        # thread the current template through a small mutable box instead.
+        current = {"id": "be-only"}
+        monkeypatch.setattr(pipeline_config, "load", lambda *a, **k: templates[current["id"]])
+
+        ok1, _ = orch.run_pipeline("be-only", project="proj_a")
+        assert ok1
+
+        current["id"] = "fe-only"
+        ok2, _ = orch.run_pipeline("fe-only", project="proj_a")
+        assert ok2
+        assert len(orch._pipeline_runs) == 2
+
+    def test_pipeline_may_adopt_a_live_manually_assigned_pane(
+        self,
+        qapp: QCoreApplication,
+        two_project_json: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A role already live via a manual (non-pipeline) assign has no
+        pipeline_run_id set, so it is not a conflict — spawn() returns
+        success ('already running') and the pipeline is free to adopt the
+        pane. This is the explicit, tested "live non-pipeline pane" behaviour
+        the review asked for: adoption, not rejection."""
+        orch, _ = _make_orch_with_panes("proj_a", ["lead", "backend"])
+        monkeypatch.setattr(orch, "spawn", MagicMock(return_value=(True, "already running")))
+        assert orch._pane_state.get("proj_a::backend") is None
+
+        from agent_takkub import pipeline_config
+
+        monkeypatch.setattr(
+            pipeline_config,
+            "load",
+            lambda *a, **k: _simple_pipeline(
+                [[{"role": "backend", "cwd": "", "requiresCommit": False, "autoChain": False}]],
+                template_id="adopt-test",
+            ),
+        )
+
+        ok, _ = orch.run_pipeline("adopt-test", project="proj_a")
+        assert ok
+        ps = orch._pane_state.get("proj_a::backend")
+        assert ps is not None and ps.pipeline_run_id is not None
+
+
+# ──────────────────────────────────────────────────────────────
 # Hop spawn staggering (#44)
 # ──────────────────────────────────────────────────────────────
 

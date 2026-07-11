@@ -543,6 +543,10 @@ class LeadInboxMixin:
             return
         elapsed = [0]
         sent = [False]
+        # Sticky: once we've ever seen this role parked in the spawn gate's
+        # deferred set (spawn_engine._spawn_deferred), stop trusting
+        # max_wait_ms for the "no session yet" branch — see _check below.
+        gate_seen = [False]
 
         def _deliver(unconfirmed: bool = False) -> None:
             if sent[0]:
@@ -590,11 +594,46 @@ class LeadInboxMixin:
                 return
             if pane.session is None or not pane.session.is_alive:
                 # Session absent or not yet alive — may be deferred by the
-                # spawn gate.  Keep waiting rather than silently dropping the
-                # task; the gate retry will attach the session within seconds.
+                # spawn gate (modal/popup blocking ConPTY construction, see
+                # spawn_engine._retry_deferred_spawn). That retry loop has no
+                # timeout of its own — it keeps re-checking every 50ms until
+                # the gate clears, however long that takes. So while the role
+                # is (or was) parked in the gate's deferred set, keep polling
+                # past max_wait_ms too: giving up here on a timer that's
+                # shorter than the gate's own retry window silently drops the
+                # task the moment the pane finally spawns (no session left
+                # polling to paste it, no warning to the Lead — see the
+                # 2026-07-11 dogfooding bug where a ~70s gate block outlived
+                # the 45s default and the task vanished into a blank pane).
                 elapsed[0] += _READY_POLL_INTERVAL_MS
-                if elapsed[0] < max_wait_ms:
-                    QTimer.singleShot(_READY_POLL_INTERVAL_MS, _check)
+                _deferred = getattr(self, "_spawn_deferred", None)
+                _dk = f"{self._resolve_project(project)}::{role_name}"
+                if _deferred is not None and _dk in _deferred:
+                    gate_seen[0] = True
+                # Sticky, not a live re-check: _retry_deferred_spawn discards
+                # the deferred marker BEFORE its follow-up spawn() call
+                # actually attaches a session (a ~35ms quiet-window gap) — a
+                # poll landing in that gap would read "not deferred" even
+                # though the pane is about to come up. Once gate_seen has
+                # ever flipped True we commit to waiting it out regardless of
+                # elapsed, and only bail if the pane itself was torn down
+                # (closed / replaced by a fresh spawn) rather than re-timing
+                # out on that narrow race.
+                if elapsed[0] < max_wait_ms or gate_seen[0]:
+                    if not gate_seen[0] or self._project_panes(project).get(role_name) is pane:
+                        QTimer.singleShot(_READY_POLL_INTERVAL_MS, _check)
+                        return
+                # Hard timeout and either never gate-deferred, or the pane
+                # was torn down while we waited: nothing left to paste into
+                # (no session exists, unlike the ready-prompt-timeout branch
+                # below). Warn instead of the silent drop this used to be.
+                sent[0] = True
+                self._warn_lead_delivery_unconfirmed(role_name, project)
+                _log_event(
+                    "task_deliver_timeout_no_session",
+                    project=self._resolve_project(project),
+                    role=role_name,
+                )
                 return
             if pane.session.is_at_ready_prompt():
                 _deliver()
@@ -979,10 +1018,37 @@ class LeadInboxMixin:
 
         # Lead is alive and idle — deliver one item; reset retry counter.
         getattr(self, "_lead_notify_retry", {}).pop(project_ns, None)
-        body = _sanitize_pane_text(queue.popleft())
+        # Deliver-then-ack: peek instead of pop so a write() exception (session
+        # torn down between the liveness checks above and this write) never
+        # drops the item — see HIGH#1,
+        # docs/reviews/2026-07-11-full-system-review-codex.md.
+        raw_body = queue[0]
+        body = _sanitize_pane_text(raw_body)
         _notify_sess = lead.session
         payload = _paste_payload(body)
-        _notify_sess.write(payload)
+        try:
+            _notify_sess.write(payload)
+        except Exception:
+            # The write failed — this item and anything queued behind it are
+            # still unsent. Spill the whole live queue to the durable store
+            # rather than lose it; a torn-down session will not recover
+            # mid-pump, so retrying live here would just fail again.
+            items = list(queue)
+            queue.clear()
+            pumping = getattr(self, "_lead_notify_pumping", set())
+            pumping.discard(project_ns)
+            getattr(self, "_lead_notify_retry", {}).pop(project_ns, None)
+            if not hasattr(self, "_pending_done_notices"):
+                self._pending_done_notices = {}
+            for b in items:
+                self._pending_done_notices.setdefault(project_ns, []).append(
+                    {"role": "system", "note": "notify_write_failed", "body": b}
+                )
+            self._save_pending_done_notices(project_ns)
+            _log_event("lead_notify_write_failed", project=project_ns, count=len(items))
+            return
+        # Write succeeded — now it is safe to dequeue.
+        queue.popleft()
         delay = _enter_delay_ms(payload)
         # Self-healing submit: a done-report whose Enter is swallowed mid-paste-
         # render leaves Lead idle with the report unsubmitted — it "won't run on"
@@ -1034,11 +1100,35 @@ class LeadInboxMixin:
             # is worse than a late notice); it only escalates the not-ready
             # branch.
             return
-        items = self._pending_done_notices.pop(project_ns)
-        self._save_pending_done_notices(project_ns)
+        # Deliver-then-ack, one item at a time (HIGH#1,
+        # docs/reviews/2026-07-11-full-system-review-codex.md): process a fixed
+        # snapshot of the items present when this flush started, removing each
+        # from the durable list right before handing it to _notify_lead rather
+        # than popping/persisting the whole list empty up front. A crash
+        # between any two items then loses nothing — items not yet reached are
+        # still on disk. The snapshot (not a live re-check) also bounds this
+        # loop to exactly len(items) iterations even though _notify_lead's own
+        # synchronous pump may re-spill a failed item back onto this same
+        # durable list — without the snapshot that re-spill would be picked
+        # back up and reprocessed forever.
+        items = list(pending)
+        transferred = 0
         for item in items:
-            self._notify_lead(project_ns, item["body"])
-        _log_event("done_notices_flushed", project=project_ns, count=len(items))
+            current = self._pending_done_notices.get(project_ns)
+            if current:
+                current.pop(0)
+                if not current:
+                    self._pending_done_notices.pop(project_ns, None)
+                self._save_pending_done_notices(project_ns)
+            try:
+                self._notify_lead(project_ns, item["body"])
+            except Exception:
+                self._pending_done_notices.setdefault(project_ns, []).insert(0, item)
+                self._save_pending_done_notices(project_ns)
+                _log_event("done_notices_flush_failed", project=project_ns, transferred=transferred)
+                return
+            transferred += 1
+        _log_event("done_notices_flushed", project=project_ns, count=transferred)
 
     def _reap_pending_done_notices(self) -> None:
         """Flush durable done-notices for any project whose Lead is idle.
@@ -1109,12 +1199,21 @@ class LeadInboxMixin:
         lead = self._project_panes(project_ns).get(LEAD.name)
         if not (lead and lead.session and lead.session.is_alive):
             return
-        items = self._pending_done_notices.pop(project_ns)
-        self._save_pending_done_notices(project_ns)
-        body = "\n\n".join(_sanitize_pane_text(item["body"]) for item in items)
+        # Deliver-then-ack (HIGH#1,
+        # docs/reviews/2026-07-11-full-system-review-codex.md): only pop/persist
+        # empty once the write is known to have succeeded, so a torn-down
+        # session mid-write leaves the items durable for the next attempt
+        # instead of vanishing.
+        body = "\n\n".join(_sanitize_pane_text(item["body"]) for item in pending)
         sess = lead.session
         payload = _paste_payload(body)
-        sess.write(payload)
+        try:
+            sess.write(payload)
+        except Exception:
+            _log_event("done_notice_force_deliver_failed", project=project_ns, count=len(pending))
+            return
+        self._pending_done_notices.pop(project_ns, None)
+        self._save_pending_done_notices(project_ns)
         delay = _enter_delay_ms(payload)
         _orch_attr("_delayed_enter_verified", _delayed_enter_verified)(
             lead,
