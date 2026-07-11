@@ -54,10 +54,12 @@ agent_takkub = [
     "static/fonts/LICENSE.txt",
     "static/icons/*.svg",
     # Staged by setup.py's custom build_py from the repo-root CLAUDE.md /
-    # .claude/agents/*.md right before this list is collected — see
-    # config.py's ASSETS_ROOT for the installed-vs-dev-checkout read path.
+    # .claude/agents/*.md / .claude/skills/*/SKILL.md right before this list
+    # is collected — see config.py's ASSETS_ROOT for the
+    # installed-vs-dev-checkout read path.
     "_assets/CLAUDE.md",
     "_assets/.claude/agents/*.md",
+    "_assets/.claude/skills/*/SKILL.md",
     # remote/ (P0 scaffold) mobile PWA — glob stays empty (no error) until
     # P1 adds files; deleting remote/ makes it empty again, build still works.
     "remote/static/*",

@@ -175,10 +175,19 @@ class TestNewRoleSkillPicker:
             f"---\nname: {name}\ndescription: {description}\n---\n\nbody\n", encoding="utf-8"
         )
 
+    @pytest.fixture(autouse=True)
+    def _isolate_skill_roots(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """`_new_role_skill_roots` also falls back to `config.ASSETS_ROOT` (the
+        installed-build read path for the shipped default skill bundle) — on
+        this dev checkout that's the real worktree root, which has real
+        `.claude/skills/*`. Pin both roots to tmp_path so these tests stay
+        isolated from the repo's actual skill bundle."""
+        monkeypatch.setattr(config, "REPO_ROOT", tmp_path)
+        monkeypatch.setattr(config, "ASSETS_ROOT", tmp_path)
+
     def test_checkbox_list_populated_from_scanned_skills(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(config, "REPO_ROOT", tmp_path)
         self._write_skill(tmp_path, "test-skill", "does a thing")
         dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_NEW_ROLE)
         assert [s.name for s, _chk in dlg._nr_skill_checks] == ["test-skill"]
@@ -187,7 +196,6 @@ class TestNewRoleSkillPicker:
     def test_no_skills_dir_shows_empty_list_without_crashing(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(config, "REPO_ROOT", tmp_path)
         dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_NEW_ROLE)
         assert dlg._nr_skill_checks == []
         dlg.deleteLater()
@@ -197,7 +205,6 @@ class TestNewRoleSkillPicker:
     ) -> None:
         """#4 in the task spec — an empty Instructions box still gets the
         skill reference embedded into the generated default template."""
-        monkeypatch.setattr(config, "REPO_ROOT", tmp_path)
         self._write_skill(tmp_path, "test-skill", "does a thing")
         dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_NEW_ROLE)
         dlg._nr_name.setText("data-eng")
@@ -214,7 +221,6 @@ class TestNewRoleSkillPicker:
     def test_selected_skill_embedded_into_typed_instructions(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(config, "REPO_ROOT", tmp_path)
         self._write_skill(tmp_path, "test-skill", "does a thing")
         dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_NEW_ROLE)
         dlg._nr_name.setText("data-eng")
@@ -232,7 +238,6 @@ class TestNewRoleSkillPicker:
     def test_unchecked_skill_not_embedded(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(config, "REPO_ROOT", tmp_path)
         self._write_skill(tmp_path, "test-skill", "does a thing")
         dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_NEW_ROLE)
         dlg._nr_name.setText("data-eng")
@@ -243,6 +248,22 @@ class TestNewRoleSkillPicker:
         role_file = custom_roles.CUSTOM_AGENTS_DIR / "data-eng.md"
         text = role_file.read_text(encoding="utf-8")
         assert "test-skill" not in text
+        dlg.deleteLater()
+
+    def test_assets_root_fallback_finds_shipped_skill_bundle(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Installed-build regression guard: on a pip/npm build `REPO_ROOT`
+        resolves to an empty venv ancestor, but `ASSETS_ROOT` (the staged
+        wheel data) has the shipped default skill bundle — the picker must
+        still find it via that fallback."""
+        monkeypatch.setattr(config, "REPO_ROOT", tmp_path / "empty-venv-ancestor")
+        assets_root = tmp_path / "assets"
+        monkeypatch.setattr(config, "ASSETS_ROOT", assets_root)
+        self._write_skill(assets_root, "bundled-skill", "ships in the wheel")
+
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_NEW_ROLE)
+        assert [s.name for s, _chk in dlg._nr_skill_checks] == ["bundled-skill"]
         dlg.deleteLater()
 
 

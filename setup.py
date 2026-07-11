@@ -1,11 +1,12 @@
 """Custom build step: stage app-shipped assets into the wheel.
 
-The cockpit's ``CLAUDE.md`` (Lead playbook) and ``.claude/agents/*.md`` (role
-files) live at the repo root as the single source of truth — they're also
-what a dev checkout reads directly via ``config.ASSETS_ROOT`` (see
-config.py's dev-checkout branch). An installed build can't read them from
-the repo root (site-packages ships none of that), so they need to travel
-*inside* the wheel too.
+The cockpit's ``CLAUDE.md`` (Lead playbook), ``.claude/agents/*.md`` (role
+files), and ``.claude/skills/*/SKILL.md`` (default skill bundle) live at the
+repo root as the single source of truth — they're also what a dev checkout
+reads directly via ``config.ASSETS_ROOT`` (see config.py's dev-checkout
+branch). An installed build can't read them from the repo root
+(site-packages ships none of that), so they need to travel *inside* the
+wheel too.
 
 This stages them into ``src/agent_takkub/_assets/`` right before
 setuptools' ``build_py`` collects ``package_data`` (see pyproject.toml), then
@@ -86,6 +87,22 @@ def _stage_assets() -> None:
     shutil.copy2(claude_md, _ASSETS / "CLAUDE.md")
     for f in agent_files:
         shutil.copy2(f, agents_dst / f.name)
+
+    # Default skill bundle (.claude/skills/<name>/SKILL.md) — supplementary
+    # reference material for the New Role / Skill Catalog pickers, unlike
+    # CLAUDE.md/agents it's not required for a pane to spawn, so a
+    # missing/empty .claude/skills degrades to "no bundled skills shipped"
+    # instead of failing the build.
+    skills_src = _ROOT / ".claude" / "skills"
+    if skills_src.is_dir():
+        skill_files = sorted(skills_src.glob("*/SKILL.md"))
+        if skill_files:
+            skills_dst = _ASSETS / ".claude" / "skills"
+            for f in skill_files:
+                dst = skills_dst / f.parent.name / f.name
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(f, dst)
+
     _assert_no_home_path_leak()
 
 

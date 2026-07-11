@@ -835,7 +835,15 @@ def check_installed_integrity() -> list[Finding]:
     the role files, or the console script, or a DATA_HOME that turned out
     not to be writable after all.
     """
-    from .config import AGENTS_DIR, ASSETS_ROOT, CLI_BIN_DIR, DATA_HOME, REPO_ROOT, RUNTIME_DIR
+    from .config import (
+        AGENTS_DIR,
+        ASSETS_ROOT,
+        CLI_BIN_DIR,
+        DATA_HOME,
+        REPO_ROOT,
+        RUNTIME_DIR,
+        SKILLS_DIR,
+    )
 
     if DATA_HOME == REPO_ROOT:
         return []
@@ -869,6 +877,27 @@ def check_installed_integrity() -> list[Finding]:
                 Status.FAIL,
                 f"no *.md role files under {AGENTS_DIR}",
                 "reinstall — the wheel shipped with no .claude/agents",
+            )
+        )
+
+    # Default skill bundle — supplementary reference material for the New
+    # Role / Skill Catalog pickers (skill_scan.scan_skills), not required for
+    # a pane to spawn (unlike CLAUDE.md/role files above), so a missing
+    # bundle is a WARN nudge rather than a FAIL.
+    skill_files = sorted(SKILLS_DIR.glob("*/SKILL.md")) if SKILLS_DIR.is_dir() else []
+    if skill_files:
+        findings.append(
+            Finding("installed", "assets-skill-files", Status.OK, f"{len(skill_files)} skill(s)")
+        )
+    else:
+        findings.append(
+            Finding(
+                "installed",
+                "assets-skill-files",
+                Status.WARN,
+                f"no SKILL.md files under {SKILLS_DIR}",
+                "reinstall — the wheel shipped with no default .claude/skills bundle "
+                "(New Role / Skill Catalog pickers will show no built-in skills)",
             )
         )
 

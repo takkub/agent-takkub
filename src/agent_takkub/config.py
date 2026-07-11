@@ -243,6 +243,12 @@ CLI_BIN_DIR = _resolve_cli_bin_dir()
 
 PROJECTS_JSON = DATA_HOME / "projects.json"
 AGENTS_DIR = ASSETS_ROOT / ".claude" / "agents"
+# Default (built-in) skill bundle shipped alongside the role files — same
+# read path as AGENTS_DIR (dev checkout: repo root; installed: staged wheel
+# data under _assets/, see setup.py's _stage_assets). Reference material for
+# the New Role / Skill Catalog pickers (`skill_scan.scan_skills`); unlike
+# AGENTS_DIR nothing at spawn time depends on it being present.
+SKILLS_DIR = ASSETS_ROOT / ".claude" / "skills"
 # Writable counterpart to AGENTS_DIR for user-created custom roles (A6). AGENTS_DIR
 # sits under ASSETS_ROOT, which is READ-ONLY app-shipped assets on an installed
 # build (see `_resolve_assets_root`) — a custom role's .md file can never be
