@@ -117,6 +117,27 @@ class ManagementPage(QWidget):
         """Programmatic selection (e.g. right after a successful create)."""
         self.list.select(entity_id)
 
+    def confirm_navigate_away(self) -> bool:
+        """True when it's safe to leave this page right now (not dirty, or
+        the user chose Save/Discard on the draft-guard dialog); False when
+        the user chose "Keep editing" (Cancel) — the caller MUST NOT
+        proceed with whatever navigation it was about to do.
+
+        Shares the exact Save/Discard/Cancel dialog `_on_selection_changed`
+        already uses for in-page list switches, so callers outside this
+        page (sidebar nav, "Open legacy settings", window close) get the
+        same guard instead of a second hand-rolled one (codex cross-check
+        MEDIUM-2 — those three paths bypassed the guard entirely)."""
+        if not self.is_dirty():
+            return True
+        choice = self._ask_draft_guard()
+        if choice == QMessageBox.StandardButton.Save:
+            return self.save()
+        if choice == QMessageBox.StandardButton.Discard:
+            self.discard()
+            return True
+        return False
+
     def _ask_draft_guard(self) -> QMessageBox.StandardButton:
         box = theme.themed_message_box(self)
         box.setWindowTitle("Unsaved changes")

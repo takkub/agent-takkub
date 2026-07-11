@@ -129,6 +129,36 @@ def test_danger_zone_visible_for_custom_role() -> None:
     assert page.danger_zone.isHidden() is False
 
 
+def test_lead_provider_note_empty_when_claude() -> None:
+    page = RolesPage()
+    page.refresh()
+    page.on_select("lead")
+    assert page.provider_combo.currentText() == "claude"
+    assert page.provider_note.text() == ""
+
+
+def test_lead_provider_note_warns_reactively_on_non_claude_selection() -> None:
+    page = RolesPage()
+    page.refresh()
+    page.on_select("lead")
+    idx = page.provider_combo.findText("codex")
+    page.provider_combo.setCurrentIndex(idx)
+    assert "mirror" in page.provider_note.text()
+    # Switching back to claude clears the warning live (reactive, not static).
+    idx_claude = page.provider_combo.findText("claude")
+    page.provider_combo.setCurrentIndex(idx_claude)
+    assert page.provider_note.text() == ""
+
+
+def test_non_lead_role_never_shows_lead_capability_note() -> None:
+    page = RolesPage()
+    page.refresh()
+    page.on_select("backend")
+    idx = page.provider_combo.findText("codex")
+    page.provider_combo.setCurrentIndex(idx)
+    assert page.provider_note.text() == ""
+
+
 def test_search_filters_role_list() -> None:
     page = RolesPage()
     page.refresh()
@@ -166,3 +196,149 @@ def test_filter_chip_filters_role_list_to_builtin_only() -> None:
 def test_settings_window_has_object_name_for_theming() -> None:
     window = SettingsManagementWindow()
     assert window.objectName() == "settingsWindow"
+
+
+# ── draft-guard coverage (codex cross-check MEDIUM-2) ──────────────────────
+# window.py's sidebar nav / "Open legacy settings" / closeEvent all bypassed
+# ManagementPage's Save/Discard/Keep-editing guard before this fix — a
+# dirty draft on the current page could be silently discarded by any of the
+# three. confirm_navigate_away() is the shared choke point; the tests below
+# cover (1) the page-level dialog wiring and (2) window.py's three call sites
+# via a monkeypatched confirm_navigate_away (no real dialogs in headless CI).
+
+
+def _make_backend_dirty(page: RolesPage) -> None:
+    page.on_select("backend")
+    page.label_edit.setText("Backend Renamed")
+    assert page._dirty is True
+
+
+def test_confirm_navigate_away_true_when_not_dirty() -> None:
+    page = RolesPage()
+    page.refresh()
+    page.on_select("backend")
+    assert page.confirm_navigate_away() is True
+
+
+def test_confirm_navigate_away_discard_clears_dirty(monkeypatch: pytest.MonkeyPatch) -> None:
+    from PyQt6.QtWidgets import QMessageBox
+
+    page = RolesPage()
+    page.refresh()
+    _make_backend_dirty(page)
+    monkeypatch.setattr(page, "_ask_draft_guard", lambda: QMessageBox.StandardButton.Discard)
+
+    assert page.confirm_navigate_away() is True
+    assert page._dirty is False
+
+
+def test_confirm_navigate_away_cancel_keeps_dirty(monkeypatch: pytest.MonkeyPatch) -> None:
+    from PyQt6.QtWidgets import QMessageBox
+
+    page = RolesPage()
+    page.refresh()
+    _make_backend_dirty(page)
+    monkeypatch.setattr(page, "_ask_draft_guard", lambda: QMessageBox.StandardButton.Cancel)
+
+    assert page.confirm_navigate_away() is False
+    assert page._dirty is True
+
+
+def test_confirm_navigate_away_save_persists_and_returns_true(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from PyQt6.QtWidgets import QMessageBox
+
+    from agent_takkub.settings_management.repositories import roles as roles_repo
+
+    roles_repo.create(
+        CreateRoleCommand(
+            name="data-eng",
+            general=RoleGeneralDraft(
+                label="Data Eng", color="#94a3b8", column=2, row=50, instructions=""
+            ),
+            access=RoleAccessDraft(provider="claude", skills=[], mcps=None, plugins=None),
+        )
+    )
+    page = RolesPage()
+    page.refresh()
+    page.on_select("data-eng")
+    page.label_edit.setText("Data Eng Renamed")
+    monkeypatch.setattr(page, "_ask_draft_guard", lambda: QMessageBox.StandardButton.Save)
+
+    assert page.confirm_navigate_away() is True
+    assert roles.by_name("data-eng").label == "Data Eng Renamed"
+
+
+def test_sidebar_nav_reverted_when_current_page_blocks_navigation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = SettingsManagementWindow()
+    monkeypatch.setattr(window.roles_page, "confirm_navigate_away", lambda: False)
+
+    window.sidebar.setCurrentRow(1)
+
+    assert window.sidebar.currentRow() == 0
+    assert window.content_stack.currentWidget() is window.roles_page
+
+
+def test_sidebar_nav_proceeds_when_current_page_allows_navigation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = SettingsManagementWindow()
+    monkeypatch.setattr(window.roles_page, "confirm_navigate_away", lambda: True)
+
+    window.sidebar.setCurrentRow(1)
+
+    assert window.sidebar.currentRow() == 1
+    assert window.content_stack.currentWidget() is window.skills_page
+
+
+def test_open_legacy_button_blocked_when_current_page_dirty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = SettingsManagementWindow()
+    calls: list[bool] = []
+    window.open_legacy_requested = lambda: calls.append(True)
+    monkeypatch.setattr(window.roles_page, "confirm_navigate_away", lambda: False)
+
+    window._on_open_legacy_clicked()
+
+    assert calls == []
+
+
+def test_open_legacy_button_fires_when_current_page_clean(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = SettingsManagementWindow()
+    calls: list[bool] = []
+    window.open_legacy_requested = lambda: calls.append(True)
+    monkeypatch.setattr(window.roles_page, "confirm_navigate_away", lambda: True)
+
+    window._on_open_legacy_clicked()
+
+    assert calls == [True]
+
+
+def test_close_event_ignored_when_current_page_dirty(monkeypatch: pytest.MonkeyPatch) -> None:
+    from PyQt6.QtGui import QCloseEvent
+
+    window = SettingsManagementWindow()
+    monkeypatch.setattr(window.roles_page, "confirm_navigate_away", lambda: False)
+    event = QCloseEvent()
+
+    window.closeEvent(event)
+
+    assert event.isAccepted() is False
+
+
+def test_close_event_accepted_when_current_page_clean(monkeypatch: pytest.MonkeyPatch) -> None:
+    from PyQt6.QtGui import QCloseEvent
+
+    window = SettingsManagementWindow()
+    monkeypatch.setattr(window.roles_page, "confirm_navigate_away", lambda: True)
+    event = QCloseEvent()
+
+    window.closeEvent(event)
+
+    assert event.isAccepted() is True

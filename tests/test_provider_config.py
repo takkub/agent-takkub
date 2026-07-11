@@ -292,3 +292,21 @@ class TestLeadCapabilityGap:
         redirect_config_path.write_text('{"lead": "codex"}', encoding="utf-8")
         monkeypatch.setattr(provider_config, "_provider_available", lambda p: False)
         assert provider_config.lead_capability_gap() is None
+
+
+class TestLeadCapabilityGapForProvider:
+    """Pure sibling of lead_capability_gap — no disk/role lookup, so the
+    Settings UI can warn on an unsaved combo selection (#101 critic R3
+    blocker #1)."""
+
+    def test_claude_has_no_gap(self) -> None:
+        assert provider_config.lead_capability_gap_for_provider("claude") == []
+
+    def test_codex_reports_missing_features(self) -> None:
+        missing = provider_config.lead_capability_gap_for_provider("codex")
+        assert missing
+        assert any("mirror" in m for m in missing)
+
+    def test_unknown_provider_reports_every_label(self) -> None:
+        missing = provider_config.lead_capability_gap_for_provider("nonexistent")
+        assert missing == [label for _, label in provider_config._LEAD_CAPABILITY_LABELS]

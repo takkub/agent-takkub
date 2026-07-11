@@ -50,6 +50,8 @@ class SettingsManagementWindow(QWidget):
         sidebar_col.setContentsMargins(0, 0, 0, 0)
         sidebar_col.setSpacing(0)
 
+        self._current_nav_row = 0
+
         self.sidebar = QListWidget(self)
         self.sidebar.setObjectName("sidebar")
         self.sidebar.setFixedWidth(200)
@@ -67,7 +69,7 @@ class SettingsManagementWindow(QWidget):
         self.open_legacy_requested: Callable[[], None] = lambda: None
         self._legacy_link = theme.secondary_button("Open legacy settings", self)
         self._legacy_link.setFixedWidth(200)
-        self._legacy_link.clicked.connect(lambda: self.open_legacy_requested())
+        self._legacy_link.clicked.connect(self._on_open_legacy_clicked)
         sidebar_col.addWidget(self._legacy_link)
 
         root.addLayout(sidebar_col)
@@ -124,11 +126,44 @@ class SettingsManagementWindow(QWidget):
     def _go_to_roles(self) -> None:
         self.sidebar.setCurrentRow(_SIDEBAR_ENTITIES.index("Roles"))
 
+    def _current_page(self):
+        pages = getattr(self, "_pages", None)
+        if not pages:
+            return None
+        name = _SIDEBAR_ENTITIES[self._current_nav_row]
+        return pages.get(name)
+
     def _on_nav_changed(self, row: int) -> None:
         if row < 0:
             return
+        current_page = self._current_page()
+        if (
+            current_page is not None
+            and row != self._current_nav_row
+            and not current_page.confirm_navigate_away()
+        ):
+            # Revert the sidebar selection without re-entering this slot.
+            self.sidebar.blockSignals(True)
+            self.sidebar.setCurrentRow(self._current_nav_row)
+            self.sidebar.blockSignals(False)
+            return
+
+        self._current_nav_row = row
         name = _SIDEBAR_ENTITIES[row]
         if name in self._pages:
             self.content_stack.setCurrentWidget(self._pages[name])
         else:
             self.content_stack.setCurrentIndex(self._placeholder_index[name])
+
+    def _on_open_legacy_clicked(self) -> None:
+        current_page = self._current_page()
+        if current_page is not None and not current_page.confirm_navigate_away():
+            return
+        self.open_legacy_requested()
+
+    def closeEvent(self, event) -> None:
+        current_page = self._current_page()
+        if current_page is not None and not current_page.confirm_navigate_away():
+            event.ignore()
+            return
+        super().closeEvent(event)

@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ... import cockpit_theme as theme
+from ... import provider_config
 from ...provider_spec import PROVIDER_REGISTRY
 from ..commands import CreateRoleCommand, RoleAccessDraft, RoleGeneralDraft, UpdateRoleCommand
 from ..models import Ownership, RoleDetail
@@ -58,6 +59,10 @@ class RolesPage(ManagementPage):
             parent=parent,
         )
 
+        self._current: RoleDetail | None = None
+        self._create_mode = False
+        self._access_forced = False
+
         self._detail = QWidget(self)
         detail_layout = QVBoxLayout(self._detail)
         self.header = DetailHeader(self._detail)
@@ -85,8 +90,6 @@ class RolesPage(ManagementPage):
 
         self.detail_stack.addWidget(self._detail)
 
-        self._current: RoleDetail | None = None
-        self._create_mode = False
         self._dirty = False
 
         self.load_rows = self._load_rows
@@ -124,10 +127,12 @@ class RolesPage(ManagementPage):
         for name in PROVIDER_REGISTRY:
             self.provider_combo.addItem(name)
         self.provider_note = QLabel("")
+        self.provider_note.setWordWrap(True)
         self.provider_note.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         provider_row.addRow("Provider", self.provider_combo)
         layout.addLayout(provider_row)
         layout.addWidget(self.provider_note)
+        self.provider_combo.currentIndexChanged.connect(self._update_provider_note)
 
         layout.addWidget(QLabel("Skills"))
         self.skills_list = QListWidget()
@@ -209,12 +214,11 @@ class RolesPage(ManagementPage):
         return sorted(pane_tools_dialog.discover_marketplace_plugins())
 
     def _populate_access(self, access, skills_selected: tuple[str, ...]) -> None:
+        self._access_forced = access.provider_forced
         idx = self.provider_combo.findText(access.provider)
         self.provider_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self.provider_combo.setEnabled(not access.provider_forced)
-        self.provider_note.setText(
-            "Provider fixed by cockpit infrastructure" if access.provider_forced else ""
-        )
+        self._update_provider_note()
 
         self.skills_list.clear()
         for name in self._available_skills():
@@ -238,6 +242,30 @@ class RolesPage(ManagementPage):
         for name in self._tri_state_rows(self._available_plugins(), access.plugins):
             self.plugins_list.addItem(name)
         self.plugins_list.setDisabled(access.plugins is None)
+
+    def _role_name_for_note(self) -> str:
+        if self._current is not None:
+            return self._current.name
+        return self.name_edit.text().strip().lower()
+
+    def _update_provider_note(self) -> None:
+        """Reactive Access-tab notice under the provider combo — recomputed
+        on every combo change (not just on page load) so a Lead role that's
+        about to lose claude-only capabilities warns the user BEFORE Save,
+        per critic R3 blocker #1 (#101 dropped lead from FORCED_ROLES, which
+        silently dropped this warning along with the forced lock)."""
+        if self._access_forced:
+            self.provider_note.setText("Provider fixed by cockpit infrastructure")
+            return
+
+        provider = self.provider_combo.currentText()
+        if self._role_name_for_note() == "lead" and provider != "claude":
+            missing = provider_config.lead_capability_gap_for_provider(provider)
+            if missing:
+                self.provider_note.setText("⚠ Lead ที่ไม่ใช่ Claude จะเสีย: " + " · ".join(missing))
+                return
+
+        self.provider_note.setText("")
 
     @staticmethod
     def _tri_state_rows(
