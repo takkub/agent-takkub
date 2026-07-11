@@ -15,12 +15,12 @@ import json
 from unittest.mock import patch
 
 from agent_takkub.pane_tools_dialog import (
-    ROLES,
     _default_plugins_installed_file,
     build_matrix,
     diff_role_items,
     discover_marketplace_plugins,
     discover_marketplaces,
+    matrix_roles,
     matrix_to_role_items,
     parse_install_form,
 )
@@ -183,8 +183,12 @@ def test_parse_install_form_rejects_missing_command():
     assert parse_install_form("my-mcp", "", "-y pkg") is None
 
 
-def test_roles_tuple_covers_expected_roles():
-    assert set(ROLES) == {
+def test_matrix_roles_covers_expected_builtin_roles():
+    # designer/analyst/security/docs were never real roles (no roles.py entry,
+    # never spawnable) — a hand-maintained copy of this tuple had drifted to
+    # include them; codex/gemini/shell are an intentional exclusion (their
+    # panes never load --mcp-config, see matrix_roles()'s own docstring).
+    assert set(matrix_roles()) == {
         "lead",
         "frontend",
         "backend",
@@ -193,8 +197,17 @@ def test_roles_tuple_covers_expected_roles():
         "qa",
         "reviewer",
         "critic",
-        "designer",
-        "analyst",
-        "security",
-        "docs",
     }
+
+
+def test_matrix_roles_includes_registered_custom_role():
+    from agent_takkub import roles as roles_mod
+
+    role = roles_mod.Role(
+        name="sales-ops-test", label="Sales Ops", color="#112233", column=2, row=50
+    )
+    roles_mod.register_role(role)
+    try:
+        assert "sales-ops-test" in matrix_roles()
+    finally:
+        roles_mod.unregister_role("sales-ops-test")

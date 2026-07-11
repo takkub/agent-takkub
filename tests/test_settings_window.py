@@ -268,7 +268,7 @@ class TestMcpMatrixView:
             shared_dev_tools, "list_master_mcps", lambda: ["playwright", "context7"]
         )
         dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_MCP_MATRIX)
-        assert set(dlg._mcp_toggles.keys()) == set(settings_window._MATRIX_ROLES)
+        assert set(dlg._mcp_toggles.keys()) == set(settings_window._matrix_roles())
         for items in dlg._mcp_toggles.values():
             assert set(items.keys()) == {"playwright", "context7"}
         # Widgets never .show()'n in offscreen tests always report
@@ -320,7 +320,7 @@ class TestPluginsMatrixView:
             settings_window.pane_tools_dialog, "discover_marketplaces", lambda: ["pordee"]
         )
         dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PLUGINS_MATRIX)
-        assert set(dlg._plugin_toggles.keys()) == set(settings_window._MATRIX_ROLES)
+        assert set(dlg._plugin_toggles.keys()) == set(settings_window._matrix_roles())
         for items in dlg._plugin_toggles.values():
             assert set(items.keys()) == {"pordee"}
         assert dlg._plugins_empty.isHidden()

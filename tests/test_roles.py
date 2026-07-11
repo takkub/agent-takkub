@@ -127,3 +127,29 @@ class TestCustomRoles:
 
     def test_unregister_role_unknown_name_is_a_noop(self, clean_custom_registry) -> None:
         roles.unregister_role("never-registered")  # must not raise
+
+
+class TestAllRoleNames:
+    """all_role_names() is the single source of truth every UI/config
+    surface (pipeline_config.valid_roles, pane_tools_dialog.matrix_roles,
+    pane_tools_policy.known_roles_base, ...) is meant to derive from."""
+
+    def test_include_lead_true_matches_all_default(self, clean_custom_registry) -> None:
+        assert roles.all_role_names() == tuple(r.name for r in roles.ALL_DEFAULT)
+
+    def test_include_lead_false_excludes_lead_only(self, clean_custom_registry) -> None:
+        names = roles.all_role_names(include_lead=False)
+        assert "lead" not in names
+        assert names == tuple(r.name for r in roles.DEFAULT_TEAMMATES)
+
+    def test_picks_up_a_freshly_registered_custom_role(self, clean_custom_registry) -> None:
+        r = roles.Role("data-eng", "Data Eng", "#112233", column=1, row=5)
+        roles.register_role(r)
+        assert "data-eng" in roles.all_role_names()
+        assert "data-eng" in roles.all_role_names(include_lead=False)
+
+    def test_forgets_an_unregistered_custom_role(self, clean_custom_registry) -> None:
+        r = roles.Role("data-eng", "Data Eng", "#112233", column=1, row=5)
+        roles.register_role(r)
+        roles.unregister_role("data-eng")
+        assert "data-eng" not in roles.all_role_names()

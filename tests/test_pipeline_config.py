@@ -31,7 +31,7 @@ def test_load_missing_file_returns_seed(tmp_path_json):
     assert ids == ["feature", "design", "quickfix"]
     assert state["activeTemplate"] == "feature"
     # every selectable role present and enabled by default
-    assert set(state["rolesEnabled"]) == set(pipeline_config.VALID_ROLES)
+    assert set(state["rolesEnabled"]) == set(pipeline_config.valid_roles())
     assert all(state["rolesEnabled"].values())
 
 
@@ -279,7 +279,7 @@ def test_hop_dedups_repeated_role(tmp_path_json):
 def test_roles_enabled_unknown_dropped_and_defaults_true(tmp_path_json):
     pipeline_config.save({"rolesEnabled": {"backend": False, "ghost": True}})
     roles = pipeline_config.load()["rolesEnabled"]
-    assert set(roles) == set(pipeline_config.VALID_ROLES)  # ghost dropped
+    assert set(roles) == set(pipeline_config.valid_roles())  # ghost dropped
     assert roles["backend"] is False  # explicit False persists
     assert roles["frontend"] is True  # unspecified defaults True
 

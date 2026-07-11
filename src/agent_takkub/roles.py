@@ -106,3 +106,14 @@ def by_name(name: str) -> Role | None:
         if r.name == name:
             return r
     return _CUSTOM.get(name)
+
+
+def all_role_names(*, include_lead: bool = True) -> tuple[str, ...]:
+    """Every role name known RIGHT NOW: built-ins (``ALL_DEFAULT`` order,
+    ``lead`` first) followed by every runtime-registered custom role
+    (registration order). The single source of truth for any UI/CLI/config
+    surface that needs "every role" — always call this fresh (never cache
+    the result at module-import time) since a custom role registers live
+    when the "New Role" dialog creates one, with no cockpit restart."""
+    base = ALL_DEFAULT if include_lead else DEFAULT_TEAMMATES
+    return tuple(r.name for r in base) + tuple(r.name for r in custom_roles())

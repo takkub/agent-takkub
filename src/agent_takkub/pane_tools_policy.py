@@ -29,49 +29,47 @@ import re
 import tempfile
 
 from .config import SETTINGS_HOME
+from .roles import all_role_names
 
 _log = logging.getLogger(__name__)
 
-# All known roles in cockpit (controls which keys are valid in policy file).
-KNOWN_ROLES = frozenset(
-    {
-        "lead",
-        "frontend",
-        "backend",
-        "mobile",
-        "devops",
-        "qa",
-        "reviewer",
-        "critic",
-        "designer",
-        "codex",
-        "gemini",
-        "analyst",
-        "security",
-        "docs",
-    }
-)
+
+def known_roles_base() -> frozenset[str]:
+    """Every built-in role name (controls which keys are valid in the policy
+    file before any custom-role union). A function — not a hand-duplicated
+    frozenset — so it always matches `roles.py`'s registry; a previous
+    hand-maintained copy here drifted to include roles that were never
+    actually registered anywhere (e.g. "analyst"/"security"/"docs") while
+    missing real ones (e.g. "shell")."""
+    return frozenset(all_role_names())
+
 
 PANE_TOOLS_POLICY_FILE = SETTINGS_HOME / "pane-tools.json"
 
 
 def known_roles() -> frozenset[str]:
-    """`KNOWN_ROLES` plus any A6 user-created custom role names.
+    """`known_roles_base()` plus any A6 user-created custom role names.
 
     Custom roles register themselves in ``~/.takkub/custom-roles.json``, not
-    in this module's static set — a dynamic union is what lets the Role
-    Manager dialog's skill/tool checkboxes (and `takkub mcp/plugins
+    in `known_roles_base()`'s built-in set — a dynamic union is what lets the
+    Role Manager dialog's skill/tool checkboxes (and `takkub mcp/plugins
     allow|deny|reset --role <custom>`) write a policy entry for a role this
     module has never heard of at import time. Lazy import avoids a hard
-    dependency on `custom_roles` (and its own `roles` import) for the common
-    case where every caller only ever touches built-in roles.
+    dependency on `custom_roles` for the common case where every caller only
+    ever touches built-in roles.
+
+    Note: `known_roles_base()` already includes any custom role registered
+    in-process via `roles.register_role()` (e.g. right after the "New Role"
+    dialog creates one) — this union additionally covers custom roles
+    persisted to disk but not yet re-registered in THIS process (e.g. a
+    second cockpit tab reading the same `custom-roles.json`).
     """
     try:
         from . import custom_roles
 
-        return KNOWN_ROLES | custom_roles.list_role_names()
+        return known_roles_base() | custom_roles.list_role_names()
     except Exception:
-        return KNOWN_ROLES
+        return known_roles_base()
 
 
 def _policy_dir() -> pathlib.Path:

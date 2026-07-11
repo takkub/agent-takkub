@@ -78,18 +78,37 @@ class TestLoadPolicy:
         # Invalid names are filtered; valid ones remain
         assert "qa" in result
 
-    def test_accepts_analyst_security_docs_roles(self, policy_file: Path) -> None:
+    def test_accepts_registered_custom_role(self, policy_file: Path) -> None:
+        from agent_takkub import roles as roles_mod
+
+        role = roles_mod.Role(
+            name="analyst-test", label="Analyst", color="#112233", column=2, row=50
+        )
+        roles_mod.register_role(role)
+        try:
+            payload = {
+                "version": 1,
+                "roles": {"analyst-test": {"mcps": [], "plugins": []}},
+            }
+            policy_file.write_text(json.dumps(payload), encoding="utf-8")
+            result = pane_tools_policy.load_policy()
+            assert set(result) == {"analyst-test"}
+        finally:
+            roles_mod.unregister_role("analyst-test")
+
+    def test_rejects_role_never_registered_anywhere(self, policy_file: Path) -> None:
+        # "analyst"/"security"/"docs" used to be hand-listed as "known" here
+        # despite never being a real role (no roles.py entry, never
+        # spawnable) — KNOWN_ROLES now derives from the registry, so an
+        # unregistered name is correctly rejected instead of silently
+        # accepted forever.
         payload = {
             "version": 1,
-            "roles": {
-                "analyst": {"mcps": [], "plugins": []},
-                "security": {"mcps": [], "plugins": []},
-                "docs": {"mcps": [], "plugins": []},
-            },
+            "roles": {"never-registered-ghost-role": {"mcps": [], "plugins": []}},
         }
         policy_file.write_text(json.dumps(payload), encoding="utf-8")
         result = pane_tools_policy.load_policy()
-        assert set(result) == {"analyst", "security", "docs"}
+        assert set(result) == set()
 
     def test_skips_role_with_invalid_format(self, policy_file: Path) -> None:
         payload = {
@@ -362,9 +381,9 @@ class TestValidateName:
 
 
 class TestKnownRoles:
-    """A6: known_roles() unions the static KNOWN_ROLES set with any
-    registered custom role, so custom roles can get an MCP/plugin policy
-    entry written the same way a built-in role can."""
+    """A6: known_roles() unions known_roles_base() with any registered
+    custom role, so custom roles can get an MCP/plugin policy entry written
+    the same way a built-in role can."""
 
     @pytest.fixture
     def custom_role_files(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -383,7 +402,7 @@ class TestKnownRoles:
             raise RuntimeError("simulated failure")
 
         monkeypatch.setattr(custom_roles, "list_role_names", boom)
-        assert pane_tools_policy.known_roles() == pane_tools_policy.KNOWN_ROLES
+        assert pane_tools_policy.known_roles() == pane_tools_policy.known_roles_base()
 
     def test_includes_registered_custom_role(self, custom_role_files: Path) -> None:
         from agent_takkub import custom_roles
@@ -391,7 +410,7 @@ class TestKnownRoles:
         custom_roles.create_role("data-eng", "Data Eng", "#112233", 1, 5, "x")
         known = pane_tools_policy.known_roles()
         assert "data-eng" in known
-        assert pane_tools_policy.KNOWN_ROLES < known
+        assert pane_tools_policy.known_roles_base() < known
 
     def test_set_role_items_accepts_custom_role(
         self, policy_file: Path, custom_role_files: Path

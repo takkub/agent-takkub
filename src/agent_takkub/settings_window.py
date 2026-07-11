@@ -139,29 +139,45 @@ _VIEW_HEADERS: dict[int, tuple[str, str]] = {
     ),
 }
 
+
 # Roles offered a per-role CLI override in "Providers & Roles". Excludes
 # lead/codex/gemini (provider_config.FORCED_ROLES — CLI is fixed) and shell
-# (not a pipeline-eligible role — see pipeline_config.VALID_ROLES's own note).
-_OVERRIDABLE_ROLES: tuple[str, ...] = tuple(
-    r for r in pipeline_config.VALID_ROLES if r not in provider_config.FORCED_ROLES and r != "shell"
-)
+# (not a pipeline-eligible role — see pipeline_config.valid_roles()'s own
+# note). A function — not a frozen tuple — since custom roles register at
+# runtime and this must reflect them the next time the Settings window opens
+# (SettingsWindow is constructed fresh on every open, so a function called
+# from inside a `_build_*_view()` picks up a just-created role with no
+# cockpit restart; a module-level constant computed once at import time
+# never would).
+def _overridable_roles() -> tuple[str, ...]:
+    return tuple(
+        r
+        for r in pipeline_config.valid_roles()
+        if r not in provider_config.FORCED_ROLES and r != "shell"
+    )
+
 
 _PROVIDER_DESC: dict[str, str] = {
     "codex": "OpenAI Codex CLI — second opinion / refactor cross-check",
     "gemini": "Google Antigravity (agy) — planning / long-context second opinion",
 }
 
+
 # Roles rendered as rows in the MCP/Plugins matrices — same set (and order)
-# pane_tools_dialog's teal dialog uses, so a role's policy reads identically
-# from either surface.
-_MATRIX_ROLES: tuple[str, ...] = pane_tools_dialog.ROLES
+# pane_tools_dialog.matrix_roles() defines, so a role's policy reads
+# identically from either surface. Also a function, for the same
+# fresh-per-open reason as `_overridable_roles()` above.
+def _matrix_roles() -> tuple[str, ...]:
+    return pane_tools_dialog.matrix_roles()
+
 
 # Roles offered in the Pipeline Builder's role palette / per-hop add-role
-# select. Every VALID_ROLES entry except "shell" — an ad-hoc terminal pane,
-# not a directed pipeline participant (see _OVERRIDABLE_ROLES's own note).
-_PIPELINE_PALETTE_ROLES: tuple[str, ...] = tuple(
-    r for r in pipeline_config.VALID_ROLES if r != "shell"
-)
+# select. Every valid_roles() entry except "shell" — an ad-hoc terminal pane,
+# not a directed pipeline participant (see `_overridable_roles()`'s own
+# note). Also a function, for the same fresh-per-open reason.
+def _pipeline_palette_roles() -> tuple[str, ...]:
+    return tuple(r for r in pipeline_config.valid_roles() if r != "shell")
+
 
 # New Role's "use default MCP+Plugins ตาม column" toggle (#6): no per-role
 # policy exists yet for a freshly created custom role, so this maps the
@@ -283,7 +299,7 @@ class SettingsWindow(QDialog):
             lay.addWidget(cockpit_theme.gold_soft_chip(str(active_name), strip))
 
         roles_enabled = payload.get("rolesEnabled", {})
-        for role in pipeline_config.VALID_ROLES:
+        for role in pipeline_config.valid_roles():
             if not roles_enabled.get(role, True):
                 continue
             r = roles_mod.by_name(role)
@@ -555,12 +571,12 @@ class SettingsWindow(QDialog):
             role_providers = {
                 role: combo.currentData() for role, combo in self._role_provider_combos.items()
             }
-            # scope=_OVERRIDABLE_ROLES (#1): this page only renders a control
+            # scope=_overridable_roles() (#1): this page only renders a control
             # for these roles — anything else already on disk (a custom
             # role's override, say) must be preserved, not silently dropped
             # by a naive full-replace write.
             provider_config.save_role_overrides(
-                role_providers, self._project, scope=_OVERRIDABLE_ROLES
+                role_providers, self._project, scope=_overridable_roles()
             )
 
             payload = pipeline_config.load(self._project)
@@ -687,7 +703,7 @@ class SettingsWindow(QDialog):
         rp_lay.addWidget(rp_title)
 
         roles_enabled = pipeline_config.load(self._project).get("rolesEnabled", {})
-        role_providers = provider_config.role_provider_map(_OVERRIDABLE_ROLES, self._project)
+        role_providers = provider_config.role_provider_map(_overridable_roles(), self._project)
 
         self._role_toggles = {}
         self._role_provider_combos = {}
@@ -703,7 +719,7 @@ class SettingsWindow(QDialog):
         )
         rp_lay.addWidget(lead_row)
 
-        for role in _OVERRIDABLE_ROLES:
+        for role in _overridable_roles():
             r = roles_mod.by_name(role)
             label = r.label if r else role.capitalize()
             color = cockpit_theme.ROLE_COLORS.get(role, r.color if r else "#94a3b8")
@@ -813,7 +829,7 @@ class SettingsWindow(QDialog):
             toggle.setChecked(roles_enabled.get(role, True))
             toggle.blockSignals(False)
 
-        role_providers = provider_config.role_provider_map(_OVERRIDABLE_ROLES, self._project)
+        role_providers = provider_config.role_provider_map(_overridable_roles(), self._project)
         for role, combo in self._role_provider_combos.items():
             combo.blockSignals(True)
             idx = combo.findData(role_providers.get(role, provider_config.CLAUDE))
@@ -1554,9 +1570,11 @@ class SettingsWindow(QDialog):
 
     def _reload_mcp_matrix(self) -> None:
         items = pane_tools_dialog.master_mcps()
-        self._orig_mcp_items = pane_tools_dialog.policy_role_items(_MATRIX_ROLES, "mcps")
-        matrix = pane_tools_dialog.build_matrix(_MATRIX_ROLES, items, self._orig_mcp_items)
-        self._mcp_toggles = self._populate_matrix_grid(self._mcp_grid, _MATRIX_ROLES, items, matrix)
+        self._orig_mcp_items = pane_tools_dialog.policy_role_items(_matrix_roles(), "mcps")
+        matrix = pane_tools_dialog.build_matrix(_matrix_roles(), items, self._orig_mcp_items)
+        self._mcp_toggles = self._populate_matrix_grid(
+            self._mcp_grid, _matrix_roles(), items, matrix
+        )
         self._mcp_empty.setVisible(not items)
 
     def _on_add_mcp_server_clicked(self) -> None:
@@ -1646,7 +1664,7 @@ class SettingsWindow(QDialog):
         # stores marketplace names, so only these make a checkbox's identity
         # match what gets read back on Save.
         items = pane_tools_dialog.discover_marketplaces()
-        full_orig = pane_tools_dialog.policy_role_items(_MATRIX_ROLES, "plugins")
+        full_orig = pane_tools_dialog.policy_role_items(_matrix_roles(), "plugins")
         rendered = set(items)
         # A role's built-in default can name a marketplace with no column
         # here (not installed on this machine) — stash it so Save re-adds it
@@ -1655,9 +1673,9 @@ class SettingsWindow(QDialog):
             r: [m for m in v if m not in rendered] for r, v in full_orig.items()
         }
         self._orig_plugin_items = {r: [m for m in v if m in rendered] for r, v in full_orig.items()}
-        matrix = pane_tools_dialog.build_matrix(_MATRIX_ROLES, items, self._orig_plugin_items)
+        matrix = pane_tools_dialog.build_matrix(_matrix_roles(), items, self._orig_plugin_items)
         self._plugin_toggles = self._populate_matrix_grid(
-            self._plugins_grid, _MATRIX_ROLES, items, matrix
+            self._plugins_grid, _matrix_roles(), items, matrix
         )
         self._plugins_empty.setVisible(not items)
 
@@ -1743,7 +1761,7 @@ class SettingsWindow(QDialog):
         pal_hint = QLabel("+ hop เดี่ยวจาก role:", palette_panel)
         pal_hint.setObjectName("panelHint")
         pal_lay.addWidget(pal_hint)
-        for role in _PIPELINE_PALETTE_ROLES:
+        for role in _pipeline_palette_roles():
             r = roles_mod.by_name(role)
             label = r.label if r else role.capitalize()
             color = cockpit_theme.ROLE_COLORS.get(role, r.color if r else "#94a3b8")
@@ -1875,7 +1893,7 @@ class SettingsWindow(QDialog):
             add_combo = QComboBox(panel)
             add_combo.addItem("+ add role", None)
             used = {e["role"] for e in hop}
-            for role in _PIPELINE_PALETTE_ROLES:
+            for role in _pipeline_palette_roles():
                 if role in used:
                     continue
                 r = roles_mod.by_name(role)

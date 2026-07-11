@@ -40,12 +40,17 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from .config import SETTINGS_HOME as _BASE_DIR
-from .roles import DEFAULT_TEAMMATES
+from .roles import all_role_names
 
-# Roles selectable in a pipeline = every default teammate. Lead is the locked
-# human/coordinator seat and is intentionally excluded from pipelines.
-VALID_ROLES: tuple[str, ...] = tuple(r.name for r in DEFAULT_TEAMMATES)
-_VALID_ROLE_SET: frozenset[str] = frozenset(VALID_ROLES)
+
+def valid_roles() -> tuple[str, ...]:
+    """Roles selectable in a pipeline = every default teammate + every
+    registered custom role. Lead is the locked human/coordinator seat and is
+    intentionally excluded from pipelines. A function (not a frozen
+    constant) since custom roles register at runtime — see
+    ``roles.all_role_names``."""
+    return all_role_names(include_lead=False)
+
 
 # Built-in template ids — immutable in the UI (no rename/delete; Duplicate to
 # fork). Re-asserted from code on every load/save so they can't drift.
@@ -140,12 +145,12 @@ def _builtin_templates() -> list[dict]:
 # ─────────────────────────────────────────────────────────────────────
 
 
-def _norm_entry(raw: object) -> dict | None:
+def _norm_entry(raw: object, valid: frozenset[str]) -> dict | None:
     """Coerce one hop cell; drop it (None) if the role is unknown/missing."""
     if not isinstance(raw, dict):
         return None
     role = raw.get("role")
-    if not isinstance(role, str) or role not in _VALID_ROLE_SET:
+    if not isinstance(role, str) or role not in valid:
         return None
     cwd = raw.get("cwd", "")
     return {
@@ -156,14 +161,14 @@ def _norm_entry(raw: object) -> dict | None:
     }
 
 
-def _norm_hop(raw: object) -> list[dict]:
+def _norm_hop(raw: object, valid: frozenset[str]) -> list[dict]:
     """Coerce one hop. A hop is a *set* of roles — dedup by role (keep first)."""
     if not isinstance(raw, list):
         return []
     hop: list[dict] = []
     seen: set[str] = set()
     for item in raw:
-        ent = _norm_entry(item)
+        ent = _norm_entry(item, valid)
         if ent is None or ent["role"] in seen:
             continue
         seen.add(ent["role"])
@@ -171,13 +176,13 @@ def _norm_hop(raw: object) -> list[dict]:
     return hop
 
 
-def _norm_hops(raw: object) -> list[list[dict]]:
+def _norm_hops(raw: object, valid: frozenset[str]) -> list[list[dict]]:
     if not isinstance(raw, list):
         return []
-    return [_norm_hop(h) for h in raw]
+    return [_norm_hop(h, valid) for h in raw]
 
 
-def _norm_custom_template(raw: object) -> dict | None:
+def _norm_custom_template(raw: object, valid: frozenset[str]) -> dict | None:
     """Coerce a custom template; drop it if malformed or claims a built-in id."""
     if not isinstance(raw, dict):
         return None
@@ -189,7 +194,12 @@ def _norm_custom_template(raw: object) -> dict | None:
         return None  # built-ins come from code, never from the file
     name = raw.get("name")
     name = name.strip() if isinstance(name, str) and name.strip() else tid
-    return {"id": tid, "name": name, "builtin": False, "hops": _norm_hops(raw.get("hops"))}
+    return {
+        "id": tid,
+        "name": name,
+        "builtin": False,
+        "hops": _norm_hops(raw.get("hops"), valid),
+    }
 
 
 def _has_runnable_hop(hops: list[list[dict]]) -> bool:
@@ -210,6 +220,8 @@ def _normalize(raw: object) -> dict:
     Well-formed custom templates follow in file order (deduped by id).
     """
     data = raw if isinstance(raw, dict) else {}
+    valid_tuple = valid_roles()
+    valid = frozenset(valid_tuple)
 
     builtins = {t["id"]: t for t in _builtin_templates()}
     order = list(builtins.keys())  # canonical display order
@@ -225,7 +237,7 @@ def _normalize(raw: object) -> dict:
             if tid in BUILTIN_IDS:
                 # Override hops only — name/builtin stay canonical.
                 if "hops" in item:
-                    hops = _norm_hops(item.get("hops"))
+                    hops = _norm_hops(item.get("hops"), valid)
                     if _has_runnable_hop(hops):
                         builtins[tid] = {
                             "id": tid,
@@ -234,7 +246,7 @@ def _normalize(raw: object) -> dict:
                             "hops": hops,
                         }
                 continue
-            tpl = _norm_custom_template(item)
+            tpl = _norm_custom_template(item, valid)
             if tpl is None or tpl["id"] in seen_ids:
                 continue
             seen_ids.add(tpl["id"])
@@ -244,7 +256,7 @@ def _normalize(raw: object) -> dict:
 
     raw_roles = data.get("rolesEnabled")
     raw_roles = raw_roles if isinstance(raw_roles, dict) else {}
-    roles_enabled = {role: bool(raw_roles.get(role, True)) for role in VALID_ROLES}
+    roles_enabled = {role: bool(raw_roles.get(role, True)) for role in valid_tuple}
 
     active = data.get("activeTemplate")
     ids = {t["id"] for t in templates}

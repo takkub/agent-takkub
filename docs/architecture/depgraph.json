@@ -598,19 +598,21 @@
         "agent_takkub.config",
         "agent_takkub.lead_context",
         "agent_takkub.pane_tools_policy",
+        "agent_takkub.roles",
         "agent_takkub.shared_dev_tools"
       ],
       "imported_by": [
         "agent_takkub.settings_window"
       ],
       "fan_in": 1,
-      "fan_out": 4
+      "fan_out": 5
     },
     {
       "module": "agent_takkub.pane_tools_policy",
       "imports": [
         "agent_takkub.config",
-        "agent_takkub.custom_roles"
+        "agent_takkub.custom_roles",
+        "agent_takkub.roles"
       ],
       "imported_by": [
         "agent_takkub.cli",
@@ -620,7 +622,7 @@
         "agent_takkub.shared_dev_tools"
       ],
       "fan_in": 5,
-      "fan_out": 2
+      "fan_out": 3
     },
     {
       "module": "agent_takkub.pipeline_config",
@@ -937,12 +939,14 @@
         "agent_takkub.main_window",
         "agent_takkub.orchestrator",
         "agent_takkub.orchestrator_text",
+        "agent_takkub.pane_tools_dialog",
+        "agent_takkub.pane_tools_policy",
         "agent_takkub.pipeline_config",
         "agent_takkub.remote.api",
         "agent_takkub.settings_window",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 11,
+      "fan_in": 13,
       "fan_out": 0
     },
     {

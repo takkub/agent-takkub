@@ -18,22 +18,20 @@ from __future__ import annotations
 import json
 import pathlib
 
-# Roles that get a row in the matrix. Order matches the cockpit's
-# role-declaration convention (lead first, then specialists).
-ROLES: tuple[str, ...] = (
-    "lead",
-    "frontend",
-    "backend",
-    "mobile",
-    "devops",
-    "qa",
-    "reviewer",
-    "critic",
-    "designer",
-    "analyst",
-    "security",
-    "docs",
-)
+from . import roles as _roles_mod
+
+# Roles that get a row in the MCP/Plugins matrix: every currently-registered
+# role (built-in + custom, lead first — role-declaration convention) except
+# shell/codex/gemini, whose panes never load --mcp-config so a policy toggle
+# for them would do nothing (shell = plain terminal, no claude at all;
+# codex/gemini = non-claude binaries — see shared_dev_tools._ROLE_MCP_POLICY's
+# own note). A function (not a frozen tuple) since custom roles register at
+# runtime — see roles.all_role_names.
+_MATRIX_EXCLUDED_ROLES: frozenset[str] = frozenset({"shell", "codex", "gemini"})
+
+
+def matrix_roles() -> tuple[str, ...]:
+    return tuple(r for r in _roles_mod.all_role_names() if r not in _MATRIX_EXCLUDED_ROLES)
 
 
 def _default_plugins_installed_file() -> pathlib.Path:
