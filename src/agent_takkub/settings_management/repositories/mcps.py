@@ -39,12 +39,22 @@ def _ownership(name: str) -> Ownership:
 def _draft_to_cfg(draft: McpConfigDraft, existing: dict | None = None) -> dict:
     """Merge the form-editable fields onto *existing* (preserving unknown
     keys like ``headers``) — or build a fresh config when there's nothing to
-    merge onto (create)."""
+    merge onto (create).
+
+    ``existing`` is always the RAW (unmasked) stored config — `get()` masks
+    for display, but the draft's env/args values came from that masked
+    display, so any secret the user never touched still equals the masked
+    placeholder. `restore_masked_secrets` swaps those back to their real
+    value, field-by-field, so an unrelated edit (e.g. only ``command``)
+    can't clobber a stored credential with ``••••••••`` (HIGH-1).
+    """
     cfg = dict(existing or {})
     cfg["type"] = draft.type
     cfg["command"] = draft.command
     cfg["args"] = [*draft.args]
     cfg["env"] = dict(draft.env)
+    if existing:
+        cfg = shared_dev_tools.restore_masked_secrets(cfg, existing)
     return cfg
 
 
@@ -119,6 +129,16 @@ def capabilities(entity_id: str | None = None) -> Capability:
     return Capability(can_create=True, can_update=True, can_delete=True)
 
 
+def _regen_variants_or_raise() -> None:
+    """Checked MCP role-variant regen (HIGH-4) — call inside a
+    `FileTransaction` that also snapshots `shared_dev_tools.role_variant_paths()`
+    so a partial variant write rolls back together with master/policy
+    instead of leaving them disagreeing."""
+    ok, failed = shared_dev_tools.regen_role_variants_checked()
+    if not ok:
+        raise RuntimeError(f"regenerate MCP role variant ไม่สำเร็จ: {', '.join(failed)}")
+
+
 def create(command: CreateMcpCommand) -> OperationResult:
     name = (command.name or "").strip().lower()
     if not name:
@@ -126,10 +146,14 @@ def create(command: CreateMcpCommand) -> OperationResult:
     if name in shared_dev_tools.list_master_mcps():
         return OperationResult(ok=False, message=f"MCP server '{name}' มีอยู่แล้ว")
     cfg = _draft_to_cfg(command.config)
-    if not shared_dev_tools.add_mcp_server(name, cfg, force=True):
-        return OperationResult(
-            ok=False, message="สร้าง MCP server ไม่สำเร็จ — ชื่อไม่ถูกต้อง หรือชนกับ managed MCP"
-        )
+    paths = [shared_dev_tools.SHARED_MCP_FILE, *shared_dev_tools.role_variant_paths()]
+    try:
+        with FileTransaction(paths):
+            if not shared_dev_tools.add_mcp_server(name, cfg, force=True):
+                raise RuntimeError("สร้าง MCP server ไม่สำเร็จ — ชื่อไม่ถูกต้อง หรือชนกับ managed MCP")
+            _regen_variants_or_raise()
+    except (RuntimeError, OSError) as e:
+        return OperationResult(ok=False, message=str(e))
     return OperationResult(ok=True, entity_id=name)
 
 
@@ -142,8 +166,14 @@ def update(entity_id: str, command: UpdateMcpCommand) -> OperationResult:
             ok=False, message="Managed MCP server แก้ definition ไม่ได้", entity_id=entity_id
         )
     cfg = _draft_to_cfg(command.config, existing)
-    if not shared_dev_tools.add_mcp_server(entity_id, cfg, force=True):
-        return OperationResult(ok=False, message="แก้ MCP server ไม่สำเร็จ", entity_id=entity_id)
+    paths = [shared_dev_tools.SHARED_MCP_FILE, *shared_dev_tools.role_variant_paths()]
+    try:
+        with FileTransaction(paths):
+            if not shared_dev_tools.add_mcp_server(entity_id, cfg, force=True):
+                raise RuntimeError("แก้ MCP server ไม่สำเร็จ")
+            _regen_variants_or_raise()
+    except (RuntimeError, OSError) as e:
+        return OperationResult(ok=False, message=str(e), entity_id=entity_id)
     return OperationResult(ok=True, entity_id=entity_id)
 
 
@@ -183,7 +213,11 @@ def delete(entity_id: str, confirmed_plan_version: str) -> OperationResult:
             entity_id=entity_id,
         )
 
-    paths = [shared_dev_tools.SHARED_MCP_FILE, pane_tools_policy.PANE_TOOLS_POLICY_FILE]
+    paths = [
+        shared_dev_tools.SHARED_MCP_FILE,
+        pane_tools_policy.PANE_TOOLS_POLICY_FILE,
+        *shared_dev_tools.role_variant_paths(),
+    ]
     try:
         with FileTransaction(paths):
             if not shared_dev_tools.remove_mcp_server(entity_id):
@@ -197,7 +231,8 @@ def delete(entity_id: str, confirmed_plan_version: str) -> OperationResult:
                     changed = True
             if changed and not pane_tools_policy.save_policy(policy):
                 raise RuntimeError("ลบ policy reference ไม่สำเร็จ")
-    except RuntimeError as e:
+            _regen_variants_or_raise()
+    except (RuntimeError, OSError) as e:
         return OperationResult(ok=False, message=str(e), entity_id=entity_id)
 
     return OperationResult(ok=True, entity_id=entity_id)

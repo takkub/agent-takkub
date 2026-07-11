@@ -8,7 +8,14 @@ from pathlib import Path
 import pytest
 from PyQt6.QtWidgets import QApplication
 
-from agent_takkub import custom_roles, pane_tools_policy, provider_config, roles, skill_policy
+from agent_takkub import (
+    custom_roles,
+    pane_tools_policy,
+    provider_config,
+    roles,
+    shared_dev_tools,
+    skill_policy,
+)
 from agent_takkub.settings_management.commands import (
     CreateRoleCommand,
     RoleAccessDraft,
@@ -26,6 +33,9 @@ def redirect_stores(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setattr(skill_policy, "SKILL_POLICY_FILE", tmp_path / "skill-policy.json")
     monkeypatch.setattr(provider_config, "_CONFIG_PATH", tmp_path / "role-providers.json")
     monkeypatch.setattr(provider_config, "_BASE_DIR", tmp_path)
+    # Access-tab MCP writes now regen role variants (HIGH-4) — redirect the
+    # master file so that never touches the real ~/.takkub runtime dir.
+    monkeypatch.setattr(shared_dev_tools, "SHARED_MCP_FILE", tmp_path / "shared-mcp.json")
     saved = dict(roles._CUSTOM)
     roles._CUSTOM.clear()
     yield tmp_path
