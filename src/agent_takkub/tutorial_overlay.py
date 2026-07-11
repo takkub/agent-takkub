@@ -108,12 +108,22 @@ class TutorialOverlay(QWidget):
             " padding:4px 12px; }"
             f"QPushButton:hover {{ background:{cockpit_theme.GROUND_SELECT}; }}"
         )
-        self._next_btn = QPushButton("ถัดไป →", self._callout)
-        self._next_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        # gold_button() sets objectName #goldButton, whose QSS lives in
+        # cockpit_theme.build_stylesheet() — the overlay isn't a descendant
+        # of a widget that applies that stylesheet, so the same gold-CTA
+        # rule is also set directly here (matching the design system's
+        # tokens: GOLD_GRAD_TOP/BOTTOM, GOLD_TEXT_ON, RADIUS_SM) instead of
+        # the previous METER_CLAY + literal 6px radius that had drifted off
+        # the design system's primary-CTA styling.
+        self._next_btn = cockpit_theme.gold_button("ถัดไป →", self._callout)
         self._next_btn.setStyleSheet(
-            f"QPushButton {{ color:{cockpit_theme.GROUND_PANEL}; background:{_CLAUDE_CORAL};"
-            " border:none; border-radius:6px; padding:4px 14px; font-weight:600; }"
-            f"QPushButton:hover {{ background:{cockpit_theme.METER_CLAY_ALT}; }}"
+            "QPushButton#goldButton {"
+            " background: qlineargradient(x1:0, y1:0, x2:0, y2:1,"
+            f" stop:0 {cockpit_theme.GOLD_GRAD_TOP}, stop:1 {cockpit_theme.GOLD_GRAD_BOTTOM});"
+            f" color:{cockpit_theme.GOLD_TEXT_ON}; border:none;"
+            f" border-radius:{cockpit_theme.RADIUS_SM}px; padding:4px 14px; font-weight:700; }}"
+            "QPushButton#goldButton:hover { background: qlineargradient(x1:0, y1:0, x2:0, y2:1,"
+            f" stop:0 #f2cd75, stop:1 {cockpit_theme.GOLD_GRAD_TOP}); }}"
         )
         self._skip_btn.clicked.connect(lambda: self.finish(mark=True))
         self._next_btn.clicked.connect(self._advance)

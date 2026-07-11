@@ -69,6 +69,36 @@ _STATUS_FALLBACK = ("☐", cockpit_theme.TEXT_MUTED)  # ☐
 # every expand/collapse.
 _ROLE_BASE_LABEL = Qt.ItemDataRole.UserRole + 1
 
+# Extra QTreeWidgetItem data role (column 0): max wrapped-line count for a
+# header row (goal/feature) — `_WrapItemDelegate` caps the grown row height
+# to this many lines so a long goal doesn't eat the whole dock (critic
+# round-2 finding 1); plain task rows carry no such data and keep growing
+# to fit their (already short) summary text untouched.
+_ROLE_MAX_LINES = Qt.ItemDataRole.UserRole + 2
+_HEADER_MAX_LINES = 2
+
+# Goal/feature header label text is clamped to this many characters (plus a
+# "…" ellipsis) before it ever reaches the tree — belt-and-braces alongside
+# the delegate's line cap, and what actually produces a real, consistent
+# ellipsis character (the delegate only clips overflow, it doesn't paint
+# "…"). The full, untruncated text is always set as the row's tooltip.
+_GOAL_LABEL_MAX_CHARS = 140
+_FEATURE_LABEL_MAX_CHARS = 100
+
+
+def _clamp_label(text: str, limit: int) -> str:
+    """*text* truncated to *limit* chars with a trailing "…" if it overflows.
+
+    Short/blank text is returned unchanged (no-op below the limit) — this is
+    what makes the ellipsis consistent: every label over the limit gets cut
+    at the exact same character, instead of wrapping wherever a line break
+    happens to land."""
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
 _DOCK_QSS = f"""
 #taskDockRoot {{
     background: {cockpit_theme.GROUND_SIDEBAR};
@@ -172,7 +202,11 @@ class _WrapItemDelegate(QStyledItemDelegate):
         wrapped = metrics.boundingRect(
             0, 0, width, 100_000, int(Qt.TextFlag.TextWordWrap), str(text)
         )
-        return QSize(base.width(), max(base.height(), wrapped.height() + _WRAP_V_PAD))
+        height = wrapped.height() + _WRAP_V_PAD
+        max_lines = index.data(_ROLE_MAX_LINES)
+        if isinstance(max_lines, int):
+            height = min(height, max_lines * metrics.lineSpacing() + _WRAP_V_PAD)
+        return QSize(base.width(), max(base.height(), height))
 
 
 def status_glyph(status: str) -> tuple[str, str]:
@@ -523,10 +557,13 @@ class TaskDockWidget(QWidget):
         done = sum(1 for r in rows_all if r.get("status") == "ok")
         goal = group.get("goal", "")
         key = f"group:{project}:{group.get('date', '')}:{goal}"
-        base_label = f"\U0001f3af {goal}  ({done}/{len(rows_all)})"
+        goal_display = _clamp_label(goal, _GOAL_LABEL_MAX_CHARS)
+        base_label = f"\U0001f3af {goal_display}  ({done}/{len(rows_all)})"
         item = QTreeWidgetItem([f"▸  {base_label}"])
         item.setData(0, Qt.ItemDataRole.UserRole, key)
         item.setData(0, _ROLE_BASE_LABEL, base_label)
+        item.setData(0, _ROLE_MAX_LINES, _HEADER_MAX_LINES)
+        item.setToolTip(0, goal)
         font = item.font(0)
         font.setBold(True)
         item.setFont(0, font)
@@ -538,10 +575,13 @@ class TaskDockWidget(QWidget):
     def _build_feature_item(self, project: str, group: dict, feature: dict) -> QTreeWidgetItem:
         name = feature.get("name", "")
         key = f"feature:{project}:{group.get('date', '')}:{group.get('goal', '')}:{name}"
-        base_label = f"{feature_emoji(feature)} {name}"
+        name_display = _clamp_label(name, _FEATURE_LABEL_MAX_CHARS)
+        base_label = f"{feature_emoji(feature)} {name_display}"
         item = QTreeWidgetItem([f"▸  {base_label}"])
         item.setData(0, Qt.ItemDataRole.UserRole, key)
         item.setData(0, _ROLE_BASE_LABEL, base_label)
+        item.setData(0, _ROLE_MAX_LINES, _HEADER_MAX_LINES)
+        item.setToolTip(0, name)
         item.setForeground(0, QColor(cockpit_theme.TEXT_MUTED))
         for row in feature.get("rows", []):
             item.addChild(self._build_row_item(row))
