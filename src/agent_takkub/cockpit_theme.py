@@ -348,7 +348,7 @@ def build_stylesheet(sans_family: str, mono_family: str) -> str:
     _up_arrow_svg_disabled = (_icons_dir / "spin-up-disabled.svg").as_posix()
     _down_arrow_svg_disabled = (_icons_dir / "spin-down-disabled.svg").as_posix()
     return f"""
-    QDialog#settingsWindow {{
+    QDialog#settingsWindow, QWidget#settingsWindow {{
         background: {GROUND_WINDOW};
         color: {TEXT_PRIMARY};
         font-family: "{sans_family}";
