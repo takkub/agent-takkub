@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from PyQt6.QtCore import QCoreApplication
 
-from agent_takkub import config, hook_wiring
+from agent_takkub import config, hook_wiring, rtk_helper
 from agent_takkub import orchestrator as orch_mod
 from agent_takkub.orchestrator import Orchestrator
 
@@ -116,6 +116,54 @@ class TestHookSettingsFile:
 
         assert path1 == path2
         assert mtime1 == mtime2  # second call must not touch the file
+
+
+class TestRtkInjection:
+    """A3: the rtk PreToolUse Bash hook is folded into the SAME central
+    --settings file when rtk is enabled + on PATH, so it reaches panes
+    without dirtying any project's .claude/settings.json."""
+
+    @pytest.fixture(autouse=True)
+    def _isolate_flag(self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(config, "SETTINGS_HOME", tmp_path / "settings-home")
+
+    def _pre_cmds(self, path: str) -> list[str]:
+        data = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+        pre = data["hooks"].get("PreToolUse", [])
+        return [h.get("command") for grp in pre for h in grp.get("hooks", [])]
+
+    def test_no_rtk_hook_when_disabled(
+        self, tmp_env: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(rtk_helper, "rtk_binary_available", lambda: True)
+        # not enabled → no PreToolUse rtk hook, pane-state hooks intact
+        path = hook_wiring.ensure_hook_settings_file()
+        data = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+        assert "PreToolUse" not in data["hooks"]
+        assert hook_wiring.HOOK_COMMAND in [
+            h["command"] for grp in data["hooks"]["Stop"] for h in grp["hooks"]
+        ]
+
+    def test_rtk_hook_present_when_enabled_and_available(
+        self, tmp_env: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(rtk_helper, "rtk_binary_available", lambda: True)
+        rtk_helper.set_rtk_enabled(True)
+        path = hook_wiring.ensure_hook_settings_file()
+        assert rtk_helper.RTK_HOOK_COMMAND in self._pre_cmds(path)
+        # pane-state hooks still present alongside it
+        data = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+        assert "SessionStart" in data["hooks"]
+
+    def test_no_rtk_hook_when_binary_missing(
+        self, tmp_env: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Enabled but binary gone: never inject a `rtk hook claude` command
+        # that would make every Bash tool call in the pane fail.
+        rtk_helper.set_rtk_enabled(True)
+        monkeypatch.setattr(rtk_helper, "rtk_binary_available", lambda: False)
+        path = hook_wiring.ensure_hook_settings_file()
+        assert rtk_helper.RTK_HOOK_COMMAND not in self._pre_cmds(path)
 
 
 class TestClaudeSpawnArgvIncludesSettings:

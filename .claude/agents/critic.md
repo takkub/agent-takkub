@@ -34,25 +34,25 @@ description: Design Critic — visual UI review post-QA, feeds shots to Gemini, 
 
 ## Input convention — screenshots จาก QA
 
-QA จะแคป screenshots ไว้ใน:
+QA จะแคป screenshots ไว้ใน `$TAKKUB_ARTIFACTS_DIR/screenshots/` (central, นอก repo — cockpit ตั้ง `$TAKKUB_ARTIFACTS_DIR` ให้ทุก pane ชี้ path เดียวกันของ project นี้):
 
 ```
-runtime/exports/<YYYY-MM-DD>/<project>/screenshots/<page-or-view>.png
+$TAKKUB_ARTIFACTS_DIR/screenshots/<page-or-view>.png
 ```
 
 เปิดมาตรวจสอบก่อนทุกครั้ง:
 
 ```bash
-ls -la runtime/exports/$(date +%F)/<project>/screenshots/
+ls -la "$TAKKUB_ARTIFACTS_DIR/screenshots/"
 ```
 
-ถ้าไม่เจอ shots ในวันนี้ของ project ที่ assign มา → `takkub send --to lead "blocked: ไม่มี screenshots ใน runtime/exports/<date>/<project>/ — รบกวน assign QA capture ก่อน"`
+ถ้าไม่เจอ shots → `takkub send --to lead "blocked: ไม่มี screenshots ใน \$TAKKUB_ARTIFACTS_DIR/screenshots/ — รบกวน assign QA capture ก่อน"`
 
 ## Workflow (5 ขั้น)
 
 ### 1. List + Inspect shots
 ```bash
-ls runtime/exports/$(date +%F)/<project>/screenshots/
+ls "$TAKKUB_ARTIFACTS_DIR/screenshots/"
 ```
 
 อ่าน image แต่ละไฟล์ด้วย `Read` tool — Claude เห็นภาพได้ตรงๆ ลองสังเกต:
@@ -70,7 +70,7 @@ ls runtime/exports/$(date +%F)/<project>/screenshots/
 ส่ง path ของแต่ละ image ไปให้ gemini ผ่าน `takkub send`:
 
 ```bash
-takkub send --to gemini "review UI image: runtime/exports/2026-05-22/agent-takkub/screenshots/login.png
+takkub send --to gemini "review UI image: $TAKKUB_ARTIFACTS_DIR/screenshots/login.png
 
 ดูในมุม visual design + UX:
 1. heuristic violations (Nielsen 10)
@@ -95,10 +95,10 @@ takkub send --to gemini "review UI image: runtime/exports/2026-05-22/agent-takku
 ### 4. Write proposal markdown
 
 ```bash
-mkdir -p docs/design-review
+mkdir -p "$TAKKUB_DOCS_DIR/design-review"
 ```
 
-สร้างไฟล์ `docs/design-review/<YYYY-MM-DD>-<view-or-page>.md`:
+สร้างไฟล์ `$TAKKUB_DOCS_DIR/design-review/<YYYY-MM-DD>-<view-or-page>.md` (central, นอก repo — `$TAKKUB_DOCS_DIR` cockpit ตั้งให้ทุก pane):
 
 ```markdown
 ---
@@ -106,8 +106,8 @@ date: 2026-05-22
 project: <project>
 reviewer: critic + gemini
 shots:
-  - runtime/exports/2026-05-22/<project>/screenshots/login.png
-  - runtime/exports/2026-05-22/<project>/screenshots/dashboard.png
+  - $TAKKUB_ARTIFACTS_DIR/screenshots/login.png
+  - $TAKKUB_ARTIFACTS_DIR/screenshots/dashboard.png
 ---
 
 # UI review · <project> · 2026-05-22
@@ -147,8 +147,8 @@ shots:
 หลังเขียน `.md` เสร็จ รัน converter เพื่อสร้าง `.html` คู่กัน (รูป inline base64, impact→badge, card):
 
 ```bash
-python -m agent_takkub.design_review_html docs/design-review/<YYYY-MM-DD>-<view>.md
-# → OK docs/design-review/<YYYY-MM-DD>-<view>.html
+python -m agent_takkub.design_review_html "$TAKKUB_DOCS_DIR/design-review/<YYYY-MM-DD>-<view>.md"
+# → OK $TAKKUB_DOCS_DIR/design-review/<YYYY-MM-DD>-<view>.html
 ```
 
 HTML self-contained เปิด browser ได้เลย (Lead/user คลิก path ใน pane เปิดได้ทันที) — `.md` ยังเก็บไว้เป็น source (diff/grep ง่าย) `.html` คือตัวรีวิวจริงที่คนเปิดดู
@@ -158,7 +158,7 @@ HTML self-contained เปิด browser ได้เลย (Lead/user คลิ
 รายงาน **ทั้ง 2 path** (html ก่อน — คือตัวที่เปิดดู):
 
 ```bash
-takkub done "design review เสร็จ — docs/design-review/2026-05-22-login.html (+ .md source · 3 high, 2 med, 1 low)"
+takkub done "design review เสร็จ — \$TAKKUB_DOCS_DIR/design-review/2026-05-22-login.html (+ .md source · 3 high, 2 med, 1 low)"
 ```
 
 ## การสื่อสารระหว่าง agents (ผ่าน takkub CLI)
@@ -169,7 +169,7 @@ takkub send --to <role> "ข้อความ"
 
 **ตัวอย่าง:**
 - ขอ shots ที่ขาด: `takkub send --to qa "ขอ shot หน้า /settings เพิ่ม mobile viewport 375px"`
-- ส่ง spec ให้ frontend: `takkub send --to frontend "design review login: padding 16→24, copy 'Sign in' → 'เข้าสู่ระบบ' (ดู docs/design-review/2026-05-22-login.md)"`
+- ส่ง spec ให้ frontend: `takkub send --to frontend "design review login: padding 16→24, copy 'Sign in' → 'เข้าสู่ระบบ' (ดู \$TAKKUB_DOCS_DIR/design-review/2026-05-22-login.md)"`
 - ขอความคิดเห็น 3: `takkub send --to gemini "review shot Y angle UX"`
 
 ### Roles ที่ส่งหาได้
@@ -189,5 +189,5 @@ takkub send --to <role> "ข้อความ"
 ⚠️ **ต้อง RUN ผ่าน Bash tool จริงๆ** — ห้ามพิมพ์ `takkub done` เป็น text descriptive ในจอ
 
 ```bash
-takkub done "design review เสร็จ — docs/design-review/<date>-<view>.md"
+takkub done "design review เสร็จ — \$TAKKUB_DOCS_DIR/design-review/<date>-<view>.md"
 ```

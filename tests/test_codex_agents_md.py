@@ -151,6 +151,57 @@ class TestEnsureAgentsMdExtra:
         assert target.read_text(encoding="utf-8") == original
 
 
+class TestGitExclude:
+    """A2: a cockpit-planted AGENTS.md is added to `.git/info/exclude` so it
+    never shows in the user's `git status` — without touching `.gitignore`."""
+
+    def _exclude(self, repo: Path) -> Path:
+        return repo / ".git" / "info" / "exclude"
+
+    def test_adds_agents_md_to_exclude_in_a_repo(self, tmp_path: Path) -> None:
+        (tmp_path / ".git").mkdir()
+        ok, _ = ensure_agents_md(tmp_path)
+        assert ok
+        lines = self._exclude(tmp_path).read_text(encoding="utf-8").splitlines()
+        assert "AGENTS.md" in lines
+
+    def test_no_exclude_when_not_a_repo(self, tmp_path: Path) -> None:
+        ok, _ = ensure_agents_md(tmp_path)
+        assert ok
+        assert not (tmp_path / ".git").exists()
+
+    def test_idempotent_no_duplicate_line(self, tmp_path: Path) -> None:
+        (tmp_path / ".git").mkdir()
+        ensure_agents_md(tmp_path)
+        ensure_agents_md(tmp_path)  # refresh
+        lines = self._exclude(tmp_path).read_text(encoding="utf-8").splitlines()
+        assert lines.count("AGENTS.md") == 1
+
+    def test_preserves_existing_exclude_entries(self, tmp_path: Path) -> None:
+        info = tmp_path / ".git" / "info"
+        info.mkdir(parents=True)
+        (info / "exclude").write_text("# git ls-files --others\n*.log\n", encoding="utf-8")
+        ensure_agents_md(tmp_path)
+        text = self._exclude(tmp_path).read_text(encoding="utf-8")
+        assert "*.log" in text
+        assert "AGENTS.md" in text.splitlines()
+
+    def test_user_owned_file_not_excluded(self, tmp_path: Path) -> None:
+        # A user-owned AGENTS.md is left alone AND not force-hidden from them.
+        (tmp_path / ".git").mkdir()
+        (tmp_path / "AGENTS.md").write_text("# mine\n", encoding="utf-8")
+        ok, reason = ensure_agents_md(tmp_path)
+        assert not ok and reason == "user-owned"
+        assert not self._exclude(tmp_path).exists()
+
+    def test_skips_git_file_worktree(self, tmp_path: Path) -> None:
+        # A `.git` FILE (linked worktree/submodule) is skipped rather than
+        # parsed — the marker already says "do not commit".
+        (tmp_path / ".git").write_text("gitdir: /somewhere/.git/worktrees/x\n", encoding="utf-8")
+        ok, _ = ensure_agents_md(tmp_path)
+        assert ok  # still plants the file, just no exclude write
+
+
 class TestCodexAgentsMdOverrideRule:
     """Guards the section that prevents codex from misreading
     Lead's `[ROLE: ... ห้าม spawn subagent]` prefix as forbidding the

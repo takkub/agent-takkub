@@ -31,6 +31,7 @@ docs/reviews/2026-07-02-claude-hooks-design-crosscheck.md, section 3).
 
 from __future__ import annotations
 
+import copy
 import json
 
 from . import config
@@ -52,12 +53,38 @@ _HOOK_SETTINGS: dict = {
 }
 
 
+def _rendered_settings() -> dict:
+    """The hook settings for this spawn: the static Stop/Notification/
+    SessionStart wiring, plus rtk's PreToolUse Bash hook when rtk is enabled
+    centrally AND on PATH (`rtk_helper.rtk_should_inject`).
+
+    Folding rtk in here — rather than into a project's `.claude/settings.json`
+    — is the central-home migration (A3): the file this returns is already
+    handed to every claude pane via `--settings`, so rtk reaches panes without
+    dirtying any repo. Additive: rtk lives under its own PreToolUse key and
+    never perturbs the pane-state Stop/Notification/SessionStart hooks."""
+    settings = copy.deepcopy(_HOOK_SETTINGS)
+    try:
+        from . import rtk_helper
+
+        if rtk_helper.rtk_should_inject():
+            settings["hooks"]["PreToolUse"] = [rtk_helper.rtk_hook_fragment()]
+    except Exception:
+        # rtk is a best-effort optimisation — never let it break the
+        # authoritative pane-state hook wiring.
+        pass
+    return settings
+
+
 def ensure_hook_settings_file() -> str:
-    """Write the static hook-wiring settings file if missing/stale and
-    return its path as a string (for `--settings <path>`).
+    """Write the hook-wiring settings file if missing/stale and return its
+    path as a string (for `--settings <path>`).
 
     Idempotent and cheap: only writes when the on-disk content differs, so
-    spawning N panes back-to-back doesn't hammer the filesystem.
+    spawning N panes back-to-back doesn't hammer the filesystem. The content
+    now varies with the central rtk toggle (`_rendered_settings`), so
+    enabling rtk mid-session is picked up on the next spawn without a
+    cockpit restart.
 
     Resolves ``config.RUNTIME_DIR`` at call time (not import time) so tests
     that monkeypatch it (as several spawn-argv tests already do) land the
@@ -66,7 +93,7 @@ def ensure_hook_settings_file() -> str:
     """
     config.ensure_runtime()
     settings_path = config.RUNTIME_DIR / "hook-settings.json"
-    rendered = json.dumps(_HOOK_SETTINGS, indent=2, ensure_ascii=False)
+    rendered = json.dumps(_rendered_settings(), indent=2, ensure_ascii=False)
     try:
         current = settings_path.read_text(encoding="utf-8")
     except OSError:

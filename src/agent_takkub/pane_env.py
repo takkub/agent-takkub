@@ -127,6 +127,12 @@ _PANE_ENV_ALLOWLIST: frozenset[str] = frozenset(
         # `_apply_artifacts_dir()` stamps the effective value into every
         # pane's env unconditionally, same contract as TAKKUB_PORT_FILE.
         "TAKKUB_ARTIFACTS_DIR",
+        # Central per-project docs dir for LLM-authored design-review /
+        # reviews / guides / system-overview markdown+html (central-home
+        # migration item C). Same stamped-unconditionally contract —
+        # `_apply_artifacts_dir()` sets it so instructions can point at
+        # `$TAKKUB_DOCS_DIR/...` instead of a repo-relative `docs/...`.
+        "TAKKUB_DOCS_DIR",
     }
 )
 
@@ -241,16 +247,22 @@ def _apply_port_file(env: dict[str, str]) -> None:
 
 
 def _apply_artifacts_dir(env: dict[str, str], project_ns: str) -> None:
-    """Stamp ``TAKKUB_ARTIFACTS_DIR`` and create it, per pane spawn (plan #1).
+    """Stamp ``TAKKUB_ARTIFACTS_DIR`` + ``TAKKUB_DOCS_DIR`` and create them,
+    per pane spawn (plan #1 + central-home item C).
 
-    Reuses the existing ``runtime/exports/<date>/<project>/`` convention the
-    screenshot scanner already reads (``orchestrator._compute_last_progress_ts``
-    checks ``.../screenshots``) so shots keep landing where they always have —
-    this just gives every pane an explicit, allowlisted scratch dir for temp
-    files/images/test scripts instead of littering the project repo. Stamped
-    unconditionally at spawn time (not just allowlisted) so every pane sees a
-    real, already-existing directory rather than an env var that may or may
-    not resolve depending on what the host process happened to export.
+    ``TAKKUB_ARTIFACTS_DIR`` reuses the existing ``runtime/exports/<date>/
+    <project>/`` convention the screenshot scanner already reads
+    (``orchestrator._compute_last_progress_ts`` checks ``.../screenshots``) so
+    shots keep landing where they always have — an explicit, allowlisted
+    scratch dir for temp files/images/test scripts instead of littering the
+    project repo.
+
+    ``TAKKUB_DOCS_DIR`` (``runtime/docs/<project>/``) is the central home for
+    LLM-authored docs (design-review / reviews / guides / system-overview) the
+    CLAUDE.md routing tells panes to produce — pointing those at
+    ``$TAKKUB_DOCS_DIR/...`` keeps them out of the user's repo too. Both are
+    stamped unconditionally at spawn time (not just allowlisted) so every pane
+    — claude, codex, agy alike — sees a real, already-existing directory.
     """
     from . import config
 
@@ -261,6 +273,16 @@ def _apply_artifacts_dir(env: dict[str, str], project_ns: str) -> None:
     except OSError:
         pass
     env["TAKKUB_ARTIFACTS_DIR"] = str(artifacts_dir)
+
+    # Recomputed from RUNTIME_DIR at call time (not the frozen config.DOCS_DIR
+    # constant) so a monkeypatched / multi-instance RUNTIME_DIR is honoured —
+    # same contract as the artifacts dir above.
+    docs_dir = config.RUNTIME_DIR / "docs" / project_ns
+    try:
+        docs_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    env["TAKKUB_DOCS_DIR"] = str(docs_dir)
 
 
 def _apply_mcp_timeout(env: dict[str, str]) -> None:

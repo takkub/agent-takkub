@@ -114,16 +114,16 @@ mb text "h1"                        # extract text by selector
 
 ### 📸 Screenshot path convention (สำคัญ — Design Critic ใช้ pickup)
 
-เซฟ shots ทุกครั้งใต้:
+เซฟ shots ทุกครั้งใต้ `$TAKKUB_ARTIFACTS_DIR/screenshots/` (central, นอก repo — cockpit ตั้ง `$TAKKUB_ARTIFACTS_DIR` ให้ทุก pane):
 
 ```
-runtime/exports/<YYYY-MM-DD>/<project>/screenshots/<view>.png
+$TAKKUB_ARTIFACTS_DIR/screenshots/<view>.png
 ```
 
-ใช้ Bash interpolate ให้ช่วย:
+ใช้ Bash interpolate ให้ช่วย (อย่าใช้ path relative `runtime/exports/...` — มันจะไปตกใน repo ของ project):
 
 ```bash
-SHOT_DIR="runtime/exports/$(date +%F)/${TAKKUB_PROJECT:-default}/screenshots"
+SHOT_DIR="$TAKKUB_ARTIFACTS_DIR/screenshots"
 mkdir -p "$SHOT_DIR"
 mb shot "$SHOT_DIR/login.png"
 mb shot "$SHOT_DIR/dashboard.png"
@@ -163,7 +163,7 @@ mb tab list / tab new <url> / tab close <n>
 
 **Workflow ตัวอย่าง (smoke test login flow):**
 ```bash
-SHOT_DIR="runtime/exports/$(date +%F)/${TAKKUB_PROJECT:-default}/screenshots"
+SHOT_DIR="$TAKKUB_ARTIFACTS_DIR/screenshots"
 mkdir -p "$SHOT_DIR"
 mb-start-chrome
 mb go "http://localhost:19510/login"
@@ -201,7 +201,7 @@ takkub done
 
 หรือพร้อม note สรุป (แนะนำ — Lead ใช้ตัดสินใจขั้นถัดไป):
 ```bash
-takkub done "smoke test login → dashboard ผ่าน 15 cases, screenshots ใน runtime/exports/"
+takkub done "smoke test login → dashboard ผ่าน 15 cases, screenshots ใน \$TAKKUB_ARTIFACTS_DIR/screenshots/"
 ```
 
 ---

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import base64
 import mimetypes
+import os
 import pathlib
 import re
 import sys
@@ -107,10 +108,22 @@ def _split_front_matter(text: str) -> tuple[dict, str]:
 
 def _inline_shot(shot: str, base_dirs: list[pathlib.Path]) -> str:
     """Return a <figure> with the screenshot inlined as base64, or a
-    'missing' notice if the file can't be found under any base dir."""
+    'missing' notice if the file can't be found under any base dir.
+
+    Env vars / ``~`` in the path are expanded first so a central path like
+    ``$TAKKUB_ARTIFACTS_DIR/screenshots/login.png`` written into the front
+    matter resolves at convert time (central-home migration — shots live in
+    the central artifacts dir, not the repo)."""
     rel = shot.strip()
-    for base in base_dirs:
-        p = (base / rel).resolve()
+    expanded = os.path.expanduser(os.path.expandvars(rel))
+    # An absolute (post-expansion) path resolves on its own; a relative one
+    # is still tried under each base dir as before.
+    candidates: list[pathlib.Path] = []
+    if os.path.isabs(expanded):
+        candidates.append(pathlib.Path(expanded))
+    else:
+        candidates.extend((base / expanded).resolve() for base in base_dirs)
+    for p in candidates:
         if p.exists() and p.is_file():
             mime = mimetypes.guess_type(p.name)[0] or "image/png"
             b64 = base64.b64encode(p.read_bytes()).decode()

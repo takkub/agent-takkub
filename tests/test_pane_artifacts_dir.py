@@ -67,3 +67,32 @@ class TestApplyArtifactsDir:
 
     def test_allowlisted_for_clarity(self) -> None:
         assert "TAKKUB_ARTIFACTS_DIR" in _PANE_ENV_ALLOWLIST
+
+
+class TestApplyDocsDir:
+    """Central-home item C: the same spawn-time stamp also sets
+    ``TAKKUB_DOCS_DIR`` (runtime/docs/<project>/) so LLM-authored design-
+    review/reviews/guides/system-overview docs land out of the user's repo."""
+
+    def test_stamps_and_creates_docs_dir(self, runtime_dir: Path) -> None:
+        env: dict[str, str] = {}
+        _apply_artifacts_dir(env, "myproj")
+        expected = runtime_dir / "docs" / "myproj"
+        assert env["TAKKUB_DOCS_DIR"] == str(expected)
+        assert Path(env["TAKKUB_DOCS_DIR"]).is_dir()
+
+    def test_docs_dir_allowlisted(self) -> None:
+        assert "TAKKUB_DOCS_DIR" in _PANE_ENV_ALLOWLIST
+
+    def test_no_crash_on_docs_mkdir_failure(
+        self, runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from pathlib import Path as _Path
+
+        def _boom(self, *a, **kw):
+            raise OSError("permission denied")
+
+        monkeypatch.setattr(_Path, "mkdir", _boom)
+        env: dict[str, str] = {}
+        _apply_artifacts_dir(env, "myproj")  # must not raise
+        assert "TAKKUB_DOCS_DIR" in env

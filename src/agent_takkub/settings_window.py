@@ -2078,6 +2078,19 @@ class SettingsWindow(QDialog):
         skills, always read-only from this UI)."""
         return _allowed_project_roots(self._project) if self._project else []
 
+    def _central_skill_dirs(self) -> list[Path]:
+        """Central `project_skills_dir` for the active project — where a
+        New-Skill create writes the real file (the project path only holds a
+        junction). Passed to `is_writable_skill` so a junctioned skill, whose
+        `SkillInfo.path` resolves into the central store, still shows a delete
+        button. Empty when no project is active."""
+        if not self._project:
+            return []
+        try:
+            return [config.project_skills_dir(self._project)]
+        except ValueError:
+            return []
+
     def _reload_skill_catalog(self) -> None:
         """(Re)populate the skill list from disk — called at view build time
         and again after a create/delete so the list, New Role picker (#3)
@@ -2142,7 +2155,11 @@ class SettingsWindow(QDialog):
             self._catalog_roles.setText("ยังไม่มี role ไหนอ้างถึง skill นี้")
         self._catalog_path.setText(f"📄 {skill.path}")
         self._catalog_delete_btn.setVisible(
-            skill_scan.is_writable_skill(skill.path, self._writable_skill_roots())
+            skill_scan.is_writable_skill(
+                skill.path,
+                self._writable_skill_roots(),
+                extra_dirs=self._central_skill_dirs(),
+            )
         )
 
     def _on_create_skill_clicked(self) -> None:
@@ -2157,7 +2174,12 @@ class SettingsWindow(QDialog):
 
         existing = {s.name for s in self._catalog_skills}
         ok, err = skill_scan.create_skill(
-            root[0], name, description, instructions, existing=existing
+            root[0],
+            name,
+            description,
+            instructions,
+            project_ns=self._project,
+            existing=existing,
         )
         if not ok:
             self._ns_status.setText(f"⚠️ {err}")

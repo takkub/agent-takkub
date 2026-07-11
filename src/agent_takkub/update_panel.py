@@ -1042,15 +1042,17 @@ class MainWindowUpdateMixin:
         proj_name = active_project()[0] or "(unnamed)"
         confirm = QMessageBox.question(
             self,
-            "Install rtk hook",
+            "Enable rtk hook",
             (
-                f"Add the rtk PreToolUse Bash hook to:\n\n"
-                f"  {root}/.claude/settings.json\n\n"
-                f"Every Bash tool call in panes under this project ({proj_name}) "
-                f"will be auto-rewritten with rtk (60-90% token savings on common "
-                f"dev output like git diff, docker logs, npm ci, pytest, tsc).\n\n"
-                f"This only touches the project's .claude/settings.json — no user-level "
-                f"settings, no CLAUDE.md changes."
+                f"Enable the rtk PreToolUse Bash hook for cockpit panes.\n\n"
+                f"Every Bash tool call in spawned panes will be auto-rewritten "
+                f"with rtk (60-90% token savings on common dev output like git "
+                f"diff, docker logs, npm ci, pytest, tsc).\n\n"
+                f"This is a PERSONAL, central toggle — the hook is injected at "
+                f"spawn time via --settings, so NO project files are written and "
+                f"nothing lands in {proj_name}'s repo. Any legacy rtk hook a "
+                f"previous cockpit build wrote into this project's "
+                f".claude/settings.json is cleaned up."
             ),
             QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Ok,
