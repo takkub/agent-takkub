@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 87,
+  "module_count": 88,
   "modules": [
     {
       "module": "agent_takkub",
@@ -1034,6 +1034,13 @@
       ],
       "fan_in": 2,
       "fan_out": 1
+    },
+    {
+      "module": "agent_takkub.skill_scan",
+      "imports": [],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 0
     },
     {
       "module": "agent_takkub.spawn_engine",

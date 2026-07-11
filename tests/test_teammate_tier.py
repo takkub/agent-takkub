@@ -16,8 +16,8 @@ from agent_takkub.orchestrator import (
 
 
 def test_gate_roles_run_opus_high_with_sonnet_fallback():
-    """reviewer/critic gate what ships — max quality, degrade only to Sonnet."""
-    for role in ("reviewer", "critic"):
+    """reviewer/critic/maintainer gate what ships — max quality, degrade only to Sonnet."""
+    for role in ("reviewer", "critic", "maintainer"):
         model, effort, fallback = _teammate_tier(role)
         assert model == "claude-opus-4-8"
         assert effort == "high"
@@ -51,7 +51,15 @@ def test_only_intended_roles_are_overridden():
     """Guard against accidental tier creep — keep the override set explicit.
     codex/gemini use Opus/high so Claude substitutes have the same quality as
     reviewer/critic when the real binary is unavailable."""
-    assert set(_ROLE_MODEL_TIERS) == {"reviewer", "critic", "backend", "devops", "codex", "gemini"}
+    assert set(_ROLE_MODEL_TIERS) == {
+        "reviewer",
+        "critic",
+        "maintainer",
+        "backend",
+        "devops",
+        "codex",
+        "gemini",
+    }
 
 
 def test_codex_gemini_substitutes_use_opus_high():

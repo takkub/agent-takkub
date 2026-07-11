@@ -92,6 +92,10 @@ _DEFAULT_TEAMMATE_TIER: tuple[str, str, str] = (
 _ROLE_MODEL_TIERS: dict[str, tuple[str, str, str]] = {
     "reviewer": ("claude-opus-4-8", "high", "claude-sonnet-5"),
     "critic": ("claude-opus-4-8", "high", "claude-sonnet-5"),
+    # maintainer: full-system review + subtle-bug hunting on agent-takkub
+    # itself — a gate-style workload, not high-frequency impl — so it sits
+    # in the reviewer/critic tier rather than the backend/devops tier.
+    "maintainer": ("claude-opus-4-8", "high", "claude-sonnet-5"),
     "backend": ("claude-sonnet-5", "high", "claude-haiku-4-5"),
     "devops": ("claude-sonnet-5", "high", "claude-haiku-4-5"),
     # codex/gemini substitutes: when the real binary is unavailable, Claude
