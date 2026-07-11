@@ -188,7 +188,11 @@ def test_matrix_roles_covers_expected_builtin_roles():
     # never spawnable) — a hand-maintained copy of this tuple had drifted to
     # include them; codex/gemini/shell are an intentional exclusion (their
     # panes never load --mcp-config, see matrix_roles()'s own docstring).
-    assert set(matrix_roles()) == {
+    # Subset (not equality): matrix_roles() correctly appends live custom
+    # roles from ~/.takkub/custom-roles.json, so an equality assert breaks on
+    # any machine where the user has created one (e.g. `maintainer`).
+    got = set(matrix_roles())
+    builtin = {
         "lead",
         "frontend",
         "backend",
@@ -198,6 +202,9 @@ def test_matrix_roles_covers_expected_builtin_roles():
         "reviewer",
         "critic",
     }
+    assert builtin <= got
+    assert got.isdisjoint({"designer", "analyst", "security", "docs"})
+    assert got.isdisjoint({"codex", "gemini", "shell"})
 
 
 def test_matrix_roles_includes_registered_custom_role():
