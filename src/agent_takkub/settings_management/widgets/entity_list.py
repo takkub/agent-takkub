@@ -62,6 +62,12 @@ class EntityList(QWidget):
             self._filter_group = None
 
         self._list = QListWidget(self)
+        # Long descriptions ("cockpit-ui-style · project — The single design
+        # system…") used to spill past the list width and force a horizontal
+        # scrollbar that clipped trailing content like a BLOCKED tag (critic
+        # R2) — elide instead and keep the full text one hover away.
+        self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._list.setTextElideMode(Qt.TextElideMode.ElideRight)
         self._list.currentItemChanged.connect(self._on_current_changed)
         layout.addWidget(self._list, 1)
 
@@ -77,6 +83,7 @@ class EntityList(QWidget):
         for entity_id, text in rows:
             item = QListWidgetItem(text)
             item.setData(Qt.ItemDataRole.UserRole, entity_id)
+            item.setToolTip(text)
             self._list.addItem(item)
         self._list.blockSignals(False)
         self.select(previous)

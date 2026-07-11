@@ -1,4 +1,4 @@
-"""Resolve which Settings surface opens — ``legacy`` (default), ``new``, or
+"""Resolve which Settings surface opens — ``new`` (default), ``legacy``, or
 ``compare`` (both, dev-only) — from ``TAKKUB_SETTINGS_UI``.
 
 Single resolution point (SPEC.md "Coexistence") — every entry point (the
@@ -22,9 +22,9 @@ class SettingsUI(StrEnum):
 
 
 def resolve() -> SettingsUI:
-    """Read ``TAKKUB_SETTINGS_UI`` (case-insensitive). Unset/unknown -> LEGACY."""
+    """Read ``TAKKUB_SETTINGS_UI`` (case-insensitive). Unset/unknown -> NEW."""
     raw = (os.environ.get(_ENV_VAR) or "").strip().lower()
     try:
         return SettingsUI(raw)
     except ValueError:
-        return SettingsUI.LEGACY
+        return SettingsUI.NEW

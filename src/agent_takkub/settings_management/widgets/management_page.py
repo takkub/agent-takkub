@@ -118,7 +118,7 @@ class ManagementPage(QWidget):
         self.list.select(entity_id)
 
     def _ask_draft_guard(self) -> QMessageBox.StandardButton:
-        box = QMessageBox(self)
+        box = theme.themed_message_box(self)
         box.setWindowTitle("Unsaved changes")
         box.setText("มีการแก้ไขที่ยังไม่ได้บันทึก — Save ก่อนสลับ หรือทิ้งการแก้ไข?")
         box.setStandardButtons(

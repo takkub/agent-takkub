@@ -22,6 +22,7 @@ from PyQt6.QtWidgets import (
     QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QWidget,
 )
@@ -776,6 +777,44 @@ def secondary_button(text: str, parent: QWidget | None = None) -> QPushButton:
     btn.setObjectName("secondaryButton")
     btn.setCursor(Qt.CursorShape.PointingHandCursor)
     return btn
+
+
+def themed_message_box(parent: QWidget | None = None) -> QMessageBox:
+    """A ``QMessageBox`` that matches the gold/dark design system instead of
+    the OS's native light chrome (critic R1+R2: delete/draft-guard dialogs
+    were the only remaining native-light surface in the Settings window —
+    QSS on the window doesn't reach a QMessageBox's own top-level palette,
+    so it needs an explicit stylesheet of its own)."""
+    box = QMessageBox(parent)
+    box.setStyleSheet(f"""
+        QMessageBox {{
+            background: {GROUND_WINDOW};
+            color: {TEXT_PRIMARY};
+        }}
+        QMessageBox QLabel {{
+            color: {TEXT_PRIMARY};
+        }}
+        QMessageBox QPushButton {{
+            background: transparent;
+            border: 1px solid {BORDER_STRONG};
+            color: {TEXT_SECONDARY};
+            border-radius: {RADIUS_SM}px;
+            padding: 6px 16px;
+            min-width: 64px;
+        }}
+        QMessageBox QPushButton:hover {{
+            background: rgba(255,255,255,0.05);
+            color: {TEXT_PRIMARY};
+        }}
+        QMessageBox QPushButton:default {{
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 {GOLD_GRAD_TOP}, stop:1 {GOLD_GRAD_BOTTOM});
+            color: {GOLD_TEXT_ON};
+            border: none;
+            font-weight: 700;
+        }}
+    """)
+    return box
 
 
 def role_chip(label: str, color: str, parent: QWidget | None = None) -> QWidget:

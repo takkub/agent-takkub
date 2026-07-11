@@ -61,7 +61,7 @@ class DangerZone(QWidget):
         if self._plan is None or not self._plan.deletable:
             return
         effects = "\n".join(f"• {e}" for e in self._plan.effects)
-        box = QMessageBox(self)
+        box = theme.themed_message_box(self)
         box.setWindowTitle("Delete")
         box.setText(f"ลบ '{self._plan.entity_id}'?\n\nจะเกิดผลดังนี้:\n{effects}")
         box.setStandardButtons(QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes)
