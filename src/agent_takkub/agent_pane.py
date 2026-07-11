@@ -30,17 +30,12 @@ from PyQt6.QtWidgets import (
 )
 
 from . import cockpit_theme
+from .agent_pane_model import AgentPaneModel
 from .config import RUNTIME_DIR
 from .pty_session import PtySession
 from .roles import LEAD, USER_DRIVEN_ROLES, Role
 from .terminal_widget import TerminalWidget
-from .token_meter import (
-    effective_context_limit,
-    find_latest_session,
-    format_tokens,
-    read_last_usage,
-    usage_color,
-)
+from .token_meter import find_latest_session, read_last_usage
 
 # Pane state → dot color, using cockpit_theme state tokens (semantic — never
 # gold). "empty" is a neutral faint grey; the rest are the ok/warn/info/exit/
@@ -74,9 +69,12 @@ class AgentPane(QFrame):
     def __init__(self, role: Role, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.role = role
-        self.state: str = "empty"
-        self.last_note: str | None = None
-        self.session: PtySession | None = None
+        # Session + state bookkeeping lives in AgentPaneModel (issue #105
+        # Phase A) so it stays importable/testable without a display. The
+        # properties below proxy the legacy self.<field> reads/writes onto
+        # it, so every other module's `pane.session`/`pane.state`/... call
+        # sites are unchanged.
+        self.model = AgentPaneModel(role)
 
         # spinner + elapsed time bookkeeping for the working state
         self._spinner_idx = 0
@@ -91,42 +89,12 @@ class AgentPane(QFrame):
         # throttle pyte-state polling so chatty TUIs don't fire it 50+/sec
         self._idle_check_at: float = 0.0
 
-        # Token-meter bookkeeping. The pane locks on to the first JSONL
-        # session file that appears under the encoded project dir after
-        # spawn — if two panes share a cwd, the second pane locks on to
-        # whichever new file claude opens for it. Once locked, the path
-        # is held until the pane detaches.
-        self._spawn_ts: float = 0.0
-        self._session_cwd: str | None = None
-        # Isolated git worktree branch (issue #81), shown as a 🌿 chip in the
-        # header so the user can tell an isolated pane from a shared one. None =
-        # shared cwd (default). Set via set_worktree_branch() from the orchestrator.
-        self._worktree_branch: str | None = None
-        self._session_jsonl = None  # type: object | None
-        self._last_usage: dict | None = None
-        # Known context cap for the token badge. Teammates use per-model limits
-        # (200k). The Lead inherits the user's default model — on a Max plan the
-        # 1M-context variant — but the JSONL stamps the bare model name with no
-        # `[1m]` suffix so the limit can't be read back from it. Pin 1M for a
-        # Max Lead; the runtime guard in _refresh_token_meter self-heals a wrong
-        # tier guess once usage exceeds the base. (None = derive per-model.)
-        self._context_limit: int | None = None
-        if role.name == LEAD.name:
-            from .plan_tier import is_pro
-
-            self._context_limit = None if is_pro() else 1_000_000
         self._token_timer = QTimer(self)
         self._token_timer.setInterval(5_000)
         self._token_timer.timeout.connect(self._refresh_token_meter)
         # Apply off-thread token-meter reads back on the main (GUI) thread.
         self._tokenMeterReady.connect(self._apply_token_meter)
         self._token_refreshing = False
-        # Wall-clock timestamp of the most recent byte received from the
-        # PTY. The orchestrator's stuck-pane watchdog reads this to
-        # decide whether a "working" pane is silently hung (no output
-        # for STUCK_THRESHOLD_S → auto-recover via close + respawn with
-        # --continue).
-        self._last_output_ts: float = 0.0
 
         # Issue #35 — render-path coalescing.
         # Instead of forwarding every PTY chunk to xterm.js immediately (which
@@ -139,10 +107,6 @@ class AgentPane(QFrame):
         self._render_timer.setInterval(16)  # ≈60 fps
         self._render_timer.setSingleShot(True)
         self._render_timer.timeout.connect(self._flush_render_buf)
-
-        # Monotonically increasing byte counter used by the orchestrator's
-        # throughput watchdog to detect runaway-output panes.
-        self._tp_total_bytes: int = 0
 
         # Auto clear-view (teammate panes only, never Lead):
         #  - "done": clear scrollback ~5s after a done report, unless the
@@ -174,16 +138,9 @@ class AgentPane(QFrame):
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setStyleSheet(self._stylesheet())
 
-        # Tracks whether the next process exit is "expected" (user-triggered
-        # close / done / orchestrator.close). If False when exit fires, we
-        # treat it as a crash and surface the "exited" state.
-        self._expected_exit = False
-
-        # Monotonically incremented each time a new PtySession is attached.
-        # Captured inside the processExited lambda so stale exit signals from
-        # an old session (emitted after a replacement is already attached) are
-        # dropped rather than mutating the new session's state.
-        self._session_generation: int = 0
+        # _expected_exit / _session_generation live on self.model (see the
+        # property proxies below) — AgentPaneModel.__init__ already seeded
+        # their defaults.
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -306,6 +263,123 @@ class AgentPane(QFrame):
 
         root.addWidget(header)
         root.addWidget(self._stack, 1)
+
+    # ──────────────────────────────────────────────────────────────
+    # model proxies — session/state bookkeeping lives on self.model
+    # (AgentPaneModel, issue #105 Phase A); these keep every other module's
+    # `pane.session`/`pane.state`/... call sites unchanged.
+    # ──────────────────────────────────────────────────────────────
+    @property
+    def session(self) -> PtySession | None:
+        return self.model.session
+
+    @session.setter
+    def session(self, value: PtySession | None) -> None:
+        self.model.session = value
+
+    @property
+    def state(self) -> str:
+        return self.model.state
+
+    @state.setter
+    def state(self, value: str) -> None:
+        self.model.state = value
+
+    @property
+    def last_note(self) -> str | None:
+        return self.model.last_note
+
+    @last_note.setter
+    def last_note(self, value: str | None) -> None:
+        self.model.last_note = value
+
+    @property
+    def _worktree_branch(self) -> str | None:
+        return self.model.worktree_branch
+
+    @_worktree_branch.setter
+    def _worktree_branch(self, value: str | None) -> None:
+        self.model.worktree_branch = value
+
+    @property
+    def _expected_exit(self) -> bool:
+        return self.model.expected_exit
+
+    @_expected_exit.setter
+    def _expected_exit(self, value: bool) -> None:
+        self.model.expected_exit = value
+
+    @property
+    def _session_generation(self) -> int:
+        return self.model.session_generation
+
+    @_session_generation.setter
+    def _session_generation(self, value: int) -> None:
+        self.model.session_generation = value
+
+    @property
+    def _last_output_ts(self) -> float:
+        return self.model.last_output_ts
+
+    @_last_output_ts.setter
+    def _last_output_ts(self, value: float) -> None:
+        self.model.last_output_ts = value
+
+    @property
+    def _tp_total_bytes(self) -> int:
+        return self.model.tp_total_bytes
+
+    @_tp_total_bytes.setter
+    def _tp_total_bytes(self, value: int) -> None:
+        self.model.tp_total_bytes = value
+
+    @property
+    def _spawn_ts(self) -> float:
+        return self.model.spawn_ts
+
+    @_spawn_ts.setter
+    def _spawn_ts(self, value: float) -> None:
+        self.model.spawn_ts = value
+
+    @property
+    def _session_cwd(self) -> str | None:
+        return self.model.session_cwd
+
+    @_session_cwd.setter
+    def _session_cwd(self, value: str | None) -> None:
+        self.model.session_cwd = value
+
+    @property
+    def _session_jsonl(self):
+        return self.model.session_jsonl
+
+    @_session_jsonl.setter
+    def _session_jsonl(self, value) -> None:
+        self.model.session_jsonl = value
+
+    @property
+    def _last_usage(self) -> dict | None:
+        return self.model.last_usage
+
+    @_last_usage.setter
+    def _last_usage(self, value: dict | None) -> None:
+        self.model.last_usage = value
+
+    @property
+    def _context_limit(self) -> int | None:
+        return self.model.context_limit
+
+    @_context_limit.setter
+    def _context_limit(self, value: int | None) -> None:
+        self.model.context_limit = value
+
+    @property
+    def _transcript_path(self):
+        return self.model.transcript_path
+
+    @_transcript_path.setter
+    def _transcript_path(self, value) -> None:
+        self.model.transcript_path = value
 
     # ──────────────────────────────────────────────────────────────
     # state transitions
@@ -508,7 +582,7 @@ class AgentPane(QFrame):
 
         Re-renders the header so the 🌿 <branch> marker appears immediately.
         """
-        self._worktree_branch = branch or None
+        self.model.set_worktree_branch(branch)
         self._update_title_with_cwd(self._session_cwd)
 
     def _update_title_with_cwd(self, cwd: str | None) -> None:
@@ -596,12 +670,8 @@ class AgentPane(QFrame):
         # Distinguish:
         #   - expected: orchestrator.close() / done() called terminate first
         #   - unexpected: claude.exe died on its own (crash, OOM, user `/exit`)
-        if self.state == "done" or self._expected_exit:
-            self.set_state("empty", note=None)
-        else:
-            # show 'exited' state so the user can click Spawn to retry
-            note = f"claude exited unexpectedly (code {code})"
-            self.set_state("exited", note=note)
+        new_state, note = self.model.decide_exit_state(code)
+        self.set_state(new_state, note=note)
         self._expected_exit = False
         self.detach_session()
 
@@ -664,33 +734,21 @@ class AgentPane(QFrame):
         if usage is None:
             return
         self._last_usage = usage
-        prompt = usage["prompt"]
-        limit = effective_context_limit(usage["model"], prompt, base=self._context_limit)
-        pct = (prompt / limit) if limit else 0.0
-        color = usage_color(pct)
-        text = f"{format_tokens(prompt)}/{format_tokens(limit)} · {int(pct * 100)}%"
-        self._token_label.setText(text)
-        self._token_label.setStyleSheet(f"color: {color}; font-size: 11px;")
-        self._token_label.setToolTip(
-            f"model: {usage['model']}\n"
-            f"prompt: {usage['prompt']:,} tokens  (input {usage['input']:,} + "
-            f"cache write {usage['cache_creation']:,} + cache read {usage['cache_read']:,})\n"
-            f"output: {usage['output']:,} tokens\n"
-            f"context limit: {limit:,}"
-        )
+        badge = self.model.format_token_badge(usage)
+        self._token_label.setText(badge["text"])
+        self._token_label.setStyleSheet(f"color: {badge['color']}; font-size: 11px;")
+        self._token_label.setToolTip(badge["tooltip"])
         self._token_label.show()
 
     def current_usage(self) -> dict | None:
         """Return the last-known usage dict for status-bar aggregation, or
         None if this pane has no active session / hasn't logged a turn yet."""
-        if self.session is None:
-            return None
-        return self._last_usage
+        return self.model.current_usage()
 
     def mark_expected_exit(self) -> None:
         """Called by orchestrator.close()/done() before terminate so the next
         exit notification isn't treated as a crash."""
-        self._expected_exit = True
+        self.model.mark_expected_exit()
 
     # ──────────────────────────────────────────────────────────────
     # minimise / restore — hides the terminal body so the parent splitter

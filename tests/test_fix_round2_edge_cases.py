@@ -429,8 +429,13 @@ class TestAgentPaneOnExitGenerationGuard:
 
     def _make_pane(self, generation: int = 1):
         from agent_takkub.agent_pane import AgentPane
+        from agent_takkub.agent_pane_model import AgentPaneModel
+        from agent_takkub.roles import by_name
 
         pane = AgentPane.__new__(AgentPane)
+        # _session_generation/_expected_exit/state live on self.model
+        # (issue #105 Phase A) — seed a bare model too.
+        pane.model = AgentPaneModel(by_name("backend"))
         pane._session_generation = generation
         pane._expected_exit = False
         pane.state = "active"
