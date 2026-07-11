@@ -55,8 +55,12 @@ python scripts/migrate_vault_logs.py
 
 ## ของที่ extract ไว้แล้ว (ตัวอย่าง knowledge layer)
 
-- `02-Areas/architecture-decisions.md` — decision ของ cockpit
-- `02-Areas/bug-patterns.md` — bug pattern ที่ซ้ำ
-- `01-Projects/agent-takkub.md` — enriched + Decisions & Learnings
+ตัวอย่างต่อไปนี้เป็น path ภายใน Obsidian vault ภายนอก repository:
+
+```text
+02-Areas/architecture-decisions.md  — decision ของ cockpit
+02-Areas/bug-patterns.md            — bug pattern ที่ซ้ำ
+01-Projects/agent-takkub.md         — enriched + Decisions & Learnings
+```
 
 (gemini extract จาก brief/post-mortem เดิม 17 links — เป็น format ให้ distill layer เลียนแบบต่อ)

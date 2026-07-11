@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 124,
+  "module_count": 125,
   "modules": [
     {
       "module": "agent_takkub",
@@ -19,6 +19,13 @@
       "imported_by": [],
       "fan_in": 0,
       "fan_out": 1
+    },
+    {
+      "module": "agent_takkub._assets",
+      "imports": [],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 0
     },
     {
       "module": "agent_takkub._pty_backend",

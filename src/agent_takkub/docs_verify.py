@@ -55,6 +55,7 @@ _CODE_EXTENSIONS = (".py", ".md", ".json", ".yml", ".yaml", ".ts", ".tsx", ".js"
 _DEFAULT_EXCLUDE_GLOBS: tuple[str, ...] = (
     "docs/reviews/*",
     "docs/review/*",
+    "docs/audit/*",
     "docs/code-review/*",
     "docs/design-review/*",
     "docs/qa/*",
@@ -121,7 +122,7 @@ _PATH_PATTERN = re.compile(
 _SYMBOL_CLASS_METHOD = re.compile(r"`([A-Z][a-zA-Z0-9_]*)\.([a-z_][a-zA-Z0-9_]{3,})`")
 _SYMBOL_FUNCTION = re.compile(r"`([a-z_][a-zA-Z0-9_]{3,})\(\)`")
 
-_SKIP_SYMBOLS = frozenset({"i.e", "e.g", "etc"})
+_SKIP_SYMBOLS = frozenset({"i.e", "e.g", "etc", "isinstance"})
 
 
 def extract_path_refs(md_text: str, source: str = "") -> list[PathRef]:

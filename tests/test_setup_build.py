@@ -61,6 +61,18 @@ class TestStageAssets:
         setup_mod._stage_assets()
         assert not (setup_mod._ASSETS / "stale.txt").exists()
 
+    def test_preserves_package_marker_while_replacing_payload(self, fake_root: Path) -> None:
+        setup_mod._ASSETS.mkdir(parents=True)
+        marker = setup_mod._ASSETS / "__init__.py"
+        marker.write_text('"""marker"""\n', encoding="utf-8")
+
+        setup_mod._stage_assets()
+
+        assert marker.read_text(encoding="utf-8") == '"""marker"""\n'
+        setup_mod._clear_staged_asset_payload()
+        assert marker.is_file()
+        assert not (setup_mod._ASSETS / "CLAUDE.md").exists()
+
     def test_raises_if_claude_md_missing(self, fake_root: Path) -> None:
         (fake_root / "CLAUDE.md").unlink()
         with pytest.raises(RuntimeError, match=r"CLAUDE\.md"):

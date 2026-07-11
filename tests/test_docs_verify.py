@@ -309,6 +309,18 @@ def test_verify_docs_default_excludes_reviews_dir(tmp_path: Path) -> None:
     assert broken == []
 
 
+def test_verify_docs_default_excludes_audit_dir(tmp_path: Path) -> None:
+    audits_dir = tmp_path / "docs" / "audit"
+    audits_dir.mkdir(parents=True)
+    (audits_dir / "historical.md").write_text("See `src/removed_after_audit.py:1`.\n")
+    results = verify_docs(docs_dirs=(Path("docs"),), extras=(), repo_root=tmp_path)
+    assert [r for r in results if r.status != "ok"] == []
+
+
+def test_extract_symbol_refs_skips_python_builtin_isinstance() -> None:
+    assert extract_symbol_refs("Uses `isinstance()` for the runtime check.") == []
+
+
 def test_verify_docs_default_excludes_point_in_time_artifacts(tmp_path: Path) -> None:
     """Design plans/specs, code reviews and QA reports are excluded by default —
     they reference prototype/renamed/test/external symbols that are false drift."""

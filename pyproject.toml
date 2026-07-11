@@ -1,9 +1,9 @@
 [project]
 name = "agent-takkub"
-version = "1.0.21"
+version = "1.0.22"
 description = "Desktop cockpit for orchestrating Claude Code dev teammates on Windows"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
 dependencies = [
     # Pinned to the Qt 6.8 LTS series. Qt 6.11.0 shipped a Qt6Core.dll regression
     # that aborts the cockpit with 0xc0000409 (__fastfail) — a hard native crash
@@ -39,7 +39,7 @@ dev = [
 ]
 
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]

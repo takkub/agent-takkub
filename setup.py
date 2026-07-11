@@ -29,6 +29,7 @@ _ASSETS = _ROOT / "src" / "agent_takkub" / "_assets"
 # (unlike _ASSETS) — scan it too so a future app.js/static asset can't leak a
 # home-dir path into the wheel the same way the 1.0.13-1.0.17 leak did.
 _REMOTE = _ROOT / "src" / "agent_takkub" / "remote"
+_ASSET_PACKAGE_MARKER = "__init__.py"
 
 # Personal home-path leak guard: staged assets ship inside the wheel to every
 # installer, so a hardcoded `C:\Users\<me>\...` / `/Users/<me>/...` path would
@@ -66,9 +67,26 @@ def _assert_no_home_path_leak() -> None:
         )
 
 
+def _clear_staged_asset_payload() -> None:
+    """Remove generated assets while preserving the package marker.
+
+    Keeping ``_assets/__init__.py`` in the source tree makes setuptools treat
+    the runtime asset root as an explicit package instead of an ambiguous
+    importable data directory.  The generated CLAUDE/role/skill payload still
+    exists only for the duration of a build.
+    """
+    _ASSETS.mkdir(parents=True, exist_ok=True)
+    for path in _ASSETS.iterdir():
+        if path.name == _ASSET_PACKAGE_MARKER:
+            continue
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+
+
 def _stage_assets() -> None:
-    if _ASSETS.exists():
-        shutil.rmtree(_ASSETS)
+    _clear_staged_asset_payload()
     claude_md = _ROOT / "CLAUDE.md"
     agents_src = _ROOT / ".claude" / "agents"
     if not claude_md.is_file():
@@ -112,7 +130,7 @@ class build_py(_build_py):
         try:
             super().run()
         finally:
-            shutil.rmtree(_ASSETS, ignore_errors=True)
+            _clear_staged_asset_payload()
 
 
 setup(cmdclass={"build_py": build_py})

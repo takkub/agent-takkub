@@ -95,6 +95,19 @@ def redirect_stores(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     )
 
     fake = _FakeRegistry()
+    # ``plugins_repo.get()`` derives governability from the Claude install
+    # registry, not from ``plugin_installer.list_installed()``.  Point both
+    # sources at this fixture so the test cannot pass merely because the
+    # developer machine happens to have these marketplaces installed.
+    import json
+
+    cfg_dir = tmp_path / "claude-config"
+    (cfg_dir / "plugins").mkdir(parents=True)
+    (cfg_dir / "plugins" / "installed_plugins.json").write_text(
+        json.dumps({"plugins": {entry["id"]: {} for entry in fake.entries}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config, "default_claude_config_dir", lambda: cfg_dir)
     monkeypatch.setattr(plugin_installer, "list_installed", fake.list_installed)
     monkeypatch.setattr(plugin_installer, "list_marketplaces", fake.list_marketplaces)
     monkeypatch.setattr(plugin_installer, "install_by_id", fake.install_by_id)
@@ -226,7 +239,7 @@ class TestGovernableMarketplaces:
         import json
 
         cfg_dir = tmp_path / "claude-config"
-        (cfg_dir / "plugins").mkdir(parents=True)
+        (cfg_dir / "plugins").mkdir(parents=True, exist_ok=True)
         (cfg_dir / "plugins" / "installed_plugins.json").write_text(
             json.dumps(
                 {

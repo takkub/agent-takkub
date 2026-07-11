@@ -37,7 +37,7 @@ This builds the image from the repo's `Dockerfile` and mounts:
   `SETTINGS_HOME` touches, so it survives container restarts.
 
 The container exposes port `8899` (the remote-control HTTP server the PWA
-talks to — see `remote/config.py`'s `bind_port`). `cli_server`'s own TCP
+talks to — see `src/agent_takkub/remote/config.py`'s `bind_port`). `cli_server`'s own TCP
 protocol (the `takkub` CLI) binds loopback-only and is only reachable from
 inside the container.
 
@@ -62,7 +62,7 @@ its Lead automatically on every subsequent restart.
 ## Enabling remote-control
 
 Headless mode's only UI is the PWA. `RemoteControl.maybe_start()` reads
-`~/.takkub/remote.json` (`SETTINGS_HOME/remote.json` under
+`~/.takkub/remote.json` (`remote.json` under `SETTINGS_HOME`; with
 `AGENT_TAKKUB_HOME=/data`, i.e. `/data/remote.json`) same as the desktop
 build — `enabled: true` has to already be set for the HTTP server to open a
 socket at all. If you've never turned remote-control on from a desktop
