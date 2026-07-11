@@ -21,12 +21,31 @@ Wiring:
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QSize, Qt, pyqtSignal
+from PyQt6.QtCore import QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import QTabWidget, QVBoxLayout, QWidget
 
 from . import cockpit_theme
 from .agent_pane import AgentPane
+
+# Shared icon canvas for every pane-tab icon (unread-dot + role/status combo)
+# — QTabWidget.setIconSize is tab-bar-wide, so every icon painted onto a tab
+# must share one size or Qt rescales whichever was set last.
+_TAB_ICON_SIZE = QSize(16, 10)
+
+# Cluster B #1 (UI walkthrough 2026-07-11, "Per-pane-tab status dot") — a
+# Multi-mode fan-out spawns several teammate panes at once, and there was no
+# way to tell working/done apart without clicking into each tab. AgentPane
+# already tracks this as a plain `.state` attribute (empty/active/working/
+# done/exited/error, see agent_pane.py) but emits no change signal, and
+# agent_pane.py is out of scope for this task — so the tab dot is refreshed
+# by a light poll timer instead of a push signal.
+_TAB_STATUS_COLORS = {
+    "working": cockpit_theme.STATE_WARN_BRIGHT,  # yellow — actively running
+    "done": cockpit_theme.STATE_OK_BRIGHT,  # green — finished
+}
+_TAB_STATUS_DEFAULT = cockpit_theme.TEXT_FAINT  # idle/active/empty — grey
+_TAB_STATUS_POLL_MS = 600
 
 # Modern flat tab strip for the panes inside a project. Selected accent = gold
 # (the design system's one active accent — was indigo #6366f1).
@@ -105,6 +124,18 @@ class ProjectTab(QWidget):
 
         # Cached red-dot icon for the unread Lead indicator (built lazily).
         self._unread_icon: QIcon | None = None
+        # Cached role-color + status-color combo icons for teammate tabs,
+        # keyed by (role_color, status_color) so repeat states reuse one QIcon.
+        self._tab_status_icons: dict[tuple[str, str], QIcon] = {}
+        self.pane_tabs.setIconSize(_TAB_ICON_SIZE)
+
+        # Poll teammate pane `.state` and repaint each tab's status dot —
+        # see the _TAB_STATUS_* module comment for why this is a poll, not a
+        # signal. Cheap: skips entirely when there are no teammate tabs.
+        self._tab_status_timer = QTimer(self)
+        self._tab_status_timer.setInterval(_TAB_STATUS_POLL_MS)
+        self._tab_status_timer.timeout.connect(self._refresh_teammate_tab_icons)
+        self._tab_status_timer.start()
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -154,6 +185,9 @@ class ProjectTab(QWidget):
         idx = self.pane_tabs.addTab(pane, label)
         self.pane_tabs.setCurrentIndex(idx)
         self._apply_pane_keepalive()
+        # Paint the new tab's role/status dot immediately — don't make the
+        # user wait out the poll interval to see a just-spawned pane's dot.
+        self._refresh_teammate_tab_icons()
 
     def remove_teammate_tab(self, role_name: str) -> AgentPane | None:
         """Drop a teammate pane's tab and registry entry. Returns the pane so
@@ -214,17 +248,56 @@ class ProjectTab(QWidget):
         self._apply_pane_keepalive()
 
     # ------------------------------------------------------------------
+    # per-teammate-tab role color + status dot (UI walkthrough #43/#46)
+    # ------------------------------------------------------------------
+    def _tab_status_icon(self, role_color: str, status_color: str) -> QIcon:
+        """Two small dots side by side: role identity (left) + working/done/
+        idle state (right). Cached per color pair so the poll timer doesn't
+        rebuild a QPixmap every tick for panes whose state hasn't changed."""
+        key = (role_color, status_color)
+        icon = self._tab_status_icons.get(key)
+        if icon is not None:
+            return icon
+        pix = QPixmap(_TAB_ICON_SIZE)
+        pix.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(role_color))
+        p.drawEllipse(0, 1, 6, 6)
+        p.setBrush(QColor(status_color))
+        p.drawEllipse(9, 1, 6, 6)
+        p.end()
+        icon = QIcon(pix)
+        self._tab_status_icons[key] = icon
+        return icon
+
+    def _refresh_teammate_tab_icons(self) -> None:
+        """Repaint every teammate pane-tab's role/status dot from the live
+        pane state. Cheap no-op when there are no teammate tabs."""
+        if not self.teammate_panes:
+            return
+        for pane in self.teammate_panes.values():
+            idx = self.pane_tabs.indexOf(pane)
+            if idx < 0:
+                continue
+            role = getattr(pane, "role", None)
+            role_color = getattr(role, "color", None) or cockpit_theme.ROLE_COLOR_FALLBACK
+            status_color = _TAB_STATUS_COLORS.get(getattr(pane, "state", None), _TAB_STATUS_DEFAULT)
+            self.pane_tabs.setTabIcon(idx, self._tab_status_icon(role_color, status_color))
+
+    # ------------------------------------------------------------------
     # unread red dot on the Lead tab
     # ------------------------------------------------------------------
     def _dot_icon(self) -> QIcon:
         if self._unread_icon is None:
-            pix = QPixmap(10, 10)
+            pix = QPixmap(_TAB_ICON_SIZE)
             pix.fill(Qt.GlobalColor.transparent)
             p = QPainter(pix)
             p.setRenderHint(QPainter.RenderHint.Antialiasing)
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(QColor(cockpit_theme.STATE_ERROR))
-            p.drawEllipse(1, 1, 8, 8)
+            p.drawEllipse(3, 1, 8, 8)
             p.end()
             self._unread_icon = QIcon(pix)
         return self._unread_icon
@@ -239,7 +312,6 @@ class ProjectTab(QWidget):
             return
         if self._keepalive and self.pane_tabs.currentWidget() is self.lead_pane:
             return  # already on screen — nothing unseen
-        self.pane_tabs.setIconSize(QSize(10, 10))
         self.pane_tabs.setTabIcon(idx, self._dot_icon())
 
     def _clear_lead_unread(self) -> None:
