@@ -180,14 +180,6 @@ _PANE_ROWS = 36
 # live debugger session.
 CODEX_EARLY_CRASH_WINDOW_SEC = 90
 
-# #107: the generic inject_slash_command_when_ready default (45s) is sized
-# for a routine slash injection into an already-warm pane. A fresh Lead boot
-# competes with cold claude startup, boot-storm main-thread stalls, and the
-# auto-trust-modal poll — all observed to push past 45s under real timing —
-# so the bridge gets its own longer window (matches the gemini/codex
-# slow-boot extension precedent in lead_inbox._ready_wait_ms) instead of
-# racing the default and silently dropping.
-_REMOTE_BRIDGE_MAX_WAIT_MS = 90_000
 
 # Tier 2: tight re-samples of InSendMessageEx immediately before each native
 # ConPTY call to narrow the TOCTOU window between the early gate check and the
@@ -1376,6 +1368,16 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                     role_md_path.write_text(_existing_md + _appendix, encoding="utf-8")
                 role_md_file = str(role_md_path)
 
+        # LOW (codex full-system review 2026-07-11): validate an explicit
+        # resume_uuid BEFORE minting the per-pane capability token below.
+        # spawn_cwd is settled for both the Lead and teammate branches above,
+        # so this can reject a mismatched uuid without ever registering a
+        # token that a later early-return would leave orphaned in
+        # self._pane_tokens (the token is never revoked because it was never
+        # minted in the first place).
+        if resume_uuid and not _resume_uuid_matches_cwd(project_ns, resume_uuid, spawn_cwd):
+            return False, f"resume_uuid does not match cwd for {role_name}"
+
         try:
             claude = find_claude_executable()
         except RuntimeError as e:
@@ -1675,11 +1677,12 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         # from panes that were open *this run*) so a forged/mismatched uuid can
         # never bleed another project's conversation into this cwd, same
         # cwd-disambiguation guarantee the auto-resume path below relies on.
+        # (Actual validation now happens earlier, before pane-token minting —
+        # see the resume_uuid check above find_claude_executable(). By this
+        # point resume_uuid is already known-valid or None.)
         resumed = False
         _ekey_spawn = _exit_key(project_ns, role_name)
         if resume_uuid:
-            if not _resume_uuid_matches_cwd(project_ns, resume_uuid, spawn_cwd):
-                return False, f"resume_uuid does not match cwd for {role_name}"
             argv.extend(["--resume", resume_uuid])
             resumed = True
             _ps_new = self._ps(_ekey_spawn)

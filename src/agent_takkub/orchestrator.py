@@ -585,20 +585,10 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         # Lead draft-typing guard (#3, 2026-07-09 core-upgrade plan): tracks
         # whether each project's Lead pane input line currently holds
         # unsubmitted user text, so _pump_lead_notify / _flush_pending_lead_cc
-        # / inject_slash_command_when_ready never paste an engine message on
-        # top of a draft the user hasn't submitted yet. Fed by _on_pane_input
-        # via LeadInboxMixin._track_lead_draft_input; see lead_inbox.py.
+        # never paste an engine message on top of a draft the user hasn't
+        # submitted yet. Fed by _on_pane_input via
+        # LeadInboxMixin._track_lead_draft_input; see lead_inbox.py.
         self._lead_draft_state: dict[str, LeadDraftState] = {}
-
-        # Per-(project, role) in-flight lock for inject_slash_command_when_ready
-        # (#113): keyed f"{project_ns}::{role_name}" -> present while a call's
-        # poll-through-delivery is in flight for that pane. A second call for
-        # the same key (e.g. the /remote-control auto-bridge and the ↻ Resume
-        # button both targeting the Lead pane) queues in _slash_inject_queue
-        # instead of racing a concurrent write+Enter into the same pane — see
-        # LeadInboxMixin.inject_slash_command_when_ready.
-        self._slash_inject_busy: set[str] = set()
-        self._slash_inject_queue: dict[str, collections.deque] = {}
 
         # Per-cockpit-run capability token. Injected only into the Lead pane
         # env (TAKKUB_LEAD_TOKEN) so the Lead takkub CLI can authenticate

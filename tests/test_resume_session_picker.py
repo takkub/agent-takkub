@@ -319,6 +319,10 @@ class TestSpawnResumeUuid:
         argv, result = _spawn_capture(orch, "backend", str(cwd), resume_uuid="forged-uuid")
         assert result[0] is False
         assert argv == []  # native session.spawn() never reached
+        # LOW (codex full-system review 2026-07-11): a rejected explicit
+        # resume must never leave a pane capability token registered — the
+        # engine now validates resume_uuid before minting one at all.
+        assert not orch._pane_tokens
 
     def test_resume_uuid_bypasses_5min_window_check(
         self, orch: Orchestrator, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch

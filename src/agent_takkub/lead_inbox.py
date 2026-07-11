@@ -12,10 +12,9 @@ Also houses the Lead draft-typing guard (issue #3, 2026-07-09 core-upgrade
 plan): `_track_lead_draft_input` / `_lead_can_accept_injection` /
 `_lead_draft_hold_expired`, backed by the pure state machine in
 `lead_draft_state.py`. `Orchestrator._on_pane_input` feeds every Lead-pane
-keystroke into the tracker; `_pump_lead_notify`, `_flush_pending_lead_cc`, and
-`inject_slash_command_when_ready` all gate through the same
-`_lead_can_accept_injection()` so a done-notice/CC/slash-command paste never
-lands on top of the user's unsubmitted draft.
+keystroke into the tracker; `_pump_lead_notify` and `_flush_pending_lead_cc`
+gate through the same `_lead_can_accept_injection()` so a done-notice/CC
+paste never lands on top of the user's unsubmitted draft.
 
 Layer rule (enforced by import-linter "lead-inbox-layer" contract):
   lead_inbox MUST NOT import orchestrator / main_window / app / cli.
@@ -296,13 +295,12 @@ class LeadInboxMixin:
     #
     # `is_at_ready_prompt()` only tells us the pane is idle — it can't see a
     # user draft sitting unsubmitted in the input line. Without this guard, a
-    # done-notice/CC/slash-command paste lands on top of that draft and the
-    # delayed Enter submits both together, silently dragging the user's
-    # half-typed text along with it. `_track_lead_draft_input` is fed every
-    # byte the Lead pane's terminal emits (wired from
-    # `Orchestrator._on_pane_input`); `_lead_can_accept_injection` is the
-    # single gate `_pump_lead_notify`, `_flush_pending_lead_cc`, and
-    # `inject_slash_command_when_ready` all share.
+    # done-notice/CC paste lands on top of that draft and the delayed Enter
+    # submits both together, silently dragging the user's half-typed text
+    # along with it. `_track_lead_draft_input` is fed every byte the Lead
+    # pane's terminal emits (wired from `Orchestrator._on_pane_input`);
+    # `_lead_can_accept_injection` is the single gate `_pump_lead_notify` and
+    # `_flush_pending_lead_cc` share.
     # ------------------------------------------------------------------
 
     def _track_lead_draft_input(self, project_ns: str, data: bytes) -> None:
@@ -327,149 +325,6 @@ class LeadInboxMixin:
     # ------------------------------------------------------------------
     # Delivery helpers
     # ------------------------------------------------------------------
-
-    def inject_slash_command_when_ready(
-        self,
-        role_name: str,
-        command: str,
-        max_wait_ms: int = 45_000,
-        project: str | None = None,
-        on_delivered=None,
-        on_dropped=None,
-    ) -> None:
-        """Type a Claude Code slash command (e.g. `/remote-control`) into a
-        pane as soon as it reaches the idle prompt. Unlike `_send_when_ready`,
-        this does *not* flip the pane to the `working` state — slash commands
-        are housekeeping, not tasks. If the pane never becomes ready within
-        `max_wait_ms`, or its session dies mid-poll, the command is dropped —
-        every drop path now logs `auto_slash_command_dropped` with a reason
-        (#4/#107: these used to be silent, which is why a fresh-boot Lead
-        that never reached ready in time lost `/remote-control` with zero
-        trace in events.log). `on_delivered`/`on_dropped(reason)` let a
-        caller react (e.g. retry later) instead of only reading the log.
-
-        Every command routed here is self-contained and gets the delayed
-        Enter that submits it automatically. Calls are serialised per
-        (project, role): a second call for a pane already in flight is queued —
-        not dropped — and starts its own fresh poll only once the first call's
-        delivery has fully settled (write + the delayed submitting Enter), so
-        two concurrent injections can't interleave payload+Enter into the same
-        pane.
-
-        NOTE (2026-07-10): the only production callers of this — the
-        `/remote-control` auto-bridge and the ↻ Resume button — were removed
-        (they raced claude's `/resume` picker and cancelled it). This method is
-        kept as generic slash-command-injection infrastructure but currently
-        has no callers.
-        """
-        project_ns = self._resolve_project(project)
-        lock_key = f"{project_ns}::{role_name}"
-        if not hasattr(self, "_slash_inject_busy"):
-            self._slash_inject_busy = set()
-        if not hasattr(self, "_slash_inject_queue"):
-            self._slash_inject_queue = {}
-        busy = self._slash_inject_busy
-        queue = self._slash_inject_queue
-
-        if lock_key in busy:
-            queue.setdefault(lock_key, collections.deque()).append(
-                (role_name, command, max_wait_ms, project, on_delivered, on_dropped)
-            )
-            return
-        busy.add(lock_key)
-
-        def _release_and_advance() -> None:
-            busy.discard(lock_key)
-            pending = queue.get(lock_key)
-            if not pending:
-                return
-            next_args = pending.popleft()
-            (
-                next_role,
-                next_command,
-                next_max_wait_ms,
-                next_project,
-                next_on_delivered,
-                next_on_dropped,
-            ) = next_args
-            self.inject_slash_command_when_ready(
-                next_role,
-                next_command,
-                max_wait_ms=next_max_wait_ms,
-                project=next_project,
-                on_delivered=next_on_delivered,
-                on_dropped=next_on_dropped,
-            )
-
-        pane = self._project_panes(project).get(role_name)
-        if pane is None:
-            _log_event(
-                "auto_slash_command_dropped", role=role_name, command=command, reason="pane_missing"
-            )
-            if on_dropped is not None:
-                on_dropped("pane_missing")
-            _release_and_advance()
-            return
-        elapsed = [0]
-        sent = [False]
-        last_wait_reason = ["not_ready"]
-
-        def _drop(reason: str) -> None:
-            sent[0] = True
-            _log_event("auto_slash_command_dropped", role=role_name, command=command, reason=reason)
-            if on_dropped is not None:
-                on_dropped(reason)
-            _release_and_advance()
-
-        def _deliver() -> None:
-            if sent[0]:
-                return
-            sent[0] = True
-            if pane.session is None or not pane.session.is_alive:
-                _log_event(
-                    "auto_slash_command_dropped",
-                    role=role_name,
-                    command=command,
-                    reason="session_dead",
-                )
-                if on_dropped is not None:
-                    on_dropped("session_dead")
-                _release_and_advance()
-                return
-            _slash_sess = pane.session
-            payload = _paste_payload(command)
-            _slash_sess.write(payload)
-            _log_event("auto_slash_command", role=role_name, command=command)
-            delay_ms = _enter_delay_ms(payload)
-            _orch_attr("_delayed_enter", _delayed_enter)(pane, _slash_sess, delay_ms)
-            if on_delivered is not None:
-                on_delivered()
-            # Hold the lock through the delayed submitting Enter, not just
-            # the synchronous paste write — a queued call must not start its
-            # own poll until this command has actually been submitted.
-            QTimer.singleShot(delay_ms, _release_and_advance)
-
-        def _check() -> None:
-            if sent[0]:
-                return
-            if pane.session is None or not pane.session.is_alive:
-                _drop("session_dead")
-                return
-            # Same draft guard as _pump_lead_notify/_flush_pending_lead_cc —
-            # only meaningful for the Lead pane (teammates have no draft
-            # tracker fed for them, so the check is a no-op there).
-            ready = pane.session.is_at_ready_prompt()
-            if ready and (role_name != LEAD.name or self._lead_can_accept_injection(project_ns)):
-                _deliver()
-                return
-            last_wait_reason[0] = "not_ready" if not ready else "draft_blocked"
-            elapsed[0] += 500
-            if elapsed[0] >= max_wait_ms:
-                _drop(f"timeout_{last_wait_reason[0]}")
-                return
-            QTimer.singleShot(500, _check)
-
-        QTimer.singleShot(1_500, _check)
 
     def inject_lead_prompt(self, prompt: str, project: str | None = None) -> bool:
         """Paste a prompt into a project's Lead pane and submit it.

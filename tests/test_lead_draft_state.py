@@ -1,9 +1,8 @@
 """Tests for the pure Lead draft-typing state machine (issue #3).
 
 Scope: byte-level transitions only — no Qt, no Orchestrator. Integration
-(gate wired into _pump_lead_notify / _flush_pending_lead_cc /
-inject_slash_command_when_ready / _on_pane_input) is covered by
-test_lead_draft_guard.py.
+(gate wired into _pump_lead_notify / _flush_pending_lead_cc / _on_pane_input)
+is covered by test_lead_draft_guard.py.
 """
 
 from __future__ import annotations

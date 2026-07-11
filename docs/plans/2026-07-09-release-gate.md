@@ -179,7 +179,7 @@ restart cockpit at this HEAD.
 ## #113 — `/remote-control` bridge races ↻ Resume button, no lock (2026-07-09, HEAD = `2fd4dec`)
 
 Gate for `2fd4dec` (per-`(project, role)` in-flight lock on `inject_slash_command_when_ready` —
-`lead_inbox.py` + `orchestrator.py`, new tests in `tests/test_slash_inject_serialize.py`).
+`lead_inbox.py` + `orchestrator.py`, new tests in tests/test_slash_inject_serialize.py (removed 2026-07-11, injector deleted)).
 
 ### 1. Full pytest suite
 
@@ -196,14 +196,14 @@ tests=3382 failures=2 errors=0 skipped=2 time=163.286s
 - `TestRolePluginPolicy::test_design_roles_get_ui_ux_pro_max`
 
 Root cause unchanged (sandbox has no `~/.claude/plugins/cache` populated → env-dependent, not a
-code regression). Test count rose 3374 → 3382 (+8, from `tests/test_slash_inject_serialize.py`'s
-new #113 tests). No other failures, 0 regressions.
+code regression). Test count rose 3374 → 3382 (+8, from tests/test_slash_inject_serialize.py's
+new #113 tests; file removed 2026-07-11 with the injector). No other failures, 0 regressions.
 
 ### 2. Falsifiability check — revert fix, prove the race reproduces; restore, prove it serializes
 
 Reverted `lead_inbox.py` + `orchestrator.py` to the pre-fix parent commit (`2fd4dec^` = `ae2d845`)
 via `git checkout ae2d845 -- src/agent_takkub/lead_inbox.py src/agent_takkub/orchestrator.py`
-(kept the new `tests/test_slash_inject_serialize.py` at HEAD — same file, unrevert), then ran the
+(kept the new tests/test_slash_inject_serialize.py (removed 2026-07-11) at HEAD — same file, unrevert), then ran the
 new #113 regression tests against that pre-fix code:
 
 ```
@@ -337,7 +337,7 @@ every prior gate in this file also records. **0 code regressions.**
 
 - tests/test_resume_button_feedback.py (removed 2026-07-10) (rewritten for the picker→close→spawn flow),
   `tests/test_resume_session_picker.py` (+3 new `TestCoreListRecentLeadSessions` cases for the core
-  scanner), `tests/test_slash_inject_serialize.py` (flag tests removed, serialization + default
+  scanner), tests/test_slash_inject_serialize.py (removed 2026-07-11) (flag tests removed, serialization + default
   auto-Enter guard kept) — **37/37 green.**
 - `rtk lint-imports` — **18/18 contracts KEPT** (incl. `remote-bolt-on-isolation`); `depgraph.json`
   refreshed by the pre-commit hook (new edges: `user_actions → chatlog_scanner`,

@@ -10,8 +10,6 @@ Covers the engine-side wiring on top of the pure state machine
   - _pump_lead_notify holds delivery while a draft is pending, delivers once
     it clears, and spills to the durable queue once the hold times out.
   - _flush_pending_lead_cc holds while a draft is pending.
-  - inject_slash_command_when_ready holds for the Lead role but is unaffected
-    for non-Lead roles.
 """
 
 from __future__ import annotations
@@ -231,62 +229,3 @@ class TestFlushPendingLeadCcDraftGuard:
 
         assert lead.session.write.called
         assert TEST_PROJECT not in orch._pending_lead_cc
-
-
-class TestInjectSlashCommandDraftGuard:
-    def test_holds_for_lead_role_while_draft_pending(self, orch: Orchestrator) -> None:
-        lead = _make_pane("lead", ready=True)
-        orch._panes_by_project[TEST_PROJECT] = {"lead": lead}
-        orch._lead_draft_state[TEST_PROJECT] = LeadDraftState(
-            state=NONEMPTY, draft_len=3, pending_since=time.time()
-        )
-
-        timers: list[tuple[int, object]] = []
-
-        def capture(ms, fn):
-            timers.append((ms, fn))
-
-        with patch("agent_takkub.orchestrator.QTimer.singleShot", side_effect=capture):
-            orch.inject_slash_command_when_ready("lead", "/remote-control", project=TEST_PROJECT)
-            # Fire the initial 1_500ms scheduling timer to run the first _check().
-            assert timers
-            timers[0][1]()
-
-        lead.session.write.assert_not_called()
-
-    def test_delivers_for_lead_role_once_draft_clears(self, orch: Orchestrator) -> None:
-        lead = _make_pane("lead", ready=True)
-        orch._panes_by_project[TEST_PROJECT] = {"lead": lead}
-
-        timers: list[tuple[int, object]] = []
-
-        def capture(ms, fn):
-            timers.append((ms, fn))
-
-        with patch("agent_takkub.orchestrator.QTimer.singleShot", side_effect=capture):
-            orch.inject_slash_command_when_ready("lead", "/remote-control", project=TEST_PROJECT)
-            timers[0][1]()
-
-        assert lead.session.write.called
-
-    def test_guard_does_not_affect_non_lead_roles(self, orch: Orchestrator) -> None:
-        """A non-Lead pane has no draft tracker fed for it — the guard must
-        be a no-op there so teammate slash-injection is unaffected."""
-        teammate = _make_pane("backend", ready=True)
-        orch._panes_by_project[TEST_PROJECT] = {"backend": teammate}
-        # Even if some stale/foreign draft state exists under this project
-        # namespace, a non-Lead role_name must bypass the check entirely.
-        orch._lead_draft_state[TEST_PROJECT] = LeadDraftState(
-            state=NONEMPTY, draft_len=3, pending_since=time.time()
-        )
-
-        timers: list[tuple[int, object]] = []
-
-        def capture(ms, fn):
-            timers.append((ms, fn))
-
-        with patch("agent_takkub.orchestrator.QTimer.singleShot", side_effect=capture):
-            orch.inject_slash_command_when_ready("backend", "/some-command", project=TEST_PROJECT)
-            timers[0][1]()
-
-        assert teammate.session.write.called
