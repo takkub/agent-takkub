@@ -988,6 +988,26 @@ class MainWindow(
             roots = _allowed_project_roots(project_name)
             if not roots:
                 return
+            # First migrate any legacy cockpit-created skills (real dirs that
+            # dirty the repo) into the central store; then repair the links so
+            # every central skill (migrated or created-in-a-prior-session) is
+            # discoverable from cwd. Migration is safe by construction — only
+            # git-untracked real dirs move (see skill_scan docstring).
+            migrations = skill_scan.migrate_legacy_project_skills(roots[0], project_name)
+            moved = [m for m in migrations if m.action == "migrated"]
+            errored = [m for m in migrations if m.action == "error"]
+            if moved:
+                self._status.showMessage(
+                    f"↪ migrated {len(moved)} legacy skill(s) to central store: "
+                    f"{', '.join(m.name for m in moved)}",
+                    8_000,
+                )
+            if errored:
+                self._status.showMessage(
+                    f"⚠ skill migrate: {len(errored)} issue(s) — "
+                    f"{errored[0].name}: {errored[0].detail}",
+                    8_000,
+                )
             errors = skill_scan.ensure_project_skill_links(roots[0], project_name)
             if errors:
                 self._status.showMessage(

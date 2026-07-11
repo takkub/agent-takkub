@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -24,6 +25,10 @@ from . import config
 from .worktree_manager import _make_link, _remove_link
 
 _log = logging.getLogger(__name__)
+
+# `git ls-files` here is local + fast; bound it so a wedged git can never
+# freeze the project-open path (the migration runs on the Qt main thread).
+_GIT_LS_TIMEOUT_S = 15
 
 # Same charset as `custom_roles.validate_role_name`/`config.validate_name`
 # (a-z0-9, -, _, 1-64 chars, must start alnum) — a skill name becomes a
@@ -162,6 +167,163 @@ def ensure_project_skill_links(project_root: str | Path, project_ns: str) -> lis
         if err:
             errors.append(f"{skill_dir.name}: {err}")
     return errors
+
+
+def _is_reparse_point(p: Path) -> bool:
+    """True when `p` is a symlink OR a Windows junction (a directory reparse
+    point that `Path.is_symlink()` does NOT flag). Used to tell an already-
+    migrated/linked skill (leave it alone) from a real on-disk directory (a
+    migration candidate). Never raises."""
+    try:
+        if p.is_symlink():
+            return True
+    except OSError:
+        return False
+    # A junction resolves to somewhere other than `<realpath(parent)>/<name>`;
+    # a real directory resolves to exactly that. Comparing against the parent's
+    # realpath keeps a link *above* `p` from producing a false positive.
+    try:
+        real = os.path.realpath(str(p))
+        expected = os.path.join(os.path.realpath(str(p.parent)), p.name)
+    except OSError:
+        return False
+    return os.path.normcase(real) != os.path.normcase(expected)
+
+
+def _git_tracked_skill_names(project_root: Path) -> set[str] | None:
+    """Names of skills under `<project_root>/.claude/skills/` that git tracks
+    (i.e. the user committed them → user-owned, never migrate).
+
+    Returns None when `project_root` is not a git work tree (or git is
+    unavailable) — the caller treats that as "cannot prove ownership, leave
+    everything alone". An empty set means "git repo, but nothing tracked".
+    Never raises."""
+    try:
+        res = subprocess.run(
+            ["git", "-C", str(project_root), "ls-files", "-z", "--", ".claude/skills"],
+            capture_output=True,
+            timeout=_GIT_LS_TIMEOUT_S,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if res.returncode != 0:  # 128 = not a git repository
+        return None
+    out = res.stdout.decode("utf-8", errors="replace")
+    names: set[str] = set()
+    for entry in out.split("\0"):
+        entry = entry.strip()
+        if not entry:
+            continue
+        # git always emits forward slashes: ".claude/skills/<name>/SKILL.md".
+        parts = entry.split("/")
+        if len(parts) >= 3 and parts[0] == ".claude" and parts[1] == "skills":
+            names.add(parts[2])
+    return names
+
+
+@dataclass(frozen=True)
+class SkillMigration:
+    """One entry in a legacy-skill migration report (see
+    `migrate_legacy_project_skills`). `action` is one of: ``migrated`` /
+    ``would-migrate`` (dry-run) / ``skipped-tracked`` / ``skipped-linked`` /
+    ``skipped-conflict`` / ``skipped-non-git`` / ``error``."""
+
+    name: str
+    action: str
+    detail: str = ""
+
+
+def _migrate_one_skill(
+    src_dir: Path, central: Path, project_root: Path, project_ns: str, name: str
+) -> str | None:
+    """Move one real skill dir `src_dir` → `central`, then junction/symlink it
+    back to `src_dir`'s path. Returns None on success, an error string
+    otherwise. On a link failure AFTER the move, the central dir is moved back
+    to the project so the skill is never lost."""
+    link_path = project_root / ".claude" / "skills" / name
+    try:
+        central.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src_dir), str(central))
+    except OSError as e:
+        return f"move failed: {e}"
+    err = _link_skill_into_project(project_root, project_ns, name)
+    if err:
+        # Roll back so the skill stays discoverable at its original path.
+        try:
+            _remove_link(link_path)
+            if not link_path.exists() and central.is_dir():
+                shutil.move(str(central), str(link_path))
+        except OSError:
+            pass
+        return f"link failed after move (rolled back): {err}"
+    return None
+
+
+def migrate_legacy_project_skills(
+    project_root: str | Path, project_ns: str, *, dry_run: bool = False
+) -> list[SkillMigration]:
+    """One-time (idempotent) migration of legacy cockpit-created skills sitting
+    as REAL directories under `<project_root>/.claude/skills/` into the central
+    `project_skills_dir(project_ns)`, leaving a junction/symlink behind.
+
+    Safe by construction — only a skill that is BOTH:
+      * a real directory (not already a junction/symlink to central), AND
+      * git-UNtracked (cockpit wrote it; the user never committed it)
+    is moved. A git-tracked skill is the user's own committed skill and is left
+    untouched; a project that is not a git repo is skipped entirely (ownership
+    can't be proven). A name that already exists centrally is skipped (no
+    clobber). Nothing is ever deleted.
+
+    `dry_run=True` reports what WOULD move (`action="would-migrate"`) without
+    touching the filesystem. Returns one `SkillMigration` per skill directory
+    inspected (skips are reported too, for a clear log); never raises.
+    """
+    project_root = Path(project_root)
+    skills_dir = project_root / ".claude" / "skills"
+    if not skills_dir.is_dir():
+        return []
+    try:
+        central_base = config.project_skills_dir(project_ns)
+    except ValueError:
+        return []
+
+    tracked = _git_tracked_skill_names(project_root)
+    records: list[SkillMigration] = []
+    for child in sorted(skills_dir.iterdir()):
+        name = child.name
+        if _is_reparse_point(child):
+            records.append(SkillMigration(name, "skipped-linked", "already a link"))
+            continue
+        if not child.is_dir():
+            continue  # flat `<name>.md` legacy layout — leave as-is
+        if tracked is None:
+            records.append(
+                SkillMigration(
+                    name,
+                    "skipped-non-git",
+                    "not a git repo — cannot prove ownership, left in place",
+                )
+            )
+            continue
+        if name in tracked:
+            records.append(SkillMigration(name, "skipped-tracked", "git-tracked (user-owned)"))
+            continue
+        central = central_base / name
+        if central.exists():
+            records.append(
+                SkillMigration(name, "skipped-conflict", f"central already has {central}")
+            )
+            continue
+        if dry_run:
+            records.append(SkillMigration(name, "would-migrate", f"→ {central}"))
+            continue
+        err = _migrate_one_skill(child, central, project_root, project_ns, name)
+        if err:
+            records.append(SkillMigration(name, "error", err))
+        else:
+            records.append(SkillMigration(name, "migrated", f"→ {central}"))
+            _log.info("migrated legacy skill %r → central (%s)", name, central)
+    return records
 
 
 def create_skill(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ from agent_takkub.skill_scan import (
     delete_skill,
     ensure_project_skill_links,
     is_writable_skill,
+    migrate_legacy_project_skills,
     scan_skills,
     validate_skill_name,
 )
@@ -330,6 +332,136 @@ class TestCentralSkills:
         ok, err = create_skill(tmp_path, "legacy", "d", "b")
         assert ok, err
         assert (tmp_path / ".claude" / "skills" / "legacy" / "SKILL.md").is_file()
+
+
+def _git_init(path: Path) -> None:
+    """Init a throwaway git repo at `path` with a committable identity."""
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "-C", str(path), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(path), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(path), "config", "user.name", "t"], check=True)
+
+
+def _git_commit_all(path: Path, msg: str = "add") -> None:
+    subprocess.run(["git", "-C", str(path), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(path), "commit", "-q", "-m", msg], check=True)
+
+
+class TestLegacySkillMigration:
+    def test_untracked_skill_migrates_to_central_and_links_back(
+        self, tmp_path: Path, central_home: Path
+    ) -> None:
+        project = tmp_path / "proj"
+        _git_init(project)
+        # A legacy cockpit-created skill: a real dir, never committed.
+        _write_skill(project, "legacy-one", "cockpit made this")
+
+        records = migrate_legacy_project_skills(project, "myproj")
+
+        assert [(r.name, r.action) for r in records] == [("legacy-one", "migrated")]
+        # Real file now lives centrally…
+        central_md = central_home / "myproj" / "legacy-one" / "SKILL.md"
+        assert central_md.is_file()
+        # …and the project path is a link (junction/symlink) resolving to it.
+        link = project / ".claude" / "skills" / "legacy-one"
+        assert skill_scan._is_reparse_point(link)
+        assert (link / "SKILL.md").read_text(encoding="utf-8") == central_md.read_text(
+            encoding="utf-8"
+        )
+        # Still discoverable from cwd after migration.
+        assert "legacy-one" in {s.name for s in scan_skills(project)}
+
+    def test_tracked_skill_is_left_untouched(self, tmp_path: Path, central_home: Path) -> None:
+        project = tmp_path / "proj"
+        _git_init(project)
+        _write_skill(project, "user-owned", "committed by the user")
+        _git_commit_all(project)  # now git-tracked → user-owned
+
+        records = migrate_legacy_project_skills(project, "myproj")
+
+        assert [(r.name, r.action) for r in records] == [("user-owned", "skipped-tracked")]
+        # Real dir stays put; nothing moved centrally.
+        real = project / ".claude" / "skills" / "user-owned"
+        assert not skill_scan._is_reparse_point(real)
+        assert (real / "SKILL.md").is_file()
+        assert not (central_home / "myproj" / "user-owned").exists()
+
+    def test_non_git_project_is_skipped(self, tmp_path: Path, central_home: Path) -> None:
+        project = tmp_path / "proj"  # NOT a git repo
+        _write_skill(project, "orphan", "no git to prove ownership")
+
+        records = migrate_legacy_project_skills(project, "myproj")
+
+        assert [(r.name, r.action) for r in records] == [("orphan", "skipped-non-git")]
+        assert (project / ".claude" / "skills" / "orphan" / "SKILL.md").is_file()
+        assert not (central_home / "myproj" / "orphan").exists()
+
+    def test_dry_run_changes_nothing(self, tmp_path: Path, central_home: Path) -> None:
+        project = tmp_path / "proj"
+        _git_init(project)
+        _write_skill(project, "legacy-two", "d")
+
+        records = migrate_legacy_project_skills(project, "myproj", dry_run=True)
+
+        assert [(r.name, r.action) for r in records] == [("legacy-two", "would-migrate")]
+        # Filesystem untouched: still a real dir, nothing central.
+        real = project / ".claude" / "skills" / "legacy-two"
+        assert not skill_scan._is_reparse_point(real)
+        assert not (central_home / "myproj" / "legacy-two").exists()
+
+    def test_idempotent_second_run_is_all_skipped_linked(
+        self, tmp_path: Path, central_home: Path
+    ) -> None:
+        project = tmp_path / "proj"
+        _git_init(project)
+        _write_skill(project, "again", "d")
+
+        first = migrate_legacy_project_skills(project, "myproj")
+        assert [r.action for r in first] == ["migrated"]
+        # Second pass sees the junction and leaves it alone.
+        second = migrate_legacy_project_skills(project, "myproj")
+        assert [r.action for r in second] == ["skipped-linked"]
+        # And no data was lost / duplicated.
+        assert (central_home / "myproj" / "again" / "SKILL.md").is_file()
+
+    def test_central_name_conflict_is_skipped(self, tmp_path: Path, central_home: Path) -> None:
+        project = tmp_path / "proj"
+        _git_init(project)
+        _write_skill(project, "clash", "project real dir")
+        # A central skill of the same name already exists (created elsewhere).
+        (central_home / "myproj" / "clash").mkdir(parents=True)
+        (central_home / "myproj" / "clash" / "SKILL.md").write_text(
+            "---\nname: clash\ndescription: central\n---\n", encoding="utf-8"
+        )
+
+        records = migrate_legacy_project_skills(project, "myproj")
+
+        assert [(r.name, r.action) for r in records] == [("clash", "skipped-conflict")]
+        # Neither side was clobbered.
+        assert (project / ".claude" / "skills" / "clash" / "SKILL.md").read_text(
+            encoding="utf-8"
+        ).count("project real dir") == 1
+        assert "central" in (central_home / "myproj" / "clash" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+
+    def test_no_skills_dir_returns_empty(self, tmp_path: Path, central_home: Path) -> None:
+        project = tmp_path / "proj"
+        _git_init(project)
+        assert migrate_legacy_project_skills(project, "myproj") == []
+
+    def test_mixed_tracked_and_untracked(self, tmp_path: Path, central_home: Path) -> None:
+        project = tmp_path / "proj"
+        _git_init(project)
+        _write_skill(project, "keep-me", "user committed")
+        _git_commit_all(project)
+        _write_skill(project, "move-me", "cockpit untracked")  # untracked
+
+        records = {r.name: r.action for r in migrate_legacy_project_skills(project, "myproj")}
+
+        assert records == {"keep-me": "skipped-tracked", "move-me": "migrated"}
+        assert (central_home / "myproj" / "move-me").exists()
+        assert not (central_home / "myproj" / "keep-me").exists()
 
 
 class TestConfigCentralPaths:

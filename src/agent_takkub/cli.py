@@ -596,6 +596,45 @@ def cmd_audit_skills(args: argparse.Namespace) -> dict:
     return {"ok": True, "msg": f"{len(pairs)} overlap pair(s) found"}
 
 
+def cmd_migrate_skills(args: argparse.Namespace) -> dict:
+    """Migrate legacy cockpit-created skills out of a project's repo into the
+    central store (junction/symlink left behind). Pure local — no orchestrator
+    IPC. Defaults to the active project; `--project NAME` targets another. Only
+    git-untracked real skill dirs move (see `skill_scan` docstring) — a
+    git-tracked (user-committed) skill is never touched. `--dry-run` reports the
+    plan without changing anything."""
+    from pathlib import Path
+
+    from . import skill_scan
+    from .config import active_project, lead_cwd
+    from .lead_context import _allowed_project_roots
+
+    project = args.project or active_project()[0]
+    if not project:
+        return {"ok": False, "msg": "no active project — pass --project NAME"}
+    roots = _allowed_project_roots(project)
+    if not roots:
+        root = lead_cwd(project)
+        roots = [Path(root)] if root else []
+    if not roots:
+        return {"ok": False, "msg": f"could not resolve a folder for project {project!r}"}
+
+    records = skill_scan.migrate_legacy_project_skills(roots[0], project, dry_run=args.dry_run)
+    if not records:
+        return {"ok": True, "msg": f"no skills under {roots[0]}/.claude/skills (nothing to do)"}
+
+    verb = "would migrate" if args.dry_run else "migrated"
+    for r in records:
+        print(f"  {r.action:18s} {r.name}" + (f"  — {r.detail}" if r.detail else ""))
+    moved = [r for r in records if r.action in ("migrated", "would-migrate")]
+    errored = [r for r in records if r.action == "error"]
+    ok = not errored
+    return {
+        "ok": ok,
+        "msg": f"{len(moved)} skill(s) {verb}, {len(errored)} error(s) (inspected {len(records)})",
+    }
+
+
 def cmd_codex(args: argparse.Namespace) -> dict:
     """Fire OpenAI Codex CLI non-interactively and print the result.
 
@@ -1455,6 +1494,22 @@ def main(argv: list[str] | None = None) -> int:
     sas.add_argument("--output", default="runtime/skill_audit.md")
     sas.add_argument("--json", action="store_true", help="emit JSON instead of writing markdown")
     sas.set_defaults(func=cmd_audit_skills)
+
+    sms = sub.add_parser(
+        "migrate-skills",
+        help="move legacy cockpit-created skills out of a project's repo into the central store",
+    )
+    sms.add_argument(
+        "--project",
+        default=None,
+        help="project name to migrate (default: active project)",
+    )
+    sms.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="report what would move without changing anything",
+    )
+    sms.set_defaults(func=cmd_migrate_skills)
 
     sse = sub.add_parser(
         "search",
