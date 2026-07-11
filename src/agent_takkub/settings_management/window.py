@@ -21,11 +21,12 @@ from PyQt6.QtWidgets import (
 
 from .. import cockpit_theme as theme
 from .pages.mcp_page import McpPage
+from .pages.providers_page import ProvidersPage
 from .pages.roles_page import RolesPage
 from .pages.skills_page import SkillsPage
 
 _SIDEBAR_ENTITIES = ("Roles", "Skills", "MCP Servers", "Plugins", "Providers")
-_WIRED = {"Roles", "Skills", "MCP Servers"}
+_WIRED = {"Roles", "Skills", "MCP Servers", "Providers"}
 
 
 class SettingsManagementWindow(QWidget):
@@ -70,10 +71,16 @@ class SettingsManagementWindow(QWidget):
         self.content_stack.addWidget(self.mcp_page)
         self.mcp_page.refresh()
 
+        self.providers_page = ProvidersPage(self)
+        self.providers_page.manage_roles_requested = self._go_to_roles
+        self.content_stack.addWidget(self.providers_page)
+        self.providers_page.refresh()
+
         self._pages = {
             "Roles": self.roles_page,
             "Skills": self.skills_page,
             "MCP Servers": self.mcp_page,
+            "Providers": self.providers_page,
         }
 
         self._placeholder_index: dict[str, int] = {}
