@@ -1954,11 +1954,13 @@ class SettingsWindow(QDialog):
 
     def _build_skill_catalog_view(self) -> QWidget:
         view = QWidget(self)
-        lay = QHBoxLayout(view)
-        lay.setContentsMargins(0, 0, 0, 16)
+        outer = QVBoxLayout(view)
+        outer.setContentsMargins(0, 0, 0, 16)
+        outer.setSpacing(12)
+
+        lay = QHBoxLayout()
         lay.setSpacing(12)
 
-        self._catalog_skills = skill_scan.scan_skills(self._new_role_skill_roots())
         self._catalog_role_docs = skill_audit.load_all_role_docs()
 
         list_panel = QWidget(view)
@@ -1968,10 +1970,6 @@ class SettingsWindow(QDialog):
         list_lay.setContentsMargins(6, 6, 6, 6)
         self._catalog_list = QListWidget(list_panel)
         self._catalog_list.setFrameShape(QFrame.Shape.NoFrame)
-        for skill in self._catalog_skills:
-            item = QListWidgetItem(skill.name, self._catalog_list)
-            item.setData(Qt.ItemDataRole.UserRole, skill.name)
-            item.setToolTip(skill.description or skill.name)
         self._catalog_list.currentItemChanged.connect(self._on_catalog_skill_selected)
         list_lay.addWidget(self._catalog_list)
         lay.addWidget(list_panel)
@@ -1997,17 +1995,122 @@ class SettingsWindow(QDialog):
         self._catalog_path.setObjectName("panelHint")
         self._catalog_path.setWordWrap(True)
         detail_lay.addWidget(self._catalog_path)
+
+        # Critic round — Skill Catalog was read-only (browse only); a skill a
+        # user deletes from the UI must actually disappear, mirroring the
+        # custom-role delete button (_on_delete_custom_role_clicked). Only
+        # shown for a skill under the active project's own writable roots —
+        # a bundled cockpit-checkout skill (skill_scan.is_writable_skill ==
+        # False) never gets one, same guard `deletable=` uses for built-in
+        # roles.
+        del_row = QHBoxLayout()
+        self._catalog_delete_btn = QPushButton("✕ ลบ skill นี้", detail_panel)
+        self._catalog_delete_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._catalog_delete_btn.clicked.connect(self._on_delete_skill_clicked)
+        self._catalog_delete_btn.hide()
+        del_row.addWidget(self._catalog_delete_btn)
+        del_row.addStretch(1)
+        detail_lay.addLayout(del_row)
         detail_lay.addStretch(1)
         lay.addWidget(detail_panel, 1)
+        outer.addLayout(lay)
+
+        outer.addWidget(self._build_new_skill_form(view))
+
+        self._reload_skill_catalog()
+        return view
+
+    def _build_new_skill_form(self, parent: QWidget) -> QWidget:
+        """+ New Skill — closes the create-half of the Skill Catalog's
+        lifecycle loop (list/select already existed; create/delete did not,
+        forcing a user to hand-author `.claude/skills/<name>/SKILL.md`
+        themselves). Writes immediately on click, same "no dirty-tracking /
+        no Save & Apply" pattern as Templates' Duplicate/Delete and the
+        custom-role delete button — there's nothing to stage."""
+        form = QWidget(parent)
+        form.setObjectName("panel")
+        f_lay = QVBoxLayout(form)
+        f_lay.setContentsMargins(16, 14, 16, 14)
+        f_lay.setSpacing(10)
+        f_lay.addWidget(QLabel("+ New Skill", form))
+
+        name_row = QHBoxLayout()
+        name_col = QVBoxLayout()
+        name_col.addWidget(QLabel("Name", form))
+        self._ns_name = QLineEdit(form)
+        self._ns_name.setPlaceholderText("my-new-skill (a-z0-9-_ เท่านั้น)")
+        name_col.addWidget(self._ns_name)
+        name_row.addLayout(name_col, 1)
+
+        desc_col = QVBoxLayout()
+        desc_col.addWidget(QLabel("Description (frontmatter, 1 บรรทัด)", form))
+        self._ns_desc = QLineEdit(form)
+        self._ns_desc.setPlaceholderText("ใช้เมื่อไหร่ — Skill tool ใช้เลือก skill จากบรรทัดนี้")
+        desc_col.addWidget(self._ns_desc)
+        name_row.addLayout(desc_col, 1)
+        f_lay.addLayout(name_row)
+
+        f_lay.addWidget(QLabel("Instructions", form))
+        self._ns_instructions = QPlainTextEdit(form)
+        self._ns_instructions.setPlaceholderText(
+            "เนื้อหา skill (markdown) ที่ role จะอ่านตอนใช้ skill นี้..."
+        )
+        self._ns_instructions.setMinimumHeight(80)
+        f_lay.addWidget(self._ns_instructions)
+
+        self._ns_status = QLabel("", form)
+        self._ns_status.setObjectName("panelHint")
+        self._ns_status.setWordWrap(True)
+        f_lay.addWidget(self._ns_status)
+
+        create_row = QHBoxLayout()
+        create_btn = cockpit_theme.gold_button("+ Create Skill", form)
+        create_btn.clicked.connect(self._on_create_skill_clicked)
+        create_row.addWidget(create_btn)
+        create_row.addStretch(1)
+        f_lay.addLayout(create_row)
+
+        return form
+
+    def _writable_skill_roots(self) -> list[Path]:
+        """Project paths a New-Skill create/delete may actually write to —
+        NOT `config.REPO_ROOT`/`ASSETS_ROOT` (the cockpit's own bundled
+        skills, always read-only from this UI)."""
+        return _allowed_project_roots(self._project) if self._project else []
+
+    def _reload_skill_catalog(self) -> None:
+        """(Re)populate the skill list from disk — called at view build time
+        and again after a create/delete so the list, New Role picker (#3)
+        and Skill Matrix all reflect the change immediately without a
+        cockpit restart."""
+        self._catalog_skills = skill_scan.scan_skills(self._new_role_skill_roots())
+        self._catalog_list.blockSignals(True)
+        self._catalog_list.clear()
+        for skill in self._catalog_skills:
+            item = QListWidgetItem(skill.name, self._catalog_list)
+            item.setData(Qt.ItemDataRole.UserRole, skill.name)
+            item.setToolTip(skill.description or skill.name)
+        self._catalog_list.blockSignals(False)
 
         if self._catalog_list.count():
             self._catalog_list.setCurrentRow(0)
+            self._on_catalog_skill_selected(self._catalog_list.currentItem())
         else:
             self._catalog_name.setText("— ไม่พบ skill —")
             self._catalog_desc.setText(
                 "ยังไม่มี .claude/skills/*/SKILL.md ในโปรเจคนี้หรือ cockpit checkout"
             )
-        return view
+            self._catalog_roles.setText("")
+            self._catalog_path.setText("")
+            self._catalog_delete_btn.hide()
+
+        # New Role's checklist + Skill Matrix scan the same `.claude/skills/`
+        # roots — refresh both so a just-created/deleted skill shows up
+        # there too without reopening the Settings window.
+        if hasattr(self, "_nr_skills_lay"):
+            self._reload_new_role_skills()
+        if hasattr(self, "_skill_matrix_grid"):
+            self._reload_skill_matrix()
 
     def _roles_referencing_skill(self, skill_name: str) -> list[str]:
         """Role instruction docs that reference `skill_name` as a whole word
@@ -2038,6 +2141,53 @@ class SettingsWindow(QDialog):
         else:
             self._catalog_roles.setText("ยังไม่มี role ไหนอ้างถึง skill นี้")
         self._catalog_path.setText(f"📄 {skill.path}")
+        self._catalog_delete_btn.setVisible(
+            skill_scan.is_writable_skill(skill.path, self._writable_skill_roots())
+        )
+
+    def _on_create_skill_clicked(self) -> None:
+        name = self._ns_name.text().strip().lower()
+        description = self._ns_desc.text().strip()
+        instructions = self._ns_instructions.toPlainText()
+
+        root = self._writable_skill_roots()
+        if not root:
+            self._ns_status.setText("⚠️ ไม่มี active project ให้เขียน skill ลงไป")
+            return
+
+        existing = {s.name for s in self._catalog_skills}
+        ok, err = skill_scan.create_skill(
+            root[0], name, description, instructions, existing=existing
+        )
+        if not ok:
+            self._ns_status.setText(f"⚠️ {err}")
+            return
+
+        self._ns_status.setText(f"✓ สร้าง skill '{name}' แล้ว")
+        self._ns_name.clear()
+        self._ns_desc.clear()
+        self._ns_instructions.clear()
+        self._reload_skill_catalog()
+
+    def _on_delete_skill_clicked(self) -> None:
+        current = self._catalog_list.currentItem()
+        if current is None:
+            return
+        name = current.data(Qt.ItemDataRole.UserRole)
+        skill = next((s for s in self._catalog_skills if s.name == name), None)
+        if skill is None:
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Delete skill",
+            f"ลบ skill '{skill.name}'?\n\nจะลบทั้งโฟลเดอร์ ({skill.path.parent}) — undo ไม่ได้",
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        if not skill_scan.delete_skill(skill.path):
+            QMessageBox.critical(self, "Delete failed", f"ลบ skill '{skill.name}' ไม่สำเร็จ")
+            return
+        self._reload_skill_catalog()
 
     # ──────────────────────────────────────────────────────────
     # view: Skill Matrix (real — SKILL section, #103 phase 4)
