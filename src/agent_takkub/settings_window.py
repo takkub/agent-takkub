@@ -192,20 +192,29 @@ _VIEW_HEADERS: dict[int, tuple[str, str]] = {
 
 
 # Roles offered a per-role CLI override in "Providers & Roles". Excludes
-# lead/codex/gemini (provider_config.FORCED_ROLES — CLI is fixed) and shell
-# (not a pipeline-eligible role — see pipeline_config.valid_roles()'s own
-# note). A function — not a frozen tuple — since custom roles register at
-# runtime and this must reflect them the next time the Settings window opens
-# (SettingsWindow is constructed fresh on every open, so a function called
-# from inside a `_build_*_view()` picks up a just-created role with no
-# cockpit restart; a module-level constant computed once at import time
-# never would).
+# codex/gemini (provider_config.FORCED_ROLES — CLI IS the role's identity)
+# and shell (not a pipeline-eligible role — see pipeline_config.valid_roles()'s
+# own note). `lead` is prepended separately below: it isn't a
+# pipeline_config.valid_roles() member (Lead is excluded from dev pipelines,
+# a different concern — see that function's own docstring) but IS eligible
+# for a CLI override since issue #101's degraded-mode unlock removed it from
+# FORCED_PROVIDER. A function — not a frozen tuple — since custom roles
+# register at runtime and this must reflect them the next time the Settings
+# window opens (SettingsWindow is constructed fresh on every open, so a
+# function called from inside a `_build_*_view()` picks up a just-created
+# role with no cockpit restart; a module-level constant computed once at
+# import time never would). Same freshness reasoning applies to the
+# lead-unlocked check — re-forcing "lead" via FORCED_PROVIDER in a future
+# change makes it disappear from this list automatically.
 def _overridable_roles() -> tuple[str, ...]:
-    return tuple(
+    pipeline_roles = tuple(
         r
         for r in pipeline_config.valid_roles()
         if r not in provider_config.FORCED_ROLES and r != "shell"
     )
+    if "lead" not in provider_config.FORCED_ROLES:
+        pipeline_roles = ("lead", *pipeline_roles)
+    return pipeline_roles
 
 
 _PROVIDER_DESC: dict[str, str] = {
@@ -784,16 +793,7 @@ class SettingsWindow(QDialog):
         self._role_toggles = {}
         self._role_provider_combos = {}
         self._role_provider_badges: dict[str, QLabel] = {}
-
-        lead_row = self._build_role_row(
-            "lead",
-            "Lead",
-            cockpit_theme.ROLE_COLORS["lead"],
-            "Cockpit coordinator — provider fixed, always on",
-            role_panel,
-            locked=True,
-        )
-        rp_lay.addWidget(lead_row)
+        self._lead_warning_lbl: QLabel | None = None
 
         for role in _overridable_roles():
             r = roles_mod.by_name(role)
@@ -801,16 +801,25 @@ class SettingsWindow(QDialog):
             color = cockpit_theme.ROLE_COLORS.get(
                 role, r.color if r else cockpit_theme.ROLE_COLOR_FALLBACK
             )
+            is_lead = role == "lead"
             row = self._build_role_row(
                 role,
                 label,
                 color,
-                "",
+                # #101: Lead is unlocked (no longer forced to claude) but is
+                # NOT a pipeline participant — no enable/disable toggle for
+                # it (show_enable_toggle=False below), so its description
+                # explains the CLI dropdown instead of the usual empty desc.
+                "Cockpit coordinator — เปลี่ยน CLI ได้ (บาง feature หายเมื่อไม่ใช่ Claude)"
+                if is_lead
+                else "",
                 role_panel,
                 locked=False,
                 enabled=roles_enabled.get(role, True),
                 current_provider=role_providers.get(role, provider_config.CLAUDE),
                 deletable=role in custom_roles.list_role_names(),
+                show_enable_toggle=not is_lead,
+                lead_capability_gate=is_lead,
             )
             rp_lay.addWidget(row)
 
@@ -830,6 +839,8 @@ class SettingsWindow(QDialog):
         enabled: bool = True,
         current_provider: str | None = None,
         deletable: bool = False,
+        show_enable_toggle: bool = True,
+        lead_capability_gate: bool = False,
     ) -> QWidget:
         row = QWidget(parent)
         row_lay = QHBoxLayout(row)
@@ -872,16 +883,34 @@ class SettingsWindow(QDialog):
         row_lay.addWidget(badge)
         self._role_provider_badges[role] = badge
 
+        # #101: Lead-specific capability-degradation warning — separate from
+        # the substitute badge above (that one only fires when the chosen
+        # provider is unavailable). This fires whenever Lead is pointed at
+        # ANY non-claude provider, available or not, because claude-only
+        # plumbing (mobile mirror, --resume, remote-control history, JSONL
+        # token meter) is gone the moment Lead isn't claude — the user needs
+        # to know that BEFORE saving, not discover it later as a silent gap.
+        if lead_capability_gate:
+            warn_lbl = QLabel("⚠ non-Claude", row)
+            warn_lbl.setObjectName("capabilityWarning")
+            warn_lbl.setToolTip(
+                "Lead ที่ไม่ใช่ Claude เสีย: mobile mirror · --resume · "
+                "remote-control history · token/limit meter (claude-only features)"
+            )
+            row_lay.addWidget(warn_lbl)
+            self._lead_warning_lbl = warn_lbl
+
         combo.currentIndexChanged.connect(lambda _i=0, r=role: self._sync_role_provider_badge(r))
         combo.currentIndexChanged.connect(self._mark_dirty)
         self._sync_role_provider_badge(role)
 
-        toggle = cockpit_theme.ToggleSwitch(row, checked=enabled)
-        toggle.setAccessibleName(f"{label} role — {'enabled' if enabled else 'disabled'}")
-        toggle.setToolTip(f"เปิด/ปิด role {label} ในทีม")
-        toggle.toggled.connect(self._mark_dirty)
-        row_lay.addWidget(toggle)
-        self._role_toggles[role] = toggle
+        if show_enable_toggle:
+            toggle = cockpit_theme.ToggleSwitch(row, checked=enabled)
+            toggle.setAccessibleName(f"{label} role — {'enabled' if enabled else 'disabled'}")
+            toggle.setToolTip(f"เปิด/ปิด role {label} ในทีม")
+            toggle.toggled.connect(self._mark_dirty)
+            row_lay.addWidget(toggle)
+            self._role_toggles[role] = toggle
 
         # Critic visual-review round-2 #1 — a custom role could be created
         # but never removed from this view (Nielsen #3, user control &
@@ -934,6 +963,11 @@ class SettingsWindow(QDialog):
 
         provider = combo.currentData()
         badge.setVisible(provider != CLAUDE and not _provider_available(provider))
+
+        if role == "lead":
+            warn_lbl = getattr(self, "_lead_warning_lbl", None)
+            if warn_lbl is not None:
+                warn_lbl.setVisible(provider != CLAUDE)
 
     def _reset_providers_roles_view(self) -> None:
         for provider, toggle in self._provider_toggles.items():

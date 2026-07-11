@@ -43,6 +43,7 @@ from .lead_context import (
     _allowed_project_roots,
     _default_plugin_dirs,
     _render_lead_context,
+    render_lead_agents_md,
 )
 from .orchestrator_text import (
     _cwd_within_project,
@@ -1102,6 +1103,13 @@ class SpawnEngineMixin:
         # Per-project role→CLI mapping (project_ns resolved at spawn entry):
         # the same role can be backed by a different CLI in different tabs.
         effective_provider = effective_provider_for(base_role, project=project_ns)
+        # #101 degraded-mode unlock: `lead` is no longer forced to claude, so
+        # it can now enter the GEMINI/CODEX branches below too. Both branches
+        # need a Lead-specific cwd (project root, not a teammate staging dir)
+        # and Lead-specific context content (BLOCKED_DIRS/session-brief, not
+        # the generic teammate cheatsheet) — see the `_is_lead` branches
+        # inside each.
+        _is_lead = role_name == LEAD.name
 
         if effective_provider == GEMINI:
             # The `gemini` role is now powered by Antigravity's `agy` binary
@@ -1115,14 +1123,29 @@ class SpawnEngineMixin:
             gemini_bin = spec.custom_discovery_fn() if spec.custom_discovery_fn else None
             if gemini_bin is None:
                 return False, spec.install_instructions
-            spawn_cwd = cwd or default_cwd_for_role(role_name, project=project_ns) or str(DATA_HOME)
-            from . import skill_policy
+            if _is_lead:
+                spawn_cwd = cwd or lead_cwd(project=project_ns) or str(DATA_HOME)
+            else:
+                spawn_cwd = (
+                    cwd or default_cwd_for_role(role_name, project=project_ns) or str(DATA_HOME)
+                )
+            if _is_lead:
+                # Lead-specific AGENTS.md content (cockpit CLAUDE.md +
+                # BLOCKED_DIRS + session brief) — NOT the teammate cheatsheet
+                # ensure_agents_md() plants for every other role (#101).
+                if spawn_cwd != str(DATA_HOME):
+                    post_compact_brief = self._build_post_compact_brief(project_ns)
+                    render_lead_agents_md(
+                        project_ns, spawn_cwd, post_compact_brief=post_compact_brief
+                    )
+            else:
+                from . import skill_policy
 
-            _skill_extra = skill_policy.render_skill_appendix(
-                base_role, _skill_roots_for_project(project_ns), spec.context_strategy
-            )
-            ensure_agents_md(spawn_cwd, extra=_skill_extra)
-            env = _build_pane_env()
+                _skill_extra = skill_policy.render_skill_appendix(
+                    base_role, _skill_roots_for_project(project_ns), spec.context_strategy
+                )
+                ensure_agents_md(spawn_cwd, extra=_skill_extra)
+            env = _build_lead_env() if _is_lead else _build_pane_env()
             env["TAKKUB_ROLE"] = role_name
             env["TAKKUB_PROJECT"] = project_ns
             _apply_artifacts_dir(env, project_ns)
@@ -1134,7 +1157,14 @@ class SpawnEngineMixin:
             # not PATH), and agy may shell out to itself / companion tools.
             agy_dir = os.path.dirname(gemini_bin)
             env["PATH"] = bin_dir + os.pathsep + agy_dir + os.pathsep + env.get("PATH", "")
-            _gem_tok = self._mint_pane_token(env, project_ns, role_name)
+            # Lead gets the Lead capability token (authorises Lead-only
+            # takkub CLI commands) instead of a per-pane teammate token —
+            # mirrors the claude branch below (#101).
+            if _is_lead:
+                env["TAKKUB_LEAD_TOKEN"] = self._lead_token
+                _gem_tok = None
+            else:
+                _gem_tok = self._mint_pane_token(env, project_ns, role_name)
             # yolo: skip per-command approval prompts (parity with codex
             # --ask-for-approval never). Antigravity's flag is the long form.
             # Sourced from PROVIDER_REGISTRY["gemini"].autonomy_flags instead
@@ -1166,27 +1196,47 @@ class SpawnEngineMixin:
             codex_bin = codex_spec.custom_discovery_fn() if codex_spec.custom_discovery_fn else None
             if codex_bin is None:
                 return False, codex_spec.install_instructions
-            spawn_cwd = cwd or default_cwd_for_role(role_name, project=project_ns) or str(DATA_HOME)
-            # Plant the takkub cheatsheet so Codex auto-discovers it on
-            # boot and knows how to call `takkub send/done`. Safe: only
-            # writes when the file is absent or already takkub-managed
-            # (marker check inside the helper). `extra` bridges this role's
-            # Skill Matrix assignment (#103 phase 4) — codex has no Skill
-            # tool, so it's an instruction-style block, not real skill access.
-            from . import skill_policy
+            if _is_lead:
+                spawn_cwd = cwd or lead_cwd(project=project_ns) or str(DATA_HOME)
+            else:
+                spawn_cwd = (
+                    cwd or default_cwd_for_role(role_name, project=project_ns) or str(DATA_HOME)
+                )
+            if _is_lead:
+                # Lead-specific AGENTS.md content — see the GEMINI branch's
+                # matching comment above (#101).
+                if spawn_cwd != str(DATA_HOME):
+                    post_compact_brief = self._build_post_compact_brief(project_ns)
+                    render_lead_agents_md(
+                        project_ns, spawn_cwd, post_compact_brief=post_compact_brief
+                    )
+            else:
+                # Plant the takkub cheatsheet so Codex auto-discovers it on
+                # boot and knows how to call `takkub send/done`. Safe: only
+                # writes when the file is absent or already takkub-managed
+                # (marker check inside the helper). `extra` bridges this role's
+                # Skill Matrix assignment (#103 phase 4) — codex has no Skill
+                # tool, so it's an instruction-style block, not real skill access.
+                from . import skill_policy
 
-            _skill_extra = skill_policy.render_skill_appendix(
-                base_role, _skill_roots_for_project(project_ns), codex_spec.context_strategy
-            )
-            ensure_agents_md(spawn_cwd, extra=_skill_extra)
-            env = _build_pane_env()
+                _skill_extra = skill_policy.render_skill_appendix(
+                    base_role, _skill_roots_for_project(project_ns), codex_spec.context_strategy
+                )
+                ensure_agents_md(spawn_cwd, extra=_skill_extra)
+            env = _build_lead_env() if _is_lead else _build_pane_env()
             env["TAKKUB_ROLE"] = role_name
             env["TAKKUB_PROJECT"] = project_ns
             _apply_artifacts_dir(env, project_ns)
             inject_user_profile_env(env, project_ns)
             bin_dir = str(CLI_BIN_DIR)
             env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
-            _cdx_tok = self._mint_pane_token(env, project_ns, role_name)
+            # Lead gets the Lead capability token instead of a per-pane
+            # teammate token — mirrors the claude branch below (#101).
+            if _is_lead:
+                env["TAKKUB_LEAD_TOKEN"] = self._lead_token
+                _cdx_tok = None
+            else:
+                _cdx_tok = self._mint_pane_token(env, project_ns, role_name)
             # Autonomy flags so Codex can call `takkub done` and edit
             # workspace files without stopping for per-command approval —
             # mirrors claude's `--dangerously-skip-permissions`.

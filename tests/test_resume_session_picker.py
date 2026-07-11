@@ -580,7 +580,7 @@ class TestApiLeadSessions:
         result = api.lead_sessions(object(), "myproj", limit=999)
         assert seen["project_ns"] == "myproj"
         assert seen["limit"] == api._SESSIONS_MAX_LIMIT
-        assert result == {"project": "myproj", "sessions": []}
+        assert result == {"project": "myproj", "sessions": [], "lead_provider_note": None}
 
     def test_bad_limit_falls_back_to_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
         seen: dict = {}
@@ -673,6 +673,25 @@ class TestApiResumeLead:
         with pytest.raises(api.RemoteApiError) as exc:
             api.resume_lead(fake_orch, "proj", "forged-uuid")
         assert exc.value.status == 409
+
+    def test_non_claude_lead_rejected_before_uuid_check(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Issue #101: a codex/agy-backed Lead has no `--resume` flag —
+        reject with a clear 409 explaining why, before even validating
+        session_uuid, instead of reaching `spawn()` and failing opaquely."""
+        monkeypatch.setattr(_config, "list_project_names", lambda: ["proj"])
+        monkeypatch.setattr(_config, "get_open_tabs", lambda: ["proj"])
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.effective_provider_for",
+            lambda role, project=None: "codex",
+        )
+        fake_orch = MagicMock()
+        with pytest.raises(api.RemoteApiError) as exc:
+            api.resume_lead(fake_orch, "proj", "")  # empty uuid would 400 if reached
+        assert exc.value.status == 409
+        assert "resume unavailable" in exc.value.msg
+        fake_orch.close.assert_not_called()
         fake_orch.close.assert_not_called()
         fake_orch.spawn.assert_not_called()
 

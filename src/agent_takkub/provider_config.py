@@ -9,9 +9,14 @@ e.g. "backend always uses codex regardless of project" — by editing
 a small JSON file under `~/.takkub/`.
 
 Resolution rules:
-- `lead`   → always `claude` (cockpit infrastructure assumes claude
-             for Lead: CLAUDE.md auto-discovery, --append-system-prompt,
-             session-resume `--continue`, token-meter JSONL, etc.)
+- `lead`   → user config wins; default `claude` (issue #101, degraded-mode
+             unlock: a codex/agy-backed Lead is now allowed. Default stays
+             claude — unlock is opt-in, not a default change. Switching Lead
+             off claude loses several claude-specific capabilities (mobile
+             mirror, `--resume`, remote-control history/resume, JSONL token
+             meter) — see docs/reviews/2026-07-11-101-lead-unlock.md and the
+             `supports_*` capability flags on `provider_spec.ProviderSpec`
+             that gate each of those call sites instead of crashing.)
 - `codex`  → always `codex` (the role's whole point)
 - `gemini` → always `gemini` (the role's whole point)
 - everything else → user config wins; default `claude`
@@ -44,10 +49,12 @@ GEMINI = "gemini"
 VALID_PROVIDERS = frozenset(PROVIDER_REGISTRY.keys())
 
 # Roles whose provider is hard-coded — cannot be overridden by config.
-# Lead has too much claude-specific plumbing (CLAUDE.md, JSONL token
-# meter, --continue resume). The `codex` role's identity IS codex.
+# The `codex`/`gemini` roles' whole identity IS that CLI — remapping them
+# would be a contradiction (a "codex" pane not running codex). `lead` was
+# forced here too until issue #101's degraded-mode unlock; it is now a
+# regular (optional) override — see the module docstring's "Resolution
+# rules" for what a non-claude Lead loses.
 _FORCED_PROVIDER = {
-    "lead": CLAUDE,
     "codex": CODEX,
     "gemini": GEMINI,
 }
@@ -250,3 +257,60 @@ def effective_provider_for(role: str, project: str | None = None) -> str:
     if desired == CLAUDE:
         return CLAUDE
     return desired if _provider_available(desired) else CLAUDE
+
+
+# Capability labels surfaced to the user when Lead is degraded off claude
+# (issue #101). Keyed to the `ProviderSpec.supports_*` flag that gates the
+# affected call site, so a future provider that gains one of these
+# capabilities just flips its flag and drops off this list automatically —
+# no hand-maintained enable list to forget to update.
+_LEAD_CAPABILITY_LABELS: tuple[tuple[str, str], ...] = (
+    ("supports_mirror", "mobile mirror (มือถือ mirror หน้าจอ Lead)"),
+    ("supports_resume", "session resume (--resume · มือถือปุ่ม Resume)"),
+    ("supports_remote_history", "remote-control history (มือถือดูประวัติแชท Lead ย้อนหลัง)"),
+    ("supports_token_meter", "token/limit meter (usage แถบสถานะ อิง JSONL transcript)"),
+    ("supports_hooks", "SessionStart hook (session-report auto session-uuid tracking)"),
+)
+
+
+def lead_capability_gap(project: str | None = None) -> tuple[str, list[str]] | None:
+    """Return `(provider, [missing feature labels])` when Lead is currently
+    backed by something other than claude, or `None` when it's claude (no
+    gap).
+
+    Used by the Settings UI (capability-warning badge on the Lead row) and
+    the remote API (mobile mirror/history/resume responses) to tell the
+    user WHY a claude-only feature is unavailable instead of silently doing
+    nothing — issue #101 requires visible degradation, never a silent break.
+    """
+    from .provider_spec import PROVIDER_REGISTRY
+
+    provider = effective_provider_for("lead", project)
+    if provider == CLAUDE:
+        return None
+    spec = PROVIDER_REGISTRY.get(provider)
+    if spec is None:
+        return provider, [label for _, label in _LEAD_CAPABILITY_LABELS]
+    missing = [label for flag, label in _LEAD_CAPABILITY_LABELS if not getattr(spec, flag, False)]
+    return provider, missing
+
+
+def lead_missing_capability(flag: str, project: str | None = None) -> str | None:
+    """Return the current Lead provider's name if it lacks `flag` (a
+    `ProviderSpec.supports_*` attribute name), else `None` (claude, or a
+    provider that actually has the flag).
+
+    Precise sibling to `lead_capability_gap` for call sites that only care
+    about ONE capability — e.g. `remote/api.py`'s `resume_lead` gates
+    specifically on `"supports_resume"` rather than blocking on ANY gap
+    (a future provider could have mirror but not resume, or vice versa).
+    """
+    from .provider_spec import PROVIDER_REGISTRY
+
+    provider = effective_provider_for("lead", project)
+    if provider == CLAUDE:
+        return None
+    spec = PROVIDER_REGISTRY.get(provider)
+    if spec is None or not getattr(spec, flag, False):
+        return provider
+    return None

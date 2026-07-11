@@ -267,21 +267,30 @@ def _claude_autoloads(claude_cwd: pathlib.Path, md_dir: pathlib.Path) -> bool:
     return md_dir == claude_cwd or md_dir in claude_cwd.parents
 
 
-def _render_lead_context(
+def _build_lead_context_text(
     project: str | None = None,
     post_compact_brief: str | None = None,
     claude_cwd: str | None = None,
 ) -> str | None:
-    """Render Lead's spawn-time system prompt: cockpit CLAUDE.md + an
-    auto-injected `BLOCKED_DIRS` paragraph listing the active project's paths.
+    """Build Lead's spawn-time system-prompt TEXT: cockpit CLAUDE.md + an
+    auto-injected `BLOCKED_DIRS` paragraph listing the active project's paths
+    (+ substitution/plan/parallel/session-brief sections, same as before).
+
+    Extracted from `_render_lead_context` (issue #101) so the identical
+    content can be written to two different places depending on which CLI
+    backs Lead: `runtime/lead-context.md` for claude's
+    `--append-system-prompt-file` (see `_render_lead_context` below), or
+    `<spawn_cwd>/AGENTS.md` for a codex/agy-backed Lead (see
+    `render_lead_agents_md`) — codex/agy auto-discover AGENTS.md from cwd
+    instead of accepting a system-prompt flag.
 
     Lead's hybrid policy (see cockpit CLAUDE.md "Lead direct-edit policy")
     forbids direct file edits inside project paths; this function bakes the
     *current* project's paths into the prompt every spawn so the rule has
     teeth even when projects.json switches between sessions.
 
-    Returns the rendered file path (string), or None if there's no cockpit
-    CLAUDE.md to render from.
+    Returns the rendered text, or None if there's no cockpit CLAUDE.md to
+    render from.
     """
     cockpit_md = ASSETS_ROOT / "CLAUDE.md"
     if not cockpit_md.exists():
@@ -514,10 +523,72 @@ User เปิด **Multi mode** — เมื่อ request มี **หลา�
     if post_compact_brief:
         suffix += post_compact_brief
 
+    return base + suffix
+
+
+def _render_lead_context(
+    project: str | None = None,
+    post_compact_brief: str | None = None,
+    claude_cwd: str | None = None,
+) -> str | None:
+    """Render Lead's spawn-time system prompt to `runtime/lead-context.md`
+    (the file claude reads via `--append-system-prompt-file`). See
+    `_build_lead_context_text` for the content; this just writes it to disk.
+
+    Returns the rendered file path (string), or None if there's no cockpit
+    CLAUDE.md to render from.
+    """
+    text = _build_lead_context_text(
+        project, post_compact_brief=post_compact_brief, claude_cwd=claude_cwd
+    )
+    if text is None:
+        return None
     ensure_runtime()
     out = RUNTIME_DIR / "lead-context.md"
-    out.write_text(base + suffix, encoding="utf-8")
+    out.write_text(text, encoding="utf-8")
     return str(out)
+
+
+def render_lead_agents_md(
+    project: str,
+    spawn_cwd: str,
+    post_compact_brief: str | None = None,
+) -> str | None:
+    """AGENTS.md variant of `_render_lead_context` for a codex/agy-backed
+    Lead (issue #101 degraded mode). Codex and Antigravity auto-discover
+    `AGENTS.md` from cwd instead of accepting a `--append-system-prompt-file`
+    flag, so this writes the SAME cockpit-CLAUDE.md + BLOCKED_DIRS +
+    session-brief content there — deliberately NOT the generic teammate
+    cheatsheet from `codex_agents_md.py` (that file tells the reader "you
+    are a specialist, do the task yourself and call takkub done", which is
+    wrong for Lead, the orchestrator).
+
+    Marked with `codex_agents_md.TAKKUB_MARKER` so a user-owned AGENTS.md is
+    never clobbered (same safety rule `ensure_agents_md` uses) — but Lead's
+    content is generated here directly, bypassing `ensure_agents_md`'s
+    teammate cheatsheet entirely.
+
+    Returns the written path, or None if there's no cockpit CLAUDE.md, or
+    the target AGENTS.md already exists and is user-owned (no marker).
+    """
+    text = _build_lead_context_text(
+        project, post_compact_brief=post_compact_brief, claude_cwd=spawn_cwd
+    )
+    if text is None:
+        return None
+    from .codex_agents_md import TAKKUB_MARKER
+
+    target = pathlib.Path(spawn_cwd) / "AGENTS.md"
+    try:
+        if target.exists():
+            head = target.read_text(encoding="utf-8", errors="replace").splitlines()
+            first = head[0] if head else ""
+            if TAKKUB_MARKER not in first:
+                return None  # user-owned — don't clobber (mirrors ensure_agents_md)
+        target.write_text(f"{TAKKUB_MARKER}\n\n{text}", encoding="utf-8")
+    except OSError:
+        return None
+    return str(target)
 
 
 _LEAD_GUARD_WRITE_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")

@@ -31,6 +31,21 @@ _HISTORY_DEFAULT_LIMIT = 200
 _HISTORY_MAX_LIMIT = 200
 
 
+def _lead_provider_note(project_ns: str) -> str | None:
+    """Human-readable note when `project_ns`'s Lead is degraded off claude
+    (issue #101) — surfaced in mobile-facing responses so a blank
+    history/session list reads as "Lead isn't claude right now", not as a
+    silent bug. `None` when Lead is claude (the common case; no per-request
+    cost beyond one dict lookup)."""
+    from ..provider_config import lead_capability_gap
+
+    gap = lead_capability_gap(project_ns)
+    if gap is None:
+        return None
+    provider, missing = gap
+    return f"Lead provider = {provider} (ไม่ใช่ claude) — ไม่มี: {', '.join(missing)}"
+
+
 class RemoteApiError(Exception):
     """Carries an HTTP status alongside the message the client should see."""
 
@@ -217,7 +232,11 @@ def lead_history(orch, project_ns: str, limit: object = None) -> dict:
     limit = max(1, min(limit, _HISTORY_MAX_LIMIT))
     path = notify.resolve_lead_jsonl(orch, project_ns)
     messages = notify.read_recent_lead_messages(path, limit) if path is not None else []
-    return {"project": project_ns, "messages": messages}
+    return {
+        "project": project_ns,
+        "messages": messages,
+        "lead_provider_note": _lead_provider_note(project_ns),
+    }
 
 
 _SESSIONS_MAX_LIMIT = 20
@@ -233,7 +252,11 @@ def lead_sessions(orch, project_ns: str, limit: object = None) -> dict:
     except (TypeError, ValueError):
         limit = notify._SESSION_LIST_DEFAULT_LIMIT
     limit = max(1, min(limit, _SESSIONS_MAX_LIMIT))
-    return {"project": project_ns, "sessions": notify.list_recent_lead_sessions(project_ns, limit)}
+    return {
+        "project": project_ns,
+        "sessions": notify.list_recent_lead_sessions(project_ns, limit),
+        "lead_provider_note": _lead_provider_note(project_ns),
+    }
 
 
 def resume_lead(orch, project: object, session_uuid: object) -> dict:
@@ -250,16 +273,22 @@ def resume_lead(orch, project: object, session_uuid: object) -> dict:
     run — leaving the project with no Lead pane at all and a rejected
     resume).
 
-    Multi-provider note (#103/#101): `--resume` is a claude-CLI-specific
-    capability. Lead here means whichever provider is currently backing the
-    project's Lead pane — if that's ever a non-claude provider without an
-    equivalent resume flag, this call will simply fail at `spawn()` (unknown
-    flag / provider mismatch) rather than silently no-op. Gating this
-    endpoint on a capability flag is tracked in #103, not solved here."""
+    Multi-provider note (#101): `--resume` is a claude-CLI-specific
+    capability (`ProviderSpec.supports_resume`). Gated explicitly below via
+    `provider_config.lead_capability_gap` — a codex/agy-backed Lead gets a
+    clear 409 here instead of reaching `spawn()` and failing opaquely on an
+    unknown flag / provider mismatch."""
     if not isinstance(project, str) or project not in _config.list_project_names():
         raise RemoteApiError(400, "unknown project")
     if project not in _config.get_open_tabs():
         raise RemoteApiError(409, "project not open")
+    from ..provider_config import lead_missing_capability
+
+    missing_provider = lead_missing_capability("supports_resume", project)
+    if missing_provider is not None:
+        raise RemoteApiError(
+            409, f"resume unavailable — Lead provider = {missing_provider} (ไม่รองรับ --resume)"
+        )
     if not isinstance(session_uuid, str) or not session_uuid.strip():
         raise RemoteApiError(400, "missing session_uuid")
     session_uuid = session_uuid.strip()
