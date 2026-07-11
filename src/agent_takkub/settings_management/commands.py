@@ -83,3 +83,13 @@ class CreateMcpCommand:
 @dataclass(frozen=True)
 class UpdateMcpCommand:
     config: McpConfigDraft
+
+
+@dataclass(frozen=True)
+class CreatePluginCommand:
+    """``key`` is the plugin name; ``marketplace`` is optional — leave blank
+    to let ``claude plugin install`` resolve it (fails if the key is
+    ambiguous across more than one registered marketplace)."""
+
+    key: str
+    marketplace: str = ""

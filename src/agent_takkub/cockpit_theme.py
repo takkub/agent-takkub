@@ -92,6 +92,15 @@ NEUTRAL_CHIP_BG = "rgba(255,255,255,0.06)"
 NEUTRAL_CHIP_BORDER = BORDER_STRONG
 NEUTRAL_CHIP_TEXT = TEXT_SECONDARY
 
+# Semantic error/blocked chip — e.g. "BLOCKED BY COCKPIT" on a denylisted
+# plugin (settings-management Plugins page, #103 follow-up). SPEC.md "status
+# ไม่สื่อด้วยสีอย่างเดียว ใช้ text badge คู่กัน" — pair with explicit text, never
+# color alone. Deliberately its own hue (not gold, not neutral): this state
+# means "cockpit refuses this", distinct from both "editable" and "read-only".
+ERROR_CHIP_BG = "rgba(217,90,90,0.12)"
+ERROR_CHIP_BORDER = "rgba(217,90,90,0.35)"
+ERROR_CHIP_TEXT = "#e58080"
+
 # ──────────────────────────────────────────────────────────────
 # Provider brand colors (codex/gemini panes) — identity, NOT "active/
 # primary". Kept distinct from the gold accent. Mirrored by roles.py
