@@ -235,7 +235,10 @@ codex_spec = ProviderSpec(
     cheatsheet_filename="AGENTS.md",
     inline_learned_notes=False,
     use_file_guards=False,
-    mcp_adapter_variant="none",  # codex has no MCP wiring today (spawn_engine codex branch)
+    mcp_adapter_variant="session_override",  # issue #100 — native `-c mcp_servers.<name>.<key>=…`
+    # dotted overrides, wired per-pane in spawn_engine.py via mcp_bridge.py.
+    # Additive/session-scoped only — never touches ~/.codex/config.toml
+    # (confirmed empirically against codex-cli 0.144.1, 2026-07-11).
     supports_browser_profiles=False,
     paste_threshold=200,  # orchestrator_text.py:112 (shared/uniform — Phase 0 behavior-neutral)
     enter_delay_base_ms=800,  # orchestrator_text.py:152 (kept uniform — review action item 2-C:
@@ -296,7 +299,11 @@ gemini_spec = ProviderSpec(
     cheatsheet_filename="AGENTS.md",
     inline_learned_notes=False,
     use_file_guards=False,
-    mcp_adapter_variant="plugin_import",  # issue #100 — agy's own MCP plugin-import mechanism
+    mcp_adapter_variant="plugin_import",  # issue #100 — `agy plugin import <path>` DOES bridge
+    # MCP servers from a claude-style plugin's `.mcp.json` (confirmed empirically against
+    # agy 1.1.1), but stages them into a GLOBAL `~/.gemini/config/plugins/<name>/` registry
+    # with no per-session/per-cwd scope — mcp_bridge.py leaves this variant a documented
+    # no-op rather than auto-driving a machine-wide side effect on every spawn.
     supports_browser_profiles=False,
     paste_threshold=200,
     enter_delay_base_ms=800,  # kept uniform — see codex_spec note above (review 2-C/2-D)

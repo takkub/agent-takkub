@@ -1143,6 +1143,15 @@ class SpawnEngineMixin:
                 gemini_bin,
                 *spec.autonomy_flags.get(sys.platform, spec.autonomy_flags.get("default", [])),
             ]
+            # MCP injection (#100): agy has no per-session MCP CLI surface —
+            # its `mcp_adapter_variant="plugin_import"` always resolves to a
+            # documented no-op here (see mcp_bridge.py module docstring for
+            # why the real `agy plugin import` bridge isn't auto-driven per
+            # spawn). Called anyway so every provider branch goes through the
+            # same adapter dispatch.
+            from .mcp_bridge import mcp_argv_for_provider
+
+            gemini_argv.extend(mcp_argv_for_provider("gemini", base_role, shard_idx, project_ns))
             return self._launch_session(
                 pane=pane,
                 role_name=role_name,
@@ -1221,6 +1230,13 @@ class SpawnEngineMixin:
                     sys.platform, codex_spec.autonomy_flags.get("default", [])
                 ),
             ]
+            # MCP injection (#100): codex's native per-session `-c
+            # mcp_servers.<name>.<key>=…` dotted overrides, resolved from the
+            # same role→MCP policy claude's --mcp-config uses. Session-scoped
+            # only — never touches ~/.codex/config.toml.
+            from .mcp_bridge import mcp_argv_for_provider
+
+            codex_argv.extend(mcp_argv_for_provider("codex", base_role, shard_idx, project_ns))
             return self._launch_session(
                 pane=pane,
                 role_name=role_name,
@@ -1644,23 +1660,20 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         # other roles get a smaller filtered config. Roles with no policy
         # fall back to the full master file. Skipped silently if there's
         # no config yet.
-        try:
-            from .shared_dev_tools import browser_profile_mcp_config_path
+        #
+        # Every pane: browser roles (qa/critic/designer) get a PERSISTENT
+        # per-(project, role[, shard]) browser profile so the browser remembers
+        # its session/cookies across runs (no more re-login every test) and
+        # parallel shards don't collide on one Chrome profile lock (#39).
+        # Non-browser roles fall through to their plain role-variant config.
+        #
+        # Routed through mcp_bridge.py (issue #100) — same adapter call every
+        # provider branch uses, dispatched by PROVIDER_REGISTRY's
+        # mcp_adapter_variant; claude's own resulting argv is byte-identical
+        # to the pre-#100 inline `--mcp-config`/`--strict-mcp-config` code.
+        from .mcp_bridge import mcp_argv_for_provider
 
-            # Every pane: browser roles (qa/critic/designer) get a PERSISTENT
-            # per-(project, role[, shard]) browser profile so the browser remembers
-            # its session/cookies across runs (no more re-login every test) and
-            # parallel shards don't collide on one Chrome profile lock (#39).
-            # Non-browser roles fall through to their plain role-variant config.
-            mcp_cfg = browser_profile_mcp_config_path(base_role, shard_idx, project_ns)
-        except Exception:
-            mcp_cfg = None
-        if mcp_cfg:
-            argv.extend(["--mcp-config", mcp_cfg])
-            # Force claude to use *only* our cockpit-managed MCP config so
-            # user-level entries registered via `claude mcp add` don't
-            # shadow or duplicate what the cockpit provides.
-            argv.append("--strict-mcp-config")
+        argv.extend(mcp_argv_for_provider("claude", base_role, shard_idx, project_ns))
 
         # Hard-deny built-in tools that don't fit the cockpit's
         # delegation model:
