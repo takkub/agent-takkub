@@ -85,6 +85,13 @@ PARALLEL_CHIP_BG = "rgba(164,114,240,.14)"
 PARALLEL_CHIP_BORDER = "rgba(164,114,240,.3)"
 PARALLEL_CHIP_TEXT = "#c39cf5"
 
+# Neutral (non-gold) chip — read-only ownership badges (BUILT-IN / MANAGED /
+# EXTERNAL) in the settings-management redesign (#103 follow-up). Deliberately
+# NOT gold: gold means "you can edit/delete this", these mean the opposite.
+NEUTRAL_CHIP_BG = "rgba(255,255,255,0.06)"
+NEUTRAL_CHIP_BORDER = BORDER_STRONG
+NEUTRAL_CHIP_TEXT = TEXT_SECONDARY
+
 # ──────────────────────────────────────────────────────────────
 # Provider brand colors (codex/gemini panes) — identity, NOT "active/
 # primary". Kept distinct from the gold accent. Mirrored by roles.py
