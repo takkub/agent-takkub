@@ -83,3 +83,12 @@ class CreateMcpCommand:
 @dataclass(frozen=True)
 class UpdateMcpCommand:
     config: McpConfigDraft
+
+
+@dataclass(frozen=True)
+class UpdateProviderCommand:
+    """The only editable field for a BUILT-IN provider is the operational
+    enabled/disabled override (SPEC.md §Providers) — spec definition fields
+    are read-only."""
+
+    enabled: bool

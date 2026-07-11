@@ -166,3 +166,49 @@ class McpDetail:
     has_secrets: bool
     allowed_roles: tuple[str, ...] = ()
     capabilities: Capability = field(default_factory=Capability)
+
+
+@dataclass(frozen=True)
+class ProviderCapabilities:
+    """Spec-definition capability flags (SPEC.md §Providers "Spec
+    definition" layer) — read-only, sourced from ``ProviderSpec``."""
+
+    context_strategy: str
+    supports_mirror: bool
+    supports_resume: bool
+    supports_slash_commands: bool
+    supports_hooks: bool
+    supports_browser_profiles: bool
+
+
+@dataclass(frozen=True)
+class ProviderSummary:
+    """One row in the Providers list."""
+
+    name: str
+    label: str
+    ownership: Ownership
+    installed: bool
+    enabled: bool
+    required: bool
+
+
+@dataclass(frozen=True)
+class ProviderDetail:
+    """Everything the Provider detail pane (General + Capabilities +
+    Assigned roles) needs. Two layers per SPEC.md §Providers: the spec
+    fields (``binary_names``..``spec_capabilities``) are BUILT-IN read-only;
+    ``enabled`` is the only editable (operational-override) field."""
+
+    name: str
+    label: str
+    ownership: Ownership
+    binary_names: tuple[str, ...]
+    install_instructions: str
+    installed: bool
+    binary_path: str
+    enabled: bool
+    required: bool
+    spec_capabilities: ProviderCapabilities
+    assigned_roles: tuple[str, ...] = ()
+    capabilities: Capability = field(default_factory=Capability)
