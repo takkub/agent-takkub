@@ -60,7 +60,7 @@ scanner พวกนั้น scan `<project>/.claude/skills` อยู่แล
 
 **rtk กลายเป็น toggle ส่วนตัว central** ไม่ใช่ hook ใน `<project>/.claude/settings.json` อีก:
 
-- flag กลาง `SETTINGS_HOME/rtk-enabled.json` (`rtk_helper.rtk_hook_enabled` / `set_rtk_enabled`)
+- flag กลาง SETTINGS_HOME/rtk-enabled.json (`rtk_helper.rtk_hook_enabled` / `set_rtk_enabled`)
 - **hook ฉีดตอน spawn ผ่านไฟล์ `--settings` กลางที่มีอยู่แล้ว** — `hook_wiring._rendered_settings()`
   merge `rtk_hook_fragment()` (PreToolUse Bash) เข้าไฟล์เดียวกับ Stop/Notification/SessionStart
   เมื่อ `rtk_should_inject()` (enabled **และ** binary อยู่บน PATH — กัน `rtk hook claude` พังทุก Bash call)

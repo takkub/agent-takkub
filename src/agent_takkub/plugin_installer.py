@@ -18,6 +18,7 @@ GUI — and spawned panes on the default profile — actually look.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from dataclasses import dataclass
@@ -229,3 +230,68 @@ def install_plugin(
         return False, "CLI reported success but plugin not found on disk (try restart)"
     tail = ((proc.stdout or "") + (proc.stderr or "")).strip().splitlines()
     return False, tail[-1] if tail else "install failed"
+
+
+def list_installed(timeout: float = 30.0) -> list[dict] | None:
+    """``claude plugin list --json`` — the structured install registry
+    (``id``/``version``/``scope``/``enabled``/``installPath``/``installedAt``
+    per entry), backing the settings-management Plugins page. ``None`` on any
+    CLI/parse failure so the caller can fall back to a filesystem scan
+    instead of showing a false "0 plugins"."""
+    try:
+        proc = _claude("plugin", "list", "--json", timeout=timeout)
+    except Exception:  # pragma: no cover - binary missing/timeout
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        data = json.loads(proc.stdout)
+    except ValueError:
+        return None
+    return data if isinstance(data, list) else None
+
+
+def list_marketplaces(timeout: float = 30.0) -> list[dict] | None:
+    """``claude plugin marketplace list --json`` — registered marketplaces
+    (``name``/``source``/``repo``/``installLocation``). ``None`` on failure."""
+    try:
+        proc = _claude("plugin", "marketplace", "list", "--json", timeout=timeout)
+    except Exception:  # pragma: no cover - binary missing/timeout
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        data = json.loads(proc.stdout)
+    except ValueError:
+        return None
+    return data if isinstance(data, list) else None
+
+
+def install_by_id(plugin_id: str, *, timeout: float = 120.0) -> tuple[bool, str]:
+    """Install ``<key>`` or ``<key>@<marketplace>`` — the generic counterpart
+    to :func:`install_plugin` for plugins outside the curated ``RECOMMENDED``
+    set. Unlike :func:`install_plugin`, this does NOT auto-register a
+    marketplace first (an arbitrary id has no known ``marketplace_repo`` to
+    add) — the marketplace must already be registered."""
+    try:
+        proc = _claude("plugin", "install", plugin_id, timeout=timeout)
+    except Exception as e:  # pragma: no cover - binary missing/timeout
+        return False, str(e)
+    if proc.returncode == 0:
+        return True, "installed"
+    tail = ((proc.stdout or "") + (proc.stderr or "")).strip().splitlines()
+    return False, tail[-1] if tail else "install failed"
+
+
+def uninstall_plugin(plugin_id: str, *, timeout: float = 120.0) -> tuple[bool, str]:
+    """Uninstall ``<key>@<marketplace>`` via ``claude plugin uninstall``.
+    Non-interactive by construction (``capture_output=True`` — no TTY, and
+    the call never passes ``--prune``, the only flag that prompts)."""
+    try:
+        proc = _claude("plugin", "uninstall", plugin_id, timeout=timeout)
+    except Exception as e:  # pragma: no cover - binary missing/timeout
+        return False, str(e)
+    if proc.returncode == 0:
+        return True, "uninstalled"
+    tail = ((proc.stdout or "") + (proc.stderr or "")).strip().splitlines()
+    return False, tail[-1] if tail else "uninstall failed"

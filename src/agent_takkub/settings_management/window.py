@@ -1,7 +1,7 @@
 """SettingsManagementWindow — the redesigned Settings surface's shell.
 
-Sidebar (5 entities per SPEC.md IA — ``Roles``/``Skills``/``MCP Servers``
-wired through Phase 2; Plugins/Providers still show a "coming soon"
+Sidebar (5 entities per SPEC.md IA — ``Roles``/``Skills``/``MCP Servers``/
+``Plugins`` wired through Phase 3; Providers still shows a "coming soon"
 placeholder so the nav is honest about scope instead of a dead link) + a
 ``QStackedWidget`` content area, themed via ``cockpit_theme.build_stylesheet``
 at the window root (SPEC.md "Visual").
@@ -21,12 +21,13 @@ from PyQt6.QtWidgets import (
 
 from .. import cockpit_theme as theme
 from .pages.mcp_page import McpPage
+from .pages.plugins_page import PluginsPage
 from .pages.providers_page import ProvidersPage
 from .pages.roles_page import RolesPage
 from .pages.skills_page import SkillsPage
 
 _SIDEBAR_ENTITIES = ("Roles", "Skills", "MCP Servers", "Plugins", "Providers")
-_WIRED = {"Roles", "Skills", "MCP Servers", "Providers"}
+_WIRED = {"Roles", "Skills", "MCP Servers", "Plugins", "Providers"}
 
 
 class SettingsManagementWindow(QWidget):
@@ -72,6 +73,11 @@ class SettingsManagementWindow(QWidget):
         self.content_stack.addWidget(self.mcp_page)
         self.mcp_page.refresh()
 
+        self.plugins_page = PluginsPage(self)
+        self.plugins_page.manage_roles_requested = self._go_to_roles
+        self.content_stack.addWidget(self.plugins_page)
+        self.plugins_page.refresh()
+
         self.providers_page = ProvidersPage(self)
         self.providers_page.manage_roles_requested = self._go_to_roles
         self.content_stack.addWidget(self.providers_page)
@@ -81,6 +87,7 @@ class SettingsManagementWindow(QWidget):
             "Roles": self.roles_page,
             "Skills": self.skills_page,
             "MCP Servers": self.mcp_page,
+            "Plugins": self.plugins_page,
             "Providers": self.providers_page,
         }
 

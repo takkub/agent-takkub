@@ -146,6 +146,54 @@ class SkillDetail:
 
 
 @dataclass(frozen=True)
+class PluginSummary:
+    """One row in the Plugins list. ``id`` is the ``claude plugin`` identity
+    (``<key>@<marketplace>``); ``key``/``marketplace`` are that id split for
+    display + governance lookups. ``blocked`` flags a plugin identity the
+    cockpit never injects into a teammate pane even when its marketplace is
+    otherwise allowed for a role (``lead_context._PANE_PLUGIN_DENYLIST``)."""
+
+    id: str
+    key: str
+    marketplace: str
+    version: str
+    enabled: bool
+    ownership: Ownership
+    blocked: bool = False
+    blocked_reason: str = ""
+
+
+@dataclass(frozen=True)
+class PluginDetail:
+    """Everything the Plugin detail pane (General + Allowed roles) needs.
+
+    Nothing here is form-editable — identity/version are external
+    marketplace metadata (SPEC.md "edit = assignment เท่านั้น"), and even
+    assignment is read-only on THIS page: it's governed per-marketplace by
+    ``pane_tools_policy`` and edited from the Role's Access tab, same
+    relationship as ``McpDetail.allowed_roles``. ``governable`` is False when
+    the plugin's marketplace isn't one the cockpit can push into panes at all
+    (``pane_tools_dialog.discover_marketplaces``) — ``allowed_roles`` is then
+    always empty because there's no policy to read.
+    """
+
+    id: str
+    key: str
+    marketplace: str
+    version: str
+    enabled: bool
+    scope: str
+    install_path: str
+    installed_at: str
+    ownership: Ownership
+    blocked: bool
+    blocked_reason: str
+    governable: bool
+    allowed_roles: tuple[str, ...] = ()
+    capabilities: Capability = field(default_factory=Capability)
+
+
+@dataclass(frozen=True)
 class McpSummary:
     """One row in the MCP Servers list."""
 

@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 118,
+  "module_count": 120,
   "modules": [
     {
       "module": "agent_takkub",
@@ -164,12 +164,13 @@
         "agent_takkub.services",
         "agent_takkub.shared_dev_tools",
         "agent_takkub.skill_audit",
+        "agent_takkub.skill_scan",
         "agent_takkub.verify",
         "agent_takkub.worktree_manager"
       ],
       "imported_by": [],
       "fan_in": 0,
-      "fan_out": 16
+      "fan_out": 17
     },
     {
       "module": "agent_takkub.cli_server",
@@ -195,6 +196,7 @@
         "agent_takkub.project_nav",
         "agent_takkub.project_tab",
         "agent_takkub.settings_management.pages.mcp_page",
+        "agent_takkub.settings_management.pages.plugins_page",
         "agent_takkub.settings_management.pages.providers_page",
         "agent_takkub.settings_management.pages.roles_page",
         "agent_takkub.settings_management.pages.skills_page",
@@ -213,7 +215,7 @@
         "agent_takkub.usage_meter",
         "agent_takkub.user_actions"
       ],
-      "fan_in": 24,
+      "fan_in": 25,
       "fan_out": 0
     },
     {
@@ -443,10 +445,11 @@
         "agent_takkub.orchestrator",
         "agent_takkub.orchestrator_text",
         "agent_takkub.pane_tools_dialog",
+        "agent_takkub.settings_management.repositories.plugins",
         "agent_takkub.settings_window",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 7,
+      "fan_in": 8,
       "fan_out": 8
     },
     {
@@ -657,9 +660,10 @@
       ],
       "imported_by": [
         "agent_takkub.settings_management.pages.roles_page",
+        "agent_takkub.settings_management.repositories.plugins",
         "agent_takkub.settings_window"
       ],
-      "fan_in": 2,
+      "fan_in": 3,
       "fan_out": 5
     },
     {
@@ -674,6 +678,7 @@
         "agent_takkub.lead_context",
         "agent_takkub.pane_tools_dialog",
         "agent_takkub.settings_management.repositories.mcps",
+        "agent_takkub.settings_management.repositories.plugins",
         "agent_takkub.settings_management.repositories.roles",
         "agent_takkub.settings_management.services.cleanup",
         "agent_takkub.settings_management.services.relationships",
@@ -681,7 +686,7 @@
         "agent_takkub.shared_dev_tools",
         "agent_takkub.skill_policy"
       ],
-      "fan_in": 10,
+      "fan_in": 11,
       "fan_out": 3
     },
     {
@@ -737,9 +742,10 @@
       ],
       "imported_by": [
         "agent_takkub.cli",
+        "agent_takkub.settings_management.repositories.plugins",
         "agent_takkub.user_actions"
       ],
-      "fan_in": 2,
+      "fan_in": 3,
       "fan_out": 2
     },
     {
@@ -1080,16 +1086,18 @@
       "imports": [],
       "imported_by": [
         "agent_takkub.settings_management.pages.mcp_page",
+        "agent_takkub.settings_management.pages.plugins_page",
         "agent_takkub.settings_management.pages.providers_page",
         "agent_takkub.settings_management.pages.roles_page",
         "agent_takkub.settings_management.pages.skills_page",
         "agent_takkub.settings_management.repositories.mcps",
+        "agent_takkub.settings_management.repositories.plugins",
         "agent_takkub.settings_management.repositories.providers",
         "agent_takkub.settings_management.repositories.roles",
         "agent_takkub.settings_management.repositories.skills",
         "agent_takkub.settings_management.services.relationships"
       ],
-      "fan_in": 9,
+      "fan_in": 11,
       "fan_out": 0
     },
     {
@@ -1104,10 +1112,12 @@
       "imports": [],
       "imported_by": [
         "agent_takkub.settings_management.pages.mcp_page",
+        "agent_takkub.settings_management.pages.plugins_page",
         "agent_takkub.settings_management.pages.providers_page",
         "agent_takkub.settings_management.pages.roles_page",
         "agent_takkub.settings_management.pages.skills_page",
         "agent_takkub.settings_management.repositories.mcps",
+        "agent_takkub.settings_management.repositories.plugins",
         "agent_takkub.settings_management.repositories.providers",
         "agent_takkub.settings_management.repositories.roles",
         "agent_takkub.settings_management.repositories.skills",
@@ -1117,7 +1127,7 @@
         "agent_takkub.settings_management.widgets.detail_header",
         "agent_takkub.settings_management.widgets.source_badge"
       ],
-      "fan_in": 13,
+      "fan_in": 15,
       "fan_out": 0
     },
     {
@@ -1134,6 +1144,24 @@
         "agent_takkub.settings_management.commands",
         "agent_takkub.settings_management.models",
         "agent_takkub.settings_management.repositories.mcps",
+        "agent_takkub.settings_management.widgets.danger_zone",
+        "agent_takkub.settings_management.widgets.detail_footer",
+        "agent_takkub.settings_management.widgets.detail_header",
+        "agent_takkub.settings_management.widgets.management_page"
+      ],
+      "imported_by": [
+        "agent_takkub.settings_management.window"
+      ],
+      "fan_in": 1,
+      "fan_out": 8
+    },
+    {
+      "module": "agent_takkub.settings_management.pages.plugins_page",
+      "imports": [
+        "agent_takkub.cockpit_theme",
+        "agent_takkub.settings_management.commands",
+        "agent_takkub.settings_management.models",
+        "agent_takkub.settings_management.repositories.plugins",
         "agent_takkub.settings_management.widgets.danger_zone",
         "agent_takkub.settings_management.widgets.detail_footer",
         "agent_takkub.settings_management.widgets.detail_header",
@@ -1224,6 +1252,22 @@
       ],
       "fan_in": 1,
       "fan_out": 5
+    },
+    {
+      "module": "agent_takkub.settings_management.repositories.plugins",
+      "imports": [
+        "agent_takkub.lead_context",
+        "agent_takkub.pane_tools_dialog",
+        "agent_takkub.pane_tools_policy",
+        "agent_takkub.plugin_installer",
+        "agent_takkub.settings_management.commands",
+        "agent_takkub.settings_management.models"
+      ],
+      "imported_by": [
+        "agent_takkub.settings_management.pages.plugins_page"
+      ],
+      "fan_in": 1,
+      "fan_out": 6
     },
     {
       "module": "agent_takkub.settings_management.repositories.providers",
@@ -1354,10 +1398,11 @@
       ],
       "imported_by": [
         "agent_takkub.settings_management.pages.mcp_page",
+        "agent_takkub.settings_management.pages.plugins_page",
         "agent_takkub.settings_management.pages.roles_page",
         "agent_takkub.settings_management.pages.skills_page"
       ],
-      "fan_in": 3,
+      "fan_in": 4,
       "fan_out": 2
     },
     {
@@ -1367,11 +1412,12 @@
       ],
       "imported_by": [
         "agent_takkub.settings_management.pages.mcp_page",
+        "agent_takkub.settings_management.pages.plugins_page",
         "agent_takkub.settings_management.pages.providers_page",
         "agent_takkub.settings_management.pages.roles_page",
         "agent_takkub.settings_management.pages.skills_page"
       ],
-      "fan_in": 4,
+      "fan_in": 5,
       "fan_out": 1
     },
     {
@@ -1383,11 +1429,12 @@
       ],
       "imported_by": [
         "agent_takkub.settings_management.pages.mcp_page",
+        "agent_takkub.settings_management.pages.plugins_page",
         "agent_takkub.settings_management.pages.providers_page",
         "agent_takkub.settings_management.pages.roles_page",
         "agent_takkub.settings_management.pages.skills_page"
       ],
-      "fan_in": 4,
+      "fan_in": 5,
       "fan_out": 3
     },
     {
@@ -1409,11 +1456,12 @@
       ],
       "imported_by": [
         "agent_takkub.settings_management.pages.mcp_page",
+        "agent_takkub.settings_management.pages.plugins_page",
         "agent_takkub.settings_management.pages.providers_page",
         "agent_takkub.settings_management.pages.roles_page",
         "agent_takkub.settings_management.pages.skills_page"
       ],
-      "fan_in": 4,
+      "fan_in": 5,
       "fan_out": 2
     },
     {
@@ -1433,6 +1481,7 @@
       "imports": [
         "agent_takkub.cockpit_theme",
         "agent_takkub.settings_management.pages.mcp_page",
+        "agent_takkub.settings_management.pages.plugins_page",
         "agent_takkub.settings_management.pages.providers_page",
         "agent_takkub.settings_management.pages.roles_page",
         "agent_takkub.settings_management.pages.skills_page"
@@ -1441,7 +1490,7 @@
         "agent_takkub.settings_management.__main__"
       ],
       "fan_in": 1,
-      "fan_out": 5
+      "fan_out": 6
     },
     {
       "module": "agent_takkub.settings_window",
@@ -1530,13 +1579,14 @@
         "agent_takkub.worktree_manager"
       ],
       "imported_by": [
+        "agent_takkub.cli",
         "agent_takkub.main_window",
         "agent_takkub.settings_management.pages.roles_page",
         "agent_takkub.settings_management.repositories.skills",
         "agent_takkub.settings_window",
         "agent_takkub.skill_policy"
       ],
-      "fan_in": 5,
+      "fan_in": 6,
       "fan_out": 2
     },
     {
