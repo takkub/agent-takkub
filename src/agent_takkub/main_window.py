@@ -918,13 +918,16 @@ class MainWindow(
             self._status.showMessage(f"⚠ failed to persist open tabs: {e}", 8_000)
 
     def _on_new_tab_clicked(self) -> None:
-        """New-project entry point — two modes (the 📁 add-project button was
-        folded in here):
+        """New-project entry point — a single dialog, 3 buttons:
 
-          1. **เลือกจากที่มีอยู่** — open a project already configured in
-             projects.json (the old "+" picker; excludes already-open ones).
-          2. **เพิ่มโปรเจคใหม่** — add a brand-new project via the wizard
-             (`_on_add_project_clicked`: New with AI rules, or Import existing).
+          1. **เปิดโปรเจคที่ตั้งไว้** — open a project already configured in
+             projects.json (excludes already-open ones).
+          2. **โปรเจคใหม่ (AI rules)** — `_new_project_with_rules()`.
+          3. **Import โฟลเดอร์** — `_import_existing_project()`.
+
+        Collapses what used to be two sequential "new vs existing" dialogs
+        (this one, then a second one asking "New with AI rules vs Import")
+        into one — same three end behaviors, one fewer dialog hop.
         """
         from PyQt6.QtWidgets import QMessageBox
 
@@ -932,13 +935,14 @@ class MainWindow(
         available = [n for n in list_project_names() if n not in open_names]
 
         box = QMessageBox(self)
-        box.setWindowTitle("New project")
-        box.setText("เปิดโปรเจคที่มีอยู่ หรือเพิ่มโปรเจคใหม่?")
+        box.setWindowTitle("โปรเจคใหม่")
+        box.setText("เปิดโปรเจคที่ตั้งไว้ หรือเพิ่มโปรเจคใหม่?")
         box.setInformativeText(
-            "เลือกจากที่เคยตั้งไว้ในระบบ — หรือเพิ่มโปรเจคใหม่ (สร้างใหม่ / import folder ที่มีอยู่)"
+            "เลือกจากที่เคยตั้งไว้ในระบบ — หรือเพิ่มโปรเจคใหม่ (สร้างใหม่ด้วย AI rules / import โฟลเดอร์ที่มีอยู่)"
         )
-        btn_existing = box.addButton("📂 เลือกจากที่มีอยู่", QMessageBox.ButtonRole.AcceptRole)
-        btn_new = box.addButton("✨ เพิ่มโปรเจคใหม่", QMessageBox.ButtonRole.AcceptRole)
+        btn_existing = box.addButton("📂 เปิดโปรเจคที่ตั้งไว้", QMessageBox.ButtonRole.AcceptRole)
+        btn_new = box.addButton("✨ โปรเจคใหม่ (AI rules)", QMessageBox.ButtonRole.AcceptRole)
+        btn_import = box.addButton("📁 Import โฟลเดอร์", QMessageBox.ButtonRole.AcceptRole)
         box.addButton("ยกเลิก", QMessageBox.ButtonRole.RejectRole)
         # No existing-but-unopened project → steer straight to "add new".
         if not available:
@@ -948,7 +952,10 @@ class MainWindow(
         clicked = box.clickedButton()
 
         if clicked is btn_new:
-            self._on_add_project_clicked()
+            self._new_project_with_rules()
+            return
+        if clicked is btn_import:
+            self._import_existing_project()
             return
         if clicked is not btn_existing:
             return  # cancelled / closed

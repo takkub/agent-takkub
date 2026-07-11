@@ -61,27 +61,6 @@ class _RulesGeneratorThread(QThread):
 class ProjectWizardMixin:
     """Mixin for new/import project wizard and project editing."""
 
-    def _on_add_project_clicked(self) -> None:
-        """Show a choice dialog: New project (AI-generated rules) vs Import existing."""
-        from PyQt6.QtWidgets import QMessageBox
-
-        msg = QMessageBox(self)
-        msg.setWindowTitle("Add project")
-        msg.setText("How do you want to add this project?")
-        btn_new = msg.addButton(
-            "✨ New project (AI-generated rules)", QMessageBox.ButtonRole.AcceptRole
-        )
-        btn_import = msg.addButton("📂 Import existing", QMessageBox.ButtonRole.ActionRole)
-        msg.addButton(QMessageBox.StandardButton.Cancel)
-        msg.exec()
-
-        clicked = msg.clickedButton()
-        if clicked is btn_new:
-            self._new_project_with_rules()
-        elif clicked is btn_import:
-            self._import_existing_project()
-        # Cancel → do nothing
-
     def _import_existing_project(self) -> None:
         """Original add-project flow: select folder → map paths → save."""
         from pathlib import Path

@@ -1,9 +1,15 @@
-"""_run_map_paths_dialog: flat-repo auto-skip (no subdir to map → no dialog)."""
+"""_run_map_paths_dialog: flat-repo auto-skip (no subdir to map → no dialog).
+
+Also covers `MainWindow._on_new_tab_clicked`'s merged D1+D2 dialog (3
+buttons: open-existing / new-with-rules / import) that replaced the old
+two-hop "new vs existing" then "new-with-rules vs import" chain.
+"""
 
 from __future__ import annotations
 
-from PyQt6.QtWidgets import QWidget
+from PyQt6.QtWidgets import QInputDialog, QMessageBox, QWidget
 
+from agent_takkub.main_window import MainWindow
 from agent_takkub.project_wizard import ProjectWizardMixin
 
 
@@ -55,3 +61,105 @@ def test_repo_with_subdir_still_opens_dialog(tmp_path, monkeypatch):
 
     assert calls, "dialog.exec() should be called when a mappable subdir exists"
     assert result is None
+
+
+class _NewTabHost(QWidget):
+    """Minimal host exposing only what `_on_new_tab_clicked` touches on
+    `self` — avoids booting the full MainWindow (orchestrator, CLI server,
+    Lead pane)."""
+
+    def __init__(self):
+        super().__init__()
+        self.calls: list[tuple] = []
+
+    def _open_projects(self):
+        return []
+
+    def _open_project_tab(self, name):
+        self.calls.append(("open_tab", name))
+
+    def _new_project_with_rules(self):
+        self.calls.append(("new_with_rules",))
+
+    def _import_existing_project(self):
+        self.calls.append(("import_existing",))
+
+
+def _stub_dialog(monkeypatch, pick_text_substr):
+    """Make QMessageBox.exec() a no-op and clickedButton() return the
+    button whose text contains `pick_text_substr` (None → nothing clicked)."""
+    picked: dict = {}
+
+    def _fake_exec(self):
+        picked["box"] = self
+        return 0
+
+    def _fake_clicked_button(self):
+        box = picked.get("box")
+        if box is None or pick_text_substr is None:
+            return None
+        for b in box.buttons():
+            if pick_text_substr in b.text():
+                return b
+        return None
+
+    monkeypatch.setattr(QMessageBox, "exec", _fake_exec)
+    monkeypatch.setattr(QMessageBox, "clickedButton", _fake_clicked_button)
+    return picked
+
+
+def test_new_tab_dialog_has_exactly_three_action_buttons(monkeypatch):
+    monkeypatch.setattr("agent_takkub.main_window.list_project_names", lambda: [])
+    host = _NewTabHost()
+    picked = _stub_dialog(monkeypatch, None)
+
+    MainWindow._on_new_tab_clicked(host)
+
+    labels = [b.text() for b in picked["box"].buttons()]
+    assert len(labels) == 4  # existing / new-with-rules / import / cancel
+    assert any("เปิดโปรเจคที่ตั้งไว้" in t for t in labels)
+    assert any("AI rules" in t for t in labels)
+    assert any("Import" in t for t in labels)
+    assert host.calls == []  # cancelled → no downstream action fired
+
+
+def test_new_tab_dialog_routes_new_to_rules_wizard(monkeypatch):
+    monkeypatch.setattr("agent_takkub.main_window.list_project_names", lambda: [])
+    host = _NewTabHost()
+    _stub_dialog(monkeypatch, "AI rules")
+
+    MainWindow._on_new_tab_clicked(host)
+
+    assert host.calls == [("new_with_rules",)]
+
+
+def test_new_tab_dialog_routes_import_to_import_flow(monkeypatch):
+    monkeypatch.setattr("agent_takkub.main_window.list_project_names", lambda: [])
+    host = _NewTabHost()
+    _stub_dialog(monkeypatch, "Import")
+
+    MainWindow._on_new_tab_clicked(host)
+
+    assert host.calls == [("import_existing",)]
+
+
+def test_new_tab_dialog_existing_button_disabled_when_nothing_to_open(monkeypatch):
+    monkeypatch.setattr("agent_takkub.main_window.list_project_names", lambda: [])
+    host = _NewTabHost()
+    picked = _stub_dialog(monkeypatch, None)
+
+    MainWindow._on_new_tab_clicked(host)
+
+    btn_existing = next(b for b in picked["box"].buttons() if "เปิดโปรเจคที่ตั้งไว้" in b.text())
+    assert not btn_existing.isEnabled()
+
+
+def test_new_tab_dialog_routes_existing_to_project_picker(monkeypatch):
+    monkeypatch.setattr("agent_takkub.main_window.list_project_names", lambda: ["alpha", "beta"])
+    host = _NewTabHost()
+    _stub_dialog(monkeypatch, "เปิดโปรเจคที่ตั้งไว้")
+    monkeypatch.setattr(QInputDialog, "getItem", lambda *a, **k: ("beta", True))
+
+    MainWindow._on_new_tab_clicked(host)
+
+    assert host.calls == [("open_tab", "beta")]
