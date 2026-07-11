@@ -655,7 +655,7 @@ class UserActionsMixin:
         if not hasattr(self, "_chip_plan"):
             return
         is_pro = tier == "pro"
-        self._chip_plan.setText("Pro" if is_pro else "Max")
+        self._chip_plan.setText(self._plan_chip_label(is_pro))
         self._chip_plan.setStyleSheet(self._plan_chip_style(is_pro))
         self._chip_plan.setToolTip(self._plan_chip_tooltip(is_pro))
 

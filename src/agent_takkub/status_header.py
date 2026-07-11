@@ -13,10 +13,12 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
     QComboBox,
     QFrame,
+    QHBoxLayout,
     QPushButton,
     QStatusBar,
     QStyle,
     QSystemTrayIcon,
+    QWidget,
 )
 
 from . import cockpit_theme
@@ -32,11 +34,14 @@ class StatusHeaderMixin:
     # ──────────────────────────────────────────────────────────────
 
     @staticmethod
-    def _make_status_separator() -> QFrame:
+    def _make_status_separator() -> QWidget:
         """A thin vertical divider between status-bar groups.
 
-        Same height as the chips around it so the bar still reads as a
-        single row; faint zinc color so it acts as a hint, not a wall.
+        Every chip already draws its own 1px outline, so a bare 1px line
+        sitting flush against them used to disappear into the row of
+        borders (14+ outlined chips reading as one blob). Wrapping the
+        line in a widget with real left/right margin gives the eye a
+        visible gap to land on, not just one more thin stroke among many.
         """
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.VLine)
@@ -46,8 +51,12 @@ class StatusHeaderMixin:
             f"QFrame {{ color: {cockpit_theme.BORDER_STRONG}; "
             f"background: {cockpit_theme.BORDER_STRONG}; }}"
         )
-        sep.setContentsMargins(2, 4, 2, 4)
-        return sep
+        wrap = QWidget()
+        lay = QHBoxLayout(wrap)
+        lay.setContentsMargins(6, 4, 6, 4)
+        lay.setSpacing(0)
+        lay.addWidget(sep)
+        return wrap
 
     @staticmethod
     def _provider_chip_style(provider: str, disabled: bool, not_installed: bool = False) -> str:
@@ -141,6 +150,15 @@ class StatusHeaderMixin:
                 "Loses model diversity. Install the CLI to fix, or click to disable."
             )
         return f"{name}: enabled — click to disable"
+
+    @staticmethod
+    def _plan_chip_label(is_pro: bool) -> str:
+        """'Plan: Pro' / 'Plan: Max' — the bare 'Pro'/'Max' text used to sit
+        right next to the '👤 1:1' / '👥 Multi' exec-mode chip with a near
+        -identical outline style; the two easily got mistaken for the same
+        kind of toggle. The 'Plan:' prefix removes the ambiguity without
+        needing the reader to memorise a colour legend."""
+        return "Plan: Pro" if is_pro else "Plan: Max"
 
     @staticmethod
     def _plan_chip_style(is_pro: bool) -> str:
@@ -381,7 +399,7 @@ class StatusHeaderMixin:
         from .plan_tier import is_pro as _plan_is_pro
 
         _pro_now = _plan_is_pro()
-        self._chip_plan = QPushButton("Pro" if _pro_now else "Max", self)
+        self._chip_plan = QPushButton(self._plan_chip_label(_pro_now), self)
         self._chip_plan.setToolTip(self._plan_chip_tooltip(_pro_now))
         self._chip_plan.setStyleSheet(self._plan_chip_style(_pro_now))
         self._chip_plan.clicked.connect(self._on_plan_chip_clicked)
@@ -445,6 +463,14 @@ class StatusHeaderMixin:
             "border: none; padding: 2px 6px; font-size: 12px; }"
             f"QPushButton:hover {{ color: {cockpit_theme.TEXT_SECONDARY}; }}"
         )
+        # This button's label swings from "🔄 Checking…" to "📦 Update
+        # available (12)" to "⚠ Local edits (3)" as the poll state changes —
+        # every swing used to reflow the whole status bar and jump every chip
+        # to its right. A stable minimum width (sized for the longest common
+        # label) absorbs the short-label states; only rare very-long dirty-
+        # file counts still grow past it, which is an acceptable trade for a
+        # bar that stays put the rest of the time.
+        self._btn_update.setMinimumWidth(150)
         self._btn_update.clicked.connect(self._on_update_clicked)
         # Cached result from the most recent poll. Populated lazily so
         # the click handler doesn't re-run git just to re-render the
@@ -594,13 +620,19 @@ class StatusHeaderMixin:
         self._project_combo.hide()
 
         # Status bar is laid out in 2 semantic groups separated by a thin
-        # vertical line. Without grouping, 14+ widgets scan as one long
-        # blob and the user has to recall (not recognize) which button
-        # does what. Order within each group stays stable across cockpit
-        # versions so muscle memory survives upgrades.
+        # vertical line, and Group 2 is further split into 4 sub-groups —
+        # Group 2 used to dump 10 heterogeneous chips (exec mode, providers,
+        # session toggles, system actions) in one run with no internal
+        # separator, so it read as a single wall even after the top-level
+        # grouping landed. Order within each (sub-)group stays stable across
+        # cockpit versions so muscle memory survives upgrades.
         #
         #   Group 1 — Workflow actions (buttons that change pane state)
         #   Group 2 — System status    (cockpit-level toggles + updates)
+        #     2a. exec      — account plan · execution mode
+        #     2b. providers — codex · gemini
+        #     2c. session   — auto-resume · remote
+        #     2d. system    — rtk install · restart · team · update
         for w in (
             self._btn_open_shell,
             self._chip_tasks,
@@ -609,22 +641,25 @@ class StatusHeaderMixin:
         ):
             self._status.addPermanentWidget(w)
         self._status.addPermanentWidget(self._make_status_separator())
-        for w in (
-            self._chip_plan,
-            self._chip_exec_mode,
-            self._chip_auto_resume,
-            self._chip_remote,
-            self._chip_codex,
-            self._chip_gemini,
-            self._btn_install_rtk,
-            self._btn_restart,
-            self._btn_pipelines,
-            # self._btn_claude_auth,  # hidden per user request — uncomment to restore.
-            # The button + its handler are still created above; only its
-            # placement in the status bar is removed so it can come back easily.
-            self._btn_update,
-        ):
-            self._status.addPermanentWidget(w)
+        subgroups = (
+            (self._chip_plan, self._chip_exec_mode),
+            (self._chip_codex, self._chip_gemini),
+            (self._chip_auto_resume, self._chip_remote),
+            (
+                self._btn_install_rtk,
+                self._btn_restart,
+                self._btn_pipelines,
+                # self._btn_claude_auth,  # hidden per user request — uncomment to restore.
+                # The button + its handler are still created above; only its
+                # placement in the status bar is removed so it can come back easily.
+                self._btn_update,
+            ),
+        )
+        for i, group in enumerate(subgroups):
+            for w in group:
+                self._status.addPermanentWidget(w)
+            if i < len(subgroups) - 1:
+                self._status.addPermanentWidget(self._make_status_separator())
         # Sync rtk button visibility after every permanent widget has been
         # added, so any layout invalidation triggered by show()/hide() lands
         # on a fully-built status bar rather than a half-built one (an
