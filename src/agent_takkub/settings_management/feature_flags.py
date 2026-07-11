@@ -1,5 +1,11 @@
-"""Resolve which Settings surface opens — ``new`` (default) or ``legacy`` —
+"""Resolve which Settings surface opens — ``legacy`` (default) or ``new`` —
 from ``TAKKUB_SETTINGS_UI``.
+
+Default rolled back to LEGACY (2026-07-11 evening): the new surface passed
+critic review but the actual user rejected it in real use ("ใช้ยากกว่าเดิม")
+— the flag exists precisely so this is a one-line revert. The new window
+stays fully functional behind ``TAKKUB_SETTINGS_UI=new`` while its UX is
+reworked against the user's actual complaints.
 
 Single resolution point (SPEC.md "Coexistence") — every entry point (the
 status-bar Settings button, this package's ``__main__``, tests) reads
@@ -33,9 +39,9 @@ class SettingsUI(StrEnum):
 
 
 def resolve() -> SettingsUI:
-    """Read ``TAKKUB_SETTINGS_UI`` (case-insensitive). Unset/unknown -> NEW."""
+    """Read ``TAKKUB_SETTINGS_UI`` (case-insensitive). Unset/unknown -> LEGACY."""
     raw = (os.environ.get(_ENV_VAR) or "").strip().lower()
     try:
         return SettingsUI(raw)
     except ValueError:
-        return SettingsUI.NEW
+        return SettingsUI.LEGACY

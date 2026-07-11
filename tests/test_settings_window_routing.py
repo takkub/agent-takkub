@@ -62,15 +62,17 @@ class TestOpenSettingsWindowRouting:
         stub._open_legacy_settings_window.assert_called_once_with(VIEW_PROVIDERS_ROLES)
         stub._open_settings_management_window.assert_not_called()
 
-    def test_unset_env_defaults_to_new_window(self):
+    def test_unset_env_defaults_to_legacy_window(self):
+        # Default rolled back to LEGACY 2026-07-11 evening (user rejected the
+        # new surface in real use) — new stays opt-in via TAKKUB_SETTINGS_UI.
         stub = _Stub()
         stub._open_settings_management_window = MagicMock()
         stub._open_legacy_settings_window = MagicMock()
 
         stub._open_settings_window(VIEW_PROVIDERS_ROLES)
 
-        stub._open_settings_management_window.assert_called_once_with()
-        stub._open_legacy_settings_window.assert_not_called()
+        stub._open_legacy_settings_window.assert_called_once_with(VIEW_PROVIDERS_ROLES)
+        stub._open_settings_management_window.assert_not_called()
 
 
 class TestOpenSettingsManagementWindow:
