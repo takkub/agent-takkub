@@ -144,8 +144,14 @@ focused on. Treat that as your workspace root. Read files, run tests.
 """
 
 
-def ensure_agents_md(spawn_cwd: str | Path) -> tuple[bool, str]:
+def ensure_agents_md(spawn_cwd: str | Path, extra: str = "") -> tuple[bool, str]:
     """Plant `<spawn_cwd>/AGENTS.md` with the cockpit cheatsheet.
+
+    `extra` (issue #103 phase 4) is appended verbatim after the base
+    cheatsheet — used to bridge the Skill Matrix's per-role skill
+    references into this file (see `skill_policy.render_skill_appendix`,
+    ``context_strategy="agents_md_file"``). Empty by default: unchanged
+    behaviour for every existing caller.
 
     Returns `(planted, reason)`:
       - `(True, "written")` — file was created or refreshed.
@@ -154,10 +160,16 @@ def ensure_agents_md(spawn_cwd: str | Path) -> tuple[bool, str]:
       - `(False, "<error>")` — disk failure (permission, etc.).
 
     The cheatsheet is idempotent: if the file already carries our
-    marker, we overwrite it (refresh in case the content changed
-    between cockpit versions). If a user-owned AGENTS.md exists we
+    marker, we overwrite it (refresh in case the content — or `extra` —
+    changed since the last spawn). If a user-owned AGENTS.md exists we
     skip — Codex will use theirs, and our `takkub` shortcuts just
     won't be available.
+
+    Caveat when two DIFFERENT roles both map to a non-claude provider and
+    happen to share the same `spawn_cwd`: whichever spawns last wins the
+    `extra` content, same as the base cheatsheet already does today (no
+    per-role file — one file per cwd). Typically not an issue since roles
+    default to distinct cwds (frontend→web, backend→api, ...).
     """
     spawn_path = Path(spawn_cwd)
     # Refuse drive-relative or relative paths — they make `mkdir(parents=True)`
@@ -173,7 +185,7 @@ def ensure_agents_md(spawn_cwd: str | Path) -> tuple[bool, str]:
             first = head[0] if head else ""
             if TAKKUB_MARKER not in first:
                 return False, "user-owned"
-        target.write_text(CODEX_AGENTS_MD, encoding="utf-8")
+        target.write_text(CODEX_AGENTS_MD + extra, encoding="utf-8")
         return True, "written"
     except OSError as e:
         return False, f"write failed: {e}"

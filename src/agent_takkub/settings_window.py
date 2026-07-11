@@ -3,7 +3,7 @@
 Implements the gold/IBM-Plex design system from
 `docs/design-review/2026-07-10-cockpit-settings-design-system.md`: a
 status strip + sidebar (PIPELINE/POLICY/ACCOUNT sections + "+ New
-Role") + content (header, an 8-view ``QStackedWidget``, footer). The
+Role") + content (header, a 10-view ``QStackedWidget``, footer). The
 original design also had a decorative faux titlebar above the status
 strip — dropped 2026-07-11 (UI walkthrough #55): it duplicated the OS
 title bar's "Takkub Cockpit — Settings" text with no other function.
@@ -30,6 +30,16 @@ remaining five:
   ``.claude/skills/*/SKILL.md`` via :mod:`skill_scan` (the scanner the New
   Role picker uses) with each skill's description + which role docs mention
   it. Read-only browse, like Role Overlap.
+* **Skill Matrix** (SKILL section, 2026-07-11 — #103 phase 4) — role × skill
+  toggle grid backed by :mod:`skill_policy` (mirrors :mod:`pane_tools_policy`'s
+  on-disk shape, a separate store/concern: which skills get PROACTIVELY
+  referenced in a role's spawn-time context, not which MCP/plugin a pane can
+  load). Reuses the same ``_populate_matrix_grid`` + ``pane_tools_dialog``
+  matrix helpers as MCP/Plugins Matrix. Unlike those two, codex and gemini get
+  rows here — `spawn_engine.spawn()` bridges a checked skill into their
+  AGENTS.md as instruction-style text (no Skill tool on those CLIs); claude
+  gets a lighter nudge appended to its role ``CLAUDE.md``, since its Skill
+  tool already auto-discovers `.claude/skills/` on its own.
 * **Pipeline Builder** / **Templates** — native hop editor + template
   list/detail, backed by :mod:`pipeline_config` directly (a from-scratch
   reimplementation of :mod:`pipeline_dialog`'s QWebEngineView page per the
@@ -106,6 +116,7 @@ from . import (
     provider_state,
     shared_dev_tools,
     skill_audit,
+    skill_policy,
     skill_scan,
     user_profile,
 )
@@ -115,11 +126,13 @@ from .lead_context import _allowed_project_roots
 
 # ── view indices (QStackedWidget page order) ────────────────────
 # Order is stable for indices 0–7 (external callers/tests reference these
-# constants); the real Skill Catalog was appended as index 8 rather than
-# renumbering. VIEW_ROLE_OVERLAP (5) is the old "Skill Catalog" page — it was
-# never a skill browser, it audits ROLE-doc scope overlap (TF-IDF), so it was
-# renamed to say what it does. VIEW_SKILL_CATALOG (8) is the new, real skill
-# browser backed by `skill_scan` (the same scanner the New Role picker uses).
+# constants); the real Skill Catalog was appended as index 8 and Skill Matrix
+# as index 9 rather than renumbering. VIEW_ROLE_OVERLAP (5) is the old "Skill
+# Catalog" page — it was never a skill browser, it audits ROLE-doc scope
+# overlap (TF-IDF), so it was renamed to say what it does. VIEW_SKILL_CATALOG
+# (8) is the real skill browser backed by `skill_scan` (the same scanner the
+# New Role picker uses); VIEW_SKILL_MATRIX (9) is the role×skill policy grid
+# backed by `skill_policy`.
 VIEW_PIPELINE_BUILDER = 0
 VIEW_TEMPLATES = 1
 VIEW_PROVIDERS_ROLES = 2
@@ -129,6 +142,7 @@ VIEW_ROLE_OVERLAP = 5
 VIEW_NEW_ROLE = 6
 VIEW_USERS = 7
 VIEW_SKILL_CATALOG = 8
+VIEW_SKILL_MATRIX = 9
 
 # (view index, nav label, sidebar section) — New Role is reached via the
 # dedicated "+ New Role" button, not this list, so it isn't a normal nav item.
@@ -144,6 +158,7 @@ _NAV_VIEWS: tuple[tuple[int, str, str], ...] = (
     (VIEW_MCP_MATRIX, "MCP Matrix", "TOOLS"),
     (VIEW_PLUGINS_MATRIX, "Plugins Matrix", "TOOLS"),
     (VIEW_SKILL_CATALOG, "Skill Catalog", "SKILL"),
+    (VIEW_SKILL_MATRIX, "Skill Matrix", "SKILL"),
     (VIEW_USERS, "Users", "ACCOUNT"),
 )
 
@@ -168,6 +183,10 @@ _VIEW_HEADERS: dict[int, tuple[str, str]] = {
     VIEW_SKILL_CATALOG: (
         "Skill Catalog",
         "skill จริงใน .claude/skills/ (SKILL.md) — ความรู้ที่ role อ้างถึง/อ่านได้",
+    ),
+    VIEW_SKILL_MATRIX: (
+        "Skill Matrix",
+        "role × skill — เลือก skill ที่จะ inject เข้า context ตอน spawn อัตโนมัติ",
     ),
 }
 
@@ -454,7 +473,8 @@ class SettingsWindow(QDialog):
 
         self._stack = QStackedWidget(header_body)
         # Index order MUST match the VIEW_* constants above (0–7 unchanged;
-        # the real Skill Catalog is index 8, appended last).
+        # Skill Catalog is index 8, Skill Matrix is index 9 — both appended
+        # last rather than renumbering existing indices).
         self._stack.addWidget(self._wrap_scroll(self._build_pipeline_builder_view()))
         self._stack.addWidget(self._wrap_scroll(self._build_templates_view()))
         self._stack.addWidget(self._wrap_scroll(self._build_providers_roles_view()))
@@ -464,6 +484,7 @@ class SettingsWindow(QDialog):
         self._stack.addWidget(self._wrap_scroll(self._build_new_role_view()))
         self._stack.addWidget(self._wrap_scroll(self._build_users_view()))
         self._stack.addWidget(self._wrap_scroll(self._build_skill_catalog_view()))
+        self._stack.addWidget(self._wrap_scroll(self._build_skill_matrix_view()))
         hb_lay.addWidget(self._stack, 1)
 
         outer.addWidget(header_body, 1)
@@ -549,6 +570,8 @@ class SettingsWindow(QDialog):
             self._reload_mcp_matrix()
         elif idx == VIEW_PLUGINS_MATRIX:
             self._reload_plugins_matrix()
+        elif idx == VIEW_SKILL_MATRIX:
+            self._reload_skill_matrix()
         elif idx == VIEW_PIPELINE_BUILDER and getattr(self, "_pb_template_id", None):
             self._load_pb_hops(self._pb_template_id)
         self._dirty_views.discard(idx)
@@ -585,6 +608,7 @@ class SettingsWindow(QDialog):
             provider_config.config_path(self._project),
             pipeline_config.path(self._project),
             pane_tools_policy.PANE_TOOLS_POLICY_FILE,
+            skill_policy.SKILL_POLICY_FILE,
         )
         snapshots = {p: (p.read_bytes() if p.exists() else None) for p in snapshot_paths}
 
@@ -668,6 +692,20 @@ class SettingsWindow(QDialog):
                 shared_dev_tools.regen_role_variants()
             self._orig_mcp_items = updated_mcps
             self._orig_plugin_items = updated_plugins
+
+            updated_skills = pane_tools_dialog.matrix_to_role_items(
+                {
+                    role: {item: t.isChecked() for item, t in items.items()}
+                    for role, items in self._skill_toggles.items()
+                }
+            )
+            skill_changes = pane_tools_dialog.diff_role_items(
+                self._orig_skill_items, updated_skills
+            )
+            for role in skill_changes:
+                if not skill_policy.set_role_skills(role, updated_skills[role]):
+                    raise OSError(f"เขียน skill policy ของ role '{role}' ไม่สำเร็จ")
+            self._orig_skill_items = updated_skills
         except OSError as e:
             _rollback()
             self._pipeline_payload = pipeline_config.load(self._project)
@@ -2000,6 +2038,68 @@ class SettingsWindow(QDialog):
         else:
             self._catalog_roles.setText("ยังไม่มี role ไหนอ้างถึง skill นี้")
         self._catalog_path.setText(f"📄 {skill.path}")
+
+    # ──────────────────────────────────────────────────────────
+    # view: Skill Matrix (real — SKILL section, #103 phase 4)
+    #
+    # role × skill toggle grid, same shape as MCP Matrix / Plugins Matrix
+    # (reuses `_populate_matrix_grid` + `pane_tools_dialog.build_matrix`/
+    # `matrix_to_role_items`/`diff_role_items` verbatim — this is a THIRD
+    # kind of policy those helpers already generalize over). Unlike the
+    # MCP/Plugins matrices, codex and gemini get rows here — a checked cell
+    # makes `spawn_engine.spawn()` bridge that skill into their AGENTS.md as
+    # instruction-style text (`skill_policy.render_skill_appendix`, see that
+    # module's docstring for the claude-vs-codex/gemini distinction). Persists
+    # to `skill_policy` (~/.takkub/skill-policy.json), a policy store separate
+    # from `pane_tools_policy` — different concern (context injection, not
+    # MCP/plugin access) even though the on-disk shape rhymes.
+    # ──────────────────────────────────────────────────────────
+
+    def _build_skill_matrix_view(self) -> QWidget:
+        view = QWidget(self)
+        lay = QVBoxLayout(view)
+        lay.setContentsMargins(0, 0, 0, 16)
+        lay.setSpacing(12)
+
+        banner = QLabel(
+            "ติ๊ก = spawn ครั้งหน้า role นั้นจะเห็น reference ของ skill นี้ใน context ทันที "
+            "(claude = นัดให้อ่าน skill ที่มีอยู่แล้ว · codex/gemini = ฝังเนื้อหาเป็น "
+            "instruction-style ใน AGENTS.md เพราะไม่มี Skill tool)",
+            view,
+        )
+        banner.setObjectName("infoBanner")
+        banner.setWordWrap(True)
+        lay.addWidget(banner)
+
+        self._skill_matrix_empty = QLabel(
+            "ไม่พบ .claude/skills/*/SKILL.md ในโปรเจคนี้หรือ cockpit checkout", view
+        )
+        self._skill_matrix_empty.setObjectName("panelHint")
+        self._skill_matrix_empty.setWordWrap(True)
+        self._skill_matrix_empty.hide()
+        lay.addWidget(self._skill_matrix_empty)
+
+        matrix_panel = QWidget(view)
+        matrix_panel.setObjectName("panel")
+        self._skill_matrix_grid = QGridLayout(matrix_panel)
+        self._skill_matrix_grid.setContentsMargins(14, 12, 14, 12)
+        self._skill_matrix_grid.setHorizontalSpacing(6)
+        self._skill_matrix_grid.setVerticalSpacing(4)
+        lay.addWidget(matrix_panel)
+        lay.addStretch(1)
+
+        self._reload_skill_matrix()
+        return view
+
+    def _reload_skill_matrix(self) -> None:
+        items = [s.name for s in skill_scan.scan_skills(self._new_role_skill_roots())]
+        roles = skill_policy.skill_matrix_roles()
+        self._orig_skill_items = {role: skill_policy.effective_skills(role) for role in roles}
+        matrix = pane_tools_dialog.build_matrix(roles, items, self._orig_skill_items)
+        self._skill_toggles = self._populate_matrix_grid(
+            self._skill_matrix_grid, roles, items, matrix
+        )
+        self._skill_matrix_empty.setVisible(not items)
 
     # ──────────────────────────────────────────────────────────
     # view: Pipeline Builder (real)

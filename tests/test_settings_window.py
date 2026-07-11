@@ -27,6 +27,7 @@ from agent_takkub import (
     provider_state,
     settings_window,
     shared_dev_tools,
+    skill_policy,
     user_profile,
 )
 from agent_takkub import roles as roles_mod
@@ -44,6 +45,7 @@ def _isolate_settings_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(pipeline_config, "_PATH", tmp_path / "pipelines.json")
     monkeypatch.setattr(provider_state, "_PATH", tmp_path / "disabled-providers.json")
     monkeypatch.setattr(pane_tools_policy, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
+    monkeypatch.setattr(skill_policy, "SKILL_POLICY_FILE", tmp_path / "skill-policy.json")
     monkeypatch.setattr(shared_dev_tools, "SHARED_MCP_FILE", tmp_path / "shared-mcp.json")
     # Users view (VIEW_USERS) touches user_profile's registry on every
     # SettingsWindow() construction (list_profiles() is called eagerly to
@@ -59,10 +61,10 @@ def _isolate_settings_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 class TestSettingsWindowStructure:
-    def test_has_nine_stacked_views(self) -> None:
-        # 8 original views + the new real Skill Catalog (index 8).
+    def test_has_ten_stacked_views(self) -> None:
+        # 8 original views + real Skill Catalog (index 8) + Skill Matrix (index 9).
         dlg = settings_window.SettingsWindow()
-        assert dlg._stack.count() == 9
+        assert dlg._stack.count() == 10
         dlg.deleteLater()
 
     def test_initial_view_defaults_to_providers_roles(self) -> None:
@@ -513,6 +515,73 @@ class TestPluginsMatrixView:
         assert pane_tools_policy.effective_plugins("backend") == frozenset(
             {"ui-ux-pro-max-skill", "superpowers-dev", "pordee", "claude-plugins-official"}
         )
+        dlg.deleteLater()
+
+
+class TestSkillMatrixView:
+    """Role × skill toggle grid (#103 phase 4) — persists to skill_policy,
+    NOT pane_tools_policy. Unlike MCP/Plugins Matrix, codex and gemini get
+    rows here (skill_policy.skill_matrix_roles(), not
+    settings_window._matrix_roles())."""
+
+    def _fake_skills(self, *names: str) -> list:
+        from agent_takkub import skill_scan
+
+        return [skill_scan.SkillInfo(name=n, description=f"{n} desc", path=Path(n)) for n in names]
+
+    def test_grid_has_a_toggle_per_role_per_skill(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            settings_window.skill_scan,
+            "scan_skills",
+            lambda roots: self._fake_skills("debug-mantra", "verify"),
+        )
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_SKILL_MATRIX)
+        assert set(dlg._skill_toggles.keys()) == set(skill_policy.skill_matrix_roles())
+        for items in dlg._skill_toggles.values():
+            assert set(items.keys()) == {"debug-mantra", "verify"}
+        assert "codex" in dlg._skill_toggles
+        assert "gemini" in dlg._skill_toggles
+        assert "shell" not in dlg._skill_toggles
+        assert dlg._skill_matrix_empty.isHidden()
+        dlg.deleteLater()
+
+    def test_empty_catalog_shows_empty_hint(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(settings_window.skill_scan, "scan_skills", lambda roots: [])
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_SKILL_MATRIX)
+        assert not dlg._skill_matrix_empty.isHidden()
+        dlg.deleteLater()
+
+    def test_toggle_cell_marks_dirty_and_save_persists(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            settings_window.skill_scan,
+            "scan_skills",
+            lambda roots: self._fake_skills("debug-mantra"),
+        )
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_SKILL_MATRIX)
+        toggle = dlg._skill_toggles["backend"]["debug-mantra"]
+        assert toggle.isChecked() is False
+        toggle.setChecked(True)
+        assert dlg._dirty is True
+
+        dlg._on_save_apply_clicked()
+
+        assert skill_policy.effective_skills("backend") == ["debug-mantra"]
+        dlg.deleteLater()
+
+    def test_reset_reverts_unsaved_toggle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            settings_window.skill_scan,
+            "scan_skills",
+            lambda roots: self._fake_skills("debug-mantra"),
+        )
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_SKILL_MATRIX)
+        dlg._skill_toggles["backend"]["debug-mantra"].setChecked(True)
+        dlg._mark_dirty()
+        dlg._on_reset_clicked()
+        assert dlg._skill_toggles["backend"]["debug-mantra"].isChecked() is False
+        assert skill_policy.effective_skills("backend") == []
         dlg.deleteLater()
 
 
