@@ -24,6 +24,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
@@ -465,6 +466,11 @@ def bootstrap_default_profile(
     if dest.exists():
         if (dest / _BOOTSTRAP_MARKER).exists() or (dest / ".credentials.json").exists():
             return False  # real profile — never touch
+        if sys.platform == "darwin":
+            from .limit_status import _read_keychain_credentials
+
+            if _read_keychain_credentials():
+                return False  # logged-in macOS profile — credentials live in Keychain
         shutil.rmtree(dest, ignore_errors=True)  # torn from an earlier interrupted clone
 
     src = Path.home() / ".claude"

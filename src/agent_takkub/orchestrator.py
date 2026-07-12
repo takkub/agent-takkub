@@ -1844,12 +1844,13 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         else:
             notice_body = self._condense_done_note(raw_note, note, evidence_line, session_md_path)
             notice = f"[{from_role} done] {notice_body}".rstrip()
-        # Shard panes: suppress per-shard notice to Lead — consolidated handoff
-        # (_inject_shard_fanout_handoff) is the single message Lead sees.
+        # Shard panes suppress clean per-shard notices in favour of the
+        # consolidated handoff. Failures still surface immediately so the
+        # fix-loop proposal cannot be delayed or lost.
         # Planner panes: suppress too — the "[qa plan ready] fan-out …" message
         # from _fire_qa_plan_fanout is the meaningful one Lead acts on.
         # Non-shard, non-planner panes use the normal notice path.
-        if had_shard_total == 0 and not had_plan_fanout:
+        if failed or (had_shard_total == 0 and not had_plan_fanout):
             # Route through _notify_lead so concurrent done notices are serialised
             # and never injected while Lead is mid-generation (the root cause of the
             # "Lead goes silent after parallel dispatch" bug).
@@ -1879,7 +1880,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
 
         # Plan-then-fan-out: this pane was a planner (--plan). Read the bucket
         # plan it just wrote and spawn the QA shards (each with its bucket).
-        if had_plan_fanout:
+        if had_plan_fanout and not failed:
             base_role_p, _ = _split_shard(from_role)
             self._fire_qa_plan_fanout(project_ns, base_role_p, had_plan_fanout, planner_note=note)
 
@@ -1893,7 +1894,11 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             group_key = f"{project_ns}::{base_role_d}"
             group = self._shard_groups.get(group_key)
             if group and not group.closed:
-                group.done[from_role] = notice_body
+                if failed:
+                    group.failed.add(from_role)
+                    group.failed_notes[from_role] = notice_body
+                else:
+                    group.done[from_role] = notice_body
                 if len(group.done) + len(group.failed) >= group.total:
                     group.closed = True
                     self._inject_shard_fanout_handoff(project_ns, group)
@@ -1932,7 +1937,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
 
         def _close_if_same_session() -> None:
             _pp = self._project_panes(project_ns).get(from_role)
-            if _pp is not None and _pp.session is _done_sess:
+            if _pp is not None and _pp.session is _done_sess and _pp.state == "done":
                 self.close(from_role, project=project_ns)
 
         QTimer.singleShot(2_500, _close_if_same_session)
@@ -3066,11 +3071,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                                     f"[cockpit] {name} ไม่ active >{hint_min}m. "
                                     f"ลอง: takkub harvest --role {name}"
                                 )
-                                lead_pane.session.write(hint_msg)
-                                QTimer.singleShot(
-                                    150,
-                                    lambda lp=lead_pane: lp.session and lp.session.write(b"\r"),
-                                )
+                                self._notify_lead(project_name, hint_msg)
                                 _log_event("harvest_hint", role=name, project=project_name)
                                 self._ps(key).harvest_hint_ts = now
                 except Exception as e:
@@ -3534,10 +3535,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                 f"อัตโนมัติ (กัน loop + pipeline stall) — เช็ค `takkub list` แล้ว "
                 f"close + assign ใหม่ถ้าต้องการให้ทำต่อ"
             )
-            _cap_sess = lead.session
-            _cap_sess.write(msg)
-            _delayed_enter(lead, _cap_sess, 150)
-            self.leadInjected.emit(msg)
+            self._notify_lead(project, msg)
 
     def _warn_lead_runaway_pane(self, role: str, project: str, rate_bps: float) -> None:
         """Inject a one-line warning into Lead's input when a teammate pane has
@@ -3555,10 +3553,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             f"ต่อเนื่อง > {int(RUNAWAY_DURATION_S)}s — อาจติดลูป. "
             f"ตรวจสอบ pane /{role} หรือ `takkub close --role {role}` ถ้าต้องการหยุด"
         )
-        _run_sess = lead.session
-        _run_sess.write(msg)
-        _delayed_enter(lead, _run_sess, 150)
-        self.leadInjected.emit(msg)
+        self._notify_lead(project, msg)
         _log_event("runaway_pane_warn", role=role, project=project, rate_kb=int(rate_kb))
 
     def _warn_lead_over_cap(self, role: str, project: str) -> None:
@@ -3601,10 +3596,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                 f"เกินที่เครื่องนี้รับไหวสบายๆ (~{cap} panes) · เสี่ยงช้า/ค้าง/RAM พุ่ง. "
                 f"พิจารณาแบ่งงานเป็น waves หรือ `takkub close` pane ที่ไม่ใช้แล้ว"
             )
-            _cap_sess = lead.session
-            _cap_sess.write(msg)
-            _delayed_enter(lead, _cap_sess, 150)
-            self.leadInjected.emit(msg)
+            self._notify_lead(project, msg)
             _log_event("over_capacity_warn", role=role, project=project, active=active, cap=cap)
         except Exception:
             # A capacity advisory must never prevent a pane from spawning.
@@ -3923,12 +3915,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             f"⏰ [rate-limit] {role} ({project}) — usage limit reset แล้ว "
             f"pane พร้อมทำงานต่อ (nudge/มอบงานต่อได้เลย)"
         )
-        lead = panes.get(LEAD.name)
-        if lead and lead.session and lead.session.is_alive:
-            _rl_sess = lead.session
-            _rl_sess.write(msg)
-            _delayed_enter(lead, _rl_sess, 150)
-            self.leadInjected.emit(msg)
+        self._notify_lead(project, msg)
         _log_event("rate_limit_reset", role=role, project=project)
         self.statusChanged.emit()
 
@@ -3965,10 +3952,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             f"(เช่น `-y`, `--no-input`, `DEBIAN_FRONTEND=noninteractive`) "
             f'หรือ `takkub send --to {role} "<คำแนะนำ>"` เพื่อปลด block'
         )
-        _tty_sess = lead.session
-        _tty_sess.write(msg)
-        _delayed_enter(lead, _tty_sess, 150)
-        self.leadInjected.emit(msg)
+        self._notify_lead(project, msg)
         _log_event("tty_block_surface", role=role, project=project, prompt=prompt_line)
 
     def _inject_idle_reminder(self, role_name: str, pane: AgentPane) -> None:

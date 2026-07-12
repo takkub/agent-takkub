@@ -189,6 +189,7 @@ def save_policy(policy: dict[str, dict[str, list[str]]]) -> bool:
         "version": 1,
         "roles": policy,
     }
+    tmp_path: pathlib.Path | None = None
     try:
         _policy_dir()
         with tempfile.NamedTemporaryFile(
@@ -205,10 +206,11 @@ def save_policy(policy: dict[str, dict[str, list[str]]]) -> bool:
         return True
     except OSError as e:
         _log.warning("save_policy: could not write %s: %s", PANE_TOOLS_POLICY_FILE, e)
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
         return False
 
 
@@ -266,7 +268,17 @@ def set_role_items(role: str, kind: str, names: list[str]) -> bool:
 
     policy = load_policy()
     if role not in policy:
-        policy[role] = {"mcps": [], "plugins": []}
+        # Materialising one kind also makes the other kind explicit in the
+        # on-disk schema, so preserve that kind's built-in effective default.
+        from .lead_context import _ROLE_PLUGIN_POLICY, _TEAMMATE_PLUGINS
+        from .shared_dev_tools import default_role_mcp_policy
+
+        default_mcps = default_role_mcp_policy().get(role)
+        default_plugins = _ROLE_PLUGIN_POLICY.get(role, _TEAMMATE_PLUGINS)
+        policy[role] = {
+            "mcps": sorted(default_mcps or ()),
+            "plugins": sorted(default_plugins),
+        }
     policy[role][kind] = names
     return save_policy(policy)
 

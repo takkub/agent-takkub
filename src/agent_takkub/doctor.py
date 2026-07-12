@@ -1363,20 +1363,34 @@ def check_env_path() -> list[Finding]:
 
 def run_all_checks() -> list[Finding]:
     findings: list[Finding] = []
-    findings.extend(check_claude())
-    findings.extend(check_env_path())
-    findings.extend(check_runtime())
-    findings.extend(check_installed_integrity())
-    findings.extend(check_arch())
-    findings.extend(check_qt())
-    findings.extend(check_plugins())
-    findings.extend(check_mcps())
-    findings.extend(check_projects())
-    findings.extend(check_providers())
-    findings.extend(check_hooks())
-    findings.extend(check_hook_wiring())
-    findings.extend(check_ready_markers())
-    findings.extend(check_version())
+    checks = (
+        ("check_claude", check_claude),
+        ("check_env_path", check_env_path),
+        ("check_runtime", check_runtime),
+        ("check_installed_integrity", check_installed_integrity),
+        ("check_arch", check_arch),
+        ("check_qt", check_qt),
+        ("check_plugins", check_plugins),
+        ("check_mcps", check_mcps),
+        ("check_projects", check_projects),
+        ("check_providers", check_providers),
+        ("check_hooks", check_hooks),
+        ("check_hook_wiring", check_hook_wiring),
+        ("check_ready_markers", check_ready_markers),
+        ("check_version", check_version),
+    )
+    for check_name, check in checks:
+        try:
+            findings.extend(check())
+        except Exception as exc:
+            findings.append(
+                Finding(
+                    "doctor",
+                    check_name,
+                    Status.FAIL,
+                    f"check {check_name} errored: {type(exc).__name__}: {exc}",
+                )
+            )
     return findings
 
 

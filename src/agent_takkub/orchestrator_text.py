@@ -23,6 +23,7 @@ from .config import EVENTS_LOG, RUNTIME_DIR, ensure_runtime
 from .lead_context import _allowed_project_roots
 from .provider_spec import PROVIDER_REGISTRY
 from .roles import LEAD
+from .token_meter import encode_path_for_claude
 
 
 def _orch_attr(name: str, default):
@@ -721,15 +722,15 @@ def _resolve_project_memory(cwd: str | None) -> pathlib.Path | None:
     """Return the Lead's MEMORY.md path for the project rooted at *cwd*, or None.
 
     Claude Code encodes the project directory as the key under
-    ``~/.claude/projects/`` by replacing the OS separator and colon with ``-``.
-    For example ``C:\\Users\\alice\\web`` → ``C--Users-alice-web``.
+    ``~/.claude/projects/`` by replacing every non-alphanumeric character
+    with ``-``. The canonical token-meter encoder is shared here so separators,
+    colons, underscores, and dots all match Claude's directory name.
 
     Returns None when *cwd* is absent or no memory file exists yet.
     """
     if not cwd:
         return None
-    encoded = str(pathlib.Path(cwd).resolve())
-    encoded = encoded.replace(os.sep, "-").replace(":", "-")
+    encoded = encode_path_for_claude(cwd)
     mem = pathlib.Path.home() / ".claude" / "projects" / encoded / "memory" / "MEMORY.md"
     return mem if mem.exists() else None
 

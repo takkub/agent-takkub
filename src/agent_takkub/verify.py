@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import glob
 import json
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -66,6 +67,8 @@ def detect_stack(cwd: Path) -> list[Check]:
         )
 
     if (cwd / "package.json").exists():
+        npm = shutil.which("npm") or "npm"
+        npx = shutil.which("npx") or "npx"
         try:
             pkg = json.loads((cwd / "package.json").read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -73,10 +76,10 @@ def detect_stack(cwd: Path) -> list[Check]:
 
         scripts = pkg.get("scripts", {})
         if "test" in scripts:
-            checks.append(Check(name="npm-test", cmd=["npm", "test"], stack="node"))
+            checks.append(Check(name="npm-test", cmd=[npm, "test"], stack="node"))
 
         if (cwd / "tsconfig.json").exists():
-            checks.append(Check(name="tsc", cmd=["npx", "tsc", "--noEmit"], stack="node"))
+            checks.append(Check(name="tsc", cmd=[npx, "tsc", "--noEmit"], stack="node"))
 
         eslintrc_patterns = [
             ".eslintrc",
@@ -86,13 +89,15 @@ def detect_stack(cwd: Path) -> list[Check]:
             ".eslintrc.yml",
         ]
         if any((cwd / p).exists() for p in eslintrc_patterns) or glob.glob(str(cwd / ".eslintrc*")):
-            checks.append(Check(name="eslint", cmd=["npx", "eslint", "."], stack="node"))
+            checks.append(Check(name="eslint", cmd=[npx, "eslint", "."], stack="node"))
 
     return checks
 
 
 def run_checks(checks: list[Check], cwd: Path, timeout: int = 600) -> VerifyResult:
     """Run each check subprocess and collect results."""
+    from ._win_console import SUBPROCESS_NO_WINDOW
+
     results: list[CheckResult] = []
     all_passed = True
 
@@ -105,6 +110,7 @@ def run_checks(checks: list[Check], cwd: Path, timeout: int = 600) -> VerifyResu
                 capture_output=True,
                 shell=False,
                 timeout=timeout,
+                creationflags=SUBPROCESS_NO_WINDOW,
             )
             exit_code = proc.returncode
             stdout = proc.stdout.decode("utf-8", errors="replace")
