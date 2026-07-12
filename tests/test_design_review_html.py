@@ -92,3 +92,36 @@ class TestRender:
         md = _write_review(tmp_path, f"shots:\n  - {shot}\n")
         html = render(md).read_text(encoding="utf-8")
         assert base64.b64encode(_PNG).decode() in html
+
+
+class TestSanitize:
+    """The rendered HTML must neutralise injection vectors while leaving code
+    content intact. Regression guard for the 2026-07 full-system review: the
+    first injection fix double-escaped code snippets, and an early version
+    missed ``javascript:`` link hrefs. design-review docs routinely contain
+    code (HTML tags, CSS ``>`` selectors), so both must hold together.
+    """
+
+    def _render_body(self, tmp_path, body: str) -> str:
+        md = tmp_path / "2026-07-12-sanitize.md"
+        md.write_text(f"---\nproject: sample\n---\n\n# Review\n\n{body}", encoding="utf-8")
+        return render(md).read_text(encoding="utf-8")
+
+    def test_raw_script_element_dropped(self, tmp_path):
+        html = self._render_body(tmp_path, "<script>alert('XSS_RAW')</script>\n")
+        assert "<script>alert('XSS_RAW')" not in html
+
+    def test_event_handler_attribute_stripped(self, tmp_path):
+        html = self._render_body(tmp_path, '<img src=x onerror="alert(1)">\n')
+        assert "onerror" not in html
+
+    def test_javascript_url_neutralised(self, tmp_path):
+        html = self._render_body(tmp_path, "[click](javascript:alert(1))\n")
+        assert "javascript:" not in html
+
+    def test_code_fence_renders_without_double_escape(self, tmp_path):
+        body = '```html\n<div class="PRESERVE_ME">a > b & c</div>\n```\n'
+        html = self._render_body(tmp_path, body)
+        assert "PRESERVE_ME" in html  # code content survives sanitisation
+        assert "&amp;lt;" not in html  # '<' escaped once, not twice
+        assert "&amp;amp;" not in html  # '&' escaped once, not twice
