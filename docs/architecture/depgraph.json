@@ -563,6 +563,7 @@
         "agent_takkub.lead_inbox",
         "agent_takkub.limit_status",
         "agent_takkub.orchestrator_text",
+        "agent_takkub.provider_config",
         "agent_takkub.roles",
         "agent_takkub.spawn_engine",
         "agent_takkub.user_profile"
@@ -571,7 +572,7 @@
         "agent_takkub.orchestrator"
       ],
       "fan_in": 1,
-      "fan_out": 8
+      "fan_out": 9
     },
     {
       "module": "agent_takkub.limit_panel",
@@ -895,6 +896,7 @@
         "agent_takkub.cli_server",
         "agent_takkub.lead_context",
         "agent_takkub.lead_inbox",
+        "agent_takkub.limit_autoresume",
         "agent_takkub.orchestrator",
         "agent_takkub.pipeline_executor",
         "agent_takkub.remote.api",
@@ -907,7 +909,7 @@
         "agent_takkub.spawn_engine",
         "agent_takkub.update_panel"
       ],
-      "fan_in": 14,
+      "fan_in": 15,
       "fan_out": 3
     },
     {
