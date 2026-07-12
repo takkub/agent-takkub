@@ -36,6 +36,8 @@ LEAD_ONLY_COMMANDS = frozenset(
         "harvest",
         "release",
         "pipeline",
+        "provision",
+        "migrate-skills",
         "goal",
         "worktree",
         "restart",

@@ -19,6 +19,7 @@ Importable: `render(md_path) -> Path`.
 from __future__ import annotations
 
 import base64
+import html as html_lib
 import mimetypes
 import os
 import pathlib
@@ -115,6 +116,7 @@ def _inline_shot(shot: str, base_dirs: list[pathlib.Path]) -> str:
     matter resolves at convert time (central-home migration — shots live in
     the central artifacts dir, not the repo)."""
     rel = shot.strip()
+    safe_rel = html_lib.escape(rel, quote=True)
     expanded = os.path.expanduser(os.path.expandvars(rel))
     # An absolute (post-expansion) path resolves on its own; a relative one
     # is still tried under each base dir as before.
@@ -128,10 +130,10 @@ def _inline_shot(shot: str, base_dirs: list[pathlib.Path]) -> str:
             mime = mimetypes.guess_type(p.name)[0] or "image/png"
             b64 = base64.b64encode(p.read_bytes()).decode()
             return (
-                f'<figure><img alt="{rel}" src="data:{mime};base64,{b64}">'
-                f"<figcaption>{rel}</figcaption></figure>"
+                f'<figure><img alt="{safe_rel}" src="data:{mime};base64,{b64}">'
+                f"<figcaption>{safe_rel}</figcaption></figure>"
             )
-    return f'<div class="missing-shot">⚠ screenshot not found: <code>{rel}</code></div>'
+    return f'<div class="missing-shot">⚠ screenshot not found: <code>{safe_rel}</code></div>'
 
 
 def render(md_path: str | pathlib.Path) -> pathlib.Path:
@@ -149,14 +151,21 @@ def render(md_path: str | pathlib.Path) -> pathlib.Path:
     base_dirs = [pathlib.Path.cwd(), md_path.resolve().parent]
     shots_html = "".join(_inline_shot(s, base_dirs) for s in shots)
 
-    body_html = markdown.markdown(body, extensions=["extra", "sane_lists"])
+    # Python-Markdown intentionally passes raw HTML through. Escape it at the
+    # source boundary while preserving Markdown syntax and normal rendering.
+    safe_body = html_lib.escape(body, quote=False)
+    body_html = markdown.markdown(safe_body, extensions=["extra", "sane_lists"])
     body_html = _IMPACT_EM.sub(lambda m: _impact_badge(m.group(1)), body_html)
     body_html = _IMPACT_BARE.sub(lambda m: _impact_badge(m.group(1)), body_html)
 
-    meta_bits = [str(fm[k]) for k in ("date", "project", "reviewer") if fm.get(k)]
+    meta_bits = [
+        html_lib.escape(str(fm[k]), quote=True)
+        for k in ("date", "project", "reviewer")
+        if fm.get(k)
+    ]
     meta_html = f'<div class="meta">{" · ".join(meta_bits)}</div>' if meta_bits else ""
 
-    title = fm.get("project") or md_path.stem
+    title = html_lib.escape(str(fm.get("project") or md_path.stem), quote=True)
     html = (
         "<!doctype html>\n"
         '<html lang="th"><head><meta charset="utf-8">'

@@ -13,6 +13,7 @@ disk writes.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -86,6 +87,8 @@ class RemoteConfig:
         _PATH.parent.mkdir(parents=True, exist_ok=True)
         tmp = _PATH.with_suffix(_PATH.suffix + ".tmp")
         tmp.write_text(json.dumps(asdict(self), indent=2) + "\n", encoding="utf-8")
+        if os.name != "nt":
+            tmp.chmod(0o600)
         tmp.replace(_PATH)
 
     def pairing_url(self) -> str:

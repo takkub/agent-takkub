@@ -41,6 +41,17 @@ _log = logging.getLogger(__name__)
 
 SHARED_MCP_FILE = RUNTIME_DIR / "shared-mcp.json"
 
+
+def _write_private_mcp_json(path: pathlib.Path, data: dict) -> None:
+    """Write an MCP config owner-only on POSIX; Windows uses profile ACLs."""
+    path.write_text(
+        json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    if os.name != "nt":
+        path.chmod(0o600)
+
+
 # Browser MCPs that the cockpit forces into every pane so smoke tests,
 # UX checks, and crawls are available from any project's Lead. These
 # are vanilla npx-stdio servers with no auth, so we hard-code their
@@ -283,10 +294,7 @@ def browser_profile_mcp_config_path(
 
     out = SHARED_MCP_FILE.parent / f"shared-mcp-{safe_project}-{base_role}{shard_suffix}.json"
     try:
-        out.write_text(
-            json.dumps(data, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
+        _write_private_mcp_json(out, data)
     except OSError:
         return base_path
     return str(out)
@@ -378,10 +386,7 @@ def ensure_browser_mcps() -> tuple[bool, str]:
         return True, "browser MCPs already present"
     try:
         SHARED_MCP_FILE.parent.mkdir(parents=True, exist_ok=True)
-        SHARED_MCP_FILE.write_text(
-            json.dumps(config, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
+        _write_private_mcp_json(SHARED_MCP_FILE, config)
     except OSError as e:
         return False, f"could not write {SHARED_MCP_FILE}: {e}"
     _write_role_variants()
@@ -488,10 +493,7 @@ def add_mcp_server(name: str, cfg: dict, force: bool = False) -> bool:
         servers = config.setdefault("mcpServers", {})
         servers[name] = cfg
         SHARED_MCP_FILE.parent.mkdir(parents=True, exist_ok=True)
-        SHARED_MCP_FILE.write_text(
-            json.dumps(config, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
+        _write_private_mcp_json(SHARED_MCP_FILE, config)
         _write_role_variants()
         return True
     except OSError as e:
@@ -518,10 +520,7 @@ def remove_mcp_server(name: str) -> bool:
         if name not in servers:
             return False
         del servers[name]
-        SHARED_MCP_FILE.write_text(
-            json.dumps(config, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
+        _write_private_mcp_json(SHARED_MCP_FILE, config)
         _write_role_variants()
         return True
     except OSError as e:
@@ -612,10 +611,7 @@ def regen_role_variants_checked() -> tuple[bool, list[str]]:
         # --mcp-config) for the role.
         variant = {"mcpServers": filtered}
         try:
-            _role_variant_path(role).write_text(
-                json.dumps(variant, indent=2, ensure_ascii=False) + "\n",
-                encoding="utf-8",
-            )
+            _write_private_mcp_json(_role_variant_path(role), variant)
         except OSError as e:
             _log.warning("regen_role_variants_checked: could not write %s: %s", role, e)
             failed.append(role)
@@ -637,26 +633,74 @@ def _write_role_variants() -> None:
 
 # Patterns that indicate a credential-bearing MCP entry.  Any entry that
 # matches is skipped unless it is explicitly in _USER_MCP_DEFAULT_ALLOW.
-_SECRET_HEADER_KEYS = frozenset({"Authorization", "authorization"})
-_SECRET_ENV_SUBSTRINGS = ("TOKEN", "KEY", "SECRET", "PASSWORD", "PASS")
+_SECRET_KEY_PARTS = frozenset(
+    {
+        "token",
+        "secret",
+        "key",
+        "apikey",
+        "password",
+        "pass",
+        "bearer",
+        "credential",
+        "authorization",
+    }
+)
+_SECRET_KEY_MARKERS = (
+    "token",
+    "secret",
+    "apikey",
+    "password",
+    "bearer",
+    "credential",
+)
+
+
+def _secret_shaped_key(key: object) -> bool:
+    text = str(key).lower()
+    parts = {part for part in re.split(r"[^a-z0-9]+", text) if part}
+    compact = re.sub(r"[^a-z0-9]", "", text)
+    return bool(parts & _SECRET_KEY_PARTS) or any(
+        marker in compact for marker in _SECRET_KEY_MARKERS
+    )
 
 
 def _has_secrets(cfg: dict) -> bool:
     """Return True if *cfg* contains a credential that should not be written
     to a world-accessible shared runtime file."""
-    headers = cfg.get("headers") or {}
-    for key in _SECRET_HEADER_KEYS:
-        if key in headers:
+
+    def scan(value: object, key: object | None = None) -> bool:
+        if key is not None and _secret_shaped_key(key) and value not in (None, "", False):
             return True
-    env = cfg.get("env") or {}
-    for var_name in env:
-        upper = str(var_name).upper()
-        if any(s in upper for s in _SECRET_ENV_SUBSTRINGS):
-            return True
+        if isinstance(value, dict):
+            return any(scan(child, child_key) for child_key, child in value.items())
+        if isinstance(value, (list, tuple)):
+            return any(scan(child) for child in value)
+        if isinstance(value, str):
+            if re.search(r"\$\{[^}]+\}", value):
+                return True
+            if re.search(
+                r"[?&](?:[^&#=]*(?:token|secret|api[_-]?key|password|bearer|credential)[^&#=]*)=",
+                value,
+                re.IGNORECASE,
+            ):
+                return True
+        return False
+
+    if scan(cfg):
+        return True
+
     args = cfg.get("args") or []
     for a in args:
+        arg = str(a)
+        if re.match(
+            r"^--?[^=\s]*(?:token|secret|api[_-]?key|password|bearer|credential)(?:=|$)",
+            arg,
+            re.IGNORECASE,
+        ):
+            return True
         # DSN with inline credentials: scheme://user:pass@host
-        if re.search(r"://[^/@\s]+:[^/@\s]+@", str(a)):
+        if re.search(r"://[^/@\s]+:[^/@\s]+@", arg):
             return True
     return False
 
@@ -670,14 +714,11 @@ def mask_secrets(cfg: dict) -> dict:
     headers = out.get("headers")
     if isinstance(headers, dict):
         out["headers"] = {
-            k: ("••••••••" if k in _SECRET_HEADER_KEYS else v) for k, v in headers.items()
+            k: ("••••••••" if _secret_shaped_key(k) else v) for k, v in headers.items()
         }
     env = out.get("env")
     if isinstance(env, dict):
-        out["env"] = {
-            k: ("••••••••" if any(s in str(k).upper() for s in _SECRET_ENV_SUBSTRINGS) else v)
-            for k, v in env.items()
-        }
+        out["env"] = {k: ("••••••••" if _secret_shaped_key(k) else v) for k, v in env.items()}
     args = out.get("args")
     if isinstance(args, list):
         out["args"] = [re.sub(r"(://[^/@\s]+):[^/@\s]+@", r"\1:••••••••@", str(a)) for a in args]
@@ -855,10 +896,7 @@ def ensure_user_mcps() -> tuple[bool, str]:
 
     try:
         SHARED_MCP_FILE.parent.mkdir(parents=True, exist_ok=True)
-        SHARED_MCP_FILE.write_text(
-            json.dumps(config, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
+        _write_private_mcp_json(SHARED_MCP_FILE, config)
     except OSError as e:
         return False, f"could not write {SHARED_MCP_FILE}: {e}"
     _write_role_variants()
