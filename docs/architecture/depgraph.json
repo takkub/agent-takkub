@@ -50,9 +50,10 @@
         "agent_takkub.services",
         "agent_takkub.shared_dev_tools",
         "agent_takkub.update_helper",
-        "agent_takkub.update_panel"
+        "agent_takkub.update_panel",
+        "agent_takkub.verify"
       ],
-      "fan_in": 11,
+      "fan_in": 12,
       "fan_out": 0
     },
     {
@@ -517,11 +518,12 @@
         "agent_takkub.orchestrator",
         "agent_takkub.orchestrator_text",
         "agent_takkub.pane_tools_dialog",
+        "agent_takkub.pane_tools_policy",
         "agent_takkub.settings_management.repositories.plugins",
         "agent_takkub.settings_window",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 8,
+      "fan_in": 9,
       "fan_out": 9
     },
     {
@@ -592,9 +594,10 @@
       "imported_by": [
         "agent_takkub.doctor",
         "agent_takkub.limit_autoresume",
-        "agent_takkub.limit_panel"
+        "agent_takkub.limit_panel",
+        "agent_takkub.user_profile"
       ],
-      "fan_in": 3,
+      "fan_in": 4,
       "fan_out": 0
     },
     {
@@ -698,6 +701,7 @@
         "agent_takkub.plan_tier",
         "agent_takkub.provider_spec",
         "agent_takkub.roles",
+        "agent_takkub.token_meter",
         "agent_takkub.worktree_manager"
       ],
       "imported_by": [
@@ -708,7 +712,7 @@
         "agent_takkub.spawn_engine"
       ],
       "fan_in": 5,
-      "fan_out": 6
+      "fan_out": 7
     },
     {
       "module": "agent_takkub.pane_env",
@@ -745,7 +749,9 @@
       "imports": [
         "agent_takkub.config",
         "agent_takkub.custom_roles",
-        "agent_takkub.roles"
+        "agent_takkub.lead_context",
+        "agent_takkub.roles",
+        "agent_takkub.shared_dev_tools"
       ],
       "imported_by": [
         "agent_takkub.cli",
@@ -761,7 +767,7 @@
         "agent_takkub.skill_policy"
       ],
       "fan_in": 11,
-      "fan_out": 3
+      "fan_out": 5
     },
     {
       "module": "agent_takkub.pipeline_config",
@@ -1627,12 +1633,13 @@
         "agent_takkub.mcp_bridge",
         "agent_takkub.orchestrator",
         "agent_takkub.pane_tools_dialog",
+        "agent_takkub.pane_tools_policy",
         "agent_takkub.settings_management.pages.roles_page",
         "agent_takkub.settings_management.repositories.mcps",
         "agent_takkub.settings_management.services.relationships",
         "agent_takkub.settings_window"
       ],
-      "fan_in": 9,
+      "fan_in": 10,
       "fan_out": 3
     },
     {
@@ -1802,13 +1809,14 @@
       "imported_by": [
         "agent_takkub.agent_pane",
         "agent_takkub.agent_pane_model",
+        "agent_takkub.orchestrator_text",
         "agent_takkub.project_nav",
         "agent_takkub.remote.notify",
         "agent_takkub.spawn_engine",
         "agent_takkub.status_header",
         "agent_takkub.task_dock"
       ],
-      "fan_in": 7,
+      "fan_in": 8,
       "fan_out": 0
     },
     {
@@ -1909,6 +1917,7 @@
       "module": "agent_takkub.user_profile",
       "imports": [
         "agent_takkub.config",
+        "agent_takkub.limit_status",
         "agent_takkub.worktree_manager"
       ],
       "imported_by": [
@@ -1925,7 +1934,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 11,
-      "fan_out": 2
+      "fan_out": 3
     },
     {
       "module": "agent_takkub.vault_graph",
@@ -1952,12 +1961,14 @@
     },
     {
       "module": "agent_takkub.verify",
-      "imports": [],
+      "imports": [
+        "agent_takkub._win_console"
+      ],
       "imported_by": [
         "agent_takkub.cli"
       ],
       "fan_in": 1,
-      "fan_out": 0
+      "fan_out": 1
     },
     {
       "module": "agent_takkub.worktree_manager",

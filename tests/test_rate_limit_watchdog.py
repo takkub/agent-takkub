@@ -272,6 +272,11 @@ class TestEmitRateLimitReset:
 
         panes[LEAD.name] = alive_lead_pane
 
+        # Delivery to Lead is now routed through _notify_lead's ready-prompt
+        # gated queue rather than a raw session.write — spy on it instead of
+        # asserting the write/leadInjected side effects directly.
+        o._notify_lead = MagicMock()
+
         before = time.time()
         with (
             patch("agent_takkub.orchestrator.QTimer.singleShot"),
@@ -280,8 +285,10 @@ class TestEmitRateLimitReset:
             o._emit_rate_limit_reset("proj", "frontend")
         after = time.time()
 
-        alive_lead_pane.session.write.assert_called_once()
-        o.leadInjected.emit.assert_called_once()
+        o._notify_lead.assert_called_once()
+        call_project, msg = o._notify_lead.call_args[0]
+        assert call_project == "proj"
+        assert "frontend" in msg
         o.statusChanged.emit.assert_called_once()
         ps = o._pane_state["proj::frontend"]
         assert ps.rate_limited_until == 0.0
@@ -305,6 +312,8 @@ class TestEmitRateLimitReset:
 
         panes[LEAD.name] = alive_lead_pane
 
+        o._notify_lead = MagicMock()
+
         with (
             patch("agent_takkub.orchestrator.QTimer.singleShot"),
             patch("agent_takkub.orchestrator._log_event"),
@@ -312,5 +321,4 @@ class TestEmitRateLimitReset:
             o._emit_rate_limit_reset("proj", "mobile")  # first fire
             o._emit_rate_limit_reset("proj", "mobile")  # duplicate — must be skipped
 
-        assert alive_lead_pane.session.write.call_count == 1
-        assert o.leadInjected.emit.call_count == 1
+        assert o._notify_lead.call_count == 1

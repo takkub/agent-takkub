@@ -341,4 +341,9 @@ class TestShardConsolidatedHandoffSymmetrizes:
         note = _long_note("shard-fail-full")
         orch.done("qa#1", note=note, project=proj, failed=True)
 
-        assert group.done["qa#1"] == note
+        # Failed shards land in group.failed (not group.done) and keep the
+        # FULL note uncondensed, mirroring the non-shard fail path so Lead's
+        # fix-loop propose + classify_failure can read it in full.
+        assert "qa#1" in group.failed
+        assert "qa#1" not in group.done
+        assert group.failed_notes["qa#1"] == note

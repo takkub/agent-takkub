@@ -33,6 +33,7 @@ class _FakeOrch:
         self._panes_by_project: dict = {}
         self.leadInjected = MagicMock()
         self._last_overcap_warn_ts = 0.0
+        self._notify_lead = MagicMock()
 
     def _project_panes(self, project: str) -> dict:
         return self._panes_by_project.get(project, {})
@@ -64,10 +65,10 @@ class TestOverCapacityWarn:
 
         _warn(fake)
 
-        assert lead.session.write.call_count == 1
-        msg = lead.session.write.call_args[0][0]
+        fake._notify_lead.assert_called_once()
+        call_project, msg = fake._notify_lead.call_args[0]
+        assert call_project == "p"
         assert "over-capacity" in msg
-        fake.leadInjected.emit.assert_called_once()
 
     def test_no_warn_under_cap(self, monkeypatch) -> None:
         _set_cap(monkeypatch, 4)
@@ -77,8 +78,7 @@ class TestOverCapacityWarn:
 
         _warn(fake)
 
-        lead.session.write.assert_not_called()
-        fake.leadInjected.emit.assert_not_called()
+        fake._notify_lead.assert_not_called()
 
     def test_lead_role_is_exempt(self, monkeypatch) -> None:
         _set_cap(monkeypatch, 1)
@@ -89,7 +89,7 @@ class TestOverCapacityWarn:
         # Spawning a Lead pane is never an over-capacity event.
         _warn(fake, role=LEAD.name)
 
-        lead.session.write.assert_not_called()
+        fake._notify_lead.assert_not_called()
 
     def test_lead_panes_excluded_from_count(self, monkeypatch) -> None:
         _set_cap(monkeypatch, 2)
@@ -101,7 +101,7 @@ class TestOverCapacityWarn:
         fake._panes_by_project["q"] = {LEAD.name: lead_q}
 
         _warn(fake)
-        lead_p.session.write.assert_not_called()
+        fake._notify_lead.assert_not_called()
 
     def test_dead_panes_not_counted(self, monkeypatch) -> None:
         _set_cap(monkeypatch, 2)
@@ -115,7 +115,7 @@ class TestOverCapacityWarn:
         }
 
         _warn(fake)
-        lead.session.write.assert_not_called()
+        fake._notify_lead.assert_not_called()
 
     def test_cooldown_suppresses_repeat(self, monkeypatch) -> None:
         _set_cap(monkeypatch, 1)
@@ -124,10 +124,10 @@ class TestOverCapacityWarn:
         fake._panes_by_project["p"] = {LEAD.name: lead, "frontend": _Pane()}
 
         _warn(fake)
-        assert lead.session.write.call_count == 1
+        assert fake._notify_lead.call_count == 1
         # Immediate repeat — within OVERCAP_WARN_COOLDOWN_S → suppressed.
         _warn(fake)
-        assert lead.session.write.call_count == 1
+        assert fake._notify_lead.call_count == 1
 
     def test_warns_again_after_cooldown(self, monkeypatch) -> None:
         _set_cap(monkeypatch, 1)
@@ -136,11 +136,11 @@ class TestOverCapacityWarn:
         fake._panes_by_project["p"] = {LEAD.name: lead, "frontend": _Pane()}
 
         _warn(fake)
-        assert lead.session.write.call_count == 1
+        assert fake._notify_lead.call_count == 1
         # Backdate the last-warn so the cooldown has elapsed.
         fake._last_overcap_warn_ts -= OVERCAP_WARN_COOLDOWN_S + 1
         _warn(fake)
-        assert lead.session.write.call_count == 2
+        assert fake._notify_lead.call_count == 2
 
     def test_no_lead_pane_is_safe(self, monkeypatch) -> None:
         _set_cap(monkeypatch, 1)

@@ -495,8 +495,10 @@ class TestStuckRecoverCap:
         lead = _FakePane(state="working", last_out=0.0)
         fake._panes_by_project["p"] = {"backend": pane, LEAD.name: lead}
         _drive_until(fake, pane, ticks=STUCK_RECOVER_MAX + 2)
-        assert lead.session.write.called, "Lead must be warned when a pane is stuck-capped"
-        assert fake.leadInjected.emit.called
+        assert fake.notify_calls, "Lead must be warned when a pane is stuck-capped"
+        project, notice, _from_role = fake.notify_calls[0]
+        assert project == "p"
+        assert "stuck-capped" in notice
 
     def test_give_up_last_auto_chain_pane_releases_handoff(self) -> None:
         # bug-1 orch: if the stuck-capped pane was the last auto-chain blocker,

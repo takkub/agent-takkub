@@ -7,13 +7,13 @@ teammate can read domain rules on demand.
 
 from __future__ import annotations
 
-import os
 import pathlib
 import sys
 
 import pytest
 
 from agent_takkub.orchestrator import _resolve_project_memory
+from agent_takkub.token_meter import encode_path_for_claude
 
 
 class TestResolveProjectMemory:
@@ -30,7 +30,7 @@ class TestResolveProjectMemory:
     def test_returns_path_when_memory_file_exists(self, tmp_path) -> None:
         # Simulate a cwd whose encoded name lives under tmp_path/.claude/projects/
         cwd = str(tmp_path / "myproject")
-        encoded = cwd.replace(os.sep, "-").replace(":", "-")
+        encoded = encode_path_for_claude(cwd)
         mem_dir = tmp_path / ".claude" / "projects" / encoded / "memory"
         mem_dir.mkdir(parents=True, exist_ok=True)
         (mem_dir / "MEMORY.md").write_text("# index", encoding="utf-8")
@@ -89,7 +89,7 @@ class TestMemoryInjectedIntoRoleMd:
 
         # Create the project memory file.
         cwd = str(tmp_path / "myproject")
-        encoded = cwd.replace(os.sep, "-").replace(":", "-")
+        encoded = encode_path_for_claude(cwd)
         mem_dir = tmp_path / ".claude" / "projects" / encoded / "memory"
         mem_dir.mkdir(parents=True, exist_ok=True)
         mem_path = mem_dir / "MEMORY.md"
@@ -161,8 +161,7 @@ class TestMemoryResolveMultiPathProject:
 
     def _create_memory(self, tmp_path: pathlib.Path, project_root: pathlib.Path) -> pathlib.Path:
         """Write a fake MEMORY.md keyed from *project_root* under tmp_path/.claude."""
-        cwd_str = str(project_root.resolve())
-        encoded = cwd_str.replace(os.sep, "-").replace(":", "-")
+        encoded = encode_path_for_claude(project_root)
         mem_dir = tmp_path / ".claude" / "projects" / encoded / "memory"
         mem_dir.mkdir(parents=True, exist_ok=True)
         mem_file = mem_dir / "MEMORY.md"
