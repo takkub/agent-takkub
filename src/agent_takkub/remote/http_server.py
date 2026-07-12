@@ -120,11 +120,13 @@ class _Bridge(QObject):
         return self._orch._resolve_project(None)
 
     def _handle(self, pending: _PendingRequest) -> None:
-        if pending.action in self._OFF_THREAD_ACTIONS:
-            pending.params["project"] = self._resolve_scoped_project(pending.params.get("project"))
-            threading.Thread(target=self._run_off_thread, args=(pending,), daemon=True).start()
-            return
         try:
+            if pending.action in self._OFF_THREAD_ACTIONS:
+                pending.params["project"] = self._resolve_scoped_project(
+                    pending.params.get("project")
+                )
+                threading.Thread(target=self._run_off_thread, args=(pending,), daemon=True).start()
+                return
             if pending.action == "projects":
                 mode = pending.params.get("mode", "view")
                 pending.reply.put((200, api.projects(None, mode)))

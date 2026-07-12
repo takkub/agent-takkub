@@ -742,13 +742,13 @@ class PtySession(QObject):
         self.outputUpdated.emit()
 
     def _on_exit(self) -> None:
-        self._alive = False
         code = 0
         try:
             if self._proc is not None:
                 code = self._proc.exitstatus or 0
         except Exception:
             pass
+        self._teardown_resources(kill_process=False, wait=False)
         self.processExited.emit(code)
 
     def write(self, data: bytes | str) -> None:
@@ -788,6 +788,14 @@ class PtySession(QObject):
         QObject built via __new__ without __init__ (some test fixtures), so every
         attribute read is guarded — terminate() is always safe to call.
         """
+        self._teardown_resources(kill_process=True, wait=wait)
+
+    def _teardown_resources(self, *, kill_process: bool, wait: bool) -> None:
+        """Detach and release this session's process, threads and transcript.
+
+        Natural child exit and explicit termination share this path so neither
+        can leave a writer blocked on its queue or a native handle retained.
+        """
         try:
             _writer = self._writer
         except (AttributeError, RuntimeError):
@@ -812,6 +820,16 @@ class PtySession(QObject):
             _transcript = self._transcript
         except (AttributeError, RuntimeError):
             _transcript = None
+        # On natural exit the reader loop has already finished, so closing the
+        # transcript synchronously is race-free and releases the fd before the
+        # processExited/respawn chain runs. Explicit terminate closes it after
+        # joining the still-active reader below.
+        if not kill_process and _transcript is not None:
+            try:
+                _transcript.close()
+            except Exception:
+                pass
+            _transcript = None
         try:
             self._alive = False
         except (AttributeError, RuntimeError):
@@ -820,6 +838,11 @@ class PtySession(QObject):
             self._transcript = None
         except (AttributeError, RuntimeError):
             pass
+        for attr in ("_writer", "_reader", "_proc", "_pid"):
+            try:
+                setattr(self, attr, None)
+            except (AttributeError, RuntimeError):
+                pass
 
         def _teardown() -> None:
             # ORDER MATTERS. `taskkill /T` walks the live parent→child tree, so
@@ -827,8 +850,9 @@ class PtySession(QObject):
             # terminate(force=True) only reaps claude.exe itself and would orphan
             # the node dev-server subtree if it ran first. Running both here, in
             # sequence, preserves that ordering off the Qt main thread.
-            _tree_kill(_pid)
-            if _proc is not None:
+            if kill_process:
+                _tree_kill(_pid)
+            if kill_process and _proc is not None:
                 try:
                     _proc.terminate(force=True)  # unblocks reader's proc.read()
                 except Exception:
@@ -841,6 +865,14 @@ class PtySession(QObject):
             if _reader is not None:
                 _reader.quit()
                 _reader.wait(2000)
+            # Thread QObjects are children of the session.  Once their loops
+            # stop, release their last references to the native PTY object.
+            for thread_obj in (_writer, _reader):
+                if thread_obj is not None:
+                    try:
+                        thread_obj._proc = None
+                    except Exception:
+                        pass
             if _transcript is not None:
                 try:
                     _transcript.close()
