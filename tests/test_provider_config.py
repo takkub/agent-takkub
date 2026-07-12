@@ -76,6 +76,13 @@ class TestProviderFor:
         assert provider_config.provider_for("backend") == "gemini"
         assert provider_config.provider_for("qa") == "gemini"
 
+    def test_shard_suffix_uses_base_role_provider(self, redirect_config_path: Path) -> None:
+        redirect_config_path.write_text('{"qa": "gemini"}', encoding="utf-8")
+        assert provider_config.provider_for("codex#2") == "codex"
+        assert provider_config.provider_for("gemini#3") == "gemini"
+        assert provider_config.provider_for("qa#2") == provider_config.provider_for("qa")
+        assert provider_config.provider_for("frontend") == "claude"
+
 
 class TestEffectiveProviderFor:
     """`effective_provider_for` degrades an unavailable codex/gemini role to
@@ -101,6 +108,18 @@ class TestEffectiveProviderFor:
     def test_gemini_unavailable_degrades_to_claude(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(provider_config, "_provider_available", lambda p: False)
         assert provider_config.effective_provider_for("gemini") == "claude"
+
+    def test_shard_suffix_uses_base_role_effective_provider(
+        self, monkeypatch: pytest.MonkeyPatch, redirect_config_path: Path
+    ) -> None:
+        redirect_config_path.write_text('{"qa": "gemini"}', encoding="utf-8")
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: True)
+        assert provider_config.effective_provider_for("codex#2") == "codex"
+        assert provider_config.effective_provider_for("gemini#3") == "gemini"
+        assert provider_config.effective_provider_for(
+            "qa#2"
+        ) == provider_config.effective_provider_for("qa")
+        assert provider_config.effective_provider_for("frontend") == "claude"
 
     def test_remapped_role_also_degrades(
         self, monkeypatch: pytest.MonkeyPatch, redirect_config_path: Path

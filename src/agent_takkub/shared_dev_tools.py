@@ -31,6 +31,7 @@ import os
 import pathlib
 import re
 import subprocess
+import tempfile
 import threading
 
 from ._win_console import SUBPROCESS_NO_WINDOW
@@ -44,12 +45,26 @@ SHARED_MCP_FILE = RUNTIME_DIR / "shared-mcp.json"
 
 def _write_private_mcp_json(path: pathlib.Path, data: dict) -> None:
     """Write an MCP config owner-only on POSIX; Windows uses profile ACLs."""
-    path.write_text(
-        json.dumps(data, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
+    payload = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+    if os.name == "nt":
+        path.write_text(payload, encoding="utf-8")
+        return
+
+    fd, tmp_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        text=True,
     )
-    if os.name != "nt":
-        path.chmod(0o600)
+    tmp_path = pathlib.Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(payload)
+        tmp_path.chmod(0o600)
+        os.replace(tmp_path, path)
+    except OSError:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 # Browser MCPs that the cockpit forces into every pane so smoke tests,
@@ -654,14 +669,17 @@ _SECRET_KEY_MARKERS = (
     "bearer",
     "credential",
 )
+_SECRET_KEY_SUFFIXES = ("key", "pass")
 
 
 def _secret_shaped_key(key: object) -> bool:
     text = str(key).lower()
     parts = {part for part in re.split(r"[^a-z0-9]+", text) if part}
     compact = re.sub(r"[^a-z0-9]", "", text)
-    return bool(parts & _SECRET_KEY_PARTS) or any(
-        marker in compact for marker in _SECRET_KEY_MARKERS
+    return (
+        bool(parts & _SECRET_KEY_PARTS)
+        or any(marker in compact for marker in _SECRET_KEY_MARKERS)
+        or compact.endswith(_SECRET_KEY_SUFFIXES)
     )
 
 
