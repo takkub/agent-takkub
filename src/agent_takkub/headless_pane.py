@@ -124,6 +124,8 @@ class HeadlessPane(QObject):
     def attach_session(self, session: PtySession, cwd: str | None = None) -> None:
         """Bind `session` — the data-only half of `AgentPane.attach_session`
         (no terminal resize/focus/idle-flag/token-label widget work)."""
+        if self.model.session is not None and self.model.session is not session:
+            self.detach_session()
         self.model.session = session
         self.model.last_output_ts = time.time()
         self.model.tp_total_bytes = 0
@@ -151,6 +153,7 @@ class HeadlessPane(QObject):
                     pass
                 self._exit_conn = None
             self.model.session = None
+            session.terminate()
         self.model.session_jsonl = None
         self.model.last_usage = None
 

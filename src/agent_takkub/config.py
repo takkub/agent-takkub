@@ -64,9 +64,9 @@ def validate_name(value: str, kind: str) -> str:
     return name
 
 
-def _write_json_atomic(path: Path, data: dict) -> None:
+def _write_json_atomic(path: Path, data: dict) -> bool:
     """Write *data* to *path* via a temp file so a crash mid-write never
-    leaves a partial/corrupt JSON file behind."""
+    leaves a partial/corrupt JSON file behind. Return whether it persisted."""
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     # Windows can transiently reject replacement while an AV scanner or
@@ -77,7 +77,7 @@ def _write_json_atomic(path: Path, data: dict) -> None:
             time.sleep(delay)
         try:
             tmp.replace(path)
-            return
+            return True
         except PermissionError:
             if attempt < 3:
                 continue
@@ -86,7 +86,7 @@ def _write_json_atomic(path: Path, data: dict) -> None:
                 tmp.unlink(missing_ok=True)
             except OSError:
                 pass
-            return
+            return False
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -498,13 +498,12 @@ def lead_cwd(project: str | None = None) -> str | None:
 
 def set_active_project(name: str) -> bool:
     """Write a new active project name back to projects.json. Returns True if
-    the name was valid (existed in `projects`), False otherwise."""
+    the name was valid and persisted, False otherwise."""
     data = load_projects()
     if name not in data.get("projects", {}):
         return False
     data["active"] = name
-    _write_json_atomic(PROJECTS_JSON, data)
-    return True
+    return _write_json_atomic(PROJECTS_JSON, data)
 
 
 def clear_active_project() -> None:
