@@ -270,15 +270,7 @@ def set_role_items(role: str, kind: str, names: list[str]) -> bool:
     if role not in policy:
         # Materialising one kind also makes the other kind explicit in the
         # on-disk schema, so preserve that kind's built-in effective default.
-        from .lead_context import _ROLE_PLUGIN_POLICY, _TEAMMATE_PLUGINS
-        from .shared_dev_tools import default_role_mcp_policy
-
-        default_mcps = default_role_mcp_policy().get(role)
-        default_plugins = _ROLE_PLUGIN_POLICY.get(role, _TEAMMATE_PLUGINS)
-        policy[role] = {
-            "mcps": sorted(default_mcps or ()),
-            "plugins": sorted(default_plugins),
-        }
+        policy[role] = _default_role_entry(role)
     policy[role][kind] = names
     return save_policy(policy)
 
@@ -296,13 +288,29 @@ def allow_item(role: str, kind: str, name: str) -> bool:
 
     policy = load_policy()
     if role not in policy:
-        policy[role] = {"mcps": [], "plugins": []}
+        # A policy entry makes both kinds explicit. Seed both from their
+        # built-in effective values so allowing one item cannot accidentally
+        # erase the untouched kind (or the touched kind's existing defaults).
+        policy[role] = _default_role_entry(role)
 
     items = list(policy[role].get(kind) or [])
     if name not in items:
         items.append(name)
     policy[role][kind] = items
     return save_policy(policy)
+
+
+def _default_role_entry(role: str) -> dict[str, list[str]]:
+    """Materialise the built-in effective policy for both persisted kinds."""
+    from .lead_context import _ROLE_PLUGIN_POLICY, _TEAMMATE_PLUGINS
+    from .shared_dev_tools import default_role_mcp_policy
+
+    default_mcps = default_role_mcp_policy().get(role)
+    default_plugins = _ROLE_PLUGIN_POLICY.get(role, _TEAMMATE_PLUGINS)
+    return {
+        "mcps": sorted(default_mcps or ()),
+        "plugins": sorted(default_plugins),
+    }
 
 
 def deny_item(role: str, kind: str, name: str) -> bool:

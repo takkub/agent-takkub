@@ -25,6 +25,7 @@ import os
 import pathlib
 import re
 import sys
+from html.parser import HTMLParser
 
 import markdown
 import yaml
@@ -82,6 +83,89 @@ footer{margin-top:40px;padding-top:16px;border-top:1px solid var(--border);
 # *impact: high* (rendered by markdown as <em>) or bare "impact: high"
 _IMPACT_EM = re.compile(r"<em>\s*impact:\s*(high|med|medium|low)\s*</em>", re.IGNORECASE)
 _IMPACT_BARE = re.compile(r"\bimpact:\s*(high|med|medium|low)\b", re.IGNORECASE)
+
+_BLOCKED_TAGS = frozenset({"script", "iframe"})
+
+
+def _unsafe_url(value: str) -> bool:
+    """Return True for browser-executable URLs after entity/control folding."""
+    folded = re.sub(r"[\x00-\x20]+", "", html_lib.unescape(value)).lower()
+    return folded.startswith(("javascript:", "vbscript:", "data:"))
+
+
+class _ReviewHTMLSanitizer(HTMLParser):
+    """Small post-render sanitizer for Python-Markdown's raw-HTML passthrough.
+
+    This deliberately operates on rendered HTML so Markdown code spans and
+    fenced blocks are escaped exactly once by Markdown itself.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=False)
+        self.parts: list[str] = []
+        self._blocked_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if self._blocked_depth:
+            if tag in _BLOCKED_TAGS:
+                self._blocked_depth += 1
+            return
+        if tag in _BLOCKED_TAGS:
+            self._blocked_depth = 1
+            return
+        safe_attrs = []
+        for name, value in attrs:
+            if name.lower().startswith("on"):
+                continue
+            if value is not None and name.lower() in ("href", "src") and _unsafe_url(value):
+                value = "#"
+            if value is None:
+                safe_attrs.append(f" {name}")
+            else:
+                safe_attrs.append(f' {name}="{html_lib.escape(value, quote=True)}"')
+        self.parts.append(f"<{tag}{''.join(safe_attrs)}>")
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if self._blocked_depth or tag in _BLOCKED_TAGS:
+            return
+        self.handle_starttag(tag, attrs)
+        if self.parts:
+            self.parts[-1] = self.parts[-1][:-1] + " />"
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._blocked_depth:
+            if tag in _BLOCKED_TAGS:
+                self._blocked_depth -= 1
+            return
+        if tag not in _BLOCKED_TAGS:
+            self.parts.append(f"</{tag}>")
+
+    def handle_data(self, data: str) -> None:
+        if not self._blocked_depth:
+            self.parts.append(data)
+
+    def handle_entityref(self, name: str) -> None:
+        if not self._blocked_depth:
+            self.parts.append(f"&{name};")
+
+    def handle_charref(self, name: str) -> None:
+        if not self._blocked_depth:
+            self.parts.append(f"&#{name};")
+
+    def handle_comment(self, data: str) -> None:
+        if not self._blocked_depth:
+            self.parts.append(f"<!--{data}-->")
+
+    def handle_decl(self, decl: str) -> None:
+        if not self._blocked_depth:
+            self.parts.append(f"<!{decl}>")
+
+
+def _sanitize_rendered_html(rendered: str) -> str:
+    sanitizer = _ReviewHTMLSanitizer()
+    sanitizer.feed(rendered)
+    sanitizer.close()
+    return "".join(sanitizer.parts)
 
 
 def _norm_impact(word: str) -> str:
@@ -151,10 +235,11 @@ def render(md_path: str | pathlib.Path) -> pathlib.Path:
     base_dirs = [pathlib.Path.cwd(), md_path.resolve().parent]
     shots_html = "".join(_inline_shot(s, base_dirs) for s in shots)
 
-    # Python-Markdown intentionally passes raw HTML through. Escape it at the
-    # source boundary while preserving Markdown syntax and normal rendering.
-    safe_body = html_lib.escape(body, quote=False)
-    body_html = markdown.markdown(safe_body, extensions=["extra", "sane_lists"])
+    # Python-Markdown intentionally passes raw HTML through. Sanitize its
+    # rendered output rather than pre-escaping the source, which double-escapes
+    # code spans/blocks containing HTML, CSS selectors, JSX, or shell syntax.
+    body_html = markdown.markdown(body, extensions=["extra", "sane_lists"])
+    body_html = _sanitize_rendered_html(body_html)
     body_html = _IMPACT_EM.sub(lambda m: _impact_badge(m.group(1)), body_html)
     body_html = _IMPACT_BARE.sub(lambda m: _impact_badge(m.group(1)), body_html)
 

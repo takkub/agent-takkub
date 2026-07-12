@@ -868,7 +868,7 @@ class SpawnEngineMixin:
             return True, f"{label} spawned in {spawn_cwd}"
         except Exception as e:
             try:
-                session.terminate(wait=True)
+                session.terminate(wait=False)
             except Exception:
                 pass
             try:
@@ -1949,7 +1949,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             return True, f"{role_name} spawned in {spawn_cwd}{suffix}"
         except Exception as e:
             try:
-                session.terminate(wait=True)
+                session.terminate(wait=False)
             except Exception:
                 pass
             try:
