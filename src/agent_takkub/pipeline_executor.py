@@ -94,7 +94,8 @@ class ShardGroup:
     base_role: str
     total: int
     done: dict = field(default_factory=dict)  # {shard_key: note}
-    failed: set = field(default_factory=set)  # shard_keys that crashed
+    failed: set = field(default_factory=set)  # shard_keys that crashed or reported --fail
+    failed_notes: dict = field(default_factory=dict)  # {shard_key: done --fail note}
     closed: bool = False
     generation: int = field(default_factory=lambda: next(_shard_generation_counter))
 
@@ -499,7 +500,11 @@ class PipelineMixin:
             lines.append(f"  shard {idx}: {group.done[shard_key] or 'done'}")
         for shard_key in sorted(group.failed):
             _, idx = _split_shard(shard_key)
-            lines.append(f"  shard {idx}: CRASHED (respawn-capped)")
+            failed_note = group.failed_notes.get(shard_key)
+            if failed_note is not None:
+                lines.append(f"  shard {idx}: FAILED: {failed_note or '(no detail given)'}")
+            else:
+                lines.append(f"  shard {idx}: CRASHED (respawn-capped)")
         if timed_out:
             reported = set(group.done) | group.failed
             for n in range(1, total + 1):

@@ -66,20 +66,29 @@ def _apply_access(name: str, draft: RoleAccessDraft) -> None:
     if not skill_policy.set_role_skills(name, list(draft.skills)):
         raise RuntimeError("เขียน skill policy ไม่สำเร็จ")
 
+    had_tools_override = name in pane_tools_policy.load_policy()
     mcps_changed = False
+    plugins_changed = False
     if draft.mcps is None and draft.plugins is None:
         if not pane_tools_policy.reset_role(name):
             raise RuntimeError("เขียน MCP/plugin policy ไม่สำเร็จ")
         mcps_changed = True
+        plugins_changed = True
     else:
         if draft.mcps is not None:
             if not pane_tools_policy.set_role_items(name, "mcps", list(draft.mcps)):
                 raise RuntimeError("เขียน MCP policy ไม่สำเร็จ")
             mcps_changed = True
-        if draft.plugins is not None and not pane_tools_policy.set_role_items(
-            name, "plugins", list(draft.plugins)
-        ):
-            raise RuntimeError("เขียน plugin policy ไม่สำเร็จ")
+        if draft.plugins is not None:
+            if not pane_tools_policy.set_role_items(name, "plugins", list(draft.plugins)):
+                raise RuntimeError("เขียน plugin policy ไม่สำเร็จ")
+            plugins_changed = True
+
+        # The schema materialises both kinds together. Setting only plugins on
+        # a role that used defaults therefore also makes its MCP default
+        # explicit and requires role-variant regeneration.
+        if not had_tools_override and plugins_changed:
+            mcps_changed = True
 
     if mcps_changed:
         # HIGH-4: an Access-tab MCP change must regenerate role variants
