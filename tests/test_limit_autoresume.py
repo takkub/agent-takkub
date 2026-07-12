@@ -118,6 +118,37 @@ class TestMaybeAutoResumePark:
         confirm.assert_called_once_with("proj", "backend")
         assert ps.limit_confirm_pending is True
 
+    def test_non_claude_shards_park_without_claude_telemetry(self, monkeypatch) -> None:
+        from agent_takkub import provider_config
+
+        monkeypatch.setattr(auto_resume, "is_enabled", lambda: True)
+        monkeypatch.setattr(provider_config, "_provider_available", lambda provider: True)
+        for role in ("codex#2", "gemini#3"):
+            o = _bare_orch()
+            ps = o._ps(f"proj::{role}")
+            ps.last_assigned_task = "do the thing"
+            ps.rate_limited_until = time.time() + 3600
+            with (
+                patch.object(o, "_confirm_limit_via_usage_async") as confirm,
+                patch.object(o, "_park_pane_for_limit") as park,
+            ):
+                o._maybe_auto_resume_park("proj", role, _pane_alive(), time.time())
+            confirm.assert_not_called()
+            park.assert_called_once_with("proj", role, ps)
+            assert ps.limit_confirm_pending is False
+
+    def test_claude_shard_still_uses_claude_telemetry(self, monkeypatch) -> None:
+        monkeypatch.setattr(auto_resume, "is_enabled", lambda: True)
+        o = _bare_orch()
+        role = "qa#2"
+        ps = o._ps(f"proj::{role}")
+        ps.last_assigned_task = "do the thing"
+        ps.rate_limited_until = time.time() + 3600
+        with patch.object(o, "_confirm_limit_via_usage_async") as confirm:
+            o._maybe_auto_resume_park("proj", role, _pane_alive(), time.time())
+        confirm.assert_called_once_with("proj", role)
+        assert ps.limit_confirm_pending is True
+
     def test_already_pending_skips_duplicate_fetch(self, monkeypatch) -> None:
         monkeypatch.setattr(auto_resume, "is_enabled", lambda: True)
         o = _bare_orch()

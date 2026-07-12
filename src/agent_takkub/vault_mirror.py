@@ -321,8 +321,8 @@ def write_obsidian_graph_filter(vault: pathlib.Path) -> bool:
             suffix=".tmp",
             delete=False,
         ) as f:
-            json.dump(config, f, indent=2, ensure_ascii=False)
             tmp_path = pathlib.Path(f.name)
+            json.dump(config, f, indent=2, ensure_ascii=False)
         os.replace(tmp_path, graph_path)
         return True
     except OSError as exc:
