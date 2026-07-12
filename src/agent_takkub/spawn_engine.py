@@ -13,6 +13,7 @@ created by ``Orchestrator.__init__``.
 from __future__ import annotations
 
 import collections
+import logging
 import os
 import pathlib
 import re
@@ -61,6 +62,8 @@ from .pane_env import (
 from .pipeline_executor import _split_shard
 from .pty_session import PtySession
 from .roles import LEAD
+
+_log = logging.getLogger(__name__)
 
 # ── test-mockability shim ────────────────────────────────────────
 # Tests written before the spawn_engine extraction patch symbols at
@@ -864,6 +867,15 @@ class SpawnEngineMixin:
             _log_event("spawn", role=role_name, cwd=spawn_cwd, resumed=False)
             return True, f"{label} spawned in {spawn_cwd}"
         except Exception as e:
+            try:
+                session.terminate(wait=True)
+            except Exception:
+                pass
+            try:
+                session.setParent(None)
+                session.deleteLater()
+            except Exception:
+                pass
             self._pane_tokens.pop(pane_tok, None)
             return False, f"failed to spawn {label}: {e}"
         finally:
@@ -1136,9 +1148,12 @@ class SpawnEngineMixin:
                 # ensure_agents_md() plants for every other role (#101).
                 if spawn_cwd != str(DATA_HOME):
                     post_compact_brief = self._build_post_compact_brief(project_ns)
-                    render_lead_agents_md(
-                        project_ns, spawn_cwd, post_compact_brief=post_compact_brief
-                    )
+                    try:
+                        render_lead_agents_md(
+                            project_ns, spawn_cwd, post_compact_brief=post_compact_brief
+                        )
+                    except OSError:
+                        _log.exception("could not render Gemini Lead context; spawning without it")
             else:
                 from . import skill_policy
 
@@ -1217,9 +1232,12 @@ class SpawnEngineMixin:
                 # matching comment above (#101).
                 if spawn_cwd != str(DATA_HOME):
                     post_compact_brief = self._build_post_compact_brief(project_ns)
-                    render_lead_agents_md(
-                        project_ns, spawn_cwd, post_compact_brief=post_compact_brief
-                    )
+                    try:
+                        render_lead_agents_md(
+                            project_ns, spawn_cwd, post_compact_brief=post_compact_brief
+                        )
+                    except OSError:
+                        _log.exception("could not render Codex Lead context; spawning without it")
             else:
                 # Plant the takkub cheatsheet so Codex auto-discovers it on
                 # boot and knows how to call `takkub send/done`. Safe: only
@@ -1327,13 +1345,25 @@ class SpawnEngineMixin:
             # (no project context to enforce).
             if spawn_cwd != str(DATA_HOME):
                 post_compact_brief = self._build_post_compact_brief(project_ns)
-                role_md_file = _render_lead_context(
-                    project_ns,
-                    post_compact_brief=post_compact_brief,
-                    claude_cwd=spawn_cwd,
-                )
+                try:
+                    role_md_file = _render_lead_context(
+                        project_ns,
+                        post_compact_brief=post_compact_brief,
+                        claude_cwd=spawn_cwd,
+                    )
+                except OSError:
+                    _log.exception("could not render Claude Lead context; spawning without it")
+                    role_md_file = None
         else:
-            staging = agent_role_dir(base_role)
+            try:
+                staging = agent_role_dir(base_role)
+                role_context_available = True
+            except OSError:
+                _log.exception(
+                    "could not prepare role context for %s; spawning without it", base_role
+                )
+                staging = DATA_HOME
+                role_context_available = False
             spawn_cwd = cwd or default_cwd_for_role(base_role, project=project_ns) or str(staging)
             # When cwd is a project path, claude auto-discovers the project's
             # CLAUDE.md, not the role's specialist override. Pass the role's
@@ -1342,11 +1372,18 @@ class SpawnEngineMixin:
             # variant avoids command-line escaping problems with multiline
             # markdown containing backticks, asterisks, and Thai text.)
             role_md_path = staging / "CLAUDE.md"
-            if role_md_path.exists():
+            if role_context_available and role_md_path.exists():
                 # agent_role_dir() always rewrites CLAUDE.md fresh from the source
                 # .claude/agents/<role>.md, so these injections never accumulate.
                 # Build the whole appendix, then write once.
-                _existing_md = role_md_path.read_text(encoding="utf-8")
+                try:
+                    _existing_md = role_md_path.read_text(encoding="utf-8")
+                except OSError:
+                    _log.exception(
+                        "could not read role context for %s; spawning without it", base_role
+                    )
+                    _existing_md = ""
+                    role_context_available = False
                 _appendix = ""
                 # Issue #33: pointer to Lead's project-memory so the teammate can
                 # read domain rules (package manager, ports, vendor patterns) on
@@ -1469,9 +1506,16 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 # for minutes. Lead delegates and rarely bulk-edits, so it's
                 # omitted there to save spawn tokens.
                 _appendix += STALE_FILE_GUARD
-                if _appendix:
-                    role_md_path.write_text(_existing_md + _appendix, encoding="utf-8")
-                role_md_file = str(role_md_path)
+                if role_context_available:
+                    try:
+                        if _appendix:
+                            role_md_path.write_text(_existing_md + _appendix, encoding="utf-8")
+                        role_md_file = str(role_md_path)
+                    except OSError:
+                        _log.exception(
+                            "could not write role context for %s; spawning without it", base_role
+                        )
+                        role_md_file = None
 
         # LOW (codex full-system review 2026-07-11): validate an explicit
         # resume_uuid BEFORE minting the per-pane capability token below.
@@ -1904,6 +1948,15 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 suffix += " — claude substitute (provider unavailable)"
             return True, f"{role_name} spawned in {spawn_cwd}{suffix}"
         except Exception as e:
+            try:
+                session.terminate(wait=True)
+            except Exception:
+                pass
+            try:
+                session.setParent(None)
+                session.deleteLater()
+            except Exception:
+                pass
             # Revoke the token if spawn failed — it was registered before the
             # try block so the pane never actually came up to use it.
             if role_name != LEAD.name:

@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import sys
+import time
 from pathlib import Path
+
+_log = logging.getLogger(__name__)
 
 _SAFE_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _SAFE_SHARD_IDX = re.compile(r"^[1-9][0-9]{0,2}$")  # 1–999
@@ -65,7 +69,24 @@ def _write_json_atomic(path: Path, data: dict) -> None:
     leaves a partial/corrupt JSON file behind."""
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-    tmp.replace(path)
+    # Windows can transiently reject replacement while an AV scanner or
+    # another reader still has the destination open.  A bounded retry absorbs
+    # that race without letting PermissionError escape a Qt save slot.
+    for attempt, delay in enumerate((0.0, 0.02, 0.05, 0.1)):
+        if delay:
+            time.sleep(delay)
+        try:
+            tmp.replace(path)
+            return
+        except PermissionError:
+            if attempt < 3:
+                continue
+            _log.exception("could not replace %s after retries; keeping existing config", path)
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -316,17 +337,18 @@ def project_docs_dir(project_ns: str) -> Path:
 
 
 def load_projects() -> dict:
+    empty = {"active": None, "projects": {}}
     if not PROJECTS_JSON.exists():
-        return {"active": None, "projects": {}}
+        return empty
     try:
-        return json.loads(PROJECTS_JSON.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        import logging
-
-        logging.getLogger(__name__).warning(
-            "projects.json contains invalid JSON — falling back to empty project list"
-        )
-        return {"active": None, "projects": {}}
+        data = json.loads(PROJECTS_JSON.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        _log.warning("could not read projects.json (%r) — falling back to empty project list", exc)
+        return empty
+    if not isinstance(data, dict):
+        _log.warning("projects.json root is not an object — falling back to empty project list")
+        return empty
+    return data
 
 
 def active_project() -> tuple[str | None, dict]:

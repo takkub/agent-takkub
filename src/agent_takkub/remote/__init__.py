@@ -107,11 +107,16 @@ class RemoteControl:
         self._idle_timer.start(_IDLE_CHECK_MS)
 
     def _check_idle_expire(self) -> None:
-        if self._server is not None and self._server.auth.idle_expired():
-            _log.info("remote-control idle-expired — disabling")
-            self.stop()
-            self.config.enabled = False
-            self.config.save()
+        try:
+            if self._server is not None and self._server.auth.idle_expired():
+                _log.info("remote-control idle-expired — disabling")
+                self.stop()
+                self.config.enabled = False
+                self.config.save()
+        except Exception:
+            # This is a QTimer slot: no filesystem/tunnel failure may escape
+            # into Qt's event loop and abort the whole cockpit.
+            _log.exception("remote-control idle-expire cleanup failed")
 
     def stop(self) -> None:
         app = QCoreApplication.instance()

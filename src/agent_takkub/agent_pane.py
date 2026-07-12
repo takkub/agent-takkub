@@ -489,6 +489,8 @@ class AgentPane(QFrame):
     def attach_session(self, session: PtySession, cwd: str | None = None) -> None:
         """Bind a PtySession to this pane's terminal widget. `cwd` (optional)
         is shown in the header next to the role label."""
+        if self.session is not None and self.session is not session:
+            self.detach_session()
         self.session = session
         # Route PTY bytes through the coalescing buffer (issue #35).
         # _coalesce_bytes accumulates chunks and flushes to xterm.js every
@@ -604,6 +606,7 @@ class AgentPane(QFrame):
         self._flush_render_buf()
         self._render_timer.stop()
         if self.session is not None:
+            outgoing = self.session
             try:
                 self.session.bytesIn.disconnect(self._coalesce_bytes)
             except Exception:
@@ -616,6 +619,10 @@ class AgentPane(QFrame):
                 self.session.outputUpdated.disconnect(self._sync_idle_flag)
             except Exception:
                 pass
+            try:
+                self._terminal.resized.disconnect(self.session.resize)
+            except Exception:
+                pass
             # Sever processExited so a late exit from this (engine-owned)
             # session can't call back into a pane that's being torn down.
             exit_conn = getattr(self, "_exit_conn", None)
@@ -626,6 +633,7 @@ class AgentPane(QFrame):
                     pass
                 self._exit_conn = None
             self.session = None
+            outgoing.terminate()
         # __new__-built pane doubles (see test_render_coalesce.py) never ran
         # __init__, so this attr may not exist — and reading a missing attr on
         # such a double raises RuntimeError, not AttributeError, so getattr's
