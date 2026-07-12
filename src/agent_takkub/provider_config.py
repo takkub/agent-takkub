@@ -193,7 +193,7 @@ def provider_for(role: str, project: str | None = None) -> str:
     role-providers mapping for everything else; defaults to `"claude"` when the
     role isn't in the config.
     """
-    key = (role or "").lower().strip()
+    key = re.sub(r"#\d+$", "", (role or "").lower().strip())
     if key in _FORCED_PROVIDER:
         return _FORCED_PROVIDER[key]
     mapping = load_providers(project)
@@ -253,6 +253,8 @@ def effective_provider_for(role: str, project: str | None = None) -> str:
     (static identity); this answers "which CLI is *usable* right now"
     (runtime). Spawn-time decisions should use this one.
     """
+    # Pane shards (for example ``codex#2``) share their base role's provider.
+    role = re.sub(r"#\d+$", "", role or "")
     desired = provider_for(role, project)
     if desired == CLAUDE:
         return CLAUDE

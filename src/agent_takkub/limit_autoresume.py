@@ -6,11 +6,11 @@ Mixed into ``Orchestrator``. Builds on the existing rate-limit watchdog
 ``pty_session.rate_limit_reset_at()`` and its marker list — and records the
 reset epoch in ``PaneState.rate_limited_until``. This module adds:
 
-* **signal (b)** — an independent confirmation via the pane's own profile
-  ``limit_status`` telemetry (five-hour window utilization), fetched off the
-  Qt thread so a slow/offline network call never blocks the watchdog tick.
-  Both signals must agree before a pane is parked (conservative — avoids a
-  false-positive banner match parking a pane that can still work).
+* **signal (b)** — for Claude panes, an independent confirmation via the
+  profile's ``limit_status`` telemetry (five-hour window utilization), fetched
+  off the Qt thread so a slow/offline network call never blocks the watchdog
+  tick. Both signals must agree before a Claude pane is parked. Other providers
+  currently fall back to their provider-specific banner (signal (a)) alone.
 * **park** — once confirmed, notify the Lead once and stop poking the pane
   (the idle-reminder suppression already in ``_rate_limit_suppressed``
   handles the "stop nagging" half).
@@ -44,6 +44,7 @@ from .agent_pane import AgentPane
 from .lead_inbox import _delayed_enter
 from .limit_status import UsageData, fetch_usage
 from .orchestrator_text import _log_event
+from .provider_config import CLAUDE, effective_provider_for
 from .roles import LEAD
 from .spawn_engine import PaneState
 
@@ -126,6 +127,13 @@ class AutoResumeMixin:
         if not ps.rate_limited_until:
             return  # signal (a) not actually recorded yet on this pane state
 
+        if effective_provider_for(role, project) != CLAUDE:
+            # #103: Codex/Gemini do not yet expose usage telemetry here. Their
+            # provider-specific limit banner (signal a) is the safe fallback;
+            # never confirm it against an unrelated Anthropic usage window.
+            self._park_pane_for_limit(project, role, ps)
+            return
+
         ps.limit_confirm_pending = True
         self._confirm_limit_via_usage_async(project, role)
 
@@ -159,6 +167,11 @@ class AutoResumeMixin:
         """Runs in a background thread — network I/O, must never touch a Qt
         widget directly. Emits `limitUsageConfirmed` so the park decision
         itself runs back on the Qt thread."""
+        if effective_provider_for(role, project) != CLAUDE:
+            # Defensive re-check in the worker: provider selection may change
+            # after the watchdog schedules this confirmation.
+            self.limitUsageConfirmed.emit(project, role, True)
+            return
         try:
             usage = fetch_usage(config_dir)
         except Exception:

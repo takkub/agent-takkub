@@ -13,6 +13,7 @@ repo (cwd-detected), pass `cockpit_bug=False` (CLI: `--no-cockpit-bug`).
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -176,18 +177,27 @@ def _load_local_issues(cwd: str | Path | None) -> list[dict[str, Any]]:
         return []
     try:
         with open(path, encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return []
+            issues = json.load(f)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"could not read local issue store {path}: {exc}") from exc
+    if not isinstance(issues, list):
+        raise RuntimeError(f"local issue store {path} must contain a JSON list")
+    return issues
 
 
 def _save_local_issues(issues: list[dict[str, Any]], cwd: str | Path | None) -> None:
     path = _get_local_issues_path(cwd)
+    tmp = path.with_suffix(path.suffix + ".tmp")
     try:
-        with open(path, "w", encoding="utf-8") as f:
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(issues, f, indent=2, ensure_ascii=False)
-    except Exception:
-        pass
+        os.replace(tmp, path)
+    except Exception as exc:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise RuntimeError(f"could not save local issue store {path}: {exc}") from exc
 
 
 def new_issue(

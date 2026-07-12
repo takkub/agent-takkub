@@ -24,6 +24,7 @@ import logging
 import os
 import pathlib
 import re
+import tempfile
 import time
 from datetime import datetime
 
@@ -294,12 +295,16 @@ def write_obsidian_graph_filter(vault: pathlib.Path) -> bool:
     obsidian_dir = vault / ".obsidian"
     graph_path = obsidian_dir / "graph.json"
 
-    config: dict = {}
-    if graph_path.is_file():
-        try:
-            config = json.loads(graph_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            config = {}
+    try:
+        config = json.loads(graph_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        config = {}
+    except (json.JSONDecodeError, OSError, UnicodeError) as exc:
+        _distill_log.warning("Skipping unreadable Obsidian graph config %s: %s", graph_path, exc)
+        return False
+    if not isinstance(config, dict):
+        _distill_log.warning("Skipping non-object Obsidian graph config %s", graph_path)
+        return False
 
     existing_search = config.get("search", "")
     if _GRAPH_FILTER not in existing_search:
@@ -308,9 +313,25 @@ def write_obsidian_graph_filter(vault: pathlib.Path) -> bool:
 
     try:
         obsidian_dir.mkdir(parents=True, exist_ok=True)
-        graph_path.write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=obsidian_dir,
+            prefix=f".{graph_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+            tmp_path = pathlib.Path(f.name)
+        os.replace(tmp_path, graph_path)
         return True
-    except OSError:
+    except OSError as exc:
+        if "tmp_path" in locals():
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        _distill_log.warning("Could not update Obsidian graph config %s: %s", graph_path, exc)
         return False
 
 
