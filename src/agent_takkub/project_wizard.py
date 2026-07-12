@@ -251,7 +251,21 @@ class ProjectWizardMixin:
         try:
             thread.start()
             busy.exec()
-            thread.wait(5000)
+            # busy.exec() can return via Esc / the window close button
+            # (QDialog.reject) WITHOUT going through on_cancel, leaving the
+            # generator thread still running claude headless. Scheduling
+            # deleteLater() on a running QThread makes Qt abort the whole
+            # process (std::terminate: "Destroyed while thread is still
+            # running") and orphans the subprocess — so always cancel + join
+            # before deleting, no matter how the dialog closed.
+            if thread.isRunning():
+                thread.cancel()
+                if not thread.wait(10000):
+                    # cancel() couldn't stop it (rare: killed inside the proc
+                    # create→assign window); force-terminate rather than delete
+                    # a live thread, then join so it is finished before delete.
+                    thread.terminate()
+                    thread.wait()
             thread.deleteLater()
         finally:
             if _add_btn is not None:
