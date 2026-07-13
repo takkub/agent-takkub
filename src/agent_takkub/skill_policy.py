@@ -148,9 +148,12 @@ def save_policy(policy: dict[str, list[str]]) -> bool:
             delete=False,
             encoding="utf-8",
         ) as tmp:
+            # Bind the temp path BEFORE writing so the except-clause cleanup
+            # still fires if json.dump raises mid-write (delete=False would
+            # otherwise leak the partial temp file).
+            tmp_path = Path(tmp.name)
             json.dump(payload, tmp, indent=2, ensure_ascii=False)
             tmp.write("\n")
-            tmp_path = Path(tmp.name)
         tmp_path.replace(SKILL_POLICY_FILE)
         return True
     except OSError as e:

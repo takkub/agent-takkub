@@ -43,7 +43,7 @@ def test_doctor_thread_runs_fixes_before_recheck(monkeypatch):
     assert calls == [("fix", ["dirty"]), ("check",)]
 
 
-def test_doctor_thread_swallows_errors(monkeypatch):
+def test_doctor_thread_surfaces_errors_not_blank(monkeypatch):
     def _boom():
         raise RuntimeError("git exploded")
 
@@ -54,9 +54,14 @@ def test_doctor_thread_swallows_errors(monkeypatch):
     th.ready.connect(got.append)
     th.run()
 
-    # Never propagates — emits [] so the dialog can recover instead of the slot
-    # raising inside the Qt event dispatch.
-    assert got == [[]]
+    # Must NOT propagate (a raise inside the Qt slot would abort the process),
+    # but must NOT blank the report either — a silent [] renders as a healthy
+    # env, the opposite of the truth. Surface the crash as a single FAIL finding.
+    assert len(got) == 1
+    findings = got[0]
+    assert len(findings) == 1
+    assert findings[0].status == doctor.Status.FAIL
+    assert "git exploded" in findings[0].detail
 
 
 def test_no_fixes_when_apply_fixes_none(monkeypatch):

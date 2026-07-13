@@ -59,8 +59,20 @@ class _DoctorThread(QThread):
             if self._apply_fixes_to is not None:
                 _doctor.run_auto_fixes(self._apply_fixes_to)
             findings = _doctor.run_all_checks()
-        except Exception:
-            findings = []
+        except Exception as e:
+            # Surface the crash as a FAIL finding rather than blanking the whole
+            # report — a silent findings=[] renders as a clean/healthy env, the
+            # exact opposite of the truth. run_all_checks already isolates each
+            # check, so this only fires on an unexpected top-level error.
+            _log_event("doctor_run_error", error=str(e))
+            findings = [
+                _doctor.Finding(
+                    "doctor",
+                    "self-check",
+                    _doctor.Status.FAIL,
+                    f"diagnostics crashed before completing: {e}",
+                )
+            ]
         self.ready.emit(findings)
 
 
