@@ -68,7 +68,10 @@ def _write_json_atomic(path: Path, data: dict) -> bool:
     """Write *data* to *path* via a temp file so a crash mid-write never
     leaves a partial/corrupt JSON file behind. Return whether it persisted."""
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    with tmp.open("w", encoding="utf-8") as f:
+        f.write(json.dumps(data, indent=2, ensure_ascii=False))
+        f.flush()
+        os.fsync(f.fileno())
     # Windows can transiently reject replacement while an AV scanner or
     # another reader still has the destination open.  A bounded retry absorbs
     # that race without letting PermissionError escape a Qt save slot.
@@ -77,7 +80,6 @@ def _write_json_atomic(path: Path, data: dict) -> bool:
             time.sleep(delay)
         try:
             tmp.replace(path)
-            return True
         except PermissionError:
             if attempt < 3:
                 continue
@@ -87,6 +89,14 @@ def _write_json_atomic(path: Path, data: dict) -> bool:
             except OSError:
                 pass
             return False
+        else:
+            if sys.platform != "win32":
+                dir_fd = os.open(path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            return True
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]

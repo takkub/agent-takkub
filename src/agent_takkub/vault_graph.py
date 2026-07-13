@@ -25,7 +25,7 @@ import re
 import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 
 import yaml
 
@@ -152,6 +152,11 @@ def _parse_session_file(path: pathlib.Path) -> SessionEntry | None:
 
     if not role or ts is None:
         return None
+
+    # Keep all entries comparable even when frontmatter mixes offset-aware
+    # ISO timestamps with the naive timestamps produced by older mirrors.
+    if ts.tzinfo is not None:
+        ts = ts.astimezone(UTC).replace(tzinfo=None)
 
     note = _extract_note_text(body)
     return SessionEntry(
