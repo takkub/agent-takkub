@@ -474,12 +474,19 @@ def cmd_list(_: argparse.Namespace) -> dict:
     return _request(_with_project({"cmd": "list"}))
 
 
-def _print_status_report(report: dict) -> None:
+def _print_status_report(report: object) -> None:
     """Pretty-print the per-pane report returned by `takkub status`."""
+    if not isinstance(report, dict):
+        print("  project: ?")
+        return
     project = report.get("project") or "?"
     panes = report.get("panes") or {}
+    if not isinstance(panes, dict):
+        panes = {}
     print(f"  project: {project}")
     for role, info in panes.items():
+        if not isinstance(info, dict):
+            info = {}
         state = info.get("state", "?")
         stall = info.get("stall_minutes")
         human_ts = info.get("last_progress_human", "?")
@@ -1865,7 +1872,8 @@ def main(argv: list[str] | None = None) -> int:
     ok = bool(resp.get("ok"))
     if "report" in resp:
         _print_status_report(resp["report"])
-        if resp.get("report", {}).get("any_stalled"):
+        report = resp.get("report")
+        if isinstance(report, dict) and report.get("any_stalled"):
             ok = False
     elif "status" in resp:
         for role, state in resp["status"].items():

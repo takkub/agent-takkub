@@ -44,7 +44,8 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 def _project_slug(project: str) -> str:
-    return re.sub(r"[^A-Za-z0-9._-]", "_", project) or "default"
+    slug = re.sub(r"[^A-Za-z0-9._-]", "_", project)
+    return slug if slug.strip(".") else "default"
 
 
 def _project_profile_path(project: str) -> Path:

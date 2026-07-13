@@ -8,6 +8,9 @@ never imports ``custom_roles``/``provider_config``/``pane_tools_policy``/
 
 from __future__ import annotations
 
+import os
+import tempfile
+
 from ... import custom_roles
 from ... import roles as roles_mod
 from ..commands import CreateRoleCommand, UpdateRoleCommand
@@ -104,7 +107,7 @@ def _aggregate_paths(name: str, *, include_registry: bool) -> list:
     # NOTE: this module defines its own `list()` (the repository contract,
     # below) which shadows the builtin — `[*iterable]` instead of
     # `list(iterable)`.
-    paths = [*relationships._relationship_paths()]
+    paths = [*relationships._relationship_paths(name)]
     if include_registry:
         paths += [custom_roles.CUSTOM_ROLES_FILE, custom_roles.role_file_path(name)]
     return paths
@@ -178,7 +181,15 @@ def update(entity_id: str, command: UpdateRoleCommand) -> OperationResult:
                     raise RuntimeError("เขียน custom-roles.json ไม่สำเร็จ")
                 path = custom_roles.role_file_path(entity_id)
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(command.general.instructions, encoding="utf-8")
+                fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+                tmp_path = path.parent / os.path.basename(tmp_name)
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8") as tmp:
+                        tmp.write(command.general.instructions)
+                    os.replace(tmp_path, path)
+                except OSError:
+                    tmp_path.unlink(missing_ok=True)
+                    raise
 
             relationships._apply_access(entity_id, command.access)
     except (RuntimeError, OSError) as e:

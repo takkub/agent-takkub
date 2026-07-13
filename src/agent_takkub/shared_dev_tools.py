@@ -30,9 +30,11 @@ import logging
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
+from collections.abc import Iterable
 
 from ._win_console import SUBPROCESS_NO_WINDOW
 from .config import RUNTIME_DIR
@@ -148,6 +150,11 @@ def warm_browser_mcps() -> None:
         _log.debug("warm_browser_mcps: skipped (TAKKUB_SKIP_MCP_WARM set)")
         return
 
+    npx = shutil.which("npx")
+    if npx is None:
+        _log.debug("warm_browser_mcps: npx launcher not found on PATH")
+        return
+
     def _warm_one(argv: list[str]) -> None:
         try:
             subprocess.run(
@@ -163,7 +170,7 @@ def warm_browser_mcps() -> None:
             pass
 
     for name, cfg in BROWSER_MCPS.items():
-        argv = [cfg["command"], *cfg["args"]]
+        argv = [npx if cfg["command"] == "npx" else cfg["command"], *cfg["args"]]
         threading.Thread(
             target=_warm_one,
             args=(argv,),
@@ -208,7 +215,9 @@ def shared_mcp_config_path_for_role(role: str) -> str | None:
             try:
                 data = json.loads(variant.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
-                return shared_mcp_config_path()  # fall back on corruption
+                # A role policy exists, so a corrupt variant must fail closed.
+                # Falling back to the master would grant every shared MCP.
+                return None
             servers = data.get("mcpServers") or {}
             if servers:
                 return str(variant)
@@ -580,7 +589,7 @@ def regen_role_variants() -> int:
     return count
 
 
-def role_variant_paths() -> list[pathlib.Path]:
+def role_variant_paths(extra_roles: Iterable[str] = ()) -> list[pathlib.Path]:
     """Every per-role MCP variant file path `regen_role_variants_checked`
     may write — for callers that need to include them in a
     :class:`~.settings_management.transaction.FileTransaction` alongside
@@ -589,7 +598,11 @@ def role_variant_paths() -> list[pathlib.Path]:
     disagreeing (HIGH-4)."""
     from .pane_tools_policy import load_policy
 
-    roles = set(_ROLE_MCP_POLICY) | set(load_policy())
+    roles = (
+        set(_ROLE_MCP_POLICY)
+        | set(load_policy())
+        | {role for role in extra_roles if isinstance(role, str)}
+    )
     return [_role_variant_path(r) for r in sorted(roles)]
 
 
@@ -704,6 +717,13 @@ def _has_secrets(cfg: dict) -> bool:
             ):
                 return True
         return False
+
+    # HTTP headers are arbitrary user-controlled credential channels (Cookie,
+    # X-Org-Auth, vendor-specific session headers, etc.).  Treat any populated
+    # header map as sensitive instead of trying to enumerate every spelling.
+    if cfg.get("type") in {"http", "sse"} and isinstance(cfg.get("headers"), dict):
+        if any(value not in (None, "", False) for value in cfg["headers"].values()):
+            return True
 
     if scan(cfg):
         return True

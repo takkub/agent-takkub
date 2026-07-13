@@ -27,6 +27,8 @@ stray row can never clobber base_url / the auth headers.
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -136,14 +138,29 @@ def load_claude_auth(config_dir: Path | str | None = None) -> ClaudeAuthConfig:
 
 def save_claude_auth(config: ClaudeAuthConfig, config_dir: Path | str | None = None) -> None:
     path = config_path(config_dir)
+    parent_existed = path.parent.exists()
     path.parent.mkdir(parents=True, exist_ok=True)
+    if os.name != "nt" and not parent_existed:
+        path.parent.chmod(0o700)
     data = {
         "base_url": config.base_url.strip(),
         "api_key": config.api_key.strip(),
         "auth_token": config.auth_token.strip(),
         "env": _clean_env_map(config.extra_env),
     }
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    tmp_path = Path(tmp_name)
+    try:
+        if os.name != "nt":
+            os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as tmp:
+            tmp.write(json.dumps(data, indent=2) + "\n")
+        os.replace(tmp_path, path)
+        if os.name != "nt":
+            path.chmod(0o600)
+    except OSError:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def apply_claude_auth_overrides(env: dict[str, str]) -> None:
