@@ -1,6 +1,6 @@
 [project]
 name = "agent-takkub"
-version = "1.0.24"
+version = "1.0.25"
 description = "Desktop cockpit for orchestrating Claude Code dev teammates on Windows"
 requires-python = ">=3.11"
 license = "MIT"

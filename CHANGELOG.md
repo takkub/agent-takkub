@@ -4,7 +4,11 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.25] - 2026-07-13
+
 ### Added (ใหม่)
+- **Instance banner แยก dev/prod (v1.0.25)** — `takkub list`/`status` ขึ้นหัวบอกว่ากำลังคุม cockpit ตัวไหน (`dev · <repo>` / `v<ver>` + port + path) และเตือนเมื่อมีอีก instance (dev↔prod) รันพร้อมกัน — เลิกงมว่าคำสั่งเข้า cockpit ตัวไหน.
+- **`TAKKUB_NPM_REGISTRY` override (v1.0.25)** — ตั้ง npm registry สำหรับ public package (Claude CLI / takkub) ได้เอง เผื่อองค์กรที่ mirror แพ็กเกจไว้ใน private registry ของตัวเอง.
 - **Task Ledger + Task Dock ครบวงจร** — ทุก assign มี markdown record, สถานะ flip ตอน done/failed/reassign และ cockpit แสดงงานข้าม project แบบ responsive.
 - **Role/Skill lifecycle และ multi-provider architecture** — custom roles, skill catalog/matrix, shipped skill bundle, ProviderSpec registry, per-provider skill injection และ MCP bridge สำหรับ Codex/AGY.
 - **Headless server mode** — แยก pane model ออกจาก Qt view, เพิ่ม headless entrypoint, Docker/Compose และ Ubuntu CI โดยยังคง desktop cockpit เดิม.
@@ -15,6 +19,7 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 - **Settings ค่าเริ่มต้นกลับเป็น legacy** — correctness ของ UI ใหม่ผ่าน gate แล้ว แต่ feedback ผู้ใช้จริงพบว่า workflow ใช้ยากกว่าเดิม จึงเก็บรุ่นใหม่หลัง feature flag จนกว่า issue #115 จะผ่าน usability acceptance.
 - **งานยาวและ done note ใช้ file handoff** — ลด paste/Enter race, เก็บ artifacts ใต้ runtime และแนบ screenshot evidence อัตโนมัติสำหรับ role ตรวจสอบ.
 - **Parallel guidance ไม่บังคับ numeric cap** — capacity เป็น telemetry/warning เท่านั้น พร้อมแนะนำแบ่งงานเป็น waves ตามภาระจริง.
+- **README ยกเครื่องใหม่ (v1.0.25)** — hero/badges โปรขึ้น, callout `-g` เตือนต้องลง global, เพิ่มจุดขาย **3 model brains** (Claude/Codex/Gemini + substitution) และ execution mode **1:1 ↔ Multi**; installer เลิก set npm registry global (เหลือ report อย่างเดียว).
 
 ### Fixed (แก้)
 - **Full-system code review sweep + reliability hardening (v1.0.24)** — รีวิวโค้ดทั้งระบบแบบ multi-agent + adversarial verify แก้ครบ 92 findings: กัน **PyQt6 exit-127** (unhandled exception ใน Qt/QTimer slot ที่ทำ cockpit ตายเงียบ) ทั่ว config/remote-server/spawn/pane-tools/project-wizard, teardown **PTY resource leak** บน exit→respawn, sharded `done --fail` → เข้า fix-loop, route timer/watchdog notices ผ่าน `_notify_lead` (draft-guard กัน draft-clobber), canonical MEMORY path encoder, Windows `npm/npx` resolve, macOS Keychain login guard, doctor per-check isolation, secrets เขียน 0600 + ขยาย detection, `design_review_html` sanitize กัน HTML/JS injection, cli role-gate (`provision`/`migrate-skills`), provider `#N` shard normalize + auto-resume telemetry แบบ provider-gated, และ data-loss guards + atomic writes ใน issues/vault/config/skill-policy.
@@ -24,6 +29,8 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 - **Settings data integrity** — ป้องกัน masked secrets เขียนทับ credential จริง, rollback partial writes ของ role/skill/MCP, provider broadcast และ dirty-navigation data loss.
 - **CI hermetic + version sync** — Plugins repository test ไม่พึ่ง marketplace registry ของเครื่อง dev อีกต่อไป และเพิ่ม gate ให้ `pyproject.toml`, `package.json`, `agent_takkub.__version__` ตรงกันเสมอ.
 - **Hotfix Qt dependency resolution (v1.0.23)** — v1.0.22 ระบุช่วง `<6.12` กว้างเกินไปจน npm production install ดึง Qt 6.11 ซึ่ง doctor บล็อกเพราะ pane-teardown crash regression; pin ทั้ง PyQt6/WebEngine และ binary wheels ให้อยู่สาย 6.8 LTS (`>=6.8,<6.9`) พร้อมตรวจจาก registry install จริง.
+- **Plugin half-clone self-repair (v1.0.25)** — plugin ที่ clone ค้างครึ่งทาง (registry บอก installed แต่ cache ไม่มีไฟล์ปลั๊กอินจริง) ทำให้ `claude plugin install` ตอบ "already installed" วนไม่จบ **restart ก็ไม่หาย** (เจอจริงกับ Claude Mem บน prod); ตอนนี้ตรวจเจอแล้วซ่อมเอง 1 รอบ (uninstall → purge cache แบบ read-only-safe → reinstall) แทนข้อความ "try restart".
+- **npm private-registry รองรับ (v1.0.25)** — เครื่องที่ตั้ง npm registry เป็น private (Nexus/Artifactory) เดิม update Claude CLI/takkub ไม่ได้ (E404 เพราะ public package ไม่อยู่ใน registry ภายใน); เปลี่ยนเป็น pass `--registry` แบบ scoped เฉพาะคำสั่งที่ดึง public package (installer + Claude-CLI updater) โดย **ไม่แตะ global npm config** ของผู้ใช้ (default public · override ผ่าน `TAKKUB_NPM_REGISTRY`), และ `takkub doctor` เพิ่ม check เตือนแบบ read-only เมื่อ registry เป็น private.
 
 ## [1.0.17] - 2026-07-06
 
