@@ -646,6 +646,7 @@
     {
       "module": "agent_takkub.mcp_bridge",
       "imports": [
+        "agent_takkub.pane_tools_policy",
         "agent_takkub.provider_spec",
         "agent_takkub.shared_dev_tools"
       ],
@@ -653,7 +654,7 @@
         "agent_takkub.spawn_engine"
       ],
       "fan_in": 1,
-      "fan_out": 2
+      "fan_out": 3
     },
     {
       "module": "agent_takkub.orchestrator",
@@ -757,6 +758,7 @@
       "imported_by": [
         "agent_takkub.cli",
         "agent_takkub.lead_context",
+        "agent_takkub.mcp_bridge",
         "agent_takkub.pane_tools_dialog",
         "agent_takkub.settings_management.repositories.mcps",
         "agent_takkub.settings_management.repositories.plugins",
@@ -767,7 +769,7 @@
         "agent_takkub.shared_dev_tools",
         "agent_takkub.skill_policy"
       ],
-      "fan_in": 11,
+      "fan_in": 12,
       "fan_out": 5
     },
     {

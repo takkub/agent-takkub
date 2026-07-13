@@ -55,6 +55,11 @@ class TestTerminalWidgetFontZoom:
         tw = TerminalWidget.__new__(TerminalWidget)
         tw._view = MagicMock()
         tw.fontSizeChanged = MagicMock()
+        # set_font_point_size now defers the JS call until the page is ready
+        # (guards runJavaScript before the xterm.js page exists); the __new__
+        # fake must carry these so the guard reads a plain attr, not a sip miss.
+        tw._page_ready = False
+        tw._font_px = None
         return tw
 
     def test_set_font_point_size_clamps_low(self) -> None:

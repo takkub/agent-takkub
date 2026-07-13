@@ -720,22 +720,33 @@ class LeadInboxMixin:
             # paste the CC over it.
             return
         # Hand every CC to the same ready-prompt-aware serialised queue used by
-        # done notices. This prevents a tight paste loop from stacking messages
-        # into a Lead that became busy after the initial readiness check.
+        # done notices — a tight paste loop must not stack messages into a Lead
+        # that went busy after the initial readiness check (finding lead_inbox:693).
+        # Track delivered items so a _notify_lead that raises mid-flush preserves
+        # ONLY the undelivered tail (durable for the next retry, M4#22) and never
+        # re-enqueues an already-handed-off CC (the duplicate-delivery regression).
         items = list(pending)
+        delivered = 0
         try:
             for item in items:
-                self._notify_lead(
-                    project_ns,
-                    item["body"],
-                    from_role=item.get("from_role", "system"),
-                    note="cc_flush",
-                )
-        except Exception:
-            return
-        self._pending_lead_cc.pop(project_ns, None)
-        self._save_pending_cc(project_ns)
-        _log_event("send_cc_flushed", project=project_ns, count=len(items))
+                body = item.get("body") if isinstance(item, dict) else None
+                if isinstance(body, str):
+                    self._notify_lead(
+                        project_ns,
+                        body,
+                        from_role=item.get("from_role", "system"),
+                        note="cc_flush",
+                    )
+                delivered += 1  # a malformed item is dropped, not retried forever
+        finally:
+            remaining = items[delivered:]
+            if remaining:
+                self._pending_lead_cc[project_ns] = remaining
+            else:
+                self._pending_lead_cc.pop(project_ns, None)
+            self._save_pending_cc(project_ns)
+        if delivered:
+            _log_event("send_cc_flushed", project=project_ns, count=delivered)
 
     # ------------------------------------------------------------------
     # Lead-notify queue: ready-prompt-aware serialised delivery

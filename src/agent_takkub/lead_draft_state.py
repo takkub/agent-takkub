@@ -253,13 +253,27 @@ def advance_draft_state(prev: LeadDraftState, data: bytes, now: float) -> LeadDr
                     st = _apply_word_delete(st, now)
                     i += 2
                     continue
-                # Bare Esc may clear the composer or merely dismiss an
-                # autocomplete/menu. Without render-side visibility, retain a
-                # conservative unknown hold when text may still be present.
-                if st.state == NONEMPTY:
-                    st = _held(UNKNOWN_NONEMPTY, st.draft_len, st.word_len, st, now)
-                else:
-                    st = _cleared()
+                # A genuine lone Esc is deliberately left as a full clear
+                # (issue #114, A3-secondary): Claude CLI overloads bare Esc
+                # to both clear a draft in progress *and* dismiss its own
+                # slash-menu/dialog/autocomplete overlays, and this module
+                # only ever sees keystrokes going *into* the pane — it has
+                # no visibility into which of those the CLI is currently
+                # showing, so the two cases are provably indistinguishable
+                # from the input byte stream alone. Between the two possible
+                # wrong answers, clearing on a menu-dismiss Esc merely holds
+                # state as "empty" one keystroke early (at worst a stray
+                # injection lands on an empty line a beat sooner than a
+                # human would've typed into it) where NOT clearing on a
+                # genuine draft-Esc would leave `draft_len`/state stuck
+                # "nonempty" over text that no longer exists — silently
+                # blocking injection until `DRAFT_HOLD_TIMEOUT_S` spills it.
+                # The existing over-clear is the safer failure mode of the
+                # two, so it stays; see docs/reviews/2026-07-10-a3-secondary-esc-analysis.md
+                # for the full writeup and what would be needed to do better
+                # (render-side menu detection, out of this pure byte-level
+                # module's scope).
+                st = _cleared()  # proven bare Esc key
                 i += 1
                 continue
             seq = m.group()

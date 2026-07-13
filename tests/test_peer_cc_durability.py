@@ -509,33 +509,44 @@ class TestSendEventLogsFullBody:
 
 
 class TestFlushWriteFailureKeepsRemainder:
-    def test_undelivered_tail_preserved_on_write_error(self, orch, tmp_path, monkeypatch):
-        """If a session.write raises mid-flush, the messages not yet written stay
-        queued + re-persisted instead of being lost (the bug pop-before-write had)."""
+    def test_undelivered_tail_preserved_on_notify_error(self, orch, tmp_path, monkeypatch):
+        """CC now routes through the ready-prompt-aware notify queue (finding
+        lead_inbox:693 — no more raw paste that stacked into a busy Lead), but it
+        must keep the M4#22 deliver-then-dequeue guarantee: if _notify_lead raises
+        mid-flush, only the undelivered tail stays queued + re-persisted, and an
+        already-handed-off CC is never re-delivered on the next retry."""
         monkeypatch.setattr(orch_mod, "RUNTIME_DIR", tmp_path)
         monkeypatch.setattr(orch_mod, "EVENTS_LOG", tmp_path / "events.log")
         monkeypatch.setattr(orch_mod, "ensure_runtime", lambda: None)
 
         proj = "proj_a"
         lead_session = _make_alive_session()
-        # write succeeds for item 1, raises for item 2 → item 2 must survive
-        lead_session.write = MagicMock(side_effect=[None, RuntimeError("session gone")])
         _register_pane(orch, LEAD.name, proj, lead_session)
+        monkeypatch.setattr(orch, "_lead_can_accept_injection", lambda ns: True)
 
         orch._pending_lead_cc[proj] = [
             {"from_role": "frontend", "to_role": "backend", "body": "[CC] m1", "ts": "t1"},
             {"from_role": "qa", "to_role": "backend", "body": "[CC] m2", "ts": "t2"},
         ]
+        # notify succeeds for item 1, raises for item 2 → item 2 must survive.
+        notified: list[str] = []
+
+        def _notify(_ns, body, **_kw):
+            if notified:  # second call raises mid-flush
+                raise RuntimeError("lead torn down")
+            notified.append(body)
+
+        monkeypatch.setattr(orch, "_notify_lead", _notify)
         save_calls: list[str] = []
         monkeypatch.setattr(orch, "_save_pending_cc", lambda ns: save_calls.append(ns))
 
         with pytest.raises(RuntimeError):
             orch._flush_pending_lead_cc(proj)
 
-        # the undelivered message stays queued (not lost) and was re-persisted
+        # only the undelivered CC stays queued (m1 not re-delivered) + persisted.
         remaining = orch._pending_lead_cc.get(proj, [])
-        assert len(remaining) == 1
-        assert remaining[0]["body"] == "[CC] m2"
+        assert [r["body"] for r in remaining] == ["[CC] m2"]
+        assert notified == ["[CC] m1"]
         assert proj in save_calls
 
     def test_all_delivered_clears_queue(self, orch, tmp_path, monkeypatch):
