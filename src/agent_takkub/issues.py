@@ -246,6 +246,13 @@ def new_issue(
     if not use_local:
         try:
             _ensure_labels(labels, repo, cwd=detect_cwd)
+        except RuntimeError as exc:
+            print(
+                f"warn: could not ensure GitHub issue labels ({exc}); attempting issue create",
+                file=sys.stderr,
+            )
+
+        try:
             gh_args = ["issue", "create", "--repo", repo, "--title", title, "--body", body or ""]
             for lbl in labels:
                 gh_args += ["--label", lbl]
@@ -553,7 +560,16 @@ def cmd_issue_new(args: Any) -> dict:
         ) as f:
             tmppath = f.name
         try:
-            ret = subprocess.call([*shlex.split(editor), tmppath])
+            if sys.platform == "win32" and os.path.exists(editor):
+                editor_args = [editor]
+            else:
+                editor_args = shlex.split(editor, posix=sys.platform != "win32")
+                if sys.platform == "win32":
+                    editor_args = [arg.strip('"') for arg in editor_args]
+            try:
+                ret = subprocess.call([*editor_args, tmppath])
+            except (FileNotFoundError, OSError) as exc:
+                return {"ok": False, "msg": f"could not launch editor {editor!r}: {exc}"}
             if ret != 0:
                 return {"ok": False, "msg": f"editor exited with code {ret}"}
             body = Path(tmppath).read_text(encoding="utf-8")

@@ -629,9 +629,11 @@ def scan_hot_md_metrics(
     hook_counts: dict[str, int] = {}
     total_corrections = 0
     total_retries = 0
+    current_paths: set[str] = set()
 
     for jsonl in iter_session_files(project_filter, since=since):
         key = str(jsonl)
+        current_paths.add(key)
         try:
             st = jsonl.stat()
             mtime = st.st_mtime
@@ -690,5 +692,8 @@ def scan_hot_md_metrics(
             hook_counts[bucket] = hook_counts.get(bucket, 0) + cnt
         total_corrections += file_corrections
         total_retries += file_retries
+
+    for stale_key in _hot_md_cache.keys() - current_paths:
+        del _hot_md_cache[stale_key]
 
     return hook_counts, total_corrections, total_retries

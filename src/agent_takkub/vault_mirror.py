@@ -496,7 +496,26 @@ def _append_decision_entry(page: pathlib.Path, entry: str) -> None:
             new_text = text[:sec_end].rstrip("\n") + "\n" + entry + "\n" + text[sec_end:]
     else:
         new_text = text.rstrip("\n") + f"\n\n{_CURATED_SECTION}\n\n{_CURATED_INTRO}\n\n{entry}\n"
-    page.write_text(new_text, encoding="utf-8")
+    tmp_path: pathlib.Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=page.parent,
+            prefix=f".{page.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as f:
+            tmp_path = pathlib.Path(f.name)
+            f.write(new_text)
+        os.replace(tmp_path, page)
+    except OSError:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
 
 
 def distill_session_facts(
