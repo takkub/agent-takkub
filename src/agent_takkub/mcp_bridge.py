@@ -41,6 +41,7 @@ from __future__ import annotations
 import json
 import logging
 import pathlib
+import re
 
 _log = logging.getLogger(__name__)
 
@@ -51,6 +52,7 @@ _log = logging.getLogger(__name__)
 # equivalent — stdio is implied by `command` being present — so it's
 # dropped rather than forwarded as an override codex doesn't recognize.
 _CODEX_SERVER_KEYS = ("command", "args", "env")
+_TOML_BARE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 def _toml_literal(value: object) -> str:
@@ -72,6 +74,8 @@ def _toml_literal(value: object) -> str:
     if isinstance(value, list):
         return "[" + ",".join(_toml_literal(v) for v in value) + "]"
     if isinstance(value, dict):
+        if not all(isinstance(k, str) and _TOML_BARE_KEY_RE.fullmatch(k) for k in value):
+            raise TypeError("mcp_bridge: invalid TOML inline-table key")
         return "{" + ",".join(f"{k}={_toml_literal(v)}" for k, v in value.items()) + "}"
     raise TypeError(f"mcp_bridge: unsupported TOML literal type {type(value)!r}")
 
@@ -124,7 +128,12 @@ def _codex_mcp_argv(base_role: str, shard_idx: int | None, project_ns: str) -> l
     """
     servers = _role_mcp_servers(base_role, shard_idx, project_ns)
     argv: list[str] = []
+    from .pane_tools_policy import _validate_name
+
     for name, cfg in servers.items():
+        if not isinstance(name, str) or not _validate_name(name):
+            _log.warning("mcp_bridge: skipping invalid MCP name for codex: %r", name)
+            continue
         if not isinstance(cfg, dict):
             continue
         for key in _CODEX_SERVER_KEYS:

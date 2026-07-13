@@ -190,9 +190,10 @@ def _run_ngrok_authtoken(token: str) -> tuple[bool, str]:
             timeout=15,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        return False, str(exc)
+        return False, str(exc).replace(token, "[redacted]")
     if result.returncode != 0:
-        return False, (result.stderr or result.stdout or "").strip()
+        message = (result.stderr or result.stdout or "").strip()
+        return False, message.replace(token, "[redacted]")
     return True, ""
 
 
