@@ -406,7 +406,8 @@ class LimitStore:
         with self._lock:
             is_new = key not in self._refs
             self._refs[key] = self._refs.get(key, 0) + 1
-        if is_new:
+            backed_off = time.monotonic() < self._backoff_until.get(key, 0.0)
+        if is_new and not backed_off:
             threading.Thread(
                 target=self._do_fetch,
                 args=(key,),
@@ -428,7 +429,6 @@ class LimitStore:
             if self._refs[key] <= 0:
                 self._refs.pop(key, None)
                 self._cache.pop(key, None)
-                self._backoff_until.pop(key, None)
 
     def get(self, config_dir: Path | None) -> UsageData | None:
         """Return cached data for *config_dir* without triggering any fetch."""

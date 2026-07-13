@@ -225,9 +225,10 @@ def ensure_agents_md(spawn_cwd: str | Path, extra: str = "") -> tuple[bool, str]
     target = spawn_path / "AGENTS.md"
     try:
         if target.exists():
-            head = target.read_text(encoding="utf-8", errors="replace").splitlines()
+            existing = target.read_text(encoding="utf-8", errors="replace")
+            head = existing.splitlines()
             first = head[0] if head else ""
-            if TAKKUB_MARKER not in first:
+            if existing.strip() and TAKKUB_MARKER not in first:
                 return False, "user-owned"
         target.write_text(CODEX_AGENTS_MD + extra, encoding="utf-8")
         # We just planted (or refreshed) a file WE own — keep it out of the

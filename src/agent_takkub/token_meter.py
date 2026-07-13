@@ -23,8 +23,9 @@ import os
 import re
 from pathlib import Path
 
-# Default context window for Claude 4 family. Override per pane with the
-# TAKKUB_CONTEXT_LIMIT env var (e.g. set to 1000000 when using the [1m] flag).
+# Default context window for Claude 4 family. TAKKUB_CONTEXT_LIMIT is a
+# process-wide fallback; callers with pane-specific metadata pass ``base`` to
+# ``effective_context_limit`` instead.
 _DEFAULT_LIMIT = 200_000
 
 # Per-model overrides if Claude Code ever stamps a different family into the
@@ -38,7 +39,7 @@ _MODEL_LIMITS: dict[str, int] = {
 
 
 def context_limit_for_model(model: str | None) -> int:
-    """Return the context-window cap for `model`, honouring env override."""
+    """Return the context-window cap for `model`, honouring process env."""
     env = os.environ.get("TAKKUB_CONTEXT_LIMIT")
     if env:
         try:
@@ -54,8 +55,8 @@ def effective_context_limit(model: str | None, prompt: int, base: int | None = N
     """Context-window cap to display for a turn of `prompt` tokens.
 
     `base` is a per-pane known cap (e.g. a Max Lead pinned to 1M); when None it
-    falls back to the per-model/env limit. Either way, if the observed prompt
-    already exceeds the cap we bump to 1M — a turn that sent >200k tokens can
+    falls back to the per-model/process-env limit. Either way, if the observed
+    prompt already exceeds the cap we bump to 1M — a turn that sent >200k tokens can
     only be a 1M-context session, and the bare model name stamped in the JSONL
     (`claude-opus-4-8`, no `[1m]`) doesn't encode the 1M runtime flag. This
     keeps the badge from showing an impossible ">100%" when the per-pane tier
