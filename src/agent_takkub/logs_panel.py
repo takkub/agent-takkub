@@ -188,11 +188,12 @@ class LogsPanel(QWidget):
             except json.JSONDecodeError:
                 rendered.append(line)
                 continue
-            ts = row.get("ts", "")
-            ev = row.get("event", "?")
-            role = row.get("role") or row.get("to", "")
+            ts = str(row.get("ts") or "")
+            ev = str(row.get("event") or "?")
+            role = str(row.get("role") or row.get("to") or "")
             note = row.get("note") or row.get("task_preview") or row.get("msg_preview") or ""
-            cwd = row.get("cwd") or ""
+            note = str(note)
+            cwd = str(row.get("cwd") or "")
 
             # apply filters
             if self._event_filter != "all" and ev != self._event_filter:

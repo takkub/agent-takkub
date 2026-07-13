@@ -697,8 +697,6 @@ class SettingsWindow(QDialog):
                     role, "plugins", updated_plugins[role] + hidden.get(role, [])
                 ):
                     raise OSError(f"เขียน tools policy ของ role '{role}' (plugins) ไม่สำเร็จ")
-            if mcp_changes or plugin_changes:
-                shared_dev_tools.regen_role_variants()
             self._orig_mcp_items = updated_mcps
             self._orig_plugin_items = updated_plugins
 
@@ -715,6 +713,8 @@ class SettingsWindow(QDialog):
                 if not skill_policy.set_role_skills(role, updated_skills[role]):
                     raise OSError(f"เขียน skill policy ของ role '{role}' ไม่สำเร็จ")
             self._orig_skill_items = updated_skills
+            if mcp_changes or plugin_changes:
+                shared_dev_tools.regen_role_variants()
         except OSError as e:
             _rollback()
             self._pipeline_payload = pipeline_config.load(self._project)
@@ -2298,7 +2298,11 @@ class SettingsWindow(QDialog):
         return view
 
     def _reload_skill_matrix(self) -> None:
-        items = [s.name for s in skill_scan.scan_skills(self._new_role_skill_roots())]
+        items = [
+            s.name
+            for s in skill_scan.scan_skills(self._new_role_skill_roots())
+            if skill_policy._validate_name(s.name)
+        ]
         roles = skill_policy.skill_matrix_roles()
         self._orig_skill_items = {role: skill_policy.effective_skills(role) for role in roles}
         matrix = pane_tools_dialog.build_matrix(roles, items, self._orig_skill_items)

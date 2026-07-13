@@ -24,6 +24,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from PyQt6 import sip
 from PyQt6.QtCore import (
     QEasingCurve,
     QParallelAnimationGroup,
@@ -487,8 +488,10 @@ class MainWindow(
         # Running the whole teardown on the next tick lets the emit fully unwind
         # first, so no WebEngine operation ever overlaps another.
         def _teardown() -> None:
+            if sip.isdeleted(tab):
+                return
             pane = tab.teammate_panes.get(role_name)
-            if pane is None:
+            if pane is None or sip.isdeleted(pane):
                 return
             # destroy_terminal FIRST: it removeEventFilter()s the view (so the
             # later removeTab/setParent can't re-enter eventFilter on it), stops
@@ -1040,6 +1043,7 @@ class MainWindow(
             )
             return
         # Set as active so spawn picks up lead_cwd() for the new project.
+        previous_active = active_project()[0]
         set_active_project(project_name)
         self._refresh_project_list()
         # Repair the central-skills junctions/symlinks for this project so a
@@ -1057,6 +1061,23 @@ class MainWindow(
 
         ok, msg = self.orch.spawn(LEAD.name, project=project_name)
         if not ok:
+            self.orch.unregister_pane(LEAD.name, project=project_name, force=True)
+            try:
+                lead._terminal.destroy_terminal()
+            except Exception:
+                pass
+            failed_index = next(
+                (i for i in range(self.tabs.count()) if self.tabs.widget(i) is tab), -1
+            )
+            if failed_index >= 0:
+                self.tabs.removeTab(failed_index)
+            tab.deleteLater()
+            if active_project()[0] == project_name:
+                if previous_active and self._tab_for_project(previous_active) is not None:
+                    set_active_project(previous_active)
+                else:
+                    clear_active_project()
+            self._refresh_project_list()
             self._status.showMessage(f"⚠ Lead spawn failed for {project_name}: {msg}", 15_000)
             return
         lead._title.setText(f"Lead · {project_name}")
@@ -1110,6 +1131,10 @@ class MainWindow(
             if answer != QMessageBox.StandardButton.Ok:
                 return False, "cancelled"
 
+        # Empty the lookup before close() emits paneClosed: its deferred
+        # callbacks must become no-ops if this ProjectTab is deleted first.
+        teammate_panes = list(tab.teammate_panes.values())
+        tab.teammate_panes.clear()
         self.orch.close_all_teammates(project=tab.project_name)
         self.orch.close(LEAD.name, project=tab.project_name, force=True, reason="tab_close")
         self.orch.unregister_pane(LEAD.name, project=tab.project_name, force=True)
@@ -1134,7 +1159,7 @@ class MainWindow(
         # ProjectTab still holds references to AgentPane/TerminalWidget;
         # explicitly destroy them so Chromium releases the renderer.
         try:
-            for pane in [tab.lead_pane, *tab.teammate_panes.values()]:
+            for pane in [tab.lead_pane, *teammate_panes]:
                 pane._terminal.destroy_terminal()
         except Exception:
             pass
