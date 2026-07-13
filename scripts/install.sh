@@ -7,7 +7,7 @@
 # cockpit-specific config so `python -m agent_takkub` runs cleanly.
 #
 #   Phase 1  System runtime : Python 3.11+, Git, Node.js LTS, Chrome, gh CLI
-#   Phase 2  npm registry   : reset to the public registry (gates MCP fetch)
+#   Phase 2  npm registry   : report config; public installs use an explicit target
 #   Phase 3  AI CLIs        : Claude Code (required), OpenAI Codex + Antigravity
 #                             agy (both OPTIONAL — back the codex/gemini roles;
 #                             absent → those roles run as Claude)
@@ -60,6 +60,7 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+NPM_REGISTRY="${TAKKUB_NPM_REGISTRY:-https://registry.npmjs.org/}"
 
 # ── pretty output + summary tracking ──────────────────────────────────────
 if [ -t 1 ]; then
@@ -118,7 +119,7 @@ npm_global() {
     skip "$pkg already present"; SKIPPED+=("$pkg"); return
   fi
   doing "npm install -g $pkg"
-  if npm install -g "$pkg" >/dev/null 2>&1; then
+  if npm install -g "$pkg" --registry "$NPM_REGISTRY" >/dev/null 2>&1; then
     ok "$pkg installed"; [ "$UPDATE" -eq 1 ] && UPGRADED+=("$pkg") || INSTALLED+=("$pkg")
   else
     fail "$pkg npm install failed (if it's a permissions error, prefer a Homebrew node so npm -g needs no sudo)"
@@ -235,12 +236,9 @@ fi
 step "Phase 2 - npm registry"
 if have npm; then
   CURRENT="$(npm config get registry 2>/dev/null | tr -d '[:space:]')"
-  if [ "$CURRENT" != "https://registry.npmjs.org/" ]; then
-    doing "switching npm registry to public (was $CURRENT)"
-    npm config set registry https://registry.npmjs.org/ && { ok "npm registry → public"; INSTALLED+=("npm registry (public)"); }
-  else
-    skip "npm registry already public"; SKIPPED+=("npm registry")
-  fi
+  ok "npm configured registry (read-only): $CURRENT"
+  ok "public package install registry: $NPM_REGISTRY"
+  SKIPPED+=("npm registry (preserved)")
 else
   fail "npm not on PATH — open a new shell after Node install"; FAILED+=("npm registry")
 fi

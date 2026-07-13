@@ -14,6 +14,7 @@ _log = logging.getLogger(__name__)
 
 _SAFE_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _SAFE_SHARD_IDX = re.compile(r"^[1-9][0-9]{0,2}$")  # 1–999
+DEFAULT_NPM_REGISTRY = "https://registry.npmjs.org/"
 
 # Plugins cockpit wants spawned agents to inherit (skipping claude-obsidian's broken
 # SessionStart hook). Each entry is a marketplace name under ~/.claude/plugins/cache/.
@@ -37,6 +38,11 @@ _SAFE_PLUGINS: tuple[str, ...] = (
     # (ToolUseContext required error). Until a spawn smoke-test under cockpit
     # flags confirms the hook no longer fires, do not add it here.
 )
+
+
+def npm_registry() -> str:
+    """Registry used for public npm packages without changing user config."""
+    return os.environ.get("TAKKUB_NPM_REGISTRY") or DEFAULT_NPM_REGISTRY
 
 
 def validate_name(value: str, kind: str) -> str:

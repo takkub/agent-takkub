@@ -19,7 +19,9 @@ import json
 import os
 import socket
 import sys
+from pathlib import Path
 
+from . import config
 from .config import read_port
 
 # Commands that orchestrate the cockpit (spawn/route/close panes). Only the
@@ -62,6 +64,45 @@ def _connect() -> socket.socket:
     # orchestrator is still doing the right thing in the background.
     s = socket.create_connection(("127.0.0.1", port), timeout=15)
     return s
+
+
+def _instance_banner() -> str:
+    """Return a best-effort identity banner for the active cockpit instance."""
+    try:
+        label = config.instance_identity_label()
+        port = config.read_port()
+        port_file = Path(config._get_port_file())
+        lines = [f"▸ {label}   (port {port} · {port_file.parent})"]
+    except Exception:
+        return ""
+
+    try:
+        is_dev = config.DATA_HOME == config.REPO_ROOT
+        if is_dev:
+            other_port_file = Path.home() / ".agent-takkub" / "runtime" / "port"
+        else:
+            other_port_file = Path(config.REPO_ROOT) / "runtime" / "port"
+
+        # A port-file override can point at the conventional path for the
+        # other instance. Do not probe (or warn about) ourselves in that case.
+        if other_port_file == port_file:
+            return "\n".join(lines)
+
+        other_port = int(other_port_file.read_text(encoding="utf-8").strip())
+        probe = socket.create_connection(("127.0.0.1", other_port), timeout=0.3)
+        close = getattr(probe, "close", None)
+        if callable(close):
+            close()
+
+        if is_dev:
+            other_label = f"v{config.instance_display_version()}"
+        else:
+            other_label = f"dev · {Path(config.REPO_ROOT).name}"
+        lines.append(f"  ⚠ {other_label} ก็รันอยู่ด้วย (port {other_port}) — คำสั่งนี้คุม {label} เท่านั้น")
+    except Exception:
+        pass
+
+    return "\n".join(lines)
 
 
 def _request(payload: dict) -> dict:
@@ -1870,6 +1911,13 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     ok = bool(resp.get("ok"))
+    if args.command in {"list", "status"}:
+        try:
+            banner = _instance_banner()
+        except Exception:
+            banner = ""
+        if banner:
+            print(banner)
     if "report" in resp:
         _print_status_report(resp["report"])
         report = resp.get("report")

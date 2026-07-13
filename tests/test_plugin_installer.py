@@ -8,6 +8,7 @@ parser; the network call itself is not unit-tested.
 
 from __future__ import annotations
 
+import stat
 from unittest.mock import patch
 
 from agent_takkub import plugin_installer as pi
@@ -119,19 +120,92 @@ def test_install_plugin_success_by_exit_code(monkeypatch):
     assert ok is True
 
 
-def test_install_plugin_exit0_but_missing_on_disk_is_failure(monkeypatch):
-    # Exit 0 but the plugin never landed on disk (a no-op skip) → NOT success,
-    # so the dialog doesn't falsely claim installed while panes can't load it.
+def test_install_plugin_repairs_half_clone_once(monkeypatch, tmp_path):
+    # The registry can say installed while an interrupted clone left no
+    # loadable plugin.  Repair clears registry + cache, then installs once more.
     class _P:
         returncode = 0
         stdout = "nothing to do"
         stderr = ""
 
-    monkeypatch.setattr(pi, "_claude", lambda *a, **k: _P())
-    monkeypatch.setattr(pi, "installed_on_disk", lambda: set())
-    ok, msg = pi.install_plugin(pi.RECOMMENDED[1], ensure_marketplace=False)
+    target = pi.RECOMMENDED[1]
+    plugin_id = f"{target.key}@{target.marketplace}"
+    claude_calls: list[tuple[tuple, dict]] = []
+    uninstall_calls: list[str] = []
+    disk_results = iter((set(), {target.key}))
+    config_dir = tmp_path / "claude-config"
+    partial_cache = config_dir / "plugins" / "cache" / target.marketplace / target.key
+    partial_cache.mkdir(parents=True)
+    partial_pack = partial_cache / "partial.pack"
+    partial_pack.write_text("incomplete", encoding="utf-8")
+    partial_pack.chmod(stat.S_IREAD)
+
+    def fake_claude(*args, **kwargs):
+        claude_calls.append((args, kwargs))
+        return _P()
+
+    monkeypatch.setattr(pi, "_claude", fake_claude)
+    monkeypatch.setattr(
+        pi,
+        "uninstall_plugin",
+        lambda candidate: uninstall_calls.append(candidate) or (True, "uninstalled"),
+    )
+    monkeypatch.setattr(pi, "installed_on_disk", lambda: next(disk_results))
+    with patch(
+        "agent_takkub.config.default_claude_config_dir",
+        return_value=config_dir,
+    ):
+        ok, msg = pi.install_plugin(target, ensure_marketplace=False)
+
+    assert (ok, msg) == (True, "installed (repaired half-clone)")
+    assert uninstall_calls == [plugin_id]
+    assert [call[0] for call in claude_calls] == [
+        ("plugin", "install", plugin_id),
+        ("plugin", "install", plugin_id),
+    ]
+    assert partial_cache.exists() is False
+
+
+def test_install_plugin_half_clone_repair_failure(monkeypatch, tmp_path):
+    # Repair is attempted only once; a second missing-on-disk result returns a
+    # stable actionable error instead of looping or suggesting a restart.
+    class _P:
+        returncode = 0
+        stdout = "nothing to do"
+        stderr = ""
+
+    target = pi.RECOMMENDED[1]
+    plugin_id = f"{target.key}@{target.marketplace}"
+    claude_calls: list[tuple] = []
+    uninstall_calls: list[str] = []
+    disk_results = iter((set(), set()))
+
+    monkeypatch.setattr(
+        pi,
+        "_claude",
+        lambda *args, **kwargs: claude_calls.append(args) or _P(),
+    )
+    monkeypatch.setattr(
+        pi,
+        "uninstall_plugin",
+        lambda candidate: uninstall_calls.append(candidate) or (True, "uninstalled"),
+    )
+    monkeypatch.setattr(pi, "installed_on_disk", lambda: next(disk_results))
+    with patch(
+        "agent_takkub.config.default_claude_config_dir",
+        return_value=tmp_path / "claude-config",
+    ):
+        ok, msg = pi.install_plugin(target, ensure_marketplace=False)
+
     assert ok is False
-    assert "disk" in msg.lower()
+    assert msg == (
+        "CLI reported success but plugin not found on disk (repair failed — check npm/git access)"
+    )
+    assert uninstall_calls == [plugin_id]
+    assert claude_calls == [
+        ("plugin", "install", plugin_id),
+        ("plugin", "install", plugin_id),
+    ]
 
 
 def test_install_plugin_failure_by_exit_code(monkeypatch):

@@ -20,6 +20,9 @@ from __future__ import annotations
 
 import json
 import os
+import pathlib
+import shutil
+import stat
 import subprocess
 from dataclasses import dataclass
 
@@ -203,6 +206,37 @@ def ensure_marketplaces(plugins: list[RecommendedPlugin]) -> dict[str, tuple[boo
     return results
 
 
+def _purge_plugin_cache(plugin: RecommendedPlugin) -> None:
+    """Best-effort removal of a plugin cache left by an interrupted clone.
+
+    Git pack files can be read-only on Windows.  ``onerror`` keeps this
+    compatible with Python 3.11 while clearing that bit and retrying the failed
+    operation on every platform.  A cache that still cannot be removed is left
+    for the reinstall/on-disk verification to diagnose instead of crashing the
+    installer thread.
+    """
+    from .config import default_claude_config_dir
+
+    cache_dir = default_claude_config_dir() / "plugins" / "cache" / plugin.marketplace / plugin.key
+
+    def _retry_writable(function, path: str, _exc_info) -> None:
+        try:
+            cache_path = pathlib.Path(path)
+            cache_path.chmod(cache_path.stat().st_mode | stat.S_IWRITE)
+            function(path)
+        except OSError:
+            pass
+
+    try:
+        shutil.rmtree(cache_dir, onerror=_retry_writable)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        # Repair remains best-effort; the final filesystem check is the source
+        # of truth and returns a useful npm/git-access error if reinstall fails.
+        pass
+
+
 def install_plugin(
     plugin: RecommendedPlugin, *, ensure_marketplace: bool = True
 ) -> tuple[bool, str]:
@@ -227,7 +261,25 @@ def install_plugin(
         # (the same <version>/.claude-plugin/plugin.json check panes use).
         if plugin.key in installed_on_disk():
             return True, "installed"
-        return False, "CLI reported success but plugin not found on disk (try restart)"
+
+        # A half-clone can leave the registry saying "installed" while the
+        # cache has no loadable plugin.  Clear both pieces of stale state and
+        # retry exactly once; otherwise future installs remain permanent no-ops.
+        plugin_id = f"{plugin.key}@{plugin.marketplace}"
+        uninstall_plugin(plugin_id)
+        _purge_plugin_cache(plugin)
+        try:
+            _claude("plugin", "install", plugin_id, timeout=120)
+        except Exception:
+            # The final disk check below is authoritative and provides the
+            # stable repair-failure message for subprocess/network exceptions.
+            pass
+        if plugin.key in installed_on_disk():
+            return True, "installed (repaired half-clone)"
+        return False, (
+            "CLI reported success but plugin not found on disk "
+            "(repair failed — check npm/git access)"
+        )
     tail = ((proc.stdout or "") + (proc.stderr or "")).strip().splitlines()
     return False, tail[-1] if tail else "install failed"
 

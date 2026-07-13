@@ -1385,11 +1385,52 @@ def check_env_path() -> list[Finding]:
     return findings
 
 
+def check_npm_registry() -> list[Finding]:
+    """[env] — report private npm config without mutating user settings."""
+    from .config import DEFAULT_NPM_REGISTRY, npm_registry
+
+    override = os.environ.get("TAKKUB_NPM_REGISTRY")
+    if override:
+        return [
+            Finding(
+                "env",
+                "npm-registry",
+                Status.OK,
+                f"TAKKUB_NPM_REGISTRY={npm_registry()}",
+            )
+        ]
+
+    npm = shutil.which("npm.cmd") or shutil.which("npm")
+    if not npm:
+        return [Finding("env", "npm-registry", Status.SKIP, "npm not found")]
+
+    code, configured = _run([npm, "config", "get", "registry"])
+    if code != 0 or not configured:
+        return [
+            Finding(
+                "env",
+                "npm-registry",
+                Status.SKIP,
+                f"อ่าน npm registry ไม่ได้: {configured or 'unknown error'}",
+            )
+        ]
+
+    if configured.rstrip("/").lower() == DEFAULT_NPM_REGISTRY.rstrip("/").lower():
+        return [Finding("env", "npm-registry", Status.OK, configured)]
+
+    detail = (
+        f"npm registry เป็น private ({configured}) — Claude CLI/takkub update ดึงจาก public npm; "
+        "ตั้ง TAKKUB_NPM_REGISTRY=<mirror> หรือให้ public npm เข้าถึงได้"
+    )
+    return [Finding("env", "npm-registry", Status.WARN, detail)]
+
+
 def run_all_checks() -> list[Finding]:
     findings: list[Finding] = []
     checks = (
         ("check_claude", check_claude),
         ("check_env_path", check_env_path),
+        ("check_npm_registry", check_npm_registry),
         ("check_runtime", check_runtime),
         ("check_installed_integrity", check_installed_integrity),
         ("check_arch", check_arch),

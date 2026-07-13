@@ -9,7 +9,7 @@
 
     Sections:
       1.  System runtime   : Python 3.11+, Git, Node.js, Chrome, gh CLI
-      2.  npm registry     : reset to public registry (gates MCP fetch)
+      2.  npm registry     : report config; public installs use an explicit target
       3.  AI CLIs          : Claude Code (required), OpenAI Codex +
                              Antigravity agy (both OPTIONAL — back the
                              codex/gemini roles; absent → run as Claude)
@@ -56,6 +56,11 @@ param(
 )
 
 $ErrorActionPreference = "Continue"
+$script:NpmRegistry = if ($env:TAKKUB_NPM_REGISTRY) {
+    $env:TAKKUB_NPM_REGISTRY
+} else {
+    "https://registry.npmjs.org/"
+}
 
 # Track what happened so we can print a summary at the end.
 $script:Summary = @{
@@ -147,7 +152,7 @@ function Install-NpmGlobal {
     if ($ProbeCmd -and (Test-Cmd $ProbeCmd)) {
         if ($Update) {
             Write-Doing "upgrading $Package"
-            npm install -g $Package | Out-Null
+            npm install -g $Package --registry $script:NpmRegistry | Out-Null
             $script:Summary.Upgraded += $Package
             Write-Ok "$Package upgraded"
         } else {
@@ -157,7 +162,7 @@ function Install-NpmGlobal {
         return
     }
     Write-Doing "installing $Package globally"
-    npm install -g $Package
+    npm install -g $Package --registry $script:NpmRegistry
     if ($LASTEXITCODE -eq 0) {
         Write-Ok "$Package installed"
         $script:Summary.Installed += $Package
@@ -277,14 +282,9 @@ Install-Winget -DisplayName "GitHub CLI"  -Id "GitHub.cli"          -ProbeCmd "g
 Write-Step "Phase 2 - npm registry"
 if (Test-Cmd npm) {
     $current = (npm config get registry).Trim()
-    if ($current -ne "https://registry.npmjs.org/") {
-        Write-Doing "switching npm registry to public (was $current)"
-        npm config set registry https://registry.npmjs.org/
-        $script:Summary.Installed += "npm registry (public)"
-    } else {
-        Write-Skip "npm registry already public"
-        $script:Summary.Skipped += "npm registry"
-    }
+    Write-Ok "npm configured registry (read-only): $current"
+    Write-Ok "public package install registry: $script:NpmRegistry"
+    $script:Summary.Skipped += "npm registry (preserved)"
 } else {
     Write-Fail "npm not on PATH - open a new shell after Node install"
     $script:Summary.Failed += "npm registry"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -17,6 +18,7 @@ from agent_takkub.doctor import (
     check_claude,
     check_installed_integrity,
     check_mcps,
+    check_npm_registry,
     check_plugins,
     check_projects,
     check_providers,
@@ -747,6 +749,7 @@ class TestRunAllChecks:
             ),
             patch("agent_takkub.doctor.check_installed_integrity", return_value=[]),
             patch("agent_takkub.doctor.check_env_path", return_value=[]),
+            patch("agent_takkub.doctor.check_npm_registry", return_value=[]),
             patch("agent_takkub.doctor.check_arch", return_value=[]),
             patch("agent_takkub.doctor.check_qt", return_value=[]),
             patch("agent_takkub.doctor.check_plugins", return_value=[]),
@@ -955,3 +958,53 @@ class TestEnvPathCheck:
         ok, msg = doctor._append_posix_rc_path("/fake/bin")
         assert ok and "already" in msg
         assert zshrc.read_text(encoding="utf-8") == first
+
+
+class TestNpmRegistryCheck:
+    def test_private_registry_warns(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        private = "https://nexus.corp.example/repository/npm/"
+        monkeypatch.delenv("TAKKUB_NPM_REGISTRY", raising=False)
+        monkeypatch.setattr("agent_takkub.doctor.shutil.which", lambda _name: "npm")
+
+        def fake_run(argv, **kwargs):
+            assert argv == ["npm", "config", "get", "registry"]
+            assert kwargs["timeout"] == 5
+            return subprocess.CompletedProcess(argv, 0, private + "\n", "")
+
+        monkeypatch.setattr("agent_takkub.doctor.subprocess.run", fake_run)
+        finding = check_npm_registry()[0]
+        assert finding.status == Status.WARN
+        assert private in finding.detail
+        assert "TAKKUB_NPM_REGISTRY=<mirror>" in finding.detail
+
+    def test_public_registry_ok(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("TAKKUB_NPM_REGISTRY", raising=False)
+        monkeypatch.setattr("agent_takkub.doctor.shutil.which", lambda _name: "npm")
+        monkeypatch.setattr(
+            "agent_takkub.doctor.subprocess.run",
+            lambda argv, **kwargs: subprocess.CompletedProcess(
+                argv, 0, "https://registry.npmjs.org/\n", ""
+            ),
+        )
+        assert check_npm_registry()[0].status == Status.OK
+
+    def test_override_ok_without_reading_npm_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TAKKUB_NPM_REGISTRY", "https://npm.corp.example/")
+
+        def unexpected_run(*args, **kwargs):
+            raise AssertionError("npm config must not be read when override is explicit")
+
+        monkeypatch.setattr("agent_takkub.doctor.subprocess.run", unexpected_run)
+        finding = check_npm_registry()[0]
+        assert finding.status == Status.OK
+        assert "TAKKUB_NPM_REGISTRY" in finding.detail
+
+    def test_subprocess_error_is_swallowed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("TAKKUB_NPM_REGISTRY", raising=False)
+        monkeypatch.setattr("agent_takkub.doctor.shutil.which", lambda _name: "npm")
+
+        def timed_out(*args, **kwargs):
+            raise subprocess.TimeoutExpired("npm", 5)
+
+        monkeypatch.setattr("agent_takkub.doctor.subprocess.run", timed_out)
+        assert check_npm_registry()[0].status == Status.SKIP

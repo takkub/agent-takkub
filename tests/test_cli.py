@@ -285,6 +285,112 @@ class TestExitCodes:
         assert "frontend" in out and "working" in out
 
 
+class TestInstanceBanner:
+    @staticmethod
+    def _mock_prod_instance(monkeypatch: pytest.MonkeyPatch, tmp_path) -> tuple:
+        repo_root = tmp_path / "checkout"
+        current_port_file = tmp_path / "prod" / "runtime" / "port"
+        monkeypatch.setattr(cli.config, "REPO_ROOT", repo_root)
+        monkeypatch.setattr(cli.config, "DATA_HOME", tmp_path / "prod")
+        monkeypatch.setattr(cli.config, "instance_identity_label", lambda: "v9.9.9")
+        monkeypatch.setattr(cli.config, "read_port", lambda: 43123)
+        monkeypatch.setattr(cli.config, "_get_port_file", lambda: current_port_file)
+        return repo_root, current_port_file
+
+    def test_banner_contains_label_port_and_runtime_path(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        _, port_file = self._mock_prod_instance(monkeypatch, tmp_path)
+
+        banner = cli._instance_banner()
+
+        assert banner == f"▸ v9.9.9   (port 43123 · {port_file.parent})"
+
+    def test_banner_warns_when_other_instance_is_reachable(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        repo_root, _ = self._mock_prod_instance(monkeypatch, tmp_path)
+        other_port_file = repo_root / "runtime" / "port"
+        other_port_file.parent.mkdir(parents=True)
+        other_port_file.write_text("43124", encoding="utf-8")
+        calls: list[tuple[tuple[str, int], float]] = []
+
+        class FakeSocket:
+            closed = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        fake_socket = FakeSocket()
+
+        def _connect(address: tuple[str, int], timeout: float):
+            calls.append((address, timeout))
+            return fake_socket
+
+        monkeypatch.setattr(cli.socket, "create_connection", _connect)
+
+        banner = cli._instance_banner()
+
+        assert calls == [(("127.0.0.1", 43124), 0.3)]
+        assert fake_socket.closed is True
+        assert "⚠ dev · checkout ก็รันอยู่ด้วย (port 43124)" in banner
+        assert "คำสั่งนี้คุม v9.9.9 เท่านั้น" in banner
+
+    def test_banner_is_silent_when_other_instance_is_unreachable(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        repo_root, port_file = self._mock_prod_instance(monkeypatch, tmp_path)
+        other_port_file = repo_root / "runtime" / "port"
+        other_port_file.parent.mkdir(parents=True)
+        other_port_file.write_text("43124", encoding="utf-8")
+
+        def _unreachable(*_args, **_kwargs):
+            raise OSError("connection refused")
+
+        monkeypatch.setattr(cli.socket, "create_connection", _unreachable)
+
+        banner = cli._instance_banner()
+
+        assert banner == f"▸ v9.9.9   (port 43123 · {port_file.parent})"
+        assert "⚠" not in banner
+
+    def test_banner_failure_is_skipped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _broken_label() -> str:
+            raise RuntimeError("bad config")
+
+        monkeypatch.setattr(cli.config, "instance_identity_label", _broken_label)
+
+        assert cli._instance_banner() == ""
+
+    @pytest.mark.parametrize(
+        ("command", "response"),
+        [
+            ("list", {"ok": True, "status": {"lead": "active"}}),
+            (
+                "status",
+                {
+                    "ok": True,
+                    "report": {"project": "demo", "panes": {}, "any_stalled": False},
+                },
+            ),
+        ],
+    )
+    def test_list_and_status_print_banner_first(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        command: str,
+        response: dict[str, object],
+    ) -> None:
+        monkeypatch.setattr(cli, "_request", lambda _payload: response)
+        monkeypatch.setattr(cli, "_instance_banner", lambda: "▸ test-instance")
+        monkeypatch.delenv("TAKKUB_ROLE", raising=False)
+
+        assert cli.main([command]) == 0
+
+        assert capsys.readouterr().out.splitlines()[0] == "▸ test-instance"
+
+
 class TestRoleGate:
     """Lead-only commands (spawn/assign/close/close-all) must be blocked when
     invoked from a teammate pane. Prevents an agent that drifted into Lead

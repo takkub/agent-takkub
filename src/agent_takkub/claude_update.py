@@ -40,6 +40,7 @@ import subprocess
 import urllib.request
 
 from ._win_console import SUBPROCESS_NO_WINDOW
+from .config import npm_registry
 
 PACKAGE = "@anthropic-ai/claude-code"
 CHANGELOG_URL = "https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md"
@@ -258,7 +259,10 @@ def latest_version(timeout: float = 20.0) -> tuple[bool, str]:
     if not npm:
         return False, "npm not on PATH"
     try:
-        proc = _run([npm, "view", PACKAGE, "version"], timeout=timeout)
+        proc = _run(
+            [npm, "view", PACKAGE, "version", "--registry", npm_registry()],
+            timeout=timeout,
+        )
     except subprocess.TimeoutExpired:
         return False, "npm view timed out"
     except Exception as e:
@@ -343,6 +347,7 @@ def build_updater_script(
     post-mortem if the relaunch doesn't come back.
     """
     failed_sentinel = f"{log_path}.failed"
+    registry = npm_registry()
     if is_windows:
 
         def _ps_quote(value: str) -> str:
@@ -353,6 +358,7 @@ def build_updater_script(
         repo_q = _ps_quote(repo_root)
         log_q = _ps_quote(log_path)
         failed_q = _ps_quote(failed_sentinel)
+        registry_q = _ps_quote(registry)
         return (
             "$ErrorActionPreference = 'Continue'\r\n"
             # Wait for the cockpit to die so its panes release claude.exe (30s cap).
@@ -360,7 +366,8 @@ def build_updater_script(
             f"while ((Get-Process -Id {cockpit_pid} -ErrorAction SilentlyContinue) "
             "-and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 200 }\r\n"
             "Start-Sleep -Seconds 1\r\n"  # grace for the OS to release file handles
-            f"& {npm_q} install -g {PACKAGE}@latest *>&1 | Tee-Object -FilePath {log_q}\r\n"
+            f"& {npm_q} install -g {PACKAGE}@latest --registry {registry_q} "
+            f"*>&1 | Tee-Object -FilePath {log_q}\r\n"
             "$code = $LASTEXITCODE\r\n"
             f'if ($code -ne 0) {{ "FAILED exit=$code" | Out-File -FilePath {failed_q} }}\r\n'
             f"Start-Process -FilePath {python_q} -ArgumentList '-m','agent_takkub' "
@@ -373,6 +380,7 @@ def build_updater_script(
     repo_q = shlex.quote(repo_root)
     log_q = shlex.quote(log_path)
     failed_q = shlex.quote(failed_sentinel)
+    registry_q = shlex.quote(registry)
     return (
         "#!/bin/sh\n"
         f"pid={cockpit_pid}\n"
@@ -380,7 +388,7 @@ def build_updater_script(
         "i=0\n"
         'while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 150 ]; do sleep 0.2; i=$((i+1)); done\n'
         "sleep 1\n"
-        f"{npm_q} install -g {PACKAGE}@latest > {log_q} 2>&1\n"
+        f"{npm_q} install -g {PACKAGE}@latest --registry {registry_q} > {log_q} 2>&1\n"
         "code=$?\n"
         f'[ "$code" -ne 0 ] && echo "FAILED exit=$code" > {failed_q}\n'
         f"cd {repo_q} && {python_q} -m agent_takkub &\n"
@@ -399,7 +407,17 @@ def apply_update(timeout: float = 300.0) -> tuple[bool, str]:
     if not npm:
         return False, "npm not on PATH"
     try:
-        proc = _run([npm, "install", "-g", f"{PACKAGE}@latest"], timeout=timeout)
+        proc = _run(
+            [
+                npm,
+                "install",
+                "-g",
+                f"{PACKAGE}@latest",
+                "--registry",
+                npm_registry(),
+            ],
+            timeout=timeout,
+        )
     except subprocess.TimeoutExpired:
         return False, "npm install timed out"
     except Exception as e:

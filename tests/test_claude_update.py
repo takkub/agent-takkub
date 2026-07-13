@@ -1,10 +1,8 @@
-"""Tests for `claude_update` pure helpers — version parsing/compare, changelog
-slicing, prompt + updater-script builders. The IO functions (npm/network/
-headless-claude) aren't unit-tested here (they shell out); the UI wires them
-through a worker.
-"""
+"""Tests for the Claude CLI updater helpers and npm command construction."""
 
 from __future__ import annotations
+
+import subprocess
 
 from agent_takkub import claude_update as cu
 
@@ -173,6 +171,42 @@ class TestBuildIssueTitleAndBody:
         assert "v2.1.156" in body  # provenance header
 
 
+class TestNpmRegistry:
+    def test_default_and_env_override(self, monkeypatch):
+        monkeypatch.delenv("TAKKUB_NPM_REGISTRY", raising=False)
+        assert cu.npm_registry() == "https://registry.npmjs.org/"
+
+        monkeypatch.setenv("TAKKUB_NPM_REGISTRY", "https://npm.corp.example/repository/npm/")
+        assert cu.npm_registry() == "https://npm.corp.example/repository/npm/"
+
+    def test_latest_version_passes_registry(self, monkeypatch):
+        seen: list[str] = []
+        monkeypatch.delenv("TAKKUB_NPM_REGISTRY", raising=False)
+        monkeypatch.setattr(cu, "_npm", lambda: "npm")
+
+        def fake_run(argv, timeout):
+            seen.extend(argv)
+            return subprocess.CompletedProcess(argv, 0, "2.1.156\n", "")
+
+        monkeypatch.setattr(cu, "_run", fake_run)
+        assert cu.latest_version() == (True, "2.1.156")
+        assert seen[-2:] == ["--registry", "https://registry.npmjs.org/"]
+
+    def test_apply_update_passes_override_registry(self, monkeypatch):
+        seen: list[str] = []
+        mirror = "https://npm.corp.example/repository/npm/"
+        monkeypatch.setenv("TAKKUB_NPM_REGISTRY", mirror)
+        monkeypatch.setattr(cu, "_npm", lambda: "npm")
+
+        def fake_run(argv, timeout):
+            seen.extend(argv)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        monkeypatch.setattr(cu, "_run", fake_run)
+        assert cu.apply_update() == (True, "claude CLI updated")
+        assert seen[-2:] == ["--registry", mirror]
+
+
 class TestBuildUpdaterScript:
     def test_windows_script(self):
         s = cu.build_updater_script(
@@ -186,6 +220,7 @@ class TestBuildUpdaterScript:
         # Polls the cockpit pid to exit (not a blind sleep) before install.
         assert "Get-Process -Id 4242" in s
         assert f"{cu.PACKAGE}@latest" in s
+        assert "--registry" in s
         assert "C:/n/npm.cmd" in s
         # captures exit code + failure sentinel
         assert "$LASTEXITCODE" in s
@@ -207,7 +242,16 @@ class TestBuildUpdaterScript:
         assert 'kill -0 "$pid"' in s  # polls for exit instead of a blind sleep
         assert "/home/u/repo/runtime/u.log.failed" in s  # failure sentinel
         assert f"{cu.PACKAGE}@latest" in s
+        assert "--registry" in s
         assert "agent_takkub" in s
+
+    def test_registry_override_is_embedded_in_both_scripts(self, monkeypatch):
+        mirror = "https://npm.corp.example/repository/npm/"
+        monkeypatch.setenv("TAKKUB_NPM_REGISTRY", mirror)
+        for is_win in (True, False):
+            script = cu.build_updater_script("npm", "py", "/r", "/r/log", is_win, 4242)
+            assert "--registry" in script
+            assert mirror in script
 
     def test_install_waits_before_running(self):
         # The pid-wait MUST come before the npm install line in both variants
