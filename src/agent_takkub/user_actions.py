@@ -10,7 +10,7 @@ attributes (``orch``, ``_status``, ``_btn_pipelines``, ``_chip_codex``,
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QDialog,
     QHBoxLayout,
@@ -780,8 +780,44 @@ class UserActionsMixin:
             current=_config_mod.RemoteConfig.load(),
             on_apply=self._apply_remote_config,
         )
-        dlg.exec()
+        self._remote_settings_dialog = dlg
+        try:
+            dlg.exec()
+        finally:
+            self._remote_settings_dialog = None
         self._refresh_remote_chip()
+
+    def _poll_remote_public_url(self, tunnel_obj, remote_obj) -> None:
+        """Poll a quick tunnel without blocking Qt's event loop."""
+        old_timer = getattr(self, "_remote_url_poll_timer", None)
+        if old_timer is not None:
+            old_timer.stop()
+
+        timer = QTimer()
+        timer.setInterval(int(_QUICK_TUNNEL_POLL_S * 1000))
+        max_attempts = max(1, int(_QUICK_TUNNEL_WAIT_S / _QUICK_TUNNEL_POLL_S))
+        attempts = 0
+
+        def _poll() -> None:
+            nonlocal attempts
+            attempts += 1
+            if getattr(self, "_remote", None) is not remote_obj:
+                timer.stop()
+                return
+            public_url = tunnel_obj.captured_url
+            if public_url:
+                remote_obj.config.public_url = public_url
+                remote_obj.config.save()
+                dialog = getattr(self, "_remote_settings_dialog", None)
+                if dialog is not None and hasattr(dialog, "_render_state"):
+                    dialog._render_state(pairing_url=remote_obj.config.pairing_url())
+                timer.stop()
+            elif attempts >= max_attempts:
+                timer.stop()
+
+        timer.timeout.connect(_poll)
+        self._remote_url_poll_timer = timer
+        timer.start()
 
     def _apply_remote_config(self, config, enable: bool) -> tuple[bool, str, str]:
         """Enable/disable the live remote-control server. Injected into
@@ -827,25 +863,17 @@ class UserActionsMixin:
         # start(). ngrok-fixed already knows its URL upfront (set at
         # build_config time) so it's excluded here — `captured_url` is
         # already non-None for it and this loop would just no-op anyway.
-        # ponytail: block this click briefly rather than wire a QTimer poll
-        # into a dialog that's otherwise fully Qt-event-loop-decoupled.
-        # Ceiling: if a real quick tunnel is ever slower than this, the
-        # dialog just shows no pairing URL until reopened — upgrade path is
-        # a background poll instead of this bounded wait.
         tunnel_obj = getattr(self._remote, "_tunnel", None)
         tunnel_cfg = self._remote.config.tunnel
         needs_url_scrape = tunnel_cfg.type == "quick" or (
             tunnel_cfg.type == "ngrok" and tunnel_cfg.url_mode == "random"
         )
         if tunnel_obj is not None and needs_url_scrape:
-            import time as _time
-
-            deadline = _time.monotonic() + _QUICK_TUNNEL_WAIT_S
-            while tunnel_obj.captured_url is None and _time.monotonic() < deadline:
-                _time.sleep(_QUICK_TUNNEL_POLL_S)
             if tunnel_obj.captured_url:
                 self._remote.config.public_url = tunnel_obj.captured_url
                 self._remote.config.save()
+            else:
+                self._poll_remote_public_url(tunnel_obj, self._remote)
 
         return True, "", self._remote.config.pairing_url()
 
