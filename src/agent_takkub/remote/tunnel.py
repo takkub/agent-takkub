@@ -154,7 +154,20 @@ def _spawn(argv: list[str], extra_env: dict | None = None) -> subprocess.Popen:
     direct `Popen([exe, *args])` is known to fail on this host."""
     env = {**os.environ, **extra_env} if extra_env else None
     if sys.platform == "win32":
-        launch = ["cmd", "/d", "/c", subprocess.list2cmdline(argv)]
+        # cmd.exe reparses list2cmdline's output; escape its control
+        # metacharacters so a config-supplied executable/script path cannot
+        # append another command. Keep the wrapper for existing .bat support.
+        command = subprocess.list2cmdline(argv)
+        escaped: list[str] = []
+        quoted = False
+        for char in command:
+            if char == '"':
+                quoted = not quoted
+            if not quoted and char in "&|<>^()":
+                escaped.append("^")
+            escaped.append(char)
+        command = "".join(escaped)
+        launch = ["cmd", "/d", "/c", command]
         return subprocess.Popen(
             launch,
             stdout=subprocess.PIPE,

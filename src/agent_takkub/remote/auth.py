@@ -122,7 +122,13 @@ class AuthGate:
                 and bool(expected)
                 and secrets.compare_digest(token.encode(), expected.encode())
             )
-            self._record_result_locked(ok)
+            # Missing/malformed Authorization headers are common background
+            # probes, not structurally plausible guesses. Counting them lets
+            # anyone who learns only the secret path globally lock out the
+            # owner. Plausible wrong tokens still share a global counter
+            # because tunnel traffic has no useful per-client IP identity.
+            if token:
+                self._record_result_locked(ok)
             return ok
 
     # ── password — third auth factor (addendum), never in the pairing URL/QR:
@@ -170,7 +176,13 @@ class AuthGate:
         with self._lock:
             self._prune_sessions_locked()
             expiry = self._sessions.get(session_token)
-            return expiry is not None and expiry >= time.time()
+            if expiry is None:
+                return False
+            # Sliding expiry: an actively polling phone must not be logged
+            # out merely because the original issue time crossed the idle
+            # window. The server-wide idle watchdog remains the hard stop.
+            self._sessions[session_token] = time.time() + self._password_session_ttl_sec()
+            return True
 
     def _prune_sessions_locked(self) -> None:
         now = time.time()

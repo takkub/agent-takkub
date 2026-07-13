@@ -20,6 +20,7 @@ picked one yet).
 from __future__ import annotations
 
 import json
+import logging
 import socket
 import time
 
@@ -29,6 +30,8 @@ from . import notify
 
 _HISTORY_DEFAULT_LIMIT = 200
 _HISTORY_MAX_LIMIT = 200
+
+_log = logging.getLogger(__name__)
 
 
 def _lead_provider_note(project_ns: str) -> str | None:
@@ -68,8 +71,9 @@ def _lead_frame(orch, payload: dict, timeout: float = 5.0) -> dict:
     payload = {**payload, "auth": token}
     try:
         sock = socket.create_connection(("127.0.0.1", port), timeout=timeout)
-    except OSError as exc:
-        raise RemoteApiError(503, f"cli_server unreachable: {exc}") from None
+    except OSError:
+        _log.exception("remote api could not connect to cli_server")
+        raise RemoteApiError(503, "cockpit unreachable") from None
     try:
         sock.sendall((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
         sock.settimeout(timeout)
@@ -79,16 +83,18 @@ def _lead_frame(orch, payload: dict, timeout: float = 5.0) -> dict:
             if not chunk:
                 break
             buf += chunk
-    except OSError as exc:
-        raise RemoteApiError(503, f"cli_server request failed: {exc}") from None
+    except OSError:
+        _log.exception("remote api cli_server request failed")
+        raise RemoteApiError(503, "cockpit unreachable") from None
     finally:
         sock.close()
     if not buf:
         raise RemoteApiError(502, "no response from cli_server")
     try:
         return json.loads(buf.split(b"\n", 1)[0].decode("utf-8"))
-    except json.JSONDecodeError as exc:
-        raise RemoteApiError(502, f"bad response from cli_server: {exc}") from None
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        _log.exception("remote api received an invalid cli_server response")
+        raise RemoteApiError(502, "invalid cockpit response") from None
 
 
 def pulse(orch, from_project: str | None) -> dict:

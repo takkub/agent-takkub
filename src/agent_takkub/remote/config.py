@@ -86,7 +86,12 @@ class RemoteConfig:
         """Persist atomically (tmp+rename), same pattern as `exec_mode.py`."""
         _PATH.parent.mkdir(parents=True, exist_ok=True)
         tmp = _PATH.with_suffix(_PATH.suffix + ".tmp")
-        tmp.write_text(json.dumps(asdict(self), indent=2) + "\n", encoding="utf-8")
+        payload = json.dumps(asdict(self), indent=2) + "\n"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        if os.name != "nt":
+            os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(payload)
         if os.name != "nt":
             tmp.chmod(0o600)
         tmp.replace(_PATH)
