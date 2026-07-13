@@ -345,16 +345,21 @@ class TestAggregateTransactionRollback:
             CreateRoleCommand(name="data-eng", general=_general_draft(), access=_access_draft())
         )
 
+        # The role .md write is now atomic (tempfile + os.replace), not
+        # Path.write_text — inject the disk failure at os.replace so the
+        # rollback path is still exercised (a real OSError there re-raises into
+        # the transaction's except and rolls the registry back).
+        import os as _os
         from pathlib import Path as _Path
 
-        real_write_text = _Path.write_text
+        real_replace = _os.replace
 
-        def flaky_write_text(self: _Path, *a: object, **k: object) -> int:
-            if self.name == "data-eng.md":
+        def flaky_replace(src: object, dst: object, *a: object, **k: object) -> None:
+            if _Path(dst).name == "data-eng.md":
                 raise OSError("simulated disk failure")
-            return real_write_text(self, *a, **k)
+            return real_replace(src, dst, *a, **k)  # type: ignore[arg-type]
 
-        monkeypatch.setattr(_Path, "write_text", flaky_write_text)
+        monkeypatch.setattr(_os, "replace", flaky_replace)
 
         result = roles_repo.update(
             "data-eng",

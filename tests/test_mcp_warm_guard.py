@@ -71,7 +71,10 @@ def test_warm_browser_mcps_spawns_when_env_unset(monkeypatch: pytest.MonkeyPatch
     _real_warm_browser_mcps()
 
     assert len(calls) == 2
-    assert all("npx" in argv for argv in calls)
+    # argv[0] is now the shutil.which-resolved npx launcher (e.g. .../npx.cmd on
+    # Windows) — the finding fix for the bare-'npx' FileNotFoundError — so check
+    # the resolved launcher, not literal-'npx' list membership.
+    assert all("npx" in argv[0] for argv in calls)
 
 
 def test_orchestrator_construction_spawns_no_subprocess(

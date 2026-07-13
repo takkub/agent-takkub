@@ -65,14 +65,19 @@ class TestEnsureAgentsMd:
         assert ok is False
         assert "write failed" in reason
 
-    def test_handles_empty_existing_file(self, tmp_path: Path) -> None:
-        # Edge: empty AGENTS.md (no first line). Should be treated as
-        # user-owned because the marker isn't present.
+    def test_empty_existing_file_is_replanted(self, tmp_path: Path) -> None:
+        # An empty / whitespace-only AGENTS.md (e.g. an interrupted write that
+        # left 0 bytes) is NOT user content — it must be (re)planted, not
+        # misclassified as user-owned. Finding #64: an empty file permanently
+        # blocked the takkub cheatsheet, so a codex/gemini pane never learned to
+        # `takkub done` and could idle forever. Only real non-marker content on
+        # a non-empty file counts as user-owned.
         target = tmp_path / "AGENTS.md"
-        target.write_text("", encoding="utf-8")
+        target.write_text("   \n", encoding="utf-8")  # whitespace-only counts as empty
         ok, reason = ensure_agents_md(tmp_path)
-        assert ok is False
-        assert reason == "user-owned"
+        assert ok is True
+        assert reason == "written"
+        assert TAKKUB_MARKER in target.read_text(encoding="utf-8")
 
     def test_rejects_relative_path(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         # Drive-relative / relative paths must be refused — otherwise
