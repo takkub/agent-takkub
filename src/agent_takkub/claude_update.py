@@ -344,6 +344,15 @@ def build_updater_script(
     """
     failed_sentinel = f"{log_path}.failed"
     if is_windows:
+
+        def _ps_quote(value: str) -> str:
+            return "'" + value.replace("'", "''") + "'"
+
+        npm_q = _ps_quote(npm)
+        python_q = _ps_quote(python_exe)
+        repo_q = _ps_quote(repo_root)
+        log_q = _ps_quote(log_path)
+        failed_q = _ps_quote(failed_sentinel)
         return (
             "$ErrorActionPreference = 'Continue'\r\n"
             # Wait for the cockpit to die so its panes release claude.exe (30s cap).
@@ -351,12 +360,19 @@ def build_updater_script(
             f"while ((Get-Process -Id {cockpit_pid} -ErrorAction SilentlyContinue) "
             "-and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 200 }\r\n"
             "Start-Sleep -Seconds 1\r\n"  # grace for the OS to release file handles
-            f'& "{npm}" install -g {PACKAGE}@latest *>&1 | Tee-Object -FilePath "{log_path}"\r\n'
+            f"& {npm_q} install -g {PACKAGE}@latest *>&1 | Tee-Object -FilePath {log_q}\r\n"
             "$code = $LASTEXITCODE\r\n"
-            f'if ($code -ne 0) {{ "FAILED exit=$code" | Out-File -FilePath "{failed_sentinel}" }}\r\n'
-            f"Start-Process -FilePath \"{python_exe}\" -ArgumentList '-m','agent_takkub' "
-            f'-WorkingDirectory "{repo_root}"\r\n'
+            f'if ($code -ne 0) {{ "FAILED exit=$code" | Out-File -FilePath {failed_q} }}\r\n'
+            f"Start-Process -FilePath {python_q} -ArgumentList '-m','agent_takkub' "
+            f"-WorkingDirectory {repo_q}\r\n"
         )
+    import shlex
+
+    npm_q = shlex.quote(npm)
+    python_q = shlex.quote(python_exe)
+    repo_q = shlex.quote(repo_root)
+    log_q = shlex.quote(log_path)
+    failed_q = shlex.quote(failed_sentinel)
     return (
         "#!/bin/sh\n"
         f"pid={cockpit_pid}\n"
@@ -364,10 +380,10 @@ def build_updater_script(
         "i=0\n"
         'while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 150 ]; do sleep 0.2; i=$((i+1)); done\n'
         "sleep 1\n"
-        f'"{npm}" install -g {PACKAGE}@latest > "{log_path}" 2>&1\n'
+        f"{npm_q} install -g {PACKAGE}@latest > {log_q} 2>&1\n"
         "code=$?\n"
-        f'[ "$code" -ne 0 ] && echo "FAILED exit=$code" > "{failed_sentinel}"\n'
-        f'cd "{repo_root}" && "{python_exe}" -m agent_takkub &\n'
+        f'[ "$code" -ne 0 ] && echo "FAILED exit=$code" > {failed_q}\n'
+        f"cd {repo_q} && {python_q} -m agent_takkub &\n"
     )
 
 

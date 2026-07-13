@@ -252,48 +252,40 @@ class MainWindowUpdateMixin:
 
     def _pulse_update_button(self, flashes: int = 3, _count: int = 0) -> None:
         """Alternate button border between orange and normal 3 times."""
-        if _count >= flashes * 2:
-            # Restore to whatever _refresh_update_button would set.
-            self._refresh_update_button()
+        try:
+            if _count >= flashes * 2:
+                # Restore to whatever _refresh_update_button would set.
+                self._refresh_update_button()
+                return
+            if _count % 2 == 0:
+                self._btn_update.setStyleSheet(
+                    f"QPushButton {{ color: {cockpit_theme.BANNER_WARN_TEXT}; "
+                    f"background: {cockpit_theme.BANNER_WARN_BG}; "
+                    f"border: 2px solid {cockpit_theme.STATE_EXITED}; border-radius: 4px; "
+                    "padding: 2px 8px; font-weight: 600; }"
+                )
+            else:
+                self._btn_update.setStyleSheet(
+                    f"QPushButton {{ color: {cockpit_theme.BANNER_WARN_TEXT}; "
+                    f"background: {cockpit_theme.BANNER_WARN_BG}; "
+                    f"border: 1px solid {cockpit_theme.BANNER_WARN_BORDER}; border-radius: 4px; "
+                    "padding: 2px 8px; }"
+                )
+            QTimer.singleShot(
+                400,
+                lambda count=_count + 1: self._pulse_update_button(flashes, count),
+            )
+        except RuntimeError:
             return
-        if _count % 2 == 0:
-            self._btn_update.setStyleSheet(
-                f"QPushButton {{ color: {cockpit_theme.BANNER_WARN_TEXT}; "
-                f"background: {cockpit_theme.BANNER_WARN_BG}; "
-                f"border: 2px solid {cockpit_theme.STATE_EXITED}; border-radius: 4px; "
-                "padding: 2px 8px; font-weight: 600; }"
-            )
-        else:
-            self._btn_update.setStyleSheet(
-                f"QPushButton {{ color: {cockpit_theme.BANNER_WARN_TEXT}; "
-                f"background: {cockpit_theme.BANNER_WARN_BG}; "
-                f"border: 1px solid {cockpit_theme.BANNER_WARN_BORDER}; border-radius: 4px; "
-                "padding: 2px 8px; }"
-            )
-        QTimer.singleShot(
-            400,
-            lambda count=_count + 1: self._pulse_update_button(flashes, count),
-        )
 
     # ------------------------------------------------------------------
-    # Legacy synchronous check — kept for the click handler's "cache is
-    # None" early-boot path only.  All recurring polls now go through
-    # _schedule_update_check.
+    # Legacy entry point kept for callers that request an immediate check.
+    # It now delegates to the same background worker as recurring polls.
     # ------------------------------------------------------------------
 
     def _run_update_check(self) -> None:
-        """Synchronous fallback used only when the user clicks the chip
-        before the first threaded poll has completed (~30 s after boot).
-        Runs on the Qt main thread; acceptable for a one-off user action."""
-        from .update_helper import fetch_remote, is_git_repo, local_status
-
-        if not is_git_repo():
-            self._update_status_cache = {"not_repo": True}
-            self._refresh_update_button()
-            return
-        fetch_remote()  # best effort; ignore failure
-        self._update_status_cache = local_status()
-        self._refresh_update_button()
+        """Schedule the early-boot fallback check without blocking Qt."""
+        self._schedule_update_check()
 
     # ------------------------------------------------------------------
     # Claude CLI update (separate from cockpit self-update above)
@@ -753,8 +745,6 @@ class MainWindowUpdateMixin:
         """
         from PyQt6.QtWidgets import QMessageBox
 
-        from .update_helper import pull_updates
-
         # First poll fires 30 s after boot. If the user clicks during
         # that window the cache is still None — don't render a fake
         # "check failed" dialog. Kick the check off immediately and
@@ -875,14 +865,29 @@ class MainWindowUpdateMixin:
         )
         if confirm != QMessageBox.StandardButton.Ok:
             return
-        ok, msg = pull_updates()
-        if not ok:
-            QMessageBox.critical(self, "Pull failed", msg)
-            self._schedule_update_check()  # refresh chip (threaded — no main-thread fetch)
+        from .update_worker import PullUpdateWorker
+
+        self._update_worker_busy = True
+        self._btn_update.setEnabled(False)
+        self._status.showMessage("Pulling update…", 0)
+        worker = PullUpdateWorker()
+        worker.signals.finished.connect(
+            lambda result, deps=deps_changing: self._on_pull_update_done(result, deps)
+        )
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_pull_update_done(self, result: dict, deps_changing: bool) -> None:
+        """Apply a background pull result on the Qt thread and restart."""
+        self._update_worker_busy = False
+        try:
+            self._btn_update.setEnabled(True)
+        except RuntimeError:
             return
-        # Pull succeeded. If deps changed, restart through the pip-sync path so
-        # the new cockpit boots with the new dependencies installed; otherwise a
-        # plain restart is enough.
+        msg = result.get("message", "update failed")
+        if not result.get("ok"):
+            QMessageBox.critical(self, "Pull failed", msg)
+            self._schedule_update_check()
+            return
         if deps_changing:
             self._status.showMessage(f"{msg} — syncing dependencies + restarting…", 8_000)
             QTimer.singleShot(500, self._restart_with_pip_sync)

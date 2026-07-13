@@ -67,8 +67,8 @@ def detect_stack(cwd: Path) -> list[Check]:
         )
 
     if (cwd / "package.json").exists():
-        npm = shutil.which("npm") or "npm"
-        npx = shutil.which("npx") or "npx"
+        npm = shutil.which("npm.cmd") or shutil.which("npm") or "npm"
+        npx = shutil.which("npx.cmd") or shutil.which("npx") or "npx"
         try:
             pkg = json.loads((cwd / "package.json").read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):

@@ -26,12 +26,22 @@ The string transforms are pure (unit-tested); only `release()`,
 from __future__ import annotations
 
 import datetime
+import os
 import pathlib
 import re
 import subprocess
+import sys
 
 _VERSION_RE = re.compile(r'^version\s*=\s*"([^"]+)"', re.MULTILINE)
 _VNEXT = "## [vNEXT]"
+_SUBPROCESS_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+
+
+def _git_env() -> dict[str, str]:
+    env = dict(os.environ)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GCM_INTERACTIVE"] = "never"
+    return env
 
 
 def bump_version(current: str, part: str) -> str:
@@ -126,12 +136,9 @@ def create_github_release(
         return False, "gh CLI not found — run `gh release create` manually once installed"
     if push:
         try:
-            subprocess.run(
-                ["git", "-C", str(repo_root), "push", "--follow-tags"],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
+            _git(repo_root, "push", "--follow-tags", timeout=120.0)
+        except subprocess.TimeoutExpired:
+            return False, "git push timed out after 120s"
         except subprocess.CalledProcessError as e:
             tail = (e.stderr or "git push failed").strip().splitlines()
             return False, f"git push failed: {tail[-1] if tail else 'unknown'}"
@@ -154,7 +161,11 @@ def create_github_release(
             cwd=str(repo_root),
             capture_output=True,
             text=True,
+            timeout=120.0,
+            creationflags=_SUBPROCESS_NO_WINDOW,
         )
+    except subprocess.TimeoutExpired:
+        return False, "gh release create timed out after 120s"
     except OSError as e:
         return False, f"gh release create failed: {e}"
     finally:
@@ -174,23 +185,24 @@ def _semver_tuple(v: str) -> tuple[int, int, int]:
     return (a, b, c)
 
 
-def _git(repo_root: pathlib.Path, *args: str) -> None:
-    subprocess.run(
-        ["git", "-C", str(repo_root), *args],
+def _git(
+    repo_root: pathlib.Path, *args: str, timeout: float = 30.0
+) -> subprocess.CompletedProcess[str]:
+    """Run git with finite timeouts and all interactive credentials disabled."""
+    return subprocess.run(
+        ["git", "-c", "credential.helper=", "-C", str(repo_root), *args],
         check=True,
         capture_output=True,
         text=True,
+        timeout=timeout,
+        env=_git_env(),
+        creationflags=_SUBPROCESS_NO_WINDOW,
     )
 
 
 def _tag_exists(repo_root: pathlib.Path, tag: str) -> bool:
     try:
-        out = subprocess.run(
-            ["git", "-C", str(repo_root), "tag", "-l", tag],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
+        out = _git(repo_root, "tag", "-l", tag)
     except (subprocess.SubprocessError, OSError):
         return False
     return tag in out.stdout.split()
@@ -265,16 +277,42 @@ def release(
     if dry_run:
         return summary
 
-    pyproject.write_text(new_pp, encoding="utf-8")
-    changelog.write_text(new_cl, encoding="utf-8")
+    original_head = ""
+    commit_created = False
+    writes_started = False
+    try:
+        if do_commit:
+            original_head = _git(repo_root, "rev-parse", "HEAD").stdout.strip()
 
-    if do_commit:
-        _git(repo_root, "add", "pyproject.toml", "CHANGELOG.md")
-        _git(repo_root, "commit", "-m", f"chore(release): {tag}")
-        summary["committed"] = True
-    if do_tag:
-        _git(repo_root, "tag", "-a", tag, "-m", tag)
-        summary["tagged"] = True
+        writes_started = True
+        pyproject.write_text(new_pp, encoding="utf-8")
+        changelog.write_text(new_cl, encoding="utf-8")
+
+        if do_commit:
+            _git(repo_root, "add", "pyproject.toml", "CHANGELOG.md")
+            _git(repo_root, "commit", "-m", f"chore(release): {tag}")
+            commit_created = True
+            summary["committed"] = True
+        if do_tag:
+            _git(repo_root, "tag", "-a", tag, "-m", tag)
+            summary["tagged"] = True
+    except (subprocess.SubprocessError, OSError) as exc:
+        # Restore both tracked files and undo a release commit if tag creation
+        # failed after the commit. Preserve any pre-existing file content.
+        try:
+            if writes_started:
+                if do_commit:
+                    if commit_created and original_head:
+                        _git(repo_root, "reset", "--mixed", original_head)
+                    else:
+                        _git(repo_root, "reset", "--", "pyproject.toml", "CHANGELOG.md")
+                pyproject.write_text(pp_text, encoding="utf-8")
+                changelog.write_text(cl_text, encoding="utf-8")
+        except Exception as rollback_exc:
+            raise RuntimeError(
+                f"release failed ({exc}); rollback also failed: {rollback_exc}"
+            ) from exc
+        raise RuntimeError(f"release failed; working tree reverted: {exc}") from exc
 
     # Publish the GitHub Release (push + gh release create) so the changelog
     # shows on the Releases page. Needs a real commit+tag to push, so it's
@@ -282,7 +320,10 @@ def release(
     # the local release already happened.
     if do_github_release and do_commit and do_tag:
         notes = extract_release_notes(new_cl, new_version)
-        ok, msg = create_github_release(repo_root, tag, tag, notes)
+        try:
+            ok, msg = create_github_release(repo_root, tag, tag, notes)
+        except Exception as exc:
+            ok, msg = False, f"GitHub release failed: {exc}"
         if ok:
             summary["github_released"] = True
             summary["github_url"] = msg

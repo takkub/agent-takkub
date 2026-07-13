@@ -4,12 +4,11 @@ UpdateCheckWorker  — QRunnable that fetches origin/main + emits local_status()
                      without touching the Qt event loop. MainWindow wires a
                      5-minute QTimer to schedule repeated checks.
 
-_try_silent_self_update — pre-UI fast-forward pull on startup. Calls
-                          os.execv to restart into the new code when a clean
-                          ff-pull succeeds.  Called from app.main() before
-                          QApplication is constructed; any failure is silently
-                          swallowed so a network hiccup never prevents the
-                          cockpit from opening.
+_try_silent_self_update — pre-UI fast-forward pull on startup. Re-execs when
+                          dependencies are unchanged, or hands dependency sync
+                          to a detached restart script. Called from app.main()
+                          before QApplication is constructed; network failures
+                          never prevent the cockpit from opening.
 """
 
 from __future__ import annotations
@@ -78,6 +77,24 @@ class UpdateCheckWorker(QRunnable):
         except Exception as exc:
             status = {"ok": False, "error": str(exc)}
         _safe_emit(self.signals, status)
+
+
+class PullUpdateWorker(QRunnable):
+    """Run the potentially network-bound update pull off the Qt main thread."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.signals = _WorkerSignals()
+
+    def run(self) -> None:  # called by QThreadPool
+        from .update_helper import pull_updates
+
+        try:
+            ok, message = pull_updates()
+            result = {"ok": ok, "message": message}
+        except Exception as exc:
+            result = {"ok": False, "message": str(exc)}
+        _safe_emit(self.signals, result)
 
 
 class ClaudeUpdateCheckWorker(QRunnable):
@@ -233,8 +250,8 @@ def _log_startup_pull(event: str, **kw: object) -> None:
 def try_silent_self_update(*, timeout_fetch: float = 5.0, timeout_pull: float = 15.0) -> bool:
     """Best-effort pre-UI fast-forward pull.
 
-    Returns True if a ff-pull succeeded and os.execv was invoked
-    (the caller never reaches the return statement in that case).
+    Returns True if a ff-pull succeeded and restart was invoked (the caller
+    never reaches the return statement in that case).
     Returns False on any skip condition or error.
 
     Safety guards:
@@ -246,6 +263,7 @@ def try_silent_self_update(*, timeout_fetch: float = 5.0, timeout_pull: float = 
     """
     if not is_git_repo():
         return False
+    dependency_sync_required = False
     try:
         ok, _msg = fetch_remote(timeout=timeout_fetch)
         if not ok:
@@ -284,12 +302,55 @@ def try_silent_self_update(*, timeout_fetch: float = 5.0, timeout_pull: float = 
 
         print(
             f"[takkub] auto-update: pulled {behind} commit(s) "
-            f"({from_sha[:7]}→{to_sha[:7]}), restarting…",
+            f"({from_sha[:7]}->{to_sha[:7]}), restarting...",
             flush=True,
         )
-        # Re-exec into the newly fetched code.
+        from .update_helper import pyproject_changed_in_pull
+
+        if pyproject_changed_in_pull(from_sha, to_sha):
+            dependency_sync_required = True
+            import shutil
+            import subprocess
+
+            from .update_helper import build_pip_sync_script
+
+            is_win = sys.platform == "win32"
+            RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+            log_path = RUNTIME_DIR / "pip_sync.log"
+            script_path = RUNTIME_DIR / ("pip_sync.ps1" if is_win else "pip_sync.sh")
+            script_path.write_text(
+                build_pip_sync_script(
+                    python_exe=sys.executable,
+                    repo_root=str(REPO_ROOT),
+                    log_path=str(log_path),
+                    is_windows=is_win,
+                    cockpit_pid=os.getpid(),
+                ),
+                encoding="utf-8",
+            )
+            if is_win:
+                pwsh = shutil.which("pwsh") or shutil.which("powershell") or "powershell"
+                subprocess.Popen(
+                    [pwsh, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
+                    cwd=str(REPO_ROOT),
+                    close_fds=True,
+                    creationflags=0x00000008 | 0x00000200,
+                )
+            else:
+                subprocess.Popen(
+                    ["sh", str(script_path)],
+                    cwd=str(REPO_ROOT),
+                    close_fds=True,
+                    start_new_session=True,
+                )
+            _log_startup_pull("pip_sync_spawned", script=str(script_path))
+            raise SystemExit(0)
+
+        # Re-exec into the newly fetched code when dependencies are unchanged.
         os.execv(sys.executable, [sys.executable, *sys.argv])
         return True  # unreachable — os.execv replaces this process
     except Exception as exc:
         _log_startup_pull("exception", error=str(exc))
+        if dependency_sync_required:
+            print(f"[takkub] auto-update dependency sync failed: {exc}", flush=True)
         return False
