@@ -80,9 +80,17 @@ def _save_clipboard_image(b64data: str, runtime_dir: Path) -> Path:
     """Decode base64 image data and write to runtime/clipboard-<ISO-ts>.png."""
     runtime_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
-    path = runtime_dir / f"clipboard-{ts}.png"
-    path.write_bytes(base64.b64decode(b64data))
-    return path
+    image_data = base64.b64decode(b64data)
+    suffix = 0
+    while True:
+        unique = "" if suffix == 0 else f"-{suffix}"
+        path = runtime_dir / f"clipboard-{ts}{unique}.png"
+        try:
+            with path.open("xb") as image_file:
+                image_file.write(image_data)
+            return path
+        except FileExistsError:
+            suffix += 1
 
 
 _TRAILING_PUNCT = ".,;:!?)]}>\"'`"
@@ -297,6 +305,7 @@ class TerminalWidget(QWidget):
         # buffer bytes until xterm.js says it's ready, then flush in order
         self._pending_writes: list[str] = []
         self._page_ready = False
+        self._font_px: int | None = None
 
         # Input lock: when True, every USER-originated input (keystrokes, image
         # paste, file drop) is dropped before it reaches the PTY. The
@@ -468,7 +477,9 @@ class TerminalWidget(QWidget):
         size = max(8, min(24, int(size)))
         # xterm.js wants pixel size; rough conversion: pt * 1.333 ≈ px
         px = int(size * 1.333)
-        self._view.page().runJavaScript(f"termSetFontSize({px});")
+        self._font_px = px
+        if getattr(self, "_page_ready", False):
+            self._view.page().runJavaScript(f"termSetFontSize({px});")
         self.fontSizeChanged.emit(size)
 
     def _on_font_zoomed(self, pt: int) -> None:
@@ -528,14 +539,16 @@ class TerminalWidget(QWidget):
 
     def _on_page_ready(self) -> None:
         self._page_ready = True
+        if self._font_px is not None:
+            self._view.page().runJavaScript(f"termSetFontSize({self._font_px});")
         # Re-assert the lock state now that JS can receive it — the initial
         # set_input_locked() at construction ran before the page existed.
         if self._input_locked:
             self.set_input_locked(True)
         if self._pending_writes:
-            joined = "".join(self._pending_writes)
+            self._write_buf.extend(self._pending_writes)
             self._pending_writes.clear()
-            self._view.page().runJavaScript(f"termWrite({json.dumps(joined)});")
+            self._flush_writes()
         # Start heartbeat once the page is alive — keeps the renderer warm
         # so stalled-frame bugs (output delivered but not painted) can't
         # accumulate while the user is looking at another pane. If this pane's

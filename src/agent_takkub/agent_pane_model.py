@@ -89,7 +89,7 @@ class AgentPaneModel:
         """
         if self.state == "done" or self.expected_exit:
             return "empty", None
-        return "exited", f"claude exited unexpectedly (code {code})"
+        return "exited", f"agent process exited unexpectedly (code {code})"
 
     def format_token_badge(self, usage: dict) -> dict:
         """Pure formatting for the header token badge — factored out of the

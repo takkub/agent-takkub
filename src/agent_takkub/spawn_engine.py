@@ -109,7 +109,7 @@ def _normalize_cwd_for_compare(cwd: str) -> str:
     """
     try:
         return os.path.normcase(str(pathlib.Path(cwd).resolve()))
-    except OSError:
+    except (OSError, ValueError):
         return os.path.normcase(cwd)
 
 
@@ -1147,20 +1147,26 @@ class SpawnEngineMixin:
                 # BLOCKED_DIRS + session brief) — NOT the teammate cheatsheet
                 # ensure_agents_md() plants for every other role (#101).
                 if spawn_cwd != str(DATA_HOME):
-                    post_compact_brief = self._build_post_compact_brief(project_ns)
                     try:
+                        post_compact_brief = self._build_post_compact_brief(project_ns)
                         render_lead_agents_md(
                             project_ns, spawn_cwd, post_compact_brief=post_compact_brief
                         )
-                    except OSError:
+                    except Exception:
                         _log.exception("could not render Gemini Lead context; spawning without it")
             else:
-                from . import skill_policy
+                try:
+                    from . import skill_policy
 
-                _skill_extra = skill_policy.render_skill_appendix(
-                    base_role, _skill_roots_for_project(project_ns), spec.context_strategy
-                )
-                ensure_agents_md(spawn_cwd, extra=_skill_extra)
+                    _skill_extra = skill_policy.render_skill_appendix(
+                        base_role, _skill_roots_for_project(project_ns), spec.context_strategy
+                    )
+                    ensure_agents_md(spawn_cwd, extra=_skill_extra)
+                except Exception:
+                    _log.exception(
+                        "could not render Gemini role context for %s; spawning without it",
+                        base_role,
+                    )
             env = _build_lead_env() if _is_lead else _build_pane_env()
             env["TAKKUB_ROLE"] = role_name
             env["TAKKUB_PROJECT"] = project_ns
@@ -1231,12 +1237,12 @@ class SpawnEngineMixin:
                 # Lead-specific AGENTS.md content — see the GEMINI branch's
                 # matching comment above (#101).
                 if spawn_cwd != str(DATA_HOME):
-                    post_compact_brief = self._build_post_compact_brief(project_ns)
                     try:
+                        post_compact_brief = self._build_post_compact_brief(project_ns)
                         render_lead_agents_md(
                             project_ns, spawn_cwd, post_compact_brief=post_compact_brief
                         )
-                    except OSError:
+                    except Exception:
                         _log.exception("could not render Codex Lead context; spawning without it")
             else:
                 # Plant the takkub cheatsheet so Codex auto-discovers it on
@@ -1245,12 +1251,18 @@ class SpawnEngineMixin:
                 # (marker check inside the helper). `extra` bridges this role's
                 # Skill Matrix assignment (#103 phase 4) — codex has no Skill
                 # tool, so it's an instruction-style block, not real skill access.
-                from . import skill_policy
+                try:
+                    from . import skill_policy
 
-                _skill_extra = skill_policy.render_skill_appendix(
-                    base_role, _skill_roots_for_project(project_ns), codex_spec.context_strategy
-                )
-                ensure_agents_md(spawn_cwd, extra=_skill_extra)
+                    _skill_extra = skill_policy.render_skill_appendix(
+                        base_role, _skill_roots_for_project(project_ns), codex_spec.context_strategy
+                    )
+                    ensure_agents_md(spawn_cwd, extra=_skill_extra)
+                except Exception:
+                    _log.exception(
+                        "could not render Codex role context for %s; spawning without it",
+                        base_role,
+                    )
             env = _build_lead_env() if _is_lead else _build_pane_env()
             env["TAKKUB_ROLE"] = role_name
             env["TAKKUB_PROJECT"] = project_ns
@@ -1344,14 +1356,14 @@ class SpawnEngineMixin:
             # Skip injection when Lead is anchored at the cockpit itself
             # (no project context to enforce).
             if spawn_cwd != str(DATA_HOME):
-                post_compact_brief = self._build_post_compact_brief(project_ns)
                 try:
+                    post_compact_brief = self._build_post_compact_brief(project_ns)
                     role_md_file = _render_lead_context(
                         project_ns,
                         post_compact_brief=post_compact_brief,
                         claude_cwd=spawn_cwd,
                     )
-                except OSError:
+                except Exception:
                     _log.exception("could not render Claude Lead context; spawning without it")
                     role_md_file = None
         else:
@@ -1372,13 +1384,21 @@ class SpawnEngineMixin:
             # variant avoids command-line escaping problems with multiline
             # markdown containing backticks, asterisks, and Thai text.)
             role_md_path = staging / "CLAUDE.md"
-            if role_context_available and role_md_path.exists():
+            try:
+                role_context_exists = role_context_available and role_md_path.exists()
+            except Exception:
+                _log.exception(
+                    "could not inspect role context for %s; spawning without it", base_role
+                )
+                role_context_exists = False
+                role_md_file = None
+            if role_context_exists:
                 # agent_role_dir() always rewrites CLAUDE.md fresh from the source
                 # .claude/agents/<role>.md, so these injections never accumulate.
                 # Build the whole appendix, then write once.
                 try:
                     _existing_md = role_md_path.read_text(encoding="utf-8")
-                except OSError:
+                except Exception:
                     _log.exception(
                         "could not read role context for %s; spawning without it", base_role
                     )
@@ -1388,7 +1408,16 @@ class SpawnEngineMixin:
                 # Issue #33: pointer to Lead's project-memory so the teammate can
                 # read domain rules (package manager, ports, vendor patterns) on
                 # demand without relying on Lead to echo them in every task spec.
-                _mem_path = _resolve_project_memory(lead_cwd(project_ns) or spawn_cwd)
+                try:
+                    _mem_path = _resolve_project_memory(lead_cwd(project_ns) or spawn_cwd)
+                except Exception:
+                    _log.exception(
+                        "could not resolve project memory for %s; spawning without role context",
+                        base_role,
+                    )
+                    _mem_path = None
+                    role_context_available = False
+                    role_md_file = None
                 if _mem_path is not None:
                     _appendix += f"""
 
@@ -1431,7 +1460,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                     # would raise on an f-string.
                     try:
                         _mem_text = _role_mem.read_text(encoding="utf-8", errors="replace")
-                    except OSError:
+                    except Exception:
                         _mem_text = ""
                     # tok-5: a freshly-seeded file is just the skeleton (bare `-`
                     # placeholders, no learned bullets). Inlining the whole empty
@@ -1439,9 +1468,20 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                     # tok/spawn for zero knowledge. When there's no real content
                     # yet, emit a one-line pointer instead; the full inline block
                     # returns the moment the role appends its first note.
-                    from .role_memory import has_learned_content
+                    try:
+                        from .role_memory import has_learned_content
 
-                    if not has_learned_content(_mem_text, project_ns, base_role):
+                        has_role_memory = has_learned_content(_mem_text, project_ns, base_role)
+                    except Exception:
+                        _log.exception(
+                            "could not render learned role context for %s; spawning without it",
+                            base_role,
+                        )
+                        has_role_memory = False
+                        role_context_available = False
+                        role_md_file = None
+
+                    if not has_role_memory:
                         # No real notes yet — a one-line pointer instead of dumping
                         # the empty skeleton + long wrapper. The full inline block
                         # below returns the moment this role appends its first note.
@@ -1488,13 +1528,21 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 # this policy — this appendix just names which ones the
                 # operator flagged as relevant to THIS role, so it reads them
                 # proactively instead of waiting to stumble onto them.
-                from . import skill_policy
+                try:
+                    from . import skill_policy
 
-                _appendix += skill_policy.render_skill_appendix(
-                    base_role,
-                    _skill_roots_for_project(project_ns),
-                    PROVIDER_REGISTRY["claude"].context_strategy,
-                )
+                    _appendix += skill_policy.render_skill_appendix(
+                        base_role,
+                        _skill_roots_for_project(project_ns),
+                        PROVIDER_REGISTRY["claude"].context_strategy,
+                    )
+                except Exception:
+                    _log.exception(
+                        "could not render skill role context for %s; spawning without it",
+                        base_role,
+                    )
+                    role_context_available = False
+                    role_md_file = None
                 # Big-file hygiene: every teammate gets the same guard the Lead
                 # does — a teammate assigned to port a 2.7MB game file would
                 # otherwise Read it wholesale and balloon its own per-turn
@@ -1511,7 +1559,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                         if _appendix:
                             role_md_path.write_text(_existing_md + _appendix, encoding="utf-8")
                         role_md_file = str(role_md_path)
-                    except OSError:
+                    except Exception:
                         _log.exception(
                             "could not write role context for %s; spawning without it", base_role
                         )
