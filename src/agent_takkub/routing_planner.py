@@ -140,6 +140,10 @@ _API_EN_BASE: tuple[str, ...] = (
     "GraphQL",
 )
 _API_EN_MULTIROLE_EXTRA: tuple[str, ...] = ("backend", "server")
+_API_EN_AMBIGUOUS: frozenset[str] = frozenset({"model", "query", "service"})
+_API_EN_MULTIROLE_BASE: tuple[str, ...] = tuple(
+    token for token in _API_EN_BASE if token.lower() not in _API_EN_AMBIGUOUS
+)
 _API_TH_FRAGMENT = r"ฐานข้อมูล|หลังบ้าน"
 
 
@@ -148,8 +152,10 @@ def _build_ui_regex(extra: tuple[str, ...] = ()) -> re.Pattern:
     return re.compile(rf"(?:\b({en_alt})\b|{_UI_TH_FRAGMENT})", re.IGNORECASE)
 
 
-def _build_api_regex(extra: tuple[str, ...] = ()) -> re.Pattern:
-    en_alt = "|".join(_API_EN_BASE + extra)
+def _build_api_regex(
+    extra: tuple[str, ...] = (), *, base: tuple[str, ...] = _API_EN_BASE
+) -> re.Pattern:
+    en_alt = "|".join(base + extra)
     return re.compile(rf"(?:\b({en_alt})\b|{_API_TH_FRAGMENT})", re.IGNORECASE)
 
 
@@ -188,7 +194,7 @@ _EXPLAIN_SYSTEM = re.compile(
     r"|อธิบาย\s*(?:ระบบ|โครงสร้าง|สถาปัตยกรรม|โค้?ด|codebase)"
     r"|(?:ระบบ|โค้?ด|codebase)\s*(?:นี้|ตัวนี้)?\s*(?:ทำงาน|เป็น)\s*(?:ยังไง|อย่างไร|ยัง)"
     r"|(?:ภาพรวม|โครงสร้าง|สถาปัตยกรรม)\s*(?:ระบบ|โปรเจ[คก]ต?|code|app)"
-    r"|\b(?:review|explain|describe|document|walk\s*me\s*through|overview\s*of|map\s*out)\b"
+    r"|\b(?:explain|describe|walk\s*me\s*through|overview\s*of|map\s*out)\b"
     r"[^.\n]{0,25}\b(?:system|architecture|codebase|how\s*it\s*works)\b"
     r"|\bhow\s+(?:does|do)\b[^.\n]{0,25}\b(?:system|architecture|the\s*app|everything)\b"
     r"[^.\n]{0,15}\bwork"
@@ -340,7 +346,7 @@ _AMBIGUOUS_CONFIRM = re.compile(r"(เออๆ|เออ\s|ok\s*แต่|but\b
 # but useful for pair detection). Drift between the two layers is now
 # impossible: change the base, both update.
 _HAS_UI = _build_ui_regex(_UI_EN_MULTIROLE_EXTRA)
-_HAS_API = _build_api_regex(_API_EN_MULTIROLE_EXTRA)
+_HAS_API = _build_api_regex(_API_EN_MULTIROLE_EXTRA, base=_API_EN_MULTIROLE_BASE)
 
 
 # ─────────────────────────────────────────────────────────────────────

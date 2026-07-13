@@ -403,8 +403,8 @@ class PipelineMixin:
             self._fire_pipeline_hop(project_ns, run.run_id, run)
 
     def _maybe_fire_auto_chain_handoff(self, project_ns: str, was_auto_chain: bool) -> None:
-        """Fire the verify-hop handoff iff *was_auto_chain* and no pane in the
-        project still carries the auto_chain tag.
+        """Fire the verify-hop handoff iff *was_auto_chain* and no live or
+        queued assign in the project still carries the auto_chain tag.
 
         Shared by done(), close(), and the crash-cap / stuck-give-up paths
         (bug-1 orch, review 2026-06-16). A pane that dies WITHOUT a done event
@@ -420,7 +420,12 @@ class PipelineMixin:
             for k, s in getattr(self, "_pane_state", {}).items()
             if k.startswith(f"{project_ns}::") and s.auto_chain
         ]
-        if not pending:
+        queued = [
+            item
+            for item in getattr(self, "_fanout_queue", {}).get(project_ns, [])
+            if item.get("auto_chain")
+        ]
+        if not pending and not queued:
             self._inject_auto_chain_handoff(project_ns)
 
     def _inject_auto_chain_handoff(self, project_ns: str) -> None:

@@ -73,6 +73,23 @@ def is_parallel() -> bool:
     return current() == PARALLEL
 
 
+def _base_pane_cap() -> int:
+    """Shared CPU/RAM pane budget before any per-role ceiling."""
+    try:
+        cores = os.cpu_count() or 4
+    except Exception:
+        cores = 4
+    by_cpu = max(1, cores // 2)
+    try:
+        import psutil
+
+        free_gb = psutil.virtual_memory().available / (1024**3)
+        by_ram = max(1, int(free_gb // 2))
+    except Exception:
+        by_ram = 2
+    return max(1, min(by_cpu, by_ram))
+
+
 def machine_fanout_cap() -> int:
     """Max instances-per-role this machine can comfortably run concurrently,
     derived from CPU cores + free RAM, never above `MAX_FANOUT`.
@@ -88,19 +105,7 @@ def machine_fanout_cap() -> int:
     Falls back to a conservative 2 if psutil/cpu_count are unavailable, so this
     never raises on an odd environment.
     """
-    try:
-        cores = os.cpu_count() or 4
-    except Exception:
-        cores = 4
-    by_cpu = max(1, cores // 2)
-    try:
-        import psutil
-
-        free_gb = psutil.virtual_memory().available / (1024**3)
-        by_ram = max(1, int(free_gb // 2))
-    except Exception:
-        by_ram = 2
-    return max(1, min(MAX_FANOUT, by_cpu, by_ram))
+    return max(1, min(MAX_FANOUT, _base_pane_cap()))
 
 
 def machine_total_pane_cap() -> int:
@@ -121,19 +126,7 @@ def machine_total_pane_cap() -> int:
     legitimately run more than `MAX_FANOUT` panes in total. Floor 1; falls back
     conservatively to 2 if psutil/cpu_count are unavailable so it never raises.
     """
-    try:
-        cores = os.cpu_count() or 4
-    except Exception:
-        cores = 4
-    by_cpu = max(1, cores // 2)
-    try:
-        import psutil
-
-        free_gb = psutil.virtual_memory().available / (1024**3)
-        by_ram = max(1, int(free_gb // 2))
-    except Exception:
-        by_ram = 2
-    return max(1, min(by_cpu, by_ram))
+    return _base_pane_cap()
 
 
 def set_current(mode: str) -> None:

@@ -185,7 +185,7 @@ def create_assignment(
     """
     now = datetime.now()
     date = now.strftime("%Y-%m-%d")
-    hhmmss = now.strftime("%H%M%S")
+    hhmmss = now.strftime("%H%M%S%f")
     goal_text = (goal or "").strip() or _FALLBACK_GOAL
     feature_text = (feature or "").strip() or _FALLBACK_FEATURE
     role = role.strip()
