@@ -543,6 +543,7 @@ class _WriterThread(QThread):
 class _ReaderThread(QThread):
     bytesReceived = pyqtSignal(bytes)
     finished_clean = pyqtSignal()
+    _MAX_CONSECUTIVE_READ_ERRORS = 25
 
     def __init__(self, proc, on_data=None, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -561,6 +562,7 @@ class _ReaderThread(QThread):
         # has actually exited.
         import time
 
+        consecutive_errors = 0
         while not self._stop:
             try:
                 data = self._proc.read(4096)
@@ -573,9 +575,13 @@ class _ReaderThread(QThread):
                 print(f"[pty_session] read error: {e!r}", flush=True)
                 if not self._proc.isalive():
                     break
+                consecutive_errors += 1
+                if consecutive_errors >= self._MAX_CONSECUTIVE_READ_ERRORS:
+                    break
                 time.sleep(0.04)
                 continue
 
+            consecutive_errors = 0
             if not data:
                 if not self._proc.isalive():
                     break
@@ -745,7 +751,17 @@ class PtySession(QObject):
         code = 0
         try:
             if self._proc is not None:
-                code = self._proc.exitstatus or 0
+                exit_status = self._proc.exitstatus
+                if exit_status is not None:
+                    code = int(exit_status)
+                else:
+                    signal_status = getattr(self._proc, "signalstatus", None)
+                    if signal_status is None:
+                        signal_status = getattr(
+                            getattr(self._proc, "_proc", None), "signalstatus", None
+                        )
+                    if signal_status is not None:
+                        code = -int(signal_status)
         except Exception:
             pass
         self._teardown_resources(kill_process=False, wait=False)
