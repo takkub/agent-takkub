@@ -309,13 +309,10 @@ def _curate_text(text: str) -> tuple[str, bool]:
             if not _trim_oldest_bullet(sections):
                 break
 
-        # Drop now-empty NON-seeded sections (all their bullets were trimmed);
-        # seeded headings stay so the skeleton survives.
+        # Drop truly empty NON-seeded sections. A retained sub-heading is
+        # content too, even when all bullets beneath it were trimmed.
         sections = [
-            sec
-            for sec in sections
-            if sec[0].rstrip() in seeded
-            or any(ln.strip() and not ln.startswith("#") for ln in sec[1])
+            sec for sec in sections if sec[0].rstrip() in seeded or any(ln.strip() for ln in sec[1])
         ]
 
         new = _render(header, sections)

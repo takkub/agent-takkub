@@ -53,13 +53,15 @@ _STOPWORDS = frozenset(
 
 
 def load_role_docs(skills_dir: Path = Path(".claude/agents")) -> dict[str, str]:
-    """Return {role_name: doc_text} for every .md file in skills_dir.
+    """Return {role_name: doc_text} for every readable .md file in skills_dir.
 
     ``skills_dir`` defaults to a cwd-relative path (only correct when run
     from the repo root). If that doesn't exist, fall back to
     ``config.AGENTS_DIR`` — the cockpit's real role-file location in both a
     dev checkout and an installed build (see
     docs/audit/2026-07-05-installed-build-audit-gemini.md, finding 5).
+    Filesystem races and unreadable entries are skipped; this function never
+    raises for directory enumeration or file-read failures.
     """
     if not skills_dir.exists():
         from .config import AGENTS_DIR
@@ -67,11 +69,19 @@ def load_role_docs(skills_dir: Path = Path(".claude/agents")) -> dict[str, str]:
         skills_dir = AGENTS_DIR
     if not skills_dir.exists():
         return {}
-    return {
-        p.stem: p.read_text(encoding="utf-8", errors="replace")
-        for p in skills_dir.iterdir()
-        if p.suffix == ".md"
-    }
+    try:
+        entries = list(skills_dir.iterdir())
+    except OSError:
+        return {}
+    docs: dict[str, str] = {}
+    for path in entries:
+        if path.suffix != ".md":
+            continue
+        try:
+            docs[path.stem] = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+    return docs
 
 
 def tokenize(text: str) -> list[str]:

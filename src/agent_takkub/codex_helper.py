@@ -103,6 +103,11 @@ def codex_exec(
             "codex binary not on PATH. Install with "
             "`npm install -g @openai/codex`, then run `codex login` once."
         )
+    if sys.platform == "win32" and Path(binary).suffix.lower() in {".cmd", ".bat"}:
+        return False, (
+            "native codex.exe not found; refusing the Windows command shim "
+            "because prompts cannot be passed to .cmd/.bat safely"
+        )
     if not (prompt or "").strip():
         return False, "empty prompt"
     argv: list[str] = [binary, "exec", prompt]

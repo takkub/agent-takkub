@@ -134,9 +134,9 @@ def save_custom_roles(roles: dict[str, Role]) -> bool:
             delete=False,
             encoding="utf-8",
         ) as tmp:
+            tmp_path = Path(tmp.name)
             json.dump(payload, tmp, indent=2, ensure_ascii=False)
             tmp.write("\n")
-            tmp_path = Path(tmp.name)
         tmp_path.replace(CUSTOM_ROLES_FILE)
         return True
     except OSError as e:
@@ -204,9 +204,14 @@ def create_role(
             delete=False,
             encoding="utf-8",
         ) as tmp:
-            tmp.write(content)
             tmp_path = Path(tmp.name)
+            tmp.write(content)
     except OSError as e:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
         return False, f"เขียน role file ไม่สำเร็จ: {e}"
 
     roles = load_custom_roles()

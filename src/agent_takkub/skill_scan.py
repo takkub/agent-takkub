@@ -379,9 +379,14 @@ def create_skill(
         with tempfile.NamedTemporaryFile(
             mode="w", dir=store_dir, suffix=".md", delete=False, encoding="utf-8"
         ) as tmp:
-            tmp.write(content)
             tmp_path = Path(tmp.name)
+            tmp.write(content)
     except OSError as e:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
         return False, f"เขียน SKILL.md ไม่สำเร็จ: {e}"
 
     try:
@@ -435,9 +440,13 @@ def update_skill(path: Path, description: str, instructions: str) -> tuple[bool,
     ``name`` is immutable via this path (a skill's identity is its
     directory name; renaming means create+delete). Returns ``(ok, message)``
     — ``message`` is "" on success. Never raises."""
-    fm, _old_body = read_skill(path)
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False, f"อ่าน {path} ไม่สำเร็จ"
+    fm = _parse_frontmatter(text)
     if not fm:
-        return False, f"อ่านหรือ parse frontmatter ของ {path} ไม่สำเร็จ"
+        fm = {"name": path.parent.name if path.name == "SKILL.md" else path.stem}
 
     fm["description"] = (description or "").strip()
     body = (
@@ -454,8 +463,8 @@ def update_skill(path: Path, description: str, instructions: str) -> tuple[bool,
         with tempfile.NamedTemporaryFile(
             mode="w", dir=path.parent, suffix=".md", delete=False, encoding="utf-8"
         ) as tmp:
-            tmp.write(content)
             tmp_path = Path(tmp.name)
+            tmp.write(content)
         tmp_path.replace(path)
     except OSError as e:
         if tmp_path is not None:
