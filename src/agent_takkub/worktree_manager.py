@@ -186,7 +186,11 @@ def load_worktree_config(git_root: str) -> tuple[WorktreeConfig, str]:
 
     warnings: list[str] = []
     links: list[str] = []
-    for entry in (raw.get("symlinks") or [])[:_MAX_SYMLINKS]:
+    symlinks = raw.get("symlinks", [])
+    if not isinstance(symlinks, list):
+        warnings.append("symlinks ต้องเป็น array")
+        symlinks = []
+    for entry in symlinks[:_MAX_SYMLINKS]:
         rel = _safe_rel_entry(entry)
         if rel is None:
             warnings.append(f"symlinks entry ไม่ปลอดภัย/ไม่ใช่ relative path: {entry!r}")
@@ -194,7 +198,11 @@ def load_worktree_config(git_root: str) -> tuple[WorktreeConfig, str]:
             links.append(rel)
 
     cmds: list[str] = []
-    for cmd in (raw.get("postCreate") or [])[:_MAX_POST_CREATE]:
+    post_create = raw.get("postCreate", [])
+    if not isinstance(post_create, list):
+        warnings.append("postCreate ต้องเป็น array")
+        post_create = []
+    for cmd in post_create[:_MAX_POST_CREATE]:
         if isinstance(cmd, str) and cmd.strip():
             cmds.append(cmd.strip())
         else:
@@ -598,8 +606,12 @@ class WorktreeManager:
         if keep:
             return True, f"merged {branch} (–keep: worktree ยังอยู่)"
         sweep_link_points(Path(row["path"]))
-        self._run(["-C", git_root, "worktree", "remove", row["path"]], None)
+        remove = self._run(["-C", git_root, "worktree", "remove", row["path"]], None)
         self._run(["-C", git_root, "worktree", "prune"], None)
+        if not remove.ok:
+            lines = (remove.stderr or remove.stdout).strip().splitlines()
+            detail = lines[-1] if lines else f"exit {remove.returncode}"
+            return True, (f"merged {branch} แต่ลบ worktree ไม่ได้ ({detail}) — เก็บที่ {row['path']}")
         self._run(["-C", git_root, "branch", "-d", branch], None)
         return True, f"merged {branch} + cleanup เรียบร้อย"
 

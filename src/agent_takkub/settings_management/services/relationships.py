@@ -45,12 +45,12 @@ def get_role_access(name: str) -> models.RoleAccess:
     )
 
 
-def _relationship_paths() -> list:
+def _relationship_paths(*role_names: str) -> list:
     return [
         provider_config.config_path(None),
         pane_tools_policy.PANE_TOOLS_POLICY_FILE,
         skill_policy.SKILL_POLICY_FILE,
-        *shared_dev_tools.role_variant_paths(),
+        *shared_dev_tools.role_variant_paths(role_names),
     ]
 
 
@@ -102,7 +102,7 @@ def _apply_access(name: str, draft: RoleAccessDraft) -> None:
 def write_access(name: str, draft: RoleAccessDraft) -> OperationResult:
     """Persist a role's Access-tab draft across all stores atomically."""
     try:
-        with FileTransaction(_relationship_paths()):
+        with FileTransaction(_relationship_paths(name)):
             _apply_access(name, draft)
     except (RuntimeError, OSError) as e:
         return OperationResult(ok=False, message=str(e), entity_id=name)
