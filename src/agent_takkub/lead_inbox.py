@@ -72,6 +72,19 @@ def _orch_attr(name: str, default):
 # Self-healing submit constants (see _delayed_enter_verified docstring).
 _SUBMIT_VERIFY_GRACE_MS = 600
 _SUBMIT_MAX_RESENDS = 3
+# Separate, much larger budget for the "pane not-ready + paste still visibly
+# pending" case — a legitimately busy/booting pane (codex/agy cold-booting its
+# MCP servers), NOT a swallowed CR. The small _SUBMIT_MAX_RESENDS budget
+# (~1.8 s) is meant for the swallow/repaste path where being aggressive risks
+# duplicate pastes; sharing it with the boot case meant that when ≥3 codex
+# panes were spawned together, the later ones were still MCP-booting when the
+# 3-resend budget ran out, so their task CR was abandoned and the pointer +
+# auto-reminders piled up unsubmitted in the composer (observed 2026-07-13).
+# 150 × 600 ms ≈ 90 s — matches the codex/agy ready-wait window (_ready_wait_ms)
+# so a boot that finishes anytime within that window still gets its CR. Nudging
+# stops the instant the paste leaves the composer (submit landed), so a normal
+# boot resends only a handful of times; the cap only bounds a wedged pane.
+_SUBMIT_BUSY_MAX_RESENDS = 150
 
 # Render-settle guard for the repaste branch (duplicate-paste spam fix).
 # Under parallel-spawn CPU load claude renders its `[Pasted text +N lines]`
@@ -127,6 +140,7 @@ def _delayed_enter_verified(
     delay_ms: int,
     *,
     max_resends: int = _SUBMIT_MAX_RESENDS,
+    busy_max_resends: int = _SUBMIT_BUSY_MAX_RESENDS,
     on_resend=None,
     payload: str | None = None,
     content_fragment: str = "",
@@ -169,13 +183,13 @@ def _delayed_enter_verified(
         session.last_output_monotonic() if hasattr(session, "last_output_monotonic") else 0.0
     ]
 
-    def _send_then_verify(remaining: int) -> None:
+    def _send_then_verify(remaining: int, busy_remaining: int) -> None:
         if pane.session is not session:
             return
         pane.session.write(b"\r")
 
         def _verify(render_waits: int = _RENDER_WAIT_MAX) -> None:
-            if pane.session is not session or remaining <= 0:
+            if pane.session is not session:
                 return
             # Submit landed → pane is busy → is_at_ready_prompt() is False → stop.
             # But "not ready" is ambiguous: it's ALSO what a busy marker
@@ -190,12 +204,24 @@ def _delayed_enter_verified(
             # Cross-check the input box itself before trusting it: if the
             # pasted content is still visibly sitting there, the CR hasn't
             # landed yet regardless of why the pane reads not-ready, so keep
-            # retrying (same bounded resend budget) instead of stopping.
+            # retrying on the SEPARATE, generous busy budget (busy_remaining) —
+            # a slow MCP boot is not a swallow, and sharing the tiny swallow
+            # budget stranded later panes' tasks under concurrent multi-spawn
+            # (3+ codex panes booting at once outlasted the 3-resend budget).
             if not session.is_at_ready_prompt():
-                if payload is not None and session.shows_pending_input(content_fragment):
+                if (
+                    payload is not None
+                    and busy_remaining > 0
+                    and session.shows_pending_input(content_fragment)
+                ):
                     if on_resend is not None:
-                        on_resend(remaining)
-                    _send_then_verify(remaining - 1)
+                        on_resend(busy_remaining)
+                    _send_then_verify(remaining, busy_remaining - 1)
+                return
+            # Ready-prompt reached. The swallow/repaste recovery below is the
+            # aggressive path (risks duplicate pastes), so it stays on the small
+            # bounded swallow budget — exhaust it and stop.
+            if remaining <= 0:
                 return
             # Still ready → submit didn't land. If we have the payload and the
             # input box is empty, the PASTE may have been swallowed (#26) — but
@@ -225,7 +251,7 @@ def _delayed_enter_verified(
                 if produced_output:
                     if on_resend is not None:
                         on_resend(remaining)
-                    _send_then_verify(remaining - 1)
+                    _send_then_verify(remaining - 1, busy_remaining)
                     return
                 # No output yet since the paste. Could be a genuine swallow, or a
                 # placeholder that hasn't started painting under load — wait out a
@@ -244,17 +270,17 @@ def _delayed_enter_verified(
                 paste_baseline[0] = session.last_output_monotonic()
                 QTimer.singleShot(
                     _enter_delay_ms(payload),
-                    lambda: _send_then_verify(remaining - 1),
+                    lambda: _send_then_verify(remaining - 1, busy_remaining),
                 )
                 return
             # Content present, CR swallowed mid-render (#22) — resend the CR.
             if on_resend is not None:
                 on_resend(remaining)
-            _send_then_verify(remaining - 1)
+            _send_then_verify(remaining - 1, busy_remaining)
 
         QTimer.singleShot(_SUBMIT_VERIFY_GRACE_MS, _verify)
 
-    QTimer.singleShot(delay_ms, lambda: _send_then_verify(max_resends))
+    QTimer.singleShot(delay_ms, lambda: _send_then_verify(max_resends, busy_max_resends))
 
 
 # ── Mixin ─────────────────────────────────────────────────────────────────────

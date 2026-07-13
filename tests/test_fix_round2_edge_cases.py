@@ -226,6 +226,11 @@ class TestDelayedEnterVerifiedRepaste:
                 session,
                 150,
                 max_resends=3,
+                # Explicit (small) busy budget so the not-ready/boot-path resend
+                # values are predictable and decoupled from the production
+                # _SUBMIT_BUSY_MAX_RESENDS default. The not-ready branch reports
+                # busy_remaining to on_resend; the ready branch reports remaining.
+                busy_max_resends=50,
                 payload=self.PAYLOAD,
                 content_fragment="[ROLE: qa] do the thing",
                 on_resend=resends.append,
@@ -348,7 +353,10 @@ class TestDelayedEnterVerifiedRepaste:
         # initial CR, ready+content resend, then not-ready+content resend
         # (#99: not-ready is cross-checked against the box before trusting it).
         assert writes == [b"\r", b"\r", b"\r"]
-        assert resends == [3, 2] and repastes == []
+        # First resend is the ready+content path (reports remaining=3); the
+        # second is the not-ready/#99 path, which now draws on the separate busy
+        # budget and reports busy_remaining (=50, the explicit test override).
+        assert resends == [3, 50] and repastes == []
         sess.shows_pending_input.assert_called()
 
     def test_not_ready_stops_when_content_cleared(self) -> None:
@@ -388,7 +396,11 @@ class TestDelayedEnterVerifiedRepaste:
 
         writes = [c.args[0] for c in sess.write.call_args_list]
         assert writes == [b"\r", b"\r", b"\r"]  # initial + 2 recovery resends
-        assert resends == [3, 2] and repastes == []
+        # Both recovery resends are the not-ready/MCP-boot path, so both report
+        # the busy budget countdown (busy_max_resends=50 → 50, 49) — the whole
+        # point of the fix: MCP boot is nudged on the large budget, not the
+        # tiny 3-resend swallow budget it used to share.
+        assert resends == [50, 49] and repastes == []
 
     def test_transcript_sequence_busy_mcp_boot_then_ready_still_pending(self) -> None:
         """Regression for #99, exact chronology from the transcript: paste →
@@ -410,7 +422,11 @@ class TestDelayedEnterVerifiedRepaste:
 
         writes = [c.args[0] for c in sess.write.call_args_list]
         assert writes == [b"\r", b"\r", b"\r"]  # initial + 2 recovery resends
-        assert resends == [3, 2] and repastes == []
+        # resend #1 is the not-ready/MCP-boot path (busy budget → 50); resend #2
+        # is the ready+content-present (#22) path (swallow budget → remaining 3).
+        # The two chain into each other exactly as before — only the first now
+        # draws on the larger budget so a longer boot can't starve it.
+        assert resends == [50, 3] and repastes == []
 
 
 # ─────────────────────────────────────────────────────────────────────────────

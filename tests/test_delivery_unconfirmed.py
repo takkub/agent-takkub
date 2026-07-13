@@ -288,3 +288,91 @@ class TestSpawnFailureNotSilent:
         orch._panes_by_project["P"] = {"reviewer": _pane(_live_session())}
         with patch("agent_takkub.orchestrator._log_event"):
             orch._warn_lead_spawn_failed("reviewer", "P", "x")  # must not raise
+
+
+class TestSlowBootSubmitBudget:
+    """A codex/agy pane still cold-booting its MCP servers reads not-ready with
+    the pasted task visibly pending in the composer. The submit CR must keep
+    being resent on a SEPARATE, generous budget — not the tiny 3-resend swallow
+    budget — otherwise a slow boot under concurrent multi-spawn exhausts the
+    budget and strands the task unsubmitted (2026-07-13 dogfooding: 4 codex
+    backends spawned together, the later 3 never submitted; the task pointer +
+    idle auto-reminders piled up in the composer)."""
+
+    def test_default_busy_budget_far_exceeds_swallow_budget(self) -> None:
+        from agent_takkub.lead_inbox import _SUBMIT_BUSY_MAX_RESENDS, _SUBMIT_MAX_RESENDS
+
+        # ≈90 s at the 600 ms grace — must cover a codex/agy cold boot, and be
+        # far larger than the swallow budget it used to (wrongly) share.
+        assert _SUBMIT_BUSY_MAX_RESENDS >= 100
+        assert _SUBMIT_BUSY_MAX_RESENDS > _SUBMIT_MAX_RESENDS * 20
+
+    def test_booting_pane_keeps_nudging_past_swallow_budget(self, qapp, monkeypatch) -> None:
+        import agent_takkub.lead_inbox as li
+
+        # Run the verify/resend timers synchronously so the whole chain drains.
+        monkeypatch.setattr(li.QTimer, "singleShot", staticmethod(lambda _ms, fn: fn()))
+
+        session = MagicMock()
+        session.is_at_ready_prompt.return_value = False  # perpetually booting
+        session.shows_pending_input.return_value = True  # paste still in composer
+        session.seconds_since_output.return_value = 0.0
+        session.last_output_monotonic.return_value = 0.0
+        pane = _pane(session)
+
+        # Small explicit busy budget keeps the synchronous recursion shallow
+        # while still proving the boot path uses the LARGE budget, not the tiny
+        # swallow one (pre-fix this branch decremented `remaining` → ~4 CRs).
+        li._delayed_enter_verified(
+            pane,
+            session,
+            0,
+            busy_max_resends=25,
+            payload="task spec",
+            content_fragment="task spec",
+        )
+
+        crs = [c for c in session.write.call_args_list if c.args and c.args[0] == b"\r"]
+        assert len(crs) > li._SUBMIT_MAX_RESENDS, (
+            f"submit gave up after {len(crs)} CRs while the pane was still "
+            "booting — the small swallow budget must not bound the boot case"
+        )
+        assert len(crs) >= 20  # used the generous busy budget
+
+    def test_submit_stops_once_paste_leaves_composer(self, qapp, monkeypatch) -> None:
+        """Once the CR lands (composer no longer shows the paste), the boot-nudge
+        loop must stop — no unbounded CR spray into a pane that already
+        submitted."""
+        import agent_takkub.lead_inbox as li
+
+        monkeypatch.setattr(li.QTimer, "singleShot", staticmethod(lambda _ms, fn: fn()))
+
+        state = {"cycles": 0}
+
+        session = MagicMock()
+        session.is_at_ready_prompt.return_value = False  # busy the whole time
+        session.seconds_since_output.return_value = 0.0
+        session.last_output_monotonic.return_value = 0.0
+
+        def _pending(_fragment: str) -> bool:
+            # Paste sits in the composer for a few boot cycles, then the CR lands
+            # and it clears — the loop must not keep nudging after that.
+            state["cycles"] += 1
+            return state["cycles"] <= 5
+
+        session.shows_pending_input.side_effect = _pending
+        pane = _pane(session)
+
+        li._delayed_enter_verified(
+            pane,
+            session,
+            0,
+            busy_max_resends=100,
+            payload="task spec",
+            content_fragment="task spec",
+        )
+
+        crs = [c for c in session.write.call_args_list if c.args and c.args[0] == b"\r"]
+        # Nudged through the boot cycles, then stopped when the paste cleared —
+        # bounded well under the 100 budget, not sprayed to exhaustion.
+        assert 5 <= len(crs) <= 8
