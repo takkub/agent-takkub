@@ -35,6 +35,7 @@ from .config import (
     EVENTS_LOG,
     REPO_ROOT,  # re-exported: tests patch agent_takkub.orchestrator.REPO_ROOT
     RUNTIME_DIR,
+    _write_json_atomic,
     active_project,
     agent_role_dir,
     default_cwd_for_role,
@@ -2642,10 +2643,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         the periodic save timer."""
         try:
             ensure_runtime()
-            _LAST_SESSION_FILE.write_text(
-                json.dumps(self.snapshot_state(), indent=2, ensure_ascii=False) + "\n",
-                encoding="utf-8",
-            )
+            _write_json_atomic(_LAST_SESSION_FILE, self.snapshot_state())
         except OSError:
             pass
 
@@ -3728,6 +3726,11 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                 project=item["project"],
                 feature=item.get("feature", ""),
             )
+            # The queue itself was an auto-chain blocker. Re-evaluate after
+            # dequeue: a successful replay now has pane state to block on; a
+            # failed replay (or another queued item) is handled correctly too.
+            if item.get("auto_chain"):
+                getattr(self, "_maybe_fire_auto_chain_handoff", lambda *_: None)(project_ns, True)
         except Exception:
             pass
 
@@ -3745,7 +3748,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             path = self._fanout_queue_path(project_ns)
             if items:
                 ensure_runtime()
-                path.write_text(json.dumps(items, ensure_ascii=False), encoding="utf-8")
+                _write_json_atomic(path, items)
             elif path.exists():
                 path.unlink()
         except Exception:
@@ -3888,6 +3891,17 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                 role=role,
                 project=project,
                 reason="already_handled",
+            )
+            return
+
+        # Auto-resume owns parked episodes: its wake timer resumes the teammate
+        # and emits the single Lead-facing reset notice.
+        if _ps_rr.limit_parked:
+            _log_event(
+                "rate_limit_reset_skipped",
+                role=role,
+                project=project,
+                reason="auto_resume_parked",
             )
             return
 

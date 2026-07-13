@@ -659,8 +659,17 @@ class LeadInboxMixin:
                 proj = p.stem[len("pending-done-notices-") :]
                 try:
                     items = json.loads(p.read_text(encoding="utf-8"))
-                    if items:
-                        self._pending_done_notices[proj] = items
+                    valid = (
+                        [
+                            item
+                            for item in items
+                            if isinstance(item, dict) and isinstance(item.get("body"), str)
+                        ]
+                        if isinstance(items, list)
+                        else []
+                    )
+                    if valid:
+                        self._pending_done_notices[proj] = valid
                 except Exception:
                     pass
         except Exception:
@@ -684,32 +693,23 @@ class LeadInboxMixin:
             # next retry (spawn's timer or the next live send()) rather than
             # paste the CC over it.
             return
-        # Deliver-then-dequeue: write each CC first and drop ONLY what was
-        # actually delivered. The previous code popped + persisted-empty BEFORE
-        # writing, so a write that raised mid-flush (Lead session torn down
-        # between the liveness check and the write) silently lost the remaining
-        # queued messages from both memory and disk — defeating the durability
-        # the persistence exists for. (M4#22: blind CC flush / pop-before-write)
+        # Hand every CC to the same ready-prompt-aware serialised queue used by
+        # done notices. This prevents a tight paste loop from stacking messages
+        # into a Lead that became busy after the initial readiness check.
         items = list(pending)
-        delivered = 0
         try:
             for item in items:
-                payload = _paste_payload(item["body"])
-                lead.session.write(payload)
-                QTimer.singleShot(
-                    _enter_delay_ms(payload),
-                    lambda s=lead.session: s and s.write(b"\r"),
+                self._notify_lead(
+                    project_ns,
+                    item["body"],
+                    from_role=item.get("from_role", "system"),
+                    note="cc_flush",
                 )
-                delivered += 1
-        finally:
-            remaining = items[delivered:]
-            if remaining:
-                self._pending_lead_cc[project_ns] = remaining
-            else:
-                self._pending_lead_cc.pop(project_ns, None)
-            self._save_pending_cc(project_ns)
-        if delivered:
-            _log_event("send_cc_flushed", project=project_ns, count=delivered)
+        except Exception:
+            return
+        self._pending_lead_cc.pop(project_ns, None)
+        self._save_pending_cc(project_ns)
+        _log_event("send_cc_flushed", project=project_ns, count=len(items))
 
     # ------------------------------------------------------------------
     # Lead-notify queue: ready-prompt-aware serialised delivery
@@ -1059,7 +1059,14 @@ class LeadInboxMixin:
         # empty once the write is known to have succeeded, so a torn-down
         # session mid-write leaves the items durable for the next attempt
         # instead of vanishing.
-        body = "\n\n".join(_sanitize_pane_text(item["body"]) for item in pending)
+        valid = [
+            item for item in pending if isinstance(item, dict) and isinstance(item.get("body"), str)
+        ]
+        if not valid:
+            self._pending_done_notices.pop(project_ns, None)
+            self._save_pending_done_notices(project_ns)
+            return
+        body = "\n\n".join(_sanitize_pane_text(item.get("body", "")) for item in valid)
         sess = lead.session
         payload = _paste_payload(body)
         try:
