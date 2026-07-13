@@ -445,7 +445,8 @@ def check_arch() -> list[Finding]:
                 if _ARM64_GUARD_MARKER in existing:
                     return True, "guard already present"
                 sep = "" if existing.endswith("\n") or not existing else "\n"
-                zshrc.write_text(existing + sep + _ARM64_GUARD_BLOCK, encoding="utf-8")
+                with zshrc.open("a", encoding="utf-8") as fh:
+                    fh.write(sep + _ARM64_GUARD_BLOCK)
             except OSError as e:
                 return False, str(e)
             return True, "added arm64 guard to ~/.zshrc — reopen the terminal to take effect"
@@ -609,34 +610,45 @@ def check_plugins(cache_root: Path | None = None) -> list[Finding]:
 
         # 3-level walk: marketplace / plugin / version / .claude-plugin / plugin.json
         found = False
-        for plugin_dir in sorted(mp_dir.iterdir()):
-            if not plugin_dir.is_dir():
-                continue
-            versions = sorted((v for v in plugin_dir.iterdir() if v.is_dir()), reverse=True)
-            for v in versions:
-                plugin_json = v / ".claude-plugin" / "plugin.json"
-                if not plugin_json.is_file():
+        try:
+            for plugin_dir in sorted(mp_dir.iterdir()):
+                if not plugin_dir.is_dir():
                     continue
-                try:
-                    json.loads(plugin_json.read_text(encoding="utf-8"))
-                except Exception as e:
-                    findings.append(
-                        Finding(
-                            "plugins",
-                            marketplace,
-                            Status.FAIL,
-                            f"plugin.json broken: {e}",
-                            "re-install via /plugin",
+                versions = sorted((v for v in plugin_dir.iterdir() if v.is_dir()), reverse=True)
+                for v in versions:
+                    plugin_json = v / ".claude-plugin" / "plugin.json"
+                    if not plugin_json.is_file():
+                        continue
+                    try:
+                        json.loads(plugin_json.read_text(encoding="utf-8"))
+                    except Exception as e:
+                        findings.append(
+                            Finding(
+                                "plugins",
+                                marketplace,
+                                Status.FAIL,
+                                f"plugin.json broken: {e}",
+                                "re-install via /plugin",
+                            )
                         )
-                    )
+                        found = True
+                        break
+                    label = f"{marketplace}/{plugin_dir.name}@{v.name}"
+                    findings.append(Finding("plugins", marketplace, Status.OK, label))
                     found = True
                     break
-                label = f"{marketplace}/{plugin_dir.name}@{v.name}"
-                findings.append(Finding("plugins", marketplace, Status.OK, label))
-                found = True
-                break
-            if found:
-                break
+                if found:
+                    break
+        except OSError as e:
+            findings.append(
+                Finding(
+                    "plugins",
+                    marketplace,
+                    Status.WARN,
+                    f"plugin cache unreadable: {e}",
+                )
+            )
+            continue
 
         if not found:
             findings.append(
@@ -793,6 +805,17 @@ def check_projects() -> list[Finding]:
     for proj_name, proj_data in projects.items():
         paths: dict = proj_data.get("paths") or {}
         for path_key, path_val in paths.items():
+            if not isinstance(path_val, str) or not path_val:
+                findings.append(
+                    Finding(
+                        "projects",
+                        proj_name,
+                        Status.WARN,
+                        f"path '{path_key}' is invalid: {path_val!r}",
+                        "edit projects.json or run 'takkub project rm " + proj_name + "'",
+                    )
+                )
+                continue
             if not Path(path_val).exists():
                 findings.append(
                     Finding(
@@ -1304,7 +1327,8 @@ def _append_posix_rc_path(bin_dir: str) -> tuple[bool, str]:
             existing = rc.read_text(encoding="utf-8") if rc.exists() else ""
             if _PATHFIX_MARKER in existing:
                 continue
-            rc.write_text(existing + block, encoding="utf-8")
+            with rc.open("a", encoding="utf-8") as fh:
+                fh.write(block)
             touched.append(rc.name)
     except OSError as e:
         return False, str(e)
