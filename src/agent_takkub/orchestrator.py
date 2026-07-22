@@ -260,6 +260,17 @@ _POST_COMPACT_DETECT_SEC = 5 * 60
 IDLE_REMIND_AFTER_S = 45
 IDLE_REMIND_COOLDOWN_S = 90
 
+# Fallback that arms the forgot-done reminder even when the watchdog never
+# caught the pane mid-turn. The `seen_working` latch (set when a tick observes
+# a genuine, non-startup busy state) suppresses reminders for a codex/agy pane
+# still booting/queuing its task — but a task that starts AND finishes between
+# two 5 s ticks never flips the latch, which would strand a genuinely
+# finished-but-forgot pane with no reminder at all. Provider boot/queue windows
+# are bounded by the ready-wait allowance (90 s for codex/agy), so once a pane
+# has sat continuously idle past this it is not booting any more and the
+# reminder is safe to fire regardless of the latch.
+IDLE_REMIND_UNLATCHED_AFTER_S = 180
+
 # Stuck-paste reaper. A task pasted at spawn renders "[Pasted text +N lines]"
 # in the input box; under parallel-spawn CPU load the submitting Enter (and the
 # delivery self-heal's 3 resends, all within ~3 s) can be swallowed while
@@ -1995,7 +2006,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
 
         if from_role != LEAD.name and event in ("Stop", "Notification"):
             entry = self._idle_state.setdefault(
-                key, {"first_idle_ts": None, "last_reminder_ts": 0.0}
+                key, {"first_idle_ts": None, "last_reminder_ts": 0.0, "seen_working": False}
             )
             if entry["first_idle_ts"] is None:
                 entry["first_idle_ts"] = time.time()
@@ -2997,7 +3008,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                         continue
 
                     entry = self._idle_state.setdefault(
-                        key, {"first_idle_ts": None, "last_reminder_ts": 0.0}
+                        key, {"first_idle_ts": None, "last_reminder_ts": 0.0, "seen_working": False}
                     )
 
                     # Issue #54: suppress the forgot-done reminder while a pane is
@@ -3018,6 +3029,23 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                     if not pane.session.is_at_ready_prompt():
                         # claude is processing — reset the idle streak so a long
                         # build doesn't count toward the reminder threshold.
+                        # Latch that the pane entered a GENUINE work turn (not a
+                        # codex/agy MCP-boot or queued-message phase — those read
+                        # busy too but aren't the task running). The forgot-done
+                        # reminder only arms once this is set, so a booting/queued
+                        # pane no longer collects reminders it can't act on
+                        # (2026-07-21 codex boot-window noise). A pane cannot
+                        # finish its task without a real work turn, so a genuine
+                        # forgot-`takkub done` still reminds.
+                        if not pane.session.shows_startup_marker():
+                            entry["seen_working"] = True
+                        entry["first_idle_ts"] = None
+                        continue
+
+                    # Still in a provider startup / message-queue phase (idle
+                    # status bar but task not yet consumed) — not a finished
+                    # task. Reset the streak and wait for the real turn.
+                    if pane.session.shows_startup_marker():
                         entry["first_idle_ts"] = None
                         continue
 
@@ -3045,8 +3073,14 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
 
                     idle_for = now - entry["first_idle_ts"]
                     since_last_reminder = now - entry["last_reminder_ts"]
+                    # Armed once we've seen a real work turn, OR — for a task
+                    # that began and ended between two ticks so the latch never
+                    # flipped — once the pane has been idle well past any
+                    # provider boot/queue window (see the constant's comment).
+                    armed = entry.get("seen_working") or idle_for >= IDLE_REMIND_UNLATCHED_AFTER_S
                     if (
-                        idle_for >= IDLE_REMIND_AFTER_S
+                        armed
+                        and idle_for >= IDLE_REMIND_AFTER_S
                         and since_last_reminder >= IDLE_REMIND_COOLDOWN_S
                     ):
                         self._inject_idle_reminder(name, pane)

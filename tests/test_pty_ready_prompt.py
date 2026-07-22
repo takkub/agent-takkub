@@ -444,3 +444,45 @@ class TestReadyRegionScoping:
         s = PtySession(cols=80, rows=24)
         s._feed_and_log(b"bypass permissions")
         assert s.is_at_ready_prompt() is True
+
+
+# ── startup / message-queue marker (idle-watchdog gate) ──────────────────────
+# The forgot-`takkub done` watchdog suppresses reminders while this reads True.
+# It must therefore track the LIVE footer only: a boot line left behind in the
+# conversation body must not pin it True forever, or a pane that finished but
+# forgot to report would never be reminded.
+
+
+def test_startup_marker_true_while_codex_boots_mcp() -> None:
+    s = _feed_screen(
+        "• Booting MCP server: codex_apps (0s • esc to interrupt)",
+        "gpt-5.6 high · ~/project · Fast off",
+    )
+    assert s.shows_startup_marker() is True
+
+
+def test_startup_marker_true_while_message_is_queued() -> None:
+    s = _feed_screen(
+        "› [ROLE: codex] task...",
+        "tab to queue message",
+        "gpt-5.6 high · ~/project · Fast off",
+    )
+    assert s.shows_startup_marker() is True
+
+
+def test_stale_boot_line_in_scrollback_does_not_pin_startup_marker() -> None:
+    # The boot line has scrolled up out of the footer while the pane sits idle
+    # at its composer. Regression guard: scanning the whole screen here kept the
+    # marker True indefinitely and starved the idle reminder (codex review M3).
+    s = _feed_screen(
+        "• Booting MCP server: codex_apps (0s • esc to interrupt)",
+        "• Ran Get-Content -Raw -LiteralPath 'spec.md'",
+        "• done reading the spec",
+        "",
+        "some later output line",
+        "another later output line",
+        "yet another later output line",
+        "gpt-5.6 high · ~/project · Fast off",
+    )
+    assert s.shows_startup_marker() is False
+    assert s.is_at_ready_prompt() is True

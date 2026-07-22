@@ -264,6 +264,17 @@ def _classify_ready(text_lower: str) -> bool:
 # which already anchors tty-prompt detection to the bottom for the same reason.
 _READY_TAIL_ROWS = 6
 
+# Provider startup / message-queue chrome. Present in the footer region while a
+# codex/agy pane is still cold-booting its MCP servers (and while a message it
+# received during that window sits queued rather than running). Kept beside the
+# ready markers because it is read from the same region — see
+# PtySession.shows_startup_marker.
+_STARTUP_MARKERS: tuple[str, ...] = (
+    "booting mcp server",
+    "starting mcp server",
+    "tab to queue message",
+)
+
 
 def _ready_region(lines: list[str]) -> str:
     """Lowercased bottom _READY_TAIL_ROWS non-blank rows of the screen — the
@@ -957,6 +968,31 @@ class PtySession(QObject):
     # ──────────────────────────────────────────────────────────────
     # state detection: helps orchestrator auto-trust / wait-for-ready
     # ──────────────────────────────────────────────────────────────
+    def shows_startup_marker(self) -> bool:
+        """True when the pane is in a provider *startup / message-queue* phase
+        rather than actively running a task turn.
+
+        Scoped to the same bottom footer/status rows as the ready markers
+        (`_ready_region`) — NOT the whole screen. A boot line that has scrolled
+        up into the visible conversation body must not keep reading as
+        "startup" after the pane moved on, or the idle watchdog would reset its
+        streak on every tick and a pane that finished-but-forgot
+        `takkub done` would never be reminded (the exact regression this
+        suppression exists to avoid).
+
+        codex/agy cold-boot their MCP servers and, if a message arrives during
+        that window, QUEUE it ("tab to queue message") instead of processing it
+        immediately. Between boot phases the composer status bar can read idle
+        ("Fast off") with no "esc to interrupt" — so `is_at_ready_prompt()`
+        returns True and the forgot-`takkub done` watchdog mistakes a booting/
+        queued pane for one that finished-but-forgot, stacking auto-reminders
+        into the composer (diagnosed 2026-07-21 from a wash-locker codex
+        transcript: task queued through MCP boot, ran to completion, called
+        `takkub done` — the reminders were pure boot-window noise). The idle
+        watchdog uses this to tell a genuine work turn ("Working…") apart from
+        a boot/queue phase, so it only arms after the task actually started."""
+        return any(m in _ready_region(self.display_lines()) for m in _STARTUP_MARKERS)
+
     def is_at_trust_prompt(self) -> bool:
         """True when claude OR codex is showing a trust-directory modal.
 

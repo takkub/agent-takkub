@@ -87,7 +87,24 @@ def _make_pane(
     # MagicMock would return a truthy stub and the stuck-paste reaper would
     # fire a recovery CR in every test.
     pane.session.shows_pending_input.return_value = False
+    # Default: not in a provider MCP-boot / queued-message phase. Without this a
+    # MagicMock would return a truthy stub and the boot/queue suppression gate
+    # would treat every idle pane as "still booting".
+    pane.session.shows_startup_marker.return_value = False
     return pane
+
+
+def _work_then_idle(orch: Orchestrator, pane: MagicMock, clock: list) -> None:
+    """Drive one genuine work turn (busy, non-startup) then back to idle, so the
+    watchdog's `seen_working` latch arms — mirrors a real task starting to run
+    before the pane goes idle. The forgot-`takkub done` reminder only fires
+    after this (a pane that never actually ran its task isn't "forgot done")."""
+    pane.session.is_at_ready_prompt.return_value = False
+    pane.session.shows_startup_marker.return_value = False
+    orch._check_idle_teammates()
+    pane.session.is_at_ready_prompt.return_value = True
+    clock[0] += 1
+    orch._check_idle_teammates()
 
 
 class TestIdleWatchdog:
@@ -113,12 +130,98 @@ class TestIdleWatchdog:
         clock = [1000.0]
         monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
 
-        orch._check_idle_teammates()  # start the streak
+        _work_then_idle(orch, pane, clock)  # a real turn runs, then idle
+        orch._check_idle_teammates()  # start the idle streak
         clock[0] += orch_mod.IDLE_REMIND_AFTER_S + 1  # cross threshold
         orch._check_idle_teammates()
 
         pane.session.write.assert_called_with(orch_mod.IDLE_REMINDER_TEXT)
         assert orch._idle_state[_key("backend")]["last_reminder_ts"] == clock[0]
+
+    def test_booting_pane_never_reminded(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # codex/agy cold-boot: the composer status bar can read idle ("Fast
+        # off") while MCP servers boot and a delivered task sits queued. The
+        # watchdog must NOT count that as forgot-`takkub done` (2026-07-21
+        # boot-window reminder-stacking bug).
+        pane = _make_pane(state="working", at_ready_prompt=True)
+        pane.session.shows_startup_marker.return_value = True
+        orch.panes["codex"] = pane
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+
+        orch._check_idle_teammates()
+        clock[0] += orch_mod.IDLE_REMIND_AFTER_S + orch_mod.IDLE_REMIND_COOLDOWN_S + 10
+        orch._check_idle_teammates()
+
+        pane.session.write.assert_not_called()
+        assert orch._idle_state[_key("codex")]["first_idle_ts"] is None
+
+    def test_fast_task_still_reminded_via_unlatched_fallback(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A task that starts AND finishes between two watchdog ticks never lets
+        # the tick observe a busy state, so `seen_working` stays False. Such a
+        # pane really did finish, so it must still be reminded once it has been
+        # idle past any provider boot/queue window — otherwise the boot fix
+        # would strand genuinely-forgot-done panes forever.
+        pane = _make_pane(state="working", at_ready_prompt=True)
+        orch.panes["backend"] = pane
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+
+        orch._check_idle_teammates()  # start the streak; never seen busy
+        assert orch._idle_state[_key("backend")]["seen_working"] is False
+
+        # Past IDLE_REMIND_AFTER_S alone: still suppressed (could be booting).
+        clock[0] += orch_mod.IDLE_REMIND_AFTER_S + 1
+        orch._check_idle_teammates()
+        pane.session.write.assert_not_called()
+
+        # Past the unlatched fallback: the pane is certainly not booting.
+        clock[0] += orch_mod.IDLE_REMIND_UNLATCHED_AFTER_S
+        orch._check_idle_teammates()
+        pane.session.write.assert_called_with(orch_mod.IDLE_REMINDER_TEXT)
+
+    def test_booting_pane_not_reminded_even_past_unlatched_fallback(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The fallback must not defeat the boot fix: while the startup/queue
+        # marker is on screen the idle streak keeps resetting, so idle_for
+        # never reaches the fallback threshold.
+        pane = _make_pane(state="working", at_ready_prompt=True)
+        pane.session.shows_startup_marker.return_value = True
+        orch.panes["codex"] = pane
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+
+        orch._check_idle_teammates()
+        clock[0] += orch_mod.IDLE_REMIND_UNLATCHED_AFTER_S * 2
+        orch._check_idle_teammates()
+
+        pane.session.write.assert_not_called()
+
+    def test_pane_that_never_ran_is_not_reminded_before_the_fallback(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A pane that received its task but never actually ran a work turn
+        # (queued the whole time) has seen_working=False, so no reminder — a
+        # task can't be "finished but forgot done" without ever having run.
+        pane = _make_pane(state="working", at_ready_prompt=True)
+        orch.panes["backend"] = pane
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+
+        orch._check_idle_teammates()
+        clock[0] += orch_mod.IDLE_REMIND_AFTER_S + 1
+        orch._check_idle_teammates()
+
+        pane.session.write.assert_not_called()
 
     def test_processing_pane_resets_streak(
         self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
@@ -200,7 +303,8 @@ class TestIdleWatchdog:
         clock = [1000.0]
         monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
 
-        # First reminder fires.
+        # First reminder fires (after a real work turn arms the latch).
+        _work_then_idle(orch, pane, clock)
         orch._check_idle_teammates()
         clock[0] += orch_mod.IDLE_REMIND_AFTER_S + 1
         orch._check_idle_teammates()
@@ -457,6 +561,7 @@ class TestTtyBlockIdleWatchdog:
         monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
         monkeypatch.setattr(orch_mod.QTimer, "singleShot", lambda *_a, **_kw: None)
 
+        _work_then_idle(orch, pane, clock)
         orch._check_idle_teammates()
         clock[0] += orch_mod.IDLE_REMIND_AFTER_S + 1
         orch._check_idle_teammates()
