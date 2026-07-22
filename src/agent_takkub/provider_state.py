@@ -23,10 +23,26 @@ from .config import SETTINGS_HOME
 CODEX = "codex"
 GEMINI = "gemini"
 
-# Providers that can be toggled. Adding a new togglable provider:
-# (1) add to this frozenset, (2) add a chip in main_window status bar,
-# (3) update routing_planner if it has provider-specific routing rules.
-TOGGLABLE: frozenset[str] = frozenset({CODEX, GEMINI})
+
+def _togglable() -> frozenset[str]:
+    """Every registered provider except claude (the cockpit's baseline —
+    disabling it would leave nothing to substitute with).
+
+    Derived from PROVIDER_REGISTRY (#103 Phase 1) instead of a hand-maintained
+    frozenset, so a new registry entry is automatically togglable in the
+    status bar + Settings without an edit here. Lazy import keeps this module
+    a thin config leaf at import time.
+    """
+    from .provider_spec import PROVIDER_REGISTRY
+
+    return frozenset(PROVIDER_REGISTRY) - {"claude"}
+
+
+# Providers that can be toggled. Adding a new togglable provider only needs a
+# PROVIDER_REGISTRY entry; the status-bar chips (status_header) and Settings
+# rows iterate this set. Update routing_planner only if the new provider gets
+# provider-specific routing rules.
+TOGGLABLE: frozenset[str] = _togglable()
 
 _PATH = SETTINGS_HOME / "disabled-providers.json"
 

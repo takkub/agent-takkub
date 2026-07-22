@@ -110,6 +110,7 @@ ERROR_CHIP_TEXT = "#e58080"
 # ──────────────────────────────────────────────────────────────
 PROVIDER_CODEX = "#10a37f"  # OpenAI teal
 PROVIDER_GEMINI = "#4285f4"  # Google blue
+PROVIDER_OPENCODE = "#f97316"  # sst orange
 
 # ──────────────────────────────────────────────────────────────
 # State colors — status semantics (ok/warn/error/info). The *meaning* is

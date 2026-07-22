@@ -87,11 +87,16 @@ class UpdateMcpCommand:
 
 @dataclass(frozen=True)
 class UpdateProviderCommand:
-    """The only editable field for a BUILT-IN provider is the operational
-    enabled/disabled override (SPEC.md §Providers) — spec definition fields
-    are read-only."""
+    """The only editable fields for a BUILT-IN provider are the operational
+    enabled/disabled override and the per-provider model override (SPEC.md
+    §Providers) — spec definition fields are read-only.
+
+    ``model``: ``None`` = leave untouched, ``""`` = clear back to the CLI's
+    own default, any other string = set. Only meaningful when the provider's
+    spec has ``model_flag`` set (``ProviderDetail.model_flag_supported``)."""
 
     enabled: bool
+    model: str | None = None
 
 
 @dataclass(frozen=True)

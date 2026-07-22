@@ -410,7 +410,7 @@ def _build_lead_context_text(
 
     # Determine provider availability — two distinct reasons codex/gemini can be
     # unusable, each warranting different Lead messaging:
-    #   "toggled off"   = user disabled via cockpit status bar (can re-enable)
+    #   "toggled off"   = user disabled in Settings → Providers & Roles (can re-enable)
     #   "not installed" = binary absent from PATH — cross-check is Claude-on-Claude
     # Section is suppressed entirely when all providers are available (saves tokens
     # on every normal spawn where nothing is substituted).

@@ -1,7 +1,7 @@
 """StatusHeaderMixin — status-bar construction + update helpers.
 
 Extracted from ``MainWindow`` (~580 lines).  All widget refs stay on ``self``
-(``self._status``, ``self._chip_codex``, …) so every other mixin and
+(``self._status``, ``self._chip_plan``, …) so every other mixin and
 MainWindow method can touch them unchanged.
 
 **Import constraint:** this module MUST NOT import ``app`` or ``cli``.
@@ -57,99 +57,6 @@ class StatusHeaderMixin:
         lay.setSpacing(0)
         lay.addWidget(sep)
         return wrap
-
-    @staticmethod
-    def _provider_chip_style(provider: str, disabled: bool, not_installed: bool = False) -> str:
-        """Outline chip for the codex/gemini toggles.
-
-        Three visual states:
-          • available      — brand color (green/blue), bold
-          • disabled       — gray + strikethrough (toggled off by user)
-          • not_installed  — amber, enabled but CLI absent; Claude substitutes
-        """
-        if disabled:
-            return (
-                "QPushButton { "
-                f"background:transparent; color:{cockpit_theme.TEXT_MUTED}; "
-                f"border:1px solid {cockpit_theme.BORDER_STRONG}; "
-                f"border-radius:{cockpit_theme.RADIUS_MD}px; "
-                "padding:2px 10px; font-weight:500; "
-                "text-decoration: line-through; "
-                "}"
-                f"QPushButton:hover {{ background:{cockpit_theme.GROUND_SELECT}; "
-                f"color:{cockpit_theme.TEXT_SECONDARY}; }}"
-            )
-        if not_installed:
-            # Amber: enabled in config but CLI not on PATH → Claude will substitute
-            return (
-                "QPushButton { "
-                f"background:transparent; color:{cockpit_theme.STATE_WARN}; "
-                f"border:1px solid {cockpit_theme.STATE_WARN}; "
-                f"border-radius:{cockpit_theme.RADIUS_MD}px; "
-                "padding:2px 10px; font-weight:500; "
-                "}"
-                "QPushButton:hover { background:rgba(217,119,6,0.08); }"
-            )
-        # Brand colors: codex teal / gemini blue (provider identity tokens)
-        brand = (
-            cockpit_theme.PROVIDER_CODEX if provider == "codex" else cockpit_theme.PROVIDER_GEMINI
-        )
-        return (
-            "QPushButton { "
-            f"background:transparent; color:{brand}; "
-            f"border:1px solid {brand}; border-radius:{cockpit_theme.RADIUS_MD}px; "
-            "padding:2px 10px; font-weight:600; "
-            "}"
-            "QPushButton:hover { background:rgba(255,255,255,0.06); }"
-        )
-
-    @staticmethod
-    def _provider_chip_state(provider: str) -> str:
-        """Return the chip's display state: 'available', 'disabled', or 'not_installed'.
-
-        'disabled'      — toggled off in disabled-providers.json (user intent)
-        'not_installed' — enabled but CLI binary not found; Claude will substitute
-        'available'     — enabled and CLI present
-        """
-        from .provider_state import is_disabled
-
-        if is_disabled(provider):
-            return "disabled"
-        if provider == "codex":
-            try:
-                from .codex_helper import find_codex_executable
-
-                installed = find_codex_executable() is not None
-            except Exception:
-                import shutil
-
-                installed = shutil.which(provider) is not None
-        elif provider == "gemini":
-            # The `gemini` role runs on Antigravity's `agy` binary.
-            try:
-                from .gemini_helper import find_agy_executable
-
-                installed = find_agy_executable() is not None
-            except Exception:
-                import shutil
-
-                installed = shutil.which("agy") is not None
-        else:
-            installed = True
-        return "available" if installed else "not_installed"
-
-    @staticmethod
-    def _provider_chip_tooltip(provider: str, state: str) -> str:
-        """Human-readable tooltip for a provider chip given its state."""
-        name = provider.capitalize()
-        if state == "disabled":
-            return f"{name}: disabled — click to enable"
-        if state == "not_installed":
-            return (
-                f"{name}: enabled but not installed — Claude will substitute.\n"
-                "Loses model diversity. Install the CLI to fix, or click to disable."
-            )
-        return f"{name}: enabled — click to disable"
 
     @staticmethod
     def _plan_chip_label(is_pro: bool) -> str:
@@ -346,36 +253,6 @@ class StatusHeaderMixin:
         # rtk isn't installed at all. `_refresh_rtk_button` sets text/style/tip.
         self._btn_install_rtk = QPushButton("⚡ Enable rtk", self)
         self._btn_install_rtk.clicked.connect(self._on_install_rtk_clicked)
-
-        # ── provider toggle chips (codex / gemini) ─────────────────
-        # State source-of-truth lives in provider_state.json; orchestrator
-        # owns the broadcast on toggle. We just create the buttons and
-        # subscribe to providerStateChanged to redraw.
-        from .provider_state import CODEX, GEMINI
-
-        _codex_state = self._provider_chip_state(CODEX)
-        self._chip_codex = QPushButton("● Codex", self)
-        self._chip_codex.setToolTip(self._provider_chip_tooltip(CODEX, _codex_state))
-        self._chip_codex.setStyleSheet(
-            self._provider_chip_style(
-                CODEX,
-                disabled=_codex_state == "disabled",
-                not_installed=_codex_state == "not_installed",
-            )
-        )
-        self._chip_codex.clicked.connect(lambda: self._on_provider_chip_clicked(CODEX))
-
-        _gemini_state = self._provider_chip_state(GEMINI)
-        self._chip_gemini = QPushButton("● Gemini", self)
-        self._chip_gemini.setToolTip(self._provider_chip_tooltip(GEMINI, _gemini_state))
-        self._chip_gemini.setStyleSheet(
-            self._provider_chip_style(
-                GEMINI,
-                disabled=_gemini_state == "disabled",
-                not_installed=_gemini_state == "not_installed",
-            )
-        )
-        self._chip_gemini.clicked.connect(lambda: self._on_provider_chip_clicked(GEMINI))
 
         # ── account plan chip (Pro / Max) ──────────────────────────
         # Records whether the owner is on Pro or Max so the orchestrator can
@@ -616,9 +493,8 @@ class StatusHeaderMixin:
         #   Group 1 — Workflow actions (buttons that change pane state)
         #   Group 2 — System status    (cockpit-level toggles + updates)
         #     2a. exec      — account plan · execution mode
-        #     2b. providers — codex · gemini
-        #     2c. session   — auto-resume · remote
-        #     2d. system    — rtk install · restart · team · update
+        #     2b. session   — auto-resume · remote
+        #     2c. system    — rtk install · restart · team · update
         for w in (
             self._btn_open_shell,
             self._chip_tasks,
@@ -629,7 +505,6 @@ class StatusHeaderMixin:
         self._status.addPermanentWidget(self._make_status_separator())
         subgroups = (
             (self._chip_plan, self._chip_exec_mode),
-            (self._chip_codex, self._chip_gemini),
             (self._chip_auto_resume, self._chip_remote),
             (
                 self._btn_install_rtk,
@@ -657,7 +532,6 @@ class StatusHeaderMixin:
             lambda port: self._status.showMessage(f"cockpit ready · cli port {port}")
         )
         self.orch.statusChanged.connect(self._update_status)
-        self.orch.providerStateChanged.connect(self._on_provider_state_changed)
         self.orch.planTierChanged.connect(self._on_plan_tier_changed)
         self.orch.execModeChanged.connect(self._on_exec_mode_changed)
         self.orch.autoResumeChanged.connect(self._on_auto_resume_changed)

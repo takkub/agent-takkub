@@ -3,8 +3,8 @@ BUILT-IN registry, read-only) + :mod:`~...provider_config` (per-role
 assignment) + :mod:`~...provider_state` (enable/disable toggle).
 
 UI (``pages/providers_page.py``) only ever talks to this module; it never
-imports ``provider_spec``/``provider_config``/``provider_state`` directly
-(SPEC.md "UI ห้าม import JSON path ตรง").
+imports ``provider_spec``/``provider_config``/``provider_state``/
+``provider_models`` directly (SPEC.md "UI ห้าม import JSON path ตรง").
 
 Two layers per SPEC.md §Providers:
   - **Spec definition** (binary/flags/ready rules/capabilities): BUILT-IN,
@@ -12,10 +12,14 @@ Two layers per SPEC.md §Providers:
     delete on this layer in this phase (custom provider spec CRUD stays
     hidden behind a capability flag until a registry service lands — SPEC.md
     Phase 4).
-  - **Operational override** (enabled/disabled + role assignment): the only
-    writable field is ``enabled``, via :func:`update`. Role assignment is
-    read-only here too — it's edited from the Role's Access tab (SPEC.md
-    "Relationships").
+  - **Operational override** (enabled/disabled + model override + role
+    assignment): the writable fields are ``enabled`` and ``model``, via
+    :func:`update`. Role assignment is read-only here too — it's edited from
+    the Role's Access tab (SPEC.md "Relationships"). ``model`` is only
+    meaningful when the spec's ``model_flag`` is set
+    (``ProviderDetail.model_flag_supported``); backed by
+    :mod:`~...provider_models` (per-provider ``model_for``/``set_model``/
+    ``clear_model``).
 """
 
 from __future__ import annotations
@@ -59,6 +63,21 @@ def _enabled(name: str) -> bool:
     return True if _required(name) else not provider_state.is_disabled(name)
 
 
+def _model_flag_supported(name: str) -> bool:
+    spec = PROVIDER_REGISTRY.get(name)
+    return spec is not None and spec.model_flag is not None
+
+
+def _model_for(name: str) -> str:
+    """Current per-provider model override, via the provider_models API
+    (never the JSON path directly — SPEC.md "UI ห้าม import JSON path
+    ตรง"). Lazy import so this module still imports cleanly if
+    provider_models hasn't landed yet; only list()/get()/update() need it."""
+    from ... import provider_models
+
+    return provider_models.model_for(name) or ""
+
+
 def _assigned_roles(name: str) -> tuple[str, ...]:
     return tuple(
         sorted(
@@ -84,6 +103,7 @@ def list(query: str = "") -> list[ProviderSummary]:  # contract name (models.py 
                 installed=installed,
                 enabled=_enabled(name),
                 required=_required(name),
+                model=_model_for(name),
             )
         )
     return out
@@ -112,6 +132,8 @@ def get(entity_id: str) -> ProviderDetail:
             supports_hooks=spec.supports_hooks,
             supports_browser_profiles=spec.supports_browser_profiles,
         ),
+        model=_model_for(entity_id),
+        model_flag_supported=_model_flag_supported(entity_id),
         assigned_roles=_assigned_roles(entity_id),
         capabilities=capabilities(entity_id),
     )
@@ -125,24 +147,45 @@ def capabilities(entity_id: str | None = None) -> Capability:
             can_create=False, can_update=False, can_delete=False, reason="ไม่พบ provider นี้"
         )
     if _required(entity_id):
+        # Required providers (currently just claude) can't have `enabled`
+        # toggled off — but the per-provider model override is a separate
+        # field, so `can_update` stays True whenever the CLI supports a
+        # model flag; `update()` below still rejects an actual enabled flip.
         return Capability(
             can_create=False,
-            can_update=False,
+            can_update=True,
             can_delete=False,
-            reason="Provider นี้เป็น cockpit infrastructure ที่บังคับใช้ — ปิดใช้งานไม่ได้",
+            reason="Provider นี้เป็น cockpit infrastructure ที่บังคับใช้ — ปิดใช้งานไม่ได้ (ตั้ง model ได้)",
         )
     return Capability(can_create=False, can_update=True, can_delete=False)
 
 
 def update(entity_id: str, command: UpdateProviderCommand) -> OperationResult:
-    """Persist the operational enabled/disabled override. Spec-definition
-    fields aren't writable in this phase — there's nothing else to update."""
+    """Persist the operational enabled/disabled override and/or the
+    per-provider model override. Spec-definition fields aren't writable in
+    this phase.
+
+    A required provider (claude) rejects any actual `enabled` flip but MAY
+    still have its `model` set/cleared — the two fields are independent
+    operational overrides."""
     if entity_id not in PROVIDER_REGISTRY:
         return OperationResult(ok=False, message="ไม่พบ provider นี้", entity_id=entity_id)
-    if _required(entity_id):
-        return OperationResult(ok=False, message="Provider นี้ปิดใช้งานไม่ได้", entity_id=entity_id)
-    try:
-        provider_state.set_disabled(entity_id, not command.enabled)
-    except ValueError as e:
-        return OperationResult(ok=False, message=str(e), entity_id=entity_id)
+    required = _required(entity_id)
+    if command.enabled != _enabled(entity_id):
+        if required:
+            return OperationResult(ok=False, message="Provider นี้ปิดใช้งานไม่ได้", entity_id=entity_id)
+        try:
+            provider_state.set_disabled(entity_id, not command.enabled)
+        except ValueError as e:
+            return OperationResult(ok=False, message=str(e), entity_id=entity_id)
+    if command.model is not None:
+        from ... import provider_models
+
+        try:
+            if command.model == "":
+                provider_models.clear_model(entity_id)
+            else:
+                provider_models.set_model(entity_id, command.model)
+        except ValueError as e:
+            return OperationResult(ok=False, message=str(e), entity_id=entity_id)
     return OperationResult(ok=True, entity_id=entity_id)

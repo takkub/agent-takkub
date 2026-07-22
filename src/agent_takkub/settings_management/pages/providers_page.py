@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import (
     QFormLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QVBoxLayout,
     QWidget,
@@ -29,6 +30,24 @@ from ..repositories import providers as providers_repo
 from ..widgets.detail_footer import DetailFooter
 from ..widgets.detail_header import DetailHeader
 from ..widgets.management_page import ManagementPage
+
+# Per-provider hint for how to list that CLI's available models — shown as
+# the Model field's tooltip. Providers without an entry fall back to a
+# generic "<binary> --help" hint in `_model_hint`.
+_MODEL_LIST_HINTS = {
+    "gemini": "ดู model ที่ใช้ได้ด้วยคำสั่ง `agy models`",
+    "opencode": "ดู model ที่ใช้ได้ด้วยคำสั่ง `opencode models`",
+    "kimi": "ดู model ที่ใช้ได้ด้วยคำสั่ง `kimi --help`",
+    "cursor": "ดู model ที่ใช้ได้ด้วยคำสั่ง `agent models`",
+    "claude": "ดู model ที่ใช้ได้จากเอกสาร Anthropic (เช่น opus/sonnet/haiku)",
+}
+
+
+def _model_hint(detail: ProviderDetail) -> str:
+    if detail.name in _MODEL_LIST_HINTS:
+        return _MODEL_LIST_HINTS[detail.name]
+    binary = detail.binary_names[0] if detail.binary_names else detail.name
+    return f"ดู model ที่ใช้ได้ด้วยคำสั่ง `{binary} --help`"
 
 
 def _flag_row(label: str, on: bool) -> QLabel:
@@ -96,15 +115,24 @@ class ProvidersPage(ManagementPage):
         self.binary_label = QLabel("")
         self.status_label = QLabel("")
         self.context_label = QLabel("")
+        self.model_edit = QLineEdit()
+        self.model_edit.setPlaceholderText("default")
+        self.model_edit.textChanged.connect(self._on_model_changed)
         form.addRow("Binary", self.binary_label)
         form.addRow("Status", self.status_label)
         form.addRow("Context strategy", self.context_label)
+        form.addRow("Model", self.model_edit)
         parent_layout.addLayout(form)
 
         self.install_note = QLabel("")
         self.install_note.setWordWrap(True)
         self.install_note.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         parent_layout.addWidget(self.install_note)
+
+        self.model_note = QLabel("มีผลกับ pane ที่ spawn ใหม่")
+        self.model_note.setWordWrap(True)
+        self.model_note.setStyleSheet(f"color: {theme.TEXT_MUTED};")
+        parent_layout.addWidget(self.model_note)
 
     def _build_capabilities(self, parent_layout: QVBoxLayout) -> None:
         title = QLabel("Capabilities")
@@ -185,6 +213,12 @@ class ProvidersPage(ManagementPage):
         self.context_label.setText(d.spec_capabilities.context_strategy)
         self.install_note.setText("" if d.installed else d.install_instructions)
 
+        self.model_edit.blockSignals(True)
+        self.model_edit.setText(d.model)
+        self.model_edit.setEnabled(d.model_flag_supported)
+        self.model_edit.setToolTip(_model_hint(d) if d.model_flag_supported else "")
+        self.model_edit.blockSignals(False)
+
         self._clear_capabilities_box()
         sc = d.spec_capabilities
         for label, on in (
@@ -209,10 +243,18 @@ class ProvidersPage(ManagementPage):
             self._dirty = True
             self.footer.set_dirty(True)
 
+    def _on_model_changed(self, _text: str) -> None:
+        if self._current is not None:
+            self._dirty = True
+            self.footer.set_dirty(True)
+
     def _save(self) -> bool:
         if self._current is None:
             return False
         enabled = self.enabled_toggle.isChecked()
+        model = self.model_edit.text().strip()
+        model_changed = self._current.model_flag_supported and model != self._current.model
+
         if enabled != self._current.enabled:
             hook_result = self.toggle_provider_requested(self._current.name, not enabled)
             if hook_result is not None:
@@ -222,11 +264,21 @@ class ProvidersPage(ManagementPage):
                     return False
             else:
                 result = providers_repo.update(
-                    self._current.name, UpdateProviderCommand(enabled=enabled)
+                    self._current.name,
+                    UpdateProviderCommand(enabled=enabled, model=model if model_changed else None),
                 )
                 if not result.ok:
                     self._show_error(result.message)
                     return False
+                model_changed = False  # persisted together with the toggle above
+
+        if model_changed:
+            result = providers_repo.update(
+                self._current.name, UpdateProviderCommand(enabled=enabled, model=model)
+            )
+            if not result.ok:
+                self._show_error(result.message)
+                return False
 
         self._dirty = False
         self.footer.set_dirty(False)

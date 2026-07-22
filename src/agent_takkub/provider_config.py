@@ -1,10 +1,8 @@
 """Per-role CLI provider mapping.
 
-The cockpit can spawn teammate panes backed by Claude Code
-(`claude.exe`), OpenAI Codex (`codex.CMD`), or Google Antigravity
-(`agy`, the `gemini` role's engine). By default every role except
-`codex` and `gemini` runs
-claude. This module lets the user override the mapping globally —
+The cockpit can spawn teammate panes backed by any CLI registered in
+``provider_spec.PROVIDER_REGISTRY``. By default every role except the forced
+provider-identity roles runs claude. This module lets the user override the mapping globally —
 e.g. "backend always uses codex regardless of project" — by editing
 a small JSON file under `~/.takkub/`.
 
@@ -19,6 +17,9 @@ Resolution rules:
              that gate each of those call sites instead of crashing.)
 - `codex`  → always `codex` (the role's whole point)
 - `gemini` → always `gemini` (the role's whole point)
+- `opencode` → always `opencode` (the role's whole point)
+- `kimi`   → always `kimi` (the role's whole point)
+- `cursor` → always `cursor` (the role's whole point)
 - everything else → user config wins; default `claude`
 
 Config file: `~/.takkub/role-providers.json`. Created on first read
@@ -43,20 +44,26 @@ from .provider_spec import PROVIDER_REGISTRY
 CLAUDE = "claude"
 CODEX = "codex"
 GEMINI = "gemini"
+OPENCODE = "opencode"
+KIMI = "kimi"
+CURSOR = "cursor"
 # Dynamic — derived from the registry (issue #103 Phase 0) instead of a
 # hand-maintained frozenset, so a new PROVIDER_REGISTRY entry is
 # automatically a valid provider everywhere this constant is consulted.
 VALID_PROVIDERS = frozenset(PROVIDER_REGISTRY.keys())
 
 # Roles whose provider is hard-coded — cannot be overridden by config.
-# The `codex`/`gemini` roles' whole identity IS that CLI — remapping them
-# would be a contradiction (a "codex" pane not running codex). `lead` was
+# Provider-named roles' whole identity IS that CLI — remapping them would be
+# a contradiction (a "codex" pane not running codex). `lead` was
 # forced here too until issue #101's degraded-mode unlock; it is now a
 # regular (optional) override — see the module docstring's "Resolution
 # rules" for what a non-claude Lead loses.
 _FORCED_PROVIDER = {
     "codex": CODEX,
     "gemini": GEMINI,
+    "opencode": OPENCODE,
+    "kimi": KIMI,
+    "cursor": CURSOR,
 }
 
 # Roles whose CLI is fixed and must not be offered as an override in the UI.
@@ -204,7 +211,7 @@ def _provider_available(provider: str) -> bool:
     """True iff `provider` can actually run right now.
 
     Two ways a codex/gemini provider becomes unusable:
-      1. Toggled off in the cockpit status bar (`disabled-providers.json`).
+      1. Toggled off in Settings → Providers & Roles (`disabled-providers.json`).
       2. Its CLI isn't installed (binary not on PATH).
 
     `claude` is always considered available (it's the cockpit's baseline;

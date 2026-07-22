@@ -1087,54 +1087,67 @@ class SpawnEngineMixin:
                 _shard_total=_shard_total,
             )
 
-        # ── codex pane: non-claude path ─────────────────────────────
-        # `codex` is OpenAI's TUI; it speaks a different protocol and
-        # doesn't understand any of the claude flags below. Build a
-        # minimal argv and short-circuit so we don't accidentally pass
-        # `--dangerously-skip-permissions`, MCP configs, plugin dirs,
-        # or `--session-id`/`--resume` (all claude-only) to it.
+        # ── non-claude providers (codex / gemini / future CLIs) ─────
+        # These TUIs speak different protocols and understand none of the
+        # claude flags below — build a minimal spec-driven argv and
+        # short-circuit so we never pass `--dangerously-skip-permissions`,
+        # MCP configs, plugin dirs, or `--session-id`/`--resume` (all
+        # claude-only) to them.
         #
         # Entry condition uses `effective_provider_for(role_name)` so the
-        # user can remap any teammate role (e.g. "backend") to the codex
-        # binary via `~/.takkub/role-providers.json`. The `codex` role
-        # itself is forced toward codex by provider_config's
+        # user can remap any teammate role (e.g. "backend") to another CLI
+        # via `~/.takkub/role-providers.json`. The `codex`/`gemini` roles
+        # themselves are forced toward their CLIs by provider_config's
         # `_FORCED_PROVIDER` table.
         #
         # `effective_provider_for` (not plain `provider_for`) degrades a
-        # codex/gemini role to claude when that provider is unavailable —
+        # non-claude role to claude when that provider is unavailable —
         # toggled off in the status bar OR its CLI isn't installed. When
-        # that happens neither branch below matches and execution falls
+        # that happens the branch below doesn't match and execution falls
         # through to the claude spawn path *with role_name unchanged*, so
         # a "gemini"/"codex" pane keeps its slot/identity but is powered by
-        # claude ("Claude รับตำแหน่งแทน"). The in-branch `find_*_executable`
-        # None-guards are now belt-and-suspenders (we only enter a branch
-        # when the binary resolved), but kept in case PATH changes between
-        # the availability probe and the spawn.
-        from .provider_config import CODEX, GEMINI, effective_provider_for
+        # claude ("Claude รับตำแหน่งแทน"). The in-branch discovery
+        # None-guard is belt-and-suspenders (we only enter the branch when
+        # the binary resolved), but kept in case PATH changes between the
+        # availability probe and the spawn.
+        from .provider_config import CLAUDE, effective_provider_for
         from .provider_spec import PROVIDER_REGISTRY
 
         # Per-project role→CLI mapping (project_ns resolved at spawn entry):
         # the same role can be backed by a different CLI in different tabs.
         effective_provider = effective_provider_for(base_role, project=project_ns)
         # #101 degraded-mode unlock: `lead` is no longer forced to claude, so
-        # it can now enter the GEMINI/CODEX branches below too. Both branches
-        # need a Lead-specific cwd (project root, not a teammate staging dir)
-        # and Lead-specific context content (BLOCKED_DIRS/session-brief, not
-        # the generic teammate cheatsheet) — see the `_is_lead` branches
-        # inside each.
+        # it can enter the non-claude branch below too. It needs a
+        # Lead-specific cwd (project root, not a teammate staging dir) and
+        # Lead-specific context content (BLOCKED_DIRS/session-brief, not the
+        # generic teammate cheatsheet) — see the `_is_lead` forks inside.
         _is_lead = role_name == LEAD.name
 
-        if effective_provider == GEMINI:
-            # The `gemini` role is now powered by Antigravity's `agy` binary
-            # (Google retired the standalone Gemini CLI on 2026-06-18). `agy`
-            # auto-discovers AGENTS.md/.agents/ — NOT GEMINI.md — so the pane
-            # reuses codex's AGENTS.md cheatsheet (one manager, one marker, no
-            # write race when codex + gemini share a project cwd).
+        if effective_provider != CLAUDE:
+            # ── generic non-claude provider branch (#103 Phase 1) ──────
+            # One spec-driven path replaces the old hand-written GEMINI and
+            # CODEX branches (which had drifted into ~110 nearly identical
+            # lines each). Everything provider-specific now lives on the
+            # ProviderSpec: binary discovery, autonomy flags (platform-keyed
+            # — codex's Windows sandbox-helper escape hatch #5 vs the
+            # workspace-write + network_access loopback unblock #26 Mode B),
+            # PATH handling (gemini: agy's installer doesn't reliably
+            # register it on PATH → prepend_bin_dir_to_path), first-boot
+            # trust driving (auto_trust), and early-crash detection
+            # (early_exit_watch → _on_codex_exit wiring). Adding a NEW
+            # provider = a PROVIDER_REGISTRY entry + ready markers; this
+            # branch should not need to change.
+            #
+            # Providers with confirmed native AGENTS.md discovery share one
+            # cheatsheet file and manager marker, avoiding write races in a
+            # shared cwd. A provider whose discovery is still unconfirmed
+            # uses context_strategy="none"; context is skipped with a log line
+            # so the #103 gap stays visible instead of being guessed.
             from .codex_agents_md import ensure_agents_md
 
-            spec = PROVIDER_REGISTRY[GEMINI]
-            gemini_bin = spec.custom_discovery_fn() if spec.custom_discovery_fn else None
-            if gemini_bin is None:
+            spec = PROVIDER_REGISTRY[effective_provider]
+            provider_bin = spec.custom_discovery_fn() if spec.custom_discovery_fn else None
+            if provider_bin is None:
                 return False, spec.install_instructions
             if _is_lead:
                 spawn_cwd = cwd or lead_cwd(project=project_ns) or str(DATA_HOME)
@@ -1153,8 +1166,18 @@ class SpawnEngineMixin:
                             project_ns, spawn_cwd, post_compact_brief=post_compact_brief
                         )
                     except Exception:
-                        _log.exception("could not render Gemini Lead context; spawning without it")
-            else:
+                        _log.exception(
+                            "could not render %s Lead context; spawning without it",
+                            spec.name,
+                        )
+            elif spec.context_strategy == "agents_md_file":
+                # Plant the takkub cheatsheet so the provider auto-discovers
+                # it on boot and knows how to call `takkub send/done`. Safe:
+                # only writes when the file is absent or already
+                # takkub-managed (marker check inside the helper). `extra`
+                # bridges this role's Skill Matrix assignment (#103 phase 4)
+                # as an instruction-style block (non-claude CLIs have no
+                # Skill tool).
                 try:
                     from . import skill_policy
 
@@ -1164,175 +1187,76 @@ class SpawnEngineMixin:
                     ensure_agents_md(spawn_cwd, extra=_skill_extra)
                 except Exception:
                     _log.exception(
-                        "could not render Gemini role context for %s; spawning without it",
+                        "could not render %s role context for %s; spawning without it",
+                        spec.name,
                         base_role,
                     )
+            else:
+                _log.warning(
+                    "provider %s has context_strategy=%r — teammate cheatsheet skipped (#103)",
+                    spec.name,
+                    spec.context_strategy,
+                )
             env = _build_lead_env() if _is_lead else _build_pane_env()
             env["TAKKUB_ROLE"] = role_name
             env["TAKKUB_PROJECT"] = project_ns
             _apply_artifacts_dir(env, project_ns)
             inject_user_profile_env(env, project_ns)
             bin_dir = str(CLI_BIN_DIR)
-            # Put agy's own dir on the pane PATH too — the Antigravity
-            # installer doesn't reliably register it (find_agy_executable
-            # may have resolved the binary via its fixed install location,
-            # not PATH), and agy may shell out to itself / companion tools.
-            agy_dir = os.path.dirname(gemini_bin)
-            env["PATH"] = bin_dir + os.pathsep + agy_dir + os.pathsep + env.get("PATH", "")
+            if spec.prepend_bin_dir_to_path:
+                provider_dir = os.path.dirname(provider_bin)
+                env["PATH"] = bin_dir + os.pathsep + provider_dir + os.pathsep + env.get("PATH", "")
+            else:
+                env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
             # Lead gets the Lead capability token (authorises Lead-only
             # takkub CLI commands) instead of a per-pane teammate token —
             # mirrors the claude branch below (#101).
             if _is_lead:
                 env["TAKKUB_LEAD_TOKEN"] = self._lead_token
-                _gem_tok = None
+                _prov_tok = None
             else:
-                _gem_tok = self._mint_pane_token(env, project_ns, role_name)
-            # yolo: skip per-command approval prompts (parity with codex
-            # --ask-for-approval never). Antigravity's flag is the long form.
-            # Sourced from PROVIDER_REGISTRY["gemini"].autonomy_flags instead
-            # of a hardcoded literal (issue #103 Phase 0) — same value.
-            gemini_argv = [
-                gemini_bin,
+                _prov_tok = self._mint_pane_token(env, project_ns, role_name)
+            provider_argv = [
+                provider_bin,
                 *spec.autonomy_flags.get(sys.platform, spec.autonomy_flags.get("default", [])),
             ]
-            # MCP injection (#100): agy has no per-session MCP CLI surface —
-            # its `mcp_adapter_variant="plugin_import"` always resolves to a
-            # documented no-op here (see mcp_bridge.py module docstring for
-            # why the real `agy plugin import` bridge isn't auto-driven per
-            # spawn). Called anyway so every provider branch goes through the
-            # same adapter dispatch.
+            if spec.model_flag:
+                from .provider_models import model_for
+                from .role_models import model_for as role_model_for
+
+                # A per-role model wins over the provider-level default; empty
+                # falls through to the provider default, then the CLI's own.
+                # The role model is resolved against the provider ACTUALLY
+                # spawning (spec.name == effective_provider here), so a role
+                # re-pointed at another CLI — or substituted to claude because
+                # its own CLI is off/missing — never inherits a model id that
+                # belongs to a different CLI.
+                provider_model = role_model_for(base_role, spec.name) or model_for(spec.name)
+                if provider_model:
+                    provider_argv.extend([spec.model_flag, provider_model])
+            # MCP injection (#100): dispatched per spec.mcp_adapter_variant —
+            # codex gets native `-c mcp_servers.<name>.<key>=…` session
+            # overrides; agy's "plugin_import" resolves to a documented no-op
+            # (see mcp_bridge.py). Called for every provider so each branch
+            # goes through the same adapter dispatch.
             from .mcp_bridge import mcp_argv_for_provider
 
-            gemini_argv.extend(mcp_argv_for_provider("gemini", base_role, shard_idx, project_ns))
+            provider_argv.extend(mcp_argv_for_provider(spec.name, base_role, shard_idx, project_ns))
             return self._launch_session(
                 pane=pane,
                 role_name=role_name,
                 project_ns=project_ns,
                 spawn_cwd=spawn_cwd,
-                argv=gemini_argv,
+                argv=provider_argv,
                 env=env,
-                pane_tok=_gem_tok,
-                label="gemini",
+                pane_tok=_prov_tok,
+                label=spec.name,
                 cwd=cwd,
                 project=project,
                 _from_auto_respawn=_from_auto_respawn,
                 _shard_total=_shard_total,
-                auto_trust=True,
-            )
-
-        if effective_provider == CODEX:
-            from .codex_agents_md import ensure_agents_md
-
-            codex_spec = PROVIDER_REGISTRY[CODEX]
-            codex_bin = codex_spec.custom_discovery_fn() if codex_spec.custom_discovery_fn else None
-            if codex_bin is None:
-                return False, codex_spec.install_instructions
-            if _is_lead:
-                spawn_cwd = cwd or lead_cwd(project=project_ns) or str(DATA_HOME)
-            else:
-                spawn_cwd = (
-                    cwd or default_cwd_for_role(role_name, project=project_ns) or str(DATA_HOME)
-                )
-            if _is_lead:
-                # Lead-specific AGENTS.md content — see the GEMINI branch's
-                # matching comment above (#101).
-                if spawn_cwd != str(DATA_HOME):
-                    try:
-                        post_compact_brief = self._build_post_compact_brief(project_ns)
-                        render_lead_agents_md(
-                            project_ns, spawn_cwd, post_compact_brief=post_compact_brief
-                        )
-                    except Exception:
-                        _log.exception("could not render Codex Lead context; spawning without it")
-            else:
-                # Plant the takkub cheatsheet so Codex auto-discovers it on
-                # boot and knows how to call `takkub send/done`. Safe: only
-                # writes when the file is absent or already takkub-managed
-                # (marker check inside the helper). `extra` bridges this role's
-                # Skill Matrix assignment (#103 phase 4) — codex has no Skill
-                # tool, so it's an instruction-style block, not real skill access.
-                try:
-                    from . import skill_policy
-
-                    _skill_extra = skill_policy.render_skill_appendix(
-                        base_role, _skill_roots_for_project(project_ns), codex_spec.context_strategy
-                    )
-                    ensure_agents_md(spawn_cwd, extra=_skill_extra)
-                except Exception:
-                    _log.exception(
-                        "could not render Codex role context for %s; spawning without it",
-                        base_role,
-                    )
-            env = _build_lead_env() if _is_lead else _build_pane_env()
-            env["TAKKUB_ROLE"] = role_name
-            env["TAKKUB_PROJECT"] = project_ns
-            _apply_artifacts_dir(env, project_ns)
-            inject_user_profile_env(env, project_ns)
-            bin_dir = str(CLI_BIN_DIR)
-            env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
-            # Lead gets the Lead capability token instead of a per-pane
-            # teammate token — mirrors the claude branch below (#101).
-            if _is_lead:
-                env["TAKKUB_LEAD_TOKEN"] = self._lead_token
-                _cdx_tok = None
-            else:
-                _cdx_tok = self._mint_pane_token(env, project_ns, role_name)
-            # Autonomy flags so Codex can call `takkub done` and edit
-            # workspace files without stopping for per-command approval —
-            # mirrors claude's `--dangerously-skip-permissions`.
-            #
-            # Windows: codex 0.133 interactive TUI still spawns
-            # `codex-windows-sandbox-setup.exe` on the first shell tool
-            # call even with `-s danger-full-access`. That helper has a
-            # `requireAdministrator` manifest, so under a non-elevated
-            # cockpit it ENOENTs out as "windows sandbox: spawn setup
-            # refresh" and the pane can't run any command (issue #5).
-            # `--dangerously-bypass-approvals-and-sandbox` is the codex-
-            # documented escape hatch that skips the helper entirely —
-            # same net trust as `-s danger-full-access` we already use.
-            #
-            # Linux/macOS: keep workspace-write so the OS sandbox still
-            # constrains an off-the-rails codex to its cwd. But `-s
-            # workspace-write` blocks outbound network by default (per codex
-            # docs), including loopback — and `takkub done` reports back over
-            # a loopback TCP socket to the cockpit's cli_server. Without the
-            # network_access override the socket connect gets sandboxed to a
-            # PermissionError, so codex finishes its task but can never call
-            # `takkub done` and the pane hangs "working" forever (issue #26
-            # Mode B). Opening network here is the codex-documented way to
-            # unblock that loopback call while still keeping cwd write-scoping.
-            #
-            # Sourced from PROVIDER_REGISTRY["codex"].autonomy_flags instead of
-            # a hardcoded if/else (issue #103 Phase 0) — same per-platform
-            # values, keyed the same way ("win32" vs "default").
-            codex_argv = [
-                codex_bin,
-                *codex_spec.autonomy_flags.get(
-                    sys.platform, codex_spec.autonomy_flags.get("default", [])
-                ),
-            ]
-            # MCP injection (#100): codex's native per-session `-c
-            # mcp_servers.<name>.<key>=…` dotted overrides, resolved from the
-            # same role→MCP policy claude's --mcp-config uses. Session-scoped
-            # only — never touches ~/.codex/config.toml.
-            from .mcp_bridge import mcp_argv_for_provider
-
-            codex_argv.extend(mcp_argv_for_provider("codex", base_role, shard_idx, project_ns))
-            return self._launch_session(
-                pane=pane,
-                role_name=role_name,
-                project_ns=project_ns,
-                spawn_cwd=spawn_cwd,
-                argv=codex_argv,
-                env=env,
-                pane_tok=_cdx_tok,
-                label="codex",
-                cwd=cwd,
-                project=project,
-                _from_auto_respawn=_from_auto_respawn,
-                _shard_total=_shard_total,
-                codex_exit=True,
-                auto_trust=True,
+                codex_exit=spec.early_exit_watch,
+                auto_trust=spec.auto_trust,
             )
 
         # Resolve cwd:
@@ -1729,7 +1653,23 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         #   TAKKUB_TEAMMATE_EFFORT="high"              → force high effort everywhere
         if role_name != LEAD.name:
             tier_model, tier_effort, tier_fallback = _teammate_tier(base_role)
-            teammate_model = os.environ.get("TAKKUB_TEAMMATE_MODEL", tier_model).strip()
+            if "TAKKUB_TEAMMATE_MODEL" in os.environ:
+                # An explicitly empty value means "use the Claude CLI default"
+                # and must not be replaced by provider configuration.
+                teammate_model = os.environ["TAKKUB_TEAMMATE_MODEL"].strip()
+            else:
+                from .provider_config import CLAUDE
+                from .provider_models import model_for
+                from .role_models import model_for as role_model_for
+
+                # Precedence: per-role model > claude provider-level model >
+                # the role's tier default. Reaching this branch means claude is
+                # the effective provider (a non-claude role that degraded to a
+                # claude substitute lands here too), so the role model only
+                # applies when it was chosen FOR claude.
+                teammate_model = (
+                    role_model_for(base_role, CLAUDE) or model_for(CLAUDE) or tier_model
+                ).strip()
             teammate_model = _remap_pinned_model(teammate_model, env)
             if teammate_model:
                 argv.extend(["--model", teammate_model])
@@ -1763,7 +1703,21 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             # be the [1m] 1M-context variant, which Pro can't reach (usage
             # credits required) and which hard-errors the turn. Pin the Lead
             # to a standard-context model in that case (see plan_tier).
-            lead_model = _lead_model_override()
+            #
+            # Settings renders a model picker for Lead like any other role, so
+            # honour it here with the same precedence teammates use — role >
+            # provider > plan-tier pin — otherwise choosing a Lead model is a
+            # silent no-op on a claude Lead while it works on a non-claude one
+            # (that path goes through the generic branch above).
+            from .provider_config import CLAUDE as _CLAUDE
+            from .provider_models import model_for as _provider_model_for
+            from .role_models import model_for as _role_model_for
+
+            lead_model = (
+                _role_model_for(role_name, _CLAUDE)
+                or _provider_model_for(_CLAUDE)
+                or _lead_model_override()
+            )
             if lead_model:
                 lead_model = _remap_pinned_model(lead_model, env)
                 argv.extend(["--model", lead_model])
@@ -1988,11 +1942,13 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             # (Fix 1: eliminates the "(resumed)" in msg string-coupling fragility.)
             self._ps(_ekey_spawn).last_spawn_resumed = resumed
             suffix = " (resumed)" if resumed else ""
-            # If a codex/gemini role reached the claude spawn path, its provider
-            # was unavailable (toggled off or not installed) and claude is
-            # standing in. Surface that so the user isn't surprised the pane
-            # talks like Claude.
-            if role_name in (CODEX, GEMINI):
+            # If a forced non-claude role (codex/gemini/...) reached the claude
+            # spawn path, its provider was unavailable (toggled off or not
+            # installed) and claude is standing in. Surface that so the user
+            # isn't surprised the pane talks like Claude.
+            from .provider_config import FORCED_ROLES
+
+            if role_name in FORCED_ROLES:
                 suffix += " — claude substitute (provider unavailable)"
             return True, f"{role_name} spawned in {spawn_cwd}{suffix}"
         except Exception as e:

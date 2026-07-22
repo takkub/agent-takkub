@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_takkub import provider_config, provider_state
+from agent_takkub import provider_config, provider_models, provider_state
 from agent_takkub.settings_management.commands import UpdateProviderCommand
 from agent_takkub.settings_management.models import Ownership
 from agent_takkub.settings_management.repositories import providers as providers_repo
@@ -22,17 +22,20 @@ def redirect_stores(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setattr(provider_state, "_PATH", tmp_path / "disabled-providers.json")
     monkeypatch.setattr(provider_config, "_CONFIG_PATH", tmp_path / "role-providers.json")
     monkeypatch.setattr(provider_config, "_BASE_DIR", tmp_path)
+    monkeypatch.setattr(provider_models, "_PATH", tmp_path / "provider-models.json")
     yield tmp_path
 
 
 class TestList:
     def test_list_includes_all_registry_providers(self) -> None:
         names = {p.name for p in providers_repo.list()}
-        assert names == {"claude", "codex", "gemini"}
+        assert names == {"claude", "codex", "gemini", "opencode", "kimi", "cursor"}
 
     def test_list_query_filters_by_name(self) -> None:
-        names = {p.name for p in providers_repo.list(query="cod")}
-        assert names == {"codex"}
+        # "cod" would match both codex and open"cod"e — use an unambiguous
+        # fragment per provider.
+        assert {p.name for p in providers_repo.list(query="codex")} == {"codex"}
+        assert {p.name for p in providers_repo.list(query="openc")} == {"opencode"}
 
     def test_claude_is_required_and_always_enabled(self) -> None:
         by_name = {p.name: p for p in providers_repo.list()}
@@ -70,9 +73,12 @@ class TestGet:
 
 
 class TestCapabilities:
-    def test_claude_cannot_be_updated(self) -> None:
+    def test_claude_can_be_updated_model_only(self) -> None:
+        # claude's `enabled` flag can never be flipped (required provider),
+        # but its per-provider `model` override is still writable — so
+        # can_update stays True (update() itself rejects an enabled flip).
         cap = providers_repo.capabilities("claude")
-        assert cap.can_update is False
+        assert cap.can_update is True
         assert cap.reason
 
     def test_codex_can_be_updated(self) -> None:
@@ -104,3 +110,56 @@ class TestUpdate:
     def test_update_rejects_unknown_provider(self) -> None:
         result = providers_repo.update("bogus", UpdateProviderCommand(enabled=False))
         assert not result.ok
+
+
+class TestModelFlagSupported:
+    def test_supported_for_all_registered_providers(self) -> None:
+        # Every registered provider declares model_flag — codex's was verified
+        # against the installed binary (`codex --help`: `-m, --model <MODEL>`).
+        for name in ("claude", "codex", "gemini", "opencode", "kimi", "cursor"):
+            assert providers_repo.get(name).model_flag_supported is True, name
+
+
+class TestModel:
+    def test_get_shows_empty_model_by_default(self) -> None:
+        assert providers_repo.get("gemini").model == ""
+
+    def test_list_shows_configured_model(self) -> None:
+        provider_models.set_model("gemini", "gemini-2.5-pro")
+        by_name = {p.name: p for p in providers_repo.list()}
+        assert by_name["gemini"].model == "gemini-2.5-pro"
+
+    def test_update_sets_model(self) -> None:
+        result = providers_repo.update(
+            "gemini", UpdateProviderCommand(enabled=True, model="gemini-2.5-pro")
+        )
+        assert result.ok
+        assert provider_models.model_for("gemini") == "gemini-2.5-pro"
+        assert providers_repo.get("gemini").model == "gemini-2.5-pro"
+
+    def test_update_clears_model_with_empty_string(self) -> None:
+        provider_models.set_model("gemini", "gemini-2.5-pro")
+        result = providers_repo.update("gemini", UpdateProviderCommand(enabled=True, model=""))
+        assert result.ok
+        assert provider_models.model_for("gemini") is None
+
+    def test_update_model_none_leaves_it_untouched(self) -> None:
+        provider_models.set_model("gemini", "gemini-2.5-pro")
+        result = providers_repo.update("gemini", UpdateProviderCommand(enabled=True, model=None))
+        assert result.ok
+        assert provider_models.model_for("gemini") == "gemini-2.5-pro"
+
+    def test_update_model_on_unknown_provider_fails(self) -> None:
+        result = providers_repo.update("bogus", UpdateProviderCommand(enabled=True, model="x"))
+        assert not result.ok
+
+    def test_claude_can_update_model_even_though_enabled_is_locked(self) -> None:
+        result = providers_repo.update("claude", UpdateProviderCommand(enabled=True, model="opus"))
+        assert result.ok
+        assert provider_models.model_for("claude") == "opus"
+
+    def test_claude_enabled_flip_still_rejected_alongside_model_set(self) -> None:
+        result = providers_repo.update("claude", UpdateProviderCommand(enabled=False, model="opus"))
+        assert not result.ok
+        # Rejected before the model write happens — no partial apply.
+        assert provider_models.model_for("claude") is None

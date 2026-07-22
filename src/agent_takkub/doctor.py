@@ -967,47 +967,67 @@ def check_installed_integrity() -> list[Finding]:
 def check_providers() -> list[Finding]:
     findings: list[Finding] = []
 
-    # The `gemini` teammate role runs on Antigravity's `agy` binary
-    # (Google retired the standalone Gemini CLI on 2026-06-18). Resolve via the
-    # SAME helper the cockpit uses at spawn time — `find_agy_executable()` falls
-    # back to %LOCALAPPDATA%\agy\bin when the installer didn't register PATH, so
-    # doctor doesn't falsely report "not installed" for a gemini role that
-    # actually works. Use the resolved absolute path in `_run` so `--version`
-    # succeeds even when the binary is off-PATH.
-    def _resolve_provider_bin(provider: str, binary: str) -> str | None:
+    # One row per registered non-claude provider (#103 Phase 1 — registry-
+    # driven, so a new PROVIDER_REGISTRY entry shows up here automatically).
+    # Resolve via the SAME custom_discovery_fn the cockpit uses at spawn time —
+    # e.g. gemini's `find_agy_executable()` falls back to %LOCALAPPDATA%\agy\bin
+    # when the installer didn't register PATH, so doctor doesn't falsely report
+    # "not installed" for a role that actually works. Use the resolved absolute
+    # path in `_run` so `--version` succeeds even when the binary is off-PATH.
+    from .provider_spec import PROVIDER_REGISTRY
+
+    def _resolve_provider_bin(spec) -> str | None:
         try:
-            if provider == "gemini":
-                from .gemini_helper import find_agy_executable
-
-                return find_agy_executable()
-            if provider == "codex":
-                from .codex_helper import find_codex_executable
-
-                return find_codex_executable()
+            if spec.custom_discovery_fn is not None:
+                return spec.custom_discovery_fn()
         except Exception:
             pass
-        return shutil.which(binary)
+        for name in spec.binary_names or (spec.name,):
+            found = shutil.which(name)
+            if found:
+                return found
+        return None
 
-    for provider, binary in (("codex", "codex"), ("gemini", "agy")):
-        path = _resolve_provider_bin(provider, binary)
+    for provider, spec in PROVIDER_REGISTRY.items():
+        if provider == "claude":
+            continue  # claude has its own dedicated checks elsewhere
+        path = _resolve_provider_bin(spec)
         if path:
             rc, ver = _run([path, "--version"])
             version = (ver.splitlines()[0] if ver else path) if rc == 0 else path
             findings.append(Finding("providers", provider, Status.INFO, version))
-        else:
-            hint = (
-                "install the Antigravity CLI (https://antigravity.google/download) "
-                "to use the 'gemini' teammate role"
-                if provider == "gemini"
-                else f"install {binary} CLI to use '{provider}' teammate role"
-            )
+        elif spec.install_command:
+            # Machine-installable (npm) → offer it as a --fix auto-fix. Bind
+            # the provider name via default arg so the loop variable doesn't
+            # leak the last iteration into every closure.
+            def _install(provider=provider) -> tuple[bool, str]:
+                from .provider_install import install_provider
+
+                return install_provider(provider)
+
             findings.append(
                 Finding(
                     "providers",
                     provider,
                     Status.SKIP,
                     "not installed (optional)",
-                    hint,
+                    (
+                        f"install this provider: `takkub provider install {provider}`; "
+                        "or install all missing providers: "
+                        "`takkub doctor --fix --install-providers`"
+                    ),
+                    auto_fix=_install,
+                )
+            )
+        else:
+            findings.append(
+                Finding(
+                    "providers",
+                    provider,
+                    Status.SKIP,
+                    "not installed (optional)",
+                    spec.install_instructions
+                    or f"install the {provider} CLI to use the '{provider}' teammate role",
                 )
             )
 
@@ -1459,12 +1479,21 @@ def run_all_checks() -> list[Finding]:
     return findings
 
 
-def run_auto_fixes(findings: list[Finding]) -> None:
+def run_auto_fixes(findings: list[Finding], install_providers: bool = False) -> None:
+    """Run available fixes, keeping machine-level provider installs opt-in."""
     for f in findings:
-        if f.auto_fix is not None:
-            ok, msg = f.auto_fix()
-            label = "fixed" if ok else "fix failed"
-            print(f"  [{label}] {f.category}/{f.name}: {msg}")
+        if f.auto_fix is None:
+            continue
+        if f.category == "providers" and not install_providers:
+            print(
+                f"  [skipped (opt-in)] {f.category}/{f.name}: "
+                "takkub doctor --fix --install-providers or "
+                f"takkub provider install {f.name}"
+            )
+            continue
+        ok, msg = f.auto_fix()
+        label = "fixed" if ok else "fix failed"
+        print(f"  [{label}] {f.category}/{f.name}: {msg}")
 
 
 # ---------------------------------------------------------------------------

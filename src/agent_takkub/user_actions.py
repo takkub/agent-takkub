@@ -1,9 +1,8 @@
 """UserActionsMixin — toolbar/button handlers (refactor round 4, step A).
 
 Extracted from ``MainWindow`` as a mixin. All methods access ``self.*``
-attributes (``orch``, ``_status``, ``_btn_pipelines``, ``_chip_codex``,
-``_chip_gemini``, ``_chip_plan``, ``_limit_store``, etc.) initialised in
-``MainWindow.__init__``.
+attributes (``orch``, ``_status``, ``_btn_pipelines``, ``_chip_plan``,
+``_limit_store``, etc.) initialised in ``MainWindow.__init__``.
 
 **Import constraint:** this module MUST NOT import ``app`` or ``cli``.
 """
@@ -647,44 +646,8 @@ class UserActionsMixin:
         dlg.exec()
 
     # ──────────────────────────────────────────────────────────────
-    # provider / plan chip handlers
+    # plan chip handlers
     # ──────────────────────────────────────────────────────────────
-
-    def _on_provider_chip_clicked(self, provider: str) -> None:
-        """Toggle a provider on the orchestrator. Orchestrator persists state,
-        broadcasts to all Lead panes, and emits providerStateChanged → we
-        update the chip style via _on_provider_state_changed."""
-        from .provider_state import is_disabled
-
-        currently_disabled = is_disabled(provider)
-        # Flip
-        ok, msg = self.orch.toggle_provider(provider, not currently_disabled)
-        if not ok:
-            self._status.showMessage(f"Toggle failed: {msg}", 4000)
-
-    def _on_provider_state_changed(self, provider: str, disabled: bool) -> None:
-        """Repaint the affected chip when provider state flips. Triggered by
-        Orchestrator.providerStateChanged so both user click and future
-        config-file changes from other sources land here."""
-        state = self._provider_chip_state(provider)
-        if provider == "codex" and hasattr(self, "_chip_codex"):
-            self._chip_codex.setStyleSheet(
-                self._provider_chip_style(
-                    "codex",
-                    disabled=state == "disabled",
-                    not_installed=state == "not_installed",
-                )
-            )
-            self._chip_codex.setToolTip(self._provider_chip_tooltip("codex", state))
-        elif provider == "gemini" and hasattr(self, "_chip_gemini"):
-            self._chip_gemini.setStyleSheet(
-                self._provider_chip_style(
-                    "gemini",
-                    disabled=state == "disabled",
-                    not_installed=state == "not_installed",
-                )
-            )
-            self._chip_gemini.setToolTip(self._provider_chip_tooltip("gemini", state))
 
     def _on_plan_chip_clicked(self) -> None:
         """Flip the account plan on the orchestrator. It persists state,

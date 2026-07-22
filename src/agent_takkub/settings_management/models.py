@@ -239,6 +239,7 @@ class ProviderSummary:
     installed: bool
     enabled: bool
     required: bool
+    model: str = ""
 
 
 @dataclass(frozen=True)
@@ -258,5 +259,7 @@ class ProviderDetail:
     enabled: bool
     required: bool
     spec_capabilities: ProviderCapabilities
+    model: str = ""
+    model_flag_supported: bool = False
     assigned_roles: tuple[str, ...] = ()
     capabilities: Capability = field(default_factory=Capability)

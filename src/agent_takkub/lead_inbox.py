@@ -394,13 +394,18 @@ class LeadInboxMixin:
         if max_wait_ms != 45_000:
             return max_wait_ms
         try:
-            from .provider_config import CODEX, GEMINI, effective_provider_for
+            from .provider_config import effective_provider_for
+            from .provider_spec import PROVIDER_REGISTRY
 
-            if effective_provider_for(role_name, project=self._resolve_project(project)) in (
-                GEMINI,
-                CODEX,
-            ):
-                return 90_000
+            # Registry-driven (#103): each spec owns its cold-boot allowance via
+            # `ready_wait_ms`, so a newly registered provider (opencode/kimi/
+            # cursor …) gets its own window instead of silently inheriting
+            # claude's 45 s and forcing a blind first paste. Was a hardcoded
+            # codex/gemini pair.
+            provider = effective_provider_for(role_name, project=self._resolve_project(project))
+            spec = PROVIDER_REGISTRY.get(provider)
+            if spec is not None and spec.ready_wait_ms:
+                return max(max_wait_ms, int(spec.ready_wait_ms))
         except Exception:
             pass
         return max_wait_ms

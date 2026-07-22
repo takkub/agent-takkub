@@ -554,7 +554,7 @@ def classify(user_message: str, context: dict | None = None) -> RoutingAction:
             ``pending_proposal`` (bool) — True when Lead has shown a plan
             table and is waiting for the user to confirm/abort/edit it.
             ``disabled_providers`` (set[str]) — provider names the user has
-            disabled via the cockpit status bar toggle. These are NO LONGER
+            disabled via Settings → Providers & Roles. These are NO LONGER
             refused: routing proceeds normally and the spawn layer backs the
             unavailable codex/gemini role with claude ("Claude รับตำแหน่งแทน").
             The only effect here is a substitution note in ``reason`` and a

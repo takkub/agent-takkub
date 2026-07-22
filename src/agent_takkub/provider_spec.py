@@ -1,7 +1,7 @@
 """Declarative per-provider CLI specs — Wave 3 #6 Phase 0 (issue #103).
 
 Single source of truth for how the cockpit spawns/monitors each terminal CLI
-provider (claude / codex / gemini). Pure data layer: no PyQt, no engine
+provider. Pure data layer: no PyQt, no engine
 imports — `provider_config.py` / `spawn_engine.py` / `pty_session.py` /
 `orchestrator_text.py` read from `PROVIDER_REGISTRY`; never the reverse (see
 the `provider-spec-pure` import-linter contract in pyproject.toml).
@@ -48,11 +48,23 @@ class ProviderSpec:
     """
 
     name: str
+    # Human-facing label (status-bar chip, tooltips). Empty → name.capitalize().
+    display_name: str = ""
 
     # ─── 1. Binary discovery ───
     binary_names: list[str] = field(default_factory=list)
     install_instructions: str = ""
     custom_discovery_fn: Callable[[], str | None] | None = None
+    # Machine-actionable installer (provider_install.py / doctor --fix /
+    # Settings → Providers & Roles). None = manual install only (e.g.
+    # agy ships as a GUI installer download, not a package command) — the
+    # human `install_instructions` above is then the only guidance.
+    # First token is resolved via shutil.which at run time (npm → npm.cmd on
+    # Windows), so keep it a bare program name.
+    install_command: list[str] | None = None
+    # One-time post-install step the cockpit can NOT do for the user
+    # (interactive login/OAuth). Shown after a successful install.
+    post_install_note: str = ""
 
     # ─── 2. Spawn argv builder ───
     autonomy_flags: dict[str, list[str]] = field(default_factory=dict)
@@ -107,6 +119,22 @@ class ProviderSpec:
     supports_token_meter: bool = False
     supports_remote_history: bool = False
 
+    # ─── 11. Generic non-claude spawn-branch knobs (#103 Phase 1) ───
+    # These three encode the ONLY real divergences between the old
+    # hand-written gemini/codex branches in spawn_engine.py, so the generic
+    # spec-driven branch can replace both without behavior change.
+    #
+    # prepend_bin_dir_to_path — put the discovered binary's own directory on
+    # the pane PATH (gemini: the Antigravity installer doesn't reliably
+    # register agy on PATH, and agy shells out to itself / companion tools).
+    prepend_bin_dir_to_path: bool = False
+    # auto_trust — drive the provider's first-boot trust/onboarding prompt
+    # after attach (gemini/codex; shell never, claude has its own inline path).
+    auto_trust: bool = False
+    # early_exit_watch — wire `_on_codex_exit`-style early-crash detection
+    # (stamps codex_spawn_ts) instead of the stale-guarded `_on_session_exit`.
+    early_exit_watch: bool = False
+
 
 # ── binary discovery wrappers ────────────────────────────────────────────────
 # Each does its `from .<helper> import find_*` INSIDE the call (not at module
@@ -131,6 +159,48 @@ def _discover_gemini() -> str | None:
     from .gemini_helper import find_agy_executable
 
     return find_agy_executable()
+
+
+def _discover_opencode() -> str | None:
+    """Plain PATH lookup — opencode's npm install registers the shim reliably
+    on all platforms (unlike agy), so no vendored-path fallback is needed."""
+    import shutil
+
+    for name in ("opencode", "opencode.cmd", "opencode.exe"):
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
+
+
+def _discover_kimi() -> str | None:
+    """Plain PATH lookup for Kimi CLI's cross-platform installer shims."""
+    import shutil
+
+    for name in ("kimi", "kimi.cmd", "kimi.exe"):
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
+
+
+def _discover_cursor() -> str | None:
+    """PATH lookup for the Cursor CLI, canonical name first.
+
+    ``cursor-agent`` is the name Cursor's own install/parameter docs use, so it
+    is tried before the bare ``agent`` alias — ``agent`` is generic enough that
+    an unrelated program of that name can sit earlier on PATH and be mistaken
+    for Cursor. Preferring the canonical name makes that misidentification much
+    less likely (a full ``--version`` identity probe is still the real fix and
+    is tracked as a follow-up).
+    """
+    import shutil
+
+    for name in ("cursor-agent", "cursor-agent.exe", "agent", "agent.exe"):
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
 
 
 # ── claude ──────────────────────────────────────────────────────────────────
@@ -206,6 +276,8 @@ codex_spec = ProviderSpec(
         "codex binary not on PATH. Install with "
         "`npm install -g @openai/codex`, then run `codex login` once."
     ),  # spawn_engine.py:1097-1100 (byte-identical to codex_helper.py:69-72)
+    install_command=["npm", "install", "-g", "@openai/codex"],
+    post_install_note="run `codex login` once to sign in",
     custom_discovery_fn=_discover_codex,
     autonomy_flags={
         "win32": ["--dangerously-bypass-approvals-and-sandbox"],  # spawn_engine.py:1140-1143
@@ -265,9 +337,14 @@ codex_spec = ProviderSpec(
     ),  # WIRED in Phase 0 — byte-identical to the pre-refactor
     # orchestrator_text.py _CODEX_TASK_NOTICE constant, which now sources
     # this field instead of owning the text (single source of truth).
+    model_flag="--model",  # verified against the installed binary: `codex --help`
+    # documents `-m, --model <MODEL>` for the interactive TUI (and
+    # codex_helper.py:118 already passes `--model` to `codex exec`).
     produces_jsonl_transcript=False,
     supports_token_meter=False,
     supports_remote_history=False,
+    auto_trust=True,  # spawn_engine.py codex branch: auto_trust=True
+    early_exit_watch=True,  # spawn_engine.py codex branch: codex_exit=True
 )
 
 
@@ -282,6 +359,8 @@ gemini_spec = ProviderSpec(
         "agy binary not on PATH. Install the Antigravity CLI from "
         "https://antigravity.google/download, then run `agy` once to sign in."
     ),  # spawn_engine.py:1050-1053
+    install_command=None,  # GUI installer download only — no package command
+    post_install_note="run `agy` once to sign in",
     custom_discovery_fn=_discover_gemini,
     autonomy_flags={"default": ["--dangerously-skip-permissions"]},  # spawn_engine.py:1073
     ready_hard_blockers=(
@@ -314,9 +393,199 @@ gemini_spec = ProviderSpec(
     supports_resume=False,
     supports_slash_commands=False,
     supports_hooks=False,
+    model_flag="--model",  # agy 1.0.5 changelog + confirmed `agy models` subcommand
     produces_jsonl_transcript=False,
     supports_token_meter=False,
     supports_remote_history=False,
+    prepend_bin_dir_to_path=True,  # spawn_engine.py gemini branch: agy_dir on PATH
+    auto_trust=True,  # spawn_engine.py gemini branch: auto_trust=True
+)
+
+
+# ── opencode ──────────────────────────────────────────────────────────────────
+# First provider added through the generic spec-driven spawn branch (#103
+# Phase 1) — no hand-written branch of its own. opencode is sst's open-source
+# multi-provider TUI (https://opencode.ai): one integration exposes 75+ model
+# backends (Anthropic, OpenAI, z.ai GLM, Kimi, local Ollama, ...) selected via
+# `-m provider/model` or the user's opencode config. Requires a one-time
+# `opencode auth login` (or /connect in the TUI) per backend.
+opencode_spec = ProviderSpec(
+    name="opencode",
+    display_name="OpenCode",
+    binary_names=["opencode", "opencode.cmd", "opencode.exe"],
+    install_instructions=(
+        "opencode binary not on PATH. Install with `npm install -g opencode-ai`, "
+        "then run `opencode auth login` once to connect a model provider."
+    ),
+    install_command=["npm", "install", "-g", "opencode-ai"],
+    post_install_note="run `opencode auth login` once to connect a model provider",
+    custom_discovery_fn=_discover_opencode,
+    # `--auto` = auto-approve permissions not explicitly denied (opencode
+    # docs /docs/permissions) — parity with claude's
+    # --dangerously-skip-permissions / codex's --ask-for-approval never.
+    autonomy_flags={"default": ["--auto"]},
+    ready_hard_blockers=(),  # global blockers (esc to interrupt/cancel, press
+    # enter to continue) still apply via the cross-provider dedup table below.
+    ready_rules=(
+        # Idle composer footer, verified by direct ConPTY capture against
+        # opencode 1.18.3 on Windows (2026-07-17): the bottom hint row reads
+        # "tab agents  ctrl+p commands" once the TUI reaches its input box.
+        # "ctrl+p commands" is the distinctive half (no collision with any
+        # other provider's markers).
+        ReadyRule("ctrl+p commands", True),
+        # ⚠ BUSY marker NOT yet calibrated: needs an authenticated session to
+        # observe what the footer shows mid-generation (no provider was
+        # connected on the calibration machine). Until then the global
+        # "esc to interrupt"/"esc to cancel" blockers are the only busy
+        # signal — if opencode words its interrupt hint differently, a
+        # working pane may read idle. Re-probe after `opencode auth login`
+        # and add the observed marker here (#103).
+    ),
+    ready_wait_ms=90_000,  # cold-boot allowance, parity with codex/gemini
+    context_strategy="agents_md_file",  # opencode reads AGENTS.md natively
+    cheatsheet_filename="AGENTS.md",
+    inline_learned_notes=False,
+    use_file_guards=False,
+    mcp_adapter_variant="none",  # opencode's MCP lives in opencode.json config;
+    # no per-session CLI surface identified yet — documented gap, see #103.
+    supports_browser_profiles=False,
+    paste_threshold=200,  # uniform defaults — retune only with pty evidence
+    enter_delay_base_ms=800,
+    enter_delay_per_kb_ms=150,
+    enter_delay_max_ms=3000,
+    input_swallow_recovery=True,
+    supports_mirror=False,
+    supports_resume=False,
+    supports_slash_commands=False,
+    supports_hooks=False,
+    model_flag="--model",  # `-m provider/model` — per-role model selection hook
+    produces_jsonl_transcript=False,
+    supports_token_meter=False,
+    supports_remote_history=False,
+    prepend_bin_dir_to_path=False,
+    auto_trust=False,  # no folder-trust modal observed on first boot (1.18.3)
+    early_exit_watch=False,
+)
+
+
+# ── kimi ────────────────────────────────────────────────────────────────────
+# Kimi CLI (MoonshotAI/kimi-cli) uses the same generic spec-driven spawn
+# branch as opencode (#103 Phase 1) and has no hand-written branch of its own.
+kimi_spec = ProviderSpec(
+    name="kimi",
+    display_name="Kimi",
+    binary_names=["kimi", "kimi.cmd", "kimi.exe"],
+    install_instructions=(
+        "kimi binary not on PATH. Install with `uv tool install kimi-cli` "
+        "(alternative: `pip install kimi-cli`). On Windows, install Git Bash "
+        "first; if bash.exe is in a custom location, set `KIMI_CLI_GIT_BASH_PATH` "
+        "to its full path. Then launch `kimi` and run `/login` in the TUI."
+    ),  # env var name per kimi-cli changelog 1.42.0 (2026-05-11): "locates
+    # bash.exe via the KIMI_CLI_GIT_BASH_PATH env override → where.exe git".
+    # Pin the interpreter: kimi-cli supports Python 3.12-3.14 and uv would
+    # otherwise pick whatever default it finds, which can be outside that range.
+    install_command=["uv", "tool", "install", "--python", "3.13", "kimi-cli"],
+    post_install_note="launch `kimi` and run `/login` once in the TUI to sign in",
+    custom_discovery_fn=_discover_kimi,
+    # `--yolo` skips approval for tool calls, file writes, and shell execution.
+    # Kimi documents it as mutually exclusive with `--auto`, so only the
+    # confirmed full-autonomy flag belongs in this argv.
+    autonomy_flags={"default": ["--yolo"]},
+    ready_hard_blockers=(),  # global blockers (esc to interrupt/cancel, press
+    # enter to continue) still apply via the cross-provider dedup table below.
+    # ⚠ BUSY marker NOT yet calibrated: no authenticated Kimi TUI was
+    # available for ConPTY capture. Do not guess at an idle/busy footer; keep
+    # this empty until an exact marker is observed (#103).
+    ready_rules=(),
+    ready_wait_ms=90_000,  # cold-boot allowance, parity with codex/gemini
+    # AGENTS.md discovery CONFIRMED (kimi-cli changelog 1.29.0, 2026-04-01:
+    # "discovers and merges AGENTS.md files from the git project root down to
+    # the working directory"). Without planting it a kimi teammate never learns
+    # it must call `takkub done`, so the pane would just hang after finishing.
+    context_strategy="agents_md_file",
+    cheatsheet_filename="AGENTS.md",
+    inline_learned_notes=False,
+    use_file_guards=False,
+    mcp_adapter_variant="none",
+    supports_browser_profiles=False,
+    paste_threshold=200,  # uniform defaults — retune only with pty evidence
+    enter_delay_base_ms=800,
+    enter_delay_per_kb_ms=150,
+    enter_delay_max_ms=3000,
+    input_swallow_recovery=True,
+    supports_mirror=False,
+    supports_resume=False,
+    supports_slash_commands=False,
+    supports_hooks=False,
+    model_flag="--model",  # Kimi CLI docs: `--model <id>` (for example `k2.5`)
+    produces_jsonl_transcript=False,
+    supports_token_meter=False,
+    supports_remote_history=False,
+    prepend_bin_dir_to_path=False,
+    auto_trust=False,
+    early_exit_watch=False,
+)
+
+
+# ── cursor ──────────────────────────────────────────────────────────────────
+# Cursor CLI / cursor-agent uses the same generic spec-driven spawn branch as
+# opencode and Kimi (#103 Phase 1), with no hand-written spawn branch. Its
+# executable is the unusually generic name `agent`, so PATH discovery can
+# collide with unrelated programs; see _discover_cursor above.
+cursor_spec = ProviderSpec(
+    name="cursor",
+    display_name="Cursor",
+    binary_names=["cursor-agent", "cursor-agent.exe", "agent", "agent.exe"],
+    install_instructions=(
+        "Cursor CLI binary `agent` not on PATH. Install manually on Windows "
+        "PowerShell with `irm 'https://cursor.com/install?win32=true' | iex`; "
+        "on macOS/Linux with `curl https://cursor.com/install -fsS | bash`."
+    ),
+    # Official installation is a remote script, not a package-manager command.
+    # Never auto-execute curl/irm installers from takkub; require an explicit
+    # user-run manual install instead.
+    install_command=None,
+    post_install_note="run `agent` once to sign in via browser OAuth",
+    custom_discovery_fn=_discover_cursor,
+    # `-f/--force` ("Force allow commands unless explicitly denied", alias
+    # `--yolo`) per cursor.com/docs/cli/reference/parameters — the documented
+    # full-autonomy flag, parity with claude's --dangerously-skip-permissions.
+    # Without it every terminal command stops on a y/n prompt and the pane is
+    # unusable as an unattended teammate.
+    autonomy_flags={"default": ["--force"]},
+    ready_hard_blockers=(),
+    # ⚠ NOT yet calibrated: no Cursor TUI idle/busy markers have been observed.
+    # Keep this empty rather than guessing markers that could misroute tasks.
+    ready_rules=(),
+    ready_wait_ms=90_000,
+    # AGENTS.md discovery CONFIRMED (cursor.com/docs/cli/using: "The CLI also
+    # reads AGENTS.md and CLAUDE.md at the project root (if present) and applies
+    # them as rules"). Needed so a cursor teammate learns to call `takkub done`.
+    context_strategy="agents_md_file",
+    cheatsheet_filename="AGENTS.md",
+    inline_learned_notes=False,
+    use_file_guards=False,
+    mcp_adapter_variant="none",
+    supports_browser_profiles=False,
+    paste_threshold=200,
+    enter_delay_base_ms=800,
+    enter_delay_per_kb_ms=150,
+    enter_delay_max_ms=3000,
+    input_swallow_recovery=True,
+    supports_mirror=False,
+    # Cursor supports `--resume [thread-id]`, but cockpit resume is based on a
+    # session UUID with different semantics. Keep disabled until adapted.
+    supports_resume=False,
+    supports_slash_commands=False,
+    supports_hooks=False,
+    # Cursor CLI parameter reference: `--model <model>`; `agent models` lists ids.
+    model_flag="--model",
+    produces_jsonl_transcript=False,
+    supports_token_meter=False,
+    supports_remote_history=False,
+    prepend_bin_dir_to_path=False,
+    auto_trust=False,
+    early_exit_watch=False,
 )
 
 
@@ -324,6 +593,9 @@ PROVIDER_REGISTRY: dict[str, ProviderSpec] = {
     "claude": claude_spec,
     "codex": codex_spec,
     "gemini": gemini_spec,
+    "opencode": opencode_spec,
+    "kimi": kimi_spec,
+    "cursor": cursor_spec,
 }
 
 
@@ -338,6 +610,16 @@ _READY_RULES_BY_PROVIDER: tuple[tuple[str, ProviderSpec], ...] = (
     ("gemini", gemini_spec),
     ("codex", codex_spec),
     ("claude", claude_spec),
+    # opencode appended last: its single marker ("ctrl+p commands") shares no
+    # substring with any rule above, so position carries no precedence weight —
+    # last keeps the historical gemini→codex→claude table byte-identical.
+    ("opencode", opencode_spec),
+    # Kimi intentionally contributes no rules yet, but keeping an explicit
+    # entry makes the future calibrated marker a data-only change (#103).
+    ("kimi", kimi_spec),
+    # Cursor intentionally contributes no rules until its TUI has been
+    # observed; keep the entry explicit so calibration remains data-only.
+    ("cursor", cursor_spec),
 )
 
 READY_RULES: tuple[tuple[bool, str], ...] = tuple(

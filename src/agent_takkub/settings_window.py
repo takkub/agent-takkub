@@ -113,7 +113,9 @@ from . import (
     pipeline_config,
     project_nav,
     provider_config,
+    provider_models,
     provider_state,
+    role_models,
     shared_dev_tools,
     skill_audit,
     skill_policy,
@@ -221,6 +223,85 @@ _PROVIDER_DESC: dict[str, str] = {
     "codex": "OpenAI Codex CLI — second opinion / refactor cross-check",
     "gemini": "Google Antigravity (agy) — planning / long-context second opinion",
 }
+
+# Empty selection = don't pass `--model` at all, i.e. whatever that CLI
+# defaults to for the signed-in account.
+_MODEL_DEFAULT_LABEL = "(default)"
+
+# Model shortlists per provider — a *snapshot* (July 2026 research) offered as
+# dropdown presets. Every model combo stays EDITABLE because each CLI ships new
+# ids on its own cadence and a stale hardcoded list is worse than typing the
+# id; run the CLI's own lister for the authoritative current set
+# (`agy models`, `agent --list-models`, `codex --help`, Kimi/opencode docs).
+# Some entries (agy's spaced display names, cursor's ids) may differ from the
+# exact `--model` token — the field being editable is the escape hatch.
+_MODELS_BY_PROVIDER: dict[str, tuple[str, ...]] = {
+    "claude": (
+        "opus",
+        "sonnet",
+        "haiku",
+        "claude-opus-4-8",
+        "claude-sonnet-5",
+        "claude-haiku-4-5",
+        "claude-fable-5",
+    ),
+    "codex": ("gpt-5.6", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex"),
+    "gemini": (
+        "Gemini 3.5 Flash",
+        "Gemini 3.1 Pro (High)",
+        "Gemini 3.1 Pro (Low)",
+        "Claude Sonnet 4.6 (Thinking)",
+        "Claude Opus 4.6 (Thinking)",
+        "GPT-OSS 120B",
+    ),
+    "kimi": ("k3", "k2.7", "k2.6", "k2.5"),
+    "cursor": (
+        "claude-sonnet-4.7",
+        "claude-opus-4.7",
+        "gpt-5.5",
+        "gemini-2.5-pro",
+        "grok-4",
+        "composer-1",
+    ),
+    "opencode": (
+        "anthropic/claude-sonnet-4.7",
+        "anthropic/claude-opus-4.7",
+        "openai/gpt-5.5",
+        "google/gemini-2.5-pro",
+    ),
+}
+
+
+def _fill_model_combo(combo: QComboBox, provider: str, current: str | None) -> None:
+    """(Re)populate a model picker with *provider*'s presets, preserving any
+    free-typed value, and point it at *current* (empty/None → "(default)")."""
+    combo.blockSignals(True)
+    combo.clear()
+    combo.addItem(_MODEL_DEFAULT_LABEL, "")
+    for preset in _MODELS_BY_PROVIDER.get(provider, ()):
+        combo.addItem(preset, preset)
+    combo.lineEdit().setPlaceholderText(_MODEL_DEFAULT_LABEL)
+    _select_model(combo, current)
+    combo.blockSignals(False)
+
+
+def _select_model(combo: QComboBox, model: str | None) -> None:
+    """Point *combo* at *model* — a preset row when it matches one, otherwise
+    the free-text value; empty/None falls back to the "(default)" row."""
+    if not model:
+        combo.setCurrentIndex(0)
+        return
+    idx = combo.findData(model)
+    if idx >= 0:
+        combo.setCurrentIndex(idx)
+    else:
+        combo.setCurrentText(model)
+
+
+def _combo_model(combo: QComboBox) -> str:
+    """Read a model picker back: "(default)" (or blank) means no override."""
+    text = combo.currentText().strip()
+    return "" if text == _MODEL_DEFAULT_LABEL else text
 
 
 # Roles rendered as rows in the MCP/Plugins matrices — same set (and order)
@@ -618,6 +699,11 @@ class SettingsWindow(QDialog):
             pipeline_config.path(self._project),
             pane_tools_policy.PANE_TOOLS_POLICY_FILE,
             skill_policy.SKILL_POLICY_FILE,
+            # Model overrides are written first in this same Save, so they must
+            # roll back too — otherwise a later pipeline/tools failure reports
+            # "save failed" while the model files are already persisted.
+            provider_models.path(),
+            role_models.path(),
         )
         snapshots = {p: (p.read_bytes() if p.exists() else None) for p in snapshot_paths}
 
@@ -637,6 +723,21 @@ class SettingsWindow(QDialog):
                 desired_disabled = not toggle.isChecked()
                 if desired_disabled != provider_state.is_disabled(provider):
                     self.pending_provider_disabled[provider] = desired_disabled
+
+            # Per-provider + per-role model overrides — written straight
+            # through (unlike the on/off toggle they need no orchestrator
+            # broadcast; the value is read at spawn time, so it lands on the
+            # next pane).
+            for provider, combo in self._provider_model_combos.items():
+                provider_models.set_model(provider, _combo_model(combo))
+            for role, combo in self._role_model_combos.items():
+                # Bind the model to the CLI it was picked for, so switching the
+                # role's provider (or a substitute kicking in) can't pass a
+                # model id to a CLI that doesn't know it.
+                role_provider = (
+                    self._role_provider_combos[role].currentData() or provider_config.CLAUDE
+                )
+                role_models.set_model(role, role_provider, _combo_model(combo))
 
             role_providers = {
                 role: combo.currentData() for role, combo in self._role_provider_combos.items()
@@ -754,6 +855,7 @@ class SettingsWindow(QDialog):
         pp_lay.addWidget(pp_title)
 
         self._provider_toggles: dict[str, cockpit_theme.ToggleSwitch] = {}
+        self._provider_model_combos: dict[str, QComboBox] = {}
         for provider in sorted(provider_state.TOGGLABLE):
             row = QWidget(provider_panel)
             row_lay = QHBoxLayout(row)
@@ -768,6 +870,19 @@ class SettingsWindow(QDialog):
             desc = QLabel(_PROVIDER_DESC.get(provider, ""), row)
             desc.setObjectName("panelHint")
             row_lay.addWidget(desc, 1)
+
+            # Per-provider default model (provider_models.json). Editable —
+            # presets are only a shortcut; anything typed passes through to
+            # that provider's `--model` flag verbatim.
+            model_combo = QComboBox(row)
+            model_combo.setEditable(True)
+            model_combo.setMinimumWidth(200)
+            model_combo.setAccessibleName(f"{provider.capitalize()} model")
+            _fill_model_combo(model_combo, provider, provider_models.model_for(provider))
+            model_combo.currentTextChanged.connect(self._mark_dirty)
+            row_lay.addWidget(model_combo)
+            self._provider_model_combos[provider] = model_combo
+
             toggle = cockpit_theme.ToggleSwitch(
                 row, checked=not provider_state.is_disabled(provider)
             )
@@ -792,6 +907,7 @@ class SettingsWindow(QDialog):
 
         self._role_toggles = {}
         self._role_provider_combos = {}
+        self._role_model_combos: dict[str, QComboBox] = {}
         self._role_provider_badges: dict[str, QLabel] = {}
         self._lead_warning_lbl: QLabel | None = None
 
@@ -874,6 +990,35 @@ class SettingsWindow(QDialog):
         row_lay.addWidget(combo)
         self._role_provider_combos[role] = combo
 
+        # Per-role model override — the model this role's panes spawn with,
+        # overriding the provider-level default. Presets track the role's
+        # CURRENT provider (repopulated when the CLI combo changes) and the
+        # box is editable for ids not in the shortlist. Empty = inherit the
+        # provider default. Stored per role in role_models.json.
+        model_combo = QComboBox(row)
+        model_combo.setEditable(True)
+        model_combo.setMinimumWidth(180)
+        model_combo.setAccessibleName(f"{label} model")
+        model_combo.setToolTip("model ที่ role นี้ใช้ — ว่าง = ตาม provider default")
+        _role_provider_now = combo.currentData() or provider_config.CLAUDE
+        _fill_model_combo(
+            model_combo,
+            _role_provider_now,
+            role_models.model_for(role, _role_provider_now),
+        )
+        model_combo.currentTextChanged.connect(self._mark_dirty)
+        row_lay.addWidget(model_combo)
+        self._role_model_combos[role] = model_combo
+        # When the role's CLI changes, refresh its model presets to that
+        # provider's list (keeping any free-typed value the user had).
+        combo.currentIndexChanged.connect(
+            lambda _i=0, r=role: _fill_model_combo(
+                self._role_model_combos[r],
+                self._role_provider_combos[r].currentData() or provider_config.CLAUDE,
+                _combo_model(self._role_model_combos[r]) or None,
+            )
+        )
+
         # Gemini #12 — surface when the role's configured provider would
         # actually be substituted by Claude right now (toggled off or not
         # installed), as a styled badge rather than plain banner text.
@@ -945,6 +1090,7 @@ class SettingsWindow(QDialog):
         roles_mod.unregister_role(role)
         self._role_toggles.pop(role, None)
         self._role_provider_combos.pop(role, None)
+        self._role_model_combos.pop(role, None)
         self._role_provider_badges.pop(role, None)
         layout = row.parentWidget().layout() if row.parentWidget() else None
         if layout is not None:
@@ -975,6 +1121,11 @@ class SettingsWindow(QDialog):
             toggle.setChecked(not provider_state.is_disabled(provider))
             toggle.blockSignals(False)
 
+        for provider, combo in self._provider_model_combos.items():
+            combo.blockSignals(True)
+            _select_model(combo, provider_models.model_for(provider))
+            combo.blockSignals(False)
+
         roles_enabled = pipeline_config.load(self._project).get("rolesEnabled", {})
         for role, toggle in self._role_toggles.items():
             toggle.blockSignals(True)
@@ -988,6 +1139,10 @@ class SettingsWindow(QDialog):
             combo.setCurrentIndex(idx if idx >= 0 else 0)
             combo.blockSignals(False)
             self._sync_role_provider_badge(role)
+
+        for role, combo in self._role_model_combos.items():
+            provider = self._role_provider_combos[role].currentData() or provider_config.CLAUDE
+            _fill_model_combo(combo, provider, role_models.model_for(role, provider))
 
     # ──────────────────────────────────────────────────────────
     # view: New Role (real)

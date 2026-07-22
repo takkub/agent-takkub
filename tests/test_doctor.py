@@ -808,6 +808,28 @@ class TestCmdDoctorExitCode:
         assert parsed[0]["status"] == "ok"
         assert parsed[1]["status"] == "fail"
 
+    @pytest.mark.parametrize(
+        ("argv", "install_providers"),
+        [
+            (["doctor", "--fix"], False),
+            (["doctor", "--fix", "--install-providers"], True),
+        ],
+    )
+    def test_fix_forwards_provider_install_opt_in(
+        self, argv: list[str], install_providers: bool
+    ) -> None:
+        findings = [Finding("claude", "binary", Status.OK)]
+        with (
+            patch("agent_takkub.doctor.run_all_checks", return_value=findings),
+            patch("agent_takkub.doctor.run_auto_fixes") as run_auto_fixes,
+        ):
+            from agent_takkub import cli
+
+            result = cli.main(argv)
+
+        assert result == 0
+        run_auto_fixes.assert_called_once_with(findings, install_providers=install_providers)
+
 
 class TestCheckClaudeAuthenticated:
     """[claude] authenticated — must read `.credentials.json` (leading dot,

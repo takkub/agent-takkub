@@ -43,6 +43,9 @@ LEAD_ONLY_COMMANDS = frozenset(
         "goal",
         "worktree",
         "restart",
+        # machine-level npm installs — a teammate pane must never mutate the
+        # host toolchain mid-task; Lead/terminal decides when to add a CLI.
+        "provider",
     }
 )
 
@@ -770,7 +773,7 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
     findings = run_all_checks()
 
     if args.fix:
-        run_auto_fixes(findings)
+        run_auto_fixes(findings, install_providers=args.install_providers)
         findings = run_all_checks()
 
     if args.json:
@@ -797,6 +800,72 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
     n_fail = sum(1 for f in findings if f.status == Status.FAIL)
     ok = n_fail == 0
     return {"ok": ok, "msg": f"{n_fail} fail(s)" if not ok else "all checks passed"}
+
+
+def cmd_provider(args: argparse.Namespace) -> dict:
+    """`takkub provider list|install|model` — provider management surface.
+
+    Pure-local (no orchestrator socket): discovery, config, and installs run
+    straight from this process, so it works with the cockpit closed — same
+    rationale as `takkub worktree`. The cockpit picks changes up on the next
+    spawn/chip refresh without a restart.
+    """
+    from .provider_install import _discover, install_provider, installable_providers
+    from .provider_models import clear_model, model_for, set_model
+    from .provider_spec import PROVIDER_REGISTRY
+
+    if args.provider_cmd == "list":
+        lines = []
+        for name, spec in PROVIDER_REGISTRY.items():
+            if name == "claude":
+                continue
+            path = _discover(spec)
+            if path:
+                state = f"installed  {path}"
+            elif spec.install_command:
+                state = f"not installed  (takkub provider install {name})"
+            else:
+                state = "not installed  (manual — see takkub doctor)"
+            configured_model = model_for(name)
+            if configured_model:
+                state += f" · model: {configured_model}"
+            lines.append(f"  {name:<10} {state}")
+        _utf8_print("\n".join(lines) or "  (no providers registered)")
+        return {"ok": True, "msg": f"{len(lines)} provider(s)"}
+
+    if args.provider_cmd == "model":
+        name = args.name
+        if name not in PROVIDER_REGISTRY:
+            msg = f"unknown provider: {name!r}"
+            _utf8_print(f"✗ {msg}")
+            return {"ok": False, "msg": msg}
+        if args.clear:
+            clear_model(name)
+            msg = f"{name} model cleared (provider default)"
+            _utf8_print(f"✓ {msg}")
+            return {"ok": True, "msg": msg}
+        if args.model is not None:
+            set_model(name, args.model)
+            configured_model = model_for(name)
+            if configured_model:
+                msg = f"{name} model: {configured_model}"
+            else:
+                msg = f"{name} model cleared (provider default)"
+            _utf8_print(f"✓ {msg}")
+            return {"ok": True, "msg": msg}
+        configured_model = model_for(name)
+        msg = f"{name} model: {configured_model or '(provider default)'}"
+        _utf8_print(msg)
+        return {"ok": True, "msg": msg}
+
+    # install
+    name = args.name
+    ok, msg = install_provider(name)
+    _utf8_print(("✓ " if ok else "✗ ") + msg)
+    if not ok and name not in installable_providers() and name in PROVIDER_REGISTRY:
+        # manual-only provider — the message already carries the instructions
+        pass
+    return {"ok": ok, "msg": msg}
 
 
 def cmd_release(args: argparse.Namespace) -> dict:
@@ -1735,7 +1804,12 @@ def main(argv: list[str] | None = None) -> int:
     sdoc.add_argument(
         "--fix",
         action="store_true",
-        help="apply safe auto-fixes for missing/broken state",
+        help="apply safe auto-fixes (provider installs are skipped by default)",
+    )
+    sdoc.add_argument(
+        "--install-providers",
+        action="store_true",
+        help="with --fix, also install all missing provider CLIs (default: skipped)",
     )
     sdoc.add_argument(
         "--json",
@@ -1743,6 +1817,23 @@ def main(argv: list[str] | None = None) -> int:
         help="emit JSON instead of text report",
     )
     sdoc.set_defaults(func=cmd_doctor)
+
+    sprv = sub.add_parser(
+        "provider",
+        help="provider CLIs: list/install providers and configure spawn models",
+    )
+    sprv_sub = sprv.add_subparsers(dest="provider_cmd", required=True)
+    sprv_sub.add_parser("list", help="show each registered provider + install state")
+    spi = sprv_sub.add_parser(
+        "install",
+        help="install a provider CLI via its registered package command (e.g. npm)",
+    )
+    spi.add_argument("name", help="provider name (e.g. codex, opencode)")
+    spm = sprv_sub.add_parser("model", help="show or set a provider's spawn model")
+    spm.add_argument("name", help="provider name (e.g. claude, kimi, cursor)")
+    spm.add_argument("model", nargs="?", help="model id; omit to show the current value")
+    spm.add_argument("--clear", action="store_true", help="clear the model and use CLI default")
+    sprv.set_defaults(func=cmd_provider)
 
     sprov = sub.add_parser(
         "provision",
