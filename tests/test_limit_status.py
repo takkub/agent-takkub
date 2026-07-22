@@ -199,6 +199,18 @@ def _fake_usage() -> UsageData:
     return UsageData(plan="Max", windows=[], extra_usage_enabled=False)
 
 
+def _age_shared_state(config_dir: Path, by_s: float) -> None:
+    """Rewind the shared state file's timestamps so a subsequent _do_fetch
+    behaves like a poll tick arriving that much later."""
+    path = limit_status._state_path(config_dir)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if raw.get("fetched_at"):
+        raw["fetched_at"] -= by_s
+    if raw.get("backoff_until"):
+        raw["backoff_until"] -= by_s
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+
 class TestLimitStore:
     def test_dedup_same_config_dir_two_registers_one_poll(self, tmp_path: Path) -> None:
         """Two register() calls on the same resolved config_dir trigger only 1 fetch."""
@@ -323,6 +335,12 @@ class TestLimitStore:
             store._do_fetch(key)
         assert key not in store._backoff_until
 
+        # A real second poll happens interval_s later, by which point the
+        # shared-state file is no longer "fresh" — age it so the direct
+        # _do_fetch call below reaches the network path instead of the
+        # cross-process reuse fast-path.
+        _age_shared_state(key, by_s=7200)
+
         with patch(
             "agent_takkub.limit_status.fetch_usage",
             side_effect=limit_status.RateLimited(3600.0),
@@ -397,3 +415,165 @@ class TestLimitStore:
 
         assert ok, "loop must fetch again once the backoff deadline has passed"
         assert key not in store._backoff_until, "a successful fetch must clear backoff"
+
+
+# ---------------------------------------------------------------------------
+# missing-utilization honesty + cross-process shared state
+# ---------------------------------------------------------------------------
+
+
+class TestParseWindowUtilization:
+    def test_missing_utilization_is_none_not_zero(self) -> None:
+        """A window whose payload has resets_at but NO utilization field must
+        parse as utilization=None (unknown), never 0.0 — a schema change once
+        rendered as a confident '0%' on the prod chip."""
+        w = limit_status._parse_window("five_hour", {"resets_at": "2026-06-09T10:00:00+00:00"})
+        assert w is not None
+        assert w.utilization is None
+
+    def test_null_utilization_is_none(self) -> None:
+        w = limit_status._parse_window(
+            "five_hour",
+            {"utilization": None, "resets_at": "2026-06-09T10:00:00+00:00"},
+        )
+        assert w is not None
+        assert w.utilization is None
+
+    def test_real_zero_stays_zero(self) -> None:
+        """An explicit utilization: 0 from the API is a genuine 0%, kept as 0.0."""
+        w = limit_status._parse_window(
+            "five_hour",
+            {"utilization": 0, "resets_at": "2026-06-09T10:00:00+00:00"},
+        )
+        assert w is not None
+        assert w.utilization == 0.0
+
+
+class TestSharedState:
+    def test_roundtrip(self, tmp_path: Path) -> None:
+        cd = tmp_path / ".claude"
+        cd.mkdir()
+        data = UsageData(
+            plan="Max",
+            windows=[
+                limit_status.LimitWindow(
+                    name="five_hour",
+                    utilization=42.5,
+                    resets_at=datetime(2026, 6, 9, 10, tzinfo=UTC),
+                ),
+                limit_status.LimitWindow(
+                    name="seven_day",
+                    utilization=None,
+                    resets_at=datetime(2026, 6, 15, 10, tzinfo=UTC),
+                ),
+            ],
+            extra_usage_enabled=True,
+            fetched_at=datetime(2026, 6, 9, 9, tzinfo=UTC),
+        )
+        limit_status.save_shared_state(cd, data=data)
+        state = limit_status.load_shared_state(cd)
+        assert state["backoff_until"] == 0.0
+        assert state["fetched_at"] > 0
+        loaded = state["data"]
+        assert loaded is not None
+        assert loaded.plan == "Max"
+        assert loaded.windows[0].utilization == 42.5
+        assert loaded.windows[1].utilization is None
+        assert loaded.windows[1].resets_at == datetime(2026, 6, 15, 10, tzinfo=UTC)
+
+    def test_missing_file_is_empty_state(self, tmp_path: Path) -> None:
+        state = limit_status.load_shared_state(tmp_path / "nowhere")
+        assert state == {"backoff_until": 0.0, "fetched_at": 0.0, "data": None}
+
+    def test_second_store_honours_persisted_backoff(self, tmp_path: Path) -> None:
+        """A 429 recorded by one store (process) must stop a FRESH store from
+        fetching the same account — the multi-instance hammering fix."""
+        cd = tmp_path / ".claude"
+        cd.mkdir()
+        key = limit_status._resolve_config_dir(cd)
+
+        first = LimitStore(interval_s=3600)
+        first._refs[key] = 1
+        with patch(
+            "agent_takkub.limit_status.fetch_usage",
+            side_effect=limit_status.RateLimited(3600.0),
+        ):
+            first._do_fetch(key)
+
+        calls: list = []
+        second = LimitStore(interval_s=3600)  # simulates another cockpit instance
+        second._refs[key] = 1
+        with patch(
+            "agent_takkub.limit_status.fetch_usage",
+            side_effect=lambda cfg=None: calls.append(1) or _fake_usage(),
+        ):
+            second._do_fetch(key)
+
+        assert calls == [], "second instance must honour the persisted backoff"
+        assert key in second._backoff_until
+
+    def test_second_store_reuses_fresh_shared_data(self, tmp_path: Path) -> None:
+        """A fresh result persisted by one store is reused by another instead
+        of a duplicate network fetch."""
+        cd = tmp_path / ".claude"
+        cd.mkdir()
+        key = limit_status._resolve_config_dir(cd)
+
+        first = LimitStore(interval_s=3600)
+        first._refs[key] = 1
+        with patch("agent_takkub.limit_status.fetch_usage", return_value=_fake_usage()):
+            first._do_fetch(key)
+
+        calls: list = []
+        emitted: list = []
+        second = LimitStore(interval_s=3600, on_update=lambda k, d: emitted.append(d))
+        second._refs[key] = 1
+        with patch(
+            "agent_takkub.limit_status.fetch_usage",
+            side_effect=lambda cfg=None: calls.append(1) or _fake_usage(),
+        ):
+            second._do_fetch(key)
+
+        assert calls == [], "fresh shared data must be reused, not re-fetched"
+        assert second.get(cd) is not None
+        assert emitted and emitted[-1] is not None
+
+
+class TestFetchUsageShared:
+    def test_429_persists_backoff_and_returns_stale(self, tmp_path: Path) -> None:
+        cd = tmp_path / ".claude"
+        cd.mkdir()
+        limit_status.save_shared_state(cd, data=_fake_usage())
+        _age_shared_state(cd, by_s=7200)
+
+        with patch(
+            "agent_takkub.limit_status.fetch_usage",
+            side_effect=limit_status.RateLimited(1800.0),
+        ):
+            out = limit_status.fetch_usage_shared(cd, max_age_s=300.0)
+
+        assert out is not None, "stale data should be returned while penalised"
+        state = limit_status.load_shared_state(cd)
+        assert state["backoff_until"] > time.time() + 1200
+
+    def test_backoff_blocks_network(self, tmp_path: Path) -> None:
+        cd = tmp_path / ".claude"
+        cd.mkdir()
+        limit_status.save_shared_state(cd, backoff_until=time.time() + 3600)
+
+        with patch("agent_takkub.limit_status.fetch_usage") as mock_fetch:
+            out = limit_status.fetch_usage_shared(cd)
+
+        mock_fetch.assert_not_called()
+        assert out is None  # no prior data — caller sees "unknown", not a hit
+
+    def test_fresh_data_short_circuits(self, tmp_path: Path) -> None:
+        cd = tmp_path / ".claude"
+        cd.mkdir()
+        limit_status.save_shared_state(cd, data=_fake_usage())
+
+        with patch("agent_takkub.limit_status.fetch_usage") as mock_fetch:
+            out = limit_status.fetch_usage_shared(cd, max_age_s=300.0)
+
+        mock_fetch.assert_not_called()
+        assert out is not None

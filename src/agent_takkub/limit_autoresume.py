@@ -42,7 +42,7 @@ from PyQt6.QtCore import QTimer
 from . import auto_resume
 from .agent_pane import AgentPane
 from .lead_inbox import _delayed_enter
-from .limit_status import UsageData, fetch_usage
+from .limit_status import UsageData, fetch_usage_shared
 from .orchestrator_text import _log_event
 from .provider_config import CLAUDE, effective_provider_for
 from .roles import LEAD
@@ -61,7 +61,11 @@ def _usage_confirms_limit(
     if usage is None:
         return False
     for window in usage.windows or ():
-        if window.name == "five_hour" and window.utilization >= threshold:
+        if (
+            window.name == "five_hour"
+            and window.utilization is not None
+            and window.utilization >= threshold
+        ):
             return True
     return False
 
@@ -173,7 +177,12 @@ class AutoResumeMixin:
             self.limitUsageConfirmed.emit(project, role, True)
             return
         try:
-            usage = fetch_usage(config_dir)
+            # Shared-state-aware: reuses a recent poller result and honours a
+            # persisted 429 backoff instead of firing an extra request that
+            # would re-arm the endpoint's penalty (see limit_status module
+            # comment). A pane that just banner-reported a limit makes fresh
+            # telemetry likely cached moments ago anyway.
+            usage = fetch_usage_shared(config_dir, max_age_s=300.0)
         except Exception:
             usage = None
         confirmed = _usage_confirms_limit(usage)

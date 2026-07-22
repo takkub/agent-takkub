@@ -39,8 +39,15 @@ class LimitPanelMixin:
 
         # on_update runs in a daemon thread — emit signal so Qt queues the
         # call and _on_usage_updated executes on the GUI thread.
+        # 600 s (was 120): the usage endpoint is aggressively rate-limited
+        # per account (2026-07-17: Retry-After up to ~60 min, re-armed by
+        # further attempts) and this machine legitimately runs several
+        # cockpit instances. Utilisation moves slowly; a 10-min cadence
+        # keeps the chip honest without feeding the penalty box. The
+        # cross-process shared state in limit_status collapses concurrent
+        # instances to ~one real fetch per interval on top of this.
         self._limit_store = limit_status.LimitStore(
-            interval_s=120,
+            interval_s=600,
             on_update=lambda cd, data: self._usageUpdated.emit((cd, data)),
         )
         self._limit_store.start()
@@ -109,19 +116,41 @@ class LimitPanelMixin:
             w = window_map.get(key)
             if w is None:
                 return f"{label} —"
-            pct = f"{round(w.utilization)}%"
+            # utilization None = the API payload carried no figure — show
+            # "—" (unknown), never a fabricated 0%.
+            pct = "—" if w.utilization is None else f"{round(w.utilization)}%"
             eta = _fmt_eta(w)
             return f"{label} {eta} {pct}" if eta else f"{label} {pct}"
 
         text = " · ".join([_fmt("five_hour", "5h"), _fmt("seven_day", "7d")])
 
-        max_util = max((w.utilization for w in (data.windows or [])), default=0.0)
+        # Stale detection: how old is the payload behind this render? A
+        # rate-limited emit re-serves the last good fetch, and with the
+        # endpoint's long penalties that snapshot can be an hour+ old — a
+        # frozen "52%" (or a post-reset "0%") shown as if live was exactly
+        # the prod "0% ตลอด" bug. Age > 15 min → visible ⏳ marker.
+        stale_age_s: float | None = None
+        fetched_at = getattr(data, "fetched_at", None)
+        if fetched_at is not None:
+            if fetched_at.tzinfo is None:
+                fetched_at = fetched_at.replace(tzinfo=UTC)
+            stale_age_s = max(0.0, (now - fetched_at).total_seconds())
+        is_stale = stale_age_s is not None and stale_age_s > 900
+        if is_stale:
+            text += " ⏳"
+
+        known_utils = [w.utilization for w in (data.windows or []) if w.utilization is not None]
+        max_util = max(known_utils, default=0.0)
         if rate_limited:
             color = cockpit_theme.BANNER_WARN_BORDER
         elif max_util >= 80:
             color = cockpit_theme.STATE_ERROR_BRIGHT
         elif max_util >= 50:
             color = cockpit_theme.METER_AMBER
+        elif is_stale or not known_utils:
+            # Old snapshot or no utilisation figures at all — dim the chip so
+            # it doesn't read as a confident live value.
+            color = cockpit_theme.TEXT_MUTED
         else:
             # Calm state → Claude coral so the little spark reads as "a bit of
             # Claude" in the corner instead of a neutral grey system chip.
@@ -129,7 +158,15 @@ class LimitPanelMixin:
 
         self._limit_label.apply(text, color)
         plan = getattr(data, "plan", "")
-        stale_note = " (rate-limited, showing last known)" if rate_limited else ""
+        note_bits = []
+        if rate_limited:
+            note_bits.append("rate-limited — showing last known values")
+        if stale_age_s is not None:
+            mins = int(stale_age_s // 60)
+            note_bits.append(f"fetched {mins}m ago" if mins else "just fetched")
+        if any(w.utilization is None for w in (data.windows or [])):
+            note_bits.append("— = API ไม่ส่งค่า utilization (unknown ไม่ใช่ 0%)")
+        stale_note = f" ({' · '.join(note_bits)})" if note_bits else ""
         reset_lines = []
         for key, label in (
             ("five_hour", "5h"),

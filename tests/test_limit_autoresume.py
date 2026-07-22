@@ -53,6 +53,16 @@ class TestUsageConfirmsLimit:
         assert _usage_confirms_limit(_usage(80.0), threshold=75.0) is True
         assert _usage_confirms_limit(_usage(80.0), threshold=90.0) is False
 
+    def test_unknown_utilization_not_confirmed(self) -> None:
+        """utilization=None (API omitted the figure) must never confirm a
+        limit — unknown is not 'exhausted'."""
+        usage = UsageData(
+            plan="Max",
+            windows=[LimitWindow(name="five_hour", utilization=None, resets_at=None)],
+            extra_usage_enabled=False,
+        )
+        assert _usage_confirms_limit(usage) is False
+
 
 # ── shared fixture: a bare Orchestrator with just what AutoResumeMixin touches ──
 

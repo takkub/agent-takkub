@@ -38,7 +38,11 @@ _cached_ua: str | None = None
 @dataclass
 class LimitWindow:
     name: str
-    utilization: float
+    # None = the API response carried no utilization figure for this window.
+    # Callers must render that as "unknown" (—), never as 0% — a fabricated
+    # 0% reads as "plenty of quota left", the exact opposite of the truth
+    # when the field is missing because the endpoint changed shape.
+    utilization: float | None
     resets_at: datetime
 
 
@@ -205,9 +209,17 @@ def _refresh_and_persist(
 def _parse_window(name: str, value: dict[str, Any] | None) -> LimitWindow | None:
     if not value or value.get("resets_at") is None:
         return None
+    raw_util = value.get("utilization")
+    try:
+        # Preserve "field absent" as None instead of coercing to 0.0 — the
+        # UI shows "—" for unknown. (`or 0.0` here once turned a schema
+        # change into a permanent, confident-looking "0%".)
+        utilization = float(raw_util) if raw_util is not None else None
+    except (TypeError, ValueError):
+        utilization = None
     return LimitWindow(
         name=name,
-        utilization=float(value.get("utilization") or 0.0),
+        utilization=utilization,
         resets_at=datetime.fromisoformat(str(value["resets_at"])),
     )
 
@@ -353,6 +365,145 @@ def _resolve_config_dir(config_dir: Path | None) -> Path:
     return Path(config_dir).resolve()
 
 
+# ── cross-process shared fetch state ─────────────────────────────────────────
+# The usage endpoint is aggressively rate-limited per account (observed
+# 2026-07-17: Retry-After up to ~60 min, re-armed by further attempts). One
+# machine often runs SEVERAL cockpit instances (prod + dev) that each polled
+# independently — every instance honoured only its own in-memory backoff, so
+# together they kept the server-side penalty armed forever and the chip froze
+# on stale data. The fix: persist {last good payload, fetched_at, backoff_until}
+# in a small JSON *inside the polled profile's config dir* — the one location
+# every process polling that account already shares (same precedent as
+# `takkub-claude-auth.json`). All wall-clock epochs (cross-process; monotonic
+# clocks don't compare between processes).
+_STATE_FILENAME = "takkub-usage-state.json"
+
+
+def _state_path(config_dir: Path | None) -> Path:
+    return _resolve_config_dir(config_dir) / _STATE_FILENAME
+
+
+def _serialize_usage(data: UsageData) -> dict[str, Any]:
+    return {
+        "plan": data.plan,
+        "extra_usage_enabled": data.extra_usage_enabled,
+        "fetched_at": data.fetched_at.isoformat() if data.fetched_at else None,
+        "windows": [
+            {
+                "name": w.name,
+                "utilization": w.utilization,
+                "resets_at": w.resets_at.isoformat(),
+            }
+            for w in data.windows
+        ],
+    }
+
+
+def _deserialize_usage(raw: Any) -> UsageData | None:
+    if not isinstance(raw, dict):
+        return None
+    try:
+        windows = []
+        for w in raw.get("windows") or []:
+            util = w.get("utilization")
+            windows.append(
+                LimitWindow(
+                    name=str(w["name"]),
+                    utilization=float(util) if util is not None else None,
+                    resets_at=datetime.fromisoformat(str(w["resets_at"])),
+                )
+            )
+        fetched_raw = raw.get("fetched_at")
+        return UsageData(
+            plan=str(raw.get("plan") or "Unknown"),
+            windows=windows,
+            extra_usage_enabled=bool(raw.get("extra_usage_enabled")),
+            fetched_at=datetime.fromisoformat(str(fetched_raw)) if fetched_raw else None,
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def load_shared_state(config_dir: Path | None) -> dict[str, Any]:
+    """Return {"backoff_until": epoch, "fetched_at": epoch, "data": UsageData|None}.
+
+    Best-effort: missing/corrupt file → all-zero state (never raises)."""
+    out: dict[str, Any] = {"backoff_until": 0.0, "fetched_at": 0.0, "data": None}
+    try:
+        raw = json.loads(_state_path(config_dir).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return out
+    if not isinstance(raw, dict):
+        return out
+    try:
+        out["backoff_until"] = float(raw.get("backoff_until") or 0.0)
+    except (TypeError, ValueError):
+        pass
+    try:
+        out["fetched_at"] = float(raw.get("fetched_at") or 0.0)
+    except (TypeError, ValueError):
+        pass
+    out["data"] = _deserialize_usage(raw.get("data"))
+    return out
+
+
+def save_shared_state(
+    config_dir: Path | None,
+    *,
+    data: UsageData | None = None,
+    backoff_until: float | None = None,
+) -> None:
+    """Merge-write the shared state file (atomic, best-effort).
+
+    `data` given → record the fresh payload + fetched_at=now and CLEAR any
+    backoff (a success proves the penalty lapsed). `backoff_until` given →
+    record the deadline, keeping the last good payload for stale display."""
+    path = _state_path(config_dir)
+    current = load_shared_state(config_dir)
+    if data is not None:
+        current["data"] = data
+        current["fetched_at"] = time.time()
+        current["backoff_until"] = 0.0
+    if backoff_until is not None:
+        current["backoff_until"] = float(backoff_until)
+    payload = {
+        "backoff_until": current["backoff_until"],
+        "fetched_at": current["fetched_at"],
+        "data": _serialize_usage(current["data"]) if current["data"] is not None else None,
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload, indent=1), encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        _log.debug("could not persist usage state to %s", path, exc_info=True)
+
+
+def fetch_usage_shared(config_dir: Path | None, max_age_s: float = 300.0) -> UsageData | None:
+    """Cross-process-polite `fetch_usage`: reuse another process's recent
+    result, honour a persisted backoff, and record any 429 penalty for
+    everyone else. One-shot callers (limit_autoresume signal-b confirmation)
+    should use this instead of `fetch_usage` so they never re-arm a penalty
+    the pollers are already sitting out. May return stale data (or None)
+    while backed off — callers treat it as best-effort telemetry."""
+    now = time.time()
+    state = load_shared_state(config_dir)
+    if state["backoff_until"] > now:
+        return state["data"]
+    if state["data"] is not None and now - state["fetched_at"] <= max_age_s:
+        return state["data"]
+    try:
+        fresh = fetch_usage(config_dir)
+    except RateLimited as exc:
+        save_shared_state(config_dir, backoff_until=now + max(exc.retry_after or 0.0, 300.0))
+        return state["data"]
+    if fresh is not None:
+        save_shared_state(config_dir, data=fresh)
+        return fresh
+    return state["data"]
+
+
 class LimitStore:
     """Shared background poller with per-user (config_dir) ref-counting.
 
@@ -449,16 +600,56 @@ class LimitStore:
         stuck on "—" forever. We also emit the last known data marked
         ``rate_limited`` so a stale value can show instead of blanking.
         Mirrors the backoff logic in ``Poller._do_poll``.
+
+        Both the backoff and the last good payload are ALSO persisted via the
+        shared state file (see module comment above ``_state_path``) so
+        concurrent cockpit instances and post-restart runs neither re-arm a
+        served penalty nor duplicate a fetch another process just made.
         """
+        now = time.time()
+        shared = load_shared_state(key)
+
+        # Another process (or a previous run) is sitting out a 429 penalty —
+        # honour it instead of re-arming, and surface its stale data.
+        if shared["backoff_until"] > now:
+            with self._lock:
+                if key not in self._refs:
+                    return
+                self._backoff_until[key] = time.monotonic() + (shared["backoff_until"] - now)
+                if shared["data"] is not None and self._cache.get(key) is None:
+                    self._cache[key] = shared["data"]
+                cached = self._cache.get(key)
+                emit_data = (
+                    dataclasses.replace(cached, status="rate_limited")
+                    if cached is not None
+                    else None
+                )
+            self._emit(key, emit_data)
+            return
+
+        # Another process fetched recently enough — reuse instead of a
+        # duplicate network hit (N instances collapse to ~1 fetch/interval).
+        if shared["data"] is not None and now - shared["fetched_at"] < self._interval_s:
+            with self._lock:
+                if key not in self._refs:
+                    return
+                self._cache[key] = shared["data"]
+                self._backoff_until.pop(key, None)
+            self._emit(key, shared["data"])
+            return
+
         try:
             data = fetch_usage(key)
         except RateLimited as exc:
             backoff = max(exc.retry_after or 0.0, self._min_backoff_s)
             _log.warning("Rate limited for %s; backing off %.0fs", key, backoff)
+            save_shared_state(key, backoff_until=now + backoff)
             with self._lock:
                 if key not in self._refs:
                     return  # unregistered while fetch was in-flight
                 self._backoff_until[key] = time.monotonic() + backoff
+                if shared["data"] is not None and self._cache.get(key) is None:
+                    self._cache[key] = shared["data"]
                 cached = self._cache.get(key)
                 emit_data = (
                     dataclasses.replace(cached, status="rate_limited")
@@ -480,6 +671,10 @@ class LimitStore:
             emit_data = self._cache.get(key)
 
         self._emit(key, emit_data)
+        # Persist last (after cache + emit): the UI shouldn't wait on disk
+        # I/O, and other processes only need the file eventually.
+        if data is not None:
+            save_shared_state(key, data=data)
 
     def _emit(self, key: Path, data: UsageData | None) -> None:
         if self._on_update is not None:

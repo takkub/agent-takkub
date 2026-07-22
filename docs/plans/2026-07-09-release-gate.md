@@ -107,6 +107,12 @@ suite 12/12 green. Safe to ship 1.0.22 at this HEAD.
 Gate for `b2a543b` (`_lead_remote_bridge_delivered_session` persistent identity guard —
 `orchestrator.py` + `spawn_engine.py`, tests in tests/test_remote_bridge_repro.py (removed 2026-07-10)).
 
+## true final — #110/#111 (2026-07-09, HEAD = `18a6a43`)
+
+Release gate re-run after `278c002` (#110 remote-bridge double-fire on `--resume` boot) and
+`18a6a43` (#111 mouse-seq draft-guard false positive — split across PTY reads). Queue is empty;
+this is the last gate before publish.
+
 ### 1. Full pytest suite
 
 ```
@@ -115,6 +121,12 @@ rtk proxy python -m pytest -q --junitxml=runtime/tasks/agent-takkub/2026-07-09/q
 
 ```
 tests=3374 failures=2 errors=0 skipped=2 time=139.938s
+
+rtk proxy python -m pytest -q --junitxml=runtime/exports/2026-07-09/true-final-junit.xml
+```
+
+```
+tests=3373 failures=2 errors=0 skipped=2 time=144.282s
 ```
 
 **2 failures — same baseline as every prior gate, both `tests/test_plugin_policy.py`:**
@@ -350,3 +362,33 @@ every prior gate in this file also records. **0 code regressions.**
 ✅ **PASS** — the button is functional on a single click, the `b1a5700` auto-Enter workaround and its
 dead param are gone, no core→remote boundary break, 0 code regressions. Runtime click-through still
 needs a `takkub restart` to load the new Python into the running cockpit.
+
+Root cause unchanged: sandbox has no `~/.claude/plugins/cache` populated → env-dependent, not a
+code regression. Test count rose 3364 → 3373 (+9, matching #110/#111 new tests). 0 regressions.
+
+### 2. #111 repro re-verified independently (not just trusting the commit note)
+
+QA wrote a **fresh standalone script** calling `advance_draft_state()` directly (not reusing
+`tests/test_lead_draft_state.py`'s existing assertions, to avoid rubber-stamping the fix
+author's own test) covering the exact three repro classes from the #111 commit message:
+
+| Check | Points tested | Result |
+|---|---|---|
+| SGR mouse sequence (`\x1b[<0;42;13M`, 11 bytes) split at every interior byte boundary | 10/10 split points | all reassemble to `EMPTY`, `draft_len=0`, no leak into typed-char count |
+| Thai UTF-8 multibyte ("สวัสดีครับ", 30 bytes / 10 chars) split at every interior byte boundary | 29/29 split points | all reassemble to exactly `draft_len=10` — no corruption |
+| Genuine bare-Esc, no latency: Esc alone stays ambiguous (`NONEMPTY`, old draft held) until the next byte proves it's not `[`/`O`, then old draft clears **on that same/next call** (not delayed) and the disambiguating byte itself types fresh | same-call resolution + split-across-calls resolution (simulates PTY read boundary) | 4/4 — old draft clears immediately once proven, no extra latency |
+
+First run of the genuine-Esc checks flagged 2 "FAIL"s — traced to QA's own wrong expected value
+(expected `EMPTY` after Esc+byte instead of the correct `NONEMPTY, draft_len=1`: Esc clears the
+*old* draft, then the disambiguating byte itself is typed as a fresh character). Corrected the
+script's expectations to match `test_esc_clears_in_one_call_when_next_byte_rules_out_a_sequence`
+/ `test_lone_esc_stays_ambiguous_until_the_next_byte_arrives`'s documented semantics, re-ran →
+all green. Also ran the existing repo suite's #111-specific tests directly as a second
+cross-check: `tests/test_lead_draft_state.py -k "split or bare_esc..."` → **7 passed**.
+
+### Verdict (true final)
+
+✅ **PASS** — 0 regressions (3373 tests, same 2 pre-existing env-dependent failures), #111 fix
+independently re-repro'd green across all three claimed repro classes (SGR split, Thai UTF-8
+split, genuine-Esc-no-latency), #110 covered by the full suite (remote-bridge dedupe tests
+included in the 3373 total, all passing). Safe to publish 1.0.22.
