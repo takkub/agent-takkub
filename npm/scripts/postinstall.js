@@ -41,7 +41,31 @@ function ensureClaudeCli(present) {
   return run(npm, ['install', '-g', '@anthropic-ai/claude-code']);
 }
 
+// A local (non-global) install leaves a package that cannot work: the `takkub`
+// / `agent-takkub` bin shims never land on PATH, and the PATH provisioning
+// below targets the npm GLOBAL bin dir. Without this guard that failure is
+// silent — install "succeeds", then the command simply doesn't exist. npm sets
+// npm_config_global=true for `-g` (npm 7+ also exposes it via npm_config_local
+// being unset); treat an explicit "false" as the only definitive local signal
+// so an unusual npm/pnpm/yarn env can't produce a false alarm.
+function warnIfNotGlobal() {
+  if (String(process.env.npm_config_global || '').toLowerCase() === 'true') return;
+  const prefix = process.env.npm_config_prefix || '';
+  // Heuristic fallback: a local install puts us under a project node_modules.
+  const looksLocal =
+    String(process.env.npm_config_global || '').toLowerCase() === 'false' ||
+    (!prefix && __dirname.includes(`${path.sep}node_modules${path.sep}`) && !process.env.npm_config_global);
+  if (!looksLocal) return;
+  console.warn(
+    '\n[agent-takkub] ⚠ This looks like a LOCAL install.\n' +
+      '    agent-takkub must be installed globally or the `takkub` command\n' +
+      '    will not be on your PATH:\n\n' +
+      '        npm install -g agent-takkub\n'
+  );
+}
+
 function main() {
+  warnIfNotGlobal();
   const env = preflight.detect();
   preflight.report(env);
 

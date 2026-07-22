@@ -45,17 +45,31 @@ A single AI agent hits a wall on big work: context fills up, sub-tasks collide, 
 
 ---
 
-## 🧠 One team, three model "brains"
+## 🧠 One team, many model "brains"
 
-Model diversity beats a single point of view. Takkub lets the Lead pull in a **second and third brain** for planning, review, and cross-checks — and it never breaks if you don't have them installed.
+Model diversity beats a single point of view. Takkub lets the Lead pull in a **second, third — or sixth** brain for planning, review, and cross-checks, and it never breaks if you don't have them installed.
 
 | Brain | Backed by | Great at |
 | :-- | :-- | :-- |
 | 🟣 **Claude** | Claude Code CLI | The Lead + every specialist — build, test, review |
 | 🟢 **Codex** | OpenAI Codex CLI | Second opinion · refactor patterns · cross-checking a plan |
 | 🔵 **Gemini** | Google Antigravity (`agy`) | Long-context planning (reads the whole repo) · a third perspective |
+| 🟠 **OpenCode** | sst OpenCode | One CLI, 75+ model backends (GLM · DeepSeek · local Ollama …) |
+| ⚪ **Kimi** | MoonshotAI Kimi Code CLI | Long-context work · another independent perspective |
+| ⚫ **Cursor** | Cursor CLI (`cursor-agent`) | Pick per-task from Cursor's own model roster |
 
-> **Never a hard dependency.** If Codex or Gemini isn't installed (or you've toggled it off), the Lead keeps the role — **Claude transparently stands in**, and tells you you've traded away model diversity. No refusals, no dead ends.
+**Pick the model, not just the CLI.** Every provider — and every *role* — can be pinned to a specific model from **Settings → Providers & Roles**, or from the terminal:
+
+```bash
+takkub provider model gemini "Gemini 3.1 Pro (High)"   # this CLI spawns with that model
+takkub provider list                                    # who's installed, and on which model
+```
+
+A role's own model wins over the provider default, so `backend` can run Codex on `gpt-5.6` while `reviewer` runs it on something cheaper.
+
+> **Never a hard dependency.** If a provider isn't installed (or you've toggled it off), the Lead keeps the role — **Claude transparently stands in**, and tells you you've traded away model diversity. No refusals, no dead ends.
+
+> ⚠️ **Kimi and Cursor are new in 1.0.27** — they spawn and take tasks, but their idle/busy screen markers aren't calibrated yet, so prefer Claude/Codex/Gemini/OpenCode for roles you leave unattended.
 
 ---
 
@@ -150,7 +164,10 @@ sequenceDiagram
 | `takkub send --to qa "…"` | Message a teammate (Lead CC’d) |
 | `takkub goal "…"` | Set a session goal injected into every task |
 | `takkub restart` | Restart the whole cockpit from the terminal |
-| `takkub doctor --fix` | Diagnose the environment + auto-repair |
+| `takkub doctor --fix` | Diagnose the environment + auto-repair (add `--install-providers` to also install missing provider CLIs) |
+| `takkub provider list` | Show every provider CLI, whether it's installed, and its model |
+| `takkub provider install <name>` | Install one provider CLI (Codex / OpenCode / Kimi) |
+| `takkub provider model <name> [<model>]` | Show or set the model a provider spawns with (`--clear` to reset) |
 | `takkub provision` | Install / repair plugins + browser tools |
 
 ---

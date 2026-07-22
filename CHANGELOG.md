@@ -4,6 +4,17 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.27] - 2026-07-22
+
+### Added (ใหม่)
+- **เตือนทันทีถ้าติดตั้งแบบไม่ใส่ `-g`** — postinstall ตรวจว่าเป็น local install แล้วบอกตรงๆ ให้ลงใหม่ด้วย `npm install -g agent-takkub`. เดิมการลงแบบ local จะ "สำเร็จ" เงียบๆ แต่คำสั่ง `takkub` ไม่เคยขึ้น PATH เลย (bin shim กับ PATH provisioning ผูกกับ npm global bin dir) — ผู้ใช้เจอแค่ "command not found" โดยไม่รู้สาเหตุ.
+
+### Changed (ปรับ)
+- **`description` ของแพ็กเกจบอกวิธีติดตั้งแบบ global แล้ว** — หน้า npm และผลค้นหาแสดง `description` จาก package.json ซึ่งเดิมไม่ได้บอกว่าต้องใส่ `-g` คนที่เห็นจาก npm โดยไม่เปิด README จึงพลาดได้ง่าย (README บอกไว้ครบอยู่แล้ว).
+
+### Fixed (แก้)
+- **role file ที่ขาดของ kimi / cursor** — ทั้งคู่ถูกเพิ่มเป็น forced role ใน 1.0.26 แต่ไม่มี `.claude/agents/<role>.md` เลย เมื่อ CLI ยังไม่ได้ติดตั้ง (สถานะปกติของเครื่องส่วนใหญ่) pane จะ degrade เป็น claude substitute แล้วหาไฟล์ role ไม่เจอ → ไม่ได้รับ SPECIALIST OVERRIDE → เสี่ยงอ่าน CLAUDE.md ของโปรเจคแล้วทำตัวเป็น Lead แทนที่จะเป็น teammate ที่ทำงานเองแล้วรายงาน. เพิ่ม stand-in role file ครบทั้ง kimi/cursor และ track `opencode.md` ที่ค้างอยู่.
+
 ## [1.0.26] - 2026-07-21
 
 ### Added (ใหม่)
