@@ -65,3 +65,6 @@ vscode-extension/*.vsix
 # Per-pane git worktree isolation (issue #81) — DATA_HOME/worktrees. In a dev
 # checkout DATA_HOME == repo root, so isolated worktrees land here; never track them.
 worktrees/
+
+# graphify knowledge-graph output (generated)
+graphify-out/
