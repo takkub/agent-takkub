@@ -10,6 +10,7 @@
 - **reviewer** — code review (quality, security, code-level performance)
 - **critic** — Design Critic: รีวิว UI หลัง QA, ส่งภาพให้ Gemini, เขียน proposal markdown ส่ง Lead
 - **codex** — OpenAI Codex CLI "สมองที่ 2" สำหรับ second opinion / refactor / cross-check
+- **opencode / kimi / cursor** — provider CLI เพิ่มเติมใน registry (sst OpenCode · MoonshotAI Kimi · Cursor `agent`) เปิด/ปิด + เลือก model ได้ที่ Settings → Providers & Roles · ready/busy marker ของ kimi/cursor **ยังไม่ calibrate** (spawn ได้ แต่ยังไม่ควรใช้เป็น role หลักจนกว่าจะเก็บ marker จริง)
 
 Lead spawn เฉพาะ role ที่จำเป็นต่องานนั้น — ไม่ต้องทุกครั้ง ใช้ `takkub` CLI สั่ง orchestrator (Python desktop app)
 
@@ -17,7 +18,7 @@ Lead spawn เฉพาะ role ที่จำเป็นต่องานน
 > อ่าน `docs/architecture/godfile-map.md` (method→โมดูลไหน + hidden string/socket edges ที่ import มองไม่เห็น)
 > + `docs/architecture/depgraph.json` (import map + fan-in/out, auto-refresh ทุก commit) — **อย่า grep มั่วแล้วเดา**.
 
-> **Multi-provider — บังคับทุกการเปลี่ยนแปลง (user directive 2026-07-09):** ระบบไม่ fix กับ claude อีกต่อไป — ทุก feature/fix ต้องคำนึงถึง **ทุก provider** (claude / codex / gemini-agy / CLI ใหม่ในอนาคต — ProviderSpec #103): engine feature ใหม่ (delivery, notices, evidence, env) ต้องทำงานกับ pane ที่ไม่ใช่ claude ด้วยหรือระบุ gap ชัดๆ · wording ใน task/pointer อย่าผูก claude-only (เช่น "Read tool") โดยไม่มี fallback · claude-only shortcut ที่เลี่ยงไม่ได้ต้อง flag เข้า #103 เสมอ ห้ามเงียบ
+> **Multi-provider — บังคับทุกการเปลี่ยนแปลง (user directive 2026-07-09):** ระบบไม่ fix กับ claude อีกต่อไป — ทุก feature/fix ต้องคำนึงถึง **ทุก provider** (claude / codex / gemini-agy / opencode / kimi / cursor / CLI ใหม่ในอนาคต — ProviderSpec #103): engine feature ใหม่ (delivery, notices, evidence, env) ต้องทำงานกับ pane ที่ไม่ใช่ claude ด้วยหรือระบุ gap ชัดๆ · wording ใน task/pointer อย่าผูก claude-only (เช่น "Read tool") โดยไม่มี fallback · claude-only shortcut ที่เลี่ยงไม่ได้ต้อง flag เข้า #103 เสมอ ห้ามเงียบ
 
 > **Cross-platform (Windows + macOS) — บังคับทุกการเปลี่ยนแปลง:** cockpit รัน **ทั้ง Windows (ConPTY) และ macOS (`_pty_backend` — merge แล้ว)** ทุก feature/fix/refactor ต้องทำงานได้ **ทั้ง 2 OS คู่กัน** ห้ามทำให้ฝั่งใดฝั่งหนึ่งพัง:
 > - **ห้าม hardcode** path/command เฉพาะ platform — ใช้ `pathlib.Path` (ไม่ใช่ `\\` หรือ `.exe` ตรงๆ); อะไรที่ platform-specific ต้อง gate ด้วย `sys.platform == "win32"/"darwin"` **+ มี branch อีกฝั่งเสมอ** (อย่าปล่อยให้ mac ตกหล่น)
@@ -340,7 +341,7 @@ CLI ยังมีอยู่แต่ **Lead ห้ามใช้** — user
 ## Unavailable providers → Claude รับตำแหน่งแทน (substitution)
 
 codex/gemini อาจ **ใช้ไม่ได้** 2 กรณี:
-1. **ปิดผ่าน toggle** ใน status bar (`~/.takkub/disabled-providers.json`)
+1. **ปิดผ่าน toggle** ใน Settings → Providers & Roles (`~/.takkub/disabled-providers.json`)
 2. **ยังไม่ได้ติดตั้ง** CLI (binary ไม่อยู่ใน PATH)
 
 **ทั้ง 2 กรณี Lead ไม่ต้อง refuse** — ตำแหน่งนั้นไม่ตกหล่น **Claude รับแทนอัตโนมัติ**:

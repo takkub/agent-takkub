@@ -4,6 +4,22 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.26] - 2026-07-21
+
+### Added (ใหม่)
+- **เลือก model ได้ต่อ provider และต่อ role** — Settings → Providers & Roles มี dropdown เลือก model ให้ทุก provider และทุก role (รายการ preset เปลี่ยนตาม CLI ที่ role นั้นเลือก, พิมพ์ id เองได้เพราะแต่ละ CLI ออก model ใหม่คนละจังหวะ). เก็บที่ `~/.takkub/provider-models.json` + `~/.takkub/role-models.json`. ลำดับความสำคัญตอน spawn: **model ของ role > model ของ provider > default ของ CLI** (ฝั่ง claude: `TAKKUB_TEAMMATE_MODEL` env ยังชนะทุกอย่างเหมือนเดิม และค่าว่างยังแปลว่า "ไม่ส่ง `--model`"). CLI: `takkub provider model <name> [<model>|--clear]`.
+- **provider ใหม่ 2 ตัว** — **Kimi CLI** (MoonshotAI, `uv tool install --python 3.13 kimi-cli`, autonomy `--yolo`, Windows ต้องมี Git Bash / ตั้ง `KIMI_CLI_GIT_BASH_PATH`) และ **Cursor CLI** (`cursor-agent`, autonomy `--force`, ติดตั้งเองเท่านั้นเพราะ installer เป็น remote script — cockpit ไม่รันสคริปต์จากเน็ตให้). ทั้งคู่อ่าน `AGENTS.md` ได้จริง cockpit จึง plant teammate cheatsheet ให้ (ไม่งั้น pane ไม่รู้ว่าต้องเรียก `takkub done`). **ready/busy marker ยังไม่ calibrate** — spawn ได้แต่ยังไม่ควรใช้เป็น role หลักจนกว่าจะเก็บ marker จาก TUI จริง.
+- **ติดตั้ง provider CLI จาก cockpit** — `takkub provider list` ดูสถานะ, `takkub provider install <name>` ติดตั้งรายตัว (lead-only), verify ว่า binary ขึ้น PATH จริงก่อนบอกว่าสำเร็จ.
+
+### Changed (ปรับ)
+- **doctor ไม่ติดตั้ง provider ให้อัตโนมัติแล้ว** — `takkub doctor --fix` จะ **ข้าม** การติดตั้ง provider พร้อมพิมพ์ `[skipped (opt-in)]` ต้องสั่ง `--install-providers` (หรือ `takkub provider install <name>`) เอง — กันการลง CLI หลายตัวโดยไม่ตั้งใจบนทุกเครื่องที่รัน `--fix`.
+- **ถอด provider toggle chips ออกจาก status bar** — เปิด/ปิด provider ทำที่ Settings ที่เดียว (chips ซ้ำซ้อนกับหน้า Providers & Roles อยู่แล้ว).
+- **ready-wait ตอนส่ง task แรกอ่านจาก ProviderSpec แล้ว** — เดิม hardcode ให้เฉพาะ codex/gemini ได้ 90 วิ ทำให้ opencode/kimi/cursor ตกไปใช้ค่า claude 45 วิ แล้วโดน blind paste ตอน cold-boot; ตอนนี้แต่ละ provider ใช้ `ready_wait_ms` ของตัวเอง.
+
+### Fixed (แก้)
+- **usage/limit meter รับมือ endpoint ที่ถูก harden แล้ว** — `oauth/usage` เริ่มตอบ 403/429 จริงจัง ทำให้ meter เดิมยิงซ้ำจนโดนบล็อกและโชว์ 0% ทั้งที่แค่อ่านค่าไม่ได้. ตอนนี้ทุก cockpit/instance ใช้ shared state ร่วมกันที่ `<config_dir>/takkub-usage-state.json` (cache + backoff ที่ persist ข้าม process), poll ห่างขึ้น 120→600 วิ และค่าที่อ่านไม่ได้แสดงเป็น `—` ไม่ใช่ 0%. **ข้อจำกัดที่รู้อยู่:** shared state ยังไม่มี inter-process lock — สอง instance ที่เริ่มพร้อมกันเป๊ะอาจยิง fetch ซ้อนกันหนึ่งรอบ (เท่าพฤติกรรมเดิมก่อนมี cache จึงไม่ใช่ regression) ไว้ปิดใน release ถัดไป.
+- **auto-reminder ยิงรัวใส่ pane ตอน codex/agy กำลัง boot** — ระหว่าง cold-boot MCP servers, codex จะ **queue** task ที่เพิ่งส่งไว้ก่อน แต่ status bar อ่านว่า idle (`Fast off`) ทำให้ idle-watchdog เข้าใจผิดว่า "ทำเสร็จแล้วลืม `takkub done`" แล้วยิง `[auto-reminder]` พอกอยู่ในช่อง composer ทุก 90 วิ (งานไม่เคยพัง — พอ boot เสร็จ codex กลืน queue แล้วรันจนจบ แต่รกและกิน context). ตอนนี้ watchdog จะเริ่มนับก็ต่อเมื่อ pane **เคยเข้า turn ทำงานจริง** อย่างน้อยหนึ่งครั้งหลังรับ task และหยุดนับระหว่างเห็น marker ของ boot/queue — งานที่ทำเสร็จจริงแล้วลืมรายงานยังโดนเตือนเหมือนเดิม.
+
 ## [1.0.25] - 2026-07-13
 
 ### Added (ใหม่)
