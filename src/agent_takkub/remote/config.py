@@ -21,6 +21,20 @@ from ..config import SETTINGS_HOME
 
 _PATH = SETTINGS_HOME / "remote.json"
 
+# The phone mirrors the **Lead pane only** (user directive 2026-07-23).
+#
+# Every teammate pane used to reach the phone twice over: as a row in
+# `/api/activity`'s `roles` list, and as a `done` SSE push per finished task.
+# With a normal fan-out (frontend + backend + qa + reviewer, sometimes sharded)
+# that is a stream of notifications about work the user delegated precisely so
+# they would not have to watch it — "เป็นขยะเยอะเกินไป". Lead is the one pane
+# the user actually converses with, and Lead already summarises what the team
+# did, so teammate traffic is pure duplication on a 6-inch screen.
+#
+# Flip to False to put the whole team back on the phone; `api.activity` and
+# `notify.EventTailer` are the only two readers.
+LEAD_ONLY_STREAM = True
+
 
 def path() -> Path:
     """Where state lives. Function form so tests can monkeypatch `_PATH`."""

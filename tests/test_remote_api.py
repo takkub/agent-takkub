@@ -178,16 +178,17 @@ class TestActivity:
     """Pulse page (project-grouped active panes). DATA-MIN: role + project +
     runtime only — never task text, cwd, command, or status detail."""
 
-    def test_groups_only_working_panes_by_project(self, monkeypatch):
+    def test_groups_leads_by_project(self, monkeypatch):
         now = 1_000_000.0
         monkeypatch.setattr(api.time, "time", lambda: now)
         orch = _FakeOrchWithPanes(
             {
                 "proj-a": {
+                    "lead": _FakePane("working", now - 30),
                     "backend": _FakePane("working", now - 30),
-                    "frontend": _FakePane("done", now - 999),
                 },
                 "proj-b": {
+                    "lead": _FakePane("idle", None),
                     "qa": _FakePane("working", now - 120),
                 },
             }
@@ -195,10 +196,24 @@ class TestActivity:
         result = api.activity(orch)
         assert result == {
             "projects": [
-                {"project": "proj-a", "roles": [{"role": "backend", "runtime_sec": 30}]},
-                {"project": "proj-b", "roles": [{"role": "qa", "runtime_sec": 120}]},
+                {
+                    "project": "proj-a",
+                    "roles": [],
+                    "lead": {"state": "working", "runtime_sec": 30},
+                },
+                {"project": "proj-b", "roles": [], "lead": {"state": "idle", "runtime_sec": 0}},
             ]
         }
+
+    def test_project_with_working_teammates_but_no_lead_is_omitted(self, monkeypatch):
+        """LEAD_ONLY_STREAM: teammates alone are not a reason to show a card —
+        there is nothing on it the phone is allowed to report."""
+        now = 1_000_000.0
+        monkeypatch.setattr(api.time, "time", lambda: now)
+        orch = _FakeOrchWithPanes(
+            {"proj-a": {"backend": _FakePane("working", now - 30)}},
+        )
+        assert api.activity(orch) == {"projects": []}
 
     def test_project_with_no_working_panes_is_omitted(self, monkeypatch):
         orch = _FakeOrchWithPanes(
@@ -221,10 +236,10 @@ class TestActivity:
     def test_never_leaks_task_cwd_or_transcript_fields(self, monkeypatch):
         now = 500.0
         monkeypatch.setattr(api.time, "time", lambda: now)
-        orch = _FakeOrchWithPanes({"proj-a": {"backend": _FakePane("working", now - 10)}})
+        orch = _FakeOrchWithPanes({"proj-a": {"lead": _FakePane("working", now - 10)}})
         result = api.activity(orch)
         dumped = json.dumps(result)
-        assert set(result["projects"][0]["roles"][0].keys()) == {"role", "runtime_sec"}
+        assert set(result["projects"][0]["lead"].keys()) == {"state", "runtime_sec"}
         for leaked in ("implement", "/auth/login", "transcript.jsonl", "secret-project"):
             assert leaked not in dumped
 
@@ -252,7 +267,35 @@ class TestActivity:
             ]
         }
 
-    def test_lead_and_working_teammates_both_reported(self, monkeypatch):
+    def test_working_teammates_are_suppressed_beside_lead(self, monkeypatch):
+        """LEAD_ONLY_STREAM (2026-07-23): `roles` is emitted but always empty.
+        The key stays so older PWA builds reading `p.roles.length` keep
+        working."""
+        now = 2_000.0
+        monkeypatch.setattr(api.time, "time", lambda: now)
+        orch = _FakeOrchWithPanes(
+            {
+                "proj-a": {
+                    "lead": _FakePane("idle", None),
+                    "backend": _FakePane("working", now - 10),
+                    "qa": _FakePane("working", now - 20),
+                }
+            }
+        )
+        result = api.activity(orch)
+        assert result == {
+            "projects": [
+                {
+                    "project": "proj-a",
+                    "roles": [],
+                    "lead": {"state": "idle", "runtime_sec": 0},
+                }
+            ]
+        }
+
+    def test_teammates_reported_again_when_flag_off(self, monkeypatch):
+        """The switch is real, not a hard-coded deletion."""
+        monkeypatch.setattr(api._remote_config, "LEAD_ONLY_STREAM", False)
         now = 2_000.0
         monkeypatch.setattr(api.time, "time", lambda: now)
         orch = _FakeOrchWithPanes(

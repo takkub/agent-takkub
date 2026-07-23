@@ -55,6 +55,7 @@ from PyQt6.QtCore import QObject, QTimer
 
 from ..orchestrator_text import _exit_key
 from ..user_profile import config_dir_for
+from . import config as _remote_config
 
 # Per-message cap for a single Lead reply (live SSE event, history entry, and
 # done note). Generous on purpose — the phone should show the WHOLE message
@@ -691,6 +692,15 @@ class LeadNotifier(QObject):
     def _on_done(self, project_ns: str, role: str, note: str) -> None:
         # H-A: stamp the event's own project, not whatever project happens
         # to be active right now — `agentDone` fires for every project.
+        #
+        # LEAD_ONLY_STREAM (2026-07-23): a teammate's `takkub done` is not news
+        # on the phone. The user delegated that work; Lead receives the same
+        # note as a handoff and folds it into its own reply, which reaches the
+        # phone through the JSONL tail below. Pushing both meant every fan-out
+        # produced a burst of near-duplicate notifications — the "ขยะ" the
+        # directive names. Lead's own done still goes through.
+        if _remote_config.LEAD_ONLY_STREAM and role != "lead":
+            return
         self._broadcaster.push("done", f"{role}: {note}"[:_MAX_EVENT_CHARS], project_ns)
 
     def stop(self) -> None:

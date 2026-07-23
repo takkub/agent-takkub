@@ -1097,6 +1097,38 @@ def cmd_session_report(_: argparse.Namespace) -> dict:
         return {"ok": True, "msg": ""}
 
 
+def cmd_guard(_: argparse.Namespace) -> dict:
+    """Internal command wired as the `PreToolUse`/`Bash` hook for every
+    cockpit-spawned claude pane (see hook_wiring.py). Blocks a teammate pane
+    from routing around the MCP tool policy via the shell — installing or
+    driving a browser it was never granted, or sweeping the whole disk.
+
+    Denies by exiting 2 with the reason on stderr: that is the one PreToolUse
+    blocking contract every Claude Code build honours, so a version that does
+    not understand a JSON `permissionDecision` payload still blocks instead of
+    silently failing open.
+
+    Never raises. Any unexpected failure allows the command (exit 0) — the
+    guard must never be able to wedge a pane's shell. Rules and rationale live
+    in `pane_guard.py`."""
+    try:
+        from . import pane_guard
+
+        payload = _read_hook_stdin()
+        role = _from_role()
+        if not role:
+            return {"ok": True, "msg": ""}  # manual / non-cockpit invocation
+        tool_input = payload.get("tool_input")
+        command = tool_input.get("command", "") if isinstance(tool_input, dict) else ""
+        verdict = pane_guard.classify(command, role)
+        if verdict.allowed:
+            return {"ok": True, "msg": ""}
+        print(f"[takkub guard: {verdict.rule}] {verdict.reason}", file=sys.stderr)
+        return {"ok": True, "msg": "", "exit_code": 2}
+    except Exception:
+        return {"ok": True, "msg": ""}
+
+
 def cmd_services(args: argparse.Namespace) -> dict:
     """Local docker compose operations — no orchestrator IPC.
 
@@ -1570,6 +1602,13 @@ def main(argv: list[str] | None = None) -> int:
     # be able to report it.
     ssr = sub.add_parser("session-report", help=argparse.SUPPRESS)
     ssr.set_defaults(func=cmd_session_report)
+
+    # Internal — wired as the PreToolUse/Bash hook `command` for every
+    # cockpit-spawned claude pane (see hook_wiring.py). Blocks a teammate from
+    # shelling around the MCP tool policy (`npx playwright`) or sweeping the
+    # whole disk. Hidden from --help; fires on every Bash call.
+    sgd = sub.add_parser("_guard", help=argparse.SUPPRESS)
+    sgd.set_defaults(func=cmd_guard)
 
     sst = sub.add_parser(
         "status",

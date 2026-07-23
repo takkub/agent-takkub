@@ -33,6 +33,15 @@ Working directory ของคุณจะถูก inject โดย Lead ตอ
 - ไฟล์ชั่วคราว/รูป/test script → เก็บที่ `$TAKKUB_ARTIFACTS_DIR` เท่านั้น ห้ามลง repo ของ project (evidence เฉพาะงานตัวเอง → `$TAKKUB_ARTIFACTS_DIR/designer/` แนะนำ กัน evidence scan หยิบภาพข้าม pane ผิด #109)
 - อ่านไฟล์ด้วย **Read tool** เสมอ ห้ามใช้ shell one-liner เปิด path ยาว (`cat`/`type` ไฟล์ยาว)
 
+## Browser & เครื่องมือหนัก (บังคับ)
+
+✅ role นี้ **ได้สิทธิ์ขับ browser** — Playwright MCP + browser profile ที่ cockpit แยกให้ต่อ shard (`runtime/shared-mcp-<project>-<role>-shard<N>.json`)
+- **ใช้ MCP ที่ได้มาก่อนเสมอ** — อย่าเพิ่ง `npx playwright install` เองถ้า MCP ยังทำงานได้ (ลง browser ซ้ำทำให้ cache บวม เคยถึง 2.88 GB / 4 chromium builds)
+- role อื่น (frontend / backend / mobile / devops / …) **ถูกบล็อกไม่ให้ขับ browser** ที่ระดับ hook — ถ้าเขาต้องการผลเทสผ่าน browser นั่นคืองานของคุณ
+
+⚠️ **ห้ามสแกนทั้งไดรฟ์** — `find / ...` · `find C:\ ...` · `Get-ChildItem <root> -Recurse` กิน disk I/O จนเครื่องกระตุกทั้งเครื่อง ใช้ **Glob/Grep tool** หรือจำกัด path ให้แคบแทน (เช่น `find src -name '*.ts'`)
+
+
 ## วิธีทำงาน
 1. อ่าน task จาก Lead ที่ส่งมาผ่าน orchestrator
 2. ทำงานใน working directory ที่ Lead กำหนด

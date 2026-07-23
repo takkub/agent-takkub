@@ -1443,16 +1443,22 @@
     if (!wrap) return;
     wrap.innerHTML = "";
 
-    var totalRoles = 0;
+    // `roles` is always [] while the server runs LEAD_ONLY_STREAM, so the
+    // headline count has to include a working Lead or it reads "0 ตำแหน่ง"
+    // with a spinning Lead chip right beneath it. Counted separately from
+    // `visible`: an *idle* Lead still earns its project a card (the user
+    // wants to see Lead is home) but is not "working".
     var totalWorking = 0;
+    var visible = 0;
     projects.forEach(function (p) {
       if (!p) return;
-      if (Array.isArray(p.roles)) totalRoles += p.roles.length;
-      if (p.lead) totalWorking += 1; // every open Lead counts as a visible position
-      totalWorking += (Array.isArray(p.roles) ? p.roles.length : 0);
+      var roleCount = Array.isArray(p.roles) ? p.roles.length : 0;
+      totalWorking += roleCount;
+      if (p.lead && p.lead.state === "working") totalWorking += 1;
+      if (p.lead || roleCount) visible += 1;
     });
 
-    if (!projects.length || totalWorking === 0) {
+    if (!projects.length || visible === 0) {
       var empty = document.createElement("div");
       empty.className = "pulse-empty";
       empty.innerHTML = '<span class="icon">🌙</span><span class="text">ไม่มีงานกำลังรันอยู่</span>';
@@ -1461,7 +1467,8 @@
       return;
     }
 
-    $("pulse-count").textContent = totalRoles + " ตำแหน่งกำลังทำงาน";
+    $("pulse-count").textContent =
+      totalWorking > 0 ? totalWorking + " ตำแหน่งกำลังทำงาน" : "Lead ว่าง";
 
     projects.forEach(function (p) {
       if (!p || !p.project) return;

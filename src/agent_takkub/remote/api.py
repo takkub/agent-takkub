@@ -26,6 +26,7 @@ import time
 
 from .. import config as _config
 from ..roles import LEAD
+from . import config as _remote_config
 from . import notify
 
 _HISTORY_DEFAULT_LIMIT = 200
@@ -127,8 +128,14 @@ def activity(orch) -> dict:
     whether it's currently working, so the phone always shows whether Lead is
     home. Idle Lead's `_working_start` is `None` (cleared by `set_state` —
     see `agent_pane.py`), so idle never reuses a stale/previous runtime; it's
-    reported as 0."""
+    reported as 0.
+
+    When `config.LEAD_ONLY_STREAM` is on (the default since 2026-07-23),
+    `roles` is always `[]`: the phone mirrors Lead and nothing else. The key
+    is still emitted — dropping it would break every PWA build that reads
+    `p.roles.length` — it is simply always empty."""
     now = time.time()
+    lead_only = _remote_config.LEAD_ONLY_STREAM
     projects_out: list[dict] = []
     for project_ns, panes in (getattr(orch, "_panes_by_project", None) or {}).items():
         roles: list[dict] = []
@@ -140,6 +147,8 @@ def activity(orch) -> dict:
                 started = getattr(pane, "_working_start", None) if working else None
                 runtime_sec = max(0, int(now - started)) if started is not None else 0
                 lead_out = {"state": "working" if working else "idle", "runtime_sec": runtime_sec}
+                continue
+            if lead_only:
                 continue
             if state != "working":
                 continue

@@ -38,6 +38,7 @@ from . import config
 
 HOOK_COMMAND = "takkub _hook"
 SESSION_REPORT_COMMAND = "takkub session-report"
+GUARD_COMMAND = "takkub _guard"
 
 _HOOK_SETTINGS: dict = {
     "hooks": {
@@ -53,26 +54,47 @@ _HOOK_SETTINGS: dict = {
 }
 
 
+def guard_hook_fragment() -> dict:
+    """The `PreToolUse`/`Bash` entry that runs `pane_guard` before every Bash
+    call. A fresh dict each call so a caller can't mutate shared state.
+
+    Unlike rtk this is NOT conditional: the guard is the only thing standing
+    between a teammate pane and the shell workaround for its MCP tool policy
+    (`npx playwright`), and `takkub` is guaranteed on every pane's PATH
+    (`spawn_engine` prepends `config.CLI_BIN_DIR`) — the same guarantee the
+    Stop/SessionStart hooks already rely on."""
+    return {
+        "matcher": "Bash",
+        "hooks": [{"type": "command", "command": GUARD_COMMAND}],
+    }
+
+
 def _rendered_settings() -> dict:
     """The hook settings for this spawn: the static Stop/Notification/
-    SessionStart wiring, plus rtk's PreToolUse Bash hook when rtk is enabled
-    centrally AND on PATH (`rtk_helper.rtk_should_inject`).
+    SessionStart wiring, the always-on PreToolUse Bash guard, plus rtk's
+    PreToolUse Bash hook when rtk is enabled centrally AND on PATH
+    (`rtk_helper.rtk_should_inject`).
 
     Folding rtk in here — rather than into a project's `.claude/settings.json`
     — is the central-home migration (A3): the file this returns is already
     handed to every claude pane via `--settings`, so rtk reaches panes without
     dirtying any repo. Additive: rtk lives under its own PreToolUse key and
-    never perturbs the pane-state Stop/Notification/SessionStart hooks."""
+    never perturbs the pane-state Stop/Notification/SessionStart hooks.
+
+    Ordering matters: the guard is listed **first** so a denied command is
+    blocked before rtk spends any work rewriting it."""
     settings = copy.deepcopy(_HOOK_SETTINGS)
+    pre_tool_use: list[dict] = [guard_hook_fragment()]
     try:
         from . import rtk_helper
 
         if rtk_helper.rtk_should_inject():
-            settings["hooks"]["PreToolUse"] = [rtk_helper.rtk_hook_fragment()]
+            pre_tool_use.append(rtk_helper.rtk_hook_fragment())
     except Exception:
         # rtk is a best-effort optimisation — never let it break the
-        # authoritative pane-state hook wiring.
+        # authoritative pane-state hook wiring (or the guard).
         pass
+    settings["hooks"]["PreToolUse"] = pre_tool_use
     return settings
 
 

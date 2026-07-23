@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 128,
+  "module_count": 129,
   "modules": [
     {
       "module": "agent_takkub",
@@ -182,6 +182,7 @@
         "agent_takkub.gemini_helper",
         "agent_takkub.issues",
         "agent_takkub.lead_context",
+        "agent_takkub.pane_guard",
         "agent_takkub.pane_tools_policy",
         "agent_takkub.plugin_installer",
         "agent_takkub.provider_install",
@@ -197,7 +198,7 @@
       ],
       "imported_by": [],
       "fan_in": 0,
-      "fan_out": 20
+      "fan_out": 21
     },
     {
       "module": "agent_takkub.cli_server",
@@ -733,6 +734,15 @@
       "fan_out": 2
     },
     {
+      "module": "agent_takkub.pane_guard",
+      "imports": [],
+      "imported_by": [
+        "agent_takkub.cli"
+      ],
+      "fan_in": 1,
+      "fan_out": 0
+    },
+    {
       "module": "agent_takkub.pane_tools_dialog",
       "imports": [
         "agent_takkub.config",
@@ -1033,6 +1043,7 @@
       "imports": [
         "agent_takkub.config",
         "agent_takkub.provider_config",
+        "agent_takkub.remote.config",
         "agent_takkub.remote.notify",
         "agent_takkub.roles",
         "agent_takkub.spawn_engine"
@@ -1041,7 +1052,7 @@
         "agent_takkub.remote.http_server"
       ],
       "fan_in": 1,
-      "fan_out": 5
+      "fan_out": 6
     },
     {
       "module": "agent_takkub.remote.auth",
@@ -1062,12 +1073,14 @@
       ],
       "imported_by": [
         "agent_takkub.remote",
+        "agent_takkub.remote.api",
         "agent_takkub.remote.auth",
         "agent_takkub.remote.http_server",
+        "agent_takkub.remote.notify",
         "agent_takkub.remote.settings_dialog",
         "agent_takkub.remote.tunnel"
       ],
-      "fan_in": 5,
+      "fan_in": 7,
       "fan_out": 1
     },
     {
@@ -1089,6 +1102,7 @@
       "imports": [
         "agent_takkub.config",
         "agent_takkub.orchestrator_text",
+        "agent_takkub.remote.config",
         "agent_takkub.token_meter",
         "agent_takkub.user_profile"
       ],
@@ -1097,7 +1111,7 @@
         "agent_takkub.remote.api"
       ],
       "fan_in": 2,
-      "fan_out": 4
+      "fan_out": 5
     },
     {
       "module": "agent_takkub.remote.settings_dialog",

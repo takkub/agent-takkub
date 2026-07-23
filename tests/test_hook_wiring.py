@@ -136,10 +136,12 @@ class TestRtkInjection:
         self, tmp_env: pathlib.Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(rtk_helper, "rtk_binary_available", lambda: True)
-        # not enabled → no PreToolUse rtk hook, pane-state hooks intact
+        # not enabled → no rtk command in PreToolUse. The block itself still
+        # exists because the pane_guard hook is unconditional (see
+        # TestGuardInjection); only rtk's entry is absent.
         path = hook_wiring.ensure_hook_settings_file()
         data = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
-        assert "PreToolUse" not in data["hooks"]
+        assert rtk_helper.RTK_HOOK_COMMAND not in self._pre_cmds(path)
         assert hook_wiring.HOOK_COMMAND in [
             h["command"] for grp in data["hooks"]["Stop"] for h in grp["hooks"]
         ]
@@ -164,6 +166,51 @@ class TestRtkInjection:
         monkeypatch.setattr(rtk_helper, "rtk_binary_available", lambda: False)
         path = hook_wiring.ensure_hook_settings_file()
         assert rtk_helper.RTK_HOOK_COMMAND not in self._pre_cmds(path)
+
+
+class TestGuardInjection:
+    """The pane_guard PreToolUse Bash hook is unconditional — it is what stops
+    a teammate shelling around its MCP tool policy (`npx playwright`), so it
+    must be present whether or not rtk is enabled, and must never displace
+    rtk's own entry."""
+
+    @pytest.fixture(autouse=True)
+    def _isolate_flag(self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(config, "SETTINGS_HOME", tmp_path / "settings-home")
+
+    def _pre_cmds(self, path: str) -> list[str]:
+        data = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+        pre = data["hooks"].get("PreToolUse", [])
+        return [h.get("command") for grp in pre for h in grp.get("hooks", [])]
+
+    def test_guard_present_when_rtk_disabled(
+        self, tmp_env: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(rtk_helper, "rtk_binary_available", lambda: False)
+        path = hook_wiring.ensure_hook_settings_file()
+        assert hook_wiring.GUARD_COMMAND in self._pre_cmds(path)
+
+    def test_guard_and_rtk_coexist_guard_first(
+        self, tmp_env: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(rtk_helper, "rtk_binary_available", lambda: True)
+        rtk_helper.set_rtk_enabled(True)
+        cmds = self._pre_cmds(hook_wiring.ensure_hook_settings_file())
+        assert hook_wiring.GUARD_COMMAND in cmds
+        assert rtk_helper.RTK_HOOK_COMMAND in cmds
+        # deny before rtk spends work rewriting a command that won't run
+        assert cmds.index(hook_wiring.GUARD_COMMAND) < cmds.index(rtk_helper.RTK_HOOK_COMMAND)
+
+    def test_guard_matcher_is_bash(self, tmp_env: pathlib.Path) -> None:
+        data = json.loads(
+            pathlib.Path(hook_wiring.ensure_hook_settings_file()).read_text(encoding="utf-8")
+        )
+        entry = next(
+            grp
+            for grp in data["hooks"]["PreToolUse"]
+            if any(h.get("command") == hook_wiring.GUARD_COMMAND for h in grp.get("hooks", []))
+        )
+        assert entry["matcher"] == "Bash"
 
 
 class TestClaudeSpawnArgvIncludesSettings:

@@ -54,6 +54,9 @@ grep-verified ตอน refresh นี้ ไม่ใช่ inherited จาก
 | **String-keyed role tables** | `'critic'/'designer'/'gemini'/'codex'` ซ้ำในหลายตาราง (`roles`, `provider_config`, `routing_planner`, `shared_dev_tools`, + literal ใน `orchestrator`) ไม่มี shared enum | แก้ role 1 ตัวต้องไล่ทุกตาราง — grep string เดียวยังพลาด |
 | **Prompt ↔ code drift** | `CLAUDE.md` routing table ↔ `routing_planner.classify()` regex | code = authoritative (มี comment บอก). prose ไม่ใช่ edge — เชื่อ `routing_planner.py` |
 | **Vendor-string coupling** | `pty_session.py` ready/busy detect = substring-match footer ของ external CLI (agy/codex/claude) | พฤติกรรมผูกกับ string ของ vendor — เปลี่ยน CLI version อาจพัง ready-detect |
+| **Bash guard = hook round-trip** | `hook_wiring.py` เขียน string `"takkub _guard"` ลง `runtime/hook-settings.json` → claude spawn ด้วย `--settings` → **claude เรียก CLI กลับมาเป็น subprocess** ทุก Bash call → `cli.cmd_guard` → `pane_guard.classify()` | ไม่มี import edge จาก `hook_wiring` ไป `pane_guard` เลย — เชื่อมด้วย **string ในไฟล์ settings + PATH** เท่านั้น. "ใครบล็อก `npx playwright`" ตอบจาก import graph ไม่ได้ · ผลข้างเคียง: `pane_guard` ต้องเป็น pure leaf (import 156ms ทั้ง `cli`) เพราะยิงทุก Bash call |
+| **Tool policy 2 ชั้น คนละกลไก** | MCP → `pane_tools_policy.py` + `--strict-mcp-config` (spawn argv) · Bash → `pane_guard.py` (PreToolUse hook) | ปิด MCP **ไม่ได้ปิด shell** — pane ยัง `npx playwright` ได้ (bug 2026-07-23). ต้องแก้ทั้งคู่เสมอเมื่อจำกัดเครื่องมือ role |
+| **`BROWSER_ROLES` ↔ role-file prose** | `pane_guard.BROWSER_ROLES` (hard block, **claude เท่านั้น**) ↔ `.claude/agents/*.md` (prose, provider อื่นเห็นแค่นี้ — #103) | prose คือ enforcement เดียวของ codex/gemini/opencode/kimi/cursor. แก้ `BROWSER_ROLES` แล้วไม่แก้ไฟล์ role = pane ค้าง (ถูกบอกว่าทำได้ แต่ hook บล็อก) — `tests/test_agent_role_files_have_browser_guard.py` กันไว้ |
 
 ---
 

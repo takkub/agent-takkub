@@ -4,6 +4,28 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.28] - 2026-07-23
+
+### Fixed (แก้)
+- **pane เดินอ้อม tool policy ผ่าน shell ไม่ได้อีกแล้ว** — `pane_tools_policy` คุมแค่ **MCP** แต่ทุก pane spawn ด้วย `--dangerously-skip-permissions` แปลว่า **Bash ไม่มี gate เลย**. pane `frontend` ที่ถูกปฏิเสธ browser MCP จึงติดตั้ง browser เองด้วย `npx --yes playwright` แล้วขับ Chromium จาก ad-hoc script (จับได้สดๆ 2026-07-23 พร้อม `find / -maxdepth 6 -iname playwright` ที่สแกนทั้งไดรฟ์จนเครื่องกระตุก). ปิดทางที่ถูกต้องโดยไม่ปิดทางอ้อม = agent เดินอ้อมเอง.
+  - **module ใหม่ `pane_guard.py`** (pure leaf, stdlib ล้วน) — 2 rule: `browser_driver` (playwright / puppeteer / selenium / headless chrome ทุกช่องทาง: `npx`, `npm|pnpm|yarn|bun install|add|dlx`, `pip install`, `python -m`, bare invoke, inline `require()`/`import`, `chrome --headless`) และ `disk_scan` (`find /`, `find C:\`, `Get-ChildItem <root> -Recurse`)
+  - **บังคับจริงที่ hook** — `takkub _guard` ต่อเป็น `PreToolUse`/`Bash` ให้ทุก claude pane (unconditional, เรียงก่อน rtk) · deny ด้วย **exit code 2 + เหตุผลทาง stderr** ซึ่งเป็น contract ที่ Claude Code ทุก build เข้าใจ (JSON `permissionDecision` เสี่ยง fail-open เงียบ)
+  - **`BROWSER_ROLES` = qa / critic / designer** เท่านั้นที่ขับ browser ได้ — shard (`qa#3`) ได้สิทธิ์ตาม role แม่ · `lead` / `shell` ไม่โดน guard (user พิมพ์เอง)
+  - **fail-open ทุกทาง** — role ว่าง / command ว่าง / payload พัง / guard เองพัง = ปล่อยผ่านเสมอ. hook นี้ยิงทุก Bash call จึงห้ามทำ pane ค้างเด็ดขาด
+  - **อ่านยังได้หมด** — `grep playwright`, `ls ~/AppData/Local/ms-playwright`, `cat package.json` ไม่โดนบล็อก บล็อกเฉพาะ **ติดตั้ง/รัน**
+- **นับ "ตำแหน่งกำลังทำงาน" บนมือถือถูกต้อง** — `renderPulse` เดิมนับจาก `roles` อย่างเดียว พอ `roles` ว่างจะขึ้น "0 ตำแหน่งกำลังทำงาน" ทั้งที่ chip Lead หมุนอยู่ตรงนั้น ตอนนี้นับ Lead ที่ working ด้วย และ Lead ที่ idle ยังได้ card ("Lead ว่าง")
+
+### Changed (ปรับ)
+- **remote-control mirror เฉพาะ Lead** (`remote/config.py: LEAD_ONLY_STREAM = True`) — เดิม teammate ทุกตัวไปโผล่บนมือถือ 2 ทาง: เป็นแถวใน `/api/activity` และเป็น `done` SSE ต่อ 1 งาน. fan-out ปกติ (frontend + backend + qa + reviewer บางทีมี shard) = notification ระเบิดเรื่องงานที่ user มอบหมายไปแล้วเพื่อจะได้ไม่ต้องนั่งดู. Lead สรุปงานทีมให้อยู่แล้ว traffic ของ teammate จึงเป็นของซ้ำล้วนๆ บนจอ 6 นิ้ว
+  - `api.activity()` ยัง emit key `roles` แต่**ว่างเสมอ** (ลบ key ทิ้งจะพัง PWA build เก่าที่อ่าน `p.roles.length`)
+  - `notify._on_done` drop done ของ teammate, ของ Lead ยังผ่าน
+  - เปลี่ยน `LEAD_ONLY_STREAM = False` = ทีมทั้งหมดกลับมาเหมือนเดิม (มีเทสกันไว้ทั้ง 2 ทิศ)
+- **role file 16 ไฟล์เพิ่มหมวด "Browser & เครื่องมือหนัก (บังคับ)"** — 13 role ได้ข้อห้าม + ชี้ทางส่งต่อให้ qa, ส่วน qa/critic/designer ได้ข้อความอนุญาต + เตือนอย่าลง browser ซ้ำ (cache บนเครื่อง dev บวมถึง 2.88 GB / chromium 4 builds). **#103:** Claude Code hook มีเฉพาะ claude — pane ที่รัน codex / gemini-agy / opencode / kimi / cursor บังคับด้วย prose ตรงนี้เท่านั้น
+
+### Added (ใหม่)
+- **เทสใหม่** — `test_pane_guard.py` (87 เคส รวม false-positive ทั้งชุด), `test_cli_guard.py` (18 เคส wiring + fail-open), `test_agent_role_files_have_browser_guard.py` (กัน prose ↔ `BROWSER_ROLES` drift), `test_hook_wiring.py::TestGuardInjection`
+- **`docs/architecture/godfile-map.md`** เพิ่ม hidden edge 3 เส้น — guard เชื่อมด้วย **string ในไฟล์ settings + PATH** ไม่มี import edge เลย, tool policy 2 ชั้นคนละกลไก, และ `BROWSER_ROLES` ↔ role-file prose
+
 ## [1.0.27] - 2026-07-22
 
 ### Added (ใหม่)

@@ -12,6 +12,7 @@ import os
 import pytest
 from PyQt6.QtCore import QCoreApplication, QObject, pyqtSignal
 
+from agent_takkub.remote import config as remote_config
 from agent_takkub.remote import notify as notify_mod
 from agent_takkub.remote.notify import LeadNotifier, _lead_text_blocks
 
@@ -215,13 +216,13 @@ class TestLeadTextBlocks:
 
 
 class TestDoneEvents:
-    def test_agent_done_pushes_to_broadcaster(self, qapp):
+    def test_lead_done_pushes_to_broadcaster(self, qapp):
         orch = _FakeOrch()
         broadcaster = _FakeBroadcaster()
         notifier = LeadNotifier(orch, broadcaster)
         try:
-            orch.agentDone.emit("proj", "backend", "added /auth/login")
-            assert broadcaster.events == [("done", "backend: added /auth/login", "proj")]
+            orch.agentDone.emit("proj", "lead", "shipped /auth/login")
+            assert broadcaster.events == [("done", "lead: shipped /auth/login", "proj")]
         finally:
             notifier.stop()
 
@@ -234,8 +235,35 @@ class TestDoneEvents:
         broadcaster = _FakeBroadcaster()
         notifier = LeadNotifier(orch, broadcaster)
         try:
-            orch.agentDone.emit("other-proj", "backend", "did a thing")
-            assert broadcaster.events == [("done", "backend: did a thing", "other-proj")]
+            orch.agentDone.emit("other-proj", "lead", "did a thing")
+            assert broadcaster.events == [("done", "lead: did a thing", "other-proj")]
+        finally:
+            notifier.stop()
+
+    @pytest.mark.parametrize("role", ["backend", "frontend", "qa", "reviewer", "qa#2"])
+    def test_teammate_done_is_dropped_when_lead_only(self, qapp, role):
+        """LEAD_ONLY_STREAM (2026-07-23): the phone mirrors Lead only. A
+        teammate's `takkub done` reaches Lead as a handoff and surfaces in
+        Lead's own reply — pushing it separately was duplicate noise."""
+        orch = _FakeOrch()
+        broadcaster = _FakeBroadcaster()
+        notifier = LeadNotifier(orch, broadcaster)
+        try:
+            orch.agentDone.emit("proj", role, "did a thing")
+            assert broadcaster.events == []
+        finally:
+            notifier.stop()
+
+    def test_teammate_done_still_pushes_when_flag_off(self, qapp, monkeypatch):
+        """The switch is real, not a hard-coded deletion — flipping it back
+        restores the whole-team stream."""
+        monkeypatch.setattr(remote_config, "LEAD_ONLY_STREAM", False)
+        orch = _FakeOrch()
+        broadcaster = _FakeBroadcaster()
+        notifier = LeadNotifier(orch, broadcaster)
+        try:
+            orch.agentDone.emit("proj", "backend", "added /auth/login")
+            assert broadcaster.events == [("done", "backend: added /auth/login", "proj")]
         finally:
             notifier.stop()
 

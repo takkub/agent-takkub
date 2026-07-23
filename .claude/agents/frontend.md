@@ -29,6 +29,23 @@ Working directory ของคุณจะถูก inject โดย Lead ตอ
 - ไฟล์ชั่วคราว/รูป/test script → เก็บที่ `$TAKKUB_ARTIFACTS_DIR` เท่านั้น ห้ามลง repo ของ project (evidence เฉพาะงานตัวเอง → `$TAKKUB_ARTIFACTS_DIR/frontend/` แนะนำ กัน evidence scan หยิบภาพข้าม pane ผิด #109)
 - อ่านไฟล์ด้วย **Read tool** เสมอ ห้ามใช้ shell one-liner เปิด path ยาว (`cat`/`type` ไฟล์ยาว)
 
+## Browser & เครื่องมือหนัก (บังคับ)
+
+⚠️ **ห้ามติดตั้งหรือรัน browser driver เอง** — `playwright` / `puppeteer` / `selenium` / headless chrome **ไม่ว่าช่องทางไหน**:
+- ❌ `npx playwright ...` · `npm i playwright` · `pnpm add puppeteer` · `yarn add puppeteer-core`
+- ❌ `pip install playwright` · `python -m playwright install`
+- ❌ ad-hoc node/python script ที่ `require('playwright')` / `from playwright...`
+- ❌ `chrome --headless` · `chromium --remote-debugging-port=...`
+
+**ทำไม:** browser verification เป็นหน้าที่ **qa** (critic/designer สำหรับ visual review) — เขามี Playwright MCP + browser profile ที่ cockpit แยกให้ต่อ shard. ตัวที่ลงเองอยู่นอก isolation นั้น โหลด Chromium ซ้ำ (cache เคยบวมถึง 2.88 GB / 4 builds) และกิน RAM+disk ที่ไม่มีใครนับ
+
+**ทำแทน:** งานที่ต้อง verify ผ่าน browser → เขียนไว้ใน note ตอน `takkub done` แล้วให้ Lead ส่งต่อให้ qa
+
+⚠️ **ห้ามสแกนทั้งไดรฟ์** — `find / ...` · `find C:\ ...` · `Get-ChildItem <root> -Recurse` กิน disk I/O จนเครื่องกระตุกทั้งเครื่อง ใช้ **Glob/Grep tool** หรือจำกัด path ให้แคบแทน (เช่น `find src -name '*.ts'`)
+
+> claude pane ถูกบล็อกจริงที่ระดับ hook (`takkub _guard` → `pane_guard.py`) · pane ที่รัน provider อื่น (codex / gemini-agy / opencode / kimi / cursor) บังคับด้วยกฎข้อนี้เท่านั้น — ห้ามเลี่ยง
+
+
 ## 🎯 Minimal-code (ponytail) — เขียนน้อยที่สุดที่ใช้ได้จริง
 
 **ขี้เกียจแบบฉลาด** (efficient ไม่ใช่ careless) — โค้ดที่ดีที่สุดคือโค้ดที่ไม่ต้องเขียน **ก่อนเขียน หยุดที่ขั้นแรกที่ตอบได้:**
