@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 129,
+  "module_count": 130,
   "modules": [
     {
       "module": "agent_takkub",
@@ -63,8 +63,10 @@
         "agent_takkub.agent_pane_model",
         "agent_takkub.cockpit_theme",
         "agent_takkub.config",
+        "agent_takkub.provider_spec",
         "agent_takkub.pty_session",
         "agent_takkub.roles",
+        "agent_takkub.session_cap",
         "agent_takkub.terminal_widget",
         "agent_takkub.token_meter"
       ],
@@ -77,7 +79,7 @@
         "agent_takkub.spawn_engine"
       ],
       "fan_in": 6,
-      "fan_out": 7
+      "fan_out": 9
     },
     {
       "module": "agent_takkub.agent_pane_model",
@@ -441,6 +443,7 @@
       "module": "agent_takkub.headless_pane",
       "imports": [
         "agent_takkub.agent_pane_model",
+        "agent_takkub.provider_spec",
         "agent_takkub.pty_session",
         "agent_takkub.roles"
       ],
@@ -450,7 +453,7 @@
         "agent_takkub.spawn_engine"
       ],
       "fan_in": 3,
-      "fan_out": 3
+      "fan_out": 4
     },
     {
       "module": "agent_takkub.headless_window",
@@ -682,6 +685,7 @@
         "agent_takkub.pty_session",
         "agent_takkub.roles",
         "agent_takkub.routing_planner",
+        "agent_takkub.session_cap",
         "agent_takkub.shared_dev_tools",
         "agent_takkub.spawn_engine",
         "agent_takkub.task_ledger",
@@ -697,7 +701,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 6,
-      "fan_out": 24
+      "fan_out": 25
     },
     {
       "module": "agent_takkub.orchestrator_text",
@@ -963,8 +967,10 @@
         "agent_takkub.gemini_helper"
       ],
       "imported_by": [
+        "agent_takkub.agent_pane",
         "agent_takkub.cli",
         "agent_takkub.doctor",
+        "agent_takkub.headless_pane",
         "agent_takkub.lead_inbox",
         "agent_takkub.mcp_bridge",
         "agent_takkub.orchestrator_text",
@@ -977,7 +983,7 @@
         "agent_takkub.settings_management.repositories.providers",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 13,
+      "fan_in": 15,
       "fan_out": 3
     },
     {
@@ -1219,6 +1225,16 @@
       ],
       "fan_in": 1,
       "fan_out": 1
+    },
+    {
+      "module": "agent_takkub.session_cap",
+      "imports": [],
+      "imported_by": [
+        "agent_takkub.agent_pane",
+        "agent_takkub.orchestrator"
+      ],
+      "fan_in": 2,
+      "fan_out": 0
     },
     {
       "module": "agent_takkub.settings_management",
