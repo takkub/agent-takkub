@@ -4,6 +4,12 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+### Changed
+- Idle `takkub done` reminders now surface through a cross-provider cockpit
+  status/tray signal without submitting a model turn. After three consecutive
+  UI-only rounds by default (`TAKKUB_IDLE_REMIND_ESCALATE_ROUNDS`), the prior
+  PTY reminder is retained as a one-shot fallback.
+
 ## [1.0.29] - 2026-07-24
 
 ### Added (ใหม่)

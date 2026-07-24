@@ -13,6 +13,7 @@ import pytest
 from PyQt6.QtCore import QCoreApplication
 
 from agent_takkub import orchestrator as orch_mod
+from agent_takkub.main_window import MainWindow
 from agent_takkub.orchestrator import (
     IDLE_REMINDER_TEXT,
     MALFORMED_XML_NOTICE_COOLDOWN_S,
@@ -126,6 +127,8 @@ class TestIdleWatchdog:
     ) -> None:
         pane = _make_pane(state="working", at_ready_prompt=True)
         orch.panes["backend"] = pane
+        notices: list[tuple[str, str, int, bool]] = []
+        orch.idleReminderNotice.connect(lambda *args: notices.append(args))
 
         clock = [1000.0]
         monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
@@ -135,7 +138,10 @@ class TestIdleWatchdog:
         clock[0] += orch_mod.IDLE_REMIND_AFTER_S + 1  # cross threshold
         orch._check_idle_teammates()
 
-        pane.session.write.assert_called_with(orch_mod.IDLE_REMINDER_TEXT)
+        # Normal reminder rounds are cockpit-side only: no PTY write/Enter,
+        # therefore no provider model turn is woken.
+        pane.session.write.assert_not_called()
+        assert notices == [(TEST_PROJECT, "backend", 1, False)]
         assert orch._idle_state[_key("backend")]["last_reminder_ts"] == clock[0]
 
     def test_booting_pane_never_reminded(
@@ -148,6 +154,8 @@ class TestIdleWatchdog:
         pane = _make_pane(state="working", at_ready_prompt=True)
         pane.session.shows_startup_marker.return_value = True
         orch.panes["codex"] = pane
+        notices: list[tuple[str, str, int, bool]] = []
+        orch.idleReminderNotice.connect(lambda *args: notices.append(args))
 
         clock = [1000.0]
         monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
@@ -157,6 +165,7 @@ class TestIdleWatchdog:
         orch._check_idle_teammates()
 
         pane.session.write.assert_not_called()
+        assert notices == []
         assert orch._idle_state[_key("codex")]["first_idle_ts"] is None
 
     def test_fast_task_still_reminded_via_unlatched_fallback(
@@ -169,6 +178,8 @@ class TestIdleWatchdog:
         # would strand genuinely-forgot-done panes forever.
         pane = _make_pane(state="working", at_ready_prompt=True)
         orch.panes["backend"] = pane
+        notices: list[tuple[str, str, int, bool]] = []
+        orch.idleReminderNotice.connect(lambda *args: notices.append(args))
 
         clock = [1000.0]
         monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
@@ -184,7 +195,8 @@ class TestIdleWatchdog:
         # Past the unlatched fallback: the pane is certainly not booting.
         clock[0] += orch_mod.IDLE_REMIND_UNLATCHED_AFTER_S
         orch._check_idle_teammates()
-        pane.session.write.assert_called_with(orch_mod.IDLE_REMINDER_TEXT)
+        pane.session.write.assert_not_called()
+        assert notices == [(TEST_PROJECT, "backend", 1, False)]
 
     def test_booting_pane_not_reminded_even_past_unlatched_fallback(
         self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
@@ -195,6 +207,8 @@ class TestIdleWatchdog:
         pane = _make_pane(state="working", at_ready_prompt=True)
         pane.session.shows_startup_marker.return_value = True
         orch.panes["codex"] = pane
+        notices: list[tuple[str, str, int, bool]] = []
+        orch.idleReminderNotice.connect(lambda *args: notices.append(args))
 
         clock = [1000.0]
         monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
@@ -204,6 +218,7 @@ class TestIdleWatchdog:
         orch._check_idle_teammates()
 
         pane.session.write.assert_not_called()
+        assert notices == []
 
     def test_pane_that_never_ran_is_not_reminded_before_the_fallback(
         self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
@@ -294,11 +309,13 @@ class TestIdleWatchdog:
         assert _key("backend") not in orch._idle_state
         pane.session.write.assert_not_called()
 
-    def test_cooldown_prevents_back_to_back_reminders(
+    def test_cooldown_prevents_back_to_back_ui_notices(
         self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         pane = _make_pane(state="working", at_ready_prompt=True)
         orch.panes["backend"] = pane
+        notices: list[tuple[str, str, int, bool]] = []
+        orch.idleReminderNotice.connect(lambda *args: notices.append(args))
 
         clock = [1000.0]
         monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
@@ -308,17 +325,149 @@ class TestIdleWatchdog:
         orch._check_idle_teammates()
         clock[0] += orch_mod.IDLE_REMIND_AFTER_S + 1
         orch._check_idle_teammates()
-        assert pane.session.write.call_count == 1
+        assert len(notices) == 1
+        pane.session.write.assert_not_called()
 
         # Inside the cooldown window — even sitting idle, no second nag.
         clock[0] += orch_mod.IDLE_REMIND_AFTER_S + 1
         orch._check_idle_teammates()
-        assert pane.session.write.call_count == 1
+        assert len(notices) == 1
 
         # After cooldown elapses we're willing to nudge again.
         clock[0] += orch_mod.IDLE_REMIND_COOLDOWN_S + 1
         orch._check_idle_teammates()
-        assert pane.session.write.call_count == 2
+        assert notices == [
+            (TEST_PROJECT, "backend", 1, False),
+            (TEST_PROJECT, "backend", 2, False),
+        ]
+        pane.session.write.assert_not_called()
+
+    def test_pty_escalation_fires_once_after_configured_ui_rounds(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pane = _make_pane(state="working", at_ready_prompt=True)
+        orch.panes["backend"] = pane
+        notices: list[tuple[str, str, int, bool]] = []
+        orch.idleReminderNotice.connect(lambda *args: notices.append(args))
+        monkeypatch.setattr(orch_mod, "IDLE_REMIND_ESCALATE_AFTER_ROUNDS", 2)
+        monkeypatch.setattr(orch_mod.QTimer, "singleShot", lambda *_args, **_kw: None)
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        _work_then_idle(orch, pane, clock)
+
+        # Two UI-only rounds.
+        clock[0] += orch_mod.IDLE_REMIND_AFTER_S + 1
+        orch._check_idle_teammates()
+        clock[0] += orch_mod.IDLE_REMIND_COOLDOWN_S + 1
+        orch._check_idle_teammates()
+        pane.session.write.assert_not_called()
+
+        # The next continuous-idle round gets the retained PTY fallback.
+        clock[0] += orch_mod.IDLE_REMIND_COOLDOWN_S + 1
+        orch._check_idle_teammates()
+        pane.session.write.assert_called_once_with(IDLE_REMINDER_TEXT)
+
+        # Further rounds remain UI-only: escalation is strictly one-shot.
+        clock[0] += orch_mod.IDLE_REMIND_COOLDOWN_S + 1
+        orch._check_idle_teammates()
+        pane.session.write.assert_called_once_with(IDLE_REMINDER_TEXT)
+        assert notices == [
+            (TEST_PROJECT, "backend", 1, False),
+            (TEST_PROJECT, "backend", 2, False),
+            (TEST_PROJECT, "backend", 3, True),
+            (TEST_PROJECT, "backend", 4, False),
+        ]
+
+    def test_processing_resets_escalation_rounds(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pane = _make_pane(state="working", at_ready_prompt=True)
+        orch.panes["backend"] = pane
+        notices: list[tuple[str, str, int, bool]] = []
+        orch.idleReminderNotice.connect(lambda *args: notices.append(args))
+        monkeypatch.setattr(orch_mod, "IDLE_REMIND_ESCALATE_AFTER_ROUNDS", 1)
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        _work_then_idle(orch, pane, clock)
+        clock[0] += orch_mod.IDLE_REMIND_AFTER_S + 1
+        orch._check_idle_teammates()
+
+        pane.session.is_at_ready_prompt.return_value = False
+        clock[0] += 1
+        orch._check_idle_teammates()
+        pane.session.is_at_ready_prompt.return_value = True
+        clock[0] += 1
+        orch._check_idle_teammates()
+        clock[0] += orch_mod.IDLE_REMIND_AFTER_S + 1
+        orch._check_idle_teammates()
+
+        assert notices == [
+            (TEST_PROJECT, "backend", 1, False),
+            (TEST_PROJECT, "backend", 1, False),
+        ]
+        pane.session.write.assert_not_called()
+
+    def test_continuous_idle_timestamp_preserves_harvest_hint(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pane = _make_pane(state="working", at_ready_prompt=True)
+        orch.panes["backend"] = pane
+        orch.panes["lead"] = _make_pane(state="active")
+        monkeypatch.setattr(orch_mod, "HARVEST_HINT_SEC", 100)
+        notify_lead = MagicMock()
+        monkeypatch.setattr(orch, "_notify_lead", notify_lead)
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        _work_then_idle(orch, pane, clock)
+        idle_since = orch._idle_state[_key("backend")]["first_idle_ts"]
+
+        clock[0] += orch_mod.IDLE_REMIND_AFTER_S + 1
+        orch._check_idle_teammates()
+        assert orch._idle_state[_key("backend")]["first_idle_ts"] == idle_since
+
+        clock[0] = float(idle_since) + orch_mod.HARVEST_HINT_SEC + 1
+        orch._check_idle_teammates()
+        notify_lead.assert_called_once()
+        assert "takkub harvest --role backend" in notify_lead.call_args.args[1]
+
+
+class TestIdleReminderUi:
+    def test_status_handler_describes_non_turn_notice(self) -> None:
+        window = MagicMock()
+        window._tray = None
+
+        MainWindow._on_idle_reminder_notice(
+            window,
+            TEST_PROJECT,
+            "backend",
+            1,
+            False,
+        )
+
+        window._status.showMessage.assert_called_once()
+        message, timeout_ms = window._status.showMessage.call_args.args
+        assert TEST_PROJECT in message
+        assert "backend" in message
+        assert "no model turn was triggered" in message
+        assert timeout_ms == 15_000
+
+    def test_status_handler_marks_one_shot_escalation(self) -> None:
+        window = MagicMock()
+        window._tray = None
+
+        MainWindow._on_idle_reminder_notice(
+            window,
+            TEST_PROJECT,
+            "backend",
+            4,
+            True,
+        )
+
+        message = window._status.showMessage.call_args.args[0]
+        assert "one final PTY reminder was submitted" in message
 
 
 class TestStuckPasteReaper:
@@ -550,12 +699,14 @@ class TestTtyBlockIdleWatchdog:
         orch._check_idle_teammates()
         assert lead.session.write.call_count == 2
 
-    def test_normal_idle_pane_behavior_unchanged(
+    def test_normal_idle_pane_surfaces_ui_notice_without_pty(
         self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """(d) A pane that is NOT TTY-blocked still gets the normal idle reminder."""
+        """(d) A non-TTY-blocked pane gets the normal cockpit UI notice."""
         pane = _make_pane(state="working", at_ready_prompt=True, tty_prompt=None)
         orch.panes["backend"] = pane
+        notices: list[tuple[str, str, int, bool]] = []
+        orch.idleReminderNotice.connect(lambda *args: notices.append(args))
 
         clock = [1000.0]
         monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
@@ -566,7 +717,8 @@ class TestTtyBlockIdleWatchdog:
         clock[0] += orch_mod.IDLE_REMIND_AFTER_S + 1
         orch._check_idle_teammates()
 
-        pane.session.write.assert_called_with(IDLE_REMINDER_TEXT)
+        pane.session.write.assert_not_called()
+        assert notices == [(TEST_PROJECT, "backend", 1, False)]
 
 
 class TestMalformedXmlWatchdog:

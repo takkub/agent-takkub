@@ -207,6 +207,7 @@ class MainWindow(
         self.orch.crossTabDone.connect(self._on_cross_tab_done)
         self.orch.leadNotified.connect(self._on_lead_notified)
         self.orch.sessionCapNotice.connect(self._on_session_cap_notice)
+        self.orch.idleReminderNotice.connect(self._on_idle_reminder_notice)
         # `takkub restart` — same persist+relaunch path as the status-bar 🔄
         # button, minus the confirm dialog (typing the command IS the confirm).
         self.orch.restartRequested.connect(self._restart_cockpit)
@@ -785,6 +786,33 @@ class MainWindow(
                 f"[{project_ns}] {body}",
                 QSystemTrayIcon.MessageIcon.Warning,
                 min(timeout_ms, 10_000),
+            )
+
+    def _on_idle_reminder_notice(
+        self,
+        project_ns: str,
+        role: str,
+        notice_round: int,
+        escalated: bool,
+    ) -> None:
+        """Show an idle badge/status without submitting a provider turn."""
+        if escalated:
+            body = (
+                f"{role} is still idle waiting for takkub done "
+                f"(round {notice_round}); one final PTY reminder was submitted."
+            )
+        else:
+            body = (
+                f"{role} is idle waiting for takkub done "
+                f"(round {notice_round}); no model turn was triggered."
+            )
+        self._status.showMessage(f"⚠ [{project_ns}] {body}", 15_000)
+        if self._tray and QSystemTrayIcon.isSystemTrayAvailable():
+            self._tray.showMessage(
+                "Teammate idle",
+                f"[{project_ns}] {body}",
+                QSystemTrayIcon.MessageIcon.Warning,
+                10_000,
             )
 
     # ──────────────────────────────────────────────────────────────
