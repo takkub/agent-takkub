@@ -73,6 +73,11 @@ class ProviderSpec:
     # ─── 3. CLI argument mapping flags ───
     mcp_config_flag: str | None = None
     strict_mcp_flag: str | None = None
+    # Must accept a FILE path and append it to the interactive session's
+    # system prompt. spawn_engine uses this for a fresh pane's one-shot task.
+    # A user-prompt string/positional argument is not equivalent: putting a
+    # multi-KB task in argv reintroduces Windows length and escaping risk.
+    # None keeps the reliable task-file pointer flow.
     system_prompt_flag: str | None = None
     session_id_flag: str | None = None
     session_resume_flag: str | None = None
@@ -296,6 +301,9 @@ codex_spec = ProviderSpec(
             "sandbox_workspace_write.network_access=true",
         ],  # spawn_engine.py:1144-1153
     },
+    # GAP (CLI 0.145.0 --help, checked 2026-07-24): only positional [PROMPT];
+    # no file-backed append-system-prompt option. Keep task pointer delivery.
+    system_prompt_flag=None,
     ready_hard_blockers=("esc to interrupt", "esc to cancel"),  # pty_session.py:208-209
     ready_rules=(
         # Current-code truth (post-#99 fix): the banner-alone rule
@@ -374,6 +382,9 @@ gemini_spec = ProviderSpec(
     post_install_note="run `agy` once to sign in",
     custom_discovery_fn=_discover_gemini,
     autonomy_flags={"default": ["--dangerously-skip-permissions"]},  # spawn_engine.py:1073
+    # GAP (agy 1.1.5 --help, checked 2026-07-24): --prompt-interactive accepts
+    # a prompt string, not a system-prompt file. Keep task pointer delivery.
+    system_prompt_flag=None,
     ready_hard_blockers=(
         "esc to interrupt",
         "esc to cancel",
@@ -436,6 +447,9 @@ opencode_spec = ProviderSpec(
     # docs /docs/permissions) — parity with claude's
     # --dangerously-skip-permissions / codex's --ask-for-approval never.
     autonomy_flags={"default": ["--auto"]},
+    # GAP (opencode 1.18.4 --help, checked 2026-07-24): --prompt is a string;
+    # there is no file-backed append-system-prompt option.
+    system_prompt_flag=None,
     ready_hard_blockers=(),  # global blockers (esc to interrupt/cancel, press
     # enter to continue) still apply via the cross-provider dedup table below.
     ready_rules=(
@@ -506,6 +520,10 @@ kimi_spec = ProviderSpec(
     # Kimi documents it as mutually exclusive with `--auto`, so only the
     # confirmed full-autonomy flag belongs in this argv.
     autonomy_flags={"default": ["--yolo"]},
+    # GAP (kimi 1.49.0 --help, checked 2026-07-24): --prompt is a user string
+    # and --agent-file is a whole agent specification, not an append-system-
+    # prompt file. Keep the task pointer flow.
+    system_prompt_flag=None,
     ready_hard_blockers=(),  # global blockers (esc to interrupt/cancel, press
     # enter to continue) still apply via the cross-provider dedup table below.
     # ⚠ BUSY marker NOT yet calibrated: no authenticated Kimi TUI was
@@ -571,6 +589,10 @@ cursor_spec = ProviderSpec(
     # Without it every terminal command stops on a y/n prompt and the pane is
     # unusable as an unattended teammate.
     autonomy_flags={"default": ["--force"]},
+    # GAP (official CLI parameter help, checked 2026-07-24; binary unavailable
+    # locally): only a positional initial user prompt is documented, with no
+    # file-backed append-system-prompt option. Keep task pointer delivery.
+    system_prompt_flag=None,
     ready_hard_blockers=(),
     # ⚠ NOT yet calibrated: no Cursor TUI idle/busy markers have been observed.
     # Keep this empty rather than guessing markers that could misroute tasks.

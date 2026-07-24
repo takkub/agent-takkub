@@ -13,6 +13,7 @@ created by ``Orchestrator.__init__``.
 from __future__ import annotations
 
 import collections
+import hashlib
 import logging
 import os
 import pathlib
@@ -106,6 +107,65 @@ def _append_provider_effort(
         return
     value = f"{spec.effort_config_key}={effort}" if spec.effort_config_key is not None else effort
     argv.extend([spec.effort_flag, value])
+
+
+_CURRENT_TASK_BEGIN = "\n\n<!-- takkub-current-spawn-task:start -->"
+_CURRENT_TASK_END = "<!-- takkub-current-spawn-task:end -->"
+_CURRENT_TASK_TRIGGER = "Start the current task from the one-shot system-prompt block now."
+
+
+def _prepare_spawn_system_prompt(
+    role_md_file: str | None,
+    task: str | None,
+    *,
+    output_file: str | None = None,
+) -> str | None:
+    """Regenerate one spawn's appended system-prompt file.
+
+    The role/Lead context file is rebuilt by the caller on every spawn.  This
+    helper still strips its own prior block defensively before optionally
+    appending *task*, so a retry/resume can never inherit an old task if a
+    context renderer stops rewriting the file in the future.
+
+    ``output_file`` receives a pane-scoped copy so concurrent shards sharing
+    one role staging directory cannot overwrite each other's task. Rewriting
+    that deterministic copy on every spawn also removes the prior task before
+    a respawn/resume. The returned path is safe to pass to
+    ``--append-system-prompt-file``.
+    ``None`` means the file could not be prepared and the caller must use the
+    existing pointer delivery.
+    """
+    if not role_md_file:
+        return None
+    path = pathlib.Path(role_md_file)
+    try:
+        existing = path.read_text(encoding="utf-8")
+        base = existing.split(_CURRENT_TASK_BEGIN, 1)[0].rstrip()
+        if task is None:
+            rendered = base + ("\n" if base else "")
+        else:
+            rendered = (
+                base
+                + _CURRENT_TASK_BEGIN
+                + "\n\n"
+                + "## Current task for this spawn (one-shot)\n\n"
+                + "The block below is the current task for this newly spawned pane. "
+                + "Execute it now. It is not a standing instruction and must not be "
+                + "reused on a later respawn/resume unless that spawn explicitly "
+                + "contains a new block.\n\n"
+                + "------ task ------\n"
+                + task
+                + "\n\n"
+                + _CURRENT_TASK_END
+                + "\n"
+            )
+        target = pathlib.Path(output_file) if output_file else path
+        if target != path or rendered != existing:
+            target.write_text(rendered, encoding="utf-8")
+        return str(target)
+    except OSError:
+        _log.exception("could not prepare one-shot spawn task in %s", role_md_file)
+        return None
 
 
 # ── spawn constants ──────────────────────────────────────────────
@@ -272,6 +332,15 @@ class PaneState:
     # slashes always (`takkub task show` and the pointer text share this
     # value verbatim).
     last_assigned_task_file: str | None = None
+    # One-shot delivery staged by _assign_dispatch before spawn(). Claude can
+    # preload it through --append-system-prompt-file; providers without an
+    # equivalent file-backed system-prompt flag keep the pointer/PTY flow.
+    # State: "" (none), "requested" (assign prepared it), "pending" (spawn
+    # accepted it), "delivered" (system prompt), "fallback" (pointer).
+    spawn_initial_task: str | None = None
+    spawn_initial_task_fallback: str | None = None
+    spawn_initial_prompt_file: str | None = None
+    spawn_initial_task_state: str = ""
     # assign_ts: wall-clock when this pane's current task was dispatched
     # (_assign_dispatch). done() reads this BEFORE popping the PaneState so it
     # can scan the artifacts dir for screenshots newer than the assignment
@@ -793,6 +862,51 @@ class SpawnEngineMixin:
         env["TAKKUB_PANE_TOKEN"] = tok
         return tok
 
+    def _finish_spawn_initial_task(
+        self,
+        role_name: str,
+        project_ns: str,
+        *,
+        preloaded: bool,
+    ) -> None:
+        """Finalize a one-shot task accepted by this native spawn.
+
+        A successful system-prompt preload needs only a tiny turn-start trigger,
+        never the task body or pointer. If the prompt file could not be
+        prepared, or the effective provider changed while a spawn was deferred,
+        deliver the already-created handoff pointer through the established
+        ready-polling path instead. Clearing the payload here prevents a later
+        manual respawn from seeing a stale task.
+        """
+        ps = self._ps(_exit_key(project_ns, role_name))
+        if ps.spawn_initial_task_state != "pending":
+            return
+        fallback = ps.spawn_initial_task_fallback
+        ps.spawn_initial_task = None
+        ps.spawn_initial_task_fallback = None
+        ps.spawn_initial_prompt_file = None
+        if preloaded:
+            ps.spawn_initial_task_state = "delivered"
+            _log_event(
+                "spawn_initial_task_preloaded",
+                role=role_name,
+                project=project_ns,
+            )
+            # A system-prompt block supplies context but does not itself create
+            # a user turn. Submit one tiny trigger so the first inference acts
+            # on the task directly instead of spending a round-trip deciding
+            # to read the handoff file.
+            self._send_when_ready(role_name, _CURRENT_TASK_TRIGGER, project=project_ns)
+            return
+        ps.spawn_initial_task_state = "fallback"
+        _log_event(
+            "spawn_initial_task_pointer_fallback",
+            role=role_name,
+            project=project_ns,
+        )
+        if fallback:
+            self._send_when_ready(role_name, fallback, project=project_ns)
+
     def _launch_session(
         self,
         *,
@@ -894,10 +1008,21 @@ class SpawnEngineMixin:
                 del self._recent_exits[_ekey]
             if auto_trust:
                 self._auto_trust(role_name, project=project_ns)
+            # Non-Claude providers currently have no file-backed append-system-
+            # prompt capability. This is normally a no-op because assign() keeps
+            # them on pointer delivery; it only fires if the provider changed
+            # while a Claude-capable spawn was deferred.
+            self._finish_spawn_initial_task(role_name, project_ns, preloaded=False)
             self.statusChanged.emit()
             _log_event("spawn", role=role_name, cwd=spawn_cwd, resumed=False)
             return True, f"{label} spawned in {spawn_cwd}"
         except Exception as e:
+            _ps_failed = self._ps(_exit_key(project_ns, role_name))
+            if _ps_failed.spawn_initial_task_state == "pending":
+                _ps_failed.spawn_initial_task = None
+                _ps_failed.spawn_initial_task_fallback = None
+                _ps_failed.spawn_initial_prompt_file = None
+                _ps_failed.spawn_initial_task_state = ""
             try:
                 session.terminate(wait=False)
             except Exception:
@@ -960,6 +1085,22 @@ class SpawnEngineMixin:
 
         if pane.session is not None and pane.session.is_alive:
             return True, f"{role_name} already running"
+
+        # A task-bearing assign stages a one-shot payload before entering
+        # spawn(). Accept it only for a provider with a confirmed file-backed
+        # append-system-prompt flag. Marking it pending above the gate/FIFO
+        # returns lets deferred spawns retain the task without adding it to a
+        # long PTY paste or command-line argument.
+        from .provider_config import CLAUDE, effective_provider_for
+        from .provider_spec import PROVIDER_REGISTRY
+
+        effective_provider = effective_provider_for(base_role, project=project_ns)
+        _ps_initial = self._ps(_exit_key(project_ns, role_name))
+        if (
+            _ps_initial.spawn_initial_task_state == "requested"
+            and PROVIDER_REGISTRY[effective_provider].system_prompt_flag is not None
+        ):
+            _ps_initial.spawn_initial_task_state = "pending"
 
         # Fresh teammate spawn — flag machine oversubscription to Lead before we
         # construct the session (best-effort, non-blocking; the warn method
@@ -1141,12 +1282,8 @@ class SpawnEngineMixin:
         # None-guard is belt-and-suspenders (we only enter the branch when
         # the binary resolved), but kept in case PATH changes between the
         # availability probe and the spawn.
-        from .provider_config import CLAUDE, effective_provider_for
-        from .provider_spec import PROVIDER_REGISTRY
-
         # Per-project role→CLI mapping (project_ns resolved at spawn entry):
         # the same role can be backed by a different CLI in different tabs.
-        effective_provider = effective_provider_for(base_role, project=project_ns)
         # #101 degraded-mode unlock: `lead` is no longer forced to claude, so
         # it can enter the non-claude branch below too. It needs a
         # Lead-specific cwd (project root, not a teammate staging dir) and
@@ -1528,6 +1665,48 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                         )
                         role_md_file = None
 
+        _ps_prompt = self._ps(_exit_key(project_ns, role_name))
+        _pending_spawn_task = (
+            _ps_prompt.spawn_initial_task
+            if _ps_prompt.spawn_initial_task_state == "pending"
+            else None
+        )
+        # Always run the regeneration helper, even with no pending task: its
+        # strip-first contract guarantees respawn/resume never inherits a task
+        # block left by a prior spawn.
+        _prepared_prompt_file = None
+        _cached_prompt_file = _ps_prompt.spawn_initial_prompt_file
+        if (
+            _pending_spawn_task is not None
+            and _cached_prompt_file
+            and pathlib.Path(_cached_prompt_file).is_file()
+        ):
+            # A Tier-2 gate retry is still the same pending native spawn; reuse
+            # its immutable per-spawn file instead of leaking one copy per poll.
+            _prepared_prompt_file = _cached_prompt_file
+        else:
+            _spawn_prompt_output = None
+            if role_md_file:
+                _role_prompt_path = pathlib.Path(role_md_file)
+                _pane_scope = hashlib.sha256(f"{project_ns}\0{role_name}".encode()).hexdigest()[:16]
+                _spawn_prompt_output = str(
+                    _role_prompt_path.with_name(
+                        f"{_role_prompt_path.stem}.spawn-{_pane_scope}{_role_prompt_path.suffix}"
+                    )
+                )
+            _prepared_prompt_file = _prepare_spawn_system_prompt(
+                role_md_file,
+                _pending_spawn_task,
+                output_file=_spawn_prompt_output,
+            )
+            if _pending_spawn_task is not None and _prepared_prompt_file is not None:
+                _ps_prompt.spawn_initial_prompt_file = _prepared_prompt_file
+        _initial_task_preloaded = (
+            _pending_spawn_task is not None and _prepared_prompt_file is not None
+        )
+        if _prepared_prompt_file is not None:
+            role_md_file = _prepared_prompt_file
+
         # LOW (codex full-system review 2026-07-11): validate an explicit
         # resume_uuid BEFORE minting the per-pane capability token below.
         # spawn_cwd is settled for both the Lead and teammate branches above,
@@ -1782,8 +1961,9 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         for pdir in [p.strip() for p in plugin_dirs_raw.split(";") if p.strip()]:
             if (pathlib.Path(pdir) / ".claude-plugin" / "plugin.json").exists():
                 argv.extend(["--plugin-dir", pdir])
-        if role_md_file:
-            argv.extend(["--append-system-prompt-file", role_md_file])
+        _claude_system_prompt_flag = PROVIDER_REGISTRY[CLAUDE].system_prompt_flag
+        if role_md_file and _claude_system_prompt_flag:
+            argv.extend([_claude_system_prompt_flag, role_md_file])
 
         # (Lead write-boundary used to inject a per-project deny-rule
         # settings file here. Removed when Lead switched to
@@ -1934,6 +2114,11 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 ms=int((time.time() - _t0) * 1000),
             )
             pane.attach_session(session, cwd=spawn_cwd, provider_name="claude")
+            self._finish_spawn_initial_task(
+                role_name,
+                project_ns,
+                preloaded=_initial_task_preloaded,
+            )
             # Record exits so the auto-respawn watcher knows which project
             # namespace owned the pane that just died.  Capture the session so
             # stale exit signals from an old session don't trigger respawn on a
@@ -1994,6 +2179,12 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 suffix += " — claude substitute (provider unavailable)"
             return True, f"{role_name} spawned in {spawn_cwd}{suffix}"
         except Exception as e:
+            _ps_failed = self._ps(_exit_key(project_ns, role_name))
+            if _ps_failed.spawn_initial_task_state == "pending":
+                _ps_failed.spawn_initial_task = None
+                _ps_failed.spawn_initial_task_fallback = None
+                _ps_failed.spawn_initial_prompt_file = None
+                _ps_failed.spawn_initial_task_state = ""
             try:
                 session.terminate(wait=False)
             except Exception:
