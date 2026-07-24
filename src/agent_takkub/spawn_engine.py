@@ -332,6 +332,11 @@ class PaneState:
     # slashes always (`takkub task show` and the pointer text share this
     # value verbatim).
     last_assigned_task_file: str | None = None
+    # Per-assign model override. Set only when assign() is about to spawn a
+    # fresh pane; an assign sent to an already-live pane leaves this unchanged
+    # because CLI argv cannot be changed after process start. Keeping it in
+    # PaneState carries the choice through spawn gate/FIFO and auto-respawn.
+    model_override: str | None = None
     # One-shot delivery staged by _assign_dispatch before spawn(). Claude can
     # preload it through --append-system-prompt-file; providers without an
     # equivalent file-backed system-prompt flag keep the pointer/PTY flow.
@@ -1419,7 +1424,13 @@ class SpawnEngineMixin:
                 # re-pointed at another CLI — or substituted to claude because
                 # its own CLI is off/missing — never inherits a model id that
                 # belongs to a different CLI.
-                provider_model = role_model_for(base_role, spec.name) or model_for(spec.name)
+                # Per-assign override is the narrowest choice and therefore
+                # wins over the role setting, provider setting, and CLI default.
+                provider_model = (
+                    _ps_initial.model_override
+                    or role_model_for(base_role, spec.name)
+                    or model_for(spec.name)
+                )
                 if provider_model:
                     provider_argv.extend([spec.model_flag, provider_model])
             if not _is_lead:
@@ -1901,7 +1912,11 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         #   TAKKUB_TEAMMATE_EFFORT="high"              → force high effort everywhere
         if role_name != LEAD.name:
             tier_model, tier_effort, tier_fallback = _teammate_tier(base_role)
-            if "TAKKUB_TEAMMATE_MODEL" in os.environ:
+            if _ps_initial.model_override:
+                # --model on this assign is narrower than every persistent or
+                # process-wide setting, including TAKKUB_TEAMMATE_MODEL.
+                teammate_model = _ps_initial.model_override
+            elif "TAKKUB_TEAMMATE_MODEL" in os.environ:
                 # An explicitly empty value means "use the Claude CLI default"
                 # and must not be replaced by provider configuration.
                 teammate_model = os.environ["TAKKUB_TEAMMATE_MODEL"].strip()
@@ -1965,7 +1980,8 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             from .role_models import model_for as _role_model_for
 
             lead_model = (
-                _role_model_for(role_name, _CLAUDE)
+                _ps_initial.model_override
+                or _role_model_for(role_name, _CLAUDE)
                 or _provider_model_for(_CLAUDE)
                 or _lead_model_override()
             )

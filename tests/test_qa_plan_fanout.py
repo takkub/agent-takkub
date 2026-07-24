@@ -197,7 +197,13 @@ class TestAssignPlan:
 
 class TestFireFanout:
     def _cfg(self, plan_file: str, shards: int = 3) -> dict:
-        return {"shards": shards, "cwd": "/web", "task": "e2e", "plan_file": plan_file}
+        return {
+            "shards": shards,
+            "cwd": "/web",
+            "task": "e2e",
+            "plan_file": plan_file,
+            "model": "flash-scan",
+        }
 
     def test_valid_plan_fires_bucketed_shards(self, orch: Orchestrator, tmp_path) -> None:
         plan = {
@@ -223,6 +229,7 @@ class TestFireFanout:
         assert roles == ["qa#1", "qa#2", "qa#3"]
         for c in asg.call_args_list:
             assert c.kwargs["shard_total"] == 3
+            assert c.kwargs["model"] == "flash-scan"
             assert "SHARD" in c.kwargs["task"]
         # scope text flows into the matching shard
         assert "/dashboard" in asg.call_args_list[1].kwargs["task"]

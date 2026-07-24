@@ -198,6 +198,7 @@
         "agent_takkub.pane_guard",
         "agent_takkub.pane_tools_policy",
         "agent_takkub.plugin_installer",
+        "agent_takkub.provider_config",
         "agent_takkub.provider_install",
         "agent_takkub.provider_models",
         "agent_takkub.provider_spec",
@@ -211,7 +212,7 @@
       ],
       "imported_by": [],
       "fan_in": 0,
-      "fan_out": 21
+      "fan_out": 22
     },
     {
       "module": "agent_takkub.cli_server",
@@ -927,6 +928,7 @@
         "agent_takkub.provider_state"
       ],
       "imported_by": [
+        "agent_takkub.cli",
         "agent_takkub.cli_server",
         "agent_takkub.lead_context",
         "agent_takkub.lead_inbox",
@@ -943,7 +945,7 @@
         "agent_takkub.spawn_engine",
         "agent_takkub.update_panel"
       ],
-      "fan_in": 15,
+      "fan_in": 16,
       "fan_out": 3
     },
     {

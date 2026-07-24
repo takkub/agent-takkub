@@ -144,7 +144,17 @@ class TestDrain:
         # 1 active teammate (< cap 2) and one item queued → drain replays it.
         fake._panes_by_project["p"] = {LEAD.name: _Pane(), "frontend": _Pane()}
         Orchestrator._enqueue_assign(
-            fake, "backend", "/cwd", "task-b", True, False, 0, False, "shared", "p"
+            fake,
+            "backend",
+            "/cwd",
+            "task-b",
+            True,
+            False,
+            0,
+            False,
+            "shared",
+            "p",
+            model="haiku-scan",
         )  # type: ignore[arg-type]
 
         self._drain(fake)
@@ -153,6 +163,7 @@ class TestDrain:
         args, kwargs = fake.assign.call_args
         assert args[0] == "backend"
         assert kwargs["requires_commit"] is True
+        assert kwargs["model"] == "haiku-scan"
         assert len(fake._fanout_queue["p"]) == 0
 
     def test_drain_noop_when_still_full(self, monkeypatch) -> None:

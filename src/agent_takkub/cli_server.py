@@ -361,6 +361,17 @@ class CliServer(QObject):
                 if not role:
                     self._reply(sock, ok=False, msg="missing arg: 'role'")
                     return
+                if cmd == "assign":
+                    from .provider_config import assign_model_override_error
+
+                    model_error = assign_model_override_error(
+                        role,
+                        req.get("model"),
+                        from_project,
+                    )
+                    if model_error:
+                        self._reply(sock, ok=False, msg=model_error)
+                        return
                 delay = self._next_spawn_delay_ms(role, from_project)
                 if cmd == "spawn":
                     QTimer.singleShot(
@@ -382,6 +393,7 @@ class CliServer(QObject):
                             isolation=str(req.get("isolation", "shared") or "shared"),
                             project=from_project,
                             feature=str(req.get("feature", "") or ""),
+                            model=(str(req.get("model", "") or "").strip() or None),
                         ),
                     )
                     self._reply(

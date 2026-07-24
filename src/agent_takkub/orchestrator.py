@@ -871,7 +871,15 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         isolation: str = "shared",
         project: str | None = None,
         feature: str = "",
+        model: str | None = None,
     ) -> tuple[bool, str]:
+        model = (model or "").strip() or None
+        if model:
+            from .provider_config import assign_model_override_error
+
+            model_error = assign_model_override_error(role_name, model, project)
+            if model_error:
+                return False, model_error
         # Fan-out queue (flag-gated, default off): defer a fresh teammate spawn
         # that would exceed the machine's total-pane budget. It spawns
         # automatically when a pane frees a slot (see _drain_fanout_queue). No-op
@@ -888,6 +896,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                 isolation,
                 project,
                 feature,
+                model,
             )
 
         # Per-pane git worktree isolation (issue #81): create the worktree +
@@ -904,6 +913,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                 plan,
                 project,
                 feature,
+                model,
             )
         return self._assign_dispatch(
             role_name,
@@ -916,6 +926,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             project=project,
             worktree=None,
             feature=feature,
+            model=model,
         )
 
     def _assign_dispatch(
@@ -930,6 +941,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         project: str | None = None,
         worktree: dict | None = None,
         feature: str = "",
+        model: str | None = None,
     ) -> tuple[bool, str]:
         # Spawn the pane and run all post-spawn wiring (goal, provider rewrite,
         # verify hint, shard/plan bookkeeping, send). Shared by the normal assign
@@ -969,6 +981,32 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         )
         key = _exit_key(project_ns, role_name)
         ps_assign = self._ps(key)
+        existing_pane = self._project_panes(project_ns).get(role_name)
+        pane_is_running = bool(
+            existing_pane is not None
+            and getattr(existing_pane, "session", None) is not None
+            and getattr(existing_pane.session, "is_alive", False)
+        )
+        if model and pane_is_running:
+            self._notify_lead(
+                project_ns,
+                f"⚠️ [{role_name}] --model {model!r} ไม่มีผล: pane เปิดอยู่แล้วและยังใช้ "
+                "model เดิม · close pane นี้ก่อนแล้ว assign ใหม่เพื่อใช้ override",
+                from_role=role_name,
+                note="",
+            )
+            _log_event(
+                "assign_model_override_ignored",
+                role=role_name,
+                project=project_ns,
+                model=model,
+                reason="pane-already-running",
+            )
+        elif not pane_is_running:
+            # PaneState can outlive a crashed session. A new assign without
+            # --model must clear the prior one-shot choice; a new assign with
+            # --model survives spawn gate/FIFO retries and crash auto-respawn.
+            ps_assign.model_override = model
         ps_assign.spawn_initial_task = None
         ps_assign.spawn_initial_task_fallback = None
         ps_assign.spawn_initial_prompt_file = None
@@ -1092,6 +1130,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                 "cwd": cwd,
                 "task": task,
                 "plan_file": str(plan_file),
+                "model": model,
             }
             _log_event(
                 "assign_plan",
@@ -1135,6 +1174,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             initial_delivery=initial_delivery,
             initial_delivery_reason=initial_delivery_reason,
             effective_provider=effective_provider,
+            model_override=model,
         )
         return True, f"task queued for {role_name} (sending when ready)"
 
@@ -1149,6 +1189,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         plan: bool,
         project: str | None,
         feature: str = "",
+        model: str | None = None,
     ) -> tuple[bool, str]:
         """Create an isolated git worktree for the pane, then dispatch into it.
 
@@ -1183,6 +1224,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                 project=project,
                 worktree=None,
                 feature=feature,
+                model=model,
             )
 
         if not base_cwd:
@@ -1244,6 +1286,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             project=project,
             worktree=info.as_dict(),
             feature=feature,
+            model=model,
         )
         # Tag the pane title with the branch so the isolation is unmistakable in
         # the cockpit (best-effort; the pane exists once dispatch's spawn emitted
@@ -3856,10 +3899,12 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         isolation: str,
         project: str | None,
         feature: str = "",
+        model: str | None = None,
     ) -> tuple[bool, str]:
         """Park an over-cap assign on the per-project queue and tell the Lead.
         Replayed verbatim by `_drain_fanout_queue` once a slot frees, so every
-        flag (commit gate, auto-chain, shards, plan, isolation, feature) survives unchanged."""
+        flag (commit gate, auto-chain, shards, plan, isolation, feature,
+        per-assign model) survives unchanged."""
         project_ns = self._resolve_project(project)
         q = getattr(self, "_fanout_queue", None)
         if q is None:
@@ -3876,6 +3921,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                 "isolation": isolation,
                 "project": project,
                 "feature": feature,
+                "model": model,
             }
         )
         depth = len(q[project_ns])
@@ -3936,6 +3982,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                 isolation=item.get("isolation", "shared"),
                 project=item["project"],
                 feature=item.get("feature", ""),
+                model=item.get("model"),
             )
             # The queue itself was an auto-chain blocker. Re-evaluate after
             # dequeue: a successful replay now has pane state to block on; a

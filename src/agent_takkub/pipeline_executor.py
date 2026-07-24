@@ -614,6 +614,7 @@ class PipelineMixin:
         requested = int(cfg.get("shards", 0) or 0)
         base_task = str(cfg.get("task", ""))
         cwd = cfg.get("cwd")
+        model = str(cfg.get("model", "") or "").strip() or None
         plan_path = pathlib.Path(str(cfg.get("plan_file", "")))
 
         buckets: list[tuple[str, str]] = []
@@ -659,8 +660,8 @@ class PipelineMixin:
                 shard_task = base_task  # degraded: self-split via TAKKUB_SHARD
             self._defer(
                 delay,
-                lambda r=shard_role, t=shard_task, kk=k: self.assign(
-                    r, cwd=cwd, task=t, shard_total=kk, project=project_ns
+                lambda r=shard_role, t=shard_task, kk=k, m=model: self.assign(
+                    r, cwd=cwd, task=t, shard_total=kk, project=project_ns, model=m
                 ),
             )
             fired.append(shard_role)

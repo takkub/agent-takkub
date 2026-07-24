@@ -10,6 +10,7 @@ codex pane. Hard rules:
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -329,3 +330,33 @@ class TestLeadCapabilityGapForProvider:
     def test_unknown_provider_reports_every_label(self) -> None:
         missing = provider_config.lead_capability_gap_for_provider("nonexistent")
         assert missing == [label for _, label in provider_config._LEAD_CAPABILITY_LABELS]
+
+
+class TestAssignModelOverrideValidation:
+    def test_supported_effective_provider_accepts_override(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            provider_config, "effective_provider_for", lambda *_args, **_kwargs: "claude"
+        )
+        assert provider_config.assign_model_override_error("qa", "haiku") is None
+
+    def test_provider_without_model_flag_returns_clear_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from agent_takkub.provider_spec import PROVIDER_REGISTRY
+
+        monkeypatch.setattr(
+            provider_config, "effective_provider_for", lambda *_args, **_kwargs: "cursor"
+        )
+        monkeypatch.setitem(
+            PROVIDER_REGISTRY,
+            "cursor",
+            replace(PROVIDER_REGISTRY["cursor"], model_flag=None),
+        )
+
+        error = provider_config.assign_model_override_error("qa", "cheap-scan")
+
+        assert error is not None
+        assert "cursor" in error
+        assert "model_flag" in error

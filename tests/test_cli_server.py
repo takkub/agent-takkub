@@ -56,8 +56,10 @@ class _FakeOrch:
         isolation="shared",
         project=None,
         feature="",
+        model=None,
     ):
         self.assign_calls.append((role, cwd, task, requires_commit, auto_chain, isolation))
+        self.last_assign_model = model
         return True, "ok"
 
     def spawn(self, role, cwd=None, project=None):
@@ -107,11 +109,33 @@ class TestAsyncSpawnDispatch:
                     "requires_commit": True,
                     "auto_chain": True,
                     "isolation": "worktree",
+                    "model": "claude-haiku-4-5",
                 }
             ),
         )
         qapp.processEvents()
         assert orch.assign_calls == [("backend", "C:/x", "t", True, True, "worktree")]
+        assert orch.last_assign_model == "claude-haiku-4-5"
+
+    def test_assign_rejects_unsupported_model_before_scheduling(
+        self, qapp: QCoreApplication, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.assign_model_override_error",
+            lambda *_args, **_kwargs: "--model is not supported by provider 'demo'",
+        )
+        orch = _FakeOrch()
+        srv = CliServer(orch)
+        sock = _FakeSock()
+
+        srv._dispatch(
+            sock,
+            _auth({"cmd": "assign", "role": "qa", "model": "cheap", "task": "scan"}),
+        )
+
+        assert _replies(sock)[0]["ok"] is False
+        qapp.processEvents()
+        assert orch.assign_calls == []
 
     def test_spawn_acked_immediately_then_deferred(self, qapp: QCoreApplication) -> None:
         orch = _FakeOrch()
