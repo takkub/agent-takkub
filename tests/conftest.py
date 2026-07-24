@@ -44,6 +44,9 @@ os.environ.setdefault("TAKKUB_ALLOW_MULTI", "1")
 # belt-and-suspenders layer (monkeypatch) in case a test explicitly clears
 # this env var.
 os.environ.setdefault("TAKKUB_SKIP_MCP_WARM", "1")
+# Browser-role spawn tests mock the PTY and must never launch a real Chrome.
+# NativeChromeManager itself is tested directly with subprocess/CDP mocks.
+os.environ.setdefault("TAKKUB_SKIP_NATIVE_CHROME", "1")
 
 import pytest
 
@@ -140,6 +143,7 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
     # path that dodges the env check still can't spawn real npx/node children
     # during the suite.
     monkeypatch.setenv("TAKKUB_SKIP_MCP_WARM", "1")
+    monkeypatch.setenv("TAKKUB_SKIP_NATIVE_CHROME", "1")
     sdt = _maybe_module("agent_takkub.shared_dev_tools", force=True)
     if sdt is not None:
         monkeypatch.setattr(sdt, "warm_browser_mcps", lambda: None, raising=False)

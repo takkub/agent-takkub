@@ -319,6 +319,66 @@ def check_runtime() -> list[Finding]:
 
 
 # ---------------------------------------------------------------------------
+# [browser] — mini-browser CLI used by provider-neutral browser QA (#123)
+# ---------------------------------------------------------------------------
+
+
+def check_mini_browser() -> list[Finding]:
+    """Check/install the provider-neutral ``mb`` CLI.
+
+    Normal doctor runs remain read-only. ``takkub doctor --fix`` invokes the
+    fixed-package auto-fix when mb is absent; unlike optional model providers,
+    mb is shared browser-role infrastructure and does not require
+    ``--install-providers``.
+    """
+    mb = shutil.which("mb.cmd") or shutil.which("mb")
+    if mb:
+        return [Finding("browser", "mini-browser", Status.OK, mb)]
+
+    npm = shutil.which("npm.cmd") or shutil.which("npm")
+    if not npm:
+        return [
+            Finding(
+                "browser",
+                "mini-browser",
+                Status.WARN,
+                "mb not found; npm is unavailable",
+                "install Node.js, then run `npm install --global @runablehq/mini-browser`",
+            )
+        ]
+
+    def _install() -> tuple[bool, str]:
+        from ._win_console import SUBPROCESS_NO_WINDOW
+
+        try:
+            result = subprocess.run(
+                [npm, "install", "--global", "@runablehq/mini-browser"],
+                capture_output=True,
+                text=True,
+                timeout=300,
+                creationflags=SUBPROCESS_NO_WINDOW,
+                env={**os.environ, "npm_config_yes": "true"},
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return False, str(exc)
+        output = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
+        if result.returncode == 0:
+            return True, output[-300:] or "mini-browser installed"
+        return False, output[-300:] or f"npm exited {result.returncode}"
+
+    return [
+        Finding(
+            "browser",
+            "mini-browser",
+            Status.WARN,
+            "mb not found — browser roles cannot use provider-neutral CLI QA",
+            "`takkub doctor --fix` or `npm install --global @runablehq/mini-browser`",
+            auto_fix=_install,
+        )
+    ]
+
+
+# ---------------------------------------------------------------------------
 # [arch] — Apple Silicon Rosetta / native-arm64 shell hygiene (macOS only)
 # ---------------------------------------------------------------------------
 
@@ -1452,6 +1512,7 @@ def run_all_checks() -> list[Finding]:
         ("check_env_path", check_env_path),
         ("check_npm_registry", check_npm_registry),
         ("check_runtime", check_runtime),
+        ("check_mini_browser", check_mini_browser),
         ("check_installed_integrity", check_installed_integrity),
         ("check_arch", check_arch),
         ("check_qt", check_qt),

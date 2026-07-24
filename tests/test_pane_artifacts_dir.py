@@ -16,7 +16,11 @@ from unittest.mock import patch
 import pytest
 
 from agent_takkub import config
-from agent_takkub.pane_env import _PANE_ENV_ALLOWLIST, _apply_artifacts_dir
+from agent_takkub.pane_env import (
+    _PANE_ENV_ALLOWLIST,
+    _apply_artifacts_dir,
+    _build_pane_env,
+)
 
 
 @pytest.fixture
@@ -67,6 +71,12 @@ class TestApplyArtifactsDir:
 
     def test_allowlisted_for_clarity(self) -> None:
         assert "TAKKUB_ARTIFACTS_DIR" in _PANE_ENV_ALLOWLIST
+
+    def test_env_builder_stamps_when_project_is_known(self, runtime_dir: Path) -> None:
+        """Provider branches cannot forget the artifact stamp on early return."""
+        env = _build_pane_env("gemini-project")
+        assert env["TAKKUB_ARTIFACTS_DIR"].startswith(str(runtime_dir / "exports"))
+        assert env["TAKKUB_ARTIFACTS_DIR"].endswith("gemini-project")
 
 
 class TestApplyDocsDir:

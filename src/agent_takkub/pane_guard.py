@@ -163,6 +163,11 @@ _DISK_SCAN_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
 )
 
+# mini-browser's client is fixed to CDP 9222. A qa/critic/designer shard may
+# still use its isolated Playwright MCP, but must never drive mb's one shared
+# Chrome session (#92).
+_MB_INVOKE = re.compile(r"(?:^|[|;&]\s*)(?:mb|mb-start-chrome)(?:\s|$)", re.I | re.M)
+
 
 def normalise_role(role: str | None) -> str:
     """Canonical role name: lowercased, whitespace-trimmed, shard suffix
@@ -192,6 +197,18 @@ def classify(command: str, role: str | None) -> Verdict:
     name = normalise_role(role)
     if not name or name in _UNGUARDED_ROLES:
         return Verdict(True)
+
+    raw_role = (role or "").strip().lower()
+    if "#" in raw_role and is_browser_role(name) and _MB_INVOKE.search(cmd):
+        return Verdict(
+            False,
+            rule="browser_driver:mb-shard-cdp-9222",
+            reason=(
+                f"role `{raw_role}` ใช้ mb ไม่ได้: mb client hardcode CDP 9222 "
+                "ทำให้ทุก shard ขับ Chrome ตัวเดียวกัน (#92). "
+                "ใช้ Playwright MCP ที่ cockpit แยก profile ให้ต่อ shard แทน"
+            ),
+        )
 
     if not is_browser_role(name):
         for rule, pattern in _BROWSER_PATTERNS:

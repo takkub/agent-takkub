@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 131,
+  "module_count": 132,
   "modules": [
     {
       "module": "agent_takkub",
@@ -135,6 +135,19 @@
       ],
       "fan_in": 3,
       "fan_out": 1
+    },
+    {
+      "module": "agent_takkub.browser_chrome",
+      "imports": [
+        "agent_takkub.config",
+        "agent_takkub.pane_guard"
+      ],
+      "imported_by": [
+        "agent_takkub.orchestrator",
+        "agent_takkub.spawn_engine"
+      ],
+      "fan_in": 2,
+      "fan_out": 2
     },
     {
       "module": "agent_takkub.chatlog_scanner",
@@ -291,6 +304,7 @@
         "agent_takkub.agent_pane",
         "agent_takkub.app",
         "agent_takkub.auto_resume",
+        "agent_takkub.browser_chrome",
         "agent_takkub.chatlog_scanner",
         "agent_takkub.claude_auth_config",
         "agent_takkub.claude_update",
@@ -355,7 +369,7 @@
         "agent_takkub.vault_mirror",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 66,
+      "fan_in": 67,
       "fan_out": 0
     },
     {
@@ -681,6 +695,7 @@
       "module": "agent_takkub.orchestrator",
       "imports": [
         "agent_takkub.agent_pane",
+        "agent_takkub.browser_chrome",
         "agent_takkub.chatlog_scanner",
         "agent_takkub.claude_auth_config",
         "agent_takkub.config",
@@ -716,7 +731,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 6,
-      "fan_out": 26
+      "fan_out": 27
     },
     {
       "module": "agent_takkub.orchestrator_text",
@@ -756,9 +771,10 @@
       "module": "agent_takkub.pane_guard",
       "imports": [],
       "imported_by": [
+        "agent_takkub.browser_chrome",
         "agent_takkub.cli"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 0
     },
     {
@@ -1800,6 +1816,7 @@
       "module": "agent_takkub.spawn_engine",
       "imports": [
         "agent_takkub.agent_pane",
+        "agent_takkub.browser_chrome",
         "agent_takkub.claude_auth_config",
         "agent_takkub.codex_agents_md",
         "agent_takkub.config",
@@ -1829,7 +1846,7 @@
         "agent_takkub.remote.api"
       ],
       "fan_in": 3,
-      "fan_out": 23
+      "fan_out": 24
     },
     {
       "module": "agent_takkub.spawn_gate",

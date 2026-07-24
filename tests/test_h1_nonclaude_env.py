@@ -123,6 +123,7 @@ class TestNonClaudeBranchesGetH1EnvDefaults:
         assert env["npm_config_yes"] == "true"
         assert env["GIT_TERMINAL_PROMPT"] == "0"
         assert env["MCP_TOOL_TIMEOUT"] == "180000"
+        assert env["TAKKUB_ARTIFACTS_DIR"].endswith(TEST_PROJECT)
 
     def test_shell_pane_gets_color_and_non_interactive_env(self, qapp, monkeypatch):
         import shutil as _shutil_mod

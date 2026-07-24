@@ -132,6 +132,28 @@ class TestBrowserDriverAllowed:
         assert pane_guard.classify("ls -la ~/.cache/ms-playwright", "backend").allowed
 
 
+class TestMiniBrowserShardConstraint:
+    @pytest.mark.parametrize("role", ["qa#1", "critic#2", "designer#9"])
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "mb go http://localhost:3000",
+            "mb shot out.png",
+            "mb-start-chrome",
+            "npm test && mb logs",
+        ],
+    )
+    def test_mb_is_denied_for_browser_shards(self, role: str, command: str) -> None:
+        verdict = pane_guard.classify(command, role)
+        assert not verdict.allowed
+        assert verdict.rule == "browser_driver:mb-shard-cdp-9222"
+        assert "Playwright MCP" in verdict.reason
+
+    @pytest.mark.parametrize("role", ["qa", "critic", "designer"])
+    def test_mb_is_allowed_for_unsharded_browser_roles(self, role: str) -> None:
+        assert pane_guard.classify("mb go http://localhost:3000", role).allowed
+
+
 class TestDiskScanDenied:
     @pytest.mark.parametrize(
         "command",
