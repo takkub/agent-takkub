@@ -4,6 +4,22 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.29] - 2026-07-24
+
+### Added (ใหม่)
+- **ลด token ชุดแรก (จาก audit ข้อมูลจริง 7 วัน = 4.34B tokens, 98.25% เป็น cache reads)** — report เต็มที่ `docs/qa-reports/2026-07-24-token-audit.md`:
+  - **session-cap watchdog** (`session_cap.py`) — pane ที่ prompt ทะลุ cap (default 180k · `TAKKUB_SESSION_CAP_TOKENS` / QSettings) เตือนแบบ edge-trigger: teammate ได้ advisory ให้จบงานก่อนแล้ว `/compact` (รอ ready prompt เสมอ ไม่ตัดกลางงาน) · Lead ได้แค่ UI notice ไม่ auto-compact เด็ดขาด · เฉพาะ claude pane (provider อื่นไม่มี JSONL ให้อ่าน — #103 gap ระบุแล้ว)
+  - **one-shot spawn task delivery** — assign ที่ spawn pane ใหม่ฝัง task เต็มเข้า `--append-system-prompt-file` + trigger สั้นๆ แทน pointer→Read round-trip (~60k tokens/spawn) · pane รันอยู่/provider อื่น = pointer เดิม · **known gap #124: ยังไม่ engage ตอน staggered fan-out**
+- **reasoning effort ต่อ provider** — role tier effort มีผลกับ pane ที่ไม่ใช่ claude แล้ว: agy `--effort` (1.1.5+) · codex `-c model_reasoning_effort=` · opencode/kimi/cursor ไม่มี surface = ระบุ gap ใน spec (#103)
+- **Team Settings redesign** (👥 Team) ตาม control-plane mockup — ธีมดำ+gold เดิม: sidebar หมวด+SVG icons · heading kicker · card rows · matrix legend/sublabel/separator/empty-state · sticky footer พร้อม dirty dot · ผ่าน qa 3 รอบ + critic verify SHIP
+- **Thai font fallback ทั้งแอป** — bundle Noto Sans Thai (OFL) + per-OS stack (Win: Leelawadee UI · mac: Thonburi) แก้ข้อความไทย/glyph เป็นกล่อง tofu จากการประกาศ font family เดียว
+
+### Fixed (แก้)
+- **#120 restart port-file drift** — successor ของ `takkub restart` เคยสืบทอด `TAKKUB_PORT_FILE` ของ PID เก่า ทำ CLI วิ่งผิด instance ("unauthorized: lead-only") · ตอนนี้ค่าที่ app ตั้งเองถูก strip (provenance marker) ส่วน override จริงจาก shell ยังรอด
+- **#117 over-capacity advisory เตือนเกินจริง** — budget ลดจาก 2GB → 0.5GB/pane (วัดจริง ~350MB) + ฐาน RAM ใช้ `max(available, 25% ของ total)` กัน sample แกว่ง
+- **#118 delivery-unconfirmed false positive** (ส่วนที่เหลือจาก 1.0.26) — claude pane ที่ policy ให้ MCP (qa/critic/designer) ได้ ready-wait 90s เท่า provider ช้า + ข้อความเตือนรายงานเลข wait จริง
+- **ลูกศร dropdown ของ QComboBox กลับมาแสดง** — สไตล์ `::down-arrow` โดยไม่มี `image:` ทำ Qt ลบลูกศร native ทิ้ง ใส่ SVG glyph ตรงๆ (พร้อม state เปิด/disabled)
+
 ## [1.0.28] - 2026-07-23
 
 ### Fixed (แก้)

@@ -1,6 +1,6 @@
 {
   "name": "agent-takkub",
-  "version": "1.0.28",
+  "version": "1.0.29",
   "description": "Desktop cockpit for orchestrating a team of Claude Code agents (Windows + macOS). Install globally: npm i -g agent-takkub",
   "keywords": [
     "claude",
