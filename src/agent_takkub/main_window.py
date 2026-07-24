@@ -1385,6 +1385,10 @@ class MainWindow(
                     # finishes before the process dies — a detached daemon
                     # teardown would be killed mid-kill and orphan the tree.
                     pane.session.terminate(wait=True)
+        try:
+            self.orch.close_native_chrome()
+        except Exception:
+            pass
         if self._limit_store is not None:
             self._limit_store.stop()
             self._limit_store = None

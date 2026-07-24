@@ -578,6 +578,12 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         # access site (self._pane_state[...] etc.) work unchanged.
         # Lifecycle notes are in PaneRegistry's docstring (spawn_engine.py).
         self._registry: PaneRegistry = PaneRegistry()
+        # Windows mini-browser uses a fixed CDP endpoint. The process is
+        # started lazily for an eligible browser pane and stopped explicitly
+        # by the GUI/headless teardown paths.
+        from .browser_chrome import NativeChromeManager
+
+        self._native_chrome = NativeChromeManager()
         # Peer CC durability: messages queued when Lead is not alive.
         # Keyed by project namespace; flushed to Lead on next Lead spawn.
         self._pending_lead_cc: dict[str, list[dict]] = {}
@@ -689,6 +695,12 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         # directly inside _is_spawn_blocked() regardless of this predicate.
         self._spawn_gate_pred: Callable[[], bool] | None = None
         # _spawn_deferred, _spawn_queue, _spawn_in_progress → self._registry
+
+    def close_native_chrome(self) -> None:
+        """Stop Chrome only when this cockpit launched it (idempotent)."""
+        manager = getattr(self, "_native_chrome", None)
+        if manager is not None:
+            manager.close()
 
     # ──────────────────────────────────────────────────────────────
     # project-aware view onto the pane registry  (SpawnEngineMixin provides _ps + spawn methods)

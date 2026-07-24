@@ -30,6 +30,11 @@ from typing import TYPE_CHECKING
 from PyQt6.QtCore import QTimer
 
 from .agent_pane import AgentPane
+from .browser_chrome import (
+    NativeChromeManager,
+    apply_chrome_bin,
+    should_manage_native_chrome,
+)
 from .claude_auth_config import apply_claude_auth_overrides
 from .config import (
     CLI_BIN_DIR,
@@ -58,7 +63,6 @@ from .orchestrator_text import (
     _teammate_tier,
 )
 from .pane_env import (
-    _apply_artifacts_dir,
     inject_user_profile_env,
 )
 from .pipeline_executor import _split_shard
@@ -1212,6 +1216,29 @@ class SpawnEngineMixin:
             return True, f"{role_name} spawn queued (arbiter busy)"
         # ── /Spawn gate + FIFO arbiter ──────────────────────────────
 
+        # Windows only: mb's launcher wrapper falls through to WSL and fails,
+        # while the mb client itself works once native Chrome exposes its
+        # hardcoded CDP endpoint. Start/reuse one cockpit-owned Chrome before
+        # every provider branch so qa/critic/designer behave identically under
+        # Claude, Codex, and Gemini. Shards deliberately skip this path: mb
+        # cannot target a per-shard port and would make every shard drive the
+        # same browser (#92); their isolated Playwright MCP remains available.
+        if (
+            should_manage_native_chrome(base_role, shard_idx)
+            and os.environ.get("TAKKUB_SKIP_NATIVE_CHROME", "") != "1"
+        ):
+            manager = getattr(self, "_native_chrome", None)
+            if manager is None:
+                manager = self._native_chrome = NativeChromeManager()
+            chrome_ok, chrome_msg = manager.ensure_started()
+            _log_event(
+                "native_chrome",
+                role=role_name,
+                project=project_ns,
+                ok=chrome_ok,
+                msg=chrome_msg,
+            )
+
         # ── shell pane: plain PowerShell, no agent ──────────────────
         # The "Open Shell" status-bar button drops the user into a raw
         # pwsh prompt inside the cockpit grid — handy for one-off git
@@ -1256,10 +1283,9 @@ class SpawnEngineMixin:
                 )
                 shell_argv = [posix_shell, "-i"]
             spawn_cwd = cwd or default_cwd_for_role(role_name, project=project_ns) or str(DATA_HOME)
-            env = _build_pane_env()
+            env = _build_pane_env(project_ns)
             env["TAKKUB_ROLE"] = role_name
             env["TAKKUB_PROJECT"] = project_ns
-            _apply_artifacts_dir(env, project_ns)
             inject_user_profile_env(env, project_ns)
             bin_dir = str(CLI_BIN_DIR)
             env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
@@ -1385,10 +1411,10 @@ class SpawnEngineMixin:
                     spec.name,
                     spec.context_strategy,
                 )
-            env = _build_lead_env() if _is_lead else _build_pane_env()
+            env = _build_lead_env(project_ns) if _is_lead else _build_pane_env(project_ns)
             env["TAKKUB_ROLE"] = role_name
             env["TAKKUB_PROJECT"] = project_ns
-            _apply_artifacts_dir(env, project_ns)
+            apply_chrome_bin(env, base_role)
             inject_user_profile_env(env, project_ns)
             bin_dir = str(CLI_BIN_DIR)
             if spec.prepend_bin_dir_to_path:
@@ -1752,9 +1778,9 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         except RuntimeError as e:
             return False, str(e)
 
-        env = _build_lead_env() if role_name == LEAD.name else _build_pane_env()
+        env = _build_lead_env(project_ns) if role_name == LEAD.name else _build_pane_env(project_ns)
         env["TAKKUB_ROLE"] = role_name
-        _apply_artifacts_dir(env, project_ns)
+        apply_chrome_bin(env, base_role)
         inject_user_profile_env(env, project_ns)
         # Shard env: let the agent know its instance identity vs behaviour identity.
         # TAKKUB_BASE_ROLE = base role name (loads qa.md, correct Chrome config, etc.)
@@ -1806,38 +1832,6 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             rtk_dir = str(pathlib.Path(rtk_path).resolve().parent)
             if rtk_dir not in env["PATH"].split(os.pathsep):
                 env["PATH"] = rtk_dir + os.pathsep + env["PATH"]
-
-        # QA pane uses `@runablehq/mini-browser` for e2e/smoke flows.
-        # The `mb-start-chrome` helper looks for $CHROME_BIN before
-        # falling back to "Chrome not found". Probe the typical Windows
-        # install paths once at spawn time so the QA agent doesn't have
-        # to remember to export the variable in every shell. Skip if
-        # the user already provides CHROME_BIN at the cockpit level.
-        if base_role == "qa" and "CHROME_BIN" not in env:
-            if sys.platform == "win32":
-                chrome_candidates = (
-                    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-                    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-                    str(pathlib.Path.home() / "AppData/Local/Google/Chrome/Application/chrome.exe"),
-                )
-            elif sys.platform == "darwin":
-                chrome_candidates = (
-                    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-                    str(
-                        pathlib.Path.home()
-                        / "Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-                    ),
-                )
-            else:  # linux
-                chrome_candidates = (
-                    "/usr/bin/google-chrome",
-                    "/usr/bin/chromium",
-                    "/usr/bin/chromium-browser",
-                )
-            for cand in chrome_candidates:
-                if pathlib.Path(cand).is_file():
-                    env["CHROME_BIN"] = cand
-                    break
 
         # H1: MCP timeout / non-interactive env / truecolor term are applied
         # inside _build_pane_env()/_build_lead_env() itself now (pane_env.py)
@@ -2311,8 +2305,9 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 output_tail = "(unavailable)"
 
             # Env keys the filtered pane env would have contained at spawn time.
-            # Re-build from _build_pane_env() — same logic as spawn, values omitted.
-            env_keys = sorted(_build_pane_env().keys())
+            # Re-build from _build_pane_env(project) — same logic as spawn,
+            # including the central artifacts/docs stamps; values omitted.
+            env_keys = sorted(_build_pane_env(project).keys())
 
             lines = [
                 f"# Codex early-crash dump — {ts_str}",

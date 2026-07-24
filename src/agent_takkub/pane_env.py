@@ -1,6 +1,6 @@
 """Per-pane env construction — allowlist + mute helpers for spawned panes.
 
-Six concerns live here:
+Seven concerns live here:
 1. `_PANE_ENV_ALLOWLIST` + `_build_pane_env()` — keep secret-bearing env
    vars (API keys, GH tokens, AWS creds) out of teammate panes by
    filtering to a known-safe set.
@@ -24,6 +24,9 @@ Six concerns live here:
    (full 256-colour + truecolor palette), but a GUI-launched cockpit on
    macOS inherits no `TERM`, so the allowlist had nothing to forward and
    claude fell back to monochrome.
+7. `_apply_artifacts_dir()` — when the caller supplies ``project_ns``, stamp
+   the central artifacts/docs paths inside the env builder itself so an
+   early-returning provider branch (especially Gemini/agy) cannot omit them.
 
 H1 (cross-platform audit 2026-07-10): #4-6 used to be called explicitly only
 from `spawn_engine.py`'s claude branch, *after* the shell/codex/gemini
@@ -145,7 +148,7 @@ _PANE_ENV_ALLOWLIST: frozenset[str] = frozenset(
 _DEFAULT_MCP_TOOL_TIMEOUT_MS = "180000"
 
 
-def _build_pane_env() -> dict[str, str]:
+def _build_pane_env(project_ns: str | None = None) -> dict[str, str]:
     """Build a clean env for spawned panes — only allowlisted keys.
 
     Why: codex's OMA review (docs/security-audit-2026-05-21.md, Check 1)
@@ -170,6 +173,8 @@ def _build_pane_env() -> dict[str, str]:
     _apply_mcp_timeout(env)
     _apply_non_interactive_env(env)
     _apply_color_term(env)
+    if project_ns is not None:
+        _apply_artifacts_dir(env, project_ns)
     return env
 
 
@@ -199,7 +204,7 @@ _LEAD_ENV_EXTRA_ALLOWLIST: frozenset[str] = frozenset(
 )
 
 
-def _build_lead_env() -> dict[str, str]:
+def _build_lead_env(project_ns: str | None = None) -> dict[str, str]:
     """Lead env: base teammate allowlist + Lead-only extras + user opt-in.
 
     Lead is privileged (commits, runs gh, orchestrates) but still uses an
@@ -218,6 +223,8 @@ def _build_lead_env() -> dict[str, str]:
     _apply_mcp_timeout(env)
     _apply_non_interactive_env(env)
     _apply_color_term(env)
+    if project_ns is not None:
+        _apply_artifacts_dir(env, project_ns)
     return env
 
 

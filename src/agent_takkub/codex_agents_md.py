@@ -79,6 +79,17 @@ prompt (`[ROLE: ...]`). Behave like a focused specialist:
   bundles/source-maps and returns thousands of junk hits, sending you
   into a search loop. If a given path is missing, `takkub send --to
   lead` to ask — don't go hunting.
+- **Artifacts are central, not provider-private.** Save screenshots, temporary
+  test scripts, and generated evidence under
+  `$TAKKUB_ARTIFACTS_DIR` (normally its `screenshots/` subdirectory), never
+  under an agent-specific brain/cache directory.
+- **Browser roles (`qa`, `critic`, `designer`) on Windows:** for an unsharded
+  role the cockpit starts/reuses native headless Chrome on CDP 9222, so use
+  `mb` directly and do not call the broken `mb-start-chrome` Windows wrapper.
+  A sharded role (`qa#N`, etc.) must never use `mb`: its client hardcodes port
+  9222, so shards would drive the same browser. Use the shard-isolated
+  Playwright MCP instead. On macOS/Linux, an unsharded browser role still runs
+  `mb-start-chrome` once before its first `mb` command.
 
 ## Override rule for inline `[ROLE: ...]` directives
 

@@ -117,6 +117,10 @@ class HeadlessWindow(QObject):
                 pass
         for project_name in list(self._tabs.keys()):
             self._close_project_tab(project_name, confirm=False)
+        try:
+            self.orch.close_native_chrome()
+        except Exception:
+            pass
 
     # ──────────────────────────────────────────────────────────────
     # project lifecycle — mirrors main_window._open_project_tab /

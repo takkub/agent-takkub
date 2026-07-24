@@ -18,6 +18,7 @@ from agent_takkub.doctor import (
     check_claude,
     check_installed_integrity,
     check_mcps,
+    check_mini_browser,
     check_npm_registry,
     check_plugins,
     check_projects,
@@ -161,6 +162,48 @@ class TestCheckProviders:
             g = self._gemini(check_providers())
         assert g.status == Status.SKIP
         assert "antigravity.google" in (g.fix_hint or "")
+
+
+class TestCheckMiniBrowser:
+    def test_installed_mb_is_ok(self) -> None:
+        with patch(
+            "agent_takkub.doctor.shutil.which",
+            side_effect=lambda name: "C:/npm/mb.cmd" if name == "mb.cmd" else None,
+        ):
+            finding = check_mini_browser()[0]
+        assert finding.status is Status.OK
+        assert finding.auto_fix is None
+
+    def test_missing_mb_offers_global_npm_auto_fix(self) -> None:
+        def _which(name: str) -> str | None:
+            return "C:/node/npm.cmd" if name == "npm.cmd" else None
+
+        with patch("agent_takkub.doctor.shutil.which", side_effect=_which):
+            finding = check_mini_browser()[0]
+
+        assert finding.status is Status.WARN
+        assert finding.auto_fix is not None
+        with patch("agent_takkub.doctor.subprocess.run") as run:
+            run.return_value.returncode = 0
+            run.return_value.stdout = "added 1 package"
+            run.return_value.stderr = ""
+            ok, msg = finding.auto_fix()
+
+        assert ok
+        assert "added 1 package" in msg
+        assert run.call_args.args[0] == [
+            "C:/node/npm.cmd",
+            "install",
+            "--global",
+            "@runablehq/mini-browser",
+        ]
+
+    def test_missing_npm_has_manual_hint_only(self) -> None:
+        with patch("agent_takkub.doctor.shutil.which", return_value=None):
+            finding = check_mini_browser()[0]
+        assert finding.status is Status.WARN
+        assert finding.auto_fix is None
+        assert "Node.js" in finding.fix_hint
 
 
 # ---------------------------------------------------------------------------
@@ -750,6 +793,7 @@ class TestRunAllChecks:
             patch("agent_takkub.doctor.check_installed_integrity", return_value=[]),
             patch("agent_takkub.doctor.check_env_path", return_value=[]),
             patch("agent_takkub.doctor.check_npm_registry", return_value=[]),
+            patch("agent_takkub.doctor.check_mini_browser", return_value=[]),
             patch("agent_takkub.doctor.check_arch", return_value=[]),
             patch("agent_takkub.doctor.check_qt", return_value=[]),
             patch("agent_takkub.doctor.check_plugins", return_value=[]),

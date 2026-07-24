@@ -466,6 +466,10 @@ def _install_signal_handlers(window: MainWindow) -> None:
                     except Exception:
                         pass
         try:
+            window.orch.close_native_chrome()
+        except Exception:
+            pass
+        try:
             window.cli.close()
         except Exception:
             pass
