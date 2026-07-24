@@ -532,10 +532,33 @@ class LeadInboxMixin:
             return
         elapsed = [0]
         sent = [False]
-        # Sticky: once we've ever seen this role parked in the spawn gate's
         # deferred set (spawn_engine._spawn_deferred), stop trusting
         # max_wait_ms for the "no session yet" branch — see _check below.
         gate_seen = [False]
+        ready_settle_elapsed = [0]
+
+        project_ns = self._resolve_project(project)
+        try:
+            from .provider_config import effective_provider_for
+            from .provider_spec import PROVIDER_REGISTRY
+
+            provider = effective_provider_for(role_name, project=project_ns)
+            spec = PROVIDER_REGISTRY.get(provider)
+            settle_ms = spec.ready_settle_ms if spec else 0
+        except Exception:
+            provider = None
+            spec = None
+            settle_ms = 0
+
+        import os
+
+        if provider == "gemini":
+            env_val = os.environ.get("TAKKUB_GEMINI_READY_SETTLE_MS")
+            if env_val is not None:
+                try:
+                    settle_ms = int(env_val)
+                except ValueError:
+                    pass
 
         def _deliver(unconfirmed: bool = False) -> None:
             if sent[0]:
@@ -543,6 +566,81 @@ class LeadInboxMixin:
             sent[0] = True
             if pane.session is None or not pane.session.is_alive:
                 return
+
+            needs_warmup = bool(spec and getattr(spec, "needs_warmup_ping", False))
+            _task_sess = pane.session
+
+            if needs_warmup and not getattr(_task_sess, "_warmup_ping_done", False):
+                _task_sess._warmup_ping_done = True
+                _log_event("warmup_ping_sent", project=project_ns, role=role_name)
+
+                warmup_task = "ready check — ตอบ ok สั้นๆ"
+                pane.set_state("working", note=warmup_task[:60])
+                payload = _paste_payload(_sanitize_pane_text(warmup_task))
+                _task_sess.write(payload)
+
+                _orch_attr("_delayed_enter_verified", _delayed_enter_verified)(
+                    pane,
+                    _task_sess,
+                    _enter_delay_ms(payload),
+                    payload=payload,
+                    content_fragment=warmup_task,
+                    on_resend=lambda rem, r=role_name, p=project_ns: _log_event(
+                        "task_deliver_enter_resend", project=p, role=r, remaining=rem
+                    ),
+                    on_repaste=lambda rem, r=role_name, p=project_ns: _log_event(
+                        "task_deliver_repaste", project=p, role=r, remaining=rem
+                    ),
+                )
+
+                elapsed_warmup = [0]
+                marker_seen_warmup = [False]
+
+                def _warmup_check() -> None:
+                    if (
+                        not _task_sess.is_alive
+                        or self._project_panes(project_ns).get(role_name) is not pane
+                    ):
+                        return
+
+                    session_shows_busy = (
+                        _task_sess.shows_any_status_marker(spec.post_submit_recovery_markers)
+                        if spec and spec.post_submit_recovery_markers
+                        else False
+                    )
+                    if session_shows_busy:
+                        marker_seen_warmup[0] = True
+                    elif marker_seen_warmup[0] or not session_shows_busy:
+                        if _task_sess.is_at_ready_prompt():
+                            _log_event("warmup_ping_ok", project=project_ns, role=role_name)
+                            self._send_when_ready(
+                                role_name,
+                                task,
+                                max_wait_ms,
+                                project=project_ns,
+                                _post_submit_recovery_attempt=_post_submit_recovery_attempt,
+                                _redelivery_session=_redelivery_session,
+                            )
+                            return
+
+                    elapsed_warmup[0] += _POST_SUBMIT_RECOVERY_POLL_MS
+                    if elapsed_warmup[0] >= 120_000:
+                        _log_event("warmup_ping_timeout", project=project_ns, role=role_name)
+                        self._send_when_ready(
+                            role_name,
+                            task,
+                            max_wait_ms,
+                            project=project_ns,
+                            _post_submit_recovery_attempt=_post_submit_recovery_attempt,
+                            _redelivery_session=_redelivery_session,
+                        )
+                        return
+
+                    QTimer.singleShot(_POST_SUBMIT_RECOVERY_POLL_MS, _warmup_check)
+
+                QTimer.singleShot(_enter_delay_ms(payload) + _READY_POLL_INTERVAL_MS, _warmup_check)
+                return
+
             pane.set_state("working", note=task[:60])
             _task_sess = pane.session
             payload = _paste_payload(_sanitize_pane_text(task))
@@ -636,10 +734,24 @@ class LeadInboxMixin:
                     project=self._resolve_project(project),
                     role=role_name,
                 )
+                _log_event(
+                    "task_deliver_timeout_no_session",
+                    project=self._resolve_project(project),
+                    role=role_name,
+                )
                 return
             if pane.session.is_at_ready_prompt():
+                if settle_ms > 0:
+                    ready_settle_elapsed[0] += _READY_POLL_INTERVAL_MS
+                    if ready_settle_elapsed[0] < settle_ms:
+                        QTimer.singleShot(_READY_POLL_INTERVAL_MS, _check)
+                        return
                 _deliver()
                 return
+
+            # Not ready, reset settle elapsed
+            ready_settle_elapsed[0] = 0
+
             if _redelivery_session is not None:
                 # The provider began a genuine work turn after the watcher saw
                 # idle but before this guarded re-delivery reached its first

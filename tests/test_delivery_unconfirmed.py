@@ -600,3 +600,277 @@ class TestSlowBootSubmitBudget:
         # Nudged through the boot cycles, then stopped when the paste cleared —
         # bounded well under the 100 budget, not sprayed to exhaustion.
         assert 5 <= len(crs) <= 8
+
+
+class TestWarmupPing:
+    def test_other_provider_no_ping(self, orch: Orchestrator, monkeypatch) -> None:
+        import agent_takkub.lead_inbox as li
+
+        monkeypatch.setattr(li.QTimer, "singleShot", staticmethod(lambda _ms, fn: fn()))
+
+        session = MagicMock()
+        session.is_alive = True
+        session.is_at_ready_prompt.return_value = True
+
+        pane = _pane(session)
+        orch._panes_by_project = {"test-project": {"claude": pane}}
+
+        mock_write = MagicMock()
+        session.write = mock_write
+        session._warmup_ping_done = False
+
+        orch._send_when_ready("claude", "real_task", project="test-project")
+
+        # Claude does not need warmup ping, should deliver real_task directly
+        assert session._warmup_ping_done is False
+        writes = [
+            args[0].decode("utf-8") if isinstance(args[0], bytes) else args[0]
+            for args, _ in mock_write.call_args_list
+        ]
+        assert any("real_task" in w for w in writes)
+        assert not any("ready check" in w for w in writes)
+
+    def test_fresh_agy_spawn_ping_before_task(self, orch: Orchestrator, monkeypatch, qapp) -> None:
+        import agent_takkub.lead_inbox as li
+        from agent_takkub import provider_config
+
+        monkeypatch.setattr(
+            provider_config, "effective_provider_for", lambda role, project=None: "gemini"
+        )
+        monkeypatch.setattr(li.QTimer, "singleShot", staticmethod(lambda _ms, fn: fn()))
+        monkeypatch.setattr(li, "_delayed_enter_verified", MagicMock())
+
+        session = MagicMock()
+        session.is_alive = True
+        session._warmup_ping_done = False
+
+        # State machine for is_at_ready_prompt:
+        # 1st call (in _check before _deliver): True (triggers delivery)
+        # 2nd call (inside _warmup_check): False (pretend it's busy verifying)
+        # 3rd call (inside _warmup_check): True (pretend verification cleared)
+        # 4th call (in _check for real task): True
+        state = {"checks": 0}
+
+        def mock_ready():
+            state["checks"] += 1
+            if state["checks"] == 2:
+                return False
+            return True
+
+        session.is_at_ready_prompt.side_effect = mock_ready
+        session.shows_any_status_marker.return_value = False
+
+        pane = _pane(session)
+        orch._panes_by_project = {"test-project": {"gemini": pane}}
+
+        mock_write = MagicMock()
+        session.write = mock_write
+
+        orch._send_when_ready("gemini", "real_task", project="test-project")
+
+        # gemini needs warmup ping
+        assert getattr(session, "_warmup_ping_done", False) is True
+        writes = [
+            args[0].decode("utf-8") if isinstance(args[0], bytes) else args[0]
+            for args, _ in mock_write.call_args_list
+        ]
+
+        # Should have sent both warmup ping and real task eventually
+        assert any("ready check" in w for w in writes)
+        assert any("real_task" in w for w in writes)
+
+        # real_task should be sent AFTER ready check
+        idx_ping = next(i for i, w in enumerate(writes) if "ready check" in w)
+        idx_task = next(i for i, w in enumerate(writes) if "real_task" in w)
+        assert idx_ping < idx_task
+
+    def test_ping_timeout_fallback(self, orch: Orchestrator, monkeypatch, qapp) -> None:
+        import agent_takkub.lead_inbox as li
+        from agent_takkub import provider_config
+
+        monkeypatch.setattr(
+            provider_config, "effective_provider_for", lambda role, project=None: "gemini"
+        )
+
+        # We need to simulate timeout by advancing the elapsed timer manually
+        # since calling it synchronously will recurse infinitely.
+        timer_funcs = []
+
+        def mock_singleShot(_ms, fn):
+            timer_funcs.append(fn)
+
+        monkeypatch.setattr(li.QTimer, "singleShot", staticmethod(mock_singleShot))
+        monkeypatch.setattr(li, "_delayed_enter_verified", MagicMock())
+
+        session = MagicMock()
+        session.is_alive = True
+        session._warmup_ping_done = False
+
+        # Never goes ready again
+        session.is_at_ready_prompt.return_value = True
+
+        pane = _pane(session)
+        orch._panes_by_project = {"test-project": {"gemini": pane}}
+
+        mock_write = MagicMock()
+        session.write = mock_write
+
+        orch._send_when_ready("gemini", "real_task", project="test-project")
+
+        while not getattr(session, "_warmup_ping_done", False) and timer_funcs:
+            timer_funcs.pop(0)()
+
+        assert getattr(session, "_warmup_ping_done", False) is True
+
+        # first singleShot is _check -> execute it
+        timer_funcs.pop(0)()
+
+        # now warmup_ping is sent. _warmup_check is queued.
+        assert len(timer_funcs) > 0
+
+        # Let's override is_at_ready_prompt to always return False for the warmup ping
+        session.is_at_ready_prompt.return_value = False
+
+        # Execute _warmup_check multiple times to trigger timeout
+        for _ in range(120_000 // 500 + 1):
+            if not timer_funcs:
+                break
+            f = timer_funcs.pop(0)
+            f()
+
+        # After timeout, it resends real_task which has a 4000ms settle delay
+        while (
+            not any(
+                "real_task" in (args[0].decode("utf-8") if isinstance(args[0], bytes) else args[0])
+                for args, _ in mock_write.call_args_list
+            )
+            and timer_funcs
+        ):
+            timer_funcs.pop(0)()
+
+        writes = [
+            args[0].decode("utf-8") if isinstance(args[0], bytes) else args[0]
+            for args, _ in mock_write.call_args_list
+        ]
+        assert any("ready check" in w for w in writes)
+        assert any("real_task" in w for w in writes)
+
+
+class TestReadySettle:
+    def test_no_settle_delay_by_default(self, orch: Orchestrator, monkeypatch) -> None:
+        import agent_takkub.lead_inbox as li
+        from agent_takkub import provider_config
+
+        monkeypatch.setattr(
+            provider_config, "effective_provider_for", lambda role, project=None: "claude"
+        )
+
+        timer_funcs = []
+
+        def mock_singleShot(_ms, fn):
+            timer_funcs.append(fn)
+
+        monkeypatch.setattr(li.QTimer, "singleShot", staticmethod(mock_singleShot))
+
+        session = MagicMock()
+        session.is_alive = True
+        session.is_at_ready_prompt.return_value = True
+
+        pane = _pane(session)
+        orch._panes_by_project = {"test-project": {"claude": pane}}
+        session.write = MagicMock()
+
+        orch._send_when_ready("claude", "task", project="test-project")
+
+        # singleShot called for _check, we execute it
+        timer_funcs.pop(0)()
+
+        # Should have written immediately without ready_settle delay
+        assert session.write.called
+
+    def test_gemini_settle_delay(self, orch: Orchestrator, monkeypatch) -> None:
+        import agent_takkub.lead_inbox as li
+        from agent_takkub import provider_config
+
+        print("LI FILE:", li.__file__)
+        monkeypatch.setattr(
+            provider_config, "effective_provider_for", lambda role, project=None: "gemini"
+        )
+
+        timer_funcs = []
+
+        def mock_singleShot(_ms, fn):
+            timer_funcs.append(fn)
+
+        monkeypatch.setattr(li.QTimer, "singleShot", staticmethod(mock_singleShot))
+        monkeypatch.setattr(li, "_delayed_enter_verified", MagicMock())
+
+        session = MagicMock()
+        session.is_alive = True
+        session.is_at_ready_prompt.return_value = True
+        session._warmup_ping_done = True
+
+        pane = _pane(session)
+        orch._panes_by_project = {"test-project": {"gemini": pane}}
+        session.write = MagicMock()
+
+        orch._send_when_ready("gemini", "task", project="test-project")
+
+        # Execute first _check (from _READY_POLL_FIRST_MS)
+        timer_funcs.pop(0)()
+
+        # Not written yet, because settle_ms > 0
+        assert not session.write.called
+
+        # It should queue another singleShot for interval. Let's execute it enough times
+        while not session.write.called and timer_funcs:
+            timer_funcs.pop(0)()
+
+        assert session.write.called
+
+    def test_gemini_settle_restarts_on_busy(self, orch: Orchestrator, monkeypatch) -> None:
+        import agent_takkub.lead_inbox as li
+        from agent_takkub import provider_config
+
+        monkeypatch.setattr(
+            provider_config, "effective_provider_for", lambda role, project=None: "gemini"
+        )
+
+        timer_funcs = []
+
+        def mock_singleShot(_ms, fn):
+            timer_funcs.append(fn)
+
+        monkeypatch.setattr(li.QTimer, "singleShot", staticmethod(mock_singleShot))
+        monkeypatch.setattr(li, "_delayed_enter_verified", MagicMock())
+
+        session = MagicMock()
+        session.is_alive = True
+        session._warmup_ping_done = True
+
+        state = {"checks": 0}
+
+        def mock_ready():
+            state["checks"] += 1
+            if state["checks"] == 2:
+                return False
+            return True
+
+        session.is_at_ready_prompt.side_effect = mock_ready
+
+        pane = _pane(session)
+        orch._panes_by_project = {"test-project": {"gemini": pane}}
+        session.write = MagicMock()
+
+        orch._send_when_ready("gemini", "task", project="test-project")
+
+        timer_funcs.pop(0)()  # Check 1 (ready)
+        assert not session.write.called
+
+        timer_funcs.pop(0)()  # Check 2 (busy -> resets elapsed)
+
+        # Needs full 4000ms again
+        while not session.write.called and timer_funcs:
+            timer_funcs.pop(0)()
+
+        assert session.write.called

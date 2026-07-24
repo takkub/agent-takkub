@@ -119,3 +119,23 @@ Both the targeted suite and the full repository suite pass. The full-suite
 launcher inserts this worktree's `src` only in the parent pytest process rather
 than exporting `PYTHONPATH`, so installed-mode subprocess tests still exercise
 their isolated wheel/venv as intended.
+
+## Round 3 — root-cause warm-up ping
+
+The post-submit recovery from round 2 is a safety net that catches swallowed tasks and re-delivers them, but it's treating the symptom rather than preventing it. The root cause is that Google's server-side eligibility check sometimes swallows the *very first* request submitted by a fresh AGY session, silently doing nothing after the verify banner clears. User prefers to prevent the first task from being swallowed.
+
+### Change
+
+- Added a `needs_warmup_ping: bool = False` capability flag to `ProviderSpec` and enabled it for AGY (`gemini`).
+- The task delivery watcher (`_send_when_ready`) detects this flag on fresh spawns. Before sending the actual queued task, it sends a sacrificial "ready check — ตอบ ok สั้นๆ" payload and waits for it to finish.
+- If the ping turn finishes normally or clears a verification banner, the watcher observes the return to the ready prompt and then proceeds to send the real task.
+- Added a 120-second hard timeout to the ping turn. If it hangs, the watcher falls back to sending the real task anyway.
+- Event logs record each step (`warmup_ping_sent`, `warmup_ping_ok`, `warmup_ping_timeout`).
+- The round-2 `post_submit_recovery` remains fully active as a secondary safety net for both the ping and the real task.
+
+### Round 3 verification
+
+Targeted test suite updated to cover:
+- Providers that don't need warmup (like Claude) route tasks normally.
+- Fresh AGY sessions send the warmup ping, wait, and sequence the real task correctly.
+- Hard timeouts trigger the fallback routing to ensure tasks don't get permanently stuck in a stalled ping.

@@ -158,6 +158,14 @@ class ProviderSpec:
     # (stamps codex_spawn_ts) instead of the stale-guarded `_on_session_exit`.
     early_exit_watch: bool = False
 
+    # ─── 12. Warm-up ping (issue #126) ───
+    # For providers that swallow the very first request due to a transient
+    # server-side eligibility check (e.g. AGY Google account verify). Sends a
+    # sacrificial ready-check message instead of the actual task to clear the
+    # gate safely.
+    needs_warmup_ping: bool = False
+    ready_settle_ms: int = 0
+
 
 # ── binary discovery wrappers ────────────────────────────────────────────────
 # Each does its `from .<helper> import find_*` INSIDE the call (not at module
@@ -456,6 +464,8 @@ gemini_spec = ProviderSpec(
     supports_remote_history=False,
     prepend_bin_dir_to_path=True,  # spawn_engine.py gemini branch: agy_dir on PATH
     auto_trust=True,  # spawn_engine.py gemini branch: auto_trust=True
+    needs_warmup_ping=True,
+    ready_settle_ms=4000,
 )
 
 
