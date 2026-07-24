@@ -255,11 +255,19 @@ _POST_COMPACT_DETECT_SEC = 5 * 60
 # Idle watchdog: when a teammate pane sits at the ready prompt (claude is
 # idle, no "esc to interrupt") while pane.state is still "working", the
 # orchestrator assumes the agent finished its task but forgot to call
-# `takkub done`. After IDLE_REMIND_AFTER_S of continuous idle we inject a
-# one-line reminder, then back off for IDLE_REMIND_COOLDOWN_S before another.
-# Set IDLE_REMIND_AFTER_S to 0 to disable the watchdog entirely.
+# `takkub done`. After IDLE_REMIND_AFTER_S of continuous idle we surface a
+# cockpit-side notice, then back off for IDLE_REMIND_COOLDOWN_S before another.
+# This primary path never writes to the PTY, so it works for every provider
+# (including providers without Claude-specific prompt markers; #103) without
+# waking a full model turn. After N UI-only rounds, one PTY reminder is retained
+# as a last-resort escalation for panes that really finished but forgot done.
+# Set IDLE_REMIND_AFTER_S to 0 to disable the watchdog entirely; set escalation
+# rounds to 0 to keep reminders permanently UI-only.
 IDLE_REMIND_AFTER_S = 45
 IDLE_REMIND_COOLDOWN_S = 90
+IDLE_REMIND_ESCALATE_AFTER_ROUNDS = max(
+    0, int(os.environ.get("TAKKUB_IDLE_REMIND_ESCALATE_ROUNDS", "3"))
+)
 
 # Fallback that arms the forgot-done reminder even when the watchdog never
 # caught the pane mid-turn. The `seen_working` latch (set when a tick observes
@@ -501,6 +509,12 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
     # Teammate crossings also emit this after their safe-idle advisory is queued.
     sessionCapNotice = pyqtSignal(str, str, int, int, bool)
     # project_ns, role, prompt, threshold, is_lead
+    # UI-only idle notice. The routine reminder uses this cockpit-side channel
+    # for every provider (#103) instead of writing+Enter into a provider PTY.
+    # `escalated` is true only on the one round that also receives the retained
+    # last-resort PTY reminder.
+    idleReminderNotice = pyqtSignal(str, str, int, bool)
+    # project_ns, role, notice_round, escalated
     # Emitted after every successful Task Ledger (A7) write — assign/done/
     # fail/close. The Task Tree dock (A8) connects this straight to its
     # refresh_project(project_ns) slot instead of polling the state file, so
@@ -631,11 +645,13 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         # Idle watchdog bookkeeping. Per-role:
         #   first_idle_ts   — when the pane was first seen idle in this streak
         #                     (None = currently processing or not "working")
-        #   last_reminder_ts — last time we injected a reminder (0 = never)
+        #   last_reminder_ts — last time we surfaced a reminder (0 = never)
+        #   notice_rounds    — UI-only rounds in this continuous idle streak
+        #   escalated        — whether the one-shot PTY fallback already fired
         # Kept as a separate dict (not in PaneState) because its key-presence
         # semantics ("absent = not tracking") are relied on by the watchdog and
         # tests — pop() must remove the entry, not merely reset fields.
-        self._idle_state: dict[str, dict[str, float | None]] = {}
+        self._idle_state: dict[str, dict[str, float | int | bool | None]] = {}
         # Per-pane last-logged watchdog exception (err_str, ts) — dedups the
         # blind 5s-tick `idle_watchdog_pane_error` spam (was 3279 entries in one
         # events.log) so a persistent fault is logged once with detail, not
@@ -3049,13 +3065,15 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         threading.Thread(target=_hot_md_worker, daemon=True, name="hot-md-writer").start()
 
     # ──────────────────────────────────────────────────────────────
-    # idle watchdog — nudge teammates that forgot to `takkub done`
+    # idle watchdog — surface teammates that forgot to `takkub done`
     # ──────────────────────────────────────────────────────────────
     def _check_idle_teammates(self) -> None:
-        """Inject a `takkub done` reminder into any teammate pane that's been
+        """Surface a `takkub done` reminder for any teammate pane that's been
         at the ready prompt for IDLE_REMIND_AFTER_S while still flagged
-        'working'. Lead is exempt — only Lead is allowed to orchestrate, and
-        Lead never calls `done` on itself.
+        'working'. Normal rounds are cockpit UI signals and do not wake the
+        model; one PTY escalation is allowed after the configured number of
+        continuous-idle rounds. Lead is exempt — only Lead is allowed to
+        orchestrate, and Lead never calls `done` on itself.
 
         Scans every open project so a teammate in a background tab still
         gets nudged. Idle-state keys are namespaced `<project>::<role>`
@@ -3130,10 +3148,20 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                         entry = self._idle_state.get(key)
                         if entry:
                             entry["first_idle_ts"] = None
+                            entry["last_reminder_ts"] = 0.0
+                            entry["notice_rounds"] = 0
+                            entry["escalated"] = False
                         continue
 
                     entry = self._idle_state.setdefault(
-                        key, {"first_idle_ts": None, "last_reminder_ts": 0.0, "seen_working": False}
+                        key,
+                        {
+                            "first_idle_ts": None,
+                            "last_reminder_ts": 0.0,
+                            "seen_working": False,
+                            "notice_rounds": 0,
+                            "escalated": False,
+                        },
                     )
 
                     # Issue #54: suppress the forgot-done reminder while a pane is
@@ -3144,6 +3172,9 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                     _tty_prompt = pane.session.is_blocked_on_tty_prompt()
                     if _tty_prompt:
                         entry["first_idle_ts"] = None
+                        entry["last_reminder_ts"] = 0.0
+                        entry["notice_rounds"] = 0
+                        entry["escalated"] = False
                         self._maybe_surface_tty_block(key, name, project_name, _tty_prompt, now)
                         continue
                     # Clear block state when no longer blocked.
@@ -3165,6 +3196,9 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                         if not pane.session.shows_startup_marker():
                             entry["seen_working"] = True
                         entry["first_idle_ts"] = None
+                        entry["last_reminder_ts"] = 0.0
+                        entry["notice_rounds"] = 0
+                        entry["escalated"] = False
                         continue
 
                     # Still in a provider startup / message-queue phase (idle
@@ -3172,6 +3206,9 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                     # task. Reset the streak and wait for the real turn.
                     if pane.session.shows_startup_marker():
                         entry["first_idle_ts"] = None
+                        entry["last_reminder_ts"] = 0.0
+                        entry["notice_rounds"] = 0
+                        entry["escalated"] = False
                         continue
 
                     # Issue #59: pane is idle — check for malformed tool-call XML
@@ -3208,12 +3245,27 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                         and idle_for >= IDLE_REMIND_AFTER_S
                         and since_last_reminder >= IDLE_REMIND_COOLDOWN_S
                     ):
-                        self._inject_idle_reminder(name, pane)
+                        notice_round = int(entry.get("notice_rounds") or 0) + 1
+                        escalate = bool(
+                            IDLE_REMIND_ESCALATE_AFTER_ROUNDS > 0
+                            and notice_round > IDLE_REMIND_ESCALATE_AFTER_ROUNDS
+                            and not entry.get("escalated")
+                        )
+                        self._inject_idle_reminder(
+                            project_name,
+                            name,
+                            pane,
+                            notice_round,
+                            escalate=escalate,
+                        )
+                        entry["notice_rounds"] = notice_round
+                        if escalate:
+                            entry["escalated"] = True
                         entry["last_reminder_ts"] = now
-                        # restart the idle streak so we don't fire again until
-                        # the agent stays idle for another full
-                        # IDLE_REMIND_AFTER_S past the cooldown.
-                        entry["first_idle_ts"] = now
+                        # Keep first_idle_ts anchored to the start of the
+                        # continuous idle episode. Cooldown controls reminder
+                        # frequency; retaining the original timestamp also
+                        # preserves HARVEST_HINT_SEC semantics.
 
                     # Harvest hint: if the pane has been idle much longer than
                     # the reminder threshold, suggest `takkub harvest` to Lead.
@@ -4128,13 +4180,44 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         self._notify_lead(project, msg)
         _log_event("tty_block_surface", role=role, project=project, prompt=prompt_line)
 
-    def _inject_idle_reminder(self, role_name: str, pane: AgentPane) -> None:
+    def _inject_idle_reminder(
+        self,
+        project_name: str,
+        role_name: str,
+        pane: AgentPane,
+        notice_round: int,
+        *,
+        escalate: bool = False,
+    ) -> None:
+        """Surface an idle reminder without waking a model turn.
+
+        The cockpit-side signal is the primary, cross-platform/provider path
+        (#103). Only the explicitly requested one-shot escalation retains the
+        historical PTY write+Enter behaviour so a genuinely finished pane can
+        still be pushed to report and remain harvestable.
+        """
         if pane.session is None or not pane.session.is_alive:
             return
-        _idle_sess = pane.session
-        _idle_sess.write(IDLE_REMINDER_TEXT)
-        _delayed_enter(pane, _idle_sess, 150)
-        _log_event("idle_reminder", role=role_name)
+        self.idleReminderNotice.emit(project_name, role_name, notice_round, escalate)
+        _log_event(
+            "idle_reminder",
+            role=role_name,
+            project=project_name,
+            channel="ui",
+            round=notice_round,
+            escalated=escalate,
+        )
+        if not escalate:
+            return
+        idle_sess = pane.session
+        idle_sess.write(IDLE_REMINDER_TEXT)
+        _delayed_enter(pane, idle_sess, 150)
+        _log_event(
+            "idle_reminder_escalation",
+            role=role_name,
+            project=project_name,
+            round=notice_round,
+        )
 
     def _maybe_surface_malformed_xml(
         self, key: str, role: str, project: str, pane: AgentPane, now: float
