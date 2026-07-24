@@ -643,6 +643,7 @@ class TestWarmupPing:
         session = MagicMock()
         session.is_alive = True
         session._warmup_ping_done = False
+        session._last_output_ts = 0.0
 
         # State machine for is_at_ready_prompt:
         # 1st call (in _check before _deliver): True (triggers delivery)

@@ -1036,7 +1036,7 @@ class SpawnEngineMixin:
             if _ekey in self._recent_exits:
                 del self._recent_exits[_ekey]
             if auto_trust:
-                self._boot_auto_advance(role_name, project=project_ns)
+                self._auto_trust(role_name, project=project_ns)
             # Non-Claude providers currently have no file-backed append-system-
             # prompt capability. This is normally a no-op because assign() keeps
             # them on pointer delivery; it only fires if the provider changed
@@ -2180,7 +2180,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             # session.spawn call) and registered in self._pane_tokens at that time.
             # Nothing more to do here.
 
-            self._boot_auto_advance(role_name, project=project_ns)
+            self._auto_trust(role_name, project=project_ns)
             self.statusChanged.emit()
             # (The /remote-control auto-bridge was removed 2026-07-10 — it kept
             # racing claude's /resume picker. Type /remote-control by hand.)
@@ -2457,6 +2457,10 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 self._send_when_ready(role_name, cached_task, project=project)
 
     # ──────────────────────────────────────────────────────────────
+    def _auto_trust(self, role_name: str, project: str | None = None) -> None:
+        """Backward-compat alias. Use _boot_auto_advance instead."""
+        self._boot_auto_advance(role_name, project=project)
+
     def _boot_auto_advance(self, role_name: str, project: str | None = None) -> None:
         """Watch the pane and auto-press Enter on boot screens (whitelisted per provider).
 

@@ -226,6 +226,7 @@ class TestAutoTrustProjectNamespace:
         # Plant a pane only in proj_a; proj_b (active) has no backend pane.
         fake_pane = MagicMock()
         fake_pane.session = None  # no active session
+        fake_pane.role.provider = "claude"
         orch._panes_by_project["proj_a"] = {"backend": fake_pane}
         orch._panes_by_project["proj_b"] = {}
 
