@@ -77,7 +77,7 @@ import re
 from pathlib import Path
 
 from PyQt6.QtCore import QLocale, QSize, Qt
-from PyQt6.QtGui import QFontMetrics
+from PyQt6.QtGui import QFontMetrics, QIcon
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -163,6 +163,34 @@ _NAV_VIEWS: tuple[tuple[int, str, str], ...] = (
     (VIEW_SKILL_MATRIX, "Skill Matrix", "SKILL"),
     (VIEW_USERS, "Users", "ACCOUNT"),
 )
+
+# Design review 2026-07-24 #1 (ROOT CAUSE) — the mockup's nav glyphs
+# (⌘ ◇ ◉ ⊞ ✦ ♙) were ported 1:1 from the web mockup but IBM Plex Sans/Mono
+# don't ship those code points, so every nav item tofu'd (□) on this desktop
+# font stack. Swapped for resolution-independent SVG icons (precedent:
+# static/icons/ already backs the QComboBox/QSpinBox arrows the same way —
+# see cockpit_theme._down_arrow_svg) instead of chasing a symbol font.
+# Two-tone per icon (muted/gold) so the active nav item still reads as
+# accented without depending on font color inheritance through QIcon.
+_NAV_ICON_NAMES: dict[int, str] = {
+    VIEW_PIPELINE_BUILDER: "pipeline",
+    VIEW_TEMPLATES: "diamond",
+    VIEW_PROVIDERS_ROLES: "target",
+    VIEW_ROLE_OVERLAP: "diamond",
+    VIEW_MCP_MATRIX: "grid",
+    VIEW_PLUGINS_MATRIX: "grid",
+    VIEW_SKILL_CATALOG: "star",
+    VIEW_SKILL_MATRIX: "star",
+    VIEW_USERS: "user",
+}
+_NAV_ICONS_DIR = Path(__file__).resolve().parent / "static" / "icons" / "nav"
+
+
+def _nav_icon(view_idx: int, *, active: bool) -> QIcon:
+    name = _NAV_ICON_NAMES.get(view_idx, "diamond")
+    tone = "gold" if active else "muted"
+    return QIcon(str(_NAV_ICONS_DIR / f"nav-{name}-{tone}.svg"))
+
 
 _VIEW_HEADERS: dict[int, tuple[str, str]] = {
     VIEW_PIPELINE_BUILDER: ("Pipeline Builder", "ลาก-วาง hop และ role ใน pipeline template"),
@@ -455,9 +483,10 @@ class SettingsWindow(QDialog):
 
         for provider in sorted(provider_state.TOGGLABLE):
             enabled = not provider_state.is_disabled(provider)
-            dot = QLabel("●", strip)
             color = cockpit_theme.ACCENT_GOLD if enabled else cockpit_theme.TEXT_FAINT
-            dot.setStyleSheet(f"color: {color}; font-size: 10px;")
+            # Design review 2026-07-24 #4 — a real painted dot, not the "●"
+            # glyph (tofus on fonts without that code point).
+            dot = cockpit_theme.color_dot(color, strip, size=8)
             dot.setToolTip(f"{provider}: {'enabled' if enabled else 'disabled'}")
             lay.addWidget(dot)
 
@@ -490,7 +519,9 @@ class SettingsWindow(QDialog):
             # QPushButton treats a lone "&" as a mnemonic escape (swallows the
             # next char) — "Providers & Roles" would render as "Providers
             # _Roles". Double it so it displays literally.
-            btn = QPushButton(label.replace("&", "&&"), sidebar)
+            btn = QPushButton(f"  {label}".replace("&", "&&"), sidebar)
+            btn.setIcon(_nav_icon(view_idx, active=False))
+            btn.setIconSize(QSize(16, 16))
             btn.setObjectName("navButton")
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setProperty("active", False)
@@ -516,7 +547,7 @@ class SettingsWindow(QDialog):
 
         lay.addStretch(1)
 
-        new_role_btn = QPushButton("＋ New Role", sidebar)
+        new_role_btn = QPushButton("+ New Role", sidebar)
         new_role_btn.setObjectName("newRoleButton")
         new_role_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         new_role_btn.clicked.connect(lambda: self._goto_view(VIEW_NEW_ROLE))
@@ -526,7 +557,9 @@ class SettingsWindow(QDialog):
 
     def _goto_view(self, view_idx: int) -> None:
         for idx, btn in self._nav_buttons.items():
-            btn.setProperty("active", idx == view_idx)
+            is_active = idx == view_idx
+            btn.setProperty("active", is_active)
+            btn.setIcon(_nav_icon(idx, active=is_active))
             btn.style().unpolish(btn)
             btn.style().polish(btn)
         for idx, indicator in self._nav_indicators.items():
@@ -552,6 +585,9 @@ class SettingsWindow(QDialog):
         hb_lay.setContentsMargins(24, 20, 24, 16)
         hb_lay.setSpacing(4)
 
+        self._content_pretitle = QLabel("CONFIGURATION", header_body)
+        self._content_pretitle.setObjectName("contentPreTitle")
+        hb_lay.addWidget(self._content_pretitle)
         self._content_title = QLabel("", header_body)
         self._content_title.setObjectName("contentTitle")
         hb_lay.addWidget(self._content_title)
@@ -600,16 +636,18 @@ class SettingsWindow(QDialog):
         # state (i.e. discards staged edits), it does not restore factory
         # defaults. "Reset to default" over-promised; label it for what it
         # actually does.
-        reset_btn = cockpit_theme.secondary_button("↺ Revert unsaved changes", footer)
+        reset_btn = cockpit_theme.secondary_button("Revert unsaved changes", footer)
         reset_btn.clicked.connect(self._on_reset_clicked)
         lay.addWidget(reset_btn)
         lay.addStretch(1)
 
-        self._unsaved_dot = QLabel("●", footer)
+        # Design review 2026-07-24 #4 — real painted dot widget, not the "●"
+        # text glyph (tofus on fonts lacking that code point).
+        self._unsaved_dot = cockpit_theme.color_dot(cockpit_theme.ACCENT_GOLD, footer, size=8)
         self._unsaved_dot.setObjectName("unsavedDot")
         self._unsaved_dot.setVisible(False)
         lay.addWidget(self._unsaved_dot)
-        self._unsaved_label = QLabel("unsaved changes", footer)
+        self._unsaved_label = QLabel("มีการแก้ไขที่ยังไม่บันทึก", footer)
         self._unsaved_label.setObjectName("unsavedLabel")
         self._unsaved_label.setVisible(False)
         lay.addWidget(self._unsaved_label)
@@ -837,7 +875,7 @@ class SettingsWindow(QDialog):
         lay.setSpacing(14)
 
         banner = QLabel(
-            "provider ที่ปิดหรือยังไม่ติดตั้ง → Claude รับตำแหน่งแทนอัตโนมัติ "
+            "provider ที่ปิดหรือยังไม่ติดตั้ง -> Claude รับตำแหน่งแทนอัตโนมัติ "
             "(role เดิม, engine เปลี่ยนเป็น claude — เสีย model diversity)",
             view,
         )
@@ -850,16 +888,20 @@ class SettingsWindow(QDialog):
         pp_lay = QVBoxLayout(provider_panel)
         pp_lay.setContentsMargins(14, 12, 14, 12)
         pp_lay.setSpacing(10)
-        pp_title = QLabel("Providers", provider_panel)
-        pp_title.setObjectName("panelTitle")
-        pp_lay.addWidget(pp_title)
+        n_enabled = sum(1 for p in provider_state.TOGGLABLE if not provider_state.is_disabled(p))
+        pp_lay.addWidget(
+            self._build_card_header(
+                "MODEL CONNECTIONS", "Providers", f"{n_enabled} enabled", provider_panel
+            )
+        )
 
         self._provider_toggles: dict[str, cockpit_theme.ToggleSwitch] = {}
         self._provider_model_combos: dict[str, QComboBox] = {}
         for provider in sorted(provider_state.TOGGLABLE):
             row = QWidget(provider_panel)
+            row.setObjectName("providerRow")
             row_lay = QHBoxLayout(row)
-            row_lay.setContentsMargins(0, 0, 0, 0)
+            row_lay.setContentsMargins(10, 8, 10, 8)
             row_lay.setSpacing(10)
             provider_role = roles_mod.by_name(provider)
             color = cockpit_theme.ROLE_COLORS.get(
@@ -893,17 +935,21 @@ class SettingsWindow(QDialog):
             pp_lay.addWidget(row)
         lay.addWidget(provider_panel)
 
+        roles_enabled = pipeline_config.load(self._project).get("rolesEnabled", {})
+        role_providers = provider_config.role_provider_map(_overridable_roles(), self._project)
+
         role_panel = QWidget(view)
         role_panel.setObjectName("panel")
         rp_lay = QVBoxLayout(role_panel)
         rp_lay.setContentsMargins(14, 12, 14, 12)
         rp_lay.setSpacing(10)
-        rp_title = QLabel("Roles", role_panel)
-        rp_title.setObjectName("panelTitle")
-        rp_lay.addWidget(rp_title)
-
-        roles_enabled = pipeline_config.load(self._project).get("rolesEnabled", {})
-        role_providers = provider_config.role_provider_map(_overridable_roles(), self._project)
+        n_roles = len(_overridable_roles())
+        n_roles_enabled = sum(1 for r in _overridable_roles() if roles_enabled.get(r, True))
+        rp_lay.addWidget(
+            self._build_card_header(
+                "TEAM ROSTER", "Roles", f"{n_roles_enabled}/{n_roles} active", role_panel
+            )
+        )
 
         self._role_toggles = {}
         self._role_provider_combos = {}
@@ -943,6 +989,38 @@ class SettingsWindow(QDialog):
         lay.addStretch(1)
         return view
 
+    def _build_card_header(self, kicker: str, title: str, tag: str, parent: QWidget) -> QWidget:
+        """Card header matching the mockup pattern — uppercase kicker line,
+        title, and a right-aligned tag chip (design review 2026-07-24 #4,
+        e.g. 'MODEL CONNECTIONS / Providers / 3 enabled'). Styled inline
+        (existing color constants only) rather than a new cockpit_theme.py
+        QSS class, since that file has an in-flight parallel edit."""
+        header = QWidget(parent)
+        outer = QVBoxLayout(header)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(2)
+
+        top = QWidget(header)
+        top_lay = QHBoxLayout(top)
+        top_lay.setContentsMargins(0, 0, 0, 0)
+        top_lay.setSpacing(8)
+        mono = cockpit_theme.ensure_fonts_loaded()["mono"]
+        kicker_lbl = QLabel(kicker.upper(), top)
+        kicker_lbl.setStyleSheet(
+            f'font-family: "{mono}"; font-size: 10px; font-weight: 600; '
+            f"letter-spacing: 1.5px; color: {cockpit_theme.TEXT_FAINT};"
+        )
+        top_lay.addWidget(kicker_lbl)
+        top_lay.addStretch(1)
+        if tag:
+            top_lay.addWidget(cockpit_theme.gold_soft_chip(tag, top, compact=True))
+        outer.addWidget(top)
+
+        title_lbl = QLabel(title, header)
+        title_lbl.setObjectName("panelTitle")
+        outer.addWidget(title_lbl)
+        return header
+
     def _build_role_row(
         self,
         role: str,
@@ -959,8 +1037,9 @@ class SettingsWindow(QDialog):
         lead_capability_gate: bool = False,
     ) -> QWidget:
         row = QWidget(parent)
+        row.setObjectName("roleRow")
         row_lay = QHBoxLayout(row)
-        row_lay.setContentsMargins(0, 4, 0, 4)
+        row_lay.setContentsMargins(10, 8, 10, 8)
         row_lay.setSpacing(10)
         row_lay.addWidget(cockpit_theme.role_chip(label, color, row))
         desc_lbl = QLabel(desc, row)
@@ -1022,7 +1101,7 @@ class SettingsWindow(QDialog):
         # Gemini #12 — surface when the role's configured provider would
         # actually be substituted by Claude right now (toggled off or not
         # installed), as a styled badge rather than plain banner text.
-        badge = QLabel("→ Claude", row)
+        badge = QLabel("-> Claude", row)
         badge.setObjectName("substituteBadge")
         badge.setToolTip("provider นี้ปิดหรือยังไม่ติดตั้ง — Claude รับตำแหน่งแทน")
         row_lay.addWidget(badge)
@@ -1036,7 +1115,7 @@ class SettingsWindow(QDialog):
         # token meter) is gone the moment Lead isn't claude — the user needs
         # to know that BEFORE saving, not discover it later as a silent gap.
         if lead_capability_gate:
-            warn_lbl = QLabel("⚠ non-Claude", row)
+            warn_lbl = QLabel("! non-Claude", row)
             warn_lbl.setObjectName("capabilityWarning")
             warn_lbl.setToolTip(
                 "Lead ที่ไม่ใช่ Claude เสีย: mobile mirror · --resume · "
@@ -1063,7 +1142,7 @@ class SettingsWindow(QDialog):
         # is the caller's default), so there's no way to delete a shipped
         # role by mistake.
         if deletable:
-            delete_btn = QPushButton("✕", row)
+            delete_btn = QPushButton("x", row)
             delete_btn.setFixedWidth(28)
             delete_btn.setToolTip(f"ลบ custom role '{role}'")
             delete_btn.setAccessibleName(f"Delete {label} role")
@@ -1172,7 +1251,7 @@ class SettingsWindow(QDialog):
         label_col = QVBoxLayout()
         label_col.addWidget(QLabel("Label", form))
         self._nr_label = QLineEdit(form)
-        self._nr_label.setPlaceholderText("🧬 Data Eng")
+        self._nr_label.setPlaceholderText("Data Eng")
         self._nr_label.textChanged.connect(self._mark_dirty)
         label_col.addWidget(self._nr_label)
         name_row.addLayout(label_col, 1)
@@ -1361,7 +1440,7 @@ class SettingsWindow(QDialog):
 
         ok, err = custom_roles.create_role(name, label, self._nr_color, column, row, instructions)
         if not ok:
-            self._nr_status.setText(f"⚠️ {err}")
+            self._nr_status.setText(f"! {err}")
             return False
 
         # Register in THIS process immediately so `--role <name>` spawns
@@ -1375,11 +1454,11 @@ class SettingsWindow(QDialog):
         tools_ok = self._apply_new_role_tools_policy(name, column)
 
         status = (
-            f"✓ สร้าง role '{name}' แล้ว — spawn ได้ทันทีด้วย "
+            f"OK: สร้าง role '{name}' แล้ว — spawn ได้ทันทีด้วย "
             f'`takkub assign --role {name} "..."` (ไม่ต้อง restart cockpit)'
         )
         if not tools_ok:
-            status += "\n⚠️ แต่บันทึก MCP/Plugins default ไม่สำเร็จ — ตั้งเองผ่าน MCP/Plugins Matrix"
+            status += "\n! แต่บันทึก MCP/Plugins default ไม่สำเร็จ — ตั้งเองผ่าน MCP/Plugins Matrix"
         self._nr_status.setText(status)
         self._reset_new_role_form(clear_status=False)
         return True
@@ -1503,14 +1582,14 @@ class SettingsWindow(QDialog):
         self._up_profile_list = QListWidget(list_panel)
         self._up_profile_list.setFrameShape(QFrame.Shape.NoFrame)
         for p in self._up_profiles:
-            self._up_profile_list.addItem(f"{p['name']}  →  {p['config_dir']}")
+            self._up_profile_list.addItem(f"{p['name']}  ->  {p['config_dir']}")
         lp_lay.addWidget(self._up_profile_list)
 
         btn_row = QHBoxLayout()
         self._up_remove_btn = cockpit_theme.secondary_button("Remove selected", list_panel)
         self._up_remove_btn.setEnabled(False)
         self._up_share_btn = cockpit_theme.secondary_button(
-            "🔗 Share sessions with default", list_panel
+            "Share sessions with default", list_panel
         )
         self._up_share_btn.setEnabled(False)
         self._up_share_btn.setToolTip(
@@ -1555,7 +1634,7 @@ class SettingsWindow(QDialog):
         form.addRow("Config dir:", dir_row)
 
         self._up_add_share_chk = QCheckBox(
-            "🔗 Share sessions/plugins with default (switch account only)", add_panel
+            "Share sessions/plugins with default (switch account only)", add_panel
         )
         self._up_add_share_chk.setChecked(True)
         self._up_add_share_chk.setToolTip(
@@ -1649,14 +1728,14 @@ class SettingsWindow(QDialog):
             return
         new_p = {"name": n, "config_dir": d}
         self._up_profiles.append(new_p)
-        suffix = "  🔗shared" if linked else ""
-        self._up_profile_list.addItem(f"{n}  →  {d}{suffix}")
+        suffix = "  (shared)" if linked else ""
+        self._up_profile_list.addItem(f"{n}  ->  {d}{suffix}")
         self._up_add_name.clear()
         self._up_add_dir.clear()
         self._reload_users_auth_combo()
         if linked:
             self._users_status(
-                f"👤 profile '{n}' created — shares {', '.join(linked)} with default · "
+                f"profile '{n}' created — shares {', '.join(linked)} with default · "
                 "run 'claude login' in a pane of that profile to sign in"
             )
 
@@ -1750,7 +1829,7 @@ class SettingsWindow(QDialog):
         p_lay.addWidget(add_env_btn)
 
         save_row = QHBoxLayout()
-        save_btn = cockpit_theme.gold_button("💾 Save", panel)
+        save_btn = cockpit_theme.gold_button("Save", panel)
         save_btn.clicked.connect(self._on_users_save_auth_clicked)
         save_row.addWidget(save_btn)
         save_row.addStretch(1)
@@ -1835,7 +1914,7 @@ class SettingsWindow(QDialog):
         name_edit.setPlaceholderText("NAME — e.g. ANTHROPIC_DEFAULT_SONNET_MODEL")
         value_edit = QLineEdit(value, row)
         value_edit.setPlaceholderText("value — e.g. qwen/qwen3-coder:free")
-        remove_btn = QPushButton("✕", row)
+        remove_btn = QPushButton("x", row)
         remove_btn.setFixedWidth(28)
         remove_btn.setToolTip("Remove this variable")
 
@@ -1879,23 +1958,33 @@ class SettingsWindow(QDialog):
         roles: tuple[str, ...],
         items: list[str],
         matrix: dict[str, dict[str, bool]],
+        *,
+        column_category: str = "",
     ) -> dict[str, dict[str, cockpit_theme.ToggleSwitch]]:
         """Fill *grid* (already parented to a panel widget) with a role×item
         toggle matrix: col 0 = 180px role-chip column, cols 1..N = 1fr item
         columns of centered ``ToggleSwitch`` cells. Clears any prior content
-        first, so this doubles as the reload/refresh path."""
+        first, so this doubles as the reload/refresh path.
+
+        *column_category* (design review 2026-07-24 #3) — a second line
+        under each item header naming what kind of column it is (e.g. "MCP"
+        / "Plugin"), so the matrix doesn't rely on the reader already
+        knowing what the sidebar section implied. Each role row also gets a
+        hairline bottom-border (inline, not a new global QSS class) so the
+        eye can track a row across many toggle columns."""
         self._clear_grid(grid)
         panel = grid.parentWidget()
         grid.setColumnMinimumWidth(0, 160)
         grid.setColumnStretch(0, 0)
+        role_header = QLabel("Role", panel)
+        role_header.setObjectName("matrixHeaderCell")
+        grid.addWidget(role_header, 0, 0)
         for col, item in enumerate(items, start=1):
-            header = QLabel(item, panel)
-            header.setObjectName("panelHint")
-            header.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            header.setToolTip(item)
+            header = self._build_matrix_column_header(item, column_category, panel)
             grid.addWidget(header, 0, col)
             grid.setColumnStretch(col, 1)
 
+        row_hairline = f"border-bottom: 1px solid {cockpit_theme.BORDER_HAIRLINE};"
         boxes: dict[str, dict[str, cockpit_theme.ToggleSwitch]] = {}
         for row, role in enumerate(roles, start=1):
             r = roles_mod.by_name(role)
@@ -1903,19 +1992,73 @@ class SettingsWindow(QDialog):
             color = cockpit_theme.ROLE_COLORS.get(
                 role, r.color if r else cockpit_theme.ROLE_COLOR_FALLBACK
             )
-            grid.addWidget(cockpit_theme.role_chip(label, color, panel), row, 0)
+            chip_cell = QWidget(panel)
+            chip_cell_lay = QHBoxLayout(chip_cell)
+            chip_cell_lay.setContentsMargins(0, 6, 0, 6)
+            chip_cell.setStyleSheet(row_hairline)
+            chip_cell_lay.addWidget(cockpit_theme.role_chip(label, color, chip_cell))
+            grid.addWidget(chip_cell, row, 0)
             boxes[role] = {}
             for col, item in enumerate(items, start=1):
                 checked = matrix.get(role, {}).get(item, False)
                 toggle = cockpit_theme.ToggleSwitch(panel, checked=checked)
                 toggle.toggled.connect(self._mark_dirty)
                 cell = QWidget(panel)
+                cell.setStyleSheet(row_hairline)
                 cell_lay = QHBoxLayout(cell)
                 cell_lay.setContentsMargins(0, 4, 0, 4)
                 cell_lay.addWidget(toggle, alignment=Qt.AlignmentFlag.AlignCenter)
                 grid.addWidget(cell, row, col)
                 boxes[role][item] = toggle
         return boxes
+
+    def _build_matrix_column_header(self, item: str, category: str, parent: QWidget) -> QWidget:
+        """One matrix header cell: item name + a muted category sublabel
+        underneath (design review 2026-07-24 #3)."""
+        cell = QWidget(parent)
+        lay = QVBoxLayout(cell)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        name_lbl = QLabel(item, cell)
+        name_lbl.setObjectName("matrixHeaderCell")
+        name_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        name_lbl.setToolTip(item)
+        lay.addWidget(name_lbl)
+        if category:
+            cat_lbl = QLabel(category, cell)
+            cat_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            cat_lbl.setStyleSheet(
+                f"color: {cockpit_theme.TEXT_FAINT}; font-size: 10px; "
+                f"border-bottom: 1px solid {cockpit_theme.BORDER_HAIRLINE}; padding-bottom: 6px;"
+            )
+            lay.addWidget(cat_lbl)
+        return cell
+
+    def _build_matrix_legend(self, parent: QWidget) -> QWidget:
+        """Legend footer under a role×item matrix — 'Allowed'/'Blocked' dot
+        key + a validation note, matching the mockup (design review
+        2026-07-24 #2 in the '➕ เพิ่ม' section: 'Matrix legend footer')."""
+        legend = QWidget(parent)
+        lay = QHBoxLayout(legend)
+        lay.setContentsMargins(4, 6, 4, 0)
+        lay.setSpacing(6)
+
+        lay.addWidget(cockpit_theme.color_dot(cockpit_theme.ACCENT_GOLD, legend, size=8))
+        allowed_lbl = QLabel("Allowed", legend)
+        allowed_lbl.setStyleSheet(f"color: {cockpit_theme.TEXT_SECONDARY}; font-size: 11px;")
+        lay.addWidget(allowed_lbl)
+
+        lay.addSpacing(10)
+        lay.addWidget(cockpit_theme.color_dot(cockpit_theme.TEXT_FAINT, legend, size=8))
+        blocked_lbl = QLabel("Blocked", legend)
+        blocked_lbl.setStyleSheet(f"color: {cockpit_theme.TEXT_SECONDARY}; font-size: 11px;")
+        lay.addWidget(blocked_lbl)
+
+        lay.addStretch(1)
+        note_lbl = QLabel("Security policy จะถูก validate ก่อน Apply", legend)
+        note_lbl.setStyleSheet(f"color: {cockpit_theme.TEXT_FAINT}; font-size: 11px;")
+        lay.addWidget(note_lbl)
+        return legend
 
     # ──────────────────────────────────────────────────────────
     # view: MCP Matrix (real)
@@ -1934,20 +2077,32 @@ class SettingsWindow(QDialog):
         add_row.addStretch(1)
         lay.addLayout(add_row)
 
-        self._mcp_empty = QLabel(
-            "ยังไม่มี MCP server ใน master registry — กด “+ Add MCP server”", view
-        )
-        self._mcp_empty.setObjectName("panelHint")
+        # Design review 2026-07-24 #3 — an empty MCP registry used to show a
+        # small hint line ABOVE a matrix panel that still rendered (just a
+        # bare role-name list, no columns). Now the panel hides entirely and
+        # this becomes the dashed-border empty-state block (reuses
+        # cockpit_theme's `placeholderBadge` QSS — same class the other
+        # not-yet-real views already use, so no new stylesheet class needed).
+        self._mcp_empty = QLabel("ยังไม่มี MCP server — กด “+ Add MCP server” ด้านบนเพื่อเริ่ม", view)
+        self._mcp_empty.setObjectName("placeholderBadge")
         self._mcp_empty.setWordWrap(True)
+        self._mcp_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._mcp_empty.hide()
         lay.addWidget(self._mcp_empty)
 
         matrix_panel = QWidget(view)
         matrix_panel.setObjectName("panel")
-        self._mcp_grid = QGridLayout(matrix_panel)
-        self._mcp_grid.setContentsMargins(14, 12, 14, 12)
+        self._mcp_matrix_panel = matrix_panel
+        panel_lay = QVBoxLayout(matrix_panel)
+        panel_lay.setContentsMargins(14, 12, 14, 12)
+        panel_lay.setSpacing(4)
+        grid_host = QWidget(matrix_panel)
+        self._mcp_grid = QGridLayout(grid_host)
+        self._mcp_grid.setContentsMargins(0, 0, 0, 0)
         self._mcp_grid.setHorizontalSpacing(6)
         self._mcp_grid.setVerticalSpacing(4)
+        panel_lay.addWidget(grid_host)
+        panel_lay.addWidget(self._build_matrix_legend(matrix_panel))
         lay.addWidget(matrix_panel)
         lay.addStretch(1)
 
@@ -1959,9 +2114,10 @@ class SettingsWindow(QDialog):
         self._orig_mcp_items = pane_tools_dialog.policy_role_items(_matrix_roles(), "mcps")
         matrix = pane_tools_dialog.build_matrix(_matrix_roles(), items, self._orig_mcp_items)
         self._mcp_toggles = self._populate_matrix_grid(
-            self._mcp_grid, _matrix_roles(), items, matrix
+            self._mcp_grid, _matrix_roles(), items, matrix, column_category="MCP"
         )
         self._mcp_empty.setVisible(not items)
+        self._mcp_matrix_panel.setVisible(bool(items))
 
     def _on_add_mcp_server_clicked(self) -> None:
         dlg = QDialog(self)
@@ -2027,17 +2183,25 @@ class SettingsWindow(QDialog):
         self._plugins_empty = QLabel(
             "ไม่พบ marketplace plugin — ยังไม่มีอะไรใน installed_plugins.json", view
         )
-        self._plugins_empty.setObjectName("panelHint")
+        self._plugins_empty.setObjectName("placeholderBadge")
         self._plugins_empty.setWordWrap(True)
+        self._plugins_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._plugins_empty.hide()
         lay.addWidget(self._plugins_empty)
 
         matrix_panel = QWidget(view)
         matrix_panel.setObjectName("panel")
-        self._plugins_grid = QGridLayout(matrix_panel)
-        self._plugins_grid.setContentsMargins(14, 12, 14, 12)
+        self._plugins_matrix_panel = matrix_panel
+        panel_lay = QVBoxLayout(matrix_panel)
+        panel_lay.setContentsMargins(14, 12, 14, 12)
+        panel_lay.setSpacing(4)
+        grid_host = QWidget(matrix_panel)
+        self._plugins_grid = QGridLayout(grid_host)
+        self._plugins_grid.setContentsMargins(0, 0, 0, 0)
         self._plugins_grid.setHorizontalSpacing(6)
         self._plugins_grid.setVerticalSpacing(4)
+        panel_lay.addWidget(grid_host)
+        panel_lay.addWidget(self._build_matrix_legend(matrix_panel))
         lay.addWidget(matrix_panel)
         lay.addStretch(1)
 
@@ -2061,9 +2225,10 @@ class SettingsWindow(QDialog):
         self._orig_plugin_items = {r: [m for m in v if m in rendered] for r, v in full_orig.items()}
         matrix = pane_tools_dialog.build_matrix(_matrix_roles(), items, self._orig_plugin_items)
         self._plugin_toggles = self._populate_matrix_grid(
-            self._plugins_grid, _matrix_roles(), items, matrix
+            self._plugins_grid, _matrix_roles(), items, matrix, column_category="Plugin"
         )
         self._plugins_empty.setVisible(not items)
+        self._plugins_matrix_panel.setVisible(bool(items))
 
     # ──────────────────────────────────────────────────────────
     # view: Role Overlap (real — ROLE section)
@@ -2125,9 +2290,9 @@ class SettingsWindow(QDialog):
         overlaps = skill_audit.audit_existing_role(role, self._overlap_docs)
         if overlaps:
             names = ", ".join(f"{other} ({sim:.2f})" for other, sim in overlaps)
-            self._overlap_badge.setText(f"⚠️ overlap กับ scope role อื่น: {names}")
+            self._overlap_badge.setText(f"! overlap กับ scope role อื่น: {names}")
         else:
-            self._overlap_badge.setText("✓ won't overlap — ไม่ทับ scope role อื่น")
+            self._overlap_badge.setText("OK: won't overlap — ไม่ทับ scope role อื่น")
 
     # ──────────────────────────────────────────────────────────
     # view: Skill Catalog (real — SKILL section)
@@ -2193,7 +2358,7 @@ class SettingsWindow(QDialog):
         # False) never gets one, same guard `deletable=` uses for built-in
         # roles.
         del_row = QHBoxLayout()
-        self._catalog_delete_btn = QPushButton("✕ ลบ skill นี้", detail_panel)
+        self._catalog_delete_btn = QPushButton("x ลบ skill นี้", detail_panel)
         self._catalog_delete_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._catalog_delete_btn.clicked.connect(self._on_delete_skill_clicked)
         self._catalog_delete_btn.hide()
@@ -2342,7 +2507,7 @@ class SettingsWindow(QDialog):
             self._catalog_roles.setText(f"อ้างถึงโดย role: {labels}")
         else:
             self._catalog_roles.setText("ยังไม่มี role ไหนอ้างถึง skill นี้")
-        self._catalog_path.setText(f"📄 {skill.path}")
+        self._catalog_path.setText(f"{skill.path}")
         self._catalog_delete_btn.setVisible(
             skill_scan.is_writable_skill(
                 skill.path,
@@ -2358,7 +2523,7 @@ class SettingsWindow(QDialog):
 
         root = self._writable_skill_roots()
         if not root:
-            self._ns_status.setText("⚠️ ไม่มี active project ให้เขียน skill ลงไป")
+            self._ns_status.setText("! ไม่มี active project ให้เขียน skill ลงไป")
             return
 
         existing = {s.name for s in self._catalog_skills}
@@ -2371,10 +2536,10 @@ class SettingsWindow(QDialog):
             existing=existing,
         )
         if not ok:
-            self._ns_status.setText(f"⚠️ {err}")
+            self._ns_status.setText(f"! {err}")
             return
 
-        self._ns_status.setText(f"✓ สร้าง skill '{name}' แล้ว")
+        self._ns_status.setText(f"OK: สร้าง skill '{name}' แล้ว")
         self._ns_name.clear()
         self._ns_desc.clear()
         self._ns_instructions.clear()
@@ -2586,7 +2751,7 @@ class SettingsWindow(QDialog):
                 )
                 head_row.addWidget(chip)
             head_row.addStretch(1)
-            remove_hop_btn = QPushButton("✕", panel)
+            remove_hop_btn = QPushButton("x", panel)
             remove_hop_btn.setFixedSize(22, 22)
             remove_hop_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             remove_hop_btn.setToolTip("ลบ hop นี้")
@@ -2611,7 +2776,7 @@ class SettingsWindow(QDialog):
                 pill_lay.setContentsMargins(8, 3, 4, 3)
                 pill_lay.setSpacing(4)
                 pill_lay.addWidget(cockpit_theme.role_chip(label, color, pill))
-                rm_btn = QPushButton("✕", pill)
+                rm_btn = QPushButton("x", pill)
                 rm_btn.setFixedSize(16, 16)
                 rm_btn.setCursor(Qt.CursorShape.PointingHandCursor)
                 rm_btn.setStyleSheet(
@@ -2641,7 +2806,7 @@ class SettingsWindow(QDialog):
             self._pb_hops_lay.addWidget(panel)
 
             if idx < len(self._pb_hops) - 1:
-                conn = QLabel("↓ wait for all", self._pb_hops_container)
+                conn = QLabel("v wait for all", self._pb_hops_container)
                 conn.setObjectName("panelHint")
                 conn.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 self._pb_hops_lay.addWidget(conn)
@@ -2719,7 +2884,7 @@ class SettingsWindow(QDialog):
         d_lay.addStretch(1)
 
         btn_row = QHBoxLayout()
-        self._tpl_edit_btn = cockpit_theme.secondary_button("Edit hops →", detail_panel)
+        self._tpl_edit_btn = cockpit_theme.secondary_button("Edit hops ->", detail_panel)
         self._tpl_edit_btn.clicked.connect(self._on_template_edit_hops_clicked)
         btn_row.addWidget(self._tpl_edit_btn)
         self._tpl_duplicate_btn = cockpit_theme.secondary_button("Duplicate", detail_panel)
@@ -2817,7 +2982,7 @@ class SettingsWindow(QDialog):
             f"HOP {i}: " + (", ".join(e["role"] for e in hop) or "(ว่าง)")
             for i, hop in enumerate(tpl["hops"], start=1)
         ]
-        self._tpl_hops_summary.setText("\n↓ wait for all\n".join(lines) or "(ไม่มี hop)")
+        self._tpl_hops_summary.setText("\nv wait for all\n".join(lines) or "(ไม่มี hop)")
         self._tpl_delete_btn.setEnabled(not tpl.get("builtin"))
 
     def _on_template_edit_hops_clicked(self) -> None:

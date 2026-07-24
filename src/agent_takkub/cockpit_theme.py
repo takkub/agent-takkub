@@ -42,6 +42,11 @@ GROUND_PANEL = "#181b21"
 GROUND_PANEL_ALT = "#191c22"
 GROUND_INPUT = "#1c1f26"
 GROUND_SELECT = "#232732"
+# ToggleSwitch's unchecked track — deliberately lighter than GROUND_SELECT.
+# GROUND_SELECT against card background GROUND_PANEL (#181b21) had almost no
+# delta, so an off toggle's rounded-rect shape barely read against the card
+# behind it (design review 2026-07-24 #4, gemini + critic both flagged it).
+TOGGLE_TRACK_OFF = "#2d323e"
 
 # ──────────────────────────────────────────────────────────────
 # Borders
@@ -243,6 +248,18 @@ FONT_MONO_FALLBACK_CANDIDATES: tuple[str, ...] = (
     "DejaVu Sans Mono",  # near-universal Linux fallback
     "Consolas",
 )
+# Neither IBM Plex Sans/Mono nor the sans fallback candidates above carry Thai
+# glyphs — declaring only `sans_family` in the QSS font-family (no fallback
+# chain at all) left every Thai string in the window rendering as tofu (design
+# review 2026-07-24, root cause #2). `Noto Sans Thai` (OFL, bundled below,
+# same pattern as IBM Plex) covers this on any OS; the OS-native names are a
+# second-line fallback in case the bundled ttf ever fails to load.
+FONT_THAI_FALLBACK_CANDIDATES: tuple[str, ...] = (
+    "Leelawadee UI",  # Windows
+    "Thonburi",  # macOS
+    "Noto Sans Thai",  # common Linux distro default
+    "Tahoma",  # older Windows fallback with Thai coverage
+)
 # First candidate of each list — kept as plain constants (not just the
 # lists) since callers/tests reference "the" fallback name. The family Qt
 # actually renders with is resolved per-platform inside
@@ -265,6 +282,7 @@ _MONO_FILES = (
     "IBMPlexMono-Medium.ttf",
     "IBMPlexMono-SemiBold.ttf",
 )
+_THAI_FILES = ("NotoSansThai-Regular.ttf",)
 
 _font_cache: dict[str, object] | None = None
 
@@ -286,44 +304,45 @@ def _resolve_fallback_family(candidates: tuple[str, ...]) -> str:
     return candidates[0]
 
 
-def ensure_fonts_loaded() -> dict[str, object]:
-    """Register the bundled IBM Plex ttfs with Qt (idempotent, cached).
+def _load_font_family(files: tuple[str, ...]) -> str | None:
+    """Register the first weight of *files* that exists+loads and return the
+    family Qt registered it under (``None`` if none loaded)."""
+    family: str | None = None
+    for fname in files:
+        path = _FONTS_DIR / fname
+        if not path.is_file():
+            continue
+        font_id = QFontDatabase.addApplicationFont(str(path))
+        if font_id == -1:
+            continue
+        families = QFontDatabase.applicationFontFamilies(font_id)
+        if families and family is None:
+            family = families[0]
+    return family
 
-    Returns ``{"sans": family, "mono": family, "bundled": bool}``. ``sans``/
-    ``mono`` are the actual family names Qt registered the fonts under (not
-    necessarily "IBM Plex Sans" verbatim — Qt reads it from the font's own
-    name table) when at least one weight loaded, otherwise the platform
-    fallback family. ``bundled`` is True only when BOTH families loaded from
-    disk — a partial load (e.g. Sans ok, Mono missing) still reports the
-    fallback for the missing family without raising.
+
+def ensure_fonts_loaded() -> dict[str, object]:
+    """Register the bundled IBM Plex + Noto Sans Thai ttfs with Qt (idempotent,
+    cached).
+
+    Returns ``{"sans": family, "mono": family, "thai": family, "bundled":
+    bool}``. ``sans``/``mono``/``thai`` are the actual family names Qt
+    registered the fonts under (not necessarily "IBM Plex Sans" verbatim — Qt
+    reads it from the font's own name table) when at least one weight loaded,
+    otherwise the platform fallback family. ``bundled`` is True only when BOTH
+    ``sans`` and ``mono`` loaded from disk — a partial load (e.g. Sans ok,
+    Mono missing) still reports the fallback for the missing family without
+    raising. ``thai`` is tracked separately (own fallback candidates) since it
+    backs a font-family *stack*, not a standalone declaration — see
+    ``build_stylesheet``'s ``_sans_font_stack``.
     """
     global _font_cache
     if _font_cache is not None:
         return _font_cache
 
-    sans_family: str | None = None
-    for fname in _SANS_FILES:
-        path = _FONTS_DIR / fname
-        if not path.is_file():
-            continue
-        font_id = QFontDatabase.addApplicationFont(str(path))
-        if font_id == -1:
-            continue
-        families = QFontDatabase.applicationFontFamilies(font_id)
-        if families and sans_family is None:
-            sans_family = families[0]
-
-    mono_family: str | None = None
-    for fname in _MONO_FILES:
-        path = _FONTS_DIR / fname
-        if not path.is_file():
-            continue
-        font_id = QFontDatabase.addApplicationFont(str(path))
-        if font_id == -1:
-            continue
-        families = QFontDatabase.applicationFontFamilies(font_id)
-        if families and mono_family is None:
-            mono_family = families[0]
+    sans_family = _load_font_family(_SANS_FILES)
+    mono_family = _load_font_family(_MONO_FILES)
+    thai_family = _load_font_family(_THAI_FILES)
 
     bundled = sans_family is not None and mono_family is not None
     if not bundled:
@@ -334,9 +353,16 @@ def ensure_fonts_loaded() -> dict[str, object]:
             "ok" if sans_family else "missing",
             "ok" if mono_family else "missing",
         )
+    if thai_family is None:
+        _log.warning(
+            "ensure_fonts_loaded: bundled Noto Sans Thai missing/failed to load from %s "
+            "— falling back to platform Thai font substitution",
+            _FONTS_DIR,
+        )
     _font_cache = {
         "sans": sans_family or _resolve_fallback_family(FONT_SANS_FALLBACK_CANDIDATES),
         "mono": mono_family or _resolve_fallback_family(FONT_MONO_FALLBACK_CANDIDATES),
+        "thai": thai_family or _resolve_fallback_family(FONT_THAI_FALLBACK_CANDIDATES),
         "bundled": bundled,
     }
     return _font_cache
@@ -345,6 +371,23 @@ def ensure_fonts_loaded() -> dict[str, object]:
 # ──────────────────────────────────────────────────────────────
 # QSS
 # ──────────────────────────────────────────────────────────────
+
+
+def _sans_font_stack(sans_family: str) -> str:
+    """Comma-separated ``font-family`` value: *sans_family* first, then a Thai
+    fallback chain. Qt's QSS font-family list does per-*character* fallback —
+    declaring only ``sans_family`` (as the old single-name QSS did) meant any
+    Thai codepoint IBM Plex Sans lacks a glyph for had nowhere left to fall
+    back to and rendered as tofu (design review 2026-07-24, root cause #2).
+    The bundled Noto Sans Thai family goes first in the Thai chain since it's
+    guaranteed present regardless of OS; the OS-native names are a second-line
+    fallback for the rare case that ttf failed to register."""
+    thai_family = str(ensure_fonts_loaded().get("thai") or "")
+    names = [sans_family]
+    for candidate in (thai_family, *FONT_THAI_FALLBACK_CANDIDATES):
+        if candidate and candidate not in names:
+            names.append(candidate)
+    return ", ".join(f'"{n}"' for n in names)
 
 
 def build_stylesheet(sans_family: str, mono_family: str) -> str:
@@ -359,11 +402,12 @@ def build_stylesheet(sans_family: str, mono_family: str) -> str:
     _up_arrow_svg_disabled = (_icons_dir / "spin-up-disabled.svg").as_posix()
     _down_arrow_svg_disabled = (_icons_dir / "spin-down-disabled.svg").as_posix()
     _combo_arrow_on_svg = (_icons_dir / "combo-down-on.svg").as_posix()
+    _sans_stack = _sans_font_stack(sans_family)
     return f"""
     QDialog#settingsWindow, QWidget#settingsWindow {{
         background: {GROUND_WINDOW};
         color: {TEXT_PRIMARY};
-        font-family: "{sans_family}";
+        font-family: {_sans_stack};
         font-size: 13px;
     }}
     QWidget#titlebar {{
@@ -445,6 +489,13 @@ def build_stylesheet(sans_family: str, mono_family: str) -> str:
     QWidget#content {{
         background: {GROUND_WINDOW};
     }}
+    QLabel#contentPreTitle {{
+        font-family: "{mono_family}";
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 1.5px;
+        color: {ACCENT_GOLD};
+    }}
     QLabel#contentTitle {{
         font-size: 20px;
         font-weight: 700;
@@ -456,11 +507,19 @@ def build_stylesheet(sans_family: str, mono_family: str) -> str:
     }}
     QWidget#footer {{
         background: {GROUND_SIDEBAR};
-        border-top: 1px solid {BORDER_HAIRLINE};
+        border-top: 1px solid {BORDER_STRONG2};
     }}
-    QLabel#unsavedDot {{
-        color: {ACCENT_GOLD};
-        font-size: 16px;
+    /* A real painted dot, not the "●" text glyph the old rule sized via
+       font-size — that glyph tofus on fonts lacking it (design review
+       2026-07-24 #4). min-width/height give it a circle footprint even if
+       the widget keeps QLabel with empty text instead of becoming a QFrame. */
+    QLabel#unsavedDot, QFrame#unsavedDot {{
+        background: {ACCENT_GOLD};
+        border-radius: 4px;
+        min-width: 8px;
+        min-height: 8px;
+        max-width: 8px;
+        max-height: 8px;
     }}
     QLabel#unsavedLabel {{
         color: {TEXT_MUTED};
@@ -512,6 +571,19 @@ def build_stylesheet(sans_family: str, mono_family: str) -> str:
     QLabel#panelHint {{
         color: {TEXT_MUTED};
         font-size: 12px;
+    }}
+    QWidget#providerRow, QWidget#roleRow {{
+        background: {GROUND_PANEL_ALT};
+        border: 1px solid {BORDER_HAIRLINE};
+        border-radius: {RADIUS_SM}px;
+    }}
+    QLabel#matrixHeaderCell {{
+        font-family: "{mono_family}";
+        font-weight: 600;
+        font-size: 11px;
+        color: {TEXT_SECONDARY};
+        padding-bottom: 6px;
+        border-bottom: 1px solid {BORDER_HAIRLINE};
     }}
     QLabel#infoBanner {{
         background: {GOLD_CHIP_BG};
@@ -748,9 +820,20 @@ class ToggleSwitch(QAbstractButton):
         if checked:
             track = QColor(ACCENT_GOLD) if enabled else QColor(TEXT_FAINT)
         else:
-            track = QColor(GROUND_SELECT)
+            track = QColor(TOGGLE_TRACK_OFF)
         painter.setBrush(track)
         painter.drawRoundedRect(rect, rect.height() / 2, rect.height() / 2)
+
+        if not checked:
+            # Extra definition beyond the lighter track fill alone — a thin
+            # inner border so the switch's rounded-rect shape reads clearly
+            # against a card background close in value to the track color.
+            pen = QPen(QColor(255, 255, 255, 20))
+            pen.setWidth(1)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(rect, rect.height() / 2, rect.height() / 2)
+            painter.setPen(Qt.PenStyle.NoPen)
 
         knob_d = rect.height() - 4
         knob_x = rect.right() - knob_d - 1 if checked else rect.left() + 1
@@ -831,6 +914,16 @@ def themed_message_box(parent: QWidget | None = None) -> QMessageBox:
     return box
 
 
+def color_dot(color: str, parent: QWidget | None = None, size: int = 8) -> QWidget:
+    """A small solid-color circle — a real painted widget, not the "●" text
+    glyph (design review 2026-07-24 #4: that glyph tofus on fonts lacking it,
+    e.g. the status-strip provider indicators and the footer's dirty dot)."""
+    dot = QLabel(parent)
+    dot.setFixedSize(size, size)
+    dot.setStyleSheet(f"background: {color}; border-radius: {size // 2}px;")
+    return dot
+
+
 def role_chip(label: str, color: str, parent: QWidget | None = None) -> QWidget:
     """Colored dot + label, matching the design system's role-chip component."""
     mono = ensure_fonts_loaded()["mono"]
@@ -838,9 +931,7 @@ def role_chip(label: str, color: str, parent: QWidget | None = None) -> QWidget:
     lay = QHBoxLayout(chip)
     lay.setContentsMargins(0, 0, 0, 0)
     lay.setSpacing(6)
-    dot = QLabel(chip)
-    dot.setFixedSize(8, 8)
-    dot.setStyleSheet(f"background: {color}; border-radius: 4px;")
+    dot = color_dot(color, chip)
     lay.addWidget(dot)
     text = QLabel(label, chip)
     # Gemini #14 — chips/badges spec IBM Plex Mono; left unset here they

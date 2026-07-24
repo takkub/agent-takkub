@@ -53,6 +53,7 @@ agent_takkub = [
     "static/*.png",
     "static/fonts/*.ttf",
     "static/fonts/LICENSE.txt",
+    "static/fonts/LICENSE-NotoSansThai.txt",
     "static/icons/*.svg",
     # Staged by setup.py's custom build_py from the repo-root CLAUDE.md /
     # .claude/agents/*.md / .claude/skills/*/SKILL.md right before this list

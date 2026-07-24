@@ -107,7 +107,7 @@ class TestNewRoleView:
 
         assert "data-eng" in custom_roles.load_custom_roles()
         assert roles_mod.by_name("data-eng") is not None
-        assert dlg._nr_status.text().startswith("✓")
+        assert dlg._nr_status.text().startswith("OK:")
         # Form resets on success (status message is deliberately kept).
         assert dlg._nr_name.text() == ""
         dlg.deleteLater()
@@ -118,7 +118,7 @@ class TestNewRoleView:
         dlg._on_create_role_clicked()
 
         assert "lead" not in custom_roles.load_custom_roles()
-        assert dlg._nr_status.text().startswith("⚠️")
+        assert dlg._nr_status.text().startswith("!")
         dlg.deleteLater()
 
     def test_footer_save_apply_creates_role_and_accepts(self) -> None:
@@ -145,7 +145,7 @@ class TestNewRoleView:
         dlg._on_save_apply_clicked()
 
         assert dlg.result() != QDialog.DialogCode.Accepted
-        assert dlg._nr_status.text().startswith("⚠️")
+        assert dlg._nr_status.text().startswith("!")
         dlg.deleteLater()
 
     def test_new_role_fields_mark_dirty(self) -> None:
@@ -401,7 +401,7 @@ class TestProvidersRolesView:
         dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
         row = dlg._role_toggles["qa"].parent()
         assert not any(
-            isinstance(w, QPushButton) and w.text() == "✕" for w in row.findChildren(QPushButton)
+            isinstance(w, QPushButton) and w.text() == "x" for w in row.findChildren(QPushButton)
         )
         dlg.deleteLater()
 
@@ -419,7 +419,7 @@ class TestProvidersRolesView:
 
         dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
         row = dlg._role_toggles["data-eng"].parent()
-        delete_btn = next(w for w in row.findChildren(QPushButton) if w.text() == "✕")
+        delete_btn = next(w for w in row.findChildren(QPushButton) if w.text() == "x")
 
         delete_btn.click()
 
@@ -439,7 +439,7 @@ class TestProvidersRolesView:
 
         dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
         row = dlg._role_toggles["data-eng"].parent()
-        delete_btn = next(w for w in row.findChildren(QPushButton) if w.text() == "✕")
+        delete_btn = next(w for w in row.findChildren(QPushButton) if w.text() == "x")
 
         delete_btn.click()
 
@@ -629,7 +629,7 @@ class TestRoleOverlapView:
         )
         dlg._overlap_list.setCurrentRow(row)
         assert dlg._overlap_detail_text.toPlainText() == docs["backend"]
-        assert dlg._overlap_badge.text().startswith("✓")
+        assert dlg._overlap_badge.text().startswith("OK:")
         dlg.deleteLater()
 
 
@@ -744,7 +744,7 @@ class TestNewSkillForm:
         dlg._on_create_skill_clicked()
 
         assert (tmp_path / ".claude" / "skills" / "my-new-skill" / "SKILL.md").is_file()
-        assert dlg._ns_status.text().startswith("✓")
+        assert dlg._ns_status.text().startswith("OK:")
         assert dlg._ns_name.text() == ""
         assert "my-new-skill" in {s.name for s in dlg._catalog_skills}
         dlg.deleteLater()
@@ -756,7 +756,7 @@ class TestNewSkillForm:
         dlg._ns_name.setText("orphan-skill")
         dlg._on_create_skill_clicked()
 
-        assert dlg._ns_status.text().startswith("⚠️")
+        assert dlg._ns_status.text().startswith("!")
         assert not (tmp_path / ".claude" / "skills" / "orphan-skill").exists()
         dlg.deleteLater()
 
@@ -767,7 +767,7 @@ class TestNewSkillForm:
         dlg._ns_name.setText("../escape")
         dlg._on_create_skill_clicked()
 
-        assert dlg._ns_status.text().startswith("⚠️")
+        assert dlg._ns_status.text().startswith("!")
         assert not (tmp_path / ".claude" / "skills").exists()
         dlg.deleteLater()
 
@@ -780,7 +780,7 @@ class TestNewSkillForm:
         dlg._ns_name.setText("dup-skill")
         dlg._on_create_skill_clicked()
 
-        assert dlg._ns_status.text().startswith("⚠️")
+        assert dlg._ns_status.text().startswith("!")
         dlg.deleteLater()
 
     def test_created_skill_shows_delete_button(self, tmp_path: Path) -> None:
