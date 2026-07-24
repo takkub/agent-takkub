@@ -55,12 +55,31 @@ def test_machine_fanout_cap_bounds():
     assert 1 <= cap <= exec_mode.MAX_FANOUT
 
 
+def test_machine_caps_use_stable_total_ram_headroom(monkeypatch):
+    """Regression for #117: a transient low available sample must not yield cap 1."""
+    # Reported host: 8 logical cores, 16 GB total. Even if available temporarily
+    # dips to 1 GB, the stable 25%-of-total baseline provides 4 GB of headroom,
+    # so CPU remains the tighter budget at four panes.
+    monkeypatch.setattr(exec_mode.os, "cpu_count", lambda: 8)
+
+    class _VM:
+        total = 16 * 1024**3
+        available = 1 * 1024**3
+
+    import psutil
+
+    monkeypatch.setattr(psutil, "virtual_memory", lambda: _VM())
+    assert exec_mode.machine_fanout_cap() == exec_mode.MAX_FANOUT
+    assert exec_mode.machine_total_pane_cap() == 4
+
+
 def test_machine_fanout_cap_limited_by_low_ram(monkeypatch):
-    # 1 GB free RAM → by_ram = 0 → clamped to 1, so the cap is 1 regardless of CPU.
+    # Tiny host: 25% of 2 GB is one 0.5 GB pane, so RAM remains the tighter cap.
     monkeypatch.setattr(exec_mode.os, "cpu_count", lambda: 32)
 
     class _VM:
-        available = 1 * 1024**3
+        total = 2 * 1024**3
+        available = 128 * 1024**2
 
     import psutil
 
@@ -73,6 +92,7 @@ def test_machine_fanout_cap_capped_at_max(monkeypatch):
     monkeypatch.setattr(exec_mode.os, "cpu_count", lambda: 64)
 
     class _VM:
+        total = 256 * 1024**3
         available = 256 * 1024**3
 
     import psutil

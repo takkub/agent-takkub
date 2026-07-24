@@ -46,6 +46,16 @@ _DEFAULT = SOLO
 # per-role component of the total-pane oversubscription telemetry.
 MAX_FANOUT = 4
 
+# A measured Claude/Codex pane is typically around 350 MB. Keep some room for
+# transient growth while avoiding the old 2 GB/pane estimate, which made the
+# advisory report false over-capacity warnings on otherwise comfortable hosts.
+_PANE_RAM_GB = 0.5
+
+# Instantaneous ``available`` memory can dip sharply while the OS is using RAM
+# for reclaimable cache (especially on Windows). Treat a modest share of total
+# RAM as reclaimable headroom so a momentary sample cannot collapse the cap.
+_RAM_HEADROOM_FRACTION = 0.25
+
 _PATH = SETTINGS_HOME / "exec-mode.json"
 
 
@@ -83,8 +93,10 @@ def _base_pane_cap() -> int:
     try:
         import psutil
 
-        free_gb = psutil.virtual_memory().available / (1024**3)
-        by_ram = max(1, int(free_gb // 2))
+        memory = psutil.virtual_memory()
+        stable_available = max(memory.available, memory.total * _RAM_HEADROOM_FRACTION)
+        stable_available_gb = stable_available / (1024**3)
+        by_ram = max(1, int(stable_available_gb // _PANE_RAM_GB))
     except Exception:
         by_ram = 2
     return max(1, min(by_cpu, by_ram))
@@ -94,13 +106,14 @@ def machine_fanout_cap() -> int:
     """Max instances-per-role this machine can comfortably run concurrently,
     derived from CPU cores + free RAM, never above `MAX_FANOUT`.
 
-    Each extra instance is roughly another claude.exe pane (often plus a dev
-    server), so we budget ~2 logical cores and ~2 GB of *available* RAM per
-    concurrent pane and take the tighter limit. NOT injected into the Lead's
-    planning prompt (that block gives a qualitative wave-sequencing advisory
-    instead, #2 2026-07-09) — this stays as a component of the total-pane
-    oversubscription telemetry (`machine_total_pane_cap()`) and is exercised
-    directly by tests for that reason.
+    Each extra instance is roughly another agent pane, so we budget ~2 logical
+    cores and ~0.5 GB of RAM per concurrent pane and take the tighter limit.
+    The RAM basis is the larger of currently available RAM and 25% of total RAM,
+    avoiding false warnings from a single pessimistic available-memory sample.
+    NOT injected into the Lead's planning prompt (that block gives a qualitative
+    wave-sequencing advisory instead, #2 2026-07-09) — this stays as a component
+    of the total-pane oversubscription telemetry (`machine_total_pane_cap()`) and
+    is exercised directly by tests for that reason.
 
     Falls back to a conservative 2 if psutil/cpu_count are unavailable, so this
     never raises on an odd environment.
@@ -121,10 +134,11 @@ def machine_total_pane_cap() -> int:
     blow a small box's RAM). The cockpit uses this only to *warn* the Lead when a
     fresh spawn would push the total over the line — it never blocks the spawn.
 
-    Same budget as `machine_fanout_cap()` (~2 logical cores + ~2 GB available per
-    pane, tighter wins) but WITHOUT the `MAX_FANOUT` ceiling, since a big box can
-    legitimately run more than `MAX_FANOUT` panes in total. Floor 1; falls back
-    conservatively to 2 if psutil/cpu_count are unavailable so it never raises.
+    Same budget as `machine_fanout_cap()` (~2 logical cores + ~0.5 GB stable RAM
+    headroom per pane, tighter wins) but WITHOUT the `MAX_FANOUT` ceiling, since
+    a big box can legitimately run more than `MAX_FANOUT` panes in total.
+    Floor 1; falls back conservatively to 2 if psutil/cpu_count are unavailable
+    so it never raises.
     """
     return _base_pane_cap()
 
