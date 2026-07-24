@@ -65,6 +65,18 @@ class TestDeliveryUnconfirmedWarning:
         assert "reviewer" in msg
         assert "#26" in msg
 
+    def test_warning_reports_actual_wait_window(self, orch: Orchestrator) -> None:
+        lead = _pane(_live_session())
+        orch._panes_by_project["P"] = {"lead": lead, "qa": _pane(_live_session())}
+        with (
+            patch("agent_takkub.orchestrator._log_event"),
+            patch("agent_takkub.orchestrator.QTimer.singleShot"),
+        ):
+            orch._warn_lead_delivery_unconfirmed("qa", "P", 90_000)
+        msg = lead.session.write.call_args[0][0]
+        assert "90s" in msg
+        assert "45s" not in msg
+
     def test_noop_when_target_is_lead(self, orch: Orchestrator) -> None:
         lead = _pane(_live_session())
         orch._panes_by_project["P"] = {"lead": lead}
@@ -94,7 +106,9 @@ class TestDeliveryUnconfirmedWarning:
         # Best-effort paste still happened on the reviewer pane...
         assert reviewer.session.write.called
         # ...and the Lead got the unconfirmed-delivery warning.
-        assert any("#26" in c.args[0] for c in lead.session.write.call_args_list if c.args)
+        warnings = [c.args[0] for c in lead.session.write.call_args_list if c.args]
+        assert any("#26" in msg for msg in warnings)
+        assert any("1s" in msg for msg in warnings)
 
 
 class TestGateDeferredSpawnDeliversEventually:
@@ -183,13 +197,64 @@ class TestReadyWaitMs:
         )
         assert orch._ready_wait_ms("codex", "P", 45_000) == 90_000
 
-    def test_claude_role_keeps_default(self, orch, monkeypatch) -> None:
-        from agent_takkub import provider_config
+    def test_claude_role_without_mcps_keeps_default(self, orch, monkeypatch) -> None:
+        from agent_takkub import pane_tools_policy, provider_config
 
         monkeypatch.setattr(
             provider_config, "effective_provider_for", lambda role, project=None: "claude"
         )
+        monkeypatch.setattr(
+            pane_tools_policy,
+            "effective_mcps",
+            lambda role, default=None: frozenset(),
+        )
         assert orch._ready_wait_ms("backend", "P", 45_000) == 45_000
+
+    def test_claude_role_with_policy_mcps_gets_longer_window(self, orch, monkeypatch) -> None:
+        from agent_takkub import pane_tools_policy, provider_config, shared_dev_tools
+
+        seen = {}
+
+        monkeypatch.setattr(
+            provider_config, "effective_provider_for", lambda role, project=None: "claude"
+        )
+        monkeypatch.setattr(
+            shared_dev_tools,
+            "default_role_mcp_policy",
+            lambda: {"qa": frozenset({"playwright", "chrome-devtools"})},
+        )
+
+        def _effective_mcps(role, default=None):
+            seen["role"] = role
+            seen["default"] = default
+            return default
+
+        monkeypatch.setattr(pane_tools_policy, "effective_mcps", _effective_mcps)
+
+        assert orch._ready_wait_ms("qa", "P", 45_000) == 90_000
+        assert seen == {
+            "role": "qa",
+            "default": frozenset({"playwright", "chrome-devtools"}),
+        }
+
+    def test_claude_shard_uses_base_role_mcp_policy(self, orch, monkeypatch) -> None:
+        from agent_takkub import pane_tools_policy, provider_config, shared_dev_tools
+
+        monkeypatch.setattr(
+            provider_config, "effective_provider_for", lambda role, project=None: "claude"
+        )
+        monkeypatch.setattr(
+            shared_dev_tools,
+            "default_role_mcp_policy",
+            lambda: {"critic": frozenset({"playwright"})},
+        )
+        monkeypatch.setattr(
+            pane_tools_policy,
+            "effective_mcps",
+            lambda role, default=None: default if role == "critic" else frozenset(),
+        )
+
+        assert orch._ready_wait_ms("critic#2", "P", 45_000) == 90_000
 
     def test_explicit_override_wins_even_for_gemini(self, orch, monkeypatch) -> None:
         from agent_takkub import provider_config
