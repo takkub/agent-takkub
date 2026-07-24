@@ -1036,7 +1036,7 @@ class SpawnEngineMixin:
             if _ekey in self._recent_exits:
                 del self._recent_exits[_ekey]
             if auto_trust:
-                self._auto_trust(role_name, project=project_ns)
+                self._boot_auto_advance(role_name, project=project_ns)
             # Non-Claude providers currently have no file-backed append-system-
             # prompt capability. This is normally a no-op because assign() keeps
             # them on pointer delivery; it only fires if the provider changed
@@ -2180,7 +2180,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             # session.spawn call) and registered in self._pane_tokens at that time.
             # Nothing more to do here.
 
-            self._auto_trust(role_name, project=project_ns)
+            self._boot_auto_advance(role_name, project=project_ns)
             self.statusChanged.emit()
             # (The /remote-control auto-bridge was removed 2026-07-10 — it kept
             # racing claude's /resume picker. Type /remote-control by hand.)
@@ -2457,25 +2457,66 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 self._send_when_ready(role_name, cached_task, project=project)
 
     # ──────────────────────────────────────────────────────────────
-    def _auto_trust(self, role_name: str, project: str | None = None) -> None:
-        """Watch the pane and auto-press Enter on claude's trust folder modal.
+    def _boot_auto_advance(self, role_name: str, project: str | None = None) -> None:
+        """Watch the pane and auto-press Enter on boot screens (whitelisted per provider).
 
-        Polls every 500ms for up to 30s. Stops as soon as the prompt is
-        accepted (or the session dies / never shows it).
+        Bounded to max 5 advances per boot. Unrecognized hard blocker = notify Lead.
         """
         pane = self._project_panes(project).get(role_name)
         if pane is None:
             return
+
+        from .provider_spec import PROVIDER_REGISTRY
+
+        spec = PROVIDER_REGISTRY.get(pane.role.provider)
+        if not spec:
+            return
+
         elapsed = [0]
         max_ms = 30_000
+        advances = [0]
+        max_advances = 5
 
         def _check() -> None:
             if pane.session is None or not pane.session.is_alive:
                 return
-            if pane.session.is_at_trust_prompt():
-                # option 1 (Yes) is preselected; just hit Enter
-                pane.session.write("\r")
+            if pane.session.is_at_ready_prompt():
                 return
+
+            text = "\n".join(pane.session.display_lines()).lower()
+            present_blockers = [b for b in spec.ready_hard_blockers if b in text]
+
+            if present_blockers:
+                blocker = present_blockers[0]
+                if blocker in spec.boot_auto_advance_screens:
+                    if advances[0] < max_advances:
+                        advances[0] += 1
+                        _log_event(
+                            "boot_auto_advance", role=role_name, project=project, marker=blocker
+                        )
+                        pane.session.write("\r")
+                        QTimer.singleShot(500, _check)
+                        return
+                    else:
+                        # Reached bound, just wait
+                        pass
+                elif blocker not in (
+                    "esc to interrupt",
+                    "esc to cancel",
+                    "thinking...",
+                    "generating...",
+                    "signing in",
+                    "verifying your account",
+                ):
+                    _log_event(
+                        "boot_auto_advance_unknown", role=role_name, project=project, marker=blocker
+                    )
+                    self.send(
+                        LEAD.name,
+                        f"[Orchestrator] Pane {role_name} ติดหน้าจอที่ไม่รู้จักตอน boot ({blocker}) ไม่กล้ากด Enter ให้ กรุณาตรวจสอบ",
+                    )
+                    return
+
             elapsed[0] += 500
             if elapsed[0] >= max_ms:
                 return
