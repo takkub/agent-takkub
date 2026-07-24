@@ -19,9 +19,9 @@ paste never lands on top of the user's unsubmitted draft.
 Layer rule (enforced by import-linter "lead-inbox-layer" contract):
   lead_inbox MUST NOT import orchestrator / main_window / app / cli.
 
-State ownership rule: _lead_notify_queue, _pending_lead_cc,
-_pending_done_notices, _lead_notify_pumping, _lead_notify_retry,
-_lead_draft_state MUST stay in Orchestrator.__init__.  This mixin only
+State ownership rule: _lead_notify_queue, _lead_digest_queue, _digest_timer,
+_pending_lead_cc, _pending_done_notices, _lead_notify_pumping,
+_lead_notify_retry, _lead_draft_state MUST stay in Orchestrator.__init__.  This mixin only
 defines methods — never the initial dict assignments — so queue ownership
 stays centralised and divergence bugs cannot creep back in.
 """
@@ -30,7 +30,9 @@ from __future__ import annotations
 
 import collections
 import json
+import os
 import pathlib
+import re
 import sys as _sys
 import time
 
@@ -117,6 +119,12 @@ _MCP_READY_WAIT_MS = _SUBMIT_BUSY_MAX_RESENDS * _SUBMIT_VERIFY_GRACE_MS
 # occurs while Lead is alive-but-wedged.
 LEAD_NOTIFY_BUSY_CAP = 75
 
+# Clean done notices and peer CCs are deliberately held for a short window so a
+# parallel burst wakes Lead once instead of once per teammate.  Read the env at
+# enqueue time (rather than only at import) so cockpit launches and tests can
+# configure the policy without rebuilding this module.
+_INBOX_DIGEST_WINDOW_MS = 60_000
+
 # Staleness escalation for the durable reaper (#70). When spilled done-notices
 # can't be flushed because the Lead reads as not-ready for this long, the
 # reaper force-delivers them anyway — guarding against an is_at_ready_prompt()
@@ -125,6 +133,70 @@ LEAD_NOTIFY_BUSY_CAP = 75
 # stall). 60 s ≫ a real Lead turn, so a genuinely-busy Lead is rarely hit; if it
 # is, claude buffers the pasted input and processes it next.
 _DONE_NOTICE_STALE_S = 60.0
+
+
+def _inbox_digest_window_ms() -> int:
+    """Return the configured Lead-inbox digest window.
+
+    Invalid values fall back to the production default; negative values behave
+    like ``0`` (legacy immediate delivery).
+    """
+    raw = os.environ.get("TAKKUB_INBOX_DIGEST_MS")
+    if raw is None:
+        return _INBOX_DIGEST_WINDOW_MS
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return _INBOX_DIGEST_WINDOW_MS
+
+
+_DONE_NOTICE_RE = re.compile(r"^\[([^\]\r\n]+?)\s+done\](?:\s+(.*))?$", re.DOTALL)
+_CC_NOTICE_RE = re.compile(
+    r"^\[CC\]\s*\[([^\]\r\n]+?)\s*→\s*([^\]\r\n]+?)\](?:\s+(.*))?$",
+    re.DOTALL,
+)
+_FAILED_NOTICE_RE = re.compile(r"\[[^\]\r\n]*\bFAILED\b[^\]\r\n]*\]", re.IGNORECASE)
+_BLOCKING_NOTICE_MARKERS = ("[spawn-failed]", "[delivery-unconfirmed]")
+
+
+def _is_digestible_lead_notice(body: str) -> bool:
+    """True only for the high-volume, non-blocking done/peer-CC paths."""
+    stripped = body.strip()
+    return bool(_DONE_NOTICE_RE.match(stripped) or _CC_NOTICE_RE.match(stripped))
+
+
+def _is_immediate_lead_notice(body: str) -> bool:
+    """True for notices that require Lead action or sequencing immediately."""
+    return _is_blocking_lead_notice(body) or "[auto-chain handoff]" in body.lower()
+
+
+def _is_blocking_lead_notice(body: str) -> bool:
+    """True for failure notices that must jump ahead of digestible mail."""
+    lowered = body.lower()
+    return bool(
+        _FAILED_NOTICE_RE.search(body)
+        or any(marker in lowered for marker in _BLOCKING_NOTICE_MARKERS)
+    )
+
+
+def _format_digest_item(body: str) -> str:
+    """Render one queued notice in the compact Lead Inbox Digest format."""
+    stripped = body.strip()
+    done_match = _DONE_NOTICE_RE.match(stripped)
+    if done_match:
+        role, detail = done_match.groups()
+        suffix = f": {detail.strip()}" if detail and detail.strip() else ""
+        return f"• [{role.strip()}] done{suffix}"
+
+    cc_match = _CC_NOTICE_RE.match(stripped)
+    if cc_match:
+        from_role, to_role, detail = cc_match.groups()
+        suffix = f": {detail.strip()}" if detail and detail.strip() else ""
+        return f"• [CC from {from_role.strip()} -> {to_role.strip()}]{suffix}"
+
+    # Defensive fallback: only digestible bodies should reach this helper, but
+    # preserve a notice rather than drop it if a caller changes its format.
+    return f"• {stripped}"
 
 
 def _delayed_enter(pane: AgentPane, session: PtySession, delay_ms: int) -> None:
@@ -295,8 +367,9 @@ class LeadInboxMixin:
     """Lead-inbox queue and delivery methods for Orchestrator.
 
     All methods resolve through the combined MRO; state dicts
-    (_lead_notify_queue, _pending_lead_cc, _pending_done_notices,
-    _lead_notify_pumping, _lead_notify_retry, _lead_draft_state) are
+    (_lead_notify_queue, _lead_digest_queue, _digest_timer, _pending_lead_cc,
+    _pending_done_notices, _lead_notify_pumping, _lead_notify_retry,
+    _lead_draft_state) are
     initialised in Orchestrator.__init__ — never here — so ownership stays
     centralised.
 
@@ -786,6 +859,82 @@ class LeadInboxMixin:
     # Lead-notify queue: ready-prompt-aware serialised delivery
     # ------------------------------------------------------------------
 
+    def _enqueue_live_lead_notice(self, project_ns: str, body: str, *, front: bool = False) -> None:
+        """Append one ready-to-deliver body without starting the pump."""
+        if not hasattr(self, "_lead_notify_queue"):
+            self._lead_notify_queue = {}
+        if not hasattr(self, "_lead_notify_pumping"):
+            self._lead_notify_pumping = set()
+        queue = self._lead_notify_queue.setdefault(project_ns, collections.deque())
+        if front:
+            # Keep blocking notices FIFO with each other while placing them
+            # ahead of informational/digest bodies already waiting on a busy
+            # Lead.
+            priority_end = 0
+            while priority_end < len(queue) and _is_blocking_lead_notice(queue[priority_end]):
+                priority_end += 1
+            queue.insert(priority_end, body)
+        else:
+            queue.append(body)
+
+    def _arm_lead_digest(self, project_ns: str, window_ms: int) -> None:
+        """Debounce the project's digest using a generation-checked timer.
+
+        ``QTimer.singleShot`` timers cannot be cancelled.  A monotonically
+        increasing token makes older callbacks harmless while still restarting
+        the full window whenever another notice joins the burst.
+        """
+        if not hasattr(self, "_digest_timer"):
+            self._digest_timer = {}
+        generation = int(self._digest_timer.get(project_ns, 0)) + 1
+        self._digest_timer[project_ns] = generation
+        QTimer.singleShot(
+            window_ms,
+            lambda p=project_ns, g=generation: self._flush_lead_digest(p, generation=g),
+        )
+
+    def _flush_lead_digest(
+        self,
+        project_ns: str,
+        *,
+        generation: int | None = None,
+        arm_pump: bool = True,
+        trailing_body: str | None = None,
+    ) -> bool:
+        """Move a pending burst into the live queue as one Lead turn.
+
+        ``generation`` is supplied by timer callbacks.  Early flushes (notably
+        before an auto-chain handoff) invalidate the outstanding callback and
+        preserve the chronological order: digest first, actionable handoff
+        second.
+        """
+        timers = getattr(self, "_digest_timer", {})
+        if generation is not None and timers.get(project_ns) != generation:
+            return False
+        # Keep the last generation instead of deleting it. An early flush can
+        # leave its uncancellable singleShot callback outstanding; a later
+        # burst must receive a strictly newer token so that old callback cannot
+        # accidentally flush the new mail.
+
+        pending = getattr(self, "_lead_digest_queue", {}).pop(project_ns, None)
+        if not pending:
+            return False
+        items = list(pending)
+        digest = "\n".join(
+            [f"📬 [Lead Inbox Digest — {len(items)} update{'s' if len(items) != 1 else ''}]"]
+            + [_format_digest_item(item) for item in items]
+        )
+        if trailing_body:
+            # Auto-chain uses this path: the actionable handoff follows the
+            # digest in the same payload/turn, so Lead sees the prerequisite
+            # done notes first without waiting through a separate digest turn.
+            digest = f"{digest}\n\n{trailing_body}"
+        self._enqueue_live_lead_notice(project_ns, digest)
+        _log_event("lead_inbox_digest", project=project_ns, count=len(items))
+        if arm_pump:
+            self._arm_lead_notify_pump(project_ns)
+        return True
+
     def _notify_lead(
         self,
         project_ns: str,
@@ -796,10 +945,10 @@ class LeadInboxMixin:
     ) -> None:
         """Queue *body* for delivery to the Lead pane.
 
-        If Lead is alive the item enters the in-memory per-project queue and an
-        idempotent pump is armed.  The pump blocks until Lead is at its ready
-        prompt before each write so concurrent done notices never overwrite each
-        other mid-generation.
+        If Lead is alive, clean done and peer-CC notices are debounced into one
+        digest (60 s by default). Blocking failures and sequencing handoffs
+        bypass the window. The ready-prompt-aware pump then serialises writes so
+        concurrent notices never overwrite each other mid-generation.
 
         If Lead is absent the item falls directly into the durable
         _pending_done_notices (survives a restart, delivered on next Lead spawn).
@@ -814,12 +963,40 @@ class LeadInboxMixin:
         """
         lead = self._project_panes(project_ns).get(LEAD.name)
         if lead and lead.session and lead.session.is_alive:
-            if not hasattr(self, "_lead_notify_queue"):
-                self._lead_notify_queue = {}
-            if not hasattr(self, "_lead_notify_pumping"):
-                self._lead_notify_pumping = set()
-            self._lead_notify_queue.setdefault(project_ns, collections.deque()).append(body)
-            self._arm_lead_notify_pump(project_ns)
+            window_ms = _inbox_digest_window_ms()
+            digestible = _is_digestible_lead_notice(body)
+            immediate = _is_immediate_lead_notice(body)
+            blocking = _is_blocking_lead_notice(body)
+
+            if digestible and not immediate and window_ms > 0:
+                if not hasattr(self, "_lead_digest_queue"):
+                    self._lead_digest_queue = {}
+                self._lead_digest_queue.setdefault(project_ns, collections.deque()).append(body)
+                self._arm_lead_digest(project_ns, window_ms)
+            elif blocking:
+                # Failures are explicitly outside the digest policy. Do not
+                # make Lead read an older informational digest turn before the
+                # blocking alert; the digest keeps its original timer.
+                self._enqueue_live_lead_notice(project_ns, body, front=True)
+                self._arm_lead_notify_pump(project_ns)
+            elif "[auto-chain handoff]" in body.lower():
+                combined = self._flush_lead_digest(
+                    project_ns,
+                    arm_pump=False,
+                    trailing_body=body,
+                )
+                if not combined:
+                    self._enqueue_live_lead_notice(project_ns, body)
+                self._arm_lead_notify_pump(project_ns)
+            else:
+                # A sequencing handoff must not sit behind the debounce window.
+                # Flush older done/CC mail first so auto-chain still sees the
+                # done notes it explicitly tells Lead to re-read. Other
+                # immediate engine notices follow the same chronological rule.
+                self._flush_lead_digest(project_ns, arm_pump=False)
+                self._enqueue_live_lead_notice(project_ns, body)
+                self._arm_lead_notify_pump(project_ns)
+
             # Tell the UI Lead has new mail so it can red-dot the Lead pane-tab
             # when the user is on another pane. Best-effort: a partial test
             # fixture built via Orchestrator.__new__ won't have the bound signal.
@@ -835,6 +1012,9 @@ class LeadInboxMixin:
             )
             self._save_pending_done_notices(project_ns)
             _log_event("done_notice_queued", project=project_ns, role=from_role)
+
+        # Legacy mode (window=0) reaches the immediate branch above and retains
+        # byte-for-byte single-notice delivery.
 
     def _arm_lead_notify_pump(self, project_ns: str) -> None:
         """Start a pump for *project_ns* if one is not already running.
