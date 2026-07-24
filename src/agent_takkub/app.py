@@ -15,6 +15,7 @@ from pathlib import Path
 # config.py is a pure-leaf module (stdlib only, no agent_takkub imports), so
 # importing it this early carries no circular-import risk despite app.py
 # being the GUI entry point.
+from ._restart_env import configure_multi_instance_port_file
 from .config import DATA_HOME, RUNTIME_DIR
 
 # Boot-time crash dump. pythonw.exe has no console, so a segfault or
@@ -215,8 +216,11 @@ def _wait_predecessor_exit(
 # and panes (which inherit this env) auto-connect to the right cockpit.
 # Must be set BEFORE config is imported (config reads PORT_FILE at call time).
 if _should_allow_multi():
-    _multi_port_file = Path(tempfile.gettempdir()) / f"agent-takkub-port.{os.getpid()}"
-    os.environ.setdefault("TAKKUB_PORT_FILE", str(_multi_port_file))
+    configure_multi_instance_port_file(
+        os.environ,
+        pid=os.getpid(),
+        temp_dir=tempfile.gettempdir(),
+    )
 
 
 from PyQt6.QtCore import QLockFile  # noqa: E402

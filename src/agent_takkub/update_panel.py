@@ -15,6 +15,7 @@ from PyQt6.QtCore import QCoreApplication, QThread, QThreadPool, QTimer, pyqtSig
 from PyQt6.QtWidgets import QMessageBox, QSystemTrayIcon
 
 from . import cockpit_theme, config
+from ._restart_env import build_restart_successor_env
 from .config import REPO_ROOT, active_project, lead_cwd
 from .orchestrator import _log_event
 from .rtk_helper import install_rtk, rtk_hook_enabled, set_rtk_enabled
@@ -1009,8 +1010,12 @@ class MainWindowUpdateMixin:
             # Tag the successor so its single-instance guard WAITS for this
             # process to exit (WebEngine teardown takes seconds) instead of
             # racing into auto-kill or the "already running" OK dialog.
-            _succ_env = _os.environ.copy()
-            _succ_env["TAKKUB_RESTART_SUCCESSOR"] = "1"
+            #
+            # Multi-instance app startup derives a per-PID TAKKUB_PORT_FILE and
+            # marks its provenance.  Do not copy that process-specific path to
+            # the new PID: strip it so app.py derives a fresh one.  A real shell
+            # override has no marker and is intentionally inherited unchanged.
+            _succ_env = build_restart_successor_env(_os.environ)
             subprocess.Popen(
                 [sys.executable, "-m", "agent_takkub"],
                 cwd=str(REPO_ROOT),

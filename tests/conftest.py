@@ -111,6 +111,7 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
     # themselves) + redirect PORT_FILE to the isolated runtime so no test can
     # read or write the real runtime/port.
     monkeypatch.delenv("TAKKUB_PORT_FILE", raising=False)
+    monkeypatch.delenv("_TAKKUB_AUTO_PORT_FILE", raising=False)
     cfg = _maybe_module("agent_takkub.config", force=True)
     if cfg is not None and hasattr(cfg, "PORT_FILE"):
         monkeypatch.setattr(cfg, "PORT_FILE", runtime / "port", raising=False)

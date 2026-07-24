@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 130,
+  "module_count": 131,
   "modules": [
     {
       "module": "agent_takkub",
@@ -34,6 +34,16 @@
         "agent_takkub.pty_session"
       ],
       "fan_in": 1,
+      "fan_out": 0
+    },
+    {
+      "module": "agent_takkub._restart_env",
+      "imports": [],
+      "imported_by": [
+        "agent_takkub.app",
+        "agent_takkub.update_panel"
+      ],
+      "fan_in": 2,
       "fan_out": 0
     },
     {
@@ -99,6 +109,7 @@
     {
       "module": "agent_takkub.app",
       "imports": [
+        "agent_takkub._restart_env",
         "agent_takkub.config",
         "agent_takkub.custom_roles",
         "agent_takkub.main_window",
@@ -110,7 +121,7 @@
         "agent_takkub.__main__"
       ],
       "fan_in": 1,
-      "fan_out": 6
+      "fan_out": 7
     },
     {
       "module": "agent_takkub.auto_resume",
@@ -1935,6 +1946,7 @@
     {
       "module": "agent_takkub.update_panel",
       "imports": [
+        "agent_takkub._restart_env",
         "agent_takkub._win_console",
         "agent_takkub.claude_update",
         "agent_takkub.cockpit_theme",
@@ -1949,7 +1961,7 @@
         "agent_takkub.main_window"
       ],
       "fan_in": 1,
-      "fan_out": 9
+      "fan_out": 10
     },
     {
       "module": "agent_takkub.update_worker",
