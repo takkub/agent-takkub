@@ -708,6 +708,23 @@ class SpawnEngineMixin:
 
         return is_spawn_blocked(getattr(self, "_spawn_gate_pred", None))
 
+    def _preserve_pending_spawn_initial_task(self, role_name: str, project_ns: str) -> None:
+        """Keep an accepted one-shot payload pending across queue callbacks.
+
+        The payload deliberately lives on ``PaneState`` rather than in a timer
+        closure or FIFO tuple.  Normal ``spawn()`` entry changes ``requested``
+        to ``pending`` before either gate/FIFO early return; accepting
+        ``requested`` here as well makes retry/drain robust to a callback queued
+        by an older caller that did not pass through that transition.
+        """
+        ps = getattr(self, "_pane_state", {}).get(_exit_key(project_ns, role_name))
+        if (
+            ps is not None
+            and ps.spawn_initial_task is not None
+            and ps.spawn_initial_task_state in {"requested", "pending"}
+        ):
+            ps.spawn_initial_task_state = "pending"
+
     def _retry_deferred_spawn(
         self,
         role_name: str,
@@ -731,6 +748,7 @@ class SpawnEngineMixin:
         if pane is None:
             _log_event("spawn_deferred_pane_gone", role=role_name, project=project_ns)
             return
+        self._preserve_pending_spawn_initial_task(role_name, project_ns)
 
         if self._is_spawn_blocked():
             if _deferred is not None:
@@ -781,6 +799,7 @@ class SpawnEngineMixin:
         if pane is not None and pane.session is not None and pane.session.is_alive:
             self._drain_spawn_queue()
             return
+        self._preserve_pending_spawn_initial_task(role, project_ns)
         _log_event("spawn_queue_drain", role=role, project=project_ns)
         QTimer.singleShot(
             0,
@@ -903,6 +922,7 @@ class SpawnEngineMixin:
             "spawn_initial_task_pointer_fallback",
             role=role_name,
             project=project_ns,
+            reason="fallback-after-fail",
         )
         if fallback:
             self._send_when_ready(role_name, fallback, project=project_ns)

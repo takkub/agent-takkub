@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -176,12 +177,16 @@ def test_fresh_claude_prompt_write_failure_falls_back_once_to_pointer(
     tmp_path: Path,
 ) -> None:
     task = "[ROLE: backend]\n" + ("fallback\n" * 80)
-    _calls, mock_send, _role_file = _spawn_claude_assign(
-        orch,
-        tmp_path,
-        task,
-        prepare_result=None,
-    )
+    with (
+        patch("agent_takkub.spawn_engine._log_event") as spawn_log,
+        patch("agent_takkub.orchestrator._log_event") as assign_log,
+    ):
+        _calls, mock_send, _role_file = _spawn_claude_assign(
+            orch,
+            tmp_path,
+            task,
+            prepare_result=None,
+        )
 
     mock_send.assert_called_once()
     sent = mock_send.call_args.args[1]
@@ -190,6 +195,16 @@ def test_fresh_claude_prompt_write_failure_falls_back_once_to_pointer(
     assert orch._pane_state[_exit_key(TEST_PROJECT, "backend")].spawn_initial_task_state == (
         "fallback"
     )
+    fallback_event = next(
+        call
+        for call in spawn_log.call_args_list
+        if call.args[0] == "spawn_initial_task_pointer_fallback"
+    )
+    assert fallback_event.kwargs["reason"] == "fallback-after-fail"
+    assign_event = next(call for call in assign_log.call_args_list if call.args[0] == "assign")
+    assert assign_event.kwargs["initial_delivery"] == "fallback"
+    assert assign_event.kwargs["initial_delivery_reason"] == "fallback-after-fail"
+    assert assign_event.kwargs["effective_provider"] == "claude"
 
 
 def test_running_claude_pane_keeps_mid_session_pointer_flow(
@@ -219,6 +234,33 @@ def test_running_claude_pane_keeps_mid_session_pointer_flow(
     assert sent != task
     assert "file-read tool" in sent
     assert orch._pane_state[_exit_key(TEST_PROJECT, "backend")].spawn_initial_task_state == ""
+
+
+def test_unsupported_provider_pointer_is_logged_as_by_design(
+    orch: Orchestrator,
+    tmp_path: Path,
+) -> None:
+    from agent_takkub.provider_config import CODEX
+
+    orch._panes_by_project[TEST_PROJECT] = {"backend": _pane(alive=True)}
+    with (
+        patch("agent_takkub.provider_config.effective_provider_for", return_value=CODEX),
+        patch.object(orch, "_send_when_ready"),
+        patch("agent_takkub.task_ledger.create_assignment", return_value=None),
+        patch("agent_takkub.orchestrator._log_event") as event_log,
+    ):
+        ok, message = orch.assign(
+            "backend",
+            cwd=str(tmp_path),
+            task="[ROLE: backend]\nunsupported provider",
+            project=TEST_PROJECT,
+        )
+
+    assert ok is True, message
+    assign_event = next(call for call in event_log.call_args_list if call.args[0] == "assign")
+    assert assign_event.kwargs["initial_delivery"] == "pointer"
+    assert assign_event.kwargs["initial_delivery_reason"] == "provider-unsupported (by design)"
+    assert assign_event.kwargs["effective_provider"] == CODEX
 
 
 def test_deferred_fresh_claude_spawn_retains_preload_without_early_pointer(
@@ -251,6 +293,105 @@ def test_deferred_fresh_claude_spawn_retains_preload_without_early_pointer(
     assert state.spawn_initial_task_state == "pending"
     assert state.spawn_initial_task == task
     assert state.spawn_initial_task_fallback is not None
+
+
+def test_fifo_queue_drains_three_claude_assigns_with_preload_events(
+    orch: Orchestrator,
+    qapp: QCoreApplication,
+    tmp_path: Path,
+) -> None:
+    """Exercise real PaneState + FIFO + QTimer drain, not an immediate spawn mock."""
+    from agent_takkub.provider_config import CLAUDE
+
+    roles = ("backend#1", "backend#2", "backend#3")
+    panes = {role: _pane() for role in roles}
+    orch._panes_by_project[TEST_PROJECT] = panes
+    staging = tmp_path / "role"
+    staging.mkdir()
+    (staging / "CLAUDE.md").write_text("# Backend role\n", encoding="utf-8")
+    native_spawns: list[dict] = []
+    events: list[tuple[str, dict]] = []
+
+    def _pty_factory(*_args, **_kwargs):
+        session = MagicMock()
+        session.spawn.side_effect = lambda **kwargs: native_spawns.append(kwargs)
+        return session
+
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(orch, "_is_spawn_blocked", return_value=False))
+        stack.enter_context(patch.object(orch, "_final_gate_clear", return_value=True))
+        mock_send = stack.enter_context(patch.object(orch, "_send_when_ready"))
+        mock_pty_cls = stack.enter_context(patch("agent_takkub.orchestrator.PtySession"))
+        mock_pty_cls.side_effect = _pty_factory
+        stack.enter_context(patch("agent_takkub.orchestrator._build_pane_env", return_value={}))
+        stack.enter_context(
+            patch("agent_takkub.orchestrator.find_claude_executable", return_value="claude")
+        )
+        stack.enter_context(
+            patch("agent_takkub.provider_config.effective_provider_for", return_value=CLAUDE)
+        )
+        stack.enter_context(patch("agent_takkub.spawn_engine.agent_role_dir", return_value=staging))
+        stack.enter_context(
+            patch("agent_takkub.spawn_engine._cwd_within_project", return_value=True)
+        )
+        stack.enter_context(
+            patch("agent_takkub.spawn_engine._default_plugin_dirs", return_value=[])
+        )
+        stack.enter_context(patch("agent_takkub.spawn_engine.inject_user_profile_env"))
+        stack.enter_context(patch("agent_takkub.spawn_engine.apply_claude_auth_overrides"))
+        stack.enter_context(patch("agent_takkub.mcp_bridge.mcp_argv_for_provider", return_value=[]))
+        stack.enter_context(
+            patch(
+                "agent_takkub.hook_wiring.ensure_hook_settings_file",
+                return_value="hooks.json",
+            )
+        )
+        stack.enter_context(patch("agent_takkub.task_ledger.create_assignment", return_value=None))
+        stack.enter_context(
+            patch(
+                "agent_takkub.spawn_engine._log_event",
+                side_effect=lambda event, **details: events.append((event, details)),
+            )
+        )
+
+        # Simulate a native spawn already holding the arbiter. Each real
+        # assign() enters spawn(), stages pending state, and joins the FIFO.
+        orch._spawn_in_progress = True
+        for role in roles:
+            ok, message = orch.assign(
+                role,
+                cwd=str(tmp_path),
+                task=f"[ROLE: {role}]\nqueue integration task",
+                project=TEST_PROJECT,
+            )
+            assert ok is True, message
+        assert [item[0] for item in orch._spawn_queue] == list(roles)
+        assert all(
+            orch._pane_state[_exit_key(TEST_PROJECT, role)].spawn_initial_task_state == "pending"
+            for role in roles
+        )
+        mock_send.assert_not_called()
+
+        # Release and drain through real zero-delay QTimer callbacks. Every
+        # successful native launch drains the next FIFO item in its finally.
+        orch._spawn_in_progress = False
+        orch._drain_spawn_queue()
+        for _ in range(20):
+            qapp.processEvents()
+            if len(native_spawns) == len(roles):
+                break
+
+    assert len(native_spawns) == len(roles)
+    preloaded_roles = [
+        details["role"] for event, details in events if event == "spawn_initial_task_preloaded"
+    ]
+    assert preloaded_roles == list(roles)
+    assert all(
+        orch._pane_state[_exit_key(TEST_PROJECT, role)].spawn_initial_task_state == "delivered"
+        for role in roles
+    )
+    assert mock_send.call_count == len(roles)
+    assert all(call.args[1] == _CURRENT_TASK_TRIGGER for call in mock_send.call_args_list)
 
 
 def test_only_claude_has_confirmed_file_backed_system_prompt_capability() -> None:
