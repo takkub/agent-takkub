@@ -1052,6 +1052,17 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             ps_assign.spawn_initial_prompt_file = None
             ps_assign.spawn_initial_task_state = ""
             self._send_when_ready(role_name, paste_text, project=project)
+        initial_delivery = ps_assign.spawn_initial_task_state or "pointer"
+        if initial_delivery == "delivered":
+            initial_delivery_reason = "preloaded"
+        elif initial_delivery == "pending":
+            initial_delivery_reason = "queued-pending"
+        elif initial_delivery == "fallback":
+            initial_delivery_reason = "fallback-after-fail"
+        elif PROVIDER_REGISTRY[effective_provider].system_prompt_flag is None:
+            initial_delivery_reason = "provider-unsupported (by design)"
+        else:
+            initial_delivery_reason = "pane-already-running"
         if plan and shard_total > 0:
             # Planner wrapping happened before spawn so a fresh Claude pane can
             # receive the complete planner task in its one-shot system prompt.
@@ -1068,7 +1079,9 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                 shards=shard_total,
                 plan_file=str(plan_file),
                 task_file=task_file,
-                initial_delivery=ps_assign.spawn_initial_task_state or "pointer",
+                initial_delivery=initial_delivery,
+                initial_delivery_reason=initial_delivery_reason,
+                effective_provider=effective_provider,
             )
             return True, f"planner queued for {role_name} (fan-out {shard_total} on done)"
         if shard_total > 0:
@@ -1098,7 +1111,9 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             auto_chain=auto_chain,
             shard_total=shard_total,
             task_file=task_file,
-            initial_delivery=ps_assign.spawn_initial_task_state or "pointer",
+            initial_delivery=initial_delivery,
+            initial_delivery_reason=initial_delivery_reason,
+            effective_provider=effective_provider,
         )
         return True, f"task queued for {role_name} (sending when ready)"
 
