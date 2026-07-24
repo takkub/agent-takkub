@@ -268,6 +268,39 @@ def effective_provider_for(role: str, project: str | None = None) -> str:
     return desired if _provider_available(desired) else CLAUDE
 
 
+def assign_model_override_error(
+    role: str,
+    model: str | None,
+    project: str | None = None,
+) -> str | None:
+    """Return a user-facing error when ``--model`` cannot reach this role.
+
+    Validation is intentionally based on the provider that will *actually*
+    spawn, including provider substitution.  This keeps a per-assign model id
+    from being silently ignored by a current or future provider that has no
+    :class:`ProviderSpec` ``model_flag``.
+    """
+    normalized = str(model or "").strip()
+    if not normalized:
+        return None
+
+    from .provider_spec import PROVIDER_REGISTRY
+
+    provider = effective_provider_for(role, project)
+    spec = PROVIDER_REGISTRY.get(provider)
+    if spec is None:
+        return (
+            f"--model cannot be used for role '{role}': "
+            f"effective provider '{provider}' is not registered"
+        )
+    if spec.model_flag is None:
+        return (
+            f"--model is not supported by provider '{provider}' "
+            f"(role '{role}' has no ProviderSpec.model_flag)"
+        )
+    return None
+
+
 # Capability labels surfaced to the user when Lead is degraded off claude
 # (issue #101). Keyed to the `ProviderSpec.supports_*` flag that gates the
 # affected call site, so a future provider that gains one of these

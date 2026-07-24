@@ -14,6 +14,8 @@
 
 Lead spawn เฉพาะ role ที่จำเป็นต่องานนั้น — ไม่ต้องทุกครั้ง ใช้ `takkub` CLI สั่ง orchestrator (Python desktop app)
 
+> **Scan-heavy roles ใช้ Hybrid Tiered Scanning (Option B):** งาน audit/scan รอบแรกของ `qa`, `reviewer`, `critic`, `docs_verify` ให้ assign ด้วย `--model <haiku-or-flash-id>` ตาม provider เพื่อลด token/latency แล้วค่อย escalate เป็น Sonnet/Opus หรือรุ่น reasoning สูงเมื่อพบประเด็นยากและตอน final gate signoff. `--model` มีผลเฉพาะ pane ที่ spawn ใหม่; ถ้า role เปิดอยู่แล้วให้ `takkub close --role <role>` ก่อน assign รอบที่ต้องเปลี่ยน model.
+
 > **ก่อน navigate/แก้ `src/agent_takkub/`:** god-files แตกครบแล้ว (2026-06) — `orchestrator.py` 5.8k→2.7k LOC, `main_window.py` 4k→1k LOC, กระจายเป็น **10 cohesive mixins** (engine: `pipeline_executor` · `orchestrator_text` · `broadcast_actions` · `lead_inbox` · `spawn_engine` + `PaneRegistry`; UI: `update_panel` · `project_wizard` · `user_actions` · `limit_panel` · `status_header`). guardrail = import-linter 13 contracts.
 > อ่าน `docs/architecture/godfile-map.md` (method→โมดูลไหน + hidden string/socket edges ที่ import มองไม่เห็น)
 > + `docs/architecture/depgraph.json` (import map + fan-in/out, auto-refresh ทุก commit) — **อย่า grep มั่วแล้วเดา**.
@@ -160,6 +162,7 @@ takkub list                                            # ดูสถานะ p
 takkub status                                           # per-pane progress + stall detection (post-compact awareness)
 takkub assign --role frontend "<task>"                 # spawn (ถ้ายังไม่เปิด) + ส่ง task
 takkub assign --role backend --cwd <path> "<task>"     # override role-aware default cwd
+takkub assign --role qa --model <haiku-or-flash-id> "<scan>" # override model เฉพาะ pane ที่ spawn ใหม่; precedence: assign > role > provider > CLI default
 takkub assign --role backend --requires-commit "<task>" # gate done: flag uncommitted changes ให้ Lead (Lead commit)
 takkub assign --role backend --auto-chain "<task>"     # impl done → auto verify sequence (devops→qa) ไม่ต้อง propose
 takkub assign --role qa --shards 4 "<task>"            # fan-out N parallel shard panes (<role>#1…#N · env TAKKUB_SHARD/_TOTAL)

@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from PyQt6.QtCore import QCoreApplication
 
-from agent_takkub import provider_models
+from agent_takkub import provider_models, role_models
 from agent_takkub.orchestrator import Orchestrator
 
 TEST_PROJECT = "providermodeltest"
@@ -20,6 +20,7 @@ TEST_PROJECT = "providermodeltest"
 def isolated_models(monkeypatch, tmp_path) -> Path:
     path = tmp_path / "provider-models.json"
     monkeypatch.setattr(provider_models, "_PATH", path)
+    monkeypatch.setattr(role_models, "_PATH", tmp_path / "role-models.json")
     return path
 
 
@@ -105,13 +106,21 @@ def _make_pane(role: str) -> MagicMock:
     return pane
 
 
-def _capture_generic_argv(qapp, monkeypatch, tmp_path, provider: str) -> list[str]:
+def _capture_generic_argv(
+    qapp,
+    monkeypatch,
+    tmp_path,
+    provider: str,
+    *,
+    model_override: str | None = None,
+) -> list[str]:
     from agent_takkub import pane_tools_policy as ptp
     from agent_takkub import shared_dev_tools as sdt
 
     orchestrator = _make_orchestrator(qapp, monkeypatch)
     pane = _make_pane(provider)
     orchestrator._panes_by_project[TEST_PROJECT] = {provider: pane}
+    orchestrator._ps(f"{TEST_PROJECT}::{provider}").model_override = model_override
     # Canonical names: cursor ships `cursor-agent` (the bare `agent` alias is
     # only the fallback in discovery, since it collides too easily).
     binary = {
@@ -165,6 +174,30 @@ class TestGenericProviderSpawnModels:
 
         assert argv == ["kimi", "--yolo"]
         assert "--model" not in argv
+
+    def test_assign_override_wins_over_role_and_provider_models(
+        self, qapp, monkeypatch, tmp_path
+    ) -> None:
+        role_models.set_model("cursor", "cursor", "role-model")
+        provider_models.set_model("cursor", "provider-model")
+
+        argv = _capture_generic_argv(
+            qapp,
+            monkeypatch,
+            tmp_path,
+            "cursor",
+            model_override="assign-model",
+        )
+
+        assert argv == ["cursor-agent", "--force", "--model", "assign-model"]
+
+    def test_role_model_still_wins_over_provider_model(self, qapp, monkeypatch, tmp_path) -> None:
+        role_models.set_model("cursor", "cursor", "role-model")
+        provider_models.set_model("cursor", "provider-model")
+
+        argv = _capture_generic_argv(qapp, monkeypatch, tmp_path, "cursor")
+
+        assert argv == ["cursor-agent", "--force", "--model", "role-model"]
 
 
 class TestProviderEffortSpecs:
@@ -222,12 +255,19 @@ class TestGenericProviderSpawnEffort:
         assert argv == ["opencode", "--auto"]
 
 
-def _capture_claude_argv(qapp, monkeypatch, tmp_path) -> list[str]:
+def _capture_claude_argv(
+    qapp,
+    monkeypatch,
+    tmp_path,
+    *,
+    model_override: str | None = None,
+) -> list[str]:
     from agent_takkub.provider_config import CLAUDE
 
     orchestrator = _make_orchestrator(qapp, monkeypatch)
     pane = _make_pane("backend")
     orchestrator._panes_by_project[TEST_PROJECT] = {"backend": pane}
+    orchestrator._ps(f"{TEST_PROJECT}::backend").model_override = model_override
     spawn_calls: list[dict] = []
 
     with (
@@ -266,6 +306,22 @@ def _model_arg(argv: list[str]) -> str | None:
 
 
 class TestClaudeTeammateModelPrecedence:
+    def test_assign_override_wins_over_role_provider_and_env(
+        self, qapp, monkeypatch, tmp_path
+    ) -> None:
+        role_models.set_model("backend", "claude", "claude-role")
+        provider_models.set_model("claude", "claude-provider")
+        monkeypatch.setenv("TAKKUB_TEAMMATE_MODEL", "claude-env")
+
+        argv = _capture_claude_argv(
+            qapp,
+            monkeypatch,
+            tmp_path,
+            model_override="claude-assign",
+        )
+
+        assert _model_arg(argv) == "claude-assign"
+
     def test_config_wins_over_tier_when_env_unset(self, qapp, monkeypatch, tmp_path) -> None:
         monkeypatch.delenv("TAKKUB_TEAMMATE_MODEL", raising=False)
         provider_models.set_model("claude", "claude-custom")
@@ -283,6 +339,43 @@ class TestClaudeTeammateModelPrecedence:
         monkeypatch.setenv("TAKKUB_TEAMMATE_MODEL", "claude-env")
 
         assert _model_arg(_capture_claude_argv(qapp, monkeypatch, tmp_path)) == "claude-env"
+
+
+class TestRunningPaneModelOverride:
+    def test_override_warns_lead_and_does_not_change_live_pane(self, qapp, monkeypatch) -> None:
+        from agent_takkub.provider_config import CLAUDE
+
+        orchestrator = _make_orchestrator(qapp, monkeypatch)
+        pane = _make_pane("backend")
+        pane.session = MagicMock()
+        pane.session.is_alive = True
+        orchestrator._panes_by_project[TEST_PROJECT] = {"backend": pane}
+        state = orchestrator._ps(f"{TEST_PROJECT}::backend")
+        state.model_override = "model-used-at-spawn"
+
+        with (
+            patch(
+                "agent_takkub.provider_config.effective_provider_for",
+                return_value=CLAUDE,
+            ),
+            patch("agent_takkub.orchestrator._task_handoff_pointer", return_value=("task", None)),
+            patch("agent_takkub.task_ledger.create_assignment", return_value=None),
+            patch.object(orchestrator, "_notify_lead") as notify,
+            patch.object(orchestrator, "_send_when_ready"),
+        ):
+            ok, message = orchestrator.assign(
+                "backend",
+                cwd=None,
+                task="scan",
+                project=TEST_PROJECT,
+                model="claude-haiku-4-5",
+            )
+
+        assert ok is True, message
+        assert state.model_override == "model-used-at-spawn"
+        warning = notify.call_args.args[1]
+        assert "ไม่มีผล" in warning
+        assert "close" in warning
 
 
 class TestProviderModelCli:

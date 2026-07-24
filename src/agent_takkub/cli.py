@@ -215,6 +215,13 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                 ),
             }
     shards = int(_raw_shards or 1)
+    model = (getattr(args, "model", None) or "").strip() or None
+    if model:
+        from .provider_config import assign_model_override_error
+
+        model_error = assign_model_override_error(args.role, model, _from_project())
+        if model_error:
+            return {"ok": False, "msg": model_error}
     if shards > 1 and getattr(args, "auto_chain", False):
         return {
             "ok": False,
@@ -259,6 +266,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                     "from": _from_role(),
                     "plan": True,
                     "shard_total": shards,
+                    "model": model,
                     "feature": getattr(args, "feature", "") or "",
                 }
             )
@@ -280,6 +288,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                         "auto_chain": bool(getattr(args, "auto_chain", False)),
                         "shard_total": shards,
                         "isolation": isolation,
+                        "model": model,
                         "feature": getattr(args, "feature", "") or "",
                     }
                 )
@@ -298,6 +307,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                 "requires_commit": bool(getattr(args, "requires_commit", False)),
                 "auto_chain": bool(getattr(args, "auto_chain", False)),
                 "isolation": isolation,
+                "model": model,
                 "feature": getattr(args, "feature", "") or "",
             }
         )
@@ -1420,6 +1430,14 @@ def main(argv: list[str] | None = None) -> int:
     sa = sub.add_parser("assign", help="spawn (if needed) and send a task")
     sa.add_argument("--role", required=True)
     sa.add_argument("--cwd", default=None)
+    sa.add_argument(
+        "--model",
+        default=None,
+        metavar="ID",
+        help="override the model for this assign when it spawns a new pane "
+        "(takes precedence over role/provider defaults; an already-running "
+        "pane keeps its current model)",
+    )
     sa.add_argument("task", help="task content (positional)")
     sa.add_argument(
         "--requires-commit",

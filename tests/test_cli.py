@@ -41,6 +41,30 @@ class TestArgparse:
         cli.main(["assign", "--role", "backend", "--cwd", "/x", "do work"])
         assert fake_request[-1]["cwd"] == "/x"
 
+    def test_assign_with_model_override(self, fake_request: list[dict[str, Any]]) -> None:
+        cli.main(["assign", "--role", "qa", "--model", "claude-haiku-4-5", "scan"])
+        assert fake_request[-1]["model"] == "claude-haiku-4-5"
+
+    def test_assign_model_override_is_forwarded_to_every_shard(
+        self, fake_request: list[dict[str, Any]]
+    ) -> None:
+        cli.main(["assign", "--role", "qa", "--shards", "2", "--model", "flash", "scan"])
+        assert [payload["model"] for payload in fake_request[-2:]] == ["flash", "flash"]
+
+    def test_assign_model_validation_error_sends_nothing(
+        self,
+        fake_request: list[dict[str, Any]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.assign_model_override_error",
+            lambda *_args, **_kwargs: "--model unsupported",
+        )
+        before = len(fake_request)
+        rc = cli.main(["assign", "--role", "qa", "--model", "flash", "scan"])
+        assert rc == 1
+        assert len(fake_request) == before
+
     def test_send_passes_from_role_env(
         self, fake_request: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
     ) -> None:
