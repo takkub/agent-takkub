@@ -160,6 +160,7 @@ class TestMachineTotalPaneCap:
         — a big box can run more than MAX_FANOUT panes in total."""
         monkeypatch.setattr(exec_mode.os, "cpu_count", lambda: 64)
         fake_vm = MagicMock()
+        fake_vm.total = 256 * (1024**3)
         fake_vm.available = 256 * (1024**3)  # 256 GB free
         import psutil
 
@@ -170,6 +171,7 @@ class TestMachineTotalPaneCap:
     def test_tight_resources_floor(self, monkeypatch) -> None:
         monkeypatch.setattr(exec_mode.os, "cpu_count", lambda: 1)
         fake_vm = MagicMock()
+        fake_vm.total = 4 * (1024**3)
         fake_vm.available = 1 * (1024**3)  # 1 GB free
         import psutil
 
