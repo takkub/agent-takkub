@@ -1437,7 +1437,17 @@ class SpawnEngineMixin:
             # goes through the same adapter dispatch.
             from .mcp_bridge import mcp_argv_for_provider
 
-            provider_argv.extend(mcp_argv_for_provider(spec.name, base_role, shard_idx, project_ns))
+            provider_argv.extend(
+                mcp_argv_for_provider(
+                    spec.name,
+                    base_role,
+                    shard_idx,
+                    project_ns,
+                    provider_bin=provider_bin,
+                    cwd=spawn_cwd,
+                    env=env,
+                )
+            )
             return self._launch_session(
                 pane=pane,
                 role_name=role_name,

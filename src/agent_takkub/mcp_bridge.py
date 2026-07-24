@@ -21,7 +21,10 @@ to that provider's own injection surface:
     against the real `codex-cli 0.144.1` binary 2026-07-11 — see
     docs/reviews/2026-07-11-100-mcp-bridge.md). Additive only: never
     touches `~/.codex/config.toml` (verified: `-c` overrides are
-    request-scoped, not persisted).
+    request-scoped, not persisted). An explicit empty role policy is
+    different: it resolves inherited MCP names and disables each one, plus
+    `features.plugins=false` for plugin-bundled MCPs (#121; verified
+    against codex-cli 0.145.0).
   - ``"plugin_import"`` (gemini/agy): documented no-op. `agy` genuinely
     CAN bridge MCP servers from a Claude-style plugin's `.mcp.json` via
     `agy plugin import <path>` (proven empirically against the real
@@ -40,8 +43,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import pathlib
 import re
+import subprocess
 
 _log = logging.getLogger(__name__)
 
@@ -53,6 +58,35 @@ _log = logging.getLogger(__name__)
 # dropped rather than forwarded as an override codex doesn't recognize.
 _CODEX_SERVER_KEYS = ("command", "args", "env")
 _TOML_BARE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_CODEX_DISABLE_ALL_MCP_ARGV = [
+    "-c",
+    "mcp_servers={}",
+    "-c",
+    "features.plugins=false",
+]
+
+
+def _codex_resolved_mcp_names(provider_bin: str, cwd: str, env: dict[str, str]) -> list[str]:
+    """Ask Codex for config-defined MCP names without loading plugin MCPs."""
+    try:
+        result = subprocess.run(
+            [provider_bin, "-c", "features.plugins=false", "mcp", "list", "--json"],
+            cwd=cwd,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        )
+        servers = json.loads(result.stdout)
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+        raise RuntimeError("could not resolve inherited Codex MCP servers") from exc
+    if not isinstance(servers, list):
+        raise RuntimeError("Codex MCP list returned a non-list payload")
+    names = [server.get("name") for server in servers if isinstance(server, dict)]
+    if not all(isinstance(name, str) and _TOML_BARE_KEY_RE.fullmatch(name) for name in names):
+        raise RuntimeError("Codex MCP list contained an unsupported server name")
+    return names
 
 
 def _toml_literal(value: object) -> str:
@@ -120,12 +154,37 @@ def _claude_mcp_argv(base_role: str, shard_idx: int | None, project_ns: str) -> 
     return ["--mcp-config", cfg_path, "--strict-mcp-config"]
 
 
-def _codex_mcp_argv(base_role: str, shard_idx: int | None, project_ns: str) -> list[str]:
+def _codex_mcp_argv(
+    base_role: str,
+    shard_idx: int | None,
+    project_ns: str,
+    *,
+    provider_bin: str | None,
+    cwd: str | None,
+    env: dict[str, str] | None,
+) -> list[str]:
     """`-c mcp_servers.<name>.<key>=<toml>` per server, per allowed key.
 
     Session-scoped: these argv tokens only affect the one codex process
     they're passed to. Never reads or writes `~/.codex/config.toml`.
     """
+    from .shared_dev_tools import role_mcp_allowlist
+
+    # Codex merges an empty CLI table with lower-precedence user/project MCP
+    # tables, so `mcp_servers={}` alone does not clear them. Resolve their
+    # names through Codex itself and disable each one. Plugins are a second
+    # MCP source, so disable that feature for this invocation too (#121).
+    if role_mcp_allowlist(base_role) == frozenset():
+        names = _codex_resolved_mcp_names(
+            provider_bin or "codex",
+            cwd or os.getcwd(),
+            env or os.environ.copy(),
+        )
+        argv = list(_CODEX_DISABLE_ALL_MCP_ARGV)
+        for name in names:
+            argv.extend(["-c", f"mcp_servers.{name}.enabled=false"])
+        return argv
+
     servers = _role_mcp_servers(base_role, shard_idx, project_ns)
     argv: list[str] = []
     from .pane_tools_policy import _validate_name
@@ -149,7 +208,14 @@ def _codex_mcp_argv(base_role: str, shard_idx: int | None, project_ns: str) -> l
 
 
 def mcp_argv_for_provider(
-    provider_name: str, base_role: str, shard_idx: int | None, project_ns: str
+    provider_name: str,
+    base_role: str,
+    shard_idx: int | None,
+    project_ns: str,
+    *,
+    provider_bin: str | None = None,
+    cwd: str | None = None,
+    env: dict[str, str] | None = None,
 ) -> list[str]:
     """Extra argv tokens to append for *provider_name*'s MCP injection.
 
@@ -168,7 +234,14 @@ def mcp_argv_for_provider(
     if variant == "strict":
         return _claude_mcp_argv(base_role, shard_idx, project_ns)
     if variant == "session_override":
-        return _codex_mcp_argv(base_role, shard_idx, project_ns)
+        return _codex_mcp_argv(
+            base_role,
+            shard_idx,
+            project_ns,
+            provider_bin=provider_bin,
+            cwd=cwd,
+            env=env,
+        )
     # "plugin_import" (gemini/agy) and "none" — documented no-op, see
     # module docstring for why plugin_import isn't auto-driven per spawn.
     return []

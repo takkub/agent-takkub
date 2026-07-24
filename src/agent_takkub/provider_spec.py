@@ -404,7 +404,9 @@ gemini_spec = ProviderSpec(
     # MCP servers from a claude-style plugin's `.mcp.json` (confirmed empirically against
     # agy 1.1.1), but stages them into a GLOBAL `~/.gemini/config/plugins/<name>/` registry
     # with no per-session/per-cwd scope — mcp_bridge.py leaves this variant a documented
-    # no-op rather than auto-driving a machine-wide side effect on every spawn.
+    # no-op rather than auto-driving a machine-wide side effect on every spawn. Existing
+    # global AGY MCP/plugin config can therefore still leak into an explicit-empty Takkub
+    # policy; no startup flag that prevents MCP boot is exposed by agy 1.1.6 (#103/#121).
     supports_browser_profiles=False,
     paste_threshold=200,
     enter_delay_base_ms=800,  # kept uniform — see codex_spec note above (review 2-C/2-D)
@@ -473,7 +475,9 @@ opencode_spec = ProviderSpec(
     inline_learned_notes=False,
     use_file_guards=False,
     mcp_adapter_variant="none",  # opencode's MCP lives in opencode.json config;
-    # no per-session CLI surface identified yet — documented gap, see #103.
+    # merged global/project config can therefore leak MCPs into an explicit-empty role.
+    # `--pure` suppresses external plugins, not configured MCPs, and no generic
+    # per-session MCP-disable CLI surface exists in opencode 1.18.4 (#103/#121).
     supports_browser_profiles=False,
     paste_threshold=200,  # uniform defaults — retune only with pty evidence
     enter_delay_base_ms=800,
@@ -539,7 +543,9 @@ kimi_spec = ProviderSpec(
     cheatsheet_filename="AGENTS.md",
     inline_learned_notes=False,
     use_file_guards=False,
-    mcp_adapter_variant="none",
+    mcp_adapter_variant="none",  # Kimi auto-loads user/project mcp.json files.
+    # Its --mcp-config/--mcp-config-file options add configs but expose no deny-all
+    # startup switch in kimi 1.49.0, so explicit-empty role isolation is a #103/#121 gap.
     supports_browser_profiles=False,
     paste_threshold=200,  # uniform defaults — retune only with pty evidence
     enter_delay_base_ms=800,
@@ -605,7 +611,9 @@ cursor_spec = ProviderSpec(
     cheatsheet_filename="AGENTS.md",
     inline_learned_notes=False,
     use_file_guards=False,
-    mcp_adapter_variant="none",
+    mcp_adapter_variant="none",  # Cursor auto-detects the IDE's mcp.json config.
+    # Current docs expose interactive enable/disable after launch, but no verified
+    # deny-all startup flag; explicit-empty role isolation remains a #103/#121 gap.
     supports_browser_profiles=False,
     paste_threshold=200,
     enter_delay_base_ms=800,
