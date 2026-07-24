@@ -4,6 +4,11 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.32] - 2026-07-24
+
+### Fixed (แก้)
+- **#126 agy pane "ตายเงียบ" — task ค้างใน composer ไม่ถูก submit** — ระหว่าง agy ขึ้น "Signing in / Verifying your account" (Google eligibility check ฝั่ง server) จอยังโชว์ idle footer ทำ cockpit เข้าใจว่า ready → paste แล้ว Enter โดน swallow → pane นั่งเงียบจน user ต้องสั่งซ้ำเอง (เจอ 3 เคสใน 1 วัน) · ตอนนี้ marker ทั้งสองเป็น **ready hard-blocker**: cockpit รอให้พ้น check ก่อนส่ง + submit verification/resend หลังพ้น (calibrate จาก transcript จริง แนวเดียวกับที่เคยแก้ codex #99)
+
 ## [1.0.31] - 2026-07-24
 
 ### Fixed (แก้)
