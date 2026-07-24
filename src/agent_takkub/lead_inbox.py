@@ -105,6 +105,11 @@ _RENDER_WAIT_MAX = 6
 # hard timeout stays wall-clock accurate.
 _READY_POLL_FIRST_MS = 300
 _READY_POLL_INTERVAL_MS = 150
+# Claude roles that load MCP servers need the same cold-boot allowance as the
+# slower provider CLIs.  Claude's base provider spec intentionally stays at
+# 45 s because roles without MCPs normally render their prompt well inside
+# that window; the role-aware extension is applied in _ready_wait_ms.
+_MCP_READY_WAIT_MS = _SUBMIT_BUSY_MAX_RESENDS * _SUBMIT_VERIFY_GRACE_MS
 
 # After this many consecutive 400-ms busy-retries (~30 s) the pump gives up
 # and spills remaining items to the durable _pending_done_notices queue.
@@ -387,14 +392,17 @@ class LeadInboxMixin:
         composer status bar ('fast off'/'fast on') renders, which lands after
         codex finishes cold-booting AND auto-booting its configured MCP servers
         (#99 — the startup banner alone is deliberately not a ready marker), so
-        the default 45s can also force a blind paste there. An explicit
-        non-default ``max_wait_ms`` from the caller always wins (e.g. the
-        short-poll peer-send path).
+        the default 45s can also force a blind paste there. Claude roles whose
+        effective pane-tools policy loads MCP servers get the same allowance:
+        MCP schema boot routinely keeps qa/critic/designer from reaching the
+        ready prompt within 45s (#118). An explicit non-default ``max_wait_ms``
+        from the caller always wins (e.g. the short-poll peer-send path).
         """
         if max_wait_ms != 45_000:
             return max_wait_ms
+        effective_wait_ms = max_wait_ms
         try:
-            from .provider_config import effective_provider_for
+            from .provider_config import CLAUDE, effective_provider_for
             from .provider_spec import PROVIDER_REGISTRY
 
             # Registry-driven (#103): each spec owns its cold-boot allowance via
@@ -405,10 +413,19 @@ class LeadInboxMixin:
             provider = effective_provider_for(role_name, project=self._resolve_project(project))
             spec = PROVIDER_REGISTRY.get(provider)
             if spec is not None and spec.ready_wait_ms:
-                return max(max_wait_ms, int(spec.ready_wait_ms))
+                effective_wait_ms = max(effective_wait_ms, int(spec.ready_wait_ms))
+
+            if provider == CLAUDE:
+                from .pane_tools_policy import effective_mcps
+                from .shared_dev_tools import default_role_mcp_policy
+
+                base_role = _split_shard(role_name)[0]
+                default_mcps = default_role_mcp_policy().get(base_role)
+                if effective_mcps(base_role, default_mcps):
+                    effective_wait_ms = max(effective_wait_ms, _MCP_READY_WAIT_MS)
         except Exception:
             pass
-        return max_wait_ms
+        return effective_wait_ms
 
     def _send_when_ready(
         self,
@@ -473,7 +490,7 @@ class LeadInboxMixin:
                 # Delivered blind — the pane never signalled ready, so on a cold
                 # re-spawn the paste may have been swallowed (issue #26). Surface
                 # it to the Lead instead of letting delegation fail silently.
-                self._warn_lead_delivery_unconfirmed(role_name, project)
+                self._warn_lead_delivery_unconfirmed(role_name, project, max_wait_ms)
 
         def _check() -> None:
             if sent[0]:
@@ -514,7 +531,7 @@ class LeadInboxMixin:
                 # (no session exists, unlike the ready-prompt-timeout branch
                 # below). Warn instead of the silent drop this used to be.
                 sent[0] = True
-                self._warn_lead_delivery_unconfirmed(role_name, project)
+                self._warn_lead_delivery_unconfirmed(role_name, project, max_wait_ms)
                 _log_event(
                     "task_deliver_timeout_no_session",
                     project=self._resolve_project(project),
@@ -536,8 +553,13 @@ class LeadInboxMixin:
 
         QTimer.singleShot(_READY_POLL_FIRST_MS, _check)
 
-    def _warn_lead_delivery_unconfirmed(self, role_name: str, project: str | None) -> None:
-        """Tell the Lead that an assign hit the 45s hard timeout without the
+    def _warn_lead_delivery_unconfirmed(
+        self,
+        role_name: str,
+        project: str | None,
+        wait_ms: int = 45_000,
+    ) -> None:
+        """Tell the Lead that an assign hit its hard timeout without the
         target pane ever signalling ready. The task was pasted blind and may
         not have landed (cold re-spawn render differs from boot), so the Lead
         should verify / re-assign instead of trusting the 'task queued' reply
@@ -548,13 +570,20 @@ class LeadInboxMixin:
         lead = self._project_panes(project_ns).get(LEAD.name)
         if not (lead and lead.session and lead.session.is_alive):
             return
+        wait_label = f"{wait_ms / 1000:g}s"
         msg = (
-            f"⚠️ [delivery-unconfirmed] {role_name} pane ไม่ถึง ready prompt ใน 45s — "
+            f"⚠️ [delivery-unconfirmed] {role_name} pane ไม่ถึง ready prompt ใน "
+            f"{wait_label} — "
             f"task ถูก paste แบบ blind อาจไม่ติด (pane อาจค้าง empty). "
             f"เช็ค pane / re-assign ถ้ายังว่าง — อย่าถือว่าส่งสำเร็จ (issue #26)"
         )
         self._notify_lead(project_ns, msg)
-        _log_event("delivery_unconfirmed", role=role_name, project=project_ns)
+        _log_event(
+            "delivery_unconfirmed",
+            role=role_name,
+            project=project_ns,
+            wait_ms=wait_ms,
+        )
 
     def _warn_lead_spawn_failed(self, role_name: str, project: str | None, reason: str) -> None:
         """Tell the Lead that an assign's pane spawn failed. The CLI acks
