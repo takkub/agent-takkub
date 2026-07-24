@@ -55,6 +55,14 @@ class AgentPaneModel:
         self.session_cwd: str | None = None
         self.session_jsonl: object | None = None
         self.last_usage: dict | None = None
+        # Provider capability is set by AgentPane.attach_session(). Claude is
+        # currently the only provider whose JSONL usage schema token_meter can
+        # read (#103); other providers must not arm the session-cap watchdog.
+        self.provider_name: str | None = None
+        self.supports_token_meter: bool = False
+        # Edge-trigger latch: warn once while at/above the cap, then re-arm
+        # only after a later usage sample falls below it (e.g. /compact).
+        self.session_cap_warning_active: bool = False
         # Known context cap for the token badge (None = derive per-model).
         self.context_limit: int | None = None
         if role.name == LEAD.name:
@@ -79,6 +87,29 @@ class AgentPaneModel:
 
     def set_worktree_branch(self, branch: str | None) -> None:
         self.worktree_branch = branch or None
+
+    def configure_provider(self, provider_name: str, *, supports_token_meter: bool) -> None:
+        """Reset meter/watchdog state for a newly attached provider session."""
+        self.provider_name = provider_name
+        self.supports_token_meter = bool(supports_token_meter)
+        self.session_cap_warning_active = False
+
+    def observe_session_cap(self, prompt: int, threshold: int) -> bool:
+        """Return True exactly once for each below→at/above cap crossing."""
+        if not self.supports_token_meter:
+            self.session_cap_warning_active = False
+            return False
+        if prompt < threshold:
+            self.session_cap_warning_active = False
+            return False
+        if self.session_cap_warning_active:
+            return False
+        self.session_cap_warning_active = True
+        return True
+
+    def reset_session_cap_watchdog(self) -> None:
+        """Re-arm after a transcript rollover or session teardown."""
+        self.session_cap_warning_active = False
 
     def decide_exit_state(self, code: int) -> tuple[str, str | None]:
         """Pure decision for what a process exit should transition state to.

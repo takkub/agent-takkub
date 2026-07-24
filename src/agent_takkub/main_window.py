@@ -206,6 +206,7 @@ class MainWindow(
         self.orch.agentDone.connect(self._notify_agent_done)
         self.orch.crossTabDone.connect(self._on_cross_tab_done)
         self.orch.leadNotified.connect(self._on_lead_notified)
+        self.orch.sessionCapNotice.connect(self._on_session_cap_notice)
         # `takkub restart` — same persist+relaunch path as the status-bar 🔄
         # button, minus the confirm dialog (typing the command IS the confirm).
         self.orch.restartRequested.connect(self._restart_cockpit)
@@ -754,6 +755,37 @@ class MainWindow(
         tab = self._tab_for_project(project_ns)
         if tab is not None:
             tab.mark_lead_unread()
+
+    def _on_session_cap_notice(
+        self,
+        project_ns: str,
+        role: str,
+        prompt: int,
+        threshold: int,
+        is_lead: bool,
+    ) -> None:
+        """Surface a cap decision without ever auto-compacting Lead."""
+        if is_lead:
+            body = (
+                f"Lead context is {prompt:,} tokens (cap {threshold:,}). "
+                "When safe, choose /compact or end and reopen the Lead session; "
+                "the cockpit will not compact Lead automatically."
+            )
+            timeout_ms = 30_000
+        else:
+            body = (
+                f"{role} context is {prompt:,} tokens (cap {threshold:,}). "
+                "A /compact-or-reopen advisory is queued for after its current turn."
+            )
+            timeout_ms = 15_000
+        self._status.showMessage(f"⚠ [{project_ns}] {body}", timeout_ms)
+        if self._tray and QSystemTrayIcon.isSystemTrayAvailable():
+            self._tray.showMessage(
+                "Session context cap reached",
+                f"[{project_ns}] {body}",
+                QSystemTrayIcon.MessageIcon.Warning,
+                min(timeout_ms, 10_000),
+            )
 
     # ──────────────────────────────────────────────────────────────
     # toolbar buttons

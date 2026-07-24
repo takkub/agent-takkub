@@ -34,6 +34,7 @@ from .agent_pane_model import AgentPaneModel
 from .config import RUNTIME_DIR
 from .pty_session import PtySession
 from .roles import LEAD, USER_DRIVEN_ROLES, Role
+from .session_cap import SESSION_CAP_SETTING, resolve_session_cap_threshold
 from .terminal_widget import TerminalWidget
 from .token_meter import find_latest_session, read_last_usage
 
@@ -65,6 +66,9 @@ class AgentPane(QFrame):
     # Off-thread token-meter result → applied on the main thread by
     # _apply_token_meter. Carries (session_path | None, usage dict | None).
     _tokenMeterReady = pyqtSignal(object, object)
+    # Edge-triggered session-cap crossing. Orchestrator decides role-specific
+    # action (teammate advisory vs Lead UI notice).
+    sessionCapExceeded = pyqtSignal(int, int)  # prompt, threshold
 
     def __init__(self, role: Role, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -95,6 +99,9 @@ class AgentPane(QFrame):
         # Apply off-thread token-meter reads back on the main (GUI) thread.
         self._tokenMeterReady.connect(self._apply_token_meter)
         self._token_refreshing = False
+        self._session_cap_threshold = resolve_session_cap_threshold(
+            QSettings("agent-takkub", "cockpit").value(SESSION_CAP_SETTING)
+        )
 
         # Issue #35 — render-path coalescing.
         # Instead of forwarding every PTY chunk to xterm.js immediately (which
@@ -486,7 +493,13 @@ class AgentPane(QFrame):
         self._last_output_ts = time.time()
         self._idle_auto_cleared = False
 
-    def attach_session(self, session: PtySession, cwd: str | None = None) -> None:
+    def attach_session(
+        self,
+        session: PtySession,
+        cwd: str | None = None,
+        *,
+        provider_name: str = "claude",
+    ) -> None:
         """Bind a PtySession to this pane's terminal widget. `cwd` (optional)
         is shown in the header next to the role label."""
         if self.session is not None and self.session is not session:
@@ -545,7 +558,18 @@ class AgentPane(QFrame):
         self._session_jsonl = None
         self._last_usage = None
         self._token_label.hide()
-        if cwd:
+        # #103 gap: only Claude currently has a JSONL transcript compatible
+        # with token_meter.read_last_usage. Keep both the badge and watchdog
+        # behind ProviderSpec.supports_token_meter so a non-Claude pane cannot
+        # accidentally pick up an unrelated Claude JSONL under the same cwd.
+        from .provider_spec import PROVIDER_REGISTRY
+
+        spec = PROVIDER_REGISTRY.get(provider_name)
+        self.model.configure_provider(
+            provider_name,
+            supports_token_meter=bool(spec and spec.supports_token_meter),
+        )
+        if cwd and self.model.supports_token_meter:
             self._token_timer.start()
             # one quick refresh after a short delay so the badge appears as
             # soon as the first turn lands without waiting a full interval
@@ -653,6 +677,7 @@ class AgentPane(QFrame):
         self._token_timer.stop()
         self._session_jsonl = None
         self._last_usage = None
+        self.model.reset_session_cap_watchdog()
         self._token_label.hide()
 
     def _on_exit(self, code: int, gen: int | None = None) -> None:
@@ -737,6 +762,7 @@ class AgentPane(QFrame):
             # first assistant turn (otherwise the header keeps the old "128%").
             self._session_jsonl = cand
             self._last_usage = None
+            self.model.reset_session_cap_watchdog()
             self._token_label.setText("")
             self._token_label.hide()
         if usage is None:
@@ -747,6 +773,8 @@ class AgentPane(QFrame):
         self._token_label.setStyleSheet(f"color: {badge['color']}; font-size: 11px;")
         self._token_label.setToolTip(badge["tooltip"])
         self._token_label.show()
+        if self.model.observe_session_cap(usage["prompt"], self._session_cap_threshold):
+            self.sessionCapExceeded.emit(usage["prompt"], self._session_cap_threshold)
 
     def current_usage(self) -> dict | None:
         """Return the last-known usage dict for status-bar aggregation, or
