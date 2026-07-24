@@ -663,6 +663,16 @@ class SpawnEngineMixin:
         pane.spawnRequested.connect(self._on_pane_spawn_clicked)
         pane.closeRequested.connect(self._on_pane_close_clicked)
         pane.inputBytes.connect(self._on_pane_input)
+        # Display-backed panes own the Claude JSONL poller and expose the
+        # edge-triggered cap signal. HeadlessPane intentionally has no poller
+        # yet, so capability-check the signal instead of inventing usage.
+        cap_signal = getattr(pane, "sessionCapExceeded", None)
+        if cap_signal is not None:
+            cap_signal.connect(
+                lambda prompt, threshold, p=pane: self._on_session_cap_exceeded(
+                    p, prompt, threshold
+                )
+            )
         self.statusChanged.emit()
 
     def unregister_pane(
@@ -965,7 +975,7 @@ class SpawnEngineMixin:
                 project=project_ns,
                 ms=int((time.time() - _t0) * 1000),
             )
-            pane.attach_session(session, cwd=spawn_cwd)
+            pane.attach_session(session, cwd=spawn_cwd, provider_name=label)
             _ekey = _exit_key(project_ns, role_name)
             # FU1 (cross-platform audit 2026-07-10 followup): shell/gemini/codex
             # have no `--resume` concept (claude-branch-only, see docstring
@@ -2103,7 +2113,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 project=project_ns,
                 ms=int((time.time() - _t0) * 1000),
             )
-            pane.attach_session(session, cwd=spawn_cwd)
+            pane.attach_session(session, cwd=spawn_cwd, provider_name="claude")
             self._finish_spawn_initial_task(
                 role_name,
                 project_ns,

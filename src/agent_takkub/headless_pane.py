@@ -121,7 +121,13 @@ class HeadlessPane(QObject):
     def set_worktree_branch(self, branch: str | None) -> None:
         self.model.set_worktree_branch(branch)
 
-    def attach_session(self, session: PtySession, cwd: str | None = None) -> None:
+    def attach_session(
+        self,
+        session: PtySession,
+        cwd: str | None = None,
+        *,
+        provider_name: str = "claude",
+    ) -> None:
         """Bind `session` — the data-only half of `AgentPane.attach_session`
         (no terminal resize/focus/idle-flag/token-label widget work)."""
         if self.model.session is not None and self.model.session is not session:
@@ -137,6 +143,16 @@ class HeadlessPane(QObject):
         self.model.session_cwd = cwd
         self.model.session_jsonl = None
         self.model.last_usage = None
+        # Headless panes do not poll JSONL today, but retain the provider
+        # capability on the shared model so their state cannot masquerade as a
+        # supported token-meter source.
+        from .provider_spec import PROVIDER_REGISTRY
+
+        spec = PROVIDER_REGISTRY.get(provider_name)
+        self.model.configure_provider(
+            provider_name,
+            supports_token_meter=bool(spec and spec.supports_token_meter),
+        )
         self.set_state("active")
 
     def detach_session(self) -> None:
@@ -156,6 +172,7 @@ class HeadlessPane(QObject):
             session.terminate()
         self.model.session_jsonl = None
         self.model.last_usage = None
+        self.model.reset_session_cap_watchdog()
 
     def _mark_output_ts(self, _data: bytes) -> None:
         self.model.last_output_ts = time.time()
