@@ -114,7 +114,13 @@ def _capture_generic_argv(qapp, monkeypatch, tmp_path, provider: str) -> list[st
     orchestrator._panes_by_project[TEST_PROJECT] = {provider: pane}
     # Canonical names: cursor ships `cursor-agent` (the bare `agent` alias is
     # only the fallback in discovery, since it collides too easily).
-    binary = {"cursor": "cursor-agent", "kimi": "kimi"}[provider]
+    binary = {
+        "codex": "codex",
+        "cursor": "cursor-agent",
+        "gemini": "agy",
+        "kimi": "kimi",
+        "opencode": "opencode",
+    }[provider]
     monkeypatch.setattr(sdt, "SHARED_MCP_FILE", tmp_path / "shared-mcp.json")
     monkeypatch.setattr(ptp, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
     spawn_calls: list[dict] = []
@@ -127,7 +133,11 @@ def _capture_generic_argv(qapp, monkeypatch, tmp_path, provider: str) -> list[st
         patch("agent_takkub.orchestrator.QTimer.singleShot"),
         patch("agent_takkub.orchestrator._build_pane_env", return_value={}),
         patch("agent_takkub.provider_config.effective_provider_for", return_value=provider),
+        patch("agent_takkub.spawn_engine.sys.platform", "win32"),
+        patch("agent_takkub.codex_helper.find_codex_executable", return_value=binary),
+        patch("agent_takkub.gemini_helper.find_agy_executable", return_value=binary),
         patch("shutil.which", side_effect=lambda name: binary if name == binary else None),
+        patch("agent_takkub.codex_agents_md.ensure_agents_md"),
         patch("agent_takkub.orchestrator.inject_user_profile_env"),
     ):
         mock_pty = MagicMock()
@@ -155,6 +165,53 @@ class TestGenericProviderSpawnModels:
 
         assert argv == ["kimi", "--yolo"]
         assert "--model" not in argv
+
+
+class TestProviderEffortSpecs:
+    def test_direct_and_config_backed_effort_surfaces(self) -> None:
+        from agent_takkub.provider_spec import codex_spec, gemini_spec
+
+        assert gemini_spec.effort_flag == "--effort"
+        assert gemini_spec.effort_config_key is None
+        assert codex_spec.effort_flag == "-c"
+        assert codex_spec.effort_config_key == "model_reasoning_effort"
+
+    def test_unsupported_providers_remain_explicit(self) -> None:
+        from agent_takkub.provider_spec import cursor_spec, kimi_spec, opencode_spec
+
+        assert opencode_spec.effort_flag is None
+        assert kimi_spec.effort_flag is None
+        assert cursor_spec.effort_flag is None
+
+
+class TestGenericProviderSpawnEffort:
+    def test_gemini_gets_role_tier_effort(self, qapp, monkeypatch, tmp_path) -> None:
+        monkeypatch.delenv("TAKKUB_TEAMMATE_EFFORT", raising=False)
+
+        argv = _capture_generic_argv(qapp, monkeypatch, tmp_path, "gemini")
+
+        assert argv[-2:] == ["--effort", "high"]
+
+    def test_codex_uses_session_config_override(self, qapp, monkeypatch, tmp_path) -> None:
+        monkeypatch.setenv("TAKKUB_TEAMMATE_EFFORT", "low")
+
+        argv = _capture_generic_argv(qapp, monkeypatch, tmp_path, "codex")
+
+        assert argv[-2:] == ["-c", "model_reasoning_effort=low"]
+
+    def test_explicit_empty_env_disables_effort(self, qapp, monkeypatch, tmp_path) -> None:
+        monkeypatch.setenv("TAKKUB_TEAMMATE_EFFORT", "")
+
+        argv = _capture_generic_argv(qapp, monkeypatch, tmp_path, "gemini")
+
+        assert "--effort" not in argv
+
+    def test_unsupported_provider_gets_no_effort_arg(self, qapp, monkeypatch, tmp_path) -> None:
+        monkeypatch.setenv("TAKKUB_TEAMMATE_EFFORT", "high")
+
+        argv = _capture_generic_argv(qapp, monkeypatch, tmp_path, "opencode")
+
+        assert argv == ["opencode", "--auto"]
 
 
 def _capture_claude_argv(qapp, monkeypatch, tmp_path) -> list[str]:
