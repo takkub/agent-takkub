@@ -389,7 +389,12 @@ gemini_spec = ProviderSpec(
         "esc to interrupt",
         "esc to cancel",
         "press enter to continue",
-    ),  # pty_session.py:205-209 (agy's own trust/press-enter observed on first boot)
+        # agy 1.1.6 can render its idle footer while these startup/account
+        # checks are still swallowing submit. Keep task delivery behind the
+        # ready gate until the transient check clears (#126).
+        "signing in",
+        "verifying your account",
+    ),  # pty_session.py:205-209 (agy's own trust/account gates observed on first boot)
     ready_rules=(
         ReadyRule("? for shortcuts", True),  # pty_session.py:222 (agy idle footer)
         ReadyRule("type your message or", True),  # pty_session.py:223 (legacy gemini CLI)

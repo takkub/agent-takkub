@@ -298,6 +298,36 @@ class TestVerifiedEnterWiring:
         assert verified.call_args[0][1] is reviewer.session
         plain.assert_not_called()
 
+    def test_agy_task_deliver_verifies_expected_content(
+        self, orch: Orchestrator, monkeypatch
+    ) -> None:
+        """#126: agy uses the generic verified-submit path with its task fragment."""
+        from agent_takkub import provider_config
+
+        task = "[ROLE: qa] read the task spec and run the full suite"
+        qa = _pane(_live_session())
+        qa.session.is_at_ready_prompt.return_value = True
+        orch._panes_by_project["P"] = {"lead": _pane(_live_session()), "qa": qa}
+        monkeypatch.setattr(
+            provider_config,
+            "effective_provider_for",
+            lambda role, project=None: "gemini",
+        )
+        monkeypatch.setattr(orch_mod.QTimer, "singleShot", staticmethod(lambda _ms, fn: fn()))
+
+        with (
+            patch("agent_takkub.orchestrator._log_event"),
+            patch("agent_takkub.orchestrator._delayed_enter_verified") as verified,
+            patch("agent_takkub.orchestrator._delayed_enter") as plain,
+        ):
+            orch._send_when_ready("qa", task, max_wait_ms=1000, project="P")
+
+        verified.assert_called_once()
+        assert verified.call_args[0][1] is qa.session
+        assert verified.call_args.kwargs["content_fragment"] == task
+        assert verified.call_args.kwargs["payload"]
+        plain.assert_not_called()
+
     def test_peer_send_uses_verified_enter(self, orch: Orchestrator, monkeypatch) -> None:
         reviewer = _pane(_live_session())
         orch._panes_by_project["P"] = {"reviewer": reviewer}

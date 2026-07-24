@@ -321,6 +321,10 @@ def _input_has_content(region: str, fragment: str) -> bool:
 # the other two specs' markers) — see _classify_ready_for_provider below.
 _READY_SELFTEST_CASES: tuple[tuple[str, bool, str], ...] = (
     ("> \n? for shortcuts            Gemini 3.5 Flash (Medium)", True, "gemini"),  # agy idle
+    # agy account gates can coexist with the normal idle footer but still
+    # swallow Enter; both observed 2026-07-24 in issue #126 transcripts.
+    ("⣷  Signing in...\n? for shortcuts", False, "gemini"),
+    ("⚠ Verifying your account...\n? for shortcuts", False, "gemini"),
     # agy busy: even if the '? for shortcuts' footer persists, an active
     # interrupt indicator is a hard blocker → not ready (no premature done-nudge).
     ("Thinking... (esc to interrupt)\n? for shortcuts", False, "gemini"),  # agy busy

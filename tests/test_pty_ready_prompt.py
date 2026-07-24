@@ -36,6 +36,23 @@ def test_gemini_idle_input_box_only_is_ready() -> None:
     assert s.is_at_ready_prompt() is True
 
 
+@pytest.mark.parametrize(
+    "account_gate",
+    (
+        "⣷  Signing in...",
+        "⚠ Verifying your account...",
+    ),
+)
+def test_gemini_account_gate_with_idle_footer_is_not_ready(account_gate: str) -> None:
+    """#126: agy paints its idle footer while account checks still swallow Enter."""
+    s = _feed_screen(
+        account_gate,
+        "? for shortcuts",
+        "Gemini 3.6 Flash · medium (Google AI Pro)",
+    )
+    assert s.is_at_ready_prompt() is False
+
+
 def test_claude_working_esc_to_interrupt_is_not_ready() -> None:
     # Regression guard for the pre-existing claude busy indicator.
     s = _feed_screen("(esc to interrupt) building...", "bypass permissions")
