@@ -80,6 +80,12 @@ def _maybe_module(name: str, *, force: bool):
 
 @pytest.fixture(autouse=True)
 def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    # Most orchestration unit tests intentionally assert the legacy
+    # synchronous Lead-notice path without running a Qt event loop. Keep those
+    # tests focused by disabling the production 60 s inbox window per test;
+    # digest-specific tests explicitly remove/override this value.
+    monkeypatch.setenv("TAKKUB_INBOX_DIGEST_MS", "0")
+
     # Distinct name (not "runtime") so we don't collide with test-local fixtures
     # that do `(tmp_path / "runtime").mkdir()` without exist_ok. Tests that set
     # their own RUNTIME_DIR re-patch over ours (autouse runs first); this is

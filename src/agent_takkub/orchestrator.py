@@ -593,6 +593,11 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         # fires per project so concurrent done notices never overwrite each other
         # mid-generation.  Lead-absent items fall through to _pending_done_notices.
         self._lead_notify_queue: dict[str, collections.deque] = {}
+        # Clean done/peer-CC notices wait here for the configurable debounced
+        # Lead Inbox Digest window. _digest_timer stores the latest generation
+        # token per project so stale singleShot callbacks are harmless.
+        self._lead_digest_queue: dict[str, collections.deque] = {}
+        self._digest_timer: dict[str, int] = {}
         self._lead_notify_pumping: set[str] = set()
         # Busy-retry counter per project_ns; reset on delivery or Lead-dies path.
         self._lead_notify_retry: dict[str, int] = {}
