@@ -39,6 +39,21 @@ def test_chrome_bin_override_is_provider_neutral(tmp_path, monkeypatch) -> None:
     assert env["CHROME_BIN"] == str(chrome)
 
 
+def test_explicit_empty_env_does_not_use_host_chrome_bin(tmp_path, monkeypatch) -> None:
+    chrome = tmp_path / "chrome.exe"
+    chrome.write_bytes(b"stub")
+    monkeypatch.setenv("CHROME_BIN", str(chrome))
+    monkeypatch.setattr(browser_chrome.shutil, "which", lambda _name: None)
+
+    resolved = browser_chrome.find_chrome_executable(
+        platform="darwin",
+        env={},
+        home=tmp_path,
+    )
+
+    assert resolved is None
+
+
 def test_macos_user_app_path_still_resolves(tmp_path) -> None:
     chrome = (
         tmp_path / "Applications" / "Google Chrome.app" / "Contents" / "MacOS" / "Google Chrome"

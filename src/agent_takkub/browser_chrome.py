@@ -38,7 +38,7 @@ def find_chrome_executable(
 ) -> str | None:
     """Return a native Chrome/Chromium executable without launching it."""
     platform = platform or sys.platform
-    env = env or os.environ
+    env = env if env is not None else os.environ
     home = home or pathlib.Path.home()
 
     override = env.get("CHROME_BIN", "").strip()
