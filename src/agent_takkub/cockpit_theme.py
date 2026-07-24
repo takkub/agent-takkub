@@ -358,6 +358,7 @@ def build_stylesheet(sans_family: str, mono_family: str) -> str:
     _down_arrow_svg = (_icons_dir / "spin-down.svg").as_posix()
     _up_arrow_svg_disabled = (_icons_dir / "spin-up-disabled.svg").as_posix()
     _down_arrow_svg_disabled = (_icons_dir / "spin-down-disabled.svg").as_posix()
+    _combo_arrow_on_svg = (_icons_dir / "combo-down-on.svg").as_posix()
     return f"""
     QDialog#settingsWindow, QWidget#settingsWindow {{
         background: {GROUND_WINDOW};
@@ -550,12 +551,24 @@ def build_stylesheet(sans_family: str, mono_family: str) -> str:
     }}
     QComboBox::drop-down {{
         border: none;
+        border-left: 1px solid {BORDER_HAIRLINE};
         width: 22px;
     }}
+    /* Styling ::down-arrow at all suppresses Qt's native arrow, so an explicit
+       glyph is required or the combo renders as a bare text field and nobody
+       realizes it drops down. Same SVG-on-disk approach as QSpinBox above
+       (url(data:...) doesn't render, border-triangles come out as rectangles
+       in Qt6 — both proven by pixel measurement). */
     QComboBox::down-arrow {{
+        image: url("{_down_arrow_svg}");
         width: 8px;
-        height: 8px;
-        border: none;
+        height: 5px;
+    }}
+    QComboBox::down-arrow:on {{
+        image: url("{_combo_arrow_on_svg}");
+    }}
+    QComboBox::down-arrow:disabled {{
+        image: url("{_down_arrow_svg_disabled}");
     }}
     QComboBox QAbstractItemView {{
         background: {GROUND_SELECT};
