@@ -4,11 +4,20 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
-### Changed
-- Idle `takkub done` reminders now surface through a cross-provider cockpit
-  status/tray signal without submitting a model turn. After three consecutive
-  UI-only rounds by default (`TAKKUB_IDLE_REMIND_ESCALATE_ROUNDS`), the prior
-  PTY reminder is retained as a one-shot fallback.
+## [1.0.30] - 2026-07-24
+
+### Added (ใหม่)
+- **Lead Inbox Digest** — done notices + peer CC ที่มาเป็น burst ถูกรวมส่งเข้า Lead เป็น**ข้อความเดียว** (window 60 วิ · `TAKKUB_INBOX_DIGEST_MS`, `0` = ปิดกลับพฤติกรรมเดิม) ลดการปลุก Lead ให้ลาก context เต็มซ้ำต่อ notice (~5.1M tokens/7วันจาก audit) · `[FAILED]` / spawn-failed / delivery-unconfirmed **ไม่เข้า digest** ส่งทันทีและแซงคิว · auto-chain handoff ถูกแนบต่อท้าย digest ใน turn เดียวกัน — ลำดับ "เห็น done ก่อน act" คงเดิม
+- **เลือก model ต่อ assign ได้** (`takkub assign --model <id>`) — ยิงงาน scan/audit รอบแรกด้วยรุ่นถูก (haiku/flash) แล้ว escalate เป็นรุ่นใหญ่เฉพาะรอบ final ตามกลยุทธ์ Hybrid Tiered Scanning · precedence: **assign > role > provider > CLI default** (ชนะ `TAKKUB_TEAMMATE_MODEL` — แคบสุดชนะ) · provider ที่ไม่มี `model_flag` = error ชัดตอน assign ไม่เงียบ · มีผลเฉพาะ pane ที่ spawn ใหม่
+- **Browser QA ผ่าน `mb` ใช้ได้ทุก provider บน Windows (#123)** — cockpit จัดการ Chrome lifecycle เอง (module ใหม่ `browser_chrome.py`: launch native / reuse / cleanup ผ่าน CDP 9222 ตามทางที่พิสูจน์ empirical ใน issue) · `takkub doctor --fix` ติดตั้ง mb ให้ (run ปกติ = read-only) · #92 (mb+shard ชน CDP) บังคับที่ `pane_guard` แล้ว ไม่ใช่แค่ prose
+
+### Changed (ปรับ)
+- **Idle reminder ไม่ปลุก model แล้ว** — เตือน pane ที่ลืม `takkub done` ผ่าน **UI notice (status bar + tray)** แทนการ write+Enter เข้า PTY (เดิมปลุก model turn เต็ม ~296k tokens/ครั้ง) ใช้ได้ทุก provider (#103) · ยังมี escalation: idle ต่อเนื่องเกิน N รอบ (`TAKKUB_IDLE_REMIND_ESCALATE_ROUNDS`, default 3, `0` = UI-only ตลอด) ค่อย inject PTY หนเดียว — pane ที่เสร็จจริงแล้วเงียบยังถูกดันให้รายงาน
+
+### Fixed (แก้)
+- **#121 codex pane ค้าง "Starting MCP servers" ทั้งที่ policy ไม่ให้ MCP** — MCP รั่วจาก `~/.codex/config.toml` ระดับ user เพราะ codex merge config table · ตอนนี้ role ที่ policy deny-all จะถูกปิดรายตัวผ่าน `codex mcp list --json` + `features.plugins=false` (session-scoped, fail-closed, ไม่แตะไฟล์ user) · provider อื่นยังไม่มี surface เทียบเท่า — ระบุ gap ใน spec (#103)
+- **`$TAKKUB_ARTIFACTS_DIR` หายจาก pane gemini** — ย้ายการ stamp เข้า env builder (`pane_env`) โดยตรง provider branch ที่ early-return ก็ไม่ทำหลุดอีก
+- **#124 ปิดแบบ invalid diagnosis** — "one-shot delivery ไม่ทำงาน" ที่รายงานไว้ แท้จริง pointer เป็น by-design ของ role ที่ map เป็น codex/agy (ไม่มี system-prompt-file) — claude pane preload ปกติมาตลอด · ได้ของแถม: assign event มี `initial_delivery_reason` แยกเหตุชัด (provider-unsupported / fallback-after-fail / preloaded) + retry/queue path hardening + integration test 3-pane ผ่าน QTimer จริง
 
 ## [1.0.29] - 2026-07-24
 
