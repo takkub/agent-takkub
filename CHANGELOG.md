@@ -4,6 +4,13 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.33] - 2026-07-24
+
+### Added (ใหม่)
+- **Boot auto-advance (#128)** — pane เปิดมาเจอหน้าจอ boot ที่รู้จัก (trust-folder dialog ของ agy ที่ถามทุก worktree ใหม่ · press-enter-to-continue) → cockpit กด Enter ผ่านให้เองจนถึง prompt พร้อมรับงาน — เฉพาะ whitelist ต่อ provider, bounded 5 ครั้ง, log ทุกการกด
+- **Task-start watchdog ทุก pane (#128)** — ส่งงานแล้ว cockpit เฝ้าจนยืนยันว่า pane **เริ่มทำงานจริง** (log `task_started`) ค่อยเลิกดู · ไม่เริ่มในเวลา = `task_start_timeout` + แจ้ง Lead พร้อมสิ่งที่เห็นบนจอ — ปิดคลาส "pane ตายเงียบ" ทุกรูปแบบทุก provider
+- **agy ได้ 2 ชั้นกันโดนกลืน request (#126)** — warm-up ping (request แรกเป็น ping จิ๋วให้ Google eligibility check กินแทน task จริง) + `ready_settle_ms` (gemini=4000ms — ready ต้องนิ่งต่อเนื่อง 4 วิค่อยส่ง ตาม user directive)
+
 ## [1.0.32] - 2026-07-24
 
 ### Fixed (แก้)
