@@ -4,6 +4,12 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.31] - 2026-07-24
+
+### Fixed (แก้)
+- **#125 (HIGH) agy pane เปลี่ยน model เองเมื่อเจอ `--effort`** — regression จาก 1.0.29: role tier effort ที่ inject ให้ agy ชนกับ model ที่ user ตั้งไว้ (slug ของ agy encode effort อยู่แล้ว เช่น `gemini-3.1-pro-low`) แล้ว agy ตอบโต้ด้วยการ**ทิ้ง model ไปใช้ default เงียบๆ** · ตัด `effort_flag` ฝั่ง agy ทิ้ง (หลักการ: flag เสริมห้ามทำ model เปลี่ยน) — claude/codex ยังได้ effort ตาม tier ปกติ
+- **`browser_chrome` อ่าน env จริงของ host ทั้งที่ caller ส่ง dict ว่าง** — `env or os.environ` ทำ `{}` (falsy) fallback ไป host env → `CHROME_BIN` รั่วเข้า resolution · แก้เป็น None-check + regression test
+
 ## [1.0.30] - 2026-07-24
 
 ### Added (ใหม่)
