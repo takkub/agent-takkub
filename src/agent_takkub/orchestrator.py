@@ -740,7 +740,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         No-op when no goal exists, or when the task already carries the
         block (idempotent — guards against double-prepend on auto-respawn
         replay, which re-sends the stored last_assigned_task)."""
-        goal = self._session_goals.get(project_ns)
+        goal = getattr(self, "_session_goals", {}).get(project_ns)
         if not goal:
             return task
         if _SESSION_GOAL_HEADER in task:
@@ -826,9 +826,53 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         # Plan mode spawns a single PLANNER pane (not a shard) — it carries
         # shard_total=0 so done() treats it as a normal pane; the fan-out it
         # triggers later assigns the real shards with shard_total=N.
+        from .provider_config import CODEX, effective_provider_for
+        from .provider_spec import PROVIDER_REGISTRY
+
+        project_ns = self._resolve_project(project)
+        # Task Ledger (A7) records what the caller asked for, not delivery
+        # mechanics added below.
+        raw_task_for_ledger = task
+        task = self._apply_session_goal(task, project_ns)
+        base_role_a = _split_shard(role_name)[0]
+        effective_provider = effective_provider_for(base_role_a, project=project_ns)
+        if effective_provider == CODEX:
+            task = _rewrite_task_for_codex(task)
+        task = _append_verify_fail_hint(task, base_role_a)
+
+        plan_file = None
+        delivery_task = task
+        if plan and shard_total > 0:
+            plan_file = self._qa_plan_file(project_ns, base_role_a)
+            delivery_task = self._wrap_planner_task(task, plan_file, shard_total)
+
+        # Materialise the reliable file handoff before spawn. Claude can attach
+        # the full task to its per-spawn system-prompt file; the pointer remains
+        # the fallback and is still the delivery path for a running pane and
+        # providers without a confirmed file-backed equivalent.
+        paste_text, task_file = _task_handoff_pointer(
+            delivery_task,
+            project_ns,
+            role_name,
+        )
+        key = _exit_key(project_ns, role_name)
+        ps_assign = self._ps(key)
+        ps_assign.spawn_initial_task = None
+        ps_assign.spawn_initial_task_fallback = None
+        ps_assign.spawn_initial_prompt_file = None
+        ps_assign.spawn_initial_task_state = ""
+        if PROVIDER_REGISTRY[effective_provider].system_prompt_flag is not None:
+            ps_assign.spawn_initial_task = delivery_task
+            ps_assign.spawn_initial_task_fallback = paste_text
+            ps_assign.spawn_initial_task_state = "requested"
+
         spawn_shard_total = 0 if plan else shard_total
         ok, msg = self.spawn(role_name, cwd=cwd, project=project, _shard_total=spawn_shard_total)
         if not ok:
+            ps_assign.spawn_initial_task = None
+            ps_assign.spawn_initial_task_fallback = None
+            ps_assign.spawn_initial_prompt_file = None
+            ps_assign.spawn_initial_task_state = ""
             # The CLI already acked "task queued" to the Lead's shell before
             # this async spawn ran, so a failure here is invisible unless we
             # say so. Tell the Lead the task never landed (#26).
@@ -859,36 +903,8 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                         self._shard_groups.pop(gk_fail, None)
             return ok, msg
 
-        from .provider_config import CODEX, effective_provider_for
-
-        project_ns = self._resolve_project(project)
-        # Task Ledger (A7): the ledger records what the CALLER actually asked
-        # for, not the delivery-mechanics text (goal-prefix / codex-rewrite /
-        # verify-fail hint) added below — capture before any of that mutates
-        # `task`.
-        raw_task_for_ledger = task
-
-        # #50: prepend the session objective (if Lead set one) so every
-        # teammate sees the big picture. Done before the codex rewrite and
-        # before storing last_assigned_task, so the goal also rides along on
-        # auto-respawn replay (the _apply_session_goal guard keeps it idempotent).
-        task = self._apply_session_goal(task, project_ns)
-
-        # Use the *effective* provider: a codex role substituted by claude
-        # (provider unavailable) must keep the plain task — codex-specific
-        # task rewriting would only confuse the standing-in claude pane.
-        # Scoped to project_ns so the per-project role→CLI mapping decides.
-        base_role_a = _split_shard(role_name)[0]
-        effective_provider = effective_provider_for(base_role_a, project=project_ns)
-        if effective_provider == CODEX:
-            task = _rewrite_task_for_codex(task)
-        # Verify roles (qa/reviewer): tell them to report a failing result with
-        # `takkub done --fail` so the orchestrator can offer a fix loop (Tier 2a
-        # part 2 — completes the feedback loop the --fail mechanism enables).
-        task = _append_verify_fail_hint(task, base_role_a)
-        key = _exit_key(project_ns, role_name)
-        ps_assign = self._ps(key)
-        ps_assign.last_assigned_task = task
+        ps_assign.last_assigned_task = delivery_task
+        ps_assign.last_assigned_task_file = task_file
         # New task → fresh assign timestamp so done()'s evidence scan only
         # picks up screenshots captured for THIS task, not a stale one left
         # over from a previous assignment to the same pane (issue #5).
@@ -932,34 +948,36 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             # Remember the isolated worktree so done()/close() can finalize it
             # (merge proposal if the branch has commits, else safe-remove).
             ps_assign.worktree = worktree
+        initial_task_consumed = ps_assign.spawn_initial_task_state in {
+            "pending",
+            "delivered",
+            "fallback",
+        }
+        if not initial_task_consumed:
+            # Running pane, unsupported provider, or a mocked spawn in unit
+            # tests: preserve the established pointer/ready-polling delivery.
+            ps_assign.spawn_initial_task = None
+            ps_assign.spawn_initial_task_fallback = None
+            ps_assign.spawn_initial_prompt_file = None
+            ps_assign.spawn_initial_task_state = ""
+            self._send_when_ready(role_name, paste_text, project=project)
         if plan and shard_total > 0:
-            # Planner pane: wrap the task with planning instructions, remember
-            # the fan-out config, and let done() spawn the shards once the
-            # plan file is written. The planner itself is NOT a shard.
-            plan_file = self._qa_plan_file(project_ns, base_role_a)
-            planner_task = self._wrap_planner_task(task, plan_file, shard_total)
-            # Full text always lives in last_assigned_task for crash replay
-            # (spawn_engine._auto_respawn) — only the pasted payload may be a
-            # pointer (issue #1).
-            ps_assign.last_assigned_task = planner_task
-            paste_planner, planner_task_file = _task_handoff_pointer(
-                planner_task, project_ns, role_name
-            )
-            ps_assign.last_assigned_task_file = planner_task_file
+            # Planner wrapping happened before spawn so a fresh Claude pane can
+            # receive the complete planner task in its one-shot system prompt.
             ps_assign.plan_fanout = {
                 "shards": shard_total,
                 "cwd": cwd,
                 "task": task,
                 "plan_file": str(plan_file),
             }
-            self._send_when_ready(role_name, paste_planner, project=project)
             _log_event(
                 "assign_plan",
                 role=role_name,
                 cwd=cwd,
                 shards=shard_total,
                 plan_file=str(plan_file),
-                task_file=planner_task_file,
+                task_file=task_file,
+                initial_delivery=ps_assign.spawn_initial_task_state or "pointer",
             )
             return True, f"planner queued for {role_name} (fan-out {shard_total} on done)"
         if shard_total > 0:
@@ -980,11 +998,6 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                 )
             else:
                 self._shard_groups[group_key].total = shard_total
-        # Full text already lives in last_assigned_task (set above) for crash
-        # replay — only the pasted payload may be a pointer file (issue #1).
-        paste_text, task_file = _task_handoff_pointer(task, project_ns, role_name)
-        ps_assign.last_assigned_task_file = task_file
-        self._send_when_ready(role_name, paste_text, project=project)
         _log_event(
             "assign",
             role=role_name,
@@ -994,6 +1007,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             auto_chain=auto_chain,
             shard_total=shard_total,
             task_file=task_file,
+            initial_delivery=ps_assign.spawn_initial_task_state or "pointer",
         )
         return True, f"task queued for {role_name} (sending when ready)"
 

@@ -678,6 +678,7 @@
         "agent_takkub.pipeline_executor",
         "agent_takkub.plan_tier",
         "agent_takkub.provider_config",
+        "agent_takkub.provider_spec",
         "agent_takkub.provider_state",
         "agent_takkub.pty_session",
         "agent_takkub.roles",
@@ -697,7 +698,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 6,
-      "fan_out": 24
+      "fan_out": 25
     },
     {
       "module": "agent_takkub.orchestrator_text",
@@ -967,6 +968,7 @@
         "agent_takkub.doctor",
         "agent_takkub.lead_inbox",
         "agent_takkub.mcp_bridge",
+        "agent_takkub.orchestrator",
         "agent_takkub.orchestrator_text",
         "agent_takkub.provider_config",
         "agent_takkub.provider_install",
@@ -977,7 +979,7 @@
         "agent_takkub.settings_management.repositories.providers",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 13,
+      "fan_in": 14,
       "fan_out": 3
     },
     {
