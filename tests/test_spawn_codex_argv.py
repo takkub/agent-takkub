@@ -9,7 +9,8 @@ sandboxed away, so codex finishes its task but can never call
 
 These tests pin down:
   - macOS/Linux codex argv includes `-c sandbox_workspace_write.network_access=true`
-  - Windows codex argv is unaffected (still the bypass-sandbox escape hatch)
+  - Windows codex argv retains the bypass-sandbox escape hatch
+  - every platform enforces an explicit empty MCP policy per session
 """
 
 from __future__ import annotations
@@ -53,7 +54,14 @@ def _make_codex_pane(role: str = "codex"):
     return pane
 
 
-def _spawn_codex_and_capture_argv(qapp, monkeypatch, tmp_path, platform: str):
+def _spawn_codex_and_capture_argv(
+    qapp,
+    monkeypatch,
+    tmp_path,
+    platform: str,
+    *,
+    allowed_mcps: list[str] | None = None,
+):
     from agent_takkub import pane_tools_policy as ptp
     from agent_takkub import shared_dev_tools as sdt
     from agent_takkub.provider_config import CODEX
@@ -70,6 +78,9 @@ def _spawn_codex_and_capture_argv(qapp, monkeypatch, tmp_path, platform: str):
     # that don't care about MCP injection.
     monkeypatch.setattr(sdt, "SHARED_MCP_FILE", tmp_path / "shared-mcp.json")
     monkeypatch.setattr(ptp, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
+    if allowed_mcps is not None:
+        ptp.set_role_items("codex", "mcps", allowed_mcps)
+        sdt.regen_role_variants()
 
     pty_spawn_calls = []
 
@@ -90,6 +101,7 @@ def _spawn_codex_and_capture_argv(qapp, monkeypatch, tmp_path, platform: str):
         ),
         patch("agent_takkub.codex_agents_md.ensure_agents_md"),
         patch("agent_takkub.orchestrator.inject_user_profile_env"),
+        patch("agent_takkub.mcp_bridge._codex_resolved_mcp_names", return_value=[]),
     ):
         mock_pty = MagicMock()
         mock_pty.spawn.side_effect = lambda **kw: pty_spawn_calls.append(kw)
@@ -119,11 +131,31 @@ class TestCodexArgvNetworkAccess:
         idx = argv.index("-c")
         assert argv[idx + 1] == "sandbox_workspace_write.network_access=true"
 
-    def test_windows_codex_argv_unaffected(self, qapp, monkeypatch, tmp_path):
+    def test_windows_codex_argv_preserves_bypass_sandbox(self, qapp, monkeypatch, tmp_path):
         argv = _spawn_codex_and_capture_argv(qapp, monkeypatch, tmp_path, "win32")
 
         assert argv[:2] == ["codex", "--dangerously-bypass-approvals-and-sandbox"]
-        assert argv[2:] == ["-c", "model_reasoning_effort=high"]
+        assert argv[2:] == [
+            "-c",
+            "model_reasoning_effort=high",
+            "-c",
+            "mcp_servers={}",
+            "-c",
+            "features.plugins=false",
+        ]
+
+
+class TestCodexArgvMcpDeny:
+    @pytest.mark.parametrize("platform", ["win32", "darwin", "linux"])
+    def test_explicit_empty_policy_disables_config_and_plugin_mcps(
+        self, qapp, monkeypatch, tmp_path, platform
+    ):
+        argv = _spawn_codex_and_capture_argv(qapp, monkeypatch, tmp_path, platform)
+        config_values = [argv[i + 1] for i, arg in enumerate(argv[:-1]) if arg == "-c"]
+
+        assert "mcp_servers={}" in config_values
+        assert "features.plugins=false" in config_values
+        assert not any(value.startswith("mcp_servers.") for value in config_values)
 
 
 class TestCodexArgvMcpInjection:
@@ -148,7 +180,13 @@ class TestCodexArgvMcpInjection:
 
     def test_windows_codex_argv_gets_mcp_overrides(self, qapp, monkeypatch, tmp_path):
         self._write_shared_mcp(tmp_path)
-        argv = _spawn_codex_and_capture_argv(qapp, monkeypatch, tmp_path, "win32")
+        argv = _spawn_codex_and_capture_argv(
+            qapp,
+            monkeypatch,
+            tmp_path,
+            "win32",
+            allowed_mcps=["demo"],
+        )
 
         assert argv[:2] == ["codex", "--dangerously-bypass-approvals-and-sandbox"]
         assert "-c" in argv
@@ -156,8 +194,9 @@ class TestCodexArgvMcpInjection:
         assert 'mcp_servers.demo.args=["-e","1"]' in argv
         assert 'mcp_servers.demo.env={FOO="bar"}' in argv
 
-    def test_no_shared_mcp_file_means_no_mcp_overrides(self, qapp, monkeypatch, tmp_path):
-        # tmp_path/shared-mcp.json is never written — no policy anywhere.
+    def test_no_shared_mcp_file_still_blocks_inherited_mcps(self, qapp, monkeypatch, tmp_path):
+        # tmp_path/shared-mcp.json is never written; the built-in Codex policy
+        # must still block MCPs inherited from Codex's own configuration.
         argv = _spawn_codex_and_capture_argv(qapp, monkeypatch, tmp_path, "win32")
 
         assert argv == [
@@ -165,5 +204,9 @@ class TestCodexArgvMcpInjection:
             "--dangerously-bypass-approvals-and-sandbox",
             "-c",
             "model_reasoning_effort=high",
+            "-c",
+            "mcp_servers={}",
+            "-c",
+            "features.plugins=false",
         ]
         assert not any(str(arg).startswith("mcp_servers.") for arg in argv)

@@ -208,7 +208,7 @@ def shared_mcp_config_path_for_role(role: str) -> str | None:
     # role gets no MCPs") and must go through the variant path so the empty
     # variant returns None (skip --mcp-config) — `if allowed:` would flip
     # that into the full master config.
-    allowed = effective_mcps(role, _ROLE_MCP_POLICY.get(role))
+    allowed = role_mcp_allowlist(role)
     if allowed is not None:  # role has policy (override or built-in)
         variant = _role_variant_path(role)
         if variant.is_file():
@@ -456,8 +456,9 @@ _USER_MCP_DEFAULT_ALLOW: frozenset[str] = frozenset()
 #   - critic/designer: visual review reads shots, may inspect runtime DOM.
 #   - reviewer/frontend/backend/mobile/devops: code roles work through the
 #     dev server / shell / psql directly, not MCPs.
-#   - codex/gemini: not claude — bypass --mcp-config entirely, listed here
-#     for documentation only (won't be used; argv builder skips for them).
+#   - codex: provider-native pane, but the policy still applies and builds
+#     per-session config overrides. Gemini currently has no safe
+#     session-scoped MCP adapter (#103) and keeps its existing fallback.
 # obsidian-vault removed from every role 2026-07-02: the claude-obsidian
 # plugin (its only provider) was uninstalled after a usage audit found 68
 # calls across ~3,200 sessions. Non-browser roles keep an explicit EMPTY
@@ -473,6 +474,7 @@ _ROLE_MCP_POLICY: dict[str, frozenset[str]] = {
     "backend": frozenset(),
     "mobile": frozenset(),
     "devops": frozenset(),
+    "codex": frozenset(),
 }
 
 
@@ -481,6 +483,18 @@ def _role_variant_path(role: str) -> pathlib.Path:
     Derived from SHARED_MCP_FILE so test fixtures that redirect that
     constant pick up the variants automatically."""
     return SHARED_MCP_FILE.parent / f"shared-mcp-{role}.json"
+
+
+def role_mcp_allowlist(role: str) -> frozenset[str] | None:
+    """Return the role's effective MCP policy without collapsing its states.
+
+    ``frozenset()`` is an explicit deny-all policy; ``None`` means the role
+    has no policy and retains the legacy master-config passthrough.  Provider
+    adapters need this distinction even when there is no shared MCP file:
+    Codex, for example, must suppress MCPs inherited from its own user config
+    whenever the cockpit policy explicitly denies them (#121).
+    """
+    return effective_mcps(role, _ROLE_MCP_POLICY.get(role))
 
 
 def add_mcp_server(name: str, cfg: dict, force: bool = False) -> bool:

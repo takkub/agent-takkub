@@ -28,6 +28,7 @@ def isolated_mcp_file(monkeypatch: pytest.MonkeyPatch, tmp_path):
     target = tmp_path / "shared-mcp.json"
     monkeypatch.setattr(sdt, "SHARED_MCP_FILE", target)
     monkeypatch.setattr(ptp, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
+    monkeypatch.setattr(mcp_bridge, "_codex_resolved_mcp_names", lambda *args: [])
     return target
 
 
@@ -57,10 +58,36 @@ class TestTomlLiteral:
 
 
 class TestCodexMcpArgv:
-    def test_no_master_file_returns_empty(self, isolated_mcp_file):
-        assert mcp_bridge.mcp_argv_for_provider("codex", "codex", None, "proj") == []
+    def test_default_codex_policy_disables_config_and_plugin_mcps(self, isolated_mcp_file):
+        assert mcp_bridge.mcp_argv_for_provider("codex", "codex", None, "proj") == [
+            "-c",
+            "mcp_servers={}",
+            "-c",
+            "features.plugins=false",
+        ]
+
+    def test_disables_every_resolved_inherited_server(self, isolated_mcp_file, monkeypatch):
+        monkeypatch.setattr(
+            mcp_bridge,
+            "_codex_resolved_mcp_names",
+            lambda *args: ["user_mcp", "project-mcp"],
+        )
+
+        assert mcp_bridge.mcp_argv_for_provider("codex", "codex", None, "proj") == [
+            "-c",
+            "mcp_servers={}",
+            "-c",
+            "features.plugins=false",
+            "-c",
+            "mcp_servers.user_mcp.enabled=false",
+            "-c",
+            "mcp_servers.project-mcp.enabled=false",
+        ]
 
     def test_translates_command_args_env(self, isolated_mcp_file):
+        from agent_takkub import pane_tools_policy as ptp
+        from agent_takkub import shared_dev_tools as sdt
+
         _write_master(
             isolated_mcp_file,
             {
@@ -72,6 +99,8 @@ class TestCodexMcpArgv:
                 }
             },
         )
+        ptp.set_role_items("codex", "mcps", ["demo"])
+        sdt.regen_role_variants()
         argv = mcp_bridge.mcp_argv_for_provider("codex", "codex", None, "proj")
         pairs = list(zip(argv[0::2], argv[1::2], strict=True))
         assert pairs == [
@@ -82,18 +111,25 @@ class TestCodexMcpArgv:
         # "type" has no codex equivalent — never forwarded.
         assert not any("type" in tok for tok in argv)
 
-    def test_role_with_empty_policy_gets_no_overrides(self, isolated_mcp_file):
+    def test_role_with_empty_policy_disables_all_codex_mcp_sources(self, isolated_mcp_file):
         from agent_takkub import pane_tools_policy as ptp
         from agent_takkub import shared_dev_tools as sdt
 
         _write_master(isolated_mcp_file, {"demo": {"command": "node"}})
         ptp.set_role_items("backend", "mcps", [])  # explicit empty allowlist
         sdt.regen_role_variants()  # generates the empty shared-mcp-backend.json variant
-        assert mcp_bridge.mcp_argv_for_provider("codex", "backend", None, "proj") == []
+        assert mcp_bridge.mcp_argv_for_provider("codex", "backend", None, "proj") == [
+            "-c",
+            "mcp_servers={}",
+            "-c",
+            "features.plugins=false",
+        ]
 
     def test_never_raises_on_corrupt_master_file(self, isolated_mcp_file):
         isolated_mcp_file.write_text("{not json", encoding="utf-8")
-        assert mcp_bridge.mcp_argv_for_provider("codex", "codex", None, "proj") == []
+        # QA has an allow policy, so this exercises the ordinary config-reading
+        # path rather than Codex's deny-all fast path.
+        assert mcp_bridge.mcp_argv_for_provider("codex", "qa", None, "proj") == []
 
 
 class TestClaudeMcpArgv:
