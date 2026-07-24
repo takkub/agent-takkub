@@ -109,7 +109,13 @@ class ProviderSpec:
     plugin_dirs: tuple[str, ...] = field(default_factory=tuple)
     disallowed_tools: tuple[str, ...] = field(default_factory=tuple)
     model_flag: str | None = None
+    # Most CLIs accept effort as a regular ``flag value`` pair. Codex instead
+    # exposes it through its generic config override:
+    # ``-c model_reasoning_effort=<level>``. When effort_config_key is set,
+    # spawn_engine prefixes the effort value with ``<key>=`` before passing it
+    # to effort_flag. A provider with effort_flag=None receives no effort arg.
     effort_flag: str | None = None
+    effort_config_key: str | None = None
     fallback_model_flag: str | None = None
     settings_flag: str | None = None
     task_notice_preamble: str | None = None
@@ -340,6 +346,11 @@ codex_spec = ProviderSpec(
     model_flag="--model",  # verified against the installed binary: `codex --help`
     # documents `-m, --model <MODEL>` for the interactive TUI (and
     # codex_helper.py:118 already passes `--model` to `codex exec`).
+    effort_flag="-c",
+    effort_config_key="model_reasoning_effort",
+    # Codex has no direct --effort option. Its documented session-scoped config
+    # override accepts `-c model_reasoning_effort=<low|medium|high>`, so role
+    # tier effort can be wired without mutating the user's config.toml.
     produces_jsonl_transcript=False,
     supports_token_meter=False,
     supports_remote_history=False,
@@ -394,6 +405,7 @@ gemini_spec = ProviderSpec(
     supports_slash_commands=False,
     supports_hooks=False,
     model_flag="--model",  # agy 1.0.5 changelog + confirmed `agy models` subcommand
+    effort_flag="--effort",  # agy 1.1.5 --help: low|medium|high
     produces_jsonl_transcript=False,
     supports_token_meter=False,
     supports_remote_history=False,
@@ -459,6 +471,9 @@ opencode_spec = ProviderSpec(
     supports_slash_commands=False,
     supports_hooks=False,
     model_flag="--model",  # `-m provider/model` — per-role model selection hook
+    # GAP (#103): opencode 1.18.4 `opencode --help` exposes no reasoning-effort
+    # flag. Keep None so the generic spawn path cannot pass an invented option.
+    effort_flag=None,
     produces_jsonl_transcript=False,
     supports_token_meter=False,
     supports_remote_history=False,
@@ -518,6 +533,9 @@ kimi_spec = ProviderSpec(
     supports_slash_commands=False,
     supports_hooks=False,
     model_flag="--model",  # Kimi CLI docs: `--model <id>` (for example `k2.5`)
+    # GAP (#103): kimi 1.49.0 only exposes boolean --thinking/--no-thinking,
+    # not low|medium|high. Do not collapse three role tiers into that toggle.
+    effort_flag=None,
     produces_jsonl_transcript=False,
     supports_token_meter=False,
     supports_remote_history=False,
@@ -580,6 +598,9 @@ cursor_spec = ProviderSpec(
     supports_hooks=False,
     # Cursor CLI parameter reference: `--model <model>`; `agent models` lists ids.
     model_flag="--model",
+    # GAP (#103): Cursor's official CLI parameter reference lists no reasoning
+    # effort option. Keep None until Cursor documents a session-scoped surface.
+    effort_flag=None,
     produces_jsonl_transcript=False,
     supports_token_meter=False,
     supports_remote_history=False,

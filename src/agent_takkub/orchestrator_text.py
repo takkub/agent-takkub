@@ -294,10 +294,11 @@ def scan_artifacts(
 
 
 def _teammate_tier(role_name: str) -> tuple[str, str, str]:
-    """(model, effort, fallback) for a claude teammate role.
+    """Return the configured ``(model, effort, fallback)`` role tier.
 
-    Non-claude panes (codex/gemini/shell) never reach this — they spawn via a
-    separate path that skips claude model flags entirely.
+    The model and fallback IDs are Claude-specific. The low/medium/high effort
+    value is also consumed by non-Claude providers whose ProviderSpec declares
+    a supported session-scoped effort argument.
     """
     return _ROLE_MODEL_TIERS.get(role_name, _DEFAULT_TEAMMATE_TIER)
 

@@ -122,8 +122,8 @@ class TestCodexArgvNetworkAccess:
     def test_windows_codex_argv_unaffected(self, qapp, monkeypatch, tmp_path):
         argv = _spawn_codex_and_capture_argv(qapp, monkeypatch, tmp_path, "win32")
 
-        assert argv == ["codex", "--dangerously-bypass-approvals-and-sandbox"]
-        assert "-c" not in argv
+        assert argv[:2] == ["codex", "--dangerously-bypass-approvals-and-sandbox"]
+        assert argv[2:] == ["-c", "model_reasoning_effort=high"]
 
 
 class TestCodexArgvMcpInjection:
@@ -156,8 +156,14 @@ class TestCodexArgvMcpInjection:
         assert 'mcp_servers.demo.args=["-e","1"]' in argv
         assert 'mcp_servers.demo.env={FOO="bar"}' in argv
 
-    def test_no_shared_mcp_file_means_no_c_overrides(self, qapp, monkeypatch, tmp_path):
+    def test_no_shared_mcp_file_means_no_mcp_overrides(self, qapp, monkeypatch, tmp_path):
         # tmp_path/shared-mcp.json is never written — no policy anywhere.
         argv = _spawn_codex_and_capture_argv(qapp, monkeypatch, tmp_path, "win32")
 
-        assert argv == ["codex", "--dangerously-bypass-approvals-and-sandbox"]
+        assert argv == [
+            "codex",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "-c",
+            "model_reasoning_effort=high",
+        ]
+        assert not any(str(arg).startswith("mcp_servers.") for arg in argv)

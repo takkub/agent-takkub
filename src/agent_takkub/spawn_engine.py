@@ -24,6 +24,7 @@ import uuid as _uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import QTimer
 
@@ -63,6 +64,9 @@ from .pipeline_executor import _split_shard
 from .pty_session import PtySession
 from .roles import LEAD
 
+if TYPE_CHECKING:
+    from .provider_spec import ProviderSpec
+
 _log = logging.getLogger(__name__)
 
 # ── test-mockability shim ────────────────────────────────────────
@@ -85,6 +89,23 @@ def _from_orch(name: str):
         if val is not _SENTINEL:
             return val
     return globals()[name]
+
+
+def _append_provider_effort(
+    argv: list[str],
+    spec: ProviderSpec,
+    effort: str,
+) -> None:
+    """Append one provider's session-scoped reasoning-effort override.
+
+    ``effort_flag=None`` is the explicit unsupported-provider contract. Most
+    providers receive ``<flag> <effort>``; config-backed providers such as
+    Codex receive ``<flag> <config-key>=<effort>``.
+    """
+    if not effort or not spec.effort_flag:
+        return
+    value = f"{spec.effort_config_key}={effort}" if spec.effort_config_key is not None else effort
+    argv.extend([spec.effort_flag, value])
 
 
 # ── spawn constants ──────────────────────────────────────────────
@@ -1234,6 +1255,14 @@ class SpawnEngineMixin:
                 provider_model = role_model_for(base_role, spec.name) or model_for(spec.name)
                 if provider_model:
                     provider_argv.extend([spec.model_flag, provider_model])
+            if not _is_lead:
+                # Role tiers are provider-neutral for effort: a pane mapped to
+                # agy or Codex should retain the role's low/medium/high setting
+                # just like a Claude-backed pane. Explicitly empty env disables
+                # the argument for every provider.
+                _, tier_effort, _ = _teammate_tier(base_role)
+                provider_effort = os.environ.get("TAKKUB_TEAMMATE_EFFORT", tier_effort).strip()
+                _append_provider_effort(provider_argv, spec, provider_effort)
             # MCP injection (#100): dispatched per spec.mcp_adapter_variant —
             # codex gets native `-c mcp_servers.<name>.<key>=…` session
             # overrides; agy's "plugin_import" resolves to a documented no-op
@@ -1674,8 +1703,11 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             if teammate_model:
                 argv.extend(["--model", teammate_model])
             teammate_effort = os.environ.get("TAKKUB_TEAMMATE_EFFORT", tier_effort).strip()
-            if teammate_effort:
-                argv.extend(["--effort", teammate_effort])
+            _append_provider_effort(
+                argv,
+                PROVIDER_REGISTRY[CLAUDE],
+                teammate_effort,
+            )
             # Graceful degradation under load. When the teammate's model is
             # overloaded (HTTP 529) or not found, claude switches to this
             # model for the rest of the session instead of hard-failing the
