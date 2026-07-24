@@ -59,3 +59,63 @@ Lint:
 ```text
 .venv\Scripts\ruff.exe check src\agent_takkub\provider_spec.py src\agent_takkub\pty_session.py tests\test_pty_ready_prompt.py tests\test_delivery_unconfirmed.py
 ```
+
+## Round 2 — post-submit recovery
+
+The first fix (`690a1b7`) correctly prevents delivery while an account gate is
+already visible during boot, but it cannot cover a gate triggered by the
+request being submitted. The decisive runtime evidence is:
+
+- `runtime/sessions/2026-07-24/agent-takkub/gemini-173055.transcript.log`
+- line 47: agy is at its normal `? for shortcuts` ready footer.
+- lines 48–49: cockpit renders the complete `[ROLE: gemini ...]` smoke-test
+  task in the composer.
+- line 51 onward: the idle footer remains visible after submit.
+- lines 59–61: only then does agy paint `⚠ Verifying your account...` and the
+  Google eligibility explanation.
+- the transcript ends back at the idle composer without `Generating...`, a
+  model response, or `takkub done`.
+
+This order proves the first request itself triggered eligibility verification
+and was consumed. A pre-send blocker cannot prevent that sequence by design.
+
+### Change
+
+- Added provider-declared `post_submit_recovery_markers`, working markers, a
+  90-second observation window, and a two-redelivery bound to `ProviderSpec`.
+  Only agy/gemini currently declares a recovery marker; all other providers
+  take the generic no-op path (#103).
+- After normal ready-gated paste plus verified Enter, task delivery arms the
+  short watcher. If `verifying your account` appears and then clears back to
+  ready, it sends the entire original task through `_send_when_ready()` again
+  and logs `task_redeliver_after_verify`.
+- Each re-delivery carries its attempt count, so at most two re-pastes occur.
+- `Thinking`, `Generating`, and interrupt/cancel status markers cancel
+  recovery. The re-delivery also captures the exact session and aborts if it
+  is no longer ready at its first delivery poll, closing the race where real
+  work starts between the watcher verdict and paste.
+- Provider marker scanning uses the same bottom-row status region as ready
+  detection, preventing task/body text that quotes the marker from triggering
+  recovery.
+
+### Round 2 verification
+
+Targeted tests cover:
+
+- ready → deliver → verification appears → clears → full-task re-delivery;
+- verification clears into a real work marker → no re-delivery;
+- work starts before the guarded re-delivery poll → no re-delivery;
+- two-retry cap and providers without recovery markers → no-op;
+- footer-scoped provider marker matching.
+
+```text
+PYTHONPATH=src pytest -q tests/test_delivery_unconfirmed.py tests/test_pty_ready_prompt.py
+python -c "import sys, pytest; sys.path.insert(0, 'src'); raise SystemExit(pytest.main(['-q']))"
+ruff check src/agent_takkub/provider_spec.py src/agent_takkub/pty_session.py src/agent_takkub/lead_inbox.py tests/test_delivery_unconfirmed.py tests/test_pty_ready_prompt.py
+ruff format --check src/agent_takkub/provider_spec.py src/agent_takkub/pty_session.py src/agent_takkub/lead_inbox.py tests/test_delivery_unconfirmed.py tests/test_pty_ready_prompt.py
+```
+
+Both the targeted suite and the full repository suite pass. The full-suite
+launcher inserts this worktree's `src` only in the parent pytest process rather
+than exporting `PYTHONPATH`, so installed-mode subprocess tests still exercise
+their isolated wheel/venv as intended.

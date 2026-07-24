@@ -319,6 +319,7 @@ class TestVerifiedEnterWiring:
             patch("agent_takkub.orchestrator._log_event"),
             patch("agent_takkub.orchestrator._delayed_enter_verified") as verified,
             patch("agent_takkub.orchestrator._delayed_enter") as plain,
+            patch.object(orch, "_arm_post_submit_recovery") as recovery,
         ):
             orch._send_when_ready("qa", task, max_wait_ms=1000, project="P")
 
@@ -326,6 +327,8 @@ class TestVerifiedEnterWiring:
         assert verified.call_args[0][1] is qa.session
         assert verified.call_args.kwargs["content_fragment"] == task
         assert verified.call_args.kwargs["payload"]
+        recovery.assert_called_once()
+        assert recovery.call_args.args[:4] == ("qa", task, "P", qa.session)
         plain.assert_not_called()
 
     def test_peer_send_uses_verified_enter(self, orch: Orchestrator, monkeypatch) -> None:
@@ -342,6 +345,132 @@ class TestVerifiedEnterWiring:
         verified.assert_called_once()
         assert verified.call_args[0][1] is reviewer.session
         plain.assert_not_called()
+
+
+class TestPostSubmitVerificationRecovery:
+    """#126 round 2: agy may consume the first request in an eligibility gate."""
+
+    def _agy(self, orch: Orchestrator, monkeypatch):
+        from agent_takkub import provider_config
+
+        qa = _pane(_live_session())
+        orch._panes_by_project["P"] = {"lead": _pane(_live_session()), "qa": qa}
+        monkeypatch.setattr(
+            provider_config,
+            "effective_provider_for",
+            lambda role, project=None: "gemini",
+        )
+        monkeypatch.setattr(orch_mod.QTimer, "singleShot", staticmethod(lambda _ms, fn: fn()))
+        return qa
+
+    def test_verify_appears_then_clears_and_redelivers_full_task(
+        self, orch: Orchestrator, monkeypatch
+    ) -> None:
+        task = "[ROLE: qa] full multi-line task\nread the spec\nrun every targeted test"
+        qa = self._agy(orch, monkeypatch)
+        # Poll 1: recovery marker appears. Poll 2: it cleared, no working
+        # marker is present, and the pane is idle again.
+        qa.session.shows_any_status_marker.side_effect = [True, False, False]
+        qa.session.is_at_ready_prompt.return_value = True
+
+        with (
+            patch.object(orch, "_send_when_ready") as redeliver,
+            patch("agent_takkub.lead_inbox._log_event") as log,
+        ):
+            orch._arm_post_submit_recovery("qa", task, "P", qa.session)
+
+        redeliver.assert_called_once_with(
+            "qa",
+            task,
+            project="P",
+            _post_submit_recovery_attempt=1,
+            _redelivery_session=qa.session,
+        )
+        assert any(
+            call.args and call.args[0] == "task_redeliver_after_verify"
+            for call in log.call_args_list
+        )
+
+    def test_verify_clears_into_working_and_never_redelivers(
+        self, orch: Orchestrator, monkeypatch
+    ) -> None:
+        qa = self._agy(orch, monkeypatch)
+        # Recovery marker appears, then clears directly into a genuine
+        # Generating/Thinking marker. That positive busy evidence must win.
+        qa.session.shows_any_status_marker.side_effect = [True, False, True]
+
+        with (
+            patch.object(orch, "_send_when_ready") as redeliver,
+            patch("agent_takkub.lead_inbox._log_event") as log,
+        ):
+            orch._arm_post_submit_recovery("qa", "do not duplicate", "P", qa.session)
+
+        redeliver.assert_not_called()
+        assert not any(
+            call.args and call.args[0] == "task_redeliver_after_verify"
+            for call in log.call_args_list
+        )
+
+    def test_guarded_redelivery_aborts_if_work_starts_before_first_poll(
+        self, orch: Orchestrator, monkeypatch
+    ) -> None:
+        qa = self._agy(orch, monkeypatch)
+        qa.session.is_at_ready_prompt.return_value = False
+
+        with (
+            patch.object(orch, "_arm_post_submit_recovery") as recovery,
+            patch("agent_takkub.orchestrator._delayed_enter_verified") as verified,
+        ):
+            orch._send_when_ready(
+                "qa",
+                "do not duplicate",
+                project="P",
+                _post_submit_recovery_attempt=1,
+                _redelivery_session=qa.session,
+            )
+
+        verified.assert_not_called()
+        recovery.assert_not_called()
+        qa.session.write.assert_not_called()
+
+    def test_retry_budget_stops_arming_after_two_redeliveries(
+        self, orch: Orchestrator, monkeypatch
+    ) -> None:
+        qa = self._agy(orch, monkeypatch)
+
+        with patch.object(orch_mod.QTimer, "singleShot") as timer:
+            orch._arm_post_submit_recovery(
+                "qa",
+                "bounded task",
+                "P",
+                qa.session,
+                recovery_attempt=2,
+            )
+
+        timer.assert_not_called()
+
+    def test_provider_without_recovery_markers_is_noop(
+        self, orch: Orchestrator, monkeypatch
+    ) -> None:
+        from agent_takkub import provider_config
+
+        reviewer = _pane(_live_session())
+        orch._panes_by_project["P"] = {"reviewer": reviewer}
+        monkeypatch.setattr(
+            provider_config,
+            "effective_provider_for",
+            lambda role, project=None: "claude",
+        )
+
+        with patch.object(orch_mod.QTimer, "singleShot") as timer:
+            orch._arm_post_submit_recovery(
+                "reviewer",
+                "normal task",
+                "P",
+                reviewer.session,
+            )
+
+        timer.assert_not_called()
 
 
 class TestSpawnFailureNotSilent:

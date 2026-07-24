@@ -110,6 +110,23 @@ class TestShowsPendingInput:
         assert s.shows_pending_input() is False
 
 
+class TestStatusMarkers:
+    def test_provider_marker_is_found_in_footer_region(self) -> None:
+        s = _feed_screen(
+            "⚠ Verifying your account...",
+            "? for shortcuts",
+        )
+        assert s.shows_any_status_marker(("verifying your account",)) is True
+
+    def test_body_quote_does_not_trigger_provider_marker(self) -> None:
+        s = _feed_screen(
+            "The issue says Verifying your account can swallow a request",
+            *["" for _ in range(8)],
+            "? for shortcuts",
+        )
+        assert s.shows_any_status_marker(("verifying your account",)) is False
+
+
 def test_gemini_thinking_with_update_footer_is_not_ready() -> None:
     # The update footer must not flip a *thinking* gemini to ready -- the
     # "esc to cancel" busy indicator still takes precedence.
