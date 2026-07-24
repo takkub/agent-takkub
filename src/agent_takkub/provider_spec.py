@@ -86,6 +86,18 @@ class ProviderSpec:
     ready_hard_blockers: tuple[str, ...] = field(default_factory=tuple)
     ready_rules: tuple[ReadyRule, ...] = field(default_factory=tuple)
     ready_wait_ms: int = 45_000
+    # Some providers trigger a transient server-side gate only after the first
+    # submitted request.  If one of these markers appears, delivery watches for
+    # it to clear and may re-deliver the original task because that request was
+    # consumed by the gate.  Empty by default: providers without observed
+    # post-submit gates pay no polling cost (#103/#126).
+    post_submit_recovery_markers: tuple[str, ...] = field(default_factory=tuple)
+    # Positive evidence that the submitted request really entered a work turn.
+    # This wins over recovery so a marker that clears into genuine processing
+    # can never cause a duplicate task.
+    post_submit_working_markers: tuple[str, ...] = field(default_factory=tuple)
+    post_submit_recovery_window_ms: int = 90_000
+    post_submit_max_redeliveries: int = 2
 
     # ─── 5. Context injection strategy ───
     context_strategy: str = "none"
@@ -401,6 +413,16 @@ gemini_spec = ProviderSpec(
         ReadyRule("gemini cli update available!", True),  # pty_session.py:224 (#51)
     ),
     ready_wait_ms=90_000,  # lead_inbox.py:431-435 (agy cold-boot allowance)
+    # agy 1.1.6 can trigger Google eligibility verification *after* accepting
+    # the first submit.  The request is then consumed and the pane returns
+    # idle, so the full task must be pasted again once the gate clears (#126).
+    post_submit_recovery_markers=("verifying your account",),
+    post_submit_working_markers=(
+        "esc to interrupt",
+        "esc to cancel",
+        "thinking...",
+        "generating...",
+    ),
     context_strategy="agents_md_file",
     cheatsheet_filename="AGENTS.md",
     inline_learned_notes=False,

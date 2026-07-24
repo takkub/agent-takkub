@@ -1072,6 +1072,19 @@ class PtySession(QObject):
         """
         return _input_has_content(_ready_region(self.display_lines()), fragment)
 
+    def shows_any_status_marker(self, markers: tuple[str, ...]) -> bool:
+        """True when any provider-supplied marker is in the live status region.
+
+        Delivery recovery uses this with marker lists from ``ProviderSpec``.
+        Keeping the scan here reuses the same bottom-row scoping as ready/busy
+        detection, so task text that merely quotes a marker cannot trigger a
+        re-delivery (#103/#126).
+        """
+        if not markers:
+            return False
+        region = _ready_region(self.display_lines())
+        return any(marker.lower() in region for marker in markers)
+
     def is_at_update_splash(self) -> bool:
         """True when a codex 'update available!' startup splash is blocking the prompt.
 

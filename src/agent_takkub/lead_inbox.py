@@ -107,6 +107,10 @@ _RENDER_WAIT_MAX = 6
 # hard timeout stays wall-clock accurate.
 _READY_POLL_FIRST_MS = 300
 _READY_POLL_INTERVAL_MS = 150
+# Post-submit provider-gate watcher cadence.  This is intentionally slower than
+# the normal ready poll: it observes a server-side state transition rather than
+# racing to deliver into a newly rendered prompt.
+_POST_SUBMIT_RECOVERY_POLL_MS = 300
 # Claude roles that load MCP servers need the same cold-boot allowance as the
 # slower provider CLIs.  Claude's base provider spec intentionally stays at
 # 45 s because roles without MCPs normally render their prompt well inside
@@ -506,6 +510,9 @@ class LeadInboxMixin:
         task: str,
         max_wait_ms: int = 45_000,
         project: str | None = None,
+        *,
+        _post_submit_recovery_attempt: int = 0,
+        _redelivery_session: PtySession | None = None,
     ) -> None:
         """Poll until claude's main prompt is idle, then paste task + Enter.
 
@@ -516,6 +523,12 @@ class LeadInboxMixin:
         max_wait_ms = self._ready_wait_ms(role_name, project, max_wait_ms)
         pane = self._project_panes(project).get(role_name)
         if pane is None:
+            return
+        # A post-verify re-delivery is safe only while the exact pane/session
+        # observed idle by the watcher is still idle.  Do not queue behind a
+        # work turn that starts in the short gap before the first ready poll;
+        # doing so would submit a duplicate as soon as that real turn ends.
+        if _redelivery_session is not None and pane.session is not _redelivery_session:
             return
         elapsed = [0]
         sent = [False]
@@ -559,6 +572,17 @@ class LeadInboxMixin:
                     remaining=rem,
                 ),
             )
+            self._arm_post_submit_recovery(
+                role_name,
+                task,
+                project,
+                _task_sess,
+                recovery_attempt=_post_submit_recovery_attempt,
+                # Start just after the initial CR rather than waiting for the
+                # verified-submit grace. A short eligibility flash could clear
+                # inside that 600-ms grace and must still be observed.
+                start_delay_ms=_enter_delay_ms(payload) + _READY_POLL_INTERVAL_MS,
+            )
             if unconfirmed:
                 # Delivered blind — the pane never signalled ready, so on a cold
                 # re-spawn the paste may have been swallowed (issue #26). Surface
@@ -569,6 +593,8 @@ class LeadInboxMixin:
             if sent[0]:
                 return
             if pane.session is None or not pane.session.is_alive:
+                if _redelivery_session is not None:
+                    return
                 # Session absent or not yet alive — may be deferred by the
                 # spawn gate (modal/popup blocking ConPTY construction, see
                 # spawn_engine._retry_deferred_spawn). That retry loop has no
@@ -614,6 +640,11 @@ class LeadInboxMixin:
             if pane.session.is_at_ready_prompt():
                 _deliver()
                 return
+            if _redelivery_session is not None:
+                # The provider began a genuine work turn after the watcher saw
+                # idle but before this guarded re-delivery reached its first
+                # poll.  Abort permanently; waiting for idle would duplicate it.
+                return
             elapsed[0] += _READY_POLL_INTERVAL_MS
             if elapsed[0] >= max_wait_ms:
                 # Hard timeout: pane never reached the ready prompt. Paste
@@ -625,6 +656,93 @@ class LeadInboxMixin:
             QTimer.singleShot(_READY_POLL_INTERVAL_MS, _check)
 
         QTimer.singleShot(_READY_POLL_FIRST_MS, _check)
+
+    def _arm_post_submit_recovery(
+        self,
+        role_name: str,
+        task: str,
+        project: str | None,
+        session: PtySession,
+        *,
+        recovery_attempt: int = 0,
+        start_delay_ms: int = 0,
+    ) -> None:
+        """Recover a request consumed by a provider's post-submit gate.
+
+        Marker lists and bounds come entirely from ``ProviderSpec``.  Providers
+        without configured recovery markers are a no-op.  Once a marker is
+        observed, the watcher waits for it to clear and for the exact session
+        to return ready, then routes the *whole original task* through
+        ``_send_when_ready`` again.  A real busy/thinking marker cancels the
+        watcher so work already in progress is never duplicated (#103/#126).
+        """
+        try:
+            from .provider_config import effective_provider_for
+            from .provider_spec import PROVIDER_REGISTRY
+
+            project_ns = self._resolve_project(project)
+            provider = effective_provider_for(role_name, project=project_ns)
+            spec = PROVIDER_REGISTRY.get(provider)
+        except Exception:
+            return
+
+        if (
+            spec is None
+            or not spec.post_submit_recovery_markers
+            or recovery_attempt >= spec.post_submit_max_redeliveries
+        ):
+            return
+
+        pane = self._project_panes(project_ns).get(role_name)
+        if pane is None or pane.session is not session:
+            return
+
+        elapsed = [0]
+        marker_seen = [False]
+
+        def _check() -> None:
+            if (
+                pane.session is not session
+                or not session.is_alive
+                or self._project_panes(project_ns).get(role_name) is not pane
+            ):
+                return
+
+            if session.shows_any_status_marker(spec.post_submit_recovery_markers):
+                marker_seen[0] = True
+            elif marker_seen[0]:
+                # If verification clears into genuine processing, the original
+                # request survived after all.  Positive working evidence wins
+                # over the idle/recovery path to prevent a duplicate task.
+                if session.shows_any_status_marker(spec.post_submit_working_markers):
+                    return
+                if session.is_at_ready_prompt():
+                    next_attempt = recovery_attempt + 1
+                    _log_event(
+                        "task_redeliver_after_verify",
+                        project=project_ns,
+                        role=role_name,
+                        provider=provider,
+                        attempt=next_attempt,
+                    )
+                    self._send_when_ready(
+                        role_name,
+                        task,
+                        project=project_ns,
+                        _post_submit_recovery_attempt=next_attempt,
+                        _redelivery_session=session,
+                    )
+                    return
+            elif session.shows_any_status_marker(spec.post_submit_working_markers):
+                # The submit entered a real turn before any recovery marker.
+                return
+
+            elapsed[0] += _POST_SUBMIT_RECOVERY_POLL_MS
+            if elapsed[0] >= spec.post_submit_recovery_window_ms:
+                return
+            QTimer.singleShot(_POST_SUBMIT_RECOVERY_POLL_MS, _check)
+
+        QTimer.singleShot(start_delay_ms, _check)
 
     def _warn_lead_delivery_unconfirmed(
         self,
