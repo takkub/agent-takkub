@@ -583,6 +583,12 @@ class LeadInboxMixin:
                 # inside that 600-ms grace and must still be observed.
                 start_delay_ms=_enter_delay_ms(payload) + _READY_POLL_INTERVAL_MS,
             )
+            self._arm_task_start_watchdog(
+                role_name,
+                project,
+                _task_sess,
+                start_delay_ms=_enter_delay_ms(payload) + _READY_POLL_INTERVAL_MS,
+            )
             if unconfirmed:
                 # Delivered blind — the pane never signalled ready, so on a cold
                 # re-spawn the paste may have been swallowed (issue #26). Surface
@@ -743,6 +749,85 @@ class LeadInboxMixin:
             QTimer.singleShot(_POST_SUBMIT_RECOVERY_POLL_MS, _check)
 
         QTimer.singleShot(start_delay_ms, _check)
+
+    def _arm_task_start_watchdog(
+        self,
+        role_name: str,
+        project: str | None,
+        session: PtySession,
+        *,
+        start_delay_ms: int = 0,
+    ) -> None:
+        """Task-start watchdog: watches pane until working turn is confirmed."""
+        try:
+            import time
+
+            from .provider_config import effective_provider_for
+            from .provider_spec import PROVIDER_REGISTRY
+
+            project_ns = self._resolve_project(project)
+            provider = effective_provider_for(role_name, project=project_ns)
+            spec = PROVIDER_REGISTRY.get(provider)
+        except Exception:
+            return
+
+        if spec is None:
+            return
+
+        pane = self._project_panes(project_ns).get(role_name)
+        if pane is None or pane.session is not session:
+            return
+
+        elapsed = [0]
+        max_ms = 120_000
+        poll_ms = 2_000
+
+        def _check() -> None:
+            if (
+                pane.session is not session
+                or not session.is_alive
+                or self._project_panes(project_ns).get(role_name) is not pane
+            ):
+                return
+
+            is_working = False
+            if spec.post_submit_working_markers and session.shows_any_status_marker(
+                spec.post_submit_working_markers
+            ):
+                is_working = True
+
+            if not is_working and session.shows_any_status_marker(
+                ("esc to interrupt", "esc to cancel", "thinking...", "generating...")
+            ):
+                is_working = True
+
+            if not is_working:
+                # Output advancing while NOT at ready prompt (e.g. running shell command)
+                if (time.monotonic() - session._last_output_ts) < (
+                    poll_ms / 1000.0
+                ) and not session.is_at_ready_prompt():
+                    is_working = True
+
+            if is_working:
+                _log_event("task_started", project=project_ns, role=role_name, provider=provider)
+                return
+
+            elapsed[0] += poll_ms
+            if elapsed[0] >= max_ms:
+                _log_event(
+                    "task_start_timeout", project=project_ns, role=role_name, provider=provider
+                )
+                lines = [line.strip() for line in session.display_lines() if line.strip()]
+                screen_summary = "\n".join(lines[-3:]) if lines else "blank screen"
+                self.send(
+                    LEAD.name,
+                    f"[Orchestrator] Pane {role_name} ดูเหมือนยังไม่เริ่มทำงานหลังส่ง task ไป 120 วิ\nหน้าจอปัจจุบัน:\n```\n{screen_summary}\n```\nโปรดตรวจสอบหรือกระตุ้นการทำงาน",
+                )
+                return
+
+            QTimer.singleShot(poll_ms, _check)
+
+        QTimer.singleShot(start_delay_ms + 1_000, _check)
 
     def _warn_lead_delivery_unconfirmed(
         self,
