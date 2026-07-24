@@ -734,6 +734,10 @@ class TestTier2FinalGate:
             patch("agent_takkub.codex_helper.find_codex_executable", return_value="codex"),
             patch("agent_takkub.codex_agents_md.ensure_agents_md"),
             patch("agent_takkub.orchestrator.inject_user_profile_env"),
+            patch(
+                "agent_takkub.mcp_bridge.subprocess.run",
+                return_value=MagicMock(returncode=0, stdout="[]", stderr=""),
+            ),
         ):
             mock_pty = MagicMock()
             mock_pty.spawn.side_effect = lambda **kw: pty_spawn_calls.append(kw)
@@ -1149,6 +1153,10 @@ class TestTier2InProgressResetNonClaude:
             patch("agent_takkub.codex_helper.find_codex_executable", return_value="codex"),
             patch("agent_takkub.codex_agents_md.ensure_agents_md"),
             patch("agent_takkub.orchestrator.inject_user_profile_env"),
+            patch(
+                "agent_takkub.mcp_bridge.subprocess.run",
+                return_value=MagicMock(returncode=0, stdout="[]", stderr=""),
+            ),
         ):
             pane.attach_session = MagicMock()
             orch.spawn("codex", project=TEST_PROJECT)

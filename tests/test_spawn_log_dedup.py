@@ -28,6 +28,9 @@ class _FakeEngine:
     def _resolve_project(self, project):
         return project or "proj"
 
+    def _preserve_pending_spawn_initial_task(self, role_name, project_ns):
+        pass
+
     def _project_panes(self, project_ns):
         # Return an empty dict so pane is None → early return on "gone" path
         # is suppressed by returning a pane stub.

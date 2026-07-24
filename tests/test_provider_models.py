@@ -195,9 +195,17 @@ class TestGenericProviderSpawnEffort:
     def test_codex_uses_session_config_override(self, qapp, monkeypatch, tmp_path) -> None:
         monkeypatch.setenv("TAKKUB_TEAMMATE_EFFORT", "low")
 
-        argv = _capture_generic_argv(qapp, monkeypatch, tmp_path, "codex")
+        with patch(
+            "agent_takkub.mcp_bridge.subprocess.run",
+            return_value=MagicMock(returncode=0, stdout="[]", stderr=""),
+        ):
+            argv = _capture_generic_argv(qapp, monkeypatch, tmp_path, "codex")
 
-        assert argv[-2:] == ["-c", "model_reasoning_effort=low"]
+        effort_idx = argv.index("model_reasoning_effort=low")
+        assert argv[effort_idx - 1 : effort_idx + 1] == [
+            "-c",
+            "model_reasoning_effort=low",
+        ]
 
     def test_explicit_empty_env_disables_effort(self, qapp, monkeypatch, tmp_path) -> None:
         monkeypatch.setenv("TAKKUB_TEAMMATE_EFFORT", "")

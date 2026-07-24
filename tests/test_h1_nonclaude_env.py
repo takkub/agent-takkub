@@ -92,6 +92,10 @@ class TestNonClaudeBranchesGetH1EnvDefaults:
             ),
             patch("agent_takkub.codex_helper.find_codex_executable", return_value="codex"),
             patch("agent_takkub.codex_agents_md.ensure_agents_md"),
+            patch(
+                "agent_takkub.mcp_bridge.subprocess.run",
+                return_value=MagicMock(returncode=0, stdout="[]", stderr=""),
+            ),
         )
         assert env["COLORTERM"] == "truecolor"
         assert env["TERM"] == "xterm-256color"
