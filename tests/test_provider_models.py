@@ -113,14 +113,16 @@ def _capture_generic_argv(
     provider: str,
     *,
     model_override: str | None = None,
+    role: str | None = None,
 ) -> list[str]:
     from agent_takkub import pane_tools_policy as ptp
     from agent_takkub import shared_dev_tools as sdt
 
     orchestrator = _make_orchestrator(qapp, monkeypatch)
-    pane = _make_pane(provider)
-    orchestrator._panes_by_project[TEST_PROJECT] = {provider: pane}
-    orchestrator._ps(f"{TEST_PROJECT}::{provider}").model_override = model_override
+    spawn_role = role or provider
+    pane = _make_pane(spawn_role)
+    orchestrator._panes_by_project[TEST_PROJECT] = {spawn_role: pane}
+    orchestrator._ps(f"{TEST_PROJECT}::{spawn_role}").model_override = model_override
     # Canonical names: cursor ships `cursor-agent` (the bare `agent` alias is
     # only the fallback in discovery, since it collides too easily).
     binary = {
@@ -154,7 +156,7 @@ def _capture_generic_argv(
         mock_pty_cls.return_value = mock_pty
         pane.attach_session = MagicMock()
 
-        ok, message = orchestrator.spawn(provider, project=TEST_PROJECT)
+        ok, message = orchestrator.spawn(spawn_role, project=TEST_PROJECT)
 
     assert ok is True, message
     assert spawn_calls
@@ -201,29 +203,59 @@ class TestGenericProviderSpawnModels:
 
 
 class TestProviderEffortSpecs:
-    def test_direct_and_config_backed_effort_surfaces(self) -> None:
-        from agent_takkub.provider_spec import codex_spec, gemini_spec
+    def test_codex_keeps_config_backed_effort_surface(self) -> None:
+        from agent_takkub.provider_spec import codex_spec
 
-        assert gemini_spec.effort_flag == "--effort"
-        assert gemini_spec.effort_config_key is None
         assert codex_spec.effort_flag == "-c"
         assert codex_spec.effort_config_key == "model_reasoning_effort"
 
     def test_unsupported_providers_remain_explicit(self) -> None:
-        from agent_takkub.provider_spec import cursor_spec, kimi_spec, opencode_spec
+        from agent_takkub.provider_spec import cursor_spec, gemini_spec, kimi_spec, opencode_spec
 
+        assert gemini_spec.effort_flag is None
         assert opencode_spec.effort_flag is None
         assert kimi_spec.effort_flag is None
         assert cursor_spec.effort_flag is None
 
 
 class TestGenericProviderSpawnEffort:
-    def test_gemini_gets_role_tier_effort(self, qapp, monkeypatch, tmp_path) -> None:
-        monkeypatch.delenv("TAKKUB_TEAMMATE_EFFORT", raising=False)
+    def test_gemini_model_override_is_never_changed_by_effort(
+        self, qapp, monkeypatch, tmp_path
+    ) -> None:
+        monkeypatch.setenv("TAKKUB_TEAMMATE_EFFORT", "high")
 
-        argv = _capture_generic_argv(qapp, monkeypatch, tmp_path, "gemini")
+        argv = _capture_generic_argv(
+            qapp,
+            monkeypatch,
+            tmp_path,
+            "gemini",
+            model_override="Gemini 3.1 Pro (Low)",
+            role="backend",
+        )
 
-        assert argv[-2:] == ["--effort", "high"]
+        assert argv == [
+            "agy",
+            "--dangerously-skip-permissions",
+            "--model",
+            "Gemini 3.1 Pro (Low)",
+        ]
+        assert "--effort" not in argv
+
+    def test_gemini_without_model_override_never_guesses_effort(
+        self, qapp, monkeypatch, tmp_path
+    ) -> None:
+        monkeypatch.setenv("TAKKUB_TEAMMATE_EFFORT", "high")
+
+        argv = _capture_generic_argv(
+            qapp,
+            monkeypatch,
+            tmp_path,
+            "gemini",
+            role="backend",
+        )
+
+        assert argv == ["agy", "--dangerously-skip-permissions"]
+        assert "--effort" not in argv
 
     def test_codex_uses_session_config_override(self, qapp, monkeypatch, tmp_path) -> None:
         monkeypatch.setenv("TAKKUB_TEAMMATE_EFFORT", "low")
@@ -306,6 +338,14 @@ def _model_arg(argv: list[str]) -> str | None:
 
 
 class TestClaudeTeammateModelPrecedence:
+    def test_claude_keeps_role_tier_effort(self, qapp, monkeypatch, tmp_path) -> None:
+        monkeypatch.delenv("TAKKUB_TEAMMATE_EFFORT", raising=False)
+
+        argv = _capture_claude_argv(qapp, monkeypatch, tmp_path)
+
+        effort_idx = argv.index("--effort")
+        assert argv[effort_idx : effort_idx + 2] == ["--effort", "high"]
+
     def test_assign_override_wins_over_role_provider_and_env(
         self, qapp, monkeypatch, tmp_path
     ) -> None:

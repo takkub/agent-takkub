@@ -418,7 +418,12 @@ gemini_spec = ProviderSpec(
     supports_slash_commands=False,
     supports_hooks=False,
     model_flag="--model",  # agy 1.0.5 changelog + confirmed `agy models` subcommand
-    effort_flag="--effort",  # agy 1.1.5 --help: low|medium|high
+    # agy 1.1.6 exposes --effort, but its advertised model slugs already encode
+    # effort (for example gemini-3.1-pro-low/high). A mismatched pair makes agy
+    # discard the explicit --model and silently use its default (#125). With no
+    # explicit model there is also no deterministic way to prove the default
+    # supports the requested effort before launch, so model preservation wins.
+    effort_flag=None,
     produces_jsonl_transcript=False,
     supports_token_meter=False,
     supports_remote_history=False,
