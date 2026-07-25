@@ -633,7 +633,12 @@ class LeadInboxMixin:
                 return
             QTimer.singleShot(_READY_POLL_INTERVAL_MS, _check)
 
-        QTimer.singleShot(5000, _check)
+        # Initial wait before starting the poll loop. Allows the pane UI
+        # to settle before we hammer it.
+        # Start immediately if the pane is already gate-deferred, as we'll
+        # just wait out the gate anyway.
+        gate_deferred = getattr(pane, "deferred_spawn", False)
+        QTimer.singleShot(0 if gate_deferred else _READY_POLL_FIRST_MS, _check)
 
     def _warn_lead_delivery_unconfirmed(
         self,

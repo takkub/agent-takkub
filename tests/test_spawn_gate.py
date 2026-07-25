@@ -125,6 +125,7 @@ def _make_dead_pane(role: str = "backend"):
     pane.role.name = role
     pane.session = None
     pane.state = "empty"
+    pane.deferred_spawn = False
     return pane
 
 
@@ -395,12 +396,14 @@ class TestSendWhenReadyRetry:
             live_sess.is_at_ready_prompt.return_value = True
             pane.session = live_sess
 
-            # Fire the rescheduled retry — session is now alive → delivers
-            retry_check = timer_calls[0][1]
-            timer_calls.clear()
-            retry_check()
+            # Fire the rescheduled retries — session is now alive. It needs 33 consecutive
+            # ready states to satisfy the stability streak requirement.
+            for _ in range(33):
+                retry_check = timer_calls[0][1]
+                timer_calls.clear()
+                retry_check()
 
-        live_sess.write.assert_called()  # task was delivered
+            live_sess.write.assert_called()  # task was delivered
 
 
 class TestSendWhenReadyOutlivesGateBlock:
