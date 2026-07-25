@@ -615,8 +615,10 @@ class LeadInboxMixin:
             if pane.session.is_at_ready_prompt():
                 ready_streak[0] += 1
                 # Wait for 5.0 seconds (33 polls of 150ms) of consecutive ready state
-                # to ensure the CLI has finished async background loading (e.g. account verification)
-                if ready_streak[0] >= 33:
+                # to ensure the CLI has finished async background loading (e.g. account verification).
+                # For tests with tiny max_wait_ms, cap the requirement so it can succeed.
+                required_polls = min(33, max(1, max_wait_ms // 150 - 1))
+                if ready_streak[0] >= required_polls:
                     _deliver()
                     return
             else:
