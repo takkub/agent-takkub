@@ -85,20 +85,7 @@ class ProviderSpec:
     # ─── 4. Ready / busy / blocker markers ───
     ready_hard_blockers: tuple[str, ...] = field(default_factory=tuple)
     ready_rules: tuple[ReadyRule, ...] = field(default_factory=tuple)
-    boot_auto_advance_screens: tuple[str, ...] = field(default_factory=tuple)
     ready_wait_ms: int = 45_000
-    # Some providers trigger a transient server-side gate only after the first
-    # submitted request.  If one of these markers appears, delivery watches for
-    # it to clear and may re-deliver the original task because that request was
-    # consumed by the gate.  Empty by default: providers without observed
-    # post-submit gates pay no polling cost (#103/#126).
-    post_submit_recovery_markers: tuple[str, ...] = field(default_factory=tuple)
-    # Positive evidence that the submitted request really entered a work turn.
-    # This wins over recovery so a marker that clears into genuine processing
-    # can never cause a duplicate task.
-    post_submit_working_markers: tuple[str, ...] = field(default_factory=tuple)
-    post_submit_recovery_window_ms: int = 90_000
-    post_submit_max_redeliveries: int = 2
 
     # ─── 5. Context injection strategy ───
     context_strategy: str = "none"
@@ -158,14 +145,6 @@ class ProviderSpec:
     # early_exit_watch — wire `_on_codex_exit`-style early-crash detection
     # (stamps codex_spawn_ts) instead of the stale-guarded `_on_session_exit`.
     early_exit_watch: bool = False
-
-    # ─── 12. Warm-up ping (issue #126) ───
-    # For providers that swallow the very first request due to a transient
-    # server-side eligibility check (e.g. AGY Google account verify). Sends a
-    # sacrificial ready-check message instead of the actual task to clear the
-    # gate safely.
-    needs_warmup_ping: bool = False
-    ready_settle_ms: int = 0
 
 
 # ── binary discovery wrappers ────────────────────────────────────────────────
@@ -262,11 +241,6 @@ claude_spec = ProviderSpec(
         "esc to cancel",
     ),  # pty_session.py:204-210 (full original 5 — claude is the provider observed
     # showing the folder-trust modal, so it keeps all of them)
-    boot_auto_advance_screens=(
-        "trust this folder",
-        "do you trust the contents of this directory",
-        "press enter to continue",
-    ),
     ready_rules=(
         ReadyRule("bypass permissions", True),  # pty_session.py:249
         ReadyRule("shift+tab to cycle", True),  # pty_session.py:250
@@ -331,10 +305,6 @@ codex_spec = ProviderSpec(
     # no file-backed append-system-prompt option. Keep task pointer delivery.
     system_prompt_flag=None,
     ready_hard_blockers=("esc to interrupt", "esc to cancel"),  # pty_session.py:208-209
-    boot_auto_advance_screens=(
-        "do you trust the contents of this directory",
-        "press enter to continue",
-    ),
     ready_rules=(
         # Current-code truth (post-#99 fix): the banner-alone rule
         # ("openai codex (v", True) that an earlier design draft listed was
@@ -419,33 +389,19 @@ gemini_spec = ProviderSpec(
         "esc to interrupt",
         "esc to cancel",
         "press enter to continue",
-        "do you trust the contents of this project",
         # agy 1.1.6 can render its idle footer while these startup/account
         # checks are still swallowing submit. Keep task delivery behind the
         # ready gate until the transient check clears (#126).
         "signing in",
         "verifying your account",
     ),  # pty_session.py:205-209 (agy's own trust/account gates observed on first boot)
-    boot_auto_advance_screens=(
-        "do you trust the contents of this project",
-        "press enter to continue",
-    ),
     ready_rules=(
         ReadyRule("? for shortcuts", True),  # pty_session.py:222 (agy idle footer)
         ReadyRule("type your message or", True),  # pty_session.py:223 (legacy gemini CLI)
         ReadyRule("gemini cli update available!", True),  # pty_session.py:224 (#51)
+        ReadyRule("please try again shortly", True),
     ),
     ready_wait_ms=90_000,  # lead_inbox.py:431-435 (agy cold-boot allowance)
-    # agy 1.1.6 can trigger Google eligibility verification *after* accepting
-    # the first submit.  The request is then consumed and the pane returns
-    # idle, so the full task must be pasted again once the gate clears (#126).
-    post_submit_recovery_markers=("verifying your account",),
-    post_submit_working_markers=(
-        "esc to interrupt",
-        "esc to cancel",
-        "thinking...",
-        "generating...",
-    ),
     context_strategy="agents_md_file",
     cheatsheet_filename="AGENTS.md",
     inline_learned_notes=False,
@@ -479,8 +435,6 @@ gemini_spec = ProviderSpec(
     supports_remote_history=False,
     prepend_bin_dir_to_path=True,  # spawn_engine.py gemini branch: agy_dir on PATH
     auto_trust=True,  # spawn_engine.py gemini branch: auto_trust=True
-    needs_warmup_ping=True,
-    ready_settle_ms=4000,
 )
 
 

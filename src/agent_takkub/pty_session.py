@@ -244,8 +244,12 @@ def _classify_ready(text_lower: str) -> bool:
     Faithful to the original if/return chain: hard blockers (all → not ready)
     came first there too, so grouping them is equivalent; the ordered rules then
     reproduce the exact first-match-wins precedence."""
-    if any(b in text_lower for b in _READY_HARD_BLOCKERS):
-        return False
+    for b in _READY_HARD_BLOCKERS:
+        if b in text_lower:
+            # Bypass 'verifying your account' if the check failed and dropped to prompt
+            if b == "verifying your account" and "please try again shortly" in text_lower:
+                continue
+            return False
     for marker in _extra_ready_markers():
         if marker in text_lower:
             return True
@@ -325,6 +329,16 @@ _READY_SELFTEST_CASES: tuple[tuple[str, bool, str], ...] = (
     # swallow Enter; both observed 2026-07-24 in issue #126 transcripts.
     ("⣷  Signing in...\n? for shortcuts", False, "gemini"),
     ("⚠ Verifying your account...\n? for shortcuts", False, "gemini"),
+    # however if the gate fails and drops to prompt ("please try again shortly")
+    # it is ready again, even if the warning remains on screen.
+    (
+        "⚠ Verifying your account...\n"
+        "  L We're finishing verifying your account eligibility.\n"
+        "    This usually takes a moment. Please try again shortly.\n\n"
+        "> ",
+        True,
+        "gemini",
+    ),
     # agy busy: even if the '? for shortcuts' footer persists, an active
     # interrupt indicator is a hard blocker → not ready (no premature done-nudge).
     ("Thinking... (esc to interrupt)\n? for shortcuts", False, "gemini"),  # agy busy
@@ -404,8 +418,11 @@ def _classify_ready_for_provider(text_lower: str, provider: str) -> bool:
     Ignores TAKKUB_EXTRA_READY_MARKERS, like the shipped-table self-test
     itself. (issue #103 Phase 0, design §5.6)"""
     spec = PROVIDER_REGISTRY[provider]
-    if any(b in text_lower for b in spec.ready_hard_blockers):
-        return False
+    for b in spec.ready_hard_blockers:
+        if b in text_lower:
+            if b == "verifying your account" and "please try again shortly" in text_lower:
+                continue
+            return False
     for rule in spec.ready_rules:
         if rule.marker in text_lower:
             return rule.ready_when
@@ -1071,19 +1088,6 @@ class PtySession(QObject):
         conversation-body text quoting the content can't poison the verdict. (#79)
         """
         return _input_has_content(_ready_region(self.display_lines()), fragment)
-
-    def shows_any_status_marker(self, markers: tuple[str, ...]) -> bool:
-        """True when any provider-supplied marker is in the live status region.
-
-        Delivery recovery uses this with marker lists from ``ProviderSpec``.
-        Keeping the scan here reuses the same bottom-row scoping as ready/busy
-        detection, so task text that merely quotes a marker cannot trigger a
-        re-delivery (#103/#126).
-        """
-        if not markers:
-            return False
-        region = _ready_region(self.display_lines())
-        return any(marker.lower() in region for marker in markers)
 
     def is_at_update_splash(self) -> bool:
         """True when a codex 'update available!' startup splash is blocking the prompt.

@@ -4,17 +4,10 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
-## [1.0.33] - 2026-07-24
-
-### Added (ใหม่)
-- **Boot auto-advance (#128)** — pane เปิดมาเจอหน้าจอ boot ที่รู้จัก (trust-folder dialog ของ agy ที่ถามทุก worktree ใหม่ · press-enter-to-continue) → cockpit กด Enter ผ่านให้เองจนถึง prompt พร้อมรับงาน — เฉพาะ whitelist ต่อ provider, bounded 5 ครั้ง, log ทุกการกด
-- **Task-start watchdog ทุก pane (#128)** — ส่งงานแล้ว cockpit เฝ้าจนยืนยันว่า pane **เริ่มทำงานจริง** (log `task_started`) ค่อยเลิกดู · ไม่เริ่มในเวลา = `task_start_timeout` + แจ้ง Lead พร้อมสิ่งที่เห็นบนจอ — ปิดคลาส "pane ตายเงียบ" ทุกรูปแบบทุก provider
-- **agy ได้ 2 ชั้นกันโดนกลืน request (#126)** — warm-up ping (request แรกเป็น ping จิ๋วให้ Google eligibility check กินแทน task จริง) + `ready_settle_ms` (gemini=4000ms — ready ต้องนิ่งต่อเนื่อง 4 วิค่อยส่ง ตาม user directive)
-
 ## [1.0.32] - 2026-07-24
 
 ### Fixed (แก้)
-- **#126 agy pane "ตายเงียบ" — Google eligibility กลืน request แรก** — `Signing in / Verifying your account` ยังเป็น ready hard-blocker สำหรับ gate ที่ค้างจาก boot และเพิ่ม post-submit watcher สำหรับ gate ที่ request แรกเพิ่ง trigger: หลัง marker หายและ pane กลับ ready cockpit re-paste task ทั้งก้อนผ่าน delivery path เดิมอัตโนมัติ (สูงสุด 2 ครั้ง, log `task_redeliver_after_verify`) · ถ้าเห็น `Thinking` / `Generating` / busy marker หรือ pane เริ่มทำงานก่อน re-paste จะยกเลิกทันที ไม่ส่งงานซ้ำ · config อยู่ใน ProviderSpec; provider อื่นไม่มี marker = no-op (#103)
+- **#126 agy pane "ตายเงียบ" — task ค้างใน composer ไม่ถูก submit** — ระหว่าง agy ขึ้น "Signing in / Verifying your account" (Google eligibility check ฝั่ง server) จอยังโชว์ idle footer ทำ cockpit เข้าใจว่า ready → paste แล้ว Enter โดน swallow → pane นั่งเงียบจน user ต้องสั่งซ้ำเอง (เจอ 3 เคสใน 1 วัน) · ตอนนี้ marker ทั้งสองเป็น **ready hard-blocker**: cockpit รอให้พ้น check ก่อนส่ง + submit verification/resend หลังพ้น (calibrate จาก transcript จริง แนวเดียวกับที่เคยแก้ codex #99)
 
 ## [1.0.31] - 2026-07-24
 

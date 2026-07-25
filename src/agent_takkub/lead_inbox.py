@@ -107,10 +107,6 @@ _RENDER_WAIT_MAX = 6
 # hard timeout stays wall-clock accurate.
 _READY_POLL_FIRST_MS = 300
 _READY_POLL_INTERVAL_MS = 150
-# Post-submit provider-gate watcher cadence.  This is intentionally slower than
-# the normal ready poll: it observes a server-side state transition rather than
-# racing to deliver into a newly rendered prompt.
-_POST_SUBMIT_RECOVERY_POLL_MS = 300
 # Claude roles that load MCP servers need the same cold-boot allowance as the
 # slower provider CLIs.  Claude's base provider spec intentionally stays at
 # 45 s because roles without MCPs normally render their prompt well inside
@@ -510,9 +506,6 @@ class LeadInboxMixin:
         task: str,
         max_wait_ms: int = 45_000,
         project: str | None = None,
-        *,
-        _post_submit_recovery_attempt: int = 0,
-        _redelivery_session: PtySession | None = None,
     ) -> None:
         """Poll until claude's main prompt is idle, then paste task + Enter.
 
@@ -524,41 +517,13 @@ class LeadInboxMixin:
         pane = self._project_panes(project).get(role_name)
         if pane is None:
             return
-        # A post-verify re-delivery is safe only while the exact pane/session
-        # observed idle by the watcher is still idle.  Do not queue behind a
-        # work turn that starts in the short gap before the first ready poll;
-        # doing so would submit a duplicate as soon as that real turn ends.
-        if _redelivery_session is not None and pane.session is not _redelivery_session:
-            return
         elapsed = [0]
         sent = [False]
+        # Sticky: once we've ever seen this role parked in the spawn gate's
         # deferred set (spawn_engine._spawn_deferred), stop trusting
         # max_wait_ms for the "no session yet" branch — see _check below.
         gate_seen = [False]
-        ready_settle_elapsed = [0]
-
-        project_ns = self._resolve_project(project)
-        try:
-            from .provider_config import effective_provider_for
-            from .provider_spec import PROVIDER_REGISTRY
-
-            provider = effective_provider_for(role_name, project=project_ns)
-            spec = PROVIDER_REGISTRY.get(provider)
-            settle_ms = spec.ready_settle_ms if spec else 0
-        except Exception:
-            provider = None
-            spec = None
-            settle_ms = 0
-
-        import os
-
-        if provider == "gemini":
-            env_val = os.environ.get("TAKKUB_GEMINI_READY_SETTLE_MS")
-            if env_val is not None:
-                try:
-                    settle_ms = int(env_val)
-                except ValueError:
-                    pass
+        ready_streak = [0]
 
         def _deliver(unconfirmed: bool = False) -> None:
             if sent[0]:
@@ -566,81 +531,6 @@ class LeadInboxMixin:
             sent[0] = True
             if pane.session is None or not pane.session.is_alive:
                 return
-
-            needs_warmup = bool(spec and getattr(spec, "needs_warmup_ping", False))
-            _task_sess = pane.session
-
-            if needs_warmup and not getattr(_task_sess, "_warmup_ping_done", False):
-                _task_sess._warmup_ping_done = True
-                _log_event("warmup_ping_sent", project=project_ns, role=role_name)
-
-                warmup_task = "ready check — ตอบ ok สั้นๆ"
-                pane.set_state("working", note=warmup_task[:60])
-                payload = _paste_payload(_sanitize_pane_text(warmup_task))
-                _task_sess.write(payload)
-
-                _orch_attr("_delayed_enter_verified", _delayed_enter_verified)(
-                    pane,
-                    _task_sess,
-                    _enter_delay_ms(payload),
-                    payload=payload,
-                    content_fragment=warmup_task,
-                    on_resend=lambda rem, r=role_name, p=project_ns: _log_event(
-                        "task_deliver_enter_resend", project=p, role=r, remaining=rem
-                    ),
-                    on_repaste=lambda rem, r=role_name, p=project_ns: _log_event(
-                        "task_deliver_repaste", project=p, role=r, remaining=rem
-                    ),
-                )
-
-                elapsed_warmup = [0]
-                marker_seen_warmup = [False]
-
-                def _warmup_check() -> None:
-                    if (
-                        not _task_sess.is_alive
-                        or self._project_panes(project_ns).get(role_name) is not pane
-                    ):
-                        return
-
-                    session_shows_busy = (
-                        _task_sess.shows_any_status_marker(spec.post_submit_recovery_markers)
-                        if spec and spec.post_submit_recovery_markers
-                        else False
-                    )
-                    if session_shows_busy:
-                        marker_seen_warmup[0] = True
-                    elif marker_seen_warmup[0] or not session_shows_busy:
-                        if _task_sess.is_at_ready_prompt():
-                            _log_event("warmup_ping_ok", project=project_ns, role=role_name)
-                            self._send_when_ready(
-                                role_name,
-                                task,
-                                max_wait_ms,
-                                project=project_ns,
-                                _post_submit_recovery_attempt=_post_submit_recovery_attempt,
-                                _redelivery_session=_redelivery_session,
-                            )
-                            return
-
-                    elapsed_warmup[0] += _POST_SUBMIT_RECOVERY_POLL_MS
-                    if elapsed_warmup[0] >= 120_000:
-                        _log_event("warmup_ping_timeout", project=project_ns, role=role_name)
-                        self._send_when_ready(
-                            role_name,
-                            task,
-                            max_wait_ms,
-                            project=project_ns,
-                            _post_submit_recovery_attempt=_post_submit_recovery_attempt,
-                            _redelivery_session=_redelivery_session,
-                        )
-                        return
-
-                    QTimer.singleShot(_POST_SUBMIT_RECOVERY_POLL_MS, _warmup_check)
-
-                QTimer.singleShot(_enter_delay_ms(payload) + _READY_POLL_INTERVAL_MS, _warmup_check)
-                return
-
             pane.set_state("working", note=task[:60])
             _task_sess = pane.session
             payload = _paste_payload(_sanitize_pane_text(task))
@@ -670,23 +560,6 @@ class LeadInboxMixin:
                     remaining=rem,
                 ),
             )
-            self._arm_post_submit_recovery(
-                role_name,
-                task,
-                project,
-                _task_sess,
-                recovery_attempt=_post_submit_recovery_attempt,
-                # Start just after the initial CR rather than waiting for the
-                # verified-submit grace. A short eligibility flash could clear
-                # inside that 600-ms grace and must still be observed.
-                start_delay_ms=_enter_delay_ms(payload) + _READY_POLL_INTERVAL_MS,
-            )
-            self._arm_task_start_watchdog(
-                role_name,
-                project,
-                _task_sess,
-                start_delay_ms=_enter_delay_ms(payload) + _READY_POLL_INTERVAL_MS,
-            )
             if unconfirmed:
                 # Delivered blind — the pane never signalled ready, so on a cold
                 # re-spawn the paste may have been swallowed (issue #26). Surface
@@ -697,8 +570,6 @@ class LeadInboxMixin:
             if sent[0]:
                 return
             if pane.session is None or not pane.session.is_alive:
-                if _redelivery_session is not None:
-                    return
                 # Session absent or not yet alive — may be deferred by the
                 # spawn gate (modal/popup blocking ConPTY construction, see
                 # spawn_engine._retry_deferred_spawn). That retry loop has no
@@ -740,29 +611,16 @@ class LeadInboxMixin:
                     project=self._resolve_project(project),
                     role=role_name,
                 )
-                _log_event(
-                    "task_deliver_timeout_no_session",
-                    project=self._resolve_project(project),
-                    role=role_name,
-                )
                 return
             if pane.session.is_at_ready_prompt():
-                if settle_ms > 0:
-                    ready_settle_elapsed[0] += _READY_POLL_INTERVAL_MS
-                    if ready_settle_elapsed[0] < settle_ms:
-                        QTimer.singleShot(_READY_POLL_INTERVAL_MS, _check)
-                        return
-                _deliver()
-                return
-
-            # Not ready, reset settle elapsed
-            ready_settle_elapsed[0] = 0
-
-            if _redelivery_session is not None:
-                # The provider began a genuine work turn after the watcher saw
-                # idle but before this guarded re-delivery reached its first
-                # poll.  Abort permanently; waiting for idle would duplicate it.
-                return
+                ready_streak[0] += 1
+                # Wait for 5.0 seconds (33 polls of 150ms) of consecutive ready state
+                # to ensure the CLI has finished async background loading (e.g. account verification)
+                if ready_streak[0] >= 33:
+                    _deliver()
+                    return
+            else:
+                ready_streak[0] = 0
             elapsed[0] += _READY_POLL_INTERVAL_MS
             if elapsed[0] >= max_wait_ms:
                 # Hard timeout: pane never reached the ready prompt. Paste
@@ -773,173 +631,7 @@ class LeadInboxMixin:
                 return
             QTimer.singleShot(_READY_POLL_INTERVAL_MS, _check)
 
-        QTimer.singleShot(_READY_POLL_FIRST_MS, _check)
-
-    def _arm_post_submit_recovery(
-        self,
-        role_name: str,
-        task: str,
-        project: str | None,
-        session: PtySession,
-        *,
-        recovery_attempt: int = 0,
-        start_delay_ms: int = 0,
-    ) -> None:
-        """Recover a request consumed by a provider's post-submit gate.
-
-        Marker lists and bounds come entirely from ``ProviderSpec``.  Providers
-        without configured recovery markers are a no-op.  Once a marker is
-        observed, the watcher waits for it to clear and for the exact session
-        to return ready, then routes the *whole original task* through
-        ``_send_when_ready`` again.  A real busy/thinking marker cancels the
-        watcher so work already in progress is never duplicated (#103/#126).
-        """
-        try:
-            from .provider_config import effective_provider_for
-            from .provider_spec import PROVIDER_REGISTRY
-
-            project_ns = self._resolve_project(project)
-            provider = effective_provider_for(role_name, project=project_ns)
-            spec = PROVIDER_REGISTRY.get(provider)
-        except Exception:
-            return
-
-        if (
-            spec is None
-            or not spec.post_submit_recovery_markers
-            or recovery_attempt >= spec.post_submit_max_redeliveries
-        ):
-            return
-
-        pane = self._project_panes(project_ns).get(role_name)
-        if pane is None or pane.session is not session:
-            return
-
-        elapsed = [0]
-        marker_seen = [False]
-
-        def _check() -> None:
-            if (
-                pane.session is not session
-                or not session.is_alive
-                or self._project_panes(project_ns).get(role_name) is not pane
-            ):
-                return
-
-            if session.shows_any_status_marker(spec.post_submit_recovery_markers):
-                marker_seen[0] = True
-            elif marker_seen[0]:
-                # If verification clears into genuine processing, the original
-                # request survived after all.  Positive working evidence wins
-                # over the idle/recovery path to prevent a duplicate task.
-                if session.shows_any_status_marker(spec.post_submit_working_markers):
-                    return
-                if session.is_at_ready_prompt():
-                    next_attempt = recovery_attempt + 1
-                    _log_event(
-                        "task_redeliver_after_verify",
-                        project=project_ns,
-                        role=role_name,
-                        provider=provider,
-                        attempt=next_attempt,
-                    )
-                    self._send_when_ready(
-                        role_name,
-                        task,
-                        project=project_ns,
-                        _post_submit_recovery_attempt=next_attempt,
-                        _redelivery_session=session,
-                    )
-                    return
-            elif session.shows_any_status_marker(spec.post_submit_working_markers):
-                # The submit entered a real turn before any recovery marker.
-                return
-
-            elapsed[0] += _POST_SUBMIT_RECOVERY_POLL_MS
-            if elapsed[0] >= spec.post_submit_recovery_window_ms:
-                return
-            QTimer.singleShot(_POST_SUBMIT_RECOVERY_POLL_MS, _check)
-
-        QTimer.singleShot(start_delay_ms, _check)
-
-    def _arm_task_start_watchdog(
-        self,
-        role_name: str,
-        project: str | None,
-        session: PtySession,
-        *,
-        start_delay_ms: int = 0,
-    ) -> None:
-        """Task-start watchdog: watches pane until working turn is confirmed."""
-        try:
-            import time
-
-            from .provider_config import effective_provider_for
-            from .provider_spec import PROVIDER_REGISTRY
-
-            project_ns = self._resolve_project(project)
-            provider = effective_provider_for(role_name, project=project_ns)
-            spec = PROVIDER_REGISTRY.get(provider)
-        except Exception:
-            return
-
-        if spec is None:
-            return
-
-        pane = self._project_panes(project_ns).get(role_name)
-        if pane is None or pane.session is not session:
-            return
-
-        elapsed = [0]
-        max_ms = 120_000
-        poll_ms = 2_000
-
-        def _check() -> None:
-            if (
-                pane.session is not session
-                or not session.is_alive
-                or self._project_panes(project_ns).get(role_name) is not pane
-            ):
-                return
-
-            is_working = False
-            if spec.post_submit_working_markers and session.shows_any_status_marker(
-                spec.post_submit_working_markers
-            ):
-                is_working = True
-
-            if not is_working and session.shows_any_status_marker(
-                ("esc to interrupt", "esc to cancel", "thinking...", "generating...")
-            ):
-                is_working = True
-
-            if not is_working:
-                # Output advancing while NOT at ready prompt (e.g. running shell command)
-                if (time.monotonic() - session._last_output_ts) < (
-                    poll_ms / 1000.0
-                ) and not session.is_at_ready_prompt():
-                    is_working = True
-
-            if is_working:
-                _log_event("task_started", project=project_ns, role=role_name, provider=provider)
-                return
-
-            elapsed[0] += poll_ms
-            if elapsed[0] >= max_ms:
-                _log_event(
-                    "task_start_timeout", project=project_ns, role=role_name, provider=provider
-                )
-                lines = [line.strip() for line in session.display_lines() if line.strip()]
-                screen_summary = "\n".join(lines[-3:]) if lines else "blank screen"
-                self.send(
-                    LEAD.name,
-                    f"[Orchestrator] Pane {role_name} ดูเหมือนยังไม่เริ่มทำงานหลังส่ง task ไป 120 วิ\nหน้าจอปัจจุบัน:\n```\n{screen_summary}\n```\nโปรดตรวจสอบหรือกระตุ้นการทำงาน",
-                )
-                return
-
-            QTimer.singleShot(poll_ms, _check)
-
-        QTimer.singleShot(start_delay_ms + 1_000, _check)
+        QTimer.singleShot(5000, _check)
 
     def _warn_lead_delivery_unconfirmed(
         self,
