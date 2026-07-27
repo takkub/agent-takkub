@@ -4,6 +4,18 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.37] - 2026-07-27
+
+### Fixed (แก้)
+- **#132 (HIGH · แก้ของที่หลุดไปกับ 1.0.36) boot sweep อาจลบงานที่ยังไม่ commit** — `prune_orphan_worktrees_boot()` รันเองทุกครั้งที่เปิด cockpit แล้วลบ orphan worktree **ทั้งโฟลเดอร์** โดยตัดสินจาก metadata ล้วน (ไม่มี `.git` / resolve repo ไม่ได้ / ไม่อยู่ใน `git worktree list`) ซึ่งไม่ได้แปลว่าไม่มีอะไรจะเสีย — worktree ที่ `.git` pointer หายแต่ยังมีไฟล์ที่ไม่เคย commit จะหายถาวรโดยไม่มีใครสั่ง · เคสจริง: ตอนเก็บกวาดพื้นที่พบ orphan 3 ตัว โดยตัวหนึ่งมีไฟล์ที่ไม่ใช่ node_modules อยู่ ~96 MB
+  - sweep อัตโนมัติลบได้เฉพาะสิ่งที่ **สร้างใหม่ได้แน่นอน**: โฟลเดอร์ว่าง หรือมีแต่ `node_modules` และต้อง clean + ไม่มี commit ค้างบน branch
+  - orphan ที่ยังมีไฟล์ source ถูกเลื่อนไปหมวดใหม่ `orphan-worktrees-review` (ระดับ review) ต้องสั่งเองด้วย `takkub prune --level review --category orphan-worktrees-review --yes` และ CLI **พิมพ์ path ที่จะหายให้เห็นก่อนลบเสมอ**
+  - `classify_worktree()` เติม `dirty`/`branch`/`ahead` ให้เคสที่ยังอ่าน git ได้ แทนที่จะ return ทันทีที่ path หลุดจาก `git worktree list`
+- **#130 `delivery-unconfirmed` เตือนผิดทุกครั้งที่ pane กำลังทำงาน** — เกณฑ์เดิมคือ "ไม่ถึง ready prompt ใน 90 วินาที" ซึ่ง pane ที่กำลังรันงานยาว (เช่น full test suite 6 นาที) ก็เข้าเงื่อนไขเดียวกัน · วันที่ 2026-07-27 เตือนผิด **6 จาก 6 ครั้ง** (ทุกเคส `takkub status` แสดง state=working และจบด้วย done ปกติ) ทำให้ notice นี้ไร้ความหมาย และมันยังสั่งให้ Lead re-assign ซึ่งจะส่งงานซ้ำให้ pane ที่ทำอยู่
+  - แยก busy ออกจาก stuck ด้วยสัญญาณ PTY output (provider-agnostic — codex/agy เหมือน claude ไม่ต้อง parse ข้อความ) เตือนเฉพาะเมื่อ pane เงียบต่อเนื่องเกิน `STALL_THRESHOLD_SEC` ซึ่งเป็นเกณฑ์เดียวกับที่ `takkub status` ใช้บอกว่า pane stalled
+  - มีเพดานรวม `BUSY_WAIT_CEILING_SEC` (default 1800s · env `TAKKUB_BUSY_WAIT_CEILING_SEC`) กัน pane ที่ **ค้างแบบมีเสียง** (TUI วน redraw แต่ไม่รับ input) รอไม่รู้จบจนไม่มีใครรู้ — ครบเพดานจะเตือนด้วยข้อความและ log event **คนละแบบ** กับเคสเงียบ จะได้ไม่วินิจฉัยผิดทาง
+- **#131 เทส watchdog flaky บน CI** — `test_single_instance_watchdog.py` ใช้ `sleep()` เวลาคงที่แล้ว assert ผลของ daemon thread ทันที ซึ่งแพ้ runner ที่ CPU ถูกแชร์ (แดงแล้วผ่านเองตอน re-run โค้ดชุดเดิม) · เปลี่ยนเป็น poll-until-condition (เพดาน 5 วินาที) 3 จุด และขยาย margin ให้เคสที่พิสูจน์ว่า "ไม่เกิด" ซึ่ง poll ไม่ได้ · ยืนยันด้วยการรัน 15 รอบ รวม 5 รอบภายใต้ CPU stress
+
 ## [1.0.36] - 2026-07-27
 
 ### Added (ใหม่)
