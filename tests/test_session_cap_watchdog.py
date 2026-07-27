@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -11,36 +10,65 @@ from agent_takkub.agent_pane_model import AgentPaneModel
 from agent_takkub.orchestrator import Orchestrator
 from agent_takkub.roles import LEAD, by_name
 from agent_takkub.session_cap import (
-    DEFAULT_SESSION_CAP_TOKENS,
+    DEFAULT_SESSION_CAP_RATIO,
     SESSION_CAP_ENV,
+    SessionCapThreshold,
     resolve_session_cap_threshold,
 )
 
 
 class TestThresholdResolution:
-    def test_default(self) -> None:
-        assert resolve_session_cap_threshold(environ={}) == DEFAULT_SESSION_CAP_TOKENS
+    def test_default_is_ratio_of_context_window(self) -> None:
+        spec = resolve_session_cap_threshold(environ={})
+        assert spec == SessionCapThreshold(ratio=DEFAULT_SESSION_CAP_RATIO)
+        assert spec.tokens_for(200_000) == int(200_000 * DEFAULT_SESSION_CAP_RATIO)
+        assert spec.tokens_for(1_000_000) == int(1_000_000 * DEFAULT_SESSION_CAP_RATIO)
 
-    def test_qsettings_value_overrides_default(self) -> None:
-        assert resolve_session_cap_threshold("210,000", environ={}) == 210_000
+    def test_qsettings_ratio_overrides_default(self) -> None:
+        spec = resolve_session_cap_threshold("0.5", environ={})
+        assert spec == SessionCapThreshold(ratio=0.5)
+        assert spec.tokens_for(200_000) == 100_000
+        assert spec.tokens_for(1_000_000) == 500_000
 
     def test_env_wins_over_qsettings(self) -> None:
-        assert (
-            resolve_session_cap_threshold(
-                "210000",
-                environ={SESSION_CAP_ENV: "175_000"},
-            )
-            == 175_000
+        spec = resolve_session_cap_threshold(
+            "0.5",
+            environ={SESSION_CAP_ENV: "0.9"},
         )
+        assert spec == SessionCapThreshold(ratio=0.9)
 
     def test_invalid_env_falls_back_to_valid_setting(self) -> None:
-        assert (
-            resolve_session_cap_threshold(
-                "190000",
-                environ={SESSION_CAP_ENV: "disabled"},
-            )
-            == 190_000
+        spec = resolve_session_cap_threshold(
+            "0.6",
+            environ={SESSION_CAP_ENV: "not-a-number"},
         )
+        assert spec == SessionCapThreshold(ratio=0.6)
+
+    def test_zero_disables_watchdog(self) -> None:
+        spec = resolve_session_cap_threshold("0", environ={})
+        assert spec.tokens_for(200_000) is None
+        assert spec.tokens_for(1_000_000) is None
+
+    def test_env_zero_disables_even_with_valid_setting(self) -> None:
+        spec = resolve_session_cap_threshold(
+            "0.8",
+            environ={SESSION_CAP_ENV: "0"},
+        )
+        assert spec.tokens_for(1_000_000) is None
+
+    def test_legacy_absolute_token_config_still_works(self) -> None:
+        spec = resolve_session_cap_threshold("210,000", environ={})
+        assert spec == SessionCapThreshold(tokens=210_000)
+        # A legacy fixed cap ignores the pane's actual context window.
+        assert spec.tokens_for(200_000) == 210_000
+        assert spec.tokens_for(1_000_000) == 210_000
+
+    def test_legacy_absolute_token_env_wins(self) -> None:
+        spec = resolve_session_cap_threshold(
+            "0.5",
+            environ={SESSION_CAP_ENV: "175_000"},
+        )
+        assert spec == SessionCapThreshold(tokens=175_000)
 
 
 class TestCrossingState:
@@ -66,6 +94,26 @@ class TestCrossingState:
         model.configure_provider("codex", supports_token_meter=False)
         assert model.observe_session_cap(500_000, 180_000) is False
         assert model.session_cap_warning_active is False
+
+    def test_disabled_threshold_never_warns(self) -> None:
+        model = self._model()
+        assert model.observe_session_cap(999_999, None) is False
+        assert model.session_cap_warning_active is False
+
+    def test_ratio_based_threshold_on_1m_window(self) -> None:
+        model = self._model()
+        spec = SessionCapThreshold(ratio=0.85)
+        cap = spec.tokens_for(1_000_000)
+        assert model.observe_session_cap(cap - 1, cap) is False
+        assert model.observe_session_cap(cap, cap) is True
+
+    def test_ratio_based_threshold_on_200k_window(self) -> None:
+        model = self._model()
+        spec = SessionCapThreshold(ratio=0.85)
+        cap = spec.tokens_for(200_000)
+        assert cap == 170_000
+        assert model.observe_session_cap(cap - 1, cap) is False
+        assert model.observe_session_cap(cap, cap) is True
 
 
 class _SignalCapture:
@@ -95,13 +143,9 @@ class _Pane:
 class _FakeOrchestrator:
     def __init__(self) -> None:
         self.sessionCapNotice = _SignalCapture()
-        self.queued: list[tuple] = []
 
     def _project_ns_for_pane(self, _pane) -> str:
         return "project-a"
-
-    def _queue_session_cap_advice(self, *args) -> None:
-        self.queued.append(args)
 
 
 @pytest.fixture(autouse=True)
@@ -110,6 +154,10 @@ def _quiet_event_log(monkeypatch: pytest.MonkeyPatch):
 
 
 class TestRoleRouting:
+    """Both Lead and teammates get a passive UI notice only — no PTY write,
+    no advisory queue. Auto-compact inside the CLI handles context pressure;
+    the cockpit never pastes into a pane over this."""
+
     def test_lead_gets_ui_notice_only(self) -> None:
         fake = _FakeOrchestrator()
         pane = _Pane("lead")
@@ -117,54 +165,22 @@ class TestRoleRouting:
         Orchestrator._on_session_cap_exceeded(fake, pane, 205_000, 180_000)
 
         assert fake.sessionCapNotice.calls == [("project-a", "lead", 205_000, 180_000, True)]
-        assert fake.queued == []
         pane.session.write.assert_not_called()
 
-    def test_teammate_gets_ui_notice_and_safe_queue(self) -> None:
+    def test_teammate_gets_ui_notice_only(self) -> None:
         fake = _FakeOrchestrator()
         pane = _Pane("backend")
 
         Orchestrator._on_session_cap_exceeded(fake, pane, 205_000, 180_000)
 
         assert fake.sessionCapNotice.calls == [("project-a", "backend", 205_000, 180_000, False)]
-        assert fake.queued == [(pane, "project-a", 205_000, 180_000)]
-
-
-class TestSafeTeammateDelivery:
-    def test_busy_current_turn_is_never_interrupted(self) -> None:
-        pane = _Pane("backend", ready=False)
-        fake = SimpleNamespace()
-
-        result = Orchestrator._try_session_cap_advice(
-            fake, pane, pane.session, "project-a", 205_000, 180_000
-        )
-
-        assert result == "wait"
         pane.session.write.assert_not_called()
 
-    def test_compacted_session_cancels_queued_advice(self) -> None:
-        pane = _Pane("backend", prompt=90_000, ready=True)
-        fake = SimpleNamespace()
+    def test_no_project_ns_is_a_silent_noop(self) -> None:
+        fake = _FakeOrchestrator()
+        fake._project_ns_for_pane = lambda _pane: None
+        pane = _Pane("backend")
 
-        result = Orchestrator._try_session_cap_advice(
-            fake, pane, pane.session, "project-a", 205_000, 180_000
-        )
+        Orchestrator._on_session_cap_exceeded(fake, pane, 205_000, 180_000)
 
-        assert result == "stop"
-        pane.session.write.assert_not_called()
-
-    def test_ready_teammate_receives_advice(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        pane = _Pane("backend", ready=True)
-        fake = SimpleNamespace()
-        verified = MagicMock()
-        monkeypatch.setattr("agent_takkub.orchestrator._delayed_enter_verified", verified)
-
-        result = Orchestrator._try_session_cap_advice(
-            fake, pane, pane.session, "project-a", 205_000, 180_000
-        )
-
-        assert result == "sent"
-        pane.session.write.assert_called_once()
-        assert "/compact" in pane.session.write.call_args.args[0]
-        verified.assert_called_once()
-        assert pane.state_calls == [("working", "session-cap advisory")]
+        assert fake.sessionCapNotice.calls == []

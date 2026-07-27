@@ -99,7 +99,7 @@ class AgentPane(QFrame):
         # Apply off-thread token-meter reads back on the main (GUI) thread.
         self._tokenMeterReady.connect(self._apply_token_meter)
         self._token_refreshing = False
-        self._session_cap_threshold = resolve_session_cap_threshold(
+        self._session_cap_spec = resolve_session_cap_threshold(
             QSettings("agent-takkub", "cockpit").value(SESSION_CAP_SETTING)
         )
 
@@ -773,8 +773,9 @@ class AgentPane(QFrame):
         self._token_label.setStyleSheet(f"color: {badge['color']}; font-size: 11px;")
         self._token_label.setToolTip(badge["tooltip"])
         self._token_label.show()
-        if self.model.observe_session_cap(usage["prompt"], self._session_cap_threshold):
-            self.sessionCapExceeded.emit(usage["prompt"], self._session_cap_threshold)
+        cap_tokens = self._session_cap_spec.tokens_for(badge["limit"])
+        if self.model.observe_session_cap(usage["prompt"], cap_tokens):
+            self.sessionCapExceeded.emit(usage["prompt"], cap_tokens)
 
     def current_usage(self) -> dict | None:
         """Return the last-known usage dict for status-bar aggregation, or

@@ -17,7 +17,6 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QStatusBar,
     QStyle,
-    QSystemTrayIcon,
     QWidget,
 )
 
@@ -469,13 +468,6 @@ class StatusHeaderMixin:
         # delete this hide() line and re-add it to the Group-2 widget tuple below.
         self._btn_claude_auth.hide()
 
-        # Per-pane "context >= 80%" warning state. Keyed
-        # `<project>::<role>`. We toast (status bar + tray) the first
-        # time a pane crosses 80% and then stay silent until it dips
-        # below 70% — the gap stops a pane that's hovering around
-        # 80% from spamming notifications.
-        self._context_warned: dict[str, bool] = {}
-
         # `project_combo` is retained as a hidden widget so legacy code
         # paths that update it (`_refresh_project_list`, `_on_project_changed`)
         # still link cleanly. The tab strip is now the authoritative
@@ -572,7 +564,7 @@ class StatusHeaderMixin:
             panes = self.orch._project_panes(tab.project_name)
             peak_ratio = 0.0
             peak_limit = 0
-            for role_name, pane in panes.items():
+            for pane in panes.values():
                 usage = pane.current_usage()
                 if not usage:
                     continue
@@ -583,26 +575,10 @@ class StatusHeaderMixin:
                 if ratio > peak_ratio:
                     peak_ratio = ratio
                     peak_limit = lim
-                # Surface a status-bar + tray warning the first time a
-                # pane crosses 80%. Hysteresis at 70% keeps the toast
-                # from flickering when usage oscillates near the line.
-                key = f"{tab.project_name}::{role_name}"
-                if ratio >= 0.80 and not self._context_warned.get(key):
-                    self._context_warned[key] = True
-                    msg = (
-                        f"⚠ {tab.project_name}/{role_name} context at "
-                        f"{int(ratio * 100)}% — consider /clear or ✅ Finish Job"
-                    )
-                    self._status.showMessage(msg, 12_000)
-                    if self._tray and QSystemTrayIcon.isSystemTrayAvailable():
-                        self._tray.showMessage(
-                            f"Context {int(ratio * 100)}%",
-                            f"{tab.project_name}/{role_name} — consider /clear or Finish Job",
-                            QSystemTrayIcon.MessageIcon.Warning,
-                            6_000,
-                        )
-                elif ratio < 0.70 and self._context_warned.get(key):
-                    self._context_warned.pop(key, None)
+            # The cap-crossing status-bar notice lives in one place —
+            # orchestrator's edge-triggered session-cap watchdog (see
+            # main_window._on_session_cap_notice) — so this loop stays purely
+            # passive: it only feeds the always-visible %/color badges below.
             # Sidebar row shows only the % badge — the absolute count lives on
             # the pane header (the canonical per-pane meter). Avoids the same
             # number appearing in three places (sidebar/header/status).

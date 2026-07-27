@@ -94,9 +94,13 @@ class AgentPaneModel:
         self.supports_token_meter = bool(supports_token_meter)
         self.session_cap_warning_active = False
 
-    def observe_session_cap(self, prompt: int, threshold: int) -> bool:
-        """Return True exactly once for each below→at/above cap crossing."""
-        if not self.supports_token_meter:
+    def observe_session_cap(self, prompt: int, threshold: int | None) -> bool:
+        """Return True exactly once for each below→at/above cap crossing.
+
+        `threshold=None` means the watchdog is disabled for this pane (cap
+        ratio configured to 0) — always returns False.
+        """
+        if not self.supports_token_meter or threshold is None:
             self.session_cap_warning_active = False
             return False
         if prompt < threshold:
@@ -131,6 +135,7 @@ class AgentPaneModel:
         return {
             "text": f"{format_tokens(prompt)}/{format_tokens(limit)} · {int(pct * 100)}%",
             "color": usage_color(pct),
+            "limit": limit,
             "tooltip": (
                 f"model: {usage['model']}\n"
                 f"prompt: {usage['prompt']:,} tokens  (input {usage['input']:,} + "
