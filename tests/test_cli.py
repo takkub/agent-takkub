@@ -800,6 +800,74 @@ class TestWorktreeCli:
         assert cli.main(["worktree", "clean", "--force"]) != 0
 
 
+class TestDiskPruneCli:
+    """`takkub disk` (all roles) / `takkub prune` (lead only) — pure-local."""
+
+    @pytest.fixture(autouse=True)
+    def _isolated_data_home(self, tmp_path, monkeypatch):
+        from agent_takkub import disk_usage
+
+        monkeypatch.setattr(disk_usage, "DATA_HOME", tmp_path)
+        # disk_report/prune's claude-config-derived categories (chat-history,
+        # shell-snapshots) call default_claude_config_dir() independently of
+        # DATA_HOME — pin it under tmp_path too so no CLI test here ever
+        # reads/lists the real ~/.claude or ~/.agent-takkub/claude-config.
+        monkeypatch.setattr(
+            disk_usage, "default_claude_config_dir", lambda: tmp_path / "claude-config"
+        )
+        monkeypatch.delenv("TAKKUB_ROLE", raising=False)
+        return tmp_path
+
+    def test_disk_available_to_teammate(self, monkeypatch):
+        monkeypatch.setenv("TAKKUB_ROLE", "backend")
+        assert cli.main(["disk"]) == 0
+
+    def test_disk_json(self, capsys, tmp_path):
+        (tmp_path / "venv").mkdir()
+        assert cli.main(["disk", "--json"]) == 0
+        out = capsys.readouterr().out
+        # main() appends a trailing human-readable "ok: ..." line after the
+        # JSON blob (same convention as `verify --json`/`audit-skills --json`)
+        # — decode just the first JSON value and ignore that trailer.
+        report, _ = json.JSONDecoder().raw_decode(out)
+        assert report["data_home"] == str(tmp_path.resolve())
+        assert any(c["key"] == "venv" for c in report["categories"])
+
+    def test_prune_blocked_for_teammate(self, monkeypatch):
+        monkeypatch.setenv("TAKKUB_ROLE", "backend")
+        assert cli.main(["prune"]) != 0
+
+    def test_prune_allowed_for_lead_dry_run_default(self, monkeypatch):
+        monkeypatch.setenv("TAKKUB_ROLE", "lead")
+        assert cli.main(["prune"]) == 0
+
+    def test_prune_unknown_category_rejected(self):
+        rc = cli.main(["prune", "--category", "not-a-real-category"])
+        assert rc != 0
+
+    def test_prune_review_category_without_level_is_refused(self, capsys, tmp_path):
+        rc = cli.main(["prune", "--category", "chat-history", "--yes"])
+        out = capsys.readouterr().out
+        assert "REFUSED" in out
+        assert rc != 0 or "REFUSED" in out
+
+    def test_prune_dry_run_does_not_delete(self, tmp_path):
+        wt = tmp_path / "worktrees" / "proj" / "frontend-1"
+        wt.mkdir(parents=True)
+        (wt / "f.txt").write_text("x")
+        rc = cli.main(["prune", "--category", "orphan-worktrees"])
+        assert rc == 0
+        assert wt.exists()  # no --yes → nothing removed
+
+    def test_prune_yes_removes_orphan_worktree(self, tmp_path):
+        wt = tmp_path / "worktrees" / "proj" / "frontend-2"
+        wt.mkdir(parents=True)
+        (wt / "f.txt").write_text("x")
+        rc = cli.main(["prune", "--category", "orphan-worktrees", "--yes"])
+        assert rc == 0
+        assert not wt.exists()
+
+
 class TestRestartCli:
     """`takkub restart` — full cockpit restart from the terminal (no button)."""
 

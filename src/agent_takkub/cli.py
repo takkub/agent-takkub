@@ -42,6 +42,7 @@ LEAD_ONLY_COMMANDS = frozenset(
         "migrate-skills",
         "goal",
         "worktree",
+        "prune",
         "restart",
         # machine-level npm installs — a teammate pane must never mutate the
         # host toolchain mid-task; Lead/terminal decides when to add a CLI.
@@ -376,6 +377,110 @@ def cmd_worktree(args: argparse.Namespace) -> dict:
         return {"ok": failed == 0, "msg": f"{len(lines)} processed, {failed} failed"}
 
     return {"ok": False, "msg": f"unknown worktree subcommand: {sub}"}
+
+
+def _fmt_bytes(n: int) -> str:
+    size = float(n)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            return f"{size:.1f}{unit}" if unit != "B" else f"{int(size)}{unit}"
+        size /= 1024
+    return f"{size:.1f}TB"
+
+
+def cmd_disk(args: argparse.Namespace) -> dict:
+    """`takkub disk` — categorized DATA_HOME usage report (safe/review/never).
+
+    Pure-local (no orchestrator socket, same rationale as `worktree`): reads
+    straight off disk + git state so it works even with the cockpit closed.
+    Available to every pane (read-only) — mutation lives in `prune`.
+    """
+    from .disk_usage import disk_report
+
+    report = disk_report()
+    if getattr(args, "json", False):
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return {"ok": True, "msg": f"{_fmt_bytes(report['total_bytes'])} total"}
+
+    _utf8_print(f"DATA_HOME: {report['data_home']}")
+    _utf8_print(f"total: {_fmt_bytes(report['total_bytes'])}\n")
+    for c in sorted(report["categories"], key=lambda c: -c["size_bytes"]):
+        tag = {"safe": "safe  ", "review": "review", "never": "never "}[c["level"]]
+        _utf8_print(
+            f"  [{tag}] {_fmt_bytes(c['size_bytes']):>9}  {c['file_count']:>7} files  "
+            f"{c['key']:<20} {c['label']}"
+        )
+        if c.get("detail"):
+            _utf8_print(f"           {c['detail']}")
+    wt = report["worktrees"]
+    if wt["orphan"] or wt["registered"]:
+        _utf8_print("\nworktrees:")
+        for r in wt["orphan"]:
+            _utf8_print(f"  ORPHAN {_fmt_bytes(r['size_bytes']):>9}  {r['path']}")
+        for r in wt["registered"]:
+            flags = []
+            if r.get("dirty"):
+                flags.append("dirty")
+            if r.get("ahead"):
+                flags.append(f"{r['ahead']} ahead")
+            if r.get("pane_active"):
+                flags.append("pane-active?")
+            _utf8_print(
+                f"  LIVE   {_fmt_bytes(r['size_bytes']):>9}  {r.get('branch', ''):<28} "
+                f"{(' · '.join(flags) or 'clean'):<24} {r['path']}"
+            )
+    return {"ok": True, "msg": f"{_fmt_bytes(report['total_bytes'])} total"}
+
+
+def cmd_prune(args: argparse.Namespace) -> dict:
+    """`takkub prune` — delete reclaimable DATA_HOME categories (lead only).
+
+    Dry-run by default; requires --yes to actually delete. Never touches a
+    `never`-level category regardless of --category. Pure-local, same as
+    `disk`/`worktree` — no orchestrator socket involved.
+    """
+    from .disk_usage import VALID_CATEGORIES, prune
+
+    categories = None
+    if args.category:
+        categories = [c.strip() for c in args.category.split(",") if c.strip()]
+        unknown = [c for c in categories if c not in VALID_CATEGORIES]
+        if unknown:
+            return {
+                "ok": False,
+                "msg": f"unknown --category {unknown}; valid: {', '.join(VALID_CATEGORIES)}",
+            }
+
+    result = prune(
+        categories=categories,
+        level=args.level,
+        older_than_days=args.older_than,
+        dry_run=not args.yes,
+        include_live=bool(args.include_live),
+    )
+
+    for cat in result["categories"]:
+        verb = "would remove" if cat["dry_run"] else "removed"
+        bytes_field = cat["would_free_bytes"] if cat["dry_run"] else cat["freed_bytes"]
+        _utf8_print(
+            f"  [{cat['level']}] {cat['category']:<18} {verb} {cat['target_count']} "
+            f"({_fmt_bytes(bytes_field)})"
+        )
+        for s in cat["skipped"]:
+            _utf8_print(f"           skip: {s}")
+        for e in cat["errors"]:
+            _utf8_print(f"           error: {e}")
+    for r in result["refusals"]:
+        _utf8_print(f"  REFUSED: {r}")
+
+    total_field = (
+        result["total_would_free_bytes"] if result["dry_run"] else result["total_freed_bytes"]
+    )
+    verb = "would free" if result["dry_run"] else "freed"
+    msg = f"{verb} {_fmt_bytes(total_field)}"
+    if result["dry_run"] and total_field:
+        msg += " (dry-run — pass --yes to actually delete)"
+    return {"ok": result["ok"], "msg": msg}
 
 
 def cmd_send(args: argparse.Namespace) -> dict:
@@ -1522,6 +1627,52 @@ def main(argv: list[str] | None = None) -> int:
     )
     swc.add_argument("--cwd", default=None, help="project dir (default: current dir)")
     swt.set_defaults(func=cmd_worktree)
+
+    sdisk = sub.add_parser(
+        "disk",
+        help="report DATA_HOME disk usage by category (safe/review/never to delete)",
+    )
+    sdisk.add_argument("--json", action="store_true", help="machine-readable output")
+    sdisk.set_defaults(func=cmd_disk)
+
+    sprune = sub.add_parser(
+        "prune",
+        help="delete reclaimable DATA_HOME categories — dry-run unless --yes (lead only)",
+    )
+    sprune.add_argument(
+        "--category",
+        default=None,
+        help="comma-separated categories to prune (default: every safe category). "
+        "one of: browser-profiles,transcripts,exports,orphan-worktrees,"
+        "shell-snapshots,partial,chat-history,node-modules",
+    )
+    sprune.add_argument(
+        "--level",
+        choices=("safe", "review"),
+        default="safe",
+        help="max safety level in scope when --category is omitted, and the ceiling "
+        "a named --category must be at or under (default: safe; review must be explicit)",
+    )
+    sprune.add_argument(
+        "--older-than",
+        type=int,
+        default=None,
+        metavar="DAYS",
+        help="age threshold (days) for time-based categories (default: per-category retention)",
+    )
+    sprune.add_argument(
+        "--include-live",
+        action="store_true",
+        help="also delete node_modules under STILL-REGISTERED worktrees (node-modules "
+        "category only) — dangerous if a dev server/build is running there; default "
+        "skips them",
+    )
+    sprune.add_argument(
+        "--yes",
+        action="store_true",
+        help="actually delete (default is dry-run: preview only, nothing removed)",
+    )
+    sprune.set_defaults(func=cmd_prune)
 
     ss = sub.add_parser("send", help="send a message to a running pane")
     ss.add_argument("--to", required=True)
