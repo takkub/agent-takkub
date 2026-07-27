@@ -748,7 +748,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 6,
-      "fan_out": 26
+      "fan_out": 27
     },
     {
       "module": "agent_takkub.orchestrator_text",

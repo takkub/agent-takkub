@@ -363,21 +363,25 @@ class TestAttachSessionReceivesSessionUuid:
     cwd).
 
     Self-contained (own `_spawn` helper, doesn't reuse the module-level
-    `_spawn_capture`): the rest of this file patches `orch_mod.PtySession`,
-    but the claude spawn branch actually constructs `PtySession` from
-    `spawn_engine`'s own module-level import (post god-file-split), not a
-    name re-exported on `orchestrator` — patching the stale location is a
-    pre-existing bug in this file unrelated to #129 (confirmed: every other
-    test here fails the same way even on an unmodified checkout), out of
-    scope for this fix.
+    `_spawn_capture`) because it needs `fake_pane` back to inspect
+    `attach_session.call_args`. Patches `orch_mod.PtySession`, same as the
+    rest of this file: `spawn_engine._from_orch("PtySession")` (see
+    spawn_engine.py's test-mockability shim comment) resolves the name from
+    `agent_takkub.orchestrator`'s live module dict at call time and only
+    falls back to spawn_engine's own module-level binding if orchestrator
+    doesn't have it — so patching `spawn_engine_mod.PtySession` is never
+    actually consulted while `orch_mod.PtySession` exists, which it always
+    does. An earlier version of this helper patched the spawn_engine
+    location on the mistaken belief it was the "real" one; that left
+    `captured` empty (the *real* PtySession got constructed and its real
+    spawn() ran instead of the mock).
     """
 
     def _spawn(self, orch: Orchestrator, role_name: str, cwd: str = "/proj") -> tuple:
-        """Run orch.spawn() with a fake PtySession patched at its real
-        current location (spawn_engine.PtySession). Returns (argv, fake_pane).
+        """Run orch.spawn() with a fake PtySession patched at
+        orch_mod.PtySession (the location _from_orch actually reads).
+        Returns (argv, fake_pane).
         """
-        from agent_takkub import spawn_engine as spawn_engine_mod
-
         fake_pane = MagicMock()
         fake_pane.session = None
         fake_pane.state = "empty"
@@ -388,7 +392,7 @@ class TestAttachSessionReceivesSessionUuid:
         fake_session = MagicMock()
         fake_session.processExited = MagicMock()
         fake_session.processExited.connect = MagicMock()
-        with patch.object(spawn_engine_mod, "PtySession", return_value=fake_session):
+        with patch.object(orch_mod, "PtySession", return_value=fake_session):
             with patch.object(
                 fake_session,
                 "spawn",
