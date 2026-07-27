@@ -571,6 +571,20 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             prune_old_browser_profiles()
         except Exception as e:
             _log_event("browser_profile_prune_error", error=repr(e))
+        # Reclaim disk: sweep ORPHAN worktree checkouts only — dirs under
+        # runtime/../worktrees/ that `git worktree list` no longer knows about
+        # (crashed cockpit, deleted .git pointer). Never touches a still-
+        # registered worktree (that's `takkub worktree clean`'s job, explicit
+        # opt-in). Safe at boot for the same reason as the two prunes above:
+        # no pane is alive yet to be using one. Best-effort / non-fatal.
+        try:
+            from .disk_usage import prune_orphan_worktrees_boot
+
+            removed = prune_orphan_worktrees_boot()
+            if removed:
+                _log_event("orphan_worktree_prune", removed=removed)
+        except Exception as e:
+            _log_event("orphan_worktree_prune_error", error=repr(e))
         # PaneRegistry groups all 7 spawn-engine state dicts under one object.
         # Backward-compat properties on SpawnEngineMixin let every existing
         # access site (self._pane_state[...] etc.) work unchanged.
