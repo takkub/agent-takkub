@@ -28,10 +28,13 @@ Design rules (mirror codex_helper.py):
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
 import sys
+import time
+import urllib.parse
 from pathlib import Path
 
 from ._win_console import SUBPROCESS_NO_WINDOW
@@ -97,6 +100,156 @@ def find_agy_executable() -> str | None:
     for candidate in _default_agy_paths():
         if candidate.is_file():
             return str(candidate)
+    return None
+
+
+def _normalize_path_for_compare(path: str) -> str:
+    """Collapse a filesystem path (or a decoded `file://` URI tail) into a
+    form comparable across the two shapes agy's own project registry uses:
+    forward slashes, no trailing slash, and — ONLY on the platforms where the
+    filesystem itself is case-insensitive (Windows, macOS/APFS default) —
+    lowercased. Linux (ext4 etc.) is case-sensitive, so `Project` and
+    `project` are two different directories there; lowercasing unconditionally
+    would falsely match an unrelated cwd that merely differs in case (#132
+    followup)."""
+    normalized = path.replace("\\", "/")
+    while "//" in normalized:
+        normalized = normalized.replace("//", "/")
+    normalized = normalized.rstrip("/")
+    if sys.platform in ("win32", "darwin"):
+        normalized = normalized.lower()
+    return normalized
+
+
+def _folder_uri_to_path(uri: str) -> str | None:
+    """Decode an agy project config `folderUri` into a comparable path.
+
+    Two shapes have been observed on disk under
+    `~/.gemini/config/projects/<uuid>.json`:
+      - `file:///c%3A/Users/...` — percent-encoded drive letter + colon,
+        POSIX-style triple slash (the `gitFolder.folderUri` field).
+      - `file://C:/Users/...`   — plain drive letter, double slash (the
+        top-level `folderUri` field some entries use instead).
+    Both decode to the same comparable path once normalized. macOS/Linux
+    URIs (`file:///Users/name/project`) have no drive letter and pass
+    through unaffected.
+    """
+    prefix = "file://"
+    if not uri.startswith(prefix):
+        return None
+    rest = urllib.parse.unquote(uri[len(prefix) :])
+    # Windows drive-letter form after stripping "file://": a leading slash
+    # followed by "<letter>:" (e.g. "/c:/Users/..."). Strip that leading
+    # slash so it lines up with the no-leading-slash "C:/Users/..." shape.
+    if len(rest) >= 3 and rest[0] == "/" and rest[2] == ":":
+        rest = rest[1:]
+    return rest
+
+
+# ── concurrent-mint guard (#132 followup) ────────────────────────────────────
+# agy has no server-side dedup: mint a project via `--new-project` twice for
+# the same folder (two panes spawning against the same not-yet-registered cwd
+# at once — e.g. a Multi-mode fan-out or `--shards` sharing one cwd) and agy
+# creates two separate project ids for it, forking that project's
+# conversation history in two. The cockpit can't create the id itself either
+# — only `agy` mints one, and only after it finishes booting, well after our
+# `spawn()` call has already returned. So the guard lives entirely in-process
+# (single Qt event loop → these calls are never truly concurrent, only
+# closely spaced in wall-clock time): the first caller for a given cwd claims
+# it as "minting" and moves on; anyone else asking about that same cwd while
+# the claim is fresh polls the on-disk registry briefly instead of racing its
+# own `--new-project`, and gives up (accepting a possible duplicate over a
+# stuck spawn) once its poll budget runs out.
+_MINT_INFLIGHT: dict[str, float] = {}
+_MINT_INFLIGHT_TTL_SEC = 60.0  # abandon a claim this old (crashed/never-finished mint)
+_MINT_POLL_TIMEOUT_SEC = 4.0  # total bounded wait for a fresh mint to land
+_MINT_POLL_INTERVAL_SEC = 0.25
+
+
+def _project_registry_files() -> list[Path]:
+    config_dir = Path.home() / ".gemini" / "config" / "projects"
+    if not config_dir.is_dir():
+        return []
+    return sorted(config_dir.glob("*.json"))
+
+
+def _find_project_id_for(target: str) -> str | None:
+    """Scan `~/.gemini/config/projects/*.json` for a project whose folder
+    matches the already-normalized `target` path. Best-effort: a corrupt
+    project file is skipped rather than raised (must not block spawning the
+    whole gemini role over one bad file)."""
+    for config_file in _project_registry_files():
+        try:
+            data = json.loads(config_file.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        project_id = data.get("id")
+        if not project_id:
+            continue
+        resources = data.get("projectResources", {}).get("resources", [])
+        for resource in resources:
+            for uri in (
+                resource.get("gitFolder", {}).get("folderUri"),
+                resource.get("folderUri"),
+            ):
+                if not uri:
+                    continue
+                decoded = _folder_uri_to_path(uri)
+                if decoded and _normalize_path_for_compare(decoded) == target:
+                    return project_id
+    return None
+
+
+def resolve_agy_project_id(cwd: str) -> str | None:
+    """Match `cwd` against agy's own project registry
+    (`~/.gemini/config/projects/*.json`) and return the matching project
+    id, or None when no existing agy project covers this folder (the caller
+    then falls back to `--new-project`).
+
+    Why this exists (#132): agy has no cwd-derived project scoping of its
+    own — every spawn without an explicit `--project <id>` lands
+    conversations in the shared pseudo-project `default-cli-project`,
+    mixing every takkub project's Lead/teammate conversation history into
+    one bucket. Antigravity IDE sessions DO get a real per-project uuid
+    recorded here (`projectResources.resources[].gitFolder.folderUri`, or
+    the older plain `.folderUri` sibling some entries use instead) —
+    reusing that id when the folder matches keeps agy's existing
+    conversation history for the project intact instead of the caller
+    minting a duplicate id via `--new-project`.
+
+    Concurrent-mint guard (#132 followup): a `cwd` with no existing match
+    could mean "no agy project yet" OR "another pane just asked the same
+    question a moment ago and is already getting one minted". Only the
+    first caller for a given `cwd` is told "go mint one" (returns None with
+    no in-flight claim in the way); anyone else asking again while that
+    claim is still fresh (`_MINT_INFLIGHT_TTL_SEC`) polls the registry for
+    up to `_MINT_POLL_TIMEOUT_SEC` instead of immediately requesting its own
+    `--new-project` — so two panes spawning into the same brand-new cwd at
+    nearly the same time converge on one project id instead of forking it in
+    two. A poll that times out still returns None (accepting a possible
+    duplicate beats blocking the spawn indefinitely); a stale claim past its
+    TTL (the original minter crashed or never finished) is abandoned so the
+    next caller becomes the new minter instead of polling forever.
+    """
+    target = _normalize_path_for_compare(cwd)
+    found = _find_project_id_for(target)
+    if found:
+        _MINT_INFLIGHT.pop(target, None)
+        return found
+
+    now = time.monotonic()
+    inflight_since = _MINT_INFLIGHT.get(target)
+    if inflight_since is not None and (now - inflight_since) < _MINT_INFLIGHT_TTL_SEC:
+        deadline = now + _MINT_POLL_TIMEOUT_SEC
+        while time.monotonic() < deadline:
+            time.sleep(_MINT_POLL_INTERVAL_SEC)
+            found = _find_project_id_for(target)
+            if found:
+                _MINT_INFLIGHT.pop(target, None)
+                return found
+        return None
+
+    _MINT_INFLIGHT[target] = now
     return None
 
 

@@ -260,3 +260,342 @@ class TestGeminiExec:
         ok, msg = gemini_helper.gemini_exec("hi")
         assert ok is True
         assert msg == "answer text"
+
+
+def _plant_project(config_dir: Path, project_id: str, folder_uri: str) -> None:
+    import json
+
+    config_dir.mkdir(parents=True, exist_ok=True)
+    body = {
+        "id": project_id,
+        "projectResources": {"resources": [{"folderUri": folder_uri}]},
+    }
+    (config_dir / f"{project_id}.json").write_text(json.dumps(body), encoding="utf-8")
+
+
+@pytest.fixture(autouse=True)
+def _clear_mint_inflight():
+    """`_MINT_INFLIGHT` is process-wide state (#132 followup) — reset it
+    around every test in this module so one test's claim can never leak
+    into another's."""
+    gemini_helper._MINT_INFLIGHT.clear()
+    yield
+    gemini_helper._MINT_INFLIGHT.clear()
+
+
+class TestFolderUriToPath:
+    """agy's own `~/.gemini/config/projects/<uuid>.json` registry stores the
+    project's folder two different ways (see resolve_agy_project_id's
+    docstring) — both must decode to the same comparable path (#132)."""
+
+    def test_percent_encoded_windows_drive_gitfolder_form(self) -> None:
+        uri = "file:///c%3A/Users/monch/WebstormProjects/agent-takkub"
+        assert (
+            gemini_helper._folder_uri_to_path(uri) == "c:/Users/monch/WebstormProjects/agent-takkub"
+        )
+
+    def test_plain_windows_drive_top_level_form(self) -> None:
+        uri = "file://C:/Users/monch/WebstormProjects/agent-takkub"
+        assert (
+            gemini_helper._folder_uri_to_path(uri) == "C:/Users/monch/WebstormProjects/agent-takkub"
+        )
+
+    def test_macos_posix_path_has_no_drive_letter_to_strip(self) -> None:
+        uri = "file:///Users/monch/projects/agent-takkub"
+        assert gemini_helper._folder_uri_to_path(uri) == "/Users/monch/projects/agent-takkub"
+
+    def test_percent_encoded_unicode_path_segment(self) -> None:
+        uri = "file:///c%3A/Users/monch/WebstormProjects/%E0%B8%9B"
+        assert gemini_helper._folder_uri_to_path(uri) == "c:/Users/monch/WebstormProjects/\u0e1b"
+
+    def test_non_file_scheme_returns_none(self) -> None:
+        assert gemini_helper._folder_uri_to_path("https://example.com/x") is None
+
+
+class TestNormalizePathForCompare:
+    def test_backslashes_become_forward_slashes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(gemini_helper.sys, "platform", "win32")
+        assert (
+            gemini_helper._normalize_path_for_compare(
+                r"C:\Users\monch\WebstormProjects\agent-takkub"
+            )
+            == "c:/users/monch/webstormprojects/agent-takkub"
+        )
+
+    def test_trailing_slash_is_dropped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(gemini_helper.sys, "platform", "win32")
+        assert (
+            gemini_helper._normalize_path_for_compare("c:/Users/monch/agent-takkub/")
+            == "c:/users/monch/agent-takkub"
+        )
+
+    def test_double_slashes_collapse(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(gemini_helper.sys, "platform", "win32")
+        assert (
+            gemini_helper._normalize_path_for_compare("c:/Users//monch///agent-takkub")
+            == "c:/users/monch/agent-takkub"
+        )
+
+    def test_case_insensitive_on_windows(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(gemini_helper.sys, "platform", "win32")
+        a = gemini_helper._normalize_path_for_compare("C:/Users/Monch/Agent-Takkub")
+        b = gemini_helper._normalize_path_for_compare("c:/users/monch/agent-takkub")
+        assert a == b
+
+    def test_case_insensitive_on_macos(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(gemini_helper.sys, "platform", "darwin")
+        a = gemini_helper._normalize_path_for_compare("/Users/Monch/Agent-Takkub")
+        b = gemini_helper._normalize_path_for_compare("/users/monch/agent-takkub")
+        assert a == b
+
+    def test_case_sensitive_on_linux(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Regression guard (#132 followup): ext4 et al. are case-sensitive —
+        # unconditional lowercasing would falsely equate two distinct dirs.
+        monkeypatch.setattr(gemini_helper.sys, "platform", "linux")
+        a = gemini_helper._normalize_path_for_compare("/Users/Monch/Agent-Takkub")
+        b = gemini_helper._normalize_path_for_compare("/users/monch/agent-takkub")
+        assert a != b
+        # ...but separator/trailing-slash collapsing still applies.
+        assert (
+            gemini_helper._normalize_path_for_compare("/Users/Monch//Agent-Takkub/")
+            == "/Users/Monch/Agent-Takkub"
+        )
+
+
+class TestResolveAgyProjectId:
+    """Match spawn cwd against agy's own project registry (#132) so an
+    existing Antigravity project id is reused instead of every takkub spawn
+    landing in agy's shared 'default-cli-project' pseudo-project bucket."""
+
+    def _write_project(self, config_dir: Path, project_id: str, body: dict) -> None:
+        import json
+
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / f"{project_id}.json").write_text(json.dumps(body), encoding="utf-8")
+
+    def test_no_config_dir_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(gemini_helper.Path, "home", lambda: tmp_path)
+        assert gemini_helper.resolve_agy_project_id(str(tmp_path / "repo")) is None
+
+    def test_matches_percent_encoded_gitfolder_form(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(gemini_helper.Path, "home", lambda: tmp_path)
+        config_dir = tmp_path / ".gemini" / "config" / "projects"
+        self._write_project(
+            config_dir,
+            "17fdc03a-8cb3-446e-a833-4aaffc55f6bb",
+            {
+                "id": "17fdc03a-8cb3-446e-a833-4aaffc55f6bb",
+                "name": "agent-takkub",
+                "projectResources": {
+                    "resources": [
+                        {
+                            "gitFolder": {
+                                "folderUri": "file:///c%3A/Users/monch/WebstormProjects/agent-takkub"
+                            }
+                        }
+                    ]
+                },
+            },
+        )
+        result = gemini_helper.resolve_agy_project_id(
+            r"C:\Users\monch\WebstormProjects\agent-takkub"
+        )
+        assert result == "17fdc03a-8cb3-446e-a833-4aaffc55f6bb"
+
+    def test_matches_plain_top_level_folderuri_form(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(gemini_helper.Path, "home", lambda: tmp_path)
+        config_dir = tmp_path / ".gemini" / "config" / "projects"
+        self._write_project(
+            config_dir,
+            "876a3c92-9f62-4d1e-8f5c-7ad6265764e7",
+            {
+                "id": "876a3c92-9f62-4d1e-8f5c-7ad6265764e7",
+                "name": r"C:\Users\monch\WebstormProjects\agent-takkub",
+                "projectResources": {
+                    "resources": [
+                        {"folderUri": "file://C:/Users/monch/WebstormProjects/agent-takkub"}
+                    ]
+                },
+            },
+        )
+        result = gemini_helper.resolve_agy_project_id(
+            "C:/Users/monch/WebstormProjects/agent-takkub"
+        )
+        assert result == "876a3c92-9f62-4d1e-8f5c-7ad6265764e7"
+
+    def test_case_insensitive_match(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        # Windows filesystem is case-insensitive — pin platform explicitly so
+        # this test's outcome doesn't depend on which host CI runs it on.
+        monkeypatch.setattr(gemini_helper.sys, "platform", "win32")
+        monkeypatch.setattr(gemini_helper.Path, "home", lambda: tmp_path)
+        config_dir = tmp_path / ".gemini" / "config" / "projects"
+        self._write_project(
+            config_dir,
+            "case-test-id",
+            {
+                "id": "case-test-id",
+                "projectResources": {
+                    "resources": [
+                        {"folderUri": "file://C:/Users/monch/WebstormProjects/agent-takkub"}
+                    ]
+                },
+            },
+        )
+        result = gemini_helper.resolve_agy_project_id(
+            "c:/users/MONCH/WebstormProjects/AGENT-TAKKUB"
+        )
+        assert result == "case-test-id"
+
+    def test_no_match_returns_none(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        monkeypatch.setattr(gemini_helper.Path, "home", lambda: tmp_path)
+        config_dir = tmp_path / ".gemini" / "config" / "projects"
+        self._write_project(
+            config_dir,
+            "unrelated-id",
+            {
+                "id": "unrelated-id",
+                "projectResources": {
+                    "resources": [{"folderUri": "file://C:/Users/monch/OtherProject"}]
+                },
+            },
+        )
+        result = gemini_helper.resolve_agy_project_id(
+            "C:/Users/monch/WebstormProjects/agent-takkub"
+        )
+        assert result is None
+
+    def test_corrupt_project_file_is_skipped_not_fatal(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(gemini_helper.Path, "home", lambda: tmp_path)
+        config_dir = tmp_path / ".gemini" / "config" / "projects"
+        config_dir.mkdir(parents=True)
+        (config_dir / "broken.json").write_text("{not valid json", encoding="utf-8")
+        self._write_project(
+            config_dir,
+            "good-id",
+            {
+                "id": "good-id",
+                "projectResources": {
+                    "resources": [
+                        {"folderUri": "file://C:/Users/monch/WebstormProjects/agent-takkub"}
+                    ]
+                },
+            },
+        )
+        result = gemini_helper.resolve_agy_project_id(
+            "C:/Users/monch/WebstormProjects/agent-takkub"
+        )
+        assert result == "good-id"
+
+
+class TestResolveAgyProjectIdConcurrentMint:
+    """#132 followup: two panes spawning agy against the same not-yet-
+    registered cwd at nearly the same time must not each mint their own
+    project id — the second caller polls briefly for the first caller's
+    in-flight mint to land instead of racing its own `--new-project`."""
+
+    def test_first_caller_claims_the_mint_and_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(gemini_helper.Path, "home", lambda: tmp_path)
+
+        def _boom(_seconds):
+            raise AssertionError("first caller must not poll — nobody else is minting yet")
+
+        monkeypatch.setattr(gemini_helper.time, "sleep", _boom)
+
+        cwd = str(tmp_path / "repo")
+        result = gemini_helper.resolve_agy_project_id(cwd)
+        assert result is None
+        target = gemini_helper._normalize_path_for_compare(cwd)
+        assert target in gemini_helper._MINT_INFLIGHT
+
+    def test_second_caller_polls_and_picks_up_id_written_mid_wait(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(gemini_helper.Path, "home", lambda: tmp_path)
+        cwd = str(tmp_path / "repo")
+        target = gemini_helper._normalize_path_for_compare(cwd)
+
+        first = gemini_helper.resolve_agy_project_id(cwd)
+        assert first is None  # becomes the minter, claims target
+
+        config_dir = tmp_path / ".gemini" / "config" / "projects"
+        folder_uri = f"file://{(tmp_path / 'repo').as_posix()}"
+        sleep_calls = {"n": 0}
+
+        def fake_sleep(_seconds):
+            # Simulate agy finishing its mint (writing the registry entry)
+            # partway through the second caller's poll wait, without
+            # actually burning real wall-clock time in the test.
+            sleep_calls["n"] += 1
+            if sleep_calls["n"] == 1:
+                _plant_project(config_dir, "minted-id", folder_uri)
+
+        monkeypatch.setattr(gemini_helper.time, "sleep", fake_sleep)
+
+        second = gemini_helper.resolve_agy_project_id(cwd)
+        assert second == "minted-id"
+        assert sleep_calls["n"] >= 1
+        assert target not in gemini_helper._MINT_INFLIGHT
+
+    def test_second_caller_falls_back_to_new_project_after_poll_timeout(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(gemini_helper.Path, "home", lambda: tmp_path)
+        monkeypatch.setattr(gemini_helper, "_MINT_POLL_TIMEOUT_SEC", 0.05)
+        monkeypatch.setattr(gemini_helper, "_MINT_POLL_INTERVAL_SEC", 0.01)
+        monkeypatch.setattr(gemini_helper.time, "sleep", lambda _s: None)
+
+        cwd = str(tmp_path / "repo")
+        first = gemini_helper.resolve_agy_project_id(cwd)
+        assert first is None  # becomes the minter
+
+        # Nobody ever writes the registry entry — the poll must give up and
+        # return None (caller falls back to --new-project) rather than
+        # blocking indefinitely.
+        second = gemini_helper.resolve_agy_project_id(cwd)
+        assert second is None
+
+    def test_stale_inflight_marker_is_abandoned_without_polling(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(gemini_helper.Path, "home", lambda: tmp_path)
+        monkeypatch.setattr(gemini_helper, "_MINT_INFLIGHT_TTL_SEC", 0.01)
+
+        cwd = str(tmp_path / "repo")
+        target = gemini_helper._normalize_path_for_compare(cwd)
+        gemini_helper._MINT_INFLIGHT[target] = gemini_helper.time.monotonic() - 10
+
+        def _boom(_seconds):
+            raise AssertionError("a stale (expired) in-flight claim must not trigger a poll")
+
+        monkeypatch.setattr(gemini_helper.time, "sleep", _boom)
+
+        result = gemini_helper.resolve_agy_project_id(cwd)
+        assert result is None
+        # This caller re-claims the mint for itself rather than waiting.
+        assert target in gemini_helper._MINT_INFLIGHT
+
+    def test_immediate_registry_match_clears_any_inflight_marker(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(gemini_helper.Path, "home", lambda: tmp_path)
+        cwd = str(tmp_path / "repo")
+        target = gemini_helper._normalize_path_for_compare(cwd)
+        gemini_helper._MINT_INFLIGHT[target] = gemini_helper.time.monotonic()
+
+        config_dir = tmp_path / ".gemini" / "config" / "projects"
+        folder_uri = f"file://{(tmp_path / 'repo').as_posix()}"
+        _plant_project(config_dir, "already-id", folder_uri)
+
+        result = gemini_helper.resolve_agy_project_id(cwd)
+        assert result == "already-id"
+        assert target not in gemini_helper._MINT_INFLIGHT

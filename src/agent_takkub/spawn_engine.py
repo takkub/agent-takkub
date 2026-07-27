@@ -1485,6 +1485,32 @@ class SpawnEngineMixin:
                     env=env,
                 )
             )
+            # Project/session scoping (#132): opt-in per provider via
+            # ProviderSpec.project_scope_flag — currently only gemini/agy,
+            # whose own conversation history isn't keyed by cwd otherwise.
+            # Never hardcode a provider name here; a future provider plugs
+            # in by setting the three project_scope_* fields on its own spec.
+            if spec.project_scope_flag and spec.project_scope_resolver:
+                try:
+                    _scope_id = spec.project_scope_resolver(spawn_cwd)
+                except Exception:
+                    _log.exception("project scope resolver failed for %s", spec.name)
+                    _scope_id = None
+                if _scope_id:
+                    provider_argv.extend([spec.project_scope_flag, _scope_id])
+                    _log_event(
+                        "provider_project_scope",
+                        provider=spec.name,
+                        resolved=_scope_id,
+                    )
+                elif spec.project_scope_new_flag:
+                    provider_argv.append(spec.project_scope_new_flag)
+                    _log_event(
+                        "provider_project_scope",
+                        provider=spec.name,
+                        resolved=None,
+                        fallback=spec.project_scope_new_flag,
+                    )
             return self._launch_session(
                 pane=pane,
                 role_name=role_name,

@@ -146,6 +146,23 @@ class ProviderSpec:
     # (stamps codex_spawn_ts) instead of the stale-guarded `_on_session_exit`.
     early_exit_watch: bool = False
 
+    # ─── 12. Project/session scoping (opt-in per provider, #132) ───
+    # A CLI whose own conversation history isn't already keyed by cwd (agy
+    # dumps everything into one shared pseudo-project without this) can plug
+    # in a resolver here instead of spawn_engine.py hardcoding its name.
+    # project_scope_flag     — argv flag that takes an existing scope/project
+    #                          id as its value (None = provider not wired).
+    # project_scope_resolver — cwd -> existing scope id, or None when nothing
+    #                          matches. Lazy-imports its helper module inside
+    #                          the call, mirroring custom_discovery_fn above,
+    #                          so this stays a pure data layer.
+    # project_scope_new_flag — fallback flag to request a fresh scope id when
+    #                          the resolver finds no match (None = provider
+    #                          has no such flag; scope arg is simply omitted).
+    project_scope_flag: str | None = None
+    project_scope_resolver: Callable[[str], str | None] | None = None
+    project_scope_new_flag: str | None = None
+
 
 # ── binary discovery wrappers ────────────────────────────────────────────────
 # Each does its `from .<helper> import find_*` INSIDE the call (not at module
@@ -170,6 +187,12 @@ def _discover_gemini() -> str | None:
     from .gemini_helper import find_agy_executable
 
     return find_agy_executable()
+
+
+def _resolve_gemini_project_id(cwd: str) -> str | None:
+    from .gemini_helper import resolve_agy_project_id
+
+    return resolve_agy_project_id(cwd)
 
 
 def _discover_opencode() -> str | None:
@@ -435,6 +458,13 @@ gemini_spec = ProviderSpec(
     supports_remote_history=False,
     prepend_bin_dir_to_path=True,  # spawn_engine.py gemini branch: agy_dir on PATH
     auto_trust=True,  # spawn_engine.py gemini branch: auto_trust=True
+    project_scope_flag="--project",  # agy 1.1.6 --help: "Project ID for the
+    # current CLI session" — without it every spawn falls into agy's shared
+    # 'default-cli-project' pseudo-project, mixing every takkub project's
+    # conversation history together (#132).
+    project_scope_resolver=_resolve_gemini_project_id,
+    project_scope_new_flag="--new-project",  # agy 1.1.6 --help: mint a fresh
+    # project id when the resolver finds no existing match for this cwd.
 )
 
 
