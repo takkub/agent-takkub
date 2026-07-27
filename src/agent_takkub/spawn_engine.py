@@ -2150,6 +2150,12 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 _ps_new.session_uuid = new_uuid
                 _ps_new.session_uuid_cwd = spawn_cwd
 
+        # Whichever branch above ran, `_ps(_ekey_spawn).session_uuid` now
+        # holds the exact uuid this spawn is using — pass it straight to the
+        # pane so the token meter resolves this pane's own JSONL by uuid,
+        # never by newest-mtime-in-cwd (issue #129: peer panes sharing a cwd).
+        _spawned_session_uuid = self._ps(_ekey_spawn).session_uuid
+
         session = PtySession(cols=_PANE_COLS, rows=_PANE_ROWS, parent=self)
         _t_path = _build_transcript_path(project_ns, role_name)
         pane._transcript_path = _t_path
@@ -2179,7 +2185,12 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 project=project_ns,
                 ms=int((time.time() - _t0) * 1000),
             )
-            pane.attach_session(session, cwd=spawn_cwd, provider_name="claude")
+            pane.attach_session(
+                session,
+                cwd=spawn_cwd,
+                provider_name="claude",
+                session_uuid=_spawned_session_uuid,
+            )
             self._finish_spawn_initial_task(
                 role_name,
                 project_ns,

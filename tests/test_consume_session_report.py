@@ -7,6 +7,8 @@ stale uuid and broke the remote mirror's exact-uuid lookup.
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 import pytest
 from PyQt6.QtCore import QCoreApplication
 
@@ -102,6 +104,45 @@ class TestUpdatesPaneState:
 
         assert orch._pane_state[_key("backend")].session_uuid == "backend-uuid"
         assert orch._pane_state[_key("frontend")].session_uuid == "frontend-uuid"
+
+
+class TestPropagatesToLivePane:
+    """Issue #129: PaneState.session_uuid isn't what the token meter reads —
+    AgentPaneModel.session_uuid is, a separate copy stamped at attach time.
+    Without pushing this SessionStart-hook update onto the live pane too, a
+    manual /resume or /clear inside the pane would leave the meter polling
+    the pre-rollover (now-stale) uuid's file forever."""
+
+    def test_updates_live_pane_model_session_uuid(self, orch: Orchestrator) -> None:
+        pane = MagicMock()
+        pane.model.session_uuid = "spawn-time-uuid"
+        orch._panes_by_project.setdefault(TEST_PROJECT, {})["backend"] = pane
+
+        ok, _ = orch.consume_session_report(
+            "backend",
+            project=TEST_PROJECT,
+            session_id="resumed-uuid",
+            source="resume",
+            cwd="/proj",
+        )
+
+        assert ok is True
+        pane.model.set_session_uuid.assert_called_once_with("resumed-uuid")
+
+    def test_no_open_pane_does_not_raise(self, orch: Orchestrator) -> None:
+        # No pane registered for this role/project — must fail open, not crash.
+        ok, _ = orch.consume_session_report(
+            "ghost-role", project=TEST_PROJECT, session_id="uuid", cwd="/proj"
+        )
+        assert ok is True
+
+    def test_does_not_touch_other_projects_pane(self, orch: Orchestrator) -> None:
+        other_pane = MagicMock()
+        orch._panes_by_project.setdefault("other-project", {})["backend"] = other_pane
+
+        orch.consume_session_report("backend", project=TEST_PROJECT, session_id="uuid", cwd="/proj")
+
+        other_pane.model.set_session_uuid.assert_not_called()
 
 
 class TestMissingCwdKeepsPriorValue:

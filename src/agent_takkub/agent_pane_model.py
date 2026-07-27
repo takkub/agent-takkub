@@ -55,6 +55,13 @@ class AgentPaneModel:
         self.session_cwd: str | None = None
         self.session_jsonl: object | None = None
         self.last_usage: dict | None = None
+        # This pane's own Claude session transcript uuid (PaneState.session_uuid
+        # mirror — see AgentPane.attach_session). The token meter resolves its
+        # JSONL by this exact uuid, never by newest-mtime-in-cwd, so panes
+        # sharing a cwd (issue #129) can't read each other's usage numbers.
+        # None until spawn (or a later /resume-triggered SessionStart hook)
+        # reports it.
+        self.session_uuid: str | None = None
         # Provider capability is set by AgentPane.attach_session(). Claude is
         # currently the only provider whose JSONL usage schema token_meter can
         # read (#103); other providers must not arm the session-cap watchdog.
@@ -87,6 +94,14 @@ class AgentPaneModel:
 
     def set_worktree_branch(self, branch: str | None) -> None:
         self.worktree_branch = branch or None
+
+    def set_session_uuid(self, session_uuid: str | None) -> None:
+        """Update this pane's known session transcript uuid — called at
+        attach (spawn-time value) and again whenever the `SessionStart`
+        hook reports a rollover (manual `/resume`/`/clear`), so the token
+        meter never chases a stale uuid after the user switches sessions
+        mid-pane."""
+        self.session_uuid = session_uuid or None
 
     def configure_provider(self, provider_name: str, *, supports_token_meter: bool) -> None:
         """Reset meter/watchdog state for a newly attached provider session."""
