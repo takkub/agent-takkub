@@ -4,6 +4,24 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.36] - 2026-07-27
+
+### Added (ใหม่)
+- **`takkub disk` / `takkub prune` — ดูว่าอะไรกินพื้นที่ แล้วเลือกลบได้** (`disk_usage.py`) · `disk` รายงาน DATA_HOME แยกหมวดพร้อมป้ายความปลอดภัย **safe / review / never** (+`--json`) · `prune` **dry-run เป็นค่าเริ่มต้น** ต้อง `--yes` ถึงลบจริง เลือกได้ด้วย `--category` / `--level` / `--older-than` · หมวด `never` (venv, config, tasks, worktree ที่ยังใช้งาน) ถูกปฏิเสธเสมอแม้สั่งเอง · ทุกเป้าหมายถูก resolve แล้วเช็คว่าอยู่ใต้ DATA_HOME จริง กัน path escape
+  - **หมวด `node-modules`** — สแกน `node_modules` ทุกชั้นใต้ `worktrees/` แยก **orphan** (worktree ที่ git ไม่รู้จักแล้ว = ลบได้เลย) ออกจากตัวที่ยังใช้งาน (ข้ามโดยอัตโนมัติ ต้อง `--include-live` เอง) — เคสจริงจากเครื่อง user: `~/.agent-takkub` บวมถึง **14.5 GB / 472,973 ไฟล์** โดย 8.1 GB เป็น worktree ซาก
+  - **Windows long-path** — ลบผ่าน `\\?\` extended-length prefix + ปลด read-only แล้วลองซ้ำ และ **รายงานไฟล์ที่ลบไม่ออกเสมอ ไม่เงียบแล้วบอกว่าสำเร็จ**
+  - boot auto-prune กวาด orphan worktree (เฉพาะระดับ safe) ต่อจาก transcript/browser-profile prune เดิม
+- **agy conversation แยกตามโปรเจคแล้ว (#132)** — เดิม cockpit ไม่เคยส่ง `--project` ให้ agy ทำให้ทุกบทสนทนาตกลงถัง `default-cli-project` ถังเดียว (วัดจริง: **212 conversation จาก 11+ โปรเจคปนกัน**) กด resume ทีเดียวเห็นทุกโปรเจค · ตอนนี้ resolve project id จาก registry ของ agy เองแล้วส่ง `--project <id>` (ไม่เจอ → `--new-project` ซึ่ง agy จะจดโฟลเดอร์ให้เอง = สร้างครั้งเดียวต่อ cwd) · กันสร้างซ้ำตอน spawn ขนานด้วย in-process claim + poll registry แบบมี timeout · ทำผ่าน `ProviderSpec` (`project_scope_flag/_resolver/_new_flag`) ไม่ hardcode ชื่อ provider ใน spawn path
+
+### Changed (ปรับ)
+- **เตือน context น้อยลงมาก** — เดิมมี 3 ช่องซ้อนกัน (badge 80% + session cap + **paste ข้อความเตือนเข้า pane**) และ cap เป็นเลขตายตัว 180k ไม่ผูกกับ context window จริง ทำให้ session 1M โดนเตือนตั้งแต่ใช้ไปราว 18% (พบใน log 21 ครั้ง prompt 503k–538k) · ตอนนี้ **cap = สัดส่วนของ context window จริง** (default 0.85 · `0` = ปิด · เลขเดิมแบบ token ยังใช้ได้) · **ตัด tray toast ทั้ง 2 จุด** · **ตัดการ paste advisory เข้า pane ทิ้ง** (CLI auto-compact จัดการเองอยู่แล้ว) เหลือ status bar บรรทัดเดียวตอนข้าม cap · badge %/สีบน pane header + tab ยังอยู่ครบ
+
+### Fixed (แก้)
+- **#129 token meter อ่าน session ของ pane อื่น เมื่อหลาย role ใช้ cwd เดียวกัน** — โค้ดเลือก "ไฟล์ JSONL ใหม่สุดใน cwd" แทนที่จะยึด session uuid ของ pane ตัวเอง โดย docstring เขียนสมมติฐานไว้ว่า "one-pane-per-cwd ทำให้ปนกันไม่ได้" ซึ่งไม่จริงกับโปรเจค single-repo · เห็นสดๆ ตอน qa pane เพิ่ง spawn 2 วินาทีแล้วถูกรายงานว่าใช้ 185k tokens (เลขของ Lead) · ตอนนี้ยึด `<uuid>.jsonl` ตรงๆ ตามกติกา exact-uuid-หรือไม่แสดงเลย (ไม่เดา)
+- **CI แดงมาตั้งแต่ 2026-07-24 โดยไม่มีใครเห็น** — `pyproject` ขอ `ruff>=0.7` แบบลอย ทำให้ CI ลง **0.16.0** ขณะที่เครื่อง dev อยู่ 0.15.12 และ pre-commit ปักไว้ 0.15.13 → gate ในเครื่องผ่าน แต่ CI ล้มที่ `ruff check` **ก่อนได้รัน pytest เลย** (รวมถึง commit ที่ release 1.0.32/1.0.33/1.0.35) · ตรึง `ruff==0.16.0` ให้ตรงกันทั้ง 3 ที่ + กัน ruff ไปไล่ `worktrees/**` (เครื่อง dev lint 503 ไฟล์ ขณะที่ CI เห็น 362) และ `*.md`
+- **เทสที่ผูกกับสภาพเครื่องที่รัน** — พอ CI รัน pytest ได้อีกครั้งจึงโผล่มา: path แบบ Windows ที่ต้อง lowercase (แดงบน Linux ซึ่ง case-sensitive ถูกต้องแล้ว), เทสที่เรียก binary `codex` จริง, `TERM` ที่รั่วจาก shell ของ host, และ macOS runner ที่มี Chrome จริงที่ `/Applications` ชนะ fixture เสมอ (แยก path ออกเป็น const ให้ monkeypatch ได้ ค่า default ไม่เปลี่ยน) · รวมถึง `~/.gemini` จริงที่หลุดเข้าเทส 6 จุด
+- **PtySession re-export หลุดหาย** ทำให้เทส 112 ตัวพัง — `orchestrator.py` เป็น re-export façade โดยเจตนา (มี per-file F401 ignore กำกับ) แต่ import ถูกลบเพราะดูเหมือนไม่ถูกใช้ · คืนกลับ + เพิ่มเทสที่ทำให้การลบ re-export แดงที่จุดเดียวแทนที่จะพัง 112 จุดกระจาย
+
 ## [1.0.32] - 2026-07-24
 
 ### Fixed (แก้)
