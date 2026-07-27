@@ -96,6 +96,9 @@ class TestDeliveryUnconfirmedWarning:
         lead = _pane(_live_session())
         reviewer = _pane(_live_session())
         reviewer.session.is_at_ready_prompt.return_value = False  # never ready
+        reviewer.session.seconds_since_output.return_value = float(
+            "inf"
+        )  # truly stuck, not busy (#130)
         orch._panes_by_project["P"] = {"lead": lead, "reviewer": reviewer}
         # Run scheduled callbacks synchronously so the poll loop completes.
         monkeypatch.setattr(orch_mod.QTimer, "singleShot", staticmethod(lambda _ms, fn: fn()))
@@ -109,6 +112,170 @@ class TestDeliveryUnconfirmedWarning:
         warnings = [c.args[0] for c in lead.session.write.call_args_list if c.args]
         assert any("#26" in msg for msg in warnings)
         assert any("1s" in msg for msg in warnings)
+
+
+class TestBusyPaneNotFalselyWarned:
+    """#130: is_at_ready_prompt() alone can't tell a stuck-empty pane from one
+    legitimately busy on a prior long-running task (e.g. a 6-minute test
+    suite) — both read "not ready" past the hard timeout, and 6/6 real
+    delivery-unconfirmed notices turned out to be the latter (`takkub status`
+    showed state=working with progress that had just moved). The fix checks
+    `seconds_since_output()` — the same structural, provider-agnostic PTY
+    signal the submit self-heal above already relies on — to tell them apart,
+    reusing the STALL_THRESHOLD_SEC bar `takkub status` already uses to call
+    a pane "stalled"."""
+
+    def test_busy_pane_gets_no_warning_and_delivers_once_ready(
+        self, orch: Orchestrator, monkeypatch
+    ) -> None:
+        lead = _pane(_live_session())
+        reviewer = _pane(_live_session())
+        # Never ready for the first 6 polls (past the 300ms hard timeout at
+        # poll 2), then ready — mimics a pane returning from a long task.
+        reviewer.session.is_at_ready_prompt.side_effect = [False] * 6 + [True] * 10
+        reviewer.session.seconds_since_output.return_value = 2.0  # actively producing output
+        orch._panes_by_project["P"] = {"lead": lead, "reviewer": reviewer}
+        monkeypatch.setattr(orch_mod.QTimer, "singleShot", staticmethod(lambda _ms, fn: fn()))
+
+        with patch("agent_takkub.lead_inbox._log_event") as log:
+            orch._send_when_ready("reviewer", "run smoke", max_wait_ms=300, project="P")
+
+        # Delivered normally once ready — no blind paste, no Lead warning.
+        assert reviewer.session.write.called
+        assert not any(
+            "delivery-unconfirmed" in c.args[0] for c in lead.session.write.call_args_list if c.args
+        )
+        assert any(c.args and c.args[0] == "task_deliver_wait_extended" for c in log.call_args_list)
+
+    def test_wait_extended_logged_once_not_per_poll(self, orch: Orchestrator, monkeypatch) -> None:
+        lead = _pane(_live_session())
+        reviewer = _pane(_live_session())
+        reviewer.session.is_at_ready_prompt.side_effect = [False] * 6 + [True] * 10
+        reviewer.session.seconds_since_output.return_value = 2.0
+        orch._panes_by_project["P"] = {"lead": lead, "reviewer": reviewer}
+        monkeypatch.setattr(orch_mod.QTimer, "singleShot", staticmethod(lambda _ms, fn: fn()))
+
+        with patch("agent_takkub.lead_inbox._log_event") as log:
+            orch._send_when_ready("reviewer", "run smoke", max_wait_ms=300, project="P")
+
+        extended_calls = [
+            c for c in log.call_args_list if c.args and c.args[0] == "task_deliver_wait_extended"
+        ]
+        assert len(extended_calls) == 1
+
+    def test_silent_pane_past_stall_threshold_still_warns(
+        self, orch: Orchestrator, monkeypatch
+    ) -> None:
+        """A shorter STALL_THRESHOLD_SEC (as `takkub status` would also use)
+        means a pane silent longer than that bar still gets the #26 warning —
+        the fix narrows false positives, it doesn't remove the real signal."""
+        monkeypatch.setattr(orch_mod, "STALL_THRESHOLD_SEC", 1)
+        lead = _pane(_live_session())
+        reviewer = _pane(_live_session())
+        reviewer.session.is_at_ready_prompt.return_value = False
+        reviewer.session.seconds_since_output.return_value = 5.0  # silent past the 1s bar
+        orch._panes_by_project["P"] = {"lead": lead, "reviewer": reviewer}
+        monkeypatch.setattr(orch_mod.QTimer, "singleShot", staticmethod(lambda _ms, fn: fn()))
+
+        with patch("agent_takkub.lead_inbox._log_event"):
+            orch._send_when_ready("reviewer", "run smoke", max_wait_ms=300, project="P")
+
+        assert reviewer.session.write.called
+        assert any(
+            "delivery-unconfirmed" in c.args[0] for c in lead.session.write.call_args_list if c.args
+        )
+
+    def test_busy_suppression_works_for_non_claude_provider(
+        self, orch: Orchestrator, monkeypatch
+    ) -> None:
+        """Multi-provider (#103): the busy/stuck signal is a generic PTY
+        session method (`seconds_since_output`), not a claude-only text
+        marker, so a codex/agy-backed pane gets the same false-positive fix."""
+        from agent_takkub import provider_config
+
+        monkeypatch.setattr(
+            provider_config, "effective_provider_for", lambda role, project=None: "codex"
+        )
+        lead = _pane(_live_session())
+        backend = _pane(_live_session())
+        backend.session.is_at_ready_prompt.side_effect = [False] * 6 + [True] * 10
+        backend.session.seconds_since_output.return_value = 1.0
+        orch._panes_by_project["P"] = {"lead": lead, "backend": backend}
+        monkeypatch.setattr(orch_mod.QTimer, "singleShot", staticmethod(lambda _ms, fn: fn()))
+
+        with patch("agent_takkub.lead_inbox._log_event"):
+            orch._send_when_ready("backend", "run smoke", max_wait_ms=300, project="P")
+
+        assert backend.session.write.called
+        assert not any(
+            "delivery-unconfirmed" in c.args[0] for c in lead.session.write.call_args_list if c.args
+        )
+
+
+class TestBusyWaitCeiling:
+    """Follow-up to #130: the busy-not-stuck grace period has no ceiling of
+    its own — a pane that produces output forever without ever returning to
+    ready (e.g. a TUI stuck redrawing a spinner/progress animation on a loop,
+    never actually accepting input) would poll past that branch indefinitely
+    with no warning ever reaching the Lead. `BUSY_WAIT_CEILING_SEC` bounds the
+    total wait; crossing it warns the Lead with wording distinct from the
+    plain empty/stuck case so it isn't misdiagnosed."""
+
+    def test_busy_pane_past_ceiling_warns_with_distinct_message(
+        self, orch: Orchestrator, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(orch_mod, "BUSY_WAIT_CEILING_SEC", 1)  # 1s ceiling — fake clock
+        lead = _pane(_live_session())
+        reviewer = _pane(_live_session())
+        reviewer.session.is_at_ready_prompt.return_value = False  # never ready
+        reviewer.session.seconds_since_output.return_value = 1.0  # busy the whole time
+        orch._panes_by_project["P"] = {"lead": lead, "reviewer": reviewer}
+        monkeypatch.setattr(orch_mod.QTimer, "singleShot", staticmethod(lambda _ms, fn: fn()))
+
+        with patch("agent_takkub.lead_inbox._log_event") as log:
+            orch._send_when_ready("reviewer", "run smoke", max_wait_ms=300, project="P")
+
+        # Best-effort paste still happened...
+        assert reviewer.session.write.called
+        # ...and the Lead's warning names the busy-ceiling symptom (#131), not
+        # the plain empty-pane one (#26) — a Lead told to look for an empty
+        # pane would misdiagnose a pane that is visibly full of output.
+        warnings = [
+            c.args[0]
+            for c in lead.session.write.call_args_list
+            if c.args and isinstance(c.args[0], str)
+        ]
+        assert any("delivery-unconfirmed" in msg for msg in warnings)
+        assert any("#131" in msg for msg in warnings)
+        assert not any("#26" in msg for msg in warnings)
+        assert not any("ค้าง empty" in msg for msg in warnings)
+        assert any(
+            c.args and c.args[0] == "task_deliver_busy_ceiling_timeout" for c in log.call_args_list
+        )
+
+    def test_busy_pane_delivers_normally_when_ready_before_ceiling(
+        self, orch: Orchestrator, monkeypatch
+    ) -> None:
+        """A pane that's busy but returns to ready well inside the ceiling
+        must still deliver cleanly — the ceiling must not fire early."""
+        monkeypatch.setattr(orch_mod, "BUSY_WAIT_CEILING_SEC", 5)  # 5s ceiling — fake clock
+        lead = _pane(_live_session())
+        reviewer = _pane(_live_session())
+        reviewer.session.is_at_ready_prompt.side_effect = [False] * 6 + [True] * 10
+        reviewer.session.seconds_since_output.return_value = 1.0
+        orch._panes_by_project["P"] = {"lead": lead, "reviewer": reviewer}
+        monkeypatch.setattr(orch_mod.QTimer, "singleShot", staticmethod(lambda _ms, fn: fn()))
+
+        with patch("agent_takkub.lead_inbox._log_event") as log:
+            orch._send_when_ready("reviewer", "run smoke", max_wait_ms=300, project="P")
+
+        assert reviewer.session.write.called
+        assert not any(
+            "delivery-unconfirmed" in c.args[0] for c in lead.session.write.call_args_list if c.args
+        )
+        assert not any(
+            c.args and c.args[0] == "task_deliver_busy_ceiling_timeout" for c in log.call_args_list
+        )
 
 
 class TestGateDeferredSpawnDeliversEventually:

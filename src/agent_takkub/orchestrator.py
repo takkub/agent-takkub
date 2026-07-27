@@ -246,6 +246,17 @@ __all__ = [  # backwards-compat re-exports
 # Overrideable via env so QA-heavy workflows can tune the threshold.
 STALL_THRESHOLD_SEC = int(os.environ.get("TAKKUB_STALL_THRESHOLD_SEC", "300"))
 
+# Follow-up to #130: the busy-not-stuck grace period in lead_inbox._check
+# (deferring the hard-timeout delivery warning while a pane keeps producing
+# output) has no ceiling of its own — a pane whose output is real but that
+# never returns to its ready prompt (e.g. a TUI stuck redrawing a spinner/
+# progress animation on a loop, never actually accepting input) would poll
+# forever with no warning ever reaching the Lead. 30 minutes clears this
+# repo's own longest normal gate (full pytest ~6 min) with wide margin, plus
+# typical build/docker-pull waits, while still bounding an otherwise-
+# unbounded wait. Overrideable via env for slower CI/hardware.
+BUSY_WAIT_CEILING_SEC = int(os.environ.get("TAKKUB_BUSY_WAIT_CEILING_SEC", "1800"))
+
 # When `_LAST_SESSION_FILE` is newer than this and teammates are alive,
 # the current Lead boot is treated as post-compact so a status snapshot
 # is auto-injected into the Lead prompt.

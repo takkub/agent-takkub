@@ -156,6 +156,11 @@ _CC_NOTICE_RE = re.compile(
     re.DOTALL,
 )
 _FAILED_NOTICE_RE = re.compile(r"\[[^\]\r\n]*\bFAILED\b[^\]\r\n]*\]", re.IGNORECASE)
+# delivery-unconfirmed reviewed for #130 (was firing on busy-not-stuck panes,
+# see _check's seconds_since_output gate above _warn_lead_delivery_unconfirmed)
+# and kept here: now that it only fires for a pane genuinely silent past
+# STALL_THRESHOLD_SEC, it's a real "task may not have landed" signal that
+# deserves to jump the digest queue, same as spawn-failed.
 _BLOCKING_NOTICE_MARKERS = ("[spawn-failed]", "[delivery-unconfirmed]")
 
 
@@ -524,8 +529,11 @@ class LeadInboxMixin:
         # max_wait_ms for the "no session yet" branch — see _check below.
         gate_seen = [False]
         ready_streak = [0]
+        # #130: logged once (not every 150ms poll) the first time the hard
+        # timeout is deferred because the pane is busy, not stuck.
+        busy_wait_logged = [False]
 
-        def _deliver(unconfirmed: bool = False) -> None:
+        def _deliver(unconfirmed: bool = False, busy_ceiling: bool = False) -> None:
             if sent[0]:
                 return
             sent[0] = True
@@ -564,7 +572,9 @@ class LeadInboxMixin:
                 # Delivered blind — the pane never signalled ready, so on a cold
                 # re-spawn the paste may have been swallowed (issue #26). Surface
                 # it to the Lead instead of letting delegation fail silently.
-                self._warn_lead_delivery_unconfirmed(role_name, project, max_wait_ms)
+                self._warn_lead_delivery_unconfirmed(
+                    role_name, project, max_wait_ms, busy_ceiling=busy_ceiling
+                )
 
         def _check() -> None:
             if sent[0]:
@@ -625,10 +635,65 @@ class LeadInboxMixin:
                 ready_streak[0] = 0
             elapsed[0] += _READY_POLL_INTERVAL_MS
             if elapsed[0] >= max_wait_ms:
-                # Hard timeout: pane never reached the ready prompt. Paste
-                # best-effort (markers may be a false negative) but flag it as
-                # unconfirmed so the Lead verifies/re-assigns rather than
-                # assuming the task landed (issue #26).
+                # Hard timeout: pane never reached the ready prompt. That is
+                # ALSO exactly what a pane legitimately busy on a prior
+                # long-running task looks like (e.g. running a 6-minute test
+                # suite) — is_at_ready_prompt() can't distinguish "stuck
+                # empty" from "working" (#130, proven 6/6 false positives:
+                # `takkub status` showed state=working with progress that had
+                # just moved). Reuse the same structural PTY-output signal the
+                # self-heal above already depends on (provider-agnostic —
+                # works for codex/agy/claude alike, no text-marker parsing) to
+                # tell them apart: a busy pane keeps producing output, a stuck
+                # one goes silent. Only warn once the pane has been
+                # continuously silent for STALL_THRESHOLD_SEC — the same bar
+                # `takkub status` already uses to call a pane "stalled" —
+                # otherwise keep polling so the task still lands normally the
+                # moment the pane returns to ready.
+                seconds_since_output = pane.session.seconds_since_output()
+                stall_threshold_sec = _orch_attr("STALL_THRESHOLD_SEC", 300)
+                if seconds_since_output < stall_threshold_sec:
+                    # Follow-up to #130: the busy grace period above has no
+                    # ceiling of its own, so a pane that produces output
+                    # forever without ever returning to ready (e.g. a TUI
+                    # stuck redrawing a spinner/progress animation on a loop,
+                    # never actually accepting input) would poll past this
+                    # branch indefinitely with no warning ever reaching the
+                    # Lead — the exact silent-drop risk #26 was fixed to
+                    # prevent, just reintroduced for the "busy" case instead
+                    # of the "stuck empty" one. `elapsed[0]` has been
+                    # accumulating since this poll loop started (it is never
+                    # reset), so it doubles as the total-wait clock the
+                    # ceiling needs.
+                    busy_wait_ceiling_ms = _orch_attr("BUSY_WAIT_CEILING_SEC", 1800) * 1000
+                    if elapsed[0] < busy_wait_ceiling_ms:
+                        if not busy_wait_logged[0]:
+                            busy_wait_logged[0] = True
+                            _log_event(
+                                "task_deliver_wait_extended",
+                                project=self._resolve_project(project),
+                                role=role_name,
+                                seconds_since_output=round(seconds_since_output, 1),
+                            )
+                        QTimer.singleShot(_READY_POLL_INTERVAL_MS, _check)
+                        return
+                    # Ceiling reached while the pane was busy the whole time —
+                    # a different symptom than the silent/empty case below, so
+                    # it gets its own log event (distinct stats) and a warning
+                    # that says so (a Lead reading "pane อาจค้าง empty" here
+                    # would look for an empty pane and find one full of
+                    # output, misdiagnosing it).
+                    _log_event(
+                        "task_deliver_busy_ceiling_timeout",
+                        project=self._resolve_project(project),
+                        role=role_name,
+                        elapsed_sec=round(elapsed[0] / 1000, 1),
+                    )
+                    _deliver(unconfirmed=True, busy_ceiling=True)
+                    return
+                # Paste best-effort (markers may be a false negative) but flag
+                # it as unconfirmed so the Lead verifies/re-assigns rather
+                # than assuming the task landed (issue #26).
                 _deliver(unconfirmed=True)
                 return
             QTimer.singleShot(_READY_POLL_INTERVAL_MS, _check)
@@ -645,12 +710,21 @@ class LeadInboxMixin:
         role_name: str,
         project: str | None,
         wait_ms: int = 45_000,
+        *,
+        busy_ceiling: bool = False,
     ) -> None:
         """Tell the Lead that an assign hit its hard timeout without the
         target pane ever signalling ready. The task was pasted blind and may
         not have landed (cold re-spawn render differs from boot), so the Lead
         should verify / re-assign instead of trusting the 'task queued' reply
-        (issue #26). No-op when warning the Lead about itself."""
+        (issue #26). No-op when warning the Lead about itself.
+
+        ``busy_ceiling=True`` means the pane produced output the whole time
+        (never went silent) but still never returned to its ready prompt
+        before the #130 busy-wait absolute ceiling — a different symptom from
+        the plain empty/stuck case, so it gets distinct wording (a Lead told
+        to look for "pane อาจค้าง empty" would misdiagnose a pane that is
+        visibly full of output) and a separate log event."""
         if role_name == LEAD.name:
             return
         project_ns = self._resolve_project(project)
@@ -658,15 +732,24 @@ class LeadInboxMixin:
         if not (lead and lead.session and lead.session.is_alive):
             return
         wait_label = f"{wait_ms / 1000:g}s"
-        msg = (
-            f"⚠️ [delivery-unconfirmed] {role_name} pane ไม่ถึง ready prompt ใน "
-            f"{wait_label} — "
-            f"task ถูก paste แบบ blind อาจไม่ติด (pane อาจค้าง empty). "
-            f"เช็ค pane / re-assign ถ้ายังว่าง — อย่าถือว่าส่งสำเร็จ (issue #26)"
-        )
+        if busy_ceiling:
+            msg = (
+                f"⚠️ [delivery-unconfirmed] {role_name} pane มี output ต่อเนื่องมาตลอดแต่ไม่กลับสู่ "
+                f"ready prompt เกิน {wait_label} — "
+                f"task ถูก paste แบบ blind อาจไม่ติด (pane ค้างแบบ 'มีเสียง' เช่น TUI/spinner วนซ้ำ "
+                f"ไม่ใช่ pane ว่างเงียบ). เช็ค pane / re-assign ถ้ายังไม่ลง — "
+                f"อย่าถือว่าส่งสำเร็จ (issue #131)"
+            )
+        else:
+            msg = (
+                f"⚠️ [delivery-unconfirmed] {role_name} pane ไม่ถึง ready prompt ใน "
+                f"{wait_label} — "
+                f"task ถูก paste แบบ blind อาจไม่ติด (pane อาจค้าง empty). "
+                f"เช็ค pane / re-assign ถ้ายังว่าง — อย่าถือว่าส่งสำเร็จ (issue #26)"
+            )
         self._notify_lead(project_ns, msg)
         _log_event(
-            "delivery_unconfirmed",
+            "delivery_unconfirmed_busy_ceiling" if busy_ceiling else "delivery_unconfirmed",
             role=role_name,
             project=project_ns,
             wait_ms=wait_ms,
