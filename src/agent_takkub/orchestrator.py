@@ -121,9 +121,7 @@ from .pipeline_executor import (  # re-exported for test imports; mixin provides
     ShardGroup,
     _split_shard,
 )
-from .pty_session import PtySession
 from .roles import LEAD
-from .session_cap import teammate_session_cap_advice
 from .spawn_engine import (  # re-exported for backward compat; mixin provides methods
     _PANE_COLS,
     _PANE_ROWS,
@@ -769,11 +767,12 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         return True, "goal cleared"
 
     def _on_session_cap_exceeded(self, pane: AgentPaneLike, prompt: int, threshold: int) -> None:
-        """Route one edge-triggered cap crossing by role.
+        """Log + surface one edge-triggered cap crossing (audit + passive notice).
 
-        Lead is user-controlled: emit a UI notice only and never write into its
-        PTY. A teammate gets an advisory queued behind its current turn; the
-        queue deliberately has no blind timeout, so it cannot interrupt work.
+        The CLI's own auto-compact already handles context pressure, so this
+        never writes into the pane's PTY — it only emits a UI notice (for the
+        status bar) and an audit log line. Lead and teammates are treated the
+        same; `is_lead` only affects notice wording downstream.
         """
         project_ns = self._project_ns_for_pane(pane)
         if project_ns is None:
@@ -787,71 +786,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             role=role_name,
             prompt=prompt,
             threshold=threshold,
-            action="ui_notice" if is_lead else "teammate_advice_queued",
         )
-        if not is_lead:
-            self._queue_session_cap_advice(pane, project_ns, prompt, threshold)
-
-    def _try_session_cap_advice(
-        self,
-        pane: AgentPaneLike,
-        session: PtySession,
-        project_ns: str,
-        prompt: int,
-        threshold: int,
-    ) -> str:
-        """Attempt one teammate advisory delivery.
-
-        Returns ``"wait"`` while the current turn is busy, ``"sent"`` after a
-        ready-prompt delivery, and ``"stop"`` when the pane/session changed or
-        compaction already dropped usage below the threshold.
-        """
-        if pane.session is not session or not session.is_alive:
-            return "stop"
-        usage = pane.current_usage()
-        if usage is None or int(usage.get("prompt") or 0) < threshold:
-            return "stop"
-        if not session.is_at_ready_prompt():
-            return "wait"
-
-        advice = teammate_session_cap_advice(prompt, threshold)
-        payload = _paste_payload(_sanitize_pane_text(advice))
-        pane.set_state("working", note="session-cap advisory")
-        session.write(payload)
-        _delayed_enter_verified(
-            pane,
-            session,
-            _enter_delay_ms(payload),
-            payload=payload,
-            content_fragment=advice,
-        )
-        _log_event(
-            "session_cap_advice_sent",
-            project=project_ns,
-            role=pane.role.name,
-            prompt=prompt,
-            threshold=threshold,
-        )
-        return "sent"
-
-    def _queue_session_cap_advice(
-        self,
-        pane: AgentPaneLike,
-        project_ns: str,
-        prompt: int,
-        threshold: int,
-    ) -> None:
-        """Wait for a teammate's ready prompt, never falling back to blind paste."""
-        session = pane.session
-        if session is None:
-            return
-
-        def _check() -> None:
-            result = self._try_session_cap_advice(pane, session, project_ns, prompt, threshold)
-            if result == "wait":
-                QTimer.singleShot(1_000, _check)
-
-        QTimer.singleShot(0, _check)
 
     def get_session_goal(self, project: str | None = None) -> str | None:
         """Return the current session objective for `project`, or None."""

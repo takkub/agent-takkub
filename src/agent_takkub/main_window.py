@@ -765,28 +765,14 @@ class MainWindow(
         threshold: int,
         is_lead: bool,
     ) -> None:
-        """Surface a cap decision without ever auto-compacting Lead."""
-        if is_lead:
-            body = (
-                f"Lead context is {prompt:,} tokens (cap {threshold:,}). "
-                "When safe, choose /compact or end and reopen the Lead session; "
-                "the cockpit will not compact Lead automatically."
-            )
-            timeout_ms = 30_000
-        else:
-            body = (
-                f"{role} context is {prompt:,} tokens (cap {threshold:,}). "
-                "A /compact-or-reopen advisory is queued for after its current turn."
-            )
-            timeout_ms = 15_000
-        self._status.showMessage(f"⚠ [{project_ns}] {body}", timeout_ms)
-        if self._tray and QSystemTrayIcon.isSystemTrayAvailable():
-            self._tray.showMessage(
-                "Session context cap reached",
-                f"[{project_ns}] {body}",
-                QSystemTrayIcon.MessageIcon.Warning,
-                min(timeout_ms, 10_000),
-            )
+        """Passive status-bar notice for a cap crossing — never writes into
+        any pane's PTY (the CLI's own auto-compact handles context pressure).
+        The sole cap-crossing notice mechanism; the pane header/tab badges
+        cover ongoing visibility, so no tray toast here.
+        """
+        who = "Lead" if is_lead else role
+        body = f"{who} context is {prompt:,} tokens (cap {threshold:,}) — /compact when convenient."
+        self._status.showMessage(f"⚠ [{project_ns}] {body}", 15_000)
 
     def _on_idle_reminder_notice(
         self,
