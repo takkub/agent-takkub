@@ -114,6 +114,7 @@ def _capture_generic_argv(
     *,
     model_override: str | None = None,
     role: str | None = None,
+    gemini_project_id: str | None = None,
 ) -> list[str]:
     from agent_takkub import pane_tools_policy as ptp
     from agent_takkub import shared_dev_tools as sdt
@@ -147,6 +148,10 @@ def _capture_generic_argv(
         patch("agent_takkub.spawn_engine.sys.platform", "win32"),
         patch("agent_takkub.codex_helper.find_codex_executable", return_value=binary),
         patch("agent_takkub.gemini_helper.find_agy_executable", return_value=binary),
+        patch(
+            "agent_takkub.gemini_helper.resolve_agy_project_id",
+            return_value=gemini_project_id,
+        ),
         patch("shutil.which", side_effect=lambda name: binary if name == binary else None),
         patch("agent_takkub.codex_agents_md.ensure_agents_md"),
         patch("agent_takkub.orchestrator.inject_user_profile_env"),
@@ -218,9 +223,23 @@ class TestProviderEffortSpecs:
         assert cursor_spec.effort_flag is None
 
 
+_GEMINI_SCOPE_CASES = pytest.mark.parametrize(
+    "gemini_project_id,expected_scope_tail",
+    [
+        pytest.param(None, ["--new-project"], id="no-match"),
+        pytest.param(
+            "17fdc03a-8cb3-446e-a833-4aaffc55f6bb",
+            ["--project", "17fdc03a-8cb3-446e-a833-4aaffc55f6bb"],
+            id="matched",
+        ),
+    ],
+)
+
+
 class TestGenericProviderSpawnEffort:
+    @_GEMINI_SCOPE_CASES
     def test_gemini_model_override_is_never_changed_by_effort(
-        self, qapp, monkeypatch, tmp_path
+        self, qapp, monkeypatch, tmp_path, gemini_project_id, expected_scope_tail
     ) -> None:
         monkeypatch.setenv("TAKKUB_TEAMMATE_EFFORT", "high")
 
@@ -231,18 +250,24 @@ class TestGenericProviderSpawnEffort:
             "gemini",
             model_override="Gemini 3.1 Pro (Low)",
             role="backend",
+            gemini_project_id=gemini_project_id,
         )
 
+        # #132: project scoping always appends --project/--new-project after
+        # the model flag — pin the resolver (via gemini_project_id) so this
+        # stays deterministic instead of reading the real ~/.gemini registry.
         assert argv == [
             "agy",
             "--dangerously-skip-permissions",
             "--model",
             "Gemini 3.1 Pro (Low)",
+            *expected_scope_tail,
         ]
         assert "--effort" not in argv
 
+    @_GEMINI_SCOPE_CASES
     def test_gemini_without_model_override_never_guesses_effort(
-        self, qapp, monkeypatch, tmp_path
+        self, qapp, monkeypatch, tmp_path, gemini_project_id, expected_scope_tail
     ) -> None:
         monkeypatch.setenv("TAKKUB_TEAMMATE_EFFORT", "high")
 
@@ -252,9 +277,10 @@ class TestGenericProviderSpawnEffort:
             tmp_path,
             "gemini",
             role="backend",
+            gemini_project_id=gemini_project_id,
         )
 
-        assert argv == ["agy", "--dangerously-skip-permissions"]
+        assert argv == ["agy", "--dangerously-skip-permissions", *expected_scope_tail]
         assert "--effort" not in argv
 
     def test_codex_uses_session_config_override(self, qapp, monkeypatch, tmp_path) -> None:

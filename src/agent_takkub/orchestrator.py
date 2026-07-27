@@ -121,6 +121,7 @@ from .pipeline_executor import (  # re-exported for test imports; mixin provides
     ShardGroup,
     _split_shard,
 )
+from .pty_session import PtySession  # re-exported for test imports
 from .roles import LEAD
 from .spawn_engine import (  # re-exported for backward compat; mixin provides methods
     _PANE_COLS,

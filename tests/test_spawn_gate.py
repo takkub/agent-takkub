@@ -701,6 +701,11 @@ class TestTier2FinalGate:
             patch("agent_takkub.orchestrator._build_pane_env", return_value={}),
             patch("agent_takkub.provider_config.effective_provider_for", return_value=GEMINI),
             patch("agent_takkub.gemini_helper.find_agy_executable", return_value="agy"),
+            # argv (incl. #132 project-scope resolution) is built before the
+            # TOCTOU gate check inside _launch_session — pin the resolver so
+            # this never touches the real ~/.gemini registry on the box the
+            # suite happens to run on.
+            patch("agent_takkub.gemini_helper.resolve_agy_project_id", return_value=None),
             patch("agent_takkub.codex_agents_md.ensure_agents_md"),
             patch("agent_takkub.orchestrator.inject_user_profile_env"),
         ):
@@ -1129,6 +1134,7 @@ class TestTier2InProgressResetNonClaude:
             patch("agent_takkub.orchestrator._build_pane_env", return_value={}),
             patch("agent_takkub.provider_config.effective_provider_for", return_value=GEMINI),
             patch("agent_takkub.gemini_helper.find_agy_executable", return_value="agy"),
+            patch("agent_takkub.gemini_helper.resolve_agy_project_id", return_value=None),
             patch("agent_takkub.codex_agents_md.ensure_agents_md"),
             patch("agent_takkub.orchestrator.inject_user_profile_env"),
         ):

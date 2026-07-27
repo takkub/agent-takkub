@@ -116,6 +116,9 @@ class TestNonClaudeBranchesGetH1EnvDefaults:
                 return_value=GEMINI,
             ),
             patch("agent_takkub.gemini_helper.find_agy_executable", return_value="agy"),
+            # #132 project-scope resolution runs during argv build — pin it so
+            # this never reads the real ~/.gemini registry.
+            patch("agent_takkub.gemini_helper.resolve_agy_project_id", return_value=None),
             patch("agent_takkub.codex_agents_md.ensure_agents_md"),
         )
         assert env["COLORTERM"] == "truecolor"
