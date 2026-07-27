@@ -29,6 +29,11 @@ MB_CDP_HOST = "127.0.0.1"
 MB_CDP_PORT = 9222
 _START_TIMEOUT_SEC = 8.0
 
+# Module-level so tests can monkeypatch it for host isolation (real macOS CI
+# runners have Chrome installed here, which would otherwise win over any
+# tmp_path fixture).
+MACOS_SYSTEM_APPLICATIONS_DIR = pathlib.Path("/Applications")
+
 
 def find_chrome_executable(
     *,
@@ -57,7 +62,7 @@ def find_chrome_executable(
         which_names = ("chrome.exe", "chrome")
     elif platform == "darwin":
         candidates = (
-            pathlib.Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+            MACOS_SYSTEM_APPLICATIONS_DIR / "Google Chrome.app/Contents/MacOS/Google Chrome",
             home / "Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
         )
         which_names = ("google-chrome", "chromium")
