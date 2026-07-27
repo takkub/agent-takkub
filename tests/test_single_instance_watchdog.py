@@ -36,6 +36,23 @@ def qapp() -> QCoreApplication:
     return app
 
 
+def _wait_until(predicate, timeout: float = 5.0, interval: float = 0.005) -> bool:
+    """Poll *predicate* until truthy or *timeout* elapses, then return it once more.
+
+    Replaces a fixed ``time.sleep(N)`` guess before asserting on a background
+    daemon thread's side effects. A CI runner under contention can starve that
+    thread past any fixed delay — this waits exactly as long as needed (fast
+    on a healthy machine) while giving a slow one a generous real ceiling
+    instead of failing outright (issue #131).
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(interval)
+    return bool(predicate())
+
+
 # ─────────────────────────────────────────────────────────────
 # 1. Single-instance guard — QLockFile behaviour
 # ─────────────────────────────────────────────────────────────
@@ -149,7 +166,7 @@ class TestWatchdogThreadBehaviour:
 
         with patch.object(os, "_exit", side_effect=lambda c: exit_called.append(c)):
             app_mod._start_deadman_watchdog(window, _stop=stop)
-            time.sleep(0.15)  # several poll cycles past the hard threshold
+            _wait_until(lambda: bool(dump_calls))
             stop.set()
 
         assert exit_called == [], "watchdog must NEVER call os._exit (hard-kill disabled)"
@@ -181,7 +198,7 @@ class TestWatchdogThreadBehaviour:
 
         with patch.object(os, "_exit", side_effect=lambda c: exit_called.append(c)):
             app_mod._start_deadman_watchdog(window, _stop=stop)
-            time.sleep(0.15)
+            _wait_until(lambda: bool(dump_calls))
             stop.set()
 
         assert exit_called == [], "hard-kill disabled: os._exit must not be called"
@@ -210,7 +227,7 @@ class TestWatchdogThreadBehaviour:
 
         with patch.object(os, "_exit", side_effect=lambda c: exit_called.append(c)):
             app_mod._start_deadman_watchdog(window, _stop=stop)
-            time.sleep(0.15)
+            _wait_until(lambda: bool(dump_calls))
             stop.set()
 
         assert exit_called == [], "soft stall must NOT kill the process"
@@ -220,7 +237,11 @@ class TestWatchdogThreadBehaviour:
     def test_watchdog_does_not_fire_with_live_heartbeat(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(app_mod, "_WATCHDOG_TIMEOUT_S", 0.1)
+        # Timeout is wider than the older 0.1s so a keeper-thread stall caused
+        # by CI scheduler contention can't starve it into a false hard-kill
+        # (issue #131) — the keeper refreshes far more often than this, so a
+        # healthy run still finishes fast.
+        monkeypatch.setattr(app_mod, "_WATCHDOG_TIMEOUT_S", 0.3)
         monkeypatch.setattr(app_mod, "_WATCHDOG_POLL_S", 0.02)
         monkeypatch.setattr(app_mod, "_WATCHDOG_SOFT_STALL_S", 999.0)  # never soft-dump here
         monkeypatch.setattr(app_mod, "_BOOT_LOG_FH", None)
@@ -246,7 +267,10 @@ class TestWatchdogThreadBehaviour:
 
         with patch.object(os, "_exit", side_effect=_fake_exit):
             app_mod._start_deadman_watchdog(window, _stop=stop)
-            time.sleep(0.3)  # 3× the timeout — watchdog must not fire
+            # No positive event to poll for here (that's the point of this
+            # test) — wait out a generous multiple of the timeout, returning
+            # early only if the bug we're guarding against actually fires.
+            _wait_until(lambda: bool(exit_called), timeout=1.5)
             stop.set()  # halt daemon before os._exit is un-patched
 
         keepalive_stop.set()
