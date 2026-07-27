@@ -82,6 +82,12 @@ class TestNonClaudeBranchesGetH1EnvDefaults:
         from agent_takkub.provider_config import CODEX
 
         monkeypatch.setenv("COLORTERM", "24bit")  # host value must NOT leak through
+        # TERM IS on the pane-env allowlist (unlike COLORTERM), so unlike
+        # COLORTERM it passes through host state via setdefault — a CI
+        # runner/shell that happens to already export TERM (e.g. "dumb")
+        # would otherwise make this assertion depend on that host state
+        # instead of exercising the "no host TERM" default-applying path.
+        monkeypatch.delenv("TERM", raising=False)
         env = _spawn_and_capture_env(
             qapp,
             monkeypatch,
@@ -107,6 +113,7 @@ class TestNonClaudeBranchesGetH1EnvDefaults:
         from agent_takkub.provider_config import GEMINI
 
         monkeypatch.setenv("COLORTERM", "24bit")
+        monkeypatch.delenv("TERM", raising=False)  # see codex test above for why
         env = _spawn_and_capture_env(
             qapp,
             monkeypatch,
@@ -132,6 +139,7 @@ class TestNonClaudeBranchesGetH1EnvDefaults:
         import shutil as _shutil_mod
 
         monkeypatch.setenv("COLORTERM", "24bit")
+        monkeypatch.delenv("TERM", raising=False)  # see codex test above for why
         env = _spawn_and_capture_env(
             qapp,
             monkeypatch,

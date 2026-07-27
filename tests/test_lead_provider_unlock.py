@@ -126,6 +126,11 @@ class TestLeadThroughCodexBranch:
             tmp_path,
             "codex",
             patch("agent_takkub.codex_helper.find_codex_executable", return_value="codex"),
+            # The codex "session_override" MCP bridge shells out to the real
+            # `codex` binary to resolve inherited MCP servers when the role
+            # policy denies all MCPs (lead's case) — pin it so this test
+            # never depends on codex being installed on the CI runner.
+            patch("agent_takkub.mcp_bridge._codex_resolved_mcp_names", return_value=[]),
         )
         assert call["cwd"] == str(tmp_path)
         assert call["env"]["TAKKUB_LEAD_TOKEN"] == "test-lead-token"

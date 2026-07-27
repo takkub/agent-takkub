@@ -382,6 +382,13 @@ class TestResolveAgyProjectId:
     def test_matches_percent_encoded_gitfolder_form(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
+        # Windows-shaped registry entry (lowercase drive letter) matched
+        # against a differently-cased Windows cwd relies on the
+        # case-insensitive branch of _normalize_path_for_compare — pin the
+        # platform explicitly so this doesn't depend on which OS CI runs it
+        # on (Linux is case-sensitive and would otherwise fail this exact
+        # case-mismatch on its own merits, not a real bug).
+        monkeypatch.setattr(gemini_helper.sys, "platform", "win32")
         monkeypatch.setattr(gemini_helper.Path, "home", lambda: tmp_path)
         config_dir = tmp_path / ".gemini" / "config" / "projects"
         self._write_project(
@@ -405,6 +412,35 @@ class TestResolveAgyProjectId:
             r"C:\Users\monch\WebstormProjects\agent-takkub"
         )
         assert result == "17fdc03a-8cb3-446e-a833-4aaffc55f6bb"
+
+    def test_matches_percent_encoded_gitfolder_form_posix(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # POSIX counterpart: no drive letter to percent-decode, and Linux's
+        # case-sensitive compare means the cwd must match the registry
+        # exactly (no case-folding to lean on).
+        monkeypatch.setattr(gemini_helper.sys, "platform", "linux")
+        monkeypatch.setattr(gemini_helper.Path, "home", lambda: tmp_path)
+        config_dir = tmp_path / ".gemini" / "config" / "projects"
+        self._write_project(
+            config_dir,
+            "posix-gitfolder-id",
+            {
+                "id": "posix-gitfolder-id",
+                "name": "agent-takkub",
+                "projectResources": {
+                    "resources": [
+                        {
+                            "gitFolder": {
+                                "folderUri": "file:///Users/monch/WebstormProjects/agent-takkub"
+                            }
+                        }
+                    ]
+                },
+            },
+        )
+        result = gemini_helper.resolve_agy_project_id("/Users/monch/WebstormProjects/agent-takkub")
+        assert result == "posix-gitfolder-id"
 
     def test_matches_plain_top_level_folderuri_form(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
