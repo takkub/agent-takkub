@@ -31,7 +31,11 @@ takkub = "agent_takkub.cli:main"
 [project.optional-dependencies]
 dev = [
     "pytest>=8",
-    "ruff>=0.7",
+    # Pinned, not floating: CI installs .[dev] fresh, so an unpinned ruff let
+    # a newer release land there than the one developers run locally — the
+    # local gate passed while CI failed on a rule the old version didn't have.
+    # Bump this and .pre-commit-config.yaml's rev together, deliberately.
+    "ruff==0.16.0",
     "pre-commit>=3.7",
     "grimp>=3.14",        # dep-graph generation for tools/gen_import_graph.py
     "import-linter>=2.9", # architecture contracts (lint-imports)
@@ -74,7 +78,18 @@ agent_takkub = [
 line-length = 100
 target-version = "py311"
 src = ["src", "tests"]
-extend-exclude = ["scripts/test_*.py", "scripts/inspect_*.py", "runtime/**"]
+extend-exclude = [
+    "scripts/test_*.py",
+    "scripts/inspect_*.py",
+    "runtime/**",
+    # Throwaway per-pane checkouts (`--isolation worktree`): a full copy of the
+    # tree that ruff would lint twice, and that CI never sees at all.
+    "worktrees/**",
+    # ruff 0.16 formats python fenced in markdown. Prose docs are not part of
+    # the build; letting the formatter rewrite them churns docs on every ruff
+    # bump for no gain.
+    "*.md",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "RUF"]

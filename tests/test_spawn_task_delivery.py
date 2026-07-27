@@ -53,7 +53,7 @@ def _spawn_claude_assign(
     tmp_path: Path,
     task: str,
     *,
-    prepare_result: str | None | object = ...,
+    prepare_result: str | object | None = ...,
 ) -> tuple[list[dict], MagicMock, Path]:
     from agent_takkub.provider_config import CLAUDE
 
