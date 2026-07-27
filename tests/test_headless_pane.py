@@ -139,6 +139,33 @@ def test_set_worktree_branch(qapp: QCoreApplication) -> None:
     assert pane._worktree_branch is None
 
 
+def test_attach_session_stores_session_uuid(qapp: QCoreApplication) -> None:
+    """Issue #129: the pane's own session_uuid must be recorded at attach so
+    the token meter (AgentPane) resolves this pane's own transcript, never a
+    sibling pane's via newest-mtime-in-cwd."""
+    pane = HeadlessPane(by_name("backend"))
+    session = _mock_session()
+
+    pane.attach_session(session, cwd="/tmp/project", session_uuid="backend-uuid-123")
+
+    assert pane.model.session_uuid == "backend-uuid-123"
+
+
+def test_attach_session_without_uuid_leaves_it_unknown(qapp: QCoreApplication) -> None:
+    pane = HeadlessPane(by_name("backend"))
+    pane.attach_session(_mock_session(), cwd="/tmp/project")
+    assert pane.model.session_uuid is None
+
+
+def test_detach_session_clears_session_uuid(qapp: QCoreApplication) -> None:
+    pane = HeadlessPane(by_name("backend"))
+    pane.attach_session(_mock_session(), cwd="/tmp/project", session_uuid="backend-uuid-123")
+
+    pane.detach_session()
+
+    assert pane.model.session_uuid is None
+
+
 def test_signals_exist_for_register_pane_connect(qapp: QCoreApplication) -> None:
     """register_pane() connects spawnRequested/closeRequested/inputBytes —
     HeadlessPane must expose them even though headless mode never emits."""

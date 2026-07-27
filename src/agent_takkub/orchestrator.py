@@ -2214,6 +2214,14 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         ps.session_uuid = session_id
         if cwd:
             ps.session_uuid_cwd = cwd
+        # Also push the rollover onto the *live* pane (issue #129): the token
+        # meter reads pane.model.session_uuid every 5 s tick, a separate copy
+        # from PaneState.session_uuid stamped at attach time. Without this, a
+        # manual /resume or /clear inside the pane would update PaneState but
+        # leave the meter polling the pre-rollover uuid's (now-stale) file.
+        pane = self._panes_by_project.get(project_ns, {}).get(from_role)
+        if pane is not None:
+            pane.model.set_session_uuid(session_id)
         _log_event(
             "session_report",
             project=project_ns,

@@ -127,6 +127,7 @@ class HeadlessPane(QObject):
         cwd: str | None = None,
         *,
         provider_name: str = "claude",
+        session_uuid: str | None = None,
     ) -> None:
         """Bind `session` — the data-only half of `AgentPane.attach_session`
         (no terminal resize/focus/idle-flag/token-label widget work)."""
@@ -143,6 +144,7 @@ class HeadlessPane(QObject):
         self.model.session_cwd = cwd
         self.model.session_jsonl = None
         self.model.last_usage = None
+        self.model.set_session_uuid(session_uuid)
         # Headless panes do not poll JSONL today, but retain the provider
         # capability on the shared model so their state cannot masquerade as a
         # supported token-meter source.
@@ -172,6 +174,7 @@ class HeadlessPane(QObject):
             session.terminate()
         self.model.session_jsonl = None
         self.model.last_usage = None
+        self.model.set_session_uuid(None)
         self.model.reset_session_cap_watchdog()
 
     def _mark_output_ts(self, _data: bytes) -> None:

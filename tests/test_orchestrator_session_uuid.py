@@ -355,6 +355,69 @@ class TestTwoRolesIsolatedInSameCwd:
 # ─────────────────────────────────────────────────────────────
 
 
+class TestAttachSessionReceivesSessionUuid:
+    """Issue #129: the token meter reads pane.model.session_uuid, not the
+    argv --session-id/--resume value directly — spawn() must hand the exact
+    uuid it just decided to attach_session() or the meter falls back to
+    guessing (which reads a sibling pane's transcript when panes share a
+    cwd).
+
+    Self-contained (own `_spawn` helper, doesn't reuse the module-level
+    `_spawn_capture`): the rest of this file patches `orch_mod.PtySession`,
+    but the claude spawn branch actually constructs `PtySession` from
+    `spawn_engine`'s own module-level import (post god-file-split), not a
+    name re-exported on `orchestrator` — patching the stale location is a
+    pre-existing bug in this file unrelated to #129 (confirmed: every other
+    test here fails the same way even on an unmodified checkout), out of
+    scope for this fix.
+    """
+
+    def _spawn(self, orch: Orchestrator, role_name: str, cwd: str = "/proj") -> tuple:
+        """Run orch.spawn() with a fake PtySession patched at its real
+        current location (spawn_engine.PtySession). Returns (argv, fake_pane).
+        """
+        from agent_takkub import spawn_engine as spawn_engine_mod
+
+        fake_pane = MagicMock()
+        fake_pane.session = None
+        fake_pane.state = "empty"
+        fake_pane._transcript_path = None
+        orch._panes_by_project.setdefault(_PROJECT, {})[role_name] = fake_pane
+
+        captured: list[list[str]] = []
+        fake_session = MagicMock()
+        fake_session.processExited = MagicMock()
+        fake_session.processExited.connect = MagicMock()
+        with patch.object(spawn_engine_mod, "PtySession", return_value=fake_session):
+            with patch.object(
+                fake_session,
+                "spawn",
+                side_effect=lambda argv, cwd, env, **kwargs: captured.append(list(argv)),
+            ):
+                orch.spawn(role_name, cwd=cwd, project=_PROJECT)
+        return captured[0] if captured else [], fake_pane
+
+    def test_fresh_spawn_passes_new_session_id_uuid(self, orch: Orchestrator) -> None:
+        argv, fake_pane = self._spawn(orch, "backend")
+
+        uuid_val = argv[argv.index("--session-id") + 1]
+        _, kwargs = fake_pane.attach_session.call_args
+        assert kwargs["session_uuid"] == uuid_val
+
+    def test_resumed_spawn_passes_resume_uuid(self, orch: Orchestrator) -> None:
+        cwd = "/proj"
+        argv1, _ = self._spawn(orch, "frontend", cwd=cwd)
+        uuid1 = argv1[argv1.index("--session-id") + 1]
+        _simulate_exit(orch, "frontend", cwd=cwd)
+
+        argv2, fake_pane2 = self._spawn(orch, "frontend", cwd=cwd)
+        assert "--resume" in argv2
+        assert argv2[argv2.index("--resume") + 1] == uuid1
+
+        _, kwargs = fake_pane2.attach_session.call_args
+        assert kwargs["session_uuid"] == uuid1
+
+
 class TestContinueFlagNeverAppears:
     def test_fresh_spawn(self, orch: Orchestrator) -> None:
         assert "--continue" not in _spawn_capture(orch, "backend", cwd="/proj")

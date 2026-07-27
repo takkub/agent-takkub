@@ -7,6 +7,7 @@ preserved by a full-scan fallback when the tail holds no assistant turn.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import sys
 
@@ -15,6 +16,7 @@ from agent_takkub.token_meter import (
     effective_context_limit,
     encode_path_for_claude,
     find_latest_session,
+    find_session_by_uuid,
     read_last_usage,
 )
 
@@ -207,3 +209,79 @@ class TestFindLatestSessionConfigDir:
         monkeypatch.setattr(pathlib.Path, "home", classmethod(lambda cls: fake_default))
         planted = self._plant_session(fake_default / ".claude", cwd)
         assert find_latest_session(cwd, config_dir=None) == planted
+
+
+class TestFindSessionByUuid:
+    """Issue #129: multiple panes sharing one cwd (routine for a single-repo
+    project where every role points at the same project root) must never have
+    the token meter/session-cap watchdog read a *sibling* pane's transcript.
+    `find_session_by_uuid` resolves the exact ``<uuid>.jsonl`` for the pane's
+    own recorded session, ignoring every other file in the cwd's project dir
+    — never falls back to a newest-mtime guess."""
+
+    def _plant(
+        self,
+        config_home: pathlib.Path,
+        cwd: pathlib.Path,
+        session_uuid: str,
+        mtime: float | None = None,
+    ) -> pathlib.Path:
+        enc = encode_path_for_claude(cwd)
+        proj = config_home / "projects" / enc
+        proj.mkdir(parents=True, exist_ok=True)
+        f = proj / f"{session_uuid}.jsonl"
+        f.write_text(
+            json.dumps({"type": "assistant", "message": {"usage": {"input_tokens": 1}}}) + "\n",
+            encoding="utf-8",
+        )
+        if mtime is not None:
+            os.utime(f, (mtime, mtime))
+        return f
+
+    def test_two_panes_same_cwd_each_read_own_file(self, tmp_path: pathlib.Path) -> None:
+        cwd = tmp_path / "proj"
+        cwd.mkdir()
+        config_home = tmp_path / "home"
+        # QA's file is written *later* than Lead's — the regression this
+        # guards: the old newest-mtime scan handed Lead's badge the QA file
+        # because it was the most-recently-modified one in the shared cwd
+        # dir (proven live in events.log: session_cap_crossed for role=qa
+        # fired 2s after spawn, reading Lead's ~185k prompt size).
+        lead_file = self._plant(config_home, cwd, "lead-uuid-1111", mtime=1_000_000)
+        qa_file = self._plant(config_home, cwd, "qa-uuid-2222", mtime=2_000_000)
+
+        assert find_session_by_uuid(cwd, "lead-uuid-1111", config_dir=config_home) == lead_file
+        assert find_session_by_uuid(cwd, "qa-uuid-2222", config_dir=config_home) == qa_file
+
+    def test_unknown_uuid_returns_none_never_a_guess(self, tmp_path: pathlib.Path) -> None:
+        cwd = tmp_path / "proj"
+        cwd.mkdir()
+        config_home = tmp_path / "home"
+        self._plant(config_home, cwd, "some-other-pane-uuid")
+        # This pane's own uuid isn't in the dir — must get nothing back,
+        # not whatever else happens to live in the cwd's project dir.
+        assert find_session_by_uuid(cwd, "not-planted-uuid", config_dir=config_home) is None
+
+    def test_empty_uuid_returns_none(self, tmp_path: pathlib.Path) -> None:
+        cwd = tmp_path / "proj"
+        cwd.mkdir()
+        assert find_session_by_uuid(cwd, "", config_dir=tmp_path / "home") is None
+
+    def test_honours_custom_config_dir(self, tmp_path: pathlib.Path) -> None:
+        cwd = tmp_path / "proj"
+        cwd.mkdir()
+        custom_home = tmp_path / "profileB"
+        planted = self._plant(custom_home, cwd, "profile-uuid")
+        assert find_session_by_uuid(cwd, "profile-uuid", config_dir=custom_home) == planted
+
+    def test_default_config_dir_does_not_see_custom_profile_session(
+        self, tmp_path: pathlib.Path, monkeypatch
+    ) -> None:
+        cwd = tmp_path / "proj"
+        cwd.mkdir()
+        custom_home = tmp_path / "profileB"
+        self._plant(custom_home, cwd, "profile-uuid")
+        fake_default = tmp_path / "defaulthome"
+        (fake_default / ".claude").mkdir(parents=True)
+        monkeypatch.setattr(pathlib.Path, "home", classmethod(lambda cls: fake_default))
+        assert find_session_by_uuid(cwd, "profile-uuid", config_dir=None) is None

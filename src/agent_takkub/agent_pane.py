@@ -36,7 +36,7 @@ from .pty_session import PtySession
 from .roles import LEAD, USER_DRIVEN_ROLES, Role
 from .session_cap import SESSION_CAP_SETTING, resolve_session_cap_threshold
 from .terminal_widget import TerminalWidget
-from .token_meter import find_latest_session, read_last_usage
+from .token_meter import find_session_by_uuid, read_last_usage
 
 # Pane state → dot color, using cockpit_theme state tokens (semantic — never
 # gold). "empty" is a neutral faint grey; the rest are the ok/warn/info/exit/
@@ -499,9 +499,14 @@ class AgentPane(QFrame):
         cwd: str | None = None,
         *,
         provider_name: str = "claude",
+        session_uuid: str | None = None,
     ) -> None:
         """Bind a PtySession to this pane's terminal widget. `cwd` (optional)
-        is shown in the header next to the role label."""
+        is shown in the header next to the role label. `session_uuid`
+        (optional) is this pane's own Claude transcript uuid — spawn_engine
+        passes the exact value it just decided (--session-id/--resume), so
+        the token meter can resolve *this* pane's JSONL instead of guessing
+        by newest-mtime-in-cwd (issue #129)."""
         if self.session is not None and self.session is not session:
             self.detach_session()
         self.session = session
@@ -558,6 +563,7 @@ class AgentPane(QFrame):
         self._session_jsonl = None
         self._last_usage = None
         self._token_label.hide()
+        self.model.set_session_uuid(session_uuid)
         # #103 gap: only Claude currently has a JSONL transcript compatible
         # with token_meter.read_last_usage. Keep both the badge and watchdog
         # behind ProviderSpec.supports_token_meter so a non-Claude pane cannot
@@ -677,6 +683,7 @@ class AgentPane(QFrame):
         self._token_timer.stop()
         self._session_jsonl = None
         self._last_usage = None
+        self.model.set_session_uuid(None)
         self.model.reset_session_cap_watchdog()
         self._token_label.hide()
 
@@ -712,25 +719,36 @@ class AgentPane(QFrame):
     # token meter
     # ──────────────────────────────────────────────────────────────
     def _refresh_token_meter(self) -> None:
-        """Poll the active claude session's JSONL for the latest usage block
-        and update the header badge. Runs every 5 s.
+        """Poll this pane's own claude session JSONL for the latest usage
+        block and update the header badge. Runs every 5 s.
 
-        The file glob (`find_latest_session`) + JSONL read (`read_last_usage`)
-        run on a background thread — on a large/active session file this was a
-        proven main_thread_stall source at the 5 s tick. The badge itself is
-        updated back on the GUI thread via _tokenMeterReady → _apply_token_meter.
+        The exact-uuid resolve (`find_session_by_uuid`) + JSONL read
+        (`read_last_usage`) run on a background thread — on a large/active
+        session file this was a proven main_thread_stall source at the 5 s
+        tick. The badge itself is updated back on the GUI thread via
+        _tokenMeterReady → _apply_token_meter.
         """
         if self.session is None or not self._session_cwd:
             return
         # Coalesce: skip if the previous off-thread read is still in flight.
         if getattr(self, "_token_refreshing", False):
             return
-        # Always re-poll for the newest JSONL under this pane's cwd, not the one
-        # we first saw — Claude's `/clear` rolls over to a fresh session file.
-        # Scope to this pane's Claude config home (per-profile panes write under
-        # <CLAUDE_CONFIG_DIR>/projects/, not ~/.claude/projects/).
+        # Read fresh every tick (not cached at attach time): a manual
+        # /resume or /clear inside claude rolls over to a different
+        # transcript uuid, and consume_session_report() updates
+        # model.session_uuid live as soon as the SessionStart hook reports
+        # it — so the next tick follows the rollover automatically.
+        session_uuid = self.model.session_uuid
+        if not session_uuid:
+            # Unknown uuid: showing nothing beats guessing. Issue #129 — a
+            # newest-mtime-in-cwd fallback here would surface a sibling
+            # pane's transcript on this pane's badge whenever panes share
+            # a cwd (routine for a single-repo project with every role
+            # pointed at the same project root).
+            return
+        # Scope to this pane's Claude config home (per-profile panes write
+        # under <CLAUDE_CONFIG_DIR>/projects/, not ~/.claude/projects/).
         cwd = self._session_cwd
-        since_ts = self._spawn_ts - 5
         cfg_dir = getattr(self.session, "_claude_config_dir", None)
         self._token_refreshing = True
 
@@ -738,7 +756,7 @@ class AgentPane(QFrame):
             cand = None
             usage = None
             try:
-                cand = find_latest_session(cwd, since_ts=since_ts, config_dir=cfg_dir)
+                cand = find_session_by_uuid(cwd, session_uuid, config_dir=cfg_dir)
                 if cand is not None:
                     try:
                         usage = read_last_usage(cand)

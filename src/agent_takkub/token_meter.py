@@ -121,6 +121,34 @@ def _claude_projects_dir(config_dir: str | Path | None = None) -> Path:
     return base / "projects"
 
 
+def find_session_by_uuid(
+    cwd: str | Path, session_uuid: str, config_dir: str | Path | None = None
+) -> Path | None:
+    """Return this pane's *exact* session JSONL —
+    ``<cwd's encoded project dir>/<session_uuid>.jsonl`` — never a guess.
+
+    `session_uuid` is the pane's own `PaneState.session_uuid` (stamped at
+    spawn via `--session-id`/`--resume`, kept current across manual
+    `/resume`/`/clear` by the `SessionStart` hook,
+    `Orchestrator.consume_session_report`). Resolving the exact filename by
+    uuid is what makes this safe when several panes share one cwd (issue
+    #129: a single-repo project with every role pointed at the same project
+    root) — `find_latest_session`'s newest-mtime heuristic picked up
+    whichever *sibling* pane wrote most recently, showing that pane's
+    context %/session-cap numbers on this one's badge instead of its own.
+
+    Returns None if `session_uuid` is falsy or the file doesn't exist yet
+    (fresh pane, not flushed). Callers must treat None as "unknown — hide
+    the badge", never fall back to scanning for *some* file in the cwd's
+    project dir.
+    """
+    if not session_uuid:
+        return None
+    enc = encode_path_for_claude(cwd)
+    candidate = _claude_projects_dir(config_dir) / enc / f"{session_uuid}.jsonl"
+    return candidate if candidate.is_file() else None
+
+
 def find_latest_session(
     cwd: str | Path, since_ts: float = 0.0, config_dir: str | Path | None = None
 ) -> Path | None:
@@ -130,13 +158,17 @@ def find_latest_session(
     `config_dir` scopes the lookup to a specific Claude config home (the
     pane's CLAUDE_CONFIG_DIR); None means the default `~/.claude`.
 
-    Returns None if no file qualifies. Cockpit callers re-poll on every
-    refresh rather than caching the first hit — `/clear` inside claude
-    rolls the conversation over to a new session file, and a sticky lock
-    on the pre-clear file would pin the token meter forever. Cockpit's
-    one-pane-per-cwd discipline (Lead at project root, teammates at
-    distinct sub-paths, no two Leads share a project) makes peer-pane
-    contamination effectively impossible.
+    Returns None if no file qualifies. This is a newest-mtime GUESS, not an
+    identity lookup — it cannot tell two panes sharing the same cwd apart
+    (issue #129 disproved the old claim that cockpit's pane layout makes
+    that "effectively impossible": a single-repo project routinely has
+    Lead and every teammate pointed at the same project root, and one
+    pane's badge/session-cap watchdog picked up a sibling pane's transcript
+    whenever it happened to write more recently). Callers that know a
+    specific pane's `session_uuid` — which is every cockpit caller — must
+    use `find_session_by_uuid` instead; this function is only safe when no
+    uuid is available and "some session in this cwd, not necessarily this
+    pane's" is an acceptable answer.
     """
     enc = encode_path_for_claude(cwd)
     proj_dir = _claude_projects_dir(config_dir) / enc
