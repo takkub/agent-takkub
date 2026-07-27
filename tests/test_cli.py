@@ -854,7 +854,6 @@ class TestDiskPruneCli:
     def test_prune_dry_run_does_not_delete(self, tmp_path):
         wt = tmp_path / "worktrees" / "proj" / "frontend-1"
         wt.mkdir(parents=True)
-        (wt / "f.txt").write_text("x")
         rc = cli.main(["prune", "--category", "orphan-worktrees"])
         assert rc == 0
         assert wt.exists()  # no --yes → nothing removed
@@ -862,10 +861,41 @@ class TestDiskPruneCli:
     def test_prune_yes_removes_orphan_worktree(self, tmp_path):
         wt = tmp_path / "worktrees" / "proj" / "frontend-2"
         wt.mkdir(parents=True)
-        (wt / "f.txt").write_text("x")
         rc = cli.main(["prune", "--category", "orphan-worktrees", "--yes"])
         assert rc == 0
         assert not wt.exists()
+
+    def test_prune_yes_leaves_orphan_with_source_files_at_safe_level(self, tmp_path):
+        """#132: a source file (not node_modules) inside an orphan worktree
+        must survive the default (safe) category+level even with --yes."""
+        wt = tmp_path / "worktrees" / "proj" / "frontend-3"
+        wt.mkdir(parents=True)
+        (wt / "f.txt").write_text("x")
+        rc = cli.main(["prune", "--category", "orphan-worktrees", "--yes"])
+        assert rc == 0
+        assert wt.exists()
+        assert (wt / "f.txt").exists()
+
+    def test_prune_yes_review_category_removes_orphan_with_source_files_and_prints_targets(
+        self, tmp_path, capsys
+    ):
+        wt = tmp_path / "worktrees" / "proj" / "frontend-4"
+        wt.mkdir(parents=True)
+        (wt / "f.txt").write_text("x")
+        rc = cli.main(
+            [
+                "prune",
+                "--category",
+                "orphan-worktrees-review",
+                "--level",
+                "review",
+                "--yes",
+            ]
+        )
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert not wt.exists()
+        assert str(wt) in out  # target path printed before/while deleting, never silent
 
 
 class TestRestartCli:

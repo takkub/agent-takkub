@@ -92,6 +92,89 @@ class TestOrphanDetection:
         assert info["ahead"] == 3
         assert info["dirty"] is True
 
+    def test_orphan_not_in_worktree_list_still_reports_git_state(self, tmp_path):
+        """#132: `git worktree list` doesn't know this path, but the checkout
+        itself still responds to git directly — dirty/branch/ahead must be
+        filled in rather than the classifier bailing out blind."""
+        wt = tmp_path / "worktrees" / "proj" / "backend-11"
+        wt.mkdir(parents=True)
+        (wt / ".git").write_text("gitdir: /repo/.git/worktrees/backend-11\n")
+        # `git worktree list` lists a DIFFERENT worktree — this one is absent.
+        porcelain = _porcelain([("/repo/other", "abc123", "wt/other-1")])
+
+        def runner(args, cwd):
+            if "rev-parse" in args and "--show-toplevel" in args:
+                return GitResult(0, "/repo\n", "")
+            if "worktree" in args and "list" in args and "--porcelain" in args:
+                return GitResult(0, porcelain, "")
+            if "rev-parse" in args and "--abbrev-ref" in args:
+                return GitResult(0, "wt/backend-11-1\n", "")
+            if "rev-list" in args and "--count" in args:
+                return GitResult(0, "2\n", "")
+            if "status" in args and "--porcelain" in args:
+                return GitResult(0, "M x\n", "")
+            return GitResult(0, "", "")
+
+        mgr = WorktreeManager(runner=runner)
+        info = disk_usage.classify_worktree(wt, mgr)
+        assert info["orphan"] is True
+        assert info["branch"] == "wt/backend-11-1"
+        assert info["dirty"] is True
+        assert info["ahead"] == 2
+
+    def test_orphan_unreadable_git_leaves_state_none(self, tmp_path):
+        wt = tmp_path / "worktrees" / "proj" / "backend-12"
+        wt.mkdir(parents=True)
+        mgr = WorktreeManager(
+            runner=lambda a, c: (_ for _ in ()).throw(AssertionError("git called"))
+        )
+        info = disk_usage.classify_worktree(wt, mgr)
+        assert info["dirty"] is None
+        assert info["branch"] is None
+        assert info["ahead"] is None
+
+
+class TestOrphanPruneBucket:
+    def test_empty_dir_is_safe(self, tmp_path):
+        wt = tmp_path / "wt-empty"
+        wt.mkdir()
+        assert disk_usage._orphan_prune_bucket(wt, {}) == disk_usage.SAFE
+
+    def test_node_modules_only_is_safe(self, tmp_path):
+        wt = tmp_path / "wt-nm"
+        (wt / "node_modules" / "pkg").mkdir(parents=True)
+        (wt / "node_modules" / "pkg" / "index.js").write_text("x")
+        assert disk_usage._orphan_prune_bucket(wt, {}) == disk_usage.SAFE
+
+    def test_nested_node_modules_only_is_safe(self, tmp_path):
+        wt = tmp_path / "wt-nm-nested"
+        (wt / "apps" / "web" / "node_modules" / "pkg").mkdir(parents=True)
+        (wt / "apps" / "web" / "node_modules" / "pkg" / "index.js").write_text("x")
+        assert disk_usage._orphan_prune_bucket(wt, {}) == disk_usage.SAFE
+
+    def test_source_file_forces_review(self, tmp_path):
+        wt = tmp_path / "wt-src"
+        wt.mkdir()
+        (wt / "app.py").write_text("print('hi')")
+        assert disk_usage._orphan_prune_bucket(wt, {}) == disk_usage.REVIEW
+
+    def test_source_file_alongside_node_modules_forces_review(self, tmp_path):
+        wt = tmp_path / "wt-mixed"
+        (wt / "node_modules" / "pkg").mkdir(parents=True)
+        (wt / "src").mkdir()
+        (wt / "src" / "index.ts").write_text("export {}")
+        assert disk_usage._orphan_prune_bucket(wt, {}) == disk_usage.REVIEW
+
+    def test_dirty_forces_review_even_when_content_looks_safe(self, tmp_path):
+        wt = tmp_path / "wt-dirty"
+        wt.mkdir()
+        assert disk_usage._orphan_prune_bucket(wt, {"dirty": True}) == disk_usage.REVIEW
+
+    def test_unmerged_commits_force_review_even_when_content_looks_safe(self, tmp_path):
+        wt = tmp_path / "wt-ahead"
+        wt.mkdir()
+        assert disk_usage._orphan_prune_bucket(wt, {"ahead": 1}) == disk_usage.REVIEW
+
 
 class TestNodeModulesScan:
     def test_finds_node_modules_at_multiple_depths(self, tmp_path):
@@ -178,7 +261,6 @@ class TestPruneDryRun:
     def test_dry_run_orphan_worktree_does_not_delete(self, tmp_path):
         wt = tmp_path / "worktrees" / "proj" / "frontend-9"
         wt.mkdir(parents=True)
-        (wt / "leftover.txt").write_text("hi")
         result = disk_usage.prune(categories=["orphan-worktrees"], dry_run=True, data_home=tmp_path)
         assert wt.exists()
         cat = result["categories"][0]
@@ -190,7 +272,44 @@ class TestPruneDryRun:
     def test_yes_removes_orphan_worktree(self, tmp_path):
         wt = tmp_path / "worktrees" / "proj" / "frontend-10"
         wt.mkdir(parents=True)
-        (wt / "leftover.txt").write_text("hi")
+        result = disk_usage.prune(
+            categories=["orphan-worktrees"], dry_run=False, data_home=tmp_path
+        )
+        assert not wt.exists()
+        assert result["categories"][0]["removed_count"] == 1
+
+    def test_orphan_worktree_with_source_file_is_never_touched_by_safe_category(self, tmp_path):
+        """#132: a source file (not node_modules) is the exact shape that must
+        never be auto-deleted, even with --yes at the default (safe) level."""
+        wt = tmp_path / "worktrees" / "proj" / "frontend-11"
+        wt.mkdir(parents=True)
+        (wt / "leftover.py").write_text("print('important')")
+        result = disk_usage.prune(
+            categories=["orphan-worktrees"], dry_run=False, data_home=tmp_path
+        )
+        assert wt.exists()
+        assert (wt / "leftover.py").read_text() == "print('important')"
+        assert result["categories"][0]["target_count"] == 0
+        assert result["categories"][0]["removed_count"] == 0
+
+    def test_orphan_worktree_with_source_file_needs_review_category_and_yes(self, tmp_path):
+        wt = tmp_path / "worktrees" / "proj" / "frontend-12"
+        wt.mkdir(parents=True)
+        (wt / "leftover.py").write_text("print('important')")
+        result = disk_usage.prune(
+            categories=["orphan-worktrees-review"],
+            level="review",
+            dry_run=False,
+            data_home=tmp_path,
+        )
+        assert not wt.exists()
+        assert result["categories"][0]["removed_count"] == 1
+        assert result["categories"][0]["targets"] == [str(wt)]
+
+    def test_orphan_worktree_with_node_modules_only_deleted_by_safe_category(self, tmp_path):
+        wt = tmp_path / "worktrees" / "proj" / "frontend-13"
+        (wt / "node_modules" / "pkg").mkdir(parents=True)
+        (wt / "node_modules" / "pkg" / "index.js").write_text("x")
         result = disk_usage.prune(
             categories=["orphan-worktrees"], dry_run=False, data_home=tmp_path
         )
@@ -216,6 +335,67 @@ class TestPruneDryRun:
         assert result["ok"] is True
         assert not partial.exists()
         assert result["categories"][0]["removed_count"] == 1
+
+
+class TestBootSweepConservative:
+    """`prune_orphan_worktrees_boot` — the auto-sweep that runs unattended at
+    cockpit startup. #132: it must never delete a checkout that still holds
+    something a user could lose."""
+
+    def test_leaves_orphan_with_source_files_untouched(self, tmp_path):
+        wt = tmp_path / "worktrees" / "proj" / "frontend-boot-1"
+        wt.mkdir(parents=True)
+        (wt / "App.tsx").write_text("export default function App() {}")
+        removed = disk_usage.prune_orphan_worktrees_boot(data_home=tmp_path)
+        assert removed == 0
+        assert wt.exists()
+        assert (wt / "App.tsx").exists()
+
+    def test_removes_orphan_that_is_only_node_modules(self, tmp_path):
+        wt = tmp_path / "worktrees" / "proj" / "frontend-boot-2"
+        (wt / "node_modules" / "pkg").mkdir(parents=True)
+        (wt / "node_modules" / "pkg" / "index.js").write_text("x")
+        removed = disk_usage.prune_orphan_worktrees_boot(data_home=tmp_path)
+        assert removed == 1
+        assert not wt.exists()
+
+    def test_removes_orphan_that_is_completely_empty(self, tmp_path):
+        wt = tmp_path / "worktrees" / "proj" / "frontend-boot-3"
+        wt.mkdir(parents=True)
+        removed = disk_usage.prune_orphan_worktrees_boot(data_home=tmp_path)
+        assert removed == 1
+        assert not wt.exists()
+
+    def test_leaves_orphan_with_unmerged_branch_commits_untouched(self, tmp_path, monkeypatch):
+        """#132: even an otherwise-empty checkout must survive the boot sweep
+        when its branch still carries commits nobody merged — deleting the
+        checkout would strand the pane's work behind a branch name nobody
+        knows to look for."""
+        wt = tmp_path / "worktrees" / "proj" / "backend-boot-4"
+        wt.mkdir(parents=True)
+        (wt / ".git").write_text("gitdir: /repo/.git/worktrees/backend-boot-4\n")
+        # `git worktree list` doesn't know this path anymore (already
+        # unregistered), but the checkout itself still answers git directly
+        # and its branch has 2 commits nothing has merged yet.
+        porcelain = _porcelain([("/repo/other", "abc123", "wt/other-1")])
+
+        def runner(args, cwd):
+            if "rev-parse" in args and "--show-toplevel" in args:
+                return GitResult(0, "/repo\n", "")
+            if "worktree" in args and "list" in args and "--porcelain" in args:
+                return GitResult(0, porcelain, "")
+            if "rev-parse" in args and "--abbrev-ref" in args:
+                return GitResult(0, "wt/backend-boot-4-1\n", "")
+            if "rev-list" in args and "--count" in args:
+                return GitResult(0, "2\n", "")
+            if "status" in args and "--porcelain" in args:
+                return GitResult(0, "", "")
+            return GitResult(0, "", "")
+
+        monkeypatch.setattr(disk_usage, "WorktreeManager", lambda: WorktreeManager(runner=runner))
+        removed = disk_usage.prune_orphan_worktrees_boot(data_home=tmp_path)
+        assert removed == 0
+        assert wt.exists()
 
 
 class TestNeverLevelRefusal:
@@ -349,7 +529,26 @@ class TestDiskReport:
             "chat-history",
             "shell-snapshots",
             "orphan-worktrees",
+            "orphan-worktrees-review",
             "node-modules",
         } <= keys
         never = next(c for c in report["categories"] if c["key"] == "venv")
         assert never["level"] == "never"
+
+    def test_orphan_with_source_files_counted_under_review_not_safe(self, tmp_path, monkeypatch):
+        cfg_dir = tmp_path / "claude-config"
+        (cfg_dir / "projects").mkdir(parents=True)
+        (cfg_dir / "shell-snapshots").mkdir(parents=True)
+        monkeypatch.setattr(disk_usage, "default_claude_config_dir", lambda: cfg_dir)
+        wt = tmp_path / "worktrees" / "proj" / "frontend-report-1"
+        wt.mkdir(parents=True)
+        (wt / "leftover.py").write_text("print('important')")
+
+        report = disk_usage.disk_report(tmp_path)
+        safe_cat = next(c for c in report["categories"] if c["key"] == "orphan-worktrees")
+        review_cat = next(c for c in report["categories"] if c["key"] == "orphan-worktrees-review")
+        assert safe_cat["file_count"] == 0
+        assert review_cat["file_count"] == 1
+        assert review_cat["level"] == "review"
+        rows = report["worktrees"]["orphan"]
+        assert next(r for r in rows if r["path"] == str(wt))["prune_bucket"] == "review"

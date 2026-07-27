@@ -416,7 +416,13 @@ def cmd_disk(args: argparse.Namespace) -> dict:
     if wt["orphan"] or wt["registered"]:
         _utf8_print("\nworktrees:")
         for r in wt["orphan"]:
-            _utf8_print(f"  ORPHAN {_fmt_bytes(r['size_bytes']):>9}  {r['path']}")
+            if r.get("prune_bucket") == "review":
+                _utf8_print(
+                    f"  ORPHAN? {_fmt_bytes(r['size_bytes']):>8}  {r['path']}"
+                    "  (มีไฟล์ source/uncommitted/commit ค้าง — ต้อง review ก่อนลบ)"
+                )
+            else:
+                _utf8_print(f"  ORPHAN  {_fmt_bytes(r['size_bytes']):>8}  {r['path']}")
         for r in wt["registered"]:
             flags = []
             if r.get("dirty"):
@@ -466,6 +472,12 @@ def cmd_prune(args: argparse.Namespace) -> dict:
             f"  [{cat['level']}] {cat['category']:<18} {verb} {cat['target_count']} "
             f"({_fmt_bytes(bytes_field)})"
         )
+        if cat["category"] == "orphan-worktrees-review":
+            # #132: this bucket can hold real source/uncommitted/unmerged
+            # content — always show exactly what would disappear, dry-run or
+            # not, so --yes is never fired blind.
+            for t in cat.get("targets", []):
+                _utf8_print(f"           - {t}")
         for s in cat["skipped"]:
             _utf8_print(f"           skip: {s}")
         for e in cat["errors"]:
@@ -1644,7 +1656,7 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="comma-separated categories to prune (default: every safe category). "
         "one of: browser-profiles,transcripts,exports,orphan-worktrees,"
-        "shell-snapshots,partial,chat-history,node-modules",
+        "orphan-worktrees-review,shell-snapshots,partial,chat-history,node-modules",
     )
     sprune.add_argument(
         "--level",

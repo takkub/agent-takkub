@@ -504,8 +504,30 @@ class WorktreeManager:
 
     def is_dirty(self, info: WorktreeInfo) -> bool:
         """True when the worktree has uncommitted changes (blocks safe_remove)."""
-        res = self._run(["-C", info.path, "status", "--porcelain"], None)
+        return self.is_dirty_at(info.path)
+
+    def is_dirty_at(self, cwd: str) -> bool:
+        """Same as :meth:`is_dirty` but for a bare checkout path (no
+        :class:`WorktreeInfo` needed) — used to inspect an orphan checkout
+        that git can still read directly (#132)."""
+        res = self._run(["-C", cwd, "status", "--porcelain"], None)
         return bool(res.ok and res.stdout.strip())
+
+    def current_branch(self, cwd: str) -> str | None:
+        """Branch checked out at *cwd*, or None when detached/unresolvable."""
+        res = self._run(["-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"], None)
+        name = res.stdout.strip() if res.ok else ""
+        return name if name and name != "HEAD" else None
+
+    def commits_ahead(self, git_root: str, branch: str) -> int:
+        """Commits reachable from *branch* but not from *git_root*'s current
+        HEAD — used to warn instead of silently deleting an orphan checkout
+        whose branch still carries unmerged work (#132)."""
+        res = self._run(["-C", git_root, "rev-list", "--count", f"HEAD..{branch}"], None)
+        try:
+            return int(res.stdout.strip() or "0") if res.ok else 0
+        except ValueError:
+            return 0
 
     def diffstat(self, info: WorktreeInfo) -> str:
         """Human-readable diff summary of the branch vs its base (for the Lead

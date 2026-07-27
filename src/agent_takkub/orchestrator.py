@@ -587,8 +587,14 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         # runtime/../worktrees/ that `git worktree list` no longer knows about
         # (crashed cockpit, deleted .git pointer). Never touches a still-
         # registered worktree (that's `takkub worktree clean`'s job, explicit
-        # opt-in). Safe at boot for the same reason as the two prunes above:
-        # no pane is alive yet to be using one. Best-effort / non-fatal.
+        # opt-in). Conservative within "orphan" too (#132): only an empty
+        # checkout or one containing nothing but node_modules, clean, with no
+        # branch commits still unmerged is eligible — an orphan still holding
+        # source/uncommitted/unmerged content is left alone for the Lead to
+        # review via `takkub prune --level review --category
+        # orphan-worktrees-review --yes`. Safe at boot for the same reason as
+        # the two prunes above: no pane is alive yet to be using one.
+        # Best-effort / non-fatal.
         try:
             from .disk_usage import prune_orphan_worktrees_boot
 

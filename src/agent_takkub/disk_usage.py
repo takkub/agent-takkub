@@ -42,6 +42,7 @@ VALID_CATEGORIES: tuple[str, ...] = (
     "transcripts",
     "exports",
     "orphan-worktrees",
+    "orphan-worktrees-review",
     "shell-snapshots",
     "partial",
     "chat-history",
@@ -238,27 +239,39 @@ def classify_worktree(
 ) -> dict:
     """Describe one on-disk worktree checkout dir.
 
-    Orphan = no longer known to git at all: either the ``.git`` pointer file
-    is gone, its source repo can't be resolved anymore, or ``git worktree
-    list`` no longer lists this exact path (e.g. it was pruned already).
-    Everything else is "registered" (still live per git) and carries
-    dirty/ahead flags from the same logic ``takkub worktree list`` uses.
+    Orphan = no longer known to git as a live worktree: either the ``.git``
+    pointer file is gone, its source repo can't be resolved anymore, or
+    ``git worktree list`` no longer lists this exact path (e.g. it was
+    pruned already). Everything else is "registered" (still live per git)
+    and carries dirty/ahead flags from the same logic ``takkub worktree
+    list`` uses.
+
+    Being orphaned only means "git no longer tracks it" — NOT "safe to
+    delete" (#132). When the checkout still responds to git directly (the
+    ``git worktree list`` mismatch case), this also fills in best-effort
+    ``dirty``/``branch``/``ahead`` so callers can tell a genuinely inert
+    leftover from one whose branch still carries unmerged commits. Those two
+    stay ``None``/unset when git can't be read at all (no ``.git`` pointer,
+    or its source repo can't be resolved).
     """
     row: dict = {"path": str(wt_dir)}
     git_file = wt_dir / ".git"
     if not git_file.exists():
-        row.update(orphan=True, registered=False)
+        row.update(orphan=True, registered=False, dirty=None, branch=None, ahead=None)
         return row
     root = mgr.git_root(str(wt_dir))
     if root is None:
-        row.update(orphan=True, registered=False)
+        row.update(orphan=True, registered=False, dirty=None, branch=None, ahead=None)
         return row
     match = next(
         (r for r in mgr.list_isolated(root) if Path(r["path"]).resolve() == wt_dir.resolve()),
         None,
     )
     if match is None:
-        row.update(orphan=True, registered=False)
+        branch = mgr.current_branch(str(wt_dir))
+        dirty = mgr.is_dirty_at(str(wt_dir))
+        ahead = mgr.commits_ahead(root, branch) if branch else 0
+        row.update(orphan=True, registered=False, dirty=dirty, branch=branch, ahead=ahead)
         return row
     row.update(
         orphan=False,
@@ -269,6 +282,48 @@ def classify_worktree(
         pane_active=str(wt_dir.resolve()) in _pane_active_paths(runtime_dir),
     )
     return row
+
+
+def _worktree_has_only_regenerable_content(wt_dir: Path) -> bool:
+    """True when every file under *wt_dir* lives inside a ``node_modules``
+    directory (or there is no file at all).
+
+    This is the ONLY orphan shape an unattended sweep may delete without
+    risking unrecoverable source loss (#132): an empty checkout, or one
+    whose sole content is npm-reinstallable. Anything else — a single stray
+    source file is enough — fails this check and must go through explicit
+    ``review``-level prune instead. The worktree's own ``.git`` pointer file
+    is ignored (it is metadata, not content the user could lose).
+    """
+    try:
+        for root, _dirs, files in os.walk(wt_dir, onerror=lambda _e: None):
+            rel_parts = Path(root).relative_to(wt_dir).parts
+            if "node_modules" in rel_parts:
+                continue  # inside a node_modules subtree — regenerable
+            for f in files:
+                if f != ".git":
+                    return False
+    except OSError:
+        return False
+    return True
+
+
+def _orphan_prune_bucket(wt_dir: Path, info: dict) -> str:
+    """SAFE or REVIEW bucket for an orphan row (#132).
+
+    SAFE (auto-prunable, including by the unattended boot sweep) requires
+    ALL of: no uncommitted changes, no branch commits still unmerged, and no
+    content beyond an empty dir / node_modules. Any one of those failing
+    demotes the row to REVIEW — a human must opt in via ``takkub prune
+    --level review --category orphan-worktrees-review --yes``.
+    """
+    if info.get("dirty"):
+        return REVIEW
+    if (info.get("ahead") or 0) > 0:
+        return REVIEW
+    if not _worktree_has_only_regenerable_content(wt_dir):
+        return REVIEW
+    return SAFE
 
 
 # ── node_modules deep scan ───────────────────────────────────────────────────
@@ -417,7 +472,12 @@ def _partial_dir() -> Path:
 
 def _worktree_categories(data_home: Path, mgr: WorktreeManager) -> dict:
     """Per-worktree rows (orphan + registered) — used by both the `disk`
-    report and `prune`'s orphan-worktrees category."""
+    report and `prune`'s orphan-worktrees categories.
+
+    Every orphan row also carries ``prune_bucket`` (``safe``/``review``,
+    #132) so callers can split "nothing to lose" leftovers from ones that
+    still hold source/uncommitted/unmerged content without recomputing it.
+    """
     orphan_rows: list[dict] = []
     registered_rows: list[dict] = []
     for wt_dir in find_worktree_dirs(data_home):
@@ -426,6 +486,7 @@ def _worktree_categories(data_home: Path, mgr: WorktreeManager) -> dict:
         info["size_bytes"] = size
         info["file_count"] = count
         if info["orphan"]:
+            info["prune_bucket"] = _orphan_prune_bucket(wt_dir, info)
             orphan_rows.append(info)
         else:
             registered_rows.append(info)
@@ -499,15 +560,31 @@ def disk_report(data_home: Path | None = None) -> dict:
 
     mgr = WorktreeManager()
     wt = _worktree_categories(home, mgr)
-    orphan_bytes = sum(r["size_bytes"] for r in wt["orphan"])
-    orphan_count = len(wt["orphan"])
+    orphan_safe = [r for r in wt["orphan"] if r.get("prune_bucket") == SAFE]
+    orphan_review = [r for r in wt["orphan"] if r.get("prune_bucket") == REVIEW]
+    orphan_bytes = sum(r["size_bytes"] for r in orphan_safe)
+    orphan_count = len(orphan_safe)
     categories.append(
         CategoryUsage(
             "orphan-worktrees",
-            "worktrees/* ที่ไม่ลงทะเบียนใน git worktree list แล้ว (crashed/leftover pane)",
+            "worktrees/* ที่ไม่ลงทะเบียนใน git worktree list แล้ว (crashed/leftover pane) "
+            "และว่างเปล่า/มีแต่ node_modules — ลบอัตโนมัติได้ (#132)",
             SAFE,
             orphan_bytes,
             orphan_count,
+        )
+    )
+    review_bytes = sum(r["size_bytes"] for r in orphan_review)
+    review_count = len(orphan_review)
+    categories.append(
+        CategoryUsage(
+            "orphan-worktrees-review",
+            "worktrees/* ที่ไม่ลงทะเบียนแล้วแต่ยังมีไฟล์ source/uncommitted/commit ค้าง "
+            "— ต้อง review เอง (`takkub prune --level review "
+            "--category orphan-worktrees-review --yes`, #132)",
+            REVIEW,
+            review_bytes,
+            review_count,
         )
     )
     live_bytes = sum(r["size_bytes"] for r in wt["registered"])
@@ -570,6 +647,7 @@ class PruneOutcome:
             "category": self.category,
             "level": self.level,
             "dry_run": self.dry_run,
+            "targets": list(self.targets),
             "target_count": len(self.targets),
             "would_free_bytes": self.would_free_bytes,
             "removed_count": self.removed_count,
@@ -588,6 +666,7 @@ def _category_level(category: str) -> str:
         "transcripts": SAFE,
         "partial": SAFE,
         "orphan-worktrees": SAFE,
+        "orphan-worktrees-review": REVIEW,  # has source/uncommitted/unmerged content (#132)
         "node-modules": SAFE,  # orphan subset is safe; live subset is gated by --include-live
         "shell-snapshots": SAFE,
         "exports": REVIEW,
@@ -813,10 +892,35 @@ def _prune_partial(home: Path, dry_run: bool) -> PruneOutcome:
 
 
 def _prune_orphan_worktrees(home: Path, dry_run: bool, mgr: WorktreeManager) -> PruneOutcome:
+    """SAFE-bucket orphans only: empty checkout or node_modules-only content,
+    clean, with no branch commits still unmerged (#132). This is also what
+    ``prune_orphan_worktrees_boot`` runs — the unattended boot sweep must
+    never lose real work, so anything short of that goes to
+    ``_prune_orphan_worktrees_review`` instead, which requires an explicit
+    ``--level review --yes``."""
     outcome = PruneOutcome("orphan-worktrees", SAFE, dry_run)
     for wt_dir in find_worktree_dirs(home):
         info = classify_worktree(wt_dir, mgr, runtime_dir=home / "runtime")
-        if not info["orphan"]:
+        if not info["orphan"] or _orphan_prune_bucket(wt_dir, info) != SAFE:
+            continue
+        size, _c = _dir_stats(wt_dir)
+        outcome.targets.append(str(wt_dir))
+        outcome.would_free_bytes += size
+        if not dry_run:
+            sweep_link_points(wt_dir)
+            _rmtree_target(_assert_under(wt_dir, home), outcome, size)
+    return outcome
+
+
+def _prune_orphan_worktrees_review(home: Path, dry_run: bool, mgr: WorktreeManager) -> PruneOutcome:
+    """REVIEW-bucket orphans (#132): still hold source files, uncommitted
+    changes, or an unmerged branch. Never auto-swept — only reachable via an
+    explicit ``takkub prune --level review --category orphan-worktrees-review
+    --yes``, and the CLI prints every target path before deleting."""
+    outcome = PruneOutcome("orphan-worktrees-review", REVIEW, dry_run)
+    for wt_dir in find_worktree_dirs(home):
+        info = classify_worktree(wt_dir, mgr, runtime_dir=home / "runtime")
+        if not info["orphan"] or _orphan_prune_bucket(wt_dir, info) != REVIEW:
             continue
         size, _c = _dir_stats(wt_dir)
         outcome.targets.append(str(wt_dir))
@@ -917,6 +1021,8 @@ def prune(
             outcomes.append(_prune_partial(home, dry_run))
         elif c == "orphan-worktrees":
             outcomes.append(_prune_orphan_worktrees(home, dry_run, mgr))
+        elif c == "orphan-worktrees-review":
+            outcomes.append(_prune_orphan_worktrees_review(home, dry_run, mgr))
         elif c == "node-modules":
             outcomes.append(_prune_node_modules(home, dry_run, include_live, mgr))
 
@@ -934,9 +1040,14 @@ def prune(
 
 
 def prune_orphan_worktrees_boot(data_home: Path | None = None) -> int:
-    """Auto-prune hook for cockpit boot: sweeps ONLY orphan (unregistered)
-    worktree checkouts — the same safe subset `takkub prune --category
-    orphan-worktrees` deletes. Never touches a still-registered worktree.
+    """Auto-prune hook for cockpit boot: sweeps ONLY the SAFE-bucket subset
+    of orphan (unregistered) worktree checkouts — an empty checkout or one
+    containing nothing but node_modules, clean, with no unmerged branch
+    commits (the same subset `takkub prune --category orphan-worktrees`
+    deletes). Never touches a still-registered worktree, and never touches
+    an orphan that still holds source files, uncommitted changes, or a
+    branch with commits nobody merged yet (#132) — those need an explicit
+    `takkub prune --level review --category orphan-worktrees-review --yes`.
     Returns the number removed. Best-effort: never raises.
     """
     home = (data_home or DATA_HOME).resolve()
