@@ -4,6 +4,26 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.39] - 2026-07-28
+
+### Added (เพิ่ม)
+- **แท็บ 🌿 Git ใน Task dock — ดูสถานะ git ของโปรเจคที่เปิดอยู่ได้ในที่เดียว** · dock ขวา (chip `📋 Tasks` / Ctrl+Shift+T) แยกเป็น 2 แท็บ `📋 Tasks` / `🌿 Git`
+  - tree แบบเดียวกับ task list: 1 แถวต่อ repo → **branch ปัจจุบัน · ↑ahead ↓behind เทียบ upstream · ●modified +untracked (หรือ `clean`)** กางออกเห็น **commit ล่าสุด 8 ตัว** (sha สั้น · subject · เวลาแบบ "2 hours ago") และหมวด **`wt/*` worktrees** ที่ pane isolation สร้างไว้ (commits ahead + dirty)
+  - **โปรเจคที่มีหลาย repo รองรับเต็ม** — path key ทุกอันใน `projects.json` ถูกอ่านแยกกัน แล้ว **ยุบ key ที่ชี้ repo เดียวกัน** ด้วย `git rev-parse --show-toplevel` (monorepo ไม่โชว์ซ้ำ · repo แยกจริงโชว์ครบทุกตัว) · path ที่ไม่ใช่ git repo โชว์เป็นแถวสีเทาบอกเหตุ ไม่ใช่หายเงียบ
+  - engine ใหม่ `git_status.py` (ไม่มี PyQt — เทสแยกได้) เรียก git ผ่าน subprocess ที่มี timeout, ไม่เด้งหน้าต่าง console บน Windows, และ**ไม่ raise ทุกกรณี** (git หาย / timeout / repo พัง → แถว error)
+  - อ่าน git ใน **worker thread** เสมอ ไม่บล็อก UI · refresh เมื่อสลับโปรเจค/สลับมาแท็บ Git/กดปุ่ม ↻ และทุก 30 วิ **เฉพาะตอน dock เปิดและแท็บ Git ถูกเลือกอยู่** (ยุบ dock หรือสลับแท็บ = หยุด poll ทันที)
+
+### Changed (เปลี่ยน)
+- **Task List โชว์เฉพาะโปรเจคของ tab ที่เปิดอยู่** (ตามที่ user ขอ) — เดิมไล่ทุกโปรเจคใน `projects.json` มากองรวมกันในลิสต์เดียว ทำให้หางานของโปรเจคตัวเองไม่เจอ · ตอนนี้ผูกกับ tab ที่ active: สลับโปรเจค card เปลี่ยนตาม, card ของโปรเจคอื่นถูก**เอาออกจริง** (รวม avatar ใน rail ตอนยุบ) และ event `ledgerChanged` ของโปรเจคอื่นถูกข้าม
+
+### Fixed (แก้)
+- **#134 (HIGH) งานที่เพิ่ง spawn ถูก paste ซ้ำ 2 ก้อนติดกันจนกลายเป็นข้อความเพี้ยน** — pane ที่ preload task ผ่าน system-prompt จะได้ trigger สั้นๆ 1 บรรทัด แต่ตัวกู้ paste มองว่าหาย เลย paste ซ้ำ กลายเป็น `...block now.Start the current task from the one-shot system-prompt block now.` แล้ว submit ทั้งก้อน (หลักฐาน: `task_deliver_repaste` 2 ครั้ง 10:24:34 / 10:32:18 ตามหลัง `spawn_initial_task_preloaded` ทันที บน 1.0.38 ที่มี fix #133 ครบแล้ว)
+  - สาเหตุ: ข้อความสั้นบรรทัดเดียว **ไม่มี `[Pasted text]` placeholder** ให้ตรวจ พอ CR ลงไปแล้วช่องพิมพ์ก็ว่าง → สัญญาณ "ready + ช่องว่าง" แยกไม่ออกระหว่าง *ส่งไปแล้ว* กับ *ยังไม่ได้ส่ง* → เดาผิดข้างเดียวก็ paste ทับทันที
+  - trigger ตัวนี้เปลี่ยนไปใช้โหมด **CR-only** (`allow_repaste=False`) — กด Enter ซ้ำได้ แต่**ห้าม paste ซ้ำเด็ดขาด** · ถ้า trigger หายจริง idle watchdog (`[auto-reminder]`) ยังกู้ให้เหมือนเดิม · **การส่ง task ปกติไม่เปลี่ยน** (ยังกู้ paste ที่ถูกกลืนจริงตาม #26)
+  - เพิ่ม log `task_deliver_verify_decision` ที่จุดตัดสินใจกู้ทั้ง 4 จุด (บันทึก ready / มีข้อความค้าง / มี output ใหม่ / เงียบมากี่วินาที) — ครั้งหน้ามีหลักฐานตรงๆ ไม่ต้องเดาจากจำนวนครั้งที่ retry
+- **#135 hook ของ plugin หมดเวลาแล้วผลถูกทิ้งตอนเปิดหลาย pane พร้อมกัน** — ขึ้นข้อความแดงในจอ pane ว่า `UserPromptSubmit hook timed out after 5s — output discarded` · ต้นเหตุคือ plugin ตั้ง timeout ของตัวเองไว้ต่ำ (pordee = 5 วินาที ทั้ง `SessionStart` และ `UserPromptSubmit`) ซึ่ง node เย็นๆ ตอน fan-out หลาย pane ทำไม่ทัน
+  - ก่อน inject plugin เข้า pane cockpit จะ **ยก timeout ที่ต่ำกว่า 30 วินาทีขึ้นเป็น 30** ให้อัตโนมัติ (ปรับได้ด้วย env `TAKKUB_PLUGIN_HOOK_TIMEOUT_FLOOR`) ทั้งใน `.claude-plugin/plugin.json` และ `hooks/hooks.json` · เขียนแบบ atomic และ**เขียนเฉพาะตอนค่าเปลี่ยนจริง** · ทำใหม่ทุกครั้งที่ spawn เพราะ plugin update ทับค่ากลับ · manifest พังหรือเขียนไม่ได้ = ข้ามเงียบ ไม่ทำให้ spawn ล้ม · มี log `plugin_hook_timeout_raised` ตอนยกจริง
+
 ## [1.0.38] - 2026-07-28
 
 ### Fixed (แก้)
