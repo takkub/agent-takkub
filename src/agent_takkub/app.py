@@ -366,6 +366,16 @@ def _start_deadman_watchdog(window: MainWindow, _stop: threading.Event | None = 
     cleanly.
     """
 
+    # Registered once, synchronously, on the main thread — lead_inbox's
+    # submit-verify loop reads this live (via orchestrator._main_thread_heartbeat_age)
+    # to defer a swallow verdict while the Qt event loop was recently backlogged
+    # (#133). Reading window._heartbeat_ts directly from the caller's own
+    # closure is safe: it's a plain float, written only by the main thread's
+    # own heartbeat timer, same atomicity reasoning as PtySession._last_output_ts.
+    from .orchestrator import set_main_thread_heartbeat_probe
+
+    set_main_thread_heartbeat_probe(lambda: time.monotonic() - window._heartbeat_ts)
+
     def _run() -> None:
         soft_dumped = False
         hard_dumped = False

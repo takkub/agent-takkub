@@ -83,17 +83,33 @@ def _written_str(session: MagicMock) -> str:
 
 
 def _drain_timers(orch: Orchestrator, project_ns: str = TEST_PROJECT) -> None:
-    """Run the pump for *project_ns* until the queue is empty.
+    """Run the pump for *project_ns* until the queue AND every scheduled
+    QTimer.singleShot (including a self-heal submit-verify chain's own
+    timers, #133) have drained.
 
-    In tests QTimer.singleShot callbacks don't auto-fire, so we call
-    _pump_lead_notify directly after each delivery to simulate the timer.
-    Stops when the queue is empty or lead is no longer ready.
+    Real Qt fires every scheduled callback eventually; a test that no-ops
+    QTimer.singleShot entirely would leave a chain's on_settled forever
+    unfired, which the #133 serialisation guard in _pump_lead_notify depends
+    on to advance to the next queued item — so this captures scheduled
+    callbacks instead of discarding them, and drains them in the order they
+    were scheduled (approximating real Qt ordering closely enough for a
+    linear busy→ready→2-item scenario), interleaved with re-driving the pump
+    (standing in for the real event loop re-entering it via its own timer).
     """
-    for _ in range(100):
-        q = getattr(orch, "_lead_notify_queue", {}).get(project_ns)
-        if not q:
-            break
-        orch._pump_lead_notify(project_ns)
+    pending: list = []
+
+    def _capture(_delay_ms, fn):
+        pending.append(fn)
+
+    with patch("agent_takkub.orchestrator.QTimer.singleShot", side_effect=_capture):
+        for _ in range(500):
+            q = getattr(orch, "_lead_notify_queue", {}).get(project_ns)
+            if not q and not pending:
+                break
+            if pending:
+                pending.pop(0)()
+                continue
+            orch._pump_lead_notify(project_ns)
 
 
 # --------------------------------------------------------------------------
@@ -433,6 +449,15 @@ class TestFlushWriteFailureDoesNotLoseItems:
     def test_write_fails_on_middle_item_earlier_and_later_items_both_survive(
         self, orch: Orchestrator
     ) -> None:
+        """#133 note: alpha's successful write starts a self-heal verify chain
+        (_lead_notify_verify_active) that this test's fully no-op'd QTimer
+        never lets settle — exactly like real Qt would, the #133 guard then
+        holds beta/gamma in the LIVE queue rather than writing them
+        immediately, instead of them reaching the write() call at all. Data
+        loss is still what this test guards against, so it checks both
+        surfaces a not-yet-delivered notice can durably live on (the
+        _pending_done_notices spill AND the live _lead_notify_queue) rather
+        than assuming write() was necessarily reached for every item."""
         lead = _make_lead_pane(ready=True)
         orch._panes_by_project[TEST_PROJECT] = {"lead": lead}
 
@@ -459,13 +484,20 @@ class TestFlushWriteFailureDoesNotLoseItems:
             orch._flush_pending_done_notices(TEST_PROJECT)
 
         durable = orch._pending_done_notices.get(TEST_PROJECT, [])
-        bodies = [item["body"] for item in durable]
-        # alpha (item 1) delivered successfully — no longer durable.
-        assert not any("alpha" in b for b in bodies)
-        # beta (item 2) failed to write — must still be durable.
-        assert any("beta" in b for b in bodies), "middle item must survive its own write failure"
-        # gamma (item 3) never reached this flush call — must still be durable.
-        assert any("gamma" in b for b in bodies), (
+        durable_bodies = [item["body"] for item in durable]
+        live_bodies = list(orch._lead_notify_queue.get(TEST_PROJECT, []))
+        all_bodies = durable_bodies + live_bodies
+
+        # alpha (item 1) delivered successfully — not sitting in either queue.
+        assert not any("alpha" in b for b in all_bodies)
+        # beta (item 2): its write either failed (durable) or was never
+        # reached because alpha's own verify chain was still in flight (live
+        # queue, #133) — either way it must survive somewhere, not vanish.
+        assert any("beta" in b for b in all_bodies), (
+            "middle item must survive its own write failure"
+        )
+        # gamma (item 3) never reached this flush call — must still survive.
+        assert any("gamma" in b for b in all_bodies), (
             "items behind a failed item must remain durable, not be lost"
         )
 

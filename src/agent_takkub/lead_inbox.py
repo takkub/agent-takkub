@@ -100,6 +100,24 @@ _SUBMIT_BUSY_MAX_RESENDS = 150
 _RENDER_ACTIVE_S = 1.0
 _RENDER_WAIT_MAX = 6
 
+# Stall-aware deferral (#133). A fan-out of concurrent pane spawns backlogs
+# the Qt event loop for ~1s at a time (proven via events.log: main_thread_stall
+# episodes of 938-1141ms landing right before bursts of duplicate repaste
+# events). Every already-scheduled verify() timer queued during that backlog
+# fires in a burst the instant it clears, collapsing what was meant to be
+# several REAL seconds of render-settle grace into a few milliseconds of
+# wall-clock time — so a paste that was simply still painting under CPU
+# contention gets misread as swallowed. `_main_thread_heartbeat_age()` (see
+# orchestrator.set_main_thread_heartbeat_probe) reads live Qt heartbeat
+# staleness: if verify() is running at all the main thread is free RIGHT NOW,
+# but an elevated age proves a backlog just cleared — the exact moment a
+# burst-fired verify must not trust its own timing. Deferring once more here
+# costs nothing when nothing was actually swallowed and gives production the
+# real elapsed time it was supposed to have. Bounded (not indefinite) so a
+# permanently-stale probe (a bug in the probe itself) can't wedge the chain.
+_STALL_DEFER_AGE_S = 0.5
+_STALL_DEFER_MAX = 4
+
 # Ready-prompt poll cadence for _send_when_ready (task delivery). Lowered from
 # 1000/500 → 300/150 so a task lands almost as soon as the pane hits idle — the
 # old 1 s lead-in + 500 ms poll added up to ~1.5 s of avoidable lag even on an
@@ -227,6 +245,7 @@ def _delayed_enter_verified(
     payload: str | None = None,
     content_fragment: str = "",
     on_repaste=None,
+    on_settled=None,
 ) -> None:
     """Like `_delayed_enter`, but recovers a submit that was swallowed.
 
@@ -250,10 +269,27 @@ def _delayed_enter_verified(
     the composer. When that happens the CR is resent instead of the verify
     chain concluding "submitted" and stopping for good.
 
+    Before EVERY verify decision, a live Qt main-thread heartbeat probe is
+    checked (#133): a fan-out of concurrent pane spawns can backlog the event
+    loop for ~1s at a time, and every verify() timer queued during that
+    backlog then fires in a burst the instant it clears — collapsing the
+    intended real-time render-settle grace into milliseconds and making a
+    paste that was simply still painting under CPU contention look swallowed.
+    If the probe reports the heartbeat went stale recently, the decision is
+    DEFERRED (one more grace wait, budget unconsumed) instead of concluded —
+    bounded so a stuck probe can't wedge the chain forever.
+
     ``on_resend`` / ``on_repaste`` (optional) are invoked with the
     remaining-attempt count each time the respective recovery fires, so the
-    caller can log/observe it.
+    caller can log/observe it. ``on_settled`` (optional) fires exactly once,
+    with no args, when the chain stops trying — submitted, gave up, or the
+    pane was torn down — so a caller can serialise further writes to the same
+    session until this one is no longer in flight (#133).
     """
+
+    def _settled() -> None:
+        if on_settled is not None:
+            on_settled()
 
     # Output-timestamp baseline captured the instant we begin verifying (the
     # caller has just written the paste). Output that arrives AFTER this proves
@@ -267,11 +303,28 @@ def _delayed_enter_verified(
 
     def _send_then_verify(remaining: int, busy_remaining: int) -> None:
         if pane.session is not session:
+            _settled()
             return
         pane.session.write(b"\r")
 
-        def _verify(render_waits: int = _RENDER_WAIT_MAX) -> None:
+        def _verify(
+            render_waits: int = _RENDER_WAIT_MAX, stall_grace: int = _STALL_DEFER_MAX
+        ) -> None:
             if pane.session is not session:
+                _settled()
+                return
+            # #133: a decision made the instant a Qt backlog clears is exactly
+            # what corrupted the composer — defer instead of trusting it. Costs
+            # nothing when nothing was swallowed; bounded so a permanently-stale
+            # probe can't wedge the chain. Does not touch render_waits/remaining
+            # so it never eats into either resend budget.
+            if stall_grace > 0 and _orch_attr("_main_thread_heartbeat_age", lambda: 0.0)() > (
+                _STALL_DEFER_AGE_S
+            ):
+                QTimer.singleShot(
+                    _SUBMIT_VERIFY_GRACE_MS,
+                    lambda: _verify(render_waits, stall_grace - 1),
+                )
                 return
             # Submit landed → pane is busy → is_at_ready_prompt() is False → stop.
             # But "not ready" is ambiguous: it's ALSO what a busy marker
@@ -299,11 +352,14 @@ def _delayed_enter_verified(
                     if on_resend is not None:
                         on_resend(busy_remaining)
                     _send_then_verify(remaining, busy_remaining - 1)
+                    return
+                _settled()
                 return
             # Ready-prompt reached. The swallow/repaste recovery below is the
             # aggressive path (risks duplicate pastes), so it stays on the small
             # bounded swallow budget — exhaust it and stop.
             if remaining <= 0:
+                _settled()
                 return
             # Still ready → submit didn't land. If we have the payload and the
             # input box is empty, the PASTE may have been swallowed (#26) — but
@@ -341,7 +397,10 @@ def _delayed_enter_verified(
                 # were dropped (repasting into a slow-rendering box is what
                 # stacked 4× [Pasted text]).
                 if render_waits > 0 and session.seconds_since_output() < _RENDER_ACTIVE_S:
-                    QTimer.singleShot(_SUBMIT_VERIFY_GRACE_MS, lambda: _verify(render_waits - 1))
+                    QTimer.singleShot(
+                        _SUBMIT_VERIFY_GRACE_MS,
+                        lambda: _verify(render_waits - 1, stall_grace),
+                    )
                     return
                 # Silent through the grace window → genuine swallow (#26):
                 # re-paste, then submit once it renders. Re-baseline so the next
@@ -1146,6 +1205,19 @@ class LeadInboxMixin:
             getattr(self, "_lead_notify_retry", {}).pop(project_ns, None)
             return
 
+        # #133: a previous item's self-heal submit-verify chain is still
+        # deciding whether ITS write landed. Writing a second item now — even
+        # though is_at_ready_prompt() may already read True again — is exactly
+        # what raced two independent chains into the same Lead composer
+        # (events.log: duplicate `remaining: 3` lead_notify_repaste entries
+        # proved two chains, not one bursty one). Wait for on_settled instead
+        # of trusting the ready-prompt read alone. Not counted against the
+        # busy-retry cap — that budget is for a genuinely wedged Lead, a
+        # different condition from "our own last write hasn't resolved yet".
+        if project_ns in getattr(self, "_lead_notify_verify_active", set()):
+            QTimer.singleShot(400, lambda: self._pump_lead_notify(project_ns))
+            return
+
         lead = self._project_panes(project_ns).get(LEAD.name)
         if not (lead and lead.session and lead.session.is_alive):
             # Lead died — move remaining items to the durable queue.
@@ -1253,6 +1325,16 @@ class LeadInboxMixin:
         # Write succeeded — now it is safe to dequeue.
         queue.popleft()
         delay = _enter_delay_ms(payload)
+        # #133: mark the chain in flight BEFORE scheduling it so no other
+        # writer (a re-entrant pump, _force_deliver_done_notices) can slip a
+        # write in first. on_settled is the only place this clears.
+        if not hasattr(self, "_lead_notify_verify_active"):
+            self._lead_notify_verify_active = set()
+        self._lead_notify_verify_active.add(project_ns)
+
+        def _on_verify_settled(p=project_ns) -> None:
+            getattr(self, "_lead_notify_verify_active", set()).discard(p)
+
         # Self-healing submit: a done-report whose Enter is swallowed mid-paste-
         # render leaves Lead idle with the report unsubmitted — it "won't run on"
         # (issue #22 residual). Verify the submit landed and resend if not.
@@ -1268,6 +1350,7 @@ class LeadInboxMixin:
             on_repaste=lambda rem: _log_event(
                 "lead_notify_repaste", project=project_ns, remaining=rem
             ),
+            on_settled=_on_verify_settled,
         )
         self.leadInjected.emit(body)
 
@@ -1399,6 +1482,11 @@ class LeadInboxMixin:
         pending = getattr(self, "_pending_done_notices", {}).get(project_ns)
         if not pending:
             return
+        # #133: never write into Lead's composer while _pump_lead_notify's own
+        # chain is still verifying an earlier write — same guard, same shared
+        # set, so the two writers can't race each other either.
+        if project_ns in getattr(self, "_lead_notify_verify_active", set()):
+            return
         lead = self._project_panes(project_ns).get(LEAD.name)
         if not (lead and lead.session and lead.session.is_alive):
             return
@@ -1425,6 +1513,13 @@ class LeadInboxMixin:
         self._pending_done_notices.pop(project_ns, None)
         self._save_pending_done_notices(project_ns)
         delay = _enter_delay_ms(payload)
+        if not hasattr(self, "_lead_notify_verify_active"):
+            self._lead_notify_verify_active = set()
+        self._lead_notify_verify_active.add(project_ns)
+
+        def _on_verify_settled(p=project_ns) -> None:
+            getattr(self, "_lead_notify_verify_active", set()).discard(p)
+
         _orch_attr("_delayed_enter_verified", _delayed_enter_verified)(
             lead,
             sess,
@@ -1437,5 +1532,6 @@ class LeadInboxMixin:
             on_repaste=lambda rem: _log_event(
                 "done_notice_force_repaste", project=project_ns, remaining=rem
             ),
+            on_settled=_on_verify_settled,
         )
         self.leadInjected.emit(body)

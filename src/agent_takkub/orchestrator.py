@@ -257,6 +257,39 @@ STALL_THRESHOLD_SEC = int(os.environ.get("TAKKUB_STALL_THRESHOLD_SEC", "300"))
 # unbounded wait. Overrideable via env for slower CI/hardware.
 BUSY_WAIT_CEILING_SEC = int(os.environ.get("TAKKUB_BUSY_WAIT_CEILING_SEC", "1800"))
 
+
+# Live probe for Qt main-thread heartbeat staleness (#133 — fan-out delivery
+# corruption: concurrent pane spawns backlog the Qt event loop for ~1s at a
+# time, so a batch of already-scheduled submit-verify timers fires in a burst
+# the instant the backlog clears; the self-heal in lead_inbox mistook that
+# burst for real swallowed-paste/CR evidence and repasted on top of a paste
+# that was simply still rendering — proven via events.log: duplicate
+# `remaining: 3` values on concurrent lead_notify_repaste entries, timestamped
+# right after main_thread_stall episodes). Registered once by app.py's
+# watchdog setup (`set_main_thread_heartbeat_probe`); read by
+# lead_inbox._delayed_enter_verified via `_orch_attr` so the verify loop can
+# defer a swallow verdict instead of concluding one — without lead_inbox
+# importing app (forbidden by the lead-inbox-layer contract). Defaults to
+# "never stale" so headless/test runs (no watchdog registered) keep the
+# pre-#133 behaviour exactly.
+def _no_heartbeat_probe() -> float:
+    return 0.0
+
+
+_main_thread_heartbeat_age = _no_heartbeat_probe
+
+
+def set_main_thread_heartbeat_probe(probe) -> None:
+    """Register the live Qt-main-thread heartbeat-staleness probe.
+
+    *probe* takes no args and returns seconds since the main thread last
+    proved itself alive (0.0 = fine). Called once from app.py's watchdog
+    startup; tests may call it directly to simulate a stall window.
+    """
+    global _main_thread_heartbeat_age
+    _main_thread_heartbeat_age = probe
+
+
 # When `_LAST_SESSION_FILE` is newer than this and teammates are alive,
 # the current Lead boot is treated as post-compact so a status snapshot
 # is auto-injected into the Lead prompt.
@@ -651,6 +684,15 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         self._lead_notify_pumping: set[str] = set()
         # Busy-retry counter per project_ns; reset on delivery or Lead-dies path.
         self._lead_notify_retry: dict[str, int] = {}
+        # #133: project_ns currently has an in-flight _delayed_enter_verified
+        # submit-verify chain writing to the Lead session. Both
+        # _pump_lead_notify (next queued item) and _force_deliver_done_notices
+        # (staleness escalation) check this before writing so two chains can
+        # never race into the same Lead composer at once — the proven cause of
+        # the fan-out corruption (events.log showed duplicate
+        # `remaining: 3` lead_notify_repaste entries, meaning two independent
+        # chains, not one bursty one). Cleared by the chain's on_settled.
+        self._lead_notify_verify_active: set[str] = set()
         # Shard fan-out groups: keyed f"{project_ns}::{base_role}".
         # Created on first shard assign, closed when all N shards report.
         self._shard_groups: dict[str, ShardGroup] = {}

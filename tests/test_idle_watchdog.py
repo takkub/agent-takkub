@@ -688,6 +688,13 @@ class TestTtyBlockIdleWatchdog:
         clock[0] += TTY_BLOCK_SURFACE_AFTER_S + 1
         orch._check_idle_teammates()  # first surface
         assert lead.session.write.call_count == 1
+        # #133: the first surface starts a self-heal submit-verify chain that
+        # this test's fully no-op'd QTimer never lets run, so it never settles
+        # on its own. In real Qt it would settle in well under a second — far
+        # inside the 3-minute cooldown this test is about — so clear it here
+        # to model that, rather than the unrelated #133 guard blocking a
+        # cooldown-gated resurface it was never meant to affect.
+        orch._lead_notify_verify_active.clear()
 
         # Still inside cooldown — should not re-surface.
         clock[0] += TTY_BLOCK_SURFACE_COOLDOWN_S - 1

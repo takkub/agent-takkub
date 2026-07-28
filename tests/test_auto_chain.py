@@ -38,6 +38,26 @@ def qapp() -> QCoreApplication:
     return app
 
 
+@pytest.fixture(autouse=True)
+def _stub_verify_chain(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#133: these tests assert on WHAT gets written to Lead (a done-notice
+    immediately followed by an auto-chain handoff), not on the self-heal
+    submit-verify chain's timing. Fully QTimer-free tests never let the
+    done-notice's chain settle, so the #133 serialisation guard
+    (_lead_notify_verify_active) would otherwise hold and silently defer the
+    handoff write these tests expect to see in the same call. Stub the chain
+    to settle immediately (call on_settled synchronously) instead of no-op'ing
+    it outright — a no-op stub never clears the guard either, since it's
+    on_settled that clears it."""
+
+    def _fake_verified(*_args, **kwargs):
+        on_settled = kwargs.get("on_settled")
+        if on_settled is not None:
+            on_settled()
+
+    monkeypatch.setattr(orch_mod, "_delayed_enter_verified", _fake_verified)
+
+
 @pytest.fixture
 def two_project_json(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> pathlib.Path:
     """projects.json with two independent projects."""

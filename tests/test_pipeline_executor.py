@@ -54,6 +54,26 @@ def _inline_pipeline_defer(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(Orchestrator, "_defer", lambda _self, _delay, fn: fn())
 
 
+@pytest.fixture(autouse=True)
+def _stub_verify_chain(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#133: these tests assert on WHAT gets written to Lead (content/order
+    across a hop-completion + a following notice), not on the self-heal
+    submit-verify chain's timing. Fully QTimer-free tests never let a prior
+    write's chain settle, so the #133 serialisation guard
+    (_lead_notify_verify_active) would otherwise hold and silently defer the
+    very next Lead write these tests expect to see immediately. Stub the
+    chain to settle immediately (call on_settled synchronously) instead of
+    no-op'ing it outright — a no-op stub never clears the guard either, since
+    it's on_settled that clears it."""
+
+    def _fake_verified(*_args, **kwargs):
+        on_settled = kwargs.get("on_settled")
+        if on_settled is not None:
+            on_settled()
+
+    monkeypatch.setattr(orch_mod, "_delayed_enter_verified", _fake_verified)
+
+
 @pytest.fixture
 def two_project_json(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> pathlib.Path:
     pj = tmp_path / "projects.json"
