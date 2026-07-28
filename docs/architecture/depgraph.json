@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 133,
+  "module_count": 134,
   "modules": [
     {
       "module": "agent_takkub",
@@ -54,6 +54,7 @@
         "agent_takkub.codex_helper",
         "agent_takkub.doctor",
         "agent_takkub.gemini_helper",
+        "agent_takkub.git_status",
         "agent_takkub.plugin_installer",
         "agent_takkub.project_rules",
         "agent_takkub.provider_install",
@@ -64,7 +65,7 @@
         "agent_takkub.update_panel",
         "agent_takkub.verify"
       ],
-      "fan_in": 13,
+      "fan_in": 14,
       "fan_out": 0
     },
     {
@@ -315,6 +316,7 @@
         "agent_takkub.disk_usage",
         "agent_takkub.doctor",
         "agent_takkub.exec_mode",
+        "agent_takkub.git_status",
         "agent_takkub.headless",
         "agent_takkub.headless_window",
         "agent_takkub.hook_wiring",
@@ -371,7 +373,7 @@
         "agent_takkub.vault_mirror",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 68,
+      "fan_in": 69,
       "fan_out": 0
     },
     {
@@ -470,6 +472,16 @@
       ],
       "fan_in": 2,
       "fan_out": 1
+    },
+    {
+      "module": "agent_takkub.git_status",
+      "imports": [
+        "agent_takkub._win_console",
+        "agent_takkub.config"
+      ],
+      "imported_by": [],
+      "fan_in": 0,
+      "fan_out": 2
     },
     {
       "module": "agent_takkub.headless",
