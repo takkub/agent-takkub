@@ -47,6 +47,7 @@ from .config import (
     load_projects,
 )
 from .pane_tools_policy import effective_plugins
+from .plugin_installer import normalize_plugin_hook_timeout
 from .user_profile import config_dir_for
 from .vault_mirror import _is_junk_note
 
@@ -742,6 +743,17 @@ def _default_plugin_dirs(role: str | None = None, project: str | None = None) ->
             versions = sorted((v for v in plugin.iterdir() if v.is_dir()), reverse=True)
             for v in versions:
                 if (v / ".claude-plugin" / "plugin.json").exists():
+                    try:
+                        raised = normalize_plugin_hook_timeout(v)
+                    except Exception:  # pragma: no cover - defensive, best-effort
+                        raised = []
+                    if raised:
+                        _log_event(
+                            "plugin_hook_timeout_raised",
+                            plugin=plugin.name,
+                            marketplace=marketplace,
+                            changes=raised,
+                        )
                     out.append(str(v))
                     break
     return out

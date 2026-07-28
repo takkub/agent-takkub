@@ -8,6 +8,7 @@ parser; the network call itself is not unit-tested.
 
 from __future__ import annotations
 
+import json
 import stat
 from unittest.mock import patch
 
@@ -273,6 +274,148 @@ def test_claude_env_preserves_existing_config_dir_override(monkeypatch, tmp_path
     ):
         env = pi._claude_env()
     assert env["CLAUDE_CONFIG_DIR"] == "/profile/override"
+
+
+# ---------------------------------------------------------------------------
+# normalize_plugin_hook_timeout — #135 (plugin hook timeout too low for
+# multi-pane fan-out spawn load)
+# ---------------------------------------------------------------------------
+
+
+def _write_manifest(plugin_dir, payload: dict) -> None:
+    d = plugin_dir / ".claude-plugin"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "plugin.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_normalize_raises_low_timeout_to_floor(tmp_path):
+    plugin_dir = tmp_path / "pordee" / "pordee" / "abc123"
+    _write_manifest(
+        plugin_dir,
+        {
+            "name": "pordee",
+            "hooks": {
+                "SessionStart": [{"hooks": [{"type": "command", "command": "x", "timeout": 5}]}],
+                "UserPromptSubmit": [
+                    {"hooks": [{"type": "command", "command": "y", "timeout": 5}]}
+                ],
+            },
+        },
+    )
+
+    changes = pi.normalize_plugin_hook_timeout(plugin_dir, floor=30)
+
+    assert len(changes) == 2
+    assert {c["event"] for c in changes} == {"SessionStart", "UserPromptSubmit"}
+    assert all(c["old"] == 5 and c["new"] == 30 for c in changes)
+    manifest = json.loads((plugin_dir / ".claude-plugin" / "plugin.json").read_text("utf-8"))
+    assert manifest["hooks"]["SessionStart"][0]["hooks"][0]["timeout"] == 30
+    assert manifest["hooks"]["UserPromptSubmit"][0]["hooks"][0]["timeout"] == 30
+
+
+def test_normalize_leaves_timeout_at_or_above_floor_untouched(tmp_path):
+    plugin_dir = tmp_path / "mp" / "plug" / "1.0.0"
+    _write_manifest(
+        plugin_dir,
+        {"hooks": {"SessionStart": [{"hooks": [{"type": "command", "timeout": 60}]}]}},
+    )
+    before = (plugin_dir / ".claude-plugin" / "plugin.json").read_text("utf-8")
+
+    changes = pi.normalize_plugin_hook_timeout(plugin_dir, floor=30)
+
+    assert changes == []
+    assert (plugin_dir / ".claude-plugin" / "plugin.json").read_text("utf-8") == before
+
+
+def test_normalize_never_invents_a_missing_timeout_key(tmp_path):
+    plugin_dir = tmp_path / "mp" / "plug" / "1.0.0"
+    _write_manifest(
+        plugin_dir,
+        {"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "x"}]}]}},
+    )
+
+    changes = pi.normalize_plugin_hook_timeout(plugin_dir, floor=30)
+
+    assert changes == []
+    manifest = json.loads((plugin_dir / ".claude-plugin" / "plugin.json").read_text("utf-8"))
+    assert "timeout" not in manifest["hooks"]["SessionStart"][0]["hooks"][0]
+
+
+def test_normalize_swallows_unreadable_manifest(tmp_path):
+    plugin_dir = tmp_path / "mp" / "plug" / "1.0.0"
+    d = plugin_dir / ".claude-plugin"
+    d.mkdir(parents=True)
+    (d / "plugin.json").write_text("{not valid json", encoding="utf-8")
+
+    changes = pi.normalize_plugin_hook_timeout(plugin_dir, floor=30)
+
+    assert changes == []
+
+
+def test_normalize_no_manifest_at_all_is_a_noop(tmp_path):
+    plugin_dir = tmp_path / "mp" / "plug" / "1.0.0"
+    plugin_dir.mkdir(parents=True)
+
+    assert pi.normalize_plugin_hook_timeout(plugin_dir, floor=30) == []
+
+
+def test_normalize_is_idempotent_second_call_does_not_rewrite(tmp_path, monkeypatch):
+    import pathlib
+
+    plugin_dir = tmp_path / "pordee" / "pordee" / "abc123"
+    _write_manifest(
+        plugin_dir,
+        {"hooks": {"SessionStart": [{"hooks": [{"type": "command", "timeout": 5}]}]}},
+    )
+
+    first = pi.normalize_plugin_hook_timeout(plugin_dir, floor=30)
+    assert len(first) == 1
+
+    write_calls: list = []
+    real_write_text = pathlib.Path.write_text
+
+    def spy_write_text(self, *args, **kwargs):
+        write_calls.append(self)
+        return real_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "write_text", spy_write_text)
+
+    second = pi.normalize_plugin_hook_timeout(plugin_dir, floor=30)
+
+    assert second == []
+    assert write_calls == []  # no tmp-file write attempted on the no-op pass
+
+
+def test_normalize_uses_hooks_json_convention_file(tmp_path):
+    # Some plugins (superpowers, remember, security-guidance) declare hooks
+    # via hooks/hooks.json instead of inline in plugin.json.
+    plugin_dir = tmp_path / "mp" / "plug" / "1.0.0"
+    (plugin_dir / ".claude-plugin").mkdir(parents=True)
+    (plugin_dir / ".claude-plugin" / "plugin.json").write_text(
+        json.dumps({"name": "plug"}), encoding="utf-8"
+    )
+    hooks_dir = plugin_dir / "hooks"
+    hooks_dir.mkdir()
+    (hooks_dir / "hooks.json").write_text(
+        json.dumps({"hooks": {"SessionStart": [{"hooks": [{"type": "command", "timeout": 5}]}]}}),
+        encoding="utf-8",
+    )
+
+    changes = pi.normalize_plugin_hook_timeout(plugin_dir, floor=30)
+
+    assert len(changes) == 1
+    manifest = json.loads((hooks_dir / "hooks.json").read_text("utf-8"))
+    assert manifest["hooks"]["SessionStart"][0]["hooks"][0]["timeout"] == 30
+
+
+def test_plugin_hook_timeout_floor_env_override(monkeypatch):
+    monkeypatch.setenv("TAKKUB_PLUGIN_HOOK_TIMEOUT_FLOOR", "45")
+    assert pi._plugin_hook_timeout_floor() == 45
+
+
+def test_plugin_hook_timeout_floor_default_on_bad_env(monkeypatch):
+    monkeypatch.setenv("TAKKUB_PLUGIN_HOOK_TIMEOUT_FLOOR", "not-a-number")
+    assert pi._plugin_hook_timeout_floor() == pi.PLUGIN_HOOK_TIMEOUT_FLOOR_DEFAULT
 
 
 def test_claude_passes_env_to_subprocess_run(monkeypatch, tmp_path):
