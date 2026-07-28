@@ -19,7 +19,7 @@ color) so the same project shows the same avatar tint in both places.
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QSize, Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtCore import QObject, QRunnable, QSize, Qt, QThreadPool, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QColor, QDesktopServices, QFontMetrics, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QHBoxLayout,
@@ -29,6 +29,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QStyledItemDelegate,
     QStyleOptionViewItem,
+    QTabWidget,
     QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
@@ -37,7 +38,6 @@ from PyQt6.QtWidgets import (
 )
 
 from . import cockpit_theme, task_ledger
-from .config import list_project_names
 from .project_nav import _avatar_color, _initials
 from .token_meter import usage_color
 
@@ -151,6 +151,53 @@ QTreeWidget#taskTree::branch {{
 #taskRail {{
     background: transparent;
 }}
+QTabWidget#taskDockTabs::pane {{
+    border: none;
+    background: {cockpit_theme.GROUND_SIDEBAR};
+}}
+QTabWidget#taskDockTabs QTabBar {{
+    background: {cockpit_theme.GROUND_SIDEBAR};
+    qproperty-drawBase: 0;
+}}
+QTabWidget#taskDockTabs QTabBar::tab {{
+    background: transparent;
+    color: {cockpit_theme.TEXT_MUTED};
+    padding: 6px 10px;
+    margin: 0;
+    border: none;
+    border-bottom: 2px solid transparent;
+    font-size: 11px;
+}}
+QTabWidget#taskDockTabs QTabBar::tab:hover {{
+    color: {cockpit_theme.TEXT_SECONDARY};
+    background: {cockpit_theme.GROUND_PANEL};
+}}
+QTabWidget#taskDockTabs QTabBar::tab:selected {{
+    color: {cockpit_theme.TEXT_PRIMARY};
+    border-bottom: 2px solid {cockpit_theme.ACCENT_GOLD};
+    background: {cockpit_theme.GROUND_PANEL};
+}}
+QTreeWidget#gitStatusTree {{
+    background: {cockpit_theme.GROUND_SIDEBAR};
+    color: {cockpit_theme.TEXT_SECONDARY};
+    border: 1px solid {cockpit_theme.BORDER_STRONG};
+    border-radius: {cockpit_theme.RADIUS_SM}px;
+    outline: 0;
+    padding: 4px;
+}}
+QTreeWidget#gitStatusTree::item {{
+    border-radius: {cockpit_theme.RADIUS_SM}px;
+    padding: 3px 2px;
+    margin: 1px 0;
+}}
+QTreeWidget#gitStatusTree::item:hover {{
+    background: {cockpit_theme.GROUND_PANEL};
+}}
+QTreeWidget#gitStatusTree::branch {{
+    background: transparent;
+    border-image: none;
+    image: none;
+}}
 """
 
 
@@ -262,6 +309,82 @@ def feature_emoji(feature: dict) -> str:
     return "⏳"  # ⏳
 
 
+# ──────────────────────────────────────────────────────────────
+# 🌿 Git tab pure helpers — no Qt import, so they're unit-testable without a
+# QApplication. Operate on `git_status.RepoStatus`/`Commit`/`Worktree`
+# (attribute access, not dict) but are duck-typed against any object with the
+# same attributes so tests don't need the real dataclasses.
+# ──────────────────────────────────────────────────────────────
+def repo_state_color(repo) -> str:
+    """Badge color for a repo's header row: an unreadable repo (`error` set)
+    is faint gray (not red — it's a read failure, not a git state to fix),
+    any dirty/untracked file is warn-amber, ahead-of-upstream-only is the
+    gold accent, and a clean, up-to-date repo is plain muted text."""
+    if getattr(repo, "error", None):
+        return cockpit_theme.TEXT_FAINT
+    if repo.staged or repo.modified or repo.untracked:
+        return cockpit_theme.STATE_WARN_BRIGHT
+    if repo.ahead:
+        return cockpit_theme.ACCENT_GOLD
+    return cockpit_theme.TEXT_MUTED
+
+
+def repo_status_summary(repo) -> str:
+    """`<branch>  ↑<ahead> ↓<behind>  ●<dirty> +<untracked>` (or `clean`
+    when nothing is outstanding) — the repo's `error` message stands in for
+    the whole summary when the repo couldn't be read."""
+    if getattr(repo, "error", None):
+        return str(repo.error)
+    parts = [repo.branch or "?"]
+    if repo.upstream:
+        parts.append(f"↑{repo.ahead} ↓{repo.behind}")
+    dirty = repo.staged + repo.modified
+    if dirty or repo.untracked:
+        bits = []
+        if dirty:
+            bits.append(f"●{dirty}")
+        if repo.untracked:
+            bits.append(f"+{repo.untracked}")
+        parts.append(" ".join(bits))
+    else:
+        parts.append("clean")
+    return "  ".join(parts)
+
+
+def repo_header_label(repo) -> str:
+    """`🌿 <key>   <status summary>` — a repo's top-level tree row text."""
+    return f"\U0001f33f {repo.key}   {repo_status_summary(repo)}"
+
+
+def commit_row_label(commit) -> str:
+    """`·  <short sha>  <subject>   <rel time>` — a commit child-row's text."""
+    sha = (commit.sha or "")[:7]
+    return f"·  {sha}  {commit.subject}   {commit.rel_time}"
+
+
+def commit_tooltip(commit) -> str:
+    """Full subject + author — the short row label elides neither, but a
+    long subject can still exceed the dock's width, so the tooltip repeats
+    it in full alongside the author."""
+    return f"{commit.subject}\n{commit.author}"
+
+
+def worktree_row_label(wt) -> str:
+    """`<branch>  ↑<commits ahead> dirty` — a worktree child-row's text,
+    omitting the ahead/dirty suffix entirely when there's nothing to flag."""
+    bits = []
+    if wt.commits_ahead:
+        bits.append(f"↑{wt.commits_ahead}")
+    if wt.dirty:
+        bits.append("dirty")
+    suffix = f"  {' '.join(bits)}" if bits else ""
+    return f"{wt.branch}{suffix}"
+
+
+def worktree_color(wt) -> str:
+    return cockpit_theme.STATE_WARN_BRIGHT if wt.dirty else cockpit_theme.TEXT_MUTED
+
+
 def _hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
     h = hex_color.lstrip("#")
     return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
@@ -295,18 +418,218 @@ def _row_status_icon(glyph: str, color: str) -> QIcon:
     return QIcon(pix)
 
 
+class _GitStatusSignals(QObject):
+    """`QRunnable` isn't a `QObject` (no signals of its own) — this small
+    helper is what actually carries a worker's result back onto the GUI
+    thread; Qt auto-queues the connection since emit happens off-thread."""
+
+    finished = pyqtSignal(str, list)
+    failed = pyqtSignal(str, str)
+
+
+class _GitStatusWorker(QRunnable):
+    """Runs `git_status.collect()` off the GUI thread — per-repo `git log`/
+    `git status`/worktree subprocess calls are slow enough to stall the UI if
+    run inline (main-thread stall is a proven bug class in this codebase).
+    Imports `git_status` lazily so this module doesn't hard-fail to import
+    if that module isn't present yet.
+    """
+
+    def __init__(self, project: str, signals: _GitStatusSignals) -> None:
+        super().__init__()
+        self._project = project
+        self._signals = signals
+
+    def run(self) -> None:
+        try:
+            from . import git_status
+        except ImportError as exc:
+            self._signals.failed.emit(self._project, f"git_status module ไม่พร้อมใช้งาน ({exc})")
+            return
+        try:
+            repos = git_status.collect(self._project)
+        except Exception as exc:
+            self._signals.failed.emit(self._project, str(exc))
+            return
+        self._signals.finished.emit(self._project, repos)
+
+
+_GIT_PLACEHOLDER = "เลือกโปรเจคเพื่อดู git status"
+_GIT_LOADING = "กำลังอ่าน git…"
+_GIT_POLL_MS = 30_000
+
+
+class GitStatusView(QWidget):
+    """🌿 Git tab body: one tree row per repo (branch/ahead-behind/dirty
+    badge), expanding to recent commits + `wt/*` worktrees underneath.
+
+    Refresh is event-driven, never a background poll while unattended: it
+    fires on project switch, on tab-select (`set_active(True)`), on the ↻
+    button, and — only while both the dock is open *and* this tab is the one
+    on screen — every 30s via an internal `QTimer` that `set_active(False)`
+    stops.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._project: str | None = None
+        self._busy = False
+        self._pending = False
+        self._live_signals: _GitStatusSignals | None = None
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 4, 0, 0)
+        root.setSpacing(4)
+
+        header = QHBoxLayout()
+        header.addStretch(1)
+        self._refresh_btn = QToolButton()
+        self._refresh_btn.setText("↻")
+        self._refresh_btn.setToolTip("รีเฟรช git status")
+        self._refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._refresh_btn.setAutoRaise(True)
+        self._refresh_btn.setStyleSheet(
+            f"QToolButton {{ color: {cockpit_theme.TEXT_MUTED}; background: transparent;"
+            f" border: none; font-size: 13px; }}"
+            f"QToolButton:hover {{ color: {cockpit_theme.TEXT_SECONDARY}; }}"
+        )
+        self._refresh_btn.clicked.connect(self.refresh)
+        header.addWidget(self._refresh_btn)
+        root.addLayout(header)
+
+        self._tree = QTreeWidget()
+        self._tree.setObjectName("gitStatusTree")
+        self._tree.setHeaderHidden(True)
+        self._tree.setIndentation(16)
+        self._tree.setTextElideMode(Qt.TextElideMode.ElideNone)
+        self._tree.setWordWrap(True)
+        self._tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._tree.setUniformRowHeights(False)
+        self._tree.setItemDelegate(_WrapItemDelegate(self._tree))
+        header_view = self._tree.header()
+        header_view.setStretchLastSection(True)
+        header_view.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        root.addWidget(self._tree, 1)
+
+        self._set_placeholder(_GIT_PLACEHOLDER)
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(_GIT_POLL_MS)
+        self._timer.timeout.connect(self.refresh)
+
+    # ──────────────────────────────────────────────────────────────
+    def set_project(self, project: str | None) -> None:
+        if project == self._project:
+            return
+        self._project = project
+        if project is None:
+            self._timer.stop()
+            self._set_placeholder(_GIT_PLACEHOLDER)
+            return
+        self.refresh()
+
+    def set_active(self, active: bool) -> None:
+        """Start/stop the 30s poll — only while the dock is open and this is
+        the tab actually on screen; never poll in the background."""
+        if active and self._project is not None:
+            if not self._timer.isActive():
+                self._timer.start()
+            self.refresh()
+        else:
+            self._timer.stop()
+
+    # ──────────────────────────────────────────────────────────────
+    def refresh(self) -> None:
+        if self._project is None:
+            return
+        if self._busy:
+            # A refresh is already in flight — queue exactly one follow-up
+            # instead of piling up parallel git subprocess calls.
+            self._pending = True
+            return
+        self._busy = True
+        self._set_placeholder(_GIT_LOADING)
+        signals = _GitStatusSignals()
+        signals.finished.connect(self._on_finished)
+        signals.failed.connect(self._on_failed)
+        self._live_signals = signals  # keep alive until the callback fires
+        QThreadPool.globalInstance().start(_GitStatusWorker(self._project, signals))
+
+    def _on_finished(self, project: str, repos: list) -> None:
+        self._busy = False
+        if project == self._project:
+            self._render(repos)
+        self._maybe_run_pending()
+
+    def _on_failed(self, project: str, message: str) -> None:
+        self._busy = False
+        if project == self._project:
+            self._set_placeholder(f"⚠ อ่าน git ไม่สำเร็จ: {message}", error=True)
+        self._maybe_run_pending()
+
+    def _maybe_run_pending(self) -> None:
+        if self._pending:
+            self._pending = False
+            self.refresh()
+
+    # ──────────────────────────────────────────────────────────────
+    def _set_placeholder(self, text: str, error: bool = False) -> None:
+        self._tree.clear()
+        item = QTreeWidgetItem([text])
+        color = cockpit_theme.STATE_ERROR if error else cockpit_theme.TEXT_FAINT
+        item.setForeground(0, QColor(color))
+        self._tree.addTopLevelItem(item)
+
+    def _render(self, repos: list) -> None:
+        self._tree.clear()
+        if not repos:
+            self._set_placeholder("ไม่มี git repo ในโปรเจคนี้")
+            return
+        for repo in repos:
+            top = QTreeWidgetItem([repo_header_label(repo)])
+            top.setForeground(0, QColor(repo_state_color(repo)))
+            self._tree.addTopLevelItem(top)
+            if getattr(repo, "error", None):
+                continue
+            for commit in getattr(repo, "commits", None) or []:
+                citem = QTreeWidgetItem([commit_row_label(commit)])
+                citem.setForeground(0, QColor(cockpit_theme.TEXT_MUTED))
+                citem.setToolTip(0, commit_tooltip(commit))
+                top.addChild(citem)
+            worktrees = getattr(repo, "worktrees", None) or []
+            if worktrees:
+                wt_group = QTreeWidgetItem([f"🔀 worktrees ({len(worktrees)})"])
+                wt_group.setForeground(0, QColor(cockpit_theme.TEXT_MUTED))
+                top.addChild(wt_group)
+                for wt in worktrees:
+                    witem = QTreeWidgetItem([worktree_row_label(wt)])
+                    witem.setForeground(0, QColor(worktree_color(wt)))
+                    wt_group.addChild(witem)
+            top.setExpanded(True)
+        self._tree.updateGeometries()
+        self._tree.scheduleDelayedItemsLayout()
+
+
 class TaskDockWidget(QWidget):
-    """Right-dock panel body: a QTreeWidget of every open project's ledger."""
+    """Right-dock panel body: 📋 Tasks (a QTreeWidget of the active project's
+    ledger) and 🌿 Git (per-repo status) as two tabs."""
 
     # Emitted after a collapse/expand toggle so main_window can animate the
     # containing QDockWidget's width in lockstep (this widget only controls
     # its own internal layout, not the dock's outer size).
     collapseToggled = pyqtSignal(bool)
 
+    _GIT_TAB_INDEX = 1
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("taskDockRoot")
         self.setStyleSheet(_DOCK_QSS)
+
+        # The dock only ever shows one project's ledger — the active tab's
+        # (set via `set_project`), not every open project mixed together.
+        # `None` until main_window wires it up on boot/tab-switch.
+        self._project: str | None = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(6, 4, 6, 6)
@@ -315,6 +638,13 @@ class TaskDockWidget(QWidget):
         self._title = QLabel("Task List")
         self._title.setObjectName("taskDockHeader")
         root.addWidget(self._title)
+
+        self._tabs = QTabWidget()
+        self._tabs.setObjectName("taskDockTabs")
+        # currentChanged connects only after both tabs (and `_git_view`) exist
+        # below — QTabWidget fires it the moment the first tab lands (index
+        # -1 → 0), and the slot reads `self._git_view`.
+        root.addWidget(self._tabs, 1)
 
         self._tree = QTreeWidget()
         self._tree.setObjectName("taskTree")
@@ -342,7 +672,11 @@ class TaskDockWidget(QWidget):
         # the column got narrower/wider — force the cache to drop on every
         # resize so wrapped rows don't overlap the row below them.
         header.sectionResized.connect(lambda *_a: self._tree.updateGeometries())
-        root.addWidget(self._tree, 1)
+        self._tabs.addTab(self._tree, "📋 Tasks")
+
+        self._git_view = GitStatusView()
+        self._tabs.addTab(self._git_view, "🌿 Git")
+        self._tabs.currentChanged.connect(self._on_tab_changed)
 
         # Collapsed-rail body: one avatar per open project, stacked vertically
         # (mirrors project_nav's collapsed sidebar). Hidden until collapsed.
@@ -384,6 +718,21 @@ class TaskDockWidget(QWidget):
         self.refresh_all()
 
     # ──────────────────────────────────────────────────────────────
+    # 🌿 Git tab lifecycle — active only while the dock is visible AND the
+    # Git tab is the one on screen (never poll git in the background).
+    # ──────────────────────────────────────────────────────────────
+    def _on_tab_changed(self, index: int) -> None:
+        self._git_view.set_active(index == self._GIT_TAB_INDEX and self.isVisible())
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._git_view.set_active(self._tabs.currentIndex() == self._GIT_TAB_INDEX)
+
+    def hideEvent(self, event) -> None:
+        super().hideEvent(event)
+        self._git_view.set_active(False)
+
+    # ──────────────────────────────────────────────────────────────
     # collapse-to-rail toggle
     # ──────────────────────────────────────────────────────────────
     def toggle_collapsed(self) -> bool:
@@ -399,8 +748,12 @@ class TaskDockWidget(QWidget):
             return
         self._collapsed = collapsed
         self._title.setVisible(not collapsed)
-        self._tree.setVisible(not collapsed)
+        self._tabs.setVisible(not collapsed)
         self._rail.setVisible(collapsed)
+        if collapsed:
+            self._git_view.set_active(False)
+        else:
+            self._git_view.set_active(self._tabs.currentIndex() == self._GIT_TAB_INDEX)
         self._toggle_btn.setText("»" if collapsed else "«  Collapse")
         self._toggle_btn.setToolTip("ขยาย Task List" if collapsed else "ยุบ Task List เป็นแถบ avatar")
         self.collapseToggled.emit(collapsed)
@@ -451,15 +804,44 @@ class TaskDockWidget(QWidget):
             self._restore_expansion(item.child(i))
 
     # ──────────────────────────────────────────────────────────────
-    def refresh_all(self) -> None:
-        """Reload every open project's ledger state and rebuild the tree."""
-        for project in list_project_names():
+    def set_project(self, project: str | None) -> None:
+        """Restrict the dock to *project*'s ledger card only — mirrors the
+        active project tab so the Task List doesn't show every open
+        project's tasks mixed together. Cards for any other project are
+        dropped from the tree/rail; `None` clears the dock (no tabs open)."""
+        if project == self._project:
+            return
+        self._project = project
+        for i in reversed(range(self._tree.topLevelItemCount())):
+            item = self._tree.topLevelItem(i)
+            key = item.data(0, Qt.ItemDataRole.UserRole)
+            if isinstance(key, str) and key.startswith("project:"):
+                other = key[len("project:") :]
+                if other != project:
+                    self._tree.takeTopLevelItem(i)
+                    self._chevron_labels.pop(other, None)
+                    self._remove_rail_avatar(other)
+        if project is not None:
             self.refresh_project(project)
+        self._relayout_tree()
+        self._git_view.set_project(project)
+
+    def refresh_all(self) -> None:
+        """Reload the active project's ledger state and rebuild its card.
+
+        Kept under the old name (used to loop every open project) — the dock
+        only ever shows the active project now (see `set_project`), so this
+        just re-runs `refresh_project` for it."""
+        if self._project is not None:
+            self.refresh_project(self._project)
 
     def refresh_project(self, project: str) -> None:
         """Reload just *project*'s ledger state — the slot `Orchestrator.
         ledgerChanged` connects to, so a single assign/done/fail/close only
-        repaints the one card that actually changed."""
+        repaints the one card that actually changed. Ignored for any project
+        other than the active one (see `set_project`)."""
+        if self._project is not None and project != self._project:
+            return
         state = task_ledger.load_state(project)
         existing = self._find_top_level(f"project:{project}")
         if not has_any_rows(state):

@@ -310,6 +310,7 @@ class MainWindow(
         self._tasks_dock.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea)
         self._configure_tasks_dock_chrome(self._tasks_dock)
         self._tasks_dock_widget = TaskDockWidget()
+        self._tasks_dock_widget.set_project(initial_project)
         self._tasks_dock.setWidget(self._tasks_dock_widget)
         self._tasks_dock.setMinimumWidth(_TASKS_DOCK_EXPANDED_W)
         self._tasks_dock.hide()
@@ -1222,6 +1223,7 @@ class MainWindow(
             # No tabs left (e.g. the last one just closed) — `active` must
             # not keep pointing at a project with no open tab (#102).
             clear_active_project()
+            self._tasks_dock_widget.set_project(None)
             return
         tab = self.tabs.widget(index)
         if not isinstance(tab, ProjectTab):
@@ -1239,6 +1241,7 @@ class MainWindow(
             self._limit_label_host.pane_tabs.setCornerWidget(None, Qt.Corner.TopRightCorner)
         self._limit_label_host = tab
         tab.mount_usage_widget(self._limit_label)
+        self._tasks_dock_widget.set_project(tab.project_name)
         if set_active_project(tab.project_name):
             self._refresh_rtk_button()
             from . import user_profile as _up_sw

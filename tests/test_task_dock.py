@@ -12,11 +12,11 @@ from __future__ import annotations
 import pathlib
 
 import pytest
-from PyQt6.QtCore import QSize
+from PyQt6.QtCore import QSize, Qt
 from PyQt6.QtGui import QResizeEvent
 from PyQt6.QtWidgets import QHeaderView
 
-from agent_takkub import task_dock, task_ledger
+from agent_takkub import cockpit_theme, task_dock, task_ledger
 
 PROJECT = "taskdocktest"
 
@@ -109,7 +109,6 @@ class TestTaskDockWidget:
     def test_refresh_project_renders_row_and_reflects_done(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(task_dock, "list_project_names", lambda: [])
         widget = task_dock.TaskDockWidget()
         assert widget._tree.topLevelItemCount() == 0
 
@@ -131,9 +130,68 @@ class TestTaskDockWidget:
         assert row_item.text(0).startswith("✓")
 
     def test_project_with_no_rows_is_skipped(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(task_dock, "list_project_names", lambda: [])
         widget = task_dock.TaskDockWidget()
         widget.refresh_project("neverassigned")
+        assert widget._tree.topLevelItemCount() == 0
+
+
+# ──────────────────────────────────────────────────────────────
+# Task List shows only the active project's tab, not every open project
+# mixed together.
+# ──────────────────────────────────────────────────────────────
+class TestSetProject:
+    OTHER = "othertaskdocktest"
+
+    def test_set_project_shows_only_that_projects_card(self) -> None:
+        widget = task_dock.TaskDockWidget()
+        task_ledger.create_assignment(PROJECT, "backend", "/api", "task one", None, None, "claude")
+        task_ledger.create_assignment(
+            self.OTHER, "backend", "/api", "task two", None, None, "claude"
+        )
+        widget.set_project(PROJECT)
+        assert widget._tree.topLevelItemCount() == 1
+        item = widget._tree.topLevelItem(0)
+        assert item.data(0, Qt.ItemDataRole.UserRole) == f"project:{PROJECT}"
+
+    def test_switching_project_drops_the_previous_projects_card(self) -> None:
+        widget = task_dock.TaskDockWidget()
+        task_ledger.create_assignment(PROJECT, "backend", "/api", "task one", None, None, "claude")
+        task_ledger.create_assignment(
+            self.OTHER, "backend", "/api", "task two", None, None, "claude"
+        )
+        widget.set_project(PROJECT)
+        widget.set_project(self.OTHER)
+        assert widget._tree.topLevelItemCount() == 1
+        item = widget._tree.topLevelItem(0)
+        assert item.data(0, Qt.ItemDataRole.UserRole) == f"project:{self.OTHER}"
+
+    def test_refresh_project_of_a_different_project_is_ignored_once_pinned(self) -> None:
+        widget = task_dock.TaskDockWidget()
+        task_ledger.create_assignment(PROJECT, "backend", "/api", "task one", None, None, "claude")
+        widget.set_project(PROJECT)
+        task_ledger.create_assignment(
+            self.OTHER, "backend", "/api", "task two", None, None, "claude"
+        )
+        widget.refresh_project(self.OTHER)
+        assert widget._tree.topLevelItemCount() == 1
+        item = widget._tree.topLevelItem(0)
+        assert item.data(0, Qt.ItemDataRole.UserRole) == f"project:{PROJECT}"
+
+    def test_refresh_all_only_reloads_the_active_project(self) -> None:
+        widget = task_dock.TaskDockWidget()
+        task_ledger.create_assignment(PROJECT, "backend", "/api", "task one", None, None, "claude")
+        widget.set_project(PROJECT)
+        task_ledger.mark_done(PROJECT, "backend", "ok")
+        widget.refresh_all()
+        item = widget._tree.topLevelItem(0)
+        card = widget._tree.itemWidget(item, 0)
+        assert isinstance(card, task_dock.ProjectCardWidget)
+
+    def test_set_project_none_clears_the_dock(self) -> None:
+        widget = task_dock.TaskDockWidget()
+        task_ledger.create_assignment(PROJECT, "backend", "/api", "task one", None, None, "claude")
+        widget.set_project(PROJECT)
+        widget.set_project(None)
         assert widget._tree.topLevelItemCount() == 0
 
 
@@ -149,7 +207,6 @@ class TestFallbackGoalFlattening:
         assert task_dock._is_fallback_goal("ship v1") is False
 
     def test_goalless_groups_have_no_goal_header(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(task_dock, "list_project_names", lambda: [])
         widget = task_dock.TaskDockWidget()
         task_ledger.create_assignment(PROJECT, "backend", "/api", "task one", None, None, "claude")
         widget.refresh_project(PROJECT)
@@ -164,7 +221,6 @@ class TestFallbackGoalFlattening:
     def test_goalless_groups_on_different_dates_merge_flat_not_duplicated(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(task_dock, "list_project_names", lambda: [])
         widget = task_dock.TaskDockWidget()
         task_ledger.create_assignment(
             PROJECT, "backend", "/api", "task one", None, "feature A", "claude"
@@ -187,7 +243,6 @@ class TestFallbackGoalFlattening:
             assert "ไม่ระบุเป้าหมาย" not in item.child(i).text(0)
 
     def test_real_goal_group_keeps_its_header(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(task_dock, "list_project_names", lambda: [])
         widget = task_dock.TaskDockWidget()
         task_ledger.create_assignment(
             PROJECT, "backend", "/api", "task one", "ship v1", "feature A", "claude"
@@ -206,15 +261,11 @@ class TestTreeWrapConfig:
     def test_tree_wraps_and_hides_horizontal_scrollbar(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(task_dock, "list_project_names", lambda: [])
         widget = task_dock.TaskDockWidget()
         assert widget._tree.wordWrap() is True
-        from PyQt6.QtCore import Qt
-
         assert widget._tree.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
 
     def test_header_stretches_single_column(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(task_dock, "list_project_names", lambda: [])
         widget = task_dock.TaskDockWidget()
         header = widget._tree.header()
         assert header.stretchLastSection() is True
@@ -226,7 +277,6 @@ class TestTreeWrapConfig:
 # ──────────────────────────────────────────────────────────────
 class TestProjectCardWidget:
     def _make_card(self, monkeypatch: pytest.MonkeyPatch) -> tuple:
-        monkeypatch.setattr(task_dock, "list_project_names", lambda: [])
         widget = task_dock.TaskDockWidget()
         task_ledger.create_assignment(
             PROJECT, "backend", "/api", "add /health endpoint", "ship v1", "A8 dock", "claude"
@@ -270,7 +320,6 @@ class TestProjectItemTextClearedOnMount:
     progress visually ("pms...5)pms")."""
 
     def test_item_text_is_empty_once_card_is_mounted(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(task_dock, "list_project_names", lambda: [])
         widget = task_dock.TaskDockWidget()
         task_ledger.create_assignment(
             PROJECT, "backend", "/api", "add /health endpoint", "ship v1", "A8 dock", "claude"
@@ -285,7 +334,6 @@ class TestProjectItemTextClearedOnMount:
         """_apply_expanded_visual for a project item repaints the card's own
         chevron button (looked up by project name), not item.text(0) — so
         clearing the item text must not break expand/collapse."""
-        monkeypatch.setattr(task_dock, "list_project_names", lambda: [])
         widget = task_dock.TaskDockWidget()
         task_ledger.create_assignment(
             PROJECT, "backend", "/api", "add /health endpoint", "ship v1", "A8 dock", "claude"
@@ -305,12 +353,10 @@ class TestRowWrapRelayout:
     clipped to 1 line until the user happens to resize the dock."""
 
     def test_uniform_row_heights_disabled(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(task_dock, "list_project_names", lambda: [])
         widget = task_dock.TaskDockWidget()
         assert widget._tree.uniformRowHeights() is False
 
     def test_refresh_project_triggers_relayout(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(task_dock, "list_project_names", lambda: [])
         widget = task_dock.TaskDockWidget()
         calls: list[str] = []
         monkeypatch.setattr(
@@ -337,7 +383,6 @@ class TestWrapItemDelegate:
     """
 
     def _delegate_and_tree(self, monkeypatch: pytest.MonkeyPatch):
-        monkeypatch.setattr(task_dock, "list_project_names", lambda: [])
         widget = task_dock.TaskDockWidget()
         tree = widget._tree
         tree.setFixedWidth(240)
@@ -381,3 +426,196 @@ class TestWrapItemDelegate:
             delegate.sizeHint(opt, idx).height()
             == super(task_dock._WrapItemDelegate, delegate).sizeHint(opt, idx).height()
         )
+
+
+# ──────────────────────────────────────────────────────────────
+# 🌿 Git tab: pure helpers (no Qt import, duck-typed against a plain
+# namespace instead of the real git_status.RepoStatus/Commit/Worktree).
+# ──────────────────────────────────────────────────────────────
+class _NS:
+    def __init__(self, **kw) -> None:
+        self.__dict__.update(kw)
+
+
+def _repo(**kw) -> _NS:
+    base = dict(
+        key="api",
+        path="/repo/api",
+        branch="main",
+        upstream="origin/main",
+        ahead=0,
+        behind=0,
+        staged=0,
+        modified=0,
+        untracked=0,
+        commits=[],
+        worktrees=[],
+        error=None,
+    )
+    base.update(kw)
+    return _NS(**base)
+
+
+class TestRepoStateColor:
+    def test_error_is_faint_not_red(self) -> None:
+        assert task_dock.repo_state_color(_repo(error="not a git repo")) == cockpit_theme.TEXT_FAINT
+
+    def test_dirty_or_untracked_is_warn(self) -> None:
+        assert task_dock.repo_state_color(_repo(modified=1)) == cockpit_theme.STATE_WARN_BRIGHT
+        assert task_dock.repo_state_color(_repo(untracked=1)) == cockpit_theme.STATE_WARN_BRIGHT
+
+    def test_ahead_only_is_accent(self) -> None:
+        assert task_dock.repo_state_color(_repo(ahead=2)) == cockpit_theme.ACCENT_GOLD
+
+    def test_clean_is_muted(self) -> None:
+        assert task_dock.repo_state_color(_repo()) == cockpit_theme.TEXT_MUTED
+
+
+class TestRepoStatusSummary:
+    def test_clean_repo_says_clean(self) -> None:
+        assert task_dock.repo_status_summary(_repo()).endswith("clean")
+
+    def test_dirty_repo_shows_dot_and_plus_counts(self) -> None:
+        summary = task_dock.repo_status_summary(_repo(staged=2, modified=1, untracked=3))
+        assert "●3" in summary
+        assert "+3" in summary
+
+    def test_ahead_behind_shown_when_upstream_set(self) -> None:
+        summary = task_dock.repo_status_summary(_repo(ahead=2, behind=1))
+        assert "↑2 ↓1" in summary
+
+    def test_no_upstream_omits_ahead_behind(self) -> None:
+        summary = task_dock.repo_status_summary(_repo(upstream=None))
+        assert "↑" not in summary
+
+    def test_error_repo_shows_the_error_message(self) -> None:
+        assert task_dock.repo_status_summary(_repo(error="timeout")) == "timeout"
+
+
+class TestRepoHeaderLabel:
+    def test_includes_key_and_summary(self) -> None:
+        label = task_dock.repo_header_label(_repo(key="api"))
+        assert "api" in label
+        assert "clean" in label
+
+
+class TestCommitHelpers:
+    def _commit(self, **kw) -> _NS:
+        base = dict(sha="a1b2c3d4e5f6", subject="fix(#12): thing", author="pim", rel_time="2h ago")
+        base.update(kw)
+        return _NS(**base)
+
+    def test_commit_row_label_shortens_sha(self) -> None:
+        label = task_dock.commit_row_label(self._commit())
+        assert "a1b2c3d" in label
+        assert "a1b2c3d4e5f6" not in label
+        assert "2h ago" in label
+
+    def test_commit_tooltip_has_full_subject_and_author(self) -> None:
+        tooltip = task_dock.commit_tooltip(self._commit())
+        assert "fix(#12): thing" in tooltip
+        assert "pim" in tooltip
+
+
+class TestWorktreeHelpers:
+    def _wt(self, **kw) -> _NS:
+        base = dict(branch="wt/backend-178", path="/repo/wt", commits_ahead=0, dirty=False)
+        base.update(kw)
+        return _NS(**base)
+
+    def test_clean_worktree_has_no_suffix(self) -> None:
+        assert task_dock.worktree_row_label(self._wt()) == "wt/backend-178"
+
+    def test_ahead_and_dirty_worktree_shows_both(self) -> None:
+        label = task_dock.worktree_row_label(self._wt(commits_ahead=3, dirty=True))
+        assert "↑3" in label
+        assert "dirty" in label
+
+    def test_dirty_worktree_is_warn_colored(self) -> None:
+        assert task_dock.worktree_color(self._wt(dirty=True)) == cockpit_theme.STATE_WARN_BRIGHT
+
+    def test_clean_worktree_is_muted(self) -> None:
+        assert task_dock.worktree_color(self._wt()) == cockpit_theme.TEXT_MUTED
+
+
+# ──────────────────────────────────────────────────────────────
+# 🌿 Git tab: TaskDockWidget wiring — set_project propagates, tab lifecycle
+# starts/stops the poll timer only while visible + selected.
+# ──────────────────────────────────────────────────────────────
+class TestGitTabWiring:
+    def test_dock_has_two_tabs_labelled_tasks_and_git(self) -> None:
+        widget = task_dock.TaskDockWidget()
+        assert widget._tabs.count() == 2
+        assert "Tasks" in widget._tabs.tabText(0)
+        assert "Git" in widget._tabs.tabText(1)
+
+    def test_set_project_propagates_to_git_view(self) -> None:
+        widget = task_dock.TaskDockWidget()
+        widget.set_project(PROJECT)
+        assert widget._git_view._project == PROJECT
+
+    def test_git_view_starts_inactive(self) -> None:
+        view = task_dock.GitStatusView()
+        assert view._timer.isActive() is False
+
+    def test_set_active_true_with_project_starts_timer(self) -> None:
+        view = task_dock.GitStatusView()
+        view.set_project(PROJECT)
+        view.set_active(True)
+        assert view._timer.isActive() is True
+
+    def test_set_active_false_stops_timer(self) -> None:
+        view = task_dock.GitStatusView()
+        view.set_project(PROJECT)
+        view.set_active(True)
+        view.set_active(False)
+        assert view._timer.isActive() is False
+
+    def test_set_active_without_project_does_not_start_timer(self) -> None:
+        view = task_dock.GitStatusView()
+        view.set_active(True)
+        assert view._timer.isActive() is False
+
+    def test_switching_to_git_tab_activates_it(self) -> None:
+        widget = task_dock.TaskDockWidget()
+        widget.set_project(PROJECT)
+        widget.show()
+        widget._tabs.setCurrentIndex(task_dock.TaskDockWidget._GIT_TAB_INDEX)
+        assert widget._git_view._timer.isActive() is True
+        widget._tabs.setCurrentIndex(0)
+        assert widget._git_view._timer.isActive() is False
+
+    def test_hiding_the_dock_deactivates_the_git_tab(self) -> None:
+        widget = task_dock.TaskDockWidget()
+        widget.set_project(PROJECT)
+        widget.show()
+        widget._tabs.setCurrentIndex(task_dock.TaskDockWidget._GIT_TAB_INDEX)
+        assert widget._git_view._timer.isActive() is True
+        widget.hide()
+        assert widget._git_view._timer.isActive() is False
+
+
+class TestGitStatusViewRendering:
+    def test_render_error_repo_shows_error_and_no_children(self) -> None:
+        view = task_dock.GitStatusView()
+        view._render([_repo(error="not a git repo")])
+        assert view._tree.topLevelItemCount() == 1
+        item = view._tree.topLevelItem(0)
+        assert item.childCount() == 0
+
+    def test_render_repo_with_commits_and_worktrees(self) -> None:
+        view = task_dock.GitStatusView()
+        commit = _NS(sha="a1b2c3d", subject="fix: x", author="pim", rel_time="2h ago")
+        wt = _NS(branch="wt/x", path="/x", commits_ahead=1, dirty=True)
+        view._render([_repo(commits=[commit], worktrees=[wt])])
+        item = view._tree.topLevelItem(0)
+        # 1 commit child + 1 worktrees-group child
+        assert item.childCount() == 2
+        wt_group = item.child(1)
+        assert wt_group.childCount() == 1
+
+    def test_render_empty_list_shows_placeholder(self) -> None:
+        view = task_dock.GitStatusView()
+        view._render([])
+        assert view._tree.topLevelItemCount() == 1
+        assert "ไม่มี" in view._tree.topLevelItem(0).text(0)
