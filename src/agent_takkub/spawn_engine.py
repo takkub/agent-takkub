@@ -924,7 +924,22 @@ class SpawnEngineMixin:
             # a user turn. Submit one tiny trigger so the first inference acts
             # on the task directly instead of spending a round-trip deciding
             # to read the handoff file.
-            self._send_when_ready(role_name, _CURRENT_TASK_TRIGGER, project=project_ns)
+            #
+            # #134: allow_repaste=False. The trigger is short, single-line,
+            # and never bracket-pasted (below BRACKETED_PASTE_THRESHOLD), so
+            # a "ready + empty box" verify reading is genuinely ambiguous
+            # between "already submitted" and "still sitting unsent" (no
+            # placeholder / no is_at_ready_prompt() busy transition to
+            # disambiguate on) — trusting it enough to repaste risked writing
+            # a second copy straight after the first with no separator
+            # (observed: the trigger doubled and got submitted as one garbled
+            # turn). A genuinely lost trigger still recovers: the pane sits
+            # at ready with the preloaded system prompt and an empty
+            # composer, which the idle watchdog's `[auto-reminder]` nudge
+            # (IDLE_REMINDER_TEXT) picks up.
+            self._send_when_ready(
+                role_name, _CURRENT_TASK_TRIGGER, project=project_ns, allow_repaste=False
+            )
             return
         ps.spawn_initial_task_state = "fallback"
         _log_event(

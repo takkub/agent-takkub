@@ -163,6 +163,7 @@ def test_fresh_claude_assign_preloads_task_and_sends_only_tiny_trigger(
         "backend",
         _CURRENT_TASK_TRIGGER,
         project=TEST_PROJECT,
+        allow_repaste=False,
     )
     assert task not in mock_send.call_args.args[1]
     assert "file-read tool" not in mock_send.call_args.args[1]
@@ -392,6 +393,7 @@ def test_fifo_queue_drains_three_claude_assigns_with_preload_events(
     )
     assert mock_send.call_count == len(roles)
     assert all(call.args[1] == _CURRENT_TASK_TRIGGER for call in mock_send.call_args_list)
+    assert all(call.kwargs.get("allow_repaste") is False for call in mock_send.call_args_list)
 
 
 def test_only_claude_has_confirmed_file_backed_system_prompt_capability() -> None:

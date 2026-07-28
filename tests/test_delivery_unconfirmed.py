@@ -495,6 +495,49 @@ class TestVerifiedEnterWiring:
         assert verified.call_args.kwargs["payload"]
         plain.assert_not_called()
 
+    def test_allow_repaste_false_disables_repaste_recovery(
+        self, orch: Orchestrator, monkeypatch
+    ) -> None:
+        """#134: a caller that opts out of repaste (spawn_engine's
+        _CURRENT_TASK_TRIGGER) must reach _delayed_enter_verified with
+        payload=None, so a "ready + empty box" verify reading can only ever
+        resend a bare CR — never write a second copy of the body."""
+        reviewer = _pane(_live_session())
+        reviewer.session.is_at_ready_prompt.return_value = True
+        orch._panes_by_project["P"] = {"lead": _pane(_live_session()), "reviewer": reviewer}
+        monkeypatch.setattr(orch_mod.QTimer, "singleShot", staticmethod(lambda _ms, fn: fn()))
+        with (
+            patch("agent_takkub.orchestrator._log_event"),
+            patch("agent_takkub.orchestrator._delayed_enter_verified") as verified,
+        ):
+            orch._send_when_ready(
+                "reviewer",
+                "Start the current task from the one-shot system-prompt block now.",
+                max_wait_ms=1000,
+                project="P",
+                allow_repaste=False,
+            )
+        verified.assert_called_once()
+        assert verified.call_args.kwargs["payload"] is None
+
+    def test_allow_repaste_default_keeps_payload_for_normal_tasks(
+        self, orch: Orchestrator, monkeypatch
+    ) -> None:
+        """Ordinary task delivery (allow_repaste unset) is unaffected — a real
+        task spec has no idle-watchdog backstop if genuinely lost, so the
+        repaste recovery must stay armed."""
+        reviewer = _pane(_live_session())
+        reviewer.session.is_at_ready_prompt.return_value = True
+        orch._panes_by_project["P"] = {"lead": _pane(_live_session()), "reviewer": reviewer}
+        monkeypatch.setattr(orch_mod.QTimer, "singleShot", staticmethod(lambda _ms, fn: fn()))
+        with (
+            patch("agent_takkub.orchestrator._log_event"),
+            patch("agent_takkub.orchestrator._delayed_enter_verified") as verified,
+        ):
+            orch._send_when_ready("reviewer", "run smoke", max_wait_ms=1000, project="P")
+        verified.assert_called_once()
+        assert verified.call_args.kwargs["payload"]
+
     def test_peer_send_uses_verified_enter(self, orch: Orchestrator, monkeypatch) -> None:
         reviewer = _pane(_live_session())
         orch._panes_by_project["P"] = {"reviewer": reviewer}
