@@ -360,7 +360,6 @@
         "agent_takkub.skill_scan",
         "agent_takkub.spawn_engine",
         "agent_takkub.status_header",
-        "agent_takkub.task_dock",
         "agent_takkub.task_ledger",
         "agent_takkub.terminal_widget",
         "agent_takkub.tutorial_overlay",
@@ -373,7 +372,7 @@
         "agent_takkub.vault_mirror",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 69,
+      "fan_in": 68,
       "fan_out": 0
     },
     {
@@ -479,8 +478,10 @@
         "agent_takkub._win_console",
         "agent_takkub.config"
       ],
-      "imported_by": [],
-      "fan_in": 0,
+      "imported_by": [
+        "agent_takkub.task_dock"
+      ],
+      "fan_in": 1,
       "fan_out": 2
     },
     {
@@ -1919,7 +1920,7 @@
       "module": "agent_takkub.task_dock",
       "imports": [
         "agent_takkub.cockpit_theme",
-        "agent_takkub.config",
+        "agent_takkub.git_status",
         "agent_takkub.project_nav",
         "agent_takkub.task_ledger",
         "agent_takkub.token_meter"
