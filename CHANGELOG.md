@@ -4,6 +4,14 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.38] - 2026-07-28
+
+### Fixed (แก้)
+- **#133 (HIGH) เปิดหลาย pane พร้อมกันแล้ว pane ค้างไม่เริ่มงาน** — fan-out จาก Multi mode ทำให้ trigger `Start the current task from the one-shot system-prompt block now.` ถูก **paste ทับซ้อน 4 ก้อนในช่องพิมพ์และไม่เคยถูก submit** · Lead เองก็ได้ notice ซ้ำและ **ตัวอักษรเพี้ยน** (`isolawted`, `fkontend-2`, `Imerge`) จากการเขียนชนกันใน PTY เดียว · เกิดทุกครั้งที่ fan-out
+  - **สาเหตุที่ 1 — ตัดสินด้วยนาฬิกาที่หยุดเดิน:** ตัวตรวจว่า paste หายหรือไม่ อ่านจากสถานะที่ Qt main thread เป็นคนอัปเดต (จอที่ render แล้ว, timestamp ของ output ล่าสุด, ช่วง grace) · fan-out ทำให้ event loop ค้างทีละ ~1 วินาที แล้ว timer ของ verify ที่ค้างคิวไว้จะ **ยิงพรวดพร้อมกันทันทีที่คิวคลาย** ทำให้ grace ที่ตั้งใจให้กินเวลาจริงหลายวินาทียุบเหลือหลักมิลลิวินาที — paste ที่แค่ยังวาดไม่เสร็จจึงถูกตัดสินว่าหาย แล้วโดน repaste ทับ (หลักฐานจริง: `task_deliver_repaste` 3 ครั้ง/pane ห่างกัน ~1 วินาที ขนาบด้วย `main_thread_stall` 938ms / 1125ms / 1141ms)
+  - ตอนนี้เช็ค heartbeat ของ main thread ก่อนทุกครั้งที่จะตัดสิน ถ้าเพิ่งค้างจะ **เลื่อนการตัดสินโดยไม่กินโควตา repaste** (จำกัด 4 ครั้ง) — paste ที่หายจริงยังกู้ได้เหมือนเดิม
+  - **สาเหตุที่ 2 — เขียนชนกัน:** log มี `remaining:3` ซ้ำ = มี verify chain 2 เส้นเขียนเข้า Lead พร้อมกัน · `_pump_lead_notify` กับ `_force_deliver_done_notices` ใช้ guard ร่วมกันแล้ว ปล่อยคืนผ่าน callback ตอน chain จบ ทำให้เขียนได้ทีละเส้น · เคสที่ถูกกันไว้จะไม่ดึงคิวออก ของยังอยู่ครบให้รอบถัดไปส่ง
+
 ## [1.0.37] - 2026-07-27
 
 ### Fixed (แก้)
