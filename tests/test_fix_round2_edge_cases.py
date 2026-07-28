@@ -429,6 +429,107 @@ class TestDelayedEnterVerifiedRepaste:
         assert resends == [50, 3] and repastes == []
 
 
+class TestDelayedEnterVerifiedAllowRepasteFalse:
+    """#134: a short, single-line trigger body (spawn_engine's
+    _CURRENT_TASK_TRIGGER) is never bracket-pasted, so a "ready + empty box"
+    verify reading is genuinely ambiguous between "already submitted" and
+    "still holds the unsent text" — no placeholder and no busy-transition to
+    disambiguate on. Repasting into that ambiguity wrote a second copy right
+    after the first with no separator, corrupting the turn into one garbled
+    doubled prompt (observed live, issue #134). The caller opts out by
+    passing payload=None: the exact "looks-swallowed" signal pattern that
+    used to trigger a repaste must now resolve to a bare, harmless CR resend
+    instead — while genuinely paste-swallowed callers that keep `payload`
+    (the existing #26 contract) must still repaste unchanged."""
+
+    SINGLE_LINE = "Start the current task from the one-shot system-prompt block now."
+
+    def _run_inline(self, pane, session, *, payload):
+        from agent_takkub.orchestrator import _delayed_enter_verified
+
+        resends: list[int] = []
+        repastes: list[int] = []
+
+        def _inline(delay_ms, fn):
+            fn()
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot", _inline):
+            _delayed_enter_verified(
+                pane,
+                session,
+                150,
+                max_resends=3,
+                busy_max_resends=50,
+                payload=payload,
+                content_fragment=self.SINGLE_LINE,
+                on_resend=resends.append,
+                on_repaste=repastes.append,
+            )
+        return resends, repastes
+
+    def test_payload_none_never_repastes_even_on_swallow_looking_signal(self) -> None:
+        """Regression for #134: the exact signal combination that misfired as
+        a repaste (ready + empty box + no output since baseline + idle) must,
+        with payload=None, resolve to a single bare CR resend and settle —
+        never write the trigger text a second time."""
+        sess = MagicMock()
+        sess.is_at_ready_prompt.side_effect = [True, False]  # ready once, then landed
+        sess.shows_pending_input.return_value = False  # empty box (ambiguous)
+        sess.seconds_since_output.return_value = 5.0  # idle — looks like a swallow
+        sess.last_output_monotonic.return_value = 100.0  # no output since baseline
+
+        pane = MagicMock()
+        pane.session = sess
+
+        resends, repastes = self._run_inline(pane, sess, payload=None)
+
+        writes = [c.args[0] for c in sess.write.call_args_list]
+        assert self.SINGLE_LINE not in writes
+        assert writes == [b"\r", b"\r"]  # initial CR + one harmless CR resend
+        assert repastes == []
+        assert resends == [3]
+
+    def test_payload_none_still_bounds_resends_when_never_ready_drops(self) -> None:
+        """A pane that never leaves the ready prompt must still stop after
+        max_resends, exactly like the CR-only (#22) path — payload=None must
+        not create an unbounded retry loop."""
+        sess = MagicMock()
+        sess.is_at_ready_prompt.return_value = True  # never lands
+        sess.shows_pending_input.return_value = False
+        sess.seconds_since_output.return_value = 5.0
+        sess.last_output_monotonic.return_value = 100.0
+        pane = MagicMock()
+        pane.session = sess
+
+        resends, repastes = self._run_inline(pane, sess, payload=None)
+
+        assert repastes == []
+        assert resends == [3, 2, 1]
+        writes = [c.args[0] for c in sess.write.call_args_list]
+        assert all(w == b"\r" for w in writes)
+
+    def test_payload_present_same_signal_still_repastes_unchanged(self) -> None:
+        """Companion case: when the caller keeps `payload` (default,
+        allow_repaste=True — ordinary task delivery), the identical
+        looks-swallowed signal pattern must still repaste exactly as before
+        #134 — losing a real task spec has no idle-watchdog backstop, so the
+        #26 recovery must stay intact for every other caller."""
+        sess = MagicMock()
+        sess.is_at_ready_prompt.side_effect = [True, False]
+        sess.shows_pending_input.return_value = False
+        sess.seconds_since_output.return_value = 5.0
+        sess.last_output_monotonic.return_value = 100.0
+        pane = MagicMock()
+        pane.session = sess
+
+        resends, repastes = self._run_inline(pane, sess, payload=self.SINGLE_LINE)
+
+        writes = [c.args[0] for c in sess.write.call_args_list]
+        assert writes == [b"\r", self.SINGLE_LINE, b"\r"]
+        assert repastes == [3]
+        assert resends == []
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # AgentPane._on_exit generation guard
 # ─────────────────────────────────────────────────────────────────────────────

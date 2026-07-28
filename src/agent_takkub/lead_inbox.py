@@ -234,6 +234,41 @@ def _delayed_enter(pane: AgentPane, session: PtySession, delay_ms: int) -> None:
     )
 
 
+def _log_verify_decision(
+    decision: str,
+    *,
+    session: PtySession,
+    payload: str | None,
+    is_ready: bool,
+    shows_pending: bool | None = None,
+    produced_output: bool | None = None,
+    render_waits: int | None = None,
+) -> None:
+    """#134 diagnostics: record every recovery decision (resend/repaste) with
+    the exact signals that drove it. Deliberately fired only at the same 4
+    sites that already call ``on_resend``/``on_repaste`` (never per-poll), so
+    volume stays proportional to actual recovery events, not verify() ticks."""
+    try:
+        seconds_since_output = session.seconds_since_output()
+    except Exception:
+        seconds_since_output = None
+    _log_event(
+        "task_deliver_verify_decision",
+        decision=decision,
+        is_ready=is_ready,
+        shows_pending=shows_pending,
+        produced_output=produced_output,
+        seconds_since_output=(
+            round(seconds_since_output, 2)
+            if isinstance(seconds_since_output, (int, float))
+            else None
+        ),
+        render_waits=render_waits,
+        payload_len=len(payload) if payload else 0,
+        single_line=("\n" not in payload) if payload else None,
+    )
+
+
 def _delayed_enter_verified(
     pane: AgentPane,
     session: PtySession,
@@ -349,6 +384,13 @@ def _delayed_enter_verified(
                     and busy_remaining > 0
                     and session.shows_pending_input(content_fragment)
                 ):
+                    _log_verify_decision(
+                        "resend_busy_pending",
+                        session=session,
+                        payload=payload,
+                        is_ready=False,
+                        shows_pending=True,
+                    )
                     if on_resend is not None:
                         on_resend(busy_remaining)
                     _send_then_verify(remaining, busy_remaining - 1)
@@ -387,6 +429,14 @@ def _delayed_enter_verified(
                     else False
                 )
                 if produced_output:
+                    _log_verify_decision(
+                        "resend_ready_output_produced",
+                        session=session,
+                        payload=payload,
+                        is_ready=True,
+                        shows_pending=False,
+                        produced_output=True,
+                    )
                     if on_resend is not None:
                         on_resend(remaining)
                     _send_then_verify(remaining - 1, busy_remaining)
@@ -405,6 +455,15 @@ def _delayed_enter_verified(
                 # Silent through the grace window → genuine swallow (#26):
                 # re-paste, then submit once it renders. Re-baseline so the next
                 # verify measures output produced by THIS repaste.
+                _log_verify_decision(
+                    "repaste",
+                    session=session,
+                    payload=payload,
+                    is_ready=True,
+                    shows_pending=False,
+                    produced_output=False,
+                    render_waits=render_waits,
+                )
                 if on_repaste is not None:
                     on_repaste(remaining)
                 session.write(payload)
@@ -415,6 +474,13 @@ def _delayed_enter_verified(
                 )
                 return
             # Content present, CR swallowed mid-render (#22) — resend the CR.
+            _log_verify_decision(
+                "resend_content_present",
+                session=session,
+                payload=payload,
+                is_ready=True,
+                shows_pending=True,
+            )
             if on_resend is not None:
                 on_resend(remaining)
             _send_then_verify(remaining - 1, busy_remaining)
@@ -570,12 +636,28 @@ class LeadInboxMixin:
         task: str,
         max_wait_ms: int = 45_000,
         project: str | None = None,
+        allow_repaste: bool = True,
     ) -> None:
         """Poll until claude's main prompt is idle, then paste task + Enter.
 
         Replaces the old fixed 12s wait so we don't paste into the trust modal
         or while claude is still bootstrapping. Falls back to a hard timeout
         so a hung claude doesn't silently swallow the task.
+
+        ``allow_repaste=False`` (#134) disables the swallow/repaste recovery
+        in ``_delayed_enter_verified`` for this delivery — only a bare CR
+        resend is ever attempted. For a short, single-line, non-bracketed-
+        paste body the "ready + empty box" verify signal is genuinely
+        ambiguous between "submitted already" and "still holds the unsent
+        text" (no ``[Pasted text]`` placeholder or `is_at_ready_prompt()`
+        busy transition to disambiguate on), so trusting it enough to write a
+        SECOND copy risks concatenating two copies into the composer with no
+        separator (observed: the trigger doubled and submitted as one
+        garbled turn). Callers whose body is recoverable another way (e.g.
+        spawn_engine's `_CURRENT_TASK_TRIGGER`, backed by the idle watchdog's
+        `[auto-reminder]` nudge if genuinely never delivered) should pass
+        this. Ordinary task delivery keeps the default — losing a real task
+        spec has no such backstop, so repaste recovery must stay on.
         """
         max_wait_ms = self._ready_wait_ms(role_name, project, max_wait_ms)
         pane = self._project_panes(project).get(role_name)
@@ -612,7 +694,7 @@ class LeadInboxMixin:
                 pane,
                 _task_sess,
                 _enter_delay_ms(payload),
-                payload=payload,
+                payload=payload if allow_repaste else None,
                 content_fragment=task,
                 on_resend=lambda rem, r=role_name, p=project: _log_event(
                     "task_deliver_enter_resend",
