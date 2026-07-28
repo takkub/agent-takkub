@@ -347,3 +347,128 @@ def uninstall_plugin(plugin_id: str, *, timeout: float = 120.0) -> tuple[bool, s
         return True, "uninstalled"
     tail = ((proc.stdout or "") + (proc.stderr or "")).strip().splitlines()
     return False, tail[-1] if tail else "uninstall failed"
+
+
+# ---------------------------------------------------------------------------
+# Plugin hook timeout normalization (#135)
+#
+# A plugin's own manifest declares hook timeouts (e.g. pordee's SessionStart/
+# UserPromptSubmit hooks ship `"timeout": 5`). A cold-start node/python
+# process under multi-pane fan-out spawn load can miss that easily, producing
+# "UserPromptSubmit hook timed out after 5s — output discarded" on the pane.
+# `lead_context._default_plugin_dirs` calls `normalize_plugin_hook_timeout`
+# on every plugin dir it injects into a pane so the shipped-too-low value
+# never reaches a spawn. Re-applied every spawn (idempotent) since a plugin
+# update overwrites the manifest back to its shipped value.
+# ---------------------------------------------------------------------------
+
+PLUGIN_HOOK_TIMEOUT_FLOOR_DEFAULT = 30
+
+
+def _plugin_hook_timeout_floor() -> int:
+    """Floor (seconds) below which a plugin hook's declared ``timeout`` gets
+    raised. Overridable via ``TAKKUB_PLUGIN_HOOK_TIMEOUT_FLOOR`` without a
+    code change; falls back to the default on a missing/unparseable value."""
+    raw = os.environ.get("TAKKUB_PLUGIN_HOOK_TIMEOUT_FLOOR")
+    if raw:
+        try:
+            return int(raw)
+        except ValueError:
+            pass
+    return PLUGIN_HOOK_TIMEOUT_FLOOR_DEFAULT
+
+
+def _hook_manifest_paths(plugin_dir: pathlib.Path) -> list[pathlib.Path]:
+    """Candidate files that may declare hooks for one installed plugin
+    version dir: the inline ``hooks`` key in ``plugin.json`` (or the file it
+    points at, when that key is a path string instead of an inline object),
+    and the by-convention ``hooks/hooks.json``."""
+    paths: list[pathlib.Path] = []
+    plugin_json = plugin_dir / ".claude-plugin" / "plugin.json"
+    if plugin_json.is_file():
+        paths.append(plugin_json)
+        try:
+            data = json.loads(plugin_json.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = None
+        hooks_ref = data.get("hooks") if isinstance(data, dict) else None
+        if isinstance(hooks_ref, str):
+            ref_path = (plugin_json.parent / hooks_ref).resolve()
+            if ref_path.is_file() and ref_path not in paths:
+                paths.append(ref_path)
+    default_hooks_json = plugin_dir / "hooks" / "hooks.json"
+    if default_hooks_json.is_file() and default_hooks_json not in paths:
+        paths.append(default_hooks_json)
+    return paths
+
+
+def _raise_low_timeouts(data: dict, floor: int) -> list[tuple[str, float, int]]:
+    """Mutate ``data["hooks"]`` in place, raising any ``timeout`` below
+    ``floor``. Returns one ``(event, old, new)`` tuple per entry actually
+    changed; a missing ``timeout`` key is left alone (never invented)."""
+    changes: list[tuple[str, float, int]] = []
+    hooks_by_event = data.get("hooks") if isinstance(data, dict) else None
+    if not isinstance(hooks_by_event, dict):
+        return changes
+    for event, groups in hooks_by_event.items():
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            entries = group.get("hooks")
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                old = entry.get("timeout")
+                if isinstance(old, (int, float)) and not isinstance(old, bool) and old < floor:
+                    entry["timeout"] = floor
+                    changes.append((event, old, floor))
+    return changes
+
+
+def normalize_plugin_hook_timeout(
+    plugin_dir: pathlib.Path, *, floor: int | None = None
+) -> list[dict]:
+    """Raise any hook ``timeout`` below ``floor`` seconds declared by the
+    plugin at ``plugin_dir`` (an installed ``.../<marketplace>/<plugin>/
+    <version>/`` dir), rewriting the manifest in place.
+
+    Idempotent — a file is only rewritten when a value actually changes —
+    and safe to call on every spawn: a plugin update overwrites the manifest
+    back to its shipped (possibly-too-low) timeout, so this must re-apply
+    every time, not just once at install. Best-effort: any read/parse/write
+    failure on a manifest is swallowed so a broken plugin never blocks a
+    pane spawn; other manifests for the same plugin are still tried.
+
+    Returns one ``{"file", "event", "old", "new"}`` dict per hook entry that
+    was actually changed (empty list when nothing needed raising).
+    """
+    resolved_floor = _plugin_hook_timeout_floor() if floor is None else floor
+    changed: list[dict] = []
+    try:
+        manifest_paths = _hook_manifest_paths(plugin_dir)
+    except OSError:
+        return changed
+    for path in manifest_paths:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        file_changes = _raise_low_timeouts(data, resolved_floor)
+        if not file_changes:
+            continue
+        try:
+            payload = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+            tmp = path.with_name(path.name + f".tmp{os.getpid()}")
+            tmp.write_text(payload, encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError:
+            continue
+        for event, old, new in file_changes:
+            changed.append({"file": str(path), "event": event, "old": old, "new": new})
+    return changed

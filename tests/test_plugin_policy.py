@@ -14,10 +14,12 @@ context bloat on every pane. The role policy trims what each pane receives:
 
 from __future__ import annotations
 
+import json
 import pathlib
 
 import pytest
 
+from agent_takkub import lead_context
 from agent_takkub.lead_context import _default_plugin_dirs
 
 
@@ -177,3 +179,69 @@ class TestCustomProfilePluginDirs:
         joined = " ".join(_default_plugin_dirs("backend", project="other-proj"))
         assert "superpowers-dev" in joined
         assert str(custom_config_dir) not in joined
+
+
+class TestHookTimeoutNormalizationOnDiscovery:
+    """#135: _default_plugin_dirs must normalize a low hook timeout in every
+    plugin dir it discovers, on every call — a plugin injected into a pane
+    that still ships a too-low timeout is exactly the bug (5s < node
+    cold-start under multi-pane fan-out)."""
+
+    def test_low_timeout_is_raised_when_plugin_is_discovered(
+        self, fake_cache: pathlib.Path
+    ) -> None:
+        manifest = fake_cache / "pordee" / "pordee" / "1.0.0" / ".claude-plugin" / "plugin.json"
+        manifest.write_text(
+            json.dumps(
+                {"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "timeout": 5}]}]}}
+            ),
+            encoding="utf-8",
+        )
+
+        _default_plugin_dirs("backend")
+
+        data = json.loads(manifest.read_text("utf-8"))
+        assert data["hooks"]["UserPromptSubmit"][0]["hooks"][0]["timeout"] >= 30
+
+    def test_logs_when_a_timeout_is_actually_raised(
+        self, fake_cache: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        manifest = fake_cache / "pordee" / "pordee" / "1.0.0" / ".claude-plugin" / "plugin.json"
+        manifest.write_text(
+            json.dumps(
+                {"hooks": {"SessionStart": [{"hooks": [{"type": "command", "timeout": 5}]}]}}
+            ),
+            encoding="utf-8",
+        )
+        logged: list[tuple] = []
+        monkeypatch.setattr(
+            lead_context, "_log_event", lambda event, **details: logged.append((event, details))
+        )
+
+        _default_plugin_dirs("backend")
+
+        raised = [e for e in logged if e[0] == "plugin_hook_timeout_raised"]
+        assert len(raised) == 1
+        assert raised[0][1]["plugin"] == "pordee"
+
+    def test_no_log_when_plugin_manifest_has_no_hooks(
+        self, fake_cache: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # fake_cache's plugin.json is bare "{}" — nothing to raise.
+        logged: list[tuple] = []
+        monkeypatch.setattr(
+            lead_context, "_log_event", lambda event, **details: logged.append((event, details))
+        )
+
+        _default_plugin_dirs("backend")
+
+        assert [e for e in logged if e[0] == "plugin_hook_timeout_raised"] == []
+
+    def test_broken_manifest_does_not_break_discovery(self, fake_cache: pathlib.Path) -> None:
+        manifest = fake_cache / "pordee" / "pordee" / "1.0.0" / ".claude-plugin" / "plugin.json"
+        manifest.write_text("{not valid json", encoding="utf-8")
+
+        # Must not raise, and the plugin dir is still returned (a broken
+        # hook manifest is not a reason to drop the plugin from the pane).
+        joined = " ".join(_default_plugin_dirs("backend"))
+        assert "pordee" in joined
