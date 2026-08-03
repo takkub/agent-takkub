@@ -1060,11 +1060,13 @@
         "agent_takkub.provider_models",
         "agent_takkub.provider_state",
         "agent_takkub.pty_session",
+        "agent_takkub.role_models",
         "agent_takkub.settings_management.pages.roles_page",
         "agent_takkub.settings_management.repositories.providers",
+        "agent_takkub.settings_window",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 16,
+      "fan_in": 18,
       "fan_out": 3
     },
     {
@@ -1238,14 +1240,15 @@
     {
       "module": "agent_takkub.role_models",
       "imports": [
-        "agent_takkub.config"
+        "agent_takkub.config",
+        "agent_takkub.provider_spec"
       ],
       "imported_by": [
         "agent_takkub.settings_window",
         "agent_takkub.spawn_engine"
       ],
       "fan_in": 2,
-      "fan_out": 1
+      "fan_out": 2
     },
     {
       "module": "agent_takkub.roles",
@@ -1772,6 +1775,7 @@
         "agent_takkub.project_nav",
         "agent_takkub.provider_config",
         "agent_takkub.provider_models",
+        "agent_takkub.provider_spec",
         "agent_takkub.provider_state",
         "agent_takkub.role_models",
         "agent_takkub.roles",
@@ -1786,7 +1790,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 2,
-      "fan_out": 20
+      "fan_out": 21
     },
     {
       "module": "agent_takkub.shared_dev_tools",

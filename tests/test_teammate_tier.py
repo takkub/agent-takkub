@@ -19,7 +19,7 @@ def test_gate_roles_run_opus_high_with_sonnet_fallback():
     """reviewer/critic/maintainer gate what ships — max quality, degrade only to Sonnet."""
     for role in ("reviewer", "critic", "maintainer"):
         model, effort, fallback = _teammate_tier(role)
-        assert model == "claude-opus-4-8"
+        assert model == "claude-opus-5"
         assert effort == "high"
         assert fallback == "claude-sonnet-5"
 
@@ -67,6 +67,6 @@ def test_codex_gemini_substitutes_use_opus_high():
     model quality as reviewer/critic (not the default Sonnet/medium)."""
     for role in ("codex", "gemini"):
         model, effort, fallback = _teammate_tier(role)
-        assert model == "claude-opus-4-8"
+        assert model == "claude-opus-5"
         assert effort == "high"
         assert fallback == "claude-sonnet-5"

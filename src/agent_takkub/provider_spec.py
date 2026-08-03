@@ -121,6 +121,14 @@ class ProviderSpec:
     # to effort_flag. A provider with effort_flag=None receives no effort arg.
     effort_flag: str | None = None
     effort_config_key: str | None = None
+    # Effort levels this provider's CLI actually accepts via effort_flag, in
+    # UI-display order (lowest→highest). Single source of truth for the
+    # Settings "Providers & Roles" per-role Effort dropdown (settings_window.py)
+    # and the spawn-time resolver (spawn_engine.py) — neither hardcodes a
+    # list. Empty for any provider with effort_flag=None (unsupported) and
+    # for providers whose accepted levels are not yet confirmed from the
+    # CLI's own --help/docs (see each spec's own note below).
+    effort_levels: tuple[str, ...] = ()
     fallback_model_flag: str | None = None
     settings_flag: str | None = None
     task_notice_preamble: str | None = None
@@ -290,6 +298,10 @@ claude_spec = ProviderSpec(
     # spawn_engine.py:1594-1608 — not collapsed into this one field in Phase 0)
     model_flag="--model",  # spawn_engine.py:1483
     effort_flag="--effort",  # spawn_engine.py:1486
+    effort_levels=("low", "medium", "high", "xhigh", "max"),  # claude CLI's
+    # documented --effort levels (matches the Claude Code agent()-tool effort
+    # tiers already surfaced to this session — see the Workflow tool's own
+    # opts.effort schema, same CLI underneath).
     fallback_model_flag="--fallback-model",  # spawn_engine.py:1500
     settings_flag="--settings",  # spawn_engine.py:1456
     task_notice_preamble=None,
@@ -382,6 +394,7 @@ codex_spec = ProviderSpec(
     # Codex has no direct --effort option. Its documented session-scoped config
     # override accepts `-c model_reasoning_effort=<low|medium|high>`, so role
     # tier effort can be wired without mutating the user's config.toml.
+    effort_levels=("low", "medium", "high"),  # what `model_reasoning_effort` accepts
     produces_jsonl_transcript=False,
     supports_token_meter=False,
     supports_remote_history=False,
@@ -728,3 +741,34 @@ READY_HARD_BLOCKERS: tuple[str, ...] = tuple(
         blocker for spec in PROVIDER_REGISTRY.values() for blocker in spec.ready_hard_blockers
     )
 )
+
+
+# ── per-model effort exceptions ────────────────────────────────────────────
+# A model that rejects its own provider's effort flag even though the
+# provider generally supports one — narrower than a whole ProviderSpec field,
+# so it lives as a small model-keyed table instead of another dataclass
+# field. claude-haiku-4-5 (and the "haiku" alias): confirmed against the
+# installed claude CLI — passing `--effort` errors, this tier has no
+# extended-thinking/reasoning-effort mode. Keyed by provider so two CLIs that
+# happen to share a model id string can't collide.
+_MODELS_WITHOUT_EFFORT: dict[str, frozenset[str]] = {
+    "claude": frozenset({"claude-haiku-4-5", "haiku"}),
+}
+
+
+def effort_levels_for(provider: str, model: str | None) -> tuple[str, ...]:
+    """Effort levels selectable when *provider* spawns *model*.
+
+    Single source of truth for both the spawn-time effort resolver
+    (spawn_engine.py) and the Settings "Effort" dropdown
+    (settings_window.py) — neither hardcodes level lists or the
+    per-model exception table. Empty when the provider has no
+    ``effort_flag`` at all, or when *model* is one of that provider's
+    ``_MODELS_WITHOUT_EFFORT`` entries.
+    """
+    spec = PROVIDER_REGISTRY.get(provider)
+    if spec is None or not spec.effort_flag:
+        return ()
+    if model and model.strip() in _MODELS_WITHOUT_EFFORT.get(provider, frozenset()):
+        return ()
+    return spec.effort_levels

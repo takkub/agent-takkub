@@ -25,6 +25,7 @@ from agent_takkub import (
     project_nav,
     provider_config,
     provider_state,
+    role_models,
     settings_window,
     shared_dev_tools,
     skill_policy,
@@ -53,6 +54,11 @@ def _isolate_settings_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # store above so tests never read/write the real ~/.takkub registry.
     monkeypatch.setattr(user_profile, "_REGISTRY_PATH", tmp_path / "user-profiles.json")
     monkeypatch.setattr(user_profile, "_DEFAULT_CONFIG_DIR", tmp_path / "default-claude-config")
+    # Providers & Roles' per-role model/effort combos write through
+    # role_models.set_model/set_effort on every Save & Apply — isolate like
+    # every other store above so a test never touches the real
+    # ~/.takkub/role-models.json.
+    monkeypatch.setattr(role_models, "_PATH", tmp_path / "role-models.json")
     saved = dict(roles_mod._CUSTOM)
     roles_mod._CUSTOM.clear()
     yield
@@ -445,6 +451,124 @@ class TestProvidersRolesView:
 
         assert "data-eng" in custom_roles.load_custom_roles()
         assert "data-eng" in dlg._role_toggles
+        dlg.deleteLater()
+
+
+class TestRoleEffortCombo:
+    """Per-role reasoning-effort override (#136 follow-up): a combo next to
+    the model picker, gated by provider_spec.effort_levels_for and
+    repopulated whenever provider or model changes."""
+
+    def test_default_provider_offers_claude_effort_levels(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+        combo = dlg._role_effort_combos["backend"]
+        assert combo.isEnabled() is True
+        levels = [combo.itemData(i) for i in range(combo.count())]
+        assert levels == ["", "low", "medium", "high", "xhigh", "max"]
+        assert combo.currentData() == ""  # nothing saved yet -> "(default)"
+        dlg.deleteLater()
+
+    def test_switching_provider_to_unsupported_disables_combo(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+        provider_combo = dlg._role_provider_combos["backend"]
+        effort_combo = dlg._role_effort_combos["backend"]
+
+        provider_combo.setCurrentIndex(provider_combo.findData("gemini"))
+
+        assert effort_combo.isEnabled() is False
+        dlg.deleteLater()
+
+    def test_switching_model_to_haiku_disables_and_keeps_prior_selection(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+        model_combo = dlg._role_model_combos["backend"]
+        effort_combo = dlg._role_effort_combos["backend"]
+        effort_combo.setCurrentIndex(effort_combo.findData("high"))
+        assert effort_combo.currentData() == "high"
+
+        model_combo.setCurrentText("claude-haiku-4-5")
+
+        assert effort_combo.isEnabled() is False
+        # State preserved for display, not silently reset to "(default)".
+        assert effort_combo.currentData() == "high"
+        dlg.deleteLater()
+
+    def test_switching_provider_back_re_enables_and_restores_levels(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+        provider_combo = dlg._role_provider_combos["backend"]
+        effort_combo = dlg._role_effort_combos["backend"]
+
+        provider_combo.setCurrentIndex(provider_combo.findData("gemini"))
+        assert effort_combo.isEnabled() is False
+        provider_combo.setCurrentIndex(provider_combo.findData("claude"))
+
+        assert effort_combo.isEnabled() is True
+        levels = [effort_combo.itemData(i) for i in range(effort_combo.count())]
+        assert levels == ["", "low", "medium", "high", "xhigh", "max"]
+        dlg.deleteLater()
+
+    def test_save_apply_persists_effort_selection(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+        effort_combo = dlg._role_effort_combos["backend"]
+        effort_combo.setCurrentIndex(effort_combo.findData("xhigh"))
+
+        dlg._on_save_apply_clicked()
+
+        assert role_models.effort_for("backend", "claude") == "xhigh"
+        dlg.deleteLater()
+
+    def test_save_apply_drops_stale_effort_for_unsupported_model_and_notifies(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        role_models.set_model("backend", "claude", "claude-sonnet-5")
+        role_models.set_effort("backend", "claude", "high")
+
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+        # Combo was populated from disk with "high" selected; now the user
+        # switches the model under it to one that can't take --effort at all,
+        # without touching the effort combo itself.
+        dlg._role_model_combos["backend"].setCurrentText("claude-haiku-4-5")
+        assert dlg._role_effort_combos["backend"].isEnabled() is False
+
+        notices: list[tuple] = []
+        monkeypatch.setattr(
+            QMessageBox,
+            "information",
+            lambda *a, **k: notices.append(a) or QMessageBox.StandardButton.Ok,
+        )
+
+        dlg._on_save_apply_clicked()
+
+        assert role_models.effort_for("backend", "claude") is None
+        assert len(notices) == 1
+        assert "backend" in notices[0][2]  # (self, title, text) — text mentions the role
+        dlg.deleteLater()
+
+    def test_save_apply_no_notice_when_nothing_dropped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+        notices: list[tuple] = []
+        monkeypatch.setattr(
+            QMessageBox,
+            "information",
+            lambda *a, **k: notices.append(a) or QMessageBox.StandardButton.Ok,
+        )
+
+        dlg._on_save_apply_clicked()
+
+        assert notices == []
+        dlg.deleteLater()
+
+    def test_reset_restores_effort_combo_from_disk(self) -> None:
+        role_models.set_model("backend", "claude", "claude-sonnet-5")
+        role_models.set_effort("backend", "claude", "medium")
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+        effort_combo = dlg._role_effort_combos["backend"]
+        effort_combo.setCurrentIndex(effort_combo.findData("max"))
+
+        dlg._on_reset_clicked()
+
+        assert effort_combo.currentData() == "medium"
         dlg.deleteLater()
 
 

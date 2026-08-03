@@ -683,7 +683,7 @@ class TestCodexGeminiModelTier:
         from agent_takkub.orchestrator import _teammate_tier
 
         model, effort, fallback = _teammate_tier("codex")
-        assert model == "claude-opus-4-8"
+        assert model == "claude-opus-5"
         assert effort == "high"
         assert fallback == "claude-sonnet-5"
 
@@ -691,7 +691,7 @@ class TestCodexGeminiModelTier:
         from agent_takkub.orchestrator import _teammate_tier
 
         model, effort, fallback = _teammate_tier("gemini")
-        assert model == "claude-opus-4-8"
+        assert model == "claude-opus-5"
         assert effort == "high"
         assert fallback == "claude-sonnet-5"
 

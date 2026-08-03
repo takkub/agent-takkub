@@ -105,3 +105,93 @@ def test_corrupt_file_behaves_empty() -> None:
 def test_non_dict_json_behaves_empty() -> None:
     role_models._PATH.write_text('["a", "b"]', encoding="utf-8")
     assert role_models.all_models() == {}
+
+
+# ── effort field (#136 follow-up: per-role reasoning-effort override) ──────
+
+
+def test_legacy_entry_without_effort_key_still_loads() -> None:
+    # Backward compat: a role-models.json written before this field existed
+    # must load unchanged, with effort simply absent.
+    role_models._PATH.write_text(
+        '{"backend": {"provider": "codex", "model": "gpt-5.6"}}', encoding="utf-8"
+    )
+    assert role_models.all_models() == {"backend": {"provider": "codex", "model": "gpt-5.6"}}
+    assert role_models.effort_for("backend", "codex") is None
+
+
+def test_set_get_effort_roundtrip() -> None:
+    role_models.set_model("backend", "claude", "claude-sonnet-5")
+    role_models.set_effort("backend", "claude", "high")
+    assert role_models.effort_for("backend", "claude") == "high"
+    assert role_models.all_models() == {
+        "backend": {"provider": "claude", "model": "claude-sonnet-5", "effort": "high"}
+    }
+
+
+def test_effort_not_returned_for_a_different_provider() -> None:
+    role_models.set_model("backend", "claude", "claude-sonnet-5")
+    role_models.set_effort("backend", "claude", "high")
+    assert role_models.effort_for("backend", "codex") is None
+
+
+def test_invalid_effort_value_drops_only_that_field() -> None:
+    # "ludicrous" is not one of claude's declared effort_levels — the
+    # (provider, model) pair underneath must survive, only effort is dropped.
+    role_models._PATH.write_text(
+        '{"backend": {"provider": "claude", "model": "claude-sonnet-5", "effort": "ludicrous"}}',
+        encoding="utf-8",
+    )
+    assert role_models.model_for("backend", "claude") == "claude-sonnet-5"
+    assert role_models.effort_for("backend", "claude") is None
+
+
+def test_effort_valid_for_unregistered_provider_is_kept() -> None:
+    # A provider not in PROVIDER_REGISTRY (future/custom) can't be validated
+    # against a known level set — trust it rather than guess.
+    role_models._PATH.write_text(
+        '{"backend": {"provider": "made-up", "model": "x", "effort": "whatever"}}',
+        encoding="utf-8",
+    )
+    assert role_models.effort_for("backend", "made-up") == "whatever"
+
+
+def test_empty_effort_clears_only_effort_keeps_model() -> None:
+    role_models.set_model("backend", "claude", "claude-sonnet-5")
+    role_models.set_effort("backend", "claude", "high")
+    role_models.set_effort("backend", "claude", "")
+    assert role_models.effort_for("backend", "claude") is None
+    assert role_models.model_for("backend", "claude") == "claude-sonnet-5"
+
+
+def test_empty_model_clears_only_model_keeps_effort() -> None:
+    role_models.set_model("backend", "claude", "claude-sonnet-5")
+    role_models.set_effort("backend", "claude", "high")
+    role_models.set_model("backend", "claude", "")
+    assert role_models.model_for("backend", "claude") is None
+    assert role_models.effort_for("backend", "claude") == "high"
+
+
+def test_effort_only_entry_persists_without_a_model() -> None:
+    role_models.set_effort("reviewer", "claude", "max")
+    assert role_models.effort_for("reviewer", "claude") == "max"
+    assert role_models.model_for("reviewer", "claude") is None
+    assert role_models.all_models() == {"reviewer": {"provider": "claude", "effort": "max"}}
+
+
+def test_provider_switch_drops_stale_effort() -> None:
+    # Same wrong-CLI hazard as model: an effort chosen for one provider must
+    # not leak onto another when the role's provider changes.
+    role_models.set_model("backend", "claude", "claude-sonnet-5")
+    role_models.set_effort("backend", "claude", "high")
+    role_models.set_model("backend", "codex", "gpt-5.6")
+    assert role_models.effort_for("backend", "codex") is None
+    assert role_models.effort_for("backend", "claude") is None
+
+
+def test_clear_model_also_clears_effort() -> None:
+    role_models.set_model("backend", "claude", "claude-sonnet-5")
+    role_models.set_effort("backend", "claude", "high")
+    role_models.clear_model("backend")
+    assert role_models.model_for("backend", "claude") is None
+    assert role_models.effort_for("backend", "claude") is None
