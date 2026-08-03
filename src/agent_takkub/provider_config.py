@@ -188,7 +188,9 @@ def save_role_overrides(
         p = str(provider).lower().strip()
         if r in FORCED_ROLES or p not in VALID_PROVIDERS:
             continue
-        if r == "lead" or p != CLAUDE:
+        if p == CLAUDE:
+            overrides.pop(r, None)
+        else:
             overrides[r] = p
     save_providers(overrides, project)
 
