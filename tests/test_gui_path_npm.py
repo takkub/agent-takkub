@@ -63,12 +63,19 @@ class TestGuiBinaryDirs:
     def test_win32_includes_appdata_npm_and_program_files(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # NOTE: monkeypatching sys.platform simulates win32, but os.path is
+        # still the *host's* real module — production joins these with
+        # os.path.join too, so build the expected strings the same way
+        # instead of hardcoding "\" (which only matches when tests happen to
+        # run on a Windows host; mac/linux CI got "/" and failed here).
         monkeypatch.setattr(config.sys, "platform", "win32")
-        monkeypatch.setenv("APPDATA", r"C:\Users\demo\AppData\Roaming")
-        monkeypatch.setenv("ProgramFiles", r"C:\Program Files")
+        appdata = r"C:\Users\demo\AppData\Roaming"
+        program_files = r"C:\Program Files"
+        monkeypatch.setenv("APPDATA", appdata)
+        monkeypatch.setenv("ProgramFiles", program_files)
         dirs = config._gui_binary_dirs()
-        assert r"C:\Users\demo\AppData\Roaming\npm" in dirs
-        assert any(d.endswith(r"Program Files\nodejs") for d in dirs)
+        assert os.path.join(appdata, "npm") in dirs
+        assert any(d.endswith(os.path.join("Program Files", "nodejs")) for d in dirs)
 
     def test_linux_does_not_crash_and_returns_list(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(config.sys, "platform", "linux")
