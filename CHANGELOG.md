@@ -4,6 +4,30 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.41] - 2026-08-03
+
+### Added (เพิ่ม)
+- **ตั้งระดับ Effort (ความลึกในการคิด) ได้เองต่อ role** — Settings → Providers & Roles มีช่อง **Effort** เพิ่มมาข้างช่อง model ของแต่ละ role · เดิมค่านี้ hardcode อยู่ในโค้ด (`_ROLE_MODEL_TIERS`) ปรับได้ทางเดียวคือ env `TAKKUB_TEAMMATE_EFFORT` ซึ่งมีผลทั้งระบบพร้อมกัน
+  - เก็บใน `role-models.json` ไฟล์เดิม (ที่เก็บ provider+model อยู่แล้ว) แบบ sparse — เลือก "(ตามค่าเริ่มต้นของ role)" = ไม่เขียนลงไฟล์ · ไฟล์เก่าที่ไม่มีค่านี้ยังโหลดได้ปกติ
+  - **รู้ว่า CLI ไหนรับอะไรได้จริง**: claude รับ `low/medium/high/xhigh/max` · codex รับ `low/medium/high` (ผ่าน `-c model_reasoning_effort=`) · agy/opencode/kimi/cursor **ไม่รองรับ** (agy ฝัง effort ไว้ในชื่อ model อยู่แล้ว เช่น `gemini-3.1-pro-high`) → ช่องจะ disable พร้อมบอกเหตุผล
+  - **`claude-haiku-4-5` ไม่รองรับ effort** (CLI จะ error ถ้าส่งไป) → เลือก model นี้เมื่อไหร่ ช่อง Effort ปิดทันทีและไม่ส่ง flag แม้เคยตั้งค่าไว้
+  - ลำดับความสำคัญ: **ค่าที่ตั้งใน Settings > env `TAKKUB_TEAMMATE_EFFORT` > ค่าเริ่มต้นของ role**
+  - เปลี่ยน provider/model แล้วรายการอัปเดตทันที · ค่าที่ใช้ไม่ได้จะไม่ถูกลบเงียบ — คงไว้จนกด Save & Apply แล้วค่อยตัดพร้อมแจ้ง
+
+### Fixed (แก้)
+- **macOS: เปิดแอปจาก Finder/Launchpad/Dock แล้วหา CLI ไม่เจอ** (จาก PR #136 โดย [@than-aa](https://github.com/than-aa) ทดสอบบน Mac Intel i7) — แอป GUI บน mac **ไม่ได้รับ PATH ของ shell** ทำให้ตอน boot มองไม่เห็น `codex` / `agy` / `opencode` / `npm` → provider ที่ตั้งไว้ถูกมองว่า "ใช้ไม่ได้" แล้ว degrade กลับเป็น claude **ทุกครั้งที่เปิดใหม่** (อาการที่ผู้ใช้เห็นคือ "ตั้ง Lead เป็น codex แล้วไม่จำค่า")
+  - `ensure_gui_path()` เติม path มาตรฐานเข้า PATH ตอน boot: Homebrew ทั้ง **Apple Silicon (`/opt/homebrew/bin`) และ Intel (`/usr/local/bin`)**, nvm, fnm, n, volta, asdf, `~/.local/bin`
+  - หา `npm` เจอแม้ไม่อยู่ใน PATH — ครอบทั้ง Windows (`%APPDATA%\npm`, nodejs, `npm.cmd/.exe`), macOS และ Linux
+  - **แก้บั๊กเลือก Node ผิดเวอร์ชัน**: การเรียงโฟลเดอร์ nvm แบบข้อความทำให้ `v9` มาก่อน `v20` (เพราะ `'9' > '2'`) เลยได้ Node เก่ากว่า — เปลี่ยนเป็นเรียงตามเลขเวอร์ชันจริง
+  - รวมโค้ดค้นหาที่เคยซ้ำกัน 3 ที่ (`claude_update.py`, `update_panel.py`, `config.py`) ให้เหลือที่เดียว
+  - เอาการเรียก PATH-bootstrap ออกจาก `_provider_available()` (ถูกเรียกทุกครั้งที่ spawn/เปิด Settings) + memoize ให้ทำงานจริงครั้งเดียวต่อการเปิดแอป
+- **macOS: icon ไม่ขึ้นบน Dock / App Switcher** และเพิ่ม launcher ลง `~/Applications` ให้เปิดจาก Launchpad ได้ (PR #136)
+- **`_ROLE_MODEL_TIERS` ยังชี้ `claude-opus-4-8`** — ตารางนี้อยู่คนละที่กับ dropdown ใน Settings เลยตกหล่นตอนอัปรายชื่อ model รอบที่แล้ว (1.0.40) · อัปเป็น `claude-opus-5` แล้ว พร้อมคอมเมนต์ชี้จุดที่ต้องแก้คู่กันเวลามีรุ่นใหม่
+
+### Notes (หมายเหตุ)
+- เครื่อง dev และ CI (`macos-latest`) เป็น **Apple Silicon** ทั้งคู่ — path ของ Homebrew ฝั่ง **Intel (`/usr/local/bin`) ยืนยันด้วยเทสที่จำลอง filesystem เท่านั้น** ยังไม่ได้รันบนเครื่อง Intel จริง (ขอให้ผู้ส่ง PR ช่วยยืนยันไว้แล้ว)
+- ส่วนที่ PR #136 แถมมาแต่ไม่รับเข้า: การแก้ `save_role_overrides()` (ตรวจแล้วไม่ได้เปลี่ยนพฤติกรรมจริง + เสี่ยงลบค่าที่สัญญาว่าจะเก็บ) — รายละเอียดในรีวิว `docs/reviews/2026-08-03-pr136-mac-intel.md`
+
 ## [1.0.40] - 2026-08-03
 
 ### Fixed (แก้)
