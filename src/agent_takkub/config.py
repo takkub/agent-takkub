@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import glob
 import json
 import logging
 import os
 import re
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -747,42 +749,122 @@ def find_claude_executable() -> str:
     )
 
 
-def ensure_macos_gui_path() -> None:
-    """Ensure common macOS GUI binary directories are on PATH.
+def _node_version_key(bin_dir: str) -> tuple[int, int, int]:
+    """Version-aware sort key for an nvm-style ``.../vX.Y.Z/bin`` path.
 
-    macOS applications launched from Finder or GUI launchers do not inherit
-    interactive shell PATH variables. This function adds standard Node/npm,
-    Homebrew, Pyenv, Fnm, Asdf, and Local binary paths to `os.environ["PATH"]`
-    so CLI provider discovery (`codex`, `agy`, `claude`, `opencode`, etc.)
-    works on initial application boot.
+    Plain lexicographic sort puts ``v9.x`` after ``v20.x`` (``'9' > '2'``),
+    silently picking an older Node major. Parses the version out of the
+    parent directory name and sorts numerically instead.
     """
-    if sys.platform != "darwin":
-        return
+    m = re.search(r"v?(\d+)\.(\d+)\.(\d+)", os.path.basename(os.path.dirname(bin_dir)))
+    return tuple(int(x) for x in m.groups()) if m else (0, 0, 0)
 
-    import glob
 
-    extra_paths = [
-        "/opt/homebrew/bin",
-        "/usr/local/bin",
+def _gui_binary_dirs() -> list[str]:
+    """Platform-specific directories to probe for CLI binaries (node/npm/
+    codex/agy/...) that a process launched without an inherited shell PATH
+    (e.g. a GUI app opened from Finder/Dock/Launchpad on macOS) would
+    otherwise miss. Entries containing ``*`` are glob patterns expanded by
+    the caller.
+    """
+    if sys.platform == "darwin":
+        return [
+            "/opt/homebrew/bin",  # Apple Silicon Homebrew
+            "/usr/local/bin",  # Intel Homebrew
+            os.path.expanduser("~/.nvm/versions/node/*/bin"),
+            os.path.expanduser("~/.fnm/current/bin"),
+            os.path.expanduser("~/.n/bin"),
+            os.path.expanduser("~/.local/bin"),
+            os.path.expanduser("~/.asdf/shims"),
+            os.path.expanduser("~/.volta/bin"),
+            "/usr/bin",
+        ]
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming"))
+        localappdata = os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))
+        program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
+        program_files_x86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+        return [
+            os.path.join(appdata, "npm"),
+            os.path.join(program_files, "nodejs"),
+            os.path.join(program_files_x86, "nodejs"),
+            os.path.join(localappdata, "Volta", "bin"),
+            os.path.join(localappdata, "fnm_multishells", "*"),
+        ]
+    # linux: not an officially supported desktop target, but CI runs
+    # ubuntu-latest — this must never raise there.
+    return [
         os.path.expanduser("~/.nvm/versions/node/*/bin"),
-        os.path.expanduser("~/.fnm/current/bin"),
-        os.path.expanduser("~/.n/bin"),
         os.path.expanduser("~/.local/bin"),
-        os.path.expanduser("~/.asdf/shims"),
-        os.path.expanduser("~/.volta/bin"),
+        "/usr/local/bin",
         "/usr/bin",
     ]
-    expanded = []
-    for p in extra_paths:
+
+
+def _expand_gui_binary_dirs() -> list[str]:
+    """Expand `_gui_binary_dirs()` globs (newest Node version first) and
+    drop directories that don't exist."""
+    expanded: list[str] = []
+    for p in _gui_binary_dirs():
         if "*" in p:
-            expanded.extend(sorted(glob.glob(p), reverse=True))
+            expanded.extend(sorted(glob.glob(p), key=_node_version_key, reverse=True))
         else:
             expanded.append(p)
+    return [p for p in expanded if p and os.path.isdir(p)]
 
-    current_path = os.environ.get("PATH", "").split(os.pathsep)
-    missing = [p for p in expanded if p and os.path.isdir(p) and p not in current_path]
-    if missing:
-        os.environ["PATH"] = os.pathsep.join(missing) + os.pathsep + os.environ.get("PATH", "")
+
+_gui_path_ensured = False
+
+
+def ensure_gui_path() -> None:
+    """Best-effort: prepend `_gui_binary_dirs()` entries that exist and
+    aren't already on PATH to this process's `os.environ["PATH"]`.
+
+    A process launched without an inherited shell PATH (typically a macOS
+    GUI app opened from Finder/Dock/Launchpad) otherwise can't discover
+    `codex`/`agy`/`npm`/etc. at boot. On Windows/Linux the GUI environment
+    usually already has a working PATH, so this is close to a no-op there —
+    it still fills in gaps (e.g. a missing `%APPDATA%\\npm`) without erroring.
+
+    Memoized: the actual PATH scan runs at most once per process. Never
+    raises — PATH discovery is best-effort and must not block boot.
+    """
+    global _gui_path_ensured
+    if _gui_path_ensured:
+        return
+    _gui_path_ensured = True
+    try:
+        current = os.environ.get("PATH", "").split(os.pathsep)
+        missing = [p for p in _expand_gui_binary_dirs() if p not in current]
+        if missing:
+            os.environ["PATH"] = os.pathsep.join(missing) + os.pathsep + os.environ.get("PATH", "")
+    except Exception:
+        _log.debug("ensure_gui_path failed", exc_info=True)
+
+
+def find_npm() -> str | None:
+    """Locate the npm executable, falling back to `_gui_binary_dirs()` when
+    `npm` isn't already on PATH (e.g. a GUI-launched process on macOS).
+
+    Mutates `os.environ["PATH"]` by design when a fallback directory hits —
+    so the `npm` subprocess this returns can itself locate `node`. Returns
+    `None` (leaving PATH untouched) when nothing is found.
+    """
+    npm = shutil.which("npm.cmd") or shutil.which("npm")
+    if npm:
+        return npm
+
+    names = ["npm.cmd", "npm.exe", "npm"] if sys.platform == "win32" else ["npm"]
+    for d in _expand_gui_binary_dirs():
+        for name in names:
+            candidate = os.path.join(d, name)
+            if os.path.isfile(candidate) and (
+                sys.platform == "win32" or os.access(candidate, os.X_OK)
+            ):
+                if d not in os.environ.get("PATH", "").split(os.pathsep):
+                    os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
+                return candidate
+    return None
 
 
 def _heal_process_path(resolved: str) -> str:
