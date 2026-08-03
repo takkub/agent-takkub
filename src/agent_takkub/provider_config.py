@@ -230,6 +230,14 @@ def _provider_available(provider: str) -> bool:
     """
     if provider == CLAUDE:
         return True
+
+    try:
+        from .config import ensure_macos_gui_path
+
+        ensure_macos_gui_path()
+    except Exception:
+        pass
+
     # (1) user-intent toggle
     try:
         from .provider_state import is_disabled

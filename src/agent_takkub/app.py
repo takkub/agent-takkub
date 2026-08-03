@@ -623,6 +623,9 @@ def _bootstrap_prod_claude_profile() -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from .config import ensure_macos_gui_path
+
+    ensure_macos_gui_path()
     # Layer C: silent fast-forward pull before UI starts.  If a pull
     # succeeds, os.execv re-execs into the new code — execution never
     # reaches the next line.  Any failure returns False silently.
