@@ -4,6 +4,27 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.40] - 2026-08-03
+
+### Fixed (แก้)
+- **หน้าต่างดำเด้งแว๊บๆ ตอนเปิด cockpit (user รายงานว่า "รู้สึกเหมือนโดนไวรัส")** — cockpit รันใต้ `pythonw.exe` ซึ่งเป็น GUI process ที่ไม่มี console ของตัวเอง · บน Windows เมื่อ process แบบนี้เรียกโปรแกรม console (git.exe / npm / node) โดยไม่ใส่ `creationflags=CREATE_NO_WINDOW` ระบบจะ **สร้าง console หน้าต่างใหม่ให้ลูกทุกครั้ง** = หน้าต่างดำแว๊บแล้วหาย (การ redirect `capture_output` ไม่ช่วย — คนละเรื่องกัน)
+  - พิสูจน์ด้วยตัวเลขจริง (harness รันใต้ `pythonw`): ลูกที่ไม่มี flag → `GetConsoleWindow()` = `396036` (มี console จริง) · ใส่ flag → `0`
+  - จุดที่ทำให้เห็นตอน boot: **git ของระบบ worktree** (`prune_orphan_worktrees_boot()` รันทุกครั้งที่เปิดแอป), `git ls-files` ตอนเปิดโปรเจค, เช็ค npm อัปเดตหลัง boot, และตอน spawn pane ของ codex
+  - แก้ **13 จุด** ที่ขาด flag (worktree · skill scan · update panel/worker · mcp bridge · issues · browser · limit status · remote settings/tunnel · skills page) — ค่าเป็น `0` บน macOS จึงไม่กระทบฝั่ง mac
+  - เหลือ **1 จุดที่ตั้งใจไม่แก้**: `takkub issue new` ที่เปิด `$EDITOR` (vim/nano/notepad) แบบพิมพ์โต้ตอบ — ต้องใช้ console จริง ถ้าซ่อนจะพิมพ์ไม่ได้ · กำกับด้วยคอมเมนต์ `# subprocess-console-ok:`
+  - **กันกลับมาเป็นซ้ำ**: เพิ่มเทสที่เดินอ่าน AST ทุกไฟล์ใต้ `src/agent_takkub/` (136 ไฟล์) แล้วฟ้องทันทีถ้ามี subprocess ใหม่ที่ลืม `creationflags` (ยกเว้นได้ด้วยคอมเมนต์ระบุเหตุผล) · QA ทดสอบแล้วว่าฟ้องแดงจริงเมื่อจงใจใส่โค้ดผิด
+- **แถบนับ token คิดเปอร์เซ็นต์ผิดสำหรับ model รุ่นใหม่** — ตารางขนาด context ผูกกับชื่อที่มี `[1m]` ต่อท้ายเท่านั้น ทำให้ `claude-opus-5` / `claude-sonnet-5` / `claude-fable-5` / opus-4.x / sonnet-4.6 (ซึ่ง context **1M เป็นค่า default อยู่แล้ว**) ถูกคิดเป็น 200k → pane ที่ใช้ไป 150k โชว์ ~75% ทั้งที่จริง ~15% · ตอนนี้ผูกกับชื่อ model ตรงๆ และจับ `[1m]` ด้วย regex (ครอบคลุมรุ่นใหม่ที่ยังไม่อยู่ในตารางด้วย)
+
+### Changed (เปลี่ยน)
+- **รายชื่อ model ใน Settings → Providers & Roles เป็นรุ่นล่าสุด** — ของเดิมเป็น snapshot เดือน ก.ค. และหลายตัวใช้ไม่ได้จริง · รอบนี้ดึงจาก CLI ที่ติดตั้งอยู่บนเครื่องจริง ไม่ได้เดา:
+  - **claude**: `claude-opus-5` ขึ้นเป็นตัวหลัก (เดิมสุดที่ `claude-opus-4-8`) · มี `claude-sonnet-5` / `claude-haiku-4-5` / `claude-fable-5` · เก็บ `claude-opus-4-8` ไว้เป็นรุ่นเก่าที่ยังใช้ได้
+  - **codex**: `gpt-5.6` เดี่ยวไม่มีแล้ว กลายเป็น `gpt-5.6-sol` / `-terra` / `-luna` (ยืนยันจาก cache ของ codex เอง) · ตัด `gpt-5.3-codex` ที่หายไปแล้วออก
+  - **gemini (agy)**: เปลี่ยนจากชื่อโชว์ (`"Gemini 3.5 Flash"` ซึ่งใส่แล้วใช้ไม่ได้) เป็น token จริงที่ `--model` รับ เช่น `gemini-3.6-flash-high`, `gemini-3.1-pro-high`
+  - **opencode**: `anthropic/claude-opus-5`, `anthropic/claude-sonnet-5`
+  - **kimi / cursor**: คงค่าเดิม + คอมเมนต์ระบุชัดว่า **ยังยืนยันไม่ได้** (kimi ไม่มีคำสั่งลิสต์ model, cursor CLI ไม่ได้ติดตั้งบนเครื่องนี้) — ไม่เดาให้
+  - ทุกช่องยังพิมพ์เองได้เหมือนเดิม (CLI ออกรุ่นใหม่เร็วกว่ารอบ release)
+- `plan_tier.PRO_LEAD_MODEL` → `claude-opus-5` (เจตนาเดิมคือ "Opus ตัวล่าสุดที่ไม่ใช่ 1M variant")
+
 ## [1.0.39] - 2026-07-28
 
 ### Added (เพิ่ม)
