@@ -93,6 +93,16 @@ function createMac() {
       stdio: 'ignore',
     });
   }
+
+  // Also install under ~/Applications so macOS Launchpad indexes and shows the app icon
+  const userAppsDir = path.join(os.homedir(), 'Applications');
+  try {
+    fs.mkdirSync(userAppsDir, { recursive: true });
+    spawnSync('cp', ['-R', appDir, userAppsDir], { stdio: 'ignore' });
+  } catch (_e) {
+    /* best-effort */
+  }
+
   return fs.existsSync(path.join(macos, 'launch')) ? appDir : null;
 }
 

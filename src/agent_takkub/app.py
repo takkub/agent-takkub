@@ -224,7 +224,7 @@ if _should_allow_multi():
 
 
 from PyQt6.QtCore import QLockFile  # noqa: E402
-from PyQt6.QtGui import QFont  # noqa: E402 — PyQt must import after env setup above
+from PyQt6.QtGui import QFont, QIcon  # noqa: E402 — PyQt must import after env setup above
 from PyQt6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
 from .main_window import MainWindow  # noqa: E402
@@ -623,6 +623,9 @@ def _bootstrap_prod_claude_profile() -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from .config import ensure_macos_gui_path
+
+    ensure_macos_gui_path()
     # Layer C: silent fast-forward pull before UI starts.  If a pull
     # succeeds, os.execv re-execs into the new code — execution never
     # reaches the next line.  Any failure returns False silently.
@@ -634,6 +637,13 @@ def main(argv: list[str] | None = None) -> int:
 
     app = QApplication(argv or sys.argv)
     app.setApplicationName("agent-takkub")
+
+    icon_path = Path(__file__).parent / "static" / "icon.png"
+    if not icon_path.exists():
+        icon_path = Path(__file__).parent.parent.parent / "assets" / "icon.png"
+    if icon_path.exists():
+        app.setWindowIcon(QIcon(str(icon_path)))
+
     _configure_webengine_profile()
     # Segoe UI ships on Windows; on macOS it is absent, which triggers a
     # costly font-alias scan + fallback at startup. Pick the native UI font

@@ -747,6 +747,44 @@ def find_claude_executable() -> str:
     )
 
 
+def ensure_macos_gui_path() -> None:
+    """Ensure common macOS GUI binary directories are on PATH.
+
+    macOS applications launched from Finder or GUI launchers do not inherit
+    interactive shell PATH variables. This function adds standard Node/npm,
+    Homebrew, Pyenv, Fnm, Asdf, and Local binary paths to `os.environ["PATH"]`
+    so CLI provider discovery (`codex`, `agy`, `claude`, `opencode`, etc.)
+    works on initial application boot.
+    """
+    if sys.platform != "darwin":
+        return
+
+    import glob
+
+    extra_paths = [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        os.path.expanduser("~/.nvm/versions/node/*/bin"),
+        os.path.expanduser("~/.fnm/current/bin"),
+        os.path.expanduser("~/.n/bin"),
+        os.path.expanduser("~/.local/bin"),
+        os.path.expanduser("~/.asdf/shims"),
+        os.path.expanduser("~/.volta/bin"),
+        "/usr/bin",
+    ]
+    expanded = []
+    for p in extra_paths:
+        if "*" in p:
+            expanded.extend(sorted(glob.glob(p), reverse=True))
+        else:
+            expanded.append(p)
+
+    current_path = os.environ.get("PATH", "").split(os.pathsep)
+    missing = [p for p in expanded if p and os.path.isdir(p) and p not in current_path]
+    if missing:
+        os.environ["PATH"] = os.pathsep.join(missing) + os.pathsep + os.environ.get("PATH", "")
+
+
 def _heal_process_path(resolved: str) -> str:
     """Self-heal: *resolved* was found by probing (claude is NOT on PATH).
 
