@@ -85,25 +85,36 @@ _HARVEST_EXCLUDE_DIRS = frozenset(
 #
 # The global TAKKUB_TEAMMATE_MODEL / _EFFORT / _FALLBACK env vars still win
 # when explicitly set — they override every role's per-role default at once.
+#
+# Model-id hygiene: this table hardcodes concrete Claude model ids as the
+# *default* tier per role — separate from settings_window.py's
+# _MODELS_BY_PROVIDER (a dropdown PRESET list that intentionally keeps older
+# ids selectable) and plan_tier.py (usage-credit gating, keyed by whatever
+# model a pane actually ends up running). When Anthropic ships a new
+# generation, update the id HERE (the actual default everyone spawns with);
+# _MODELS_BY_PROVIDER only needs the new id added as one more offered preset,
+# it doesn't need the old ones removed. The two lists drifted once already
+# (this table kept pointing at claude-opus-4-8 after claude-opus-5 shipped
+# and became current) — check both when bumping.
 _DEFAULT_TEAMMATE_TIER: tuple[str, str, str] = (
     "claude-sonnet-5",
     "medium",
     "claude-haiku-4-5",
 )
 _ROLE_MODEL_TIERS: dict[str, tuple[str, str, str]] = {
-    "reviewer": ("claude-opus-4-8", "high", "claude-sonnet-5"),
-    "critic": ("claude-opus-4-8", "high", "claude-sonnet-5"),
+    "reviewer": ("claude-opus-5", "high", "claude-sonnet-5"),
+    "critic": ("claude-opus-5", "high", "claude-sonnet-5"),
     # maintainer: full-system review + subtle-bug hunting on agent-takkub
     # itself — a gate-style workload, not high-frequency impl — so it sits
     # in the reviewer/critic tier rather than the backend/devops tier.
-    "maintainer": ("claude-opus-4-8", "high", "claude-sonnet-5"),
+    "maintainer": ("claude-opus-5", "high", "claude-sonnet-5"),
     "backend": ("claude-sonnet-5", "high", "claude-haiku-4-5"),
     "devops": ("claude-sonnet-5", "high", "claude-haiku-4-5"),
     # codex/gemini substitutes: when the real binary is unavailable, Claude
     # backs the role — use Opus/high so the cross-check has the same quality
     # as reviewer/critic rather than falling to the default Sonnet tier.
-    "codex": ("claude-opus-4-8", "high", "claude-sonnet-5"),
-    "gemini": ("claude-opus-4-8", "high", "claude-sonnet-5"),
+    "codex": ("claude-opus-5", "high", "claude-sonnet-5"),
+    "gemini": ("claude-opus-5", "high", "claude-sonnet-5"),
 }
 
 # ── bracketed-paste framing ───────────────────────────────────────────────────

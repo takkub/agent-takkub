@@ -114,6 +114,7 @@ from . import (
     project_nav,
     provider_config,
     provider_models,
+    provider_spec,
     provider_state,
     role_models,
     shared_dev_tools,
@@ -362,6 +363,54 @@ def _combo_model(combo: QComboBox) -> str:
     """Read a model picker back: "(default)" (or blank) means no override."""
     text = combo.currentText().strip()
     return "" if text == _MODEL_DEFAULT_LABEL else text
+
+
+# Empty selection = don't pass an effort argument at all, i.e. the role's
+# tier default (or the TAKKUB_TEAMMATE_EFFORT env override, or the provider's
+# own CLI default) applies instead — see spawn_engine._resolve_teammate_effort.
+_EFFORT_DEFAULT_LABEL = "(ตามค่าเริ่มต้นของ role)"
+
+
+def _fill_effort_combo(combo: QComboBox, provider: str, model: str, current: str | None) -> None:
+    """(Re)populate an effort picker with the levels *provider* accepts for
+    *model* — single source of truth is
+    ``provider_spec.effort_levels_for`` (#103: never hardcode a level list
+    or the per-model exception table here).
+
+    When that provider/model combination can't take an effort argument at
+    all, the combo is disabled rather than emptied: *current* (if any) is
+    kept as the sole selectable item so a stale-but-still-recorded choice
+    stays visible instead of silently vanishing — Save & Apply is what
+    actually drops it (see the save handler's own note).
+    """
+    combo.blockSignals(True)
+    combo.clear()
+    combo.addItem(_EFFORT_DEFAULT_LABEL, "")
+    levels = provider_spec.effort_levels_for(provider, model)
+    if levels:
+        for level in levels:
+            combo.addItem(level, level)
+        combo.setEnabled(True)
+        combo.setToolTip("reasoning effort ของ role นี้ — ว่าง = ตามค่าเริ่มต้นของ role")
+    else:
+        if current:
+            combo.addItem(current, current)
+        combo.setEnabled(False)
+        combo.setToolTip(
+            "provider/model นี้ไม่รองรับ reasoning effort — ตั้งค่าไม่ได้ (Save & Apply จะตัดค่าเดิมออก ถ้ามี)"
+        )
+    idx = combo.findData(current or "")
+    combo.setCurrentIndex(idx if idx >= 0 else 0)
+    combo.blockSignals(False)
+
+
+def _combo_effort(combo: QComboBox) -> str:
+    """Read an effort picker back: disabled (unsupported provider/model) or
+    the "(default)" row both mean no override."""
+    if not combo.isEnabled():
+        return ""
+    text = combo.currentText().strip()
+    return "" if text == _EFFORT_DEFAULT_LABEL else text
 
 
 # Roles rendered as rows in the MCP/Plugins matrices — same set (and order)
@@ -800,6 +849,7 @@ class SettingsWindow(QDialog):
             # next pane).
             for provider, combo in self._provider_model_combos.items():
                 provider_models.set_model(provider, _combo_model(combo))
+            dropped_effort_roles: list[str] = []
             for role, combo in self._role_model_combos.items():
                 # Bind the model to the CLI it was picked for, so switching the
                 # role's provider (or a substitute kicking in) can't pass a
@@ -808,6 +858,17 @@ class SettingsWindow(QDialog):
                     self._role_provider_combos[role].currentData() or provider_config.CLAUDE
                 )
                 role_models.set_model(role, role_provider, _combo_model(combo))
+                effort_combo = self._role_effort_combos.get(role)
+                if effort_combo is not None:
+                    if not effort_combo.isEnabled() and role_models.effort_for(role, role_provider):
+                        # Combo is disabled because the CURRENT provider/model
+                        # can't take an effort argument, yet a value is still
+                        # on disk for this exact provider (stale from before
+                        # the model changed under it) — drop it now rather
+                        # than persist something the CLI would reject, and
+                        # tell the user once instead of silently.
+                        dropped_effort_roles.append(role)
+                    role_models.set_effort(role, role_provider, _combo_effort(effort_combo))
 
             role_providers = {
                 role: combo.currentData() for role, combo in self._role_provider_combos.items()
@@ -893,6 +954,13 @@ class SettingsWindow(QDialog):
                 self, "Save failed", f"บันทึกไม่สำเร็จ (rolled back ทุก store ที่แก้ไปแล้ว): {e}"
             )
             return
+        if dropped_effort_roles:
+            QMessageBox.information(
+                self,
+                "Effort override cleared",
+                "provider/model ปัจจุบันไม่รองรับ reasoning effort — ตัดค่า effort เดิมออกจาก: "
+                + ", ".join(dropped_effort_roles),
+            )
         self._clear_dirty()
         self.accept()
 
@@ -986,6 +1054,7 @@ class SettingsWindow(QDialog):
         self._role_toggles = {}
         self._role_provider_combos = {}
         self._role_model_combos: dict[str, QComboBox] = {}
+        self._role_effort_combos: dict[str, QComboBox] = {}
         self._role_provider_badges: dict[str, QLabel] = {}
         self._lead_warning_lbl: QLabel | None = None
 
@@ -1117,11 +1186,37 @@ class SettingsWindow(QDialog):
             _role_provider_now,
             role_models.model_for(role, _role_provider_now),
         )
-        model_combo.currentTextChanged.connect(self._mark_dirty)
         row_lay.addWidget(model_combo)
         self._role_model_combos[role] = model_combo
+
+        # Per-role reasoning-effort override — same per-provider binding as
+        # the model combo above, stored in the same role_models.json entry.
+        # Not editable (unlike model): the offered levels are an exact enum
+        # per provider (provider_spec.effort_levels_for), so free text would
+        # only ever be wrong.
+        effort_combo = QComboBox(row)
+        effort_combo.setMinimumWidth(140)
+        effort_combo.setAccessibleName(f"{label} effort")
+        _fill_effort_combo(
+            effort_combo,
+            _role_provider_now,
+            role_models.model_for(role, _role_provider_now) or "",
+            role_models.effort_for(role, _role_provider_now),
+        )
+        effort_combo.currentIndexChanged.connect(self._mark_dirty)
+        row_lay.addWidget(effort_combo)
+        self._role_effort_combos[role] = effort_combo
+
+        # A free-typed model change can also change which effort levels are
+        # offered (e.g. switching to claude-haiku-4-5), so refresh Effort
+        # whenever Model changes too — not just when the CLI combo does.
+        model_combo.currentTextChanged.connect(self._mark_dirty)
+        model_combo.currentTextChanged.connect(
+            lambda _t="", r=role: self._refresh_role_effort_combo(r)
+        )
         # When the role's CLI changes, refresh its model presets to that
-        # provider's list (keeping any free-typed value the user had).
+        # provider's list (keeping any free-typed value the user had), then
+        # refresh Effort against the (possibly just-changed) model.
         combo.currentIndexChanged.connect(
             lambda _i=0, r=role: _fill_model_combo(
                 self._role_model_combos[r],
@@ -1129,6 +1224,7 @@ class SettingsWindow(QDialog):
                 _combo_model(self._role_model_combos[r]) or None,
             )
         )
+        combo.currentIndexChanged.connect(lambda _i=0, r=role: self._refresh_role_effort_combo(r))
 
         # Gemini #12 — surface when the role's configured provider would
         # actually be substituted by Claude right now (toggled off or not
@@ -1202,6 +1298,7 @@ class SettingsWindow(QDialog):
         self._role_toggles.pop(role, None)
         self._role_provider_combos.pop(role, None)
         self._role_model_combos.pop(role, None)
+        self._role_effort_combos.pop(role, None)
         self._role_provider_badges.pop(role, None)
         layout = row.parentWidget().layout() if row.parentWidget() else None
         if layout is not None:
@@ -1225,6 +1322,18 @@ class SettingsWindow(QDialog):
             warn_lbl = getattr(self, "_lead_warning_lbl", None)
             if warn_lbl is not None:
                 warn_lbl.setVisible(provider != CLAUDE)
+
+    def _refresh_role_effort_combo(self, role: str) -> None:
+        """Repopulate `role`'s Effort combo for its CURRENT provider+model
+        selection (not what's on disk) — called whenever either changes so
+        the offered levels, and the disabled/unsupported state, always
+        match what Save & Apply is about to persist."""
+        effort_combo = self._role_effort_combos.get(role)
+        if effort_combo is None:
+            return
+        provider = self._role_provider_combos[role].currentData() or provider_config.CLAUDE
+        model = _combo_model(self._role_model_combos[role])
+        _fill_effort_combo(effort_combo, provider, model, _combo_effort(effort_combo) or None)
 
     def _reset_providers_roles_view(self) -> None:
         for provider, toggle in self._provider_toggles.items():
@@ -1254,6 +1363,13 @@ class SettingsWindow(QDialog):
         for role, combo in self._role_model_combos.items():
             provider = self._role_provider_combos[role].currentData() or provider_config.CLAUDE
             _fill_model_combo(combo, provider, role_models.model_for(role, provider))
+
+        for role, effort_combo in self._role_effort_combos.items():
+            provider = self._role_provider_combos[role].currentData() or provider_config.CLAUDE
+            model = _combo_model(self._role_model_combos[role])
+            _fill_effort_combo(
+                effort_combo, provider, model, role_models.effort_for(role, provider)
+            )
 
     # ──────────────────────────────────────────────────────────
     # view: New Role (real)

@@ -113,6 +113,42 @@ def _append_provider_effort(
     argv.extend([spec.effort_flag, value])
 
 
+def _resolve_teammate_effort(base_role: str, spec: ProviderSpec, model: str) -> str:
+    """Resolve the effort value a teammate pane should spawn with for
+    *base_role* on *spec*, spawning *model* (empty string when no explicit
+    model override applies — see the two call sites).
+
+    Precedence (highest wins):
+      1. the role's own Settings -> Providers & Roles effort override
+         (:func:`role_models.effort_for`, already resolved against the
+         provider ACTUALLY spawning so a re-pointed/substituted role never
+         inherits an effort meant for a different CLI — same contract as
+         `role_models.model_for`)
+      2. the ``TAKKUB_TEAMMATE_EFFORT`` env escape hatch (pre-existing,
+         process-wide) — its mere *presence* in the environment wins over
+         the tier default, even set to ``""`` to force no ``--effort``
+      3. the role's tier default (:func:`_teammate_tier`)
+
+    Whichever wins is then gated by
+    :func:`provider_spec.effort_levels_for`: a provider with no
+    ``effort_flag`` at all, or a *model* in that provider's
+    ``_MODELS_WITHOUT_EFFORT`` (e.g. claude-haiku-4-5), always resolves to
+    ``""`` regardless of which tier picked a value — callers never need to
+    re-check provider/model support themselves.
+    """
+    from .provider_spec import effort_levels_for
+    from .role_models import effort_for as role_effort_for
+
+    if not effort_levels_for(spec.name, model):
+        return ""
+    role_effort = role_effort_for(base_role, spec.name)
+    if role_effort:
+        return role_effort
+    if "TAKKUB_TEAMMATE_EFFORT" in os.environ:
+        return os.environ["TAKKUB_TEAMMATE_EFFORT"].strip()
+    return _teammate_tier(base_role)[1]
+
+
 _CURRENT_TASK_BEGIN = "\n\n<!-- takkub-current-spawn-task:start -->"
 _CURRENT_TASK_END = "<!-- takkub-current-spawn-task:end -->"
 _CURRENT_TASK_TRIGGER = "Start the current task from the one-shot system-prompt block now."
@@ -1454,6 +1490,11 @@ class SpawnEngineMixin:
                 provider_bin,
                 *spec.autonomy_flags.get(sys.platform, spec.autonomy_flags.get("default", [])),
             ]
+            # Default for providers with no model_flag (none currently in the
+            # registry, but ProviderSpec allows it) — _resolve_teammate_effort
+            # below still needs a value to check against
+            # provider_spec._MODELS_WITHOUT_EFFORT.
+            provider_model = ""
             if spec.model_flag:
                 from .provider_models import model_for
                 from .role_models import model_for as role_model_for
@@ -1477,10 +1518,12 @@ class SpawnEngineMixin:
             if not _is_lead:
                 # Role tiers are provider-neutral for effort: a pane mapped to
                 # agy or Codex should retain the role's low/medium/high setting
-                # just like a Claude-backed pane. Explicitly empty env disables
-                # the argument for every provider.
-                _, tier_effort, _ = _teammate_tier(base_role)
-                provider_effort = os.environ.get("TAKKUB_TEAMMATE_EFFORT", tier_effort).strip()
+                # just like a Claude-backed pane. _resolve_teammate_effort
+                # applies the full role-setting > env > tier precedence and
+                # gates the result against what this provider/model actually
+                # accepts — _append_provider_effort is then a no-op whenever
+                # that resolves to "".
+                provider_effort = _resolve_teammate_effort(base_role, spec, provider_model)
                 _append_provider_effort(provider_argv, spec, provider_effort)
             # MCP injection (#100): dispatched per spec.mcp_adapter_variant —
             # codex gets native `-c mcp_servers.<name>.<key>=…` session
@@ -1946,7 +1989,9 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         #   TAKKUB_TEAMMATE_EFFORT=""                  → no --effort
         #   TAKKUB_TEAMMATE_EFFORT="high"              → force high effort everywhere
         if role_name != LEAD.name:
-            tier_model, tier_effort, tier_fallback = _teammate_tier(base_role)
+            # effort's own tier default is looked up inside
+            # _resolve_teammate_effort below (needs the role, not this tuple).
+            tier_model, _tier_effort, tier_fallback = _teammate_tier(base_role)
             if _ps_initial.model_override:
                 # --model on this assign is narrower than every persistent or
                 # process-wide setting, including TAKKUB_TEAMMATE_MODEL.
@@ -1971,7 +2016,13 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             teammate_model = _remap_pinned_model(teammate_model, env)
             if teammate_model:
                 argv.extend(["--model", teammate_model])
-            teammate_effort = os.environ.get("TAKKUB_TEAMMATE_EFFORT", tier_effort).strip()
+            # Precedence + provider/model gating: see _resolve_teammate_effort's
+            # own docstring (same resolver the generic provider branch above
+            # uses — role setting > TAKKUB_TEAMMATE_EFFORT > tier default,
+            # then gated so e.g. claude-haiku-4-5 never gets --effort).
+            teammate_effort = _resolve_teammate_effort(
+                base_role, PROVIDER_REGISTRY[CLAUDE], teammate_model
+            )
             _append_provider_effort(
                 argv,
                 PROVIDER_REGISTRY[CLAUDE],
