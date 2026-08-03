@@ -256,33 +256,59 @@ _PROVIDER_DESC: dict[str, str] = {
 # defaults to for the signed-in account.
 _MODEL_DEFAULT_LABEL = "(default)"
 
-# Model shortlists per provider — a *snapshot* (July 2026 research) offered as
-# dropdown presets. Every model combo stays EDITABLE because each CLI ships new
-# ids on its own cadence and a stale hardcoded list is worse than typing the
-# id; run the CLI's own lister for the authoritative current set
-# (`agy models`, `agent --list-models`, `codex --help`, Kimi/opencode docs).
-# Some entries (agy's spaced display names, cursor's ids) may differ from the
-# exact `--model` token — the field being editable is the escape hatch.
+# Model shortlists per provider — a *snapshot* (2026-08-03, refreshed against
+# each CLI actually installed on the dev box) offered as dropdown presets.
+# Every model combo stays EDITABLE because each CLI ships new ids on its own
+# cadence and a stale hardcoded list is worse than typing the id; re-verify
+# with the CLI's own lister next time this goes stale (`agy models`, `codex`
+# — read `~/.codex/models_cache.json`'s "slug" fields, no CLI subcommand
+# lists them — `opencode models --refresh`).
+# claude/codex/gemini/opencode entries below were confirmed live against the
+# CLIs installed on this box; kimi has no model-listing command or cache to
+# check against (accepts free-text `-m`) and cursor's CLI wasn't installed
+# here at all — both left as the prior snapshot, unverified.
 _MODELS_BY_PROVIDER: dict[str, tuple[str, ...]] = {
     "claude": (
         "opus",
         "sonnet",
         "haiku",
-        "claude-opus-4-8",
+        "claude-opus-5",
         "claude-sonnet-5",
         "claude-haiku-4-5",
         "claude-fable-5",
+        "claude-opus-4-8",
     ),
-    "codex": ("gpt-5.6", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex"),
+    # Confirmed via ~/.codex/models_cache.json "slug" fields (installed CLI's
+    # own cache) — gpt-5.3-codex no longer appears; gpt-5.6 now ships as 3
+    # named variants instead of a bare "gpt-5.6". codex-auto-review excluded
+    # (internal review-only model, not a general chat/agent model).
+    "codex": (
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-5.5",
+        "gpt-5.4",
+        "gpt-5.4-mini",
+    ),
+    # Confirmed via `agy models` (installed CLI's own lister) — these are the
+    # exact `--model` tokens, not agy's spaced display names like the prior
+    # snapshot had.
     "gemini": (
-        "Gemini 3.5 Flash",
-        "Gemini 3.1 Pro (High)",
-        "Gemini 3.1 Pro (Low)",
-        "Claude Sonnet 4.6 (Thinking)",
-        "Claude Opus 4.6 (Thinking)",
-        "GPT-OSS 120B",
+        "gemini-3.6-flash-high",
+        "gemini-3.6-flash-medium",
+        "gemini-3.6-flash-low",
+        "gemini-3.5-flash-high",
+        "gemini-3.1-pro-high",
+        "gemini-3.1-pro-low",
+        "claude-sonnet-4-6",
+        "claude-opus-4-6-thinking",
+        "gpt-oss-120b-medium",
     ),
+    # Unverified — kimi CLI (v1.49.0) exposes no `models` subcommand or model
+    # cache; kept as the prior snapshot.
     "kimi": ("k3", "k2.7", "k2.6", "k2.5"),
+    # Unverified — cursor's CLI isn't installed on this box; kept as the
+    # prior snapshot.
     "cursor": (
         "claude-sonnet-4.7",
         "claude-opus-4.7",
@@ -291,11 +317,17 @@ _MODELS_BY_PROVIDER: dict[str, tuple[str, ...]] = {
         "grok-4",
         "composer-1",
     ),
+    # anthropic/* confirmed via `opencode models` (installed CLI, its own
+    # models.dev-backed lister); this box's opencode has no openai/google
+    # provider logged in, so those two are cross-referenced from the same
+    # underlying vendor models confirmed above (codex's gpt-5.6-sol, agy's
+    # gemini-3.1-pro-high) rather than opencode's own lister — best-effort,
+    # not directly confirmed by opencode itself.
     "opencode": (
-        "anthropic/claude-sonnet-4.7",
-        "anthropic/claude-opus-4.7",
-        "openai/gpt-5.5",
-        "google/gemini-2.5-pro",
+        "anthropic/claude-opus-5",
+        "anthropic/claude-sonnet-5",
+        "openai/gpt-5.6-sol",
+        "google/gemini-3.1-pro-high",
     ),
 }
 
