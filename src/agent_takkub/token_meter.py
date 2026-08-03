@@ -28,14 +28,30 @@ from pathlib import Path
 # ``effective_context_limit`` instead.
 _DEFAULT_LIMIT = 200_000
 
-# Per-model overrides if Claude Code ever stamps a different family into the
-# `model` field of the assistant message. Best-effort: anything not listed
-# falls back to _DEFAULT_LIMIT.
+# Per-model context-window sizes, keyed by the *bare* model id — this is the
+# only place in the cockpit that should know each model's context size.
+# (`settings_window._MODELS_BY_PROVIDER` is just the Settings dropdown's
+# preset list of model-id strings; it is not a source of truth for context
+# size and must not duplicate this table.) Anything not listed falls back to
+# _DEFAULT_LIMIT. Keep this in sync with shared/models.md in the claude-api
+# skill when Anthropic ships a new model.
 _MODEL_LIMITS: dict[str, int] = {
-    # 1M variants — stamped with bracket suffix in some Code clients
-    "claude-opus-4-8[1m]": 1_000_000,
-    "claude-sonnet-5[1m]": 1_000_000,
+    "claude-opus-5": 1_000_000,
+    "claude-sonnet-5": 1_000_000,
+    "claude-fable-5": 1_000_000,
+    "claude-opus-4-8": 1_000_000,
+    "claude-opus-4-7": 1_000_000,
+    "claude-opus-4-6": 1_000_000,
+    "claude-sonnet-4-6": 1_000_000,
+    "claude-haiku-4-5": 200_000,
 }
+
+# Some Code clients stamp a "[1m]" suffix onto the model id to flag the 1M
+# runtime variant regardless of the base model's own default (e.g. a Max Lead
+# opting into the 1M context flag). Match it generically instead of listing
+# "<id>[1m]" pairs per model in _MODEL_LIMITS above — that generalizes to any
+# base model without needing an extra table entry per model.
+_SUFFIX_1M_RE = re.compile(r"\[1m\]$", re.IGNORECASE)
 
 
 def context_limit_for_model(model: str | None) -> int:
@@ -46,8 +62,11 @@ def context_limit_for_model(model: str | None) -> int:
             return int(env)
         except ValueError:
             pass
-    if model and model in _MODEL_LIMITS:
-        return _MODEL_LIMITS[model]
+    if model:
+        if _SUFFIX_1M_RE.search(model):
+            return 1_000_000
+        if model in _MODEL_LIMITS:
+            return _MODEL_LIMITS[model]
     return _DEFAULT_LIMIT
 
 
@@ -56,11 +75,11 @@ def effective_context_limit(model: str | None, prompt: int, base: int | None = N
 
     `base` is a per-pane known cap (e.g. a Max Lead pinned to 1M); when None it
     falls back to the per-model/process-env limit. Either way, if the observed
-    prompt already exceeds the cap we bump to 1M — a turn that sent >200k tokens can
-    only be a 1M-context session, and the bare model name stamped in the JSONL
-    (`claude-opus-4-8`, no `[1m]`) doesn't encode the 1M runtime flag. This
-    keeps the badge from showing an impossible ">100%" when the per-pane tier
-    guess was wrong or absent.
+    prompt already exceeds the cap we bump to 1M — a turn that sent more tokens
+    than the resolved cap can only be a 1M-context session, which covers a
+    model missing from `_MODEL_LIMITS` (new/unreleased) or a `base` guess that
+    was wrong. This keeps the badge from showing an impossible ">100%" when
+    the per-pane tier guess was wrong or absent.
     """
     cap = base if base is not None else context_limit_for_model(model)
     return 1_000_000 if prompt > cap else cap
