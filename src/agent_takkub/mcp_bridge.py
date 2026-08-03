@@ -48,6 +48,8 @@ import pathlib
 import re
 import subprocess
 
+from ._win_console import SUBPROCESS_NO_WINDOW
+
 _log = logging.getLogger(__name__)
 
 # codex's `mcp_servers.<name>.*` schema (per `codex mcp add --help` /
@@ -77,6 +79,7 @@ def _codex_resolved_mcp_names(provider_bin: str, cwd: str, env: dict[str, str]) 
             text=True,
             timeout=5,
             check=True,
+            creationflags=SUBPROCESS_NO_WINDOW,
         )
         servers = json.loads(result.stdout)
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:

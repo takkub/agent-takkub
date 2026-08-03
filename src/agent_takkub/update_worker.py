@@ -312,6 +312,7 @@ def try_silent_self_update(*, timeout_fetch: float = 5.0, timeout_pull: float = 
             import shutil
             import subprocess
 
+            from ._win_console import SUBPROCESS_NO_WINDOW
             from .update_helper import build_pip_sync_script
 
             is_win = sys.platform == "win32"
@@ -342,6 +343,7 @@ def try_silent_self_update(*, timeout_fetch: float = 5.0, timeout_pull: float = 
                     cwd=str(REPO_ROOT),
                     close_fds=True,
                     start_new_session=True,
+                    creationflags=SUBPROCESS_NO_WINDOW,
                 )
             _log_startup_pull("pip_sync_spawned", script=str(script_path))
             raise SystemExit(0)

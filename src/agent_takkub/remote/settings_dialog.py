@@ -62,6 +62,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
+from .._win_console import SUBPROCESS_NO_WINDOW
 from .auth import hash_password
 from .config import RemoteConfig, TunnelConfig
 
@@ -188,6 +189,7 @@ def _run_ngrok_authtoken(token: str) -> tuple[bool, str]:
             capture_output=True,
             text=True,
             timeout=15,
+            creationflags=SUBPROCESS_NO_WINDOW,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return False, str(exc).replace(token, "[redacted]")

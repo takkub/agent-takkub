@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ... import cockpit_theme as theme
+from ..._win_console import SUBPROCESS_NO_WINDOW
 from ..commands import CreateSkillCommand, UpdateSkillCommand
 from ..models import Ownership, SkillDetail
 from ..repositories import skills as skills_repo
@@ -261,9 +262,11 @@ class SkillsPage(ManagementPage):
         if sys.platform == "win32":
             os.startfile(folder)
         elif sys.platform == "darwin":
-            subprocess.run(["open", str(folder)], check=False)
+            subprocess.run(["open", str(folder)], check=False, creationflags=SUBPROCESS_NO_WINDOW)
         else:
-            subprocess.run(["xdg-open", str(folder)], check=False)
+            subprocess.run(
+                ["xdg-open", str(folder)], check=False, creationflags=SUBPROCESS_NO_WINDOW
+            )
 
     def _on_delete_confirmed(self, version: str) -> None:
         if self._current is None:

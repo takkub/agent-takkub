@@ -181,6 +181,7 @@ def _spawn(argv: list[str], extra_env: dict | None = None) -> subprocess.Popen:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         start_new_session=True,  # own process group, mirrors ptyprocess's setsid (5.2)
+        creationflags=_CREATE_NO_WINDOW,
         env=env,
     )
 
