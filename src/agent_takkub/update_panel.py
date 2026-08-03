@@ -37,6 +37,41 @@ def _release_port_file() -> None:
         pass
 
 
+def _find_npm() -> str | None:
+    import glob
+    import os
+    import shutil as _shutil
+
+    npm = _shutil.which("npm.cmd") or _shutil.which("npm")
+    if npm:
+        return npm
+
+    extra_paths = [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        os.path.expanduser("~/.nvm/versions/node/*/bin"),
+        os.path.expanduser("~/.fnm/current/bin"),
+        os.path.expanduser("~/.n/bin"),
+        os.path.expanduser("~/.asdf/shims"),
+        os.path.expanduser("~/.volta/bin"),
+        "/usr/bin",
+    ]
+    expanded = []
+    for p in extra_paths:
+        if "*" in p:
+            expanded.extend(sorted(glob.glob(p), reverse=True))
+        else:
+            expanded.append(p)
+
+    for p in expanded:
+        candidate = os.path.join(p, "npm")
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            if p not in os.environ.get("PATH", "").split(os.pathsep):
+                os.environ["PATH"] = p + os.pathsep + os.environ.get("PATH", "")
+            return candidate
+    return None
+
+
 class _NpmUpdateThread(QThread):
     """npm registry check / global update OFF the Qt main thread.
 
@@ -54,7 +89,6 @@ class _NpmUpdateThread(QThread):
         self._mode = mode
 
     def run(self) -> None:  # pragma: no cover - thin subprocess wrapper
-        import shutil as _shutil
         import subprocess as _subprocess
         from importlib import metadata as _metadata
 
@@ -64,7 +98,7 @@ class _NpmUpdateThread(QThread):
             current = _metadata.version("agent-takkub")
         except Exception:
             current = "?"
-        npm = _shutil.which("npm.cmd") or _shutil.which("npm")
+        npm = _find_npm()
         if not npm:
             self.done.emit(False, current, "", "npm not found on PATH")
             return

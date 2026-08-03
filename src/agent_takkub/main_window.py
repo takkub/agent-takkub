@@ -177,6 +177,10 @@ class MainWindow(
             else self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxInformation)
         )
         self.setWindowIcon(app_icon)
+        from PyQt6.QtWidgets import QApplication as _QAppInst
+
+        if _QAppInst.instance():
+            _QAppInst.instance().setWindowIcon(app_icon)
 
         self.resize(1500, 900)
 

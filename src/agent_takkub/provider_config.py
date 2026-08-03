@@ -186,19 +186,19 @@ def save_role_overrides(
     for role, provider in (mapping or {}).items():
         r = str(role).lower().strip()
         p = str(provider).lower().strip()
-        if r in FORCED_ROLES or p == CLAUDE or p not in VALID_PROVIDERS:
+        if r in FORCED_ROLES or p not in VALID_PROVIDERS:
             continue
-        overrides[r] = p
+        if r == "lead" or p != CLAUDE:
+            overrides[r] = p
     save_providers(overrides, project)
 
 
 def provider_for(role: str, project: str | None = None) -> str:
     """Resolve which CLI backs the given role.
 
-    Returns one of `"claude"`, `"codex"`, or `"gemini"`. Forced for `lead`,
-    `codex`, and `gemini`; consulted from the per-project (or global)
-    role-providers mapping for everything else; defaults to `"claude"` when the
-    role isn't in the config.
+    Returns one of `"claude"`, `"codex"`, `"gemini"`, etc. Consulted from the
+    per-project (or global) role-providers mapping for everything else;
+    defaults to `"claude"` when the role isn't in the config.
     """
     key = re.sub(r"#\d+$", "", (role or "").lower().strip())
     if key in _FORCED_PROVIDER:

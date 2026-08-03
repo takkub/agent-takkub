@@ -83,7 +83,37 @@ def _run(argv: list[str], timeout: float) -> subprocess.CompletedProcess[str]:
 def _npm() -> str | None:
     """Resolve the npm executable. On Windows this finds `npm.cmd`, which
     subprocess can run directly when given the full path (no shell needed)."""
-    return shutil.which("npm")
+    import glob
+    import os
+
+    npm = shutil.which("npm.cmd") or shutil.which("npm")
+    if npm:
+        return npm
+
+    extra_paths = [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        os.path.expanduser("~/.nvm/versions/node/*/bin"),
+        os.path.expanduser("~/.fnm/current/bin"),
+        os.path.expanduser("~/.n/bin"),
+        os.path.expanduser("~/.asdf/shims"),
+        os.path.expanduser("~/.volta/bin"),
+        "/usr/bin",
+    ]
+    expanded = []
+    for p in extra_paths:
+        if "*" in p:
+            expanded.extend(sorted(glob.glob(p), reverse=True))
+        else:
+            expanded.append(p)
+
+    for p in expanded:
+        candidate = os.path.join(p, "npm")
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            if p not in os.environ.get("PATH", "").split(os.pathsep):
+                os.environ["PATH"] = p + os.pathsep + os.environ.get("PATH", "")
+            return candidate
+    return None
 
 
 # ─────────────────────────────────────────────────────────────────────
