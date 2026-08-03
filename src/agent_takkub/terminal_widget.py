@@ -297,6 +297,24 @@ class TerminalWidget(QWidget):
         self._channel.registerObject("bridge", self._bridge)
         self._view.page().setWebChannel(self._channel)
 
+    def focusInEvent(self, event) -> None:
+        super().focusInEvent(event)
+        self._view.setFocus()
+        if getattr(self, "_page_ready", False):
+            try:
+                self._view.page().runJavaScript("term.focus();")
+            except Exception:
+                pass
+
+    def mousePressEvent(self, event) -> None:
+        super().mousePressEvent(event)
+        self._view.setFocus()
+        if getattr(self, "_page_ready", False):
+            try:
+                self._view.page().runJavaScript("term.focus();")
+            except Exception:
+                pass
+
         # Stateful UTF-8 decoder: buffers partial multi-byte sequences across
         # PTY read chunks so Thai/CJK chars split at chunk boundaries are not
         # corrupted into replacement chars (U+FFFD).

@@ -45,6 +45,7 @@
       scrollback: 500,
       allowProposedApi: true,
       windowsMode: false,  // we feed bytes already from a Windows pty, no normalisation
+      unicodeVersion: '11',  // Unicode 11 character widths (fixes Thai combining mark widths)
       theme: {
         background: '#0e0e10',
         foreground: '#e6e6e6',
@@ -113,6 +114,37 @@
     term.open(document.getElementById('term'));
     fit.fit();
     term.focus();
+
+    // ------------------------------------------------------------------
+    // IME focus guard & Shift+Enter multi-line handler
+    // ------------------------------------------------------------------
+    function ensureTermFocus() {
+      if (term && !inputLocked) {
+        try {
+          term.focus();
+        } catch (e) {}
+      }
+    }
+
+    // Keep helper textarea focused during IME composition, window focus, and mouse clicks
+    window.addEventListener('focus', ensureTermFocus);
+    document.addEventListener('mousedown', ensureTermFocus);
+    document.addEventListener('compositionstart', ensureTermFocus);
+    document.addEventListener('compositionend', ensureTermFocus);
+
+    term.attachCustomKeyEventHandler((ev) => {
+      ensureTermFocus();
+      if (ev.type === 'keydown') {
+        // Shift+Enter: send newline (\n) without submitting (\r)
+        if (ev.key === 'Enter' && ev.shiftKey && !ev.ctrlKey && !ev.altKey && !ev.metaKey) {
+          if (!inputLocked && bridge && bridge.sendInput) {
+            bridge.sendInput('\n');
+          }
+          return false; // prevent xterm.js default \r submit
+        }
+      }
+      return true;
+    });
 
     // ------------------------------------------------------------------
     // Ctrl/Cmd + mouse-wheel font zoom
