@@ -85,21 +85,32 @@ def _npm() -> str | None:
     subprocess can run directly when given the full path (no shell needed)."""
     import glob
     import os
+    import sys
 
     npm = shutil.which("npm.cmd") or shutil.which("npm")
     if npm:
         return npm
 
-    extra_paths = [
-        "/opt/homebrew/bin",
-        "/usr/local/bin",
-        os.path.expanduser("~/.nvm/versions/node/*/bin"),
-        os.path.expanduser("~/.fnm/current/bin"),
-        os.path.expanduser("~/.n/bin"),
-        os.path.expanduser("~/.asdf/shims"),
-        os.path.expanduser("~/.volta/bin"),
-        "/usr/bin",
-    ]
+    if sys.platform == "win32":
+        extra_paths = [
+            os.path.expandvars(r"%APPDATA%\npm"),
+            os.path.expandvars(r"%ProgramFiles%\nodejs"),
+            os.path.expandvars(r"%ProgramFiles(x86)%\nodejs"),
+        ]
+        names = ["npm.cmd", "npm.exe", "npm"]
+    else:
+        extra_paths = [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            os.path.expanduser("~/.nvm/versions/node/*/bin"),
+            os.path.expanduser("~/.fnm/current/bin"),
+            os.path.expanduser("~/.n/bin"),
+            os.path.expanduser("~/.asdf/shims"),
+            os.path.expanduser("~/.volta/bin"),
+            "/usr/bin",
+        ]
+        names = ["npm"]
+
     expanded = []
     for p in extra_paths:
         if "*" in p:
@@ -108,11 +119,12 @@ def _npm() -> str | None:
             expanded.append(p)
 
     for p in expanded:
-        candidate = os.path.join(p, "npm")
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            if p not in os.environ.get("PATH", "").split(os.pathsep):
-                os.environ["PATH"] = p + os.pathsep + os.environ.get("PATH", "")
-            return candidate
+        for name in names:
+            candidate = os.path.join(p, name)
+            if os.path.isfile(candidate) and (sys.platform == "win32" or os.access(candidate, os.X_OK)):
+                if p not in os.environ.get("PATH", "").split(os.pathsep):
+                    os.environ["PATH"] = p + os.pathsep + os.environ.get("PATH", "")
+                return candidate
     return None
 
 
