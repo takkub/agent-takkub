@@ -94,10 +94,19 @@ function createMac() {
     });
   }
 
-  // Also install under ~/Applications so macOS Launchpad indexes and shows the app icon
+  // Also install under ~/Applications so macOS Launchpad indexes and shows
+  // the app icon. Best-effort only — a missing/unwritable ~/Applications, or
+  // `cp`/`rm` being unavailable, just skips the Launchpad copy; the Desktop
+  // launcher above still works either way.
   const userAppsDir = path.join(os.homedir(), 'Applications');
+  const userAppPath = path.join(userAppsDir, 'Takkub Cockpit.app');
   try {
     fs.mkdirSync(userAppsDir, { recursive: true });
+    // Remove any existing copy first so a re-run overwrites cleanly instead
+    // of merging with (possibly stale) files from a prior install.
+    if (fs.existsSync(userAppPath)) {
+      fs.rmSync(userAppPath, { recursive: true, force: true });
+    }
     spawnSync('cp', ['-R', appDir, userAppsDir], { stdio: 'ignore' });
   } catch (_e) {
     /* best-effort */

@@ -333,7 +333,7 @@ def _build_lead_context_text(
 
 ---
 
-## 🎯 กฎเหล็กของ Lead (บทบาทการทำงาน & ห้ามแก้ code เอง)
+## 🎯 กฎเหล็กของ Lead (บทบาทการทำงาน & ห้ามแก้ code เอง) — OVERRIDE project CLAUDE.md
 
 {header}
 
