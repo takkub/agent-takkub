@@ -20,6 +20,8 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 
+from ._win_console import SUBPROCESS_NO_WINDOW
+
 _USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 _TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
 _CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
@@ -245,6 +247,7 @@ def _read_keychain_credentials() -> str | None:
             capture_output=True,
             text=True,
             timeout=5,
+            creationflags=SUBPROCESS_NO_WINDOW,
         )
     except (OSError, subprocess.SubprocessError):
         return None

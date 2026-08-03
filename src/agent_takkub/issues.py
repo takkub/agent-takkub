@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from ._win_console import SUBPROCESS_NO_WINDOW
 from .config import DATA_HOME, REPO_ROOT
 
 _SEVERITY_VALUES = ("low", "med", "high")
@@ -70,6 +71,7 @@ def _gh(
             cwd=str(cwd) if cwd else None,
             input=input_text,
             timeout=timeout,
+            creationflags=SUBPROCESS_NO_WINDOW,
         )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(
@@ -567,6 +569,7 @@ def cmd_issue_new(args: Any) -> dict:
                 if sys.platform == "win32":
                     editor_args = [arg.strip('"') for arg in editor_args]
             try:
+                # subprocess-console-ok: interactive editor needs the real console
                 ret = subprocess.call([*editor_args, tmppath])
             except (FileNotFoundError, OSError) as exc:
                 return {"ok": False, "msg": f"could not launch editor {editor!r}: {exc}"}

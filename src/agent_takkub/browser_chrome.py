@@ -23,6 +23,7 @@ import urllib.request
 from collections.abc import Mapping
 
 from . import config
+from ._win_console import SUBPROCESS_NO_WINDOW
 from .pane_guard import BROWSER_ROLES
 
 MB_CDP_HOST = "127.0.0.1"
@@ -208,6 +209,7 @@ class NativeChromeManager:
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     timeout=5,
+                    creationflags=SUBPROCESS_NO_WINDOW,
                 )
                 if result.returncode == 0:
                     return

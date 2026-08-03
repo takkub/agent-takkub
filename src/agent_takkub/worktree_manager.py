@@ -41,6 +41,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from ._win_console import SUBPROCESS_NO_WINDOW
 from .config import DATA_HOME
 
 # git ops here are all local (no network) and fast; bound them so a wedged git
@@ -235,6 +236,7 @@ def _default_runner(args: list[str], cwd: str | None) -> GitResult:
             capture_output=True,
             text=True,
             timeout=_GIT_TIMEOUT_S,
+            creationflags=SUBPROCESS_NO_WINDOW,
         )
         return GitResult(proc.returncode, proc.stdout, proc.stderr)
     except subprocess.TimeoutExpired:

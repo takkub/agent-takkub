@@ -22,6 +22,7 @@ from pathlib import Path
 import yaml
 
 from . import config
+from ._win_console import SUBPROCESS_NO_WINDOW
 from .worktree_manager import _make_link, _remove_link
 
 _log = logging.getLogger(__name__)
@@ -203,6 +204,7 @@ def _git_tracked_skill_names(project_root: Path) -> set[str] | None:
             ["git", "-C", str(project_root), "ls-files", "-z", "--", ".claude/skills"],
             capture_output=True,
             timeout=_GIT_LS_TIMEOUT_S,
+            creationflags=SUBPROCESS_NO_WINDOW,
         )
     except (OSError, subprocess.SubprocessError):
         return None

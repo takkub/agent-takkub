@@ -455,6 +455,7 @@ class MainWindowUpdateMixin:
 
         from PyQt6.QtWidgets import QMessageBox
 
+        from ._win_console import SUBPROCESS_NO_WINDOW
         from .claude_update import _npm, build_updater_script
 
         npm = _npm()
@@ -540,6 +541,7 @@ class MainWindowUpdateMixin:
                     cwd=str(REPO_ROOT),
                     close_fds=True,
                     start_new_session=True,
+                    creationflags=SUBPROCESS_NO_WINDOW,
                 )
         except Exception as e:
             QMessageBox.critical(
@@ -913,6 +915,7 @@ class MainWindowUpdateMixin:
         import subprocess
         import sys
 
+        from ._win_console import SUBPROCESS_NO_WINDOW
         from .update_helper import build_pip_sync_script
 
         # Persist up-front — we quit() right after spawning, can't rely on closeEvent.
@@ -961,6 +964,7 @@ class MainWindowUpdateMixin:
                     cwd=str(REPO_ROOT),
                     close_fds=True,
                     start_new_session=True,
+                    creationflags=SUBPROCESS_NO_WINDOW,
                 )
         except Exception as e:
             # Couldn't set up the detached pip-sync — fall back to a plain
