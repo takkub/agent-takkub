@@ -13,6 +13,7 @@ import sys
 
 from agent_takkub.token_meter import (
     _TAIL_SCAN_BYTES,
+    context_limit_for_model,
     effective_context_limit,
     encode_path_for_claude,
     find_latest_session,
@@ -21,20 +22,67 @@ from agent_takkub.token_meter import (
 )
 
 
+class TestContextLimitForModel:
+    """_MODEL_LIMITS is keyed by bare model id — every current 1M-context
+    model must resolve without needing a "[1m]" suffix, per shared/models.md
+    in the claude-api skill (checked live 2026-08-03)."""
+
+    def test_opus5_no_suffix_is_1m(self) -> None:
+        assert context_limit_for_model("claude-opus-5") == 1_000_000
+
+    def test_sonnet5_no_suffix_is_1m(self) -> None:
+        assert context_limit_for_model("claude-sonnet-5") == 1_000_000
+
+    def test_fable5_no_suffix_is_1m(self) -> None:
+        assert context_limit_for_model("claude-fable-5") == 1_000_000
+
+    def test_opus_4x_no_suffix_is_1m(self) -> None:
+        assert context_limit_for_model("claude-opus-4-8") == 1_000_000
+        assert context_limit_for_model("claude-opus-4-7") == 1_000_000
+        assert context_limit_for_model("claude-opus-4-6") == 1_000_000
+
+    def test_sonnet_4_6_no_suffix_is_1m(self) -> None:
+        assert context_limit_for_model("claude-sonnet-4-6") == 1_000_000
+
+    def test_haiku_stays_200k(self) -> None:
+        assert context_limit_for_model("claude-haiku-4-5") == 200_000
+
+    def test_unknown_model_falls_back_to_default(self) -> None:
+        assert context_limit_for_model("claude-some-future-model") == 200_000
+        assert context_limit_for_model(None) == 200_000
+
+    def test_1m_suffix_still_forces_1m_on_any_model(self) -> None:
+        # Legacy behaviour preserved: a stamped "[1m]" suffix means 1M
+        # regardless of the base model's own default — even one that isn't
+        # (yet) a 1M model on its own, like haiku.
+        assert context_limit_for_model("claude-opus-4-8[1m]") == 1_000_000
+        assert context_limit_for_model("claude-sonnet-5[1m]") == 1_000_000
+        assert context_limit_for_model("claude-haiku-4-5[1m]") == 1_000_000
+
+    def test_env_override_wins_over_model_table(self, monkeypatch) -> None:
+        monkeypatch.setenv("TAKKUB_CONTEXT_LIMIT", "555000")
+        assert context_limit_for_model("claude-opus-5") == 555_000
+        assert context_limit_for_model(None) == 555_000
+
+    def test_env_override_ignored_when_not_an_int(self, monkeypatch) -> None:
+        monkeypatch.setenv("TAKKUB_CONTEXT_LIMIT", "not-a-number")
+        assert context_limit_for_model("claude-haiku-4-5") == 200_000
+
+
 class TestEffectiveContextLimit:
-    """The badge cap must never let the percentage exceed 100% just because the
-    bare model name (claude-opus-4-8, no [1m]) hides the 1M runtime flag."""
+    """The badge cap must never let the percentage exceed 100% just because
+    the resolved model/base cap turns out to be too small."""
 
     def test_under_default_uses_200k(self) -> None:
-        assert effective_context_limit("claude-opus-4-8", 50_000) == 200_000
+        assert effective_context_limit("claude-some-future-model", 50_000) == 200_000
 
     def test_prompt_over_200k_bumps_to_1m(self) -> None:
-        # The 177%-badge bug: 360k prompt on a bare model name must read 1M.
-        assert effective_context_limit("claude-opus-4-8", 360_000) == 1_000_000
+        # The 177%-badge bug: a >200k prompt on an unknown/unlisted model must read 1M.
+        assert effective_context_limit("claude-some-future-model", 360_000) == 1_000_000
 
     def test_per_pane_base_pins_1m_from_token_zero(self) -> None:
         # A Max Lead pins base=1M so even a small prompt shows /1M, not /200k.
-        assert effective_context_limit("claude-opus-4-8", 33_000, base=1_000_000) == 1_000_000
+        assert effective_context_limit("claude-haiku-4-5", 33_000, base=1_000_000) == 1_000_000
 
     def test_base_overrides_model_lookup(self) -> None:
         assert effective_context_limit("anything", 10_000, base=200_000) == 200_000
