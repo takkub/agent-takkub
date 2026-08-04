@@ -159,7 +159,18 @@ from .vault_mirror import (  # re-exported for test + script imports
 # MainWindow keeps registering AgentPane instances unchanged.
 AgentPaneLike = AgentPane | HeadlessPane
 
-_ANSI = re.compile(r"\x1b\[[0-9;]*[mABCDHJKSThlsu]")
+# Full ECMA-48 CSI + OSC stripper (issue #145). The old allowlist
+# (`[mABCDHJKSThlsu]` finals, `[0-9;]*` params) missed 3 real cases seen in
+# `takkub status` tail output: private-mode toggles like `\x1b[?25h`/`\x1b[?25l`
+# (the '?' is a valid CSI parameter byte the old class didn't include),
+# `\x1b[3G` (CHA — final byte 'G' wasn't in the allowlist), and OSC window-
+# title/hyperlink sequences (`\x1b]0;...\x07` / `...\x1b\\`) which are a
+# different escape family the old CSI-only pattern never matched at all.
+# CSI = `ESC [` + parameter bytes (0x30-0x3F) + intermediate bytes
+# (0x20-0x2F) + one final byte (0x40-0x7E), per ECMA-48 §5.4.
+# OSC = `ESC ]` + any bytes up to a BEL or ST (`ESC \`) terminator, per
+# ECMA-48 §5.6 / ECMA-35.
+_ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 
 # Bound on how many bytes of a pane transcript we read to extract its tail for
 # `takkub status`. A long session's transcript grows to MBs; reading the whole

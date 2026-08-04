@@ -360,3 +360,108 @@ class TestAssignModelOverrideValidation:
         assert error is not None
         assert "cursor" in error
         assert "model_flag" in error
+
+
+class TestAssignModelOverrideProviderMismatch:
+    """Issue #127: a --model id that unambiguously belongs to a DIFFERENT
+    provider's naming scheme (e.g. claude-* sent to a role that maps to
+    gemini/agy) must be blocked at assign time instead of silently falling
+    back to that provider's own default."""
+
+    @pytest.mark.parametrize(
+        "provider,model",
+        [
+            ("gemini", "claude-haiku-4-5"),
+            ("gemini", "haiku"),
+            ("claude", "gemini-3.1-pro"),
+            ("claude", "gpt-5"),
+            ("codex", "claude-sonnet-4-5"),
+            ("codex", "gemini-3.1-pro-high"),
+            ("kimi", "claude-opus-4"),
+            ("gemini", "k2.5"),
+        ],
+    )
+    def test_wrong_provider_model_is_blocked(
+        self, monkeypatch: pytest.MonkeyPatch, provider: str, model: str
+    ) -> None:
+        monkeypatch.setattr(provider_config, "effective_provider_for", lambda *_a, **_kw: provider)
+        error = provider_config.assign_model_override_error("qa", model)
+        assert error is not None
+        assert provider in error
+        assert model in error
+
+    @pytest.mark.parametrize(
+        "provider,model",
+        [
+            ("claude", "claude-sonnet-4-5"),
+            ("claude", "opus"),
+            ("codex", "gpt-5"),
+            ("codex", "o3-mini"),
+            ("gemini", "gemini-3.1-pro"),
+            ("kimi", "k2.5"),
+            ("kimi", "kimi-k2"),
+        ],
+    )
+    def test_own_provider_model_is_never_blocked(
+        self, monkeypatch: pytest.MonkeyPatch, provider: str, model: str
+    ) -> None:
+        monkeypatch.setattr(provider_config, "effective_provider_for", lambda *_a, **_kw: provider)
+        assert provider_config.assign_model_override_error("qa", model) is None
+
+    @pytest.mark.parametrize("provider", ["opencode", "cursor"])
+    def test_router_providers_never_blocked_even_for_other_providers_ids(
+        self, monkeypatch: pytest.MonkeyPatch, provider: str
+    ) -> None:
+        # opencode/cursor front many backends by design — a claude-shaped id
+        # can be a genuinely valid selection for them.
+        monkeypatch.setattr(provider_config, "effective_provider_for", lambda *_a, **_kw: provider)
+        assert provider_config.assign_model_override_error("qa", "claude-sonnet-4-5") is None
+
+
+class TestAssignModelOverrideWarning:
+    """Issue #127: an unrecognized-but-not-provably-wrong model id should
+    warn, not block — new models ship faster than this table can track."""
+
+    def test_unrecognized_model_for_known_provider_warns(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(provider_config, "effective_provider_for", lambda *_a, **_kw: "claude")
+        warning = provider_config.assign_model_override_warning("qa", "totally-new-model-9")
+        assert warning is not None
+        assert "claude" in warning
+        assert "qa" in warning
+        # The blocking check must NOT fire for the same input.
+        assert provider_config.assign_model_override_error("qa", "totally-new-model-9") is None
+
+    def test_own_provider_model_does_not_warn(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(provider_config, "effective_provider_for", lambda *_a, **_kw: "claude")
+        assert provider_config.assign_model_override_warning("qa", "claude-sonnet-4-5") is None
+
+    def test_wrong_provider_model_does_not_also_warn(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # It's already blocked by assign_model_override_error; the warning
+        # path is for the softer "unknown, not provably wrong" case only.
+        monkeypatch.setattr(provider_config, "effective_provider_for", lambda *_a, **_kw: "gemini")
+        assert provider_config.assign_model_override_warning("qa", "claude-haiku-4-5") is None
+
+    @pytest.mark.parametrize("provider", ["opencode", "cursor"])
+    def test_router_providers_never_warn(
+        self, monkeypatch: pytest.MonkeyPatch, provider: str
+    ) -> None:
+        monkeypatch.setattr(provider_config, "effective_provider_for", lambda *_a, **_kw: provider)
+        assert provider_config.assign_model_override_warning("qa", "anything-goes-here") is None
+
+    def test_empty_model_never_warns(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(provider_config, "effective_provider_for", lambda *_a, **_kw: "claude")
+        assert provider_config.assign_model_override_warning("qa", "") is None
+        assert provider_config.assign_model_override_warning("qa", None) is None
+
+    def test_provider_without_model_flag_never_warns(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from agent_takkub.provider_spec import PROVIDER_REGISTRY
+
+        monkeypatch.setattr(provider_config, "effective_provider_for", lambda *_a, **_kw: "cursor")
+        monkeypatch.setitem(
+            PROVIDER_REGISTRY,
+            "cursor",
+            replace(PROVIDER_REGISTRY["cursor"], model_flag=None),
+        )
+        assert provider_config.assign_model_override_warning("qa", "cheap-scan") is None

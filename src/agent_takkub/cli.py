@@ -218,11 +218,14 @@ def cmd_assign(args: argparse.Namespace) -> dict:
     shards = int(_raw_shards or 1)
     model = (getattr(args, "model", None) or "").strip() or None
     if model:
-        from .provider_config import assign_model_override_error
+        from .provider_config import assign_model_override_error, assign_model_override_warning
 
         model_error = assign_model_override_error(args.role, model, _from_project())
         if model_error:
             return {"ok": False, "msg": model_error}
+        model_warning = assign_model_override_warning(args.role, model, _from_project())
+        if model_warning:
+            print(f"warn: {model_warning}", file=sys.stderr)
     if shards > 1 and getattr(args, "auto_chain", False):
         return {
             "ok": False,
