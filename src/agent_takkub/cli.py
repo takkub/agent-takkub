@@ -1907,6 +1907,14 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
 
+    _COCKPIT_BUG_READ_HELP = (
+        "read from the agent-takkub install repo regardless of cwd (DEFAULT — "
+        "matches `issue new`'s default, so an issue filed with no flag is found "
+        "with no flag). Use --no-cockpit-bug to read the active project's repo "
+        "instead — must match whatever `--no-cockpit-bug` (or not) was used to "
+        "file the issue, or it queries the wrong store (#142)."
+    )
+
     # issue list
     sil = si_sub.add_parser("list", help="list issues with optional filters")
     sil.add_argument("--open", action="store_true", dest="open", help="show only open issues")
@@ -1914,6 +1922,13 @@ def main(argv: list[str] | None = None) -> int:
     sil.add_argument("--noticed-in", dest="noticed_in", default=None, metavar="PROJECT")
     sil.add_argument("--role", default=None, metavar="ROLE")
     sil.add_argument("--severity", choices=["low", "med", "high"], default=None)
+    sil.add_argument(
+        "--cockpit-bug",
+        dest="cockpit_bug",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=_COCKPIT_BUG_READ_HELP,
+    )
 
     # issue close
     sic = si_sub.add_parser("close", help="close an issue by GitHub number")
@@ -1921,10 +1936,24 @@ def main(argv: list[str] | None = None) -> int:
     sic.add_argument(
         "--note", default="", metavar="MSG", help="cause / fix summary (posted as comment)"
     )
+    sic.add_argument(
+        "--cockpit-bug",
+        dest="cockpit_bug",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=_COCKPIT_BUG_READ_HELP,
+    )
 
     # issue show
     sis = si_sub.add_parser("show", help="print issue from GitHub to stdout")
     sis.add_argument("id", help="GitHub issue number (e.g. 123, #123)")
+    sis.add_argument(
+        "--cockpit-bug",
+        dest="cockpit_bug",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=_COCKPIT_BUG_READ_HELP,
+    )
 
     # --issues-dir kept for backward compat — deprecated, issues.py emits a warning and ignores it
     for sp in (sin, sil, sic, sis):

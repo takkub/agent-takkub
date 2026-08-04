@@ -179,6 +179,171 @@ class TestAsyncSpawnDispatch:
         assert orch.assign_calls == []
 
 
+class _FakeOrchWithProject(_FakeOrch):
+    """`_FakeOrch` plus a `_resolve_project` that mirrors the real
+    Orchestrator's (project explicitly given → returned as-is, no disk I/O)
+    so cwd-validation tests don't depend on the real ~/.takkub/projects.json."""
+
+    def _resolve_project(self, project):
+        return project or "default"
+
+
+class TestSyncCwdValidation:
+    """#143: cwd escaping the project's configured paths must be rejected
+    synchronously, before the "task queued" ack — not discovered later via
+    an async [spawn-failed] notice after the CLI already printed ok."""
+
+    @pytest.fixture
+    def project_setup(self, tmp_path, monkeypatch: pytest.MonkeyPatch):
+        import agent_takkub.config as config_mod
+
+        web = tmp_path / "myproject" / "web"
+        api = tmp_path / "myproject" / "api"
+        web.mkdir(parents=True)
+        api.mkdir(parents=True)
+        pj = tmp_path / "projects.json"
+        pj.write_text(
+            json.dumps(
+                {
+                    "active": "myproject",
+                    "projects": {"myproject": {"paths": {"web": str(web), "api": str(api)}}},
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(config_mod, "PROJECTS_JSON", pj)
+        return {"web": web, "api": api, "root": web.parent, "tmp_path": tmp_path}
+
+    def test_assign_rejects_cwd_outside_project_before_ack(
+        self, qapp: QCoreApplication, project_setup
+    ) -> None:
+        orch = _FakeOrchWithProject()
+        srv = CliServer(orch)
+        sock = _FakeSock()
+        outside = str(project_setup["tmp_path"] / "unrelated")
+
+        srv._dispatch(
+            sock,
+            _auth(
+                {
+                    "cmd": "assign",
+                    "role": "backend",
+                    "cwd": outside,
+                    "task": "x",
+                    "from_project": "myproject",
+                }
+            ),
+        )
+
+        r = _replies(sock)
+        assert len(r) == 1
+        assert r[0]["ok"] is False
+        assert "outside project" in r[0]["msg"]
+        assert str(project_setup["web"]) in r[0]["msg"]  # valid paths named
+        qapp.processEvents()
+        assert orch.assign_calls == [], "invalid cwd must never reach assign(), even async"
+
+    def test_spawn_rejects_cwd_outside_project_before_ack(
+        self, qapp: QCoreApplication, project_setup
+    ) -> None:
+        orch = _FakeOrchWithProject()
+        srv = CliServer(orch)
+        sock = _FakeSock()
+        outside = str(project_setup["tmp_path"] / "unrelated")
+
+        srv._dispatch(
+            sock,
+            _auth(
+                {"cmd": "spawn", "role": "frontend", "cwd": outside, "from_project": "myproject"}
+            ),
+        )
+
+        r = _replies(sock)
+        assert r[0]["ok"] is False
+        assert "outside project" in r[0]["msg"]
+        qapp.processEvents()
+        assert orch.spawn_calls == []
+
+    def test_assign_accepts_cwd_inside_configured_path(
+        self, qapp: QCoreApplication, project_setup
+    ) -> None:
+        orch = _FakeOrchWithProject()
+        srv = CliServer(orch)
+        sock = _FakeSock()
+
+        srv._dispatch(
+            sock,
+            _auth(
+                {
+                    "cmd": "assign",
+                    "role": "backend",
+                    "cwd": str(project_setup["api"]),
+                    "task": "x",
+                    "from_project": "myproject",
+                }
+            ),
+        )
+
+        assert _replies(sock)[0]["ok"] is True
+        qapp.processEvents()
+        assert orch.assign_calls == [
+            ("backend", str(project_setup["api"]), "x", False, False, "shared")
+        ]
+
+    def test_assign_accepts_project_root_cwd(self, qapp: QCoreApplication, project_setup) -> None:
+        """The project's own root (common parent of its configured paths) is
+        a legal cwd for any role, not just Lead (#143)."""
+        orch = _FakeOrchWithProject()
+        srv = CliServer(orch)
+        sock = _FakeSock()
+
+        srv._dispatch(
+            sock,
+            _auth(
+                {
+                    "cmd": "assign",
+                    "role": "devops",
+                    "cwd": str(project_setup["root"]),
+                    "task": "x",
+                    "from_project": "myproject",
+                }
+            ),
+        )
+
+        assert _replies(sock)[0]["ok"] is True
+        qapp.processEvents()
+        assert orch.assign_calls == [
+            ("devops", str(project_setup["root"]), "x", False, False, "shared")
+        ]
+
+    def test_assign_skips_validation_without_resolve_project(
+        self, qapp: QCoreApplication, project_setup
+    ) -> None:
+        """A caller whose orchestrator stub lacks `_resolve_project` (only
+        the plain `_FakeOrch` — as in the rest of this test module) must
+        degrade to the pre-existing 'default namespace, no validation'
+        behavior rather than crash."""
+        orch = _FakeOrch()
+        srv = CliServer(orch)
+        sock = _FakeSock()
+
+        srv._dispatch(
+            sock,
+            _auth(
+                {
+                    "cmd": "assign",
+                    "role": "backend",
+                    "cwd": str(project_setup["tmp_path"] / "unrelated"),
+                    "task": "x",
+                }
+            ),
+        )
+
+        assert _replies(sock)[0]["ok"] is True
+        qapp.processEvents()
+        assert len(orch.assign_calls) == 1
+
+
 class TestSpawnStagger:
     """Concurrent assigns must be spaced apart so back-to-back ConPTY spawns
     don't collide on one event-loop tick (#44); codex gets a bigger gap so its

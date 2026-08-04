@@ -16,7 +16,12 @@ import pytest
 import agent_takkub.orchestrator as orch_mod
 from agent_takkub import config as config_mod
 from agent_takkub.config import _write_json_atomic, validate_name
-from agent_takkub.orchestrator import LEAD, _cwd_within_project
+from agent_takkub.orchestrator import (
+    LEAD,
+    _cwd_within_project,
+    _project_root_dir,
+    cwd_validation_error,
+)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # validate_name
@@ -170,6 +175,97 @@ class TestCwdWithinProject:
         unrelated.mkdir()
         assert _cwd_within_project(str(unrelated), project_env["project"], LEAD.name) is False
         assert _cwd_within_project(str(unrelated), project_env["project"], "backend") is False
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# _project_root_dir / _cwd_within_project — project-root acceptance (#143)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestProjectRootDir:
+    def test_returns_common_parent_when_it_exists(self, project_env: dict) -> None:
+        # project_env's web/api paths are both under tmp_path/"myproject",
+        # which mkdir(parents=True) creates as a real, existing directory.
+        root = _project_root_dir(project_env["project"])
+        assert root is not None
+        assert root == project_env["web"].parent
+        assert root == project_env["api"].parent
+
+    def test_none_for_unknown_project(self, project_env: dict) -> None:
+        assert _project_root_dir("nonexistent-project") is None
+
+    def test_none_when_common_parent_does_not_exist(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Configured paths whose common parent was never created on disk —
+        # must not fabricate a bypass for a directory that doesn't exist.
+        pj = tmp_path / "projects.json"
+        pj.write_text(
+            json.dumps(
+                {
+                    "active": "ghost",
+                    "projects": {
+                        "ghost": {
+                            "paths": {
+                                "web": str(tmp_path / "never-created" / "web"),
+                                "api": str(tmp_path / "never-created" / "api"),
+                            }
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(config_mod, "PROJECTS_JSON", pj)
+        assert _project_root_dir("ghost") is None
+
+
+class TestCwdWithinProjectAcceptsProjectRoot:
+    def test_project_root_itself_allowed_for_teammate(self, project_env: dict) -> None:
+        root = project_env["web"].parent
+        assert _cwd_within_project(str(root), project_env["project"], "backend") is True
+
+    def test_subdir_of_project_root_allowed_for_teammate(self, project_env: dict) -> None:
+        root = project_env["web"].parent
+        extra = root / "docs"
+        extra.mkdir()
+        assert _cwd_within_project(str(extra), project_env["project"], "devops") is True
+
+    def test_sibling_of_project_root_still_denied(
+        self, project_env: dict, tmp_path: pathlib.Path
+    ) -> None:
+        # A directory next to (not under) the project root must stay denied —
+        # the bypass is scoped to the root and its descendants only.
+        sibling = tmp_path / "sibling-of-myproject"
+        sibling.mkdir()
+        assert _cwd_within_project(str(sibling), project_env["project"], "backend") is False
+
+
+class TestCwdValidationError:
+    def test_none_for_valid_cwd(self, project_env: dict) -> None:
+        assert (
+            cwd_validation_error(str(project_env["web"]), project_env["project"], "backend") is None
+        )
+
+    def test_message_names_valid_paths_for_invalid_cwd(
+        self, project_env: dict, tmp_path: pathlib.Path
+    ) -> None:
+        unrelated = tmp_path / "unrelated"
+        unrelated.mkdir()
+        err = cwd_validation_error(str(unrelated), project_env["project"], "backend")
+        assert err is not None
+        assert str(unrelated) in err
+        assert str(project_env["web"]) in err
+        assert str(project_env["api"]) in err
+
+    def test_message_includes_project_root_when_it_exists(
+        self, project_env: dict, tmp_path: pathlib.Path
+    ) -> None:
+        unrelated = tmp_path / "unrelated"
+        unrelated.mkdir()
+        err = cwd_validation_error(str(unrelated), project_env["project"], "backend")
+        assert err is not None
+        assert str(project_env["web"].parent) in err
 
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -310,10 +310,23 @@ def list_issues(
     role: str | None = None,
     severity: str | None = None,
     cwd: str | Path | None = None,
+    cockpit_bug: bool = True,
 ) -> list[dict[str, Any]]:
-    """Return list of issue dicts matching filters. Falls back to local store if GitHub is unavailable."""
+    """Return list of issue dicts matching filters. Falls back to local store if GitHub is unavailable.
+
+    `cockpit_bug` (default **True**) reads from the same place `new_issue`
+    defaults to writing to — the agent-takkub install repo (REPO_ROOT's git
+    remote), or its local-fallback store, regardless of `cwd`. Without this,
+    `list_issues(cwd=<pane's actual dir>)` would query a completely different
+    repo/store than the cockpit-bug issue `new_issue` just filed, and come
+    back looking empty even though the data exists (issue #142). Pass
+    `cockpit_bug=False` to read the *active project's* repo instead
+    (cwd-based `gh repo view` detection, CLI: `--no-cockpit-bug`) — matching
+    `new_issue`'s routing rule exactly.
+    """
+    detect_cwd: str | Path | None = str(REPO_ROOT) if cockpit_bug else cwd
     try:
-        repo = _detect_repo(cwd)
+        repo = _detect_repo(detect_cwd)
         use_local = False
     except RuntimeError:
         use_local = True
@@ -347,7 +360,7 @@ def list_issues(
             if noticed_in:
                 gh_args += ["--label", f"noticed-in:{noticed_in}"]
 
-            out = _gh(*gh_args, cwd=cwd)
+            out = _gh(*gh_args, cwd=detect_cwd)
             if not out:
                 return []
 
@@ -393,7 +406,7 @@ def list_issues(
             use_local = True
 
     # Local fallback
-    issues = _load_local_issues(_local_store_cwd(cwd))
+    issues = _load_local_issues(_local_store_cwd(detect_cwd))
     results = []
     for iss in issues:
         status = iss.get("status", "open").lower()
@@ -416,11 +429,19 @@ def close_issue(
     *,
     note: str = "",
     cwd: str | Path | None = None,
+    cockpit_bug: bool = True,
 ) -> str:
-    """Close an issue by number. Returns the issue URL. Falls back to local store if GitHub is unavailable."""
+    """Close an issue by number. Returns the issue URL. Falls back to local store if GitHub is unavailable.
+
+    `cockpit_bug` (default **True**) targets the same repo/store `new_issue`
+    files against by default — see `list_issues`'s docstring (issue #142).
+    Pass `cockpit_bug=False` to close against the *active project's* repo
+    instead (CLI: `--no-cockpit-bug`).
+    """
     number = _parse_issue_number(issue_id)
+    detect_cwd: str | Path | None = str(REPO_ROOT) if cockpit_bug else cwd
     try:
-        repo = _detect_repo(cwd)
+        repo = _detect_repo(detect_cwd)
         use_local = False
     except RuntimeError:
         use_local = True
@@ -431,14 +452,14 @@ def close_issue(
             if note:
                 gh_args += ["--comment", note]
 
-            _gh(*gh_args, cwd=cwd, timeout=60)
+            _gh(*gh_args, cwd=detect_cwd, timeout=60)
             return f"https://github.com/{repo}/issues/{number}"
         except RuntimeError as exc:
             _warn_local_fallback(f"close #{number}", reason=str(exc)[:60])
             use_local = True
 
     # Local fallback
-    local_cwd = _local_store_cwd(cwd)
+    local_cwd = _local_store_cwd(detect_cwd)
     issues = _load_local_issues(local_cwd)
     found = False
     import datetime
@@ -460,23 +481,30 @@ def close_issue(
     return f"local://issue/{number}"
 
 
-def show_issue(issue_id: str, *, cwd: str | Path | None = None) -> str:
-    """Return rendered issue text. Falls back to local store if GitHub is unavailable."""
+def show_issue(issue_id: str, *, cwd: str | Path | None = None, cockpit_bug: bool = True) -> str:
+    """Return rendered issue text. Falls back to local store if GitHub is unavailable.
+
+    `cockpit_bug` (default **True**) targets the same repo/store `new_issue`
+    files against by default — see `list_issues`'s docstring (issue #142).
+    Pass `cockpit_bug=False` to read the *active project's* repo instead
+    (CLI: `--no-cockpit-bug`).
+    """
     number = _parse_issue_number(issue_id)
+    detect_cwd: str | Path | None = str(REPO_ROOT) if cockpit_bug else cwd
     try:
-        repo = _detect_repo(cwd)
+        repo = _detect_repo(detect_cwd)
         use_local = False
     except RuntimeError:
         use_local = True
 
     if not use_local:
         try:
-            return _gh("issue", "view", str(number), "--repo", repo, cwd=cwd)
+            return _gh("issue", "view", str(number), "--repo", repo, cwd=detect_cwd)
         except RuntimeError:
             use_local = True
 
     # Local fallback
-    issues = _load_local_issues(_local_store_cwd(cwd))
+    issues = _load_local_issues(_local_store_cwd(detect_cwd))
     iss = next((i for i in issues if i.get("number") == number), None)
     if not iss:
         raise RuntimeError(f"local issue #{number} not found")
@@ -535,6 +563,16 @@ def _safe_print(text: str, **kwargs) -> None:
 
 def _safe_col(val: str, width: int) -> str:
     return val.replace("\n", " ").replace("\r", "")[:width]
+
+
+def _scope_desc(cwd: str | Path | None, cockpit_bug: bool) -> str:
+    """One-line description of which repo/store a query targets, plus the
+    active filters — so an empty '(no issues)' result reads as "this store
+    genuinely has nothing" rather than "did my data disappear?" (issue #142:
+    `list` used to silently query a different store than `new` wrote to)."""
+    if cockpit_bug:
+        return f"scope: cockpit (agent-takkub repo, {REPO_ROOT})"
+    return f"scope: active project (cwd={cwd or '.'})"
 
 
 # ── CLI entry points (called from cli.py) ─────────────────────────────────────
@@ -615,6 +653,7 @@ def cmd_issue_list(args: Any) -> dict:
         print("warn: --issues-dir is deprecated and ignored", file=sys.stderr)
 
     cwd = getattr(args, "cwd", None)
+    cockpit_bug = getattr(args, "cockpit_bug", True)
     try:
         items = list_issues(
             filter_open=getattr(args, "open", False),
@@ -623,10 +662,12 @@ def cmd_issue_list(args: Any) -> dict:
             role=getattr(args, "role", None),
             severity=getattr(args, "severity", None),
             cwd=cwd,
+            cockpit_bug=cockpit_bug,
         )
     except (ValueError, RuntimeError) as exc:
         return {"ok": False, "msg": str(exc)}
 
+    _safe_print(_scope_desc(cwd, cockpit_bug))
     if not items:
         _safe_print("(no issues)")
         return {"ok": True, "msg": "0 issue(s)"}
@@ -656,6 +697,7 @@ def cmd_issue_close(args: Any) -> dict:
             args.id,
             note=getattr(args, "note", "") or "",
             cwd=cwd,
+            cockpit_bug=getattr(args, "cockpit_bug", True),
         )
     except (ValueError, RuntimeError) as exc:
         return {"ok": False, "msg": str(exc)}
@@ -671,7 +713,7 @@ def cmd_issue_show(args: Any) -> dict:
 
     cwd = getattr(args, "cwd", None)
     try:
-        content = show_issue(args.id, cwd=cwd)
+        content = show_issue(args.id, cwd=cwd, cockpit_bug=getattr(args, "cockpit_bug", True))
     except (ValueError, RuntimeError) as exc:
         return {"ok": False, "msg": str(exc)}
 

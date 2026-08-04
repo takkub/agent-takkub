@@ -644,3 +644,175 @@ def test_issues_dir_flag_cli_deprecated(tmp_path, monkeypatch, capsys) -> None:
             assert exc.code == 0, f"CLI exited {exc.code}"
     captured = capsys.readouterr()
     assert "unrecognized" not in captured.err
+
+
+# ── #142: list/close/show must read the same store `new` writes to ───────────
+
+
+def test_list_issues_default_cockpit_bug_routes_to_repo_root(tmp_path) -> None:
+    """`list_issues()` with no flag must detect the repo at REPO_ROOT, exactly
+    like `new_issue()` — regardless of a caller-supplied cwd pointing at some
+    other pane's directory."""
+    from agent_takkub.config import REPO_ROOT
+
+    detected_cwds: list = []
+
+    def fake_gh(*args, cwd=None, **kwargs):
+        detected_cwds.append(str(cwd) if cwd is not None else None)
+        if args[:2] == ("repo", "view"):
+            return "takkub/agent-takkub"
+        return "[]"
+
+    with patch("agent_takkub.issues._gh", side_effect=fake_gh):
+        list_issues(cwd=str(tmp_path))
+
+    assert detected_cwds[0] == str(REPO_ROOT)
+
+
+def test_list_issues_no_cockpit_bug_uses_cwd(tmp_path) -> None:
+    """`--no-cockpit-bug` opts back into cwd-based repo detection."""
+    detected_cwds: list = []
+
+    def fake_gh(*args, cwd=None, **kwargs):
+        detected_cwds.append(str(cwd) if cwd is not None else None)
+        if args[:2] == ("repo", "view"):
+            return "owner/repo"
+        return "[]"
+
+    with patch("agent_takkub.issues._gh", side_effect=fake_gh):
+        list_issues(cwd=str(tmp_path), cockpit_bug=False)
+
+    assert detected_cwds[0] == str(tmp_path)
+
+
+def test_close_issue_default_cockpit_bug_routes_to_repo_root() -> None:
+    from agent_takkub.config import REPO_ROOT
+
+    detected_cwds: list = []
+
+    def fake_gh(*args, cwd=None, **kwargs):
+        detected_cwds.append(str(cwd) if cwd is not None else None)
+        if args[:2] == ("repo", "view"):
+            return "takkub/agent-takkub"
+        return ""
+
+    with patch("agent_takkub.issues._gh", side_effect=fake_gh):
+        close_issue("5", cwd="/some/other/pane/dir")
+
+    assert detected_cwds[0] == str(REPO_ROOT)
+
+
+def test_show_issue_default_cockpit_bug_routes_to_repo_root() -> None:
+    from agent_takkub.config import REPO_ROOT
+
+    detected_cwds: list = []
+
+    def fake_gh(*args, cwd=None, **kwargs):
+        detected_cwds.append(str(cwd) if cwd is not None else None)
+        if args[:2] == ("repo", "view"):
+            return "takkub/agent-takkub"
+        return "issue content"
+
+    with patch("agent_takkub.issues._gh", side_effect=fake_gh):
+        show_issue("5", cwd="/some/other/pane/dir")
+
+    assert detected_cwds[0] == str(REPO_ROOT)
+
+
+def test_new_then_list_symmetry_local_fallback(tmp_path, monkeypatch) -> None:
+    """End-to-end regression for #142: an issue filed with the default
+    cockpit_bug=True (gh unavailable → local store) must be found by
+    list_issues() with the default flags too, no matter what cwd the
+    *listing* pane happens to be in — this is the exact bug: `new` and
+    `list` reading two different local-store files."""
+    fake_repo_root = tmp_path / "cockpit-checkout"
+    fake_repo_root.mkdir()
+    monkeypatch.setattr("agent_takkub.issues.REPO_ROOT", fake_repo_root)
+    monkeypatch.setattr("agent_takkub.issues.DATA_HOME", fake_repo_root)
+
+    other_pane_cwd = tmp_path / "some-project-pane"
+    other_pane_cwd.mkdir()
+
+    with patch("agent_takkub.issues._detect_repo", side_effect=RuntimeError("no gh")):
+        number, _url = new_issue("cockpit bug found in pane", "body", cwd=str(other_pane_cwd))
+
+    with patch("agent_takkub.issues._detect_repo", side_effect=RuntimeError("no gh")):
+        # Listing from a totally different pane cwd — must still see it.
+        found = list_issues(cwd=str(other_pane_cwd / "nested" / "dir"))
+
+    assert any(iss["number"] == number for iss in found)
+
+
+def test_cmd_list_shows_cockpit_scope(capsys) -> None:
+    with patch("agent_takkub.issues.list_issues", return_value=[]):
+        cmd_issue_list(_args())
+    captured = capsys.readouterr()
+    assert "scope: cockpit" in captured.out
+
+
+def test_cmd_list_shows_project_scope_on_no_cockpit_bug(capsys) -> None:
+    with patch("agent_takkub.issues.list_issues", return_value=[]):
+        cmd_issue_list(_args(cockpit_bug=False, cwd="/my/project"))
+    captured = capsys.readouterr()
+    assert "scope: active project" in captured.out
+    assert "/my/project" in captured.out
+
+
+def test_cli_issue_list_no_cockpit_bug_opt_out(monkeypatch) -> None:
+    import sys
+
+    from agent_takkub import cli
+
+    captured: dict = {}
+
+    def fake_list_issues(**kw):
+        captured.update(kw)
+        return []
+
+    with patch("agent_takkub.issues.list_issues", side_effect=fake_list_issues):
+        monkeypatch.setattr(sys, "argv", ["takkub", "issue", "list", "--no-cockpit-bug"])
+        try:
+            cli.main()
+        except SystemExit as exc:
+            assert exc.code == 0, f"CLI exited {exc.code}"
+    assert captured.get("cockpit_bug") is False
+
+
+def test_cli_issue_close_defaults_to_cockpit_bug(monkeypatch) -> None:
+    import sys
+
+    from agent_takkub import cli
+
+    captured: dict = {}
+
+    def fake_close_issue(issue_id, **kw):
+        captured.update(kw)
+        return "https://github.com/takkub/agent-takkub/issues/1"
+
+    with patch("agent_takkub.issues.close_issue", side_effect=fake_close_issue):
+        monkeypatch.setattr(sys, "argv", ["takkub", "issue", "close", "1"])
+        try:
+            cli.main()
+        except SystemExit as exc:
+            assert exc.code == 0, f"CLI exited {exc.code}"
+    assert captured.get("cockpit_bug") is True
+
+
+def test_cli_issue_show_defaults_to_cockpit_bug(monkeypatch) -> None:
+    import sys
+
+    from agent_takkub import cli
+
+    captured: dict = {}
+
+    def fake_show_issue(issue_id, **kw):
+        captured.update(kw)
+        return "content"
+
+    with patch("agent_takkub.issues.show_issue", side_effect=fake_show_issue):
+        monkeypatch.setattr(sys, "argv", ["takkub", "issue", "show", "1"])
+        try:
+            cli.main()
+        except SystemExit as exc:
+            assert exc.code == 0, f"CLI exited {exc.code}"
+    assert captured.get("cockpit_bug") is True
