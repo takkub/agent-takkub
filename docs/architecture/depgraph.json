@@ -244,6 +244,7 @@
       "imports": [
         "agent_takkub.config",
         "agent_takkub.orchestrator",
+        "agent_takkub.orchestrator_text",
         "agent_takkub.provider_config",
         "agent_takkub.spawn_queue_health"
       ],
@@ -252,7 +253,7 @@
         "agent_takkub.main_window"
       ],
       "fan_in": 2,
-      "fan_out": 4
+      "fan_out": 5
     },
     {
       "module": "agent_takkub.cockpit_theme",
@@ -791,6 +792,7 @@
         "agent_takkub.worktree_manager"
       ],
       "imported_by": [
+        "agent_takkub.cli_server",
         "agent_takkub.disk_usage",
         "agent_takkub.lead_inbox",
         "agent_takkub.limit_autoresume",
@@ -798,7 +800,7 @@
         "agent_takkub.remote.notify",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 6,
+      "fan_in": 7,
       "fan_out": 7
     },
     {

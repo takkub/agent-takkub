@@ -693,8 +693,33 @@ def _render_hot_md(
     return "\n".join(lines)
 
 
+def _project_root_dir(project: str) -> pathlib.Path | None:
+    """The project's own root — the common parent directory of every path
+    configured for `project` (mirrors the "common parent" step of
+    `config.lead_cwd()`, but is not role-restricted).
+
+    A monorepo-style project configures per-role paths (`web`, `api`, …)
+    that all live under one shared root; a cwd landing exactly on that root
+    is already implied to be legitimate (it's the parent of everything the
+    project *does* allow), so any role — not just Lead — may use it.
+    Returns None when the project has no configured paths, or when their
+    common parent doesn't exist on disk.
+    """
+    roots = _allowed_project_roots(project)
+    if not roots:
+        return None
+    try:
+        common = pathlib.Path(os.path.commonpath([str(p) for p in roots]))
+    except ValueError:
+        return None
+    if common.is_dir() and common.parent != common:
+        return common
+    return None
+
+
 def _cwd_within_project(cwd: str, project: str, role_name: str) -> bool:
-    """True when `cwd` resolves under one of `project`'s configured roots.
+    """True when `cwd` resolves under one of `project`'s configured roots
+    (or the project's own root — see `_project_root_dir`).
 
     The cockpit repo-root bypass is intentionally restricted to Lead: teammates
     of unrelated projects must not inherit Lead's self-edit privileges.
@@ -721,7 +746,40 @@ def _cwd_within_project(cwd: str, project: str, role_name: str) -> bool:
             return True
     except Exception:
         pass
-    return any(target == root or root in target.parents for root in _allowed_project_roots(project))
+    if any(target == root or root in target.parents for root in _allowed_project_roots(project)):
+        return True
+    project_root = _project_root_dir(project)
+    return project_root is not None and (target == project_root or project_root in target.parents)
+
+
+def _describe_valid_project_cwds(project: str) -> str:
+    """Human-readable list of cwds that are legal for `project` — its
+    per-role configured paths plus its own root, if one resolves (see
+    `_project_root_dir`). Used to make "cwd rejected" errors actionable
+    instead of just naming the bad path."""
+    valid_paths = [str(p) for p in _allowed_project_roots(project)]
+    project_root = _project_root_dir(project)
+    if project_root is not None:
+        valid_paths.append(f"{project_root} (project root)")
+    return ", ".join(valid_paths) if valid_paths else "(no paths configured for this project)"
+
+
+def cwd_validation_error(cwd: str, project: str, role_name: str) -> str | None:
+    """None when `cwd` is a legal spawn/assign target for `role_name` in
+    `project`; otherwise a human-readable error naming the valid paths.
+
+    Single source of truth for the "cwd escapes project" rejection —
+    called from both the synchronous CLI-facing check (`cli_server.py`,
+    before the request is acknowledged) and the async spawn-time safety net
+    (`spawn_engine.py`, for callers that reach `assign()`/`spawn()` directly
+    without going through the socket, e.g. worktree/auto-respawn paths).
+    """
+    if _cwd_within_project(cwd, project, role_name):
+        return None
+    return (
+        f"cwd '{cwd}' is outside project '{project}' paths. "
+        f"valid paths: {_describe_valid_project_cwds(project)}"
+    )
 
 
 def _exit_key(project: str, role: str) -> str:

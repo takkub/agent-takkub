@@ -364,6 +364,27 @@ class CliServer(QObject):
                 if not role:
                     self._reply(sock, ok=False, msg="missing arg: 'role'")
                     return
+                # #143: cwd escaping the project's configured paths used to be
+                # caught only inside spawn() — which runs AFTER the "task
+                # queued" ack below (async, next event-loop tick). The Lead
+                # saw a false "ok" and only found out it failed once the
+                # deferred [spawn-failed] notice arrived. Validate here,
+                # synchronously, before any ack goes out.
+                cwd_req = req.get("cwd")
+                if cwd_req:
+                    _resolve_project = getattr(self._orch, "_resolve_project", None)
+                    project_ns = (
+                        _resolve_project(from_project)
+                        if _resolve_project is not None
+                        else (from_project or "default")
+                    )
+                    if project_ns != "default":
+                        from .orchestrator_text import cwd_validation_error
+
+                        cwd_err = cwd_validation_error(str(cwd_req), project_ns, role)
+                        if cwd_err:
+                            self._reply(sock, ok=False, msg=cwd_err)
+                            return
                 if cmd == "assign":
                     from .provider_config import assign_model_override_error
 

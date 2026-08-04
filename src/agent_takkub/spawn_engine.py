@@ -56,6 +56,7 @@ from .lead_context import (
 )
 from .orchestrator_text import (
     _cwd_within_project,
+    _describe_valid_project_cwds,
     _exit_key,
     _lead_model_override,
     _log_event,
@@ -1227,8 +1228,16 @@ class SpawnEngineMixin:
         # "default" namespace (unit-test / no-project) is exempt since it has no
         # configured paths to validate against. The cockpit repo itself is always
         # allowed so Lead can self-edit cockpit files (CLAUDE.md, projects.json, …).
+        # This is a defense-in-depth backstop — the same `_cwd_within_project`
+        # check runs synchronously in cli_server.py's dispatch, BEFORE the
+        # "task queued" ack, for callers that go through the socket (#143). This
+        # branch still matters for callers that reach spawn()/assign() directly
+        # (worktree finalize, auto-respawn replay, tests).
         if cwd and project_ns != "default" and not _cwd_within_project(cwd, project_ns, role_name):
-            return False, f"cwd '{cwd}' is outside project '{project_ns}' paths"
+            return False, (
+                f"cwd '{cwd}' is outside project '{project_ns}' paths. "
+                f"valid paths: {_describe_valid_project_cwds(project_ns)}"
+            )
 
         # ── Spawn gate + FIFO arbiter ────────────────────────────────
         # Prevent RPC_E_CANTCALLOUT_ININPUTSYNCCALL (Windows fatal 0x8001010d):
