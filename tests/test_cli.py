@@ -65,6 +65,26 @@ class TestArgparse:
         assert rc == 1
         assert len(fake_request) == before
 
+    def test_assign_model_warning_prints_but_does_not_block(
+        self,
+        fake_request: list[dict[str, Any]],
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # Issue #127: an unrecognized (but not provably-wrong-provider) model
+        # id must warn on stderr and still let the assign go through.
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.assign_model_override_warning",
+            lambda *_args, **_kwargs: "model id not recognized for provider 'claude'",
+        )
+        rc = cli.main(["assign", "--role", "qa", "--model", "totally-new-model", "scan"])
+        assert rc == 0
+        assert len(fake_request) == 1
+        assert fake_request[-1]["model"] == "totally-new-model"
+        err = capsys.readouterr().err
+        assert "warn:" in err
+        assert "not recognized" in err
+
     def test_send_passes_from_role_env(
         self, fake_request: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -268,6 +268,49 @@ def effective_provider_for(role: str, project: str | None = None) -> str:
     return desired if _provider_available(desired) else CLAUDE
 
 
+# ── model-id family patterns (issue #127) ───────────────────────────────────
+# Recognizable naming conventions for each provider's own model ids. Used to
+# catch a --model override that is unambiguously from the WRONG provider (for
+# example a claude-* id assigned to a role that maps to gemini/agy) instead of
+# letting it through to spawn, where the CLI just warns "model ... is not
+# recognized, using default" and silently falls back — the exact #127 report.
+#
+# Providers that route to many third-party backends by design (opencode's
+# `-m provider/model` across 75+ integrations, cursor's multi-backend model
+# picker) intentionally have NO entry here: almost any id can legitimately be
+# valid for them, so they are never blocked or warned about by family.
+_MODEL_ID_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
+    CLAUDE: (
+        re.compile(r"^claude[-_]", re.IGNORECASE),
+        re.compile(r"^(opus|sonnet|haiku|fable)([-_]|$)", re.IGNORECASE),
+    ),
+    CODEX: (
+        re.compile(r"^gpt[-_]", re.IGNORECASE),
+        re.compile(r"^o[1-9][a-z0-9-]*$", re.IGNORECASE),
+        re.compile(r"^codex", re.IGNORECASE),
+    ),
+    GEMINI: (re.compile(r"^gemini[-_]", re.IGNORECASE),),
+    KIMI: (
+        re.compile(r"^k2([.\-_]|$)", re.IGNORECASE),
+        re.compile(r"^kimi[-_]", re.IGNORECASE),
+        re.compile(r"^moonshot", re.IGNORECASE),
+    ),
+}
+
+
+def _model_family(model: str) -> str | None:
+    """Return the provider whose naming pattern ``model`` matches, else None.
+
+    ``None`` means either the id is genuinely new/unrecognized, or it belongs
+    to a router provider with no pattern table — both are non-findings here,
+    not a family match.
+    """
+    for provider, patterns in _MODEL_ID_PATTERNS.items():
+        if any(p.match(model) for p in patterns):
+            return provider
+    return None
+
+
 def assign_model_override_error(
     role: str,
     model: str | None,
@@ -278,7 +321,12 @@ def assign_model_override_error(
     Validation is intentionally based on the provider that will *actually*
     spawn, including provider substitution.  This keeps a per-assign model id
     from being silently ignored by a current or future provider that has no
-    :class:`ProviderSpec` ``model_flag``.
+    :class:`ProviderSpec` ``model_flag``, and (issue #127) blocks a model id
+    that unambiguously belongs to a DIFFERENT provider's naming scheme (for
+    example a claude-* id sent to a role that maps to gemini/agy). A model id
+    that simply isn't recognized by any known pattern is NOT blocked here —
+    see :func:`assign_model_override_warning` for that softer case, since a
+    provider can ship a brand-new model id at any time.
     """
     normalized = str(model or "").strip()
     if not normalized:
@@ -298,7 +346,57 @@ def assign_model_override_error(
             f"--model is not supported by provider '{provider}' "
             f"(role '{role}' has no ProviderSpec.model_flag)"
         )
+    family = _model_family(normalized)
+    if family is not None and family != provider and provider in _MODEL_ID_PATTERNS:
+        display = spec.display_name or provider.capitalize()
+        return (
+            f"--model '{normalized}' looks like a {family} model id, but role "
+            f"'{role}' → provider '{provider}' ({display}); use a {provider} "
+            f"model id instead of a {family} one (role→provider mapping: "
+            f"'{role}' → '{provider}')"
+        )
     return None
+
+
+def assign_model_override_warning(
+    role: str,
+    model: str | None,
+    project: str | None = None,
+) -> str | None:
+    """Return a non-blocking heads-up when ``--model`` isn't a recognized id
+    for the effective provider, but also isn't confidently from a different
+    one (that case is :func:`assign_model_override_error`'s hard block, not
+    this warning).
+
+    Only fires for providers with a KNOWN naming scheme in
+    ``_MODEL_ID_PATTERNS`` — router providers (opencode/cursor) accept model
+    ids from many backends by design and are never warned about here.
+    """
+    normalized = str(model or "").strip()
+    if not normalized:
+        return None
+
+    from .provider_spec import PROVIDER_REGISTRY
+
+    provider = effective_provider_for(role, project)
+    spec = PROVIDER_REGISTRY.get(provider)
+    if spec is None or spec.model_flag is None:
+        return None
+    if provider not in _MODEL_ID_PATTERNS:
+        return None
+    family = _model_family(normalized)
+    if family == provider:
+        return None
+    if family is not None:
+        # Belongs to a different provider's naming scheme — that's
+        # assign_model_override_error's hard block, not this softer warning.
+        return None
+    return (
+        f"--model '{normalized}' does not match any known {provider} model id "
+        f"pattern (role '{role}' → provider '{provider}'); continuing — if this "
+        f"is a new model that's fine, but if it was meant for another provider "
+        f"the CLI may silently fall back to its own default instead of using it"
+    )
 
 
 # Capability labels surfaced to the user when Lead is degraded off claude

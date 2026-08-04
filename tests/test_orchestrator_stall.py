@@ -281,6 +281,72 @@ class TestPaneStatusReport:
         assert "plain line" in tail
         assert "bold yellow" in tail
 
+    def test_transcript_tail_strips_private_mode_csi(
+        self, runtime_tmp: pathlib.Path, tmp_path: pathlib.Path
+    ) -> None:
+        """#145: `\\x1b[?25h`/`\\x1b[?25l` (cursor show/hide) weren't stripped —
+        the '?' private-mode parameter byte wasn't in the old char class."""
+        transcript = tmp_path / "backend.transcript.log"
+        transcript.write_text("\x1b[?25lworking\x1b[?25hplain line\n", encoding="utf-8")
+        orch = _FakeOrch()
+        pane = _FakePane(state="working", transcript_path=str(transcript))
+        orch._panes_by_project["default"] = {"backend": pane}
+        report = orch.pane_status_report("default")
+        tail = report["panes"]["backend"]["transcript_tail"]
+        assert "\x1b[" not in tail
+        assert "working" in tail
+        assert "plain line" in tail
+
+    def test_transcript_tail_strips_cha_final_byte(
+        self, runtime_tmp: pathlib.Path, tmp_path: pathlib.Path
+    ) -> None:
+        """#145: `\\x1b[3G` (CHA — cursor horizontal absolute) has a final
+        byte 'G' that wasn't in the old allowlist `[mABCDHJKSThlsu]`."""
+        transcript = tmp_path / "backend.transcript.log"
+        transcript.write_text("\x1b[3Gplain line\n", encoding="utf-8")
+        orch = _FakeOrch()
+        pane = _FakePane(state="working", transcript_path=str(transcript))
+        orch._panes_by_project["default"] = {"backend": pane}
+        report = orch.pane_status_report("default")
+        tail = report["panes"]["backend"]["transcript_tail"]
+        assert "\x1b[" not in tail
+        assert "plain line" in tail
+
+    def test_transcript_tail_strips_osc_sequence(
+        self, runtime_tmp: pathlib.Path, tmp_path: pathlib.Path
+    ) -> None:
+        """#145: OSC window-title sequences (`\\x1b]0;...\\x07`) are a
+        different escape family the old CSI-only regex never matched."""
+        transcript = tmp_path / "backend.transcript.log"
+        transcript.write_text(
+            "\x1b]0;my title\x07plain line\n\x1b]0;other\x1b\\second line\n",
+            encoding="utf-8",
+        )
+        orch = _FakeOrch()
+        pane = _FakePane(state="working", transcript_path=str(transcript))
+        orch._panes_by_project["default"] = {"backend": pane}
+        report = orch.pane_status_report("default")
+        tail = report["panes"]["backend"]["transcript_tail"]
+        assert "\x1b]" not in tail
+        assert "plain line" in tail
+        assert "second line" in tail
+
+    def test_transcript_tail_leaves_plain_text_untouched(
+        self, runtime_tmp: pathlib.Path, tmp_path: pathlib.Path
+    ) -> None:
+        """Plain text with no escape sequences must pass through unchanged
+        (guards against an over-broad stripper eating real content)."""
+        transcript = tmp_path / "backend.transcript.log"
+        transcript.write_text(
+            "just some [bracketed] text and a ? question mark\n", encoding="utf-8"
+        )
+        orch = _FakeOrch()
+        pane = _FakePane(state="working", transcript_path=str(transcript))
+        orch._panes_by_project["default"] = {"backend": pane}
+        report = orch.pane_status_report("default")
+        tail = report["panes"]["backend"]["transcript_tail"]
+        assert tail == "just some [bracketed] text and a ? question mark"
+
     def test_non_ui_role_stall_not_suppressed_by_qa_screenshot(
         self, runtime_tmp: pathlib.Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
