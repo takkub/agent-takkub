@@ -906,6 +906,17 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
         run_auto_fixes(findings, install_providers=args.install_providers)
         findings = run_all_checks()
 
+    if getattr(args, "live", False):
+        from .doctor import check_spawn_queue_live
+
+        live_resp: dict | None = None
+        if read_port() is not None:
+            try:
+                live_resp = _request({"cmd": "spawn-queue-status"})
+            except Exception as e:
+                live_resp = {"ok": False, "msg": f"{type(e).__name__}: {e}"}
+        findings += check_spawn_queue_live(live_resp)
+
     if args.json:
         import json as _json
 
@@ -2038,6 +2049,12 @@ def main(argv: list[str] | None = None) -> int:
         "--json",
         action="store_true",
         help="emit JSON instead of text report",
+    )
+    sdoc.add_argument(
+        "--live",
+        action="store_true",
+        help="also query the running cockpit for spawn-queue wedge state (#141); "
+        "skipped (not failed) when the cockpit isn't running",
     )
     sdoc.set_defaults(func=cmd_doctor)
 

@@ -5,6 +5,13 @@ by `check_version`, which does ONE best-effort `git fetch` (short timeout,
 degrades to the last-known ref offline) so a CLI-only user learns they're behind
 origin/main. Every subprocess call uses a short timeout + SUBPROCESS_NO_WINDOW
 to prevent hangs.
+
+The one other exception is `check_spawn_queue_live` (#141) — it interprets a
+live spawn-arbiter status response, but never fetches it itself: doctor.py is
+a `leaf-modules-pure` module (import-linter contract) and must not import
+`cli`/`orchestrator`, so the TCP round-trip lives in `cli.cmd_doctor` and is
+only made when the caller explicitly opts in via `takkub doctor --live`. It
+is NOT part of `run_all_checks()`, so a plain `takkub doctor` is unaffected.
 """
 
 from __future__ import annotations
@@ -1503,6 +1510,86 @@ def check_npm_registry() -> list[Finding]:
         "ตั้ง TAKKUB_NPM_REGISTRY=<mirror> หรือให้ public npm เข้าถึงได้"
     )
     return [Finding("env", "npm-registry", Status.WARN, detail)]
+
+
+# ---------------------------------------------------------------------------
+# [spawn-queue] — live wedge check (#141, `takkub doctor --live` only)
+# ---------------------------------------------------------------------------
+
+# A healthy spawn (ConPTY construction + gate checks) finishes in well under
+# a second; the 400ms / 10s spawn-stagger slots in cli_server.py bound how
+# fast the arbiter drains a busy-but-healthy queue. Anything sitting this
+# long is a wedge, not load.
+_SPAWN_QUEUE_STUCK_S = 60.0
+
+
+def check_spawn_queue_live(resp: dict | None) -> list[Finding]:
+    """[spawn-queue] — interpret a live spawn-arbiter status response (#141).
+
+    Pure interpretation only — doctor.py is a `leaf-modules-pure` module
+    (see pyproject.toml's import-linter contracts) and must NOT import
+    `cli`/`orchestrator` itself, not even lazily inside a function (the
+    linter's static analysis flags any import statement regardless of
+    laziness). So the TCP round-trip lives in the CALLER: `cli.cmd_doctor`
+    (when `--live` is passed) queries the running cockpit via
+    `cli._request({"cmd": "spawn-queue-status"})` — the same protocol/socket
+    the `takkub` CLI already uses — and passes the raw response dict here.
+    Pass `None` when the cockpit isn't running at all (no port file) — NOT
+    part of run_all_checks() / the pure-logic default, so a plain
+    `takkub doctor` still needs no cockpit running. #141: the pure-logic
+    checks reported "all checks passed" while 4 `takkub assign` calls sat
+    wedged in the spawn arbiter's FIFO queue — this is the only way doctor
+    can see that in-memory Orchestrator state at all.
+    """
+    if resp is None:
+        return [
+            Finding(
+                "spawn-queue",
+                "wedge",
+                Status.SKIP,
+                "cockpit is not running — live check unavailable",
+                "start the cockpit, then re-run `takkub doctor --live`",
+            )
+        ]
+
+    if not resp.get("ok"):
+        return [
+            Finding(
+                "spawn-queue",
+                "wedge",
+                Status.WARN,
+                f"live check failed: {resp.get('msg', 'unknown error')}",
+            )
+        ]
+
+    depth = int(resp.get("queue_depth") or 0)
+    in_progress = bool(resp.get("spawn_in_progress", False))
+    in_progress_age = resp.get("spawn_in_progress_age_s")
+    oldest_age = resp.get("oldest_queued_age_s")
+
+    if depth == 0 and not in_progress:
+        return [Finding("spawn-queue", "wedge", Status.OK, "queue empty, arbiter idle")]
+
+    detail = f"depth={depth} in_progress={in_progress}"
+    if in_progress_age is not None:
+        detail += f" in_progress_age={in_progress_age:.0f}s"
+    if oldest_age is not None:
+        detail += f" oldest_queued_age={oldest_age:.0f}s"
+
+    stuck = (in_progress_age is not None and in_progress_age >= _SPAWN_QUEUE_STUCK_S) or (
+        oldest_age is not None and oldest_age >= _SPAWN_QUEUE_STUCK_S
+    )
+    if stuck:
+        return [
+            Finding(
+                "spawn-queue",
+                "wedge",
+                Status.FAIL,
+                detail,
+                "spawn arbiter appears wedged — `takkub restart` to clear it",
+            )
+        ]
+    return [Finding("spawn-queue", "wedge", Status.OK, detail)]
 
 
 def run_all_checks() -> list[Finding]:
