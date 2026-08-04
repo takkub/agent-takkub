@@ -97,6 +97,38 @@ def _from_orch(name: str):
     return globals()[name]
 
 
+# Native pty-constructor duration past which spawn_native_ms stops being
+# routine noise and becomes worth a LOUD, separately-greppable log line
+# (#139 — a 3,412,178 ms / 56.9-minute spawn sat buried in events.log next to
+# every normal sub-second entry until someone went looking for it by hand).
+# The call just creates a process handle; anything over a few seconds already
+# signals contention (AV scan, disk I/O stall, a wedge in the making).
+SPAWN_NATIVE_SLOW_MS = int(os.environ.get("TAKKUB_SPAWN_NATIVE_SLOW_MS", "5000"))
+
+# Escape hatch for the spawn FIFO queue (#139/#140): if the head of
+# ``_spawn_queue`` has been waiting longer than this, whatever set
+# ``_spawn_in_progress = True`` is wedged well past the native-spawn timeout
+# (``pty_session.PTY_SPAWN_TIMEOUT_SEC``) that should have released it on its
+# own — force the arbiter open and warn Lead rather than let the queue (and
+# every assign behind it) stay stuck indefinitely.
+SPAWN_QUEUE_STUCK_SEC = int(os.environ.get("TAKKUB_SPAWN_QUEUE_STUCK_SEC", "120"))
+
+
+def _log_spawn_native_ms(_log_event, *, role: str, project: str, ms: int) -> None:
+    """Emit the routine ``spawn_native_ms`` timing plus a separate, louder
+    event when it ran unusually slow (#139) — the routine event is high-volume
+    (one per spawn) and gets lost in events.log even at pathological durations."""
+    _log_event("spawn_native_ms", role=role, project=project, ms=ms)
+    if ms >= SPAWN_NATIVE_SLOW_MS:
+        _log_event(
+            "spawn_native_slow",
+            role=role,
+            project=project,
+            ms=ms,
+            threshold_ms=SPAWN_NATIVE_SLOW_MS,
+        )
+
+
 def _append_provider_effort(
     argv: list[str],
     spec: ProviderSpec,
@@ -854,6 +886,55 @@ class SpawnEngineMixin:
             ),
         )
 
+    def _check_spawn_queue_stuck(self, now: float) -> None:
+        """Escape hatch for the spawn FIFO queue (#139/#140).
+
+        Called from the idle watchdog's 5 s tick (see
+        Orchestrator._check_idle_teammates) so a wedged arbiter is detected
+        even without another spawn() call arriving to trip over it. Since
+        pty_session.PTY_SPAWN_TIMEOUT_SEC already bounds the native call every
+        spawn goes through, ``_spawn_in_progress`` should never legitimately
+        stay True anywhere close to SPAWN_QUEUE_STUCK_SEC — reaching it means
+        something outside that bounded call is wedged (or, defensively, a
+        future code path that doesn't go through it). Forcing the arbiter
+        open is safe either way: it's a no-op if `_spawn_in_progress` already
+        cleared on its own, and unwedges the queue if it didn't.
+
+        Only inspects the head of the queue — one stuck item implies every
+        item behind it is equally starved, so a single check per tick is
+        enough; draining re-queues the rest to run (or re-queue again) below.
+        """
+        _queue = getattr(self, "_spawn_queue", None)
+        if not _queue:
+            return
+        head = _queue[0]
+        enqueued_ts = head[6] if len(head) > 6 else None
+        if enqueued_ts is None:
+            return
+        age = now - enqueued_ts
+        if age < SPAWN_QUEUE_STUCK_SEC:
+            return
+        role_name, _cwd, project, _from_auto_respawn, _shard_total = head[:5]
+        project_ns = self._resolve_project(project)
+        _log_event(
+            "spawn_queue_stuck",
+            role=role_name,
+            project=project_ns,
+            age_sec=round(age, 1),
+            queue_len=len(_queue),
+        )
+        # Whatever held the arbiter is wedged well past its own bound —
+        # release it by hand so this item (and everything queued behind it)
+        # isn't stuck forever.
+        self._spawn_in_progress = False
+        warn = getattr(self, "_warn_lead_spawn_stuck", None)
+        if warn is not None:
+            try:
+                warn(role_name, project, age)
+            except Exception:
+                pass
+        self._drain_spawn_queue()
+
     # ──────────────────────────────────────────────────────────────
     # Tier 2 final re-sample gate helpers
     # ──────────────────────────────────────────────────────────────
@@ -1050,8 +1131,8 @@ class SpawnEngineMixin:
                 return True, f"{role_name} spawn deferred (final re-sample blocked)"
             _t0 = time.time()
             session.spawn(argv=argv, cwd=spawn_cwd, env=env, transcript_path=_t_path)
-            _log_event(
-                "spawn_native_ms",
+            _log_spawn_native_ms(
+                _log_event,
                 role=role_name,
                 project=project_ns,
                 ms=int((time.time() - _t0) * 1000),
@@ -1098,6 +1179,17 @@ class SpawnEngineMixin:
             _log_event("spawn", role=role_name, cwd=spawn_cwd, resumed=False)
             return True, f"{label} spawned in {spawn_cwd}"
         except Exception as e:
+            # #139: make a native-spawn failure's actual elapsed time visible
+            # even though it never reached the success log line above — this
+            # is the one place a PtySpawnTimeout (or any other native-call
+            # failure) surfaces its duration.
+            _log_event(
+                "spawn_native_failed",
+                role=role_name,
+                project=project_ns,
+                ms=int((time.time() - _t0) * 1000) if "_t0" in locals() else None,
+                err=f"{type(e).__name__}: {e}",
+            )
             _ps_failed = self._ps(_exit_key(project_ns, role_name))
             if _ps_failed.spawn_initial_task_state == "pending":
                 _ps_failed.spawn_initial_task = None
@@ -1276,7 +1368,20 @@ class SpawnEngineMixin:
             _queue = getattr(self, "_spawn_queue", None)
             if _queue is None:
                 self._spawn_queue = _queue = collections.deque()
-            _queue.append((role_name, cwd, project, _from_auto_respawn, _shard_total, resume_uuid))
+            # Trailing enqueue timestamp (7th element) feeds the queue-age
+            # escape hatch (_check_spawn_queue_stuck, #139/#140) — a caller
+            # unpacking with item[:5] (the pre-existing shape) is unaffected.
+            _queue.append(
+                (
+                    role_name,
+                    cwd,
+                    project,
+                    _from_auto_respawn,
+                    _shard_total,
+                    resume_uuid,
+                    time.time(),
+                )
+            )
             _log_event("spawn_queued_fifo", role=role_name, project=project_ns)
             return True, f"{role_name} spawn queued (arbiter busy)"
         # ── /Spawn gate + FIFO arbiter ──────────────────────────────
@@ -2254,8 +2359,8 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 return True, f"{role_name} spawn deferred (final re-sample blocked)"
             _t0 = time.time()
             session.spawn(argv=argv, cwd=spawn_cwd, env=env, transcript_path=_t_path)
-            _log_event(
-                "spawn_native_ms",
+            _log_spawn_native_ms(
+                _log_event,
                 role=role_name,
                 project=project_ns,
                 ms=int((time.time() - _t0) * 1000),
@@ -2331,6 +2436,17 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 suffix += " — claude substitute (provider unavailable)"
             return True, f"{role_name} spawned in {spawn_cwd}{suffix}"
         except Exception as e:
+            # #139: make a native-spawn failure's actual elapsed time visible
+            # even though it never reached the success log line above — this
+            # is the one place a PtySpawnTimeout (or any other native-call
+            # failure) surfaces its duration.
+            _log_event(
+                "spawn_native_failed",
+                role=role_name,
+                project=project_ns,
+                ms=int((time.time() - _t0) * 1000) if "_t0" in locals() else None,
+                err=f"{type(e).__name__}: {e}",
+            )
             _ps_failed = self._ps(_exit_key(project_ns, role_name))
             if _ps_failed.spawn_initial_task_state == "pending":
                 _ps_failed.spawn_initial_task = None

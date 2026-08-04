@@ -3170,6 +3170,10 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         # recover (which closes the pane) doesn't fight with reminder
         # injection on the same pane.
         self._check_stuck_panes(now)
+        # Spawn FIFO queue escape hatch rides the same tick (#139/#140) — a
+        # wedged arbiter is caught even with no new spawn() call arriving to
+        # trip over it.
+        self._check_spawn_queue_stuck(now)
         # Flush durable done-notices for any project whose Lead is now idle.
         # Handles the case where notices spilled to _pending_done_notices while
         # Lead was busy — delivers them without requiring a Lead restart.

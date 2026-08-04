@@ -143,7 +143,9 @@ class TestBusyPaneNotFalselyWarned:
         # Delivered normally once ready — no blind paste, no Lead warning.
         assert reviewer.session.write.called
         assert not any(
-            "delivery-unconfirmed" in c.args[0] for c in lead.session.write.call_args_list if c.args
+            "delivery-unconfirmed" in c.args[0]
+            for c in lead.session.write.call_args_list
+            if c.args and isinstance(c.args[0], str)
         )
         assert any(c.args and c.args[0] == "task_deliver_wait_extended" for c in log.call_args_list)
 
@@ -208,7 +210,9 @@ class TestBusyPaneNotFalselyWarned:
 
         assert backend.session.write.called
         assert not any(
-            "delivery-unconfirmed" in c.args[0] for c in lead.session.write.call_args_list if c.args
+            "delivery-unconfirmed" in c.args[0]
+            for c in lead.session.write.call_args_list
+            if c.args and isinstance(c.args[0], str)
         )
 
 
@@ -271,7 +275,9 @@ class TestBusyWaitCeiling:
 
         assert reviewer.session.write.called
         assert not any(
-            "delivery-unconfirmed" in c.args[0] for c in lead.session.write.call_args_list if c.args
+            "delivery-unconfirmed" in c.args[0]
+            for c in lead.session.write.call_args_list
+            if c.args and isinstance(c.args[0], str)
         )
         assert not any(
             c.args and c.args[0] == "task_deliver_busy_ceiling_timeout" for c in log.call_args_list

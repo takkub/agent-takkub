@@ -179,7 +179,12 @@ _FAILED_NOTICE_RE = re.compile(r"\[[^\]\r\n]*\bFAILED\b[^\]\r\n]*\]", re.IGNOREC
 # and kept here: now that it only fires for a pane genuinely silent past
 # STALL_THRESHOLD_SEC, it's a real "task may not have landed" signal that
 # deserves to jump the digest queue, same as spawn-failed.
-_BLOCKING_NOTICE_MARKERS = ("[spawn-failed]", "[delivery-unconfirmed]")
+# spawn-stuck (#140): an assign that fell into the spawn FIFO queue used to
+# produce no notice at all — only an outright spawn *failure* warned via
+# spawn-failed. A queued assign stuck past SPAWN_QUEUE_STUCK_SEC
+# (spawn_engine._check_spawn_queue_stuck) is the same "task may not have
+# landed" class of signal and jumps the queue for the same reason.
+_BLOCKING_NOTICE_MARKERS = ("[spawn-failed]", "[delivery-unconfirmed]", "[spawn-stuck]")
 
 
 def _is_digestible_lead_notice(body: str) -> bool:
@@ -816,6 +821,16 @@ class LeadInboxMixin:
                                 role=role_name,
                                 seconds_since_output=round(seconds_since_output, 1),
                             )
+                            # #144: until now the Lead heard nothing about a
+                            # busy-wait extension until either the task
+                            # finally landed or the ceiling above fired — up
+                            # to BUSY_WAIT_CEILING_SEC (30 min default) later.
+                            # Warn once, right as the extension begins, so the
+                            # Lead knows delivery is still in flight instead
+                            # of silently assuming it landed.
+                            self._warn_lead_delivery_busy_wait(
+                                role_name, project, seconds_since_output
+                            )
                         QTimer.singleShot(_READY_POLL_INTERVAL_MS, _check)
                         return
                     # Ceiling reached while the pane was busy the whole time —
@@ -845,6 +860,41 @@ class LeadInboxMixin:
         # just wait out the gate anyway.
         gate_deferred = getattr(pane, "deferred_spawn", False)
         QTimer.singleShot(0 if gate_deferred else _READY_POLL_FIRST_MS, _check)
+
+    def _warn_lead_delivery_busy_wait(
+        self, role_name: str, project: str | None, seconds_since_output: float
+    ) -> None:
+        """Tell the Lead, once, the moment an assign enters the #130
+        busy-wait extension — the target pane never reached its ready prompt
+        within the normal delivery timeout but is still producing output, so
+        delivery keeps polling/resending rather than giving up. Before this
+        (#144) the Lead heard nothing about that until either the task landed
+        or the BUSY_WAIT_CEILING_SEC absolute ceiling fired, up to 30 minutes
+        later by default — this fires right as the wait begins instead.
+        Callers gate on their own one-shot flag (``busy_wait_logged`` in
+        _send_when_ready's ``_check`` closure) so this is called at most once
+        per delivery, keeping it from flooding the Lead on every 150 ms poll.
+        No-op when warning the Lead about itself."""
+        if role_name == LEAD.name:
+            return
+        project_ns = self._resolve_project(project)
+        lead = self._project_panes(project_ns).get(LEAD.name)
+        if not (lead and lead.session and lead.session.is_alive):
+            return
+        ceiling_sec = _orch_attr("BUSY_WAIT_CEILING_SEC", 1800)
+        msg = (
+            f"⏳ [delivery-busy-wait] {role_name} pane ยังไม่ถึง ready prompt แต่มี output "
+            f"ล่าสุดเมื่อ {seconds_since_output:.0f}s ที่แล้ว (ยังไม่นิ่ง) — "
+            f"task ยังไม่ถึงมือ กำลังรอ/จะ resend ต่อจนกว่าจะ ready หรือครบ {ceiling_sec}s "
+            f"(issue #144)"
+        )
+        self._notify_lead(project_ns, msg)
+        _log_event(
+            "delivery_busy_wait_warned",
+            role=role_name,
+            project=project_ns,
+            seconds_since_output=round(seconds_since_output, 1),
+        )
 
     def _warn_lead_delivery_unconfirmed(
         self,
@@ -914,6 +964,36 @@ class LeadInboxMixin:
         )
         self._notify_lead(project_ns, msg)
         _log_event("spawn_failed_warned", role=role_name, project=project_ns)
+
+    def _warn_lead_spawn_stuck(self, role_name: str, project: str | None, age_sec: float) -> None:
+        """Tell the Lead that an assign has been sitting in the spawn FIFO
+        queue for longer than spawn_engine.SPAWN_QUEUE_STUCK_SEC without ever
+        reaching a pane (#140). Until this, a queued assign was silent —
+        _warn_lead_spawn_failed only ever fired for an outright spawn
+        *failure*, never for one stuck waiting behind another spawn that
+        wouldn't finish. Called by spawn_engine._check_spawn_queue_stuck,
+        which has already forced the arbiter open and requeued this item, so
+        the wording reflects that a retry is already underway. No-op when the
+        stuck role is the Lead itself."""
+        if role_name == LEAD.name:
+            return
+        project_ns = self._resolve_project(project)
+        lead = self._project_panes(project_ns).get(LEAD.name)
+        if not (lead and lead.session and lead.session.is_alive):
+            return
+        msg = (
+            f"⚠️ [spawn-stuck] {role_name} assign ค้างใน spawn queue นานเกิน {age_sec:.0f}s "
+            f"— arbiter ถูกปล่อยแล้วและกำลัง retry ให้อัตโนมัติ แต่ pane ยังไม่ขึ้น "
+            f"ณ ตอนนี้. เช็คด้วย takkub list — ถ้ายังไม่ขึ้นให้ลอง assign {role_name} "
+            f"ใหม่อีกครั้ง (issue #139/#140)"
+        )
+        self._notify_lead(project_ns, msg)
+        _log_event(
+            "spawn_stuck_warned",
+            role=role_name,
+            project=project_ns,
+            age_sec=round(age_sec, 1),
+        )
 
     def _warn_lead_respawn_capped(self, role_name: str, project: str) -> None:
         """Bug-3 fix: tell Lead that a teammate hit AUTO_RESPAWN_MAX and gave up.
