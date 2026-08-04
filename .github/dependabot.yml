@@ -14,6 +14,20 @@ updates:
     groups:
       python-deps:
         patterns: ["*"]
+    # PyQt6 is pinned to the 6.8 LTS series on purpose (matches `takkub doctor`'s
+    # supported-Qt-series check, enforced by
+    # tests/test_version_sync.py::test_qt_dependencies_match_doctor_supported_lts_series).
+    # Block dependabot from proposing a minor/major bump past 6.9 (PR #138 tried
+    # this and broke CI); patch-level security updates within 6.8.x still land.
+    ignore:
+      - dependency-name: "PyQt6"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "PyQt6-Qt6"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "PyQt6-WebEngine"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "PyQt6-WebEngine-Qt6"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
 
   # npm wrapper (root package.json — dev/wrapper only, zero runtime deps).
   - package-ecosystem: "npm"
