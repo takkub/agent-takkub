@@ -1,8 +1,10 @@
 # Issue #146 — Playwright MCP ไม่ connect บน qa `--plan --shards N` panes
 
-วันที่ตรวจ: 2026-08-04
+วันที่ตรวจ: 2026-08-04 (รอบ 1 เช้า, รอบ 2 บ่าย)
 ผู้ตรวจ: backend (static-only — ไม่มีสิทธิ์รัน browser driver / ไม่มี cockpit instance จริงให้ repro สด)
-สถานะ: **ยังปิดไม่ได้ — ต้อง repro สด** (ไม่พบบั๊กจาก static trace ทั้ง argv/env/config generation)
+สถานะ: **ยังปิดไม่ได้ — ต้อง repro สด** (ไม่พบบั๊กจาก static trace ทั้ง argv/env/config generation;
+รอบ 2 พิสูจน์แล้วว่า "หลักฐานใหม่" ที่ดูเหมือนขัดแย้งกับรอบ 1 เป็น false lead จากการเช็คไฟล์คนละ
+`RUNTIME_DIR` — ดูท้ายเอกสาร "รอบ 2")
 
 ## ขอบเขตที่ตรวจ
 
@@ -150,3 +152,107 @@ Static trace ครบทั้ง argv construction, provider resolution, env i
 (shard-specific config path, TAKKUB_SHARD env) ซึ่งตรวจแล้วว่าถูกต้อง สาเหตุที่เหลือทั้งหมด (H1/H2/H3)
 เป็นเรื่อง **timing/resource contention ตอน runtime** ที่พิสูจน์ได้เฉพาะด้วยการ repro สดเท่านั้น — งานนี้
 **ยังปิดไม่ได้** ต้องส่งต่อให้ role ที่มีสิทธิ์รัน browser driver จริง (qa) ทำตาม repro plan ข้างบน
+
+---
+
+## รอบ 2 — live evidence + code trace (2026-08-04, บ่าย)
+
+ผู้ตรวจ: backend (static trace + อ่านไฟล์จริงบนดิสก์ — **ไม่แตะโปรเจค wash-locker เลย**, อ้างถึงแค่
+*ชื่อไฟล์*/เนื้อ JSON ของ config ใต้ `~/.agent-takkub/runtime/` ที่มีอยู่ก่อนแล้วเท่านั้น)
+
+### สรุปสั้น: correlation ในรอบ 2 เป็น **false lead** — ไม่ใช่บั๊ก ไม่เกี่ยวกับ #146 เดิม
+
+หลักฐานใหม่ที่ qa รายงานมา (per-shard config ไม่ถูกสร้างสำหรับ `agent-takkub`, แต่ถูกสร้างสำหรับ
+`wash-locker`) **เกิดจากการเช็คคนละ `RUNTIME_DIR`** — ไม่ใช่พฤติกรรมที่ต่างกันจริงของโค้ด
+
+### พิสูจน์ (บรรทัดต่อบรรทัด)
+
+**1. `RUNTIME_DIR` ไม่ใช่ path เดียวเสมอ — ขึ้นกับว่า cockpit instance ไหนกำลังรัน**
+
+`config.py:110-140` (`_resolve_data_home`):
+```python
+REPO_ROOT = Path(__file__).resolve().parents[2]
+...
+if (REPO_ROOT / "pyproject.toml").is_file() and (REPO_ROOT / "src").is_dir():
+    return REPO_ROOT          # dev checkout → DATA_HOME = REPO_ROOT
+...
+return Path.home() / ".agent-takkub"   # installed/prod → ~/.agent-takkub
+```
+`RUNTIME_DIR = DATA_HOME / "runtime"` (`config.py:298`) — **โดยตั้งใจ** (docstring บรรทัด 120-121:
+"dev checkout ... → REPO_ROOT, so a from-source run behaves EXACTLY as before"). ยืนยันสดด้วยการ import
+`shared_dev_tools` จาก source ของ repo นี้ตรงๆ:
+
+```
+RUNTIME_DIR C:\Users\monch\WebstormProjects\agent-takkub\runtime
+```
+
+ไม่ใช่ `~/.agent-takkub/runtime` ที่ qa เช็ค — **นี่คือจุดที่ evidence รอบ 1 เข้าใจผิด**
+
+**2. per-shard config ถูกสร้างครบจริง — อยู่ใน `<repo>/runtime/` ไม่ใช่ `~/.agent-takkub/runtime/`**
+
+`ls C:\Users\monch\WebstormProjects\agent-takkub\runtime\` (repo-local, `.gitignore:16` — ไม่ commit)
+มีครบ: `shared-mcp-agent-takkub-qa.json`, `-qa-shard1.json`, `-qa-shard2.json`, `-qa-shard3.json`
+— ทั้งหมด mtime **`2026-08-04 17:53:31`** (ตรงกับเวลา live repro รอบนี้เป๊ะ ต่างกันแค่ระดับ ms
+ระหว่าง 4 ไฟล์ = เขียนพร้อมกันจริงตาม fan-out) เทียบกับ `~/.agent-takkub/runtime/shared-mcp-agent-takkub-qa.json`
+ที่มี**อยู่ก่อนแล้ว**ตั้งแต่ `2026-07-04 22:27:32` (เก่า ~1 เดือน, ไม่เกี่ยวกับ repro รอบนี้เลย)
+
+เนื้อไฟล์ (`shard1` vs `shard2`) มี `--user-data-dir` **แยกกันจริง**:
+```
+shard1 → ...\runtime\browser-profiles\agent-takkub-qa-shard1-playwright
+shard2 → ...\runtime\browser-profiles\agent-takkub-qa-shard2-playwright
+shard3 → ...\runtime\browser-profiles\agent-takkub-qa-shard3-playwright
+```
+ทั้ง 3 โฟลเดอร์นี้ **มีอยู่จริงบนดิสก์** (`profile_dir.mkdir(parents=True, exist_ok=True)` ที่
+`shared_dev_tools.py:309` เป็นคนสร้าง — ก่อน pane spawn ด้วยซ้ำ ไม่ต้องรอ playwright สร้างเอง) และแต่ละ
+โฟลเดอร์มี **Chromium artifact จริง** (`BrowserMetrics/`, `component_crx_cache/`, mtime 17:28-17:30 —
+ก่อนไฟล์ config เขียนเสร็จเล็กน้อย เพราะ mkdir เกิดก่อน browser ค่อย populate) — พิสูจน์ว่า **Playwright
+MCP connect สำเร็จและขับ Chromium จริงในโปรไฟล์ที่แยกต่อ shard ถูกต้อง 100%** ไม่มี profile ชนกัน
+
+**สรุปข้อ 4 ของ task (side-effect concern):** "3 shards ใช้ browser profile เดียวกัน" **ไม่จริง** — เป็น
+ผลจากการเช็คไฟล์ผิดที่ ไม่ใช่บั๊ก ไม่ต้องแก้อะไร
+
+**3. `--plan` fan-out กับ plain `--shards` เดินโค้ดเดียวกันสำหรับ per-shard MCP config (ยืนยันซ้ำจาก empirical)**
+
+หลักฐานนี้เอง (`agent-takkub` รันด้วย plain `--shards 3` ไม่มี `--plan`) พิสูจน์ข้อนี้แล้วโดยไม่ต้องอ่านโค้ด
+เพิ่ม: ถ้า plain `--shards` เดินคนละ path จาก `--plan --shards` จริง per-shard config คงไม่ถูกสร้างขึ้นมาเลย
+(เหมือนที่ qa เข้าใจผิดตอนแรก) แต่ในความเป็นจริงมันถูกสร้างครบทั้ง 3 shard ด้วย argv/isolation ที่ถูกต้อง
+— ตรงกับที่ static trace รอบ 1 สรุปไว้แล้วว่า `spawn_engine.py:2127` เป็น code path เดียวกันทั้งคู่
+(`_split_shard(role_name)` แยกแค่ `shard_idx`) `pipeline_executor.py` (`_fire_qa_plan_fanout`) เป็นแค่
+planner hop ที่มาก่อน — หลังจากนั้น fan-out จริง (spawn + mcp_argv_for_provider) ใช้โค้ดเดียวกันกับ plain
+`--shards` เป๊ะ ไม่มี branch แยก
+
+**4. เหตุใด `wash-locker` เจอไฟล์ใน `~/.agent-takkub/runtime/` แต่ `agent-takkub` ไม่เจอ (ที่เดิม)**
+
+อธิบายได้ครบโดยไม่ต้องมี hypothesis ใหม่: cockpit tab ที่จัดการโปรเจค **agent-takkub เอง (self-hosting)**
+รันจาก **dev checkout instance** (เพราะกำลังพัฒนา cockpit repo นี้ตรงๆ) → `DATA_HOME = REPO_ROOT` →
+เขียนไฟล์ลง `<repo>/runtime/` คนละที่กับ `~/.agent-takkub/runtime/` โดยสมบูรณ์ ส่วน cockpit tab ที่จัดการ
+โปรเจค `wash-locker` (และโปรเจคอื่นที่พบไฟล์ครบใน `~/.agent-takkub/runtime/` เช่น `pms`, `unirecon`,
+`TK-ERP`) รันจาก **installed/prod cockpit** → `DATA_HOME = ~/.agent-takkub` ตามดีไซน์เดิม
+(`config.py:113-137`, เจตนา — ดู docstring + `docs/audit/2026-07-05-isolation-plan-crosscheck-codex.md`
+finding C5 ที่อ้างถึงใน `config.py:183`) — **นี่คือพฤติกรรมที่ตั้งใจ ไม่ใช่บั๊ก** สองคอปปี้ cockpit (dev +
+prod) ตั้งใจแยก runtime state กันเพื่อไม่ให้ dev checkout ชน state ของ prod cockpit ที่ user ใช้งานจริง
+
+### สถานะ #146 เดิม (wash-locker ไม่ connect) หลังรอบ 2
+
+**ยังไม่ถูกพิสูจน์ — correlation ที่ผู้ assign ให้มาไม่ใช่สาเหตุจริง** ต้อง treat เป็น false lead แล้วกลับไปที่
+H1/H2/H3 ของรอบ 1 (concurrent MCP cold-start / process contention / npx cache lock) เป็น hypothesis หลักต่อ
+ไป — ยังไม่มี static evidence ใหม่ที่ชี้ไปทางอื่น
+
+**สิ่งที่ขาดในการพิสูจน์ต่อ (ต้อง live repro โดย qa เท่านั้น อ่านหลักฐานจากที่ถูกต้อง):**
+- ต้องระบุก่อนว่า cockpit tab ที่ใช้ repro #146 เดิม (บน `wash-locker`) รันจาก **dev checkout หรือ
+  installed build** (เช็คด้วย `takkub doctor` หรือดู window title — `instance_identity_label()` ที่
+  `config.py:218-229` ขึ้น `dev · agent-takkub` ถ้าเป็น dev, ขึ้น `v<version>` ถ้าเป็น prod) — แล้วเช็ค
+  `RUNTIME_DIR` ที่ถูกต้องของ instance นั้น (`<repo>/runtime/` หรือ `~/.agent-takkub/runtime/`) ก่อนสรุปว่า
+  ไฟล์ "ไม่ถูกสร้าง"
+- ต้องดู stderr/log จริงของ claude.exe แต่ละ shard ตอน MCP connect fail (ยังไม่เคยมีใครเก็บ) — แยก
+  "MCP connect timeout" (H1/H2) ออกจาก "npx cache lock" (H3) ตาม repro plan ข้อ 4 ของรอบ 1
+- รัน repro plan ข้อ 5 ของรอบ 1 (idle vs busy machine) เพื่อแยก H1 ออกจาก H2
+
+### บทเรียนที่ควรบันทึกไว้ (ป้องกัน false-lead ซ้ำ)
+
+ทุกครั้งที่ debug ปัญหาที่เกี่ยวกับไฟล์ใต้ `runtime/` (shared-mcp config, browser profiles, transcripts,
+session state ฯลฯ) **ต้องเช็คก่อนว่ากำลังดู `RUNTIME_DIR` ของ cockpit instance ไหนอยู่** — เครื่องนี้มีทั้ง
+dev checkout (`<repo>/runtime/`) และ prod install (`~/.agent-takkub/runtime/`) รันขนานกันได้จริง คนละ
+state คนละไฟล์ทั้งหมด (ไม่ใช่แค่ CLI PATH shadowing ที่เคยพบมาก่อน — เห็นได้จาก project memory
+`prod-dev-cli-path-shadowing.md` — แต่ยังลามไปถึง **ทุกไฟล์ runtime state** ด้วย) การเช็คไฟล์ผิด instance
+= สรุปผิดทันทีโดยไม่รู้ตัว (เหมือนที่เกิดในรอบ 2 นี้)
