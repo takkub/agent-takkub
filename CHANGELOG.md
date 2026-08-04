@@ -4,6 +4,20 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.43] - 2026-08-04
+
+### Fixed (แก้)
+- **ข้อความสั้นที่มีหลายบรรทัดถูกตัดกลางทาง** (จาก PR #149 โดย [@than-aa](https://github.com/than-aa)) — LF ดิบที่เขียนลง PTY **คือปุ่ม Enter** ที่ชั้น TUI (`lead_draft_state._ENTER_BYTES` นับ `0x0A` เป็น submit) และ `_sanitize_pane_text` ก็จงใจเก็บ `\n` ไว้สำหรับ task หลายบรรทัด · ผลคือ payload ที่ **สั้นกว่า 200 ตัวอักษรแต่มีหลายบรรทัด** จะถูก submit ตั้งแต่ `\n` แรก แล้วมาถึงแบบขาดเป็นท่อน — เคสที่เจอจริงคือ done-notice หลายอันที่ถูกรวมเป็นก้อนเดียว (`lead_inbox.py:1669`) และข้อความจาก `takkub send`
+  - ตอนนี้ payload ที่มีหลายบรรทัด **ห่อ bracketed paste เสมอไม่ว่าสั้นแค่ไหน** → ทั้งก้อนถึงปลายทางพร้อมกัน
+  - ผลข้างเคียงที่ตั้งใจ: notice สั้นหลายบรรทัดเปลี่ยนไปใช้ `_PASTE_ENTER_DELAY_MS` (200 ms → 800 ms) มี test pin ไว้แล้วว่าเป็นความตั้งใจ ไม่ใช่ drift
+  - ไม่กระทบ provider ตัวไหน — `_paste_payload` ไม่อ่าน provider spec เลย ทุก provider ได้ bracketed paste กับ task spec ปกติอยู่แล้ว
+- **มือถือเห็นจำนวน pane ของทั้งทีม ทั้งที่ตั้งให้ mirror เฉพาะ Lead** — `api.pulse()` เป็น reader ตัวเดียวที่ **ตกหล่น** ตอนเพิ่ม `LEAD_ONLY_STREAM` เมื่อ 2026-07-23 (`api.activity` กับ `notify.LeadNotifier` ถูก gate ไปแล้ว) → `total` ยังนับทุก pane ที่เปิดอยู่ และ `working` ยังสะท้อนว่า teammate กำลังทำงาน · ตอนนี้ scope ลงเหลือเฉพาะ entry ของ Lead (`total` เป็น 1 หรือ 0 เท่านั้น ไม่บอกขนาดทีม) · PWA ที่ ship อยู่ไม่ได้เรียก endpoint นี้แล้ว (ใช้ `/api/activity`) แต่ route ยัง live + authenticated จึงยังเป็นช่องรั่วจริงของ API surface
+- **error ตอน `--cwd` ผิด โชว์ path ซ้ำสองรอบ** (#150) — โปรเจคที่ตั้ง path ไว้ตัวเดียว (เช่น cockpit เอง) จะได้ "project root" เป็นค่าเดียวกับ configured path อยู่แล้ว เพราะ common parent ของ path เดียวคือตัวมันเอง · ตอนนี้ติดป้าย `(project root)` ที่บรรทัดเดิมแทนการต่อท้ายซ้ำ · โปรเจคหลาย path ยังเห็น root เป็นบรรทัดเพิ่มเหมือนเดิม
+
+### Notes (หมายเหตุ)
+- **PR #149 ยังไม่ merge ทั้งก้อน** — รับมาเฉพาะฝั่ง Python (ข้อแรกด้านบน) ส่วน `terminal.html` ติด 3 blocker ที่กระทบผู้ใช้ทุก OS ไม่ใช่แค่ Mac: พิมพ์ `` ` ``/`~` ไม่ได้ (xterm `attachCustomKeyEventHandler` คืน `false` ไม่ได้เรียก `preventDefault` ตัวอักษรเลยค้างใน helper textarea), CJK IME ส่งข้อความที่ยัง compose ไม่เสร็จเข้า PTY, และ Shift+Enter ทิ้ง `\n` ค้างจนปิด fallback ของตัวเอง · รายละเอียดเต็ม: `docs/reviews/2026-08-04-pr149-mac-ime-shift-enter.md`
+- **#146 (Playwright MCP บน `qa --plan --shards`) ยังเปิดอยู่** — repro รอบใหม่บนเครื่อง dev: 3 shard แยก config + แยก browser profile จริง แล้ว **connect ได้ทั้ง 3** → per-shard isolation ไม่ใช่สาเหตุ · ระหว่างทางเจอ false lead ที่บันทึกไว้กันคนหลังหลงซ้ำ: `RUNTIME_DIR` ของ dev checkout (`<repo>/runtime/`) กับ installed (`~/.agent-takkub/runtime/`) เป็นคนละที่ ทำให้ดูเผินๆ เหมือนไฟล์ per-shard ไม่ถูกสร้าง
+
 ## [1.0.42] - 2026-08-04
 
 รอบนี้เก็บบั๊กจาก issue queue ที่ค้างอยู่ทั้งหมด **8 เรื่อง** (#127, #139–#145) — ส่วนใหญ่เจอตอนใช้งานจริงกับโปรเจค wash-locker เมื่อ 4 ส.ค.
