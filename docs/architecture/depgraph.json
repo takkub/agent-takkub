@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 134,
+  "module_count": 135,
   "modules": [
     {
       "module": "agent_takkub",
@@ -244,14 +244,15 @@
       "imports": [
         "agent_takkub.config",
         "agent_takkub.orchestrator",
-        "agent_takkub.provider_config"
+        "agent_takkub.provider_config",
+        "agent_takkub.spawn_queue_health"
       ],
       "imported_by": [
         "agent_takkub.headless_window",
         "agent_takkub.main_window"
       ],
       "fan_in": 2,
-      "fan_out": 3
+      "fan_out": 4
     },
     {
       "module": "agent_takkub.cockpit_theme",
@@ -1910,6 +1911,15 @@
         "agent_takkub.spawn_engine"
       ],
       "fan_in": 2,
+      "fan_out": 0
+    },
+    {
+      "module": "agent_takkub.spawn_queue_health",
+      "imports": [],
+      "imported_by": [
+        "agent_takkub.cli_server"
+      ],
+      "fan_in": 1,
       "fan_out": 0
     },
     {

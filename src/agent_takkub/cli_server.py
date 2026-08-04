@@ -22,6 +22,7 @@ from PyQt6.QtNetwork import QHostAddress, QTcpServer, QTcpSocket
 
 from .config import write_port
 from .orchestrator import Orchestrator
+from .spawn_queue_health import SpawnQueueHealthMonitor
 
 # Maximum allowed frame size (bytes). Frames larger than this are rejected so
 # a malicious or buggy client cannot force the Qt main thread to parse/process
@@ -96,6 +97,8 @@ class CliServer(QObject):
         self._codex_gap_ms = int(os.environ.get("TAKKUB_CODEX_SPAWN_STAGGER_MS", "10000"))
         self._spawn_slot_until = 0.0  # monotonic ms; next non-codex spawn may start
         self._codex_slot_until = 0.0  # monotonic ms; next codex spawn may start
+        # #141: read-only spawn-arbiter wedge diagnostics for `takkub doctor --live`.
+        self._spawn_health = SpawnQueueHealthMonitor(orchestrator, parent=self)
 
     def _is_codex_spawn(self, role: str | None, project: str | None) -> bool:
         """True iff this spawn will actually be backed by the codex CLI.
@@ -461,6 +464,21 @@ class CliServer(QObject):
                         state = f"{state} (stalled {stall_min}m)"
                     status[role] = state
                 self._reply(sock, ok=True, msg="status", status=status)
+                return
+            elif cmd == "spawn-queue-status":
+                # #141: read-only spawn-arbiter wedge diagnostics. Open like
+                # list/status (trust-local model) — no cwd/task content, only
+                # a depth/bool/age summary.
+                snap = self._spawn_health.snapshot()
+                self._reply(
+                    sock,
+                    ok=True,
+                    msg="spawn queue status",
+                    queue_depth=snap.queue_depth,
+                    spawn_in_progress=snap.spawn_in_progress,
+                    spawn_in_progress_age_s=snap.spawn_in_progress_age_s,
+                    oldest_queued_age_s=snap.oldest_queued_age_s,
+                )
                 return
             elif cmd == "status":
                 since_ts: float | None = None
