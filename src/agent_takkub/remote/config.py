@@ -31,8 +31,11 @@ _PATH = SETTINGS_HOME / "remote.json"
 # the user actually converses with, and Lead already summarises what the team
 # did, so teammate traffic is pure duplication on a 6-inch screen.
 #
-# Flip to False to put the whole team back on the phone; `api.activity` and
-# `notify.EventTailer` are the only two readers.
+# Flip to False to put the whole team back on the phone. Three readers gate
+# on this flag: `api.activity` (roles list always [] when on), `api.pulse`
+# (count scoped down to the `lead` entry when on — fixed 2026-08-04, it was
+# missed in the original 2026-07-23 pass and counted every pane regardless),
+# and `notify.LeadNotifier._on_done` (teammate `done` events dropped when on).
 LEAD_ONLY_STREAM = True
 
 

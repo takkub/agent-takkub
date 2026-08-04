@@ -6,7 +6,11 @@ executes (§6.4).
 
 Data minimization (§7.3 / finding B2): `pulse` strips the `list` response
 down to a bare `{working, total}` count. It never uses `cmd:"status"` and
-never lets role/task/state/transcript text anywhere near the response.
+never lets role/task/state/transcript text anywhere near the response. When
+`config.LEAD_ONLY_STREAM` is on, `pulse` also scopes that count down to the
+`lead` entry only (2026-08-04 fix — it was the one mobile-facing reader that
+still counted every pane, missed when the flag was added to `activity`/
+`notify.LeadNotifier` on 2026-07-23).
 
 Multi-project scoping (project picker): `from_project` is threaded through
 from the HTTP layer (`http_server.py`'s `_Bridge._resolve_scoped_project`
@@ -99,11 +103,28 @@ def _lead_frame(orch, payload: dict, timeout: float = 5.0) -> dict:
 
 
 def pulse(orch, from_project: str | None) -> dict:
-    """§7.3 / B2: count only — never `cmd:"status"`, never role/task text."""
+    """§7.3 / B2: count only — never `cmd:"status"`, never role/task text.
+
+    LEAD_ONLY_STREAM (2026-07-23): this was found NOT gated (the mobile-scope
+    audit that added the gate to `activity`/`notify.LeadNotifier` missed this
+    reader) — `total` still counted every open pane and `working` still
+    reflected teammate activity, contradicting "phone mirrors Lead only" for
+    any client hitting `/api/pulse` directly (the shipped PWA no longer calls
+    it — see `app.js`'s `fetchPulse`, which reads `/api/activity` — but the
+    route itself stayed live and authenticated). When the flag is on, scope
+    the count down to the `lead` entry before counting so `total` never
+    reveals team size and `working` never reveals teammate activity; `total`
+    is 1 (Lead open) or 0 (no Lead pane for this project), never > 1."""
     resp = _lead_frame(orch, {"cmd": "list", "from": "remote", "from_project": from_project})
     status = resp.get("status") if isinstance(resp, dict) else None
     if not isinstance(status, dict):
         return {"working": 0, "total": 0}
+    if _remote_config.LEAD_ONLY_STREAM:
+        lead_state = status.get(LEAD.name)
+        if not isinstance(lead_state, str):
+            return {"working": 0, "total": 0}
+        working = 1 if lead_state.startswith("working") else 0
+        return {"working": working, "total": 1}
     working = sum(
         1 for state in status.values() if isinstance(state, str) and state.startswith("working")
     )

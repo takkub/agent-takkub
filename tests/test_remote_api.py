@@ -64,7 +64,12 @@ def _patch_port(monkeypatch, port: int) -> None:
 
 
 class TestPulseDataMinimization:
+    """LEAD_ONLY_STREAM=False here (explicit) — these pin the pre-gate,
+    count-every-pane behavior that must survive unchanged for anyone who
+    flips the flag back off."""
+
     def test_counts_only_working_panes(self, monkeypatch, fake_orch):
+        monkeypatch.setattr(api._remote_config, "LEAD_ONLY_STREAM", False)
         srv = _FakeCliServer(
             {"ok": True, "msg": "status", "status": {"frontend": "working", "backend": "idle"}}
         )
@@ -76,6 +81,7 @@ class TestPulseDataMinimization:
         assert result == {"working": 1, "total": 2}
 
     def test_stalled_state_still_counts_as_working(self, monkeypatch, fake_orch):
+        monkeypatch.setattr(api._remote_config, "LEAD_ONLY_STREAM", False)
         srv = _FakeCliServer(
             {"ok": True, "msg": "status", "status": {"qa": "working (stalled 12m)"}}
         )
@@ -90,6 +96,7 @@ class TestPulseDataMinimization:
         # Simulate an over-sharing / misrouted cli_server response (as if
         # `status` accidentally carried full pane_status_report-shaped data)
         # and confirm pulse() strips it down to the count regardless.
+        monkeypatch.setattr(api._remote_config, "LEAD_ONLY_STREAM", False)
         srv = _FakeCliServer(
             {
                 "ok": True,
@@ -113,6 +120,82 @@ class TestPulseDataMinimization:
         dumped = json.dumps(result)
         for leaked in ("implement", "secret internal chatter", "shot.png"):
             assert leaked not in dumped
+
+
+class TestPulseLeadOnlyStreamGate:
+    """LEAD_ONLY_STREAM defaults True (2026-07-23). `pulse` was found NOT
+    gated by it (mobile-scope audit, 2026-08-04) — it kept counting every
+    open pane's `list` state regardless of the flag, so `/api/pulse` leaked
+    team size (`total`) and teammate activity (`working`) to the phone even
+    though `activity`/`notify.LeadNotifier` already honored the same flag.
+    These pin the fix: scoped down to the `lead` entry only."""
+
+    def test_gate_on_by_default(self):
+        assert api._remote_config.LEAD_ONLY_STREAM is True
+
+    def test_counts_lead_only_ignores_working_teammates(self, monkeypatch, fake_orch):
+        srv = _FakeCliServer(
+            {
+                "ok": True,
+                "msg": "status",
+                "status": {
+                    "lead": "idle",
+                    "frontend": "working",
+                    "backend": "working",
+                    "qa": "working",
+                },
+            }
+        )
+        _patch_port(monkeypatch, srv.port)
+        try:
+            result = api.pulse(fake_orch, None)
+        finally:
+            srv.close()
+        assert result == {"working": 0, "total": 1}
+
+    def test_counts_lead_working(self, monkeypatch, fake_orch):
+        srv = _FakeCliServer(
+            {"ok": True, "msg": "status", "status": {"lead": "working", "backend": "idle"}}
+        )
+        _patch_port(monkeypatch, srv.port)
+        try:
+            result = api.pulse(fake_orch, None)
+        finally:
+            srv.close()
+        assert result == {"working": 1, "total": 1}
+
+    def test_lead_stalled_state_still_counts_as_working(self, monkeypatch, fake_orch):
+        srv = _FakeCliServer(
+            {"ok": True, "msg": "status", "status": {"lead": "working (stalled 12m)"}}
+        )
+        _patch_port(monkeypatch, srv.port)
+        try:
+            result = api.pulse(fake_orch, None)
+        finally:
+            srv.close()
+        assert result == {"working": 1, "total": 1}
+
+    def test_no_lead_pane_yields_zero_even_with_teammates_working(self, monkeypatch, fake_orch):
+        srv = _FakeCliServer(
+            {"ok": True, "msg": "status", "status": {"frontend": "working", "backend": "working"}}
+        )
+        _patch_port(monkeypatch, srv.port)
+        try:
+            result = api.pulse(fake_orch, None)
+        finally:
+            srv.close()
+        assert result == {"working": 0, "total": 0}
+
+    def test_total_never_reveals_team_size(self, monkeypatch, fake_orch):
+        status = {f"backend#{i}": "working" for i in range(5)}
+        status["lead"] = "idle"
+        srv = _FakeCliServer({"ok": True, "msg": "status", "status": status})
+        _patch_port(monkeypatch, srv.port)
+        try:
+            result = api.pulse(fake_orch, None)
+        finally:
+            srv.close()
+        assert result["total"] == 1
 
     def test_malformed_response_yields_zero_counts(self, monkeypatch, fake_orch):
         srv = _FakeCliServer({"ok": False, "msg": "bad"})
