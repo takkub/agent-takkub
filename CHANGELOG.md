@@ -4,6 +4,34 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.42] - 2026-08-04
+
+รอบนี้เก็บบั๊กจาก issue queue ที่ค้างอยู่ทั้งหมด **8 เรื่อง** (#127, #139–#145) — ส่วนใหญ่เจอตอนใช้งานจริงกับโปรเจค wash-locker เมื่อ 4 ส.ค.
+
+### Fixed (แก้)
+- **งานทั้งระบบค้าง 47 นาที — assign แล้วไม่มี pane ขึ้นเลย ต้อง `takkub restart` อย่างเดียวถึงหาย** (#139) — อาการ: สั่ง `takkub assign` 6 รอบ pane โชว์ `empty` ตลอด → root cause: การเรียก **native PTY spawn** (pywinpty/ConPTY) บล็อกยาว **56.9 นาที** (`spawn_native_ms=3,412,178`) โดยถือธง `_spawn_in_progress` ของ FIFO arbiter ไว้ตลอดช่วงนั้น · คิว spawn ถูกระบายได้จาก `finally` ของ spawn เท่านั้น ไม่มีทางเข้าอื่นเลย และ watchdog เป็น diagnostic-only โดยเจตนา → ไม่มีอะไรกู้ได้เอง
+  - แก้: หุ้ม native call ด้วย `spawn_pty_bounded()` + `PtySpawnTimeout` (worker thread + join แบบมี timeout · default **30 วินาที** ปรับได้ด้วย `TAKKUB_PTY_SPAWN_TIMEOUT_SEC`) — ครอบทั้ง **Windows (pywinpty) และ macOS/Linux (ptyprocess)** เหมือนกัน · ถ้า timeout แล้ว native call เสร็จช้าตามมาทีหลัง ตัว worker จะ `terminate(force=True)` process นั้นทิ้งเอง ไม่ปล่อยเป็น ghost
+  - เพิ่ม **escape hatch ของคิว**: งานที่ค้างหัวคิวเกิน **120 วินาที** (`TAKKUB_SPAWN_QUEUE_STUCK_SEC`) จะถูกปล่อย arbiter + drain คิวอัตโนมัติ โดยเช็คบน tick 5 วินาทีของ idle watchdog (ไม่ต้องรอ spawn ตัวใหม่มาสะดุด)
+  - log ที่เคยจมอยู่ใน `events.log`: เพิ่ม `spawn_native_slow` (เกิน 5 วินาที) และ `spawn_native_failed` (พร้อมเวลาที่ใช้จริง) แยกออกมาให้ grep เจอ
+  - \+ 3 ไฟล์เทสใหม่ (`test_pty_spawn_timeout.py`, `test_pty_session_spawn_timeout.py`, `test_spawn_queue_stuck.py`)
+- **assign ที่ตกเข้าคิวแล้วค้าง — Lead ไม่ได้รับสัญญาณอะไรเลย** (#140) — เดิมแจ้ง Lead เฉพาะตอน spawn **fail** (`[spawn-failed]`) ส่วนทางที่เข้าคิวคืนค่า "queued" แบบเงียบๆ ไม่มี notice ผูกอยู่เลย → Lead ต้องไปไล่อ่าน `runtime/events.log` เองถึงรู้ว่างานไม่ได้ออก · ตอนนี้มี **`[spawn-stuck]`** เด้งเข้า Lead (นับเป็น blocking notice แบบเดียวกับ `[spawn-failed]` — ข้ามคิว digest) พร้อมบอกว่า retry ให้อัตโนมัติแล้ว
+- **งานที่ส่งให้ pane ที่กำลังยุ่ง เงียบไป 30 นาทีก่อนจะแจ้ง** (#144) — เดิมตอนเข้าโหมดรอ pane ว่าง ระบบ log แค่ event ไม่แจ้ง Lead แล้วเงียบยาวจนชนเพดาน `BUSY_WAIT_CEILING_SEC` (30 นาที) ถึงค่อยเด้ง `[delivery-unconfirmed]` → เพิ่ม **`[delivery-busy-wait]`** แจ้งครั้งเดียวตั้งแต่วินาทีที่เริ่มรอ (ไม่ flood — ครั้งเดียวต่อการส่ง 1 ครั้ง) ส่วน notice ตอนชนเพดานยังอยู่เหมือนเดิม
+- **`takkub assign --cwd <path ผิด>` ตอบ `ok: task queued` ก่อน แล้วค่อย fail ทีหลัง** (#143) — validation อยู่ใน `spawn()` ซึ่งรัน async **หลัง** CLI ตอบ ok ไปแล้ว → Lead เข้าใจว่างานออกไปแล้ว · ตอนนี้ตรวจ cwd **แบบ sync ที่ `cli_server` ก่อน ack** — ผิดคือ exit non-zero ทันที และ error บอก **valid paths ของโปรเจคนั้นทั้งหมด** (ไม่ใช่แค่บอกว่าผิด) · เพิ่มด้วยว่า **root ของโปรเจคเองใช้เป็น cwd ได้แล้ว** (เป็น parent ของทุก path ที่ตั้งไว้อยู่แล้ว) · ตัว check ใน `spawn()` ยังอยู่เป็น backstop สำหรับ caller ที่ไม่ผ่าน socket
+- **`takkub issue list` บอกว่าไม่มี issue ทั้งที่เพิ่งสร้างสำเร็จ** (#142) — `issue new` (default = ลง repo agent-takkub) เขียนลง `~/.agent-takkub/.takkub_issues.json` แต่ `issue list` อ่านจาก cwd ของ pane → คนละ store กัน เกือบวินิจฉัยผิดเป็น "ข้อมูลหายหลัง restart" (จริงๆ มีครบ 11 รายการ) · แก้ให้ `list` / `close` / `show` รับ `--cockpit-bug` / `--no-cockpit-bug` แบบเดียวกับ `new` (default ตรงกัน) + **แสดงบรรทัด `scope:` บอกว่ากำลังอ่าน store ไหน** เพื่อไม่ให้ "(no issues)" เปล่าๆ อ่านเหมือนข้อมูลหาย
+- **`takkub status` มี ANSI escape ดิบปนจนอ่านไม่ออก** (#145) — regex เดิมครอบไม่ครบ 3 แบบที่เจอจริง: `[?25h`/`[?25l` (private-mode `?`), `[3G` (final byte `G`), และ `]0;…` (OSC — คนละตระกูลกับ CSI) · เปลี่ยนเป็น stripper เต็มสเปค ECMA-48 ครอบทั้ง CSI + OSC
+- **`--model` ไม่เช็คว่า model id เป็นของ provider นั้นจริง** (#127) — เคสจริง: ส่ง `--model claude-haiku-4-5` ให้ role ที่ map เป็น gemini → CLI เตือนแล้ว fallback ไป default เงียบๆ · ตอนนี้ **บล็อกตั้งแต่ CLI เมื่อผิด provider ชัดเจน** (เช่น `claude-*` เข้า agy) พร้อม error ที่ชี้ mapping `role → provider` ให้เห็น · ส่วน id ที่ไม่รู้จักแต่ไม่ขัดกับใคร = **เตือนเฉยๆ ไม่บล็อก** (กัน model รุ่นใหม่ที่เพิ่งออกโดนบล็อกผิด) · provider แบบ router (opencode/cursor) ที่รับ model ได้หลายเจ้าโดยออกแบบ = ไม่แตะเลย
+
+### Added (เพิ่ม)
+- **`takkub doctor --live`** (#141) — `doctor` ปกติเป็น pure-logic ไม่คุยกับ cockpit **โดยเจตนา** จึงมองไม่เห็น state ใน memory ของ orchestrator: ตอนคิว spawn ค้างอยู่จริง 4 งาน doctor ยังรายงาน "all checks passed — 31 ok" · เพิ่ม endpoint `spawn-queue-status` (read-only) + check `[spawn-queue]` ที่เรียก endpoint นั้นเฉพาะเมื่อใส่ `--live` — คิวค้างเกิน 60 วินาที = FAIL พร้อมบอกให้ `takkub restart` · **`takkub doctor` เปล่าๆ ยังไม่ต้องมี cockpit รันเหมือนเดิม 100%** และถ้า cockpit ปิดอยู่ `--live` จะขึ้น SKIP ไม่ใช่ FAIL
+
+### Changed (เปลี่ยน)
+- ruff 0.16.0 → **0.16.1** (ไม่มีโค้ดต้องแก้ตาม) และ **กัน dependabot เสนอ PyQt6 ข้าม minor/major** — PyQt6 ถูก pin ที่ซีรีส์ **6.8 LTS โดยเจตนา** (ผูกกับ check ของ `takkub doctor` ผ่าน `test_version_sync.py`) · PR #138 ที่ขยายเป็น `<6.12` ทำ CI แดงทั้ง 3 OS จึงปิดไป และแทนที่ด้วยกฎ `ignore` ใน `.github/dependabot.yml` (security update ภายใน 6.8.x ยังผ่านได้ปกติ)
+- อัป GitHub Actions: `github/codeql-action` 4 → 4.37.4 (PR #137) · `actions/setup-python` 6 → 7 (PR #122)
+
+### Notes (หมายเหตุ)
+- **#146 (Playwright MCP ไม่ connect บน `qa --plan --shards`) ยังไม่ปิด** — ไล่โค้ดแบบ static ครบทั้ง argv, provider resolution, env injection และ policy lookup แล้ว **ไม่พบบั๊กเชิงโครงสร้าง** (`--mcp-config` ถูกส่งเข้า shard pane ถูกต้อง, per-shard config ถูกสร้างครบ) · สาเหตุที่เหลือเป็นเรื่อง **timing/contention ตอน runtime** ซึ่งพิสูจน์ได้เฉพาะ repro สดเท่านั้น — บันทึกหลักฐาน + repro plan ไว้ที่ `docs/audit/2026-08-04-issue-146-playwright-shards.md`
+- **ต้อง restart cockpit** ถึงจะได้ engine fix ของ #139/#140/#143/#144 (โค้ดที่รันอยู่เป็นตัวเก่าใน memory)
+
 ## [1.0.41] - 2026-08-03
 
 ### Added (เพิ่ม)
