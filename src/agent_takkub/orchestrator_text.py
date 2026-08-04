@@ -756,10 +756,21 @@ def _describe_valid_project_cwds(project: str) -> str:
     """Human-readable list of cwds that are legal for `project` — its
     per-role configured paths plus its own root, if one resolves (see
     `_project_root_dir`). Used to make "cwd rejected" errors actionable
-    instead of just naming the bad path."""
-    valid_paths = [str(p) for p in _allowed_project_roots(project)]
+    instead of just naming the bad path.
+
+    A single-path project's root *is* that one configured path (the common
+    parent of one path is itself), so appending it as a separate "(project
+    root)" entry would just print the same path twice (#150). Only append
+    when the root doesn't already match one of the configured paths; when it
+    does, label that existing entry instead of duplicating it.
+    """
+    roots = _allowed_project_roots(project)
     project_root = _project_root_dir(project)
-    if project_root is not None:
+    valid_paths = [
+        f"{p} (project root)" if project_root is not None and p == project_root else str(p)
+        for p in roots
+    ]
+    if project_root is not None and project_root not in roots:
         valid_paths.append(f"{project_root} (project root)")
     return ", ".join(valid_paths) if valid_paths else "(no paths configured for this project)"
 

@@ -19,6 +19,7 @@ from agent_takkub.config import _write_json_atomic, validate_name
 from agent_takkub.orchestrator import (
     LEAD,
     _cwd_within_project,
+    _describe_valid_project_cwds,
     _project_root_dir,
     cwd_validation_error,
 )
@@ -266,6 +267,63 @@ class TestCwdValidationError:
         err = cwd_validation_error(str(unrelated), project_env["project"], "backend")
         assert err is not None
         assert str(project_env["web"].parent) in err
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# _describe_valid_project_cwds — single-path project must not duplicate the
+# path when its "project root" (common parent of one path) is itself (#150)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def single_path_project_env(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> dict:
+    """A project configured with exactly one path (e.g. agent-takkub's `main`)."""
+    main = tmp_path / "myproject"
+    main.mkdir(parents=True)
+
+    pj = tmp_path / "projects.json"
+    pj.write_text(
+        json.dumps(
+            {
+                "active": "myproject",
+                "projects": {
+                    "myproject": {
+                        "paths": {
+                            "main": str(main),
+                        }
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config_mod, "PROJECTS_JSON", pj)
+
+    return {"main": main, "project": "myproject"}
+
+
+class TestDescribeValidProjectCwds:
+    def test_single_path_project_lists_path_once(self, single_path_project_env: dict) -> None:
+        # The common parent of one path is that path itself, so the naive
+        # "roots + project root" concatenation used to print the same path
+        # twice. It must appear exactly once, labelled as the project root.
+        desc = _describe_valid_project_cwds(single_path_project_env["project"])
+        main = str(single_path_project_env["main"])
+        assert desc.count(main) == 1
+        assert f"{main} (project root)" in desc
+
+    def test_multi_path_project_lists_root_as_extra_entry(self, project_env: dict) -> None:
+        # A project with several distinct paths must still see its common
+        # parent listed as an additional "(project root)" entry.
+        desc = _describe_valid_project_cwds(project_env["project"])
+        web = str(project_env["web"])
+        api = str(project_env["api"])
+        root = str(project_env["web"].parent)
+        assert web in desc
+        assert api in desc
+        assert f"{root} (project root)" in desc
+        # exactly one "(project root)" label — not duplicated per configured path
+        assert desc.count("(project root)") == 1
 
 
 # ──────────────────────────────────────────────────────────────────────────────
