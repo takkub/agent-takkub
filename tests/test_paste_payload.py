@@ -28,6 +28,20 @@ class TestPastePayload:
         text = "hi"
         assert _paste_payload(text) == text
 
+    def test_short_multiline_message_is_wrapped(self) -> None:
+        # A raw LF is Enter at the TUI layer, so a short multi-line payload
+        # used to submit at its first newline and arrive chopped (PR #149).
+        text = "line1\nline2"
+        wrapped = _paste_payload(text)
+        assert wrapped.startswith(_PASTE_START)
+        assert wrapped.endswith(_PASTE_END)
+        assert text in wrapped
+
+    def test_short_multiline_uses_paste_enter_delay(self) -> None:
+        # The bracketed path also picks the slower enter delay — pinned here so
+        # the +600 ms on short multi-line notices reads as intended, not drift.
+        assert _enter_delay_ms(_paste_payload("a\nb")) == _PASTE_ENTER_DELAY_MS
+
     def test_threshold_minus_one_is_unchanged(self) -> None:
         text = "x" * (BRACKETED_PASTE_THRESHOLD - 1)
         assert _paste_payload(text) == text

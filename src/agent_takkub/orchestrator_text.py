@@ -372,7 +372,14 @@ def _paste_payload(text: str) -> str:
     # path writes the text straight through too).
     if _PASTE_START in text or _PASTE_END in text:
         text = text.replace(_PASTE_START, "").replace(_PASTE_END, "")
-    if len(text) < BRACKETED_PASTE_THRESHOLD:
+    # Multiline always takes the bracketed path regardless of length (PR #149,
+    # @than-aa): a raw LF written to the PTY *is* Enter at the TUI layer (see
+    # `lead_draft_state._ENTER_BYTES`, which counts 0x0A as submit), and
+    # `_sanitize_pane_text` deliberately preserves \n in multi-line bodies. So a
+    # short multi-line payload — a merged done-notice digest, a `takkub send`
+    # message — used to submit at its first newline and arrive chopped across
+    # turns. Bracketing it keeps the whole block atomic.
+    if "\n" not in text and len(text) < BRACKETED_PASTE_THRESHOLD:
         return text
     return _PASTE_START + text + _PASTE_END
 
