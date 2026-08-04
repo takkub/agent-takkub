@@ -24,7 +24,7 @@ import pyte
 from PyQt6.QtCore import QObject, QThread, QTimer, pyqtSignal
 from wcwidth import wcwidth
 
-from ._pty_backend import spawn_pty
+from ._pty_backend import spawn_pty_bounded
 from ._win_console import hide_hwnds, snapshot_console_hwnds
 from .provider_spec import PROVIDER_REGISTRY
 from .provider_spec import READY_HARD_BLOCKERS as _READY_HARD_BLOCKERS
@@ -32,6 +32,14 @@ from .provider_spec import READY_RULES as _READY_RULES
 
 # CREATE_NO_WINDOW so the helper taskkill doesn't flash a console window.
 _CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+# Bound on the native pty-constructor call itself (issue #139): a wedged
+# pywinpty/ptyprocess spawn once blocked the Qt main thread — and the
+# spawn-in-progress FIFO arbiter behind it (spawn_engine.py) — for 47+
+# minutes with no way to recover. The native call normally completes in well
+# under a second (it just creates a process handle); anything past this is
+# already pathological. Overrideable for slow/loaded CI hardware.
+PTY_SPAWN_TIMEOUT_SEC = float(os.environ.get("TAKKUB_PTY_SPAWN_TIMEOUT_SEC", "30"))
 
 
 def _safe_screen_display(screen: pyte.Screen) -> list[str]:
@@ -703,7 +711,19 @@ class PtySession(QObject):
         # Cross-platform PTY: pywinpty (ConPTY) on Windows, ptyprocess on
         # macOS/Linux. The backend wrapper normalises read→bytes and accepts
         # str/bytes on write, so the reader/writer threads below stay identical.
-        self._proc = spawn_pty(argv, cwd=cwd, env=env, rows=self.rows, cols=self.cols)
+        # Bounded (#139): the native constructor call is blocking with no
+        # timeout of its own on either backend — spawn_pty_bounded runs it on
+        # a worker thread and raises PtySpawnTimeout (a plain Exception,
+        # caught by every existing spawn-failure handler) instead of letting
+        # a wedged call freeze this call forever.
+        self._proc = spawn_pty_bounded(
+            argv,
+            cwd=cwd,
+            env=env,
+            rows=self.rows,
+            cols=self.cols,
+            timeout_sec=PTY_SPAWN_TIMEOUT_SEC,
+        )
         self._alive = True
         try:
             self._pid = int(self._proc.pid)

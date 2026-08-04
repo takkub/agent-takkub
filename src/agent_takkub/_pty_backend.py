@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 from collections.abc import Sequence
 
 
@@ -148,3 +149,75 @@ def spawn_pty(
     if sys.platform == "win32":
         return _WinptyBackend.spawn(argv, cwd, env, rows, cols)
     return _PosixBackend.spawn(argv, cwd, env, rows, cols)
+
+
+class PtySpawnTimeout(Exception):
+    """Raised when the native PTY spawn call doesn't return within the bound.
+
+    Both backends' underlying constructor (pywinpty on Windows, ptyprocess on
+    macOS/Linux) is a blocking native call with no timeout of its own — a
+    wedged one once blocked the Qt main thread (and the spawn-in-progress FIFO
+    arbiter behind it, spawn_engine.py's ``_spawn_in_progress``) solid for
+    47+ minutes with nothing able to recover (issue #139). Python cannot
+    interrupt a blocking native call, so the worker thread that made it keeps
+    running in the background after this is raised — see
+    ``spawn_pty_bounded``, which tears down whatever process that worker
+    eventually produces instead of leaking it to a caller that already gave up.
+    """
+
+
+def spawn_pty_bounded(
+    argv: Sequence[str],
+    cwd: str | None,
+    env: dict | None,
+    rows: int,
+    cols: int,
+    timeout_sec: float,
+):
+    """Run :func:`spawn_pty` on a worker thread, bounded by ``timeout_sec``.
+
+    Returns the same wrapper ``spawn_pty`` would on success. Raises
+    ``PtySpawnTimeout`` if the worker hasn't finished by the deadline —
+    trading "block forever" for "fail fast" (#139). The worker thread itself
+    is left running (daemon, so it never blocks interpreter exit); a `lock`-
+    guarded handoff decides, whichever side finishes first, whether the
+    caller still wants the result:
+      - worker finishes first → hands the live process to the caller normally.
+      - deadline hits first → caller raises and moves on; when/if the worker
+        later completes, it finds itself abandoned and force-terminates the
+        process it just spawned rather than leaving an unmanaged handle.
+    """
+    lock = threading.Lock()
+    state: dict = {"proc": None, "error": None, "abandoned": False}
+
+    def _run() -> None:
+        try:
+            proc = spawn_pty(argv, cwd=cwd, env=env, rows=rows, cols=cols)
+        except BaseException as exc:  # must reach the caller's thread, not just Exception
+            with lock:
+                if not state["abandoned"]:
+                    state["error"] = exc
+            return
+        with lock:
+            if not state["abandoned"]:
+                state["proc"] = proc
+                return
+        # The caller already gave up on us — nothing left to hand this
+        # process to, so kill it instead of leaking a rogue PTY (#139).
+        try:
+            proc.terminate(force=True)
+        except Exception:
+            pass
+
+    worker = threading.Thread(target=_run, name="pty-spawn", daemon=True)
+    worker.start()
+    worker.join(timeout_sec)
+    with lock:
+        if state["proc"] is not None:
+            return state["proc"]
+        if state["error"] is not None:
+            raise state["error"]
+        state["abandoned"] = True
+    raise PtySpawnTimeout(
+        f"native pty spawn exceeded {timeout_sec:g}s (argv[0]={argv[0] if argv else None!r})"
+    )
