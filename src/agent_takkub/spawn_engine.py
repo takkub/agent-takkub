@@ -241,6 +241,62 @@ def _prepare_spawn_system_prompt(
         return None
 
 
+# Filename shape written above via `output_file=str(role_md_path.with_name(
+# f"{stem}.spawn-{pane_scope}{suffix}"))`: `CLAUDE.spawn-<16 hex chars>.md`.
+# `pane_scope` is `sha256(f"{project_ns}\0{role_name}")[:16]` (see spawn()) —
+# deterministic per (project, role_name), so the SAME live pane overwrites its
+# own snapshot on every respawn. Only snapshots belonging to a pane that has
+# since closed, been reshaped (shard count changed), or whose project was
+# retired ever go stale (token-reduction task, 2026-08).
+_SPAWN_SNAPSHOT_RE = re.compile(r"^CLAUDE\.spawn-([0-9a-f]{16})\.md$")
+
+# How many stale (no-longer-active) snapshots to keep per role dir as a short
+# buffer for a pane that just closed and might still resume soon.
+_SPAWN_SNAPSHOT_KEEP_STALE = 3
+
+
+def _active_spawn_scope_hashes(panes_by_project: dict) -> set[str]:
+    """The pane-scope hashes of every currently-registered pane, across all
+    projects — the set `_prune_stale_spawn_snapshots` must never delete."""
+    hashes: set[str] = set()
+    for project_ns, roles in panes_by_project.items():
+        for role_name in roles:
+            hashes.add(hashlib.sha256(f"{project_ns}\0{role_name}".encode()).hexdigest()[:16])
+    return hashes
+
+
+def _prune_stale_spawn_snapshots(
+    role_dir: pathlib.Path,
+    active_hashes: set[str],
+    *,
+    keep_stale: int = _SPAWN_SNAPSHOT_KEEP_STALE,
+) -> None:
+    """Delete `CLAUDE.spawn-<hash>.md` snapshots that no longer belong to a
+    live pane, keeping the `keep_stale` most-recently-modified stale ones as a
+    buffer. Never touches a file whose hash is in *active_hashes*. Best-effort
+    — any filesystem error (locked file, race with another process) is
+    swallowed so a bad file can never block a spawn.
+    """
+    try:
+        stale: list[tuple[float, pathlib.Path]] = []
+        for f in role_dir.glob("CLAUDE.spawn-*.md"):
+            m = _SPAWN_SNAPSHOT_RE.match(f.name)
+            if not m or m.group(1) in active_hashes:
+                continue
+            try:
+                stale.append((f.stat().st_mtime, f))
+            except OSError:
+                continue
+        stale.sort(key=lambda t: t[0], reverse=True)
+        for _mtime, f in stale[keep_stale:]:
+            try:
+                f.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
 # ── spawn constants ──────────────────────────────────────────────
 
 RESUME_WINDOW_SEC = 5 * 60  # respawn within this window → claude --resume <uuid>
@@ -1735,6 +1791,9 @@ class SpawnEngineMixin:
             try:
                 staging = agent_role_dir(base_role)
                 role_context_available = True
+                _prune_stale_spawn_snapshots(
+                    staging, _active_spawn_scope_hashes(self._panes_by_project)
+                )
             except OSError:
                 _log.exception(
                     "could not prepare role context for %s; spawning without it", base_role

@@ -121,7 +121,9 @@ def _seed(project: str, base_role: str) -> str:
     header = (
         f"# {base_role} — learned notes · project: {project}\n\n"
         f"> สิ่งที่ **{base_role} เรียนรู้เกี่ยวกับโปรเจคนี้** สะสมข้ามรอบงาน (cockpit per-role memory).\n"
-        "> อ่านก่อนเริ่มงาน · **append** สิ่งที่ไม่ obvious เมื่อเจอ (bullet สั้น กระชับ).\n"
+        "> อ่านก่อนเริ่มงาน · **append** สิ่งที่ไม่ obvious เมื่อเจอ.\n"
+        "> **กฎตายตัว: entry ละไม่เกิน 2-3 บรรทัด ห้าม paste done report / เรียงความยาว** "
+        "(เกิน 600 ตัวอักษรโดนตัดทิ้งอัตโนมัติตอน spawn ครั้งถัดไป).\n"
         '> อย่าซ้ำกับ code / git / โปรเจค MEMORY.md — เก็บเฉพาะ "ความรู้ที่ต้องเสียเวลาค้นใหม่".\n\n'
     )
     extra = _ROLE_SECTIONS.get(base_role, "")
@@ -143,8 +145,15 @@ def _seed(project: str, base_role: str) -> str:
 # untouched), preserve the header + seeded section headings verbatim, and never
 # f-string/.format note bodies (role-memory legitimately contains literal braces
 # like Go templates `{{.State.Health.Status}}`).
-_MEM_MAX_BYTES = 16_000
+_MEM_MAX_BYTES = 6_000
 _MEM_MAX_ENTRIES = 120
+
+# Per-entry cap (token-reduction task, 2026-08): agents were observed pasting a
+# whole done-report paragraph as ONE bullet (~1,500 tok seen in the wild) — the
+# byte/entry budget above can't stop that since a single oversized entry can
+# dominate the whole file. Any bullet block longer than this many characters is
+# collapsed to its first line/sentence + " …" at curation time.
+_MEM_MAX_ENTRY_CHARS = 600
 
 # A content bullet: a `- ` / `* ` marker followed by real text. A bare "-"
 # placeholder (the seed's empty sections) deliberately does NOT match, so seed
@@ -271,6 +280,51 @@ def _dedup_body(body: list[str]) -> list[str]:
     return _blocks_to_lines(kept)
 
 
+# Matches a sentence-ending punctuation mark (., !, ?, or Thai ฯ) followed by
+# whitespace or end-of-string — used to find a natural "first sentence" cut
+# point inside an over-long entry.
+_ENTRY_SENTENCE_RE = re.compile(r"[.!?ฯ](?:\s|$)")
+
+
+def _truncate_entry(lines: list[str], max_chars: int) -> list[str]:
+    """Collapse one bullet block to its first line/sentence + ' …' if the
+    whole entry (marker + all continuation lines joined) exceeds *max_chars*.
+
+    Cuts at the first sentence-ending punctuation within the budget; falling
+    back to the nearest preceding whitespace when no sentence end is found,
+    so the cut never lands mid-word. Python string indices are codepoints
+    (not UTF-8 bytes), so slicing here can split a combining-mark cluster
+    (e.g. a Thai tone mark) from its base character but can never split a
+    single character in half. Returns *lines* unchanged when under budget.
+    """
+    marker_m = re.match(r"^(\s*[-*]\s+)", lines[0])
+    marker = marker_m.group(1) if marker_m else "- "
+    first_rest = lines[0][len(marker) :] if marker_m else lines[0]
+    joined = " ".join([first_rest.strip(), *(ln.strip() for ln in lines[1:])]).strip()
+    if len(marker) + len(joined) <= max_chars:
+        return lines
+    budget = max(0, max_chars - len(marker) - 2)  # reserve room for " …"
+    window = joined[:budget]
+    m = _ENTRY_SENTENCE_RE.search(window)
+    if m:
+        cut = m.end()
+    else:
+        cut = window.rfind(" ")
+        if cut <= 0:
+            cut = len(window)
+    truncated = window[:cut].rstrip()
+    return [marker + truncated + " …"]
+
+
+def _truncate_body(body: list[str], max_chars: int = _MEM_MAX_ENTRY_CHARS) -> list[str]:
+    """Apply `_truncate_entry` to every bullet block in a section body."""
+    blocks = _block_split(body)
+    for block in blocks:
+        if block[0]:
+            block[1] = _truncate_entry(block[1], max_chars)
+    return _blocks_to_lines(blocks)
+
+
 def _trim_oldest_bullet(sections: list[list]) -> bool:
     """Remove the single oldest (topmost, earliest-section) content bullet block.
     Returns True if one was removed."""
@@ -296,6 +350,7 @@ def _curate_text(text: str) -> tuple[str, bool]:
 
         for sec in sections:
             sec[1] = _dedup_body(sec[1])
+            sec[1] = _truncate_body(sec[1])
 
         def _over_budget() -> bool:
             n_bul = sum(1 for sec in sections for ln in sec[1] if _BULLET_RE.match(ln))
