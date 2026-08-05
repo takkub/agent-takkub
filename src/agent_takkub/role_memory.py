@@ -475,6 +475,89 @@ def _archive_entries(project: str, base_role: str, entries: list[str]) -> None:
         _log.warning("role_memory: failed to archive entries for %s/%s", project, base_role)
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Auto-capture failures (ReflexionMemory-style — task ask was "auto-capture
+# failure into role memory")
+#
+# Until now role-memory only grew when an agent decided to Edit/Write a
+# bullet itself — a `done(failed=True)` report went to Lead and nowhere
+# else, so the same role could repeat the same failure cold next spawn.
+# This appends one bullet automatically from the `done()` path, no agent
+# decision required. Every auto-captured line is prefixed with this exact
+# "fail — " marker so dedup can match on the REASON alone (ignoring the
+# date, which differs per occurrence) without colliding with a bullet an
+# agent typed by hand.
+_FAIL_ENTRY_RE = re.compile(r"^\s*[-*]\s+\d{4}-\d{2}-\d{2}:\s*fail\s*—\s*(.*)$", re.MULTILINE)
+
+
+def _fail_entry_key(reason: str) -> str:
+    return " ".join(reason.lower().split()).rstrip(".·!?,;: ")
+
+
+def append_failure_entry(project: str, base_role: str, reason: str) -> bool:
+    """Auto-capture a `done(failed=True)` report as one bullet in this
+    (project, role)'s learned memory. Returns whether an entry was written
+    (``False`` on empty *reason*, a dedup no-op, or any I/O failure).
+
+    Appends under the role's "## Flaky / known-failing" section when the
+    seed ships one (qa), else the universal "## Gotchas / pitfalls" section
+    every role's seed ships — never invents a new heading. Dedups against
+    prior auto-captured entries for the SAME reason (date-independent) so
+    a repeat failure collapses to one line instead of piling up, then reruns
+    `_curate_text` (dedup/entry-cap/byte-budget, same as `ensure_role_memory`
+    applies on every spawn read) so the file never exceeds its spawn-prompt
+    budget between spawns either.
+
+    Best-effort: never raises. A filesystem hiccup here must never break the
+    `done()` report it's called alongside — the pane still gets a clean
+    return either way.
+    """
+    reason = " ".join((reason or "").split()).strip()
+    if not reason:
+        return False
+    try:
+        path = ensure_role_memory(project, base_role)
+        if path is None:
+            return False
+        text = path.read_text(encoding="utf-8", errors="replace")
+        header, sections = _split_doc(text)
+
+        heading = "## Flaky / known-failing"
+        if not any(sec[0].rstrip() == heading for sec in sections):
+            heading = "## Gotchas / pitfalls"
+        target = next((sec for sec in sections if sec[0].rstrip() == heading), None)
+        if target is None:
+            # Neither heading exists (unexpected — every seed ships
+            # "## Gotchas / pitfalls"). Append a fresh section rather than
+            # silently dropping the failure.
+            target = [heading, []]
+            sections.append(target)
+
+        new_key = _fail_entry_key(reason)
+        for ln in target[1]:
+            m = _FAIL_ENTRY_RE.match(ln)
+            if m and _fail_entry_key(m.group(1)) == new_key:
+                return False  # same failure already recorded — dedup, no-op
+
+        prefix = f"- {_archive_date()}: fail — "
+        budget = _MEM_MAX_ENTRY_CHARS - len(prefix)
+        if budget > 0 and len(reason) > budget:
+            reason = reason[:budget].rstrip() + "…"
+        target[1].append(prefix + reason)
+
+        new_text = _render(header, sections)
+        curated, _changed, archived = _curate_text(new_text)
+        if archived:
+            _archive_entries(project, base_role, archived)
+        tmp = path.parent / (path.name + ".tmp")
+        tmp.write_text(curated, encoding="utf-8")
+        tmp.replace(path)
+        return True
+    except Exception:
+        _log.warning("append_failure_entry: failed for %s/%s", project, base_role)
+        return False
+
+
 def ensure_role_memory(project: str, base_role: str) -> pathlib.Path | None:
     """Return this (project, role)'s learned-memory path, seeding it if missing.
 

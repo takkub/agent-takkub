@@ -16,6 +16,7 @@ from agent_takkub.doctor import (
     Status,
     check_arch,
     check_claude,
+    check_graft,
     check_installed_integrity,
     check_mcps,
     check_mini_browser,
@@ -204,6 +205,134 @@ class TestCheckMiniBrowser:
         assert finding.status is Status.WARN
         assert finding.auto_fix is None
         assert "Node.js" in finding.fix_hint
+
+
+# ---------------------------------------------------------------------------
+# check_graft — NanoNets graft CLI (global install, pinned version)
+# ---------------------------------------------------------------------------
+
+
+class TestCheckGraft:
+    def _f(self, findings: list[Finding], name: str) -> Finding:
+        return next(f for f in findings if f.name == name)
+
+    def _pinned(self) -> str:
+        from agent_takkub.shared_dev_tools import _GRAFT_MCP_VERSION
+
+        return _GRAFT_MCP_VERSION
+
+    def _which(self, node: str | None, graft: str | None, npm: str | None = None):
+        def _side(name: str) -> str | None:
+            if name == "node":
+                return node
+            if name == "graft.cmd":
+                return graft
+            if name == "npm.cmd":
+                return npm
+            return None
+
+        return _side
+
+    def _run(self, node_ver: str, graft_ver: str):
+        def _side(argv: list[str]) -> tuple[int, str]:
+            if argv[0] == "node":
+                return 0, node_ver
+            if argv[0] == "C:/npm/graft.cmd":
+                return 0, graft_ver
+            return 1, ""
+
+        return _side
+
+    def test_installed_matching_pinned_version_is_ok(self) -> None:
+        with (
+            patch(
+                "agent_takkub.doctor.shutil.which",
+                side_effect=self._which("C:/node/node.exe", "C:/npm/graft.cmd"),
+            ),
+            patch(
+                "agent_takkub.doctor._run",
+                side_effect=self._run("v20.11.0", self._pinned()),
+            ),
+        ):
+            findings = check_graft()
+
+        cli = self._f(findings, "cli")
+        assert cli.status is Status.OK
+        assert cli.auto_fix is None
+        assert not any(f.name == "node-version" for f in findings)
+
+    def test_version_mismatch_warns_with_pinned_upgrade_hint(self) -> None:
+        with (
+            patch(
+                "agent_takkub.doctor.shutil.which",
+                side_effect=self._which("C:/node/node.exe", "C:/npm/graft.cmd"),
+            ),
+            patch(
+                "agent_takkub.doctor._run",
+                side_effect=self._run("v20.11.0", "0.0.1"),
+            ),
+        ):
+            findings = check_graft()
+
+        cli = self._f(findings, "cli")
+        assert cli.status is Status.WARN
+        assert self._pinned() in cli.fix_hint
+        assert cli.auto_fix is None  # already installed — nudge, not a reinstall
+
+    def test_old_node_flagged_even_with_graft_installed(self) -> None:
+        with (
+            patch(
+                "agent_takkub.doctor.shutil.which",
+                side_effect=self._which("C:/node/node.exe", "C:/npm/graft.cmd"),
+            ),
+            patch(
+                "agent_takkub.doctor._run",
+                side_effect=self._run("v18.19.0", self._pinned()),
+            ),
+        ):
+            findings = check_graft()
+
+        node_finding = self._f(findings, "node-version")
+        assert node_finding.status is Status.WARN
+        assert "Node >= 20" in node_finding.detail
+        assert self._f(findings, "cli").status is Status.OK
+
+    def test_missing_graft_offers_global_npm_auto_fix(self) -> None:
+        with patch(
+            "agent_takkub.doctor.shutil.which",
+            side_effect=self._which(None, None, npm="C:/node/npm.cmd"),
+        ):
+            findings = check_graft()
+
+        cli = self._f(findings, "cli")
+        assert cli.status is Status.WARN
+        assert cli.auto_fix is not None
+
+        with patch("agent_takkub.doctor.subprocess.run") as run:
+            run.return_value.returncode = 0
+            run.return_value.stdout = "added 1 package"
+            run.return_value.stderr = ""
+            ok, msg = cli.auto_fix()
+
+        assert ok
+        assert "added 1 package" in msg
+        assert run.call_args.args[0] == [
+            "C:/node/npm.cmd",
+            "install",
+            "-g",
+            f"@nanonets/graft@{self._pinned()}",
+        ]
+
+    def test_missing_graft_and_npm_has_manual_hint_only(self) -> None:
+        with patch("agent_takkub.doctor.shutil.which", return_value=None):
+            findings = check_graft()
+
+        assert len(findings) == 1
+        cli = findings[0]
+        assert cli.name == "cli"
+        assert cli.status is Status.SKIP
+        assert cli.auto_fix is None
+        assert "npm" in cli.detail
 
 
 # ---------------------------------------------------------------------------
@@ -794,6 +923,7 @@ class TestRunAllChecks:
             patch("agent_takkub.doctor.check_env_path", return_value=[]),
             patch("agent_takkub.doctor.check_npm_registry", return_value=[]),
             patch("agent_takkub.doctor.check_mini_browser", return_value=[]),
+            patch("agent_takkub.doctor.check_graft", return_value=[]),
             patch("agent_takkub.doctor.check_arch", return_value=[]),
             patch("agent_takkub.doctor.check_qt", return_value=[]),
             patch("agent_takkub.doctor.check_plugins", return_value=[]),

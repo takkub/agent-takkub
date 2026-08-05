@@ -356,6 +356,95 @@ class TestArchive:
         rm._archive_entries("p", "backend", ["- something"])  # must not raise
 
 
+class TestAppendFailureEntry:
+    """Auto-capture of `done(failed=True)` reports (ReflexionMemory-style) —
+    no agent decision required, unlike every other bullet in role-memory."""
+
+    def test_writes_under_flaky_section_for_qa(self, isolated_role_memory: pathlib.Path) -> None:
+        ensure_role_memory("p", "qa")
+        assert rm.append_failure_entry("p", "qa", "login smoke failed: 500 on /auth") is True
+        text = rm.role_memory_path("p", "qa").read_text(encoding="utf-8")
+        flaky = text.split("## Flaky / known-failing")[1]
+        assert "login smoke failed: 500 on /auth" in flaky
+
+    def test_falls_back_to_gotchas_when_no_flaky_section(
+        self, isolated_role_memory: pathlib.Path
+    ) -> None:
+        # backend's seed has no "## Flaky / known-failing" — must not invent one.
+        ensure_role_memory("p", "backend")
+        assert rm.append_failure_entry("p", "backend", "migration crashed on empty table") is True
+        text = rm.role_memory_path("p", "backend").read_text(encoding="utf-8")
+        assert "## Flaky / known-failing" not in text
+        gotchas = text.split("## Gotchas / pitfalls")[1]
+        assert "migration crashed on empty table" in gotchas
+
+    def test_seeds_file_when_missing(self, isolated_role_memory: pathlib.Path) -> None:
+        # Never called before ensure_role_memory (e.g. first-ever failure) —
+        # must seed the file itself rather than no-op.
+        path = rm.role_memory_path("p", "frontend")
+        assert not path.exists()
+        assert rm.append_failure_entry("p", "frontend", "build broke on missing env var") is True
+        assert path.exists()
+        assert "build broke on missing env var" in path.read_text(encoding="utf-8")
+
+    def test_entry_prefixed_with_date_and_fail_marker(
+        self, isolated_role_memory: pathlib.Path
+    ) -> None:
+        rm.append_failure_entry("p", "qa", "checkout 500")
+        text = rm.role_memory_path("p", "qa").read_text(encoding="utf-8")
+        m = rm._FAIL_ENTRY_RE.search(text)
+        assert m is not None
+        assert m.group(1) == "checkout 500"
+
+    def test_dedup_same_reason_across_calls(self, isolated_role_memory: pathlib.Path) -> None:
+        rm.append_failure_entry("p", "qa", "checkout 500 on submit")
+        second = rm.append_failure_entry("p", "qa", "  Checkout 500 on submit  ")
+        assert second is False  # dedup no-op, not an error
+        text = rm.role_memory_path("p", "qa").read_text(encoding="utf-8")
+        assert text.lower().count("checkout 500 on submit") == 1
+
+    def test_distinct_reasons_both_kept(self, isolated_role_memory: pathlib.Path) -> None:
+        rm.append_failure_entry("p", "qa", "checkout 500 on submit")
+        rm.append_failure_entry("p", "qa", "login 500 on auth")
+        text = rm.role_memory_path("p", "qa").read_text(encoding="utf-8")
+        assert "checkout 500 on submit" in text
+        assert "login 500 on auth" in text
+
+    def test_empty_reason_is_noop(self, isolated_role_memory: pathlib.Path) -> None:
+        assert rm.append_failure_entry("p", "qa", "") is False
+        assert rm.append_failure_entry("p", "qa", "   ") is False
+
+    def test_respects_entry_char_cap(self, isolated_role_memory: pathlib.Path) -> None:
+        rm.append_failure_entry("p", "backend", "x " * 500)
+        text = rm.role_memory_path("p", "backend").read_text(encoding="utf-8")
+        lines = [ln for ln in text.splitlines() if ln.startswith("- ") and "fail —" in ln]
+        assert len(lines) == 1
+        assert len(lines[0]) <= rm._MEM_MAX_ENTRY_CHARS
+
+    def test_best_effort_on_write_failure(
+        self, isolated_role_memory: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ensure_role_memory("p", "qa")
+
+        def boom(*_a, **_k):
+            raise OSError("write failed")
+
+        monkeypatch.setattr(pathlib.Path, "write_text", boom)
+        assert rm.append_failure_entry("p", "qa", "anything") is False  # must not raise
+
+    def test_curation_runs_immediately_so_budget_never_bloats(
+        self, isolated_role_memory: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(rm, "_MEM_MAX_ENTRIES", 3)
+        ensure_role_memory("p", "qa")
+        for i in range(10):
+            rm.append_failure_entry("p", "qa", f"distinct failure number {i}")
+        text = rm.role_memory_path("p", "qa").read_text(encoding="utf-8")
+        n_bullets = sum(1 for ln in text.splitlines() if rm._BULLET_RE.match(ln))
+        assert n_bullets <= 3
+        assert "distinct failure number 9" in text  # newest survives
+
+
 class TestHasLearnedContent:
     """tok-5: a freshly-seeded role-memory file (skeleton only) must read as
     *empty* so the spawn path injects a one-line pointer instead of the whole

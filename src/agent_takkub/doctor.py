@@ -386,6 +386,133 @@ def check_mini_browser() -> list[Finding]:
 
 
 # ---------------------------------------------------------------------------
+# [graft] — NanoNets graft CLI (code-intelligence: symbol search / call-graph)
+# ---------------------------------------------------------------------------
+
+
+def check_graft() -> list[Finding]:
+    """Check/install the global ``graft`` CLI (NanoNets code-intelligence tool).
+
+    Separate from the graft MCP server (``shared_dev_tools.GRAFT_MCP``,
+    launched ephemerally per-pane via ``npx -y @nanonets/graft@<pin> mcp`` —
+    no install needed there). This checks the CLI binary a human/agent runs
+    directly (``graft build``, ``graft ask``, ``graft skeleton``, ...).
+    Pilot findings: ``docs/audit/2026-08-05-graft-pilot.md``.
+
+    Like ``check_mini_browser``, normal doctor runs stay read-only;
+    ``takkub doctor --fix`` installs it when missing. graft is shared
+    dev-tool infra, not a role/pane provider, so it does NOT require
+    ``--install-providers``. Never runs ``graft init`` — that would
+    overwrite the cockpit's own ``.claude/settings.json`` + statusline.
+
+    Node >= 20 is graft's real ``engines.node`` floor — stricter than the
+    cockpit's own Node baseline (WARN-only below 20, FAIL only below 18 —
+    see system_baseline.py), so a machine that clears ``check_runtime``
+    with just a WARN can still be too old for graft. Flagged here
+    explicitly instead of failing silently at install/build time.
+
+    Never blocks on a missing graph: a project that hasn't run
+    ``graft build`` yet gets graceful empty answers (confirmed in the
+    pilot — no crash/hang), so this only nudges toward running it.
+    """
+    from .shared_dev_tools import _GRAFT_MCP_VERSION
+
+    findings: list[Finding] = []
+
+    node = shutil.which("node")
+    if node:
+        rc, ver = _run(["node", "--version"])
+        if rc == 0 and ver:
+            try:
+                major = int(ver.lstrip("v").split(".")[0])
+            except ValueError:
+                major = 0
+            if 0 < major < 20:
+                findings.append(
+                    Finding(
+                        "graft",
+                        "node-version",
+                        Status.WARN,
+                        f"node {ver} — graft requires Node >= 20 (cockpit min is 18)",
+                        "upgrade Node.js to 20+ from nodejs.org",
+                    )
+                )
+
+    graft = shutil.which("graft.cmd") or shutil.which("graft")
+    if graft:
+        rc, out = _run([graft, "--version"])
+        version = out.strip() if rc == 0 else ""
+        if version and version != _GRAFT_MCP_VERSION:
+            findings.append(
+                Finding(
+                    "graft",
+                    "cli",
+                    Status.WARN,
+                    f"{version}  {graft}  (pinned: {_GRAFT_MCP_VERSION})",
+                    f"npm install -g @nanonets/graft@{_GRAFT_MCP_VERSION}  — match the pinned version",
+                )
+            )
+        else:
+            findings.append(
+                Finding("graft", "cli", Status.OK, f"{version or '(unknown)'}  {graft}")
+            )
+        findings.append(
+            Finding(
+                "graft",
+                "graph",
+                Status.INFO,
+                "a project that hasn't run `graft build` yet returns empty-but-valid "
+                "answers (not a crash) — run `graft build` in that project's root first",
+            )
+        )
+        return findings
+
+    npm = shutil.which("npm.cmd") or shutil.which("npm")
+    if not npm:
+        findings.append(
+            Finding(
+                "graft",
+                "cli",
+                Status.SKIP,
+                "graft not found; npm is unavailable",
+                f"install Node.js, then run `npm install -g @nanonets/graft@{_GRAFT_MCP_VERSION}`",
+            )
+        )
+        return findings
+
+    def _install() -> tuple[bool, str]:
+        from ._win_console import SUBPROCESS_NO_WINDOW
+
+        try:
+            result = subprocess.run(
+                [npm, "install", "-g", f"@nanonets/graft@{_GRAFT_MCP_VERSION}"],
+                capture_output=True,
+                text=True,
+                timeout=300,
+                creationflags=SUBPROCESS_NO_WINDOW,
+                env={**os.environ, "npm_config_yes": "true"},
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return False, str(exc)
+        output = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
+        if result.returncode == 0:
+            return True, output[-300:] or "graft installed"
+        return False, output[-300:] or f"npm exited {result.returncode}"
+
+    findings.append(
+        Finding(
+            "graft",
+            "cli",
+            Status.WARN,
+            "graft CLI not found — code-intelligence checks unavailable",
+            f"`takkub doctor --fix` or `npm install -g @nanonets/graft@{_GRAFT_MCP_VERSION}`",
+            auto_fix=_install,
+        )
+    )
+    return findings
+
+
+# ---------------------------------------------------------------------------
 # [arch] — Apple Silicon Rosetta / native-arm64 shell hygiene (macOS only)
 # ---------------------------------------------------------------------------
 
@@ -1600,6 +1727,7 @@ def run_all_checks() -> list[Finding]:
         ("check_npm_registry", check_npm_registry),
         ("check_runtime", check_runtime),
         ("check_mini_browser", check_mini_browser),
+        ("check_graft", check_graft),
         ("check_installed_integrity", check_installed_integrity),
         ("check_arch", check_arch),
         ("check_qt", check_qt),

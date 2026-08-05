@@ -68,3 +68,10 @@ worktrees/
 
 # graphify knowledge-graph output (generated)
 graphify-out/
+
+# graft regenerates src/agent_takkub/.ignore on every `graft build` with
+# `!graft/`, re-admitting its 141 generated cards to ripgrep (stale line
+# numbers, doubles every grep hit). We ship src/agent_takkub/.rgignore
+# instead — it outranks .ignore and graft never touches it — so the
+# regenerated .ignore is pure local noise. Never track it.
+src/agent_takkub/.ignore

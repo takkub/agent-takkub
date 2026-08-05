@@ -9,6 +9,14 @@ requiring per-project `.claude/settings.json` edits:
     every pane via `runtime/shared-mcp.json` so smoke tests, UX checks,
     and crawls are available from any project's Lead without per-project
     wiring.
+  * **graft** — a code-intelligence MCP (symbol search / call-graph /
+    file-API skeletons over the project's `graft/` graph) is injected the
+    same way, into every role that reads code (see `_ROLE_MCP_POLICY`).
+    Separate dict/functions from the browser MCPs (`GRAFT_MCP`,
+    `ensure_graft_mcp`, `warm_graft_mcp`) so browser-MCP tests/behavior
+    stay untouched, but the same protection (can't be overridden/removed
+    via `add_mcp_server`/`remove_mcp_server`, wins over a same-named user
+    MCP) applies via `MANAGED_MCP_NAMES`.
   * **User MCPs** — allowlisted entries from the user's own `~/.claude.json`
     mcpServers are merged into `runtime/shared-mcp.json` so every cockpit
     pane inherits them automatically without manual setup. Browser MCPs
@@ -117,6 +125,41 @@ BROWSER_MCPS: dict = {
 }
 
 
+# graft (https://github.com/NanoNets/graft) — code-intelligence MCP: symbol
+# search, call-graph tracing, and per-file API skeletons over the project's
+# prebuilt `graft/` graph. Same rationale as BROWSER_MCPS (vanilla npx-stdio,
+# no auth, so cockpit hard-codes it rather than asking each project to wire
+# it up), but kept as its OWN dict/functions rather than folded into
+# BROWSER_MCPS: `ensure_browser_mcps()` writes EXACTLY BROWSER_MCPS's names
+# on a fresh install and tests assert that — mixing graft in would break
+# that invariant for a tool that isn't a browser.
+#
+# `graft mcp [dir]` serves the graph rooted at `dir` (default ".") over
+# stdio. Since npx inherits the spawning pane's cwd, the bare "." resolves
+# to whichever project the pane is running in — no per-pane cwd templating
+# needed (unlike the browser MCPs' persistent --user-data-dir dance).
+#
+# Confirmed empirically 2026-08-05 (this task, direct stdio JSON-RPC probe):
+# `graft mcp` in a directory with no `graft/` built does NOT crash or hang —
+# a tool call returns a graceful "no matching nodes ... try `graft build`"
+# text result (isError: false). So a project that hasn't run `graft build`
+# yet just gets empty-but-valid answers, never a wedged/crashed pane.
+#
+# Pinned to the version docs/audit/2026-08-05-graft-pilot.md evaluated —
+# see _PLAYWRIGHT_MCP_VERSION's comment above for why pinning (not @latest)
+# matters for cold-npx-spawn latency.
+_GRAFT_MCP_VERSION = "0.8.2"
+
+GRAFT_MCP: dict = {
+    "graft": {
+        "type": "stdio",
+        "command": "npx",
+        "args": ["-y", f"@nanonets/graft@{_GRAFT_MCP_VERSION}", "mcp"],
+        "env": {},
+    },
+}
+
+
 def warm_browser_mcps() -> None:
     """Pre-warm the npx cache for the browser MCPs at cockpit boot.
 
@@ -179,6 +222,39 @@ def warm_browser_mcps() -> None:
         ).start()
 
 
+def warm_graft_mcp() -> None:
+    """Pre-warm the npx cache for the graft MCP at cockpit boot — same
+    rationale and same TAKKUB_SKIP_MCP_WARM guard as `warm_browser_mcps`
+    (avoid first-call npx/registry latency blowing past a provider's MCP
+    startup window). Kept as its own function so #91's browser-warm
+    regression tests (asserting exactly 2 spawned processes) stay accurate.
+    """
+    if os.environ.get("TAKKUB_SKIP_MCP_WARM", "").strip() not in ("", "0"):
+        _log.debug("warm_graft_mcp: skipped (TAKKUB_SKIP_MCP_WARM set)")
+        return
+
+    npx = shutil.which("npx")
+    if npx is None:
+        _log.debug("warm_graft_mcp: npx launcher not found on PATH")
+        return
+
+    def _warm() -> None:
+        try:
+            subprocess.run(
+                [npx, *GRAFT_MCP["graft"]["args"]],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=30,
+                check=False,
+                creationflags=SUBPROCESS_NO_WINDOW,
+            )
+        except Exception:
+            pass
+
+    threading.Thread(target=_warm, name="warm-graft", daemon=True).start()
+
+
 def shared_mcp_config_path() -> str | None:
     """Absolute path to the shared MCP config file if it exists and has
     at least one MCP server entry. Returned to the orchestrator's argv builder."""
@@ -195,9 +271,13 @@ def shared_mcp_config_path() -> str | None:
 
 
 def shared_mcp_config_path_for_role(role: str) -> str | None:
-    """Role-aware MCP config path. Returns the per-role variant if the
-    role has a policy entry (from pane-tools.json or built-in) and its
-    variant exists; otherwise falls back to the master shared-mcp.json.
+    """Role-aware MCP config path. Returns the per-role variant if the role
+    has a policy entry (from pane-tools.json or built-in) and its variant
+    has servers in it; falls back to the master shared-mcp.json only when
+    the role has NO policy anywhere (`role_mcp_allowlist` returns `None`).
+    A role WITH a policy but no generated variant file gets `None` (skip
+    --mcp-config), never the master — see `role_mcp_allowlist`'s docstring
+    for why a policy with nothing to grant must not become a full grant.
 
     Why: lets the orchestrator send each claude pane only the MCPs that
     role actually uses, cutting browser-MCP schemas (~12-16k tokens) out
@@ -211,19 +291,28 @@ def shared_mcp_config_path_for_role(role: str) -> str | None:
     allowed = role_mcp_allowlist(role)
     if allowed is not None:  # role has policy (override or built-in)
         variant = _role_variant_path(role)
-        if variant.is_file():
-            try:
-                data = json.loads(variant.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                # A role policy exists, so a corrupt variant must fail closed.
-                # Falling back to the master would grant every shared MCP.
-                return None
-            servers = data.get("mcpServers") or {}
-            if servers:
-                return str(variant)
-            # Empty allowlist intersection → no MCPs for this role: signal
-            # "skip --mcp-config" by returning None.
+        if not variant.is_file():
+            # A policy exists (built-in, pane-tools.json override, or the
+            # "registered role with no entry → deny" default
+            # `role_mcp_allowlist` now applies — docs/reviews/2026-08-05-
+            # graft-mcp-security.md M1) but `_write_role_variants` never
+            # generated a file for it, e.g. because it isn't in
+            # `_ROLE_MCP_POLICY` or `pane-tools.json` at all. There is
+            # nothing to grant here — falling back to the master file would
+            # undo the deny-by-default this policy exists to express.
             return None
+        try:
+            data = json.loads(variant.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            # A role policy exists, so a corrupt variant must fail closed.
+            # Falling back to the master would grant every shared MCP.
+            return None
+        servers = data.get("mcpServers") or {}
+        if servers:
+            return str(variant)
+        # Empty allowlist intersection → no MCPs for this role: signal
+        # "skip --mcp-config" by returning None.
+        return None
     return shared_mcp_config_path()
 
 
@@ -417,10 +506,52 @@ def ensure_browser_mcps() -> tuple[bool, str]:
     return True, f"updated browser MCPs: {', '.join(changed)}"
 
 
+def ensure_graft_mcp() -> tuple[bool, str]:
+    """Merge GRAFT_MCP into runtime/shared-mcp.json if not already present.
+    Idempotent — safe to call on every cockpit launch. Mirrors
+    `ensure_browser_mcps` (same two startup states: file missing / already
+    up to date), kept as a separate function so browser-MCP tests keep
+    asserting `ensure_browser_mcps()` writes EXACTLY BROWSER_MCPS's names.
+
+    Returns (ok, message) for logging only; failure is non-fatal — panes
+    still spawn, graft just won't be available until the file is healed.
+    """
+    config: dict = {}
+    if SHARED_MCP_FILE.is_file():
+        try:
+            config = json.loads(SHARED_MCP_FILE.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return False, f"could not parse {SHARED_MCP_FILE}; leaving as-is"
+    servers = config.setdefault("mcpServers", {})
+    changed = []
+    for name, server_cfg in GRAFT_MCP.items():
+        desired = json.loads(json.dumps(server_cfg))  # deep copy
+        if servers.get(name) != desired:
+            servers[name] = desired
+            changed.append(name)
+    if not changed:
+        _write_role_variants()
+        return True, "graft MCP already present"
+    try:
+        SHARED_MCP_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _write_private_mcp_json(SHARED_MCP_FILE, config)
+    except OSError as e:
+        return False, f"could not write {SHARED_MCP_FILE}: {e}"
+    _write_role_variants()
+    return True, f"updated graft MCP: {', '.join(changed)}"
+
+
 # Browser MCP names are force-injected by ensure_browser_mcps() with pinned
 # versions and specific flags.  User copies of the same names are skipped so
 # cockpit's version always wins.
 _BROWSER_MCP_NAMES = frozenset(BROWSER_MCPS.keys())
+
+# Every cockpit-managed dev-tool MCP name (browser MCPs + graft) — the union
+# used for override/removal protection and for skipping a same-named user
+# MCP. `_BROWSER_MCP_NAMES` alone stays browser-only on purpose (it also
+# drives the --user-data-dir profile-isolation loop, which graft has no
+# use for), so this is a separate, wider set rather than an in-place edit.
+MANAGED_MCP_NAMES: frozenset[str] = _BROWSER_MCP_NAMES | frozenset(GRAFT_MCP.keys())
 
 # Explicit allowlist of user MCP names that are safe to copy into
 # runtime/shared-mcp.json by default.  Criteria: stdio servers with no
@@ -451,29 +582,37 @@ _USER_MCP_DEFAULT_ALLOW: frozenset[str] = frozenset()
 # for any future role we haven't classified yet).
 #
 # Policy rationale:
-#   - lead: orchestrator only — delegates UI work, no direct browser use.
-#   - qa: smoke + e2e tests need playwright/chrome-devtools.
-#   - critic/designer: visual review reads shots, may inspect runtime DOM.
-#   - reviewer/frontend/backend/mobile/devops: code roles work through the
-#     dev server / shell / psql directly, not MCPs.
-#   - codex: provider-native pane, but the policy still applies and builds
-#     per-session config overrides. Gemini currently has no safe
-#     session-scoped MCP adapter (#103) and keeps its existing fallback.
+#   - lead: orchestrator only — delegates code-reading + UI work, no direct
+#     browser/graft use.
+#   - qa: smoke + e2e tests need playwright/chrome-devtools, plus graft to
+#     navigate the codebase while writing/debugging tests.
+#   - critic: visual review reads shots, may inspect runtime DOM; plus graft
+#     for the code side of a review.
+#   - designer: visual review only — no code-reading MCP need, so no graft
+#     (matches the original playwright/chrome-devtools-only scope).
+#   - reviewer/frontend/backend/mobile/devops: code roles that read/navigate
+#     source get graft (2026-08-05, docs/audit/2026-08-05-graft-pilot.md);
+#     they work through the dev server/shell/psql directly for everything
+#     else, so no browser MCPs.
+#   - codex (the role slot, not the provider): provider-native pane, not a
+#     code-reading role itself — unchanged, no graft.
+#   - Gemini currently has no safe session-scoped MCP adapter (#103) and
+#     keeps its existing fallback regardless of what's in this table.
 # obsidian-vault removed from every role 2026-07-02: the claude-obsidian
 # plugin (its only provider) was uninstalled after a usage audit found 68
-# calls across ~3,200 sessions. Non-browser roles keep an explicit EMPTY
+# calls across ~3,200 sessions. Roles with no MCPs keep an explicit EMPTY
 # policy so they skip --mcp-config entirely (no schema tokens) instead of
 # falling through to the master file.
 _ROLE_MCP_POLICY: dict[str, frozenset[str]] = {
     "lead": frozenset(),
-    "qa": frozenset({"playwright", "chrome-devtools"}),
-    "critic": frozenset({"playwright", "chrome-devtools"}),
+    "qa": frozenset({"playwright", "chrome-devtools", "graft"}),
+    "critic": frozenset({"playwright", "chrome-devtools", "graft"}),
     "designer": frozenset({"playwright", "chrome-devtools"}),
-    "reviewer": frozenset(),
-    "frontend": frozenset(),
-    "backend": frozenset(),
-    "mobile": frozenset(),
-    "devops": frozenset(),
+    "reviewer": frozenset({"graft"}),
+    "frontend": frozenset({"graft"}),
+    "backend": frozenset({"graft"}),
+    "mobile": frozenset({"graft"}),
+    "devops": frozenset({"graft"}),
     "codex": frozenset(),
 }
 
@@ -489,12 +628,29 @@ def role_mcp_allowlist(role: str) -> frozenset[str] | None:
     """Return the role's effective MCP policy without collapsing its states.
 
     ``frozenset()`` is an explicit deny-all policy; ``None`` means the role
-    has no policy and retains the legacy master-config passthrough.  Provider
+    name isn't one the cockpit recognizes at all (typo, stale config) and
+    keeps the legacy master-config passthrough as a last resort. Provider
     adapters need this distinction even when there is no shared MCP file:
     Codex, for example, must suppress MCPs inherited from its own user config
     whenever the cockpit policy explicitly denies them (#121).
+
+    A REGISTERED role (``roles.all_role_names()``) with no `_ROLE_MCP_POLICY`
+    entry and no `pane-tools.json` override is a policy GAP, not a
+    passthrough licence — `gemini`/`shell` (registered defaults) and every
+    freshly created A6 custom role (`custom_roles.create_role` never writes
+    a `pane-tools.json` entry) used to fall through to `None` here and
+    inherit the full master `shared-mcp.json` on claude / the operator's
+    whole `~/.codex/config.toml` on codex (docs/reviews/2026-08-05-graft-mcp-
+    security.md M1). Deny those explicitly instead — a role import from
+    `roles` at call time (not module level) to avoid a needless import-time
+    coupling for every other caller of this module.
     """
-    return effective_mcps(role, _ROLE_MCP_POLICY.get(role))
+    explicit = effective_mcps(role, _ROLE_MCP_POLICY.get(role))
+    if explicit is not None:
+        return explicit
+    from .roles import all_role_names
+
+    return frozenset() if role in all_role_names() else None
 
 
 def add_mcp_server(name: str, cfg: dict, force: bool = False) -> bool:
@@ -506,16 +662,16 @@ def add_mcp_server(name: str, cfg: dict, force: bool = False) -> bool:
            write despite secrets (for user opt-ins).
 
     Returns True on success, False on validation/I/O error.
-    Blocks BROWSER_MCPS names from being overwritten (always returns False).
-    Never raises.
+    Blocks MANAGED_MCP_NAMES (browser MCPs + graft) from being overwritten
+    (always returns False). Never raises.
     """
     from .pane_tools_policy import _validate_name
 
     if not isinstance(name, str) or not _validate_name(name):
         _log.warning("add_mcp_server: invalid MCP name %r", name)
         return False
-    if name in _BROWSER_MCP_NAMES:
-        _log.warning("add_mcp_server: cannot override browser MCP %r", name)
+    if name in MANAGED_MCP_NAMES:
+        _log.warning("add_mcp_server: cannot override managed MCP %r", name)
         return False
     if not isinstance(cfg, dict):
         _log.warning("add_mcp_server: cfg for %r is not dict", name)
@@ -542,12 +698,13 @@ def add_mcp_server(name: str, cfg: dict, force: bool = False) -> bool:
 def remove_mcp_server(name: str) -> bool:
     """Remove an MCP server from the master shared-mcp.json.
 
-    Blocks removal of browser MCPs (returns False without modifying file).
+    Blocks removal of managed MCPs (browser MCPs + graft) — returns False
+    without modifying the file.
     Returns True on success, False on I/O error or if name not found.
     Never raises.
     """
-    if name in _BROWSER_MCP_NAMES:
-        _log.warning("remove_mcp_server: cannot remove browser MCP %r", name)
+    if name in MANAGED_MCP_NAMES:
+        _log.warning("remove_mcp_server: cannot remove managed MCP %r", name)
         return False
 
     try:
@@ -666,9 +823,12 @@ def _write_role_variants() -> None:
     mutates the master so variants stay in sync.
 
     Best-effort wrapper around `regen_role_variants_checked` for callers
-    that don't need to know which roles failed — a missing variant simply
-    causes the orchestrator to fall back to the master file for that role
-    (back-compat).
+    that don't need to know which roles failed — a missing variant for a
+    role with NO policy anywhere still falls back to the master file
+    (back-compat); a missing variant for a role that DOES have a policy
+    (built-in, override, or the registered-role-with-no-entry deny default)
+    resolves to "no MCPs", not the master — see
+    `shared_mcp_config_path_for_role`.
     """
     regen_role_variants_checked()
 
@@ -880,8 +1040,8 @@ def ensure_user_mcps() -> tuple[bool, str]:
     skipped: list[str] = []
 
     for name, cfg in user_servers.items():
-        if name in _BROWSER_MCP_NAMES:
-            skipped.append(f"{name} (browser MCP wins)")
+        if name in MANAGED_MCP_NAMES:
+            skipped.append(f"{name} (cockpit-managed MCP wins)")
             continue
         if not isinstance(cfg, dict):
             skipped.append(f"{name} (not a dict)")
@@ -921,12 +1081,12 @@ def ensure_user_mcps() -> tuple[bool, str]:
 
     servers = config.setdefault("mcpServers", {})
 
-    # Prune stale entries: non-browser user MCPs no longer in current policy.
+    # Prune stale entries: non-managed user MCPs no longer in current policy.
     # Log name only — never the cfg value (may contain bearer tokens).
     pruned: list[str] = []
     for name in list(servers.keys()):
-        if name in _BROWSER_MCP_NAMES:
-            continue  # managed by ensure_browser_mcps; never touch
+        if name in MANAGED_MCP_NAMES:
+            continue  # managed by ensure_browser_mcps/ensure_graft_mcp; never touch
         if name not in to_merge:
             del servers[name]
             pruned.append(name)

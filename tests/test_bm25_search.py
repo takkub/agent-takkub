@@ -32,6 +32,12 @@ def _user_rec(text: str, ts: str) -> dict:
     }
 
 
+@pytest.fixture(autouse=True)
+def _isolate_fs(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
+    monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(bm25_search, "ROLE_MEMORY_DIR", tmp_path / "role-memory")
+
+
 class TestTokenize:
     def test_ascii_words_lowercased(self) -> None:
         assert tokenize("Fix the Bug") == ["fix", "the", "bug"]
@@ -59,7 +65,6 @@ class TestSearchRanking:
     def test_more_relevant_doc_ranks_first_english(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
     ) -> None:
-        monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
         proj = tmp_path / ".claude" / "projects" / "C--Users-alice-foo"
         proj.mkdir(parents=True)
         _write_jsonl(
@@ -78,7 +83,6 @@ class TestSearchRanking:
     def test_thai_only_query_ranks_matching_doc_first(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
     ) -> None:
-        monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
         proj = tmp_path / ".claude" / "projects" / "C--Users-alice-foo"
         proj.mkdir(parents=True)
         _write_jsonl(
@@ -96,7 +100,6 @@ class TestSearchRanking:
     def test_mixed_thai_english_query(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
     ) -> None:
-        monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
         proj = tmp_path / ".claude" / "projects" / "C--Users-alice-foo"
         proj.mkdir(parents=True)
         _write_jsonl(
@@ -114,7 +117,6 @@ class TestSearchRanking:
     def test_project_filter_narrows(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
     ) -> None:
-        monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
         base = tmp_path / ".claude" / "projects"
         keep = base / "C--Users-alice-agent-takkub"
         skip = base / "C--Users-alice-other"
@@ -134,7 +136,6 @@ class TestSearchRanking:
     def test_limit_caps_results(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
     ) -> None:
-        monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
         proj = tmp_path / ".claude" / "projects" / "C--Users-alice-foo"
         proj.mkdir(parents=True)
         recs = [_user_rec(f"hit number {i}", f"2026-05-17T10:{i:02d}:00Z") for i in range(10)]
@@ -146,7 +147,6 @@ class TestSearchRanking:
     def test_no_matches_returns_empty_bm25(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
     ) -> None:
-        monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
         hits, used_bm25 = search("nothing indexed anywhere")
         assert hits == []
         assert used_bm25 is True
@@ -156,9 +156,7 @@ class TestArchiveCorpus:
     def test_archive_lines_are_searchable(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
     ) -> None:
-        monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
         role_mem = tmp_path / "role-memory"
-        monkeypatch.setattr(bm25_search, "ROLE_MEMORY_DIR", role_mem)
         proj_dir = role_mem / "agent-takkub"
         proj_dir.mkdir(parents=True)
         (proj_dir / "backend-archive.md").write_text(
@@ -176,7 +174,6 @@ class TestArchiveCorpus:
     def test_missing_archive_dir_is_skipped(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
     ) -> None:
-        monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
         monkeypatch.setattr(bm25_search, "ROLE_MEMORY_DIR", tmp_path / "does-not-exist")
         hits, used_bm25 = search("anything at all here")
         assert hits == []
@@ -187,7 +184,6 @@ class TestFallback:
     def test_short_query_falls_back_to_grep(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
     ) -> None:
-        monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
         proj = tmp_path / ".claude" / "projects" / "C--Users-alice-foo"
         proj.mkdir(parents=True)
         _write_jsonl(proj / "s.jsonl", [_user_rec("ci build fixed", "2026-05-17T10:00:00Z")])
@@ -199,7 +195,6 @@ class TestFallback:
     def test_punctuation_only_query_falls_back_to_grep(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
     ) -> None:
-        monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
         hits, used_bm25 = search("!!!???")
         assert used_bm25 is False
         assert hits == []
@@ -207,7 +202,6 @@ class TestFallback:
     def test_indexing_failure_falls_back_to_grep(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
     ) -> None:
-        monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path)
         proj = tmp_path / ".claude" / "projects" / "C--Users-alice-foo"
         proj.mkdir(parents=True)
         _write_jsonl(proj / "s.jsonl", [_user_rec("bracketed paste bug", "2026-05-17T10:00:00Z")])

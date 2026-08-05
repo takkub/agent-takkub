@@ -19,12 +19,33 @@ to that provider's own injection surface:
   - ``"session_override"`` (codex): codex has native per-session `-c
     mcp_servers.<name>.<key>=<toml-value>` dotted overrides (confirmed
     against the real `codex-cli 0.144.1` binary 2026-07-11 — see
-    docs/reviews/2026-07-11-100-mcp-bridge.md). Additive only: never
-    touches `~/.codex/config.toml` (verified: `-c` overrides are
-    request-scoped, not persisted). An explicit empty role policy is
-    different: it resolves inherited MCP names and disables each one, plus
-    `features.plugins=false` for plugin-bundled MCPs (#121; verified
-    against codex-cli 0.145.0).
+    docs/reviews/2026-07-11-100-mcp-bridge.md). Never touches
+    `~/.codex/config.toml` (verified: `-c` overrides are request-scoped,
+    not persisted). Every role with an explicit cockpit MCP policy — empty
+    *or* non-empty (e.g. a graft-only allowlist) — is deny-by-default: the
+    bridge always emits `_CODEX_DISABLE_ALL_MCP_ARGV` (`-c mcp_servers={}
+    -c features.plugins=false`) first. Re-verified 2026-08-05 against real
+    codex-cli binaries at 0.144.1, 0.145.0, AND 0.146.0 (Windows): a bare
+    `-c mcp_servers.<name>.*` PARTIAL override with no `mcp_servers={}`
+    prefix merges with codex's own inherited config (`~/.codex/config.toml`,
+    project config) rather than replacing it — the original #121 finding —
+    but `-c mcp_servers={}` itself fully clears the whole table on all
+    three versions, and it STAYS cleared through any partial overrides
+    layered on after it (only the explicitly-named servers show up; the
+    inherited ones do not come back). That makes the disable-all prefix a
+    complete deny-by-default on its own, on every version tested — not
+    something that depends on also resolving and disabling each inherited
+    name one by one. Because untested older/unknown codex builds could
+    still behave like the original #121 finding, `_codex_mcp_argv` keeps
+    that per-name resolve-and-disable as defense-in-depth gated by
+    `_CODEX_RESOLVE_SAFE_MIN_VERSION`: codex-cli at or above that floor
+    skips the resolve subprocess entirely (and can never hard-abort a spawn
+    over it); anything older, or whose version can't be parsed, keeps the
+    original conservative behaviour (resolve codex's live MCP name list via
+    `mcp list --json`, hard-abort the spawn if that fails — see
+    `McpResolutionError`). A role with NO cockpit MCP policy at all
+    (`role_mcp_allowlist` returns `None`) stays untouched passthrough, same
+    as always.
   - ``"plugin_import"`` (gemini/agy): documented no-op. `agy` genuinely
     CAN bridge MCP servers from a Claude-style plugin's `.mcp.json` via
     `agy plugin import <path>` (proven empirically against the real
@@ -67,9 +88,47 @@ _CODEX_DISABLE_ALL_MCP_ARGV = [
     "features.plugins=false",
 ]
 
+# Oldest codex-cli build empirically confirmed (2026-08-05, real binaries,
+# not guessed) to fully clear `mcp_servers` from `-c mcp_servers={}` alone —
+# see the module docstring's session_override bullet. codex-cli at or above
+# this floor skips `_codex_resolved_mcp_names` entirely: the disable-all
+# prefix is already sufficient, so there is nothing left to resolve and
+# nothing that can hard-abort the spawn. Anything older, or a version string
+# we can't parse, falls back to the pre-existing resolve-and-hard-abort path
+# — we have not tested every codex build that has ever shipped, only these
+# three (0.144.1, 0.145.0, 0.146.0), so this stays a conservative floor
+# rather than a blanket "codex never merges" assumption.
+_CODEX_RESOLVE_SAFE_MIN_VERSION = (0, 144, 1)
+_CODEX_VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
+
+
+class McpResolutionError(RuntimeError):
+    """Raised when the "session_override" (codex) adapter can't safely
+    resolve which MCP servers to deny.
+
+    Only reachable for a codex-cli older than `_CODEX_RESOLVE_SAFE_MIN_VERSION`
+    (or one whose version we couldn't parse): the disable-all prefix already
+    covers every verified codex build on its own (module docstring), so
+    `_codex_mcp_argv` skips this resolve step — and this error — entirely
+    for those. For the older/unverified path, deny-by-default falls back to
+    depending on the full inherited name list being known — an incomplete
+    or failed resolution there would silently under-deny, handing the pane
+    whatever MCPs happen to be in `~/.codex/config.toml`. So this is not
+    a degrade-and-continue error: callers (`spawn_engine.py`) must treat
+    it as fatal to the spawn attempt, not log-and-proceed like the
+    surrounding context-rendering `except Exception` blocks do.
+    """
+
 
 def _codex_resolved_mcp_names(provider_bin: str, cwd: str, env: dict[str, str]) -> list[str]:
-    """Ask Codex for config-defined MCP names without loading plugin MCPs."""
+    """Ask Codex for config-defined MCP names without loading plugin MCPs.
+
+    Runs once per codex-family spawn, uncached: measured ~180-225ms
+    across 3 local runs against a real `codex-cli` binary (2026-08-05),
+    negligible next to the rest of the spawn path (PTY/process launch).
+    The 5s timeout is a safety ceiling, not the expected case — revisit
+    session-level caching only if that assumption stops holding.
+    """
     try:
         result = subprocess.run(
             [provider_bin, "-c", "features.plugins=false", "mcp", "list", "--json"],
@@ -83,13 +142,43 @@ def _codex_resolved_mcp_names(provider_bin: str, cwd: str, env: dict[str, str]) 
         )
         servers = json.loads(result.stdout)
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
-        raise RuntimeError("could not resolve inherited Codex MCP servers") from exc
+        raise McpResolutionError("could not resolve inherited Codex MCP servers") from exc
     if not isinstance(servers, list):
-        raise RuntimeError("Codex MCP list returned a non-list payload")
+        raise McpResolutionError("Codex MCP list returned a non-list payload")
     names = [server.get("name") for server in servers if isinstance(server, dict)]
     if not all(isinstance(name, str) and _TOML_BARE_KEY_RE.fullmatch(name) for name in names):
-        raise RuntimeError("Codex MCP list contained an unsupported server name")
+        raise McpResolutionError("Codex MCP list contained an unsupported server name")
     return names
+
+
+def _codex_cli_version(
+    provider_bin: str, cwd: str, env: dict[str, str]
+) -> tuple[int, int, int] | None:
+    """Best-effort `codex --version` parse, e.g. ``(0, 146, 0)``.
+
+    `None` on any failure (binary missing, timeout, unparseable output) —
+    unlike `_codex_resolved_mcp_names`, this never raises: a failed/unknown
+    version must fall back to the conservative resolve-and-disable path in
+    `_codex_mcp_argv`, not abort the spawn. Only used to decide whether that
+    path is even needed (see `_CODEX_RESOLVE_SAFE_MIN_VERSION`).
+    """
+    try:
+        result = subprocess.run(
+            [provider_bin, "--version"],
+            cwd=cwd,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+            creationflags=SUBPROCESS_NO_WINDOW,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    match = _CODEX_VERSION_RE.search(result.stdout)
+    if not match:
+        return None
+    return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
 
 
 def _toml_literal(value: object) -> str:
@@ -173,23 +262,35 @@ def _codex_mcp_argv(
     """
     from .shared_dev_tools import role_mcp_allowlist
 
-    # Codex merges an empty CLI table with lower-precedence user/project MCP
-    # tables, so `mcp_servers={}` alone does not clear them. Resolve their
-    # names through Codex itself and disable each one. Plugins are a second
-    # MCP source, so disable that feature for this invocation too (#121).
-    if role_mcp_allowlist(base_role) == frozenset():
-        names = _codex_resolved_mcp_names(
-            provider_bin or "codex",
-            cwd or os.getcwd(),
-            env or os.environ.copy(),
-        )
-        argv = list(_CODEX_DISABLE_ALL_MCP_ARGV)
-        for name in names:
-            argv.extend(["-c", f"mcp_servers.{name}.enabled=false"])
-        return argv
-
     servers = _role_mcp_servers(base_role, shard_idx, project_ns)
     argv: list[str] = []
+
+    # `role_mcp_allowlist` returning None means "no cockpit MCP policy for
+    # this role at all" — legacy passthrough, additive-only, never touch
+    # what codex already has configured. Any other result (including an
+    # EXPLICIT empty frozenset) means the cockpit has an opinion about this
+    # role's MCPs, so it must be deny-by-default: a non-empty role allowlist
+    # (e.g. graft-only) is just as much a leak risk as an empty one if we
+    # only inject the role's own servers — a bare partial `-c
+    # mcp_servers.<name>.*` override merges with codex's lower-precedence
+    # user/project config rather than replacing it, so anything already in
+    # `~/.codex/config.toml` would otherwise still be reachable. The
+    # disable-all prefix below closes that on its own (module docstring)
+    # — resolving the live inherited name list and disabling each one is
+    # extra defense-in-depth for codex builds we haven't verified, so it
+    # only runs there (see `_CODEX_RESOLVE_SAFE_MIN_VERSION`).
+    if role_mcp_allowlist(base_role) is not None:
+        argv.extend(_CODEX_DISABLE_ALL_MCP_ARGV)
+        _bin = provider_bin or "codex"
+        _cwd = cwd or os.getcwd()
+        _env = env or os.environ.copy()
+        version = _codex_cli_version(_bin, _cwd, _env)
+        if version is None or version < _CODEX_RESOLVE_SAFE_MIN_VERSION:
+            names = _codex_resolved_mcp_names(_bin, _cwd, _env)
+            for name in names:
+                if name not in servers:
+                    argv.extend(["-c", f"mcp_servers.{name}.enabled=false"])
+
     from .pane_tools_policy import _validate_name
 
     for name, cfg in servers.items():
@@ -226,7 +327,15 @@ def mcp_argv_for_provider(
     so the decision of which bridge a provider gets is driven by its
     `ProviderSpec`, not a hardcoded if/else per provider. Returns `[]`
     for any variant with no session-scoped bridge (`"plugin_import"`,
-    `"none"`, unknown) — always a safe no-op, never raises.
+    `"none"`, unknown) — a safe no-op, never raises for those.
+
+    The `"strict"` (claude) and `"session_override"` (codex) variants are
+    NOT no-ops: `"session_override"` shells out to the codex binary to
+    resolve its deny-by-default list and raises `McpResolutionError` if
+    that resolution fails (subprocess error, timeout, malformed output)
+    — see `McpResolutionError`'s docstring for why this must be fatal
+    rather than degrade-and-continue. Callers spawning a codex-family
+    pane must let that propagate to a spawn-abort, not swallow it.
     """
     from .provider_spec import PROVIDER_REGISTRY
 

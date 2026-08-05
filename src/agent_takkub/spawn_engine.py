@@ -1700,10 +1700,24 @@ class SpawnEngineMixin:
             # overrides; agy's "plugin_import" resolves to a documented no-op
             # (see mcp_bridge.py). Called for every provider so each branch
             # goes through the same adapter dispatch.
-            from .mcp_bridge import mcp_argv_for_provider
+            #
+            # codex's "session_override" variant is deny-by-default via an
+            # unconditional `-c mcp_servers={}` prefix, verified sufficient
+            # on its own against real codex-cli binaries 0.144.1/0.145.0/
+            # 0.146.0 (mcp_bridge.py docstring). Only for an older/unparseable
+            # codex build does it also need to resolve codex's own inherited
+            # MCP set to disable each by name; if THAT resolution fails,
+            # silently continuing would spawn the pane with whatever MCPs are
+            # already sitting in ~/.codex/config.toml unfiltered — the exact
+            # leak #100/#121 closed. Fail closed instead: refuse the spawn
+            # with a message the Lead can see (mirrors the binary-discovery
+            # failure return a few lines above), same as any other
+            # pre-launch spawn abort. A recent, detected codex-cli never
+            # reaches this failure mode at all — see McpResolutionError.
+            from .mcp_bridge import McpResolutionError, mcp_argv_for_provider
 
-            provider_argv.extend(
-                mcp_argv_for_provider(
+            try:
+                mcp_argv = mcp_argv_for_provider(
                     spec.name,
                     base_role,
                     shard_idx,
@@ -1712,7 +1726,12 @@ class SpawnEngineMixin:
                     cwd=spawn_cwd,
                     env=env,
                 )
-            )
+            except McpResolutionError as exc:
+                return False, (
+                    f"could not verify {spec.name}'s inherited MCP servers, so "
+                    f"{role_name} was not spawned (refusing to guess a deny-list): {exc}"
+                )
+            provider_argv.extend(mcp_argv)
             # Project/session scoping (#132): opt-in per provider via
             # ProviderSpec.project_scope_flag — currently only gemini/agy,
             # whose own conversation history isn't keyed by cwd otherwise.

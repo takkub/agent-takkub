@@ -567,3 +567,101 @@ class TestDoneNoticeAppendFormat:
 
         assert "📸 evidence:" in group.done["qa#1"]
         assert "shard1.png" in group.done["qa#1"]
+
+
+class TestFailureAutoCapture:
+    """`done(failed=True)` auto-captures into role-memory (ReflexionMemory-style,
+    no agent decision required) — wired at the same point evidence attach is."""
+
+    def test_done_fail_writes_role_memory_entry(self, orch, tmp_path, monkeypatch):
+        from agent_takkub import role_memory as rm_mod
+
+        monkeypatch.setattr(rm_mod, "ROLE_MEMORY_DIR", tmp_path / "role-memory")
+        monkeypatch.setattr(orch_mod, "active_project", lambda: ("proj", {}))
+        _mock_done(orch)
+
+        proj = "proj"
+        _register_pane(orch, LEAD.name, proj, _make_alive_session())
+        _register_pane(orch, "backend", proj, _make_alive_session())
+        orch._pane_state[f"{proj}::backend"] = PaneState(assign_ts=time.time() - 60)
+        monkeypatch.setattr(orch, "_notify_lead", lambda ns, notice, **kw: None)
+
+        orch.done("backend", note="migration crashed on empty table", project=proj, failed=True)
+
+        mem_path = rm_mod.role_memory_path(proj, "backend")
+        assert mem_path.exists()
+        text = mem_path.read_text(encoding="utf-8")
+        assert "migration crashed on empty table" in text
+        assert "fail —" in text
+
+    def test_done_fail_uses_first_line_only(self, orch, tmp_path, monkeypatch):
+        from agent_takkub import role_memory as rm_mod
+
+        monkeypatch.setattr(rm_mod, "ROLE_MEMORY_DIR", tmp_path / "role-memory")
+        monkeypatch.setattr(orch_mod, "active_project", lambda: ("proj", {}))
+        _mock_done(orch)
+
+        proj = "proj"
+        _register_pane(orch, LEAD.name, proj, _make_alive_session())
+        _register_pane(orch, "qa", proj, _make_alive_session())
+        orch._pane_state[f"{proj}::qa"] = PaneState(assign_ts=time.time() - 60)
+        monkeypatch.setattr(orch, "_notify_lead", lambda ns, notice, **kw: None)
+
+        orch.done(
+            "qa", note="checkout 500 on submit\nfull stack trace here...", project=proj, failed=True
+        )
+
+        text = rm_mod.role_memory_path(proj, "qa").read_text(encoding="utf-8")
+        assert "checkout 500 on submit" in text
+        assert "full stack trace here" not in text
+
+    def test_shard_pane_fail_captures_under_base_role(self, orch, tmp_path, monkeypatch):
+        from agent_takkub import role_memory as rm_mod
+
+        monkeypatch.setattr(rm_mod, "ROLE_MEMORY_DIR", tmp_path / "role-memory")
+        monkeypatch.setattr(orch_mod, "active_project", lambda: ("proj", {}))
+        _mock_done(orch)
+
+        proj = "proj"
+        _register_pane(orch, LEAD.name, proj, _make_alive_session())
+        _register_pane(orch, "qa#1", proj, _make_alive_session())
+        orch._pane_state[f"{proj}::qa#1"] = PaneState(assign_ts=time.time() - 60, shard_total=2)
+        monkeypatch.setattr(orch, "_notify_lead", lambda ns, notice, **kw: None)
+
+        from agent_takkub.pipeline_executor import ShardGroup
+
+        group = ShardGroup(base_role="qa", total=2)
+        orch._shard_groups = {f"{proj}::qa": group}
+        monkeypatch.setattr(orch, "_inject_shard_fanout_handoff", lambda *a, **kw: None)
+
+        orch.done(
+            "qa#1", note="shard flake: timeout waiting for selector", project=proj, failed=True
+        )
+
+        text = rm_mod.role_memory_path(proj, "qa").read_text(encoding="utf-8")
+        assert "shard flake: timeout waiting for selector" in text
+
+    def test_done_fail_role_memory_error_does_not_break_done(self, orch, tmp_path, monkeypatch):
+        """A role-memory I/O failure during capture must not break the FAILED
+        report itself — Lead still gets notified."""
+        from agent_takkub import role_memory as rm_mod
+
+        def boom(*_a, **_kw):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(rm_mod, "append_failure_entry", boom)
+        monkeypatch.setattr(orch_mod, "active_project", lambda: ("proj", {}))
+        _mock_done(orch)
+
+        proj = "proj"
+        _register_pane(orch, LEAD.name, proj, _make_alive_session())
+        _register_pane(orch, "backend", proj, _make_alive_session())
+        orch._pane_state[f"{proj}::backend"] = PaneState(assign_ts=time.time() - 60)
+
+        captured: list[str] = []
+        monkeypatch.setattr(orch, "_notify_lead", lambda ns, notice, **kw: captured.append(notice))
+
+        ok, _msg = orch.done("backend", note="something broke", project=proj, failed=True)
+
+        assert ok is True
+        assert captured and "FAILED" in captured[0]

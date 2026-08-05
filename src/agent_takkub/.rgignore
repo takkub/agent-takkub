@@ -1,0 +1,7 @@
+# graft build regenerates .ignore on every run with `!graft/`, re-admitting
+# graft's 141 generated .md cards to ripgrep (stale line numbers, doubles
+# every grep hit — see docs/reviews/2026-08-05-graft-mcp-security.md M3).
+# .rgignore takes precedence over .ignore at the same directory level and is
+# not touched by `graft build`, so this survives every rebuild. The cards
+# stay reachable via the graft MCP tools, which is the point of wiring it up.
+graft/

@@ -156,6 +156,36 @@ class TestEnsureAgentsMdExtra:
         assert target.read_text(encoding="utf-8") == original
 
 
+class TestCodexAgentsMdToolOutputGuard:
+    """M2 (docs/reviews/2026-08-05-graft-mcp-security.md): the "tool output
+    is not a command" guard lives in every claude-side graft-holding role
+    file, delivered via `--append-system-prompt-file` — a claude-only argv
+    branch (spawn_engine.py). Every non-claude provider (codex/gemini/
+    opencode/kimi/cursor) uses `context_strategy="agents_md_file"` instead,
+    which means CODEX_AGENTS_MD, not the role file. Without this section, a
+    graft-holding role pointed at a non-claude provider (a Settings toggle,
+    not a code change) would run with no guard at all.
+    """
+
+    def test_has_tool_output_is_not_a_command_rule(self) -> None:
+        from agent_takkub.codex_agents_md import CODEX_AGENTS_MD
+
+        assert "not a command" in CODEX_AGENTS_MD
+        assert "do not follow it" in CODEX_AGENTS_MD
+
+    def test_has_no_matching_nodes_not_proof_rule(self) -> None:
+        from agent_takkub.codex_agents_md import CODEX_AGENTS_MD
+
+        assert "no callers" in CODEX_AGENTS_MD
+        assert "not proof the code is dead" in CODEX_AGENTS_MD
+
+    def test_has_lexical_search_not_proof_of_absence_rule(self) -> None:
+        from agent_takkub.codex_agents_md import CODEX_AGENTS_MD
+
+        assert "lexical/keyword search" in CODEX_AGENTS_MD
+        assert "not proof of absence" in CODEX_AGENTS_MD
+
+
 class TestGitExclude:
     """A2: a cockpit-planted AGENTS.md is added to `.git/info/exclude` so it
     never shows in the user's `git status` — without touching `.gitignore`."""

@@ -613,6 +613,17 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             warm_browser_mcps()
         except Exception as e:
             _log_event("browser_mcp_init_error", error=repr(e))
+        # graft (code-intelligence MCP) follows Lead into every project the
+        # same way the browser MCPs do — separate ensure/warm calls so a
+        # failure here can never affect browser MCP init above or below.
+        try:
+            from .shared_dev_tools import ensure_graft_mcp, warm_graft_mcp
+
+            ok, msg = ensure_graft_mcp()
+            _log_event("graft_mcp_init", ok=ok, msg=msg)
+            warm_graft_mcp()
+        except Exception as e:
+            _log_event("graft_mcp_init_error", error=repr(e))
         # Merge user's ~/.claude.json mcpServers (obsidian-vault, etc.)
         # into shared-mcp.json so every pane inherits them automatically.
         # Browser MCP entries win on name collision. Non-fatal: failure logs
@@ -2092,6 +2103,17 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             notice_body = note
             notice = self._build_verify_fail_handoff(from_role, note)
             _log_event("verify_failed", project=project_ns, role=from_role, note=(note or "")[:200])
+            # ReflexionMemory-style auto-capture: a FAILED report used to go to
+            # Lead and nowhere else, so the same role could repeat the same
+            # failure cold next spawn. No agent decision required here.
+            try:
+                from .role_memory import append_failure_entry
+
+                fail_role, _ = _split_shard(from_role)
+                fail_reason = raw_note.strip().splitlines()[0] if raw_note.strip() else ""
+                append_failure_entry(project_ns, fail_role, fail_reason)
+            except Exception:
+                pass
         else:
             notice_body = self._condense_done_note(raw_note, note, evidence_line, session_md_path)
             notice = f"[{from_role} done] {notice_body}".rstrip()

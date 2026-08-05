@@ -7,9 +7,9 @@ UI (``pages/mcp_page.py``) only ever talks to this module; it never imports
 JSON path ตรง").
 
 Ownership per SPEC.md §MCP Servers:
-  - MANAGED: a browser MCP the cockpit force-injects (``playwright``,
-    ``chrome-devtools``) — definition read-only, assignment still editable
-    from a Role's Access tab.
+  - MANAGED: a dev-tool MCP the cockpit force-injects (``playwright``,
+    ``chrome-devtools``, ``graft``) — definition read-only, assignment
+    still editable from a Role's Access tab.
   - USER: any other server — full CRUD.
 
 Credential handling: ``get()`` always returns a secret-masked config
@@ -33,7 +33,7 @@ class McpNotFoundError(KeyError):
 
 
 def _ownership(name: str) -> Ownership:
-    return Ownership.MANAGED if name in shared_dev_tools._BROWSER_MCP_NAMES else Ownership.USER
+    return Ownership.MANAGED if name in shared_dev_tools.MANAGED_MCP_NAMES else Ownership.USER
 
 
 def _draft_to_cfg(draft: McpConfigDraft, existing: dict | None = None) -> dict:
@@ -124,7 +124,7 @@ def capabilities(entity_id: str | None = None) -> Capability:
             can_create=True,
             can_update=False,
             can_delete=False,
-            reason="Managed browser MCP ของ cockpit — definition แก้ไม่ได้ (assignment ยังแก้ได้จากหน้า Role)",
+            reason="Managed MCP ของ cockpit — definition แก้ไม่ได้ (assignment ยังแก้ได้จากหน้า Role)",
         )
     return Capability(can_create=True, can_update=True, can_delete=True)
 
@@ -187,7 +187,7 @@ def delete_plan(entity_id: str) -> DeletePlan:
             entity_id=entity_id,
             deletable=False,
             version=_signature(entity_id),
-            blockers=("Managed browser MCP ลบไม่ได้",),
+            blockers=("Managed MCP ลบไม่ได้",),
         )
     affected = _explicit_allowlist_roles(entity_id)
     effects = ["ลบ master entry จาก shared-mcp.json", "regenerate role variant files"]

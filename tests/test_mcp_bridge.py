@@ -21,7 +21,14 @@ def isolated_mcp_file(monkeypatch: pytest.MonkeyPatch, tmp_path):
     """Redirect shared_dev_tools' SHARED_MCP_FILE + pane_tools_policy's
     PANE_TOOLS_POLICY_FILE to tmp paths — same isolation test_browser_mcps.py
     uses, so a real dev machine's runtime/shared-mcp.json or
-    ~/.takkub/pane-tools.json never leaks into these assertions."""
+    ~/.takkub/pane-tools.json never leaks into these assertions.
+
+    `_codex_cli_version` is forced to `None` (undetectable) so every
+    existing test here deterministically exercises the pre-#146
+    resolve-and-disable path regardless of whether the dev machine
+    running these tests happens to have a real `codex` binary on PATH —
+    see TestCodexResolveVersionGate for the opposite (skip-resolve) path.
+    """
     from agent_takkub import pane_tools_policy as ptp
     from agent_takkub import shared_dev_tools as sdt
 
@@ -29,6 +36,7 @@ def isolated_mcp_file(monkeypatch: pytest.MonkeyPatch, tmp_path):
     monkeypatch.setattr(sdt, "SHARED_MCP_FILE", target)
     monkeypatch.setattr(ptp, "PANE_TOOLS_POLICY_FILE", tmp_path / "pane-tools.json")
     monkeypatch.setattr(mcp_bridge, "_codex_resolved_mcp_names", lambda *args: [])
+    monkeypatch.setattr(mcp_bridge, "_codex_cli_version", lambda *args: None)
     return target
 
 
@@ -103,7 +111,12 @@ class TestCodexMcpArgv:
         sdt.regen_role_variants()
         argv = mcp_bridge.mcp_argv_for_provider("codex", "codex", None, "proj")
         pairs = list(zip(argv[0::2], argv[1::2], strict=True))
+        # A non-empty explicit allowlist is still deny-by-default (the
+        # regression this task closed): the disable-all-inherited prefix
+        # comes first, then the role's own additive overrides.
         assert pairs == [
+            ("-c", "mcp_servers={}"),
+            ("-c", "features.plugins=false"),
             ("-c", 'mcp_servers.demo.command="node"'),
             ("-c", 'mcp_servers.demo.args=["-e","1"]'),
             ("-c", 'mcp_servers.demo.env={FOO="1"}'),
@@ -125,11 +138,141 @@ class TestCodexMcpArgv:
             "features.plugins=false",
         ]
 
+    def test_propagates_resolution_failure_instead_of_swallowing(
+        self, isolated_mcp_file, monkeypatch
+    ):
+        """Fail-closed contract: when codex's own inherited MCP set can't be
+        resolved, `mcp_argv_for_provider` must raise `McpResolutionError`
+        (not return a partial/empty argv) so the caller refuses to spawn
+        rather than silently under-denying. See spawn_engine.py's try/except
+        around this call for the caller side of the contract."""
+
+        def _boom(*args):
+            raise mcp_bridge.McpResolutionError("codex CLI timed out")
+
+        monkeypatch.setattr(mcp_bridge, "_codex_resolved_mcp_names", _boom)
+        with pytest.raises(mcp_bridge.McpResolutionError):
+            mcp_bridge.mcp_argv_for_provider("codex", "codex", None, "proj")
+
     def test_never_raises_on_corrupt_master_file(self, isolated_mcp_file):
         isolated_mcp_file.write_text("{not json", encoding="utf-8")
-        # QA has an allow policy, so this exercises the ordinary config-reading
-        # path rather than Codex's deny-all fast path.
-        assert mcp_bridge.mcp_argv_for_provider("codex", "qa", None, "proj") == []
+        # QA has a non-empty allow policy, so `_role_mcp_servers` must resolve
+        # to {} on the corrupt master (not raise) while the deny-by-default
+        # prefix still fires because QA has an explicit cockpit MCP policy.
+        assert mcp_bridge.mcp_argv_for_provider("codex", "qa", None, "proj") == [
+            "-c",
+            "mcp_servers={}",
+            "-c",
+            "features.plugins=false",
+        ]
+
+
+class TestCodexCliVersion:
+    """`_codex_cli_version` — best-effort `codex --version` parse used to
+    gate the resolve-and-disable defense-in-depth (see
+    TestCodexResolveVersionGate). Must never raise."""
+
+    def test_parses_plain_version_output(self, monkeypatch):
+        class _Result:
+            stdout = "codex-cli 0.146.0\n"
+
+        monkeypatch.setattr(mcp_bridge.subprocess, "run", lambda *a, **kw: _Result())
+        assert mcp_bridge._codex_cli_version("codex", ".", {}) == (0, 146, 0)
+
+    def test_parses_prerelease_suffix_by_leading_numbers(self, monkeypatch):
+        class _Result:
+            stdout = "codex-cli 0.147.0-alpha.6.3\n"
+
+        monkeypatch.setattr(mcp_bridge.subprocess, "run", lambda *a, **kw: _Result())
+        assert mcp_bridge._codex_cli_version("codex", ".", {}) == (0, 147, 0)
+
+    def test_returns_none_on_subprocess_error(self, monkeypatch):
+        import subprocess as sp
+
+        def _boom(*a, **kw):
+            raise sp.TimeoutExpired(cmd="codex", timeout=5)
+
+        monkeypatch.setattr(mcp_bridge.subprocess, "run", _boom)
+        assert mcp_bridge._codex_cli_version("codex", ".", {}) is None
+
+    def test_returns_none_on_unparseable_output(self, monkeypatch):
+        class _Result:
+            stdout = "not a version string\n"
+
+        monkeypatch.setattr(mcp_bridge.subprocess, "run", lambda *a, **kw: _Result())
+        assert mcp_bridge._codex_cli_version("codex", ".", {}) is None
+
+
+class TestCodexResolveVersionGate:
+    """A codex-cli at/above `_CODEX_RESOLVE_SAFE_MIN_VERSION` skips the
+    resolve-and-disable defense-in-depth entirely (empirically verified
+    2026-08-05 against real codex-cli 0.144.1/0.145.0/0.146.0 binaries —
+    `-c mcp_servers={}` alone fully denies on all three, see the module
+    docstring). Below that floor, or when the version can't be determined,
+    the original conservative resolve-and-hard-abort behaviour applies
+    unchanged — that's what `isolated_mcp_file` exercises by default."""
+
+    def test_recent_version_skips_resolve_subprocess_entirely(self, isolated_mcp_file, monkeypatch):
+        monkeypatch.setattr(mcp_bridge, "_codex_cli_version", lambda *a: (0, 146, 0))
+        calls = []
+        monkeypatch.setattr(
+            mcp_bridge, "_codex_resolved_mcp_names", lambda *a: calls.append(a) or []
+        )
+        argv = mcp_bridge.mcp_argv_for_provider("codex", "codex", None, "proj")
+        assert calls == [], "resolve subprocess must not run for a verified-safe version"
+        assert argv == ["-c", "mcp_servers={}", "-c", "features.plugins=false"]
+
+    def test_recent_version_never_hard_aborts_even_if_resolve_would_fail(
+        self, isolated_mcp_file, monkeypatch
+    ):
+        # Prove the skip is unconditional: even a resolve function that
+        # would raise never gets a chance to, because it's never called.
+        monkeypatch.setattr(mcp_bridge, "_codex_cli_version", lambda *a: (0, 146, 0))
+
+        def _boom(*args):
+            raise mcp_bridge.McpResolutionError("codex CLI timed out")
+
+        monkeypatch.setattr(mcp_bridge, "_codex_resolved_mcp_names", _boom)
+        argv = mcp_bridge.mcp_argv_for_provider("codex", "codex", None, "proj")
+        assert argv == ["-c", "mcp_servers={}", "-c", "features.plugins=false"]
+
+    def test_exact_floor_version_also_skips_resolve(self, isolated_mcp_file, monkeypatch):
+        monkeypatch.setattr(
+            mcp_bridge, "_codex_cli_version", lambda *a: mcp_bridge._CODEX_RESOLVE_SAFE_MIN_VERSION
+        )
+        calls = []
+        monkeypatch.setattr(
+            mcp_bridge, "_codex_resolved_mcp_names", lambda *a: calls.append(a) or []
+        )
+        mcp_bridge.mcp_argv_for_provider("codex", "codex", None, "proj")
+        assert calls == []
+
+    def test_older_version_still_uses_resolve_path(self, isolated_mcp_file, monkeypatch):
+        monkeypatch.setattr(mcp_bridge, "_codex_cli_version", lambda *a: (0, 140, 0))
+        monkeypatch.setattr(mcp_bridge, "_codex_resolved_mcp_names", lambda *a: ["inherited_mcp"])
+        argv = mcp_bridge.mcp_argv_for_provider("codex", "codex", None, "proj")
+        assert "-c" in argv and "mcp_servers.inherited_mcp.enabled=false" in argv
+
+    def test_older_version_still_hard_aborts_on_resolve_failure(
+        self, isolated_mcp_file, monkeypatch
+    ):
+        monkeypatch.setattr(mcp_bridge, "_codex_cli_version", lambda *a: (0, 140, 0))
+
+        def _boom(*args):
+            raise mcp_bridge.McpResolutionError("codex CLI timed out")
+
+        monkeypatch.setattr(mcp_bridge, "_codex_resolved_mcp_names", _boom)
+        with pytest.raises(mcp_bridge.McpResolutionError):
+            mcp_bridge.mcp_argv_for_provider("codex", "codex", None, "proj")
+
+    def test_undetectable_version_falls_back_to_resolve_path(self, isolated_mcp_file, monkeypatch):
+        # isolated_mcp_file already forces this (_codex_cli_version -> None);
+        # asserted explicitly here so the gate's default-conservative
+        # direction has its own named test, not just an implicit fixture
+        # side effect.
+        monkeypatch.setattr(mcp_bridge, "_codex_resolved_mcp_names", lambda *a: ["inherited_mcp"])
+        argv = mcp_bridge.mcp_argv_for_provider("codex", "codex", None, "proj")
+        assert "mcp_servers.inherited_mcp.enabled=false" in argv
 
 
 class TestClaudeMcpArgv:
@@ -137,7 +280,14 @@ class TestClaudeMcpArgv:
         assert mcp_bridge.mcp_argv_for_provider("claude", "qa", None, "proj") == []
 
     def test_returns_strict_mcp_config_pair(self, isolated_mcp_file):
+        from agent_takkub import shared_dev_tools as sdt
+
         _write_master(isolated_mcp_file, {"playwright": {"command": "npx", "args": []}})
+        # QA has an explicit non-None policy, so the per-role variant must
+        # exist for shared_mcp_config_path_for_role to grant it anything —
+        # a policy with a missing variant now resolves to "no MCPs", not
+        # the master (docs/reviews/2026-08-05-graft-mcp-security.md M1).
+        sdt.regen_role_variants()
         argv = mcp_bridge.mcp_argv_for_provider("claude", "qa", None, "proj")
         assert argv[0] == "--mcp-config"
         assert argv[2] == "--strict-mcp-config"

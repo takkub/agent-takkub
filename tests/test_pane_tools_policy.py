@@ -498,11 +498,27 @@ class TestVariantIntegration:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
         assert set(data["mcpServers"]) == {"custom-tool"}
 
-    def test_role_without_any_policy_falls_back_to_master(
+    def test_registered_role_without_any_policy_denies_not_master(
         self, policy_file: Path, mcp_env: Path
     ) -> None:
+        # gemini is a REGISTERED role (roles.all_role_names()) with no
+        # built-in _ROLE_MCP_POLICY entry and no pane-tools.json override.
+        # It used to fall back to the master file (every shared MCP) —
+        # docs/reviews/2026-08-05-graft-mcp-security.md M1 closed that: a
+        # registered role with no explicit policy is deny-by-default, same
+        # as an explicit empty allowlist, not legacy passthrough.
         from agent_takkub import shared_dev_tools as sdt
 
         sdt._write_role_variants()
-        # gemini has no built-in entry and no file override → master passthrough.
-        assert sdt.shared_mcp_config_path_for_role("gemini") == str(mcp_env)
+        assert sdt.shared_mcp_config_path_for_role("gemini") is None
+
+    def test_unregistered_role_name_still_falls_back_to_master(
+        self, policy_file: Path, mcp_env: Path
+    ) -> None:
+        # A name the cockpit has never registered at all (typo, stale
+        # config) is not a policy gap — `role_mcp_allowlist` returns None
+        # for it and the legacy master-passthrough contract still applies.
+        from agent_takkub import shared_dev_tools as sdt
+
+        sdt._write_role_variants()
+        assert sdt.shared_mcp_config_path_for_role("totally-unregistered-role-xyz") == str(mcp_env)
