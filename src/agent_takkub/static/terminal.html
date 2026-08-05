@@ -116,7 +116,9 @@
 
     // ------------------------------------------------------------------
     // Key Handling & Custom Key Event Interceptors (registered synchronously
-    // at term.open time so no keystrokes are missed during WebChannel boot)
+    // at term.open time; keystrokes typed before the QWebChannel bridge
+    // connects are queued in pendingKeystrokes and flushed in order once
+    // it does — see the QWebChannel constructor callback below).
     // ------------------------------------------------------------------
     let bridge = null;
     let inputLocked = false;
@@ -124,41 +126,62 @@
     let lastEmittedTime = 0;
     let pendingCharText = '';
     let isComposing = false;
+    let pendingKeystrokes = [];
+    // Python-set ESC+CR escape (ProviderSpec.multiline_newline_seq, #149) this
+    // pane's provider accepts for a Shift+Enter multiline newline. null until
+    // AgentPane.attach_session calls termSetNewlineSeq — and stays null for
+    // any provider whose TUI toolkit isn't confirmed safe for it (e.g. codex's
+    // ratatui treats a bare ESC as interrupt/clear-composer, not a no-op).
+    let newlineSeq = null;
+    // macOS CapsLock doubles as a language-switch key on some layouts; on
+    // Windows/Linux it's just CapsLock and blocking it has no benefit, only
+    // the side-effect of nuking in-flight IME composition state (#149).
+    const IS_MAC = /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent || '');
 
     term.onData((data) => {
       lastEmittedText = data;
       lastEmittedTime = Date.now();
       pendingCharText = '';
       if (inputLocked) return;  // pane is input-locked — swallow keystrokes
-      if (bridge && bridge.sendInput) bridge.sendInput(data);
+      if (bridge && bridge.sendInput) {
+        bridge.sendInput(data);
+      } else {
+        pendingKeystrokes.push(data);  // bridge not connected yet — flush on connect
+      }
     });
 
     const helperTextarea = document.querySelector('.xterm-helper-textarea');
 
-    // 1. Intercept Shift+Enter, Alt+Enter, Cmd+Enter on Mac & Bluetooth keyboards
+    // 1. Intercept Shift+Enter / Alt+Enter (multiline newline). Ctrl/Cmd+Enter
+    // are intentionally left alone — they still submit via xterm's native '\r',
+    // matching every other terminal's convention and the pre-#149 behavior.
     term.attachCustomKeyEventHandler((ev) => {
       const isEnter = (ev.key === 'Enter' || ev.code === 'Enter' || ev.code === 'NumpadEnter' || ev.keyCode === 13) &&
                       ev.keyCode !== 229 && ev.key !== 'Process';
-      if (isEnter && (ev.shiftKey || ev.altKey || ev.ctrlKey || ev.metaKey)) {
+      if (isEnter && (ev.shiftKey || ev.altKey)) {
+        if (!newlineSeq) return true;  // provider not confirmed for ESC+CR — fall through to native '\r'
         ev.preventDefault(); // Prevent default browser newline insertion into helper textarea
         if (ev.type === 'keydown') {
           lastEmittedTime = Date.now();
           if (helperTextarea) helperTextarea.value = ''; // Clear leftover text in textarea
 
           if (!inputLocked && bridge && bridge.sendInput) {
-            bridge.sendInput('\x1b\r');  // ESC + Return: native Ink/Claude multiline newline
+            bridge.sendInput(newlineSeq);
           }
         }
         return false; // Return false for BOTH keydown and keyup so xterm.js never sends \r
       }
 
-      // 2. Intercept CapsLock ONLY for layout toggle (do NOT intercept Backquote / keyCode 192)
-      const isCapsLock = (
+      // 2. Intercept CapsLock ONLY for layout toggle, macOS only (do NOT
+      // intercept Backquote / keyCode 192).
+      const isCapsLock = IS_MAC && (
         ev.key === 'CapsLock' || ev.code === 'CapsLock' || ev.keyCode === 20
       );
 
       if (isCapsLock) {
-        if (helperTextarea) helperTextarea.value = ''; // Ensure textarea is clean
+        // Don't nuke in-flight IME composition state (#149) — only clear when
+        // nothing is being composed.
+        if (helperTextarea && !isComposing) helperTextarea.value = '';
         return false; // Block xterm from buffering caps
       }
 
@@ -273,6 +296,13 @@
     new QWebChannel(qt.webChannelTransport, (channel) => {
       bridge = channel.objects.bridge;
 
+      // Flush any keystrokes typed before the bridge connected, in order.
+      if (pendingKeystrokes.length) {
+        pendingKeystrokes.splice(0).forEach((d) => {
+          if (bridge && bridge.sendInput) bridge.sendInput(d);
+        });
+      }
+
       // resize → tell PTY new cols/rows
       const reportResize = () => {
         if (bridge && bridge.resize) bridge.resize(term.cols, term.rows);
@@ -346,6 +376,13 @@
         term.options.cursorStyle = inputLocked ? 'underline' : 'block';
       } catch (e) {}
       if (document.body) document.body.classList.toggle('input-locked', inputLocked);
+    };
+
+    // Set/clear the provider's confirmed ESC+CR multiline-newline escape
+    // (ProviderSpec.multiline_newline_seq, #149). null disables interception —
+    // Shift+Enter then falls through to xterm's native '\r'.
+    window.termSetNewlineSeq = function (seq) {
+      newlineSeq = (typeof seq === 'string' && seq) ? seq : null;
     };
 
     window.termClear = function () {
