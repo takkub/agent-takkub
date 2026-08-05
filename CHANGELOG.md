@@ -4,6 +4,24 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.44] - 2026-08-05
+
+### Added (เพิ่ม)
+- **Shift+Enter / Alt+Enter ขึ้นบรรทัดใหม่ได้ในช่องพิมพ์ของ pane** (PR #149 โดย [@than-aa](https://github.com/than-aa) ทดสอบบน Mac จริง) — เดิมกดแล้ว submit ทันทีเหมือน Enter ธรรมดา ต้องพิมพ์ multiline ผ่านวิธีอ้อม
+  - ทำงานแบบ **provider-aware** ผ่าน field ใหม่ `ProviderSpec.multiline_newline_seq`: claude / gemini (Ink TUI — ESC เปล่าเป็น no-op) ได้ `ESC+CR` · **codex ไม่ intercept** (ratatui ตีความ ESC เป็น interrupt/ล้างช่องพิมพ์ — จะพังแทน) · opencode/kimi/cursor ยังไม่ยืนยัน toolkit → ไม่ intercept เช่นกัน = พฤติกรรมเดิม 100%
+  - Ctrl+Enter / Cmd+Enter **ไม่ถูกแตะ** — ยัง submit ตามเดิมทุก pane
+- **แก้ Mac IME/ภาษาไทยกินตัวอักษรหลังสลับภาษา** (PR #149) — เพิ่ม fallback ผ่าน helper textarea จับตัวอักษรที่ xterm.js ทิ้งหลัง CapsLock/สลับ layout (Cocoa NSTextInput) พร้อม guard ครบ: ไม่ flush ระหว่าง IME composition (จีน/ญี่ปุ่น/เกาหลี/ไทย), CapsLock intercept เฉพาะ macOS, ตัวอักษรที่พิมพ์ก่อน bridge ต่อเสร็จถูก queue ไว้ flush ตามลำดับ (เดิมหายเงียบ)
+
+### Fixed (แก้)
+- **แก้ 3 blocker ที่เจอตอนรีวิว PR #149 ก่อน merge** (รีวิวเต็ม: `docs/reviews/2026-08-04-pr149-mac-ime-shift-enter.md`) — พิมพ์ backquote/`~` ไม่ได้ทุก OS (xterm custom handler คืน false โดยไม่ `preventDefault` ตัวอักษรค้างใน textarea), IME ส่งข้อความที่ compose ไม่เสร็จเข้า PTY, Shift+Enter ทิ้ง `\n` ค้างจนปิด fallback ของตัวเอง · และ blocker รอบสอง: method ใหม่ถูกแทรกกลาง `__init__` ของ `terminal_widget.py` ทำ pane เปิดมาจอว่าง (CI จับไม่ได้เพราะ GUI ไม่ construct ใน headless — เพิ่ม structural test แบบ AST กันซ้ำแล้ว)
+
+### Changed (เปลี่ยน) — token reduction wave 3 (ลดต้นทุนเปิด pane)
+- **Lead context ลด −53%** (~15.4k → ~7.2k token โดยประมาณ) — cockpit CLAUDE.md ตัดจาก ~12.1k เหลือ ~4k โดยย้ายตัวอย่าง/reference ทั้งหมดไป `docs/lead/cli-reference.md` + `docs/lead/patterns.md` ให้อ่าน on-demand · กฎ/สัญญาพฤติกรรมอยู่ครบ
+- **role memory ต่อ pane โดนคุมขนาดจริงจัง** — entry ที่ agent เขียนยาวเกิน 600 ตัวอักษร (เคยเจอ paste done-report ทั้งย่อหน้า ~1,500 token ต่อ bullet) ถูกตัดเหลือประโยคแรกอัตโนมัติตอน spawn · budget ต่อไฟล์ลด 16k → 6k bytes · header ระบุกฎ "entry ละไม่เกิน 2-3 บรรทัด" กันที่ต้นทาง
+- **`.claude/agents/qa.md` ตัดจาก ~4.7k → ~2.6k token** (ยาวผิดปกติเกือบ 2 เท่าของ role อื่น) — พฤติกรรมครบ: verdict rubric, mb surface, shard mode, blocked protocol
+- **snapshot `CLAUDE.spawn-*.md` เก่าถูกเก็บกวาดอัตโนมัติ** ตอน spawn (เก็บ 3 ตัวล่าสุดของ pane ที่ปิดแล้ว ไม่แตะ pane ที่เปิดอยู่)
+- **ถอด notebooklm MCP ออกจาก Lead** (แทบไม่ได้ใช้ — ลด ~20 tools + instruction block ทุก session)
+
 ## [1.0.43] - 2026-08-04
 
 ### Fixed (แก้)
