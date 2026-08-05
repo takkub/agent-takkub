@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 135,
+  "module_count": 136,
   "modules": [
     {
       "module": "agent_takkub",
@@ -147,6 +147,18 @@
       "fan_out": 1
     },
     {
+      "module": "agent_takkub.bm25_search",
+      "imports": [
+        "agent_takkub.chatlog_scanner",
+        "agent_takkub.role_memory"
+      ],
+      "imported_by": [
+        "agent_takkub.cli"
+      ],
+      "fan_in": 1,
+      "fan_out": 2
+    },
+    {
       "module": "agent_takkub.browser_chrome",
       "imports": [
         "agent_takkub._win_console",
@@ -166,10 +178,11 @@
         "agent_takkub.config"
       ],
       "imported_by": [
+        "agent_takkub.bm25_search",
         "agent_takkub.cli",
         "agent_takkub.orchestrator"
       ],
-      "fan_in": 2,
+      "fan_in": 3,
       "fan_out": 1
     },
     {
@@ -211,6 +224,7 @@
     {
       "module": "agent_takkub.cli",
       "imports": [
+        "agent_takkub.bm25_search",
         "agent_takkub.chatlog_scanner",
         "agent_takkub.codex_helper",
         "agent_takkub.config",
@@ -237,7 +251,7 @@
       ],
       "imported_by": [],
       "fan_in": 0,
-      "fan_out": 23
+      "fan_out": 24
     },
     {
       "module": "agent_takkub.cli_server",
@@ -1235,9 +1249,10 @@
         "agent_takkub.config"
       ],
       "imported_by": [
+        "agent_takkub.bm25_search",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 1
     },
     {
