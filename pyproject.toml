@@ -183,6 +183,7 @@ forbidden_modules = [
     "agent_takkub.token_meter",
     "agent_takkub.limit_status",
     "agent_takkub.chatlog_scanner",
+    "agent_takkub.bm25_search",
     "agent_takkub.logs_panel",
     "agent_takkub.project_rules",
     "agent_takkub.role_memory",

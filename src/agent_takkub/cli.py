@@ -1065,12 +1065,11 @@ def cmd_release(args: argparse.Namespace) -> dict:
 
 
 def cmd_search(args: argparse.Namespace) -> dict:
-    """Pure read-only grep across `~/.claude/projects/<*>/<uuid>.jsonl`.
+    """Ranked (BM25) search across `~/.claude/projects/<*>/<uuid>.jsonl` +
+    role-memory archives — `--grep` forces the old plain-substring path.
     Does NOT go through the orchestrator's TCP socket — search is a
     passive query and works whether the cockpit is running or not."""
     from datetime import datetime, timedelta
-
-    from .chatlog_scanner import search_sessions
 
     since: datetime | None = None
     if getattr(args, "days", None):
@@ -1080,12 +1079,19 @@ def cmd_search(args: argparse.Namespace) -> dict:
     if since is None and not getattr(args, "all", False):
         since = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 
-    hits = search_sessions(
-        args.query,
-        project_filter=args.project,
-        since=since,
-        limit=args.limit,
-    )
+    if getattr(args, "grep", False):
+        from .chatlog_scanner import search_sessions
+
+        hits = search_sessions(
+            args.query, project_filter=args.project, since=since, limit=args.limit
+        )
+        used_bm25 = False
+    else:
+        from .bm25_search import search as bm25_search
+
+        hits, used_bm25 = bm25_search(
+            args.query, project_filter=args.project, since=since, limit=args.limit
+        )
     if not hits:
         return {"ok": True, "msg": f"no matches for {args.query!r}"}
     for h in hits:
@@ -1094,14 +1100,18 @@ def cmd_search(args: argparse.Namespace) -> dict:
         ts_short = ts.replace("T", " ")[:19] if ts else "(no ts)"
         proj = h.get("project") or "?"
         role = h.get("role") or "?"
-        snippet = h.get("snippet") or ""
+        line = h.get("line")
+        snippet = (f"L{line}: " if line else "") + (h.get("snippet") or "")
+        score_prefix = f"[{h['score']:.2f}] " if used_bm25 and "score" in h else ""
         # Project folder names are encoded — show the recognisable
         # tail so the line stays readable.
         proj_tail = proj.split("-")[-1] if "-" in proj else proj
-        print(f"  {proj_tail:18s} {ts_short}  {role:9s}  {snippet}")
+        print(f"  {score_prefix}{proj_tail:18s} {ts_short}  {role:9s}  {snippet}")
+    mode = "bm25" if used_bm25 else "grep"
     return {
         "ok": True,
-        "msg": f"{len(hits)} match(es)" + (" (limit reached)" if len(hits) == args.limit else ""),
+        "msg": f"{len(hits)} match(es) ({mode})"
+        + (" (limit reached)" if len(hits) == args.limit else ""),
     }
 
 
@@ -1866,9 +1876,9 @@ def main(argv: list[str] | None = None) -> int:
 
     sse = sub.add_parser(
         "search",
-        help="grep past Claude Code conversations across all projects",
+        help="BM25-ranked search across past Claude Code conversations (+ role-memory archives)",
     )
-    sse.add_argument("query", help="substring to grep for (case-insensitive)")
+    sse.add_argument("query", help="text to search for (BM25-ranked; case-insensitive)")
     sse.add_argument(
         "--project",
         default=None,
@@ -1890,6 +1900,11 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=20,
         help="max hits to print (default: 20)",
+    )
+    sse.add_argument(
+        "--grep",
+        action="store_true",
+        help="force the old plain-substring grep path instead of BM25 ranking",
     )
     sse.set_defaults(func=cmd_search)
 
