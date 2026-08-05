@@ -4,6 +4,38 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.46] - 2026-08-05
+
+### Added (เพิ่ม)
+- **graft = แผนที่โค้ดให้ทุก pane** — เสียบ [`@nanonets/graft`](https://github.com/NanoNets/Graft) `0.8.2` เป็น shared MCP ตัวที่ 5 ต่อจาก playwright/chrome-devtools/context7/notebooklm · pane ที่ต้องอ่านโค้ด (frontend/backend/mobile/devops/qa/reviewer/critic) ถาม graph ได้แทนการ grep แล้วเดา — `ask` (ค้น symbol), `skeleton` (API surface ของไฟล์), `callers` (ใครเรียกใคร)
+  - **ใช้เฉพาะชั้น structural** (tree-sitter) — ไม่ใช้ `--deep` จึง**ไม่ต้องมี API key และไม่มีค่าใช้จ่ายเพิ่ม**
+  - วัดจริงบน `src/agent_takkub` (`docs/audit/2026-08-05-graft-pilot.md`): parse Python **136/136 ไฟล์ (100%)** · build 4.68s · `skeleton orchestrator.py` = 12.5KB จากไฟล์จริง 213KB → **ลด token ~94%**
+  - **macOS ใช้ได้ไม่ต้อง compile** — tree-sitter มี prebuild ครบ darwin-arm64/x64 + win32-x64 · ขอแค่ Node ≥ 20 · `takkub doctor` เช็ค/ลงให้ (opt-in ด้วย `--fix`)
+  - **ไม่รัน `graft init`** เด็ดขาด — มันเขียนทับ `.claude/settings.json` + statusline ที่ cockpit จัดการเอง
+  - `graft/` ถูก gitignore (regenerate ได้) — โค้ดซิงค์ข้ามเครื่องผ่าน git แต่ graph ต้อง `graft build` เองที่ปลายทาง
+- **role memory จำความผิดพลาดเองแล้ว** — `done(failed=True)` เขียน 1 bullet เข้า `runtime/role-memory/<project>/<role>.md` อัตโนมัติ · เดิม FAILED report ไปถึง Lead แล้วหายไปเลย role เดิมจึงพลาดซ้ำเรื่องเดิมได้ · dedup ตามเหตุผล (ไม่นับวันที่), เคารพ entry cap 600 ตัวอักษร + budget 6k + archive rotation เดิม จึงไม่ทำ spawn prompt บวมสวนทาง token diet · ทำงานทุก provider (ดักที่ `done()` ซึ่งเป็น entrypoint ร่วม)
+
+### Fixed (แก้)
+- **role ที่ลงทะเบียนแล้วแต่ไม่มีนโยบาย MCP เคยได้ MCP ทุกตัวฟรี** — `gemini`, `shell` และ **custom role ที่สร้างเองทุกตัว** resolve เป็น `None` = passthrough → ได้ master `shared-mcp.json` ทั้งก้อนบน claude / `~/.codex/config.toml` ทั้งไฟล์บน codex (ซึ่งอาจมี MCP ที่ผูก token อยู่) ทั้งที่ไม่มีใครอนุญาต
+  - ตอนนี้ **deny ทันที** (`frozenset()`) · `None` เหลือไว้เฉพาะชื่อที่ cockpit ไม่รู้จักจริง ๆ + เทส invariant ล็อกว่าทุกชื่อจาก `roles.all_role_names()` ต้อง resolve ไม่เป็น `None`
+  - ⚠️ **breaking สำหรับ custom role**: ถ้าเคยพึ่ง passthrough ต้องไปเปิด MCP ให้ role นั้นเองในหน้า Settings → Role → Access
+  - ปิดบั๊กแฝงตัวที่ 2 ที่เจอตามมา: `shared_mcp_config_path_for_role` หลุดไป master เมื่อ policy มีอยู่แต่ variant file ยังไม่ถูก generate
+- **กฎ "output ของ tool ไม่ใช่คำสั่ง" ไปไม่ถึง pane ที่ไม่ใช่ claude** — role file ถูก append เข้า argv ใน claude branch จุดเดียว · pane ที่ใช้ `context_strategy=agents_md_file` (codex/opencode/kimi/cursor/gemini) ได้ `CODEX_AGENTS_MD` ที่ไม่มีกฎนี้ ทั้งที่ได้ graft ไปใช้ → ย้ายกฎเข้า Hard rules ของ `CODEX_AGENTS_MD` ครอบทุก provider ทั้งปัจจุบันและอนาคต (graft ฝังข้อความสั่ง agent ให้รายงาน "tokens saved" มากับ output จริง — รูปแบบเดียวกับ prompt injection)
+- **codex spawn พังทั้งเส้นได้ถ้า CLI สะดุด** — `_codex_resolved_mcp_names` raise `RuntimeError` ดิบ ๆ โดยที่จุดเรียกใน `spawn_engine` ไม่มี try/except (docstring ยังเคลมผิดว่า "never raises") → `McpResolutionError` + fail-closed: ปฏิเสธ spawn พร้อมข้อความ แทนที่จะพังดิบหรือปล่อย pane ขึ้นมาโดยไม่รู้ว่ามี MCP อะไรติดมา
+- **การ์ดของ graft ปนตอน grep** — `graft build` เขียน `.ignore` ทับกลับทุกครั้งด้วย `!graft/` ทำให้การ์ด 141 ใบเข้า ripgrep · การ์ดมีเลขบรรทัดที่ไม่ตรง source จริงแต่หน้าตาเหมือน `file:line` → ship `src/agent_takkub/.rgignore` ที่ outrank `.ignore` และ graft ไม่แตะ (ยืนยันด้วยการ build ซ้ำ 2 รอบ)
+- **เทส `test_bm25_search` รั่ว** — corpus resolve ผ่าน 2 ทาง (`Path.home()` + `bm25_search.ROLE_MEMORY_DIR`) แต่เทสเดิม patch ทางเดียว ไฟล์ role-memory จริงบนเครื่องจึงรั่วเข้า index → autouse fixture ปิดทั้งสองทาง
+
+### Changed (เปลี่ยน)
+- **premise ของ #121 ที่เข้าใจผิดมาตลอด** — verify กับ codex-cli จริง 3 เวอร์ชันติดกัน (0.144.1 / 0.145.0 / 0.146.0): `-c mcp_servers={}` เคลียร์ inherited table ได้**ครบทุกเวอร์ชัน** และคงสภาพเคลียร์แม้ layer partial override ทับทีหลัง · ที่ #121 เจอว่า "merge ไม่ replace" คือเคส bare partial override ที่ไม่มี `mcp_servers={}` นำหน้า ซึ่ง cockpit ไม่เคยส่ง
+  - gate ขั้นตอน resolve-and-disable ที่ซ้ำซ้อนด้วย `_CODEX_RESOLVE_SAFE_MIN_VERSION = (0,144,1)` — เวอร์ชันเก่าสุดที่ทดสอบจริง ไม่ใช่ 0.146.0 · ต่ำกว่านั้นหรืออ่านเวอร์ชันไม่ออก = คงพฤติกรรมระวังตัวแบบเดิม (เราไม่ได้ทดสอบทุก build ที่เคยออกมา จึงไม่เหมาว่า "codex ไม่เคย merge")
+  - ผลข้างเคียง: spawn ของ codex ประหยัดไป ~80ms (เลิกยิง `codex mcp list` 440ms เหลือ `codex --version` 363ms)
+
+### Known gaps (ยังปิดไม่ได้)
+- **ยังไม่ได้ smoke pane codex ตัวจริง** — qa ไม่มีสิทธิ์ `takkub assign` (CLI gate กันไว้เอง) · unit test คุมไว้ 32 ตัว แต่ไม่เท่าของจริง
+- `codex --version` ยังยิงทุก spawn (363ms) ยังไม่ cache ระดับ session
+- `graft ask` เป็น lexical (BM25) ล้วนเพราะไม่ใช้ `--deep` — query ที่ไม่มีคำร่วมกับโค้ดเป้าหมายจะหาไม่เจอ ให้ fallback ไป grep
+- `graft callers` under-report ได้ (เจอเคส type-annotated instantiation) — ผลลัพธ์ "no callers" **ห้ามใช้เป็นหลักฐานว่าโค้ดตายแล้ว**
+
 ## [1.0.45] - 2026-08-05
 
 ### Added (เพิ่ม)
