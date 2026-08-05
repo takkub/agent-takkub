@@ -4,6 +4,22 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.45] - 2026-08-05
+
+### Added (เพิ่ม)
+- **`takkub search` เป็น BM25 ranking แล้ว** (#152) — เดิมเป็น grep ต้องเดาคำเป๊ะ · ตอนนี้ค้นแบบจัดอันดับความเกี่ยวข้อง (Okapi BM25) ข้าม session logs ทุกโปรเจค + role-memory archives พร้อม score/บรรทัดที่เจอ · **รองรับภาษาไทย**ด้วย character trigram (ไทยไม่มีวรรค — ไม่ต้องพึ่ง segmenter ภายนอก) · เขียนเองทั้งตัว **ไม่มี dependency ใหม่** · query สั้นเกิน/index พัง → ตกกลับ grep เดิมอัตโนมัติ, flag `--grep` บังคับโหมดเก่าได้
+- **role-memory L2 archive** (#151) — เดิม entry ที่โดนตัด/ทิ้งตอน curation (token diet) หายถาวร · ตอนนี้เนื้อเต็มถูกเก็บลง `<role>-archive.md` ข้างไฟล์เดิม (ประทับวันที่ ISO, cap 200k แบบ rotate ตัวเก่าสุดออก) — **ไม่ถูก inject เข้า pane** จึงไม่กระทบ token budget แต่ค้นกลับได้ผ่าน `takkub search` · header ของไฟล์ memory ชี้ archive ให้ agent รู้
+- **Evidence-cite check** — done note ของ verify roles (qa/reviewer/critic/designer) ที่สรุปลอยๆ โดยไม่อ้างหลักฐานเลย (ไม่มี path ของ report/shots/log และไม่มีผลรันจริงอย่าง "N passed"/"exit 0") จะถูก tag **`⚠ no evidence cited`** ให้ Lead เห็นใน done notice — เตือนอย่างเดียวไม่ block · เช็คที่ engine จึงไม่กิน token ของ pane, role files แตะเพียง 1–2 บรรทัด · reviewer ถูกเพิ่มเข้ากลุ่มที่ตรวจด้วย
+
+### Fixed (แก้)
+- **เครื่องที่ติดตั้งผ่าน npm ได้ CLAUDE.md ที่ pointer ด้วน** — CLAUDE.md หลัง token diet (1.0.44) อ้าง `docs/lead/cli-reference.md` / `docs/lead/patterns.md` รวม 6 จุด แต่ wheel ไม่เคย ship โฟลเดอร์ `docs/` เลย และต่อให้ ship มา path แบบ relative ก็ resolve ไม่ได้จาก cwd ของโปรเจค user (เครื่อง dev ไม่เจออาการเพราะ cwd คือ repo เอง)
+  - `setup.py` stage `docs/lead/*.md` เข้า wheel แล้ว + **build จะ fail ทันที**ถ้า CLAUDE.md อ้างไฟล์ docs/lead ที่ไม่มีจริง (กัน pointer ด้วนตั้งแต่ต้นทางทุก release ต่อไป)
+  - เครื่องติดตั้ง: ตอน render Lead context ระบบ rewrite `docs/lead/` เป็น absolute path ของสำเนาที่ ship มา — Lead เปิดอ่านได้จริง · เครื่อง dev พฤติกรรมเดิมไม่เปลี่ยน
+  - เพิ่ม assert เข้า installed-mode gate ใน CI (build + ติดตั้ง wheel จริงทั้ง Windows/macOS ทุก commit) — ช่องโหว่แบบนี้จะไม่หลุดอีก
+
+### Changed (เปลี่ยน)
+- **README ใหม่** — เพิ่มกลุ่ม feature "Token efficiency & memory" + "Reliability & diagnostics" (pull-on-demand context, role memory + archive, BM25 search, evidence-gated QA, doctor --live, Shift+Enter multiline พร้อมเครดิต [@than-aa](https://github.com/than-aa)) + อัปเดตตารางคำสั่ง — หน้าเดียวกันนี้แสดงทั้ง GitHub และ npm
+
 ## [1.0.44] - 2026-08-05
 
 ### Added (เพิ่ม)
