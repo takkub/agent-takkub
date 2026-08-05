@@ -33,15 +33,34 @@ npm install -g agent-takkub
 
 A single AI agent hits a wall on big work: context fills up, sub-tasks collide, and everything runs one-at-a-time. `agent-takkub` runs it like a **real engineering team** — a **Lead** you talk to, and specialist teammates it delegates to, each in its own isolated `claude` process, working **concurrently**.
 
+### Orchestration
+
 |  |  |
 | :-- | :-- |
 | 🧠 **Orchestrated teammates** | Converse with the Lead; it spawns, tasks, and manages specialist panes (`frontend`, `backend`, `qa`, `reviewer`, `devops`, `mobile`, …) on demand — only the roles a job actually needs. |
 | 🔀 **True parallelism** | `frontend` and `backend` build a feature at the same time; QA always verifies **last**, against the real running stack. |
 | 🌿 **Branch & worktree isolation** | Parallel teammates each work on their own git branch in an isolated worktree — no commit races, no dirty-state collisions. You merge when ready. |
 | 👥 **Fleet mode** | One toggle scales a role into a fleet (`frontend#1…#K`) sized to your machine — for many independent features or sharded test suites at once. |
+| 🧭 **Plan-first shards** | `takkub assign --role qa --plan --shards N` — a planner splits a big browser-QA sweep into N buckets before fanning out, instead of guessing an even split. |
 | 🖥️ **Steerable, always** | Every pane is a live `claude` shell. Watch output in real time, interrupt, or type straight into any teammate. |
 | 🗂️ **Multi-project tabs** | One isolated Lead per project — no cross-talk. |
 | 🔒 **100% local** | No SaaS middleware. Everything runs on your machine, on your logged-in Claude Code CLI. |
+
+### Token efficiency & memory
+
+|  |  |
+| :-- | :-- |
+| 📥 **Pull-on-demand context** | Reference docs, patterns, and CLI cheatsheets live outside the Lead's default prompt — it reads them only when a task needs them, instead of paying for them on every turn. |
+| 🧾 **Per-role memory + L2 archive** | Each teammate keeps a short, token-budgeted "learned notes" file; entries that get trimmed for space are archived (not deleted) to a searchable sibling file instead of being lost. |
+| 🔎 **BM25 search (`takkub search`)** | Full-text search over session logs and role-memory archives, ranked with Okapi BM25 — tokenizes both English words and Thai character trigrams, no external segmenter. |
+| ✅ **Evidence-gated QA/review** | A verify role's "done" report is checked for actual evidence (a file, a test run, an exit code) — reports with no evidence cited get flagged for the Lead instead of trusted at face value. |
+
+### Reliability & diagnostics
+
+|  |  |
+| :-- | :-- |
+| 🩺 **`takkub doctor --live`** | Checks the *running* cockpit's spawn queue, not just static config — catches a stuck queue that a config-only check would miss. |
+| ⌨️ **Multiline input that just works** | Shift+Enter / Alt+Enter add a newline instead of submitting, provider-aware (works on claude/gemini panes; skipped where the underlying TUI would misinterpret it) — includes a macOS IME fix for Thai/CJK input dropped after switching input languages. <sub>(community contribution by [@than-aa](https://github.com/than-aa))</sub> |
 
 ---
 
@@ -162,9 +181,11 @@ sequenceDiagram
 | `takkub assign --role qa --plan --shards 4 "…"` | Plan-first parallel browser QA (auto fan-out) |
 | `takkub worktree list / merge / clean` | Review + merge isolated branches |
 | `takkub send --to qa "…"` | Message a teammate (Lead CC’d) |
+| `takkub search "…"` | BM25-ranked search over session logs + role-memory archives (Thai + English) |
 | `takkub goal "…"` | Set a session goal injected into every task |
 | `takkub restart` | Restart the whole cockpit from the terminal |
 | `takkub doctor --fix` | Diagnose the environment + auto-repair (add `--install-providers` to also install missing provider CLIs) |
+| `takkub doctor --live` | Same checks, plus a live look at the running cockpit's spawn queue |
 | `takkub provider list` | Show every provider CLI, whether it's installed, and its model |
 | `takkub provider install <name>` | Install one provider CLI (Codex / OpenCode / Kimi) |
 | `takkub provider model <name> [<model>]` | Show or set the model a provider spawns with (`--clear` to reset) |
