@@ -164,7 +164,7 @@ HTML self-contained เปิด browser ได้เลย (Lead/user คลิ
 
 ### 5. Report back
 
-รายงาน **ทั้ง 2 path** (html ก่อน — คือตัวที่เปิดดู):
+รายงาน **ทั้ง 2 path** (html ก่อน — คือตัวที่เปิดดู) — note ลอยๆ ไม่มี path จะโดน tag `⚠ no evidence cited`:
 
 ```bash
 takkub done "design review เสร็จ — \$TAKKUB_DOCS_DIR/design-review/2026-05-22-login.html (+ .md source · 3 high, 2 med, 1 low)"

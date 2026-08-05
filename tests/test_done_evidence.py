@@ -5,8 +5,9 @@
 - done() scans the pane's artifacts dir (`runtime/exports/<date>/<project>/`,
   including `screenshots/`) for images newer than assign_ts and at least
   _EVIDENCE_SETTLE_SEC old, and appends a `📸 evidence: …` line to the note.
-- qa/critic/designer with zero new shots get a `⚠ no screenshot evidence`
-  warning instead; every other role stays silent.
+- qa/critic/designer/reviewer with zero new shots get a `⚠ no evidence cited`
+  warning instead, UNLESS the note itself cites a path-like or test-result
+  token (see `_EVIDENCE_CITE_RE`) — every other role stays silent.
 - `done --fail` gets the same evidence treatment as a clean done.
 """
 
@@ -134,9 +135,9 @@ class TestAssignTsCapture:
         captured = {}
         orig = Orchestrator._scan_done_evidence.__func__
 
-        def spy(cls, project_ns, from_role, assign_ts):
+        def spy(cls, project_ns, from_role, assign_ts, note=""):
             captured["assign_ts"] = assign_ts
-            return orig(cls, project_ns, from_role, assign_ts)
+            return orig(cls, project_ns, from_role, assign_ts, note)
 
         monkeypatch.setattr(Orchestrator, "_scan_done_evidence", classmethod(spy))
 
@@ -172,7 +173,7 @@ class TestEvidenceScanFiltering:
         result = Orchestrator._scan_done_evidence("proj", "qa", assign_ts)
 
         assert "stale.png" not in result
-        assert result == "⚠ no screenshot evidence"
+        assert result == "⚠ no evidence cited"
 
     def test_image_too_fresh_is_settling_and_ignored(self, orch, tmp_path):
         """A file modified within the last _EVIDENCE_SETTLE_SEC is treated as
@@ -198,7 +199,7 @@ class TestEvidenceScanFiltering:
 
         result = Orchestrator._scan_done_evidence("proj", "qa", assign_ts)
 
-        assert result == "⚠ no screenshot evidence"
+        assert result == "⚠ no evidence cited"
 
     def test_evidence_scanned_recursively_under_artifacts_dir(self, orch, tmp_path):
         """Not just screenshots/ — the whole per-project artifacts dir counts."""
@@ -234,7 +235,7 @@ class TestEvidenceScanFiltering:
 
     def test_missing_artifacts_dir_degrades_silently(self, orch, tmp_path):
         result = Orchestrator._scan_done_evidence("nonexistent-project", "qa", time.time() - 60)
-        assert result == "⚠ no screenshot evidence"
+        assert result == "⚠ no evidence cited"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -418,7 +419,7 @@ class TestDoneNoticeAppendFormat:
         assert "📸 evidence:" in captured[0]
         assert "login.png" in captured[0]
 
-    def test_warning_only_for_qa_critic_designer(self, orch, tmp_path, monkeypatch):
+    def test_warning_only_for_qa_critic_designer_reviewer(self, orch, tmp_path, monkeypatch):
         monkeypatch.setattr(orch_mod, "active_project", lambda: ("proj", {}))
         _mock_done(orch)
 
@@ -426,7 +427,7 @@ class TestDoneNoticeAppendFormat:
         _register_pane(orch, LEAD.name, proj, _make_alive_session())
 
         assign_ts = time.time() - 60
-        for role in ("qa", "critic", "designer", "backend", "devops", "reviewer"):
+        for role in ("qa", "critic", "designer", "reviewer", "backend", "devops"):
             _register_pane(orch, role, proj, _make_alive_session())
             orch._pane_state[f"{proj}::{role}"] = PaneState(assign_ts=assign_ts)
 
@@ -437,15 +438,85 @@ class TestDoneNoticeAppendFormat:
             lambda ns, notice, from_role=None, **kw: captured.__setitem__(from_role, notice),
         )
 
-        for role in ("qa", "critic", "designer", "backend", "devops", "reviewer"):
+        for role in ("qa", "critic", "designer", "reviewer", "backend", "devops"):
             orch.done(role, note="finished", project=proj)
 
-        for warn_role in ("qa", "critic", "designer"):
-            assert "⚠ no screenshot evidence" in captured[warn_role], warn_role
+        for warn_role in ("qa", "critic", "designer", "reviewer"):
+            assert "⚠ no evidence cited" in captured[warn_role], warn_role
 
-        for quiet_role in ("backend", "devops", "reviewer"):
-            assert "⚠ no screenshot evidence" not in captured[quiet_role], quiet_role
+        for quiet_role in ("backend", "devops"):
+            assert "⚠ no evidence cited" not in captured[quiet_role], quiet_role
             assert captured[quiet_role] == f"[{quiet_role} done] finished"
+
+    def test_note_citing_path_suppresses_warning(self, orch, tmp_path, monkeypatch):
+        """A warn-role note that cites a path-like/test-result token is
+        trusted at face value even when the screenshot scan finds nothing."""
+        monkeypatch.setattr(orch_mod, "active_project", lambda: ("proj", {}))
+        _mock_done(orch)
+
+        proj = "proj"
+        _register_pane(orch, LEAD.name, proj, _make_alive_session())
+        _register_pane(orch, "reviewer", proj, _make_alive_session())
+
+        assign_ts = time.time() - 60
+        orch._pane_state[f"{proj}::reviewer"] = PaneState(assign_ts=assign_ts)
+
+        captured: list[str] = []
+        monkeypatch.setattr(orch, "_notify_lead", lambda ns, notice, **kw: captured.append(notice))
+
+        orch.done("reviewer", note="reviewed, see docs/review-notes.md", project=proj)
+
+        assert captured
+        assert "⚠ no evidence cited" not in captured[0]
+        assert captured[0] == "[reviewer done] reviewed, see docs/review-notes.md"
+
+    def test_note_without_citation_gets_tagged(self, orch, tmp_path, monkeypatch):
+        """A warn-role note with no path/test-result reference and no scanned
+        files gets tagged, so Lead can see the claim is unsubstantiated."""
+        monkeypatch.setattr(orch_mod, "active_project", lambda: ("proj", {}))
+        _mock_done(orch)
+
+        proj = "proj"
+        _register_pane(orch, LEAD.name, proj, _make_alive_session())
+        _register_pane(orch, "qa", proj, _make_alive_session())
+
+        assign_ts = time.time() - 60
+        orch._pane_state[f"{proj}::qa"] = PaneState(assign_ts=assign_ts)
+
+        captured: list[str] = []
+        monkeypatch.setattr(orch, "_notify_lead", lambda ns, notice, **kw: captured.append(notice))
+
+        orch.done("qa", note="all good, ship it", project=proj)
+
+        assert captured
+        assert "⚠ no evidence cited" in captured[0]
+
+    def test_note_without_citation_but_scan_finds_files_still_gets_shots(
+        self, orch, tmp_path, monkeypatch
+    ):
+        """Filesystem evidence wins outright — a bare note doesn't suppress
+        the 📸 evidence line when the scan actually found something."""
+        monkeypatch.setattr(orch_mod, "active_project", lambda: ("proj", {}))
+        _mock_done(orch)
+
+        proj = "proj"
+        _register_pane(orch, LEAD.name, proj, _make_alive_session())
+        _register_pane(orch, "qa", proj, _make_alive_session())
+
+        assign_ts = time.time() - 60
+        orch._pane_state[f"{proj}::qa"] = PaneState(assign_ts=assign_ts)
+        shots = _shot_dir(tmp_path, proj)
+        _touch_old_enough(shots / "smoke.png", assign_ts, age=10)
+
+        captured: list[str] = []
+        monkeypatch.setattr(orch, "_notify_lead", lambda ns, notice, **kw: captured.append(notice))
+
+        orch.done("qa", note="all good, ship it", project=proj)
+
+        assert captured
+        assert "📸 evidence:" in captured[0]
+        assert "smoke.png" in captured[0]
+        assert "⚠ no evidence cited" not in captured[0]
 
     def test_done_fail_also_gets_evidence(self, orch, tmp_path, monkeypatch):
         """`done --fail` attaches evidence the same way a clean done does."""

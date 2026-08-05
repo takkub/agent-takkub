@@ -203,7 +203,19 @@ _EVIDENCE_STAT_RETRY_SLEEP_SEC = 0.05
 _EVIDENCE_MAX_FILES = 10
 # Roles expected to always produce fresh evidence; a done with none gets a
 # warning line (everyone else silently gets nothing when they have no shots).
-_EVIDENCE_WARN_ROLES = ("qa", "critic", "designer")
+_EVIDENCE_WARN_ROLES = ("qa", "critic", "designer", "reviewer")
+
+# Issue #evidence-cite: path-like or test-result tokens that count as a note
+# "citing" evidence even when the screenshot scan above found nothing (e.g. a
+# reviewer citing a log path, or qa citing a pytest summary line). Engine
+# check only — never blocks, just widens what counts as "cited" before the
+# warn-role note gets tagged.
+_EVIDENCE_CITE_RE = re.compile(
+    r"(?:docs/|runtime/|tests/|\$TAKKUB_ARTIFACTS_DIR|\$SHOT_DIR"
+    r"|\.(?:md|png|jpe?g|log|json|txt)\b"
+    r"|\b\d+\s+passed\b|\bexit\s*0\b)",
+    re.IGNORECASE,
+)
 
 # Windows Open-With dialog tripwire (issue #104): a shell one-liner that
 # mangles a bare file path into command position gets ShellExecute'd by
@@ -1886,15 +1898,19 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         return found
 
     @classmethod
-    def _scan_done_evidence(cls, project_ns: str, from_role: str, assign_ts: float) -> str:
+    def _scan_done_evidence(
+        cls, project_ns: str, from_role: str, assign_ts: float, note: str = ""
+    ) -> str:
         """Scan the pane's artifacts dir for screenshots newer than `assign_ts`.
 
-        Returns a `'📸 evidence: <paths>'` suffix to append to the done notice,
-        a bare `'⚠ no screenshot evidence'` warning when `from_role` is one of
-        the screenshot-expected roles (qa/critic/designer) and none were
-        found, or `''` otherwise. Degrades silently on any filesystem hiccup —
-        a missing/unreadable artifacts dir just yields no evidence, never an
-        exception (issue #5).
+        Returns a `'📸 evidence: <paths>'` suffix to append to the done notice
+        when fresh screenshot files were found. Otherwise, for a warn-role
+        (qa/critic/designer/reviewer): if `note` itself cites evidence (a
+        path-like or test-result token, see `_EVIDENCE_CITE_RE`) returns `''`
+        — the note is trusted at face value — else returns a bare
+        `'⚠ no evidence cited'` warning. Everyone else silently gets `''`.
+        Degrades silently on any filesystem hiccup — a missing/unreadable
+        artifacts dir just yields no evidence, never an exception (issue #5).
 
         Issue #109: a flat scan over the whole project artifacts dir attaches
         *any* pane's screenshot to *any* other pane's done() if the mtimes
@@ -1929,7 +1945,11 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             paths = ", ".join(str(p).replace("\\", "/") for _, p in newest)
             suffix = " (shared dir)" if shared else ""
             return f"📸 evidence: {paths}{suffix}"
-        return "⚠ no screenshot evidence" if base_role in _EVIDENCE_WARN_ROLES else ""
+        if base_role not in _EVIDENCE_WARN_ROLES:
+            return ""
+        if note and _EVIDENCE_CITE_RE.search(note):
+            return ""
+        return "⚠ no evidence cited"
 
     @staticmethod
     def _build_verify_fail_handoff(from_role: str, note: str) -> str:
@@ -2036,7 +2056,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         # aggregate, the decision note) carries it — `done --fail` gets
         # evidence exactly the same way a clean done does.
         raw_note = note
-        evidence_line = self._scan_done_evidence(project_ns, from_role, had_assign_ts)
+        evidence_line = self._scan_done_evidence(project_ns, from_role, had_assign_ts, raw_note)
         if evidence_line:
             note = f"{note}\n{evidence_line}" if note else evidence_line
 

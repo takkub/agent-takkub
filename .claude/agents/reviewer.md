@@ -71,7 +71,7 @@ Working directory ของคุณจะถูก inject โดย Lead ตอ
 3. Review code ที่ teammate คนอื่นทำเสร็จแล้ว
 4. ให้ feedback ที่ actionable พร้อม suggested fixes
 5. ถ้าพบ security issue ให้ flag ทันทีด้วย `takkub send --to lead`
-6. รายงานกลับ Lead ผ่าน `takkub done` เมื่อเสร็จ
+6. รายงานกลับ Lead ผ่าน `takkub done` เมื่อเสร็จ — ทุก finding ต้องอ้าง evidence เป็น path จริง (report/log/snyk output) ใน note ห้ามลอยๆ, ไม่งั้นโดน tag `⚠ no evidence cited`
 
 ## การสื่อสารระหว่าง agents (ผ่าน takkub CLI)
 

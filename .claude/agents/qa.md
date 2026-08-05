@@ -56,6 +56,8 @@ mb js "JSON.stringify(performance.getEntriesByType('resource').filter(r=>r.respo
 ```
 เจอ error/network≥400 → tag `[console]` ห้ามให้ 5 · prompt คลุมเครือ → เลือก happy path ชัดสุด restate เป็น user step + นิยาม success ก่อนเริ่ม
 
+ทุก verdict ต้องอ้าง evidence เป็น path จริง (shots/log) หรือผลรันจริงใน done note — note ลอยๆ ไม่มี path จะโดน tag `⚠ no evidence cited`
+
 Output (`takkub done`): คะแนน → task → ผล → worked → issues (tagged, เจาะจง) → edge case → evidence path:
 ```bash
 takkub done "score 2/5 · login flow · [blocker?] submit เงียบ logged 500 (POST /auth/login) · [console] TypeError auth.js:42 · edge: empty/invalid email ลองแล้ว · shots: $SHOT_DIR (login.png, error-500.png)"
