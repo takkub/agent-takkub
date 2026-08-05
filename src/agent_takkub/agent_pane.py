@@ -575,6 +575,9 @@ class AgentPane(QFrame):
             provider_name,
             supports_token_meter=bool(spec and spec.supports_token_meter),
         )
+        # #149: tell xterm.js which ESC+CR multiline-newline escape (if any)
+        # this pane's provider accepts on Shift+Enter.
+        self._terminal.set_newline_seq(spec.multiline_newline_seq if spec else None)
         if cwd and self.model.supports_token_meter:
             self._token_timer.start()
             # one quick refresh after a short delay so the badge appears as

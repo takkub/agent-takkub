@@ -102,3 +102,69 @@ class TestIncrementalDecoder:
 # whose import-order coupling was brittle in the full suite. The unit tests
 # above exercise the exact codecs.IncrementalDecoder instance that
 # TerminalWidget._utf8_decoder uses, so behavior coverage is identical.
+
+
+# ---------------------------------------------------------------------------
+# __init__ order regression (PR #149 review blocker #1): focusInEvent/
+# mousePressEvent were once spliced into the middle of __init__, so every
+# statement after them (the UTF-8 decoder, _pending_writes, _input_locked,
+# ..., down to the final self._view.load(...)) was silently reparented as
+# the BODY of mousePressEvent instead of __init__ — dead code that never
+# runs at construction time. A real QWebEngineView construction was tried
+# here first to catch this end-to-end, but it hard-aborts the whole pytest
+# process (exit 127) even under QT_QPA_PLATFORM=offscreen on this Windows
+# box — exactly the class of crash test_terminal_widget.py's own removal
+# note above and test_keepalive_suspend.py already warn about, confirmed by
+# actually reproducing it. An AST check instead inspects the *source
+# structure* of __init__: if the buggy splice reappears, the attribute
+# assignments below stop being descendants of the __init__ FunctionDef node
+# (they become descendants of a sibling method instead) and this goes red —
+# without ever importing Qt or constructing anything.
+# ---------------------------------------------------------------------------
+
+
+class TestTerminalWidgetInitStructure:
+    def _init_body_attrs(self) -> set[str]:
+        import ast
+        import inspect
+
+        from agent_takkub import terminal_widget
+
+        source = inspect.getsource(terminal_widget.TerminalWidget)
+        cls_node = ast.parse(source).body[0]
+        init_node = next(
+            n for n in cls_node.body if isinstance(n, ast.FunctionDef) and n.name == "__init__"
+        )
+        return {
+            node.attr
+            for node in ast.walk(init_node)
+            if isinstance(node, ast.Attribute)
+            and isinstance(node.ctx, ast.Store)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "self"
+        }
+
+    def test_init_assigns_attributes_past_the_bridge_setup(self) -> None:
+        assigned = self._init_body_attrs()
+        for attr in ("_page_ready", "_utf8_decoder", "_input_locked", "_pending_writes"):
+            assert attr in assigned, (
+                f"TerminalWidget.__init__ never assigns self.{attr} — did "
+                "focusInEvent/mousePressEvent get spliced back into the "
+                "middle of __init__, reparenting everything after them "
+                "into a sibling method's dead-code body?"
+            )
+
+    def test_focus_and_mousepress_handlers_are_not_nested_in_init(self) -> None:
+        import ast
+        import inspect
+
+        from agent_takkub import terminal_widget
+
+        source = inspect.getsource(terminal_widget.TerminalWidget)
+        cls_node = ast.parse(source).body[0]
+        init_node = next(
+            n for n in cls_node.body if isinstance(n, ast.FunctionDef) and n.name == "__init__"
+        )
+        nested_defs = {n.name for n in ast.walk(init_node) if isinstance(n, ast.FunctionDef)}
+        assert "focusInEvent" not in nested_defs
+        assert "mousePressEvent" not in nested_defs

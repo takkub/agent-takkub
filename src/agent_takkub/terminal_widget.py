@@ -351,6 +351,13 @@ class TerminalWidget(QWidget):
         # paths resolve against the project this pane is working in.
         self._cwd: str | None = None
 
+        # ESC+CR multiline-newline escape this pane's provider accepts on
+        # Shift+Enter, from ProviderSpec.multiline_newline_seq (#149). None
+        # (the default until AgentPane.attach_session sets it) means the
+        # provider's TUI toolkit isn't confirmed safe for ESC+CR — JS falls
+        # back to xterm's native '\r' on Shift+Enter, same as plain Enter.
+        self._newline_seq: str | None = None
+
         self._bridge.inputData.connect(self._on_input_data)
         self._bridge.sizeChanged.connect(self.resized.emit)
         self._bridge.pageReady.connect(self._on_page_ready)
@@ -366,6 +373,24 @@ class TerminalWidget(QWidget):
         self._view.setAcceptDrops(True)
 
         self._view.load(_INDEX_URL)
+
+    def focusInEvent(self, event) -> None:
+        super().focusInEvent(event)
+        self._view.setFocus()
+        if self._page_ready:
+            try:
+                self._view.page().runJavaScript("term.focus();")
+            except Exception:
+                pass
+
+    def mousePressEvent(self, event) -> None:
+        super().mousePressEvent(event)
+        self._view.setFocus()
+        if self._page_ready:
+            try:
+                self._view.page().runJavaScript("term.focus();")
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Python → JS
@@ -529,6 +554,18 @@ class TerminalWidget(QWidget):
     def is_input_locked(self) -> bool:
         return self._input_locked
 
+    def set_newline_seq(self, seq: str | None) -> None:
+        """Tell xterm.js which ESC+CR-style escape (if any) this pane's
+        provider accepts on Shift+Enter for a multiline newline (#149).
+        None means the provider's TUI toolkit isn't confirmed safe for
+        intercepting Shift+Enter — JS falls back to sending a plain '\\r'."""
+        self._newline_seq = seq
+        if self._page_ready:
+            try:
+                self._view.page().runJavaScript(f"termSetNewlineSeq({json.dumps(seq)});")
+            except Exception:
+                pass
+
     def _on_input_data(self, data: str) -> None:
         # xterm.js gives us already-encoded escape sequences for keys; just
         # ship the bytes to the PTY — unless this pane is input-locked, in which
@@ -545,6 +582,10 @@ class TerminalWidget(QWidget):
         # set_input_locked() at construction ran before the page existed.
         if self._input_locked:
             self.set_input_locked(True)
+        # Re-assert the newline-seq (if AgentPane.attach_session set one
+        # before the page finished booting) the same way.
+        if self._newline_seq is not None:
+            self.set_newline_seq(self._newline_seq)
         if self._pending_writes:
             self._write_buf.extend(self._pending_writes)
             self._pending_writes.clear()

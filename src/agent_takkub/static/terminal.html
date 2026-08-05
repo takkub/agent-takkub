@@ -115,6 +115,138 @@
     term.focus();
 
     // ------------------------------------------------------------------
+    // Key Handling & Custom Key Event Interceptors (registered synchronously
+    // at term.open time; keystrokes typed before the QWebChannel bridge
+    // connects are queued in pendingKeystrokes and flushed in order once
+    // it does — see the QWebChannel constructor callback below).
+    // ------------------------------------------------------------------
+    let bridge = null;
+    let inputLocked = false;
+    let lastEmittedText = '';
+    let lastEmittedTime = 0;
+    let pendingCharText = '';
+    let isComposing = false;
+    let pendingKeystrokes = [];
+    // Python-set ESC+CR escape (ProviderSpec.multiline_newline_seq, #149) this
+    // pane's provider accepts for a Shift+Enter multiline newline. null until
+    // AgentPane.attach_session calls termSetNewlineSeq — and stays null for
+    // any provider whose TUI toolkit isn't confirmed safe for it (e.g. codex's
+    // ratatui treats a bare ESC as interrupt/clear-composer, not a no-op).
+    let newlineSeq = null;
+    // macOS CapsLock doubles as a language-switch key on some layouts; on
+    // Windows/Linux it's just CapsLock and blocking it has no benefit, only
+    // the side-effect of nuking in-flight IME composition state (#149).
+    const IS_MAC = /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent || '');
+
+    term.onData((data) => {
+      lastEmittedText = data;
+      lastEmittedTime = Date.now();
+      pendingCharText = '';
+      if (inputLocked) return;  // pane is input-locked — swallow keystrokes
+      if (bridge && bridge.sendInput) {
+        bridge.sendInput(data);
+      } else {
+        pendingKeystrokes.push(data);  // bridge not connected yet — flush on connect
+      }
+    });
+
+    const helperTextarea = document.querySelector('.xterm-helper-textarea');
+
+    // 1. Intercept Shift+Enter / Alt+Enter (multiline newline). Ctrl/Cmd+Enter
+    // are intentionally left alone — they still submit via xterm's native '\r',
+    // matching every other terminal's convention and the pre-#149 behavior.
+    term.attachCustomKeyEventHandler((ev) => {
+      const isEnter = (ev.key === 'Enter' || ev.code === 'Enter' || ev.code === 'NumpadEnter' || ev.keyCode === 13) &&
+                      ev.keyCode !== 229 && ev.key !== 'Process';
+      if (isEnter && (ev.shiftKey || ev.altKey)) {
+        if (!newlineSeq) return true;  // provider not confirmed for ESC+CR — fall through to native '\r'
+        ev.preventDefault(); // Prevent default browser newline insertion into helper textarea
+        if (ev.type === 'keydown') {
+          lastEmittedTime = Date.now();
+          if (helperTextarea) helperTextarea.value = ''; // Clear leftover text in textarea
+
+          if (!inputLocked && bridge && bridge.sendInput) {
+            bridge.sendInput(newlineSeq);
+          }
+        }
+        return false; // Return false for BOTH keydown and keyup so xterm.js never sends \r
+      }
+
+      // 2. Intercept CapsLock ONLY for layout toggle, macOS only (do NOT
+      // intercept Backquote / keyCode 192).
+      const isCapsLock = IS_MAC && (
+        ev.key === 'CapsLock' || ev.code === 'CapsLock' || ev.keyCode === 20
+      );
+
+      if (isCapsLock) {
+        // Don't nuke in-flight IME composition state (#149) — only clear when
+        // nothing is being composed.
+        if (helperTextarea && !isComposing) helperTextarea.value = '';
+        return false; // Block xterm from buffering caps
+      }
+
+      return true;
+    });
+
+    // 3. Language Switch & Non-CJK Fallback Guard (Caps Lock / Cocoa NSTextInput)
+    // Catch any character (a, ฟ, Space, etc.) that xterm.js drops after CapsLock/Language switch.
+    if (helperTextarea) {
+      const flushTextareaInput = () => {
+        if (isComposing) return; // Do not flush during IME composition
+
+        const val = helperTextarea.value || pendingCharText;
+        if (!val || val === 'Dead') return;
+
+        if (val.includes('\n') || val.includes('\r')) {
+          helperTextarea.value = ''; // Clean up any leftover newlines
+          pendingCharText = '';
+          return;
+        }
+
+        const capturedVal = val;
+        pendingCharText = '';
+
+        // If xterm.js did NOT emit this character within 50ms:
+        const emittedByXterm = (lastEmittedText === capturedVal) && (Date.now() - lastEmittedTime <= 50);
+        if (!emittedByXterm) {
+          if (!inputLocked && bridge && bridge.sendInput) {
+            bridge.sendInput(capturedVal);
+            lastEmittedText = capturedVal;
+            lastEmittedTime = Date.now();
+          }
+        }
+        if (helperTextarea.value === capturedVal) {
+          helperTextarea.value = '';
+        }
+      };
+
+      helperTextarea.addEventListener('compositionstart', () => {
+        isComposing = true;
+      });
+
+      helperTextarea.addEventListener('beforeinput', (e) => {
+        if (e.isComposing || e.inputType === 'insertCompositionText') {
+          isComposing = true;
+          return;
+        }
+        if (e.data) {
+          pendingCharText = e.data;
+          setTimeout(flushTextareaInput, 5);
+        }
+      });
+
+      helperTextarea.addEventListener('input', (e) => {
+        if (e.isComposing) return;
+        setTimeout(flushTextareaInput, 5);
+      });
+
+      helperTextarea.addEventListener('compositionend', () => {
+        isComposing = false;
+        setTimeout(flushTextareaInput, 5);
+      });
+    }
+
+    // ------------------------------------------------------------------
     // Ctrl/Cmd + mouse-wheel font zoom
     // ------------------------------------------------------------------
     // pt/px conversion mirrors terminal_widget.py's set_font_point_size
@@ -159,36 +291,17 @@
     // ------------------------------------------------------------------
     // Qt bridge — exchange bytes with the Python side over QWebChannel
     // ------------------------------------------------------------------
-    let bridge = null;
-
-    // Input policy: pure pass-through. Every keystroke goes straight to
-    // the PTY and claude is the *only* writer to the screen. We tried
-    // local echo in v0.3.0–0.3.5 to mask claude's redraw latency, but
-    // claude's TUI renders arrive out of order under fast input, so a
-    // delayed render of "กพ" would overwrite a local erase and the
-    // user saw ghost chars stuck on screen.
-    //
-    // Every native terminal (iTerm, Windows Terminal, wezterm, ...)
-    // works this way. claude is slow when busy; the user feels that
-    // slowness but the display is *correct* and stays in sync.
-    //
-    // Kept for future reference: window.termSetIdle exists but is now
-    // a no-op so Python-side wiring doesn't need to be ripped out in
-    // lock-step.
     window.termSetIdle = function (_idle) { /* no-op since v0.3.6 */ };
-
-    // Input lock: when true, drop every user keystroke in JS before it even
-    // crosses the bridge (Python also guards, but stopping it here means no
-    // local feedback and no wasted IPC). Mirrored from Python via termSetLocked.
-    let inputLocked = false;
 
     new QWebChannel(qt.webChannelTransport, (channel) => {
       bridge = channel.objects.bridge;
 
-      term.onData((data) => {
-        if (inputLocked) return;  // pane is input-locked — swallow keystrokes
-        if (bridge && bridge.sendInput) bridge.sendInput(data);
-      });
+      // Flush any keystrokes typed before the bridge connected, in order.
+      if (pendingKeystrokes.length) {
+        pendingKeystrokes.splice(0).forEach((d) => {
+          if (bridge && bridge.sendInput) bridge.sendInput(d);
+        });
+      }
 
       // resize → tell PTY new cols/rows
       const reportResize = () => {
@@ -263,6 +376,13 @@
         term.options.cursorStyle = inputLocked ? 'underline' : 'block';
       } catch (e) {}
       if (document.body) document.body.classList.toggle('input-locked', inputLocked);
+    };
+
+    // Set/clear the provider's confirmed ESC+CR multiline-newline escape
+    // (ProviderSpec.multiline_newline_seq, #149). null disables interception —
+    // Shift+Enter then falls through to xterm's native '\r'.
+    window.termSetNewlineSeq = function (seq) {
+      newlineSeq = (typeof seq === 'string' && seq) ? seq : null;
     };
 
     window.termClear = function () {

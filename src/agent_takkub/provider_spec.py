@@ -103,6 +103,15 @@ class ProviderSpec:
     enter_delay_per_kb_ms: int = 150
     enter_delay_max_ms: int = 3000
     input_swallow_recovery: bool = True
+    # Escape sequence terminal.html sends on Shift+Enter/Alt+Enter to request a
+    # multiline newline instead of submitting (#149). Confirmed correct only
+    # for Ink-based TUIs (claude, gemini/agy), which treat a bare ESC as a
+    # harmless no-op immediately followed by CR. codex's ratatui UI treats ESC
+    # as interrupt/clear-composer, so it — and every provider whose TUI toolkit
+    # hasn't been confirmed (opencode/bubbletea, kimi, cursor) — stays at the
+    # safe default None: terminal.html then does NOT intercept the keystroke,
+    # so xterm.js sends its native '\r' (pre-#149 behavior, same as plain Enter).
+    multiline_newline_seq: str | None = None
 
     # ─── 8. Spawning capability flags ───
     supports_mirror: bool = False
@@ -288,6 +297,8 @@ claude_spec = ProviderSpec(
     enter_delay_per_kb_ms=150,  # orchestrator_text.py:158 _PASTE_PER_KB_DELAY_MS
     enter_delay_max_ms=3000,  # orchestrator_text.py:159 _PASTE_MAX_ENTER_DELAY_MS
     input_swallow_recovery=True,
+    multiline_newline_seq="\x1b\r",  # Ink TUI: bare ESC is a no-op, so ESC+CR
+    # inserts a newline instead of submitting (#149).
     supports_mirror=True,
     supports_resume=True,
     supports_slash_commands=True,
@@ -366,6 +377,10 @@ codex_spec = ProviderSpec(
     enter_delay_per_kb_ms=150,  # do NOT tune codex lower than claude in Phase 0, it would
     enter_delay_max_ms=3000,  # regress the #99 enter-swallow fix. Tuning is a separate change.)
     input_swallow_recovery=True,  # review action item 2-D: keep True (self-heal stays active)
+    # multiline_newline_seq left at default None: codex's ratatui UI treats a
+    # bare ESC as interrupt/clear-composer, not a no-op, so ESC+CR would clear
+    # the composer and submit an empty line instead of inserting a newline
+    # (#149). Shift+Enter on a codex pane falls back to xterm's native '\r'.
     supports_mirror=False,
     supports_resume=False,
     supports_slash_commands=False,
@@ -455,6 +470,8 @@ gemini_spec = ProviderSpec(
     enter_delay_per_kb_ms=150,
     enter_delay_max_ms=3000,
     input_swallow_recovery=True,
+    multiline_newline_seq="\x1b\r",  # agy is Ink-based like claude — same ESC+CR
+    # multiline newline behavior (#149).
     supports_mirror=False,
     supports_resume=False,
     supports_slash_commands=False,
