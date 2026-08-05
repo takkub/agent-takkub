@@ -45,7 +45,6 @@
       scrollback: 500,
       allowProposedApi: true,
       windowsMode: false,  // we feed bytes already from a Windows pty, no normalisation
-      unicodeVersion: '11',  // Unicode 11 character widths (fixes Thai combining mark widths)
       theme: {
         background: '#0e0e10',
         foreground: '#e6e6e6',
@@ -116,35 +115,113 @@
     term.focus();
 
     // ------------------------------------------------------------------
-    // IME focus guard & Shift+Enter multi-line handler
+    // Key Handling & Custom Key Event Interceptors (registered synchronously
+    // at term.open time so no keystrokes are missed during WebChannel boot)
     // ------------------------------------------------------------------
-    function ensureTermFocus() {
-      if (term && !inputLocked) {
-        try {
-          term.focus();
-        } catch (e) {}
-      }
-    }
+    let bridge = null;
+    let inputLocked = false;
+    let lastEmittedText = '';
+    let lastEmittedTime = 0;
+    let pendingCharText = '';
+    let isComposing = false;
 
-    // Keep helper textarea focused during IME composition, window focus, and mouse clicks
-    window.addEventListener('focus', ensureTermFocus);
-    document.addEventListener('mousedown', ensureTermFocus);
-    document.addEventListener('compositionstart', ensureTermFocus);
-    document.addEventListener('compositionend', ensureTermFocus);
+    term.onData((data) => {
+      lastEmittedText = data;
+      lastEmittedTime = Date.now();
+      pendingCharText = '';
+      if (inputLocked) return;  // pane is input-locked — swallow keystrokes
+      if (bridge && bridge.sendInput) bridge.sendInput(data);
+    });
 
+    const helperTextarea = document.querySelector('.xterm-helper-textarea');
+
+    // 1. Intercept Shift+Enter, Alt+Enter, Cmd+Enter on Mac & Bluetooth keyboards
     term.attachCustomKeyEventHandler((ev) => {
-      ensureTermFocus();
-      if (ev.type === 'keydown') {
-        // Shift+Enter: send newline (\n) without submitting (\r)
-        if (ev.key === 'Enter' && ev.shiftKey && !ev.ctrlKey && !ev.altKey && !ev.metaKey) {
+      const isEnter = (ev.key === 'Enter' || ev.code === 'Enter' || ev.code === 'NumpadEnter' || ev.keyCode === 13) &&
+                      ev.keyCode !== 229 && ev.key !== 'Process';
+      if (isEnter && (ev.shiftKey || ev.altKey || ev.ctrlKey || ev.metaKey)) {
+        ev.preventDefault(); // Prevent default browser newline insertion into helper textarea
+        if (ev.type === 'keydown') {
+          lastEmittedTime = Date.now();
+          if (helperTextarea) helperTextarea.value = ''; // Clear leftover text in textarea
+
           if (!inputLocked && bridge && bridge.sendInput) {
-            bridge.sendInput('\n');
+            bridge.sendInput('\x1b\r');  // ESC + Return: native Ink/Claude multiline newline
           }
-          return false; // prevent xterm.js default \r submit
         }
+        return false; // Return false for BOTH keydown and keyup so xterm.js never sends \r
       }
+
+      // 2. Intercept CapsLock ONLY for layout toggle (do NOT intercept Backquote / keyCode 192)
+      const isCapsLock = (
+        ev.key === 'CapsLock' || ev.code === 'CapsLock' || ev.keyCode === 20
+      );
+
+      if (isCapsLock) {
+        if (helperTextarea) helperTextarea.value = ''; // Ensure textarea is clean
+        return false; // Block xterm from buffering caps
+      }
+
       return true;
     });
+
+    // 3. Language Switch & Non-CJK Fallback Guard (Caps Lock / Cocoa NSTextInput)
+    // Catch any character (a, ฟ, Space, etc.) that xterm.js drops after CapsLock/Language switch.
+    if (helperTextarea) {
+      const flushTextareaInput = () => {
+        if (isComposing) return; // Do not flush during IME composition
+
+        const val = helperTextarea.value || pendingCharText;
+        if (!val || val === 'Dead') return;
+
+        if (val.includes('\n') || val.includes('\r')) {
+          helperTextarea.value = ''; // Clean up any leftover newlines
+          pendingCharText = '';
+          return;
+        }
+
+        const capturedVal = val;
+        pendingCharText = '';
+
+        // If xterm.js did NOT emit this character within 50ms:
+        const emittedByXterm = (lastEmittedText === capturedVal) && (Date.now() - lastEmittedTime <= 50);
+        if (!emittedByXterm) {
+          if (!inputLocked && bridge && bridge.sendInput) {
+            bridge.sendInput(capturedVal);
+            lastEmittedText = capturedVal;
+            lastEmittedTime = Date.now();
+          }
+        }
+        if (helperTextarea.value === capturedVal) {
+          helperTextarea.value = '';
+        }
+      };
+
+      helperTextarea.addEventListener('compositionstart', () => {
+        isComposing = true;
+      });
+
+      helperTextarea.addEventListener('beforeinput', (e) => {
+        if (e.isComposing || e.inputType === 'insertCompositionText') {
+          isComposing = true;
+          return;
+        }
+        if (e.data) {
+          pendingCharText = e.data;
+          setTimeout(flushTextareaInput, 5);
+        }
+      });
+
+      helperTextarea.addEventListener('input', (e) => {
+        if (e.isComposing) return;
+        setTimeout(flushTextareaInput, 5);
+      });
+
+      helperTextarea.addEventListener('compositionend', () => {
+        isComposing = false;
+        setTimeout(flushTextareaInput, 5);
+      });
+    }
 
     // ------------------------------------------------------------------
     // Ctrl/Cmd + mouse-wheel font zoom
@@ -191,36 +268,10 @@
     // ------------------------------------------------------------------
     // Qt bridge — exchange bytes with the Python side over QWebChannel
     // ------------------------------------------------------------------
-    let bridge = null;
-
-    // Input policy: pure pass-through. Every keystroke goes straight to
-    // the PTY and claude is the *only* writer to the screen. We tried
-    // local echo in v0.3.0–0.3.5 to mask claude's redraw latency, but
-    // claude's TUI renders arrive out of order under fast input, so a
-    // delayed render of "กพ" would overwrite a local erase and the
-    // user saw ghost chars stuck on screen.
-    //
-    // Every native terminal (iTerm, Windows Terminal, wezterm, ...)
-    // works this way. claude is slow when busy; the user feels that
-    // slowness but the display is *correct* and stays in sync.
-    //
-    // Kept for future reference: window.termSetIdle exists but is now
-    // a no-op so Python-side wiring doesn't need to be ripped out in
-    // lock-step.
     window.termSetIdle = function (_idle) { /* no-op since v0.3.6 */ };
-
-    // Input lock: when true, drop every user keystroke in JS before it even
-    // crosses the bridge (Python also guards, but stopping it here means no
-    // local feedback and no wasted IPC). Mirrored from Python via termSetLocked.
-    let inputLocked = false;
 
     new QWebChannel(qt.webChannelTransport, (channel) => {
       bridge = channel.objects.bridge;
-
-      term.onData((data) => {
-        if (inputLocked) return;  // pane is input-locked — swallow keystrokes
-        if (bridge && bridge.sendInput) bridge.sendInput(data);
-      });
 
       // resize → tell PTY new cols/rows
       const reportResize = () => {
