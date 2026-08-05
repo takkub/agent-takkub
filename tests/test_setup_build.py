@@ -121,6 +121,49 @@ class TestStageAssets:
 
         assert not (setup_mod._ASSETS / ".claude" / "skills" / "README.md").exists()
 
+    def test_stages_docs_lead_files(self, fake_root: Path) -> None:
+        docs_lead = fake_root / "docs" / "lead"
+        docs_lead.mkdir(parents=True)
+        (docs_lead / "patterns.md").write_text("# patterns", encoding="utf-8")
+
+        setup_mod._stage_assets()
+
+        staged = setup_mod._ASSETS / "docs" / "lead" / "patterns.md"
+        assert staged.read_text(encoding="utf-8") == "# patterns"
+
+    def test_missing_docs_lead_dir_does_not_raise_when_unreferenced(self, fake_root: Path) -> None:
+        # CLAUDE.md in this fixture ("# playbook") never mentions docs/lead —
+        # an unreferenced, absent docs/lead/ must still build a valid wheel.
+        setup_mod._stage_assets()
+        assert not (setup_mod._ASSETS / "docs" / "lead").exists()
+
+    def test_raises_if_claude_md_references_missing_docs_lead_file(self, fake_root: Path) -> None:
+        (fake_root / "CLAUDE.md").write_text(
+            "See `docs/lead/patterns.md` for details.", encoding="utf-8"
+        )
+        with pytest.raises(RuntimeError, match="docs/lead"):
+            setup_mod._stage_assets()
+
+    def test_raises_if_docs_lead_file_referenced_but_dir_absent(self, fake_root: Path) -> None:
+        # No docs/lead/ directory at all, but CLAUDE.md still points at one —
+        # must fail exactly like the file-present-but-wrong-name case above.
+        (fake_root / "CLAUDE.md").write_text("See `docs/lead/cli-reference.md`.", encoding="utf-8")
+        with pytest.raises(RuntimeError, match="docs/lead"):
+            setup_mod._stage_assets()
+
+    def test_stages_referenced_docs_lead_file_and_passes(self, fake_root: Path) -> None:
+        docs_lead = fake_root / "docs" / "lead"
+        docs_lead.mkdir(parents=True)
+        (docs_lead / "patterns.md").write_text("# patterns", encoding="utf-8")
+        (fake_root / "CLAUDE.md").write_text(
+            "See `docs/lead/patterns.md` for details.", encoding="utf-8"
+        )
+
+        setup_mod._stage_assets()  # must not raise
+
+        staged = setup_mod._ASSETS / "docs" / "lead" / "patterns.md"
+        assert staged.read_text(encoding="utf-8") == "# patterns"
+
 
 class TestManifestIncludesRootAssets:
     """Guards the sdist path: CLAUDE.md and .claude/agents/*.md live outside
@@ -136,3 +179,4 @@ class TestManifestIncludesRootAssets:
         assert "CLAUDE.md" in text
         assert ".claude/agents" in text
         assert ".claude/skills" in text
+        assert "docs/lead" in text

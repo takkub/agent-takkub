@@ -94,6 +94,7 @@ def _stage_assets() -> None:
             f"asset staging failed: {claude_md} is missing — refusing to build a "
             "wheel with no Lead playbook shipped inside it"
         )
+    claude_md_text = claude_md.read_text(encoding="utf-8")
     agent_files = sorted(agents_src.glob("*.md")) if agents_src.is_dir() else []
     if not agent_files:
         raise RuntimeError(
@@ -105,6 +106,33 @@ def _stage_assets() -> None:
     shutil.copy2(claude_md, _ASSETS / "CLAUDE.md")
     for f in agent_files:
         shutil.copy2(f, agents_dst / f.name)
+
+    # Lead playbook doc bundle (docs/lead/*.md) — CLAUDE.md cross-references
+    # these by relative path (`docs/lead/patterns.md`, `docs/lead/cli-
+    # reference.md`, ...), which only resolves from a dev checkout's cwd.
+    # Ship them alongside CLAUDE.md so an installed build has something for
+    # lead_context.py to rewrite the references onto (see its installed-mode
+    # rewrite) instead of shipping a CLAUDE.md full of dangling pointers.
+    docs_lead_src = _ROOT / "docs" / "lead"
+    docs_lead_files = sorted(docs_lead_src.glob("*.md")) if docs_lead_src.is_dir() else []
+    if docs_lead_files:
+        docs_lead_dst = _ASSETS / "docs" / "lead"
+        docs_lead_dst.mkdir(parents=True)
+        for f in docs_lead_files:
+            shutil.copy2(f, docs_lead_dst / f.name)
+
+    # Fail the build fast if CLAUDE.md references a docs/lead/*.md file that
+    # isn't actually staged (missing on disk, or docs/lead/ absent entirely)
+    # — catches a dangling pointer at build time instead of shipping it to
+    # every installer (the bug this staging step exists to fix).
+    referenced_docs = set(re.findall(r"docs/lead/([\w.-]+\.md)", claude_md_text))
+    staged_names = {f.name for f in docs_lead_files}
+    missing_docs = sorted(referenced_docs - staged_names)
+    if missing_docs:
+        raise RuntimeError(
+            "asset staging failed: CLAUDE.md references docs/lead file(s) not found "
+            f"under {docs_lead_src}: {', '.join(missing_docs)}"
+        )
 
     # Default skill bundle (.claude/skills/<name>/SKILL.md) — supplementary
     # reference material for the New Role / Skill Catalog pickers, unlike

@@ -66,6 +66,7 @@ agent_takkub = [
     "_assets/CLAUDE.md",
     "_assets/.claude/agents/*.md",
     "_assets/.claude/skills/*/SKILL.md",
+    "_assets/docs/lead/*.md",
     # remote/ (P0 scaffold) mobile PWA — glob stays empty (no error) until
     # P1 adds files; deleting remote/ makes it empty again, build still works.
     "remote/static/*",

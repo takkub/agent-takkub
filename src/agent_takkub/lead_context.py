@@ -299,6 +299,16 @@ def _build_lead_context_text(
         return None
 
     base = cockpit_md.read_text(encoding="utf-8")
+    if ASSETS_ROOT != REPO_ROOT:
+        # Installed build: CLAUDE.md's `docs/lead/...` cross-references only
+        # resolve relative to a dev checkout's cwd. setup.py's _stage_assets
+        # ships docs/lead/*.md alongside CLAUDE.md at ASSETS_ROOT/docs/lead/
+        # for exactly this — rewrite the references onto that absolute,
+        # Read-able path so an installed Lead's pointers aren't dangling.
+        # Dev checkouts (ASSETS_ROOT == REPO_ROOT) are untouched: the
+        # relative reference already resolves from the repo root.
+        _docs_lead_dir = (ASSETS_ROOT / "docs" / "lead").as_posix()
+        base = base.replace("docs/lead/", f"{_docs_lead_dir}/")
     if project is not None:
         data = load_projects()
         proj = (data.get("projects") or {}).get(project) or {}

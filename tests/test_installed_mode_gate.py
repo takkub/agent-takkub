@@ -210,6 +210,44 @@ class TestInstalledLeadContext:
         assert out["has_assign"] is True
         assert out["length"] > 500
 
+    def test_docs_lead_shipped_and_rewritten_to_resolvable_paths(
+        self, installed_venv: Path, installed_home: Path
+    ) -> None:
+        """Regression cover: an installed build's CLAUDE.md references
+        `docs/lead/patterns.md` / `docs/lead/cli-reference.md` by relative
+        path, which only resolves from a dev checkout's cwd. Proves both
+        halves of the fix from the real, packaged wheel: the files are
+        staged inside ASSETS_ROOT/docs/lead/, and the rendered Lead prompt
+        points at those real, readable absolute paths instead of the bare
+        (dangling, on an installed build) relative reference."""
+        out = _run_in_venv(
+            installed_venv,
+            installed_home,
+            """
+            import json
+            from pathlib import Path
+            from agent_takkub import config
+            from agent_takkub.lead_context import _render_lead_context
+            docs_lead_dir = config.ASSETS_ROOT / "docs" / "lead"
+            staged = sorted(p.name for p in docs_lead_dir.glob("*.md"))
+            path = _render_lead_context()
+            text = Path(path).read_text(encoding="utf-8") if path else ""
+            print(json.dumps({
+                "docs_lead_dir": str(docs_lead_dir),
+                "staged": staged,
+                "has_bare_reference": "`docs/lead/patterns.md`" in text,
+                "has_rewritten_reference": (docs_lead_dir / "patterns.md").as_posix() in text,
+            }))
+            """,
+        )
+        assert "patterns.md" in out["staged"]
+        assert "cli-reference.md" in out["staged"]
+        docs_lead_dir = Path(out["docs_lead_dir"])
+        assert (docs_lead_dir / "patterns.md").is_file()
+        assert (docs_lead_dir / "cli-reference.md").is_file()
+        assert out["has_bare_reference"] is False
+        assert out["has_rewritten_reference"] is True
+
 
 class TestInstalledPaneEnv:
     def test_pane_and_lead_env_stamp_port_file_and_claude_config_dir(
