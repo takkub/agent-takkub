@@ -1246,6 +1246,15 @@ class MainWindow(
         self._limit_label_host = tab
         tab.mount_usage_widget(self._limit_label)
         self._tasks_dock_widget.set_project(tab.project_name)
+        # graft code-graph auto-build: only kicks a background build for
+        # paths that have no graph yet — see graft_autobuild.py. Never
+        # blocks the tab switch.
+        try:
+            from .graft_autobuild import ensure_project_graph_async
+
+            ensure_project_graph_async(tab.project_name)
+        except Exception:
+            pass
         if set_active_project(tab.project_name):
             self._refresh_rtk_button()
             from . import user_profile as _up_sw

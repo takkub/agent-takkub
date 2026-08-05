@@ -25,7 +25,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .config import DATA_HOME, RUNTIME_DIR, default_claude_config_dir
+from . import graft_store
+from .config import DATA_HOME, RUNTIME_DIR, default_claude_config_dir, load_projects
 from .orchestrator_text import prune_old_transcripts
 from .shared_dev_tools import prune_old_browser_profiles
 from .worktree_manager import WorktreeManager, sweep_link_points
@@ -47,6 +48,7 @@ VALID_CATEGORIES: tuple[str, ...] = (
     "partial",
     "chat-history",
     "node-modules",
+    "graft-graphs",
 )
 
 # Categories the report is aware of but which `prune` must always refuse,
@@ -384,6 +386,95 @@ def scan_node_modules(data_home: Path, mgr: WorktreeManager | None = None) -> di
     }
 
 
+# ── graft graph store (#146 follow-up) ───────────────────────────────────────
+
+
+def _configured_graph_keys() -> set[str]:
+    """`graph_key(...)` for every path currently configured across every
+    project in projects.json, regardless of whether that path still exists
+    on disk (a transient unmount/offline drive must not reclassify a store
+    as orphan). Used to tell a live graft-graphs/ store apart from one whose
+    source project/path was removed."""
+    keys: set[str] = set()
+    try:
+        projects = load_projects().get("projects") or {}
+    except Exception:
+        return keys
+    for proj in projects.values():
+        if not isinstance(proj, dict):
+            continue
+        paths = proj.get("paths")
+        if not isinstance(paths, dict):
+            continue
+        for raw in paths.values():
+            if not isinstance(raw, str) or not raw.strip():
+                continue
+            try:
+                resolved = Path(raw).expanduser().resolve()
+            except OSError:
+                continue
+            keys.add(graft_store.graph_key(resolved))
+    return keys
+
+
+def scan_graft_graphs(data_home: Path) -> dict:
+    """Aggregate `graft-graphs/` usage (external code-graph store, #146
+    follow-up), split orphan vs. live by comparing each store dir's own
+    name (its `graph_key`) against every path currently configured in
+    projects.json. A store whose source project/path was removed (or
+    renamed, which mints a different key) shows up as orphan even though
+    its bytes are still sitting on disk.
+
+    *data_home* is accepted (and left unused) only to keep this function's
+    signature uniform with its `scan_*`/`_prune_*` siblings in this module —
+    the store root is never DATA_HOME-relative (see `graft_store.py`'s
+    module docstring), so the real root always comes from
+    `graft_store.GRAFT_STORE_ROOT`.
+    """
+    root = graft_store.GRAFT_STORE_ROOT
+    entries: list[dict] = []
+    orphan_bytes = orphan_count = 0
+    live_bytes = live_count = 0
+    if not root.is_dir():
+        return {
+            "entries": entries,
+            "orphan_bytes": orphan_bytes,
+            "orphan_count": orphan_count,
+            "live_bytes": live_bytes,
+            "live_count": live_count,
+        }
+    configured_keys = _configured_graph_keys()
+    try:
+        store_dirs = [p for p in root.iterdir() if p.is_dir()]
+    except OSError:
+        store_dirs = []
+    for store in store_dirs:
+        size, count = _dir_stats(store)
+        is_orphan = store.name not in configured_keys
+        entries.append(
+            {
+                "path": str(store),
+                "source": graft_store.read_store_manifest(store),
+                "orphan": is_orphan,
+                "size_bytes": size,
+                "file_count": count,
+            }
+        )
+        if is_orphan:
+            orphan_bytes += size
+            orphan_count += 1
+        else:
+            live_bytes += size
+            live_count += 1
+    return {
+        "entries": entries,
+        "orphan_bytes": orphan_bytes,
+        "orphan_count": orphan_count,
+        "live_bytes": live_bytes,
+        "live_count": live_count,
+    }
+
+
 # ── category report ──────────────────────────────────────────────────────────
 
 
@@ -612,6 +703,20 @@ def disk_report(data_home: Path | None = None) -> dict:
         )
     )
 
+    gg = scan_graft_graphs(home)
+    categories.append(
+        CategoryUsage(
+            "graft-graphs",
+            "graft-graphs/* (external code-graph store ต่อโปรเจค, #146 — orphan = path "
+            "ไม่ได้ configure ใน projects.json แล้ว, ลบอัตโนมัติได้; live เก็บไว้เสมอ)",
+            SAFE,
+            gg["orphan_bytes"] + gg["live_bytes"],
+            gg["orphan_count"] + gg["live_count"],
+            detail=f"orphan {gg['orphan_bytes']} bytes ({gg['orphan_count']}) · "
+            f"live {gg['live_bytes']} bytes ({gg['live_count']}, ไม่แตะ)",
+        )
+    )
+
     total = sum(c.size_bytes for c in categories)
     return {
         "data_home": str(home),
@@ -671,6 +776,7 @@ def _category_level(category: str) -> str:
         "shell-snapshots": SAFE,
         "exports": REVIEW,
         "chat-history": REVIEW,
+        "graft-graphs": SAFE,  # orphan subset only — live stores are never auto-deleted
     }
     return levels.get(category, NEVER)
 
@@ -958,6 +1064,32 @@ def _prune_node_modules(
     return outcome
 
 
+def _prune_graft_graphs(home: Path, dry_run: bool) -> PruneOutcome:
+    """Delete only ORPHAN `graft-graphs/*` stores — a source path no longer
+    configured in projects.json (#146 follow-up). Live stores are never
+    touched here, no `--include-live` escape hatch needed: an orphan is
+    safe to reclaim unconditionally (worst case, re-adding the same path
+    later just triggers a fresh `graft build` into a new store).
+
+    *home* is accepted only for call-site uniformity with the other
+    `_prune_*` functions (and threaded into `scan_graft_graphs`, which
+    itself ignores it — see that function's docstring); the real safety
+    boundary for `_assert_under` is `graft_store.GRAFT_STORE_ROOT`, since
+    the store is never DATA_HOME-relative.
+    """
+    outcome = PruneOutcome("graft-graphs", SAFE, dry_run)
+    gg = scan_graft_graphs(home)
+    for entry in gg["entries"]:
+        if not entry["orphan"]:
+            continue
+        outcome.targets.append(entry["path"])
+        outcome.would_free_bytes += entry["size_bytes"]
+        if not dry_run:
+            p = _assert_under(Path(entry["path"]), graft_store.GRAFT_STORE_ROOT)
+            _rmtree_target(p, outcome, entry["size_bytes"])
+    return outcome
+
+
 def prune(
     categories: list[str] | None = None,
     *,
@@ -1025,6 +1157,8 @@ def prune(
             outcomes.append(_prune_orphan_worktrees_review(home, dry_run, mgr))
         elif c == "node-modules":
             outcomes.append(_prune_node_modules(home, dry_run, include_live, mgr))
+        elif c == "graft-graphs":
+            outcomes.append(_prune_graft_graphs(home, dry_run))
 
     total_would_free = sum(o.would_free_bytes for o in outcomes)
     total_freed = sum(o.freed_bytes for o in outcomes)

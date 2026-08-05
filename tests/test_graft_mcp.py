@@ -279,3 +279,78 @@ class TestRegisteredRoleNeverPassthrough:
             encoding="utf-8",
         )
         assert shared_mcp_config_path_for_role("gemini") is None
+
+
+class TestGraftDirPerPaneTemplating:
+    """#146 follow-up: graft's MCP args get a per-pane `--dir <external
+    store>` templated in, mirroring the browser-profile precedent, so the
+    served graph is read from the SAME externalized location
+    `graft_autobuild.py` builds into — never from inside the pane's cwd."""
+
+    def test_claude_argv_carries_dir_pointed_at_external_store(
+        self, isolated_mcp_file: pathlib.Path, tmp_path
+    ) -> None:
+        from agent_takkub import graft_store, mcp_bridge
+
+        ok, _ = ensure_graft_mcp()
+        assert ok
+        target = tmp_path / "backend-cwd"
+        target.mkdir()
+
+        argv = mcp_bridge.mcp_argv_for_provider("claude", "backend", None, "proj", cwd=str(target))
+
+        assert argv[0] == "--mcp-config"
+        data = json.loads(pathlib.Path(argv[1]).read_text(encoding="utf-8"))
+        args = data["mcpServers"]["graft"]["args"]
+        store = graft_store.graph_store_dir(target)
+        dir_idx = args.index("--dir")
+        assert args[dir_idx + 1] == str(store)
+        assert args[dir_idx + 2] == "mcp"  # global --dir sits right before the subcommand
+        assert store.is_dir()
+        assert (store / "source.json").is_file()
+
+    def test_codex_argv_carries_dir_arg(
+        self, isolated_mcp_file: pathlib.Path, tmp_path, monkeypatch
+    ) -> None:
+        from agent_takkub import graft_store, mcp_bridge
+
+        # Deterministic regardless of whether the dev machine running this
+        # test has a real `codex` binary on PATH — same isolation
+        # test_mcp_bridge.py's fixture applies (skip the resolve
+        # subprocess entirely, as a verified-safe codex-cli would).
+        monkeypatch.setattr(mcp_bridge, "_codex_cli_version", lambda *a: (0, 146, 0))
+        monkeypatch.setattr(mcp_bridge, "_codex_resolved_mcp_names", lambda *a: [])
+        ok, _ = ensure_graft_mcp()
+        assert ok
+        target = tmp_path / "backend-cwd"
+        target.mkdir()
+
+        argv = mcp_bridge.mcp_argv_for_provider("codex", "backend", None, "proj", cwd=str(target))
+
+        store = graft_store.graph_store_dir(target)
+        args_flag = next(a for a in argv if a.startswith("mcp_servers.graft.args="))
+        assert '"--dir"' in args_flag
+        assert store.name in args_flag  # hash-keyed store name, unaffected by path escaping
+
+    def test_no_cwd_leaves_graft_args_untemplated(self, isolated_mcp_file: pathlib.Path) -> None:
+        from agent_takkub import mcp_bridge
+
+        ok, _ = ensure_graft_mcp()
+        assert ok
+        argv = mcp_bridge.mcp_argv_for_provider("claude", "backend", None, "proj")
+        data = json.loads(pathlib.Path(argv[1]).read_text(encoding="utf-8"))
+        assert "--dir" not in data["mcpServers"]["graft"]["args"]
+
+    def test_idempotent_second_call_does_not_double_template(
+        self, isolated_mcp_file: pathlib.Path, tmp_path
+    ) -> None:
+        ok, _ = ensure_graft_mcp()
+        assert ok
+        target = tmp_path / "backend-cwd"
+        target.mkdir()
+
+        p1 = sdt.browser_profile_mcp_config_path("backend", None, "proj", str(target))
+        p2 = sdt.browser_profile_mcp_config_path("backend", None, "proj", str(target))
+        assert p1 == p2
+        data = json.loads(pathlib.Path(p2).read_text(encoding="utf-8"))
+        assert data["mcpServers"]["graft"]["args"].count("--dir") == 1

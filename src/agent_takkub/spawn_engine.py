@@ -2316,7 +2316,9 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         # to the pre-#100 inline `--mcp-config`/`--strict-mcp-config` code.
         from .mcp_bridge import mcp_argv_for_provider
 
-        argv.extend(mcp_argv_for_provider("claude", base_role, shard_idx, project_ns))
+        argv.extend(
+            mcp_argv_for_provider("claude", base_role, shard_idx, project_ns, cwd=spawn_cwd)
+        )
 
         # Hard-deny built-in tools that don't fit the cockpit's
         # delegation model:

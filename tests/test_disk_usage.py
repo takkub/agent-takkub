@@ -14,7 +14,7 @@ import time
 
 import pytest
 
-from agent_takkub import disk_usage
+from agent_takkub import disk_usage, graft_store
 from agent_takkub.worktree_manager import GitResult, WorktreeManager
 
 
@@ -510,6 +510,144 @@ class TestRobustRmtree:
         monkeypatch.setattr(disk_usage.shutil, "rmtree", spy_rmtree)
         disk_usage.robust_rmtree(d)
         assert captured["target"].startswith("\\\\?\\")
+
+
+class TestGraftGraphsScan:
+    """`graft-graphs/` — external code-graph store (#146 follow-up). Orphan
+    classification compares each store dir's own name (its `graph_key`)
+    against every path currently configured in projects.json, so every test
+    here isolates `config.PROJECTS_JSON` under tmp_path — never the real
+    dev machine's project list.
+
+    The store root itself is never DATA_HOME-relative (see graft_store.py's
+    module docstring), so `scan_graft_graphs`'s `data_home` arg is a no-op —
+    every test here monkeypatches `graft_store.GRAFT_STORE_ROOT` directly to
+    an isolated tmp dir instead."""
+
+    def _isolate_projects(self, monkeypatch, tmp_path, projects: dict) -> None:
+        import json as _json
+
+        from agent_takkub import config
+
+        pj = tmp_path / "projects.json"
+        pj.write_text(_json.dumps({"active": None, "projects": projects}), encoding="utf-8")
+        monkeypatch.setattr(config, "PROJECTS_JSON", pj)
+
+    def test_no_root_dir_is_empty(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(graft_store, "GRAFT_STORE_ROOT", tmp_path / "graft-graphs")
+        result = disk_usage.scan_graft_graphs(tmp_path)
+        assert result == {
+            "entries": [],
+            "orphan_bytes": 0,
+            "orphan_count": 0,
+            "live_bytes": 0,
+            "live_count": 0,
+        }
+
+    def test_live_store_matches_configured_project_path(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(graft_store, "GRAFT_STORE_ROOT", tmp_path / "graft-graphs")
+        target = tmp_path / "some-project" / "api"
+        target.mkdir(parents=True)
+        self._isolate_projects(monkeypatch, tmp_path, {"proj": {"paths": {"api": str(target)}}})
+
+        store = tmp_path / "graft-graphs" / graft_store.graph_key(target)
+        (store / "graft").mkdir(parents=True)
+        (store / "graft" / "index.json").write_bytes(b"x" * 40)
+
+        result = disk_usage.scan_graft_graphs(tmp_path)
+        assert result["live_count"] == 1
+        assert result["live_bytes"] == 40
+        assert result["orphan_count"] == 0
+
+    def test_orphan_store_not_referenced_by_any_project(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(graft_store, "GRAFT_STORE_ROOT", tmp_path / "graft-graphs")
+        self._isolate_projects(monkeypatch, tmp_path, {})
+
+        store = tmp_path / "graft-graphs" / ("0" * 64)
+        (store / "graft").mkdir(parents=True)
+        (store / "graft" / "index.json").write_bytes(b"y" * 25)
+
+        result = disk_usage.scan_graft_graphs(tmp_path)
+        assert result["orphan_count"] == 1
+        assert result["orphan_bytes"] == 25
+        assert result["live_count"] == 0
+
+    def test_entry_carries_manifest_source_when_present(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(graft_store, "GRAFT_STORE_ROOT", tmp_path / "graft-graphs")
+        self._isolate_projects(monkeypatch, tmp_path, {})
+        target = tmp_path / "orphaned-project"
+        target.mkdir()
+        graft_store.write_store_manifest(target)
+
+        result = disk_usage.scan_graft_graphs(tmp_path)
+        assert result["entries"][0]["source"] == str(target.resolve())
+        assert result["entries"][0]["orphan"] is True  # not in projects.json paths
+
+
+class TestPruneGraftGraphs:
+    def test_dry_run_does_not_delete_orphan_store(self, tmp_path, monkeypatch):
+        from agent_takkub import config
+
+        monkeypatch.setattr(graft_store, "GRAFT_STORE_ROOT", tmp_path / "graft-graphs")
+        pj = tmp_path / "projects.json"
+        pj.write_text('{"active": null, "projects": {}}', encoding="utf-8")
+        monkeypatch.setattr(config, "PROJECTS_JSON", pj)
+        store = tmp_path / "graft-graphs" / ("1" * 64)
+        (store / "graft").mkdir(parents=True)
+
+        result = disk_usage.prune(categories=["graft-graphs"], dry_run=True, data_home=tmp_path)
+        assert store.exists()
+        assert result["categories"][0]["target_count"] == 1
+
+    def test_yes_removes_orphan_store_only(self, tmp_path, monkeypatch):
+        from agent_takkub import config
+
+        monkeypatch.setattr(graft_store, "GRAFT_STORE_ROOT", tmp_path / "graft-graphs")
+        live_target = tmp_path / "live-project"
+        live_target.mkdir()
+        pj = tmp_path / "projects.json"
+        import json as _json
+
+        pj.write_text(
+            _json.dumps({"active": None, "projects": {"p": {"paths": {"a": str(live_target)}}}}),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(config, "PROJECTS_JSON", pj)
+
+        live_store = tmp_path / "graft-graphs" / graft_store.graph_key(live_target)
+        (live_store / "graft").mkdir(parents=True)
+        orphan_store = tmp_path / "graft-graphs" / ("2" * 64)
+        (orphan_store / "graft").mkdir(parents=True)
+
+        result = disk_usage.prune(categories=["graft-graphs"], dry_run=False, data_home=tmp_path)
+        assert not orphan_store.exists()
+        assert live_store.exists()
+        assert result["categories"][0]["removed_count"] == 1
+
+    def test_never_deletes_outside_store_root(self, tmp_path, monkeypatch):
+        # `_prune_graft_graphs` reuses `_assert_under` like every other
+        # category — a store dir reported outside `graft_store.GRAFT_STORE_ROOT`
+        # (the real safety boundary now the store is never DATA_HOME-relative)
+        # must refuse rather than delete, same guarantee TestPathSafety
+        # asserts elsewhere.
+        from agent_takkub import config
+
+        monkeypatch.setattr(graft_store, "GRAFT_STORE_ROOT", tmp_path / "graft-graphs")
+        pj = tmp_path / "projects.json"
+        pj.write_text('{"active": null, "projects": {}}', encoding="utf-8")
+        monkeypatch.setattr(config, "PROJECTS_JSON", pj)
+        home = tmp_path / "home"
+        home.mkdir()
+        escaped = tmp_path / "outside" / "evil-store"  # not under GRAFT_STORE_ROOT
+        monkeypatch.setattr(
+            disk_usage,
+            "scan_graft_graphs",
+            lambda h: {
+                "entries": [{"path": str(escaped), "orphan": True, "size_bytes": 1, "source": None}]
+            },
+        )
+        with pytest.raises(ValueError):
+            disk_usage._prune_graft_graphs(home, dry_run=False)
 
 
 class TestDiskReport:

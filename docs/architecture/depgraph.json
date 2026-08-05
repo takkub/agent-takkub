@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 136,
+  "module_count": 138,
   "modules": [
     {
       "module": "agent_takkub",
@@ -56,6 +56,7 @@
         "agent_takkub.doctor",
         "agent_takkub.gemini_helper",
         "agent_takkub.git_status",
+        "agent_takkub.graft_autobuild",
         "agent_takkub.issues",
         "agent_takkub.limit_status",
         "agent_takkub.mcp_bridge",
@@ -74,7 +75,7 @@
         "agent_takkub.verify",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 23,
+      "fan_in": 24,
       "fan_out": 0
     },
     {
@@ -343,6 +344,8 @@
         "agent_takkub.doctor",
         "agent_takkub.exec_mode",
         "agent_takkub.git_status",
+        "agent_takkub.graft_autobuild",
+        "agent_takkub.graft_store",
         "agent_takkub.headless",
         "agent_takkub.headless_window",
         "agent_takkub.hook_wiring",
@@ -398,7 +401,7 @@
         "agent_takkub.vault_mirror",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 68,
+      "fan_in": 70,
       "fan_out": 0
     },
     {
@@ -430,6 +433,7 @@
       "module": "agent_takkub.disk_usage",
       "imports": [
         "agent_takkub.config",
+        "agent_takkub.graft_store",
         "agent_takkub.orchestrator_text",
         "agent_takkub.shared_dev_tools",
         "agent_takkub.worktree_manager"
@@ -439,7 +443,7 @@
         "agent_takkub.orchestrator"
       ],
       "fan_in": 2,
-      "fan_out": 4
+      "fan_out": 5
     },
     {
       "module": "agent_takkub.docs_verify",
@@ -509,6 +513,33 @@
       ],
       "fan_in": 1,
       "fan_out": 2
+    },
+    {
+      "module": "agent_takkub.graft_autobuild",
+      "imports": [
+        "agent_takkub._win_console",
+        "agent_takkub.config",
+        "agent_takkub.graft_store"
+      ],
+      "imported_by": [
+        "agent_takkub.main_window",
+        "agent_takkub.orchestrator"
+      ],
+      "fan_in": 2,
+      "fan_out": 3
+    },
+    {
+      "module": "agent_takkub.graft_store",
+      "imports": [
+        "agent_takkub.config"
+      ],
+      "imported_by": [
+        "agent_takkub.disk_usage",
+        "agent_takkub.graft_autobuild",
+        "agent_takkub.shared_dev_tools"
+      ],
+      "fan_in": 3,
+      "fan_out": 1
     },
     {
       "module": "agent_takkub.headless",
@@ -714,6 +745,7 @@
         "agent_takkub.cli_server",
         "agent_takkub.cockpit_theme",
         "agent_takkub.config",
+        "agent_takkub.graft_autobuild",
         "agent_takkub.lead_context",
         "agent_takkub.limit_panel",
         "agent_takkub.logs_panel",
@@ -736,7 +768,7 @@
         "agent_takkub.app"
       ],
       "fan_in": 1,
-      "fan_out": 21
+      "fan_out": 22
     },
     {
       "module": "agent_takkub.mcp_bridge",
@@ -762,6 +794,7 @@
         "agent_takkub.config",
         "agent_takkub.disk_usage",
         "agent_takkub.exec_mode",
+        "agent_takkub.graft_autobuild",
         "agent_takkub.headless_pane",
         "agent_takkub.lead_context",
         "agent_takkub.lead_draft_state",
@@ -793,7 +826,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 6,
-      "fan_out": 28
+      "fan_out": 29
     },
     {
       "module": "agent_takkub.orchestrator_text",
@@ -1818,6 +1851,7 @@
       "imports": [
         "agent_takkub._win_console",
         "agent_takkub.config",
+        "agent_takkub.graft_store",
         "agent_takkub.pane_tools_policy",
         "agent_takkub.roles"
       ],
@@ -1836,7 +1870,7 @@
         "agent_takkub.settings_window"
       ],
       "fan_in": 12,
-      "fan_out": 4
+      "fan_out": 5
     },
     {
       "module": "agent_takkub.skill_audit",

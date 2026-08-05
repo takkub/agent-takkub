@@ -69,9 +69,30 @@ worktrees/
 # graphify knowledge-graph output (generated)
 graphify-out/
 
-# graft regenerates src/agent_takkub/.ignore on every `graft build` with
-# `!graft/`, re-admitting its 141 generated cards to ripgrep (stale line
-# numbers, doubles every grep hit). We ship src/agent_takkub/.rgignore
-# instead — it outranks .ignore and graft never touches it — so the
-# regenerated .ignore is pure local noise. Never track it.
-src/agent_takkub/.ignore
+# graft's externalized code-graph store (#146 follow-up) — graft_store.py.
+# Lives under the user's home dir (~/.agent-takkub/graft-graphs/<instance>/),
+# never under DATA_HOME/this repo — a dev-checkout regression (found
+# 2026-08-05) had it default to DATA_HOME, which for a dev checkout equals
+# REPO_ROOT, so the store landed INSIDE this very repo whenever agent-takkub
+# was itself a configured project; that's what caused the `.ignore`
+# un-ignore rule below to actually fire. Fixed in graft_store.py, but this
+# pattern stays as a defensive backstop against any future regression of
+# the same kind (a store nested back inside the tree) — not because it
+# fires routinely anymore.
+graft-graphs/
+
+# `graft build` regenerates a `.ignore` next to whatever it just indexed, to
+# re-admit its own generated output to ripgrep, WHEN the `--dir` store ends
+# up nested inside the indexed target (see the graft-graphs/ comment above
+# for how that happened here). Two places that pattern could land in this
+# repo, neither ever hand-authored by us:
+#   * src/agent_takkub/.ignore — from the original in-place pilot build; it
+#     re-admits graft's 141 generated cards to ripgrep (stale line numbers,
+#     doubles every grep hit), which is why we ship src/agent_takkub/.rgignore
+#     instead — .rgignore outranks .ignore and graft never touches it.
+#   * ./.ignore (repo root) — written back whenever the graft-graphs/ store
+#     regresses to living inside the tree (see above); now a defensive
+#     backstop, not an expected boot-time artifact.
+# Unanchored so it covers both and any future build target — we author our
+# ripgrep excludes as .rgignore, so no .ignore in this tree is ever ours.
+.ignore

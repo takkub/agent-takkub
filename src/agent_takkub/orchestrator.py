@@ -624,6 +624,18 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             warm_graft_mcp()
         except Exception as e:
             _log_event("graft_mcp_init_error", error=repr(e))
+        # Auto-run `graft build` for every project so the MCP above actually
+        # has a graph to answer from instead of returning graceful-but-empty
+        # results until the user finds out they need to run the CLI by hand.
+        # Background threads, capped concurrency, per-dir single-flight — see
+        # graft_autobuild.py. Non-fatal: a build failure here never blocks
+        # cockpit startup.
+        try:
+            from .graft_autobuild import build_all_projects_async
+
+            build_all_projects_async()
+        except Exception as e:
+            _log_event("graft_autobuild_boot_error", error=repr(e))
         # Merge user's ~/.claude.json mcpServers (obsidian-vault, etc.)
         # into shared-mcp.json so every pane inherits them automatically.
         # Browser MCP entries win on name collision. Non-fatal: failure logs
@@ -2144,6 +2156,18 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         # otherwise safe-remove the empty worktree.
         if had_worktree:
             self._finalize_worktree(project_ns, from_role, had_worktree)
+        else:
+            # graft code-graph refresh (debounced): the pane wrote directly
+            # into the project's tracked cwd (not a worktree — those are a
+            # throwaway checkout under DATA_HOME/worktrees/ that this must
+            # never touch), so the graph there just went stale. Best-effort,
+            # never blocks the done() report.
+            try:
+                from .graft_autobuild import schedule_rebuild_after_done
+
+                schedule_rebuild_after_done(getattr(pane, "_session_cwd", None))
+            except Exception:
+                pass
 
         # Auto-chain handoff: if this pane was tagged --auto-chain at
         # assign time, and it was the LAST pending auto-chain pane in

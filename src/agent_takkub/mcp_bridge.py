@@ -206,20 +206,25 @@ def _toml_literal(value: object) -> str:
     raise TypeError(f"mcp_bridge: unsupported TOML literal type {type(value)!r}")
 
 
-def _role_mcp_servers(base_role: str, shard_idx: int | None, project_ns: str) -> dict[str, dict]:
+def _role_mcp_servers(
+    base_role: str, shard_idx: int | None, project_ns: str, cwd: str | None = None
+) -> dict[str, dict]:
     """Resolve the role's effective MCP server set as a plain dict.
 
     Delegates entirely to `shared_dev_tools.browser_profile_mcp_config_path`
-    — the same role-allowlist + browser-profile-isolation resolution
-    claude's injection already used — so every provider agrees on "what
-    MCPs does this role get" from one place. Returns `{}` on no policy,
-    no master config yet, or any read error (never raises — MCP
-    injection is a nice-to-have, not a spawn-blocking dependency).
+    — the same role-allowlist + browser-profile-isolation + per-pane graft
+    `--dir` resolution claude's injection already used — so every provider
+    agrees on "what MCPs does this role get" from one place. *cwd* (the
+    pane's own working directory) is what lets graft's `--dir` point at the
+    right externalized graph store (#146 follow-up); omitting it just means
+    graft's args stay untemplated. Returns `{}` on no policy, no master
+    config yet, or any read error (never raises — MCP injection is a
+    nice-to-have, not a spawn-blocking dependency).
     """
     try:
         from .shared_dev_tools import browser_profile_mcp_config_path
 
-        cfg_path = browser_profile_mcp_config_path(base_role, shard_idx, project_ns)
+        cfg_path = browser_profile_mcp_config_path(base_role, shard_idx, project_ns, cwd)
     except Exception:
         return {}
     if not cfg_path:
@@ -232,13 +237,16 @@ def _role_mcp_servers(base_role: str, shard_idx: int | None, project_ns: str) ->
     return servers if isinstance(servers, dict) else {}
 
 
-def _claude_mcp_argv(base_role: str, shard_idx: int | None, project_ns: str) -> list[str]:
+def _claude_mcp_argv(
+    base_role: str, shard_idx: int | None, project_ns: str, cwd: str | None = None
+) -> list[str]:
     """`--mcp-config <path> --strict-mcp-config`, or `[]` if the role has
-    no MCPs — byte-identical to the pre-#100 inline spawn_engine.py code."""
+    no MCPs — byte-identical to the pre-#100 inline spawn_engine.py code
+    (aside from now threading *cwd* through for graft's per-pane `--dir`)."""
     try:
         from .shared_dev_tools import browser_profile_mcp_config_path
 
-        cfg_path = browser_profile_mcp_config_path(base_role, shard_idx, project_ns)
+        cfg_path = browser_profile_mcp_config_path(base_role, shard_idx, project_ns, cwd)
     except Exception:
         cfg_path = None
     if not cfg_path:
@@ -262,7 +270,7 @@ def _codex_mcp_argv(
     """
     from .shared_dev_tools import role_mcp_allowlist
 
-    servers = _role_mcp_servers(base_role, shard_idx, project_ns)
+    servers = _role_mcp_servers(base_role, shard_idx, project_ns, cwd)
     argv: list[str] = []
 
     # `role_mcp_allowlist` returning None means "no cockpit MCP policy for
@@ -344,7 +352,7 @@ def mcp_argv_for_provider(
         return []
     variant = spec.mcp_adapter_variant
     if variant == "strict":
-        return _claude_mcp_argv(base_role, shard_idx, project_ns)
+        return _claude_mcp_argv(base_role, shard_idx, project_ns, cwd)
     if variant == "session_override":
         return _codex_mcp_argv(
             base_role,

@@ -44,6 +44,11 @@ os.environ.setdefault("TAKKUB_ALLOW_MULTI", "1")
 # belt-and-suspenders layer (monkeypatch) in case a test explicitly clears
 # this env var.
 os.environ.setdefault("TAKKUB_SKIP_MCP_WARM", "1")
+# Same rationale as TAKKUB_SKIP_MCP_WARM above, for graft_autobuild.py:
+# Orchestrator() construction and done() both trigger real `graft build`
+# subprocesses otherwise — a full pytest run would spawn dozens of node
+# processes across every projects.json path.
+os.environ.setdefault("TAKKUB_SKIP_GRAFT_BUILD", "1")
 # Browser-role spawn tests mock the PTY and must never launch a real Chrome.
 # NativeChromeManager itself is tested directly with subprocess/CDP mocks.
 os.environ.setdefault("TAKKUB_SKIP_NATIVE_CHROME", "1")
@@ -144,9 +149,24 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
     # during the suite.
     monkeypatch.setenv("TAKKUB_SKIP_MCP_WARM", "1")
     monkeypatch.setenv("TAKKUB_SKIP_NATIVE_CHROME", "1")
+    monkeypatch.setenv("TAKKUB_SKIP_GRAFT_BUILD", "1")
     sdt = _maybe_module("agent_takkub.shared_dev_tools", force=True)
     if sdt is not None:
         monkeypatch.setattr(sdt, "warm_browser_mcps", lambda: None, raising=False)
+    gab = _maybe_module("agent_takkub.graft_autobuild", force=True)
+    if gab is not None:
+        monkeypatch.setattr(gab, "build_all_projects_async", lambda: None, raising=False)
+
+    # graft_store.GRAFT_STORE_ROOT defaults to DATA_HOME/"graft-graphs" —
+    # for THIS repo's own dev checkout, DATA_HOME == REPO_ROOT (config.py's
+    # `_resolve_data_home`), so an unpatched test calling `_run_build`/
+    # `graph_store_dir` for real would create `graft-graphs/` inside the
+    # actual agent-takkub working tree — exactly the "writes into the repo
+    # it's building for" bug #146's fix exists to prevent, just aimed at our
+    # own repo instead of a user's. Redirect to the isolated runtime dir.
+    gst = _maybe_module("agent_takkub.graft_store", force=True)
+    if gst is not None:
+        monkeypatch.setattr(gst, "GRAFT_STORE_ROOT", runtime / "graft-graphs", raising=False)
 
     yield
 

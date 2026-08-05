@@ -46,6 +46,7 @@ from collections.abc import Iterable
 
 from ._win_console import SUBPROCESS_NO_WINDOW
 from .config import RUNTIME_DIR
+from .graft_store import graph_store_dir, write_store_manifest
 from .pane_tools_policy import effective_mcps
 
 _log = logging.getLogger(__name__)
@@ -134,16 +135,22 @@ BROWSER_MCPS: dict = {
 # on a fresh install and tests assert that — mixing graft in would break
 # that invariant for a tool that isn't a browser.
 #
-# `graft mcp [dir]` serves the graph rooted at `dir` (default ".") over
-# stdio. Since npx inherits the spawning pane's cwd, the bare "." resolves
-# to whichever project the pane is running in — no per-pane cwd templating
-# needed (unlike the browser MCPs' persistent --user-data-dir dance).
+# `graft mcp` serves the graph over stdio. `GRAFT_MCP` below holds the bare
+# template with NO `--dir`; `browser_profile_mcp_config_path` templates a
+# per-pane `--dir <store>` in front of the `mcp` subcommand at spawn time
+# (mirroring its browser-profile `--user-data-dir` dance), where *store* is
+# `graft_store.graph_store_dir(<pane's own cwd>)` — the SAME external,
+# hash-keyed location `graft_autobuild.py` builds into (#146 follow-up: the
+# graph must never live inside the target repo, see graft_store.py's module
+# docstring). A pane whose provider bridge has no cwd to template with (or
+# whose role has no cwd-aware bridge) falls back to the untemplated form,
+# which resolves relative to npx's inherited cwd same as before.
 #
 # Confirmed empirically 2026-08-05 (this task, direct stdio JSON-RPC probe):
-# `graft mcp` in a directory with no `graft/` built does NOT crash or hang —
-# a tool call returns a graceful "no matching nodes ... try `graft build`"
-# text result (isError: false). So a project that hasn't run `graft build`
-# yet just gets empty-but-valid answers, never a wedged/crashed pane.
+# `graft mcp` pointed at a store with no graph built yet does NOT crash or
+# hang — a tool call returns a graceful "no matching nodes ... try `graft
+# build`" text result (isError: false). So a project that hasn't run `graft
+# build` yet just gets empty-but-valid answers, never a wedged/crashed pane.
 #
 # Pinned to the version docs/audit/2026-08-05-graft-pilot.md evaluated —
 # see _PLAYWRIGHT_MCP_VERSION's comment above for why pinning (not @latest)
@@ -345,12 +352,20 @@ def _clear_stale_singleton_locks(profile_dir: pathlib.Path) -> None:
 
 
 def browser_profile_mcp_config_path(
-    base_role: str, shard_idx: int | None, project: str
+    base_role: str, shard_idx: int | None, project: str, cwd: str | None = None
 ) -> str | None:
-    """Browser-profile-isolated MCP config: identical to the role variant, but
-    each browser MCP (playwright, chrome-devtools) gets a PERSISTENT per-pane
-    user-data-dir — via that browser's own profile flag (``--user-data-dir`` for
-    playwright, ``--userDataDir`` for chrome-devtools). Two wins:
+    """Per-pane-templated MCP config: identical to the role variant, but
+
+      * each browser MCP (playwright, chrome-devtools) gets a PERSISTENT
+        per-pane user-data-dir — via that browser's own profile flag
+        (``--user-data-dir`` for playwright, ``--userDataDir`` for
+        chrome-devtools);
+      * the graft MCP (if present for this role) gets a per-pane ``--dir
+        <store>`` pointed at *cwd*'s own externalized graph store (#146
+        follow-up — see ``graft_store.py``'s module docstring for why the
+        graph must never live inside the target repo).
+
+    Browser-profile wins:
 
       * the browser **remembers its session/cookies across runs** instead of
         starting from playwright's default ephemeral temp profile — so a logged-in
@@ -359,14 +374,19 @@ def browser_profile_mcp_config_path(
         profile lock (#39 — only shard #1 could drive the browser, the rest hit
         "profile locked by another shard").
 
-    The dir is keyed per (project, base_role[, shard], browser). ``shard_idx`` is
-    None for a normal (non-fan-out) pane and an int for a shard, which is the only
-    difference between the two callers — both get a persistent isolated profile.
+    The browser profile dir is keyed per (project, base_role[, shard], browser).
+    ``shard_idx`` is None for a normal (non-fan-out) pane and an int for a shard,
+    which is the only difference between the two callers — both get a persistent
+    isolated profile. The graft store, by contrast, is keyed by *cwd* itself
+    (``graft_store.graph_store_dir``) — a pane's code graph is a property of
+    which directory it's reading, not of which role/shard is reading it, so two
+    roles sharing one cwd correctly share one store.
 
-    Non-browser MCPs pass through untouched. Returns the path to a generated
+    Other MCPs pass through untouched. Returns the path to a generated
     ``shared-mcp-<project>-<role>[-shard<N>].json``; falls back to the plain
-    role-variant path when the role has no browser MCP (nothing to isolate) or on
-    any read/write error (a shared profile still beats no MCPs at all).
+    role-variant path when there is nothing to template (no browser MCP and no
+    graft-with-cwd for this role) or on any read/write error (an untemplated
+    config still beats no MCPs at all).
     """
     base_path = shared_mcp_config_path_for_role(base_role)
     if base_path is None:
@@ -377,8 +397,9 @@ def browser_profile_mcp_config_path(
         return base_path
     servers = data.get("mcpServers") or {}
     browser_names = [n for n in servers if n in _BROWSER_MCP_NAMES]
-    if not browser_names:
-        return base_path  # no browser MCP for this role — nothing to isolate
+    has_graft = "graft" in servers and cwd
+    if not browser_names and not has_graft:
+        return base_path  # nothing this role's config needs templated
 
     # Sanitize the project namespace for use in file/dir names.
     safe_project = re.sub(r"[^A-Za-z0-9._-]", "_", project) or "default"
@@ -403,6 +424,34 @@ def browser_profile_mcp_config_path(
         _clear_stale_singleton_locks(profile_dir)
         cfg["args"] = [*args, flag, str(profile_dir)]
         servers[name] = cfg
+
+    if has_graft:
+        cfg = dict(servers["graft"])
+        args = list(cfg.get("args") or [])
+        if "--dir" not in args:  # idempotent — already templated
+            target = pathlib.Path(cwd)
+            store = graph_store_dir(target)
+            try:
+                store.mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                _log.warning(
+                    "browser_profile_mcp_config_path: could not create graft store %s: %s",
+                    store,
+                    e,
+                )
+            write_store_manifest(target)
+            # Global `--dir` must precede the subcommand (verified against
+            # the real CLI, see graft_store.py) — insert right before "mcp"
+            # rather than appending blindly, so future extra subcommand
+            # args stay in the right position.
+            try:
+                idx = args.index("mcp")
+                args = [*args[:idx], "--dir", str(store), *args[idx:]]
+            except ValueError:
+                args = [*args, "--dir", str(store)]
+            cfg["args"] = args
+            servers["graft"] = cfg
+
     data["mcpServers"] = servers
 
     out = SHARED_MCP_FILE.parent / f"shared-mcp-{safe_project}-{base_role}{shard_suffix}.json"

@@ -4,6 +4,28 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.47] - 2026-08-05
+
+### Added (เพิ่ม)
+- **`graft build` รันเองอัตโนมัติแล้ว** — 1.0.46 เสียบ graft MCP ไว้แต่ไม่มีอะไรสร้าง graph ให้ ฟีเจอร์เลยเงียบไปเฉย ๆ จนกว่า user จะรู้เองว่าต้องรันคำสั่ง · ตอนนี้ `graft_autobuild.py` ยิงให้ 3 จังหวะ: **ตอน cockpit boot** (ทุกโปรเจกต์ใน `projects.json`), **ตอนเปิด/สลับ project tab** (เฉพาะที่ยังไม่มี graph), **หลัง pane รายงาน `done`** (debounce 20s กัน shard เสร็จพร้อมกันแล้วยิงซ้ำ)
+  - background thread ล้วน + timeout 600s/build · semaphore คุม concurrency 3 · single-flight ต่อ directory · **boot ไม่หน่วง** (วัดจริง 300-460ms เท่า baseline)
+  - rebuild ที่มี cache แล้ว = **1.02s** (141 ไฟล์, 136 replay จาก cache) → ไม่ต้องเพิ่ม git-diff gating
+  - skip เงียบถ้าไม่มี graft CLI · skip worktree (#81) · **structural only ไม่มี `--deep`** (ไม่ต้องมี API key ไม่มีค่าใช้จ่าย) · ไม่แตะ `graft init`
+  - kill switch `TAKKUB_SKIP_GRAFT_BUILD` (เหมือน `TAKKUB_SKIP_MCP_WARM`) — conftest ตั้งให้ทุก test run อยู่แล้ว
+- **`takkub disk` เห็น graph แล้ว** — category `graft-graphs` แยกออกมา, ตัวที่ path หายจาก `projects.json` แล้วขึ้นเป็น orphan ให้ `prune` ลบได้ (ไม่แตะตัวที่ยัง live)
+
+### Fixed (แก้)
+- **graft เขียนไฟล์ลง repo ที่ไม่ใช่ของ cockpit** — auto-build sweep วิ่งข้ามทุก path ที่ตั้งค่าไว้ (เครื่องทดสอบ: **46 โฟลเดอร์ จาก 27 โปรเจกต์**) ซึ่งส่วนใหญ่เป็น git repo ของ user เอง · `graft build` แบบไม่มี `--dir` เขียน `graft/`, `.gitignore`, `.ignore` ลง target ตรง ๆ → tree ของ user เลิกสะอาดทันทีที่เปิด cockpit และ `git add -A` เผลอ ๆ ก็ commit ไฟล์ของ cockpit ติดไป
+  - `graft_store.py` (ใหม่) — graph ย้ายไปเก็บนอก target ทั้งหมดที่ `~/.agent-takkub/graft-graphs/<instance-hash>/<target-hash>/` ผ่าน `--dir` · MCP inject `--dir` ต่อ pane ให้ตรงกัน (ผ่าน `mcp_bridge` ครบทั้ง claude `strict` และ codex `session_override`)
+  - key = **SHA-256 ของ absolute path ที่ normalize แล้ว** ไม่ใช้ `decode_project_dir` หรือ encoding แบบ lossy (โปรเจกต์ที่ชื่อมี `-` `_` `.` หรือเว้นวรรค จะ round-trip ผิดแล้วชี้ graph ผิดตัวแบบเงียบ ๆ) · บน Windows case-fold ก่อน hash ด้วย ไม่งั้น path เดียวกันคนละตัวพิมพ์จะแตกเป็น 2 store · มี `source.json` manifest ให้ย้อนดูได้ว่า hash ไหนคือโปรเจกต์ไหน
+  - **แยกต่อ cockpit instance โดยตั้งใจ** (`<instance-hash>`) — single-flight ปัจจุบันเป็น `threading.Lock` ระดับโปรเซส ถ้า dev กับ prod cockpit (รันพร้อมกันได้บนเครื่องเดียว) ใช้ store ร่วมกันจะเขียนทับกันโดยไม่มีอะไรกัน แล้ว agent จะเชื่อ graph ที่พังครึ่ง ๆ · จะ share ต้องทำ **cross-process file lock** ก่อน — เขียนเตือนไว้ใน `graft_store.py` แล้ว
+- **cockpit เขียนไฟล์ลง repo ตัวเอง** — `GRAFT_STORE_ROOT` เดิมอิง `DATA_HOME` ซึ่งใน dev checkout `DATA_HOME == REPO_ROOT` → store ตกในรีโปตัวเอง → `graft build` เขียน `.ignore` ที่ราก **และ append เข้า `.gitignore` ที่ track อยู่** ทุก boot · ย้าย store ออกนอกรีโปเสมอ (ไม่อิง `DATA_HOME` อีก) แก้ทั้งสองอาการที่ต้นทาง
+
+### Known gaps (ยังปิดไม่ได้)
+- **ยังไม่ได้ smoke pane codex ตัวจริง** (ค้างจาก 1.0.46) — qa ไม่มีสิทธิ์ `takkub assign` และ codex ติด token limit · unit test คุมไว้
+- dev กับ prod cockpit ยัง build graph คนละชุด (ตั้งใจ — ดูเหตุผลด้านบน) กินดิสก์ 2 เท่า
+- `codex --version` ยังยิงทุก spawn (363ms) ยังไม่ cache ระดับ session
+
 ## [1.0.46] - 2026-08-05
 
 ### Added (เพิ่ม)

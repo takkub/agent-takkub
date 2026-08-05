@@ -1,6 +1,6 @@
 [project]
 name = "agent-takkub"
-version = "1.0.46"
+version = "1.0.47"
 description = "Desktop cockpit for orchestrating Claude Code dev teammates on Windows"
 requires-python = ">=3.11"
 license = "MIT"
@@ -189,6 +189,7 @@ forbidden_modules = [
     "agent_takkub.project_rules",
     "agent_takkub.role_memory",
     "agent_takkub.shared_dev_tools",
+    "agent_takkub.graft_autobuild",
     "agent_takkub.user_profile",
     "agent_takkub.skill_audit",
     "agent_takkub.skill_scan",
