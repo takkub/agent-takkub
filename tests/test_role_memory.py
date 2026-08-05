@@ -144,8 +144,9 @@ class TestCuration:
 
     def test_curation_is_idempotent(self, isolated_role_memory: pathlib.Path) -> None:
         text = ensure_role_memory("p", "qa").read_text(encoding="utf-8")
-        new, changed = rm._curate_text(text)
+        new, changed, archived = rm._curate_text(text)
         assert changed is False and new == text
+        assert archived == []
 
     def test_literal_braces_preserved(self, isolated_role_memory: pathlib.Path) -> None:
         path = ensure_role_memory("p", "devops")
@@ -234,6 +235,125 @@ class TestCuration:
         text = ensure_role_memory("p", "qa").read_text(encoding="utf-8")
         assert "2-3 บรรทัด" in text
         assert "ห้าม paste done report" in text
+
+
+class TestArchive:
+    """L2 archive (#151): entries curation truncates/trims out of the L1 file
+    are appended in FULL to a sibling ``<role>-archive.md`` before being cut —
+    and that sibling file is never the one a spawn prompt inlines."""
+
+    def test_truncated_entry_full_text_archived(self, isolated_role_memory: pathlib.Path) -> None:
+        path = ensure_role_memory("p", "backend")
+        essay = "- fix (2026-08-04): " + ("root cause analysis word " * 60) + ". more detail after."
+        path.write_text(path.read_text(encoding="utf-8") + "\n" + essay + "\n", encoding="utf-8")
+        ensure_role_memory("p", "backend")  # curate → truncate L1 + archive full text
+        archive = rm.role_memory_archive_path("p", "backend")
+        assert archive.exists()
+        archived_text = archive.read_text(encoding="utf-8")
+        assert "more detail after" in archived_text  # the part L1 cut away
+
+    def test_trimmed_entry_full_text_archived(
+        self, isolated_role_memory: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(rm, "_MEM_MAX_ENTRIES", 5)
+        path = ensure_role_memory("p", "backend")
+        notes = "".join(f"\n- note number {i:03d}\n" for i in range(20))
+        path.write_text(path.read_text(encoding="utf-8") + notes, encoding="utf-8")
+        ensure_role_memory("p", "backend")
+        l1_text = path.read_text(encoding="utf-8")
+        assert "number 000" not in l1_text  # trimmed out of L1 as before (#43)
+        archive_text = rm.role_memory_archive_path("p", "backend").read_text(encoding="utf-8")
+        assert "number 000" in archive_text  # ...but the full entry survives in L2
+
+    def test_archive_not_injected_into_spawn_content(
+        self, isolated_role_memory: pathlib.Path
+    ) -> None:
+        # spawn_engine inlines exactly `ensure_role_memory(...)`'s return path's
+        # content into the prompt — prove that content never contains what got
+        # archived, and that the archive lives at a different path entirely.
+        path = ensure_role_memory("p", "backend")
+        essay = "- fix: " + ("root cause analysis word " * 60) + ". tail text that must not leak."
+        assert len(essay) > rm._MEM_MAX_ENTRY_CHARS
+        path.write_text(path.read_text(encoding="utf-8") + "\n" + essay + "\n", encoding="utf-8")
+        mem_path = ensure_role_memory("p", "backend")
+        injected = mem_path.read_text(encoding="utf-8")
+        assert "tail text that must not leak" not in injected
+        archive_path = rm.role_memory_archive_path("p", "backend")
+        assert archive_path != mem_path
+        assert "tail text that must not leak" in archive_path.read_text(encoding="utf-8")
+
+    def test_dedup_drop_not_archived(self, isolated_role_memory: pathlib.Path) -> None:
+        # A duplicate bullet dedup drops is a verbatim repeat of the kept one —
+        # nothing lost, so it must NOT create an archive file at all.
+        path = ensure_role_memory("p", "qa")
+        path.write_text(
+            path.read_text(encoding="utf-8") + "\n- dupe entry text\n- dupe entry text\n",
+            encoding="utf-8",
+        )
+        ensure_role_memory("p", "qa")
+        assert not rm.role_memory_archive_path("p", "qa").exists()
+
+    def test_archive_timestamp_is_single_line_iso_date(
+        self, isolated_role_memory: pathlib.Path
+    ) -> None:
+        path = ensure_role_memory("p", "backend")
+        essay = "- fix: " + ("root cause analysis word " * 60) + ". overflow tail."
+        assert len(essay) > rm._MEM_MAX_ENTRY_CHARS
+        path.write_text(path.read_text(encoding="utf-8") + "\n" + essay + "\n", encoding="utf-8")
+        ensure_role_memory("p", "backend")
+        archive_text = rm.role_memory_archive_path("p", "backend").read_text(encoding="utf-8")
+        stamps = [ln for ln in archive_text.splitlines() if ln.startswith("### ")]
+        assert stamps, archive_text
+        for s in stamps:
+            date_part = s.removeprefix("### ").strip()
+            assert len(date_part) == 10 and date_part.count("-") == 2  # "YYYY-MM-DD"
+
+    def test_archive_caps_and_rotates_oldest(
+        self, isolated_role_memory: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        archive_path = rm.role_memory_archive_path("p", "backend")
+        rm._archive_entries("p", "backend", ["- oldest entry marker AAA " + "x" * 200])
+        size_after_one = len(archive_path.read_text(encoding="utf-8").encode("utf-8"))
+        monkeypatch.setattr(rm, "_ARCHIVE_MAX_BYTES", size_after_one + 50)
+        rm._archive_entries("p", "backend", ["- newest entry marker BBB " + "y" * 200])
+        text = archive_path.read_text(encoding="utf-8")
+        assert len(text.encode("utf-8")) <= size_after_one + 50
+        assert "newest entry marker BBB" in text
+        assert "oldest entry marker AAA" not in text
+
+    def test_l1_header_points_to_archive_and_search(
+        self, isolated_role_memory: pathlib.Path
+    ) -> None:
+        text = ensure_role_memory("p", "backend").read_text(encoding="utf-8")
+        assert "backend-archive.md" in text
+        assert "takkub search" in text
+
+    def test_archive_header_names_project_and_role(
+        self, isolated_role_memory: pathlib.Path
+    ) -> None:
+        rm._archive_entries("proj_a", "qa", ["- some archived thing"])
+        text = rm.role_memory_archive_path("proj_a", "qa").read_text(encoding="utf-8")
+        assert "qa" in text and "proj_a" in text
+
+    def test_archive_path_is_sibling_file(self, isolated_role_memory: pathlib.Path) -> None:
+        mem = rm.role_memory_path("proj_a", "backend")
+        archive = rm.role_memory_archive_path("proj_a", "backend")
+        assert archive.parent == mem.parent
+        assert archive.name == "backend-archive.md"
+        assert archive != mem
+
+    def test_archive_entries_noop_on_empty_list(self, isolated_role_memory: pathlib.Path) -> None:
+        rm._archive_entries("p", "backend", [])
+        assert not rm.role_memory_archive_path("p", "backend").exists()
+
+    def test_archive_best_effort_on_write_failure(
+        self, isolated_role_memory: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def boom(*_a, **_k):
+            raise OSError("write failed")
+
+        monkeypatch.setattr(pathlib.Path, "write_text", boom)
+        rm._archive_entries("p", "backend", ["- something"])  # must not raise
 
 
 class TestHasLearnedContent:
