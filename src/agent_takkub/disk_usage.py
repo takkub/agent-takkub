@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import stat
 import sys
@@ -389,6 +390,73 @@ def scan_node_modules(data_home: Path, mgr: WorktreeManager | None = None) -> di
 # ── graft graph store (#146 follow-up) ───────────────────────────────────────
 
 
+# H1(c) — a live graft-graphs store had no reclaim path at all and no
+# visibility: `_prune_graft_graphs` only ever touched orphans, so a store
+# that grew unbounded (measured: 507 MB / 4954 files for one project, 72%
+# of it gitignored bulk graft's own walker doesn't recognize — see
+# graft_autobuild.py's module docstring) sat there forever with nothing in
+# `takkub disk`'s output calling it out. Chosen to match `node-modules`'s
+# `--include-live` precedent below (`_prune_node_modules`) rather than
+# invent a second reclaim UX.
+_GRAFT_STORE_WARN_BYTES = 200 * 1024 * 1024
+
+# H2 migration (2026-08-05 cross-OS audit) — pre-fix `graft_store.py` keyed
+# both the instance dir and each per-target store dir with a FULL 64-hex-char
+# SHA-256 digest; H2 truncated both to 16 hex chars to reclaim Windows
+# MAX_PATH budget. A 64-char name can therefore never be produced by current
+# code, so it unambiguously identifies pre-fix leftovers — unlike a same-
+# length (16-char) sibling instance dir, which might be a second cockpit
+# instance that is genuinely still live and must never be touched here.
+_LEGACY_KEY_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _legacy_orphan_entries() -> list[dict]:
+    """Pre-H2 store dirs left behind by the 64-hex-char key format — see
+    `_LEGACY_KEY_RE`'s comment. `graph_store.GRAFT_STORE_ROOT` is now
+    16-char-keyed, so these sit as siblings one level up
+    (`GRAFT_STORE_ROOT.parent`) and were previously invisible to
+    `scan_graft_graphs` entirely (it only ever iterated inside the CURRENT
+    instance's root) — silently unreclaimable garbage otherwise, exactly
+    what H2 requires a migration path NOT leave behind."""
+    parent = graft_store.GRAFT_STORE_ROOT.parent
+    entries: list[dict] = []
+    try:
+        instance_dirs = [p for p in parent.iterdir() if p.is_dir()]
+    except OSError:
+        return entries
+    for inst_dir in instance_dirs:
+        if not _LEGACY_KEY_RE.match(inst_dir.name):
+            continue  # current-format (16-char) — may be a live sibling instance, leave alone
+        try:
+            target_dirs = [p for p in inst_dir.iterdir() if p.is_dir()]
+        except OSError:
+            target_dirs = []
+        if not target_dirs:
+            size, count = _dir_stats(inst_dir)
+            entries.append(
+                {
+                    "path": str(inst_dir),
+                    "source": None,
+                    "orphan": True,
+                    "size_bytes": size,
+                    "file_count": count,
+                }
+            )
+            continue
+        for store in target_dirs:
+            size, count = _dir_stats(store)
+            entries.append(
+                {
+                    "path": str(store),
+                    "source": graft_store.read_store_manifest(store),
+                    "orphan": True,
+                    "size_bytes": size,
+                    "file_count": count,
+                }
+            )
+    return entries
+
+
 def _configured_graph_keys() -> set[str]:
     """`graph_key(...)` for every path currently configured across every
     project in projects.json, regardless of whether that path still exists
@@ -425,6 +493,15 @@ def scan_graft_graphs(data_home: Path) -> dict:
     renamed, which mints a different key) shows up as orphan even though
     its bytes are still sitting on disk.
 
+    Each entry's size also folds in its paired staging mirror under
+    `graft_store.GRAFT_STAGING_ROOT` (same `graph_key`, H1 follow-up,
+    2026-08-06 — `graft_autobuild.staging_dir_for` persists a git-filtered
+    copy of the source tree alongside the graph itself now) — one combined
+    number per project rather than a second category the user has to
+    reason about separately. A store with no paired staging dir (pre-H1-
+    follow-up leftover, or a build that failed before staging synced)
+    contributes 0 extra bytes, not an error.
+
     *data_home* is accepted (and left unused) only to keep this function's
     signature uniform with its `scan_*`/`_prune_*` siblings in this module —
     the store root is never DATA_HOME-relative (see `graft_store.py`'s
@@ -435,6 +512,18 @@ def scan_graft_graphs(data_home: Path) -> dict:
     entries: list[dict] = []
     orphan_bytes = orphan_count = 0
     live_bytes = live_count = 0
+    oversized_live: list[dict] = []
+
+    # H2 migration: pre-fix 64-hex-char-keyed leftovers sit one level up
+    # from `root` regardless of whether `root` (the CURRENT instance's
+    # store) exists yet — check independently of the `root.is_dir()` guard
+    # below, or a fresh reinstall with old leftovers but no new build yet
+    # would never see them either.
+    for legacy in _legacy_orphan_entries():
+        entries.append(legacy)
+        orphan_bytes += legacy["size_bytes"]
+        orphan_count += 1
+
     if not root.is_dir():
         return {
             "entries": entries,
@@ -442,6 +531,7 @@ def scan_graft_graphs(data_home: Path) -> dict:
             "orphan_count": orphan_count,
             "live_bytes": live_bytes,
             "live_count": live_count,
+            "oversized_live": oversized_live,
         }
     configured_keys = _configured_graph_keys()
     try:
@@ -450,6 +540,11 @@ def scan_graft_graphs(data_home: Path) -> dict:
         store_dirs = []
     for store in store_dirs:
         size, count = _dir_stats(store)
+        staging = graft_store.GRAFT_STAGING_ROOT / store.name
+        if staging.is_dir():
+            stage_size, stage_count = _dir_stats(staging)
+            size += stage_size
+            count += stage_count
         is_orphan = store.name not in configured_keys
         entries.append(
             {
@@ -466,12 +561,15 @@ def scan_graft_graphs(data_home: Path) -> dict:
         else:
             live_bytes += size
             live_count += 1
+            if size > _GRAFT_STORE_WARN_BYTES:
+                oversized_live.append({"path": str(store), "size_bytes": size})
     return {
         "entries": entries,
         "orphan_bytes": orphan_bytes,
         "orphan_count": orphan_count,
         "live_bytes": live_bytes,
         "live_count": live_count,
+        "oversized_live": oversized_live,
     }
 
 
@@ -704,16 +802,26 @@ def disk_report(data_home: Path | None = None) -> dict:
     )
 
     gg = scan_graft_graphs(home)
+    gg_detail = (
+        f"orphan {gg['orphan_bytes']} bytes ({gg['orphan_count']}) · "
+        f"live {gg['live_bytes']} bytes ({gg['live_count']}, ต้อง --include-live)"
+    )
+    if gg["oversized_live"]:
+        biggest = max(gg["oversized_live"], key=lambda e: e["size_bytes"])
+        gg_detail += (
+            f" · ⚠ {len(gg['oversized_live'])} store เกิน {_GRAFT_STORE_WARN_BYTES // (1024 * 1024)}MB "
+            f"(ใหญ่สุด {biggest['size_bytes']} bytes ที่ {biggest['path']}) — "
+            "graft ไม่รู้จัก .gitignore เอง มักมาจาก dir ที่ไม่ใช่ source จริง (H1)"
+        )
     categories.append(
         CategoryUsage(
             "graft-graphs",
             "graft-graphs/* (external code-graph store ต่อโปรเจค, #146 — orphan = path "
-            "ไม่ได้ configure ใน projects.json แล้ว, ลบอัตโนมัติได้; live เก็บไว้เสมอ)",
+            "ไม่ได้ configure ใน projects.json แล้ว, ลบอัตโนมัติได้; live ต้อง --include-live)",
             SAFE,
             gg["orphan_bytes"] + gg["live_bytes"],
             gg["orphan_count"] + gg["live_count"],
-            detail=f"orphan {gg['orphan_bytes']} bytes ({gg['orphan_count']}) · "
-            f"live {gg['live_bytes']} bytes ({gg['live_count']}, ไม่แตะ)",
+            detail=gg_detail,
         )
     )
 
@@ -776,7 +884,7 @@ def _category_level(category: str) -> str:
         "shell-snapshots": SAFE,
         "exports": REVIEW,
         "chat-history": REVIEW,
-        "graft-graphs": SAFE,  # orphan subset only — live stores are never auto-deleted
+        "graft-graphs": SAFE,  # orphan subset is safe; live subset is gated by --include-live (H1c)
     }
     return levels.get(category, NEVER)
 
@@ -1064,29 +1172,52 @@ def _prune_node_modules(
     return outcome
 
 
-def _prune_graft_graphs(home: Path, dry_run: bool) -> PruneOutcome:
-    """Delete only ORPHAN `graft-graphs/*` stores — a source path no longer
-    configured in projects.json (#146 follow-up). Live stores are never
-    touched here, no `--include-live` escape hatch needed: an orphan is
-    safe to reclaim unconditionally (worst case, re-adding the same path
-    later just triggers a fresh `graft build` into a new store).
+def _prune_graft_graphs(home: Path, dry_run: bool, include_live: bool) -> PruneOutcome:
+    """Delete ORPHAN `graft-graphs/*` stores unconditionally (a source path
+    no longer configured in projects.json, #146 follow-up — safe to reclaim
+    outright: re-adding the same path later just triggers a fresh `graft
+    build`). A LIVE store is only deleted with `--include-live` (H1(c) — a
+    live store used to have NO reclaim path at all, however large it grew;
+    same escape hatch as `node-modules`'s, since forcing a rebuild is the
+    same recoverable cost either way).
 
     *home* is accepted only for call-site uniformity with the other
     `_prune_*` functions (and threaded into `scan_graft_graphs`, which
     itself ignores it — see that function's docstring); the real safety
-    boundary for `_assert_under` is `graft_store.GRAFT_STORE_ROOT`, since
-    the store is never DATA_HOME-relative.
+    boundary for `_assert_under` is `graft_store.GRAFT_STORE_ROOT.parent`
+    (the whole `graft-graphs/` dir, every instance namespace under it) —
+    not the narrower current-instance `GRAFT_STORE_ROOT` itself, since a
+    pre-H2 legacy leftover (`scan_graft_graphs`'s `_legacy_orphan_entries`)
+    sits one level up as a sibling instance dir, still never DATA_HOME-
+    relative either way.
+
+    Deleting a store also deletes its paired staging mirror under
+    `graft_store.GRAFT_STAGING_ROOT` (same `graph_key`, H1 follow-up,
+    2026-08-06) — `entry["size_bytes"]` already folds the staging bytes in
+    (`scan_graft_graphs`), so this second removal contributes no additional
+    freed-bytes accounting, only an error entry if it fails to fully clear.
     """
-    outcome = PruneOutcome("graft-graphs", SAFE, dry_run)
+    outcome = PruneOutcome("graft-graphs", SAFE if not include_live else REVIEW, dry_run)
     gg = scan_graft_graphs(home)
     for entry in gg["entries"]:
-        if not entry["orphan"]:
-            continue
-        outcome.targets.append(entry["path"])
-        outcome.would_free_bytes += entry["size_bytes"]
-        if not dry_run:
-            p = _assert_under(Path(entry["path"]), graft_store.GRAFT_STORE_ROOT)
-            _rmtree_target(p, outcome, entry["size_bytes"])
+        if entry["orphan"] or include_live:
+            outcome.targets.append(entry["path"])
+            outcome.would_free_bytes += entry["size_bytes"]
+            if not dry_run:
+                p = _assert_under(Path(entry["path"]), graft_store.GRAFT_STORE_ROOT.parent)
+                _rmtree_target(p, outcome, entry["size_bytes"])
+                staging = graft_store.GRAFT_STAGING_ROOT / Path(entry["path"]).name
+                if staging.is_dir():
+                    staging = _assert_under(staging, graft_store.GRAFT_STAGING_ROOT)
+                    ok, leftover = robust_rmtree(staging)
+                    if not ok:
+                        outcome.errors.append(
+                            f"{staging}: staging mirror ลบไม่ครบ ({len(leftover)} รายการเหลือ)"
+                        )
+        else:
+            outcome.skipped.append(
+                f"{entry['path']}: ยัง configure อยู่ (live) — ข้าม (ใส่ --include-live เพื่อบังคับลบ)"
+            )
     return outcome
 
 
@@ -1158,7 +1289,7 @@ def prune(
         elif c == "node-modules":
             outcomes.append(_prune_node_modules(home, dry_run, include_live, mgr))
         elif c == "graft-graphs":
-            outcomes.append(_prune_graft_graphs(home, dry_run))
+            outcomes.append(_prune_graft_graphs(home, dry_run, include_live))
 
     total_would_free = sum(o.would_free_bytes for o in outcomes)
     total_freed = sum(o.freed_bytes for o in outcomes)

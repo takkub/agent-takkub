@@ -157,16 +157,23 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
     if gab is not None:
         monkeypatch.setattr(gab, "build_all_projects_async", lambda: None, raising=False)
 
-    # graft_store.GRAFT_STORE_ROOT defaults to DATA_HOME/"graft-graphs" —
-    # for THIS repo's own dev checkout, DATA_HOME == REPO_ROOT (config.py's
-    # `_resolve_data_home`), so an unpatched test calling `_run_build`/
-    # `graph_store_dir` for real would create `graft-graphs/` inside the
-    # actual agent-takkub working tree — exactly the "writes into the repo
-    # it's building for" bug #146's fix exists to prevent, just aimed at our
-    # own repo instead of a user's. Redirect to the isolated runtime dir.
+    # graft_store.GRAFT_STORE_ROOT falls back to Path.home()/".agent-takkub"
+    # exactly when DATA_HOME == REPO_ROOT (M5, graft_store.py's module
+    # docstring) — which is always true for THIS repo's own dev checkout
+    # running the suite (config.py's `_resolve_data_home`). An unpatched
+    # test calling `_run_build`/`graph_store_dir` for real would therefore
+    # write into the real `~/.agent-takkub` on the machine running pytest,
+    # not the actual agent-takkub working tree (that self-nesting case is
+    # exactly what #146/M5 avoid) — still not what a test run should touch.
+    # Redirect to the isolated runtime dir either way.
     gst = _maybe_module("agent_takkub.graft_store", force=True)
     if gst is not None:
         monkeypatch.setattr(gst, "GRAFT_STORE_ROOT", runtime / "graft-graphs", raising=False)
+        # Same reasoning as GRAFT_STORE_ROOT above, for its persistent staging
+        # sibling (H1 follow-up, 2026-08-06) — an unpatched test calling
+        # `_run_build`/`staging_dir_for` for real would otherwise write into
+        # the real `~/.agent-takkub/graft-staging`.
+        monkeypatch.setattr(gst, "GRAFT_STAGING_ROOT", runtime / "graft-staging", raising=False)
 
     yield
 

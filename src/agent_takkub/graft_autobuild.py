@@ -28,6 +28,57 @@ real regression). `graft_store.graph_store_dir(target)` derives *store* from
 a hash of *target*'s own resolved path, so each distinct target still gets
 its own isolated graph.
 
+`build` NEVER points at *target* directly (H1, 2026-08-05 cross-OS audit) —
+it points at a staging mirror of only the files `git` itself considers
+non-ignored under *target* (`_git_nonignored_files` + `_stage_files`).
+Read directly from the shipped CLI (`dist/ingest/fs.js` in
+`@nanonets/graft`): graft's own walker has no `--exclude` and does NOT
+consult `.gitignore` at all — it skips dot-directories plus one fixed
+9-name list (`node_modules`, `dist`, `build`, `out`, `target`, `vendor`,
+`coverage`, `__pycache__`, `venv`) and nothing else. Handed a real project
+root, it happily walks and parses every OTHER gitignored directory too —
+verified empirically: this repo's own `runtime/` (venvs/worktrees/scratch,
+`.gitignore` line 16, not on graft's fixed list) was 72% of a 507 MB store,
+3591 of 4954 cards, for 143 cards of actual source. Staging only what `git
+ls-files --cached --others --exclude-standard` reports makes "what gets
+indexed" match this repo's own `.gitignore` exactly — deliberately NOT
+`git archive HEAD`, which would index the last COMMIT and silently miss
+live uncommitted edits, defeating the entire point of an agent-facing index.
+A target with no git repository at all (a non-code documents/images folder
+in projects.json, L5) has nothing `git ls-files` can report, so it is
+skipped rather than indexed wholesale — same fix covers H1(a).
+
+The staging mirror lives at `graft_store.staging_dir_for(target)` and is
+PERSISTENT — it is never torn down after a build (H1 follow-up, 2026-08-06).
+The original version of this fix used a `tempfile.mkdtemp()` copy deleted in
+`_run_build`'s `finally` block, which passed every test and every manual
+build-then-check-store-size probe, but broke the very first real QUERY:
+graft's own freshness gate (`ensureFreshGraph` in its shipped
+`graph/refresh.js`) re-probes the working tree at whatever `dir` argument
+the CURRENT call was given — `graft ask`/`graft mcp [dir]` both default
+`dir` to "." (the calling process's own cwd) when not given explicitly —
+and, if that doesn't match what the graph was built from, silently rebuilds
+UNFILTERED from it before answering. A pane's `graft mcp` (no positional
+`dir`, see `shared_dev_tools.browser_profile_mcp_config_path`) defaults
+that root to the pane's own cwd — the real, gitignored-bulk-containing
+target — so with the staging copy already deleted, this fired on literally
+every query, re-inflating the store by hundreds of MB the first time any
+agent asked it a question. Verified against the real CLI: building into a
+deleted tempdir then querying with the default `dir="."` reproduces
+`[graft] refreshed the graph (N files changed) before answering` with N =
+every file under the target; building into and querying against a
+directory that stays in place with the same content produces no refresh at
+all. Fix: keep the mirror around, and thread its path through as the
+explicit positional `dir` on every build AND every query
+(`shared_dev_tools.browser_profile_mcp_config_path` appends it after `mcp`)
+so freshness always compares against the SAME stable, filtered root — see
+`graft_store.staging_dir_for`'s docstring for the full mechanism and the
+staleness trade-off this accepts. Each build re-syncs the mirror
+(`_sync_staging`): existing files are refreshed in place (unlink-then-relink
+so a rename-over-write editor save is picked up, not silently stuck on the
+old inode) and files no longer in the current non-ignored set are removed,
+so the mirror never accumulates stale content across renames/deletes.
+
 Why a project's `paths` entries are built individually rather than once at
 the project's common root: the graft MCP is spawned with a per-pane `--dir
 <store>` templated from the SAME pane's own cwd (`shared_dev_tools.
@@ -58,13 +109,21 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
 
 from ._win_console import SUBPROCESS_NO_WINDOW
 from .config import load_projects
-from .graft_store import graph_store_dir, write_store_manifest
+from .graft_store import (
+    graft_cli_path,
+    graph_store_dir,
+    has_completed_build,
+    mark_build_complete,
+    staging_dir_for,
+    write_store_manifest,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -96,7 +155,33 @@ def _skip_env() -> bool:
 
 
 def _graft_cli() -> str | None:
-    return shutil.which("graft.cmd") or shutil.which("graft")
+    return graft_cli_path()
+
+
+def _dir_stats(root: Path) -> tuple[int, int]:
+    """Best-effort `(total_bytes, file_count)` for *root* — mirrors
+    `disk_usage._dir_stats`'s fail-soft posture but kept local so this
+    module never has to import the UI-adjacent `disk_usage` (its own
+    import-linter contract forbids that direction anyway)."""
+    total = 0
+    count = 0
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for name in filenames:
+            try:
+                total += (Path(dirpath) / name).stat().st_size
+            except OSError:
+                continue
+            count += 1
+    return total, count
+
+
+def _fmt_bytes(n: int) -> str:
+    size = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.1f}{unit}"
+        size /= 1024
+    return f"{size:.1f}TB"
 
 
 def _dirs_for_project(project: dict) -> list[Path]:
@@ -125,6 +210,166 @@ def _dirs_for_project(project: dict) -> list[Path]:
     return list(seen.values())
 
 
+def _git_bin() -> str | None:
+    return shutil.which("git")
+
+
+def _git_nonignored_files(target: Path) -> list[str] | None:
+    """`git ls-files` (tracked + untracked-but-not-`.gitignore`d) under
+    *target*, as paths relative to *target*. `None` means "nothing safe to
+    index" — git missing, *target* not a git work-tree, or the listing call
+    itself failed — which is the caller's signal to skip the build entirely
+    rather than hand graft the raw directory (H1a, L5). A git work-tree with
+    zero non-ignored files also returns `None` (nothing to stage either
+    way); a real project always has at least one.
+
+    Separate seam from the actual `graft build` subprocess call so tests can
+    fake this without touching the argv assertions on the graft invocation.
+    """
+    git_bin = _git_bin()
+    if git_bin is None:
+        return None
+    try:
+        r = subprocess.run(
+            [
+                git_bin,
+                "-C",
+                str(target),
+                "ls-files",
+                "-z",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+            check=False,
+            creationflags=SUBPROCESS_NO_WINDOW,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0:
+        return None
+    rel_paths = [p for p in r.stdout.decode("utf-8", "replace").split("\0") if p]
+    return rel_paths or None
+
+
+def _stage_files(target: Path, rel_paths: list[str], staging: Path) -> None:
+    """Best-effort hardlink-or-copy of *rel_paths* (relative to *target*)
+    into *staging*, preserving relative structure so graft's own per-file
+    card paths still read as ordinary project-relative paths. Hardlink
+    first (same-volume, near-zero cost — the common case since *staging*
+    and *target* are usually on the same drive); falls back to a real copy
+    on any failure (cross-device, no link permission, Windows without the
+    privilege).
+
+    Always unlinks *dst* first (a no-op OSError when it doesn't exist yet):
+    *staging* is now PERSISTENT across builds (H1 follow-up, 2026-08-06 —
+    see module docstring), so a previously-staged file's content must be
+    refreshed, not left pointing at a stale inode. A hardlinked dst already
+    shares the source's inode and would pick up an in-place edit for free,
+    but an editor that saves via rename-over-write gives the file a NEW
+    inode each time — re-linking on every build is what keeps that case in
+    sync too. Never raises: a raced/unreadable file is skipped, not fatal —
+    matches the fail-soft posture of the rest of this module."""
+    for rel in rel_paths:
+        src = target / rel
+        dst = staging / rel
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            continue
+        try:
+            dst.unlink()
+        except OSError:
+            pass
+        try:
+            os.link(src, dst)
+        except OSError:
+            try:
+                shutil.copy2(src, dst)
+            except OSError:
+                continue
+
+
+def _sync_staging(target: Path, rel_paths: list[str], staging: Path) -> None:
+    """Bring *staging* in line with *rel_paths* exactly: remove any staged
+    file no longer in the current non-ignored set (deleted, renamed, or
+    newly `.gitignore`d since the last build — otherwise the persistent
+    mirror only ever grows) then re-stage every file in *rel_paths*
+    (`_stage_files` handles refreshing content for files already present).
+    Best-effort: never raises."""
+    try:
+        staging.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return
+    desired = set(rel_paths)
+    try:
+        for dirpath, _dirnames, filenames in os.walk(staging):
+            for name in filenames:
+                full = Path(dirpath) / name
+                try:
+                    rel = full.relative_to(staging).as_posix()
+                except ValueError:
+                    continue
+                if rel not in desired:
+                    try:
+                        full.unlink()
+                    except OSError:
+                        pass
+    except OSError:
+        pass
+    # Bottom-up so a now-empty child dir is gone before its parent is checked.
+    try:
+        for dirpath, _dirnames, _filenames in os.walk(staging, topdown=False):
+            d = Path(dirpath)
+            if d == staging:
+                continue
+            try:
+                next(d.iterdir())
+            except StopIteration:
+                try:
+                    d.rmdir()
+                except OSError:
+                    pass
+            except OSError:
+                pass
+    except OSError:
+        pass
+    _stage_files(target, rel_paths, staging)
+
+
+def _kill_orphan_tree(pid: int) -> None:
+    """Best-effort recursive kill of a timed-out build's process tree.
+
+    `graft` resolves to `graft.cmd` on Windows, a batch shim — plain
+    `Popen.kill()` only kills the direct `cmd.exe` child; the real
+    `node.exe` grandchild survives (M4 — this project has a documented prior
+    incident of ~3170 orphaned node processes / 18 GB from exactly this
+    class of leak). `taskkill /T` walks the live parent→child tree by PID
+    before anything in it can exit — same pattern already used for Chrome
+    (`browser_chrome.py`) and pane teardown (`pty_session.py`). POSIX needs
+    no equivalent: `Popen.kill()` there already reaches the real child with
+    no batch-shim layer in between.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            creationflags=SUBPROCESS_NO_WINDOW,
+        )
+    except OSError:
+        pass
+
+
 def _run_build(graft_bin: str, target: Path) -> tuple[bool, float, str]:
     t0 = time.monotonic()
     store = graph_store_dir(target)
@@ -132,22 +377,47 @@ def _run_build(graft_bin: str, target: Path) -> tuple[bool, float, str]:
         store.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         return False, time.monotonic() - t0, f"could not create graph store {store}: {e}"
+
+    rel_paths = _git_nonignored_files(target)
+    if rel_paths is None:
+        return (
+            False,
+            time.monotonic() - t0,
+            "not a git work-tree, git unavailable, or nothing non-ignored to index — skipped",
+        )
+
+    staging = staging_dir_for(target)
+    _sync_staging(target, rel_paths, staging)
     try:
-        r = subprocess.run(
-            [graft_bin, "--dir", str(store), "build", str(target)],
+        proc = subprocess.Popen(
+            [graft_bin, "--dir", str(store), "build", str(staging)],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
-            timeout=_BUILD_TIMEOUT_S,
             text=True,
-            check=False,
             creationflags=SUBPROCESS_NO_WINDOW,
         )
-        if r.returncode == 0:
+        try:
+            _out, err = proc.communicate(timeout=_BUILD_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            _kill_orphan_tree(proc.pid)
+            proc.kill()
+            proc.communicate()
+            return False, time.monotonic() - t0, f"timed out after {_BUILD_TIMEOUT_S}s"
+        if proc.returncode == 0:
             write_store_manifest(target)
-        return r.returncode == 0, time.monotonic() - t0, (r.stderr or "").strip()[:500]
-    except subprocess.TimeoutExpired:
-        return False, time.monotonic() - t0, f"timed out after {_BUILD_TIMEOUT_S}s"
+            mark_build_complete(store)
+            size_bytes, file_count = _dir_stats(store)
+            stage_bytes, stage_files = _dir_stats(staging)
+            _log.info(
+                "graft_autobuild: store for %s is now %s (%d files) · staging mirror %s (%d files)",
+                target,
+                _fmt_bytes(size_bytes),
+                file_count,
+                _fmt_bytes(stage_bytes),
+                stage_files,
+            )
+        return proc.returncode == 0, time.monotonic() - t0, (err or "").strip()[:500]
     except OSError as e:
         return False, time.monotonic() - t0, str(e)
 
@@ -224,12 +494,13 @@ def ensure_project_graph_async(project_name: str) -> None:
     if not isinstance(proj, dict):
         return
     for d in _dirs_for_project(proj):
-        # `.graph` (not `graft/`) is the real on-disk marker a `graft --dir
-        # <store> build` writes into the store root — confirmed empirically
-        # 2026-08-05 against the real CLI (`@nanonets/graft@0.8.2`): a build
-        # produces `.graph/`, `.cache/`, `INDEX.md`, and one `<file>.md`
-        # per source file directly under *store*, no nested `graft/` folder.
-        if not (graph_store_dir(d) / ".graph").is_dir():
+        # `.graph` existing is NOT proof of a COMPLETE build (H2) — a
+        # timeout or a Windows MAX_PATH failure partway through leaves a
+        # partial `.graph` behind that looks identical to a finished one to
+        # a bare `.is_dir()` check, and the pane then reads from a silently
+        # truncated graph forever (this check never fires again). Use the
+        # completion marker `_run_build` writes LAST, only on exit 0.
+        if not has_completed_build(graph_store_dir(d)):
             _spawn_build(d)
 
 

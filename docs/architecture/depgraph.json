@@ -1853,7 +1853,8 @@
         "agent_takkub.config",
         "agent_takkub.graft_store",
         "agent_takkub.pane_tools_policy",
-        "agent_takkub.roles"
+        "agent_takkub.roles",
+        "agent_takkub.worktree_manager"
       ],
       "imported_by": [
         "agent_takkub.cli",
@@ -1870,7 +1871,7 @@
         "agent_takkub.settings_window"
       ],
       "fan_in": 12,
-      "fan_out": 5
+      "fan_out": 6
     },
     {
       "module": "agent_takkub.skill_audit",
@@ -2223,10 +2224,11 @@
         "agent_takkub.disk_usage",
         "agent_takkub.orchestrator",
         "agent_takkub.orchestrator_text",
+        "agent_takkub.shared_dev_tools",
         "agent_takkub.skill_scan",
         "agent_takkub.user_profile"
       ],
-      "fan_in": 6,
+      "fan_in": 7,
       "fan_out": 2
     }
   ]

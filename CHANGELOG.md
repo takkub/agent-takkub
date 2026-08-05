@@ -21,10 +21,27 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
   - **แยกต่อ cockpit instance โดยตั้งใจ** (`<instance-hash>`) — single-flight ปัจจุบันเป็น `threading.Lock` ระดับโปรเซส ถ้า dev กับ prod cockpit (รันพร้อมกันได้บนเครื่องเดียว) ใช้ store ร่วมกันจะเขียนทับกันโดยไม่มีอะไรกัน แล้ว agent จะเชื่อ graph ที่พังครึ่ง ๆ · จะ share ต้องทำ **cross-process file lock** ก่อน — เขียนเตือนไว้ใน `graft_store.py` แล้ว
 - **cockpit เขียนไฟล์ลง repo ตัวเอง** — `GRAFT_STORE_ROOT` เดิมอิง `DATA_HOME` ซึ่งใน dev checkout `DATA_HOME == REPO_ROOT` → store ตกในรีโปตัวเอง → `graft build` เขียน `.ignore` ที่ราก **และ append เข้า `.gitignore` ที่ track อยู่** ทุก boot · ย้าย store ออกนอกรีโปเสมอ (ไม่อิง `DATA_HOME` อีก) แก้ทั้งสองอาการที่ต้นทาง
 
+### Fixed — จาก cross-OS audit ก่อนปล่อย (`docs/reviews/2026-08-05-graft-crossos-audit.md`)
+รอบ audit เต็มก่อน publish เจอ 3 blocker + 6 medium · แก้ครบก่อนขึ้น npm — **1.0.47 ไม่เคยถูก publish ในสภาพที่มีปัญหาเหล่านี้**
+
+- **graph บวมหลาย GB เพราะ index ของที่ `.gitignore` ไว้** — พิสูจน์จากการอ่าน source ของ graft เอง: **มันไม่อ่าน `.gitignore` เลย** มีแค่ skip-list 9 ชื่อที่ hardcode ไว้ · repo cockpit เอง = **463MB / 4,005 ไฟล์** ซึ่ง 72% เป็น venv ใต้ `runtime/` (source จริง 143 การ์ด) × 46 dirs × 2 cockpit instance
+  - build จาก **staging mirror ที่กรองด้วย `git ls-files --cached --others --exclude-standard`** แทนการชี้ที่ target ตรง ๆ → **463MB → 43MB (−91%)**, path ยาวสุด 308 → 139 ตัวอักษร
+  - staging เป็น **hardlink** (ไม่ใช่สำเนาจริง) เมื่ออยู่ volume เดียวกัน → ต้นทุนดิสก์จริงเกือบศูนย์ · re-sync ทุก build (ลบไฟล์ที่หายไป, re-link ไฟล์ที่เปลี่ยน)
+  - **รอบสองของบั๊กเดียวกัน:** staging แรกเป็น tempdir ที่ถูกลบหลัง build → graft ทำ freshness check ทุก query แล้ว **re-index จาก cwd จริงเงียบ ๆ** ทำให้บวมกลับเป็น 435MB ทันทีที่ pane ถามคำถามแรก (`graft mcp` ไม่มี `--no-refresh` ให้ปิด) · แก้เป็น staging ถาวร + ส่งเป็น positional `dir` ทั้งตอน build และตอน inject MCP → **วัดแล้ว store/staging ไม่ขยับเลยหลัง query**
+  - skip target ที่ไม่ใช่ git work-tree (โฟลเดอร์เอกสาร/รูปใน `projects.json` ไม่ถูก index อีก)
+  - `takkub prune` ลบ live store ได้ (escape hatch) + เตือนเมื่อ store ใหญ่เกินเกณฑ์
+- **Windows MAX_PATH** — 3,080 ไฟล์ยาวเกิน 259 ตัวอักษร · เครื่อง dev รอดเพราะเปิด `LongPathsEnabled` ไว้ซึ่ง **ไม่ใช่ default ของ Win11** → hash key 64 → 16 hex (คืนมา 129 ตัวอักษร) + `built.json` marker แทนการเช็คแค่ว่า `.graph` มีอยู่ (build ที่ค้างครึ่งทางไม่ถูกนับว่าเสร็จอีกต่อไป) + legacy-store detection สำหรับ key 64 ตัวเก่าที่ scan/prune เดิมมองไม่เห็น
+- **MCP บอก agent ว่า repo index แล้วทั้งที่ graph ว่าง** — เดิม inject ให้ทุก role โดยไม่เช็ค แต่ graft CLI ลงให้เฉพาะ `doctor --fix` → user ใหม่ได้เครื่องมือที่บอกให้ "ใช้แทน grep" ทั้งที่ไม่มีข้อมูล · ตอนนี้ inject เฉพาะ pane ที่ store build เสร็จจริง (มี CLI + มี marker + ไม่ใช่ worktree cwd)
+- **case-fold ผิดด้าน** — เดิมทำเฉพาะ `os.name == "nt"` ซึ่ง `Path.resolve()` บน Windows แก้ case ให้อยู่แล้ว **แต่ darwin ที่ APFS case-insensitive จริงกลับไม่ได้ทำ** → path เดียวกันคนละตัวพิมพ์บน Mac จะแตกเป็น 2 store · กลับด้านให้ถูก
+- worktree pane ไม่ inject graft (เดิม build side skip แต่ MCP side ไม่ skip → ได้ graph ว่างถาวร) · `expanduser` รวมจุดเดียวใน `_normalize_for_key` · timeout ใช้ `Popen` + `taskkill /T` กัน `node.exe` ค้างบน Windows (เดิม `subprocess.run` เก็บ pid ไม่ได้)
+
 ### Known gaps (ยังปิดไม่ได้)
 - **ยังไม่ได้ smoke pane codex ตัวจริง** (ค้างจาก 1.0.46) — qa ไม่มีสิทธิ์ `takkub assign` และ codex ติด token limit · unit test คุมไว้
 - dev กับ prod cockpit ยัง build graph คนละชุด (ตั้งใจ — ดูเหตุผลด้านบน) กินดิสก์ 2 เท่า
 - `codex --version` ยังยิงทุก spawn (363ms) ยังไม่ cache ระดับ session
+- `GRAFT_STORE_ROOT` คำนวณตอน import ไม่ใช่ lazy + ถ้า `~` เขียนไม่ได้จะเงียบ ไม่มีสัญญาณบน UI (M5 secondary)
+- **first-run ไม่มีตัวบอกสถานะ** — เปิด cockpit ครั้งแรก build หลายโปรเจกต์เงียบ ๆ ไม่มี indicator (M6, เป็นงาน UI)
+- `engines: node >= 18` ใน `package.json` แต่ graft ต้อง Node ≥ 20 (doctor เตือนให้แล้ว)
 
 ## [1.0.46] - 2026-08-05
 

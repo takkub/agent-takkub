@@ -542,6 +542,7 @@ class TestGraftGraphsScan:
             "orphan_count": 0,
             "live_bytes": 0,
             "live_count": 0,
+            "oversized_live": [],
         }
 
     def test_live_store_matches_configured_project_path(self, tmp_path, monkeypatch):
@@ -582,6 +583,86 @@ class TestGraftGraphsScan:
         result = disk_usage.scan_graft_graphs(tmp_path)
         assert result["entries"][0]["source"] == str(target.resolve())
         assert result["entries"][0]["orphan"] is True  # not in projects.json paths
+
+    def test_live_store_size_folds_in_paired_staging_mirror(self, tmp_path, monkeypatch):
+        """H1 follow-up (2026-08-06): the persistent staging mirror
+        (`graft_store.staging_dir_for`, same `graph_key` as the store) is
+        reported as part of the SAME entry, not invisible — otherwise the
+        very disk cost this whole feature exists to make visible (H1c) would
+        have a blind spot for its own new persistent directory."""
+        monkeypatch.setattr(graft_store, "GRAFT_STORE_ROOT", tmp_path / "graft-graphs")
+        monkeypatch.setattr(graft_store, "GRAFT_STAGING_ROOT", tmp_path / "graft-staging")
+        target = tmp_path / "some-project" / "api"
+        target.mkdir(parents=True)
+        self._isolate_projects(monkeypatch, tmp_path, {"proj": {"paths": {"api": str(target)}}})
+
+        key = graft_store.graph_key(target)
+        store = tmp_path / "graft-graphs" / key
+        (store / "graft").mkdir(parents=True)
+        (store / "graft" / "index.json").write_bytes(b"x" * 40)
+        staging = tmp_path / "graft-staging" / key
+        staging.mkdir(parents=True)
+        (staging / "main.py").write_bytes(b"y" * 10)
+
+        result = disk_usage.scan_graft_graphs(tmp_path)
+        assert result["live_count"] == 1
+        assert result["live_bytes"] == 50  # 40 (store) + 10 (staging)
+
+    def test_oversized_live_store_flagged(self, tmp_path, monkeypatch):
+        """H1(c): a live store over the size threshold shows up in
+        `oversized_live` so `takkub disk` can warn about it — orphan stores
+        (already reclaimable) are never flagged, only live ones (which had
+        no reclaim path at all before `--include-live`)."""
+        monkeypatch.setattr(graft_store, "GRAFT_STORE_ROOT", tmp_path / "graft-graphs")
+        monkeypatch.setattr(disk_usage, "_GRAFT_STORE_WARN_BYTES", 10)
+        target = tmp_path / "big-project"
+        target.mkdir()
+        self._isolate_projects(monkeypatch, tmp_path, {"proj": {"paths": {"a": str(target)}}})
+        store = tmp_path / "graft-graphs" / graft_store.graph_key(target)
+        (store / "graft").mkdir(parents=True)
+        (store / "graft" / "index.json").write_bytes(b"x" * 40)  # 40 > the 10-byte threshold
+
+        result = disk_usage.scan_graft_graphs(tmp_path)
+
+        assert len(result["oversized_live"]) == 1
+        assert result["oversized_live"][0]["size_bytes"] == 40
+
+    def test_legacy_64char_instance_dir_reported_as_orphan(self, tmp_path, monkeypatch):
+        """H2 migration: pre-fix code keyed the instance dir with a FULL
+        64-hex-char SHA-256 digest (H2 truncated to 16). A leftover 64-char
+        instance dir from before this fix must show up as orphan — not sit
+        forever as invisible dead weight one level above the current
+        (16-char) `GRAFT_STORE_ROOT` (see `_legacy_orphan_entries`)."""
+        current_root = tmp_path / "graft-graphs" / "abc123ef"  # current-format, short
+        monkeypatch.setattr(graft_store, "GRAFT_STORE_ROOT", current_root)
+        self._isolate_projects(monkeypatch, tmp_path, {})
+        legacy_instance = tmp_path / "graft-graphs" / ("f" * 64)
+        legacy_store = legacy_instance / ("a" * 64)
+        legacy_store.mkdir(parents=True)
+        (legacy_store / "index.json").write_bytes(b"z" * 15)
+
+        result = disk_usage.scan_graft_graphs(tmp_path)
+
+        assert result["orphan_count"] == 1
+        assert result["orphan_bytes"] == 15
+        assert result["entries"][0]["path"] == str(legacy_store)
+        assert result["entries"][0]["orphan"] is True
+
+    def test_current_format_sibling_instance_dir_not_treated_as_legacy(self, tmp_path, monkeypatch):
+        """A SAME-length (16-char) sibling instance dir might be a second,
+        genuinely live cockpit instance (dev + prod, `_instance_key`'s own
+        docstring) — must never be swept up as a migration leftover."""
+        current_root = tmp_path / "graft-graphs" / "abc123ef"
+        monkeypatch.setattr(graft_store, "GRAFT_STORE_ROOT", current_root)
+        self._isolate_projects(monkeypatch, tmp_path, {})
+        other_live_instance = tmp_path / "graft-graphs" / "9998887766"
+        (other_live_instance / "somehash").mkdir(parents=True)
+        (other_live_instance / "somehash" / "f.md").write_bytes(b"q" * 5)
+
+        result = disk_usage.scan_graft_graphs(tmp_path)
+
+        assert result["entries"] == []
+        assert result["orphan_count"] == 0
 
 
 class TestPruneGraftGraphs:
@@ -624,21 +705,92 @@ class TestPruneGraftGraphs:
         assert live_store.exists()
         assert result["categories"][0]["removed_count"] == 1
 
-    def test_never_deletes_outside_store_root(self, tmp_path, monkeypatch):
-        # `_prune_graft_graphs` reuses `_assert_under` like every other
-        # category — a store dir reported outside `graft_store.GRAFT_STORE_ROOT`
-        # (the real safety boundary now the store is never DATA_HOME-relative)
-        # must refuse rather than delete, same guarantee TestPathSafety
-        # asserts elsewhere.
+    def test_yes_removes_orphan_staging_mirror_alongside_store(self, tmp_path, monkeypatch):
+        """H1 follow-up (2026-08-06): deleting an orphan store must delete
+        its paired staging mirror too — otherwise the mirror is permanent,
+        unreclaimable garbage the moment its source project is removed from
+        projects.json (same class of blind spot H1c fixed for the store
+        itself)."""
         from agent_takkub import config
 
         monkeypatch.setattr(graft_store, "GRAFT_STORE_ROOT", tmp_path / "graft-graphs")
+        monkeypatch.setattr(graft_store, "GRAFT_STAGING_ROOT", tmp_path / "graft-staging")
+        pj = tmp_path / "projects.json"
+        pj.write_text('{"active": null, "projects": {}}', encoding="utf-8")
+        monkeypatch.setattr(config, "PROJECTS_JSON", pj)
+        key = "2" * 16
+        orphan_store = tmp_path / "graft-graphs" / key
+        (orphan_store / "graft").mkdir(parents=True)
+        orphan_staging = tmp_path / "graft-staging" / key
+        orphan_staging.mkdir(parents=True)
+        (orphan_staging / "main.py").write_bytes(b"x")
+
+        result = disk_usage.prune(categories=["graft-graphs"], dry_run=False, data_home=tmp_path)
+
+        assert not orphan_store.exists()
+        assert not orphan_staging.exists()
+        assert result["categories"][0]["removed_count"] == 1
+        assert result["categories"][0]["errors"] == []
+
+    def test_include_live_deletes_live_store_too(self, tmp_path, monkeypatch):
+        """H1(c): before this fix, a live store had NO reclaim path at all —
+        `--include-live` is the escape hatch (same shape as `node-modules`'s)
+        for when a store grew unbounded and the user wants it gone now,
+        accepting that the next build just starts from scratch."""
+        from agent_takkub import config
+
+        monkeypatch.setattr(graft_store, "GRAFT_STORE_ROOT", tmp_path / "graft-graphs")
+        live_target = tmp_path / "live-project"
+        live_target.mkdir()
+        pj = tmp_path / "projects.json"
+        import json as _json
+
+        pj.write_text(
+            _json.dumps({"active": None, "projects": {"p": {"paths": {"a": str(live_target)}}}}),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(config, "PROJECTS_JSON", pj)
+        live_store = tmp_path / "graft-graphs" / graft_store.graph_key(live_target)
+        (live_store / "graft").mkdir(parents=True)
+
+        result = disk_usage.prune(
+            categories=["graft-graphs"],
+            level="review",
+            dry_run=False,
+            include_live=True,
+            data_home=tmp_path,
+        )
+
+        assert not live_store.exists()
+        assert result["categories"][0]["removed_count"] == 1
+        assert result["categories"][0]["level"] == "review"
+
+    def test_never_deletes_outside_store_root(self, tmp_path, monkeypatch):
+        # `_prune_graft_graphs` reuses `_assert_under` like every other
+        # category — a store dir reported outside `GRAFT_STORE_ROOT.parent`
+        # (the whole `graft-graphs/` dir, widened from the narrower current-
+        # instance root so H2-migration legacy siblings are reachable too —
+        # see `_prune_graft_graphs`'s docstring) must refuse rather than
+        # delete, same guarantee TestPathSafety asserts elsewhere.
+        #
+        # GRAFT_STORE_ROOT is set up with the real 2-level production shape
+        # (`<graft-graphs-dir>/<instance-key>`, `graft_store.py`'s
+        # `GRAFT_STORE_ROOT = ... / "graft-graphs" / _instance_key(...)`) —
+        # NOT the 1-level shortcut other tests in this file use — because
+        # this test specifically exercises the `.parent` boundary, and a
+        # 1-level `GRAFT_STORE_ROOT` would make `.parent` == `tmp_path`
+        # itself, silently widening the boundary to include `escaped` below.
+        from agent_takkub import config
+
+        monkeypatch.setattr(
+            graft_store, "GRAFT_STORE_ROOT", tmp_path / "graft-graphs" / "instance-key"
+        )
         pj = tmp_path / "projects.json"
         pj.write_text('{"active": null, "projects": {}}', encoding="utf-8")
         monkeypatch.setattr(config, "PROJECTS_JSON", pj)
         home = tmp_path / "home"
         home.mkdir()
-        escaped = tmp_path / "outside" / "evil-store"  # not under GRAFT_STORE_ROOT
+        escaped = tmp_path / "outside" / "evil-store"  # not under graft-graphs/ at all
         monkeypatch.setattr(
             disk_usage,
             "scan_graft_graphs",
@@ -647,7 +799,7 @@ class TestPruneGraftGraphs:
             },
         )
         with pytest.raises(ValueError):
-            disk_usage._prune_graft_graphs(home, dry_run=False)
+            disk_usage._prune_graft_graphs(home, dry_run=False, include_live=False)
 
 
 class TestDiskReport:

@@ -46,8 +46,9 @@ from collections.abc import Iterable
 
 from ._win_console import SUBPROCESS_NO_WINDOW
 from .config import RUNTIME_DIR
-from .graft_store import graph_store_dir, write_store_manifest
+from .graft_store import graft_cli_path, graph_store_dir, has_completed_build, staging_dir_for
 from .pane_tools_policy import effective_mcps
+from .worktree_manager import worktree_root
 
 _log = logging.getLogger(__name__)
 
@@ -363,7 +364,29 @@ def browser_profile_mcp_config_path(
       * the graft MCP (if present for this role) gets a per-pane ``--dir
         <store>`` pointed at *cwd*'s own externalized graph store (#146
         follow-up — see ``graft_store.py``'s module docstring for why the
-        graph must never live inside the target repo).
+        graph must never live inside the target repo) — but ONLY once that
+        store holds a COMPLETED build. Otherwise the server is dropped from
+        this pane's config entirely (H3, 2026-08-05 cross-OS audit): the
+        graft MCP's own server-instruction block tells an agent "this repo
+        is indexed... prefer these tools over grep/read", and an unbuilt or
+        CLI-missing store answers every query with a graceful-looking empty
+        result — an agent following those instructions treats that as proof
+        a symbol doesn't exist instead of "not indexed yet". Same gate drops
+        it for a worktree-isolated pane's cwd (M3): `graft_autobuild.py`
+        never builds a worktree checkout's graph (see that module's
+        docstring), so injecting the server there would ALWAYS hit this
+        same false-negative trap, for the pane's entire lifetime.
+
+        The templated args ALSO carry the persistent staging mirror
+        (`graft_store.staging_dir_for(cwd)`) as the explicit positional
+        `dir` after `mcp` (H1 follow-up, 2026-08-06) — without it, `graft
+        mcp` defaults that root to "." (the pane's own, unfiltered cwd), and
+        graft's own per-query freshness check (`ensureFreshGraph`) then
+        rebuilds the graph from THAT unfiltered root on literally the pane's
+        first tool call, re-inflating the store with everything
+        `graft_autobuild.py`'s git-nonignored staging was built to keep out.
+        See `graft_store.staging_dir_for`'s docstring for the full mechanism
+        and `graft_autobuild.py`'s module docstring for how this was found.
 
     Browser-profile wins:
 
@@ -426,31 +449,44 @@ def browser_profile_mcp_config_path(
         servers[name] = cfg
 
     if has_graft:
-        cfg = dict(servers["graft"])
-        args = list(cfg.get("args") or [])
-        if "--dir" not in args:  # idempotent — already templated
-            target = pathlib.Path(cwd)
-            store = graph_store_dir(target)
-            try:
-                store.mkdir(parents=True, exist_ok=True)
-            except OSError as e:
-                _log.warning(
-                    "browser_profile_mcp_config_path: could not create graft store %s: %s",
-                    store,
-                    e,
-                )
-            write_store_manifest(target)
-            # Global `--dir` must precede the subcommand (verified against
-            # the real CLI, see graft_store.py) — insert right before "mcp"
-            # rather than appending blindly, so future extra subcommand
-            # args stay in the right position.
-            try:
-                idx = args.index("mcp")
-                args = [*args[:idx], "--dir", str(store), *args[idx:]]
-            except ValueError:
-                args = [*args, "--dir", str(store)]
-            cfg["args"] = args
-            servers["graft"] = cfg
+        target = pathlib.Path(cwd)
+        store = graph_store_dir(target)  # normalizes/expands/resolves internally
+        under_worktree = False
+        try:
+            resolved_target = target.expanduser().resolve()
+            wt_root = worktree_root(project).resolve()
+            under_worktree = resolved_target == wt_root or wt_root in resolved_target.parents
+        except OSError:
+            pass
+        if under_worktree or graft_cli_path() is None or not has_completed_build(store):
+            # H3/M3: never hand an agent a graft MCP that can only answer
+            # graceful-but-wrong empties — see the docstring above. The
+            # store itself (and its manifest) is entirely `_run_build`'s
+            # responsibility (`graft_autobuild.py`); by the time
+            # `has_completed_build` is true, both already exist.
+            del servers["graft"]
+        else:
+            cfg = dict(servers["graft"])
+            args = list(cfg.get("args") or [])
+            if "--dir" not in args:  # idempotent — already templated
+                # Global `--dir` must precede the subcommand (verified against
+                # the real CLI, see graft_store.py) — insert right before "mcp"
+                # rather than appending blindly, so future extra subcommand
+                # args stay in the right position.
+                try:
+                    idx = args.index("mcp")
+                    args = [*args[:idx], "--dir", str(store), *args[idx:]]
+                except ValueError:
+                    args = [*args, "--dir", str(store)]
+                # Positional `dir` after "mcp": the persistent, git-filtered
+                # staging mirror — NOT *cwd* itself (H1 follow-up, 2026-08-06,
+                # see this function's docstring + graft_store.staging_dir_for).
+                # Without this, `graft mcp`'s default `dir="."` resolves to
+                # *cwd* and every query's freshness check rebuilds unfiltered
+                # from it.
+                args = [*args, str(staging_dir_for(target))]
+                cfg["args"] = args
+                servers["graft"] = cfg
 
     data["mcpServers"] = servers
 

@@ -285,10 +285,27 @@ class TestGraftDirPerPaneTemplating:
     """#146 follow-up: graft's MCP args get a per-pane `--dir <external
     store>` templated in, mirroring the browser-profile precedent, so the
     served graph is read from the SAME externalized location
-    `graft_autobuild.py` builds into — never from inside the pane's cwd."""
+    `graft_autobuild.py` builds into — never from inside the pane's cwd.
+
+    H3 (2026-08-05 cross-OS audit) added a gate ON TOP of that: the server
+    is only injected once the store holds a COMPLETED build (real CLI
+    present, build finished). `_mark_ready` sets up that "ready" state so
+    these tests keep covering the templating mechanics; the gate itself is
+    covered separately below (`TestGraftInjectionGate`).
+    """
+
+    @staticmethod
+    def _mark_ready(monkeypatch: pytest.MonkeyPatch, target: pathlib.Path) -> None:
+        from agent_takkub import graft_store
+
+        monkeypatch.setattr(sdt, "graft_cli_path", lambda: r"C:\fake\graft.cmd")
+        store = graft_store.graph_store_dir(target)
+        store.mkdir(parents=True, exist_ok=True)
+        graft_store.write_store_manifest(target)
+        graft_store.mark_build_complete(store)
 
     def test_claude_argv_carries_dir_pointed_at_external_store(
-        self, isolated_mcp_file: pathlib.Path, tmp_path
+        self, isolated_mcp_file: pathlib.Path, tmp_path, monkeypatch
     ) -> None:
         from agent_takkub import graft_store, mcp_bridge
 
@@ -296,6 +313,7 @@ class TestGraftDirPerPaneTemplating:
         assert ok
         target = tmp_path / "backend-cwd"
         target.mkdir()
+        self._mark_ready(monkeypatch, target)
 
         argv = mcp_bridge.mcp_argv_for_provider("claude", "backend", None, "proj", cwd=str(target))
 
@@ -306,6 +324,13 @@ class TestGraftDirPerPaneTemplating:
         dir_idx = args.index("--dir")
         assert args[dir_idx + 1] == str(store)
         assert args[dir_idx + 2] == "mcp"  # global --dir sits right before the subcommand
+        # H1 follow-up (2026-08-06): the positional dir AFTER "mcp" is the
+        # persistent staging mirror, not *target* itself — otherwise `graft
+        # mcp`'s default `dir="."` would point every query's freshness check
+        # at the pane's real, unfiltered cwd (see shared_dev_tools.py's
+        # module docstring).
+        assert args[dir_idx + 3] == str(graft_store.staging_dir_for(target))
+        assert len(args) == dir_idx + 4  # nothing after the staging positional
         assert store.is_dir()
         assert (store / "source.json").is_file()
 
@@ -324,13 +349,20 @@ class TestGraftDirPerPaneTemplating:
         assert ok
         target = tmp_path / "backend-cwd"
         target.mkdir()
+        self._mark_ready(monkeypatch, target)
 
         argv = mcp_bridge.mcp_argv_for_provider("codex", "backend", None, "proj", cwd=str(target))
 
         store = graft_store.graph_store_dir(target)
+        # store and its paired staging mirror share the same `graph_key`
+        # (graft_store.staging_dir_for), so the hash-keyed name appears
+        # TWICE in the serialized args: once for `--dir <store>`, once for
+        # the positional staging `dir` after "mcp" (H1 follow-up, 2026-08-06).
         args_flag = next(a for a in argv if a.startswith("mcp_servers.graft.args="))
         assert '"--dir"' in args_flag
-        assert store.name in args_flag  # hash-keyed store name, unaffected by path escaping
+        assert (
+            args_flag.count(store.name) == 2
+        )  # unaffected by path escaping, unlike a full-path check
 
     def test_no_cwd_leaves_graft_args_untemplated(self, isolated_mcp_file: pathlib.Path) -> None:
         from agent_takkub import mcp_bridge
@@ -342,15 +374,102 @@ class TestGraftDirPerPaneTemplating:
         assert "--dir" not in data["mcpServers"]["graft"]["args"]
 
     def test_idempotent_second_call_does_not_double_template(
-        self, isolated_mcp_file: pathlib.Path, tmp_path
+        self, isolated_mcp_file: pathlib.Path, tmp_path, monkeypatch
     ) -> None:
         ok, _ = ensure_graft_mcp()
         assert ok
         target = tmp_path / "backend-cwd"
         target.mkdir()
+        self._mark_ready(monkeypatch, target)
 
         p1 = sdt.browser_profile_mcp_config_path("backend", None, "proj", str(target))
         p2 = sdt.browser_profile_mcp_config_path("backend", None, "proj", str(target))
         assert p1 == p2
         data = json.loads(pathlib.Path(p2).read_text(encoding="utf-8"))
         assert data["mcpServers"]["graft"]["args"].count("--dir") == 1
+
+
+class TestGraftInjectionGate:
+    """H3 (2026-08-05 cross-OS audit): the graft MCP must never be injected
+    into a pane whose store can only answer graceful-but-wrong empties —
+    the server's own instructions tell an agent "this repo is indexed...
+    prefer these tools over grep/read", which is actively misleading for an
+    unbuilt/CLI-missing/worktree-isolated store."""
+
+    def test_dropped_when_store_has_no_completed_build(
+        self, isolated_mcp_file: pathlib.Path, tmp_path, monkeypatch
+    ) -> None:
+        ok, _ = ensure_graft_mcp()
+        assert ok
+        monkeypatch.setattr(sdt, "graft_cli_path", lambda: r"C:\fake\graft.cmd")
+        target = tmp_path / "backend-cwd"
+        target.mkdir()
+        # deliberately no mark_build_complete — store either doesn't exist
+        # or (simulating a partial/killed build) has files but no marker
+
+        path = sdt.browser_profile_mcp_config_path("backend", None, "proj", str(target))
+
+        data = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+        assert "graft" not in data["mcpServers"]
+
+    def test_dropped_when_graft_cli_missing(
+        self, isolated_mcp_file: pathlib.Path, tmp_path, monkeypatch
+    ) -> None:
+        from agent_takkub import graft_store
+
+        ok, _ = ensure_graft_mcp()
+        assert ok
+        target = tmp_path / "backend-cwd"
+        target.mkdir()
+        store = graft_store.graph_store_dir(target)
+        store.mkdir(parents=True, exist_ok=True)
+        graft_store.mark_build_complete(store)  # build IS complete...
+        monkeypatch.setattr(sdt, "graft_cli_path", lambda: None)  # ...but CLI vanished since
+
+        path = sdt.browser_profile_mcp_config_path("backend", None, "proj", str(target))
+
+        data = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+        assert "graft" not in data["mcpServers"]
+
+    def test_dropped_for_worktree_isolated_cwd(
+        self, isolated_mcp_file: pathlib.Path, tmp_path, monkeypatch
+    ) -> None:
+        """M3: a worktree checkout's graph is never built (graft_autobuild.py
+        skips it by construction) — even a build-complete store must not be
+        injected if the pane's cwd sits under the project's worktree root."""
+        from agent_takkub import graft_store, worktree_manager
+
+        ok, _ = ensure_graft_mcp()
+        assert ok
+        monkeypatch.setattr(worktree_manager, "DATA_HOME", tmp_path)
+        wt_root = worktree_manager.worktree_root("proj")
+        target = wt_root / "backend-1234"
+        target.mkdir(parents=True)
+        monkeypatch.setattr(sdt, "graft_cli_path", lambda: r"C:\fake\graft.cmd")
+        store = graft_store.graph_store_dir(target)
+        store.mkdir(parents=True, exist_ok=True)
+        graft_store.mark_build_complete(store)  # even if somehow built...
+
+        path = sdt.browser_profile_mcp_config_path("backend", None, "proj", str(target))
+
+        data = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+        assert "graft" not in data["mcpServers"]  # ...still dropped: cwd is a worktree checkout
+
+    def test_kept_when_ready(self, isolated_mcp_file: pathlib.Path, tmp_path, monkeypatch) -> None:
+        """Sanity check that the gate isn't just always dropping graft."""
+        from agent_takkub import graft_store
+
+        ok, _ = ensure_graft_mcp()
+        assert ok
+        target = tmp_path / "backend-cwd"
+        target.mkdir()
+        monkeypatch.setattr(sdt, "graft_cli_path", lambda: r"C:\fake\graft.cmd")
+        store = graft_store.graph_store_dir(target)
+        store.mkdir(parents=True, exist_ok=True)
+        graft_store.mark_build_complete(store)
+
+        path = sdt.browser_profile_mcp_config_path("backend", None, "proj", str(target))
+
+        data = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+        assert "graft" in data["mcpServers"]
+        assert "--dir" in data["mcpServers"]["graft"]["args"]
