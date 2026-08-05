@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -15,6 +16,7 @@ from agent_takkub.spawn_engine import (
     _CURRENT_TASK_BEGIN,
     _CURRENT_TASK_END,
     _CURRENT_TASK_TRIGGER,
+    _active_spawn_scope_hashes,
     _prepare_spawn_system_prompt,
 )
 
@@ -54,6 +56,7 @@ def _spawn_claude_assign(
     task: str,
     *,
     prepare_result: str | object | None = ...,
+    pre_spawn: Callable[[Path], None] | None = None,
 ) -> tuple[list[dict], MagicMock, Path]:
     from agent_takkub.provider_config import CLAUDE
 
@@ -63,6 +66,8 @@ def _spawn_claude_assign(
     staging.mkdir()
     role_file = staging / "CLAUDE.md"
     role_file.write_text("# Backend role\n", encoding="utf-8")
+    if pre_spawn is not None:
+        pre_spawn(staging)
     spawn_calls: list[dict] = []
 
     stack = [
@@ -400,3 +405,38 @@ def test_only_claude_has_confirmed_file_backed_system_prompt_capability() -> Non
     assert PROVIDER_REGISTRY["claude"].system_prompt_flag == "--append-system-prompt-file"
     for provider in ("codex", "gemini", "opencode", "kimi", "cursor"):
         assert PROVIDER_REGISTRY[provider].system_prompt_flag is None
+
+
+def test_spawn_prunes_stale_snapshots_but_keeps_active_pane_file(
+    orch: Orchestrator, tmp_path: Path
+) -> None:
+    """A real spawn() sweeps `CLAUDE.spawn-*.md` snapshots left by panes that
+    are no longer registered, but never touches the spawning pane's own
+    (now-active) snapshot file — even one that already existed from a prior
+    respawn (token-reduction task, 2026-08)."""
+    task = "[ROLE: backend]\n" + ("do work\n" * 10)
+
+    def _pre_populate(staging: Path) -> None:
+        active_hash = next(iter(_active_spawn_scope_hashes({TEST_PROJECT: {"backend": object()}})))
+        (staging / f"CLAUDE.spawn-{active_hash}.md").write_text(
+            "# stale copy from a prior spawn\n", encoding="utf-8"
+        )
+        for i in range(6):
+            (staging / f"CLAUDE.spawn-{'0' * 15}{i}.md").write_text("x", encoding="utf-8")
+
+    spawn_calls, _mock_send, role_file = _spawn_claude_assign(
+        orch, tmp_path, task, pre_spawn=_pre_populate
+    )
+    assert len(spawn_calls) == 1
+
+    staging = role_file.parent
+    argv = spawn_calls[0]["argv"]
+    active_snapshot = Path(argv[argv.index("--append-system-prompt-file") + 1])
+    assert active_snapshot.exists()  # the pane's own (just-written) snapshot survives
+    assert task in active_snapshot.read_text(encoding="utf-8")
+
+    remaining = list(staging.glob("CLAUDE.spawn-*.md"))
+    # the 6 fake unrelated-pane snapshots are pruned down to the keep-stale
+    # buffer; only the active pane's real snapshot is guaranteed to remain.
+    assert active_snapshot in remaining
+    assert len(remaining) <= 1 + 3  # active + at most keep_stale buffer

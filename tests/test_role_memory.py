@@ -169,6 +169,72 @@ class TestCuration:
         # A read failure during curation must be swallowed — ensure still returns.
         assert ensure_role_memory("p", "qa") == path
 
+    def test_long_entry_truncated_to_first_sentence(
+        self, isolated_role_memory: pathlib.Path
+    ) -> None:
+        # A done-report-style paragraph pasted as one bullet must be cut down
+        # at curation time, not left to bloat the spawn prompt forever.
+        path = ensure_role_memory("p", "backend")
+        essay = "- fix (2026-08-04): " + ("root cause analysis word " * 60) + ". more detail after."
+        assert len(essay) > rm._MEM_MAX_ENTRY_CHARS
+        path.write_text(path.read_text(encoding="utf-8") + "\n" + essay + "\n", encoding="utf-8")
+        ensure_role_memory("p", "backend")
+        text = path.read_text(encoding="utf-8")
+        kept = [ln for ln in text.splitlines() if ln.startswith("- fix (2026-08-04):")]
+        assert len(kept) == 1, kept
+        assert len(kept[0]) <= rm._MEM_MAX_ENTRY_CHARS
+        assert kept[0].endswith(" …")
+        assert "more detail after" not in text
+
+    def test_long_entry_without_sentence_end_cuts_at_word_boundary(
+        self, isolated_role_memory: pathlib.Path
+    ) -> None:
+        path = ensure_role_memory("p", "qa")
+        no_punct = "- " + ("wordwordword " * 80).strip()  # no . ! ? anywhere
+        assert len(no_punct) > rm._MEM_MAX_ENTRY_CHARS
+        path.write_text(path.read_text(encoding="utf-8") + "\n" + no_punct + "\n", encoding="utf-8")
+        ensure_role_memory("p", "qa")
+        text = path.read_text(encoding="utf-8")
+        kept = [ln for ln in text.splitlines() if ln.startswith("- wordwordword")]
+        assert len(kept) == 1, kept
+        assert kept[0].endswith(" …")
+        # cut lands on a word boundary — content before " …" ends with a
+        # whole "wordwordword" token, never a partial word like "wordwordwor"
+        assert kept[0][:-2].endswith("wordwordword")
+        assert len(kept[0]) <= rm._MEM_MAX_ENTRY_CHARS
+
+    def test_short_entry_not_truncated(self, isolated_role_memory: pathlib.Path) -> None:
+        path = ensure_role_memory("p", "frontend")
+        short = "- ports are 3001 / 3002 for this project"
+        path.write_text(path.read_text(encoding="utf-8") + "\n" + short + "\n", encoding="utf-8")
+        ensure_role_memory("p", "frontend")
+        assert short in path.read_text(encoding="utf-8")
+
+    def test_multiline_entry_collapsed_when_over_budget(
+        self, isolated_role_memory: pathlib.Path
+    ) -> None:
+        # A bullet with continuation lines (the multi-line-entry convention
+        # `_block_split` groups) must also be collapsed to one truncated line.
+        path = ensure_role_memory("p", "backend")
+        block = "- header line here.\n  " + ("continuation text words " * 40)
+        assert len(block) > rm._MEM_MAX_ENTRY_CHARS
+        path.write_text(path.read_text(encoding="utf-8") + "\n" + block + "\n", encoding="utf-8")
+        ensure_role_memory("p", "backend")
+        text = path.read_text(encoding="utf-8")
+        assert "continuation text words continuation" not in text
+        kept = [ln for ln in text.splitlines() if ln.startswith("- header line here")]
+        assert len(kept) == 1, kept
+
+    def test_byte_cap_is_6000(self) -> None:
+        # Regression guard for the token-reduction task (2026-08): the cap was
+        # deliberately lowered from 16000 to 6000 bytes/spawn.
+        assert rm._MEM_MAX_BYTES == 6_000
+
+    def test_header_states_entry_length_rule(self, isolated_role_memory: pathlib.Path) -> None:
+        text = ensure_role_memory("p", "qa").read_text(encoding="utf-8")
+        assert "2-3 บรรทัด" in text
+        assert "ห้าม paste done report" in text
+
 
 class TestHasLearnedContent:
     """tok-5: a freshly-seeded role-memory file (skeleton only) must read as
