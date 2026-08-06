@@ -3268,6 +3268,26 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                         self._idle_state.pop(key, None)
                         continue
 
+                    # Mid-task graft staleness gap: boot/tab-switch/done are the
+                    # only 3 triggers that ever touch a directory's staging
+                    # mirror or graph (graft_autobuild.py module docstring), so a
+                    # pane querying graft about a file it is CURRENTLY editing —
+                    # before its own `done()` — got an answer as of its last
+                    # done() (or nothing, on a pane's first task). Riding this
+                    # same 5s tick costs nothing new and resync_staging_only()
+                    # self-throttles per directory, so this is a cheap no-op most
+                    # ticks. Worktree-isolated panes are skipped: graft is never
+                    # granted there (M3, shared_dev_tools.py), so resyncing that
+                    # throwaway checkout's mirror would be pure waste.
+                    _ps_wt = getattr(self, "_pane_state", {}).get(key)
+                    if _ps_wt is None or not _ps_wt.worktree:
+                        try:
+                            from .graft_autobuild import resync_staging_only
+
+                            resync_staging_only(getattr(pane, "_session_cwd", None))
+                        except Exception:
+                            pass
+
                     # Stuck-paste reaper — MUST run before every suppression
                     # gate below (rate-limit, blocked-on-lead, tty-block). A
                     # swallowed task submit has to be recovered even when a

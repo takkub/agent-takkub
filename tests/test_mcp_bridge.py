@@ -10,6 +10,7 @@ the bulk of the new-behaviour coverage is codex's `-c` override translation.
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -201,6 +202,99 @@ class TestCodexCliVersion:
 
         monkeypatch.setattr(mcp_bridge.subprocess, "run", lambda *a, **kw: _Result())
         assert mcp_bridge._codex_cli_version("codex", ".", {}) is None
+
+
+class TestCodexCliVersionCached:
+    """`_codex_cli_version_cached` — the per-session cache every codex-family
+    spawn actually calls through (2026-08-06). Every codex spawn used to pay
+    a real `codex --version` subprocess (~363ms measured) even though the
+    binary's version never changes mid-session; this caches it."""
+
+    def test_second_call_does_not_reshell_out(self, tmp_path, monkeypatch):
+        fake_bin = tmp_path / "codex.cmd"
+        fake_bin.write_text("@echo off\n", encoding="utf-8")
+        monkeypatch.setattr(mcp_bridge.shutil, "which", lambda name: str(fake_bin))
+        calls = []
+
+        def _fake_run(argv, **kw):
+            calls.append(argv)
+
+            class _Result:
+                stdout = "codex-cli 0.146.0\n"
+
+            return _Result()
+
+        monkeypatch.setattr(mcp_bridge.subprocess, "run", _fake_run)
+
+        first = mcp_bridge._codex_cli_version_cached(str(fake_bin), ".", {})
+        second = mcp_bridge._codex_cli_version_cached(str(fake_bin), ".", {})
+
+        assert first == (0, 146, 0)
+        assert second == (0, 146, 0)
+        assert len(calls) == 1, "second call must be served from cache, not re-shell out"
+
+    def test_binary_mtime_change_invalidates_cache(self, tmp_path, monkeypatch):
+        """A codex-cli upgrade in place (same path, new file) must be
+        re-probed, not silently keep reporting the old version forever for
+        the remainder of a long-lived cockpit session."""
+        fake_bin = tmp_path / "codex.cmd"
+        fake_bin.write_text("@echo off\n", encoding="utf-8")
+        monkeypatch.setattr(mcp_bridge.shutil, "which", lambda name: str(fake_bin))
+        versions = iter(["codex-cli 0.146.0\n", "codex-cli 0.150.0\n"])
+
+        def _fake_run(argv, **kw):
+            class _Result:
+                stdout = next(versions)
+
+            return _Result()
+
+        monkeypatch.setattr(mcp_bridge.subprocess, "run", _fake_run)
+
+        first = mcp_bridge._codex_cli_version_cached(str(fake_bin), ".", {})
+        # Simulate an in-place upgrade: same path, later mtime.
+        os.utime(fake_bin, (fake_bin.stat().st_atime, fake_bin.stat().st_mtime + 10))
+        second = mcp_bridge._codex_cli_version_cached(str(fake_bin), ".", {})
+
+        assert first == (0, 146, 0)
+        assert second == (0, 150, 0)
+
+    def test_unresolvable_binary_still_caches_for_this_process(self, monkeypatch):
+        monkeypatch.setattr(mcp_bridge.shutil, "which", lambda name: None)
+        calls = []
+
+        def _fake_run(argv, **kw):
+            calls.append(argv)
+
+            class _Result:
+                stdout = "codex-cli 0.146.0\n"
+
+            return _Result()
+
+        monkeypatch.setattr(mcp_bridge.subprocess, "run", _fake_run)
+
+        mcp_bridge._codex_cli_version_cached("codex-not-on-path", ".", {})
+        mcp_bridge._codex_cli_version_cached("codex-not-on-path", ".", {})
+
+        assert len(calls) == 1
+
+
+class TestCodexMcpArgvUsesCachedVersion:
+    def test_mcp_argv_for_provider_calls_cached_wrapper_not_raw(
+        self, isolated_mcp_file, monkeypatch
+    ):
+        """Regression guard: `_codex_mcp_argv` must go through the cache,
+        not call `_codex_cli_version` directly — otherwise every codex spawn
+        still pays the subprocess cost this cache exists to remove."""
+        calls = []
+        monkeypatch.setattr(
+            mcp_bridge,
+            "_codex_cli_version_cached",
+            lambda *a: calls.append(a) or (0, 146, 0),
+        )
+
+        mcp_bridge.mcp_argv_for_provider("codex", "codex", None, "proj")
+
+        assert len(calls) == 1
 
 
 class TestCodexResolveVersionGate:

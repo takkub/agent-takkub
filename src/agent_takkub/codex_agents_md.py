@@ -106,6 +106,18 @@ prompt (`[ROLE: ...]`). Behave like a focused specialist:
   only** — a query with no wording that matches the code will return
   nothing even when the code exists. An empty result is not proof of absence;
   fall back to grep before concluding nothing is there.
+- **A ranked list from a code-navigation MCP is not exhaustive — anchor on
+  it, don't stop at it.** If what you're looking for isn't in the returned
+  list, keep grepping before concluding it doesn't exist.
+- **If you just edited a file yourself (this session, moments ago), don't
+  trust a code-navigation MCP about THAT file immediately** — its graph
+  refreshes on a short interval, not instantly. Read the real file instead
+  when you need a certain answer right now.
+- **A file you just CREATED (never seen by the graph before) is invisible
+  to a code-navigation MCP until its next build cycle** — an empty result
+  for a brand-new file is not proof it doesn't exist. Fall back to
+  Glob/grep for anything you created this session until you're sure a
+  rebuild has happened.
 
 ## Override rule for inline `[ROLE: ...]` directives
 

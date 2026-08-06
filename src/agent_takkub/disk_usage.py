@@ -826,8 +826,26 @@ def disk_report(data_home: Path | None = None) -> dict:
     )
 
     total = sum(c.size_bytes for c in categories)
+    # L2 (2026-08-05 cross-OS audit): `graft-graphs/` bytes get folded into
+    # `total_bytes` above like every other category, but they don't
+    # necessarily LIVE under `home` — `graft_store.py`'s module docstring
+    # documents the one case where they don't (DATA_HOME == REPO_ROOT, a dev
+    # checkout, falls back to `Path.home()/".agent-takkub"` instead, see
+    # `_graft_store_base`). Reporting only `"data_home"` would silently
+    # present a total that spans two different roots under one label.
+    # Surface the graft store's REAL root explicitly so a caller (or a human
+    # reading `--json` output) can tell the two apart instead of assuming
+    # every byte counted here sits under `data_home`.
+    graft_root = str(graft_store.GRAFT_STORE_ROOT.parent)
     return {
         "data_home": str(home),
+        "graft_store_root": graft_root,
+        # L8 (2026-08-06 re-review): a raw `startswith` reads a sibling like
+        # `<home>-old` as "inside" `home` — `Path.is_relative_to` compares
+        # actual path parts instead of a string prefix (and, on Windows,
+        # pathlib's own case-insensitive comparison already covers what the
+        # old `os.name == "nt"` branch hand-rolled).
+        "graft_store_root_outside_data_home": not Path(graft_root).is_relative_to(home),
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "total_bytes": total,
         "categories": [c.as_dict() for c in categories],

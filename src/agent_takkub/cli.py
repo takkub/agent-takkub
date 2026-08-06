@@ -406,6 +406,15 @@ def cmd_disk(args: argparse.Namespace) -> dict:
         return {"ok": True, "msg": f"{_fmt_bytes(report['total_bytes'])} total"}
 
     _utf8_print(f"DATA_HOME: {report['data_home']}")
+    # L2 (2026-08-05 cross-OS audit): graft-graphs/ can live OUTSIDE
+    # DATA_HOME (a dev checkout falls back to Path.home()/".agent-takkub" —
+    # see graft_store.py's module docstring) while its bytes still count
+    # toward `total_bytes` below. Say so explicitly instead of letting the
+    # total look like it's all under DATA_HOME.
+    if report.get("graft_store_root_outside_data_home"):
+        _utf8_print(
+            f"  (note: graft-graphs/ counted above lives outside DATA_HOME, at {report['graft_store_root']})"
+        )
     _utf8_print(f"total: {_fmt_bytes(report['total_bytes'])}\n")
     for c in sorted(report["categories"], key=lambda c: -c["size_bytes"]):
         tag = {"safe": "safe  ", "review": "review", "never": "never "}[c["level"]]
@@ -1680,7 +1689,8 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="comma-separated categories to prune (default: every safe category). "
         "one of: browser-profiles,transcripts,exports,orphan-worktrees,"
-        "orphan-worktrees-review,shell-snapshots,partial,chat-history,node-modules",
+        "orphan-worktrees-review,shell-snapshots,partial,chat-history,node-modules,"
+        "graft-graphs",
     )
     sprune.add_argument(
         "--level",

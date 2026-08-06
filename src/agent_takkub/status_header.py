@@ -9,11 +9,14 @@ MainWindow method can touch them unchanged.
 
 from __future__ import annotations
 
+import time
+
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
     QComboBox,
     QFrame,
     QHBoxLayout,
+    QMessageBox,
     QPushButton,
     QStatusBar,
     QStyle,
@@ -23,6 +26,34 @@ from PyQt6.QtWidgets import (
 from . import cockpit_theme
 from .config import RUNTIME_DIR
 from .rtk_helper import is_rtk_installed, rtk_binary_available
+
+# ── 🧠 Graft chip snapshot caches (MED-6, 2026-08-06 final review) ─────────
+# `_graft_progress_snapshot` used to redo `shutil.which()` x2 (a full PATH
+# scan) + a `projects.json` walk + a `resolve()`/`is_dir()`/sha256 PER
+# CONFIGURED PATH on *every* call — and it was called on the Qt main thread
+# every 2s timer tick AND every `orch.statusChanged` emission (reviewer
+# measured 14.4ms/call at 46 project dirs; worse, `is_dir()` on a
+# disconnected mapped drive blocks for the SMB timeout, on the GUI thread).
+# Two module-level caches fix the shape without touching the GUI-thread
+# constraint: the CLI path never changes mid-session (resolved once), and
+# the rest of the snapshot is cheap enough to redo only every 10s — chip
+# granularity doesn't need 2s resolution. `_reset_graft_caches()` is the
+# test-only escape hatch so each test's fresh monkeypatching still lands.
+_UNSET = object()
+_graft_cli_cache: str | object | None = _UNSET
+_graft_snapshot_cache: dict | None = None
+_graft_snapshot_cache_at: float = 0.0
+_GRAFT_SNAPSHOT_TTL_S = 10.0
+
+
+def _reset_graft_caches() -> None:
+    """Test hook: clear both graft-chip caches so the next
+    `_graft_progress_snapshot()` call recomputes from scratch instead of
+    returning a value cached under a previous test's monkeypatches."""
+    global _graft_cli_cache, _graft_snapshot_cache, _graft_snapshot_cache_at
+    _graft_cli_cache = _UNSET
+    _graft_snapshot_cache = None
+    _graft_snapshot_cache_at = 0.0
 
 
 class StatusHeaderMixin:
@@ -168,6 +199,27 @@ class StatusHeaderMixin:
         return "Remote control: OFF — click to set up phone pairing (Cloudflare tunnel)."
 
     @staticmethod
+    def _graft_chip_style(state: str) -> str:
+        """Outline chip for the 🧠 Graft code-graph auto-build indicator.
+
+        `building` = info blue (quiet background activity, nothing needed
+        from the user), `attention` = warn amber (CLI missing or a build
+        failed — actionable), `idle` = neutral zinc (nothing happening /
+        everything already built — matches the exec-mode/auto-resume chips'
+        OFF treatment so it reads as calm, not alarming)."""
+        brand = {
+            "building": cockpit_theme.STATE_INFO,
+            "attention": cockpit_theme.STATE_WARN_ALT,
+        }.get(state, cockpit_theme.TEXT_MUTED)
+        return (
+            "QPushButton { "
+            f"background:transparent; color:{brand}; "
+            f"border:1px solid {brand}; border-radius:{cockpit_theme.RADIUS_MD}px; "
+            "padding:2px 10px; font-weight:600; }"
+            "QPushButton:hover { background:rgba(255,255,255,0.06); }"
+        )
+
+    @staticmethod
     def _ghost_button_style() -> str:
         """Neutral status-bar action button.
 
@@ -303,6 +355,21 @@ class StatusHeaderMixin:
         self._chip_remote = QPushButton(self)
         self._chip_remote.clicked.connect(self._on_remote_chip_clicked)
         self._refresh_remote_chip()
+
+        # 🧠 Graft chip: surfaces the boot-time / tab-switch code-graph
+        # auto-build (graft_autobuild.py) that otherwise runs completely
+        # silently — a machine with 46 project dirs building in the
+        # background with zero UI feedback looked like the cockpit was just
+        # slow for no reason (M6). Click opens a plain-language detail
+        # dialog; state/text are repainted by _refresh_graft_chip, called
+        # here and then every 2s off the existing status timer (piggy-backs
+        # on _update_status — polling a couple dozen marker files is cheap,
+        # no dedicated timer needed).
+        self._chip_graft = QPushButton("🧠 Graft", self)
+        self._chip_graft.setStyleSheet(self._graft_chip_style("idle"))
+        self._chip_graft.clicked.connect(self._on_graft_chip_clicked)
+        self._graft_status_cache: dict | None = None
+        self._refresh_graft_chip()
 
         # Self-update chip. Polls `git fetch` + `git status` every 5 min
         # so a user that pulled their friend's commit from another machine
@@ -485,7 +552,7 @@ class StatusHeaderMixin:
         #   Group 1 — Workflow actions (buttons that change pane state)
         #   Group 2 — System status    (cockpit-level toggles + updates)
         #     2a. exec      — account plan · execution mode
-        #     2b. session   — auto-resume · remote
+        #     2b. session   — auto-resume · remote · graft build status
         #     2c. system    — rtk install · restart · team · update
         for w in (
             self._btn_open_shell,
@@ -497,7 +564,7 @@ class StatusHeaderMixin:
         self._status.addPermanentWidget(self._make_status_separator())
         subgroups = (
             (self._chip_plan, self._chip_exec_mode),
-            (self._chip_auto_resume, self._chip_remote),
+            (self._chip_auto_resume, self._chip_remote, self._chip_graft),
             (
                 self._btn_install_rtk,
                 self._btn_restart,
@@ -588,6 +655,255 @@ class StatusHeaderMixin:
         if working:
             bits.append(f"{working} working")
         self._status.showMessage("  ·  ".join(bits))
+        self._refresh_graft_chip()
+
+    # ──────────────────────────────────────────────────────────────
+    # 🧠 Graft chip — code-graph auto-build status
+    # ──────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _graft_progress_snapshot() -> dict:
+        """Best-effort snapshot of the boot-time / tab-switch graft
+        auto-build sweep (`graft_autobuild.py`), built ONLY from public,
+        side-effect-free readers — this never imports a private symbol from
+        that module (see the M6 task's file-ownership split; backend owns
+        it, this is read-only polling from the UI side).
+
+        `{"available": bool, "total": int, "completed": int,
+          "building": int|None, "failed": list[str]|None}` — `total`/
+        `completed` come from `graft_store`'s public `has_completed_build`
+        marker (always accurate: it's the same marker the build itself
+        writes last, only on success). `building`/`failed` come from
+        `graft_autobuild.get_build_status()` — a real, in-flight count of
+        threads currently building and a real list of dirs whose last
+        attempt failed, not an estimate. `building` is `0` (not falsy-None)
+        the moment nothing is building right now — callers MUST tell that
+        apart from `None`, which means the getter itself is unavailable
+        (older graft_autobuild, or the import/call raised) and the chip has
+        no signal at all beyond the completion markers above.
+
+        MED-6 (2026-08-06 final review, R-2 follow-up): this runs on the Qt
+        main thread (2s status timer + every `statusChanged`), and per-call
+        cost scales with configured project count — a `shutil.which()` PATH
+        scan plus a `resolve()`/`is_dir()`/sha256 per path (measured
+        14.4ms/call at 46 dirs; an offline mapped drive's `is_dir()` blocks
+        for the SMB timeout on the GUI thread). The resolved CLI path and
+        the `total`/`completed` project scan are the expensive, slow-moving
+        part — cached under `_GRAFT_SNAPSHOT_TTL_S` (10s), since the chip
+        doesn't need 2s resolution for those.
+
+        `building`/`failed` are the OPPOSITE: `graft_autobuild.get_build_status()`
+        is a real in-flight count, documented as cheap by design (two
+        dict/set snapshots under one lock — safe to poll every tick), and
+        it is the one signal that must never be stale — a cached `0` here
+        would render "confirmed nothing building" at boot while 3 builds
+        are actually running, exactly the "stale zero looks like confirmed
+        zero" conflation `_refresh_graft_chip`'s docstring forbids. So it is
+        called fresh on every invocation, cache hit or miss, and merged
+        into the (possibly cached) rest of the snapshot. `_reset_graft_caches()`
+        clears the cached half for tests.
+        """
+        global _graft_cli_cache, _graft_snapshot_cache, _graft_snapshot_cache_at
+
+        def _fresh_build_status() -> tuple[int | None, list[str] | None]:
+            # Optional richer status IF graft_autobuild ever grows a public
+            # getter — degrades to progress-only when it's absent, which is
+            # the case today.
+            try:
+                from . import graft_autobuild as _gab
+
+                get_status = getattr(_gab, "get_build_status", None)
+                if callable(get_status):
+                    live = get_status()
+                    if isinstance(live, dict):
+                        return live.get("building"), live.get("failed")
+            except Exception:
+                pass
+            return None, None
+
+        now = time.monotonic()
+        if (
+            _graft_snapshot_cache is not None
+            and (now - _graft_snapshot_cache_at) < _GRAFT_SNAPSHOT_TTL_S
+        ):
+            snap = dict(_graft_snapshot_cache)
+            if snap["available"]:
+                snap["building"], snap["failed"] = _fresh_build_status()
+            return snap
+
+        from . import graft_store
+
+        if _graft_cli_cache is _UNSET:
+            _graft_cli_cache = graft_store.graft_cli_path()
+        cli = _graft_cli_cache
+        if cli is None:
+            snap = {
+                "available": False,
+                "total": 0,
+                "completed": 0,
+                "building": None,
+                "failed": None,
+            }
+            _graft_snapshot_cache = snap
+            _graft_snapshot_cache_at = now
+            return snap
+
+        from pathlib import Path
+
+        from .config import load_projects
+
+        try:
+            projects = load_projects().get("projects") or {}
+        except Exception:
+            projects = {}
+        seen: dict[str, Path] = {}
+        for proj in projects.values():
+            if not isinstance(proj, dict):
+                continue
+            paths = proj.get("paths")
+            if not isinstance(paths, dict):
+                continue
+            for raw in paths.values():
+                if not isinstance(raw, str) or not raw.strip():
+                    continue
+                try:
+                    resolved = Path(raw).expanduser().resolve()
+                except OSError:
+                    continue
+                if not resolved.is_dir():
+                    continue
+                # MED-5 (2026-08-06 final review): dedup key MUST match the
+                # store key `graft_store.graph_store_dir` actually uses
+                # (`graph_key` -> `_normalize_for_key`, which case-folds on
+                # win32 AND darwin). The old `os.name == "nt"`-only fold
+                # left macOS case-variant paths ("/Users/x/Proj" vs.
+                # "/Users/x/proj") as two distinct dict entries here while
+                # `graph_store_dir` folded them to the SAME store dir —
+                # `total` overcounts and two concurrent `graft build`s can
+                # race into one store. Reusing `graph_key` keeps this
+                # dedup permanently in lockstep with the store key instead
+                # of hand-rolling a second copy of the casing rule.
+                key = graft_store.graph_key(resolved)
+                seen[key] = resolved
+
+        total = len(seen)
+        completed = sum(
+            1
+            for d in seen.values()
+            if graft_store.has_completed_build(graft_store.graph_store_dir(d))
+        )
+
+        building, failed = _fresh_build_status()
+
+        snap = {
+            "available": True,
+            "total": total,
+            "completed": completed,
+            "building": building,
+            "failed": failed,
+        }
+        # Cache only the slow-moving half (available/total/completed) —
+        # building/failed are recomputed fresh on every call above, so the
+        # cached copy below is never read for those two keys.
+        _graft_snapshot_cache = snap
+        _graft_snapshot_cache_at = now
+        return snap
+
+    def _graft_chip_tooltip(self, snap: dict) -> str:
+        if not snap["available"]:
+            return (
+                "graft CLI not found on PATH — the code-intelligence MCP has\n"
+                "no graph to answer from and returns empty results.\n"
+                "Run `takkub doctor --fix` to install it, then restart the\n"
+                "cockpit. Click for details."
+            )
+        total, completed = snap["total"], snap["completed"]
+        building = snap.get("building")
+        failed = snap.get("failed") or []
+        if failed:
+            return f"{completed}/{total} project graphs built · {len(failed)} failed — click for details."
+        if total and completed < total:
+            if building:
+                return f"Building code-intelligence graphs in the background: {building} in progress, {completed}/{total} done."
+            if building == 0:
+                return f"{completed}/{total} project graphs built · none building right now — queued for the next tab switch or restart."
+            return f"Building code-intelligence graphs in the background: {completed}/{total} done."
+        if total:
+            return f"Code-intelligence graphs ready: {total}/{total} projects built."
+        return "No project paths configured yet — nothing to build."
+
+    def _refresh_graft_chip(self) -> None:
+        """Repaint the 🧠 Graft chip from a fresh snapshot. Uses the same
+        `__dict__`-membership guard as `_refresh_remote_chip` so tests that
+        exercise a `MainWindow.__new__()` stub (Qt C++ side never
+        constructed) don't hit the sip `hasattr`/`getattr` quirk documented
+        there.
+
+        `building` distinguishes real states: `None` = no getter (unknown,
+        falls back to the marker-based progress text below), `0` = getter
+        present but nothing building right now (queued, not "building"),
+        `>0` = a real in-flight count — these three MUST render differently
+        so "don't know" never looks identical to "confirmed zero"."""
+        if "_chip_graft" not in self.__dict__:
+            return
+        snap = self._graft_progress_snapshot()
+        self._graft_status_cache = snap
+        total, completed = snap["total"], snap["completed"]
+        building = snap.get("building")
+        failed = snap.get("failed") or []
+        if not snap["available"]:
+            self._chip_graft.setText("🧠 Graft: not installed")
+            self._chip_graft.setStyleSheet(self._graft_chip_style("attention"))
+        elif failed:
+            self._chip_graft.setText(f"🧠 Graft: {len(failed)} failed")
+            self._chip_graft.setStyleSheet(self._graft_chip_style("attention"))
+        elif building:
+            self._chip_graft.setText(f"🧠 Building graphs… {building} now · {completed}/{total}")
+            self._chip_graft.setStyleSheet(self._graft_chip_style("building"))
+        elif total and completed < total:
+            if building == 0:
+                self._chip_graft.setText(f"🧠 Graft: {completed}/{total} queued")
+                self._chip_graft.setStyleSheet(self._graft_chip_style("idle"))
+            else:
+                self._chip_graft.setText(f"🧠 Building graphs… {completed}/{total}")
+                self._chip_graft.setStyleSheet(self._graft_chip_style("building"))
+        else:
+            self._chip_graft.setText("🧠 Graft ready" if total else "🧠 Graft")
+            self._chip_graft.setStyleSheet(self._graft_chip_style("idle"))
+        self._chip_graft.setToolTip(self._graft_chip_tooltip(snap))
+
+    def _on_graft_chip_clicked(self) -> None:
+        """Click-for-detail — the chip itself stays a quiet passive status
+        readout (M6: background build must never pop a modal unprompted),
+        this dialog only ever appears from an explicit click."""
+        snap = self._graft_status_cache or self._graft_progress_snapshot()
+        if not snap["available"]:
+            QMessageBox.warning(
+                self,
+                "Code-intelligence graph (graft)",
+                "The `graft` CLI isn't installed, so teammate panes get\n"
+                "empty answers from the code-graph MCP instead of real\n"
+                "results.\n\n"
+                "Fix: run `takkub doctor --fix` from a terminal, then\n"
+                "restart the cockpit.",
+            )
+            return
+        total, completed = snap["total"], snap["completed"]
+        building = snap.get("building")
+        failed = snap.get("failed") or []
+        lines = [f"{completed}/{total} project graphs built."]
+        if building:
+            lines.append(f"{building} building right now.")
+        if failed:
+            lines.append("")
+            lines.append("Failed:")
+            lines.extend(f"  • {name}" for name in failed)
+            lines.append("")
+            lines.append("Check the cockpit log for the error. A tab switch or")
+            lines.append("cockpit restart retries any project with no graph yet.")
+            QMessageBox.warning(self, "Code-intelligence graph (graft)", "\n".join(lines))
+        else:
+            QMessageBox.information(self, "Code-intelligence graph (graft)", "\n".join(lines))
 
     # ──────────────────────────────────────────────────────────────
     # 🌐 Remote chip visibility + state

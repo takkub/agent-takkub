@@ -4,6 +4,46 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.48] - 2026-08-06
+
+รอบนี้มาจาก user directive "อุดให้หมด อย่ารอให้ถามแล้วค่อยแก้" — cross-OS audit + final review เจอ **1 blocker วนไม่รู้จบ + 6 medium** ที่ CI จับไม่ได้เลย เพราะ repo ทดสอบไม่มี git submodule และไม่มี path ยาวเกิน MAX_PATH
+
+### Added (เพิ่ม)
+- **🧠 chip Graft บน status bar** — 4 สถานะ: พร้อมใช้ / กำลัง build (X/Y) / **ยังไม่ได้ลง** (บอกให้รัน `takkub doctor --fix`) / **build ล้ม N อัน** · คลิกดูรายละเอียด · ไม่มี popup ขวางทาง · เดิม cockpit build graph เบื้องหลังเงียบสนิท user ไม่มีทางรู้ว่าเกิดอะไรหรือทำไม graft ตอบว่าง
+- **`graft_autobuild.get_build_status()`** — snapshot thread-safe `{'building': int, 'failed': list[str]}` เบาพอให้ UI poll ทุก 2 วินาที · แยก **queued** ออกจาก **in-flight** (semaphore cap 3) จึงไม่โชว์ "Building 46" ตอน boot ทั้งที่ build จริง 3
+- **trigger ที่ 4: resync ระหว่างทำงาน** — เดิม graph อัปเดตแค่ตอน boot / สลับแท็บ / หลัง pane `done` → **ระหว่างที่ pane กำลังแก้โค้ด graph ยังเป็นภาพก่อนแก้** ถาม graft ได้คำตอบเก่า = มั่นใจแล้วผิด · ตอนนี้ resync staging บน idle-watchdog tick (throttle 15s/dir, ไม่ใช่ `graft build` เต็ม)
+- `takkub doctor` รายงานขนาด store · `takkub prune --help` ลิสต์ `graft-graphs` ครบ
+
+### Fixed (แก้)
+- **🔴 วนไม่รู้จบบน repo ที่มี git submodule** — `git ls-files` รายงาน submodule เป็น 1 entry แต่บนดิสก์เป็น **directory** → stage ไม่ได้ → ระบบคิดว่า "ยังมีไฟล์ใหม่" → `_spawn_build` ใหม่ **ทุก ~15 วินาทีตลอดอายุ pane** กิน semaphore + rewrite store ทั้งก้อนไม่หยุด · broken symlink / dir symlink / non-utf8 เข้าทางเดียวกัน
+  - **รอบสอง (ฝั่งปลายทาง):** แก้ครั้งแรกเช็คแค่ฝั่ง source แต่ **MAX_PATH fail ที่ปลายทาง** (staging prefix คงที่ 77 ตัวอักษร → rel path เกิน ~182 พังตอนเขียน) loop จึงกลับมา · ปิดด้วย escalation memory ที่ยืนยัน convergence **หลัง build จบ** ก่อนเลิก escalate + log ครั้งเดียวบอกชื่อไฟล์ แทนที่จะเงียบหรือสแปมทุกรอบ
+- **🔴 cross-device inode collision (regression จากการ optimize รอบเดียวกัน)** — `_stage_files` เทียบ `st_ino` โดยไม่เทียบ `st_dev` · inode เป็น per-volume → ถ้า `AGENT_TAKKUB_HOME` อยู่คนละไดรฟ์ (use case ที่ document ไว้เอง) inode ชนกันได้ = **ข้าม sync ถาวรแบบเงียบ** ไฟล์ไม่อัปเดตอีกเลย → `os.path.samestat` (st_dev + st_ino)
+- **staging ก๊อปใหม่ทั้งหมดทุกรอบ** ทั้งที่ไม่มีอะไรเปลี่ยน — 739 ไฟล์ = 264ms ทุก 15 วินาทีต่อ pane → เทียบ inode ก่อน relink เหลือ ~70ms · *(ตัดข้อเสนอ `(mtime,size)` ทิ้งหลังพิสูจน์ว่าบน Windows การเขียน 2 ครั้งติดกันได้ `st_mtime_ns` เท่ากันจริง)*
+- **chip ถ่วง UI** — `_graft_progress_snapshot` วิ่งบน Qt main thread ทุก 2 วินาที สแกน PATH 69 entries = 16.3ms/รอบ · network path offline = จอค้างทุก 2 วิ → cache แยกส่วน (แพง=cache, `building`/`failed`=เรียกสด) **16.3ms → 0.0002ms** และไม่โชว์ "0/46" เทา ๆ ตอน boot ทั้งที่ build อยู่จริงอีกต่อไป
+- **casing ผิดด้าน 2 จุดที่เหลือ** (`_dirs_for_project`, `_graft_progress_snapshot`) ยังใช้ `os.name == "nt"` → **บน macOS path ต่างตัวพิมพ์ = 2 build ยิงใส่ store เดียวกันพร้อมกัน** คือ corruption ที่ docstring ตัวเองห้ามไว้ · ทั้งคู่เปลี่ยนไปใช้ `graft_store.graph_key()` ตัวเดียวกับที่ store ใช้ จึง drift กันไม่ได้อีก
+- `resync_staging_only` ไม่เช็ค graft CLI → เครื่องที่ **ไม่มี graft** ยิง git subprocess + 2 threads ทุก 15 วิ/pane ฟรี ๆ
+- `qa.md` + `critic.md` ขาดกฎ new-file ทั้งที่ทั้งคู่ได้ graft — **qa สร้างไฟล์เทสใหม่ตลอด คือ role ที่ต้องการกฎนี้ที่สุด**
+- **failed ค้างถาวร** — dir ที่ถูกลบจาก `projects.json` หลัง build ล้ม ค้างบน chip ตลอดไป → TTL 24 ชม. lazy-prune (ไม่เพิ่ม I/O ให้ getter ที่ UI poll ทุก 2 วิ)
+- `~` เขียนไม่ได้ (เครื่ององค์กร) เดิมเงียบสนิท → ขึ้นใน `get_build_status()['failed']` · `GRAFT_STORE_ROOT`/`STAGING_ROOT` lazy ผ่าน module `__getattr__` (เดิม freeze ตอน import) · cache `codex --version` keyed by (bin, mtime) — วัดจริง cold 125-200ms → warm ~0ms
+
+### Fixed — test quality (เจอเพราะ verify ไม่ใช่เพราะ CI)
+- **เทสที่หลอกตัวเอง 3 กลุ่ม** — (1) `test_graft_store_root_never_under_data_home` อ่านค่าที่ conftest patch ทับ ผ่านบน Windows เพราะ tmp บังเอิญอยู่ใต้ `~` แต่ **ไม่เคยทดสอบสูตรจริงบนแพลตฟอร์มไหนเลย** (2) 4 เทสของ `resync_staging_only` ผ่านแบบ vacuous บน CI เพราะ CI ไม่ได้ลง graft — พิสูจน์ด้วยการลบ precondition ทิ้งแล้วยังผ่าน (3) module-global state ของ `graft_autobuild` รั่วข้ามเทส → `test_graft_chip` พังเฉพาะตอนรัน full suite (targeted จับไม่ได้)
+- ทุกเทสที่แก้ **พิสูจน์แล้วว่าจะ fail จริงถ้าทำลาย logic ที่มันควรคุม** ไม่ใช่แค่ทำให้เขียว
+
+### Known gaps (ยังเปิดอยู่ — ไม่ block)
+- ยังไม่ได้ smoke pane codex ตัวจริง (ค้างจาก 1.0.46 — codex ติด token limit) · unit test คุมไว้
+- dev กับ prod cockpit build graph คนละชุด (ตั้งใจ — จะ share ต้องมี cross-process file lock ก่อน ไม่งั้น 2 โปรเซสเขียนทับกัน)
+- LOW ที่เหลือจาก audit ไม่มีอันไหนกระทบการใช้งาน
+
+### Fixed — mid-task staleness follow-up
+- **ไฟล์ที่สร้างใหม่ระหว่าง task (ไม่เคยอยู่ใน graph มาก่อน) ยัง invisible แม้ `resync_staging_only` วิ่งแล้ว** — ต่างจากไฟล์ที่แก้ (modify) ซึ่งปิดไปแล้วใน 1.0.47 (freshness gate ของ graft เอง refresh ให้ถูกต้อง) ไฟล์ใหม่กลับไม่ถูก refresh: พิสูจน์ว่า `resync_staging_only` คัดลอกไฟล์เข้า staging mirror ถูกต้องแล้ว แต่ `graft ask` ยังตอบว่างเงียบๆ (ไม่มีบรรทัด `[graft] refreshed...`) ต้องรอ `_build_one` เต็มรอบถัดไปถึงจะเห็น
+  - แก้โดยให้ `resync_staging_only` เทียบรายชื่อไฟล์ที่ git เห็นตอนนี้กับที่ staging mirror มีอยู่จริง (`_has_new_files`) — ถ้าเจอไฟล์ที่ staging ยังไม่มี ถือว่าเป็นไฟล์ใหม่ → escalate เป็น `_spawn_build` เต็มรูป (ใช้ single-flight/semaphore/throttle เดิมทั้งหมด) แทนการ sync เฉยๆ
+  - พิสูจน์ end-to-end กับ `graft` CLI จริง (ไม่ mock): build baseline → สร้างไฟล์ใหม่พร้อม symbol ใหม่ → เรียก `resync_staging_only()` ของจริง → รอ build จบ → `graft ask` เจอ symbol ใหม่ทันที ไม่ต้องรอรอบ build ปกติถัดไป
+
+### Known behavior (พฤติกรรมที่รู้ไว้ตั้งใจ — ไม่ใช่ gap ที่ปล่อยเงียบ)
+- **สาเหตุที่แท้จริงฝั่ง `@nanonets/graft` เองไม่ได้ไล่ลึกลงไป** — อ่านซอร์สที่ shipped มา (`probeDrift`/`ensureFreshGraph` ใน `graph/fingerprint.js`/`graph/refresh.js`) แล้วดูเหมือนไฟล์ใหม่ควรถูกจับผ่าน `drift.added` เหมือนไฟล์ที่แก้ผ่าน `drift.changed` แต่ทดสอบจริงกลับไม่เป็นแบบนั้น — เลือก workaround ที่ควบคุมได้เองในฝั่ง `graft_autobuild.py` (escalate เป็น build เต็มเมื่อเจอไฟล์ใหม่) แทนการ debug เข้าไปใน dependency ภายนอก เพราะพิสูจน์แล้วว่าปิดช่องได้จริงและความเสี่ยง regression ต่ำ (ใช้ build path เดิมที่ผ่าน test อยู่แล้ว)
+  - เอกสารกฎไว้ใน `.claude/agents/*.md` (backend/devops/frontend/mobile/reviewer) + `codex_agents_md.py` ด้วยเป็น defense-in-depth เผื่อ agent ถามคำถามเร็วกว่า throttle (15s) + เวลา build จริงจะทำเสร็จ — "ไฟล์ที่เพิ่งสร้างใหม่ graft อาจยังไม่เห็น ห้ามสรุปว่าไม่มี ให้ fallback ไป Glob/Grep"
+
 ## [1.0.47] - 2026-08-05
 
 ### Added (เพิ่ม)
@@ -38,10 +78,15 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 ### Known gaps (ยังปิดไม่ได้)
 - **ยังไม่ได้ smoke pane codex ตัวจริง** (ค้างจาก 1.0.46) — qa ไม่มีสิทธิ์ `takkub assign` และ codex ติด token limit · unit test คุมไว้
 - dev กับ prod cockpit ยัง build graph คนละชุด (ตั้งใจ — ดูเหตุผลด้านบน) กินดิสก์ 2 เท่า
-- `codex --version` ยังยิงทุก spawn (363ms) ยังไม่ cache ระดับ session
-- `GRAFT_STORE_ROOT` คำนวณตอน import ไม่ใช่ lazy + ถ้า `~` เขียนไม่ได้จะเงียบ ไม่มีสัญญาณบน UI (M5 secondary)
-- **first-run ไม่มีตัวบอกสถานะ** — เปิด cockpit ครั้งแรก build หลายโปรเจกต์เงียบ ๆ ไม่มี indicator (M6, เป็นงาน UI)
 - `engines: node >= 18` ใน `package.json` แต่ graft ต้อง Node ≥ 20 (doctor เตือนให้แล้ว)
+
+ปิดแล้ว (2026-08-06 — ดู `docs/reviews/2026-08-05-graft-crossos-audit.md` สำหรับที่มา):
+- ~~`codex --version` ยิงทุก spawn (363ms) ไม่ cache~~ — cache ระดับ process แล้ว คีย์ด้วย `(provider_bin, mtime ของไฟล์ binary)` ให้ codex-cli อัปเกรดที่ path เดิมแล้วยัง re-probe ถูก (`mcp_bridge._codex_cli_version_cached`) · วัดจริงกับ binary จริง: cold call ~125-200ms, warm call ~0ms
+- ~~`GRAFT_STORE_ROOT` คำนวณตอน import ไม่ lazy~~ — ย้ายเป็น module-level `__getattr__` (PEP 562) คำนวณสดทุกครั้งที่อ่าน ตอบสนอง `AGENT_TAKKUB_HOME`/`DATA_HOME` ที่ patch หลัง import ได้จริง (พิสูจน์ด้วยเทส patch DATA_HOME หลัง import แล้วอ่านค่าใหม่)
+- ~~`~` เขียนไม่ได้แล้วเงียบ ไม่มีสัญญาณบน UI~~ — build ที่ mkdir store ล้ม (unwritable home) ตอนนี้ถูกบันทึกเป็น failure ใน `graft_autobuild.get_build_status()` เหมือน build failure อื่นๆ ทุกตัว ไม่ใช่ silent path พิเศษอีกต่อไป
+- ~~first-run ไม่มีตัวบอกสถานะ (M6)~~ — `graft_autobuild.get_build_status()` (thread-safe `{'building': int, 'failed': list[str]}`, ไม่แตะ filesystem หนัก ปลอดภัยให้ poll ถี่) + status-bar chip ฝั่ง frontend อ่านค่านี้แล้ว
+- ~~mid-task staleness: pane query graft ระหว่างที่ตัวเองกำลังแก้โค้ดอยู่ยังได้คำตอบเก่า (ไม่มี trigger คลุมช่วงนี้เลย นอกจาก boot/tab-switch/done)~~ — เพิ่ม trigger ที่ 4: `resync_staging_only()` วิ่งบน idle-watchdog tick ทุก pane ที่ `state=="working"` (throttle 15s/dir, ไม่ใช่ `graft build` เต็มรูป) sync แค่ staging mirror แล้วปล่อยให้ freshness gate ของ graft เองรีเฟรช graph แบบ incremental บน query ถัดไป · พิสูจน์ end-to-end จริงด้วย rename-over-write edit (ให้ inode ใหม่ ไม่ผูกกับ hardlink เดิม): query ก่อน resync ได้ symbol เก่าเงียบๆ (ไม่มี refresh message เพราะ staging ยังไม่เปลี่ยน) · หลังเรียก `resync_staging_only()` แล้ว query ซ้ำ ได้ `[graft] refreshed the graph (1 file changed)` แล้วตอบ symbol ใหม่ทันที
+- ~~`disk_report` ปนสอง root เข้าด้วยกันใต้ label `data_home` เดียว (L2)~~ — เพิ่มฟิลด์ `graft_store_root` + `graft_store_root_outside_data_home` ในผลลัพธ์ + `takkub disk` พิมพ์หมายเหตุเมื่อ graft-graphs อยู่นอก DATA_HOME จริง (กรณี dev checkout ที่ `DATA_HOME == REPO_ROOT`)
 
 ## [1.0.46] - 2026-08-05
 

@@ -54,6 +54,7 @@ A single AI agent hits a wall on big work: context fills up, sub-tasks collide, 
 | 🧾 **Per-role memory + L2 archive** | Each teammate keeps a short, token-budgeted "learned notes" file; entries that get trimmed for space are archived (not deleted) to a searchable sibling file instead of being lost. |
 | 🔎 **BM25 search (`takkub search`)** | Full-text search over session logs and role-memory archives, ranked with Okapi BM25 — tokenizes both English words and Thai character trigrams, no external segmenter. |
 | ✅ **Evidence-gated QA/review** | A verify role's "done" report is checked for actual evidence (a file, a test run, an exit code) — reports with no evidence cited get flagged for the Lead instead of trusted at face value. |
+| 🧬 **Structural code-intelligence (`graft`)** | Symbol search, call-graph tracing, and signatures-only file views wired into code-reading roles (frontend/backend/mobile/devops/qa/reviewer/critic) — no LLM call, ~92% smaller than reading a large file whole. Fully optional: install with `takkub doctor --fix` (needs Node ≥ 20); a pane never gets the extra tools unless a project's graph has actually finished building. The graph lives outside the repo (`~/.agent-takkub/graft-graphs`, never committed); disable entirely with `TAKKUB_SKIP_GRAFT_BUILD=1`. |
 
 ### Reliability & diagnostics
 
@@ -117,6 +118,8 @@ agent-takkub
 <tr><td>
 
 **Requirements** — Node.js ≥ 18 and Python ≥ 3.11 already on your system. They're **detected, never reinstalled**. Everything else lives in an isolated `~/.agent-takkub`; your existing `claude` CLI, plugins, and config are left completely untouched.
+
+**Optional: `graft` code-intelligence** needs Node ≥ 20 — stricter than the cockpit's own Node ≥ 18 floor. It's off until you run `takkub doctor --fix`; without it (or on Node 18–19), the cockpit runs exactly the same, just without the extra structural-search tools for code-reading roles.
 
 </td></tr>
 </table>

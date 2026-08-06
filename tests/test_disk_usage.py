@@ -842,3 +842,36 @@ class TestDiskReport:
         assert review_cat["level"] == "review"
         rows = report["worktrees"]["orphan"]
         assert next(r for r in rows if r["path"] == str(wt))["prune_bucket"] == "review"
+
+    def test_graft_store_root_flagged_outside_data_home(self, tmp_path, monkeypatch):
+        """L2 (2026-08-05 cross-OS audit): graft-graphs/ can live outside
+        DATA_HOME (the module's own conftest-independent fallback case) while
+        still counting toward `total_bytes` — the report must say so
+        explicitly instead of letting `data_home` imply everything sits
+        under it."""
+        cfg_dir = tmp_path / "claude-config"
+        (cfg_dir / "projects").mkdir(parents=True)
+        (cfg_dir / "shell-snapshots").mkdir(parents=True)
+        monkeypatch.setattr(disk_usage, "default_claude_config_dir", lambda: cfg_dir)
+        # A genuine SIBLING of tmp_path, not nested inside it — a path
+        # merely under a differently-named subdir of tmp_path would still
+        # (correctly) count as "under data_home".
+        outside_root = tmp_path.parent / "totally-unrelated-root" / "graft-graphs" / "abc123"
+        monkeypatch.setattr(disk_usage.graft_store, "GRAFT_STORE_ROOT", outside_root, raising=False)
+
+        report = disk_usage.disk_report(tmp_path)
+
+        assert report["graft_store_root"] == str(outside_root.parent)
+        assert report["graft_store_root_outside_data_home"] is True
+
+    def test_graft_store_root_not_flagged_when_under_data_home(self, tmp_path, monkeypatch):
+        cfg_dir = tmp_path / "claude-config"
+        (cfg_dir / "projects").mkdir(parents=True)
+        (cfg_dir / "shell-snapshots").mkdir(parents=True)
+        monkeypatch.setattr(disk_usage, "default_claude_config_dir", lambda: cfg_dir)
+        inside_root = tmp_path / "graft-graphs" / "abc123"
+        monkeypatch.setattr(disk_usage.graft_store, "GRAFT_STORE_ROOT", inside_root, raising=False)
+
+        report = disk_usage.disk_report(tmp_path)
+
+        assert report["graft_store_root_outside_data_home"] is False

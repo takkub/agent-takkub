@@ -139,22 +139,71 @@ def _graft_store_base() -> Path:
     return DATA_HOME
 
 
-# Central home for every project's externalized graft graph, namespaced
-# first by this cockpit instance's own identity (`_instance_key`) and then
-# by a hash of the target path itself (`graph_key`) so each distinct target
-# still gets its own isolated graph. See `_graft_store_base` + module
-# docstring for why the base isn't simply `DATA_HOME` unconditionally.
-GRAFT_STORE_ROOT = _graft_store_base() / "graft-graphs" / _instance_key(DATA_HOME)
+def _compute_store_root() -> Path:
+    """Central home for every project's externalized graft graph, namespaced
+    first by this cockpit instance's own identity (`_instance_key`) and then
+    by a hash of the target path itself (`graph_key`) so each distinct
+    target still gets its own isolated graph. See `_graft_store_base` +
+    module docstring for why the base isn't simply `DATA_HOME`
+    unconditionally."""
+    return _graft_store_base() / "graft-graphs" / _instance_key(DATA_HOME)
 
-# Persistent mirror of each target's git-non-ignored files (H1 follow-up,
-# 2026-08-06) — a TRUE SIBLING of `GRAFT_STORE_ROOT`, never nested inside it
-# or inside the target: nesting reproduces the exact self-ignoring-.gitignore
-# bug `_graft_store_base`'s docstring already documents for `DATA_HOME ==
-# REPO_ROOT` (graft appending an un-ignoring `graft-graphs/<hash>/` line to
-# the target's own tracked `.gitignore` whenever the store isn't *truly*
-# external to whatever `dir` it's pointed at). See `staging_dir_for`'s
-# docstring for why this directory has to exist and persist at all.
-GRAFT_STAGING_ROOT = _graft_store_base() / "graft-staging" / _instance_key(DATA_HOME)
+
+def _compute_staging_root() -> Path:
+    """Persistent mirror of each target's git-non-ignored files (H1
+    follow-up, 2026-08-06) — a TRUE SIBLING of `GRAFT_STORE_ROOT`, never
+    nested inside it or inside the target: nesting reproduces the exact
+    self-ignoring-.gitignore bug `_graft_store_base`'s docstring already
+    documents for `DATA_HOME == REPO_ROOT` (graft appending an un-ignoring
+    `graft-graphs/<hash>/` line to the target's own tracked `.gitignore`
+    whenever the store isn't *truly* external to whatever `dir` it's pointed
+    at). See `staging_dir_for`'s docstring for why this directory has to
+    exist and persist at all."""
+    return _graft_store_base() / "graft-staging" / _instance_key(DATA_HOME)
+
+
+# `GRAFT_STORE_ROOT`/`GRAFT_STAGING_ROOT` are deliberately NOT plain
+# module-level constants (M5, 2026-08-05 cross-OS audit): the old
+# `NAME = _compute_...()` form ran a filesystem `.resolve()` syscall as a
+# SIDE EFFECT of merely importing this module, at whatever moment Python
+# first imported it — before `AGENT_TAKKUB_HOME`/test env patching had
+# necessarily happened, and with no way for anything to redirect it
+# afterwards short of re-importing the module. Module-level `__getattr__`
+# (PEP 562) computes fresh on every access instead — cheap (one `.resolve()`
+# + one sha256 digest) and correct even if `DATA_HOME` is patched after this
+# module first loads. Explicit `setattr(graft_store, "GRAFT_STORE_ROOT",
+# ...)` (tests/conftest.py's isolated-runtime redirect) still works exactly
+# as a plain constant would: `__getattr__` only fires on a MISS, so a value
+# placed directly in the module's `__dict__` shadows it, and `delattr`
+# (monkeypatch's teardown) restores lazy computation.
+def __getattr__(name: str) -> Path:
+    if name == "GRAFT_STORE_ROOT":
+        return _compute_store_root()
+    if name == "GRAFT_STAGING_ROOT":
+        return _compute_staging_root()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def _store_root() -> Path:
+    """Current `GRAFT_STORE_ROOT` value, honouring a test's `setattr` override
+    the same way an external `graft_store.GRAFT_STORE_ROOT` read would.
+
+    Functions in THIS module cannot simply reference the bare name
+    `GRAFT_STORE_ROOT` — Python resolves a bare global name via the module's
+    own `__dict__`/`LOAD_GLOBAL`, which never consults `__getattr__` (that
+    hook only fires for the attribute-access protocol, i.e. `module.NAME`
+    from outside, or here, via `sys.modules[__name__]`). Going through the
+    module object explicitly is what makes both paths agree: a monkeypatched
+    value (placed directly in `__dict__`) is seen either way, and the lazy
+    `__getattr__` fallback fires either way when nothing overrode it.
+    """
+    return sys.modules[__name__].GRAFT_STORE_ROOT
+
+
+def _staging_root() -> Path:
+    """`GRAFT_STAGING_ROOT` counterpart to `_store_root` — see its docstring."""
+    return sys.modules[__name__].GRAFT_STAGING_ROOT
+
 
 _MANIFEST_NAME = "source.json"
 
@@ -177,7 +226,7 @@ def graph_store_dir(target: Path) -> Path:
     before handing this to the graft CLI; this function only computes the
     path (kept side-effect-free so it's safe to call from a hot path like
     per-pane MCP config templating, not just the build sweep)."""
-    return GRAFT_STORE_ROOT / graph_key(target)
+    return _store_root() / graph_key(target)
 
 
 def staging_dir_for(target: Path) -> Path:
@@ -217,17 +266,17 @@ def staging_dir_for(target: Path) -> Path:
     in place with the same content produces no refresh message at all.
 
     Trade-off accepted here: because refresh now compares against this
-    mirror instead of the live target, an edit made between rebuild
-    triggers (boot / tab-switch / a `done()`'s debounced rebuild — see
-    `graft_autobuild.py`) is invisible to a query until the next trigger
-    resyncs the mirror. That is the same staleness window
-    `graft_autobuild.py`'s debounce already accepts for the graph itself;
-    this just extends it to the one directory graft's own freshness check
-    reads from.
+    mirror instead of the live target, an edit made between resync triggers
+    (boot / tab-switch / a `done()`'s debounced rebuild / a live pane's own
+    throttled resync — see `graft_autobuild.py`'s 4 triggers) is invisible
+    to a query until the next trigger resyncs the mirror. That is the same
+    staleness window `graft_autobuild.py`'s debounce/throttle already
+    accepts for the graph itself; this just extends it to the one directory
+    graft's own freshness check reads from.
 
     Side-effect-free like `graph_store_dir` — callers create/populate it
     (`graft_autobuild._sync_staging`)."""
-    return GRAFT_STAGING_ROOT / graph_key(target)
+    return _staging_root() / graph_key(target)
 
 
 def write_store_manifest(target: Path) -> None:
@@ -266,10 +315,11 @@ def read_store_manifest(store: Path) -> str | None:
 
 def iter_store_dirs() -> list[Path]:
     """Every existing per-target store directory under `GRAFT_STORE_ROOT`."""
-    if not GRAFT_STORE_ROOT.is_dir():
+    root = _store_root()
+    if not root.is_dir():
         return []
     try:
-        return [p for p in GRAFT_STORE_ROOT.iterdir() if p.is_dir()]
+        return [p for p in root.iterdir() if p.is_dir()]
     except OSError:
         return []
 

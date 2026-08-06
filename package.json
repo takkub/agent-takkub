@@ -1,6 +1,6 @@
 {
   "name": "agent-takkub",
-  "version": "1.0.47",
+  "version": "1.0.48",
   "description": "Desktop cockpit for orchestrating a team of Claude Code agents (Windows + macOS). Install globally: npm i -g agent-takkub",
   "keywords": [
     "claude",
@@ -42,5 +42,6 @@
   "engines": {
     "node": ">=18"
   },
+  "engines-note": "This floor is for agent-takkub itself. The OPTIONAL graft code-intelligence feature (installed separately via `takkub doctor --fix`, not an npm dependency of this package) needs Node >=20 — see README's Requirements section. Not raised here because it would force the >=20 floor onto every user even though graft stays off until explicitly enabled.",
   "license": "MIT"
 }

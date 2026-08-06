@@ -67,6 +67,7 @@ import logging
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 
 from ._win_console import SUBPROCESS_NO_WINDOW
@@ -161,6 +162,11 @@ def _codex_cli_version(
     version must fall back to the conservative resolve-and-disable path in
     `_codex_mcp_argv`, not abort the spawn. Only used to decide whether that
     path is even needed (see `_CODEX_RESOLVE_SAFE_MIN_VERSION`).
+
+    Uncached on purpose — `_codex_cli_version_cached` (below) is the real
+    entry point every caller should use; this stays the raw, always-shells-
+    out primitive so tests can exercise it without the cache getting in the
+    way.
     """
     try:
         result = subprocess.run(
@@ -179,6 +185,41 @@ def _codex_cli_version(
     if not match:
         return None
     return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+
+
+# Every codex-family pane spawn calls `_codex_cli_version` once — measured
+# ~363ms on this machine, effectively all of it process-launch overhead for
+# a binary that never changes version mid-session. A fan-out of N codex
+# panes (parallel/shard spawn) used to pay that cost N times over. Keyed by
+# `(provider_bin, mtime-of-resolved-binary)`, NOT just `provider_bin`, so a
+# codex-cli upgrade in place at the SAME path (e.g. `npm update -g` between
+# cockpit restarts, or an unusually long-lived cockpit session) still gets
+# re-probed instead of serving a stale version forever — the mtime changes
+# the moment the installer replaces the file, which is far cheaper to check
+# (one `os.stat`) than re-running `--version` on every spawn regardless.
+# When the binary can't be resolved/stat'd (bare name not on PATH from this
+# cwd, or some other OSError), the key's mtime component is just `None` and
+# caching still holds for the remainder of THIS process's life — the
+# `_codex_cli_version` fallback path (missing binary) is unaffected either
+# way, since a `None` in means `None` out, cached or not.
+_version_cache: dict[tuple[str, float | None], tuple[int, int, int] | None] = {}
+
+
+def _codex_cli_version_cached(
+    provider_bin: str, cwd: str, env: dict[str, str]
+) -> tuple[int, int, int] | None:
+    """Cached wrapper around `_codex_cli_version` — see `_version_cache`'s
+    comment for the invalidation strategy. This is what `_codex_mcp_argv`
+    actually calls."""
+    resolved = shutil.which(provider_bin) or provider_bin
+    try:
+        mtime = os.stat(resolved).st_mtime
+    except OSError:
+        mtime = None
+    key = (provider_bin, mtime)
+    if key not in _version_cache:
+        _version_cache[key] = _codex_cli_version(provider_bin, cwd, env)
+    return _version_cache[key]
 
 
 def _toml_literal(value: object) -> str:
@@ -292,7 +333,7 @@ def _codex_mcp_argv(
         _bin = provider_bin or "codex"
         _cwd = cwd or os.getcwd()
         _env = env or os.environ.copy()
-        version = _codex_cli_version(_bin, _cwd, _env)
+        version = _codex_cli_version_cached(_bin, _cwd, _env)
         if version is None or version < _CODEX_RESOLVE_SAFE_MIN_VERSION:
             names = _codex_resolved_mcp_names(_bin, _cwd, _env)
             for name in names:

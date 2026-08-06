@@ -728,6 +728,66 @@ class TestTtyBlockIdleWatchdog:
         assert notices == [(TEST_PROJECT, "backend", 1, False)]
 
 
+class TestGraftLiveResyncHook:
+    """The idle-watchdog tick also drives `graft_autobuild.resync_staging_only`
+    for a working pane's own cwd (closes the mid-task staleness gap: the
+    boot/tab-switch/done triggers alone never touch a directory's staging
+    mirror while a pane is actively editing — see graft_autobuild.py's
+    module docstring for the 4th trigger)."""
+
+    def test_working_pane_triggers_live_resync(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pane = _make_pane(state="working", at_ready_prompt=True)
+        pane._session_cwd = "/some/backend/cwd"
+        orch.panes["backend"] = pane
+        calls = []
+        monkeypatch.setattr(orch_mod.time, "time", lambda: 1000.0)
+        monkeypatch.setattr(
+            "agent_takkub.graft_autobuild.resync_staging_only", lambda cwd: calls.append(cwd)
+        )
+
+        orch._check_idle_teammates()
+
+        assert calls == ["/some/backend/cwd"]
+
+    def test_worktree_pane_skips_live_resync(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """M3: graft is never granted to a worktree-isolated pane (its cwd is
+        a throwaway checkout that `graft_autobuild.py` never builds), so
+        resyncing that checkout's staging mirror would be pure waste."""
+        pane = _make_pane(state="working", at_ready_prompt=True)
+        pane._session_cwd = "/some/worktree/checkout"
+        orch.panes["backend"] = pane
+        orch._ps(_key("backend")).worktree = {"branch": "wt/backend-123"}
+        calls = []
+        monkeypatch.setattr(orch_mod.time, "time", lambda: 1000.0)
+        monkeypatch.setattr(
+            "agent_takkub.graft_autobuild.resync_staging_only", lambda cwd: calls.append(cwd)
+        )
+
+        orch._check_idle_teammates()
+
+        assert calls == []
+
+    def test_lead_pane_skips_live_resync(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        lead = _make_pane(state="active", at_ready_prompt=True)
+        lead._session_cwd = "/some/lead/cwd"
+        orch.panes["lead"] = lead
+        calls = []
+        monkeypatch.setattr(orch_mod.time, "time", lambda: 1000.0)
+        monkeypatch.setattr(
+            "agent_takkub.graft_autobuild.resync_staging_only", lambda cwd: calls.append(cwd)
+        )
+
+        orch._check_idle_teammates()
+
+        assert calls == []
+
+
 class TestMalformedXmlWatchdog:
     """Issue #59: pane has literal tool-call XML on screen (harness silently
     no-op'd it due to missing namespace prefix) -- watchdog must inject a nudge."""

@@ -211,6 +211,71 @@ def test_graft_store_base_is_data_home_when_not_repo_root(tmp_path, monkeypatch)
     assert graft_store._graft_store_base() == custom_home
 
 
+def test_graft_store_root_reacts_to_data_home_patched_after_import(tmp_path, monkeypatch):
+    """M5 (2026-08-05 cross-OS audit): the old `NAME = _compute_...()` form
+    froze `GRAFT_STORE_ROOT` at whatever `DATA_HOME` was when this module
+    first imported — nothing could ever redirect it afterwards short of
+    re-importing the module. This is the behavior change: patching
+    `DATA_HOME` well AFTER import (this test file already imported
+    `graft_store` at collection time — see `_REAL_GRAFT_STORE_ROOT` above)
+    must still change what `graft_store.GRAFT_STORE_ROOT` reports next time
+    it's read."""
+    # conftest.py's own isolation fixture already placed an explicit
+    # `GRAFT_STORE_ROOT` override in `graft_store.__dict__` (belt-and-
+    # suspenders so no test can ever touch the real `~/.agent-takkub`) —
+    # that override, being a real attribute, would shadow `__getattr__`
+    # exactly like it's designed to (see `test_graft_store_root_explicit_
+    # override_still_wins`). Remove it here so THIS test genuinely exercises
+    # the lazy-computation path the fix is about, not the override.
+    monkeypatch.delattr(graft_store, "GRAFT_STORE_ROOT", raising=False)
+    custom_home = tmp_path / "patched-after-import"
+    monkeypatch.setattr(graft_store, "DATA_HOME", custom_home)
+    monkeypatch.setattr(graft_store, "REPO_ROOT", tmp_path / "unrelated-repo-root")
+
+    root = graft_store.GRAFT_STORE_ROOT
+
+    assert str(root).startswith(str(custom_home))
+
+
+def test_graft_staging_root_reacts_to_data_home_patched_after_import(tmp_path, monkeypatch):
+    monkeypatch.delattr(graft_store, "GRAFT_STAGING_ROOT", raising=False)
+    custom_home = tmp_path / "patched-after-import-2"
+    monkeypatch.setattr(graft_store, "DATA_HOME", custom_home)
+    monkeypatch.setattr(graft_store, "REPO_ROOT", tmp_path / "unrelated-repo-root")
+
+    root = graft_store.GRAFT_STAGING_ROOT
+
+    assert str(root).startswith(str(custom_home))
+
+
+def test_graft_store_root_explicit_override_still_wins(tmp_path, monkeypatch):
+    """An explicit `setattr(graft_store, "GRAFT_STORE_ROOT", ...)` — exactly
+    what tests/conftest.py's isolation fixture does — must still shadow the
+    lazy computation, the same way it would shadow a plain constant. Proves
+    `__getattr__` only fires on a genuine miss."""
+    override = tmp_path / "explicit-override"
+    monkeypatch.setattr(graft_store, "GRAFT_STORE_ROOT", override, raising=False)
+
+    assert graft_store.GRAFT_STORE_ROOT == override
+
+
+def test_graph_store_dir_honours_patched_root_from_inside_module(tmp_path, monkeypatch):
+    """`graph_store_dir` (and `iter_store_dirs`) read `GRAFT_STORE_ROOT` from
+    INSIDE `graft_store.py` itself — a bare-name reference would silently
+    stop seeing a `setattr(graft_store, "GRAFT_STORE_ROOT", ...)` override
+    once the constant became lazy (Python's `LOAD_GLOBAL` never consults
+    module `__getattr__`). This proves the internal `_store_root()` indirection
+    keeps external monkeypatch overrides visible to internal callers too."""
+    override = tmp_path / "override-root"
+    monkeypatch.setattr(graft_store, "GRAFT_STORE_ROOT", override, raising=False)
+    target = tmp_path / "some-target"
+    target.mkdir()
+
+    store = graft_store.graph_store_dir(target)
+
+    assert store.parent == override
+
+
 def test_graft_store_base_falls_back_to_home_when_data_home_is_repo_root(tmp_path, monkeypatch):
     """The one exception (see module docstring): DATA_HOME == REPO_ROOT (a
     dev checkout) would nest the store inside the cockpit's own repo, so

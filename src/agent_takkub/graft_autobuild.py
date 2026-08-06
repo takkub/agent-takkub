@@ -6,13 +6,24 @@ answers forever (shared_dev_tools.py's comment on GRAFT_MCP) — the MCP is
 wired into every code-reading role's pane, but silently useless until someone
 knows to run the command themselves.
 
-Three triggers call into this module (each fire-and-forget, background only):
+Four triggers call into this module (each fire-and-forget, background only):
   * cockpit boot — `build_all_projects_async()` (orchestrator.py __init__)
   * project tab switch — `ensure_project_graph_async()`, only projects with
     no graph yet (main_window.py `_on_tab_switched`)
   * a teammate's `done()` — `schedule_rebuild_after_done()`, debounced so a
     burst of shards finishing together doesn't rebuild the same dir N times
     (orchestrator.py `done()`)
+  * a LIVE pane's own idle-watchdog tick, mid-task — `resync_staging_only()`,
+    throttled per directory (orchestrator.py `_check_idle_teammates`). The
+    first three only ever touch a directory's staging mirror at build
+    boundaries the pane itself never crosses mid-task, so without this a
+    pane asking graft about a file it just edited got an answer as of its
+    LAST `done()`. For a file the graph already knows about, this trigger
+    does not run `graft build` at all — see its own docstring for why
+    keeping the staging mirror in sync is enough. A file the graph has
+    NEVER seen before (created since the last real build) is a known
+    exception to that — see `_has_new_files`'s docstring — and escalates to
+    a real `_spawn_build` instead.
 
 Structural layer ONLY — every build call is `graft --dir <store> build
 <dir>`, never `--deep` (needs an API key the user hasn't approved paying
@@ -108,6 +119,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -118,6 +130,7 @@ from ._win_console import SUBPROCESS_NO_WINDOW
 from .config import load_projects
 from .graft_store import (
     graft_cli_path,
+    graph_key,
     graph_store_dir,
     has_completed_build,
     mark_build_complete,
@@ -147,7 +160,54 @@ _build_semaphore = threading.Semaphore(_MAX_CONCURRENT_BUILDS)
 
 _lock = threading.Lock()
 _building: set[str] = set()  # abs dir path currently building (single-flight)
+# abs dir path actually running INSIDE `_build_semaphore` right now (M2,
+# 2026-08-06): `_building` is added pre-semaphore so single-flight can reject
+# a duplicate call before it even queues, which means at boot (46 project
+# dirs, `_MAX_CONCURRENT_BUILDS = 3`) `_building` holds all 46 the instant
+# every thread starts, while only 3 are actually doing anything — the chip
+# reported "Building 46 now" when 43 of them were merely queued on the
+# semaphore. `get_build_status()` reports THIS set, not `_building`.
+_in_flight: set[str] = set()
 _debounce_timers: dict[str, threading.Timer] = {}  # abs dir path -> pending Timer
+# abs dir path -> (last build's failure reason, time.monotonic() it failed at)
+# (M6 follow-up, 2026-08-06): the UI status-bar chip needs to tell "building"
+# / "failed, gave up" / "never started" apart, which `has_completed_build`
+# alone can't (it only answers completed-or-not). Populated/cleared by
+# `_build_one`'s own success/failure branch — the single choke point every
+# trigger (boot/tab-switch/done/live resync's full-build sibling) already
+# funnels through. Entry is removed on that SAME dir's next SUCCESSFUL build,
+# OR lazily by `get_build_status()` once `_FAILED_ENTRY_TTL_S` has elapsed
+# (2026-08-06 follow-up: a dir deleted from projects.json after a failed
+# build has no trigger left to ever re-attempt/clear it, so without a TTL it
+# stuck in the chip forever — #146-style stale-state leak, same shape as the
+# orphan-worktree bug, just for this dict instead of disk). A still-live,
+# still-failing project keeps refreshing its own timestamp via tab-switch/
+# done() re-attempts, so the TTL only ever prunes entries nothing has retried
+# in a day.
+_last_build_failed: dict[str, tuple[str, float]] = {}
+_FAILED_ENTRY_TTL_S = 24 * 3600.0
+
+# H1 residual (2026-08-06 re-review): `_stageable` only gates the SOURCE side
+# (a submodule/broken-symlink/dir-symlink entry) — it cannot see a failure on
+# the DESTINATION side, e.g. a staged rel path pushing `staging/<hash>/<hash>/
+# <rel>` over Windows' MAX_PATH even though the shorter *target*/<rel> source
+# stats fine. That class read as "new" on every `_has_new_files` check
+# forever, re-escalating to a full `_spawn_build` roughly every 15s for the
+# rest of the pane's life — same infinite-loop shape H1 was filed against,
+# just reached through the mirror side instead of the source side.
+#
+# `_pending_escalation` records, per target, exactly which rel paths a
+# resync-triggered `_spawn_build` was asked to resolve; `_build_one` checks
+# that same set once ITS OWN `_run_build` (which re-syncs the mirror
+# synchronously before returning, success or failure) has finished. A rel
+# still absent from the mirror at that point is a structural failure, not a
+# timing gap — recorded in `_unresolvable_rels` so `_new_stageable_rels`
+# (and therefore `_has_new_files`) never escalates on it again, logged once
+# instead of every cycle. A rel later renamed/moved is a DIFFERENT rel path
+# (git reports the new name), so it gets a fresh chance on its own — nothing
+# here is permanently stuck for a rel whose situation actually changes.
+_pending_escalation: dict[str, frozenset[str]] = {}
+_unresolvable_rels: dict[str, frozenset[str]] = {}
 
 
 def _skip_env() -> bool:
@@ -191,6 +251,18 @@ def _dirs_for_project(project: dict) -> list[Path]:
     but deliberately does NOT collapse a path nested inside another — see
     the module docstring for why (each is a separate pane cwd, hence a
     separate graft MCP root).
+
+    Dedup key is `graph_key()` — the SAME hash `graph_store_dir` uses to
+    pick a store directory — not a hand-rolled `os.name == "nt"` casing
+    (M5, 2026-08-06). `graph_key`'s own `_normalize_for_key` case-folds on
+    BOTH Windows and macOS (M1, 2026-08-05 audit); the old expression here
+    only folded on Windows, so two case-variant paths on macOS (or two
+    `paths` entries differing only in case, on either OS) survived dedup as
+    two distinct dirs, each spawning its own `_build_one` thread with an
+    UNFOLDED single-flight key — while `graph_store_dir` folded both to the
+    SAME store, letting two `graft build` calls race into it concurrently.
+    Sharing the exact key `graph_store_dir` derives from means this can
+    never drift from the store key again.
     """
     paths = project.get("paths") if isinstance(project, dict) else None
     if not isinstance(paths, dict):
@@ -205,8 +277,7 @@ def _dirs_for_project(project: dict) -> list[Path]:
             continue
         if not resolved.is_dir():
             continue
-        key = str(resolved).lower() if os.name == "nt" else str(resolved)
-        seen[key] = resolved
+        seen[graph_key(resolved)] = resolved
     return list(seen.values())
 
 
@@ -256,6 +327,29 @@ def _git_nonignored_files(target: Path) -> list[str] | None:
     return rel_paths or None
 
 
+def _stat_or_none(path: Path) -> os.stat_result | None:
+    try:
+        return path.stat()
+    except OSError:
+        return None
+
+
+def _stageable(path: Path) -> bool:
+    """True when *path* is a plain file `_stage_files` could plausibly
+    hardlink/copy. A git submodule (a single `ls-files` entry that is a
+    DIRECTORY on disk), a broken symlink, a directory symlink, and a path
+    Windows refuses to `stat` (MAX_PATH) all read `False` here — every one
+    of them made `os.link`/`shutil.copy2` raise and silently `continue` in
+    `_stage_files` while still counting as "missing from the mirror" to
+    `_has_new_files`, which is what fed the H1 (2026-08-06) infinite
+    rebuild loop: an entry that can never be staged looked identical,
+    forever, to one merely not staged YET. Re-checked fresh on every call
+    (no cached skip-set) so a submodule later replaced with a real file is
+    picked up on its own next cycle instead of needing a state reset."""
+    st = _stat_or_none(path)
+    return st is not None and stat.S_ISREG(st.st_mode)
+
+
 def _stage_files(target: Path, rel_paths: list[str], staging: Path) -> None:
     """Best-effort hardlink-or-copy of *rel_paths* (relative to *target*)
     into *staging*, preserving relative structure so graft's own per-file
@@ -265,18 +359,56 @@ def _stage_files(target: Path, rel_paths: list[str], staging: Path) -> None:
     on any failure (cross-device, no link permission, Windows without the
     privilege).
 
-    Always unlinks *dst* first (a no-op OSError when it doesn't exist yet):
-    *staging* is now PERSISTENT across builds (H1 follow-up, 2026-08-06 —
-    see module docstring), so a previously-staged file's content must be
-    refreshed, not left pointing at a stale inode. A hardlinked dst already
-    shares the source's inode and would pick up an in-place edit for free,
-    but an editor that saves via rename-over-write gives the file a NEW
-    inode each time — re-linking on every build is what keeps that case in
-    sync too. Never raises: a raced/unreadable file is skipped, not fatal —
-    matches the fail-soft posture of the rest of this module."""
+    Skips anything `_stageable` rejects (submodules, broken/dir symlinks,
+    MAX_PATH) outright rather than paying for a doomed `os.link` + `copy2`
+    attempt on every cycle.
+
+    A destination already hardlinked to the CURRENT source (same file) is
+    left alone: `_sync_staging` runs on a 15s timer for every live pane
+    (M1, 2026-08-06), and re-`unlink`+`link`ing hundreds of untouched files
+    every cycle was measured at ~264ms of pure disk churn for zero effect —
+    an already-identical dst would pick up an in-place edit for free
+    regardless (the whole reason relinking is needed AT ALL is a
+    rename-over-write save giving src a NEW inode). Deliberately NOT a
+    `(mtime, size)` fallback for the `copy2` case too: measured on this
+    machine, two files written back-to-back can land on the exact same
+    `st_mtime_ns` (Windows batches nearby writes onto one timestamp tick),
+    so that heuristic can silently skip syncing a real content change —
+    unlike `os.path.samestat`, which is always exact, never a probabilistic
+    match. The `copy2` fallback path (cross-device/no-link-permission) pays
+    the full re-copy every cycle same as before; only the common
+    same-volume hardlink case gets the speedup.
+
+    `os.path.samestat` (st_dev AND st_ino), not a bare `st_ino` comparison
+    (R-1, 2026-08-06 re-review): inode/file-index numbers are allocated
+    PER VOLUME, so a bare `st_ino` match is only proof of identity when src
+    and dst are known to share a device. Cross-device staging is not
+    hypothetical here — it is the documented reason `AGENT_TAKKUB_HOME`
+    exists (`graft_store.py`'s module docstring: moving cockpit data off a
+    small/boot drive), and on that path `_stage_files` always takes the
+    `copy2` fallback below, landing dst in an INDEPENDENT inode space from
+    src. A bare `st_ino` coincidence there would skip re-copying a real
+    content change forever, silently — proven on this machine (two real
+    volumes) by forcing the collision: `os.path.samestat` correctly said
+    "different file" while `st_ino` alone agreed by chance.
+
+    Always unlinks *dst* first before actually relinking (a no-op OSError
+    when it doesn't exist yet): *staging* is now PERSISTENT across builds
+    (H1 follow-up, 2026-08-06 — see module docstring), so a previously
+    -staged file's content must be refreshed, not left pointing at a stale
+    inode. An editor that saves via rename-over-write gives the file a NEW
+    inode each time — re-linking is what keeps that case in sync. Never
+    raises: a raced/unreadable file is skipped, not fatal — matches the
+    fail-soft posture of the rest of this module."""
     for rel in rel_paths:
         src = target / rel
+        src_stat = _stat_or_none(src)
+        if src_stat is None or not stat.S_ISREG(src_stat.st_mode):
+            continue
         dst = staging / rel
+        dst_stat = _stat_or_none(dst)
+        if dst_stat is not None and os.path.samestat(src_stat, dst_stat):
+            continue
         try:
             dst.parent.mkdir(parents=True, exist_ok=True)
         except OSError:
@@ -437,7 +569,40 @@ def _build_one(target: Path) -> None:
         _building.add(key)
     try:
         with _build_semaphore:
-            ok, elapsed, err = _run_build(graft_bin, target)
+            with _lock:
+                _in_flight.add(key)
+            try:
+                ok, elapsed, err = _run_build(graft_bin, target)
+            finally:
+                with _lock:
+                    _in_flight.discard(key)
+        with _lock:
+            if ok:
+                _last_build_failed.pop(key, None)
+            else:
+                _last_build_failed[key] = (err or "build failed", time.monotonic())
+            pending = _pending_escalation.pop(key, None)
+        if pending:
+            # `_run_build` re-syncs the mirror synchronously before it
+            # returns (success OR failure), so this is a definitive
+            # convergence check, not a guess (H1 residual, 2026-08-06
+            # re-review). Only walks `staging` when there was something
+            # pending to check — zero extra cost for the boot/tab-switch/
+            # done triggers, which never populate `_pending_escalation`.
+            still_missing = pending - _staging_relpaths(staging_dir_for(target))
+            if still_missing:
+                with _lock:
+                    _unresolvable_rels[key] = (
+                        _unresolvable_rels.get(key, frozenset()) | still_missing
+                    )
+                _log.warning(
+                    "graft_autobuild: %s: giving up on staging %d file(s) that never "
+                    "land in the mirror (destination-side failure, e.g. MAX_PATH) — "
+                    "will not re-escalate for them: %s",
+                    target,
+                    len(still_missing),
+                    sorted(still_missing)[:5],
+                )
         if ok:
             _log.info("graft_autobuild: built %s in %.1fs", target, elapsed)
         else:
@@ -445,6 +610,38 @@ def _build_one(target: Path) -> None:
     finally:
         with _lock:
             _building.discard(key)
+
+
+def get_build_status() -> dict:
+    """Thread-safe snapshot for the UI status-bar chip: how many builds are
+    ACTUALLY RUNNING inside `_build_semaphore` right now (`_in_flight`, not
+    the broader single-flight `_building` set — see `_in_flight`'s
+    module-level comment for why the two diverge at boot, M2 2026-08-06),
+    and which directories' LAST build attempt failed.
+
+    `has_completed_build` alone can't tell a chip "building" / "failed, gave
+    up" / "never started" apart — it only ever answers completed-or-not, so a
+    dir that failed every attempt looks identical, forever, to one that
+    simply hasn't been asked to build yet (M6/H3 follow-up: a build failure
+    with zero UI surface). Deliberately cheap — two dict/set snapshots under
+    the same lock every other build-state mutation already uses, never a
+    filesystem walk — so polling this on a short interval (e.g. every 2s from
+    the UI thread) costs nothing.
+
+    `failed` entries persist across a dir's later NEW attempts and are
+    removed once that same dir's build actually succeeds, or lazily pruned
+    here after `_FAILED_ENTRY_TTL_S` — see `_last_build_failed`'s
+    module-level comment for why a TTL and not a projects.json cross-check
+    (the latter would add a JSON read + a resolve()/is_dir() stat per path on
+    every 2s poll; this adds one time.monotonic() call and reuses the same
+    dict iteration `sorted()` already paid for below).
+    """
+    with _lock:
+        cutoff = time.monotonic() - _FAILED_ENTRY_TTL_S
+        expired = [k for k, (_reason, at) in _last_build_failed.items() if at < cutoff]
+        for k in expired:
+            _last_build_failed.pop(k, None)
+        return {"building": len(_in_flight), "failed": sorted(_last_build_failed)}
 
 
 def _spawn_build(target: Path) -> None:
@@ -508,6 +705,154 @@ def _debounced_fire(key: str, target: Path) -> None:
     with _lock:
         _debounce_timers.pop(key, None)
     _build_one(target)
+
+
+def _staging_relpaths(staging: Path) -> set[str]:
+    """Every file currently present in *staging*, as POSIX-style paths
+    relative to *staging*. A missing/unreadable *staging* reads as empty
+    (`os.walk` on a nonexistent dir silently yields nothing) — same
+    fail-soft posture as the rest of this module."""
+    out: set[str] = set()
+    for dirpath, _dirnames, filenames in os.walk(staging):
+        for name in filenames:
+            full = Path(dirpath) / name
+            try:
+                out.add(full.relative_to(staging).as_posix())
+            except ValueError:
+                continue
+    return out
+
+
+def _new_stageable_rels(target: Path, rel_paths: list[str], staging: Path) -> set[str]:
+    """The subset of *rel_paths* that are missing from *staging*, pass the
+    SOURCE-side `_stageable` gate (H1, 2026-08-06 — rules out a submodule,
+    broken symlink, dir symlink, or a source Windows refuses to `stat`), and
+    are NOT already known to fail on the DESTINATION side no matter how many
+    times staging is retried (`_unresolvable_rels` — H1 residual, 2026-08-06
+    re-review; see that dict's module-level comment for the MAX_PATH class
+    `_stageable` structurally cannot see, since it only ever looks at the
+    source path). Shared by `_has_new_files` (bool view) and
+    `resync_staging_only` (needs the actual set to hand to `_build_one` for
+    post-build convergence checking)."""
+    staged = _staging_relpaths(staging)
+    with _lock:
+        given_up = _unresolvable_rels.get(str(target), frozenset())
+    return {
+        rel
+        for rel in rel_paths
+        if rel not in staged and rel not in given_up and _stageable(target / rel)
+    }
+
+
+def _has_new_files(target: Path, rel_paths: list[str], staging: Path) -> bool:
+    """True when *rel_paths* (git's current non-ignored set) contains a
+    STAGEABLE file *staging* doesn't have yet — i.e. created since the
+    mirror was last synced.
+
+    Why this needs its own escalation instead of just letting
+    `_sync_staging` copy the new file in: verified against the real CLI
+    (2026-08-06) that graft's own freshness gate (`ensureFreshGraph` /
+    `probeDrift` in its shipped `graph/refresh.js` + `graph/fingerprint.js`)
+    reliably catches a MODIFIED file — one it already has a fingerprint
+    entry for — through a plain mirror sync, exactly as this module's
+    docstring on trigger #4 describes. A file with NO prior fingerprint
+    entry at all did not: syncing it into the staging mirror produced no
+    `[graft] refreshed the graph ...` note and an empty `ask` answer, and
+    only a real `graft build` (this module's own, not graft's query-time
+    incremental one) made it visible. Root cause not chased into graft's
+    own source — treating "new to the mirror" as its own case here is a
+    contained, low-risk fix that doesn't depend on understanding why
+    upstream's added-file path behaves differently from its changed-file
+    path.
+
+    Gated on `_stageable(target / rel)` (H1, 2026-08-06): a git submodule,
+    broken symlink, dir symlink, or MAX_PATH-too-long entry is reported by
+    `git ls-files` but can never actually land in *staging* — without the
+    gate, it read as "new" on EVERY call forever, escalating to a full
+    `_spawn_build` roughly every 15s for the rest of the pane's life
+    (verified with a real `git submodule add` repo). That gate only sees
+    SOURCE-side failures, though — see `_new_stageable_rels`'s doc for the
+    DESTINATION-side class (`_unresolvable_rels`) it delegates to as well.
+    """
+    return bool(_new_stageable_rels(target, rel_paths, staging))
+
+
+# How often a LIVE pane's staging mirror is allowed to resync while the pane
+# is mid-task (no `done()` yet) — closes the mid-edit staleness gap the 3
+# triggers above (boot / tab-switch / done) leave open: without this, a pane
+# asking graft about a file it just edited gets an answer as of its LAST
+# `done()` (or nothing, on a pane's very first task), because those are the
+# only events that ever touch a directory's staging mirror or graph. This
+# does NOT run `graft build` — it only keeps the staging mirror in sync;
+# graft's OWN freshness gate (`ensureFreshGraph`, see
+# `graft_store.staging_dir_for`'s docstring) already re-probes its `dir`
+# argument on every tool call inside the pane's own long-lived `graft mcp`
+# process and incrementally refreshes the graph the instant it sees the
+# mirror changed — so a live pane self-heals within one polling interval
+# instead of only at its own `done()`. Deliberately much lighter than a full
+# build: `_sync_staging` is a `git ls-files` + hardlink-relink of the
+# (usually small) delta, never a `graft build` subprocess.
+_LIVE_RESYNC_MIN_INTERVAL_S = 15.0
+_live_resync_lock = threading.Lock()
+_last_live_resync: dict[str, float] = {}
+
+
+def resync_staging_only(cwd: str | None) -> None:
+    """Best-effort, throttled staging-mirror refresh for a LIVE pane's own
+    *cwd*. See `_LIVE_RESYNC_MIN_INTERVAL_S` for why this exists and why it
+    is deliberately not a `graft build` call for the common case (a
+    modified file). Safe to call from any thread on any cadence — a no-op
+    inside the per-directory throttle window, while a full build for the
+    same directory is already in-flight (that build's own `_sync_staging`
+    call already covers this pass), or when the kill switch is set / *cwd*
+    isn't a real directory.
+
+    Exception: a file *brand new* to the staging mirror escalates to a real
+    `_spawn_build` instead of a plain sync — see `_has_new_files`'s
+    docstring for why a lightweight sync alone isn't enough for that case.
+    """
+    if _skip_env() or _graft_cli() is None or not cwd:
+        return
+    try:
+        target = Path(cwd).expanduser().resolve()
+    except OSError:
+        return
+    if not target.is_dir():
+        return
+    key = str(target)
+    with _lock:
+        if key in _building:
+            return  # in-flight full build already re-syncs this same mirror
+    now = time.monotonic()
+    with _live_resync_lock:
+        last = _last_live_resync.get(key, 0.0)
+        if now - last < _LIVE_RESYNC_MIN_INTERVAL_S:
+            return
+        _last_live_resync[key] = now
+
+    def _do() -> None:
+        rel_paths = _git_nonignored_files(target)
+        if rel_paths is None:
+            return
+        staging = staging_dir_for(target)
+        new_rels = _new_stageable_rels(target, rel_paths, staging)
+        if new_rels:
+            # A file the graph has never seen needs a real build, not just a
+            # mirror sync (`_has_new_files`). `_spawn_build` -> `_build_one`
+            # is single-flight and semaphore-bounded like every other build
+            # trigger, and `_run_build` re-syncs the mirror itself, so this
+            # subsumes the plain `_sync_staging` call below. Recording *what*
+            # we escalated for BEFORE spawning lets `_build_one` check, once
+            # that same build has actually finished, whether it converged —
+            # see `_pending_escalation`'s module-level comment (H1 residual,
+            # 2026-08-06 re-review).
+            with _lock:
+                _pending_escalation[key] = frozenset(new_rels)
+            _spawn_build(target)
+            return
+        _sync_staging(target, rel_paths, staging)
+
+    threading.Thread(target=_do, name=f"graft-live-resync-{target.name}", daemon=True).start()
 
 
 def schedule_rebuild_after_done(cwd: str | None) -> None:

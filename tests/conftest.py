@@ -156,6 +156,25 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
     gab = _maybe_module("agent_takkub.graft_autobuild", force=True)
     if gab is not None:
         monkeypatch.setattr(gab, "build_all_projects_async", lambda: None, raising=False)
+        # graft_autobuild's single-flight/failure-tracking state (_building,
+        # _last_build_failed, _last_live_resync, _pending_escalation,
+        # _unresolvable_rels) lives in module-level mutable containers, not
+        # per-call locals — a test that records a failure (test_graft_
+        # autobuild.py) leaves it there for every test that runs after it in
+        # the same process, including unrelated ones in test_graft_chip.py
+        # that assert `get_build_status()["failed"] == []` (proven: passes
+        # in isolation, fails in the full suite). Reset by mutating in place
+        # (not reassigning) since other modules may hold a reference to the
+        # same dict/set object.
+        for timer in list(gab._debounce_timers.values()):
+            timer.cancel()
+        gab._building.clear()
+        gab._in_flight.clear()
+        gab._debounce_timers.clear()
+        gab._last_build_failed.clear()
+        gab._last_live_resync.clear()
+        gab._pending_escalation.clear()
+        gab._unresolvable_rels.clear()
 
     # graft_store.GRAFT_STORE_ROOT falls back to Path.home()/".agent-takkub"
     # exactly when DATA_HOME == REPO_ROOT (M5, graft_store.py's module
@@ -174,6 +193,16 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
         # `_run_build`/`staging_dir_for` for real would otherwise write into
         # the real `~/.agent-takkub/graft-staging`.
         monkeypatch.setattr(gst, "GRAFT_STAGING_ROOT", runtime / "graft-staging", raising=False)
+
+    # `mcp_bridge._codex_cli_version_cached`'s cache (2026-08-06, cheap-spawn
+    # follow-up) is keyed by `(provider_bin, mtime-of-resolved-binary)` — on
+    # a dev machine with a real `codex` on PATH, that key is IDENTICAL across
+    # every test in the suite, so without a per-test reset the first test to
+    # populate it would silently poison every later test that monkeypatches
+    # `_codex_cli_version` expecting its own return value to take effect.
+    mcpb = _maybe_module("agent_takkub.mcp_bridge", force=True)
+    if mcpb is not None:
+        monkeypatch.setattr(mcpb, "_version_cache", {}, raising=False)
 
     yield
 

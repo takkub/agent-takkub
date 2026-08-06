@@ -390,6 +390,38 @@ def check_mini_browser() -> list[Finding]:
 # ---------------------------------------------------------------------------
 
 
+def _graft_store_size_finding() -> Finding:
+    """[graft/store-size] — surface `graft-graphs/` live-store size without
+    making the user run `takkub disk` separately. Read-only: reuses
+    `disk_usage.scan_graft_graphs`, the same aggregation `takkub disk` and
+    `takkub prune` already rely on, so the oversized-store threshold (H1,
+    2026-08-05 cross-OS audit) stays defined in exactly one place.
+    """
+    from . import disk_usage
+    from .config import DATA_HOME
+
+    gg = disk_usage.scan_graft_graphs(DATA_HOME)
+    live_mb = gg["live_bytes"] / (1024 * 1024)
+    if gg["live_count"] == 0:
+        return Finding("graft", "store-size", Status.INFO, "no graph built yet for any project")
+    if gg["oversized_live"]:
+        names = ", ".join(Path(e["path"]).name[:12] for e in gg["oversized_live"][:3])
+        return Finding(
+            "graft",
+            "store-size",
+            Status.WARN,
+            f"{gg['live_count']} live store(s), {live_mb:.0f} MB total — "
+            f"{len(gg['oversized_live'])} over the size-warning threshold ({names}...)",
+            "takkub disk  for detail, then takkub prune --include-live to reclaim",
+        )
+    return Finding(
+        "graft",
+        "store-size",
+        Status.OK,
+        f"{gg['live_count']} live store(s), {live_mb:.0f} MB total",
+    )
+
+
 def check_graft() -> list[Finding]:
     """Check/install the global ``graft`` CLI (NanoNets code-intelligence tool).
 
@@ -465,6 +497,7 @@ def check_graft() -> list[Finding]:
                 "answers (not a crash) — run `graft build` in that project's root first",
             )
         )
+        findings.append(_graft_store_size_finding())
         return findings
 
     npm = shutil.which("npm.cmd") or shutil.which("npm")

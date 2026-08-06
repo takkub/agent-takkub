@@ -865,6 +865,24 @@ class TestDiskPruneCli:
         rc = cli.main(["prune", "--category", "not-a-real-category"])
         assert rc != 0
 
+    def test_prune_help_lists_every_valid_category(self, capsys):
+        """qa (2026-08-06): `--category`'s help text is a hand-maintained
+        listing that had already drifted from `disk_usage.VALID_CATEGORIES`
+        once (missing `graft-graphs`, functionally accepted but undiscoverable
+        via `--help`). Pin every valid category name so the two can't drift
+        apart silently again. Whitespace stripped before the substring check:
+        argparse's HelpFormatter line-wraps on the hyphens inside category
+        names (e.g. `browser-profiles` → `browser-\n  profiles`), which is
+        cosmetic, not a real absence."""
+        from agent_takkub import disk_usage
+
+        with pytest.raises(SystemExit) as exc:
+            cli.main(["prune", "--help"])
+        assert exc.value.code == 0
+        squashed = "".join(capsys.readouterr().out.split())
+        for category in disk_usage.VALID_CATEGORIES:
+            assert category in squashed, f"{category!r} missing from `takkub prune --help`"
+
     def test_prune_review_category_without_level_is_refused(self, capsys, tmp_path):
         rc = cli.main(["prune", "--category", "chat-history", "--yes"])
         out = capsys.readouterr().out
