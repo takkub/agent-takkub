@@ -185,6 +185,18 @@ _debounce_timers: dict[str, threading.Timer] = {}  # abs dir path -> pending Tim
 # done() re-attempts, so the TTL only ever prunes entries nothing has retried
 # in a day.
 _last_build_failed: dict[str, tuple[str, float]] = {}
+# abs dir path -> (skip reason, time.monotonic() it was skipped at). A real
+# user was shown "17/20 built. Failed: genimage, oracle, sales" for 3 dirs
+# that were never git repos in the first place — `_run_build` used to return
+# `ok=False` for that case too, so a perfectly normal "nothing to index here"
+# state read identically to an actual build failure, and permanently drowned
+# out any REAL failure in the same list (bug report, 2026-08-06). Kept as its
+# own dict, not folded into `_last_build_failed`, precisely so the two can
+# never collide again — see `_run_build`'s tri-state return for the split.
+# Same TTL/lazy-prune shape as `_last_build_failed` for the same reason (a
+# dir removed from projects.json has no trigger left to ever clear its own
+# entry).
+_last_build_skipped: dict[str, tuple[str, float]] = {}
 _FAILED_ENTRY_TTL_S = 24 * 3600.0
 
 # H1 residual (2026-08-06 re-review): `_stageable` only gates the SOURCE side
@@ -288,11 +300,21 @@ def _git_bin() -> str | None:
 def _git_nonignored_files(target: Path) -> list[str] | None:
     """`git ls-files` (tracked + untracked-but-not-`.gitignore`d) under
     *target*, as paths relative to *target*. `None` means "nothing safe to
-    index" — git missing, *target* not a git work-tree, or the listing call
-    itself failed — which is the caller's signal to skip the build entirely
-    rather than hand graft the raw directory (H1a, L5). A git work-tree with
-    zero non-ignored files also returns `None` (nothing to stage either
-    way); a real project always has at least one.
+    index" — *target* not a git work-tree, the listing call itself failed,
+    or a git work-tree with zero non-ignored files (a real project always
+    has at least one) — which is the caller's signal to skip the build
+    entirely rather than hand graft the raw directory (H1a, L5).
+
+    Git-binary-missing is a DIFFERENT case, checked separately by the caller
+    (`_run_build`, before this is ever called): a repo with nothing to index
+    is ordinary and expected (an image/docs folder in projects.json — see
+    `get_build_status()`'s `skipped` list), but no `git` on PATH at all is a
+    real, actionable problem — bundling the two under one `None` used to
+    report both identically as "skipped", hiding the git-missing case from
+    the user entirely (2026-08-06 bug report). This function still returns
+    plain `None` for the "no git" case too if called directly (defensive —
+    every caller besides `_run_build` is a test), it just never reaches that
+    branch through `_run_build`'s normal path.
 
     Separate seam from the actual `graft build` subprocess call so tests can
     fake this without touching the argv assertions on the graft invocation.
@@ -502,7 +524,22 @@ def _kill_orphan_tree(pid: int) -> None:
         pass
 
 
-def _run_build(graft_bin: str, target: Path) -> tuple[bool, float, str]:
+def _run_build(graft_bin: str, target: Path) -> tuple[bool | None, float, str]:
+    """Returns `(status, elapsed_s, message)`. *status* is tri-state, NOT a
+    plain success/fail bool (2026-08-06 fix — see `_last_build_skipped`'s
+    module-level comment for the bug this closes):
+
+    * `True`  — build actually ran and succeeded.
+    * `False` — a REAL failure: unwritable store, no `git` on PATH, the
+      `graft build` subprocess itself errored or timed out. Surfaced via
+      `get_build_status()`'s `failed` list — this is the list a user should
+      act on.
+    * `None`  — not applicable: *target* is not a git work-tree, or is one
+      with nothing non-ignored to index. Ordinary and expected for a
+      non-code folder in projects.json (L5) — surfaced separately via
+      `get_build_status()`'s `skipped` list so it can never again drown out
+      a real failure in the same bucket.
+    """
     t0 = time.monotonic()
     store = graph_store_dir(target)
     try:
@@ -510,12 +547,19 @@ def _run_build(graft_bin: str, target: Path) -> tuple[bool, float, str]:
     except OSError as e:
         return False, time.monotonic() - t0, f"could not create graph store {store}: {e}"
 
-    rel_paths = _git_nonignored_files(target)
-    if rel_paths is None:
+    if _git_bin() is None:
         return (
             False,
             time.monotonic() - t0,
-            "not a git work-tree, git unavailable, or nothing non-ignored to index — skipped",
+            "git not found on PATH — install git to enable code-intelligence indexing",
+        )
+
+    rel_paths = _git_nonignored_files(target)
+    if rel_paths is None:
+        return (
+            None,
+            time.monotonic() - t0,
+            "not a git work-tree, or nothing non-ignored to index — not applicable, skipped",
         )
 
     staging = staging_dir_for(target)
@@ -577,10 +621,15 @@ def _build_one(target: Path) -> None:
                 with _lock:
                     _in_flight.discard(key)
         with _lock:
-            if ok:
+            if ok is True:
+                _last_build_failed.pop(key, None)
+                _last_build_skipped.pop(key, None)
+            elif ok is None:
+                _last_build_skipped[key] = (err or "not applicable", time.monotonic())
                 _last_build_failed.pop(key, None)
             else:
                 _last_build_failed[key] = (err or "build failed", time.monotonic())
+                _last_build_skipped.pop(key, None)
             pending = _pending_escalation.pop(key, None)
         if pending:
             # `_run_build` re-syncs the mirror synchronously before it
@@ -603,8 +652,12 @@ def _build_one(target: Path) -> None:
                     len(still_missing),
                     sorted(still_missing)[:5],
                 )
-        if ok:
+        if ok is True:
             _log.info("graft_autobuild: built %s in %.1fs", target, elapsed)
+        elif ok is None:
+            _log.debug(
+                "graft_autobuild: %s not applicable, skipped (%.1fs): %s", target, elapsed, err
+            )
         else:
             _log.warning("graft_autobuild: build failed for %s (%.1fs): %s", target, elapsed, err)
     finally:
@@ -617,31 +670,47 @@ def get_build_status() -> dict:
     ACTUALLY RUNNING inside `_build_semaphore` right now (`_in_flight`, not
     the broader single-flight `_building` set — see `_in_flight`'s
     module-level comment for why the two diverge at boot, M2 2026-08-06),
-    and which directories' LAST build attempt failed.
+    which directories' LAST build attempt actually FAILED, and which were
+    SKIPPED as not applicable (not a git work-tree — an ordinary, expected
+    state, not an error the user needs to act on).
 
     `has_completed_build` alone can't tell a chip "building" / "failed, gave
     up" / "never started" apart — it only ever answers completed-or-not, so a
     dir that failed every attempt looks identical, forever, to one that
     simply hasn't been asked to build yet (M6/H3 follow-up: a build failure
-    with zero UI surface). Deliberately cheap — two dict/set snapshots under
-    the same lock every other build-state mutation already uses, never a
+    with zero UI surface). Deliberately cheap — dict/set snapshots under the
+    same lock every other build-state mutation already uses, never a
     filesystem walk — so polling this on a short interval (e.g. every 2s from
     the UI thread) costs nothing.
 
-    `failed` entries persist across a dir's later NEW attempts and are
-    removed once that same dir's build actually succeeds, or lazily pruned
-    here after `_FAILED_ENTRY_TTL_S` — see `_last_build_failed`'s
-    module-level comment for why a TTL and not a projects.json cross-check
-    (the latter would add a JSON read + a resolve()/is_dir() stat per path on
-    every 2s poll; this adds one time.monotonic() call and reuses the same
-    dict iteration `sorted()` already paid for below).
+    `failed` and `skipped` are two SEPARATE lists, not one bucket split by a
+    flag (2026-08-06 bug report: a user's non-git projects.json dirs — 3 on
+    prod, 15 on dev — were reported to them as "failed" every time the
+    cockpit opened, drowning out any dir that actually failed to build in
+    the same list, forever). See `_run_build`'s tri-state return and
+    `_last_build_skipped`'s module-level comment for the full mechanism.
+
+    Both lists persist across a dir's later NEW attempts and are removed
+    once that same dir's build actually succeeds, or lazily pruned here
+    after `_FAILED_ENTRY_TTL_S` — see `_last_build_failed`'s module-level
+    comment for why a TTL and not a projects.json cross-check (the latter
+    would add a JSON read + a resolve()/is_dir() stat per path on every 2s
+    poll; this adds one time.monotonic() call and reuses the same dict
+    iteration `sorted()` already paid for below).
     """
     with _lock:
         cutoff = time.monotonic() - _FAILED_ENTRY_TTL_S
-        expired = [k for k, (_reason, at) in _last_build_failed.items() if at < cutoff]
-        for k in expired:
+        expired_failed = [k for k, (_reason, at) in _last_build_failed.items() if at < cutoff]
+        for k in expired_failed:
             _last_build_failed.pop(k, None)
-        return {"building": len(_in_flight), "failed": sorted(_last_build_failed)}
+        expired_skipped = [k for k, (_reason, at) in _last_build_skipped.items() if at < cutoff]
+        for k in expired_skipped:
+            _last_build_skipped.pop(k, None)
+        return {
+            "building": len(_in_flight),
+            "failed": sorted(_last_build_failed),
+            "skipped": sorted(_last_build_skipped),
+        }
 
 
 def _spawn_build(target: Path) -> None:

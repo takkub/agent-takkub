@@ -69,13 +69,14 @@
         "agent_takkub.settings_management.pages.skills_page",
         "agent_takkub.shared_dev_tools",
         "agent_takkub.skill_scan",
+        "agent_takkub.status_header",
         "agent_takkub.update_helper",
         "agent_takkub.update_panel",
         "agent_takkub.update_worker",
         "agent_takkub.verify",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 24,
+      "fan_in": 25,
       "fan_out": 0
     },
     {
@@ -1985,6 +1986,7 @@
     {
       "module": "agent_takkub.status_header",
       "imports": [
+        "agent_takkub._win_console",
         "agent_takkub.auto_resume",
         "agent_takkub.cockpit_theme",
         "agent_takkub.config",
@@ -2000,7 +2002,7 @@
         "agent_takkub.main_window"
       ],
       "fan_in": 1,
-      "fan_out": 10
+      "fan_out": 11
     },
     {
       "module": "agent_takkub.system_baseline",

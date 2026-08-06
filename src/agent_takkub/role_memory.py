@@ -450,6 +450,42 @@ def _cap_archive(text: str, max_bytes: int) -> str:
     return _ARCHIVE_ENTRY_SEP.join([head, *entries])
 
 
+def role_memory_distill_flag_path(project: str, base_role: str) -> pathlib.Path:
+    """Sentinel path marking this (project, role) L1 file as having just lost
+    real entries to the L2 archive (#distill) — a one-shot signal consumed by
+    `consume_distill_pending` at the role's next spawn so it can distill the
+    surviving bullets (merge/de-fluff) with its own judgement instead of the
+    file quietly losing knowledge to age-based trimming forever."""
+    return ROLE_MEMORY_DIR / _safe(project) / f"{_safe(base_role)}.distill-pending"
+
+
+def _mark_distill_pending(project: str, base_role: str) -> None:
+    """Best-effort: never raises. A failure here just means the next spawn
+    doesn't get the distill nudge — the archive/curation it's called alongside
+    must still succeed."""
+    try:
+        p = role_memory_distill_flag_path(project, base_role)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.touch()
+    except OSError:
+        pass
+
+
+def consume_distill_pending(project: str, base_role: str) -> bool:
+    """True (and clears the flag) iff this (project, role) has had real
+    entries cut from L1 to the L2 archive since the last time this was
+    called. One-shot so the nudge fires once per overflow event, not on
+    every subsequent spawn. Best-effort: never raises."""
+    try:
+        p = role_memory_distill_flag_path(project, base_role)
+        if p.exists():
+            p.unlink()
+            return True
+    except OSError:
+        pass
+    return False
+
+
 def _archive_entries(project: str, base_role: str, entries: list[str]) -> None:
     """Append the full text of *entries* to this (project, role)'s L2 archive,
     each stamped with today's date, then cap the file to `_ARCHIVE_MAX_BYTES`
@@ -457,6 +493,9 @@ def _archive_entries(project: str, base_role: str, entries: list[str]) -> None:
     here must never break curation of the L1 file it's called alongside."""
     if not entries:
         return
+    # Something just got cut from L1 — flag it regardless of whether the L2
+    # write below succeeds, since the knowledge loss from L1 already happened.
+    _mark_distill_pending(project, base_role)
     try:
         path = role_memory_archive_path(project, base_role)
         path.parent.mkdir(parents=True, exist_ok=True)

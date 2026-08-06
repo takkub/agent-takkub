@@ -4,6 +4,31 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.49] - 2026-08-06
+
+รอบนี้มาจากการใช้งานจริง — user เปิด cockpit แล้วเจอ dialog ขึ้นว่า **"Failed: 15 projects"** พร้อม chip แดง `Graft: 15 failed` แล้วเข้าใจว่าระบบพัง · ไล่ดูแล้ว**ไม่มีอะไรพังเลยสักตัว**
+
+### Fixed (แก้)
+- **🔴 "ข้าม" ถูกรายงานเป็น "ล้มเหลว"** — `_run_build` คืน `ok=False` สำหรับโฟลเดอร์ที่ไม่ใช่ git repo ทั้งที่ข้อความในโค้ดเขียนเองว่า `— skipped` · เครื่อง user มี **15 โฟลเดอร์ที่ไม่ใช่ git repo** (prod 3) ในรายการโปรเจค → ขึ้น failed ทุกครั้งที่เปิด cockpit ทั้งที่ระบบทำงานถูกต้อง
+  - `_run_build` เป็น tri-state (`True` = สร้างแล้ว / `False` = ล้มเหลวจริง / `None` = ไม่เข้าเกณฑ์) · `get_build_status()` เพิ่ม `skipped: list[str]` แยกจาก `failed`
+  - **แยก "ไม่มี git ในเครื่อง" (ปัญหาจริง ต้องเตือน) ออกจาก "โฟลเดอร์นี้ไม่ใช่ git repo" (เรื่องปกติ)** — เดิมข้อความเดียวรวม 3 กรณี
+  - **ทำไมไม่ใช่แค่เรื่องคำพูด:** ของที่พังจริงจะจมอยู่ในกอง 15 ตัวที่ไม่ใช่ปัญหา · ค้าง 24 ชม. ตาม TTL · และข้อความบอกให้ "ดู log" ซึ่ง**ไม่มีอะไรใน log เลยเพราะมันไม่ได้ fail** → พา user ไปทางตัน
+  - chip ไม่ขึ้นสีเตือนถ้าเป็นแค่ skip · ตัวหารใช้เฉพาะที่เข้าเกณฑ์ (ไม่ใช่ `30/46` อีกแล้ว) · dialog แยก section `Skipped` / `Failed` และ**ไม่มีคำว่า Failed ถ้าไม่มีอะไรล้มเหลวจริง**
+- **เทสเขียนไฟล์จริงลง `runtime/role-memory/` ของ repo** — `ROLE_MEMORY_DIR` ไม่ได้อยู่ใน `_isolate_runtime` → ขยะค้างจริง 9 โฟลเดอร์ (`proj`, `proj_a`, `spawn-task-test`, `gatetest`, …) · ปิดต้นเหตุที่ conftest + ลบของที่ค้าง (ยืนยันทีละตัวจาก `TEST_PROJECT` constant ใน source ก่อนลบ ไม่ใช่เดา — โฟลเดอร์ที่มีเนื้อหาจริงไม่ถูกแตะ)
+- `subprocess.Popen` ของ graft viewer ส่ง `creationflags` ผ่าน `**kwargs` → guard test (AST checker) มองไม่เห็น · แก้ที่โค้ดให้ส่ง literal ตาม convention ของโปรเจค (`creationflags` เป็น 0 บน non-Windows อยู่แล้ว จึงส่งตรง ๆ ได้เสมอ) — **ไม่ได้แก้ที่ guard และไม่ใส่ `# subprocess-console-ok:`** เพราะทั้งสองทางจะทำให้ guard จับของจริงไม่ได้อีก
+
+### Added (เพิ่ม)
+- **ปุ่มเปิด Graph Viewer** ในกล่องของ chip — `graft viz` เสิร์ฟ graph แบบโต้ตอบได้ · ยืนยันด้วย browser จริงแล้ว: แท็บ **Code = 10,772 nodes / 21,209 links** (file 407 · function 2,724 · class 1,290 · method 6,351) เห็น symbol จริงของเรา
+  - **แท็บ default ของ graft คือ `context` ซึ่งว่างเปล่าเสมอสำหรับเรา** (concept map มาจากชั้น LLM `--deep` ที่เราตั้งใจไม่ใช้) · อ่าน bundle ของ graft แล้วยืนยันว่า hardcode ไว้ เปลี่ยนผ่าน URL/hash/localStorage ไม่ได้ → บอก user ในกล่องแทนว่าให้ดูแท็บ Code · **ไม่เปิด `--deep`** (ต้องมี API key = เสียเงิน)
+- **self-distill nudge** — เดิมความจำของ role เต็มงบ 6KB แล้ว `_trim_oldest_bullet` ดันของเก่าสุดออก archive · ค้นด้วย `takkub search` ได้ **แต่ agent ไม่เห็นตอน spawn อีกเลย** (เครื่องนี้มี ~14KB/role ที่หลุดไปแล้ว) — **การตัดตามอายุคือการเดาว่าอะไรสำคัญ**
+  - ตอนนี้เมื่อ curation ต้อง archive จริง → ตั้ง flag → **spawn ครั้งถัดไปของ role นั้น** ได้ nudge 1 บรรทัดให้กลั่นความจำตัวเองก่อน append ใหม่ (รวม bullet เรื่องเดียวกัน ตัดคำฟุ่มเฟือย เก็บใจความ) · pane มี context โปรเจคอยู่แล้วจึงรู้ว่าอะไรสำคัญ
+  - **งบเท่าเดิม 6,000 bytes — ไม่ได้ลด token แต่บรรจุความรู้ได้มากขึ้นต่อ token เท่าเดิม**
+  - nudge ขึ้น**เฉพาะตอน flag ถูกตั้งจริง** ไม่ใช่ทุก spawn · ทำที่ spawn ไม่ใช่ `done()` เพราะ `done()` ปิด pane ใน 2.5 วิ เสี่ยง race · archive ยังเก็บฉบับเต็มเหมือนเดิม · ทุก provider
+  - แนวคิดจาก TencentDB-Agent-Memory (L0→L3) — **เอาแค่แนวคิด ไม่ลง Docker ไม่ใช้ API key เพิ่ม** แบบเดียวกับ ReflexionMemory จาก SuperClaude ใน 1.0.46
+
+### Decisions (ตัดสินใจไม่ทำ พร้อมเหตุผล)
+- **ไม่ index โฟลเดอร์ที่ไม่ใช่ git repo** แม้จะมีถึง 15 อัน — ไม่มี `.gitignore` ให้กรอง noise จะย้อนกลับไปเจอบั๊กคลาสเดียวกับ H1 ใน 1.0.48 (index venv/`node_modules` จนบวม 463MB) และโฟลเดอร์เหล่านั้นส่วนใหญ่ไม่ใช่โค้ดอยู่แล้ว
+
 ## [1.0.48] - 2026-08-06
 
 รอบนี้มาจาก user directive "อุดให้หมด อย่ารอให้ถามแล้วค่อยแก้" — cross-OS audit + final review เจอ **1 blocker วนไม่รู้จบ + 6 medium** ที่ CI จับไม่ได้เลย เพราะ repo ทดสอบไม่มี git submodule และไม่มี path ยาวเกิน MAX_PATH

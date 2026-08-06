@@ -401,6 +401,38 @@ def test_fifo_queue_drains_three_claude_assigns_with_preload_events(
     assert all(call.kwargs.get("allow_repaste") is False for call in mock_send.call_args_list)
 
 
+def test_distill_pending_flag_injects_nudge_into_role_context(
+    orch: Orchestrator, tmp_path: Path
+) -> None:
+    """When curation last had to cut real entries to the L2 archive for this
+    (project, role), the role's next spawn gets a one-shot nudge appended to
+    its learned-notes block asking it to consolidate before appending more —
+    and the flag is consumed (won't repeat on the spawn after)."""
+    from agent_takkub import role_memory as rm
+
+    rm.ensure_role_memory(TEST_PROJECT, "backend")
+    rm._archive_entries(TEST_PROJECT, "backend", ["- something that overflowed"])
+    assert rm.role_memory_distill_flag_path(TEST_PROJECT, "backend").exists()
+
+    task = "[ROLE: backend]\n" + ("implement safely\n" * 10)
+    _spawn_calls, _mock_send, role_file = _spawn_claude_assign(orch, tmp_path, task)
+
+    assert "memory ใกล้เต็ม" in role_file.read_text(encoding="utf-8")
+    assert not rm.role_memory_distill_flag_path(TEST_PROJECT, "backend").exists()
+
+
+def test_no_distill_pending_flag_omits_nudge(orch: Orchestrator, tmp_path: Path) -> None:
+    from agent_takkub import role_memory as rm
+
+    rm.ensure_role_memory(TEST_PROJECT, "backend")
+    assert not rm.role_memory_distill_flag_path(TEST_PROJECT, "backend").exists()
+
+    task = "[ROLE: backend]\n" + ("implement safely\n" * 10)
+    _spawn_calls, _mock_send, role_file = _spawn_claude_assign(orch, tmp_path, task)
+
+    assert "memory ใกล้เต็ม" not in role_file.read_text(encoding="utf-8")
+
+
 def test_only_claude_has_confirmed_file_backed_system_prompt_capability() -> None:
     assert PROVIDER_REGISTRY["claude"].system_prompt_flag == "--append-system-prompt-file"
     for provider in ("codex", "gemini", "opencode", "kimi", "cursor"):

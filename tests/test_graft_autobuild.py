@@ -552,7 +552,14 @@ def test_run_build_skips_target_with_no_git_files(tmp_path, monkeypatch):
     """H1(a) / L5: a target that isn't a git work-tree (or has nothing
     non-ignored) is skipped outright — never handed to `graft build` raw.
     This is the actual behavior change from the pre-fix code, which built
-    `target` directly regardless of git status."""
+    `target` directly regardless of git status.
+
+    2026-08-06 fix: this is `ok is None` (not applicable), NOT `ok is False`
+    — the old bool-only return reported "not a git repo" identically to a
+    real build failure, which is exactly what made 15+ non-git projects.json
+    dirs show up as "failed" in the UI for a real user. See
+    `test_get_build_status_reports_skip_not_failure` for the end-to-end
+    surface this feeds."""
     target = tmp_path / "not-a-repo"
     target.mkdir()
     monkeypatch.setattr(gab, "_git_nonignored_files", lambda t: None)
@@ -563,9 +570,28 @@ def test_run_build_skips_target_with_no_git_files(tmp_path, monkeypatch):
 
     ok, _elapsed, err = gab._run_build("graft.cmd", target)
 
-    assert ok is False
-    assert "skipped" in err
+    assert ok is None
+    assert "not a git work-tree" in err or "not applicable" in err
     assert calls == []  # graft was never invoked
+
+
+def test_run_build_treats_missing_git_binary_as_a_real_failure(tmp_path, monkeypatch):
+    """The other half of the 2026-08-06 split: "no git on PATH at all" is a
+    real, actionable problem (the user should install git), NOT the same
+    ordinary "not a git repo" skip — must come back `ok is False`, land in
+    `failed`, and never even attempt `_git_nonignored_files` (there is
+    nothing useful it could report anyway)."""
+    target = tmp_path / "some-dir"
+    target.mkdir()
+    monkeypatch.setattr(gab, "_git_bin", lambda: None)
+    probed = []
+    monkeypatch.setattr(gab, "_git_nonignored_files", lambda t: probed.append(t) or None)
+
+    ok, _elapsed, err = gab._run_build("graft.cmd", target)
+
+    assert ok is False
+    assert "git" in err.lower()
+    assert probed == []  # never even asked — we already know git is missing
 
 
 def test_run_build_writes_store_manifest_on_success(tmp_path, monkeypatch):
@@ -763,15 +789,57 @@ def test_debounced_fire_pops_timer_and_builds(tmp_path, monkeypatch):
 
 
 def test_get_build_status_empty_by_default(monkeypatch):
-    # `_building`/`_last_build_failed` are module-level state shared with
-    # every other test in this file (mirrors `_building`/`_debounce_timers`'
-    # existing lack of per-test isolation) — reset explicitly rather than
-    # relying on test execution order leaving them empty.
+    # `_building`/`_last_build_failed`/`_last_build_skipped` are module-level
+    # state shared with every other test in this file (mirrors
+    # `_building`/`_debounce_timers`'s existing lack of per-test isolation) —
+    # reset explicitly rather than relying on test execution order leaving
+    # them empty.
     monkeypatch.setattr(gab, "_last_build_failed", {})
+    monkeypatch.setattr(gab, "_last_build_skipped", {})
     monkeypatch.setattr(gab, "_building", set())
     monkeypatch.setattr(gab, "_in_flight", set())
 
-    assert gab.get_build_status() == {"building": 0, "failed": []}
+    assert gab.get_build_status() == {"building": 0, "failed": [], "skipped": []}
+
+
+def test_get_build_status_reports_skip_not_failure(tmp_path, monkeypatch):
+    """The actual user-facing fix (2026-08-06 bug report): a dir that is
+    simply not a git work-tree must show up in `skipped`, and MUST NOT show
+    up in `failed` — verified end-to-end through the real `_build_one`
+    against a real (non-git) directory, not a stubbed status dict."""
+    monkeypatch.setattr(gab, "_graft_cli", lambda: r"C:\fake\graft.cmd")
+    monkeypatch.setattr(gab, "_last_build_failed", {})
+    monkeypatch.setattr(gab, "_last_build_skipped", {})
+    target = tmp_path / "not-a-repo"
+    target.mkdir()
+    (target / "readme.txt").write_text("just some files, no .git here", encoding="utf-8")
+
+    gab._build_one(target)
+
+    status = gab.get_build_status()
+    assert str(target) in status["skipped"]
+    assert str(target) not in status["failed"]
+
+
+def test_get_build_status_skip_and_failure_never_collide(tmp_path, monkeypatch):
+    """A dir that was previously skipped (not a git repo) and later actually
+    fails a real build attempt (or vice versa) must not linger in both
+    lists — each transition clears the other bucket's stale entry."""
+    monkeypatch.setattr(gab, "_graft_cli", lambda: r"C:\fake\graft.cmd")
+    monkeypatch.setattr(gab, "_last_build_failed", {})
+    monkeypatch.setattr(gab, "_last_build_skipped", {})
+    target = tmp_path / "flip-flop-repo"
+
+    monkeypatch.setattr(gab, "_run_build", lambda graft_bin, target: (None, 0.01, "skip"))
+    gab._build_one(target)
+    assert str(target) in gab.get_build_status()["skipped"]
+    assert str(target) not in gab.get_build_status()["failed"]
+
+    monkeypatch.setattr(gab, "_run_build", lambda graft_bin, target: (False, 0.01, "boom"))
+    gab._build_one(target)
+    status = gab.get_build_status()
+    assert str(target) in status["failed"]
+    assert str(target) not in status["skipped"]
 
 
 def test_get_build_status_reports_failure(tmp_path, monkeypatch):
@@ -820,6 +888,27 @@ def test_get_build_status_prunes_failure_after_ttl(tmp_path, monkeypatch):
     status = gab.get_build_status()
     assert str(target) not in status["failed"]
     assert str(target) not in gab._last_build_failed
+
+
+def test_get_build_status_prunes_skip_after_ttl(tmp_path, monkeypatch):
+    """Mirrors `test_get_build_status_prunes_failure_after_ttl` for the
+    `skipped` bucket — a dir removed from projects.json after being skipped
+    must not linger in the chip forever either."""
+    monkeypatch.setattr(gab, "_graft_cli", lambda: r"C:\fake\graft.cmd")
+    monkeypatch.setattr(gab, "_run_build", lambda graft_bin, target: (None, 0.01, "skip"))
+    target = tmp_path / "abandoned-non-repo"
+
+    fake_now = [1000.0]
+    monkeypatch.setattr(gab.time, "monotonic", lambda: fake_now[0])
+
+    gab._build_one(target)
+    assert str(target) in gab.get_build_status()["skipped"]
+
+    fake_now[0] += gab._FAILED_ENTRY_TTL_S + 1.0
+
+    status = gab.get_build_status()
+    assert str(target) not in status["skipped"]
+    assert str(target) not in gab._last_build_skipped
 
 
 def test_get_build_status_counts_in_flight_builds(tmp_path, monkeypatch):

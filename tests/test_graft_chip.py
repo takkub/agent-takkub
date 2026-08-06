@@ -61,8 +61,10 @@ class TestGraftProgressSnapshot:
             "available": False,
             "total": 0,
             "completed": 0,
+            "eligible_total": 0,
             "building": None,
             "failed": None,
+            "skipped": None,
         }
 
     def test_counts_total_and_completed_from_public_markers(self, monkeypatch, tmp_path):
@@ -245,6 +247,42 @@ class TestGraftProgressSnapshot:
         assert snap2["building"] == 3
         assert snap2["total"] == 0  # the cheap/cached half is unaffected
 
+    def test_skipped_excluded_from_eligible_total(self, monkeypatch, tmp_path):
+        """2026-08-06 bug report: non-git-repo dirs must not inflate the
+        denominator shown to the user — `eligible_total` = `total` minus
+        however many are `skipped`."""
+        import agent_takkub.config as config
+        import agent_takkub.graft_autobuild as graft_autobuild
+        import agent_takkub.graft_store as graft_store
+
+        proj_a = tmp_path / "a"
+        proj_b = tmp_path / "b"
+        proj_a.mkdir()
+        proj_b.mkdir()
+
+        monkeypatch.setattr(graft_store, "graft_cli_path", lambda: "graft.cmd")
+        monkeypatch.setattr(
+            config,
+            "load_projects",
+            lambda: {
+                "projects": {
+                    "demo": {"paths": {"web": str(proj_a), "api": str(proj_b)}},
+                }
+            },
+        )
+        monkeypatch.setattr(graft_store, "has_completed_build", lambda store: False)
+        monkeypatch.setattr(
+            graft_autobuild,
+            "get_build_status",
+            lambda: {"building": 0, "failed": [], "skipped": ["b"]},
+            raising=False,
+        )
+
+        snap = sh_mod.StatusHeaderMixin._graft_progress_snapshot()
+        assert snap["total"] == 2
+        assert snap["skipped"] == ["b"]
+        assert snap["eligible_total"] == 1
+
     def test_missing_getter_degrades_to_unknown_not_zero(self, monkeypatch, tmp_path):
         """If get_build_status() is truly absent (older graft_autobuild, or
         deleted at runtime), building/failed must stay None — "unknown" —
@@ -261,6 +299,7 @@ class TestGraftProgressSnapshot:
         snap = sh_mod.StatusHeaderMixin._graft_progress_snapshot()
         assert snap["building"] is None
         assert snap["failed"] is None
+        assert snap["skipped"] is None
 
 
 class TestRefreshGraftChip:
@@ -389,6 +428,205 @@ class TestRefreshGraftChip:
         stub._refresh_graft_chip()
         assert stub._chip_graft.text() == "🧠 Graft: 2 failed"
 
+    def test_skipped_only_shows_ready_not_attention(self, monkeypatch):
+        """2026-08-06 bug report: dirs skipped for not being a git repo must
+        never turn the chip into the warn/attention style or mention
+        "failed" — only a real `failed` entry does that. `total`=5 with 2
+        skipped means only 3 are eligible, and all 3 are already built."""
+        stub = _Stub()
+        monkeypatch.setattr(
+            stub,
+            "_graft_progress_snapshot",
+            lambda: {
+                "available": True,
+                "total": 5,
+                "completed": 3,
+                "eligible_total": 3,
+                "building": 0,
+                "failed": [],
+                "skipped": ["img-repo", "docs-repo"],
+            },
+        )
+        stub._refresh_graft_chip()
+        assert stub._chip_graft.text() == "🧠 Graft ready"
+        assert "failed" not in stub._chip_graft.text()
+        assert stub._chip_graft.styleSheet() == stub._graft_chip_style("idle")
+
+    def test_skipped_only_still_queued_uses_eligible_total(self, monkeypatch):
+        stub = _Stub()
+        monkeypatch.setattr(
+            stub,
+            "_graft_progress_snapshot",
+            lambda: {
+                "available": True,
+                "total": 5,
+                "completed": 1,
+                "eligible_total": 3,
+                "building": 0,
+                "failed": [],
+                "skipped": ["img-repo", "docs-repo"],
+            },
+        )
+        stub._refresh_graft_chip()
+        assert stub._chip_graft.text() == "🧠 Graft: 1/3 queued"
+
+
+def _mock_message_box(monkeypatch, viewer_target=None):
+    """Stand in for the manually-built `QMessageBox` `_on_graft_chip_clicked`
+    constructs (needed for the "Open Graph Viewer" button — the static
+    `QMessageBox.information`/`.warning` convenience functions can't add a
+    custom button). Returns the box instance mock; `.setText.call_args[0][0]`
+    is the rendered body text. `viewer_btn` is a distinct sentinel object
+    returned by `addButton("Open Graph Viewer", ...)` so a test can simulate
+    the user clicking it via `box.clickedButton.return_value = viewer_btn`.
+    """
+    box = MagicMock()
+    viewer_btn = object()
+    close_btn = object()
+
+    def _add_button(label, *_a, **_k):
+        return viewer_btn if label == "Open Graph Viewer" else close_btn
+
+    box.addButton.side_effect = _add_button
+    box.clickedButton.return_value = close_btn
+    cls = MagicMock(return_value=box)
+    monkeypatch.setattr(sh_mod, "QMessageBox", cls)
+    return box, viewer_btn
+
+
+class TestGraftViewerTarget:
+    def test_no_tabs_attr_returns_none(self):
+        stub = _Stub()
+        assert stub._graft_viewer_target() is None
+
+    def test_tab_without_project_name_returns_none(self):
+        stub = _Stub()
+        stub.tabs = MagicMock()
+        stub.tabs.currentWidget.return_value = object()  # no .project_name
+        assert stub._graft_viewer_target() is None
+
+    def test_returns_first_path_with_completed_build(self, monkeypatch, tmp_path):
+        import agent_takkub.config as config
+        import agent_takkub.graft_store as graft_store
+
+        proj_a = tmp_path / "a"
+        proj_b = tmp_path / "b"
+        proj_a.mkdir()
+        proj_b.mkdir()
+
+        stub = _Stub()
+        tab = MagicMock()
+        tab.project_name = "demo"
+        stub.tabs = MagicMock()
+        stub.tabs.currentWidget.return_value = tab
+
+        monkeypatch.setattr(
+            config,
+            "load_projects",
+            lambda: {
+                "projects": {
+                    "demo": {"paths": {"web": str(proj_a), "api": str(proj_b)}},
+                }
+            },
+        )
+        monkeypatch.setattr(
+            graft_store,
+            "has_completed_build",
+            lambda store: store == graft_store.graph_store_dir(proj_b.resolve()),
+        )
+
+        target = stub._graft_viewer_target()
+        assert target == proj_b.resolve()
+
+    def test_no_completed_build_returns_none(self, monkeypatch, tmp_path):
+        import agent_takkub.config as config
+        import agent_takkub.graft_store as graft_store
+
+        proj_a = tmp_path / "a"
+        proj_a.mkdir()
+
+        stub = _Stub()
+        tab = MagicMock()
+        tab.project_name = "demo"
+        stub.tabs = MagicMock()
+        stub.tabs.currentWidget.return_value = tab
+
+        monkeypatch.setattr(
+            config, "load_projects", lambda: {"projects": {"demo": {"paths": {"web": str(proj_a)}}}}
+        )
+        monkeypatch.setattr(graft_store, "has_completed_build", lambda store: False)
+
+        assert stub._graft_viewer_target() is None
+
+
+class TestGraftViewerLifecycle:
+    def test_stop_with_no_process_is_a_noop(self):
+        stub = _Stub()
+        stub.stop_graft_viewer()  # must not raise
+
+    def test_stop_kills_the_whole_process_tree(self, monkeypatch):
+        """`Popen.terminate()` alone isn't enough — `graft` is a `.cmd` shim
+        on Windows, so the tracked PID is the shim, not the real `node`
+        server underneath it. Confirmed live: after a plain `terminate()`
+        the server kept answering HTTP requests. `stop_graft_viewer` must
+        kill the whole tree: `taskkill /T /F` on win32, `os.killpg` on
+        POSIX — assert whichever this platform actually uses."""
+        import subprocess
+        import sys
+
+        stub = _Stub()
+        proc = MagicMock()
+        proc.poll.return_value = None
+        proc.pid = 424242
+        stub._graft_viewer_proc = proc
+
+        if sys.platform == "win32":
+            run = MagicMock()
+            monkeypatch.setattr(subprocess, "run", run)
+            stub.stop_graft_viewer()
+            run.assert_called_once()
+            argv = run.call_args[0][0]
+            assert argv[:3] == ["taskkill", "/T", "/F"]
+            assert str(proc.pid) in argv
+        else:
+            import os
+
+            killed = []
+            monkeypatch.setattr(os, "killpg", lambda pgid, sig: killed.append((pgid, sig)))
+            monkeypatch.setattr(os, "getpgid", lambda pid: pid)
+            stub.stop_graft_viewer()
+            assert killed == [(proc.pid, __import__("signal").SIGTERM)]
+        assert stub._graft_viewer_proc is None
+
+    def test_stop_skips_already_exited_process(self):
+        stub = _Stub()
+        proc = MagicMock()
+        proc.poll.return_value = 0  # already exited
+        stub._graft_viewer_proc = proc
+        stub.stop_graft_viewer()
+        proc.terminate.assert_not_called()
+
+    def test_open_reuses_running_server_for_same_target(self, monkeypatch, tmp_path):
+        stub = _Stub()
+        proc = MagicMock()
+        proc.poll.return_value = None
+        target = tmp_path
+        stub._graft_viewer_proc = proc
+        stub._graft_viewer_port = 4444
+        stub._graft_viewer_target_path = target
+
+        import subprocess as _subprocess
+        import webbrowser as _webbrowser
+
+        opened = []
+        monkeypatch.setattr(_webbrowser, "open", opened.append)
+        popen = MagicMock()
+        monkeypatch.setattr(_subprocess, "Popen", popen)
+
+        stub._open_graft_viewer(target)
+        popen.assert_not_called()
+        assert opened == ["http://127.0.0.1:4444"]
+
 
 class TestOnGraftChipClicked:
     def test_cli_missing_shows_warning_dialog(self, monkeypatch):
@@ -415,11 +653,11 @@ class TestOnGraftChipClicked:
             "building": None,
             "failed": None,
         }
-        info = MagicMock()
-        monkeypatch.setattr(sh_mod.QMessageBox, "information", info)
+        monkeypatch.setattr(stub, "_graft_viewer_target", lambda: None)
+        box, _ = _mock_message_box(monkeypatch)
         stub._on_graft_chip_clicked()
-        info.assert_called_once()
-        assert "3/3" in info.call_args[0][2]
+        box.setText.assert_called_once()
+        assert "3/3" in box.setText.call_args[0][0]
 
     def test_building_now_shows_in_information_dialog(self, monkeypatch):
         stub = _Stub()
@@ -430,11 +668,10 @@ class TestOnGraftChipClicked:
             "building": 3,
             "failed": [],
         }
-        info = MagicMock()
-        monkeypatch.setattr(sh_mod.QMessageBox, "information", info)
+        monkeypatch.setattr(stub, "_graft_viewer_target", lambda: None)
+        box, _ = _mock_message_box(monkeypatch)
         stub._on_graft_chip_clicked()
-        info.assert_called_once()
-        assert "3 building right now" in info.call_args[0][2]
+        assert "3 building right now" in box.setText.call_args[0][0]
 
     def test_failures_shows_warning_dialog_listing_them(self, monkeypatch):
         stub = _Stub()
@@ -445,8 +682,91 @@ class TestOnGraftChipClicked:
             "building": None,
             "failed": ["proj-x"],
         }
-        warn = MagicMock()
-        monkeypatch.setattr(sh_mod.QMessageBox, "warning", warn)
+        monkeypatch.setattr(stub, "_graft_viewer_target", lambda: None)
+        box, _ = _mock_message_box(monkeypatch)
         stub._on_graft_chip_clicked()
-        warn.assert_called_once()
-        assert "proj-x" in warn.call_args[0][2]
+        text = box.setText.call_args[0][0]
+        assert "proj-x" in text
+        assert "graft build <path>" in text
+        box.setIcon.assert_called_once_with(sh_mod.QMessageBox.Icon.Warning)
+
+    def test_skipped_only_shows_information_dialog_not_failed(self, monkeypatch):
+        """2026-08-06 bug report: skipped-not-git-repo dirs must render in
+        their own "Skipped" section, never under the word "Failed", and the
+        dialog stays informational (not a warning) when nothing actually
+        failed."""
+        stub = _Stub()
+        stub._graft_status_cache = {
+            "available": True,
+            "total": 5,
+            "completed": 3,
+            "eligible_total": 3,
+            "building": None,
+            "failed": [],
+            "skipped": ["img-repo", "docs-repo"],
+        }
+        monkeypatch.setattr(stub, "_graft_viewer_target", lambda: None)
+        box, _ = _mock_message_box(monkeypatch)
+        stub._on_graft_chip_clicked()
+        text = box.setText.call_args[0][0]
+        assert "img-repo" in text
+        assert "Skipped" in text
+        assert "Failed" not in text
+        assert "3/3" in text
+        box.setIcon.assert_called_once_with(sh_mod.QMessageBox.Icon.Information)
+
+    def test_skipped_and_failed_both_shown_in_separate_sections(self, monkeypatch):
+        stub = _Stub()
+        stub._graft_status_cache = {
+            "available": True,
+            "total": 6,
+            "completed": 2,
+            "eligible_total": 4,
+            "building": None,
+            "failed": ["broken-repo"],
+            "skipped": ["img-repo", "docs-repo"],
+        }
+        monkeypatch.setattr(stub, "_graft_viewer_target", lambda: None)
+        box, _ = _mock_message_box(monkeypatch)
+        stub._on_graft_chip_clicked()
+        text = box.setText.call_args[0][0]
+        assert "Skipped" in text
+        assert "img-repo" in text
+        assert "Failed:" in text
+        assert "broken-repo" in text
+
+    def test_viewer_button_offered_when_target_available(self, monkeypatch):
+        stub = _Stub()
+        stub._graft_status_cache = {
+            "available": True,
+            "total": 3,
+            "completed": 3,
+            "building": None,
+            "failed": None,
+        }
+        sentinel_target = object()
+        monkeypatch.setattr(stub, "_graft_viewer_target", lambda: sentinel_target)
+        opened = []
+        monkeypatch.setattr(stub, "_open_graft_viewer", lambda t: opened.append(t))
+        box, viewer_btn = _mock_message_box(monkeypatch)
+        box.clickedButton.return_value = viewer_btn
+        stub._on_graft_chip_clicked()
+        assert any(c.args[:1] == ("Open Graph Viewer",) for c in box.addButton.call_args_list)
+        assert opened == [sentinel_target]
+
+    def test_viewer_button_omitted_when_no_target(self, monkeypatch):
+        stub = _Stub()
+        stub._graft_status_cache = {
+            "available": True,
+            "total": 3,
+            "completed": 3,
+            "building": None,
+            "failed": None,
+        }
+        monkeypatch.setattr(stub, "_graft_viewer_target", lambda: None)
+        opened = []
+        monkeypatch.setattr(stub, "_open_graft_viewer", lambda t: opened.append(t))
+        box, _ = _mock_message_box(monkeypatch)
+        stub._on_graft_chip_clicked()
+        assert not any(c.args[:1] == ("Open Graph Viewer",) for c in box.addButton.call_args_list)
+        assert opened == []

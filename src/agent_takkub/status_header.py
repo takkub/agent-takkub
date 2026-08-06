@@ -670,17 +670,27 @@ class StatusHeaderMixin:
         it, this is read-only polling from the UI side).
 
         `{"available": bool, "total": int, "completed": int,
-          "building": int|None, "failed": list[str]|None}` — `total`/
+          "eligible_total": int, "building": int|None,
+          "failed": list[str]|None, "skipped": list[str]|None}` — `total`/
         `completed` come from `graft_store`'s public `has_completed_build`
         marker (always accurate: it's the same marker the build itself
-        writes last, only on success). `building`/`failed` come from
-        `graft_autobuild.get_build_status()` — a real, in-flight count of
-        threads currently building and a real list of dirs whose last
-        attempt failed, not an estimate. `building` is `0` (not falsy-None)
-        the moment nothing is building right now — callers MUST tell that
-        apart from `None`, which means the getter itself is unavailable
-        (older graft_autobuild, or the import/call raised) and the chip has
-        no signal at all beyond the completion markers above.
+        writes last, only on success). `building`/`failed`/`skipped` come
+        from `graft_autobuild.get_build_status()` — a real, in-flight count
+        of threads currently building, a real list of dirs whose last
+        attempt genuinely errored, and a real list of dirs intentionally
+        skipped (not a git repo — by design, not a failure). `building` is
+        `0` (not falsy-None) the moment nothing is building right now —
+        callers MUST tell that apart from `None`, which means the getter
+        itself is unavailable (older graft_autobuild, or the import/call
+        raised) and the chip has no signal at all beyond the completion
+        markers above. `skipped` degrades to `None` the same way on an
+        older getter that doesn't report it yet — callers must not treat
+        `None` as "zero skipped", only as "unknown".
+
+        `eligible_total` is `total` minus however many of those configured
+        paths are `skipped` — the denominator the chip/tooltip/dialog show,
+        so a non-git-repo path never inflates the "N built" fraction or
+        makes the chip look stuck below 100%.
 
         MED-6 (2026-08-06 final review, R-2 follow-up): this runs on the Qt
         main thread (2s status timer + every `statusChanged`), and per-call
@@ -692,20 +702,20 @@ class StatusHeaderMixin:
         part — cached under `_GRAFT_SNAPSHOT_TTL_S` (10s), since the chip
         doesn't need 2s resolution for those.
 
-        `building`/`failed` are the OPPOSITE: `graft_autobuild.get_build_status()`
-        is a real in-flight count, documented as cheap by design (two
-        dict/set snapshots under one lock — safe to poll every tick), and
-        it is the one signal that must never be stale — a cached `0` here
-        would render "confirmed nothing building" at boot while 3 builds
-        are actually running, exactly the "stale zero looks like confirmed
-        zero" conflation `_refresh_graft_chip`'s docstring forbids. So it is
+        `building`/`failed`/`skipped` are the OPPOSITE: `graft_autobuild.get_build_status()`
+        is a real in-flight snapshot, documented as cheap by design (dict/set
+        snapshots under one lock — safe to poll every tick), and it is the
+        one signal that must never be stale — a cached `0` here would render
+        "confirmed nothing building" at boot while 3 builds are actually
+        running, exactly the "stale zero looks like confirmed zero"
+        conflation `_refresh_graft_chip`'s docstring forbids. So it is
         called fresh on every invocation, cache hit or miss, and merged
         into the (possibly cached) rest of the snapshot. `_reset_graft_caches()`
         clears the cached half for tests.
         """
         global _graft_cli_cache, _graft_snapshot_cache, _graft_snapshot_cache_at
 
-        def _fresh_build_status() -> tuple[int | None, list[str] | None]:
+        def _fresh_build_status() -> tuple[int | None, list[str] | None, list[str] | None]:
             # Optional richer status IF graft_autobuild ever grows a public
             # getter — degrades to progress-only when it's absent, which is
             # the case today.
@@ -716,10 +726,13 @@ class StatusHeaderMixin:
                 if callable(get_status):
                     live = get_status()
                     if isinstance(live, dict):
-                        return live.get("building"), live.get("failed")
+                        return live.get("building"), live.get("failed"), live.get("skipped")
             except Exception:
                 pass
-            return None, None
+            return None, None, None
+
+        def _eligible_total(total: int, skipped: list[str] | None) -> int:
+            return max(total - len(skipped or []), 0)
 
         now = time.monotonic()
         if (
@@ -728,7 +741,8 @@ class StatusHeaderMixin:
         ):
             snap = dict(_graft_snapshot_cache)
             if snap["available"]:
-                snap["building"], snap["failed"] = _fresh_build_status()
+                snap["building"], snap["failed"], snap["skipped"] = _fresh_build_status()
+                snap["eligible_total"] = _eligible_total(snap["total"], snap["skipped"])
             return snap
 
         from . import graft_store
@@ -741,8 +755,10 @@ class StatusHeaderMixin:
                 "available": False,
                 "total": 0,
                 "completed": 0,
+                "eligible_total": 0,
                 "building": None,
                 "failed": None,
+                "skipped": None,
             }
             _graft_snapshot_cache = snap
             _graft_snapshot_cache_at = now
@@ -793,18 +809,20 @@ class StatusHeaderMixin:
             if graft_store.has_completed_build(graft_store.graph_store_dir(d))
         )
 
-        building, failed = _fresh_build_status()
+        building, failed, skipped = _fresh_build_status()
 
         snap = {
             "available": True,
             "total": total,
             "completed": completed,
+            "eligible_total": _eligible_total(total, skipped),
             "building": building,
             "failed": failed,
+            "skipped": skipped,
         }
         # Cache only the slow-moving half (available/total/completed) —
-        # building/failed are recomputed fresh on every call above, so the
-        # cached copy below is never read for those two keys.
+        # building/failed/skipped are recomputed fresh on every call above,
+        # so the cached copy below is never read for those keys.
         _graft_snapshot_cache = snap
         _graft_snapshot_cache_at = now
         return snap
@@ -817,19 +835,36 @@ class StatusHeaderMixin:
                 "Run `takkub doctor --fix` to install it, then restart the\n"
                 "cockpit. Click for details."
             )
-        total, completed = snap["total"], snap["completed"]
+        completed = snap["completed"]
+        eligible_total = snap.get("eligible_total", snap["total"])
         building = snap.get("building")
         failed = snap.get("failed") or []
+        skipped = snap.get("skipped") or []
+        skip_note = f" ({len(skipped)} skipped, not git repos)" if skipped else ""
         if failed:
-            return f"{completed}/{total} project graphs built · {len(failed)} failed — click for details."
-        if total and completed < total:
+            return (
+                f"{completed}/{eligible_total} project graphs built{skip_note} "
+                f"— {len(failed)} failed — click for details."
+            )
+        if eligible_total and completed < eligible_total:
             if building:
-                return f"Building code-intelligence graphs in the background: {building} in progress, {completed}/{total} done."
+                return (
+                    f"Building code-intelligence graphs in the background: "
+                    f"{building} in progress, {completed}/{eligible_total} done{skip_note}."
+                )
             if building == 0:
-                return f"{completed}/{total} project graphs built · none building right now — queued for the next tab switch or restart."
-            return f"Building code-intelligence graphs in the background: {completed}/{total} done."
-        if total:
-            return f"Code-intelligence graphs ready: {total}/{total} projects built."
+                return (
+                    f"{completed}/{eligible_total} project graphs built{skip_note} "
+                    f"— none building right now — queued for the next tab switch or restart."
+                )
+            return (
+                f"Building code-intelligence graphs in the background: "
+                f"{completed}/{eligible_total} done{skip_note}."
+            )
+        if eligible_total:
+            return f"Code-intelligence graphs ready: {eligible_total}/{eligible_total} projects built{skip_note}."
+        if skipped:
+            return f"No eligible projects to build — {len(skipped)} configured path(s) aren't git repos."
         return "No project paths configured yet — nothing to build."
 
     def _refresh_graft_chip(self) -> None:
@@ -843,12 +878,20 @@ class StatusHeaderMixin:
         falls back to the marker-based progress text below), `0` = getter
         present but nothing building right now (queued, not "building"),
         `>0` = a real in-flight count — these three MUST render differently
-        so "don't know" never looks identical to "confirmed zero"."""
+        so "don't know" never looks identical to "confirmed zero".
+
+        `skipped` (not-a-git-repo, intentional) is NEVER folded into `failed`
+        and never flips the chip to the attention/warn style on its own —
+        it isn't something the user needs to act on. Only a real entry in
+        `failed` earns the warn color and the singular word "failed"
+        anywhere on the chip (2026-08-06 bug report: skipped dirs were
+        rendered as "N failed" and scared the user for nothing)."""
         if "_chip_graft" not in self.__dict__:
             return
         snap = self._graft_progress_snapshot()
         self._graft_status_cache = snap
-        total, completed = snap["total"], snap["completed"]
+        completed = snap["completed"]
+        eligible_total = snap.get("eligible_total", snap["total"])
         building = snap.get("building")
         failed = snap.get("failed") or []
         if not snap["available"]:
@@ -858,24 +901,198 @@ class StatusHeaderMixin:
             self._chip_graft.setText(f"🧠 Graft: {len(failed)} failed")
             self._chip_graft.setStyleSheet(self._graft_chip_style("attention"))
         elif building:
-            self._chip_graft.setText(f"🧠 Building graphs… {building} now · {completed}/{total}")
+            self._chip_graft.setText(
+                f"🧠 Building graphs… {building} now · {completed}/{eligible_total}"
+            )
             self._chip_graft.setStyleSheet(self._graft_chip_style("building"))
-        elif total and completed < total:
+        elif eligible_total and completed < eligible_total:
             if building == 0:
-                self._chip_graft.setText(f"🧠 Graft: {completed}/{total} queued")
+                self._chip_graft.setText(f"🧠 Graft: {completed}/{eligible_total} queued")
                 self._chip_graft.setStyleSheet(self._graft_chip_style("idle"))
             else:
-                self._chip_graft.setText(f"🧠 Building graphs… {completed}/{total}")
+                self._chip_graft.setText(f"🧠 Building graphs… {completed}/{eligible_total}")
                 self._chip_graft.setStyleSheet(self._graft_chip_style("building"))
         else:
-            self._chip_graft.setText("🧠 Graft ready" if total else "🧠 Graft")
+            self._chip_graft.setText("🧠 Graft ready" if eligible_total else "🧠 Graft")
             self._chip_graft.setStyleSheet(self._graft_chip_style("idle"))
         self._chip_graft.setToolTip(self._graft_chip_tooltip(snap))
+
+    def _graft_viewer_target(self):
+        """Resolve the graph store to visualize for the CURRENT project
+        tab — the first of its configured paths that already has a
+        completed build. Returns `None` if there's no active project tab,
+        no configured path, or nothing built yet for any of them (2026-08-06:
+        the viewer button must reflect whichever project tab is open, never
+        a hardcoded path).
+
+        Duck-types on `project_name` rather than `isinstance(tab, ProjectTab)`
+        on purpose: importing `project_tab` transitively pulls in
+        `QtWebEngineWidgets` (the xterm.js terminal host), which raises if a
+        `QCoreApplication` already exists without it pre-imported — a real
+        constraint in tests that build a bare Qt widget without going through
+        the app's normal boot order. A plain attribute check needs none of
+        that and is exactly as correct here (only `ProjectTab` ever carries
+        `project_name`)."""
+        from pathlib import Path
+
+        from . import graft_store
+        from .config import load_projects
+
+        tabs = getattr(self, "tabs", None)
+        tab = tabs.currentWidget() if tabs is not None else None
+        project_name = getattr(tab, "project_name", None)
+        if not isinstance(project_name, str):
+            return None
+        try:
+            projects = load_projects().get("projects") or {}
+        except Exception:
+            return None
+        proj = projects.get(project_name)
+        if not isinstance(proj, dict):
+            return None
+        paths = proj.get("paths")
+        if not isinstance(paths, dict):
+            return None
+        for raw in paths.values():
+            if not isinstance(raw, str) or not raw.strip():
+                continue
+            try:
+                resolved = Path(raw).expanduser().resolve()
+            except OSError:
+                continue
+            if not resolved.is_dir():
+                continue
+            if graft_store.has_completed_build(graft_store.graph_store_dir(resolved)):
+                return resolved
+        return None
+
+    def _open_graft_viewer(self, target) -> None:
+        """Launch (or reuse) a local `graft viz` server for *target* and open
+        it in the OS default browser — not a driver-controlled browser, this
+        is the same as clicking a link. Reuses the already-running server for
+        the same target instead of spawning a second one on every click; a
+        different target (switched project tab) replaces it.
+
+        Spawned detached into its own process group/session (see
+        `stop_graft_viewer`'s docstring for why — the CLI is a `.cmd`
+        wrapper on Windows and `terminate()` alone only kills that wrapper,
+        orphaning the real `node` server underneath, confirmed live while
+        building this button: the port stayed open and answering requests
+        after `terminate()` returned)."""
+        import socket
+        import subprocess
+        import sys
+        import webbrowser
+
+        from . import graft_store
+        from ._win_console import SUBPROCESS_NO_WINDOW
+
+        proc = self.__dict__.get("_graft_viewer_proc")
+        if (
+            proc is not None
+            and proc.poll() is None
+            and self.__dict__.get("_graft_viewer_target_path") == target
+        ):
+            webbrowser.open(f"http://127.0.0.1:{self._graft_viewer_port}")
+            return
+        self.stop_graft_viewer()
+
+        cli = graft_store.graft_cli_path()
+        if cli is None:
+            return
+        store = graft_store.graph_store_dir(target)
+        staging = graft_store.staging_dir_for(target)
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+
+        creationflags = SUBPROCESS_NO_WINDOW
+        popen_kwargs: dict = {}
+        if sys.platform == "win32":
+            creationflags |= subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            popen_kwargs["start_new_session"] = True
+
+        try:
+            proc = subprocess.Popen(
+                [cli, "--dir", str(store), "viz", "--no-open", "-p", str(port), str(staging)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=creationflags,
+                **popen_kwargs,
+            )
+        except OSError:
+            QMessageBox.warning(
+                self,
+                "Code-intelligence graph (graft)",
+                "Couldn't start the graph viewer — see the cockpit log for details.",
+            )
+            return
+
+        self._graft_viewer_proc = proc
+        self._graft_viewer_port = port
+        self._graft_viewer_target_path = target
+        webbrowser.open(f"http://127.0.0.1:{port}")
+
+    def stop_graft_viewer(self) -> None:
+        """Kill any running `graft viz` server this window spawned, MUST be
+        called from `MainWindow.closeEvent` — `graft viz` doesn't exit on
+        its own when the cockpit closes.
+
+        Plain `Popen.terminate()` is NOT enough here and was confirmed live
+        while building this button: `graft` is installed as a `.cmd` shim on
+        Windows, so the tracked PID is `cmd.exe` running that shim, and the
+        real `node` server is its CHILD — `terminate()` kills only the shim,
+        the server keeps listening and answering requests. `_open_graft_viewer`
+        spawns into its own process group (`CREATE_NEW_PROCESS_GROUP`) /
+        session (`start_new_session`) precisely so the whole tree can be
+        killed from here: `taskkill /T /F` on Windows, `os.killpg` on POSIX.
+
+        Reads `_graft_viewer_proc` via `self.__dict__.get(...)`, not
+        `getattr` — same sip quirk `_refresh_graft_chip` guards against:
+        `closeEvent` can run against a `MainWindow.__new__()` test stub
+        whose Qt C++ side was never constructed, and `getattr` on a truly
+        absent attribute there raises `RuntimeError` instead of behaving
+        like a normal missing-attribute lookup."""
+        import subprocess
+        import sys
+
+        proc = self.__dict__.get("_graft_viewer_proc")
+        if proc is not None and proc.poll() is None:
+            if sys.platform == "win32":
+                from ._win_console import SUBPROCESS_NO_WINDOW
+
+                subprocess.run(
+                    ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=SUBPROCESS_NO_WINDOW,
+                    check=False,
+                )
+            else:
+                import os
+                import signal
+
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+        self._graft_viewer_proc = None
 
     def _on_graft_chip_clicked(self) -> None:
         """Click-for-detail — the chip itself stays a quiet passive status
         readout (M6: background build must never pop a modal unprompted),
-        this dialog only ever appears from an explicit click."""
+        this dialog only ever appears from an explicit click.
+
+        `skipped` (not-a-git-repo) gets its own section, worded as ordinary
+        and expected, never mixed into `failed` or labeled with the word
+        "Failed" — and the dialog only turns into a warning (icon + tone)
+        when `failed` is genuinely non-empty. A skip-only dialog stays
+        informational (2026-08-06 bug report: the old dialog said "Failed:"
+        for dirs that were never supposed to build at all)."""
         snap = self._graft_status_cache or self._graft_progress_snapshot()
         if not snap["available"]:
             QMessageBox.warning(
@@ -888,22 +1105,57 @@ class StatusHeaderMixin:
                 "restart the cockpit.",
             )
             return
-        total, completed = snap["total"], snap["completed"]
+        completed = snap["completed"]
+        eligible_total = snap.get("eligible_total", snap["total"])
         building = snap.get("building")
         failed = snap.get("failed") or []
-        lines = [f"{completed}/{total} project graphs built."]
+        skipped = snap.get("skipped") or []
+        lines = [f"{completed}/{eligible_total} project graphs built."]
         if building:
             lines.append(f"{building} building right now.")
+        if skipped:
+            lines.append("")
+            lines.append(f"Skipped ({len(skipped)}, not a git repo — nothing to do):")
+            lines.extend(f"  • {name}" for name in skipped)
+        is_warning = bool(failed)
         if failed:
             lines.append("")
             lines.append("Failed:")
             lines.extend(f"  • {name}" for name in failed)
             lines.append("")
-            lines.append("Check the cockpit log for the error. A tab switch or")
-            lines.append("cockpit restart retries any project with no graph yet.")
-            QMessageBox.warning(self, "Code-intelligence graph (graft)", "\n".join(lines))
-        else:
-            QMessageBox.information(self, "Code-intelligence graph (graft)", "\n".join(lines))
+            lines.append("These hit a real build error. Open a terminal in that")
+            lines.append("project and run `graft build <path>` directly to see")
+            lines.append("the actual error text (the status bar only keeps a")
+            lines.append("pass/fail marker, not the log). A tab switch or")
+            lines.append("cockpit restart retries it automatically.")
+
+        # Offer "Open Graph Viewer" only when something for THIS project tab
+        # has actually finished building — a viewer with nothing to show is
+        # worse than no button at all.
+        viewer_target = self._graft_viewer_target()
+        if viewer_target is not None:
+            # The viewer always opens on its "Context" tab, which is only
+            # populated by the optional LLM `--deep` layer we don't run (no
+            # API key spend) — so it's permanently empty. No URL param or
+            # localStorage key lets us pick a different default tab from
+            # here (checked the shipped viewer bundle), so the fix is this
+            # heads-up instead of a silent empty-looking page.
+            lines.append("")
+            lines.append("Viewer opens on the Context tab — that one's empty")
+            lines.append("by design (needs the paid --deep layer, off by")
+            lines.append("default). Switch to the Code tab to see the graph.")
+
+        box = QMessageBox(self)
+        box.setWindowTitle("Code-intelligence graph (graft)")
+        box.setText("\n".join(lines))
+        box.setIcon(QMessageBox.Icon.Warning if is_warning else QMessageBox.Icon.Information)
+        box.addButton(QMessageBox.StandardButton.Close)
+        viewer_btn = None
+        if viewer_target is not None:
+            viewer_btn = box.addButton("Open Graph Viewer", QMessageBox.ButtonRole.ActionRole)
+        box.exec()
+        if viewer_btn is not None and box.clickedButton() is viewer_btn:
+            self._open_graft_viewer(viewer_target)
 
     # ──────────────────────────────────────────────────────────────
     # 🌐 Remote chip visibility + state

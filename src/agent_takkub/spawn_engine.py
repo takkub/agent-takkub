@@ -1966,6 +1966,27 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                             f"`{_role_mem}` ด้วย Edit/Write เพื่อให้รอบหน้าเร็วขึ้น "
                             "เก็บเฉพาะของจริงที่มีค่า อย่าซ้ำ code/git\n"
                         )
+                    # One-shot distill nudge (#distill): curation already had to
+                    # cut real entries out to the L2 archive since last spawn —
+                    # ask THIS pane (it just read the notes above and has full
+                    # project context) to consolidate before appending more,
+                    # instead of letting age-based trimming keep quietly
+                    # discarding knowledge from the L1 spawn-prompt inject.
+                    try:
+                        from .role_memory import consume_distill_pending
+
+                        if consume_distill_pending(project_ns, base_role):
+                            _appendix += (
+                                "\n> ⚠️ **memory ใกล้เต็ม — เพิ่งตัดความรู้เก่าบางรายการออกไป "
+                                "archive แล้ว (เนื้อเต็มยังค้นได้ด้วย `takkub search`).** ก่อน append "
+                                "ใหม่ ลองกลั่นของเดิมด้านบนก่อน: รวม bullet เรื่องเดียวกันเป็นข้อเดียว "
+                                "ตัดคำฟุ่มเฟือย เก็บใจความเดิมในเนื้อที่น้อยลง แล้ว Write ทับไฟล์เดิม.\n"
+                            )
+                    except Exception:
+                        _log.exception(
+                            "could not check distill-pending flag for %s; spawning without it",
+                            base_role,
+                        )
                 # Skill Matrix (#103 phase 4): a role's own Skill tool already
                 # auto-discovers .claude/skills/ project-wide regardless of
                 # this policy — this appendix just names which ones the

@@ -114,6 +114,16 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
         if mod is not None and hasattr(mod, attr):
             monkeypatch.setattr(mod, attr, value, raising=False)
 
+    # role_memory computes ROLE_MEMORY_DIR = RUNTIME_DIR / "role-memory" once at
+    # import time (not a lazy join), so patching its copied RUNTIME_DIR name
+    # above doesn't touch it. Without this, any test that exercises the
+    # spawn-time role-memory injection (e.g. test_spawn_task_delivery.py)
+    # writes real files into this checkout's actual runtime/role-memory/
+    # (confirmed: proj_a/, proj/, spawn-task-test/ leaked there from prior runs).
+    rmem = _maybe_module("agent_takkub.role_memory", force=False)
+    if rmem is not None:
+        monkeypatch.setattr(rmem, "ROLE_MEMORY_DIR", runtime / "role-memory", raising=False)
+
     # Neutralise TAKKUB_PORT_FILE + isolate PORT_FILE. Importing agent_takkub.app
     # runs a module-level `os.environ.setdefault("TAKKUB_PORT_FILE", <tmp>/agent-
     # takkub-port.<pid>)` whenever TAKKUB_ALLOW_MULTI is set (which it always is

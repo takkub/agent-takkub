@@ -1362,6 +1362,11 @@ class MainWindow(
         # reaps them on exit. (A Doctor git fetch or a 120s-per-plugin install
         # would have blown any bounded close-time wait anyway.)
 
+        # `graft viz` (🧠 chip's "Open Graph Viewer" button) is a plain node
+        # HTTP server, not a pane session — nothing else terminates it on
+        # cockpit close, so it would otherwise keep listening forever.
+        self.stop_graft_viewer()
+
         self._save_window_state()
         self._persist_open_tabs()
         # Capture the live teammate-pane picture BEFORE we terminate the

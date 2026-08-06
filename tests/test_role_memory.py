@@ -445,6 +445,80 @@ class TestAppendFailureEntry:
         assert "distinct failure number 9" in text  # newest survives
 
 
+class TestDistillPending:
+    """One-shot flag (#distill): when curation cuts real entries out to the L2
+    archive, the role's NEXT spawn should get a nudge to consolidate its
+    surviving notes instead of quietly losing knowledge to age-based trimming
+    forever. `_archive_entries` sets it; `consume_distill_pending` clears it."""
+
+    def test_archiving_real_entries_sets_flag(self, isolated_role_memory: pathlib.Path) -> None:
+        assert rm.consume_distill_pending("p", "backend") is False  # nothing yet
+        rm._archive_entries("p", "backend", ["- something that overflowed"])
+        assert rm.role_memory_distill_flag_path("p", "backend").exists()
+
+    def test_empty_archive_call_does_not_set_flag(self, isolated_role_memory: pathlib.Path) -> None:
+        rm._archive_entries("p", "backend", [])
+        assert not rm.role_memory_distill_flag_path("p", "backend").exists()
+
+    def test_consume_is_one_shot(self, isolated_role_memory: pathlib.Path) -> None:
+        rm._archive_entries("p", "backend", ["- overflow entry"])
+        assert rm.consume_distill_pending("p", "backend") is True
+        assert rm.consume_distill_pending("p", "backend") is False  # already cleared
+        assert not rm.role_memory_distill_flag_path("p", "backend").exists()
+
+    def test_flag_survives_l2_write_failure(
+        self, isolated_role_memory: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The L1→L2 knowledge loss already happened even if the archive write
+        # itself fails — the flag must still be set so the nudge isn't lost.
+        def boom(*_a, **_k):
+            raise OSError("write failed")
+
+        monkeypatch.setattr(pathlib.Path, "write_text", boom)
+        rm._archive_entries("p", "backend", ["- something"])
+        assert rm.consume_distill_pending("p", "backend") is True
+
+    def test_ensure_role_memory_curation_sets_flag_via_size_cap(
+        self, isolated_role_memory: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # End-to-end through the real curation path (not calling
+        # _archive_entries directly): a size-cap trim during ensure_role_memory
+        # must also flip the flag.
+        monkeypatch.setattr(rm, "_MEM_MAX_ENTRIES", 5)
+        path = ensure_role_memory("p", "backend")
+        notes = "".join(f"\n- note number {i:03d}\n" for i in range(20))
+        path.write_text(path.read_text(encoding="utf-8") + notes, encoding="utf-8")
+        assert rm.consume_distill_pending("p", "backend") is False  # not yet curated
+        ensure_role_memory("p", "backend")  # triggers the trim
+        assert rm.consume_distill_pending("p", "backend") is True
+
+    def test_per_project_and_role_isolation(self, isolated_role_memory: pathlib.Path) -> None:
+        rm._archive_entries("proj_a", "backend", ["- overflow"])
+        assert rm.consume_distill_pending("proj_a", "backend") is True
+        assert rm.consume_distill_pending("proj_a", "frontend") is False
+        assert rm.consume_distill_pending("proj_b", "backend") is False
+
+    def test_best_effort_mark_does_not_raise(
+        self, isolated_role_memory: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def boom(*_a, **_k):
+            raise OSError("touch failed")
+
+        monkeypatch.setattr(pathlib.Path, "touch", boom)
+        rm._archive_entries("p", "backend", ["- something"])  # must not raise
+
+    def test_best_effort_consume_does_not_raise_on_unlink_failure(
+        self, isolated_role_memory: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        rm._archive_entries("p", "backend", ["- something"])
+
+        def boom(*_a, **_k):
+            raise OSError("unlink failed")
+
+        monkeypatch.setattr(pathlib.Path, "unlink", boom)
+        assert rm.consume_distill_pending("p", "backend") is False  # swallowed, not raised
+
+
 class TestHasLearnedContent:
     """tok-5: a freshly-seeded role-memory file (skeleton only) must read as
     *empty* so the spawn path injects a one-line pointer instead of the whole
