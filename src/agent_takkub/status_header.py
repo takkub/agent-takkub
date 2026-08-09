@@ -611,6 +611,7 @@ class StatusHeaderMixin:
     def _update_provider_chip(self) -> None:
         """Update the provider chip to reflect the current primary provider and account."""
         from . import user_profile
+        from .provider_config import effective_provider_for
 
         try:
             from .config import active_project as _active_project
@@ -621,16 +622,35 @@ class StatusHeaderMixin:
 
         if not proj:
             self._btn_provider.setText("🤖 Accounts")
+            self._btn_provider.setToolTip("Click: switch user account or provider.")
             return
 
-        # Here we just show the active profile for Claude right now.
-        # Future-proofing: We could show the default provider and its active profile.
-        # But we'll just read the claude profile to start.
-        current_claude = user_profile.profile_for(proj, provider="claude")
-        if current_claude != "default":
-            self._btn_provider.setText(f"🤖 Claude ({current_claude})")
-        else:
-            self._btn_provider.setText("🤖 Accounts")
+        # Fetch the effective provider for the Lead role in this project
+        lead_provider = effective_provider_for("lead", proj)
+        current_profile = user_profile.profile_for(proj, provider=lead_provider)
+
+        # Determine if other providers also have non-default profiles
+        active_others = []
+        for p in ["claude", "openai", "gemini"]:
+            if p != lead_provider:
+                prof = user_profile.profile_for(proj, provider=p)
+                if prof != "default":
+                    active_others.append(p)
+
+        text = f"🤖 {lead_provider.capitalize()} ({current_profile})"
+        if active_others:
+            text += f" (+{len(active_others)})"
+
+        self._btn_provider.setText(text)
+
+        # Tooltip clearly shows all logged in providers
+        tooltip = f"Click: switch user account or provider.\n\nActive in {proj}:"
+        tooltip += f"\n✅ {lead_provider.capitalize()} (Lead): {current_profile}"
+        for p in ["claude", "openai", "gemini"]:
+            if p != lead_provider:
+                prof = user_profile.profile_for(proj, provider=p)
+                tooltip += f"\n✅ {p.capitalize()}: {prof}"
+        self._btn_provider.setToolTip(tooltip)
 
     def _update_status(self) -> None:
         from .token_meter import effective_context_limit

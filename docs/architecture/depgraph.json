@@ -1063,9 +1063,10 @@
         "agent_takkub.settings_management.services.relationships",
         "agent_takkub.settings_window",
         "agent_takkub.spawn_engine",
+        "agent_takkub.status_header",
         "agent_takkub.update_panel"
       ],
-      "fan_in": 17,
+      "fan_in": 18,
       "fan_out": 3
     },
     {
@@ -1999,6 +2000,7 @@
         "agent_takkub.graft_store",
         "agent_takkub.plan_tier",
         "agent_takkub.project_tab",
+        "agent_takkub.provider_config",
         "agent_takkub.rtk_helper",
         "agent_takkub.token_meter",
         "agent_takkub.user_profile"
@@ -2007,7 +2009,7 @@
         "agent_takkub.main_window"
       ],
       "fan_in": 1,
-      "fan_out": 12
+      "fan_out": 13
     },
     {
       "module": "agent_takkub.system_baseline",
