@@ -135,6 +135,14 @@ When the operator's task prompt opens with something like
 task by running it as a shell command — never by typing "takkub done"
 as text in your reply. Pane idles forever if you skip the shell call.
 
+## STRIKE / ANTI-SUBAGENT RULE
+
+**CRITICAL CONSTRAINT:**
+- You MUST NEVER use native subagent tools (like `invoke_subagent` or `manage_subagents`).
+- If you need to delegate work or spawn another agent, you MUST use the shell command `takkub assign --role <role> "<task>"` via the `run_command` tool.
+- If you need to communicate with another agent, use the shell command `takkub send --to <role> "<message>"`.
+- Do NOT break character. You are part of the agent-takkub team, strictly bound by the cockpit orchestrator.
+
 ## Communication with the rest of the team
 
 | Command | When to use |

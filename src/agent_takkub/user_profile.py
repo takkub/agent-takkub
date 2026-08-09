@@ -85,18 +85,23 @@ def _load_registry() -> list[dict]:
             continue
         name = str(item.get("name", "")).strip()
         config_dir = str(item.get("config_dir", "")).strip()
-        if name and config_dir and name != DEFAULT_PROFILE:
-            out.append({"name": name, "config_dir": config_dir})
+        provider = str(item.get("provider", "claude")).strip()
+        if name and name != DEFAULT_PROFILE:
+            out.append({"name": name, "config_dir": config_dir, "provider": provider})
     return out
 
 
 def list_profiles() -> list[dict]:
     """Return all profiles: implicit default first, then registered ones.
 
-    Each entry: ``{"name": str, "config_dir": str}``.
+    Each entry: ``{"name": str, "config_dir": str, "provider": str}``.
     """
     registered = _load_registry()
-    default_entry = {"name": DEFAULT_PROFILE, "config_dir": str(_DEFAULT_CONFIG_DIR)}
+    default_entry = {
+        "name": DEFAULT_PROFILE,
+        "config_dir": str(_DEFAULT_CONFIG_DIR),
+        "provider": "claude",
+    }
     return [default_entry, *registered]
 
 
@@ -231,13 +236,15 @@ def cleanup_profile_links(config_dir: str | Path) -> list[str]:
     return removed
 
 
-def add_profile(name: str, config_dir: str | Path, share_sessions: bool = False) -> list[str]:
+def add_profile(
+    name: str, config_dir: str | Path = "", share_sessions: bool = False, provider: str = "claude"
+) -> list[str]:
     """Register a new profile.
 
     ``share_sessions=True`` provisions *config_dir* so sessions/plugins are
     shared with the default profile (see :func:`provision_shared_profile`) —
     switching users changes ONLY the login/credentials. Returns the list of
-    shared items linked ([] when not sharing).
+    shared items linked ([] when not sharing). (Only applies to 'claude' provider).
 
     Raises ``ValueError`` if *name* is invalid or already taken.
     No-ops on I/O errors to keep callers fault-tolerant (caller should
@@ -259,13 +266,13 @@ def add_profile(name: str, config_dir: str | Path, share_sessions: bool = False)
         raise ValueError(f"Profile {name!r} already exists")
 
     linked: list[str] = []
-    if share_sessions:
+    if share_sessions and provider == "claude":
         try:
             linked = provision_shared_profile(config_dir_s)
         except OSError as e:
             raise ValueError(f"Cannot create profile dir {config_dir_s}: {e}") from e
 
-    profiles.append({"name": name, "config_dir": config_dir_s})
+    profiles.append({"name": name, "config_dir": config_dir_s, "provider": provider})
     try:
         _atomic_write(_REGISTRY_PATH, profiles)
     except OSError:
@@ -289,8 +296,8 @@ def remove_profile(name: str) -> None:
         pass
 
 
-def profile_for(project: str) -> str:
-    """Return the profile name selected for *project* (``"default"`` if unset)."""
+def profile_for(project: str, provider: str = "claude") -> str:
+    """Return the profile name selected for *project* and *provider* (``"default"`` if unset)."""
     path = _project_profile_path(project)
     try:
         raw = path.read_text(encoding="utf-8")
@@ -299,31 +306,63 @@ def profile_for(project: str) -> str:
         return DEFAULT_PROFILE
     if not isinstance(data, dict):
         return DEFAULT_PROFILE
-    name = str(data.get("name", "")).strip()
+
+    # Backward compatibility: old format was {"name": "profile_name"} meaning claude.
+    # New format: {"providers": {"claude": "profile_name", "openai": "default"}, "default_provider": "claude"}
+    if "name" in data and "providers" not in data:
+        if provider == "claude":
+            name = str(data.get("name", "")).strip()
+        else:
+            name = DEFAULT_PROFILE
+    else:
+        providers_dict = data.get("providers", {})
+        name = str(providers_dict.get(provider, DEFAULT_PROFILE)).strip()
+
     if not name:
         return DEFAULT_PROFILE
-    # Verify the name still exists in the registry (profile may have been removed)
+    # Verify the name still exists in the registry for this provider
     if name != DEFAULT_PROFILE:
         registry = _load_registry()
-        if not any(p["name"] == name for p in registry):
+        if not any(p["name"] == name and p["provider"] == provider for p in registry):
             return DEFAULT_PROFILE
     return name
 
 
-def set_profile(project: str, name: str) -> None:
-    """Assign a profile to *project*.
+def set_profile(project: str, name: str, provider: str = "claude") -> None:
+    """Assign a profile to *project* for a specific *provider*.
 
-    Raises ``ValueError`` if *name* is not in the registry (and not
+    Raises ``ValueError`` if *name* is not in the registry for that provider (and not
     ``"default"``).  Silent on I/O errors.
     """
     name = str(name).strip()
     if name != DEFAULT_PROFILE:
         registry = _load_registry()
-        if not any(p["name"] == name for p in registry):
-            raise ValueError(f"Unknown profile {name!r}; register it first with add_profile()")
+        if not any(p["name"] == name and p["provider"] == provider for p in registry):
+            raise ValueError(
+                f"Unknown profile {name!r} for provider {provider!r}; register it first with add_profile()"
+            )
+
     path = _project_profile_path(project)
     try:
-        _atomic_write(path, {"name": name})
+        raw = path.read_text(encoding="utf-8")
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            data = {}
+    except (OSError, json.JSONDecodeError):
+        data = {}
+
+    # Migrate old format to new format
+    if "name" in data and "providers" not in data:
+        old_claude = data.pop("name")
+        data["providers"] = {"claude": old_claude}
+
+    if "providers" not in data:
+        data["providers"] = {}
+
+    data["providers"][provider] = name
+
+    try:
+        _atomic_write(path, data)
     except OSError:
         pass
 

@@ -142,21 +142,14 @@ class UserActionsMixin:
     # user-profile menu
     # ──────────────────────────────────────────────────────────────
 
-    def _show_pipelines_menu(self, *_args) -> None:
-        """Show the user-profile drop-down menu.
-
-        A6-redesign moved this off the 👥 Team chip's left-click (now
-        ``_on_team_chip_clicked`` — straight to Team & Roles) onto its
-        RIGHT-click (``customContextMenuRequested``, which passes a QPoint
-        this method ignores in favor of anchoring off the button's own rect).
+    def _show_pipelines_menu(self) -> None:
+        """Accounts / Provider menu (left-click on 🤖 Accounts).
         Built fresh on every click so user-profile state is always current.
-        "Pipeline Settings…" used to be the first section here, opening
-        :class:`pipeline_dialog.PipelineSettingsDialog`; removed 2026-07-10 —
-        100% redundant with 👥 Team's own Pipeline Builder / Templates views
-        (see settings_window.py). Menu sections:
-          1. User profiles (checkable, one per profile)
+        Menu sections:
+          1. Claude accounts
+          2. OpenAI accounts (etc)
           ─────────────────
-          2. Add / Remove user… (now includes Claude Auth tab)
+          3. Manage Accounts… (opens Settings)
         """
         from PyQt6.QtGui import QAction
         from PyQt6.QtWidgets import QMenu
@@ -172,22 +165,48 @@ class UserActionsMixin:
 
         menu = QMenu(self)
 
-        current_profile = user_profile.profile_for(_proj or "")
+        # Group profiles by provider
+        providers_dict = {}
         for profile in user_profile.list_profiles():
-            name = profile["name"]
-            act = QAction(name, self)
-            act.setCheckable(True)
-            act.setChecked(name == current_profile)
-            act.triggered.connect(lambda _checked, n=name: self._on_user_changed(n))
-            menu.addAction(act)
+            prov = profile.get("provider", "claude")
+            if prov not in providers_dict:
+                providers_dict[prov] = []
+            providers_dict[prov].append(profile)
 
-        menu.addSeparator()
+        for prov, profiles in providers_dict.items():
+            if not profiles:
+                continue
 
-        act_manage = QAction("Add / Remove user…", self)
+            # Add a disabled label-like action for the provider category
+            cat_act = QAction(f"{prov.capitalize()} Accounts", self)
+            cat_act.setEnabled(False)
+            menu.addAction(cat_act)
+
+            current_for_prov = user_profile.profile_for(_proj or "", provider=prov)
+
+            for profile in profiles:
+                name = profile["name"]
+                act = QAction(f"  {name}", self)
+                act.setCheckable(True)
+                act.setChecked(name == current_for_prov)
+                act.triggered.connect(lambda _checked, n=name, p=prov: self._on_user_changed(n, p))
+                menu.addAction(act)
+
+            menu.addSeparator()
+
+        act_manage = QAction("⚙️ Manage Accounts…", self)
         act_manage.triggered.connect(self._on_add_user_clicked)
         menu.addAction(act_manage)
 
-        menu.exec(self._btn_pipelines.mapToGlobal(self._btn_pipelines.rect().bottomLeft()))
+        if hasattr(self, "_btn_provider"):
+            menu.exec(self._btn_provider.mapToGlobal(self._btn_provider.rect().bottomLeft()))
+        else:
+            menu.exec(self._btn_pipelines.mapToGlobal(self._btn_pipelines.rect().bottomLeft()))
+
+    def _on_user_changed(self, name: str, provider: str = "claude") -> None:
+        """Fired from the profile-switch menu. Switches the active project's
+        provider-profile mapping, then requests a project-wide restart of all
+        teammates so the new credentials take effect immediately."""
 
     # ──────────────────────────────────────────────────────────────
     # session control

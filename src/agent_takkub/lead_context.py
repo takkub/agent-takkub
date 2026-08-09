@@ -374,6 +374,11 @@ def _build_lead_context_text(
 - งานที่ touch > 1 ไฟล์
 - งานที่ edit > 30 บรรทัดในรอบเดียว
 
+🚫 STRIKE / ANTI-SUBAGENT RULE:
+- You MUST NEVER use native subagent tools (like `invoke_subagent` or `manage_subagents`).
+- If you need to delegate work or spawn another agent, you MUST use the shell command `takkub assign --role <role> "<task>"` via the `run_command` tool.
+- If you need to communicate with another agent, use the shell command `takkub send --to <role> "<message>"`.
+
 ละเมิดข้อใดข้อหนึ่ง → หยุดทันที สรุปงานแล้ว delegate ผ่าน `takkub assign`
 """
 

@@ -21,7 +21,7 @@
     --accent: #2dd4bf;
     --accent-ink: #032c26;
     --accent-dim: #0f766e;
-    --lead: #c084fc;
+    --lead: #d97757;
     --lead-ink: #f3e8ff;
     --work: #fbbf24;
     --done: #34d399;
@@ -976,14 +976,14 @@
       <div id="lead-log">
         <div id="lead-empty">
           <span class="icon">💬</span>
-          <span class="text">ยังไม่มีข้อความ — พิมพ์ถึง Lead ด้านล่างเพื่อเริ่ม</span>
+          <span class="text" id="lead-empty-text">ยังไม่มีข้อความ — พิมพ์ข้อความด้านล่างเพื่อเริ่ม</span>
         </div>
       </div>
       <div id="lead-picker-banner"></div>
       <div id="quick-replies"></div>
       <div id="view-control-note"></div>
       <form id="lead-composer">
-        <textarea id="lead-input" rows="1" placeholder="พิมพ์ถึง Lead…"></textarea>
+        <textarea id="lead-input" rows="1" placeholder="พิมพ์ถึง Claude…"></textarea>
         <button id="lead-send" type="submit">➤</button>
       </form>
     </section>
@@ -1000,7 +1000,7 @@
 
   <nav id="bottom-nav">
     <button data-view="projects"><span class="icon">📂</span>Projects</button>
-    <button data-view="lead"><span class="icon">🧠</span>Lead</button>
+    <button data-view="lead" aria-label="Claude"><span class="icon" id="nav-lead-icon" aria-hidden="true">🧠</span><span id="nav-lead-text">Claude</span></button>
     <button data-view="pulse"><span class="icon">◍</span>Pulse</button>
   </nav>
 

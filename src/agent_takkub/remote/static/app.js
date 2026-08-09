@@ -3,8 +3,8 @@
 /*
  * Takkub Remote — vanilla JS SPA, no build step, no external requests.
  * Data-minimization contract (design doc §7.3): only ever render (1) the
- * Lead's own conversation/report text and (2) on Pulse, role name + runtime
- * per project. Any other field the API might accidentally include (task
+ * Lead's own conversation/report text and (2) on Pulse, role name + provider
+ * + runtime per project. Any other field the API might accidentally include (task
  * detail, pane id, transcript, state) is never read into the DOM.
  */
 (function () {
@@ -26,12 +26,63 @@
     lastToast: 0,
     activeProject: "",
     selectedProject: "",
+    provider: "claude",
+    providersByProject: {},
     openTabs: [],
     opening: null,
     closing: null,
   };
 
-  var VIEW_LABELS = { projects: "Projects", lead: "Lead", pulse: "Pulse" };
+  var VIEW_LABELS = { projects: "Projects", pulse: "Pulse" };
+
+  // Self-contained brand marks keep the PWA's no-external-requests promise.
+  // `codex` is accepted as the internal engine alias; the UI's public provider
+  // name is OpenAI. Unknown/missing values deliberately fall back to Claude so the
+  // frontend remains compatible with pre-multi-provider cockpit versions.
+  var PROVIDERS = {
+    claude: { name: "Claude", logo: "🧠", color: "#d97757" },
+    openai: { name: "OpenAI", logo: "🤖", color: "#10a37f" },
+    gemini: { name: "Gemini", logo: "✨", color: "#4285f4" },
+  };
+
+  function normalizeProvider(value) {
+    var name = typeof value === "string" ? value.trim().toLowerCase() : "";
+    if (name === "codex") name = "openai";
+    return PROVIDERS[name] ? name : "claude";
+  }
+
+  function providerMeta(value) {
+    return PROVIDERS[normalizeProvider(value)];
+  }
+
+  function providerIdentity(value) {
+    var meta = providerMeta(value);
+    return meta.logo + " " + meta.name;
+  }
+
+  function updateProviderUI() {
+    var meta = providerMeta(state.provider);
+    document.documentElement.style.setProperty("--lead", meta.color);
+    var icon = $("nav-lead-icon");
+    var textEl = $("nav-lead-text");
+    var navButton = icon && icon.closest("button");
+    if (icon) icon.textContent = meta.logo;
+    if (textEl) textEl.textContent = meta.name;
+    if (navButton) navButton.setAttribute("aria-label", meta.name);
+    updateHeaderTitle();
+    updateControlNote();
+  }
+
+  function setProvider(value, project) {
+    var fallback = (project && state.providersByProject[project]) || "claude";
+    var provider = normalizeProvider(value || fallback);
+    if (project) state.providersByProject[project] = provider;
+    var visibleProject = state.selectedProject || state.activeProject;
+    if (project && visibleProject && project !== visibleProject) return;
+    if (state.provider === provider) return;
+    state.provider = provider;
+    updateProviderUI();
+  }
 
   var VIEW_SUBTITLES = {
     projects: "เฉพาะที่ import ไว้",
@@ -40,7 +91,9 @@
   };
 
   function updateHeaderTitle() {
-    var label = VIEW_LABELS[state.view] || "Takkub Remote";
+    var label = state.view === "lead"
+      ? providerIdentity(state.provider)
+      : (VIEW_LABELS[state.view] || "Takkub Remote");
     $("header-title").textContent = label;
     
     var sub = VIEW_SUBTITLES[state.view] || "";
@@ -522,6 +575,7 @@
       return;
     }
     state.selectedProject = name;
+    setProvider(state.providersByProject[name] || "claude", name);
     lastMsgKind = null;
     lastLeadBodyEl = null;
     lastLeadRawAccum = "";
@@ -751,9 +805,11 @@
     delegating: "👥 กำลังมอบงานทีม…",
     skill: "🛠️ กำลังใช้ skill…",
   };
-  var THINKING_DEFAULT_LABEL = "⏳ Lead กำลังทำงาน…";
+  function thinkingDefaultLabel() {
+    return "⏳ " + providerMeta(state.provider).name + " กำลังทำงาน…";
+  }
   function thinkingLabelFor(category) {
-    return (category && THINKING_LABELS[category]) || THINKING_DEFAULT_LABEL;
+    return (category && THINKING_LABELS[category]) || thinkingDefaultLabel();
   }
 
   var thinkingEl = null;
@@ -775,7 +831,7 @@
     var dot = document.createElement("span");
     dot.className = "dot";
     who.appendChild(dot);
-    who.appendChild(document.createTextNode("Lead"));
+    who.appendChild(document.createTextNode(providerIdentity(state.provider)));
     div.appendChild(who);
     var body = document.createElement("div");
     body.className = "msg-body";
@@ -826,7 +882,7 @@
       var dot = document.createElement("span");
       dot.className = "dot";
       who.appendChild(dot);
-      who.appendChild(document.createTextNode("Lead"));
+      who.appendChild(document.createTextNode(providerIdentity(state.provider)));
       var time = document.createElement("span");
       time.className = "time";
       time.textContent = timeLabel();
@@ -944,12 +1000,10 @@
     });
   }
 
-  // B2: renders tappable option chips from the AskUserQuestion payload
-  // instead of forcing the phone user to answer on the desktop. Only
-  // understands Claude's JSONL AskUserQuestion shape (server-side
-  // notify.py) — codex/gemini panes have no structured picker event, so
-  // those still fall back to the plain "answer on desktop" text below
-  // (multi-provider #103 gap).
+  // B2: renders tappable option chips from the provider-neutral picker
+  // payload emitted by notify.py instead of forcing the phone user to answer
+  // on the desktop. Providers without structured options use the same plain
+  // "answer on desktop" fallback below.
   function showPickerBanner(payload) {
     var el = $("lead-picker-banner");
     if (!el) return;
@@ -1054,6 +1108,7 @@
     return apiFetch(path)
       .then(function (r) { return r.json(); })
       .then(function (data) {
+        setProvider(data && data.provider, state.selectedProject || state.activeProject);
         // Full re-fetch — clear rendered messages first or a tab-switch-back/
         // reconnect re-appends the same history on top of what's already
         // there. Only strips .msg nodes so #lead-empty (a sibling, shown via
@@ -1119,6 +1174,9 @@
       var payload = JSON.parse(raw);
       if (typeof payload === "string") return payload;
       if (payload && typeof payload === "object") {
+        if (payload.provider) {
+          setProvider(payload.provider, state.selectedProject || state.activeProject);
+        }
         var text = payload.text || payload.message;
         return typeof text === "string" ? text : null;
       }
@@ -1143,7 +1201,9 @@
       lastLeadRawAccum = "";
       hidePickerBanner();
       state.leadWorking = false;
-      setLeadEmptyText("ยังไม่มีข้อความ — พิมพ์ถึง Lead ด้านล่างเพื่อเริ่ม");
+      setLeadEmptyText(
+        "ยังไม่มีข้อความ — พิมพ์ถึง " + providerMeta(state.provider).name + " ด้านล่างเพื่อเริ่ม"
+      );
     };
     // Backend sends 'working' whenever the Lead is actively doing something
     // (tool_use/thinking) with no reply text yet — payload is a JSON
@@ -1195,7 +1255,10 @@
     state.esRetries += 1;
     if (state.esRetries > MAX_ES_RETRIES) {
       setLeadEmptyText("เชื่อมต่อไม่ได้ กรุณาสแกน QR ใหม่");
-      appendMsg("sys", "เชื่อมต่อ Lead ไม่ได้ — tunnel URL อาจเปลี่ยน สแกน QR ใหม่");
+      appendMsg(
+        "sys",
+        "เชื่อมต่อ " + providerMeta(state.provider).name + " ไม่ได้ — tunnel URL อาจเปลี่ยน สแกน QR ใหม่"
+      );
       return;
     }
     var delay = Math.min(1000 * Math.pow(2, state.esRetries), 15000);
@@ -1223,7 +1286,9 @@
     $("lead-send").disabled = !isControl;
     var input = $("lead-input");
     input.disabled = !isControl;
-    input.placeholder = isControl ? "พิมพ์ถึง Lead…" : "อ่านอย่างเดียว (view mode)";
+    input.placeholder = isControl
+      ? "พิมพ์ถึง " + providerMeta(state.provider).name + "…"
+      : "อ่านอย่างเดียว (view mode)";
     var modePill = $("status-mode");
     modePill.textContent = isControl ? "CONTROL" : "VIEW";
     modePill.classList.toggle("control", isControl);
@@ -1271,6 +1336,7 @@
     apiFetch(path)
       .then(function (r) { return r.json(); })
       .then(function (data) {
+        setProvider(data && data.provider, state.selectedProject || state.activeProject);
         renderResumeList(Array.isArray(data && data.sessions) ? data.sessions : []);
       })
       .catch(function () {
@@ -1420,14 +1486,16 @@
       .catch(function () { /* keep last known value on transient failure */ });
   }
 
-  function makeRoleChip(role, runtimeSec, idle) {
+  function makeRoleChip(role, runtimeSec, idle, provider) {
     var chip = document.createElement("div");
     chip.className = "role-chip" + (idle ? " idle" : "");
-    chip.style.setProperty("--role-color", roleColor(role));
+    chip.style.setProperty("--role-color", provider ? providerMeta(provider).color : roleColor(role));
 
     var name = document.createElement("span");
     name.className = "role-chip-name";
-    name.textContent = String(role);
+    name.textContent = provider
+      ? (role === "lead" ? providerIdentity(provider) : String(role) + " · " + providerIdentity(provider))
+      : String(role);
     chip.appendChild(name);
 
     var badge = document.createElement("span");
@@ -1452,6 +1520,7 @@
     var visible = 0;
     projects.forEach(function (p) {
       if (!p) return;
+      if (p.lead && p.lead.provider) setProvider(p.lead.provider, p.project);
       var roleCount = Array.isArray(p.roles) ? p.roles.length : 0;
       totalWorking += roleCount;
       if (p.lead && p.lead.state === "working") totalWorking += 1;
@@ -1468,7 +1537,9 @@
     }
 
     $("pulse-count").textContent =
-      totalWorking > 0 ? totalWorking + " ตำแหน่งกำลังทำงาน" : "Lead ว่าง";
+      totalWorking > 0
+        ? totalWorking + " ตำแหน่งกำลังทำงาน"
+        : providerMeta(state.provider).name + " ว่าง";
 
     projects.forEach(function (p) {
       if (!p || !p.project) return;
@@ -1486,11 +1557,11 @@
       chips.className = "pulse-chips";
 
       if (p.lead && p.lead.state) {
-        chips.appendChild(makeRoleChip("lead", p.lead.runtime_sec, p.lead.state !== "working"));
+        chips.appendChild(makeRoleChip("lead", p.lead.runtime_sec, p.lead.state !== "working", p.lead.provider));
       }
       roles.forEach(function (r) {
         if (!r || !r.role) return;
-        chips.appendChild(makeRoleChip(r.role, r.runtime_sec, false));
+        chips.appendChild(makeRoleChip(r.role, r.runtime_sec, false, r.provider));
       });
       card.appendChild(chips);
 

@@ -1055,6 +1055,7 @@
         "agent_takkub.orchestrator",
         "agent_takkub.pipeline_executor",
         "agent_takkub.remote.api",
+        "agent_takkub.remote.notify",
         "agent_takkub.settings_management.pages.roles_page",
         "agent_takkub.settings_management.repositories.providers",
         "agent_takkub.settings_management.repositories.roles",
@@ -1064,7 +1065,7 @@
         "agent_takkub.spawn_engine",
         "agent_takkub.update_panel"
       ],
-      "fan_in": 16,
+      "fan_in": 17,
       "fan_out": 3
     },
     {
@@ -1116,13 +1117,14 @@
         "agent_takkub.provider_models",
         "agent_takkub.provider_state",
         "agent_takkub.pty_session",
+        "agent_takkub.remote.notify",
         "agent_takkub.role_models",
         "agent_takkub.settings_management.pages.roles_page",
         "agent_takkub.settings_management.repositories.providers",
         "agent_takkub.settings_window",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 18,
+      "fan_in": 19,
       "fan_out": 3
     },
     {
@@ -1247,6 +1249,8 @@
       "imports": [
         "agent_takkub.config",
         "agent_takkub.orchestrator_text",
+        "agent_takkub.provider_config",
+        "agent_takkub.provider_spec",
         "agent_takkub.remote.config",
         "agent_takkub.token_meter",
         "agent_takkub.user_profile"
@@ -1256,7 +1260,7 @@
         "agent_takkub.remote.api"
       ],
       "fan_in": 2,
-      "fan_out": 5
+      "fan_out": 7
     },
     {
       "module": "agent_takkub.remote.settings_dialog",
@@ -1996,13 +2000,14 @@
         "agent_takkub.plan_tier",
         "agent_takkub.project_tab",
         "agent_takkub.rtk_helper",
-        "agent_takkub.token_meter"
+        "agent_takkub.token_meter",
+        "agent_takkub.user_profile"
       ],
       "imported_by": [
         "agent_takkub.main_window"
       ],
       "fan_in": 1,
-      "fan_out": 11
+      "fan_out": 12
     },
     {
       "module": "agent_takkub.system_baseline",
@@ -2182,9 +2187,10 @@
         "agent_takkub.remote.notify",
         "agent_takkub.settings_window",
         "agent_takkub.spawn_engine",
+        "agent_takkub.status_header",
         "agent_takkub.user_actions"
       ],
-      "fan_in": 11,
+      "fan_in": 12,
       "fan_out": 3
     },
     {

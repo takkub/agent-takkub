@@ -4,10 +4,12 @@ orchestrator, not guessed):
 
 * done events: `orch.agentDone` (orchestrator.py, emitted on every
   `takkub done`).
-* live Lead output: tails each open project's Lead pane **structured
-  session JSONL** — `<CLAUDE_CONFIG_DIR>/projects/<encoded-cwd>/<uuid>.jsonl`
-  (same store `chatlog_scanner.py` / `takkub search` read) — instead of
-  scraping raw PTY bytes.
+* live Lead output: dispatches through the current provider's registered
+  history scanner. Claude's scanner tails its structured session JSONL —
+  `<CLAUDE_CONFIG_DIR>/projects/<encoded-cwd>/<uuid>.jsonl` (the same store
+  `chatlog_scanner.py` / `takkub search` read) — instead of scraping raw PTY
+  bytes. Providers without a compatible scanner degrade to an empty history
+  and working/idle state only; they never fall through to Claude's files.
 
 Why the switch (mobile junk-elimination, proven not guessed): a raw Lead
 transcript is TUI-redraw churn (`\\r`=4200, `\\n`=0 in a real capture) — the
@@ -48,6 +50,7 @@ way, per-project, for the same reason.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -83,6 +86,7 @@ class _Tail:
 
     path: Path
     session_uuid: str
+    provider: str = "claude"
     offset: int = 0
     # bytes held back from the previous read because they didn't end in a
     # `\n` yet — Claude Code writes one JSON object per line, and a poll can
@@ -300,8 +304,8 @@ def _strip_remote_prefix(text: str) -> str:
     return text[len(_REMOTE_PREFIX) :] if text.startswith(_REMOTE_PREFIX) else text
 
 
-def _resolve_jsonl_path(project_ns: str, session_uuid: str) -> Path | None:
-    """Resolve the JSONL for the pane's *exact* recorded session — and only
+def _resolve_claude_jsonl_path(project_ns: str, session_uuid: str) -> Path | None:
+    """Resolve Claude's JSONL for the pane's *exact* recorded session — and only
     that. The mobile console is a mirror of the desktop Lead pane, so it must
     show the session that pane is actually on, nothing else: if that file
     doesn't exist yet (a fresh pane the user hasn't resumed), the honest
@@ -322,6 +326,11 @@ def _resolve_jsonl_path(project_ns: str, session_uuid: str) -> Path | None:
     return matches[0] if matches else None
 
 
+# Backward-compatible low-level name for callers/tests that explicitly scan
+# Claude's store. Provider-aware code must use `resolve_lead_jsonl` instead.
+_resolve_jsonl_path = _resolve_claude_jsonl_path
+
+
 def _lead_session_uuid(orch, project_ns: str) -> str | None:
     panes_by_project = getattr(orch, "_panes_by_project", None)
     pane_state = getattr(orch, "_pane_state", None)
@@ -333,15 +342,51 @@ def _lead_session_uuid(orch, project_ns: str) -> str | None:
     return getattr(ps, "session_uuid", None) if ps is not None else None
 
 
-def resolve_lead_jsonl(orch, project_ns: str) -> Path | None:
-    """Locate the open Lead pane's session JSONL for `project_ns` — used by
-    the one-shot `/api/lead/history` endpoint (`api.lead_history`). Returns
-    None if there is no open Lead pane, no session uuid yet, or the file
-    hasn't been created/flushed."""
+def pane_provider_name(orch, project_ns: str | None, role: str, pane=None) -> str:
+    """Return the provider actually backing a pane, with a config fallback.
+
+    A live pane's model records the provider chosen at spawn time. Prefer it
+    over re-reading mutable provider config so a settings change cannot
+    relabel an already-running pane. Lightweight test/headless panes may not
+    expose a model, in which case the effective provider resolver is the
+    authoritative fallback.
+    """
+    if pane is None and project_ns:
+        panes_by_project = getattr(orch, "_panes_by_project", None)
+        if isinstance(panes_by_project, dict):
+            panes = panes_by_project.get(project_ns)
+            if isinstance(panes, dict):
+                pane = panes.get(role)
+    model = getattr(pane, "model", None)
+    provider = getattr(model, "provider_name", None)
+    if isinstance(provider, str) and provider.strip():
+        return provider.strip().lower()
+    from ..provider_config import effective_provider_for
+
+    return effective_provider_for(role, project_ns)
+
+
+def lead_provider_name(orch, project_ns: str | None) -> str:
+    return pane_provider_name(orch, project_ns, "lead")
+
+
+def resolve_lead_jsonl(orch, project_ns: str, provider: str | None = None) -> Path | None:
+    """Locate the open Lead pane's provider-owned history source.
+
+    The historical name is retained for callers/tests, but resolution now
+    dispatches through `_HistoryScanner` rather than assuming every provider
+    writes Claude JSONL. Returns None when the provider has no registered,
+    compatible scanner, there is no current session id, or its file has not
+    been created yet.
+    """
+    provider = provider or lead_provider_name(orch, project_ns)
+    scanner = history_scanner(provider)
+    if scanner is None:
+        return None
     session_uuid = _lead_session_uuid(orch, project_ns)
     if not session_uuid:
         return None
-    return _resolve_jsonl_path(project_ns, session_uuid)
+    return scanner.resolve_session(project_ns, session_uuid)
 
 
 _SESSION_LIST_DEFAULT_LIMIT = 10
@@ -386,7 +431,7 @@ def _first_user_preview(path: Path) -> str:
     return ""
 
 
-def list_recent_lead_sessions(
+def _list_recent_claude_sessions(
     project_ns: str, limit: int = _SESSION_LIST_DEFAULT_LIMIT
 ) -> list[dict]:
     """W3 (resume/session picker): recent Lead sessions for `project_ns`'s cwd,
@@ -483,7 +528,7 @@ def _tail_start_offset(path: Path, size: int) -> int:
         return size
 
 
-def read_recent_lead_messages(path: Path, limit: int = _DEFAULT_HISTORY_LIMIT) -> list[dict]:
+def _read_recent_claude_messages(path: Path, limit: int = _DEFAULT_HISTORY_LIMIT) -> list[dict]:
     """Read (at most the last `_HISTORY_MAX_BYTES` of) `path` and return the
     last `limit` conversation turns, oldest first, **in the exact order they
     occurred** in the JSONL — assistant reply text (`kind: "lead"`) and
@@ -525,6 +570,101 @@ def read_recent_lead_messages(path: Path, limit: int = _DEFAULT_HISTORY_LIMIT) -
     return out[-limit:]
 
 
+@dataclass(frozen=True)
+class _HistoryScanner:
+    """Provider adapter for remote history/session reads.
+
+    A provider is registered only when its transcript location and record
+    parser are known. This keeps the dispatcher format-neutral: a future
+    Codex/Gemini adapter can supply its own resolver/parser without adding a
+    provider-name branch to the API or notifier.
+    """
+
+    resolve_session: Callable[[str, str], Path | None]
+    read_messages: Callable[[Path, int], list[dict]]
+    list_sessions: Callable[[str, int], list[dict]]
+
+
+_HISTORY_SCANNERS: dict[str, _HistoryScanner] = {
+    "claude": _HistoryScanner(
+        resolve_session=_resolve_claude_jsonl_path,
+        read_messages=_read_recent_claude_messages,
+        list_sessions=_list_recent_claude_sessions,
+    )
+}
+
+
+def history_scanner(provider: str) -> _HistoryScanner | None:
+    """Return a verified scanner for `provider`, or None for clean fallback.
+
+    Both the registry entry and ProviderSpec capability must opt in. The
+    double gate prevents an accidentally registered experimental parser (or
+    a capability flag flipped without a parser) from exposing the wrong
+    provider's local transcript. A scanner may use any format; Claude's is
+    JSONL, but future providers are not required to copy it.
+    """
+    from ..provider_spec import PROVIDER_REGISTRY
+
+    name = str(provider or "").strip().lower()
+    spec = PROVIDER_REGISTRY.get(name)
+    if spec is None or not spec.supports_remote_history:
+        return None
+    return _HISTORY_SCANNERS.get(name)
+
+
+def supports_remote_history(provider: str) -> bool:
+    """Whether remote history is both declared and actually scannable."""
+    return history_scanner(provider) is not None
+
+
+def read_recent_lead_messages(
+    path: Path, limit: int = _DEFAULT_HISTORY_LIMIT, *, provider: str = "claude"
+) -> list[dict]:
+    """Provider-dispatched history reader; unsupported providers return []."""
+    scanner = history_scanner(provider)
+    if scanner is None:
+        return []
+    try:
+        return scanner.read_messages(path, limit)
+    except (OSError, ValueError, TypeError):
+        return []
+
+
+def list_recent_lead_sessions(
+    project_ns: str,
+    limit: int = _SESSION_LIST_DEFAULT_LIMIT,
+    *,
+    provider: str | None = None,
+) -> list[dict]:
+    """Provider-dispatched Lead session list; unsupported providers return []."""
+    if provider is None:
+        from ..provider_config import effective_provider_for
+
+        provider = effective_provider_for("lead", project_ns)
+    scanner = history_scanner(provider)
+    if scanner is None:
+        return []
+    try:
+        return scanner.list_sessions(project_ns, limit)
+    except (OSError, ValueError, TypeError):
+        return []
+
+
+def lead_history_snapshot(orch, project_ns: str, limit: int) -> tuple[str, list[dict]]:
+    """Return `(provider, messages)` without ever crossing provider stores."""
+    provider = lead_provider_name(orch, project_ns)
+    path = resolve_lead_jsonl(orch, project_ns, provider)
+    if path is None:
+        return provider, []
+    return provider, read_recent_lead_messages(path, limit, provider=provider)
+
+
+def lead_sessions_snapshot(orch, project_ns: str, limit: int) -> tuple[str, list[dict]]:
+    """Return `(provider, sessions)` with a clean unsupported-provider fallback."""
+    provider = lead_provider_name(orch, project_ns)
+    return provider, list_recent_lead_sessions(project_ns, limit, provider=provider)
+
+
 class LeadNotifier(QObject):
     def __init__(self, orch, broadcaster) -> None:
         super().__init__()
@@ -547,31 +687,38 @@ class LeadNotifier(QObject):
         self._resync()
 
     # ── discover / rediscover every open project's Lead session uuid ────
-    def _lead_uuids_by_project(self) -> dict[str, str]:
+    def _lead_uuids_by_project(self) -> dict[str, tuple[str, str]]:
         panes_by_project = getattr(self._orch, "_panes_by_project", None)
         pane_state = getattr(self._orch, "_pane_state", None)
         if not isinstance(panes_by_project, dict) or not isinstance(pane_state, dict):
             return {}
-        found: dict[str, str] = {}
+        found: dict[str, tuple[str, str]] = {}
         for project_ns, panes in panes_by_project.items():
             if "lead" not in panes:
+                continue
+            provider = pane_provider_name(self._orch, project_ns, "lead", panes.get("lead"))
+            if history_scanner(provider) is None:
                 continue
             ps = pane_state.get(_exit_key(project_ns, "lead"))
             uuid = getattr(ps, "session_uuid", None) if ps is not None else None
             if uuid:
-                found[project_ns] = uuid
+                found[project_ns] = (provider, uuid)
         return found
 
-    def _resolve_jsonl(self, project_ns: str, session_uuid: str) -> Path | None:
-        return _resolve_jsonl_path(project_ns, session_uuid)
+    def _resolve_jsonl(
+        self, project_ns: str, session_uuid: str, provider: str = "claude"
+    ) -> Path | None:
+        scanner = history_scanner(provider)
+        return scanner.resolve_session(project_ns, session_uuid) if scanner is not None else None
 
     def _resync(self) -> None:
         wanted = self._lead_uuids_by_project()
 
         # drop projects that closed, or whose Lead session uuid changed
-        # (respawn/resume) — a stale tail must never keep feeding events.
+        # (respawn/resume), or whose provider changed — a stale tail must
+        # never keep feeding events from another provider's store.
         for project_ns, tail in list(self._tails.items()):
-            if wanted.get(project_ns) != tail.session_uuid:
+            if wanted.get(project_ns) != (tail.provider, tail.session_uuid):
                 del self._tails[project_ns]
 
         # start tailing newly-discovered sessions only — a project already
@@ -582,10 +729,10 @@ class LeadNotifier(QObject):
         # session that resolves late (fresh spawn/resume timing) is picked
         # up on the very next poll instead of only on the next
         # `statusChanged` signal.
-        for project_ns, session_uuid in wanted.items():
+        for project_ns, (provider, session_uuid) in wanted.items():
             if project_ns in self._tails:
                 continue
-            path = self._resolve_jsonl(project_ns, session_uuid)
+            path = self._resolve_jsonl(project_ns, session_uuid, provider)
             if path is None:
                 continue
             try:
@@ -593,7 +740,12 @@ class LeadNotifier(QObject):
             except OSError:
                 size = 0
             offset = _tail_start_offset(path, size)
-            self._tails[project_ns] = _Tail(path=path, session_uuid=session_uuid, offset=offset)
+            self._tails[project_ns] = _Tail(
+                path=path,
+                session_uuid=session_uuid,
+                provider=provider,
+                offset=offset,
+            )
 
     def _emit_lead_working_transitions(self) -> None:
         """Push a 'working' / 'idle' SSE event whenever the Lead pane's own

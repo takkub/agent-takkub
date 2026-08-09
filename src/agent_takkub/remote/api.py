@@ -39,19 +39,22 @@ _HISTORY_MAX_LIMIT = 200
 _log = logging.getLogger(__name__)
 
 
-def _lead_provider_note(project_ns: str) -> str | None:
-    """Human-readable note when `project_ns`'s Lead is degraded off claude
-    (issue #101) — surfaced in mobile-facing responses so a blank
-    history/session list reads as "Lead isn't claude right now", not as a
-    silent bug. `None` when Lead is claude (the common case; no per-request
-    cost beyond one dict lookup)."""
-    from ..provider_config import lead_capability_gap
-
-    gap = lead_capability_gap(project_ns)
-    if gap is None:
+def _lead_provider_note(provider: str) -> str | None:
+    """Explain a clean empty state when no history scanner is available."""
+    if notify.supports_remote_history(provider):
         return None
-    provider, missing = gap
-    return f"Lead provider = {provider} (ไม่ใช่ claude) — ไม่มี: {', '.join(missing)}"
+    return f"Lead provider = {provider} — remote history/session unavailable"
+
+
+def _pulse_project(from_project: str | None) -> str | None:
+    """Resolve pulse's implicit active-project scope for provider labeling."""
+    if from_project:
+        return from_project
+    try:
+        active, _ = _config.active_project()
+    except (OSError, TypeError, ValueError):
+        return None
+    return active if isinstance(active, str) and active else None
 
 
 class RemoteApiError(Exception):
@@ -115,20 +118,21 @@ def pulse(orch, from_project: str | None) -> dict:
     the count down to the `lead` entry before counting so `total` never
     reveals team size and `working` never reveals teammate activity; `total`
     is 1 (Lead open) or 0 (no Lead pane for this project), never > 1."""
+    provider = notify.lead_provider_name(orch, _pulse_project(from_project))
     resp = _lead_frame(orch, {"cmd": "list", "from": "remote", "from_project": from_project})
     status = resp.get("status") if isinstance(resp, dict) else None
     if not isinstance(status, dict):
-        return {"working": 0, "total": 0}
+        return {"working": 0, "total": 0, "provider": provider}
     if _remote_config.LEAD_ONLY_STREAM:
         lead_state = status.get(LEAD.name)
         if not isinstance(lead_state, str):
-            return {"working": 0, "total": 0}
+            return {"working": 0, "total": 0, "provider": provider}
         working = 1 if lead_state.startswith("working") else 0
-        return {"working": working, "total": 1}
+        return {"working": working, "total": 1, "provider": provider}
     working = sum(
         1 for state in status.values() if isinstance(state, str) and state.startswith("working")
     )
-    return {"working": working, "total": len(status)}
+    return {"working": working, "total": len(status), "provider": provider}
 
 
 def activity(orch) -> dict:
@@ -167,7 +171,11 @@ def activity(orch) -> dict:
                 working = state == "working"
                 started = getattr(pane, "_working_start", None) if working else None
                 runtime_sec = max(0, int(now - started)) if started is not None else 0
-                lead_out = {"state": "working" if working else "idle", "runtime_sec": runtime_sec}
+                lead_out = {
+                    "state": "working" if working else "idle",
+                    "runtime_sec": runtime_sec,
+                    "provider": notify.pane_provider_name(orch, project_ns, role, pane),
+                }
                 continue
             if lead_only:
                 continue
@@ -176,7 +184,13 @@ def activity(orch) -> dict:
             started = getattr(pane, "_working_start", None)
             if started is None:
                 continue
-            roles.append({"role": role, "runtime_sec": max(0, int(now - started))})
+            roles.append(
+                {
+                    "role": role,
+                    "runtime_sec": max(0, int(now - started)),
+                    "provider": notify.pane_provider_name(orch, project_ns, role, pane),
+                }
+            )
         if roles or lead_out is not None:
             entry: dict = {"project": project_ns, "roles": roles}
             if lead_out is not None:
@@ -266,12 +280,12 @@ def lead_history(orch, project_ns: str, limit: object = None) -> dict:
     except (TypeError, ValueError):
         limit = _HISTORY_DEFAULT_LIMIT
     limit = max(1, min(limit, _HISTORY_MAX_LIMIT))
-    path = notify.resolve_lead_jsonl(orch, project_ns)
-    messages = notify.read_recent_lead_messages(path, limit) if path is not None else []
+    provider, messages = notify.lead_history_snapshot(orch, project_ns, limit)
     return {
         "project": project_ns,
+        "provider": provider,
         "messages": messages,
-        "lead_provider_note": _lead_provider_note(project_ns),
+        "lead_provider_note": _lead_provider_note(provider),
     }
 
 
@@ -288,10 +302,12 @@ def lead_sessions(orch, project_ns: str, limit: object = None) -> dict:
     except (TypeError, ValueError):
         limit = notify._SESSION_LIST_DEFAULT_LIMIT
     limit = max(1, min(limit, _SESSIONS_MAX_LIMIT))
+    provider, sessions = notify.lead_sessions_snapshot(orch, project_ns, limit)
     return {
         "project": project_ns,
-        "sessions": notify.list_recent_lead_sessions(project_ns, limit),
-        "lead_provider_note": _lead_provider_note(project_ns),
+        "provider": provider,
+        "sessions": sessions,
+        "lead_provider_note": _lead_provider_note(provider),
     }
 
 

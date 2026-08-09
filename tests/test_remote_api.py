@@ -1,6 +1,6 @@
 """Tests for `agent_takkub.remote.api` — the loopback cli_server client and
 the project-list reader. Central focus (finding B2): `pulse()` must never
-leak role/task/state/transcript text, only a bare `{working, total}` count.
+leak role/task/state/transcript text, only `{working, total, provider}`.
 """
 
 from __future__ import annotations
@@ -78,7 +78,7 @@ class TestPulseDataMinimization:
             result = api.pulse(fake_orch, None)
         finally:
             srv.close()
-        assert result == {"working": 1, "total": 2}
+        assert result == {"working": 1, "total": 2, "provider": "claude"}
 
     def test_stalled_state_still_counts_as_working(self, monkeypatch, fake_orch):
         monkeypatch.setattr(api._remote_config, "LEAD_ONLY_STREAM", False)
@@ -90,7 +90,7 @@ class TestPulseDataMinimization:
             result = api.pulse(fake_orch, None)
         finally:
             srv.close()
-        assert result == {"working": 1, "total": 1}
+        assert result == {"working": 1, "total": 1, "provider": "claude"}
 
     def test_never_leaks_role_task_or_transcript_fields(self, monkeypatch, fake_orch):
         # Simulate an over-sharing / misrouted cli_server response (as if
@@ -116,7 +116,7 @@ class TestPulseDataMinimization:
             result = api.pulse(fake_orch, None)
         finally:
             srv.close()
-        assert set(result.keys()) == {"working", "total"}
+        assert set(result.keys()) == {"working", "total", "provider"}
         dumped = json.dumps(result)
         for leaked in ("implement", "secret internal chatter", "shot.png"):
             assert leaked not in dumped
@@ -151,7 +151,7 @@ class TestPulseLeadOnlyStreamGate:
             result = api.pulse(fake_orch, None)
         finally:
             srv.close()
-        assert result == {"working": 0, "total": 1}
+        assert result == {"working": 0, "total": 1, "provider": "claude"}
 
     def test_counts_lead_working(self, monkeypatch, fake_orch):
         srv = _FakeCliServer(
@@ -162,7 +162,7 @@ class TestPulseLeadOnlyStreamGate:
             result = api.pulse(fake_orch, None)
         finally:
             srv.close()
-        assert result == {"working": 1, "total": 1}
+        assert result == {"working": 1, "total": 1, "provider": "claude"}
 
     def test_lead_stalled_state_still_counts_as_working(self, monkeypatch, fake_orch):
         srv = _FakeCliServer(
@@ -173,7 +173,7 @@ class TestPulseLeadOnlyStreamGate:
             result = api.pulse(fake_orch, None)
         finally:
             srv.close()
-        assert result == {"working": 1, "total": 1}
+        assert result == {"working": 1, "total": 1, "provider": "claude"}
 
     def test_no_lead_pane_yields_zero_even_with_teammates_working(self, monkeypatch, fake_orch):
         srv = _FakeCliServer(
@@ -184,7 +184,7 @@ class TestPulseLeadOnlyStreamGate:
             result = api.pulse(fake_orch, None)
         finally:
             srv.close()
-        assert result == {"working": 0, "total": 0}
+        assert result == {"working": 0, "total": 0, "provider": "claude"}
 
     def test_total_never_reveals_team_size(self, monkeypatch, fake_orch):
         status = {f"backend#{i}": "working" for i in range(5)}
@@ -204,7 +204,7 @@ class TestPulseLeadOnlyStreamGate:
             result = api.pulse(fake_orch, None)
         finally:
             srv.close()
-        assert result == {"working": 0, "total": 0}
+        assert result == {"working": 0, "total": 0, "provider": "claude"}
 
     def test_stamps_lead_token_and_list_cmd_never_status(self, monkeypatch, fake_orch):
         srv = _FakeCliServer({"ok": True, "msg": "status", "status": {}})
@@ -227,6 +227,23 @@ class TestPulseLeadOnlyStreamGate:
             srv.close()
         assert srv.received[0]["from_project"] == "proj-b"
 
+    def test_exposes_scoped_lead_provider(self, monkeypatch, fake_orch):
+        seen = {}
+
+        def _provider(orch, project):
+            seen["project"] = project
+            return "codex"
+
+        monkeypatch.setattr(api.notify, "lead_provider_name", _provider)
+        srv = _FakeCliServer({"ok": True, "msg": "status", "status": {"lead": "idle"}})
+        _patch_port(monkeypatch, srv.port)
+        try:
+            result = api.pulse(fake_orch, "proj-b")
+        finally:
+            srv.close()
+        assert seen["project"] == "proj-b"
+        assert result["provider"] == "codex"
+
     def test_no_port_file_raises_service_unavailable(self, monkeypatch, fake_orch):
         monkeypatch.setattr(api._config, "read_port", lambda: None)
         with pytest.raises(api.RemoteApiError) as excinfo:
@@ -243,9 +260,10 @@ class TestPulseLeadOnlyStreamGate:
 
 
 class _FakePane:
-    def __init__(self, state: str, working_start: float | None) -> None:
+    def __init__(self, state: str, working_start: float | None, provider: str = "claude") -> None:
         self.state = state
         self._working_start = working_start
+        self.model = type("FakePaneModel", (), {"provider_name": provider})()
         # decoys — activity() must never surface any of these
         self.last_note = "implement /auth/login"
         self._transcript_path = "C:/secret/transcript.jsonl"
@@ -282,9 +300,13 @@ class TestActivity:
                 {
                     "project": "proj-a",
                     "roles": [],
-                    "lead": {"state": "working", "runtime_sec": 30},
+                    "lead": {"state": "working", "runtime_sec": 30, "provider": "claude"},
                 },
-                {"project": "proj-b", "roles": [], "lead": {"state": "idle", "runtime_sec": 0}},
+                {
+                    "project": "proj-b",
+                    "roles": [],
+                    "lead": {"state": "idle", "runtime_sec": 0, "provider": "claude"},
+                },
             ]
         }
 
@@ -322,7 +344,11 @@ class TestActivity:
         orch = _FakeOrchWithPanes({"proj-a": {"lead": _FakePane("working", now - 10)}})
         result = api.activity(orch)
         dumped = json.dumps(result)
-        assert set(result["projects"][0]["lead"].keys()) == {"state", "runtime_sec"}
+        assert set(result["projects"][0]["lead"].keys()) == {
+            "state",
+            "runtime_sec",
+            "provider",
+        }
         for leaked in ("implement", "/auth/login", "transcript.jsonl", "secret-project"):
             assert leaked not in dumped
 
@@ -333,7 +359,11 @@ class TestActivity:
         result = api.activity(orch)
         assert result == {
             "projects": [
-                {"project": "proj-a", "roles": [], "lead": {"state": "working", "runtime_sec": 45}}
+                {
+                    "project": "proj-a",
+                    "roles": [],
+                    "lead": {"state": "working", "runtime_sec": 45, "provider": "claude"},
+                }
             ]
         }
 
@@ -346,7 +376,11 @@ class TestActivity:
         result = api.activity(orch)
         assert result == {
             "projects": [
-                {"project": "proj-a", "roles": [], "lead": {"state": "idle", "runtime_sec": 0}}
+                {
+                    "project": "proj-a",
+                    "roles": [],
+                    "lead": {"state": "idle", "runtime_sec": 0, "provider": "claude"},
+                }
             ]
         }
 
@@ -371,7 +405,7 @@ class TestActivity:
                 {
                     "project": "proj-a",
                     "roles": [],
-                    "lead": {"state": "idle", "runtime_sec": 0},
+                    "lead": {"state": "idle", "runtime_sec": 0, "provider": "claude"},
                 }
             ]
         }
@@ -394,8 +428,8 @@ class TestActivity:
             "projects": [
                 {
                     "project": "proj-a",
-                    "roles": [{"role": "backend", "runtime_sec": 10}],
-                    "lead": {"state": "idle", "runtime_sec": 0},
+                    "roles": [{"role": "backend", "runtime_sec": 10, "provider": "claude"}],
+                    "lead": {"state": "idle", "runtime_sec": 0, "provider": "claude"},
                 }
             ]
         }
@@ -405,9 +439,29 @@ class TestActivity:
         result = api.activity(orch)
         assert result == {
             "projects": [
-                {"project": "proj-a", "roles": [], "lead": {"state": "idle", "runtime_sec": 0}}
+                {
+                    "project": "proj-a",
+                    "roles": [],
+                    "lead": {"state": "idle", "runtime_sec": 0, "provider": "claude"},
+                }
             ]
         }
+
+    def test_uses_provider_recorded_on_each_live_pane(self, monkeypatch):
+        monkeypatch.setattr(api._remote_config, "LEAD_ONLY_STREAM", False)
+        now = 2_000.0
+        monkeypatch.setattr(api.time, "time", lambda: now)
+        orch = _FakeOrchWithPanes(
+            {
+                "proj-a": {
+                    "lead": _FakePane("idle", None, "codex"),
+                    "backend": _FakePane("working", now - 10, "gemini"),
+                }
+            }
+        )
+        project = api.activity(orch)["projects"][0]
+        assert project["lead"]["provider"] == "codex"
+        assert project["roles"][0]["provider"] == "gemini"
 
 
 class TestLeadSay:
@@ -608,24 +662,33 @@ class TestLeadHistory:
         pass
 
     def test_no_resolvable_session_returns_empty_messages(self, monkeypatch):
-        monkeypatch.setattr(api.notify, "resolve_lead_jsonl", lambda orch, ns: None)
+        monkeypatch.setattr(
+            api.notify, "lead_history_snapshot", lambda orch, ns, limit: ("claude", [])
+        )
         result = api.lead_history(self._Orch(), "proj-a")
-        assert result == {"project": "proj-a", "messages": [], "lead_provider_note": None}
+        assert result == {
+            "project": "proj-a",
+            "provider": "claude",
+            "messages": [],
+            "lead_provider_note": None,
+        }
 
-    def test_reads_recent_messages_oldest_first_with_kind_field(self, monkeypatch, tmp_path):
-        path = tmp_path / "uuid-1.jsonl"
-        monkeypatch.setattr(api.notify, "resolve_lead_jsonl", lambda orch, ns: path)
+    def test_reads_recent_messages_oldest_first_with_kind_field(self, monkeypatch):
         monkeypatch.setattr(
             api.notify,
-            "read_recent_lead_messages",
-            lambda p, limit: [
-                {"text": "first", "kind": "me"},
-                {"text": "second", "kind": "lead"},
-            ],
+            "lead_history_snapshot",
+            lambda orch, ns, limit: (
+                "claude",
+                [
+                    {"text": "first", "kind": "me"},
+                    {"text": "second", "kind": "lead"},
+                ],
+            ),
         )
         result = api.lead_history(self._Orch(), "proj-a", limit=2)
         assert result == {
             "project": "proj-a",
+            "provider": "claude",
             "messages": [
                 {"text": "first", "kind": "me"},
                 {"text": "second", "kind": "lead"},
@@ -637,50 +700,76 @@ class TestLeadHistory:
         """Issue #101: a codex/agy-backed Lead's mobile history response
         carries a human-readable note explaining the degraded state instead
         of just quietly returning whatever jsonl-based history it can find."""
-        monkeypatch.setattr(api.notify, "resolve_lead_jsonl", lambda orch, ns: None)
         monkeypatch.setattr(
-            "agent_takkub.provider_config.effective_provider_for",
-            lambda role, project=None: "codex",
+            api.notify, "lead_history_snapshot", lambda orch, ns, limit: ("codex", [])
         )
         result = api.lead_history(self._Orch(), "proj-a")
+        assert result["provider"] == "codex"
+        assert result["messages"] == []
         assert result["lead_provider_note"] is not None
         assert "codex" in result["lead_provider_note"]
 
-    def test_limit_defaults_to_200(self, monkeypatch, tmp_path):
+    def test_limit_defaults_to_200(self, monkeypatch):
         seen = {}
-        monkeypatch.setattr(api.notify, "resolve_lead_jsonl", lambda orch, ns: tmp_path)
 
-        def _fake_read(path, limit):
+        def _fake_snapshot(orch, ns, limit):
             seen["limit"] = limit
-            return []
+            return "claude", []
 
-        monkeypatch.setattr(api.notify, "read_recent_lead_messages", _fake_read)
+        monkeypatch.setattr(api.notify, "lead_history_snapshot", _fake_snapshot)
         api.lead_history(self._Orch(), "proj-a")
         assert seen["limit"] == 200
 
-    def test_limit_is_clamped_to_the_max(self, monkeypatch, tmp_path):
+    def test_limit_is_clamped_to_the_max(self, monkeypatch):
         seen = {}
-        monkeypatch.setattr(api.notify, "resolve_lead_jsonl", lambda orch, ns: tmp_path)
 
-        def _fake_read(path, limit):
+        def _fake_snapshot(orch, ns, limit):
             seen["limit"] = limit
-            return []
+            return "claude", []
 
-        monkeypatch.setattr(api.notify, "read_recent_lead_messages", _fake_read)
+        monkeypatch.setattr(api.notify, "lead_history_snapshot", _fake_snapshot)
         api.lead_history(self._Orch(), "proj-a", limit=99999)
         assert seen["limit"] == 200
 
-    def test_non_numeric_limit_falls_back_to_default(self, monkeypatch, tmp_path):
+    def test_non_numeric_limit_falls_back_to_default(self, monkeypatch):
         seen = {}
-        monkeypatch.setattr(api.notify, "resolve_lead_jsonl", lambda orch, ns: tmp_path)
 
-        def _fake_read(path, limit):
+        def _fake_snapshot(orch, ns, limit):
             seen["limit"] = limit
-            return []
+            return "claude", []
 
-        monkeypatch.setattr(api.notify, "read_recent_lead_messages", _fake_read)
+        monkeypatch.setattr(api.notify, "lead_history_snapshot", _fake_snapshot)
         api.lead_history(self._Orch(), "proj-a", limit="not-a-number")
         assert seen["limit"] == 200
+
+
+class TestLeadSessions:
+    class _Orch:
+        pass
+
+    def test_exposes_provider_and_clean_unsupported_state(self, monkeypatch):
+        monkeypatch.setattr(
+            api.notify, "lead_sessions_snapshot", lambda orch, ns, limit: ("codex", [])
+        )
+        result = api.lead_sessions(self._Orch(), "proj-a")
+        assert result == {
+            "project": "proj-a",
+            "provider": "codex",
+            "sessions": [],
+            "lead_provider_note": "Lead provider = codex — remote history/session unavailable",
+        }
+
+    def test_supported_provider_has_no_degradation_note(self, monkeypatch):
+        sessions = [{"uuid": "one", "mtime": 1.0, "preview": "hello"}]
+        monkeypatch.setattr(
+            api.notify,
+            "lead_sessions_snapshot",
+            lambda orch, ns, limit: ("claude", sessions),
+        )
+        result = api.lead_sessions(self._Orch(), "proj-a")
+        assert result["provider"] == "claude"
+        assert result["sessions"] == sessions
+        assert result["lead_provider_note"] is None
 
 
 class TestProjects:

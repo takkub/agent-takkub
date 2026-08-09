@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import time
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import (
     QComboBox,
     QFrame,
@@ -505,15 +505,15 @@ class StatusHeaderMixin:
         # profile-switch section stayed on RIGHT-click so the common case
         # (manage the team) is a single click, not a menu.
         self._btn_pipelines = QPushButton("👥 Team", self)
-        self._btn_pipelines.setToolTip(
-            "Click: open Team & Roles (roster + create a custom role).\n"
-            "Right-click: switch user profile, Add/Remove user."
-        )
+        self._btn_pipelines.setToolTip("Click: open Team & Roles (roster + create a custom role).")
         self._btn_pipelines.setStyleSheet(self._ghost_button_style())
         self._btn_pipelines.clicked.connect(self._on_team_chip_clicked)
-        self._btn_pipelines.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self._btn_pipelines.customContextMenuRequested.connect(self._show_pipelines_menu)
 
+        self._btn_provider = QPushButton("🤖 Accounts", self)
+        self._btn_provider.setToolTip("Click: switch user account or provider.")
+        self._btn_provider.setStyleSheet(self._ghost_button_style())
+        # Left-click now opens the quick switch menu
+        self._btn_provider.clicked.connect(self._show_pipelines_menu)
         # ▶ Run button removed per user request — it rendered as a stray widget
         # at the window origin (parent=self, never placed in a layout) and
         # covered the first project tab. Pipelines are still fired via the
@@ -569,6 +569,7 @@ class StatusHeaderMixin:
                 self._btn_install_rtk,
                 self._btn_restart,
                 self._btn_pipelines,
+                self._btn_provider,
                 # self._btn_claude_auth,  # hidden per user request — uncomment to restore.
                 # The button + its handler are still created above; only its
                 # placement in the status bar is removed so it can come back easily.
@@ -606,6 +607,30 @@ class StatusHeaderMixin:
     # ──────────────────────────────────────────────────────────────
     # live status updates
     # ──────────────────────────────────────────────────────────────
+
+    def _update_provider_chip(self) -> None:
+        """Update the provider chip to reflect the current primary provider and account."""
+        from . import user_profile
+
+        try:
+            from .config import active_project as _active_project
+
+            proj, _ = _active_project()
+        except Exception:
+            proj = None
+
+        if not proj:
+            self._btn_provider.setText("🤖 Accounts")
+            return
+
+        # Here we just show the active profile for Claude right now.
+        # Future-proofing: We could show the default provider and its active profile.
+        # But we'll just read the claude profile to start.
+        current_claude = user_profile.profile_for(proj, provider="claude")
+        if current_claude != "default":
+            self._btn_provider.setText(f"🤖 Claude ({current_claude})")
+        else:
+            self._btn_provider.setText("🤖 Accounts")
 
     def _update_status(self) -> None:
         from .token_meter import effective_context_limit
@@ -656,6 +681,8 @@ class StatusHeaderMixin:
             bits.append(f"{working} working")
         self._status.showMessage("  ·  ".join(bits))
         self._refresh_graft_chip()
+        self._refresh_remote_chip()
+        self._update_provider_chip()
 
     # ──────────────────────────────────────────────────────────────
     # 🧠 Graft chip — code-graph auto-build status

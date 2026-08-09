@@ -26,6 +26,9 @@ class _FakePane:
     """Placeholder — presence under panes_by_project[project]["lead"] is all
     the notifier checks; the actual session object lives in `_pane_state`."""
 
+    def __init__(self, provider: str = "claude") -> None:
+        self.model = type("FakePaneModel", (), {"provider_name": provider})()
+
 
 class _FakeOrch(QObject):
     agentDone = pyqtSignal(str, str, str)
@@ -36,8 +39,8 @@ class _FakeOrch(QObject):
         self._panes_by_project: dict = {}
         self._pane_state: dict = {}
 
-    def set_lead(self, project: str, session_uuid: str | None) -> None:
-        self._panes_by_project.setdefault(project, {})["lead"] = _FakePane()
+    def set_lead(self, project: str, session_uuid: str | None, provider: str = "claude") -> None:
+        self._panes_by_project.setdefault(project, {})["lead"] = _FakePane(provider)
         self._pane_state[f"{project}::lead"] = _PaneState(session_uuid)
 
     def drop_project(self, project: str) -> None:
@@ -383,6 +386,17 @@ class TestExactSessionResolutionOnly:
         orch.set_lead("proj", "ghost-uuid")
         _write_jsonl(tmp_path, "C--proj", "unrelated-old", [_assistant_line("stale")])
         assert notify_mod.resolve_lead_jsonl(orch, "proj") is None
+
+    def test_non_claude_lead_never_falls_through_to_matching_claude_jsonl(
+        self, tmp_path, config_dir
+    ):
+        orch = _FakeOrch()
+        orch.set_lead("proj", "same-uuid", provider="codex")
+        _write_jsonl(tmp_path, "C--proj", "same-uuid", [_assistant_line("claude secret")])
+
+        assert notify_mod.resolve_lead_jsonl(orch, "proj") is None
+        assert notify_mod.lead_history_snapshot(orch, "proj", 20) == ("codex", [])
+        assert notify_mod.lead_sessions_snapshot(orch, "proj", 20) == ("codex", [])
 
 
 class TestLeadHistoryHelpers:
