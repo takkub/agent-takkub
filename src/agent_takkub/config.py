@@ -14,7 +14,7 @@ from pathlib import Path
 
 _log = logging.getLogger(__name__)
 
-_SAFE_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+_SAFE_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 _SAFE_SHARD_IDX = re.compile(r"^[1-9][0-9]{0,2}$")  # 1–999
 DEFAULT_NPM_REGISTRY = "https://registry.npmjs.org/"
 
@@ -60,9 +60,11 @@ def validate_name(value: str, kind: str) -> str:
     never used as a path separator so it cannot escape the runtime subtree.
     """
     name = (value or "").lower().strip()
+    if ".." in name or name.startswith(".") or name.endswith("."):
+        raise ValueError(f"invalid {kind}: {value!r}")
     if "#" in name:
         role_part, _, shard_part = name.partition("#")
-        if not _SAFE_NAME.fullmatch(role_part):
+        if ".." in role_part or role_part.startswith(".") or role_part.endswith(".") or not _SAFE_NAME.fullmatch(role_part):
             raise ValueError(f"invalid {kind}: {value!r}")
         if not _SAFE_SHARD_IDX.fullmatch(shard_part):
             raise ValueError(f"invalid {kind} shard index: {value!r}")

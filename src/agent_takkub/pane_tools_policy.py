@@ -83,8 +83,10 @@ def _policy_dir() -> pathlib.Path:
 
 
 def _validate_name(name: str) -> bool:
-    """Check if name matches [a-z0-9][a-z0-9_-]*."""
-    return bool(re.match(r"^[a-z0-9][a-z0-9_-]*$", name, re.IGNORECASE))
+    """Check if name matches [a-z0-9][a-z0-9._-]* without traversal or trailing dot."""
+    if ".." in name or name.endswith("."):
+        return False
+    return bool(re.match(r"^[a-z0-9][a-z0-9._-]*$", name, re.IGNORECASE))
 
 
 def load_policy() -> dict[str, dict[str, list[str]]]:
