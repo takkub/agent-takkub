@@ -315,9 +315,10 @@ def resume_lead(orch, project: object, session_uuid: object) -> dict:
     """control-mode only (enforced by the HTTP handler's mode gate before this
     runs, same as `open_project`/`close_project`). Terminates the project's
     current Lead pane (same lifecycle `close_project` uses — protected-pane
-    force-close) then respawns Lead with `--resume <session_uuid>`.
+    force-close) then respawns Lead with the active provider's resume flag.
 
-    `session_uuid`/cwd match is prevalidated here (`_resume_uuid_matches_cwd`)
+    `session_uuid`/cwd match is prevalidated here (provider-specific local
+    transcript lookup)
     BEFORE `orch.close()` runs, and re-checked again inside `spawn()` itself
     as defense in depth — prevalidating means a forged/mismatched uuid never
     tears down the live Lead pane in the first place (previously the mismatch
@@ -325,16 +326,15 @@ def resume_lead(orch, project: object, session_uuid: object) -> dict:
     run — leaving the project with no Lead pane at all and a rejected
     resume).
 
-    Multi-provider note (#101): `--resume` is a claude-CLI-specific
-    capability (`ProviderSpec.supports_resume`). Gated explicitly below via
-    `provider_config.lead_capability_gap` — a codex/agy-backed Lead gets a
-    clear 409 here instead of reaching `spawn()` and failing opaquely on an
-    unknown flag / provider mismatch."""
+    Multi-provider note (#101): resume is capability-gated through
+    ``ProviderSpec.supports_resume``. Claude uses ``--resume`` and Gemini/agy
+    uses ``--conversation``; providers without a verified store+flag get a
+    clear 409 before the live pane is touched."""
     if not isinstance(project, str) or project not in _config.list_project_names():
         raise RemoteApiError(400, "unknown project")
     if project not in _config.get_open_tabs():
         raise RemoteApiError(409, "project not open")
-    from ..provider_config import lead_missing_capability
+    from ..provider_config import effective_provider_for, lead_missing_capability
 
     missing_provider = lead_missing_capability("supports_resume", project)
     if missing_provider is not None:
@@ -347,9 +347,10 @@ def resume_lead(orch, project: object, session_uuid: object) -> dict:
     cwd = _config.lead_cwd(project)
     if not cwd:
         raise RemoteApiError(409, "project has no lead cwd")
-    from ..spawn_engine import _resume_uuid_matches_cwd
+    provider = effective_provider_for("lead", project)
+    from ..spawn_engine import _resume_uuid_matches_provider_cwd
 
-    if not _resume_uuid_matches_cwd(project, session_uuid, cwd):
+    if not _resume_uuid_matches_provider_cwd(project, provider, session_uuid, cwd):
         raise RemoteApiError(409, "resume_uuid does not match cwd")
     orch.close(LEAD.name, project=project, force=True, reason="remote resume")
     ok, msg = orch.spawn(LEAD.name, cwd=cwd, project=project, resume_uuid=session_uuid)

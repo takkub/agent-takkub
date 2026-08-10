@@ -85,16 +85,21 @@ def _load_registry() -> list[dict]:
             continue
         name = str(item.get("name", "")).strip()
         config_dir = str(item.get("config_dir", "")).strip()
-        provider = str(item.get("provider", "claude")).strip()
+        provider = normalize_provider(item.get("provider", "claude"))
         if name and name != DEFAULT_PROFILE:
             out.append({"name": name, "config_dir": config_dir, "provider": provider})
     return out
 
 
 def list_profiles() -> list[dict]:
-    """Return all profiles: implicit default first, then registered ones.
+    """Return the implicit Claude default followed by registered profiles.
 
     Each entry: ``{"name": str, "config_dir": str, "provider": str}``.
+
+    Keep the historical single-default shape because the Settings users page
+    treats this as one flat, removable-profile list. Provider menus should use
+    :func:`profiles_for_provider`, which synthesizes the appropriate default
+    entry for each provider without making ``default`` appear removable.
     """
     registered = _load_registry()
     default_entry = {
@@ -103,6 +108,33 @@ def list_profiles() -> list[dict]:
         "provider": "claude",
     }
     return [default_entry, *registered]
+
+
+_PROFILE_PROVIDER_ALIASES = {"openai": "codex"}
+
+
+def normalize_provider(provider: object) -> str:
+    """Return the canonical cockpit provider id used by profile mappings.
+
+    Early multi-provider builds persisted ``openai`` while the runtime
+    provider has always been named ``codex``. Read that spelling as a legacy
+    alias so existing profile registries keep working, but only write the
+    canonical id from now on.
+    """
+    name = str(provider or "claude").strip().lower() or "claude"
+    return _PROFILE_PROVIDER_ALIASES.get(name, name)
+
+
+def profiles_for_provider(provider: str) -> list[dict]:
+    """Return one provider's implicit default followed by its profiles."""
+    provider = normalize_provider(provider)
+    default_dir = str(_DEFAULT_CONFIG_DIR) if provider == "claude" else ""
+    default_entry = {
+        "name": DEFAULT_PROFILE,
+        "config_dir": default_dir,
+        "provider": provider,
+    }
+    return [default_entry, *[p for p in _load_registry() if p["provider"] == provider]]
 
 
 # Items shared with the default profile when a profile is created with
@@ -251,6 +283,7 @@ def add_profile(
     handle the ValueError for UX, but not OSError).
     """
     name = str(name).strip()
+    provider = normalize_provider(provider)
     if not _NAME_RE.match(name):
         raise ValueError(
             f"Invalid profile name {name!r}: use 1-64 chars, letters/digits/hyphens/underscores"
@@ -298,6 +331,7 @@ def remove_profile(name: str) -> None:
 
 def profile_for(project: str, provider: str = "claude") -> str:
     """Return the profile name selected for *project* and *provider* (``"default"`` if unset)."""
+    provider = normalize_provider(provider)
     path = _project_profile_path(project)
     try:
         raw = path.read_text(encoding="utf-8")
@@ -308,7 +342,7 @@ def profile_for(project: str, provider: str = "claude") -> str:
         return DEFAULT_PROFILE
 
     # Backward compatibility: old format was {"name": "profile_name"} meaning claude.
-    # New format: {"providers": {"claude": "profile_name", "openai": "default"}, "default_provider": "claude"}
+    # New format: {"providers": {"claude": "profile_name", "codex": "default"}, "default_provider": "claude"}
     if "name" in data and "providers" not in data:
         if provider == "claude":
             name = str(data.get("name", "")).strip()
@@ -316,7 +350,13 @@ def profile_for(project: str, provider: str = "claude") -> str:
             name = DEFAULT_PROFILE
     else:
         providers_dict = data.get("providers", {})
-        name = str(providers_dict.get(provider, DEFAULT_PROFILE)).strip()
+        if not isinstance(providers_dict, dict):
+            return DEFAULT_PROFILE
+        # Compatibility with the short-lived "openai" spelling.
+        if provider == "codex" and "codex" not in providers_dict:
+            name = str(providers_dict.get("openai", DEFAULT_PROFILE)).strip()
+        else:
+            name = str(providers_dict.get(provider, DEFAULT_PROFILE)).strip()
 
     if not name:
         return DEFAULT_PROFILE
@@ -335,6 +375,7 @@ def set_profile(project: str, name: str, provider: str = "claude") -> None:
     ``"default"``).  Silent on I/O errors.
     """
     name = str(name).strip()
+    provider = normalize_provider(provider)
     if name != DEFAULT_PROFILE:
         registry = _load_registry()
         if not any(p["name"] == name and p["provider"] == provider for p in registry):
@@ -359,7 +400,54 @@ def set_profile(project: str, name: str, provider: str = "claude") -> None:
     if "providers" not in data:
         data["providers"] = {}
 
+    if isinstance(data["providers"], dict) and "openai" in data["providers"]:
+        data["providers"].setdefault("codex", data["providers"].pop("openai"))
+
     data["providers"][provider] = name
+
+    try:
+        _atomic_write(path, data)
+    except OSError:
+        pass
+
+
+def default_provider(project: str) -> str:
+    """Return the active provider selected for *project* (defaults to "claude")."""
+    path = _project_profile_path(project)
+    try:
+        raw = path.read_text(encoding="utf-8")
+        data = json.loads(raw)
+    except (OSError, json.JSONDecodeError):
+        return "claude"
+    if not isinstance(data, dict):
+        return "claude"
+    provider = normalize_provider(data.get("default_provider", "claude"))
+    from .provider_config import VALID_PROVIDERS
+
+    return provider if provider in VALID_PROVIDERS else "claude"
+
+
+def set_default_provider(project: str, provider: str) -> None:
+    """Set the active provider for *project*."""
+    provider = normalize_provider(provider)
+    from .provider_config import VALID_PROVIDERS
+
+    if provider not in VALID_PROVIDERS:
+        raise ValueError(f"Unknown provider {provider!r}")
+    path = _project_profile_path(project)
+    try:
+        raw = path.read_text(encoding="utf-8")
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            data = {}
+    except (OSError, json.JSONDecodeError):
+        data = {}
+
+    if "name" in data and "providers" not in data:
+        old_claude = data.pop("name")
+        data["providers"] = {"claude": old_claude}
+
+    data["default_provider"] = provider
 
     try:
         _atomic_write(path, data)

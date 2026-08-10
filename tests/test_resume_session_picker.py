@@ -284,6 +284,26 @@ class TestResumeUuidMatchesCwd:
         assert _resume_uuid_matches_cwd("default", "abc-123_def", str(cwd)) is True
 
 
+class TestResumeUuidMatchesProviderCwd:
+    def test_gemini_uses_provider_core_resolver(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        from agent_takkub import gemini_helper
+        from agent_takkub.spawn_engine import _resume_uuid_matches_provider_cwd
+
+        session_uuid = "89716048-a562-4bc4-80e4-a6f97a2830f3"
+        seen: dict[str, str | None] = {}
+
+        def _resolve(cwd: str, uuid: str | None) -> pathlib.Path:
+            seen.update(cwd=cwd, uuid=uuid)
+            return tmp_path / "session.jsonl"
+
+        monkeypatch.setattr(gemini_helper, "resolve_gemini_jsonl_for_cwd", _resolve)
+
+        assert _resume_uuid_matches_provider_cwd("default", "gemini", session_uuid, str(tmp_path))
+        assert seen == {"cwd": str(tmp_path), "uuid": session_uuid}
+
+
 class TestSpawnResumeUuid:
     # role_name deliberately not "lead" — a lead spawn also renders
     # runtime/lead-context.md via lead_context.py, which reads its own
@@ -571,23 +591,30 @@ class TestApiLeadSessions:
     def test_clamps_limit_and_forwards_to_notify(self, monkeypatch: pytest.MonkeyPatch) -> None:
         seen: dict = {}
 
-        def _fake(project_ns, limit):
+        def _fake(project_ns, limit, *, provider=None):
             seen["project_ns"] = project_ns
             seen["limit"] = limit
+            seen["provider"] = provider
             return []
 
         monkeypatch.setattr(notify_mod, "list_recent_lead_sessions", _fake)
         result = api.lead_sessions(object(), "myproj", limit=999)
         assert seen["project_ns"] == "myproj"
         assert seen["limit"] == api._SESSIONS_MAX_LIMIT
-        assert result == {"project": "myproj", "sessions": [], "lead_provider_note": None}
+        assert seen["provider"] == "claude"
+        assert result == {
+            "project": "myproj",
+            "provider": "claude",
+            "sessions": [],
+            "lead_provider_note": None,
+        }
 
     def test_bad_limit_falls_back_to_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
         seen: dict = {}
         monkeypatch.setattr(
             notify_mod,
             "list_recent_lead_sessions",
-            lambda project_ns, limit: seen.setdefault("limit", limit) or [],
+            lambda project_ns, limit, **_kw: seen.setdefault("limit", limit) or [],
         )
         api.lead_sessions(object(), "myproj", limit="not-a-number")
         assert seen["limit"] == notify_mod._SESSION_LIST_DEFAULT_LIMIT
@@ -621,7 +648,8 @@ class TestApiResumeLead:
         monkeypatch.setattr(_config, "get_open_tabs", lambda: ["proj"])
         monkeypatch.setattr(_config, "lead_cwd", lambda project=None: "/proj/web")
         monkeypatch.setattr(
-            "agent_takkub.spawn_engine._resume_uuid_matches_cwd", lambda p, u, c: True
+            "agent_takkub.spawn_engine._resume_uuid_matches_provider_cwd",
+            lambda p, provider, u, c: True,
         )
 
         fake_orch = MagicMock()
@@ -641,7 +669,8 @@ class TestApiResumeLead:
         monkeypatch.setattr(_config, "get_open_tabs", lambda: ["proj"])
         monkeypatch.setattr(_config, "lead_cwd", lambda project=None: "/proj/web")
         monkeypatch.setattr(
-            "agent_takkub.spawn_engine._resume_uuid_matches_cwd", lambda p, u, c: True
+            "agent_takkub.spawn_engine._resume_uuid_matches_provider_cwd",
+            lambda p, provider, u, c: True,
         )
 
         fake_orch = MagicMock()
@@ -666,7 +695,8 @@ class TestApiResumeLead:
         monkeypatch.setattr(_config, "get_open_tabs", lambda: ["proj"])
         monkeypatch.setattr(_config, "lead_cwd", lambda project=None: "/proj/web")
         monkeypatch.setattr(
-            "agent_takkub.spawn_engine._resume_uuid_matches_cwd", lambda p, u, c: False
+            "agent_takkub.spawn_engine._resume_uuid_matches_provider_cwd",
+            lambda p, provider, u, c: False,
         )
 
         fake_orch = MagicMock()
@@ -677,7 +707,7 @@ class TestApiResumeLead:
     def test_non_claude_lead_rejected_before_uuid_check(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Issue #101: a codex/agy-backed Lead has no `--resume` flag —
+        """Issue #101: a Codex-backed Lead has no verified resume flag —
         reject with a clear 409 explaining why, before even validating
         session_uuid, instead of reaching `spawn()` and failing opaquely."""
         monkeypatch.setattr(_config, "list_project_names", lambda: ["proj"])
@@ -692,8 +722,38 @@ class TestApiResumeLead:
         assert exc.value.status == 409
         assert "resume unavailable" in exc.value.msg
         fake_orch.close.assert_not_called()
-        fake_orch.close.assert_not_called()
         fake_orch.spawn.assert_not_called()
+
+    def test_gemini_lead_uses_provider_aware_validation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(_config, "list_project_names", lambda: ["proj"])
+        monkeypatch.setattr(_config, "get_open_tabs", lambda: ["proj"])
+        monkeypatch.setattr(_config, "lead_cwd", lambda project=None: "/proj/web")
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.effective_provider_for",
+            lambda role, project=None: "gemini",
+        )
+        seen: dict = {}
+
+        def _matches(project, provider, uuid, cwd):
+            seen.update(project=project, provider=provider, uuid=uuid, cwd=cwd)
+            return True
+
+        monkeypatch.setattr("agent_takkub.spawn_engine._resume_uuid_matches_provider_cwd", _matches)
+        fake_orch = MagicMock()
+        fake_orch.spawn.return_value = (True, "ok")
+
+        assert api.resume_lead(fake_orch, "proj", "uuid-gemini") == {
+            "ok": True,
+            "project": "proj",
+        }
+        assert seen == {
+            "project": "proj",
+            "provider": "gemini",
+            "uuid": "uuid-gemini",
+            "cwd": "/proj/web",
+        }
 
 
 # ─────────────────────────────────────────────────────────────

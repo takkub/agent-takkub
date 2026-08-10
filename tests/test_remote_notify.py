@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
 import pytest
 from PyQt6.QtCore import QCoreApplication, QObject, pyqtSignal
 
+from agent_takkub import gemini_helper
 from agent_takkub.remote import config as remote_config
 from agent_takkub.remote import notify as notify_mod
 from agent_takkub.remote.notify import LeadNotifier, _lead_text_blocks
@@ -495,6 +497,157 @@ class TestLeadHistoryHelpers:
         assert notify_mod.read_recent_lead_messages(path) == [
             {"text": "real question", "kind": "me"}
         ]
+
+
+class TestGeminiHistoryHelpers:
+    @staticmethod
+    def _chat_store(home: Path, cwd: Path) -> Path:
+        project_dir = home / ".gemini" / "tmp" / cwd.name
+        chats = project_dir / "chats"
+        chats.mkdir(parents=True, exist_ok=True)
+        (project_dir / ".project_root").write_text(str(cwd), encoding="utf-8")
+        return chats
+
+    @staticmethod
+    def _write_session(chats: Path, uuid: str, suffix: str, records: list[dict]) -> Path:
+        path = chats / f"session-2026-08-10T10-{suffix}-{uuid[:8]}.jsonl"
+        lines = [
+            json.dumps(
+                {
+                    "sessionId": uuid,
+                    "projectHash": "hash",
+                    "startTime": "2026-08-10T03:00:00Z",
+                    "kind": "main",
+                }
+            ),
+            *[json.dumps(record) for record in records],
+        ]
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return path
+
+    @pytest.fixture(autouse=True)
+    def _isolate_gemini(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> tuple[Path, Path, Path]:
+        home = tmp_path / "home"
+        cwd = tmp_path / "project"
+        cwd.mkdir()
+        chats = self._chat_store(home, cwd)
+        monkeypatch.setattr(Path, "home", lambda: home)
+        monkeypatch.setattr("agent_takkub.config.lead_cwd", lambda project=None: str(cwd))
+        gemini_helper._gemini_chats_cache.clear()
+        self.home, self.cwd, self.chats = home, cwd, chats
+        yield home, cwd, chats
+        gemini_helper._gemini_chats_cache.clear()
+
+    def test_remote_resolver_delegates_to_provider_core(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        marker = self.chats / "delegated.jsonl"
+        seen: dict[str, str | None] = {}
+
+        def _resolve(cwd: str, session_uuid: str | None) -> Path:
+            seen.update(cwd=cwd, session_uuid=session_uuid)
+            return marker
+
+        monkeypatch.setattr(gemini_helper, "resolve_gemini_jsonl_for_cwd", _resolve)
+
+        assert notify_mod._resolve_gemini_jsonl_for_cwd(str(self.cwd), "session-id") == marker
+        assert seen == {"cwd": str(self.cwd), "session_uuid": "session-id"}
+
+    def test_exact_resolver_confirms_full_uuid_not_only_filename_prefix(self) -> None:
+        uuid_a = "12345678-aaaa-4444-8888-aaaaaaaaaaaa"
+        uuid_b = "12345678-bbbb-4444-8888-bbbbbbbbbbbb"
+        path_a = self._write_session(self.chats, uuid_a, "a", [])
+        path_b = self._write_session(self.chats, uuid_b, "b", [])
+
+        assert notify_mod._resolve_gemini_jsonl_for_cwd(str(self.cwd), uuid_a) == path_a
+        assert notify_mod._resolve_gemini_jsonl_for_cwd(str(self.cwd), uuid_b) == path_b
+        assert (
+            notify_mod._resolve_gemini_jsonl_for_cwd(
+                str(self.cwd), "12345678-cccc-4444-8888-cccccccccccc"
+            )
+            is None
+        )
+
+    def test_initial_store_miss_is_rescanned_after_agy_creates_chats(self) -> None:
+        late_cwd = self.cwd.parent / "late-project"
+        late_cwd.mkdir()
+        assert notify_mod._find_gemini_chats_dir(str(late_cwd)) is None
+
+        late_chats = self._chat_store(self.home, late_cwd)
+        assert notify_mod._find_gemini_chats_dir(str(late_cwd)) == late_chats
+
+    def test_positive_store_hit_is_reused_without_rescan(self) -> None:
+        assert notify_mod._find_gemini_chats_dir(str(self.cwd)) == self.chats
+        (self.chats.parent / ".project_root").unlink()
+
+        assert notify_mod._find_gemini_chats_dir(str(self.cwd)) == self.chats
+
+    def test_reads_snapshot_and_incremental_array_content(self) -> None:
+        path = self._write_session(
+            self.chats,
+            "abcdef12-aaaa-4444-8888-aaaaaaaaaaaa",
+            "messages",
+            [
+                {
+                    "$set": {
+                        "messages": [
+                            {
+                                "id": "context",
+                                "type": "user",
+                                "content": [{"text": "<session_context>hidden"}],
+                            },
+                            {
+                                "id": "user-1",
+                                "type": "user",
+                                "content": [{"text": "[remote → lead] hello"}],
+                            },
+                        ]
+                    }
+                },
+                {
+                    "id": "gemini-1",
+                    "type": "gemini",
+                    "content": ["answer", {"functionCall": {"name": "tool"}}],
+                },
+                {
+                    "id": "tool-result",
+                    "type": "user",
+                    "content": [{"functionResponse": {"name": "tool"}}],
+                },
+            ],
+        )
+
+        assert notify_mod.read_recent_lead_messages(path, provider="gemini") == [
+            {"text": "hello", "kind": "me"},
+            {"text": "answer", "kind": "lead"},
+        ]
+
+    def test_lists_gemini_sessions_and_filters_teammate_tasks(self) -> None:
+        lead_uuid = "aaaaaaaa-aaaa-4444-8888-aaaaaaaaaaaa"
+        teammate_uuid = "bbbbbbbb-bbbb-4444-8888-bbbbbbbbbbbb"
+        self._write_session(
+            self.chats,
+            lead_uuid,
+            "lead",
+            [{"id": "u1", "type": "user", "content": [{"text": "real task"}]}],
+        )
+        self._write_session(
+            self.chats,
+            teammate_uuid,
+            "teammate",
+            [
+                {
+                    "id": "u2",
+                    "type": "user",
+                    "content": [{"text": "[ROLE: qa] smoke test"}],
+                }
+            ],
+        )
+
+        sessions = notify_mod.list_recent_lead_sessions("proj", provider="gemini")
+        assert [item["uuid"] for item in sessions] == [lead_uuid]
 
     def test_read_recent_lead_messages_skips_command_wrapper_markup(self, tmp_path, config_dir):
         path = _write_jsonl(

@@ -281,14 +281,16 @@ def _build_lead_context_text(
     content can be written to two different places depending on which CLI
     backs Lead: `runtime/lead-context.md` for claude's
     `--append-system-prompt-file` (see `_render_lead_context` below), or
-    `<spawn_cwd>/AGENTS.md` for a codex/agy-backed Lead (see
-    `render_lead_agents_md`) — codex/agy auto-discover AGENTS.md from cwd
-    instead of accepting a system-prompt flag.
+    `<spawn_cwd>/AGENTS.md` for any non-Claude Lead (see
+    `render_lead_agents_md`) — the registered non-Claude providers
+    auto-discover AGENTS.md from cwd instead of accepting Claude's
+    system-prompt flag.
 
-    Lead's hybrid policy (see cockpit CLAUDE.md "Lead direct-edit policy")
-    forbids direct file edits inside project paths; this function bakes the
-    *current* project's paths into the prompt every spawn so the rule has
-    teeth even when projects.json switches between sessions.
+    Lead's provider-neutral policy (see cockpit CLAUDE.md "Lead direct-edit
+    policy") delegates every substantive/source change and permits only tiny
+    non-source cockpit edits. This function also bakes the *current* project's
+    paths into the prompt every spawn so the rule has teeth even when
+    projects.json switches between sessions.
 
     Returns the rendered text, or None if there's no cockpit CLAUDE.md to
     render from.
@@ -317,10 +319,12 @@ def _build_lead_context_text(
         name, proj = active_project()
     paths = list((proj.get("paths") or {}).values()) if proj else []
 
-    # Guard: if the active project IS the cockpit repo itself (agent-takkub),
-    # skip BLOCKED_DIRS injection entirely — cockpit files are in the ✅ list
-    # (Lead can edit CLAUDE.md, projects.json, .claude/agents/*) so blocking
-    # the whole repo would contradict that policy.
+    # If the active project IS the cockpit repo itself (agent-takkub), avoid a
+    # blanket BLOCKED_DIRS entry for the entire repo because Lead may still make
+    # a *tiny, non-source* governance/config correction there.  The universal
+    # provider-neutral policy injected below independently protects cockpit
+    # source code and substantive changes, so this is not a source-code bypass.
+    cockpit_active = False
     if paths:
         _proj_paths: dict = proj.get("paths") or {}
         _proj_root_str: str | None = _proj_paths.get("main") or next(
@@ -329,15 +333,19 @@ def _build_lead_context_text(
         if _proj_root_str:
             _proj_root = pathlib.Path(_proj_root_str).resolve()
             if _proj_root == REPO_ROOT.resolve():
-                # Active project = cockpit → no BLOCKED_DIRS
+                cockpit_active = True
                 paths = []
 
+    header = f"active project: **{name}**" if name else "active project:"
     if paths:
         blocked = "\n".join(f"- `{p}`" for p in paths)
-        header = f"active project: **{name}**" if name else "active project:"
+    elif cockpit_active:
+        blocked = (
+            "- (cockpit active — source code remains protected by the "
+            "provider-neutral delegation rule below)"
+        )
     else:
         blocked = "- (no active project — projects.json `active` not set)"
-        header = "active project:"
 
     suffix = f"""
 
@@ -354,6 +362,19 @@ def _build_lead_context_text(
 > 2. **ส่งต่อทีม (Delegate):** **ห้ามลงมือเขียน/แก้ไข code เองเด็ดขาด** (ห้ามใช้ Edit / Write / MultiEdit กับไฟล์ซอร์สโค้ดของโปรเจค)
 > 3. **มอบหมายงาน (`takkub assign`):** ให้ส่งงานต่อให้ specialist role ที่เหมาะสม เช่น `frontend`, `backend`, `devops`, `qa`, `mobile` ผ่านคำสั่ง `takkub assign --role <role> --cwd <path> "<task>"` เสมอ
 
+### กฎเดียวกันสำหรับทุก provider — ไม่มี provider ใดเป็นข้อยกเว้น
+
+กฎนี้ใช้กับ Lead ที่รันผ่าน **Claude, Codex, Gemini/agy, OpenCode, Kimi, Cursor, provider ที่เพิ่มในอนาคต และ provider substitution ทุกกรณี** การเปลี่ยน provider ห้ามทำให้ขอบเขตงานของ Lead เปลี่ยนไป
+
+**ค่าเริ่มต้นคือ delegate:** งาน implementation, bug fix, refactor, test, source code, provider behavior, API/schema, dependency, infra/deploy, security หรือ investigation/review ที่ต้องใช้ specialist context ต้องใช้ `takkub assign` แม้งานจะมีไฟล์เดียวหรือดูง่าย และกฎนี้ใช้กับ source code ของ cockpit `agent-takkub` ด้วย
+
+Lead ทำเองได้เฉพาะงานเล็กเมื่อเข้าเงื่อนไขครบทุกข้อ:
+- เป็น read-only inspection/status/summary/plan **หรือ** แก้ typo/นโยบาย/config/docs ของ cockpit แบบเล็กมาก
+- ถ้ามีการแก้ไฟล์: แตะไม่เกิน 1 ไฟล์ และไม่เกิน 30 บรรทัด
+- ไม่แตะ source code, tests, provider behavior, API/schema, dependency, infra/deploy, security หรือ business logic
+
+ถ้าไม่แน่ใจว่าเป็นงานเล็กหรือไม่ → ถือว่าไม่เล็กและ delegate ทันที ห้ามอ้างว่า active project เป็น cockpit, path ไม่อยู่ใน BLOCKED_DIRS หรือ provider ไม่มี native subagent tool เพื่อทำงานเอง
+
 ไดเรกทอรีต่อไปนี้คือ project code — Lead **ห้ามใช้ Edit / Write / MultiEdit / NotebookEdit** ในไฟล์ใต้ paths เหล่านี้เด็ดขาด:
 
 {blocked}
@@ -366,11 +387,12 @@ def _build_lead_context_text(
 
 ✅ ทำเองได้:
 - Read / Grep / Glob ทุกที่ (สำหรับวางแผน สรุปงาน และเขียน task spec)
-- Edit / Write ใน cockpit ({REPO_ROOT}) เช่น CLAUDE.md, projects.json, .claude/agents/*
+- แก้ typo/นโยบาย/config/docs ของ cockpit ({REPO_ROOT}) เฉพาะเมื่อเข้าเกณฑ์งานเล็กครบทุกข้อข้างบน
 - `git status` / `git log` / `git diff` (inspection ไม่กระทบไฟล์)
 
 ❌ ห้ามทำเองแม้แค่บรรทัดเดียว:
-- ทุกไฟล์ที่เป็น source code ของโปรเจค หรืออยู่ใต้ BLOCKED_DIRS ข้างบน
+- ทุกไฟล์ที่เป็น source code หรือ tests รวมถึงภายใน cockpit `agent-takkub`
+- ทุกไฟล์ที่อยู่ใต้ BLOCKED_DIRS ข้างบน (ยกเว้น cockpit non-source งานเล็กตามเกณฑ์ครบทุกข้อ)
 - งานที่ touch > 1 ไฟล์
 - งานที่ edit > 30 บรรทัดในรอบเดียว
 
@@ -574,14 +596,15 @@ def render_lead_agents_md(
     spawn_cwd: str,
     post_compact_brief: str | None = None,
 ) -> str | None:
-    """AGENTS.md variant of `_render_lead_context` for a codex/agy-backed
-    Lead (issue #101 degraded mode). Codex and Antigravity auto-discover
-    `AGENTS.md` from cwd instead of accepting a `--append-system-prompt-file`
-    flag, so this writes the SAME cockpit-CLAUDE.md + BLOCKED_DIRS +
-    session-brief content there — deliberately NOT the generic teammate
-    cheatsheet from `codex_agents_md.py` (that file tells the reader "you
-    are a specialist, do the task yourself and call takkub done", which is
-    wrong for Lead, the orchestrator).
+    """AGENTS.md variant of `_render_lead_context` for every non-Claude Lead
+    provider (issue #101 degraded mode, generalized by ProviderSpec #103).
+    These providers auto-discover `AGENTS.md` from cwd instead of accepting
+    Claude's `--append-system-prompt-file` flag, so this writes the SAME
+    cockpit-CLAUDE.md + BLOCKED_DIRS + session-brief content there —
+    deliberately NOT the generic teammate cheatsheet from
+    `codex_agents_md.py` (that file tells the reader "you are a specialist,
+    do the task yourself and call takkub done", which is wrong for Lead, the
+    orchestrator).
 
     Marked with `codex_agents_md.TAKKUB_MARKER` so a user-owned AGENTS.md is
     never clobbered (same safety rule `ensure_agents_md` uses) — but Lead's

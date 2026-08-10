@@ -301,6 +301,50 @@ class TestLeadContextProjectRulesInjection:
         assert "deploy to Fly.io" not in content
 
 
+class TestProviderNeutralLeadDelegationPolicy:
+    """Every Lead engine receives the same strict orchestrator boundary."""
+
+    @staticmethod
+    def _assert_strict_policy(content: str) -> None:
+        assert "กฎเดียวกันสำหรับทุก provider" in content
+        assert "Claude, Codex, Gemini/agy, OpenCode, Kimi, Cursor" in content
+        assert "provider substitution ทุกกรณี" in content
+        assert "source code ของ cockpit `agent-takkub`" in content
+        assert "ถ้าไม่แน่ใจว่าเป็นงานเล็กหรือไม่" in content
+
+    def test_claude_context_keeps_policy_when_cockpit_is_active(
+        self, lead_context_env: Path
+    ) -> None:
+        _write_projects(lead_context_env, lead_context_env, name="cockpit")
+
+        from agent_takkub.lead_context import _render_lead_context
+
+        out_path = _render_lead_context(project="cockpit")
+        assert out_path is not None
+        content = Path(out_path).read_text(encoding="utf-8")
+        self._assert_strict_policy(content)
+        assert "active project: **cockpit**" in content
+        assert "source code remains protected" in content
+
+    def test_all_nonclaude_provider_specs_receive_identical_policy(
+        self, lead_context_env: Path
+    ) -> None:
+        from agent_takkub.lead_context import render_lead_agents_md
+        from agent_takkub.provider_spec import PROVIDER_REGISTRY
+
+        _write_projects(lead_context_env, lead_context_env, name="cockpit")
+        for provider, spec in PROVIDER_REGISTRY.items():
+            if provider == "claude":
+                continue
+            assert spec.context_strategy == "agents_md_file", provider
+            spawn_cwd = lead_context_env / f"lead-{provider}"
+            spawn_cwd.mkdir()
+            out_path = render_lead_agents_md("cockpit", str(spawn_cwd))
+            assert out_path is not None, provider
+            content = Path(out_path).read_text(encoding="utf-8")
+            self._assert_strict_policy(content)
+
+
 class TestLeadContextMissingAssets:
     """Prod-bug follow-up: an installed build whose _assets/CLAUDE.md never
     got shipped must not fail silently — it should log so the gap is

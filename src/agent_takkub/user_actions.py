@@ -165,15 +165,8 @@ class UserActionsMixin:
 
         menu = QMenu(self)
 
-        # Group profiles by provider
-        providers_dict = {}
-        for profile in user_profile.list_profiles():
-            prov = profile.get("provider", "claude")
-            if prov not in providers_dict:
-                providers_dict[prov] = []
-            providers_dict[prov].append(profile)
-
-        for prov, profiles in providers_dict.items():
+        for prov in ("claude", "codex", "gemini"):
+            profiles = user_profile.profiles_for_provider(prov)
             if not profiles:
                 continue
 
@@ -202,11 +195,6 @@ class UserActionsMixin:
             menu.exec(self._btn_provider.mapToGlobal(self._btn_provider.rect().bottomLeft()))
         else:
             menu.exec(self._btn_pipelines.mapToGlobal(self._btn_pipelines.rect().bottomLeft()))
-
-    def _on_user_changed(self, name: str, provider: str = "claude") -> None:
-        """Fired from the profile-switch menu. Switches the active project's
-        provider-profile mapping, then requests a project-wide restart of all
-        teammates so the new credentials take effect immediately."""
 
     # ──────────────────────────────────────────────────────────────
     # session control
@@ -875,58 +863,56 @@ class UserActionsMixin:
     # per-project user profile selector (accessed via 👥 Team chip's right-click menu)
     # ──────────────────────────────────────────────────────────────
 
-    def _on_user_changed(self, name: str) -> None:
+    def _on_user_changed(self, name: str, provider: str = "claude") -> None:
+        """Switch Lead's provider/account and restart this project's panes."""
         if not name:
             return
         project = active_project()[0] or ""
         if not project:
             return
-        from . import user_profile
+        from . import provider_config, user_profile
 
-        old_name = user_profile.profile_for(project)
+        provider = user_profile.normalize_provider(provider)
+        old_provider = provider_config.provider_for("lead", project)
+        old_name = user_profile.profile_for(project, provider=provider)
         old_cd = user_profile.config_dir_for(project)
-        try:
-            user_profile.set_profile(project, name)
-        except ValueError:
+        changed = old_provider != provider or old_name != name
+        if not changed:
             return
+
+        confirm = QMessageBox.question(
+            self,
+            "Switch provider account",
+            f"Switch '{project}' Lead to {provider.capitalize()} profile '{name}'?\n\n"
+            "Lead + every teammate pane for this project will be restarted "
+            "so the new provider/account takes effect.",
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Ok,
+        )
+        if confirm != QMessageBox.StandardButton.Ok:
+            return
+
+        try:
+            user_profile.set_profile(project, name, provider=provider)
+            user_profile.set_default_provider(project, provider)
+            provider_config.save_role_overrides({"lead": provider}, project, scope=["lead"])
+        except ValueError as exc:
+            QMessageBox.warning(self, "Profile Error", str(exc))
+            return
+
         new_cd = user_profile.config_dir_for(project)
-        changed = old_cd.resolve() != new_cd.resolve()
-
-        # When the account actually changes, the running Lead + teammate panes
-        # still carry the old CLAUDE_CONFIG_DIR (injected once at spawn time),
-        # so the switch is invisible until they respawn. Confirm, then kill +
-        # respawn so the new profile's login takes effect immediately. Same
-        # restart path the active-project switch uses.
-        if changed:
-            from PyQt6.QtWidgets import QMessageBox
-
-            confirm = QMessageBox.question(
-                self,
-                "Switch Claude account",
-                f"Switch '{project}' to profile '{name}'?\n\n"
-                f"Lead + every teammate pane for this project will be "
-                f"restarted so the new login takes effect.",
-                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
-                QMessageBox.StandardButton.Ok,
-            )
-            if confirm != QMessageBox.StandardButton.Ok:
-                # Backed out — restore the previous selection so the persisted
-                # state still matches the (unchanged) running panes.
-                try:
-                    user_profile.set_profile(project, old_name)
-                except ValueError:
-                    pass
-                return
+        config_changed = old_cd.resolve() != new_cd.resolve()
 
         if self._limit_store is not None:
-            if changed:
+            if config_changed:
                 self._limit_store.unregister(old_cd)
                 self._limit_store.register(new_cd)
             self._refresh_limit_label(self._limit_store.get(new_cd))
 
-        if changed:
-            self._status.showMessage(f"switching {project} → {name} · restarting panes…", 6_000)
-            self._restart_lead_for_active_project()
+        self._status.showMessage(
+            f"switching {project} → {provider}/{name} · restarting panes…", 6_000
+        )
+        self._restart_lead_for_active_project()
 
     def _on_add_user_clicked(self) -> None:
         """ "Add / Remove user…" right-click menu entry: jump straight to the

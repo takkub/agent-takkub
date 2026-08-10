@@ -473,7 +473,8 @@ gemini_spec = ProviderSpec(
     multiline_newline_seq="\x1b\r",  # agy is Ink-based like claude — same ESC+CR
     # multiline newline behavior (#149).
     supports_mirror=False,
-    supports_resume=False,
+    supports_resume=True,
+    session_resume_flag="--conversation",
     supports_slash_commands=False,
     supports_hooks=False,
     model_flag="--model",  # agy 1.0.5 changelog + confirmed `agy models` subcommand
@@ -483,9 +484,9 @@ gemini_spec = ProviderSpec(
     # explicit model there is also no deterministic way to prove the default
     # supports the requested effort before launch, so model preservation wins.
     effort_flag=None,
-    produces_jsonl_transcript=False,
+    produces_jsonl_transcript=True,
     supports_token_meter=False,
-    supports_remote_history=False,
+    supports_remote_history=True,
     prepend_bin_dir_to_path=True,  # spawn_engine.py gemini branch: agy_dir on PATH
     auto_trust=True,  # spawn_engine.py gemini branch: auto_trust=True
     project_scope_flag="--project",  # agy 1.1.6 --help: "Project ID for the

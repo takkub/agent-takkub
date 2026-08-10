@@ -4,6 +4,15 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.50] - 2026-08-10
+
+### Changed (เปลี่ยน)
+- **กฎมอบหมายงานของ Lead เป็น provider-neutral** — Claude, Codex, Gemini/agy, OpenCode, Kimi, Cursor, provider ใหม่ และ provider substitution ใช้นโยบายเดียวกัน: งาน source/tests/provider behavior ต้องส่งให้ specialist เสมอ รวมถึงงานใน cockpit เอง; Lead ทำตรงได้เฉพาะ inspection หรือแก้ non-source เล็กมากตามเกณฑ์ที่ระบุไว้ใน `CLAUDE.md` และ context/`AGENTS.md` ที่สร้างตอน spawn
+- **สลับ provider/profile แล้ว UI และ runtime ตรงกับความจริง** — เมนู Accounts แยก profile ต่อ provider, normalize ชื่อเก่า `openai` เป็น `codex`, บันทึก provider เริ่มต้นพร้อม Lead override แล้ว restart pane ของโปรเจกต์; status header แสดง effective provider จริงหลัง substitution แทนค่าที่ตั้งไว้แต่ใช้งานไม่ได้
+
+### Fixed (แก้)
+- **Gemini history/resume ใช้งานได้ครบเส้นทาง** — หา chat store จาก `.project_root`, อ่าน Gemini JSONL และแสดง remote history/session picker ตาม provider จริง; ตรวจ UUID กับ cwd ใน store ก่อนปิด pane แล้ว resume agy ด้วย `--conversation` ขณะที่ provider ที่ยังไม่มี capability ถูกปฏิเสธอย่างชัดเจนโดยไม่แตะ Lead ที่กำลังรัน
+
 ## [1.0.49] - 2026-08-06
 
 รอบนี้มาจากการใช้งานจริง — user เปิด cockpit แล้วเจอ dialog ขึ้นว่า **"Failed: 15 projects"** พร้อม chip แดง `Graft: 15 failed` แล้วเข้าใจว่าระบบพัง · ไล่ดูแล้ว**ไม่มีอะไรพังเลยสักตัว**

@@ -5,7 +5,9 @@
 > 2. Lead **ห้ามแก้ไข/เขียน source code ของโปรเจคเองเด็ดขาด** (ห้าม Write/Edit ไฟล์ใต้ project paths / BLOCKED_DIRS)
 > 3. Lead มีหน้าที่ **ส่งงานต่อให้ทีม (`takkub assign`)** เสมอ
 >
-> **ข้อยกเว้นเดียว (hybrid policy — ห้ามตีความข้อ 2 กว้างกว่านี้):** ไฟล์ *ของ cockpit เอง* ที่เป็น config/นโยบาย ไม่ใช่ source code — `CLAUDE.md`, `projects.json`, `.claude/agents/*` — Lead แก้ได้โดยตรง · ตาราง "Lead direct-edit policy" ด้านล่างคือฉบับตัดสินจริง
+> **ใช้กับทุก provider โดยไม่มีข้อยกเว้น:** Claude, Codex, Gemini/agy, OpenCode, Kimi, Cursor, provider ใหม่ และ provider substitution ต้องใช้กฎเดียวกัน การเปลี่ยน provider ห้ามเปลี่ยน Lead ให้กลายเป็น Developer
+>
+> **ข้อยกเว้นเดียว:** งานเล็กจริงตามเกณฑ์ "Lead direct-edit policy" ด้านล่างเท่านั้น เช่น read-only inspection หรือ typo/นโยบาย/config/docs ของ cockpit แบบเล็กมาก งาน source code/tests/provider behavior ต้อง delegate แม้อยู่ใน `agent-takkub` เอง
 
 Teammates: **frontend** (React/Next/TS) · **backend** (API/DB) · **mobile** (RN/Capacitor) · **devops** (CI/Docker/infra) · **qa** (tests/e2e) · **reviewer** (code review) · **critic** (Design Critic — รีวิว UI หลัง QA + เขียน proposal) · **gemini** (Antigravity CLI `agy` — "สมองที่ 3" planning/second opinion/long-context) · **codex** (OpenAI Codex CLI — "สมองที่ 2" refactor/cross-check) · **opencode / kimi / cursor** (provider เสริมใน registry — ready/busy marker ของ kimi/cursor ยังไม่ calibrate อย่าใช้เป็น role หลัก)
 
@@ -124,16 +126,18 @@ codex/gemini ใช้ไม่ได้ (toggle ปิดใน Settings หร
 
 ## บทเรียน (anti-patterns)
 
-### Lead direct-edit policy (hybrid)
+### Lead direct-edit policy (provider-neutral)
 
 | ทำเองได้ ✅ | ต้อง delegate 🚫 |
 |---|---|
-| Read/Grep/Glob ทุกที่ | แก้ไฟล์ใต้ project paths (BLOCKED_DIRS) |
-| Edit/Write ใน cockpit (CLAUDE.md, projects.json, .claude/agents/*) | งาน touch > 1 ไฟล์ |
-| `git status` / `log` / `diff` | งาน edit > 30 บรรทัดในรอบเดียว |
-| typo บรรทัดเดียวที่ user pin path | งาน specialist context (CSS, API contract, schema, infra) |
+| Read/Grep/Glob และ status/summary/plan แบบ read-only | source code หรือ tests ทุกที่ รวมถึง `agent-takkub` |
+| `git status` / `log` / `diff` | implementation, bug fix, refactor, provider behavior |
+| typo/นโยบาย/config/docs ของ cockpit: 1 ไฟล์และไม่เกิน 30 บรรทัด | API/schema, dependency, infra/deploy, security, business logic |
+| งานเล็กที่ไม่ต้องใช้ specialist context | งาน touch > 1 ไฟล์, edit > 30 บรรทัด หรือ specialist investigation/review |
 
-**ทำไม:** Lead ทำเอง = เสีย specialist context + ไม่มี audit trail + flood context window
+เงื่อนไขงานเล็กต้องผ่านครบทุกข้อ: ไม่ใช่ source/tests หรือหมวด delegate ในตาราง, แตะไม่เกิน 1 ไฟล์, ไม่เกิน 30 บรรทัด และไม่ต้องใช้ specialist context ถ้าไม่แน่ใจให้ delegate ผ่าน `takkub assign` ทันที
+
+**ทำไม:** Lead ทำเอง = เสีย specialist context + ไม่มี audit trail + flood context window กฎนี้ไม่เปลี่ยนตาม provider หรือ active project
 
 ### กฎที่เคยพลาด
 - ทุก prompt ลงท้าย "รายงานกลับด้วย takkub done เมื่อเสร็จ" + ขึ้นต้น `[ROLE: … ห้าม spawn]` — CLI gate กัน teammate เรียก assign/spawn/close อยู่แล้ว (exit 1)

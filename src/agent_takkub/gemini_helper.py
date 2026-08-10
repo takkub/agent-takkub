@@ -121,6 +121,117 @@ def _normalize_path_for_compare(path: str) -> str:
     return normalized
 
 
+# ── Gemini chat-store resolution ────────────────────────────────────────────
+# agy stores conversation JSONL under ~/.gemini/tmp/<opaque-name>/chats/.
+# The opaque directory name is not a stable API, but each directory carries a
+# `.project_root` file with the original workspace path. Keep this provider-
+# owned discovery beside the rest of the agy integration so core spawn logic
+# and optional remote history can share it without core importing remote/.
+_gemini_chats_cache: dict[str, Path | None] = {}
+
+
+def _normalize_chat_store_cwd(cwd: str) -> str:
+    """Match the normalization used by the original history resolver."""
+    return Path(cwd).resolve().as_posix().rstrip("/").lower()
+
+
+def find_gemini_chats_dir(cwd: str) -> Path | None:
+    """Locate agy's ``chats/`` directory owned by the workspace at *cwd*.
+
+    Positive hits are cached for the process lifetime while misses are
+    deliberately re-scanned: agy creates ``chats/`` lazily after the first
+    user turn. A cached directory that disappears is evicted and re-resolved.
+    """
+    normalized_cwd = _normalize_chat_store_cwd(cwd)
+
+    cached = _gemini_chats_cache.get(normalized_cwd)
+    if cached is not None:
+        if cached.is_dir():
+            return cached
+        _gemini_chats_cache.pop(normalized_cwd, None)
+
+    tmp_root = Path.home() / ".gemini" / "tmp"
+    if not tmp_root.is_dir():
+        return None
+
+    best: Path | None = None
+    best_mtime = 0.0
+    try:
+        for project_dir in tmp_root.iterdir():
+            if not project_dir.is_dir():
+                continue
+            root_file = project_dir / ".project_root"
+            if not root_file.is_file():
+                continue
+            try:
+                root_content = root_file.read_text(encoding="utf-8").strip()
+                normalized_root = _normalize_chat_store_cwd(root_content)
+            except (OSError, ValueError):
+                continue
+            if normalized_root != normalized_cwd:
+                continue
+            chats_dir = project_dir / "chats"
+            if not chats_dir.is_dir():
+                continue
+            try:
+                latest = max(
+                    (item.stat().st_mtime for item in chats_dir.glob("session-*.jsonl")),
+                    default=0.0,
+                )
+            except OSError:
+                latest = 0.0
+            if latest >= best_mtime:
+                best = chats_dir
+                best_mtime = latest
+    except OSError:
+        pass
+
+    if best is not None:
+        _gemini_chats_cache[normalized_cwd] = best
+    return best
+
+
+def gemini_session_uuid(path: Path) -> str:
+    """Read the canonical full conversation id from a Gemini JSONL header."""
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            rec = json.loads(fh.readline())
+    except (OSError, ValueError, TypeError):
+        return ""
+    return str(rec.get("sessionId", "")).strip() if isinstance(rec, dict) else ""
+
+
+def resolve_gemini_jsonl_for_cwd(cwd: str, session_uuid: str | None) -> Path | None:
+    """Resolve a Gemini conversation inside the chat store owned by *cwd*.
+
+    Filenames contain only the first eight UUID characters, so an exact
+    lookup always confirms the full ``sessionId`` from the JSONL header.
+    With no session id, return the newest conversation for history discovery.
+    """
+    base = find_gemini_chats_dir(cwd)
+    if base is None:
+        return None
+
+    if session_uuid:
+        short_uuid = session_uuid[:8]
+        try:
+            matches = base.glob(f"session-*-{short_uuid}.jsonl")
+        except OSError:
+            return None
+        for match in matches:
+            if gemini_session_uuid(match) == session_uuid:
+                return match
+        return None
+
+    try:
+        files = list(base.glob("session-*.jsonl"))
+        if not files:
+            return None
+        return max(files, key=lambda item: item.stat().st_mtime)
+    except OSError:
+        return None
+
+
 def _folder_uri_to_path(uri: str) -> str | None:
     """Decode an agy project config `folderUri` into a comparable path.
 

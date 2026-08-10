@@ -56,6 +56,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import QObject, QTimer
 
+from .. import gemini_helper
 from ..orchestrator_text import _exit_key
 from ..user_profile import config_dir_for
 from . import config as _remote_config
@@ -304,7 +305,7 @@ def _strip_remote_prefix(text: str) -> str:
     return text[len(_REMOTE_PREFIX) :] if text.startswith(_REMOTE_PREFIX) else text
 
 
-def _resolve_claude_jsonl_path(project_ns: str, session_uuid: str) -> Path | None:
+def _resolve_claude_jsonl_path(project_ns: str, session_uuid: str | None) -> Path | None:
     """Resolve Claude's JSONL for the pane's *exact* recorded session — and only
     that. The mobile console is a mirror of the desktop Lead pane, so it must
     show the session that pane is actually on, nothing else: if that file
@@ -318,6 +319,8 @@ def _resolve_claude_jsonl_path(project_ns: str, session_uuid: str) -> Path | Non
     phone the desktop wasn't showing. Removed on purpose — a genuine
     session-id drift is a bug to fix at its source (keep pane_state.session_uuid
     accurate), never to paper over with a guess here."""
+    if not session_uuid:
+        return None
     try:
         base = config_dir_for(project_ns) / "projects"
         matches = list(base.glob(f"*/{session_uuid}.jsonl"))
@@ -384,8 +387,8 @@ def resolve_lead_jsonl(orch, project_ns: str, provider: str | None = None) -> Pa
     if scanner is None:
         return None
     session_uuid = _lead_session_uuid(orch, project_ns)
-    if not session_uuid:
-        return None
+    # Do not bail out if session_uuid is None, as some providers (Gemini)
+    # generate their own UUIDs and will resolve to the newest file instead.
     return scanner.resolve_session(project_ns, session_uuid)
 
 
@@ -570,6 +573,185 @@ def _read_recent_claude_messages(path: Path, limit: int = _DEFAULT_HISTORY_LIMIT
     return out[-limit:]
 
 
+# Compatibility aliases for callers/tests that imported the original private
+# remote helpers. The implementation and cache now live in provider/core code.
+_gemini_chats_cache = gemini_helper._gemini_chats_cache
+
+
+def _find_gemini_chats_dir(cwd: str) -> Path | None:
+    return gemini_helper.find_gemini_chats_dir(cwd)
+
+
+def _gemini_session_uuid(path: Path) -> str:
+    return gemini_helper.gemini_session_uuid(path)
+
+
+def _resolve_gemini_jsonl_for_cwd(cwd: str, session_uuid: str | None) -> Path | None:
+    return gemini_helper.resolve_gemini_jsonl_for_cwd(cwd, session_uuid)
+
+
+def _resolve_gemini_jsonl_path(project_ns: str, session_uuid: str | None) -> Path | None:
+    from .. import config as _config
+
+    cwd = _config.lead_cwd(project_ns)
+    return _resolve_gemini_jsonl_for_cwd(cwd, session_uuid) if cwd else None
+
+
+def _gemini_record_messages(rec: object) -> list[dict]:
+    """Return messages represented by one snapshot or incremental record."""
+    if not isinstance(rec, dict):
+        return []
+    patch = rec.get("$set")
+    if isinstance(patch, dict) and isinstance(patch.get("messages"), list):
+        return [m for m in patch["messages"] if isinstance(m, dict)]
+    if rec.get("id") and rec.get("type") in ("user", "gemini"):
+        return [rec]
+    return []
+
+
+def _gemini_message_text(message: dict) -> str:
+    """Extract visible text while excluding function call/response payloads."""
+    content = message.get("content", [])
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, dict):
+        content = [content]
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for item in content:
+        if isinstance(item, str):
+            parts.append(item)
+        elif isinstance(item, dict) and isinstance(item.get("text"), str):
+            parts.append(item["text"])
+    return "\n".join(part.strip() for part in parts if part.strip()).strip()
+
+
+def _read_recent_gemini_messages(path: Path, limit: int = _DEFAULT_HISTORY_LIMIT) -> list[dict]:
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return []
+    truncated = size > _HISTORY_MAX_BYTES
+    try:
+        with path.open("rb") as fh:
+            if truncated:
+                fh.seek(size - _HISTORY_MAX_BYTES)
+            raw = fh.read()
+    except OSError:
+        return []
+    lines = raw.split(b"\n")
+    if truncated:
+        lines = lines[1:]
+
+    messages_by_id: dict[str, dict] = {}
+    ordered_ids: list[str] = []
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+
+        for message in _gemini_record_messages(rec):
+            mid = str(message.get("id", "")).strip()
+            if not mid:
+                continue
+            if mid not in messages_by_id:
+                ordered_ids.append(mid)
+            messages_by_id[mid] = message
+
+    out: list[dict] = []
+    for mid in ordered_ids:
+        m = messages_by_id[mid]
+        mtype = m.get("type")
+        text = _gemini_message_text(m)
+        if not text:
+            continue
+        if mtype == "user":
+            if not text.startswith("<session_context>"):
+                text = _strip_remote_prefix(text)
+                out.append({"text": text[:_MAX_EVENT_CHARS], "kind": "me"})
+        elif mtype == "gemini":
+            out.append({"text": text[:_MAX_EVENT_CHARS], "kind": "lead"})
+
+    return out[-limit:]
+
+
+def _first_gemini_user_preview(path: Path) -> tuple[str, str]:
+    """Returns (session_uuid, preview)."""
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            first_line = fh.readline().strip()
+            if not first_line:
+                return "", ""
+            try:
+                rec1 = json.loads(first_line)
+                session_uuid = str(rec1.get("sessionId", "")).strip()
+            except ValueError:
+                return "", ""
+
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+
+                for m in _gemini_record_messages(rec):
+                    if m.get("type") == "user":
+                        text = _gemini_message_text(m)
+                        if text and not text.startswith("<session_context>"):
+                            return session_uuid, _strip_remote_prefix(text)[:_SESSION_PREVIEW_CHARS]
+    except OSError:
+        pass
+    return "", ""
+
+
+def _list_recent_gemini_sessions(
+    project_ns: str, limit: int = _SESSION_LIST_DEFAULT_LIMIT
+) -> list[dict]:
+    from .. import config as _config
+
+    cwd = _config.lead_cwd(project_ns)
+    if not cwd:
+        return []
+
+    base = _find_gemini_chats_dir(cwd)
+    if base is None:
+        return []
+
+    found: list[tuple[float, Path]] = []
+    try:
+        for jsonl in base.glob("session-*.jsonl"):
+            try:
+                found.append((jsonl.stat().st_mtime, jsonl))
+            except OSError:
+                continue
+    except OSError:
+        return []
+
+    found.sort(key=lambda t: t[0], reverse=True)
+    capped = max(1, min(limit, _SESSION_LIST_MAX_LIMIT))
+    out: list[dict] = []
+
+    for mtime, jsonl in found:
+        session_uuid, preview = _first_gemini_user_preview(jsonl)
+        if not session_uuid:
+            continue
+        if preview.startswith(_TEAMMATE_TASK_PREFIXES):
+            continue
+        out.append({"uuid": session_uuid, "mtime": mtime, "preview": preview})
+        if len(out) >= capped:
+            break
+    return out
+
+
 @dataclass(frozen=True)
 class _HistoryScanner:
     """Provider adapter for remote history/session reads.
@@ -580,7 +762,7 @@ class _HistoryScanner:
     provider-name branch to the API or notifier.
     """
 
-    resolve_session: Callable[[str, str], Path | None]
+    resolve_session: Callable[[str, str | None], Path | None]
     read_messages: Callable[[Path, int], list[dict]]
     list_sessions: Callable[[str, int], list[dict]]
 
@@ -590,7 +772,12 @@ _HISTORY_SCANNERS: dict[str, _HistoryScanner] = {
         resolve_session=_resolve_claude_jsonl_path,
         read_messages=_read_recent_claude_messages,
         list_sessions=_list_recent_claude_sessions,
-    )
+    ),
+    "gemini": _HistoryScanner(
+        resolve_session=_resolve_gemini_jsonl_path,
+        read_messages=_read_recent_gemini_messages,
+        list_sessions=_list_recent_gemini_sessions,
+    ),
 }
 
 

@@ -625,13 +625,14 @@ class StatusHeaderMixin:
             self._btn_provider.setToolTip("Click: switch user account or provider.")
             return
 
-        # Fetch the effective provider for the Lead role in this project
+        # Show the provider actually backing Lead. If a configured provider is
+        # disabled/missing, this correctly shows the Claude substitution.
         lead_provider = effective_provider_for("lead", proj)
         current_profile = user_profile.profile_for(proj, provider=lead_provider)
 
         # Determine if other providers also have non-default profiles
         active_others = []
-        for p in ["claude", "openai", "gemini"]:
+        for p in ["claude", "codex", "gemini"]:
             if p != lead_provider:
                 prof = user_profile.profile_for(proj, provider=p)
                 if prof != "default":
@@ -646,7 +647,7 @@ class StatusHeaderMixin:
         # Tooltip clearly shows all logged in providers
         tooltip = f"Click: switch user account or provider.\n\nActive in {proj}:"
         tooltip += f"\n✅ {lead_provider.capitalize()} (Lead): {current_profile}"
-        for p in ["claude", "openai", "gemini"]:
+        for p in ["claude", "codex", "gemini"]:
             if p != lead_provider:
                 prof = user_profile.profile_for(proj, provider=p)
                 tooltip += f"\n✅ {p.capitalize()}: {prof}"

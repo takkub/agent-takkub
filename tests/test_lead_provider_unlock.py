@@ -51,7 +51,9 @@ def _make_pane():
     return pane
 
 
-def _spawn_lead_and_capture(qapp, monkeypatch, tmp_path, effective_provider, *extra_patches):
+def _spawn_lead_and_capture(
+    qapp, monkeypatch, tmp_path, effective_provider, *extra_patches, **spawn_kwargs
+):
     orch = _make_orchestrator(monkeypatch)
     orch._lead_token = "test-lead-token"
     pane = _make_pane()
@@ -91,7 +93,7 @@ def _spawn_lead_and_capture(qapp, monkeypatch, tmp_path, effective_provider, *ex
         mock_pty_cls.return_value = mock_pty
         pane.attach_session = MagicMock()
 
-        ok, msg = orch.spawn("lead", cwd=str(tmp_path), project=TEST_PROJECT)
+        ok, msg = orch.spawn("lead", cwd=str(tmp_path), project=TEST_PROJECT, **spawn_kwargs)
 
     assert ok is True, msg
     assert pty_spawn_calls, "PtySession.spawn was not called"
@@ -116,6 +118,25 @@ class TestLeadThroughGeminiBranch:
         assert agents_md_calls, "render_lead_agents_md was not called for a gemini-backed Lead"
         assert agents_md_calls[0][0][:2] == (TEST_PROJECT, str(tmp_path))
         mock_ensure.assert_not_called()
+
+    def test_resume_uses_conversation_flag_after_provider_store_validation(
+        self, qapp, monkeypatch, tmp_path
+    ):
+        call, _agents_md_calls, _mock_ensure = _spawn_lead_and_capture(
+            qapp,
+            monkeypatch,
+            tmp_path,
+            "gemini",
+            patch("agent_takkub.gemini_helper.find_agy_executable", return_value="agy"),
+            patch("agent_takkub.gemini_helper.resolve_agy_project_id", return_value=None),
+            patch(
+                "agent_takkub.spawn_engine._resume_uuid_matches_provider_cwd",
+                return_value=True,
+            ),
+            resume_uuid="89716048-a562-4bc4-80e4-a6f97a2830f3",
+        )
+        argv = call["argv"]
+        assert argv[argv.index("--conversation") + 1] == ("89716048-a562-4bc4-80e4-a6f97a2830f3")
 
 
 class TestLeadThroughCodexBranch:

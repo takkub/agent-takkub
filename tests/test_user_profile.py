@@ -39,6 +39,21 @@ class TestListProfiles:
     def test_empty_registry_returns_only_default(self) -> None:
         assert len(up.list_profiles()) == 1
 
+    def test_provider_menu_gets_one_default_per_provider(self) -> None:
+        assert up.profiles_for_provider("codex") == [
+            {"name": "default", "config_dir": "", "provider": "codex"}
+        ]
+        assert up.profiles_for_provider("gemini") == [
+            {"name": "default", "config_dir": "", "provider": "gemini"}
+        ]
+
+    def test_legacy_openai_provider_normalizes_to_codex(self, tmp_path: Path) -> None:
+        up._REGISTRY_PATH.write_text(
+            '[{"name":"work","config_dir":"/codex-work","provider":"openai"}]',
+            encoding="utf-8",
+        )
+        assert up.profiles_for_provider("codex")[-1]["provider"] == "codex"
+
 
 # ─────────────────────────── add_profile ──────────────────────────────────
 
@@ -148,6 +163,27 @@ class TestSetProfile:
         up.set_profile("myproject", "work")
         slug = up._project_slug("myproject")
         assert (tmp_path / "projects" / slug / "user-profile.json").exists()
+
+    def test_codex_profile_reads_legacy_openai_mapping(self, tmp_path: Path) -> None:
+        up.add_profile("work", "/codex-work", provider="codex")
+        path = up._project_profile_path("myproject")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"providers":{"openai":"work"}}', encoding="utf-8")
+        assert up.profile_for("myproject", provider="codex") == "work"
+
+
+class TestDefaultProvider:
+    def test_round_trip(self) -> None:
+        up.set_default_provider("myproject", "gemini")
+        assert up.default_provider("myproject") == "gemini"
+
+    def test_legacy_openai_normalizes_to_codex(self) -> None:
+        up.set_default_provider("myproject", "openai")
+        assert up.default_provider("myproject") == "codex"
+
+    def test_unknown_provider_rejected(self) -> None:
+        with pytest.raises(ValueError, match="Unknown provider"):
+            up.set_default_provider("myproject", "not-real")
 
 
 # ─────────────────────────── config_dir_for ───────────────────────────────

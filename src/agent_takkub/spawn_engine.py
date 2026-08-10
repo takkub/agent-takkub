@@ -375,6 +375,21 @@ def _resume_uuid_matches_cwd(project_ns: str, session_uuid: str, cwd: str) -> bo
     return (proj_dir / f"{session_uuid}.jsonl").is_file()
 
 
+def _resume_uuid_matches_provider_cwd(
+    project_ns: str, provider: str, session_uuid: str, cwd: str
+) -> bool:
+    """Validate a caller-selected conversation against its provider store."""
+    if not _SAFE_SESSION_UUID_RE.fullmatch(session_uuid):
+        return False
+    if provider == "claude":
+        return _resume_uuid_matches_cwd(project_ns, session_uuid, cwd)
+    if provider == "gemini":
+        from .gemini_helper import resolve_gemini_jsonl_for_cwd
+
+        return resolve_gemini_jsonl_for_cwd(cwd, session_uuid) is not None
+    return False
+
+
 # Continue-nudge injected after a *resumed* stuck-recovery. `--resume` restores
 # the conversation but leaves claude idle at the ready prompt — it does NOT
 # auto-continue the interrupted turn, so without a prompt the recovered pane
@@ -1142,6 +1157,7 @@ class SpawnEngineMixin:
         _shard_total: int,
         codex_exit: bool = False,
         auto_trust: bool = False,
+        resume_uuid: str | None = None,
     ) -> tuple[bool, str]:
         """Common ConPTY launch tail for the non-claude spawn branches (shell,
         gemini, codex). Creates the PtySession, runs the final TOCTOU re-sample
@@ -1171,10 +1187,8 @@ class SpawnEngineMixin:
             if not self._final_gate_clear():
                 session.setParent(None)
                 session.deleteLater()
-                # resume_uuid omitted (defaults None): shell/gemini/codex never
-                # carry a resume_uuid — that's a claude-branch-only concept
-                # (`--resume` support, #103) and this helper is never called
-                # for the claude branch (see docstring).
+                # resume_uuid omitted (defaults None) if not passed.
+                # Only providers with supports_resume=True carry it here.
                 self._toctou_redefer(
                     role_name,
                     cwd,
@@ -1195,16 +1209,11 @@ class SpawnEngineMixin:
             )
             pane.attach_session(session, cwd=spawn_cwd, provider_name=label)
             _ekey = _exit_key(project_ns, role_name)
-            # FU1 (cross-platform audit 2026-07-10 followup): shell/gemini/codex
-            # have no `--resume` concept (claude-branch-only, see docstring
-            # above), so this spawn is never a resume. Explicit False (not a
-            # no-op) matters when the SAME role slot previously spawned via the
-            # claude branch (provider substitution toggled a codex/gemini role
-            # to claude, which sets this True on an actual --resume) — without
-            # this reset, a later crash-respawn on this branch would read the
-            # stale True and _auto_respawn would wrongly skip replaying the
-            # cached last_assigned_task (#103 multi-provider parity).
-            self._ps(_ekey).last_spawn_resumed = False
+            # Record if this spawn used resume (important for auto-respawn logic).
+            self._ps(_ekey).last_spawn_resumed = bool(resume_uuid)
+            if resume_uuid:
+                self._ps(_ekey).session_uuid = resume_uuid
+                self._ps(_ekey).session_uuid_cwd = spawn_cwd
             _sess = session
             if codex_exit:
                 self._ps(_ekey).codex_spawn_ts = time.time()
@@ -1232,7 +1241,7 @@ class SpawnEngineMixin:
             # while a Claude-capable spawn was deferred.
             self._finish_spawn_initial_task(role_name, project_ns, preloaded=False)
             self.statusChanged.emit()
-            _log_event("spawn", role=role_name, cwd=spawn_cwd, resumed=False)
+            _log_event("spawn", role=role_name, cwd=spawn_cwd, resumed=bool(resume_uuid))
             return True, f"{label} spawned in {spawn_cwd}"
         except Exception as e:
             # #139: make a native-spawn failure's actual elapsed time visible
@@ -1595,6 +1604,13 @@ class SpawnEngineMixin:
                 spawn_cwd = (
                     cwd or default_cwd_for_role(role_name, project=project_ns) or str(DATA_HOME)
                 )
+            if resume_uuid:
+                if not spec.supports_resume or not spec.session_resume_flag:
+                    return False, f"resume unavailable for provider {spec.name}"
+                if not _resume_uuid_matches_provider_cwd(
+                    project_ns, spec.name, resume_uuid, spawn_cwd
+                ):
+                    return False, f"resume_uuid does not match cwd for {role_name}"
             if _is_lead:
                 # Lead-specific AGENTS.md content (cockpit CLAUDE.md +
                 # BLOCKED_DIRS + session brief) — NOT the teammate cheatsheet
@@ -1758,6 +1774,10 @@ class SpawnEngineMixin:
                         resolved=None,
                         fallback=spec.project_scope_new_flag,
                     )
+
+            if resume_uuid:
+                provider_argv.extend([spec.session_resume_flag, resume_uuid])
+
             return self._launch_session(
                 pane=pane,
                 role_name=role_name,
@@ -1773,6 +1793,7 @@ class SpawnEngineMixin:
                 _shard_total=_shard_total,
                 codex_exit=spec.early_exit_watch,
                 auto_trust=spec.auto_trust,
+                resume_uuid=resume_uuid,
             )
 
         # Resolve cwd:
