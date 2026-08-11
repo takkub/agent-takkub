@@ -366,10 +366,15 @@ def lead_history(orch, project_ns: str, limit: object = None) -> dict:
         limit = _HISTORY_DEFAULT_LIMIT
     limit = max(1, min(limit, _HISTORY_MAX_LIMIT))
     provider, messages = notify.lead_history_snapshot(orch, project_ns, limit)
+    panes = getattr(orch, "_panes_by_project", None)
+    project_panes = panes.get(project_ns) if isinstance(panes, dict) else None
+    lead_pane = project_panes.get("lead") if isinstance(project_panes, dict) else None
+    working = getattr(lead_pane, "state", None) == "working"
     return {
         "project": project_ns,
         "provider": provider,
         "messages": messages,
+        "working": working,
         "lead_provider_note": _lead_provider_note(provider),
     }
 

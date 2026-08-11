@@ -307,6 +307,23 @@ def _strip_remote_prefix(text: str) -> str:
     return text[len(_REMOTE_PREFIX) :] if text.startswith(_REMOTE_PREFIX) else text
 
 
+def _live_user_payload(text: str | None) -> list[dict]:
+    """Normalize a provider-owned user record for the live SSE stream.
+
+    ``remote`` lets the PWA suppress only its own optimistic echo while still
+    showing identical prompts deliberately typed twice on the desktop.
+    """
+    if not text:
+        return []
+    remote = text.startswith(_REMOTE_PREFIX)
+    clean = _strip_remote_prefix(text).strip()
+    return [{"text": clean[:_MAX_EVENT_CHARS], "remote": remote}] if clean else []
+
+
+def _claude_live_users(rec: dict) -> list[dict]:
+    return _live_user_payload(_lead_user_text(rec))
+
+
 def _resolve_claude_jsonl_path(project_ns: str, session_uuid: str | None) -> Path | None:
     """Resolve Claude's JSONL for the pane's *exact* recorded session — and only
     that. The mobile console is a mirror of the desktop Lead pane, so it must
@@ -985,6 +1002,23 @@ def _gemini_live_text_blocks(rec: dict) -> list[str]:
     return out[-1:]
 
 
+def _gemini_live_users(rec: dict) -> list[dict]:
+    messages = _gemini_record_messages(rec)
+    # Snapshot records repeat the full conversation. Only a snapshot whose
+    # newest message is a user turn represents a new desktop submission.
+    if not messages or messages[-1].get("type") != "user":
+        return []
+    text = _gemini_message_text(messages[-1])
+    if not text or text.startswith("<session_context>"):
+        return []
+    return _live_user_payload(text)
+
+
+def _codex_live_users(rec: dict) -> list[dict]:
+    parsed = _codex_record_message(rec)
+    return _live_user_payload(parsed[1]) if parsed is not None and parsed[0] == "me" else []
+
+
 @dataclass(frozen=True)
 class _HistoryScanner:
     """Provider adapter for remote history/session reads.
@@ -999,6 +1033,7 @@ class _HistoryScanner:
     read_messages: Callable[[Path, int], list[dict]]
     list_sessions: Callable[[str, int], list[dict]]
     live_texts: Callable[[dict], list[str]]
+    live_users: Callable[[dict], list[dict]] = lambda _rec: []
     live_activity: Callable[[dict], str | None] = lambda _rec: None
     live_ask: Callable[[dict], dict | None] = lambda _rec: None
     requires_session_uuid: bool = True
@@ -1010,6 +1045,7 @@ _HISTORY_SCANNERS: dict[str, _HistoryScanner] = {
         read_messages=_read_recent_claude_messages,
         list_sessions=_list_recent_claude_sessions,
         live_texts=_lead_text_blocks,
+        live_users=_claude_live_users,
         live_activity=_lead_activity,
         live_ask=_ask_question_options,
     ),
@@ -1018,6 +1054,7 @@ _HISTORY_SCANNERS: dict[str, _HistoryScanner] = {
         read_messages=_read_recent_gemini_messages,
         list_sessions=_list_recent_gemini_sessions,
         live_texts=_gemini_live_text_blocks,
+        live_users=_gemini_live_users,
         requires_session_uuid=False,
     ),
     "codex": _HistoryScanner(
@@ -1025,6 +1062,7 @@ _HISTORY_SCANNERS: dict[str, _HistoryScanner] = {
         read_messages=_read_recent_codex_messages,
         list_sessions=_list_recent_codex_sessions,
         live_texts=_codex_live_text_blocks,
+        live_users=_codex_live_users,
         requires_session_uuid=False,
     ),
 }
@@ -1379,6 +1417,8 @@ class LeadNotifier(QObject):
                 rec = json.loads(line)
             except ValueError:
                 continue
+            for user_payload in scanner.live_users(rec):
+                self._broadcaster.push("user", user_payload, project_ns)
             texts = scanner.live_texts(rec)
             if texts:
                 joined = "\n".join(texts)[:_MAX_EVENT_CHARS]
@@ -1411,6 +1451,16 @@ class LeadNotifier(QObject):
             # Only signal "working" when this batch showed activity but
             # produced no reply text — a real text push already tells the
             # PWA to drop the "…".
+            # Record this edge as well as sending it. Otherwise tool activity
+            # can emit `working` between pane-state polls while the dedupe map
+            # remains False; the following idle poll suppresses `idle` and the
+            # phone spinner stays up forever.
+            if not self._lead_working.get(project_ns, False):
+                self._structured_text_seen.discard(project_ns)
+                panes = getattr(self._orch, "_panes_by_project", {}).get(project_ns, {})
+                pane = panes.get("lead") if isinstance(panes, dict) else None
+                self._screen_baselines[project_ns] = _pane_screen_lines(pane)
+            self._lead_working[project_ns] = True
             self._broadcaster.push("working", activity, project_ns)
 
     # ── done events ───────────────────────────────────────────────────

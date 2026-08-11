@@ -207,7 +207,9 @@ class _Bridge(QObject):
             pending.reply.put((500, {"ok": False, "msg": "internal error"}))
 
 
-_ALLOWED_SSE_EVENTS = frozenset({"done", "lead", "working", "idle", "blocked_on_picker"})
+_ALLOWED_SSE_EVENTS = frozenset(
+    {"done", "lead", "user", "working", "idle", "blocked_on_picker", "session_changed"}
+)
 
 
 def _force_wake(q: queue.Queue) -> None:

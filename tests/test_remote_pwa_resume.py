@@ -222,6 +222,24 @@ class TestConcurrentProjectStreams:
         assert "appendLeadLive(parseSseData(evt.data, project), project)" in chunk[:3500]
         assert 'appendProjectMessage(project, "done"' in chunk[:3500]
 
+    def test_desktop_user_turns_stream_to_mobile_without_refetch(self):
+        js = _read("app.js")
+        chunk = js.split('es.addEventListener("user"')[1].split('es.addEventListener("done"')[0]
+        assert 'appendProjectMessage(project, "me", text)' in chunk
+        assert "payload.remote" in chunk
+
+    def test_working_state_has_server_reconciliation_and_optimistic_timeout(self):
+        js = _read("app.js")
+        assert "workingConfirmed: false" in js
+        assert "function beginOptimisticWorking(project)" in js
+        assert "}, 30000);" in js
+        history = js.split("function loadHistory(project, force)")[1].split("function connectSse")[
+            0
+        ]
+        assert "!!(data && data.working)" in history
+        assert "!lead.optimisticWorkingTimer" in history
+        assert "setProjectWorking(project, false, null, true)" in js
+
     def test_desktop_session_change_reloads_only_that_project_history(self):
         js = _read("app.js")
         chunk = js.split('es.addEventListener("session_changed"')[1].split(
@@ -236,3 +254,19 @@ class TestConcurrentProjectStreams:
         js = _read("app.js")
         for provider in ("claude", "openai", "gemini", "opencode", "kimi", "cursor"):
             assert f"{provider}: {{" in js
+
+
+class TestMobileViewportLayout:
+    def test_app_root_is_pinned_so_ios_cannot_scroll_header_offscreen(self):
+        html = _read("index.html")
+        body_css = html.split("\n  body {")[1].split("}", 1)[0]
+        app_css = html.split("\n  #app {")[1].split("}", 1)[0]
+        header_css = html.split("\n  header {")[1].split("}", 1)[0]
+
+        assert "position: fixed" in body_css
+        assert "inset: 0" in body_css
+        assert "position: fixed" in app_css
+        assert "height: 100dvh" in app_css
+        assert "overflow: hidden" in app_css
+        assert "z-index: 20" in header_css
+        assert "min-height: 50px" in header_css

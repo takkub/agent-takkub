@@ -4,6 +4,13 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.52] - 2026-08-11
+
+### Fixed (แก้)
+- **ข้อความที่พิมพ์จาก Desktop แสดงบน Remote Mobile ทันที** — live transcript adapters ของ Claude, Codex และ Gemini ส่ง user turn ผ่าน SSE แยกจากคำตอบ Lead พร้อมระบุข้อความที่มาจาก Remote เพื่อกัน optimistic echo ซ้ำ; เพิ่ม `user` และ `session_changed` เข้า SSE allowlist จึงไม่ต้องกด Refresh เพื่อเห็นข้อความหรือ session ที่เปลี่ยน
+- **สถานะ “OpenAI กำลังทำงาน…” ไม่ค้างหลัง turn จบ** — JSONL activity edge บันทึกสถานะเดียวกับ pane-state transition ทำให้ idle edge ไม่ถูก dedupe ทิ้ง; history API ส่งสถานะ working จริง และ PWA มี confirmed state พร้อม optimistic timeout 30 วินาทีสำหรับ turn ที่จบเร็วระหว่าง notifier polls
+- **Header ของ Remote ไม่หายบน iPhone Safari** — ตรึง body/app shell กับ dynamic viewport, จำกัด scroll ไว้ใน chat log และกำหนดความสูงขั้นต่ำ/z-index ให้ header ป้องกัน Safari restore หรือ pan layout viewport จนหัวหน้าหลุดออกนอกจอ; bump service-worker shell cache เป็น v27
+
 ## [1.0.51] - 2026-08-11
 
 ### Added (เพิ่ม)

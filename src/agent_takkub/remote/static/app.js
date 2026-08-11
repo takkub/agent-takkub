@@ -59,12 +59,45 @@
         transportGeneration: 0,
         connected: false,
         working: false,
+        workingConfirmed: false,
+        optimisticWorkingTimer: null,
         workingCategory: null,
         picker: null,
         lastLeadAt: 0,
       };
     }
     return state.leadByProject[project];
+  }
+
+  function clearOptimisticWorkingTimer(lead) {
+    if (lead && lead.optimisticWorkingTimer) {
+      clearTimeout(lead.optimisticWorkingTimer);
+      lead.optimisticWorkingTimer = null;
+    }
+  }
+
+  function setProjectWorking(project, working, category, confirmed) {
+    var lead = projectLeadState(project);
+    if (!lead) return;
+    if (!working || confirmed) clearOptimisticWorkingTimer(lead);
+    lead.working = !!working;
+    lead.workingConfirmed = !!working && !!confirmed;
+    lead.workingCategory = working ? (category || null) : null;
+    if (project === visibleProject()) {
+      state.leadWorking = lead.working;
+      if (lead.working) showThinking(lead.workingCategory);
+      else hideThinking();
+    }
+  }
+
+  function beginOptimisticWorking(project) {
+    var lead = projectLeadState(project);
+    if (!lead) return;
+    setProjectWorking(project, true, null, false);
+    lead.optimisticWorkingTimer = setTimeout(function () {
+      lead.optimisticWorkingTimer = null;
+      if (!lead.workingConfirmed) setProjectWorking(project, false, null, false);
+    }, 30000);
   }
 
   var VIEW_LABELS = { projects: "Projects", pulse: "Pulse" };
@@ -1206,8 +1239,7 @@
     var targetLead = projectLeadState(project);
     if (targetLead) {
       targetLead.picker = null;
-      targetLead.working = true;
-      targetLead.workingCategory = null;
+      beginOptimisticWorking(project);
     }
     showThinking();
     var sayBody = { text: text, project: project };
@@ -1216,8 +1248,7 @@
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(sayBody),
     }).catch(function () {
-      if (targetLead) targetLead.working = false;
-      hideThinking();
+      if (targetLead) setProjectWorking(project, false, null, false);
       toast("ส่งข้อความไม่สำเร็จ");
     });
   }
@@ -1273,8 +1304,7 @@
           );
           var targetLead = projectLeadState(project);
           if (targetLead) {
-            targetLead.working = true;
-            targetLead.workingCategory = null;
+            beginOptimisticWorking(project);
           }
           showThinking();
           toast("ส่งรูปแล้ว");
@@ -1334,6 +1364,13 @@
           });
           if (!duplicate) lead.messages.push(message);
         });
+        // A freshly opened phone (or a manual refresh) must converge on the
+        // pane's real status even when it missed the working/idle SSE edge.
+        // Do not clobber a message that this phone has just submitted while
+        // the history request was already in flight.
+        if (!lead.optimisticWorkingTimer) {
+          setProjectWorking(project, !!(data && data.working), null, true);
+        }
         lead.historyLoaded = true;
         if (project === visibleProject()) renderSelectedProject();
       })
@@ -1492,30 +1529,41 @@
     // web/delegating/skill/working, mapped to a Thai label so the remote
     // shows *what* the Lead is doing, not just a bare "…".
     es.addEventListener("working", function (evt) {
-      lead.working = true;
-      lead.workingCategory = parseSseData(evt.data, project);
-      if (project === visibleProject()) {
-        state.leadWorking = true;
-        showThinking(lead.workingCategory);
-      }
+      setProjectWorking(project, true, parseSseData(evt.data, project), true);
     });
     // Lead pane went idle (turn finished) — drop the "…" the instant the
     // desktop spinner stops, so the phone never shows a stale "working" state.
     es.addEventListener("idle", function () {
-      lead.working = false;
-      lead.workingCategory = null;
-      if (project === visibleProject()) {
-        state.leadWorking = false;
-        hideThinking();
-      }
+      setProjectWorking(project, false, null, true);
     });
     es.addEventListener("lead", function (evt) {
+      // A very fast turn may produce reply text between notifier polls, with
+      // no observable pane-state edge. Reply text is enough to retire only
+      // the local optimistic spinner; a confirmed working state stays until
+      // the authoritative idle event arrives.
+      if (!lead.workingConfirmed) setProjectWorking(project, false, null, false);
       appendLeadLive(parseSseData(evt.data, project), project);
     });
+    // Mirror prompts typed in the desktop Lead pane to every connected
+    // phone. Messages originating from this same Remote client are already
+    // painted optimistically, so suppress that one immediate echo only.
+    es.addEventListener("user", function (evt) {
+      var payload = null;
+      try {
+        payload = JSON.parse(evt.data);
+      } catch (e) {
+        payload = null;
+      }
+      var text = payload && typeof payload.text === "string"
+        ? payload.text
+        : parseSseData(evt.data, project);
+      if (!text) return;
+      var last = lead.messages.length ? lead.messages[lead.messages.length - 1] : null;
+      if (payload && payload.remote && last && last.kind === "me" && last.text === text) return;
+      appendProjectMessage(project, "me", text);
+    });
     es.addEventListener("done", function (evt) {
-      lead.working = false;
-      lead.workingCategory = null;
-      if (project === visibleProject()) state.leadWorking = false;
+      setProjectWorking(project, false, null, true);
       appendProjectMessage(project, "done", parseSseData(evt.data, project));
     });
     // A session was resumed/replaced on the desktop while this project's SSE
@@ -1524,6 +1572,7 @@
     // streaming untouched.
     es.addEventListener("session_changed", function (evt) {
       parseSseData(evt.data, project);
+      setProjectWorking(project, false, null, true);
       lead.historyGeneration += 1;
       lead.historyLoading = null;
       lead.historyLoaded = false;
@@ -1599,7 +1648,10 @@
   function stopLeadStream(project, discard) {
     if (project) {
       stopProjectTransport(project);
-      if (discard) delete state.leadByProject[project];
+      if (discard) {
+        clearOptimisticWorkingTimer(state.leadByProject[project]);
+        delete state.leadByProject[project];
+      }
     } else {
       Object.keys(state.leadByProject).forEach(stopProjectTransport);
     }
@@ -1748,6 +1800,7 @@
             });
           });
           resumedLead.historyLoaded = resumedLead.messages.length > 0;
+          setProjectWorking(project, false, null, true);
           setProvider(res.data.provider, project);
           if (project === visibleProject()) renderSelectedProject();
           startLeadStream(project);

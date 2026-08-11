@@ -968,6 +968,16 @@ class TestSSEBroadcaster:
         assert event == "blocked_on_picker"
         assert json.loads(payload) == structured
 
+    @pytest.mark.parametrize("event", ["user", "session_changed"])
+    def test_remote_sync_events_are_allowlisted(self, event):
+        broadcaster = http_server.SSEBroadcaster()
+        q = broadcaster.register("proj")
+        payload = {"text": "sync", "remote": False}
+        broadcaster.push(event, payload, "proj")
+        received_event, received_payload = q.get_nowait()
+        assert received_event == event
+        assert json.loads(received_payload) == payload
+
     def test_unknown_event_name_is_dropped(self):
         """Defense-in-depth allowlist (H-C): only `done`/`lead` are ever
         forwarded to a client, regardless of what a caller passes in."""

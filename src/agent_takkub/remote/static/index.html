@@ -31,6 +31,7 @@
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
   html, body {
     height: 100%;
+    width: 100%;
     margin: 0;
     overflow: hidden; /* the inner <main> owns scrolling — a scrollable body
                           double-scrolls and reads as "scroll ไม่ได้" on iOS */
@@ -40,7 +41,17 @@
     -webkit-text-size-adjust: 100%;
     overscroll-behavior-y: contain;
   }
+  body {
+    /* Mobile Safari can restore/pan the layout viewport even when body has
+       overflow:hidden, leaving the first flex item (the header) above the
+       visible area. Pin the app host itself; only #lead-log may scroll. */
+    position: fixed;
+    inset: 0;
+  }
   #app {
+    position: fixed;
+    inset: 0;
+    width: 100%;
     display: flex;
     flex-direction: column;
     height: 100vh;
@@ -50,6 +61,7 @@
       radial-gradient(900px 480px at 85% -12%, #10201e 0%, transparent 60%),
       radial-gradient(700px 420px at -5% 0%, #16121c 0%, transparent 55%),
       var(--bg);
+    overflow: hidden;
   }
 
   /* ---------- offline banner ---------- */
@@ -66,6 +78,9 @@
 
   /* ---------- header ---------- */
   header {
+    position: relative;
+    z-index: 20;
+    min-height: 50px;
     padding: 10px 16px;
     padding-top: max(10px, env(safe-area-inset-top));
     border-bottom: 1px solid var(--line);

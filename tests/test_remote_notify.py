@@ -730,6 +730,16 @@ class TestLeadUserText:
         )
         assert notify_mod._lead_user_text(rec) is None
 
+    def test_live_user_payload_marks_remote_origin_and_strips_prefix(self):
+        assert notify_mod._claude_live_users(
+            json.loads(_user_line("[remote → lead] hello from phone"))
+        ) == [{"text": "hello from phone", "remote": True}]
+
+    def test_live_user_payload_preserves_desktop_origin(self):
+        assert notify_mod._claude_live_users(json.loads(_user_line("hello from desktop"))) == [
+            {"text": "hello from desktop", "remote": False}
+        ]
+
 
 class TestAskQuestionPrompt:
     """`_ask_question_prompt` (W2a SHOULD-FIX): detects a real `AskUserQuestion`
@@ -885,6 +895,52 @@ class TestStripRemotePrefix:
 
 
 class TestLeadOutputTail:
+    def test_emits_new_desktop_user_turn_to_connected_remotes(self, qapp, tmp_path, config_dir):
+        orch = _FakeOrch()
+        broadcaster = _FakeBroadcaster()
+        _write_jsonl(tmp_path, "C--proj", "uuid-1", [])
+        notifier = LeadNotifier(orch, broadcaster)
+        try:
+            orch.set_lead("proj", "uuid-1")
+            orch.statusChanged.emit()
+            path = config_dir / "projects" / "C--proj" / "uuid-1.jsonl"
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(_user_line("typed on desktop") + "\n")
+
+            notifier._poll_all()
+
+            assert broadcaster.events == [
+                ("user", {"text": "typed on desktop", "remote": False}, "proj")
+            ]
+        finally:
+            notifier.stop()
+
+    def test_jsonl_activity_followed_by_idle_always_clears_working(
+        self, qapp, tmp_path, config_dir
+    ):
+        orch = _FakeOrch()
+        broadcaster = _FakeBroadcaster()
+        _write_jsonl(tmp_path, "C--proj", "uuid-1", [])
+        notifier = LeadNotifier(orch, broadcaster)
+        try:
+            orch.set_lead("proj", "uuid-1")
+            orch.statusChanged.emit()
+            path = config_dir / "projects" / "C--proj" / "uuid-1.jsonl"
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(_tool_use_line() + "\n")
+
+            # The pane is already idle by this poll. The activity record may
+            # briefly raise working, but the same poll must also emit idle.
+            notifier._poll_all()
+
+            assert broadcaster.events == [
+                ("working", "reading", "proj"),
+                ("idle", "", "proj"),
+            ]
+            assert notifier._lead_working["proj"] is False
+        finally:
+            notifier.stop()
+
     def test_resyncs_to_lead_session_and_emits_assistant_text_only(
         self, qapp, tmp_path, config_dir
     ):
@@ -1382,3 +1438,13 @@ def test_gemini_live_parser_uses_gemini_records_not_claude_shape():
         }
     }
     assert notify_mod._gemini_live_text_blocks(snapshot) == ["new reply"]
+
+
+def test_gemini_and_codex_live_user_parsers_are_provider_native():
+    gemini = {"id": "u1", "type": "user", "content": [{"text": "desktop gemini"}]}
+    codex = {
+        "type": "event_msg",
+        "payload": {"type": "user_message", "message": "desktop codex"},
+    }
+    assert notify_mod._gemini_live_users(gemini) == [{"text": "desktop gemini", "remote": False}]
+    assert notify_mod._codex_live_users(codex) == [{"text": "desktop codex", "remote": False}]

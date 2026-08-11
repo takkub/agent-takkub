@@ -728,6 +728,7 @@ class TestLeadHistory:
             "project": "proj-a",
             "provider": "claude",
             "messages": [],
+            "working": False,
             "lead_provider_note": None,
         }
 
@@ -751,8 +752,17 @@ class TestLeadHistory:
                 {"text": "first", "kind": "me"},
                 {"text": "second", "kind": "lead"},
             ],
+            "working": False,
             "lead_provider_note": None,
         }
+
+    def test_reports_current_lead_pane_working_state(self, monkeypatch):
+        monkeypatch.setattr(
+            api.notify, "lead_history_snapshot", lambda orch, ns, limit: ("claude", [])
+        )
+        orch = _FakeOrchWithPanes({"proj-a": {"lead": _FakePane("working", None)}})
+
+        assert api.lead_history(orch, "proj-a")["working"] is True
 
     def test_provider_note_set_for_provider_without_saved_history(self, monkeypatch):
         """A provider using the live visible-screen fallback still explains
