@@ -382,7 +382,12 @@ codex_spec = ProviderSpec(
     # the composer and submit an empty line instead of inserting a newline
     # (#149). Shift+Enter on a codex pane falls back to xterm's native '\r'.
     supports_mirror=False,
-    supports_resume=False,
+    # Codex CLI stable contract: ``codex resume <SESSION_ID>``.  The generic
+    # provider spawn path appends this subcommand + the UUID selected by the
+    # Remote Mobile picker after all global flags, avoiding Codex's cwd-wide
+    # native picker entirely.
+    supports_resume=True,
+    session_resume_flag="resume",
     supports_slash_commands=False,
     supports_hooks=False,
     task_notice_preamble=(
@@ -410,9 +415,13 @@ codex_spec = ProviderSpec(
     # override accepts `-c model_reasoning_effort=<low|medium|high>`, so role
     # tier effort can be wired without mutating the user's config.toml.
     effort_levels=("low", "medium", "high"),  # what `model_reasoning_effort` accepts
-    produces_jsonl_transcript=False,
+    # Codex writes structured rollout JSONL under ~/.codex/sessions. Remote
+    # consumes only event_msg user/agent messages; tool/reasoning records stay
+    # local. The session id in the rollout metadata is also the stable id used
+    # by ``codex resume <SESSION_ID>`` and the Remote picker.
+    produces_jsonl_transcript=True,
     supports_token_meter=False,
-    supports_remote_history=False,
+    supports_remote_history=True,
     auto_trust=True,  # spawn_engine.py codex branch: auto_trust=True
     early_exit_watch=True,  # spawn_engine.py codex branch: codex_exit=True
 )

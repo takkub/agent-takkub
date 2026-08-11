@@ -387,6 +387,10 @@ def _resume_uuid_matches_provider_cwd(
         from .gemini_helper import resolve_gemini_jsonl_for_cwd
 
         return resolve_gemini_jsonl_for_cwd(cwd, session_uuid) is not None
+    if provider == "codex":
+        from .codex_helper import resolve_codex_jsonl_for_cwd
+
+        return resolve_codex_jsonl_for_cwd(cwd, session_uuid) is not None
     return False
 
 

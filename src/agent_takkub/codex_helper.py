@@ -22,12 +22,77 @@ Design rules (mirror update_helper.py):
 
 from __future__ import annotations
 
+import json
+import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 from ._win_console import SUBPROCESS_NO_WINDOW
+
+
+def codex_sessions_root() -> Path:
+    """Return Codex's provider-owned interactive session store.
+
+    ``CODEX_HOME`` is part of Codex's local-state contract; when it is not
+    set the CLI uses ``~/.codex``.  Keeping this resolver in the core adapter
+    lets both the optional Remote package and the spawn engine validate the
+    same store without making core orchestration import ``agent_takkub.remote``.
+    """
+    configured = os.environ.get("CODEX_HOME", "").strip()
+    return Path(configured) / "sessions" if configured else Path.home() / ".codex" / "sessions"
+
+
+def normalize_codex_cwd(value: object) -> str:
+    """Normalize a session-metadata cwd for exact, platform-aware matching."""
+    if not isinstance(value, str) or not value.strip():
+        return ""
+    return os.path.normcase(os.path.abspath(os.path.expanduser(value.strip())))
+
+
+def read_codex_session_meta(path: Path) -> dict:
+    """Read the first ``session_meta`` payload from a Codex rollout file."""
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            first = fh.readline().strip()
+        rec = json.loads(first) if first else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+    payload = rec.get("payload") if isinstance(rec, dict) else None
+    return payload if rec.get("type") == "session_meta" and isinstance(payload, dict) else {}
+
+
+def resolve_codex_jsonl_for_cwd(
+    cwd: str,
+    session_id: str,
+    *,
+    root: Path | None = None,
+) -> Path | None:
+    """Resolve *session_id* only when its recorded cwd exactly matches *cwd*.
+
+    The Remote resume endpoint calls this before closing a live Lead pane and
+    the spawn engine calls it again before constructing ``codex resume``.
+    Returning ``None`` for corrupt metadata, missing IDs, or cwd mismatch
+    prevents a mobile client from resuming another project's conversation.
+    """
+    wanted_cwd = normalize_codex_cwd(cwd)
+    wanted_id = str(session_id or "").strip()
+    base = root if root is not None else codex_sessions_root()
+    if not wanted_cwd or not wanted_id or not base.is_dir():
+        return None
+    try:
+        candidates = base.rglob("rollout-*.jsonl")
+        for path in candidates:
+            meta = read_codex_session_meta(path)
+            meta_id = str(meta.get("id") or meta.get("session_id") or "").strip()
+            if meta_id != wanted_id:
+                continue
+            if normalize_codex_cwd(meta.get("cwd")) == wanted_cwd:
+                return path
+    except OSError:
+        return None
+    return None
 
 
 def find_codex_executable() -> str | None:

@@ -144,6 +144,13 @@ class TestCodexArgvNetworkAccess:
             "features.plugins=false",
         ]
 
+    def test_provider_declares_exact_session_resume_contract(self) -> None:
+        from agent_takkub.provider_spec import PROVIDER_REGISTRY
+
+        spec = PROVIDER_REGISTRY["codex"]
+        assert spec.supports_resume is True
+        assert spec.session_resume_flag == "resume"
+
 
 class TestCodexArgvMcpDeny:
     @pytest.mark.parametrize("platform", ["win32", "darwin", "linux"])

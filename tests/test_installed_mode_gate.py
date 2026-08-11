@@ -325,3 +325,40 @@ class TestInstalledCliPortFileWiring:
         assert "refused" in combined
         assert "no port file" not in combined
         assert "cockpit is not running" not in combined
+
+
+class TestInstalledRemoteAssets:
+    """The wheel used in production must include the current Remote PWA."""
+
+    def test_wheel_ships_resume_and_project_stream_assets(
+        self, installed_venv: Path, installed_home: Path
+    ) -> None:
+        out = _run_in_venv(
+            installed_venv,
+            installed_home,
+            """
+            import json
+            from pathlib import Path
+            import agent_takkub
+
+            # Locate packaged data without importing ``agent_takkub.remote``;
+            # this deliberately no-deps production probe does not install Qt.
+            static = Path(agent_takkub.__file__).parent / "remote" / "static"
+            app = (static / "app.js").read_text(encoding="utf-8")
+            sw = (static / "sw.js").read_text(encoding="utf-8")
+            print(json.dumps({
+                "has_project_state": "leadByProject: {}" in app,
+                "has_sessions_api": "api/lead/sessions" in app,
+                "has_resume_api": "api/lead/resume" in app,
+                "has_upload_api": "api/lead/upload" in app,
+                "has_cache_v25": "takkub-remote-shell-v25" in sw,
+            }))
+            """,
+        )
+        assert out == {
+            "has_project_state": True,
+            "has_sessions_api": True,
+            "has_resume_api": True,
+            "has_upload_api": True,
+            "has_cache_v25": True,
+        }

@@ -4,6 +4,21 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.51] - 2026-08-11
+
+### Added (เพิ่ม)
+- **Remote Mobile Resume ใช้ session จริงของ provider** — มีรายการ session แยกตามโปรเจกต์พร้อม preview/provider; Codex resume ด้วย UUID และ cwd ที่ตรงกับ transcript ส่วน Gemini/Claude และ provider ที่รองรับใช้ adapter เดียวกัน โดย response ส่ง history ของ session ที่เลือกกลับมาก่อนต่อ SSE จึงไม่เห็นหน้าว่างหลัง resume
+- **แนบรูปจากมือถือถึง Lead ได้โดยตรง** — ปุ่ม 📎 เลือกรูปจากกล้องหรือคลังรูป รองรับ PNG/JPEG/WebP/GIF สูงสุด 8 MB; ตรวจ magic bytes, บันทึกด้วยชื่อสุ่มใต้ artifacts กลางของโปรเจกต์ และส่ง absolute path ให้ Lead ทุก provider เปิดดู พร้อม preview แบบ data URL ที่ปลอดภัยบนมือถือ
+
+### Changed (เปลี่ยน)
+- **สลับหลายโปรเจกต์แบบทันทีและทำงานพร้อมกัน** — Remote เก็บ history/SSE แยกต่อโปรเจกต์และเปิด stream พร้อมกันสูงสุด 4 โปรเจกต์; การสลับใช้ memory cache โดยไม่ยิง history API หรือ reconnect ใหม่ ขณะที่เครื่อง/แท็บใหม่ยัง bootstrap history สดหนึ่งครั้งเสมอ
+- **ซิงก์ข้ามอุปกรณ์โดยไม่ย้อนกลับไปโหลดทุกครั้ง** — เพิ่มปุ่ม Refresh, `Cache-Control: private, no-store` สำหรับ JSON API และรีซิงก์โปรเจกต์ที่เปิดเมื่อมือถือกลับจาก background เกิน 30 วินาที เพื่อเก็บข้อความที่พลาดระหว่าง browser ระงับ SSE
+
+### Fixed (แก้)
+- **Remote ไม่ค้างหรือตายหลัง network หลุด** — SSE retry ต่อเนื่องด้วย backoff สูงสุด 15 วินาทีแทนการหยุดถาวรหลังครบจำนวนครั้ง และรักษาสถานะ turn ที่กำลังทำงานระหว่าง reconnect
+- **หน้า Remote ไม่มี console error แดงจาก bootstrap/Cloudflare อีก** — password gate ใช้ bootstrap preflight เดียวก่อนเรียก API ที่ถูก gate และ static response ส่ง `no-transform` เพื่อไม่ให้ edge inject analytics script ที่ขัดกับ CSP
+- **ข้อความ Lead รองรับ provider ทุกตัว** — parser มี provider-neutral terminal fallback สำหรับ Codex, Gemini, Claude, OpenCode, Kimi, Cursor และ provider ใหม่ โดยยังคง structured adapters เมื่อมีข้อมูล native
+
 ## [1.0.50] - 2026-08-10
 
 ### Changed (เปลี่ยน)

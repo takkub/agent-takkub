@@ -303,6 +303,23 @@ class TestResumeUuidMatchesProviderCwd:
         assert _resume_uuid_matches_provider_cwd("default", "gemini", session_uuid, str(tmp_path))
         assert seen == {"cwd": str(tmp_path), "uuid": session_uuid}
 
+    def test_codex_uses_provider_core_resolver(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        from agent_takkub import codex_helper
+        from agent_takkub.spawn_engine import _resume_uuid_matches_provider_cwd
+
+        seen: dict[str, str] = {}
+
+        def _resolve(cwd: str, uuid: str) -> pathlib.Path:
+            seen.update(cwd=cwd, uuid=uuid)
+            return tmp_path / "rollout.jsonl"
+
+        monkeypatch.setattr(codex_helper, "resolve_codex_jsonl_for_cwd", _resolve)
+
+        assert _resume_uuid_matches_provider_cwd("default", "codex", "codex-uuid", str(tmp_path))
+        assert seen == {"cwd": str(tmp_path), "uuid": "codex-uuid"}
+
 
 class TestSpawnResumeUuid:
     # role_name deliberately not "lead" — a lead spawn also renders
@@ -662,7 +679,12 @@ class TestApiResumeLead:
         fake_orch.spawn.assert_called_once_with(
             LEAD.name, cwd="/proj/web", project="proj", resume_uuid="uuid-xyz"
         )
-        assert result == {"ok": True, "project": "proj"}
+        assert result == {
+            "ok": True,
+            "project": "proj",
+            "provider": "claude",
+            "messages": [],
+        }
 
     def test_spawn_failure_surfaces_as_409(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(_config, "list_project_names", lambda: ["proj"])
@@ -704,17 +726,15 @@ class TestApiResumeLead:
             api.resume_lead(fake_orch, "proj", "forged-uuid")
         assert exc.value.status == 409
 
-    def test_non_claude_lead_rejected_before_uuid_check(
+    def test_unsupported_provider_rejected_before_uuid_check(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Issue #101: a Codex-backed Lead has no verified resume flag —
-        reject with a clear 409 explaining why, before even validating
-        session_uuid, instead of reaching `spawn()` and failing opaquely."""
+        """A provider without a verified store+flag is rejected cleanly."""
         monkeypatch.setattr(_config, "list_project_names", lambda: ["proj"])
         monkeypatch.setattr(_config, "get_open_tabs", lambda: ["proj"])
         monkeypatch.setattr(
             "agent_takkub.provider_config.effective_provider_for",
-            lambda role, project=None: "codex",
+            lambda role, project=None: "opencode",
         )
         fake_orch = MagicMock()
         with pytest.raises(api.RemoteApiError) as exc:
@@ -723,6 +743,39 @@ class TestApiResumeLead:
         assert "resume unavailable" in exc.value.msg
         fake_orch.close.assert_not_called()
         fake_orch.spawn.assert_not_called()
+
+    def test_codex_lead_uses_provider_aware_validation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(_config, "list_project_names", lambda: ["proj"])
+        monkeypatch.setattr(_config, "get_open_tabs", lambda: ["proj"])
+        monkeypatch.setattr(_config, "lead_cwd", lambda project=None: "/proj/web")
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.effective_provider_for",
+            lambda role, project=None: "codex",
+        )
+        seen: dict = {}
+
+        def _matches(project, provider, uuid, cwd):
+            seen.update(project=project, provider=provider, uuid=uuid, cwd=cwd)
+            return True
+
+        monkeypatch.setattr("agent_takkub.spawn_engine._resume_uuid_matches_provider_cwd", _matches)
+        fake_orch = MagicMock()
+        fake_orch.spawn.return_value = (True, "ok")
+
+        assert api.resume_lead(fake_orch, "proj", "uuid-codex") == {
+            "ok": True,
+            "project": "proj",
+            "provider": "codex",
+            "messages": [],
+        }
+        assert seen == {
+            "project": "proj",
+            "provider": "codex",
+            "uuid": "uuid-codex",
+            "cwd": "/proj/web",
+        }
 
     def test_gemini_lead_uses_provider_aware_validation(
         self, monkeypatch: pytest.MonkeyPatch
@@ -747,6 +800,8 @@ class TestApiResumeLead:
         assert api.resume_lead(fake_orch, "proj", "uuid-gemini") == {
             "ok": True,
             "project": "proj",
+            "provider": "gemini",
+            "messages": [],
         }
         assert seen == {
             "project": "proj",
@@ -754,6 +809,25 @@ class TestApiResumeLead:
             "uuid": "uuid-gemini",
             "cwd": "/proj/web",
         }
+
+    def test_resume_response_carries_selected_history_without_second_get(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(_config, "list_project_names", lambda: ["proj"])
+        monkeypatch.setattr(_config, "get_open_tabs", lambda: ["proj"])
+        monkeypatch.setattr(_config, "lead_cwd", lambda project=None: "/proj/web")
+        monkeypatch.setattr(
+            "agent_takkub.spawn_engine._resume_uuid_matches_provider_cwd",
+            lambda p, provider, u, c: True,
+        )
+        expected = [{"kind": "lead", "text": "restored reply"}]
+        monkeypatch.setattr(notify_mod, "read_resume_session_messages", lambda *a: expected)
+        fake_orch = MagicMock()
+        fake_orch.spawn.return_value = (True, "ok")
+
+        result = api.resume_lead(fake_orch, "proj", "uuid-history")
+
+        assert result["messages"] == expected
 
 
 # ─────────────────────────────────────────────────────────────

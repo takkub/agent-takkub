@@ -36,6 +36,7 @@ _log = logging.getLogger(__name__)
 
 _STATIC_ROOT = Path(__file__).resolve().parent / "static"
 _MAX_BODY_BYTES = 64 * 1024
+_MAX_IMAGE_BODY_BYTES = 12 * 1024 * 1024
 _BRIDGE_TIMEOUT_SEC = 8.0
 _MAX_PORT_SCAN = 50
 _MAX_SSE_CLIENTS = 6
@@ -100,7 +101,7 @@ class _Bridge(QObject):
 
     request = pyqtSignal(object)
 
-    _OFF_THREAD_ACTIONS = frozenset({"pulse", "lead_say"})
+    _OFF_THREAD_ACTIONS = frozenset({"pulse", "lead_say", "lead_upload"})
 
     def __init__(self, orch) -> None:
         super().__init__()
@@ -190,6 +191,15 @@ class _Bridge(QObject):
                     self._orch, pending.params.get("text", ""), pending.params.get("project")
                 )
                 pending.reply.put((200, {"ok": True}))
+            elif pending.action == "lead_upload":
+                result = api.lead_upload_image(
+                    self._orch,
+                    pending.params.get("data_url"),
+                    pending.params.get("name"),
+                    pending.params.get("caption"),
+                    pending.params.get("project"),
+                )
+                pending.reply.put((200, result))
         except api.RemoteApiError as exc:
             pending.reply.put((exc.status, {"ok": False, "msg": exc.msg}))
         except Exception:
@@ -334,6 +344,10 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        # API state must always come from the running cockpit. In particular,
+        # a newly paired phone must not reuse another tab's stale history or
+        # project list from an intermediary/browser cache.
+        self.send_header("Cache-Control", "private, no-store")
         # L2: JSON isn't rendered as a document, but a CSP costs one header
         # line and closes the gap for any client that mis-sniffs the body.
         self.send_header("Content-Security-Policy", _CSP_HEADER)
@@ -361,6 +375,18 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         rest, query = matched
         if rest == "/api/lead":
             self._handle_sse(query)
+        elif rest == "/api/bootstrap":
+            # Password-gate preflight: after bearer auth, report whether this
+            # browser still needs the optional third factor without making the
+            # PWA probe three gated endpoints and leave expected 403s in the
+            # console on every reload.
+            if self._check_bearer():
+                session_token = self.headers.get("X-Session")
+                password_required = bool(
+                    self.server.config.password_hash
+                    and not self.server.auth.password_ok(session_token)
+                )
+                self._send_json(200, {"password_required": password_required})
         elif rest == "/api/pulse":
             if self._check_bearer() and self._check_password_gate():
                 self._respond_marshaled("pulse", {"project": query.get("project")})
@@ -393,16 +419,49 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
             self._reject()
             return
         rest, _query = matched
+        upload_authorized = False
+        if rest == "/api/lead/upload":
+            # Authenticate before accepting a multi-megabyte body. Other JSON
+            # routes retain their small global cap; an unauthenticated tunnel
+            # client can never make us buffer an image-sized request.
+            if not self._check_bearer() or not self._check_password_gate():
+                return
+            if not self.server.auth.allows_control():
+                self._send_json(403, {"ok": False, "msg": "view mode: control is disabled"})
+                return
+            upload_authorized = True
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             self._reject()
             return
-        if not (0 <= length <= _MAX_BODY_BYTES):
-            self._reject()
+        max_body = _MAX_IMAGE_BODY_BYTES if upload_authorized else _MAX_BODY_BYTES
+        if not (0 <= length <= max_body):
+            if upload_authorized:
+                self._send_json(413, {"ok": False, "msg": "image too large"})
+            else:
+                self._reject()
             return
         body = self.rfile.read(length) if length else b""
-        if rest == "/api/verify-password":
+        if rest == "/api/lead/upload":
+            try:
+                payload = json.loads(body.decode("utf-8")) if body else {}
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                self._send_json(400, {"ok": False, "msg": "bad json"})
+                return
+            if not isinstance(payload, dict):
+                self._send_json(400, {"ok": False, "msg": "bad json"})
+                return
+            self._respond_marshaled(
+                "lead_upload",
+                {
+                    "data_url": payload.get("data_url"),
+                    "name": payload.get("name"),
+                    "caption": payload.get("caption"),
+                    "project": payload.get("project"),
+                },
+            )
+        elif rest == "/api/verify-password":
             if self._check_bearer():
                 self._handle_verify_password(body)
         elif rest == "/api/sse-ticket":
@@ -555,6 +614,12 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", _content_type(candidate.suffix))
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Content-Security-Policy", _CSP_HEADER)
+        # Cloudflare Web Analytics otherwise auto-injects beacon.min.js into
+        # this private control surface, which our intentionally strict CSP
+        # blocks and reports as a red console error. no-transform prevents the
+        # edge rewrite while no-store avoids turning the secret-path shell into
+        # shared proxy cache content.
+        self.send_header("Cache-Control", "private, no-store, no-transform")
         self.end_headers()
         try:
             self.wfile.write(data)

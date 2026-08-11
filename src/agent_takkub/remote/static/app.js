@@ -18,20 +18,54 @@
     session: localStorage.getItem(LS_SESSION) || "",
     mode: "view",
     view: "lead",
-    es: null,
-    esRetries: 0,
-    esTimer: null,
-    historyLoaded: false,
     pulseTimer: null,
     lastToast: 0,
     activeProject: "",
     selectedProject: "",
     provider: "claude",
     providersByProject: {},
+    leadByProject: {},
+    leadWorking: false,
     openTabs: [],
     opening: null,
     closing: null,
+    resumePending: false,
+    resumeProject: "",
+    backgroundedAt: 0,
   };
+
+  // Keep several project-scoped SSE subscriptions alive at once. The server
+  // caps total SSE clients, so one phone intentionally leaves headroom for a
+  // second device while still covering the common 2-4 open-project workflow.
+  var MAX_PROJECT_STREAMS = 4;
+  var MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+
+  function visibleProject() {
+    return state.selectedProject || state.activeProject || "";
+  }
+
+  function projectLeadState(project) {
+    if (!project) return null;
+    if (!state.leadByProject[project]) {
+      state.leadByProject[project] = {
+        messages: [],
+        historyLoaded: false,
+        historyLoading: null,
+        historyGeneration: 0,
+        es: null,
+        esRetries: 0,
+        esTimer: null,
+        ticketPending: false,
+        transportGeneration: 0,
+        connected: false,
+        working: false,
+        workingCategory: null,
+        picker: null,
+        lastLeadAt: 0,
+      };
+    }
+    return state.leadByProject[project];
+  }
 
   var VIEW_LABELS = { projects: "Projects", pulse: "Pulse" };
 
@@ -43,6 +77,9 @@
     claude: { name: "Claude", logo: "🧠", color: "#d97757" },
     openai: { name: "OpenAI", logo: "🤖", color: "#10a37f" },
     gemini: { name: "Gemini", logo: "✨", color: "#4285f4" },
+    opencode: { name: "OpenCode", logo: "⌘", color: "#8b5cf6" },
+    kimi: { name: "Kimi", logo: "🌙", color: "#6366f1" },
+    cursor: { name: "Cursor", logo: "◈", color: "#22c55e" },
   };
 
   function normalizeProvider(value) {
@@ -77,8 +114,8 @@
     var fallback = (project && state.providersByProject[project]) || "claude";
     var provider = normalizeProvider(value || fallback);
     if (project) state.providersByProject[project] = provider;
-    var visibleProject = state.selectedProject || state.activeProject;
-    if (project && visibleProject && project !== visibleProject) return;
+    var visible = visibleProject();
+    if (project && visible && project !== visible) return;
     if (state.provider === provider) return;
     state.provider = provider;
     updateProviderUI();
@@ -287,11 +324,13 @@
     });
     updateHeaderTitle();
     if (name === "projects") loadProjects();
-    if (name === "lead") startLeadStream();
+    if (name === "lead") {
+      renderSelectedProject();
+      startLeadStream();
+    }
     if (name === "pulse") startPulsePolling();
     else stopPulsePolling();
-    if (name !== "lead") stopLeadStream();
-    updateResumeButtonVisibility();
+    updateLeadActionVisibility();
   }
 
   document.querySelectorAll("#bottom-nav button").forEach(function (btn) {
@@ -348,8 +387,7 @@
             // fresh startLeadStream() triggered by showApp() below isn't
             // guarded out — see historyLoaded decoupling in startLeadStream.
             stopLeadStream();
-            showApp();
-            fetchProjectsAndMode().catch(function () { /* stay in view mode assumption */ });
+            enterAuthenticatedApp();
           });
         } else {
           $("password-error").textContent = "รหัสผ่านไม่ถูกต้อง";
@@ -388,6 +426,7 @@
             break;
           }
         }
+        syncProjectStreams();
         return items;
       });
   }
@@ -540,6 +579,7 @@
       .then(function (res) {
         if (res.status === 200 && res.data && res.data.ok) {
           state.openTabs = (state.openTabs || []).filter(function (n) { return n !== name; });
+          stopLeadStream(name, true);
           if (state.selectedProject === name) state.selectedProject = null;
           fetchProjectsAndMode().then(renderProjects).catch(function () {});
           loadProjects();
@@ -565,9 +605,9 @@
     return name === state.activeProject ? "📂" : "📁";
   }
 
-  // Switch the mobile view to a different open project: rebinds the SSE
-  // ticket/stream, refreshes pulse, and points the composer at it — then
-  // jumps straight to the Lead view.
+  // Switch the visible conversation only. Every project keeps its own
+  // history cache + SSE subscription, so this is a local render operation —
+  // no stop/start and no history API round-trip when the stream is warm.
   function selectProject(name) {
     if (!name) return;
     if (name === state.selectedProject) {
@@ -576,18 +616,9 @@
     }
     state.selectedProject = name;
     setProvider(state.providersByProject[name] || "claude", name);
-    lastMsgKind = null;
-    lastLeadBodyEl = null;
-    lastLeadRawAccum = "";
-    hidePickerBanner();
-    hideThinking();
-    var log = $("lead-log");
-    if (log) {
-      var old = log.querySelectorAll(".msg");
-      for (var i = 0; i < old.length; i++) old[i].remove();
-    }
     updateHeaderTitle();
-    stopLeadStream();
+    renderSelectedProject();
+    syncProjectStreams();
     switchView("lead");
     fetchPulse();
   }
@@ -656,7 +687,7 @@
   // Lead console (SSE)
   // ---------------------------------------------------------------
 
-  var MAX_ES_RETRIES = 5;
+  var ES_RETRY_WARNING_THRESHOLD = 5;
   var lastMsgKind = null;
 
   function timeLabel() {
@@ -674,11 +705,18 @@
     return div.innerHTML;
   }
 
-  // Inline markdown (bold/italic/strike/code/links) — always escapes first,
+  // Inline markdown (bold/italic/strike/code/links/images) — always escapes first,
   // then applies patterns to the *escaped* string so a `<script>` or `**` in
   // user/Lead text can never become live markup.
   function mdInline(raw) {
     var s = mdEscape(raw);
+    // Render only embedded raster data URLs. External URLs would disclose the
+    // phone's IP/referrer to arbitrary hosts, while SVG data can execute active
+    // content in some browser contexts. The strict allow-list keeps images
+    // self-contained and compatible with the PWA's CSP.
+    s = s.replace(/!\[([^\]\n]{0,200})\]\((data:image\/(?:png|jpeg|webp|gif);base64,[A-Za-z0-9+/=]+)\)/g, function (m, alt, src) {
+      return '<img class="remote-image" src="' + src + '" alt="' + alt + '" loading="lazy" decoding="async">';
+    });
     s = s.replace(/\[([^\]]+)\]\(((?:https?:\/\/|\/)[^\s)]+)\)/g, function (m, t, u) {
       // mdEscape only escapes &/</> (safe for text nodes); a literal " here would
       // break out of the href attribute, so quote-escape separately for this context.
@@ -857,7 +895,7 @@
     if (thinkingEl) { thinkingEl.remove(); thinkingEl = null; }
   }
 
-  function appendMsg(kind, text) {
+  function appendMsgDom(kind, text) {
     if (typeof text !== "string" || !text) return;
     hideThinking();
     var log = $("lead-log");
@@ -916,6 +954,21 @@
     if (state.leadWorking) showThinking();
   }
 
+  function appendProjectMessage(project, kind, text) {
+    if (typeof text !== "string" || !text || !project) return;
+    var lead = projectLeadState(project);
+    if (kind === "lead") lead.picker = null;
+    lead.messages.push({ kind: kind, text: text });
+    if (project === visibleProject()) appendMsgDom(kind, text);
+  }
+
+  // Existing composer/quick-reply callers target the currently visible
+  // project. SSE handlers use appendProjectMessage with their captured
+  // project namespace so background streams never paint into the wrong tab.
+  function appendMsg(kind, text) {
+    appendProjectMessage(visibleProject(), kind, text);
+  }
+
   // Live SSE 'lead' events land one-per-backend-record (notify.py pushes
   // each assistant record separately), which fragments a single Lead reply
   // into several stacked bubbles. Root cause is server-side (out of scope
@@ -932,11 +985,27 @@
   // this rather than the rendered DOM.
   var lastLeadRawAccum = "";
 
-  function appendLeadLive(text) {
-    if (typeof text !== "string" || !text) return;
-    hidePickerBanner();
+  function appendLeadLive(text, project) {
+    project = project || visibleProject();
+    if (typeof text !== "string" || !text || !project) return;
+    var leadState = projectLeadState(project);
+    leadState.picker = null;
     var now = Date.now();
-    if (lastLeadBodyEl && lastMsgKind === "lead" && (now - lastLeadAt) <= LEAD_MERGE_WINDOW_MS) {
+    var prior = leadState.messages.length
+      ? leadState.messages[leadState.messages.length - 1]
+      : null;
+    var shouldMerge = prior && prior.kind === "lead" &&
+      (now - leadState.lastLeadAt) <= LEAD_MERGE_WINDOW_MS;
+    if (shouldMerge) {
+      prior.text += "\n" + text;
+      leadState.lastLeadAt = now;
+    } else {
+      leadState.messages.push({ kind: "lead", text: text });
+      leadState.lastLeadAt = now;
+    }
+    if (project !== visibleProject()) return;
+    hidePickerBanner();
+    if (shouldMerge && lastLeadBodyEl && lastMsgKind === "lead") {
       hideThinking();
       var log = $("lead-log");
       var atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 24;
@@ -948,10 +1017,67 @@
       if (state.leadWorking) showThinking();
       return;
     }
-    appendMsg("lead", text);
+    appendMsgDom("lead", text);
     lastLeadAt = now;
     var bodies = document.querySelectorAll("#lead-log .msg.lead .msg-body");
     lastLeadBodyEl = bodies.length ? bodies[bodies.length - 1] : null;
+  }
+
+  function ensureLeadEmpty(text) {
+    var log = $("lead-log");
+    if (!log) return;
+    var empty = $("lead-empty");
+    if (!empty) {
+      empty = document.createElement("div");
+      empty.id = "lead-empty";
+      var icon = document.createElement("span");
+      icon.className = "icon";
+      icon.textContent = "💬";
+      var label = document.createElement("span");
+      label.className = "text";
+      empty.appendChild(icon);
+      empty.appendChild(label);
+      log.appendChild(empty);
+    }
+    var txt = empty.querySelector(".text");
+    if (txt) txt.textContent = text;
+  }
+
+  function renderSelectedProject() {
+    var project = visibleProject();
+    var lead = projectLeadState(project);
+    var log = $("lead-log");
+    if (!lead || !log) return;
+    hideThinking();
+    hidePickerBanner();
+    var old = log.querySelectorAll(".msg, #lead-empty");
+    for (var i = 0; i < old.length; i++) old[i].remove();
+    lastMsgKind = null;
+    lastLeadBodyEl = null;
+    lastLeadAt = 0;
+    lastLeadRawAccum = "";
+    var isWorking = !!lead.working;
+    state.leadWorking = false;
+    lead.messages.forEach(function (message) {
+      appendMsgDom(message.kind, message.text);
+    });
+    state.leadWorking = isWorking;
+    if (!lead.messages.length && !isWorking) {
+      ensureLeadEmpty(
+        lead.historyLoaded
+          ? "ยังไม่มีข้อความ — พิมพ์ถึง " + providerMeta(state.provider).name + " ด้านล่างเพื่อเริ่ม"
+          : "กำลังเชื่อมต่อ…"
+      );
+    }
+    if (isWorking) showThinking(lead.workingCategory);
+    if (lead.picker) showPickerBanner(lead.picker);
+    var last = lead.messages.length ? lead.messages[lead.messages.length - 1] : null;
+    if (last && last.kind === "lead") {
+      var bodies = document.querySelectorAll("#lead-log .msg.lead .msg-body");
+      lastLeadBodyEl = bodies.length ? bodies[bodies.length - 1] : null;
+      lastLeadAt = lead.lastLeadAt;
+    }
+    renderQuickReplies();
   }
 
   // ---------------------------------------------------------------
@@ -1075,107 +1201,265 @@
     if (state.mode !== "control") return;
     text = (text || "").trim();
     if (!text) return;
-    appendMsg("me", text);
+    var project = visibleProject();
+    appendProjectMessage(project, "me", text);
+    var targetLead = projectLeadState(project);
+    if (targetLead) {
+      targetLead.picker = null;
+      targetLead.working = true;
+      targetLead.workingCategory = null;
+    }
     showThinking();
-    var sayBody = { text: text };
-    if (state.selectedProject) sayBody.project = state.selectedProject;
+    var sayBody = { text: text, project: project };
     apiFetch("api/lead/say", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(sayBody),
     }).catch(function () {
+      if (targetLead) targetLead.working = false;
       hideThinking();
       toast("ส่งข้อความไม่สำเร็จ");
     });
   }
 
-  function setLeadEmptyText(text) {
-    var emptyEl = $("lead-empty");
-    if (emptyEl) {
-      var txtEl = emptyEl.querySelector(".text");
-      if (txtEl) txtEl.textContent = text;
-      else emptyEl.textContent = text;
+  function sendLeadImage(file) {
+    if (state.mode !== "control" || !file) return;
+    if (file.size > MAX_IMAGE_BYTES) {
+      toast("รูปใหญ่เกิน 8 MB");
+      return;
     }
+    if (["image/png", "image/jpeg", "image/webp", "image/gif"].indexOf(file.type) === -1) {
+      toast("รองรับ PNG, JPEG, WebP และ GIF");
+      return;
+    }
+    var project = visibleProject();
+    var input = $("lead-input");
+    var caption = input.value.trim();
+    var attach = $("lead-attach");
+    attach.disabled = true;
+    toast("กำลังส่งรูป…");
+    var reader = new FileReader();
+    reader.onerror = function () {
+      attach.disabled = false;
+      toast("อ่านรูปไม่สำเร็จ");
+    };
+    reader.onload = function () {
+      var dataUrl = typeof reader.result === "string" ? reader.result : "";
+      apiFetch("api/lead/upload", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          data_url: dataUrl,
+          name: file.name || "image",
+          caption: caption,
+          project: project,
+        }),
+      })
+        .then(function (r) {
+          return r.json().then(function (data) { return { status: r.status, data: data }; });
+        })
+        .then(function (res) {
+          if (res.status !== 200 || !res.data || !res.data.ok) {
+            throw new Error((res.data && res.data.msg) || "upload failed");
+          }
+          if (caption) {
+            input.value = "";
+            autosizeInput();
+          }
+          appendProjectMessage(
+            project,
+            "me",
+            (caption ? caption + "\n" : "") + "![" + (file.name || "image") + "](" + dataUrl + ")"
+          );
+          var targetLead = projectLeadState(project);
+          if (targetLead) {
+            targetLead.working = true;
+            targetLead.workingCategory = null;
+          }
+          showThinking();
+          toast("ส่งรูปแล้ว");
+        })
+        .catch(function (err) {
+          if (err instanceof Error && (err.message === "password_required" || err.message === "unauthorized")) return;
+          toast(err instanceof Error && err.message ? err.message : "ส่งรูปไม่สำเร็จ");
+        })
+        .then(function () {
+          attach.disabled = state.mode !== "control";
+        });
+    };
+    reader.readAsDataURL(file);
   }
 
-  // Repopulates the chat log from GET /api/lead/history before opening the
-  // SSE stream — the live tail only ever reaches currently-connected
-  // clients, so without this a fresh connect/reconnect/project-switch shows
-  // a blank screen and loses whatever reply landed during the gap.
-  function loadHistory() {
+  function setLeadEmptyText(text) {
+    ensureLeadEmpty(text);
+  }
+
+  // Load each project's history exactly once per authenticated app lifetime.
+  // Project switches render this cache and never repeat the request.
+  function loadHistory(project, force) {
+    var lead = projectLeadState(project);
+    if (!lead) return Promise.resolve();
+    if (force) {
+      // Invalidate any older in-flight snapshot. Keep rendering the existing
+      // cache until the fresh response lands, avoiding a blank/flickering UI.
+      lead.historyGeneration += 1;
+      lead.historyLoaded = false;
+      lead.historyLoading = null;
+    }
+    if (lead.historyLoaded) return Promise.resolve();
+    if (lead.historyLoading) return lead.historyLoading;
+    var generation = lead.historyGeneration;
+    var preserveFrom = force ? lead.messages.length : 0;
     var path = "api/lead/history?limit=200";
-    if (state.selectedProject) path += "&project=" + encodeURIComponent(state.selectedProject);
-    return apiFetch(path)
+    path += "&project=" + encodeURIComponent(project);
+    var refreshError = null;
+    var request = apiFetch(path, { cache: "no-store" })
       .then(function (r) { return r.json(); })
       .then(function (data) {
-        setProvider(data && data.provider, state.selectedProject || state.activeProject);
-        // Full re-fetch — clear rendered messages first or a tab-switch-back/
-        // reconnect re-appends the same history on top of what's already
-        // there. Only strips .msg nodes so #lead-empty (a sibling, shown via
-        // setLeadEmptyText) survives to be reused if history comes back empty.
-        hideThinking();
-        var log = $("lead-log");
-        if (log) {
-          var old = log.querySelectorAll(".msg");
-          for (var i = 0; i < old.length; i++) old[i].remove();
-        }
-        lastMsgKind = null;
-        lastLeadBodyEl = null;
-        lastLeadRawAccum = "";
-        hidePickerBanner();
+        if (state.leadByProject[project] !== lead || lead.historyGeneration !== generation) return;
+        setProvider(data && data.provider, project);
         var messages = Array.isArray(data && data.messages) ? data.messages : [];
+        // The composer can be used while history is still in flight. Preserve
+        // those optimistic project-scoped messages instead of replacing them
+        // when the older history snapshot arrives.
+        var pending = lead.messages.slice(preserveFrom);
+        lead.messages = [];
         messages.forEach(function (m) {
           var text = m && typeof m.text === "string" ? m.text : null;
-          if (text) appendMsg(m && m.kind === "me" ? "me" : "lead", text);
+          if (text) lead.messages.push({ kind: m && m.kind === "me" ? "me" : "lead", text: text });
         });
+        pending.forEach(function (message) {
+          var duplicate = lead.messages.slice(-10).some(function (stored) {
+            return stored.kind === message.kind && stored.text === message.text;
+          });
+          if (!duplicate) lead.messages.push(message);
+        });
+        lead.historyLoaded = true;
+        if (project === visibleProject()) renderSelectedProject();
       })
-      .catch(function () { /* best-effort — live SSE still works without history */ });
+      .catch(function (err) {
+        if (state.leadByProject[project] !== lead || lead.historyGeneration !== generation) return;
+        // Best-effort — a live stream is still useful when provider history
+        // is unavailable. Mark the attempt complete so tab switches do not
+        // hammer the same failed endpoint.
+        lead.historyLoaded = true;
+        refreshError = err;
+        if (project === visibleProject()) renderSelectedProject();
+      })
+      .then(function () {
+        if (state.leadByProject[project] === lead && lead.historyGeneration === generation) {
+          lead.historyLoading = null;
+        }
+        if (force && refreshError) throw refreshError;
+      });
+    lead.historyLoading = request;
+    return lead.historyLoading;
   }
 
-  function startLeadStream() {
+  function refreshProjectHistory(project, announce) {
+    if (!project) return Promise.resolve();
+    var btn = $("lead-refresh-btn");
+    if (announce && btn) btn.disabled = true;
+    return loadHistory(project, true)
+      .then(function () {
+        if (announce) toast("โหลดข้อความล่าสุดแล้ว");
+      })
+      .catch(function () {
+        if (announce) toast("โหลดข้อความล่าสุดไม่สำเร็จ");
+      })
+      .then(function () {
+        if (announce && btn) btn.disabled = false;
+      });
+  }
+
+  function refreshOpenProjectHistories() {
+    var ordered = [];
+    var selected = visibleProject();
+    if (selected) ordered.push(selected);
+    (state.openTabs || []).forEach(function (project) {
+      if (project && ordered.indexOf(project) === -1) ordered.push(project);
+    });
+    return Promise.all(ordered.slice(0, MAX_PROJECT_STREAMS).map(function (project) {
+      return refreshProjectHistory(project, false);
+    }));
+  }
+
+  function startLeadStream(project) {
     updateControlNote();
-    // History load is decoupled from the connect guard below on purpose: a
-    // stale esTimer (e.g. left over from a pre-auth 403 retry loop) must
-    // never block the chat log from repopulating once we're actually able
-    // to connect — that was Bug B (history stuck empty after the password
-    // gate). historyLoaded is reset in stopLeadStream so each fresh entry
-    // into the lead view (or project switch) reloads once.
-    if (!state.historyLoaded) {
-      state.historyLoaded = true;
-      setLeadEmptyText("กำลังเชื่อมต่อ…");
-      loadHistory();
+    if (project) {
+      startProjectStream(project);
+      return;
     }
-    if (state.es || state.esTimer) return;
-    requestTicketAndConnect();
+    syncProjectStreams();
   }
 
-  function requestTicketAndConnect() {
-    var body = state.selectedProject ? { project: state.selectedProject } : {};
+  function syncProjectStreams() {
+    var ordered = [];
+    var selected = visibleProject();
+    if (selected) ordered.push(selected);
+    (state.openTabs || []).forEach(function (project) {
+      if (project && ordered.indexOf(project) === -1) ordered.push(project);
+    });
+    var wanted = ordered.slice(0, MAX_PROJECT_STREAMS);
+    wanted.forEach(startProjectStream);
+    Object.keys(state.leadByProject).forEach(function (project) {
+      if (wanted.indexOf(project) === -1) stopProjectTransport(project);
+    });
+  }
+
+  function startProjectStream(project) {
+    var lead = projectLeadState(project);
+    if (!lead || lead.es || lead.esTimer || lead.historyLoading || lead.ticketPending) return;
+    if (!lead.historyLoaded) {
+      if (project === visibleProject()) setLeadEmptyText("กำลังเชื่อมต่อ…");
+      loadHistory(project).then(function () {
+        if (state.leadByProject[project] === lead && !lead.es && !lead.esTimer) {
+          requestTicketAndConnect(project);
+        }
+      });
+      return;
+    }
+    requestTicketAndConnect(project);
+  }
+
+  function requestTicketAndConnect(project) {
+    var lead = projectLeadState(project);
+    if (!lead || lead.es || lead.ticketPending) return;
+    lead.ticketPending = true;
+    var generation = lead.transportGeneration;
     apiFetch("api/sse-ticket", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ project: project }),
     })
       .then(function (r) { return r.json(); })
       .then(function (data) {
         var ticket = data && data.ticket;
         if (!ticket) throw new Error("no ticket");
-        connectSse(ticket);
+        if (state.leadByProject[project] !== lead || lead.transportGeneration !== generation) {
+          return;
+        }
+        lead.ticketPending = false;
+        connectSse(ticket, project);
       })
       .catch(function () {
-        scheduleEsRetry();
+        if (state.leadByProject[project] !== lead || lead.transportGeneration !== generation) {
+          return;
+        }
+        lead.ticketPending = false;
+        scheduleEsRetry(project);
       });
   }
 
   // data-min: only ever surface the Lead's own text field, whether the
   // server sends a bare string or a JSON-wrapped {text|message} payload.
-  function parseSseData(raw) {
+  function parseSseData(raw, project) {
     try {
       var payload = JSON.parse(raw);
       if (typeof payload === "string") return payload;
       if (payload && typeof payload === "object") {
         if (payload.provider) {
-          setProvider(payload.provider, state.selectedProject || state.activeProject);
+          setProvider(payload.provider, project);
         }
         var text = payload.text || payload.message;
         return typeof text === "string" ? text : null;
@@ -1186,24 +1470,21 @@
     }
   }
 
-  function connectSse(ticket) {
+  function connectSse(ticket, project) {
+    var lead = projectLeadState(project);
+    if (!lead) return;
+    lead.transportGeneration += 1;
     var url = apiUrl("api/lead?ticket=" + encodeURIComponent(ticket));
     var es = new EventSource(url);
-    state.es = es;
+    lead.es = es;
     es.onopen = function () {
-      state.esRetries = 0;
+      lead.esRetries = 0;
+      lead.connected = true;
       setOffline(false);
-      // Reset grouping across a (re)connect: the next message must start a
-      // fresh run with its own Lead label + timestamp, never fold silently
-      // into the pre-reconnect run (codex x-check).
-      lastMsgKind = null;
-      lastLeadBodyEl = null;
-      lastLeadRawAccum = "";
-      hidePickerBanner();
-      state.leadWorking = false;
-      setLeadEmptyText(
-        "ยังไม่มีข้อความ — พิมพ์ถึง " + providerMeta(state.provider).name + " ด้านล่างเพื่อเริ่ม"
-      );
+      // Preserve an in-progress turn across transport reconnects. The server
+      // emits working/idle only on pane-state transitions, so reconnecting in
+      // the middle of a turn may not receive another working edge.
+      if (project === visibleProject()) renderSelectedProject();
     };
     // Backend sends 'working' whenever the Lead is actively doing something
     // (tool_use/thinking) with no reply text yet — payload is a JSON
@@ -1211,21 +1492,45 @@
     // web/delegating/skill/working, mapped to a Thai label so the remote
     // shows *what* the Lead is doing, not just a bare "…".
     es.addEventListener("working", function (evt) {
-      state.leadWorking = true;
-      showThinking(parseSseData(evt.data));
+      lead.working = true;
+      lead.workingCategory = parseSseData(evt.data, project);
+      if (project === visibleProject()) {
+        state.leadWorking = true;
+        showThinking(lead.workingCategory);
+      }
     });
     // Lead pane went idle (turn finished) — drop the "…" the instant the
     // desktop spinner stops, so the phone never shows a stale "working" state.
     es.addEventListener("idle", function () {
-      state.leadWorking = false;
-      hideThinking();
+      lead.working = false;
+      lead.workingCategory = null;
+      if (project === visibleProject()) {
+        state.leadWorking = false;
+        hideThinking();
+      }
     });
     es.addEventListener("lead", function (evt) {
-      appendLeadLive(parseSseData(evt.data));
+      appendLeadLive(parseSseData(evt.data, project), project);
     });
     es.addEventListener("done", function (evt) {
-      state.leadWorking = false;
-      appendMsg("done", parseSseData(evt.data));
+      lead.working = false;
+      lead.workingCategory = null;
+      if (project === visibleProject()) state.leadWorking = false;
+      appendProjectMessage(project, "done", parseSseData(evt.data, project));
+    });
+    // A session was resumed/replaced on the desktop while this project's SSE
+    // remained connected. Invalidate only this project's history request and
+    // reload the newly resolved provider transcript; other projects keep
+    // streaming untouched.
+    es.addEventListener("session_changed", function (evt) {
+      parseSseData(evt.data, project);
+      lead.historyGeneration += 1;
+      lead.historyLoading = null;
+      lead.historyLoaded = false;
+      lead.messages = [];
+      lead.lastLeadAt = 0;
+      if (project === visibleProject()) renderSelectedProject();
+      loadHistory(project);
     });
     // W2a/B2: a real AskUserQuestion picker fired on the desktop — surface a
     // banner with tappable option chips instead of hanging silently; cleared
@@ -1240,42 +1545,69 @@
       } catch (e) {
         payload = null;
       }
-      showPickerBanner(payload);
+      lead.picker = payload;
+      if (project === visibleProject()) showPickerBanner(payload);
     });
     es.onerror = function () {
       es.close();
-      state.es = null;
-      setLeadEmptyText("การเชื่อมต่อขัดข้อง — กำลังพยายามเชื่อมต่อใหม่…");
-      scheduleEsRetry();
+      lead.es = null;
+      lead.connected = false;
+      if (project === visibleProject() && !lead.messages.length) {
+        setLeadEmptyText("การเชื่อมต่อขัดข้อง — กำลังพยายามเชื่อมต่อใหม่…");
+      }
+      scheduleEsRetry(project);
     };
   }
 
-  function scheduleEsRetry() {
-    if (state.view !== "lead") return;
-    state.esRetries += 1;
-    if (state.esRetries > MAX_ES_RETRIES) {
-      setLeadEmptyText("เชื่อมต่อไม่ได้ กรุณาสแกน QR ใหม่");
-      appendMsg(
+  function scheduleEsRetry(project) {
+    var lead = projectLeadState(project);
+    if (!lead || lead.esTimer) return;
+    lead.esRetries += 1;
+    if (lead.esRetries === ES_RETRY_WARNING_THRESHOLD + 1) {
+      if (project === visibleProject()) {
+        setLeadEmptyText("การเชื่อมต่อยังไม่กลับมา — ระบบจะลองใหม่อัตโนมัติ…");
+      }
+      appendProjectMessage(
+        project,
         "sys",
-        "เชื่อมต่อ " + providerMeta(state.provider).name + " ไม่ได้ — tunnel URL อาจเปลี่ยน สแกน QR ใหม่"
+        "การเชื่อมต่อ " + providerMeta(state.providersByProject[project]).name + " ขาดช่วง — กำลังลองใหม่อัตโนมัติ"
       );
-      return;
     }
-    var delay = Math.min(1000 * Math.pow(2, state.esRetries), 15000);
-    state.esTimer = setTimeout(function () {
-      state.esTimer = null;
-      requestTicketAndConnect();
+    // Never give up after a fixed retry count. A phone can spend minutes on
+    // another network or in the background and should heal when it returns.
+    var delay = Math.min(1000 * Math.pow(2, lead.esRetries), 15000);
+    lead.esTimer = setTimeout(function () {
+      lead.esTimer = null;
+      requestTicketAndConnect(project);
     }, delay);
   }
 
-  function stopLeadStream() {
-    if (state.es) { state.es.close(); state.es = null; }
-    if (state.esTimer) { clearTimeout(state.esTimer); state.esTimer = null; }
-    state.esRetries = 0;
-    state.historyLoaded = false;
-    state.leadWorking = false;
-    hideThinking();
-    hidePickerBanner();
+  function stopProjectTransport(project) {
+    var lead = state.leadByProject[project];
+    if (!lead) return;
+    // Invalidate an in-flight ticket request before clearing its marker.  A
+    // late response must never resurrect a stream that was intentionally
+    // stopped because its tab closed or fell outside the background limit.
+    lead.transportGeneration += 1;
+    if (lead.es) { lead.es.close(); lead.es = null; }
+    if (lead.esTimer) { clearTimeout(lead.esTimer); lead.esTimer = null; }
+    lead.ticketPending = false;
+    lead.connected = false;
+    lead.esRetries = 0;
+  }
+
+  function stopLeadStream(project, discard) {
+    if (project) {
+      stopProjectTransport(project);
+      if (discard) delete state.leadByProject[project];
+    } else {
+      Object.keys(state.leadByProject).forEach(stopProjectTransport);
+    }
+    if (!project || project === visibleProject()) {
+      state.leadWorking = false;
+      hideThinking();
+      hidePickerBanner();
+    }
   }
 
   function updateControlNote() {
@@ -1284,6 +1616,7 @@
       ? ""
       : "โหมด view — ส่งข้อความไม่ได้ · เปิด control ได้จาก cockpit บนเดสก์ท็อป";
     $("lead-send").disabled = !isControl;
+    $("lead-attach").disabled = !isControl;
     var input = $("lead-input");
     input.disabled = !isControl;
     input.placeholder = isControl
@@ -1300,20 +1633,22 @@
     document.querySelectorAll("#lead-picker-banner button").forEach(function (btn) {
       btn.disabled = !isControl;
     });
-    updateResumeButtonVisibility();
+    updateLeadActionVisibility();
   }
 
   // ---------------------------------------------------------------
   // Resume / session picker (W3) — control-mode only. Lists recent Lead
   // sessions for the selected project (GET api/lead/sessions) and lets the
   // user pick one to resume (POST api/lead/resume), which closes + respawns
-  // the project's Lead pane on the desktop with `--resume <uuid>`.
+  // the project's Lead pane using that provider's native resume command.
   // ---------------------------------------------------------------
 
-  function updateResumeButtonVisibility() {
-    var btn = $("lead-resume-btn");
-    if (!btn) return;
-    btn.classList.toggle("show", state.view === "lead" && state.mode === "control");
+  function updateLeadActionVisibility() {
+    var resumeBtn = $("lead-resume-btn");
+    var refreshBtn = $("lead-refresh-btn");
+    var inLead = state.view === "lead";
+    if (resumeBtn) resumeBtn.classList.toggle("show", inLead && state.mode === "control");
+    if (refreshBtn) refreshBtn.classList.toggle("show", inLead);
   }
 
   function resumeTimeLabel(mtime) {
@@ -1329,15 +1664,21 @@
     var sheet = $("resume-sheet");
     var list = $("resume-sheet-list");
     if (!sheet || !list) return;
+    var project = visibleProject();
+    if (!project) return;
+    state.resumeProject = project;
     sheet.classList.add("show");
     list.innerHTML = '<div class="resume-empty">กำลังโหลด…</div>';
-    var path = "api/lead/sessions?limit=10";
-    if (state.selectedProject) path += "&project=" + encodeURIComponent(state.selectedProject);
+    var providerLabel = $("resume-sheet-provider");
+    if (providerLabel) providerLabel.textContent = "· " + providerMeta(state.providersByProject[project]).name;
+    var path = "api/lead/sessions?limit=10&project=" + encodeURIComponent(project);
     apiFetch(path)
       .then(function (r) { return r.json(); })
       .then(function (data) {
-        setProvider(data && data.provider, state.selectedProject || state.activeProject);
-        renderResumeList(Array.isArray(data && data.sessions) ? data.sessions : []);
+        if (state.resumeProject !== project) return;
+        setProvider(data && data.provider, project);
+        if (providerLabel) providerLabel.textContent = "· " + providerMeta(data && data.provider).name;
+        renderResumeList(Array.isArray(data && data.sessions) ? data.sessions : [], project);
       })
       .catch(function () {
         list.innerHTML = '<div class="resume-empty">โหลดรายการไม่สำเร็จ ลองใหม่</div>';
@@ -1347,9 +1688,11 @@
   function closeResumeSheet() {
     var sheet = $("resume-sheet");
     if (sheet) sheet.classList.remove("show");
+    state.resumeProject = "";
+    state.resumePending = false;
   }
 
-  function renderResumeList(sessions) {
+  function renderResumeList(sessions, project) {
     var list = $("resume-sheet-list");
     if (!list) return;
     list.innerHTML = "";
@@ -1369,15 +1712,17 @@
       preview.className = "resume-preview";
       preview.textContent = (typeof s.preview === "string" && s.preview) || "(ไม่มี preview)";
       row.appendChild(preview);
-      row.addEventListener("click", function () { confirmResume(s.uuid); });
+      row.addEventListener("click", function () { confirmResume(s.uuid, project, row); });
       list.appendChild(row);
     });
   }
 
-  function confirmResume(sessionUuid) {
+  function confirmResume(sessionUuid, project, row) {
+    if (state.resumePending || !project) return;
     if (!window.confirm("Resume session นี้? Lead pane ปัจจุบันจะถูกปิดแล้วโหลด session นี้กลับมา")) return;
-    var body = { session_uuid: sessionUuid };
-    if (state.selectedProject) body.project = state.selectedProject;
+    state.resumePending = true;
+    if (row) row.classList.add("opening");
+    var body = { session_uuid: sessionUuid, project: project };
     apiFetch("api/lead/resume", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1387,9 +1732,25 @@
       .then(function (res) {
         if (res.status === 200 && res.data && res.data.ok) {
           closeResumeSheet();
-          toast("กำลัง resume session…");
-          stopLeadStream();
-          startLeadStream();
+          toast("กำลัง resume " + providerMeta(state.providersByProject[project]).name + " session…");
+          // Reset only the resumed project's cache/transport. Other projects
+          // remain connected and keep receiving messages in the background.
+          stopLeadStream(project, true);
+          var resumedLead = projectLeadState(project);
+          var resumedMessages = Array.isArray(res.data.messages) ? res.data.messages : [];
+          resumedLead.messages = [];
+          resumedMessages.forEach(function (message) {
+            var text = message && typeof message.text === "string" ? message.text : "";
+            if (!text) return;
+            resumedLead.messages.push({
+              kind: message.kind === "me" ? "me" : "lead",
+              text: text,
+            });
+          });
+          resumedLead.historyLoaded = resumedLead.messages.length > 0;
+          setProvider(res.data.provider, project);
+          if (project === visibleProject()) renderSelectedProject();
+          startLeadStream(project);
           return;
         }
         toast((res.data && res.data.msg) || "resume ไม่สำเร็จ");
@@ -1397,13 +1758,29 @@
       .catch(function (err) {
         if (err instanceof Error && (err.message === "password_required" || err.message === "unauthorized")) return;
         toast("resume ไม่สำเร็จ ลองใหม่");
+      })
+      .then(function () {
+        state.resumePending = false;
+        if (row) row.classList.remove("opening");
       });
   }
 
+  $("lead-refresh-btn").addEventListener("click", function () {
+    refreshProjectHistory(visibleProject(), true);
+  });
   $("lead-resume-btn").addEventListener("click", openResumeSheet);
   $("resume-sheet-close").addEventListener("click", closeResumeSheet);
   $("resume-sheet").addEventListener("click", function (evt) {
     if (evt.target === $("resume-sheet")) closeResumeSheet();
+  });
+
+  $("lead-attach").addEventListener("click", function () {
+    if (state.mode === "control") $("lead-image-input").click();
+  });
+  $("lead-image-input").addEventListener("change", function () {
+    var file = this.files && this.files[0];
+    this.value = "";
+    if (file) sendLeadImage(file);
   });
 
   $("lead-composer").addEventListener("submit", function (evt) {
@@ -1579,17 +1956,51 @@
     });
   }
 
+  // Mobile browsers suspend EventSource while backgrounded. SSE does not
+  // replay missed output, so refresh every warm project once on return while
+  // preserving the fast no-request path for ordinary project switching.
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) {
+      state.backgroundedAt = Date.now();
+      return;
+    }
+    if (state.backgroundedAt && Date.now() - state.backgroundedAt >= 30000) {
+      refreshOpenProjectHistories();
+    }
+    state.backgroundedAt = 0;
+  });
+
   // ---------------------------------------------------------------
   // Init
   // ---------------------------------------------------------------
+
+  function enterAuthenticatedApp() {
+    showApp();
+    fetchProjectsAndMode().catch(function () { /* stay in view mode assumption */ });
+  }
 
   function init() {
     if (!state.token) {
       showPairing();
       return;
     }
-    showApp();
-    fetchProjectsAndMode().catch(function () { /* stay in view mode assumption */ });
+    // Check the optional password gate before opening history, SSE and project
+    // requests. Previously all three raced ahead and produced expected 403s
+    // on every reload before the password prompt appeared.
+    apiFetch("api/bootstrap")
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (data && data.password_required) {
+          showPasswordPrompt();
+          return;
+        }
+        enterAuthenticatedApp();
+      })
+      .catch(function () {
+        // forgetToken() already switched to pairing on an auth 404. Keep the
+        // normal retry behavior for a transient network failure.
+        if (state.token) enterAuthenticatedApp();
+      });
   }
 
   init();

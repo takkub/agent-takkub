@@ -50,6 +50,11 @@ def server(monkeypatch):
         lambda project, mode: {"projects": [], "mode": mode, "open_tabs": []},
     )
     monkeypatch.setattr(api, "lead_say", lambda orch, text, project: {"ok": True})
+    monkeypatch.setattr(
+        api,
+        "lead_upload_image",
+        lambda orch, data_url, name, caption, project: {"ok": True, "name": name},
+    )
     monkeypatch.setattr(api, "open_project", lambda orch, project: {"ok": True, "project": project})
     monkeypatch.setattr(
         api, "close_project", lambda orch, project: {"ok": True, "project": project}
@@ -241,6 +246,61 @@ class TestMarshaledRoutes:
                 pytest.fail("expected HTTPError")
             except urllib.error.HTTPError as exc:
                 assert exc.code == 403
+        finally:
+            srv.stop()
+
+    def test_image_upload_in_control_mode_reaches_bridge(self, monkeypatch, server):
+        seen: dict = {}
+
+        def _fake_upload(orch, data_url, name, caption, project):
+            seen.update(data_url=data_url, name=name, caption=caption, project=project)
+            return {"ok": True, "name": name}
+
+        monkeypatch.setattr(api, "lead_upload_image", _fake_upload)
+        payload = {
+            "data_url": "data:image/png;base64,iVBORw0KGgo=",
+            "name": "phone.png",
+            "caption": "look",
+            "project": "default",
+        }
+
+        def _do():
+            req = urllib.request.Request(
+                _url(server, "/sek/api/lead/upload"),
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Authorization": "Bearer tok", "Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return resp.status, json.loads(resp.read())
+
+        status, body = _run_pumped(_do)
+        assert status == 200
+        assert body == {"ok": True, "name": "phone.png"}
+        assert seen == payload
+
+    def test_image_upload_in_view_mode_is_forbidden_before_dispatch(self, monkeypatch):
+        called = False
+
+        def _fake_upload(*_args):
+            nonlocal called
+            called = True
+            return {"ok": True}
+
+        monkeypatch.setattr(api, "lead_upload_image", _fake_upload)
+        config = RemoteConfig(bind_port=0, secret_path="sek", token="tok", mode="view")
+        srv = http_server.start_server(config, _FakeOrch())
+        try:
+            req = urllib.request.Request(
+                _url(srv, "/sek/api/lead/upload"),
+                data=b"{}",
+                headers={"Authorization": "Bearer tok", "Content-Type": "application/json"},
+                method="POST",
+            )
+            with pytest.raises(urllib.error.HTTPError) as excinfo:
+                urllib.request.urlopen(req, timeout=5)
+            assert excinfo.value.code == 403
+            assert called is False
         finally:
             srv.stop()
 
@@ -672,6 +732,21 @@ class TestPasswordGate:
         assert status == 403
         assert json.loads(body)["msg"] == "password_required"
 
+    def test_bootstrap_reports_password_gate_with_200_instead_of_probe_403s(self, pw_server):
+        status, body = _get_status(
+            _url(pw_server, "/sek/api/bootstrap"), {"Authorization": "Bearer tok"}
+        )
+        assert status == 200
+        assert json.loads(body) == {"password_required": True}
+
+        _, verified = self._verify_password(pw_server, "hunter2")
+        status2, body2 = _get_status(
+            _url(pw_server, "/sek/api/bootstrap"),
+            {"Authorization": "Bearer tok", "X-Session": verified["session"]},
+        )
+        assert status2 == 200
+        assert json.loads(body2) == {"password_required": False}
+
     def test_wrong_password_is_401_and_stays_blocked(self, pw_server):
         # verify-password itself never touches the bridge (no _run_pumped
         # needed) — it's a plain thread-safe AuthGate check.
@@ -1039,10 +1114,12 @@ class TestStaticSecurityHeaders:
     def test_static_response_carries_csp_header(self, server):
         with urllib.request.urlopen(_url(server, "/sek/"), timeout=5) as resp:
             csp = resp.headers.get("Content-Security-Policy")
+            cache_control = resp.headers.get("Cache-Control")
         assert csp is not None
         assert "default-src 'self'" in csp
         assert "script-src 'self'" in csp
         assert "object-src 'none'" in csp
+        assert cache_control == "private, no-store, no-transform"
 
     def test_json_response_carries_csp_and_nosniff_headers(self, server):
         """L2: `_send_json` used to omit CSP entirely — the one response
@@ -1060,6 +1137,7 @@ class TestStaticSecurityHeaders:
             assert csp is not None
             assert "default-src 'self'" in csp
             assert resp.headers.get("X-Content-Type-Options") == "nosniff"
+            assert resp.headers.get("Cache-Control") == "private, no-store"
 
 
 class TestHandlerSocketTimeout:

@@ -50,6 +50,7 @@ way, per-project, for the same reason.
 from __future__ import annotations
 
 import json
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -88,6 +89,7 @@ class _Tail:
     path: Path
     session_uuid: str
     provider: str = "claude"
+    spawn_ts: float = 0.0
     offset: int = 0
     # bytes held back from the previous read because they didn't end in a
     # `\n` yet — Claude Code writes one JSON object per line, and a poll can
@@ -389,7 +391,15 @@ def resolve_lead_jsonl(orch, project_ns: str, provider: str | None = None) -> Pa
     session_uuid = _lead_session_uuid(orch, project_ns)
     # Do not bail out if session_uuid is None, as some providers (Gemini)
     # generate their own UUIDs and will resolve to the newest file instead.
-    return scanner.resolve_session(project_ns, session_uuid)
+    pane = None
+    panes_by_project = getattr(orch, "_panes_by_project", None)
+    if isinstance(panes_by_project, dict):
+        panes = panes_by_project.get(project_ns)
+        if isinstance(panes, dict):
+            pane = panes.get("lead")
+    model = getattr(pane, "model", None)
+    spawn_ts = float(getattr(model, "spawn_ts", 0.0) or 0.0)
+    return scanner.resolve_session(project_ns, session_uuid, spawn_ts)
 
 
 _SESSION_LIST_DEFAULT_LIMIT = 10
@@ -752,6 +762,229 @@ def _list_recent_gemini_sessions(
     return out
 
 
+# ── Codex structured rollout adapter ──────────────────────────────────────
+# Codex writes one JSON object per line below ~/.codex/sessions/YYYY/MM/DD.
+# `event_msg.user_message` and `event_msg.agent_message` are the clean,
+# provider-owned conversation stream; response_item/tool records are skipped
+# so the phone never receives tool arguments, terminal paint bytes, or hidden
+# reasoning.  Unlike Claude, Codex chooses its own session id after launch, so
+# resolution is cwd + pane spawn time until the rollout file's id is known.
+
+
+def _codex_sessions_root() -> Path:
+    from ..codex_helper import codex_sessions_root
+
+    return codex_sessions_root()
+
+
+def _norm_cwd(value: object) -> str:
+    from ..codex_helper import normalize_codex_cwd
+
+    return normalize_codex_cwd(value)
+
+
+def _codex_session_meta(path: Path) -> dict:
+    from ..codex_helper import read_codex_session_meta
+
+    return read_codex_session_meta(path)
+
+
+_CODEX_RESOLVE_CACHE: dict[tuple[str, str, int], Path] = {}
+
+
+def _resolve_codex_jsonl_path(
+    project_ns: str, session_uuid: str | None, not_before: float = 0.0
+) -> Path | None:
+    from .. import config as _config
+
+    cwd = _config.lead_cwd(project_ns)
+    wanted_cwd = _norm_cwd(cwd)
+    if not wanted_cwd:
+        return None
+    wanted_uuid = str(session_uuid or "").strip()
+    cache_key = (wanted_cwd, wanted_uuid, int(not_before or 0.0))
+    cached = _CODEX_RESOLVE_CACHE.get(cache_key)
+    if cached is not None and cached.is_file():
+        return cached
+
+    root = _codex_sessions_root()
+    if not root.is_dir():
+        return None
+    try:
+        candidates = sorted(
+            root.rglob("rollout-*.jsonl"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return None
+
+    # A picker/desktop resume supplies Codex's authoritative thread id. Its
+    # rollout can be days old and may not receive a new write until the user
+    # submits another prompt, so spawn-time filtering must not hide it from
+    # Mobile history immediately after resume.
+    if wanted_uuid:
+        for path in candidates:
+            meta = _codex_session_meta(path)
+            meta_id = str(meta.get("id") or meta.get("session_id") or "").strip()
+            if meta_id != wanted_uuid or _norm_cwd(meta.get("cwd")) != wanted_cwd:
+                continue
+            _CODEX_RESOLVE_CACHE[cache_key] = path
+            return path
+
+    # Fresh Codex launches have no provider session id in pane state yet. The
+    # file may be created just before AgentPane stamps spawn_ts after attach,
+    # so allow a small clock/order tolerance without admitting old sessions.
+    earliest = max(0.0, float(not_before or 0.0) - 15.0)
+    for path in candidates:
+        try:
+            if earliest and path.stat().st_mtime < earliest:
+                break
+        except OSError:
+            continue
+        meta = _codex_session_meta(path)
+        if _norm_cwd(meta.get("cwd")) != wanted_cwd:
+            continue
+        _CODEX_RESOLVE_CACHE[cache_key] = path
+        return path
+    return None
+
+
+def _codex_record_message(rec: object) -> tuple[str, str] | None:
+    if not isinstance(rec, dict) or rec.get("type") != "event_msg":
+        return None
+    payload = rec.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    ptype = payload.get("type")
+    if ptype == "agent_message":
+        kind = "lead"
+    elif ptype == "user_message":
+        kind = "me"
+    else:
+        return None
+    text = payload.get("message")
+    if not isinstance(text, str) or not text.strip():
+        return None
+    return kind, text.strip()
+
+
+def _codex_live_text_blocks(rec: dict) -> list[str]:
+    parsed = _codex_record_message(rec)
+    return [parsed[1]] if parsed is not None and parsed[0] == "lead" else []
+
+
+def _first_codex_user_preview(path: Path) -> str:
+    """Return Codex's first user event for picker identity/filtering."""
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                try:
+                    parsed = _codex_record_message(json.loads(line))
+                except (ValueError, TypeError):
+                    continue
+                if parsed is not None and parsed[0] == "me":
+                    return _strip_remote_prefix(parsed[1]).strip()[:_SESSION_PREVIEW_CHARS]
+    except OSError:
+        pass
+    return ""
+
+
+def _read_recent_codex_messages(path: Path, limit: int = _DEFAULT_HISTORY_LIMIT) -> list[dict]:
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return []
+    truncated = size > _HISTORY_MAX_BYTES
+    try:
+        with path.open("rb") as fh:
+            if truncated:
+                fh.seek(size - _HISTORY_MAX_BYTES)
+            raw = fh.read()
+    except OSError:
+        return []
+    lines = raw.split(b"\n")
+    if truncated:
+        lines = lines[1:]
+    out: list[dict] = []
+    for raw_line in lines:
+        try:
+            parsed = _codex_record_message(json.loads(raw_line))
+        except (ValueError, TypeError):
+            continue
+        if parsed is None:
+            continue
+        kind, text = parsed
+        if kind == "me":
+            text = _strip_remote_prefix(text)
+        out.append({"text": text[:_MAX_EVENT_CHARS], "kind": kind})
+    return out[-limit:]
+
+
+def _list_recent_codex_sessions(
+    project_ns: str, limit: int = _SESSION_LIST_DEFAULT_LIMIT
+) -> list[dict]:
+    """List cwd-matched Codex chats for Remote Mobile's session picker.
+
+    Codex keeps every role below one date-sharded store, so metadata cwd and
+    the first user event are both checked.  This mirrors the Claude/Gemini
+    picker contract: sessions from other projects and teammate task sessions
+    never enter the capped Lead list.
+    """
+    from .. import config as _config
+
+    wanted_cwd = _norm_cwd(_config.lead_cwd(project_ns))
+    root = _codex_sessions_root()
+    if not wanted_cwd or not root.is_dir():
+        return []
+    found: list[tuple[float, Path, dict]] = []
+    try:
+        for path in root.rglob("rollout-*.jsonl"):
+            meta = _codex_session_meta(path)
+            if _norm_cwd(meta.get("cwd")) != wanted_cwd:
+                continue
+            session_uuid = str(meta.get("id") or meta.get("session_id") or "").strip()
+            if not session_uuid:
+                continue
+            try:
+                found.append((path.stat().st_mtime, path, meta))
+            except OSError:
+                continue
+    except OSError:
+        return []
+    found.sort(key=lambda item: item[0], reverse=True)
+    capped = max(1, min(limit, _SESSION_LIST_MAX_LIMIT))
+    out: list[dict] = []
+    for mtime, path, meta in found:
+        preview = _first_codex_user_preview(path)
+        if preview.startswith(_TEAMMATE_TASK_PREFIXES):
+            continue
+        out.append(
+            {
+                "uuid": str(meta.get("id") or meta.get("session_id")),
+                "mtime": mtime,
+                "preview": preview,
+            }
+        )
+        if len(out) >= capped:
+            break
+    return out
+
+
+def _gemini_live_text_blocks(rec: dict) -> list[str]:
+    out: list[str] = []
+    for message in _gemini_record_messages(rec):
+        if message.get("type") != "gemini":
+            continue
+        text = _gemini_message_text(message)
+        if text:
+            out.append(text)
+    # A `$set.messages` snapshot may repeat the entire conversation; only its
+    # newest Gemini message can be new at the tail. Incremental records contain
+    # one message already, so the same rule covers both without duplicate SSE.
+    return out[-1:]
+
+
 @dataclass(frozen=True)
 class _HistoryScanner:
     """Provider adapter for remote history/session reads.
@@ -762,21 +995,37 @@ class _HistoryScanner:
     provider-name branch to the API or notifier.
     """
 
-    resolve_session: Callable[[str, str | None], Path | None]
+    resolve_session: Callable[[str, str | None, float], Path | None]
     read_messages: Callable[[Path, int], list[dict]]
     list_sessions: Callable[[str, int], list[dict]]
+    live_texts: Callable[[dict], list[str]]
+    live_activity: Callable[[dict], str | None] = lambda _rec: None
+    live_ask: Callable[[dict], dict | None] = lambda _rec: None
+    requires_session_uuid: bool = True
 
 
 _HISTORY_SCANNERS: dict[str, _HistoryScanner] = {
     "claude": _HistoryScanner(
-        resolve_session=_resolve_claude_jsonl_path,
+        resolve_session=lambda project, uuid, _spawn_ts: _resolve_claude_jsonl_path(project, uuid),
         read_messages=_read_recent_claude_messages,
         list_sessions=_list_recent_claude_sessions,
+        live_texts=_lead_text_blocks,
+        live_activity=_lead_activity,
+        live_ask=_ask_question_options,
     ),
     "gemini": _HistoryScanner(
-        resolve_session=_resolve_gemini_jsonl_path,
+        resolve_session=lambda project, uuid, _spawn_ts: _resolve_gemini_jsonl_path(project, uuid),
         read_messages=_read_recent_gemini_messages,
         list_sessions=_list_recent_gemini_sessions,
+        live_texts=_gemini_live_text_blocks,
+        requires_session_uuid=False,
+    ),
+    "codex": _HistoryScanner(
+        resolve_session=_resolve_codex_jsonl_path,
+        read_messages=_read_recent_codex_messages,
+        list_sessions=_list_recent_codex_sessions,
+        live_texts=_codex_live_text_blocks,
+        requires_session_uuid=False,
     ),
 }
 
@@ -852,6 +1101,89 @@ def lead_sessions_snapshot(orch, project_ns: str, limit: int) -> tuple[str, list
     return provider, list_recent_lead_sessions(project_ns, limit, provider=provider)
 
 
+def read_resume_session_messages(
+    project_ns: str,
+    provider: str,
+    session_uuid: str,
+    limit: int = _DEFAULT_HISTORY_LIMIT,
+) -> list[dict]:
+    """Read the exact picker-selected transcript before replacing the pane.
+
+    Returning this in the resume POST response removes a timing dependency
+    between pane replacement, notifier resync, and the PWA's next history GET.
+    The caller has already validated the provider-owned id/cwd pair; the
+    scanner repeats exact resolution and applies the same clean-message and
+    size limits as the normal history endpoint.
+    """
+    scanner = history_scanner(provider)
+    if scanner is None:
+        return []
+    path = scanner.resolve_session(project_ns, session_uuid, 0.0)
+    if path is None:
+        return []
+    capped = max(1, min(int(limit), _DEFAULT_HISTORY_LIMIT))
+    return scanner.read_messages(path, capped)
+
+
+_FALLBACK_UI_MARKERS = (
+    "esc to interrupt",
+    "esc to cancel",
+    "fast off",
+    "fast on",
+    "ctrl+p commands",
+    "? for shortcuts",
+    "shift+tab to cycle",
+    "bypass permissions",
+    "update available!",
+    "write tests for @filename",
+    "weekly 100% left",
+)
+
+
+def _pane_screen_lines(pane) -> list[str]:
+    session = getattr(pane, "session", None)
+    display_lines = getattr(session, "display_lines", None)
+    if not callable(display_lines):
+        return []
+    try:
+        return [str(line).rstrip() for line in display_lines()]
+    except Exception:
+        return []
+
+
+def _fallback_visible_delta(before: list[str], after: list[str]) -> str:
+    """Best-effort clean reply for providers without a structured log.
+
+    The snapshot taken when a turn enters ``working`` already contains the
+    submitted user prompt and old conversation.  Multiset subtraction leaves
+    only rows painted during the turn; known composer/status chrome is then
+    removed.  This is intentionally a last resort — structured provider logs
+    always win and suppress this fallback.
+    """
+    remaining = Counter(line.strip() for line in before if line.strip())
+    kept: list[str] = []
+    for raw in after:
+        line = raw.strip()
+        if not line:
+            continue
+        if remaining[line] > 0:
+            remaining[line] -= 1
+            continue
+        lower = line.lower()
+        if any(marker in lower for marker in _FALLBACK_UI_MARKERS):
+            continue
+        if lower.startswith(("model:", "directory:", "permissions:", "tip:")):
+            continue
+        if line.startswith(("> ", "› ", "❯ ", _REMOTE_PREFIX)):
+            continue
+        if all(ch in "─━│┃┌┐└┘├┤┬┴┼╭╮╰╯═║╔╗╚╝╠╣╦╩╬-_| " for ch in line):
+            continue
+        if kept and kept[-1] == line:
+            continue
+        kept.append(line)
+    return "\n".join(kept).strip()[:_MAX_EVENT_CHARS]
+
+
 class LeadNotifier(QObject):
     def __init__(self, orch, broadcaster) -> None:
         super().__init__()
@@ -864,6 +1196,17 @@ class LeadNotifier(QObject):
         # tick). Drives the persistent "…" indicator (see
         # `_emit_lead_working_transitions`).
         self._lead_working: dict[str, bool] = {}
+        # Provider-neutral safety net: capture the visible terminal before a
+        # turn and emit only its clean delta at idle when no structured event
+        # arrived. This keeps every registered provider usable in Remote.
+        self._screen_baselines: dict[str, list[str]] = {}
+        self._structured_text_seen: set[str] = set()
+        # Session changes can happen on the desktop while Mobile keeps the
+        # same project SSE connection. Hold the notification until the new
+        # provider-owned history file resolves, then tell the PWA to reload
+        # only that project's cached history.
+        self._session_keys: dict[str, tuple[str, str, float]] = {}
+        self._pending_session_changes: set[str] = set()
         self._timer = QTimer(self)
         self._timer.setInterval(_POLL_MS)
         self._timer.timeout.connect(self._poll_all)
@@ -874,38 +1217,57 @@ class LeadNotifier(QObject):
         self._resync()
 
     # ── discover / rediscover every open project's Lead session uuid ────
-    def _lead_uuids_by_project(self) -> dict[str, tuple[str, str]]:
+    def _lead_uuids_by_project(self) -> dict[str, tuple[str, str, float]]:
         panes_by_project = getattr(self._orch, "_panes_by_project", None)
         pane_state = getattr(self._orch, "_pane_state", None)
         if not isinstance(panes_by_project, dict) or not isinstance(pane_state, dict):
             return {}
-        found: dict[str, tuple[str, str]] = {}
+        found: dict[str, tuple[str, str, float]] = {}
         for project_ns, panes in panes_by_project.items():
             if "lead" not in panes:
                 continue
             provider = pane_provider_name(self._orch, project_ns, "lead", panes.get("lead"))
-            if history_scanner(provider) is None:
+            scanner = history_scanner(provider)
+            if scanner is None:
                 continue
             ps = pane_state.get(_exit_key(project_ns, "lead"))
             uuid = getattr(ps, "session_uuid", None) if ps is not None else None
-            if uuid:
-                found[project_ns] = (provider, uuid)
+            if uuid or not scanner.requires_session_uuid:
+                model = getattr(panes.get("lead"), "model", None)
+                spawn_ts = float(getattr(model, "spawn_ts", 0.0) or 0.0)
+                found[project_ns] = (provider, str(uuid or ""), spawn_ts)
         return found
 
     def _resolve_jsonl(
-        self, project_ns: str, session_uuid: str, provider: str = "claude"
+        self,
+        project_ns: str,
+        session_uuid: str,
+        provider: str = "claude",
+        spawn_ts: float = 0.0,
     ) -> Path | None:
         scanner = history_scanner(provider)
-        return scanner.resolve_session(project_ns, session_uuid) if scanner is not None else None
+        return (
+            scanner.resolve_session(project_ns, session_uuid or None, spawn_ts)
+            if scanner is not None
+            else None
+        )
 
     def _resync(self) -> None:
         wanted = self._lead_uuids_by_project()
+
+        for project_ns, key in wanted.items():
+            previous = self._session_keys.get(project_ns)
+            if previous is not None and previous != key:
+                self._pending_session_changes.add(project_ns)
+        for gone in set(self._session_keys) - set(wanted):
+            self._pending_session_changes.discard(gone)
+        self._session_keys = dict(wanted)
 
         # drop projects that closed, or whose Lead session uuid changed
         # (respawn/resume), or whose provider changed — a stale tail must
         # never keep feeding events from another provider's store.
         for project_ns, tail in list(self._tails.items()):
-            if wanted.get(project_ns) != (tail.provider, tail.session_uuid):
+            if wanted.get(project_ns) != (tail.provider, tail.session_uuid, tail.spawn_ts):
                 del self._tails[project_ns]
 
         # start tailing newly-discovered sessions only — a project already
@@ -916,11 +1278,12 @@ class LeadNotifier(QObject):
         # session that resolves late (fresh spawn/resume timing) is picked
         # up on the very next poll instead of only on the next
         # `statusChanged` signal.
-        for project_ns, (provider, session_uuid) in wanted.items():
-            if project_ns in self._tails:
-                continue
-            path = self._resolve_jsonl(project_ns, session_uuid, provider)
+        for project_ns, (provider, session_uuid, spawn_ts) in wanted.items():
+            path = self._resolve_jsonl(project_ns, session_uuid, provider, spawn_ts)
             if path is None:
+                continue
+            current = self._tails.get(project_ns)
+            if current is not None and current.path == path:
                 continue
             try:
                 size = path.stat().st_size
@@ -931,8 +1294,12 @@ class LeadNotifier(QObject):
                 path=path,
                 session_uuid=session_uuid,
                 provider=provider,
+                spawn_ts=spawn_ts,
                 offset=offset,
             )
+            if project_ns in self._pending_session_changes:
+                self._broadcaster.push("session_changed", {"provider": provider}, project_ns)
+                self._pending_session_changes.discard(project_ns)
 
     def _emit_lead_working_transitions(self) -> None:
         """Push a 'working' / 'idle' SSE event whenever the Lead pane's own
@@ -955,9 +1322,24 @@ class LeadNotifier(QObject):
             if working == self._lead_working.get(project_ns, False):
                 continue
             self._lead_working[project_ns] = working
-            self._broadcaster.push("working" if working else "idle", "", project_ns)
+            if working:
+                self._structured_text_seen.discard(project_ns)
+                self._screen_baselines[project_ns] = _pane_screen_lines(pane)
+                self._broadcaster.push("working", "", project_ns)
+            else:
+                if project_ns not in self._structured_text_seen:
+                    fallback = _fallback_visible_delta(
+                        self._screen_baselines.get(project_ns, []), _pane_screen_lines(pane)
+                    )
+                    if fallback:
+                        self._broadcaster.push("lead", fallback, project_ns)
+                self._screen_baselines.pop(project_ns, None)
+                self._structured_text_seen.discard(project_ns)
+                self._broadcaster.push("idle", "", project_ns)
         for gone in [p for p in self._lead_working if p not in seen]:
             del self._lead_working[gone]
+            self._screen_baselines.pop(gone, None)
+            self._structured_text_seen.discard(gone)
 
     # ── incremental tail: read only the delta appended since last poll ──
     def _poll_all(self) -> None:
@@ -986,6 +1368,9 @@ class LeadNotifier(QObject):
         activity: str | None = None
         ask_payload: dict | None = None
         pushed_text = False
+        scanner = history_scanner(tail.provider)
+        if scanner is None:
+            return
         for raw_line in lines:
             line = raw_line.strip()
             if not line:
@@ -994,11 +1379,12 @@ class LeadNotifier(QObject):
                 rec = json.loads(line)
             except ValueError:
                 continue
-            texts = _lead_text_blocks(rec)
+            texts = scanner.live_texts(rec)
             if texts:
                 joined = "\n".join(texts)[:_MAX_EVENT_CHARS]
                 self._broadcaster.push("lead", joined, project_ns)
                 pushed_text = True
+                self._structured_text_seen.add(project_ns)
                 ask_payload = None  # a real reply supersedes any earlier picker
             else:
                 # Assistant record with only tool_use/thinking blocks (no reply
@@ -1007,10 +1393,10 @@ class LeadNotifier(QObject):
                 # coarse activity category ("reading"/"running"/…) lets the PWA
                 # show a readable "กำลัง…" status so a long tool-heavy turn
                 # doesn't look frozen. Last activity in the batch wins.
-                found = _lead_activity(rec)
+                found = scanner.live_activity(rec)
                 if found is not None:
                     activity = found
-                ask = _ask_question_options(rec)
+                ask = scanner.live_ask(rec)
                 if ask is not None:
                     ask_payload = ask
         # W2a/B2: a real AskUserQuestion picker fired and nothing has answered
@@ -1052,4 +1438,8 @@ class LeadNotifier(QObject):
             except (TypeError, RuntimeError):
                 pass
         self._tails.clear()
+        self._screen_baselines.clear()
+        self._structured_text_seen.clear()
+        self._session_keys.clear()
+        self._pending_session_changes.clear()
         self._timer.stop()

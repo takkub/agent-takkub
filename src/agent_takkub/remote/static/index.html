@@ -138,20 +138,26 @@
     background: rgba(251, 191, 36, 0.1);
     border-color: rgba(251, 191, 36, 0.34);
   }
-  #lead-resume-btn {
+  #lead-resume-btn,
+  #lead-refresh-btn {
     display: none;
     background: var(--card);
     border: 1px solid var(--line2);
     color: var(--fg-dim);
     border-radius: 999px;
-    width: 26px;
+    min-width: 26px;
     height: 26px;
-    font-size: 0.95rem;
+    padding: 0 8px;
+    font-family: var(--mono);
+    font-size: 0.68rem;
     line-height: 1;
     cursor: pointer;
   }
-  #lead-resume-btn.show { display: inline-flex; align-items: center; justify-content: center; }
-  #lead-resume-btn:active { background: var(--card2); color: var(--fg); }
+  #lead-resume-btn.show,
+  #lead-refresh-btn.show { display: inline-flex; align-items: center; justify-content: center; }
+  #lead-resume-btn:active,
+  #lead-refresh-btn:active { background: var(--card2); color: var(--fg); }
+  #lead-refresh-btn:disabled { opacity: 0.5; cursor: wait; }
 
   /* ---------- resume / session picker sheet ---------- */
   .sheet-overlay {
@@ -195,6 +201,12 @@
     cursor: pointer;
     padding: 4px 6px;
   }
+  #resume-sheet-provider {
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    font-weight: 500;
+  }
   #resume-sheet-list {
     overflow-y: auto;
     padding: 8px 12px 20px;
@@ -211,6 +223,7 @@
     cursor: pointer;
   }
   .resume-row:active { background: var(--card2); }
+  .resume-row.opening { opacity: 0.55; pointer-events: none; }
   .resume-row .resume-time {
     font-family: var(--mono);
     font-size: 0.68rem;
@@ -436,6 +449,18 @@
     color: #d7fff7;
     border-bottom-right-radius: 5px;
   }
+  .remote-image {
+    display: block;
+    max-width: 100%;
+    max-height: 320px;
+    min-width: 72px;
+    min-height: 72px;
+    object-fit: contain;
+    margin-top: 8px;
+    border-radius: 10px;
+    border: 1px solid var(--line2);
+    background: var(--bg);
+  }
   .msg.sys {
     align-self: center;
     color: var(--fg-dim);
@@ -541,6 +566,18 @@
     cursor: pointer;
   }
   #lead-send:disabled { opacity: 0.4; }
+  #lead-attach {
+    flex: none;
+    width: 44px;
+    height: 44px;
+    border-radius: 10px;
+    border: 1px solid var(--line2);
+    background: var(--card);
+    color: var(--fg-dim);
+    font-size: 1.1rem;
+    cursor: pointer;
+  }
+  #lead-attach:disabled { opacity: 0.4; cursor: not-allowed; }
   #view-control-note {
     font-size: 0.72rem;
     color: var(--fg-dim);
@@ -934,7 +971,8 @@
         <small id="header-subtitle"></small>
       </div>
       <div id="header-status">
-        <button id="lead-resume-btn" type="button" aria-label="Resume session">⟳</button>
+        <button id="lead-refresh-btn" type="button" aria-label="โหลดข้อความล่าสุด" title="โหลดข้อความล่าสุด">⟳ Refresh</button>
+        <button id="lead-resume-btn" type="button" aria-label="ดูรายการ Resume" title="ดูรายการ Resume">↻ Resume</button>
         <span id="status-conn"><span class="dot"></span><span id="status-conn-text">Online</span></span>
         <span id="status-mode">VIEW</span>
       </div>
@@ -983,6 +1021,8 @@
       <div id="quick-replies"></div>
       <div id="view-control-note"></div>
       <form id="lead-composer">
+        <input id="lead-image-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+        <button id="lead-attach" type="button" aria-label="แนบรูปจากกล้องหรือคลังรูป" title="แนบรูป">📎</button>
         <textarea id="lead-input" rows="1" placeholder="พิมพ์ถึง Claude…"></textarea>
         <button id="lead-send" type="submit">➤</button>
       </form>
@@ -1010,7 +1050,7 @@
   <div id="resume-sheet" class="sheet-overlay">
     <div class="sheet">
       <div class="sheet-header">
-        <span>Resume session</span>
+        <span>Resume session <small id="resume-sheet-provider"></small></span>
         <button id="resume-sheet-close" type="button" aria-label="ปิด">✕</button>
       </div>
       <div id="resume-sheet-list"></div>

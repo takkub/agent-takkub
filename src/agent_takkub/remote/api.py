@@ -23,10 +23,15 @@ picked one yet).
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import logging
 import socket
 import time
+import uuid
+from datetime import datetime
+from pathlib import Path
 
 from .. import config as _config
 from ..roles import LEAD
@@ -35,6 +40,17 @@ from . import notify
 
 _HISTORY_DEFAULT_LIMIT = 200
 _HISTORY_MAX_LIMIT = 200
+_MAX_REMOTE_IMAGE_BYTES = 8 * 1024 * 1024
+
+_IMAGE_FORMATS = {
+    "png": ("png", lambda data: data.startswith(b"\x89PNG\r\n\x1a\n")),
+    "jpeg": ("jpg", lambda data: data.startswith(b"\xff\xd8\xff")),
+    "webp": (
+        "webp",
+        lambda data: len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP",
+    ),
+    "gif": ("gif", lambda data: data.startswith((b"GIF87a", b"GIF89a"))),
+}
 
 _log = logging.getLogger(__name__)
 
@@ -216,6 +232,75 @@ def lead_say(orch, text: str, from_project: str | None) -> dict:
     return {"ok": True}
 
 
+def lead_upload_image(
+    orch,
+    data_url: object,
+    filename: object,
+    caption: object,
+    from_project: str | None,
+) -> dict:
+    """Persist one mobile image in the project's central artifacts directory
+    and tell Lead its exact local path. All providers receive the same plain
+    text path, so their native image-reading tools can inspect it without a
+    provider-specific upload protocol.
+
+    The client-supplied filename is display-only. Storage uses a random name,
+    and MIME is verified against magic bytes before anything is written.
+    """
+    if not isinstance(data_url, str) or not data_url.startswith("data:image/"):
+        raise RemoteApiError(400, "invalid image")
+    header, separator, encoded = data_url.partition(",")
+    if not separator or not header.endswith(";base64"):
+        raise RemoteApiError(400, "invalid image")
+    mime_subtype = header.removeprefix("data:image/").removesuffix(";base64").lower()
+    image_format = _IMAGE_FORMATS.get(mime_subtype)
+    if image_format is None:
+        raise RemoteApiError(400, "unsupported image type")
+    try:
+        image_bytes = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError):
+        raise RemoteApiError(400, "invalid image") from None
+    if not image_bytes:
+        raise RemoteApiError(400, "empty image")
+    if len(image_bytes) > _MAX_REMOTE_IMAGE_BYTES:
+        raise RemoteApiError(413, "image too large")
+    extension, matches_magic = image_format
+    if not matches_magic(image_bytes):
+        raise RemoteApiError(400, "image content does not match type")
+
+    try:
+        project_ns = _config.validate_name(from_project or "default", "project")
+    except ValueError:
+        raise RemoteApiError(400, "invalid project") from None
+    today = datetime.now().strftime("%Y-%m-%d")
+    runtime_root = _config.RUNTIME_DIR.resolve()
+    screenshots = (_config.RUNTIME_DIR / "exports" / today / project_ns / "screenshots").resolve()
+    if runtime_root not in screenshots.parents:
+        raise RemoteApiError(400, "invalid project")
+    try:
+        screenshots.mkdir(parents=True, exist_ok=True)
+        image_path = screenshots / f"remote-{uuid.uuid4().hex}.{extension}"
+        image_path.write_bytes(image_bytes)
+    except OSError as exc:
+        _log.warning("could not save remote image: %s", exc)
+        raise RemoteApiError(500, "could not save image") from None
+
+    display_name = Path(filename).name[:120] if isinstance(filename, str) else "image"
+    clean_caption = caption.strip()[:2000] if isinstance(caption, str) else ""
+    message = f'[remote → lead] แนบรูปจาก mobile ให้เปิดดูจากไฟล์นี้: "{image_path}"'
+    if clean_caption:
+        message += f"\nข้อความประกอบ: {clean_caption}"
+    try:
+        lead_say(orch, message, project_ns)
+    except Exception:
+        try:
+            image_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+    return {"ok": True, "name": display_name or "image"}
+
+
 def open_project(orch, project: object) -> dict:
     """control-mode only (enforced by the HTTP handler's mode gate before
     this runs, same as `lead_say`). Validates `project` against
@@ -352,11 +437,22 @@ def resume_lead(orch, project: object, session_uuid: object) -> dict:
 
     if not _resume_uuid_matches_provider_cwd(project, provider, session_uuid, cwd):
         raise RemoteApiError(409, "resume_uuid does not match cwd")
+    # Snapshot the exact selected transcript before pane replacement. The
+    # response lets Mobile paint it immediately instead of racing notifier
+    # resync + a separate history request after the desktop already resumed.
+    resume_messages = notify.read_resume_session_messages(
+        project, provider, session_uuid, _HISTORY_MAX_LIMIT
+    )
     orch.close(LEAD.name, project=project, force=True, reason="remote resume")
     ok, msg = orch.spawn(LEAD.name, cwd=cwd, project=project, resume_uuid=session_uuid)
     if not ok:
         raise RemoteApiError(409, msg or "resume failed")
-    return {"ok": True, "project": project}
+    return {
+        "ok": True,
+        "project": project,
+        "provider": provider,
+        "messages": resume_messages,
+    }
 
 
 def projects(from_project: str | None, mode: str = "view") -> dict:

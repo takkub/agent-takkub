@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -29,7 +30,17 @@ class _FakePane:
     the notifier checks; the actual session object lives in `_pane_state`."""
 
     def __init__(self, provider: str = "claude") -> None:
-        self.model = type("FakePaneModel", (), {"provider_name": provider})()
+        self.model = type("FakePaneModel", (), {"provider_name": provider, "spawn_ts": 0.0})()
+        self.state = "idle"
+        self.session = None
+
+
+class _FakeScreenSession:
+    def __init__(self, lines: list[str]) -> None:
+        self.lines = lines
+
+    def display_lines(self) -> list[str]:
+        return list(self.lines)
 
 
 class _FakeOrch(QObject):
@@ -964,13 +975,18 @@ class TestLeadOutputTail:
             orch.set_lead("proj", "uuid-new")
             orch.statusChanged.emit()
             notifier._poll_all()
-            assert broadcaster.events == [], "stale session's output must never surface"
+            assert broadcaster.events == [("session_changed", {"provider": "claude"}, "proj")], (
+                "stale session's output must never surface"
+            )
 
             new_path = config_dir / "projects" / "C--proj" / "uuid-new.jsonl"
             with new_path.open("a", encoding="utf-8") as fh:
                 fh.write(_assistant_line("fresh output") + "\n")
             notifier._poll_all()
-            assert broadcaster.events == [("lead", "fresh output", "proj")]
+            assert broadcaster.events == [
+                ("session_changed", {"provider": "claude"}, "proj"),
+                ("lead", "fresh output", "proj"),
+            ]
         finally:
             notifier.stop()
 
@@ -1155,3 +1171,214 @@ class TestLeadOutputTail:
         notifier._poll_all()  # stopped notifier must not still be polling
         orch.agentDone.emit("proj", "backend", "note")
         assert broadcaster.events == []
+
+
+class TestCodexRemoteHistory:
+    @pytest.fixture(autouse=True)
+    def _isolate_codex(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        self.cwd = tmp_path / "project"
+        self.cwd.mkdir()
+        self.root = tmp_path / "codex-sessions"
+        self.root.mkdir()
+        monkeypatch.setattr(notify_mod, "_codex_sessions_root", lambda: self.root)
+        monkeypatch.setattr("agent_takkub.config.lead_cwd", lambda project=None: str(self.cwd))
+        notify_mod._CODEX_RESOLVE_CACHE.clear()
+        yield
+        notify_mod._CODEX_RESOLVE_CACHE.clear()
+
+    def _write(self, uuid: str, records: list[dict]) -> Path:
+        path = self.root / f"rollout-2026-08-11T10-00-00-{uuid}.jsonl"
+        meta = {
+            "type": "session_meta",
+            "payload": {"id": uuid, "session_id": uuid, "cwd": str(self.cwd)},
+        }
+        path.write_text(
+            "\n".join(json.dumps(item) for item in [meta, *records]) + "\n",
+            encoding="utf-8",
+        )
+        return path
+
+    def test_reads_only_clean_user_and_agent_events(self):
+        path = self._write(
+            "codex-uuid",
+            [
+                {
+                    "type": "event_msg",
+                    "payload": {"type": "user_message", "message": "[remote → lead] hello"},
+                },
+                {
+                    "type": "response_item",
+                    "payload": {"type": "custom_tool_call", "input": "secret tool args"},
+                },
+                {
+                    "type": "event_msg",
+                    "payload": {"type": "agent_message", "message": "working update"},
+                },
+                {
+                    "type": "event_msg",
+                    "payload": {"type": "agent_message", "message": "final answer"},
+                },
+            ],
+        )
+
+        assert notify_mod.read_recent_lead_messages(path, provider="codex") == [
+            {"text": "hello", "kind": "me"},
+            {"text": "working update", "kind": "lead"},
+            {"text": "final answer", "kind": "lead"},
+        ]
+
+    def test_uuidless_live_codex_session_is_resolved_by_cwd_and_spawn_time(self, qapp):
+        path = self._write("codex-live", [])
+        os.utime(path, (time.time(), time.time()))
+        orch = _FakeOrch()
+        orch.set_lead("proj", None, provider="codex")
+        orch._panes_by_project["proj"]["lead"].model.spawn_ts = time.time() - 1
+        broadcaster = _FakeBroadcaster()
+        notifier = LeadNotifier(orch, broadcaster)
+        try:
+            assert notifier._tails["proj"].path == path
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(
+                    json.dumps(
+                        {
+                            "type": "event_msg",
+                            "payload": {"type": "agent_message", "message": "codex reply"},
+                        }
+                    )
+                    + "\n"
+                )
+            notifier._poll_all()
+            assert broadcaster.events == [("lead", "codex reply", "proj")]
+        finally:
+            notifier.stop()
+
+    def test_resumed_codex_uuid_resolves_old_rollout_before_first_new_write(self):
+        path = self._write("codex-resumed", [])
+        old = time.time() - 86_400
+        os.utime(path, (old, old))
+
+        assert (
+            notify_mod._resolve_codex_jsonl_path("proj", "codex-resumed", not_before=time.time())
+            == path
+        )
+
+    def test_wrong_cwd_is_never_selected(self):
+        path = self._write("other-cwd", [])
+        first = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+        first["payload"]["cwd"] = str(self.cwd.parent / "other")
+        path.write_text(json.dumps(first) + "\n", encoding="utf-8")
+
+        assert notify_mod._resolve_codex_jsonl_path("proj", None) is None
+
+    def test_mobile_picker_lists_lead_sessions_newest_first_and_filters_teammates(self):
+        lead_old = self._write(
+            "lead-old",
+            [{"type": "event_msg", "payload": {"type": "user_message", "message": "งานเก่า"}}],
+        )
+        lead_new = self._write(
+            "lead-new",
+            [
+                {
+                    "type": "event_msg",
+                    "payload": {"type": "user_message", "message": "[remote → lead] งานใหม่"},
+                }
+            ],
+        )
+        teammate = self._write(
+            "qa-session",
+            [
+                {
+                    "type": "event_msg",
+                    "payload": {"type": "user_message", "message": "[ROLE: qa] run smoke"},
+                }
+            ],
+        )
+        now = time.time()
+        os.utime(lead_old, (now - 200, now - 200))
+        os.utime(lead_new, (now - 100, now - 100))
+        os.utime(teammate, (now, now))
+
+        sessions = notify_mod.list_recent_lead_sessions("proj", provider="codex")
+        assert [item["uuid"] for item in sessions] == ["lead-new", "lead-old"]
+        assert sessions[0]["preview"] == "งานใหม่"
+
+    def test_mobile_picker_excludes_other_cwd(self):
+        path = self._write(
+            "other-project",
+            [{"type": "event_msg", "payload": {"type": "user_message", "message": "secret"}}],
+        )
+        records = path.read_text(encoding="utf-8").splitlines()
+        meta = json.loads(records[0])
+        meta["payload"]["cwd"] = str(self.cwd.parent / "other")
+        path.write_text("\n".join([json.dumps(meta), *records[1:]]) + "\n", encoding="utf-8")
+
+        assert notify_mod.list_recent_lead_sessions("proj", provider="codex") == []
+
+
+class TestProviderNeutralLiveFallback:
+    @pytest.mark.parametrize(
+        "provider", ["claude", "codex", "gemini", "opencode", "kimi", "cursor"]
+    )
+    def test_every_provider_emits_visible_reply_when_structured_event_is_missing(
+        self, qapp, provider
+    ):
+        orch = _FakeOrch()
+        orch.set_lead("proj", None, provider=provider)
+        pane = orch._panes_by_project["proj"]["lead"]
+        pane.session = _FakeScreenSession(["old reply", "current prompt", "ctrl+p commands"])
+        broadcaster = _FakeBroadcaster()
+        notifier = LeadNotifier(orch, broadcaster)
+        try:
+            pane.state = "working"
+            notifier._emit_lead_working_transitions()
+            broadcaster.events.clear()
+
+            pane.session.lines = [
+                "old reply",
+                "current prompt",
+                "provider answer",
+                "ctrl+p commands",
+            ]
+            pane.state = "idle"
+            notifier._emit_lead_working_transitions()
+
+            assert broadcaster.events == [
+                ("lead", "provider answer", "proj"),
+                ("idle", "", "proj"),
+            ]
+        finally:
+            notifier.stop()
+
+    def test_structured_text_suppresses_duplicate_screen_fallback(self, qapp):
+        orch = _FakeOrch()
+        orch.set_lead("proj", "uuid", provider="claude")
+        pane = orch._panes_by_project["proj"]["lead"]
+        pane.session = _FakeScreenSession(["prompt"])
+        broadcaster = _FakeBroadcaster()
+        notifier = LeadNotifier(orch, broadcaster)
+        try:
+            pane.state = "working"
+            notifier._emit_lead_working_transitions()
+            broadcaster.events.clear()
+            notifier._structured_text_seen.add("proj")
+            pane.session.lines = ["prompt", "same structured answer"]
+            pane.state = "idle"
+            notifier._emit_lead_working_transitions()
+            assert broadcaster.events == [("idle", "", "proj")]
+        finally:
+            notifier.stop()
+
+
+def test_gemini_live_parser_uses_gemini_records_not_claude_shape():
+    rec = {"id": "g1", "type": "gemini", "content": ["gemini live reply"]}
+    assert notify_mod._gemini_live_text_blocks(rec) == ["gemini live reply"]
+
+    snapshot = {
+        "$set": {
+            "messages": [
+                {"id": "g-old", "type": "gemini", "content": ["old reply"]},
+                {"id": "g-new", "type": "gemini", "content": ["new reply"]},
+            ]
+        }
+    }
+    assert notify_mod._gemini_live_text_blocks(snapshot) == ["new reply"]

@@ -7,6 +7,7 @@ construction + the error-surfacing contract.
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -17,6 +18,52 @@ def _proc(returncode: int = 0, stdout: str = "", stderr: str = ""):
     return subprocess.CompletedProcess(
         args=["codex"], returncode=returncode, stdout=stdout, stderr=stderr
     )
+
+
+def _write_rollout(root: Path, uuid: str, cwd: Path) -> Path:
+    import json
+
+    path = root / "2026" / "08" / "11" / f"rollout-{uuid}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "type": "session_meta",
+                "payload": {"id": uuid, "cwd": str(cwd)},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+class TestCodexSessionStore:
+    def test_exact_id_and_cwd_resolve(self, tmp_path: Path) -> None:
+        cwd = tmp_path / "project"
+        cwd.mkdir()
+        root = tmp_path / "sessions"
+        path = _write_rollout(root, "uuid-1", cwd)
+
+        assert codex_helper.resolve_codex_jsonl_for_cwd(str(cwd), "uuid-1", root=root) == path
+
+    def test_wrong_cwd_or_id_never_resolves(self, tmp_path: Path) -> None:
+        cwd = tmp_path / "project"
+        cwd.mkdir()
+        root = tmp_path / "sessions"
+        _write_rollout(root, "uuid-1", cwd)
+
+        assert (
+            codex_helper.resolve_codex_jsonl_for_cwd(str(tmp_path / "other"), "uuid-1", root=root)
+            is None
+        )
+        assert codex_helper.resolve_codex_jsonl_for_cwd(str(cwd), "uuid-2", root=root) is None
+
+    def test_codex_home_selects_provider_store(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "custom-codex"))
+        assert codex_helper.codex_sessions_root() == tmp_path / "custom-codex" / "sessions"
 
 
 class TestFindCodexExecutable:

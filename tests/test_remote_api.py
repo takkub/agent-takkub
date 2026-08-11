@@ -5,9 +5,11 @@ leak role/task/state/transcript text, only `{working, total, provider}`.
 
 from __future__ import annotations
 
+import base64
 import json
 import socket
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -505,6 +507,62 @@ class TestLeadSay:
         assert excinfo.value.status == 502
 
 
+class TestLeadUploadImage:
+    _PNG = b"\x89PNG\r\n\x1a\n" + b"test-pixels"
+
+    @staticmethod
+    def _data_url(data: bytes) -> str:
+        return "data:image/png;base64," + base64.b64encode(data).decode("ascii")
+
+    def test_saves_under_project_artifacts_and_sends_exact_path(
+        self, monkeypatch, tmp_path: Path, fake_orch
+    ):
+        monkeypatch.setattr(api._config, "RUNTIME_DIR", tmp_path / "runtime")
+        seen: dict = {}
+
+        def _fake_say(orch, text, project):
+            seen.update(text=text, project=project)
+            return {"ok": True}
+
+        monkeypatch.setattr(api, "lead_say", _fake_say)
+        result = api.lead_upload_image(
+            fake_orch,
+            self._data_url(self._PNG),
+            "../../phone.png",
+            "ช่วยดู error นี้",
+            "proj-a",
+        )
+
+        images = list((tmp_path / "runtime" / "exports").glob("*/proj-a/screenshots/*.png"))
+        assert len(images) == 1
+        assert images[0].read_bytes() == self._PNG
+        assert str(images[0]) in seen["text"]
+        assert "ช่วยดู error นี้" in seen["text"]
+        assert seen["project"] == "proj-a"
+        assert result == {"ok": True, "name": "phone.png"}
+
+    def test_rejects_mime_magic_mismatch_without_writing(self, monkeypatch, tmp_path: Path):
+        monkeypatch.setattr(api._config, "RUNTIME_DIR", tmp_path / "runtime")
+        with pytest.raises(api.RemoteApiError) as excinfo:
+            api.lead_upload_image(None, self._data_url(b"not a png"), "x.png", "", "proj-a")
+        assert excinfo.value.status == 400
+        assert not (tmp_path / "runtime").exists()
+
+    def test_removes_new_file_when_lead_delivery_fails(
+        self, monkeypatch, tmp_path: Path, fake_orch
+    ):
+        monkeypatch.setattr(api._config, "RUNTIME_DIR", tmp_path / "runtime")
+
+        def _fail(*_args):
+            raise api.RemoteApiError(502, "lead is not running")
+
+        monkeypatch.setattr(api, "lead_say", _fail)
+        with pytest.raises(api.RemoteApiError) as excinfo:
+            api.lead_upload_image(fake_orch, self._data_url(self._PNG), "phone.png", "", "proj-a")
+        assert excinfo.value.status == 502
+        assert list((tmp_path / "runtime" / "exports").glob("**/*.*")) == []
+
+
 class _FakeMainWindow:
     def __init__(self) -> None:
         self.opened: list[str] = []
@@ -696,18 +754,17 @@ class TestLeadHistory:
             "lead_provider_note": None,
         }
 
-    def test_provider_note_set_for_non_claude_lead(self, monkeypatch):
-        """Issue #101: a codex/agy-backed Lead's mobile history response
-        carries a human-readable note explaining the degraded state instead
-        of just quietly returning whatever jsonl-based history it can find."""
+    def test_provider_note_set_for_provider_without_saved_history(self, monkeypatch):
+        """A provider using the live visible-screen fallback still explains
+        that saved history/session browsing is unavailable."""
         monkeypatch.setattr(
-            api.notify, "lead_history_snapshot", lambda orch, ns, limit: ("codex", [])
+            api.notify, "lead_history_snapshot", lambda orch, ns, limit: ("opencode", [])
         )
         result = api.lead_history(self._Orch(), "proj-a")
-        assert result["provider"] == "codex"
+        assert result["provider"] == "opencode"
         assert result["messages"] == []
         assert result["lead_provider_note"] is not None
-        assert "codex" in result["lead_provider_note"]
+        assert "opencode" in result["lead_provider_note"]
 
     def test_limit_defaults_to_200(self, monkeypatch):
         seen = {}
@@ -749,14 +806,14 @@ class TestLeadSessions:
 
     def test_exposes_provider_and_clean_unsupported_state(self, monkeypatch):
         monkeypatch.setattr(
-            api.notify, "lead_sessions_snapshot", lambda orch, ns, limit: ("codex", [])
+            api.notify, "lead_sessions_snapshot", lambda orch, ns, limit: ("opencode", [])
         )
         result = api.lead_sessions(self._Orch(), "proj-a")
         assert result == {
             "project": "proj-a",
-            "provider": "codex",
+            "provider": "opencode",
             "sessions": [],
-            "lead_provider_note": "Lead provider = codex — remote history/session unavailable",
+            "lead_provider_note": "Lead provider = opencode — remote history/session unavailable",
         }
 
     def test_supported_provider_has_no_degradation_note(self, monkeypatch):

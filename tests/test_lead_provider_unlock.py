@@ -159,3 +159,20 @@ class TestLeadThroughCodexBranch:
         assert agents_md_calls, "render_lead_agents_md was not called for a codex-backed Lead"
         assert agents_md_calls[0][0][:2] == (TEST_PROJECT, str(tmp_path))
         mock_ensure.assert_not_called()
+
+    def test_resume_uses_subcommand_and_exact_session_id(self, qapp, monkeypatch, tmp_path):
+        call, _agents_md_calls, _mock_ensure = _spawn_lead_and_capture(
+            qapp,
+            monkeypatch,
+            tmp_path,
+            "codex",
+            patch("agent_takkub.codex_helper.find_codex_executable", return_value="codex"),
+            patch("agent_takkub.mcp_bridge._codex_resolved_mcp_names", return_value=[]),
+            patch(
+                "agent_takkub.spawn_engine._resume_uuid_matches_provider_cwd",
+                return_value=True,
+            ),
+            resume_uuid="019feec4-1be4-7333-8eda-a097c6734637",
+        )
+        argv = call["argv"]
+        assert argv[-2:] == ["resume", "019feec4-1be4-7333-8eda-a097c6734637"]
