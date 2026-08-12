@@ -4,6 +4,16 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.54] - 2026-08-12
+
+### Fixed (แก้)
+- **วางข้อความซ้ำ (double-paste) ใน terminal** — browser กับ xterm.js เขียนทับ helper textarea พร้อมกันตอน paste ทำให้ข้อความถูกส่งซ้ำ 2 รอบ (ขอบคุณ contributor `than-aa`, PR #153)
+- **ชื่อ project/role ที่มีจุดเดียวใช้ไม่ได้** — เช่น `www.abc.com` ตอนนี้อนุญาตแล้ว ยังกัน path traversal เต็ม (`..`, จุดขึ้นต้น/ลงท้าย) เหมือนเดิม (PR #153)
+
+### Chore
+- Bump `ruff` 0.16.1 → 0.16.2 (bugfix, dependabot #155) — ปฏิเสธการขยาย Qt6 pin ที่ dependabot เสนอเพราะ Qt 6.11+ มี crash regression ที่ทราบอยู่แล้ว (`doctor.py::check_qt()`)
+- Bump `github/codeql-action` 4.37.4 → 4.37.6 (dependabot #154)
+
 ## [1.0.53] - 2026-08-12
 
 ### Added (เพิ่ม)
