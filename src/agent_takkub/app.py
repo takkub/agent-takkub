@@ -64,6 +64,12 @@ def _log_unhandled(exc_type, exc_value, exc_tb, *, source: str) -> None:
             sys.__stderr__.write(tb)
     except Exception:
         pass
+    try:
+        from .auto_issue_capture import capture_cockpit_crash
+
+        capture_cockpit_crash(exc_type, exc_value, exc_tb, source=source)
+    except Exception:
+        pass
 
 
 def _install_exception_guard() -> None:

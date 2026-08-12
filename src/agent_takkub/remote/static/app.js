@@ -1094,6 +1094,15 @@
     lead.messages.forEach(function (message) {
       appendMsgDom(message.kind, message.text);
     });
+    // appendMsgDom's atBottom heuristic is built for incremental streaming
+    // (don't yank the user down while they're reading scrollback). A full
+    // rebuild is different: it's always "just opened this chat", so it must
+    // land on the latest message unconditionally. Relying on the heuristic
+    // here silently fails whenever log.clientHeight reads 0 mid-loop (view
+    // not yet active, app resuming from background on mobile, etc.) —
+    // appendMsgDom.atBottom then stays false for the rest of the loop and
+    // the log is stuck scrolled to the top.
+    log.scrollTop = log.scrollHeight;
     state.leadWorking = isWorking;
     if (!lead.messages.length && !isWorking) {
       ensureLeadEmpty(

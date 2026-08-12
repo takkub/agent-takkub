@@ -1,14 +1,15 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 138,
+  "module_count": 139,
   "modules": [
     {
       "module": "agent_takkub",
       "imports": [],
       "imported_by": [
+        "agent_takkub.auto_issue_capture",
         "agent_takkub.settings_window"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 0
     },
     {
@@ -122,6 +123,7 @@
       "module": "agent_takkub.app",
       "imports": [
         "agent_takkub._restart_env",
+        "agent_takkub.auto_issue_capture",
         "agent_takkub.config",
         "agent_takkub.custom_roles",
         "agent_takkub.main_window",
@@ -133,7 +135,20 @@
         "agent_takkub.__main__"
       ],
       "fan_in": 1,
-      "fan_out": 7
+      "fan_out": 8
+    },
+    {
+      "module": "agent_takkub.auto_issue_capture",
+      "imports": [
+        "agent_takkub",
+        "agent_takkub.config",
+        "agent_takkub.issues"
+      ],
+      "imported_by": [
+        "agent_takkub.app"
+      ],
+      "fan_in": 1,
+      "fan_out": 3
     },
     {
       "module": "agent_takkub.auto_resume",
@@ -335,6 +350,7 @@
       "imported_by": [
         "agent_takkub.agent_pane",
         "agent_takkub.app",
+        "agent_takkub.auto_issue_capture",
         "agent_takkub.auto_resume",
         "agent_takkub.browser_chrome",
         "agent_takkub.chatlog_scanner",
@@ -404,7 +420,7 @@
         "agent_takkub.vault_mirror",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 70,
+      "fan_in": 71,
       "fan_out": 0
     },
     {
@@ -613,10 +629,11 @@
         "agent_takkub.config"
       ],
       "imported_by": [
+        "agent_takkub.auto_issue_capture",
         "agent_takkub.cli",
         "agent_takkub.update_worker"
       ],
-      "fan_in": 2,
+      "fan_in": 3,
       "fan_out": 2
     },
     {

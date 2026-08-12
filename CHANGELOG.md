@@ -4,6 +4,15 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.53] - 2026-08-12
+
+### Added (เพิ่ม)
+- **Auto-issue-capture สำหรับ cockpit crash** — unhandled exception ในตัว cockpit เอง (sys.excepthook/threading.excepthook/unraisablehook) auto เปิด GitHub issue เข้า repo agent-takkub ให้อัตโนมัติ พร้อม dedup ต่อ signature 24 ชม. + rate-cap 5 อีชชู่/24 ชม. กัน crash-loop สแปม และ scrub home path + redact secret-shaped string ก่อนส่งเพราะ repo เป็น public
+- **นโยบาย Lead auto-open cockpit self-bug** — Lead ทุกโปรเจคที่เจอ error ที่เป็นตัว cockpit เอง (ไม่ใช่ bug โปรเจค user) เปิด issue อัตโนมัติได้เลยไม่ต้องรอสั่ง (`CLAUDE.md`)
+
+### Fixed (แก้)
+- **Remote/mobile chat เด้งไปบนสุดแทนที่จะโชว์ข้อความล่าสุด** — `renderSelectedProject()` rebuild log ทั้งหมดตอนโหลด history แต่พึ่ง atBottom heuristic ที่ออกแบบมาสำหรับ incremental streaming ล้วนๆ ซึ่ง fail เงียบๆ ถ้า container ยังไม่ visible ตอน render — เพิ่ม force scroll-to-bottom หลัง full-rebuild
+
 ## [1.0.52] - 2026-08-11
 
 ### Fixed (แก้)

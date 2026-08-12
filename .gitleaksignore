@@ -1,0 +1,11 @@
+# Known false-positives: example/fixture secret-shaped strings used to test
+# auto_issue_capture.py's redaction regex (docs/audit review tables + test
+# parametrize cases) — not real credentials.
+docs/audit/2026-08-12-auto-issue-capture-review-round3.md:aws-access-token:61
+docs/audit/2026-08-12-auto-issue-capture-review-round3.md:generic-api-key:58
+docs/audit/2026-08-12-auto-issue-capture-review-round3.md:generic-api-key:60
+docs/audit/2026-08-12-auto-issue-capture-review-round2.md:generic-api-key:110
+docs/audit/2026-08-12-auto-issue-capture-review-round2.md:generic-api-key:112
+docs/audit/2026-08-12-auto-issue-capture-review-round2.md:aws-access-token:113
+tests/test_auto_issue_capture.py:generic-api-key:281
+tests/test_auto_issue_capture.py:generic-api-key:282

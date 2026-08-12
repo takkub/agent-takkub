@@ -105,8 +105,19 @@ takkub issue list | new "<title>" --severity <s> --body "..."   # default ลง
 3. Render proposal รอ confirm **ห้าม chain auto-fire**
 `classify_failure(note)` suggest role ใน fix-loop ให้แล้ว (devops > backend > frontend > qa) — เป็น suggestion, Lead ตัดสิน
 
+### Lead reply style
+รายงาน/finding/รายละเอียดยาว → เขียนลงไฟล์ (`docs/audit/`, `docs/lead/`, session report) แล้วชี้ path สั้นๆ 1-3 บรรทัดในแชท (แบบเดียวกับที่ teammate role รายงาน `takkub done`) ห้าม paste เนื้อหายาวลงแชท — ยกเว้น propose table (role/task/cwd) ที่ต้องโชว์เต็มเพราะ user ต้อง confirm ก่อน fire แต่ก็ให้กระชับที่สุด ไม่มี prose ยาวคั่น
+
 ### Auto-fire exceptions (skip propose)
-Lead's own Read/Grep/Glob/`git status|log|diff` · แก้ไฟล์ cockpit ตาม direct-edit policy — **ยังต้อง propose:** ทุก `takkub assign` (รวม codex/gemini) · แตะไฟล์ใน BLOCKED_DIRS
+Lead's own Read/Grep/Glob/`git status|log|diff` · แก้ไฟล์ cockpit ตาม direct-edit policy · **cockpit self-bug auto-issue** (ดูหัวข้อถัดไป) — **ยังต้อง propose:** ทุก `takkub assign` (รวม codex/gemini) · แตะไฟล์ใน BLOCKED_DIRS
+
+### Cockpit self-bug auto-issue (ทุก project tab)
+เจอ error ระหว่างทำงาน**ที่เป็นตัว cockpit เอง** (takkub CLI พัง, pane spawn/crash ผิดปกติ, orchestrator/routing เพี้ยน, provider integration พัง) — **ไม่ใช่ bug ของโค้ด/โปรเจค user** — → auto-fire ทันที ไม่ต้อง propose:
+1. เช็คก่อนว่ามี issue เปิดอยู่แล้ว topic เดียวกันไหม (`takkub issue list --open`) — ถ้ามี ข้าม ไม่เปิดใหม่ (กันสแปม, ยังไม่มี `issue comment` subcommand)
+2. ไม่มี → `takkub issue new "<title>" --cockpit-bug --severity <s> --noticed-in <project-name> --body "..."` (title เป็น positional arg ไม่ใช่ `--title` · `--cockpit-bug` เป็น default อยู่แล้ว แต่ใส่ชัดกันพลาด)
+3. แจ้ง user 1 บรรทัด: `[cockpit bug] เปิด issue #N: <title>`
+
+ห้าม auto-open ถ้าเป็น bug ของโปรเจค user เอง (ไม่เกี่ยวกับ cockpit) — เคสนั้นแจ้ง user ตามปกติ ไม่ใช่ issue tracker ของ cockpit
 
 ### ❌ ห้าม one-shot `takkub codex` / `takkub gemini`
 user ต้องเห็นทำงานสดใน pane → ใส่เป็น row ใน propose table → fire `takkub assign --role codex/gemini`
