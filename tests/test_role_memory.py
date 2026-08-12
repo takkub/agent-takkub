@@ -74,14 +74,16 @@ class TestEnsureRoleMemory:
         path = role_memory_path("my proj/weird:name", "qa")
         assert path.parent.name == "my_proj_weird_name"  # no / or : in the segment
         assert path.name == "qa.md"
+        domain_path = role_memory_path("www.abc.com", "qa")
+        assert domain_path.parent.name == "www.abc.com"  # single dots preserved
 
     def test_no_parent_dir_traversal(self, isolated_role_memory: pathlib.Path) -> None:
-        # Dots are dropped so a `..` project/role can't escape ROLE_MEMORY_DIR.
+        # Double/leading/trailing dots sanitized so a `..` project/role can't escape ROLE_MEMORY_DIR.
         for evil in ("..", "../../etc", "a..b"):
             p = role_memory_path(evil, "qa")
             assert ".." not in p.parts
             assert isolated_role_memory in p.parents
-        assert role_memory_path("p", "..").name == "__.md"
+        assert role_memory_path("p", "..").name == "_.md"
 
 
 class TestCuration:

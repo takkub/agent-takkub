@@ -229,6 +229,18 @@
           isComposing = true;
           return;
         }
+        if (e.inputType === 'insertFromPaste') {
+          // Text paste is owned by xterm.js's native paste handler: it reads
+          // the clipboard, wraps it in bracketed-paste ESC[200~..ESC[201~ when
+          // the PTY asked for it, and emits onData — so lastEmittedText holds
+          // the *wrapped* text while the helper textarea holds the raw text,
+          // and flushTextareaInput's dedup fails, re-sending the paste a second
+          // time. Let xterm be the single writer: skip the flush AND stop the
+          // browser's default insert into the helper textarea so no raw paste
+          // text lingers for a later keystroke's flush to re-send.
+          e.preventDefault();
+          return;
+        }
         if (e.data) {
           pendingCharText = e.data;
           setTimeout(flushTextareaInput, 5);
@@ -237,6 +249,12 @@
 
       helperTextarea.addEventListener('input', (e) => {
         if (e.isComposing) return;
+        if (e.inputType === 'insertFromPaste') {
+          // Safety net: if a paste still landed in the textarea (some path the
+          // beforeinput prevention missed), drop it — xterm.js already sent it.
+          helperTextarea.value = '';
+          return;
+        }
         setTimeout(flushTextareaInput, 5);
       });
 

@@ -106,11 +106,15 @@ _ROLE_SECTIONS: dict[str, str] = {
 def _safe(name: str) -> str:
     """Sanitize a project / role name into ONE safe path segment.
 
-    Dots are dropped (not just other separators) so a ``..`` can never survive as
-    a parent-dir-traversal segment, even if a caller bypasses the upstream
-    validate_name guard. ``my.proj`` → ``my_proj``; ``..`` → ``__``.
+    Single dots in project names are preserved (e.g. ``www.abc.com``).
+    Leading/trailing dots and double/consecutive dots are stripped or replaced
+    so path traversal is impossible.
     """
-    return re.sub(r"[^A-Za-z0-9_-]", "_", name) or "default"
+    s = re.sub(r"[^A-Za-z0-9._-]", "_", name)
+    while ".." in s:
+        s = s.replace("..", "_")
+    s = s.strip(".")
+    return s or "default"
 
 
 def role_memory_path(project: str, base_role: str) -> pathlib.Path:

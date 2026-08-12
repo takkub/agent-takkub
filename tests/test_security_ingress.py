@@ -42,6 +42,9 @@ class TestValidateName:
     def test_valid_alphanumeric(self) -> None:
         assert validate_name("role2", "role") == "role2"
 
+    def test_valid_with_dot_domain(self) -> None:
+        assert validate_name("www.abc.com", "project") == "www.abc.com"
+
     def test_strips_and_lowercases(self) -> None:
         # validate_name normalises before matching
         assert validate_name("  Backend  ", "role") == "backend"
@@ -83,6 +86,14 @@ class TestValidateName:
     def test_double_dot_raises(self) -> None:
         with pytest.raises(ValueError, match="invalid role"):
             validate_name("..", "role")
+
+    def test_leading_dot_raises(self) -> None:
+        with pytest.raises(ValueError, match="invalid role"):
+            validate_name(".hidden", "role")
+
+    def test_trailing_dot_raises(self) -> None:
+        with pytest.raises(ValueError, match="invalid role"):
+            validate_name("trailing.", "role")
 
     def test_null_byte_raises(self) -> None:
         with pytest.raises(ValueError):

@@ -371,6 +371,7 @@ class TestValidateName:
         assert pane_tools_policy._validate_name("pordee-tool")
         assert pane_tools_policy._validate_name("tool123")
         assert pane_tools_policy._validate_name("T123")  # case-insensitive
+        assert pane_tools_policy._validate_name("www.abc.com")
 
     def test_rejects_invalid_names(self) -> None:
         assert not pane_tools_policy._validate_name("")
@@ -378,6 +379,10 @@ class TestValidateName:
         assert not pane_tools_policy._validate_name("_playwright")  # starts with underscore
         assert not pane_tools_policy._validate_name("playwright!")
         assert not pane_tools_policy._validate_name("playwright tool")  # space
+        assert not pane_tools_policy._validate_name("..")
+        assert not pane_tools_policy._validate_name(".hidden")
+        assert not pane_tools_policy._validate_name("trailing.")
+        assert not pane_tools_policy._validate_name("../../etc/passwd")
 
 
 class TestKnownRoles:
