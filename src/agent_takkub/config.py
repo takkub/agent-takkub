@@ -64,7 +64,12 @@ def validate_name(value: str, kind: str) -> str:
         raise ValueError(f"invalid {kind}: {value!r}")
     if "#" in name:
         role_part, _, shard_part = name.partition("#")
-        if ".." in role_part or role_part.startswith(".") or role_part.endswith(".") or not _SAFE_NAME.fullmatch(role_part):
+        if (
+            ".." in role_part
+            or role_part.startswith(".")
+            or role_part.endswith(".")
+            or not _SAFE_NAME.fullmatch(role_part)
+        ):
             raise ValueError(f"invalid {kind}: {value!r}")
         if not _SAFE_SHARD_IDX.fullmatch(shard_part):
             raise ValueError(f"invalid {kind} shard index: {value!r}")
