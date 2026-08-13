@@ -955,3 +955,145 @@ class TestWatchdogExceptionLogging:
         errs = [kw["err"] for ev, kw in events if ev == "idle_watchdog_pane_error"]
         assert any("RuntimeError: first" in e for e in errs)
         assert any("ValueError: second" in e for e in errs)
+
+
+class TestProactiveIdleCompact:
+    """`/compact` injected into a Claude pane that's been continuously idle
+    (any pane.state — targets `done`/Lead panes the forgot-`done` loop above
+    never tracks) for PROACTIVE_COMPACT_IDLE_AFTER_S. See issue #161 /
+    orchestrator._check_proactive_compact's docstring for the prompt-cache
+    TTL cost rationale."""
+
+    def _claude(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.effective_provider_for",
+            lambda role, project=None: "claude",
+        )
+
+    def test_disabled_when_threshold_is_zero(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._claude(monkeypatch)
+        monkeypatch.setattr(orch_mod, "PROACTIVE_COMPACT_IDLE_AFTER_S", 0)
+        pane = _make_pane(state="done", at_ready_prompt=True)
+        orch.panes["backend"] = pane
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        orch._check_idle_teammates()
+        clock[0] += 10_000
+        orch._check_idle_teammates()
+
+        pane.session.write.assert_not_called()
+
+    def test_compact_fires_once_after_idle_threshold(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._claude(monkeypatch)
+        monkeypatch.setattr(orch_mod, "PROACTIVE_COMPACT_IDLE_AFTER_S", 100)
+        # A "done" pane — the forgot-`done` loop above ignores it entirely
+        # (pane.state != "working"), so this is exactly the case the
+        # proactive-compact watchdog exists for.
+        pane = _make_pane(state="done", at_ready_prompt=True)
+        orch.panes["backend"] = pane
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        orch._check_idle_teammates()  # idle episode starts
+        pane.session.write.assert_not_called()
+
+        clock[0] += 99  # just under the threshold
+        orch._check_idle_teammates()
+        pane.session.write.assert_not_called()
+
+        clock[0] += 2  # crosses the threshold
+        orch._check_idle_teammates()
+        pane.session.write.assert_called_once_with("/compact")
+
+        # Still idle, well past the threshold — must not fire a second time
+        # for the SAME idle episode.
+        clock[0] += 500
+        orch._check_idle_teammates()
+        pane.session.write.assert_called_once_with("/compact")
+
+    def test_new_idle_episode_after_going_busy_fires_again(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._claude(monkeypatch)
+        monkeypatch.setattr(orch_mod, "PROACTIVE_COMPACT_IDLE_AFTER_S", 100)
+        pane = _make_pane(state="done", at_ready_prompt=True)
+        orch.panes["backend"] = pane
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        orch._check_idle_teammates()
+        clock[0] += 101
+        orch._check_idle_teammates()
+        assert pane.session.write.call_count == 1
+
+        # New work starts (pane goes busy) — the idle episode ends.
+        pane.session.is_at_ready_prompt.return_value = False
+        clock[0] += 1
+        orch._check_idle_teammates()
+        pane.session.is_at_ready_prompt.return_value = True
+        clock[0] += 1
+        orch._check_idle_teammates()  # new idle episode starts
+        clock[0] += 101
+        orch._check_idle_teammates()
+
+        assert pane.session.write.call_count == 2
+
+    def test_non_claude_provider_never_compacted(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.effective_provider_for",
+            lambda role, project=None: "codex",
+        )
+        monkeypatch.setattr(orch_mod, "PROACTIVE_COMPACT_IDLE_AFTER_S", 100)
+        pane = _make_pane(state="done", at_ready_prompt=True)
+        orch.panes["backend"] = pane
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        orch._check_idle_teammates()
+        clock[0] += 10_000
+        orch._check_idle_teammates()
+
+        pane.session.write.assert_not_called()
+
+    def test_rate_limited_pane_never_compacted(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._claude(monkeypatch)
+        monkeypatch.setattr(orch_mod, "PROACTIVE_COMPACT_IDLE_AFTER_S", 100)
+        pane = _make_pane(state="done", at_ready_prompt=True)
+        orch.panes["backend"] = pane
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        orch._ps(_key("backend")).rate_limited_until = clock[0] + 10_000
+        orch._check_idle_teammates()
+        clock[0] += 10_000
+        orch._check_idle_teammates()
+
+        pane.session.write.assert_not_called()
+
+    def test_lead_pane_is_eligible(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Unlike the forgot-`done` loop (which explicitly `continue`s past
+        Lead), Lead's own conversation is usually the longest-lived of all
+        and IS eligible for proactive compaction."""
+        self._claude(monkeypatch)
+        monkeypatch.setattr(orch_mod, "PROACTIVE_COMPACT_IDLE_AFTER_S", 100)
+        pane = _make_pane(state="active", at_ready_prompt=True)
+        orch.panes["lead"] = pane
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        orch._check_idle_teammates()
+        clock[0] += 101
+        orch._check_idle_teammates()
+
+        pane.session.write.assert_called_once_with("/compact")

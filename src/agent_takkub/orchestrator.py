@@ -185,6 +185,30 @@ _TRANSCRIPT_TAIL_BYTES = 64 * 1024
 # when a teammate pane has been idle this long. 0 = disabled.
 HARVEST_HINT_SEC = int(os.environ.get("TAKKUB_HARVEST_HINT_SEC", "600"))
 
+# ── Proactive idle compaction (prompt-cache TTL cost control, issue #161) ───
+# Claude's server-side prompt cache is written once, at whatever size the
+# transcript is when the cache entry is (re)created, and expires after its
+# TTL — normally ~1h, but Anthropic shortens it to ~5min while the account is
+# in usage-overage (see limit_status.is_in_overage). A pane that piles up a
+# long conversation and then sits fully idle across that TTL boundary pays
+# the FULL transcript as one big cache-write the next time anyone talks to
+# it — a cost that scales with how much context piled up before the pane
+# went idle, not with the TTL itself. Sending `/compact` proactively once a
+# pane has been idle long enough to be at real risk of crossing that
+# boundary keeps the eventual re-cache small instead of paying for the whole
+# pre-idle transcript in one shot. This is IN ADDITION to (never a
+# replacement for) the CLI's own automatic near-full-context compaction —
+# see _on_session_cap_exceeded's docstring for why the cockpit never second-
+# guesses that one. 0 = disabled.
+#
+# Claude-only for now: `/compact` is a Claude Code CLI slash command with no
+# confirmed equivalent on codex/gemini/opencode/kimi/cursor — a known
+# multi-provider gap, tracked under #103 rather than silently assumed to work
+# everywhere. See _check_proactive_compact's provider gate.
+PROACTIVE_COMPACT_IDLE_AFTER_S = int(
+    os.environ.get("TAKKUB_PROACTIVE_COMPACT_IDLE_AFTER_S", str(25 * 60))
+)
+
 # ── Screenshot evidence auto-attach (issue #5) ──────────────────────────────
 # Extensions done() treats as "evidence" when scanning the pane's artifacts
 # dir. Case-insensitive match against Path.suffix.
@@ -3247,6 +3271,11 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         # Surface panes whose idle prompt no marker recognises (structural #20
         # staleness detector) — makes an upstream-reword silent break LOUD.
         self._check_stale_markers(now)
+        # Proactive idle compaction (issue #161) — independent of the
+        # forgot-`done` loop below (which only tracks pane.state=="working"):
+        # this targets panes that ARE done (or Lead, which never reports
+        # done) and have simply been sitting idle a long time.
+        self._check_proactive_compact(now)
         for project_name, project_panes in list(self._panes_by_project.items()):
             for name, pane in list(project_panes.items()):
                 try:
@@ -3527,6 +3556,80 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                     self._stale_marker_last[key] = now
                 except Exception:
                     continue
+
+    def _check_proactive_compact(self, now: float) -> None:
+        """Inject `/compact` into a Claude pane that's been continuously idle
+        at its ready prompt for PROACTIVE_COMPACT_IDLE_AFTER_S — see that
+        constant's comment for the prompt-cache-TTL cost rationale.
+
+        Runs over every live pane (including Lead) regardless of
+        `pane.state` — unlike the forgot-`takkub done` loop this rides
+        alongside, a pane that already reported done (or Lead, which never
+        calls done on itself) is exactly the case this targets, not one it
+        skips. Never fires on a pane that's busy, booting, TTY-blocked, or
+        currently rate-limited (rate-limited panes can't run `/compact`
+        either — it would just join the same stuck queue).
+
+        Claude-only: gated on `effective_provider_for(...) == CLAUDE`. Other
+        providers are skipped without an alternative action — `/compact` has
+        no confirmed equivalent slash command on codex/gemini/opencode/kimi/
+        cursor (tracked as a known gap under #103, not silently assumed to
+        work). A pane whose provider changes mid-episode (rare — provider is
+        fixed at spawn) is simply re-evaluated fresh next tick.
+
+        One `/compact` per idle episode: `proactive_compact_sent_ts` is
+        compared against `proactive_compact_idle_since`, so a pane that stays
+        idle for hours only gets nudged once, not every tick past the
+        threshold. Going busy again (new task, user typing, etc.) resets
+        `proactive_compact_idle_since` to None, which starts a fresh episode
+        the next time the pane settles.
+        """
+        if PROACTIVE_COMPACT_IDLE_AFTER_S <= 0:
+            return
+        from .provider_config import CLAUDE, effective_provider_for
+
+        for project_name, project_panes in list(self._panes_by_project.items()):
+            for role, pane in list(project_panes.items()):
+                try:
+                    sess = pane.session
+                    if sess is None or not sess.is_alive:
+                        continue
+                    key = f"{project_name}::{role}"
+                    ps = self._ps(key)
+                    if (
+                        not sess.is_at_ready_prompt()
+                        or sess.shows_startup_marker()
+                        or sess.is_blocked_on_tty_prompt()
+                        or ps.rate_limited_until > now
+                    ):
+                        ps.proactive_compact_idle_since = None
+                        continue
+                    if effective_provider_for(role, project=project_name) != CLAUDE:
+                        continue
+                    if ps.proactive_compact_idle_since is None:
+                        ps.proactive_compact_idle_since = now
+                        continue
+                    idle_for = now - ps.proactive_compact_idle_since
+                    if idle_for < PROACTIVE_COMPACT_IDLE_AFTER_S:
+                        continue
+                    if ps.proactive_compact_sent_ts >= ps.proactive_compact_idle_since:
+                        continue  # already compacted this idle episode
+                    sess.write("/compact")
+                    _delayed_enter(pane, sess, 150)
+                    ps.proactive_compact_sent_ts = now
+                    _log_event(
+                        "proactive_idle_compact",
+                        role=role,
+                        project=project_name,
+                        idle_for=round(idle_for),
+                    )
+                except Exception as e:
+                    _log_event(
+                        "proactive_compact_check_error",
+                        role=role,
+                        project=project_name,
+                        err=f"{type(e).__name__}: {e}",
+                    )
 
     def _check_shell_open_dialog(
         self, project_name: str, role: str, pane: AgentPane, key: str

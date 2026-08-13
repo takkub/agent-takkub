@@ -745,9 +745,10 @@
         "agent_takkub.doctor",
         "agent_takkub.limit_autoresume",
         "agent_takkub.limit_panel",
+        "agent_takkub.status_header",
         "agent_takkub.user_profile"
       ],
-      "fan_in": 4,
+      "fan_in": 5,
       "fan_out": 1
     },
     {
@@ -2019,6 +2020,7 @@
         "agent_takkub.config",
         "agent_takkub.graft_autobuild",
         "agent_takkub.graft_store",
+        "agent_takkub.limit_status",
         "agent_takkub.plan_tier",
         "agent_takkub.project_tab",
         "agent_takkub.provider_config",
@@ -2029,7 +2031,7 @@
         "agent_takkub.main_window"
       ],
       "fan_in": 1,
-      "fan_out": 10
+      "fan_out": 11
     },
     {
       "module": "agent_takkub.system_baseline",
