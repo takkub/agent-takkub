@@ -602,6 +602,16 @@ class PaneState:
     # per pane's current assignment is enough; the dialog doesn't repeat the
     # marker text, so re-scanning after the first hit is just wasted I/O.
     shell_open_dialog_notified: bool = False
+    # ── proactive idle compaction (prompt-cache TTL cost control) ────────────
+    # proactive_compact_idle_since: monotonic-ish wall clock (time.time()) when
+    # this pane was first observed continuously idle at its ready prompt; None
+    # while busy/booting/blocked. proactive_compact_sent_ts: wall clock of the
+    # last `/compact` this watchdog injected — compared against
+    # proactive_compact_idle_since so the SAME idle episode never gets a
+    # second `/compact` (a fresh episode only starts once the pane goes busy
+    # and idles again). See orchestrator._check_proactive_compact.
+    proactive_compact_idle_since: float | None = None
+    proactive_compact_sent_ts: float = 0.0
 
 
 @dataclass

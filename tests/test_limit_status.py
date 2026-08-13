@@ -449,6 +449,46 @@ class TestParseWindowUtilization:
         assert w.utilization == 0.0
 
 
+def _usage(five_hour_util: float | None) -> UsageData:
+    from agent_takkub.limit_status import LimitWindow
+
+    window = LimitWindow(
+        name="five_hour",
+        utilization=five_hour_util,
+        resets_at=datetime(2026, 6, 9, 10, 0, 0, tzinfo=UTC),
+    )
+    return UsageData(plan="Max", windows=[window], extra_usage_enabled=False)
+
+
+class TestIsInOverage:
+    """Pure signal `status_header._refresh_overage_chip` and
+    `orchestrator._check_proactive_compact` both key off — see
+    `limit_status.is_in_overage`'s docstring for the prompt-cache-TTL
+    rationale."""
+
+    def test_none_data_is_not_overage(self) -> None:
+        assert limit_status.is_in_overage(None) is False
+
+    def test_below_100_is_not_overage(self) -> None:
+        assert limit_status.is_in_overage(_usage(79.9)) is False
+        assert limit_status.is_in_overage(_usage(99.99)) is False
+
+    def test_exactly_100_is_overage(self) -> None:
+        assert limit_status.is_in_overage(_usage(100.0)) is True
+
+    def test_above_100_is_overage(self) -> None:
+        assert limit_status.is_in_overage(_usage(140.0)) is True
+
+    def test_unknown_utilization_is_not_overage(self) -> None:
+        """None utilization (API sent no figure) must never be guessed into
+        the scarier state — matches LimitWindow.utilization's own contract."""
+        assert limit_status.is_in_overage(_usage(None)) is False
+
+    def test_no_five_hour_window_is_not_overage(self) -> None:
+        data = UsageData(plan="Max", windows=[], extra_usage_enabled=False)
+        assert limit_status.is_in_overage(data) is False
+
+
 class TestSharedState:
     def test_roundtrip(self, tmp_path: Path) -> None:
         cd = tmp_path / ".claude"

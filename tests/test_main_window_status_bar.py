@@ -13,6 +13,7 @@ from __future__ import annotations
 from unittest.mock import Mock, patch
 
 from agent_takkub.main_window import MainWindow
+from agent_takkub.status_header import StatusHeaderMixin
 
 # ---------------------------------------------------------------------------
 # #16 — doctor integration: run_all_checks + format_report round-trip
@@ -79,3 +80,78 @@ class TestOnTabSwitchedNoTabsLeft:
         mock_clear.assert_called_once_with()
         # Nothing past the early-return branch should be touched.
         fake_self.tabs.widget.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# ⚠ Usage-overage chip (#161) — status_header._refresh_overage_chip
+# ---------------------------------------------------------------------------
+
+
+class TestOverageChip:
+    """No Qt widget tree needed: _refresh_overage_chip only touches
+    `self._chip_overage` (a plain Mock stands in fine — show()/hide()/
+    setVisible() are just recorded calls) and reads through
+    `self._limit_store`, never constructing real widgets."""
+
+    def _fake_self(self, *, limit_store=None):
+        fake_self = Mock()
+        fake_self._chip_overage = Mock()
+        fake_self._limit_store = limit_store
+        return fake_self
+
+    def test_hides_when_no_limit_store_yet(self) -> None:
+        """The 3s boot window before _init_limit_store runs — must degrade
+        to hidden, never raise."""
+        fake_self = self._fake_self(limit_store=None)
+        StatusHeaderMixin._refresh_overage_chip(fake_self)
+        fake_self._chip_overage.hide.assert_called_once()
+
+    def test_hides_when_no_active_project(self) -> None:
+        fake_self = self._fake_self(limit_store=Mock())
+        with patch("agent_takkub.config.active_project", return_value=(None, None)):
+            StatusHeaderMixin._refresh_overage_chip(fake_self)
+        fake_self._chip_overage.hide.assert_called_once()
+
+    def test_visible_when_active_project_is_in_overage(self) -> None:
+        from datetime import UTC, datetime
+
+        from agent_takkub.limit_status import LimitWindow, UsageData
+
+        data = UsageData(
+            plan="Max",
+            windows=[
+                LimitWindow(
+                    name="five_hour",
+                    utilization=100.0,
+                    resets_at=datetime(2026, 6, 9, 10, 0, 0, tzinfo=UTC),
+                )
+            ],
+            extra_usage_enabled=False,
+        )
+        store = Mock()
+        store.get.return_value = data
+        fake_self = self._fake_self(limit_store=store)
+        with (
+            patch("agent_takkub.config.active_project", return_value=("demo", None)),
+            patch("agent_takkub.user_profile.config_dir_for", return_value="/fake/cd"),
+        ):
+            StatusHeaderMixin._refresh_overage_chip(fake_self)
+        fake_self._chip_overage.setVisible.assert_called_once_with(True)
+
+    def test_hidden_when_active_project_is_not_in_overage(self) -> None:
+        store = Mock()
+        store.get.return_value = None
+        fake_self = self._fake_self(limit_store=store)
+        with (
+            patch("agent_takkub.config.active_project", return_value=("demo", None)),
+            patch("agent_takkub.user_profile.config_dir_for", return_value="/fake/cd"),
+        ):
+            StatusHeaderMixin._refresh_overage_chip(fake_self)
+        fake_self._chip_overage.setVisible.assert_called_once_with(False)
+
+    def test_no_op_when_chip_was_never_built(self) -> None:
+        """Same `__dict__`-membership guard as _refresh_remote_chip/
+        _refresh_graft_chip — a MainWindow.__new__() test stub whose Qt C++
+        side never ran must not crash here."""
+        fake_self = Mock(spec=[])  # empty spec → no attributes at all
+        StatusHeaderMixin._refresh_overage_chip(fake_self)  # must not raise

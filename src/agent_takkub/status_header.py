@@ -173,6 +173,23 @@ class StatusHeaderMixin:
         )
 
     @staticmethod
+    def _overage_chip_style() -> str:
+        """Outline chip for the ⚠ usage-overage warning.
+
+        Unlike the other status-bar chips this one is never toggled — it's a
+        pure warning, shown only while true — so it has a single style (warn
+        amber), not a paired on/off pair like _auto_resume_chip_style.
+        """
+        brand = cockpit_theme.STATE_WARN_ALT
+        return (
+            "QPushButton { "
+            f"background:transparent; color:{brand}; "
+            f"border:1px solid {brand}; border-radius:{cockpit_theme.RADIUS_MD}px; "
+            "padding:2px 10px; font-weight:600; }"
+            "QPushButton:hover { background:rgba(255,255,255,0.06); }"
+        )
+
+    @staticmethod
     def _remote_chip_style(enabled: bool) -> str:
         """Outline chip for the 🌐 Remote toggle. ON = teal (server live,
         reachable from outside this machine), OFF = neutral zinc — same
@@ -307,6 +324,35 @@ class StatusHeaderMixin:
         self._chip_plan.setToolTip(self._plan_chip_tooltip(_pro_now))
         self._chip_plan.setStyleSheet(self._plan_chip_style(_pro_now))
         self._chip_plan.clicked.connect(self._on_plan_chip_clicked)
+
+        # ⚠ Usage-overage chip: warns when the ACTIVE project's Claude
+        # account has fully exhausted its 5-hour usage window. Anthropic
+        # shortens the prompt-cache TTL (~1h → ~5min) while an account is in
+        # this state, so an idle pane recaches its whole transcript far
+        # sooner than usual (see limit_status.is_in_overage + the
+        # proactive-idle-compact watchdog in orchestrator.py, which is the
+        # actual mitigation — this chip is only the visible signal). Reuses
+        # the LimitStore cache the tab-corner usage meter already polls
+        # (limit_panel.py) — no extra network fetch. Hidden by default;
+        # _refresh_overage_chip (called from _update_status, same as the
+        # other status chips) shows it only while true.
+        self._chip_overage = QPushButton("⚠ Usage overage", self)
+        self._chip_overage.setStyleSheet(self._overage_chip_style())
+        self._chip_overage.setToolTip(
+            "This account's 5-hour usage window is fully exhausted.\n"
+            "Claude's prompt-cache TTL shortens (~1h → ~5min) while this "
+            "lasts, so idle panes\nrecache their whole context sooner than "
+            "usual. Clears when the 5-hour window\nresets (see the usage "
+            "meter in the tab corner for the countdown)."
+        )
+        self._chip_overage.clicked.connect(
+            lambda: self._status.showMessage(
+                "⚠ Usage overage — 5-hour window exhausted, prompt-cache TTL shortened "
+                "(~1h → ~5min) until it resets",
+                8_000,
+            )
+        )
+        self._chip_overage.hide()
 
         # 🌐 Remote chip: opens the remote-control (phone pairing) settings
         # dialog. `remote/` is a delete-to-uninstall bolt-on (see
@@ -515,7 +561,7 @@ class StatusHeaderMixin:
         #
         #   Group 1 — Workflow actions (buttons that change pane state)
         #   Group 2 — System status    (cockpit-level toggles + updates)
-        #     2a. exec      — account plan · execution mode
+        #     2a. exec      — account plan · usage-overage warning · execution mode
         #     2b. session   — auto-resume · remote · graft build status
         #     2c. system    — rtk install · restart · team · update
         for w in (
@@ -527,7 +573,7 @@ class StatusHeaderMixin:
             self._status.addPermanentWidget(w)
         self._status.addPermanentWidget(self._make_status_separator())
         subgroups = (
-            (self._chip_plan,),
+            (self._chip_plan, self._chip_overage),
             (self._chip_remote, self._chip_graft),
             (
                 self._btn_restart,
@@ -660,7 +706,42 @@ class StatusHeaderMixin:
         self._status.showMessage("  ·  ".join(bits))
         self._refresh_graft_chip()
         self._refresh_remote_chip()
+        self._refresh_overage_chip()
         self._update_provider_chip()
+
+    # ──────────────────────────────────────────────────────────────
+    # ⚠ Usage-overage chip
+    # ──────────────────────────────────────────────────────────────
+
+    def _refresh_overage_chip(self) -> None:
+        """Repaint the ⚠ overage chip from the LimitStore cache for the
+        ACTIVE project tab — never triggers a new fetch (LimitStore's own
+        background poller, registered per-tab in limit_panel.py, keeps that
+        cache warm on its own schedule).
+
+        Uses the same `__dict__`-membership guard as `_refresh_remote_chip`/
+        `_refresh_graft_chip` so tests exercising a bare `MainWindow.__new__()`
+        stub (Qt C++ side never constructed) don't hit the sip `hasattr`
+        quirk documented there. Silently hides (never raises) when there's no
+        store yet — the 3s boot window before `_init_limit_store` runs — or
+        no active project.
+        """
+        if "_chip_overage" not in self.__dict__:
+            return
+        store = getattr(self, "_limit_store", None)
+        if store is None:
+            self._chip_overage.hide()
+            return
+        from . import user_profile
+        from .config import active_project
+        from .limit_status import is_in_overage
+
+        proj, _ = active_project()
+        if not proj:
+            self._chip_overage.hide()
+            return
+        data = store.get(user_profile.config_dir_for(proj))
+        self._chip_overage.setVisible(is_in_overage(data))
 
     # ──────────────────────────────────────────────────────────────
     # 🧠 Graft chip — code-graph auto-build status

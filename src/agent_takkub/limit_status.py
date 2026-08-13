@@ -63,6 +63,28 @@ class RateLimited(Exception):
         self.retry_after = retry_after
 
 
+def is_in_overage(data: UsageData | None) -> bool:
+    """True once the five-hour usage window is fully exhausted (>=100%).
+
+    Anthropic's server-side prompt-cache TTL shortens from its normal ~1h
+    window to ~5min while an account sits in this state (not something this
+    codebase configures or observes directly) — a pane that goes idle here
+    pays a full cache-write far sooner than usual on its next turn. This is
+    the pure signal the status-bar overage chip (status_header.py) and the
+    proactive-idle-compact watchdog (orchestrator.py) key off of.
+
+    None/unknown utilization is never treated as overage — an offline fetch
+    or a schema change that dropped the field must never read as "worse than
+    we actually know", matching LimitWindow.utilization's own None contract.
+    """
+    if data is None:
+        return False
+    for window in data.windows or ():
+        if window.name == "five_hour" and window.utilization is not None:
+            return window.utilization >= 100.0
+    return False
+
+
 def _detect_cli_version() -> str | None:
     try:
         executable = shutil.which("claude")
