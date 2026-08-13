@@ -541,7 +541,6 @@ def test_install_falls_back_to_direct_when_staging_unavailable(tmp_path):
 
 
 def test_build_staging_mirror_hardlinks_files_and_excludes_git_and_skills(tmp_path):
-    (tmp_path / "package.json").write_text('{"name": "x"}', encoding="utf-8")
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "index.ts").write_text("export {}", encoding="utf-8")
     (tmp_path / ".git").mkdir()
@@ -553,10 +552,9 @@ def test_build_staging_mirror_hardlinks_files_and_excludes_git_and_skills(tmp_pa
     staging = ai._build_staging_mirror(tmp_path)
     assert staging is not None
     try:
-        mirrored = staging / "package.json"
+        mirrored = staging / "src" / "index.ts"
         assert mirrored.is_file()
-        assert mirrored.stat().st_ino == (tmp_path / "package.json").stat().st_ino
-        assert (staging / "src" / "index.ts").is_file()
+        assert mirrored.stat().st_ino == (tmp_path / "src" / "index.ts").stat().st_ino
         assert not (staging / ".git").exists()
         assert (staging / ".claude" / "skills").is_dir()
         assert list((staging / ".claude" / "skills").iterdir()) == []
@@ -567,6 +565,35 @@ def test_build_staging_mirror_hardlinks_files_and_excludes_git_and_skills(tmp_pa
 def test_build_staging_mirror_none_on_root_creation_failure(tmp_path):
     with patch.object(ai.tempfile, "mkdtemp", side_effect=OSError("nope")):
         assert ai._build_staging_mirror(tmp_path) is None
+
+
+def test_build_staging_mirror_copies_manifest_files_instead_of_hardlinking(tmp_path):
+    """A hardlinked manifest shares the real file's inode — an in-place
+    rewrite of the staged copy (e.g. a stack-detection tool normalizing a
+    lockfile) would silently corrupt the real project's file too. Manifest
+    files must be real, independent copies."""
+    (tmp_path / "package.json").write_text('{"name": "x"}', encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n", encoding="utf-8")
+    (tmp_path / "tsconfig.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "package-lock.json").write_text("{}", encoding="utf-8")
+    (tmp_path / ".env").write_text("SECRET=1", encoding="utf-8")
+
+    staging = ai._build_staging_mirror(tmp_path)
+    assert staging is not None
+    try:
+        for name in (
+            "package.json",
+            "pyproject.toml",
+            "tsconfig.json",
+            "package-lock.json",
+            ".env",
+        ):
+            mirrored = staging / name
+            assert mirrored.is_file()
+            assert mirrored.stat().st_ino != (tmp_path / name).stat().st_ino
+            assert mirrored.read_bytes() == (tmp_path / name).read_bytes()
+    finally:
+        ai.shutil.rmtree(staging, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------

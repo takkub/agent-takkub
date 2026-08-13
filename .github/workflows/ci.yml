@@ -56,6 +56,22 @@ jobs:
         run: |
           python -c "import agent_takkub.config, agent_takkub.roles, agent_takkub.cli"
 
+      # import-linter: architecture contracts (pyproject.toml [[tool.importlinter.contracts]]).
+      # `lint-imports` is the console script pip installs from `.[dev]` above — no
+      # OS-specific venv path needed here (unlike the local pre-commit hooks, which
+      # resolve a shared .venv's Scripts/bin directly).
+      - name: Import-linter architecture contracts
+        run: lint-imports
+
+      # depgraph freshness: regenerate in memory and compare to the committed
+      # docs/architecture/depgraph.json, ignoring provenance-only fields
+      # (generated_by) — same check as the local depgraph-fresh pre-commit
+      # hook, so a --no-verify commit or a GitHub-web merge still gets caught
+      # here. --check never touches the working tree, so it is immune to
+      # git-diff/CRLF false positives and to grimp point-release bumps.
+      - name: Depgraph freshness check
+        run: python tools/gen_import_graph.py --check
+
       - name: Run tests
         run: python -m pytest -v
 

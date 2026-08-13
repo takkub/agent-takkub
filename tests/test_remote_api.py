@@ -631,6 +631,37 @@ class TestLeadUploadImage:
             "lead_provider_note": None,
         }
 
+    def test_caption_control_chars_are_stripped_before_reaching_lead_pty(
+        self, monkeypatch, tmp_path: Path, fake_orch
+    ):
+        monkeypatch.setattr(api._config, "RUNTIME_DIR", tmp_path / "runtime")
+        seen: dict = {}
+
+        def _fake_say(orch, text, project):
+            seen.update(text=text)
+            return {
+                "ok": True,
+                "provider": "claude",
+                "mirror_supported": True,
+                "lead_provider_note": None,
+            }
+
+        monkeypatch.setattr(api, "lead_say", _fake_say)
+        api.lead_upload_image(
+            fake_orch,
+            self._data_url(self._PNG),
+            "phone.png",
+            "ดูด้วย\x03\x1b[2Jrm -rf /\tok",
+            "proj-a",
+        )
+
+        assert "\x03" not in seen["text"]
+        assert "\x1b" not in seen["text"]
+        assert "\t" not in seen["text"]
+        # ESC itself is stripped; the printable text that followed it in the
+        # escape sequence is not control data and is left intact.
+        assert "ดูด้วย[2Jrm -rf /ok" in seen["text"]
+
     def test_rejects_mime_magic_mismatch_without_writing(self, monkeypatch, tmp_path: Path):
         monkeypatch.setattr(api._config, "RUNTIME_DIR", tmp_path / "runtime")
         with pytest.raises(api.RemoteApiError) as excinfo:

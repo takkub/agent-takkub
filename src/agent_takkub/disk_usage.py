@@ -1332,7 +1332,22 @@ def prune_orphan_worktrees_boot(data_home: Path | None = None) -> int:
     branch with commits nobody merged yet (#132) — those need an explicit
     `takkub prune --level review --category orphan-worktrees-review --yes`.
     Returns the number removed. Best-effort: never raises.
+
+    Kill switch: TAKKUB_SKIP_ORPHAN_WORKTREE_PRUNE (any value other than ""
+    or "0"), same shape as TAKKUB_SKIP_GRAFT_BUILD / TAKKUB_SKIP_MCP_WARM —
+    set by conftest.py for every test run. Every `classify_worktree` call
+    inside `_prune_orphan_worktrees` runs real `git rev-parse` / `git
+    worktree list` subprocesses via WorktreeManager (`find_worktree_dirs`
+    finds ANY dir under `<data_home>/worktrees/**`, including a leftover
+    real dev-machine checkout, not just test fixtures) — Orchestrator()
+    construction calls this at boot, so an unguarded suite run would shell
+    out to real git once per collected worktree on every test that builds
+    an Orchestrator. Guarded here (not just at the orchestrator.py call
+    site) so no caller can bypass it, mirroring the other two kill
+    switches' rationale.
     """
+    if os.environ.get("TAKKUB_SKIP_ORPHAN_WORKTREE_PRUNE", "").strip() not in ("", "0"):
+        return 0
     home = (data_home or DATA_HOME).resolve()
     try:
         result = _prune_orphan_worktrees(home, dry_run=False, mgr=WorktreeManager())

@@ -9,6 +9,7 @@ closeEvent).
 from __future__ import annotations
 
 import pathlib
+import types
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -16,6 +17,7 @@ from PyQt6.QtCore import QCoreApplication
 from PyQt6.QtWidgets import QMessageBox as _RealQMessageBox
 
 import agent_takkub.main_window as mw_mod
+import agent_takkub.orchestrator as orch_mod
 import agent_takkub.update_panel as up_mod
 from agent_takkub._restart_env import AUTO_PORT_FILE_ENV, configure_multi_instance_port_file
 
@@ -44,6 +46,11 @@ def _make_window_stub(monkeypatch: pytest.MonkeyPatch) -> mw_mod.MainWindow:
 
     win.orch = MagicMock()
     win.orch._panes_by_project = {}
+    # Bind the real Orchestrator.iter_all_panes so tests that populate
+    # _panes_by_project directly are exercised through the same public
+    # accessor the production code now calls, instead of drifting from
+    # it via a hand-rolled fake.
+    win.orch.iter_all_panes = types.MethodType(orch_mod.Orchestrator.iter_all_panes, win.orch)
     win._status = MagicMock()
     # Stub out the heavy persistence/launch helpers so tests stay fast.
     win._save_window_state = MagicMock()

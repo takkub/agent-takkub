@@ -342,7 +342,8 @@ class TestBootSweepConservative:
     cockpit startup. #132: it must never delete a checkout that still holds
     something a user could lose."""
 
-    def test_leaves_orphan_with_source_files_untouched(self, tmp_path):
+    def test_leaves_orphan_with_source_files_untouched(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("TAKKUB_SKIP_ORPHAN_WORKTREE_PRUNE", raising=False)
         wt = tmp_path / "worktrees" / "proj" / "frontend-boot-1"
         wt.mkdir(parents=True)
         (wt / "App.tsx").write_text("export default function App() {}")
@@ -351,7 +352,8 @@ class TestBootSweepConservative:
         assert wt.exists()
         assert (wt / "App.tsx").exists()
 
-    def test_removes_orphan_that_is_only_node_modules(self, tmp_path):
+    def test_removes_orphan_that_is_only_node_modules(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("TAKKUB_SKIP_ORPHAN_WORKTREE_PRUNE", raising=False)
         wt = tmp_path / "worktrees" / "proj" / "frontend-boot-2"
         (wt / "node_modules" / "pkg").mkdir(parents=True)
         (wt / "node_modules" / "pkg" / "index.js").write_text("x")
@@ -359,7 +361,8 @@ class TestBootSweepConservative:
         assert removed == 1
         assert not wt.exists()
 
-    def test_removes_orphan_that_is_completely_empty(self, tmp_path):
+    def test_removes_orphan_that_is_completely_empty(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("TAKKUB_SKIP_ORPHAN_WORKTREE_PRUNE", raising=False)
         wt = tmp_path / "worktrees" / "proj" / "frontend-boot-3"
         wt.mkdir(parents=True)
         removed = disk_usage.prune_orphan_worktrees_boot(data_home=tmp_path)
@@ -371,6 +374,7 @@ class TestBootSweepConservative:
         when its branch still carries commits nobody merged — deleting the
         checkout would strand the pane's work behind a branch name nobody
         knows to look for."""
+        monkeypatch.delenv("TAKKUB_SKIP_ORPHAN_WORKTREE_PRUNE", raising=False)
         wt = tmp_path / "worktrees" / "proj" / "backend-boot-4"
         wt.mkdir(parents=True)
         (wt / ".git").write_text("gitdir: /repo/.git/worktrees/backend-boot-4\n")
