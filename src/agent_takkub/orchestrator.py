@@ -126,6 +126,7 @@ from .pipeline_executor import (  # re-exported for test imports; mixin provides
 )
 from .pty_session import PtySession  # re-exported for test imports
 from .roles import LEAD
+from .roles import by_name as _role_by_name
 from .spawn_engine import (  # re-exported for backward compat; mixin provides methods
     _PANE_COLS,
     _PANE_ROWS,
@@ -726,6 +727,26 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                 _log_event("orphan_worktree_prune", removed=removed)
         except Exception as e:
             _log_event("orphan_worktree_prune_error", error=repr(e))
+        # Reconcile task-ledger rows orphaned by a cockpit that exited
+        # without ever calling `takkub done` (issue #166 — previously stuck
+        # "working" forever since `mark_done` only fires from a live pane's
+        # done/close handler). Safe at boot for the same "no pane alive yet"
+        # reason as the two prunes above — but the ledger's own date<today
+        # gate (`task_ledger._orphan_candidates`) is the one that actually
+        # matters here: it's what stops this from closing a same-day row an
+        # auto-respawn (2s later, once panes exist) is about to resume.
+        # Best-effort / non-fatal — a readonly runtime never blocks startup.
+        try:
+            from . import task_ledger
+
+            for _proj in task_ledger.list_projects_with_ledger():
+                _closed, _warn = task_ledger.reconcile_orphaned(_proj, frozenset())
+                if _closed:
+                    _log_event("ledger_reconcile_boot", project=_proj, closed=_closed)
+                if _warn:
+                    _log_event("ledger_reconcile_boot_warning", project=_proj, warning=_warn[:200])
+        except Exception as e:
+            _log_event("ledger_reconcile_boot_error", error=repr(e))
         # PaneRegistry groups all 7 spawn-engine state dicts under one object.
         # Backward-compat properties on SpawnEngineMixin let every existing
         # access site (self._pane_state[...] etc.) work unchanged.
@@ -1549,6 +1570,42 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                 error=str(exc)[:200],
             )
 
+    def _unknown_pane_message(self, to_role: str, project_ns: str) -> str:
+        """Explain why `send()`'s pane lookup came back empty (issue #164).
+
+        `_project_panes(...).get(role)` returns `None` in two different
+        situations that used to collapse into the same misleading "unknown
+        role" message: the name genuinely isn't in the role registry at all,
+        vs. it's a real role (`roles.by_name` finds it) whose pane just isn't
+        open right now — e.g. it was closed, or the process restarted and
+        this role hasn't respawned yet (`unregister_pane` pops the pane
+        widget out of `_project_panes` but never touches `roles.py`'s
+        registry). Only the first case is actually "unknown role".
+
+        `to_role` may carry a shard suffix (`"qa#1"`) — the registry only
+        knows base role names, so that's stripped via `_split_shard` before
+        the lookup; the raw (possibly sharded) name is still used for the
+        PaneState/worktree lookup below since shard panes get their own
+        independent `PaneState` entry."""
+        base_role, _shard_idx = _split_shard(to_role)
+        if _role_by_name(base_role) is None:
+            return f"unknown role: {to_role}"
+        hint = (
+            f"'{to_role}' is a known role but has no pane open right now — "
+            f'use `takkub assign --role {to_role} "<task>"` to open one'
+        )
+        ps = self._pane_state.get(_exit_key(project_ns, to_role))
+        wt = getattr(ps, "worktree", None) if ps is not None else None
+        wt_path = wt.get("path") if wt else None
+        if wt_path:
+            hint += (
+                f" (this role last worked on an isolated worktree — a plain "
+                f"`--isolation worktree` re-assign creates a *new* branch off "
+                f"base, it does not continue the old one; to pick that work "
+                f"back up, assign with `--cwd {wt_path}` instead)"
+            )
+        return hint
+
     def send(
         self,
         to_role: str,
@@ -1564,7 +1621,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         project_panes = self._project_panes(project_ns)
         pane = project_panes.get(to_role)
         if pane is None:
-            return False, f"unknown role: {to_role}"
+            return False, self._unknown_pane_message(to_role, project_ns)
         if pane.session is None or not pane.session.is_alive:
             return False, f"{to_role} is not running (spawn it first)"
 
@@ -2976,6 +3033,71 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                 return False, f"task file unreadable: {task_file} ({e})", {}
             return True, "task", {"task": content, "task_file": task_file}
         return True, "task", {"task": ps.last_assigned_task, "task_file": None}
+
+    def _live_roles(self, project_ns: str) -> frozenset[str]:
+        """Roles in *project_ns* with a currently-alive pane session — the
+        set `task_ledger`'s reconcile/close guards check before ever
+        touching a role's ledger row (issue #166)."""
+        return frozenset(
+            role
+            for role, pane in self._project_panes(project_ns).items()
+            if pane.session is not None and pane.session.is_alive
+        )
+
+    def task_reconcile(self, project: str | None = None, dry_run: bool = False) -> tuple[bool, str]:
+        """`takkub task reconcile [--dry-run]` — close ledger rows orphaned
+        by a cockpit session that exited without ever calling `takkub done`
+        (issue #166). Delegates the actual safety gate to
+        `task_ledger._orphan_candidates`; this method only supplies the
+        live-pane set that gate needs."""
+        from . import task_ledger
+
+        project_ns = self._resolve_project(project)
+        live_roles = self._live_roles(project_ns)
+        if dry_run:
+            preview = task_ledger.preview_reconcile(project_ns, live_roles)
+            if not preview:
+                return True, "no orphaned rows to reconcile"
+            lines = "\n".join(f"  - {c['role']} ({c['date']}) — {c['summary']}" for c in preview)
+            return True, f"would close {len(preview)} orphaned row(s):\n{lines}"
+
+        closed, warning = task_ledger.reconcile_orphaned(project_ns, live_roles)
+        if not closed:
+            msg = "no orphaned rows to reconcile"
+        else:
+            msg = f"closed {len(closed)} orphaned row(s): {', '.join(closed)}"
+        if warning:
+            msg = f"{msg}\n{warning}"
+        return True, msg
+
+    def task_close_role(
+        self,
+        role: str,
+        project: str | None = None,
+        force: bool = False,
+        dry_run: bool = False,
+    ) -> tuple[bool, str]:
+        """`takkub task close --role <r> [--force] [--dry-run]` — manually
+        close one role's open ledger row (issue #166's user-facing escape
+        hatch alongside the automatic `task_reconcile`)."""
+        from . import task_ledger
+
+        project_ns = self._resolve_project(project)
+        live_roles = self._live_roles(project_ns)
+        if dry_run:
+            state = task_ledger.load_state(project_ns)
+            ptr = state.get("open", {}).get(role)
+            if ptr is None:
+                return False, f"no open ledger row for role '{role}'"
+            if role in live_roles and not force:
+                return (
+                    False,
+                    f"'{role}' has a live pane right now — close the pane first "
+                    f"(`takkub close --role {role}`), or pass --force to override",
+                )
+            return True, f"would close ledger row for '{role}' (assigned {ptr['date']})"
+
+        return task_ledger.close_role(project_ns, role, live_roles, force=force)
 
     def _build_post_compact_brief(self, project_ns: str) -> str | None:
         """Return a markdown snippet summarising alive teammates for post-compact injection.

@@ -597,6 +597,17 @@ class CliServer(QObject):
                 else:
                     self._reply(sock, ok=False, msg=msg_t)
                 return
+            elif cmd == "task-reconcile":
+                ok, msg = self._orch.task_reconcile(
+                    project=from_project, dry_run=bool(req.get("dry_run", False))
+                )
+            elif cmd == "task-close":
+                ok, msg = self._orch.task_close_role(
+                    req.get("role", ""),
+                    project=from_project,
+                    force=bool(req.get("force", False)),
+                    dry_run=bool(req.get("dry_run", False)),
+                )
             elif cmd == "harvest-done":
                 harvest_role = req.get("role", "")
                 harvest_note = req.get("note", "harvested by lead")
