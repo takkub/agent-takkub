@@ -195,10 +195,11 @@
         "agent_takkub.pane_guard"
       ],
       "imported_by": [
+        "agent_takkub.cli_server",
         "agent_takkub.orchestrator",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 2,
+      "fan_in": 3,
       "fan_out": 3
     },
     {
@@ -285,6 +286,7 @@
     {
       "module": "agent_takkub.cli_server",
       "imports": [
+        "agent_takkub.browser_chrome",
         "agent_takkub.config",
         "agent_takkub.orchestrator",
         "agent_takkub.orchestrator_text",
@@ -298,7 +300,7 @@
         "agent_takkub.main_window"
       ],
       "fan_in": 2,
-      "fan_out": 7
+      "fan_out": 8
     },
     {
       "module": "agent_takkub.cockpit_theme",
@@ -912,9 +914,10 @@
       "imports": [],
       "imported_by": [
         "agent_takkub.browser_chrome",
-        "agent_takkub.cli"
+        "agent_takkub.cli",
+        "agent_takkub.pipeline_executor"
       ],
-      "fan_in": 2,
+      "fan_in": 3,
       "fan_out": 0
     },
     {
@@ -979,6 +982,7 @@
       "module": "agent_takkub.pipeline_executor",
       "imports": [
         "agent_takkub.config",
+        "agent_takkub.pane_guard",
         "agent_takkub.pipeline_config",
         "agent_takkub.provider_config"
       ],
@@ -988,7 +992,7 @@
         "agent_takkub.spawn_engine"
       ],
       "fan_in": 3,
-      "fan_out": 3
+      "fan_out": 4
     },
     {
       "module": "agent_takkub.plan_tier",

@@ -293,6 +293,64 @@ class TestFireFanout:
         assert asg.call_count == 2  # degraded fallback
 
 
+class TestFireFanoutStagger:
+    """#177 mitigation: qa-planner shards (always a browser role — qa is the
+    only `--plan --shards` entry point today) get the widened browser-shard
+    spawn gap, not the tight general one, to reduce concurrent MCP-init
+    contention. Overrides the module fixture's inline `_defer` so the actual
+    delay argument is observable."""
+
+    def _cfg(self, plan_file: str, shards: int = 3) -> dict:
+        return {
+            "shards": shards,
+            "cwd": "/web",
+            "task": "e2e",
+            "plan_file": plan_file,
+            "model": None,
+        }
+
+    def test_qa_shards_use_the_browser_shard_gap(
+        self, orch: Orchestrator, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from agent_takkub import pipeline_executor as pe
+
+        monkeypatch.setattr(pe, "_SPAWN_STAGGER_MS", 400)
+        monkeypatch.setattr(pe, "_BROWSER_SHARD_SPAWN_STAGGER_MS", 3000)
+        delays: list[int] = []
+        monkeypatch.setattr(orch, "_defer", lambda d, fn: (delays.append(d), fn())[1])
+
+        plan = {"shards": [{"n": i, "scope": f"/p{i}"} for i in (1, 2, 3)]}
+        pf = tmp_path / "plan.json"
+        pf.write_text(json.dumps(plan), encoding="utf-8")
+
+        with patch.object(orch, "assign"), patch.object(orch, "_notify_lead"):
+            orch._fire_qa_plan_fanout(TEST_PROJECT, "qa", self._cfg(str(pf), 3))
+
+        assert delays == [0, 3000, 6000]  # browser-shard gap, not the 400ms general one
+
+    def test_non_browser_base_role_keeps_general_gap(
+        self, orch: Orchestrator, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Not a real cockpit-issued flow today (--plan is qa-only per CLAUDE.md),
+        # but _fire_qa_plan_fanout itself has no such gate — locks in that a
+        # non-browser base_role, were it ever reached, keeps the tight gap.
+        from agent_takkub import pipeline_executor as pe
+
+        monkeypatch.setattr(pe, "_SPAWN_STAGGER_MS", 400)
+        monkeypatch.setattr(pe, "_BROWSER_SHARD_SPAWN_STAGGER_MS", 3000)
+        delays: list[int] = []
+        monkeypatch.setattr(orch, "_defer", lambda d, fn: (delays.append(d), fn())[1])
+
+        plan = {"shards": [{"n": i, "scope": f"/p{i}"} for i in (1, 2)]}
+        pf = tmp_path / "plan.json"
+        pf.write_text(json.dumps(plan), encoding="utf-8")
+
+        with patch.object(orch, "assign"), patch.object(orch, "_notify_lead"):
+            orch._fire_qa_plan_fanout(TEST_PROJECT, "backend", self._cfg(str(pf), 2))
+
+        assert delays == [0, 400]
+
+
 # ──────────────────────────────────────────────────────────────
 # done() on a planner pane → fires fan-out, suppresses per-pane notice
 # ──────────────────────────────────────────────────────────────

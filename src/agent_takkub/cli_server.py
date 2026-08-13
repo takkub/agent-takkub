@@ -20,6 +20,7 @@ from datetime import datetime
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 from PyQt6.QtNetwork import QHostAddress, QTcpServer, QTcpSocket
 
+from . import browser_chrome
 from .config import write_port
 from .orchestrator import Orchestrator
 from .spawn_queue_health import SpawnQueueHealthMonitor
@@ -95,8 +96,22 @@ class CliServer(QObject):
         # installs collide on EBUSY on Windows (#38). Space codex spawns further so
         # their update windows don't overlap.
         self._codex_gap_ms = int(os.environ.get("TAKKUB_CODEX_SPAWN_STAGGER_MS", "10000"))
+        # #177 mitigation (not a proven fix — see docs/audit/2026-08-04-issue-146-
+        # playwright-shards.md's H1/H2): a browser-role shard (qa#N/critic#N/
+        # designer#N) spawns TWO npx MCP server processes (playwright +
+        # chrome-devtools) on top of its own claude.exe, and claude code's MCP
+        # connect/startup window has no configurable timeout. N shards' MCP-init
+        # firing near-simultaneously is the leading (unproven, no live repro yet)
+        # hypothesis for "shard doesn't connect, single pane does" reports. Widen
+        # the gap for these spawns specifically, same mechanism as the codex gap
+        # above, so MCP-init windows overlap less without slowing down non-browser
+        # fan-out (backend/frontend shards keep the tight 400ms gap).
+        self._browser_shard_gap_ms = int(
+            os.environ.get("TAKKUB_BROWSER_SHARD_SPAWN_STAGGER_MS", "3000")
+        )
         self._spawn_slot_until = 0.0  # monotonic ms; next non-codex spawn may start
         self._codex_slot_until = 0.0  # monotonic ms; next codex spawn may start
+        self._browser_shard_slot_until = 0.0  # monotonic ms; next browser-shard spawn may start
         # #141: read-only spawn-arbiter wedge diagnostics for `takkub doctor --live`.
         self._spawn_health = SpawnQueueHealthMonitor(orchestrator, parent=self)
 
@@ -119,29 +134,50 @@ class CliServer(QObject):
         except Exception:
             return base == "codex"
 
+    @staticmethod
+    def _is_browser_shard_spawn(role: str | None) -> bool:
+        """True iff *role* is a fan-out shard (`#N` suffix) of a browser role
+        (qa/critic/designer) — see `_browser_shard_gap_ms`'s comment for why
+        these specifically get a wider spawn gap (#177 mitigation)."""
+        raw = (role or "").strip().lower()
+        if "#" not in raw:
+            return False
+        base = raw.split("#", 1)[0]
+        return base in browser_chrome.BROWSER_ROLES
+
     def _next_spawn_delay_ms(self, role: str | None, project: str | None = None) -> int:
         """Reserve the next spawn time slot and return the delay (ms) until it.
 
-        Two slots: a general one spaces ALL spawns ≥ _spawn_gap_ms apart (the
-        ConPTY collision fix, #44); a codex one additionally spaces codex spawns
-        ≥ _codex_gap_ms apart (the npm-EBUSY mitigation, #38). A non-codex spawn
-        following a SINGLE codex spawn is not penalised by the codex gap (it uses
-        the general slot); after multiple codex spawns the general slot is dragged
-        forward by the in-flight codex window, which is benign (the system is
-        mid-codex-install anyway). The first spawn in an idle period yields delay
+        Three slots, each additive on top of the general one: a general slot
+        spaces ALL spawns ≥ _spawn_gap_ms apart (the ConPTY collision fix,
+        #44); a codex slot additionally spaces codex spawns ≥ _codex_gap_ms
+        apart (the npm-EBUSY mitigation, #38); a browser-shard slot
+        additionally spaces qa#N/critic#N/designer#N spawns ≥
+        _browser_shard_gap_ms apart (the MCP cold-start mitigation, #177). A
+        spawn outside a given slot's category is not penalised by that slot
+        (it only waits on the general one); after several spawns IN that
+        category the general slot itself gets dragged forward by the
+        in-flight window, which is benign (the system is mid-install/
+        mid-MCP-init anyway). The first spawn in an idle period yields delay
         0, so a lone `takkub assign` is unchanged. Runs on the Qt main thread
         (QTcpServer), so no locking is needed. codex detection resolves the
         effective provider (see _is_codex_spawn) so remapped→codex roles are
         covered and a degraded-to-claude codex role is not over-staggered."""
         now = time.monotonic() * 1000.0
         is_codex = self._is_codex_spawn(role, project)
+        is_browser_shard = self._is_browser_shard_spawn(role)
         start = max(now, self._spawn_slot_until)
         if is_codex:
             start = max(start, self._codex_slot_until)
-        # General slot advances for every spawn; codex slot only for codex spawns.
+        if is_browser_shard:
+            start = max(start, self._browser_shard_slot_until)
+        # General slot advances for every spawn; the other two only for
+        # spawns in their own category.
         self._spawn_slot_until = start + self._spawn_gap_ms
         if is_codex:
             self._codex_slot_until = start + self._codex_gap_ms
+        if is_browser_shard:
+            self._browser_shard_slot_until = start + self._browser_shard_gap_ms
         return max(0, int(start - now))
 
     def listen(self, port: int = 0) -> int:
