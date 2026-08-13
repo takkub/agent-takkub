@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import threading
 import time
 from datetime import UTC, datetime, timedelta
 
@@ -228,6 +229,17 @@ class TestCodexAdapter:
     def test_parse_codex_rate_limits_ignores_malformed_used_percent(self):
         result = pu._parse_codex_rate_limits({"primary": {"usedPercent": "not-a-number"}})
         assert result.utilization is None
+
+    def test_roundtrip_exception_is_caught_never_raises(self, monkeypatch):
+        monkeypatch.setattr(pu, "_codex_executable", lambda: sys.executable)
+
+        def _boom(proc, timeout):
+            raise RuntimeError("stdin pipe exploded")
+
+        monkeypatch.setattr(pu, "_codex_rpc_roundtrip", _boom)
+        result = pu.fetch_codex_usage(timeout=2.0)
+        assert result.status == "error"
+        assert result.error == "app-server RPC failed"
 
 
 # ── gemini/agy adapter ────────────────────────────────────────────────────
@@ -479,3 +491,201 @@ class TestProviderUsageStore:
         second = pu.get_store()
         assert first is second
         monkeypatch.setattr(pu, "_store", None)
+
+    def test_emit_swallows_on_update_exception(self):
+        def _boom(name, data):
+            raise RuntimeError("listener blew up")
+
+        store = pu.ProviderUsageStore(on_update=_boom)
+        # Must not raise even though the callback does.
+        store._emit("claude", pu.ProviderUsage(provider="claude", status="active"))
+
+    def test_start_spawns_daemon_thread_running_the_loop(self, monkeypatch):
+        ran = threading.Event()
+        store = pu.ProviderUsageStore(interval_s=999)
+        monkeypatch.setattr(store, "_loop", ran.set)
+        store.start()
+        assert ran.wait(timeout=2.0), "start() did not invoke _loop on a background thread"
+        assert store._running is True
+
+    def test_refresh_now_fetches_off_the_calling_thread(self, monkeypatch):
+        seen_thread: list[str] = []
+        done = threading.Event()
+
+        def fake_fetch_one(provider):
+            seen_thread.append(threading.current_thread().name)
+            done.set()
+
+        store = pu.ProviderUsageStore()
+        monkeypatch.setattr(store, "_fetch_one", fake_fetch_one)
+        store.refresh_now("claude")
+        assert done.wait(timeout=2.0), "refresh_now() never triggered a fetch"
+        assert seen_thread == ["usage-fetch-claude"]
+
+
+# ── ProviderUsageStore._loop ──────────────────────────────────────────────
+#
+# Every test here drives `_loop()` synchronously on the calling thread (no
+# real background thread, no real `time.sleep`/`Event.wait` delay) by
+# monkeypatching `_wake.wait` itself: the fake stands in for "an interval
+# elapsed or refresh_now() woke us early" and flips `_running` off once the
+# test has observed enough cycles, so the loop always terminates
+# deterministically and fast.
+
+
+class TestProviderUsageLoop:
+    def test_initial_pass_fetches_every_provider_once_in_order(self, monkeypatch):
+        store = pu.ProviderUsageStore(interval_s=999)
+        calls: list[str] = []
+        monkeypatch.setattr(store, "_fetch_one", lambda p: calls.append(p))
+
+        def fake_wait(timeout=None):
+            store._running = False
+            return False
+
+        monkeypatch.setattr(store._wake, "wait", fake_wait)
+        store._running = True
+        store._loop()
+        assert calls == list(pu.PROVIDER_NAMES)
+
+    def test_wait_blocks_for_the_configured_interval_not_a_busy_spin(self, monkeypatch):
+        store = pu.ProviderUsageStore(interval_s=42)
+        monkeypatch.setattr(store, "_fetch_one", lambda p: None)
+        seen_timeouts: list[float] = []
+
+        def fake_wait(timeout=None):
+            seen_timeouts.append(timeout)
+            store._running = False
+            return False
+
+        monkeypatch.setattr(store._wake, "wait", fake_wait)
+        store._running = True
+        store._loop()
+        assert seen_timeouts == [42]
+
+    def test_wake_event_is_cleared_every_cycle_so_it_cannot_fire_stale(self, monkeypatch):
+        store = pu.ProviderUsageStore(interval_s=0.01)
+        monkeypatch.setattr(store, "_fetch_one", lambda p: None)
+        clear_calls = {"n": 0}
+        orig_clear = store._wake.clear
+
+        def spy_clear():
+            clear_calls["n"] += 1
+            orig_clear()
+
+        monkeypatch.setattr(store._wake, "clear", spy_clear)
+        iterations = {"n": 0}
+
+        def fake_wait(timeout=None):
+            iterations["n"] += 1
+            if iterations["n"] >= 2:
+                store._running = False
+            return False
+
+        monkeypatch.setattr(store._wake, "wait", fake_wait)
+        store._running = True
+        store._loop()
+        assert clear_calls["n"] == 2
+
+    def test_stop_before_loop_starts_exits_without_any_fetch(self, monkeypatch):
+        store = pu.ProviderUsageStore(interval_s=999)
+        calls: list[str] = []
+        monkeypatch.setattr(store, "_fetch_one", lambda p: calls.append(p))
+        store.stop()
+        store._loop()
+        assert calls == []
+
+    def test_stop_mid_initial_pass_halts_remaining_fetches(self, monkeypatch):
+        store = pu.ProviderUsageStore(interval_s=999)
+        calls: list[str] = []
+
+        def fake_fetch_one(provider):
+            calls.append(provider)
+            if provider == pu.PROVIDER_NAMES[1]:
+                store._running = False
+
+        monkeypatch.setattr(store, "_fetch_one", fake_fetch_one)
+        store._running = True
+        store._loop()
+        assert calls == list(pu.PROVIDER_NAMES[:2])
+
+    def test_repoll_cycle_skips_a_provider_cached_unsupported(self, monkeypatch):
+        store = pu.ProviderUsageStore(interval_s=0.01)
+        phase = {"value": "initial"}
+        initial_round: list[str] = []
+        repoll_round: list[str] = []
+
+        def fake_fetch_one(provider):
+            if phase["value"] == "initial":
+                initial_round.append(provider)
+                if provider == "codex":
+                    store._cache["codex"] = pu.ProviderUsage(
+                        provider="codex", status=pu.STATUS_UNSUPPORTED
+                    )
+            else:
+                repoll_round.append(provider)
+
+        monkeypatch.setattr(store, "_fetch_one", fake_fetch_one)
+        waits = {"n": 0}
+
+        def fake_wait(timeout=None):
+            waits["n"] += 1
+            phase["value"] = "repoll"
+            if waits["n"] >= 2:
+                store._running = False
+            return False
+
+        monkeypatch.setattr(store._wake, "wait", fake_wait)
+        store._running = True
+        store._loop()
+
+        assert "codex" in initial_round
+        assert "codex" not in repoll_round
+        assert set(repoll_round) == set(pu.PROVIDER_NAMES) - {"codex"}
+
+    def test_unsupported_provider_is_never_reprobed_across_many_cycles(self, monkeypatch):
+        """Documents the class docstring's intentional contract: an
+        `unsupported` verdict is treated as static per machine and is never
+        automatically re-fetched, no matter how many interval cycles pass —
+        only an explicit `refresh_now()` call bypasses the cache check. If
+        this ever starts failing because `_loop` began re-probing, that is a
+        deliberate behavior change, not a bug to silently "fix" here.
+        """
+        store = pu.ProviderUsageStore(interval_s=0.01)
+        store._cache["codex"] = pu.ProviderUsage(provider="codex", status=pu.STATUS_UNSUPPORTED)
+        calls: list[str] = []
+        monkeypatch.setattr(store, "_fetch_one", lambda p: calls.append(p))
+        waits = {"n": 0}
+
+        def fake_wait(timeout=None):
+            waits["n"] += 1
+            if waits["n"] >= 4:
+                store._running = False
+            return False
+
+        monkeypatch.setattr(store._wake, "wait", fake_wait)
+        store._running = True
+        store._loop()
+        # Fetched exactly once: the unconditional initial pass. None of the
+        # 4 repoll cycles that followed touched it again.
+        assert calls.count("codex") == 1
+
+    def test_stop_during_repoll_cycle_halts_remaining_fetches(self, monkeypatch):
+        # Prove the `if not self._running: return` guard inside the repoll
+        # for-loop itself (not just the outer while) actually stops a cycle
+        # partway through once something flips `_running` off mid-fetch.
+        store = pu.ProviderUsageStore(interval_s=0.01)
+        calls: list[str] = []
+
+        def fake_fetch_one(provider):
+            calls.append(provider)
+            if len(calls) == len(pu.PROVIDER_NAMES) + 2:
+                store._running = False
+
+        monkeypatch.setattr(store, "_fetch_one", fake_fetch_one)
+        monkeypatch.setattr(store._wake, "wait", lambda timeout=None: False)
+        store._running = True
+        store._loop()
+        # Initial pass (6) + 2 providers into the first repoll cycle, then
+        # the inner-loop guard stopped it before the remaining 4.
+        assert calls == list(pu.PROVIDER_NAMES) + list(pu.PROVIDER_NAMES[:2])

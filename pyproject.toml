@@ -518,3 +518,24 @@ forbidden_modules = [
     "agent_takkub.main_window",
     "agent_takkub.app",
 ]
+
+[[tool.importlinter.contracts]]
+name = "settings-window-layer"
+type = "forbidden"
+# settings_window.py (3.7k LOC, 102 methods, 10 QStackedWidget views in one
+# class — docs/qa/2026-08-13-testsuite-audit.md) has no contract guarding it
+# today, the same unguarded state that let orchestrator.py grow to 5k LOC
+# before leaf-modules-pure existed. This doesn't shrink the god-file; it
+# stops the god-file from also becoming an engine/CLI/entry-point import
+# hub while nobody is looking — same "UI-layer mixin" constraint as
+# update_panel/project_wizard/user_actions/limit_panel/status_header: a
+# settings page must never reach past the data layer into the engine or
+# the other desktop entry points.
+source_modules = ["agent_takkub.settings_window"]
+forbidden_modules = [
+    "agent_takkub.orchestrator",
+    "agent_takkub.main_window",
+    "agent_takkub.app",
+    "agent_takkub.cli",
+    "agent_takkub.cli_server",
+]
