@@ -639,17 +639,48 @@ class WorktreeManager:
         self._run(["-C", git_root, "branch", "-d", branch], None)
         return True, f"merged {branch} + cleanup เรียบร้อย"
 
-    def clean_isolated(self, git_root: str, force: bool = False) -> list[str]:
+    def clean_isolated(
+        self,
+        git_root: str,
+        force: bool = False,
+        live_paths: frozenset[str] | set[str] = frozenset(),
+    ) -> list[str]:
         """Sweep leftover ``wt/*`` worktrees (crashed panes, forgotten probes).
 
         Default: remove only SAFE leftovers — clean tree AND no commits ahead
         (nothing of value can be lost). ``force=True`` removes every wt/*
-        worktree + branch regardless (dirty work and unmerged commits are
+        worktree + branch regardless of dirty/unmerged status (that work is
         dropped — the CLI makes the caller opt in explicitly). Returns
         human-readable result lines.
+
+        Two safety rules, both unconditional (#187 — a real incident where
+        `--force` deleted the branch of a worktree a just-spawned pane still
+        held, seconds after `git worktree remove` itself failed on a Windows
+        file lock):
+
+        * **Live-pane guard** — a path present in *live_paths* (worktrees a
+          currently-alive pane is sitting in, see
+          :meth:`Orchestrator.live_worktree_paths`) is ALWAYS skipped, dirty
+          or not, ``force`` or not. There is no bypass flag: yanking the
+          checkout out from under a running pane corrupts its cwd and can
+          orphan uncommitted work with zero chance to recover it — the only
+          safe sequence is ``takkub close --role <r>`` first, then clean.
+        * **Atomicity** — the branch is deleted only when ``git worktree
+          remove`` actually succeeded. A failed removal (permission denied,
+          the directory still locked, ...) now leaves BOTH the worktree
+          directory and its branch untouched and is reported as such, instead
+          of the pre-#187 behavior where the branch was deleted unconditionally
+          right after the (possibly failed) remove call.
         """
+        live = {str(Path(p).resolve()) for p in live_paths}
         out: list[str] = []
         for row in self.list_isolated(git_root):
+            if str(Path(row["path"]).resolve()) in live:
+                out.append(
+                    f"KEEP  {row['branch']} — pane ยังใช้งาน worktree นี้อยู่ (live pane); "
+                    "ปิด pane ก่อน (`takkub close --role <role>`) แล้วค่อย clean ใหม่"
+                )
+                continue
             keep_reason = ""
             if not force:
                 if row["dirty"]:
@@ -665,11 +696,15 @@ class WorktreeManager:
                 args.append("--force")
             rm = self._run([*args, row["path"]], None)
             self._run(["-C", git_root, "worktree", "prune"], None)
+            if not rm.ok:
+                detail = (rm.stderr or rm.stdout).strip()[:120]
+                out.append(
+                    f"FAILED  {row['branch']} — {detail or f'exit {rm.returncode}'} "
+                    "(ไม่ได้ลบอะไร — worktree และ branch ยังอยู่ครบ)"
+                )
+                continue
             self._run(["-C", git_root, "branch", "-D", row["branch"]], None)
-            out.append(
-                f"{'REMOVED' if rm.ok else 'FAILED '} {row['branch']}"
-                + ("" if rm.ok else f" — {(rm.stderr or rm.stdout).strip()[:120]}")
-            )
+            out.append(f"REMOVED {row['branch']}")
         return out
 
     def force_remove(self, info: WorktreeInfo) -> tuple[bool, str]:

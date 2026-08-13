@@ -8,6 +8,7 @@ WorktreeManager is faked so nothing touches a real repo.
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -15,7 +16,7 @@ from PyQt6.QtCore import QCoreApplication, QObject
 
 from agent_takkub import orchestrator as orch_mod
 from agent_takkub import worktree_manager as wm_mod
-from agent_takkub.orchestrator import Orchestrator
+from agent_takkub.orchestrator import Orchestrator, PaneState
 from agent_takkub.worktree_manager import WorktreeInfo
 
 
@@ -249,6 +250,48 @@ class TestFinalizeWorktree:
         orch._finalize_worktree("proj", "qa", {"bogus": True})
         # no exception; nothing proposed
         assert not orch._notify_lead.called
+
+
+class TestLiveWorktreePaths:
+    """Orchestrator.live_worktree_paths — the pane-registry side of the #187
+    live-pane guard `takkub worktree clean` uses before touching any
+    checkout. Provider-agnostic on purpose: it keys off `pane.session` +
+    `PaneState.worktree`, never anything claude-specific (#103)."""
+
+    @staticmethod
+    def _pane(alive: bool) -> MagicMock:
+        pane = MagicMock()
+        pane.session = MagicMock(is_alive=True) if alive else None
+        return pane
+
+    def test_alive_pane_with_worktree_is_reported(self, orch):
+        orch._panes_by_project["proj"] = {"frontend": self._pane(alive=True)}
+        orch._pane_state["proj::frontend"] = PaneState(worktree=_info().as_dict())
+
+        assert orch.live_worktree_paths("proj") == {str(Path("/wt/frontend-1").resolve())}
+
+    def test_dead_pane_is_excluded(self, orch):
+        # session exited but PaneState/worktree record hasn't been popped yet
+        # (close()/done() do that atomically, but a crash can leave it behind)
+        orch._panes_by_project["proj"] = {"frontend": self._pane(alive=False)}
+        orch._pane_state["proj::frontend"] = PaneState(worktree=_info().as_dict())
+
+        assert orch.live_worktree_paths("proj") == set()
+
+    def test_alive_shared_cwd_pane_is_excluded(self, orch):
+        # normal (non-isolated) pane: alive, but PaneState.worktree is None
+        orch._panes_by_project["proj"] = {"backend": self._pane(alive=True)}
+        orch._pane_state["proj::backend"] = PaneState()
+
+        assert orch.live_worktree_paths("proj") == set()
+
+    def test_scoped_to_project(self, orch):
+        orch._panes_by_project["proj-a"] = {"frontend": self._pane(alive=True)}
+        orch._pane_state["proj-a::frontend"] = PaneState(worktree=_info().as_dict())
+        orch._panes_by_project["proj-b"] = {}
+
+        assert orch.live_worktree_paths("proj-b") == set()
+        assert orch.live_worktree_paths("proj-a") == {str(Path("/wt/frontend-1").resolve())}
 
 
 class TestWorktreeHint:

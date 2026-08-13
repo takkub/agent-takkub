@@ -318,13 +318,36 @@ def cmd_assign(args: argparse.Namespace) -> dict:
     )
 
 
+def _live_worktree_paths_best_effort() -> set[str]:
+    """Live-pane worktree paths from the running orchestrator, if reachable.
+
+    `clean` is the only `worktree` subcommand that needs this (#187
+    live-pane guard). Best-effort by design, mirroring `cmd_worktree`'s
+    crash-recovery rationale: with the cockpit not running there is no live
+    pane that could hold a worktree open, so any connect failure (no port
+    file, refused, timeout, malformed reply) is treated as "nothing to
+    protect" rather than an error — `clean` must keep working with the
+    cockpit closed.
+    """
+    try:
+        resp = _request(_with_project({"cmd": "worktree-live-paths"}))
+    except (RuntimeError, OSError, ValueError):
+        return set()
+    if not isinstance(resp, dict) or not resp.get("ok"):
+        return set()
+    paths = resp.get("paths")
+    return set(paths) if isinstance(paths, list) else set()
+
+
 def cmd_worktree(args: argparse.Namespace) -> dict:
     """`takkub worktree list|merge|clean` — Lead merge assist for #81 worktrees.
 
     Pure-local git operations (no orchestrator socket): the git state is the
     source of truth, so this works after a cockpit crash or with the cockpit
     closed — exactly when cleanup is most needed. Mutations are lead-gated at
-    the CLI layer like assign/close.
+    the CLI layer like assign/close. `clean` additionally makes a best-effort
+    socket call for the live-pane guard (#187) — see
+    `_live_worktree_paths_best_effort`.
     """
     from .worktree_manager import WorktreeManager
 
@@ -370,7 +393,8 @@ def cmd_worktree(args: argparse.Namespace) -> dict:
         return {"ok": ok, "msg": msg}
 
     if sub == "clean":
-        lines = mgr.clean_isolated(root, force=bool(args.force))
+        live_paths = _live_worktree_paths_best_effort()
+        lines = mgr.clean_isolated(root, force=bool(args.force), live_paths=live_paths)
         if not lines:
             print("(nothing to clean)")
             return {"ok": True, "msg": "0 cleaned"}

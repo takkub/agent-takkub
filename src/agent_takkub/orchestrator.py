@@ -3030,6 +3030,30 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             result[role] = {"state": state, "stall_minutes": None, "last_progress_ts": 0.0}
         return result
 
+    def live_worktree_paths(self, project: str | None = None) -> set[str]:
+        """Absolute worktree checkout paths currently held by a LIVE pane.
+
+        Used by `takkub worktree clean`'s live-pane guard (#187): a worktree
+        an active pane is sitting in must never be removed, no matter how the
+        command was invoked (`--force` included) — see
+        `WorktreeManager.clean_isolated`. "Live" = a session process that is
+        still alive, regardless of provider (claude/codex/gemini/opencode/
+        kimi/cursor — PaneState.worktree is set the same way for all of
+        them). Scoped to *project* only, matching the rest of the socket
+        protocol's per-project isolation.
+        """
+        project_ns = self._resolve_project(project)
+        paths: set[str] = set()
+        for role, pane in self._project_panes(project_ns).items():
+            if pane.session is None or not pane.session.is_alive:
+                continue
+            ps = self._pane_state.get(f"{project_ns}::{role}")
+            wt = ps.worktree if ps is not None else None
+            path = wt.get("path") if wt else None
+            if path:
+                paths.add(str(pathlib.Path(path).resolve()))
+        return paths
+
     def pane_status_report(
         self,
         project: str | None = None,
