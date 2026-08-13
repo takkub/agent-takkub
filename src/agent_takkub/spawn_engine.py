@@ -613,6 +613,21 @@ class PaneState:
     # and idles again). See orchestrator._check_proactive_compact.
     proactive_compact_idle_since: float | None = None
     proactive_compact_sent_ts: float = 0.0
+    # proactive_compact_pending: True from the moment `/compact` is injected
+    # until the pane is next observed back at its ready prompt. While True,
+    # the watchdog's not-ready branch must NOT null out
+    # proactive_compact_idle_since — the pane going busy right now is our OWN
+    # `/compact` running, not new work, so nulling it would make the pane's
+    # return-to-ready look like the start of a fresh idle episode and let the
+    # SAME idle stretch re-fire `/compact` roughly one threshold later,
+    # forever (issue #190). Cleared (without touching idle_since) the first
+    # time the pane is seen ready again — a genuinely new not-ready
+    # afterwards is real work and resets idle_since as before. If the pane
+    # is never observed ready again before real work keeps it busy, this
+    # would stay True forever — bounded by
+    # orchestrator.PROACTIVE_COMPACT_PENDING_CEILING_S, past which it's
+    # treated as stale and cleared like any other new-work not-ready.
+    proactive_compact_pending: bool = False
 
 
 @dataclass

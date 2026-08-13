@@ -211,6 +211,27 @@ PROACTIVE_COMPACT_IDLE_AFTER_S = int(
     os.environ.get("TAKKUB_PROACTIVE_COMPACT_IDLE_AFTER_S", str(25 * 60))
 )
 
+# Follow-up to #190: `proactive_compact_pending` is trusted as "our own
+# /compact is still running" so the not-ready branch below leaves
+# proactive_compact_idle_since alone while it's True. But if the pane is
+# never observed back at its ready prompt before real work lands on it (a
+# task gets assigned, or someone types directly into it, in the same window
+# the compact was still finishing) the flag never gets cleared the normal
+# way, and idle_since would stay stuck at its stale pre-compact value
+# forever — silently suppressing the NEXT idle episode's `/compact` for as
+# long as the pane keeps being busy. Bound how long `pending` can be trusted
+# before the not-ready branch gives up and treats it like any other new
+# not-ready (clears pending, resets idle_since). `_check_idle_teammates`
+# ticks every IDLE_WATCHDOG_INTERVAL_MS (5s), so there's ample granularity
+# to catch a compact that actually finishes within this window; the #190
+# repeat-fire cycles logged in runtime/events.log put real compact runtime
+# around ~2 minutes, so 10 minutes leaves a wide margin before a stuck
+# `pending` gets mistaken for a still-running compact. Overrideable via env
+# like the sibling proactive-compact knobs.
+PROACTIVE_COMPACT_PENDING_CEILING_S = int(
+    os.environ.get("TAKKUB_PROACTIVE_COMPACT_PENDING_CEILING_S", str(10 * 60))
+)
+
 # ── Screenshot evidence auto-attach (issue #5) ──────────────────────────────
 # Extensions done() treats as "evidence" when scanning the pane's artifacts
 # dir. Case-insensitive match against Path.suffix.
@@ -3981,9 +4002,34 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         One `/compact` per idle episode: `proactive_compact_sent_ts` is
         compared against `proactive_compact_idle_since`, so a pane that stays
         idle for hours only gets nudged once, not every tick past the
-        threshold. Going busy again (new task, user typing, etc.) resets
-        `proactive_compact_idle_since` to None, which starts a fresh episode
-        the next time the pane settles.
+        threshold. Going busy again for REAL work (new task, user typing,
+        etc.) resets `proactive_compact_idle_since` to None, which starts a
+        fresh episode the next time the pane settles.
+
+        Issue #190: the pane going busy running the `/compact` THIS WATCHDOG
+        just injected must NOT count as "going busy again" for that reset —
+        `proactive_compact_pending` (set the instant we send `/compact`,
+        cleared the next time the pane is observed back at its ready prompt)
+        makes that one not-ready stretch transparent to
+        `proactive_compact_idle_since`, so the same idle episode is still
+        recognised as already-compacted once the pane settles. Without this,
+        the compact's own busy→ready cycle looked identical to new work
+        starting, so `proactive_compact_idle_since` got reset to "now" right
+        after compacting, sent_ts (older) no longer gated it, and the same
+        idle stretch fired `/compact` again ~one threshold later — forever
+        (confirmed in runtime/events.log: repeat cycles at
+        threshold + compact-run-time, e.g. +27min against a 25min threshold).
+
+        Follow-up gap: `proactive_compact_pending` alone can't tell "still
+        running our /compact" apart from "went not-ready again for real work
+        before we ever observed it back at ready" — e.g. a task lands on the
+        pane in the same window the compact was still finishing. Left
+        unbounded, that would pin `idle_since` at its stale pre-compact value
+        for as long as the pane keeps being busy, silently swallowing the
+        NEXT idle episode's `/compact` once it finally settles. See
+        PROACTIVE_COMPACT_PENDING_CEILING_S: once a not-ready stretch outlives
+        it, `pending` is treated as stale and the not-ready branch falls back
+        to the ordinary new-work path (clear pending, reset idle_since).
         """
         if PROACTIVE_COMPACT_IDLE_AFTER_S <= 0:
             return
@@ -4003,8 +4049,32 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                         or sess.is_blocked_on_tty_prompt()
                         or ps.rate_limited_until > now
                     ):
+                        # #190: don't null out idle_since for the busy stretch
+                        # caused by the /compact we ourselves just injected —
+                        # only a genuinely new not-ready (pending already
+                        # cleared) means real work started.
+                        if ps.proactive_compact_pending and (
+                            now - ps.proactive_compact_sent_ts
+                            <= PROACTIVE_COMPACT_PENDING_CEILING_S
+                        ):
+                            continue
+                        # Either pending was never set (ordinary new-work
+                        # not-ready), or it's been pending longer than a
+                        # /compact could plausibly still be running — see
+                        # PROACTIVE_COMPACT_PENDING_CEILING_S's comment.
+                        # Either way this is real work now: clear any stale
+                        # pending flag and reset idle_since so it starts a
+                        # fresh episode once the pane settles.
+                        ps.proactive_compact_pending = False
                         ps.proactive_compact_idle_since = None
                         continue
+                    if ps.proactive_compact_pending:
+                        # Pane is back at its ready prompt for the first time
+                        # since we sent /compact — the compact episode is
+                        # over. Clear the flag but deliberately leave
+                        # idle_since untouched so this idle episode still
+                        # reads as already-compacted.
+                        ps.proactive_compact_pending = False
                     if effective_provider_for(role, project=project_name) != CLAUDE:
                         continue
                     if ps.proactive_compact_idle_since is None:
@@ -4018,6 +4088,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                     sess.write("/compact")
                     _delayed_enter(pane, sess, 150)
                     ps.proactive_compact_sent_ts = now
+                    ps.proactive_compact_pending = True
                     _log_event(
                         "proactive_idle_compact",
                         role=role,
