@@ -23,7 +23,7 @@ npm install -g agent-takkub
 
 ## 🖥️ The Desktop Cockpit
 
-![Takkub Cockpit — Lead + specialist teammates working in parallel](https://raw.githubusercontent.com/takkub/agent-takkub/v1.0.5/assets/cockpit-main.png)
+![Takkub Cockpit — Lead + specialist teammates working in parallel](https://raw.githubusercontent.com/takkub/agent-takkub/main/assets/cockpit-main.png)
 
 <div align="center"><i>One window: you talk to the <b>Lead</b>, and it spawns and drives specialist teammates (frontend · backend · qa · reviewer · devops · …) as live Claude Code panes.</i></div>
 
