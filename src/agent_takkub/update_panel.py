@@ -117,8 +117,7 @@ class MainWindowUpdateMixin:
         `_restart_cockpit` which persists state and relaunches."""
         working_count = sum(
             1
-            for project_panes in self.orch._panes_by_project.values()
-            for pane in project_panes.values()
+            for _role, pane in self.orch.iter_all_panes()
             if getattr(pane, "state", None) in ("working", "active")
         )
 
@@ -436,12 +435,11 @@ class MainWindowUpdateMixin:
         from .provider_config import effective_provider_for
 
         n = 0
-        for project_panes in self.orch._panes_by_project.values():
-            for role, pane in project_panes.items():
-                sess = getattr(pane, "session", None)
-                if sess is not None and getattr(sess, "is_alive", False):
-                    if effective_provider_for(_mw_split_shard2(role)[0]) == "claude":
-                        n += 1
+        for role, pane in self.orch.iter_all_panes():
+            sess = getattr(pane, "session", None)
+            if sess is not None and getattr(sess, "is_alive", False):
+                if effective_provider_for(_mw_split_shard2(role)[0]) == "claude":
+                    n += 1
         return n
 
     def _confirm_and_apply_claude_update(self, cur: str, latest: str) -> None:

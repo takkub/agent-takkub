@@ -22,7 +22,7 @@ import secrets
 import threading
 import time
 import uuid as _uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -929,6 +929,18 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             if panes.get(pane.role.name) is pane:
                 return project_ns
         return None
+
+    def iter_all_panes(self) -> Iterator[tuple[str, AgentPaneLike]]:
+        """Yield (role, pane) for every pane across every project namespace.
+
+        Public replacement for UI code reaching into
+        ``orch._panes_by_project`` directly — callers that need every
+        teammate/Lead regardless of which project tab is active (cockpit
+        restart confirmation, claude.exe liveness count, app-quit teardown)
+        should use this instead of touching the private registry.
+        """
+        for project_panes in self._panes_by_project.values():
+            yield from project_panes.items()
 
     @property
     def panes(self) -> dict[str, AgentPaneLike]:

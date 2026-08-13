@@ -1419,14 +1419,13 @@ class MainWindow(
             pass
         # Walk every project namespace, not just the active view, so a
         # background tab's panes are also terminated cleanly.
-        for project_panes in self.orch._panes_by_project.values():
-            for pane in list(project_panes.values()):
-                if pane.session is not None:
-                    pane.mark_expected_exit()
-                    # wait=True: tear down inline on app exit so taskkill /T
-                    # finishes before the process dies — a detached daemon
-                    # teardown would be killed mid-kill and orphan the tree.
-                    pane.session.terminate(wait=True)
+        for _role, pane in list(self.orch.iter_all_panes()):
+            if pane.session is not None:
+                pane.mark_expected_exit()
+                # wait=True: tear down inline on app exit so taskkill /T
+                # finishes before the process dies — a detached daemon
+                # teardown would be killed mid-kill and orphan the tree.
+                pane.session.terminate(wait=True)
         try:
             self.orch.close_native_chrome()
         except Exception:
