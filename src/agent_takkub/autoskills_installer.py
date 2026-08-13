@@ -506,6 +506,25 @@ def _restore_entry(backup: Path, dest: Path) -> bool:
 
 _STAGING_PREFIX = ".autoskills-staging-"
 
+# Manifest/config files `autoskills` may plausibly open for an in-place
+# rewrite (e.g. a stack-detection tool normalizing a lockfile). A hardlink
+# shares the underlying bytes with the real project file, so an in-place
+# rewrite in staging would silently corrupt the real one too — mirror these
+# with a real copy instead. Everything else keeps the hardlink fast path.
+_MANIFEST_FILENAMES = frozenset(
+    {"package.json", "package-lock.json", "pyproject.toml", "tsconfig.json"}
+)
+_MANIFEST_SUFFIXES = (".lock",)
+_MANIFEST_PREFIXES = (".env",)
+
+
+def _is_manifest_file(fname: str) -> bool:
+    return (
+        fname in _MANIFEST_FILENAMES
+        or fname.endswith(_MANIFEST_SUFFIXES)
+        or fname.startswith(_MANIFEST_PREFIXES)
+    )
+
 
 def _build_staging_mirror(project_root: Path) -> Path | None:
     """Best-effort isolated copy of `project_root` for `install()` to run
@@ -516,7 +535,8 @@ def _build_staging_mirror(project_root: Path) -> Path | None:
     stranded permanently.
 
     Lives INSIDE `project_root` (guarantees the same filesystem volume, so
-    the mirror can use hardlinks — ~0 extra disk, same technique as this
+    the mirror can use hardlinks for most files — ~0 extra disk, same
+    technique as this
     codebase's graft staging mirror) under a `.autoskills-staging-<token>/`
     directory that the mirror walk itself excludes. `.git/` and the real
     `.claude/skills/` are also excluded: `.git` because it's irrelevant to
@@ -580,6 +600,8 @@ def _build_staging_mirror(project_root: Path) -> Path | None:
                 if src.is_symlink():
                     target = os.readlink(src)
                     os.symlink(target, dest, target_is_directory=src.is_dir())
+                elif _is_manifest_file(fname):
+                    shutil.copy2(src, dest)
                 else:
                     os.link(src, dest)
             except OSError:

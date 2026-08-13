@@ -27,6 +27,7 @@ import base64
 import binascii
 import json
 import logging
+import re
 import socket
 import time
 import uuid
@@ -53,6 +54,10 @@ _IMAGE_FORMATS = {
 }
 
 _log = logging.getLogger(__name__)
+
+# Strips C0 control chars (keeps \n) so a caption can never inject a PTY
+# control sequence (e.g. \x03/Ctrl+C, ANSI escapes) into lead_say's terminal.
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x09\x0b-\x1f]")
 
 
 def _lead_provider_note(provider: str) -> str | None:
@@ -303,7 +308,9 @@ def lead_upload_image(
         raise RemoteApiError(500, "could not save image") from None
 
     display_name = Path(filename).name[:120] if isinstance(filename, str) else "image"
-    clean_caption = caption.strip()[:2000] if isinstance(caption, str) else ""
+    clean_caption = (
+        _CONTROL_CHARS_RE.sub("", caption).strip()[:2000] if isinstance(caption, str) else ""
+    )
     message = f'[remote → lead] แนบรูปจาก mobile ให้เปิดดูจากไฟล์นี้: "{image_path}"'
     if clean_caption:
         message += f"\nข้อความประกอบ: {clean_caption}"

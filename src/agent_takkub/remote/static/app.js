@@ -760,7 +760,10 @@
     // content in some browser contexts. The strict allow-list keeps images
     // self-contained and compatible with the PWA's CSP.
     s = s.replace(/!\[([^\]\n]{0,200})\]\((data:image\/(?:png|jpeg|webp|gif);base64,[A-Za-z0-9+/=]+)\)/g, function (m, alt, src) {
-      return '<img class="remote-image" src="' + src + '" alt="' + alt + '" loading="lazy" decoding="async">';
+      // mdEscape only escapes &/</> (safe for text nodes); a literal " here would
+      // break out of the alt attribute, so quote-escape separately for this context.
+      var safeAlt = alt.replace(/"/g, "&quot;");
+      return '<img class="remote-image" src="' + src + '" alt="' + safeAlt + '" loading="lazy" decoding="async">';
     });
     s = s.replace(/\[([^\]]+)\]\(((?:https?:\/\/|\/)[^\s)]+)\)/g, function (m, t, u) {
       // mdEscape only escapes &/</> (safe for text nodes); a literal " here would
