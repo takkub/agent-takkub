@@ -406,6 +406,28 @@ class TestInstanceBanner:
 
         assert cli._instance_banner() == ""
 
+    def test_banner_keeps_project_name_for_pane_assigned_into_worktree(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """#185 end-to-end: a teammate pane spawned with `--cwd` into a git
+        worktree of the same repo must still show the real project name in
+        `takkub list`'s header, not the worktree's own basename — otherwise
+        Lead reads "controls X only" and wrongly believes it lost some panes.
+        Exercises the real `config.instance_identity_label()` (not stubbed),
+        driven purely by the env var the orchestrator stamps on every spawn."""
+        worktree = tmp_path / "worktrees" / "agent-takkub" / "frontend-1786615682"
+        worktree.mkdir(parents=True)
+        current_port_file = tmp_path / "runtime" / "port"
+        monkeypatch.setattr(cli.config, "REPO_ROOT", worktree)
+        monkeypatch.setattr(cli.config, "DATA_HOME", worktree)
+        monkeypatch.setenv("TAKKUB_PROJECT", "agent-takkub")
+        monkeypatch.setattr(cli.config, "read_port", lambda: 56919)
+        monkeypatch.setattr(cli.config, "_get_port_file", lambda: current_port_file)
+
+        banner = cli._instance_banner()
+
+        assert banner == f"▸ dev · agent-takkub   (port 56919 · {current_port_file.parent})"
+
     @pytest.mark.parametrize(
         ("command", "response"),
         [

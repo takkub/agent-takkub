@@ -230,9 +230,22 @@ def instance_identity_label() -> str:
     A dev checkout still needs the ``dev · <repo>`` tag since two checkouts
     can run side by side with the same version. An installed build only
     needs its version — the literal word "prod" added no information the
-    version number didn't already carry."""
+    version number didn't already carry.
+
+    The ``<repo>`` name prefers ``TAKKUB_PROJECT`` (the orchestrator-issued,
+    registry-backed project namespace stamped into every cockpit-spawned
+    pane's env — Lead and teammates alike, see ``spawn_engine.py``) over
+    ``REPO_ROOT.name``. A teammate pane spawned with ``--cwd`` pointing at a
+    worktree checkout still carries the *same* instance's canonical project
+    name via that env var, whereas ``REPO_ROOT`` is only this particular CLI
+    invocation's own on-disk resolution and isn't guaranteed to match (#185:
+    a worktree-scoped pane showed the worktree's basename here instead of
+    the actual project name, making Lead think it only controlled part of
+    the fleet). Manual terminal invocations have no ``TAKKUB_PROJECT`` set
+    and keep falling back to ``REPO_ROOT.name`` unchanged."""
     if DATA_HOME == REPO_ROOT:
-        return f"dev · {REPO_ROOT.name}"
+        name = os.environ.get("TAKKUB_PROJECT") or REPO_ROOT.name
+        return f"dev · {name}"
     return f"v{instance_display_version()}"
 
 
