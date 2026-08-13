@@ -2154,6 +2154,14 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         role subdir has nothing. This keeps the qa→critic shared
         `screenshots/` pickup convention working unchanged for panes that
         haven't adopted a per-role subdir yet.
+
+        Issue #165: the flat fallback above is itself scoped to
+        `_EVIDENCE_WARN_ROLES` (qa/critic/designer/reviewer) — the only roles
+        the shared-screenshots convention is actually for. A role outside
+        that set (backend, devops, …) that never wrote to its own subdir
+        gets `''`, never another pane's screenshots by coincidence of
+        overlapping assign windows — confirmed live: a pure-Python backend
+        pane's done() picked up critic's unrelated screenshots this way.
         """
         if assign_ts <= 0:
             # No tracked assignment (pane never went through _assign_dispatch,
@@ -2168,7 +2176,15 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
 
         found = cls._find_evidence_files(artifacts_dir / base_role, assign_ts, now)
         shared = False
-        if not found:
+        # Issue #165: the flat/shared fallback used to run for ANY role, so a
+        # pane that never touches a browser (e.g. backend doing pure-Python
+        # work) could get another pane's screenshots (e.g. critic's) folded
+        # into its own done() evidence line — same-project, overlapping
+        # assign windows is all it took. The fallback is only a legitimate
+        # signal for the roles the qa→critic/designer shared screenshots/
+        # convention actually applies to; scope it to _EVIDENCE_WARN_ROLES so
+        # a role outside that set never inherits evidence it didn't produce.
+        if not found and base_role in _EVIDENCE_WARN_ROLES:
             found = cls._find_evidence_files(artifacts_dir, assign_ts, now)
             shared = True
 
@@ -2787,13 +2803,75 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         _log_event("end_session", project=project_ns, note=note[:200])
         return True, f"lead session summary written: {rel_path}"
 
+    # Issue #163: a `done()` report is queued for Lead but the reporting
+    # pane's own auto-close timer fires a fixed 2.5s later regardless — the
+    # Lead Inbox Digest can hold a clean notice up to its debounce window,
+    # the delivery pump can spend further time waiting for Lead to be ready,
+    # and a Lead whose composer reads "ready but holding an unsubmitted
+    # draft" parks the notice in the durable store indefinitely by design
+    # (never force-bypassing a live draft — see _reap_pending_done_notices).
+    # None of those delays are bounded by the pane's own 2.5s lifetime, so
+    # `takkub list` used to just drop the role the moment its pane closed —
+    # looking exactly like the work vanished, even though the report was
+    # still genuinely in flight. Confirmed live (2026-08-13): a backend
+    # pane's clean done() at 15:10 didn't reach the Lead Inbox Digest until
+    # ~15:40, but the pane itself was already gone from `takkub list` well
+    # before that.
+    _PENDING_NOTICE_STATE = "done (report queued — not yet delivered to Lead)"
+
+    def _has_pending_lead_notice(self, project_ns: str, role_name: str) -> bool:
+        """True if `role_name`'s done/FAILED report is still somewhere in the
+        outbound-to-Lead pipeline (digest queue, live notify queue, or the
+        durable pending store) rather than actually written into Lead's pane.
+
+        Matched by the literal `[<role> done]` / `[<role> FAILED]` tag
+        `done()` builds the notice with, plus the `[<role>] done` shape the
+        notice takes once folded into a Lead Inbox Digest line (see
+        `_format_digest_item`). Used by list_status/list_status_detailed to
+        keep surfacing a role until its notice has genuinely left the
+        pipeline, instead of trusting pane-registry membership alone (#163).
+        """
+        tag = re.compile(
+            rf"\[{re.escape(role_name)}\s+(?:done|FAILED)\]"
+            rf"|^•\s*\[{re.escape(role_name)}\]\s*done",
+            re.IGNORECASE | re.MULTILINE,
+        )
+
+        def _any_match(bodies) -> bool:
+            return any(isinstance(b, str) and tag.search(b) for b in bodies)
+
+        if _any_match(getattr(self, "_lead_digest_queue", {}).get(project_ns, ())):
+            return True
+        if _any_match(getattr(self, "_lead_notify_queue", {}).get(project_ns, ())):
+            return True
+        for item in getattr(self, "_pending_done_notices", {}).get(project_ns, ()):
+            if isinstance(item, dict) and item.get("role") == role_name:
+                return True
+        return False
+
+    def _pending_notice_roles(self, project_ns: str, known: dict) -> dict[str, str]:
+        """Roles from `_recent_done` no longer in `known` whose report is
+        still pending delivery — see `_has_pending_lead_notice` (#163)."""
+        extra: dict[str, str] = {}
+        for done_ns, done_role, _fname in getattr(self, "_recent_done", ()):
+            if done_ns != project_ns or done_role in known or done_role in extra:
+                continue
+            if self._has_pending_lead_notice(project_ns, done_role):
+                extra[done_role] = self._PENDING_NOTICE_STATE
+        return extra
+
     def list_status(self, project: str | None = None) -> dict[str, str]:
         """Snapshot of `role → state` for one project's panes.
 
         Defaults to the active project's view, so a Lead in project-a never
-        accidentally sees a backend pane that belongs to project-b.
+        accidentally sees a backend pane that belongs to project-b. Also
+        surfaces a just-closed role whose done report hasn't reached Lead
+        yet (#163) instead of letting it silently vanish from the list.
         """
-        return {name: p.state for name, p in self._project_panes(project).items()}
+        project_ns = self._resolve_project(project)
+        status = {name: p.state for name, p in self._project_panes(project_ns).items()}
+        status.update(self._pending_notice_roles(project_ns, status))
+        return status
 
     def _compute_last_progress_ts(self, role: str, project_ns: str, pane: AgentPane) -> float:
         """Return the most-recent activity timestamp for `pane` (0.0 = no baseline).
@@ -2857,6 +2935,8 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                 "stall_minutes": stall_minutes,
                 "last_progress_ts": last_progress_ts,
             }
+        for role, state in self._pending_notice_roles(project_ns, result).items():
+            result[role] = {"state": state, "stall_minutes": None, "last_progress_ts": 0.0}
         return result
 
     def pane_status_report(
