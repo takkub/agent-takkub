@@ -460,6 +460,28 @@ def resume_lead(orch, project: object, session_uuid: object) -> dict:
     }
 
 
+def usage() -> dict:
+    """View-mode safe (read-only). Per the provider-usage design doc §4:
+    remote must NEVER trigger a live provider fetch — a phone poll would
+    otherwise become an extra rate-limit hit against a provider's endpoint.
+    Reads `provider_usage.get_store()`'s cache only; the store's own
+    background thread does the actual fetching. A provider with no cache
+    entry yet (first request since cockpit start, before its first
+    background fetch completes) reports `status: "loading"` here instead of
+    this handler fetching it inline."""
+    from .. import provider_usage
+
+    store = provider_usage.get_store()
+    cache = store.get_all()
+    providers = [
+        provider_usage.usage_to_dict(
+            cache.get(name) or provider_usage.ProviderUsage(provider=name, status="loading")
+        )
+        for name in provider_usage.PROVIDER_NAMES
+    ]
+    return {"providers": providers}
+
+
 def projects(from_project: str | None, mode: str = "view") -> dict:
     """View-mode. In-process, no loopback: reads the same `projects.json`
     the desktop UI reads. Safe from the H2 cross-thread race because this

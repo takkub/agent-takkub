@@ -466,6 +466,61 @@ class TestActivity:
         assert project["roles"][0]["provider"] == "gemini"
 
 
+class TestUsage:
+    """`/api/usage` must NEVER trigger a live provider fetch itself — it
+    only reads `provider_usage.get_store()`'s cache (design doc §4: a phone
+    poll must never become an extra rate-limit hit)."""
+
+    def test_reads_from_store_cache_without_fetching(self, monkeypatch):
+        from agent_takkub import provider_usage
+
+        class _FakeStore:
+            def get_all(self):
+                return {
+                    "claude": provider_usage.ProviderUsage(
+                        provider="claude", status="active", utilization=7.0
+                    )
+                }
+
+        def _boom():
+            raise AssertionError("usage() must not call fetch_provider_usage directly")
+
+        monkeypatch.setattr(provider_usage, "get_store", lambda: _FakeStore())
+        monkeypatch.setattr(provider_usage, "fetch_provider_usage", _boom)
+
+        result = api.usage()
+        by_provider = {p["provider"]: p for p in result["providers"]}
+        assert by_provider["claude"]["status"] == "active"
+        assert by_provider["claude"]["utilization"] == 7.0
+
+    def test_provider_missing_from_cache_reports_loading_not_an_error(self, monkeypatch):
+        from agent_takkub import provider_usage
+
+        class _FakeStore:
+            def get_all(self):
+                return {}
+
+        monkeypatch.setattr(provider_usage, "get_store", lambda: _FakeStore())
+
+        result = api.usage()
+        by_provider = {p["provider"]: p for p in result["providers"]}
+        assert set(by_provider) == set(provider_usage.PROVIDER_NAMES)
+        for entry in by_provider.values():
+            assert entry["status"] == "loading"
+            assert entry["utilization"] is None
+
+    def test_response_covers_every_registered_provider(self, monkeypatch):
+        from agent_takkub import provider_usage
+
+        class _FakeStore:
+            def get_all(self):
+                return {}
+
+        monkeypatch.setattr(provider_usage, "get_store", lambda: _FakeStore())
+        result = api.usage()
+        assert len(result["providers"]) == len(provider_usage.PROVIDER_NAMES)
+
+
 class TestLeadSay:
     def test_empty_message_rejected(self, fake_orch):
         with pytest.raises(api.RemoteApiError) as excinfo:

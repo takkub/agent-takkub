@@ -174,6 +174,8 @@ class _Bridge(QObject):
                     pending.reply.put((exc.status, {"ok": False, "msg": exc.msg}))
             elif pending.action == "activity":
                 pending.reply.put((200, api.activity(self._orch)))
+            elif pending.action == "usage":
+                pending.reply.put((200, api.usage()))
             else:
                 pending.reply.put((404, {"ok": False, "msg": "unknown action"}))
         except Exception:
@@ -410,6 +412,9 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         elif rest == "/api/activity":
             if self._check_bearer() and self._check_password_gate():
                 self._respond_marshaled("activity", {})
+        elif rest == "/api/usage":
+            if self._check_bearer() and self._check_password_gate():
+                self._respond_marshaled("usage", {})
         elif rest.startswith("/api/"):
             self._reject()
         else:
