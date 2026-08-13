@@ -175,6 +175,11 @@ _TTY_PROMPT_RE = re.compile(
 )
 _TTY_PROMPT_TAIL_ROWS = 5
 
+# "Enter [to] Confirm" — claude/codex word it "Enter to confirm", agy words
+# its own trust modal "enter Confirm" with no "to" (#186). Tolerate both so
+# is_at_trust_prompt() doesn't silently miss the agy variant.
+_ENTER_CONFIRM_RE = re.compile(r"enter\s+(?:to\s+)?confirm", re.IGNORECASE)
+
 
 # ── Ready-prompt detection markers (M4#17) ──────────────────────────────────
 # is_at_ready_prompt() decides whether a pane is idle at its input prompt. The
@@ -1044,16 +1049,25 @@ class PtySession(QObject):
         return any(m in _ready_region(self.display_lines()) for m in _STARTUP_MARKERS)
 
     def is_at_trust_prompt(self) -> bool:
-        """True when claude OR codex is showing a trust-directory modal.
+        """True when claude, codex, OR agy is showing a trust-directory modal.
 
-        Both CLIs default-select "Yes/trust" so a single Enter keypress
+        All three default-select "Yes/trust" so a single Enter keypress
         accepts. Patterns:
           - claude: "Yes, I trust this folder" + "Enter to confirm"
           - codex:  "Do you trust the contents of this directory"
                     + "Press enter to continue"
+          - agy:    "Yes, I trust this folder" + "up/down Navigate . enter
+                    Confirm" — same "trust this folder" phrase as claude but
+                    NO "to" before "Confirm" (live-captured screen text,
+                    issue #186). The old exact-substring "enter to confirm"
+                    match silently never fired for this wording, so
+                    _auto_trust's poller never pressed Enter and a worktree
+                    spawn sat on the modal until someone noticed and sent a
+                    bare Enter by hand. _ENTER_CONFIRM_RE tolerates the
+                    missing "to" instead of requiring the exact phrase.
         """
         text = "\n".join(self.display_lines()).lower()
-        if "trust this folder" in text and "enter to confirm" in text:
+        if "trust this folder" in text and _ENTER_CONFIRM_RE.search(text):
             return True
         if "do you trust the contents of this directory" in text:
             return True

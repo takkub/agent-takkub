@@ -30,6 +30,13 @@ def _live_session() -> MagicMock:
     s = MagicMock()
     s.is_alive = True
     s.write = MagicMock()
+    # #186: is_at_trust_prompt()/is_blocked_on_tty_prompt() are checked on
+    # every delivery poll — an unconfigured MagicMock call returns a
+    # (truthy) MagicMock, which would misread every test pane below as
+    # blocked-on-prompt. Real PtySession returns bool/None for an ordinary
+    # non-blocked pane, so pin the mocks to match.
+    s.is_at_trust_prompt.return_value = False
+    s.is_blocked_on_tty_prompt.return_value = None
     return s
 
 

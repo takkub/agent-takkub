@@ -43,12 +43,16 @@ def orch(qapp, monkeypatch):
     return o
 
 
-def _launch(orch, pane, *, label, codex_exit=False, auto_trust=False):
+def _launch(orch, pane, *, label, codex_exit=False, auto_trust=False, auto_trust_wait_ms=None):
     """Run _launch_session with PtySession + transcript mocked. Returns
     (ok, msg, mock_session, connected_handler)."""
     connected: list = []
     mock_session = MagicMock()
     mock_session.processExited.connect.side_effect = lambda h: connected.append(h)
+
+    kwargs = {}
+    if auto_trust_wait_ms is not None:
+        kwargs["auto_trust_wait_ms"] = auto_trust_wait_ms
 
     with (
         patch("agent_takkub.orchestrator.PtySession", return_value=mock_session),
@@ -69,6 +73,7 @@ def _launch(orch, pane, *, label, codex_exit=False, auto_trust=False):
             _shard_total=0,
             codex_exit=codex_exit,
             auto_trust=auto_trust,
+            **kwargs,
         )
     return ok, msg, mock_session, (connected[0] if connected else None)
 
@@ -99,6 +104,23 @@ class TestLaunchSessionCommonTail:
     def test_gemini_auto_trusts(self, orch):
         _launch(orch, _pane(), label="gemini", auto_trust=True)
         orch._auto_trust.assert_called_once()
+
+    def test_gemini_auto_trust_uses_default_window_when_unspecified(self, orch):
+        """#186: a caller that doesn't opt into a longer window (the claude
+        inline branch, which never overrides) still gets the historical 30s
+        default via `_launch_session`'s own default kwarg."""
+        _launch(orch, _pane(), label="gemini", auto_trust=True)
+        assert orch._auto_trust.call_args.kwargs["max_ms"] == 30_000
+
+    def test_auto_trust_wait_ms_forwarded_as_max_ms(self, orch):
+        """#186: a cold-boot provider (agy — ready_wait_ms=90_000) can render
+        its trust modal well after a hardcoded 30s watcher would already
+        have given up (a real worktree fan-out incident). The spec-driven
+        spawn branch threads its own ready_wait_ms through here instead of
+        relying on the claude-tuned 30s default."""
+        _launch(orch, _pane(), label="gemini", auto_trust=True, auto_trust_wait_ms=90_000)
+        orch._auto_trust.assert_called_once()
+        assert orch._auto_trust.call_args.kwargs["max_ms"] == 90_000
 
     def test_non_codex_wires_session_exit_not_codex(self, orch):
         orch._panes_by_project[TEST_PROJECT] = {}

@@ -1187,6 +1187,7 @@ class SpawnEngineMixin:
         _shard_total: int,
         codex_exit: bool = False,
         auto_trust: bool = False,
+        auto_trust_wait_ms: int = 30_000,
         resume_uuid: str | None = None,
     ) -> tuple[bool, str]:
         """Common ConPTY launch tail for the non-claude spawn branches (shell,
@@ -1200,6 +1201,11 @@ class SpawnEngineMixin:
                        early-crash detection) instead of the stale-guarded
                        ``_on_session_exit`` used by shell/gemini.
           auto_trust : call ``_auto_trust`` after attach (gemini/codex; NOT shell).
+          auto_trust_wait_ms : how long ``_auto_trust`` keeps polling for the
+                       modal (#186) — pass the provider's own cold-boot
+                       allowance (``spec.ready_wait_ms``) so a slow-booting
+                       provider's trust prompt isn't missed by a watcher that
+                       already gave up.
 
         The claude branch is intentionally NOT routed through here — it adds
         resume / session-uuid / MCP wiring and stays inline.
@@ -1264,7 +1270,7 @@ class SpawnEngineMixin:
             if _ekey in self._recent_exits:
                 del self._recent_exits[_ekey]
             if auto_trust:
-                self._auto_trust(role_name, project=project_ns)
+                self._auto_trust(role_name, project=project_ns, max_ms=auto_trust_wait_ms)
             # Non-Claude providers currently have no file-backed append-system-
             # prompt capability. This is normally a no-op because assign() keeps
             # them on pointer delivery; it only fires if the provider changed
@@ -1823,6 +1829,11 @@ class SpawnEngineMixin:
                 _shard_total=_shard_total,
                 codex_exit=spec.early_exit_watch,
                 auto_trust=spec.auto_trust,
+                # #186: watch at least as long as this provider's own
+                # cold-boot ready allowance, so a trust modal rendered late
+                # in a slow boot (multi-role fan-out contention) still gets
+                # auto-answered instead of outliving the watcher.
+                auto_trust_wait_ms=max(30_000, spec.ready_wait_ms),
                 resume_uuid=resume_uuid,
             )
 
@@ -2853,17 +2864,27 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 self._send_when_ready(role_name, cached_task, project=project)
 
     # ──────────────────────────────────────────────────────────────
-    def _auto_trust(self, role_name: str, project: str | None = None) -> None:
-        """Watch the pane and auto-press Enter on claude's trust folder modal.
+    def _auto_trust(self, role_name: str, project: str | None = None, max_ms: int = 30_000) -> None:
+        """Watch the pane and auto-press Enter on a trust/folder-onboarding
+        modal (claude, codex, agy — see ``is_at_trust_prompt()``).
 
-        Polls every 500ms for up to 30s. Stops as soon as the prompt is
-        accepted (or the session dies / never shows it).
+        Polls every 500ms for up to ``max_ms``. Stops as soon as the prompt
+        is accepted (or the session dies / never shows it).
+
+        The default 30s window is fine for claude/codex, whose trust modal
+        renders essentially immediately at spawn. It is NOT enough for a
+        provider with a slow cold boot (agy's own ``ready_wait_ms`` allows up
+        to 90s, see provider_spec.gemini_spec) — under multi-role fan-out
+        contention the modal can render after this watcher would already
+        have given up, leaving it stuck with no one left polling to answer
+        it (issue #186). Callers spawning a cold-boot provider should pass
+        that provider's own ready allowance here instead of relying on the
+        default.
         """
         pane = self._project_panes(project).get(role_name)
         if pane is None:
             return
         elapsed = [0]
-        max_ms = 30_000
 
         def _check() -> None:
             if pane.session is None or not pane.session.is_alive:
