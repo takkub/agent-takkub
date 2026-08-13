@@ -196,6 +196,41 @@ class TestStopTreeKill:
         t.stop()  # must not raise
 
 
+class TestIsAliveAndLastOutput:
+    """`Tunnel.is_alive`/`last_output` — surfaced by the sidebar tunnel dot
+    (status_header._refresh_tunnel_indicator) to catch a tunnel dying well
+    after a clean start, not just at initial startup (`_verify_named_started`
+    only covers the latter)."""
+
+    def test_never_started_is_not_alive(self):
+        cfg = TunnelConfig(type="bat", credentials_json="./quick-tunnel.sh")
+        t = tunnel.Tunnel(cfg, public_url="", port=8899)
+        assert t.is_alive is False
+
+    def test_running_process_is_alive(self):
+        cfg = TunnelConfig(type="bat", credentials_json="./quick-tunnel.sh")
+        t = tunnel.Tunnel(cfg, public_url="", port=8899)
+        t._proc = _FakeProc(returncode=None)
+        assert t.is_alive is True
+
+    def test_exited_process_is_not_alive(self):
+        cfg = TunnelConfig(type="bat", credentials_json="./quick-tunnel.sh")
+        t = tunnel.Tunnel(cfg, public_url="", port=8899)
+        t._proc = _FakeProc(returncode=1)
+        assert t.is_alive is False
+
+    def test_last_output_empty_by_default(self):
+        cfg = TunnelConfig(type="bat", credentials_json="./quick-tunnel.sh")
+        t = tunnel.Tunnel(cfg, public_url="", port=8899)
+        assert t.last_output == ""
+
+    def test_last_output_joins_drained_lines(self):
+        cfg = TunnelConfig(type="bat", credentials_json="./quick-tunnel.sh")
+        t = tunnel.Tunnel(cfg, public_url="", port=8899)
+        t._last_output = ["line one", "line two"]
+        assert t.last_output == "line one\nline two"
+
+
 class TestKillOnCloseJob:
     """H-E: Windows Job Object with KILL_ON_JOB_CLOSE — kernel-enforced
     cleanup for the case our own process dies without calling Tunnel.stop()."""

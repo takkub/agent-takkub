@@ -16,6 +16,8 @@ Row index == stacked-widget index == list row, kept in lockstep at all times.
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 from PyQt6.QtCore import (
     QEasingCurve,
     QParallelAnimationGroup,
@@ -99,6 +101,11 @@ QListWidget#projectList::item:selected {{
     margin: 6px 12px 0 12px;
     font-size: 12px;
     font-weight: 600;
+}}
+#tunnelIndicator {{
+    border-radius: 5px;
+    background: {cockpit_theme.TEXT_FAINT};
+    border: 1px solid rgba(0,0,0,0.25);
 }}
 #sidebarToggleBtn:hover {{
     background: {cockpit_theme.GROUND_PANEL};
@@ -281,9 +288,27 @@ class ProjectNav(QWidget):
         sb.setContentsMargins(0, 0, 0, 0)
         sb.setSpacing(0)
 
+        # Header row: "PROJECTS" label + a small tunnel-status dot at the
+        # sidebar's top edge — the true top-left corner of the main window
+        # (the sidebar sits flush against the window frame). Deliberately
+        # separate from the 🌐 Remote chip in the bottom status bar: that
+        # chip answers "is remote control on", this dot answers "is the
+        # tunnel itself actually up right now" (a tunnel can die silently
+        # after remote control started fine — see remote/tunnel.py).
+        header_row = QWidget(sidebar)
+        hr = QHBoxLayout(header_row)
+        hr.setContentsMargins(0, 0, 12, 0)
+        hr.setSpacing(6)
         self._header = QLabel("PROJECTS")
         self._header.setObjectName("projectSidebarHeader")
-        sb.addWidget(self._header)
+        hr.addWidget(self._header)
+        hr.addStretch(1)
+        self._tunnel_indicator = QLabel(header_row)
+        self._tunnel_indicator.setObjectName("tunnelIndicator")
+        self._tunnel_indicator.setFixedSize(10, 10)
+        self._tunnel_indicator.setToolTip("Tunnel: not enabled")
+        hr.addWidget(self._tunnel_indicator)
+        sb.addWidget(header_row)
 
         self._list = QListWidget(sidebar)
         self._list.setObjectName("projectList")
@@ -399,6 +424,28 @@ class ProjectNav(QWidget):
         name = item.data(Qt.ItemDataRole.UserRole)
         if isinstance(name, str) and name:
             self.openProjectRequested.emit(name)
+
+    # ------------------------------------------------------------------
+    # top-left tunnel-status dot
+    # ------------------------------------------------------------------
+    _TUNNEL_STATE_COLORS: ClassVar[dict[str, str]] = {
+        "running": cockpit_theme.STATE_OK,
+        "error": cockpit_theme.STATE_ERROR,
+    }
+
+    def set_tunnel_status(self, state: str, tooltip: str) -> None:
+        """Paint the sidebar-header tunnel dot. `state` is one of
+        `"off"` (neutral, not running) / `"running"` (green) / `"error"`
+        (red) — any other value falls back to the neutral "off" color
+        rather than raising, since this is a passive status readout, not
+        input validation. Pure presentation: the caller (MainWindow) is
+        responsible for deciding the state from `RemoteControl`."""
+        color = self._TUNNEL_STATE_COLORS.get(state, cockpit_theme.TEXT_FAINT)
+        self._tunnel_indicator.setStyleSheet(
+            f"#tunnelIndicator {{ border-radius:5px; background:{color}; "
+            "border:1px solid rgba(0,0,0,0.25); }"
+        )
+        self._tunnel_indicator.setToolTip(tooltip)
 
     # ------------------------------------------------------------------
     # sidebar collapse/expand (the ☰ "slide menu" toggle)
