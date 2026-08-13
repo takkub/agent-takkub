@@ -33,6 +33,7 @@ Scope guard: only ever acts on a pane that has an outstanding assigned task
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from pathlib import Path
@@ -41,6 +42,7 @@ from PyQt6.QtCore import QTimer
 
 from . import auto_resume
 from .agent_pane import AgentPane
+from .config import RUNTIME_DIR
 from .lead_inbox import _delayed_enter
 from .limit_status import UsageData, fetch_usage_shared
 from .orchestrator_text import _log_event
@@ -68,6 +70,83 @@ def _usage_confirms_limit(
         ):
             return True
     return False
+
+
+# ── status-dump helpers (#158) — pure, no Qt/network, safe on a mock pane ──
+
+
+def _pane_cwd(pane: AgentPane | None) -> str | None:
+    """Best-effort task cwd for *pane* — used to locate the working tree for
+    the git-status half of the give-up dump. None on anything unexpected
+    (no pane, torn-down pane, a bare mock in tests) rather than raising."""
+    if pane is None:
+        return None
+    cwd = getattr(pane, "_session_cwd", None)
+    return cwd if isinstance(cwd, str) and cwd else None
+
+
+def _pane_output_tail(
+    pane: AgentPane | None, *, max_lines: int = auto_resume.GIVE_UP_TAIL_LINES
+) -> str:
+    """Last non-blank lines of *pane*'s visible screen, newest at the bottom.
+
+    Diagnostic only: this is what the Lead sees when auto-resume gives up, to
+    judge whether the task actually finished before the pane went quiet.
+    Never raises — a dead session or a bare mock pane in tests just yields ""."""
+    if pane is None or pane.session is None:
+        return ""
+    try:
+        lines = [ln.rstrip() for ln in pane.session.display_lines() if ln.strip()]
+    except Exception:
+        return ""
+    return "\n".join(lines[-max_lines:])
+
+
+def _progress_marker_path(project: str, role: str) -> Path:
+    """``RUNTIME_DIR/progress/<project>/<role>.json`` — one file per pane,
+    overwritten on every park/give-up/wake transition."""
+    day_dir = RUNTIME_DIR / "progress" / project
+    try:
+        day_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return day_dir / f"{role}.json"
+
+
+def _write_progress_marker(
+    project: str,
+    role: str,
+    ps: PaneState,
+    pane: AgentPane | None,
+    *,
+    status: str,
+    reason: str = "",
+) -> Path | None:
+    """Persist a recovery snapshot of the parked task to disk (#158).
+
+    Written by the orchestrator itself — never depends on the agent process
+    cooperating — so the pending task's last-known state (task text, cwd,
+    visible output) survives even if the pane later dies mid-park without
+    ever reporting `takkub done`. Returns the path on success, None on a
+    write failure (disk full, permissions) — diagnostic only, never fatal."""
+    marker = {
+        "status": status,  # "parked" | "gave_up" | "resumed"
+        "reason": reason,
+        "role": role,
+        "project": project,
+        "ts": time.time(),
+        "task": ps.last_assigned_task or "",
+        "task_file": ps.last_assigned_task_file,
+        "cwd": _pane_cwd(pane),
+        "output_tail": _pane_output_tail(pane),
+        "park_rounds": ps.limit_park_rounds,
+    }
+    path = _progress_marker_path(project, role)
+    try:
+        path.write_text(json.dumps(marker, indent=2, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        return None
+    return path
 
 
 class AutoResumeMixin:
@@ -148,12 +227,45 @@ class AutoResumeMixin:
             if reason == "relimit_within_grace"
             else f"park/wake ครบ {auto_resume.MAX_PARK_ROUNDS} รอบแล้ว"
         )
-        msg = (
-            f"🌙⚠️ [auto-resume] {role} ({project}) หยุด auto-resume ให้ task นี้ "
-            f"({why}) — ตัดสินใจต่อเอง (nudge ต่อ/มอบงานใหม่)"
+        pane = self._panes_by_project.get(project, {}).get(role)
+        cwd = _pane_cwd(pane)
+        tail = _pane_output_tail(pane)
+        marker_path = _write_progress_marker(
+            project, role, ps, pane, status="gave_up", reason=reason
         )
+
+        task = ps.last_assigned_task or ""
+        task_preview = task[: auto_resume.GIVE_UP_TASK_PREVIEW_CHARS].strip()
+        if len(task) > auto_resume.GIVE_UP_TASK_PREVIEW_CHARS:
+            task_preview += "…"
+
+        # #158: a pane that gave up mid-task isn't proof the task failed — it
+        # may well have finished and just never got to run `takkub done`
+        # before the window ran out again. Dump enough state (task, last
+        # visible output, and — async below — a git-status check of its cwd)
+        # for the Lead to verify before discarding or reassigning the work.
+        dump = [
+            f"🌙⚠️ [auto-resume] {role} ({project}) หยุด auto-resume ให้ task นี้ "
+            f"({why}) — ตัดสินใจต่อเอง (nudge ต่อ/มอบงานใหม่)",
+            "⚠️ hint: งานอาจเสร็จสมบูรณ์แล้วแต่ยังไม่ได้รายงานผ่าน `takkub done` "
+            "(ชน limit ก่อนได้รายงาน) — ตรวจสอบสถานะจริงก่อน discard/reassign",
+        ]
+        if task_preview:
+            dump.append(f"📋 task ที่ค้าง: {task_preview}")
+        if tail:
+            dump.append(f"🖥️ output ท้าย pane:\n{tail}")
+        if marker_path is not None:
+            dump.append(f"📄 status dump เต็ม: {marker_path}")
+        msg = "\n".join(dump)
+
         self._notify_lead(project, msg, from_role=role, note=reason)
         _log_event("pane_limit_autoresume_stopped", role=role, project=project, reason=reason)
+        if cwd:
+            # Non-blocking (QProcess, not subprocess.run) — reuses the same
+            # git-status-in-cwd check `done()` already runs for the
+            # requires-commit warning, so a dirty tree gets its own follow-up
+            # Lead message instead of racing the notice above.
+            self._check_uncommitted_async(project, role, cwd)
 
     # ── signal (b) confirmation (background thread → Qt signal) ─────────
     def _confirm_limit_via_usage_async(self, project: str, role: str) -> None:
@@ -212,6 +324,11 @@ class AutoResumeMixin:
         ps.limit_parked = True
         ps.limit_park_rounds += 1
         reset_at = ps.rate_limited_until
+        # #158: snapshot task/cwd/output to disk while parked, so a pane that
+        # crashes (rather than cleanly waking) still leaves a recoverable
+        # trail instead of silently losing the in-progress task.
+        pane = self._panes_by_project.get(project, {}).get(role)
+        _write_progress_marker(project, role, ps, pane, status="parked")
         _log_event(
             "pane_limit_parked",
             role=role,
@@ -248,6 +365,10 @@ class AutoResumeMixin:
         ps.limit_park_wake_ts = time.time()
         ps.rate_limited_until = 0.0  # let the rate-limit watchdog run normally again
         ps.last_content_change_ts = time.time()  # #53: don't false-trigger the stuck detector
+        # #158: mark the on-disk snapshot resumed rather than deleting it —
+        # cheap audit trail of the park→wake cycle, harmless if it's
+        # overwritten again by the next park.
+        _write_progress_marker(project, role, ps, pane, status="resumed")
 
         msg = "⏰ quota reset แล้ว — ทำงานต่อจาก task ที่ค้างไว้ ถ้าเสร็จแล้วรายงานด้วย `takkub done`"
         _wake_sess = pane.session

@@ -371,6 +371,7 @@
         "agent_takkub.lead_bash_audit",
         "agent_takkub.lead_context",
         "agent_takkub.lead_inbox",
+        "agent_takkub.limit_autoresume",
         "agent_takkub.limit_panel",
         "agent_takkub.main_window",
         "agent_takkub.orchestrator",
@@ -419,7 +420,7 @@
         "agent_takkub.vault_mirror",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 71,
+      "fan_in": 72,
       "fan_out": 0
     },
     {
@@ -707,6 +708,7 @@
       "imports": [
         "agent_takkub.agent_pane",
         "agent_takkub.auto_resume",
+        "agent_takkub.config",
         "agent_takkub.lead_inbox",
         "agent_takkub.limit_status",
         "agent_takkub.orchestrator_text",
@@ -719,7 +721,7 @@
         "agent_takkub.orchestrator"
       ],
       "fan_in": 1,
-      "fan_out": 9
+      "fan_out": 10
     },
     {
       "module": "agent_takkub.limit_panel",
