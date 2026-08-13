@@ -10,6 +10,13 @@ from agent_takkub.orchestrator import _build_lead_env, _build_pane_env
 
 
 def test_build_pane_env_includes_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    # On win32, _build_pane_env() intentionally prepends %APPDATA%\npm to PATH
+    # when that directory exists (pane_env._apply_win32_path_sanitization,
+    # commit 4dc974a / Bug #156) — clear APPDATA so that sanitization step's
+    # `os.path.isdir(npm_dir)` check is false and this test's exact-equality
+    # assertion stays deterministic regardless of what's actually installed
+    # on the machine running the suite.
+    monkeypatch.delenv("APPDATA", raising=False)
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
     env = _build_pane_env()
     assert "PATH" in env
