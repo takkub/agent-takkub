@@ -179,8 +179,10 @@ UI god-object เดินสายทุก subsystem. ส่วนใหญ่
 4. **ไม่เริ่ม:** lift `spawn_engine` → dedicated `PaneRegistry`/`SpawnArbiter` state object (currently a mixin over `Orchestrator`, which the original plan flagged as the wrong shape long-term)
 5. **ไม่เคย plan ไว้แต่เข้าเงื่อนไขเดียวกัน:** `command_surface` / `session_persistence` / `watchdogs` remain unextracted inside `orchestrator.py` — this doc's 2026-06-21 "แตกครบแล้ว" framing never actually covered these three; they were identified but not scheduled
 
-**กันพันใหม่:** ทุก extract → เพิ่ม import-linter contract (ตอนนี้ 18 contracts, `pyproject.toml`)
-→ PR ที่ลาก edge ข้าม layer **fail CI** + regenerate `depgraph.json` ใน pre-commit → graph ไม่ stale +
+**กันพันใหม่:** ทุก extract → เพิ่ม import-linter contract (ตอนนี้ 23 contracts, `pyproject.toml`)
+→ PR ที่ลาก edge ข้าม layer **fail CI** (`.github/workflows/ci.yml` รัน `lint-imports` + depgraph
+freshness check ทุก OS ใน matrix ตั้งแต่ 2026-08-13 — ก่อนหน้านั้น guardrail มีแค่ local pre-commit
+hook เท่านั้น ไม่ได้ block PR จริง) + regenerate `depgraph.json` ใน pre-commit → graph ไม่ stale +
 Serena เห็น symbol ใหม่ทันที → orchestrator ไม่งอกกลับเป็น 5.8k LOC โดยไม่มีใครสังเกต.
 
 **Refresh discipline:** this doc drifted for ~3 weeks (2026-06-21 → 2026-07-11) mostly from real

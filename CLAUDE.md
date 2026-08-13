@@ -15,7 +15,7 @@ Lead spawn เฉพาะ role ที่จำเป็น ใช้ `takkub` C
 
 > **Tiered scanning:** งาน audit/scan รอบแรกของ qa/reviewer/critic ให้ `--model <haiku-or-flash-id>` แล้ว escalate เมื่อเจอประเด็นยาก + ตอน final gate · `--model` มีผลเฉพาะ pane spawn ใหม่ (เปิดอยู่ = `takkub close --role` ก่อน)
 
-> **ก่อน navigate/แก้ `src/agent_takkub/`:** god-files แตกเป็น 10 mixins แล้ว (2026-06) — อ่าน `docs/architecture/godfile-map.md` (method→module + hidden string/socket edges) + `docs/architecture/depgraph.json` (import map, auto-refresh ทุก commit) — **อย่า grep มั่วแล้วเดา** · guardrail = import-linter 13 contracts
+> **ก่อน navigate/แก้ `src/agent_takkub/`:** god-files แตกเป็น 10 mixins แล้ว (2026-06) — อ่าน `docs/architecture/godfile-map.md` (method→module + hidden string/socket edges) + `docs/architecture/depgraph.json` (import map, auto-refresh ทุก commit) — **อย่า grep มั่วแล้วเดา** · guardrail = import-linter 23 contracts (enforced in CI, not just local pre-commit)
 
 > **Multi-provider (user directive 2026-07-09):** ทุก feature/fix ต้องคำนึงถึง**ทุก provider** (claude/codex/gemini-agy/opencode/kimi/cursor + อนาคต — ProviderSpec #103): engine feature ใหม่ต้องทำงานกับ pane ที่ไม่ใช่ claude ด้วยหรือระบุ gap ชัดๆ · wording อย่าผูก claude-only โดยไม่มี fallback · claude-only shortcut ที่เลี่ยงไม่ได้ต้อง flag เข้า #103 ห้ามเงียบ
 
