@@ -1299,3 +1299,215 @@ class TestUsersView:
 
         assert dlg._up_base_url.text() == "https://openrouter.ai/api"
         dlg.deleteLater()
+
+
+class TestSkillDescriptionClamp:
+    """New Role picker's description clamp (design critique #1 —
+    docs/design/2026-08-13-new-role-critique.md)."""
+
+    def test_short_description_unchanged(self) -> None:
+        assert settings_window._clamp_skill_description("does a thing") == "does a thing"
+
+    def test_long_description_truncated_with_ellipsis(self) -> None:
+        long_desc = "x" * 200
+        clamped = settings_window._clamp_skill_description(long_desc)
+        assert len(clamped) <= settings_window._SKILL_DESC_CLAMP_CHARS
+        assert clamped.endswith("…")
+
+    def test_row_sets_full_text_as_tooltip(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(config, "REPO_ROOT", tmp_path / "no-bundle-here")
+        monkeypatch.setattr(config, "ASSETS_ROOT", tmp_path / "no-bundle-here")
+        monkeypatch.setattr(settings_window, "_allowed_project_roots", lambda _project: [tmp_path])
+        long_desc = "y" * 200
+        d = tmp_path / ".claude" / "skills" / "verbose-skill"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "SKILL.md").write_text(
+            f"---\nname: verbose-skill\ndescription: {long_desc}\n---\n\nbody\n", encoding="utf-8"
+        )
+        dlg = settings_window.SettingsWindow(
+            project="demo", initial_view=settings_window.VIEW_NEW_ROLE
+        )
+        _skill, chk = dlg._nr_skill_checks[0]
+        desc_label = chk.parentWidget().findChildren(settings_window.QLabel)[-1]
+        assert desc_label.toolTip() == long_desc
+        assert desc_label.text() != long_desc
+        dlg.deleteLater()
+
+
+class TestAutoskillsPanel:
+    """Skill Catalog's "ดึง skill ตาม stack" button — bridges
+    :mod:`autoskills_installer` on a worker thread, gated behind an explicit
+    user confirmation (:class:`settings_window._AutoskillsConfirmDialog`)
+    before anything is written."""
+
+    @pytest.fixture(autouse=True)
+    def _isolate_skill_roots(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(config, "REPO_ROOT", tmp_path / "no-bundle-here")
+        monkeypatch.setattr(config, "ASSETS_ROOT", tmp_path / "no-bundle-here")
+        monkeypatch.setattr(settings_window, "_allowed_project_roots", lambda _project: [tmp_path])
+
+    def test_scan_without_active_project_shows_warning(self, tmp_path: Path) -> None:
+        dlg = settings_window.SettingsWindow(
+            project=None, initial_view=settings_window.VIEW_SKILL_CATALOG
+        )
+        dlg._on_autoskills_scan_clicked()
+        assert dlg._as_status.text().startswith("!")
+        dlg.deleteLater()
+
+    def test_scan_disables_button_and_starts_thread(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        started = {}
+
+        def _fake_start(self_thread: object) -> None:
+            started["project_root"] = self_thread._project_root
+
+        monkeypatch.setattr(settings_window._AutoskillsPreviewThread, "start", _fake_start)
+        dlg = settings_window.SettingsWindow(
+            project="demo", initial_view=settings_window.VIEW_SKILL_CATALOG
+        )
+        dlg._on_autoskills_scan_clicked()
+
+        assert dlg._as_scan_btn.isEnabled() is False
+        assert started["project_root"] == tmp_path
+        dlg.deleteLater()
+
+    def test_preview_error_shows_warning_and_reenables_button(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            settings_window.QMessageBox, "warning", staticmethod(lambda *a, **k: None)
+        )
+        dlg = settings_window.SettingsWindow(
+            project="demo", initial_view=settings_window.VIEW_SKILL_CATALOG
+        )
+        dlg._as_scan_btn.setEnabled(False)
+        result = settings_window.autoskills_installer.PreviewResult(
+            ok=False, error="ไม่พบ autoskills และไม่พบ npx บนเครื่องนี้"
+        )
+        dlg._on_autoskills_preview_ready(result)
+        assert dlg._as_scan_btn.isEnabled() is True
+        dlg.deleteLater()
+
+    def test_preview_empty_skills_shows_info_no_dialog(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            settings_window.QMessageBox, "information", staticmethod(lambda *a, **k: None)
+        )
+        dlg = settings_window.SettingsWindow(
+            project="demo", initial_view=settings_window.VIEW_SKILL_CATALOG
+        )
+        result = settings_window.autoskills_installer.PreviewResult(
+            ok=True, stack=["node"], skills=[]
+        )
+        dlg._on_autoskills_preview_ready(result)
+        assert dlg._as_scan_btn.isEnabled() is True
+        dlg.deleteLater()
+
+    def test_preview_with_skills_opens_confirm_dialog_and_starts_install(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        candidate = settings_window.autoskills_installer.SkillCandidate(
+            name="react-testing", source="https://skills.sh/react-testing"
+        )
+        result = settings_window.autoskills_installer.PreviewResult(
+            ok=True, stack=["react"], skills=[candidate]
+        )
+
+        monkeypatch.setattr(
+            settings_window._AutoskillsConfirmDialog,
+            "exec",
+            lambda self_dlg: settings_window.QDialog.DialogCode.Accepted,
+        )
+        started = {}
+
+        def _fake_start(self_thread: object) -> None:
+            started["project_root"] = self_thread._project_root
+            started["selected"] = self_thread._selected_names
+
+        monkeypatch.setattr(settings_window._AutoskillsInstallThread, "start", _fake_start)
+
+        dlg = settings_window.SettingsWindow(
+            project="demo", initial_view=settings_window.VIEW_SKILL_CATALOG
+        )
+        dlg._on_autoskills_preview_ready(result)
+
+        assert started["project_root"] == tmp_path
+        assert started["selected"] == ["react-testing"]
+        dlg.deleteLater()
+
+    def test_preview_dialog_cancelled_does_not_install(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        candidate = settings_window.autoskills_installer.SkillCandidate(name="react-testing")
+        result = settings_window.autoskills_installer.PreviewResult(ok=True, skills=[candidate])
+        monkeypatch.setattr(
+            settings_window._AutoskillsConfirmDialog,
+            "exec",
+            lambda self_dlg: settings_window.QDialog.DialogCode.Rejected,
+        )
+
+        def _fail_start(self_thread: object) -> None:
+            raise AssertionError("install must not start when the confirm dialog is cancelled")
+
+        monkeypatch.setattr(settings_window._AutoskillsInstallThread, "start", _fail_start)
+        dlg = settings_window.SettingsWindow(
+            project="demo", initial_view=settings_window.VIEW_SKILL_CATALOG
+        )
+        dlg._on_autoskills_preview_ready(result)  # must not raise
+        dlg.deleteLater()
+
+    def test_install_result_reports_overwritten_and_reloads_catalog(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        reloaded = {}
+        monkeypatch.setattr(
+            settings_window.QMessageBox, "information", staticmethod(lambda *a, **k: None)
+        )
+        dlg = settings_window.SettingsWindow(
+            project="demo", initial_view=settings_window.VIEW_SKILL_CATALOG
+        )
+        monkeypatch.setattr(
+            dlg, "_reload_skill_catalog", lambda: reloaded.setdefault("called", True)
+        )
+        result = settings_window.autoskills_installer.InstallResult(
+            ok=True, written=["a"], skipped=["b"], overwritten=["c"]
+        )
+        dlg._on_autoskills_install_ready(result)
+        assert reloaded.get("called") is True
+        assert dlg._as_scan_btn.isEnabled() is True
+        dlg.deleteLater()
+
+    def test_install_overwrite_failed_shows_critical_and_forces_reload(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen = {}
+        monkeypatch.setattr(
+            settings_window.QMessageBox,
+            "critical",
+            staticmethod(lambda *a, **k: seen.setdefault("critical", True)),
+        )
+        dlg = settings_window.SettingsWindow(
+            project="demo", initial_view=settings_window.VIEW_SKILL_CATALOG
+        )
+        result = settings_window.autoskills_installer.InstallResult(
+            ok=False, overwrite_failed=["c"], error="data loss"
+        )
+        dlg._on_autoskills_install_ready(result)
+        assert seen.get("critical") is True
+        dlg.deleteLater()
+
+    def test_confirm_dialog_selected_names_reflects_checkboxes(self) -> None:
+        candidates = [
+            settings_window.autoskills_installer.SkillCandidate(name="a", source="https://x/a"),
+            settings_window.autoskills_installer.SkillCandidate(name="b"),
+        ]
+        result = settings_window.autoskills_installer.PreviewResult(ok=True, skills=candidates)
+        dialog = settings_window._AutoskillsConfirmDialog(result)
+        assert dialog.selected_names() == ["a", "b"]  # default: all ticked
+        dialog._checks[1][1].setChecked(False)
+        assert dialog.selected_names() == ["a"]
+        dialog.deleteLater()

@@ -168,8 +168,10 @@
       "imports": [
         "agent_takkub._win_console"
       ],
-      "imported_by": [],
-      "fan_in": 0,
+      "imported_by": [
+        "agent_takkub.settings_window"
+      ],
+      "fan_in": 1,
       "fan_out": 1
     },
     {
@@ -1862,6 +1864,7 @@
       "module": "agent_takkub.settings_window",
       "imports": [
         "agent_takkub",
+        "agent_takkub.autoskills_installer",
         "agent_takkub.claude_auth_config",
         "agent_takkub.cockpit_theme",
         "agent_takkub.config",
@@ -1888,7 +1891,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 2,
-      "fan_out": 21
+      "fan_out": 22
     },
     {
       "module": "agent_takkub.shared_dev_tools",

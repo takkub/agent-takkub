@@ -76,8 +76,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from PyQt6.QtCore import QLocale, QSize, Qt
-from PyQt6.QtGui import QFontMetrics, QIcon
+from PyQt6.QtCore import QLocale, QSize, Qt, QThread, pyqtSignal
+from PyQt6.QtGui import QColor, QFontMetrics, QIcon, QPalette
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -105,6 +105,7 @@ from PyQt6.QtWidgets import (
 
 from . import __version__ as _COCKPIT_VERSION
 from . import (
+    autoskills_installer,
     cockpit_theme,
     config,
     custom_roles,
@@ -457,6 +458,21 @@ _NEW_ROLE_TEMPLATES: tuple[tuple[str, str], ...] = (
 _AGENT_TEMPLATE_HEADER_RE = re.compile(r"^(?:<!--.*?-->\s*)?(?:---.*?---\s*)?", re.DOTALL)
 
 
+# New Role's skill picker rows sit in a `maximumHeight(220)` scroll area
+# (see `_build_new_role_skill_row`) — an unclamped description could run
+# 4-5 lines (critic review docs/design/2026-08-13-new-role-critique.md),
+# leaving room for only ~3 skills before the list needed scrolling on its
+# own. ~110 chars is roughly 2 wrapped lines at this card's width; the full
+# text is never lost — it's always set as the row's tooltip.
+_SKILL_DESC_CLAMP_CHARS = 110
+
+
+def _clamp_skill_description(description: str) -> str:
+    if len(description) <= _SKILL_DESC_CLAMP_CHARS:
+        return description
+    return description[: _SKILL_DESC_CLAMP_CHARS - 1].rstrip() + "…"
+
+
 def _append_skill_references(instructions: str, skills: list[skill_scan.SkillInfo]) -> str:
     """Embed a "## Skills ที่เกี่ยวข้อง" section listing every selected skill
     into the role's generated instructions text — applies whether
@@ -470,6 +486,120 @@ def _append_skill_references(instructions: str, skills: list[skill_scan.SkillInf
         for s in skills
     )
     return f"{instructions.rstrip()}\n\n## Skills ที่เกี่ยวข้อง\n{lines}\n"
+
+
+class _AutoskillsPreviewThread(QThread):
+    """Runs `autoskills_installer.preview()` off the Qt main thread — it
+    shells out and can block up to 60s (see that module's docstring), and
+    the Skill Catalog's "ดึง skill ตาม stack" button must never freeze the
+    whole window while that subprocess runs."""
+
+    resultReady: pyqtSignal = pyqtSignal(object)  # PreviewResult
+
+    def __init__(self, project_root: Path, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._project_root = project_root
+
+    def run(self) -> None:
+        self.resultReady.emit(autoskills_installer.preview(self._project_root))
+
+
+class _AutoskillsInstallThread(QThread):
+    """Runs `autoskills_installer.install()` off the Qt main thread — same
+    blocking-subprocess reasoning as `_AutoskillsPreviewThread`, only called
+    after the user has explicitly confirmed a skill selection."""
+
+    resultReady: pyqtSignal = pyqtSignal(object)  # InstallResult
+
+    def __init__(
+        self, project_root: Path, selected_names: list[str], parent: QWidget | None = None
+    ) -> None:
+        super().__init__(parent)
+        self._project_root = project_root
+        self._selected_names = selected_names
+
+    def run(self) -> None:
+        self.resultReady.emit(
+            autoskills_installer.install(self._project_root, self._selected_names)
+        )
+
+
+class _AutoskillsConfirmDialog(QDialog):
+    """Confirms which of `autoskills`' proposed candidates actually get
+    written — never auto-checked-and-fired. A skill under `.claude/skills/`
+    is a prompt every pane in the project auto-loads automatically, so this
+    is external content (from the skills.sh registry) entering the team's
+    shared context; the user must see the list and press Install."""
+
+    def __init__(
+        self, result: autoskills_installer.PreviewResult, parent: QWidget | None = None
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Auto-detect skills")
+        self.resize(520, 480)
+        self._result = result
+        self._checks: list[tuple[autoskills_installer.SkillCandidate, QCheckBox]] = []
+
+        lay = QVBoxLayout(self)
+        if result.stack:
+            lay.addWidget(QLabel(f"Stack ที่ตรวจพบ: {', '.join(result.stack)}", self))
+
+        warn = QLabel(
+            "⚠ skill ที่ติดตั้งคือ instruction ที่ทุก pane ในโปรเจคนี้อ่านอัตโนมัติ = "
+            "เนื้อหาจากภายนอก (skills.sh registry) เข้าสู่ context ของทีม — "
+            "เลือกเฉพาะ skill ที่ต้องการจริงๆ ก่อนกดติดตั้ง",
+            self,
+        )
+        warn.setObjectName("infoBanner")
+        warn.setWordWrap(True)
+        lay.addWidget(warn)
+
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        container = QWidget(scroll)
+        c_lay = QVBoxLayout(container)
+        c_lay.setSpacing(4)
+        for cand in result.skills:
+            chk = QCheckBox(cand.name, container)
+            chk.setChecked(True)
+            c_lay.addWidget(chk)
+            if cand.source:
+                src = QLabel(cand.source, container)
+                src.setObjectName("panelHint")
+                src.setContentsMargins(22, 0, 0, 0)
+                src.setWordWrap(True)
+                c_lay.addWidget(src)
+            self._checks.append((cand, chk))
+        c_lay.addStretch(1)
+        scroll.setWidget(container)
+        lay.addWidget(scroll, 1)
+
+        raw_row = QHBoxLayout()
+        raw_btn = QPushButton("ดู raw output ของ CLI", self)
+        raw_btn.clicked.connect(self._show_raw_output)
+        raw_row.addWidget(raw_btn)
+        raw_row.addStretch(1)
+        lay.addLayout(raw_row)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, self
+        )
+        ok_btn = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        if ok_btn is not None:
+            ok_btn.setText("ติดตั้ง skill ที่เลือก")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        lay.addWidget(buttons)
+
+    def _show_raw_output(self) -> None:
+        box = QMessageBox(self)
+        box.setWindowTitle("autoskills raw output")
+        box.setText(self._result.raw_output or "(ว่างเปล่า)")
+        box.exec()
+
+    def selected_names(self) -> list[str]:
+        return [cand.name for cand, chk in self._checks if chk.isChecked()]
 
 
 class SettingsWindow(QDialog):
@@ -515,6 +645,16 @@ class SettingsWindow(QDialog):
         fonts = cockpit_theme.ensure_fonts_loaded()
         self._fonts = fonts
         self.setStyleSheet(cockpit_theme.build_stylesheet(str(fonts["sans"]), str(fonts["mono"])))
+        # QSS `::placeholder` only styles QLineEdit (see the rule itself in
+        # cockpit_theme.py) — QPlainTextEdit has no stylesheet placeholder
+        # selector in Qt6, it reads QPalette.PlaceholderText instead, which
+        # was never set anywhere so it fell back to Qt's default near-invisible
+        # tint on GROUND_INPUT (critic finding, docs/design/
+        # 2026-08-13-new-role-critique.md). Set once here so every
+        # QPlainTextEdit in this window inherits it.
+        palette = self.palette()
+        palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(cockpit_theme.TEXT_MUTED))
+        self.setPalette(palette)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -1573,10 +1713,15 @@ class SettingsWindow(QDialog):
         skills_hint.setWordWrap(True)
         sk_lay.addWidget(skills_hint)
 
+        filter_row = QHBoxLayout()
         self._nr_skill_filter = QLineEdit(skills)
         self._nr_skill_filter.setPlaceholderText("ค้นหา skill…")
         self._nr_skill_filter.textChanged.connect(self._filter_new_role_skills)
-        sk_lay.addWidget(self._nr_skill_filter)
+        filter_row.addWidget(self._nr_skill_filter, 1)
+        self._nr_skill_count = QLabel("", skills)
+        self._nr_skill_count.setObjectName("panelHint")
+        filter_row.addWidget(self._nr_skill_count)
+        sk_lay.addLayout(filter_row)
 
         skills_scroll = QScrollArea(skills)
         skills_scroll.setWidgetResizable(True)
@@ -1589,10 +1734,6 @@ class SettingsWindow(QDialog):
         self._nr_skills_lay.setSpacing(4)
         skills_scroll.setWidget(self._nr_skills_container)
         sk_lay.addWidget(skills_scroll)
-
-        self._nr_skill_count = QLabel("", skills)
-        self._nr_skill_count.setObjectName("panelHint")
-        sk_lay.addWidget(self._nr_skill_count)
 
         self._nr_skill_checks: list[tuple[skill_scan.SkillInfo, QCheckBox]] = []
         self._reload_new_role_skills()
@@ -1761,6 +1902,7 @@ class SettingsWindow(QDialog):
         row_lay.setSpacing(0)
 
         top = QHBoxLayout()
+        top.setSpacing(8)
         chk = QCheckBox(skill.name, row)
         chk.toggled.connect(self._mark_dirty)
         chk.toggled.connect(self._update_new_role_skill_count)
@@ -1777,10 +1919,11 @@ class SettingsWindow(QDialog):
         row_lay.addLayout(top)
 
         if skill.description:
-            desc = QLabel(skill.description, row)
+            desc = QLabel(_clamp_skill_description(skill.description), row)
             desc.setObjectName("panelHint")
             desc.setWordWrap(True)
             desc.setContentsMargins(22, 0, 0, 0)
+            desc.setToolTip(skill.description)
             row_lay.addWidget(desc)
 
         self._nr_skill_checks.append((skill, chk))
@@ -2762,10 +2905,111 @@ class SettingsWindow(QDialog):
         lay.addWidget(detail_panel, 1)
         outer.addLayout(lay)
 
+        outer.addWidget(self._build_autoskills_panel(view))
         outer.addWidget(self._build_new_skill_form(view))
 
         self._reload_skill_catalog()
         return view
+
+    def _build_autoskills_panel(self, parent: QWidget) -> QWidget:
+        """ "ดึง skill ตาม stack" — bridges :mod:`autoskills_installer` (scans
+        the project via the `autoskills` CLI, proposes matching skills from
+        the skills.sh registry) into the Skill Catalog. Confirm-before-write
+        end to end: `preview()`/`install()` both run on a worker thread
+        (`_AutoskillsPreviewThread`/`_AutoskillsInstallThread` — the CLI call
+        can block up to ~60s) and nothing is written until the user ticks a
+        selection in `_AutoskillsConfirmDialog` and presses Install."""
+        panel = QWidget(parent)
+        panel.setObjectName("panel")
+        p_lay = QVBoxLayout(panel)
+        p_lay.setContentsMargins(16, 14, 16, 14)
+        p_lay.setSpacing(8)
+        p_lay.addWidget(QLabel("⚡ Auto-detect skills", panel))
+        hint = QLabel(
+            "สแกน stack ของโปรเจคด้วย autoskills CLI แล้วเสนอ skill ที่เข้ากับ stack — "
+            "ไม่เขียนไฟล์จนกว่าจะเลือกและกดยืนยัน",
+            panel,
+        )
+        hint.setObjectName("panelHint")
+        hint.setWordWrap(True)
+        p_lay.addWidget(hint)
+
+        row = QHBoxLayout()
+        self._as_scan_btn = cockpit_theme.gold_button("ดึง skill ตาม stack", panel)
+        self._as_scan_btn.clicked.connect(self._on_autoskills_scan_clicked)
+        row.addWidget(self._as_scan_btn)
+        self._as_status = QLabel("", panel)
+        self._as_status.setObjectName("panelHint")
+        row.addWidget(self._as_status)
+        row.addStretch(1)
+        p_lay.addLayout(row)
+        return panel
+
+    def _on_autoskills_scan_clicked(self) -> None:
+        roots = self._writable_skill_roots()
+        if not roots:
+            self._as_status.setText("! ไม่มี active project ให้สแกน")
+            return
+        self._as_scan_btn.setEnabled(False)
+        self._as_status.setText("กำลังสแกน stack…")
+        # Kept on self so the QThread object isn't garbage-collected mid-run
+        # (a local variable going out of scope here would stop the thread).
+        self._as_preview_thread = _AutoskillsPreviewThread(roots[0], self)
+        self._as_preview_thread.resultReady.connect(self._on_autoskills_preview_ready)
+        self._as_preview_thread.start()
+
+    def _on_autoskills_preview_ready(self, result: autoskills_installer.PreviewResult) -> None:
+        self._as_scan_btn.setEnabled(True)
+        self._as_status.setText("")
+        if not result.ok:
+            QMessageBox.warning(self, "Auto-detect skills", result.error or "สแกนไม่สำเร็จ")
+            return
+        if not result.skills:
+            extra = f"\n\nstack ที่ตรวจพบ: {', '.join(result.stack)}" if result.stack else ""
+            QMessageBox.information(
+                self,
+                "Auto-detect skills",
+                f"autoskills ไม่พบ skill ที่เข้ากับ stack ของโปรเจคนี้{extra}",
+            )
+            return
+        dialog = _AutoskillsConfirmDialog(result, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        selected = dialog.selected_names()
+        if not selected:
+            return
+        roots = self._writable_skill_roots()
+        if not roots:
+            self._as_status.setText("! ไม่มี active project ให้ติดตั้ง")
+            return
+        self._as_scan_btn.setEnabled(False)
+        self._as_status.setText("กำลังติดตั้ง…")
+        self._as_install_thread = _AutoskillsInstallThread(roots[0], selected, self)
+        self._as_install_thread.resultReady.connect(self._on_autoskills_install_ready)
+        self._as_install_thread.start()
+
+    def _on_autoskills_install_ready(self, result: autoskills_installer.InstallResult) -> None:
+        self._as_scan_btn.setEnabled(True)
+        self._as_status.setText("")
+        lines: list[str] = []
+        if result.written:
+            lines.append(f"ติดตั้งแล้ว: {', '.join(result.written)}")
+        if result.skipped:
+            lines.append(f"ข้าม (ไม่ได้เลือก): {', '.join(result.skipped)}")
+        if result.overwritten:
+            lines.append(f"⚠ เขียนทับ skill เดิม: {', '.join(result.overwritten)}")
+        if result.overwrite_failed:
+            lines.append(
+                f"‼ เขียนทับและกู้คืนไม่สำเร็จ (data loss จริง): {', '.join(result.overwrite_failed)}"
+            )
+        if result.error:
+            lines.append(f"error: {result.error}")
+        body = "\n".join(lines) if lines else "ไม่มีอะไรเปลี่ยนแปลง"
+        if not result.ok or result.overwrite_failed:
+            QMessageBox.critical(self, "Auto-detect skills", body)
+        else:
+            QMessageBox.information(self, "Auto-detect skills", body)
+        self._reload_skill_catalog()
 
     def _build_new_skill_form(self, parent: QWidget) -> QWidget:
         """+ New Skill — closes the create-half of the Skill Catalog's
