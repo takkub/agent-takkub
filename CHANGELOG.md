@@ -4,6 +4,31 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.58] - 2026-08-13
+
+### Added (เพิ่ม)
+- **usage/limit ของทุก provider** — `provider_usage.py` เป็น abstraction กลาง + endpoint `GET /api/usage` + แถบบนหัวจอเดสก์ท็อป + การ์ดบน PWA มือถือ · claude/codex/gemini ดึงได้จริง (codex ยืนยันด้วยการยิง JSON-RPC สด) · opencode แยกเป็น `spend` คนละ field เพราะเป็นยอดที่มันนับเอง **ไม่ใช่โควต้า** · kimi/cursor แสดงว่าไม่รองรับตรงๆ · **ไม่มีสถานะไหนถูกแสดงเป็น 0%** ค่าที่ไม่มีคือ "—" เสมอ · remote อ่านจาก cache ที่เดสก์ท็อปดึงมาแล้วเท่านั้น ไม่ยิง provider เอง เพื่อไม่ให้มือถือกลายเป็นตัวเร่ง rate limit
+- **autoskills bridge** — ปุ่ม "ดึง skill ตาม stack" ในหน้า Skill Catalog: สแกน stack ด้วย `autoskills --dry-run` → ให้ผู้ใช้ติ๊กเลือกเอง → ติดตั้งเฉพาะที่เลือก ทำงานบน worker thread ไม่บล็อก UI · ติดตั้งใน staging mirror ก่อน **skill ที่ไม่ได้เลือกไม่แตะดิสก์จริงเลย** · ตรวจจับ+กู้คืน skill เดิมที่ถูกเขียนทับ · ตรวจ symlink หลบหนีแบบ nested · **แสดงธงเตือนของ CLI เอง** (เช่น `(security check ⚠)`) และ skill ที่ติดธงจะไม่ถูกติ๊กไว้ล่วงหน้า
+- **หน้า New Role ใหม่** — จัดเป็น 5 การ์ด (Identity/Placement/Tools/Skills/Instructions) + ช่องค้นหา skill + ป้ายบอกที่มา + hint ตำแหน่งบนกริด + ปุ่ม "เริ่มจากเทมเพลต" ที่ดึง `analyst`/`designer`/`docs`/`security` มาใช้ได้จริง (4 ไฟล์นี้เคยมีแต่ doc ไม่เคยถูกใช้)
+- **knowledge base ต่อโปรเจค** — กลั่นข้อสรุปที่ใช้ซ้ำได้จาก done note ลง `runtime/knowledge/<project>.md` มีเพดาน FIFO (12KB/150 entry) ปิดได้ด้วย `TAKKUB_KNOWLEDGE_BASE=0` (#168)
+- **`takkub task reconcile` / `task close`** — ล้าง ledger row ที่ค้างได้เอง พร้อม dry-run
+- **`takkub doctor --live` หมวด `[remote-mirror]`** — วินิจฉัยทีละชั้นว่าทำไมมือถือไม่ขึ้นคำตอบ (provider / scanner / session_uuid / ไฟล์ transcript)
+
+### Fixed (แก้)
+- **หน้า New Role ล้นแนวนอนจนกรอกไม่ครบ** — `QCheckBox` ที่ยัด description ยาวลงไปโดยไม่ wrap ดันความกว้างฟอร์มไป 2405px ทำให้ช่อง **Label** และสวิตช์ **MCP+Plugins** ถูกดันหลุดจอ ผู้ใช้จึงเห็นหน้าที่ใช้งานไม่ได้จริง (วัดหลังแก้เหลือ 554px) · ตัวหนังสือซ้อนกันเพราะ `deleteLater()` ลบแบบ deferred แล้วชน reload รอบสองที่ยังไม่ทันถึง event loop
+- **แถบ usage บนเดสก์ท็อปเคยแสดงตัวเลขที่กุขึ้นมา** สำหรับ codex/gemini/opencode/kimi/cursor — ลบทิ้งแล้วอ่านจาก store จริง พร้อมเทสกันของปลอมกลับมา
+- **มือถือค้างสปินเนอร์เงียบๆ เมื่อ Lead ไม่ใช่ claude** — คำสั่งส่งถึงและ Lead ตอบแล้ว แต่ mirror อ่าน transcript ของ claude อย่างเดียว ตอนนี้ตอบกลับพร้อมเหตุผลทันที และติดธง gap ของ opencode/kimi/cursor ไว้ที่ `provider_spec.py` (#103)
+- **ledger row ค้าง `working` ถาวร** เมื่อ cockpit ปิดทั้ง process → reconcile ตอน startup โดยไม่แตะ row ของ pane ที่ยังมีชีวิต (#166)
+- **`takkub send --to <role>` ตอบ `unknown role` ทั้งที่ role มีจริง** แค่ pane ปิดไปแล้ว → แยกข้อความ 2 กรณีพร้อมบอกวิธีแก้ (#164)
+- **done report แนบ evidence ของ role อื่น** — shared-dir scan รันให้ทุก role โดยไม่ scope ตอนนี้จำกัดเฉพาะ role ที่ทำงานกับภาพ (#165)
+- **pane หายจาก `takkub list` ก่อน done report ถึง Lead** — `list/status` แสดงสถานะ `report queued` ให้เห็นแทนที่จะเงียบ (#163)
+- **`takkub issue list` ทิ้ง backlog ในไฟล์ local** ทันทีที่ `gh` ใช้ได้ ทำให้ issue ที่บันทึกไว้หายจากสายตาทั้งหมด — ตอนนี้อ่านรวมทั้ง 2 แหล่งพร้อมเตือน (#174)
+- **teammate pane รันคำสั่งฆ่าโปรเซสข้ามเครื่องได้** (`taskkill /IM`, `pkill`, `killall`, `Stop-Process -Name`) ซึ่งฆ่า pane อื่นทั้งเครื่อง → กัน 2 ชั้นทั้ง `pane_guard.py` และ prose ใน role file ครบทุกไฟล์ พร้อมเทสที่จับได้ถ้ามี role ใหม่ลืมใส่ (#169)
+- **AttributeError ที่ `pty_session.py`** — race ระหว่าง reader thread กับ teardown thread บน `self._proc` (#179)
+- **Playwright MCP ไม่ได้ตั้ง `--output-dir`** ทำให้ screenshot ไปตกใน temp dir ของ MCP (#178)
+- **screenshot ที่ถ่ายพลาดไม่ถูกตรวจจับ** — เพิ่มการจับภาพซ้ำด้วย md5 นอกเหนือจากการเช็คขนาด/header เดิม (#182)
+- **เทส 3 ตัวแดงเฉพาะบนเครื่อง dev** เพราะไปอ่าน `~/.takkub` จริงของคนรัน — isolate แล้ว
+
 ## [1.0.56] - 2026-08-13
 
 ### Fixed (แก้)
