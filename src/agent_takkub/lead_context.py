@@ -58,11 +58,19 @@ from .vault_mirror import _is_junk_note
 # way. Reading large files by offset/limit or grepping for the needed span
 # keeps per-turn context (and the cache bill) flat. Kept terse on purpose: a
 # guard against token bloat must not itself be bloat.
+#
+# #157: extended to cover images. Images are charged by resolution (vision
+# tiling), not linearly by byte size like text, so the text-file "check bytes,
+# offset/limit" workaround doesn't apply — the only real levers are "don't
+# re-open a mockup you already saw" and "ask for a cropped/downscaled version".
+# Proven incident: the same 1.7MB mockup PNG got Read across 4 frontend rounds
+# + 3 critic rounds, and two frontend panes hit their usage limit in the same
+# turn (16% of usage in one turn) from the repeated vision-token cost alone.
 BIG_FILE_GUARD = """
 
 ---
 
-## 📦 ไฟล์ยักษ์ — ห้าม Read ทั้งก้อน (กัน context/cache บวม)
+## 📦 ไฟล์ยักษ์ / รูปภาพใหญ่ — ห้าม Read ทั้งก้อน หรือ Read ซ้ำ (กัน context/cache/usage บวม)
 
 ไฟล์ใหญ่ที่อ่านทั้งก้อนจะค้างใน history แล้ว **โดนชาร์จเป็น cache ซ้ำทุก turn** (เคสจริง: session เดียว cache_read พุ่ง 22M เพราะอ่าน sprites.js 2.6MB + เกม HTML 2.7MB เข้า context)
 
@@ -73,6 +81,15 @@ BIG_FILE_GUARD = """
   - `Grep` หา symbol/section ที่ต้องการ → ได้เลขบรรทัด
   - `Read` แบบ `offset`/`limit` เฉพาะช่วงนั้น
 - **ห้าม `cat`/dump ไฟล์ใหญ่ลง terminal** (โดน persist + ก้อนยังหลุดเข้า context อยู่ดี)
+
+### 🖼️ รูปภาพ (mockup/screenshot) — แพงกว่าไฟล์ข้อความต่อไบต์ ห้าม Read ซ้ำ
+
+รูปภาพถูกชาร์จเป็น token ตาม **resolution** (vision tiling) ไม่ใช่เชิงเส้นตาม byte เหมือนไฟล์ข้อความ — `offset`/`limit` ใช้กับรูปไม่ได้ วิธีเดียวที่ลด cost คือ**อย่าเปิดซ้ำ** (เคสจริง: mockup PNG 1.7MB ตัวเดียวถูก `Read` ซ้ำข้าม 4 รอบ frontend + 3 รอบ critic จนสองรอบ frontend ชน usage limit พร้อมกันในเทิร์นเดียว — 16% ของ usage)
+
+ก่อน `Read` รูป **> ~300KB หรือด้านยาว > ~1500px**:
+- เช็คก่อนว่าคุณ (หรือรอบงานก่อนหน้าในรอบ pipeline เดียวกัน) เคย `Read` รูปนี้ไปแล้วหรือยัง — ถ้าเคย ใช้ finding/note ที่มีอยู่แทน (เช่น design-review markdown ที่ critic เขียนไว้) อย่าเปิดไฟล์ใหม่ซ้ำ
+- ถ้างานต้องดูรูปจริง ๆ และมีแค่บางส่วนที่เกี่ยวข้อง ขอให้ผู้มอบหมายงาน crop/downscale เฉพาะส่วนนั้นมาให้ก่อน แทนที่จะเปิดรูปเต็ม
+- อย่า `Read` รูปเดียวกันซ้ำ "เพื่อความชัวร์" ระหว่าง iteration หลายรอบ — เก็บสิ่งที่เห็นไว้เป็น note แล้วอ้างอิง note แทน
 
 เป้าหมาย: context/turn ให้แบน อย่าให้โตตามจำนวนไฟล์ที่เปิด"""
 

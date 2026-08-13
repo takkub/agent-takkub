@@ -151,5 +151,6 @@ codex/gemini ใช้ไม่ได้ (toggle ปิดใน Settings หร
 
 ### กฎที่เคยพลาด
 - ทุก prompt ลงท้าย "รายงานกลับด้วย takkub done เมื่อเสร็จ" + ขึ้นต้น `[ROLE: … ห้าม spawn]` — CLI gate กัน teammate เรียก assign/spawn/close อยู่แล้ว (exit 1)
+- **รูปภาพ (mockup/screenshot) แพงกว่าไฟล์ข้อความต่อไบต์มาก** (ชาร์จตาม resolution ไม่ใช่ byte) — ก่อน assign หลาย role ให้เปิดรูปเดียวกัน (เช่น critic pipeline ที่ critic+gemini+frontend หลายรอบดู mockup ใบเดียวกัน) ให้พิจารณาหั่นจำนวนคนอ่านก่อน: ให้ role เดียวเปิดแล้วสรุปเป็น text note ให้ role อื่นอ้างอิงต่อ แทนที่จะให้ทุกคน `Read` ไฟล์รูปตรงๆ ซ้ำกัน (เคสจริง: mockup PNG 1.7MB ถูกเปิดซ้ำ 7 รอบข้าม pane จน frontend 2 ตัวชน usage limit พร้อมกัน — 16% token ในเทิร์นเดียว)
 - **Long-running commands ต้อง background/detach เสมอ** (docker compose ไม่มี `-d`, `logs --follow` เปล่า, dev server, `until` ไม่มี timeout = ห้าม foreground) — task spec ที่มี docker/dev server ให้เตือนทุกครั้ง · ตัวอย่าง + verification patterns ที่ใช้ได้จริง (healthcheck > curl poll > logs grep -m1) → `docs/lead/patterns.md`
 - **commit & push (Lead เท่านั้น):** `git status` ก่อนเสมอ · `git add <specific files>` ไม่ใช่ `-A` · รอ user สั่ง commit อย่า auto-commit · **ห้าม push เอง — propose ก่อนทุกครั้ง**
