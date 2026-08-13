@@ -70,6 +70,20 @@ class TestDeny:
         _run(monkeypatch, _payload("npx playwright test"), TAKKUB_ROLE="frontend#3")
         assert cli.cmd_guard(None)["exit_code"] == 2
 
+    def test_blocks_taskkill_by_image_name(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """#169: the exact command that killed every teammate pane's node
+        process on 2026-07-08."""
+        _run(monkeypatch, _payload("taskkill /F /T /IM node.exe"), TAKKUB_ROLE="frontend")
+
+        resp = cli.cmd_guard(None)
+
+        assert resp["exit_code"] == 2
+        err = capsys.readouterr().err
+        assert "host_destructive" in err
+        assert "PID" in err, "the reason must name the safe alternative, not just say no"
+
 
 class TestAllow:
     def test_allows_ordinary_command(
@@ -86,6 +100,10 @@ class TestAllow:
 
     def test_allows_browser_role(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _run(monkeypatch, _payload("npx playwright test"), TAKKUB_ROLE="qa")
+        assert cli.cmd_guard(None) == {"ok": True, "msg": ""}
+
+    def test_allows_pid_targeted_taskkill(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _run(monkeypatch, _payload("taskkill /F /PID 12345"), TAKKUB_ROLE="frontend")
         assert cli.cmd_guard(None) == {"ok": True, "msg": ""}
 
     def test_lead_is_never_guarded(self, monkeypatch: pytest.MonkeyPatch) -> None:
