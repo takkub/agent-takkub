@@ -46,6 +46,10 @@ class RemoteControl:
         self._notifier = None
         self._tunnel = None
         self._idle_timer: QTimer | None = None
+        # Set when `tunnel.start()` raises — the reason a requested tunnel
+        # didn't come up, so callers (the Settings dialog's Enable flow) can
+        # surface *why* instead of a dead pairing URL with no explanation.
+        self.tunnel_error: str | None = None
 
     @classmethod
     def maybe_start(cls, orch) -> RemoteControl | None:
@@ -94,9 +98,10 @@ class RemoteControl:
                     self.config.tunnel, self.config.public_url, self._server.port
                 )
                 self._tunnel.start()
-            except tunnel.TunnelError:
+            except tunnel.TunnelError as exc:
                 _log.exception("remote tunnel failed to start — server stays loopback-only")
                 self._tunnel = None
+                self.tunnel_error = str(exc)
 
         app = QCoreApplication.instance()
         if app is not None:

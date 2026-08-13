@@ -55,6 +55,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import urllib.parse
 from pathlib import Path
 
@@ -218,6 +219,18 @@ if sys.platform == "win32":
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
 _JOBOBJECTINFOCLASS_EXTENDED_LIMIT = 9
 
+# Named-tunnel liveness check (bug: a friend's fresh machine reported
+# remote-control silently not working, root-caused to cloudflared exiting
+# immediately — bad/expired cert, a `credentials_json` copied verbatim from
+# another machine's `remote.json`, etc. — with zero surfacing: `_spawn`
+# only fails if the executable itself can't launch, so a same-process exit
+# used to look identical to "started fine" all the way up to the pairing
+# URL shown to the user). Short and best-effort on purpose: long enough to
+# catch a same-process startup failure, short enough not to make every
+# successful Enable click feel sluggish.
+_STARTUP_CHECK_S = 0.4
+_MAX_DRAINED_LINES = 20
+
 
 def _create_kill_on_close_job() -> int | None:
     """H-E, Windows: a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`.
@@ -284,6 +297,10 @@ class Tunnel:
         self._job: int | None = None
         # Mode A: URL is known upfront. Mode B: filled in by _scan_for_url.
         self.captured_url: str | None = public_url or None
+        # Bounded tail of the child's stdout/stderr (merged) — kept so a
+        # same-process startup failure (see `_verify_named_started`) can be
+        # reported with cloudflared's own error text instead of nothing.
+        self._last_output: list[str] = []
 
     def start(self) -> None:
         if self._config.type == "cloudflared":
@@ -332,6 +349,29 @@ class Tunnel:
         self._proc = _spawn(argv)
         self._own_job_if_windows()
         self._drain_output()
+        self._verify_named_started()
+
+    def _verify_named_started(self) -> None:
+        """`_spawn`'s `Popen(...)` only raises if the executable itself
+        can't be launched — it has no idea whether cloudflared then exits
+        immediately because `--config`/`--credentials-file` don't parse
+        (bad JSON, expired cert, a `credentials_json` path that doesn't
+        exist on this machine). Left unchecked, that dead process looks
+        identical to a healthy one all the way up to the pairing URL shown
+        to the user. Best-effort and short: `proc.poll()` after a brief
+        wait, not a real health check — a process that's still alive after
+        this window is assumed to have started."""
+        proc = self._proc
+        if proc is None:
+            return
+        time.sleep(_STARTUP_CHECK_S)
+        if proc.poll() is None:
+            return
+        if self._reader is not None:
+            self._reader.join(timeout=1)
+        self._proc = None
+        detail = "\n".join(self._last_output) or f"exit code {proc.returncode}"
+        raise TunnelError(f"cloudflared exited immediately: {detail}")
 
     def _start_quick(self) -> None:
         """Mode "quick" (addendum, no-domain path): cockpit spawns
@@ -388,14 +428,17 @@ class Tunnel:
     def _drain_output(self) -> None:
         """Named-tunnel mode doesn't need the URL scraped, but the child's
         stdout pipe must still be drained or cloudflared blocks once its own
-        log output fills the pipe buffer."""
+        log output fills the pipe buffer. The last `_MAX_DRAINED_LINES`
+        lines are kept (not discarded) so `_verify_named_started` can report
+        *why* cloudflared exited, instead of just that it did."""
 
         def _drain() -> None:
             proc = self._proc
             if proc is None or proc.stdout is None:
                 return
-            for _ in proc.stdout:
-                pass
+            for line in proc.stdout:
+                self._last_output.append(line.decode("utf-8", errors="replace").rstrip())
+                del self._last_output[:-_MAX_DRAINED_LINES]
 
         self._reader = threading.Thread(target=_drain, daemon=True)
         self._reader.start()
