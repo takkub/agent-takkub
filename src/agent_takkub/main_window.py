@@ -1300,14 +1300,56 @@ class MainWindow(
         act_edit = menu.addAction("✏️ Edit project…")
         act_rules = menu.addAction("📋 Edit project rules…")
         menu.addSeparator()
+        act_restart_lead = menu.addAction("🔄 Restart Lead")
+        menu.addSeparator()
         act_close = menu.addAction("🗙 Close project")
         chosen = menu.exec(global_pos)
         if chosen is act_edit:
             self._on_edit_project_clicked(proj_name)
         elif chosen is act_rules:
             self._on_edit_project_rules_clicked(proj_name)
+        elif chosen is act_restart_lead:
+            self._on_restart_lead_from_menu(proj_name, index)
         elif chosen is act_close:
             self._on_tab_close_requested(index)
+
+    def _on_restart_lead_from_menu(self, proj_name: str, index: int) -> None:
+        """ "🔄 Restart Lead" from a project tab's right-click menu.
+
+        `_restart_lead_for_active_project` (and the orchestrator calls it
+        makes) always target whichever project is currently active, so a
+        tab that isn't the active one has to be switched to first — same
+        confirm-then-restart shape as the provider-switch flow in
+        `user_actions.UserActionsMixin._on_user_changed`.
+        """
+        working_count = sum(
+            1
+            for pane in self.orch._project_panes(proj_name).values()
+            if getattr(pane, "state", None) in ("working", "active")
+        )
+        if working_count > 0:
+            body = (
+                f"{working_count} pane(s) in '{proj_name}' currently working. "
+                "Restarting Lead will terminate in-flight tasks. Continue?"
+            )
+        else:
+            body = (
+                f"Restart Lead for '{proj_name}'?\n\n"
+                "Lead + every teammate pane for this project will be closed "
+                "and Lead respawned."
+            )
+        confirm = QMessageBox.question(
+            self,
+            "Restart Lead",
+            body,
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if confirm != QMessageBox.StandardButton.Ok:
+            return
+        if self.tabs.currentIndex() != index:
+            self.tabs.setCurrentIndex(index)
+        self._restart_lead_for_active_project()
 
     # ──────────────────────────────────────────────────────────────
     # window state persistence
