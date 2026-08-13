@@ -43,6 +43,17 @@ WAKE_BUFFER_S = 3 * 60
 # against a false-positive banner match parking a pane that can still work.
 CONFIRM_UTILIZATION_PCT = 95.0
 
+# Give-up status dump (#158): how many trailing non-blank lines of the pane's
+# visible screen to echo in the give-up notice, so the Lead can tell at a
+# glance whether the task actually finished before the pane went quiet.
+GIVE_UP_TAIL_LINES = 12
+
+# How many leading characters of the assigned task text to preview in the
+# give-up notice — enough to identify the task without dumping the whole
+# spec into chat (the full text always survives in the progress-marker file
+# and in PaneState.last_assigned_task / last_assigned_task_file).
+GIVE_UP_TASK_PREVIEW_CHARS = 220
+
 
 def path() -> Path:
     """Where state lives. Function form so tests can monkeypatch `_PATH`."""

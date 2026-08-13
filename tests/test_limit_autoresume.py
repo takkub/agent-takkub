@@ -11,12 +11,20 @@ Layers:
 
 from __future__ import annotations
 
+import json
 import time
 from unittest.mock import MagicMock, patch
 
 from agent_takkub import auto_resume
-from agent_takkub.limit_autoresume import _usage_confirms_limit
+from agent_takkub.limit_autoresume import (
+    _pane_cwd,
+    _pane_output_tail,
+    _progress_marker_path,
+    _usage_confirms_limit,
+    _write_progress_marker,
+)
 from agent_takkub.limit_status import LimitWindow, UsageData
+from agent_takkub.spawn_engine import PaneState
 
 # ── layer 1: pure signal-(b) check ──────────────────────────────────────────
 
@@ -393,3 +401,169 @@ class TestSetAutoResume:
         assert ok is True
         assert saved["v"] is False
         o.autoResumeChanged.emit.assert_called_once_with(False)
+
+
+# ── layer 6: give-up status dump (#158) ─────────────────────────────────────
+
+
+class TestPaneCwd:
+    def test_none_pane_returns_none(self) -> None:
+        assert _pane_cwd(None) is None
+
+    def test_missing_attr_returns_none(self) -> None:
+        pane = MagicMock(spec=[])  # no _session_cwd attribute at all
+        assert _pane_cwd(pane) is None
+
+    def test_empty_cwd_returns_none(self) -> None:
+        pane = MagicMock()
+        pane._session_cwd = ""
+        assert _pane_cwd(pane) is None
+
+    def test_real_cwd_returned(self) -> None:
+        pane = MagicMock()
+        pane._session_cwd = "C:/work/api"
+        assert _pane_cwd(pane) == "C:/work/api"
+
+
+class TestPaneOutputTail:
+    def test_none_pane_returns_empty(self) -> None:
+        assert _pane_output_tail(None) == ""
+
+    def test_none_session_returns_empty(self) -> None:
+        pane = MagicMock()
+        pane.session = None
+        assert _pane_output_tail(pane) == ""
+
+    def test_display_lines_error_returns_empty(self) -> None:
+        pane = MagicMock()
+        pane.session.display_lines.side_effect = RuntimeError("boom")
+        assert _pane_output_tail(pane) == ""
+
+    def test_blank_lines_dropped_and_trailing_kept(self) -> None:
+        pane = MagicMock()
+        pane.session.display_lines.return_value = ["a", "", "  ", "b", "c"]
+        assert _pane_output_tail(pane, max_lines=2) == "b\nc"
+
+    def test_max_lines_default_from_auto_resume_constant(self) -> None:
+        pane = MagicMock()
+        pane.session.display_lines.return_value = [f"line{i}" for i in range(20)]
+        tail = _pane_output_tail(pane)
+        assert tail.count("\n") + 1 == auto_resume.GIVE_UP_TAIL_LINES
+        assert tail.splitlines()[-1] == "line19"
+
+
+class TestProgressMarkerPath:
+    def test_creates_project_dir_and_role_file_name(self) -> None:
+        path = _progress_marker_path("proj", "backend")
+        assert path.name == "backend.json"
+        assert path.parent.name == "proj"
+        assert path.parent.is_dir()
+
+
+class TestWriteProgressMarker:
+    def test_writes_expected_fields(self) -> None:
+        ps = PaneState()
+        ps.last_assigned_task = "fix the thing"
+        ps.last_assigned_task_file = "/tmp/task.txt"
+        ps.limit_park_rounds = 2
+        pane = MagicMock()
+        pane._session_cwd = "C:/work/api"
+        pane.session.display_lines.return_value = ["done."]
+
+        path = _write_progress_marker(
+            "proj", "backend", ps, pane, status="gave_up", reason="round_cap"
+        )
+
+        assert path is not None
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert data["status"] == "gave_up"
+        assert data["reason"] == "round_cap"
+        assert data["role"] == "backend"
+        assert data["project"] == "proj"
+        assert data["task"] == "fix the thing"
+        assert data["task_file"] == "/tmp/task.txt"
+        assert data["cwd"] == "C:/work/api"
+        assert data["output_tail"] == "done."
+        assert data["park_rounds"] == 2
+
+    def test_overwrites_on_repeated_calls(self) -> None:
+        ps = PaneState()
+        ps.last_assigned_task = "task"
+        pane = MagicMock()
+        pane._session_cwd = None
+        pane.session = None
+
+        p1 = _write_progress_marker("proj", "backend", ps, pane, status="parked")
+        p2 = _write_progress_marker("proj", "backend", ps, pane, status="resumed")
+
+        assert p1 == p2
+        assert json.loads(p2.read_text(encoding="utf-8"))["status"] == "resumed"
+
+    def test_write_failure_returns_none(self, monkeypatch) -> None:
+        from pathlib import Path
+
+        ps = PaneState()
+        monkeypatch.setattr(
+            Path, "write_text", lambda self, *a, **k: (_ for _ in ()).throw(OSError("disk full"))
+        )
+        assert _write_progress_marker("proj", "backend", ps, None, status="parked") is None
+
+
+class TestGiveUpAutoResume:
+    def test_dump_includes_hint_task_preview_and_marker_path(self) -> None:
+        o = _bare_orch()
+        ps = o._ps("proj::backend")
+        ps.last_assigned_task = "implement the auth endpoint"
+        pane = MagicMock()
+        pane._session_cwd = None
+        pane.session.display_lines.return_value = ["ok, done implementing."]
+        o._panes_by_project["proj"] = {"backend": pane}
+
+        o._give_up_auto_resume("proj", "backend", ps, reason="round_cap")
+
+        o._notify_lead.assert_called_once()
+        msg = o._notify_lead.call_args.args[1]
+        assert "งานอาจเสร็จสมบูรณ์แล้ว" in msg  # verify-before-discard hint
+        assert "implement the auth endpoint" in msg
+        assert "ok, done implementing." in msg
+        assert "status dump เต็ม" in msg
+
+    def test_long_task_preview_is_truncated(self) -> None:
+        o = _bare_orch()
+        ps = o._ps("proj::backend")
+        ps.last_assigned_task = "x" * (auto_resume.GIVE_UP_TASK_PREVIEW_CHARS + 50)
+        o._give_up_auto_resume("proj", "backend", ps, reason="round_cap")
+        msg = o._notify_lead.call_args.args[1]
+        assert "x" * auto_resume.GIVE_UP_TASK_PREVIEW_CHARS + "…" in msg
+        assert "x" * (auto_resume.GIVE_UP_TASK_PREVIEW_CHARS + 1) not in msg
+
+    def test_writes_progress_marker_to_disk(self) -> None:
+        o = _bare_orch()
+        ps = o._ps("proj::backend")
+        ps.last_assigned_task = "do the thing"
+        o._give_up_auto_resume("proj", "backend", ps, reason="round_cap")
+        path = _progress_marker_path("proj", "backend")
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert data["status"] == "gave_up"
+        assert data["reason"] == "round_cap"
+
+    def test_checks_uncommitted_when_cwd_known(self) -> None:
+        o = _bare_orch()
+        ps = o._ps("proj::backend")
+        ps.last_assigned_task = "do the thing"
+        pane = MagicMock()
+        pane._session_cwd = "C:/work/api"
+        pane.session.display_lines.return_value = []
+        o._panes_by_project["proj"] = {"backend": pane}
+        with patch.object(o, "_check_uncommitted_async") as check:
+            o._give_up_auto_resume("proj", "backend", ps, reason="round_cap")
+        check.assert_called_once_with("proj", "backend", "C:/work/api")
+
+    def test_skips_uncommitted_check_when_cwd_unknown(self) -> None:
+        o = _bare_orch()
+        ps = o._ps("proj::backend")
+        ps.last_assigned_task = "do the thing"
+        # no pane registered for this project/role → _pane_cwd returns None
+        with patch.object(o, "_check_uncommitted_async") as check:
+            o._give_up_auto_resume("proj", "backend", ps, reason="round_cap")
+        check.assert_not_called()
