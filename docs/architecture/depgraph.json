@@ -292,7 +292,6 @@
       "imported_by": [
         "agent_takkub.agent_pane",
         "agent_takkub.headless_window",
-        "agent_takkub.limit_panel",
         "agent_takkub.logs_panel",
         "agent_takkub.main_window",
         "agent_takkub.project_nav",
@@ -317,7 +316,7 @@
         "agent_takkub.usage_meter",
         "agent_takkub.user_actions"
       ],
-      "fan_in": 26,
+      "fan_in": 25,
       "fan_out": 0
     },
     {
@@ -728,10 +727,10 @@
     {
       "module": "agent_takkub.limit_panel",
       "imports": [
-        "agent_takkub.cockpit_theme",
         "agent_takkub.config",
         "agent_takkub.limit_status",
         "agent_takkub.project_tab",
+        "agent_takkub.usage_meter",
         "agent_takkub.user_profile"
       ],
       "imported_by": [
@@ -2185,9 +2184,10 @@
         "agent_takkub.cockpit_theme"
       ],
       "imported_by": [
+        "agent_takkub.limit_panel",
         "agent_takkub.main_window"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 1
     },
     {
