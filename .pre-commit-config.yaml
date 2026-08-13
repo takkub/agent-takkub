@@ -60,10 +60,15 @@ repos:
         # agent_takkub from wherever the hook is actually running — a no-op in the
         # main worktree (cwd's src == the .pth target already) and the fix for a
         # linked worktree.
+        # BIN/EXT probe: venv layout is Scripts/*.exe on Windows, bin/* (no
+        # extension) on macOS/Linux — detect which one exists instead of
+        # hardcoding either (macOS panes were previously getting a
+        # nonexistent-path failure here since Scripts/ was hardcoded).
         entry: >-
           bash -c '
           ROOT="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")";
-          PYTHONPATH="$(pwd)/src" "$ROOT/.venv/Scripts/lint-imports.exe"
+          if [ -d "$ROOT/.venv/Scripts" ]; then BIN="$ROOT/.venv/Scripts"; EXT=".exe"; else BIN="$ROOT/.venv/bin"; EXT=""; fi;
+          PYTHONPATH="$(pwd)/src" "$BIN/lint-imports$EXT"
           '
         pass_filenames: false
         stages: [pre-commit]
@@ -76,11 +81,12 @@ repos:
         language: system
         # See import-linter hook above for why PYTHONPATH is prepended with this
         # checkout's own src/ — same shared-venv/linked-worktree module-visibility
-        # gap, same fix.
+        # gap, same fix. Same Scripts/ vs bin/ BIN/EXT probe as import-linter above.
         entry: >-
           bash -c '
           ROOT="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")";
-          PYTHONPATH="$(pwd)/src" "$ROOT/.venv/Scripts/python.exe" tools/gen_import_graph.py &&
+          if [ -d "$ROOT/.venv/Scripts" ]; then BIN="$ROOT/.venv/Scripts"; EXT=".exe"; else BIN="$ROOT/.venv/bin"; EXT=""; fi;
+          PYTHONPATH="$(pwd)/src" "$BIN/python$EXT" tools/gen_import_graph.py &&
           git diff --exit-code docs/architecture/depgraph.json
           '
         pass_filenames: false
