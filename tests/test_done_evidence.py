@@ -569,6 +569,116 @@ class TestDoneNoticeAppendFormat:
         assert "shard1.png" in group.done["qa#1"]
 
 
+# ─────────────────────────────────────────────────────────────
+# Suspect-capture flagging (issue #159): a screenshot can "exist" and still
+# be a failed/blank capture — size + magic-byte sniff surfaces that instead
+# of trusting file existence alone as proof of a good shot.
+# ─────────────────────────────────────────────────────────────
+
+
+def _write_real_png(path: pathlib.Path, extra_bytes: int = 0) -> None:
+    """A file that starts with a real PNG signature, padded to look like a
+    normal-sized screenshot."""
+    path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * extra_bytes)
+
+
+class TestSuspectCaptureFlagging:
+    def test_size_annotated_on_every_entry(self, orch, tmp_path):
+        assign_ts = time.time() - 60
+        shots = _shot_dir(tmp_path, "proj")
+        path = shots / "big.png"
+        _write_real_png(path, extra_bytes=50 * 1024)
+        import os
+
+        mt = assign_ts + 10
+        os.utime(path, (mt, mt))
+
+        result = Orchestrator._scan_done_evidence("proj", "qa", assign_ts)
+
+        assert "big.png (50.0KB)" in result
+        assert "⚠" not in result
+
+    def test_small_file_flagged_suspect(self, orch, tmp_path):
+        """A real-looking but tiny file (< 10KB) is still evidence, but
+        tagged so Lead can tell it might be a failed capture."""
+        assign_ts = time.time() - 60
+        shots = _shot_dir(tmp_path, "proj")
+        path = shots / "tiny.png"
+        _write_real_png(path, extra_bytes=100)  # well under 10KB
+        import os
+
+        mt = assign_ts + 10
+        os.utime(path, (mt, mt))
+
+        result = Orchestrator._scan_done_evidence("proj", "qa", assign_ts)
+
+        assert "📸 evidence:" in result
+        assert "tiny.png" in result
+        assert "⚠small" in result
+        assert "⚠ no evidence cited" not in result  # still counts as evidence
+
+    def test_bad_header_flagged_suspect_even_if_large(self, orch, tmp_path):
+        """Size alone isn't the whole story — wrong content under a .png
+        extension gets flagged regardless of byte count."""
+        assign_ts = time.time() - 60
+        shots = _shot_dir(tmp_path, "proj")
+        path = shots / "notreally.png"
+        _touch_old_enough(path, assign_ts, age=10)  # b"fake-image-bytes", no PNG magic
+        # pad well past the size threshold so only the header check trips
+        path.write_bytes(b"fake-image-bytes" + b"\x00" * 20 * 1024)
+        import os
+
+        mt = assign_ts + 10
+        os.utime(path, (mt, mt))
+
+        result = Orchestrator._scan_done_evidence("proj", "qa", assign_ts)
+
+        assert "⚠bad-header" in result
+        assert "⚠small" not in result
+
+    def test_both_small_and_bad_header_combine(self, orch, tmp_path):
+        assign_ts = time.time() - 60
+        shots = _shot_dir(tmp_path, "proj")
+        path = shots / "empty.png"
+        _touch_old_enough(path, assign_ts, age=10)  # tiny + no PNG magic
+        os_utime_target = assign_ts + 10
+        import os
+
+        os.utime(path, (os_utime_target, os_utime_target))
+
+        result = Orchestrator._scan_done_evidence("proj", "qa", assign_ts)
+
+        assert "⚠small+bad-header" in result
+
+    def test_evidence_format_entry_direct(self, tmp_path):
+        good = tmp_path / "shot.png"
+        _write_real_png(good, extra_bytes=50 * 1024)
+        entry = Orchestrator._evidence_format_entry(good, good.stat().st_size)
+        assert entry.endswith("(50.0KB)")
+
+        bad = tmp_path / "bad.png"
+        bad.write_bytes(b"not-a-png")
+        entry_bad = Orchestrator._evidence_format_entry(bad, bad.stat().st_size)
+        assert "⚠small+bad-header" in entry_bad
+
+    def test_evidence_looks_valid_image_per_format(self, tmp_path):
+        png = tmp_path / "a.png"
+        png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 10)
+        assert Orchestrator._evidence_looks_valid_image(png) is True
+
+        jpg = tmp_path / "a.jpg"
+        jpg.write_bytes(b"\xff\xd8\xff" + b"\x00" * 10)
+        assert Orchestrator._evidence_looks_valid_image(jpg) is True
+
+        bogus_png = tmp_path / "b.png"
+        bogus_png.write_bytes(b"<html>error</html>")
+        assert Orchestrator._evidence_looks_valid_image(bogus_png) is False
+
+        empty_png = tmp_path / "c.png"
+        empty_png.write_bytes(b"")
+        assert Orchestrator._evidence_looks_valid_image(empty_png) is False
+
+
 class TestFailureAutoCapture:
     """`done(failed=True)` auto-captures into role-memory (ReflexionMemory-style,
     no agent decision required) — wired at the same point evidence attach is."""

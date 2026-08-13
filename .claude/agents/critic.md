@@ -66,8 +66,10 @@ ls -la "$TAKKUB_ARTIFACTS_DIR/screenshots/"
 
 ### 1. List + Inspect shots
 ```bash
-ls "$TAKKUB_ARTIFACTS_DIR/screenshots/"
+ls -la "$TAKKUB_ARTIFACTS_DIR/screenshots/"
 ```
+
+**#159 — เช็คขนาดก่อนอ่าน:** ไฟล์ที่เล็กผิดปกติเทียบไฟล์พี่น้อง (เช่น < 10KB ขณะที่ตัวอื่น 40-100KB) มักเป็นภาพว่าง/ถ่ายพลาดจาก QA ไม่ใช่หลักฐานจริง — อย่านับรวมว่า "ครบ" เฉยๆ จากแค่ชื่อไฟล์มีอยู่ ถ้าเจอ `takkub send --to lead "blocked: screenshot <file> เล็กผิดปกติ (<size>) น่าจะถ่ายพลาด — ขอ QA ถ่ายใหม่"` แทนที่จะรีวิวไฟล์ที่ว่าง/พังต่อ
 
 อ่าน image แต่ละไฟล์ด้วย `Read` tool — Claude เห็นภาพได้ตรงๆ ลองสังเกต:
 - Hierarchy: heading/body/caption แยกชัดไหม

@@ -87,6 +87,15 @@ mb shot "$SHOT_DIR/login.png"
 ```
 ห้าม path relative ในตัว repo (`runtime/exports/...`) — ระบุ `$SHOT_DIR` ใน `takkub done` เสมอให้ critic หาเจอ
 
+**#159 — เช็คก่อนรายงาน:** ถ่ายพลาด (หน้าขาว/ยังโหลดไม่เสร็จ/browser crash) ยังได้ไฟล์ที่ "มีอยู่" แต่ว่าง/เล็กผิดปกติ — ตรวจขนาดทุกครั้งหลังถ่าย ก่อน `takkub done`:
+```bash
+for f in "$SHOT_DIR"/*.png; do
+  sz=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f")
+  [ "$sz" -lt 10240 ] && echo "⚠ $f = ${sz}B เล็กผิดปกติ — ถ่ายพลาด, ถ่ายใหม่"
+done
+```
+เจอไฟล์เล็กผิดปกติ → `mb wait networkidle` (หรือ `mb wait 1000`) แล้ว `mb shot` ซ้ำก่อนค่อยรายงาน — cockpit จะ flag ไฟล์ < 10KB ในหลักฐานให้ Lead เห็นเองด้วย แต่อย่าปล่อยให้ Lead มาเจอทีหลัง จับตั้งแต่ต้นทาง
+
 ### ⚠️ Blocked / ต้องการ clarification — บังคับใช้ `takkub send --to lead`
 ✅ `takkub send --to lead "blocked: <ปัญหา + ที่อยากให้ช่วย>"` ❌ ห้ามพิมพ์คำถามลอยๆ ในจอแล้วรอ — **Lead มองไม่เห็นจอคุณ** เห็นแค่ `takkub list` เท่านั้น ใช้ถูกต้อง → inject เข้า Lead ทันที + idle watchdog suppress auto-reminder จนกว่า Lead ตอบ
 
