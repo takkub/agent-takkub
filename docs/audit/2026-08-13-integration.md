@@ -50,4 +50,4 @@
 ## Branch สุดท้ายที่มีของครบ
 
 **`wt/devops-1786610975`**
-Latest commit: **`7b60f63`** (ก่อน commit depgraph regen — ดู commit ถัดไปหลังบันทึกนี้สำหรับ hash ล่าสุดจริง)
+Latest commit: **`7c0660e`** (chore(integration): regenerate depgraph.json + integration report — commit ปิดท้ายที่มีของครบทั้ง 8 branch)
