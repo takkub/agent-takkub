@@ -324,6 +324,34 @@ class TestBrowserProfileMcpConfigPath:
         for name, flag in _PROFILE_FLAGS.items():
             assert data["mcpServers"][name]["args"].count(flag) == 1
 
+    def test_shard_gets_identical_mcp_server_set_as_non_shard(
+        self, isolated_mcp_file: pathlib.Path
+    ) -> None:
+        """#177 candidate hypothesis: a shard pane's role-suffixed identity
+        (``qa#2`` / ``qa-shard2``) could fail the built-in "registered role
+        with no policy entry -> deny" default (`role_mcp_allowlist`'s
+        docstring) if that suffix ever reached the policy lookup instead of
+        the split-off `base_role`. It never does — every call site in
+        `shared_dev_tools.py`/`mcp_bridge.py`/`spawn_engine.py` passes
+        `base_role` (see docs/qa/2026-08-14-mcp-shard-investigation.md) —
+        but assert the observable *consequence* here so a future call site
+        that starts threading the raw shard-suffixed key through can't
+        silently narrow a shard's MCP grant versus its non-shard sibling.
+        """
+        ensure_browser_mcps()
+        plain = _read(pathlib.Path(browser_profile_mcp_config_path("qa", None, "proj_a")))
+        shard = _read(pathlib.Path(browser_profile_mcp_config_path("qa", 2, "proj_a")))
+        # Only playwright/chrome-devtools are in the master shared-mcp.json this
+        # fixture seeds via ensure_browser_mcps() — graft is intersected in only
+        # when the master config carries it too, so it's out of scope here; the
+        # point of this test is shard-vs-non-shard parity, not the full policy set.
+        assert (
+            set(plain["mcpServers"])
+            == set(shard["mcpServers"])
+            == {"playwright", "chrome-devtools"}
+        )
+        assert set(plain["mcpServers"]) <= _ROLE_MCP_POLICY["qa"]
+
     def test_preserves_non_browser_mcps_untouched(
         self, isolated_mcp_file: pathlib.Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
