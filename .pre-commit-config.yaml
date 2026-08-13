@@ -73,7 +73,7 @@ repos:
         pass_filenames: false
         stages: [pre-commit]
 
-  # depgraph freshness: regenerate and fail if stale
+  # depgraph freshness: regenerate in memory and compare, no working-tree write
   - repo: local
     hooks:
       - id: depgraph-fresh
@@ -82,12 +82,15 @@ repos:
         # See import-linter hook above for why PYTHONPATH is prepended with this
         # checkout's own src/ — same shared-venv/linked-worktree module-visibility
         # gap, same fix. Same Scripts/ vs bin/ BIN/EXT probe as import-linter above.
+        # --check (see tools/gen_import_graph.py) compares in memory and ignores
+        # the provenance-only generated_by field, so it never writes the file and
+        # never false-positives on git-diff/CRLF flicker or a grimp point bump —
+        # same code path CI's Depgraph freshness check step uses.
         entry: >-
           bash -c '
           ROOT="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")";
           if [ -d "$ROOT/.venv/Scripts" ]; then BIN="$ROOT/.venv/Scripts"; EXT=".exe"; else BIN="$ROOT/.venv/bin"; EXT=""; fi;
-          PYTHONPATH="$(pwd)/src" "$BIN/python$EXT" tools/gen_import_graph.py &&
-          git diff --exit-code docs/architecture/depgraph.json
+          PYTHONPATH="$(pwd)/src" "$BIN/python$EXT" tools/gen_import_graph.py --check
           '
         pass_filenames: false
         stages: [pre-commit]
