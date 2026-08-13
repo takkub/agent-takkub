@@ -338,6 +338,11 @@ def check_mini_browser() -> list[Finding]:
     mb is shared browser-role infrastructure and does not require
     ``--install-providers``.
     """
+    if sys.platform == "win32":
+        from ._win_console import sanitize_win32_mb_shims
+
+        sanitize_win32_mb_shims()
+
     mb = shutil.which("mb.cmd") or shutil.which("mb")
     if mb:
         return [Finding("browser", "mini-browser", Status.OK, mb)]

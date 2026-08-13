@@ -61,3 +61,45 @@ def hide_hwnds(hwnds: set[int]) -> int:
             user32.ShowWindow(h, SW_HIDE)
             hidden += 1
     return hidden
+
+
+def sanitize_win32_mb_shims() -> list[str]:
+    """On Windows, extensionless POSIX shell scripts named 'mb' (created by npm
+    or bash installers under %APPDATA%\\npm\\mb or ~/.local/bin/mb) break Win32
+    SearchPathW / ShellExecute resolution (issue #156). Because the file has
+    no extension, Win32 finds 'mb' as a literal match before checking PATHEXT
+    (.cmd/.exe), and then ShellExecute pops the Windows 'Select an app to open'
+    dialog because extensionless files have no registered verb.
+
+    Renaming extensionless 'mb' to 'mb.sh' when 'mb.cmd' exists resolves 'mb'
+    cleanly to 'mb.cmd' for all Win32 apps (agy.exe, codex.exe, cmd.exe).
+    """
+    if sys.platform != "win32":
+        return []
+
+    import os
+    import shutil
+    from pathlib import Path
+
+    cleaned: list[str] = []
+    candidates: list[Path] = []
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        candidates.append(Path(appdata) / "npm" / "mb")
+    candidates.append(Path.home() / ".local" / "bin" / "mb")
+
+    for cand in candidates:
+        if cand.is_file() and not cand.name.endswith(
+            (".cmd", ".exe", ".bat", ".ps1", ".sh", ".sh_bak")
+        ):
+            cmd_sibling = cand.with_name("mb.cmd")
+            if cmd_sibling.is_file() or shutil.which("mb.cmd"):
+                target = cand.with_name("mb.sh")
+                try:
+                    if target.exists():
+                        target.unlink()
+                    cand.rename(target)
+                    cleaned.append(str(cand))
+                except OSError:
+                    pass
+    return cleaned
