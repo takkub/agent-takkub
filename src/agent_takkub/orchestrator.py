@@ -1080,6 +1080,12 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         if plan and shard_total > 0:
             plan_file = self._qa_plan_file(project_ns, base_role_a)
             delivery_task = self._wrap_planner_task(task, plan_file, shard_total)
+        elif shard_total > 0:
+            # Real shard pane (not the planner) — every shard in the group
+            # gets identical task text, so a fixed output path in it is a
+            # collision unless we force per-shard uniqueness (#160).
+            shard_idx = _split_shard(role_name)[1] or 0
+            delivery_task = self._wrap_shard_task(task, shard_idx, shard_total)
 
         # Materialise the reliable file handoff before spawn. Claude can attach
         # the full task to its per-spawn system-prompt file; the pointer remains

@@ -388,6 +388,140 @@ class TestAssignCreatesShardGroup:
 
 
 # ──────────────────────────────────────────────────────────────
+# #160 — shard fan-out output-path collision guard
+# ──────────────────────────────────────────────────────────────
+
+
+class TestWrapShardTask:
+    """_wrap_shard_task shape: index/total present, tells the shard to
+    suffix any fixed output path instead of overwriting it."""
+
+    def test_contains_index_and_total(self, orch: Orchestrator) -> None:
+        wrapped = orch._wrap_shard_task("base task", 2, 3)
+        assert "base task" in wrapped
+        assert "SHARD 2/3" in wrapped
+        assert ".shard2" in wrapped
+
+    def test_different_shards_get_different_suffix(self, orch: Orchestrator) -> None:
+        w1 = orch._wrap_shard_task("t", 1, 4)
+        w2 = orch._wrap_shard_task("t", 2, 4)
+        assert ".shard1" in w1 and ".shard1" not in w2
+        assert ".shard2" in w2 and ".shard2" not in w1
+
+
+class TestAssignInjectsShardNoteIntoTaskText:
+    """assign(shard_total>0, plan=False) — the real shard-pane path — must
+    wrap the delivered task with the #160 per-shard path-safety note, not
+    just set env vars, since the collision lives in shared *task text*."""
+
+    def test_real_shard_task_gets_wrapped(self, orch: Orchestrator) -> None:
+        pane = _make_pane("qa#2")
+        orch._panes_by_project.setdefault(TEST_PROJECT, {})["qa#2"] = pane
+
+        with (
+            patch.object(orch, "spawn", return_value=(True, "spawned")),
+            patch.object(orch, "_send_when_ready"),
+        ):
+            orch.assign(
+                "qa#2",
+                cwd="/web",
+                task="เขียนรายงานลง docs/audit/report.md",
+                shard_total=3,
+                project=TEST_PROJECT,
+            )
+
+        ek = _exit_key(TEST_PROJECT, "qa#2")
+        delivered = orch._pane_state[ek].last_assigned_task
+        assert "SHARD 2/3" in delivered
+        assert ".shard2" in delivered
+        assert "docs/audit/report.md" in delivered  # original task preserved
+        # not planner-wrapped (plan=False here)
+        assert "QA PLANNER MODE" not in delivered
+
+    def test_shard_total_zero_not_wrapped(self, orch: Orchestrator) -> None:
+        """A plain (non-shard) assign must not pick up the shard note."""
+        pane = _make_pane("backend")
+        orch._panes_by_project.setdefault(TEST_PROJECT, {})["backend"] = pane
+
+        with (
+            patch.object(orch, "spawn", return_value=(True, "spawned")),
+            patch.object(orch, "_send_when_ready"),
+        ):
+            orch.assign("backend", cwd="/api", task="add endpoint", project=TEST_PROJECT)
+
+        ek = _exit_key(TEST_PROJECT, "backend")
+        delivered = orch._pane_state[ek].last_assigned_task
+        assert "SHARD" not in delivered
+
+
+class TestDetectShardPathCollisions:
+    def test_two_shards_same_path_flagged(self, orch: Orchestrator) -> None:
+        done = {
+            "qa#1": "wrote report to docs/audit/report.md",
+            "qa#2": "also wrote docs/audit/report.md, all green",
+        }
+        collisions = orch._detect_shard_path_collisions(done)
+        assert "docs/audit/report.md" in collisions
+        assert collisions["docs/audit/report.md"] == [1, 2]
+
+    def test_distinct_shard_suffixed_paths_not_flagged(self, orch: Orchestrator) -> None:
+        done = {
+            "qa#1": "wrote docs/audit/report.shard1.md",
+            "qa#2": "wrote docs/audit/report.shard2.md",
+        }
+        assert orch._detect_shard_path_collisions(done) == {}
+
+    def test_single_mention_not_flagged(self, orch: Orchestrator) -> None:
+        done = {"qa#1": "wrote docs/audit/report.md"}
+        assert orch._detect_shard_path_collisions(done) == {}
+
+    def test_no_path_in_notes_returns_empty(self, orch: Orchestrator) -> None:
+        done = {"qa#1": "all green", "qa#2": "all green too"}
+        assert orch._detect_shard_path_collisions(done) == {}
+
+
+class TestShardFanoutHandoffWarnsOnCollision:
+    def test_handoff_flags_duplicate_path(self, orch: Orchestrator) -> None:
+        pane1 = _make_pane("qa#1")
+        pane2 = _make_pane("qa#2")
+        lead = _make_lead()
+        orch._panes_by_project.setdefault(TEST_PROJECT, {})["qa#1"] = pane1
+        orch._panes_by_project[TEST_PROJECT]["qa#2"] = pane2
+        orch._panes_by_project[TEST_PROJECT]["lead"] = lead
+
+        for n in (1, 2):
+            orch._ps(_exit_key(TEST_PROJECT, f"qa#{n}")).shard_total = 2
+        orch._shard_groups[f"{TEST_PROJECT}::qa"] = ShardGroup(base_role="qa", total=2)
+
+        with patch("agent_takkub.orchestrator.Orchestrator._check_uncommitted_async"):
+            orch.done("qa#1", note="wrote docs/audit/report.md", project=TEST_PROJECT)
+            orch.done("qa#2", note="also wrote docs/audit/report.md", project=TEST_PROJECT)
+
+        injected = _written_str(lead.session)
+        assert "#160 guard" in injected
+        assert "docs/audit/report.md" in injected
+
+    def test_handoff_clean_when_no_collision(self, orch: Orchestrator) -> None:
+        pane1 = _make_pane("qa#1")
+        pane2 = _make_pane("qa#2")
+        lead = _make_lead()
+        orch._panes_by_project.setdefault(TEST_PROJECT, {})["qa#1"] = pane1
+        orch._panes_by_project[TEST_PROJECT]["qa#2"] = pane2
+        orch._panes_by_project[TEST_PROJECT]["lead"] = lead
+
+        for n in (1, 2):
+            orch._ps(_exit_key(TEST_PROJECT, f"qa#{n}")).shard_total = 2
+        orch._shard_groups[f"{TEST_PROJECT}::qa"] = ShardGroup(base_role="qa", total=2)
+
+        with patch("agent_takkub.orchestrator.Orchestrator._check_uncommitted_async"):
+            orch.done("qa#1", note="wrote docs/audit/report.shard1.md", project=TEST_PROJECT)
+            orch.done("qa#2", note="wrote docs/audit/report.shard2.md", project=TEST_PROJECT)
+
+        injected = _written_str(lead.session)
+        assert "#160 guard" not in injected
+
+
+# ──────────────────────────────────────────────────────────────
 # Edge cases not covered by the main 24-test suite
 # ──────────────────────────────────────────────────────────────
 

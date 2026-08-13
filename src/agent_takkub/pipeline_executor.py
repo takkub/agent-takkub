@@ -21,12 +21,18 @@ from __future__ import annotations
 
 import itertools
 import os
+import re
 import sys
 from dataclasses import dataclass, field
 
 from PyQt6.QtCore import QTimer
 
 # ── Constants ─────────────────────────────────────────────────────────────────
+
+# #160 safety net: file-path-looking tokens in shard done-notes. Heuristic,
+# not a parser — good enough to flag "2+ shards mention the exact same
+# path" so Lead can check for an overwrite before trusting the report.
+_SHARD_PATH_RE = re.compile(r"[\w][\w./\\-]*\.(?:md|markdown|json|txt|csv|html?|log|ya?ml)\b")
 
 # Pipeline-hop spawn staggering (#44). A multi-role hop spawns its roles via
 # _fire_pipeline_hop; firing them back-to-back on one event-loop tick hits the
@@ -478,6 +484,22 @@ class PipelineMixin:
         self._notify_lead(project_ns, prompt)
         _log_event("auto_chain_handoff", project=project_ns)
 
+    @staticmethod
+    def _detect_shard_path_collisions(done: dict) -> dict[str, list[int]]:
+        """Scan shard done-notes for a file path mentioned by 2+ shards (#160).
+
+        The task-text fix (``_wrap_shard_task``) tells shards to suffix their
+        own path, but that's an instruction an agent can still ignore — this
+        is the post-hoc net: if two shards' own ``takkub done`` notes name
+        the identical path, they very likely raced to overwrite it.
+        """
+        path_hits: dict[str, list[int]] = {}
+        for shard_key, note in done.items():
+            _, idx = _split_shard(shard_key)
+            for path in _SHARD_PATH_RE.findall(note or ""):
+                path_hits.setdefault(path, []).append(idx if idx is not None else 0)
+        return {path: sorted(idxs) for path, idxs in path_hits.items() if len(idxs) > 1}
+
     def _inject_shard_fanout_handoff(
         self, project_ns: str, group: ShardGroup, timed_out: bool = False
     ) -> None:
@@ -516,6 +538,14 @@ class PipelineMixin:
                 shard_key = f"{group.base_role}#{n}"
                 if shard_key not in reported:
                     lines.append(f"  shard {n}: NO RESPONSE (timeout)")
+
+        collisions = self._detect_shard_path_collisions(group.done)
+        if collisions:
+            lines.append(
+                "⚠️ [#160 guard] หลาย shard พูดถึงไฟล์ path เดียวกันใน done-note — เช็คก่อนเชื่อว่าไม่ทับกัน:"
+            )
+            for path, idxs in sorted(collisions.items()):
+                lines.append(f"  {path} ← shard {', '.join(str(i) for i in idxs)}")
 
         message = "\n".join(lines)
         self._notify_lead(project_ns, message)
@@ -596,6 +626,31 @@ class PipelineMixin:
             "orchestrator จะ spawn shards ตาม plan ให้อัตโนมัติ\n\n"
             "━━ โจทย์เทสต้นฉบับ (บริบทสำหรับวางแผน) ━━\n"
             f"{base_task}"
+        )
+
+    @staticmethod
+    def _wrap_shard_task(base_task: str, shard_idx: int, shard_total: int) -> str:
+        """Append a shard-safety note to a real (non-planner) shard's task (#160).
+
+        Every shard in a fan-out group receives the *same* base_task text
+        (plain ``--shards N`` sends it verbatim; ``--plan`` mode only adds a
+        scope/focus block on top of it) — so a fixed output/report path
+        written anywhere in that shared text is a collision waiting to
+        happen the instant 2+ shards write it concurrently and the earlier
+        write is clobbered. Force each shard onto its own path instead of
+        trusting free-form task text to route around it.
+        """
+        return (
+            f"{base_task}\n\n"
+            f"━━ SHARD {shard_idx}/{shard_total} — กันไฟล์รายงานทับกัน (#160) ━━\n"
+            f"คุณคือ shard {shard_idx} จาก {shard_total} shards ที่รัน task ข้างบน "
+            "พร้อมกัน (เนื้อหา task เหมือนกันทุก shard)\n"
+            "ถ้า task นี้สั่งให้เขียนไฟล์ผลลัพธ์/รายงานไปที่ path คงที่ (เช่น "
+            "docs/audit/xxx.md) **ห้ามเขียนทับ path นั้นตรงๆ** — shard อื่นเขียน "
+            "path เดียวกันพร้อมกัน จะทับกันจนรายงานของ shard อื่นหาย ให้เติม suffix "
+            f"`.shard{shard_idx}` ก่อนนามสกุลไฟล์เสมอ (เช่น `report.md` → "
+            f"`report.shard{shard_idx}.md`) แล้วรายงาน path จริงที่เขียนกลับใน "
+            "`takkub done` ให้ชัดเจน — Lead จะรวมไฟล์ทุก shard เป็นรายงานเดียวเอง"
         )
 
     def _fire_qa_plan_fanout(
