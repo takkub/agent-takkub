@@ -169,6 +169,7 @@ def _build_pane_env(project_ns: str | None = None) -> dict[str, str]:
         if k:
             allow.add(k.upper())
     env = {k: v for k, v in os.environ.items() if k.upper() in allow}
+    _apply_win32_path_sanitization(env)
     _apply_port_file(env)
     _apply_mcp_timeout(env)
     _apply_non_interactive_env(env)
@@ -219,7 +220,9 @@ def _build_lead_env(project_ns: str | None = None) -> dict[str, str]:
         if k:
             allow.add(k.upper())
     env = {k: v for k, v in os.environ.items() if k.upper() in allow}
+    _apply_win32_path_sanitization(env)
     _apply_port_file(env)
+
     _apply_mcp_timeout(env)
     _apply_non_interactive_env(env)
     _apply_color_term(env)
@@ -374,3 +377,41 @@ def inject_user_profile_env(env: dict[str, str], project: str) -> None:
             env["CLAUDE_CONFIG_DIR"] = str(config_dir_for(project))
     except Exception:
         pass
+
+
+def _apply_win32_path_sanitization(env: dict[str, str]) -> None:
+    """Sanitize Windows PATH: clean extensionless mb shims and reorder %APPDATA%\\npm."""
+    import sys
+
+    if sys.platform != "win32":
+        return
+    from pathlib import Path
+
+    from ._win_console import sanitize_win32_mb_shims
+
+    sanitize_win32_mb_shims()
+
+    appdata = os.environ.get("APPDATA")
+    if not appdata:
+        return
+    npm_dir = os.path.join(appdata, "npm")
+    if os.path.isdir(npm_dir):
+        path_parts = env.get("PATH", "").split(os.pathsep)
+        local_bin_str = str(Path.home() / ".local" / "bin").lower()
+        npm_dir_str = npm_dir.lower()
+
+        local_idx = -1
+        npm_idx = -1
+        for idx, part in enumerate(path_parts):
+            p_lower = part.strip().lower()
+            if local_idx == -1 and p_lower == local_bin_str:
+                local_idx = idx
+            if npm_idx == -1 and p_lower == npm_dir_str:
+                npm_idx = idx
+
+        if npm_idx != -1 and local_idx != -1 and npm_idx > local_idx:
+            path_parts.pop(npm_idx)
+            path_parts.insert(local_idx, npm_dir)
+            env["PATH"] = os.pathsep.join(path_parts)
+        elif npm_idx == -1:
+            env["PATH"] = npm_dir + os.pathsep + env.get("PATH", "")

@@ -152,3 +152,23 @@ def test_ensure_started_is_noop_on_macos(monkeypatch) -> None:
     assert ok
     assert "Windows-only" in msg
     popen.assert_not_called()
+
+
+def test_sanitize_win32_mb_shims_renames_extensionless_mb(tmp_path, monkeypatch) -> None:
+    from agent_takkub import _win_console
+
+    npm_dir = tmp_path / "npm"
+    npm_dir.mkdir()
+    mb_posix = npm_dir / "mb"
+    mb_cmd = npm_dir / "mb.cmd"
+    mb_posix.write_text("#!/bin/sh\nexec node foo.js")
+    mb_cmd.write_text("@echo off")
+
+    monkeypatch.setattr(_win_console.sys, "platform", "win32")
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+
+    cleaned = _win_console.sanitize_win32_mb_shims()
+
+    assert not mb_posix.exists()
+    assert (npm_dir / "mb.sh").exists()
+    assert len(cleaned) == 1
