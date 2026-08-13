@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 139,
+  "module_count": 140,
   "modules": [
     {
       "module": "agent_takkub",
@@ -51,6 +51,7 @@
       "module": "agent_takkub._win_console",
       "imports": [],
       "imported_by": [
+        "agent_takkub.autoskills_installer",
         "agent_takkub.browser_chrome",
         "agent_takkub.claude_update",
         "agent_takkub.codex_helper",
@@ -78,7 +79,7 @@
         "agent_takkub.verify",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 26,
+      "fan_in": 27,
       "fan_out": 0
     },
     {
@@ -160,6 +161,15 @@
         "agent_takkub.limit_autoresume"
       ],
       "fan_in": 1,
+      "fan_out": 1
+    },
+    {
+      "module": "agent_takkub.autoskills_installer",
+      "imports": [
+        "agent_takkub._win_console"
+      ],
+      "imported_by": [],
+      "fan_in": 0,
       "fan_out": 1
     },
     {
