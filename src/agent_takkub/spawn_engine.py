@@ -48,6 +48,7 @@ from .config import (
 from .headless_pane import HeadlessPane
 from .lead_context import (
     BIG_FILE_GUARD,
+    GRAFT_TOOL_CAVEATS,
     STALE_FILE_GUARD,
     _allowed_project_roots,
     _default_plugin_dirs,
@@ -2053,6 +2054,22 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 # for minutes. Lead delegates and rarely bulk-edits, so it's
                 # omitted there to save spawn tokens.
                 _appendix += STALE_FILE_GUARD
+                # Graft-usage caveats (token-reduction wave 4): only inject when
+                # this role's LIVE MCP policy actually grants graft — was
+                # previously baked statically into 7 role .md files regardless
+                # of policy, so an override (e.g. pane-tools.json swapping a
+                # role from graft to a different MCP) left stale guidance about
+                # a tool the pane no longer has. See lead_context.GRAFT_TOOL_CAVEATS.
+                try:
+                    from .shared_dev_tools import role_mcp_allowlist
+
+                    if "graft" in (role_mcp_allowlist(base_role) or frozenset()):
+                        _appendix += GRAFT_TOOL_CAVEATS
+                except Exception:
+                    _log.exception(
+                        "could not resolve graft MCP policy for %s; omitting graft guard",
+                        base_role,
+                    )
                 if role_context_available:
                     try:
                         if _appendix:

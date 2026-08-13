@@ -1900,9 +1900,10 @@
         "agent_takkub.settings_management.pages.roles_page",
         "agent_takkub.settings_management.repositories.mcps",
         "agent_takkub.settings_management.services.relationships",
-        "agent_takkub.settings_window"
+        "agent_takkub.settings_window",
+        "agent_takkub.spawn_engine"
       ],
-      "fan_in": 12,
+      "fan_in": 13,
       "fan_out": 6
     },
     {
@@ -1980,6 +1981,7 @@
         "agent_takkub.role_models",
         "agent_takkub.roles",
         "agent_takkub.rtk_helper",
+        "agent_takkub.shared_dev_tools",
         "agent_takkub.skill_policy",
         "agent_takkub.spawn_gate",
         "agent_takkub.token_meter",
@@ -1991,7 +1993,7 @@
         "agent_takkub.remote.api"
       ],
       "fan_in": 3,
-      "fan_out": 26
+      "fan_out": 27
     },
     {
       "module": "agent_takkub.spawn_gate",
