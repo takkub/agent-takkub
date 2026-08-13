@@ -1,0 +1,637 @@
+"""Cross-provider usage/quota abstraction (#103 follow-up, Wave 2).
+
+One `ProviderUsage` shape for every CLI provider the cockpit can spawn
+(claude/codex/gemini/opencode/kimi/cursor), built on top of
+`docs/audit/2026-08-13-provider-usage-survey.md` (empirical spike — which
+channel exists per provider, proven live or not) and
+`docs/design/2026-08-13-provider-usage-abstraction.md` (the data-shape/UX
+design). See `docs/audit/2026-08-13-provider-usage-impl.md` for what
+actually shipped vs. what stayed `unsupported` and why.
+
+Every `fetch_*_usage` function below is a **blocking, synchronous** call
+(subprocess spawn, file read, or an HTTP GET via `limit_status`) — none of
+them may run on the Qt main thread. `ProviderUsageStore` is the only piece
+meant to be touched from Qt code; it does all fetching on background
+threads and only ever hands back already-fetched cache reads.
+
+Design contract (never violate):
+- `utilization`/`plan`/`resets_at` are quota-percentage semantics. A
+  provider with no quota API (opencode) must NEVER populate `utilization`
+  — self-tallied spend/token counts live in the separate `spend` field
+  instead, so a UI can never mislabel "tokens I sent" as "quota left".
+- Missing data is `None`, never `0` / `0.0` — a fabricated 0% reads as
+  "plenty of quota left" (see `limit_status.LimitWindow.utilization`'s own
+  contract, which this module mirrors).
+- Every adapter catches its own failures and returns `status="error"` (or
+  `"unsupported"` when no channel exists) instead of raising — a provider
+  outage must never take down whatever polls this module.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import shutil
+import subprocess
+import threading
+import time
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from . import limit_status
+from ._win_console import SUBPROCESS_NO_WINDOW
+
+_log = logging.getLogger(__name__)
+
+STATUS_ACTIVE = "active"
+STATUS_STALE = "stale"
+STATUS_LOADING = "loading"
+STATUS_UNSUPPORTED = "unsupported"
+STATUS_ERROR = "error"
+
+_VALID_STATUSES = frozenset(
+    {STATUS_ACTIVE, STATUS_STALE, STATUS_LOADING, STATUS_UNSUPPORTED, STATUS_ERROR}
+)
+
+# Every fetch (subprocess spawn or HTTP GET) is bounded by this so one wedged
+# provider CLI can never hang a background poll thread forever.
+_FETCH_TIMEOUT_S = 10.0
+
+PROVIDER_NAMES: tuple[str, ...] = ("claude", "codex", "gemini", "opencode", "kimi", "cursor")
+
+
+@dataclass
+class ProviderUsage:
+    """One provider's current usage/quota snapshot.
+
+    `raw_data` carries provider-specific extras (e.g. Claude's multiple
+    limit windows, Codex's spend-control fields) for callers that want more
+    than the flattened `utilization`/`plan`/`resets_at` triple — never
+    relied on by this module's own status logic.
+
+    `spend` is a DIFFERENT KIND OF NUMBER than `utilization` — self-tallied
+    tokens/cost a provider's own CLI has counted locally (currently only
+    opencode). It is never a quota fraction and must render as separate UI,
+    never blended into a utilization meter.
+    """
+
+    provider: str
+    status: str
+    plan: str | None = None
+    utilization: float | None = None
+    resets_at: datetime | None = None
+    fetched_at: datetime | None = None
+    raw_data: dict[str, Any] | None = None
+    error: str | None = None
+    spend: dict[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        if self.status not in _VALID_STATUSES:
+            raise ValueError(f"invalid ProviderUsage.status: {self.status!r}")
+
+
+def _unsupported(provider: str, reason: str) -> ProviderUsage:
+    return ProviderUsage(provider=provider, status=STATUS_UNSUPPORTED, error=reason)
+
+
+def _error(provider: str, reason: str) -> ProviderUsage:
+    return ProviderUsage(provider=provider, status=STATUS_ERROR, error=reason)
+
+
+def usage_to_dict(data: ProviderUsage) -> dict[str, Any]:
+    """JSON-safe serialization for the `/api/usage` remote endpoint."""
+    return {
+        "provider": data.provider,
+        "status": data.status,
+        "plan": data.plan,
+        "utilization": data.utilization,
+        "resets_at": data.resets_at.isoformat() if data.resets_at else None,
+        "fetched_at": data.fetched_at.isoformat() if data.fetched_at else None,
+        "error": data.error,
+        "spend": data.spend,
+        "raw_data": data.raw_data,
+    }
+
+
+# ── claude ────────────────────────────────────────────────────────────────
+
+
+def fetch_claude_usage(config_dir: Path | None = None) -> ProviderUsage:
+    """Wraps `limit_status.fetch_usage_shared()` — NEVER call
+    `limit_status.fetch_usage()` directly here (the endpoint 403/429s hard
+    with up to ~60min Retry-After; the shared cross-process state/backoff
+    file is what survives that — see `usage-endpoint-hardened-shared-backoff`
+    project memory). Blocking (one HTTP GET, bounded by
+    `limit_status._TIMEOUT_S`) — run off the Qt main thread.
+    """
+    try:
+        data = limit_status.fetch_usage_shared(config_dir)
+    except Exception:
+        _log.exception("claude usage fetch failed")
+        return _error("claude", "fetch failed")
+    if data is None:
+        return _error("claude", "not logged in, or no usage data available")
+    five_hour = next((w for w in data.windows if w.name == "five_hour"), None)
+    status = STATUS_STALE if data.status == "rate_limited" else STATUS_ACTIVE
+    return ProviderUsage(
+        provider="claude",
+        status=status,
+        plan=data.plan,
+        utilization=five_hour.utilization if five_hour else None,
+        resets_at=five_hour.resets_at if five_hour else None,
+        fetched_at=data.fetched_at,
+        raw_data={
+            "windows": [
+                {
+                    "name": w.name,
+                    "utilization": w.utilization,
+                    "resets_at": w.resets_at.isoformat(),
+                }
+                for w in data.windows
+            ],
+            "extra_usage_enabled": data.extra_usage_enabled,
+        },
+    )
+
+
+# ── codex ─────────────────────────────────────────────────────────────────
+# Verified LIVE against codex-cli 0.146.0 (docs/audit/2026-08-13-provider-
+# usage-survey.md follow-up probe): `codex app-server` (stdio JSON-RPC),
+# `initialize` handshake, then `account/rateLimits/read` returns a real
+# RateLimitSnapshot. The whole app-server surface is still labelled
+# `[experimental]` in `codex --help`, so this shape can move under us
+# without a deprecation window — every field access below is defensive
+# (`.get()`, never raw indexing).
+
+
+def _codex_executable() -> str | None:
+    from .codex_helper import find_codex_executable
+
+    return find_codex_executable()
+
+
+def _terminate_quietly(proc: subprocess.Popen) -> None:
+    try:
+        proc.terminate()
+        proc.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+    except Exception:
+        pass
+
+
+def _codex_rpc_roundtrip(proc: subprocess.Popen, timeout: float) -> ProviderUsage:
+    responses: dict[int, dict] = {}
+    lock = threading.Lock()
+    got_message = threading.Event()
+
+    def _reader() -> None:
+        assert proc.stdout is not None
+        try:
+            for line in proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    msg = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(msg, dict) and "id" in msg and ("result" in msg or "error" in msg):
+                    with lock:
+                        responses[msg["id"]] = msg
+                    got_message.set()
+        except (OSError, ValueError):
+            pass
+
+    threading.Thread(target=_reader, daemon=True).start()
+
+    def _send(req: dict) -> None:
+        assert proc.stdin is not None
+        proc.stdin.write(json.dumps(req) + "\n")
+        proc.stdin.flush()
+
+    def _wait_for(req_id: int, deadline: float) -> dict | None:
+        while time.monotonic() < deadline:
+            with lock:
+                if req_id in responses:
+                    return responses.pop(req_id)
+            got_message.wait(timeout=0.1)
+            got_message.clear()
+        return None
+
+    deadline = time.monotonic() + timeout
+    _send(
+        {
+            "id": 1,
+            "method": "initialize",
+            "params": {"clientInfo": {"name": "takkub-cockpit", "version": "1"}},
+        }
+    )
+    init_resp = _wait_for(1, deadline)
+    if init_resp is None:
+        return _error("codex", "app-server did not respond to initialize")
+    if "error" in init_resp:
+        return _error("codex", f"initialize error: {init_resp['error']}")
+
+    _send({"id": 2, "method": "account/rateLimits/read", "params": None})
+    rl_resp = _wait_for(2, deadline)
+    if rl_resp is None:
+        return _error("codex", "app-server did not respond to account/rateLimits/read")
+    if "error" in rl_resp:
+        err = rl_resp["error"]
+        msg = err.get("message") if isinstance(err, dict) else str(err)
+        return _error("codex", f"account/rateLimits/read error: {msg}")
+
+    result = rl_resp.get("result")
+    rate_limits = result.get("rateLimits") if isinstance(result, dict) else None
+    if not isinstance(rate_limits, dict):
+        return _error("codex", "account/rateLimits/read returned no rateLimits")
+    return _parse_codex_rate_limits(rate_limits)
+
+
+def _parse_codex_rate_limits(rate_limits: dict[str, Any]) -> ProviderUsage:
+    primary = rate_limits.get("primary")
+    primary = primary if isinstance(primary, dict) else {}
+    used_percent = primary.get("usedPercent")
+    try:
+        utilization = float(used_percent) if used_percent is not None else None
+    except (TypeError, ValueError):
+        utilization = None
+    resets_at_epoch = primary.get("resetsAt")
+    resets_at: datetime | None = None
+    if resets_at_epoch is not None:
+        try:
+            resets_at = datetime.fromtimestamp(float(resets_at_epoch), tz=UTC)
+        except (TypeError, ValueError, OSError, OverflowError):
+            resets_at = None
+    plan = rate_limits.get("planType")
+    return ProviderUsage(
+        provider="codex",
+        status=STATUS_ACTIVE,
+        plan=str(plan) if plan else None,
+        utilization=utilization,
+        resets_at=resets_at,
+        fetched_at=datetime.now(tz=UTC),
+        raw_data=rate_limits,
+    )
+
+
+def fetch_codex_usage(timeout: float = _FETCH_TIMEOUT_S) -> ProviderUsage:
+    """Spawns a throwaway `codex app-server`, does one JSON-RPC round trip,
+    then kills the subprocess — never reuses/pools it. Blocking (subprocess
+    I/O bounded by *timeout*) — run off the Qt main thread.
+    """
+    exe = _codex_executable()
+    if not exe:
+        return _unsupported("codex", "codex binary not found on PATH")
+    try:
+        proc = subprocess.Popen(
+            [exe, "app-server"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            creationflags=SUBPROCESS_NO_WINDOW,
+        )
+    except OSError as exc:
+        return _error("codex", f"could not start app-server: {exc}")
+    try:
+        return _codex_rpc_roundtrip(proc, timeout)
+    except Exception:
+        _log.exception("codex usage fetch failed")
+        return _error("codex", "app-server RPC failed")
+    finally:
+        _terminate_quietly(proc)
+
+
+# ── gemini (agy / Antigravity) ───────────────────────────────────────────
+# No CLI subcommand exists (survey confirmed via `agy --help`) — reads the
+# local cache file agy itself writes after polling quota internally. The
+# sample found in the spike was ~5.5 months stale with no on-demand refresh
+# available, so freshness is NEVER assumed: `fetched_at` always rides along
+# and anything older than the threshold below is reported `stale`, never
+# `active`.
+
+_GEMINI_STALE_THRESHOLD_S = 24 * 3600.0
+
+
+def _antigravity_authorized_cache_dir() -> Path:
+    return Path.home() / ".antigravity_cockpit" / "cache" / "quota_api_v1_plugin" / "authorized"
+
+
+def fetch_gemini_usage() -> ProviderUsage:
+    """Reads the newest `quota_api_v1_plugin/authorized/*.json` cache file.
+    Blocking (local file I/O only, no subprocess/network) — safe off the Qt
+    main thread like every other adapter here for consistency, though it's
+    fast enough it would rarely matter.
+    """
+    cache_dir = _antigravity_authorized_cache_dir()
+    try:
+        candidates = sorted(cache_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError:
+        return _unsupported("gemini", "no Antigravity quota cache directory found")
+    if not candidates:
+        return _unsupported("gemini", "no Antigravity quota cache file found (not logged in?)")
+
+    try:
+        raw = json.loads(candidates[0].read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return _error("gemini", "could not read Antigravity quota cache file")
+    if not isinstance(raw, dict):
+        return _error("gemini", "malformed Antigravity quota cache file")
+
+    fetched_at: datetime | None = None
+    updated_at_ms = raw.get("updatedAt")
+    if updated_at_ms is not None:
+        try:
+            fetched_at = datetime.fromtimestamp(float(updated_at_ms) / 1000.0, tz=UTC)
+        except (TypeError, ValueError, OSError, OverflowError):
+            fetched_at = None
+
+    payload = raw.get("payload")
+    models = payload.get("models") if isinstance(payload, dict) else None
+    models = models if isinstance(models, dict) else {}
+
+    # Aggregate to the worst-case (lowest remaining fraction) tracked model —
+    # a single meter is what a status-bar chip needs; per-model detail rides
+    # along in raw_data for anything that wants more.
+    best_fraction: float | None = None
+    resets_at: datetime | None = None
+    for info in models.values():
+        if not isinstance(info, dict):
+            continue
+        quota = info.get("quotaInfo")
+        if not isinstance(quota, dict):
+            continue
+        fraction = quota.get("remainingFraction")
+        if fraction is None:
+            continue
+        try:
+            fraction = float(fraction)
+        except (TypeError, ValueError):
+            continue
+        if best_fraction is None or fraction < best_fraction:
+            best_fraction = fraction
+            reset_raw = quota.get("resetTime")
+            resets_at = None
+            if isinstance(reset_raw, str):
+                try:
+                    resets_at = datetime.fromisoformat(reset_raw.replace("Z", "+00:00"))
+                except ValueError:
+                    resets_at = None
+
+    utilization = None
+    if best_fraction is not None:
+        utilization = max(0.0, min(100.0, (1.0 - best_fraction) * 100.0))
+
+    age_s = (datetime.now(tz=UTC) - fetched_at).total_seconds() if fetched_at else None
+    status = STATUS_ACTIVE
+    if age_s is None or age_s > _GEMINI_STALE_THRESHOLD_S:
+        status = STATUS_STALE
+
+    return ProviderUsage(
+        provider="gemini",
+        status=status,
+        utilization=utilization,
+        resets_at=resets_at,
+        fetched_at=fetched_at,
+        raw_data={"email": raw.get("email"), "model_count": len(models)},
+    )
+
+
+# ── opencode ──────────────────────────────────────────────────────────────
+# opencode has NO quota/rate-limit channel of any kind (survey: `message.data`
+# is an opaque per-response JSON blob; the only account-related table holds
+# just active-account-id pointers). `opencode stats` is the documented,
+# stable CLI surface but renders text-table only (no --json on `stats`
+# itself) — `opencode db "<SELECT ...>" --format json` gives real JSON, at
+# the cost of depending on the sqlite schema `stats` itself relies on, so
+# every field read here is defensive. This NEVER populates `utilization`.
+
+_OPENCODE_STATS_QUERY = (
+    "SELECT "
+    "SUM(json_extract(data,'$.cost')) AS cost, "
+    "SUM(json_extract(data,'$.tokens.input')) AS input_tokens, "
+    "SUM(json_extract(data,'$.tokens.output')) AS output_tokens, "
+    "SUM(json_extract(data,'$.tokens.cache.read')) AS cache_read_tokens, "
+    "SUM(json_extract(data,'$.tokens.cache.write')) AS cache_write_tokens, "
+    "COUNT(*) AS message_count "
+    "FROM message WHERE json_extract(data,'$.role')='assistant'"
+)
+
+
+def _opencode_executable() -> str | None:
+    for name in ("opencode", "opencode.cmd", "opencode.exe"):
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
+
+
+def fetch_opencode_usage(timeout: float = _FETCH_TIMEOUT_S) -> ProviderUsage:
+    """Sums opencode's own self-tallied per-message cost/token fields via a
+    read-only `opencode db` query. Blocking (subprocess, bounded by
+    *timeout*) — run off the Qt main thread. Result always lands in `spend`,
+    never `utilization` — see module docstring.
+    """
+    exe = _opencode_executable()
+    if not exe:
+        return _unsupported("opencode", "opencode binary not found on PATH")
+    try:
+        result = subprocess.run(
+            [exe, "db", _OPENCODE_STATS_QUERY, "--format", "json"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            creationflags=SUBPROCESS_NO_WINDOW,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return _error("opencode", f"opencode db query failed: {exc}")
+    if result.returncode != 0:
+        return _error("opencode", "opencode db query failed")
+    try:
+        rows = json.loads(result.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return _error("opencode", "opencode db returned unparsable output")
+    if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
+        return _error("opencode", "opencode db returned no data")
+    row = rows[0]
+    spend = {
+        "cost_usd": row.get("cost") or 0,
+        "input_tokens": row.get("input_tokens") or 0,
+        "output_tokens": row.get("output_tokens") or 0,
+        "cache_read_tokens": row.get("cache_read_tokens") or 0,
+        "cache_write_tokens": row.get("cache_write_tokens") or 0,
+        "message_count": row.get("message_count") or 0,
+    }
+    return ProviderUsage(
+        provider="opencode",
+        status=STATUS_ACTIVE,
+        fetched_at=datetime.now(tz=UTC),
+        spend=spend,
+    )
+
+
+# ── kimi ──────────────────────────────────────────────────────────────────
+# Survey found no channel at all: no CLI subcommand (`kimi --help`'s full
+# list has nothing usage-shaped) and no local state file carries anything
+# beyond a plain OAuth token blob. Statically unsupported — nothing to
+# probe at runtime.
+
+
+def fetch_kimi_usage() -> ProviderUsage:
+    return _unsupported("kimi", "no usage/quota channel found in kimi CLI")
+
+
+# ── cursor ────────────────────────────────────────────────────────────────
+# Survey could not test this provider at all — `cursor-agent`/`agent` was
+# not installed on the spike machine. Distinguish "installed but no known
+# channel yet" from "not installed here" in the reason text so the UI can
+# say something more honest than a blanket "unsupported".
+
+
+def fetch_cursor_usage() -> ProviderUsage:
+    installed = any(
+        shutil.which(name) for name in ("cursor-agent", "cursor-agent.exe", "agent", "agent.exe")
+    )
+    if installed:
+        return _unsupported("cursor", "cursor CLI usage/quota channel not yet verified (#103)")
+    return _unsupported("cursor", "cursor CLI not installed")
+
+
+# ── dispatch + background store ──────────────────────────────────────────
+
+_FETCHERS: dict[str, Callable[[], ProviderUsage]] = {
+    "claude": fetch_claude_usage,
+    "codex": fetch_codex_usage,
+    "gemini": fetch_gemini_usage,
+    "opencode": fetch_opencode_usage,
+    "kimi": fetch_kimi_usage,
+    "cursor": fetch_cursor_usage,
+}
+
+
+def fetch_provider_usage(provider: str) -> ProviderUsage:
+    """Single-provider fetch with a catch-all safety net. Blocking — run off
+    the Qt main thread (same contract as the individual `fetch_*` functions
+    above)."""
+    fetcher = _FETCHERS.get(provider)
+    if fetcher is None:
+        return _unsupported(provider, f"unknown provider: {provider}")
+    try:
+        return fetcher()
+    except Exception:
+        _log.exception("unexpected error fetching usage for %s", provider)
+        return _error(provider, "unexpected error")
+
+
+class ProviderUsageStore:
+    """Background poller for all six providers, cached for readers like the
+    `/api/usage` remote endpoint to consume WITHOUT ever triggering a live
+    fetch themselves (design doc §4 — a phone poll must never become an
+    extra rate-limit hit). One daemon thread does the fetching; every other
+    method here only touches the in-memory cache under a lock.
+
+    A provider whose most recent fetch came back `unsupported` is never
+    re-polled — that verdict is static per machine (binary present or not,
+    channel exists or not), so re-fetching it every interval would be pure
+    waste.
+    """
+
+    def __init__(
+        self,
+        interval_s: int = 300,
+        on_update: Callable[[str, ProviderUsage], None] | None = None,
+    ) -> None:
+        self._interval_s = interval_s
+        self._on_update = on_update
+        self._lock = threading.Lock()
+        self._cache: dict[str, ProviderUsage] = {}
+        self._running = False
+        self._wake = threading.Event()
+
+    def start(self) -> None:
+        self._running = True
+        threading.Thread(target=self._loop, daemon=True, name="provider-usage-loop").start()
+
+    def stop(self) -> None:
+        self._running = False
+        self._wake.set()
+
+    def get(self, provider: str) -> ProviderUsage | None:
+        with self._lock:
+            return self._cache.get(provider)
+
+    def get_all(self) -> dict[str, ProviderUsage]:
+        with self._lock:
+            return dict(self._cache)
+
+    def refresh_now(self, provider: str) -> None:
+        """Fire a background fetch for one provider outside the regular
+        interval (e.g. right after an AI generation completes — design doc
+        §4). Non-blocking: returns immediately, cache updates asynchronously.
+        """
+        threading.Thread(
+            target=self._fetch_one, args=(provider,), daemon=True, name=f"usage-fetch-{provider}"
+        ).start()
+
+    # ── internal ──────────────────────────────────────────────────
+
+    def _fetch_one(self, provider: str) -> None:
+        with self._lock:
+            if provider not in self._cache:
+                self._cache[provider] = ProviderUsage(provider=provider, status=STATUS_LOADING)
+                self._emit(provider, self._cache[provider])
+        data = fetch_provider_usage(provider)
+        with self._lock:
+            self._cache[provider] = data
+        self._emit(provider, data)
+
+    def _emit(self, provider: str, data: ProviderUsage) -> None:
+        if self._on_update is not None:
+            try:
+                self._on_update(provider, data)
+            except Exception:
+                _log.exception("Error in ProviderUsageStore on_update callback")
+
+    def _loop(self) -> None:
+        for provider in PROVIDER_NAMES:
+            if not self._running:
+                return
+            self._fetch_one(provider)
+        while self._running:
+            self._wake.wait(timeout=self._interval_s)
+            self._wake.clear()
+            if not self._running:
+                return
+            for provider in PROVIDER_NAMES:
+                if not self._running:
+                    return
+                with self._lock:
+                    cached = self._cache.get(provider)
+                if cached is not None and cached.status == STATUS_UNSUPPORTED:
+                    continue
+                self._fetch_one(provider)
+
+
+_store_lock = threading.Lock()
+_store: ProviderUsageStore | None = None
+
+
+def get_store() -> ProviderUsageStore:
+    """Process-wide singleton. First call starts the background poll thread
+    — it never blocks on a fetch itself, so callers (like the remote HTTP
+    handler) can call this inline and still get an immediate reply built
+    from whatever is already cached (`loading` for anything not fetched
+    yet)."""
+    global _store
+    with _store_lock:
+        if _store is None:
+            _store = ProviderUsageStore()
+            _store.start()
+        return _store

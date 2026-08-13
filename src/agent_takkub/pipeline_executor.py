@@ -43,6 +43,19 @@ _SHARD_PATH_RE = re.compile(r"[\w][\w./\\-]*\.(?:md|markdown|json|txt|csv|html?|
 # their npm self-update windows don't overlap (#38).
 _SPAWN_STAGGER_MS = int(os.environ.get("TAKKUB_SPAWN_STAGGER_MS", "400"))
 _CODEX_SPAWN_STAGGER_MS = int(os.environ.get("TAKKUB_CODEX_SPAWN_STAGGER_MS", "10000"))
+# #177 mitigation (unproven — see docs/audit/2026-08-04-issue-146-playwright-
+# shards.md's H1/H2 static-only trace, never live-repro'd): a browser-role
+# shard (qa/critic/designer) spawns two npx MCP server processes on top of
+# its own claude.exe; concurrent MCP-init across N shards is the leading
+# hypothesis for "shard doesn't connect, single pane does". Same value as
+# cli_server.py's `_browser_shard_gap_ms` (kept as separate constants — this
+# module can't import cli_server without violating the pipeline-executor
+# layer contract) so both fan-out entry points (this planner-driven path and
+# the plain `--shards N` path, which goes through cli_server instead) apply
+# the same widened gap.
+_BROWSER_SHARD_SPAWN_STAGGER_MS = int(
+    os.environ.get("TAKKUB_BROWSER_SHARD_SPAWN_STAGGER_MS", "3000")
+)
 
 # Timeout before injecting a partial handoff when shards don't all respond.
 _SHARD_GROUP_TIMEOUT_MS: int = 45 * 60 * 1000  # 45 minutes
@@ -78,6 +91,17 @@ def _split_shard(key: str) -> tuple[str, int | None]:
         role, _, idx = key.partition("#")
         return role, int(idx)
     return key, None
+
+
+def _browser_role_shard_stagger_ms(base_role: str) -> int:
+    """Spawn-gap increment for one browser-role shard slot (#177 mitigation
+    — see `_BROWSER_SHARD_SPAWN_STAGGER_MS`'s comment). `base_role` (never a
+    "#N"-suffixed key — callers always pass the split-off base) in
+    `pane_guard.BROWSER_ROLES` gets the widened gap; every other role keeps
+    the tight general gap."""
+    from .pane_guard import BROWSER_ROLES
+
+    return _BROWSER_SHARD_SPAWN_STAGGER_MS if base_role in BROWSER_ROLES else _SPAWN_STAGGER_MS
 
 
 # ── Dataclasses ───────────────────────────────────────────────────────────────
@@ -720,7 +744,7 @@ class PipelineMixin:
                 ),
             )
             fired.append(shard_role)
-            delay += _SPAWN_STAGGER_MS
+            delay += _browser_role_shard_stagger_ms(base_role)
 
         if degraded:
             self._notify_lead(

@@ -40,6 +40,16 @@ opencode / kimi / cursor, whose role files carry the same rule in prose.
 `GUARD_RULE_TEXT` is the single source of that prose so the role files and
 this module can never drift (guarded by
 `tests/test_agent_role_files_have_browser_guard.py`).
+
+A third rule, ``host_destructive`` (#169), blocks kill-by-image-name commands
+(`taskkill /IM`, `pkill`, `killall`, PowerShell `Stop-Process -Name`) for
+*every* guarded role, no allowlist — unlike ``browser_driver`` there is no
+role that legitimately needs to kill processes host-wide. Root incident
+(2026-07-08): a `frontend` pane ran `taskkill /F /T /IM node.exe` to clear a
+stuck dev-server port and killed every node process on the box, including
+other panes' Claude Code processes — `takkub list` came back with nothing but
+`lead`. `HOST_DESTRUCTIVE_RULE_TEXT` is the prose counterpart, pinned in role
+files by `tests/test_agent_role_files_have_host_destructive_guard.py`.
 """
 
 from __future__ import annotations
@@ -65,6 +75,17 @@ GUARD_RULE_TEXT = (
     "`pip install playwright` และ ad-hoc node/python script ที่ require มัน. "
     "ต้อง verify ผ่าน browser → เขียนใน note ตอน `takkub done` "
     "แล้วให้ Lead ส่งงานต่อให้ qa (qa มี Playwright MCP + browser profile ที่ cockpit จัดการให้)."
+)
+
+# Prose handed to role files verbatim (#169). Kept in sync with the patterns
+# below by tests/test_agent_role_files_have_host_destructive_guard.py.
+HOST_DESTRUCTIVE_RULE_TEXT = (
+    "ห้ามสั่ง kill process ด้วยชื่อ (image name / process name) — `taskkill /IM`, "
+    "`pkill`, `killall`, PowerShell `Stop-Process -Name` ฆ่าทุก process ชื่อนั้นทั้งเครื่อง "
+    "ไม่แยกว่าเป็นของ pane ตัวเองหรือไม่ (เคสจริง #169: `taskkill /F /T /IM node.exe` "
+    "ฆ่า node ทั้งเครื่อง รวม teammate panes อื่น). "
+    "Target เฉพาะ PID ที่ pane ตัวเอง spawn เอง — `taskkill /PID <pid>`, "
+    "`Stop-Process -Id <pid>`, `kill <pid>` แทน."
 )
 
 
@@ -163,6 +184,29 @@ _DISK_SCAN_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
 )
 
+# Kill-by-image-name (#169): these target every process with a given name,
+# not the caller's own children — `taskkill /IM node.exe` kills every node
+# process on the box, including other panes' Claude Code processes. Killing
+# by PID is unaffected (`taskkill /PID`, `Stop-Process -Id`, plain `kill`).
+#
+# Anchored to actual invocation position (start of command, after a
+# separator, or after `sudo`) — same as _BROWSER_PATTERNS' "bare-invoke" rule
+# — so `echo 'use taskkill /PID not /IM'` (naming it, not running it) stays
+# allowed.
+_CMD_START = r"(?:^|[|;&]\s*|\bsudo\s+)"
+_HOST_DESTRUCTIVE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "taskkill-im",
+        re.compile(rf"{_CMD_START}taskkill(?![\w-]){_SAME_CMD}/im\b", re.I | re.M),
+    ),
+    ("pkill", re.compile(rf"{_CMD_START}pkill(?![\w-])", re.I | re.M)),
+    ("killall", re.compile(rf"{_CMD_START}killall(?![\w-])", re.I | re.M)),
+    (
+        "stop-process-name",
+        re.compile(rf"{_CMD_START}Stop-Process(?![\w-]){_SAME_CMD}-Name\b", re.I | re.M),
+    ),
+)
+
 # mini-browser's client is fixed to CDP 9222. A qa/critic/designer shard may
 # still use its isolated Playwright MCP, but must never drive mb's one shared
 # Chrome session (#92).
@@ -220,6 +264,16 @@ def classify(command: str, role: str | None) -> Verdict:
                         f"role `{name}` ขับ browser เองไม่ได้ (นโยบาย cockpit). {GUARD_RULE_TEXT}"
                     ),
                 )
+
+    for rule, pattern in _HOST_DESTRUCTIVE_PATTERNS:
+        if pattern.search(cmd):
+            return Verdict(
+                False,
+                rule=f"host_destructive:{rule}",
+                reason=(
+                    f"role `{name}` ใช้คำสั่งนี้ไม่ได้ (นโยบาย cockpit). {HOST_DESTRUCTIVE_RULE_TEXT}"
+                ),
+            )
 
     for rule, pattern in _DISK_SCAN_PATTERNS:
         if pattern.search(cmd):

@@ -1627,11 +1627,25 @@ class LeadInboxMixin:
                 # state). Unlike not-ready, this is user-caused and must NEVER
                 # be force-bypassed — clobbering a live draft mid-keystroke is
                 # worse than a late notice. Park indefinitely in the durable
-                # queue (still visible via the red-dot) until the draft clears
-                # on its own, then the ready+can-accept branch above flushes
-                # it normally. Reset the staleness clock so a prior not-ready
-                # streak can't leak into a force-flush once the state flips to
-                # draft-blocked.
+                # queue until the draft clears on its own, then the
+                # ready+can-accept branch above flushes it normally. Reset
+                # the staleness clock so a prior not-ready streak can't leak
+                # into a force-flush once the state flips to draft-blocked.
+                #
+                # #163: this branch has genuinely no delivery ceiling by
+                # design (see above) — a real draft-hold can keep a done
+                # report parked here for as long as the draft sits unsent, no
+                # matter how long. That's an intentional tradeoff, not a gap
+                # this fix reopens: `_force_deliver_done_notices` pastes
+                # blind into the composer, so using it here would reintroduce
+                # exactly the clobbering #118 fixed, just on a longer fuse.
+                # Instead, `list_status`/`list_status_detailed`
+                # (`_has_pending_lead_notice`, orchestrator.py) surface the
+                # role as pending via `takkub list`/`status` — a read-only
+                # channel that stays safe to consult regardless of composer
+                # state, so Lead (or whoever is watching it) is never left
+                # with zero signal a report is stuck, even while this branch
+                # itself keeps waiting for the draft to clear.
                 self._pending_done_since.pop(project_ns, None)
 
     def _force_deliver_done_notices(self, project_ns: str) -> None:

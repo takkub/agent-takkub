@@ -187,6 +187,32 @@ def _load_local_issues(cwd: str | Path | None) -> list[dict[str, Any]]:
     return issues
 
 
+def _filter_local_issues(
+    issues: list[dict[str, Any]],
+    *,
+    filter_open: bool = False,
+    filter_closed: bool = False,
+    severity: str | None = None,
+    role: str | None = None,
+    noticed_in: str | None = None,
+) -> list[dict[str, Any]]:
+    results = []
+    for iss in issues:
+        status = iss.get("status", "open").lower()
+        if filter_open and not filter_closed and status != "open":
+            continue
+        if filter_closed and not filter_open and status != "closed":
+            continue
+        if severity and iss.get("severity") != severity:
+            continue
+        if role and iss.get("role") != role:
+            continue
+        if noticed_in and iss.get("noticed_in") != noticed_in:
+            continue
+        results.append(iss)
+    return results
+
+
 def _save_local_issues(issues: list[dict[str, Any]], cwd: str | Path | None) -> None:
     path = _get_local_issues_path(cwd)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -401,27 +427,46 @@ def list_issues(
                         "closed_at": item.get("closedAt") or "",
                     }
                 )
+
+            # A prior gh outage/auth gap can leave issues stranded in the
+            # local-fallback store (new_issue wrote there while gh was down).
+            # Once gh recovers, this branch alone would silently stop showing
+            # them forever — reproduces as "(no issues)" while
+            # .takkub_issues.json still holds open records (issue #174).
+            # Merge any matching backlog in instead of dropping it.
+            try:
+                local_backlog = _filter_local_issues(
+                    _load_local_issues(_local_store_cwd(detect_cwd)),
+                    filter_open=filter_open,
+                    filter_closed=filter_closed,
+                    severity=severity,
+                    role=role,
+                    noticed_in=noticed_in,
+                )
+            except RuntimeError:
+                local_backlog = []
+            if local_backlog:
+                local_path = _get_local_issues_path(_local_store_cwd(detect_cwd))
+                print(
+                    f"⚠ takkub issue: {len(local_backlog)} unreconciled local issue(s) found in "
+                    f"{local_path} (not on GitHub) — included below; migrate with "
+                    "'takkub issue new' against GitHub or reconcile manually.",
+                    file=sys.stderr,
+                )
+                results.extend(local_backlog)
             return results
         except RuntimeError:
             use_local = True
 
     # Local fallback
-    issues = _load_local_issues(_local_store_cwd(detect_cwd))
-    results = []
-    for iss in issues:
-        status = iss.get("status", "open").lower()
-        if filter_open and not filter_closed and status != "open":
-            continue
-        if filter_closed and not filter_open and status != "closed":
-            continue
-        if severity and iss.get("severity") != severity:
-            continue
-        if role and iss.get("role") != role:
-            continue
-        if noticed_in and iss.get("noticed_in") != noticed_in:
-            continue
-        results.append(iss)
-    return results
+    return _filter_local_issues(
+        _load_local_issues(_local_store_cwd(detect_cwd)),
+        filter_open=filter_open,
+        filter_closed=filter_closed,
+        severity=severity,
+        role=role,
+        noticed_in=noticed_in,
+    )
 
 
 def close_issue(

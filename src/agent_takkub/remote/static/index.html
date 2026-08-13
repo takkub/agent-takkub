@@ -174,6 +174,100 @@
   #lead-refresh-btn:active { background: var(--card2); color: var(--fg); }
   #lead-refresh-btn:disabled { opacity: 0.5; cursor: wait; }
 
+  /* ---------- usage chip + drawer ---------- */
+  #usage-chip {
+    background: var(--card);
+    border: 1px solid var(--line2);
+    color: var(--fg-dim);
+    border-radius: 999px;
+    min-width: 26px;
+    height: 26px;
+    padding: 0 8px;
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    line-height: 1;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  #usage-chip:active { background: var(--card2); color: var(--fg); }
+  #usage-chip.warn { color: var(--work); border-color: rgba(251, 191, 36, 0.4); background: rgba(251, 191, 36, 0.1); }
+  #usage-chip.danger { color: var(--danger); border-color: rgba(239, 68, 68, 0.45); background: rgba(239, 68, 68, 0.1); }
+  .usage-sheet-list {
+    overflow-y: auto;
+    padding: 8px 14px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .usage-card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 13px;
+    padding: 12px 13px;
+  }
+  .usage-card-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+  .usage-card-name {
+    font-family: var(--mono);
+    font-weight: 640;
+    font-size: 0.86rem;
+    color: var(--fg);
+  }
+  .usage-card-plan {
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    color: var(--faint);
+  }
+  .usage-card-pct {
+    font-family: var(--mono);
+    font-weight: 700;
+    font-size: 0.9rem;
+  }
+  .usage-bar-track {
+    height: 7px;
+    border-radius: 999px;
+    background: var(--card2);
+    border: 1px solid var(--line);
+    overflow: hidden;
+    margin-bottom: 8px;
+  }
+  .usage-bar-fill {
+    height: 100%;
+    border-radius: 999px;
+    background: var(--accent);
+    transition: width 0.3s ease;
+  }
+  .usage-bar-fill.warn { background: var(--work); }
+  .usage-bar-fill.danger { background: var(--danger); }
+  .usage-card-meta {
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    color: var(--faint);
+    line-height: 1.6;
+  }
+  .usage-card-meta .stale-tag { color: var(--work); }
+  .usage-card-note {
+    font-size: 0.76rem;
+    color: var(--fg-dim);
+    line-height: 1.5;
+  }
+  .usage-card.unsupported { opacity: 0.6; }
+  #usage-sheet-caption {
+    font-family: var(--mono);
+    color: var(--faint);
+    font-size: 0.66rem;
+    text-align: center;
+    line-height: 1.6;
+    padding: 2px 14px 12px;
+  }
+
   /* ---------- resume / session picker sheet ---------- */
   .sheet-overlay {
     display: none;
@@ -988,6 +1082,7 @@
       <div id="header-status">
         <button id="lead-refresh-btn" type="button" aria-label="โหลดข้อความล่าสุด" title="โหลดข้อความล่าสุด">⟳ Refresh</button>
         <button id="lead-resume-btn" type="button" aria-label="ดูรายการ Resume" title="ดูรายการ Resume">↻ Resume</button>
+        <button id="usage-chip" type="button" aria-label="ดู usage/limit ทุก provider" title="Usage">◔</button>
         <span id="status-conn"><span class="dot"></span><span id="status-conn-text">Online</span></span>
         <span id="status-mode">VIEW</span>
       </div>
@@ -1069,6 +1164,18 @@
         <button id="resume-sheet-close" type="button" aria-label="ปิด">✕</button>
       </div>
       <div id="resume-sheet-list"></div>
+    </div>
+  </div>
+
+  <!-- usage / limit drawer -->
+  <div id="usage-sheet" class="sheet-overlay">
+    <div class="sheet">
+      <div class="sheet-header">
+        <span>Usage / limit</span>
+        <button id="usage-sheet-close" type="button" aria-label="ปิด">✕</button>
+      </div>
+      <div id="usage-sheet-list" class="usage-sheet-list"></div>
+      <div id="usage-sheet-caption">อัปเดตจากค่าที่ cockpit บนเดสก์ท็อปดึงมาแล้ว — ไม่ยิงขอเพิ่มจาก provider</div>
     </div>
   </div>
 </div>

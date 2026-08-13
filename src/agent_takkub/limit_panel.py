@@ -16,8 +16,8 @@ from datetime import UTC, datetime
 
 from PyQt6 import sip
 
-from . import cockpit_theme
 from .config import active_project
+from .usage_meter import ProviderUsage, fmt_eta
 
 
 class LimitPanelMixin:
@@ -81,101 +81,44 @@ class LimitPanelMixin:
         # so check liveness here — the choke point every caller routes through.
         if sip.isdeleted(self._limit_label):
             return
-        if data is None:
-            self._limit_label.set_offline()
-            self._limit_label.setToolTip("Usage unavailable (offline or not logged in)")
-            return
+        from . import provider_usage
 
-        rate_limited = getattr(data, "status", "ok") == "rate_limited"
-        window_map = {w.name: w for w in (data.windows or [])}
-        now = datetime.now(tz=UTC)
+        claude_usage = _claude_provider_usage(data)
+        store = provider_usage.get_store()
+        cache = store.get_all()
+        others = [
+            cache.get(name) or ProviderUsage(provider=name, status="loading")
+            for name in provider_usage.PROVIDER_NAMES
+            if name != "claude"
+        ]
+        self._limit_label.set_usages([claude_usage, *others])
 
-        def _fmt_eta(w) -> str:
-            """Clock-style time-left until reset: 'H:MM' or 'D:HH:MM' with days."""
-            resets_at = getattr(w, "resets_at", None)
-            if resets_at is None:
-                return ""
-            if resets_at.tzinfo is None:
-                resets_at = resets_at.replace(tzinfo=UTC)
-            secs = (resets_at - now).total_seconds()
-            if secs <= 0:
-                return "now"
-            mins = int(secs // 60)
-            hours, mins = divmod(mins, 60)
-            days, hours = divmod(hours, 24)
-            if days:
-                return f"{days}:{hours:02d}:{mins:02d}"
-            return f"{hours}:{mins:02d}"
 
-        def _fmt(key: str, label: str) -> str:
-            """Inline readout: window label + countdown-to-reset + utilisation,
-            e.g. '5h 3:45 52%'. The bare '3:45 52% / 2:12 18%' this used to
-            render told you two numbers with no way to tell which was the
-            5-hour window and which was the 7-day one without opening the
-            tooltip — the label makes that legible at a glance."""
-            w = window_map.get(key)
-            if w is None:
-                return f"{label} —"
-            # utilization None = the API payload carried no figure — show
-            # "—" (unknown), never a fabricated 0%.
-            pct = "—" if w.utilization is None else f"{round(w.utilization)}%"
-            eta = _fmt_eta(w)
-            return f"{label} {eta} {pct}" if eta else f"{label} {pct}"
+def _claude_provider_usage(data) -> ProviderUsage:
+    """Convert the existing per-account `UsageData` (limit_status.py) into the
+    shared `ProviderUsage` shape. Claude's figures are for the WHOLE ACCOUNT,
+    not this pane/project — the '5h'/'7d' windows note reflects that in the
+    popup, not just here."""
+    if data is None:
+        return ProviderUsage(provider="claude", status="error")
 
-        text = " · ".join([_fmt("five_hour", "5h"), _fmt("seven_day", "7d")])
+    now = datetime.now(tz=UTC)
+    rate_limited = getattr(data, "status", "ok") == "rate_limited"
+    windows = data.windows or []
+    known_utils = [w.utilization for w in windows if w.utilization is not None]
+    resets = [w.resets_at for w in windows if getattr(w, "resets_at", None) is not None]
+    fetched_at = getattr(data, "fetched_at", None)
 
-        # Stale detection: how old is the payload behind this render? A
-        # rate-limited emit re-serves the last good fetch, and with the
-        # endpoint's long penalties that snapshot can be an hour+ old — a
-        # frozen "52%" (or a post-reset "0%") shown as if live was exactly
-        # the prod "0% ตลอด" bug. Age > 15 min → visible ⏳ marker.
-        stale_age_s: float | None = None
-        fetched_at = getattr(data, "fetched_at", None)
-        if fetched_at is not None:
-            if fetched_at.tzinfo is None:
-                fetched_at = fetched_at.replace(tzinfo=UTC)
-            stale_age_s = max(0.0, (now - fetched_at).total_seconds())
-        is_stale = stale_age_s is not None and stale_age_s > 900
-        if is_stale:
-            text += " ⏳"
+    windows_raw = {}
+    for w in windows:
+        windows_raw[w.name] = {"utilization": w.utilization, "eta": fmt_eta(w.resets_at, now)}
 
-        known_utils = [w.utilization for w in (data.windows or []) if w.utilization is not None]
-        max_util = max(known_utils, default=0.0)
-        if rate_limited:
-            color = cockpit_theme.BANNER_WARN_BORDER
-        elif max_util >= 80:
-            color = cockpit_theme.STATE_ERROR_BRIGHT
-        elif max_util >= 50:
-            color = cockpit_theme.METER_AMBER
-        elif is_stale or not known_utils:
-            # Old snapshot or no utilisation figures at all — dim the chip so
-            # it doesn't read as a confident live value.
-            color = cockpit_theme.TEXT_MUTED
-        else:
-            # Calm state → Claude coral so the little spark reads as "a bit of
-            # Claude" in the corner instead of a neutral grey system chip.
-            color = cockpit_theme.METER_CLAY
-
-        self._limit_label.apply(text, color)
-        plan = getattr(data, "plan", "")
-        note_bits = []
-        if rate_limited:
-            note_bits.append("rate-limited — showing last known values")
-        if stale_age_s is not None:
-            mins = int(stale_age_s // 60)
-            note_bits.append(f"fetched {mins}m ago" if mins else "just fetched")
-        if any(w.utilization is None for w in (data.windows or [])):
-            note_bits.append("— = API ไม่ส่งค่า utilization (unknown ไม่ใช่ 0%)")
-        stale_note = f" ({' · '.join(note_bits)})" if note_bits else ""
-        reset_lines = []
-        for key, label in (
-            ("five_hour", "5h"),
-            ("seven_day", "7d"),
-        ):
-            w = window_map.get(key)
-            if w is not None and (eta := _fmt_eta(w)):
-                reset_lines.append(f"{label} resets in {eta}")
-        reset_block = ("\n" + " · ".join(reset_lines)) if reset_lines else ""
-        self._limit_label.setToolTip(
-            f"Claude usage — plan: {plan}{stale_note}\n5h = five-hour · 7d = seven-day{reset_block}"
-        )
+    return ProviderUsage(
+        provider="claude",
+        status="stale" if rate_limited else "active",
+        plan=getattr(data, "plan", None),
+        utilization=max(known_utils) if known_utils else None,
+        resets_at=min(resets) if resets else None,
+        fetched_at=fetched_at,
+        raw_data={"windows": windows_raw},
+    )

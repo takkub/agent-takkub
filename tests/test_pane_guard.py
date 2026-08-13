@@ -187,6 +187,56 @@ class TestDiskScanDenied:
         assert pane_guard.classify(command, "frontend").allowed, f"false positive: {command}"
 
 
+class TestHostDestructiveDenied:
+    """#169: kill-by-image-name targets every process with that name on the
+    box, not just the caller's own children — the exact incident was a
+    `frontend` pane's `taskkill /F /T /IM node.exe` killing every teammate
+    pane's node process."""
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # the exact command from the incident
+            "taskkill /F /T /IM node.exe",
+            "taskkill /IM node.exe /F",
+            "Taskkill /im python.exe",
+            "pkill node",
+            "pkill -9 -f next",
+            "killall node",
+            "Stop-Process -Name node -Force",
+            "Stop-Process -Force -Name chrome",
+        ],
+    )
+    def test_denied_for_frontend(self, command: str) -> None:
+        verdict = pane_guard.classify(command, "frontend")
+        assert not verdict.allowed, f"should have blocked: {command}"
+        assert verdict.rule.startswith("host_destructive:")
+        assert "PID" in verdict.reason
+
+    @pytest.mark.parametrize("role", ["backend", "mobile", "devops", "reviewer", "qa", "critic"])
+    def test_denied_for_every_role_no_allowlist(self, role: str) -> None:
+        """Unlike browser_driver, no role legitimately needs a host-wide
+        kill-by-name — qa/critic are browser roles but still denied."""
+        assert not pane_guard.classify("taskkill /F /IM node.exe", role).allowed
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "taskkill /PID 12345 /F",
+            "taskkill /F /PID 12345",
+            "Stop-Process -Id 12345 -Force",
+            "kill 12345",
+            "kill -9 12345",
+            # reading/mentioning by name must never trip the guard
+            "grep -rn taskkill scripts/",
+            "echo 'use taskkill /PID not /IM'",
+            "cat docs/kill-policy.md",
+        ],
+    )
+    def test_pid_targeted_and_unrelated_commands_allowed(self, command: str) -> None:
+        assert pane_guard.classify(command, "frontend").allowed, f"false positive: {command}"
+
+
 class TestFailOpen:
     """The guard must never be able to wedge a pane or police a human."""
 
@@ -194,6 +244,7 @@ class TestFailOpen:
     def test_user_driven_panes_never_guarded(self, role: str) -> None:
         assert pane_guard.classify("npx --yes playwright", role).allowed
         assert pane_guard.classify("find / -name x", role).allowed
+        assert pane_guard.classify("taskkill /F /IM node.exe", role).allowed
 
     @pytest.mark.parametrize("role", [None, "", "   "])
     def test_unknown_role_allows(self, role: str | None) -> None:
@@ -212,3 +263,10 @@ class TestRuleTextSyncedWithRoleFiles:
         assert "qa" in pane_guard.GUARD_RULE_TEXT
         assert "takkub done" in pane_guard.GUARD_RULE_TEXT
         assert "playwright" in pane_guard.GUARD_RULE_TEXT.lower()
+
+    def test_host_destructive_rule_text_is_actionable(self) -> None:
+        """Same contract as GUARD_RULE_TEXT: name the safe alternative (PID),
+        not just the prohibition."""
+        assert "PID" in pane_guard.HOST_DESTRUCTIVE_RULE_TEXT
+        assert "taskkill" in pane_guard.HOST_DESTRUCTIVE_RULE_TEXT.lower()
+        assert "169" in pane_guard.HOST_DESTRUCTIVE_RULE_TEXT

@@ -626,6 +626,16 @@ def build_stylesheet(sans_family: str, mono_family: str) -> str:
     QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus {{
         border: 1px solid {ACCENT_GOLD};
     }}
+    /* No placeholder color was ever set here, so Qt fell back to its own
+       default (a faint tint derived from the palette) — nearly unreadable
+       against GROUND_INPUT (#1c1f26), confirmed by rendered screenshot
+       (docs/design/2026-08-13-new-role-critique.md). QPlainTextEdit has no
+       ::placeholder selector in Qt6 — it never needed one, since it never
+       showed a placeholder via stylesheet in the first place; only
+       QLineEdit does. */
+    QLineEdit::placeholder {{
+        color: {TEXT_MUTED};
+    }}
     QComboBox::drop-down {{
         border: none;
         border-left: 1px solid {BORDER_HAIRLINE};

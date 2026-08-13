@@ -59,6 +59,10 @@ def server(monkeypatch):
     monkeypatch.setattr(
         api, "close_project", lambda orch, project: {"ok": True, "project": project}
     )
+    # `api.usage()` would otherwise lazily start the real process-wide
+    # `ProviderUsageStore` singleton (background threads, real subprocess/
+    # network calls) — never let a generic route test touch that.
+    monkeypatch.setattr(api, "usage", lambda: {"providers": []})
 
     config = RemoteConfig(bind_port=0, secret_path="sek", token="tok", mode="control")
     srv = http_server.start_server(config, _FakeOrch())
@@ -1102,6 +1106,44 @@ class TestBridgeOffMainThreadDispatch:
         gate.set()
         status, payload = pending.reply.get(timeout=5)
         assert (status, payload) == (200, {"working": 0, "total": 0})
+
+
+class TestUsageRoute:
+    """`/api/usage` — same gating as every other view-mode GET route, and
+    must reach `api.usage()` inline on the Qt main thread (a bare cache
+    read, not I/O — same as `/api/activity`), never a live provider fetch."""
+
+    def test_returns_api_usage_payload(self, monkeypatch, server):
+        monkeypatch.setattr(
+            api, "usage", lambda: {"providers": [{"provider": "claude", "status": "active"}]}
+        )
+        status, body = _run_pumped(
+            lambda: _get_status(_url(server, "/sek/api/usage"), {"Authorization": "Bearer tok"})
+        )
+        assert status == 200
+        assert json.loads(body) == {"providers": [{"provider": "claude", "status": "active"}]}
+
+    def test_requires_bearer_auth(self, server):
+        status, _ = _get_status(_url(server, "/sek/api/usage"))
+        assert status == 404
+
+    def test_dispatch_runs_on_qt_main_thread_not_a_worker(self, monkeypatch):
+        """Unlike `pulse`/`lead_say`/`lead_upload`, `usage` must NOT be routed
+        through `_OFF_THREAD_ACTIONS` — it's a plain cache read, so it can
+        (and should) run inline in `_Bridge._handle`, same as `activity`."""
+        seen: dict[str, threading.Thread] = {}
+
+        def _fake_usage():
+            seen["thread"] = threading.current_thread()
+            return {"providers": []}
+
+        monkeypatch.setattr(api, "usage", _fake_usage)
+        bridge = http_server._Bridge(_FakeOrch())
+        pending = http_server._PendingRequest(action="usage", params={})
+        bridge._handle(pending)
+        status, payload = pending.reply.get(timeout=5)
+        assert (status, payload) == (200, {"providers": []})
+        assert seen["thread"] is threading.main_thread()
 
 
 class TestStaticFileTraversal:

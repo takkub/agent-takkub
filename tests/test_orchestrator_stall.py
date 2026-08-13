@@ -72,6 +72,11 @@ class _FakeOrch:
     _compute_last_progress_ts = Orchestrator._compute_last_progress_ts
     list_status_detailed = Orchestrator.list_status_detailed
     pane_status_report = Orchestrator.pane_status_report
+    # list_status_detailed calls these (#163 pending-notice surfacing) —
+    # bound so the fake stays a thin real-method wrapper instead of
+    # duplicating the merge logic.
+    _pending_notice_roles = Orchestrator._pending_notice_roles
+    _has_pending_lead_notice = Orchestrator._has_pending_lead_notice
 
 
 @pytest.fixture
@@ -346,6 +351,24 @@ class TestPaneStatusReport:
         report = orch.pane_status_report("default")
         tail = report["panes"]["backend"]["transcript_tail"]
         assert tail == "just some [bracketed] text and a ? question mark"
+
+    def test_transcript_tail_strips_issue_173_repro(
+        self, runtime_tmp: pathlib.Path, tmp_path: pathlib.Path
+    ) -> None:
+        """#173 (duplicate of #145, migrated from local tracker before the
+        #145 fix landed same-day): exact repro from the report — cursor
+        show/hide toggles immediately followed by a CHA spinner line
+        ('[?25h[?25l' / '[3GPondering…') must not leak into `takkub status`
+        output. Already fixed by commit 8ad72e1f; this locks the regression."""
+        transcript = tmp_path / "backend.transcript.log"
+        transcript.write_text("\x1b[?25h\x1b[?25l\x1b[3GPondering…\n", encoding="utf-8")
+        orch = _FakeOrch()
+        pane = _FakePane(state="working", transcript_path=str(transcript))
+        orch._panes_by_project["default"] = {"backend": pane}
+        report = orch.pane_status_report("default")
+        tail = report["panes"]["backend"]["transcript_tail"]
+        assert "\x1b" not in tail
+        assert "Pondering" in tail
 
     def test_non_ui_role_stall_not_suppressed_by_qa_screenshot(
         self, runtime_tmp: pathlib.Path, monkeypatch: pytest.MonkeyPatch

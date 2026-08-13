@@ -798,6 +798,90 @@ def test_cli_issue_close_defaults_to_cockpit_bug(monkeypatch) -> None:
     assert captured.get("cockpit_bug") is True
 
 
+# ── #174: gh-recovered list must not silently drop the local backlog ────────
+
+
+def test_list_issues_merges_unreconciled_local_backlog(tmp_path, monkeypatch, capsys) -> None:
+    """gh was down when `new_issue` wrote to the local fallback store; gh has
+    since recovered. `list_issues()` must still surface those records instead
+    of reporting '(no issues)' just because the GitHub query came back empty."""
+    fake_repo_root = tmp_path / "cockpit-checkout"
+    fake_repo_root.mkdir()
+    monkeypatch.setattr("agent_takkub.issues.REPO_ROOT", fake_repo_root)
+    monkeypatch.setattr("agent_takkub.issues.DATA_HOME", fake_repo_root)
+
+    local_path = fake_repo_root / ".takkub_issues.json"
+    local_path.write_text(
+        json.dumps(
+            [
+                {
+                    "number": 1,
+                    "title": "stranded local issue",
+                    "status": "open",
+                    "severity": "med",
+                    "role": "",
+                    "noticed_in": "",
+                    "tags": [],
+                    "url": "local://issue/1",
+                    "created_at": "2026-08-04T08:37:31Z",
+                    "closed_at": "",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with patch("agent_takkub.issues._gh") as mock_gh:
+        mock_gh.side_effect = ["takkub/agent-takkub", "[]"]  # gh now works, but empty
+        items = list_issues()
+
+    assert any(i["number"] == 1 and i["title"] == "stranded local issue" for i in items)
+    assert "unreconciled local issue" in capsys.readouterr().err
+
+
+def test_list_issues_no_backlog_no_warning(tmp_path, monkeypatch, capsys) -> None:
+    """No local fallback file at all → no spurious warning, normal empty gh result."""
+    fake_repo_root = tmp_path / "cockpit-checkout"
+    fake_repo_root.mkdir()
+    monkeypatch.setattr("agent_takkub.issues.REPO_ROOT", fake_repo_root)
+    monkeypatch.setattr("agent_takkub.issues.DATA_HOME", fake_repo_root)
+
+    with patch("agent_takkub.issues._gh") as mock_gh:
+        mock_gh.side_effect = ["takkub/agent-takkub", "[]"]
+        items = list_issues()
+
+    assert items == []
+    assert "unreconciled" not in capsys.readouterr().err
+
+
+def test_list_issues_backlog_respects_filters(tmp_path, monkeypatch) -> None:
+    """Local backlog merge must honour the same filters as the gh-path query —
+    a closed local issue must not leak into an --open listing."""
+    fake_repo_root = tmp_path / "cockpit-checkout"
+    fake_repo_root.mkdir()
+    monkeypatch.setattr("agent_takkub.issues.REPO_ROOT", fake_repo_root)
+    monkeypatch.setattr("agent_takkub.issues.DATA_HOME", fake_repo_root)
+
+    local_path = fake_repo_root / ".takkub_issues.json"
+    local_path.write_text(
+        json.dumps(
+            [
+                {"number": 1, "title": "closed one", "status": "closed", "severity": "med"},
+                {"number": 2, "title": "open one", "status": "open", "severity": "med"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with patch("agent_takkub.issues._gh") as mock_gh:
+        mock_gh.side_effect = ["takkub/agent-takkub", "[]"]
+        items = list_issues(filter_open=True)
+
+    numbers = [i["number"] for i in items]
+    assert 2 in numbers
+    assert 1 not in numbers
+
+
 def test_cli_issue_show_defaults_to_cockpit_bug(monkeypatch) -> None:
     import sys
 

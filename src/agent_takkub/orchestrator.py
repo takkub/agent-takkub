@@ -126,6 +126,7 @@ from .pipeline_executor import (  # re-exported for test imports; mixin provides
 )
 from .pty_session import PtySession  # re-exported for test imports
 from .roles import LEAD
+from .roles import by_name as _role_by_name
 from .spawn_engine import (  # re-exported for backward compat; mixin provides methods
     _PANE_COLS,
     _PANE_ROWS,
@@ -151,6 +152,7 @@ from .vault_mirror import (  # re-exported for test + script imports
     _render_decision_note,
     _resolve_vault_dir,
     distill_session_facts,
+    distill_to_knowledge_base,
     prune_vault_logs,
     write_obsidian_graph_filter,
 )
@@ -245,6 +247,17 @@ _EVIDENCE_MAGIC_PREFIXES: dict[str, tuple[bytes, ...]] = {
     ".jpeg": (b"\xff\xd8\xff",),
     ".gif": (b"GIF87a", b"GIF89a"),
 }
+
+# Issue #182: a byte-identical screenshot filed under several different
+# names (a retry that overwrote nothing, a copy-paste evidence list, a
+# capture script that re-saved the same failed frame under each expected
+# filename) passes every #159 check — real magic bytes, plausible size —
+# while telling Lead nothing distinct about N different app states. Lead
+# caught one live case only by manually diffing md5 sums. Cap how many bytes
+# get hashed per file: screenshots are typically well under this, and a
+# multi-MB capture is rare enough that skipping its dedup check (never
+# skipping the size/header checks) beats blocking done() on slow disk I/O.
+_EVIDENCE_DEDUP_MAX_BYTES = 8 * 1024 * 1024
 
 # Issue #evidence-cite: path-like or test-result tokens that count as a note
 # "citing" evidence even when the screenshot scan above found nothing (e.g. a
@@ -726,6 +739,26 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                 _log_event("orphan_worktree_prune", removed=removed)
         except Exception as e:
             _log_event("orphan_worktree_prune_error", error=repr(e))
+        # Reconcile task-ledger rows orphaned by a cockpit that exited
+        # without ever calling `takkub done` (issue #166 — previously stuck
+        # "working" forever since `mark_done` only fires from a live pane's
+        # done/close handler). Safe at boot for the same "no pane alive yet"
+        # reason as the two prunes above — but the ledger's own date<today
+        # gate (`task_ledger._orphan_candidates`) is the one that actually
+        # matters here: it's what stops this from closing a same-day row an
+        # auto-respawn (2s later, once panes exist) is about to resume.
+        # Best-effort / non-fatal — a readonly runtime never blocks startup.
+        try:
+            from . import task_ledger
+
+            for _proj in task_ledger.list_projects_with_ledger():
+                _closed, _warn = task_ledger.reconcile_orphaned(_proj, frozenset())
+                if _closed:
+                    _log_event("ledger_reconcile_boot", project=_proj, closed=_closed)
+                if _warn:
+                    _log_event("ledger_reconcile_boot_warning", project=_proj, warning=_warn[:200])
+        except Exception as e:
+            _log_event("ledger_reconcile_boot_error", error=repr(e))
         # PaneRegistry groups all 7 spawn-engine state dicts under one object.
         # Backward-compat properties on SpawnEngineMixin let every existing
         # access site (self._pane_state[...] etc.) work unchanged.
@@ -1549,6 +1582,42 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                 error=str(exc)[:200],
             )
 
+    def _unknown_pane_message(self, to_role: str, project_ns: str) -> str:
+        """Explain why `send()`'s pane lookup came back empty (issue #164).
+
+        `_project_panes(...).get(role)` returns `None` in two different
+        situations that used to collapse into the same misleading "unknown
+        role" message: the name genuinely isn't in the role registry at all,
+        vs. it's a real role (`roles.by_name` finds it) whose pane just isn't
+        open right now — e.g. it was closed, or the process restarted and
+        this role hasn't respawned yet (`unregister_pane` pops the pane
+        widget out of `_project_panes` but never touches `roles.py`'s
+        registry). Only the first case is actually "unknown role".
+
+        `to_role` may carry a shard suffix (`"qa#1"`) — the registry only
+        knows base role names, so that's stripped via `_split_shard` before
+        the lookup; the raw (possibly sharded) name is still used for the
+        PaneState/worktree lookup below since shard panes get their own
+        independent `PaneState` entry."""
+        base_role, _shard_idx = _split_shard(to_role)
+        if _role_by_name(base_role) is None:
+            return f"unknown role: {to_role}"
+        hint = (
+            f"'{to_role}' is a known role but has no pane open right now — "
+            f'use `takkub assign --role {to_role} "<task>"` to open one'
+        )
+        ps = self._pane_state.get(_exit_key(project_ns, to_role))
+        wt = getattr(ps, "worktree", None) if ps is not None else None
+        wt_path = wt.get("path") if wt else None
+        if wt_path:
+            hint += (
+                f" (this role last worked on an isolated worktree — a plain "
+                f"`--isolation worktree` re-assign creates a *new* branch off "
+                f"base, it does not continue the old one; to pick that work "
+                f"back up, assign with `--cwd {wt_path}` instead)"
+            )
+        return hint
+
     def send(
         self,
         to_role: str,
@@ -1564,7 +1633,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         project_panes = self._project_panes(project_ns)
         pane = project_panes.get(to_role)
         if pane is None:
-            return False, f"unknown role: {to_role}"
+            return False, self._unknown_pane_message(to_role, project_ns)
         if pane.session is None or not pane.session.is_alive:
             return False, f"{to_role} is not running (spawn it first)"
 
@@ -2026,15 +2095,35 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             return True
         return header.startswith(prefixes)
 
+    @staticmethod
+    def _evidence_content_hash(path: pathlib.Path, size: int) -> str | None:
+        """md5 of `path`'s bytes, for cross-file duplicate detection (issue
+        #182). `None` on any read failure or when `size` exceeds
+        `_EVIDENCE_DEDUP_MAX_BYTES` — the caller must treat that as "unknown,
+        can't compare" rather than "empty file", so it never collides with a
+        real hash by coincidence."""
+        if size > _EVIDENCE_DEDUP_MAX_BYTES:
+            return None
+        try:
+            return hashlib.md5(path.read_bytes()).hexdigest()
+        except OSError:
+            return None
+
     @classmethod
-    def _evidence_format_entry(cls, path: pathlib.Path, size: int) -> str:
+    def _evidence_format_entry(
+        cls, path: pathlib.Path, size: int, dup_of: pathlib.Path | None = None
+    ) -> str:
         """`path (12.3KB)`, tagged `⚠small`/`⚠bad-header` when the file looks
-        like a failed capture rather than a real screenshot (issue #159)."""
+        like a failed capture rather than a real screenshot (issue #159), or
+        `⚠dup-of:<name>` when it's byte-identical to an earlier file in the
+        same evidence batch (issue #182)."""
         reasons = []
         if size < _EVIDENCE_SUSPECT_MIN_BYTES:
             reasons.append("small")
         if not cls._evidence_looks_valid_image(path):
             reasons.append("bad-header")
+        if dup_of is not None:
+            reasons.append(f"dup-of:{dup_of.name}")
         tag = f" ⚠{'+'.join(reasons)}" if reasons else ""
         posix_path = str(path).replace("\\", "/")
         return f"{posix_path} ({size / 1024:.1f}KB{tag})"
@@ -2097,6 +2186,14 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         role subdir has nothing. This keeps the qa→critic shared
         `screenshots/` pickup convention working unchanged for panes that
         haven't adopted a per-role subdir yet.
+
+        Issue #165: the flat fallback above is itself scoped to
+        `_EVIDENCE_WARN_ROLES` (qa/critic/designer/reviewer) — the only roles
+        the shared-screenshots convention is actually for. A role outside
+        that set (backend, devops, …) that never wrote to its own subdir
+        gets `''`, never another pane's screenshots by coincidence of
+        overlapping assign windows — confirmed live: a pure-Python backend
+        pane's done() picked up critic's unrelated screenshots this way.
         """
         if assign_ts <= 0:
             # No tracked assignment (pane never went through _assign_dispatch,
@@ -2111,14 +2208,38 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
 
         found = cls._find_evidence_files(artifacts_dir / base_role, assign_ts, now)
         shared = False
-        if not found:
+        # Issue #165: the flat/shared fallback used to run for ANY role, so a
+        # pane that never touches a browser (e.g. backend doing pure-Python
+        # work) could get another pane's screenshots (e.g. critic's) folded
+        # into its own done() evidence line — same-project, overlapping
+        # assign windows is all it took. The fallback is only a legitimate
+        # signal for the roles the qa→critic/designer shared screenshots/
+        # convention actually applies to; scope it to _EVIDENCE_WARN_ROLES so
+        # a role outside that set never inherits evidence it didn't produce.
+        if not found and base_role in _EVIDENCE_WARN_ROLES:
             found = cls._find_evidence_files(artifacts_dir, assign_ts, now)
             shared = True
 
         if found:
             found.sort(key=lambda item: item[0], reverse=True)
             newest = found[:_EVIDENCE_MAX_FILES]
-            paths = ", ".join(cls._evidence_format_entry(p, size) for _, p, size in newest)
+            # Issue #182: flag a file whose content is byte-identical to an
+            # earlier one in this same batch — the first occurrence of a hash
+            # is trusted at face value, every later one is tagged so Lead
+            # doesn't mistake a repeated frame for N distinct captures.
+            seen_hashes: dict[str, pathlib.Path] = {}
+            entries = []
+            for _, p, size in newest:
+                digest = cls._evidence_content_hash(p, size)
+                dup_of = None
+                if digest is not None:
+                    first = seen_hashes.get(digest)
+                    if first is not None:
+                        dup_of = first
+                    else:
+                        seen_hashes[digest] = p
+                entries.append(cls._evidence_format_entry(p, size, dup_of=dup_of))
+            paths = ", ".join(entries)
             suffix = " (shared dir)" if shared else ""
             return f"📸 evidence: {paths}{suffix}"
         if base_role not in _EVIDENCE_WARN_ROLES:
@@ -2609,6 +2730,16 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         except OSError:
             pass
 
+        # Local knowledge-base distillation (#168): unlike the vault mirror
+        # below, this always runs — no Obsidian vault required — so every
+        # cockpit install gets cross-session knowledge capture regardless of
+        # provider or whether a vault is configured. Best-effort, never
+        # blocks the done() report it's called alongside.
+        try:
+            distill_to_knowledge_base(safe_project, role, note, RUNTIME_DIR, now=now)
+        except Exception:
+            pass
+
         vault = _resolve_vault_dir()
         if vault is not None:
             try:
@@ -2730,13 +2861,75 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         _log_event("end_session", project=project_ns, note=note[:200])
         return True, f"lead session summary written: {rel_path}"
 
+    # Issue #163: a `done()` report is queued for Lead but the reporting
+    # pane's own auto-close timer fires a fixed 2.5s later regardless — the
+    # Lead Inbox Digest can hold a clean notice up to its debounce window,
+    # the delivery pump can spend further time waiting for Lead to be ready,
+    # and a Lead whose composer reads "ready but holding an unsubmitted
+    # draft" parks the notice in the durable store indefinitely by design
+    # (never force-bypassing a live draft — see _reap_pending_done_notices).
+    # None of those delays are bounded by the pane's own 2.5s lifetime, so
+    # `takkub list` used to just drop the role the moment its pane closed —
+    # looking exactly like the work vanished, even though the report was
+    # still genuinely in flight. Confirmed live (2026-08-13): a backend
+    # pane's clean done() at 15:10 didn't reach the Lead Inbox Digest until
+    # ~15:40, but the pane itself was already gone from `takkub list` well
+    # before that.
+    _PENDING_NOTICE_STATE = "done (report queued — not yet delivered to Lead)"
+
+    def _has_pending_lead_notice(self, project_ns: str, role_name: str) -> bool:
+        """True if `role_name`'s done/FAILED report is still somewhere in the
+        outbound-to-Lead pipeline (digest queue, live notify queue, or the
+        durable pending store) rather than actually written into Lead's pane.
+
+        Matched by the literal `[<role> done]` / `[<role> FAILED]` tag
+        `done()` builds the notice with, plus the `[<role>] done` shape the
+        notice takes once folded into a Lead Inbox Digest line (see
+        `_format_digest_item`). Used by list_status/list_status_detailed to
+        keep surfacing a role until its notice has genuinely left the
+        pipeline, instead of trusting pane-registry membership alone (#163).
+        """
+        tag = re.compile(
+            rf"\[{re.escape(role_name)}\s+(?:done|FAILED)\]"
+            rf"|^•\s*\[{re.escape(role_name)}\]\s*done",
+            re.IGNORECASE | re.MULTILINE,
+        )
+
+        def _any_match(bodies) -> bool:
+            return any(isinstance(b, str) and tag.search(b) for b in bodies)
+
+        if _any_match(getattr(self, "_lead_digest_queue", {}).get(project_ns, ())):
+            return True
+        if _any_match(getattr(self, "_lead_notify_queue", {}).get(project_ns, ())):
+            return True
+        for item in getattr(self, "_pending_done_notices", {}).get(project_ns, ()):
+            if isinstance(item, dict) and item.get("role") == role_name:
+                return True
+        return False
+
+    def _pending_notice_roles(self, project_ns: str, known: dict) -> dict[str, str]:
+        """Roles from `_recent_done` no longer in `known` whose report is
+        still pending delivery — see `_has_pending_lead_notice` (#163)."""
+        extra: dict[str, str] = {}
+        for done_ns, done_role, _fname in getattr(self, "_recent_done", ()):
+            if done_ns != project_ns or done_role in known or done_role in extra:
+                continue
+            if self._has_pending_lead_notice(project_ns, done_role):
+                extra[done_role] = self._PENDING_NOTICE_STATE
+        return extra
+
     def list_status(self, project: str | None = None) -> dict[str, str]:
         """Snapshot of `role → state` for one project's panes.
 
         Defaults to the active project's view, so a Lead in project-a never
-        accidentally sees a backend pane that belongs to project-b.
+        accidentally sees a backend pane that belongs to project-b. Also
+        surfaces a just-closed role whose done report hasn't reached Lead
+        yet (#163) instead of letting it silently vanish from the list.
         """
-        return {name: p.state for name, p in self._project_panes(project).items()}
+        project_ns = self._resolve_project(project)
+        status = {name: p.state for name, p in self._project_panes(project_ns).items()}
+        status.update(self._pending_notice_roles(project_ns, status))
+        return status
 
     def _compute_last_progress_ts(self, role: str, project_ns: str, pane: AgentPane) -> float:
         """Return the most-recent activity timestamp for `pane` (0.0 = no baseline).
@@ -2800,6 +2993,8 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                 "stall_minutes": stall_minutes,
                 "last_progress_ts": last_progress_ts,
             }
+        for role, state in self._pending_notice_roles(project_ns, result).items():
+            result[role] = {"state": state, "stall_minutes": None, "last_progress_ts": 0.0}
         return result
 
     def pane_status_report(
@@ -2976,6 +3171,71 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                 return False, f"task file unreadable: {task_file} ({e})", {}
             return True, "task", {"task": content, "task_file": task_file}
         return True, "task", {"task": ps.last_assigned_task, "task_file": None}
+
+    def _live_roles(self, project_ns: str) -> frozenset[str]:
+        """Roles in *project_ns* with a currently-alive pane session — the
+        set `task_ledger`'s reconcile/close guards check before ever
+        touching a role's ledger row (issue #166)."""
+        return frozenset(
+            role
+            for role, pane in self._project_panes(project_ns).items()
+            if pane.session is not None and pane.session.is_alive
+        )
+
+    def task_reconcile(self, project: str | None = None, dry_run: bool = False) -> tuple[bool, str]:
+        """`takkub task reconcile [--dry-run]` — close ledger rows orphaned
+        by a cockpit session that exited without ever calling `takkub done`
+        (issue #166). Delegates the actual safety gate to
+        `task_ledger._orphan_candidates`; this method only supplies the
+        live-pane set that gate needs."""
+        from . import task_ledger
+
+        project_ns = self._resolve_project(project)
+        live_roles = self._live_roles(project_ns)
+        if dry_run:
+            preview = task_ledger.preview_reconcile(project_ns, live_roles)
+            if not preview:
+                return True, "no orphaned rows to reconcile"
+            lines = "\n".join(f"  - {c['role']} ({c['date']}) — {c['summary']}" for c in preview)
+            return True, f"would close {len(preview)} orphaned row(s):\n{lines}"
+
+        closed, warning = task_ledger.reconcile_orphaned(project_ns, live_roles)
+        if not closed:
+            msg = "no orphaned rows to reconcile"
+        else:
+            msg = f"closed {len(closed)} orphaned row(s): {', '.join(closed)}"
+        if warning:
+            msg = f"{msg}\n{warning}"
+        return True, msg
+
+    def task_close_role(
+        self,
+        role: str,
+        project: str | None = None,
+        force: bool = False,
+        dry_run: bool = False,
+    ) -> tuple[bool, str]:
+        """`takkub task close --role <r> [--force] [--dry-run]` — manually
+        close one role's open ledger row (issue #166's user-facing escape
+        hatch alongside the automatic `task_reconcile`)."""
+        from . import task_ledger
+
+        project_ns = self._resolve_project(project)
+        live_roles = self._live_roles(project_ns)
+        if dry_run:
+            state = task_ledger.load_state(project_ns)
+            ptr = state.get("open", {}).get(role)
+            if ptr is None:
+                return False, f"no open ledger row for role '{role}'"
+            if role in live_roles and not force:
+                return (
+                    False,
+                    f"'{role}' has a live pane right now — close the pane first "
+                    f"(`takkub close --role {role}`), or pass --force to override",
+                )
+            return True, f"would close ledger row for '{role}' (assigned {ptr['date']})"
+
+        return task_ledger.close_role(project_ns, role, live_roles, force=force)
 
     def _build_post_compact_brief(self, project_ns: str) -> str | None:
         """Return a markdown snippet summarising alive teammates for post-compact injection.

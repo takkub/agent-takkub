@@ -96,7 +96,17 @@
     setProjectWorking(project, true, null, false);
     lead.optimisticWorkingTimer = setTimeout(function () {
       lead.optimisticWorkingTimer = null;
-      if (!lead.workingConfirmed) setProjectWorking(project, false, null, false);
+      // Nothing confirmed the turn ended (no working/idle SSE edge, no reply
+      // text) within the blind window — this is the last-resort terminal
+      // state for a provider whose mirror *should* work but silently didn't
+      // (session_uuid drift, etc). Leave a trace instead of just letting the
+      // spinner vanish with no explanation (2026-08-13 remote-mirror fix) —
+      // the provider-known-unsupported case is handled earlier and faster,
+      // in sendLeadMessage's `mirror_supported` check below.
+      if (!lead.workingConfirmed) {
+        setProjectWorking(project, false, null, false);
+        appendProjectMessage(project, "sys", "ยังไม่เห็นคำตอบใน 30 วิ — เช็คที่เดสก์ท็อปว่า Lead ตอบหรือยัง");
+      }
     }, 30000);
   }
 
@@ -326,6 +336,7 @@
     $("pairing-error").textContent = errorMsg || "";
     stopLeadStream();
     stopPulsePolling();
+    stopUsagePolling();
   }
 
   // Third auth factor (addendum): shown whenever the server answers an
@@ -340,6 +351,7 @@
     $("password-error").textContent = errorMsg || "";
     stopLeadStream();
     stopPulsePolling();
+    stopUsagePolling();
   }
 
   function showApp() {
@@ -1256,10 +1268,30 @@
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(sayBody),
-    }).catch(function () {
-      if (targetLead) setProjectWorking(project, false, null, false);
-      toast("ส่งข้อความไม่สำเร็จ");
-    });
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        // The message reached Lead regardless (cli_server writes straight
+        // into the pane) — `mirror_supported: false` only means this
+        // provider (opencode/kimi/cursor — no JSONL/rollout scanner
+        // registered, see notify.supports_remote_history) can never produce
+        // a live reply here. Say so immediately instead of leaving the "…"
+        // spinner up for a reply that will never arrive (2026-08-13
+        // remote-mirror fix — was a silent indefinite hang).
+        if (data && data.mirror_supported === false && targetLead) {
+          clearOptimisticWorkingTimer(targetLead);
+          setProjectWorking(project, false, null, false);
+          appendProjectMessage(
+            project,
+            "sys",
+            data.lead_provider_note || "ส่งถึง Lead แล้ว — โหมด remote ยังไม่รองรับดูคำตอบสดของ provider นี้ ดูคำตอบที่เดสก์ท็อป"
+          );
+        }
+      })
+      .catch(function () {
+        if (targetLead) setProjectWorking(project, false, null, false);
+        toast("ส่งข้อความไม่สำเร็จ");
+      });
   }
 
   function sendLeadImage(file) {
@@ -2009,6 +2041,226 @@
   }
 
   // ---------------------------------------------------------------
+  // Usage / limit drawer (Wave 2) — reads GET /api/usage only, which itself
+  // only reads provider_usage's background-poller cache (see remote/api.py
+  // usage()). Never triggers a live provider fetch from the phone — a
+  // widely-spaced poll here would otherwise become an extra hit against a
+  // rate-limited provider endpoint. Missing numbers stay "—", never 0%
+  // (docs/audit/2026-08-13-provider-usage-impl.md contract).
+  // ---------------------------------------------------------------
+
+  var USAGE_POLL_MS = 5 * 60 * 1000; // deliberately sparse — see note above
+  var USAGE_WARN_PCT = 75;
+  var USAGE_DANGER_PCT = 90;
+  var usageState = { data: null, timer: null };
+
+  function fmtPct(v) {
+    return Math.round(v) + "%";
+  }
+
+  function fmtResetsAt(iso) {
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return "";
+    var diffMs = d.getTime() - Date.now();
+    if (diffMs <= 0) return "รีเซ็ตแล้ว";
+    var mins = Math.round(diffMs / 60000);
+    if (mins < 60) return "รีเซ็ตใน " + mins + " นาที";
+    var hrs = Math.round(mins / 60);
+    if (hrs < 48) return "รีเซ็ตใน " + hrs + " ชม.";
+    return "รีเซ็ตใน " + Math.round(hrs / 24) + " วัน";
+  }
+
+  function fmtAge(iso) {
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return "";
+    var diffMs = Math.max(0, Date.now() - d.getTime());
+    var mins = Math.round(diffMs / 60000);
+    if (mins < 1) return "อัปเดตล่าสุด";
+    if (mins < 60) return "อัปเดตเมื่อ " + mins + " นาทีก่อน";
+    var hrs = Math.round(mins / 60);
+    if (hrs < 48) return "อัปเดตเมื่อ " + hrs + " ชม.ก่อน";
+    var days = Math.round(hrs / 24);
+    if (days < 60) return "อัปเดตเมื่อ " + days + " วันก่อน";
+    return "อัปเดตเมื่อ ~" + Math.round(days / 30) + " เดือนก่อน";
+  }
+
+  function buildUsageCard(p) {
+    var meta = providerMeta(p.provider);
+    var card = document.createElement("div");
+    card.className = "usage-card" + (p.status === "unsupported" ? " unsupported" : "");
+
+    var head = document.createElement("div");
+    head.className = "usage-card-head";
+
+    var left = document.createElement("div");
+    var nameEl = document.createElement("div");
+    nameEl.className = "usage-card-name";
+    nameEl.textContent = meta.logo + " " + meta.name;
+    left.appendChild(nameEl);
+    if (p.plan) {
+      var planEl = document.createElement("div");
+      planEl.className = "usage-card-plan";
+      planEl.textContent = p.plan;
+      left.appendChild(planEl);
+    }
+    head.appendChild(left);
+
+    // A quota-percentage meter only ever applies to active/stale reads with a
+    // real number — opencode's spend field must never render here (design
+    // contract: self-tallied spend is not quota and must stay visually
+    // distinct, never a blended % bar).
+    var hasPct = (p.status === "active" || p.status === "stale") && typeof p.utilization === "number";
+    var pctEl = document.createElement("div");
+    pctEl.className = "usage-card-pct";
+    if (hasPct) {
+      pctEl.textContent = fmtPct(p.utilization);
+      pctEl.style.color = p.utilization >= USAGE_DANGER_PCT ? "var(--danger)"
+        : p.utilization >= USAGE_WARN_PCT ? "var(--work)" : "var(--fg)";
+    } else {
+      pctEl.textContent = "—";
+      pctEl.style.color = "var(--faint)";
+    }
+    head.appendChild(pctEl);
+    card.appendChild(head);
+
+    if (hasPct) {
+      var track = document.createElement("div");
+      track.className = "usage-bar-track";
+      var fill = document.createElement("div");
+      fill.className = "usage-bar-fill" +
+        (p.utilization >= USAGE_DANGER_PCT ? " danger" : p.utilization >= USAGE_WARN_PCT ? " warn" : "");
+      fill.style.width = Math.max(0, Math.min(100, p.utilization)) + "%";
+      track.appendChild(fill);
+      card.appendChild(track);
+    }
+
+    var metaBits = [];
+    if (hasPct && p.resets_at) {
+      var resetLabel = fmtResetsAt(p.resets_at);
+      if (resetLabel) metaBits.push(resetLabel);
+    }
+    if (p.fetched_at) {
+      var ageLabel = fmtAge(p.fetched_at);
+      if (ageLabel) metaBits.push(ageLabel);
+    }
+    if (metaBits.length || p.status === "stale") {
+      var metaLine = document.createElement("div");
+      metaLine.className = "usage-card-meta";
+      if (metaBits.length) metaLine.appendChild(document.createTextNode(metaBits.join(" · ")));
+      if (p.status === "stale") {
+        if (metaBits.length) metaLine.appendChild(document.createTextNode(" · "));
+        var tag = document.createElement("span");
+        tag.className = "stale-tag";
+        tag.textContent = "ข้อมูลอาจไม่ใหม่";
+        metaLine.appendChild(tag);
+      }
+      card.appendChild(metaLine);
+    }
+
+    var note = document.createElement("div");
+    note.className = "usage-card-note";
+    var noteText = "";
+    if (p.status === "loading") {
+      noteText = "กำลังโหลด…";
+    } else if (p.status === "unsupported") {
+      noteText = p.error || "provider นี้ยังไม่มีข้อมูล usage ให้ดู";
+    } else if (p.status === "error") {
+      noteText = "ดึงข้อมูลไม่สำเร็จ" + (p.error ? " — " + p.error : "");
+    } else if (p.provider === "opencode" && p.spend) {
+      var s = p.spend;
+      var cost = typeof s.cost_usd === "number" ? "$" + s.cost_usd.toFixed(2) : "—";
+      noteText = "ยอดที่ opencode นับเอง (ไม่ใช่โควต้า): " + cost + " · " +
+        (Number(s.input_tokens) || 0).toLocaleString() + " in / " +
+        (Number(s.output_tokens) || 0).toLocaleString() + " out tokens · " +
+        (Number(s.message_count) || 0) + " ข้อความ";
+    } else if (p.provider === "claude" && hasPct) {
+      noteText = "ตัวเลขของทั้งบัญชี ไม่ใช่ของ pane นี้เพียงตัวเดียว";
+    }
+    if (noteText) {
+      note.textContent = noteText;
+      card.appendChild(note);
+    }
+
+    return card;
+  }
+
+  function renderUsageSheet() {
+    var list = $("usage-sheet-list");
+    if (!list) return;
+    var providers = usageState.data;
+    list.innerHTML = "";
+    if (!providers) {
+      list.innerHTML = '<div class="resume-empty">กำลังโหลด…</div>';
+      return;
+    }
+    if (!providers.length) {
+      list.innerHTML = '<div class="resume-empty">ไม่มีข้อมูล usage</div>';
+      return;
+    }
+    providers.forEach(function (p) {
+      if (!p || !p.provider) return;
+      list.appendChild(buildUsageCard(p));
+    });
+  }
+
+  function renderUsageChip() {
+    var chip = $("usage-chip");
+    if (!chip) return;
+    var providers = usageState.data || [];
+    var worst = null;
+    providers.forEach(function (p) {
+      if (!p) return;
+      if ((p.status === "active" || p.status === "stale") && typeof p.utilization === "number") {
+        if (worst === null || p.utilization > worst) worst = p.utilization;
+      }
+    });
+    chip.classList.remove("warn", "danger");
+    if (worst !== null && worst >= USAGE_DANGER_PCT) chip.classList.add("danger");
+    else if (worst !== null && worst >= USAGE_WARN_PCT) chip.classList.add("warn");
+  }
+
+  function fetchUsage() {
+    apiFetch("api/usage")
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        usageState.data = Array.isArray(data && data.providers) ? data.providers : [];
+        renderUsageChip();
+        var sheet = $("usage-sheet");
+        if (sheet && sheet.classList.contains("show")) renderUsageSheet();
+      })
+      .catch(function () { /* keep last known snapshot — offline banner already covers this */ });
+  }
+
+  function startUsagePolling() {
+    fetchUsage();
+    stopUsagePolling();
+    usageState.timer = setInterval(fetchUsage, USAGE_POLL_MS);
+  }
+
+  function stopUsagePolling() {
+    if (usageState.timer) { clearInterval(usageState.timer); usageState.timer = null; }
+  }
+
+  function openUsageSheet() {
+    var sheet = $("usage-sheet");
+    if (!sheet) return;
+    sheet.classList.add("show");
+    renderUsageSheet();
+    fetchUsage(); // still cache-only server-side (see usage() docstring) — cheap to refresh on open
+  }
+
+  function closeUsageSheet() {
+    var sheet = $("usage-sheet");
+    if (sheet) sheet.classList.remove("show");
+  }
+
+  $("usage-chip").addEventListener("click", openUsageSheet);
+  $("usage-sheet-close").addEventListener("click", closeUsageSheet);
+  $("usage-sheet").addEventListener("click", function (evt) {
+    if (evt.target === $("usage-sheet")) closeUsageSheet();
+  });
+
+  // ---------------------------------------------------------------
   // Service worker
   // ---------------------------------------------------------------
 
@@ -2039,6 +2291,7 @@
   function enterAuthenticatedApp() {
     showApp();
     fetchProjectsAndMode().catch(function () { /* stay in view mode assumption */ });
+    startUsagePolling();
   }
 
   function init() {

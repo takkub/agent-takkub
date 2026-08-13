@@ -272,9 +272,8 @@ class MainWindow(
         # into the new active ProjectTab's corner via mount_usage_widget().
         self._limit_label = UsageMeter()
         self._limit_label.setToolTip(
-            "Claude usage windows (5h / 7d)\n"
-            "Reflects the User: profile selected for this project.\n"
-            "Updates every 5 min."
+            "Provider usage — คลิกเพื่อดูรายละเอียดแต่ละ provider\n"
+            "Claude reflects the whole account, not just this pane."
         )
 
         # ── status bar ────────────────────────────────────

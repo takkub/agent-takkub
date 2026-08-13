@@ -1,0 +1,20 @@
+
+┌─┐┬ ┬┌┬┐┌─┐┌─┐┬┌─┬┬  ┬  ┌─┐
+├─┤│ │ │ │ │└─┐├┴┐││  │  └─┐
+┴ ┴└─┘ ┴ └─┘└─┘┴ ┴┴┴─┘┴─┘└─┘
+Auto-install the best AI skills for your project · v0.3.6
+
+   Scanning project...[K   ◆ Detected technologies:
+
+     ✔ Bash      ✔ Python    ✔ Pytest    
+     ● Express   
+
+   ◆ Skills to install (3)
+
+    1. wshobson › bash-defensive-patterns               ← Bash
+    2. inferen-sh › python-executor (security check ⚠)  ← Python
+    3. wshobson › python-testing-patterns               ← Python, Pytest
+
+   Agents: claude-code
+   --dry-run: nothing was installed.
+

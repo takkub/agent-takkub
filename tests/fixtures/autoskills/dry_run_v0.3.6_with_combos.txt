@@ -1,0 +1,27 @@
+
+┌─┐┬ ┬┌┬┐┌─┐┌─┐┬┌─┬┬  ┬  ┌─┐
+├─┤│ │ │ │ │└─┐├┴┐││  │  └─┐
+┴ ┴└─┘ ┴ └─┘└─┘┴ ┴┴┴─┘┴─┘└─┘
+Auto-install the best AI skills for your project · v0.3.6
+
+   Scanning project...[K   ◆ Detected technologies:
+
+     ✔ Node.js   ✔ Bash      ✔ Python    
+     ✔ Pytest    ● Express   
+
+   ◆ Detected combos:
+
+     ⚡ Node.js + Express
+
+   ◆ Skills to install (6)
+
+    1. wshobson › nodejs-backend-patterns               ← Node.js
+    2. sickn33 › nodejs-best-practices                  ← Node.js
+    3. wshobson › bash-defensive-patterns               ← Bash
+    4. inferen-sh › python-executor (security check ⚠)  ← Python
+    5. wshobson › python-testing-patterns               ← Python, Pytest
+    6. aj-geddes › nodejs-express-server              
+
+   Agents: claude-code
+   --dry-run: nothing was installed.
+

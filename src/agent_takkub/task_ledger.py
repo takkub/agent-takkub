@@ -101,6 +101,18 @@ def index_path(project: str) -> pathlib.Path:
     return _index_path(project)
 
 
+def list_projects_with_ledger() -> list[str]:
+    """Every project namespace with a ledger on disk — the startup reconcile
+    scan (issue #166) walks this list rather than requiring a project arg."""
+    base = RUNTIME_DIR / "tasks"
+    try:
+        return sorted(
+            p.name for p in base.iterdir() if p.is_dir() and (p / ".ledger-state.json").is_file()
+        )
+    except OSError:
+        return []
+
+
 def _save_state(project: str, state: dict) -> None:
     _atomic_write(_state_path(project), json.dumps(state, ensure_ascii=False, indent=2))
 
@@ -264,35 +276,48 @@ def _flip_detail_status(path: pathlib.Path, status: str) -> None:
         _atomic_write(path, new_text)
 
 
+def _open_row(state: dict, ptr: dict) -> tuple[dict, list[dict]] | tuple[None, None]:
+    """Resolve an `open[role]` pointer to its live row dict (read-only)."""
+    group = _find_group(state, ptr["date"], ptr["goal"])
+    feat = _find_feature(group, ptr["feature"]) if group is not None else None
+    rows = feat["rows"] if feat is not None else []
+    idx = ptr["row_index"]
+    if not (0 <= idx < len(rows)):
+        return None, None
+    return rows[idx], rows
+
+
 def _resolve_open_row(
-    state: dict, project: str, role: str, status: str, ts: datetime
+    state: dict, project: str, role: str, status: str, ts: datetime, reason: str | None = None
 ) -> tuple[bool, str]:
     """Pop *role*'s open-row pointer (if any) and flip that row to *status*.
 
     Shared by `mark_done` (external ok/fail/closed) and `create_assignment`'s
     stale-open resolution (a fresh re-assign superseding a still-open row
-    left by a previous assignment that never called `takkub done`). Mutates
-    `state` in place but does not persist it — callers save + regen the
-    index themselves, and only when this returns `True` (a row actually
-    changed), matching the prior no-op-on-missing-pointer behavior.
+    left by a previous assignment that never called `takkub done`), and by
+    `reconcile_orphaned`/`close_role` (issue #166). Mutates `state` in place
+    but does not persist it — callers save + regen the index themselves, and
+    only when this returns `True` (a row actually changed), matching the
+    prior no-op-on-missing-pointer behavior. *reason*, when given, is
+    stamped on the row (e.g. `"orphaned"`) so the rendered index can explain
+    *why* it closed, distinct from an ordinary `takkub done`/close.
     """
     open_map = state.get("open", {})
     ptr = open_map.pop(role, None)
     if ptr is None:
         return False, ""
 
-    group = _find_group(state, ptr["date"], ptr["goal"])
-    feat = _find_feature(group, ptr["feature"]) if group is not None else None
-    rows = feat["rows"] if feat is not None else []
-    idx = ptr["row_index"]
-    if not (0 <= idx < len(rows)):
+    row, _rows = _open_row(state, ptr)
+    if row is None:
         return False, ""
 
-    rows[idx]["status"] = status
-    rows[idx]["done_hhmmss"] = ts.strftime("%H:%M:%S")
+    row["status"] = status
+    row["done_hhmmss"] = ts.strftime("%H:%M:%S")
+    if reason:
+        row["reason"] = reason
 
     warning = ""
-    detail_rel = rows[idx].get("detail_rel")
+    detail_rel = row.get("detail_rel")
     if detail_rel:
         try:
             _flip_detail_status(_ledger_dir(project) / detail_rel, status)
@@ -333,6 +358,129 @@ def mark_done(project: str, role: str, status: str, ts: datetime | None = None) 
     return warning
 
 
+def _orphan_candidates(state: dict, live_roles: frozenset[str], today: str) -> list[str]:
+    """Roles whose open row is safe to auto-reconcile (issue #166).
+
+    A row qualifies only when BOTH hold:
+      1. its assign *date* is strictly before *today* — a same-day row is
+         left alone because `spawn_engine._auto_respawn` can still bring
+         that exact pane back a few seconds after a restart (it re-sends
+         the cached task directly and never calls `create_assignment`, so a
+         respawned pane's row legitimately stays "working" and must not be
+         closed out from under it); and
+      2. *role* has no live pane right now (`live_roles`) — belt-and-
+         suspenders for the rare case a stale-dated row's pane is somehow
+         still alive (cockpit left running across midnight).
+    Two cockpit instances never collide here: each instance's RUNTIME_DIR
+    (and therefore its `.ledger-state.json`) is already instance-scoped, so
+    this only ever sees its own process's panes.
+    """
+    return [
+        role
+        for role, ptr in state.get("open", {}).items()
+        if ptr["date"] < today and role not in live_roles
+    ]
+
+
+def preview_reconcile(
+    project: str, live_roles: frozenset[str], today: str | None = None
+) -> list[dict]:
+    """Read-only preview of what `reconcile_orphaned` would close — for
+    `takkub task reconcile --dry-run`. Never mutates state on disk."""
+    today = today or datetime.now().strftime("%Y-%m-%d")
+    state = _load_state(project)
+    out = []
+    for role in _orphan_candidates(state, live_roles, today):
+        ptr = state["open"][role]
+        row, _rows = _open_row(state, ptr)
+        out.append(
+            {
+                "role": role,
+                "date": ptr["date"],
+                "summary": row.get("summary", "") if row else "",
+            }
+        )
+    return out
+
+
+def reconcile_orphaned(
+    project: str, live_roles: frozenset[str], today: str | None = None
+) -> tuple[list[str], str]:
+    """Close every ledger row still marked "working" whose owning session is
+    provably gone (issue #166 — a row used to stick at "working" forever
+    once the cockpit process that owned it exited, since `mark_done` is only
+    ever called from live pane-close/done handlers). See
+    `_orphan_candidates` for the safety gate. Rows are flipped to `"closed"`
+    with `reason="orphaned"` (never deleted — history stays visible in
+    INDEX.md, tagged distinctly from an ordinary close). Returns the list of
+    role names actually closed, plus any non-fatal write warning."""
+    ts = datetime.now()
+    today = today or ts.strftime("%Y-%m-%d")
+    state = _load_state(project)
+    candidates = _orphan_candidates(state, live_roles, today)
+    if not candidates:
+        return [], ""
+
+    closed: list[str] = []
+    warnings: list[str] = []
+    for role in candidates:
+        changed, warning = _resolve_open_row(state, project, role, "closed", ts, reason="orphaned")
+        if changed:
+            closed.append(role)
+        if warning:
+            warnings.append(warning)
+
+    if closed:
+        try:
+            _save_state(project, state)
+            _regen_index(project, state)
+        except OSError as exc:
+            w2 = f"⚠️ [ledger] เขียน INDEX.md ของ {project} ไม่สำเร็จ: {exc}"
+            logger.warning("task_ledger INDEX write failed for %s: %s", project, exc)
+            warnings.append(w2)
+
+    return closed, "\n".join(warnings)
+
+
+def close_role(
+    project: str, role: str, live_roles: frozenset[str], force: bool = False
+) -> tuple[bool, str]:
+    """Manually close *role*'s open ledger row (`takkub task close --role`).
+
+    Unlike `reconcile_orphaned` this is an explicit, user-directed action, so
+    it isn't date-gated — but it still refuses a role with a currently live
+    pane (real work in progress) unless *force* is passed, so it can never
+    be used to accidentally paper over an active task."""
+    state = _load_state(project)
+    ptr = state.get("open", {}).get(role)
+    if ptr is None:
+        return False, f"no open ledger row for role '{role}'"
+    if role in live_roles and not force:
+        return (
+            False,
+            f"'{role}' has a live pane right now — close the pane first "
+            f"(`takkub close --role {role}`), or pass --force to override",
+        )
+
+    ts = datetime.now()
+    changed, warning = _resolve_open_row(state, project, role, "closed", ts, reason="manual")
+    if not changed:
+        return False, f"no open ledger row for role '{role}'"
+
+    try:
+        _save_state(project, state)
+        _regen_index(project, state)
+    except OSError as exc:
+        w2 = f"⚠️ [ledger] เขียน INDEX.md ของ {project} ไม่สำเร็จ: {exc}"
+        logger.warning("task_ledger INDEX write failed for %s: %s", project, exc)
+        warning = f"{warning}\n{w2}" if warning else w2
+
+    msg = f"closed ledger row for '{role}'"
+    if warning:
+        msg = f"{msg}\n{warning}"
+    return True, msg
+
+
 def _status_suffix(row: dict) -> str:
     status = row["status"]
     done_hhmm = row.get("done_hhmmss") or ""
@@ -343,7 +491,9 @@ def _status_suffix(row: dict) -> str:
     if status == "fail":
         return f"❌ FAILED `{done_hhmm}`"
     if status == "closed":
-        return f"➖ ปิด `{done_hhmm}`"
+        reason = row.get("reason")
+        tag = " (orphaned — session ไม่มีแล้ว)" if reason == "orphaned" else ""
+        return f"➖ ปิด{tag} `{done_hhmm}`"
     if status == "superseded":
         return f"🔁 แทนที่ด้วยงานใหม่ `{done_hhmm}`"
     return ""

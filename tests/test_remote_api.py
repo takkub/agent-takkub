@@ -466,6 +466,61 @@ class TestActivity:
         assert project["roles"][0]["provider"] == "gemini"
 
 
+class TestUsage:
+    """`/api/usage` must NEVER trigger a live provider fetch itself — it
+    only reads `provider_usage.get_store()`'s cache (design doc §4: a phone
+    poll must never become an extra rate-limit hit)."""
+
+    def test_reads_from_store_cache_without_fetching(self, monkeypatch):
+        from agent_takkub import provider_usage
+
+        class _FakeStore:
+            def get_all(self):
+                return {
+                    "claude": provider_usage.ProviderUsage(
+                        provider="claude", status="active", utilization=7.0
+                    )
+                }
+
+        def _boom():
+            raise AssertionError("usage() must not call fetch_provider_usage directly")
+
+        monkeypatch.setattr(provider_usage, "get_store", lambda: _FakeStore())
+        monkeypatch.setattr(provider_usage, "fetch_provider_usage", _boom)
+
+        result = api.usage()
+        by_provider = {p["provider"]: p for p in result["providers"]}
+        assert by_provider["claude"]["status"] == "active"
+        assert by_provider["claude"]["utilization"] == 7.0
+
+    def test_provider_missing_from_cache_reports_loading_not_an_error(self, monkeypatch):
+        from agent_takkub import provider_usage
+
+        class _FakeStore:
+            def get_all(self):
+                return {}
+
+        monkeypatch.setattr(provider_usage, "get_store", lambda: _FakeStore())
+
+        result = api.usage()
+        by_provider = {p["provider"]: p for p in result["providers"]}
+        assert set(by_provider) == set(provider_usage.PROVIDER_NAMES)
+        for entry in by_provider.values():
+            assert entry["status"] == "loading"
+            assert entry["utilization"] is None
+
+    def test_response_covers_every_registered_provider(self, monkeypatch):
+        from agent_takkub import provider_usage
+
+        class _FakeStore:
+            def get_all(self):
+                return {}
+
+        monkeypatch.setattr(provider_usage, "get_store", lambda: _FakeStore())
+        result = api.usage()
+        assert len(result["providers"]) == len(provider_usage.PROVIDER_NAMES)
+
+
 class TestLeadSay:
     def test_empty_message_rejected(self, fake_orch):
         with pytest.raises(api.RemoteApiError) as excinfo:
@@ -473,19 +528,44 @@ class TestLeadSay:
         assert excinfo.value.status == 400
 
     def test_success_sends_as_remote_to_lead(self, monkeypatch, fake_orch):
+        monkeypatch.setattr(api.notify, "lead_provider_name", lambda orch, ns: "claude")
         srv = _FakeCliServer({"ok": True, "msg": "sent to lead"})
         _patch_port(monkeypatch, srv.port)
         try:
             result = api.lead_say(fake_orch, "hello lead", None)
         finally:
             srv.close()
-        assert result == {"ok": True}
+        assert result == {
+            "ok": True,
+            "provider": "claude",
+            "mirror_supported": True,
+            "lead_provider_note": None,
+        }
         assert len(srv.received) == 1
         sent = srv.received[0]
         assert sent["cmd"] == "send"
         assert sent["to"] == "lead"
         assert sent["from"] == "remote"
         assert sent["msg"] == "hello lead"
+
+    def test_success_flags_unsupported_mirror_provider(self, monkeypatch, fake_orch):
+        """2026-08-13 remote-mirror fix: a provider with no history scanner
+        (opencode/kimi/cursor) still delivers the message, but the response
+        must tell the PWA not to expect a live mirrored reply — this is the
+        signal that stops the phone's spinner from hanging forever with zero
+        explanation (the reported BlueParking/OpenCode bug)."""
+        monkeypatch.setattr(api.notify, "lead_provider_name", lambda orch, ns: "opencode")
+        srv = _FakeCliServer({"ok": True, "msg": "sent to lead"})
+        _patch_port(monkeypatch, srv.port)
+        try:
+            result = api.lead_say(fake_orch, "hello lead", None)
+        finally:
+            srv.close()
+        assert result["ok"] is True
+        assert result["provider"] == "opencode"
+        assert result["mirror_supported"] is False
+        assert result["lead_provider_note"] is not None
+        assert "opencode" in result["lead_provider_note"]
 
     def test_forwards_from_project_to_cli_server(self, monkeypatch, fake_orch):
         srv = _FakeCliServer({"ok": True, "msg": "sent to lead"})
@@ -522,7 +602,12 @@ class TestLeadUploadImage:
 
         def _fake_say(orch, text, project):
             seen.update(text=text, project=project)
-            return {"ok": True}
+            return {
+                "ok": True,
+                "provider": "claude",
+                "mirror_supported": True,
+                "lead_provider_note": None,
+            }
 
         monkeypatch.setattr(api, "lead_say", _fake_say)
         result = api.lead_upload_image(
@@ -539,7 +624,12 @@ class TestLeadUploadImage:
         assert str(images[0]) in seen["text"]
         assert "ช่วยดู error นี้" in seen["text"]
         assert seen["project"] == "proj-a"
-        assert result == {"ok": True, "name": "phone.png"}
+        assert result == {
+            "ok": True,
+            "name": "phone.png",
+            "mirror_supported": True,
+            "lead_provider_note": None,
+        }
 
     def test_rejects_mime_magic_mismatch_without_writing(self, monkeypatch, tmp_path: Path):
         monkeypatch.setattr(api._config, "RUNTIME_DIR", tmp_path / "runtime")

@@ -20,6 +20,7 @@ from datetime import datetime
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 from PyQt6.QtNetwork import QHostAddress, QTcpServer, QTcpSocket
 
+from . import browser_chrome
 from .config import write_port
 from .orchestrator import Orchestrator
 from .spawn_queue_health import SpawnQueueHealthMonitor
@@ -95,8 +96,22 @@ class CliServer(QObject):
         # installs collide on EBUSY on Windows (#38). Space codex spawns further so
         # their update windows don't overlap.
         self._codex_gap_ms = int(os.environ.get("TAKKUB_CODEX_SPAWN_STAGGER_MS", "10000"))
+        # #177 mitigation (not a proven fix — see docs/audit/2026-08-04-issue-146-
+        # playwright-shards.md's H1/H2): a browser-role shard (qa#N/critic#N/
+        # designer#N) spawns TWO npx MCP server processes (playwright +
+        # chrome-devtools) on top of its own claude.exe, and claude code's MCP
+        # connect/startup window has no configurable timeout. N shards' MCP-init
+        # firing near-simultaneously is the leading (unproven, no live repro yet)
+        # hypothesis for "shard doesn't connect, single pane does" reports. Widen
+        # the gap for these spawns specifically, same mechanism as the codex gap
+        # above, so MCP-init windows overlap less without slowing down non-browser
+        # fan-out (backend/frontend shards keep the tight 400ms gap).
+        self._browser_shard_gap_ms = int(
+            os.environ.get("TAKKUB_BROWSER_SHARD_SPAWN_STAGGER_MS", "3000")
+        )
         self._spawn_slot_until = 0.0  # monotonic ms; next non-codex spawn may start
         self._codex_slot_until = 0.0  # monotonic ms; next codex spawn may start
+        self._browser_shard_slot_until = 0.0  # monotonic ms; next browser-shard spawn may start
         # #141: read-only spawn-arbiter wedge diagnostics for `takkub doctor --live`.
         self._spawn_health = SpawnQueueHealthMonitor(orchestrator, parent=self)
 
@@ -119,29 +134,50 @@ class CliServer(QObject):
         except Exception:
             return base == "codex"
 
+    @staticmethod
+    def _is_browser_shard_spawn(role: str | None) -> bool:
+        """True iff *role* is a fan-out shard (`#N` suffix) of a browser role
+        (qa/critic/designer) — see `_browser_shard_gap_ms`'s comment for why
+        these specifically get a wider spawn gap (#177 mitigation)."""
+        raw = (role or "").strip().lower()
+        if "#" not in raw:
+            return False
+        base = raw.split("#", 1)[0]
+        return base in browser_chrome.BROWSER_ROLES
+
     def _next_spawn_delay_ms(self, role: str | None, project: str | None = None) -> int:
         """Reserve the next spawn time slot and return the delay (ms) until it.
 
-        Two slots: a general one spaces ALL spawns ≥ _spawn_gap_ms apart (the
-        ConPTY collision fix, #44); a codex one additionally spaces codex spawns
-        ≥ _codex_gap_ms apart (the npm-EBUSY mitigation, #38). A non-codex spawn
-        following a SINGLE codex spawn is not penalised by the codex gap (it uses
-        the general slot); after multiple codex spawns the general slot is dragged
-        forward by the in-flight codex window, which is benign (the system is
-        mid-codex-install anyway). The first spawn in an idle period yields delay
+        Three slots, each additive on top of the general one: a general slot
+        spaces ALL spawns ≥ _spawn_gap_ms apart (the ConPTY collision fix,
+        #44); a codex slot additionally spaces codex spawns ≥ _codex_gap_ms
+        apart (the npm-EBUSY mitigation, #38); a browser-shard slot
+        additionally spaces qa#N/critic#N/designer#N spawns ≥
+        _browser_shard_gap_ms apart (the MCP cold-start mitigation, #177). A
+        spawn outside a given slot's category is not penalised by that slot
+        (it only waits on the general one); after several spawns IN that
+        category the general slot itself gets dragged forward by the
+        in-flight window, which is benign (the system is mid-install/
+        mid-MCP-init anyway). The first spawn in an idle period yields delay
         0, so a lone `takkub assign` is unchanged. Runs on the Qt main thread
         (QTcpServer), so no locking is needed. codex detection resolves the
         effective provider (see _is_codex_spawn) so remapped→codex roles are
         covered and a degraded-to-claude codex role is not over-staggered."""
         now = time.monotonic() * 1000.0
         is_codex = self._is_codex_spawn(role, project)
+        is_browser_shard = self._is_browser_shard_spawn(role)
         start = max(now, self._spawn_slot_until)
         if is_codex:
             start = max(start, self._codex_slot_until)
-        # General slot advances for every spawn; codex slot only for codex spawns.
+        if is_browser_shard:
+            start = max(start, self._browser_shard_slot_until)
+        # General slot advances for every spawn; the other two only for
+        # spawns in their own category.
         self._spawn_slot_until = start + self._spawn_gap_ms
         if is_codex:
             self._codex_slot_until = start + self._codex_gap_ms
+        if is_browser_shard:
+            self._browser_shard_slot_until = start + self._browser_shard_gap_ms
         return max(0, int(start - now))
 
     def listen(self, port: int = 0) -> int:
@@ -518,6 +554,19 @@ class CliServer(QObject):
                     oldest_queued_age_s=snap.oldest_queued_age_s,
                 )
                 return
+            elif cmd == "remote-mirror-status":
+                # 2026-08-13 remote-mirror-blank fix: `takkub doctor --live`
+                # diagnostic for "phone shows nothing back from Lead".
+                # Interpretation lives in doctor.check_remote_mirror_live —
+                # this handler only gathers the raw live-only facts doctor's
+                # pure-logic checks structurally cannot see (in-memory pane
+                # state) AND cannot import (the `remote-bolt-on-isolation`
+                # import-linter contract forbids both cli_server.py and
+                # doctor.py from depending on `agent_takkub.remote`, so this
+                # deliberately duplicates remote/notify.py's small uuid/path
+                # resolution instead of importing it).
+                self._reply(sock, **self._remote_mirror_status(from_project))
+                return
             elif cmd == "status":
                 since_ts: float | None = None
                 since_hhmm = req.get("since")
@@ -597,6 +646,17 @@ class CliServer(QObject):
                 else:
                     self._reply(sock, ok=False, msg=msg_t)
                 return
+            elif cmd == "task-reconcile":
+                ok, msg = self._orch.task_reconcile(
+                    project=from_project, dry_run=bool(req.get("dry_run", False))
+                )
+            elif cmd == "task-close":
+                ok, msg = self._orch.task_close_role(
+                    req.get("role", ""),
+                    project=from_project,
+                    force=bool(req.get("force", False)),
+                    dry_run=bool(req.get("dry_run", False)),
+                )
             elif cmd == "harvest-done":
                 harvest_role = req.get("role", "")
                 harvest_note = req.get("note", "harvested by lead")
@@ -632,6 +692,76 @@ class CliServer(QObject):
             ok, msg = False, f"error: {e}"
 
         self._reply(sock, ok=ok, msg=msg)
+
+    def _remote_mirror_status(self, from_project: str | None) -> dict:
+        """Live facts behind `takkub doctor --live`'s remote-mirror check
+        (2026-08-13): which provider actually backs this project's Lead
+        pane, whether that provider has a registered remote-history scanner
+        at all, and — for claude, the only provider with a fixed uuid-exact
+        transcript path — whether that exact file exists on disk. Mirrors
+        remote/notify.py's `pane_provider_name`/`_lead_session_uuid`/
+        `_resolve_claude_jsonl_path` logic verbatim rather than importing
+        it (forbidden by the `remote-bolt-on-isolation` contract)."""
+        resolve_project = getattr(self._orch, "_resolve_project", None)
+        project_ns = (
+            resolve_project(from_project)
+            if resolve_project is not None
+            else (from_project or "default")
+        )
+
+        panes_by_project = getattr(self._orch, "_panes_by_project", None)
+        pane_state = getattr(self._orch, "_pane_state", None)
+        panes = panes_by_project.get(project_ns) if isinstance(panes_by_project, dict) else None
+        lead_pane = panes.get("lead") if isinstance(panes, dict) else None
+
+        provider = None
+        model = getattr(lead_pane, "model", None)
+        model_provider = getattr(model, "provider_name", None)
+        if isinstance(model_provider, str) and model_provider.strip():
+            provider = model_provider.strip().lower()
+        else:
+            from .provider_config import effective_provider_for
+
+            provider = str(effective_provider_for("lead", project_ns) or "").strip().lower()
+
+        from .provider_spec import PROVIDER_REGISTRY
+
+        spec = PROVIDER_REGISTRY.get(provider)
+        supports_remote_history = bool(spec is not None and spec.supports_remote_history)
+
+        session_uuid = None
+        if isinstance(pane_state, dict):
+            from .orchestrator_text import _exit_key
+
+            ps = pane_state.get(_exit_key(project_ns, "lead"))
+            uuid_val = getattr(ps, "session_uuid", None) if ps is not None else None
+            if isinstance(uuid_val, str) and uuid_val.strip():
+                session_uuid = uuid_val.strip()
+
+        # Only claude resolves a Lead session by an exact uuid->jsonl glob
+        # (codex/gemini pick their own file by cwd + mtime, so "does the
+        # uuid's file exist" isn't a meaningful question for them — None
+        # means "not applicable", never a false negative).
+        transcript_exists: bool | None = None
+        if provider == "claude" and session_uuid:
+            try:
+                from .user_profile import config_dir_for
+
+                base = config_dir_for(project_ns) / "projects"
+                transcript_exists = any(base.glob(f"*/{session_uuid}.jsonl"))
+            except OSError:
+                transcript_exists = False
+
+        return {
+            "ok": True,
+            "msg": "remote mirror status",
+            "project": project_ns,
+            "provider": provider,
+            "supports_remote_history": supports_remote_history,
+            "lead_pane_open": lead_pane is not None,
+            "session_uuid": session_uuid,
+            "transcript_exists": transcript_exists,
+        }
 
     def _reply(self, sock: QTcpSocket, *, ok: bool, msg: str, **extra) -> None:
         payload = {"ok": ok, "msg": msg, **extra}
