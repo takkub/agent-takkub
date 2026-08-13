@@ -277,14 +277,16 @@
         "agent_takkub.orchestrator",
         "agent_takkub.orchestrator_text",
         "agent_takkub.provider_config",
-        "agent_takkub.spawn_queue_health"
+        "agent_takkub.provider_spec",
+        "agent_takkub.spawn_queue_health",
+        "agent_takkub.user_profile"
       ],
       "imported_by": [
         "agent_takkub.headless_window",
         "agent_takkub.main_window"
       ],
       "fan_in": 2,
-      "fan_out": 5
+      "fan_out": 7
     },
     {
       "module": "agent_takkub.cockpit_theme",
@@ -1133,6 +1135,7 @@
       "imported_by": [
         "agent_takkub.agent_pane",
         "agent_takkub.cli",
+        "agent_takkub.cli_server",
         "agent_takkub.doctor",
         "agent_takkub.headless_pane",
         "agent_takkub.lead_inbox",
@@ -1151,7 +1154,7 @@
         "agent_takkub.settings_window",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 19,
+      "fan_in": 20,
       "fan_out": 3
     },
     {
@@ -2222,6 +2225,7 @@
       ],
       "imported_by": [
         "agent_takkub.app",
+        "agent_takkub.cli_server",
         "agent_takkub.doctor",
         "agent_takkub.lead_context",
         "agent_takkub.limit_autoresume",
@@ -2234,7 +2238,7 @@
         "agent_takkub.status_header",
         "agent_takkub.user_actions"
       ],
-      "fan_in": 12,
+      "fan_in": 13,
       "fan_out": 4
     },
     {

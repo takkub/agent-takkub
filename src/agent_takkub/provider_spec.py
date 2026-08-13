@@ -575,6 +575,16 @@ opencode_spec = ProviderSpec(
     effort_flag=None,
     produces_jsonl_transcript=False,
     supports_token_meter=False,
+    # GAP (#103, confirmed 2026-08-13 — BlueParking bug report): no scanner
+    # registered in remote/notify.py's _HISTORY_SCANNERS for opencode, so a
+    # Lead pane running this provider never mirrors a reply to Remote Mobile
+    # — the message IS delivered (cli_server writes straight into the pane;
+    # delivery is provider-agnostic), only the read-back is unsupported. As
+    # of the fix landing alongside this comment, this is no longer a silent
+    # gap: `api.lead_say`'s response and `takkub doctor --live` both surface
+    # it explicitly instead of the phone's spinner hanging forever with no
+    # explanation. Flip to True only once a real transcript source is found
+    # for this provider and a matching _HistoryScanner entry ships.
     supports_remote_history=False,
     prepend_bin_dir_to_path=False,
     auto_trust=False,  # no folder-trust modal observed on first boot (1.18.3)
@@ -643,6 +653,9 @@ kimi_spec = ProviderSpec(
     effort_flag=None,
     produces_jsonl_transcript=False,
     supports_token_meter=False,
+    # GAP (#103): same remote-mirror gap as opencode_spec's note above — no
+    # _HistoryScanner entry exists for kimi, so a kimi Lead pane never
+    # mirrors a reply to Remote Mobile even though delivery itself works.
     supports_remote_history=False,
     prepend_bin_dir_to_path=False,
     auto_trust=False,
@@ -714,6 +727,9 @@ cursor_spec = ProviderSpec(
     effort_flag=None,
     produces_jsonl_transcript=False,
     supports_token_meter=False,
+    # GAP (#103): same remote-mirror gap as opencode_spec's note above — no
+    # _HistoryScanner entry exists for cursor, so a cursor Lead pane never
+    # mirrors a reply to Remote Mobile even though delivery itself works.
     supports_remote_history=False,
     prepend_bin_dir_to_path=False,
     auto_trust=False,

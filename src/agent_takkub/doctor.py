@@ -1757,6 +1757,145 @@ def check_spawn_queue_live(resp: dict | None) -> list[Finding]:
     return [Finding("spawn-queue", "wedge", Status.OK, detail)]
 
 
+# ---------------------------------------------------------------------------
+# [remote-mirror] — live check (2026-08-13, `takkub doctor --live` only)
+# ---------------------------------------------------------------------------
+
+
+def check_remote_mirror_live(resp: dict | None) -> list[Finding]:
+    """[remote-mirror] — interpret a live `remote-mirror-status` response.
+
+    Diagnoses "phone shows nothing back from Lead" one item at a time,
+    reported by a friend running an OpenCode Lead (BlueParking project):
+    the message DID reach Lead (cli_server writes straight into the pane —
+    unrelated to this check), but the phone's live mirror never showed a
+    reply because remote/notify.py had no registered history scanner for
+    that provider at all.
+
+    Pure interpretation only, same reasoning as `check_spawn_queue_live`
+    above: doctor.py must not import `cli`/`orchestrator`, and (per the
+    `remote-bolt-on-isolation` import-linter contract) must not import
+    `agent_takkub.remote` either — so the live socket round-trip AND the
+    pane-state read both live in the caller (`cli.cmd_doctor` when
+    `--live` is passed → `cli_server.py`'s `remote-mirror-status` handler,
+    which deliberately duplicates remote/notify.py's small uuid/path
+    resolution rather than importing it). Pass `None` when the cockpit
+    isn't running.
+    """
+    if resp is None:
+        return [
+            Finding(
+                "remote-mirror",
+                "lead-pane",
+                Status.SKIP,
+                "cockpit is not running — live check unavailable",
+                "start the cockpit, then re-run `takkub doctor --live`",
+            )
+        ]
+    if not resp.get("ok"):
+        return [
+            Finding(
+                "remote-mirror",
+                "lead-pane",
+                Status.WARN,
+                f"live check failed: {resp.get('msg', 'unknown error')}",
+            )
+        ]
+
+    findings: list[Finding] = []
+    project = resp.get("project") or "(unknown)"
+    provider = str(resp.get("provider") or "").strip() or "(unknown)"
+    lead_open = bool(resp.get("lead_pane_open"))
+    supports = bool(resp.get("supports_remote_history"))
+    session_uuid = resp.get("session_uuid")
+    transcript_exists = resp.get("transcript_exists")
+
+    if not lead_open:
+        findings.append(
+            Finding(
+                "remote-mirror",
+                "lead-pane",
+                Status.WARN,
+                f"project={project} has no open Lead pane — nothing to mirror right now",
+                "open/spawn the Lead pane for this project, then re-run `takkub doctor --live`",
+            )
+        )
+        return findings
+    findings.append(
+        Finding("remote-mirror", "lead-pane", Status.OK, f"project={project} provider={provider}")
+    )
+
+    if supports:
+        findings.append(
+            Finding(
+                "remote-mirror",
+                "history-scanner",
+                Status.OK,
+                f"provider={provider} has a registered remote-history scanner",
+            )
+        )
+    else:
+        findings.append(
+            Finding(
+                "remote-mirror",
+                "history-scanner",
+                Status.FAIL,
+                f"provider={provider} has NO remote-history scanner registered "
+                "(ProviderSpec.supports_remote_history=False) — the phone will "
+                "never show a live reply for this Lead pane, by design, not a bug",
+                "known gap for opencode/kimi/cursor (issue #103) — desktop is "
+                "the only place to read this Lead's replies until a scanner "
+                "ships for this provider",
+            )
+        )
+
+    if session_uuid is None:
+        findings.append(
+            Finding(
+                "remote-mirror",
+                "session-uuid",
+                Status.SKIP if not supports else Status.WARN,
+                "no session_uuid recorded for this Lead pane yet",
+                "check `takkub doctor` (non-live) hook-wiring findings — the "
+                "SessionStart hook (`takkub session-report`) stamps this on "
+                "every Claude spawn/resume; a non-claude Lead may never set it",
+            )
+        )
+    else:
+        findings.append(
+            Finding("remote-mirror", "session-uuid", Status.OK, f"session_uuid={session_uuid[:8]}…")
+        )
+
+    if provider == "claude" and session_uuid is not None:
+        if transcript_exists:
+            findings.append(
+                Finding(
+                    "remote-mirror",
+                    "transcript-file",
+                    Status.OK,
+                    "transcript file for this exact session_uuid exists on disk",
+                )
+            )
+        else:
+            findings.append(
+                Finding(
+                    "remote-mirror",
+                    "transcript-file",
+                    Status.FAIL,
+                    "no transcript file matches this exact session_uuid — the "
+                    "mirror will stay blank (never falls back to a newer/other "
+                    "session file — that fallback was a proven bug, removed on "
+                    "purpose, see remote/notify.py)",
+                    "the pane's session_uuid has drifted from its actual "
+                    "transcript (usually a manual `/resume` typed on the "
+                    "desktop after spawn) — `/resume` again, or restart the "
+                    "Lead pane so a fresh spawn re-stamps a matching uuid",
+                )
+            )
+
+    return findings
+
+
 def run_all_checks() -> list[Finding]:
     findings: list[Finding] = []
     checks = (
