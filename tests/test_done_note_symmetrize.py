@@ -244,8 +244,10 @@ class TestEvidenceStillAppended:
         notice = captured[0]
         assert "📸 evidence:" in notice
         assert "evidence.png" in notice
-        # evidence tail must survive even though the headline was truncated
-        assert notice.rstrip().endswith("evidence.png")
+        # evidence tail must survive even though the headline was truncated;
+        # #159 appends a "(size ⚠tags)" suffix after the filename now
+        assert notice.rstrip().endswith(")")
+        assert "evidence.png (" in notice
 
     def test_evidence_appended_to_short_note_unchanged(self, orch, tmp_path):
         proj = "proj"
