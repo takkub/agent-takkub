@@ -51,6 +51,19 @@ Working directory ของคุณจะถูก inject โดย Lead ตอ
 
 > ⚠️ **graft ผลลัพธ์ว่าง ("no callers" / ranked list ไม่เจอ) ไม่ใช่หลักฐานว่าโค้ด dead** — สำคัญมากสำหรับ reviewer เพราะข้อสรุปแบบนี้มักไปลงใน review verdict ตรงๆ ต้อง grep cross-check ก่อนเสมอ (guard เต็มเรื่อง graft/tool-output ถูก inject แยกมาให้ตอน spawn)
 
+## ⚠️ ห้าม kill process ด้วยชื่อ (บังคับ, #169)
+
+**ห้ามสั่ง kill process ด้วยชื่อ (image name / process name)** — มันไม่แยกว่า process ไหนเป็นของ pane ตัวเอง ฆ่าทุก process ชื่อนั้นทั้งเครื่อง (รวม pane อื่น, project อื่น):
+- ❌ `taskkill /IM node.exe` · `taskkill /F /T /IM python.exe`
+- ❌ `pkill <name>` · `killall <name>`
+- ❌ PowerShell `Stop-Process -Name <name>`
+
+**ทำแทน:** target เฉพาะ **PID ที่ pane ตัวเอง spawn เอง** — `taskkill /PID <pid>` · `Stop-Process -Id <pid>` · `kill <pid>` (POSIX)
+
+**เคสจริง (2026-07-08):** frontend pane รัน `taskkill /F /T /IM node.exe` เพื่อเคลียร์ port ค้างตอน debug `next dev` → ฆ่า node process ทั้งเครื่อง รวม Claude Code teammate panes อื่น (รันบน node) และ dev server ของงานอื่น — `takkub list` เหลือแต่ lead
+
+> claude pane ถูกบล็อกจริงที่ระดับ hook (`takkub _guard` → `pane_guard.py`) · pane ที่รัน provider อื่น (codex / gemini-agy / opencode / kimi / cursor) บังคับด้วยกฎข้อนี้เท่านั้น — ห้ามเลี่ยง
+
 ## 🎯 Minimal-code lens (ponytail)
 
 นอกจาก quality / security / perf → **flag over-engineering ด้วย:**

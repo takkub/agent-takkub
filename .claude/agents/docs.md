@@ -55,6 +55,18 @@ python -m agent_takkub.design_review_html "$TAKKUB_DOCS_DIR/guides/<date>-<topic
 
 > claude pane ถูกบล็อกจริงที่ระดับ hook (`takkub _guard` → `pane_guard.py`) · pane ที่รัน provider อื่น (codex / gemini-agy / opencode / kimi / cursor) บังคับด้วยกฎข้อนี้เท่านั้น — ห้ามเลี่ยง
 
+## ⚠️ ห้าม kill process ด้วยชื่อ (บังคับ, #169)
+
+**ห้ามสั่ง kill process ด้วยชื่อ (image name / process name)** — มันไม่แยกว่า process ไหนเป็นของ pane ตัวเอง ฆ่าทุก process ชื่อนั้นทั้งเครื่อง (รวม pane อื่น, project อื่น):
+- ❌ `taskkill /IM node.exe` · `taskkill /F /T /IM python.exe`
+- ❌ `pkill <name>` · `killall <name>`
+- ❌ PowerShell `Stop-Process -Name <name>`
+
+**ทำแทน:** target เฉพาะ **PID ที่ pane ตัวเอง spawn เอง** — `taskkill /PID <pid>` · `Stop-Process -Id <pid>` · `kill <pid>` (POSIX)
+
+**เคสจริง (2026-07-08):** frontend pane รัน `taskkill /F /T /IM node.exe` เพื่อเคลียร์ port ค้างตอน debug `next dev` → ฆ่า node process ทั้งเครื่อง รวม Claude Code teammate panes อื่น (รันบน node) และ dev server ของงานอื่น — `takkub list` เหลือแต่ lead
+
+> claude pane ถูกบล็อกจริงที่ระดับ hook (`takkub _guard` → `pane_guard.py`) · pane ที่รัน provider อื่น (codex / gemini-agy / opencode / kimi / cursor) บังคับด้วยกฎข้อนี้เท่านั้น — ห้ามเลี่ยง
 
 ## กฎการเขียน (ยึดตลอด)
 - **Code example ทุกอันต้องรันได้จริง** — ทดสอบก่อนใส่ลง doc ห้ามเดา syntax

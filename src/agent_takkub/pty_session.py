@@ -604,16 +604,25 @@ class _ReaderThread(QThread):
 
         consecutive_errors = 0
         while not self._stop:
+            # Snapshot once per iteration: `_teardown_resources` can null
+            # `self._proc` from another thread after a bounded `.wait(2000)`
+            # join times out (#179) — re-reading `self._proc` after the
+            # except below observed AttributeError on the resulting None.
+            # A local reference is stable for the rest of this iteration
+            # regardless of what `self._proc` becomes concurrently.
+            proc = self._proc
+            if proc is None:
+                break
             try:
-                data = self._proc.read(4096)
+                data = proc.read(4096)
             except EOFError:
-                if not self._proc.isalive():
+                if not proc.isalive():
                     break
                 time.sleep(0.04)
                 continue
             except Exception as e:
                 print(f"[pty_session] read error: {e!r}", flush=True)
-                if not self._proc.isalive():
+                if not proc.isalive():
                     break
                 consecutive_errors += 1
                 if consecutive_errors >= self._MAX_CONSECUTIVE_READ_ERRORS:
@@ -623,7 +632,7 @@ class _ReaderThread(QThread):
 
             consecutive_errors = 0
             if not data:
-                if not self._proc.isalive():
+                if not proc.isalive():
                     break
                 time.sleep(0.02)
                 continue
