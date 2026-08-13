@@ -223,9 +223,10 @@ _VIEW_HEADERS: dict[int, tuple[str, str]] = {
 
 
 # Roles offered a per-role CLI override in "Providers & Roles". Excludes
-# codex/gemini (provider_config.FORCED_ROLES — CLI IS the role's identity)
-# and shell (not a pipeline-eligible role — see pipeline_config.valid_roles()'s
-# own note). `lead` is prepended separately below: it isn't a
+# codex/gemini/opencode/kimi/cursor (provider_config.FORCED_ROLES — CLI IS
+# the role's identity) and shell (not a pipeline-eligible role — see
+# pipeline_config.valid_roles()'s own note). `lead` is prepended separately
+# below: it isn't a
 # pipeline_config.valid_roles() member (Lead is excluded from dev pipelines,
 # a different concern — see that function's own docstring) but IS eligible
 # for a CLI override since issue #101's degraded-mode unlock removed it from
