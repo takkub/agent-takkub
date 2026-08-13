@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from PyQt6.QtGui import QColor, QPalette
 from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -41,6 +42,13 @@ class SettingsManagementWindow(QWidget):
 
         fonts = theme.ensure_fonts_loaded()
         self.setStyleSheet(theme.build_stylesheet(fonts["sans"], fonts["mono"]))
+        # QSS `::placeholder` only styles QLineEdit — QPlainTextEdit (used by
+        # SkillsPage/RolesPage/McpPage) reads QPalette.PlaceholderText
+        # instead; see settings_window.py's SettingsWindow.__init__ for the
+        # same fix and full rationale.
+        palette = self.palette()
+        palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(theme.TEXT_MUTED))
+        self.setPalette(palette)
 
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)

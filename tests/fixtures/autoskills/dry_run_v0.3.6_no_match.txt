@@ -1,0 +1,13 @@
+
+┌─┐┬ ┬┌┬┐┌─┐┌─┐┬┌─┬┬  ┬  ┌─┐
+├─┤│ │ │ │ │└─┐├┴┐││  │  └─┐
+┴ ┴└─┘ ┴ └─┘└─┘┴ ┴┴┴─┘┴─┘└─┘
+Auto-install the best AI skills for your project · v0.3.6
+
+   Scanning project...[K   ◆ Detected technologies:
+
+     ● Express   
+
+   No skills available for your stack yet.
+   Check https://autoskills.sh for the latest.
+
