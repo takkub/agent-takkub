@@ -152,6 +152,7 @@ from .vault_mirror import (  # re-exported for test + script imports
     _render_decision_note,
     _resolve_vault_dir,
     distill_session_facts,
+    distill_to_knowledge_base,
     prune_vault_logs,
     write_obsidian_graph_filter,
 )
@@ -2680,6 +2681,16 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             path.write_text(body, encoding="utf-8")
             session_md_path = str(path).replace(os.sep, "/")
         except OSError:
+            pass
+
+        # Local knowledge-base distillation (#168): unlike the vault mirror
+        # below, this always runs — no Obsidian vault required — so every
+        # cockpit install gets cross-session knowledge capture regardless of
+        # provider or whether a vault is configured. Best-effort, never
+        # blocks the done() report it's called alongside.
+        try:
+            distill_to_knowledge_base(safe_project, role, note, RUNTIME_DIR, now=now)
+        except Exception:
             pass
 
         vault = _resolve_vault_dir()
