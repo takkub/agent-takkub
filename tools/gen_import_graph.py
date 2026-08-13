@@ -50,12 +50,12 @@ def build() -> dict:
     }
 
 
-def _diff(committed: dict, fresh: dict) -> list[str]:
-    """Return human-readable lines describing semantic drift, ignoring PROVENANCE_KEYS."""
+def _diff_modules(committed_modules: list[dict], fresh_modules: list[dict]) -> list[str]:
+    """Detailed module/edge-level diff for the "modules" key."""
     lines: list[str] = []
 
-    committed_mods = {m["module"]: m for m in committed.get("modules", [])}
-    fresh_mods = {m["module"]: m for m in fresh.get("modules", [])}
+    committed_mods = {m["module"]: m for m in committed_modules}
+    fresh_mods = {m["module"]: m for m in fresh_modules}
 
     for mod in sorted(fresh_mods.keys() - committed_mods.keys()):
         lines.append(f"+ module added: {mod}")
@@ -70,6 +70,34 @@ def _diff(committed: dict, fresh: dict) -> list[str]:
                 lines.append(f"+ {mod} {field}: {edge}")
             for edge in sorted(old_edges - new_edges):
                 lines.append(f"- {mod} {field}: {edge}")
+        # fan_in/fan_out are derived from imported_by/imports but are stored
+        # fields in their own right — a tampered or stale value here would
+        # slip past the edge-set comparison above, so check them directly.
+        for field in ("fan_in", "fan_out"):
+            if old[field] != new[field]:
+                lines.append(f"~ {mod} {field}: {old[field]} -> {new[field]}")
+
+    return lines
+
+
+def _diff(committed: dict, fresh: dict) -> list[str]:
+    """Return human-readable lines describing semantic drift, ignoring PROVENANCE_KEYS.
+
+    Every top-level key is compared, not just "modules" — an unknown/future
+    key falls back to a generic added/removed/changed report so the check
+    never goes silently blind to new fields in build()'s output.
+    """
+    lines: list[str] = []
+
+    for key in sorted((committed.keys() | fresh.keys()) - PROVENANCE_KEYS):
+        if key not in committed:
+            lines.append(f"+ key added: {key} = {fresh[key]!r}")
+        elif key not in fresh:
+            lines.append(f"- key removed: {key} = {committed[key]!r}")
+        elif key == "modules":
+            lines.extend(_diff_modules(committed[key], fresh[key]))
+        elif committed[key] != fresh[key]:
+            lines.append(f"~ {key}: {committed[key]!r} -> {fresh[key]!r}")
 
     return lines
 

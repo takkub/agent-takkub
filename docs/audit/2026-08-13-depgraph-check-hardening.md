@@ -66,3 +66,46 @@ Full pytest suite ไม่ได้รันในรอบนี้ตาม�
 - `.github/workflows/ci.yml`
 - `.pre-commit-config.yaml`
 - `pyproject.toml`
+
+## Fix-loop round 2 — `PROVENANCE_KEYS` dead constant (2026-08-13, commit 4606957 review)
+
+### ปัญหาที่ Lead review เจอ
+`PROVENANCE_KEYS = {"generated_by"}` มี comment บอกว่าคีย์กลุ่มนี้ถูกกันออกจากการเทียบ
+แต่ไม่มีที่ไหนในไฟล์อ้างถึงตัวแปรนี้เลย — `_diff()` เดิม hardcode เทียบเฉพาะ
+`modules[].{imports,imported_by}` ตรงๆ ไม่ได้ derive จาก `PROVENANCE_KEYS` จริง วันนี้บังเอิญ
+ถูกเพราะ `build()` มี top-level key แค่ 3 ตัว (`generated_by`/`module_count`/`modules`) แต่ถ้ามี
+ใครเพิ่ม top-level key ใหม่ (เช่น `cycles`, `layers`) ต่อไป `--check` จะตาบอดกับคีย์นั้นเงียบๆ
+(เขียวลวงตอน graph drift จริง)
+
+### Fix
+- `_diff()` เปลี่ยนมาวนเทียบ **ทุก top-level key** ของทั้งสองฝั่ง (`committed.keys() | fresh.keys()`)
+  ลบ `PROVENANCE_KEYS` ออกจริง แทนที่จะ hardcode ชื่อ `modules`:
+  - key หายไป/เพิ่มมา → `+ key added: ...` / `- key removed: ...`
+  - key `modules` → ยังใช้ logic ละเอียดระดับ module/edge เดิม (แยกเป็น `_diff_modules()` helper)
+  - key อื่นที่ไม่รู้จัก (เช่น `module_count`, หรือคีย์ในอนาคต) → fallback generic
+    `~ key: old -> new` ไม่เงียบอีกต่อไป
+- เพิ่มการเทียบ `fan_in`/`fan_out` ต่อ module ใน `_diff_modules()` — เดิมมันเป็น derived field
+  ที่ไม่ถูกเทียบเลย (เทียบแค่ `imports`/`imported_by` เป็น set) เพิ่มเข้ามาเพราะเป็นฟิลด์ที่ถูก
+  commit ลงไฟล์จริง ค่าเพี้ยน (ทั้งจากมือ หรือ derivation bug ในอนาคต) ที่ edge-set เดิมยังเท่ากัน
+  ควรจับได้เหมือนกัน ไม่ใช่ derived ที่ "ค้ำประกันตามหลัง" edge diff
+
+### Verify (fix-loop round 2)
+รันผ่าน shared `.venv` ที่ main worktree root (`../../../.venv/Scripts/python.exe`) พร้อม
+`PYTHONPATH=<this-worktree>/src` — pattern เดียวกับ `.pre-commit-config.yaml` ใช้จริง (linked
+worktree ไม่มี `.venv` ของตัวเอง)
+
+| ทดสอบ | ผลลัพธ์ |
+|---|---|
+| `--check` บน clean tree | exit 0, `is fresh (module_count=141)` |
+| แก้ `generated_by` → `"grimp 9.9.9"` ชั่วคราวแล้ว `--check` | ยัง exit 0 — provenance ยังถูกกันออกจริง แล้ว restore |
+| แก้ `module_count` → `999` ชั่วคราวแล้ว `--check` | exit 1, `~ module_count: 999 -> 141` — **นี่คือช่องโหว่เดิมที่ปิดได้จริง** (ก่อนแก้ `_diff()` เดิมจะไม่จับ เพราะ hardcode เทียบแค่ `modules`) แล้ว restore |
+| เพิ่ม top-level key ปลอม `layers` ชั่วคราวแล้ว `--check` | exit 1, `- key removed: layers = [...]` แล้ว restore |
+| ลบ edge หนึ่งอัน (`agent_takkub.__main__.imports`) ชั่วคราวแล้ว `--check` | exit 1, พิมพ์ทั้ง `+ agent_takkub.__main__ imports: agent_takkub.app` และ `~ agent_takkub.__main__ fan_out: 0 -> 1` แล้ว restore |
+| tamper เฉพาะ `fan_in` ของ module (ไม่แตะ edges) ชั่วคราวแล้ว `--check` | exit 1, `~ agent_takkub fan_in: 12345 -> 2` — พิสูจน์ข้อกังวลใน task ว่า fan_in/fan_out ไม่หลุดจากการเทียบอีกต่อไป แล้ว restore |
+| `pre-commit run depgraph-fresh --all-files` | `Passed` |
+| `pre-commit run import-linter --all-files` (sanity, ใช้ PYTHONPATH pattern เดียวกัน) | `Passed` |
+| `ruff check tools/gen_import_graph.py` | All checks passed |
+| `ruff format --check tools/gen_import_graph.py` | 1 file already formatted |
+| `git status --porcelain` หลัง restore ทุกไฟล์ทดสอบ | มีแค่ `tools/gen_import_graph.py` ที่เปลี่ยน (`docs/architecture/depgraph.json` กลับสภาพเดิม) |
+
+Full pytest suite ไม่ได้รันตามนโยบาย targeted-tests-mid-flight — qa รัน batch gate ท้ายสุด
