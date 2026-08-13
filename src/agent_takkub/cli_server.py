@@ -396,6 +396,23 @@ class CliServer(QObject):
                     if model_error:
                         self._reply(sock, ok=False, msg=model_error)
                         return
+                    # #162: assign() itself already rejects this, but it runs
+                    # deferred (QTimer below) and its return value is never
+                    # relayed back to the socket — the ack a few lines down
+                    # is unconditionally ok=True regardless of what the
+                    # deferred call returns. Without this synchronous
+                    # pre-check a rejected worktree collision would look like
+                    # a success to the caller. Mirrors the cwd check above.
+                    isolation_req = str(req.get("isolation", "shared") or "shared")
+                    if isolation_req == "worktree":
+                        _collision_check = getattr(
+                            self._orch, "_worktree_bare_role_collision", None
+                        )
+                        if _collision_check is not None:
+                            collision_err = _collision_check(role, from_project)
+                            if collision_err:
+                                self._reply(sock, ok=False, msg=collision_err)
+                                return
                 delay = self._next_spawn_delay_ms(role, from_project)
                 if cmd == "spawn":
                     QTimer.singleShot(
