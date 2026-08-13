@@ -14,15 +14,14 @@ builds the ``ProviderUsage`` list from the usage payload(s) and calls
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
 
 from PyQt6.QtCore import QPointF, Qt
 from PyQt6.QtGui import QBrush, QColor, QPainter, QPolygonF
 from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from . import cockpit_theme
+from .provider_usage import ProviderUsage
 
 # Claude's brand coral — the spark's calm/default colour so the corner always
 # reads as "a little Claude", not a grey system chip (cockpit_theme.METER_CLAY).
@@ -39,25 +38,6 @@ PROVIDER_LABELS: dict[str, str] = {
 }
 
 _STATUS_SORT_ORDER = {"active": 0, "stale": 1, "loading": 2, "error": 3, "unsupported": 4}
-
-
-@dataclass
-class ProviderUsage:
-    """Frontend-local mirror of the backend contract in
-    ``docs/design/2026-08-13-provider-usage-abstraction.md``.
-
-    ponytail: swap for ``from .provider_usage import ProviderUsage`` once that
-    module ships — field names/shapes are kept identical on purpose so this
-    widget doesn't need to change, only the import + who builds the list.
-    """
-
-    provider: str
-    status: str  # active | stale | loading | unsupported | error
-    plan: str | None = None
-    utilization: float | None = None
-    resets_at: datetime | None = None
-    fetched_at: datetime | None = None
-    raw_data: dict[str, Any] | None = None
 
 
 def fmt_eta(resets_at: datetime | None, now: datetime) -> str:
@@ -145,13 +125,20 @@ def _provider_body_lines(u: ProviderUsage, now: datetime) -> list[tuple[str, str
         if eta:
             line += f" · reset ใน {eta}"
         lines.append((line, severity_color(u.utilization)))
-    elif u.raw_data and ("tokens_used" in u.raw_data or "cost_usd" in u.raw_data):
+    elif u.spend:
         bits = []
-        if "tokens_used" in u.raw_data:
-            bits.append(f"ใช้ไปแล้ว {u.raw_data['tokens_used']:,} tokens")
-        if "cost_usd" in u.raw_data:
-            bits.append(f"${u.raw_data['cost_usd']:.2f}")
-        lines.append((" · ".join(bits) + " (ไม่ใช่โควต้า)", cockpit_theme.TEXT_MUTED))
+        input_tok = u.spend.get("input_tokens") or 0
+        output_tok = u.spend.get("output_tokens") or 0
+        total_tok = input_tok + output_tok
+        if total_tok:
+            bits.append(f"ใช้ไปแล้ว {total_tok:,} tokens")
+        cost_usd = u.spend.get("cost_usd")
+        if cost_usd:
+            bits.append(f"${cost_usd:.2f}")
+        if bits:
+            lines.append((" · ".join(bits) + " (ไม่ใช่โควต้า)", cockpit_theme.TEXT_MUTED))
+        else:
+            lines.append(("ไม่มีข้อมูลให้ดู", cockpit_theme.TEXT_FAINT))
     else:
         lines.append(("ไม่มีข้อมูลให้ดู", cockpit_theme.TEXT_FAINT))
 
@@ -310,16 +297,14 @@ class UsageMeter(QWidget):
                 text += f" +{extra}"
         else:
             token_only = next(
-                (
-                    u
-                    for u in usages
-                    if u.status == "active" and u.raw_data and "tokens_used" in u.raw_data
-                ),
+                (u for u in usages if u.status == "active" and u.spend),
                 None,
             )
             if token_only:
                 label = PROVIDER_LABELS.get(token_only.provider, token_only.provider)
-                text = f"{label} {token_only.raw_data['tokens_used']:,} tok"
+                spend = token_only.spend or {}
+                total_tok = (spend.get("input_tokens") or 0) + (spend.get("output_tokens") or 0)
+                text = f"{label} {total_tok:,} tok"
                 color = cockpit_theme.TEXT_MUTED
             else:
                 text, color = "usage —", cockpit_theme.TEXT_FAINT
@@ -341,8 +326,9 @@ class UsageMeter(QWidget):
                 lines.append(f"{label}: กำลังโหลด…")
             elif u.status == "error":
                 lines.append(f"{label}: ดึงข้อมูลไม่สำเร็จ")
-            elif u.raw_data and "tokens_used" in u.raw_data:
-                lines.append(f"{label}: ใช้ไป {u.raw_data['tokens_used']:,} tok (ไม่ใช่โควต้า)")
+            elif u.spend:
+                total_tok = (u.spend.get("input_tokens") or 0) + (u.spend.get("output_tokens") or 0)
+                lines.append(f"{label}: ใช้ไป {total_tok:,} tok (ไม่ใช่โควต้า)")
             else:
                 lines.append(f"{label}: ไม่มีข้อมูล")
         return "\n".join(lines)

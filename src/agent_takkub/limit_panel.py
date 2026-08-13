@@ -12,7 +12,7 @@ data-layer module ``limit_status.py``.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 from PyQt6 import sip
 
@@ -81,8 +81,17 @@ class LimitPanelMixin:
         # so check liveness here — the choke point every caller routes through.
         if sip.isdeleted(self._limit_label):
             return
+        from . import provider_usage
+
         claude_usage = _claude_provider_usage(data)
-        self._limit_label.set_usages([claude_usage, *_fake_other_provider_usages()])
+        store = provider_usage.get_store()
+        cache = store.get_all()
+        others = [
+            cache.get(name) or ProviderUsage(provider=name, status="loading")
+            for name in provider_usage.PROVIDER_NAMES
+            if name != "claude"
+        ]
+        self._limit_label.set_usages([claude_usage, *others])
 
 
 def _claude_provider_usage(data) -> ProviderUsage:
@@ -113,31 +122,3 @@ def _claude_provider_usage(data) -> ProviderUsage:
         fetched_at=fetched_at,
         raw_data={"windows": windows_raw},
     )
-
-
-def _fake_other_provider_usages() -> list[ProviderUsage]:
-    """ponytail: placeholder data until backend's `provider_usage.py` ships
-    (see docs/design/2026-08-13-provider-usage-abstraction.md). Swap this for
-    real fetch results once that module lands — the state coverage here
-    (active/stale/loading/unsupported/error, token-not-quota raw_data) mirrors
-    the agreed contract so the UI above doesn't need to change, only this
-    function's body."""
-    now = datetime.now(tz=UTC)
-    return [
-        ProviderUsage(provider="codex", status="loading"),
-        ProviderUsage(
-            provider="gemini",
-            status="stale",
-            plan="Gemini Advanced",
-            utilization=35.0,
-            fetched_at=now - timedelta(days=41),
-        ),
-        ProviderUsage(
-            provider="opencode",
-            status="active",
-            fetched_at=now,
-            raw_data={"tokens_used": 128_430, "cost_usd": 4.32},
-        ),
-        ProviderUsage(provider="kimi", status="unsupported"),
-        ProviderUsage(provider="cursor", status="unsupported"),
-    ]
