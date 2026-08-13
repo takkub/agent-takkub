@@ -56,12 +56,22 @@ _NO_RUNTIME_ERROR = "ไม่พบ autoskills และไม่พบ npx บ
 
 @dataclass(frozen=True)
 class SkillCandidate:
-    """One skill `autoskills` proposes to install. `source` is its registry
-    URL when the CLI's output included one; "" when it didn't (best-effort
-    text parse — see `_parse_preview_output`)."""
+    """One skill `autoskills` proposes to install. `source` is a
+    human-readable provenance hint — "<author> › <techs>" when the CLI's
+    numbered listing included both, just "<author>" when it didn't include a
+    tech match, or an "org/repo/skill" path from the install-completion
+    listing; "" only when the parser found neither (best-effort text parse —
+    see `_parse_preview_output`).
+
+    `notes` carries the CLI's own parenthetical annotation(s) verbatim (e.g.
+    "security check ⚠") — the CLI is flagging something about this specific
+    skill that the user should see before installing. Never hardcode against
+    specific annotation text; surface whatever the CLI says. "" when the
+    listing had no parenthetical for this skill."""
 
     name: str
     source: str = ""
+    notes: str = ""
 
 
 @dataclass(frozen=True)
@@ -69,13 +79,21 @@ class PreviewResult:
     """Result of a `--dry-run` pass. `raw_output` is kept verbatim (stdout +
     stderr) even on a successful parse, since `stack`/`skills` are a
     best-effort text parse of an external CLI's output — the UI can fall back
-    to showing `raw_output` if the parsed fields look wrong or empty."""
+    to showing `raw_output` if the parsed fields look wrong or empty.
+
+    `no_skills_for_stack` distinguishes a genuine negative result (the CLI
+    itself said nothing matches this project's stack) from `skills` parsing
+    empty because this module's parser didn't recognize the output format —
+    only the former is safe to report to the user as "no matching skill
+    found"; the latter must show `raw_output` instead of claiming a false
+    negative."""
 
     ok: bool
     stack: list[str] = field(default_factory=list)
     skills: list[SkillCandidate] = field(default_factory=list)
     raw_output: str = ""
     error: str = ""
+    no_skills_for_stack: bool = False
 
 
 @dataclass(frozen=True)
@@ -161,74 +179,125 @@ def _run(cmd: list[str], cwd: Path, timeout: float) -> subprocess.CompletedProce
 
 
 # ---------------------------------------------------------------------------
-# Best-effort output parsing (`autoskills` has no --json flag documented) —
-# raw_output is always preserved alongside the parse so a wrong/empty parse
-# never hides the real CLI output from the user.
+# Best-effort output parsing (`autoskills` has no --json flag — confirmed via
+# `--help` on v0.3.6). raw_output is always preserved alongside the parse so
+# a wrong/empty parse never hides the real CLI output from the user.
+#
+# Format reference (captured live from the real CLI, v0.3.6 — see
+# tests/fixtures/autoskills/*.txt and docs/audit/2026-08-13-autoskills-installer.md):
+#
+#   ...Scanning project...[K   ◆ Detected technologies:
+#      ✔ Node.js   ✔ Bash      ✔ Python
+#      ✔ Pytest
+#   ◆ Skills to install (8)
+#    1. wshobson › nodejs-backend-patterns               ← Node.js
+#    4. inferen-sh › python-executor (security check ⚠)  ← Python
+#   --dry-run: nothing was installed.
+#
+# Headers are box-drawing (◆) prompts, not "key:" lines, and are sometimes
+# glued onto the tail of the preceding line by a lost/partial ANSI
+# clear-line sequence ("...[K   ◆ Detected...") — so headers are matched by
+# keyword anywhere in a line, never by "whole line is a header" position.
+# Skill entries are numbered "author › skill-name", not bulleted.
 # ---------------------------------------------------------------------------
 
-_STACK_INLINE_RE = re.compile(r"(?im)^\s*(?:detected\s+)?stack\s*:\s*(.+)$")
-_HEADER_RE = re.compile(r"(?im)^[ \t]*([A-Za-z][A-Za-z0-9 /_-]*)\s*:\s*$")
-_BULLET_RE = re.compile(r"(?m)^[ \t]*[-*•]\s*(.+?)\s*$")
-_URL_RE = re.compile(r"https?://[^\s()]+")
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+_STACK_HEADER_RE = re.compile(r"(?i)detected\s+technolog")
+_SKILLS_HEADER_RE = re.compile(r"(?i)skills?\s+to\s+install|select\s+skills?\s+to\s+install")
+_OTHER_HEADER_RE = re.compile(
+    # "checks" (plural) matches only the "◆ Security checks" section header,
+    # never the inline "(security check ⚠)" per-skill annotation (singular).
+    r"(?i)detected\s+combos|installing\s+skills|security\s+checks\b|^\s*agents\s*:"
+)
+_TECH_TOKEN_RE = re.compile(r"[✔●]\s*([^\s✔●][^✔●]*?)(?=\s{2,}|$)")
+_NUMBERED_SKILL_RE = re.compile(
+    r"^\s*\d+\.\s*(?P<author>\S+)\s*›\s*(?P<skill>\S+)"
+    r"(?P<notes>(?:\s*\([^)]*\))*)"
+    r"\s*(?:←\s*(?P<techs>.+?))?\s*$"
+)
+_PAREN_NOTE_RE = re.compile(r"\(([^)]*)\)")
+# Fallback for the CLI's real-install completion listing ("✔ org/repo/skill"),
+# in case a --dry-run run for some reason still reaches that renderer —
+# belt-and-suspenders, not the expected path (preview() always passes
+# --dry-run).
+_INSTALLED_PATH_RE = re.compile(r"^\s*✔\s*(?P<path>[\w.-]+(?:/[\w.-]+){1,4})\s*$")
+_NO_SKILLS_RE = re.compile(r"(?i)no\s+skills?\s+(?:available|found|match|matched|proposed)")
 
 
-def _sections(raw: str) -> dict[str, str]:
-    """Split `raw` into header->body blocks keyed by lower-cased header text,
-    where a header is a standalone line ending in ':' (no bullet prefix).
-    Output with no such headers yields {}."""
-    sections: dict[str, list[str]] = {}
+def _no_skills_reported(raw: str) -> bool:
+    """True when the CLI itself said there's nothing to install for this
+    stack (a genuine negative result) — as opposed to `skills` parsing empty
+    because this parser didn't recognize the output format. Callers must
+    treat these two cases differently: only the former is safe to report to
+    the user as "no matching skill found"."""
+    return bool(_NO_SKILLS_RE.search(raw))
+
+
+def _split_sections(raw: str) -> dict[str, list[str]]:
+    """Split `raw` into stack/skills line-groups keyed by a fuzzy header
+    match (see module docstring above) rather than strict `key:` lines.
+    Lines under any other recognized header (combos, install trace, security
+    table, agents line) are dropped so they can't pollute stack/skills."""
+    sections: dict[str, list[str]] = {"stack": [], "skills": []}
     current: str | None = None
     for line in raw.splitlines():
-        m = _HEADER_RE.match(line)
-        if m:
-            current = m.group(1).strip().lower()
-            sections[current] = []
+        if _STACK_HEADER_RE.search(line):
+            current = "stack"
+            continue
+        if _SKILLS_HEADER_RE.search(line):
+            current = "skills"
+            continue
+        if _OTHER_HEADER_RE.search(line):
+            current = None
             continue
         if current is not None:
             sections[current].append(line)
-    return {k: "\n".join(v) for k, v in sections.items()}
-
-
-def _parse_bullet_skill(text: str) -> SkillCandidate | None:
-    text = text.strip()
-    urls = _URL_RE.findall(text)
-    src = urls[0].rstrip(".,;:") if urls else ""
-    name = _URL_RE.sub("", text).strip(" -:()\t")
-    return SkillCandidate(name=name, source=src) if name else None
+    return sections
 
 
 def _parse_preview_output(raw: str) -> tuple[list[str], list[SkillCandidate]]:
+    raw = _ANSI_RE.sub("", raw)
+    sections = _split_sections(raw)
+
     stack: list[str] = []
-    m = _STACK_INLINE_RE.search(raw)
-    if m:
-        stack = [p.strip() for p in re.split(r"[,/]", m.group(1)) if p.strip()]
-    sections = _sections(raw)
-    if not stack:
-        for key, body in sections.items():
-            if "stack" in key:
-                stack = [b.strip() for b in _BULLET_RE.findall(body)]
-                if stack:
-                    break
+    for line in sections["stack"]:
+        for tech in _TECH_TOKEN_RE.findall(line):
+            tech = tech.strip()
+            if tech and tech not in stack:
+                stack.append(tech)
 
     skills: list[SkillCandidate] = []
-    for key, body in sections.items():
-        if "skill" in key:
-            for bullet in _BULLET_RE.findall(body):
-                cand = _parse_bullet_skill(bullet)
-                if cand:
-                    skills.append(cand)
-            if skills:
-                break
+    seen_names: set[str] = set()
+    for line in sections["skills"]:
+        m = _NUMBERED_SKILL_RE.match(line)
+        if not m:
+            continue
+        name = m.group("skill").strip()
+        if not name or name in seen_names:
+            continue
+        author = m.group("author").strip()
+        techs = (m.group("techs") or "").strip()
+        source = f"{author} › {techs}" if techs else author
+        notes = "; ".join(n.strip() for n in _PAREN_NOTE_RE.findall(m.group("notes") or ""))
+        skills.append(SkillCandidate(name=name, source=source, notes=notes))
+        seen_names.add(name)
+
     if not skills:
-        # Fallback: a bulleted line carrying a URL anywhere in the output is
-        # very likely a skill entry (source-linked); stack lines never are.
-        for bullet in _BULLET_RE.findall(raw):
-            urls = _URL_RE.findall(bullet)
-            if not urls:
+        # Belt-and-suspenders: the real-install completion format lists
+        # "✔ org/repo/skill" instead of a numbered preview list. Scan the
+        # whole output (not just the skills section, since this format
+        # doesn't share the same header) so a stray real install still
+        # surfaces real names instead of an empty result.
+        for line in raw.splitlines():
+            m = _INSTALLED_PATH_RE.match(line)
+            if not m:
                 continue
-            cand = _parse_bullet_skill(bullet)
-            if cand:
-                skills.append(cand)
+            path = m.group("path")
+            name = path.rsplit("/", 1)[-1]
+            if name and name not in seen_names:
+                skills.append(SkillCandidate(name=name, source=path))
+                seen_names.add(name)
+
     return stack, skills
 
 
@@ -256,7 +325,13 @@ def preview(project_root: str | Path, timeout: float = PREVIEW_TIMEOUT_DEFAULT) 
         return PreviewResult(ok=False, raw_output=raw, error=f"autoskills exited {proc.returncode}")
 
     stack, skills = _parse_preview_output(raw)
-    return PreviewResult(ok=True, stack=stack, skills=skills, raw_output=raw)
+    return PreviewResult(
+        ok=True,
+        stack=stack,
+        skills=skills,
+        raw_output=raw,
+        no_skills_for_stack=_no_skills_reported(raw),
+    )
 
 
 def _skill_entry_names(skills_dir: Path) -> set[str]:

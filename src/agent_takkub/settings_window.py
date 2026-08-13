@@ -562,7 +562,10 @@ class _AutoskillsConfirmDialog(QDialog):
         c_lay.setSpacing(4)
         for cand in result.skills:
             chk = QCheckBox(cand.name, container)
-            chk.setChecked(True)
+            # A skill the CLI itself flagged (e.g. "security check ⚠") must
+            # start unchecked — the user has to make a deliberate choice to
+            # include it, not un-notice a pre-ticked box.
+            chk.setChecked(not cand.notes)
             c_lay.addWidget(chk)
             if cand.source:
                 src = QLabel(cand.source, container)
@@ -570,6 +573,12 @@ class _AutoskillsConfirmDialog(QDialog):
                 src.setContentsMargins(22, 0, 0, 0)
                 src.setWordWrap(True)
                 c_lay.addWidget(src)
+            if cand.notes:
+                note = QLabel(f"⚠ {cand.notes}", container)
+                note.setContentsMargins(22, 0, 0, 0)
+                note.setWordWrap(True)
+                note.setStyleSheet(f"color: {cockpit_theme.ERROR_CHIP_TEXT}; font-size: 11px;")
+                c_lay.addWidget(note)
             self._checks.append((cand, chk))
         c_lay.addStretch(1)
         scroll.setWidget(container)
@@ -2965,12 +2974,26 @@ class SettingsWindow(QDialog):
             QMessageBox.warning(self, "Auto-detect skills", result.error or "สแกนไม่สำเร็จ")
             return
         if not result.skills:
-            extra = f"\n\nstack ที่ตรวจพบ: {', '.join(result.stack)}" if result.stack else ""
-            QMessageBox.information(
-                self,
-                "Auto-detect skills",
-                f"autoskills ไม่พบ skill ที่เข้ากับ stack ของโปรเจคนี้{extra}",
-            )
+            if result.no_skills_for_stack:
+                extra = f"\n\nstack ที่ตรวจพบ: {', '.join(result.stack)}" if result.stack else ""
+                QMessageBox.information(
+                    self,
+                    "Auto-detect skills",
+                    f"autoskills ไม่พบ skill ที่เข้ากับ stack ของโปรเจคนี้{extra}",
+                )
+            else:
+                # autoskills returned real output but this module's parser
+                # didn't recognize it (e.g. CLI format changed again) — never
+                # claim "not found" here, show what the CLI actually said.
+                raw = result.raw_output.strip() or "(ไม่มี output)"
+                if len(raw) > 4000:
+                    raw = raw[:4000] + "\n… (ตัดข้อความ)"
+                QMessageBox.warning(
+                    self,
+                    "Auto-detect skills",
+                    "แปลผลลัพธ์จาก autoskills ไม่สำเร็จ (รูปแบบ output อาจเปลี่ยนไป) "
+                    f"— นี่คือ output ดิบจาก CLI:\n\n{raw}",
+                )
             return
         dialog = _AutoskillsConfirmDialog(result, self)
         if dialog.exec() != QDialog.DialogCode.Accepted:

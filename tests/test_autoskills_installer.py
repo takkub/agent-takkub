@@ -9,12 +9,21 @@ from unittest.mock import patch
 
 from agent_takkub import autoskills_installer as ai
 
-SAMPLE_OUTPUT = """Detected stack: Next.js, TypeScript, Tailwind CSS
+FIXTURES_DIR = Path(__file__).parent / "fixtures" / "autoskills"
 
-Skills to install:
-  - nextjs-best-practices (https://skills.sh/nextjs-best-practices)
-  - typescript-strict (https://skills.sh/typescript-strict)
-  - tailwind-conventions
+# Real `autoskills@0.3.6` `--dry-run --agent claude-code` output (numbered
+# listing, box-drawing headers) — not the "key:" + bullet format this module
+# used to assume. See tests/fixtures/autoskills/*.txt for the live-captured
+# transcripts this mirrors (docs/audit/2026-08-13-autoskills-installer.md).
+SAMPLE_OUTPUT = """Auto-install the best AI skills for your project · v0.3.6
+   Scanning project...[K   ◆ Detected technologies:
+     ✔ Next.js   ✔ TypeScript      ✔ Tailwind CSS
+   ◆ Skills to install (3)
+    1. vercel › nextjs-best-practices                   ← Next.js
+    2. someorg › typescript-strict                       ← TypeScript
+    3. someorg › tailwind-conventions
+   Agents: claude-code
+   --dry-run: nothing was installed.
 """
 
 
@@ -103,8 +112,9 @@ def test_preview_runs_dry_run_only_no_yes_flag(tmp_path):
     names = {s.name for s in result.skills}
     assert names == {"nextjs-best-practices", "typescript-strict", "tailwind-conventions"}
     by_name = {s.name: s.source for s in result.skills}
-    assert by_name["nextjs-best-practices"] == "https://skills.sh/nextjs-best-practices"
-    assert by_name["tailwind-conventions"] == ""
+    assert by_name["nextjs-best-practices"] == "vercel › Next.js"
+    assert by_name["tailwind-conventions"] == "someorg"
+    assert result.no_skills_for_stack is False
     assert result.raw_output == SAMPLE_OUTPUT
 
 
@@ -650,15 +660,163 @@ def test_escaped_entries_nested_dir_with_no_symlinks_is_safe(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_parse_preview_output_no_headers_falls_back_to_url_bullets():
-    raw = "Some banner text\n- foo-skill (https://skills.sh/foo-skill)\n- unrelated bullet with no url\n"
+def test_parse_preview_output_unrecognized_format_yields_empty_no_crash():
+    raw = "Some banner text\nnothing resembling a skill listing here\n"
     stack, skills = ai._parse_preview_output(raw)
     assert stack == []
-    assert [s.name for s in skills] == ["foo-skill"]
-    assert skills[0].source == "https://skills.sh/foo-skill"
+    assert skills == []
+
+
+def test_parse_preview_output_real_install_completion_fallback():
+    """Belt-and-suspenders: if a --dry-run run somehow still reaches the
+    real-install completion renderer ("✔ org/repo/skill"), names are still
+    recovered instead of silently parsing to zero skills."""
+    raw = (
+        "   ◆ Installing skills...\n"
+        "   Agents: universal, claude-code\n"
+        "   ✔ inferen-sh/skills/python-executor\n"
+        "   ✔ wshobson/agents/bash-defensive-patterns\n"
+        "   ✔ Done! 2 skills installed in 20ms.\n"
+    )
+    _stack, skills = ai._parse_preview_output(raw)
+    names = {s.name for s in skills}
+    assert names == {"python-executor", "bash-defensive-patterns"}
+    by_name = {s.name: s.source for s in skills}
+    assert by_name["python-executor"] == "inferen-sh/skills/python-executor"
+
+
+def test_no_skills_reported_true_for_genuine_negative():
+    assert ai._no_skills_reported("No skills available for your stack yet.") is True
+
+
+def test_no_skills_reported_false_for_unrelated_text():
+    assert ai._no_skills_reported("Some banner text with nothing relevant") is False
 
 
 def test_parse_preview_output_empty_string():
     stack, skills = ai._parse_preview_output("")
     assert stack == []
     assert skills == []
+
+
+def test_parse_preview_output_captures_arbitrary_annotation_not_just_security():
+    """The parser must not hardcode against "security check" text — any
+    parenthetical annotation the CLI emits has to be captured verbatim."""
+    raw = (
+        "   ◆ Skills to install (1)\n"
+        "    1. someorg › experimental-skill (beta, unmaintained) ← Rust\n"
+    )
+    _stack, skills = ai._parse_preview_output(raw)
+    assert len(skills) == 1
+    assert skills[0].notes == "beta, unmaintained"
+
+
+def test_parse_preview_output_no_annotation_yields_empty_notes():
+    stack, skills = ai._parse_preview_output(SAMPLE_OUTPUT)
+    assert stack == ["Next.js", "TypeScript", "Tailwind CSS"]
+    assert all(s.notes == "" for s in skills)
+
+
+# ---------------------------------------------------------------------------
+# _parse_preview_output — live-captured real CLI transcripts
+# (tests/fixtures/autoskills/*.txt — `npx autoskills@0.3.6 --dry-run --agent
+# claude-code`, captured 2026-08-13; see docs/audit/2026-08-13-autoskills-installer.md)
+# ---------------------------------------------------------------------------
+
+
+def _fixture(name: str) -> str:
+    return (FIXTURES_DIR / name).read_text(encoding="utf-8")
+
+
+def test_parse_real_fixture_multi_skill():
+    raw = _fixture("dry_run_v0.3.6_multi_skill.txt")
+    stack, skills = ai._parse_preview_output(raw)
+    assert stack == ["Node.js", "Bash", "Python", "Pytest"]
+    names = [s.name for s in skills]
+    assert names == [
+        "nodejs-backend-patterns",
+        "nodejs-best-practices",
+        "bash-defensive-patterns",
+        "python-executor",
+        "python-testing-patterns",
+        "frontend-design",
+        "accessibility",
+        "seo",
+    ]
+    by_name = {s.name: s.source for s in skills}
+    assert by_name["nodejs-backend-patterns"] == "wshobson › Node.js"
+    # "(security check ⚠)" annotation must not leak into the name or source...
+    assert by_name["python-executor"] == "inferen-sh › Python"
+    assert by_name["python-testing-patterns"] == "wshobson › Python, Pytest"
+    # ...but must not be silently dropped either — it's a CLI-issued warning
+    # that has to reach the user, so it's captured separately on `notes`.
+    notes_by_name = {s.name: s.notes for s in skills}
+    assert notes_by_name["python-executor"] == "security check ⚠"
+    assert notes_by_name["nodejs-backend-patterns"] == ""
+    assert notes_by_name["python-testing-patterns"] == ""
+    assert ai._no_skills_reported(raw) is False
+
+
+def test_preview_end_to_end_real_fixture_multi_skill(tmp_path):
+    """Same fixture, through the full preview() path (not just the parser)."""
+    raw = _fixture("dry_run_v0.3.6_multi_skill.txt")
+    with (
+        patch.object(ai, "_resolve_autoskills_cmd", return_value=["autoskills"]),
+        patch.object(ai.subprocess, "run", return_value=_completed(stdout=raw)),
+    ):
+        result = ai.preview(tmp_path)
+    assert result.ok is True
+    assert len(result.skills) == 8
+    assert result.no_skills_for_stack is False
+
+
+def test_parse_real_fixture_no_match_is_genuine_negative():
+    raw = _fixture("dry_run_v0.3.6_no_match.txt")
+    stack, skills = ai._parse_preview_output(raw)
+    assert stack == ["Express"]
+    assert skills == []
+    assert ai._no_skills_reported(raw) is True
+
+
+def test_preview_end_to_end_real_fixture_no_match_sets_negative_flag(tmp_path):
+    raw = _fixture("dry_run_v0.3.6_no_match.txt")
+    with (
+        patch.object(ai, "_resolve_autoskills_cmd", return_value=["autoskills"]),
+        patch.object(ai.subprocess, "run", return_value=_completed(stdout=raw)),
+    ):
+        result = ai.preview(tmp_path)
+    assert result.ok is True
+    assert result.skills == []
+    assert result.no_skills_for_stack is True
+
+
+def test_parse_real_fixture_single_line_stack():
+    raw = _fixture("dry_run_v0.3.6_single_line_stack.txt")
+    stack, skills = ai._parse_preview_output(raw)
+    assert stack == ["Bash", "Python", "Pytest", "Express"]
+    assert {s.name for s in skills} == {
+        "bash-defensive-patterns",
+        "python-executor",
+        "python-testing-patterns",
+    }
+
+
+def test_parse_real_fixture_with_combos_ignores_combo_lines():
+    raw = _fixture("dry_run_v0.3.6_with_combos.txt")
+    stack, skills = ai._parse_preview_output(raw)
+    assert stack == ["Node.js", "Bash", "Python", "Pytest", "Express"]
+    # "⚡ Node.js + Express" combo line must not be treated as a stack entry
+    assert "Node.js + Express" not in stack
+    names = {s.name for s in skills}
+    assert names == {
+        "nodejs-backend-patterns",
+        "nodejs-best-practices",
+        "bash-defensive-patterns",
+        "python-executor",
+        "python-testing-patterns",
+        "nodejs-express-server",
+    }
+    # last entry has no "← Tech" suffix in the real output — source falls
+    # back to just the author
+    by_name = {s.name: s.source for s in skills}
+    assert by_name["nodejs-express-server"] == "aj-geddes"

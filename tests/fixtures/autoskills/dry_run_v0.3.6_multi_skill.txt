@@ -1,0 +1,18 @@
+┌─┐┬ ┬┌┬┐┌─┐┌─┐┬┌─┬┬  ┬  ┌─┐
+├─┤│ │ │ │ │└─┐├┴┐││  │  └─┐
+┴ ┴└─┘ ┴ └─┘└─┘┴ ┴┴┴─┘┴─┘└─┘
+Auto-install the best AI skills for your project · v0.3.6
+   Scanning project...[K   ◆ Detected technologies:
+     ✔ Node.js   ✔ Bash      ✔ Python    
+     ✔ Pytest    
+   ◆ Skills to install (8)
+    1. wshobson › nodejs-backend-patterns               ← Node.js
+    2. sickn33 › nodejs-best-practices                  ← Node.js
+    3. wshobson › bash-defensive-patterns               ← Bash
+    4. inferen-sh › python-executor (security check ⚠)  ← Python
+    5. wshobson › python-testing-patterns               ← Python, Pytest
+    6. anthropics › frontend-design                     ← Frontend
+    7. addyosmani › accessibility                       ← Frontend
+    8. addyosmani › seo                                 ← Frontend
+   Agents: claude-code
+   --dry-run: nothing was installed.

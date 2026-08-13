@@ -37,7 +37,7 @@ job; this module doesn't spawn one.
 @dataclass(frozen=True)
 class SkillCandidate:
     name: str
-    source: str = ""          # registry URL, "" if the CLI output didn't include one
+    source: str = ""          # "author › techs" / "author" / "org/repo/skill", "" if none parsed
 
 @dataclass(frozen=True)
 class PreviewResult:
@@ -46,6 +46,7 @@ class PreviewResult:
     skills: list[SkillCandidate]
     raw_output: str           # full stdout+stderr, always kept for debugging
     error: str = ""
+    no_skills_for_stack: bool = False  # True only if the CLI itself said "no skills" (see round 3)
 
 @dataclass(frozen=True)
 class InstallResult:
@@ -207,23 +208,147 @@ production.**
 
 ## Known limitation: output parsing is best-effort
 
-`autoskills` has no documented `--json` output mode. `_parse_preview_output`
-does a heuristic text parse (header-block splitting + bulleted-line
-extraction, with a URL-carrying-bullet fallback when no headers match) to
-fill in `PreviewResult.stack` / `.skills`. This was written against a
-plausible sample format, **not** verified against the real CLI's actual
-output (no network access in this environment to invoke the real registry).
+`autoskills` has no documented `--json` output mode (confirmed via
+`--help` on v0.3.6 — see Round 3 below). `_parse_preview_output` does a
+heuristic text parse to fill in `PreviewResult.stack` / `.skills`.
 `raw_output` is always populated regardless of parse success, specifically
 so the UI has a fallback to show the user the literal CLI output if the
-parsed fields look wrong or come back empty. If/when the real CLI's exact
-output format is confirmed, tighten `_parse_preview_output` accordingly.
+parsed fields look wrong or come back empty (round 3 below wires this
+fallback all the way into the UI, not just the data model).
 
 This is the same class of limitation as the staging mirror's unverified
-assumption above: both are best-effort behavior built without network
-access to the real CLI, both fail safe (parsing falls back to `raw_output`;
-staging falls back to the direct path), and both should be re-verified
-against the real `autoskills` CLI the first time this runs somewhere with
-network access.
+assumption above: both are best-effort behavior, and both fail safe
+(parsing falls back to `raw_output`; staging falls back to the direct
+path). **Round 3 below replaced the parser with one verified against the
+real CLI**, closing the specific gap this section originally flagged — the
+staging-mirror assumption above is still unverified and should be
+re-checked the same way if/when it becomes suspect.
+
+## Round 3 fix (2026-08-13, same day — QA-blocking bug)
+
+**The bug:** QA ran the real CLI for the first time with network access
+(`docs/qa/2026-08-13-autoskills-newrole-gate.md` §4.1) and found
+`_parse_preview_output` returned `stack=[]`, `skills=[]` against real
+`autoskills@0.3.6` output — even though the CLI detected a stack and
+proposed 8 skills, exit 0. Every real user hitting "Auto-detect skills"
+saw "autoskills ไม่พบ skill ที่เข้ากับ stack ของโปรเจคนี้" (no matching
+skill), unconditionally. Root cause: the parser was built (previous
+round, no network access) against a **plausible but wrong guess** at the
+output format — `key:` header lines + `-`/`*`/`•` bullets. The real CLI
+uses box-drawing (`◆`) prompts and a numbered `author › skill-name` list
+instead; neither regex ever matched.
+
+**Verification before fixing — no `--json` flag:** `npx autoskills@latest
+--help` was run first to check for a machine-readable output mode before
+writing a new text parser. None exists (`-y/--yes`, `--dry-run`,
+`--clear-cache`, `-v/--verbose`, `-a/--agent`, `-h/--help` — that's the
+complete flag set on v0.3.6). Text parsing is genuinely necessary here,
+not a shortcut.
+
+**Real output captured live**, `npx autoskills@latest --dry-run --agent
+claude-code` against this project root (v0.3.6, 2026-08-13) —
+byte-identical copies saved as fixtures for regression testing:
+
+```
+   Scanning project...[K   ◆ Detected technologies:
+     ✔ Node.js   ✔ Bash      ✔ Python
+     ✔ Pytest
+   ◆ Skills to install (8)
+    1. wshobson › nodejs-backend-patterns               ← Node.js
+    4. inferen-sh › python-executor (security check ⚠)  ← Python
+    5. wshobson › python-testing-patterns               ← Python, Pytest
+    6. aj-geddes › nodejs-express-server
+   Agents: claude-code
+   --dry-run: nothing was installed.
+```
+
+Notable real-world wrinkles the new parser had to handle, none of which
+the old one anticipated:
+- Headers aren't standalone lines — `◆ Detected technologies:` is glued
+  onto the tail of `   Scanning project...[K` (a lost/partial ANSI
+  clear-line escape), so headers are matched by keyword search anywhere
+  in a line, not by line-start position.
+- Multiple stack entries share one line, space-separated
+  (`✔ Node.js   ✔ Bash      ✔ Python`), some marked `✔` (matched) vs. `●`
+  (detected but no skill combo) — both count as stack.
+- Skill entries are numbered, not bulleted, and carry no URL — the
+  identifying token is `author › skill-name`; a trailing `← Tech, Tech2`
+  is optional (absent on combo-only entries like `nodejs-express-server`
+  above) and per-entry annotations like `(security check ⚠)` or
+  `(installed)` (seen when a prior run's `skills-lock.json` already
+  exists) can appear inline and must not corrupt the name.
+- A `◆ Detected combos:` section (e.g. `⚡ Node.js + Express`) can appear
+  between the stack and skills sections — must be excluded from both, not
+  merged into stack.
+- The word "security check" (singular) appears **inline inside a skill
+  entry** as an annotation, while the section header is "Security check**s**"
+  (plural) — an early version of the new header-matching regex conflated
+  the two and truncated the skills list after the first flagged entry;
+  caught by the multi-skill fixture test, fixed by requiring the plural.
+
+**The fix** (`_parse_preview_output`, `_split_sections`,
+`_NUMBERED_SKILL_RE`, `_TECH_TOKEN_RE` in `autoskills_installer.py`):
+rewritten against the verified real format above. ANSI escape sequences
+are stripped first (`_ANSI_RE`) as defense-in-depth even though the
+captured samples show them already partially lost in transit. A
+belt-and-suspenders fallback (`_INSTALLED_PATH_RE`) also recognizes the
+CLI's *real-install-completion* listing format (`✔ org/repo/skill-name`,
+no `←`/numbering) in case that renderer is ever reached instead of the
+dry-run one — confirmed to exist and differ from the dry-run format by
+deliberately triggering it (see "also investigated" below).
+
+**Honest-failure fix (task requirement #4):** `PreviewResult` gained
+`no_skills_for_stack: bool`, set by a new `_no_skills_reported()` helper
+that checks for the CLI's own "No skills available for your stack yet."
+text. `_on_autoskills_preview_ready` in `settings_window.py` now branches
+on it: `skills == [] and no_skills_for_stack` → the existing "not found"
+message (genuine negative, CLI said so explicitly); `skills == [] and not
+no_skills_for_stack` → a *different* message showing `raw_output` verbatim
+(capped at 4000 chars), since an empty parse with no explicit CLI
+negative most likely means the parser didn't recognize the output —
+exactly the class of bug this round fixes, now made visible instead of
+silently misreported if it recurs on a future CLI version.
+
+**Also investigated: a suspected `--dry-run` safety bug — ruled out, root
+cause was tester error, not the CLI or this module.** While capturing
+fixtures, a *different* shell command (typo'd `--version`, which isn't a
+flag `autoskills` documents — the CLI falls through to its default
+non-interactive install behavior on an unrecognized flag) briefly wrote 8
+real skill directories into this worktree's `.claude/skills/`. Before
+concluding anything, this was reproduced deterministically in three
+isolated scratch projects: (1) the real `--dry-run --agent claude-code`
+invocation — the one `preview()` actually uses — never wrote to disk in
+any of ~6 repeated attempts, including against a stack matching 8 skills;
+(2) the exact same typo'd `--version` invocation reliably reproduced a
+real, unconfirmed install in a fresh scratch project on the first try.
+This confirms `preview()`'s existing invocation (always `--dry-run
+--agent claude-code`, never anything else) is safe as documented — no
+change was made to it. The accidentally-written files (in the real
+worktree and in scratch dirs) were all cleaned up before this round's
+real work began; `git status` was clean before any parser code was
+touched.
+
+**Tests:** `tests/fixtures/autoskills/*.txt` — four byte-identical copies
+of real `--dry-run --agent claude-code` output (v0.3.6, captured
+2026-08-13): `dry_run_v0.3.6_multi_skill.txt` (8 skills, the exact
+transcript QA fed the old parser), `dry_run_v0.3.6_no_match.txt` (genuine
+"no skills for this stack" case), `dry_run_v0.3.6_single_line_stack.txt`
+(3 stack entries on one line, mixed `✔`/`●`), `dry_run_v0.3.6_with_combos.txt`
+(exercises the combos-section exclusion and a skill entry with no `←`
+suffix). Each fixture is asserted against directly (`_parse_preview_output`)
+and end-to-end through `preview()` with `subprocess.run` mocked to return
+the fixture text — so a future CLI format change fails these tests
+automatically instead of requiring another manual live run to catch. Old
+tests built against the fictional `key:`/bullet format were replaced with
+equivalents against the real numbered format; the UI-side test for the
+empty-skills case was split in two (genuine-negative vs. unparsed) to
+match the new branching, since running it unmodified would have called
+the real un-mocked `QMessageBox.warning` and hung the test process on a
+live modal dialog — caught by actually running the suite, not by
+inspection.
+
+Run: `pytest tests/test_autoskills_installer.py tests/test_settings_window.py -q -k "autoskills or Autoskills or parse or Parse"`
+— all green; `ruff check` clean on every touched file.
 
 ## Tests
 
