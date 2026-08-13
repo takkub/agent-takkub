@@ -441,6 +441,21 @@ _NEW_ROLE_COLUMN_MCPS: dict[int, frozenset[str]] = {
     2: frozenset({"playwright", "chrome-devtools"}),
 }
 
+# `.claude/agents/*.md` docs that ship in the repo but have no matching
+# roles.py Role() entry, so they're unreachable except by copy-pasting their
+# content by hand — offered as New Role Instructions starting points instead.
+_NEW_ROLE_TEMPLATES: tuple[tuple[str, str], ...] = (
+    ("analyst", "Analyst — product prioritization/spec writing"),
+    ("designer", "Designer — UI/UX design review"),
+    ("docs", "Docs — documentation writing"),
+    ("security", "Security — security review"),
+)
+
+# Strips the curation `<!-- ... -->` comment and `---\n...\n---` frontmatter
+# block that lead every `.claude/agents/*.md` file, leaving just the role
+# body to seed the Instructions box with.
+_AGENT_TEMPLATE_HEADER_RE = re.compile(r"^(?:<!--.*?-->\s*)?(?:---.*?---\s*)?", re.DOTALL)
+
 
 def _append_skill_references(instructions: str, skills: list[skill_scan.SkillInfo]) -> str:
     """Embed a "## Skills ที่เกี่ยวข้อง" section listing every selected skill
@@ -1436,60 +1451,32 @@ class SettingsWindow(QDialog):
         view = QWidget(self)
         lay = QVBoxLayout(view)
         lay.setContentsMargins(0, 0, 0, 16)
-        lay.setSpacing(12)
+        lay.setSpacing(14)
 
-        form = QWidget(view)
-        form.setObjectName("panel")
-        f_lay = QVBoxLayout(form)
-        f_lay.setContentsMargins(16, 14, 16, 14)
-        f_lay.setSpacing(10)
+        # ── Identity card ──────────────────────────────────────
+        identity = self._new_role_card("SETUP", "Identity", "1/5", view)
+        id_lay = identity.layout()
+        assert isinstance(id_lay, QVBoxLayout)
 
         name_row = QHBoxLayout()
         name_col = QVBoxLayout()
-        name_col.addWidget(QLabel("Name (--role)", form))
-        self._nr_name = QLineEdit(form)
+        name_col.addWidget(QLabel("Name (--role)", identity))
+        self._nr_name = QLineEdit(identity)
         self._nr_name.setPlaceholderText("data-eng (a-z0-9-_ เท่านั้น)")
         self._nr_name.textChanged.connect(self._mark_dirty)
         name_col.addWidget(self._nr_name)
         name_row.addLayout(name_col, 1)
 
         label_col = QVBoxLayout()
-        label_col.addWidget(QLabel("Label", form))
-        self._nr_label = QLineEdit(form)
+        label_col.addWidget(QLabel("Label", identity))
+        self._nr_label = QLineEdit(identity)
         self._nr_label.setPlaceholderText("Data Eng")
         self._nr_label.textChanged.connect(self._mark_dirty)
         label_col.addWidget(self._nr_label)
         name_row.addLayout(label_col, 1)
-        f_lay.addLayout(name_row)
+        id_lay.addLayout(name_row)
 
-        grid_row = QHBoxLayout()
-        col_col = QVBoxLayout()
-        col_col.addWidget(QLabel("Grid column", form))
-        self._nr_column = QComboBox(form)
-        self._nr_column.addItem("1 · Dev column", 1)
-        self._nr_column.addItem("2 · Support column", 2)
-        self._nr_column.setCurrentIndex(1)
-        self._nr_column.currentIndexChanged.connect(self._mark_dirty)
-        col_col.addWidget(self._nr_column)
-        grid_row.addLayout(col_col)
-
-        row_col = QVBoxLayout()
-        row_col.addWidget(QLabel("Grid row", form))
-        self._nr_row = QSpinBox(form)
-        # QSpinBox renders digits with the OS locale's native numeral system
-        # by default — on a Thai-locale machine that's ๐-๙, not 0-9. This
-        # field feeds a JSON int (custom_roles.create_role's `row` param), so
-        # force ASCII digits regardless of locale.
-        self._nr_row.setLocale(QLocale(QLocale.Language.C))
-        self._nr_row.setRange(0, 99)
-        self._nr_row.setValue(99)
-        self._nr_row.valueChanged.connect(self._mark_dirty)
-        row_col.addWidget(self._nr_row)
-        grid_row.addLayout(row_col)
-        grid_row.addStretch(1)
-        f_lay.addLayout(grid_row)
-
-        f_lay.addWidget(QLabel("Accent", form))
+        id_lay.addWidget(QLabel("Accent", identity))
         swatch_row = QHBoxLayout()
         swatch_row.setSpacing(6)
         # Codex/Gemini #17 — a gray not in the selectable palette meant no
@@ -1498,72 +1485,198 @@ class SettingsWindow(QDialog):
         self._nr_color = project_nav._AVATAR_COLORS[0]
         self._nr_swatch_btns: list[QPushButton] = []
         for color in project_nav._AVATAR_COLORS:
-            sw = QPushButton("", form)
+            sw = QPushButton("", identity)
             sw.setFixedSize(20, 20)
             sw.setCursor(Qt.CursorShape.PointingHandCursor)
             sw.clicked.connect(lambda _checked=False, c=color: self._on_swatch_clicked(c))
             self._nr_swatch_btns.append(sw)
             swatch_row.addWidget(sw)
         swatch_row.addStretch(1)
-        f_lay.addLayout(swatch_row)
+        id_lay.addLayout(swatch_row)
         self._update_swatch_selection()
+        lay.addWidget(identity)
+
+        # ── Placement card ─────────────────────────────────────
+        placement = self._new_role_card("BOARD", "Placement", "2/5", view)
+        pl_lay = placement.layout()
+        assert isinstance(pl_lay, QVBoxLayout)
+
+        grid_row = QHBoxLayout()
+        col_col = QVBoxLayout()
+        col_col.addWidget(QLabel("Grid column", placement))
+        self._nr_column = QComboBox(placement)
+        self._nr_column.addItem("1 · Dev column", 1)
+        self._nr_column.addItem("2 · Support column", 2)
+        self._nr_column.setCurrentIndex(1)
+        self._nr_column.currentIndexChanged.connect(self._mark_dirty)
+        self._nr_column.currentIndexChanged.connect(self._update_new_role_grid_hint)
+        col_col.addWidget(self._nr_column)
+        grid_row.addLayout(col_col)
+
+        row_col = QVBoxLayout()
+        row_col.addWidget(QLabel("Grid row", placement))
+        self._nr_row = QSpinBox(placement)
+        # QSpinBox renders digits with the OS locale's native numeral system
+        # by default — on a Thai-locale machine that's ๐-๙, not 0-9. This
+        # field feeds a JSON int (custom_roles.create_role's `row` param), so
+        # force ASCII digits regardless of locale.
+        self._nr_row.setLocale(QLocale(QLocale.Language.C))
+        self._nr_row.setRange(0, 99)
+        self._nr_row.setValue(99)
+        self._nr_row.valueChanged.connect(self._mark_dirty)
+        self._nr_row.valueChanged.connect(self._update_new_role_grid_hint)
+        row_col.addWidget(self._nr_row)
+        grid_row.addLayout(row_col)
+        grid_row.addStretch(1)
+        pl_lay.addLayout(grid_row)
+
+        self._nr_grid_hint = QLabel("", placement)
+        self._nr_grid_hint.setObjectName("panelHint")
+        self._nr_grid_hint.setWordWrap(True)
+        pl_lay.addWidget(self._nr_grid_hint)
+        self._update_new_role_grid_hint()
+        lay.addWidget(placement)
+
+        # ── Tools card ─────────────────────────────────────────
+        tools = self._new_role_card("ACCESS", "Tools", "3/5", view)
+        tl_lay = tools.layout()
+        assert isinstance(tl_lay, QVBoxLayout)
 
         toggle_row = QHBoxLayout()
-        toggle_row.addWidget(QLabel("ใช้ default MCP+Plugins ตาม column (แนะนำ)", form), 1)
-        self._nr_default_tools_toggle = cockpit_theme.ToggleSwitch(form, checked=True)
+        toggle_row.addWidget(QLabel("ใช้ default MCP+Plugins ตาม column (แนะนำ)", tools), 1)
+        self._nr_default_tools_toggle = cockpit_theme.ToggleSwitch(tools, checked=True)
         self._nr_default_tools_toggle.toggled.connect(self._mark_dirty)
         toggle_row.addWidget(self._nr_default_tools_toggle)
-        f_lay.addLayout(toggle_row)
+        tl_lay.addLayout(toggle_row)
         tools_hint = QLabel(
             "เปิด (แนะนำ) = role นี้ได้ default MCP/Plugins ตาม column (Dev=เปล่า, "
             "Support=playwright+chrome-devtools) · ปิด = ไม่มี MCP/Plugins เลย ตั้งเองทีหลังผ่าน "
             "MCP Matrix / Plugins Matrix",
-            form,
+            tools,
         )
         tools_hint.setObjectName("panelHint")
         tools_hint.setWordWrap(True)
-        f_lay.addWidget(tools_hint)
+        tl_lay.addWidget(tools_hint)
+        lay.addWidget(tools)
 
-        f_lay.addWidget(QLabel("Skills ที่ role นี้ควรรู้จัก", form))
+        # ── Skills card ────────────────────────────────────────
+        skills = self._new_role_card("KNOWLEDGE", "Skills", "4/5", skills_card=True, parent=view)
+        sk_lay = skills.layout()
+        assert isinstance(sk_lay, QVBoxLayout)
         skills_hint = QLabel(
             "สแกนจาก .claude/skills/ จริงในโปรเจค — ติ๊กเพื่อฝัง reference "
             "เข้า instructions ให้อัตโนมัติตอนบันทึก role นี้ (ปุ่ม Create Role "
             "หรือ Save & Apply ด้านล่างทำเหมือนกัน)",
-            form,
+            skills,
         )
         skills_hint.setObjectName("panelHint")
         skills_hint.setWordWrap(True)
-        f_lay.addWidget(skills_hint)
-        self._nr_skills_container = QWidget(form)
+        sk_lay.addWidget(skills_hint)
+
+        self._nr_skill_filter = QLineEdit(skills)
+        self._nr_skill_filter.setPlaceholderText("ค้นหา skill…")
+        self._nr_skill_filter.textChanged.connect(self._filter_new_role_skills)
+        sk_lay.addWidget(self._nr_skill_filter)
+
+        skills_scroll = QScrollArea(skills)
+        skills_scroll.setWidgetResizable(True)
+        skills_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        skills_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        skills_scroll.setMaximumHeight(220)
+        self._nr_skills_container = QWidget(skills_scroll)
         self._nr_skills_lay = QVBoxLayout(self._nr_skills_container)
         self._nr_skills_lay.setContentsMargins(0, 2, 0, 2)
         self._nr_skills_lay.setSpacing(4)
-        f_lay.addWidget(self._nr_skills_container)
+        skills_scroll.setWidget(self._nr_skills_container)
+        sk_lay.addWidget(skills_scroll)
+
+        self._nr_skill_count = QLabel("", skills)
+        self._nr_skill_count.setObjectName("panelHint")
+        sk_lay.addWidget(self._nr_skill_count)
+
         self._nr_skill_checks: list[tuple[skill_scan.SkillInfo, QCheckBox]] = []
         self._reload_new_role_skills()
+        lay.addWidget(skills)
 
-        f_lay.addWidget(QLabel("Instructions", form))
-        self._nr_instructions = QPlainTextEdit(form)
+        # ── Instructions card ──────────────────────────────────
+        instr = self._new_role_card("BEHAVIOR", "Instructions", "5/5", view)
+        in_lay = instr.layout()
+        assert isinstance(in_lay, QVBoxLayout)
+
+        template_row = QHBoxLayout()
+        template_row.addWidget(QLabel("เริ่มจากเทมเพลต", instr))
+        self._nr_template_combo = QComboBox(instr)
+        for stem, label in _NEW_ROLE_TEMPLATES:
+            self._nr_template_combo.addItem(label, stem)
+        template_row.addWidget(self._nr_template_combo, 1)
+        template_btn = cockpit_theme.secondary_button("ใช้เทมเพลตนี้", instr)
+        template_btn.clicked.connect(self._on_use_role_template_clicked)
+        template_row.addWidget(template_btn)
+        in_lay.addLayout(template_row)
+
+        self._nr_instructions = QPlainTextEdit(instr)
         self._nr_instructions.setPlaceholderText("บอก role ตัวเองว่าทำหน้าที่อะไร ขอบเขตงานคืออะไร...")
         self._nr_instructions.setMinimumHeight(90)
         self._nr_instructions.textChanged.connect(self._mark_dirty)
-        f_lay.addWidget(self._nr_instructions)
+        in_lay.addWidget(self._nr_instructions)
+        lay.addWidget(instr)
 
-        self._nr_status = QLabel("", form)
+        self._nr_status = QLabel("", view)
         self._nr_status.setObjectName("panelHint")
         self._nr_status.setWordWrap(True)
-        f_lay.addWidget(self._nr_status)
+        lay.addWidget(self._nr_status)
 
         create_row = QHBoxLayout()
-        create_btn = cockpit_theme.gold_button("+ Create Role", form)
+        create_btn = cockpit_theme.gold_button("+ Create Role", view)
         create_btn.clicked.connect(self._on_create_role_clicked)
         create_row.addWidget(create_btn)
         create_row.addStretch(1)
-        f_lay.addLayout(create_row)
+        lay.addLayout(create_row)
 
-        lay.addWidget(form)
         lay.addStretch(1)
         return view
+
+    def _new_role_card(
+        self,
+        kicker: str,
+        title: str,
+        tag: str,
+        parent: QWidget,
+        *,
+        skills_card: bool = False,
+    ) -> QWidget:
+        card = QWidget(parent)
+        card.setObjectName("panel")
+        c_lay = QVBoxLayout(card)
+        c_lay.setContentsMargins(16, 14, 16, 14)
+        c_lay.setSpacing(10 if not skills_card else 8)
+        c_lay.addWidget(self._build_card_header(kicker, title, tag, card))
+        return card
+
+    def _update_new_role_grid_hint(self) -> None:
+        column_label = self._nr_column.currentText().split("·", 1)[-1].strip() or "column"
+        self._nr_grid_hint.setText(
+            f"role นี้จะแสดงที่ {column_label} แถวที่ {self._nr_row.value()} ของบอร์ด role"
+        )
+
+    def _on_use_role_template_clicked(self) -> None:
+        stem = self._nr_template_combo.currentData()
+        path = config.AGENTS_DIR / f"{stem}.md"
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            self._nr_status.setText(f"! อ่านเทมเพลตไม่ได้: {path}")
+            return
+        body = _AGENT_TEMPLATE_HEADER_RE.sub("", text, count=1).strip()
+        if self._nr_instructions.toPlainText().strip():
+            reply = QMessageBox.question(
+                self,
+                "แทนที่ Instructions?",
+                "Instructions มีเนื้อหาอยู่แล้ว — แทนที่ด้วยเทมเพลตนี้เลยไหม?",
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+        self._nr_instructions.setPlainText(body)
 
     def _on_swatch_clicked(self, color: str) -> None:
         self._nr_color = color
@@ -1604,6 +1717,17 @@ class SettingsWindow(QDialog):
             item = self._nr_skills_lay.takeAt(0)
             w = item.widget()
             if w is not None:
+                # takeAt() only detaches the widget from the layout — it
+                # stays a live, visible child of `_nr_skills_container` until
+                # deleteLater()'s DeferredDelete event actually runs on the
+                # next event-loop tick. Reload can be triggered twice in
+                # close succession (initial build, then again after a New
+                # Skill create at line ~2762) with no event-loop turn between
+                # them, so the stale widget was still on screen when the new
+                # layout placed a fresh row at the same position — rendered
+                # as overlapping/garbled text. hide() removes it from the
+                # screen immediately; deleteLater() still reclaims it later.
+                w.hide()
                 w.deleteLater()
         self._nr_skill_checks = []
 
@@ -1612,14 +1736,72 @@ class SettingsWindow(QDialog):
             empty = QLabel("ไม่พบ skill ใน .claude/skills/ ของโปรเจคนี้", self._nr_skills_container)
             empty.setObjectName("panelHint")
             self._nr_skills_lay.addWidget(empty)
+            self._update_new_role_skill_count()
             return
+        writable_roots = self._writable_skill_roots()
+        central_dirs = self._central_skill_dirs()
         for skill in skills:
-            text = f"{skill.name} — {skill.description}" if skill.description else skill.name
-            chk = QCheckBox(text, self._nr_skills_container)
-            chk.setToolTip(skill.description or skill.name)
-            chk.toggled.connect(self._mark_dirty)
-            self._nr_skills_lay.addWidget(chk)
-            self._nr_skill_checks.append((skill, chk))
+            row = self._build_new_role_skill_row(skill, writable_roots, central_dirs)
+            self._nr_skills_lay.addWidget(row)
+        self._update_new_role_skill_count()
+
+    def _build_new_role_skill_row(
+        self,
+        skill: skill_scan.SkillInfo,
+        writable_roots: list[Path],
+        central_dirs: list[Path],
+    ) -> QWidget:
+        """One skill = one row: checkbox (name only — packing the full
+        description into the checkbox text is what made the form overflow
+        horizontally, see docs/audit/2026-08-13-new-role-redesign.md) plus a
+        word-wrapped description line and a small source badge."""
+        row = QWidget(self._nr_skills_container)
+        row_lay = QVBoxLayout(row)
+        row_lay.setContentsMargins(0, 0, 0, 0)
+        row_lay.setSpacing(0)
+
+        top = QHBoxLayout()
+        chk = QCheckBox(skill.name, row)
+        chk.toggled.connect(self._mark_dirty)
+        chk.toggled.connect(self._update_new_role_skill_count)
+        top.addWidget(chk)
+        source = (
+            "project"
+            if skill_scan.is_writable_skill(skill.path, writable_roots, central_dirs)
+            else "cockpit"
+        )
+        source_lbl = QLabel(f"· {source}", row)
+        source_lbl.setObjectName("panelHint")
+        top.addWidget(source_lbl)
+        top.addStretch(1)
+        row_lay.addLayout(top)
+
+        if skill.description:
+            desc = QLabel(skill.description, row)
+            desc.setObjectName("panelHint")
+            desc.setWordWrap(True)
+            desc.setContentsMargins(22, 0, 0, 0)
+            row_lay.addWidget(desc)
+
+        self._nr_skill_checks.append((skill, chk))
+        return row
+
+    def _filter_new_role_skills(self, text: str) -> None:
+        needle = text.strip().lower()
+        for i in range(self._nr_skills_lay.count()):
+            row = self._nr_skills_lay.itemAt(i).widget()
+            if row is None:
+                continue
+            skill = next((s for s, chk in self._nr_skill_checks if chk.parentWidget() is row), None)
+            if skill is None:
+                continue
+            hay = f"{skill.name} {skill.description}".lower()
+            row.setVisible(not needle or needle in hay)
+
+    def _update_new_role_skill_count(self, *_args: object) -> None:
+        total = len(self._nr_skill_checks)
+        checked = sum(1 for _skill, chk in self._nr_skill_checks if chk.isChecked())
+        self._nr_skill_count.setText(f"{checked}/{total} skill ที่เลือก" if total else "")
 
     def _selected_new_role_skills(self) -> list[skill_scan.SkillInfo]:
         return [skill for skill, chk in self._nr_skill_checks if chk.isChecked()]
@@ -1729,6 +1911,12 @@ class SettingsWindow(QDialog):
             chk.blockSignals(False)
         self._nr_color = project_nav._AVATAR_COLORS[0]
         self._update_swatch_selection()
+        self._update_new_role_grid_hint()
+        self._update_new_role_skill_count()
+        self._nr_skill_filter.blockSignals(True)
+        self._nr_skill_filter.clear()
+        self._nr_skill_filter.blockSignals(False)
+        self._filter_new_role_skills("")
         if clear_status:
             self._nr_status.setText("")
 
