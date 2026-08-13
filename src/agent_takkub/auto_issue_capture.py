@@ -14,6 +14,11 @@ degrades into "file every crash" (see ``_recent`` / ``_fired_mem`` /
 The target repo is public (takkub/agent-takkub), so title/body are scrubbed
 of the caller's home directory and redacted for token-shaped substrings
 before anything is sent — see ``_scrub_home`` / ``_redact``.
+
+``capture_cockpit_crash`` is a no-op in any test/CI process — see
+``_auto_issue_suppressed`` — so a pytest run (which imports ``app.py`` and
+therefore installs the same ``sys.excepthook``) can never file a real issue
+against the public repo (#188).
 """
 
 from __future__ import annotations
@@ -171,6 +176,34 @@ def _prune(mapping: dict, now: float, window: float = _COOLDOWN_SECONDS) -> dict
     }
 
 
+def _auto_issue_suppressed() -> bool:
+    """True when auto-issue capture must stay a no-op (test/CI process).
+
+    `app.py` installs `sys.excepthook` at *module import time*, so any
+    process that imports `agent_takkub.app` — including a pytest run that
+    only imports it transitively — gets its unhandled exceptions routed here
+    too (#188: a background pytest process's own `OSError` on a broken
+    stdout pipe at shutdown filed a real GitHub issue against the public
+    repo). Checked at call time, as a single seam, so
+    `test_auto_issue_capture.py`'s tests — which intentionally exercise real
+    firing behaviour — can monkeypatch just this function back to `False`
+    instead of every one of them going dark.
+    """
+    if os.environ.get("TAKKUB_SKIP_AUTO_ISSUE_CAPTURE", "").strip() not in ("", "0"):
+        return True
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return True
+    # CI is an external convention (GitHub Actions sets it to the literal
+    # string "true"), not one of our own TAKKUB_SKIP_* kill switches — so it
+    # intentionally stays plain-truthy instead of the "" / "0" convention
+    # above.
+    if os.environ.get("CI"):
+        return True
+    if "pytest" in sys.modules:
+        return True
+    return False
+
+
 def capture_cockpit_crash(exc_type, exc_value, exc_tb, *, source: str) -> None:
     """Fire-and-forget: file an auto-captured GitHub issue for a cockpit crash.
 
@@ -180,6 +213,8 @@ def capture_cockpit_crash(exc_type, exc_value, exc_tb, *, source: str) -> None:
     every failure — this must never raise back into the exception hook that
     calls it (that would defeat the whole point of `_install_exception_guard`).
     """
+    if _auto_issue_suppressed():
+        return
     try:
         sig = _signature(exc_type, exc_tb)
         now = time.time()

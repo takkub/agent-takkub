@@ -19,6 +19,10 @@ runtime/
 # Local issue-store fallback (written only when gh is unavailable). With
 # issues now defaulting to the agent-takkub repo, this can land at repo root.
 .takkub_issues.json
+# Auto-issue dedup/rate-cap state (DATA_HOME/auto_issue_dedup.json). In a dev
+# checkout DATA_HOME == REPO_ROOT, so it lands at repo root — runtime state,
+# per-machine, never source.
+auto_issue_dedup.json
 
 # Claude Code per-user local settings (permission allows, MCP overrides
 # vary per developer machine).

@@ -39,6 +39,11 @@ def _isolate(tmp_path, monkeypatch):
     monkeypatch.setattr(aic, "_signatures_mem", {})
     monkeypatch.setattr(aic, "_cap_blocked_until", 0.0)
     monkeypatch.setattr(aic, "_persist_broken", False)
+    # This module's whole point is exercising capture_cockpit_crash's real
+    # firing behaviour, so override the #188 test/CI guard (which would
+    # otherwise make every test below a silent no-op since they run under
+    # pytest) back off at this single seam.
+    monkeypatch.setattr(aic, "_auto_issue_suppressed", lambda: False)
 
 
 def test_same_signature_within_cooldown_does_not_refire(monkeypatch):

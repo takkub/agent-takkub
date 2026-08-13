@@ -49,9 +49,23 @@ os.environ.setdefault("TAKKUB_SKIP_MCP_WARM", "1")
 # subprocesses otherwise — a full pytest run would spawn dozens of node
 # processes across every projects.json path.
 os.environ.setdefault("TAKKUB_SKIP_GRAFT_BUILD", "1")
+# Same rationale again, for disk_usage.py's prune_orphan_worktrees_boot():
+# Orchestrator() construction runs it at boot, and it shells out to real
+# `git rev-parse` / `git worktree list` (via WorktreeManager) for every dir
+# under <data_home>/worktrees/** — including any leftover real checkout on
+# the dev machine running the suite, not just test fixtures.
+os.environ.setdefault("TAKKUB_SKIP_ORPHAN_WORKTREE_PRUNE", "1")
 # Browser-role spawn tests mock the PTY and must never launch a real Chrome.
 # NativeChromeManager itself is tested directly with subprocess/CDP mocks.
 os.environ.setdefault("TAKKUB_SKIP_NATIVE_CHROME", "1")
+# app.py installs sys.excepthook at import time, so any pytest process that
+# imports it (directly or transitively) routes its own unhandled exceptions
+# into auto_issue_capture.capture_cockpit_crash — which files a real GitHub
+# issue against the public repo (#188). auto_issue_capture._auto_issue_suppressed
+# already checks PYTEST_CURRENT_TEST/`pytest in sys.modules` as a fallback, but
+# this explicit flag documents the guard alongside its siblings and gives a
+# single toggle a test can clear on purpose.
+os.environ.setdefault("TAKKUB_SKIP_AUTO_ISSUE_CAPTURE", "1")
 
 import pytest
 
@@ -161,6 +175,8 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
     monkeypatch.setenv("TAKKUB_SKIP_MCP_WARM", "1")
     monkeypatch.setenv("TAKKUB_SKIP_NATIVE_CHROME", "1")
     monkeypatch.setenv("TAKKUB_SKIP_GRAFT_BUILD", "1")
+    monkeypatch.setenv("TAKKUB_SKIP_ORPHAN_WORKTREE_PRUNE", "1")
+    monkeypatch.setenv("TAKKUB_SKIP_AUTO_ISSUE_CAPTURE", "1")
     sdt = _maybe_module("agent_takkub.shared_dev_tools", force=True)
     if sdt is not None:
         monkeypatch.setattr(sdt, "warm_browser_mcps", lambda: None, raising=False)
