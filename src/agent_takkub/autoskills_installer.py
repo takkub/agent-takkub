@@ -23,14 +23,25 @@ Resolution order for the CLI itself: a directly-installed `autoskills` (or
 (never a hardcoded path) so this works unmodified on both Windows and macOS.
 When neither is found, both functions return a readable Thai error instead of
 raising or hanging.
+
+`install()` prefers running `autoskills` against a throwaway staging mirror
+of the project (see `_build_staging_mirror`) rather than the real project
+tree, so a skill the user did NOT select never touches real disk at all —
+only the ones they picked get copied in. If the mirror can't be built for any
+reason, it falls back to the original direct in-place approach (full install
+in `.claude/skills/`, then delete whatever wasn't selected) — see
+`InstallResult.staging_used` and the "Staging vs. direct" note on `install()`
+for the trade-off and an important unverified assumption about the former.
 """
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
 import subprocess
+import tempfile
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -69,15 +80,42 @@ class PreviewResult:
 
 @dataclass(frozen=True)
 class InstallResult:
-    """Result of a real install. `written` are the skill directory/file names
-    (relative to `.claude/skills/`) that autoskills wrote AND the user
-    selected — the only ones actually kept on disk. `skipped` are names
-    autoskills wrote that the user did NOT select; those are deleted again
-    before this returns (see `install()`)."""
+    """Result of a real install.
+
+    `written` — skill entry names (relative to `.claude/skills/`) that ended
+    up on disk in the real project AND were selected by the user; the only
+    ones actually kept.
+
+    `skipped` — names `autoskills` produced that the user did NOT select.
+    With the staging path (`staging_used=True`) these never touched the real
+    project at all; with the direct fallback they were written for real then
+    deleted again.
+
+    `overwritten` — pre-existing `.claude/skills/` entries whose content
+    changed because of this install. Two ways this happens: (1) the user
+    selected a name that collided with something already on disk (expected —
+    they asked for it), or (2) — direct/fallback path only — `autoskills`'
+    non-filtered install run touched a pre-existing entry the user did NOT
+    select; that case is restored from a pre-run backup and reported here
+    too, since restoring successfully means no data was actually lost.
+
+    `overwrite_failed` — pre-existing entries `autoskills` overwrote WITHOUT
+    the user selecting them, where restoring the original content also
+    failed. Only possible on the direct/fallback path. Non-empty here forces
+    `ok=False` — this is real, unrecoverable data loss the caller must
+    surface loudly, never swallow.
+
+    `staging_used` — True if this install ran `autoskills` against an
+    isolated staging mirror (see `_build_staging_mirror`) rather than the
+    real project tree directly.
+    """
 
     ok: bool
     written: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
+    overwritten: list[str] = field(default_factory=list)
+    overwrite_failed: list[str] = field(default_factory=list)
+    staging_used: bool = False
     raw_output: str = ""
     error: str = ""
 
@@ -230,21 +268,50 @@ def _skill_entry_names(skills_dir: Path) -> set[str]:
         return set()
 
 
+def _path_escapes(path: Path, skills_real: Path) -> bool:
+    """True when `path`'s resolved real location does not live under the
+    already-resolved `skills_real` directory (or it can't be resolved at
+    all — treated as an escape, not as "safe by default")."""
+    try:
+        real = path.resolve()
+        real.relative_to(skills_real)
+    except (OSError, ValueError):
+        return True
+    return False
+
+
 def _escaped_entries(skills_dir: Path, names: Iterable[str]) -> set[str]:
-    """Names among `names` whose resolved real path does NOT live under the
-    resolved `skills_dir` — e.g. a symlink/junction autoskills wrote that
-    points outside the project. The path-escape guard for `install()`."""
+    """Names among `names` that escape the resolved `skills_dir` — either
+    because the top-level entry itself is a symlink/junction pointing
+    outside it, or because a symlink NESTED anywhere inside a newly-written
+    directory points outside (e.g. `skill-a/assets/evil -> C:\\Windows`,
+    checking only the top-level entry would miss this). Walks each directory
+    entry with `followlinks=False` so a symlinked subdirectory is inspected
+    as a leaf — its own target checked — rather than followed into. The
+    path-escape guard for `install()`."""
     try:
         skills_real = skills_dir.resolve()
     except OSError:
         return set(names)
+
     escaped: set[str] = set()
     for name in names:
-        try:
-            real = (skills_dir / name).resolve()
-            real.relative_to(skills_real)
-        except (OSError, ValueError):
+        top = skills_dir / name
+        if _path_escapes(top, skills_real):
             escaped.add(name)
+            continue
+        if top.is_symlink() or not top.is_dir():
+            continue
+        for root, dirs, files in os.walk(top, followlinks=False):
+            root_path = Path(root)
+            found = False
+            for entry_name in (*dirs, *files):
+                if _path_escapes(root_path / entry_name, skills_real):
+                    escaped.add(name)
+                    found = True
+                    break
+            if found:
+                break
     return escaped
 
 
@@ -262,6 +329,384 @@ def _remove_skill_entry(path: Path) -> None:
         pass
 
 
+# ---------------------------------------------------------------------------
+# Overwrite detection/recovery for pre-existing `.claude/skills/` entries —
+# used by the direct/fallback install path, where `autoskills` runs against
+# the real tree and could silently rewrite something already there under a
+# name the user never selected (a same-name diff never shows up as "new").
+# ---------------------------------------------------------------------------
+
+
+def _hash_file(path: Path) -> str:
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 16), b""):
+                h.update(chunk)
+    except OSError:
+        return "unreadable"
+    return h.hexdigest()
+
+
+def _entry_signature(path: Path) -> str:
+    """Content-based fingerprint of one skill entry (file, dir, or symlink),
+    used to tell whether `autoskills` silently rewrote a pre-existing entry.
+    Hashes actual file bytes rather than size/mtime so it's immune to
+    filesystem timestamp-resolution flakiness (notably coarse on some
+    Windows filesystems) and to tools that preserve mtimes on write.
+    Symlinks are fingerprinted by their target string, never followed."""
+    if path.is_symlink():
+        try:
+            return f"symlink:{os.readlink(path)}"
+        except OSError:
+            return "symlink:?"
+    if path.is_file():
+        return f"file:{_hash_file(path)}"
+    if path.is_dir():
+        parts: list[str] = []
+        for root, _dirs, files in os.walk(path, followlinks=False):
+            root_path = Path(root)
+            for fname in files:
+                fpath = root_path / fname
+                rel = fpath.relative_to(path).as_posix()
+                if fpath.is_symlink():
+                    try:
+                        parts.append(f"{rel}:symlink:{os.readlink(fpath)}")
+                    except OSError:
+                        parts.append(f"{rel}:symlink:?")
+                else:
+                    parts.append(f"{rel}:{_hash_file(fpath)}")
+        h = hashlib.sha256()
+        for p in sorted(parts):
+            h.update(p.encode("utf-8", "surrogateescape"))
+            h.update(b"\0")
+        return f"dir:{h.hexdigest()}"
+    return "missing"
+
+
+def _backup_entry(path: Path, backup_root: Path, name: str) -> Path | None:
+    """Best-effort copy of one pre-existing skill entry into a temp backup
+    dir before `autoskills` runs in-place, so a silent overwrite can be
+    restored afterward. Returns None (entry can then only be reported, not
+    restored) if the backup copy itself fails."""
+    dest = backup_root / name
+    try:
+        if path.is_symlink():
+            target = os.readlink(path)
+            os.symlink(target, dest, target_is_directory=path.is_dir())
+        elif path.is_dir():
+            shutil.copytree(path, dest, symlinks=True)
+        elif path.is_file():
+            shutil.copy2(path, dest)
+        else:
+            return None
+    except OSError:
+        return None
+    return dest
+
+
+def _restore_entry(backup: Path, dest: Path) -> bool:
+    """Best-effort restore of one pre-existing skill entry from its pre-run
+    backup, after `autoskills` overwrote it. Returns False if the restore
+    itself fails partway — the caller must then report `dest`'s name as
+    unrestorable rather than assume success."""
+    _remove_skill_entry(dest)
+    try:
+        if backup.is_symlink():
+            target = os.readlink(backup)
+            os.symlink(target, dest, target_is_directory=backup.is_dir())
+        elif backup.is_dir():
+            shutil.copytree(backup, dest, symlinks=True)
+        else:
+            shutil.copy2(backup, dest)
+    except OSError:
+        return False
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Staging mirror — install() prefers running `autoskills` here instead of the
+# real project tree, so an unselected skill never touches real disk at all.
+# ---------------------------------------------------------------------------
+
+_STAGING_PREFIX = ".autoskills-staging-"
+
+
+def _build_staging_mirror(project_root: Path) -> Path | None:
+    """Best-effort isolated copy of `project_root` for `install()` to run
+    `autoskills` against instead of the real project tree, so a skill the
+    user did NOT select never touches real disk at all — the direct/fallback
+    path has to write it for real first and delete it again, a window where
+    a concurrent reader could pick it up, and where a mid-run crash leaves it
+    stranded permanently.
+
+    Lives INSIDE `project_root` (guarantees the same filesystem volume, so
+    the mirror can use hardlinks — ~0 extra disk, same technique as this
+    codebase's graft staging mirror) under a `.autoskills-staging-<token>/`
+    directory that the mirror walk itself excludes. `.git/` and the real
+    `.claude/skills/` are also excluded: `.git` because it's irrelevant to
+    `autoskills` per this module's docstring, `.claude/skills` because
+    hardlinking it would be actively dangerous — if `autoskills` opened one
+    of those hardlinked files for an in-place rewrite, it would mutate the
+    REAL project's file too (a hardlink shares the underlying bytes; only
+    deleting/replacing the directory ENTRY is isolated, not editing content
+    through it). Staging gets a fresh empty `.claude/skills/` instead; the
+    caller (`_install_via_staging`) diffs newly-written names against the
+    REAL project's `.claude/skills/` snapshot taken separately, after the
+    CLI run, since the real one was never touched during it.
+
+    UNVERIFIED ASSUMPTION, flagged per audit doc
+    (docs/audit/2026-08-13-autoskills-installer.md): this relies on
+    `autoskills`' stack detection only reading manifest/config files
+    reachable under the project tree — not, say, requiring the literal real
+    absolute path, network-probing something project-root-relative, or
+    needing `.git` to exist. There is no network access in this environment
+    to confirm that against the real CLI. `install()` treats ANY failure to
+    build this mirror as non-fatal and falls back to the direct in-place
+    path instead (see `InstallResult.staging_used`) — so a wrong assumption
+    here degrades to the previous (also imperfect, but previously the only)
+    behavior rather than breaking installs outright.
+
+    Returns None (caller falls back to the direct path) only when the
+    staging root itself can't be created. Per-file mirror failures inside
+    the walk (a locked file, a permission error) are skipped individually
+    and never abort the whole mirror — real dev trees routinely have a few
+    such files that have nothing to do with stack detection.
+    """
+    try:
+        staging = Path(tempfile.mkdtemp(prefix=_STAGING_PREFIX, dir=str(project_root)))
+    except OSError:
+        return None
+
+    for root, dirs, files in os.walk(project_root, followlinks=False):
+        root_path = Path(root)
+        try:
+            rel_parts = root_path.relative_to(project_root).parts
+        except ValueError:
+            dirs[:] = []
+            continue
+
+        if not rel_parts:
+            dirs[:] = [d for d in dirs if d != ".git" and d != staging.name]
+        elif rel_parts == (".claude",):
+            dirs[:] = [d for d in dirs if d != "skills"]
+
+        dest_dir = staging.joinpath(*rel_parts)
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            dirs[:] = []
+            continue
+
+        for fname in files:
+            src = root_path / fname
+            dest = dest_dir / fname
+            try:
+                if src.is_symlink():
+                    target = os.readlink(src)
+                    os.symlink(target, dest, target_is_directory=src.is_dir())
+                else:
+                    os.link(src, dest)
+            except OSError:
+                try:
+                    shutil.copy2(src, dest)
+                except OSError:
+                    continue  # best-effort: one bad file never aborts the mirror
+
+    try:
+        (staging / ".claude" / "skills").mkdir(parents=True, exist_ok=True)
+    except OSError:
+        shutil.rmtree(staging, ignore_errors=True)
+        return None
+    return staging
+
+
+def _install_via_staging(
+    project_root: Path,
+    staging: Path,
+    cmd: list[str],
+    selected: set[str],
+    timeout: float,
+) -> InstallResult:
+    staging_skills = staging / ".claude" / "skills"
+    full_cmd = [*cmd, "--yes", "--agent", "claude-code"]
+    try:
+        proc = _run(full_cmd, staging, timeout)
+    except subprocess.TimeoutExpired:
+        return InstallResult(
+            ok=False, error=f"autoskills install หมดเวลา ({timeout:.0f}s)", staging_used=True
+        )
+    except OSError as e:
+        return InstallResult(ok=False, error=f"เรียก autoskills ไม่สำเร็จ: {e}", staging_used=True)
+
+    raw = (proc.stdout or "") + (proc.stderr or "")
+    if proc.returncode != 0:
+        return InstallResult(
+            ok=False,
+            raw_output=raw,
+            error=f"autoskills exited {proc.returncode}",
+            staging_used=True,
+        )
+
+    staged_names = _skill_entry_names(staging_skills)
+    escaped = _escaped_entries(staging_skills, staged_names)
+    if escaped:
+        return InstallResult(
+            ok=False,
+            raw_output=raw,
+            error=f"autoskills เขียนไฟล์นอก .claude/skills/ — ยกเลิกทั้งหมด: {', '.join(sorted(escaped))}",
+            staging_used=True,
+        )
+
+    real_skills_dir = project_root / ".claude" / "skills"
+    real_before = _skill_entry_names(real_skills_dir)
+
+    written: list[str] = []
+    skipped: list[str] = []
+    overwritten: list[str] = []
+    for name in sorted(staged_names):
+        if name not in selected:
+            skipped.append(name)  # never copied — never touches the real project at all
+            continue
+        if name in real_before:
+            overwritten.append(name)  # user explicitly chose this name — expected
+        dest = real_skills_dir / name
+        try:
+            real_skills_dir.mkdir(parents=True, exist_ok=True)
+            _remove_skill_entry(dest)
+            src = staging_skills / name
+            if src.is_dir():
+                shutil.copytree(src, dest, symlinks=True)
+            else:
+                shutil.copy2(src, dest)
+            written.append(name)
+        except OSError as e:
+            return InstallResult(
+                ok=False,
+                written=written,
+                skipped=skipped,
+                overwritten=overwritten,
+                raw_output=raw,
+                error=f"คัดลอก {name} เข้าโปรเจกต์ไม่สำเร็จ: {e}",
+                staging_used=True,
+            )
+
+    return InstallResult(
+        ok=True,
+        written=written,
+        skipped=skipped,
+        overwritten=overwritten,
+        raw_output=raw,
+        staging_used=True,
+    )
+
+
+def _install_direct(
+    project_root: Path,
+    cmd: list[str],
+    selected: set[str],
+    timeout: float,
+) -> InstallResult:
+    """Original in-place install path (no staging isolation available):
+    `autoskills` runs directly against `project_root`, writing straight into
+    the real `.claude/skills/`. Everything it wrote that the user didn't
+    select is deleted again afterward. Every pre-existing entry is
+    fingerprinted and backed up before the run so a same-name overwrite can
+    be detected and — for names the user did NOT select — restored."""
+    skills_dir = project_root / ".claude" / "skills"
+    before_names = _skill_entry_names(skills_dir)
+    before_signatures = {name: _entry_signature(skills_dir / name) for name in before_names}
+
+    backup_dir: Path | None = None
+    backups: dict[str, Path] = {}
+    if before_names:
+        try:
+            backup_dir = Path(tempfile.mkdtemp(prefix="autoskills-backup-"))
+        except OSError:
+            backup_dir = None
+        if backup_dir is not None:
+            for name in before_names:
+                backed_up = _backup_entry(skills_dir / name, backup_dir, name)
+                if backed_up is not None:
+                    backups[name] = backed_up
+
+    def _cleanup_backup() -> None:
+        if backup_dir is not None:
+            shutil.rmtree(backup_dir, ignore_errors=True)
+
+    full_cmd = [*cmd, "--yes", "--agent", "claude-code"]
+    try:
+        proc = _run(full_cmd, project_root, timeout)
+    except subprocess.TimeoutExpired:
+        _cleanup_backup()
+        return InstallResult(ok=False, error=f"autoskills install หมดเวลา ({timeout:.0f}s)")
+    except OSError as e:
+        _cleanup_backup()
+        return InstallResult(ok=False, error=f"เรียก autoskills ไม่สำเร็จ: {e}")
+
+    raw = (proc.stdout or "") + (proc.stderr or "")
+    if proc.returncode != 0:
+        _cleanup_backup()
+        return InstallResult(ok=False, raw_output=raw, error=f"autoskills exited {proc.returncode}")
+
+    after_names = _skill_entry_names(skills_dir)
+    new_entries = after_names - before_names
+
+    overwritten: list[str] = []
+    overwrite_failed: list[str] = []
+    for name in sorted(before_names & after_names):
+        if _entry_signature(skills_dir / name) == before_signatures.get(name):
+            continue  # untouched
+        if name in selected:
+            overwritten.append(name)  # user explicitly chose this name — expected
+            continue
+        backup = backups.get(name)
+        if backup is not None and _restore_entry(backup, skills_dir / name):
+            overwritten.append(name)
+        else:
+            overwrite_failed.append(name)
+    _cleanup_backup()
+
+    escaped = _escaped_entries(skills_dir, new_entries)
+    if escaped:
+        for name in new_entries:
+            _remove_skill_entry(skills_dir / name)
+        error = f"autoskills เขียนไฟล์นอก .claude/skills/ — ยกเลิกทั้งหมด: {', '.join(sorted(escaped))}"
+        if overwrite_failed:
+            error += f" | เขียนทับ skill เดิมและกู้คืนไม่ได้: {', '.join(overwrite_failed)}"
+        return InstallResult(
+            ok=False,
+            raw_output=raw,
+            error=error,
+            overwritten=overwritten,
+            overwrite_failed=overwrite_failed,
+        )
+
+    written: list[str] = []
+    skipped: list[str] = []
+    for name in sorted(new_entries):
+        if name in selected:
+            written.append(name)
+        else:
+            skipped.append(name)
+            _remove_skill_entry(skills_dir / name)
+
+    ok = not overwrite_failed
+    error = ""
+    if overwrite_failed:
+        error = f"autoskills เขียนทับ skill เดิมและกู้คืนไม่ได้: {', '.join(overwrite_failed)}"
+
+    return InstallResult(
+        ok=ok,
+        written=written,
+        skipped=skipped,
+        overwritten=overwritten,
+        overwrite_failed=overwrite_failed,
+        raw_output=raw,
+        error=error,
+    )
+
+
 def install(
     project_root: str | Path,
     selected_names: Iterable[str],
@@ -275,14 +720,33 @@ def install(
     Never call speculatively, automatically, or as a side effect of
     `preview()`. Call from a worker thread; blocks up to `timeout` seconds.
 
-    `autoskills` documents no per-skill filter flag, so this runs a full
-    non-interactive install (`--yes --agent claude-code`), diffs
-    `.claude/skills/` before/after to see everything the CLI actually wrote,
-    then deletes any newly-written entry NOT in `selected_names` — so the net
-    effect on disk matches exactly the user's selection. Every newly-written
-    entry is also checked against `.claude/skills/` for a path escape (e.g. a
-    symlink pointing outside the project); if any entry escapes, ALL new
-    entries are rolled back and this returns `ok=False`.
+    `autoskills` documents no per-skill filter flag, so this always runs a
+    full non-interactive install (`--yes --agent claude-code`) and then
+    reconciles the result down to exactly `selected_names`.
+
+    Staging vs. direct: this function first tries to build an isolated
+    staging mirror of `project_root` (`_build_staging_mirror`) and run
+    `autoskills` there — an entry the user didn't select then simply never
+    gets copied into the real project, full stop. If the mirror can't be
+    built, it falls back to the ORIGINAL approach: run `autoskills` directly
+    against `project_root`, then delete whatever wasn't selected — meaning
+    an unselected skill briefly exists for real on disk before being removed
+    again. `InstallResult.staging_used` tells the caller which path ran.
+    **The staging path's correctness rests on an unverified assumption**
+    (that `autoskills`' stack detection only needs the mirrored file tree,
+    not the real absolute project path or anything staging can't replicate)
+    — see `_build_staging_mirror`'s docstring and
+    docs/audit/2026-08-13-autoskills-installer.md for the full caveat; there
+    is no network access in this environment to confirm it against the real
+    CLI.
+
+    Every newly-written entry is checked against `.claude/skills/` for a
+    path escape (e.g. a symlink pointing outside the project, at any depth
+    inside a written directory); if any entry escapes, the entire install is
+    rolled back and this returns `ok=False`. On the direct/fallback path, a
+    pre-existing entry that `autoskills` silently overwrote is also detected
+    and — if the user didn't select that name — restored from a backup taken
+    before the run; see `InstallResult.overwritten` / `.overwrite_failed`.
     """
     project_root = Path(project_root)
     selected = {n.strip() for n in selected_names if n and n.strip()}
@@ -293,40 +757,11 @@ def install(
     if cmd is None:
         return InstallResult(ok=False, error=_NO_RUNTIME_ERROR)
 
-    skills_dir = project_root / ".claude" / "skills"
-    before = _skill_entry_names(skills_dir)
+    staging = _build_staging_mirror(project_root)
+    if staging is not None:
+        try:
+            return _install_via_staging(project_root, staging, cmd, selected, timeout)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
 
-    full_cmd = [*cmd, "--yes", "--agent", "claude-code"]
-    try:
-        proc = _run(full_cmd, project_root, timeout)
-    except subprocess.TimeoutExpired:
-        return InstallResult(ok=False, error=f"autoskills install หมดเวลา ({timeout:.0f}s)")
-    except OSError as e:
-        return InstallResult(ok=False, error=f"เรียก autoskills ไม่สำเร็จ: {e}")
-
-    raw = (proc.stdout or "") + (proc.stderr or "")
-    if proc.returncode != 0:
-        return InstallResult(ok=False, raw_output=raw, error=f"autoskills exited {proc.returncode}")
-
-    new_entries = _skill_entry_names(skills_dir) - before
-
-    escaped = _escaped_entries(skills_dir, new_entries)
-    if escaped:
-        for name in new_entries:
-            _remove_skill_entry(skills_dir / name)
-        return InstallResult(
-            ok=False,
-            raw_output=raw,
-            error=f"autoskills เขียนไฟล์นอก .claude/skills/ — ยกเลิกทั้งหมด: {', '.join(sorted(escaped))}",
-        )
-
-    written: list[str] = []
-    skipped: list[str] = []
-    for name in sorted(new_entries):
-        if name in selected:
-            written.append(name)
-        else:
-            skipped.append(name)
-            _remove_skill_entry(skills_dir / name)
-
-    return InstallResult(ok=True, written=written, skipped=skipped, raw_output=raw)
+    return _install_direct(project_root, cmd, selected, timeout)
