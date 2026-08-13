@@ -108,6 +108,13 @@ class TestAppJsWiring:
         html = _read("index.html")
         assert ".remote-image" in html
 
+    def test_markdown_image_alt_text_is_quote_escaped(self):
+        js = _read("app.js")
+        chunk = js.split("function mdInline(raw)")[1].split("function renderMarkdown")[0]
+        assert 'var safeAlt = alt.replace(/"/g, "&quot;");' in chunk
+        assert "alt=\"' + safeAlt + '\"" in chunk
+        assert "alt=\"' + alt + '\"" not in chunk
+
     def test_mobile_image_picker_uploads_to_project_scoped_endpoint(self):
         js = _read("app.js")
         html = _read("index.html")
