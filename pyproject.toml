@@ -37,7 +37,7 @@ dev = [
     # Bump this and .pre-commit-config.yaml's rev together, deliberately.
     "ruff==0.16.2",
     "pre-commit>=3.7",
-    "grimp>=3.14",        # dep-graph generation for tools/gen_import_graph.py
+    "grimp>=3.14,<4",      # dep-graph generation for tools/gen_import_graph.py; major bump can change graph semantics — bump deliberately
     "import-linter>=2.9", # architecture contracts (lint-imports)
     "build>=1.0",         # wheel builder used by the installed-mode gate tests
 ]
