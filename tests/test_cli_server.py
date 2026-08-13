@@ -292,7 +292,9 @@ class TestSyncCwdValidation:
 
     def test_assign_accepts_project_root_cwd(self, qapp: QCoreApplication, project_setup) -> None:
         """The project's own root (common parent of its configured paths) is
-        a legal cwd for any role, not just Lead (#143)."""
+        a legal cwd for any role, not just Lead (#143; also closes #175 —
+        duplicate filed against the same 'assign --cwd <project root>' async
+        false-failure, migrated from the local tracker before #143 landed)."""
         orch = _FakeOrchWithProject()
         srv = CliServer(orch)
         sock = _FakeSock()
