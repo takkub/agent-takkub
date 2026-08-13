@@ -21,11 +21,20 @@ _UUID = "12345678-1234-1234-1234-123456789abc"
 
 
 class _FakeProc:
-    def __init__(self, pid: int = 4242, lines: list[bytes] | None = None) -> None:
+    def __init__(
+        self,
+        pid: int = 4242,
+        lines: list[bytes] | None = None,
+        returncode: int | None = None,
+    ) -> None:
         self.pid = pid
         self._lines = lines or []
         self.stdout = iter(self._lines)
         self.waited = False
+        self.returncode = returncode  # None = still running, matches real Popen.poll()
+
+    def poll(self):
+        return self.returncode
 
     def wait(self, timeout=None):
         self.waited = True
@@ -299,6 +308,48 @@ class TestStartRouting:
         cfg = TunnelConfig(type="bat", credentials_json="")
         t = tunnel.Tunnel(cfg, public_url="", port=8899)
         with pytest.raises(tunnel.TunnelError):
+            t.start()
+
+
+class TestNamedTunnelLivenessCheck:
+    """`_verify_named_started` (bug: a friend's fresh machine reported
+    remote-control not working, root-caused to cloudflared exiting
+    immediately with zero surfacing) — `_spawn` succeeding only proves the
+    executable launched, not that it stayed up."""
+
+    def _cfg(self, tmp_path):
+        creds = tmp_path / "creds.json"
+        creds.write_text(json.dumps({"TunnelID": _UUID}), encoding="utf-8")
+        return TunnelConfig(type="cloudflared", credentials_json=str(creds))
+
+    def _patched(self, monkeypatch, proc):
+        monkeypatch.setattr(tunnel, "_spawn", lambda argv, extra_env=None: proc)
+        monkeypatch.setattr(tunnel.Tunnel, "_own_job_if_windows", lambda self: None)
+        monkeypatch.setattr(tunnel.time, "sleep", lambda s: None)
+
+    def test_process_still_alive_after_check_does_not_raise(self, monkeypatch, tmp_path):
+        proc = _FakeProc(returncode=None)
+        self._patched(monkeypatch, proc)
+        t = tunnel.Tunnel(self._cfg(tmp_path), public_url="https://x.example.com", port=8899)
+        t.start()  # must not raise
+        assert t._proc is proc
+
+    def test_process_dead_after_check_raises_with_captured_output(self, monkeypatch, tmp_path):
+        proc = _FakeProc(
+            returncode=1,
+            lines=[b"error parsing config: config file does not exist\n"],
+        )
+        self._patched(monkeypatch, proc)
+        t = tunnel.Tunnel(self._cfg(tmp_path), public_url="https://x.example.com", port=8899)
+        with pytest.raises(tunnel.TunnelError, match="config file does not exist"):
+            t.start()
+        assert t._proc is None
+
+    def test_process_dead_with_no_output_falls_back_to_exit_code(self, monkeypatch, tmp_path):
+        proc = _FakeProc(returncode=1, lines=[])
+        self._patched(monkeypatch, proc)
+        t = tunnel.Tunnel(self._cfg(tmp_path), public_url="https://x.example.com", port=8899)
+        with pytest.raises(tunnel.TunnelError, match="exit code 1"):
             t.start()
 
 

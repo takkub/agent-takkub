@@ -241,6 +241,60 @@ class TestApplyRemoteConfig:
         assert ok is True
         assert fake_remote.config.public_url == "https://takkub.ngrok-free.app"
 
+    def test_tunnel_failure_rolls_back_and_reports_reason(self, monkeypatch, tmp_path):
+        """Bug fix: a requested tunnel (e.g. `credentials_json` copied from
+        another machine) that fails to start used to be reported as a
+        successful Enable with a pairing URL that would never connect."""
+        _isolate_remote_json(monkeypatch, tmp_path)
+        stub = _Stub()
+        stub._remote = None
+
+        fake_remote = MagicMock()
+        fake_remote._tunnel = None
+        fake_remote.tunnel_error = "can't read tunnel credentials: [Errno 2] No such file"
+        fake_remote.config = RemoteConfig(
+            auto_start_tunnel=True,
+            tunnel=TunnelConfig(type="cloudflared", credentials_json="c.json"),
+        )
+        monkeypatch.setattr(
+            "agent_takkub.remote.RemoteControl.maybe_start", lambda orch: fake_remote
+        )
+
+        config = RemoteConfig(
+            tunnel=TunnelConfig(type="cloudflared", credentials_json="c.json"),
+        )
+        ok, msg, pairing_url = stub._apply_remote_config(config, True)
+
+        assert ok is False
+        assert "can't read tunnel credentials" in msg
+        assert "Quick tunnel" in msg
+        assert pairing_url == ""
+        assert stub._remote is None
+        fake_remote.stop.assert_called_once()
+
+    def test_quick_mode_tunnel_failure_also_rolls_back(self, monkeypatch, tmp_path):
+        """Quick/ngrok modes go through the same `needs_no_credentials_file`
+        gate in `RemoteControl._start()` — the rollback check must catch
+        them too, not just named-tunnel mode."""
+        _isolate_remote_json(monkeypatch, tmp_path)
+        stub = _Stub()
+        stub._remote = None
+
+        fake_remote = MagicMock()
+        fake_remote._tunnel = None
+        fake_remote.tunnel_error = "cloudflared exited immediately: exit code 1"
+        fake_remote.config = RemoteConfig(auto_start_tunnel=True, tunnel=TunnelConfig(type="quick"))
+        monkeypatch.setattr(
+            "agent_takkub.remote.RemoteControl.maybe_start", lambda orch: fake_remote
+        )
+
+        config = RemoteConfig(tunnel=TunnelConfig(type="quick"))
+        ok, msg, _pairing_url = stub._apply_remote_config(config, True)
+
+        assert ok is False
+        assert "cloudflared exited immediately" in msg
+        assert stub._remote is None
+
     def test_missing_remote_package_fails_gracefully(self, monkeypatch):
         stub = _Stub()
         stub._remote = None

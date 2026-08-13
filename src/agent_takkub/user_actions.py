@@ -795,6 +795,29 @@ class UserActionsMixin:
         if self._remote is None:
             return False, "Failed to start the remote server — check logs.", ""
 
+        # A tunnel was requested (named/quick/ngrok, per `RemoteControl._start`'s
+        # own gate) but never came up — e.g. a `credentials_json` that doesn't
+        # exist on this machine (a `remote.json` copied from another install),
+        # a bad/expired cert, cloudflared not on PATH. `self._remote._tunnel`
+        # being None here already means `RemoteControl._start()` swallowed a
+        # `TunnelError` — surface the real reason instead of handing back a
+        # pairing URL that will never actually connect (#fresh-install-guard).
+        tunnel_cfg = self._remote.config.tunnel
+        tunnel_requested = self._remote.config.auto_start_tunnel and (
+            tunnel_cfg.type in ("quick", "ngrok") or tunnel_cfg.credentials_json
+        )
+        if tunnel_requested and self._remote._tunnel is None:
+            reason = getattr(self._remote, "tunnel_error", None) or "unknown error — check logs"
+            self._remote.stop()
+            self._remote = None
+            return (
+                False,
+                f"The tunnel couldn't start ({reason}). Fix the credentials/domain in "
+                "🌐 Remote settings, or switch to Quick tunnel (no domain/credentials "
+                "needed) for a public URL that works right away.",
+                "",
+            )
+
         # Quick-tunnel (cloudflared) and ngrok-random mode: the public URL
         # isn't known until the provider prints it, a second or two after
         # start(). ngrok-fixed already knows its URL upfront (set at

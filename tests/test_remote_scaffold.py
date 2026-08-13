@@ -136,6 +136,37 @@ class TestQuickTunnelAutoStart:
         finally:
             rc.stop()
 
+    def test_named_mode_tunnel_error_is_recorded_not_just_logged(self, _isolated, monkeypatch):
+        """Bug fix: a `TunnelError` from `Tunnel.start()` used to be logged
+        and silently discarded — `RemoteControl` now keeps the reason on
+        `tunnel_error` so a caller (the Settings dialog's Enable flow) can
+        surface it instead of reporting success with a dead tunnel."""
+        import agent_takkub.remote.tunnel as tunnel_mod
+
+        class _FakeTunnel:
+            def __init__(self, *a, **kw):
+                pass
+
+            def start(self):
+                raise tunnel_mod.TunnelError("credentials json is missing a valid TunnelID")
+
+            def stop(self):
+                pass
+
+        monkeypatch.setattr(tunnel_mod, "Tunnel", _FakeTunnel)
+        RemoteConfig(
+            enabled=True,
+            bind_port=0,
+            auto_start_tunnel=True,
+            tunnel=TunnelConfig(type="cloudflared", credentials_json="c.json"),
+        ).save()
+        rc = RemoteControl.maybe_start(MagicMock())
+        try:
+            assert rc._tunnel is None
+            assert rc.tunnel_error == "credentials json is missing a valid TunnelID"
+        finally:
+            rc.stop()
+
     def test_named_mode_without_credentials_does_not_start_tunnel(self, _isolated, monkeypatch):
         import agent_takkub.remote.tunnel as tunnel_mod
 

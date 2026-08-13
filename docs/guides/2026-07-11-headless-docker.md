@@ -70,6 +70,16 @@ cockpit pointed at the same `/data` volume, seed the file yourself or copy
 one from a desktop install that has it configured; there is no separate
 headless-only remote-control setting.
 
+⚠ If you copy a `remote.json` from a desktop install that uses **Named
+tunnel** (`tunnel.type: "cloudflared"`), its `credentials_json`/
+`cloudflared_bin` fields are absolute paths on *that* machine — they won't
+resolve inside this container, so the tunnel will silently fail to start
+(the HTTP server still comes up loopback-only; nothing is reachable from
+outside). Either re-point those two fields at paths that exist inside the
+container (bind-mount the credentials `.json` in and update the path), or
+switch `tunnel.type` to `"quick"` — no domain or credentials file needed,
+works the same way from a copied config.
+
 ## Known limitation
 
 `orchestrator.py` still imports `agent_pane.py` for one `isinstance()`
