@@ -229,6 +229,23 @@ _EVIDENCE_MAX_FILES = 10
 # warning line (everyone else silently gets nothing when they have no shots).
 _EVIDENCE_WARN_ROLES = ("qa", "critic", "designer", "reviewer")
 
+# Issue #159: a screenshot capture can fail silently (blank/loading page,
+# race with render, browser crash mid-shot) and still land as a valid file
+# that passes the extension/mtime/settle filters above — the role reports
+# "evidence collected" with no idea the shot itself is bad. A real screenshot
+# is rarely this small; below this, flag it as suspect rather than trust
+# existence alone as proof of a good capture.
+_EVIDENCE_SUSPECT_MIN_BYTES = 10 * 1024
+# Cheap magic-byte sniff per extension — not a full decode (no image-lib
+# dependency), but enough to catch a 0-byte/truncated/HTML-error-page file
+# saved under an image extension.
+_EVIDENCE_MAGIC_PREFIXES: dict[str, tuple[bytes, ...]] = {
+    ".png": (b"\x89PNG\r\n\x1a\n",),
+    ".jpg": (b"\xff\xd8\xff",),
+    ".jpeg": (b"\xff\xd8\xff",),
+    ".gif": (b"GIF87a", b"GIF89a"),
+}
+
 # Issue #evidence-cite: path-like or test-result tokens that count as a note
 # "citing" evidence even when the screenshot scan above found nothing (e.g. a
 # reviewer citing a log path, or qa citing a pytest summary line). Engine
@@ -1919,19 +1936,61 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                 return None
         return None
 
+    @staticmethod
+    def _evidence_file_size(path: pathlib.Path) -> int:
+        """Best-effort `st_size`; 0 (never raises) on any read hiccup — a
+        locked/vanished file still sorts and formats fine, matching
+        `_evidence_stat_mtime`'s degrade-silently contract (issue #159)."""
+        try:
+            return path.stat().st_size
+        except OSError:
+            return 0
+
+    @staticmethod
+    def _evidence_looks_valid_image(path: pathlib.Path) -> bool:
+        """Cheap magic-byte sniff — catches a 0-byte/truncated/wrong-content
+        file saved under an image extension, without a full decode or an
+        image-lib dependency (issue #159). Unreadable file → treat as valid;
+        that failure is already surfaced via the size check / mtime skip."""
+        suffix = path.suffix.lower()
+        try:
+            with open(path, "rb") as f:
+                header = f.read(16)
+        except OSError:
+            return True
+        if suffix == ".webp":
+            return header.startswith(b"RIFF") and header[8:12] == b"WEBP"
+        prefixes = _EVIDENCE_MAGIC_PREFIXES.get(suffix)
+        if prefixes is None:
+            return True
+        return header.startswith(prefixes)
+
+    @classmethod
+    def _evidence_format_entry(cls, path: pathlib.Path, size: int) -> str:
+        """`path (12.3KB)`, tagged `⚠small`/`⚠bad-header` when the file looks
+        like a failed capture rather than a real screenshot (issue #159)."""
+        reasons = []
+        if size < _EVIDENCE_SUSPECT_MIN_BYTES:
+            reasons.append("small")
+        if not cls._evidence_looks_valid_image(path):
+            reasons.append("bad-header")
+        tag = f" ⚠{'+'.join(reasons)}" if reasons else ""
+        posix_path = str(path).replace("\\", "/")
+        return f"{posix_path} ({size / 1024:.1f}KB{tag})"
+
     @classmethod
     def _find_evidence_files(
         cls, directory: pathlib.Path, assign_ts: float, now: float
-    ) -> list[tuple[float, pathlib.Path]]:
-        """Recursively collect `(mtime, path)` for settled evidence images
-        under `directory` that landed after `assign_ts`. Empty list on a
-        missing/unreadable dir — never raises (issue #5)."""
+    ) -> list[tuple[float, pathlib.Path, int]]:
+        """Recursively collect `(mtime, path, size)` for settled evidence
+        images under `directory` that landed after `assign_ts`. Empty list on
+        a missing/unreadable dir — never raises (issue #5)."""
         try:
             candidates = list(directory.rglob("*")) if directory.is_dir() else []
         except OSError:
             candidates = []
 
-        found: list[tuple[float, pathlib.Path]] = []
+        found: list[tuple[float, pathlib.Path, int]] = []
         for path in candidates:
             try:
                 if not path.is_file() or path.suffix.lower() not in _EVIDENCE_EXTENSIONS:
@@ -1941,7 +2000,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             mt = cls._evidence_stat_mtime(path)
             if mt is None or mt < assign_ts or mt > now - _EVIDENCE_SETTLE_SEC:
                 continue
-            found.append((mt, path))
+            found.append((mt, path, cls._evidence_file_size(path)))
         return found
 
     @classmethod
@@ -1951,13 +2010,22 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         """Scan the pane's artifacts dir for screenshots newer than `assign_ts`.
 
         Returns a `'📸 evidence: <paths>'` suffix to append to the done notice
-        when fresh screenshot files were found. Otherwise, for a warn-role
-        (qa/critic/designer/reviewer): if `note` itself cites evidence (a
-        path-like or test-result token, see `_EVIDENCE_CITE_RE`) returns `''`
-        — the note is trusted at face value — else returns a bare
-        `'⚠ no evidence cited'` warning. Everyone else silently gets `''`.
-        Degrades silently on any filesystem hiccup — a missing/unreadable
-        artifacts dir just yields no evidence, never an exception (issue #5).
+        when fresh screenshot files were found. Each path is annotated with
+        its size, e.g. `login.png (43.2KB)`, and tagged `⚠small`/`⚠bad-header`
+        when the file looks like a failed capture rather than a real
+        screenshot — a file existing is not proof it's a *good* screenshot
+        (issue #159). The file still counts as evidence either way (a bad
+        shot is still a shot the role took — Lead judges whether to send it
+        back), it's just flagged for Lead's attention rather than silently
+        trusted.
+
+        Otherwise, for a warn-role (qa/critic/designer/reviewer): if `note`
+        itself cites evidence (a path-like or test-result token, see
+        `_EVIDENCE_CITE_RE`) returns `''` — the note is trusted at face value
+        — else returns a bare `'⚠ no evidence cited'` warning. Everyone else
+        silently gets `''`. Degrades silently on any filesystem hiccup — a
+        missing/unreadable artifacts dir just yields no evidence, never an
+        exception (issue #5).
 
         Issue #109: a flat scan over the whole project artifacts dir attaches
         *any* pane's screenshot to *any* other pane's done() if the mtimes
@@ -1989,7 +2057,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         if found:
             found.sort(key=lambda item: item[0], reverse=True)
             newest = found[:_EVIDENCE_MAX_FILES]
-            paths = ", ".join(str(p).replace("\\", "/") for _, p in newest)
+            paths = ", ".join(cls._evidence_format_entry(p, size) for _, p, size in newest)
             suffix = " (shared dir)" if shared else ""
             return f"📸 evidence: {paths}{suffix}"
         if base_role not in _EVIDENCE_WARN_ROLES:
