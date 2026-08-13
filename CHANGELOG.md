@@ -4,6 +4,13 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.56] - 2026-08-13
+
+### Fixed (แก้)
+- **`assign --isolation worktree` ซ้ำที่ role name เดิม (ไม่ใส่ `#N`) ชนกันเงียบๆ** — pane identity ผูกกับ bare role name เฉยๆ ทำให้ call ที่สองไม่ได้ pane อิสระใหม่ แต่ไปทับ/ชน pane เดิม worktree ใหม่ที่สร้างไว้ไม่มีใครใช้จริง ตอนนี้ reject ทันทีทั้งใน `assign()` และ synchronous pre-check ก่อน ack (เดิม assign() reject แต่ return value ไม่เคยถูกส่งกลับ caller เลย) พร้อมบอกให้ใช้ `role#N` แทน (#162)
+- **worktree ที่ pane รายงาน done โดยไม่มี commit เลยถูกลบทิ้งอัตโนมัติทันที** — งานสูญหายจริงแม้ไม่มีทางกู้คืน ตอนนี้ไม่ auto-delete อีกต่อไปไม่ว่า dirty หรือ clean แจ้ง Lead ดังๆ แทน cleanup ต้องสั่งเองผ่าน `takkub worktree clean` (#161)
+- **role prompt ไม่เตือนต้นทุนโทเคนของรูปภาพ** — รูปถูกชาร์จตาม resolution (vision tiling) ไม่ใช่ byte เหมือนไฟล์ข้อความ เปิดรูปเดิมซ้ำหลายรอบ (mockup review) เคยทำให้ 2 pane ชน usage limit พร้อมกันในเทิร์นเดียว — เพิ่มคำเตือน + threshold ชัดเจน (>300KB หรือด้านยาว >1500px) ในทุก role prompt (#157)
+
 ## [1.0.55] - 2026-08-13
 
 ### Fixed (แก้)
