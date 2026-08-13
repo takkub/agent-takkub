@@ -18,7 +18,7 @@ from PyQt6.QtCore import QCoreApplication
 # QApplication) — terminal_widget.py's `from PyQt6.QtWebEngineWidgets import
 # QWebEngineView` must run before any QCoreApplication instance exists.
 import agent_takkub.headless_window as hw_mod
-from agent_takkub import config
+from agent_takkub import config, custom_roles, roles
 from agent_takkub import headless as headless_mod
 
 
@@ -28,6 +28,26 @@ def qapp() -> QCoreApplication:
     if app is None:
         app = QCoreApplication([])
     return app
+
+
+@pytest.fixture(autouse=True)
+def _isolate_custom_roles(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    """headless_mod.main() unconditionally calls
+    custom_roles.load_and_register_all() as part of its boot sequence. Without
+    this, that call reads the REAL ~/.takkub/custom-roles.json + agents/*.md
+    (whatever is actually on the machine running the suite) and registers
+    every entry — including self-healed orphan docs — into the process-global
+    `roles._CUSTOM` dict with no teardown, leaking into every later test in
+    the same pytest process (reproduced: a stray real `data-eng.md` on the
+    dev machine made `roles.by_name("data-eng")` resolve non-None for the
+    rest of the suite)."""
+    monkeypatch.setattr(custom_roles, "CUSTOM_ROLES_FILE", tmp_path / "custom-roles.json")
+    monkeypatch.setattr(custom_roles, "CUSTOM_AGENTS_DIR", tmp_path / "agents")
+    saved = dict(roles._CUSTOM)
+    roles._CUSTOM.clear()
+    yield
+    roles._CUSTOM.clear()
+    roles._CUSTOM.update(saved)
 
 
 def test_boot_failure_logs_and_returns_nonzero(
