@@ -261,10 +261,48 @@ def delete_role(name: str) -> bool:
     return True
 
 
+def _scan_orphan_custom_role_docs(existing: dict[str, Role]) -> dict[str, Role]:
+    """`<name>.md` files under `CUSTOM_AGENTS_DIR` with no matching
+    `custom-roles.json` entry — e.g. a role file dropped in by hand instead
+    of through `create_role()` (whose file-then-registry commit order
+    normally keeps the two in sync). `agent_role_dir()` already treats such
+    a file as a valid spawn target regardless of registry state (bug #162:
+    this exact drift — `data-eng` had a real `.md` doc but no registry row
+    — was why "Providers & Roles" and "Role Overlap" showed different role
+    counts for the same custom role), so the registry should recognize it
+    too instead of silently omitting it from every registry-backed surface.
+    Returns synthesized ``Role`` entries (same field defaults
+    ``load_custom_roles`` falls back to for a malformed JSON row), keyed by
+    name, not yet persisted. Never raises — a listdir failure just means no
+    orphans found this boot, not a failed load."""
+    try:
+        if not CUSTOM_AGENTS_DIR.is_dir():
+            return {}
+        md_files = sorted(CUSTOM_AGENTS_DIR.glob("*.md"))
+    except OSError:
+        return {}
+    orphans: dict[str, Role] = {}
+    for md in md_files:
+        name = md.stem
+        if name in existing:
+            continue
+        ok, _err = validate_role_name(name)
+        if not ok:
+            continue
+        orphans[name] = Role(
+            name=name, label=name.capitalize(), color=_DEFAULT_COLOR, column=2, row=99
+        )
+    return orphans
+
+
 def load_and_register_all() -> int:
     """Boot-time hook: load the registry and register every entry with
-    `roles.register_role` so `roles.by_name()` resolves them. Returns the
-    count registered. Never raises — a corrupt registry just means zero
+    `roles.register_role` so `roles.by_name()` resolves them. Also
+    self-heals any orphan role doc under `CUSTOM_AGENTS_DIR` that has no
+    matching registry row (see `_scan_orphan_custom_role_docs`), persisting
+    it into `custom-roles.json` so it stops silently drifting on every
+    future boot too. Returns the count registered (including any orphans
+    found this call). Never raises — a corrupt registry just means zero
     custom roles for this session, not a failed boot."""
     from . import roles as roles_mod
 
@@ -273,6 +311,25 @@ def load_and_register_all() -> int:
     except Exception:
         _log.exception("load_and_register_all: unexpected failure loading registry")
         return 0
+
+    try:
+        orphans = _scan_orphan_custom_role_docs(loaded)
+    except Exception:
+        _log.exception("load_and_register_all: unexpected failure scanning orphan role docs")
+        orphans = {}
+    if orphans:
+        merged = {**loaded, **orphans}
+        if save_custom_roles(merged):
+            loaded = merged
+        else:
+            _log.warning(
+                "load_and_register_all: could not persist %d orphan custom-role doc(s) "
+                "to %s; registering in-memory only this session",
+                len(orphans),
+                CUSTOM_ROLES_FILE,
+            )
+            loaded = merged
+
     for r in loaded.values():
         roles_mod.register_role(r)
     return len(loaded)

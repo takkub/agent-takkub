@@ -3,7 +3,7 @@
 The cockpit reserves 8 slots in a 3-column grid:
 
   col 0 (left):   Lead (always-on)
-  col 1 (middle): frontend / backend / mobile / devops / codex
+  col 1 (middle): frontend / backend / mobile / devops / codex / opencode / kimi / cursor
   col 2 (right):  gemini / qa / reviewer + dynamic add-slot
 
 Custom roles (A6) can be added at runtime via `register_role()` — boot-loaded
@@ -70,6 +70,18 @@ DEFAULT_TEAMMATES: tuple[Role, ...] = (
     # log, poke at git) without losing context to a separate terminal
     # window. Neutral slate so it doesn't compete with agent panes.
     Role("shell", "Shell", "#94a3b8", column=2, row=4),
+    # OpenCode/Kimi/Cursor: non-claude panes, same forced-provider-identity
+    # pattern as codex/gemini above (provider_config._FORCED_PROVIDER already
+    # treats all five identically — "the role's whole point"). These three
+    # were registered in provider_spec.PROVIDER_REGISTRY + FORCED_ROLES and
+    # shipped a `.claude/agents/<name>.md` doc, but never got a matching
+    # Role() entry here — the gap this doc-file/registry split caused was
+    # exactly why "Providers & Roles" (registry-driven) and "Role Overlap"
+    # (raw `.claude/agents/*.md` scan) showed different role counts (bug
+    # #162). Column 1 (dev/specialist), appended after codex.
+    Role("opencode", "OpenCode", "#f97316", column=1, row=5),
+    Role("kimi", "Kimi", "#6366f1", column=1, row=6),
+    Role("cursor", "Cursor", "#38bdf8", column=1, row=7),
 )
 
 ALL_DEFAULT: tuple[Role, ...] = (LEAD, *DEFAULT_TEAMMATES)

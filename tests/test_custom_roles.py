@@ -233,3 +233,54 @@ class TestBootLoadRegistersRoles:
     def test_boot_load_never_raises_on_corrupt_registry(self, registry_files: Path) -> None:
         registry_files.write_text("{not valid", encoding="utf-8")
         assert custom_roles.load_and_register_all() == 0
+
+
+class TestBootLoadSelfHealsOrphanDocs:
+    """bug #162: `data-eng.md` existed under CUSTOM_AGENTS_DIR with no
+    matching custom-roles.json entry (hand-dropped-in, never went through
+    create_role()), so `roles.by_name("data-eng")` returned None and it was
+    invisible to every registry-backed surface (e.g. "Providers & Roles")
+    while a raw doc-scan surface (e.g. "Role Overlap") still found it."""
+
+    def test_orphan_doc_gets_registered(self, registry_files: Path) -> None:
+        custom_roles.CUSTOM_AGENTS_DIR.mkdir(parents=True, exist_ok=True)
+        (custom_roles.CUSTOM_AGENTS_DIR / "data-eng.md").write_text("do ETL", encoding="utf-8")
+
+        count = custom_roles.load_and_register_all()
+
+        assert count == 1
+        resolved = roles.by_name("data-eng")
+        assert resolved is not None
+        assert resolved.label == "Data-eng"
+
+    def test_orphan_doc_gets_persisted_to_registry_json(self, registry_files: Path) -> None:
+        custom_roles.CUSTOM_AGENTS_DIR.mkdir(parents=True, exist_ok=True)
+        (custom_roles.CUSTOM_AGENTS_DIR / "data-eng.md").write_text("do ETL", encoding="utf-8")
+
+        custom_roles.load_and_register_all()
+
+        assert "data-eng" in custom_roles.load_custom_roles()
+
+    def test_doc_already_in_registry_is_not_duplicated_or_overwritten(
+        self, registry_files: Path
+    ) -> None:
+        ok, _err = custom_roles.create_role("data-eng", "Data Eng", "#112233", 1, 5, "x")
+        assert ok
+
+        count = custom_roles.load_and_register_all()
+
+        assert count == 1
+        assert roles.by_name("data-eng").label == "Data Eng"
+
+    def test_orphan_doc_with_invalid_name_is_skipped(self, registry_files: Path) -> None:
+        custom_roles.CUSTOM_AGENTS_DIR.mkdir(parents=True, exist_ok=True)
+        (custom_roles.CUSTOM_AGENTS_DIR / "-bad-name.md").write_text("x", encoding="utf-8")
+
+        count = custom_roles.load_and_register_all()
+
+        assert count == 0
+        assert roles.by_name("-bad-name") is None
+
+    def test_no_agents_dir_is_a_noop(self, registry_files: Path) -> None:
+        assert not custom_roles.CUSTOM_AGENTS_DIR.exists()
+        assert custom_roles.load_and_register_all() == 0
