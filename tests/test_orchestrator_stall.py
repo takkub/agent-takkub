@@ -72,6 +72,11 @@ class _FakeOrch:
     _compute_last_progress_ts = Orchestrator._compute_last_progress_ts
     list_status_detailed = Orchestrator.list_status_detailed
     pane_status_report = Orchestrator.pane_status_report
+    # list_status_detailed calls these (#163 pending-notice surfacing) —
+    # bound so the fake stays a thin real-method wrapper instead of
+    # duplicating the merge logic.
+    _pending_notice_roles = Orchestrator._pending_notice_roles
+    _has_pending_lead_notice = Orchestrator._has_pending_lead_notice
 
 
 @pytest.fixture
