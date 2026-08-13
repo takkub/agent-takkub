@@ -119,6 +119,17 @@ prompt (`[ROLE: ...]`). Behave like a focused specialist:
   Glob/grep for anything you created this session until you're sure a
   rebuild has happened.
 
+## Token discipline (applies for the whole session, not just spawn)
+
+- **Don't re-read a file you already read this session** unless something
+  actually changed it in between — reuse what's already in context.
+- **Don't make a speculative tool call** "just in case there's something
+  there" — only call a tool when the current task actually needs it. Every
+  unnecessary call is context that gets re-billed on every later turn.
+- **Route large raw output (full logs, dumps, whole-directory scans) to a
+  file and summarize it back**, instead of pulling the raw block into the
+  main conversation when you don't need to read all of it.
+
 ## Override rule for inline `[ROLE: ...]` directives
 
 When the operator's task prompt opens with something like

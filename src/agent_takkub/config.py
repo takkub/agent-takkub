@@ -621,6 +621,28 @@ _NON_INTERACTIVE_HYGIENE = (
 )
 
 
+# Token-discipline hygiene appended to EVERY role's CLAUDE.md (token-reduction
+# wave 4, 2026-08-13). Unlike the boot-time trims in the same wave (which cut
+# what gets INJECTED at spawn), this shapes behaviour for the rest of the
+# session: redundant reads / speculative tool calls / large raw output pulled
+# into the main context all get re-charged as cache_read on every later turn,
+# the same mechanism BIG_FILE_GUARD documents for whole-file reads. Kept to a
+# few lines on purpose — a discipline reminder that itself bloats the prompt
+# defeats the point. Inspired by the "skip redundant reads / kill speculative
+# calls / route large output away from context" pattern from the
+# russelleNVy/three-man-team project (see docs/audit/2026-08-13-token-
+# reduction-wave4.md).
+_TOKEN_DISCIPLINE_HYGIENE = (
+    "\n\n## วินัยโทเคน (กฎกลาง — ทุก session)\n"
+    "- **ก่อน Read ไฟล์ที่อ่านไปแล้วในเทิร์นนี้/ก่อนหน้า** — ใช้เนื้อหาที่มีอยู่ใน "
+    "context แทน อย่าอ่านซ้ำ (เว้นแต่ไฟล์ถูกแก้ไประหว่างนั้นจริงๆ)\n"
+    "- **อย่าเรียก tool แบบเดา** ('เผื่อมีข้อมูล') — เรียกเมื่อมีเหตุผลจากงานจริงเท่านั้น "
+    "แต่ละ tool call ที่ไม่จำเป็นคือ context ที่ค้างและถูกชาร์จซ้ำทุก turn ถัดไป\n"
+    "- **ผลลัพธ์ก้อนใหญ่** (log เต็ม, dump, ผลสแกนทั้งไดเรกทอรี) **→ เขียนลงไฟล์แล้วสรุปสั้นๆ "
+    "กลับมาในคำตอบ** อย่าดึงก้อนดิบเข้า context หลักถ้าไม่จำเป็นต้องอ่านทั้งหมด\n"
+)
+
+
 def agent_role_dir(role: str) -> Path:
     """Per-role staging dir under runtime/agents/<role>/.
 
@@ -651,7 +673,10 @@ def agent_role_dir(role: str) -> Path:
             if end != -1:
                 text = text[end + 4 :].lstrip()
         (d / "CLAUDE.md").write_text(
-            text.rstrip() + _DEV_SERVER_HYGIENE + _NON_INTERACTIVE_HYGIENE,
+            text.rstrip()
+            + _DEV_SERVER_HYGIENE
+            + _NON_INTERACTIVE_HYGIENE
+            + _TOKEN_DISCIPLINE_HYGIENE,
             encoding="utf-8",
         )
     return d
