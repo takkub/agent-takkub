@@ -276,6 +276,51 @@ class TestNewRoleSkillPicker:
 
 
 class TestProvidersRolesView:
+    def test_bulk_provider_control_updates_every_role_and_marks_dirty(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+        bulk = dlg._bulk_role_provider_combo
+        bulk.setCurrentIndex(bulk.findData("codex"))
+
+        assert dlg._bulk_role_provider_btn.isEnabled() is True
+        dlg._bulk_role_provider_btn.click()
+
+        assert all(combo.currentData() == "codex" for combo in dlg._role_provider_combos.values())
+        assert dlg._dirty is True
+        assert dlg._save_btn.isEnabled() is True
+        # Lead is part of "all roles", so its existing capability warning
+        # must update through the same signal path as a manual row edit.
+        assert dlg._lead_warning_lbl.isHidden() is False
+        dlg.deleteLater()
+
+    def test_bulk_provider_change_saves_all_rendered_roles(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+        bulk = dlg._bulk_role_provider_combo
+        bulk.setCurrentIndex(bulk.findData("codex"))
+        dlg._bulk_role_provider_btn.click()
+        roles = tuple(dlg._role_provider_combos)
+
+        dlg._on_save_apply_clicked()
+
+        assert all(provider_config.provider_for(role) == "codex" for role in roles)
+        dlg.deleteLater()
+
+    def test_reset_reverts_bulk_provider_change_and_clears_picker(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+        bulk = dlg._bulk_role_provider_combo
+        bulk.setCurrentIndex(bulk.findData("codex"))
+        dlg._bulk_role_provider_btn.click()
+
+        dlg._on_reset_clicked()
+
+        assert all(
+            combo.currentData() == provider_config.CLAUDE
+            for combo in dlg._role_provider_combos.values()
+        )
+        assert bulk.currentIndex() == -1
+        assert dlg._bulk_role_provider_btn.isEnabled() is False
+        assert dlg._dirty is False
+        dlg.deleteLater()
+
     def test_save_apply_persists_role_enabled_and_provider(self) -> None:
         dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
         dlg._role_toggles["qa"].setChecked(False)

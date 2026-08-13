@@ -11,3 +11,4 @@ include CLAUDE.md
 recursive-include .claude/agents *.md
 recursive-include .claude/skills *.md
 recursive-include docs/lead *.md
+recursive-include src/agent_takkub/remote/static *

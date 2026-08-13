@@ -1,6 +1,6 @@
 [project]
 name = "agent-takkub"
-version = "1.0.54"
+version = "1.0.55"
 description = "Desktop cockpit for orchestrating Claude Code dev teammates on Windows"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -70,6 +70,10 @@ agent_takkub = [
     # remote/ (P0 scaffold) mobile PWA — glob stays empty (no error) until
     # P1 adds files; deleting remote/ makes it empty again, build still works.
     "remote/static/*",
+]
+
+"agent_takkub.remote" = [
+    "static/*",
 ]
 
 # ──────────────────────────────────────────────────────────────────

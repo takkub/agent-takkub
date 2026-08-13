@@ -4,6 +4,24 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.55] - 2026-08-13
+
+### Fixed (แก้)
+- **gemini/agy pane spawn เด้ง Windows "Select an app to open 'mb'"** — npm ติดตั้ง mini-browser shim (`mb`) แบบ extensionless คู่กับ `mb.cmd`; Win32 SearchPathW เจอตัว extensionless ก่อนแล้วไม่มี associated app จึงเด้ง dialog — sanitize shim (rename เป็น `mb.sh`) + จัดลำดับ PATH ให้ `mb.cmd` ชนะเสมอ (#156)
+- **Named tunnel (remote-control) เงียบ ไม่บอกสาเหตุตอนเชื่อมไม่ติด** — cloudflared เด้งตายทันทีถ้า credentials ผิด/ก็อปมาจากเครื่องอื่น แต่ระบบไม่เคยเช็คว่ารอดจริงไหม เห็น pairing URL เหมือนสำเร็จทั้งที่ tunnel ตายแล้ว — เพิ่ม post-spawn liveness check + capture error message จริงมาโชว์ พร้อมแนะนำสลับ Quick tunnel ได้ทันที; แก้คู่มือ headless-docker ที่สอน copy credentials ข้ามเครื่องแบบไม่ปลอดภัยด้วย
+- **auto-resume ยอมแพ้แล้วทิ้งงานค้างเงียบๆ** — pane ชน usage limit ซ้ำจน auto-resume หยุดช่วย ข้อความเดิมบอกแค่ "หยุดแล้ว" ทั้งที่งานอาจเสร็จสมบูรณ์แล้วจริง — ตอนนี้ dump task ค้าง/output ท้าย pane/git-status ให้ดูก่อนตัดสินใจ discard หรือมอบงานใหม่ พร้อมเขียน recovery snapshot ลงดิสก์กันงานหายแม้ pane crash (#158)
+- **shard fan-out ของ QA เขียนไฟล์รายงานทับกัน** — หลาย shard ที่ output path เดียวกันจากงาน `--shards N` จะทับกันเอง เหลือแค่ shard สุดท้าย — บังคับ suffix `.shard{N}` ต่อ shard อัตโนมัติ พร้อม post-hoc collision detector เตือนถ้า agent ไม่ทำตาม (#160)
+- **evidence screenshot เสีย (ว่าง/เล็กผิดปกติ) หลุดผ่านไปได้โดยไม่มีใครรู้** — role รายงานว่าเก็บหลักฐานครบทั้งที่ไฟล์ภาพบางไฟล์ว่าง/ถ่ายพลาด — เพิ่ม size check + magic-byte sniff ตอน scan evidence, แสดงขนาดไฟล์ + flag ให้เห็นชัด (#159)
+- **role list ไม่ตรงกันระหว่างหน้า "Providers & Roles" กับ "Role Overlap"** — `opencode`/`kimi`/`cursor` ไม่เคยมี Role registry entry ทั้งที่ provider config บังคับใช้จริงอยู่แล้ว และ custom role ที่มีแค่ไฟล์ `.md` ไม่มี registry row ก็หลุดจากหน้า Providers & Roles ไปด้วย — เพิ่ม entry ที่ขาด + self-heal orphan doc ตอน boot (#162)
+
+### Added (เพิ่ม)
+- **ลด token cost ตอน resume จาก prompt-cache TTL หมดอายุ** — pane ที่ idle นานข้าม TTL boundary (~1 ชม. ปกติ, ร่นเหลือ ~5 นาทีตอน account เข้า usage-overage) ต้องจ่าย cache-write เต็มก้อนของ context ที่สะสมไว้ทั้งหมด — เพิ่ม proactive `/compact` อัตโนมัติเมื่อ pane idle เกิน 25 นาที (Claude เท่านั้นตอนนี้) และ status-bar chip เตือนเมื่อ account เข้า usage-overage (#161)
+- **Right-click "Restart Lead" บน project tab** — คลิกขวา tab ไหนก็ได้ (ไม่ต้อง active) แล้ว restart Lead ของ project นั้นได้เลย พร้อม confirm dialog ที่เตือนถ้ามี pane กำลังทำงานอยู่
+- **วัดและลด boot-time token cost ต่อ pane spawn จริง** — พบ graft-usage-caveats block ซ้ำแบบ policy-blind ใน 7 ไฟล์ role .md แม้ role ที่ MCP policy ไม่มี graft ก็ยังจ่าย token เต็ม — extract เป็น block เดียว gate ด้วย MCP allowlist จริง ลดได้ -637 token/spawn สำหรับ backend/frontend/mobile พร้อมเพิ่มกฎวินัยโทเคนสั้นๆ (skip redundant reads/no speculative calls/route large output ออกจาก context) ในทุก role prompt
+
+### Changed (เปลี่ยน)
+- **บังคับปิด toggle Multi/rtk/Auto-resume** — เอา chip ออกจาก status bar แล้วตั้งเป็นค่าเปิดถาวรทุกเครื่อง (Plan Pro/Max ยังเลือกได้ตามเดิม เพราะ Pro-tier ต้อง pin โมเดล standard-context)
+
 ## [1.0.54] - 2026-08-12
 
 ### Fixed (แก้)

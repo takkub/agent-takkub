@@ -567,7 +567,7 @@ class RemoteSettingsDialog(QDialog):
             QMessageBox.warning(
                 self,
                 "Missing public URL",
-                "Enter the tunnel's public URL (couldn't auto-derive it from a sibling config.yml).",
+                "Please enter the tunnel's Public URL (e.g. https://your-domain.com).",
             )
             return None
         return (

@@ -49,8 +49,16 @@ if not exist ".venv\Scripts\pythonw.exe" (
   )
 )
 
-REM --- 4. Deps: install if PyQt6-WebEngine missing
-if not exist ".venv\Lib\site-packages\PyQt6\QtWebEngineWidgets.pyd" (
+REM --- 4. Deps: install if PyQt6-WebEngine missing OR agent-takkub itself
+REM  isn't editable-installed (e.g. a reused/rebuilt .venv that has deps
+REM  but never got `pip install -e .` -> `python -m agent_takkub` fails
+REM  with "No module named agent_takkub" even though [ok] was printed).
+set NEED_INSTALL=0
+if not exist ".venv\Lib\site-packages\PyQt6\QtWebEngineWidgets.pyd" set NEED_INSTALL=1
+".venv\Scripts\python.exe" -m pip show agent-takkub >nul 2>&1
+if errorlevel 1 set NEED_INSTALL=1
+
+if "%NEED_INSTALL%"=="1" (
   echo.
   echo  [..] Installing dependencies, takes about 1-2 minutes.
   echo       First run pulls about 150 MB Chromium for PyQt6-WebEngine.

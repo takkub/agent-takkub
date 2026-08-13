@@ -1059,6 +1059,42 @@ class SettingsWindow(QDialog):
         self._role_provider_badges: dict[str, QLabel] = {}
         self._lead_warning_lbl: QLabel | None = None
 
+        # Bulk provider picker — stages the same provider change through each
+        # role's existing combo, so model/effort presets, availability badges,
+        # Lead's capability warning, dirty tracking, and Save & Apply all keep
+        # using the exact same paths as an individual row edit.
+        bulk_row = QWidget(role_panel)
+        bulk_row.setObjectName("providerRow")
+        bulk_lay = QHBoxLayout(bulk_row)
+        bulk_lay.setContentsMargins(10, 8, 10, 8)
+        bulk_lay.setSpacing(10)
+        bulk_label = QLabel("All roles", bulk_row)
+        bulk_label.setObjectName("panelTitle")
+        bulk_lay.addWidget(bulk_label)
+        bulk_hint = QLabel("เปลี่ยน provider ทุก role พร้อมกัน", bulk_row)
+        bulk_hint.setObjectName("panelHint")
+        bulk_lay.addWidget(bulk_hint)
+        bulk_lay.addStretch(1)
+
+        self._bulk_role_provider_combo = QComboBox(bulk_row)
+        self._bulk_role_provider_combo.setAccessibleName("Provider for all roles")
+        self._bulk_role_provider_combo.setMinimumWidth(150)
+        self._bulk_role_provider_combo.setPlaceholderText("Select provider…")
+        for provider in sorted(provider_config.VALID_PROVIDERS):
+            self._bulk_role_provider_combo.addItem(provider.capitalize(), provider)
+        self._bulk_role_provider_combo.setCurrentIndex(-1)
+        bulk_lay.addWidget(self._bulk_role_provider_combo)
+
+        self._bulk_role_provider_btn = cockpit_theme.secondary_button("Apply to all", bulk_row)
+        self._bulk_role_provider_btn.setAccessibleName("Apply provider to all roles")
+        self._bulk_role_provider_btn.setEnabled(False)
+        self._bulk_role_provider_combo.currentIndexChanged.connect(
+            lambda index: self._bulk_role_provider_btn.setEnabled(index >= 0)
+        )
+        self._bulk_role_provider_btn.clicked.connect(self._apply_provider_to_all_roles)
+        bulk_lay.addWidget(self._bulk_role_provider_btn)
+        rp_lay.addWidget(bulk_row)
+
         for role in _overridable_roles():
             r = roles_mod.by_name(role)
             label = r.label if r else role.capitalize()
@@ -1282,6 +1318,21 @@ class SettingsWindow(QDialog):
 
         return row
 
+    def _apply_provider_to_all_roles(self) -> None:
+        """Stage the selected provider for every rendered role.
+
+        Deliberately drive the per-role combos instead of mutating config
+        directly: their existing signals keep all dependent controls and
+        warnings in sync, while the footer remains the sole commit action.
+        """
+        provider = self._bulk_role_provider_combo.currentData()
+        if provider not in provider_config.VALID_PROVIDERS:
+            return
+        for combo in self._role_provider_combos.values():
+            index = combo.findData(provider)
+            if index >= 0:
+                combo.setCurrentIndex(index)
+
     def _on_delete_custom_role_clicked(self, role: str, row: QWidget) -> None:
         role_file = custom_roles.role_file_path(role)
         confirm = QMessageBox.question(
@@ -1337,6 +1388,11 @@ class SettingsWindow(QDialog):
         _fill_effort_combo(effort_combo, provider, model, _combo_effort(effort_combo) or None)
 
     def _reset_providers_roles_view(self) -> None:
+        self._bulk_role_provider_combo.blockSignals(True)
+        self._bulk_role_provider_combo.setCurrentIndex(-1)
+        self._bulk_role_provider_combo.blockSignals(False)
+        self._bulk_role_provider_btn.setEnabled(False)
+
         for provider, toggle in self._provider_toggles.items():
             toggle.blockSignals(True)
             toggle.setChecked(not provider_state.is_disabled(provider))
