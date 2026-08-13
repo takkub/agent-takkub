@@ -43,11 +43,6 @@ class UpdateRoleCommand:
 
 
 @dataclass(frozen=True)
-class DeleteRoleCommand:
-    confirmed_plan_version: str
-
-
-@dataclass(frozen=True)
 class CreateSkillCommand:
     name: str
     description: str
