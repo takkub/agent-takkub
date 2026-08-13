@@ -24,8 +24,6 @@ from PyQt6.QtWidgets import (
 )
 
 from . import cockpit_theme
-from .config import RUNTIME_DIR
-from .rtk_helper import is_rtk_installed, rtk_binary_available
 
 # ── 🧠 Graft chip snapshot caches (MED-6, 2026-08-06 final review) ─────────
 # `_graft_progress_snapshot` used to redo `shutil.which()` x2 (a full PATH
@@ -297,14 +295,6 @@ class StatusHeaderMixin:
         # user profile selector moved to the 👥 Team chip's right-click QMenu
         # (was ⚙ Pipelines' left-click menu before the A6-redesign)
 
-        # Central rtk toggle. rtk is a PERSONAL, central switch now (injected at
-        # spawn via --settings, not written into any repo), so this is a real
-        # on/off button — its label + style reflect the true state and clicking
-        # flips it. Visible whenever the rtk binary is on PATH; hidden only when
-        # rtk isn't installed at all. `_refresh_rtk_button` sets text/style/tip.
-        self._btn_install_rtk = QPushButton("⚡ Enable rtk", self)
-        self._btn_install_rtk.clicked.connect(self._on_install_rtk_clicked)
-
         # ── account plan chip (Pro / Max) ──────────────────────────
         # Records whether the owner is on Pro or Max so the orchestrator can
         # pin the Lead to a standard-context model under Pro (the 1M-context
@@ -317,32 +307,6 @@ class StatusHeaderMixin:
         self._chip_plan.setToolTip(self._plan_chip_tooltip(_pro_now))
         self._chip_plan.setStyleSheet(self._plan_chip_style(_pro_now))
         self._chip_plan.clicked.connect(self._on_plan_chip_clicked)
-
-        # Execution-mode chip: SOLO (1:1, default) ↔ PARALLEL (multi). In
-        # PARALLEL the Lead decomposes multi-feature requests and fans out
-        # several instances per role. State in exec-mode.json; orchestrator owns
-        # persist + broadcast on flip.
-        from . import exec_mode as _exec_mode
-
-        _parallel_now = _exec_mode.is_parallel()
-        self._chip_exec_mode = QPushButton("👥 Multi" if _parallel_now else "👤 1:1", self)
-        self._chip_exec_mode.setToolTip(self._exec_mode_chip_tooltip(_parallel_now))
-        self._chip_exec_mode.setStyleSheet(self._exec_mode_chip_style(_parallel_now))
-        self._chip_exec_mode.clicked.connect(self._on_exec_mode_chip_clicked)
-
-        # Auto-resume chip (🌙): park panes that hit their usage limit while a
-        # task is pending and wake them automatically at reset, instead of
-        # only notifying. Default OFF. State in autoresume.json; orchestrator
-        # owns persist + broadcast on flip (mirrors the exec-mode chip).
-        from . import auto_resume as _auto_resume
-
-        _auto_resume_now = _auto_resume.is_enabled()
-        self._chip_auto_resume = QPushButton(
-            "🌙 Auto-resume" if _auto_resume_now else "🌙 Auto-resume: off", self
-        )
-        self._chip_auto_resume.setToolTip(self._auto_resume_chip_tooltip(_auto_resume_now))
-        self._chip_auto_resume.setStyleSheet(self._auto_resume_chip_style(_auto_resume_now))
-        self._chip_auto_resume.clicked.connect(self._on_auto_resume_chip_clicked)
 
         # 🌐 Remote chip: opens the remote-control (phone pairing) settings
         # dialog. `remote/` is a delete-to-uninstall bolt-on (see
@@ -563,10 +527,9 @@ class StatusHeaderMixin:
             self._status.addPermanentWidget(w)
         self._status.addPermanentWidget(self._make_status_separator())
         subgroups = (
-            (self._chip_plan, self._chip_exec_mode),
-            (self._chip_auto_resume, self._chip_remote, self._chip_graft),
+            (self._chip_plan,),
+            (self._chip_remote, self._chip_graft),
             (
-                self._btn_install_rtk,
                 self._btn_restart,
                 self._btn_pipelines,
                 self._btn_provider,
@@ -581,10 +544,6 @@ class StatusHeaderMixin:
                 self._status.addPermanentWidget(w)
             if i < len(subgroups) - 1:
                 self._status.addPermanentWidget(self._make_status_separator())
-        # Sync rtk button visibility after every permanent widget has been
-        # added, so any layout invalidation triggered by show()/hide() lands
-        # on a fully-built status bar rather than a half-built one (an
-        # earlier mid-loop call kept the button invisible on first paint).
         self._refresh_rtk_button()
 
         # ── signal wiring + refresh timer ──────────────────────────
@@ -593,8 +552,6 @@ class StatusHeaderMixin:
         )
         self.orch.statusChanged.connect(self._update_status)
         self.orch.planTierChanged.connect(self._on_plan_tier_changed)
-        self.orch.execModeChanged.connect(self._on_exec_mode_changed)
-        self.orch.autoResumeChanged.connect(self._on_auto_resume_changed)
 
         # Refresh status bar every 2s so the working/active count tracks the
         # state transitions that don't emit statusChanged (e.g. working→done
@@ -1239,77 +1196,6 @@ class StatusHeaderMixin:
         self._chip_remote.setStyleSheet(self._remote_chip_style(enabled))
         self._chip_remote.setToolTip(self._remote_chip_tooltip(enabled))
 
-    # ──────────────────────────────────────────────────────────────
-    # rtk install button visibility
-    # ──────────────────────────────────────────────────────────────
-
     def _refresh_rtk_button(self) -> None:
-        """Drive the central rtk toggle's visibility, label, and style so it
-        always tells the truth. rtk is a personal/central switch (injected at
-        spawn via --settings), independent of any project — so the button is:
-          - HIDDEN when the rtk binary isn't on PATH (nothing to toggle), else
-          - shown as "⚡ rtk: on" (gold pill) when enabled, or
-          - shown as "⚡ Enable rtk" (amber nudge) when disabled.
-        """
-        import time as _t
-
-        bin_ok = rtk_binary_available()
-        enabled = is_rtk_installed()  # central flag — project-independent
-
-        if not bin_ok:
-            self._btn_install_rtk.hide()
-            decision = "hide:no-rtk-binary"
-        elif enabled:
-            self._btn_install_rtk.setText("⚡ rtk: on")
-            self._btn_install_rtk.setToolTip(
-                "rtk hook is ON (personal, central) — every Bash tool call in\n"
-                "spawned panes is auto-rewritten with rtk for token savings.\n"
-                "Injected at spawn time via --settings; no project files touched.\n"
-                "Click to turn it OFF."
-            )
-            # Toggle-on = gold (design system): a soft-gold "active" pill.
-            self._btn_install_rtk.setStyleSheet(
-                f"QPushButton {{ color: {cockpit_theme.GOLD_CHIP_TEXT}; "
-                f"background: {cockpit_theme.GOLD_CHIP_BG}; "
-                f"border: 1px solid {cockpit_theme.GOLD_CHIP_BORDER}; "
-                "border-radius: 4px; padding: 2px 8px; font-size: 12px; }"
-                f"QPushButton:hover {{ border-color: {cockpit_theme.ACCENT_GOLD}; }}"
-            )
-            self._btn_install_rtk.show()
-            self._btn_install_rtk.raise_()
-            decision = "show:on"
-        else:
-            self._btn_install_rtk.setText("⚡ Enable rtk")
-            self._btn_install_rtk.setToolTip(
-                "Enable the rtk PreToolUse Bash hook (personal, central).\n"
-                "Every Bash tool call in spawned panes gets auto-rewritten with\n"
-                "rtk (60-90% token savings on git / docker / npm / pytest / next\n"
-                "output). Injected via --settings — no project files are written."
-            )
-            # Amber CTA nudge — visible without screaming (it's optional).
-            self._btn_install_rtk.setStyleSheet(
-                f"QPushButton {{ color: {cockpit_theme.GOLD_TEXT_ON}; "
-                f"background: {cockpit_theme.METER_AMBER}; "
-                f"border: 1px solid {cockpit_theme.STATE_WARN}; border-radius: 4px; "
-                "padding: 2px 8px; font-size: 12px; }"
-                f"QPushButton:hover {{ background: {cockpit_theme.METER_AMBER_LIGHT}; }}"
-            )
-            self._btn_install_rtk.show()
-            self._btn_install_rtk.raise_()
-            decision = "show:off"
-
-        # Diagnostic breadcrumb. Written to runtime/rtk_button.log so we
-        # can confirm whether the cockpit's pythonw actually executed this
-        # path (vs. running a stale cached process / older code). Remove
-        # after visibility is verified.
-        try:
-            log = RUNTIME_DIR / "rtk_button.log"
-            log.parent.mkdir(parents=True, exist_ok=True)
-            visible = self._btn_install_rtk.isVisible()
-            with log.open("a", encoding="utf-8") as f:
-                f.write(
-                    f"{_t.strftime('%H:%M:%S')} bin_ok={bin_ok} "
-                    f"enabled={enabled} decision={decision} isVisible={visible}\n"
-                )
-        except Exception:
-            pass
+        """Central rtk toggle UI removed — rtk is forced enabled when binary is present."""
+        pass

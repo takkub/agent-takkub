@@ -540,26 +540,20 @@ class MainWindow(
                 "Lead จะวางแผนแล้ว spawn teammate ที่เหมาะกับงานให้เอง",
             ),
             TutorialStep(
-                lambda: getattr(self, "_chip_exec_mode", None),
-                "3 · โหมดทำงาน",
-                "สลับ 1:1 (ทีละงาน) ↔ Multi (แตกงานอิสระให้หลาย agent ทำขนานกัน) — "
-                "งานใหญ่หลายส่วนเปิด Multi แล้วจบไวขึ้น",
-            ),
-            TutorialStep(
                 lambda: getattr(self, "_btn_pipelines", None),
-                "4 · Team",
+                "3 · Team",
                 "ตั้งค่าว่าแต่ละ role จะได้ MCP / plugin อะไรบ้าง (เช่น browser automation ให้ QA) "
                 "หรือสร้าง role ใหม่ — มีผลกับ pane ที่ spawn ใหม่ทันที",
             ),
             TutorialStep(
                 lambda: getattr(self, "_btn_doctor", None),
-                "5 · Doctor",
+                "4 · Doctor",
                 "เช็คว่าเครื่องพร้อม — เวอร์ชัน core, plugins, MCPs, providers ครบไหม "
                 "กด Fix ซ่อมอัตโนมัติได้เลย",
             ),
             TutorialStep(
                 lambda: getattr(self, "_btn_end_session", None),
-                "6 · จบงาน",
+                "5 · จบงาน",
                 "พอเสร็จกด End Session — เขียนสรุปสั้นๆ ปิด teammate ทั้งหมด แล้วบันทึกไว้ "
                 "session หน้าเปิดมา Lead จะจำได้ว่าทำอะไรค้างไว้",
             ),

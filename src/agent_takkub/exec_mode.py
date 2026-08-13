@@ -65,22 +65,13 @@ def path() -> Path:
 
 
 def current() -> str:
-    """Return the current execution mode. Missing file or corrupt JSON → SOLO."""
-    if not _PATH.exists():
-        return _DEFAULT
-    try:
-        data = json.loads(_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return _DEFAULT
-    if not isinstance(data, dict):
-        return _DEFAULT
-    mode = str(data.get("mode", _DEFAULT)).lower().strip()
-    return mode if mode in MODES else _DEFAULT
+    """Return the current execution mode. Forced to PARALLEL (power mode always)."""
+    return PARALLEL
 
 
 def is_parallel() -> bool:
-    """True iff the Lead should fan out independent features across instances."""
-    return current() == PARALLEL
+    """True iff the Lead should fan out independent features across instances. Forced to True."""
+    return True
 
 
 def _base_pane_cap() -> int:

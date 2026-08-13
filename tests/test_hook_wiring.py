@@ -132,37 +132,23 @@ class TestRtkInjection:
         pre = data["hooks"].get("PreToolUse", [])
         return [h.get("command") for grp in pre for h in grp.get("hooks", [])]
 
-    def test_no_rtk_hook_when_disabled(
+    def test_rtk_hook_present_when_available(
         self, tmp_env: pathlib.Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(rtk_helper, "rtk_binary_available", lambda: True)
-        # not enabled → no rtk command in PreToolUse. The block itself still
-        # exists because the pane_guard hook is unconditional (see
-        # TestGuardInjection); only rtk's entry is absent.
         path = hook_wiring.ensure_hook_settings_file()
+        assert rtk_helper.RTK_HOOK_COMMAND in self._pre_cmds(path)
         data = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
-        assert rtk_helper.RTK_HOOK_COMMAND not in self._pre_cmds(path)
         assert hook_wiring.HOOK_COMMAND in [
             h["command"] for grp in data["hooks"]["Stop"] for h in grp["hooks"]
         ]
-
-    def test_rtk_hook_present_when_enabled_and_available(
-        self, tmp_env: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(rtk_helper, "rtk_binary_available", lambda: True)
-        rtk_helper.set_rtk_enabled(True)
-        path = hook_wiring.ensure_hook_settings_file()
-        assert rtk_helper.RTK_HOOK_COMMAND in self._pre_cmds(path)
-        # pane-state hooks still present alongside it
-        data = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
         assert "SessionStart" in data["hooks"]
 
     def test_no_rtk_hook_when_binary_missing(
         self, tmp_env: pathlib.Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Enabled but binary gone: never inject a `rtk hook claude` command
+        # Binary gone: never inject a `rtk hook claude` command
         # that would make every Bash tool call in the pane fail.
-        rtk_helper.set_rtk_enabled(True)
         monkeypatch.setattr(rtk_helper, "rtk_binary_available", lambda: False)
         path = hook_wiring.ensure_hook_settings_file()
         assert rtk_helper.RTK_HOOK_COMMAND not in self._pre_cmds(path)
