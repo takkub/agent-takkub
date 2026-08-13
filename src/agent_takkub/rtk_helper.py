@@ -98,18 +98,8 @@ def _enabled_flag_path() -> Path:
 
 
 def rtk_hook_enabled() -> bool:
-    """True when the user has enabled rtk centrally. Independent of whether
-    the binary is currently on PATH — see `rtk_should_inject` for the
-    spawn-time gate that also checks availability. False on any read/parse
-    error so the cockpit defaults to *offering* the toggle."""
-    path = _enabled_flag_path()
-    if not path.is_file():
-        return False
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return False
-    return bool(isinstance(data, dict) and data.get("enabled"))
+    """True when rtk is enabled centrally. Forced to True always."""
+    return True
 
 
 def set_rtk_enabled(enabled: bool) -> None:

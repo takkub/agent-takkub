@@ -50,21 +50,13 @@ def path() -> Path:
 
 
 def current() -> bool:
-    """Return whether auto-resume is enabled. Missing file/corrupt JSON → False."""
-    if not _PATH.exists():
-        return _DEFAULT
-    try:
-        data = json.loads(_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return _DEFAULT
-    if not isinstance(data, dict):
-        return _DEFAULT
-    return bool(data.get("enabled", _DEFAULT))
+    """Return whether auto-resume is enabled. Forced to True always."""
+    return True
 
 
 def is_enabled() -> bool:
-    """Alias for `current()` — reads more naturally at call sites."""
-    return current()
+    """Alias for `current()` — reads more naturally at call sites. Forced to True always."""
+    return True
 
 
 def set_enabled(flag: bool) -> None:

@@ -28,9 +28,8 @@ Lead spawn เฉพาะ role ที่จำเป็น ใช้ `takkub` C
 **Default parallel ไว้ก่อน** — task ไม่ depend output กัน → ส่งคู่ขนาน (`&` + `wait`) อย่ารอ done ทีละตัว
 **Decision rule:** task A ใช้ output จาก task B ไหม? ใช่ = sequential · ไม่ใช่ = parallel (`routing_planner.classify()` เช็ค dependency signal ให้แล้ว — "ตาม schema"/"ใช้ข้อมูลจาก endpoint" → บังคับ sequence)
 
-**Execution mode chip** (`👤 1:1` / `👥 Multi` · persist `~/.takkub/exec-mode.json`):
-- **SOLO (default):** 1 agent/role ทีละ feature
-- **PARALLEL (Multi):** request มีหลาย feature อิสระ → แตกเป็น K features → fan out `role#1..#K` พร้อมกัน · **หลาย instance แก้ repo เดียวกัน → `--isolation worktree` ทุกตัว** (#81) — done → merge proposal, Lead review diff + merge ทีละอัน · งานจำนวนมากจัดเป็น waves กันเครื่องค้าง · งาน depend กันยัง sequential · SOLO = ไม่มี fan-out เลย
+**Execution mode** (always PARALLEL / Multi mode):
+- Request มีหลาย feature อิสระ → แตกเป็น K features → fan out `role#1..#K` พร้อมกัน · **หลาย instance แก้ repo เดียวกัน → `--isolation worktree` ทุกตัว** (#81) — done → merge proposal, Lead review diff + merge ทีละอัน · งานจำนวนมากจัดเป็น waves กันเครื่องค้าง · งาน depend กันยัง sequential
 
 **กฎ verify flow:** **QA = ปุ่มจบ รันท้ายสุดเสมอ** ต่อเมื่อ (1) DEV เสร็จหมดทุกอย่าง (2) โปรเจคมี docker compose → devops ยก stack port-safe ก่อน · ไม่มี compose → ตรงไป QA · reviewer = ตอน PR (ไม่อยู่ใน auto gate ยกเว้น trust-boundary/schema/migration) · DEV ยังไม่จบ = **ห้ามเรียก QA**
 

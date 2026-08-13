@@ -51,31 +51,29 @@ def _write_project_rtk(project_root: Path, extra: dict | None = None) -> Path:
 
 
 class TestEnableFlag:
-    def test_disabled_by_default(self) -> None:
-        assert rtk_helper.rtk_hook_enabled() is False
-        assert rtk_helper.is_rtk_installed() is False
+    def test_enabled_by_default(self) -> None:
+        assert rtk_helper.rtk_hook_enabled() is True
+        assert rtk_helper.is_rtk_installed() is True
         # `project_root` arg accepted but ignored (state is central now).
-        assert rtk_helper.is_rtk_installed(Path("/whatever")) is False
+        assert rtk_helper.is_rtk_installed(Path("/whatever")) is True
 
     def test_set_and_read(self) -> None:
         rtk_helper.set_rtk_enabled(True)
         assert rtk_helper.rtk_hook_enabled() is True
         assert rtk_helper.is_rtk_installed() is True
         rtk_helper.set_rtk_enabled(False)
-        assert rtk_helper.rtk_hook_enabled() is False
+        assert rtk_helper.rtk_hook_enabled() is True
 
     def test_tolerates_malformed_flag(self) -> None:
         path = rtk_helper._enabled_flag_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("{not json", encoding="utf-8")
-        assert rtk_helper.rtk_hook_enabled() is False
+        assert rtk_helper.rtk_hook_enabled() is True
 
 
 class TestShouldInject:
-    def test_requires_enabled_and_binary(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_requires_binary_available(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(rtk_helper, "rtk_binary_available", lambda: True)
-        assert rtk_helper.rtk_should_inject() is False  # not enabled yet
-        rtk_helper.set_rtk_enabled(True)
         assert rtk_helper.rtk_should_inject() is True
 
     def test_false_when_binary_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -121,7 +119,6 @@ class TestInstall:
         ok, msg = rtk_helper.install_rtk()
         assert not ok
         assert "not on path" in msg.lower()
-        assert rtk_helper.rtk_hook_enabled() is False
 
 
 class TestUninstall:
