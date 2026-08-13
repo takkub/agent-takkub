@@ -1,7 +1,8 @@
 """Orchestrator wiring for per-pane worktree isolation (issue #81, Phase 1).
 
 Covers the assign→dispatch substitution, the git-repo fallback, and the
-done/close finalize (merge proposal vs safe-remove vs keep-dirty). The
+done/close finalize (merge proposal vs keep-and-warn on zero commits,
+whether the tree is clean or dirty — #161: never auto-remove). The
 WorktreeManager is faked so nothing touches a real repo.
 """
 
@@ -155,26 +156,29 @@ class TestFinalizeWorktree:
         assert "merge --no-ff wt/frontend-1" in msg
         assert "3 commit" in msg
 
-    def test_empty_clean_worktree_is_safe_removed(self, orch, monkeypatch):
-        fake = _FakeMgr(info=_info(), commits=0, remove_ok=True)
+    def test_empty_clean_worktree_is_kept_and_warns(self, orch, monkeypatch):
+        # #161: a zero-commit worktree must NEVER be auto-removed, even when
+        # clean — only an explicit `takkub worktree clean` may delete it.
+        fake = _FakeMgr(info=_info(), commits=0, dirty=False)
         monkeypatch.setattr(wm_mod, "WorktreeManager", lambda *a, **k: fake)
 
         orch._finalize_worktree("proj", "qa", _info().as_dict())
-        assert fake.safe_remove_calls == 1
-        # a clean empty removal is silent (no merge proposal / keep warning)
-        assert not orch._notify_lead.called
+        assert fake.safe_remove_calls == 0  # never removed automatically
+        assert orch._notify_lead.called
+        warn = orch._notify_lead.call_args[0][1]
+        assert "เก็บไว้ไม่ลบอัตโนมัติ" in warn
+        assert "ไม่มี commit" in warn
+        assert "worktree clean" in warn
 
     def test_dirty_worktree_kept_and_warns(self, orch, monkeypatch):
-        fake = _FakeMgr(
-            info=_info(), commits=0, remove_ok=False, remove_reason="uncommitted changes"
-        )
+        fake = _FakeMgr(info=_info(), commits=0, dirty=True)
         monkeypatch.setattr(wm_mod, "WorktreeManager", lambda *a, **k: fake)
 
         orch._finalize_worktree("proj", "qa", _info().as_dict())
-        assert fake.safe_remove_calls == 1
+        assert fake.safe_remove_calls == 0  # never removed automatically
         warn = orch._notify_lead.call_args[0][1]
-        assert "เก็บไว้" in warn  # kept, not lost
-        assert "uncommitted" in warn
+        assert "เก็บไว้ไม่ลบอัตโนมัติ" in warn  # kept, not lost
+        assert "uncommitted changes" in warn
 
     def test_finalize_never_raises(self, orch, monkeypatch):
         # A malformed worktree dict must not break done()/close().
