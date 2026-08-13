@@ -539,6 +539,14 @@ class CliServer(QObject):
                     status[role] = state
                 self._reply(sock, ok=True, msg="status", status=status)
                 return
+            elif cmd == "worktree-live-paths":
+                # #187: read-only, same trust level as `list` — lets `takkub
+                # worktree clean` (which is otherwise pure-local/no-socket by
+                # design, see cli.py cmd_worktree) refuse to touch a
+                # checkout a currently-alive pane still holds.
+                paths = sorted(self._orch.live_worktree_paths(project=from_project))
+                self._reply(sock, ok=True, msg=f"{len(paths)} live worktree(s)", paths=paths)
+                return
             elif cmd == "spawn-queue-status":
                 # #141: read-only spawn-arbiter wedge diagnostics. Open like
                 # list/status (trust-local model) — no cwd/task content, only
