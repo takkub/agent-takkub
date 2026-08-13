@@ -1438,11 +1438,17 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
     def _finalize_worktree(self, project_ns: str, from_role: str, worktree: dict) -> None:
         """Wrap up an isolated pane's worktree when it reports done/close.
 
-        * branch has commits  → send Lead a MERGE PROPOSAL (propose-then-fire,
+        * branch has commits → send Lead a MERGE PROPOSAL (propose-then-fire,
           never auto) and KEEP the worktree until the Lead merges.
-        * no commits, clean    → safe-remove the worktree + its throwaway branch.
-        * no commits but dirty → safe_remove refuses; keep it and warn the Lead
-          so uncommitted work is never silently discarded.
+        * no commits at all  → NEVER auto-delete (#161). A pane that reports
+          done without ever committing — even though the task required it —
+          used to be silently `rmtree`'d right here the instant done() fired,
+          with zero recovery path (proven data loss on a real task). Keep the
+          worktree either way and warn the Lead loudly instead; explicit
+          cleanup is still one command away via `takkub worktree clean`
+          (`WorktreeManager.clean_isolated`), which applies the exact same
+          clean+no-commits SAFE test this method used to apply automatically —
+          but only on the Lead's say-so, after they've had a chance to look.
 
         Phase-1 worktrees are build-only (no dev-server / node_modules copied in),
         so they contain only tracked source and every git op here is sub-second;
@@ -1466,26 +1472,27 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                 )
                 self._notify_lead(project_ns, proposal, from_role=from_role, note="")
                 return
-            removed, reason = mgr.safe_remove(info)
-            if removed:
-                _log_event(
-                    "worktree_removed", role=from_role, project=project_ns, branch=info.branch
-                )
-            else:
-                _log_event(
-                    "worktree_kept",
-                    role=from_role,
-                    project=project_ns,
-                    branch=info.branch,
-                    reason=reason[:200],
-                )
-                self._notify_lead(
-                    project_ns,
-                    f"🌿 [{from_role}] worktree `{info.branch}` เก็บไว้ (ไม่ลบ) — {reason} · "
-                    f"path: {info.path}",
-                    from_role=from_role,
-                    note="",
-                )
+            dirty = mgr.is_dirty(info)
+            _log_event(
+                "worktree_no_commit_kept",
+                role=from_role,
+                project=project_ns,
+                branch=info.branch,
+                dirty=dirty,
+            )
+            state_note = (
+                "มี uncommitted changes ในนั้น — ยังกู้ได้"
+                if dirty
+                else "working tree clean ด้วย — เช็คให้ชัวร์ว่างานหายไปจริงหรือแค่ลืม commit"
+            )
+            self._notify_lead(
+                project_ns,
+                f"⚠️ [{from_role}] done แต่ไม่มี commit ใน worktree `{info.branch}` — "
+                f"เก็บไว้ไม่ลบอัตโนมัติ ({state_note}) · path: {info.path} · "
+                f"ตรวจสอบแล้วค่อยลบเองด้วย `takkub worktree clean`",
+                from_role=from_role,
+                note="",
+            )
         except Exception as exc:  # never let worktree cleanup break done()
             _log_event(
                 "worktree_finalize_error",
