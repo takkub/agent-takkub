@@ -454,6 +454,22 @@ class Tunnel:
                     self.captured_url = match.group(0)
                     _log.info("remote tunnel URL captured")
 
+    @property
+    def is_alive(self) -> bool:
+        """Best-effort liveness check for the spawned process — a fresh
+        `poll()`, not a cached flag, so a tunnel that dies well after
+        `start()` returned (the silent-death bug this guards against) is
+        caught the next time a caller asks, not just at startup."""
+        return self._proc is not None and self._proc.poll() is None
+
+    @property
+    def last_output(self) -> str:
+        """Tail of the child's recent stdout/stderr, newline-joined. Only
+        populated for named-tunnel mode (`_drain_output`) — the other
+        modes' reader thread (`_scan_for_url`) only scans for a URL match
+        and discards the rest, so this is `""` for them."""
+        return "\n".join(self._last_output)
+
     def stop(self) -> None:
         proc = self._proc
         self._proc = None

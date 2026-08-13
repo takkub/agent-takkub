@@ -1261,6 +1261,7 @@ class StatusHeaderMixin:
         missing-attribute check (PyQt6/sip quirk), which `__dict__` access
         alone doesn't trigger.
         """
+        self._refresh_tunnel_indicator()
         if "_chip_remote" not in self.__dict__:
             return
         import importlib
@@ -1276,6 +1277,51 @@ class StatusHeaderMixin:
         self._chip_remote.setText("🌐 Remote ●" if enabled else "🌐 Remote")
         self._chip_remote.setStyleSheet(self._remote_chip_style(enabled))
         self._chip_remote.setToolTip(self._remote_chip_tooltip(enabled))
+
+    def _refresh_tunnel_indicator(self) -> None:
+        """Repaint the sidebar's top-left tunnel dot (`project_nav.py`)
+        from live `RemoteControl` state — deliberately separate from the
+        🌐 Remote status-bar chip (bottom of the window): that chip answers
+        "is remote control on", this dot answers "is the tunnel itself
+        actually up right now". A friend's fresh-install bug once had the
+        named tunnel exit right after start with zero surfacing (fixed via
+        `tunnel.py`'s `_verify_named_started` + `RemoteControl.tunnel_error`)
+        — this reuses that same state rather than tracking a duplicate copy,
+        plus `Tunnel.is_alive` for the (rarer) case of a tunnel dying well
+        after a clean start, which `tunnel_error` alone can't catch since
+        it's only ever set on the initial `start()` failure path.
+
+        Reads `self.__dict__` (not `getattr`/`hasattr`) for the same reason
+        `_refresh_remote_chip` does — tests exercise a bare
+        `MainWindow.__new__()` stub whose `tabs` may not exist yet.
+        """
+        tabs = self.__dict__.get("tabs")
+        if tabs is None or not hasattr(tabs, "set_tunnel_status"):
+            return
+        remote = getattr(self, "_remote", None)
+        if remote is None:
+            tabs.set_tunnel_status("off", "Tunnel: remote control is off.")
+            return
+        tunnel = getattr(remote, "_tunnel", None)
+        if tunnel is not None and getattr(tunnel, "is_alive", False):
+            tabs.set_tunnel_status(
+                "running", "Tunnel: running — reachable from outside this machine."
+            )
+            return
+        error = getattr(remote, "tunnel_error", None)
+        if not error and tunnel is not None:
+            # Started fine but the process is gone now — the silent-death
+            # case. No fresh tunnel_error was ever set for this path (that
+            # field only covers the initial start() failure), so fall back
+            # to whatever tail output the named-tunnel drain thread kept.
+            detail = (getattr(tunnel, "last_output", "") or "").strip()
+            error = f"stopped unexpectedly{': ' + detail if detail else ''}"
+        if error:
+            tabs.set_tunnel_status("error", f"Tunnel: {error}")
+            return
+        tabs.set_tunnel_status(
+            "off", "Tunnel: not running (remote control is on, no tunnel configured/started)."
+        )
 
     def _refresh_rtk_button(self) -> None:
         """Central rtk toggle UI removed — rtk is forced enabled when binary is present."""

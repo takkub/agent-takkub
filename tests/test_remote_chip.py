@@ -311,3 +311,69 @@ class TestApplyRemoteConfig:
         assert ok is False
         assert "remote/" in msg
         assert pairing_url == ""
+
+
+class TestRefreshTunnelIndicator:
+    """`StatusHeaderMixin._refresh_tunnel_indicator` — the sidebar's top-left
+    tunnel dot, separate from the 🌐 Remote status-bar chip above. Reuses
+    `RemoteControl.tunnel_error` / `Tunnel.is_alive` rather than tracking a
+    duplicate state copy."""
+
+    def test_no_tabs_attr_does_not_raise(self):
+        stub = _Stub()
+        stub._remote = None
+        stub._refresh_tunnel_indicator()  # no `tabs` on the stub — must no-op
+
+    def test_remote_off_paints_off(self):
+        stub = _Stub()
+        stub.tabs = MagicMock()
+        stub._remote = None
+        stub._refresh_tunnel_indicator()
+        stub.tabs.set_tunnel_status.assert_called_once()
+        state, _tooltip = stub.tabs.set_tunnel_status.call_args[0]
+        assert state == "off"
+
+    def test_alive_tunnel_paints_running(self):
+        stub = _Stub()
+        stub.tabs = MagicMock()
+        fake_tunnel = MagicMock()
+        fake_tunnel.is_alive = True
+        stub._remote = MagicMock(_tunnel=fake_tunnel, tunnel_error=None)
+        stub._refresh_tunnel_indicator()
+        state, _tooltip = stub.tabs.set_tunnel_status.call_args[0]
+        assert state == "running"
+
+    def test_tunnel_error_paints_error_with_reason(self):
+        stub = _Stub()
+        stub.tabs = MagicMock()
+        stub._remote = MagicMock(
+            _tunnel=None, tunnel_error="cloudflared exited immediately: exit code 1"
+        )
+        stub._refresh_tunnel_indicator()
+        state, tooltip = stub.tabs.set_tunnel_status.call_args[0]
+        assert state == "error"
+        assert "cloudflared exited immediately" in tooltip
+
+    def test_died_after_clean_start_paints_error(self):
+        """No `tunnel_error` was ever set (start() itself succeeded), but the
+        process is dead now — the exact silent-death bug this dot exists to
+        surface."""
+        stub = _Stub()
+        stub.tabs = MagicMock()
+        dead_tunnel = MagicMock()
+        dead_tunnel.is_alive = False
+        dead_tunnel.last_output = "connection refused"
+        stub._remote = MagicMock(_tunnel=dead_tunnel, tunnel_error=None)
+        stub._refresh_tunnel_indicator()
+        state, tooltip = stub.tabs.set_tunnel_status.call_args[0]
+        assert state == "error"
+        assert "stopped unexpectedly" in tooltip
+        assert "connection refused" in tooltip
+
+    def test_remote_on_no_tunnel_configured_paints_off(self):
+        stub = _Stub()
+        stub.tabs = MagicMock()
+        stub._remote = MagicMock(_tunnel=None, tunnel_error=None)
+        stub._refresh_tunnel_indicator()
+        state, _tooltip = stub.tabs.set_tunnel_status.call_args[0]
+        assert state == "off"

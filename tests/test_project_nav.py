@@ -11,8 +11,8 @@ import pytest
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication, QLabel, QWidget
 
+from agent_takkub import cockpit_theme, task_ledger
 from agent_takkub import project_nav as project_nav_module
-from agent_takkub import task_ledger
 from agent_takkub.project_nav import ProjectNav
 from agent_takkub.project_tab import ProjectTab
 
@@ -96,6 +96,38 @@ class TestProjectNavApi:
         assert nav.widget(1) is b
         assert nav.count() == 3
         assert nav._list.count() == 3
+
+
+class TestTunnelIndicator:
+    """Top-left sidebar dot surfacing tunnel liveness (separate from the
+    bottom-status-bar 🌐 Remote chip — see status_header._refresh_tunnel_indicator)."""
+
+    def test_default_state_is_neutral(self, qapp):
+        nav = ProjectNav()
+        assert "not enabled" in nav._tunnel_indicator.toolTip()
+
+    def test_running_state_paints_ok_color(self, qapp):
+        nav = ProjectNav()
+        nav.set_tunnel_status("running", "Tunnel: running")
+        assert cockpit_theme.STATE_OK in nav._tunnel_indicator.styleSheet()
+        assert nav._tunnel_indicator.toolTip() == "Tunnel: running"
+
+    def test_error_state_paints_error_color(self, qapp):
+        nav = ProjectNav()
+        nav.set_tunnel_status("error", "Tunnel: boom")
+        assert cockpit_theme.STATE_ERROR in nav._tunnel_indicator.styleSheet()
+        assert nav._tunnel_indicator.toolTip() == "Tunnel: boom"
+
+    def test_off_state_paints_neutral_color(self, qapp):
+        nav = ProjectNav()
+        nav.set_tunnel_status("running", "x")  # flip away from default first
+        nav.set_tunnel_status("off", "Tunnel: off")
+        assert cockpit_theme.TEXT_FAINT in nav._tunnel_indicator.styleSheet()
+
+    def test_unknown_state_falls_back_to_neutral_without_raising(self, qapp):
+        nav = ProjectNav()
+        nav.set_tunnel_status("bogus", "?")  # must not raise
+        assert cockpit_theme.TEXT_FAINT in nav._tunnel_indicator.styleSheet()
 
 
 class TestSidebarCollapse:
