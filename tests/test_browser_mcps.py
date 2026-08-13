@@ -16,6 +16,7 @@ import json
 import os
 import pathlib
 import time
+from datetime import datetime
 
 import pytest
 
@@ -374,6 +375,77 @@ class TestBrowserProfileMcpConfigPath:
         lock.write_text("stale", encoding="utf-8")
         browser_profile_mcp_config_path("qa", 1, "proj_a")  # regenerate
         assert not lock.exists()
+
+
+class TestBrowserProfileOutputDir:
+    """#178: playwright's --output-dir must be templated so a relative
+    `filename` sent to browser_take_screenshot lands under
+    $TAKKUB_ARTIFACTS_DIR/screenshots/, not @playwright/mcp's own temp dir."""
+
+    def test_playwright_gets_output_dir_pointing_at_artifacts_screenshots(
+        self, isolated_mcp_file: pathlib.Path
+    ) -> None:
+        ensure_browser_mcps()
+        path = browser_profile_mcp_config_path("qa", None, "proj_a")
+        servers = _read(pathlib.Path(path))["mcpServers"]
+        args = servers["playwright"]["args"]
+        assert args.count("--output-dir") == 1
+        out_dir = pathlib.Path(args[args.index("--output-dir") + 1])
+        assert out_dir.name == "screenshots"
+        assert out_dir.is_dir()  # templating creates it, same as the profile dir
+
+    def test_output_dir_matches_takkub_artifacts_dir_convention(
+        self, isolated_mcp_file: pathlib.Path
+    ) -> None:
+        # Must resolve to the SAME directory _apply_artifacts_dir stamps as
+        # TAKKUB_ARTIFACTS_DIR (its "screenshots" subdir) — same
+        # runtime/exports/<date>/<project>/ base — so absolute paths a role
+        # already sends via $SHOT_DIR and relative filenames both land
+        # together.
+        ensure_browser_mcps()
+        path = browser_profile_mcp_config_path("qa", None, "proj_a")
+        args = _read(pathlib.Path(path))["mcpServers"]["playwright"]["args"]
+        out_dir = pathlib.Path(args[args.index("--output-dir") + 1])
+        today = datetime.now().strftime("%Y-%m-%d")
+        expected = isolated_mcp_file.parent / "exports" / today / "proj_a" / "screenshots"
+        assert out_dir == expected
+
+    def test_chrome_devtools_does_not_get_output_dir(self, isolated_mcp_file: pathlib.Path) -> None:
+        # chrome-devtools-mcp has no documented --output-dir flag; templating
+        # an unrecognized flag risks the server refusing to start.
+        ensure_browser_mcps()
+        path = browser_profile_mcp_config_path("qa", None, "proj_a")
+        args = _read(pathlib.Path(path))["mcpServers"]["chrome-devtools"]["args"]
+        assert "--output-dir" not in args
+
+    def test_shards_share_one_screenshots_dir_not_isolated_per_shard(
+        self, isolated_mcp_file: pathlib.Path
+    ) -> None:
+        # Unlike --user-data-dir (must be per-shard, exclusive lock), the
+        # screenshots dir is meant to be the SAME shared evidence folder
+        # every shard's screenshots land in — Lead looks in one place.
+        ensure_browser_mcps()
+        s1 = _read(pathlib.Path(browser_profile_mcp_config_path("qa", 1, "proj_a")))
+        s2 = _read(pathlib.Path(browser_profile_mcp_config_path("qa", 2, "proj_a")))
+        args1 = s1["mcpServers"]["playwright"]["args"]
+        args2 = s2["mcpServers"]["playwright"]["args"]
+        out1 = args1[args1.index("--output-dir") + 1]
+        out2 = args2[args2.index("--output-dir") + 1]
+        assert out1 == out2
+        # But their --user-data-dir profiles must still differ (#39).
+        assert _udd(args1) != _udd(args2)
+
+    def test_idempotent_no_double_append_output_dir(self, isolated_mcp_file: pathlib.Path) -> None:
+        ensure_browser_mcps()
+        first = pathlib.Path(browser_profile_mcp_config_path("qa", 1, "proj_a")).read_text(
+            encoding="utf-8"
+        )
+        second = pathlib.Path(browser_profile_mcp_config_path("qa", 1, "proj_a")).read_text(
+            encoding="utf-8"
+        )
+        assert first == second
+        args = json.loads(second)["mcpServers"]["playwright"]["args"]
+        assert args.count("--output-dir") == 1
 
 
 class TestPruneOldBrowserProfiles:

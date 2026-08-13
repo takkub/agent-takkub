@@ -93,8 +93,10 @@ def _shot_dir(tmp_path, project: str, sub: str = "screenshots"):
 
 def _touch_old_enough(path, assign_ts: float, age: float = 2.0) -> None:
     """Write a file whose mtime sits `age` seconds after assign_ts — old
-    enough to be considered settled (past _EVIDENCE_SETTLE_SEC)."""
-    path.write_bytes(b"fake-image-bytes")
+    enough to be considered settled (past _EVIDENCE_SETTLE_SEC). Content is
+    keyed on the filename so unrelated fixtures calling this per-file don't
+    accidentally produce byte-identical files and trip #182's dup-of tag."""
+    path.write_bytes(b"fake-image-bytes:" + path.name.encode())
     import os
 
     mt = assign_ts + age
@@ -715,6 +717,94 @@ class TestSuspectCaptureFlagging:
         empty_png = tmp_path / "c.png"
         empty_png.write_bytes(b"")
         assert Orchestrator._evidence_looks_valid_image(empty_png) is False
+
+
+class TestDuplicateContentFlagging:
+    """Issue #182: a byte-identical screenshot filed under several names
+    passes every #159 size/header check but tells Lead nothing distinct —
+    a live case slipped through until Lead manually diff'd md5 sums."""
+
+    def test_byte_identical_files_flag_the_later_ones(self, orch, tmp_path) -> None:
+        assign_ts = time.time() - 60
+        shots = _shot_dir(tmp_path, "proj")
+        payload = b"\x89PNG\r\n\x1a\n" + b"\x00" * (20 * 1024)
+        first = shots / "r3_04_login.png"
+        second = shots / "r3_05_dashboard.png"
+        third = shots / "r3_06_confirm.png"
+        for i, p in enumerate((first, second, third)):
+            p.write_bytes(payload)
+            import os
+
+            mt = assign_ts + 10 + i  # distinct mtimes so sort order is deterministic
+            os.utime(p, (mt, mt))
+
+        result = Orchestrator._scan_done_evidence("proj", "qa", assign_ts)
+
+        # Newest-first ordering (see _scan_done_evidence's sort) — third.mtime
+        # is newest, so it's the first-seen occurrence and stays untagged;
+        # second and first repeat its hash and get flagged.
+        assert f"⚠dup-of:{third.name}" in result
+        assert "r3_05_dashboard.png" in result
+        assert "r3_04_login.png" in result
+        assert result.count("dup-of") == 2
+
+    def test_distinct_content_not_flagged_as_duplicate(self, orch, tmp_path) -> None:
+        assign_ts = time.time() - 60
+        shots = _shot_dir(tmp_path, "proj")
+        a = shots / "a.png"
+        b = shots / "b.png"
+        _write_real_png(a, extra_bytes=10 * 1024)
+        _write_real_png(b, extra_bytes=20 * 1024)  # different size → different bytes
+        import os
+
+        os.utime(a, (assign_ts + 10, assign_ts + 10))
+        os.utime(b, (assign_ts + 11, assign_ts + 11))
+
+        result = Orchestrator._scan_done_evidence("proj", "qa", assign_ts)
+
+        assert "dup-of" not in result
+
+    def test_duplicate_combines_with_small_tag(self, orch, tmp_path) -> None:
+        assign_ts = time.time() - 60
+        shots = _shot_dir(tmp_path, "proj")
+        payload = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100  # under the 10KB suspect floor
+        first = shots / "one.png"
+        second = shots / "two.png"
+        first.write_bytes(payload)
+        second.write_bytes(payload)
+        import os
+
+        os.utime(first, (assign_ts + 10, assign_ts + 10))
+        os.utime(second, (assign_ts + 11, assign_ts + 11))
+
+        result = Orchestrator._scan_done_evidence("proj", "qa", assign_ts)
+
+        assert "⚠small" in result
+        assert "dup-of" in result
+
+    def test_evidence_content_hash_skips_files_over_dedup_cap(self, tmp_path) -> None:
+        big = tmp_path / "huge.png"
+        big.write_bytes(b"\x89PNG\r\n\x1a\n")
+        oversized = orch_mod._EVIDENCE_DEDUP_MAX_BYTES + 1
+        assert Orchestrator._evidence_content_hash(big, oversized) is None
+
+    def test_evidence_content_hash_stable_for_identical_bytes(self, tmp_path) -> None:
+        a = tmp_path / "a.png"
+        b = tmp_path / "b.png"
+        payload = b"\x89PNG\r\n\x1a\n" + b"same"
+        a.write_bytes(payload)
+        b.write_bytes(payload)
+        ha = Orchestrator._evidence_content_hash(a, a.stat().st_size)
+        hb = Orchestrator._evidence_content_hash(b, b.stat().st_size)
+        assert ha == hb
+        assert ha is not None
+
+    def test_evidence_format_entry_tags_dup_of(self, tmp_path) -> None:
+        shot = tmp_path / "shot.png"
+        original = tmp_path / "original.png"
+        _write_real_png(shot, extra_bytes=50 * 1024)
+        entry = Orchestrator._evidence_format_entry(shot, shot.stat().st_size, dup_of=original)
+        assert "⚠dup-of:original.png" in entry
 
 
 class TestFailureAutoCapture:

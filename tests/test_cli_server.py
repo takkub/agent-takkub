@@ -493,6 +493,57 @@ class TestSpawnStagger:
         assert 0 < backend_delay <= 400
 
 
+class TestBrowserShardSpawnStagger:
+    """#177 mitigation: qa#N/critic#N/designer#N shards (concurrent
+    Playwright + chrome-devtools MCP cold-start) get a wider gap than plain
+    fan-out; non-shard browser-role assigns and non-browser shards are
+    unaffected."""
+
+    def test_is_browser_shard_spawn_true_only_for_suffixed_browser_roles(
+        self, qapp: QCoreApplication
+    ) -> None:
+        srv = CliServer(_FakeOrch())
+        assert srv._is_browser_shard_spawn("qa#2") is True
+        assert srv._is_browser_shard_spawn("critic#1") is True
+        assert srv._is_browser_shard_spawn("designer#9") is True
+        assert srv._is_browser_shard_spawn("qa") is False  # no suffix — not a shard
+        assert srv._is_browser_shard_spawn("backend#2") is False  # not a browser role
+        assert srv._is_browser_shard_spawn(None) is False
+
+    def test_browser_shard_gets_larger_gap_than_general(self, qapp: QCoreApplication) -> None:
+        srv = CliServer(_FakeOrch())
+        srv._spawn_gap_ms = 400
+        srv._browser_shard_gap_ms = 3_000
+        s1, s2 = _FakeSock(), _FakeSock()
+        srv._dispatch(s1, _auth({"cmd": "assign", "role": "qa#1", "task": "x"}))
+        srv._dispatch(s2, _auth({"cmd": "assign", "role": "qa#2", "task": "y"}))
+        assert _delay_ms(_replies(s1)[0]["msg"]) == 0
+        # mirrors test_codex_gets_larger_gap's tolerance for wall-clock drift
+        # between the two dispatch() calls (monotonic time keeps moving).
+        assert _delay_ms(_replies(s2)[0]["msg"]) > 2_500
+
+    def test_non_shard_qa_not_penalized_by_browser_shard_gap(self, qapp: QCoreApplication) -> None:
+        # A single "qa" (no #N suffix) pane is not a fan-out shard — normal gap.
+        srv = CliServer(_FakeOrch())
+        srv._spawn_gap_ms = 400
+        srv._browser_shard_gap_ms = 3_000
+        s1, s2 = _FakeSock(), _FakeSock()
+        srv._dispatch(s1, _auth({"cmd": "assign", "role": "backend", "task": "x"}))
+        srv._dispatch(s2, _auth({"cmd": "assign", "role": "qa", "task": "y"}))
+        assert 0 < _delay_ms(_replies(s2)[0]["msg"]) <= 400
+
+    def test_non_browser_shard_not_penalized_by_browser_shard_gap(
+        self, qapp: QCoreApplication
+    ) -> None:
+        srv = CliServer(_FakeOrch())
+        srv._spawn_gap_ms = 400
+        srv._browser_shard_gap_ms = 3_000
+        s1, s2 = _FakeSock(), _FakeSock()
+        srv._dispatch(s1, _auth({"cmd": "assign", "role": "backend#1", "task": "x"}))
+        srv._dispatch(s2, _auth({"cmd": "assign", "role": "backend#2", "task": "y"}))
+        assert 0 < _delay_ms(_replies(s2)[0]["msg"]) <= 400
+
+
 class TestCodexDetection:
     """#38: the codex gap follows the EFFECTIVE provider, not the role name.
     Exercises the REAL effective_provider_for (no name-based stub), so these would

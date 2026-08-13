@@ -248,6 +248,17 @@ _EVIDENCE_MAGIC_PREFIXES: dict[str, tuple[bytes, ...]] = {
     ".gif": (b"GIF87a", b"GIF89a"),
 }
 
+# Issue #182: a byte-identical screenshot filed under several different
+# names (a retry that overwrote nothing, a copy-paste evidence list, a
+# capture script that re-saved the same failed frame under each expected
+# filename) passes every #159 check — real magic bytes, plausible size —
+# while telling Lead nothing distinct about N different app states. Lead
+# caught one live case only by manually diffing md5 sums. Cap how many bytes
+# get hashed per file: screenshots are typically well under this, and a
+# multi-MB capture is rare enough that skipping its dedup check (never
+# skipping the size/header checks) beats blocking done() on slow disk I/O.
+_EVIDENCE_DEDUP_MAX_BYTES = 8 * 1024 * 1024
+
 # Issue #evidence-cite: path-like or test-result tokens that count as a note
 # "citing" evidence even when the screenshot scan above found nothing (e.g. a
 # reviewer citing a log path, or qa citing a pytest summary line). Engine
@@ -2084,15 +2095,35 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             return True
         return header.startswith(prefixes)
 
+    @staticmethod
+    def _evidence_content_hash(path: pathlib.Path, size: int) -> str | None:
+        """md5 of `path`'s bytes, for cross-file duplicate detection (issue
+        #182). `None` on any read failure or when `size` exceeds
+        `_EVIDENCE_DEDUP_MAX_BYTES` — the caller must treat that as "unknown,
+        can't compare" rather than "empty file", so it never collides with a
+        real hash by coincidence."""
+        if size > _EVIDENCE_DEDUP_MAX_BYTES:
+            return None
+        try:
+            return hashlib.md5(path.read_bytes()).hexdigest()
+        except OSError:
+            return None
+
     @classmethod
-    def _evidence_format_entry(cls, path: pathlib.Path, size: int) -> str:
+    def _evidence_format_entry(
+        cls, path: pathlib.Path, size: int, dup_of: pathlib.Path | None = None
+    ) -> str:
         """`path (12.3KB)`, tagged `⚠small`/`⚠bad-header` when the file looks
-        like a failed capture rather than a real screenshot (issue #159)."""
+        like a failed capture rather than a real screenshot (issue #159), or
+        `⚠dup-of:<name>` when it's byte-identical to an earlier file in the
+        same evidence batch (issue #182)."""
         reasons = []
         if size < _EVIDENCE_SUSPECT_MIN_BYTES:
             reasons.append("small")
         if not cls._evidence_looks_valid_image(path):
             reasons.append("bad-header")
+        if dup_of is not None:
+            reasons.append(f"dup-of:{dup_of.name}")
         tag = f" ⚠{'+'.join(reasons)}" if reasons else ""
         posix_path = str(path).replace("\\", "/")
         return f"{posix_path} ({size / 1024:.1f}KB{tag})"
@@ -2192,7 +2223,23 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         if found:
             found.sort(key=lambda item: item[0], reverse=True)
             newest = found[:_EVIDENCE_MAX_FILES]
-            paths = ", ".join(cls._evidence_format_entry(p, size) for _, p, size in newest)
+            # Issue #182: flag a file whose content is byte-identical to an
+            # earlier one in this same batch — the first occurrence of a hash
+            # is trusted at face value, every later one is tagged so Lead
+            # doesn't mistake a repeated frame for N distinct captures.
+            seen_hashes: dict[str, pathlib.Path] = {}
+            entries = []
+            for _, p, size in newest:
+                digest = cls._evidence_content_hash(p, size)
+                dup_of = None
+                if digest is not None:
+                    first = seen_hashes.get(digest)
+                    if first is not None:
+                        dup_of = first
+                    else:
+                        seen_hashes[digest] = p
+                entries.append(cls._evidence_format_entry(p, size, dup_of=dup_of))
+            paths = ", ".join(entries)
             suffix = " (shared dir)" if shared else ""
             return f"📸 evidence: {paths}{suffix}"
         if base_role not in _EVIDENCE_WARN_ROLES:

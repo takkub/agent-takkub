@@ -43,6 +43,7 @@ import subprocess
 import tempfile
 import threading
 from collections.abc import Iterable
+from datetime import datetime
 
 from ._win_console import SUBPROCESS_NO_WINDOW
 from .config import RUNTIME_DIR
@@ -334,6 +335,27 @@ _PROFILE_FLAG: dict[str, str] = {
     "chrome-devtools": "--userDataDir",
 }
 
+# #178: without an explicit --output-dir, @playwright/mcp resolves a relative
+# `filename` (the form its own README recommends for browser_take_screenshot)
+# against a temp dir INSIDE the MCP server process, not the pane's cwd or
+# TAKKUB_ARTIFACTS_DIR — so a QA/critic pane following its own role prompt's
+# "send a relative filename" convention writes screenshots nowhere the Lead
+# can find them. Pointing --output-dir at the same
+# `$TAKKUB_ARTIFACTS_DIR/screenshots` directory every role prompt already
+# tells panes to use (see role file's "Screenshot convention" section) makes
+# a relative filename land in the expected place; an absolute path (the
+# documented workaround) still works unchanged since --output-dir only
+# supplies the base for relative paths.
+#
+# chrome-devtools-mcp is deliberately NOT included here: unlike
+# @playwright/mcp, its CLI has no documented --output-dir flag (as of
+# _CHROME_DEVTOOLS_MCP_VERSION above) — templating a flag it doesn't
+# recognize risks the server rejecting startup entirely. Revisit if a future
+# chrome-devtools-mcp version adds an equivalent.
+_OUTPUT_DIR_FLAG: dict[str, str] = {
+    "playwright": "--output-dir",
+}
+
 # Chromium "singleton" guard files live at the root of a user-data-dir and are
 # what raise "profile is already in use / locked". A hard-killed shard (cockpit
 # force-restart, watchdog os._exit, ConPTY freeze kill) leaves them behind; on
@@ -445,7 +467,24 @@ def browser_profile_mcp_config_path(
             # failure is the only signal that the profile won't isolate.
             _log.warning("browser_profile_mcp_config_path: could not create %s: %s", profile_dir, e)
         _clear_stale_singleton_locks(profile_dir)
-        cfg["args"] = [*args, flag, str(profile_dir)]
+        new_args = [*args, flag, str(profile_dir)]
+
+        out_flag = _OUTPUT_DIR_FLAG.get(name)
+        if out_flag and out_flag not in args:  # idempotent — already templated
+            today = datetime.now().strftime("%Y-%m-%d")
+            # SHARED_MCP_FILE.parent (not the RUNTIME_DIR import) so tests that
+            # monkeypatch SHARED_MCP_FILE (isolated_mcp_file fixture) redirect
+            # this too — same indirection profile_dir/profiles_root already use.
+            shots_dir = SHARED_MCP_FILE.parent / "exports" / today / project / "screenshots"
+            try:
+                shots_dir.mkdir(parents=True, exist_ok=True)
+                new_args = [*new_args, out_flag, str(shots_dir)]
+            except OSError as e:
+                _log.warning(
+                    "browser_profile_mcp_config_path: could not create %s: %s", shots_dir, e
+                )
+
+        cfg["args"] = new_args
         servers[name] = cfg
 
     if has_graft:
