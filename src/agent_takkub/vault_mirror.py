@@ -518,6 +518,154 @@ def _append_decision_entry(page: pathlib.Path, entry: str) -> None:
         raise
 
 
+# ---------------------------------------------------------------------------
+# Local (non-vault) knowledge base — issue #168
+#
+# `distill_session_facts` above only fires when the user has an Obsidian
+# vault configured (`_resolve_vault_dir()` returns non-None), so most cockpit
+# installs never get any cross-session distillation at all. This sibling
+# writes the same durable-fact-filtered, scrubbed entry into a cockpit-owned
+# file under `runtime/knowledge/<project>.md` unconditionally — no vault,
+# no per-project setup, works for every provider (the call site is
+# orchestrator's `_save_decision_note`, already provider-neutral).
+#
+# Deliberately narrow: one flat markdown file per project, oldest entries
+# dropped first once it grows past a size cap (mirrors role_memory.py's
+# curation so this can't silently become the next unbounded-growth token
+# sink — see role_memory.py's own comment on why that budget exists). No L2
+# archive of trimmed entries (unlike role_memory's #151) — this is meant to
+# stay a lightweight recent-knowledge scratchpad, not a durable record; the
+# vault mirror (when configured) and `runtime/sessions/` already hold the
+# unabridged history.
+_KNOWLEDGE_ENV = "TAKKUB_KNOWLEDGE_BASE"
+_KNOWLEDGE_DISABLE_VALUES = frozenset({"0", "false", "off", "no"})
+_KB_MAX_BYTES = 12_000
+_KB_MAX_ENTRIES = 150
+_KB_ENTRY_PREFIX = "- `"
+
+
+def knowledge_base_enabled() -> bool:
+    """False iff ``TAKKUB_KNOWLEDGE_BASE`` is explicitly set to an opt-out
+    value (0/false/off/no, case-insensitive). Default: enabled."""
+    raw = os.environ.get(_KNOWLEDGE_ENV, "").strip().lower()
+    return raw not in _KNOWLEDGE_DISABLE_VALUES
+
+
+def knowledge_base_path(runtime_dir: pathlib.Path, project: str) -> pathlib.Path:
+    """The ``runtime/knowledge/<project>.md`` path for *project*.
+
+    Callers must pass an already-validated/sanitized *project* (the same
+    ``validate_name``d value used for the sibling ``runtime/sessions/``
+    directory) — this does no sanitization of its own.
+    """
+    return runtime_dir / "knowledge" / f"{project}.md"
+
+
+def _kb_header(project: str) -> str:
+    return (
+        f"# {project} — knowledge base\n\n"
+        "> Auto-distilled durable facts (fixes / decisions / patterns) from `takkub done` "
+        "reports across every role and provider.\n"
+        "> Best-effort, size-capped — oldest entries drop first when it grows too large. "
+        f"Opt out for this machine: `{_KNOWLEDGE_ENV}=0`.\n\n"
+    )
+
+
+def _cap_knowledge_base(
+    text: str, max_bytes: int = _KB_MAX_BYTES, max_entries: int = _KB_MAX_ENTRIES
+) -> str:
+    """Drop the OLDEST entry lines (topmost ``- `...``` bullets, append order)
+    until *text* fits both *max_bytes* and *max_entries*. Header lines (and
+    any other non-entry line) are never dropped."""
+    lines = text.split("\n")
+    header_end = 0
+    for i, ln in enumerate(lines):
+        if ln.startswith(_KB_ENTRY_PREFIX):
+            header_end = i
+            break
+    else:
+        return text  # no entries at all — nothing to cap
+    header, entries = lines[:header_end], lines[header_end:]
+
+    def _n_entries() -> int:
+        return sum(1 for ln in entries if ln.startswith(_KB_ENTRY_PREFIX))
+
+    def _size() -> int:
+        return len("\n".join(header + entries).encode("utf-8"))
+
+    while entries and (_n_entries() > max_entries or _size() > max_bytes):
+        entries.pop(0)
+    return "\n".join(header + entries)
+
+
+def distill_to_knowledge_base(
+    project: str,
+    role: str,
+    note: str,
+    runtime_dir: pathlib.Path,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Distill a durable `takkub done` note into the local, vault-free
+    ``runtime/knowledge/<project>.md`` knowledge base.
+
+    Reuses the same durable-fact filter and scrubbing as the vault mirror's
+    `distill_session_facts` so a note only lands here when it carries real
+    signal (fix/decision/pattern), never routine status chatter. Idempotent:
+    an entry already present verbatim is a no-op, not a duplicate line.
+
+    Best-effort: returns True on a successful write (including the
+    idempotent no-op case), False when the note isn't durable, the feature
+    is opted out via ``TAKKUB_KNOWLEDGE_BASE=0``, or any I/O error occurs.
+    Never raises — must not break the `takkub done` flow it's called from.
+    """
+    if not knowledge_base_enabled():
+        return False
+    try:
+        if not _is_durable_fact(note):
+            return False
+        if now is None:
+            now = datetime.now()
+        iso = now.isoformat(timespec="seconds")
+        scrubbed = _scrub_note(note)
+        if len(scrubbed) > 300:
+            scrubbed = scrubbed[:297] + "..."
+        entry = f"{_KB_ENTRY_PREFIX}{iso}` **{role}** — {scrubbed}"
+
+        path = knowledge_base_path(runtime_dir, project)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        text = path.read_text(encoding="utf-8") if path.is_file() else _kb_header(project)
+        if entry in text:
+            return True  # already recorded — idempotent no-op
+        text = text.rstrip("\n") + "\n" + entry + "\n"
+        text = _cap_knowledge_base(text)
+
+        tmp_path: pathlib.Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=path.parent,
+                prefix=f".{path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as f:
+                tmp_path = pathlib.Path(f.name)
+                f.write(text)
+            os.replace(tmp_path, path)
+        except OSError:
+            if tmp_path is not None:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise
+        return True
+    except Exception as exc:
+        _distill_log.warning("knowledge_base_error project=%s role=%s: %r", project, role, exc)
+        return False
+
+
 def distill_session_facts(
     project: str,
     role: str,
