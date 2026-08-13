@@ -96,7 +96,17 @@
     setProjectWorking(project, true, null, false);
     lead.optimisticWorkingTimer = setTimeout(function () {
       lead.optimisticWorkingTimer = null;
-      if (!lead.workingConfirmed) setProjectWorking(project, false, null, false);
+      // Nothing confirmed the turn ended (no working/idle SSE edge, no reply
+      // text) within the blind window — this is the last-resort terminal
+      // state for a provider whose mirror *should* work but silently didn't
+      // (session_uuid drift, etc). Leave a trace instead of just letting the
+      // spinner vanish with no explanation (2026-08-13 remote-mirror fix) —
+      // the provider-known-unsupported case is handled earlier and faster,
+      // in sendLeadMessage's `mirror_supported` check below.
+      if (!lead.workingConfirmed) {
+        setProjectWorking(project, false, null, false);
+        appendProjectMessage(project, "sys", "ยังไม่เห็นคำตอบใน 30 วิ — เช็คที่เดสก์ท็อปว่า Lead ตอบหรือยัง");
+      }
     }, 30000);
   }
 
@@ -1256,10 +1266,30 @@
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(sayBody),
-    }).catch(function () {
-      if (targetLead) setProjectWorking(project, false, null, false);
-      toast("ส่งข้อความไม่สำเร็จ");
-    });
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        // The message reached Lead regardless (cli_server writes straight
+        // into the pane) — `mirror_supported: false` only means this
+        // provider (opencode/kimi/cursor — no JSONL/rollout scanner
+        // registered, see notify.supports_remote_history) can never produce
+        // a live reply here. Say so immediately instead of leaving the "…"
+        // spinner up for a reply that will never arrive (2026-08-13
+        // remote-mirror fix — was a silent indefinite hang).
+        if (data && data.mirror_supported === false && targetLead) {
+          clearOptimisticWorkingTimer(targetLead);
+          setProjectWorking(project, false, null, false);
+          appendProjectMessage(
+            project,
+            "sys",
+            data.lead_provider_note || "ส่งถึง Lead แล้ว — โหมด remote ยังไม่รองรับดูคำตอบสดของ provider นี้ ดูคำตอบที่เดสก์ท็อป"
+          );
+        }
+      })
+      .catch(function () {
+        if (targetLead) setProjectWorking(project, false, null, false);
+        toast("ส่งข้อความไม่สำเร็จ");
+      });
   }
 
   function sendLeadImage(file) {

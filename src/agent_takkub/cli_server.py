@@ -518,6 +518,19 @@ class CliServer(QObject):
                     oldest_queued_age_s=snap.oldest_queued_age_s,
                 )
                 return
+            elif cmd == "remote-mirror-status":
+                # 2026-08-13 remote-mirror-blank fix: `takkub doctor --live`
+                # diagnostic for "phone shows nothing back from Lead".
+                # Interpretation lives in doctor.check_remote_mirror_live —
+                # this handler only gathers the raw live-only facts doctor's
+                # pure-logic checks structurally cannot see (in-memory pane
+                # state) AND cannot import (the `remote-bolt-on-isolation`
+                # import-linter contract forbids both cli_server.py and
+                # doctor.py from depending on `agent_takkub.remote`, so this
+                # deliberately duplicates remote/notify.py's small uuid/path
+                # resolution instead of importing it).
+                self._reply(sock, **self._remote_mirror_status(from_project))
+                return
             elif cmd == "status":
                 since_ts: float | None = None
                 since_hhmm = req.get("since")
@@ -632,6 +645,76 @@ class CliServer(QObject):
             ok, msg = False, f"error: {e}"
 
         self._reply(sock, ok=ok, msg=msg)
+
+    def _remote_mirror_status(self, from_project: str | None) -> dict:
+        """Live facts behind `takkub doctor --live`'s remote-mirror check
+        (2026-08-13): which provider actually backs this project's Lead
+        pane, whether that provider has a registered remote-history scanner
+        at all, and — for claude, the only provider with a fixed uuid-exact
+        transcript path — whether that exact file exists on disk. Mirrors
+        remote/notify.py's `pane_provider_name`/`_lead_session_uuid`/
+        `_resolve_claude_jsonl_path` logic verbatim rather than importing
+        it (forbidden by the `remote-bolt-on-isolation` contract)."""
+        resolve_project = getattr(self._orch, "_resolve_project", None)
+        project_ns = (
+            resolve_project(from_project)
+            if resolve_project is not None
+            else (from_project or "default")
+        )
+
+        panes_by_project = getattr(self._orch, "_panes_by_project", None)
+        pane_state = getattr(self._orch, "_pane_state", None)
+        panes = panes_by_project.get(project_ns) if isinstance(panes_by_project, dict) else None
+        lead_pane = panes.get("lead") if isinstance(panes, dict) else None
+
+        provider = None
+        model = getattr(lead_pane, "model", None)
+        model_provider = getattr(model, "provider_name", None)
+        if isinstance(model_provider, str) and model_provider.strip():
+            provider = model_provider.strip().lower()
+        else:
+            from .provider_config import effective_provider_for
+
+            provider = str(effective_provider_for("lead", project_ns) or "").strip().lower()
+
+        from .provider_spec import PROVIDER_REGISTRY
+
+        spec = PROVIDER_REGISTRY.get(provider)
+        supports_remote_history = bool(spec is not None and spec.supports_remote_history)
+
+        session_uuid = None
+        if isinstance(pane_state, dict):
+            from .orchestrator_text import _exit_key
+
+            ps = pane_state.get(_exit_key(project_ns, "lead"))
+            uuid_val = getattr(ps, "session_uuid", None) if ps is not None else None
+            if isinstance(uuid_val, str) and uuid_val.strip():
+                session_uuid = uuid_val.strip()
+
+        # Only claude resolves a Lead session by an exact uuid->jsonl glob
+        # (codex/gemini pick their own file by cwd + mtime, so "does the
+        # uuid's file exist" isn't a meaningful question for them — None
+        # means "not applicable", never a false negative).
+        transcript_exists: bool | None = None
+        if provider == "claude" and session_uuid:
+            try:
+                from .user_profile import config_dir_for
+
+                base = config_dir_for(project_ns) / "projects"
+                transcript_exists = any(base.glob(f"*/{session_uuid}.jsonl"))
+            except OSError:
+                transcript_exists = False
+
+        return {
+            "ok": True,
+            "msg": "remote mirror status",
+            "project": project_ns,
+            "provider": provider,
+            "supports_remote_history": supports_remote_history,
+            "lead_pane_open": lead_pane is not None,
+            "session_uuid": session_uuid,
+            "transcript_exists": transcript_exists,
+        }
 
     def _reply(self, sock: QTcpSocket, *, ok: bool, msg: str, **extra) -> None:
         payload = {"ok": ok, "msg": msg, **extra}

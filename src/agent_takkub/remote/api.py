@@ -218,7 +218,18 @@ def activity(orch) -> dict:
 def lead_say(orch, text: str, from_project: str | None) -> dict:
     """control-mode only (enforced by the HTTP handler's mode gate before
     this runs). Delivers `text` into the Lead pane the same way a peer
-    pane's `takkub send --to lead` would — Lead decides what to do with it."""
+    pane's `takkub send --to lead` would — Lead decides what to do with it.
+
+    Delivery and mirroring are separate concerns (2026-08-13 remote-mirror
+    fix): the message above always reaches Lead once `_lead_frame` returns
+    ok — cli_server's `send` writes straight into the pane's pty, unrelated
+    to whether this provider's replies can be read back. `mirror_supported`
+    tells the PWA up front whether it should expect a live reply to ever
+    arrive (`notify.supports_remote_history`, same gate `_lead_history`
+    already exposes for the one-shot history/session reads) so it can stop
+    showing an indefinite "…กำลังทำงาน" spinner for a provider that will
+    never produce one, instead of the client discovering this only after a
+    blind timeout with no explanation."""
     text = (text or "").strip()
     if not text:
         raise RemoteApiError(400, "empty message")
@@ -229,7 +240,13 @@ def lead_say(orch, text: str, from_project: str | None) -> dict:
     if not isinstance(resp, dict) or not resp.get("ok"):
         msg = resp.get("msg") if isinstance(resp, dict) else None
         raise RemoteApiError(502, msg or "send failed")
-    return {"ok": True}
+    provider = notify.lead_provider_name(orch, _pulse_project(from_project))
+    return {
+        "ok": True,
+        "provider": provider,
+        "mirror_supported": notify.supports_remote_history(provider),
+        "lead_provider_note": _lead_provider_note(provider),
+    }
 
 
 def lead_upload_image(
@@ -291,14 +308,19 @@ def lead_upload_image(
     if clean_caption:
         message += f"\nข้อความประกอบ: {clean_caption}"
     try:
-        lead_say(orch, message, project_ns)
+        say_result = lead_say(orch, message, project_ns)
     except Exception:
         try:
             image_path.unlink(missing_ok=True)
         except OSError:
             pass
         raise
-    return {"ok": True, "name": display_name or "image"}
+    return {
+        "ok": True,
+        "name": display_name or "image",
+        "mirror_supported": say_result.get("mirror_supported"),
+        "lead_provider_note": say_result.get("lead_provider_note"),
+    }
 
 
 def open_project(orch, project: object) -> dict:
