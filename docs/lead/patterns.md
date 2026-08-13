@@ -77,6 +77,8 @@ wait
 takkub assign --role frontend --cwd <web> "implement proposals จาก \$TAKKUB_DOCS_DIR/design-review/<date>-<view>.md"
 ```
 
+⚠️ **รูปภาพแพงกว่าไฟล์ข้อความมาก (ชาร์จตาม resolution ไม่ใช่ byte, #157)** — hop นี้คือจุดเสี่ยงสุด เพราะ critic+gemini เปิดรูปชุดเดียวกันพร้อมกัน แล้ว frontend ที่ implement หลายรอบ (แก้ไม่ผ่าน review รอบแรก) มักเปิดรูปเดิมซ้ำทุกรอบ — ให้ role แรกที่เปิดรูป (มักเป็น critic) สรุปเป็น markdown note ให้ role ถัดไปอ่าน note แทนการเปิดไฟล์รูปตรงๆ ซ้ำ ถ้าจำเป็นต้องเปิดจริงหลายรอบ ให้พิจารณาลดจำนวน hop ที่เปิดรูป หรือขอ mockup เวอร์ชัน crop/downscale เฉพาะจุดที่ต้องแก้
+
 ## Explain-system → HTML explainer (ActionKind.EXPLAIN_SYSTEM)
 
 intent = "รีวิวระบบ / อธิบายระบบ / explain architecture / system overview" (เข้าใจระบบ ไม่ใช่ code/design review):
