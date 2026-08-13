@@ -276,3 +276,121 @@ class TestDeriveSummary:
         result = task_ledger._derive_summary(task)
         assert len(result) == 101  # 100 chars + '…'
         assert result.endswith("…")
+
+
+def _backdate_open_row(project: str, role: str, date: str) -> None:
+    """Test helper: rewrite a role's open row + its group to *date*, so
+    reconcile-gate tests can simulate "assigned on a prior day" without
+    waiting for a real day to pass."""
+    state = task_ledger._load_state(project)
+    ptr = state["open"][role]
+    group = task_ledger._find_group(state, ptr["date"], ptr["goal"])
+    group["date"] = date
+    ptr["date"] = date
+    task_ledger._save_state(project, state)
+
+
+class TestReconcileOrphaned:
+    """Issue #166: a "working" row used to stick forever once the cockpit
+    process that owned it exited — mark_done only ever fires from a live
+    pane's own done/close handler. reconcile_orphaned() is the startup-time
+    fix; its date<today gate is the safety net that stops it from closing a
+    same-day row an auto-respawn is about to resume."""
+
+    def test_reconciles_row_backdated_before_today(self) -> None:
+        task_ledger.create_assignment(PROJECT, "backend", "/api", "do X", "goal", "feat", "claude")
+        _backdate_open_row(PROJECT, "backend", "2020-01-01")
+
+        closed, warning = task_ledger.reconcile_orphaned(PROJECT, frozenset(), today="2099-01-01")
+
+        assert closed == ["backend"]
+        assert warning == ""
+        state = task_ledger._load_state(PROJECT)
+        assert "backend" not in state["open"]
+        row = state["groups"][0]["features"][0]["rows"][0]
+        assert row["status"] == "closed"
+        assert row["reason"] == "orphaned"
+        assert "orphaned" in _index_text()
+
+    def test_leaves_same_day_row_untouched(self) -> None:
+        """A row assigned today must survive reconcile even if no pane is
+        currently live — auto-respawn may still bring it back."""
+        task_ledger.create_assignment(PROJECT, "backend", "/api", "do X", "goal", "feat", "claude")
+        today = task_ledger._load_state(PROJECT)["open"]["backend"]["date"]
+
+        closed, _warning = task_ledger.reconcile_orphaned(PROJECT, frozenset(), today=today)
+
+        assert closed == []
+        state = task_ledger._load_state(PROJECT)
+        assert "backend" in state["open"]
+
+    def test_leaves_backdated_row_alone_when_role_still_has_a_live_pane(self) -> None:
+        """Belt-and-suspenders: even a stale-dated row must never be closed
+        while its role currently has a live pane."""
+        task_ledger.create_assignment(PROJECT, "backend", "/api", "do X", "goal", "feat", "claude")
+        _backdate_open_row(PROJECT, "backend", "2020-01-01")
+
+        closed, _warning = task_ledger.reconcile_orphaned(
+            PROJECT, frozenset({"backend"}), today="2099-01-01"
+        )
+
+        assert closed == []
+        state = task_ledger._load_state(PROJECT)
+        assert "backend" in state["open"]
+
+    def test_no_open_rows_is_a_no_op(self) -> None:
+        closed, warning = task_ledger.reconcile_orphaned(PROJECT, frozenset(), today="2099-01-01")
+        assert closed == []
+        assert warning == ""
+
+    def test_preview_reports_candidates_without_mutating_state(self) -> None:
+        task_ledger.create_assignment(PROJECT, "backend", "/api", "do X", "goal", "feat", "claude")
+        _backdate_open_row(PROJECT, "backend", "2020-01-01")
+
+        preview = task_ledger.preview_reconcile(PROJECT, frozenset(), today="2099-01-01")
+
+        assert len(preview) == 1
+        assert preview[0]["role"] == "backend"
+        assert preview[0]["date"] == "2020-01-01"
+        state = task_ledger._load_state(PROJECT)
+        assert "backend" in state["open"]  # preview never mutates
+
+
+class TestCloseRole:
+    """Issue #166's user-facing escape hatch: `takkub task close --role`."""
+
+    def test_closes_open_row(self) -> None:
+        task_ledger.create_assignment(PROJECT, "qa", "/api", "smoke", "goal", "feat", "claude")
+
+        ok, _msg = task_ledger.close_role(PROJECT, "qa", frozenset())
+
+        assert ok is True
+        state = task_ledger._load_state(PROJECT)
+        assert "qa" not in state["open"]
+        row = state["groups"][0]["features"][0]["rows"][0]
+        assert row["status"] == "closed"
+        assert row["reason"] == "manual"
+
+    def test_refuses_role_with_a_live_pane(self) -> None:
+        task_ledger.create_assignment(PROJECT, "qa", "/api", "smoke", "goal", "feat", "claude")
+
+        ok, msg = task_ledger.close_role(PROJECT, "qa", frozenset({"qa"}))
+
+        assert ok is False
+        assert "live pane" in msg
+        state = task_ledger._load_state(PROJECT)
+        assert "qa" in state["open"]  # untouched
+
+    def test_force_overrides_live_pane_guard(self) -> None:
+        task_ledger.create_assignment(PROJECT, "qa", "/api", "smoke", "goal", "feat", "claude")
+
+        ok, _msg = task_ledger.close_role(PROJECT, "qa", frozenset({"qa"}), force=True)
+
+        assert ok is True
+        state = task_ledger._load_state(PROJECT)
+        assert "qa" not in state["open"]
+
+    def test_role_with_no_open_row_errors(self) -> None:
+        ok, msg = task_ledger.close_role(PROJECT, "nope", frozenset())
+        assert ok is False
+        assert "no open ledger row" in msg

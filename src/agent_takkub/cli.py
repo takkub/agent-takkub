@@ -631,6 +631,21 @@ def cmd_harvest(args: argparse.Namespace) -> dict:
     return {"ok": False, "msg": done_resp.get("msg", "harvest-done failed"), "exit_code": 1}
 
 
+def _require_lead_for_task_admin(action: str) -> str | None:
+    """Same rationale/shape as `_require_lead_for_pane_tools`: `task
+    reconcile`/`task close` mutate the shared ledger for *any* role, so only
+    Lead runs them — `task show` (read-only, self-scoped) stays open."""
+    role = _from_role()
+    if role is None:
+        return None
+    if role.lower() != "lead":
+        return (
+            f"only lead can run 'takkub {action}'. you are '{role}'.\n"
+            f"       'takkub task show' stays open for everyone; ask lead to clean up the ledger."
+        )
+    return None
+
+
 def cmd_task(args: argparse.Namespace) -> dict:
     """`takkub task show --role <r>` — print the full text of the last task
     assigned to `role` (issue #1 file-based task handoff).
@@ -638,6 +653,11 @@ def cmd_task(args: argparse.Namespace) -> dict:
     Works whether the assign pasted the task inline (short task, no handoff
     file) or a pointer (long task, read back from the on-disk handoff file)
     — the CLI always resolves to the full text either way.
+
+    `takkub task reconcile [--dry-run]` / `takkub task close --role <r>
+    [--force] [--dry-run]` are the issue #166 ledger-cleanup commands — a
+    row can stick at "working" forever once the cockpit process that owned
+    it exits, since only a live pane's done/close handler ever flips it.
     """
     if args.t_cmd == "show":
         resp = _request(
@@ -650,6 +670,30 @@ def cmd_task(args: argparse.Namespace) -> dict:
             print(f"[task file] {task_file}\n")
         _utf8_print(resp.get("task", ""))
         return {"ok": True, "msg": "task"}
+    if args.t_cmd == "reconcile":
+        gate_err = _require_lead_for_task_admin("task reconcile")
+        if gate_err:
+            return {"ok": False, "msg": gate_err}
+        return _request(
+            _with_project(
+                {"cmd": "task-reconcile", "dry_run": bool(args.dry_run), "from": _from_role()}
+            )
+        )
+    if args.t_cmd == "close":
+        gate_err = _require_lead_for_task_admin("task close")
+        if gate_err:
+            return {"ok": False, "msg": gate_err}
+        return _request(
+            _with_project(
+                {
+                    "cmd": "task-close",
+                    "role": args.role,
+                    "force": bool(args.force),
+                    "dry_run": bool(args.dry_run),
+                    "from": _from_role(),
+                }
+            )
+        )
     return {"ok": False, "msg": f"unknown task subcommand: {args.t_cmd}"}
 
 
@@ -1802,6 +1846,32 @@ def main(argv: list[str] | None = None) -> int:
     st_sub = st.add_subparsers(dest="t_cmd", required=True)
     sts = st_sub.add_parser("show", help="print the full text of a role's last assigned task")
     sts.add_argument("--role", required=True, help="role name to look up")
+    str_ = st_sub.add_parser(
+        "reconcile",
+        help="close ledger rows orphaned by a cockpit session that exited without `takkub done`",
+    )
+    str_.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        dest="dry_run",
+        help="preview what would be closed without writing",
+    )
+    stc = st_sub.add_parser("close", help="manually close a role's open ledger row")
+    stc.add_argument("--role", required=True, help="role name to close")
+    stc.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help="close even if the role currently has a live pane",
+    )
+    stc.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        dest="dry_run",
+        help="preview without writing",
+    )
     st.set_defaults(func=cmd_task)
 
     # Internal — wired as the Stop/Notification hook `command` for every
