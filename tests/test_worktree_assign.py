@@ -141,6 +141,70 @@ class TestAssignWithWorktree:
         assert orch._notify_lead.called
 
 
+class TestBareRoleWorktreeCollision:
+    """#162: `assign --isolation worktree` fired 3x back-to-back at the same
+    bare role name (no `#N`) used to silently collide — the 2nd/3rd calls
+    reused the pane slot the 1st call already owned instead of getting their
+    own independent pane, orphaning their freshly-created worktrees on disk.
+    """
+
+    def test_second_bare_worktree_assign_is_hard_rejected(self, orch, monkeypatch):
+        # Simulate call #1 already having registered a pane for "backend".
+        orch._panes_by_project["proj"] = {"backend": MagicMock()}
+        orch._assign_with_worktree = MagicMock(return_value=(True, "should not be reached"))
+
+        ok, msg = orch.assign(
+            "backend", "/repo/api", "task 2", isolation="worktree", project="proj"
+        )
+
+        assert ok is False
+        assert "#N" in msg or "backend#" in msg
+        orch._assign_with_worktree.assert_not_called()
+
+    def test_third_bare_worktree_assign_also_rejected(self, orch):
+        orch._panes_by_project["proj"] = {"backend": MagicMock()}
+        orch._assign_with_worktree = MagicMock(return_value=(True, "should not be reached"))
+
+        ok1, _ = orch.assign("backend", "/repo/api", "t2", isolation="worktree", project="proj")
+        ok2, _ = orch.assign("backend", "/repo/api", "t3", isolation="worktree", project="proj")
+
+        assert ok1 is False
+        assert ok2 is False
+        orch._assign_with_worktree.assert_not_called()
+
+    def test_shard_suffixed_role_not_blocked(self, orch, monkeypatch):
+        # role_name carries its own `#N` instance identity → distinct pane
+        # slot → no collision, even though bare "backend" is already alive.
+        orch._panes_by_project["proj"] = {"backend": MagicMock()}
+        orch._assign_with_worktree = MagicMock(return_value=(True, "ok"))
+
+        ok, _msg = orch.assign("backend#2", "/repo/api", "t2", isolation="worktree", project="proj")
+
+        assert ok is True
+        orch._assign_with_worktree.assert_called_once()
+
+    def test_no_existing_pane_is_not_a_collision(self, orch):
+        # First-ever worktree assign for this role: no pane registered yet.
+        orch._assign_with_worktree = MagicMock(return_value=(True, "ok"))
+
+        ok, _ = orch.assign("backend", "/repo/api", "t1", isolation="worktree", project="proj")
+
+        assert ok is True
+        orch._assign_with_worktree.assert_called_once()
+
+    def test_shared_isolation_reassign_to_running_pane_unaffected(self, orch):
+        # The guard is scoped to isolation="worktree" only — a normal
+        # follow-up task to an already-running pane (shared isolation) must
+        # keep working exactly as before.
+        orch._panes_by_project["proj"] = {"backend": MagicMock()}
+        orch._assign_dispatch = MagicMock(return_value=(True, "ok"))
+
+        ok, _ = orch.assign("backend", "/repo/api", "follow-up", project="proj")
+
+        assert ok is True
+        orch._assign_dispatch.assert_called_once()
+
+
 # ── done/close finalize ─────────────────────────────────────────────────────
 
 

@@ -991,6 +991,15 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             model_error = assign_model_override_error(role_name, model, project)
             if model_error:
                 return False, model_error
+        # #162: a repeated `--isolation worktree` assign at the same BARE role
+        # name (no `#N`) doesn't get its own isolated pane — it silently
+        # collides with the pane the earlier call already owns (see
+        # `_worktree_bare_role_collision` docstring). Reject before touching
+        # anything so the caller sees it instead of two tasks quietly racing.
+        if isolation == "worktree":
+            collision_err = self._worktree_bare_role_collision(role_name, project)
+            if collision_err:
+                return False, collision_err
         # Fan-out queue (flag-gated, default off): defer a fresh teammate spawn
         # that would exceed the machine's total-pane budget. It spawns
         # automatically when a pane frees a slot (see _drain_fanout_queue). No-op
@@ -1038,6 +1047,45 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             worktree=None,
             feature=feature,
             model=model,
+        )
+
+    def _worktree_bare_role_collision(self, role_name: str, project: str | None) -> str | None:
+        """Guard for issue #162: firing `assign --isolation worktree` twice at
+        the same BARE role name (no `#N` shard suffix) before the pane it
+        already owns is closed.
+
+        Pane identity — `_project_panes()` / `_pane_state` / the spawn-initial
+        one-shot payload — is keyed purely by `role_name`
+        (`_exit_key(project, role_name)`). `--isolation worktree` creates a
+        fresh git worktree on disk every call, but it dispatches into that
+        SAME keyed pane slot. A second bare-name call therefore doesn't spawn
+        an independent pane: `_assign_dispatch` overwrites the shared
+        `PaneState`'s one-shot task payload, and `spawn()` either re-launches
+        over the still-starting first process or (once it's alive) treats the
+        pane as "already running" and pastes the second call's pointer text
+        into it — the first call's own worktree gets silently dropped while a
+        second, unused worktree sits on disk. Confirmed live: three
+        back-to-back bare `assign --role backend --isolation worktree` calls
+        left two of the three worktrees never entered by any process.
+
+        A `#N` suffix (`_split_shard` giving a non-None index) sidesteps this
+        entirely — each shard is its own registry key — so only the bare-name
+        case is rejected. Any existing pane entry (alive, still spawning, or
+        merely registered) counts as a collision: worktree isolation promises
+        an independent pane per call, and reusing an in-flight identity
+        breaks that promise regardless of the pane's exact lifecycle state.
+        """
+        if _split_shard(role_name)[1] is not None:
+            return None
+        project_ns = self._resolve_project(project)
+        if self._project_panes(project_ns).get(role_name) is None:
+            return None
+        return (
+            f"[{role_name}] มี pane อยู่แล้วใน project นี้ (bare role name ไม่มี #N) — "
+            f"assign --isolation worktree ซ้ำที่ role name เดิมจะไม่ได้ pane อิสระใหม่ "
+            f"แต่จะไปชน/paste ทับ pane เดิม (worktree ใหม่ถูกสร้างบนดิสก์แต่ไม่มี pane ไหนใช้งานจริง — #162). "
+            f"ใช้ '{role_name}#N' (เช่น {role_name}#2) เพื่อได้ pane อิสระจริง "
+            f"หรือปิด/รอ {role_name} ปัจจุบันให้เสร็จก่อน (takkub close --role {role_name})"
         )
 
     def _assign_dispatch(

@@ -344,6 +344,90 @@ class TestSyncCwdValidation:
         assert len(orch.assign_calls) == 1
 
 
+class _FakeOrchWithWorktreeGuard(_FakeOrch):
+    """`_FakeOrch` plus a scriptable `_worktree_bare_role_collision`, mirroring
+    the real Orchestrator method so #162's synchronous pre-check can be
+    exercised without spinning up a real one."""
+
+    collision_msg: str | None = None
+
+    def _worktree_bare_role_collision(self, role_name, project):
+        self.collision_check_calls = getattr(self, "collision_check_calls", [])
+        self.collision_check_calls.append((role_name, project))
+        return self.collision_msg
+
+
+class TestSyncWorktreeCollisionCheck:
+    """#162: a rejected worktree-isolation collision must be caught
+    synchronously, before the ack — the deferred `assign()` call's return
+    value is discarded (fire-and-forget QTimer), so without this pre-check
+    the caller would see a false ok=True while the task silently collided."""
+
+    def test_worktree_collision_rejected_before_ack(self, qapp: QCoreApplication) -> None:
+        orch = _FakeOrchWithWorktreeGuard()
+        orch.collision_msg = "[backend] มี pane อยู่แล้ว ... ใช้ backend#N"
+        srv = CliServer(orch)
+        sock = _FakeSock()
+
+        srv._dispatch(
+            sock,
+            _auth({"cmd": "assign", "role": "backend", "task": "x", "isolation": "worktree"}),
+        )
+
+        r = _replies(sock)
+        assert len(r) == 1
+        assert r[0]["ok"] is False
+        assert "#N" in r[0]["msg"]
+        qapp.processEvents()
+        assert orch.assign_calls == [], "collision must never reach assign(), even async"
+        assert orch.collision_check_calls == [("backend", None)]
+
+    def test_worktree_no_collision_proceeds_normally(self, qapp: QCoreApplication) -> None:
+        orch = _FakeOrchWithWorktreeGuard()
+        orch.collision_msg = None
+        srv = CliServer(orch)
+        sock = _FakeSock()
+
+        srv._dispatch(
+            sock,
+            _auth({"cmd": "assign", "role": "backend", "task": "x", "isolation": "worktree"}),
+        )
+
+        assert _replies(sock)[0]["ok"] is True
+        qapp.processEvents()
+        assert orch.assign_calls == [("backend", None, "x", False, False, "worktree")]
+
+    def test_shared_isolation_never_checked(self, qapp: QCoreApplication) -> None:
+        """The guard only applies to isolation='worktree' — a plain shared
+        assign must never even call the collision check."""
+        orch = _FakeOrchWithWorktreeGuard()
+        orch.collision_msg = "should never be seen"
+        srv = CliServer(orch)
+        sock = _FakeSock()
+
+        srv._dispatch(sock, _auth({"cmd": "assign", "role": "backend", "task": "x"}))
+
+        assert _replies(sock)[0]["ok"] is True
+        assert getattr(orch, "collision_check_calls", []) == []
+
+    def test_missing_collision_method_degrades_gracefully(self, qapp: QCoreApplication) -> None:
+        """A stub orchestrator without `_worktree_bare_role_collision` (only
+        the plain `_FakeOrch`) must not crash — same degrade-gracefully
+        pattern as the cwd-validation `_resolve_project` fallback."""
+        orch = _FakeOrch()
+        srv = CliServer(orch)
+        sock = _FakeSock()
+
+        srv._dispatch(
+            sock,
+            _auth({"cmd": "assign", "role": "backend", "task": "x", "isolation": "worktree"}),
+        )
+
+        assert _replies(sock)[0]["ok"] is True
+        qapp.processEvents()
+        assert len(orch.assign_calls) == 1
+
+
 class TestSpawnStagger:
     """Concurrent assigns must be spaced apart so back-to-back ConPTY spawns
     don't collide on one event-loop tick (#44); codex gets a bigger gap so its
