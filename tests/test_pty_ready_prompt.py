@@ -80,6 +80,50 @@ def test_gemini_idle_with_update_footer_is_ready_even_if_prompt_missing() -> Non
     assert s.is_at_ready_prompt() is True
 
 
+class TestIsAtTrustPrompt:
+    """#186: agy's own folder-trust modal words the confirm hint "enter
+    Confirm" (no "to"), unlike claude/codex's "Enter to confirm" — the
+    original exact-substring match silently never fired for it, so
+    `_auto_trust` never pressed Enter and a worktree spawn hung."""
+
+    def test_claude_wording_is_trust_prompt(self) -> None:
+        s = _feed_screen(
+            "Do you trust the files in this folder?",
+            "> Yes, I trust this folder",
+            "  No, exit",
+            "Enter to confirm · Esc to exit",
+        )
+        assert s.is_at_trust_prompt() is True
+
+    def test_agy_live_captured_wording_is_trust_prompt(self) -> None:
+        # Verbatim live capture from the issue #186 incident (2026-08-13
+        # 20:40) — this exact screen previously read as NOT a trust prompt.
+        s = _feed_screen(
+            "> Yes, I trust this folder",
+            "  No, exit",
+            "  up/down Navigate . enter Confirm",
+        )
+        assert s.is_at_trust_prompt() is True
+
+    def test_codex_wording_is_trust_prompt(self) -> None:
+        s = _feed_screen(
+            "Do you trust the contents of this directory?",
+            "Press enter to continue",
+        )
+        assert s.is_at_trust_prompt() is True
+
+    def test_conversation_text_merely_quoting_it_does_not_poison(self) -> None:
+        # Whole-screen scan is intentional here (unlike is_at_ready_prompt's
+        # bottom-region scoping) — but a plain mention without the paired
+        # confirm hint on screen must still read false.
+        s = _feed_screen("earlier the pane said trust this folder and moved on", "? for shortcuts")
+        assert s.is_at_trust_prompt() is False
+
+    def test_unrelated_screen_is_not_trust_prompt(self) -> None:
+        s = _feed_screen("Type your message or @path/to/file")
+        assert s.is_at_trust_prompt() is False
+
+
 class TestShowsPendingInput:
     """#79: distinguish a swallowed paste (input box empty) from a swallowed
     Enter (pasted content still in the box) so the delivery self-heal re-pastes

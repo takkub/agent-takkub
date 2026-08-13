@@ -125,6 +125,39 @@ _STALL_DEFER_MAX = 4
 # hard timeout stays wall-clock accurate.
 _READY_POLL_FIRST_MS = 300
 _READY_POLL_INTERVAL_MS = 150
+# #186: bounded grace _deliver() keeps waiting instead of blind-pasting a
+# task into an active trust/onboarding modal or shell prompt once its normal
+# hard timeout fires. A blind paste into a modal lands as keystrokes on the
+# modal, not the composer — a strictly worse loss than the ordinary
+# best-effort blind paste this branch exists for — so give a still-running
+# _auto_trust responder (or a human) a further short window to clear it
+# first. Short relative to STALL_THRESHOLD_SEC (300s default) so it barely
+# adds wait time in the common case; this only even engages once the pane is
+# ALREADY past its delivery timeout and STILL on a recognised prompt.
+_PROMPT_BLOCK_DEFER_CEILING_MS = 30_000
+
+
+def _prompt_block_reason(session) -> str | None:
+    """Return "trust" / "tty" if *session* is currently sitting on an
+    interactive prompt that needs a keypress before it can accept a task
+    paste, else None.
+
+    This is a state `_send_when_ready` must treat as distinct from "busy
+    generating" — a modal that periodically redraws (a spinner, agy's
+    boot-phase "verifying your account" text) still advances
+    `seconds_since_output()`, so before this it silently fell into the
+    ordinary #144 busy-wait extension and the Lead heard nothing concrete
+    for up to BUSY_WAIT_CEILING_SEC (issue #186)."""
+    try:
+        if session.is_at_trust_prompt():
+            return "trust"
+        if session.is_blocked_on_tty_prompt():
+            return "tty"
+    except Exception:
+        pass
+    return None
+
+
 # Claude roles that load MCP servers need the same cold-boot allowance as the
 # slower provider CLIs.  Claude's base provider spec intentionally stays at
 # 45 s because roles without MCPs normally render their prompt well inside
@@ -678,10 +711,38 @@ class LeadInboxMixin:
         # #130: logged once (not every 150ms poll) the first time the hard
         # timeout is deferred because the pane is busy, not stuck.
         busy_wait_logged = [False]
+        # #186: logged once, the first poll that recognises the pane is
+        # blocked on an interactive prompt (trust modal / shell y-n) rather
+        # than genuinely busy or genuinely stalled.
+        prompt_blocked_warned = [False]
+        # #186: accumulates only while _deliver() is deferring a would-be
+        # blind paste because the pane is still on a recognised prompt.
+        prompt_defer_elapsed = [0]
 
         def _deliver(unconfirmed: bool = False, busy_ceiling: bool = False) -> None:
             if sent[0]:
                 return
+            if (
+                unconfirmed
+                and pane.session is not None
+                and pane.session.is_alive
+                and _prompt_block_reason(pane.session)
+            ):
+                # Never blind-paste into an active prompt — the bytes land as
+                # keystrokes on the modal itself, not the composer, so the
+                # task is lost outright rather than merely unconfirmed (#186).
+                # Give the auto-trust responder (or a human) a further
+                # bounded grace to clear it before falling through to the
+                # ordinary best-effort blind paste below.
+                prompt_defer_elapsed[0] += _READY_POLL_INTERVAL_MS
+                if prompt_defer_elapsed[0] < _PROMPT_BLOCK_DEFER_CEILING_MS:
+                    QTimer.singleShot(_READY_POLL_INTERVAL_MS, _check)
+                    return
+                _log_event(
+                    "task_deliver_prompt_defer_ceiling",
+                    project=self._resolve_project(project),
+                    role=role_name,
+                )
             sent[0] = True
             if pane.session is None or not pane.session.is_alive:
                 return
@@ -768,6 +829,25 @@ class LeadInboxMixin:
                     role=role_name,
                 )
                 return
+            if not prompt_blocked_warned[0]:
+                # #186: recognise "blocked on a prompt that needs a keypress"
+                # as its own state, checked on every poll independent of
+                # elapsed/max_wait_ms — NOT folded into the busy/stall split
+                # below, which only runs once the hard timeout has already
+                # fired and can't tell a periodically-redrawing modal apart
+                # from genuine work output. Warn the Lead the first poll that
+                # sees it, however early, instead of waiting out the full
+                # busy-wait ceiling.
+                _reason = _prompt_block_reason(pane.session)
+                if _reason:
+                    prompt_blocked_warned[0] = True
+                    _log_event(
+                        "task_deliver_blocked_on_prompt",
+                        project=self._resolve_project(project),
+                        role=role_name,
+                        reason=_reason,
+                    )
+                    self._warn_lead_delivery_blocked_prompt(role_name, project, _reason)
             if pane.session.is_at_ready_prompt():
                 ready_streak[0] += 1
                 # Wait for 5.0 seconds (33 polls of 150ms) of consecutive ready state
@@ -860,6 +940,49 @@ class LeadInboxMixin:
         # just wait out the gate anyway.
         gate_deferred = getattr(pane, "deferred_spawn", False)
         QTimer.singleShot(0 if gate_deferred else _READY_POLL_FIRST_MS, _check)
+
+    def _warn_lead_delivery_blocked_prompt(
+        self, role_name: str, project: str | None, reason: str
+    ) -> None:
+        """Tell the Lead, once, the first delivery poll that finds the target
+        pane sitting on an interactive prompt requiring a keypress (trust/
+        onboarding modal, or a generic shell y/N) — fired immediately on
+        detection, regardless of elapsed time, unlike the busy-wait (#144)
+        and unconfirmed (#26) warnings below which only fire once the normal
+        delivery timeout has already passed.
+
+        Before this (#186) a modal that periodically redraws (a spinner,
+        agy's boot-phase "verifying your account" text) advanced
+        `seconds_since_output()` exactly like ordinary generation, so it was
+        silently folded into the #144 busy-wait extension — the Lead heard
+        nothing concrete until either it cleared on its own or the
+        BUSY_WAIT_CEILING_SEC ceiling fired, up to 30 minutes later. Most
+        providers auto-answer this within seconds (`_auto_trust`), so this
+        warning is informational, not necessarily actionable — but a Lead
+        who never sees it has no way to tell "quietly progressing" from
+        "stuck needing a keypress" apart. Callers gate on their own one-shot
+        flag (`prompt_blocked_warned` in _send_when_ready's `_check`
+        closure) so this fires at most once per delivery. No-op when warning
+        the Lead about itself."""
+        if role_name == LEAD.name:
+            return
+        project_ns = self._resolve_project(project)
+        lead = self._project_panes(project_ns).get(LEAD.name)
+        if not (lead and lead.session and lead.session.is_alive):
+            return
+        kind = "trust/onboarding modal" if reason == "trust" else "interactive shell prompt"
+        msg = (
+            f"⚠️ [delivery-blocked-prompt] {role_name} pane ติดอยู่ที่ {kind} "
+            f"ที่ต้องกดตอบก่อนถึงจะรับ task ได้ — cockpit กำลัง auto-answer อยู่ "
+            f"ถ้ายังไม่เคลียร์เองให้เข้าไปดู pane ตรงๆ (issue #186)"
+        )
+        self._notify_lead(project_ns, msg)
+        _log_event(
+            "delivery_blocked_prompt_warned",
+            role=role_name,
+            project=project_ns,
+            reason=reason,
+        )
 
     def _warn_lead_delivery_busy_wait(
         self, role_name: str, project: str | None, seconds_since_output: float
