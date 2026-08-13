@@ -115,64 +115,6 @@ class StatusHeaderMixin:
         )
 
     @staticmethod
-    def _exec_mode_chip_style(is_parallel: bool) -> str:
-        """Outline chip for the SOLO/PARALLEL execution-mode toggle. Parallel =
-        emerald (active fan-out), Solo = neutral zinc (calm default)."""
-        brand = cockpit_theme.CHIP_EXEC_PARALLEL if is_parallel else cockpit_theme.TEXT_MUTED
-        return (
-            "QPushButton { "
-            f"background:transparent; color:{brand}; "
-            f"border:1px solid {brand}; border-radius:{cockpit_theme.RADIUS_MD}px; "
-            "padding:2px 10px; font-weight:600; }"
-            "QPushButton:hover { background:rgba(255,255,255,0.06); }"
-        )
-
-    @staticmethod
-    def _exec_mode_chip_tooltip(is_parallel: bool) -> str:
-        """Tooltip for the execution-mode chip — states the consequence."""
-        if is_parallel:
-            return (
-                "Execution: PARALLEL (multi) — click to switch to 1:1.\n"
-                "Lead splits independent features across several instances per\n"
-                "role (frontend#1..#K, …), capped to what the machine can run."
-            )
-        return (
-            "Execution: 1:1 (solo) — click to switch to Multi.\n"
-            "Multi makes the Lead fan out multiple agents per role for\n"
-            "independent features so big work finishes faster."
-        )
-
-    @staticmethod
-    def _auto_resume_chip_style(enabled: bool) -> str:
-        """Outline chip for the 🌙 auto-resume toggle. ON = amber (quietly
-        acting on your behalf while you're away), OFF = neutral zinc
-        (calm default — matches the exec-mode chip's OFF treatment)."""
-        brand = cockpit_theme.STATE_WARN_ALT if enabled else cockpit_theme.TEXT_MUTED
-        return (
-            "QPushButton { "
-            f"background:transparent; color:{brand}; "
-            f"border:1px solid {brand}; border-radius:{cockpit_theme.RADIUS_MD}px; "
-            "padding:2px 10px; font-weight:600; }"
-            "QPushButton:hover { background:rgba(255,255,255,0.06); }"
-        )
-
-    @staticmethod
-    def _auto_resume_chip_tooltip(enabled: bool) -> str:
-        """Tooltip for the auto-resume chip — states the consequence."""
-        if enabled:
-            return (
-                "Auto-resume 🌙: ON — click to turn off.\n"
-                "A teammate pane that hits its usage limit while a task is\n"
-                "still pending is parked and woken automatically when the\n"
-                "window resets (max 3 park/wake cycles per task)."
-            )
-        return (
-            "Auto-resume 🌙: OFF — click to turn on.\n"
-            "Usage-limit panes stay notify-only (current behaviour):\n"
-            "you get pinged, but nothing auto-resumes."
-        )
-
-    @staticmethod
     def _overage_chip_style() -> str:
         """Outline chip for the ⚠ usage-overage warning.
 

@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 141,
+  "module_count": 140,
   "modules": [
     {
       "module": "agent_takkub",
@@ -221,21 +221,11 @@
         "agent_takkub.config"
       ],
       "imported_by": [
-        "agent_takkub.claude_auth_dialog",
         "agent_takkub.orchestrator",
         "agent_takkub.settings_window",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 4,
-      "fan_out": 1
-    },
-    {
-      "module": "agent_takkub.claude_auth_dialog",
-      "imports": [
-        "agent_takkub.claude_auth_config"
-      ],
-      "imported_by": [],
-      "fan_in": 0,
+      "fan_in": 3,
       "fan_out": 1
     },
     {

@@ -155,10 +155,6 @@ class MainWindow(
     def teammate_panes(self) -> dict[str, AgentPane]:
         return self._current_tab().teammate_panes
 
-    @property
-    def _custom_role_colors(self) -> dict[str, str]:
-        return self._current_tab().custom_role_colors
-
     def __init__(self) -> None:
         super().__init__()
         from .config import instance_window_title
