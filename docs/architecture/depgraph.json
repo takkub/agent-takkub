@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 140,
+  "module_count": 141,
   "modules": [
     {
       "module": "agent_takkub",
@@ -80,7 +80,7 @@
         "agent_takkub.verify",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 27,
+      "fan_in": 28,
       "fan_out": 0
     },
     {
