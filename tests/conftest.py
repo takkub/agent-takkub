@@ -17,6 +17,7 @@ from __future__ import annotations
 import importlib
 import os
 import sys
+from pathlib import Path
 
 # Must be set before any QApplication/QCoreApplication is constructed.
 # Individual test modules import PyQt6 at module level, but Qt reads this
@@ -68,6 +69,40 @@ os.environ.setdefault("TAKKUB_SKIP_NATIVE_CHROME", "1")
 os.environ.setdefault("TAKKUB_SKIP_AUTO_ISSUE_CAPTURE", "1")
 
 import pytest
+
+
+def _assert_agent_takkub_matches_this_checkout() -> None:
+    """#202: a shared dev-venv editable install (`__editable__.agent_takkub-
+    *.pth`) can be repointed at a DIFFERENT checkout — most dangerously a
+    `--isolation worktree` that a `pip install -e .` run from inside it left
+    behind, which then goes stale (or silently redirects every OTHER pane's
+    imports) without anyone noticing. Catch that BEFORE a single test runs
+    against the wrong code, instead of after a confusing failure.
+
+    No-op when `agent_takkub` isn't importable at all in this process — the
+    `installed-gate` CI job deliberately runs `test_installed_mode_gate.py`
+    without it (assertions there run via subprocess against a throwaway
+    venv; see .github/workflows/ci.yml), and that absence is not this
+    guard's concern.
+    """
+    try:
+        import agent_takkub
+    except Exception:
+        return
+    expected = (Path(__file__).resolve().parent.parent / "src" / "agent_takkub").resolve()
+    actual = Path(agent_takkub.__file__).resolve().parent
+    if actual != expected:
+        raise RuntimeError(
+            f"agent_takkub imported from {actual}, expected {expected} (this repo's own "
+            "src/) — the shared venv's editable-install .pth points at a different "
+            "checkout (#202). Fix: `pip install -e . --no-deps` from THIS repo's root "
+            "(never from inside a worktree — see pane_guard.py's pip_editable rule), or "
+            "run this suite with PYTHONPATH=<this-repo>/src prepended to override the "
+            "shared install without touching it."
+        )
+
+
+_assert_agent_takkub_matches_this_checkout()
 
 # Modules that bind RUNTIME_DIR / EVENTS_LOG as a module-level name. config is
 # the source of truth (and what ensure_runtime uses); the rest copy the value

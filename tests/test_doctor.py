@@ -16,6 +16,7 @@ from agent_takkub.doctor import (
     Status,
     check_arch,
     check_claude,
+    check_editable_install,
     check_graft,
     check_installed_integrity,
     check_mcps,
@@ -901,6 +902,120 @@ class TestCheckInstalledIntegrity:
 
         f = next(x for x in findings if x.name == "runtime-writable")
         assert f.status == Status.FAIL
+
+
+# ---------------------------------------------------------------------------
+# check_editable_install — dev-checkout shared editable install (#202)
+# ---------------------------------------------------------------------------
+
+
+class TestCheckEditableInstall:
+    def _fake_dev_checkout(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pth_content: str | None
+    ) -> Path:
+        """Dev-checkout layout: DATA_HOME == REPO_ROOT == tmp_path, with a
+        .venv/{Lib,lib/python3.x}/site-packages holding one
+        __editable__.agent_takkub-*.pth. pth_content=None omits the file
+        entirely (simulates a checkout never `pip install -e .`-ed)."""
+        import agent_takkub.config as config_mod
+
+        repo_root = tmp_path
+        site_packages = (
+            repo_root / ".venv" / "Lib" / "site-packages"
+            if sys.platform == "win32"
+            else repo_root / ".venv" / "lib" / "python3.12" / "site-packages"
+        )
+        site_packages.mkdir(parents=True)
+        if pth_content is not None:
+            (site_packages / "__editable__.agent_takkub-1.0.60.pth").write_text(
+                pth_content, encoding="utf-8"
+            )
+        monkeypatch.setattr(config_mod, "DATA_HOME", repo_root)
+        monkeypatch.setattr(config_mod, "REPO_ROOT", repo_root)
+        return repo_root
+
+    def test_installed_build_is_a_no_op(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import agent_takkub.config as config_mod
+
+        monkeypatch.setattr(config_mod, "DATA_HOME", tmp_path / "data-home")
+        monkeypatch.setattr(config_mod, "REPO_ROOT", tmp_path / "venv-lib")
+
+        assert check_editable_install() == []
+
+    def test_no_venv_is_a_no_op(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        import agent_takkub.config as config_mod
+
+        monkeypatch.setattr(config_mod, "DATA_HOME", tmp_path)
+        monkeypatch.setattr(config_mod, "REPO_ROOT", tmp_path)
+
+        assert check_editable_install() == []
+
+    def test_warns_when_pth_missing(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        self._fake_dev_checkout(monkeypatch, tmp_path, pth_content=None)
+
+        findings = check_editable_install()
+
+        assert len(findings) == 1
+        assert findings[0].status == Status.WARN
+        assert findings[0].auto_fix is None
+
+    def test_ok_when_pth_points_at_repo_root_src(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        repo_root = self._fake_dev_checkout(
+            monkeypatch, tmp_path, pth_content=str(tmp_path / "src") + "\n"
+        )
+        (repo_root / "src").mkdir()
+
+        findings = check_editable_install()
+
+        assert len(findings) == 1
+        assert findings[0].status == Status.OK
+
+    def test_fails_when_pth_target_does_not_exist(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        missing = tmp_path / "gone" / "src"
+        self._fake_dev_checkout(monkeypatch, tmp_path, pth_content=str(missing) + "\n")
+
+        findings = check_editable_install()
+
+        assert len(findings) == 1
+        assert findings[0].status == Status.FAIL
+        assert findings[0].auto_fix is not None
+
+    def test_fails_when_pth_points_into_a_worktree(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The exact #202 incident: a worktree checkout's src/ still exists
+        (the worktree hasn't been removed YET), so an exists()-only check
+        would miss it — the worktrees/ segment is what makes this dangerous,
+        not whether the path currently resolves."""
+        wt_src = tmp_path / "worktrees" / "agent-takkub" / "backend-1-123" / "src"
+        wt_src.mkdir(parents=True)
+        self._fake_dev_checkout(monkeypatch, tmp_path, pth_content=str(wt_src) + "\n")
+
+        findings = check_editable_install()
+
+        assert len(findings) == 1
+        assert findings[0].status == Status.FAIL
+        assert "worktree" in findings[0].detail
+        assert findings[0].auto_fix is not None
+
+    def test_warns_when_pth_points_elsewhere_unexpectedly(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        other = tmp_path / "some-other-checkout" / "src"
+        other.mkdir(parents=True)
+        self._fake_dev_checkout(monkeypatch, tmp_path, pth_content=str(other) + "\n")
+
+        findings = check_editable_install()
+
+        assert len(findings) == 1
+        assert findings[0].status == Status.WARN
+        assert findings[0].auto_fix is not None
 
 
 # ---------------------------------------------------------------------------

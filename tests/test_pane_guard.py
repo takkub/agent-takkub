@@ -237,6 +237,53 @@ class TestHostDestructiveDenied:
         assert pane_guard.classify(command, "frontend").allowed, f"false positive: {command}"
 
 
+class TestPipEditableDenied:
+    """#202: `pip install -e .` rewrites the SHARED venv's
+    `__editable__*.pth` to point at the caller's cwd — the exact incident was
+    a `backend` pane running it inside its own `--isolation worktree`
+    checkout, which broke every pane's venv once the worktree was removed."""
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "pip install -e .",
+            "pip install --editable .",
+            "pip3 install -e .",
+            "python -m pip install -e .",
+            "python3 -m pip install --editable ./src",
+            "pip install -e ./worktrees/backend-1",
+        ],
+    )
+    def test_denied_for_backend(self, command: str) -> None:
+        verdict = pane_guard.classify(command, "backend")
+        assert not verdict.allowed, f"should have blocked: {command}"
+        assert verdict.rule.startswith("pip_editable:")
+        assert "pytest" in verdict.reason
+
+    @pytest.mark.parametrize("role", ["frontend", "mobile", "devops", "reviewer", "qa", "critic"])
+    def test_denied_for_every_role_no_allowlist(self, role: str) -> None:
+        """No role legitimately reinstalls the package into a venv every
+        other pane shares — qa/critic are browser roles but still denied."""
+        assert not pane_guard.classify("pip install -e .", role).allowed
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "pip install -r requirements.txt",
+            "pip install requests",
+            "pip install pytest-cov",
+            "pip list",
+            "pip show agent-takkub",
+            # reading/mentioning must never trip the guard
+            "grep -rn 'pip install -e' docs/",
+            "echo 'never run pip install -e . here'",
+            "cat pyproject.toml",
+        ],
+    )
+    def test_unrelated_pip_commands_allowed(self, command: str) -> None:
+        assert pane_guard.classify(command, "backend").allowed, f"false positive: {command}"
+
+
 class TestFailOpen:
     """The guard must never be able to wedge a pane or police a human."""
 
@@ -245,6 +292,7 @@ class TestFailOpen:
         assert pane_guard.classify("npx --yes playwright", role).allowed
         assert pane_guard.classify("find / -name x", role).allowed
         assert pane_guard.classify("taskkill /F /IM node.exe", role).allowed
+        assert pane_guard.classify("pip install -e .", role).allowed
 
     @pytest.mark.parametrize("role", [None, "", "   "])
     def test_unknown_role_allows(self, role: str | None) -> None:
@@ -270,3 +318,10 @@ class TestRuleTextSyncedWithRoleFiles:
         assert "PID" in pane_guard.HOST_DESTRUCTIVE_RULE_TEXT
         assert "taskkill" in pane_guard.HOST_DESTRUCTIVE_RULE_TEXT.lower()
         assert "169" in pane_guard.HOST_DESTRUCTIVE_RULE_TEXT
+
+    def test_pip_editable_rule_text_is_actionable(self) -> None:
+        """Same contract as GUARD_RULE_TEXT: name the safe alternative
+        (pytest, no reinstall), not just the prohibition."""
+        assert "pytest" in pane_guard.PIP_EDITABLE_RULE_TEXT
+        assert "pip install -e" in pane_guard.PIP_EDITABLE_RULE_TEXT
+        assert "202" in pane_guard.PIP_EDITABLE_RULE_TEXT

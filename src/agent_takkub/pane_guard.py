@@ -50,6 +50,20 @@ stuck dev-server port and killed every node process on the box, including
 other panes' Claude Code processes — `takkub list` came back with nothing but
 `lead`. `HOST_DESTRUCTIVE_RULE_TEXT` is the prose counterpart, pinned in role
 files by `tests/test_agent_role_files_have_host_destructive_guard.py`.
+
+A fourth rule, ``pip_editable`` (#202), blocks `pip install -e`/`--editable`
+for *every* guarded role, no allowlist. `pip install -e .` rewrites the
+`__editable__*.pth` in the shared venv's `site-packages` to point at whatever
+directory the caller ran it from. Root incident (2026-08-14): a `backend`
+pane ran it from inside its own `--isolation worktree` checkout, repointing
+the *shared* venv used by every pane at that worktree's `src/`; once the Lead
+removed the worktree after merging, the main tree's `.venv` and the `takkub`
+CLI itself broke (`ModuleNotFoundError`). Worse, while the pane was still
+running, every other process sharing that venv — including a `qa` full-suite
+run mid-flight — silently imported code from the wrong worktree, so the gate
+result couldn't be trusted. `PIP_EDITABLE_RULE_TEXT` is the prose
+counterpart, pinned in role files by
+`tests/test_agent_role_files_have_pip_editable_guard.py`.
 """
 
 from __future__ import annotations
@@ -86,6 +100,17 @@ HOST_DESTRUCTIVE_RULE_TEXT = (
     "ฆ่า node ทั้งเครื่อง รวม teammate panes อื่น). "
     "Target เฉพาะ PID ที่ pane ตัวเอง spawn เอง — `taskkill /PID <pid>`, "
     "`Stop-Process -Id <pid>`, `kill <pid>` แทน."
+)
+
+# Prose handed to role files verbatim (#202). Kept in sync with the patterns
+# below by tests/test_agent_role_files_have_pip_editable_guard.py.
+PIP_EDITABLE_RULE_TEXT = (
+    "ห้าม `pip install -e .` / `--editable` ไม่ว่า path ไหน — editable install เขียนทับ "
+    "`__editable__*.pth` ใน site-packages ของ venv ที่ pane อื่นทั้งเครื่อง (รวม worktree อื่น) "
+    "ใช้ร่วมกัน (เคสจริง #202: backend pane รันจาก worktree แล้ว venv ทั้งเครื่องพังหลัง worktree "
+    "ถูกลบ + qa ที่รัน full suite คาบเกี่ยวกันได้ผลเทสจากโค้ดผิด worktree โดยไม่รู้ตัว). "
+    "ต้องการเทสโค้ดตัวเอง → รัน pytest ปกติ (ไม่ต้อง reinstall) — ถ้าจำเป็นต้องแก้ dependency ของ repo "
+    "จริงๆ ให้แจ้ง Lead ผ่าน `takkub send --to lead` แทนที่จะแก้ shared venv เอง."
 )
 
 
@@ -207,6 +232,22 @@ _HOST_DESTRUCTIVE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
 )
 
+# pip/python -m pip install with -e/--editable, any target (#202): rewrites
+# __editable__*.pth in the SHARED venv's site-packages to point at the
+# caller's cwd — deadly when the caller is a `--isolation worktree` checkout
+# that later gets deleted. No allowlist: no guarded role needs to reinstall
+# the package into a venv every other pane shares.
+_PIP_EDITABLE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "pip-install",
+        re.compile(
+            rf"{_CMD_START}(?:pip3?|python3?\s+-m\s+pip)(?![\w-]){_SAME_CMD}"
+            rf"install{_SAME_CMD}(?:-e\b|--editable\b)",
+            re.I | re.M,
+        ),
+    ),
+)
+
 # mini-browser's client is fixed to CDP 9222. A qa/critic/designer shard may
 # still use its isolated Playwright MCP, but must never drive mb's one shared
 # Chrome session (#92).
@@ -273,6 +314,14 @@ def classify(command: str, role: str | None) -> Verdict:
                 reason=(
                     f"role `{name}` ใช้คำสั่งนี้ไม่ได้ (นโยบาย cockpit). {HOST_DESTRUCTIVE_RULE_TEXT}"
                 ),
+            )
+
+    for rule, pattern in _PIP_EDITABLE_PATTERNS:
+        if pattern.search(cmd):
+            return Verdict(
+                False,
+                rule=f"pip_editable:{rule}",
+                reason=(f"role `{name}` ใช้คำสั่งนี้ไม่ได้ (นโยบาย cockpit). {PIP_EDITABLE_RULE_TEXT}"),
             )
 
     for rule, pattern in _DISK_SCAN_PATTERNS:
