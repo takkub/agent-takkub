@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import sys
+
+import pytest
+
 from agent_takkub import job_object_manager as module
 
 
@@ -26,6 +30,12 @@ class _Kernel32:
         return 1
 
 
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="_JOBOBJECT_*_INFORMATION structures are only defined at import time on "
+    "win32 (#239); mocking ctypes.windll.kernel32 at runtime can't retrofit them "
+    "on POSIX, so create()/assign() hit a NameError caught by the broad except.",
+)
 def test_windows_job_assigns_process_and_closes_kill_on_close_handle(monkeypatch) -> None:
     kernel = _Kernel32()
     monkeypatch.setattr(module.sys, "platform", "win32")

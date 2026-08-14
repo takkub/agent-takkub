@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -12,7 +13,7 @@ def test_deterministic_stress_harness_a_through_i(tmp_path: Path) -> None:
     env["QT_QPA_PLATFORM"] = "offscreen"
     result = subprocess.run(
         [
-            str(root / ".venv" / "Scripts" / "python.exe"),
+            sys.executable,
             str(root / "tools" / "performance_reliability_stress.py"),
             "--seed",
             "12345",

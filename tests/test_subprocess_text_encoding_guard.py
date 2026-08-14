@@ -30,21 +30,11 @@ from pathlib import Path
 
 import pytest
 
+from ._subprocess_call_ast import collect_subprocess_aliases, is_subprocess_call
+
 SRC_ROOT = Path(__file__).parent.parent / "src" / "agent_takkub"
-_CALL_NAMES = {"run", "Popen", "call", "check_output", "check_call"}
 _TEXT_MODE_KWARGS = {"text", "universal_newlines"}
 _EXEMPT_MARKER = "subprocess-encoding-ok:"
-
-
-def _is_subprocess_call(node: ast.Call) -> str | None:
-    """Return the subprocess function name if *node* calls it, else None."""
-    func = node.func
-    if isinstance(func, ast.Attribute) and func.attr in _CALL_NAMES:
-        if isinstance(func.value, ast.Name) and func.value.id == "subprocess":
-            return func.attr
-    elif isinstance(func, ast.Name) and func.id in _CALL_NAMES:
-        return func.id
-    return None
 
 
 def _is_true_literal(value: ast.expr) -> bool:
@@ -71,11 +61,12 @@ def _find_violations(path: Path) -> list[str]:
     source = path.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(path))
     lines = source.splitlines()
+    module_aliases, func_aliases = collect_subprocess_aliases(tree)
     violations = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        name = _is_subprocess_call(node)
+        name = is_subprocess_call(node, module_aliases, func_aliases)
         if name is None or not _is_text_mode(node):
             continue
         if _is_exempted(lines, node.lineno):
@@ -118,3 +109,31 @@ def test_subprocess_text_mode_calls_have_encoding(py_file: Path) -> None:
         "codepage can't map (#205). If this call genuinely can't take those kwargs, "
         "add `# subprocess-encoding-ok: <reason>` on the same or preceding line."
     )
+
+
+def test_guard_catches_aliased_import_missing_encoding(tmp_path: Path) -> None:
+    """#238: `import subprocess as X` must not blind the guard."""
+    offender = tmp_path / "offender.py"
+    offender.write_text(
+        "import subprocess as _subprocess\n\n"
+        "def f():\n"
+        "    return _subprocess.run(['echo'], capture_output=True, text=True)\n",
+        encoding="utf-8",
+    )
+    violations = _find_violations(offender)
+    assert len(violations) == 1
+    assert "missing encoding, errors=" in violations[0]
+
+
+def test_guard_catches_aliased_function_import_missing_encoding(tmp_path: Path) -> None:
+    """#238: `from subprocess import run as _run` must not blind the guard."""
+    offender = tmp_path / "offender.py"
+    offender.write_text(
+        "from subprocess import run as _run\n\n"
+        "def f():\n"
+        "    return _run(['echo'], capture_output=True, text=True)\n",
+        encoding="utf-8",
+    )
+    violations = _find_violations(offender)
+    assert len(violations) == 1
+    assert "missing encoding, errors=" in violations[0]
