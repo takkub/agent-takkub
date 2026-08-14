@@ -57,6 +57,7 @@ import sys
 import threading
 import time
 import urllib.parse
+import uuid
 from pathlib import Path
 
 import yaml
@@ -231,6 +232,138 @@ _JOBOBJECTINFOCLASS_EXTENDED_LIMIT = 9
 _STARTUP_CHECK_S = 0.4
 _MAX_DRAINED_LINES = 20
 
+# #197 (orphan tunnel on hard-kill): the Job Object layer above is
+# best-effort and documented as such — `_create_kill_on_close_job` returns
+# `None` on any failure (AV interference, `OpenProcess` denied, a Windows
+# without job nesting) and `_own_job_if_windows` just logs and moves on.
+# Proven by repro (docs/audit/2026-08-14-remote-tunnel-orphan-repro.md): with
+# that layer absent, a hard-kill (TerminateProcess — Task Manager "End Task",
+# a crash, `Stop-Process -Force`) of the cockpit process leaves the tunnel's
+# `cmd.exe` wrapper + child alive forever with zero recovery. This PID file
+# is the fallback: written on every successful `Tunnel.start()`, read once at
+# boot by `reap_orphan_tunnel()` (called unconditionally from
+# `RemoteControl.maybe_start`, before the `enabled` check — an orphan from a
+# PREVIOUS session must be reaped even if THIS session doesn't want remote
+# control on) so a genuinely-abandoned tunnel gets cleaned up on the very
+# next launch instead of running forever.
+#
+# `owner_pid`/`owner_create_time` (not just `owner_pid`) guard against PID
+# reuse: if the cockpit process that wrote this file has exited and Windows
+# has since handed that PID to an unrelated process, comparing `create_time`
+# (psutil, via `GetProcessTimes`) tells the two apart — a bare PID-liveness
+# check alone would wrongly call the tunnel "still owned" forever.
+# `instance_lock_id` is a fresh uuid4 per `Tunnel.start()` call, kept purely
+# for log/debug correlation across a fleet of dev+prod instances.
+_PID_FILE = RUNTIME_DIR / "tunnel" / "tunnel_pid.json"
+
+
+def _write_pid_file(pid: int, config_path: str | None) -> None:
+    """Best-effort: a failure here must not prevent the tunnel itself from
+    running — it only means this particular start() won't be reapable if it
+    later gets orphaned."""
+    try:
+        import psutil
+
+        owner = psutil.Process(os.getpid())
+        payload = {
+            "pid": pid,
+            "started_at": time.time(),
+            "config_path": config_path,
+            "instance_lock_id": str(uuid.uuid4()),
+            "owner_pid": os.getpid(),
+            "owner_create_time": owner.create_time(),
+        }
+        _PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _PID_FILE.with_suffix(_PID_FILE.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        tmp.replace(_PID_FILE)
+    except Exception:
+        _log.exception("remote tunnel: failed to write pid file")
+
+
+def _clear_pid_file() -> None:
+    try:
+        _PID_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _clear_pid_file_if_matches(pid: int) -> None:
+    """Used by `Tunnel.stop()` — only clear the file if it's actually still
+    recording *this* tunnel's pid, so a stale/racing pid file from a
+    different `Tunnel` instance (a quick restart, two instances) is never
+    blown away by the wrong one's stop()."""
+    try:
+        if not _PID_FILE.exists():
+            return
+        data = json.loads(_PID_FILE.read_text(encoding="utf-8"))
+        if data.get("pid") == pid:
+            _PID_FILE.unlink(missing_ok=True)
+    except (OSError, json.JSONDecodeError):
+        pass
+
+
+def reap_orphan_tunnel() -> None:
+    """Boot-time cleanup (#197): if a previous session's tunnel PID file
+    still points at a live process, and the cockpit that spawned it is gone
+    (or that PID has been reused by something else since), the tunnel is
+    genuinely orphaned — kill its whole process tree and clear the file.
+
+    Never touches a process this cockpit didn't itself register: a
+    cloudflared instance the user started outside the cockpit has no PID
+    file here in the first place (issue #197 hypothesis 4) and is left
+    alone. Best-effort and silent on any internal failure — this must never
+    prevent the rest of boot from proceeding.
+    """
+    try:
+        if not _PID_FILE.exists():
+            return
+        try:
+            data = json.loads(_PID_FILE.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            # Corrupt/unreadable — there's nothing to act on, but leaving a
+            # file behind that will never parse would just wedge every
+            # future boot's reaper the same way. Clear it and move on.
+            _clear_pid_file()
+            return
+        pid = data.get("pid")
+        owner_pid = data.get("owner_pid")
+        owner_create_time = data.get("owner_create_time")
+        if not isinstance(pid, int):
+            _clear_pid_file()
+            return
+
+        import psutil
+
+        if not psutil.pid_exists(pid):
+            # Tunnel process is already gone — nothing to reap, just tidy up.
+            _clear_pid_file()
+            return
+
+        owner_alive = False
+        if isinstance(owner_pid, int) and psutil.pid_exists(owner_pid):
+            try:
+                owner_alive = psutil.Process(owner_pid).create_time() == owner_create_time
+            except psutil.Error:
+                owner_alive = False
+        if owner_alive:
+            # A live cockpit still claims this tunnel (e.g. mid-shutdown, or
+            # this really is a legitimate still-running session) — do not
+            # touch a process another live owner may still be using.
+            return
+
+        _log.warning(
+            "remote tunnel: reaping orphaned tunnel pid=%s (owner pid=%s gone/reused, "
+            "instance_lock_id=%s)",
+            pid,
+            owner_pid,
+            data.get("instance_lock_id"),
+        )
+        _tree_kill(pid)
+        _clear_pid_file()
+    except Exception:
+        _log.exception("remote tunnel: orphan reaper failed")
+
 
 def _create_kill_on_close_job() -> int | None:
     """H-E, Windows: a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`.
@@ -301,6 +434,11 @@ class Tunnel:
         # same-process startup failure (see `_verify_named_started`) can be
         # reported with cloudflared's own error text instead of nothing.
         self._last_output: list[str] = []
+        # Named-tunnel mode only — the rendered config.yml path, kept so
+        # `#197`'s pid file can record it (reaper diagnostics + `#193`'s
+        # ingress-hostname-mismatch check both want to know which config a
+        # still-running cloudflared process was launched with).
+        self._config_path: str | None = None
 
     def start(self) -> None:
         if self._config.type == "cloudflared":
@@ -311,6 +449,16 @@ class Tunnel:
             self._start_ngrok()
         else:
             self._start_bat()
+        if self._proc is not None:
+            _write_pid_file(self._proc.pid, self._config_path)
+
+    @property
+    def pid(self) -> int | None:
+        """The wrapper process's pid (`cmd.exe`/`sh` on the spawn platform),
+        not the real tunnel binary's grandchild pid — same identity
+        `_tree_kill`/the pid file already key off of. Surfaced for the UI's
+        "tunnel running (pid N)" status (#197 item 5)."""
+        return self._proc.pid if self._proc is not None else None
 
     def _cloudflared_bin(self) -> str:
         return self._config.cloudflared_bin or shutil.which("cloudflared") or "cloudflared"
@@ -337,6 +485,7 @@ class Tunnel:
         if not self._config.credentials_json or not self._public_url:
             raise TunnelError("named tunnel needs credentials_json + public_url")
         config_path = _write_named_config(self._config, self._public_url, self._port)
+        self._config_path = str(config_path)
         argv = [
             self._cloudflared_bin(),
             "tunnel",
@@ -483,6 +632,7 @@ class Tunnel:
         if proc is None:
             return
         _tree_kill(proc.pid)
+        _clear_pid_file_if_matches(proc.pid)
         try:
             proc.wait(timeout=5)
         except Exception:

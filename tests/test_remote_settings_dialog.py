@@ -345,6 +345,88 @@ class TestDialogEnableValidation:
         config, _enable = on_apply.call_args[0]
         assert "super-secret" not in config.password_hash
 
+    def test_successful_enable_with_a_warning_note_shows_it_but_stays_live(self, monkeypatch):
+        """#193: a non-fatal diagnostic (port fallback, stale ingress
+        hostname, failed probe) must not be treated like a hard failure —
+        Enable still succeeds and stays live, the warning is just shown."""
+        on_apply = MagicMock(
+            return_value=(True, "Port 9999 already in use — using 10000.", "https://x/#tok")
+        )
+        dlg = self._dlg(on_apply, tunnel=TunnelConfig(type="quick"))
+        dlg._password_edit.setText("hunter22")
+        warnings = []
+        monkeypatch.setattr(sd.QMessageBox, "warning", lambda *a, **kw: warnings.append(a))
+        dlg._on_toggle()
+
+        assert dlg._is_live is True
+        assert dlg._toggle_btn.text() == "Disable"
+        assert len(warnings) == 1
+        assert "Port 9999" in warnings[0][2]
+
+    def test_successful_enable_with_no_note_shows_no_warning(self, monkeypatch):
+        on_apply = MagicMock(return_value=(True, "", "https://x/#tok"))
+        dlg = self._dlg(on_apply, tunnel=TunnelConfig(type="quick"))
+        dlg._password_edit.setText("hunter22")
+        warnings = []
+        monkeypatch.setattr(sd.QMessageBox, "warning", lambda *a, **kw: warnings.append(a))
+        dlg._on_toggle()
+
+        assert warnings == []
+
+
+class TestStopTunnelButton:
+    """#197 item 5: "Stop tunnel only" — visible while live (and a callback
+    was supplied), stops just the tunnel without touching Enable/Disable."""
+
+    def test_hidden_when_not_live(self):
+        dlg = sd.RemoteSettingsDialog(
+            None,
+            is_live=False,
+            current=_default_config(),
+            on_apply=MagicMock(),
+            on_stop_tunnel=MagicMock(),
+        )
+        assert dlg._stop_tunnel_btn.isHidden() is True
+
+    def test_hidden_when_no_callback_supplied(self):
+        cfg = _default_config(public_url="https://x.example.com", secret_path="s", token="t")
+        dlg = sd.RemoteSettingsDialog(None, is_live=True, current=cfg, on_apply=MagicMock())
+        assert dlg._stop_tunnel_btn.isHidden() is True
+
+    def test_visible_when_live_with_callback(self):
+        cfg = _default_config(public_url="https://x.example.com", secret_path="s", token="t")
+        dlg = sd.RemoteSettingsDialog(
+            None, is_live=True, current=cfg, on_apply=MagicMock(), on_stop_tunnel=MagicMock()
+        )
+        assert dlg._stop_tunnel_btn.isHidden() is False
+
+    def test_click_calls_the_callback_and_disables_itself(self, monkeypatch):
+        cfg = _default_config(public_url="https://x.example.com", secret_path="s", token="t")
+        on_stop = MagicMock()
+        dlg = sd.RemoteSettingsDialog(
+            None, is_live=True, current=cfg, on_apply=MagicMock(), on_stop_tunnel=on_stop
+        )
+        monkeypatch.setattr(sd.QMessageBox, "information", lambda *a, **kw: None)
+
+        dlg._on_stop_tunnel_clicked()
+
+        on_stop.assert_called_once()
+        assert dlg._stop_tunnel_btn.isEnabled() is False
+
+    def test_re_render_after_enable_resets_and_shows_the_button(self):
+        on_apply = MagicMock(return_value=(True, "", "https://x/#tok"))
+        dlg = sd.RemoteSettingsDialog(
+            None,
+            is_live=False,
+            current=_default_config(tunnel=TunnelConfig(type="quick")),
+            on_apply=on_apply,
+            on_stop_tunnel=MagicMock(),
+        )
+        dlg._password_edit.setText("hunter22")
+        dlg._on_toggle()
+        assert dlg._stop_tunnel_btn.isHidden() is False
+        assert dlg._stop_tunnel_btn.isEnabled() is True
+
 
 class TestDialogDisable:
     def test_disable_calls_on_apply_with_none_and_false(self):
