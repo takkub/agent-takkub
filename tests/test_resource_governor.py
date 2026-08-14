@@ -185,6 +185,55 @@ def test_freed_slot_admits_immediately_without_backoff_delay() -> None:
     assert len(admitted) == 1
 
 
+def test_freed_slot_admits_backed_off_item_without_waiting_for_backoff_issue_201() -> None:
+    """Issue #201: dispatch_waiting used to gate a queue head purely on
+    elapsed time — after release_slot() freed a slot mid-backoff, the freed
+    slot sat idle until the item's own next_retry_at (up to 15s) instead of
+    being reused right away. A slot release must invalidate every queue
+    head's backoff so the very next dispatch_waiting() call retries it
+    immediately, no matter how little wall-clock time has passed since the
+    backoff was set."""
+    clock = [0.0]
+    governor = ResourceGovernor(
+        _limits(max_heavy_global=1, max_heavy_per_project=1),
+        clock=lambda: clock[0],
+    )
+    held = _request(governor, "held", "one")
+    assert held.allowed
+    order: list[str] = []
+    governor.enqueue(
+        project_id="a",
+        pane_id="a1",
+        task_id="a1",
+        resource_class=ResourceClass.HEAVY,
+        on_admitted=lambda _token: order.append("a1"),
+    )
+    clock[0] += 1.0
+    governor.dispatch_waiting()  # denied -> next_retry_at pushed out to t=2
+
+    governor.release_slot(held.token)
+    admitted = governor.dispatch_waiting()  # still t=1: must not wait for t=2
+    assert len(admitted) == 1
+    assert order == ["a1"]
+
+
+def test_dispatch_waiting_accepts_injectable_now() -> None:
+    """Issue #201 point 3: callers (the stress harness) need to fast-forward
+    past a backoff deterministically without a real sleep."""
+    governor = ResourceGovernor(_limits(max_heavy_global=1, max_heavy_per_project=1))
+    held = _request(governor, "held", "one")
+    governor.enqueue(
+        project_id="a",
+        pane_id="a1",
+        task_id="a1",
+        resource_class=ResourceClass.HEAVY,
+    )
+    governor.dispatch_waiting(now=1_000.0)  # denied -> next_retry_at = 1001.0
+    governor.release_slot(held.token)
+    admitted = governor.dispatch_waiting(now=1_000.5)  # before backoff would elapse
+    assert len(admitted) == 1
+
+
 def test_waiting_tasks_snapshot_exposes_reason() -> None:
     """Issue #195 point 3: the status surface needs *why* a task is
     waiting, not just a bare count."""

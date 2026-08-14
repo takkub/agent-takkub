@@ -114,6 +114,11 @@ class QueuedTask:
     # reason: most recent denial reason, kept for status/UI surfacing
     # (`ResourceGovernor.snapshot()`'s waiting_tasks) — issue #195 point 3.
     reason: str = ""
+    # retry_epoch (issue #201): the governor's `_capacity_epoch` value at the
+    # moment this item's backoff was set. If the epoch has since advanced
+    # (a slot was released or limits changed) the time-based backoff below
+    # is stale and must not gate the next dispatch attempt.
+    retry_epoch: int = -1
 
 
 # Issue #195: backoff schedule (seconds) for the queued-task retry loop in
@@ -165,6 +170,14 @@ class ResourceGovernor:
         self._waiting: OrderedDict[str, deque[QueuedTask]] = OrderedDict()
         self._project_cursor = 0
         self._lock = threading.RLock()
+        # capacity_epoch (issue #201): bumped whenever a slot is actually
+        # freed or limits change — i.e. whenever "there might be room now"
+        # becomes true. dispatch_waiting uses it to tell a queue head that
+        # is merely time-backed-off apart from one that is stale-backed-off
+        # (its next_retry_at was computed against capacity that no longer
+        # reflects reality), so a freed slot is never left idle for up to
+        # 15s waiting on a clock instead of the event that actually matters.
+        self._capacity_epoch = 0
         # Warm psutil's non-blocking CPU sampler; the first value is undefined.
         try:
             psutil.cpu_percent(interval=None)
@@ -194,6 +207,7 @@ class ResourceGovernor:
         """Apply new limits without dropping active tokens or queued work."""
         with self._lock:
             self.limits = limits
+            self._capacity_epoch += 1
         self._emit(
             "resource_limits_updated",
             limits={field: getattr(limits, field) for field in limits.__dataclass_fields__},
@@ -315,6 +329,8 @@ class ResourceGovernor:
         token_id = token if isinstance(token, str) else token.token_id
         with self._lock:
             released = self._tokens.pop(token_id, None)
+            if released is not None:
+                self._capacity_epoch += 1
         if released is not None:
             self._emit(
                 "resource_slot_released",
@@ -390,7 +406,9 @@ class ResourceGovernor:
             )
         return removed
 
-    def dispatch_waiting(self, max_dispatch: int | None = None) -> list[ResourceToken]:
+    def dispatch_waiting(
+        self, max_dispatch: int | None = None, *, now: float | None = None
+    ) -> list[ResourceToken]:
         """Admit waiting work round-robin by project, FIFO within a project.
 
         Issue #195: a queue head whose `next_retry_at` hasn't elapsed yet is
@@ -398,10 +416,24 @@ class ResourceGovernor:
         line is emitted either) — this is what turns the retry cadence from
         an unconditional 1s poll into the 1s/2s/5s/15s backoff schedule, since
         a line only ever gets logged when an attempt is actually made.
+
+        Issue #201: that time-based skip alone left freed slots idle for up
+        to 15s — a queue head's backoff is only honored while it was set
+        under the SAME `_capacity_epoch` as now. A slot release (or a limits
+        change) bumps the epoch, which makes every backed-off item stale and
+        eligible for an immediate retry on the very next call regardless of
+        `next_retry_at`, without touching the 1s/2s/5s/15s cadence that
+        applies while capacity is genuinely unchanged (`ponytail:` this is a
+        single global epoch rather than per-project/per-class — coarser than
+        strictly necessary, so a release can trigger a futile retry+log for
+        an unrelated queue, but bounded by actual release events rather than
+        wall-clock ticks; upgrade to a per-resource-class epoch if that proves
+        noisy in practice).
         """
-        now = self._clock()
+        now = self._clock() if now is None else now
         admitted: list[tuple[QueuedTask, ResourceToken]] = []
         with self._lock:
+            epoch = self._capacity_epoch
             projects = list(self._waiting)
             if projects:
                 start = self._project_cursor % len(projects)
@@ -416,7 +448,7 @@ class ResourceGovernor:
                     if not queue:
                         continue
                     item = queue[0]
-                    if item.next_retry_at > now:
+                    if item.next_retry_at > now and item.retry_epoch == epoch:
                         continue
                     decision = self.request_slot(
                         project_id=item.project_id,
@@ -436,6 +468,7 @@ class ResourceGovernor:
                             min(item.attempts, len(_GATE_RETRY_BACKOFF_S)) - 1
                         ]
                         item.next_retry_at = now + delay
+                        item.retry_epoch = epoch
                         item.reason = decision.reason
                 self._project_cursor += 1
         for item, token in admitted:
