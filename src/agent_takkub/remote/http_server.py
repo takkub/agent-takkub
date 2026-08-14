@@ -371,6 +371,22 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         self.server.auth.touch()  # M-6: only a *successful* auth counts as activity
         return True
 
+    def _drain_request_body(self) -> None:
+        """Read and discard the request body, bounded to the largest size
+        this route ever accepts (`_MAX_IMAGE_BODY_BYTES`). An oversized or
+        malformed `Content-Length` is left unread — the socket close in
+        that case races against a client that was never going to send a
+        well-formed request anyway, so there's nothing worth draining."""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return
+        if 0 < length <= _MAX_IMAGE_BODY_BYTES:
+            try:
+                self.rfile.read(length)
+            except OSError:
+                pass
+
     def do_GET(self) -> None:
         matched = self._match_secret_path()
         if matched is None:
@@ -434,6 +450,18 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
             if not self._check_bearer() or not self._check_password_gate():
                 return
             if not self.server.auth.allows_control():
+                # #206: this is the only forbidden-route branch that answers
+                # before the unconditional `self.rfile.read(length)` below —
+                # every other view-mode-forbidden route (lead/say, open,
+                # close, lead/resume) drains the body first. HTTP/1.0 has no
+                # keep-alive, so the handler closes the socket right after
+                # this response; if the client's body is still unread in the
+                # kernel receive buffer at that point, the OS can send an RST
+                # instead of a clean close, which Windows surfaces to the
+                # client as ConnectionAbortedError/WinError 10053 (racy,
+                # proven flaky under full-suite load). Drain it first so the
+                # close is always clean.
+                self._drain_request_body()
                 self._send_json(403, {"ok": False, "msg": "view mode: control is disabled"})
                 return
             upload_authorized = True
