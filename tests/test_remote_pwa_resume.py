@@ -77,10 +77,10 @@ class TestAppJsWiring:
         chunk = js.split("function refreshProjectHistory(project, announce)")[1].split(
             "function refreshOpenProjectHistories"
         )[0]
-        assert "loadHistory(project, true)" in chunk
+        assert "loadHistory(project, true, announce)" in chunk
         assert "stopLeadStream" not in chunk
 
-        load_chunk = js.split("function loadHistory(project, force)")[1].split(
+        load_chunk = js.split("function loadHistory(project, force, jumpToBottom)")[1].split(
             "function refreshProjectHistory"
         )[0]
         assert 'apiFetch(path, { cache: "no-store" })' in load_chunk
@@ -182,7 +182,7 @@ class TestConcurrentProjectStreams:
     def test_project_switch_is_cache_render_without_stream_restart(self):
         js = _read("app.js")
         chunk = js.split("function selectProject")[1].split("function renderProjects")[0]
-        assert "renderSelectedProject()" in chunk
+        assert "renderSelectedProject(true)" in chunk
         assert "syncProjectStreams()" in chunk
         assert "stopLeadStream()" not in chunk
         assert "loadHistory(" not in chunk
@@ -240,9 +240,9 @@ class TestConcurrentProjectStreams:
         assert "workingConfirmed: false" in js
         assert "function beginOptimisticWorking(project)" in js
         assert "}, 30000);" in js
-        history = js.split("function loadHistory(project, force)")[1].split("function connectSse")[
-            0
-        ]
+        history = js.split("function loadHistory(project, force, jumpToBottom)")[1].split(
+            "function connectSse"
+        )[0]
         assert "!!(data && data.working)" in history
         assert "!lead.optimisticWorkingTimer" in history
         assert "setProjectWorking(project, false, null, true)" in js

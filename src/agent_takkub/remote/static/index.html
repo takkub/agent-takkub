@@ -512,6 +512,38 @@
     flex-direction: column;
     gap: 4px;
   }
+  /* #198: floating "jump to bottom" affordance. It lives as a sticky child
+     inside the scrolling #lead-log itself (not an absolutely-positioned
+     overlay) so it always tracks the true visible bottom of the message
+     list regardless of composer/quick-reply/picker height changes below
+     it — app.js keeps it appended as the last child so `sticky` has
+     something to pin against. */
+  #new-msg-wrap {
+    position: sticky;
+    bottom: 8px;
+    height: 0;
+    display: flex;
+    justify-content: center;
+    pointer-events: none;
+    z-index: 5;
+  }
+  #new-msg-btn {
+    display: none;
+    align-items: center;
+    pointer-events: auto;
+    padding: 8px 16px;
+    border: none;
+    border-radius: 999px;
+    background: var(--accent);
+    color: var(--accent-ink);
+    font-size: 0.8rem;
+    font-weight: 600;
+    font-family: inherit;
+    box-shadow: 0 10px 24px -10px rgba(0, 0, 0, 0.7);
+    cursor: pointer;
+  }
+  #new-msg-btn.show { display: flex; }
+  #new-msg-btn:active { background: var(--accent-dim); }
   .msg {
     max-width: 100%;
     min-width: 5.5em;
@@ -1125,6 +1157,9 @@
         <div id="lead-empty">
           <span class="icon">💬</span>
           <span class="text" id="lead-empty-text">ยังไม่มีข้อความ — พิมพ์ข้อความด้านล่างเพื่อเริ่ม</span>
+        </div>
+        <div id="new-msg-wrap">
+          <button id="new-msg-btn" type="button">ข้อความใหม่ ↓</button>
         </div>
       </div>
       <div id="lead-picker-banner"></div>

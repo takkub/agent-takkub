@@ -371,7 +371,7 @@
     updateHeaderTitle();
     if (name === "projects") loadProjects();
     if (name === "lead") {
-      renderSelectedProject();
+      renderSelectedProject(true);
       startLeadStream();
     }
     if (name === "pulse") startPulsePolling();
@@ -663,7 +663,7 @@
     state.selectedProject = name;
     setProvider(state.providersByProject[name] || "claude", name);
     updateHeaderTitle();
-    renderSelectedProject();
+    renderSelectedProject(true);
     syncProjectStreams();
     switchView("lead");
     fetchPulse();
@@ -899,6 +899,35 @@
     return (category && THINKING_LABELS[category]) || thinkingDefaultLabel();
   }
 
+  // #198: shared "is the user reading scrollback?" heuristic. iOS Safari /
+  // Android Chrome momentum scrolling can leave scrollTop a few px short of
+  // true bottom even when the user's intent was "stay pinned", so this uses
+  // slack instead of an exact equality check. Every path that appends into
+  // #lead-log must go through isPinnedToBottom()+scrollToBottom() (or
+  // showNewMessagesButton() when not pinned) instead of assigning
+  // log.scrollTop directly — a stray unconditional scroll is what caused the
+  // original bug (showThinking() overriding the streaming heuristic).
+  var SCROLL_PIN_PX = 48;
+  function isPinnedToBottom(log) {
+    return !!log && log.scrollTop + log.clientHeight >= log.scrollHeight - SCROLL_PIN_PX;
+  }
+  function scrollToBottom(log) {
+    if (log) log.scrollTop = log.scrollHeight;
+    hideNewMessagesButton();
+  }
+  function showNewMessagesButton() {
+    var log = $("lead-log");
+    var wrap = $("new-msg-wrap");
+    var btn = $("new-msg-btn");
+    if (!log || !wrap || !btn) return;
+    log.appendChild(wrap); // keep it the last flow child so `position: sticky` pins to the true bottom
+    btn.classList.add("show");
+  }
+  function hideNewMessagesButton() {
+    var btn = $("new-msg-btn");
+    if (btn) btn.classList.remove("show");
+  }
+
   var thinkingEl = null;
   function showThinking(category) {
     var label = thinkingLabelFor(category);
@@ -911,6 +940,7 @@
     var log = $("lead-log");
     var emptyEl = $("lead-empty");
     if (emptyEl) emptyEl.remove();
+    var pinned = isPinnedToBottom(log);
     var div = document.createElement("div");
     div.className = "msg lead thinking group-start";
     var who = document.createElement("div");
@@ -929,7 +959,7 @@
     body.insertAdjacentHTML("beforeend", ' <span class="thinking-dots"><span></span><span></span><span></span></span>');
     div.appendChild(body);
     log.appendChild(div);
-    log.scrollTop = log.scrollHeight;
+    if (pinned) scrollToBottom(log); else showNewMessagesButton();
     thinkingEl = div;
     // Do NOT reset lastMsgKind/lastLeadBodyEl here: a 'working' SSE event
     // fires between consecutive 'lead' chunks of the same reply (tool_use
@@ -944,13 +974,13 @@
     if (thinkingEl) { thinkingEl.remove(); thinkingEl = null; }
   }
 
-  function appendMsgDom(kind, text) {
+  function appendMsgDom(kind, text, skipScroll) {
     if (typeof text !== "string" || !text) return;
     hideThinking();
     var log = $("lead-log");
     var emptyEl = $("lead-empty");
     if (emptyEl) emptyEl.remove();
-    var atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 24;
+    var atBottom = isPinnedToBottom(log);
     var isGroupStart = kind !== lastMsgKind;
     lastMsgKind = kind;
     var isOk = kind === "lead" && text.indexOf("✅") >= 0;
@@ -992,7 +1022,9 @@
     div.appendChild(body);
 
     log.appendChild(div);
-    if (atBottom) log.scrollTop = log.scrollHeight;
+    if (!skipScroll) {
+      if (atBottom) scrollToBottom(log); else showNewMessagesButton();
+    }
     if (kind === "lead") {
       lastLeadRawAccum = text;
       hidePickerBanner();
@@ -1057,12 +1089,12 @@
     if (shouldMerge && lastLeadBodyEl && lastMsgKind === "lead") {
       hideThinking();
       var log = $("lead-log");
-      var atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 24;
+      var atBottom = isPinnedToBottom(log);
       lastLeadBodyEl.insertAdjacentHTML("beforeend", renderMarkdown(text));
       lastLeadAt = now;
       lastLeadRawAccum += "\n" + text;
       renderQuickReplies();
-      if (atBottom) log.scrollTop = log.scrollHeight;
+      if (atBottom) scrollToBottom(log); else showNewMessagesButton();
       if (state.leadWorking) showThinking();
       return;
     }
@@ -1092,13 +1124,23 @@
     if (txt) txt.textContent = text;
   }
 
-  function renderSelectedProject() {
+  // forceScroll=true means "this is a genuinely new conversation view"
+  // (opened chat / switched project / resumed / new session) — jump to the
+  // bottom unconditionally, because the old per-message atBottom heuristic
+  // silently fails whenever log.clientHeight reads 0 mid-loop (view not yet
+  // active). Called without it (reconnect, backgrounded-app history
+  // refresh — #198), the rebuild instead preserves whatever the user was
+  // looking at: measured *before* the DOM is torn down, since there is
+  // nothing left to measure once the old messages are removed.
+  function renderSelectedProject(forceScroll) {
     var project = visibleProject();
     var lead = projectLeadState(project);
     var log = $("lead-log");
     if (!lead || !log) return;
     hideThinking();
     hidePickerBanner();
+    var savedScrollTop = log.scrollTop;
+    var pinned = !!forceScroll || isPinnedToBottom(log);
     var old = log.querySelectorAll(".msg, #lead-empty");
     for (var i = 0; i < old.length; i++) old[i].remove();
     lastMsgKind = null;
@@ -1107,18 +1149,19 @@
     lastLeadRawAccum = "";
     var isWorking = !!lead.working;
     state.leadWorking = false;
+    // skipScroll=true — the per-message atBottom heuristic would otherwise
+    // fire against a log that's being rebuilt from empty (nearly always
+    // "true" early on), so the scroll decision for the whole rebuild is
+    // made once, below, from the pre-rebuild snapshot instead.
     lead.messages.forEach(function (message) {
-      appendMsgDom(message.kind, message.text);
+      appendMsgDom(message.kind, message.text, true);
     });
-    // appendMsgDom's atBottom heuristic is built for incremental streaming
-    // (don't yank the user down while they're reading scrollback). A full
-    // rebuild is different: it's always "just opened this chat", so it must
-    // land on the latest message unconditionally. Relying on the heuristic
-    // here silently fails whenever log.clientHeight reads 0 mid-loop (view
-    // not yet active, app resuming from background on mobile, etc.) —
-    // appendMsgDom.atBottom then stays false for the rest of the loop and
-    // the log is stuck scrolled to the top.
-    log.scrollTop = log.scrollHeight;
+    if (pinned) {
+      scrollToBottom(log);
+    } else {
+      log.scrollTop = Math.min(savedScrollTop, log.scrollHeight);
+      if (lead.messages.length) showNewMessagesButton();
+    }
     state.leadWorking = isWorking;
     if (!lead.messages.length && !isWorking) {
       // #192: prefer the server's classified reason (provider gap / no
@@ -1376,7 +1419,13 @@
 
   // Load each project's history exactly once per authenticated app lifetime.
   // Project switches render this cache and never repeat the request.
-  function loadHistory(project, force) {
+  // jumpToBottom only matters on the force=true path — a plain (non-force)
+  // load only ever runs once per project while historyLoaded is still false,
+  // i.e. it's always a first-ever load, so it jumps regardless. force=true
+  // covers both an explicit user refresh (jump is expected) and a silent
+  // backgrounded-app catch-up refresh (#198 — must NOT yank the view; the
+  // caller passes jumpToBottom=false for that case).
+  function loadHistory(project, force, jumpToBottom) {
     var lead = projectLeadState(project);
     if (!lead) return Promise.resolve();
     if (force) {
@@ -1429,7 +1478,7 @@
           setProjectWorking(project, !!(data && data.working), null, true);
         }
         lead.historyLoaded = true;
-        if (project === visibleProject()) renderSelectedProject();
+        if (project === visibleProject()) renderSelectedProject(!force || jumpToBottom);
       })
       .catch(function (err) {
         if (state.leadByProject[project] !== lead || lead.historyGeneration !== generation) return;
@@ -1438,7 +1487,7 @@
         // hammer the same failed endpoint.
         lead.historyLoaded = true;
         refreshError = err;
-        if (project === visibleProject()) renderSelectedProject();
+        if (project === visibleProject()) renderSelectedProject(!force || jumpToBottom);
       })
       .then(function () {
         if (state.leadByProject[project] === lead && lead.historyGeneration === generation) {
@@ -1454,7 +1503,10 @@
     if (!project) return Promise.resolve();
     var btn = $("lead-refresh-btn");
     if (announce && btn) btn.disabled = true;
-    return loadHistory(project, true)
+    // announce=true is an explicit user tap on the refresh button (jump is
+    // expected); announce=false is the silent backgrounded-app catch-up
+    // fetch (visibilitychange) — must not jump the reader (#198).
+    return loadHistory(project, true, announce)
       .then(function () {
         if (announce) toast("โหลดข้อความล่าสุดแล้ว");
       })
@@ -1578,6 +1630,8 @@
       // Preserve an in-progress turn across transport reconnects. The server
       // emits working/idle only on pane-state transitions, so reconnecting in
       // the middle of a turn may not receive another working edge.
+      // No forceScroll (#198): a reconnect happens silently and often, and
+      // must not yank a user reading old messages down to the bottom.
       if (project === visibleProject()) renderSelectedProject();
     };
     // Backend sends 'working' whenever the Lead is actively doing something
@@ -1635,7 +1689,7 @@
       lead.historyLoaded = false;
       lead.messages = [];
       lead.lastLeadAt = 0;
-      if (project === visibleProject()) renderSelectedProject();
+      if (project === visibleProject()) renderSelectedProject(true);
       loadHistory(project);
     });
     // W2a/B2: a real AskUserQuestion picker fired on the desktop — surface a
@@ -1859,7 +1913,7 @@
           resumedLead.historyLoaded = resumedLead.messages.length > 0;
           setProjectWorking(project, false, null, true);
           setProvider(res.data.provider, project);
-          if (project === visibleProject()) renderSelectedProject();
+          if (project === visibleProject()) renderSelectedProject(true);
           startLeadStream(project);
           return;
         }
@@ -1877,6 +1931,16 @@
 
   $("lead-refresh-btn").addEventListener("click", function () {
     refreshProjectHistory(visibleProject(), true);
+  });
+
+  // #198 floating "new messages" affordance: tapping it jumps to the
+  // bottom; the log itself also hides it the instant the user scrolls back
+  // down on their own, without waiting for the next message to arrive.
+  $("new-msg-btn").addEventListener("click", function () {
+    scrollToBottom($("lead-log"));
+  });
+  $("lead-log").addEventListener("scroll", function () {
+    if (isPinnedToBottom(this)) hideNewMessagesButton();
   });
   $("lead-resume-btn").addEventListener("click", openResumeSheet);
   $("resume-sheet-close").addEventListener("click", closeResumeSheet);
