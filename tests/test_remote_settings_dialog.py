@@ -366,6 +366,47 @@ class TestDialogDisable:
         assert dlg._password_edit.text() == ""
 
 
+class TestLogoutAllButton:
+    """#196 requirement 4: a way to invalidate every phone's session from
+    the settings dialog, independent of Enable/Disable."""
+
+    def test_click_invokes_on_logout_all_callback(self, monkeypatch):
+        on_logout_all = MagicMock()
+        dlg = sd.RemoteSettingsDialog(
+            None,
+            is_live=True,
+            current=_default_config(),
+            on_apply=MagicMock(),
+            on_logout_all=on_logout_all,
+        )
+        monkeypatch.setattr(sd.QMessageBox, "information", lambda *a, **kw: None)
+        dlg._logout_all_btn.click()
+        on_logout_all.assert_called_once()
+
+    def test_click_without_callback_does_not_raise(self, monkeypatch):
+        dlg = sd.RemoteSettingsDialog(
+            None, is_live=True, current=_default_config(), on_apply=MagicMock()
+        )
+        monkeypatch.setattr(sd.QMessageBox, "information", lambda *a, **kw: None)
+        dlg._logout_all_btn.click()  # must not raise even with on_logout_all=None
+
+    def test_available_even_when_not_live(self, monkeypatch):
+        """Available regardless of live state — a stale session file can
+        outlive the server that minted it (see settings_dialog.py)."""
+        on_logout_all = MagicMock()
+        dlg = sd.RemoteSettingsDialog(
+            None,
+            is_live=False,
+            current=_default_config(),
+            on_apply=MagicMock(),
+            on_logout_all=on_logout_all,
+        )
+        monkeypatch.setattr(sd.QMessageBox, "information", lambda *a, **kw: None)
+        assert dlg._logout_all_btn.isEnabled() is True
+        dlg._logout_all_btn.click()
+        on_logout_all.assert_called_once()
+
+
 class TestPasswordVisibilityToggle:
     def test_show_button_flips_echo_mode(self):
         from PyQt6.QtWidgets import QLineEdit

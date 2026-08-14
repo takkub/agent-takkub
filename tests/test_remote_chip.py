@@ -94,10 +94,11 @@ class TestOnRemoteChipClicked:
         captured = {}
 
         class _FakeDialog:
-            def __init__(self, parent, *, is_live, current, on_apply):
+            def __init__(self, parent, *, is_live, current, on_apply, on_logout_all=None):
                 captured["is_live"] = is_live
                 captured["current"] = current
                 captured["on_apply"] = on_apply
+                captured["on_logout_all"] = on_logout_all
 
             def exec(self):
                 captured["exec_called"] = True
@@ -108,6 +109,7 @@ class TestOnRemoteChipClicked:
         assert isinstance(captured["current"], RemoteConfig)
         assert captured["exec_called"] is True
         assert captured["on_apply"] == stub._apply_remote_config
+        assert captured["on_logout_all"] == stub._logout_all_remote_sessions
 
 
 class TestApplyRemoteConfig:
@@ -156,6 +158,24 @@ class TestApplyRemoteConfig:
         assert stub._remote is None
         assert ok is True
         assert pairing_url == ""
+
+    def test_disable_clears_persisted_sessions(self, monkeypatch, tmp_path):
+        """#196 requirement 3: disabling remote invalidates every session,
+        not just the live in-memory ones (the server is already stopped/gone
+        by the time this runs, so there's no live AuthGate left to clear)."""
+        import agent_takkub.remote.session_store as session_store
+
+        monkeypatch.setattr(session_store, "_PATH", tmp_path / "sessions.json")
+        session_store.save("some-fingerprint", {"tok-hash": 1e15})
+        assert session_store.path().exists()
+
+        _isolate_remote_json(monkeypatch, tmp_path)
+        stub = _Stub()
+        stub._remote = MagicMock()
+
+        stub._apply_remote_config(None, False)
+
+        assert not session_store.path().exists()
 
     def test_disable_persists_enabled_false(self, monkeypatch, tmp_path):
         _isolate_remote_json(monkeypatch, tmp_path)
@@ -207,6 +227,36 @@ class TestApplyRemoteConfig:
         assert ok is True
         assert fake_remote.config.public_url == "https://abcd1234.ngrok-free.app"
         assert RemoteConfig.load().public_url == "https://abcd1234.ngrok-free.app"
+
+
+class TestLogoutAllRemoteSessions:
+    def test_live_server_delegates_to_authgate(self):
+        """When a server is actually running, the live in-memory sessions
+        must die immediately (next request, not next restart) — so this
+        goes through `AuthGate.logout_all_sessions()`, not just the file."""
+        stub = _Stub()
+        fake_remote = MagicMock()
+        stub._remote = fake_remote
+
+        stub._logout_all_remote_sessions()
+
+        fake_remote._server.auth.logout_all_sessions.assert_called_once()
+
+    def test_not_live_clears_the_persisted_store_directly(self, monkeypatch, tmp_path):
+        """No server running (remote off, or between disable and re-enable)
+        — nothing to reach through, so clear the on-disk store on its own."""
+        import agent_takkub.remote.session_store as session_store
+
+        monkeypatch.setattr(session_store, "_PATH", tmp_path / "sessions.json")
+        session_store.save("some-fingerprint", {"tok-hash": 1e15})
+        assert session_store.path().exists()
+
+        stub = _Stub()
+        stub._remote = None
+
+        stub._logout_all_remote_sessions()
+
+        assert not session_store.path().exists()
 
     def test_ngrok_fixed_mode_skips_the_scrape_wait(self, monkeypatch, tmp_path):
         """Fixed-domain ngrok already knows its URL (set by `build_config`

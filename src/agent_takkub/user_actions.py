@@ -719,6 +719,7 @@ class UserActionsMixin:
             is_live=getattr(self, "_remote", None) is not None,
             current=_config_mod.RemoteConfig.load(),
             on_apply=self._apply_remote_config,
+            on_logout_all=self._logout_all_remote_sessions,
         )
         self._remote_settings_dialog = dlg
         try:
@@ -785,9 +786,16 @@ class UserActionsMixin:
         if not enable:
             try:
                 _config_mod = importlib.import_module("agent_takkub.remote.config")
+                _session_store_mod = importlib.import_module("agent_takkub.remote.session_store")
                 cfg = _config_mod.RemoteConfig.load()
                 cfg.enabled = False
                 cfg.save()
+                # #196 requirement 3: disabling remote invalidates every
+                # session outright and immediately, rather than leaning on
+                # the fingerprint mismatch a later re-enable would produce
+                # anyway (see session_store.py's module docstring) — "ปิด
+                # remote" is its own explicit invalidation trigger.
+                _session_store_mod.clear()
             except ModuleNotFoundError:
                 pass
             return True, "", ""
@@ -839,6 +847,26 @@ class UserActionsMixin:
                 self._poll_remote_public_url(tunnel_obj, self._remote)
 
         return True, "", self._remote.config.pairing_url()
+
+    def _logout_all_remote_sessions(self) -> None:
+        """ "Log out all devices" (#196 requirement 4), wired into
+        `RemoteSettingsDialog` the same way `_apply_remote_config` is.
+        Clears the live server's in-memory sessions when the server is
+        actually running (so already-connected phones are cut off on their
+        very next request, not just after a restart), and always clears the
+        on-disk store either way."""
+        import importlib
+
+        remote = getattr(self, "_remote", None)
+        server = getattr(remote, "_server", None)
+        if server is not None:
+            server.auth.logout_all_sessions()
+            return
+        try:
+            _session_store_mod = importlib.import_module("agent_takkub.remote.session_store")
+        except ModuleNotFoundError:
+            return
+        _session_store_mod.clear()
 
     # ──────────────────────────────────────────────────────────────
     # per-project user profile selector (accessed via 👥 Team chip's right-click menu)

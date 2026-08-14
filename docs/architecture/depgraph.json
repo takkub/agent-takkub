@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 144,
+  "module_count": 145,
   "modules": [
     {
       "module": "agent_takkub",
@@ -404,6 +404,7 @@
         "agent_takkub.remote.config",
         "agent_takkub.remote.http_server",
         "agent_takkub.remote.notify",
+        "agent_takkub.remote.session_store",
         "agent_takkub.remote.tunnel",
         "agent_takkub.role_memory",
         "agent_takkub.role_models",
@@ -430,7 +431,7 @@
         "agent_takkub.vault_mirror",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 73,
+      "fan_in": 74,
       "fan_out": 0
     },
     {
@@ -1291,14 +1292,15 @@
     {
       "module": "agent_takkub.remote.auth",
       "imports": [
-        "agent_takkub.remote.config"
+        "agent_takkub.remote.config",
+        "agent_takkub.remote.session_store"
       ],
       "imported_by": [
         "agent_takkub.remote.http_server",
         "agent_takkub.remote.settings_dialog"
       ],
       "fan_in": 2,
-      "fan_out": 1
+      "fan_out": 2
     },
     {
       "module": "agent_takkub.remote.config",
@@ -1311,10 +1313,11 @@
         "agent_takkub.remote.auth",
         "agent_takkub.remote.http_server",
         "agent_takkub.remote.notify",
+        "agent_takkub.remote.session_store",
         "agent_takkub.remote.settings_dialog",
         "agent_takkub.remote.tunnel"
       ],
-      "fan_in": 7,
+      "fan_in": 8,
       "fan_out": 1
     },
     {
@@ -1350,6 +1353,18 @@
       ],
       "fan_in": 2,
       "fan_out": 9
+    },
+    {
+      "module": "agent_takkub.remote.session_store",
+      "imports": [
+        "agent_takkub.config",
+        "agent_takkub.remote.config"
+      ],
+      "imported_by": [
+        "agent_takkub.remote.auth"
+      ],
+      "fan_in": 1,
+      "fan_out": 2
     },
     {
       "module": "agent_takkub.remote.settings_dialog",

@@ -167,6 +167,16 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
         monkeypatch.setattr(pc, "_BASE_DIR", takkub_dir, raising=False)
         monkeypatch.setattr(pc, "_CONFIG_PATH", takkub_dir / "role-providers.json", raising=False)
 
+    # #196: AuthGate.__init__ now reads/writes `session_store.py`'s on-disk
+    # password-session store unconditionally (not opt-in like the P0 remote
+    # scaffold — any test that builds a real RemoteHttpServer/AuthGate, not
+    # just test_remote_auth.py, goes through it). Unpatched, that's a read
+    # and (on `issue_password_session`) a write to the real
+    # `~/.takkub/takkub-remote-sessions.json` on the machine running pytest.
+    ss = _maybe_module("agent_takkub.remote.session_store", force=True)
+    if ss is not None:
+        monkeypatch.setattr(ss, "_PATH", runtime / "takkub-remote-sessions.json", raising=False)
+
     # Second layer for #91 (see the module-level os.environ.setdefault above):
     # force the env guard back on per-test (in case a prior test cleared it)
     # AND monkeypatch warm_browser_mcps to a no-op directly, so a stray import

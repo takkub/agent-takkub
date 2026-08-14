@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import time
 
+from agent_takkub.remote import session_store
 from agent_takkub.remote.auth import AuthGate, hash_password, verify_password
 from agent_takkub.remote.config import RemoteConfig
 
@@ -279,3 +280,75 @@ class TestPasswordGate:
         gate = _gate(idle_expire_min=0)
         monkeypatch.setattr(time, "time", lambda: time.time() + 10**9)
         assert gate.idle_expired() is False
+
+
+class TestPasswordSessionPersistence:
+    """#196: a phone had to re-enter the password every time the cockpit
+    process restarted, because `AuthGate._sessions` used to live only in
+    RAM. Sessions now persist via `session_store.py`, keyed by a fingerprint
+    of (password_hash, secret_path, token) — see that module's docstring
+    for why a password/secret/token change invalidates every prior session
+    for free, with no extra invalidation call needed here."""
+
+    def _cfg(self, password: str = "hunter2", **kw) -> RemoteConfig:
+        return RemoteConfig(
+            secret_path="s3cr3t", token="tok123", password_hash=hash_password(password), **kw
+        )
+
+    def test_session_survives_a_simulated_restart(self):
+        cfg = self._cfg()
+        gate1 = AuthGate(cfg)
+        gate1.check_password("hunter2")
+        session = gate1.issue_password_session()
+
+        # Simulate a cockpit restart: same on-disk config, brand-new AuthGate
+        # (a fresh process would load the identical RemoteConfig from disk).
+        gate2 = AuthGate(cfg)
+        assert gate2.check_password_session(session) is True
+
+    def test_expired_session_does_not_survive_a_restart(self, monkeypatch):
+        cfg = self._cfg(idle_expire_min=10)
+        gate1 = AuthGate(cfg)
+        gate1.check_password("hunter2")
+        session = gate1.issue_password_session()
+
+        future = time.time() + 3600  # well past the 10-minute idle_expire TTL
+        monkeypatch.setattr(time, "time", lambda: future)
+        gate2 = AuthGate(cfg)
+        assert gate2.check_password_session(session) is False
+
+    def test_password_change_invalidates_every_prior_session(self):
+        old_cfg = self._cfg("hunter2")
+        gate1 = AuthGate(old_cfg)
+        gate1.check_password("hunter2")
+        session = gate1.issue_password_session()
+
+        # hash_password() salts fresh every call (TestPasswordHashing above),
+        # so even re-entering the *same* plaintext at Enable time produces a
+        # different password_hash — exactly what happens on a real password
+        # change or a disable-then-re-enable.
+        new_cfg = self._cfg("hunter2")
+        gate2 = AuthGate(new_cfg)
+        assert gate2.check_password_session(session) is False
+
+    def test_only_a_hash_is_ever_written_to_disk(self):
+        gate = AuthGate(self._cfg())
+        gate.check_password("hunter2")
+        session = gate.issue_password_session()
+
+        raw = session_store.path().read_text(encoding="utf-8")
+        assert session not in raw
+
+    def test_logout_all_sessions_clears_the_store_for_a_later_restart(self):
+        cfg = self._cfg()
+        gate1 = AuthGate(cfg)
+        gate1.check_password("hunter2")
+        session = gate1.issue_password_session()
+        gate1.logout_all_sessions()
+
+        # The now-logged-out session must not work even against the SAME
+        # AuthGate instance...
+        assert gate1.check_password_session(session) is False
+        # ...nor come back from disk on a later restart.
+        gate2 = AuthGate(cfg)
+        assert gate2.check_password_session(session) is False
