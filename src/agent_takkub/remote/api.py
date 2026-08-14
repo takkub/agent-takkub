@@ -6,11 +6,12 @@ executes (§6.4).
 
 Data minimization (§7.3 / finding B2): `pulse` strips the `list` response
 down to a bare `{working, total}` count. It never uses `cmd:"status"` and
-never lets role/task/state/transcript text anywhere near the response. When
-`config.LEAD_ONLY_STREAM` is on, `pulse` also scopes that count down to the
-`lead` entry only (2026-08-04 fix — it was the one mobile-facing reader that
-still counted every pane, missed when the flag was added to `activity`/
-`notify.LeadNotifier` on 2026-07-23).
+never lets role/task/transcript text anywhere near the response; `activity`
+holds to the same bar, adding only a coarse `state: "working"|"idle"` per
+pane. When `config.PULSE_SHOW_TEAM` is off, `pulse` scopes its count down to
+the `lead` entry only and `activity` reports an empty `roles` list — the
+pre-#200 default (see `remote/config.py`'s `LEAD_ONLY_STREAM`/
+`PULSE_SHOW_TEAM` split for why these are two separate flags now).
 
 Multi-project scoping (project picker): `from_project` is threaded through
 from the HTTP layer (`http_server.py`'s `_Bridge._resolve_scoped_project`
@@ -162,22 +163,20 @@ def _lead_frame(orch, payload: dict, timeout: float = 5.0) -> dict:
 def pulse(orch, from_project: str | None) -> dict:
     """§7.3 / B2: count only — never `cmd:"status"`, never role/task text.
 
-    LEAD_ONLY_STREAM (2026-07-23): this was found NOT gated (the mobile-scope
-    audit that added the gate to `activity`/`notify.LeadNotifier` missed this
-    reader) — `total` still counted every open pane and `working` still
-    reflected teammate activity, contradicting "phone mirrors Lead only" for
-    any client hitting `/api/pulse` directly (the shipped PWA no longer calls
-    it — see `app.js`'s `fetchPulse`, which reads `/api/activity` — but the
-    route itself stayed live and authenticated). When the flag is on, scope
-    the count down to the `lead` entry before counting so `total` never
-    reveals team size and `working` never reveals teammate activity; `total`
-    is 1 (Lead open) or 0 (no Lead pane for this project), never > 1."""
+    PULSE_SHOW_TEAM (#200, 2026-08-14) defaults True: `total`/`working` count
+    every open pane, not just Lead — the legacy `/api/pulse` route the
+    shipped PWA no longer calls (see `app.js`'s `fetchPulse`, which reads
+    `/api/activity`) but that stays live and authenticated for any other
+    client. When the flag is off, scope the count down to the `lead` entry
+    before counting so `total` never reveals team size and `working` never
+    reveals teammate activity; `total` is then 1 (Lead open) or 0 (no Lead
+    pane for this project), never > 1."""
     provider = notify.lead_provider_name(orch, _pulse_project(from_project))
     resp = _lead_frame(orch, {"cmd": "list", "from": "remote", "from_project": from_project})
     status = resp.get("status") if isinstance(resp, dict) else None
     if not isinstance(status, dict):
         return {"working": 0, "total": 0, "provider": provider}
-    if _remote_config.LEAD_ONLY_STREAM:
+    if not _remote_config.PULSE_SHOW_TEAM:
         lead_state = status.get(LEAD.name)
         if not isinstance(lead_state, str):
             return {"working": 0, "total": 0, "provider": provider}
@@ -190,58 +189,60 @@ def pulse(orch, from_project: str | None) -> dict:
 
 
 def activity(orch) -> dict:
-    """Pulse page (project-grouped active panes). DATA-MIN (§7.3, same bar as
-    `pulse`): role + project + runtime only — never task text, cwd, command,
-    or status detail. Runs inline on the Qt main thread (like `projects`/
-    `lead_history`, not `pulse`'s off-thread loopback call) since it reads
+    """Pulse page (project-grouped open panes). DATA-MIN (§7.3, same bar as
+    `pulse`): role + project + state + runtime only — never task text, cwd,
+    command, or fine-grained status detail (e.g. "working (stalled 12m)"
+    collapses to the same "working"/"idle" the phone gets for everything
+    else). Runs inline on the Qt main thread (like `projects`/`lead_history`,
+    not `pulse`'s off-thread loopback call) since it reads
     `orch._panes_by_project` directly rather than going through cli_server.
 
     `pane._working_start` (the same wall-clock the pane header's own
     elapsed-time spinner reads, see `agent_pane.py:set_state`) is the
     "started" timestamp — a pane can be spawned long before it's actually
     given work, so runtime is measured from the current task starting, not
-    from spawn.
+    from spawn. A pane whose state is "working" but has no `_working_start`
+    yet (defensive — `set_state` always stamps one, but never fabricate a
+    runtime) reports `runtime_sec: 0` rather than being dropped from the
+    list — the whole point of #200 is that every open pane shows up.
 
     Lead is surfaced separately from `roles` (W4): every project with an open
     Lead pane gets a `lead` entry with `state: "working"|"idle"` regardless of
     whether it's currently working, so the phone always shows whether Lead is
-    home. Idle Lead's `_working_start` is `None` (cleared by `set_state` —
-    see `agent_pane.py`), so idle never reuses a stale/previous runtime; it's
-    reported as 0.
+    home.
 
-    When `config.LEAD_ONLY_STREAM` is on (the default since 2026-07-23),
-    `roles` is always `[]`: the phone mirrors Lead and nothing else. The key
-    is still emitted — dropping it would break every PWA build that reads
-    `p.roles.length` — it is simply always empty."""
+    `roles` covers every other open pane (#200, 2026-08-14) — not just ones
+    currently working, so a project with three idle teammates still shows
+    three chips, not zero. When `config.PULSE_SHOW_TEAM` is off, `roles` is
+    always `[]`: the phone mirrors Lead and nothing else (pre-#200 default).
+    The key is still emitted either way — dropping it would break every PWA
+    build that reads `p.roles.length`."""
     now = time.time()
-    lead_only = _remote_config.LEAD_ONLY_STREAM
+    show_team = _remote_config.PULSE_SHOW_TEAM
     projects_out: list[dict] = []
     for project_ns, panes in (getattr(orch, "_panes_by_project", None) or {}).items():
         roles: list[dict] = []
         lead_out: dict | None = None
         for role, pane in panes.items():
             state = getattr(pane, "state", None)
+            working = state == "working"
+            started = getattr(pane, "_working_start", None) if working else None
+            runtime_sec = max(0, int(now - started)) if started is not None else 0
+            state_out = "working" if working else "idle"
             if role == LEAD.name:
-                working = state == "working"
-                started = getattr(pane, "_working_start", None) if working else None
-                runtime_sec = max(0, int(now - started)) if started is not None else 0
                 lead_out = {
-                    "state": "working" if working else "idle",
+                    "state": state_out,
                     "runtime_sec": runtime_sec,
                     "provider": notify.pane_provider_name(orch, project_ns, role, pane),
                 }
                 continue
-            if lead_only:
-                continue
-            if state != "working":
-                continue
-            started = getattr(pane, "_working_start", None)
-            if started is None:
+            if not show_team:
                 continue
             roles.append(
                 {
                     "role": role,
-                    "runtime_sec": max(0, int(now - started)),
+                    "state": state_out,
+                    "runtime_sec": runtime_sec,
                     "provider": notify.pane_provider_name(orch, project_ns, role, pane),
                 }
             )

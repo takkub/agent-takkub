@@ -168,7 +168,7 @@
   var VIEW_SUBTITLES = {
     projects: "เฉพาะที่ import ไว้",
     lead: "", // dynamic based on activeProject
-    pulse: "เห็นแค่จำนวน"
+    pulse: "pane ที่เปิดอยู่ตอนนี้"
   };
 
   function updateHeaderTitle() {
@@ -2062,18 +2062,21 @@
     if (!wrap) return;
     wrap.innerHTML = "";
 
-    // `roles` is always [] while the server runs LEAD_ONLY_STREAM, so the
-    // headline count has to include a working Lead or it reads "0 ตำแหน่ง"
-    // with a spinning Lead chip right beneath it. Counted separately from
-    // `visible`: an *idle* Lead still earns its project a card (the user
-    // wants to see Lead is home) but is not "working".
+    // #200: `roles` now lists every open teammate pane (working or idle),
+    // not just working ones — so the headline count is `working` (spinner
+    // chips) counted separately from `visible` (any card worth drawing,
+    // working or idle). An idle-only project still earns a card: the point
+    // of Pulse is to show what's *open*, not only what's mid-task.
     var totalWorking = 0;
     var visible = 0;
     projects.forEach(function (p) {
       if (!p) return;
       if (p.lead && p.lead.provider) setProvider(p.lead.provider, p.project);
-      var roleCount = Array.isArray(p.roles) ? p.roles.length : 0;
-      totalWorking += roleCount;
+      var roles = Array.isArray(p.roles) ? p.roles : [];
+      var roleCount = roles.length;
+      roles.forEach(function (r) {
+        if (r && r.state === "working") totalWorking += 1;
+      });
       if (p.lead && p.lead.state === "working") totalWorking += 1;
       if (p.lead || roleCount) visible += 1;
     });
@@ -2081,7 +2084,7 @@
     if (!projects.length || visible === 0) {
       var empty = document.createElement("div");
       empty.className = "pulse-empty";
-      empty.innerHTML = '<span class="icon">🌙</span><span class="text">ไม่มีงานกำลังรันอยู่</span>';
+      empty.innerHTML = '<span class="icon">🌙</span><span class="text">ไม่มี pane เปิดอยู่</span>';
       wrap.appendChild(empty);
       $("pulse-count").textContent = "0 ตำแหน่งกำลังทำงาน";
       return;
@@ -2112,7 +2115,7 @@
       }
       roles.forEach(function (r) {
         if (!r || !r.role) return;
-        chips.appendChild(makeRoleChip(r.role, r.runtime_sec, false, r.provider));
+        chips.appendChild(makeRoleChip(r.role, r.runtime_sec, r.state !== "working", r.provider));
       });
       card.appendChild(chips);
 
