@@ -93,6 +93,115 @@ def test_cancel_waiting_on_pane_close() -> None:
     assert governor.snapshot()["queued_resource_tasks"] == 0
 
 
+def test_gate_block_backoff_reduces_retry_frequency() -> None:
+    """Issue #195: a queue head that stays blocked used to be retried (and
+    logged via `resource_gate_block`) unconditionally on every dispatch tick
+    — proven in the field as 15 identical lines in 15s for one task. Pins
+    the 1s/2s/5s/15s backoff schedule: over 10 one-second ticks starting
+    from enqueue, an attempt (and its log line) should land only at
+    t=1, 2, 4, 9 — 4 lines instead of 10."""
+    clock = [0.0]
+    events: list[tuple[str, dict]] = []
+    governor = ResourceGovernor(
+        _limits(max_heavy_global=1, max_heavy_per_project=1),
+        clock=lambda: clock[0],
+        event_sink=lambda event, details: events.append((event, details)),
+    )
+    held = _request(governor, "held", "one")
+    assert held.allowed
+    governor.enqueue(
+        project_id="a",
+        pane_id="a1",
+        task_id="a1",
+        resource_class=ResourceClass.HEAVY,
+    )
+    events.clear()
+
+    for _ in range(10):
+        clock[0] += 1.0
+        governor.dispatch_waiting()
+
+    block_events = [e for e, _ in events if e == "resource_gate_block"]
+    assert len(block_events) == 4, block_events
+
+
+def test_gate_unblock_emits_single_summary_event() -> None:
+    """Issue #195: once the blocked task is finally admitted, a single
+    `resource_gate_unblocked` event carries blocked_for_s + attempts instead
+    of the retry loop's per-attempt `resource_gate_block` flood."""
+    clock = [0.0]
+    events: list[tuple[str, dict]] = []
+    governor = ResourceGovernor(
+        _limits(max_heavy_global=1, max_heavy_per_project=1),
+        clock=lambda: clock[0],
+        event_sink=lambda event, details: events.append((event, details)),
+    )
+    held = _request(governor, "held", "one")
+    governor.enqueue(
+        project_id="a",
+        pane_id="a1",
+        task_id="a1",
+        resource_class=ResourceClass.HEAVY,
+    )
+    events.clear()
+    for _ in range(3):
+        clock[0] += 1.0
+        governor.dispatch_waiting()  # 2 denials land at t=1, t=2 (see backoff test)
+
+    governor.release_slot(held.token)
+    clock[0] += 1.0  # t=4 — exactly when the 2nd denial's backoff next allows a retry
+    events_before_admit = len(events)
+    admitted = governor.dispatch_waiting()
+    events_since_admit = events[events_before_admit:]
+
+    assert len(admitted) == 1
+    unblock_events = [d for e, d in events if e == "resource_gate_unblocked"]
+    assert len(unblock_events) == 1
+    assert unblock_events[0]["attempts"] == 2
+    assert unblock_events[0]["blocked_for_s"] == 4.0
+    assert not any(e == "resource_gate_block" for e, _ in events_since_admit), (
+        "the successful admission attempt itself must not log another gate_block"
+    )
+
+
+def test_freed_slot_admits_immediately_without_backoff_delay() -> None:
+    """A queue head must not be held back by an up-front backoff on its
+    very first dispatch attempt — only an actual denial inside the retry
+    loop should push next_retry_at forward. (Regression guard: this is what
+    `test_waiting_queue_is_round_robin_by_project` already relies on.)"""
+    governor = ResourceGovernor(_limits(max_heavy_global=1, max_heavy_per_project=1))
+    held = _request(governor, "held", "one")
+    order: list[str] = []
+    governor.enqueue(
+        project_id="a",
+        pane_id="a1",
+        task_id="a1",
+        resource_class=ResourceClass.HEAVY,
+        on_admitted=lambda _token: order.append("a1"),
+    )
+    governor.release_slot(held.token)
+    admitted = governor.dispatch_waiting()
+    assert order == ["a1"]
+    assert len(admitted) == 1
+
+
+def test_waiting_tasks_snapshot_exposes_reason() -> None:
+    """Issue #195 point 3: the status surface needs *why* a task is
+    waiting, not just a bare count."""
+    governor = ResourceGovernor(_limits(max_heavy_global=1, max_heavy_per_project=1))
+    _request(governor, "held", "one")
+    governor.enqueue(
+        project_id="a",
+        pane_id="a1",
+        task_id="a1",
+        resource_class=ResourceClass.HEAVY,
+        reason="heavy_global_limit",
+    )
+    waiting = governor.snapshot()["waiting_tasks"]
+    assert len(waiting) == 1
+    assert waiting[0]["reason"] == "heavy_global_limit"
+
+
 def test_live_limit_update_preserves_active_tokens_and_waiting_queue() -> None:
     governor = ResourceGovernor(_limits(max_heavy_global=1, max_heavy_per_project=1))
     held = _request(governor, "a", "one")

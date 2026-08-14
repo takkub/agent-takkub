@@ -606,6 +606,14 @@ class PaneState:
     # per pane's current assignment is enough; the dialog doesn't repeat the
     # marker text, so re-scanning after the first hit is just wasted I/O.
     shell_open_dialog_notified: bool = False
+    # last_dialog_scan_ts / dialog_scan_in_flight (issue #194): throttle +
+    # coalesce state for the transcript-tail scan above. The blocking
+    # open()+read() runs on a background thread and at most once every
+    # _SHELL_DIALOG_SCAN_INTERVAL_S per pane — was every 5s watchdog tick,
+    # which is what turned a slow (often AV-scanned) file open into a
+    # repeating Qt main-thread stall.
+    last_dialog_scan_ts: float = 0.0
+    dialog_scan_in_flight: bool = False
     # ── proactive idle compaction (prompt-cache TTL cost control) ────────────
     # proactive_compact_idle_since: monotonic-ish wall clock (time.time()) when
     # this pane was first observed continuously idle at its ready prompt; None

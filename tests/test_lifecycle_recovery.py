@@ -264,7 +264,7 @@ class _FakeOrchForContentDelta:
     def _maybe_surface_tty_block(self, key, role, project, prompt_line, now) -> None:
         pass  # no-op stub
 
-    def _check_shell_open_dialog(self, project_name, role, pane, key) -> None:
+    def _check_shell_open_dialog(self, project_name, role, pane, key, now) -> None:
         pass  # no-op stub — #104 tripwire covered in test_stuck_recover.py
 
 

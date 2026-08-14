@@ -125,7 +125,7 @@ class _FakeSplashOrch:
     def _surface_tty_block_notice(self, role, project, prompt_line):
         pass
 
-    def _check_shell_open_dialog(self, project_name, role, pane, key) -> None:
+    def _check_shell_open_dialog(self, project_name, role, pane, key, now) -> None:
         pass  # no-op stub — #104 tripwire covered in test_stuck_recover.py
 
 
