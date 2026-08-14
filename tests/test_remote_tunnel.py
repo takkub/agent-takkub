@@ -8,9 +8,11 @@ tears them down.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import types
 
+import psutil
 import pytest
 import yaml
 
@@ -18,6 +20,17 @@ from agent_takkub.remote import tunnel
 from agent_takkub.remote.config import TunnelConfig
 
 _UUID = "12345678-1234-1234-1234-123456789abc"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_pid_file(monkeypatch, tmp_path):
+    """#197: every test in this file runs against a tmp `_PID_FILE`, never
+    the real `RUNTIME_DIR/tunnel/tunnel_pid.json` — `Tunnel.stop()` and
+    `reap_orphan_tunnel()` both touch that path for real (including a real
+    `_tree_kill`/taskkill on a genuinely-orphaned pid), and a dev machine
+    running this suite may have a live cockpit whose actual tunnel that path
+    points at."""
+    monkeypatch.setattr(tunnel, "_PID_FILE", tmp_path / "tunnel_pid.json")
 
 
 class _FakeProc:
@@ -524,3 +537,174 @@ def test_real_platform_constant_is_sane():
     # Sanity check the module imported cleanly on whatever OS is running
     # this test — CI runs both windows-latest and macos-latest.
     assert sys.platform in ("win32", "darwin", "linux")
+
+
+class _FakePsutilProcess:
+    def __init__(self, create_time: float) -> None:
+        self._create_time = create_time
+
+    def create_time(self) -> float:
+        return self._create_time
+
+
+class TestPidFileWriteAndClear:
+    """#197: `Tunnel.start()`/`stop()` write/clear the pid file that
+    `reap_orphan_tunnel()` later reads at boot."""
+
+    def _cfg(self, tmp_path):
+        creds = tmp_path / "creds.json"
+        creds.write_text(json.dumps({"TunnelID": _UUID}), encoding="utf-8")
+        return TunnelConfig(type="cloudflared", credentials_json=str(creds))
+
+    def _patched(self, monkeypatch, proc):
+        monkeypatch.setattr(tunnel, "_spawn", lambda argv, extra_env=None: proc)
+        monkeypatch.setattr(tunnel.Tunnel, "_own_job_if_windows", lambda self: None)
+        monkeypatch.setattr(tunnel.time, "sleep", lambda s: None)
+
+    def test_start_writes_pid_file_with_owner_identity(self, monkeypatch, tmp_path):
+        proc = _FakeProc(returncode=None, pid=54321)
+        self._patched(monkeypatch, proc)
+        t = tunnel.Tunnel(self._cfg(tmp_path), public_url="https://x.example.com", port=8899)
+        t.start()
+
+        assert tunnel._PID_FILE.exists()
+        data = json.loads(tunnel._PID_FILE.read_text(encoding="utf-8"))
+        assert data["pid"] == 54321
+        assert data["owner_pid"] == os.getpid()
+        assert data["owner_create_time"] == pytest.approx(psutil.Process(os.getpid()).create_time())
+        assert data["config_path"]  # named-tunnel mode records the rendered config.yml path
+        assert data["instance_lock_id"]
+
+    def test_start_writes_no_pid_file_when_named_verification_fails(self, monkeypatch, tmp_path):
+        proc = _FakeProc(returncode=1, lines=[])
+        self._patched(monkeypatch, proc)
+        t = tunnel.Tunnel(self._cfg(tmp_path), public_url="https://x.example.com", port=8899)
+        with pytest.raises(tunnel.TunnelError):
+            t.start()
+        assert not tunnel._PID_FILE.exists()
+
+    def test_stop_clears_a_matching_pid_file(self, monkeypatch):
+        monkeypatch.setattr(tunnel, "_tree_kill", lambda pid: None)
+        tunnel._PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tunnel._PID_FILE.write_text(json.dumps({"pid": 4242}), encoding="utf-8")
+        cfg = TunnelConfig(type="bat", credentials_json="./quick-tunnel.sh")
+        t = tunnel.Tunnel(cfg, public_url="", port=8899)
+        t._proc = _FakeProc(pid=4242)
+
+        t.stop()
+
+        assert not tunnel._PID_FILE.exists()
+
+    def test_stop_leaves_a_different_tunnels_pid_file_alone(self, monkeypatch):
+        """A stale/racing pid file recording some OTHER tunnel's pid must
+        never be deleted by the wrong `Tunnel.stop()`."""
+        monkeypatch.setattr(tunnel, "_tree_kill", lambda pid: None)
+        tunnel._PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tunnel._PID_FILE.write_text(json.dumps({"pid": 9999}), encoding="utf-8")
+        cfg = TunnelConfig(type="bat", credentials_json="./quick-tunnel.sh")
+        t = tunnel.Tunnel(cfg, public_url="", port=8899)
+        t._proc = _FakeProc(pid=4242)
+
+        t.stop()
+
+        assert tunnel._PID_FILE.exists()
+        assert json.loads(tunnel._PID_FILE.read_text(encoding="utf-8"))["pid"] == 9999
+
+
+class TestReapOrphanTunnel:
+    """#197: boot-time cleanup for a tunnel whose owning cockpit died
+    without calling `Tunnel.stop()` (hard-kill, crash — proven live via
+    docs/audit/2026-08-14-remote-tunnel-orphan-repro.md)."""
+
+    def _write_pid_file(self, pid: int, owner_pid: int, owner_create_time: float) -> None:
+        tunnel._PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tunnel._PID_FILE.write_text(
+            json.dumps(
+                {
+                    "pid": pid,
+                    "owner_pid": owner_pid,
+                    "owner_create_time": owner_create_time,
+                    "instance_lock_id": "test-lock",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def test_no_pid_file_is_a_no_op(self, monkeypatch):
+        killed = []
+        monkeypatch.setattr(tunnel, "_tree_kill", lambda pid: killed.append(pid))
+        tunnel.reap_orphan_tunnel()
+        assert killed == []
+
+    def test_corrupt_pid_file_is_cleared_without_raising(self, monkeypatch):
+        tunnel._PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tunnel._PID_FILE.write_text("{not json", encoding="utf-8")
+        tunnel.reap_orphan_tunnel()  # must not raise
+        assert not tunnel._PID_FILE.exists()
+
+    def test_dead_tunnel_process_just_clears_the_file(self, monkeypatch):
+        self._write_pid_file(pid=999999, owner_pid=os.getpid(), owner_create_time=0.0)
+        monkeypatch.setattr(psutil, "pid_exists", lambda pid: False)
+        killed = []
+        monkeypatch.setattr(tunnel, "_tree_kill", lambda pid: killed.append(pid))
+
+        tunnel.reap_orphan_tunnel()
+
+        assert killed == []
+        assert not tunnel._PID_FILE.exists()
+
+    def test_live_tunnel_with_live_matching_owner_is_left_alone(self, monkeypatch):
+        """The common non-orphan case: a live cockpit still legitimately owns
+        this tunnel (this IS the running session, or a restart-successor
+        checking mid-handoff) — must not be touched."""
+        real_create_time = psutil.Process(os.getpid()).create_time()
+        self._write_pid_file(pid=12345, owner_pid=os.getpid(), owner_create_time=real_create_time)
+        monkeypatch.setattr(psutil, "pid_exists", lambda pid: True)
+        killed = []
+        monkeypatch.setattr(tunnel, "_tree_kill", lambda pid: killed.append(pid))
+
+        tunnel.reap_orphan_tunnel()
+
+        assert killed == []
+        assert tunnel._PID_FILE.exists()
+
+    def test_live_tunnel_with_dead_owner_is_reaped(self, monkeypatch):
+        self._write_pid_file(pid=12345, owner_pid=999998, owner_create_time=111.0)
+
+        def _pid_exists(pid):
+            return pid == 12345  # tunnel alive, owner (999998) is not
+
+        monkeypatch.setattr(psutil, "pid_exists", _pid_exists)
+        killed = []
+        monkeypatch.setattr(tunnel, "_tree_kill", lambda pid: killed.append(pid))
+
+        tunnel.reap_orphan_tunnel()
+
+        assert killed == [12345]
+        assert not tunnel._PID_FILE.exists()
+
+    def test_live_tunnel_with_reused_owner_pid_is_reaped(self, monkeypatch):
+        """PID-reuse guard: `owner_pid` is alive, but it's a DIFFERENT
+        process now (create_time mismatch) — must still be treated as
+        orphaned, not "still owned"."""
+        self._write_pid_file(pid=12345, owner_pid=os.getpid(), owner_create_time=1.0)
+        monkeypatch.setattr(psutil, "pid_exists", lambda pid: True)
+        monkeypatch.setattr(psutil, "Process", lambda pid: _FakePsutilProcess(create_time=999.0))
+        killed = []
+        monkeypatch.setattr(tunnel, "_tree_kill", lambda pid: killed.append(pid))
+
+        tunnel.reap_orphan_tunnel()
+
+        assert killed == [12345]
+        assert not tunnel._PID_FILE.exists()
+
+    def test_non_int_pid_clears_the_file_without_killing(self, monkeypatch):
+        tunnel._PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tunnel._PID_FILE.write_text(json.dumps({"pid": "not-a-pid"}), encoding="utf-8")
+        killed = []
+        monkeypatch.setattr(tunnel, "_tree_kill", lambda pid: killed.append(pid))
+
+        tunnel.reap_orphan_tunnel()
+
+        assert killed == []
+        assert not tunnel._PID_FILE.exists()

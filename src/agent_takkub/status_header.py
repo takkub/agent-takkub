@@ -1373,8 +1373,10 @@ class StatusHeaderMixin:
             return
         tunnel = getattr(remote, "_tunnel", None)
         if tunnel is not None and getattr(tunnel, "is_alive", False):
+            pid = getattr(tunnel, "pid", None)
+            pid_note = f" (pid {pid})" if pid else ""
             tabs.set_tunnel_status(
-                "running", "Tunnel: running — reachable from outside this machine."
+                "running", f"Tunnel: running{pid_note} — reachable from outside this machine."
             )
             return
         error = getattr(remote, "tunnel_error", None)

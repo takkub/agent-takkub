@@ -20,8 +20,14 @@ from agent_takkub.remote.config import RemoteConfig, TunnelConfig
 @pytest.fixture
 def _isolated(tmp_path, monkeypatch):
     import agent_takkub.remote.config as remote_config
+    import agent_takkub.remote.tunnel as tunnel_config
 
     monkeypatch.setattr(remote_config, "_PATH", tmp_path / "remote.json")
+    # #197: `maybe_start` now unconditionally calls `reap_orphan_tunnel()`
+    # (even when disabled) — must never touch a real dev machine's actual
+    # `RUNTIME_DIR/tunnel/tunnel_pid.json` (which could point at a genuinely
+    # live cockpit's tunnel) while running this suite.
+    monkeypatch.setattr(tunnel_config, "_PID_FILE", tmp_path / "tunnel_pid.json")
 
 
 # ---------------------------------------------------------------------------
@@ -71,6 +77,173 @@ class TestMaybeStart:
         finally:
             rc.stop()
         assert set(threading.enumerate()) == before
+
+
+class TestBootTimeReap:
+    """#197: `maybe_start` reaps an orphaned tunnel from a PREVIOUS session
+    unconditionally — even when this session's config says disabled."""
+
+    def test_reap_runs_even_when_disabled(self, _isolated, monkeypatch):
+        import agent_takkub.remote.tunnel as tunnel_mod
+
+        called = []
+        monkeypatch.setattr(tunnel_mod, "reap_orphan_tunnel", lambda: called.append(True))
+
+        assert RemoteControl.maybe_start(MagicMock()) is None
+        assert called == [True]
+
+    def test_reap_runs_before_the_enabled_server_starts(self, _isolated, monkeypatch):
+        import agent_takkub.remote.tunnel as tunnel_mod
+
+        called = []
+        monkeypatch.setattr(tunnel_mod, "reap_orphan_tunnel", lambda: called.append(True))
+        RemoteConfig(enabled=True, bind_port=0, auto_start_tunnel=False).save()
+
+        rc = RemoteControl.maybe_start(MagicMock())
+        try:
+            assert called == [True]
+        finally:
+            rc.stop()
+
+    def test_a_failing_reap_does_not_block_boot(self, _isolated, monkeypatch):
+        import agent_takkub.remote.tunnel as tunnel_mod
+
+        def _boom():
+            raise RuntimeError("disk unavailable")
+
+        monkeypatch.setattr(tunnel_mod, "reap_orphan_tunnel", _boom)
+        RemoteConfig(enabled=True, bind_port=0, auto_start_tunnel=False).save()
+
+        rc = RemoteControl.maybe_start(MagicMock())
+        try:
+            assert isinstance(rc, RemoteControl)
+        finally:
+            rc.stop()
+
+
+class TestStartDiagnosticNotes:
+    """#193: `_start()` surfaces non-fatal diagnostics — a port-fallback, a
+    stale ingress hostname, a failed loopback probe — instead of a pairing
+    URL that comes up looking healthy but silently doesn't work."""
+
+    def test_no_port_conflict_when_bind_port_matches(self, _isolated):
+        RemoteConfig(enabled=True, bind_port=0, auto_start_tunnel=False).save()
+        rc = RemoteControl.maybe_start(MagicMock())
+        try:
+            # bind_port=0 means "let the OS pick" — never counted as a
+            # conflict against whatever ephemeral port comes back.
+            assert rc.port_conflict_note is None
+        finally:
+            rc.stop()
+
+    def test_port_conflict_is_reported_with_the_holder(self, _isolated, monkeypatch):
+        import agent_takkub.remote.diagnostics as diagnostics_mod
+        import agent_takkub.remote.http_server as http_server_mod
+
+        class _FakeServer:
+            def __init__(self, port):
+                self.port = port
+                self.broadcaster = MagicMock()
+
+            def stop(self):
+                pass
+
+        # Simulate `start_server`'s own scan-forward already having picked a
+        # DIFFERENT port than the one requested.
+        monkeypatch.setattr(
+            http_server_mod, "start_server", lambda config, orch: _FakeServer(12345)
+        )
+        monkeypatch.setattr(
+            diagnostics_mod, "describe_port_owner", lambda port: "pid 999 (other.exe)"
+        )
+        RemoteConfig(enabled=True, bind_port=9999, auto_start_tunnel=False).save()
+
+        rc = RemoteControl.maybe_start(MagicMock())
+        try:
+            assert "9999" in rc.port_conflict_note
+            assert "pid 999 (other.exe)" in rc.port_conflict_note
+            assert "12345" in rc.port_conflict_note
+        finally:
+            rc.stop()
+
+    def test_hostname_mismatch_is_reported(self, _isolated, monkeypatch, tmp_path):
+        import agent_takkub.config as config_mod
+
+        monkeypatch.setattr(config_mod, "RUNTIME_DIR", tmp_path)
+        config_yml_dir = tmp_path / "tunnel"
+        config_yml_dir.mkdir(parents=True)
+        (config_yml_dir / "config.yml").write_text(
+            "tunnel: abc\ningress:\n  - hostname: old.example.com\n    service: http://localhost:1\n",
+            encoding="utf-8",
+        )
+        RemoteConfig(
+            enabled=True,
+            bind_port=0,
+            auto_start_tunnel=False,
+            public_url="https://new.example.com",
+        ).save()
+
+        rc = RemoteControl.maybe_start(MagicMock())
+        try:
+            assert "old.example.com" in rc.hostname_mismatch_note
+            assert "new.example.com" in rc.hostname_mismatch_note
+        finally:
+            rc.stop()
+
+    def test_local_probe_failure_is_reported(self, _isolated, monkeypatch):
+        import agent_takkub.remote.diagnostics as diagnostics_mod
+
+        monkeypatch.setattr(
+            diagnostics_mod, "probe_local", lambda port, secret_path, timeout=2.0: (False, "boom")
+        )
+        RemoteConfig(enabled=True, bind_port=0, auto_start_tunnel=False).save()
+
+        rc = RemoteControl.maybe_start(MagicMock())
+        try:
+            assert rc.local_probe_note is not None
+            assert "boom" in rc.local_probe_note
+        finally:
+            rc.stop()
+
+    def test_local_probe_success_leaves_note_none(self, _isolated):
+        RemoteConfig(enabled=True, bind_port=0, auto_start_tunnel=False).save()
+        rc = RemoteControl.maybe_start(MagicMock())
+        try:
+            assert rc.local_probe_note is None
+        finally:
+            rc.stop()
+
+    def test_stop_tunnel_only_leaves_server_running(self, _isolated, monkeypatch):
+        import agent_takkub.remote.tunnel as tunnel_mod
+
+        class _FakeTunnel:
+            def __init__(self, *a, **kw):
+                self.stopped = False
+
+            def start(self):
+                pass
+
+            def stop(self):
+                self.stopped = True
+
+        monkeypatch.setattr(tunnel_mod, "Tunnel", _FakeTunnel)
+        RemoteConfig(
+            enabled=True,
+            bind_port=0,
+            auto_start_tunnel=True,
+            tunnel=TunnelConfig(type="quick"),
+        ).save()
+
+        rc = RemoteControl.maybe_start(MagicMock())
+        try:
+            tunnel_obj = rc._tunnel
+            assert tunnel_obj is not None
+            rc.stop_tunnel_only()
+            assert tunnel_obj.stopped is True
+            assert rc._tunnel is None
+            assert rc._server is not None  # server/notifier untouched
+        finally:
+            rc.stop()
 
 
 class TestQuickTunnelAutoStart:

@@ -720,12 +720,22 @@ class UserActionsMixin:
             current=_config_mod.RemoteConfig.load(),
             on_apply=self._apply_remote_config,
             on_logout_all=self._logout_all_remote_sessions,
+            on_stop_tunnel=self._stop_remote_tunnel_only,
         )
         self._remote_settings_dialog = dlg
         try:
             dlg.exec()
         finally:
             self._remote_settings_dialog = None
+        self._refresh_remote_chip()
+
+    def _stop_remote_tunnel_only(self) -> None:
+        """#197 item 5: `RemoteSettingsDialog`'s "Stop tunnel only" button —
+        kills just the tunnel subprocess, keeps the HTTP server/notifier
+        live. Injected the same way `_apply_remote_config` is."""
+        remote = getattr(self, "_remote", None)
+        if remote is not None:
+            remote.stop_tunnel_only()
         self._refresh_remote_chip()
 
     def _poll_remote_public_url(self, tunnel_obj, remote_obj) -> None:
@@ -846,7 +856,49 @@ class UserActionsMixin:
             else:
                 self._poll_remote_public_url(tunnel_obj, self._remote)
 
-        return True, "", self._remote.config.pairing_url()
+        warning = self._remote_start_warning(self._remote, probe_public=not needs_url_scrape)
+        return True, warning, self._remote.config.pairing_url()
+
+    def _remote_start_warning(self, remote_obj, *, probe_public: bool) -> str:
+        """#193: collect `RemoteControl._start()`'s non-fatal diagnostics
+        (port fallback, stale ingress hostname, failed loopback probe) plus,
+        when the public URL is already known (named-tunnel/ngrok-fixed —
+        `probe_public=False` skips it for quick/ngrok-random, whose URL
+        isn't captured yet), a real probe THROUGH the tunnel edge — into one
+        message for the Settings dialog to show next to a pairing URL that
+        DID come up but may not actually work. Never blocks longer than the
+        public probe's own timeout; never raises."""
+        notes = [
+            n
+            for n in (
+                getattr(remote_obj, "port_conflict_note", None),
+                getattr(remote_obj, "hostname_mismatch_note", None),
+                getattr(remote_obj, "local_probe_note", None),
+            )
+            # isinstance guard, not just truthiness: a test double (MagicMock)
+            # without these attrs explicitly set returns a truthy Mock, not a
+            # real string — must not leak into the joined message.
+            if isinstance(n, str) and n
+        ]
+        public_url = getattr(remote_obj.config, "public_url", None)
+        secret_path = getattr(remote_obj.config, "secret_path", None)
+        if (
+            probe_public
+            and isinstance(public_url, str)
+            and public_url
+            and isinstance(secret_path, str)
+            and secret_path
+        ):
+            try:
+                import importlib
+
+                diagnostics = importlib.import_module("agent_takkub.remote.diagnostics")
+                ok, detail = diagnostics.probe_public(public_url, secret_path)
+                if not ok:
+                    notes.append(f"Could not verify the public URL is reachable yet: {detail}")
+            except ModuleNotFoundError:
+                pass
+        return "\n".join(notes)
 
     def _logout_all_remote_sessions(self) -> None:
         """ "Log out all devices" (#196 requirement 4), wired into

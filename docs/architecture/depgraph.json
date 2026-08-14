@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 145,
+  "module_count": 146,
   "modules": [
     {
       "module": "agent_takkub",
@@ -400,6 +400,7 @@
         "agent_takkub.provider_models",
         "agent_takkub.provider_spec",
         "agent_takkub.provider_state",
+        "agent_takkub.remote",
         "agent_takkub.remote.api",
         "agent_takkub.remote.config",
         "agent_takkub.remote.http_server",
@@ -431,7 +432,7 @@
         "agent_takkub.vault_mirror",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 74,
+      "fan_in": 75,
       "fan_out": 0
     },
     {
@@ -1262,14 +1263,16 @@
     {
       "module": "agent_takkub.remote",
       "imports": [
+        "agent_takkub.config",
         "agent_takkub.remote.config",
+        "agent_takkub.remote.diagnostics",
         "agent_takkub.remote.http_server",
         "agent_takkub.remote.notify",
         "agent_takkub.remote.tunnel"
       ],
       "imported_by": [],
       "fan_in": 0,
-      "fan_out": 4
+      "fan_out": 6
     },
     {
       "module": "agent_takkub.remote.api",
@@ -1319,6 +1322,15 @@
       ],
       "fan_in": 8,
       "fan_out": 1
+    },
+    {
+      "module": "agent_takkub.remote.diagnostics",
+      "imports": [],
+      "imported_by": [
+        "agent_takkub.remote"
+      ],
+      "fan_in": 1,
+      "fan_out": 0
     },
     {
       "module": "agent_takkub.remote.http_server",

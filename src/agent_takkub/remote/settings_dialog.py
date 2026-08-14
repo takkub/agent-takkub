@@ -208,11 +208,21 @@ class RemoteSettingsDialog(QDialog):
     """
 
     def __init__(
-        self, parent, *, is_live: bool, current: RemoteConfig, on_apply, on_logout_all=None
+        self,
+        parent,
+        *,
+        is_live: bool,
+        current: RemoteConfig,
+        on_apply,
+        on_logout_all=None,
+        on_stop_tunnel=None,
     ) -> None:
         super().__init__(parent)
         self._on_apply = on_apply
         self._on_logout_all = on_logout_all
+        # #197 item 5: optional — a stand-in role/older caller that doesn't
+        # pass it just doesn't get the button, never a crash.
+        self._on_stop_tunnel = on_stop_tunnel
         self._is_live = is_live
         self.setWindowTitle("🌐 Remote Control")
         self.setMinimumWidth(480)
@@ -392,6 +402,14 @@ class RemoteSettingsDialog(QDialog):
         self._toggle_btn.clicked.connect(self._on_toggle)
         layout.addWidget(self._toggle_btn)
 
+        # #197 item 5: kill just the tunnel subprocess (server/notifier stay
+        # up) — for a misbehaving tunnel, or going loopback-only on demand
+        # without a full Disable+Enable round trip. Only shown while live.
+        self._stop_tunnel_btn = QPushButton("⏹ Stop tunnel only")
+        self._stop_tunnel_btn.clicked.connect(self._on_stop_tunnel_clicked)
+        self._stop_tunnel_btn.setVisible(is_live and self._on_stop_tunnel is not None)
+        layout.addWidget(self._stop_tunnel_btn)
+
         self._pairing_label = QLabel(_PAIRING_WARNING)
         self._pairing_label.setWordWrap(True)
         self._pairing_label.setStyleSheet("color:#f59e0b;")
@@ -437,8 +455,23 @@ class RemoteSettingsDialog(QDialog):
         self._form.setRowVisible(self._ngrok_bin_row, is_ngrok)
         self._ngrok_note.setVisible(is_ngrok)
 
+    def _on_stop_tunnel_clicked(self) -> None:
+        if self._on_stop_tunnel is None:
+            return
+        self._on_stop_tunnel()
+        self._stop_tunnel_btn.setEnabled(False)
+        QMessageBox.information(
+            self,
+            "Tunnel stopped",
+            "The tunnel subprocess was stopped. The remote server is still "
+            "running loopback-only — use Disable to turn off remote control "
+            "entirely, or re-open this dialog after Enable to start a new tunnel.",
+        )
+
     def _render_state(self, *, pairing_url: str) -> None:
         self._toggle_btn.setText("Disable" if self._is_live else "Enable")
+        self._stop_tunnel_btn.setVisible(self._is_live and self._on_stop_tunnel is not None)
+        self._stop_tunnel_btn.setEnabled(True)
         editable = not self._is_live
         for w in (
             self._provider_cloudflare,
@@ -572,6 +605,12 @@ class RemoteSettingsDialog(QDialog):
             return
         self._is_live = True
         self._render_state(pairing_url=pairing_url)
+        if msg:
+            # #193: non-fatal diagnostics (port fallback, stale ingress
+            # hostname, failed reachability probe) — remote DID come up
+            # (pairing_url is already showing), this is a heads-up, not a
+            # reason to treat Enable as failed.
+            QMessageBox.warning(self, "Remote enabled — heads up", msg)
 
     def _collect_cloudflare_fields(self) -> tuple[str, str, str, str, str, str, str] | None:
         """Validate + gather the Cloudflare-provider fields for `_on_toggle`.

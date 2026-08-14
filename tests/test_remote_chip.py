@@ -94,11 +94,21 @@ class TestOnRemoteChipClicked:
         captured = {}
 
         class _FakeDialog:
-            def __init__(self, parent, *, is_live, current, on_apply, on_logout_all=None):
+            def __init__(
+                self,
+                parent,
+                *,
+                is_live,
+                current,
+                on_apply,
+                on_logout_all=None,
+                on_stop_tunnel=None,
+            ):
                 captured["is_live"] = is_live
                 captured["current"] = current
                 captured["on_apply"] = on_apply
                 captured["on_logout_all"] = on_logout_all
+                captured["on_stop_tunnel"] = on_stop_tunnel
 
             def exec(self):
                 captured["exec_called"] = True
@@ -110,6 +120,7 @@ class TestOnRemoteChipClicked:
         assert captured["exec_called"] is True
         assert captured["on_apply"] == stub._apply_remote_config
         assert captured["on_logout_all"] == stub._logout_all_remote_sessions
+        assert captured["on_stop_tunnel"] == stub._stop_remote_tunnel_only
 
 
 class TestApplyRemoteConfig:
@@ -363,6 +374,127 @@ class TestLogoutAllRemoteSessions:
         assert pairing_url == ""
 
 
+class TestApplyRemoteConfigDiagnosticWarning:
+    """#193: `_apply_remote_config` surfaces `RemoteControl._start()`'s
+    non-fatal diagnostic notes as `msg` alongside a pairing URL that DID
+    come up — Enable still reports `ok=True`, this is a heads-up."""
+
+    def test_port_conflict_note_is_surfaced_as_a_warning(self, monkeypatch, tmp_path):
+        _isolate_remote_json(monkeypatch, tmp_path)
+        stub = _Stub()
+        stub._remote = None
+
+        fake_remote = MagicMock()
+        fake_remote.config = RemoteConfig()
+        fake_remote.config.public_url = ""
+        fake_remote.port_conflict_note = "Port 9999 was already in use by pid 111 — using 10000."
+        fake_remote.hostname_mismatch_note = None
+        fake_remote.local_probe_note = None
+        fake_remote._tunnel = None
+        monkeypatch.setattr(
+            "agent_takkub.remote.RemoteControl.maybe_start", lambda orch: fake_remote
+        )
+
+        ok, msg, _pairing_url = stub._apply_remote_config(RemoteConfig(), True)
+
+        assert ok is True
+        assert "Port 9999" in msg
+
+    def test_no_diagnostics_means_empty_warning(self, monkeypatch, tmp_path):
+        _isolate_remote_json(monkeypatch, tmp_path)
+        stub = _Stub()
+        stub._remote = None
+
+        fake_remote = MagicMock()
+        fake_remote.config = RemoteConfig()
+        fake_remote.port_conflict_note = None
+        fake_remote.hostname_mismatch_note = None
+        fake_remote.local_probe_note = None
+        fake_remote._tunnel = None
+        monkeypatch.setattr(
+            "agent_takkub.remote.RemoteControl.maybe_start", lambda orch: fake_remote
+        )
+
+        ok, msg, _pairing_url = stub._apply_remote_config(RemoteConfig(), True)
+
+        assert ok is True
+        assert msg == ""
+
+    def test_multiple_notes_are_joined(self, monkeypatch, tmp_path):
+        _isolate_remote_json(monkeypatch, tmp_path)
+        stub = _Stub()
+        stub._remote = None
+
+        fake_remote = MagicMock()
+        fake_remote.config = RemoteConfig()
+        fake_remote.port_conflict_note = "port note"
+        fake_remote.hostname_mismatch_note = "hostname note"
+        fake_remote.local_probe_note = "probe note"
+        fake_remote._tunnel = None
+        monkeypatch.setattr(
+            "agent_takkub.remote.RemoteControl.maybe_start", lambda orch: fake_remote
+        )
+
+        ok, msg, _pairing_url = stub._apply_remote_config(RemoteConfig(), True)
+
+        assert ok is True
+        assert "port note" in msg
+        assert "hostname note" in msg
+        assert "probe note" in msg
+
+    def test_does_not_make_a_real_network_call_when_public_url_is_unset(
+        self, monkeypatch, tmp_path
+    ):
+        """A MagicMock `.config.public_url` (a test double without it
+        explicitly set) must never be treated as a real URL to probe — that
+        would fire a live network request from a unit test."""
+        _isolate_remote_json(monkeypatch, tmp_path)
+        stub = _Stub()
+        stub._remote = None
+
+        import agent_takkub.remote.diagnostics as diagnostics_mod
+
+        probed = []
+        monkeypatch.setattr(
+            diagnostics_mod,
+            "probe_public",
+            lambda url, secret: probed.append(url) or (True, "HTTP 200"),
+        )
+
+        fake_remote = MagicMock()  # .config.public_url is an unset MagicMock attr
+        fake_remote.port_conflict_note = None
+        fake_remote.hostname_mismatch_note = None
+        fake_remote.local_probe_note = None
+        fake_remote._tunnel = None
+        monkeypatch.setattr(
+            "agent_takkub.remote.RemoteControl.maybe_start", lambda orch: fake_remote
+        )
+
+        stub._apply_remote_config(RemoteConfig(), True)
+
+        assert probed == []
+
+
+class TestStopRemoteTunnelOnly:
+    """#197 item 5: the Settings dialog's "Stop tunnel only" button."""
+
+    def test_stops_the_tunnel_when_live(self):
+        stub = _Stub()
+        stub._remote = MagicMock()
+        stub._chip_remote = QPushButton()
+
+        stub._stop_remote_tunnel_only()
+
+        stub._remote.stop_tunnel_only.assert_called_once()
+
+    def test_no_op_when_not_live(self):
+        stub = _Stub()
+        stub._remote = None
+        stub._chip_remote = QPushButton()
+
+        stub._stop_remote_tunnel_only()  # must not raise
+
+
 class TestRefreshTunnelIndicator:
     """`StatusHeaderMixin._refresh_tunnel_indicator` — the sidebar's top-left
     tunnel dot, separate from the 🌐 Remote status-bar chip above. Reuses
@@ -392,6 +524,31 @@ class TestRefreshTunnelIndicator:
         stub._refresh_tunnel_indicator()
         state, _tooltip = stub.tabs.set_tunnel_status.call_args[0]
         assert state == "running"
+
+    def test_alive_tunnel_tooltip_includes_pid(self):
+        """#197 item 5: "tunnel running (pid N)" surfaced in the sidebar dot's
+        tooltip, using `Tunnel.pid` — same identity the pid file/reaper key
+        off of, so a user can correlate what they see with Task Manager."""
+        stub = _Stub()
+        stub.tabs = MagicMock()
+        fake_tunnel = MagicMock()
+        fake_tunnel.is_alive = True
+        fake_tunnel.pid = 54321
+        stub._remote = MagicMock(_tunnel=fake_tunnel, tunnel_error=None)
+        stub._refresh_tunnel_indicator()
+        _state, tooltip = stub.tabs.set_tunnel_status.call_args[0]
+        assert "54321" in tooltip
+
+    def test_alive_tunnel_tooltip_omits_pid_when_unknown(self):
+        stub = _Stub()
+        stub.tabs = MagicMock()
+        fake_tunnel = MagicMock()
+        fake_tunnel.is_alive = True
+        fake_tunnel.pid = None
+        stub._remote = MagicMock(_tunnel=fake_tunnel, tunnel_error=None)
+        stub._refresh_tunnel_indicator()
+        _state, tooltip = stub.tabs.set_tunnel_status.call_args[0]
+        assert "pid" not in tooltip.lower()
 
     def test_tunnel_error_paints_error_with_reason(self):
         stub = _Stub()
