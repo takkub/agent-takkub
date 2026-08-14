@@ -68,6 +68,7 @@ def _find_node() -> str | None:
 def _find_global_postinstall(npm: str | None = None) -> Path | None:
     """Locate `postinstall.js` in the globally installed `agent-takkub` package."""
     import subprocess as _subprocess
+
     from ._win_console import SUBPROCESS_NO_WINDOW
 
     if npm:
@@ -94,17 +95,21 @@ def _find_global_postinstall(npm: str | None = None) -> Path | None:
     known_roots: list[Path] = []
     if sys.platform == "win32":
         appdata = os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming"))
-        known_roots.extend([
-            Path(appdata) / "npm" / "node_modules",
-            Path("C:/Program Files/nodejs/node_modules"),
-            Path("C:/nvm4w/nodejs/node_modules"),
-        ])
+        known_roots.extend(
+            [
+                Path(appdata) / "npm" / "node_modules",
+                Path("C:/Program Files/nodejs/node_modules"),
+                Path("C:/nvm4w/nodejs/node_modules"),
+            ]
+        )
     else:
-        known_roots.extend([
-            Path("/usr/local/lib/node_modules"),
-            Path("/opt/homebrew/lib/node_modules"),
-            Path.home() / ".local" / "lib" / "node_modules",
-        ])
+        known_roots.extend(
+            [
+                Path("/usr/local/lib/node_modules"),
+                Path("/opt/homebrew/lib/node_modules"),
+                Path.home() / ".local" / "lib" / "node_modules",
+            ]
+        )
         for nvm_dir in Path.home().glob(".nvm/versions/node/*/lib/node_modules"):
             known_roots.append(nvm_dir)
         for fnm_dir in Path.home().glob(".fnm/current/lib/node_modules"):

@@ -2,20 +2,19 @@
 
 from __future__ import annotations
 
-import os
 import subprocess
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 from PyQt6.QtCore import QCoreApplication
 
 import agent_takkub.update_panel as up_mod
 from agent_takkub.update_panel import (
-    _NpmUpdateThread,
     _find_global_postinstall,
     _find_node,
     _find_npm,
+    _NpmUpdateThread,
 )
 
 
@@ -89,6 +88,11 @@ class TestFindHelpers:
 
         def fake_run(cmd, **kw):
             return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr="")
+
+        # Isolate from any real globally installed packages on the host machine
+        monkeypatch.setattr(
+            Path, "is_file", lambda self: self.resolve() == repo_postinstall.resolve()
+        )
 
         with patch("subprocess.run", side_effect=fake_run):
             found = _find_global_postinstall("npm")
