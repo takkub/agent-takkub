@@ -64,6 +64,7 @@
         workingCategory: null,
         picker: null,
         lastLeadAt: 0,
+        emptyReason: null,
       };
     }
     return state.leadByProject[project];
@@ -1120,8 +1121,13 @@
     log.scrollTop = log.scrollHeight;
     state.leadWorking = isWorking;
     if (!lead.messages.length && !isWorking) {
+      // #192: prefer the server's classified reason (provider gap / no
+      // session yet / transcript drift) over the generic "no messages"
+      // text — a blank chat must say why, not stay silently ambiguous.
       ensureLeadEmpty(
-        lead.historyLoaded
+        lead.emptyReason
+          ? lead.emptyReason
+          : lead.historyLoaded
           ? "ยังไม่มีข้อความ — พิมพ์ถึง " + providerMeta(state.provider).name + " ด้านล่างเพื่อเริ่ม"
           : "กำลังเชื่อมต่อ…"
       );
@@ -1393,6 +1399,13 @@
         if (state.leadByProject[project] !== lead || lead.historyGeneration !== generation) return;
         setProvider(data && data.provider, project);
         var messages = Array.isArray(data && data.messages) ? data.messages : [];
+        // #192: a blank chat must say why instead of staying silent — only
+        // meaningful when history actually came back empty (a populated
+        // chat never needs this, and the field is null in that case anyway).
+        lead.emptyReason =
+          data && data.empty_reason && typeof data.empty_reason.text === "string"
+            ? data.empty_reason.text
+            : null;
         // The composer can be used while history is still in flight. Preserve
         // those optimistic project-scoped messages instead of replacing them
         // when the older history snapshot arrives.
@@ -2055,7 +2068,7 @@
   var USAGE_POLL_MS = 5 * 60 * 1000; // deliberately sparse — see note above
   var USAGE_WARN_PCT = 75;
   var USAGE_DANGER_PCT = 90;
-  var usageState = { data: null, timer: null };
+  var usageState = { data: null, timer: null, cockpitVersion: null };
 
   function fmtPct(v) {
     return Math.round(v) + "%";
@@ -2222,12 +2235,27 @@
     else if (worst !== null && worst >= USAGE_WARN_PCT) chip.classList.add("warn");
   }
 
+  // #192: the phone previously had no way to tell it was talking to an old
+  // cockpit build — surfaced here since the PWA already polls /api/usage on
+  // this interval, no extra request.
+  var USAGE_CAPTION_BASE = "อัปเดตจากค่าที่ cockpit บนเดสก์ท็อปดึงมาแล้ว — ไม่ยิงขอเพิ่มจาก provider";
+
+  function renderUsageCaption() {
+    var caption = $("usage-sheet-caption");
+    if (!caption) return;
+    caption.textContent = usageState.cockpitVersion
+      ? USAGE_CAPTION_BASE + " · cockpit v" + usageState.cockpitVersion
+      : USAGE_CAPTION_BASE;
+  }
+
   function fetchUsage() {
     apiFetch("api/usage")
       .then(function (r) { return r.json(); })
       .then(function (data) {
         usageState.data = Array.isArray(data && data.providers) ? data.providers : [];
+        usageState.cockpitVersion = typeof (data && data.cockpit_version) === "string" ? data.cockpit_version : null;
         renderUsageChip();
+        renderUsageCaption();
         var sheet = $("usage-sheet");
         if (sheet && sheet.classList.contains("show")) renderUsageSheet();
       })

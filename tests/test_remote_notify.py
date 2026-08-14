@@ -510,6 +510,51 @@ class TestLeadHistoryHelpers:
         ]
 
 
+class TestLeadMirrorDiagnosis:
+    """#192: classify *why* the phone has nothing to mirror instead of a
+    silent blank chat. Covers the same three layers `takkub doctor --live`
+    already proves out (`test_remote_mirror_diagnostics.py`), computed
+    in-process here rather than through the cli_server round trip."""
+
+    def test_no_scanner_is_provider_unsupported(self, config_dir):
+        orch = _FakeOrch()
+        orch.set_lead("proj", None, provider="opencode")
+        result = notify_mod.lead_mirror_diagnosis(orch, "proj")
+        assert result == {"code": "provider_unsupported", "provider": "opencode"}
+
+    def test_claude_without_session_uuid_is_no_session_uuid(self, config_dir):
+        orch = _FakeOrch()
+        orch.set_lead("proj", None, provider="claude")
+        result = notify_mod.lead_mirror_diagnosis(orch, "proj")
+        assert result == {"code": "no_session_uuid", "provider": "claude"}
+
+    def test_claude_uuid_set_but_no_matching_file_is_transcript_missing(self, tmp_path, config_dir):
+        orch = _FakeOrch()
+        orch.set_lead("proj", "ghost-uuid-1234", provider="claude")
+        result = notify_mod.lead_mirror_diagnosis(orch, "proj")
+        assert result == {
+            "code": "transcript_missing",
+            "provider": "claude",
+            "session_uuid_short": "ghost-uu",
+        }
+
+    def test_claude_uuid_resolves_is_no_reason(self, tmp_path, config_dir):
+        orch = _FakeOrch()
+        orch.set_lead("proj", "uuid-1", provider="claude")
+        _write_jsonl(tmp_path, "C--proj", "uuid-1", [])
+        result = notify_mod.lead_mirror_diagnosis(orch, "proj")
+        assert result == {"code": None, "provider": "claude"}
+
+    def test_provider_without_uuid_requirement_missing_file_is_transcript_missing(self, config_dir):
+        # codex/gemini pick their own file by cwd+mtime rather than an exact
+        # uuid — a fresh pane or a cwd mismatch resolves to None the same as
+        # claude's drift case, just without a uuid to shorten.
+        orch = _FakeOrch()
+        orch.set_lead("proj", None, provider="codex")
+        result = notify_mod.lead_mirror_diagnosis(orch, "proj")
+        assert result == {"code": "transcript_missing", "provider": "codex"}
+
+
 class TestGeminiHistoryHelpers:
     @staticmethod
     def _chat_store(home: Path, cwd: Path) -> Path:
