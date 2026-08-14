@@ -161,6 +161,8 @@ def create_github_release(
             cwd=str(repo_root),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=120.0,
             creationflags=_SUBPROCESS_NO_WINDOW,
         )
@@ -194,6 +196,8 @@ def _git(
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=timeout,
         env=_git_env(),
         creationflags=_SUBPROCESS_NO_WINDOW,

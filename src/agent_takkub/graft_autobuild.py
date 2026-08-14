@@ -571,6 +571,8 @@ def _run_build(graft_bin: str, target: Path) -> tuple[bool | None, float, str]:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             creationflags=SUBPROCESS_NO_WINDOW,
         )
         try:

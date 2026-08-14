@@ -235,6 +235,8 @@ def _default_runner(args: list[str], cwd: str | None) -> GitResult:
             cwd=cwd,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=_GIT_TIMEOUT_S,
             creationflags=SUBPROCESS_NO_WINDOW,
         )
@@ -442,6 +444,8 @@ def repair_editable_pth_if_stale(git_root: str, removed_path: str) -> str:
                 cwd=str(root),
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=120,
                 creationflags=SUBPROCESS_NO_WINDOW,
             )

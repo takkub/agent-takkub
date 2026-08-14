@@ -78,6 +78,8 @@ class _NpmUpdateThread(QThread):
                     [npm, "view", "agent-takkub", "version"],
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=60,
                     creationflags=SUBPROCESS_NO_WINDOW,
                 )
@@ -93,6 +95,8 @@ class _NpmUpdateThread(QThread):
                     [npm, "install", "-g", "agent-takkub@latest"],
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=900,
                     creationflags=SUBPROCESS_NO_WINDOW,
                 )

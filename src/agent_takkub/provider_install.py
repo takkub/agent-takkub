@@ -91,6 +91,8 @@ def install_provider(name: str) -> tuple[bool, str]:
             argv,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=_INSTALL_TIMEOUT_S,
             check=False,
             creationflags=SUBPROCESS_NO_WINDOW,

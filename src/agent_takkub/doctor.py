@@ -59,6 +59,8 @@ def _run(argv: list[str]) -> tuple[int, str]:
             argv,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
             creationflags=SUBPROCESS_NO_WINDOW,
         )
@@ -367,6 +369,8 @@ def check_mini_browser() -> list[Finding]:
                 [npm, "install", "--global", "@runablehq/mini-browser"],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=300,
                 creationflags=SUBPROCESS_NO_WINDOW,
                 env={**os.environ, "npm_config_yes": "true"},
@@ -526,6 +530,8 @@ def check_graft() -> list[Finding]:
                 [npm, "install", "-g", f"@nanonets/graft@{_GRAFT_MCP_VERSION}"],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=300,
                 creationflags=SUBPROCESS_NO_WINDOW,
                 env={**os.environ, "npm_config_yes": "true"},
@@ -644,6 +650,8 @@ def check_arch() -> list[Finding]:
                     ["softwareupdate", "--install-rosetta", "--agree-to-license"],
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=600,
                     creationflags=SUBPROCESS_NO_WINDOW,
                 )
@@ -761,6 +769,8 @@ def check_qt() -> list[Finding]:
                     ],
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=600,
                     creationflags=SUBPROCESS_NO_WINDOW,
                 )
@@ -1253,6 +1263,8 @@ def check_editable_install() -> list[Finding]:
                 cwd=str(REPO_ROOT),
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=120,
                 creationflags=SUBPROCESS_NO_WINDOW,
             )
@@ -1486,6 +1498,8 @@ def check_hook_wiring() -> list[Finding]:
             input="{}",
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
             creationflags=SUBPROCESS_NO_WINDOW,
         )
@@ -1632,6 +1646,8 @@ def _npm_global_bin_dir() -> str | None:
             [npm, "prefix", "-g"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=30,
             creationflags=SUBPROCESS_NO_WINDOW,
         )
