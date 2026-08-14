@@ -68,6 +68,7 @@ def _gh(
             capture_output=True,
             text=True,
             encoding="utf-8",
+            errors="replace",
             cwd=str(cwd) if cwd else None,
             input=input_text,
             timeout=timeout,

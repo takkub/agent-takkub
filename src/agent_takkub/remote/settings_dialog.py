@@ -188,6 +188,8 @@ def _run_ngrok_authtoken(token: str) -> tuple[bool, str]:
             ["ngrok", "config", "add-authtoken", token],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=15,
             creationflags=SUBPROCESS_NO_WINDOW,
         )

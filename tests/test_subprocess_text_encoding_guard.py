@@ -1,0 +1,101 @@
+"""Guard: every subprocess.run/Popen/call/check_output/check_call call under
+`src/agent_takkub/` that opens in text mode (`text=True` or
+`universal_newlines=True`) must pass an explicit `encoding=` *and*
+`errors=` (#205).
+
+Root cause: `text=True` without `encoding=` makes Python decode the child
+process's stdout/stderr with `locale.getpreferredencoding()` — the OS
+codepage, not UTF-8. On a Thai-locale Windows machine that's `cp874`; the
+instant an external CLI (git/npm/claude/codex/gemini/cloudflared/...)
+writes a byte `cp874` can't map, the reader thread dies with
+`UnicodeDecodeError: 'charmap' codec can't decode byte ...` and takes the
+whole subprocess call down with it — proven live on a real user machine
+(cockpit v1.0.60, pid 19952, `subprocess.py:1597 _readerthread`).
+
+`encoding=` alone isn't enough either: with the default `errors="strict"`,
+a single byte the *declared* encoding can't map still raises the same way.
+Output from an external CLI is not something this codebase controls, so
+every text-mode call must also pass `errors="replace"` — never `"strict"`
+(silently replacing an unmappable byte is strictly better than crashing
+the caller).
+
+Companion to `test_subprocess_no_window_guard.py` — same call-site
+discovery, same exemption-comment escape hatch, different invariant.
+"""
+
+from __future__ import annotations
+
+import ast
+from pathlib import Path
+
+import pytest
+
+SRC_ROOT = Path(__file__).parent.parent / "src" / "agent_takkub"
+_CALL_NAMES = {"run", "Popen", "call", "check_output", "check_call"}
+_TEXT_MODE_KWARGS = {"text", "universal_newlines"}
+_EXEMPT_MARKER = "subprocess-encoding-ok:"
+
+
+def _is_subprocess_call(node: ast.Call) -> str | None:
+    """Return the subprocess function name if *node* calls it, else None."""
+    func = node.func
+    if isinstance(func, ast.Attribute) and func.attr in _CALL_NAMES:
+        if isinstance(func.value, ast.Name) and func.value.id == "subprocess":
+            return func.attr
+    elif isinstance(func, ast.Name) and func.id in _CALL_NAMES:
+        return func.id
+    return None
+
+
+def _is_true_literal(value: ast.expr) -> bool:
+    return isinstance(value, ast.Constant) and value.value is True
+
+
+def _is_text_mode(node: ast.Call) -> bool:
+    return any(kw.arg in _TEXT_MODE_KWARGS and _is_true_literal(kw.value) for kw in node.keywords)
+
+
+def _is_exempted(source_lines: list[str], lineno: int) -> bool:
+    """Check the call's own line and the line above for the exemption marker."""
+    for idx in (lineno - 1, lineno - 2):
+        if 0 <= idx < len(source_lines) and _EXEMPT_MARKER in source_lines[idx]:
+            return True
+    return False
+
+
+def _find_violations(path: Path) -> list[str]:
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(path))
+    lines = source.splitlines()
+    violations = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = _is_subprocess_call(node)
+        if name is None or not _is_text_mode(node):
+            continue
+        if _is_exempted(lines, node.lineno):
+            continue
+        kwarg_names = {kw.arg for kw in node.keywords}
+        missing = [kw for kw in ("encoding", "errors") if kw not in kwarg_names]
+        if missing:
+            violations.append(
+                f"{path}:{node.lineno}: subprocess.{name}() opens text mode but is "
+                f'missing {", ".join(missing)}= (needs encoding="utf-8", errors="replace")'
+            )
+    return violations
+
+
+PY_FILES = sorted(SRC_ROOT.rglob("*.py"))
+
+
+@pytest.mark.parametrize("py_file", PY_FILES, ids=lambda p: str(p.relative_to(SRC_ROOT)))
+def test_subprocess_text_mode_calls_have_encoding(py_file: Path) -> None:
+    violations = _find_violations(py_file)
+    assert not violations, (
+        "\n".join(violations) + "\n\nEvery subprocess call with text=True/universal_newlines=True "
+        'must also pass encoding="utf-8", errors="replace" — otherwise decoding '
+        "falls back to the OS locale codepage and can crash on any byte that "
+        "codepage can't map (#205). If this call genuinely can't take those kwargs, "
+        "add `# subprocess-encoding-ok: <reason>` on the same or preceding line."
+    )

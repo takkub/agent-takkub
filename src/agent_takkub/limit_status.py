@@ -94,6 +94,8 @@ def _detect_cli_version() -> str | None:
             [executable, "--version"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
             check=False,
             # CREATE_NO_WINDOW: never flash a console window for this probe
@@ -268,6 +270,8 @@ def _read_keychain_credentials() -> str | None:
             ["security", "find-generic-password", "-s", _KEYCHAIN_SERVICE, "-w"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
             creationflags=SUBPROCESS_NO_WINDOW,
         )

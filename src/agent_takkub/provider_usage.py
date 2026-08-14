@@ -387,6 +387,8 @@ def fetch_codex_usage(timeout: float = _FETCH_TIMEOUT_S) -> ProviderUsage:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             bufsize=1,
             creationflags=SUBPROCESS_NO_WINDOW,
         )
@@ -539,6 +541,8 @@ def fetch_opencode_usage(timeout: float = _FETCH_TIMEOUT_S) -> ProviderUsage:
             [exe, "db", _OPENCODE_STATS_QUERY, "--format", "json"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             check=False,
             creationflags=SUBPROCESS_NO_WINDOW,
