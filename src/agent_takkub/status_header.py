@@ -714,12 +714,25 @@ class StatusHeaderMixin:
         writer_depth = sum(int(row.get("depth", 0)) for row in writers.values())
         stale_drops = sum(int(row.get("stale_dropped", 0)) for row in writers.values())
         queue_full = sum(int(row.get("queue_full", 0)) for row in writers.values())
+        # Issue #195 point 3: surface *why* work is waiting, not just a bare
+        # count — pulls the resource governor's per-task denial reason
+        # (heavy_project_limit, cpu_high, ...) straight from the snapshot.
+        waiting_reasons = sorted(
+            {
+                str(item.get("reason"))
+                for item in snap.get("waiting_tasks", [])
+                if item.get("reason")
+            }
+        )
+        resource_queue_line = f"Resource queue: {resource_queue}"
+        if waiting_reasons:
+            resource_queue_line += f" (waiting: {', '.join(waiting_reasons)})"
         self._chip_performance.setToolTip(
             "System Load: " + state + "\n"
             f"CPU: {cpu}%\nAvailable RAM: {ram}% ({available_gb:.1f}/{total_gb:.1f} GiB)\n"
             f"Heavy agents: {heavy}/{heavy_limit or '—'}\n"
             f"Browser agents: {browser}/{browser_limit or '—'}\n"
-            f"Resource queue: {resource_queue}\nSpawn queue: {spawn_queue}\n"
+            f"{resource_queue_line}\nSpawn queue: {spawn_queue}\n"
             f"Writer depth: {writer_depth} · stale drops: {stale_drops} · full: {queue_full}\n"
             f"Duplicate notices prevented: {int(snap.get('duplicate_notices_prevented', 0))}\n"
             f"Main-thread stalls: {int(snap.get('main_thread_stall_count', 0))}\n"
@@ -737,6 +750,16 @@ class StatusHeaderMixin:
         queue_full = sum(int(row.get("queue_full", 0)) for row in writers.values())
         available_gb = float(snap.get("available_memory_bytes", 0)) / (1024**3)
         total_gb = float(snap.get("total_memory_bytes", 0)) / (1024**3)
+        waiting_reasons = sorted(
+            {
+                str(item.get("reason"))
+                for item in snap.get("waiting_tasks", [])
+                if item.get("reason")
+            }
+        )
+        resource_queue_line = f"Resource queue: {int(snap.get('queued_resource_tasks', 0))}"
+        if waiting_reasons:
+            resource_queue_line += f" (waiting: {', '.join(waiting_reasons)})"
         lines = [
             f"System Load: {'OVERLOAD — new heavy work paused' if snap.get('overloaded') else 'Normal'}",
             f"CPU: {float(snap.get('cpu_percent', 0)):.1f}%",
@@ -745,7 +768,7 @@ class StatusHeaderMixin:
             f"Browser agents: {int(by_class.get('browser', 0))}/{limits.get('max_browser_global', '—')}",
             f"Builds: {int(by_class.get('build', 0))}/{limits.get('max_build_global', '—')}",
             f"Tests: {int(by_class.get('test', 0))}/{limits.get('max_test_global', '—')}",
-            f"Resource queue: {int(snap.get('queued_resource_tasks', 0))}",
+            resource_queue_line,
             f"Spawn queue: {int(snap.get('spawn_queue_depth', 0))}",
             f"Fan-out queue: {int(snap.get('fanout_queue_depth', 0))}",
             f"Writer depth: {writer_depth} · stale drops: {stale_drops} · queue full: {queue_full}",

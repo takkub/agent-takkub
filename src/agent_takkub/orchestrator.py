@@ -19,6 +19,7 @@ import os
 import pathlib
 import re
 import secrets
+import sys
 import threading
 import time
 import uuid as _uuid
@@ -90,6 +91,7 @@ from .orchestrator_text import (  # re-exported for test/app/main_window imports
     _exit_key,
     _lead_model_override,
     _log_event,
+    _looks_like_source_reference,
     _paste_payload,
     _project_root_dir,
     _read_tail_bytes,
@@ -185,6 +187,27 @@ _ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 # file every status call (just to keep the last few lines) is an unbounded memory
 # spike. 64 KiB is ample for the 5-line tail even with very long lines. (M4#22)
 _TRANSCRIPT_TAIL_BYTES = 64 * 1024
+
+# Throttle for the #104 Windows Open-With transcript scan (issue #194): even
+# a 64 KiB bounded read can block the Qt main thread for 900ms-2.5s when the
+# open() call gets caught by Windows Defender's real-time scan — and the
+# scan used to run on EVERY 5s idle-watchdog tick, for EVERY working pane,
+# until the first hit. 30s still catches a stuck dialog quickly (a human
+# needs time to notice + click through it anyway) while cutting the
+# blocking-open frequency ~6x.
+_SHELL_DIALOG_SCAN_INTERVAL_S = 30.0
+
+# Issue #199: a pane that's actively producing output cannot be blocked on a
+# modal Open-With dialog (a real dialog freezes the process until dismissed)
+# — so gate the scan on the pane having been silent at least this long.
+# Also doubles as a #194 win: an actively-working pane skips the scan (and
+# its file open) entirely instead of merely being throttled.
+_SHELL_DIALOG_IDLE_GATE_S = 20.0
+
+# Issue #194: minimum spacing between two `write_resume_briefs()` chatlog
+# scans — guards against the restart-then-closeEvent double-call (see the
+# method's docstring) redoing the same expensive scan twice in one shutdown.
+_RESUME_BRIEF_MIN_INTERVAL_S = 10.0
 
 # Harvest hint: inject a '[cockpit] <role> ไม่ active >Nm' message into Lead
 # when a teammate pane has been idle this long. 0 = disabled.
@@ -545,6 +568,38 @@ def _count_active_teammates(panes_by_project: dict) -> int:
             if sess is not None and getattr(sess, "is_alive", False):
                 n += 1
     return n
+
+
+def _open_with_dialog_process_present() -> bool:
+    """Best-effort corroboration for the #104 Windows Open-With dialog
+    tripwire (issue #199): a transcript-text match alone false-positived
+    with zero real dialog behind it (no OpenWith.exe/AppPicker/rundll32
+    process on the machine at all), so the notify path now requires this
+    to also return True. psutil is an existing dependency (resource_governor.py);
+    imported lazily here since only the Windows tripwire path needs it.
+    Windows-only by construction — the caller never invokes this off
+    `sys.platform == "win32"`, since this dialog type has no equivalent on
+    macOS's `_pty_backend`. Degrades to False (no corroboration → no
+    notify) on any psutil/permission hiccup."""
+    try:
+        import psutil
+    except Exception:
+        return False
+    try:
+        for proc in psutil.process_iter(("name",)):
+            name = (proc.info.get("name") or "").lower()
+            if name in ("openwith.exe", "apppicker.exe"):
+                return True
+            if name == "rundll32.exe":
+                try:
+                    cmdline = " ".join(proc.cmdline()).lower()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+                if "openas_rundll" in cmdline:
+                    return True
+    except Exception:
+        pass
+    return False
 
 
 def _fanout_queue_enabled() -> bool:
@@ -1113,6 +1168,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                     pane_id=role_name,
                     task_id=task_id,
                     resource_class=resource_class,
+                    reason=decision.reason,
                     on_admitted=lambda token, r=role_name, c=cwd, t=task, rc=requires_commit, ac=auto_chain, st=shard_total, pl=plan, iso=isolation, p=project, f=feature, m=model: (
                         self.assign(
                             r,
@@ -3757,7 +3813,18 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         Returns the number of briefs written. 0 when no vault is
         configured or no open project had conversation records to
         summarise.
+
+        Issue #194: `_restart_cockpit()` calls this explicitly right before
+        `QCoreApplication.quit()`, and that same quit() triggers
+        `MainWindow.closeEvent`, which calls it AGAIN moments later — two
+        full chatlog-scan passes back to back on the Qt main thread for
+        data the first call just wrote. Throttled so the second call is a
+        no-op instead of a second multi-second stall during shutdown.
         """
+        now = time.time()
+        if now - getattr(self, "_last_resume_brief_ts", 0.0) < _RESUME_BRIEF_MIN_INTERVAL_S:
+            return 0
+        self._last_resume_brief_ts = now
         vault = _resolve_vault_dir()
         if vault is None:
             return 0
@@ -4380,35 +4447,82 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                     )
 
     def _check_shell_open_dialog(
-        self, project_name: str, role: str, pane: AgentPane, key: str
+        self, project_name: str, role: str, pane: AgentPane, key: str, now: float
     ) -> None:
         """Issue #104 tripwire: nudge Lead once if `pane`'s transcript tail
         shows the Windows Open-With dialog marker — a shell one-liner
         ShellExecute'd a bare file path instead of the pane using Read/Grep.
-        Degrades silently on any I/O hiccup; never raises into the watchdog
-        tick (mirrors `_scan_done_evidence`'s degrade-silently contract)."""
+
+        Issue #194: throttled to once every _SHELL_DIALOG_SCAN_INTERVAL_S per
+        pane (was every 5s watchdog tick), gated on the pane having been
+        silent for _SHELL_DIALOG_IDLE_GATE_S (an actively-working pane skips
+        the file open entirely), and the actual open()+read() runs on a
+        background thread, so a slow disk/AV-scanned file open never blocks
+        the Qt main thread. `_notify_lead` still runs on the GUI thread —
+        it's marshalled back via QTimer.singleShot(0, ...) once the scan
+        result is in.
+
+        Issue #199: raw substring matching false-positived on the
+        cockpit's OWN notify message below (a pane editing/Read-ing this
+        exact source line saw the marker echoed back in its own
+        transcript) with zero corroborating evidence that an actual OS
+        dialog existed. Two independent guards now gate the notify:
+        (1) `_looks_like_source_reference` discards matching lines that
+        read like source/diff context; (2) on Windows, an OpenWith/
+        AppPicker/OpenAs_RunDLL process must actually be running. This
+        dialog type is Windows-only, so on any other platform the scan
+        still runs (cheap, still useful for #194's idle-gate metrics) but
+        never notifies — the "other branch" for non-Windows is simply
+        "this can't happen here."
+
+        Degrades silently on any I/O hiccup; never raises into the
+        watchdog tick (mirrors `_scan_done_evidence`'s degrade-silently
+        contract)."""
         ps = self._ps(key)
-        if ps.shell_open_dialog_notified:
+        if ps.shell_open_dialog_notified or ps.dialog_scan_in_flight:
             return
         transcript_path = getattr(pane, "_transcript_path", None)
         if not transcript_path:
             return
-        try:
-            raw = _read_tail_bytes(pathlib.Path(transcript_path), _TRANSCRIPT_TAIL_BYTES)
-            tail = raw.decode("utf-8", errors="replace")
-        except OSError:
+        last_out = getattr(pane, "_last_output_ts", 0.0)
+        if not isinstance(last_out, (int, float)) or now - last_out < _SHELL_DIALOG_IDLE_GATE_S:
+            return  # pane has recent progress — can't be blocked on a modal dialog (#199)
+        if now - ps.last_dialog_scan_ts < _SHELL_DIALOG_SCAN_INTERVAL_S:
             return
-        if _SHELL_OPEN_DIALOG_MARKER not in tail:
-            return
-        ps.shell_open_dialog_notified = True
-        self._notify_lead(
-            project_name,
-            f"[cockpit] {role} pane อาจติด Windows 'How do you want to open this file?' "
-            "dialog (ShellExecute path แทน Read tool, #104) — เช็ค/ปิด dialog บนเครื่อง "
-            "แล้วเตือน pane ให้ใช้ Read/Grep tool อ่านไฟล์แทน shell one-liner",
-            from_role=role,
-            note="",
-        )
+        ps.last_dialog_scan_ts = now
+        ps.dialog_scan_in_flight = True
+
+        def _scan_worker() -> None:
+            found = False
+            try:
+                raw = _read_tail_bytes(pathlib.Path(transcript_path), _TRANSCRIPT_TAIL_BYTES)
+                tail = raw.decode("utf-8", errors="replace")
+                candidate = any(
+                    _SHELL_OPEN_DIALOG_MARKER in line and not _looks_like_source_reference(line)
+                    for line in tail.splitlines()
+                )
+                if candidate and sys.platform == "win32" and _open_with_dialog_process_present():
+                    found = True
+            except OSError:
+                pass
+
+            def _finish() -> None:
+                ps.dialog_scan_in_flight = False
+                if not found or ps.shell_open_dialog_notified:
+                    return
+                ps.shell_open_dialog_notified = True
+                self._notify_lead(
+                    project_name,
+                    f"[cockpit] {role} pane อาจติด Windows 'How do you want to open this file?' "
+                    "dialog (ShellExecute path แทน Read tool, #104) — เช็ค/ปิด dialog บนเครื่อง "
+                    "แล้วเตือน pane ให้ใช้ Read/Grep tool อ่านไฟล์แทน shell one-liner",
+                    from_role=role,
+                    note="",
+                )
+
+            QTimer.singleShot(0, _finish)
+
+        threading.Thread(target=_scan_worker, daemon=True, name="shell-dialog-scan").start()
 
     def _check_stuck_panes(self, now: float) -> None:
         """Walk every teammate pane and auto-recover any that's been
@@ -4434,7 +4548,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                     # a ShellExecute Open-With dialog doesn't necessarily stop
                     # PTY output (the offending command may return immediately),
                     # so this must run whether or not the pane looks stuck.
-                    self._check_shell_open_dialog(project_name, role, pane, key)
+                    self._check_shell_open_dialog(project_name, role, pane, key, now)
                     # A rate-limited pane is silent on purpose — never force-respawn
                     # it (the fresh session would just hit the same limit). The idle
                     # walker owns detection; here we only read the recorded state.

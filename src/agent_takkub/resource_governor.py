@@ -102,6 +102,28 @@ class QueuedTask:
     resource_class: ResourceClass
     queued_at: float
     on_admitted: Callable[[ResourceToken], None] | None = None
+    # attempts / next_retry_at (issue #195): backoff bookkeeping for the
+    # `dispatch_waiting` retry loop. attempts counts denials seen INSIDE the
+    # loop only (the initial denial that caused the enqueue is not counted
+    # here — it's logged unconditionally by the `request_slot` call in
+    # `assign()`). next_retry_at=0.0 means "eligible for the very next
+    # dispatch_waiting pass" — a freshly freed slot must still be grabbed
+    # promptly, not delayed by an up-front backoff.
+    attempts: int = 0
+    next_retry_at: float = 0.0
+    # reason: most recent denial reason, kept for status/UI surfacing
+    # (`ResourceGovernor.snapshot()`'s waiting_tasks) — issue #195 point 3.
+    reason: str = ""
+
+
+# Issue #195: backoff schedule (seconds) for the queued-task retry loop in
+# `dispatch_waiting`. A denied item used to be retried unconditionally on
+# every 1s governor tick, re-emitting an identical resource_gate_block line
+# every second for as long as it stayed blocked (proven: 15 lines in 15s for
+# one task). Spacing retries out this way still notices freed capacity
+# within 15s worst case, and the log line frequency naturally follows the
+# same schedule since a line is only emitted when an attempt is actually made.
+_GATE_RETRY_BACKOFF_S: tuple[float, ...] = (1.0, 2.0, 5.0, 15.0)
 
 
 _HEAVY_CLASSES = {
@@ -308,6 +330,7 @@ class ResourceGovernor:
         pane_id: str,
         task_id: str,
         resource_class: ResourceClass,
+        reason: str = "",
         on_admitted: Callable[[ResourceToken], None] | None = None,
     ) -> str:
         item = QueuedTask(
@@ -319,6 +342,7 @@ class ResourceGovernor:
             self._clock(),
             on_admitted,
         )
+        item.reason = reason
         with self._lock:
             self._waiting.setdefault(project_id, deque()).append(item)
         self._emit(
@@ -328,6 +352,7 @@ class ResourceGovernor:
             pane_id=pane_id,
             task_id=task_id,
             resource_class=resource_class.value,
+            reason=reason,
         )
         return item.queue_id
 
@@ -366,7 +391,15 @@ class ResourceGovernor:
         return removed
 
     def dispatch_waiting(self, max_dispatch: int | None = None) -> list[ResourceToken]:
-        """Admit waiting work round-robin by project, FIFO within a project."""
+        """Admit waiting work round-robin by project, FIFO within a project.
+
+        Issue #195: a queue head whose `next_retry_at` hasn't elapsed yet is
+        skipped without calling `request_slot` (so no `resource_gate_block`
+        line is emitted either) — this is what turns the retry cadence from
+        an unconditional 1s poll into the 1s/2s/5s/15s backoff schedule, since
+        a line only ever gets logged when an attempt is actually made.
+        """
+        now = self._clock()
         admitted: list[tuple[QueuedTask, ResourceToken]] = []
         with self._lock:
             projects = list(self._waiting)
@@ -383,6 +416,8 @@ class ResourceGovernor:
                     if not queue:
                         continue
                     item = queue[0]
+                    if item.next_retry_at > now:
+                        continue
                     decision = self.request_slot(
                         project_id=item.project_id,
                         pane_id=item.pane_id,
@@ -395,8 +430,26 @@ class ResourceGovernor:
                             self._waiting.pop(project_id, None)
                         admitted.append((item, decision.token))
                         progress = True
+                    else:
+                        item.attempts += 1
+                        delay = _GATE_RETRY_BACKOFF_S[
+                            min(item.attempts, len(_GATE_RETRY_BACKOFF_S)) - 1
+                        ]
+                        item.next_retry_at = now + delay
+                        item.reason = decision.reason
                 self._project_cursor += 1
         for item, token in admitted:
+            # Summary line replacing the per-retry flood (issue #195 point 2):
+            # one entry per unblock, however many attempts it took.
+            self._emit(
+                "resource_gate_unblocked",
+                project_id=item.project_id,
+                pane_id=item.pane_id,
+                task_id=item.task_id,
+                resource_class=item.resource_class.value,
+                blocked_for_s=round(now - item.queued_at, 1),
+                attempts=item.attempts,
+            )
             if item.on_admitted is not None:
                 try:
                     item.on_admitted(token)
@@ -425,6 +478,11 @@ class ResourceGovernor:
                         "task_id": item.task_id,
                         "resource_class": item.resource_class.value,
                         "queued_at": item.queued_at,
+                        # reason/attempts (issue #195 point 3): lets the status
+                        # bar/pane surface *why* a task is waiting instead of
+                        # just a bare queue count.
+                        "reason": item.reason,
+                        "attempts": item.attempts,
                     }
                     for queue in self._waiting.values()
                     for item in queue

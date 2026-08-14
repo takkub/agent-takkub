@@ -126,10 +126,10 @@ class _FakeOrch:
         # Record that Lead was notified so tests can assert surface behaviour.
         self.tty_surface_calls.append((role, project, prompt_line))
 
-    def _check_shell_open_dialog(self, project_name, role, pane, key) -> None:
+    def _check_shell_open_dialog(self, project_name, role, pane, key, now) -> None:
         # Delegate to the real method (#104) — driven for real so its
         # transcript-tail read + dedupe + _notify_lead call are exercised.
-        Orchestrator._check_shell_open_dialog(self, project_name, role, pane, key)  # type: ignore[arg-type]
+        Orchestrator._check_shell_open_dialog(self, project_name, role, pane, key, now)  # type: ignore[arg-type]
 
     def _notify_lead(self, project, notice, from_role=None, note="") -> None:
         self.notify_calls.append((project, notice, from_role))
@@ -150,6 +150,25 @@ def _patch_qtimer(monkeypatch: pytest.MonkeyPatch) -> list:
 
     monkeypatch.setattr("agent_takkub.orchestrator.QTimer", _ShotCapture)
     return fired
+
+
+class _SyncThread:
+    """Runs target() inline instead of on a real thread (issue #194's
+    _check_shell_open_dialog background scan) so tests stay deterministic
+    instead of racing a real thread against the assertions right after."""
+
+    def __init__(self, target=None, args=(), kwargs=None, name=None, daemon=None) -> None:
+        self._target = target
+        self._args = args
+        self._kwargs = kwargs or {}
+
+    def start(self) -> None:
+        self._target(*self._args, **self._kwargs)
+
+
+@pytest.fixture(autouse=True)
+def _patch_dialog_scan_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("agent_takkub.orchestrator.threading.Thread", _SyncThread)
 
 
 def _check(fake: _FakeOrch, now: float) -> None:
@@ -677,6 +696,15 @@ class TestTtyBlockStuckDefer:
 
 
 class TestShellOpenDialogTripwire:
+    """Issue #199: a plain substring match on the marker text used to be
+    sufficient to notify Lead — which meant the tripwire matched its OWN
+    notify message (an f-string quoting that exact text) whenever a pane
+    edited or `Read` the source line that builds it. Every "true positive"
+    test here now requires BOTH silence (>= _SHELL_DIALOG_IDLE_GATE_S, a
+    real dialog freezes the process — an actively-working pane can't be
+    blocked on one) AND a mocked corroborating OpenWith/AppPicker process,
+    matching the real fix's two independent gates."""
+
     def _pane_with_transcript(self, tmp_path, text: str, **kw):
         pane = _FakePane(**kw)
         p = tmp_path / "transcript.log"
@@ -684,13 +712,29 @@ class TestShellOpenDialogTripwire:
         pane._transcript_path = str(p)
         return pane
 
+    @pytest.fixture(autouse=True)
+    def _corroborated_windows_dialog(self, monkeypatch: pytest.MonkeyPatch):
+        """Default stand-in for a real corroborating OS signal: pretend
+        we're on Windows with an OpenWith.exe process actually running.
+        Individual tests override this to prove the negative paths."""
+        monkeypatch.setattr("agent_takkub.orchestrator.sys.platform", "win32")
+        monkeypatch.setattr(
+            "agent_takkub.orchestrator._open_with_dialog_process_present", lambda: True
+        )
+
+    def _silent_for(self, now: float) -> float:
+        """`_last_output_ts` far enough in the past to clear the #199 idle gate."""
+        from agent_takkub.orchestrator import _SHELL_DIALOG_IDLE_GATE_S
+
+        return now - _SHELL_DIALOG_IDLE_GATE_S - 1
+
     def test_marker_present_notifies_lead_once(self, tmp_path) -> None:
         fake = _FakeOrch()
         now = 1_000_000.0
         pane = self._pane_with_transcript(
             tmp_path,
             "some output\nHow do you want to open this file?\nmore output",
-            last_out=now - 1,
+            last_out=self._silent_for(now),
         )
         fake._panes_by_project["p"] = {"backend": pane}
 
@@ -709,7 +753,7 @@ class TestShellOpenDialogTripwire:
         pane = self._pane_with_transcript(
             tmp_path,
             "How do you want to open this file?",
-            last_out=now - 1,
+            last_out=self._silent_for(now),
         )
         fake._panes_by_project["p"] = {"backend": pane}
 
@@ -723,7 +767,9 @@ class TestShellOpenDialogTripwire:
         fake = _FakeOrch()
         now = 1_000_000.0
         pane = self._pane_with_transcript(
-            tmp_path, "normal claude output\nno dialogs here", last_out=now - 1
+            tmp_path,
+            "normal claude output\nno dialogs here",
+            last_out=self._silent_for(now),
         )
         fake._panes_by_project["p"] = {"backend": pane}
 
@@ -736,26 +782,185 @@ class TestShellOpenDialogTripwire:
         raise or notify, just skip (mirrors `_scan_done_evidence` degrade)."""
         fake = _FakeOrch()
         now = 1_000_000.0
-        pane = _FakePane(state="working", last_out=now - 1)
+        pane = _FakePane(state="working", last_out=self._silent_for(now))
         fake._panes_by_project["p"] = {"backend": pane}
 
         _check(fake, now)
 
         assert fake.notify_calls == []
 
-    def test_independent_of_stuck_threshold(self, tmp_path) -> None:
-        """Fires even when the pane is well within STUCK_THRESHOLD_S — the
-        dialog doesn't necessarily stop PTY output."""
+    def test_active_progress_suppresses_notification(self, tmp_path) -> None:
+        """Issue #199 point 4 (the exact false-positive incident): the
+        marker text is present, but the pane has recent output — a real
+        modal dialog would have frozen it, so this must NOT notify."""
         fake = _FakeOrch()
         now = 1_000_000.0
         pane = self._pane_with_transcript(
             tmp_path,
             "How do you want to open this file?",
-            last_out=now - 1,  # nowhere near STUCK_THRESHOLD_S
+            last_out=now - 1,  # progressing normally, nowhere near the idle gate
+        )
+        fake._panes_by_project["p"] = {"backend": pane}
+
+        _check(fake, now)
+
+        assert fake.notify_calls == [], (
+            "an actively-progressing pane can't be blocked on a modal dialog"
+        )
+
+    def test_no_corroborating_process_suppresses_notification(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Issue #199 point 1: text match alone is not enough — without a
+        real OpenWith/AppPicker process running, don't notify (this is
+        exactly what happened in the field: 0 matching processes)."""
+        monkeypatch.setattr(
+            "agent_takkub.orchestrator._open_with_dialog_process_present", lambda: False
+        )
+        fake = _FakeOrch()
+        now = 1_000_000.0
+        pane = self._pane_with_transcript(
+            tmp_path,
+            "How do you want to open this file?",
+            last_out=self._silent_for(now),
+        )
+        fake._panes_by_project["p"] = {"backend": pane}
+
+        _check(fake, now)
+
+        assert fake.notify_calls == []
+
+    def test_self_reference_line_suppresses_notification(self, tmp_path) -> None:
+        """Issue #199 point 2: the exact incident — a matching line that
+        reads like the cockpit's own notify-message source (quoted f-string)
+        must be treated as self-reference, not a live dialog."""
+        fake = _FakeOrch()
+        now = 1_000_000.0
+        pane = self._pane_with_transcript(
+            tmp_path,
+            "f\"[cockpit] backend pane อาจติด Windows 'How do you want to open this file?' \"",
+            last_out=self._silent_for(now),
+        )
+        fake._panes_by_project["p"] = {"backend": pane}
+
+        _check(fake, now)
+
+        assert fake.notify_calls == []
+
+    def test_non_windows_never_notifies(self, tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """This dialog type is Windows-only; on any other platform the
+        tripwire must never notify, corroboration process or not."""
+        monkeypatch.setattr("agent_takkub.orchestrator.sys.platform", "darwin")
+        fake = _FakeOrch()
+        now = 1_000_000.0
+        pane = self._pane_with_transcript(
+            tmp_path,
+            "How do you want to open this file?",
+            last_out=self._silent_for(now),
+        )
+        fake._panes_by_project["p"] = {"backend": pane}
+
+        _check(fake, now)
+
+        assert fake.notify_calls == []
+
+
+class TestShellOpenDialogScanThrottle:
+    """Issue #194: the transcript-tail read that backs the tripwire above
+    used to run on EVERY 5s watchdog tick for EVERY working pane, blocking
+    the Qt main thread for up to 2.5s when the file open() got caught by AV
+    scanning. These pin down the fix: throttled re-scan cadence, and the
+    scan result marshalled back to the caller via QTimer.singleShot rather
+    than notifying inline (proving the read itself is off the calling path)."""
+
+    def _pane_with_transcript(self, tmp_path, text: str, **kw):
+        pane = _FakePane(**kw)
+        p = tmp_path / "transcript.log"
+        p.write_text(text, encoding="utf-8")
+        pane._transcript_path = str(p)
+        return pane
+
+    def _silent_for(self, now: float) -> float:
+        """`_last_output_ts` far enough in the past to clear the #199 idle
+        gate — these tests exercise the throttle/threading logic, which
+        only runs once the idle gate has already let the call through."""
+        from agent_takkub.orchestrator import _SHELL_DIALOG_IDLE_GATE_S
+
+        return now - _SHELL_DIALOG_IDLE_GATE_S - 1
+
+    def test_no_rescan_within_throttle_interval(self, tmp_path, monkeypatch) -> None:
+        fake = _FakeOrch()
+        now = 1_000_000.0
+        pane = self._pane_with_transcript(
+            tmp_path, "normal output, no dialog", last_out=self._silent_for(now)
+        )
+        fake._panes_by_project["p"] = {"backend": pane}
+
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "agent_takkub.orchestrator._read_tail_bytes",
+            lambda path, max_bytes: calls.append(str(path)) or b"normal output, no dialog",
+        )
+
+        _check(fake, now)
+        _check(fake, now + 5)
+        _check(fake, now + 10)
+
+        assert len(calls) == 1, "must not re-open the transcript file every 5s tick"
+
+    def test_rescans_after_throttle_interval_elapses(self, tmp_path, monkeypatch) -> None:
+        from agent_takkub.orchestrator import _SHELL_DIALOG_SCAN_INTERVAL_S
+
+        fake = _FakeOrch()
+        now = 1_000_000.0
+        pane = self._pane_with_transcript(
+            tmp_path, "normal output, no dialog", last_out=self._silent_for(now)
+        )
+        fake._panes_by_project["p"] = {"backend": pane}
+
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "agent_takkub.orchestrator._read_tail_bytes",
+            lambda path, max_bytes: calls.append(str(path)) or b"normal output, no dialog",
+        )
+
+        _check(fake, now)
+        _check(fake, now + _SHELL_DIALOG_SCAN_INTERVAL_S + 1)
+
+        assert len(calls) == 2, "must resume scanning once the throttle window has elapsed"
+
+    def test_notify_dispatched_via_qtimer_not_inline(
+        self, tmp_path, monkeypatch, _patch_qtimer
+    ) -> None:
+        """The scan runs on a background thread (a real thread in prod); the
+        Lead notify must be marshalled back to the caller via
+        QTimer.singleShot(0, ...) rather than called directly off-thread."""
+        monkeypatch.setattr("agent_takkub.orchestrator.sys.platform", "win32")
+        monkeypatch.setattr(
+            "agent_takkub.orchestrator._open_with_dialog_process_present", lambda: True
+        )
+        fake = _FakeOrch()
+        now = 1_000_000.0
+        pane = self._pane_with_transcript(
+            tmp_path, "How do you want to open this file?", last_out=self._silent_for(now)
         )
         fake._panes_by_project["p"] = {"backend": pane}
 
         _check(fake, now)
 
         assert len(fake.notify_calls) == 1
-        assert fake.close_calls == [], "the dialog tripwire must not itself trigger recovery"
+        assert any(ms == 0 for ms, _fn in _patch_qtimer)
+
+    def test_in_flight_flag_cleared_after_scan_completes(self, tmp_path) -> None:
+        fake = _FakeOrch()
+        now = 1_000_000.0
+        pane = self._pane_with_transcript(
+            tmp_path, "normal output, no dialog", last_out=self._silent_for(now)
+        )
+        fake._panes_by_project["p"] = {"backend": pane}
+
+        _check(fake, now)
+
+        ps = fake._pane_state["p::backend"]
+        assert ps.dialog_scan_in_flight is False
+        assert ps.last_dialog_scan_ts == now

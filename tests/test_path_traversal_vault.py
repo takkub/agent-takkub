@@ -287,3 +287,73 @@ class TestWriteResumeBriefsRejectsTraversal:
 
         # Clean up.
         orch._panes_by_project.pop("safeproject", None)
+
+
+class TestWriteResumeBriefsThrottle:
+    """Issue #194: `_restart_cockpit()` calls `write_resume_briefs()`
+    explicitly right before `QCoreApplication.quit()`, and that same quit()
+    triggers `MainWindow.closeEvent`, which calls it AGAIN moments later —
+    two full chatlog-scan passes back to back on the Qt main thread. Pins
+    down the throttle that turns the second call into a no-op."""
+
+    def test_second_call_within_interval_is_a_noop(
+        self,
+        orch: Orchestrator,
+        tmp_path: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        vault = tmp_path / "fake-vault"
+        vault.mkdir()
+        monkeypatch.setattr("agent_takkub.orchestrator.RUNTIME_DIR", tmp_path / "runtime")
+        monkeypatch.setattr("agent_takkub.orchestrator._resolve_vault_dir", lambda: vault)
+        clock = [1_000_000.0]
+        monkeypatch.setattr("agent_takkub.orchestrator.time.time", lambda: clock[0])
+
+        orch._panes_by_project["safeproject"] = {}
+        scan_calls = []
+        with patch(
+            "agent_takkub.chatlog_scanner.build_resume_brief",
+            side_effect=lambda **kw: scan_calls.append(kw) or "# Resume brief content",
+        ):
+            first = orch.write_resume_briefs()
+            clock[0] += 1.0  # well inside _RESUME_BRIEF_MIN_INTERVAL_S
+            second = orch.write_resume_briefs()
+
+        assert first == 1
+        assert second == 0, "the restart-then-closeEvent double call must not re-scan"
+        assert len(scan_calls) == 1, "chatlog scan must run exactly once, not twice"
+
+        briefs_dir = vault / "99-Logs" / "briefs"
+        assert len(list(briefs_dir.glob("safeproject-*.md"))) == 1
+
+        orch._panes_by_project.pop("safeproject", None)
+
+    def test_call_after_interval_elapses_scans_again(
+        self,
+        orch: Orchestrator,
+        tmp_path: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from agent_takkub.orchestrator import _RESUME_BRIEF_MIN_INTERVAL_S
+
+        vault = tmp_path / "fake-vault"
+        vault.mkdir()
+        monkeypatch.setattr("agent_takkub.orchestrator.RUNTIME_DIR", tmp_path / "runtime")
+        monkeypatch.setattr("agent_takkub.orchestrator._resolve_vault_dir", lambda: vault)
+        clock = [1_000_000.0]
+        monkeypatch.setattr("agent_takkub.orchestrator.time.time", lambda: clock[0])
+
+        orch._panes_by_project["safeproject"] = {}
+        scan_calls = []
+        with patch(
+            "agent_takkub.chatlog_scanner.build_resume_brief",
+            side_effect=lambda **kw: scan_calls.append(kw) or "# Resume brief content",
+        ):
+            orch.write_resume_briefs()
+            clock[0] += _RESUME_BRIEF_MIN_INTERVAL_S + 1
+            second = orch.write_resume_briefs()
+
+        assert second == 1
+        assert len(scan_calls) == 2
+
+        orch._panes_by_project.pop("safeproject", None)

@@ -189,6 +189,34 @@ def _read_tail_bytes(path: pathlib.Path, max_bytes: int) -> bytes:
         return fh.read()
 
 
+def _looks_like_source_reference(line: str) -> bool:
+    """True when *line* (already known to contain the #104 Windows Open-With
+    dialog marker text) reads like source code/diff/log context rather than
+    a live OS dialog surfacing through a pane's terminal (issue #199).
+
+    The false positive that motivated this: the cockpit's OWN notify
+    message (in `Orchestrator._check_shell_open_dialog`) quotes the marker
+    text inside an f-string, so a pane editing or `Read`-ing that exact
+    source line sees the marker echoed right back at it in its own
+    transcript — the tripwire matching itself. Real dialog text never
+    carries a Read-tool line-number prefix, a diff marker, or surrounding
+    quote characters, so any of those is treated as source-code context and
+    skipped. Pure string check — cheap enough to run per matching line on
+    the scanning thread, no transcript file needed to unit-test it."""
+    stripped = line.strip()
+    if not stripped:
+        return False
+    if re.match(r"^\d+[:\t]", stripped):
+        return True  # Read tool / `cat -n` line-number prefix
+    if stripped[0] in "+-@":
+        return True  # diff hunk line or `@@` header
+    if "'" in line or '"' in line:
+        return True  # quoted literal / f-string
+    if "_SHELL_OPEN_DIALOG_MARKER" in line:
+        return True  # the constant's own name
+    return False
+
+
 def _log_event(event: str, **details) -> None:
     """Append a JSONL event line to runtime/events.log. Best-effort; never
     raises so an audit-log failure can't take down the orchestrator."""
