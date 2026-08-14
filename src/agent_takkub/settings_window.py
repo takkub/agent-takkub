@@ -111,6 +111,7 @@ from . import (
     custom_roles,
     pane_tools_dialog,
     pane_tools_policy,
+    performance_settings,
     pipeline_config,
     project_nav,
     provider_config,
@@ -147,6 +148,7 @@ VIEW_NEW_ROLE = 6
 VIEW_USERS = 7
 VIEW_SKILL_CATALOG = 8
 VIEW_SKILL_MATRIX = 9
+VIEW_PERFORMANCE = 10
 
 # (view index, nav label, sidebar section) — New Role is reached via the
 # dedicated "+ New Role" button, not this list, so it isn't a normal nav item.
@@ -163,6 +165,7 @@ _NAV_VIEWS: tuple[tuple[int, str, str], ...] = (
     (VIEW_PLUGINS_MATRIX, "Plugins Matrix", "TOOLS"),
     (VIEW_SKILL_CATALOG, "Skill Catalog", "SKILL"),
     (VIEW_SKILL_MATRIX, "Skill Matrix", "SKILL"),
+    (VIEW_PERFORMANCE, "Performance", "SYSTEM"),
     (VIEW_USERS, "Users", "ACCOUNT"),
 )
 
@@ -183,6 +186,7 @@ _NAV_ICON_NAMES: dict[int, str] = {
     VIEW_PLUGINS_MATRIX: "grid",
     VIEW_SKILL_CATALOG: "star",
     VIEW_SKILL_MATRIX: "star",
+    VIEW_PERFORMANCE: "grid",
     VIEW_USERS: "user",
 }
 _NAV_ICONS_DIR = Path(__file__).resolve().parent / "static" / "icons" / "nav"
@@ -219,6 +223,10 @@ _VIEW_HEADERS: dict[int, tuple[str, str]] = {
     VIEW_SKILL_MATRIX: (
         "Skill Matrix",
         "role × skill — เลือก skill ที่จะ inject เข้า context ตอน spawn อัตโนมัติ",
+    ),
+    VIEW_PERFORMANCE: (
+        "Performance",
+        "กำหนดเพดานงานหนัก, จุดพัก CPU/RAM และ cadence การ render เบื้องหลัง",
     ),
 }
 
@@ -640,6 +648,7 @@ class SettingsWindow(QDialog):
         # AFTER exec() returns Accepted, so live Lead panes get the same
         # broadcast a status-bar chip click produces.
         self.pending_provider_disabled: dict[str, bool] = {}
+        self.pending_performance_reload = False
         # Pipeline Builder/Templates share this in-memory copy of pipelines.json
         # (structural edits — Duplicate/Delete — write through immediately and
         # refresh it; hop edits stay staged here until Save & Apply).
@@ -857,6 +866,7 @@ class SettingsWindow(QDialog):
         self._stack.addWidget(self._wrap_scroll(self._build_users_view()))
         self._stack.addWidget(self._wrap_scroll(self._build_skill_catalog_view()))
         self._stack.addWidget(self._wrap_scroll(self._build_skill_matrix_view()))
+        self._stack.addWidget(self._wrap_scroll(self._build_performance_view()))
         hb_lay.addWidget(self._stack, 1)
 
         outer.addWidget(header_body, 1)
@@ -946,6 +956,8 @@ class SettingsWindow(QDialog):
             self._reload_plugins_matrix()
         elif idx == VIEW_SKILL_MATRIX:
             self._reload_skill_matrix()
+        elif idx == VIEW_PERFORMANCE:
+            self._load_performance_form(performance_settings.load())
         elif idx == VIEW_PIPELINE_BUILDER and getattr(self, "_pb_template_id", None):
             self._load_pb_hops(self._pb_template_id)
         self._dirty_views.discard(idx)
@@ -988,6 +1000,7 @@ class SettingsWindow(QDialog):
             # "save failed" while the model files are already persisted.
             provider_models.path(),
             role_models.path(),
+            performance_settings.path(),
         )
         snapshots = {p: (p.read_bytes() if p.exists() else None) for p in snapshot_paths}
 
@@ -1002,6 +1015,7 @@ class SettingsWindow(QDialog):
                     pass
 
         try:
+            self.pending_performance_reload = False
             self.pending_provider_disabled = {}
             for provider, toggle in self._provider_toggles.items():
                 desired_disabled = not toggle.isChecked()
@@ -1112,7 +1126,11 @@ class SettingsWindow(QDialog):
             self._orig_skill_items = updated_skills
             if mcp_changes or plugin_changes:
                 shared_dev_tools.regen_role_variants()
-        except OSError as e:
+            if VIEW_PERFORMANCE in self._dirty_views:
+                if not performance_settings.save(self._performance_settings_from_form()):
+                    raise OSError("เขียน performance-settings.json ไม่สำเร็จ")
+                self.pending_performance_reload = True
+        except (OSError, ValueError) as e:
             _rollback()
             self._pipeline_payload = pipeline_config.load(self._project)
             QMessageBox.critical(
@@ -1128,6 +1146,102 @@ class SettingsWindow(QDialog):
             )
         self._clear_dirty()
         self.accept()
+
+    # ──────────────────────────────────────────────────────────
+    # view: Performance (persisted + live-applied by the caller)
+    # ──────────────────────────────────────────────────────────
+
+    def _build_performance_view(self) -> QWidget:
+        view = QWidget(self)
+        lay = QVBoxLayout(view)
+        lay.setContentsMargins(0, 0, 0, 16)
+        lay.setSpacing(14)
+
+        banner = QLabel(
+            "Balanced เหมาะกับการใช้งานทั่วไป · Safe ลดแรงกดบนเครื่องที่เปิด prod อยู่ · "
+            "Maximum เพิ่ม throughput แต่ยังคง CPU/RAM guard ไว้ ค่า environment TAKKUB_* "
+            "มีลำดับสูงกว่าหน้านี้เสมอ",
+            view,
+        )
+        banner.setObjectName("infoBanner")
+        banner.setWordWrap(True)
+        lay.addWidget(banner)
+
+        panel = QWidget(view)
+        panel.setObjectName("panel")
+        form = QFormLayout(panel)
+        form.setContentsMargins(16, 16, 16, 16)
+        form.setSpacing(10)
+
+        self._performance_mode = QComboBox(panel)
+        for key, label in (("safe", "Safe"), ("balanced", "Balanced"), ("maximum", "Maximum")):
+            self._performance_mode.addItem(label, key)
+        form.addRow("Preset", self._performance_mode)
+
+        specs = (
+            ("max_heavy_global", "Heavy agents · global", 1, 64, " concurrent"),
+            ("max_heavy_per_project", "Heavy agents · per project", 1, 64, " concurrent"),
+            ("max_browser_global", "Browser agents · global", 1, 64, " concurrent"),
+            ("max_build_global", "Builds · global", 1, 64, " concurrent"),
+            ("max_test_global", "Test suites · global", 1, 64, " concurrent"),
+            ("max_package_install_global", "Package installs · global", 1, 64, " concurrent"),
+            ("cpu_pause_percent", "Pause new heavy work at CPU", 50, 100, "%"),
+            ("cpu_resume_percent", "Resume heavy work below CPU", 1, 99, "%"),
+            ("min_available_ram_percent", "Pause below available RAM", 1, 99, "%"),
+            ("resume_ram_percent", "Resume above available RAM", 2, 100, "%"),
+            ("hidden_render_ms", "Background render cadence", 50, 2_000, " ms"),
+        )
+        self._performance_fields: dict[str, QSpinBox] = {}
+        for name, label, minimum, maximum, suffix in specs:
+            spin = QSpinBox(panel)
+            spin.setRange(minimum, maximum)
+            spin.setSuffix(suffix)
+            form.addRow(label, spin)
+            self._performance_fields[name] = spin
+
+        lay.addWidget(panel)
+        note = QLabel(
+            "Save & Apply ใช้กับงานใหม่ทันทีโดยไม่ตัด pane ที่กำลังทำงาน และไม่ทิ้งคิวเดิม",
+            view,
+        )
+        note.setObjectName("panelHint")
+        note.setWordWrap(True)
+        lay.addWidget(note)
+        lay.addStretch(1)
+
+        self._load_performance_form(performance_settings.load())
+        self._performance_mode.currentIndexChanged.connect(self._on_performance_mode_changed)
+        for spin in self._performance_fields.values():
+            spin.valueChanged.connect(self._mark_dirty)
+        return view
+
+    def _load_performance_form(self, settings: performance_settings.PerformanceSettings) -> None:
+        controls = [self._performance_mode, *self._performance_fields.values()]
+        for control in controls:
+            control.blockSignals(True)
+        try:
+            idx = self._performance_mode.findData(settings.mode)
+            self._performance_mode.setCurrentIndex(max(0, idx))
+            for name, spin in self._performance_fields.items():
+                spin.setValue(round(getattr(settings, name)))
+        finally:
+            for control in controls:
+                control.blockSignals(False)
+
+    def _on_performance_mode_changed(self) -> None:
+        mode = self._performance_mode.currentData() or "balanced"
+        self._load_performance_form(performance_settings.preset(str(mode)))
+        self._dirty_views.add(VIEW_PERFORMANCE)
+        self._refresh_dirty_indicator()
+
+    def _performance_settings_from_form(self) -> performance_settings.PerformanceSettings:
+        values = {name: spin.value() for name, spin in self._performance_fields.items()}
+        return performance_settings.validate(
+            performance_settings.PerformanceSettings(
+                mode=str(self._performance_mode.currentData() or "balanced"),
+                **values,
+            )
+        )
 
     # ──────────────────────────────────────────────────────────
     # view: Providers & Roles (real)

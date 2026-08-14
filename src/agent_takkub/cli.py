@@ -984,10 +984,15 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
         findings = run_all_checks()
 
     if getattr(args, "live", False):
-        from .doctor import check_remote_mirror_live, check_spawn_queue_live
+        from .doctor import (
+            check_performance_live,
+            check_remote_mirror_live,
+            check_spawn_queue_live,
+        )
 
         live_resp: dict | None = None
         mirror_resp: dict | None = None
+        performance_resp: dict | None = None
         if read_port() is not None:
             try:
                 live_resp = _request({"cmd": "spawn-queue-status"})
@@ -997,8 +1002,13 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
                 mirror_resp = _request({"cmd": "remote-mirror-status"})
             except Exception as e:
                 mirror_resp = {"ok": False, "msg": f"{type(e).__name__}: {e}"}
+            try:
+                performance_resp = _request({"cmd": "performance-status"})
+            except Exception as e:
+                performance_resp = {"ok": False, "msg": f"{type(e).__name__}: {e}"}
         findings += check_spawn_queue_live(live_resp)
         findings += check_remote_mirror_live(mirror_resp)
+        findings += check_performance_live(performance_resp)
 
     if args.json:
         import json as _json

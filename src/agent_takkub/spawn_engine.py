@@ -464,6 +464,9 @@ class PaneState:
     # _session_uuids: uuid+cwd for the current/last session
     session_uuid: str | None = None
     session_uuid_cwd: str = ""
+    # Stable identity for the current assign intent. Completion notification
+    # idempotency derives from this instead of terminal text/timing heuristics.
+    task_id: str | None = None
     # _blocked_on_lead: ts when teammate last sent to Lead (suppresses idle nag)
     blocked_on_lead_ts: float | None = None
     # _rate_limited_until: epoch at which the usage-rate limit resets (0 = no limit)
@@ -1144,7 +1147,7 @@ class SpawnEngineMixin:
             # on the task directly instead of spending a round-trip deciding
             # to read the handoff file.
             #
-            # #134: allow_repaste=False. The trigger is short, single-line,
+            # #134: production disables automated repaste globally. The trigger is short, single-line,
             # and never bracket-pasted (below BRACKETED_PASTE_THRESHOLD), so
             # a "ready + empty box" verify reading is genuinely ambiguous
             # between "already submitted" and "still sitting unsent" (no
@@ -1156,9 +1159,7 @@ class SpawnEngineMixin:
             # at ready with the preloaded system prompt and an empty
             # composer, which the idle watchdog's `[auto-reminder]` nudge
             # (IDLE_REMINDER_TEXT) picks up.
-            self._send_when_ready(
-                role_name, _CURRENT_TASK_TRIGGER, project=project_ns, allow_repaste=False
-            )
+            self._send_when_ready_no_repaste(role_name, _CURRENT_TASK_TRIGGER, project=project_ns)
             return
         ps.spawn_initial_task_state = "fallback"
         _log_event(
@@ -1168,7 +1169,7 @@ class SpawnEngineMixin:
             reason="fallback-after-fail",
         )
         if fallback:
-            self._send_when_ready(role_name, fallback, project=project_ns)
+            self._send_when_ready_no_repaste(role_name, fallback, project=project_ns)
 
     def _launch_session(
         self,

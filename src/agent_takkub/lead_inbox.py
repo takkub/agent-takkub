@@ -29,6 +29,7 @@ stays centralised and divergence bugs cannot creep back in.
 from __future__ import annotations
 
 import collections
+import inspect
 import json
 import os
 import pathlib
@@ -54,8 +55,9 @@ from .orchestrator_text import (
     _sanitize_pane_text,
 )
 from .pipeline_executor import _split_shard
-from .pty_session import PtySession
+from .pty_session import PtySession, WritePriority
 from .roles import LEAD
+from .task_delivery import DeliveryManager
 
 
 def _orch_attr(name: str, default):
@@ -268,8 +270,30 @@ def _delayed_enter(pane: AgentPane, session: PtySession, delay_ms: int) -> None:
     """
     QTimer.singleShot(
         delay_ms,
-        lambda: pane.session is session and pane.session.write(b"\r"),
+        lambda: pane.session is session and _safe_session_write(pane.session, b"\r"),
     )
+
+
+def _safe_session_write(session, data, **metadata) -> bool:
+    """Use metadata with real PtySession objects while preserving simple fakes.
+
+    Several compatibility tests and third-party integrations expose only the
+    historical ``write(data)`` shape. Production PtySession accepts the safety
+    metadata; a TypeError fallback keeps those narrow adapters working.
+    """
+    has_delivery_guard = any(
+        metadata.get(key) is not None for key in ("delivery_id", "session_generation", "expires_at")
+    )
+    safety_metadata = (
+        {key: value for key, value in metadata.items() if value is not None}
+        if has_delivery_guard
+        else {}
+    )
+    try:
+        result = session.write(data, **safety_metadata) if safety_metadata else session.write(data)
+    except TypeError:
+        result = session.write(data)
+    return result is not False
 
 
 def _log_verify_decision(
@@ -319,6 +343,9 @@ def _delayed_enter_verified(
     content_fragment: str = "",
     on_repaste=None,
     on_settled=None,
+    delivery_id: str | None = None,
+    session_generation: int | None = None,
+    expires_at: float | None = None,
 ) -> None:
     """Like `_delayed_enter`, but recovers a submit that was swallowed.
 
@@ -378,7 +405,15 @@ def _delayed_enter_verified(
         if pane.session is not session:
             _settled()
             return
-        pane.session.write(b"\r")
+        _safe_session_write(
+            pane.session,
+            b"\r",
+            priority=WritePriority.CONTROL,
+            kind="control",
+            delivery_id=delivery_id,
+            session_generation=session_generation,
+            expires_at=expires_at,
+        )
 
         def _verify(
             render_waits: int = _RENDER_WAIT_MAX, stall_grace: int = _STALL_DEFER_MAX
@@ -504,7 +539,15 @@ def _delayed_enter_verified(
                 )
                 if on_repaste is not None:
                     on_repaste(remaining)
-                session.write(payload)
+                _safe_session_write(
+                    session,
+                    payload,
+                    priority=WritePriority.TASK,
+                    kind="task",
+                    delivery_id=delivery_id,
+                    session_generation=session_generation,
+                    expires_at=expires_at,
+                )
                 paste_baseline[0] = session.last_output_monotonic()
                 QTimer.singleShot(
                     _enter_delay_ms(payload),
@@ -674,7 +717,7 @@ class LeadInboxMixin:
         task: str,
         max_wait_ms: int = 45_000,
         project: str | None = None,
-        allow_repaste: bool = True,
+        allow_repaste: bool | None = None,
     ) -> None:
         """Poll until claude's main prompt is idle, then paste task + Enter.
 
@@ -697,6 +740,11 @@ class LeadInboxMixin:
         this. Ordinary task delivery keeps the default — losing a real task
         spec has no such backstop, so repaste recovery must stay on.
         """
+        if allow_repaste is None:
+            # Real orchestrators disable automated task-body repaste.  Default
+            # to the historical behaviour for narrow adapters/test doubles
+            # that instantiate this mixin without running Orchestrator.__init__.
+            allow_repaste = bool(self.__dict__.get("_allow_automated_repaste", True))
         max_wait_ms = self._ready_wait_ms(role_name, project, max_wait_ms)
         pane = self._project_panes(project).get(role_name)
         if pane is None:
@@ -749,7 +797,79 @@ class LeadInboxMixin:
             pane.set_state("working", note=task[:60])
             _task_sess = pane.session
             payload = _paste_payload(_sanitize_pane_text(task))
-            _task_sess.write(payload)
+            generation = int(getattr(pane, "_session_generation", 0))
+            if "_delivery_manager" not in self.__dict__:
+                self._delivery_manager = DeliveryManager(
+                    event_sink=lambda event, details: _log_event(event, **details)
+                )
+            manager: DeliveryManager = self._delivery_manager
+            delivery = manager.create(
+                task_id="",
+                project_id=self._resolve_project(project),
+                pane_id=role_name,
+                session_generation=generation,
+                payload=payload,
+            )
+            if not manager.begin_write(delivery.delivery_id, generation):
+                _log_event(
+                    "task_delivery_single_flight_block",
+                    project=self._resolve_project(project),
+                    role=role_name,
+                    delivery_id=delivery.delivery_id,
+                )
+                return
+            wrote = _safe_session_write(
+                _task_sess,
+                payload,
+                priority=WritePriority.TASK,
+                kind="task",
+                expires_at=delivery.expires_at,
+                session_generation=generation,
+                delivery_id=delivery.delivery_id,
+                validator=lambda d=delivery.delivery_id, g=generation: manager.validate_for_write(
+                    d, g
+                ),
+            )
+            if not wrote:
+                manager.mark_failed(delivery.delivery_id)
+                _log_event(
+                    "writer_queue_full",
+                    project=self._resolve_project(project),
+                    role=role_name,
+                    delivery_id=delivery.delivery_id,
+                )
+                return
+            manager.mark_written(delivery.delivery_id)
+            manager.begin_submit(delivery.delivery_id, generation)
+            if "_last_delivery_ids" not in self.__dict__:
+                self._last_delivery_ids = {}
+            self._last_delivery_ids[(self._resolve_project(project), role_name)] = (
+                delivery.delivery_id
+            )
+
+            def _on_resend(rem: int, r=role_name, p=project) -> None:
+                manager.retry_enter(delivery.delivery_id, generation)
+                _log_event(
+                    "task_deliver_enter_resend",
+                    project=self._resolve_project(p),
+                    role=r,
+                    remaining=rem,
+                    delivery_id=delivery.delivery_id,
+                )
+
+            def _on_settled() -> None:
+                if pane.session is not _task_sess:
+                    manager.mark_failed(delivery.delivery_id)
+                    return
+                try:
+                    accepted = not _task_sess.is_at_ready_prompt()
+                except Exception:
+                    accepted = False
+                if accepted:
+                    manager.mark_accepted(delivery.delivery_id)
+                else:
+                    manager.mark_uncertain(delivery.delivery_id)
+
             # Self-healing submit: the task pastes as a `[Pasted text]` placeholder
             # and an Enter landing mid-render is swallowed, leaving the teammate
             # sitting on the placeholder forever instead of running the spec — the
@@ -762,18 +882,17 @@ class LeadInboxMixin:
                 _enter_delay_ms(payload),
                 payload=payload if allow_repaste else None,
                 content_fragment=task,
-                on_resend=lambda rem, r=role_name, p=project: _log_event(
-                    "task_deliver_enter_resend",
-                    project=self._resolve_project(p),
-                    role=r,
-                    remaining=rem,
-                ),
+                on_resend=_on_resend,
                 on_repaste=lambda rem, r=role_name, p=project: _log_event(
                     "task_deliver_repaste",
                     project=self._resolve_project(p),
                     role=r,
                     remaining=rem,
                 ),
+                on_settled=_on_settled,
+                delivery_id=delivery.delivery_id,
+                session_generation=generation,
+                expires_at=delivery.expires_at,
             )
             if unconfirmed:
                 # Delivered blind — the pane never signalled ready, so on a cold
@@ -940,6 +1059,34 @@ class LeadInboxMixin:
         # just wait out the gate anyway.
         gate_deferred = getattr(pane, "deferred_spawn", False)
         QTimer.singleShot(0 if gate_deferred else _READY_POLL_FIRST_MS, _check)
+
+    def _send_when_ready_no_repaste(
+        self,
+        role_name: str,
+        task: str,
+        *,
+        project: str | None = None,
+        max_wait_ms: int | None = None,
+    ) -> None:
+        """Dispatch with the v2 no-repaste flag and legacy override support."""
+        target = self._send_when_ready
+        try:
+            parameters = tuple(inspect.signature(target).parameters.values())
+            parameter_names = {parameter.name for parameter in parameters}
+            accepts_kwargs = any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters
+            )
+        except (TypeError, ValueError):
+            parameter_names = set()
+            accepts_kwargs = True
+        kwargs = {}
+        if accepts_kwargs or "project" in parameter_names:
+            kwargs["project"] = project
+        if max_wait_ms is not None and (accepts_kwargs or "max_wait_ms" in parameter_names):
+            kwargs["max_wait_ms"] = max_wait_ms
+        if accepts_kwargs or "allow_repaste" in parameter_names:
+            kwargs["allow_repaste"] = False
+        target(role_name, task, **kwargs)
 
     def _warn_lead_delivery_blocked_prompt(
         self, role_name: str, project: str | None, reason: str
@@ -1586,8 +1733,20 @@ class LeadInboxMixin:
         body = _sanitize_pane_text(raw_body)
         _notify_sess = lead.session
         payload = _paste_payload(body)
+        notice_expires_at = time.time() + float(
+            os.environ.get("TAKKUB_TASK_DELIVERY_TTL_SEC", "30")
+        )
         try:
-            _notify_sess.write(payload)
+            wrote = _safe_session_write(
+                _notify_sess,
+                payload,
+                priority=WritePriority.TASK,
+                kind="notification",
+                expires_at=notice_expires_at,
+                session_generation=getattr(lead, "_session_generation", None),
+            )
+            if not wrote:
+                raise RuntimeError("PTY writer queue rejected Lead notification")
         except Exception:
             # The write failed — this item and anything queued behind it are
             # still unsent. Spill the whole live queue to the durable store
@@ -1627,7 +1786,7 @@ class LeadInboxMixin:
             lead,
             _notify_sess,
             delay,
-            payload=payload,
+            payload=None,
             content_fragment=body,
             on_resend=lambda rem: _log_event(
                 "lead_notify_enter_resend", project=project_ns, remaining=rem
@@ -1636,6 +1795,7 @@ class LeadInboxMixin:
                 "lead_notify_repaste", project=project_ns, remaining=rem
             ),
             on_settled=_on_verify_settled,
+            expires_at=notice_expires_at,
         )
         self.leadInjected.emit(body)
 
@@ -1804,8 +1964,20 @@ class LeadInboxMixin:
         body = "\n\n".join(_sanitize_pane_text(item.get("body", "")) for item in valid)
         sess = lead.session
         payload = _paste_payload(body)
+        notice_expires_at = time.time() + float(
+            os.environ.get("TAKKUB_TASK_DELIVERY_TTL_SEC", "30")
+        )
         try:
-            sess.write(payload)
+            wrote = _safe_session_write(
+                sess,
+                payload,
+                priority=WritePriority.TASK,
+                kind="notification",
+                expires_at=notice_expires_at,
+                session_generation=getattr(lead, "_session_generation", None),
+            )
+            if not wrote:
+                raise RuntimeError("PTY writer queue rejected forced Lead notification")
         except Exception:
             _log_event("done_notice_force_deliver_failed", project=project_ns, count=len(pending))
             return
@@ -1823,7 +1995,7 @@ class LeadInboxMixin:
             lead,
             sess,
             delay,
-            payload=payload,
+            payload=None,
             content_fragment=body,
             on_resend=lambda rem: _log_event(
                 "done_notice_force_enter_resend", project=project_ns, remaining=rem
@@ -1832,5 +2004,6 @@ class LeadInboxMixin:
                 "done_notice_force_repaste", project=project_ns, remaining=rem
             ),
             on_settled=_on_verify_settled,
+            expires_at=notice_expires_at,
         )
         self.leadInjected.emit(body)

@@ -91,7 +91,36 @@ class LimitPanelMixin:
             for name in provider_usage.PROVIDER_NAMES
             if name != "claude"
         ]
-        self._limit_label.set_usages([claude_usage, *others])
+        self._limit_label.set_usages(
+            [claude_usage, *others], primary_provider=self._active_lead_provider()
+        )
+
+    def _active_lead_provider(self) -> str:
+        """Return the provider actually attached to the visible Lead pane."""
+        tabs = getattr(self, "tabs", None)
+        tab = tabs.currentWidget() if tabs is not None else None
+        pane = getattr(tab, "lead_pane", None)
+        model = getattr(pane, "model", None)
+        attached = getattr(model, "provider_name", None)
+        if isinstance(attached, str) and attached:
+            return attached.lower()
+        from .provider_config import effective_provider_for
+
+        project = getattr(tab, "project_name", None) or active_project()[0]
+        return str(effective_provider_for("lead", project=project) or "claude").lower()
+
+    def _refresh_active_provider_usage(self) -> None:
+        """Repaint from caches only; called by the existing 2-second UI timer."""
+        if not hasattr(self, "_limit_label") or sip.isdeleted(self._limit_label):
+            return
+        data = None
+        store = getattr(self, "_limit_store", None)
+        if store is not None:
+            from . import user_profile
+
+            project = active_project()[0] or ""
+            data = store.get(user_profile.config_dir_for(project))
+        self._refresh_limit_label(data)
 
 
 def _claude_provider_usage(data) -> ProviderUsage:

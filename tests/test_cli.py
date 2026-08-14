@@ -423,6 +423,11 @@ class TestInstanceBanner:
         monkeypatch.setenv("TAKKUB_PROJECT", "agent-takkub")
         monkeypatch.setattr(cli.config, "read_port", lambda: 56919)
         monkeypatch.setattr(cli.config, "_get_port_file", lambda: current_port_file)
+        # This case tests the worktree-derived project label only. Isolate the
+        # optional cross-instance probe so a real prod cockpit running on the
+        # developer machine cannot append an unrelated warning to the banner.
+        isolated_home = tmp_path / "isolated-home"
+        monkeypatch.setattr(cli.Path, "home", classmethod(lambda cls: isolated_home))
 
         banner = cli._instance_banner()
 

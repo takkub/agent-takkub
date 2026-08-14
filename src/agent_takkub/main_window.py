@@ -268,17 +268,28 @@ class MainWindow(
         # into the new active ProjectTab's corner via mount_usage_widget().
         self._limit_label = UsageMeter()
         self._limit_label.setToolTip(
-            "Provider usage — คลิกเพื่อดูรายละเอียดแต่ละ provider\n"
-            "Claude reflects the whole account, not just this pane."
+            "Lead provider usage — คลิกเพื่อดูรายละเอียดทุก provider\n"
+            "หัว meter จะตาม provider ที่ Lead ใช้งานจริง"
         )
 
         # ── status bar ────────────────────────────────────
         self._build_status_bar()
-        # Mount meter into the initial tab's pane_tabs corner.
+        # The performance-health chip (_chip_performance, built inside
+        # _build_status_bar) used to live in the global status-header row.
+        # It's parked here instead, side-by-side with the token/usage meter,
+        # as one small container so both travel together as a single corner
+        # widget across tab switches/closes.
+        self._usage_corner = QWidget()
+        _usage_corner_layout = QHBoxLayout(self._usage_corner)
+        _usage_corner_layout.setContentsMargins(0, 0, 0, 0)
+        _usage_corner_layout.setSpacing(6)
+        _usage_corner_layout.addWidget(self._chip_performance)
+        _usage_corner_layout.addWidget(self._limit_label)
+        # Mount the corner widget into the initial tab's pane_tabs corner.
         # _limit_label_host tracks the current owner so _on_tab_switched can
         # explicitly clear the old corner before mounting on the new tab.
         self._limit_label_host: ProjectTab | None = initial_tab
-        initial_tab.mount_usage_widget(self._limit_label)
+        initial_tab.mount_usage_widget(self._usage_corner)
 
         # Only NOW is it safe to listen for project switches — the handler
         # touches `_btn_install_rtk` via `_refresh_rtk_button`, which didn't
@@ -1182,18 +1193,19 @@ class MainWindow(
             from . import user_profile as _up_tc
 
             self._limit_store.unregister(_up_tc.config_dir_for(tab.project_name))
-        # The usage meter is a single UsageMeter widget parked as this tab's
-        # corner widget. If we're closing the tab that currently hosts it,
-        # detach it BEFORE deleteLater — otherwise Qt destroys the C++ widget
-        # along with the tab while Python keeps `_limit_label` pointing at the
-        # dead wrapper, and every subsequent usage poll throws "has been
-        # deleted", so the meter vanishes until the cockpit restarts. removeTab
-        # below re-mounts
+        # The usage meter + performance chip live together in one
+        # `_usage_corner` container parked as this tab's corner widget. If
+        # we're closing the tab that currently hosts it, detach it BEFORE
+        # deleteLater — otherwise Qt destroys the C++ widget along with the
+        # tab while Python keeps `_usage_corner` (and `_limit_label`)
+        # pointing at the dead wrapper, and every subsequent usage poll
+        # throws "has been deleted", so the meter vanishes until the cockpit
+        # restarts. removeTab below re-mounts
         # it on the new active tab via _on_tab_switched (host is None now, so it
         # skips the stale-clear and just mounts).
         if self._limit_label_host is tab:
             tab.pane_tabs.setCornerWidget(None, Qt.Corner.TopRightCorner)
-            self._limit_label.setParent(None)
+            self._usage_corner.setParent(None)
             self._limit_label_host = None
         self.tabs.removeTab(index)
         # ProjectTab still holds references to AgentPane/TerminalWidget;
@@ -1228,12 +1240,13 @@ class MainWindow(
             w = self.tabs.widget(i)
             if isinstance(w, ProjectTab):
                 w.set_keepalive(i == index)
-        # Reparent the usage label: clear the old corner first so the previous
-        # tab doesn't keep a stale reference, then mount on the new active tab.
+        # Reparent the usage corner (meter + performance chip): clear the old
+        # corner first so the previous tab doesn't keep a stale reference,
+        # then mount on the new active tab.
         if self._limit_label_host is not None and self._limit_label_host is not tab:
             self._limit_label_host.pane_tabs.setCornerWidget(None, Qt.Corner.TopRightCorner)
         self._limit_label_host = tab
-        tab.mount_usage_widget(self._limit_label)
+        tab.mount_usage_widget(self._usage_corner)
         self._tasks_dock_widget.set_project(tab.project_name)
         # graft code-graph auto-build: only kicks a background build for
         # paths that have no graph yet — see graft_autobuild.py. Never

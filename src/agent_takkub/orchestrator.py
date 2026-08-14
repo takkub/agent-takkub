@@ -64,6 +64,7 @@ from .lead_inbox import (  # re-exported for test/compat imports; mixin provides
     LeadInboxMixin,
     _delayed_enter,
     _delayed_enter_verified,
+    _safe_session_write,
 )
 from .limit_autoresume import AutoResumeMixin  # mixin providing auto-resume methods
 from .orchestrator_text import (  # re-exported for test/app/main_window imports
@@ -124,7 +125,8 @@ from .pipeline_executor import (  # re-exported for test imports; mixin provides
     ShardGroup,
     _split_shard,
 )
-from .pty_session import PtySession  # re-exported for test imports
+from .pty_session import PtySession, WritePriority  # re-exported for test imports
+from .resource_governor import GovernorLimits, ResourceGovernor, ResourceToken, classify_resource
 from .roles import LEAD
 from .roles import by_name as _role_by_name
 from .spawn_engine import (  # re-exported for backward compat; mixin provides methods
@@ -140,6 +142,7 @@ from .spawn_engine import (  # re-exported for backward compat; mixin provides m
     PaneState,
     SpawnEngineMixin,
 )
+from .task_delivery import NoticeDeduper, make_notice_id
 from .vault_mirror import (  # re-exported for test + script imports
     _DEFAULT_VAULT,
     _JUNK_NOTE_EXACT,
@@ -801,6 +804,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         # disk so a teammate's done report survives a cockpit restart while the
         # Lead is down (issue #13).
         self._pending_done_notices: dict[str, list[dict]] = {}
+        self._notice_deduper = NoticeDeduper(RUNTIME_DIR / "notice-dedupe.json")
         # Per-project timestamp of when the reaper first saw pending notices it
         # could not flush because the Lead read as not-ready. Drives the
         # staleness escalation that force-delivers when is_at_ready_prompt() is a
@@ -815,6 +819,22 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         # is off. See docs/reviews/2026-06-30-queue-gap.md.
         self._fanout_queue: dict = {}
         self._load_fanout_queue()
+        # Global/per-project admission controller. Sampling is non-blocking and
+        # dispatch callbacks run on this Qt thread, preserving orchestrator state
+        # ownership while preventing multi-project fan-out from saturating the host.
+        self._resource_governor = ResourceGovernor(
+            event_sink=lambda event, details: _log_event(event, **details)
+        )
+        # Reliability v2 forbids blind task-body replay. Verification may
+        # retry Enter, but a fresh delivery requires a fresh delivery ID.
+        self._allow_automated_repaste = False
+        self._resource_tokens: dict[tuple[str, str], ResourceToken] = {}
+        self._main_thread_stall_count = 0
+        self._latest_main_thread_stall: dict = {}
+        self._resource_timer = QTimer(self)
+        self._resource_timer.setInterval(1000)
+        self._resource_timer.timeout.connect(self._tick_resource_governor)
+        self._resource_timer.start()
         # In-memory serialisation queue for live Lead writes (ready-prompt aware).
         # Keyed by project namespace.  Items are string bodies; a single pump
         # fires per project so concurrent done notices never overwrite each other
@@ -1049,6 +1069,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         project: str | None = None,
         feature: str = "",
         model: str | None = None,
+        _resource_token: ResourceToken | None = None,
     ) -> tuple[bool, str]:
         model = (model or "").strip() or None
         if model:
@@ -1066,11 +1087,68 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             collision_err = self._worktree_bare_role_collision(role_name, project)
             if collision_err:
                 return False, collision_err
+        project_ns = self._resolve_project(project)
+        resource_key = (project_ns, role_name)
+        governor = getattr(self, "_resource_governor", None)
+        if governor is None:
+            governor = self._resource_governor = ResourceGovernor(
+                event_sink=lambda event, details: _log_event(event, **details)
+            )
+        if not hasattr(self, "_resource_tokens"):
+            self._resource_tokens = {}
+        if _resource_token is not None:
+            self._resource_tokens[resource_key] = _resource_token
+        elif resource_key not in self._resource_tokens:
+            resource_class = classify_resource(role_name, task)
+            task_id = _uuid.uuid4().hex
+            decision = governor.request_slot(
+                project_id=project_ns,
+                pane_id=role_name,
+                task_id=task_id,
+                resource_class=resource_class,
+            )
+            if not decision.allowed:
+                governor.enqueue(
+                    project_id=project_ns,
+                    pane_id=role_name,
+                    task_id=task_id,
+                    resource_class=resource_class,
+                    on_admitted=lambda token, r=role_name, c=cwd, t=task, rc=requires_commit, ac=auto_chain, st=shard_total, pl=plan, iso=isolation, p=project, f=feature, m=model: (
+                        self.assign(
+                            r,
+                            c,
+                            t,
+                            requires_commit=rc,
+                            auto_chain=ac,
+                            shard_total=st,
+                            plan=pl,
+                            isolation=iso,
+                            project=p,
+                            feature=f,
+                            model=m,
+                            _resource_token=token,
+                        )
+                    ),
+                )
+                _log_event(
+                    "assign_resource_wait",
+                    project=project_ns,
+                    role=role_name,
+                    resource_class=resource_class.value,
+                    reason=decision.reason,
+                )
+                return True, f"{role_name} queued · waiting for resources ({decision.reason})"
+            if decision.token is not None:
+                self._resource_tokens[resource_key] = decision.token
         # Fan-out queue (flag-gated, default off): defer a fresh teammate spawn
         # that would exceed the machine's total-pane budget. It spawns
         # automatically when a pane frees a slot (see _drain_fanout_queue). No-op
         # unless TAKKUB_QUEUE_FANOUT is set, so default behaviour is unchanged.
         if self._should_queue_assign(role_name, project):
+            # The machine-pane queue owns admission from here; do not reserve a
+            # governor slot while the work is parked behind a separate limit.
+            token = self._resource_tokens.pop(resource_key, None)
+            governor.release_slot(token)
             return self._enqueue_assign(
                 role_name,
                 cwd,
@@ -1089,7 +1167,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         # branch, then dispatch the pane into it. On any failure this falls back
         # to a shared-cwd dispatch and warns the Lead — never blocks the assign.
         if isolation == "worktree":
-            return self._assign_with_worktree(
+            result = self._assign_with_worktree(
                 role_name,
                 cwd,
                 task,
@@ -1101,19 +1179,31 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                 feature,
                 model,
             )
-        return self._assign_dispatch(
-            role_name,
-            cwd,
-            task,
-            requires_commit=requires_commit,
-            auto_chain=auto_chain,
-            shard_total=shard_total,
-            plan=plan,
-            project=project,
-            worktree=None,
-            feature=feature,
-            model=model,
-        )
+        else:
+            result = self._assign_dispatch(
+                role_name,
+                cwd,
+                task,
+                requires_commit=requires_commit,
+                auto_chain=auto_chain,
+                shard_total=shard_total,
+                plan=plan,
+                project=project,
+                worktree=None,
+                feature=feature,
+                model=model,
+            )
+        if not result[0]:
+            token = self._resource_tokens.pop(resource_key, None)
+            governor.release_slot(token)
+        return result
+
+    def _tick_resource_governor(self) -> None:
+        governor = getattr(self, "_resource_governor", None)
+        if governor is None:
+            return
+        governor.sample()
+        governor.dispatch_waiting()
 
     def _worktree_bare_role_collision(self, role_name: str, project: str | None) -> str | None:
         """Guard for issue #162: firing `assign --isolation worktree` twice at
@@ -1212,6 +1302,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         )
         key = _exit_key(project_ns, role_name)
         ps_assign = self._ps(key)
+        ps_assign.task_id = _uuid.uuid4().hex
         existing_pane = self._project_panes(project_ns).get(role_name)
         pane_is_running = bool(
             existing_pane is not None
@@ -1674,7 +1765,17 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         body = header + _sanitize_pane_text(msg)
         _send_sess = pane.session
         body_payload = _paste_payload(body)
-        _send_sess.write(body_payload)
+        message_expires_at = time.time() + float(
+            os.environ.get("TAKKUB_TASK_DELIVERY_TTL_SEC", "30")
+        )
+        _safe_session_write(
+            _send_sess,
+            body_payload,
+            priority=WritePriority.TASK,
+            kind="task",
+            expires_at=message_expires_at,
+            session_generation=getattr(pane, "_session_generation", None),
+        )
         # Self-healing submit (issue #22): resend Enter if the peer message's
         # submit was swallowed mid-paste-render. Safe — a busy target isn't at
         # its ready prompt, so no resend fires into an in-flight turn.
@@ -1682,7 +1783,10 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             pane,
             _send_sess,
             _enter_delay_ms(body_payload),
-            payload=body_payload,
+            # Peer messages are never automatically pasted twice. If submit
+            # evidence is ambiguous, retry Enter only and surface the existing
+            # delivery warning path instead of duplicating the body.
+            payload=None,
             content_fragment=body,
             on_resend=lambda rem, r=to_role: _log_event(
                 "send_enter_resend", project=project_ns, role=r, remaining=rem
@@ -1690,6 +1794,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             on_repaste=lambda rem, r=to_role: _log_event(
                 "send_repaste", project=project_ns, role=r, remaining=rem
             ),
+            expires_at=message_expires_at,
         )
 
         # Record delivery time for stall detection: receiving a message counts
@@ -1786,6 +1891,21 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             pane.session.terminate()
             pane.set_state("empty", note=None)
         key = f"{project_ns}::{role_name}"
+        resource_token = getattr(self, "_resource_tokens", {}).pop((project_ns, role_name), None)
+        resource_governor = getattr(self, "_resource_governor", None)
+        if resource_governor is not None:
+            resource_governor.release_slot(resource_token)
+            resource_governor.cancel_waiting(project_id=project_ns, pane_id=role_name)
+        delivery_id = getattr(self, "_last_delivery_ids", {}).pop((project_ns, role_name), None)
+        delivery_manager = getattr(self, "_delivery_manager", None)
+        if delivery_id and delivery_manager is not None:
+            delivery_manager.mark_failed(delivery_id)
+        if delivery_manager is not None:
+            delivery_manager.cancel_for_session(
+                project_ns,
+                role_name,
+                int(getattr(pane, "_session_generation", 0)),
+            )
         # #8: read auto_chain flag BEFORE popping state so a pane that is
         # closed externally (e.g. forced close) still triggers the auto-chain
         # handoff if it was the last pending auto-chain pane in the project.
@@ -1815,6 +1935,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
 
         self._idle_state.pop(key, None)
         getattr(self, "_pane_state", {}).pop(key, None)
+        getattr(self, "_last_done_task_ids", {}).pop(key, None)
 
         if had_worktree_close:
             self._finalize_worktree(project_ns, role_name, had_worktree_close)
@@ -2355,6 +2476,20 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
 
         key = f"{project_ns}::{from_role}"
 
+        resource_token = getattr(self, "_resource_tokens", {}).pop((project_ns, from_role), None)
+        resource_governor = getattr(self, "_resource_governor", None)
+        if resource_governor is not None:
+            resource_governor.release_slot(resource_token)
+            resource_governor.cancel_waiting(project_id=project_ns, pane_id=from_role)
+
+        delivery_id = getattr(self, "_last_delivery_ids", {}).pop((project_ns, from_role), None)
+        delivery_manager = getattr(self, "_delivery_manager", None)
+        if delivery_id and delivery_manager is not None:
+            if failed:
+                delivery_manager.mark_failed(delivery_id)
+            else:
+                delivery_manager.mark_done(delivery_id)
+
         # Read state before teardown so fields are available after the pop.
         _ps_done = getattr(self, "_pane_state", {}).get(key) or PaneState()
         had_requires_commit = _ps_done.requires_commit_on_done
@@ -2364,6 +2499,10 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         had_plan_fanout = _ps_done.plan_fanout
         had_worktree = _ps_done.worktree
         had_assign_ts = _ps_done.assign_ts
+        if not hasattr(self, "_last_done_task_ids"):
+            self._last_done_task_ids = {}
+        had_task_id = _ps_done.task_id or self._last_done_task_ids.get(key) or f"pane-{id(pane)}"
+        self._last_done_task_ids[key] = had_task_id
 
         # Opt-in commit handoff: if assign() was called with requires_commit=True,
         # check for a dirty working tree and warn Lead (the agent isn't blocked —
@@ -2446,7 +2585,25 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             # Route through _notify_lead so concurrent done notices are serialised
             # and never injected while Lead is mid-generation (the root cause of the
             # "Lead goes silent after parallel dispatch" bug).
-            self._notify_lead(project_ns, notice, from_role=from_role, note=note)
+            completion_generation = int(getattr(pane, "_session_generation", 0))
+            notice_id = make_notice_id(
+                project_ns,
+                from_role,
+                had_task_id,
+                completion_generation,
+            )
+            deduper = getattr(self, "_notice_deduper", None)
+            if deduper is None:
+                deduper = self._notice_deduper = NoticeDeduper(RUNTIME_DIR / "notice-dedupe.json")
+            if deduper.mark_once(notice_id):
+                self._notify_lead(project_ns, notice, from_role=from_role, note=note)
+            else:
+                _log_event(
+                    "done_notice_deduped",
+                    project=project_ns,
+                    role=from_role,
+                    notice_id=notice_id,
+                )
 
         # Fix A: when this done event belongs to a background tab, emit a
         # cross-tab signal so main_window can flash the status bar even if
@@ -3029,6 +3186,101 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         for role, state in self._pending_notice_roles(project_ns, result).items():
             result[role] = {"state": state, "stall_minutes": None, "last_progress_ts": 0.0}
         return result
+
+    def performance_status(self, project: str | None = None) -> dict:
+        """Read-only live reliability metrics for ``takkub doctor --live``."""
+        project_ns = self._resolve_project(project)
+        governor = getattr(self, "_resource_governor", None)
+        resource = governor.snapshot() if governor is not None else {}
+        writer_queues: dict[str, dict[str, int]] = {}
+        for role, pane in self._project_panes(project_ns).items():
+            session = getattr(pane, "session", None)
+            if session is None:
+                continue
+            writer_queues[role] = {
+                "depth": int(getattr(session, "writer_queue_depth", 0)),
+                "stale_dropped": int(getattr(session, "writer_stale_drop_count", 0)),
+                "queue_full": int(getattr(session, "writer_queue_full_count", 0)),
+                "output_rate_bps": float(getattr(session, "output_rate_bps", 0.0)),
+            }
+        deliveries = getattr(self, "_delivery_manager", None)
+        delivery_rows = deliveries.snapshot() if deliveries is not None else []
+        state_counts: dict[str, int] = {}
+        for row in delivery_rows:
+            state = str(row.get("state", "unknown"))
+            state_counts[state] = state_counts.get(state, 0) + 1
+        waiting_roles = {
+            str(item.get("pane_id"))
+            for item in resource.get("waiting_tasks", [])
+            if item.get("project_id") == project_ns
+        }
+        lifecycle: dict[str, str] = {}
+        for role, pane in self._project_panes(project_ns).items():
+            if role in waiting_roles:
+                lifecycle[role] = "WAITING_RESOURCE"
+            elif getattr(pane, "state", "") == "working":
+                lifecycle[role] = "RUNNING"
+            elif getattr(getattr(pane, "session", None), "is_alive", False):
+                lifecycle[role] = "SPAWNED_IDLE"
+        return {
+            **resource,
+            "writer_queues": writer_queues,
+            "delivery_states": state_counts,
+            "task_lifecycle": lifecycle,
+            "duplicate_notices_prevented": int(
+                getattr(getattr(self, "_notice_deduper", None), "duplicate_count", 0)
+            ),
+            "spawn_queue_depth": len(getattr(self, "_spawn_queue", ())),
+            "fanout_queue_depth": sum(
+                len(queue) for queue in getattr(self, "_fanout_queue", {}).values()
+            ),
+            "main_thread_stall_count": int(getattr(self, "_main_thread_stall_count", 0)),
+            "latest_main_thread_stall": dict(getattr(self, "_latest_main_thread_stall", {})),
+        }
+
+    def record_main_thread_stall(self, details: dict) -> None:
+        """Record a watchdog stall with a read-only workload snapshot."""
+        try:
+            snap = self.performance_status()
+        except Exception:
+            snap = {}
+        writers = snap.get("writer_queues") or {}
+        enriched = {
+            **details,
+            "active_panes": sum(
+                1
+                for pane in self.panes.values()
+                if getattr(getattr(pane, "session", None), "is_alive", False)
+            ),
+            "output_rate_bps": sum(
+                float(row.get("output_rate_bps", 0.0)) for row in writers.values()
+            ),
+            "max_writer_depth": max(
+                (int(row.get("depth", 0)) for row in writers.values()), default=0
+            ),
+            "spawn_in_progress": bool(getattr(self, "_spawn_in_progress", False)),
+            "spawn_queue_depth": len(getattr(self, "_spawn_queue", ())),
+            "active_heavy_tasks": int(snap.get("active_heavy_tasks", 0)),
+        }
+        self._main_thread_stall_count = int(getattr(self, "_main_thread_stall_count", 0)) + 1
+        self._latest_main_thread_stall = enriched
+        _log_event("main_thread_stall", **enriched)
+
+    def reload_performance_settings(self) -> dict:
+        """Apply persisted performance policy without restarting live panes."""
+        from . import performance_settings
+
+        settings = performance_settings.load()
+        limits = GovernorLimits.from_environment()
+        self._resource_governor.update_limits(limits)
+        for pane in self.panes.values():
+            apply_settings = getattr(pane, "apply_performance_settings", None)
+            if callable(apply_settings):
+                apply_settings(settings)
+        self._resource_governor.sample()
+        self._resource_governor.dispatch_waiting()
+        self.statusChanged.emit()
+        return self.performance_status()
 
     def live_worktree_paths(self, project: str | None = None) -> set[str]:
         """Absolute worktree checkout paths currently held by a LIVE pane.

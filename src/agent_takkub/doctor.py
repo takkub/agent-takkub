@@ -1757,6 +1757,40 @@ def check_spawn_queue_live(resp: dict | None) -> list[Finding]:
     return [Finding("spawn-queue", "wedge", Status.OK, detail)]
 
 
+def check_performance_live(resp: dict | None) -> list[Finding]:
+    """Interpret live governor, writer-queue and delivery telemetry."""
+    if resp is None:
+        return [
+            Finding(
+                "performance",
+                "resource-governor",
+                Status.SKIP,
+                "cockpit is not running — live check unavailable",
+            )
+        ]
+    if not resp.get("ok"):
+        return [
+            Finding(
+                "performance",
+                "resource-governor",
+                Status.WARN,
+                f"live check failed: {resp.get('msg', 'unknown error')}",
+            )
+        ]
+    queues = resp.get("writer_queues") or {}
+    max_depth = max((int(row.get("depth", 0)) for row in queues.values()), default=0)
+    stale = sum(int(row.get("stale_dropped", 0)) for row in queues.values())
+    status = Status.WARN if resp.get("overloaded") else Status.OK
+    detail = (
+        f"CPU={float(resp.get('cpu_percent', 0)):.0f}% "
+        f"RAM-free={float(resp.get('available_memory_percent', 0)):.0f}% "
+        f"heavy={int(resp.get('active_heavy_tasks', 0))} "
+        f"resource-wait={int(resp.get('queued_resource_tasks', 0))} "
+        f"writer-max={max_depth} stale-dropped={stale}"
+    )
+    return [Finding("performance", "resource-governor", status, detail)]
+
+
 # ---------------------------------------------------------------------------
 # [remote-mirror] — live check (2026-08-13, `takkub doctor --live` only)
 # ---------------------------------------------------------------------------

@@ -390,6 +390,9 @@ class UserActionsMixin:
                 ok, msg = self.orch.toggle_provider(provider, target_disabled)
                 if not ok:
                     errors.append(msg)
+        if dlg.pending_performance_reload:
+            self.orch.reload_performance_settings()
+            self._status.showMessage("Performance settings applied to live cockpit", 5_000)
         if errors:
             self._status.showMessage("Provider toggle ไม่สำเร็จบางส่วน: " + "; ".join(errors), 8_000)
 

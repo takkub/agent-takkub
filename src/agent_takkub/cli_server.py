@@ -562,6 +562,10 @@ class CliServer(QObject):
                     oldest_queued_age_s=snap.oldest_queued_age_s,
                 )
                 return
+            elif cmd == "performance-status":
+                status = self._orch.performance_status(project=from_project)
+                self._reply(sock, ok=True, msg="performance status", **status)
+                return
             elif cmd == "remote-mirror-status":
                 # 2026-08-13 remote-mirror-blank fix: `takkub doctor --live`
                 # diagnostic for "phone shows nothing back from Lead".

@@ -4,6 +4,26 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.60] - 2026-08-14
+
+### Added (เพิ่ม)
+- **Performance & Reliability v2** — ชุดปรับความเสถียร/ประสิทธิภาพรอบใหญ่ของ cockpit เอง:
+  - **task-delivery guard รอบใหม่** — ผูก identity/session ของ task ให้แน่นขึ้นพร้อม TTL + single-flight กันส่งงานซ้ำซ้อนหรือส่งผิด pane
+  - **resource governor** — รับงานใหม่โดยดู CPU/RAM ของเครื่องจริงก่อน (admission control) พร้อมคิวรอที่ยุติธรรม ไม่ปล่อยให้ pane ใหม่แย่งทรัพยากรจน pane เดิมสะดุด
+  - **PTY writer คิวเขียนแบบมี priority + batch การ render terminal** — ลดอาการหน้าจอกระตุกเวลามีหลาย pane เขียน output พร้อมกัน
+  - **Windows Job Object** — ผูก process ownership ของแต่ละ pane เข้ากับ job object จริง ปิด pane หรือปิดแอปแล้ว process ลูกที่ค้างถูก kill ตามไปด้วยเสมอ ไม่ทิ้งซาก
+  - **Performance Settings** — โปรไฟล์ให้เลือก Safe / Balanced / Maximum ปรับพฤติกรรม resource governor ตามเครื่อง
+  - **Health UI chip** แบบ live แสดงสถานะ resource governor ให้เห็นสดๆ
+  - **completion-notice dedupe** ที่ทนต่อการ restart/crash (durable) กันแจ้งเตือนงานเสร็จซ้ำ
+  - **Token Meter รู้จัก Lead จริง** — resolve provider จาก pane Lead ที่ active จริงตอนนั้น แทนที่จะเดาจาก config เฉยๆ
+  - เอกสารประกอบอยู่ที่ `docs/performance-reliability.md` (คู่มือใช้งานจริง), `docs/performance-reliability-v2-implementation-report.md`, `docs/performance-reliability-v2-traceability.md`, `docs/performance-reliability-v2-adversarial-audit.md`
+
+### Fixed (แก้)
+- **stats chip ของ Performance Health ไปนั่งอยู่บน header กลางจอ** — ย้ายมาไว้มุมของแต่ละ tab เคียงข้าง Token Meter แทน (container เดียวกัน mount/remount/teardown พร้อมกันตอนสลับ/ปิด tab) ไม่ปะปนกับ project อื่นที่เปิดอยู่คนละ tab
+- **Token Meter โหมดย่อของ Claude อ่านค่าเปอร์เซ็นต์ผิดหน้าต่าง** — เดิมเลือกโชว์ตัวไหนก็ได้ระหว่าง 5 ชั่วโมงกับ 7 วันแล้วแต่ว่าตัวไหนเปอร์เซ็นต์สูงกว่า ทำให้บางทีโชว์ 7 วันทั้งที่ user อยากรู้ short window ตอนนี้ fix ให้อ่านเฉพาะหน้าต่าง 5 ชั่วโมงเสมอ (ทั้งเปอร์เซ็นต์และเวลานับถอยหลังจน reset)
+
+ยืนยันด้วย `pytest` เต็มชุด (5820 passed, 7 skipped, 0 failed) และ `takkub doctor --live` เขียวทั้งหมด
+
 ## [1.0.59] - 2026-08-14
 
 ### Fixed (แก้)

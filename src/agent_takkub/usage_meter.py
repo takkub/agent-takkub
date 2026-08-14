@@ -16,7 +16,7 @@ from __future__ import annotations
 import math
 from datetime import UTC, datetime
 
-from PyQt6.QtCore import QPointF, Qt
+from PyQt6.QtCore import QPoint, QPointF, QRect, QSize, Qt
 from PyQt6.QtGui import QBrush, QColor, QPainter, QPolygonF
 from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
@@ -38,6 +38,33 @@ PROVIDER_LABELS: dict[str, str] = {
 }
 
 _STATUS_SORT_ORDER = {"active": 0, "stale": 1, "loading": 2, "error": 3, "unsupported": 4}
+_DETAIL_POPUP_WIDTH = 380
+_DETAIL_POPUP_SCREEN_MARGIN = 8
+
+
+def _popup_position(
+    anchor_global: QRect,
+    popup_size: QSize,
+    available: QRect,
+    *,
+    margin: int = _DETAIL_POPUP_SCREEN_MARGIN,
+) -> QPoint:
+    """Right-align a popup to its anchor and keep it inside the usable screen."""
+    left_bound = available.x() + margin
+    top_bound = available.y() + margin
+    right_bound = available.x() + available.width() - margin
+    bottom_bound = available.y() + available.height() - margin
+
+    preferred_x = anchor_global.x() + anchor_global.width() - popup_size.width()
+    max_x = max(left_bound, right_bound - popup_size.width())
+    x = min(max(preferred_x, left_bound), max_x)
+
+    below_y = anchor_global.y() + anchor_global.height()
+    above_y = anchor_global.y() - popup_size.height()
+    preferred_y = below_y if below_y + popup_size.height() <= bottom_bound else above_y
+    max_y = max(top_bound, bottom_bound - popup_size.height())
+    y = min(max(preferred_y, top_bound), max_y)
+    return QPoint(x, y)
 
 
 def fmt_eta(resets_at: datetime | None, now: datetime) -> str:
@@ -273,23 +300,73 @@ class UsageMeter(QWidget):
         lay.addWidget(self._label)
         self._usages: list[ProviderUsage] = []
 
-    def set_usages(self, usages: list[ProviderUsage]) -> None:
-        """Show `usages` — the provider nearest its limit leads the header;
-        the rest (including unsupported ones) are one click away."""
+    def set_usages(
+        self, usages: list[ProviderUsage], *, primary_provider: str | None = None
+    ) -> None:
+        """Show usage with the active Lead provider in the compact header.
+
+        Older callers may omit ``primary_provider`` and retain the original
+        worst-utilisation selection.  The popup always keeps every provider.
+        """
         self._usages = list(usages)
         now = datetime.now(tz=UTC)
+        primary = next((u for u in usages if u.provider == (primary_provider or "").lower()), None)
         candidates = [
             u for u in usages if u.status in ("active", "stale") and u.utilization is not None
         ]
-        if candidates:
-            leading = max(candidates, key=lambda u: u.utilization)
+        if primary is not None:
+            leading = primary
             label = PROVIDER_LABELS.get(leading.provider, leading.provider)
-            text = f"{label} {round(leading.utilization)}%"
+            # Claude tracks two rolling windows (5h + 7d); `leading.utilization`
+            # is max(known_utils) across both (see limit_panel._claude_provider_usage),
+            # which can silently surface the 7-day % here instead of the 5-hour
+            # one users actually watch during a session. Pull the 5h window
+            # directly so the compact chip always matches the old pre-multi-
+            # provider format: countdown + percent for the window that matters.
+            five_hour_pct: float | None = None
+            five_hour_eta = ""
+            if leading.provider == "claude":
+                windows = (leading.raw_data or {}).get("windows") or {}
+                five_hour = windows.get("five_hour") or {}
+                five_hour_pct = five_hour.get("utilization")
+                five_hour_eta = five_hour.get("eta") or ""
+            if five_hour_pct is not None:
+                text = f"{label} {round(five_hour_pct)}%"
+                if five_hour_eta:
+                    text += f" · {five_hour_eta}"
+                color = severity_color(five_hour_pct)
+            elif leading.utilization is not None:
+                text = f"{label} {round(leading.utilization)}%"
+                color = severity_color(leading.utilization)
+            elif leading.status == "loading":
+                text, color = f"{label} …", cockpit_theme.TEXT_MUTED
+            elif leading.status == "error":
+                text, color = f"{label} !", cockpit_theme.STATE_ERROR_BRIGHT
+            elif leading.spend:
+                spend = leading.spend or {}
+                total_tok = (spend.get("input_tokens") or 0) + (spend.get("output_tokens") or 0)
+                text, color = f"{label} {total_tok:,} tok", cockpit_theme.TEXT_MUTED
+            else:
+                text, color = f"{label} —", cockpit_theme.TEXT_FAINT
             if leading.status == "stale":
                 text += " ⏳"
                 color = cockpit_theme.TEXT_MUTED
-            else:
-                color = severity_color(leading.utilization)
+            extra = sum(
+                1 for u in usages if u is not leading and u.status in ("active", "stale", "loading")
+            )
+            if extra:
+                text += f" +{extra}"
+        elif candidates:
+            leading = max(candidates, key=lambda u: u.utilization)
+            label = PROVIDER_LABELS.get(leading.provider, leading.provider)
+            text = f"{label} {round(leading.utilization)}%"
+            color = (
+                cockpit_theme.TEXT_MUTED
+                if leading.status == "stale"
+                else severity_color(leading.utilization)
+            )
+            if leading.status == "stale":
+                text += " ⏳"
             extra = sum(
                 1 for u in usages if u is not leading and u.status in ("active", "stale", "loading")
             )
@@ -336,7 +413,17 @@ class UsageMeter(QWidget):
     def mousePressEvent(self, ev) -> None:
         if ev.button() == Qt.MouseButton.LeftButton and self._usages:
             popup = _ProviderDetailPopup(self._usages, self)
-            popup.move(self.mapToGlobal(self.rect().bottomLeft()))
+            screen = self.screen()
+            available = screen.availableGeometry()
+            popup.setFixedWidth(
+                max(
+                    1, min(_DETAIL_POPUP_WIDTH, available.width() - 2 * _DETAIL_POPUP_SCREEN_MARGIN)
+                )
+            )
+            popup.adjustSize()
+            anchor_global = QRect(self.mapToGlobal(self.rect().topLeft()), self.size())
+            popup.move(_popup_position(anchor_global, popup.size(), available))
+            self._detail_popup = popup
             popup.show()
         super().mousePressEvent(ev)
 

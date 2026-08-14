@@ -413,9 +413,15 @@ def _start_deadman_watchdog(window: MainWindow, _stop: threading.Event | None = 
                 rec = stall_tracker.update(age, spawn_active)
                 if rec is not None:
                     try:
-                        from .orchestrator import _log_event
+                        recorder = getattr(
+                            getattr(window, "orch", None), "record_main_thread_stall", None
+                        )
+                        if callable(recorder):
+                            recorder(rec)
+                        else:
+                            from .orchestrator import _log_event
 
-                        _log_event("main_thread_stall", **rec)
+                            _log_event("main_thread_stall", **rec)
                     except Exception:
                         pass
             # Wedge detected. DIAGNOSTIC ONLY — never kill the process (see the

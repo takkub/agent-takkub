@@ -21,6 +21,7 @@ from agent_takkub import (
     config,
     custom_roles,
     pane_tools_policy,
+    performance_settings,
     pipeline_config,
     project_nav,
     provider_config,
@@ -59,6 +60,7 @@ def _isolate_settings_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # every other store above so a test never touches the real
     # ~/.takkub/role-models.json.
     monkeypatch.setattr(role_models, "_PATH", tmp_path / "role-models.json")
+    monkeypatch.setattr(performance_settings, "path", lambda: tmp_path / "performance.json")
     saved = dict(roles_mod._CUSTOM)
     roles_mod._CUSTOM.clear()
     yield
@@ -67,10 +69,10 @@ def _isolate_settings_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 class TestSettingsWindowStructure:
-    def test_has_ten_stacked_views(self) -> None:
-        # 8 original views + real Skill Catalog (index 8) + Skill Matrix (index 9).
+    def test_has_eleven_stacked_views(self) -> None:
+        # Existing 10 stable views + appended Performance view (index 10).
         dlg = settings_window.SettingsWindow()
-        assert dlg._stack.count() == 10
+        assert dlg._stack.count() == 11
         dlg.deleteLater()
 
     def test_initial_view_defaults_to_providers_roles(self) -> None:
@@ -101,6 +103,16 @@ class TestSettingsWindowStructure:
         dlg._goto_view(settings_window.VIEW_NEW_ROLE)
         assert dlg._content_title.text() == "New Role"
         dlg.deleteLater()
+
+    def test_performance_preset_persists_and_requests_live_reload(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PERFORMANCE)
+        dlg._performance_mode.setCurrentIndex(dlg._performance_mode.findData("safe"))
+        assert settings_window.VIEW_PERFORMANCE in dlg._dirty_views
+        dlg._on_save_apply_clicked()
+        assert dlg.pending_performance_reload is True
+        saved = performance_settings.load()
+        assert saved.mode == "safe"
+        assert saved.max_heavy_global == 2
 
 
 class TestNewRoleView:

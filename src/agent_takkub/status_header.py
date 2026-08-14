@@ -177,6 +177,16 @@ class StatusHeaderMixin:
         )
 
     @staticmethod
+    def _performance_chip_style(overloaded: bool) -> str:
+        brand = cockpit_theme.STATE_ERROR_BRIGHT if overloaded else cockpit_theme.STATE_OK_BRIGHT
+        return (
+            "QPushButton { "
+            f"background:transparent; color:{brand}; border:1px solid {brand}; "
+            f"border-radius:{cockpit_theme.RADIUS_MD}px; padding:2px 10px; font-weight:600; }}"
+            "QPushButton:hover { background:rgba(255,255,255,0.06); }"
+        )
+
+    @staticmethod
     def _ghost_button_style() -> str:
         """Neutral status-bar action button.
 
@@ -322,6 +332,17 @@ class StatusHeaderMixin:
         self._chip_graft.clicked.connect(self._on_graft_chip_clicked)
         self._graft_status_cache: dict | None = None
         self._refresh_graft_chip()
+
+        # Live host/resource health. The compact chip keeps the four numbers
+        # needed during fan-out visible; click opens class/queue detail.
+        # NOT added to the status-bar row below — MainWindow mounts this
+        # widget together with the token/usage meter in the per-tab corner
+        # widget instead (see main_window._usage_corner).
+        self._chip_performance = QPushButton("SYS CPU — · RAM — · H 0/— · Q 0", self)
+        self._chip_performance.setStyleSheet(self._performance_chip_style(False))
+        self._chip_performance.clicked.connect(self._show_performance_health_dialog)
+        self._performance_status_cache: dict = {}
+        self._refresh_performance_health_chip()
 
         # Self-update chip. Polls `git fetch` + `git status` every 5 min
         # so a user that pulled their friend's commit from another machine
@@ -650,6 +671,89 @@ class StatusHeaderMixin:
         self._refresh_remote_chip()
         self._refresh_overage_chip()
         self._update_provider_chip()
+        self._refresh_active_provider_usage()
+        self._refresh_performance_health_chip()
+
+    def _active_health_project(self) -> str | None:
+        tabs = getattr(self, "tabs", None)
+        tab = tabs.currentWidget() if tabs is not None else None
+        project = getattr(tab, "project_name", None)
+        return project if isinstance(project, str) else None
+
+    def _refresh_performance_health_chip(self) -> None:
+        if "_chip_performance" not in self.__dict__:
+            return
+        getter = getattr(getattr(self, "orch", None), "performance_status", None)
+        if not callable(getter):
+            return
+        try:
+            snap = getter(project=self._active_health_project())
+        except Exception:
+            return
+        self._performance_status_cache = snap
+        cpu = round(float(snap.get("cpu_percent", 0)))
+        ram = round(float(snap.get("available_memory_percent", 0)))
+        heavy = int(snap.get("active_heavy_tasks", 0))
+        limits = snap.get("resource_limits") or {}
+        heavy_limit = int(limits.get("max_heavy_global", 0))
+        resource_queue = int(snap.get("queued_resource_tasks", 0))
+        spawn_queue = int(snap.get("spawn_queue_depth", 0))
+        total_queue = resource_queue + spawn_queue
+        overloaded = bool(snap.get("overloaded"))
+        state = "OVERLOAD" if overloaded else "OK"
+        self._chip_performance.setText(
+            f"SYS {state} · CPU {cpu}% · RAM {ram}% · H {heavy}/{heavy_limit or '—'} · Q {total_queue}"
+        )
+        self._chip_performance.setStyleSheet(self._performance_chip_style(overloaded))
+        by_class = snap.get("active_tasks_by_class") or {}
+        browser = int(by_class.get("browser", 0))
+        browser_limit = int(limits.get("max_browser_global", 0))
+        available_gb = float(snap.get("available_memory_bytes", 0)) / (1024**3)
+        total_gb = float(snap.get("total_memory_bytes", 0)) / (1024**3)
+        writers = snap.get("writer_queues") or {}
+        writer_depth = sum(int(row.get("depth", 0)) for row in writers.values())
+        stale_drops = sum(int(row.get("stale_dropped", 0)) for row in writers.values())
+        queue_full = sum(int(row.get("queue_full", 0)) for row in writers.values())
+        self._chip_performance.setToolTip(
+            "System Load: " + state + "\n"
+            f"CPU: {cpu}%\nAvailable RAM: {ram}% ({available_gb:.1f}/{total_gb:.1f} GiB)\n"
+            f"Heavy agents: {heavy}/{heavy_limit or '—'}\n"
+            f"Browser agents: {browser}/{browser_limit or '—'}\n"
+            f"Resource queue: {resource_queue}\nSpawn queue: {spawn_queue}\n"
+            f"Writer depth: {writer_depth} · stale drops: {stale_drops} · full: {queue_full}\n"
+            f"Duplicate notices prevented: {int(snap.get('duplicate_notices_prevented', 0))}\n"
+            f"Main-thread stalls: {int(snap.get('main_thread_stall_count', 0))}\n"
+            "Click for the complete live snapshot."
+        )
+
+    def _show_performance_health_dialog(self) -> None:
+        self._refresh_performance_health_chip()
+        snap = self._performance_status_cache
+        by_class = snap.get("active_tasks_by_class") or {}
+        limits = snap.get("resource_limits") or {}
+        writers = snap.get("writer_queues") or {}
+        writer_depth = sum(int(row.get("depth", 0)) for row in writers.values())
+        stale_drops = sum(int(row.get("stale_dropped", 0)) for row in writers.values())
+        queue_full = sum(int(row.get("queue_full", 0)) for row in writers.values())
+        available_gb = float(snap.get("available_memory_bytes", 0)) / (1024**3)
+        total_gb = float(snap.get("total_memory_bytes", 0)) / (1024**3)
+        lines = [
+            f"System Load: {'OVERLOAD — new heavy work paused' if snap.get('overloaded') else 'Normal'}",
+            f"CPU: {float(snap.get('cpu_percent', 0)):.1f}%",
+            f"Available RAM: {float(snap.get('available_memory_percent', 0)):.1f}% ({available_gb:.1f}/{total_gb:.1f} GiB)",
+            f"Heavy agents: {int(snap.get('active_heavy_tasks', 0))}/{limits.get('max_heavy_global', '—')}",
+            f"Browser agents: {int(by_class.get('browser', 0))}/{limits.get('max_browser_global', '—')}",
+            f"Builds: {int(by_class.get('build', 0))}/{limits.get('max_build_global', '—')}",
+            f"Tests: {int(by_class.get('test', 0))}/{limits.get('max_test_global', '—')}",
+            f"Resource queue: {int(snap.get('queued_resource_tasks', 0))}",
+            f"Spawn queue: {int(snap.get('spawn_queue_depth', 0))}",
+            f"Fan-out queue: {int(snap.get('fanout_queue_depth', 0))}",
+            f"Writer depth: {writer_depth} · stale drops: {stale_drops} · queue full: {queue_full}",
+            f"Duplicate notices prevented: {int(snap.get('duplicate_notices_prevented', 0))}",
+            f"Main-thread stalls: {int(snap.get('main_thread_stall_count', 0))}",
+            f"Processes observed: {int(snap.get('process_count', 0))}",
+        ]
+        QMessageBox.information(self, "Performance Health", "\n".join(lines))
 
     # ──────────────────────────────────────────────────────────────
     # ⚠ Usage-overage chip

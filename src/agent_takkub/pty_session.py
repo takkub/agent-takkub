@@ -12,13 +12,15 @@ The terminal widget consumes the screen state, the orchestrator triggers writes.
 from __future__ import annotations
 
 import os
-import queue
 import re
 import subprocess
 import sys
 import threading
 import time
-from collections.abc import Sequence
+from collections import deque
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
+from enum import IntEnum
 
 import pyte
 from PyQt6.QtCore import QObject, QThread, QTimer, pyqtSignal
@@ -26,6 +28,7 @@ from wcwidth import wcwidth
 
 from ._pty_backend import spawn_pty_bounded
 from ._win_console import hide_hwnds, snapshot_console_hwnds
+from .job_object_manager import JobObjectManager
 from .provider_spec import PROVIDER_REGISTRY
 from .provider_spec import READY_HARD_BLOCKERS as _READY_HARD_BLOCKERS
 from .provider_spec import READY_RULES as _READY_RULES
@@ -40,6 +43,16 @@ _CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 # under a second (it just creates a process handle); anything past this is
 # already pathological. Overrideable for slow/loaded CI hardware.
 PTY_SPAWN_TIMEOUT_SEC = float(os.environ.get("TAKKUB_PTY_SPAWN_TIMEOUT_SEC", "30"))
+PTY_WRITER_QUEUE_MAX = max(16, int(os.environ.get("TAKKUB_PTY_WRITER_QUEUE_MAX", "128")))
+PTY_WRITER_CONTROL_RESERVE = max(
+    1, min(PTY_WRITER_QUEUE_MAX // 2, int(os.environ.get("TAKKUB_PTY_CONTROL_RESERVE", "8")))
+)
+PTY_BATCH_MS = max(10, int(os.environ.get("TAKKUB_PTY_BATCH_MS", "50")))
+PTY_BATCH_BYTES = max(4096, int(os.environ.get("TAKKUB_PTY_BATCH_BYTES", str(64 * 1024))))
+TRANSCRIPT_FLUSH_MS = max(25, int(os.environ.get("TAKKUB_TRANSCRIPT_FLUSH_MS", "200")))
+TRANSCRIPT_FLUSH_BYTES = max(
+    4096, int(os.environ.get("TAKKUB_TRANSCRIPT_FLUSH_BYTES", str(64 * 1024)))
+)
 
 
 def _safe_screen_display(screen: pyte.Screen) -> list[str]:
@@ -562,27 +575,160 @@ def _parse_rate_limit_reset(text: str, now: float) -> float | None:
     return epoch
 
 
+class WritePriority(IntEnum):
+    CONTROL = 0
+    USER = 10
+    TASK = 20
+    BACKGROUND = 30
+
+
+@dataclass(slots=True)
+class PtyWriteMessage:
+    data: str
+    priority: WritePriority = WritePriority.USER
+    created_at: float = field(default_factory=time.time)
+    expires_at: float | None = None
+    session_generation: int | None = None
+    delivery_id: str | None = None
+    kind: str = "user"
+    message_id: str = field(default_factory=lambda: f"write-{time.time_ns()}")
+    cancelled: bool = False
+    validator: Callable[[], bool] | None = field(default=None, repr=False)
+
+
 class _WriterThread(QThread):
-    def __init__(self, proc, parent: QObject | None = None) -> None:
+    """Bounded, priority-aware, non-blocking PTY writer.
+
+    Control traffic keeps reserved capacity and can evict queued background/task
+    work. Staleness is checked again immediately before the native write, which
+    is the only point that can protect a replacement pane session from delayed
+    bytes after a host/PTY stall.
+    """
+
+    def __init__(
+        self,
+        proc,
+        parent: QObject | None = None,
+        *,
+        maxsize: int = PTY_WRITER_QUEUE_MAX,
+        control_reserve: int = PTY_WRITER_CONTROL_RESERVE,
+        generation_getter=None,
+    ) -> None:
         super().__init__(parent)
         self._proc = proc
-        self._q: queue.Queue[str | None] = queue.Queue()
+        self._maxsize = max(4, int(maxsize))
+        self._control_reserve = max(1, min(self._maxsize - 1, int(control_reserve)))
+        self._generation_getter = generation_getter
+        self._queues: dict[WritePriority, deque[PtyWriteMessage]] = {
+            priority: deque() for priority in WritePriority
+        }
+        self._condition = threading.Condition()
+        self._stopping = False
+        self.queue_full_count = 0
+        self.stale_drop_count = 0
+
+    @property
+    def queue_depth(self) -> int:
+        with self._condition:
+            return sum(len(items) for items in self._queues.values())
+
+    def _pop_next(self) -> PtyWriteMessage | None:
+        for priority in WritePriority:
+            items = self._queues[priority]
+            if items:
+                return items.popleft()
+        return None
+
+    def _evict_for(self, priority: WritePriority) -> bool:
+        candidates = (
+            (WritePriority.BACKGROUND, WritePriority.TASK)
+            if priority == WritePriority.USER
+            else (WritePriority.BACKGROUND, WritePriority.TASK, WritePriority.USER)
+        )
+        for candidate in candidates:
+            items = self._queues[candidate]
+            if items:
+                items.pop()
+                return True
+        return False
 
     def run(self) -> None:
         while True:
-            data = self._q.get()
-            if data is None:
-                break
+            with self._condition:
+                while not self._stopping and not any(self._queues.values()):
+                    self._condition.wait()
+                if self._stopping:
+                    break
+                message = self._pop_next()
+            if message is None:
+                continue
+            if message.cancelled or (
+                message.expires_at is not None and time.time() >= message.expires_at
+            ):
+                self.stale_drop_count += 1
+                continue
+            if message.validator is not None:
+                try:
+                    if not message.validator():
+                        self.stale_drop_count += 1
+                        continue
+                except Exception:
+                    self.stale_drop_count += 1
+                    continue
+            if message.session_generation is not None and self._generation_getter is not None:
+                try:
+                    if int(self._generation_getter()) != int(message.session_generation):
+                        self.stale_drop_count += 1
+                        continue
+                except Exception:
+                    self.stale_drop_count += 1
+                    continue
             try:
-                self._proc.write(data)
+                self._proc.write(message.data)
             except Exception as e:
                 print(f"[pty_session] write error: {e!r}", flush=True)
 
-    def write(self, data: str) -> None:
-        self._q.put(data)
+    def write(self, data: str | PtyWriteMessage, **metadata) -> bool:
+        message = (
+            data if isinstance(data, PtyWriteMessage) else PtyWriteMessage(data=data, **metadata)
+        )
+        message.priority = WritePriority(message.priority)
+        with self._condition:
+            if self._stopping:
+                return False
+            depth = sum(len(items) for items in self._queues.values())
+            non_control_cap = self._maxsize - self._control_reserve
+            over_limit = depth >= self._maxsize or (
+                message.priority != WritePriority.CONTROL and depth >= non_control_cap
+            )
+            if over_limit:
+                can_evict = message.priority in (WritePriority.CONTROL, WritePriority.USER)
+                if not can_evict or not self._evict_for(message.priority):
+                    self.queue_full_count += 1
+                    return False
+            self._queues[message.priority].append(message)
+            self._condition.notify()
+        return True
+
+    def cancel_generation(self, generation: int) -> int:
+        removed = 0
+        with self._condition:
+            for priority, items in self._queues.items():
+                kept = deque()
+                for message in items:
+                    if message.session_generation == int(generation):
+                        removed += 1
+                    else:
+                        kept.append(message)
+                self._queues[priority] = kept
+        return removed
 
     def request_stop(self) -> None:
-        self._q.put(None)
+        with self._condition:
+            self._stopping = True
+            for items in self._queues.values():
+                items.clear()
+            self._condition.notify_all()
 
 
 class _ReaderThread(QThread):
@@ -590,7 +736,15 @@ class _ReaderThread(QThread):
     finished_clean = pyqtSignal()
     _MAX_CONSECUTIVE_READ_ERRORS = 25
 
-    def __init__(self, proc, on_data=None, parent: QObject | None = None) -> None:
+    def __init__(
+        self,
+        proc,
+        on_data=None,
+        parent: QObject | None = None,
+        *,
+        batch_ms: int = PTY_BATCH_MS,
+        batch_bytes: int = PTY_BATCH_BYTES,
+    ) -> None:
         super().__init__(parent)
         self._proc = proc
         # Called in THIS reader thread for each chunk — does the heavy pyte
@@ -598,6 +752,8 @@ class _ReaderThread(QThread):
         # serialise on it (see docs/cockpit-freeze-rca-2026-05-29.md).
         self._on_data = on_data
         self._stop = False
+        self._batch_sec = max(0.001, batch_ms / 1000.0)
+        self._batch_bytes = max(1024, int(batch_bytes))
 
     def run(self) -> None:
         # pywinpty 3.x semantics: read(size) returns whatever is buffered, but
@@ -608,6 +764,20 @@ class _ReaderThread(QThread):
         import time
 
         consecutive_errors = 0
+        pending = bytearray()
+        last_flush = time.monotonic()
+
+        def _flush() -> None:
+            nonlocal last_flush
+            if not pending:
+                return
+            batch = bytes(pending)
+            pending.clear()
+            if self._on_data is not None:
+                self._on_data(batch)
+            self.bytesReceived.emit(batch)
+            last_flush = time.monotonic()
+
         while not self._stop:
             # Snapshot once per iteration: `_teardown_resources` can null
             # `self._proc` from another thread after a bounded `.wait(2000)`
@@ -621,12 +791,16 @@ class _ReaderThread(QThread):
             try:
                 data = proc.read(4096)
             except EOFError:
+                if pending and time.monotonic() - last_flush >= self._batch_sec:
+                    _flush()
                 if not proc.isalive():
                     break
                 time.sleep(0.04)
                 continue
             except Exception as e:
                 print(f"[pty_session] read error: {e!r}", flush=True)
+                if pending and time.monotonic() - last_flush >= self._batch_sec:
+                    _flush()
                 if not proc.isalive():
                     break
                 consecutive_errors += 1
@@ -637,6 +811,8 @@ class _ReaderThread(QThread):
 
             consecutive_errors = 0
             if not data:
+                if pending and time.monotonic() - last_flush >= self._batch_sec:
+                    _flush()
                 if not proc.isalive():
                     break
                 time.sleep(0.02)
@@ -644,11 +820,13 @@ class _ReaderThread(QThread):
 
             if isinstance(data, str):
                 data = data.encode("utf-8", "replace")
-            # Parse + log in this thread first, then hand the raw bytes to the
-            # main thread purely for rendering (xterm.js) + state-change notify.
-            if self._on_data is not None:
-                self._on_data(data)
-            self.bytesReceived.emit(data)
+            pending.extend(data)
+            if (
+                len(pending) >= self._batch_bytes
+                or time.monotonic() - last_flush >= self._batch_sec
+            ):
+                _flush()
+        _flush()
         self.finished_clean.emit()
 
     def request_stop(self) -> None:
@@ -682,6 +860,7 @@ class PtySession(QObject):
         # Root PID of the spawned command (claude.exe), captured at spawn so
         # terminate() can tree-kill descendants even after _proc is torn down.
         self._pid: int | None = None
+        self._job_object: JobObjectManager | None = None
         self._reader: _ReaderThread | None = None
         self._writer: _WriterThread | None = None
         self._alive = False
@@ -698,11 +877,17 @@ class PtySession(QObject):
         # output seen yet. Written in the reader thread, read on the main thread;
         # a plain float read/write is atomic under the GIL so no lock is needed.
         self._last_output_ts: float = 0.0
+        self._output_rate_bps: float = 0.0
+        self._output_rate_window_started: float = time.monotonic()
+        self._output_rate_window_bytes: int = 0
         # Ready-state computed by the reader thread from the SAME feed that
         # just updated the screen (#106) — see is_at_ready_prompt_cached().
         # Plain bool read/write is atomic under the GIL, same reasoning as
         # _last_output_ts above, so main-thread reads need no lock either.
         self._cached_ready: bool = False
+        self.session_generation: int = 0
+        self._transcript_last_flush: float = time.monotonic()
+        self._transcript_pending_bytes: int = 0
 
     # ──────────────────────────────────────────────────────────────
     # lifecycle
@@ -743,6 +928,11 @@ class PtySession(QObject):
             self._pid = int(self._proc.pid)
         except Exception:
             self._pid = None
+        if self._pid is not None and sys.platform == "win32":
+            self._job_object = JobObjectManager()
+            if not self._job_object.assign(self._pid):
+                self._job_object.close()
+                self._job_object = None
 
         # The console window can take a moment to appear. Retry hiding on a
         # short backoff so we catch it whenever it shows up.
@@ -761,6 +951,8 @@ class PtySession(QObject):
                 import logging
 
                 self._transcript = open(transcript_path, "wb")
+                self._transcript_last_flush = time.monotonic()
+                self._transcript_pending_bytes = 0
             except Exception as exc:
                 logging.getLogger(__name__).warning(
                     "transcript open failed (%s): %r — PTY still running", transcript_path, exc
@@ -772,7 +964,11 @@ class PtySession(QObject):
         self._reader.finished_clean.connect(self._on_exit)
         self._reader.start()
 
-        self._writer = _WriterThread(self._proc, parent=self)
+        self._writer = _WriterThread(
+            self._proc,
+            parent=self,
+            generation_getter=lambda: self.session_generation,
+        )
         self._writer.start()
 
     def _feed_and_log(self, data: bytes) -> None:
@@ -782,10 +978,30 @@ class PtySession(QObject):
         chunk can't kill the reader."""
         # Structural quiescence signal (#20): stamp every real output chunk.
         self._last_output_ts = time.monotonic()
+        window_bytes = int(self.__dict__.get("_output_rate_window_bytes", 0)) + len(data)
+        window_started = float(
+            self.__dict__.get("_output_rate_window_started", self._last_output_ts)
+        )
+        self.__dict__["_output_rate_window_bytes"] = window_bytes
+        rate_elapsed = self._last_output_ts - window_started
+        if rate_elapsed >= 1.0:
+            self.__dict__["_output_rate_bps"] = window_bytes / rate_elapsed
+            self.__dict__["_output_rate_window_bytes"] = 0
+            self.__dict__["_output_rate_window_started"] = self._last_output_ts
         if self._transcript is not None:
             try:
                 self._transcript.write(data)
-                self._transcript.flush()
+                now = time.monotonic()
+                pending_bytes = int(self.__dict__.get("_transcript_pending_bytes", 0)) + len(data)
+                last_flush = float(self.__dict__.get("_transcript_last_flush", now))
+                self._transcript_pending_bytes = pending_bytes
+                if (
+                    pending_bytes >= TRANSCRIPT_FLUSH_BYTES
+                    or now - last_flush >= TRANSCRIPT_FLUSH_MS / 1000.0
+                ):
+                    self._transcript.flush()
+                    self._transcript_last_flush = now
+                    self._transcript_pending_bytes = 0
             except Exception:
                 # disk full / handle closed — stop trying rather than blocking the PTY
                 self._transcript = None
@@ -833,14 +1049,53 @@ class PtySession(QObject):
         self._teardown_resources(kill_process=False, wait=False)
         self.processExited.emit(code)
 
-    def write(self, data: bytes | str) -> None:
+    def write(
+        self,
+        data: bytes | str,
+        *,
+        priority: WritePriority = WritePriority.USER,
+        kind: str = "user",
+        expires_at: float | None = None,
+        session_generation: int | None = None,
+        delivery_id: str | None = None,
+        validator: Callable[[], bool] | None = None,
+    ) -> bool:
         if not self._alive or self._proc is None or self._writer is None:
-            return
+            return False
         # pywinpty 3.x .write() expects str (it does its own UTF-8 encoding
         # internally). Passing bytes raises TypeError.
         if isinstance(data, bytes):
             data = data.decode("utf-8", "replace")
-        self._writer.write(data)
+        return self._writer.write(
+            data,
+            priority=priority,
+            kind=kind,
+            expires_at=expires_at,
+            session_generation=(
+                self.session_generation if session_generation is None else session_generation
+            ),
+            delivery_id=delivery_id,
+            validator=validator,
+        )
+
+    @property
+    def writer_queue_depth(self) -> int:
+        writer = self._writer
+        return writer.queue_depth if writer is not None else 0
+
+    @property
+    def writer_stale_drop_count(self) -> int:
+        writer = self._writer
+        return writer.stale_drop_count if writer is not None else 0
+
+    @property
+    def writer_queue_full_count(self) -> int:
+        writer = self._writer
+        return writer.queue_full_count if writer is not None else 0
+
+    @property
+    def output_rate_bps(self) -> float:
+        return float(self.__dict__.get("_output_rate_bps", 0.0))
 
     def resize(self, cols: int, rows: int) -> None:
         if cols < 20 or rows < 5:
@@ -899,6 +1154,10 @@ class PtySession(QObject):
         except (AttributeError, RuntimeError):
             _proc = None
         try:
+            _job_object = self._job_object
+        except (AttributeError, RuntimeError):
+            _job_object = None
+        try:
             _transcript = self._transcript
         except (AttributeError, RuntimeError):
             _transcript = None
@@ -920,7 +1179,7 @@ class PtySession(QObject):
             self._transcript = None
         except (AttributeError, RuntimeError):
             pass
-        for attr in ("_writer", "_reader", "_proc", "_pid"):
+        for attr in ("_writer", "_reader", "_proc", "_pid", "_job_object"):
             try:
                 setattr(self, attr, None)
             except (AttributeError, RuntimeError):
@@ -933,7 +1192,15 @@ class PtySession(QObject):
             # the node dev-server subtree if it ran first. Running both here, in
             # sequence, preserves that ordering off the Qt main thread.
             if kill_process:
+                # Native ownership first. Closing a KILL_ON_JOB_CLOSE job is
+                # deterministic; PID-scoped tree-kill below remains the fallback.
+                if _job_object is not None:
+                    _job_object.close()
                 _tree_kill(_pid)
+            elif _job_object is not None:
+                # Root exited naturally; closing the job reaps any descendants
+                # it left behind and releases the native handle.
+                _job_object.close()
             if kill_process and _proc is not None:
                 try:
                     _proc.terminate(force=True)  # unblocks reader's proc.read()

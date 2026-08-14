@@ -12,6 +12,7 @@ buttons). The body switches between QStackedWidget pages.
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from datetime import datetime
@@ -29,7 +30,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from . import cockpit_theme
+from . import cockpit_theme, performance_settings
 from .agent_pane_model import AgentPaneModel
 from .config import RUNTIME_DIR
 from .pty_session import PtySession
@@ -110,8 +111,13 @@ class AgentPane(QFrame):
         # (≈60 fps).  Force-flush when the buffer exceeds 256 KB so a single
         # bursty write doesn't accumulate unbounded backlog.
         self._render_buf: bytearray = bytearray()
+        self._visible_render_ms = max(8, int(os.environ.get("TAKKUB_VISIBLE_RENDER_MS", "16")))
+        persisted_hidden_ms = performance_settings.load().hidden_render_ms
+        self._hidden_render_ms = max(
+            50, int(os.environ.get("TAKKUB_HIDDEN_RENDER_MS", persisted_hidden_ms))
+        )
         self._render_timer = QTimer(self)
-        self._render_timer.setInterval(16)  # ≈60 fps
+        self._render_timer.setInterval(self._visible_render_ms)  # ≈60 fps while visible
         self._render_timer.setSingleShot(True)
         self._render_timer.timeout.connect(self._flush_render_buf)
 
@@ -472,6 +478,15 @@ class AgentPane(QFrame):
         if len(self._render_buf) >= self._RENDER_FLUSH_CAP:
             self._flush_render_buf()
         elif not self._render_timer.isActive():
+            try:
+                active = self._keepalive_active
+                visible_ms = self._visible_render_ms
+                hidden_ms = self._hidden_render_ms
+            except (AttributeError, RuntimeError):
+                # Compatibility for lightweight __new__ test doubles and
+                # embedders that predate adaptive cadence.
+                active, visible_ms, hidden_ms = True, 16, 300
+            self._render_timer.setInterval(visible_ms if active else hidden_ms)
             self._render_timer.start()
 
     def _flush_render_buf(self) -> None:
@@ -531,6 +546,10 @@ class AgentPane(QFrame):
         # silently dropped by _on_exit's generation check.
         self._session_generation += 1
         _gen = self._session_generation
+        # Bind all queued PTY writes to this concrete pane generation. A write
+        # left behind by the outgoing process can then be rejected by the
+        # writer immediately before it touches the replacement PTY.
+        session.session_generation = _gen
         # Keep the connection handle so detach_session can sever it. The
         # PtySession is parented to the engine (not this pane), so without an
         # explicit disconnect a late processExited would fire into a torn-down
@@ -851,11 +870,29 @@ class AgentPane(QFrame):
         """
         active = bool(active)
         became_inactive = self._keepalive_active and not active
+        became_active = not self._keepalive_active and active
         self._keepalive_active = active
+        self._render_timer.setInterval(
+            self._visible_render_ms if active else self._hidden_render_ms
+        )
+        if became_active and self._render_buf:
+            # The user selected this pane; render its accumulated background
+            # output immediately instead of waiting out the hidden cadence.
+            self._flush_render_buf()
         self._terminal.set_keepalive(active)
         if became_inactive and self._pending_auto_clear:
             self._pending_auto_clear = False
             self._clear_pane_view()
+
+    def apply_performance_settings(
+        self, settings: performance_settings.PerformanceSettings
+    ) -> None:
+        """Apply the background-paint cadence without touching pane state."""
+        self._hidden_render_ms = max(
+            50, int(os.environ.get("TAKKUB_HIDDEN_RENDER_MS", settings.hidden_render_ms))
+        )
+        if not self._keepalive_active:
+            self._render_timer.setInterval(self._hidden_render_ms)
 
     def _refresh_lock_button(self) -> None:
         if self._btn_lock is None:

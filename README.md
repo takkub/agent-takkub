@@ -60,7 +60,8 @@ A single AI agent hits a wall on big work: context fills up, sub-tasks collide, 
 
 |  |  |
 | :-- | :-- |
-| 🩺 **`takkub doctor --live`** | Checks the *running* cockpit's spawn queue, not just static config — catches a stuck queue that a config-only check would miss. |
+| 🩺 **`takkub doctor --live`** | Checks the running cockpit's spawn queue, CPU/RAM governor, resource waits, PTY queue depth, stale-write drops, and remote mirror — catches live wedges that config-only checks cannot see. |
+| 🛡️ **Reliability v2** | Delivery IDs, pane-session generations, TTL, single-flight submission, bounded priority PTY queues, fair heavy-work admission, adaptive hidden-pane rendering, durable completion dedupe, and Windows Job Object cleanup. |
 | ⌨️ **Multiline input that just works** | Shift+Enter / Alt+Enter add a newline instead of submitting, provider-aware (works on claude/gemini panes; skipped where the underlying TUI would misinterpret it) — includes a macOS IME fix for Thai/CJK input dropped after switching input languages. <sub>(community contribution by [@than-aa](https://github.com/than-aa))</sub> |
 
 ---
@@ -200,6 +201,7 @@ sequenceDiagram
 
 - 🏗️ **Architecture & design** — [Architecture Guide](https://github.com/takkub/agent-takkub/blob/main/docs/ARCHITECTURE.md)
 - ⚙️ **System overview & flow diagrams** — [docs/system-overview](https://github.com/takkub/agent-takkub/tree/main/docs/system-overview)
+- 🛡️ **Performance & Reliability v2** — [configuration, invariants, diagnostics, and rollback](docs/performance-reliability.md)
 - 🔧 **From source / one-shot installer** (Chrome, gh, Codex, Antigravity, rtk, …) — [INSTALL.md](https://github.com/takkub/agent-takkub/blob/main/docs/INSTALL.md)
 - 🐙 **GitHub** — [takkub/agent-takkub](https://github.com/takkub/agent-takkub)
 

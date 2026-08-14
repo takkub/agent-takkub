@@ -151,12 +151,13 @@ class ProjectTab(QWidget):
     # pane tabs
     # ------------------------------------------------------------------
     def mount_usage_widget(self, widget: QWidget) -> None:
-        """Park the usage/limit meter QLabel in the top-right corner of pane_tabs.
+        """Park the usage-corner widget (token meter + performance chip) in
+        the top-right corner of pane_tabs.
 
         Called by MainWindow once at boot (initial tab) and again on every
-        project switch so the single label follows the active ProjectTab.
-        Qt automatically removes the widget from any previous corner when
-        setCornerWidget is called on a new QTabWidget.
+        project switch so the single corner widget follows the active
+        ProjectTab. Qt automatically removes the widget from any previous
+        corner when setCornerWidget is called on a new QTabWidget.
         """
         self.pane_tabs.setCornerWidget(widget, Qt.Corner.TopRightCorner)
         widget.show()
