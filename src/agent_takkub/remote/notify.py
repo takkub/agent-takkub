@@ -419,6 +419,43 @@ def resolve_lead_jsonl(orch, project_ns: str, provider: str | None = None) -> Pa
     return scanner.resolve_session(project_ns, session_uuid, spawn_ts)
 
 
+# #192 (remote-blank-output): "no transcript resolved" used to reach the PWA
+# as an undifferentiated None — the phone showed the same silent blank chat
+# whether the provider has no scanner at all (opencode/kimi/cursor, #103),
+# the Lead pane hasn't stamped a session_uuid yet, or a claude/codex/gemini
+# session_uuid drifted from its actual transcript file (manual desktop
+# `/resume`). All three are diagnosable in-process right now — this mirrors
+# the same three-layer classification `doctor.check_remote_mirror_live` /
+# cli_server._remote_mirror_status already prove out for `takkub doctor
+# --live`, but computed directly against `orch` (already in-process here,
+# like `lead_history_snapshot` — no loopback round trip needed) so it can
+# never disagree with what `resolve_lead_jsonl` actually did.
+def lead_mirror_diagnosis(orch, project_ns: str) -> dict:
+    """Classify why the Lead pane currently has nothing to mirror.
+
+    Returns `{"code": ..., "provider": ..., "session_uuid_short"?: ...}`.
+    `code` is one of `"provider_unsupported"`, `"no_session_uuid"`,
+    `"transcript_missing"`, or `None` when a transcript resolved (a blank
+    chat there is legitimately "no messages yet", not a fault to explain).
+    `session_uuid_short` (first 8 chars, never the full uuid — data-min) is
+    included only for `transcript_missing` when a uuid was recorded.
+    """
+    provider = lead_provider_name(orch, project_ns)
+    scanner = history_scanner(provider)
+    if scanner is None:
+        return {"code": "provider_unsupported", "provider": provider}
+    session_uuid = _lead_session_uuid(orch, project_ns)
+    if scanner.requires_session_uuid and not session_uuid:
+        return {"code": "no_session_uuid", "provider": provider}
+    path = resolve_lead_jsonl(orch, project_ns, provider)
+    if path is not None:
+        return {"code": None, "provider": provider}
+    out = {"code": "transcript_missing", "provider": provider}
+    if session_uuid:
+        out["session_uuid_short"] = session_uuid[:8]
+    return out
+
+
 _SESSION_LIST_DEFAULT_LIMIT = 10
 _SESSION_LIST_MAX_LIMIT = 20
 # First-user-line preview is deliberately short (data-min, W3): enough to

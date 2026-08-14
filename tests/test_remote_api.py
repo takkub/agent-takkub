@@ -520,6 +520,19 @@ class TestUsage:
         result = api.usage()
         assert len(result["providers"]) == len(provider_usage.PROVIDER_NAMES)
 
+    def test_reports_cockpit_version(self, monkeypatch):
+        """#192: the phone had no way to tell whether it's talking to an old
+        cockpit build — rides along on this already-polled endpoint."""
+        from agent_takkub import __version__, provider_usage
+
+        class _FakeStore:
+            def get_all(self):
+                return {}
+
+        monkeypatch.setattr(provider_usage, "get_store", lambda: _FakeStore())
+        result = api.usage()
+        assert result["cockpit_version"] == __version__
+
 
 class TestLeadSay:
     def test_empty_message_rejected(self, fake_orch):
@@ -844,6 +857,11 @@ class TestLeadHistory:
         monkeypatch.setattr(
             api.notify, "lead_history_snapshot", lambda orch, ns, limit: ("claude", [])
         )
+        monkeypatch.setattr(
+            api.notify,
+            "lead_mirror_diagnosis",
+            lambda orch, ns: {"code": None, "provider": "claude"},
+        )
         result = api.lead_history(self._Orch(), "proj-a")
         assert result == {
             "project": "proj-a",
@@ -851,6 +869,7 @@ class TestLeadHistory:
             "messages": [],
             "working": False,
             "lead_provider_note": None,
+            "empty_reason": None,
         }
 
     def test_reads_recent_messages_oldest_first_with_kind_field(self, monkeypatch):
@@ -875,11 +894,17 @@ class TestLeadHistory:
             ],
             "working": False,
             "lead_provider_note": None,
+            "empty_reason": None,
         }
 
     def test_reports_current_lead_pane_working_state(self, monkeypatch):
         monkeypatch.setattr(
             api.notify, "lead_history_snapshot", lambda orch, ns, limit: ("claude", [])
+        )
+        monkeypatch.setattr(
+            api.notify,
+            "lead_mirror_diagnosis",
+            lambda orch, ns: {"code": None, "provider": "claude"},
         )
         orch = _FakeOrchWithPanes({"proj-a": {"lead": _FakePane("working", None)}})
 
@@ -891,11 +916,69 @@ class TestLeadHistory:
         monkeypatch.setattr(
             api.notify, "lead_history_snapshot", lambda orch, ns, limit: ("opencode", [])
         )
+        monkeypatch.setattr(
+            api.notify,
+            "lead_mirror_diagnosis",
+            lambda orch, ns: {"code": "provider_unsupported", "provider": "opencode"},
+        )
         result = api.lead_history(self._Orch(), "proj-a")
         assert result["provider"] == "opencode"
         assert result["messages"] == []
         assert result["lead_provider_note"] is not None
         assert "opencode" in result["lead_provider_note"]
+
+    def test_empty_reason_omitted_when_messages_present(self, monkeypatch):
+        """Diagnosis is skipped entirely for a populated chat — it must never
+        run (and never override) once real messages came back."""
+        called = []
+        monkeypatch.setattr(
+            api.notify,
+            "lead_history_snapshot",
+            lambda orch, ns, limit: ("claude", [{"text": "hi", "kind": "lead"}]),
+        )
+        monkeypatch.setattr(
+            api.notify,
+            "lead_mirror_diagnosis",
+            lambda orch, ns: (
+                called.append(1) or {"code": "transcript_missing", "provider": "claude"}
+            ),
+        )
+        result = api.lead_history(self._Orch(), "proj-a")
+        assert result["empty_reason"] is None
+        assert called == []
+
+    def test_empty_reason_no_session_uuid(self, monkeypatch):
+        monkeypatch.setattr(
+            api.notify, "lead_history_snapshot", lambda orch, ns, limit: ("claude", [])
+        )
+        monkeypatch.setattr(
+            api.notify,
+            "lead_mirror_diagnosis",
+            lambda orch, ns: {"code": "no_session_uuid", "provider": "claude"},
+        )
+        result = api.lead_history(self._Orch(), "proj-a")
+        assert result["empty_reason"]["code"] == "no_session_uuid"
+        assert isinstance(result["empty_reason"]["text"], str) and result["empty_reason"]["text"]
+
+    def test_empty_reason_transcript_missing_includes_short_uuid_not_full(self, monkeypatch):
+        """Data-min: only an 8-char prefix may reach the phone, never the
+        full session_uuid."""
+        monkeypatch.setattr(
+            api.notify, "lead_history_snapshot", lambda orch, ns, limit: ("claude", [])
+        )
+        monkeypatch.setattr(
+            api.notify,
+            "lead_mirror_diagnosis",
+            lambda orch, ns: {
+                "code": "transcript_missing",
+                "provider": "claude",
+                "session_uuid_short": "abc12345",
+            },
+        )
+        result = api.lead_history(self._Orch(), "proj-a")
+        assert result["empty_reason"]["code"] == "transcript_missing"
+        assert "abc12345" in result["empty_reason"]["text"]
+        assert "abc12345-full-uuid-should-never-appear" not in result["empty_reason"]["text"]
 
     def test_limit_defaults_to_200(self, monkeypatch):
         seen = {}
@@ -905,6 +988,11 @@ class TestLeadHistory:
             return "claude", []
 
         monkeypatch.setattr(api.notify, "lead_history_snapshot", _fake_snapshot)
+        monkeypatch.setattr(
+            api.notify,
+            "lead_mirror_diagnosis",
+            lambda orch, ns: {"code": None, "provider": "claude"},
+        )
         api.lead_history(self._Orch(), "proj-a")
         assert seen["limit"] == 200
 
@@ -916,6 +1004,11 @@ class TestLeadHistory:
             return "claude", []
 
         monkeypatch.setattr(api.notify, "lead_history_snapshot", _fake_snapshot)
+        monkeypatch.setattr(
+            api.notify,
+            "lead_mirror_diagnosis",
+            lambda orch, ns: {"code": None, "provider": "claude"},
+        )
         api.lead_history(self._Orch(), "proj-a", limit=99999)
         assert seen["limit"] == 200
 

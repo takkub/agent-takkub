@@ -67,6 +67,39 @@ def _lead_provider_note(provider: str) -> str | None:
     return f"Lead provider = {provider} — remote history/session unavailable"
 
 
+# #192 (remote-blank-output): Thai, user-facing explanation for each
+# `notify.lead_mirror_diagnosis` code — the phone must say *why* a chat is
+# blank instead of staying silently empty. Data-min: only the provider name
+# and an 8-char session id prefix ever reach this text, never a full uuid or
+# filesystem path (§7.3 — same bar `notify.py`'s own docstrings hold this
+# module to).
+def _empty_reason_payload(diagnosis: dict) -> dict | None:
+    code = diagnosis.get("code")
+    if code is None:
+        return None
+    if code == "provider_unsupported":
+        provider = diagnosis.get("provider") or "?"
+        text = (
+            f"Lead pane นี้ใช้ provider {provider} ที่ยังไม่รองรับการมิเรอร์บทสนทนามาที่มือถือ "
+            "(#103) — อ่านคำตอบได้ที่เดสก์ท็อปเท่านั้น"
+        )
+    elif code == "no_session_uuid":
+        text = (
+            "ยังไม่มี session ที่บันทึกไว้สำหรับ Lead pane นี้ — พิมพ์ข้อความแรกจากเดสก์ท็อปก่อน หรือรอสักครู่แล้วรีเฟรช"
+        )
+    elif code == "transcript_missing":
+        short = diagnosis.get("session_uuid_short")
+        suffix = f" (session {short}…)" if short else ""
+        text = (
+            f"ไม่พบไฟล์บทสนทนาของเซสชันนี้{suffix} — อาจเพิ่งเปิด Lead pane ใหม่ (ไฟล์ยังไม่ถูกสร้าง) "
+            "หรือ session ไม่ตรงกับที่ pane จำไว้ (เช่นสั่ง /resume จากเดสก์ท็อป) ลองพิมพ์ข้อความจาก"
+            "เดสก์ท็อปอีกครั้ง หรือรีสตาร์ท Lead pane"
+        )
+    else:
+        return None
+    return {"code": code, "text": text}
+
+
 def _pulse_project(from_project: str | None) -> str | None:
     """Resolve pulse's implicit active-project scope for provider labeling."""
     if from_project:
@@ -399,12 +432,21 @@ def lead_history(orch, project_ns: str, limit: object = None) -> dict:
     project_panes = panes.get(project_ns) if isinstance(panes, dict) else None
     lead_pane = project_panes.get("lead") if isinstance(project_panes, dict) else None
     working = getattr(lead_pane, "state", None) == "working"
+    # #192: an empty history is ambiguous on its own (genuinely no messages
+    # yet vs. provider gap vs. session drift) — classify it only when it's
+    # actually empty, so a normal populated chat never pays this extra cost.
+    empty_reason = (
+        _empty_reason_payload(notify.lead_mirror_diagnosis(orch, project_ns))
+        if not messages
+        else None
+    )
     return {
         "project": project_ns,
         "provider": provider,
         "messages": messages,
         "working": working,
         "lead_provider_note": _lead_provider_note(provider),
+        "empty_reason": empty_reason,
     }
 
 
@@ -498,7 +540,7 @@ def usage() -> dict:
     entry yet (first request since cockpit start, before its first
     background fetch completes) reports `status: "loading"` here instead of
     this handler fetching it inline."""
-    from .. import provider_usage
+    from .. import __version__, provider_usage
 
     store = provider_usage.get_store()
     cache = store.get_all()
@@ -508,7 +550,11 @@ def usage() -> dict:
         )
         for name in provider_usage.PROVIDER_NAMES
     ]
-    return {"providers": providers}
+    # #192: the phone had no way to tell whether it was talking to an old
+    # cockpit build that predates a mirror-diagnostics fix — this rides
+    # along on the endpoint the PWA already polls every USAGE_POLL_MS tick,
+    # no new round trip.
+    return {"providers": providers, "cockpit_version": __version__}
 
 
 def projects(from_project: str | None, mode: str = "view") -> dict:

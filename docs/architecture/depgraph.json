@@ -7,9 +7,10 @@
       "imports": [],
       "imported_by": [
         "agent_takkub.auto_issue_capture",
+        "agent_takkub.remote.api",
         "agent_takkub.settings_window"
       ],
-      "fan_in": 2,
+      "fan_in": 3,
       "fan_out": 0
     },
     {
@@ -1240,6 +1241,7 @@
     {
       "module": "agent_takkub.remote.api",
       "imports": [
+        "agent_takkub",
         "agent_takkub.config",
         "agent_takkub.provider_config",
         "agent_takkub.provider_usage",
@@ -1252,7 +1254,7 @@
         "agent_takkub.remote.http_server"
       ],
       "fan_in": 1,
-      "fan_out": 7
+      "fan_out": 8
     },
     {
       "module": "agent_takkub.remote.auth",
