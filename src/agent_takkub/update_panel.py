@@ -10,6 +10,9 @@ attributes (``_btn_update``, ``_update_status_cache``, ``_update_worker_busy``,
 from __future__ import annotations
 
 import os
+import shutil
+import sys
+from pathlib import Path
 
 from PyQt6.QtCore import QCoreApplication, QThread, QThreadPool, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QMessageBox, QSystemTrayIcon
@@ -42,12 +45,95 @@ def _find_npm() -> str | None:
     return config.find_npm()
 
 
+def _find_node() -> str | None:
+    """Resolve the node executable (cross-platform, GUI-PATH aware)."""
+    node = shutil.which("node.exe") or shutil.which("node")
+    if node:
+        return node
+    npm = _find_npm()
+    if npm:
+        npm_dir = Path(npm).parent
+        for name in ("node.exe", "node"):
+            cand = npm_dir / name
+            if cand.is_file() and (sys.platform == "win32" or os.access(cand, os.X_OK)):
+                return str(cand)
+    for d in config._expand_gui_binary_dirs():
+        for name in ("node.exe", "node"):
+            cand = Path(d) / name
+            if cand.is_file() and (sys.platform == "win32" or os.access(cand, os.X_OK)):
+                return str(cand)
+    return None
+
+
+def _find_global_postinstall(npm: str | None = None) -> Path | None:
+    """Locate `postinstall.js` in the globally installed `agent-takkub` package."""
+    import subprocess as _subprocess
+
+    from ._win_console import SUBPROCESS_NO_WINDOW
+
+    if npm:
+        try:
+            r_root = _subprocess.run(
+                [npm, "root", "-g"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                creationflags=SUBPROCESS_NO_WINDOW,
+            )
+            if r_root.returncode == 0 and r_root.stdout.strip():
+                root_dir = Path(r_root.stdout.strip())
+                for cand in (
+                    root_dir / "agent-takkub" / "npm" / "scripts" / "postinstall.js",
+                    root_dir / "npm" / "scripts" / "postinstall.js",
+                ):
+                    if cand.is_file():
+                        return cand
+        except Exception:
+            pass
+
+    # Common global node_modules locations
+    known_roots: list[Path] = []
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming"))
+        known_roots.extend(
+            [
+                Path(appdata) / "npm" / "node_modules",
+                Path("C:/Program Files/nodejs/node_modules"),
+                Path("C:/nvm4w/nodejs/node_modules"),
+            ]
+        )
+    else:
+        known_roots.extend(
+            [
+                Path("/usr/local/lib/node_modules"),
+                Path("/opt/homebrew/lib/node_modules"),
+                Path.home() / ".local" / "lib" / "node_modules",
+            ]
+        )
+        for nvm_dir in Path.home().glob(".nvm/versions/node/*/lib/node_modules"):
+            known_roots.append(nvm_dir)
+        for fnm_dir in Path.home().glob(".fnm/current/lib/node_modules"):
+            known_roots.append(fnm_dir)
+
+    for r in known_roots:
+        cand = r / "agent-takkub" / "npm" / "scripts" / "postinstall.js"
+        if cand.is_file():
+            return cand
+
+    repo_cand = REPO_ROOT / "npm" / "scripts" / "postinstall.js"
+    if repo_cand.is_file():
+        return repo_cand
+
+    return None
+
+
 class _NpmUpdateThread(QThread):
     """npm registry check / global update OFF the Qt main thread.
 
     mode="check"   → emits done(ok, current, latest, msg)
-    mode="install" → runs `npm install -g agent-takkub@latest` (postinstall
-                     upgrades the ~/.agent-takkub venv wheel) then emits done.
+    mode="install" → runs `npm install -g --foreground-scripts agent-takkub@latest`
+                     followed by explicit postinstall trigger to upgrade
+                     ~/.agent-takkub/venv wheel, then emits done.
     Held in the module-level _NPM_THREADS set — same lifetime rules as the
     doctor/plugin workers in user_actions (never parented to the window).
     """
@@ -58,7 +144,7 @@ class _NpmUpdateThread(QThread):
         super().__init__(parent)
         self._mode = mode
 
-    def run(self) -> None:  # pragma: no cover - thin subprocess wrapper
+    def run(self) -> None:
         import subprocess as _subprocess
         from importlib import metadata as _metadata
 
@@ -92,7 +178,7 @@ class _NpmUpdateThread(QThread):
                 self.done.emit(True, current, latest, "")
             else:
                 r = _subprocess.run(
-                    [npm, "install", "-g", "agent-takkub@latest"],
+                    [npm, "install", "-g", "--foreground-scripts", "agent-takkub@latest"],
                     capture_output=True,
                     text=True,
                     encoding="utf-8",
@@ -104,6 +190,28 @@ class _NpmUpdateThread(QThread):
                     tail = ((r.stderr or "") + (r.stdout or "")).strip().splitlines()
                     self.done.emit(False, current, "", tail[-1] if tail else "npm install failed")
                     return
+
+                # Explicit postinstall trigger step to guarantee venv wheel is upgraded
+                postinstall_js = _find_global_postinstall(npm)
+                node = _find_node()
+                if node and postinstall_js and postinstall_js.is_file():
+                    env = dict(os.environ)
+                    env["npm_config_global"] = "true"
+                    r_post = _subprocess.run(
+                        [node, str(postinstall_js)],
+                        capture_output=True,
+                        text=True,
+                        timeout=600,
+                        env=env,
+                        creationflags=SUBPROCESS_NO_WINDOW,
+                    )
+                    if r_post.returncode != 0:
+                        tail = ((r_post.stderr or "") + (r_post.stdout or "")).strip().splitlines()
+                        self.done.emit(
+                            False, current, "", tail[-1] if tail else "postinstall failed"
+                        )
+                        return
+
                 self.done.emit(True, current, "", "updated")
         except Exception as e:
             self.done.emit(False, current, "", str(e))
