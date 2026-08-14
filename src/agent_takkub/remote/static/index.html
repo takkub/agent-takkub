@@ -246,6 +246,48 @@
   }
   .usage-bar-fill.warn { background: var(--work); }
   .usage-bar-fill.danger { background: var(--danger); }
+  /* #204: one row per rolling quota window (5h/7d/…) when a provider has
+     more than one — replaces the single headline % + bar above, never both
+     at once (buildUsageCard only appends one or the other). */
+  .usage-windows {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    margin-bottom: 8px;
+  }
+  .usage-window-row-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    font-family: var(--mono);
+    font-size: 0.74rem;
+  }
+  .usage-window-label { color: var(--fg-dim); }
+  .usage-window-pct { font-weight: 650; color: var(--fg); }
+  .usage-window-pct.warn { color: var(--work); }
+  .usage-window-pct.danger { color: var(--danger); }
+  .usage-window-pct.unknown { color: var(--faint); font-weight: 500; }
+  .usage-window-bar-track {
+    height: 4px;
+    border-radius: 999px;
+    background: var(--card2);
+    border: 1px solid var(--line);
+    overflow: hidden;
+    margin: 3px 0 2px;
+  }
+  .usage-window-bar-fill {
+    height: 100%;
+    border-radius: 999px;
+    background: var(--accent);
+  }
+  .usage-window-bar-fill.warn { background: var(--work); }
+  .usage-window-bar-fill.danger { background: var(--danger); }
+  .usage-window-reset {
+    font-family: var(--mono);
+    font-size: 0.64rem;
+    color: var(--faint);
+  }
   .usage-card-meta {
     font-family: var(--mono);
     font-size: 0.68rem;

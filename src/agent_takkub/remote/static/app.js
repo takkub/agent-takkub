@@ -2167,6 +2167,66 @@
     return "อัปเดตเมื่อ ~" + Math.round(days / 30) + " เดือนก่อน";
   }
 
+  // #204: each provider's rolling quota periods (claude's five_hour/
+  // seven_day/seven_day_sonnet, codex's primary/secondary weekly window).
+  // Unrecognized names still render — fall back to the raw name rather than
+  // dropping a window the backend didn't silently swallow (see provider_usage
+  // module docstring: "never drop a window quietly").
+  var USAGE_WINDOW_LABELS = {
+    five_hour: "5 ชม.",
+    seven_day: "7 วัน",
+    seven_day_sonnet: "7 วัน (Sonnet)",
+    primary: "หลัก",
+    secondary: "รายสัปดาห์",
+    quota: "โควต้า",
+  };
+
+  function buildUsageWindowRow(w) {
+    var row = document.createElement("div");
+    row.className = "usage-window-row";
+
+    var head = document.createElement("div");
+    head.className = "usage-window-row-head";
+    var label = document.createElement("span");
+    label.className = "usage-window-label";
+    label.textContent = USAGE_WINDOW_LABELS[w.name] || w.name;
+    head.appendChild(label);
+
+    // Missing utilization for a window that DOES exist on this provider
+    // renders "—", never a fabricated 0% (see provider_usage module
+    // docstring's own contract, mirrored here).
+    var hasPct = typeof w.utilization === "number";
+    var pctEl = document.createElement("span");
+    pctEl.className = "usage-window-pct" + (hasPct
+      ? (w.utilization >= USAGE_DANGER_PCT ? " danger" : w.utilization >= USAGE_WARN_PCT ? " warn" : "")
+      : " unknown");
+    pctEl.textContent = hasPct ? fmtPct(w.utilization) : "—";
+    head.appendChild(pctEl);
+    row.appendChild(head);
+
+    if (hasPct) {
+      var track = document.createElement("div");
+      track.className = "usage-window-bar-track";
+      var fill = document.createElement("div");
+      fill.className = "usage-window-bar-fill" +
+        (w.utilization >= USAGE_DANGER_PCT ? " danger" : w.utilization >= USAGE_WARN_PCT ? " warn" : "");
+      fill.style.width = Math.max(0, Math.min(100, w.utilization)) + "%";
+      track.appendChild(fill);
+      row.appendChild(track);
+    }
+
+    if (w.resets_at) {
+      var resetLabel = fmtResetsAt(w.resets_at);
+      if (resetLabel) {
+        var reset = document.createElement("div");
+        reset.className = "usage-window-reset";
+        reset.textContent = resetLabel;
+        row.appendChild(reset);
+      }
+    }
+    return row;
+  }
+
   function buildUsageCard(p) {
     var meta = providerMeta(p.provider);
     var card = document.createElement("div");
@@ -2191,19 +2251,23 @@
     // A quota-percentage meter only ever applies to active/stale reads with a
     // real number — opencode's spend field must never render here (design
     // contract: self-tallied spend is not quota and must stay visually
-    // distinct, never a blended % bar).
-    var hasPct = (p.status === "active" || p.status === "stale") && typeof p.utilization === "number";
+    // distinct, never a blended % bar). When the provider carries multiple
+    // rolling windows (#204), each one gets its own row below instead of one
+    // headline number here, so the same figure never shows twice.
+    var isLive = p.status === "active" || p.status === "stale";
+    var hasWindows = isLive && Array.isArray(p.windows) && p.windows.length > 0;
+    var hasPct = isLive && !hasWindows && typeof p.utilization === "number";
     var pctEl = document.createElement("div");
     pctEl.className = "usage-card-pct";
     if (hasPct) {
       pctEl.textContent = fmtPct(p.utilization);
       pctEl.style.color = p.utilization >= USAGE_DANGER_PCT ? "var(--danger)"
         : p.utilization >= USAGE_WARN_PCT ? "var(--work)" : "var(--fg)";
-    } else {
+    } else if (!hasWindows) {
       pctEl.textContent = "—";
       pctEl.style.color = "var(--faint)";
     }
-    head.appendChild(pctEl);
+    if (!hasWindows) head.appendChild(pctEl);
     card.appendChild(head);
 
     if (hasPct) {
@@ -2215,6 +2279,16 @@
       fill.style.width = Math.max(0, Math.min(100, p.utilization)) + "%";
       track.appendChild(fill);
       card.appendChild(track);
+    }
+
+    if (hasWindows) {
+      var windowsWrap = document.createElement("div");
+      windowsWrap.className = "usage-windows";
+      p.windows.forEach(function (w) {
+        if (!w || !w.name) return;
+        windowsWrap.appendChild(buildUsageWindowRow(w));
+      });
+      card.appendChild(windowsWrap);
     }
 
     var metaBits = [];
@@ -2256,7 +2330,7 @@
         (Number(s.input_tokens) || 0).toLocaleString() + " in / " +
         (Number(s.output_tokens) || 0).toLocaleString() + " out tokens · " +
         (Number(s.message_count) || 0) + " ข้อความ";
-    } else if (p.provider === "claude" && hasPct) {
+    } else if (p.provider === "claude" && (hasPct || hasWindows)) {
       noteText = "ตัวเลขของทั้งบัญชี ไม่ใช่ของ pane นี้เพียงตัวเดียว";
     }
     if (noteText) {
