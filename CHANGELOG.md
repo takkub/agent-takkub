@@ -4,6 +4,36 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.61] - 2026-08-15
+
+รอบเก็บบั๊กใหญ่ของ **remote/PWA บนมือถือ** + เสถียรภาพ cockpit ตามที่ user รายงานหลังปล่อย 1.0.60 (ปิดครบ #193–#206)
+
+### Fixed (แก้)
+
+**Remote / PWA บนมือถือ**
+- **dev กับ prod cockpit แย่ง config remote กันจนต่อไม่ติด** (#193) — ทั้งสอง instance เขียน/อ่าน `remote.json` ตัวเดียวกันและชน port 9999 ทำให้ token/secret path ของอีกฝั่งถูกทับ มือถือจึงต่อไปเจอ instance ผิดตัวหรือไม่ติดเลย ตอนนี้แยก config ตาม cockpit จริง (dev/prod คนละไฟล์คนละ port) พร้อมโชว์ port/hostname ที่ใช้อยู่ให้เห็นชัด
+- **ปิด cockpit แล้ว tunnel ยังไม่ดับ** (#197) — cloudflared ค้างเป็น orphan ทำให้ URL เดิมยังตอบอยู่ทั้งที่แอปปิดไปแล้ว และรอบถัดไป spawn ทับกันจนสับสน ตอนนี้ปิดโปรแกรม = เก็บ tunnel ให้ตายตามเสมอ พร้อม reap ซากที่ค้างจากรอบก่อน
+- **ต้องกรอกรหัสใหม่ทุกครั้ง** (#196) — session ของรหัสผ่านเก็บใน memory อย่างเดียว restart cockpit ทีเดียวหลุดหมด ตอนนี้ persist session (เก็บเฉพาะ hash ไม่เก็บรหัสจริง) มือถือจึงจำการล็อกอินข้ามการ restart ได้
+- **หน้าแชทเด้งลงล่างสุดตลอดเวลาไล่อ่านโค้ด** (#198) — `showThinking()` บังคับ scroll ทุกครั้งที่มีข้อมูลใหม่ ตอนนี้ pin เฉพาะตอนที่อยู่ใกล้ล่างสุดจริง (ระยะ 48px) ถ้ากำลังอ่านย้อนอยู่จะไม่ถูกดึงลง และมีปุ่ม "ข้อความใหม่" ให้กดลงเองเมื่อพร้อม
+- **หน้า Pulse ไม่บอกว่ามี pane ไหนเปิด/ทำงานอยู่** (#200) — แยก `PULSE_SHOW_TEAM` (ฝั่ง pull) ออกจาก `LEAD_ONLY_STREAM` (ฝั่ง push) หน้า Pulse จึงเห็นทุก pane ที่เปิดอยู่พร้อมสถานะ working/idle และ runtime รวม teammate ที่ idle ด้วย (provider-neutral ไม่ผูก claude)
+- **หน้า usage ค้างไม่อัปเดต** (#203) — provider store อ่าน `~/.claude` ซึ่งเป็น snapshot เก่าค้างมา 23 วัน แทนที่จะอ่าน config dir ของ cockpit ที่รันอยู่จริง ตอนนี้ resolve ผ่าน active project + มี staleness badge บอกเมื่อข้อมูลเก่าเกิน 24 ชม.
+- **usage แสดงแค่หน้าต่างเดียว** (#204) — ตอนนี้โชว์ครบทั้ง **5 ชม.** และ **7 วัน** เป็นคนละแถว แต่ละแถวมี % และเวลานับถอยหลังจน reset ของตัวเอง · window ที่ไม่มีข้อมูลแสดง `—` (ไม่ใช่ `0%`) · codex แสดง primary/secondary แยกกัน
+
+**เสถียรภาพ cockpit**
+- **main thread ค้าง 0.9–2.5 วินาทีซ้ำๆ** (#194) — อ่านไฟล์/สถานะแบบ blocking บน GUI thread ทำให้หน้าจอสะดุดเป็นจังหวะ ย้ายออกจาก main thread แล้ว
+- **`resource_gate_block` ยิงซ้ำทุกวินาที** (#195) — heavy_project_limit log ท่วม `events.log` 1 Hz ตอนนี้ throttle แล้ว
+- **backoff กินสล็อตที่ว่างแล้ว** (#201) — ปล่อย slot ไปแล้วแต่ task ที่รออยู่ยังติด backoff schedule เดิม (1/2/5/15 วิ) จึงไม่ยอมเข้าทันที แก้ด้วย capacity-epoch invalidation: พอมี capacity เพิ่ม ให้ล้าง backoff ที่ค้างอยู่ทิ้ง
+- **tripwire "Open-With dialog" ตรวจจับตัวเอง** (#199) — pane ที่พิมพ์ชื่อ dialog ลงใน output ทำให้ tripwire เข้าใจผิดว่าเจอ dialog จริง ตอนนี้กัน self-match แล้ว
+- **worktree pane ไป repoint editable install ของ repo หลัก** (#202) — pane ใน worktree รัน `pip install -e .` ทับ `.pth` ของ venv ที่ใช้ร่วมกัน ทำให้ instance อื่นชี้ไป worktree ที่กำลังจะถูกลบ แก้สองชั้น: `pane_guard` บล็อก `pip install -e` ทุก role + role file เขียนกำกับ และตัวซ่อม `.pth` ที่ค้างใช้ interpreter ของ venv repo เองเสมอ (ไม่ใช่ `sys.executable`)
+- **`UnicodeDecodeError` ฆ่า reader thread เงียบๆ บน Windows locale ไทย** (#205) — `subprocess` text mode ไม่ระบุ `encoding=` จึงตกไปใช้ cp874 ของเครื่อง เจอ byte ที่ decode ไม่ได้แล้ว thread ตายทิ้ง output หายเงียบ (ไม่ raise ให้ caller จับได้) แก้ครบ 23 จุด (`encoding="utf-8", errors="replace"`) + guard test กันย้อนกลับ
+- **guard test ของ #205 หลวมเกินไป** (#206) — เดิมเช็คแค่ว่ามี `encoding=`/`errors=` ไม่ได้เช็คค่า ทำให้ `errors="strict"` ผ่านฉลุยทั้งที่เป็นเคสที่ห้ามใช้ ตอนนี้บังคับค่าตรงตัว (`"utf-8"` / `"replace"`) · พร้อมแก้ต้นเหตุจริงของเทสต์ socket ที่ flaky: `/api/lead/upload` ตอบ 403 โดยไม่อ่าน body ทิ้งก่อนปิด socket ทำให้ client ฝั่ง Windows โดน RST เป็น `WinError 10053` — เพิ่ม `_drain_request_body()` แก้ที่โค้ดจริง ไม่ใช่ skip เทสต์
+
+### Docs (เอกสาร)
+- gate report 3 รอบ: `docs/qa/2026-08-14-gate-remote-perf-wave.md` (#193–#201, รอบแรก NO-GO แล้วแก้จน GO), `docs/qa/2026-08-14-gate-wave2-202-203-204.md`, `docs/qa/2026-08-14-gate-wave3-205.md`
+- audit เชิงลึกรายเรื่องใน `docs/audit/2026-08-14-*.md`
+
+ยืนยันด้วย `pytest` เต็มชุด (6189 passed, 7 skipped) ที่ gate สุดท้าย + targeted 213 tests หลัง merge #206
+
 ## [1.0.60] - 2026-08-14
 
 ### Added (เพิ่ม)
