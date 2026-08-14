@@ -207,9 +207,12 @@ class RemoteSettingsDialog(QDialog):
     displays whatever `on_apply` reports back.
     """
 
-    def __init__(self, parent, *, is_live: bool, current: RemoteConfig, on_apply) -> None:
+    def __init__(
+        self, parent, *, is_live: bool, current: RemoteConfig, on_apply, on_logout_all=None
+    ) -> None:
         super().__init__(parent)
         self._on_apply = on_apply
+        self._on_logout_all = on_logout_all
         self._is_live = is_live
         self.setWindowTitle("🌐 Remote Control")
         self.setMinimumWidth(480)
@@ -366,6 +369,18 @@ class RemoteSettingsDialog(QDialog):
         password_note.setStyleSheet("color:#71717a;")
         layout.addWidget(password_note)
 
+        # #196 requirement 4: a way to kill every phone's session without
+        # waiting for its idle-expire window — e.g. a phone was lost/stolen,
+        # or the user just wants a clean slate. Always available (not gated
+        # on `is_live`) since a stale session file can outlive the server
+        # that minted it.
+        logout_row = QHBoxLayout()
+        self._logout_all_btn = QPushButton("Log out all devices")
+        self._logout_all_btn.clicked.connect(self._on_logout_all_clicked)
+        logout_row.addWidget(self._logout_all_btn)
+        logout_row.addStretch(1)
+        layout.addLayout(logout_row)
+
         defaults_note = QLabel(
             "Preset: idle-expire 240min · lockout after 5 fails · tunnel auto-start."
         )
@@ -457,6 +472,16 @@ class RemoteSettingsDialog(QDialog):
         self._pairing_label.setVisible(show_pairing)
         self._pairing_edit.setVisible(show_pairing)
         self._copy_btn.setVisible(show_pairing)
+
+    def _on_logout_all_clicked(self) -> None:
+        if self._on_logout_all is not None:
+            self._on_logout_all()
+        QMessageBox.information(
+            self,
+            "Logged out",
+            "Every device's session has been cleared — the next request from "
+            "any phone will need the password again.",
+        )
 
     def _on_password_show_toggled(self, checked: bool) -> None:
         self._password_edit.setEchoMode(

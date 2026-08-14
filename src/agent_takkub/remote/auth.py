@@ -16,6 +16,7 @@ import secrets
 import threading
 import time
 
+from . import session_store
 from .config import RemoteConfig
 
 _TICKET_TTL_SEC = 30.0
@@ -24,6 +25,17 @@ _LOCKOUT_MAX_SEC = 300.0
 # Fallback TTL for a password session when idle-expire is disabled
 # (idle_expire_min <= 0) — see `_password_session_ttl_sec`.
 _PASSWORD_SESSION_FALLBACK_SEC = 4 * 3600.0
+# #196: password sessions persist to disk (`session_store.py`) so a phone
+# doesn't have to re-enter the password on every cockpit restart. The mobile
+# client polls `/api/pulse` every 5s, and every authed request slides the
+# session's expiry — writing the store on every single one of those would
+# mean a small-file fsync every few seconds per connected phone. Throttling
+# the on-disk write to this interval keeps the sliding expiry accurate in
+# memory (where it's actually enforced) while bounding disk I/O; the worst
+# case on an unclean shutdown is a session looking up to this long more
+# "idle" than it really was, which only matters if that pushes it past the
+# multi-hour idle_expire_min window — not a security-relevant loss.
+_SESSION_PERSIST_MIN_INTERVAL_SEC = 30.0
 
 # Third auth factor (addendum, user-confirmed): a cockpit-set password, never
 # embedded in the pairing URL/QR, so a leaked link alone still can't get in.
@@ -86,10 +98,14 @@ class AuthGate:
         # per-client session credential, not a server-global flag — a
         # leaked bearer token alone is no longer enough once *any* client
         # has logged in (see `issue_password_session`/`check_password_session`).
-        # token -> expiry epoch. A fresh AuthGate is created per server
-        # start, so — like the fail counter — this never needs to survive
-        # a restart.
-        self._sessions: dict[str, float] = {}
+        # token_hash -> expiry epoch (#196: loaded from `session_store.py` so
+        # these survive a cockpit restart — unlike the fail counters above,
+        # which intentionally don't need to). Keyed by `session_store.
+        # hash_token()`, never the raw token — same reasoning as
+        # `RemoteConfig.password_hash` never holding a plaintext password.
+        self._session_fingerprint = session_store.fingerprint(config)
+        self._sessions: dict[str, float] = session_store.load(self._session_fingerprint)
+        self._sessions_last_persist_ts = 0.0
 
     # ── secret path — second secret ahead of the token (§7.5) ───────────
     def check_secret_path(self, segment: str) -> bool:
@@ -167,27 +183,55 @@ class AuthGate:
         with self._lock:
             self._prune_sessions_locked()
             token = secrets.token_urlsafe(24)
-            self._sessions[token] = time.time() + self._password_session_ttl_sec()
+            self._sessions[session_store.hash_token(token)] = (
+                time.time() + self._password_session_ttl_sec()
+            )
+            self._persist_sessions_locked(force=True)
             return token
 
     def check_password_session(self, session_token: str | None) -> bool:
         if not session_token:
             return False
+        token_hash = session_store.hash_token(session_token)
         with self._lock:
             self._prune_sessions_locked()
-            expiry = self._sessions.get(session_token)
+            expiry = self._sessions.get(token_hash)
             if expiry is None:
                 return False
             # Sliding expiry: an actively polling phone must not be logged
             # out merely because the original issue time crossed the idle
             # window. The server-wide idle watchdog remains the hard stop.
-            self._sessions[session_token] = time.time() + self._password_session_ttl_sec()
+            self._sessions[token_hash] = time.time() + self._password_session_ttl_sec()
+            self._persist_sessions_locked(force=False)
             return True
 
     def _prune_sessions_locked(self) -> None:
         now = time.time()
-        for t in [t for t, exp in self._sessions.items() if exp < now]:
+        expired = [t for t, exp in self._sessions.items() if exp < now]
+        for t in expired:
             self._sessions.pop(t, None)
+        if expired:
+            self._persist_sessions_locked(force=True)
+
+    def _persist_sessions_locked(self, *, force: bool) -> None:
+        """Write `self._sessions` to disk, throttled unless `force` (a mint
+        or a prune-driven removal always writes immediately — both change
+        what a restart should see; a plain sliding-expiry touch can wait).
+        Call only while holding `self._lock`."""
+        now = time.time()
+        if not force and (now - self._sessions_last_persist_ts) < _SESSION_PERSIST_MIN_INTERVAL_SEC:
+            return
+        session_store.save(self._session_fingerprint, dict(self._sessions))
+        self._sessions_last_persist_ts = now
+
+    def logout_all_sessions(self) -> None:
+        """ "Log out every device" (#196 requirement 4): drop every live
+        session, in memory and on disk. Reachable from the Settings
+        dialog's "Log out all devices" button."""
+        with self._lock:
+            self._sessions.clear()
+            session_store.clear()
+            self._sessions_last_persist_ts = time.time()
 
     def password_ok(self, session_token: str | None) -> bool:
         """Gate for every authenticated route besides verify-password
