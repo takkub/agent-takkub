@@ -324,7 +324,60 @@ class TestInstanceIdentityLabel:
         repo.mkdir()
         monkeypatch.setattr(config, "REPO_ROOT", repo)
         monkeypatch.setattr(config, "DATA_HOME", repo)
+        monkeypatch.delenv("TAKKUB_PROJECT", raising=False)
         assert config.instance_identity_label() == f"dev · {repo.name}"
+
+    def test_dev_label_prefers_takkub_project_over_worktree_cwd_basename(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#185: a teammate pane spawned with ``--cwd`` into a git worktree
+        must not surface the worktree's own basename as the project name —
+        it's the same instance, just a different on-disk checkout of the
+        same repo. The orchestrator-issued ``TAKKUB_PROJECT`` env var (set
+        on every cockpit-spawned pane, Lead and teammates alike) is the
+        stable source of truth; ``REPO_ROOT.name`` is only this particular
+        CLI invocation's own resolution and must be a fallback, never the
+        primary source, whenever TAKKUB_PROJECT is available."""
+        worktree = tmp_path / "worktrees" / "agent-takkub" / "frontend-1786615682"
+        worktree.mkdir(parents=True)
+        monkeypatch.setattr(config, "REPO_ROOT", worktree)
+        monkeypatch.setattr(config, "DATA_HOME", worktree)
+        monkeypatch.setenv("TAKKUB_PROJECT", "agent-takkub")
+
+        assert config.instance_identity_label() == "dev · agent-takkub"
+
+    def test_dev_label_falls_back_to_repo_root_name_without_takkub_project(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Manual terminal invocations (no cockpit-stamped env) keep the old
+        REPO_ROOT-derived behaviour — this is the debugging path, unchanged."""
+        repo = tmp_path / "checkout"
+        repo.mkdir()
+        monkeypatch.setattr(config, "REPO_ROOT", repo)
+        monkeypatch.setattr(config, "DATA_HOME", repo)
+        monkeypatch.delenv("TAKKUB_PROJECT", raising=False)
+
+        assert config.instance_identity_label() == "dev · checkout"
+
+    def test_dev_label_distinguishes_two_real_projects(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression guard: TAKKUB_PROJECT must not collapse genuinely
+        different projects (different repos, different tabs) into one
+        label — each keeps its own registry-issued name."""
+        repo_a = tmp_path / "project-a"
+        repo_a.mkdir()
+        monkeypatch.setattr(config, "REPO_ROOT", repo_a)
+        monkeypatch.setattr(config, "DATA_HOME", repo_a)
+        monkeypatch.setenv("TAKKUB_PROJECT", "project-a")
+        assert config.instance_identity_label() == "dev · project-a"
+
+        repo_b = tmp_path / "project-b"
+        repo_b.mkdir()
+        monkeypatch.setattr(config, "REPO_ROOT", repo_b)
+        monkeypatch.setattr(config, "DATA_HOME", repo_b)
+        monkeypatch.setenv("TAKKUB_PROJECT", "project-b")
+        assert config.instance_identity_label() == "dev · project-b"
 
     def test_installed_label_includes_version(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

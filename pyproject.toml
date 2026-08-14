@@ -175,7 +175,6 @@ forbidden_modules = [
     "agent_takkub.spawn_gate",
     "agent_takkub.provider_config",
     "agent_takkub.claude_auth_config",
-    "agent_takkub.claude_auth_dialog",
     "agent_takkub.gemini_helper",
     "agent_takkub.codex_helper",
     "agent_takkub.pipeline_config",

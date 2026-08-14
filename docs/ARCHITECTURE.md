@@ -91,7 +91,6 @@ src/agent_takkub/
 ├── gemini_helper.py   Google Antigravity CLI (`agy`) one-shot wrapper — backs `gemini` role (mirror of codex_helper)
 │ ── auth ──
 ├── claude_auth_config.py  optional Claude Code auth override (default = CC's own login)
-├── claude_auth_dialog.py  Qt dialog for the auth override
 │ ── observability / persistence ──
 ├── logs_panel.py      bottom dock tailing runtime/events.log
 ├── token_meter.py     per-pane context occupancy from claude session JSONL usage

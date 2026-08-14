@@ -406,6 +406,28 @@ class TestInstanceBanner:
 
         assert cli._instance_banner() == ""
 
+    def test_banner_keeps_project_name_for_pane_assigned_into_worktree(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """#185 end-to-end: a teammate pane spawned with `--cwd` into a git
+        worktree of the same repo must still show the real project name in
+        `takkub list`'s header, not the worktree's own basename — otherwise
+        Lead reads "controls X only" and wrongly believes it lost some panes.
+        Exercises the real `config.instance_identity_label()` (not stubbed),
+        driven purely by the env var the orchestrator stamps on every spawn."""
+        worktree = tmp_path / "worktrees" / "agent-takkub" / "frontend-1786615682"
+        worktree.mkdir(parents=True)
+        current_port_file = tmp_path / "runtime" / "port"
+        monkeypatch.setattr(cli.config, "REPO_ROOT", worktree)
+        monkeypatch.setattr(cli.config, "DATA_HOME", worktree)
+        monkeypatch.setenv("TAKKUB_PROJECT", "agent-takkub")
+        monkeypatch.setattr(cli.config, "read_port", lambda: 56919)
+        monkeypatch.setattr(cli.config, "_get_port_file", lambda: current_port_file)
+
+        banner = cli._instance_banner()
+
+        assert banner == f"▸ dev · agent-takkub   (port 56919 · {current_port_file.parent})"
+
     @pytest.mark.parametrize(
         ("command", "response"),
         [
@@ -750,6 +772,7 @@ class TestWorktreeCli:
         merge_result: ClassVar[tuple] = (True, "merged wt/frontend-9 + cleanup เรียบร้อย")
         clean_lines: ClassVar[list] = ["REMOVED wt/qa-7"]
         merge_calls: ClassVar[list] = []
+        clean_live_paths_calls: ClassVar[list] = []
 
         def __init__(self, *a, **k):
             pass
@@ -764,8 +787,13 @@ class TestWorktreeCli:
             type(self).merge_calls.append((branch, keep))
             return type(self).merge_result
 
-        def clean_isolated(self, root, force=False):
+        def clean_isolated(self, root, force=False, live_paths=frozenset()):
+            type(self).clean_live_paths_calls.append(set(live_paths))
             return type(self).clean_lines
+
+    @staticmethod
+    def _no_cockpit(_payload):
+        raise RuntimeError("agent-takkub cockpit is not running (no port file).")
 
     @pytest.fixture(autouse=True)
     def _fake_mgr(self, monkeypatch):
@@ -774,9 +802,15 @@ class TestWorktreeCli:
         self._FakeWtMgr.rows = []
         self._FakeWtMgr.merge_calls = []
         self._FakeWtMgr.clean_lines = ["REMOVED wt/qa-7"]
+        self._FakeWtMgr.clean_live_paths_calls = []
         self._FakeWtMgr.merge_result = (True, "merged")
         monkeypatch.setattr(wm, "WorktreeManager", self._FakeWtMgr)
         monkeypatch.delenv("TAKKUB_ROLE", raising=False)
+        # `clean` now makes a best-effort live-pane-guard query (#187). Default
+        # to "cockpit unreachable" so the rest of this class's tests — which
+        # predate that query — stay hermetic/deterministic regardless of
+        # whether a real cockpit happens to be running on the dev machine.
+        monkeypatch.setattr(cli, "_request", self._no_cockpit)
 
     def test_teammate_blocked_by_role_gate(self, monkeypatch):
         monkeypatch.setenv("TAKKUB_ROLE", "backend")
@@ -818,6 +852,25 @@ class TestWorktreeCli:
     def test_clean_failed_line_sets_exit(self):
         self._FakeWtMgr.clean_lines = ["FAILED wt/qa-7 — locked"]
         assert cli.main(["worktree", "clean", "--force"]) != 0
+
+    def test_clean_forwards_live_paths_from_orchestrator(self, monkeypatch):
+        """#187 — when the cockpit IS reachable, `clean` must query it for
+        live-pane worktree paths and pass them straight through to
+        `clean_isolated` so the live-pane guard has something to check."""
+        monkeypatch.setattr(
+            cli,
+            "_request",
+            lambda payload: {"ok": True, "msg": "1 live worktree(s)", "paths": ["/w/live-9"]},
+        )
+        assert cli.main(["worktree", "clean", "--force"]) == 0
+        assert self._FakeWtMgr.clean_live_paths_calls[-1] == {"/w/live-9"}
+
+    def test_clean_no_live_paths_when_cockpit_unreachable(self):
+        """Default fixture already stubs `_request` to raise (cockpit not
+        running) — `clean` must still work, with an empty live-paths set
+        rather than propagating the connection error."""
+        assert cli.main(["worktree", "clean"]) == 0
+        assert self._FakeWtMgr.clean_live_paths_calls[-1] == set()
 
 
 class TestDiskPruneCli:

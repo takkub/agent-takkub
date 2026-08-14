@@ -755,3 +755,69 @@ class TestCleanIsolated:
         lines = WorktreeManager(r).clean_isolated("/repo", force=True)
         assert all(line.startswith("REMOVED") for line in lines)
         assert r.ran("worktree", "remove", "--force")
+
+    def test_remove_failure_does_not_delete_branch(self, monkeypatch):
+        """#187 — atomicity. A `git worktree remove` failure (e.g. Windows
+        file lock / permission denied) must NOT be followed by `branch -D`:
+        the pre-fix code ran the branch delete unconditionally after remove,
+        so a failed remove still lost the branch."""
+        from agent_takkub import worktree_manager as wm
+
+        monkeypatch.setattr(wm, "sweep_link_points", lambda p: [])
+        r = FakeRunner(
+            [
+                (["worktree", "list", "--porcelain"], _ok(_PORCELAIN)),
+                (["rev-list", "--count"], _ok("0\n")),  # nothing ahead -> eligible
+                (["status", "--porcelain"], _ok("")),  # clean -> eligible
+                (["worktree", "remove"], _fail("Permission denied", 1)),
+            ]
+        )
+        lines = WorktreeManager(r).clean_isolated("/repo", force=True)
+        assert all(line.startswith("FAILED") for line in lines), lines
+        assert r.ran("worktree", "remove")
+        assert not r.ran("branch", "-D")  # branch must survive a failed remove
+
+    def test_live_pane_worktree_is_skipped_even_with_force(self, monkeypatch):
+        """#187 — live-pane guard. A worktree a currently-alive pane is
+        sitting in is skipped regardless of `force`, dirty/ahead status, or
+        whether `git worktree remove` would have succeeded — no bypass."""
+        from agent_takkub import worktree_manager as wm
+
+        monkeypatch.setattr(wm, "sweep_link_points", lambda p: [])
+        r = FakeRunner(
+            [
+                (["worktree", "list", "--porcelain"], _ok(_PORCELAIN)),
+                (["rev-list", "--count"], _ok("0\n")),
+                (["status", "--porcelain"], _ok("")),
+            ]
+        )
+        from pathlib import Path
+
+        live = {str(Path("/repo/worktrees/p/frontend-9").resolve())}
+        lines = WorktreeManager(r).clean_isolated("/repo", force=True, live_paths=live)
+        by_branch = {line.split()[1]: line for line in lines}
+        assert by_branch["wt/frontend-9"].startswith("KEEP")
+        assert "live pane" in by_branch["wt/frontend-9"]
+        assert by_branch["wt/qa-7"].startswith("REMOVED")  # unaffected sibling
+        # only qa-7's path may have been passed to `worktree remove`
+        remove_calls = [c for c in r.calls if "remove" in c and "worktree" in c]
+        assert all("frontend-9" not in " ".join(c) for c in remove_calls)
+
+    def test_merged_no_live_pane_still_removable(self, monkeypatch):
+        """Regression guard: a clean/merged worktree with no live pane holding
+        it must still be removable by default (no live_paths passed) — the
+        #187 fix must not make normal cleanup stop working."""
+        from agent_takkub import worktree_manager as wm
+
+        monkeypatch.setattr(wm, "sweep_link_points", lambda p: [])
+        r = FakeRunner(
+            [
+                (["worktree", "list", "--porcelain"], _ok(_PORCELAIN)),
+                (["rev-list", "--count"], _ok("0\n")),  # merged
+                (["status", "--porcelain"], _ok("")),  # clean
+            ]
+        )
+        lines = WorktreeManager(r).clean_isolated("/repo")
+        assert all(line.startswith("REMOVED") for line in lines), lines
+        assert r.ran("worktree", "remove")
+        assert r.ran("branch", "-D")

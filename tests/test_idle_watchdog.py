@@ -1016,6 +1016,117 @@ class TestProactiveIdleCompact:
         orch._check_idle_teammates()
         pane.session.write.assert_called_once_with("/compact")
 
+    def test_compact_execution_does_not_start_new_idle_episode(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#190: the pane going busy (running the `/compact` this watchdog
+        itself just injected) and returning to its ready prompt a few ticks
+        later must NOT be mistaken for a fresh idle episode — otherwise the
+        SAME idle stretch gets a second `/compact` roughly one threshold
+        later, forever (proven in runtime/events.log: ~27min repeat cycles,
+        threshold(~25min) + compact-run time)."""
+        self._claude(monkeypatch)
+        monkeypatch.setattr(orch_mod, "PROACTIVE_COMPACT_IDLE_AFTER_S", 100)
+        pane = _make_pane(state="done", at_ready_prompt=True)
+        orch.panes["backend"] = pane
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        orch._check_idle_teammates()  # idle episode starts
+        clock[0] += 101
+        orch._check_idle_teammates()  # crosses threshold -> /compact fires
+        assert pane.session.write.call_count == 1
+
+        # The pane goes busy running the /compact we just sent...
+        pane.session.is_at_ready_prompt.return_value = False
+        clock[0] += 5
+        orch._check_idle_teammates()
+        # ...and returns to ready once the compact finishes.
+        pane.session.is_at_ready_prompt.return_value = True
+        clock[0] += 5
+        orch._check_idle_teammates()
+
+        # Same idle episode continues: sitting idle past the threshold again
+        # must NOT send a second /compact (the #190 repeat-fire bug).
+        clock[0] += 101
+        orch._check_idle_teammates()
+        assert pane.session.write.call_count == 1
+
+    def test_pending_stale_past_ceiling_is_treated_as_real_work(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#190 follow-up: if the pane never gets observed back at ready
+        before real work lands on it (e.g. a task assigned in the same
+        window the compact was still finishing), `proactive_compact_pending`
+        would otherwise stay True forever, pinning `idle_since` at its stale
+        pre-compact value and silently swallowing the NEXT idle episode's
+        `/compact`. Once the not-ready stretch outlives
+        PROACTIVE_COMPACT_PENDING_CEILING_S, it must be treated as real work:
+        pending clears and idle_since resets, so a fresh idle episode still
+        earns its own `/compact` later."""
+        self._claude(monkeypatch)
+        monkeypatch.setattr(orch_mod, "PROACTIVE_COMPACT_IDLE_AFTER_S", 100)
+        monkeypatch.setattr(orch_mod, "PROACTIVE_COMPACT_PENDING_CEILING_S", 50)
+        pane = _make_pane(state="done", at_ready_prompt=True)
+        orch.panes["backend"] = pane
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        orch._check_idle_teammates()  # idle episode starts
+        clock[0] += 101
+        orch._check_idle_teammates()  # crosses threshold -> /compact fires
+        assert pane.session.write.call_count == 1
+
+        # The pane goes not-ready (running our /compact)... and is never
+        # observed ready again — real work (task assign / direct typing)
+        # keeps it busy straight through, past the pending ceiling.
+        pane.session.is_at_ready_prompt.return_value = False
+        clock[0] += 51  # outlives PROACTIVE_COMPACT_PENDING_CEILING_S (50)
+        orch._check_idle_teammates()
+
+        # Pane finally settles back to ready — this must read as the START
+        # of a brand-new idle episode (real work happened), not a
+        # continuation of the one that triggered the first /compact.
+        pane.session.is_at_ready_prompt.return_value = True
+        clock[0] += 1
+        orch._check_idle_teammates()
+        clock[0] += 101  # a full fresh idle threshold elapses
+        orch._check_idle_teammates()
+
+        assert pane.session.write.call_count == 2
+
+    def test_pending_within_ceiling_still_suppresses_repeat_compact(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Companion to the ceiling test above: a not-ready stretch that
+        stays SHORTER than PROACTIVE_COMPACT_PENDING_CEILING_S must still be
+        trusted as "our own /compact still running" — the ceiling must not
+        make the normal, fast case fire a second /compact."""
+        self._claude(monkeypatch)
+        monkeypatch.setattr(orch_mod, "PROACTIVE_COMPACT_IDLE_AFTER_S", 100)
+        monkeypatch.setattr(orch_mod, "PROACTIVE_COMPACT_PENDING_CEILING_S", 50)
+        pane = _make_pane(state="done", at_ready_prompt=True)
+        orch.panes["backend"] = pane
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        orch._check_idle_teammates()
+        clock[0] += 101
+        orch._check_idle_teammates()
+        assert pane.session.write.call_count == 1
+
+        pane.session.is_at_ready_prompt.return_value = False
+        clock[0] += 49  # well under the 50s ceiling
+        orch._check_idle_teammates()
+        pane.session.is_at_ready_prompt.return_value = True
+        clock[0] += 1
+        orch._check_idle_teammates()
+
+        # Same idle episode continues: must NOT fire a second /compact.
+        clock[0] += 101
+        orch._check_idle_teammates()
+        assert pane.session.write.call_count == 1
+
     def test_new_idle_episode_after_going_busy_fires_again(
         self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1031,7 +1142,17 @@ class TestProactiveIdleCompact:
         orch._check_idle_teammates()
         assert pane.session.write.call_count == 1
 
-        # New work starts (pane goes busy) — the idle episode ends.
+        # Let the compact we just sent settle first (busy -> ready) — same as
+        # any other /compact run, this must not itself count as new work.
+        pane.session.is_at_ready_prompt.return_value = False
+        clock[0] += 1
+        orch._check_idle_teammates()
+        pane.session.is_at_ready_prompt.return_value = True
+        clock[0] += 1
+        orch._check_idle_teammates()
+
+        # Genuinely new work starts later (a real task, unrelated to the
+        # compact that already settled) — the idle episode legitimately ends.
         pane.session.is_at_ready_prompt.return_value = False
         clock[0] += 1
         orch._check_idle_teammates()

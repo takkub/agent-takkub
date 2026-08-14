@@ -609,10 +609,6 @@ def _find_gemini_chats_dir(cwd: str) -> Path | None:
     return gemini_helper.find_gemini_chats_dir(cwd)
 
 
-def _gemini_session_uuid(path: Path) -> str:
-    return gemini_helper.gemini_session_uuid(path)
-
-
 def _resolve_gemini_jsonl_for_cwd(cwd: str, session_uuid: str | None) -> Path | None:
     return gemini_helper.resolve_gemini_jsonl_for_cwd(cwd, session_uuid)
 
