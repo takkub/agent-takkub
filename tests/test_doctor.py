@@ -1049,12 +1049,16 @@ class TestRunAllChecks:
             patch("agent_takkub.doctor.check_hook_wiring", return_value=[]),
             patch("agent_takkub.doctor.check_ready_markers", return_value=[]),
             patch("agent_takkub.doctor.check_version", return_value=[]),
+            patch("agent_takkub.doctor.check_editable_install", return_value=[]),
         ):
             findings = run_all_checks()
 
         assert isinstance(findings, list)
         assert all(isinstance(f, Finding) for f in findings)
-        assert len(findings) == 2
+        assert {(f.category, f.name) for f in findings} == {
+            ("claude", "binary"),
+            ("runtime", "node"),
+        }
 
 
 # ---------------------------------------------------------------------------
