@@ -7,6 +7,9 @@ injected fake git runner, so nothing here shells out to a real repository
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 from agent_takkub.worktree_manager import (
     GitResult,
     UnsafePathError,
@@ -14,6 +17,7 @@ from agent_takkub.worktree_manager import (
     WorktreeManager,
     branch_name,
     build_merge_proposal,
+    repair_editable_pth_if_stale,
     sanitize_ref_component,
     worktree_dest,
     worktree_root,
@@ -821,3 +825,102 @@ class TestCleanIsolated:
         assert all(line.startswith("REMOVED") for line in lines), lines
         assert r.ran("worktree", "remove")
         assert r.ran("branch", "-D")
+
+
+# ── repair_editable_pth_if_stale (#202) ─────────────────────────────────────
+
+
+def _make_venv_site_packages(git_root: Path) -> Path:
+    site_packages = (
+        (git_root / ".venv" / "Lib" / "site-packages")
+        if sys.platform == "win32"
+        else (git_root / ".venv" / "lib" / "python3.12" / "site-packages")
+    )
+    site_packages.mkdir(parents=True)
+    return site_packages
+
+
+class TestRepairEditablePthIfStale:
+    def test_no_venv_is_a_no_op(self, tmp_path: Path) -> None:
+        assert repair_editable_pth_if_stale(str(tmp_path), str(tmp_path / "gone")) == ""
+
+    def test_no_editable_pth_is_a_no_op(self, tmp_path: Path) -> None:
+        _make_venv_site_packages(tmp_path)
+        assert repair_editable_pth_if_stale(str(tmp_path), str(tmp_path / "gone")) == ""
+
+    def test_pth_pointing_elsewhere_is_untouched(self, tmp_path: Path) -> None:
+        site_packages = _make_venv_site_packages(tmp_path)
+        elsewhere = tmp_path / "src"
+        elsewhere.mkdir()
+        (site_packages / "__editable__.agent_takkub-1.0.60.pth").write_text(
+            str(elsewhere) + "\n", encoding="utf-8"
+        )
+        removed_worktree = tmp_path / "worktrees" / "backend-1"
+        assert repair_editable_pth_if_stale(str(tmp_path), str(removed_worktree)) == ""
+
+    def test_stale_pth_triggers_reinstall_and_reports_success(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        from agent_takkub import worktree_manager as wm
+
+        site_packages = _make_venv_site_packages(tmp_path)
+        removed_worktree = tmp_path / "worktrees" / "backend-1"
+        removed_worktree.mkdir(parents=True)
+        pth = site_packages / "__editable__.agent_takkub-1.0.60.pth"
+        pth.write_text(str(removed_worktree) + "\n", encoding="utf-8")
+
+        calls = []
+
+        def fake_run(argv, **kwargs):
+            calls.append((argv, kwargs.get("cwd")))
+            return GitResult(returncode=0, stdout="reinstalled", stderr="")
+
+        monkeypatch.setattr(wm.subprocess, "run", fake_run)
+
+        msg = repair_editable_pth_if_stale(str(tmp_path), str(removed_worktree))
+
+        assert "ซ่อม" in msg and pth.name in msg
+        assert calls and calls[0][1] == str(tmp_path)
+        assert "-e" in calls[0][0] and "--no-deps" in calls[0][0]
+
+    def test_stale_pth_under_a_removed_subpath_still_matches(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """The .pth may point at `<worktree>/src`, a child of the removed
+        checkout root, not the checkout root itself — must still match."""
+        from agent_takkub import worktree_manager as wm
+
+        site_packages = _make_venv_site_packages(tmp_path)
+        removed_worktree = tmp_path / "worktrees" / "backend-1"
+        pth_target = removed_worktree / "src"
+        pth_target.mkdir(parents=True)
+        (site_packages / "__editable__.agent_takkub-1.0.60.pth").write_text(
+            str(pth_target) + "\n", encoding="utf-8"
+        )
+
+        monkeypatch.setattr(
+            wm.subprocess, "run", lambda *a, **k: GitResult(returncode=0, stdout="", stderr="")
+        )
+
+        msg = repair_editable_pth_if_stale(str(tmp_path), str(removed_worktree))
+        assert "ซ่อม" in msg
+
+    def test_reinstall_failure_reports_pip_error(self, tmp_path: Path, monkeypatch) -> None:
+        from agent_takkub import worktree_manager as wm
+
+        site_packages = _make_venv_site_packages(tmp_path)
+        removed_worktree = tmp_path / "worktrees" / "backend-1"
+        removed_worktree.mkdir(parents=True)
+        (site_packages / "__editable__.agent_takkub-1.0.60.pth").write_text(
+            str(removed_worktree) + "\n", encoding="utf-8"
+        )
+
+        monkeypatch.setattr(
+            wm.subprocess,
+            "run",
+            lambda *a, **k: GitResult(returncode=1, stdout="", stderr="no such file"),
+        )
+
+        msg = repair_editable_pth_if_stale(str(tmp_path), str(removed_worktree))
+        assert "ไม่สำเร็จ" in msg
+        assert "no such file" in msg

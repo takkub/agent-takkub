@@ -363,6 +363,82 @@ def _remove_link(p: Path) -> None:
         pass  # best-effort; git worktree remove reports anything left behind
 
 
+def _dev_venv_site_packages(git_root: Path) -> Path | None:
+    """Locate *git_root*'s dev-checkout ``.venv`` site-packages, or ``None``
+    when there is no ``.venv`` (most projects the cockpit manages aren't
+    Python at all). Windows: ``.venv/Lib/site-packages``; POSIX:
+    ``.venv/lib/python<major.minor>/site-packages``."""
+    venv = git_root / ".venv"
+    win_site = venv / "Lib" / "site-packages"
+    if win_site.is_dir():
+        return win_site
+    posix_matches = sorted(venv.glob("lib/python*/site-packages"))
+    return posix_matches[0] if posix_matches else None
+
+
+def repair_editable_pth_if_stale(git_root: str, removed_path: str) -> str:
+    """After a worktree checkout is removed, check whether *git_root*'s
+    dev-checkout venv had an editable-install ``.pth`` pointing INTO it — if
+    so, the shared venv every other pane in this repo uses just went stale
+    (#202: a `backend` pane's `pip install -e .` from inside the worktree
+    repointed it there; once the worktree was removed the whole cockpit's
+    `.venv` broke with ``ModuleNotFoundError``). Repairs by reinstalling from
+    *git_root* and returns a human message; empty string when nothing needed
+    fixing (no venv, no editable install, or it already pointed elsewhere).
+    """
+    root = Path(git_root)
+    site_packages = _dev_venv_site_packages(root)
+    if site_packages is None:
+        return ""
+    try:
+        removed = Path(removed_path).resolve()
+    except OSError:
+        return ""
+    for pth in sorted(site_packages.glob("__editable__.agent_takkub-*.pth")):
+        try:
+            lines = pth.read_text(encoding="utf-8").splitlines()
+            target_raw = next((ln.strip() for ln in lines if ln.strip()), "")
+        except OSError:
+            continue
+        if not target_raw:
+            continue
+        try:
+            target = Path(target_raw).resolve()
+        except OSError:
+            continue
+        if target != removed and removed not in target.parents:
+            continue
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-e", ".", "--no-deps"],
+                cwd=str(root),
+                capture_output=True,
+                text=True,
+                timeout=120,
+                creationflags=SUBPROCESS_NO_WINDOW,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return (
+                f"⚠ {pth.name} เคยชี้ worktree ที่เพิ่งลบ "
+                f"แต่ซ่อมอัตโนมัติไม่สำเร็จ ({exc}) — "
+                f"รัน `pip install -e . --no-deps` จาก {root} เอง"
+            )
+        if proc.returncode == 0:
+            return (
+                f"\U0001f527 ซ่อม {pth.name} อัตโนมัติ "
+                f"(เคยชี้ worktree ที่เพิ่งลบ #202) "
+                f"— reinstall จาก {root} แล้ว"
+            )
+        detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        tail = detail[-1] if detail else f"exit {proc.returncode}"
+        return (
+            f"⚠ {pth.name} เคยชี้ worktree ที่เพิ่งลบ "
+            f"แต่ซ่อมอัตโนมัติไม่สำเร็จ ({tail}) — "
+            f"รัน `pip install -e . --no-deps` จาก {root} เอง"
+        )
+    return ""
+
+
 class WorktreeManager:
     """Stateless lifecycle wrapper around ``git worktree`` for one repo.
 
@@ -565,7 +641,7 @@ class WorktreeManager:
         # a branch with work is left for the Lead to merge/inspect.
         if self.commit_count(info) == 0:
             self._run(["-C", info.git_root, "branch", "-D", info.branch], None)
-        return True, ""
+        return True, repair_editable_pth_if_stale(info.git_root, info.path)
 
     # -- CLI ops (P2.4: takkub worktree list / merge / clean) ----------------
 
@@ -637,7 +713,9 @@ class WorktreeManager:
             detail = lines[-1] if lines else f"exit {remove.returncode}"
             return True, (f"merged {branch} แต่ลบ worktree ไม่ได้ ({detail}) — เก็บที่ {row['path']}")
         self._run(["-C", git_root, "branch", "-d", branch], None)
-        return True, f"merged {branch} + cleanup เรียบร้อย"
+        repair_note = repair_editable_pth_if_stale(git_root, row["path"])
+        msg = f"merged {branch} + cleanup เรียบร้อย"
+        return True, f"{msg} · {repair_note}" if repair_note else msg
 
     def clean_isolated(
         self,
@@ -704,7 +782,8 @@ class WorktreeManager:
                 )
                 continue
             self._run(["-C", git_root, "branch", "-D", row["branch"]], None)
-            out.append(f"REMOVED {row['branch']}")
+            repair_note = repair_editable_pth_if_stale(git_root, row["path"])
+            out.append(f"REMOVED {row['branch']}" + (f" · {repair_note}" if repair_note else ""))
         return out
 
     def force_remove(self, info: WorktreeInfo) -> tuple[bool, str]:
@@ -717,7 +796,7 @@ class WorktreeManager:
         if not rm.ok:
             tail = (rm.stderr or rm.stdout).strip().splitlines()
             return False, tail[-1] if tail else f"worktree remove --force exit {rm.returncode}"
-        return True, ""
+        return True, repair_editable_pth_if_stale(info.git_root, info.path)
 
 
 def _is_link_point(p: Path) -> bool:

@@ -1192,6 +1192,132 @@ def check_installed_integrity() -> list[Finding]:
 
 
 # ---------------------------------------------------------------------------
+# [venv] — dev-checkout shared editable install (#202)
+# ---------------------------------------------------------------------------
+
+
+def _dev_site_packages(repo_root: Path) -> Path | None:
+    """Locate the dev checkout's ``.venv`` site-packages dir, or ``None`` when
+    there is no ``.venv`` (e.g. CI running from a system interpreter).
+    Cross-platform: Windows lays site-packages at ``.venv/Lib/site-packages``;
+    POSIX at ``.venv/lib/python<major.minor>/site-packages``."""
+    venv = repo_root / ".venv"
+    win_site = venv / "Lib" / "site-packages"
+    if win_site.is_dir():
+        return win_site
+    posix_matches = sorted(venv.glob("lib/python*/site-packages"))
+    return posix_matches[0] if posix_matches else None
+
+
+def check_editable_install() -> list[Finding]:
+    """[venv] — dev-checkout-only: catch a shared-venv editable install
+    (``__editable__.agent_takkub-*.pth``) left pointing at a path that no
+    longer exists, or into a ``worktrees/`` checkout instead of the repo
+    itself (#202).
+
+    Root incident (2026-08-14): a `backend` pane ran `pip install -e .` from
+    inside its own ``--isolation worktree`` checkout, rewriting the pointer
+    every OTHER pane's Python/``takkub`` shares. Once the Lead removed that
+    worktree after merging, the pointer went stale and the whole cockpit's
+    ``.venv`` broke (``ModuleNotFoundError``). An installed build has its own
+    non-editable install and no shared dev venv to police, so this is a no-op
+    there — same guard `check_installed_integrity` uses.
+    """
+    from .config import DATA_HOME, REPO_ROOT
+
+    if DATA_HOME != REPO_ROOT:
+        return []
+
+    site_packages = _dev_site_packages(REPO_ROOT)
+    if site_packages is None:
+        return []  # no .venv here — nothing to police
+
+    pth_files = sorted(site_packages.glob("__editable__.agent_takkub-*.pth"))
+    if not pth_files:
+        return [
+            Finding(
+                "venv",
+                "editable-install",
+                Status.WARN,
+                f"ไม่พบ __editable__.agent_takkub-*.pth ใน {site_packages}",
+                "รัน `pip install -e . --no-deps` จาก repo root",
+            )
+        ]
+
+    def _reinstall() -> tuple[bool, str]:
+        from ._win_console import SUBPROCESS_NO_WINDOW
+
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-e", ".", "--no-deps"],
+                cwd=str(REPO_ROOT),
+                capture_output=True,
+                text=True,
+                timeout=120,
+                creationflags=SUBPROCESS_NO_WINDOW,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return False, str(exc)
+        output = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
+        if result.returncode == 0:
+            return True, output[-300:] or "reinstalled"
+        return False, output[-300:] or f"pip exited {result.returncode}"
+
+    findings: list[Finding] = []
+    expected = (REPO_ROOT / "src").resolve()
+    for pth in pth_files:
+        try:
+            lines = pth.read_text(encoding="utf-8").splitlines()
+            target_raw = next((ln.strip() for ln in lines if ln.strip()), "")
+        except OSError as exc:
+            findings.append(
+                Finding("venv", "editable-install", Status.WARN, f"{pth.name} อ่านไม่ได้: {exc}")
+            )
+            continue
+        if not target_raw:
+            findings.append(Finding("venv", "editable-install", Status.WARN, f"{pth.name} ว่างเปล่า"))
+            continue
+        target = Path(target_raw)
+        if not target.exists():
+            findings.append(
+                Finding(
+                    "venv",
+                    "editable-install",
+                    Status.FAIL,
+                    f"{pth.name} ชี้ path ที่ไม่มีอยู่จริง: {target}",
+                    "รัน `pip install -e . --no-deps` จาก repo root เพื่อซ่อม",
+                    auto_fix=_reinstall,
+                )
+            )
+        elif "worktrees" in target.parts:
+            findings.append(
+                Finding(
+                    "venv",
+                    "editable-install",
+                    Status.FAIL,
+                    f"{pth.name} ชี้เข้า worktree ({target}) แทน repo root — venv ทั้งเครื่องจะพัง "
+                    "ทันทีที่ worktree นี้ถูกลบ (#202)",
+                    "รัน `pip install -e . --no-deps` จาก repo root เพื่อซ่อม",
+                    auto_fix=_reinstall,
+                )
+            )
+        elif target.resolve() != expected:
+            findings.append(
+                Finding(
+                    "venv",
+                    "editable-install",
+                    Status.WARN,
+                    f"{pth.name} ชี้ {target} ไม่ตรงกับ repo root ที่คาดไว้ ({expected})",
+                    "ถ้าไม่ตั้งใจ รัน `pip install -e . --no-deps` จาก repo root",
+                    auto_fix=_reinstall,
+                )
+            )
+        else:
+            findings.append(Finding("venv", "editable-install", Status.OK, str(target)))
+    return findings
+
+
+# ---------------------------------------------------------------------------
 # [providers]
 # ---------------------------------------------------------------------------
 
@@ -1940,6 +2066,7 @@ def run_all_checks() -> list[Finding]:
         ("check_mini_browser", check_mini_browser),
         ("check_graft", check_graft),
         ("check_installed_integrity", check_installed_integrity),
+        ("check_editable_install", check_editable_install),
         ("check_arch", check_arch),
         ("check_qt", check_qt),
         ("check_plugins", check_plugins),

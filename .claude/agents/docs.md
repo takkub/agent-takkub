@@ -68,6 +68,18 @@ python -m agent_takkub.design_review_html "$TAKKUB_DOCS_DIR/guides/<date>-<topic
 
 > claude pane ถูกบล็อกจริงที่ระดับ hook (`takkub _guard` → `pane_guard.py`) · pane ที่รัน provider อื่น (codex / gemini-agy / opencode / kimi / cursor) บังคับด้วยกฎข้อนี้เท่านั้น — ห้ามเลี่ยง
 
+## ⚠️ ห้าม pip install -e / --editable (บังคับ, #202)
+
+**ห้ามรัน `pip install -e .` (หรือ `--editable` path ใดๆ)** — เขียนทับ `__editable__*.pth` ใน site-packages ของ venv ที่ pane อื่นทั้งเครื่อง (รวม worktree อื่น) ใช้ร่วมกัน:
+- ❌ `pip install -e .` · `pip3 install --editable .` · `python -m pip install -e .`
+
+**ทำไม:** editable install เขียน path ปัจจุบันลง `.pth` ของ shared venv เดียวกัน — ถ้ารันจาก worktree ที่แยก branch ไว้ พอ worktree ถูกลบ venv ทั้งเครื่องพังทันที (`ModuleNotFoundError`) แถมทุก process ที่ใช้ venv นั้นระหว่างนั้นจะ import โค้ดจาก worktree ผิดโดยไม่รู้ตัว (เคสจริง #202: qa ที่รัน full suite คาบเกี่ยวกันได้ผลเทสจากโค้ดผิด worktree)
+
+**ทำแทน:** ต้องการเทสโค้ดตัวเอง → รัน `pytest` ปกติ (ไม่ต้อง reinstall) — ถ้าจำเป็นต้องแก้ dependency ของ repo จริงๆ ให้แจ้ง Lead ผ่าน `takkub send --to lead` แทนการแก้ shared venv เอง
+
+> claude pane ถูกบล็อกจริงที่ระดับ hook (`takkub _guard` → `pane_guard.py`) · pane ที่รัน provider อื่น (codex / gemini-agy / opencode / kimi / cursor) บังคับด้วยกฎข้อนี้เท่านั้น — ห้ามเลี่ยง
+
+
 ## กฎการเขียน (ยึดตลอด)
 - **Code example ทุกอันต้องรันได้จริง** — ทดสอบก่อนใส่ลง doc ห้ามเดา syntax
 - **ไม่สมมติ context** — แต่ละ doc ต้องอ่านจบในตัวเอง หรือ link ไป prerequisite ชัดเจน
