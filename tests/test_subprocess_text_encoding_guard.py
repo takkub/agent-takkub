@@ -55,6 +55,10 @@ def _is_text_mode(node: ast.Call) -> bool:
     return any(kw.arg in _TEXT_MODE_KWARGS and _is_true_literal(kw.value) for kw in node.keywords)
 
 
+def _str_literal(value: ast.expr) -> str | None:
+    return value.value if isinstance(value, ast.Constant) and isinstance(value.value, str) else None
+
+
 def _is_exempted(source_lines: list[str], lineno: int) -> bool:
     """Check the call's own line and the line above for the exemption marker."""
     for idx in (lineno - 1, lineno - 2):
@@ -76,12 +80,27 @@ def _find_violations(path: Path) -> list[str]:
             continue
         if _is_exempted(lines, node.lineno):
             continue
-        kwarg_names = {kw.arg for kw in node.keywords}
-        missing = [kw for kw in ("encoding", "errors") if kw not in kwarg_names]
+        kwargs = {kw.arg: kw.value for kw in node.keywords}
+        missing = [kw for kw in ("encoding", "errors") if kw not in kwargs]
         if missing:
             violations.append(
                 f"{path}:{node.lineno}: subprocess.{name}() opens text mode but is "
                 f'missing {", ".join(missing)}= (needs encoding="utf-8", errors="replace")'
+            )
+            continue
+        encoding_value = _str_literal(kwargs["encoding"])
+        if encoding_value != "utf-8":
+            violations.append(
+                f"{path}:{node.lineno}: subprocess.{name}() encoding= must be literal "
+                f'"utf-8", found {encoding_value!r}'
+            )
+        errors_value = _str_literal(kwargs["errors"])
+        if errors_value != "replace":
+            violations.append(
+                f"{path}:{node.lineno}: subprocess.{name}() errors= must be literal "
+                f'"replace" (found {errors_value!r}) — "strict" (the default) still '
+                "raises on any byte the declared encoding can't map; if a different "
+                "value is truly required, add `# subprocess-encoding-ok: <reason>`"
             )
     return violations
 
