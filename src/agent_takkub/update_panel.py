@@ -77,6 +77,8 @@ def _find_global_postinstall(npm: str | None = None) -> Path | None:
                 [npm, "root", "-g"],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=30,
                 creationflags=SUBPROCESS_NO_WINDOW,
             )
@@ -201,6 +203,8 @@ class _NpmUpdateThread(QThread):
                         [node, str(postinstall_js)],
                         capture_output=True,
                         text=True,
+                        encoding="utf-8",
+                        errors="replace",
                         timeout=600,
                         env=env,
                         creationflags=SUBPROCESS_NO_WINDOW,
