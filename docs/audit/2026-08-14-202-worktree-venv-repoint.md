@@ -102,6 +102,46 @@ task — see CLAUDE.md test-tier policy); this change touches no other
 subsystem's runtime path, only guard/doctor/worktree-lifecycle code exercised
 by the suites above.
 
+## Fix-loop round 2 (review, 2026-08-14): wrong interpreter in the auto-repair
+
+**Severity:** high · caught in code review before merge, not shipped.
+
+`repair_editable_pth_if_stale()` correctly *located* the stale `.pth` inside
+`<git_root>/.venv/.../site-packages`, but the reinstall it ran to fix it used
+`sys.executable` — the interpreter of the **cockpit process currently running
+this code**, not the interpreter belonging to the `.venv` that was just found
+stale. On this machine those are two different installs: the prod cockpit
+runs from `C:\Users\monch\.agent-takkub\venv\Scripts\pythonw.exe`, while this
+repo's dev checkout has its own separate `.venv`. If the prod cockpit is the
+one that removes a worktree (its normal job), the "repair" would `pip install
+-e .` the dev checkout **into the prod cockpit's own venv** — i.e. it would
+make prod start running code out of a dev checkout, silently replacing
+whatever package was actually installed there. That's a worse outcome than
+the original bug (a broken dev `.venv`), and it only worked by coincidence in
+this worktree's own tests because `sys.executable` happened to equal the
+target `.venv`'s interpreter there.
+
+Fix: new `_dev_venv_python(git_root)` derives the interpreter from the same
+`.venv` `_dev_venv_site_packages()` already found —
+`.venv/Scripts/python.exe` on Windows, `.venv/bin/python` on POSIX — and
+`repair_editable_pth_if_stale()` now shells out through *that* path
+exclusively. `sys.executable` no longer appears anywhere in this function.
+When no such interpreter file exists, the function runs nothing and returns
+a message naming the exact `.venv` the user needs to repair by hand — no
+fallback to any other interpreter.
+
+Pinned by `TestRepairEditablePthIfStale::test_stale_pth_triggers_reinstall_and_reports_success`
+(now asserts `argv[0] == str(_venv_python_path(tmp_path))` and
+`argv[0] != sys.executable` — the test helper builds a fake venv interpreter
+at a path that is never equal to `sys.executable`, so this assertion is a
+real pin, not a coincidence) and the new
+`test_missing_venv_python_skips_reinstall_and_reports_guidance` (no
+interpreter file present → `subprocess.run` must never be called at all).
+
+```
+tests/test_worktree_manager.py::TestRepairEditablePthIfStale   (7 tests, all green)
+```
+
 ## Follow-ups NOT done in this pass
 
 - No automated repair for a venv **already** broken by a worktree removed

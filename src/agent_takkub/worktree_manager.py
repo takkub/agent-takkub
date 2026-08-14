@@ -376,6 +376,23 @@ def _dev_venv_site_packages(git_root: Path) -> Path | None:
     return posix_matches[0] if posix_matches else None
 
 
+def _dev_venv_python(git_root: Path) -> Path | None:
+    """Locate *git_root*'s dev-checkout ``.venv`` interpreter, or ``None``
+    when it doesn't exist. Must NEVER fall back to ``sys.executable`` — that
+    is the *cockpit process's* interpreter, which on a prod/installed cockpit
+    is a totally different venv from the repo's own ``.venv`` (#202 follow-up:
+    using ``sys.executable`` here would editable-install the dev checkout
+    into the prod cockpit's venv instead of the repo's)."""
+    venv = git_root / ".venv"
+    win_python = venv / "Scripts" / "python.exe"
+    if win_python.is_file():
+        return win_python
+    posix_python = venv / "bin" / "python"
+    if posix_python.is_file():
+        return posix_python
+    return None
+
+
 def repair_editable_pth_if_stale(git_root: str, removed_path: str) -> str:
     """After a worktree checkout is removed, check whether *git_root*'s
     dev-checkout venv had an editable-install ``.pth`` pointing INTO it — if
@@ -383,8 +400,11 @@ def repair_editable_pth_if_stale(git_root: str, removed_path: str) -> str:
     (#202: a `backend` pane's `pip install -e .` from inside the worktree
     repointed it there; once the worktree was removed the whole cockpit's
     `.venv` broke with ``ModuleNotFoundError``). Repairs by reinstalling from
-    *git_root* and returns a human message; empty string when nothing needed
-    fixing (no venv, no editable install, or it already pointed elsewhere).
+    *git_root* using **that venv's own interpreter** (never ``sys.executable``
+    — the cockpit process running this code may be a different install
+    entirely, e.g. a prod cockpit repairing a dev checkout's venv) and returns
+    a human message; empty string when nothing needed fixing (no venv, no
+    editable install, or it already pointed elsewhere).
     """
     root = Path(git_root)
     site_packages = _dev_venv_site_packages(root)
@@ -408,9 +428,17 @@ def repair_editable_pth_if_stale(git_root: str, removed_path: str) -> str:
             continue
         if target != removed and removed not in target.parents:
             continue
+        venv_python = _dev_venv_python(root)
+        if venv_python is None:
+            return (
+                f"⚠ {pth.name} เคยชี้ worktree ที่เพิ่งลบ "
+                f"แต่หา python ของ {root / '.venv'} ไม่เจอ ซ่อมอัตโนมัติไม่ได้ — "
+                f"รัน `<{root / '.venv'} ของคุณเอง>/python -m pip install -e . --no-deps` "
+                f"จาก {root} เอง (ห้ามใช้ python อื่นซ่อม venv นี้)"
+            )
         try:
             proc = subprocess.run(
-                [sys.executable, "-m", "pip", "install", "-e", ".", "--no-deps"],
+                [str(venv_python), "-m", "pip", "install", "-e", ".", "--no-deps"],
                 cwd=str(root),
                 capture_output=True,
                 text=True,
@@ -421,7 +449,7 @@ def repair_editable_pth_if_stale(git_root: str, removed_path: str) -> str:
             return (
                 f"⚠ {pth.name} เคยชี้ worktree ที่เพิ่งลบ "
                 f"แต่ซ่อมอัตโนมัติไม่สำเร็จ ({exc}) — "
-                f"รัน `pip install -e . --no-deps` จาก {root} เอง"
+                f"รัน `{venv_python} -m pip install -e . --no-deps` จาก {root} เอง"
             )
         if proc.returncode == 0:
             return (
@@ -434,7 +462,7 @@ def repair_editable_pth_if_stale(git_root: str, removed_path: str) -> str:
         return (
             f"⚠ {pth.name} เคยชี้ worktree ที่เพิ่งลบ "
             f"แต่ซ่อมอัตโนมัติไม่สำเร็จ ({tail}) — "
-            f"รัน `pip install -e . --no-deps` จาก {root} เอง"
+            f"รัน `{venv_python} -m pip install -e . --no-deps` จาก {root} เอง"
         )
     return ""
 
