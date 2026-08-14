@@ -76,6 +76,15 @@ class ProviderUsage:
     tokens/cost a provider's own CLI has counted locally (currently only
     opencode). It is never a quota fraction and must render as separate UI,
     never blended into a utilization meter.
+
+    `windows` (#204) is the same one-provider snapshot broken into its
+    individual rolling quota periods (claude's five_hour/seven_day/
+    seven_day_sonnet, codex's primary/secondary), each
+    `{"name": str, "utilization": float | None, "resets_at": iso str | None}`.
+    `utilization`/`resets_at` above stay the single headline figure (matches
+    what the desktop chip already shows — never change their meaning); a
+    provider with only one meaningful window, or none, leaves this `None`
+    and callers fall back to the headline fields, same as before #204.
     """
 
     provider: str
@@ -87,6 +96,7 @@ class ProviderUsage:
     raw_data: dict[str, Any] | None = None
     error: str | None = None
     spend: dict[str, Any] | None = None
+    windows: list[dict[str, Any]] | None = None
 
     def __post_init__(self) -> None:
         if self.status not in _VALID_STATUSES:
@@ -113,10 +123,37 @@ def usage_to_dict(data: ProviderUsage) -> dict[str, Any]:
         "error": data.error,
         "spend": data.spend,
         "raw_data": data.raw_data,
+        "windows": data.windows,
     }
 
 
 # ── claude ────────────────────────────────────────────────────────────────
+
+# #203: a fetch that never got the cockpit's real CLAUDE_CONFIG_DIR silently
+# fell back to `limit_status._resolve_config_dir(None)` == `~/.claude`, which
+# on an installed build is NOT where panes actually run (they get
+# `~/.agent-takkub/claude-config` — see `config.default_claude_config_dir`).
+# The store then read/wrote a completely different `takkub-usage-state.json`
+# than the one panes were keeping fresh, so it could go stale for weeks with
+# no signal anything was wrong. `data.status == "rate_limited"` alone can't
+# catch that either — a wrong-directory read is neither backed off nor an
+# HTTP error, so age-based staleness (below) is the only thing that can.
+_CLAUDE_STALE_THRESHOLD_S = 24 * 3600.0
+
+
+def _resolve_claude_config_dir() -> Path:
+    """Which Claude config dir this cockpit instance's usage telemetry should
+    come from — mirrors `limit_panel.LimitPanelMixin._init_limit_store`'s own
+    resolution for the desktop status chip (the active project tab's
+    profile), so the mobile/`/api/usage` number can never disagree with what
+    desktop is already showing. Falls back to the cockpit-wide default
+    profile when no project tab is active yet (e.g. a poll racing boot).
+    """
+    from . import config as _config
+    from . import user_profile
+
+    active, _ = _config.active_project()
+    return user_profile.config_dir_for(active or "")
 
 
 def fetch_claude_usage(config_dir: Path | None = None) -> ProviderUsage:
@@ -126,7 +163,15 @@ def fetch_claude_usage(config_dir: Path | None = None) -> ProviderUsage:
     file is what survives that — see `usage-endpoint-hardened-shared-backoff`
     project memory). Blocking (one HTTP GET, bounded by
     `limit_status._TIMEOUT_S`) — run off the Qt main thread.
+
+    `config_dir=None` (the normal call from `_FETCHERS`) resolves the real
+    cockpit profile dir via `_resolve_claude_config_dir` rather than letting
+    `limit_status` silently default to `~/.claude` (#203). Callers that
+    already know the dir (tests, or a future per-profile caller) may still
+    pass one explicitly.
     """
+    if config_dir is None:
+        config_dir = _resolve_claude_config_dir()
     try:
         data = limit_status.fetch_usage_shared(config_dir)
     except Exception:
@@ -135,7 +180,11 @@ def fetch_claude_usage(config_dir: Path | None = None) -> ProviderUsage:
     if data is None:
         return _error("claude", "not logged in, or no usage data available")
     five_hour = next((w for w in data.windows if w.name == "five_hour"), None)
-    status = STATUS_STALE if data.status == "rate_limited" else STATUS_ACTIVE
+    age_s = (datetime.now(tz=UTC) - data.fetched_at).total_seconds() if data.fetched_at else None
+    if data.status == "rate_limited" or age_s is None or age_s > _CLAUDE_STALE_THRESHOLD_S:
+        status = STATUS_STALE
+    else:
+        status = STATUS_ACTIVE
     return ProviderUsage(
         provider="claude",
         status=status,
@@ -143,6 +192,14 @@ def fetch_claude_usage(config_dir: Path | None = None) -> ProviderUsage:
         utilization=five_hour.utilization if five_hour else None,
         resets_at=five_hour.resets_at if five_hour else None,
         fetched_at=data.fetched_at,
+        windows=[
+            {
+                "name": w.name,
+                "utilization": w.utilization,
+                "resets_at": w.resets_at.isoformat(),
+            }
+            for w in data.windows
+        ],
         raw_data={
             "windows": [
                 {
@@ -252,6 +309,30 @@ def _codex_rpc_roundtrip(proc: subprocess.Popen, timeout: float) -> ProviderUsag
     return _parse_codex_rate_limits(rate_limits)
 
 
+def _parse_codex_rate_window(window: Any) -> dict[str, Any] | None:
+    """Parse one `RateLimitWindow` (`{usedPercent, resetsAt, ...}`) into the
+    `windows` entry shape. Returns None when *window* carries no usable
+    percentage at all, so a genuinely absent window (e.g. no `secondary` on
+    this account) never becomes a fabricated 0%-looking row."""
+    if not isinstance(window, dict):
+        return None
+    used_percent = window.get("usedPercent")
+    try:
+        utilization = float(used_percent) if used_percent is not None else None
+    except (TypeError, ValueError):
+        utilization = None
+    resets_at_epoch = window.get("resetsAt")
+    resets_at_iso: str | None = None
+    if resets_at_epoch is not None:
+        try:
+            resets_at_iso = datetime.fromtimestamp(float(resets_at_epoch), tz=UTC).isoformat()
+        except (TypeError, ValueError, OSError, OverflowError):
+            resets_at_iso = None
+    if utilization is None and resets_at_iso is None:
+        return None
+    return {"utilization": utilization, "resets_at": resets_at_iso}
+
+
 def _parse_codex_rate_limits(rate_limits: dict[str, Any]) -> ProviderUsage:
     primary = rate_limits.get("primary")
     primary = primary if isinstance(primary, dict) else {}
@@ -268,6 +349,17 @@ def _parse_codex_rate_limits(rate_limits: dict[str, Any]) -> ProviderUsage:
         except (TypeError, ValueError, OSError, OverflowError):
             resets_at = None
     plan = rate_limits.get("planType")
+    # #204: codex's `secondary` (weekly) window was fetched all along
+    # (part of `rate_limits`/`raw_data`) but silently dropped on the floor —
+    # never shown anywhere. Surface both windows the same way claude's
+    # five_hour/seven_day pair already is.
+    windows: list[dict[str, Any]] = []
+    primary_window = _parse_codex_rate_window(primary)
+    if primary_window is not None:
+        windows.append({"name": "primary", **primary_window})
+    secondary_window = _parse_codex_rate_window(rate_limits.get("secondary"))
+    if secondary_window is not None:
+        windows.append({"name": "secondary", **secondary_window})
     return ProviderUsage(
         provider="codex",
         status=STATUS_ACTIVE,
@@ -276,6 +368,7 @@ def _parse_codex_rate_limits(rate_limits: dict[str, Any]) -> ProviderUsage:
         resets_at=resets_at,
         fetched_at=datetime.now(tz=UTC),
         raw_data=rate_limits,
+        windows=windows or None,
     )
 
 

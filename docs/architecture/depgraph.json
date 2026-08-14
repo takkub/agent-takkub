@@ -1,5 +1,5 @@
 {
-  "generated_by": "grimp 3.14",
+  "generated_by": "grimp 3.15",
   "module_count": 146,
   "modules": [
     {
@@ -400,6 +400,7 @@
         "agent_takkub.provider_models",
         "agent_takkub.provider_spec",
         "agent_takkub.provider_state",
+        "agent_takkub.provider_usage",
         "agent_takkub.remote",
         "agent_takkub.remote.api",
         "agent_takkub.remote.config",
@@ -432,7 +433,7 @@
         "agent_takkub.vault_mirror",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 75,
+      "fan_in": 76,
       "fan_out": 0
     },
     {
@@ -1220,7 +1221,9 @@
       "imports": [
         "agent_takkub._win_console",
         "agent_takkub.codex_helper",
-        "agent_takkub.limit_status"
+        "agent_takkub.config",
+        "agent_takkub.limit_status",
+        "agent_takkub.user_profile"
       ],
       "imported_by": [
         "agent_takkub.limit_panel",
@@ -1228,7 +1231,7 @@
         "agent_takkub.usage_meter"
       ],
       "fan_in": 3,
-      "fan_out": 3
+      "fan_out": 5
     },
     {
       "module": "agent_takkub.pty_session",
@@ -2326,13 +2329,14 @@
         "agent_takkub.limit_panel",
         "agent_takkub.main_window",
         "agent_takkub.pane_env",
+        "agent_takkub.provider_usage",
         "agent_takkub.remote.notify",
         "agent_takkub.settings_window",
         "agent_takkub.spawn_engine",
         "agent_takkub.status_header",
         "agent_takkub.user_actions"
       ],
-      "fan_in": 13,
+      "fan_in": 14,
       "fan_out": 4
     },
     {

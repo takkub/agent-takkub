@@ -16,6 +16,7 @@ import sys
 import threading
 import time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -54,12 +55,87 @@ def test_usage_to_dict_serializes_datetimes_as_isoformat():
 # ── claude adapter ────────────────────────────────────────────────────────
 
 
+class TestClaudeConfigDirResolution:
+    """#203: the fetch must never fall back to `limit_status`'s own
+    ~/.claude default — it must resolve THIS cockpit instance's real
+    profile dir, the same one panes actually run under."""
+
+    def test_fetcher_is_called_with_resolved_cockpit_config_dir_not_none(
+        self, monkeypatch, tmp_path
+    ):
+        resolved = tmp_path / "agent-takkub-claude-config"
+        monkeypatch.setattr(pu, "_resolve_claude_config_dir", lambda: resolved)
+        seen: list[Path | None] = []
+
+        def fake_fetch_usage_shared(config_dir=None):
+            seen.append(config_dir)
+            return None
+
+        monkeypatch.setattr(limit_status, "fetch_usage_shared", fake_fetch_usage_shared)
+        pu.fetch_claude_usage()
+        assert seen == [resolved]
+
+    def test_resolves_via_active_project_profile_not_hardcoded_home_claude(
+        self, monkeypatch, tmp_path
+    ):
+        from agent_takkub import config as cockpit_config
+        from agent_takkub import user_profile
+
+        profile_dir = tmp_path / "agent-takkub" / "claude-config"
+        monkeypatch.setattr(cockpit_config, "active_project", lambda: ("myproject", {}))
+        monkeypatch.setattr(user_profile, "config_dir_for", lambda project: profile_dir)
+        result = pu._resolve_claude_config_dir()
+        assert result == profile_dir
+        assert result != Path.home() / ".claude"
+
+    def test_falls_back_to_default_profile_when_no_active_project(self, monkeypatch):
+        from agent_takkub import config as cockpit_config
+
+        monkeypatch.setattr(cockpit_config, "active_project", lambda: (None, {}))
+        # Must not raise even with no active project tab yet (e.g. a mobile
+        # poll racing cockpit boot).
+        result = pu._resolve_claude_config_dir()
+        assert isinstance(result, Path)
+
+
 class TestClaudeAdapter:
     def test_no_data_reports_error_not_zero(self, monkeypatch):
         monkeypatch.setattr(limit_status, "fetch_usage_shared", lambda config_dir=None: None)
         result = pu.fetch_claude_usage()
         assert result.status == "error"
         assert result.utilization is None
+
+    def test_stale_by_age_even_when_status_ok(self, monkeypatch):
+        """#203: a wrong-directory read is neither rate_limited nor an HTTP
+        error — only an age check catches data that stopped updating."""
+        five_hour = limit_status.LimitWindow(
+            name="five_hour", utilization=7.0, resets_at=datetime(2026, 8, 14, tzinfo=UTC)
+        )
+        data = limit_status.UsageData(
+            plan="Max 5x",
+            windows=[five_hour],
+            extra_usage_enabled=False,
+            status="ok",
+            fetched_at=datetime.now(tz=UTC) - timedelta(days=23),
+        )
+        monkeypatch.setattr(limit_status, "fetch_usage_shared", lambda config_dir=None: data)
+        result = pu.fetch_claude_usage()
+        assert result.status == "stale"
+
+    def test_missing_fetched_at_is_stale_not_active(self, monkeypatch):
+        five_hour = limit_status.LimitWindow(
+            name="five_hour", utilization=7.0, resets_at=datetime(2026, 8, 14, tzinfo=UTC)
+        )
+        data = limit_status.UsageData(
+            plan="Max 5x",
+            windows=[five_hour],
+            extra_usage_enabled=False,
+            status="ok",
+            fetched_at=None,
+        )
+        monkeypatch.setattr(limit_status, "fetch_usage_shared", lambda config_dir=None: data)
+        result = pu.fetch_claude_usage()
+        assert result.status == "stale"
 
     def test_rate_limited_data_reports_stale(self, monkeypatch):
         window = limit_status.LimitWindow(
@@ -89,7 +165,7 @@ class TestClaudeAdapter:
             plan="Pro",
             windows=[five_hour, seven_day],
             extra_usage_enabled=True,
-            fetched_at=datetime(2026, 8, 13, tzinfo=UTC),
+            fetched_at=datetime.now(tz=UTC),
         )
         monkeypatch.setattr(limit_status, "fetch_usage_shared", lambda config_dir=None: data)
         result = pu.fetch_claude_usage()
@@ -98,6 +174,9 @@ class TestClaudeAdapter:
         assert result.plan == "Pro"
         assert result.raw_data["extra_usage_enabled"] is True
         assert len(result.raw_data["windows"]) == 2
+        assert len(result.windows) == 2
+        assert result.windows[1]["name"] == "seven_day"
+        assert result.windows[1]["utilization"] == 55.0
 
     def test_missing_five_hour_window_reports_none_not_zero(self, monkeypatch):
         seven_day = limit_status.LimitWindow(
@@ -229,6 +308,31 @@ class TestCodexAdapter:
     def test_parse_codex_rate_limits_ignores_malformed_used_percent(self):
         result = pu._parse_codex_rate_limits({"primary": {"usedPercent": "not-a-number"}})
         assert result.utilization is None
+
+    def test_parse_codex_rate_limits_surfaces_secondary_window(self):
+        """#204: the weekly `secondary` window was fetched but silently
+        dropped — it must show up in `windows` alongside `primary`."""
+        result = pu._parse_codex_rate_limits(
+            {
+                "primary": {"usedPercent": 42, "resetsAt": 1800000000},
+                "secondary": {"usedPercent": 18, "resetsAt": 1800600000},
+                "planType": "pro",
+            }
+        )
+        assert result.windows is not None
+        names = [w["name"] for w in result.windows]
+        assert names == ["primary", "secondary"]
+        secondary = result.windows[1]
+        assert secondary["utilization"] == 18.0
+
+    def test_parse_codex_rate_limits_no_secondary_leaves_single_window(self):
+        result = pu._parse_codex_rate_limits({"primary": {"usedPercent": 42}})
+        assert result.windows is not None
+        assert [w["name"] for w in result.windows] == ["primary"]
+
+    def test_parse_codex_rate_limits_no_data_leaves_windows_none_not_empty_rows(self):
+        result = pu._parse_codex_rate_limits({})
+        assert result.windows is None
 
     def test_roundtrip_exception_is_caught_never_raises(self, monkeypatch):
         monkeypatch.setattr(pu, "_codex_executable", lambda: sys.executable)
