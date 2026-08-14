@@ -21,22 +21,41 @@ from ..config import SETTINGS_HOME
 
 _PATH = SETTINGS_HOME / "remote.json"
 
-# The phone mirrors the **Lead pane only** (user directive 2026-07-23).
+# The phone gets *pushed* Lead-only traffic (user directive 2026-07-23).
 #
-# Every teammate pane used to reach the phone twice over: as a row in
-# `/api/activity`'s `roles` list, and as a `done` SSE push per finished task.
-# With a normal fan-out (frontend + backend + qa + reviewer, sometimes sharded)
-# that is a stream of notifications about work the user delegated precisely so
-# they would not have to watch it — "เป็นขยะเยอะเกินไป". Lead is the one pane
-# the user actually converses with, and Lead already summarises what the team
-# did, so teammate traffic is pure duplication on a 6-inch screen.
+# A teammate's `takkub done` used to reach the phone as an unsolicited SSE
+# push. With a normal fan-out (frontend + backend + qa + reviewer, sometimes
+# sharded) that is a stream of notifications about work the user delegated
+# precisely so they would not have to watch it — "เป็นขยะเยอะเกินไป". Lead is
+# the one pane the user actually converses with, and Lead already summarises
+# what the team did, so teammate push traffic is pure duplication on a
+# 6-inch screen.
 #
-# Flip to False to put the whole team back on the phone. Three readers gate
-# on this flag: `api.activity` (roles list always [] when on), `api.pulse`
-# (count scoped down to the `lead` entry when on — fixed 2026-08-04, it was
-# missed in the original 2026-07-23 pass and counted every pane regardless),
-# and `notify.LeadNotifier._on_done` (teammate `done` events dropped when on).
+# This only gates the one *push* reader: `notify.LeadNotifier._on_done`
+# (teammate `done` events dropped when on; Lead's own `done` always goes
+# through). It says nothing about *pull* — the user opening the Pulse page
+# themselves to check what's running — that's `PULSE_SHOW_TEAM` below (#200).
+# Flip this to False to put teammate `done` notifications back on the phone.
 LEAD_ONLY_STREAM = True
+
+# The phone shows every open pane when the user *pulls* by opening the Pulse
+# page (#200, 2026-08-14) — separate concern from `LEAD_ONLY_STREAM` above.
+#
+# The 2026-07-23 directive was about unsolicited push notifications, not
+# about hiding the team's existence from a screen the user opened on purpose.
+# A user who opens Pulse and sees only "Lead idle" while three teammates are
+# actually mid-task has no way to tell the system is doing anything — the
+# opposite of what Pulse is for. So pull stays separate and defaults to
+# showing the team, even though push (LEAD_ONLY_STREAM) still defaults to
+# Lead-only.
+#
+# Two readers gate on this flag: `api.activity` (roles list always [] when
+# off — the phone-driven Pulse page) and `api.pulse` (count scoped down to
+# the `lead` entry when off — the legacy `/api/pulse` route the shipped PWA
+# no longer calls, kept live for any other authenticated client). Flip to
+# False to go back to Lead-only visibility on pull too, matching the
+# pre-#200 default when both flags are on.
+PULSE_SHOW_TEAM = True
 
 
 def path() -> Path:

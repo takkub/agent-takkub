@@ -66,12 +66,11 @@ def _patch_port(monkeypatch, port: int) -> None:
 
 
 class TestPulseDataMinimization:
-    """LEAD_ONLY_STREAM=False here (explicit) — these pin the pre-gate,
-    count-every-pane behavior that must survive unchanged for anyone who
-    flips the flag back off."""
+    """PULSE_SHOW_TEAM defaults True (#200) — these pin the default,
+    count-every-pane behavior. No monkeypatch needed: this *is* the default
+    now, unlike the pre-#200 world where it required flipping a gate off."""
 
     def test_counts_only_working_panes(self, monkeypatch, fake_orch):
-        monkeypatch.setattr(api._remote_config, "LEAD_ONLY_STREAM", False)
         srv = _FakeCliServer(
             {"ok": True, "msg": "status", "status": {"frontend": "working", "backend": "idle"}}
         )
@@ -83,7 +82,6 @@ class TestPulseDataMinimization:
         assert result == {"working": 1, "total": 2, "provider": "claude"}
 
     def test_stalled_state_still_counts_as_working(self, monkeypatch, fake_orch):
-        monkeypatch.setattr(api._remote_config, "LEAD_ONLY_STREAM", False)
         srv = _FakeCliServer(
             {"ok": True, "msg": "status", "status": {"qa": "working (stalled 12m)"}}
         )
@@ -98,7 +96,6 @@ class TestPulseDataMinimization:
         # Simulate an over-sharing / misrouted cli_server response (as if
         # `status` accidentally carried full pane_status_report-shaped data)
         # and confirm pulse() strips it down to the count regardless.
-        monkeypatch.setattr(api._remote_config, "LEAD_ONLY_STREAM", False)
         srv = _FakeCliServer(
             {
                 "ok": True,
@@ -124,18 +121,17 @@ class TestPulseDataMinimization:
             assert leaked not in dumped
 
 
-class TestPulseLeadOnlyStreamGate:
-    """LEAD_ONLY_STREAM defaults True (2026-07-23). `pulse` was found NOT
-    gated by it (mobile-scope audit, 2026-08-04) — it kept counting every
-    open pane's `list` state regardless of the flag, so `/api/pulse` leaked
-    team size (`total`) and teammate activity (`working`) to the phone even
-    though `activity`/`notify.LeadNotifier` already honored the same flag.
-    These pin the fix: scoped down to the `lead` entry only."""
+class TestPulseShowTeamGate:
+    """PULSE_SHOW_TEAM defaults True (#200, 2026-08-14) — the opposite of the
+    pre-#200 default. These pin the `PULSE_SHOW_TEAM=False` fallback: scoped
+    down to the `lead` entry only, same contract the old always-on
+    LEAD_ONLY_STREAM gate used to guarantee for `/api/pulse`."""
 
-    def test_gate_on_by_default(self):
-        assert api._remote_config.LEAD_ONLY_STREAM is True
+    def test_gate_defaults_to_full_team(self):
+        assert api._remote_config.PULSE_SHOW_TEAM is True
 
     def test_counts_lead_only_ignores_working_teammates(self, monkeypatch, fake_orch):
+        monkeypatch.setattr(api._remote_config, "PULSE_SHOW_TEAM", False)
         srv = _FakeCliServer(
             {
                 "ok": True,
@@ -156,6 +152,7 @@ class TestPulseLeadOnlyStreamGate:
         assert result == {"working": 0, "total": 1, "provider": "claude"}
 
     def test_counts_lead_working(self, monkeypatch, fake_orch):
+        monkeypatch.setattr(api._remote_config, "PULSE_SHOW_TEAM", False)
         srv = _FakeCliServer(
             {"ok": True, "msg": "status", "status": {"lead": "working", "backend": "idle"}}
         )
@@ -167,6 +164,7 @@ class TestPulseLeadOnlyStreamGate:
         assert result == {"working": 1, "total": 1, "provider": "claude"}
 
     def test_lead_stalled_state_still_counts_as_working(self, monkeypatch, fake_orch):
+        monkeypatch.setattr(api._remote_config, "PULSE_SHOW_TEAM", False)
         srv = _FakeCliServer(
             {"ok": True, "msg": "status", "status": {"lead": "working (stalled 12m)"}}
         )
@@ -178,6 +176,7 @@ class TestPulseLeadOnlyStreamGate:
         assert result == {"working": 1, "total": 1, "provider": "claude"}
 
     def test_no_lead_pane_yields_zero_even_with_teammates_working(self, monkeypatch, fake_orch):
+        monkeypatch.setattr(api._remote_config, "PULSE_SHOW_TEAM", False)
         srv = _FakeCliServer(
             {"ok": True, "msg": "status", "status": {"frontend": "working", "backend": "working"}}
         )
@@ -189,6 +188,7 @@ class TestPulseLeadOnlyStreamGate:
         assert result == {"working": 0, "total": 0, "provider": "claude"}
 
     def test_total_never_reveals_team_size(self, monkeypatch, fake_orch):
+        monkeypatch.setattr(api._remote_config, "PULSE_SHOW_TEAM", False)
         status = {f"backend#{i}": "working" for i in range(5)}
         status["lead"] = "idle"
         srv = _FakeCliServer({"ok": True, "msg": "status", "status": status})
@@ -278,10 +278,12 @@ class _FakeOrchWithPanes:
 
 
 class TestActivity:
-    """Pulse page (project-grouped active panes). DATA-MIN: role + project +
-    runtime only — never task text, cwd, command, or status detail."""
+    """Pulse page (project-grouped open panes). DATA-MIN: role + project +
+    state + runtime only — never task text, cwd, command, or fine-grained
+    status detail. PULSE_SHOW_TEAM defaults True (#200, 2026-08-14): `roles`
+    lists every open teammate pane, working or idle, not just working ones."""
 
-    def test_groups_leads_by_project(self, monkeypatch):
+    def test_groups_leads_and_teammates_by_project(self, monkeypatch):
         now = 1_000_000.0
         monkeypatch.setattr(api.time, "time", lambda: now)
         orch = _FakeOrchWithPanes(
@@ -301,40 +303,117 @@ class TestActivity:
             "projects": [
                 {
                     "project": "proj-a",
-                    "roles": [],
+                    "roles": [
+                        {
+                            "role": "backend",
+                            "state": "working",
+                            "runtime_sec": 30,
+                            "provider": "claude",
+                        }
+                    ],
                     "lead": {"state": "working", "runtime_sec": 30, "provider": "claude"},
                 },
                 {
                     "project": "proj-b",
-                    "roles": [],
+                    "roles": [
+                        {"role": "qa", "state": "working", "runtime_sec": 120, "provider": "claude"}
+                    ],
                     "lead": {"state": "idle", "runtime_sec": 0, "provider": "claude"},
                 },
             ]
         }
 
-    def test_project_with_working_teammates_but_no_lead_is_omitted(self, monkeypatch):
-        """LEAD_ONLY_STREAM: teammates alone are not a reason to show a card —
-        there is nothing on it the phone is allowed to report."""
+    def test_idle_teammates_are_included_too(self, monkeypatch):
+        """#200: the whole point is that idle panes show up, not just working
+        ones — a project with three idle teammates still shows three chips."""
+        orch = _FakeOrchWithPanes(
+            {"proj-a": {"backend": _FakePane("idle", None), "frontend": _FakePane("done", None)}}
+        )
+        result = api.activity(orch)
+        assert result == {
+            "projects": [
+                {
+                    "project": "proj-a",
+                    "roles": [
+                        {
+                            "role": "backend",
+                            "state": "idle",
+                            "runtime_sec": 0,
+                            "provider": "claude",
+                        },
+                        {
+                            "role": "frontend",
+                            "state": "idle",
+                            "runtime_sec": 0,
+                            "provider": "claude",
+                        },
+                    ],
+                }
+            ]
+        }
+
+    def test_project_with_working_teammates_but_no_lead_is_shown(self, monkeypatch):
+        """#200: teammates alone are now a reason to show a card — the whole
+        point is visibility into what's open even without Lead in frame."""
         now = 1_000_000.0
         monkeypatch.setattr(api.time, "time", lambda: now)
         orch = _FakeOrchWithPanes(
             {"proj-a": {"backend": _FakePane("working", now - 30)}},
         )
-        assert api.activity(orch) == {"projects": []}
+        assert api.activity(orch) == {
+            "projects": [
+                {
+                    "project": "proj-a",
+                    "roles": [
+                        {
+                            "role": "backend",
+                            "state": "working",
+                            "runtime_sec": 30,
+                            "provider": "claude",
+                        }
+                    ],
+                }
+            ]
+        }
 
-    def test_project_with_no_working_panes_is_omitted(self, monkeypatch):
-        orch = _FakeOrchWithPanes(
-            {"proj-a": {"backend": _FakePane("idle", None), "frontend": _FakePane("done", None)}}
-        )
-        result = api.activity(orch)
-        assert result == {"projects": []}
-
-    def test_working_pane_without_a_start_ts_is_skipped(self, monkeypatch):
+    def test_working_pane_without_a_start_ts_reports_zero_runtime(self, monkeypatch):
         # Defensive: set_state("working") always stamps _working_start, but
-        # activity() must not fabricate a runtime if it's ever None/missing.
+        # activity() must not fabricate a runtime if it's ever None/missing —
+        # it still shows the pane (#200), just with runtime_sec: 0.
         orch = _FakeOrchWithPanes({"proj-a": {"backend": _FakePane("working", None)}})
         result = api.activity(orch)
-        assert result == {"projects": []}
+        assert result == {
+            "projects": [
+                {
+                    "project": "proj-a",
+                    "roles": [
+                        {
+                            "role": "backend",
+                            "state": "working",
+                            "runtime_sec": 0,
+                            "provider": "claude",
+                        }
+                    ],
+                }
+            ]
+        }
+
+    def test_teammates_omitted_when_show_team_is_off(self, monkeypatch):
+        """PULSE_SHOW_TEAM=False reverts to the pre-#200 Lead-only default."""
+        monkeypatch.setattr(api._remote_config, "PULSE_SHOW_TEAM", False)
+        orch = _FakeOrchWithPanes(
+            {"proj-a": {"backend": _FakePane("working", None), "lead": _FakePane("idle", None)}}
+        )
+        result = api.activity(orch)
+        assert result == {
+            "projects": [
+                {
+                    "project": "proj-a",
+                    "roles": [],
+                    "lead": {"state": "idle", "runtime_sec": 0, "provider": "claude"},
+                }
+            ]
+        }
 
     def test_no_open_panes_returns_empty_projects(self):
         result = api.activity(_FakeOrchWithPanes({}))
@@ -343,10 +422,23 @@ class TestActivity:
     def test_never_leaks_task_cwd_or_transcript_fields(self, monkeypatch):
         now = 500.0
         monkeypatch.setattr(api.time, "time", lambda: now)
-        orch = _FakeOrchWithPanes({"proj-a": {"lead": _FakePane("working", now - 10)}})
+        orch = _FakeOrchWithPanes(
+            {
+                "proj-a": {
+                    "lead": _FakePane("working", now - 10),
+                    "backend": _FakePane("working", now - 5),
+                }
+            }
+        )
         result = api.activity(orch)
         dumped = json.dumps(result)
         assert set(result["projects"][0]["lead"].keys()) == {
+            "state",
+            "runtime_sec",
+            "provider",
+        }
+        assert set(result["projects"][0]["roles"][0].keys()) == {
+            "role",
             "state",
             "runtime_sec",
             "provider",
@@ -386,10 +478,8 @@ class TestActivity:
             ]
         }
 
-    def test_working_teammates_are_suppressed_beside_lead(self, monkeypatch):
-        """LEAD_ONLY_STREAM (2026-07-23): `roles` is emitted but always empty.
-        The key stays so older PWA builds reading `p.roles.length` keep
-        working."""
+    def test_multiple_teammates_all_shown_beside_lead(self, monkeypatch):
+        """#200: `roles` now carries every open teammate, not just one."""
         now = 2_000.0
         monkeypatch.setattr(api.time, "time", lambda: now)
         orch = _FakeOrchWithPanes(
@@ -402,19 +492,28 @@ class TestActivity:
             }
         )
         result = api.activity(orch)
-        assert result == {
-            "projects": [
-                {
-                    "project": "proj-a",
-                    "roles": [],
-                    "lead": {"state": "idle", "runtime_sec": 0, "provider": "claude"},
-                }
-            ]
+        roles_by_role = {r["role"]: r for r in result["projects"][0]["roles"]}
+        assert roles_by_role["backend"] == {
+            "role": "backend",
+            "state": "working",
+            "runtime_sec": 10,
+            "provider": "claude",
+        }
+        assert roles_by_role["qa"] == {
+            "role": "qa",
+            "state": "working",
+            "runtime_sec": 20,
+            "provider": "claude",
+        }
+        assert result["projects"][0]["lead"] == {
+            "state": "idle",
+            "runtime_sec": 0,
+            "provider": "claude",
         }
 
-    def test_teammates_reported_again_when_flag_off(self, monkeypatch):
-        """The switch is real, not a hard-coded deletion."""
-        monkeypatch.setattr(api._remote_config, "LEAD_ONLY_STREAM", False)
+    def test_teammates_reappear_when_show_team_flag_flips_back_on(self, monkeypatch):
+        """The switch is real, not a hard-coded deletion — proven by toggling
+        PULSE_SHOW_TEAM off then back on inside the same test."""
         now = 2_000.0
         monkeypatch.setattr(api.time, "time", lambda: now)
         orch = _FakeOrchWithPanes(
@@ -425,12 +524,23 @@ class TestActivity:
                 }
             }
         )
+        monkeypatch.setattr(api._remote_config, "PULSE_SHOW_TEAM", False)
+        assert api.activity(orch)["projects"][0]["roles"] == []
+
+        monkeypatch.setattr(api._remote_config, "PULSE_SHOW_TEAM", True)
         result = api.activity(orch)
         assert result == {
             "projects": [
                 {
                     "project": "proj-a",
-                    "roles": [{"role": "backend", "runtime_sec": 10, "provider": "claude"}],
+                    "roles": [
+                        {
+                            "role": "backend",
+                            "state": "working",
+                            "runtime_sec": 10,
+                            "provider": "claude",
+                        }
+                    ],
                     "lead": {"state": "idle", "runtime_sec": 0, "provider": "claude"},
                 }
             ]
@@ -450,7 +560,6 @@ class TestActivity:
         }
 
     def test_uses_provider_recorded_on_each_live_pane(self, monkeypatch):
-        monkeypatch.setattr(api._remote_config, "LEAD_ONLY_STREAM", False)
         now = 2_000.0
         monkeypatch.setattr(api.time, "time", lambda: now)
         orch = _FakeOrchWithPanes(
