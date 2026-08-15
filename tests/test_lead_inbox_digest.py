@@ -150,13 +150,16 @@ def test_blocking_notice_does_not_wait_behind_pending_digest(
     written = _written(lead.session)
     assert "[qa FAILED] production checkout is broken" in written
     assert "Lead Inbox Digest" not in written
-    # #241: digest-queue entries now carry a queued_ts third element.
+    # #241: digest-queue entries carry a queued_ts third element; #245 adds a
+    # 4th (digest_facts) — None here since this test calls _notify_lead
+    # directly, bypassing done()'s fact computation.
     remaining = list(orch._lead_digest_queue[PROJECT])
     assert len(remaining) == 1
-    body, pane_token, queued_ts = remaining[0]
+    body, pane_token, queued_ts, digest_facts = remaining[0]
     assert body == "[backend done] informational"
     assert pane_token is None
     assert isinstance(queued_ts, float)
+    assert digest_facts is None
 
 
 def test_auto_chain_flushes_done_digest_first_and_is_not_window_delayed(
@@ -213,10 +216,11 @@ def test_old_timer_cannot_flush_a_new_burst_after_early_handoff(
     assert _written(lead.session) == before
     remaining = list(orch._lead_digest_queue[PROJECT])
     assert len(remaining) == 1
-    body, pane_token, queued_ts = remaining[0]
+    body, pane_token, queued_ts, digest_facts = remaining[0]
     assert body == "[backend done] second burst"
     assert pane_token is None
     assert isinstance(queued_ts, float)
+    assert digest_facts is None
 
 
 def test_digest_line_carries_a_queued_time_stamp(

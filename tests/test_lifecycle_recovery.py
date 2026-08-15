@@ -92,6 +92,7 @@ class TestStuckRecoverPreservesState:
         ps.last_assigned_task = SAMPLE_TASK
         ps.auto_chain = True
         ps.requires_commit_on_done = True
+        ps.assign_base_sha = "snapshot-sha-xyz"
         return pane
 
     def test_session_uuid_restored_after_recover(self, orch: Orchestrator) -> None:
@@ -154,6 +155,26 @@ class TestStuckRecoverPreservesState:
             orch._auto_recover_stuck("devops", TEST_PROJECT, pane, now)
 
         assert (orch._pane_state.get(key) or PaneState()).requires_commit_on_done is True
+
+    def test_assign_base_sha_restored_after_recover(self, orch: Orchestrator) -> None:
+        """#245: a stuck-recover respawn resumes the SAME task, not a fresh
+        assign() dispatch — the digest baseline must survive the close()
+        pop the same way session_uuid/task/auto_chain/requires_commit do,
+        or the resumed pane would wrongly report "ตรวจไม่ได้" in done()'s
+        digest fact table for a pane that actually had a baseline."""
+        key = _exit_key(TEST_PROJECT, "designer")
+        pane = self._setup(orch, key)
+        now = 1_000_000.0
+
+        with (
+            patch("agent_takkub.orchestrator.QTimer") as mock_timer,
+            patch.object(orch, "spawn", return_value=(True, "designer spawned")),
+            patch.object(orch, "_send_when_ready"),
+        ):
+            mock_timer.singleShot.side_effect = lambda ms, fn: fn()
+            orch._auto_recover_stuck("designer", TEST_PROJECT, pane, now)
+
+        assert (orch._pane_state.get(key) or PaneState()).assign_base_sha == "snapshot-sha-xyz"
 
     def test_spawn_called_with_from_auto_respawn_true(self, orch: Orchestrator) -> None:
         key = _exit_key(TEST_PROJECT, "mobile")

@@ -576,6 +576,17 @@ class PaneState:
     # Read (captured before the pop) in done()/close() to finalize the worktree:
     # propose a merge to Lead if the branch has commits, else safe-remove it.
     worktree: dict | None = None
+    # assign_base_sha: HEAD sha of the pane's cwd, snapshotted right after
+    # spawn() resolves it, ONLY for a SHARED-tree pane (worktree above is
+    # None — an isolated worktree already carries the equivalent baseline in
+    # WorktreeInfo.base_sha, so this stays None there). #245 (follow-up to
+    # #244): a shared-tree pane has no per-pane git identity to diff "files
+    # touched" against without a baseline like this. Best-effort — None when
+    # the cwd isn't a git repo or HEAD is unborn; done()'s digest fact table
+    # then reports "ตรวจไม่ได้" rather than a misleading 0. Refreshed on
+    # every fresh task dispatch, same "one baseline per assign" semantic as
+    # assign_ts just above.
+    assign_base_sha: str | None = None
     # ── auto-resume (🌙, limit_autoresume.py) — park/wake bookkeeping ────────
     # limit_parked: True while this pane is currently parked awaiting its
     # usage-limit window to reset (auto-resume ON path only).

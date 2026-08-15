@@ -43,6 +43,7 @@ from PyQt6.QtCore import QTimer
 from .agent_pane import AgentPane
 from .config import RUNTIME_DIR as _RUNTIME_DIR_DEFAULT
 from .config import ensure_runtime as _ensure_runtime_default
+from .digest_facts import DigestFacts, format_digest_fact_line
 from .lead_draft_state import (
     LeadDraftState,
     advance_draft_state,
@@ -291,6 +292,18 @@ def _unwrap_notice_item(item) -> tuple[str, str | None, float | None]:
     return item, None, None
 
 
+def _unwrap_notice_facts(item) -> DigestFacts | None:
+    """Pull the optional 4th ``DigestFacts`` element off a
+    ``_lead_digest_queue`` entry (#245). Every OTHER queue/consumer keeps
+    working unchanged against the 3-tuple `_unwrap_notice_item` already
+    returns — this is additive, read only where the digest actually renders
+    a bullet. Absent (2-/3-tuple entries, or a bare string) means the caller
+    falls back to parsing `body` as prose, same as before #245."""
+    if isinstance(item, tuple) and len(item) >= 4:
+        return item[3]
+    return None
+
+
 _STALE_ORIGIN_BANNER = (
     "⚠️ [unverified origin — {role} pane was respawned since this report was "
     "queued; confirm current status with the live pane before acting on it]"
@@ -313,13 +326,23 @@ def _format_notice_age(now_ts: float, queued_ts: float | None) -> str:
 
 
 def _format_digest_item(
-    body: str, queued_ts: float | None = None, now_ts: float | None = None
+    body: str,
+    queued_ts: float | None = None,
+    now_ts: float | None = None,
+    facts: DigestFacts | None = None,
 ) -> str:
     """Render one queued notice in the compact Lead Inbox Digest format.
 
     Prefixed with a "[HH:MM:SS · age]" stamp whenever `queued_ts` is known
     (#241) so Lead can judge freshness inline instead of guessing whether a
     digest line already went stale while it sat in the debounce window.
+
+    When *facts* is supplied (#245 — `done()` computes it for every clean
+    done notice), the bullet is a fact table `format_digest_fact_line`
+    renders straight from cockpit-measured values, never from parsing
+    `body`. *facts* is None for every other digestible body (peer-CC relays,
+    or a caller that predates #245) — those fall back to the original
+    regex-on-prose rendering below, unchanged.
     """
     stripped = body.strip()
     if queued_ts is not None:
@@ -328,6 +351,9 @@ def _format_digest_item(
         stamp = f"[{clock}{age}] "
     else:
         stamp = ""
+
+    if facts is not None:
+        return format_digest_fact_line(facts, stamp=stamp)
 
     done_match = _DONE_NOTICE_RE.match(stripped)
     if done_match:
@@ -1644,6 +1670,7 @@ class LeadInboxMixin:
         lines = []
         for entry in items:
             item_body, item_pane_token, item_ts = _unwrap_notice_item(entry)
+            item_facts = _unwrap_notice_facts(entry)
             role = _notice_role_tag(item_body)
             if _notice_fingerprint(item_body) in already_read:
                 # #241 option A: Lead already pulled this exact report via
@@ -1653,7 +1680,7 @@ class LeadInboxMixin:
                 age = _format_notice_age(now_ts, item_ts)
                 lines.append(f"• [{role or 'system'}] (อ่านแล้วผ่าน takkub inbox{age})")
                 continue
-            line = _format_digest_item(item_body, item_ts, now_ts)
+            line = _format_digest_item(item_body, item_ts, now_ts, facts=item_facts)
             if self._provenance_stale(project_ns, role, item_pane_token):
                 line = f"{_STALE_ORIGIN_BANNER.format(role=role)}\n{line}"
             lines.append(line)
@@ -1699,6 +1726,7 @@ class LeadInboxMixin:
         from_role: str = "system",
         note: str = "notify",
         pane_token: str | None = None,
+        digest_facts: DigestFacts | None = None,
     ) -> None:
         """Queue *body* for delivery to the Lead pane.
 
@@ -1717,6 +1745,12 @@ class LeadInboxMixin:
         rides along through every queue so a delivery that happens after the
         role slot was respawned can be flagged instead of silently looking
         like it came from the pane currently running under that name.
+        *digest_facts* (#245) rides along ONLY into the digest queue — the
+        cockpit-computed fact table `done()` built for this notice, rendered
+        by `_format_digest_item` instead of re-parsing `body` as prose. None
+        for every notice that isn't a clean `done()` report (FAILED/blocking
+        notices never reach the digest queue at all, so it never matters
+        there).
 
         Lazy-initialises queue / pumping-set so partial test fixtures (those that
         use Orchestrator.__new__ and bypass __init__) don't need to pre-populate
@@ -1733,7 +1767,7 @@ class LeadInboxMixin:
                 if not hasattr(self, "_lead_digest_queue"):
                     self._lead_digest_queue = {}
                 self._lead_digest_queue.setdefault(project_ns, collections.deque()).append(
-                    (body, pane_token, time.time())
+                    (body, pane_token, time.time(), digest_facts)
                 )
                 self._arm_lead_digest(project_ns, window_ms)
             elif blocking:

@@ -151,6 +151,71 @@ class TestAssignTsCapture:
 
 
 # ─────────────────────────────────────────────────────────────
+# assign_base_sha capture (#245 — shared-tree digest-facts baseline)
+# ─────────────────────────────────────────────────────────────
+
+
+class TestAssignBaseShaCapture:
+    def test_shared_cwd_dispatch_snapshots_head(self, orch, monkeypatch):
+        """_assign_dispatch (worktree=None, the shared-cwd path) snapshots
+        HEAD into PaneState.assign_base_sha right after spawn resolves cwd."""
+        from agent_takkub import worktree_manager as wm_mod
+
+        monkeypatch.setattr(orch, "spawn", lambda *a, **kw: (True, "ok"))
+        monkeypatch.setattr(orch, "_send_when_ready", lambda *a, **kw: None)
+        monkeypatch.setattr(orch, "_apply_session_goal", lambda task, ns: task)
+        pane = _register_pane(orch, "backend", "proj")
+        pane._session_cwd = "/repo/api"
+
+        class _FakeMgr:
+            def head_sha(self, cwd):
+                assert cwd == "/repo/api"
+                return "deadbeef"
+
+        monkeypatch.setattr(wm_mod, "WorktreeManager", lambda *a, **k: _FakeMgr())
+
+        orch._assign_dispatch("backend", "/repo/api", "do the thing", project="proj")
+
+        ps = orch._pane_state["proj::backend"]
+        assert ps.assign_base_sha == "deadbeef"
+
+    def test_no_resolved_cwd_leaves_baseline_none(self, orch, monkeypatch):
+        monkeypatch.setattr(orch, "spawn", lambda *a, **kw: (True, "ok"))
+        monkeypatch.setattr(orch, "_send_when_ready", lambda *a, **kw: None)
+        monkeypatch.setattr(orch, "_apply_session_goal", lambda task, ns: task)
+        # No pane registered → _session_cwd unresolvable → no git call, None.
+
+        orch._assign_dispatch("backend", "/repo", "do the thing", project="proj")
+
+        ps = orch._pane_state["proj::backend"]
+        assert ps.assign_base_sha is None
+
+    def test_worktree_dispatch_leaves_baseline_none(self, orch, monkeypatch):
+        """An isolated worktree pane already has the equivalent baseline in
+        WorktreeInfo.base_sha — assign_base_sha must stay unset there."""
+        monkeypatch.setattr(orch, "spawn", lambda *a, **kw: (True, "ok"))
+        monkeypatch.setattr(orch, "_send_when_ready", lambda *a, **kw: None)
+        monkeypatch.setattr(orch, "_apply_session_goal", lambda task, ns: task)
+        _register_pane(orch, "backend", "proj")
+
+        orch._assign_dispatch(
+            "backend",
+            "/wt/backend-1",
+            "do the thing",
+            project="proj",
+            worktree={
+                "path": "/wt/backend-1",
+                "branch": "wt/backend-1",
+                "base_sha": "b",
+                "git_root": "/repo",
+            },
+        )
+
+        ps = orch._pane_state["proj::backend"]
+        assert ps.assign_base_sha is None
+
+
+# ─────────────────────────────────────────────────────────────
 # mtime + settle filter
 # ─────────────────────────────────────────────────────────────
 
