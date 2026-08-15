@@ -242,6 +242,40 @@ def _is_blocking_lead_notice(body: str) -> bool:
     )
 
 
+_FAILED_TAG_RE = re.compile(r"^\[([^\]\r\n]+?)\s+FAILED\]", re.IGNORECASE)
+
+
+def _notice_role_tag(body: str) -> str | None:
+    """Extract the role name from a `[role done]`/`[role FAILED]`-tagged
+    notice body, or None if the body carries no per-pane origin claim.
+
+    Both tags are built in exactly one place each (`Orchestrator.done()` /
+    `_build_verify_fail_handoff`), so a match here always corresponds to a
+    real `from_role` a caller can attach a `pane_token` to (#228)."""
+    stripped = body.strip()
+    m = _DONE_NOTICE_RE.match(stripped)
+    if m:
+        return m.group(1).strip()
+    fm = _FAILED_TAG_RE.match(stripped)
+    if fm:
+        return fm.group(1).strip()
+    return None
+
+
+def _unwrap_notice_item(item) -> tuple[str, str | None]:
+    """Normalise one `_lead_digest_queue`/`_lead_notify_queue` entry to
+    ``(body, pane_token)``. Entries produced by `_enqueue_live_lead_notice`
+    are already `(body, pane_token)` tuples; a bare string (legacy call
+    sites, hand-built test fixtures) means no origin was recorded."""
+    return item if isinstance(item, tuple) else (item, None)
+
+
+_STALE_ORIGIN_BANNER = (
+    "⚠️ [unverified origin — {role} pane was respawned since this report was "
+    "queued; confirm current status with the live pane before acting on it]"
+)
+
+
 def _format_digest_item(body: str) -> str:
     """Render one queued notice in the compact Lead Inbox Digest format."""
     stripped = body.strip()
@@ -1447,23 +1481,33 @@ class LeadInboxMixin:
     # Lead-notify queue: ready-prompt-aware serialised delivery
     # ------------------------------------------------------------------
 
-    def _enqueue_live_lead_notice(self, project_ns: str, body: str, *, front: bool = False) -> None:
-        """Append one ready-to-deliver body without starting the pump."""
+    def _enqueue_live_lead_notice(
+        self, project_ns: str, body: str, *, front: bool = False, pane_token: str | None = None
+    ) -> None:
+        """Append one ready-to-deliver body without starting the pump.
+
+        *pane_token* (#228) records which pane instance's `done()` call — if
+        any — produced *body*, so `_pump_lead_notify` can re-check at actual
+        delivery time whether that role slot has since been respawned. None
+        for system-authored bodies (combined digests, CC relays, engine
+        notices) that carry no single-pane origin claim.
+        """
         if not hasattr(self, "_lead_notify_queue"):
             self._lead_notify_queue = {}
         if not hasattr(self, "_lead_notify_pumping"):
             self._lead_notify_pumping = set()
         queue = self._lead_notify_queue.setdefault(project_ns, collections.deque())
+        item = (body, pane_token)
         if front:
             # Keep blocking notices FIFO with each other while placing them
             # ahead of informational/digest bodies already waiting on a busy
             # Lead.
             priority_end = 0
-            while priority_end < len(queue) and _is_blocking_lead_notice(queue[priority_end]):
+            while priority_end < len(queue) and _is_blocking_lead_notice(queue[priority_end][0]):
                 priority_end += 1
-            queue.insert(priority_end, body)
+            queue.insert(priority_end, item)
         else:
-            queue.append(body)
+            queue.append(item)
 
     def _arm_lead_digest(self, project_ns: str, window_ms: int) -> None:
         """Debounce the project's digest using a generation-checked timer.
@@ -1508,9 +1552,19 @@ class LeadInboxMixin:
         if not pending:
             return False
         items = list(pending)
+        lines = []
+        for entry in items:
+            item_body, item_pane_token = _unwrap_notice_item(entry)
+            line = _format_digest_item(item_body)
+            role = _notice_role_tag(item_body)
+            if self._provenance_stale(project_ns, role, item_pane_token):
+                line = f"{_STALE_ORIGIN_BANNER.format(role=role)}\n{line}"
+            lines.append(line)
         digest = "\n".join(
-            [f"📬 [Lead Inbox Digest — {len(items)} update{'s' if len(items) != 1 else ''}]"]
-            + [_format_digest_item(item) for item in items]
+            [
+                f"📬 [Lead Inbox Digest — {len(items)} update{'s' if len(items) != 1 else ''}]",
+                *lines,
+            ]
         )
         if trailing_body:
             # Auto-chain uses this path: the actionable handoff follows the
@@ -1523,6 +1577,23 @@ class LeadInboxMixin:
             self._arm_lead_notify_pump(project_ns)
         return True
 
+    def _provenance_stale(self, project_ns: str, role: str | None, pane_token: str | None) -> bool:
+        """True when a role-attributed notice's origin pane can no longer be
+        confirmed live under that role slot (#228).
+
+        *role* is None for bodies that carry no per-pane origin claim (system
+        notices, CC relays, combined digests) — never stale, there is nothing
+        to verify. *pane_token* is None when the caller didn't attach one
+        (system-authored bodies, or legacy/test-constructed queue entries) —
+        also treated as nothing-to-verify rather than flagged, so this only
+        ever fires for a genuine `[role done]`/`[role FAILED]` body whose
+        producing `done()` call recorded its own pane token.
+        """
+        if role is None or pane_token is None:
+            return False
+        current = self._current_pane_identity(project_ns, role)
+        return current != pane_token
+
     def _notify_lead(
         self,
         project_ns: str,
@@ -1530,6 +1601,7 @@ class LeadInboxMixin:
         *,
         from_role: str = "system",
         note: str = "notify",
+        pane_token: str | None = None,
     ) -> None:
         """Queue *body* for delivery to the Lead pane.
 
@@ -1543,7 +1615,11 @@ class LeadInboxMixin:
 
         *from_role* and *note* are stored only in the durable fallback record so
         callers that care about the audit trail can pass them through; the live
-        delivery path only needs *body*.
+        delivery path only needs *body*. *pane_token* (#228) is the calling
+        pane's own auth token, captured by `done()` before any teardown — it
+        rides along through every queue so a delivery that happens after the
+        role slot was respawned can be flagged instead of silently looking
+        like it came from the pane currently running under that name.
 
         Lazy-initialises queue / pumping-set so partial test fixtures (those that
         use Orchestrator.__new__ and bypass __init__) don't need to pre-populate
@@ -1559,13 +1635,15 @@ class LeadInboxMixin:
             if digestible and not immediate and window_ms > 0:
                 if not hasattr(self, "_lead_digest_queue"):
                     self._lead_digest_queue = {}
-                self._lead_digest_queue.setdefault(project_ns, collections.deque()).append(body)
+                self._lead_digest_queue.setdefault(project_ns, collections.deque()).append(
+                    (body, pane_token)
+                )
                 self._arm_lead_digest(project_ns, window_ms)
             elif blocking:
                 # Failures are explicitly outside the digest policy. Do not
                 # make Lead read an older informational digest turn before the
                 # blocking alert; the digest keeps its original timer.
-                self._enqueue_live_lead_notice(project_ns, body, front=True)
+                self._enqueue_live_lead_notice(project_ns, body, front=True, pane_token=pane_token)
                 self._arm_lead_notify_pump(project_ns)
             elif "[auto-chain handoff]" in body.lower():
                 combined = self._flush_lead_digest(
@@ -1574,7 +1652,7 @@ class LeadInboxMixin:
                     trailing_body=body,
                 )
                 if not combined:
-                    self._enqueue_live_lead_notice(project_ns, body)
+                    self._enqueue_live_lead_notice(project_ns, body, pane_token=pane_token)
                 self._arm_lead_notify_pump(project_ns)
             else:
                 # A sequencing handoff must not sit behind the debounce window.
@@ -1582,7 +1660,7 @@ class LeadInboxMixin:
                 # done notes it explicitly tells Lead to re-read. Other
                 # immediate engine notices follow the same chronological rule.
                 self._flush_lead_digest(project_ns, arm_pump=False)
-                self._enqueue_live_lead_notice(project_ns, body)
+                self._enqueue_live_lead_notice(project_ns, body, pane_token=pane_token)
                 self._arm_lead_notify_pump(project_ns)
 
             # Tell the UI Lead has new mail so it can red-dot the Lead pane-tab
@@ -1596,7 +1674,7 @@ class LeadInboxMixin:
             if not hasattr(self, "_pending_done_notices"):
                 self._pending_done_notices = {}
             self._pending_done_notices.setdefault(project_ns, []).append(
-                {"role": from_role, "note": note, "body": body}
+                {"role": from_role, "note": note, "body": body, "pane_token": pane_token}
             )
             self._save_pending_done_notices(project_ns)
             _log_event("done_notice_queued", project=project_ns, role=from_role)
@@ -1661,8 +1739,9 @@ class LeadInboxMixin:
             if not hasattr(self, "_pending_done_notices"):
                 self._pending_done_notices = {}
             for b in items:
+                b_body, b_pane_token = _unwrap_notice_item(b)
                 self._pending_done_notices.setdefault(project_ns, []).append(
-                    {"role": "system", "note": "notify", "body": b}
+                    {"role": "system", "note": "notify", "body": b_body, "pane_token": b_pane_token}
                 )
             if items:
                 self._save_pending_done_notices(project_ns)
@@ -1684,8 +1763,14 @@ class LeadInboxMixin:
                 if not hasattr(self, "_pending_done_notices"):
                     self._pending_done_notices = {}
                 for b in items:
+                    b_body, b_pane_token = _unwrap_notice_item(b)
                     self._pending_done_notices.setdefault(project_ns, []).append(
-                        {"role": "system", "note": "notify_spill", "body": b}
+                        {
+                            "role": "system",
+                            "note": "notify_spill",
+                            "body": b_body,
+                            "pane_token": b_pane_token,
+                        }
                     )
                 if items:
                     self._save_pending_done_notices(project_ns)
@@ -1713,8 +1798,14 @@ class LeadInboxMixin:
                 if not hasattr(self, "_pending_done_notices"):
                     self._pending_done_notices = {}
                 for b in items:
+                    b_body, b_pane_token = _unwrap_notice_item(b)
                     self._pending_done_notices.setdefault(project_ns, []).append(
-                        {"role": "system", "note": "notify_draft_spill", "body": b}
+                        {
+                            "role": "system",
+                            "note": "notify_draft_spill",
+                            "body": b_body,
+                            "pane_token": b_pane_token,
+                        }
                     )
                 if items:
                     self._save_pending_done_notices(project_ns)
@@ -1729,7 +1820,10 @@ class LeadInboxMixin:
         # torn down between the liveness checks above and this write) never
         # drops the item — see HIGH#1,
         # docs/reviews/2026-07-11-full-system-review-codex.md.
-        raw_body = queue[0]
+        raw_body, item_pane_token = _unwrap_notice_item(queue[0])
+        item_role = _notice_role_tag(raw_body)
+        if self._provenance_stale(project_ns, item_role, item_pane_token):
+            raw_body = f"{_STALE_ORIGIN_BANNER.format(role=item_role)}\n{raw_body}"
         body = _sanitize_pane_text(raw_body)
         _notify_sess = lead.session
         payload = _paste_payload(body)
@@ -1760,8 +1854,14 @@ class LeadInboxMixin:
             if not hasattr(self, "_pending_done_notices"):
                 self._pending_done_notices = {}
             for b in items:
+                b_body, b_pane_token = _unwrap_notice_item(b)
                 self._pending_done_notices.setdefault(project_ns, []).append(
-                    {"role": "system", "note": "notify_write_failed", "body": b}
+                    {
+                        "role": "system",
+                        "note": "notify_write_failed",
+                        "body": b_body,
+                        "pane_token": b_pane_token,
+                    }
                 )
             self._save_pending_done_notices(project_ns)
             _log_event("lead_notify_write_failed", project=project_ns, count=len(items))
@@ -1852,7 +1952,7 @@ class LeadInboxMixin:
                     self._pending_done_notices.pop(project_ns, None)
                 self._save_pending_done_notices(project_ns)
             try:
-                self._notify_lead(project_ns, item["body"])
+                self._notify_lead(project_ns, item["body"], pane_token=item.get("pane_token"))
             except Exception:
                 self._pending_done_notices.setdefault(project_ns, []).insert(0, item)
                 self._save_pending_done_notices(project_ns)
@@ -1961,7 +2061,15 @@ class LeadInboxMixin:
             self._pending_done_notices.pop(project_ns, None)
             self._save_pending_done_notices(project_ns)
             return
-        body = "\n\n".join(_sanitize_pane_text(item.get("body", "")) for item in valid)
+
+        def _flagged(item: dict) -> str:
+            item_body = item.get("body", "")
+            role = _notice_role_tag(item_body)
+            if self._provenance_stale(project_ns, role, item.get("pane_token")):
+                item_body = f"{_STALE_ORIGIN_BANNER.format(role=role)}\n{item_body}"
+            return _sanitize_pane_text(item_body)
+
+        body = "\n\n".join(_flagged(item) for item in valid)
         sess = lead.session
         payload = _paste_payload(body)
         notice_expires_at = time.time() + float(

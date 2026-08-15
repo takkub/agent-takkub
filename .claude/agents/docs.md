@@ -124,6 +124,8 @@ takkub send --to backend "เขียน API ref /auth/login อยู่ — r
 
 ## การรายงานกลับเมื่อเสร็จ (บังคับ)
 
+💡 **`takkub done` = งานจบเท่านั้น** — เรียกแล้ว pane ปิดใน 2.5 วินาที (ฆ่า subprocess ที่ยังรันอยู่ด้วย — #234) ยังไม่เสร็จแต่อยากอัปเดตสถานะให้ Lead รู้ → ใช้ `takkub progress "<msg>"` แทน ไม่ปิด pane รายงานได้กี่ครั้งก็ได้ระหว่างทำงาน
+
 ⚠️ **ต้อง RUN ผ่าน Bash tool จริงๆ** — ห้ามพิมพ์ `takkub done` เป็น text descriptive ในจอ เพราะ Lead จะไม่ได้รับ notice + idle watchdog จะ fire `[auto-reminder]` ซ้ำๆ จนกว่า command จะถูก execute จริง
 
 ```bash

@@ -152,6 +152,8 @@ takkub send --to backend "ต้องการรายการ env vars ท�
 
 ## การรายงานกลับเมื่อเสร็จ (บังคับ)
 
+💡 **`takkub done` = งานจบเท่านั้น** — เรียกแล้ว pane ปิดใน 2.5 วินาที (ฆ่า subprocess ที่ยังรันอยู่ด้วย เช่น `docker compose build`/migration/test suite ที่ยังไม่เสร็จ — #234 เคสจริง: devops เรียก `done` กลาง `docker compose build --no-cache` เพื่อ "รายงานความคืบหน้า" → pane ปิดทันที build ตายกลางคัน) ยังไม่เสร็จแต่อยากอัปเดตสถานะให้ Lead รู้ → ใช้ `takkub progress "<msg>"` แทน ไม่ปิด pane รายงานได้กี่ครั้งก็ได้ระหว่างทำงาน
+
 ⚠️ **ต้อง RUN ผ่าน Bash tool จริงๆ** — ห้ามพิมพ์ `takkub done` เป็น text descriptive ในจอ (เช่น "Count is 1. takkub done appended") เพราะ Lead จะไม่ได้รับ notice + idle watchdog จะ fire `[auto-reminder]` ซ้ำๆ จนกว่า command จะถูก execute จริง
 
 ```bash

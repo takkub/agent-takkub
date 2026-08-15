@@ -44,6 +44,7 @@ LEAD_ONLY_COMMANDS = frozenset(
         "worktree",
         "prune",
         "restart",
+        "inbox",  # reads other panes' report bodies — see cli_server._LEAD_ONLY_CMDS (#231)
         # machine-level npm installs — a teammate pane must never mutate the
         # host toolchain mid-task; Lead/terminal decides when to add a CLI.
         "provider",
@@ -53,7 +54,7 @@ LEAD_ONLY_COMMANDS = frozenset(
 # Commands intended only for teammate panes. Lead summarises inline and never
 # needs to call done on itself — blocking this prevents Lead from accidentally
 # scheduling its own close via the done→QTimer→close chain.
-TEAMMATE_ONLY_COMMANDS = frozenset({"done"})
+TEAMMATE_ONLY_COMMANDS = frozenset({"done", "progress"})
 
 
 def _connect() -> socket.socket:
@@ -565,6 +566,19 @@ def cmd_done(args: argparse.Namespace) -> dict:
     )
 
 
+def cmd_progress(args: argparse.Namespace) -> dict:
+    """(agent) report a status update to Lead WITHOUT ending the task.
+
+    Unlike `done`, this never schedules the pane's teardown — use it for a
+    long-running task (docker build, migration, e2e suite) that isn't
+    finished yet but has something worth telling Lead. Calling `done` mid-
+    task kills whatever subprocess is still running underneath the pane
+    (#234) — `done` means the task is over, full stop."""
+    return _request(
+        _with_project({"cmd": "progress", "from": _from_role(), "note": args.note or ""})
+    )
+
+
 def cmd_end_session(args: argparse.Namespace) -> dict:
     return _request(
         _with_project({"cmd": "end-session", "from": _from_role(), "note": args.note or ""})
@@ -758,10 +772,46 @@ def _print_status_report(report: object) -> None:
             print(f"    done events: {', '.join(done_evts)}")
 
 
+_INBOX_QUEUE_LABEL = {
+    "digest": "digest (debounce window, ~60s)",
+    "live": "live (ready-prompt delivery queue)",
+    "durable": "durable (survives a restart)",
+}
+
+
+def _print_inbox_items(items: object) -> None:
+    """Pretty-print the pending-report list returned by `takkub inbox`."""
+    if not isinstance(items, list) or not items:
+        print("  (nothing pending — every report has been delivered)")
+        return
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role", "?")
+        queue = _INBOX_QUEUE_LABEL.get(item.get("queue", ""), item.get("queue", "?"))
+        confirmed = item.get("origin_confirmed")
+        flag = " ⚠ unconfirmed origin — role respawned since queued" if confirmed is False else ""
+        print(f"\n  [{role}] · {queue}{flag}")
+        body = str(item.get("body", "")).strip()
+        for line in body.splitlines():
+            print(f"    │ {line}")
+
+
 def cmd_status(args: argparse.Namespace) -> dict:
     payload = _with_project({"cmd": "status"})
     if getattr(args, "since", None):
         payload["since"] = args.since
+    return _request(payload)
+
+
+def cmd_inbox(args: argparse.Namespace) -> dict:
+    """(Lead) read the actual content of every done/FAILED report still
+    sitting in the outbound-to-Lead pipeline instead of already written into
+    Lead's pane — `takkub status` could only ever say "queued", not show
+    what's in the queue (#231)."""
+    payload = _with_project({"cmd": "inbox", "from": _from_role()})
+    if getattr(args, "role", None):
+        payload["role"] = args.role
     return _request(payload)
 
 
@@ -1826,6 +1876,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     sd.set_defaults(func=cmd_done)
 
+    spg = sub.add_parser(
+        "progress",
+        help="(agent) report a status update to Lead without ending the task (#234)",
+    )
+    spg.add_argument("note")
+    spg.set_defaults(func=cmd_progress)
+
     ses = sub.add_parser(
         "end-session",
         help="(lead) write session summary to runtime/sessions and vault mirror",
@@ -1947,6 +2004,18 @@ def main(argv: list[str] | None = None) -> int:
         help="window start for done-event scan (default: 1h ago)",
     )
     sst.set_defaults(func=cmd_status)
+
+    sib = sub.add_parser(
+        "inbox",
+        help="(lead) read pending done/FAILED report content still queued for delivery (#231)",
+    )
+    sib.add_argument(
+        "--role",
+        default=None,
+        metavar="ROLE",
+        help="only show reports from this role (e.g. backend#1)",
+    )
+    sib.set_defaults(func=cmd_inbox)
 
     sv = sub.add_parser("verify", help="auto-detect stack and run lint/test gate")
     sv.add_argument("--cwd", default=None, help="working directory (default: current dir)")
@@ -2407,7 +2476,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     ok = bool(resp.get("ok"))
-    if args.command in {"list", "status"}:
+    if args.command in {"list", "status", "inbox"}:
         try:
             banner = _instance_banner()
         except Exception:
@@ -2419,6 +2488,8 @@ def main(argv: list[str] | None = None) -> int:
         report = resp.get("report")
         if isinstance(report, dict) and report.get("any_stalled"):
             ok = False
+    elif "items" in resp:
+        _print_inbox_items(resp["items"])
     elif "status" in resp:
         for role, state in resp["status"].items():
             print(f"  {role:12s} {state}")
