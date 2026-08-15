@@ -277,6 +277,75 @@ class TestEvidenceStillAppended:
         assert "short-evidence.png" in notice
 
 
+class TestIssueRefFromAssignSpecNotAgentProse:
+    """#244: the ref badge shown to Lead must come from the ORIGINAL assign
+    spec (`PaneState.last_assigned_task`, set by the cockpit at dispatch
+    time) — never from whatever the agent typed in its own note. Proven
+    concretely by a note that types the WRONG issue number: the notice must
+    still surface the assign-spec's correct ref, not the agent's mistake."""
+
+    def test_ref_from_assign_spec_appears_in_notice(self, orch, tmp_path):
+        proj = "proj"
+        _register_pane(orch, LEAD.name, proj, _make_alive_session())
+        _register_pane(orch, "backend", proj, _make_alive_session())
+        orch._pane_state[f"{proj}::backend"] = PaneState(
+            last_assigned_task="[ROLE: backend] แก้ issue #244: ..."
+        )
+
+        captured: list[str] = []
+        orch._notify_lead = lambda ns, notice, **kw: captured.append(notice)  # type: ignore[assignment]
+
+        orch.done("backend", note="fixed the digest", project=proj)
+
+        assert captured
+        assert "[ref #244]" in captured[0]
+
+    def test_agent_typed_wrong_number_does_not_override_computed_ref(self, orch, tmp_path):
+        proj = "proj"
+        _register_pane(orch, LEAD.name, proj, _make_alive_session())
+        _register_pane(orch, "backend", proj, _make_alive_session())
+        orch._pane_state[f"{proj}::backend"] = PaneState(
+            last_assigned_task="แก้ issue #244: digest computed facts"
+        )
+
+        captured: list[str] = []
+        orch._notify_lead = lambda ns, notice, **kw: captured.append(notice)  # type: ignore[assignment]
+
+        # Agent's own note mistypes the issue as #234 (the real incident).
+        orch.done("backend", note="#234 fix done", project=proj)
+
+        notice = captured[0]
+        assert "[ref #244]" in notice  # cockpit-computed ref wins
+        assert "#234" in notice  # agent's own text still visible, just not trusted as identity
+
+    def test_no_ref_in_assign_spec_omits_badge(self, orch, tmp_path):
+        proj = "proj"
+        _register_pane(orch, LEAD.name, proj, _make_alive_session())
+        _register_pane(orch, "backend", proj, _make_alive_session())
+        orch._pane_state[f"{proj}::backend"] = PaneState(last_assigned_task="general cleanup task")
+
+        captured: list[str] = []
+        orch._notify_lead = lambda ns, notice, **kw: captured.append(notice)  # type: ignore[assignment]
+
+        orch.done("backend", note="cleaned up", project=proj)
+
+        assert "[ref" not in captured[0]
+
+    def test_ref_also_appears_on_failed_handoff(self, orch, tmp_path):
+        proj = "proj"
+        _register_pane(orch, LEAD.name, proj, _make_alive_session())
+        _register_pane(orch, "qa", proj, _make_alive_session())
+        orch._pane_state[f"{proj}::qa"] = PaneState(last_assigned_task="verify issue #244")
+
+        captured: list[str] = []
+        orch._notify_lead = lambda ns, notice, **kw: captured.append(notice)  # type: ignore[assignment]
+
+        orch.done("qa", note="tests failed", project=proj, failed=True)
+
+        assert "[ref #244]" in captured[0]
+        assert "FAILED" in captured[0]
+
+
 class TestWriteBeforeNotice:
     def test_session_md_written_before_notice_sent(self, orch, tmp_path):
         """The session-md file must exist by the time the Lead notice fires,

@@ -58,12 +58,16 @@ class _FakeMgr:
         dirty: bool = False,
         remove_ok: bool = True,
         remove_reason: str = "",
+        uncommitted: int = 0,
+        merge_conflicts: bool | None = False,
     ):
         self._info = info
         self._reason = reason
         self._commits = commits
         self._dirty = dirty
         self._remove = (remove_ok, remove_reason)
+        self._uncommitted = uncommitted
+        self._merge_conflicts = merge_conflicts
         self.safe_remove_calls = 0
 
     def create(self, base_cwd, project_ns, role, ts, exclude_ports=frozenset()):
@@ -75,6 +79,12 @@ class _FakeMgr:
 
     def is_dirty(self, info):
         return self._dirty
+
+    def uncommitted_count(self, info):
+        return self._uncommitted
+
+    def merge_conflicts_with_base(self, git_root, branch):
+        return self._merge_conflicts
 
     def diffstat(self, info):
         return " src/x.ts | 3 +++"
@@ -213,7 +223,7 @@ class TestBareRoleWorktreeCollision:
 
 class TestFinalizeWorktree:
     def test_commits_produce_merge_proposal(self, orch, monkeypatch):
-        fake = _FakeMgr(info=_info(), commits=3)
+        fake = _FakeMgr(info=_info(), commits=3, merge_conflicts=False)
         monkeypatch.setattr(wm_mod, "WorktreeManager", lambda *a, **k: fake)
 
         orch._finalize_worktree("proj", "frontend", _info().as_dict())
@@ -221,6 +231,39 @@ class TestFinalizeWorktree:
         msg = orch._notify_lead.call_args[0][1]
         assert "merge --no-ff wt/frontend-1" in msg
         assert "3 commit" in msg
+        assert "พร้อม merge" in msg  # clean + merge-tree-clean → readiness claim allowed
+
+    def test_dirty_worktree_with_commits_never_claims_ready_to_merge(self, orch, monkeypatch):
+        """#244 near-miss: a branch can carry accepted commits AND still hold
+        fresh uncommitted work on top — the proposal must warn instead of
+        claiming "พร้อม merge", and must not surface the merge command as an
+        available step."""
+        fake = _FakeMgr(info=_info(), commits=2, dirty=True, uncommitted=5)
+        monkeypatch.setattr(wm_mod, "WorktreeManager", lambda *a, **k: fake)
+
+        orch._finalize_worktree("proj", "backend", _info().as_dict())
+        msg = orch._notify_lead.call_args[0][1]
+        assert "พร้อม merge" not in msg
+        assert "5 ไฟล์ที่ยังไม่ commit" in msg
+        assert "merge --no-ff" not in msg  # not offered as a step while dirty
+
+    def test_merge_conflict_against_current_base_warns(self, orch, monkeypatch):
+        fake = _FakeMgr(info=_info(), commits=1, dirty=False, merge_conflicts=True)
+        monkeypatch.setattr(wm_mod, "WorktreeManager", lambda *a, **k: fake)
+
+        orch._finalize_worktree("proj", "backend", _info().as_dict())
+        msg = orch._notify_lead.call_args[0][1]
+        assert "conflict" in msg.lower()
+        assert "พร้อม merge" not in msg
+
+    def test_unknown_merge_status_does_not_claim_ready(self, orch, monkeypatch):
+        fake = _FakeMgr(info=_info(), commits=1, dirty=False, merge_conflicts=None)
+        monkeypatch.setattr(wm_mod, "WorktreeManager", lambda *a, **k: fake)
+
+        orch._finalize_worktree("proj", "backend", _info().as_dict())
+        msg = orch._notify_lead.call_args[0][1]
+        assert "พร้อม merge" not in msg
+        assert "unknown" in msg.lower()
 
     def test_empty_clean_worktree_is_kept_and_warns(self, orch, monkeypatch):
         # #161: a zero-commit worktree must NEVER be auto-removed, even when

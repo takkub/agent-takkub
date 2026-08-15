@@ -787,6 +787,38 @@ class WorktreeManager:
         )
         return res.stdout.strip() if res.ok else ""
 
+    def uncommitted_count(self, info: WorktreeInfo) -> int:
+        """Number of changed paths in the worktree (#244) — `is_dirty` alone
+        only answers yes/no; the Lead-facing merge proposal needs the actual
+        count so "⚠ N ไฟล์ยังไม่ commit" is a real number, not a guess."""
+        res = self._run(["-C", info.path, "status", "--porcelain"], None)
+        if not res.ok:
+            return 0
+        return len([ln for ln in res.stdout.splitlines() if ln.strip()])
+
+    def merge_conflicts_with_base(self, git_root: str, branch: str) -> bool | None:
+        """Whether a 3-way merge of *branch* against the CURRENT base HEAD
+        would conflict (#244 — "merge สะอาดไหม เทียบ base ปัจจุบัน").
+
+        Deliberately compares against ``git_root``'s HEAD *now*, not the
+        worktree's creation-time ``base_sha`` — other work may have merged
+        into base since the isolated pane started. Read-only: `git
+        merge-tree <merge-base> HEAD <branch>` writes conflict markers to
+        stdout without ever touching the index or working tree, so it is
+        safe to run on a live main tree. Returns ``None`` (unknown, not
+        "clean") when the merge-base or merge-tree probe itself fails —
+        callers must treat that as "couldn't verify", never as a green
+        light.
+        """
+        base = self._run(["-C", git_root, "merge-base", "HEAD", branch], None)
+        base_sha = base.stdout.strip() if base.ok else ""
+        if not base_sha:
+            return None
+        mt = self._run(["-C", git_root, "merge-tree", base_sha, "HEAD", branch], None)
+        if not mt.ok:
+            return None
+        return "<<<<<<<" in mt.stdout
+
     # -- destroy (2-tier, adopted from agent-orchestrator) ------------------
 
     def safe_remove(self, info: WorktreeInfo) -> tuple[bool, str]:
@@ -1112,21 +1144,87 @@ def parse_worktree_list(porcelain: str) -> list[dict]:
     return out
 
 
-def build_merge_proposal(role: str, info: WorktreeInfo, commits: int, diffstat: str) -> str:
+def summarize_diffstat(diffstat: str) -> tuple[int, list[str]]:
+    """Parse `git diff --stat` output into (files_touched, top_level_dirs).
+
+    Pure — no I/O. Reads the per-file lines (each carries a literal ``|``
+    column separator; the trailing "N files changed, ..." summary line has
+    none) so a proposal/digest can say WHERE a change landed without
+    dumping the full stat block. Order-preserving, deduped.
+    """
+    dirs: list[str] = []
+    files = 0
+    for line in diffstat.strip().splitlines():
+        if "|" not in line:
+            continue
+        files += 1
+        path = line.split("|", 1)[0].strip()
+        top = path.split("/", 1)[0] if "/" in path else path
+        if top and top not in dirs:
+            dirs.append(top)
+    return files, dirs
+
+
+def build_merge_proposal(
+    role: str,
+    info: WorktreeInfo,
+    commits: int,
+    diffstat: str,
+    *,
+    dirty: bool = False,
+    uncommitted: int = 0,
+    merge_conflicts: bool | None = None,
+) -> str:
     """Lead-facing PROPOSAL when an isolated pane finishes with commits to merge.
 
     Never auto-merges — mirrors the cockpit's propose-then-fire doctrine (same
     as the verify-fail handoff). The worktree is kept until the Lead merges.
+
+    #244 (real near-miss, twice in one night): commits > 0 does NOT mean
+    "ready to merge" — the branch can carry accepted commits AND still hold
+    fresh uncommitted work on top, and this used to unconditionally open
+    with "N commit พร้อม merge กลับ base" regardless. `dirty`/`uncommitted`
+    gate the readiness claim and demote the merge command out of the first
+    actionable step; `merge_conflicts` (``None`` when undetermined —
+    see :meth:`WorktreeManager.merge_conflicts_with_base`) reports whether a
+    3-way merge against the CURRENT base would conflict.
     """
     stat = diffstat.strip() or "(diffstat ว่าง)"
-    return (
+    files_touched, top_dirs = summarize_diffstat(diffstat)
+    dirs_note = f" ({', '.join(top_dirs[:5])})" if top_dirs else ""
+    header = (
         f"🌿 [{role} worktree] ทำงานบน branch `{info.branch}` (isolated) — "
-        f"{commits} commit พร้อม merge กลับ base\n\n"
-        f"diffstat:\n{stat}\n\n"
-        "เสนอ merge (propose-then-fire, ห้าม auto):\n"
-        f"1. review: `git -C {info.git_root} diff {info.base_sha}..{info.branch}`\n"
-        f"2. merge:  `git -C {info.git_root} merge --no-ff {info.branch}`\n"
-        f"3. cleanup: `git -C {info.git_root} worktree remove {info.path}` "
-        f"แล้ว `git -C {info.git_root} branch -d {info.branch}`\n"
-        "worktree ยังอยู่จนกว่าจะ merge — อย่าลบก่อน · render proposal ให้ user confirm ก่อน fire"
+        f"{commits} commit ahead ของ base"
     )
+    if dirty:
+        readiness = (
+            f"⚠ ยังมี {uncommitted} ไฟล์ที่ยังไม่ commit ใน worktree — "
+            "ของจริงอาจยังไม่อยู่ใน branch — ยังไม่พร้อมให้ merge"
+        )
+    elif merge_conflicts is True:
+        readiness = "⚠ merge-tree เจอ conflict กับ base ปัจจุบัน — ต้อง resolve ก่อน merge"
+    elif merge_conflicts is False:
+        readiness = f"✅ {commits} commit พร้อม merge กลับ base (merge-tree clean กับ base ปัจจุบัน)"
+    else:
+        readiness = f"{commits} commit — merge-tree ตรวจสถานะไม่ได้ (unknown) · review diff ก่อน merge"
+    lines = [
+        header,
+        readiness,
+        "",
+        f"ไฟล์ที่แตะ: {files_touched} ไฟล์{dirs_note}",
+        "",
+        f"diffstat:\n{stat}",
+        "",
+        "เสนอ merge (propose-then-fire, ห้าม auto):",
+        f"1. review: `git -C {info.git_root} diff {info.base_sha}..{info.branch}`",
+    ]
+    if dirty:
+        lines.append(f"2. ให้ pane commit ให้ครบก่อนที่ {info.path} — merge/cleanup รอหลังจากนั้น")
+    else:
+        lines.append(f"2. merge:  `git -C {info.git_root} merge --no-ff {info.branch}`")
+        lines.append(
+            f"3. cleanup: `git -C {info.git_root} worktree remove {info.path}` "
+            f"แล้ว `git -C {info.git_root} branch -d {info.branch}`"
+        )
+    lines.append("worktree ยังอยู่จนกว่าจะ merge — อย่าลบก่อน · render proposal ให้ user confirm ก่อน fire")
+    return "\n".join(lines)
