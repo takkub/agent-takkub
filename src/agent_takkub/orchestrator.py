@@ -6165,6 +6165,13 @@ class Orchestrator(
         Used by Lead to reset the board and by the cockpit when a tab is
         closed."""
         project_ns = self._resolve_project(project)
+        # #249 item 5: a board reset should sweep away any `takkub wait`
+        # registration too — the roles it was watching are about to be
+        # closed out from under it, so leaving it behind just makes the
+        # next `takkub wait` stumble over a stale registration.
+        cancel_wait = getattr(self, "cancel_wait", None)
+        if cancel_wait is not None:
+            cancel_wait(project_ns)
         names = [n for n in list(self._project_panes(project_ns).keys()) if n != LEAD.name]
         if not names:
             return True, "no teammates to close"

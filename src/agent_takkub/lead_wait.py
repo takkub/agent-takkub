@@ -51,6 +51,21 @@ from .roles import LEAD
 # blocking new waits forever without needing a periodic QTimer reaper.
 _WAIT_STALE_GRACE_S = 120.0
 
+# #249: a role with no pane at all yet is ambiguous for the first few seconds
+# after `begin_wait` — `takkub assign` can return before the async spawn has
+# actually created the pane entry. Only treat "no pane" as a hard "never
+# spawned" verdict once this grace window has elapsed since the wait started.
+_WAIT_NEVER_SPAWNED_GRACE_S = 15.0
+
+# #249: pane states that can never produce a NEW report without a fresh
+# spawn (which would flip the pane back to "active"/"working" on the very
+# next poll tick). Before this fix `_resolve_role_wait_status` only special-
+# cased "working" — every other state (including "done" itself, and "empty"/
+# "exited" after the 2.5s done->auto-close) fell through to the generic
+# "pending: pane state: X" branch and stayed pending until the full timeout
+# elapsed, even though the role had already finished (or could never finish).
+_WAIT_TERMINAL_PANE_STATES = frozenset({"empty", "done", "exited", "error"})
+
 
 class LeadWaitMixin:
     """Provides `begin_wait` / `poll_wait` / `end_wait` on `Orchestrator`.
@@ -129,8 +144,13 @@ class LeadWaitMixin:
         detailed: dict,
     ) -> tuple[str, str | None]:
         """One role's status for an in-progress wait: ``("done"|"failed"|
-        "pending", detail)``. *detail* is None for a resolved role, else a
-        short human reason a pending role hasn't resolved yet.
+        "gone"|"pending", detail)``. *detail* is None for a resolved role,
+        else a short human reason. "gone" means this role will never
+        produce a report for THIS wait (never spawned, or its pane already
+        reached a terminal state with no report on record) — the caller
+        treats it the same as resolved (not still-pending) so the wait
+        doesn't block to the full timeout waiting for something that can
+        never arrive (#249).
 
         *panes* / *detailed* are computed once per `poll_wait` tick by the
         caller and passed in — each covers every role in the project, so
@@ -138,20 +158,31 @@ class LeadWaitMixin:
         count²) work for nothing.
 
         A `_wait_done_events` entry timestamped BEFORE `started_ts` is a
-        completion from an earlier cycle — deliberately ignored (#241's same
-        staleness philosophy: `wait` tracks NEW completions from the moment
-        it started watching, not whatever already happened before the Lead
-        turn that called it).
+        completion from an earlier cycle — ignored for freshness purposes
+        (#241's same staleness philosophy: `wait` tracks NEW completions
+        from the moment it started watching, not whatever already happened
+        before the Lead turn that called it) UNLESS the role's pane has
+        since reached a terminal state (see `_WAIT_TERMINAL_PANE_STATES`
+        below): once nothing further can happen without a fresh spawn, the
+        stale event is the only report this lifecycle will ever produce, so
+        it's surfaced instead of leaving the role pending forever (#249).
         """
         event = getattr(self, "_wait_done_events", {}).get((project_ns, role))
-        if event is not None and event.get("ts", 0.0) >= started_ts:
+        fresh = event is not None and event.get("ts", 0.0) >= started_ts
+        if fresh:
             if self._has_pending_lead_notice(project_ns, role):
                 return "pending", "รายงานถูกสร้างแล้ว กำลังรอส่งเข้า Lead (ยังไม่ถึง pane)"
             return ("failed" if event.get("failed") else "done"), None
 
         pane = panes.get(role)
         if pane is None:
-            return "pending", "role ไม่พบ — ยังไม่ถูก spawn ในโปรเจคนี้ (เช็คชื่อ role)"
+            # `takkub assign` can report "spawning async" before the pane
+            # entry actually exists — a short grace window keeps a wait
+            # started right after assign from mistaking that race for
+            # "never spawned" (#249 item 2).
+            if time.time() - started_ts < _WAIT_NEVER_SPAWNED_GRACE_S:
+                return "pending", "ยังไม่พบ pane ของ role นี้ — กำลังรอ spawn"
+            return "gone", "role ไม่พบ — ไม่เคยถูก spawn ในโปรเจคนี้ (เช็คชื่อ role)"
 
         info = detailed.get(role, {})
         state = info.get("state", pane.state)
@@ -170,6 +201,13 @@ class LeadWaitMixin:
                 return "pending", f"ยังทำงานอยู่ แต่ไม่มีความคืบหน้า {stall_min}m"
             return "pending", "ยังทำงานอยู่"
 
+        if state in _WAIT_TERMINAL_PANE_STATES:
+            if event is not None:
+                if self._has_pending_lead_notice(project_ns, role):
+                    return "pending", "รายงานถูกสร้างแล้ว กำลังรอส่งเข้า Lead (ยังไม่ถึง pane)"
+                return ("failed" if event.get("failed") else "done"), None
+            return "gone", f"pane ปิดไปแล้วโดยไม่มีรายงาน done (state: {state})"
+
         return "pending", f"pane state: {state or 'unknown'}"
 
     def poll_wait(self, project_ns: str, wait_id: str) -> dict:
@@ -180,10 +218,15 @@ class LeadWaitMixin:
         newer `begin_wait` in another project — registrations are per-
         project so this only happens on a genuine client bug). Otherwise
         ``{"ok": True, "done": {role: "delivered"}, "failed": {role:
-        "delivered"}, "pending": {role: reason}, "elapsed": float,
-        "expired": bool}``. The registration is auto-removed once every role
-        resolves or the timeout is reached, so a client never needs to call
-        `end_wait` on the success path — only on early abort (Ctrl-C).
+        "delivered"}, "gone": {role: reason}, "pending": {role: reason},
+        "elapsed": float, "expired": bool}``. "gone" roles (#249) will never
+        report for this wait (never spawned past the grace window, or their
+        pane already reached a terminal state with nothing on record) — the
+        registration resolves them the same as done/failed rather than
+        blocking on them. The registration is auto-removed once every role
+        resolves (or is gone) or the timeout is reached, so a client never
+        needs to call `end_wait` on the success path — only on early abort
+        (Ctrl-C).
         """
         active = self._active_waits.get(project_ns)
         if active is None or active["wait_id"] != wait_id:
@@ -202,6 +245,7 @@ class LeadWaitMixin:
 
         done: dict[str, str] = {}
         failed: dict[str, str] = {}
+        gone: dict[str, str] = {}
         pending: dict[str, str] = {}
         for role in active["roles"]:
             kind, detail = self._resolve_role_wait_status(
@@ -211,6 +255,8 @@ class LeadWaitMixin:
                 done[role] = "delivered"
             elif kind == "failed":
                 failed[role] = "delivered"
+            elif kind == "gone":
+                gone[role] = detail or "unresolvable"
             else:
                 pending[role] = detail or "unknown"
 
@@ -224,6 +270,7 @@ class LeadWaitMixin:
             "msg": "resolved" if not pending else f"{len(pending)} role(s) still pending",
             "done": done,
             "failed": failed,
+            "gone": gone,
             "pending": pending,
             "elapsed": elapsed,
             "expired": expired,
@@ -238,3 +285,18 @@ class LeadWaitMixin:
             self._active_waits.pop(project_ns, None)
             return True
         return False
+
+    def cancel_wait(self, project_ns: str) -> tuple[bool, str]:
+        """`takkub wait --cancel` (#249 item 5): release *project_ns*'s
+        active wait registration regardless of which client owns it —
+        unlike `end_wait`, the caller doesn't need to know `wait_id` (a
+        fresh CLI invocation never has it). Also used by
+        `close_all_teammates` so a board reset doesn't leave a stale
+        registration behind for the next `takkub wait` to stumble over.
+        """
+        active = self._active_waits.pop(project_ns, None)
+        if active is None:
+            return False, "no active wait to cancel"
+        return True, f"cancelled wait covering {len(active['roles'])} role(s): " + ", ".join(
+            active["roles"]
+        )
