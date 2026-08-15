@@ -136,3 +136,105 @@ provider-specific gap to flag for #103.
 
 - `src/agent_takkub/remote/notify.py` — `LeadNotifier._resync()`: skip re-resolving a
   project's JSONL path once it already has a live, identity-matched tail.
+
+## #234 follow-up — the skip-forever fast path was wrong for uuid-less providers
+
+Lead review before merge caught a multi-provider regression in the fix above: it treated
+`project_ns in self._tails` as proof of a stable resolved path for **every** provider, but that
+proof only holds for a provider whose `_HistoryScanner.requires_session_uuid` is `True`.
+
+### Root cause (proven)
+
+`_lead_uuids_by_project()` (`remote/notify.py`) admits a project into `wanted` when
+`uuid or not scanner.requires_session_uuid` — so `gemini` and `codex`
+(`requires_session_uuid=False`, `remote/notify.py:1091,1099`) are admitted with an **empty**
+`session_uuid` whenever the pane hasn't recorded one (the normal case for these providers, which
+don't take an explicit `--session-id` at spawn). Their identity triple is then
+`(provider, "", spawn_ts)` — `spawn_ts` is stamped once at pane spawn and never changes for the
+life of the pane, so **this identity is permanently constant**. The #229 eviction loop can never
+see it drift, so the naive `project_ns in self._tails: continue` fast path skipped re-resolving
+these providers forever, not just redundantly.
+
+That would be harmless if `resolve_session` were a pure function of the identity triple for these
+providers too — it is not. `gemini_helper.resolve_gemini_jsonl_for_cwd()` (uuid-less branch,
+`gemini_helper.py:226-230`) does `max(base.glob("session-*.jsonl"), key=mtime)` with **no cache**:
+its return value tracks whichever `.jsonl` agy most recently touched, and changes the instant agy
+rotates to a new conversation file — with zero change to `(provider, "", spawn_ts)`. Concretely: a
+gemini Lead pane's tail would silently stop advancing the moment agy rotated conversation files,
+with no error, no signal, and no self-heal — the Mobile console would just quietly go stale.
+
+`codex` uses the same `requires_session_uuid=False` path and is therefore exposed to the identical
+fast-path bug in principle, but happened not to regress in observable behavior because its own
+resolver, `_resolve_codex_jsonl_path()`, independently pins its result forever in
+`_CODEX_RESOLVE_CACHE` (`remote/notify.py:842-899`) the first time it resolves a given
+`(cwd, uuid, not_before)` key — a property of that one provider's resolver, not an invariant
+`_resync()`'s fast path is entitled to assume for "any uuid-less provider."
+
+### Fix
+
+`_resync()`'s tail-reuse fast path now distinguishes the two cases instead of collapsing them into
+one `project_ns in self._tails` check:
+
+- **`requires_session_uuid=True` (claude):** unchanged — skip entirely once tailed. The eviction
+  loop's identity check is still a complete proof for these providers.
+- **`requires_session_uuid=False` (gemini, codex):** stay live, but throttled to at most one
+  re-resolve every `_UUIDLESS_RESYNC_THROTTLE_S = 5.0` seconds per project (new
+  `self._uuidless_resolved_at: dict[str, float]`, keyed by `project_ns`, read with
+  `time.monotonic()`). A resolved path that differs from the currently-tailed one swaps the tail
+  in (fresh offset at current EOF, same as a brand-new tail) and pushes `session_changed` so
+  Mobile reloads its cached history for that project — the same signal already used for an
+  identity-triple change.
+
+**Why 5 seconds:** a provider rotating its conversation file is a rare, user-driven event
+(starting a fresh chat), so a few seconds of lag before Mobile notices is imperceptible. 5s caps
+the added stat cost to at most once per 5s per uuid-less project regardless of the 200ms poll
+cadence — a ~25x reduction versus the pre-#229 every-tick behavior — while still being short
+enough that a rotation is picked up within one user-perceptible beat instead of "never," which is
+what the #229 fix regressed to.
+
+### Verification
+
+- New tests in `tests/test_remote_notify.py::TestUuidlessProviderResyncThrottle`:
+  - `test_gemini_tail_repoints_to_a_rotated_file_after_the_throttle_elapses` — fails against the
+    #229-only fix (tail path never advances past the first file); passes after this fix (stays on
+    the first file inside the throttle window, then repoints and emits `session_changed` once the
+    throttle elapses).
+  - `test_claude_tail_is_never_re_resolved_regardless_of_elapsed_time` — proves the
+    session-uuid-anchored fast path is untouched by this change: zero extra resolve calls no
+    matter how much simulated wall-clock time passes.
+- `tests/test_remote_notify.py` — 101 passed (99 pre-existing + 2 new).
+- `tests/test_orchestrator_notify_lead.py`, `tests/test_remote_pwa_resume.py`,
+  `tests/test_lead_draft_guard.py` — all passed.
+- `ruff check src/agent_takkub/remote/notify.py tests/test_remote_notify.py` — clean.
+- `lint-imports` — 25/25 contracts kept, 0 broken.
+
+### Re-measured 20-project/50-tick harness (this fix)
+
+Same harness shape as the original #229 measurement (steady state: all sessions already resolved
+and tailed, then 50 more `_resync()` ticks), split by provider family since they now take
+different code paths:
+
+| | resolve/glob calls | wall time for 50 ticks |
+|---|---|---|
+| **claude** (session-uuid-anchored, 20 projects) | 0 | 4.71ms |
+| **gemini** (uuid-less, throttled, 20 projects, ticks spaced 200ms apart in simulated time = 10s total) | 20 (≈1 per project over the 10s window, bounded by the 5s throttle) | 4.81ms |
+
+The claude number reproduces the original #229 result (0 calls, sub-5ms) unchanged — this fix adds
+no cost to the session-uuid-anchored path. The gemini number shows the throttle working as
+designed: re-resolves happen (unlike the #229-only fix's silent 0-forever), but bounded to
+roughly once per project per throttle window instead of once per project *per tick* (which would
+have been 1000 calls, reproducing the original stat storm, for this same 50-tick/20-project
+shape).
+
+(Harness script: ad hoc, not committed — `LeadNotifier` built with 20 fake projects per run,
+`notifier._timer.stop()` to drive `_resync()` manually, provider resolver wrapped with a call
+counter, `notify_mod.time` swapped for a controllable fake clock for the gemini run to simulate
+200ms-spaced ticks without a real 10-second sleep.)
+
+## Files changed (this follow-up)
+
+- `src/agent_takkub/remote/notify.py` — `LeadNotifier._resync()`: uuid-less providers
+  (`requires_session_uuid=False`) now re-resolve on a throttle instead of being skipped forever;
+  corrected the code comment's "proof" claim to state the condition under which it actually holds.
+- `tests/test_remote_notify.py` — added `TestUuidlessProviderResyncThrottle` (2 tests) and a
+  reusable `_FakeMonotonicClock` test helper.

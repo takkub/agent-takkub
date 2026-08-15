@@ -50,6 +50,7 @@ way, per-project, for the same reason.
 from __future__ import annotations
 
 import json
+import time
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -73,6 +74,19 @@ _MAX_EVENT_CHARS = 16000
 # Cannot go token-by-token: the JSONL holds whole records, and streaming raw
 # PTY bytes (the pre-rewrite source) is exactly the TUI junk we removed.
 _POLL_MS = 200
+# #234 regression guard: a provider with `requires_session_uuid=False`
+# (gemini, codex) has an identity triple whose session_uuid is permanently
+# `""` — it can never be evicted/re-proven by `_resync()`'s identity check,
+# yet its resolver can still legitimately re-point to a *different* file
+# under an unchanged identity (e.g. gemini's uuid-less lookup picks
+# `max(glob(...), key=mtime)`, uncached — it silently re-points the instant
+# gemini rotates to a new conversation file). Such an identity must keep
+# being re-resolved, just not on every 200ms tick — throttled to at most
+# once per this many seconds per project. A rotated file is a rare,
+# user-driven event (starting a fresh conversation), so a few seconds of
+# lag before Mobile notices is imperceptible, while this still bounds the
+# #229 stat-storm risk to a ~25x reduction versus per-tick (5s / 200ms).
+_UUIDLESS_RESYNC_THROTTLE_S = 5.0
 _DEFAULT_HISTORY_LIMIT = 200
 # History reads are one-shot (reconnect/project-switch), not the live poll
 # tail, but a long-running Lead session's JSONL can grow into the tens of
@@ -1278,6 +1292,10 @@ class LeadNotifier(QObject):
         # only that project's cached history.
         self._session_keys: dict[str, tuple[str, str, float]] = {}
         self._pending_session_changes: set[str] = set()
+        # project_ns -> monotonic time of the last re-resolve for a
+        # uuid-less provider's already-tailed session (throttle state, see
+        # `_UUIDLESS_RESYNC_THROTTLE_S`).
+        self._uuidless_resolved_at: dict[str, float] = {}
         self._timer = QTimer(self)
         self._timer.setInterval(_POLL_MS)
         self._timer.timeout.connect(self._poll_all)
@@ -1341,28 +1359,52 @@ class LeadNotifier(QObject):
             if wanted.get(project_ns) != (tail.provider, tail.session_uuid, tail.spawn_ts):
                 del self._tails[project_ns]
 
-        # start tailing newly-discovered sessions only — a project already
-        # tailing its current session is left untouched (offset preserved),
-        # and — #229 — skipped *before* touching the filesystem at all: the
-        # eviction loop just above already deleted any tail whose identity
-        # no longer matches `wanted`, so a project_ns still in `self._tails`
-        # here is proof its resolved path can't have changed, no glob
+        # start tailing newly-discovered sessions — a project already
+        # tailing its current session under a session-uuid-anchored provider
+        # (claude) is left untouched (offset preserved) and — #229 —
+        # skipped *before* touching the filesystem at all: the eviction
+        # loop just above already deleted any tail whose identity no longer
+        # matches `wanted`, so a project_ns still in `self._tails` under
+        # such a provider is proof its resolved path can't have changed
+        # (`resolve_session` is a pure function of
+        # `(project_ns, session_uuid)` for these providers) — no glob
         # needed. Without this, every project got a fresh provider-store
         # glob (recursive stat) on *every* tick of this 200ms QTimer, on the
         # Qt main thread, regardless of whether anything changed — the
         # `_resolve_claude_jsonl_path` stat storm behind the #229 1.5-1.8s
         # SOFT stalls.
+        #
+        # #234: that proof does NOT extend to a provider with
+        # `requires_session_uuid=False` (gemini, codex) — its identity
+        # triple's session_uuid is permanently `""`, so it can never be
+        # evicted/re-proven by the loop above, yet its resolver can still
+        # legitimately re-point to a different file under that unchanged
+        # identity (see `_UUIDLESS_RESYNC_THROTTLE_S`). Those stay live,
+        # throttled instead of skipped outright.
+        #
         # A project whose jsonl hasn't been created/flushed yet (path is
         # still None) simply stays out of `_tails` and is retried here on
         # every call — `_poll_all()` calls `_resync()` on every tick, so a
         # session that resolves late (fresh spawn/resume timing) is picked
         # up on the very next poll instead of only on the next
         # `statusChanged` signal.
+        now = time.monotonic()
         for project_ns, (provider, session_uuid, spawn_ts) in wanted.items():
-            if project_ns in self._tails:
-                continue
+            existing = self._tails.get(project_ns)
+            scanner = history_scanner(provider)
+            uuidless = scanner is not None and not scanner.requires_session_uuid
+            if existing is not None:
+                if not uuidless:
+                    continue
+                last = self._uuidless_resolved_at.get(project_ns, 0.0)
+                if now - last < _UUIDLESS_RESYNC_THROTTLE_S:
+                    continue
+            if uuidless:
+                self._uuidless_resolved_at[project_ns] = now
             path = self._resolve_jsonl(project_ns, session_uuid, provider, spawn_ts)
             if path is None:
+                continue
+            if existing is not None and path == existing.path:
                 continue
             try:
                 size = path.stat().st_size
@@ -1376,9 +1418,12 @@ class LeadNotifier(QObject):
                 spawn_ts=spawn_ts,
                 offset=offset,
             )
-            if project_ns in self._pending_session_changes:
+            if project_ns in self._pending_session_changes or existing is not None:
                 self._broadcaster.push("session_changed", {"provider": provider}, project_ns)
                 self._pending_session_changes.discard(project_ns)
+
+        for gone in set(self._uuidless_resolved_at) - set(wanted):
+            del self._uuidless_resolved_at[gone]
 
     def _emit_lead_working_transitions(self) -> None:
         """Push a 'working' / 'idle' SSE event whenever the Lead pane's own

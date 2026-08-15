@@ -69,6 +69,18 @@ class _FakeBroadcaster:
         self.events.append((event, data, project_ns))
 
 
+class _FakeMonotonicClock:
+    """Stand-in for the `time` module `_resync()` reads via `time.monotonic()`
+    — controllable so a test can cross the `_UUIDLESS_RESYNC_THROTTLE_S`
+    boundary deterministically instead of sleeping."""
+
+    def __init__(self) -> None:
+        self.value = 0.0
+
+    def monotonic(self) -> float:
+        return self.value
+
+
 @pytest.fixture
 def qapp() -> QCoreApplication:
     return QCoreApplication.instance() or QCoreApplication([])
@@ -1272,6 +1284,104 @@ class TestLeadOutputTail:
         notifier._poll_all()  # stopped notifier must not still be polling
         orch.agentDone.emit("proj", "backend", "note")
         assert broadcaster.events == []
+
+
+class TestUuidlessProviderResyncThrottle:
+    """#234 regression: #229's `project_ns in self._tails` fast path proves
+    a resolved path is stable only for a session-uuid-anchored provider
+    (claude) — the eviction loop above it deletes the tail the instant that
+    identity drifts. A provider with `requires_session_uuid=False` (gemini,
+    codex) has a permanently-empty session_uuid in its identity triple, so
+    that proof never applies to it; its resolver can still legitimately
+    re-point to a different file (e.g. gemini's uuid-less lookup is an
+    uncached newest-mtime glob) without the identity ever changing. These
+    must keep being re-resolved — just throttled, not skipped forever."""
+
+    def test_gemini_tail_repoints_to_a_rotated_file_after_the_throttle_elapses(
+        self, qapp, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "agent_takkub.config.lead_cwd", lambda project=None: str(tmp_path / "cwd")
+        )
+        first = tmp_path / "session-first.jsonl"
+        first.write_text("", encoding="utf-8")
+        second = tmp_path / "session-second.jsonl"
+        second.write_text("", encoding="utf-8")
+
+        current = [first]
+        calls = {"n": 0}
+
+        def _resolve(cwd, session_uuid):
+            calls["n"] += 1
+            return current[0]
+
+        monkeypatch.setattr(gemini_helper, "resolve_gemini_jsonl_for_cwd", _resolve)
+
+        clock = _FakeMonotonicClock()
+        monkeypatch.setattr(notify_mod, "time", clock)
+
+        orch = _FakeOrch()
+        broadcaster = _FakeBroadcaster()
+        notifier = LeadNotifier(orch, broadcaster)
+        try:
+            orch.set_lead("proj", None, provider="gemini")
+            orch.statusChanged.emit()
+            assert notifier._tails["proj"].path == first
+            assert calls["n"] == 1
+
+            # agy rotates to a fresh conversation file — same
+            # (provider, "", spawn_ts) identity, different resolved path.
+            current[0] = second
+
+            # Still inside the throttle window: must not re-resolve or
+            # re-point yet — this bounds the #229 stat-storm risk.
+            notifier._poll_all()
+            assert notifier._tails["proj"].path == first
+            assert calls["n"] == 1
+
+            # Throttle elapsed: must re-resolve and pick up the rotated file.
+            clock.value += notify_mod._UUIDLESS_RESYNC_THROTTLE_S
+            notifier._poll_all()
+            assert notifier._tails["proj"].path == second
+            assert calls["n"] == 2
+            assert ("session_changed", {"provider": "gemini"}, "proj") in broadcaster.events
+        finally:
+            notifier.stop()
+
+    def test_claude_tail_is_never_re_resolved_regardless_of_elapsed_time(
+        self, qapp, tmp_path, config_dir, monkeypatch
+    ):
+        orch = _FakeOrch()
+        broadcaster = _FakeBroadcaster()
+        _write_jsonl(tmp_path, "C--proj", "uuid-1", [])
+
+        calls = {"n": 0}
+        real_resolve = notify_mod._resolve_claude_jsonl_path
+
+        def _spy(project, uuid):
+            calls["n"] += 1
+            return real_resolve(project, uuid)
+
+        monkeypatch.setattr(notify_mod, "_resolve_claude_jsonl_path", _spy)
+
+        clock = _FakeMonotonicClock()
+        monkeypatch.setattr(notify_mod, "time", clock)
+
+        notifier = LeadNotifier(orch, broadcaster)
+        try:
+            orch.set_lead("proj", "uuid-1", provider="claude")
+            orch.statusChanged.emit()
+            assert calls["n"] == 1
+
+            # A claude identity that hasn't drifted must stay pinned no
+            # matter how much wall-clock time passes — unlike the uuid-less
+            # throttle above, this path has no time-based re-check at all.
+            clock.value += notify_mod._UUIDLESS_RESYNC_THROTTLE_S * 10
+            notifier._poll_all()
+            notifier._poll_all()
+            assert calls["n"] == 1
+        finally:
+            notifier.stop()
 
 
 class TestCodexRemoteHistory:
