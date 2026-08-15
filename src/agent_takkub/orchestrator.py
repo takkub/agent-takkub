@@ -69,6 +69,7 @@ from .lead_inbox import (  # re-exported for test/compat imports; mixin provides
     _safe_session_write,
     _unwrap_notice_item,
 )
+from .lead_wait import LeadWaitMixin  # mixin providing takkub-wait methods (#242)
 from .limit_autoresume import AutoResumeMixin  # mixin providing auto-resume methods
 from .orchestrator_text import (  # re-exported for test/app/main_window imports
     _CODEX_TASK_NOTICE,
@@ -94,6 +95,7 @@ from .orchestrator_text import (  # re-exported for test/app/main_window imports
     _lead_model_override,
     _log_event,
     _looks_like_source_reference,
+    _notice_fingerprint,
     _paste_payload,
     _project_root_dir,
     _read_tail_bytes,
@@ -105,6 +107,7 @@ from .orchestrator_text import (  # re-exported for test/app/main_window imports
     _task_handoff_dir,
     _task_handoff_pointer,
     _teammate_tier,
+    _truncate_at_word_boundary,
     cwd_validation_error,
     prune_old_transcripts,
     scan_artifacts,
@@ -729,7 +732,9 @@ def _restart_reason_suffix(restart_info: dict) -> str:
     return ""
 
 
-class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMixin, QObject):
+class Orchestrator(
+    PipelineMixin, LeadInboxMixin, LeadWaitMixin, SpawnEngineMixin, AutoResumeMixin, QObject
+):
     """Owns the pane registry and routes commands.
 
     Layout policy: Lead is always pre-registered (created by main_window) and
@@ -1044,6 +1049,21 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         # In-process list of the last few `takkub done` events drives the
         # "Recent" section without hitting disk on every tick.
         self._recent_done: list[tuple[str, str, str]] = []
+        # #241: fingerprints of notice bodies Lead has already pulled via
+        # `takkub inbox`/`takkub wait` (see `_notice_fingerprint`). A later
+        # Lead Inbox Digest flush collapses a matching item to a one-line
+        # reference instead of re-pasting content Lead has already read.
+        self._inbox_seen: dict[str, set[str]] = {}
+        # #242: at most one active `takkub wait` registration per project —
+        # a second concurrent `wait` call attaches to it (unions its role
+        # set) instead of starting an independent poll loop, so stray
+        # duplicate waiters can never multiply cockpit socket load.
+        self._active_waits: dict[str, dict] = {}
+        # #242: last-seen resolution (ts + failed flag) per (project_ns,
+        # role) `done()` call, keyed independently of `_recent_done` so a
+        # `wait` registration can tell "resolved before I started watching"
+        # from "resolved just now" without racing the digest/live queues.
+        self._wait_done_events: dict[tuple[str, str], dict] = {}
         self._hot_md_timer = QTimer(self)
         self._hot_md_timer.setInterval(_HOT_MD_INTERVAL_MS)
         self._hot_md_timer.timeout.connect(self._write_hot_md)
@@ -2639,8 +2659,10 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         if len(raw_note) < TASK_HANDOFF_THRESHOLD or not session_md_path:
             return merged_note.rstrip()
         headline = raw_note.strip().splitlines()[0] if raw_note.strip() else ""
-        if len(headline) > 200:
-            headline = headline[:200].rstrip() + "…"
+        # #241: back up to a word boundary rather than a hard char slice, so
+        # the headline never severs a word/identifier mid-way — the pointer
+        # right after it means nothing is actually lost, just not inline.
+        headline = _truncate_at_word_boundary(headline, 200)
         body = f"{headline} · 📄 รายงานเต็ม: {session_md_path} (เปิดด้วย file-read tool)"
         if evidence_line:
             body = f"{body}\n{evidence_line}"
@@ -2912,6 +2934,14 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         stamp = now.strftime("%Y-%m-%dT%H%M%S")
         self._recent_done.insert(0, (project_ns, from_role, f"{stamp}-{from_role}.md"))
         del self._recent_done[20:]
+        # #242: record this resolution for any `takkub wait` registration
+        # currently watching (project_ns, from_role) — see _wait_done_events
+        # init comment. Additive-only; never read by anything except
+        # LeadWaitMixin.poll_wait.
+        getattr(self, "_wait_done_events", {})[(project_ns, from_role)] = {
+            "ts": now.timestamp(),
+            "failed": bool(failed),
+        }
         # Refresh hot.md immediately so Obsidian shows the done event
         # without waiting up to a minute for the periodic tick.
         self._write_hot_md()
@@ -3406,16 +3436,27 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         out, forcing Lead to Glob `runtime/sessions/**` by hand. This is
         that command's backing data — `takkub inbox` prints it.
 
-        Returns a list of ``{role, queue, body, origin_confirmed}``, newest
-        first within each queue tier (digest, then live, then durable).
-        ``origin_confirmed`` is `False` when the reporting pane's role slot
-        was respawned since this item was queued (#228 — the same
+        Returns a list of ``{role, queue, body, origin_confirmed, queued_ts}``,
+        newest first within each queue tier (digest, then live, then
+        durable). ``origin_confirmed`` is `False` when the reporting pane's
+        role slot was respawned since this item was queued (#228 — the same
         provenance check `_flush_lead_digest`/`_pump_lead_notify` apply at
         delivery time), `True` when confirmed live, `None` when no origin
         was recorded to check (system notices, CC relays, combined
-        digests). Optionally filtered to a single *role*.
+        digests). ``queued_ts`` (#241) is the epoch time the item joined the
+        digest debounce window, or `None` for tiers that don't track it.
+        Optionally filtered to a single *role*.
+
+        As a side effect (#241), every body returned here is fingerprinted
+        into `_inbox_seen[project_ns]` — if the SAME body later flushes out
+        of `_lead_digest_queue` via the normal digest pump, `_flush_lead_digest`
+        collapses it to a one-line reference instead of re-pasting content
+        Lead already read through this call.
         """
         project_ns = self._resolve_project(project)
+        if not hasattr(self, "_inbox_seen"):
+            self._inbox_seen = {}
+        seen = self._inbox_seen.setdefault(project_ns, set())
 
         def _origin_confirmed(item_role: str | None, pane_token: str | None) -> bool | None:
             if item_role is None or pane_token is None:
@@ -3425,10 +3466,11 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         items: list[dict] = []
 
         for entry in getattr(self, "_lead_digest_queue", {}).get(project_ns, ()):
-            body, pane_token = _unwrap_notice_item(entry)
+            body, pane_token, queued_ts = _unwrap_notice_item(entry)
             item_role = _notice_role_tag(body) or "system"
             if role is not None and item_role != role:
                 continue
+            seen.add(_notice_fingerprint(body))
             items.append(
                 {
                     "role": item_role,
@@ -3437,11 +3479,12 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                     "origin_confirmed": _origin_confirmed(
                         item_role if item_role != "system" else None, pane_token
                     ),
+                    "queued_ts": queued_ts,
                 }
             )
 
         for entry in getattr(self, "_lead_notify_queue", {}).get(project_ns, ()):
-            body, pane_token = _unwrap_notice_item(entry)
+            body, pane_token, _live_ts = _unwrap_notice_item(entry)
             item_role = _notice_role_tag(body) or "system"
             if role is not None and item_role != role:
                 continue

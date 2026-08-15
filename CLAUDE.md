@@ -48,6 +48,8 @@ takkub assign --role <r> --isolation worktree "<task>" # แยก worktree (Mul
 takkub assign --role qa --plan --shards N "<task>"     # planner แบ่ง bucket → fan-out (browser e2e เท่านั้น)
 takkub assign --role <r> --auto-chain "<task>"         # impl done → auto verify sequence
 takkub send --to <role> "<msg>" · takkub goal "<objective>"
+takkub wait [--role <r>]... [--timeout <s>]            # บล็อกจนกว่า report ถึง Lead จริง — ใช้แทน loop เอง (#242)
+takkub inbox [--role <r>]                              # ดึงเนื้อหา report ที่ยังค้างส่ง (#231)
 takkub worktree list | merge --role <r> | clean        # จัดการ wt/* (merge = --no-ff + cleanup)
 takkub close --role <r> | close-all | restart | doctor [--live]
 takkub issue list | new "<title>" --severity <s> --body "..."   # default ลง repo agent-takkub
@@ -154,3 +156,4 @@ codex/gemini ใช้ไม่ได้ (toggle ปิดใน Settings หร
 - **รูปภาพ (mockup/screenshot) แพงกว่าไฟล์ข้อความต่อไบต์มาก** (ชาร์จตาม resolution ไม่ใช่ byte) — ก่อน assign หลาย role ให้เปิดรูปเดียวกัน (เช่น critic pipeline ที่ critic+gemini+frontend หลายรอบดู mockup ใบเดียวกัน) ให้พิจารณาหั่นจำนวนคนอ่านก่อน: ให้ role เดียวเปิดแล้วสรุปเป็น text note ให้ role อื่นอ้างอิงต่อ แทนที่จะให้ทุกคน `Read` ไฟล์รูปตรงๆ ซ้ำกัน (เคสจริง: mockup PNG 1.7MB ถูกเปิดซ้ำ 7 รอบข้าม pane จน frontend 2 ตัวชน usage limit พร้อมกัน — 16% token ในเทิร์นเดียว)
 - **Long-running commands ต้อง background/detach เสมอ** (docker compose ไม่มี `-d`, `logs --follow` เปล่า, dev server, `until` ไม่มี timeout = ห้าม foreground) — task spec ที่มี docker/dev server ให้เตือนทุกครั้ง · ตัวอย่าง + verification patterns ที่ใช้ได้จริง (healthcheck > curl poll > logs grep -m1) → `docs/lead/patterns.md`
 - **commit & push (Lead เท่านั้น):** `git status` ก่อนเสมอ · `git add <specific files>` ไม่ใช่ `-A` · รอ user สั่ง commit อย่า auto-commit · **ห้าม push เอง — propose ก่อนทุกครั้ง**
+- **ห้ามกอง background waiter (#242):** ต้องรอ teammate จบ → ใช้ `takkub wait [--role <r>]... [--timeout <s>]` เสมอ ห้ามเขียน loop เอง (`for`/`while` วน `takkub status`) — มีได้ทีละ 1 waiter ต่อ project (`takkub wait` ตัวใหม่จะ attach เข้าตัวเดิมอัตโนมัติ ไม่ทับซ้อน) loop ที่เงื่อนไขออกถูกทำให้เป็นเท็จโดยการกระทำของ Lead เอง (เช่น "ออกเมื่อไม่มีใคร working" แล้ว Lead ยิงงานใหม่ทันที) จะไม่มีวันจบเอง — เป็นแพทเทิร์นต้องห้ามเด็ดขาด เคสจริง: loop แบบนี้ค้างสะสม 6 ตัวพร้อมกันบนเครื่องที่มี cockpit prod รันงานจริงอยู่ ยิง `takkub status` ซ้ำจนโหลด socket คูณ 6 เปล่าๆ

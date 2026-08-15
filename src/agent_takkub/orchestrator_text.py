@@ -189,6 +189,37 @@ def _read_tail_bytes(path: pathlib.Path, max_bytes: int) -> bytes:
         return fh.read()
 
 
+def _truncate_at_word_boundary(text: str, max_chars: int) -> str:
+    """Truncate *text* to at most *max_chars*, backing up to the nearest
+    preceding space so the cut never lands mid-word (#241 — a Lead-facing
+    headline cut with a hard char slice could sever a word, or worse a
+    number/identifier, in a way a reader can't reconstruct). Falls back to
+    the hard cut only when no space exists in range (single long token)."""
+    if len(text) <= max_chars:
+        return text
+    cut = text[:max_chars]
+    space = cut.rfind(" ")
+    # Only back up to a space if doing so doesn't throw away most of the
+    # budget (a space very early in a long line means no real word boundary
+    # exists nearby — keep the hard cut rather than truncating too eagerly).
+    if space > max_chars * 0.6:
+        cut = cut[:space]
+    return cut.rstrip() + "…"
+
+
+def _notice_fingerprint(body: str) -> str:
+    """Stable short hash of a Lead-facing notice body (#241).
+
+    Used to recognise "Lead already pulled this exact report via `takkub
+    inbox`/`takkub wait`" so a later Lead Inbox Digest flush can collapse it
+    to a one-line "(already read)" reference instead of re-pasting the full
+    content Lead has already seen. Hashes the stripped body so leading/
+    trailing whitespace differences between queue tiers don't miss a match."""
+    import hashlib
+
+    return hashlib.sha1(body.strip().encode("utf-8", errors="replace")).hexdigest()[:16]
+
+
 def _looks_like_source_reference(line: str) -> bool:
     """True when *line* (already known to contain the #104 Windows Open-With
     dialog marker text) reads like source code/diff/log context rather than
