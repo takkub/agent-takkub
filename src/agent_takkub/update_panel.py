@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import QMessageBox, QSystemTrayIcon
 from . import cockpit_theme, config
 from ._restart_env import build_restart_successor_env
 from .config import REPO_ROOT
-from .orchestrator import _log_event
+from .orchestrator import _log_event, _write_restart_reason_marker
 
 
 def _release_port_file() -> None:
@@ -256,6 +256,10 @@ class MainWindowUpdateMixin:
             return
 
         _log_event("cockpit_restart", reason="user_action", working_panes=working_count)
+        # #232: mirrors the events.log reason into a marker file the successor
+        # reads once at boot, so the Lead-facing restore notice can say WHY
+        # it restarted (not just that it did) — see `_restart_cockpit`.
+        _write_restart_reason_marker("user_action", working_panes=working_count)
 
         # Do NOT close panes here — _restart_cockpit() persists snapshot while
         # panes are still alive (is_alive=True), then atexit kills them.
@@ -735,7 +739,11 @@ class MainWindowUpdateMixin:
                 _log_event("cockpit_npm_update", version=latest)
                 # Same no-dialog restart path as `takkub restart`: state is
                 # persisted, the successor waits on the single-instance lock.
-                self._restart_cockpit()
+                # #232: pass the reason through so events.log (and the
+                # restore notice) can tell this apart from a user- or
+                # CLI-triggered restart, instead of both landing as an
+                # indistinguishable bare `cockpit_restart`.
+                self._restart_cockpit(reason="npm_update", version=latest)
             except RuntimeError:
                 pass
 
@@ -1014,7 +1022,7 @@ class MainWindowUpdateMixin:
             QTimer.singleShot(500, self._restart_with_pip_sync)
         else:
             self._status.showMessage(f"{msg} — restarting…", 6_000)
-            QTimer.singleShot(500, self._restart_cockpit)
+            QTimer.singleShot(500, lambda: self._restart_cockpit(reason="git_pull_update"))
 
     def _restart_with_pip_sync(self) -> None:
         """Restart after a self-update that changed dependencies, re-running
@@ -1088,23 +1096,34 @@ class MainWindowUpdateMixin:
             # Couldn't set up the detached pip-sync — fall back to a plain
             # restart (code is already pulled; this is the old behaviour).
             _log_event("pip_sync_spawn_failed", err=f"{type(e).__name__}: {e}")
-            self._restart_cockpit()
+            self._restart_cockpit(reason="pip_sync_fallback")
             return
 
         QCoreApplication.quit()
 
-    def _restart_cockpit(self) -> None:
+    def _restart_cockpit(self, reason: str | None = None, **extra: object) -> None:
         """Spawn a fresh agent-takkub process and quit this one.
 
         Explicitly persists window state, open tabs, and the session-resume
         snapshot BEFORE spawning the successor so data survives even when
         QCoreApplication.quit() skips closeEvent (e.g. called from a
         non-main-thread context or during a forced restart).
+
+        `reason` (#232) is optional and deliberately opt-in: the two original
+        call sites (`_on_restart_cockpit_clicked`, `Orchestrator.request_restart`)
+        already log their own `cockpit_restart` event with a specific reason
+        BEFORE calling this, so leaving it `None` here avoids double-logging.
+        Callers that had no reason of their own (npm/git-pull auto-update,
+        the pip-sync fallback) pass one explicitly and this logs + marks it.
         """
         import subprocess
         import sys
 
         from ._win_console import SUBPROCESS_NO_WINDOW
+
+        if reason is not None:
+            _log_event("cockpit_restart", reason=reason, **extra)
+            _write_restart_reason_marker(reason, **extra)
 
         # Persist state up-front — don't rely on closeEvent firing after quit().
         try:

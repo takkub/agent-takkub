@@ -119,6 +119,12 @@ class QueuedTask:
     # (a slot was released or limits changed) the time-based backoff below
     # is stale and must not gate the next dispatch attempt.
     retry_epoch: int = -1
+    # last_gate_block_log_at (issue #240 point 4): wall-clock time of the
+    # most recent `resource_gate_block` line actually emitted for this item.
+    # Initialized to `queued_at` in `enqueue()` — `assign()` already logs one
+    # unconditionally the moment the initial denial happens, before the item
+    # is even enqueued, so the heartbeat window starts counting from there.
+    last_gate_block_log_at: float = 0.0
 
 
 # Issue #195: backoff schedule (seconds) for the queued-task retry loop in
@@ -129,6 +135,54 @@ class QueuedTask:
 # within 15s worst case, and the log line frequency naturally follows the
 # same schedule since a line is only emitted when an attempt is actually made.
 _GATE_RETRY_BACKOFF_S: tuple[float, ...] = (1.0, 2.0, 5.0, 15.0)
+
+# Issue #240 point 4: the #195 backoff above still floods events.log for a
+# task blocked a *long* time — once the backoff settles at its 15s floor, a
+# multi-hour wait still emits one resource_gate_block line every 15s forever
+# (proven in the field: 1154 lines for one pane in a single wave). The ramp-up
+# attempts (covered by `_GATE_RETRY_BACKOFF_S` itself) still log every time so
+# Lead sees the block happen promptly; once an item has cycled through the
+# whole ramp, further lines are throttled to at most one per this interval —
+# a heartbeat instead of a per-retry flood. The final unblock is always
+# summarized separately by `resource_gate_unblocked` regardless of how many
+# attempts were suppressed here.
+_GATE_BLOCK_LOG_HEARTBEAT_S: float = 60.0
+
+# Issue #240 point 1: substrings that flag a task's resource class from raw
+# task text. A prohibition sentence ("ห้ามรัน `pip install -e .` เด็ดขาด") that
+# *mentions* one of these markers in order to forbid it was being counted as
+# a signal that the task WOULD do it — see `_marker_signals` below.
+_NEGATION_CUES: tuple[str, ...] = (
+    "ห้าม",
+    "อย่า",
+    "ไม่ควร",
+    "ไม่ต้อง",
+    "don't",
+    "do not",
+    "never",
+    "avoid",
+    "must not",
+    "mustn't",
+    "shouldn't",
+    "should not",
+)
+
+
+def _line_has_negation_cue(line: str) -> bool:
+    return any(cue in line for cue in _NEGATION_CUES)
+
+
+def _marker_signals(text: str, markers: tuple[str, ...]) -> bool:
+    """True if any of `markers` appears in `text` on a line that isn't a
+    prohibition/negation about it. `text` is expected already-lowercased
+    (the negation cues below are matched against it as-is, and Thai text is
+    unaffected by ``.lower()``), scanned line by line so a forbidden-command
+    sentence elsewhere in a multi-line task spec never taints an unrelated
+    instruction line."""
+    for line in text.splitlines():
+        if any(marker in line for marker in markers) and not _line_has_negation_cue(line):
+            return True
+    return False
 
 
 _HEAVY_CLASSES = {
@@ -250,16 +304,27 @@ class ResourceGovernor:
         with self._lock:
             return self._overloaded
 
-    def _counts(self) -> tuple[int, dict[str, int], dict[ResourceClass, int]]:
+    def _counts(
+        self,
+    ) -> tuple[int, dict[str, int], dict[ResourceClass, int], dict[ResourceClass, list[str]]]:
         heavy = 0
         by_project: dict[str, int] = {}
         by_class: dict[ResourceClass, int] = {}
+        holders_by_class: dict[ResourceClass, list[str]] = {}
         for token in self._tokens.values():
             by_class[token.resource_class] = by_class.get(token.resource_class, 0) + 1
+            holders_by_class.setdefault(token.resource_class, []).append(token.pane_id)
             if token.resource_class in _HEAVY_CLASSES:
                 heavy += 1
                 by_project[token.project_id] = by_project.get(token.project_id, 0) + 1
-        return heavy, by_project, by_class
+        return heavy, by_project, by_class, holders_by_class
+
+    def holders_for_class(self, resource_class: ResourceClass) -> list[str]:
+        """Pane ids currently holding a token of `resource_class` (#240 point
+        3) — lets a denied caller be told *who* it's waiting behind instead
+        of just a bare limit-name reason."""
+        with self._lock:
+            return [t.pane_id for t in self._tokens.values() if t.resource_class == resource_class]
 
     def _denial_reason(self, project_id: str, resource_class: ResourceClass) -> str:
         if resource_class in {ResourceClass.LIGHT, ResourceClass.NORMAL}:
@@ -268,7 +333,7 @@ class ResourceGovernor:
             if self._available_ram_percent < self.limits.min_available_ram_percent:
                 return "memory_low"
             return "cpu_high"
-        heavy, by_project, by_class = self._counts()
+        heavy, by_project, by_class, _holders = self._counts()
         if heavy >= self.limits.max_heavy_global:
             return "heavy_global_limit"
         if by_project.get(project_id, 0) >= self.limits.max_heavy_per_project:
@@ -291,18 +356,20 @@ class ResourceGovernor:
         pane_id: str,
         resource_class: ResourceClass,
         task_id: str,
+        emit_on_deny: bool = True,
     ) -> AdmissionDecision:
         with self._lock:
             reason = self._denial_reason(project_id, resource_class)
             if reason:
-                self._emit(
-                    "resource_gate_block",
-                    project_id=project_id,
-                    pane_id=pane_id,
-                    task_id=task_id,
-                    resource_class=resource_class.value,
-                    reason=reason,
-                )
+                if emit_on_deny:
+                    self._emit(
+                        "resource_gate_block",
+                        project_id=project_id,
+                        pane_id=pane_id,
+                        task_id=task_id,
+                        resource_class=resource_class.value,
+                        reason=reason,
+                    )
                 return AdmissionDecision(False, reason)
             token = ResourceToken(
                 uuid.uuid4().hex,
@@ -349,16 +416,18 @@ class ResourceGovernor:
         reason: str = "",
         on_admitted: Callable[[ResourceToken], None] | None = None,
     ) -> str:
+        queued_at = self._clock()
         item = QueuedTask(
             uuid.uuid4().hex,
             project_id,
             pane_id,
             task_id,
             resource_class,
-            self._clock(),
+            queued_at,
             on_admitted,
         )
         item.reason = reason
+        item.last_gate_block_log_at = queued_at
         with self._lock:
             self._waiting.setdefault(project_id, deque()).append(item)
         self._emit(
@@ -450,11 +519,22 @@ class ResourceGovernor:
                     item = queue[0]
                     if item.next_retry_at > now and item.retry_epoch == epoch:
                         continue
+                    # Issue #240 point 4: once an item has cycled through the
+                    # whole ramp-up schedule, further resource_gate_block
+                    # lines are throttled to a heartbeat instead of logging
+                    # every single retry — the ramp-up itself (attempts within
+                    # len(_GATE_RETRY_BACKOFF_S)) always logs so a fresh block
+                    # is still immediately visible.
+                    should_log = (
+                        item.attempts + 1 <= len(_GATE_RETRY_BACKOFF_S)
+                        or (now - item.last_gate_block_log_at) >= _GATE_BLOCK_LOG_HEARTBEAT_S
+                    )
                     decision = self.request_slot(
                         project_id=item.project_id,
                         pane_id=item.pane_id,
                         task_id=item.task_id,
                         resource_class=item.resource_class,
+                        emit_on_deny=should_log,
                     )
                     if decision.allowed and decision.token is not None:
                         queue.popleft()
@@ -470,6 +550,8 @@ class ResourceGovernor:
                         item.next_retry_at = now + delay
                         item.retry_epoch = epoch
                         item.reason = decision.reason
+                        if should_log:
+                            item.last_gate_block_log_at = now
                 self._project_cursor += 1
         for item, token in admitted:
             # Summary line replacing the per-retry flood (issue #195 point 2):
@@ -492,7 +574,7 @@ class ResourceGovernor:
 
     def snapshot(self) -> dict:
         with self._lock:
-            heavy, by_project, by_class = self._counts()
+            heavy, by_project, by_class, holders_by_class = self._counts()
             return {
                 "cpu_percent": self._cpu_percent,
                 "available_memory_percent": self._available_ram_percent,
@@ -503,6 +585,11 @@ class ResourceGovernor:
                 "active_heavy_tasks": heavy,
                 "active_tasks_by_project": by_project,
                 "active_tasks_by_class": {key.value: value for key, value in by_class.items()},
+                # #240 point 3: lets a caller tell a queued Lead/CLI message
+                # *who* currently holds the slot a task is waiting behind.
+                "resource_holders": {
+                    key.value: list(panes) for key, panes in holders_by_class.items()
+                },
                 "queued_resource_tasks": sum(len(queue) for queue in self._waiting.values()),
                 "waiting_tasks": [
                     {
@@ -529,15 +616,15 @@ class ResourceGovernor:
 def classify_resource(role_name: str, task: str = "") -> ResourceClass:
     role = role_name.split("#", 1)[0].lower()
     text = task.lower()
-    if role in {"qa", "critic", "designer"} or any(
-        marker in text for marker in ("playwright", "chromium", "browser qa", "lighthouse")
+    if role in {"qa", "critic", "designer"} or _marker_signals(
+        text, ("playwright", "chromium", "browser qa", "lighthouse")
     ):
         return ResourceClass.BROWSER
-    if any(marker in text for marker in ("npm install", "npm ci", "pip install", "uv sync")):
+    if _marker_signals(text, ("npm install", "npm ci", "pip install", "uv sync")):
         return ResourceClass.PACKAGE_INSTALL
-    if any(marker in text for marker in ("next build", "npm run build", "webpack", "vite build")):
+    if _marker_signals(text, ("next build", "npm run build", "webpack", "vite build")):
         return ResourceClass.BUILD
-    if any(marker in text for marker in ("pytest", "npm test", "jest", "test suite")):
+    if _marker_signals(text, ("pytest", "npm test", "jest", "test suite")):
         return ResourceClass.TEST
     if role in {"lead", "shell"}:
         return ResourceClass.LIGHT

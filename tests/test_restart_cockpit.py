@@ -394,6 +394,71 @@ class TestRestartReleasesPortFile:
         assert popen_kwargs["env"]["TAKKUB_PORT_FILE"] == str(explicit_port_file)
 
 
+# ─────────────────────────────────────────────────────────────
+# 7. Issue #232 — `_restart_cockpit(reason=...)` threading. The two original
+#    callers (`_on_restart_cockpit_clicked`, `Orchestrator.request_restart`)
+#    already log their own `cockpit_restart` event before calling this, so
+#    the default `reason=None` must stay a no-op (no double-log) — only
+#    callers with no reason of their own (npm/git-pull auto-update, the
+#    pip-sync fallback) opt in by passing one.
+# ─────────────────────────────────────────────────────────────
+
+
+class TestRestartCockpitReasonThreading:
+    def _make_stub(self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch):
+        with patch.object(mw_mod.MainWindow, "__init__", lambda self: None):
+            win = mw_mod.MainWindow.__new__(mw_mod.MainWindow)
+        win.orch = MagicMock()
+        win._status = MagicMock()
+        win._save_window_state = MagicMock()
+        win._persist_open_tabs = MagicMock()
+        monkeypatch.setenv("TAKKUB_PORT_FILE", str(tmp_path / "port"))
+        monkeypatch.setattr(up_mod, "QCoreApplication", MagicMock())
+        return win
+
+    def test_reason_omitted_logs_nothing(
+        self, qapp: QCoreApplication, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        win = self._make_stub(tmp_path, monkeypatch)
+        logged: list[dict] = []
+        monkeypatch.setattr(
+            up_mod, "_log_event", lambda event, **kw: logged.append({"event": event, **kw})
+        )
+        marker_calls: list[tuple] = []
+        monkeypatch.setattr(
+            up_mod,
+            "_write_restart_reason_marker",
+            lambda reason, **kw: marker_calls.append((reason, kw)),
+        )
+
+        with patch("subprocess.Popen", return_value=MagicMock()):
+            mw_mod.MainWindow._restart_cockpit(win)
+
+        assert logged == [], "no reason given must not log cockpit_restart (avoids double-log)"
+        assert marker_calls == []
+
+    def test_npm_update_reason_logs_event_and_marker(
+        self, qapp: QCoreApplication, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        win = self._make_stub(tmp_path, monkeypatch)
+        logged: list[dict] = []
+        monkeypatch.setattr(
+            up_mod, "_log_event", lambda event, **kw: logged.append({"event": event, **kw})
+        )
+        marker_calls: list[tuple] = []
+        monkeypatch.setattr(
+            up_mod,
+            "_write_restart_reason_marker",
+            lambda reason, **kw: marker_calls.append((reason, kw)),
+        )
+
+        with patch("subprocess.Popen", return_value=MagicMock()):
+            mw_mod.MainWindow._restart_cockpit(win, reason="npm_update", version="1.2.3")
+
+        assert logged == [{"event": "cockpit_restart", "reason": "npm_update", "version": "1.2.3"}]
+        assert marker_calls == [("npm_update", {"version": "1.2.3"})]
+
+
 class TestMultiInstancePortFileProvenance:
     def test_app_generated_value_is_marked_for_restart(self, tmp_path: pathlib.Path) -> None:
         env: dict[str, str] = {}
