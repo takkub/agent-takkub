@@ -536,20 +536,21 @@ def test_new_issue_default_routes_to_agent_takkub_repo(tmp_path) -> None:
 # ── installed-build local-fallback redirect (issues.py, DATA_HOME vs REPO_ROOT) ──
 
 
-def test_local_store_cwd_passthrough_when_dev_checkout(tmp_path, monkeypatch) -> None:
-    """DATA_HOME == REPO_ROOT in a dev checkout, so redirecting is a no-op —
-    any cwd that isn't REPO_ROOT stays untouched."""
+def test_local_store_cwd_passthrough_for_project_ops(tmp_path) -> None:
+    """cockpit_bug=False (project-scoped ops) keep using the caller's cwd
+    unchanged, whatever it is."""
     from agent_takkub.issues import _local_store_cwd
 
-    assert _local_store_cwd(str(tmp_path)) == str(tmp_path)
-    assert _local_store_cwd(None) is None
+    assert _local_store_cwd(str(tmp_path), cockpit_bug=False) == str(tmp_path)
+    assert _local_store_cwd(None, cockpit_bug=False) is None
 
 
-def test_local_store_cwd_redirects_repo_root_to_data_home(tmp_path, monkeypatch) -> None:
+def test_local_store_cwd_redirects_cockpit_bug_to_data_home(tmp_path, monkeypatch) -> None:
     """Installed build: REPO_ROOT resolves into a throwaway venv ancestor —
     the local-fallback JSON must redirect to DATA_HOME instead so it survives
     a `pip install --upgrade` (docs/audit/2026-07-05-installed-build-audit-gemini.md,
-    finding 3)."""
+    finding 3), regardless of what path `_cockpit_repo_cwd()` actually
+    resolved to (issue #237 — that's no longer guaranteed to be REPO_ROOT)."""
     from agent_takkub.issues import _local_store_cwd
 
     fake_repo_root = tmp_path / "venv" / "Lib"
@@ -558,10 +559,13 @@ def test_local_store_cwd_redirects_repo_root_to_data_home(tmp_path, monkeypatch)
     monkeypatch.setattr("agent_takkub.issues.REPO_ROOT", fake_repo_root)
     monkeypatch.setattr("agent_takkub.issues.DATA_HOME", fake_data_home)
 
-    assert _local_store_cwd(str(fake_repo_root)) == fake_data_home
-    # An unrelated cwd (active project pane) is left alone.
-    other = tmp_path / "some-other-project"
-    assert _local_store_cwd(str(other)) == str(other)
+    assert _local_store_cwd(str(fake_repo_root), cockpit_bug=True) == fake_data_home
+    # Even an unrelated detect_cwd (real checkout path from projects.json)
+    # still redirects to DATA_HOME — the flag decides, not path equality.
+    other = tmp_path / "some-other-checkout"
+    assert _local_store_cwd(str(other), cockpit_bug=True) == fake_data_home
+    # An unrelated cwd for a project-scoped op is left alone.
+    assert _local_store_cwd(str(other), cockpit_bug=False) == str(other)
 
 
 def test_new_issue_cockpit_bug_local_fallback_writes_to_data_home(tmp_path, monkeypatch) -> None:
@@ -575,12 +579,124 @@ def test_new_issue_cockpit_bug_local_fallback_writes_to_data_home(tmp_path, monk
     monkeypatch.setattr("agent_takkub.issues.REPO_ROOT", fake_repo_root)
     monkeypatch.setattr("agent_takkub.issues.DATA_HOME", fake_data_home)
 
-    with patch("agent_takkub.issues._detect_repo", side_effect=RuntimeError("no gh")):
-        number, _url = new_issue("installed cockpit bug", "body", cockpit_bug=True)
+    with patch("agent_takkub.issues.load_projects", return_value={}):
+        with patch("agent_takkub.issues._detect_repo", side_effect=RuntimeError("no gh")):
+            number, _url = new_issue("installed cockpit bug", "body", cockpit_bug=True)
 
     assert number == 1
     assert (fake_data_home / ".takkub_issues.json").exists()
     assert not (fake_repo_root / ".takkub_issues.json").exists()
+
+
+# ── #237: cockpit-bug repo resolution on an installed build ──────────────────
+
+
+def test_cockpit_repo_cwd_dev_checkout_returns_repo_root() -> None:
+    """DATA_HOME == REPO_ROOT (dev checkout) → REPO_ROOT unchanged, matching
+    every pre-#237 test's assumption."""
+    from agent_takkub.config import REPO_ROOT
+    from agent_takkub.issues import _cockpit_repo_cwd
+
+    assert _cockpit_repo_cwd() == REPO_ROOT
+
+
+def test_cockpit_repo_cwd_installed_build_uses_env_override(tmp_path, monkeypatch) -> None:
+    """AGENT_TAKKUB_COCKPIT_REPO takes priority when it points at a real
+    git checkout."""
+    from agent_takkub.issues import _cockpit_repo_cwd
+
+    fake_repo_root = tmp_path / "venv" / "Lib"
+    fake_repo_root.mkdir(parents=True)
+    fake_data_home = tmp_path / "agent-takkub-home"
+    checkout = tmp_path / "my-checkout"
+    (checkout / ".git").mkdir(parents=True)
+    monkeypatch.setattr("agent_takkub.issues.REPO_ROOT", fake_repo_root)
+    monkeypatch.setattr("agent_takkub.issues.DATA_HOME", fake_data_home)
+    monkeypatch.setenv("AGENT_TAKKUB_COCKPIT_REPO", str(checkout))
+
+    assert _cockpit_repo_cwd() == checkout
+
+
+def test_cockpit_repo_cwd_installed_build_falls_back_to_projects_json(
+    tmp_path, monkeypatch
+) -> None:
+    """No env override → fall back to the user's own projects.json
+    "agent-takkub" entry (issue #237, reproduces the exact fix: this repo's
+    real checkout path is already correctly recorded there)."""
+    from agent_takkub.issues import _cockpit_repo_cwd
+
+    fake_repo_root = tmp_path / "venv" / "Lib"
+    fake_repo_root.mkdir(parents=True)
+    fake_data_home = tmp_path / "agent-takkub-home"
+    checkout = tmp_path / "WebstormProjects" / "agent-takkub"
+    (checkout / ".git").mkdir(parents=True)
+    monkeypatch.setattr("agent_takkub.issues.REPO_ROOT", fake_repo_root)
+    monkeypatch.setattr("agent_takkub.issues.DATA_HOME", fake_data_home)
+    monkeypatch.delenv("AGENT_TAKKUB_COCKPIT_REPO", raising=False)
+
+    fake_projects = {"projects": {"agent-takkub": {"paths": {"main": str(checkout)}}}}
+    with patch("agent_takkub.issues.load_projects", return_value=fake_projects):
+        assert _cockpit_repo_cwd() == checkout
+
+
+def test_cockpit_repo_cwd_installed_build_returns_none_when_unresolved(
+    tmp_path, monkeypatch
+) -> None:
+    """Nothing resolves (no env override, no matching/valid projects.json
+    entry) → None, never a silent reuse of the venv REPO_ROOT path."""
+    from agent_takkub.issues import _cockpit_repo_cwd
+
+    fake_repo_root = tmp_path / "venv" / "Lib"
+    fake_repo_root.mkdir(parents=True)
+    fake_data_home = tmp_path / "agent-takkub-home"
+    monkeypatch.setattr("agent_takkub.issues.REPO_ROOT", fake_repo_root)
+    monkeypatch.setattr("agent_takkub.issues.DATA_HOME", fake_data_home)
+    monkeypatch.delenv("AGENT_TAKKUB_COCKPIT_REPO", raising=False)
+
+    with patch("agent_takkub.issues.load_projects", return_value={}):
+        assert _cockpit_repo_cwd() is None
+
+
+def test_new_issue_cockpit_bug_unresolved_warns_loudly(tmp_path, monkeypatch, capsys) -> None:
+    """Core regression for #237: cockpit_bug=True with no resolvable
+    checkout must warn loudly on stderr, unlike the quiet no-remote-project
+    fallback used by cockpit_bug=False."""
+    fake_repo_root = tmp_path / "venv" / "Lib"
+    fake_repo_root.mkdir(parents=True)
+    fake_data_home = tmp_path / "agent-takkub-home"
+    fake_data_home.mkdir()
+    monkeypatch.setattr("agent_takkub.issues.REPO_ROOT", fake_repo_root)
+    monkeypatch.setattr("agent_takkub.issues.DATA_HOME", fake_data_home)
+    monkeypatch.delenv("AGENT_TAKKUB_COCKPIT_REPO", raising=False)
+
+    with patch("agent_takkub.issues.load_projects", return_value={}):
+        number, url = new_issue("cockpit bug", "body", cockpit_bug=True)
+
+    assert number == 1
+    assert url == "local://issue/1"
+    err = capsys.readouterr().err
+    assert "could not resolve the agent-takkub GitHub repo" in err
+    assert "AGENT_TAKKUB_COCKPIT_REPO" in err
+
+
+def test_cmd_issue_new_flags_local_only_in_msg() -> None:
+    """CLI reply must not read as a plain success when it silently landed in
+    the local store (issue #237 item 3) — `url` is the source of truth."""
+    with patch("agent_takkub.issues.new_issue", return_value=(30, "local://issue/30")):
+        args = _args(title="t", body="b")
+        resp = cmd_issue_new(args)
+    assert resp["ok"] is True
+    assert "LOCAL ONLY" in resp["msg"]
+
+
+def test_cmd_issue_new_no_local_tag_on_real_github_issue() -> None:
+    with patch(
+        "agent_takkub.issues.new_issue",
+        return_value=(7, "https://github.com/takkub/agent-takkub/issues/7"),
+    ):
+        args = _args(title="t", body="b")
+        resp = cmd_issue_new(args)
+    assert "LOCAL ONLY" not in resp["msg"]
 
 
 # ── --issues-dir CLI backward compat ─────────────────────────────────────────
