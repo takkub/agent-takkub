@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from ._win_console import SUBPROCESS_NO_WINDOW
-from .config import DATA_HOME, REPO_ROOT
+from .config import DATA_HOME, REPO_ROOT, load_projects
 
 _SEVERITY_VALUES = ("low", "med", "high")
 
@@ -153,21 +153,124 @@ def _ensure_labels(labels: list[str], repo: str, cwd: str | Path | None = None) 
 # ── public API ────────────────────────────────────────────────────────────────
 
 
-def _local_store_cwd(cwd: str | Path | None) -> str | Path | None:
-    """Where the LOCAL fallback ``.takkub_issues.json`` actually lives, given
-    the cwd used for git-remote detection.
+def _local_store_cwd(cwd: str | Path | None, *, cockpit_bug: bool) -> str | Path | None:
+    """Where the LOCAL fallback ``.takkub_issues.json`` actually lives.
 
-    Cockpit-bug operations detect the repo at ``REPO_ROOT`` (that's where the
-    agent-takkub git remote lives, dev checkout or not) — but in an installed
-    build ``REPO_ROOT`` resolves into a read-only/ephemeral venv ancestor, so
-    local issues filed there would vanish on the next ``pip install --upgrade``
-    (see docs/audit/2026-07-05-installed-build-audit-gemini.md, finding 3).
-    Redirect just the local-fallback file to ``DATA_HOME`` instead — a no-op
-    in a dev checkout, where ``DATA_HOME == REPO_ROOT`` already.
+    Cockpit-bug ops always target ``DATA_HOME`` regardless of what repo path
+    ``_cockpit_repo_cwd()`` resolved to (the ``REPO_ROOT`` venv ancestor on an
+    installed build, a ``projects.json``-derived checkout, or an env
+    override) — mutable local state must never vanish inside a read-only/
+    ephemeral install dir (docs/audit/2026-07-05-installed-build-audit-gemini.md,
+    finding 3) or leak an untracked JSON file into the user's own
+    agent-takkub git checkout (issue #237). A no-op in a dev checkout, where
+    ``DATA_HOME == REPO_ROOT`` already. Project ops (``cockpit_bug=False``)
+    keep using the caller's cwd unchanged.
     """
-    if cwd is not None and Path(cwd).resolve() == REPO_ROOT.resolve():
+    if cockpit_bug:
         return DATA_HOME
     return cwd
+
+
+def _cockpit_repo_cwd() -> Path | None:
+    """Best-effort path to the actual agent-takkub **git checkout**, for
+    cockpit-bug issue routing (``cockpit_bug=True``).
+
+    ``REPO_ROOT`` (``Path(__file__).resolve().parents[2]``) only IS that
+    checkout in a dev checkout, where ``DATA_HOME == REPO_ROOT``. On an
+    installed build it resolves into the venv install dir instead — no
+    ``.git`` there at all — which made every cockpit-bug issue silently fall
+    back to the local store, 100% of the time (issue #237).
+
+    Resolution order:
+      1. dev checkout → ``REPO_ROOT`` unchanged (existing behaviour).
+      2. ``AGENT_TAKKUB_COCKPIT_REPO`` env var — explicit override for
+         installs that want to point the tracker at a real checkout.
+      3. the user's own ``projects.json`` ``"agent-takkub"`` project entry
+         (``paths.main``), if it exists on disk and has a ``.git`` — the
+         common case: a dev who also opened their own clone as a cockpit
+         project. Confirmed present and correct on the install that filed
+         issue #237.
+
+    Returns ``None`` when nothing resolves — the caller must warn loudly and
+    must NOT silently reuse the ``REPO_ROOT`` venv path (that was the bug).
+    """
+    if DATA_HOME == REPO_ROOT:
+        return REPO_ROOT
+
+    env = os.environ.get("AGENT_TAKKUB_COCKPIT_REPO")
+    if env:
+        candidate = Path(env).expanduser()
+        if (candidate / ".git").exists():
+            return candidate
+
+    try:
+        proj = load_projects().get("projects", {}).get("agent-takkub", {})
+        main = (proj.get("paths") or {}).get("main")
+    except Exception:
+        main = None
+    if main:
+        candidate = Path(main).expanduser()
+        if (candidate / ".git").exists():
+            return candidate
+
+    return None
+
+
+def _warn_cockpit_repo_unresolved(op: str, reason: str) -> None:
+    """Loud stderr warning when a **cockpit-bug** op (``cockpit_bug=True``)
+    can't resolve a real agent-takkub GitHub repo at all.
+
+    The cockpit always has a real GitHub remote somewhere, so this case is
+    never the legitimate "bare no-remote project" quiet fallback that
+    ``cockpit_bug=False`` (project-scoped) ops use — it means path
+    resolution itself is broken (issue #237). Silence here is exactly what
+    let 100% of cockpit-bug issues pile up in the local store unnoticed.
+    """
+    print(
+        f"⚠ takkub issue: {op} — could not resolve the agent-takkub GitHub repo "
+        f"({reason}). Cockpit-bug issues always have a real GitHub remote; landing "
+        "here means path resolution is broken, not a legit local-only mode. Set "
+        "AGENT_TAKKUB_COCKPIT_REPO to your agent-takkub checkout path, or open it "
+        "as a cockpit project named 'agent-takkub', to route this to GitHub. Using "
+        "the LOCAL issue store instead — NOT visible on GitHub until fixed.",
+        file=sys.stderr,
+    )
+
+
+def _resolve_repo_for_op(
+    cwd: str | Path | None, cockpit_bug: bool, op: str
+) -> tuple[str | Path | None, str | None, bool]:
+    """Resolve ``(detect_cwd, repo, use_local)`` for a cockpit-bug or
+    project-scoped issue op.
+
+    ``cockpit_bug=True`` routes through ``_cockpit_repo_cwd()`` and warns
+    loudly (never silently) whenever that can't land on a real GitHub repo —
+    either because no checkout could be located at all, or because
+    ``_detect_repo`` itself failed against a checkout that WAS found (e.g. no
+    remote configured on it). ``cockpit_bug=False`` (project-scoped) keeps
+    the original quiet fallback: a bare no-remote project is a legit
+    local-only mode there.
+    """
+    if not cockpit_bug:
+        detect_cwd = cwd
+        try:
+            return detect_cwd, _detect_repo(detect_cwd), False
+        except RuntimeError:
+            return detect_cwd, None, True
+
+    repo_cwd = _cockpit_repo_cwd()
+    if repo_cwd is None:
+        _warn_cockpit_repo_unresolved(
+            op, f"no agent-takkub git checkout found; REPO_ROOT={REPO_ROOT}"
+        )
+        return None, None, True
+
+    detect_cwd = str(repo_cwd)
+    try:
+        return detect_cwd, _detect_repo(detect_cwd), False
+    except RuntimeError as exc:
+        _warn_cockpit_repo_unresolved(op, str(exc))
+        return detect_cwd, None, True
 
 
 def _get_local_issues_path(cwd: str | Path | None) -> Path:
@@ -243,8 +346,8 @@ def new_issue(
     """Create an issue. Returns (number, url). Falls back to local store if GitHub is unavailable.
 
     `cockpit_bug` (default **True**) files the issue against the agent-takkub
-    install repo (REPO_ROOT's git remote) regardless of cwd — the cockpit's
-    tracker is for cockpit/orchestrator/CLI/UI bugs, so this is the safe
+    install repo (`_cockpit_repo_cwd()`'s git remote) regardless of cwd — the
+    cockpit's tracker is for cockpit/orchestrator/CLI/UI bugs, so this is the safe
     default that stops a bug noticed inside e.g. an app-api pane from leaking
     onto the app-api repo. `noticed_in` still records where the bug surfaced
     (useful context, independent of the routing target).
@@ -257,12 +360,9 @@ def new_issue(
     if severity not in _SEVERITY_VALUES:
         raise ValueError(f"severity must be one of {_SEVERITY_VALUES}, got {severity!r}")
 
-    detect_cwd: str | Path | None = str(REPO_ROOT) if cockpit_bug else cwd
-    try:
-        repo = _detect_repo(detect_cwd)
-        use_local = False
-    except RuntimeError:
-        use_local = True
+    detect_cwd, repo, use_local = _resolve_repo_for_op(
+        cwd, cockpit_bug, f"new issue '{title[:40]}'"
+    )
 
     labels: list[str] = [f"severity:{severity}"]
     if role:
@@ -303,10 +403,11 @@ def new_issue(
             _warn_local_fallback(f"new issue '{title[:40]}'", reason=str(exc)[:60])
             use_local = True
 
-    # Local fallback — when cockpit_bug=True, write to REPO_ROOT's
+    # Local fallback — when cockpit_bug=True, write to DATA_HOME's
     # .takkub_issues.json so a flaky `gh` doesn't scatter cockpit-bug
     # JSON files across every project the user touches.
-    issues = _load_local_issues(_local_store_cwd(detect_cwd))
+    local_cwd = _local_store_cwd(detect_cwd, cockpit_bug=cockpit_bug)
+    issues = _load_local_issues(local_cwd)
     number = max([iss.get("number", 0) for iss in issues] or [0]) + 1
     import datetime
 
@@ -325,7 +426,7 @@ def new_issue(
         "closed_at": "",
     }
     issues.append(new_iss)
-    _save_local_issues(issues, _local_store_cwd(detect_cwd))
+    _save_local_issues(issues, local_cwd)
     return number, new_iss["url"]
 
 
@@ -342,8 +443,9 @@ def list_issues(
     """Return list of issue dicts matching filters. Falls back to local store if GitHub is unavailable.
 
     `cockpit_bug` (default **True**) reads from the same place `new_issue`
-    defaults to writing to — the agent-takkub install repo (REPO_ROOT's git
-    remote), or its local-fallback store, regardless of `cwd`. Without this,
+    defaults to writing to — the agent-takkub install repo
+    (`_cockpit_repo_cwd()`'s git remote), or its local-fallback store,
+    regardless of `cwd`. Without this,
     `list_issues(cwd=<pane's actual dir>)` would query a completely different
     repo/store than the cockpit-bug issue `new_issue` just filed, and come
     back looking empty even though the data exists (issue #142). Pass
@@ -351,12 +453,7 @@ def list_issues(
     (cwd-based `gh repo view` detection, CLI: `--no-cockpit-bug`) — matching
     `new_issue`'s routing rule exactly.
     """
-    detect_cwd: str | Path | None = str(REPO_ROOT) if cockpit_bug else cwd
-    try:
-        repo = _detect_repo(detect_cwd)
-        use_local = False
-    except RuntimeError:
-        use_local = True
+    detect_cwd, repo, use_local = _resolve_repo_for_op(cwd, cockpit_bug, "list issues")
 
     if not use_local:
         try:
@@ -435,9 +532,10 @@ def list_issues(
             # them forever — reproduces as "(no issues)" while
             # .takkub_issues.json still holds open records (issue #174).
             # Merge any matching backlog in instead of dropping it.
+            local_cwd = _local_store_cwd(detect_cwd, cockpit_bug=cockpit_bug)
             try:
                 local_backlog = _filter_local_issues(
-                    _load_local_issues(_local_store_cwd(detect_cwd)),
+                    _load_local_issues(local_cwd),
                     filter_open=filter_open,
                     filter_closed=filter_closed,
                     severity=severity,
@@ -447,7 +545,7 @@ def list_issues(
             except RuntimeError:
                 local_backlog = []
             if local_backlog:
-                local_path = _get_local_issues_path(_local_store_cwd(detect_cwd))
+                local_path = _get_local_issues_path(local_cwd)
                 print(
                     f"⚠ takkub issue: {len(local_backlog)} unreconciled local issue(s) found in "
                     f"{local_path} (not on GitHub) — included below; migrate with "
@@ -461,7 +559,7 @@ def list_issues(
 
     # Local fallback
     return _filter_local_issues(
-        _load_local_issues(_local_store_cwd(detect_cwd)),
+        _load_local_issues(_local_store_cwd(detect_cwd, cockpit_bug=cockpit_bug)),
         filter_open=filter_open,
         filter_closed=filter_closed,
         severity=severity,
@@ -485,12 +583,7 @@ def close_issue(
     instead (CLI: `--no-cockpit-bug`).
     """
     number = _parse_issue_number(issue_id)
-    detect_cwd: str | Path | None = str(REPO_ROOT) if cockpit_bug else cwd
-    try:
-        repo = _detect_repo(detect_cwd)
-        use_local = False
-    except RuntimeError:
-        use_local = True
+    detect_cwd, repo, use_local = _resolve_repo_for_op(cwd, cockpit_bug, f"close #{number}")
 
     if not use_local:
         try:
@@ -505,7 +598,7 @@ def close_issue(
             use_local = True
 
     # Local fallback
-    local_cwd = _local_store_cwd(detect_cwd)
+    local_cwd = _local_store_cwd(detect_cwd, cockpit_bug=cockpit_bug)
     issues = _load_local_issues(local_cwd)
     found = False
     import datetime
@@ -536,12 +629,7 @@ def show_issue(issue_id: str, *, cwd: str | Path | None = None, cockpit_bug: boo
     (CLI: `--no-cockpit-bug`).
     """
     number = _parse_issue_number(issue_id)
-    detect_cwd: str | Path | None = str(REPO_ROOT) if cockpit_bug else cwd
-    try:
-        repo = _detect_repo(detect_cwd)
-        use_local = False
-    except RuntimeError:
-        use_local = True
+    detect_cwd, repo, use_local = _resolve_repo_for_op(cwd, cockpit_bug, f"show #{number}")
 
     if not use_local:
         try:
@@ -550,7 +638,7 @@ def show_issue(issue_id: str, *, cwd: str | Path | None = None, cockpit_bug: boo
             use_local = True
 
     # Local fallback
-    issues = _load_local_issues(_local_store_cwd(detect_cwd))
+    issues = _load_local_issues(_local_store_cwd(detect_cwd, cockpit_bug=cockpit_bug))
     iss = next((i for i in issues if i.get("number") == number), None)
     if not iss:
         raise RuntimeError(f"local issue #{number} not found")
@@ -615,9 +703,16 @@ def _scope_desc(cwd: str | Path | None, cockpit_bug: bool) -> str:
     """One-line description of which repo/store a query targets, plus the
     active filters — so an empty '(no issues)' result reads as "this store
     genuinely has nothing" rather than "did my data disappear?" (issue #142:
-    `list` used to silently query a different store than `new` wrote to)."""
+    `list` used to silently query a different store than `new` wrote to).
+
+    Shows the actually-resolved checkout path (`_cockpit_repo_cwd()`), not
+    `REPO_ROOT` — on an installed build those differ, and printing REPO_ROOT
+    here would repeat the exact wrong-path confusion from issue #237."""
     if cockpit_bug:
-        return f"scope: cockpit (agent-takkub repo, {REPO_ROOT})"
+        repo_cwd = _cockpit_repo_cwd()
+        if repo_cwd is None:
+            return f"scope: cockpit (agent-takkub repo — UNRESOLVED, REPO_ROOT={REPO_ROOT} is not a checkout)"
+        return f"scope: cockpit (agent-takkub repo, {repo_cwd})"
     return f"scope: active project (cwd={cwd or '.'})"
 
 
@@ -690,7 +785,15 @@ def cmd_issue_new(args: Any) -> dict:
         return {"ok": False, "msg": str(exc)}
 
     print(f"#{number}  {url}")
-    return {"ok": True, "msg": f"created #{number}"}
+    # Issue #237: "ok: created #N" alone was indistinguishable from a real
+    # GitHub issue — the whole point of this message is what tripped the
+    # bug (a wrong-but-quiet local fallback looked identical to success).
+    local_tag = (
+        " (LOCAL ONLY — did not reach GitHub, see warning above)"
+        if url.startswith("local://")
+        else ""
+    )
+    return {"ok": True, "msg": f"created #{number}{local_tag}"}
 
 
 def cmd_issue_list(args: Any) -> dict:
@@ -749,7 +852,8 @@ def cmd_issue_close(args: Any) -> dict:
         return {"ok": False, "msg": str(exc)}
 
     print(f"closed: {url}")
-    return {"ok": True, "msg": f"closed #{args.id}"}
+    local_tag = " (LOCAL ONLY — did not reach GitHub)" if url.startswith("local://") else ""
+    return {"ok": True, "msg": f"closed #{args.id}{local_tag}"}
 
 
 def cmd_issue_show(args: Any) -> dict:
