@@ -29,7 +29,12 @@ from wcwidth import wcwidth
 from ._pty_backend import spawn_pty_bounded
 from ._win_console import hide_hwnds, snapshot_console_hwnds
 from .job_object_manager import JobObjectManager
-from .provider_spec import PROVIDER_REGISTRY
+from .provider_spec import (
+    AUTH_TRANSIENT_GRACE_SEC,
+    PROVIDER_REGISTRY,
+    auth_error_markers_for,
+    auth_transient_markers_for,
+)
 from .provider_spec import READY_HARD_BLOCKERS as _READY_HARD_BLOCKERS
 from .provider_spec import READY_RULES as _READY_RULES
 
@@ -1596,6 +1601,42 @@ class PtySession(QObject):
         """
         text = "\n".join(self.display_lines()).lower()
         return _parse_rate_limit_reset(text, time.time())
+
+    def auth_failure_reason(self, provider: str) -> str | None:
+        """Return the matched marker if this pane's screen currently shows
+        `provider`'s CLI stuck on an auth failure, else ``None`` (#248/#247
+        round 2).
+
+        Two tiers, both scoped to `_ready_region` (bottom footer rows) like
+        every other prompt-state check in this class — conversation body
+        text merely quoting one of these phrases must not poison the
+        verdict, same reasoning as `_classify_ready`:
+
+          1. `provider_spec.auth_error_markers_for(provider)` — an
+             unambiguous failure phrase (provider-specific confirmed list +
+             the generic cross-provider baseline). Fires instantly, no
+             grace period — this is meant to beat
+             ``orchestrator.BUSY_WAIT_CEILING_SEC`` (1800s) by a wide
+             margin, not tune it.
+          2. `provider_spec.auth_transient_markers_for(provider)` — a
+             normally-transient boot-time marker (e.g. gemini/agy's
+             "Signing in..."). Only counts once the screen has been static
+             for ``AUTH_TRANSIENT_GRACE_SEC`` — measured via
+             ``seconds_since_output()``, the same spinner-normalized
+             content-change clock used everywhere else in this module — so
+             an animating spinner next to the same text still reads as a
+             normal cold boot, not a failure.
+        """
+        text = _ready_region(self.display_lines())
+        for marker in auth_error_markers_for(provider):
+            if marker in text:
+                return marker
+        transient = auth_transient_markers_for(provider)
+        if transient and self.seconds_since_output() >= AUTH_TRANSIENT_GRACE_SEC:
+            for marker in transient:
+                if marker in text:
+                    return marker
+        return None
 
     def is_blocked_on_tty_prompt(self) -> str | None:
         """Return the first matching line if the pane is stuck on an interactive

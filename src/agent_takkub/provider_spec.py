@@ -25,6 +25,7 @@ phase has a faithful starting point instead of having to rediscover it.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -180,6 +181,34 @@ class ProviderSpec:
     project_scope_resolver: Callable[[str], str | None] | None = None
     project_scope_new_flag: str | None = None
 
+    # ─── 13. Auth-failure detection (#248/#247 round 2) ───
+    # Lower-case substrings that unambiguously mean "this provider's CLI is
+    # NOT authenticated" when seen on the pane's footer region (_ready_region
+    # — same scope as ready_hard_blockers, so conversation body text quoting
+    # one of these can't poison the verdict). Checked instantly — no grace
+    # period — via pty_session.PtySession.auth_failure_reason(), which ALSO
+    # ORs in provider_spec.GENERIC_AUTH_ERROR_MARKERS below for every
+    # provider. Empty here means no provider-specific text has been
+    # confirmed yet; the generic table is the only signal until a real
+    # failure screen is observed and captured (never guess a marker from a
+    # provider's docs alone — a wrong guess either silently matches
+    # conversation text or never fires).
+    auth_error_markers: tuple[str, ...] = field(default_factory=tuple)
+    # Markers that mean "still going through an auth/account-verification
+    # step" — legitimately shown for the first few seconds of a normal cold
+    # boot, so unlike auth_error_markers these are NOT an instant failure
+    # signal. auth_failure_reason() only treats one of these as a failure
+    # once the screen has been static (seconds_since_output(), the
+    # spinner-normalized content-change clock — see pty_session.py's
+    # #248/#247 module note) for AUTH_TRANSIENT_GRACE_SEC — i.e. "still
+    # animating a spinner next to this text" reads as normal boot, "frozen
+    # on this text" reads as stuck. gemini/agy is the confirmed case (#247:
+    # observed hanging on "Signing in..." indefinitely); reuses the exact
+    # text already in gemini_spec.ready_hard_blockers below by design (same
+    # underlying CLI state, different question — "is it ready" vs "is it
+    # stuck").
+    auth_transient_markers: tuple[str, ...] = field(default_factory=tuple)
+
 
 # ── binary discovery wrappers ────────────────────────────────────────────────
 # Each does its `from .<helper> import find_*` INSIDE the call (not at module
@@ -319,6 +348,12 @@ claude_spec = ProviderSpec(
     produces_jsonl_transcript=True,
     supports_token_meter=True,
     supports_remote_history=True,
+    # ⚠ NOT yet verified against a real claude auth-failure screen (#248/#247
+    # round 2) — claude's own login flow runs mostly outside the pane (see
+    # doctor.check_claude's credential-file check), so no confirmed in-pane
+    # error text exists to list here. GENERIC_AUTH_ERROR_MARKERS is the only
+    # signal for this provider until one is observed.
+    auth_error_markers=(),
 )
 
 
@@ -424,6 +459,12 @@ codex_spec = ProviderSpec(
     supports_remote_history=True,
     auto_trust=True,  # spawn_engine.py codex branch: auto_trust=True
     early_exit_watch=True,  # spawn_engine.py codex branch: codex_exit=True
+    # ⚠ NOT yet verified against a real codex auth-failure screen (#248/#247
+    # round 2 — #248's report was "spawns and produces zero output", which
+    # points at the no-content watchdog, not necessarily a rendered auth
+    # error) — no confirmed in-pane error text exists to list here.
+    # GENERIC_AUTH_ERROR_MARKERS is the only signal until one is observed.
+    auth_error_markers=(),
 )
 
 
@@ -505,6 +546,16 @@ gemini_spec = ProviderSpec(
     project_scope_resolver=_resolve_gemini_project_id,
     project_scope_new_flag="--new-project",  # agy 1.1.6 --help: mint a fresh
     # project id when the resolver finds no existing match for this cwd.
+    # No confirmed hard auth-FAILURE text observed yet (#248/#247 round 2) —
+    # GENERIC_AUTH_ERROR_MARKERS is the only instant-fail signal.
+    auth_error_markers=(),
+    # CONFIRMED transient state (#247's exact report): agy can sit on
+    # "Signing in..." indefinitely instead of completing the boot-time OAuth
+    # check. Same text as ready_hard_blockers above (still not ready either
+    # way) — listed again here because auth_failure_reason() answers a
+    # different question ("stuck", gated on sustained staleness) than
+    # is_at_ready_prompt() ("not yet ready", true from frame one).
+    auth_transient_markers=("signing in", "verifying your account"),
 )
 
 
@@ -589,6 +640,9 @@ opencode_spec = ProviderSpec(
     prepend_bin_dir_to_path=False,
     auto_trust=False,  # no folder-trust modal observed on first boot (1.18.3)
     early_exit_watch=False,
+    # ⚠ NOT yet verified — no authenticated opencode session was available
+    # for calibration (#103/#248/#247). GENERIC_AUTH_ERROR_MARKERS only.
+    auth_error_markers=(),
 )
 
 
@@ -660,6 +714,9 @@ kimi_spec = ProviderSpec(
     prepend_bin_dir_to_path=False,
     auto_trust=False,
     early_exit_watch=False,
+    # ⚠ NOT yet verified — no authenticated Kimi TUI was available for
+    # calibration (#103/#248/#247). GENERIC_AUTH_ERROR_MARKERS only.
+    auth_error_markers=(),
 )
 
 
@@ -734,6 +791,9 @@ cursor_spec = ProviderSpec(
     prepend_bin_dir_to_path=False,
     auto_trust=False,
     early_exit_watch=False,
+    # ⚠ NOT yet verified — no Cursor TUI auth-failure screen has been
+    # observed (#103/#248/#247). GENERIC_AUTH_ERROR_MARKERS only.
+    auth_error_markers=(),
 )
 
 
@@ -784,6 +844,75 @@ READY_HARD_BLOCKERS: tuple[str, ...] = tuple(
         blocker for spec in PROVIDER_REGISTRY.values() for blocker in spec.ready_hard_blockers
     )
 )
+
+
+# ── auth-failure detection (#248/#247 round 2) ──────────────────────────────
+# Cross-provider fallback markers: unambiguous "not authenticated" phrasing a
+# CLI might show regardless of which provider it is. Applied to EVERY
+# provider in addition to that provider's own (currently mostly empty, see
+# each spec's auth_error_markers comment above) confirmed list — a new
+# provider therefore gets at least this baseline coverage with zero data
+# entry required. Deliberately narrow substrings (not just "sign in", which
+# would false-match a spinner-adjacent "Signing in..." on gemini/agy — that
+# case is handled separately by auth_transient_markers/AUTH_TRANSIENT_GRACE_SEC
+# below since it is legitimately transient, not an instant failure) to keep
+# the false-positive risk low against ordinary conversation text scrolling
+# through the footer region. UNVERIFIED against a real failure screen for any
+# provider as of this round — a best-effort baseline pending a live #248/#247
+# repro, not a confirmed table like READY_HARD_BLOCKERS above.
+#
+# Narrowed in the #248/#247 round-2 follow-up: a first pass included several
+# phrases that are common HTTP/test-framework vocabulary, NOT CLI-chrome —
+# ordinary backend dev output routinely prints these while testing an
+# unrelated auth *feature* in the pane's own project, and this table is
+# scoped to the footer tail rows (`_ready_region`, 6 lines), not the whole
+# scrollback, so a long test run's final lines can easily still be sitting
+# there when a poll lands. Dropped: "unauthorized" (any HTTP 401 log line),
+# "invalid credentials" / "invalid api key" (typical login-test assertion
+# text), "session expired" (common app-level error string), "login
+# required" (common 401 body text), "authentication required" /
+# "authentication failed" (generic app error strings), and especially "not
+# authenticated" — FastAPI's own default 401 detail is the literal string
+# "Not authenticated", so keeping it here would auto-fail every FastAPI
+# backend pane the moment its own test suite exercised an authless request.
+# What remains reads only as first-person CLI chrome telling an operator to
+# re-auth — text no unrelated dev-output string plausibly reproduces.
+GENERIC_AUTH_ERROR_MARKERS: tuple[str, ...] = (
+    "not signed in",
+    "please sign in again",
+    "please log in again",
+    "please authenticate",
+)
+
+# Gate for auth_transient_markers (#247): a marker in that list only counts
+# as "stuck" once the screen has been static (PtySession.seconds_since_output
+# — spinner-normalized, so an animating spinner next to the same text does
+# NOT reset this) for at least this long. Short relative to
+# orchestrator.BUSY_WAIT_CEILING_SEC (1800s default) — the whole point is
+# surfacing this to Lead far sooner than that ceiling — but long enough that
+# the first few seconds of a completely normal sign-in on a fresh spawn never
+# false-positives. Overrideable for slow/loaded machines.
+AUTH_TRANSIENT_GRACE_SEC = float(os.environ.get("TAKKUB_AUTH_TRANSIENT_GRACE_SEC", "45"))
+
+
+def auth_error_markers_for(provider: str) -> tuple[str, ...]:
+    """Instant-failure auth markers for `provider`: its own confirmed list
+    (``ProviderSpec.auth_error_markers``) plus the generic cross-provider
+    baseline, deduped. Unknown provider name → generic markers only."""
+    spec = PROVIDER_REGISTRY.get(provider)
+    own = spec.auth_error_markers if spec is not None else ()
+    return tuple(dict.fromkeys((*own, *GENERIC_AUTH_ERROR_MARKERS)))
+
+
+def auth_transient_markers_for(provider: str) -> tuple[str, ...]:
+    """Sustained-only auth-stall markers for `provider` (see
+    ``ProviderSpec.auth_transient_markers``). Empty for a provider with none
+    confirmed, or an unknown provider name — never falls back to a generic
+    table, unlike ``auth_error_markers_for``, because a transient marker only
+    makes sense paired with the exact wording of that provider's own
+    boot-time account-check text."""
+    spec = PROVIDER_REGISTRY.get(provider)
+    return spec.auth_transient_markers if spec is not None else ()
 
 
 # ── per-model effort exceptions ────────────────────────────────────────────

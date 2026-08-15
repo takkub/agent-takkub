@@ -52,6 +52,7 @@ from .lead_draft_state import (
 )
 from .orchestrator_text import (
     _enter_delay_ms,
+    _exit_key,
     _log_event,
     _notice_fingerprint,
     _paste_payload,
@@ -140,6 +141,17 @@ _READY_POLL_INTERVAL_MS = 150
 # adds wait time in the common case; this only even engages once the pane is
 # ALREADY past its delivery timeout and STILL on a recognised prompt.
 _PROMPT_BLOCK_DEFER_CEILING_MS = 30_000
+
+# #248/#247 round 2 follow-up: an auth-failure marker must be seen on this
+# many CONSECUTIVE polls before `_check` blind-delivers — a single poll that
+# happens to land while the footer region is mid-redraw (or still showing
+# stale text from a screen transition) must not be enough to convict. Small
+# relative to `_READY_POLL_INTERVAL_MS` (150ms) — 5 polls is ~750ms, trivial
+# next to the ceiling this whole fast-fail path exists to beat
+# (BUSY_WAIT_CEILING_SEC, 1800s) — but enough to filter a one-frame render
+# artifact. A pane genuinely stuck on auth keeps showing the marker on every
+# subsequent poll, so this costs it nothing.
+_AUTH_FAILURE_CONFIRM_POLLS = 5
 
 
 def _prompt_block_reason(session) -> str | None:
@@ -898,6 +910,13 @@ class LeadInboxMixin:
         # #186: accumulates only while _deliver() is deferring a would-be
         # blind paste because the pane is still on a recognised prompt.
         prompt_defer_elapsed = [0]
+        # #248/#247 round 2: logged/warned once, the first poll that
+        # recognises the pane's provider CLI showing an auth-failure marker.
+        auth_failure_warned = [False]
+        # Consecutive-poll counter gating the warn above — see
+        # _AUTH_FAILURE_CONFIRM_POLLS. Reset to 0 the moment either the
+        # marker stops matching OR the pane reaches its own ready prompt.
+        auth_failure_streak = [0]
 
         def _deliver(unconfirmed: bool = False, busy_ceiling: bool = False) -> None:
             if sent[0]:
@@ -1111,7 +1130,94 @@ class LeadInboxMixin:
                         reason=_reason,
                     )
                     self._warn_lead_delivery_blocked_prompt(role_name, project, _reason)
-            if pane.session.is_at_ready_prompt():
+            try:
+                _pane_ready_now = pane.session.is_at_ready_prompt()
+            except Exception:
+                _pane_ready_now = False
+            if not auth_failure_warned[0]:
+                if _pane_ready_now:
+                    # A CLI genuinely stuck on auth can never reach its own
+                    # ready prompt — seeing one is proof any auth-failure
+                    # marker still visible in the footer region is stale
+                    # (e.g. a just-finished test run that printed one of the
+                    # generic phrases, now scrolled into the tail rows with
+                    # the CLI back at idle). Ready wins: let the normal
+                    # ready_streak/_deliver() path below handle this poll
+                    # instead of blind-delivering, and reset the streak so a
+                    # later genuine relapse still needs its own confirmation.
+                    auth_failure_streak[0] = 0
+                else:
+                    # #248/#247 round 2: recognise a provider CLI's own
+                    # auth-failure text as its own state, checked on every
+                    # poll like the prompt-block check above — fails fast
+                    # instead of riding out the ordinary busy/stall path,
+                    # which could take up to BUSY_WAIT_CEILING_SEC (1800s
+                    # default) to say anything concrete about a pane that
+                    # was never going to recover on its own.
+                    try:
+                        _provider = getattr(pane.model, "provider_name", None) or "claude"
+                        _auth_reason = pane.session.auth_failure_reason(_provider)
+                        if not isinstance(_auth_reason, str):
+                            # Defensive: a real PtySession always returns str |
+                            # None, but a test double / unconfigured mock
+                            # session returns a truthy Mock object by default —
+                            # never treat that as a genuine auth failure.
+                            _auth_reason = None
+                    except Exception:
+                        _auth_reason = None
+                    if _auth_reason:
+                        auth_failure_streak[0] += 1
+                    else:
+                        auth_failure_streak[0] = 0
+                    if _auth_reason and auth_failure_streak[0] >= _AUTH_FAILURE_CONFIRM_POLLS:
+                        auth_failure_warned[0] = True
+                        _log_event(
+                            "task_deliver_auth_failure",
+                            project=self._resolve_project(project),
+                            role=role_name,
+                            provider=_provider,
+                            reason=_auth_reason,
+                        )
+                        self._warn_lead_auth_failure(role_name, project, _provider, _auth_reason)
+                        _deliver(unconfirmed=True)
+                        return
+            no_content_ceiling_ms = _orch_attr("NO_CONTENT_WATCHDOG_SEC", 75) * 1000
+            try:
+                _no_content = (
+                    pane.session is not None
+                    and pane.session.is_alive
+                    and pane.session.first_content_ts() is None
+                )
+            except Exception:
+                _no_content = False
+            if _no_content and elapsed[0] >= no_content_ceiling_ms:
+                _no_content_key = _exit_key(project_ns, role_name)
+                _ps_watchdog = getattr(self, "_pane_state", {}).get(_no_content_key)
+                _no_content_attempts = (
+                    _ps_watchdog.no_content_recover_attempts if _ps_watchdog is not None else 0
+                )
+                # close()+spawn() destroys and recreates the AgentPane widget
+                # (paneClosed -> main_window._remove_teammate_pane tears it
+                # down; a respawn's _ensure_teammate_pane builds a brand new
+                # one) — this `pane`/`_check` closure would be polling a dead
+                # object afterward, so recovery hands off to a FRESH
+                # `_send_when_ready` call (started once the delayed respawn
+                # lands) instead of trying to keep this loop alive. Gated on
+                # the PERSISTED PaneState counter, not a local one-shot flag,
+                # because that fresh call has its own brand-new closure state
+                # — only a value that survives the close()/respawn cycle can
+                # cap this at exactly one retry + one degrade overall.
+                if _no_content_attempts < 2:
+                    sent[0] = True
+                    self._recover_no_content_pane(
+                        role_name, project, pane, task, degrade=_no_content_attempts >= 1
+                    )
+                    return
+                # Already used both the retry and the degrade attempt, still
+                # no content — fall through to the ordinary
+                # elapsed[0] >= max_wait_ms path below as the final safety
+                # net (blind-deliver, unconfirmed).
+            if _pane_ready_now:
                 ready_streak[0] += 1
                 # Wait for 5.0 seconds (33 polls of 150ms) of consecutive ready state
                 # to ensure the CLI has finished async background loading (e.g. account verification).
@@ -1312,6 +1418,167 @@ class LeadInboxMixin:
             project=project_ns,
             seconds_since_output=round(seconds_since_output, 1),
         )
+
+    def _warn_lead_auth_failure(
+        self, role_name: str, project: str | None, provider: str, reason: str
+    ) -> None:
+        """Tell the Lead, once, the first delivery poll that finds the
+        pane's provider CLI showing an auth-failure marker (#248/#247 round
+        2) — fired immediately on detection, like
+        `_warn_lead_delivery_blocked_prompt` above, instead of riding out
+        the ordinary busy/stall path which could otherwise take up to
+        BUSY_WAIT_CEILING_SEC (1800s default) to say anything concrete.
+        Names the provider and how to log back in
+        (`ProviderSpec.post_install_note`, the same login hint doctor/
+        install flows already surface) so the Lead doesn't have to go
+        spelunking in the pane to figure out which CLI is broken. Callers
+        gate on their own one-shot flag (`auth_failure_warned` in
+        `_send_when_ready`'s `_check` closure). No-op when warning the Lead
+        about itself."""
+        if role_name == LEAD.name:
+            return
+        project_ns = self._resolve_project(project)
+        lead = self._project_panes(project_ns).get(LEAD.name)
+        if not (lead and lead.session and lead.session.is_alive):
+            return
+        from .provider_spec import PROVIDER_REGISTRY
+
+        spec = PROVIDER_REGISTRY.get(provider)
+        login_hint = (spec.post_install_note if spec is not None else "") or (
+            f"log back into the {provider} CLI"
+        )
+        display = (spec.display_name if spec is not None else "") or provider.capitalize()
+        msg = (
+            f'🔒 [auth-failure] {role_name} pane ({display}) ติด auth error: "{reason}" — '
+            f"{login_hint} แล้วสั่งงานใหม่อีกครั้ง (#248/#247)"
+        )
+        self._notify_lead(project_ns, msg)
+        _log_event(
+            "auth_failure_warned",
+            role=role_name,
+            project=project_ns,
+            provider=provider,
+            reason=reason,
+        )
+
+    def _warn_lead_no_content(self, role_name: str, project: str | None, *, degrade: bool) -> None:
+        """One-line Lead notice for `_recover_no_content_pane` below — split
+        out from the respawn logic so the message can be asserted on
+        independently of the close→respawn side effect. No-op when warning
+        the Lead about itself or when Lead itself is not reachable."""
+        if role_name == LEAD.name:
+            return
+        project_ns = self._resolve_project(project)
+        lead = self._project_panes(project_ns).get(LEAD.name)
+        if not (lead and lead.session and lead.session.is_alive):
+            return
+        ceiling = _orch_attr("NO_CONTENT_WATCHDOG_SEC", 75)
+        if degrade:
+            msg = (
+                f"⚠️ [no-content-degrade] {role_name} pane ไม่มี output เลยแม้ retry แล้ว 1 ครั้ง "
+                f"(รอบละ {ceiling}s) — degrade เป็น claude substitute แล้ว spawn ใหม่ (#248/#247)"
+            )
+        else:
+            msg = (
+                f"🔁 [no-content-retry] {role_name} pane spawn แล้วไม่มี output เลยเกิน {ceiling}s "
+                f"— กำลัง kill pane + retry spawn อีกครั้ง (#248/#247)"
+            )
+        self._notify_lead(project_ns, msg)
+        _log_event(
+            "no_content_pane_warned",
+            role=role_name,
+            project=project_ns,
+            degrade=degrade,
+        )
+
+    def _recover_no_content_pane(
+        self,
+        role_name: str,
+        project: str | None,
+        pane: AgentPane,
+        task: str,
+        *,
+        degrade: bool,
+    ) -> None:
+        """#248/#247 round 2: a pane whose provider CLI never rendered ANY
+        content within NO_CONTENT_WATCHDOG_SEC of spawn — the exact "spawn
+        succeeded, CLI never printed anything" symptom that made
+        `orchestrator._pane_display_state` add the "spawning" label in
+        round 1 (first_content_ts() staying None is otherwise
+        indistinguishable from a slow-but-healthy cold boot).
+
+        First occurrence (``degrade=False``): close + respawn once. No
+        conversation has actually started (zero content ever rendered), so
+        none of `_auto_recover_stuck`'s snapshot/--resume machinery is
+        needed — a plain fresh spawn is equivalent and far simpler.
+
+        Second occurrence (``degrade=True``): the retry ALSO produced
+        nothing, so stop trying this provider for this pane — force the
+        next spawn to claude via `PaneState.provider_override` (mirrors
+        `model_override`'s existing per-pane precedent in spawn_engine.py;
+        consulted ahead of `provider_config.effective_provider_for`'s
+        normal config/availability resolution), the same "unavailable
+        provider → claude substitute" idea the cockpit already applies
+        globally, just triggered per-pane here instead of by the
+        disabled-providers/binary-missing check that mechanism normally
+        runs on. `provider_override` naturally clears the next time this
+        role's PaneState is popped (a plain `close()`/`done()`, or the
+        `self.close()` a few lines below), so a later fresh `assign()` for
+        this role tries the real provider again rather than staying
+        degraded forever.
+
+        Unlike `_prompt_block_reason`/auth-failure handling above, the
+        caller (`_check`) does NOT keep polling the same closure afterward
+        — `close()` tears the AgentPane widget down entirely
+        (`paneClosed` → `main_window._remove_teammate_pane`) and a respawn
+        builds a brand new one (`_ensure_teammate_pane`), so the `pane`
+        object this call was given goes stale the moment `close()` returns.
+        Instead this starts a FRESH `_send_when_ready` call once the
+        delayed respawn lands (which re-fetches the pane from the registry
+        at its own top), the same way `_auto_recover_stuck`'s
+        `_do_respawn` re-sends a snapshot task after ITS close→respawn
+        cycle. The 2s close-then-respawn pause also mirrors
+        `_auto_recover_stuck` — it lets the PTY/WebEngine teardown finish
+        before a new session binds to the same role slot."""
+        if role_name == LEAD.name:
+            return
+        project_ns = self._resolve_project(project)
+        key = _exit_key(project_ns, role_name)
+        cwd = getattr(pane, "_session_cwd", None)
+        # Snapshot before close() pops the whole PaneState — restored into
+        # the fresh one _do_respawn creates so the attempt count survives
+        # the pop (same snapshot/restore shape _auto_recover_stuck uses for
+        # its own counters).
+        _ps_snap = getattr(self, "_pane_state", {}).get(key)
+        snap_attempts = _ps_snap.no_content_recover_attempts if _ps_snap is not None else 0
+        _log_event(
+            "no_content_pane_recover",
+            role=role_name,
+            project=project_ns,
+            degrade=degrade,
+            prior_attempts=snap_attempts,
+        )
+        self._warn_lead_no_content(role_name, project_ns, degrade=degrade)
+        self.close(role_name, project=project_ns, suppress_pipeline=True, suppress_auto_chain=True)
+
+        def _do_respawn() -> None:
+            ps = self._ps(key)
+            ps.no_content_recover_attempts = snap_attempts + 1
+            if degrade:
+                ps.provider_override = "claude"
+            ok, msg = self.spawn(role_name, cwd=cwd, project=project_ns, _from_auto_respawn=True)
+            _log_event(
+                "no_content_pane_respawned",
+                role=role_name,
+                project=project_ns,
+                degrade=degrade,
+                ok=ok,
+                msg=msg[:160],
+            )
+            if ok and task:
+                self._send_when_ready(role_name, task, project=project_ns)
+
+        QTimer.singleShot(2_000, _do_respawn)
 
     def _warn_lead_delivery_unconfirmed(
         self,
