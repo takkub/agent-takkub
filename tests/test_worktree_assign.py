@@ -8,6 +8,7 @@ WorktreeManager is faked so nothing touches a real repo.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -339,6 +340,34 @@ class TestWorktreeHint:
 class TestRequestRestart:
     """`takkub restart` → Orchestrator.request_restart() → deferred signal →
     main_window._restart_cockpit (persist + relaunch)."""
+
+    def test_writes_restart_reason_marker_for_restore_notice(self, orch, qapp, tmp_path):
+        """Issue #232: the CLI path writes the same marker
+        `_restart_cockpit`'s auto-triggered reasons do, so the successor's
+        `restore_teammates()` can tell a `takkub restart` apart from an
+        auto-applied update."""
+        marker = tmp_path / "restart-reason.json"
+        # The marker write happens synchronously inside request_restart(),
+        # before the deferred 200ms QTimer — but that timer must still be
+        # drained within THIS test (same pattern as
+        # test_replies_ok_and_emits_deferred below) so it never fires later
+        # against a since-torn-down `orch`, which crashes the interpreter
+        # (proven: leaving it dangling here caused an access violation in
+        # the very next test that shares this module-scoped `qapp`).
+        fired: list[bool] = []
+        orch.restartRequested.connect(lambda: fired.append(True))
+        with patch.object(orch_mod, "_RESTART_REASON_FILE", marker):
+            ok, _msg = orch.request_restart()
+        assert ok
+        assert marker.is_file()
+        assert json.loads(marker.read_text(encoding="utf-8"))["reason"] == "cli"
+
+        import time as _time
+
+        deadline = _time.monotonic() + 2.0
+        while not fired and _time.monotonic() < deadline:
+            qapp.processEvents()
+        assert fired == [True]
 
     def test_replies_ok_and_emits_deferred(self, orch, qapp):
         fired: list[bool] = []

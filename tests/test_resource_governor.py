@@ -4,6 +4,7 @@ from agent_takkub.resource_governor import (
     GovernorLimits,
     ResourceClass,
     ResourceGovernor,
+    classify_resource,
 )
 
 
@@ -251,6 +252,58 @@ def test_waiting_tasks_snapshot_exposes_reason() -> None:
     assert waiting[0]["reason"] == "heavy_global_limit"
 
 
+def test_holders_for_class_reports_pane_holding_the_slot() -> None:
+    """Issue #240 point 3: a denied caller should be able to find out *who*
+    it's waiting behind, not just the bare limit-name reason."""
+    governor = ResourceGovernor(_limits())
+    held = _request(governor, "a", "backend#1", ResourceClass.PACKAGE_INSTALL)
+    assert held.allowed
+    assert governor.holders_for_class(ResourceClass.PACKAGE_INSTALL) == ["backend#1"]
+    assert governor.snapshot()["resource_holders"]["package_install"] == ["backend#1"]
+    assert governor.holders_for_class(ResourceClass.BUILD) == []
+
+
+def test_gate_block_heartbeat_throttles_long_running_waits() -> None:
+    """Issue #240 point 4: #195's 1/2/5/15s backoff still floods events.log
+    once it settles at its 15s floor for a task blocked a long time (field
+    evidence: 1154 lines for one pane in a single wave). Ramp-up attempts
+    (the first 4, already pinned by `test_gate_block_backoff_reduces_retry_frequency`)
+    must still log every time; once an item is past the ramp, further lines
+    are throttled to at most one per `_GATE_BLOCK_LOG_HEARTBEAT_S`."""
+    clock = [0.0]
+    events: list[tuple[str, dict]] = []
+    governor = ResourceGovernor(
+        _limits(max_heavy_global=1, max_heavy_per_project=1),
+        clock=lambda: clock[0],
+        event_sink=lambda event, details: events.append((event, details)),
+    )
+    held = _request(governor, "held", "one")
+    assert held.allowed
+    governor.enqueue(
+        project_id="a",
+        pane_id="a1",
+        task_id="a1",
+        resource_class=ResourceClass.HEAVY,
+    )
+    events.clear()
+
+    # Ramp-up: t=1,2,4,9 (4 attempts) all log, per the pinned backoff test.
+    # Steady state settles at a 15s retry cadence — walk out to t=90 (~6 more
+    # retries at 15s) and expect the heartbeat to suppress most of them.
+    for _ in range(90):
+        clock[0] += 1.0
+        governor.dispatch_waiting()
+
+    block_events = [e for e, _ in events if e == "resource_gate_block"]
+    # Without the heartbeat this would be ~10 lines (4 ramp-up + ~6 steady
+    # 15s retries out to t=90); the 60s heartbeat caps steady-state logging
+    # to roughly one per minute after the ramp, well under that.
+    assert 4 <= len(block_events) <= 7, block_events
+    # And the ramp-up prefix is untouched — first 4 lines still land at
+    # exactly the pinned schedule.
+    assert len(block_events) >= 4
+
+
 def test_live_limit_update_preserves_active_tokens_and_waiting_queue() -> None:
     governor = ResourceGovernor(_limits(max_heavy_global=1, max_heavy_per_project=1))
     held = _request(governor, "a", "one")
@@ -266,3 +319,62 @@ def test_live_limit_update_preserves_active_tokens_and_waiting_queue() -> None:
     assert snapshot["queued_resource_tasks"] == 1
     assert snapshot["resource_limits"]["max_heavy_global"] == 3
     assert governor.release_slot(held.token)
+
+
+# ─────────────────────────────────────────────────────────────
+# Issue #240 point 1 — classifier must not fire on prohibition/negation
+# sentences that merely *mention* a marker in order to forbid it.
+# ─────────────────────────────────────────────────────────────
+
+
+def test_classify_ignores_prohibition_sentence_from_real_task_spec() -> None:
+    """Verbatim from issue #240's own field report — the exact sentence that
+    caused a 3-pane parallel wave to serialize on wave 1 of agent-takkub
+    itself, 2026-08-15 06:51-06:54: a task spec written to FORBID `pip
+    install -e .` was itself classified as a package-install task."""
+    task = (
+        "ก่อนแก้ไฟล์ใน src/agent_takkub/ อ่าน docs/architecture/godfile-map.md ก่อน\n"
+        "ห้ามรัน `pip install -e .` เด็ดขาด (จะไป repoint venv ของ repo หลัก — บั๊ก #202)\n"
+        "commit ใน worktree ของตัวเอง ห้าม push ห้ามแตะ main"
+    )
+    assert classify_resource("backend#2", task) != ResourceClass.PACKAGE_INSTALL
+
+
+def test_classify_ignores_prohibition_sentence_from_this_sessions_own_task() -> None:
+    """Same shape, drawn from the Lead's own spawn-prompt boilerplate used
+    across every backend task in this project (not just the #240 repro) —
+    a second independent fixture proving the fix generalizes."""
+    task = (
+        "**ห้ามติดตั้ง venv ซ้ำแบบ editable (คำสั่งตระกูล `pip install -e`) เด็ดขาด** "
+        "— จะไป repoint venv ของ repo หลัก (บั๊ก #202)"
+    )
+    assert classify_resource("backend#3", task) != ResourceClass.PACKAGE_INSTALL
+
+
+def test_classify_ignores_english_negation_cues() -> None:
+    for phrasing in (
+        "Don't run `npm install` in this repo, it will corrupt the lockfile.",
+        "Never run pip install here — use the shared venv instead.",
+        "Avoid npm ci during this task; the deps are already synced.",
+    ):
+        assert classify_resource("backend#1", phrasing) != ResourceClass.PACKAGE_INSTALL, phrasing
+
+
+def test_classify_still_detects_genuine_install_instruction() -> None:
+    """The negation filter must not swallow real instructions — a positive
+    control alongside the negation fixtures above."""
+    assert (
+        classify_resource("backend#1", "รัน `pip install -r requirements.txt` ก่อนเริ่มงาน")
+        == ResourceClass.PACKAGE_INSTALL
+    )
+    assert (
+        classify_resource("frontend#1", "run `npm install` then start the dev server")
+        == ResourceClass.PACKAGE_INSTALL
+    )
+
+
+def test_classify_negation_on_one_line_does_not_suppress_marker_on_another() -> None:
+    """A prohibition earlier in a multi-line spec must not blind the
+    classifier to a genuine install instruction on a different line."""
+    task = "ห้ามรัน `pip install -e .` เด็ดขาด\nแต่ต้องรัน `npm install` ก่อน build ปกติ"
+    assert classify_resource("frontend#1", task) == ResourceClass.PACKAGE_INSTALL

@@ -27,6 +27,17 @@ def isolated_session_file(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Pat
     return target
 
 
+@pytest.fixture
+def isolated_restart_reason_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> pathlib.Path:
+    """Redirect the module-level _RESTART_REASON_FILE (#232) to a tmp path so
+    tests don't touch/clear the real cockpit's marker under `runtime/`."""
+    target = tmp_path / "restart-reason.json"
+    monkeypatch.setattr(orch_mod, "_RESTART_REASON_FILE", target)
+    return target
+
+
 class _FakeOrchestrator:
     """Stand-in for Orchestrator that only carries the state
     `restore_teammates` reads. The real class needs Qt to construct,
@@ -130,6 +141,50 @@ class TestRestoreTeammates:
         # _recent_exits stamped for crash-recovery bookkeeping (project-scoped keys)
         assert "agent-takkub::backend" in fake._recent_exits
         assert "line-websupport::frontend" in fake._recent_exits
+
+    def test_restore_notice_carries_npm_update_reason(
+        self,
+        isolated_session_file: pathlib.Path,
+        isolated_restart_reason_file: pathlib.Path,
+    ) -> None:
+        """Issue #232: the Lead-facing restore notice should say WHY the
+        cockpit restarted, not just that it did."""
+        now = dt.datetime.now().isoformat(timespec="seconds")
+        snap = {
+            "saved_at": now,
+            "projects": {"p": [{"role": "backend", "cwd": "/x", "last_task": "do X"}]},
+        }
+        isolated_session_file.write_text(json.dumps(snap), encoding="utf-8")
+        isolated_restart_reason_file.write_text(
+            json.dumps({"reason": "npm_update", "version": "1.2.3"}), encoding="utf-8"
+        )
+        fake = _FakeOrchestrator()
+        assert _run_restore(fake) == 1
+        body = fake._pending_done_notices["p"][0]["body"]
+        assert "restarted to apply update v1.2.3" in body
+        # Marker is single-use — a second boot with no fresh marker must not
+        # keep repeating a stale reason.
+        assert not isolated_restart_reason_file.exists()
+
+    def test_restore_notice_has_no_reason_suffix_when_marker_absent(
+        self,
+        isolated_session_file: pathlib.Path,
+        isolated_restart_reason_file: pathlib.Path,
+    ) -> None:
+        now = dt.datetime.now().isoformat(timespec="seconds")
+        snap = {
+            "saved_at": now,
+            "projects": {"p": [{"role": "backend", "cwd": "/x", "last_task": "do X"}]},
+        }
+        isolated_session_file.write_text(json.dumps(snap), encoding="utf-8")
+        assert not isolated_restart_reason_file.exists()
+        fake = _FakeOrchestrator()
+        assert _run_restore(fake) == 1
+        body = fake._pending_done_notices["p"][0]["body"]
+        assert (
+            body
+            == "[cockpit restart] backend pane restored from last session and last task re-sent automatically."
+        )
 
     def test_skips_entries_without_role(self, isolated_session_file: pathlib.Path) -> None:
         # Defensive: a malformed entry shouldn't blow up the whole restore.
