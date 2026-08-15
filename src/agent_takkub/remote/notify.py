@@ -1342,7 +1342,16 @@ class LeadNotifier(QObject):
                 del self._tails[project_ns]
 
         # start tailing newly-discovered sessions only — a project already
-        # tailing its current session is left untouched (offset preserved).
+        # tailing its current session is left untouched (offset preserved),
+        # and — #229 — skipped *before* touching the filesystem at all: the
+        # eviction loop just above already deleted any tail whose identity
+        # no longer matches `wanted`, so a project_ns still in `self._tails`
+        # here is proof its resolved path can't have changed, no glob
+        # needed. Without this, every project got a fresh provider-store
+        # glob (recursive stat) on *every* tick of this 200ms QTimer, on the
+        # Qt main thread, regardless of whether anything changed — the
+        # `_resolve_claude_jsonl_path` stat storm behind the #229 1.5-1.8s
+        # SOFT stalls.
         # A project whose jsonl hasn't been created/flushed yet (path is
         # still None) simply stays out of `_tails` and is retried here on
         # every call — `_poll_all()` calls `_resync()` on every tick, so a
@@ -1350,11 +1359,10 @@ class LeadNotifier(QObject):
         # up on the very next poll instead of only on the next
         # `statusChanged` signal.
         for project_ns, (provider, session_uuid, spawn_ts) in wanted.items():
+            if project_ns in self._tails:
+                continue
             path = self._resolve_jsonl(project_ns, session_uuid, provider, spawn_ts)
             if path is None:
-                continue
-            current = self._tails.get(project_ns)
-            if current is not None and current.path == path:
                 continue
             try:
                 size = path.stat().st_size
