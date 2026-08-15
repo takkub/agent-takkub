@@ -96,6 +96,50 @@ def _safe_screen_display(screen: pyte.Screen) -> list[str]:
     return rows
 
 
+# ── Content-change fingerprint (#248/#247) ──────────────────────────────────
+# `_last_output_ts` (seconds_since_output()) used to stamp on every raw PTY
+# byte chunk, which made two very different states look identical to any
+# caller polling it: a freshly-spawned pane whose terminal-init escape
+# sequence (cursor-position report, mouse-mode enables — no visible glyph at
+# all) renders nothing, and a CLI wedged on a static status line ("Signing
+# in...") whose only motion is an animated spinner glyph. Both kept bumping
+# the "last real output" clock forever, so lead_inbox.py's delivery busy-wait
+# (#130/#144) and the stale-marker watchdog (#20) treated a hung pane as
+# "still making progress" for the full BUSY_WAIT_CEILING_SEC/STUCK_THRESHOLD_S
+# window instead of surfacing it.
+#
+# _content_fingerprint normalizes away the animation (spinner glyph, trailing
+# ellipsis dots) and drops blank rows before comparing, so two frames that
+# only differ by which spinner glyph is showing collapse to the same
+# fingerprint — stamping becomes a strict "the visible content actually
+# changed" signal instead of "a byte arrived".
+_SPINNER_GLYPH_RE = re.compile(
+    r"[⠀-⣿]"  # braille spinner block (⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⣾⣽⣻⢿⡿⣟⣯⣷ … — claude/agy/codex all use some subset)
+    r"|[●○◐◑◒◓]"  # dot/circle spinner frames
+    r"|(?<!\S)[|/\\-](?!\S)"  # isolated ascii spinner glyph — bounded by
+    # whitespace/edges so it can't eat a real hyphen inside a word/flag/path
+    # ("a-b", "--force", "a/b" are left untouched)
+)
+_TRAILING_DOTS_RE = re.compile(r"\.+\s*$")
+
+
+def _content_fingerprint(lines: list[str]) -> str:
+    """Cheap fingerprint of the non-blank screen content with spinner
+    animation normalized away. "" means the screen is entirely blank —
+    nothing rendered yet (e.g. only a terminal-init escape sequence has been
+    fed so far)."""
+    rows: list[str] = []
+    for line in lines:
+        stripped = line.rstrip()
+        if not stripped:
+            continue
+        stripped = _SPINNER_GLYPH_RE.sub("", stripped)
+        stripped = _TRAILING_DOTS_RE.sub("", stripped).rstrip()
+        if stripped:
+            rows.append(stripped)
+    return "\n".join(rows)
+
+
 def _tree_kill(pid: int | None) -> None:
     """Force-kill `pid` and its entire descendant process tree.
 
@@ -892,13 +936,32 @@ class PtySession(QObject):
         # it so a pane on a non-default user profile finds its session JSONL
         # under <config_dir>/projects/ instead of ~/.claude/projects/.
         self._claude_config_dir: str | None = None
-        # Monotonic timestamp of the last PTY output chunk. A *structural*
-        # idle/busy signal (independent of TUI text markers, #20): a generating
-        # CLI streams output continuously (spinner repaint + token stream), so a
-        # long gap since the last chunk means the pane has gone quiet. 0.0 = no
-        # output seen yet. Written in the reader thread, read on the main thread;
-        # a plain float read/write is atomic under the GIL so no lock is needed.
+        # Monotonic timestamp of the last *content-changing* PTY output chunk
+        # (#248/#247) — a structural idle/busy signal (independent of TUI text
+        # markers, #20): a generating CLI streams visibly-changing output
+        # continuously (spinner repaint + token stream), so a long gap since
+        # the screen last actually changed means the pane has gone quiet.
+        # Stamped only when _content_fingerprint(...) differs from the
+        # previous chunk's — a redrawing spinner glyph or a terminal-init
+        # escape sequence that renders nothing must NOT advance this (see
+        # _feed_and_log). 0.0 = no content seen yet. Written in the reader
+        # thread, read on the main thread; a plain float read/write is atomic
+        # under the GIL so no lock is needed.
         self._last_output_ts: float = 0.0
+        # Raw PTY liveness (#248/#247): stamped on EVERY chunk, unlike
+        # _last_output_ts above — this is "the process is still writing to
+        # the pty", not "the pane is making progress". Kept separate so a
+        # caller that only needs to know the PTY hasn't died isn't fooled by
+        # content-fingerprint normalization, and vice versa.
+        self._last_byte_ts: float = 0.0
+        # Fingerprint of the last chunk's normalized screen content — see
+        # _content_fingerprint. "" until the first non-blank content arrives.
+        self._last_content_fingerprint: str = ""
+        # Monotonic timestamp of the first content-changing chunk this
+        # session ever produced, or None before that (the CLI process is up
+        # but hasn't rendered anything yet — still mid-boot / terminal-init
+        # only). Public accessor: first_content_ts().
+        self._first_content_ts: float | None = None
         self._output_rate_bps: float = 0.0
         self._output_rate_window_started: float = time.monotonic()
         self._output_rate_window_bytes: int = 0
@@ -998,22 +1061,23 @@ class PtySession(QObject):
         thread: write the transcript, feed pyte, and classify the ready state
         (all under the screen lock). Best-effort — never raises so a bad
         chunk can't kill the reader."""
-        # Structural quiescence signal (#20): stamp every real output chunk.
-        self._last_output_ts = time.monotonic()
+        # Raw PTY liveness (#248/#247): every chunk bumps this unconditionally
+        # — see _last_byte_ts's docstring. NOT the content-progress signal;
+        # that's _last_output_ts, stamped further down only on a real
+        # content-fingerprint change.
+        now = time.monotonic()
+        self._last_byte_ts = now
         window_bytes = int(self.__dict__.get("_output_rate_window_bytes", 0)) + len(data)
-        window_started = float(
-            self.__dict__.get("_output_rate_window_started", self._last_output_ts)
-        )
+        window_started = float(self.__dict__.get("_output_rate_window_started", now))
         self.__dict__["_output_rate_window_bytes"] = window_bytes
-        rate_elapsed = self._last_output_ts - window_started
+        rate_elapsed = now - window_started
         if rate_elapsed >= 1.0:
             self.__dict__["_output_rate_bps"] = window_bytes / rate_elapsed
             self.__dict__["_output_rate_window_bytes"] = 0
-            self.__dict__["_output_rate_window_started"] = self._last_output_ts
+            self.__dict__["_output_rate_window_started"] = now
         if self._transcript is not None:
             try:
                 self._transcript.write(data)
-                now = time.monotonic()
                 pending_bytes = int(self.__dict__.get("_transcript_pending_bytes", 0)) + len(data)
                 last_flush = float(self.__dict__.get("_transcript_last_flush", now))
                 self._transcript_pending_bytes = pending_bytes
@@ -1030,14 +1094,23 @@ class PtySession(QObject):
         try:
             with self._screen_lock:
                 self.stream.feed(data)
+                lines = _safe_screen_display(self.screen)
                 # Classify ready state here, while we already hold the lock
                 # feed() just used — the reader thread pays this cost instead
                 # of the Qt main thread (#106: agent_pane._sync_idle_flag was
                 # calling is_at_ready_prompt() on every outputUpdated, taking
                 # this SAME lock and contending with this exact feed()).
-                self._cached_ready = _classify_ready(
-                    _ready_region(_safe_screen_display(self.screen))
-                )
+                self._cached_ready = _classify_ready(_ready_region(lines))
+                # Structural quiescence signal (#248/#247): stamp
+                # _last_output_ts only when the rendered screen actually
+                # changed — reuses `lines` above instead of re-joining the
+                # full screen a second time.
+                fingerprint = _content_fingerprint(lines)
+                if fingerprint != self._last_content_fingerprint:
+                    self._last_content_fingerprint = fingerprint
+                    self._last_output_ts = now
+                    if fingerprint and self._first_content_ts is None:
+                        self._first_content_ts = now
         except Exception:
             # pyte sometimes chokes on partial sequences; skip and continue
             pass
@@ -1482,6 +1555,35 @@ class PtySession(QObject):
         from one that was SWALLOWED (#26 — bytes dropped, pane stayed silent →
         timestamp unchanged), which a same-clock comparison decides reliably."""
         return self._last_output_ts or 0.0
+
+    def seconds_since_byte(self) -> float:
+        """Monotonic seconds since the PTY last delivered ANY byte chunk,
+        including ones that rendered no visible content change (a terminal-
+        init escape sequence, a redrawing spinner glyph — see
+        seconds_since_output() for the content-filtered version of this).
+
+        This is the raw "is the process still writing to the pty" signal
+        (#248/#247) — for a caller that wants to distinguish a dead/wedged
+        PTY from one that's alive but visibly stuck, not for progress
+        detection (use seconds_since_output() for that). Returns ``inf``
+        before any byte has been seen."""
+        ts = self._last_byte_ts
+        if not ts:
+            return float("inf")
+        return max(0.0, time.monotonic() - ts)
+
+    def first_content_ts(self) -> float | None:
+        """Monotonic timestamp of the first content-changing PTY output this
+        session ever produced, or ``None`` before that.
+
+        ``None`` means the CLI process is spawned and the PTY is open, but
+        nothing has rendered on screen yet — still mid-boot, or so far only
+        terminal-init escape sequences (cursor-position report, mouse-mode
+        enables) have been fed, which is exactly the state a hung/wedged
+        spawn is indistinguishable from without this (#248/#247). Orchestrator
+        status reporting (`takkub list`/`status`) uses this to tell
+        "spawning" apart from "active"/"ready"."""
+        return self._first_content_ts
 
     def rate_limit_reset_at(self) -> float | None:
         """If the pane is showing claude's usage-limit banner, return the epoch

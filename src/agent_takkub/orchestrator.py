@@ -3765,10 +3765,44 @@ class Orchestrator(
         from the list.
         """
         project_ns = self._resolve_project(project)
-        status = {name: p.state for name, p in self._project_panes(project_ns).items()}
+        status = {
+            name: self._pane_display_state(p) for name, p in self._project_panes(project_ns).items()
+        }
         status.update(self._pending_notice_roles(project_ns, status))
         status.update(self._queued_resource_roles(project_ns, status))
         return status
+
+    def _pane_display_state(self, pane: AgentPane) -> str:
+        """Refine `pane.state == "active"` into spawning/active/ready (#248/#247).
+
+        `pane.state` is set once at spawn (`AgentPane.attach_session` →
+        "active") and never distinguished "CLI process launched, nothing
+        printed yet" from "CLI is up and idle at its own ready prompt" — both
+        read identically as "active" to `takkub list`/`status`, which is
+        exactly what made a hung spawn (a codex pane whose CLI never printed
+        anything, an agy pane stuck spinning on "Signing in...") look the
+        same as a healthy idle pane waiting for a task.
+
+        Every other `pane.state` value ("working", "done", "empty", or a
+        pending-notice/queued label) is returned unchanged — this only adds
+        a richer label for the "active" case, so every existing
+        `pane.state == "working"` / etc. check elsewhere is unaffected."""
+        if pane.state != "active":
+            return pane.state
+        session = pane.session
+        if session is None:
+            return "spawning"
+        try:
+            has_content = session.first_content_ts() is not None
+        except Exception:
+            return "active"  # fail open to the old label
+        if not has_content:
+            return "spawning"
+        try:
+            ready = session.is_at_ready_prompt_cached()
+        except Exception:
+            ready = False
+        return "ready" if ready else "active"
 
     def _compute_last_progress_ts(self, role: str, project_ns: str, pane: AgentPane) -> float:
         """Return the most-recent activity timestamp for `pane` (0.0 = no baseline).
@@ -3860,7 +3894,7 @@ class Orchestrator(
                 except Exception:
                     blocked_reason = None
             result[role] = {
-                "state": state,
+                "state": self._pane_display_state(pane),
                 "stall_minutes": stall_minutes,
                 "last_progress_ts": last_progress_ts,
                 "blocked_reason": blocked_reason,
