@@ -656,14 +656,65 @@ _TOKEN_DISCIPLINE_HYGIENE = (
 )
 
 
+# Role capability declaration (#250): single source of truth for "which
+# roles are PROVEN to never need guard X", read by both this module
+# (_DEV_SERVER_HYGIENE, below) and spawn_engine.py (STALE_FILE_GUARD, added
+# to the SAME staged CLAUDE.md later in the same spawn — see that module's
+# `_appendix` build next to `agent_role_dir(base_role)`). Deliberately
+# fail-safe: only role names actually verified — by reading their
+# `.claude/agents/<role>.md` (2026-08-15 audit, not guessed from the role
+# name) — to have no way of needing a guard are listed here. Every other
+# name, including a registered role this table hasn't been taught about yet
+# or an A6 custom role (never appears in either set, `CUSTOM_AGENTS_DIR`),
+# falls through to "needs it". Do NOT add a role to either set without first
+# reading its role file: `critic`/`designer`/`qa` all drive a browser
+# against a live app and may have to bring it up themselves, so they stay
+# OUT of `_NO_DEV_SERVER_ROLES` even though they don't run `next dev`
+# directly — cutting the guard there would resurrect the worst failure mode
+# it exists to prevent (a dev server left running foreground, wedging an
+# unattended pane overnight).
+_NO_DEV_SERVER_ROLES: frozenset[str] = frozenset(
+    {
+        "reviewer",  # Read/Bash only — reviews code, never runs/builds the app
+        "gemini",  # claude-substitute: Read/Bash only, planning/second-opinion
+        "docs",  # writes docs, never runs/builds the app
+        "analyst",  # writes specs, never runs/builds the app
+        "security",  # writes findings, never runs/builds the app
+        "codex",  # claude-substitute: refactor/cross-check, no dev-server step
+        "opencode",  # claude-substitute: same shape as codex
+        "kimi",  # claude-substitute: same shape as codex
+        "cursor",  # claude-substitute: same shape as codex
+    }
+)
+
+# Roles whose role file grants no Write/Edit tool at all (Read/Bash only),
+# so the "File has been modified since read" race STALE_FILE_GUARD warns
+# about can never fire for them — there is no Edit/Write call to race.
+_NO_FILE_EDIT_ROLES: frozenset[str] = frozenset({"reviewer", "gemini"})
+
+
+def role_needs_dev_server_guard(role: str) -> bool:
+    """True unless *role* is proven (`_NO_DEV_SERVER_ROLES`) to never run or
+    build a dev server. Fail-safe: an unrecognised or custom role name is
+    always assumed to need the guard."""
+    return role not in _NO_DEV_SERVER_ROLES
+
+
+def role_needs_stale_file_guard(role: str) -> bool:
+    """True unless *role* is proven (`_NO_FILE_EDIT_ROLES`) to hold no
+    Edit/Write tool at all. Fail-safe: an unrecognised or custom role name
+    is always assumed to need the guard."""
+    return role not in _NO_FILE_EDIT_ROLES
+
+
 def agent_role_dir(role: str) -> Path:
     """Per-role staging dir under runtime/agents/<role>/.
 
     A copy of `.claude/agents/<role>.md` is materialised here as CLAUDE.md so
     claude reads the specialist role definition before any task arrives. A
-    central dev-server-hygiene block (`_DEV_SERVER_HYGIENE`) is appended to every
-    role so the `next build && next start` rule applies cockpit-wide from one
-    place.
+    central dev-server-hygiene block (`_DEV_SERVER_HYGIENE`) is appended to
+    every role PROVEN to need it (`role_needs_dev_server_guard`, #250) so the
+    `next build && next start` rule applies cockpit-wide from one place.
     """
     role = validate_name(role, "role")
     base = (RUNTIME_DIR / "agents").resolve()
@@ -687,7 +738,7 @@ def agent_role_dir(role: str) -> Path:
                 text = text[end + 4 :].lstrip()
         (d / "CLAUDE.md").write_text(
             text.rstrip()
-            + _DEV_SERVER_HYGIENE
+            + (_DEV_SERVER_HYGIENE if role_needs_dev_server_guard(role) else "")
             + _NON_INTERACTIVE_HYGIENE
             + _TOKEN_DISCIPLINE_HYGIENE,
             encoding="utf-8",

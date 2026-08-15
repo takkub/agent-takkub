@@ -43,6 +43,7 @@ from .config import (
     agent_role_dir,
     default_cwd_for_role,
     lead_cwd,
+    role_needs_stale_file_guard,
     validate_name,
 )
 from .headless_pane import HeadlessPane
@@ -2132,8 +2133,14 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 # "File has been modified since read" loop caused by a running
                 # dev-server/IDE watcher and stop it instead of retry-looping
                 # for minutes. Lead delegates and rarely bulk-edits, so it's
-                # omitted there to save spawn tokens.
-                _appendix += STALE_FILE_GUARD
+                # omitted there to save spawn tokens. Also gated per-role
+                # (#250) on `role_needs_stale_file_guard` — a role proven to
+                # never hold an Edit/Write tool (see config.py's
+                # `_NO_FILE_EDIT_ROLES`) can never hit this race in the first
+                # place; fail-safe default keeps the guard for every other
+                # (including unrecognised/custom) role name.
+                if role_needs_stale_file_guard(base_role):
+                    _appendix += STALE_FILE_GUARD
                 # Graft-usage caveats (token-reduction wave 4): only inject when
                 # this role's LIVE MCP policy actually grants graft — was
                 # previously baked statically into 7 role .md files regardless
