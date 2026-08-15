@@ -137,6 +137,73 @@ class TestAsyncSpawnDispatch:
         qapp.processEvents()
         assert orch.assign_calls == []
 
+
+class _FakeClock:
+    """Shared time.time()/time.monotonic() stand-in so a test can advance
+    the dedup window deterministically without a real sleep."""
+
+    def __init__(self, start: float = 0.0) -> None:
+        self.now = start
+
+    def time(self) -> float:
+        return self.now
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+class TestAssignDedup:
+    """#233: a client retry of the identical (project, role, task) `assign`
+    within the dedup window must not double-dispatch — the retry itself may
+    be the only signal the caller has after a client-side timeout, and the
+    first request could easily have actually landed."""
+
+    def test_identical_retry_within_window_is_deduped(self, qapp: QCoreApplication) -> None:
+        orch = _FakeOrch()
+        srv = CliServer(orch)
+
+        s1, s2 = _FakeSock(), _FakeSock()
+        srv._dispatch(s1, _auth({"cmd": "assign", "role": "devops", "task": "docker compose up"}))
+        srv._dispatch(s2, _auth({"cmd": "assign", "role": "devops", "task": "docker compose up"}))
+        qapp.processEvents()
+
+        assert _replies(s1)[0]["ok"] is True
+        r2 = _replies(s2)[0]
+        assert r2["ok"] is True
+        assert "deduped" in r2["msg"]
+        assert orch.assign_calls == [("devops", None, "docker compose up", False, False, "shared")]
+
+    def test_different_task_is_not_deduped(self, qapp: QCoreApplication) -> None:
+        orch = _FakeOrch()
+        srv = CliServer(orch)
+        srv._spawn_gap_ms = 0  # isolate dedup behavior from the spawn-stagger delay
+
+        s1, s2 = _FakeSock(), _FakeSock()
+        srv._dispatch(s1, _auth({"cmd": "assign", "role": "devops", "task": "docker compose up"}))
+        srv._dispatch(s2, _auth({"cmd": "assign", "role": "devops", "task": "docker compose down"}))
+        qapp.processEvents()
+
+        assert "deduped" not in _replies(s2)[0]["msg"]
+        assert len(orch.assign_calls) == 2
+
+    def test_retry_after_window_expires_is_not_deduped(
+        self, qapp: QCoreApplication, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clock = _FakeClock(start=1_000.0)
+        monkeypatch.setattr("agent_takkub.cli_server.time", clock)
+        orch = _FakeOrch()
+        srv = CliServer(orch)
+        srv._spawn_gap_ms = 0  # isolate dedup behavior from the spawn-stagger delay
+
+        s1, s2 = _FakeSock(), _FakeSock()
+        srv._dispatch(s1, _auth({"cmd": "assign", "role": "devops", "task": "docker compose up"}))
+        clock.now += 9.0  # past _ASSIGN_DEDUP_WINDOW_S (8.0s)
+        srv._dispatch(s2, _auth({"cmd": "assign", "role": "devops", "task": "docker compose up"}))
+        qapp.processEvents()
+
+        assert "deduped" not in _replies(s2)[0]["msg"]
+        assert len(orch.assign_calls) == 2
+
     def test_spawn_acked_immediately_then_deferred(self, qapp: QCoreApplication) -> None:
         orch = _FakeOrch()
         srv = CliServer(orch)
@@ -461,9 +528,13 @@ class TestSpawnStagger:
         srv = CliServer(_FakeOrch())
         srv._spawn_gap_ms = 400
         delays = []
-        for _ in range(3):
+        for i in range(3):
             sock = _FakeSock()
-            srv._dispatch(sock, _auth({"cmd": "assign", "role": "backend", "task": "x"}))
+            # Distinct task text per call so the #233 assign-dedup guard (same
+            # (project, role, task) fingerprint within its window) doesn't
+            # collapse these into a single dispatch — this test is about the
+            # spawn-stagger delay, a separate concern.
+            srv._dispatch(sock, _auth({"cmd": "assign", "role": "backend", "task": f"x{i}"}))
             delays.append(_delay_ms(_replies(sock)[0]["msg"]))
         d0, d1, d2 = delays
         assert d0 == 0
