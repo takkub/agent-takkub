@@ -396,6 +396,19 @@ STALL_THRESHOLD_SEC = int(os.environ.get("TAKKUB_STALL_THRESHOLD_SEC", "300"))
 # unbounded wait. Overrideable via env for slower CI/hardware.
 BUSY_WAIT_CEILING_SEC = int(os.environ.get("TAKKUB_BUSY_WAIT_CEILING_SEC", "1800"))
 
+# #248/#247 round 2: how long lead_inbox._send_when_ready's delivery poll
+# waits, past spawn, for a pane's provider CLI to render ANY content
+# (session.first_content_ts() staying None the whole time) before treating
+# it as a wedged spawn rather than a slow-but-healthy cold boot — the exact
+# "codex pane spawns, never produces output" symptom from #248. Chosen
+# comfortably above every provider's own ready_wait_ms cold-boot allowance
+# (claude 45s, codex/gemini/opencode/kimi/cursor 90s) would otherwise need,
+# but far below BUSY_WAIT_CEILING_SEC above, since a pane that has rendered
+# NOTHING at all (not even a boot banner) is a much stronger "something is
+# wedged" signal than one that's merely slow to reach its ready prompt.
+# Overrideable via env for slower CI/hardware.
+NO_CONTENT_WATCHDOG_SEC = int(os.environ.get("TAKKUB_NO_CONTENT_WATCHDOG_SEC", "75"))
+
 
 # Live probe for Qt main-thread heartbeat staleness (#133 — fan-out delivery
 # corruption: concurrent pane spawns backlog the Qt event loop for ~1s at a

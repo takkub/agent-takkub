@@ -489,6 +489,27 @@ class PaneState:
     # because CLI argv cannot be changed after process start. Keeping it in
     # PaneState carries the choice through spawn gate/FIFO and auto-respawn.
     model_override: str | None = None
+    # #248/#247 round 2: per-pane provider override, set by
+    # lead_inbox._recover_no_content_pane's degrade step when a provider's
+    # CLI never rendered any content across a spawn + one retry — consulted
+    # ahead of provider_config.effective_provider_for's normal config/
+    # availability resolution (see spawn()'s effective_provider assignment
+    # below), same idea as that function's own "unavailable provider ->
+    # claude substitute" fallback, just pane-scoped instead of global.
+    # Clears naturally the next time this PaneState is popped (close()/
+    # done()), so a later fresh assign() for this role tries the real
+    # provider again instead of staying degraded forever. Mirrors
+    # model_override's shape/precedent immediately above.
+    provider_override: str | None = None
+    # #248/#247 round 2: how many times the no-content watchdog has already
+    # closed+respawned this pane (0 = never). 1 = one plain retry used;
+    # >= 2 = the degrade-to-claude respawn also used — the watchdog gives up
+    # after that and lets the ordinary elapsed[0] >= max_wait_ms path in
+    # lead_inbox._check take over as the final safety net. Cleared on a
+    # deliberate fresh spawn (see spawn()'s fresh-spawn-clear block), kept
+    # across the watchdog's own _from_auto_respawn=True respawns — same
+    # split as stuck_recover_attempts immediately above.
+    no_content_recover_attempts: int = 0
     # One-shot delivery staged by _assign_dispatch before spawn(). Claude can
     # preload it through --append-system-prompt-file; providers without an
     # equivalent file-backed system-prompt flag keep the pointer/PTY flow.
@@ -1405,8 +1426,13 @@ class SpawnEngineMixin:
         from .provider_config import CLAUDE, effective_provider_for
         from .provider_spec import PROVIDER_REGISTRY
 
-        effective_provider = effective_provider_for(base_role, project=project_ns)
         _ps_initial = self._ps(_exit_key(project_ns, role_name))
+        # #248/#247 round 2: a pane-scoped degrade (no-content watchdog gave
+        # up on this role's real provider after a retry) wins over the
+        # normal config/availability resolution — see PaneState.provider_override.
+        effective_provider = _ps_initial.provider_override or effective_provider_for(
+            base_role, project=project_ns
+        )
         if (
             _ps_initial.spawn_initial_task_state == "requested"
             and PROVIDER_REGISTRY[effective_provider].system_prompt_flag is not None
@@ -1449,6 +1475,24 @@ class SpawnEngineMixin:
                 # recovery and never bite a genuinely-wedged pane.
                 _ps_spawn_clear.stuck_recover_attempts = 0
                 _ps_spawn_clear.stuck_recover_gave_up = False
+                # #248/#247 round 2: same reasoning — a deliberate fresh
+                # assign gets a clean no-content-watchdog budget too;
+                # NOT cleared on the _from_auto_respawn path (the
+                # watchdog's own retry/degrade respawns) or the 1-retry
+                # cap would reset every time and never reach degrade.
+                _ps_spawn_clear.no_content_recover_attempts = 0
+                # A stale PaneState that survived a crash without a clean
+                # close()/done() (which would otherwise have popped it) must
+                # not keep a role pinned to claude forever. Note this clears
+                # it for the NEXT spawn, not this one — effective_provider
+                # above already read the pre-clear value for THIS call, so a
+                # crash-while-degraded pane spawns as claude one more time
+                # before self-healing; harmless, and simpler than reordering
+                # the two blocks for an edge-within-an-edge case. Kept across
+                # _from_auto_respawn=True (the watchdog's own degrade respawn
+                # sets this immediately after this block runs, on the SAME
+                # call).
+                _ps_spawn_clear.provider_override = None
             # Auto-respawn path: recover shard_total so TAKKUB_SHARD_TOTAL is
             # re-injected correctly when _shard_total wasn't passed explicitly.
             if _shard_total == 0 and _ps_spawn_clear.shard_total > 0:
