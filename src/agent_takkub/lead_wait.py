@@ -42,6 +42,7 @@ from __future__ import annotations
 import time
 import uuid
 
+from .orchestrator_text import _exit_key
 from .roles import LEAD
 
 # Grace window added on top of a registration's own timeout before a stale
@@ -65,6 +66,14 @@ _WAIT_NEVER_SPAWNED_GRACE_S = 15.0
 # "pending: pane state: X" branch and stayed pending until the full timeout
 # elapsed, even though the role had already finished (or could never finish).
 _WAIT_TERMINAL_PANE_STATES = frozenset({"empty", "done", "exited", "error"})
+
+# #249 follow-up: how long a naturally-concluded registration's final result
+# stays available (via `_wait_resolved_echo`) to a straggling attached
+# client's next poll. Must comfortably exceed the CLI's own poll-interval
+# backoff ceiling (`cli._WAIT_POLL_MAX_INTERVAL_S` = 15s) so a second attacher
+# whose own poll simply landed a beat after the resolving one's still finds
+# the echo instead of racing it.
+_WAIT_RESOLVED_ECHO_GRACE_S = 30.0
 
 
 class LeadWaitMixin:
@@ -166,6 +175,22 @@ class LeadWaitMixin:
         below): once nothing further can happen without a fresh spawn, the
         stale event is the only report this lifecycle will ever produce, so
         it's surfaced instead of leaving the role pending forever (#249).
+
+        That terminal-state carve-out has its own staleness bug (found in
+        review of the #249 fix, closed here): `takkub assign --role X` then
+        immediately `takkub wait --role X` is the exact sequence Lead uses
+        everywhere — and `_send_when_ready`'s pane.set_state("working") only
+        fires once the async ready-poll actually delivers the paste
+        (lead_inbox.py), so the pane can still be sitting in its PREVIOUS
+        cycle's terminal state (e.g. "done") for a few polls after the new
+        assign already returned. Trusting *any* event once the pane looks
+        terminal — as the #249 fix did — surfaces last cycle's report for a
+        task that hasn't even started yet. The fix: an event only counts
+        here if it is at least as new as `PaneState.assign_ts` (the wall-
+        clock of the CURRENTLY active assign, stamped by `_assign_dispatch`
+        and reset to a fresh pane-state entry on every new assign) — a
+        report timestamped before the active assign is for a task this
+        wait was never watching.
         """
         event = getattr(self, "_wait_done_events", {}).get((project_ns, role))
         fresh = event is not None and event.get("ts", 0.0) >= started_ts
@@ -202,10 +227,19 @@ class LeadWaitMixin:
             return "pending", "ยังทำงานอยู่"
 
         if state in _WAIT_TERMINAL_PANE_STATES:
-            if event is not None:
+            pane_state = getattr(self, "_pane_state", {}).get(_exit_key(project_ns, role))
+            assign_ts = pane_state.assign_ts if pane_state is not None else 0.0
+            covers_active_assign = event is not None and event.get("ts", 0.0) >= assign_ts
+            if covers_active_assign:
                 if self._has_pending_lead_notice(project_ns, role):
                     return "pending", "รายงานถูกสร้างแล้ว กำลังรอส่งเข้า Lead (ยังไม่ถึง pane)"
                 return ("failed" if event.get("failed") else "done"), None
+            if event is not None:
+                # A newer assign superseded this event — the pane just
+                # hasn't flipped out of its previous terminal state yet
+                # (async ready-poll delivery race). The real report for
+                # THIS assign is still in flight, not lost.
+                return "pending", "assign ใหม่กำลังส่งเข้า pane — รอ report รอบใหม่"
             return "gone", f"pane ปิดไปแล้วโดยไม่มีรายงาน done (state: {state})"
 
         return "pending", f"pane state: {state or 'unknown'}"
@@ -214,22 +248,50 @@ class LeadWaitMixin:
         """One poll tick for an active wait registration.
 
         Returns ``{"ok": False, "msg": ...}`` if *wait_id* no longer matches
-        the live registration (already ended, timed out, or superseded by a
-        newer `begin_wait` in another project — registrations are per-
-        project so this only happens on a genuine client bug). Otherwise
-        ``{"ok": True, "done": {role: "delivered"}, "failed": {role:
-        "delivered"}, "gone": {role: reason}, "pending": {role: reason},
-        "elapsed": float, "expired": bool}``. "gone" roles (#249) will never
-        report for this wait (never spawned past the grace window, or their
-        pane already reached a terminal state with nothing on record) — the
-        registration resolves them the same as done/failed rather than
-        blocking on them. The registration is auto-removed once every role
-        resolves (or is gone) or the timeout is reached, so a client never
-        needs to call `end_wait` on the success path — only on early abort
-        (Ctrl-C).
+        the live registration AND no recent natural resolution is on record
+        for it (already explicitly cancelled/ended, timed-out-and-expired
+        past the echo grace window, or superseded by a newer `begin_wait` in
+        another project — registrations are per-project so this only
+        happens on a genuine client bug). Otherwise ``{"ok": True, "done":
+        {role: "delivered"}, "failed": {role: "delivered"}, "gone": {role:
+        reason}, "pending": {role: reason}, "elapsed": float, "expired":
+        bool}``. "gone" roles (#249) will never report for this wait (never
+        spawned past the grace window, or their pane already reached a
+        terminal state with nothing on record) — the registration resolves
+        them the same as done/failed rather than blocking on them. The
+        registration is auto-removed once every role resolves (or is gone)
+        or the timeout is reached, so a client never needs to call
+        `end_wait` on the success path — only on early abort (Ctrl-C).
+
+        #242 lets multiple `takkub wait` processes attach to one project's
+        registration (unioning role sets) instead of each running an
+        independent poll loop. That means several clients each poll the
+        SAME registration on their own schedule — only the one poll call
+        that happens to observe "every role resolved" (or the registration's
+        own timeout) does the auto-removal above. Every OTHER attached
+        client's next poll used to find `active is None` and get the same
+        "no longer active" error a genuinely cancelled/superseded wait
+        produces — indistinguishable from an actual failure, even though
+        the wait it was attached to had just succeeded (or validly timed
+        out with a real pending set, both of which are legitimate answers,
+        not error conditions). `_wait_resolved_echo` (below) closes that:
+        the poll call that pops the registration stashes its own returned
+        payload for `_WAIT_RESOLVED_ECHO_GRACE_S`, so a straggling
+        attacher's very next poll (comfortably inside that window — see the
+        constant's docstring) gets the real terminal result instead. An
+        explicit `end_wait`/`cancel_wait` never writes an echo, so a
+        genuinely cancelled wait still errors out for any straggler — there
+        is no terminal result to hand back for those.
         """
         active = self._active_waits.get(project_ns)
         if active is None or active["wait_id"] != wait_id:
+            echo = getattr(self, "_wait_resolved_echo", {}).get(project_ns)
+            if (
+                echo is not None
+                and echo["wait_id"] == wait_id
+                and time.time() - echo["ts"] < _WAIT_RESOLVED_ECHO_GRACE_S
+            ):
+                return dict(echo["result"])
             return {
                 "ok": False,
                 "msg": "wait session no longer active (already ended, timed out, or superseded)",
@@ -262,10 +324,7 @@ class LeadWaitMixin:
 
         elapsed = now - started_ts
         expired = elapsed >= active["timeout_s"]
-        if not pending or expired:
-            self._active_waits.pop(project_ns, None)
-
-        return {
+        result = {
             "ok": True,
             "msg": "resolved" if not pending else f"{len(pending)} role(s) still pending",
             "done": done,
@@ -275,6 +334,19 @@ class LeadWaitMixin:
             "elapsed": elapsed,
             "expired": expired,
         }
+        if not pending or expired:
+            self._active_waits.pop(project_ns, None)
+            # Stash this exact payload so any OTHER client still attached to
+            # *wait_id* whose poll lands after this pop echoes the real
+            # terminal result instead of a manufactured error — see this
+            # method's docstring.
+            self._wait_resolved_echo[project_ns] = {
+                "wait_id": wait_id,
+                "result": dict(result),
+                "ts": now,
+            }
+
+        return result
 
     def end_wait(self, project_ns: str, wait_id: str) -> bool:
         """Explicitly release a wait registration (early abort — Ctrl-C, the

@@ -17,7 +17,7 @@ import pytest
 from PyQt6.QtCore import QCoreApplication
 
 from agent_takkub import cli
-from agent_takkub.orchestrator import Orchestrator
+from agent_takkub.orchestrator import Orchestrator, PaneState, _exit_key
 
 PROJECT = "wait-test"
 
@@ -203,12 +203,14 @@ class TestPollWait:
         begin = orch.begin_wait(PROJECT, ["backend"], 60.0)
         orch._wait_done_events[(PROJECT, "backend")] = {"ts": time.time(), "failed": False}
 
-        orch.poll_wait(PROJECT, begin["wait_id"])
+        resolved = orch.poll_wait(PROJECT, begin["wait_id"])
 
         assert PROJECT not in orch._active_waits
-        # A stale poll against the now-gone registration fails cleanly.
+        # A follow-up poll against the now-gone registration echoes the same
+        # real terminal result (see TestResolvedEcho) rather than erroring —
+        # it is not "stale", the registration just already succeeded.
         follow_up = orch.poll_wait(PROJECT, begin["wait_id"])
-        assert follow_up["ok"] is False
+        assert follow_up == resolved
 
     def test_terminal_state_with_stale_event_resolves_done(self, orch: Orchestrator) -> None:
         """#249: a pane that already finished (state flipped to "empty" or
@@ -242,6 +244,39 @@ class TestPollWait:
 
         assert result["failed"] == {"qa": "delivered"}
         assert not result["pending"]
+
+    def test_reassigned_role_with_stale_terminal_event_stays_pending(
+        self, orch: Orchestrator
+    ) -> None:
+        """Review follow-up to #249: `takkub assign --role X` immediately
+        followed by `takkub wait --role X` is Lead's standard sequence.
+        `_send_when_ready`'s pane.set_state("working") only lands once the
+        async ready-poll actually delivers the paste, so at the FIRST poll
+        tick the pane can still show its PREVIOUS cycle's terminal state
+        (here: "empty") even though a brand new task was just dispatched.
+        The #249 terminal-state carve-out used to trust ANY stale event once
+        the pane looked terminal — surfacing last cycle's report as if it
+        were this one's. A fresh assign must invalidate that stale event
+        (PaneState.assign_ts, stamped by `_assign_dispatch`, is newer than
+        the old event) so the wait keeps blocking for the real report."""
+        _register_state(orch, "backend", "empty")
+        orch._wait_done_events[(PROJECT, "backend")] = {
+            "ts": time.time() - 1000,
+            "failed": False,
+        }
+        # Simulate the new `takkub assign` that happened just before this
+        # wait started — a fresh PaneState with a NEW assign_ts, exactly
+        # what `_assign_dispatch` stamps right before spawn().
+        key = _exit_key(PROJECT, "backend")
+        orch._pane_state[key] = PaneState(assign_ts=time.time())
+
+        begin = orch.begin_wait(PROJECT, ["backend"], 60.0)
+        result = orch.poll_wait(PROJECT, begin["wait_id"])
+
+        assert not result["done"]
+        assert not result["failed"]
+        assert not result["gone"]
+        assert "backend" in result["pending"]
 
     def test_terminal_state_without_any_event_is_gone(self, orch: Orchestrator) -> None:
         """A pane closed/crashed with no done() ever recorded (manual close,
@@ -290,6 +325,85 @@ class TestPollWait:
         assert result["expired"] is True
         assert "backend" in result["pending"]
         assert PROJECT not in orch._active_waits
+
+
+class TestResolvedEcho:
+    """Real incident (2026-08-15): two `takkub wait` processes attached to
+    the same project registration — one poll call resolved every role and
+    popped it; the OTHER attached process's very next poll landed a beat
+    later and got `{"ok": False, "msg": "wait session no longer active..."}`
+    printed as `err: ...` for a wait that had actually just SUCCEEDED. The
+    registration is per-project, not per-client, so any attacher's poll must
+    see the same real terminal result the resolving poll produced."""
+
+    def test_straggling_attacher_gets_echoed_result_not_error(self, orch: Orchestrator) -> None:
+        _register_working(orch, "backend")
+        owner = orch.begin_wait(PROJECT, ["backend"], 60.0)
+        attacher = orch.begin_wait(PROJECT, ["backend"], 60.0)
+        assert attacher["wait_id"] == owner["wait_id"]
+
+        orch._wait_done_events[(PROJECT, "backend")] = {"ts": time.time(), "failed": False}
+        resolving_poll = orch.poll_wait(PROJECT, owner["wait_id"])
+        assert resolving_poll["done"] == {"backend": "delivered"}
+        assert PROJECT not in orch._active_waits
+
+        straggler_poll = orch.poll_wait(PROJECT, attacher["wait_id"])
+
+        assert straggler_poll["ok"] is True
+        assert straggler_poll == resolving_poll
+
+    def test_echoed_timeout_result_still_carries_real_pending_set(self, orch: Orchestrator) -> None:
+        """A registration that pops via its OWN timeout (not full
+        completion) is a legitimate terminal outcome too, not a cancel — the
+        echo must carry the same real `pending`/`expired` payload, not
+        silently upgrade it to a fake success."""
+        _register_working(orch, "backend")
+        owner = orch.begin_wait(PROJECT, ["backend"], 1.0)
+        attacher = orch.begin_wait(PROJECT, ["backend"], 1.0)
+        orch._active_waits[PROJECT]["started_ts"] = time.time() - 10.0
+
+        resolving_poll = orch.poll_wait(PROJECT, owner["wait_id"])
+        assert resolving_poll["expired"] is True
+        assert "backend" in resolving_poll["pending"]
+
+        straggler_poll = orch.poll_wait(PROJECT, attacher["wait_id"])
+
+        assert straggler_poll == resolving_poll
+
+    def test_echo_expires_after_grace_window(self, orch: Orchestrator) -> None:
+        from agent_takkub import lead_wait as lead_wait_mod
+
+        _register_working(orch, "backend")
+        begin = orch.begin_wait(PROJECT, ["backend"], 60.0)
+        orch._wait_done_events[(PROJECT, "backend")] = {"ts": time.time(), "failed": False}
+        orch.poll_wait(PROJECT, begin["wait_id"])
+
+        orch._wait_resolved_echo[PROJECT]["ts"] = time.time() - (
+            lead_wait_mod._WAIT_RESOLVED_ECHO_GRACE_S + 1.0
+        )
+
+        result = orch.poll_wait(PROJECT, begin["wait_id"])
+
+        assert result["ok"] is False
+        assert "no longer active" in result["msg"]
+
+    def test_cancelled_wait_gives_stragglers_a_real_error_not_an_echo(
+        self, orch: Orchestrator
+    ) -> None:
+        """Explicit cancel/end (unlike natural resolution) has no terminal
+        result to hand back — a straggler must still see the plain error."""
+        _register_working(orch, "backend")
+        orch.begin_wait(PROJECT, ["backend"], 60.0)
+        attacher = orch.begin_wait(PROJECT, ["backend"], 60.0)
+
+        ok, _msg = orch.cancel_wait(PROJECT)
+        assert ok is True
+
+        result = orch.poll_wait(PROJECT, attacher["wait_id"])
+
+        assert result["ok"] is False
+        assert "no longer active" in result["msg"]
+        assert PROJECT not in orch._wait_resolved_echo
 
 
 class TestEndWait:

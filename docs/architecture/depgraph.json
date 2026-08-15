@@ -742,13 +742,14 @@
     {
       "module": "agent_takkub.lead_wait",
       "imports": [
+        "agent_takkub.orchestrator_text",
         "agent_takkub.roles"
       ],
       "imported_by": [
         "agent_takkub.orchestrator"
       ],
       "fan_in": 1,
-      "fan_out": 1
+      "fan_out": 2
     },
     {
       "module": "agent_takkub.limit_autoresume",
@@ -934,12 +935,13 @@
         "agent_takkub.cli_server",
         "agent_takkub.disk_usage",
         "agent_takkub.lead_inbox",
+        "agent_takkub.lead_wait",
         "agent_takkub.limit_autoresume",
         "agent_takkub.orchestrator",
         "agent_takkub.remote.notify",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 7,
+      "fan_in": 8,
       "fan_out": 7
     },
     {

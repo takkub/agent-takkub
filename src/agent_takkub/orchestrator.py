@@ -1065,6 +1065,17 @@ class Orchestrator(
         # `wait` registration can tell "resolved before I started watching"
         # from "resolved just now" without racing the digest/live queues.
         self._wait_done_events: dict[tuple[str, str], dict] = {}
+        # #249 follow-up: when a registration naturally concludes (every role
+        # resolved, or the registration's own timeout elapsed) `poll_wait`
+        # pops it — but two+ attached `takkub wait` clients each poll on
+        # their own schedule, so only the poller whose tick happened to
+        # observe the conclusion gets the real result; every OTHER attacher's
+        # next poll used to find `active is None` and get a manufactured
+        # "wait session no longer active" error for what was actually a
+        # success. This caches that final result per project so a straggling
+        # attacher's poll echoes the real terminal outcome instead — see
+        # `poll_wait`'s docstring for the cancel/timeout-supersede exception.
+        self._wait_resolved_echo: dict[str, dict] = {}
         self._hot_md_timer = QTimer(self)
         self._hot_md_timer.setInterval(_HOT_MD_INTERVAL_MS)
         self._hot_md_timer.timeout.connect(self._write_hot_md)

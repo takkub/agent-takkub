@@ -147,3 +147,122 @@ Every changed path reads only pane/queue state the orchestrator already
 tracks per role (`pane.state`, `_wait_done_events`, `_active_waits`) — none
 of it is Claude-specific or platform-specific, consistent with `wait`'s
 existing design.
+
+## Round 2 follow-ups (Lead diff review, 2026-08-15)
+
+Two more races found reviewing the round-1 diff before merge, both fixed in
+the same commit.
+
+### A. `assign` → immediate `wait` false-"done" (terminal-state carve-out was
+too trusting)
+
+**Symptom / proven mechanics.** `takkub assign --role X ...` followed
+immediately by `takkub wait --role X` is Lead's standard sequence
+(`docs/lead/cli-reference.md`). `pane.set_state("working", ...)` only fires
+once `_send_when_ready`'s async ready-poll actually delivers the paste
+(`lead_inbox.py` — nothing in `spawn()`/`_assign_dispatch()` flips pane
+state synchronously; confirmed by grep, zero `set_state(` calls in
+`spawn_engine.py`). So for the first several poll ticks after a fresh
+`assign`, `pane.state` can still show the PREVIOUS cycle's terminal value
+(e.g. `"done"` from before the reassignment). The round-1 terminal-state
+carve-out (`if state in _WAIT_TERMINAL_PANE_STATES: if event is not None:
+return done/failed`) trusted **any** `_wait_done_events` record once the
+pane looked terminal, with no check against the ACTIVE assign — so it
+surfaced last cycle's stale report as if it were the brand-new task's
+result. In the unattended pattern this matters most for (`assign` then
+`wait` with no human watching), Lead would see a false "done" and move on
+to verify/merge work that hadn't even started.
+
+**Fix.** `_resolve_role_wait_status`'s terminal-state branch now also reads
+`PaneState.assign_ts` (`_pane_state[project_ns::role]`, stamped by
+`_assign_dispatch` right before every `spawn()` call, and reset — the entry
+is popped — every time `done()` fires). An event only counts as covering
+the terminal state if `event["ts"] >= assign_ts`:
+
+- No reassign since the last `done()` → `_pane_state` entry is absent
+  (popped) → `assign_ts` defaults to `0.0` → any real event trivially
+  covers it → unchanged behavior, round-1's tests still pass verbatim.
+- A fresh assign landed → `assign_ts` is the new dispatch's wall-clock,
+  newer than the stale event → the event no longer "covers" the terminal
+  state → falls to a NEW `"pending"` branch (`"assign ใหม่กำลังส่งเข้า pane —
+  รอ report รอบใหม่"`) instead of either the old stale `"done"` or a bare
+  `"gone"` (which would have been just as wrong — the pane is not
+  abandoned, it's mid-delivery).
+
+No change to `_assign_dispatch` itself was needed — `assign_ts` already
+existed for the screenshot-evidence feature (#5) and turned out to be
+exactly the "when did the CURRENTLY active task start" signal this needed;
+clearing `_wait_done_events` at assign time was considered and rejected as
+a less precise duplicate of the same information.
+
+**Test:** `test_reassigned_role_with_stale_terminal_event_stays_pending`
+(`tests/test_lead_wait.py`) — terminal pane state + stale event + a fresh
+`PaneState(assign_ts=now)` → asserts `pending`, not `done`/`failed`/`gone`.
+
+### B. Attached waiter's poll after resolution returned an error, not the result
+
+**Symptom (live incident, Lead-reported).** Two `takkub wait` processes
+attached to the same project registration (per #242's union-role-set
+design). One poll call observed every watched role resolved and popped the
+registration (`poll_wait`'s `if not pending or expired:
+self._active_waits.pop(...)`). The OTHER attached process's very next poll
+— same `wait_id`, just a beat later on its own backoff schedule — hit
+`active is None`, fell into the "not found" branch, and printed:
+
+```
+[wait] attached to an existing wait already covering: backend, backend#2, backend#3
+err: wait session no longer active (already ended, timed out, or superseded)
+```
+
+`cmd_wait` treats any `poll.get("ok") is False` as a hard error
+(`return poll` before the summary/exit-code logic), so this is
+indistinguishable from a genuinely broken wait even though the underlying
+work had just succeeded.
+
+**Fix — `_wait_resolved_echo`, not a `wait_id`-scoped lock.** A per-project
+dict (`Orchestrator.__init__`) storing the exact payload the popping poll
+call returned, keyed by `wait_id`, for `_WAIT_RESOLVED_ECHO_GRACE_S` (30s —
+comfortably above the CLI's own poll-backoff ceiling,
+`cli._WAIT_POLL_MAX_INTERVAL_S` = 15s). `poll_wait`'s "not found" branch
+checks this before erroring: a matching, still-fresh echo is returned
+verbatim (`ok: True` and all) instead of the manufactured error.
+
+Two cases were deliberately kept as real errors, not echoed:
+
+- **Explicit `end_wait`/`cancel_wait`** never write an echo — there is no
+  terminal result to hand back for a wait someone actively tore down, and a
+  straggler seeing "no longer active" there is accurate, not a false
+  positive. Covered by
+  `test_cancelled_wait_gives_stragglers_a_real_error_not_an_echo`.
+- **A registration popped by its OWN timeout** (`expired=True`, roles still
+  `pending`) is NOT treated as a cancel-equivalent — it's echoed too, with
+  its real `pending`/`expired` payload intact, because that is exactly what
+  the resolving poller itself got and is a legitimate (if unhappy) terminal
+  answer, not a lost result. Covered by
+  `test_echoed_timeout_result_still_carries_real_pending_set`. This is a
+  deliberate refinement of the plain-language incident report, which
+  grouped "cancel/timeout/superseded" together as one error bucket — timeout
+  already carries a real, non-fabricated payload today for whichever poller
+  observes it directly, so echoing that same payload to a straggler is
+  strictly more correct than inventing a generic error for it.
+
+**Tests** (`tests/test_lead_wait.py::TestResolvedEcho`, all passing):
+`test_straggling_attacher_gets_echoed_result_not_error`,
+`test_echoed_timeout_result_still_carries_real_pending_set`,
+`test_echo_expires_after_grace_window`,
+`test_cancelled_wait_gives_stragglers_a_real_error_not_an_echo`. Also
+updated `TestPollWait.test_registration_auto_removed_once_all_resolved`,
+which previously asserted a same-client re-poll after resolution errors —
+that was the identical bug from a single-client angle, now correctly
+asserts the echoed result.
+
+## Round-2 verification
+
+- `pytest tests/test_lead_wait.py` — 35 passed (30 pre-existing round-1 + 1
+  new terminal-state/assign_ts case + 4 new `TestResolvedEcho` cases; one
+  round-1 assertion updated to match the now-correct echo behavior).
+- `ruff check` / `ruff format --check` on every touched file — clean.
+- `lint-imports` — 25/25 contracts kept, including `lead-wait-layer`
+  (`lead_wait.py` only gained an import of `orchestrator_text._exit_key`, a
+  leaf module already imported by `lead_inbox.py` under the same layer
+  contract).
