@@ -7,8 +7,11 @@ injected fake git runner, so nothing here shells out to a real repository
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
+
+import pytest
 
 from agent_takkub.worktree_manager import (
     GitResult,
@@ -245,6 +248,117 @@ class TestSafeRemove:
         assert removed is True
         assert r.ran("worktree", "remove", "--force")
         assert r.ran("branch", "-D", "wt/x-1")
+
+
+# ── Long-path-safe delete (#226 / #227) ─────────────────────────────────────
+
+
+class TestRemoveWorktreeTree:
+    """`remove_worktree_tree` — the disk-delete step `safe_remove` /
+    `force_remove` / `merge_isolated` / `clean_isolated` all now route
+    through instead of letting `git worktree remove` do the recursive
+    delete itself (the thing that failed partway on Windows in #226/#227).
+    """
+
+    def test_missing_path_is_trivially_removed(self, tmp_path):
+        from agent_takkub.worktree_manager import remove_worktree_tree
+
+        ghost = tmp_path / "ghost"
+        removed, msg, leftover = remove_worktree_tree(ghost)
+        assert removed is True and msg == "" and leftover == ""
+
+    def test_full_delete_leaves_original_path_gone(self, tmp_path):
+        from agent_takkub.worktree_manager import remove_worktree_tree
+
+        wt = tmp_path / "wt"
+        (wt / "src").mkdir(parents=True)
+        (wt / "src" / "app.ts").write_text("code", encoding="utf-8")
+
+        removed, msg, leftover = remove_worktree_tree(wt)
+        assert removed is True and msg == "" and leftover == ""
+        assert not wt.exists()
+
+    def test_rename_failure_keeps_original_fully_intact(self, tmp_path, monkeypatch):
+        """The one case "kept" is an accurate report: the initial rename
+        itself failed, so nothing was ever touched."""
+        from agent_takkub import worktree_manager as wm
+
+        wt = tmp_path / "wt"
+        (wt / "src").mkdir(parents=True)
+        (wt / "src" / "app.ts").write_text("code", encoding="utf-8")
+
+        def boom(_src, _dst):
+            raise OSError("simulated: file in use")
+
+        monkeypatch.setattr(wm.os, "rename", boom)
+
+        removed, msg, leftover = wm.remove_worktree_tree(wt)
+        assert removed is False
+        assert leftover == ""
+        assert "simulated" in msg
+        assert wt.exists() and (wt / "src" / "app.ts").exists()  # fully intact
+
+    def test_partial_delete_never_reports_kept_at_original_path(self, tmp_path, monkeypatch):
+        """#227 — the real incident: a recursive delete that fails partway
+        must never leave the tracked path in an ambiguous half-deleted
+        state. The rename-first strategy guarantees `wt` itself is fully
+        gone even when the staged copy behind it can't be fully cleaned up,
+        so the caller can never mistakenly report "kept"."""
+        from agent_takkub import worktree_manager as wm
+
+        wt = tmp_path / "wt"
+        (wt / "src").mkdir(parents=True)
+        (wt / "src" / "app.ts").write_text("code", encoding="utf-8")
+
+        monkeypatch.setattr(wm, "_rmtree_long_path_safe", lambda p: (False, "simulated lock"))
+
+        removed, msg, leftover = wm.remove_worktree_tree(wt)
+        assert removed is True  # original path is gone — never "kept"
+        assert not wt.exists()
+        assert "simulated lock" in msg
+        assert leftover and Path(leftover).exists()  # surfaced, not silently lost
+        assert "kept" not in msg.lower()
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="MAX_PATH (260 chars) is a Windows-only limit — #226's actual failure mode",
+)
+class TestLongPathDeleteWindows:
+    r"""Real filesystem proof (not mocked) that a tree deeper than MAX_PATH —
+    the pnpm-nested-node_modules shape from #226's repro — deletes cleanly
+    through the extended-length (\\?\) path form."""
+
+    def test_deletes_tree_deeper_than_max_path(self, tmp_path):
+        from agent_takkub.worktree_manager import _rmtree_long_path_safe, _win_long_path
+
+        root = tmp_path / "wt"
+        deep = root
+        segment = "a" * 20
+        while len(str(deep)) < 300:
+            deep = deep / segment
+        os.makedirs(_win_long_path(deep), exist_ok=True)
+        with open(_win_long_path(deep) + "\\leaf.txt", "w", encoding="utf-8") as fh:
+            fh.write("x")
+        assert len(str(deep)) > 260  # actually past MAX_PATH, not just close
+
+        ok, err = _rmtree_long_path_safe(root)
+        assert ok, err
+        assert not os.path.exists(_win_long_path(root))
+
+    def test_remove_worktree_tree_handles_long_path_end_to_end(self, tmp_path):
+        from agent_takkub.worktree_manager import _win_long_path, remove_worktree_tree
+
+        root = tmp_path / "wt"
+        deep = root / "node_modules"
+        segment = "b" * 20
+        while len(str(deep)) < 300:
+            deep = deep / segment
+        os.makedirs(_win_long_path(deep), exist_ok=True)
+
+        removed, msg, leftover = remove_worktree_tree(root)
+        assert removed is True and msg == "" and leftover == ""
+        assert not root.exists()
 
 
 # ── Merge proposal ──────────────────────────────────────────────────────────
@@ -710,6 +824,22 @@ class TestMergeIsolated:
         ok, _ = WorktreeManager(r).merge_isolated("/repo", "wt/qa-7", keep=True)
         assert ok
         assert not r.ran("worktree", "remove")
+
+    def test_live_pane_worktree_merged_but_not_removed(self, monkeypatch):
+        """#227 — merge previously had no live-pane guard at all (unlike
+        `clean_isolated`'s #187 fix): a pane could be mid-work in a worktree
+        that `takkub worktree merge` deletes out from under it. The merge
+        itself must still happen; only removal is skipped."""
+        from agent_takkub import worktree_manager as wm
+
+        monkeypatch.setattr(wm, "sweep_link_points", lambda p: [])
+        r = self._runner()
+        live = {str(Path("/repo/worktrees/p/frontend-9").resolve())}
+        ok, msg = WorktreeManager(r).merge_isolated("/repo", "wt/frontend-9", live_paths=live)
+        assert ok
+        assert "live" in msg.lower()
+        assert r.ran("merge", "--no-ff", "--no-edit", "wt/frontend-9")  # merge still happened
+        assert not r.ran("worktree", "remove")  # but not the deletion
 
 
 class TestCleanIsolated:

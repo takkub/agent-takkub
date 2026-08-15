@@ -777,6 +777,7 @@ class TestWorktreeCli:
         merge_result: ClassVar[tuple] = (True, "merged wt/frontend-9 + cleanup เรียบร้อย")
         clean_lines: ClassVar[list] = ["REMOVED wt/qa-7"]
         merge_calls: ClassVar[list] = []
+        merge_live_paths_calls: ClassVar[list] = []
         clean_live_paths_calls: ClassVar[list] = []
 
         def __init__(self, *a, **k):
@@ -788,8 +789,9 @@ class TestWorktreeCli:
         def list_isolated(self, root):
             return type(self).rows
 
-        def merge_isolated(self, root, branch, keep=False):
+        def merge_isolated(self, root, branch, keep=False, live_paths=frozenset()):
             type(self).merge_calls.append((branch, keep))
+            type(self).merge_live_paths_calls.append(set(live_paths))
             return type(self).merge_result
 
         def clean_isolated(self, root, force=False, live_paths=frozenset()):
@@ -806,6 +808,7 @@ class TestWorktreeCli:
 
         self._FakeWtMgr.rows = []
         self._FakeWtMgr.merge_calls = []
+        self._FakeWtMgr.merge_live_paths_calls = []
         self._FakeWtMgr.clean_lines = ["REMOVED wt/qa-7"]
         self._FakeWtMgr.clean_live_paths_calls = []
         self._FakeWtMgr.merge_result = (True, "merged")
@@ -850,6 +853,25 @@ class TestWorktreeCli:
     def test_merge_no_candidates_for_role(self):
         self._FakeWtMgr.rows = []
         assert cli.main(["worktree", "merge", "--role", "ghost"]) != 0
+
+    def test_merge_forwards_live_paths_from_orchestrator(self, monkeypatch):
+        """#227 — `merge` had no live-pane guard at all (unlike `clean`'s
+        #187 fix); it must now query the cockpit the same way `clean` does
+        and pass the result through to `merge_isolated`."""
+        monkeypatch.setattr(
+            cli,
+            "_request",
+            lambda payload: {"ok": True, "msg": "1 live worktree(s)", "paths": ["/w/live-9"]},
+        )
+        assert cli.main(["worktree", "merge", "--branch", "wt/qa-300"]) == 0
+        assert self._FakeWtMgr.merge_live_paths_calls[-1] == {"/w/live-9"}
+
+    def test_merge_no_live_paths_when_cockpit_unreachable(self):
+        """Default fixture stubs `_request` to raise (cockpit not running) —
+        `merge` must still work, with an empty live-paths set rather than
+        propagating the connection error."""
+        assert cli.main(["worktree", "merge", "--branch", "wt/qa-300"]) == 0
+        assert self._FakeWtMgr.merge_live_paths_calls[-1] == set()
 
     def test_clean_reports_lines(self):
         assert cli.main(["worktree", "clean"]) == 0

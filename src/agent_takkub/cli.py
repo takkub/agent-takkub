@@ -345,8 +345,8 @@ def cmd_worktree(args: argparse.Namespace) -> dict:
     Pure-local git operations (no orchestrator socket): the git state is the
     source of truth, so this works after a cockpit crash or with the cockpit
     closed — exactly when cleanup is most needed. Mutations are lead-gated at
-    the CLI layer like assign/close. `clean` additionally makes a best-effort
-    socket call for the live-pane guard (#187) — see
+    the CLI layer like assign/close. `merge` and `clean` both make a
+    best-effort socket call for the live-pane guard (#187, #227) — see
     `_live_worktree_paths_best_effort`.
     """
     from .worktree_manager import WorktreeManager
@@ -389,7 +389,8 @@ def cmd_worktree(args: argparse.Namespace) -> dict:
             if not cands:
                 return {"ok": False, "msg": f"ไม่พบ worktree branch ของ role '{args.role}'"}
             branch = cands[-1]  # highest ts = newest
-        ok, msg = mgr.merge_isolated(root, branch, keep=bool(args.keep))
+        live_paths = _live_worktree_paths_best_effort()
+        ok, msg = mgr.merge_isolated(root, branch, keep=bool(args.keep), live_paths=live_paths)
         return {"ok": ok, "msg": msg}
 
     if sub == "clean":
