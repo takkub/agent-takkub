@@ -485,7 +485,10 @@ class TestFlushWriteFailureDoesNotLoseItems:
 
         durable = orch._pending_done_notices.get(TEST_PROJECT, [])
         durable_bodies = [item["body"] for item in durable]
-        live_bodies = list(orch._lead_notify_queue.get(TEST_PROJECT, []))
+        live_bodies = [
+            entry[0] if isinstance(entry, tuple) else entry
+            for entry in orch._lead_notify_queue.get(TEST_PROJECT, [])
+        ]
         all_bodies = durable_bodies + live_bodies
 
         # alpha (item 1) delivered successfully — not sitting in either queue.

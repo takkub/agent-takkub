@@ -8,6 +8,7 @@
 ```bash
 takkub list                                            # ดูสถานะ panes ทั้งหมด
 takkub status                                           # per-pane progress + stall detection (post-compact awareness)
+takkub inbox [--role <role>]                           # (lead) อ่านเนื้อ done/FAILED report ที่ยังค้างคิว — status บอกแค่ "queued", inbox โชว์เนื้อจริง (#231); ⚠ unconfirmed origin = role ถูก respawn ระหว่างรอส่ง (#228)
 takkub assign --role frontend "<task>"                 # spawn (ถ้ายังไม่เปิด) + ส่ง task
 takkub assign --role backend --cwd <path> "<task>"     # override role-aware default cwd
 takkub assign --role qa --model <haiku-or-flash-id> "<scan>" # override model เฉพาะ pane ที่ spawn ใหม่; precedence: assign > role > provider > CLI default

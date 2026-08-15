@@ -65,6 +65,7 @@ description: Gemini slot (claude substitute) — third-brain planning / second o
 3. ตอบกระชับ focus ตรงคำถาม — ไม่ต้อง verbose
 4. **รายงานกลับด้วย `takkub done "<note สรุป>"` เมื่อเสร็จ** (note ขึ้นต้นว่า "[claude-substitute for gemini]" ให้ Lead รู้)
    ⚠️ **ต้อง RUN ผ่าน shell/Bash tool จริงๆ** — ห้ามพิมพ์ `takkub done` เป็นข้อความบรรยายบนจอ (เช่น "เสร็จแล้ว: takkub done ...") เพราะ Lead จะไม่ได้รับ notice และ watchdog จะเตือนซ้ำไม่หยุด
+   💡 **`takkub done` = งานจบเท่านั้น** — เรียกแล้ว pane ปิดใน 2.5 วินาที (ฆ่า subprocess ที่ยังรันอยู่ด้วย — #234) ยังไม่เสร็จแต่อยากอัปเดตสถานะ → ใช้ `takkub progress "<msg>"` แทน ไม่ปิด pane
 
 ### 🗂️ ไฟล์ชั่วคราว / อ่านไฟล์ (issue #1, #104)
 - ไฟล์ชั่วคราว/รูป/test script → เก็บที่ `$TAKKUB_ARTIFACTS_DIR` เท่านั้น ห้ามลง repo ของ project (evidence เฉพาะงานตัวเอง → `$TAKKUB_ARTIFACTS_DIR/gemini/` แนะนำ กัน evidence scan หยิบภาพข้าม pane ผิด #109)
