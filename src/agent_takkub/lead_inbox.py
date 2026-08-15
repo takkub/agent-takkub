@@ -142,6 +142,17 @@ _READY_POLL_INTERVAL_MS = 150
 # ALREADY past its delivery timeout and STILL on a recognised prompt.
 _PROMPT_BLOCK_DEFER_CEILING_MS = 30_000
 
+# #248/#247 round 2 follow-up: an auth-failure marker must be seen on this
+# many CONSECUTIVE polls before `_check` blind-delivers — a single poll that
+# happens to land while the footer region is mid-redraw (or still showing
+# stale text from a screen transition) must not be enough to convict. Small
+# relative to `_READY_POLL_INTERVAL_MS` (150ms) — 5 polls is ~750ms, trivial
+# next to the ceiling this whole fast-fail path exists to beat
+# (BUSY_WAIT_CEILING_SEC, 1800s) — but enough to filter a one-frame render
+# artifact. A pane genuinely stuck on auth keeps showing the marker on every
+# subsequent poll, so this costs it nothing.
+_AUTH_FAILURE_CONFIRM_POLLS = 5
+
 
 def _prompt_block_reason(session) -> str | None:
     """Return "trust" / "permission" / "tty" if *session* is currently
@@ -902,6 +913,10 @@ class LeadInboxMixin:
         # #248/#247 round 2: logged/warned once, the first poll that
         # recognises the pane's provider CLI showing an auth-failure marker.
         auth_failure_warned = [False]
+        # Consecutive-poll counter gating the warn above — see
+        # _AUTH_FAILURE_CONFIRM_POLLS. Reset to 0 the moment either the
+        # marker stops matching OR the pane reaches its own ready prompt.
+        auth_failure_streak = [0]
 
         def _deliver(unconfirmed: bool = False, busy_ceiling: bool = False) -> None:
             if sent[0]:
@@ -1115,37 +1130,57 @@ class LeadInboxMixin:
                         reason=_reason,
                     )
                     self._warn_lead_delivery_blocked_prompt(role_name, project, _reason)
+            try:
+                _pane_ready_now = pane.session.is_at_ready_prompt()
+            except Exception:
+                _pane_ready_now = False
             if not auth_failure_warned[0]:
-                # #248/#247 round 2: recognise a provider CLI's own
-                # auth-failure text as its own state, checked on every poll
-                # like the prompt-block check above — fails fast instead of
-                # riding out the ordinary busy/stall path, which could take
-                # up to BUSY_WAIT_CEILING_SEC (1800s default) to say
-                # anything concrete about a pane that was never going to
-                # recover on its own.
-                try:
-                    _provider = getattr(pane.model, "provider_name", None) or "claude"
-                    _auth_reason = pane.session.auth_failure_reason(_provider)
-                    if not isinstance(_auth_reason, str):
-                        # Defensive: a real PtySession always returns str |
-                        # None, but a test double / unconfigured mock
-                        # session returns a truthy Mock object by default —
-                        # never treat that as a genuine auth failure.
+                if _pane_ready_now:
+                    # A CLI genuinely stuck on auth can never reach its own
+                    # ready prompt — seeing one is proof any auth-failure
+                    # marker still visible in the footer region is stale
+                    # (e.g. a just-finished test run that printed one of the
+                    # generic phrases, now scrolled into the tail rows with
+                    # the CLI back at idle). Ready wins: let the normal
+                    # ready_streak/_deliver() path below handle this poll
+                    # instead of blind-delivering, and reset the streak so a
+                    # later genuine relapse still needs its own confirmation.
+                    auth_failure_streak[0] = 0
+                else:
+                    # #248/#247 round 2: recognise a provider CLI's own
+                    # auth-failure text as its own state, checked on every
+                    # poll like the prompt-block check above — fails fast
+                    # instead of riding out the ordinary busy/stall path,
+                    # which could take up to BUSY_WAIT_CEILING_SEC (1800s
+                    # default) to say anything concrete about a pane that
+                    # was never going to recover on its own.
+                    try:
+                        _provider = getattr(pane.model, "provider_name", None) or "claude"
+                        _auth_reason = pane.session.auth_failure_reason(_provider)
+                        if not isinstance(_auth_reason, str):
+                            # Defensive: a real PtySession always returns str |
+                            # None, but a test double / unconfigured mock
+                            # session returns a truthy Mock object by default —
+                            # never treat that as a genuine auth failure.
+                            _auth_reason = None
+                    except Exception:
                         _auth_reason = None
-                except Exception:
-                    _auth_reason = None
-                if _auth_reason:
-                    auth_failure_warned[0] = True
-                    _log_event(
-                        "task_deliver_auth_failure",
-                        project=self._resolve_project(project),
-                        role=role_name,
-                        provider=_provider,
-                        reason=_auth_reason,
-                    )
-                    self._warn_lead_auth_failure(role_name, project, _provider, _auth_reason)
-                    _deliver(unconfirmed=True)
-                    return
+                    if _auth_reason:
+                        auth_failure_streak[0] += 1
+                    else:
+                        auth_failure_streak[0] = 0
+                    if _auth_reason and auth_failure_streak[0] >= _AUTH_FAILURE_CONFIRM_POLLS:
+                        auth_failure_warned[0] = True
+                        _log_event(
+                            "task_deliver_auth_failure",
+                            project=self._resolve_project(project),
+                            role=role_name,
+                            provider=_provider,
+                            reason=_auth_reason,
+                        )
+                        self._warn_lead_auth_failure(role_name, project, _provider, _auth_reason)
+                        _deliver(unconfirmed=True)
+                        return
             no_content_ceiling_ms = _orch_attr("NO_CONTENT_WATCHDOG_SEC", 75) * 1000
             try:
                 _no_content = (
@@ -1182,7 +1217,7 @@ class LeadInboxMixin:
                 # no content — fall through to the ordinary
                 # elapsed[0] >= max_wait_ms path below as the final safety
                 # net (blind-deliver, unconfirmed).
-            if pane.session.is_at_ready_prompt():
+            if _pane_ready_now:
                 ready_streak[0] += 1
                 # Wait for 5.0 seconds (33 polls of 150ms) of consecutive ready state
                 # to ensure the CLI has finished async background loading (e.g. account verification).

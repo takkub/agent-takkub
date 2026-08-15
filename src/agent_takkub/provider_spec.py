@@ -860,18 +860,27 @@ READY_HARD_BLOCKERS: tuple[str, ...] = tuple(
 # through the footer region. UNVERIFIED against a real failure screen for any
 # provider as of this round — a best-effort baseline pending a live #248/#247
 # repro, not a confirmed table like READY_HARD_BLOCKERS above.
+#
+# Narrowed in the #248/#247 round-2 follow-up: a first pass included several
+# phrases that are common HTTP/test-framework vocabulary, NOT CLI-chrome —
+# ordinary backend dev output routinely prints these while testing an
+# unrelated auth *feature* in the pane's own project, and this table is
+# scoped to the footer tail rows (`_ready_region`, 6 lines), not the whole
+# scrollback, so a long test run's final lines can easily still be sitting
+# there when a poll lands. Dropped: "unauthorized" (any HTTP 401 log line),
+# "invalid credentials" / "invalid api key" (typical login-test assertion
+# text), "session expired" (common app-level error string), "login
+# required" (common 401 body text), "authentication required" /
+# "authentication failed" (generic app error strings), and especially "not
+# authenticated" — FastAPI's own default 401 detail is the literal string
+# "Not authenticated", so keeping it here would auto-fail every FastAPI
+# backend pane the moment its own test suite exercised an authless request.
+# What remains reads only as first-person CLI chrome telling an operator to
+# re-auth — text no unrelated dev-output string plausibly reproduces.
 GENERIC_AUTH_ERROR_MARKERS: tuple[str, ...] = (
     "not signed in",
-    "not authenticated",
     "please sign in again",
     "please log in again",
-    "authentication required",
-    "authentication failed",
-    "invalid api key",
-    "invalid credentials",
-    "unauthorized",
-    "session expired",
-    "login required",
     "please authenticate",
 )
 

@@ -182,3 +182,114 @@ regression).
   scope; `check_provider_auth()`, `_codex_auth_finding()`; registered in
   `run_all_checks()`.
 - `tests/test_doctor.py` — patch list update (see above).
+
+## Round-2 follow-up (Lead review fix loop)
+
+Lead reviewed the round-2 diff and held merge on two gaps before it landed:
+the auth-failure fast-fail path could blind-deliver over a pane that was
+demonstrably fine, and none of round 2's new behavior (kill+respawn, provider
+swap) had a single test. Both closed below, same branch.
+
+### 1. Auth detection could convict a pane sitting at its own ready prompt
+
+`_check()`'s original ordering ran the auth-marker check **before** the
+`is_at_ready_prompt()` check, and a single matching poll triggered an
+immediate `_deliver(unconfirmed=True)` — a blind paste — with **zero**
+regard for whether the pane was, at that exact instant, sitting idle at its
+own ready prompt. That combination can only mean one thing: the marker text
+is stale (e.g. scrolled up from a just-finished test run), because a CLI
+genuinely stuck on auth can never reach its own ready prompt. Blind-pasting
+into an idle, reachable pane is exactly the busy-wait/#130 failure mode this
+whole detector exists to avoid re-introducing.
+
+Compounding it: `GENERIC_AUTH_ERROR_MARKERS`' first pass included several
+phrases that are ordinary HTTP/test-framework vocabulary, not CLI chrome —
+`"unauthorized"` (any 401 log line), `"invalid credentials"`/`"invalid api
+key"` (typical login-test assertion text), `"session expired"`, `"login
+required"`, `"authentication required"`/`"authentication failed"` (generic
+app error strings), and especially `"not authenticated"` — **FastAPI's own
+default 401 `detail` is the literal string "Not authenticated"**, so a
+backend pane's own test suite exercising its project's auth feature would
+have auto-failed itself. Scoped to the 6-line footer tail
+(`_ready_region`), not the whole scrollback, so a long test run's final
+lines can easily still be sitting there when a poll lands — this was a real,
+not theoretical, false-positive risk.
+
+Fix, both in `lead_inbox.py::_send_when_ready`'s `_check()` and
+`provider_spec.py`:
+
+1. **Ready wins.** `is_at_ready_prompt()` is now read once per poll into
+   `_pane_ready_now` and consulted *before* the auth-marker branch: if the
+   pane is at its ready prompt, the auth check is skipped entirely for that
+   poll (and the confirm streak below is reset to 0) — normal delivery
+   proceeds via the pre-existing ready-streak path instead. The same
+   `_pane_ready_now` value is reused later for the ready-streak block itself,
+   so this costs one `is_at_ready_prompt()` call per poll, not two.
+2. **Multi-poll confirmation.** A new `_AUTH_FAILURE_CONFIRM_POLLS` (5,
+   ~750ms at the 150ms poll cadence) requires the marker to match on that
+   many **consecutive** not-ready polls — tracked via a new
+   `auth_failure_streak` counter, reset to 0 both on a non-match and on a
+   ready poll — before `_check()` convicts. Trivial next to the ceiling this
+   whole path exists to beat (`BUSY_WAIT_CEILING_SEC`, 1800s) but enough to
+   filter a one-frame render artifact; a pane genuinely stuck on auth keeps
+   showing the marker on every poll, so this costs it nothing.
+3. **Narrowed `GENERIC_AUTH_ERROR_MARKERS`** down to `"not signed in"`,
+   `"please sign in again"`, `"please log in again"`, `"please authenticate"`
+   — phrases that read only as first-person CLI chrome telling an *operator*
+   to re-auth, not text any plausible unrelated dev-output string
+   reproduces. Missing a real failure is acceptable (falls through to the
+   ordinary busy-wait/max_wait_ms path eventually); convicting normal dev
+   output blind is not.
+
+### 2. Zero test coverage for round 2's new kill+respawn / provider-swap logic
+
+The round-1 diff (739 insertions across 6 source files) shipped with a
+single added test line. Added, all targeted (`.venv\Scripts\python.exe -m
+pytest`, no full suite):
+
+- `tests/test_auth_failure_detection.py` — pure `PtySession.
+  auth_failure_reason()` logic against a minimal duck-typed fake (no real
+  ConPTY needed): instant marker match, `_ready_region` scoping (marker
+  outside the 6-line tail window is ignored), transient marker withheld
+  before `AUTH_TRANSIENT_GRACE_SEC` and fired once elapsed + screen-static,
+  a transient marker never firing for a provider with none confirmed, the
+  narrowed `GENERIC_AUTH_ERROR_MARKERS` table (asserts the removed phrases
+  are gone + a literal FastAPI-shaped "Not authenticated" test-failure line
+  no longer false-positives).
+- `tests/test_delivery_auth_failure.py` — `_send_when_ready`/`_check()`
+  integration: a ready pane with a marker present on every poll delivers
+  normally with no auth-failure warning; a ready poll resets the confirm
+  streak so a later relapse needs its own full fresh streak (proven via
+  `auth_failure_reason.call_count`, not just "no warning fired"); fewer than
+  `_AUTH_FAILURE_CONFIRM_POLLS` consecutive matches never fires; exactly
+  `_AUTH_FAILURE_CONFIRM_POLLS` consecutive matches fires exactly once and
+  blind-delivers.
+- `tests/test_no_content_watchdog_cap.py` — the no-content watchdog's
+  1-retry + 1-degrade cap: attempt 0 → `_recover_no_content_pane(...,
+  degrade=False)`; attempt 1 → `degrade=True`; attempt 2 → recovery is
+  **not** called again, falls through to the ordinary
+  `elapsed[0] >= max_wait_ms` blind-deliver-unconfirmed safety net (proven
+  end-to-end, including the `[delivery-unconfirmed]` Lead notice).
+- `tests/test_provider_override.py` — drives a real `spawn()` call (claude
+  branch fully mocked, mirrors `test_spawn_task_delivery.py`'s harness):
+  `provider_override` wins over `effective_provider_for`'s answer for that
+  spawn; with no override, `effective_provider_for` is honored normally;
+  `_from_auto_respawn=True` does **not** clear `provider_override` /
+  `no_content_recover_attempts` (the watchdog's own degrade respawn must not
+  undo itself); a fresh manual spawn still honors the pre-clear override for
+  *that* launch but clears both fields for the *next* one.
+
+All four new files plus the full existing round-2 targeted list re-run
+green. `ruff check` / `ruff format --check` clean on every touched file;
+`lint-imports` 25/25 contracts kept.
+
+### Files touched (this follow-up)
+
+- `src/agent_takkub/lead_inbox.py` — `_AUTH_FAILURE_CONFIRM_POLLS` constant;
+  `_check()`: `_pane_ready_now` computed once and reused; auth-marker branch
+  now ready-gated + streak-gated (`auth_failure_streak`).
+- `src/agent_takkub/provider_spec.py` — `GENERIC_AUTH_ERROR_MARKERS` narrowed
+  from 12 entries to 4.
+- `tests/test_auth_failure_detection.py`, `tests/test_delivery_auth_failure.py`,
+  `tests/test_no_content_watchdog_cap.py`, `tests/test_provider_override.py`
+  — new.
