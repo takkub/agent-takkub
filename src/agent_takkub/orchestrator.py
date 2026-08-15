@@ -1827,13 +1827,39 @@ class Orchestrator(
             mgr = WorktreeManager()
             commits = mgr.commit_count(info)
             if commits > 0:
-                proposal = build_merge_proposal(from_role, info, commits, mgr.diffstat(info))
+                # #244: commits > 0 does NOT mean "ready to merge" — the
+                # branch can carry accepted commits AND still hold fresh
+                # uncommitted work on top (real near-miss, twice in one
+                # night: this used to announce "พร้อม merge" unconditionally
+                # the instant commits > 0, and Lead almost merged stale
+                # work). Check dirty + merge-cleanliness against the
+                # CURRENT base before the proposal is allowed to claim
+                # readiness. Same git-subprocess-on-main-thread shape the
+                # 3 calls just below it already used (commit_count/diffstat/
+                # is_dirty) — a one-shot event fired from done(), not a
+                # per-tick poll (unlike #229's per-tick FS walk), so two
+                # more fast local git calls stay in the same performance
+                # class as the pre-existing calls, not a new risk.
+                dirty = mgr.is_dirty(info)
+                uncommitted = mgr.uncommitted_count(info) if dirty else 0
+                merge_conflicts = mgr.merge_conflicts_with_base(info.git_root, info.branch)
+                proposal = build_merge_proposal(
+                    from_role,
+                    info,
+                    commits,
+                    mgr.diffstat(info),
+                    dirty=dirty,
+                    uncommitted=uncommitted,
+                    merge_conflicts=merge_conflicts,
+                )
                 _log_event(
                     "worktree_merge_proposed",
                     role=from_role,
                     project=project_ns,
                     branch=info.branch,
                     commits=commits,
+                    dirty=dirty,
+                    merge_conflicts=merge_conflicts,
                 )
                 self._notify_lead(project_ns, proposal, from_role=from_role, note="")
                 return
@@ -2723,6 +2749,14 @@ class Orchestrator(
             self._last_done_task_ids = {}
         had_task_id = _ps_done.task_id or self._last_done_task_ids.get(key) or f"pane-{id(pane)}"
         self._last_done_task_ids[key] = had_task_id
+        # #244: the issue/task ref shown to Lead must come from the ORIGINAL
+        # assign spec Lead itself sent (last_assigned_task), never from the
+        # agent's own done() note — an agent has mistyped the issue number
+        # it was reporting on before (real incident: wrote "#234" while
+        # actually fixing #229). Captured before the PaneState pop below.
+        from .notice_facts import extract_issue_ref
+
+        issue_ref = extract_issue_ref(_ps_done.last_assigned_task)
 
         # Opt-in commit handoff: if assign() was called with requires_commit=True,
         # check for a dirty working tree and warn Lead (the agent isn't blocked —
@@ -2777,9 +2811,14 @@ class Orchestrator(
         # Lead proposes the fix, never auto-fires, and ALWAYS keeps the full
         # note (Lead's fix-loop propose + classify_failure both read it) — only
         # the clean-done path gets the file-pointer condensation.
+        # #244: the ref badge is computed (from the assign spec, above) and
+        # prepended only to the Lead-facing `notice` text — never mixed into
+        # `notice_body`, which stays the raw/condensed note other consumers
+        # (shard aggregate, role_memory failure capture) read unmodified.
+        ref_tag = f"[ref {issue_ref}] " if issue_ref else ""
         if failed:
             notice_body = note
-            notice = self._build_verify_fail_handoff(from_role, note)
+            notice = self._build_verify_fail_handoff(from_role, f"{ref_tag}{note}")
             _log_event("verify_failed", project=project_ns, role=from_role, note=(note or "")[:200])
             # ReflexionMemory-style auto-capture: a FAILED report used to go to
             # Lead and nowhere else, so the same role could repeat the same
@@ -2794,7 +2833,7 @@ class Orchestrator(
                 pass
         else:
             notice_body = self._condense_done_note(raw_note, note, evidence_line, session_md_path)
-            notice = f"[{from_role} done] {notice_body}".rstrip()
+            notice = f"[{from_role} done] {ref_tag}{notice_body}".rstrip()
         # Shard panes suppress clean per-shard notices in favour of the
         # consolidated handoff. Failures still surface immediately so the
         # fix-loop proposal cannot be delayed or lost.

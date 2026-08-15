@@ -22,6 +22,7 @@ from agent_takkub.worktree_manager import (
     build_merge_proposal,
     repair_editable_pth_if_stale,
     sanitize_ref_component,
+    summarize_diffstat,
     worktree_dest,
     worktree_root,
 )
@@ -189,6 +190,57 @@ class TestInspect:
     def test_is_dirty_false_when_clean(self):
         r = FakeRunner([(["status", "--porcelain"], _ok(""))])
         assert WorktreeManager(r).is_dirty(self._info()) is False
+
+    def test_uncommitted_count_counts_nonblank_lines(self):
+        r = FakeRunner([(["status", "--porcelain"], _ok(" M a.ts\n?? b.ts\n M c.ts\n"))])
+        assert WorktreeManager(r).uncommitted_count(self._info()) == 3
+
+    def test_uncommitted_count_zero_when_clean(self):
+        r = FakeRunner([(["status", "--porcelain"], _ok(""))])
+        assert WorktreeManager(r).uncommitted_count(self._info()) == 0
+
+    def test_uncommitted_count_zero_on_error(self):
+        r = FakeRunner([(["status", "--porcelain"], _fail())])
+        assert WorktreeManager(r).uncommitted_count(self._info()) == 0
+
+    def test_merge_conflicts_with_base_true_when_markers_present(self):
+        r = FakeRunner(
+            [
+                (["merge-base", "HEAD"], _ok("mergebase123\n")),
+                (["merge-tree"], _ok("<<<<<<< HEAD\nfoo\n=======\nbar\n>>>>>>> wt/x-1\n")),
+            ]
+        )
+        assert WorktreeManager(r).merge_conflicts_with_base("/repo", "wt/x-1") is True
+
+    def test_merge_conflicts_with_base_false_when_clean(self):
+        r = FakeRunner(
+            [
+                (["merge-base", "HEAD"], _ok("mergebase123\n")),
+                (["merge-tree"], _ok("")),
+            ]
+        )
+        assert WorktreeManager(r).merge_conflicts_with_base("/repo", "wt/x-1") is False
+
+    def test_merge_conflicts_with_base_none_when_merge_base_fails(self):
+        r = FakeRunner([(["merge-base", "HEAD"], _fail())])
+        assert WorktreeManager(r).merge_conflicts_with_base("/repo", "wt/x-1") is None
+
+    def test_merge_conflicts_with_base_none_when_merge_tree_fails(self):
+        r = FakeRunner(
+            [
+                (["merge-base", "HEAD"], _ok("mergebase123\n")),
+                (["merge-tree"], _fail()),
+            ]
+        )
+        assert WorktreeManager(r).merge_conflicts_with_base("/repo", "wt/x-1") is None
+
+    def test_merge_conflicts_with_base_uses_current_head_not_creation_base(self):
+        """#244: must diff against git_root's HEAD *now*, not the worktree's
+        creation-time base_sha — proven by asserting the merge-base call
+        targets HEAD."""
+        r = FakeRunner([(["merge-base", "HEAD", "wt/x-1"], _ok("cur\n"))])
+        WorktreeManager(r).merge_conflicts_with_base("/repo", "wt/x-1")
+        assert r.ran("merge-base", "HEAD", "wt/x-1")
 
 
 # ── Destroy (2-tier) ────────────────────────────────────────────────────────
@@ -364,6 +416,27 @@ class TestLongPathDeleteWindows:
 # ── Merge proposal ──────────────────────────────────────────────────────────
 
 
+class TestSummarizeDiffstat:
+    def test_counts_files_and_top_level_dirs(self):
+        stat = (
+            " src/api/users.py  | 12 ++++++------\n"
+            " src/api/orders.py | 4 ++--\n"
+            " docs/readme.md    | 2 +-\n"
+            " 3 files changed, 18 insertions(+), 4 deletions(-)\n"
+        )
+        files, dirs = summarize_diffstat(stat)
+        assert files == 3
+        assert dirs == ["src", "docs"]  # order-preserving, deduped
+
+    def test_empty_input(self):
+        assert summarize_diffstat("") == (0, [])
+
+    def test_summary_line_alone_is_not_counted_as_a_file(self):
+        files, dirs = summarize_diffstat(" 0 files changed\n")
+        assert files == 0
+        assert dirs == []
+
+
 class TestMergeProposal:
     def test_proposal_has_branch_merge_cmd_and_is_propose_only(self):
         info = WorktreeInfo(path="/w/p", branch="wt/frontend-9", base_sha="base9", git_root="/repo")
@@ -374,6 +447,47 @@ class TestMergeProposal:
         assert "src/x.ts" in msg  # diffstat carried through
         # propose-then-fire doctrine — must tell Lead to confirm, not auto-merge
         assert "confirm" in msg.lower()
+
+    def test_dirty_never_claims_ready_to_merge(self):
+        """#244 — the core near-miss fix: commits > 0 must not assert
+        readiness while the worktree still holds uncommitted work."""
+        info = WorktreeInfo(path="/w/p", branch="wt/backend-1", base_sha="base1", git_root="/repo")
+        msg = build_merge_proposal(
+            "backend", info, 2, " src/x.ts | 3 +++", dirty=True, uncommitted=4
+        )
+        assert "พร้อม merge" not in msg
+        assert "4 ไฟล์ที่ยังไม่ commit" in msg
+        assert "merge --no-ff" not in msg  # step not offered while dirty
+
+    def test_clean_and_merge_tree_clean_claims_ready(self):
+        info = WorktreeInfo(path="/w/p", branch="wt/backend-1", base_sha="base1", git_root="/repo")
+        msg = build_merge_proposal(
+            "backend", info, 2, " src/x.ts | 3 +++", dirty=False, merge_conflicts=False
+        )
+        assert "พร้อม merge" in msg
+        assert "merge --no-ff wt/backend-1" in msg
+
+    def test_merge_conflicts_true_warns_instead_of_ready(self):
+        info = WorktreeInfo(path="/w/p", branch="wt/backend-1", base_sha="base1", git_root="/repo")
+        msg = build_merge_proposal(
+            "backend", info, 2, " src/x.ts | 3 +++", dirty=False, merge_conflicts=True
+        )
+        assert "พร้อม merge" not in msg
+        assert "conflict" in msg.lower()
+
+    def test_merge_conflicts_unknown_does_not_claim_ready(self):
+        info = WorktreeInfo(path="/w/p", branch="wt/backend-1", base_sha="base1", git_root="/repo")
+        msg = build_merge_proposal(
+            "backend", info, 2, " src/x.ts | 3 +++", dirty=False, merge_conflicts=None
+        )
+        assert "พร้อม merge" not in msg
+
+    def test_files_touched_summary_included(self):
+        info = WorktreeInfo(path="/w/p", branch="wt/backend-1", base_sha="base1", git_root="/repo")
+        stat = " src/api/users.py | 5 +++--\n docs/readme.md | 1 +\n"
+        msg = build_merge_proposal("backend", info, 1, stat, dirty=False, merge_conflicts=False)
+        assert "ไฟล์ที่แตะ: 2 ไฟล์" in msg
+        assert "src" in msg and "docs" in msg
 
 
 # ── Env-propagation config (P2.1) ───────────────────────────────────────────
