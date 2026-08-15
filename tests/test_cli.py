@@ -1034,3 +1034,92 @@ class TestRestartCli:
         monkeypatch.setenv("TAKKUB_ROLE", "backend")
         assert cli.main(["restart"]) != 0
         assert len(fake_request) == n  # never reached the socket
+
+
+class _FakeCliSocket:
+    """Stand-in for the connected `socket.socket` `_request` talks to."""
+
+    def __init__(self, recv_fn) -> None:
+        self._recv_fn = recv_fn
+        self.sent: list[bytes] = []
+        self.settimeout_calls: list[float] = []
+        self.closed = False
+
+    def sendall(self, data: bytes) -> None:
+        self.sent.append(data)
+
+    def settimeout(self, t: float) -> None:
+        self.settimeout_calls.append(t)
+
+    def recv(self, n: int) -> bytes:
+        return self._recv_fn()
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class TestRequestDeadline:
+    """#233: `takkub assign` (and every other command routed through
+    `_request`) must always return within a bounded time, even when the
+    server keeps the connection open by dribbling data that never completes
+    a newline-terminated frame — `socket.settimeout()` alone only bounds a
+    single blocking call, not the total wait."""
+
+    def test_returns_timeout_when_server_dribbles_data_without_newline(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Every recv() call "succeeds" (returns non-empty bytes within its
+        # own per-call timeout) but never delivers a newline — the old code
+        # would loop on this forever.
+        clock = iter([0.0] + [float(i) for i in range(1, 40)])
+        monkeypatch.setattr(cli.time, "monotonic", lambda: next(clock))
+        sock = _FakeCliSocket(recv_fn=lambda: b"x")
+        monkeypatch.setattr(cli, "_connect", lambda: sock)
+
+        result = cli._request({"cmd": "assign"}, response_timeout=15.0)
+
+        assert result["ok"] is False
+        assert "timed out" in result["msg"]
+        assert sock.closed is True
+
+    def test_returns_timeout_when_recv_raises_timeout(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clock = iter([0.0, 1.0, 2.0])
+        monkeypatch.setattr(cli.time, "monotonic", lambda: next(clock))
+
+        def _raise():
+            raise TimeoutError("timed out")
+
+        sock = _FakeCliSocket(recv_fn=_raise)
+        monkeypatch.setattr(cli, "_connect", lambda: sock)
+
+        result = cli._request({"cmd": "assign"}, response_timeout=15.0)
+
+        assert result["ok"] is False
+        assert "timed out" in result["msg"]
+
+    def test_returns_clear_error_on_malformed_response(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        chunks = iter([b"not json at all\n", b""])
+        monkeypatch.setattr(cli.time, "monotonic", lambda: 0.0)
+        sock = _FakeCliSocket(recv_fn=lambda: next(chunks))
+        monkeypatch.setattr(cli, "_connect", lambda: sock)
+
+        result = cli._request({"cmd": "assign"})
+
+        assert result["ok"] is False
+        assert "malformed response" in result["msg"]
+
+    def test_returns_reply_promptly_when_server_responds_normally(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        chunks = iter([b'{"ok": true, "msg": "done"}\n'])
+        monkeypatch.setattr(cli.time, "monotonic", lambda: 0.0)
+        sock = _FakeCliSocket(recv_fn=lambda: next(chunks))
+        monkeypatch.setattr(cli, "_connect", lambda: sock)
+
+        result = cli._request({"cmd": "assign"})
+
+        assert result == {"ok": True, "msg": "done"}

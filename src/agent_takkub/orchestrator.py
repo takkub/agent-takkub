@@ -4096,12 +4096,46 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                     # #9: re-paste the last task so the pane continues working;
                     # queue a Lead notice (delivered when Lead spawns) either
                     # way so the operator knows the pane was re-spawned.
+                    #
+                    # #230: a pane can legitimately finish (`done()` pops the
+                    # ledger's `open[role]` row synchronously) in the window
+                    # between this snapshot being written and an ABRUPT restart
+                    # (crash, forced kill, or any restart path that doesn't run
+                    # through the two graceful write_session_snapshot() call
+                    # sites) — the on-disk snapshot then still shows the
+                    # already-finished task, and re-sending it silently re-runs
+                    # completed work (best case a no-op re-`done`, worst case a
+                    # repeated migration/push). The task ledger's `open` map is
+                    # the one durable, cross-process signal for "is this task
+                    # still actually outstanding" — an absent entry (already
+                    # resolved, or never tracked) means "safe to skip", which
+                    # also fails closed for ledger-write hiccups: burning one
+                    # skipped resend beats duplicating side-effecting work.
+                    task_still_open = False
                     if last_task:
+                        try:
+                            from .task_ledger import load_state as _load_ledger_state
+
+                            task_still_open = role in (
+                                _load_ledger_state(project).get("open") or {}
+                            )
+                        except Exception:
+                            task_still_open = True
+                    if last_task and task_still_open:
                         self._send_when_ready(role, last_task, project=project)
                         notice_body = (
                             f"[cockpit restart{restart_reason_suffix}] {role} pane restored "
                             f"from last session and last task re-sent automatically."
                         )
+                    elif last_task:
+                        notice_body = (
+                            f"⚠️ [cockpit restart{restart_reason_suffix}] {role} pane restored "
+                            f"from last session — its last task has no open row in the task "
+                            f"ledger (already completed, or was never tracked), so it was "
+                            f"NOT re-sent automatically to avoid duplicate/side-effect work. "
+                            f"Re-assign manually if it still needs to run."
+                        )
+                        _log_event("teammate_restore_resend_skipped", role=role, project=project)
                     elif role == "shell":
                         # A plain PowerShell pane never carries an assigned task —
                         # restoring it fresh is its normal state, so no ⚠️/re-assign
