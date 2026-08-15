@@ -7,9 +7,11 @@ repos:
     hooks:
       - id: gitleaks
 
-  # ruff: lint + format (matches pyproject.toml [tool.ruff] config)
+  # ruff: lint + format (matches pyproject.toml [tool.ruff] config).
+  # rev must match pyproject.toml's dev-dependency ruff==X pin exactly —
+  # enforced by tests/test_version_sync.py::test_ruff_pin_matches_pre_commit_rev.
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.16.0
+    rev: v0.16.2
     hooks:
       - id: ruff
         args: [--fix]
