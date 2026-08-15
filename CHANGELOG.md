@@ -4,6 +4,41 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.62] - 2026-08-15
+
+รอบ **"cockpit หยุดโกหก Lead"** — ปิดครบ #225–#245 (15 ใบ) เน้นสามเรื่อง: สถานะที่รายงานต้องตรงกับความจริง, Lead ต้องมีเครื่องมือรอที่ใช้ได้จริง, และ pane ต้องไม่ค้างรอคนกดโดยไม่มีใครรู้
+
+### Fixed (แก้)
+
+**สถานะที่รายงานไม่ตรงความจริง**
+- **`takkub status` บอก "working, progress 0s ago" ทั้งที่ pane ค้างรอคนกด permission มา 3 ชม.** (#236) — นาฬิกา progress นับ spinner frame กับการ redraw ของ dialog เป็น "ความคืบหน้า" และไม่มี detector สำหรับ approval dialog ของ Claude Code เอง (`1. Yes / 2. Yes, and don't ask again / 3. No` ไม่มี `[y/N]` เลยไม่ match pattern ไหน) ตอนนี้ progress อ่านจากสัญญาณที่กรอง spinner ออกแล้ว และ `takkub status` ขึ้นบรรทัด `⛔ blocked:permission-prompt` แยกจาก state ปกติ · ⚠️ detector ยืนยันเฉพาะ Claude Code — provider อื่นยังเป็น known gap (#103)
+- **pane หายจาก `takkub list` ก่อน report ถูกส่ง** (#225) — ฝั่ง desktop แก้ไปแล้วตั้งแต่ #163 แต่ `/api/activity` ของมือถืออ่าน pane ตรงๆ ไม่ผ่านทางเดียวกัน มือถือจึงยังเห็น pane หายก่อนเวลา ตอนนี้ไปทางเดียวกันแล้ว
+- **delivery บอก "task ยังไม่ถึงมือ" ขัดกับ status ที่บอกว่า working** (#235) — assign ซ้ำสำหรับ role เดิมทำให้เกิด poll loop คู่ขนาน ตัวเก่าที่ถูกแทนที่แล้วยังยิงคำเตือนของตัวเองเข้า Lead ตอนนี้ loop ที่ถูก supersede จะเงียบทันที
+- **worktree notice ประกาศ "N commit พร้อม merge" ทั้งที่งานจริงยังไม่ commit** (#244) — เกือบทำให้ merge ของเก่าแล้วปิด issue ทั้งที่ fix ยังไม่เข้า 2 ครั้งในคืนเดียว ตอนนี้เช็ค `git status --porcelain` + `merge-tree` เทียบ base ปัจจุบันก่อน ถ้าสกปรกจะขึ้น `⚠ ยังมี N ไฟล์ที่ยังไม่ commit` และไม่แสดงคำสั่ง merge ให้กดตาม
+- **เลข issue ใน notice มาจากที่ agent พิมพ์เอง ซึ่งพิมพ์ผิดได้** (#244) — เคสจริง: report พาดหัวว่า "#234" ทั้งที่แก้ #229 ตอนนี้ `[ref #N]` คำนวณจาก assign spec ต้นฉบับที่ Lead ส่งไปเอง
+- **done report ถูกส่งไปโผล่ผิด pane หลัง respawn** (#228) — queue เก็บ notice เป็น string เปล่าไม่มี pane identity ผูกไว้ ตอนนี้ผูก pane token กับทุก tier แล้ว re-check ตอนส่งจริง mismatch จะขึ้น banner ⚠ unverified origin แทนที่จะส่งเงียบๆ
+
+**Lead ไม่มีเครื่องมือที่ควรมี**
+- **`takkub wait [--role R] [--timeout S]`** (#242) — ของใหม่ บล็อกจนกว่า done/FAILED report **ถึง Lead จริง** ไม่ใช่แค่ pane หายจาก list · timeout บังคับเสมอ + ตอน timeout บอกเหตุผลรายตัว (working / stalled / ติด tty prompt / report ค้างคิว / ไม่เคย spawn) · waiter ตัวที่ 2 จะ attach เข้าตัวเดิม ไม่มีทางกองซ้อน (เคสจริง: loop เขียนมือค้างสะสม 6 ตัวพร้อมกัน)
+- **`takkub inbox [--role R]`** (#231) — อ่านเนื้อ report ที่ค้างคิวได้จริง ไม่ใช่เห็นแค่ป้าย "queued"
+- **`takkub progress "<msg>"`** (#234) — รายงานความคืบหน้ากลางงานโดยไม่ปิด pane (เดิมมีแต่ `done` ซึ่งจบ pane ทิ้ง) + `close()` เตือน Lead ก่อนฆ่า subprocess ที่ยังทำงานอยู่
+- **digest เป็นตาราง fact ที่ cockpit คำนวณเอง** (#245) — verdict · ref · branch · commit ที่นำหน้า base · ไฟล์ที่ยังไม่ commit · merge สะอาดไหม · ไฟล์ที่แตะ · path ไฟล์เต็ม · คำนวณไม่ได้จะบอก "ตรวจไม่ได้" ไม่ใช่ `0` ที่หลอกตา
+- **digest ส่งซ้ำ/เวลาเพี้ยน/ตัดกลางประโยค** (#241) — dedup กับ tier อื่นแล้ว, ใช้เวลาที่ report เกิดจริง, ตัดที่ขอบคำ
+
+**pane ค้างโดยไม่มีใครรู้**
+- **teammate เดินไปชนคำสั่งที่ติด permission gate แล้วค้างรอคนกด** (#243) — โหมดปล่อยรันข้ามคืนจะหยุดทั้ง wave โดยไม่มีสัญญาณ ตอนนี้อ่าน `.claude/settings.json` → `permissions.ask` **สดตอน spawn** แล้วฉีดรายการคำสั่งที่ติด gate + ทางเลือกที่ไม่ติด gate + คำสั่งให้รายงาน FAILED แทนการรอ เข้าไปในทุก pane (ไม่ hardcode ลงไฟล์ role เพราะจะ drift) · provider อื่นได้หมายเหตุระบุ gap แทน (#103)
+- **assign ค้างรอ response ไม่มีขอบเขต + resend งานที่ทำเสร็จไปแล้วตอน restart** (#233, #230)
+
+**ประสิทธิภาพ / ความถูกต้อง**
+- **UI ค้างเป็นจังหวะ 1.5-1.7 วินาที** (#229) — `notify._resync()` ยิง `pathlib.glob` แบบ recursive stat ของทุก project **ทุก tick 200ms** บน Qt main thread · วัดจริง 20 project/50 tick: claude 1000 calls/1229ms → **0 calls/4.71ms** · provider ที่ไม่มี session uuid (gemini/codex) ยัง re-resolve ต่อแบบ throttle 5s ไม่ใช่หยุดถาวร (ไม่งั้น Lead ที่เป็น gemini จะ tail ไฟล์แรกค้างตลอด)
+- **cockpit issue ไม่เคยขึ้น GitHub เลยสักใบ** (#237) — `REPO_ROOT` ชี้ไปโฟลเดอร์ติดตั้ง wheel (`venv\Lib`) ที่ไม่มี `.git` แล้ว fallback ลง local store เงียบ 100% กระทบทุกคนที่ติดตั้งแบบปกติ · ตอนนี้ไล่หา git checkout จริง (dev checkout → `AGENT_TAKKUB_COCKPIT_REPO` → `projects.json`) หาไม่เจอจะเตือนเสียงดังพร้อมวิธีแก้ และติดป้าย `(LOCAL ONLY — did not reach GitHub)`
+- **resource classifier ตัดสินผิดเพราะอ่านประโยคห้ามเป็นคำสั่ง** (#240) — task spec ที่เขียนว่า "ห้ามรัน pip install" ถูกจัดเป็นงาน package-install แล้วโดนคิวจำกัดจนงานคู่ขนานกลายเป็นเรียงทีละตัว ตอนนี้ดู negation cue รายบรรทัด + Lead เห็นได้ว่าติดคิวเพราะอะไร (#232)
+- **ลบ worktree ไม่สำเร็จบน Windows path ยาว** (#226, #227) — long-path-safe delete + ไม่รายงานว่า "เก็บไว้" ทั้งที่ลบไปครึ่งทางแล้ว
+- **guard test มองไม่เห็น subprocess ที่ import แบบ alias** (#238) + **CI แดงจาก hardcode path** (#239)
+
+### Notes
+- ต้อง **restart cockpit** ถึงจะได้ของทั้งหมดนี้ — โค้ดใหม่ไม่มีผลกับ instance ที่รันค้างอยู่
+
 ## [1.0.61] - 2026-08-15
 
 รอบเก็บบั๊กใหญ่ของ **remote/PWA บนมือถือ** + เสถียรภาพ cockpit ตามที่ user รายงานหลังปล่อย 1.0.60 (ปิดครบ #193–#206)
