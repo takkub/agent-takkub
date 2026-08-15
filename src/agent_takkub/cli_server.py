@@ -54,6 +54,11 @@ _LEAD_ONLY_CMDS = frozenset(
         "goal",
         "end-session",  # Lead-only: only Lead summarises + closes the session
         "restart",  # Lead-only: kills every pane and relaunches the app
+        # inbox is read-only, not a mutation, but reuses this same gate
+        # (#231): its payload is other panes' report bodies — the same
+        # M3#16 sensitivity as status's transcript_tail, not something a
+        # confused teammate shell should be able to read cold.
+        "inbox",
     }
 )
 
@@ -334,30 +339,32 @@ class CliServer(QObject):
                 self._reply(sock, ok=False, msg=f"unauthorized: {cmd} as lead requires token")
                 return
 
-        # done: reject from_role == "lead" — Lead never closes itself via done.
-        # This guard lives at the orchestrator level too; both layers protect
-        # against the done→close chain accidentally targeting the Lead pane.
-        if cmd == "done" and from_role_norm == "lead":
-            self._reply(sock, ok=False, msg="lead cannot call done")
+        # done/progress: reject from_role == "lead" — Lead never closes (or
+        # progress-reports on) itself. This guard lives at the orchestrator
+        # level too; both layers protect against the done→close chain
+        # accidentally targeting the Lead pane.
+        if cmd in ("done", "progress") and from_role_norm == "lead":
+            self._reply(sock, ok=False, msg=f"lead cannot call {cmd}")
             return
 
-        # Layer 4 — per-pane capability token for `done` and `send`.
+        # Layer 4 — per-pane capability token for `done`, `progress`, and `send`.
         #
         # Each non-Lead pane receives TAKKUB_PANE_TOKEN in its env at spawn time.
-        # The token is bound to (project, role) server-side. For `done` and `send`,
+        # The token is bound to (project, role) server-side. For these commands,
         # callers MUST present their token in the `auth` field. The server derives
         # caller identity (from_role, from_project) from the token instead of
         # trusting the caller-supplied `from`/`from_project` fields.
         #
         # Raw clients that haven't been spawned by the orchestrator have no token
-        # and are rejected for these two commands.
-        if cmd in ("done", "send", "hook", "session-report"):
+        # and are rejected for these commands.
+        if cmd in ("done", "progress", "send", "hook", "session-report"):
             caller_auth = req.get("auth") or ""
             pane_tokens: dict[str, tuple[str, str]] = getattr(self._orch, "_pane_tokens", {})
             # Lead token is valid for `send` (Lead sends task specs to teammates),
             # `hook` and `session-report` (Lead's own claude session also fires
             # Stop/Notification/SessionStart hooks — the done-gate itself is a
-            # no-op for Lead) but not `done` (Lead cannot call done on itself).
+            # no-op for Lead) but not `done`/`progress` (Lead cannot report on
+            # itself).
             lead_token = getattr(self._orch, "_lead_token", None)
             if (
                 lead_token
@@ -499,6 +506,14 @@ class CliServer(QObject):
                     project=from_project,
                     failed=bool(req.get("failed", False)),
                 )
+            elif cmd == "progress":
+                # #234: status update that does NOT schedule the pane's
+                # teardown — see Orchestrator.progress() docstring.
+                ok, msg = self._orch.progress(
+                    req.get("from") or "",
+                    note=req.get("note", ""),
+                    project=from_project,
+                )
             elif cmd == "hook":
                 ok, blocked, msg = self._orch.consume_pane_hook(
                     req.get("from") or "",
@@ -614,6 +629,15 @@ class CliServer(QObject):
                             _info.pop("transcript_tail", None)
                             _info.pop("last_screenshot", None)
                 self._reply(sock, ok=True, msg="status report", report=report)
+                return
+            elif cmd == "inbox":
+                # #231: `takkub status` could only ever say a role's report was
+                # "queued — not yet delivered"; nothing let Lead read the
+                # content back out short of hand-Glob'ing runtime/sessions.
+                # Lead-only (see _LEAD_ONLY_CMDS above) — same M3#16
+                # rationale as status's transcript_tail gate.
+                items = self._orch.inbox_report(project=from_project, role=req.get("role"))
+                self._reply(sock, ok=True, msg=f"{len(items)} pending item(s)", items=items)
                 return
             elif cmd == "harvest":
                 harvest_since_ts: float | None = None

@@ -148,7 +148,7 @@ def test_blocking_notice_does_not_wait_behind_pending_digest(
     written = _written(lead.session)
     assert "[qa FAILED] production checkout is broken" in written
     assert "Lead Inbox Digest" not in written
-    assert list(orch._lead_digest_queue[PROJECT]) == ["[backend done] informational"]
+    assert list(orch._lead_digest_queue[PROJECT]) == [("[backend done] informational", None)]
 
 
 def test_auto_chain_flushes_done_digest_first_and_is_not_window_delayed(
@@ -203,4 +203,4 @@ def test_old_timer_cannot_flush_a_new_burst_after_early_handoff(
         first_timer()
 
     assert _written(lead.session) == before
-    assert list(orch._lead_digest_queue[PROJECT]) == ["[backend done] second burst"]
+    assert list(orch._lead_digest_queue[PROJECT]) == [("[backend done] second burst", None)]

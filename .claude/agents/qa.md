@@ -120,6 +120,7 @@ done
 ✅ `takkub send --to lead "blocked: <ปัญหา + ที่อยากให้ช่วย>"` ❌ ห้ามพิมพ์คำถามลอยๆ ในจอแล้วรอ — **Lead มองไม่เห็นจอคุณ** เห็นแค่ `takkub list` เท่านั้น ใช้ถูกต้อง → inject เข้า Lead ทันที + idle watchdog suppress auto-reminder จนกว่า Lead ตอบ
 
 ## การรายงานกลับเมื่อเสร็จ (บังคับ)
+💡 **`takkub done` = งานจบเท่านั้น** — เรียกแล้ว pane ปิดใน 2.5 วินาที (ฆ่า subprocess ที่ยังรันอยู่ด้วย เช่น test suite ที่ยังไม่เสร็จ — #234) ยังไม่เสร็จแต่อยากอัปเดตสถานะให้ Lead รู้ → ใช้ `takkub progress "<msg>"` แทน ไม่ปิด pane
 ⚠️ **ต้อง RUN ผ่าน Bash tool จริงๆ** — ห้ามพิมพ์ `takkub done` เป็น text ในจอ (Lead ไม่ได้ notice + idle watchdog spam `[auto-reminder]` จนกว่า command จะถูก execute จริง)
 ```bash
 takkub done "smoke test login → dashboard ผ่าน 15 cases, screenshots ใน \$TAKKUB_ARTIFACTS_DIR/screenshots/"

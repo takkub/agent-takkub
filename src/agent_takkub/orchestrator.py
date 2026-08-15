@@ -65,7 +65,9 @@ from .lead_inbox import (  # re-exported for test/compat imports; mixin provides
     LeadInboxMixin,
     _delayed_enter,
     _delayed_enter_verified,
+    _notice_role_tag,
     _safe_session_write,
+    _unwrap_notice_item,
 )
 from .limit_autoresume import AutoResumeMixin  # mixin providing auto-resume methods
 from .orchestrator_text import (  # re-exported for test/app/main_window imports
@@ -1984,6 +1986,53 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         )
         return True, f"sent to {to_role}"
 
+    def _warn_if_live_children(self, project_ns: str, role_name: str, session) -> None:
+        """#234: best-effort check for a live subprocess tree under this
+        pane's shell right before `terminate()` kills it (`taskkill /T` /
+        job-object teardown, `pty_session.PtySession.terminate`) — e.g. a
+        `docker compose build` still running when `done()`'s 2.5s auto-close
+        (or a direct `close()`) tears the pane down. Cross-platform via
+        `psutil.Process(pid).children(recursive=True)`, the same idiom
+        `app.py`'s stale-process sweep already uses. Never blocks or delays
+        the close — only surfaces what is about to be killed so Lead isn't
+        left guessing why a build silently vanished (#234's own repro: a
+        `docker images`/`docker ps` hunt after the fact was the only way to
+        find out nothing had actually run).
+        """
+        pid = getattr(session, "_pid", None)
+        if not pid:
+            return
+        try:
+            import psutil
+
+            children = psutil.Process(pid).children(recursive=True)
+        except Exception:
+            return
+        if not children:
+            return
+        names: list[str] = []
+        for child in children:
+            try:
+                names.append(child.name())
+            except Exception:
+                pass
+        detail = f" ({', '.join(names[:5])}{'…' if len(names) > 5 else ''})" if names else ""
+        self._notify_lead(
+            project_ns,
+            f"⚠️ [{role_name} closing] {len(children)} subprocess(es) still running under this "
+            f"pane are about to be killed{detail} — if the work wasn't actually finished, use "
+            f"`takkub progress` next time instead of `done` until it is.",
+            from_role=role_name,
+            note="subprocess_kill_warning",
+        )
+        _log_event(
+            "close_kills_live_children",
+            role=role_name,
+            project=project_ns,
+            count=len(children),
+            names=names[:10],
+        )
+
     def close(
         self,
         role_name: str,
@@ -2025,6 +2074,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                 return True, "lead close ignored (protected)"
             # mark exit as expected so the pane doesn't surface "exited"/crash
             pane.mark_expected_exit()
+            self._warn_if_live_children(project_ns, role_name, pane.session)
             pane.session.terminate()
             pane.set_state("empty", note=None)
         key = f"{project_ns}::{role_name}"
@@ -2613,6 +2663,16 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
 
         key = f"{project_ns}::{from_role}"
 
+        # #228: capture this pane instance's own auth token *before* any
+        # teardown below. close() (scheduled 2.5s later) is what revokes it,
+        # so it is still the live, current token for (project_ns, from_role)
+        # right now — the exact spawn-instance identity of the pane that
+        # called done(). Threaded through to the Lead-facing notice so a
+        # later respawn under the same role name can be told apart from the
+        # pane that actually generated this report, however long it sits
+        # queued before Lead reads it.
+        origin_pane_token = self._current_pane_identity(project_ns, from_role)
+
         resource_token = getattr(self, "_resource_tokens", {}).pop((project_ns, from_role), None)
         resource_governor = getattr(self, "_resource_governor", None)
         if resource_governor is not None:
@@ -2733,7 +2793,13 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             if deduper is None:
                 deduper = self._notice_deduper = NoticeDeduper(RUNTIME_DIR / "notice-dedupe.json")
             if deduper.mark_once(notice_id):
-                self._notify_lead(project_ns, notice, from_role=from_role, note=note)
+                self._notify_lead(
+                    project_ns,
+                    notice,
+                    from_role=from_role,
+                    note=note,
+                    pane_token=origin_pane_token,
+                )
             else:
                 _log_event(
                     "done_notice_deduped",
@@ -2851,6 +2917,52 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         self._write_hot_md()
         self.agentDone.emit(project_ns, from_role, note)
         return True, f"{from_role} reported done"
+
+    def progress(
+        self, from_role: str, note: str = "", project: str | None = None
+    ) -> tuple[bool, str]:
+        """Report a status update to Lead without ending the task.
+
+        #234: `done()` is the *only* thing that unconditionally schedules a
+        pane's teardown 2.5s later (see the auto-close timer above) — a
+        devops pane mid-`docker compose build --no-cache` that called
+        `done()` just to say "still building, will report again when
+        finished" got that build's subprocess tree killed by the very next
+        auto-close tick, with the note's own text making clear the task was
+        *not* actually finished. `progress()` is the same one-line "tell
+        Lead what's happening" primitive as `done()`'s notice, minus every
+        teardown side effect: no auto-close timer, no `_pane_state`/
+        `_idle_state` pop, no resource-slot release, no worktree
+        merge-proposal, no task-ledger flip. The pane keeps running exactly
+        as before the call.
+        """
+        try:
+            from_role = validate_name(from_role, "role")
+        except ValueError as exc:
+            return False, str(exc)
+        if from_role == LEAD.name:
+            return False, "lead cannot call progress on itself"
+        project_ns = self._resolve_project(project)
+        project_panes = self._project_panes(project_ns)
+        pane = project_panes.get(from_role)
+        if pane is None:
+            return False, f"unknown role: {from_role}"
+        note = note.strip()
+        if not note:
+            return False, "progress requires a non-empty message"
+
+        # Counts as evidence of life for the same reason a peer send() does
+        # (spawn_engine._ps) — a long build/test run that only ever talks to
+        # Lead via progress() must not look idle to the stall watchdog.
+        self._ps(f"{project_ns}::{from_role}").last_send_ts = time.time()
+
+        origin_pane_token = self._current_pane_identity(project_ns, from_role)
+        body = f"[{from_role} progress] {note}"
+        self._notify_lead(
+            project_ns, body, from_role=from_role, note="progress", pane_token=origin_pane_token
+        )
+        _log_event("progress", role=from_role, project=project_ns, note=note[:200])
+        return True, f"{from_role} progress reported"
 
     def consume_pane_hook(
         self,
@@ -3223,7 +3335,14 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         )
 
         def _any_match(bodies) -> bool:
-            return any(isinstance(b, str) and tag.search(b) for b in bodies)
+            # #228: digest/live-queue entries are (body, pane_token) tuples;
+            # a bare string means no origin was recorded (system notices,
+            # legacy call sites, test fixtures) — either shape is searched.
+            for b in bodies:
+                text = b[0] if isinstance(b, tuple) else b
+                if isinstance(text, str) and tag.search(text):
+                    return True
+            return False
 
         if _any_match(getattr(self, "_lead_digest_queue", {}).get(project_ns, ())):
             return True
@@ -3274,6 +3393,89 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             holders = governor.holders_for_class(resource_class)
             extra[role] = _describe_resource_wait(role, resource_class, reason, holders)
         return extra
+
+    def inbox_report(self, project: str | None = None, role: str | None = None) -> list[dict]:
+        """Read-only snapshot of every done/FAILED report still sitting
+        somewhere in the outbound-to-Lead pipeline instead of already
+        written into Lead's pane (#231): the digest debounce window, the
+        ready-prompt live-notify queue, and the durable pending store
+        (survives a restart).
+
+        `takkub status` could only ever say a report was "queued — not yet
+        delivered"; there was no command that read its actual content back
+        out, forcing Lead to Glob `runtime/sessions/**` by hand. This is
+        that command's backing data — `takkub inbox` prints it.
+
+        Returns a list of ``{role, queue, body, origin_confirmed}``, newest
+        first within each queue tier (digest, then live, then durable).
+        ``origin_confirmed`` is `False` when the reporting pane's role slot
+        was respawned since this item was queued (#228 — the same
+        provenance check `_flush_lead_digest`/`_pump_lead_notify` apply at
+        delivery time), `True` when confirmed live, `None` when no origin
+        was recorded to check (system notices, CC relays, combined
+        digests). Optionally filtered to a single *role*.
+        """
+        project_ns = self._resolve_project(project)
+
+        def _origin_confirmed(item_role: str | None, pane_token: str | None) -> bool | None:
+            if item_role is None or pane_token is None:
+                return None
+            return not self._provenance_stale(project_ns, item_role, pane_token)
+
+        items: list[dict] = []
+
+        for entry in getattr(self, "_lead_digest_queue", {}).get(project_ns, ()):
+            body, pane_token = _unwrap_notice_item(entry)
+            item_role = _notice_role_tag(body) or "system"
+            if role is not None and item_role != role:
+                continue
+            items.append(
+                {
+                    "role": item_role,
+                    "queue": "digest",
+                    "body": body,
+                    "origin_confirmed": _origin_confirmed(
+                        item_role if item_role != "system" else None, pane_token
+                    ),
+                }
+            )
+
+        for entry in getattr(self, "_lead_notify_queue", {}).get(project_ns, ()):
+            body, pane_token = _unwrap_notice_item(entry)
+            item_role = _notice_role_tag(body) or "system"
+            if role is not None and item_role != role:
+                continue
+            items.append(
+                {
+                    "role": item_role,
+                    "queue": "live",
+                    "body": body,
+                    "origin_confirmed": _origin_confirmed(
+                        item_role if item_role != "system" else None, pane_token
+                    ),
+                }
+            )
+
+        for item in getattr(self, "_pending_done_notices", {}).get(project_ns, ()):
+            if not isinstance(item, dict):
+                continue
+            item_role = item.get("role") or "system"
+            if role is not None and item_role != role:
+                continue
+            item_body = item.get("body", "")
+            tagged_role = _notice_role_tag(item_body) or (
+                item_role if item_role != "system" else None
+            )
+            items.append(
+                {
+                    "role": item_role,
+                    "queue": "durable",
+                    "body": item_body,
+                    "origin_confirmed": _origin_confirmed(tagged_role, item.get("pane_token")),
+                }
+            )
+
+        return items
 
     def list_status(self, project: str | None = None) -> dict[str, str]:
         """Snapshot of `role → state` for one project's panes.

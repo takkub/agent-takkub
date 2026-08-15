@@ -1120,6 +1120,23 @@ class SpawnEngineMixin:
         env["TAKKUB_PANE_TOKEN"] = tok
         return tok
 
+    def _current_pane_identity(self, project_ns: str, role_name: str) -> str | None:
+        """Return the auth token currently minted for ``(project_ns, role_name)``,
+        or None if no live pane is registered under that role right now.
+
+        This is the same token `_mint_pane_token` stamps into a fresh pane's
+        env and revokes on the pane's next respawn — so it doubles as a
+        spawn-instance identity: two calls returning different (non-None)
+        values mean the role slot was respawned in between. Used to detect a
+        done-report that was queued while one pane instance was alive but is
+        only delivered after a later instance took over the same role name
+        (#228 — phantom done reports attributed to the wrong pane instance).
+        """
+        for tok, (p, r) in getattr(self, "_pane_tokens", {}).items():
+            if p == project_ns and r == role_name:
+                return tok
+        return None
+
     def _finish_spawn_initial_task(
         self,
         role_name: str,
