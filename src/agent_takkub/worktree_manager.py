@@ -738,18 +738,32 @@ class WorktreeManager:
 
     # -- inspect ------------------------------------------------------------
 
-    def commit_count(self, info: WorktreeInfo) -> int:
-        """Commits the pane added on its branch beyond the creation base."""
-        res = self._run(
-            ["-C", info.path, "rev-list", "--count", f"{info.base_sha}..HEAD"],
-            None,
-        )
+    def commits_since(self, cwd: str, base_sha: str) -> int:
+        """Commits reachable from *cwd*'s HEAD but not from *base_sha*.
+
+        Generic form of :meth:`commit_count` (which is now a thin wrapper over
+        this for a worktree's own base) — also used directly for a SHARED-tree
+        pane's digest facts (#245), where there is no :class:`WorktreeInfo` to
+        wrap, only a plain assign-time HEAD snapshot (``PaneState.assign_base_sha``).
+        """
+        res = self._run(["-C", cwd, "rev-list", "--count", f"{base_sha}..HEAD"], None)
         if not res.ok:
             return 0
         try:
             return int(res.stdout.strip() or "0")
         except ValueError:
             return 0
+
+    def commit_count(self, info: WorktreeInfo) -> int:
+        """Commits the pane added on its branch beyond the creation base."""
+        return self.commits_since(info.path, info.base_sha)
+
+    def status_porcelain(self, cwd: str) -> str:
+        """Raw ``git status --porcelain`` output for *cwd* (empty string on
+        any git failure — callers treat that the same as "nothing changed",
+        matching every pre-existing caller's error handling)."""
+        res = self._run(["-C", cwd, "status", "--porcelain"], None)
+        return res.stdout if res.ok else ""
 
     def is_dirty(self, info: WorktreeInfo) -> bool:
         """True when the worktree has uncommitted changes (blocks safe_remove)."""
@@ -759,8 +773,7 @@ class WorktreeManager:
         """Same as :meth:`is_dirty` but for a bare checkout path (no
         :class:`WorktreeInfo` needed) — used to inspect an orphan checkout
         that git can still read directly (#132)."""
-        res = self._run(["-C", cwd, "status", "--porcelain"], None)
-        return bool(res.ok and res.stdout.strip())
+        return bool(self.status_porcelain(cwd).strip())
 
     def current_branch(self, cwd: str) -> str | None:
         """Branch checked out at *cwd*, or None when detached/unresolvable."""
@@ -778,23 +791,28 @@ class WorktreeManager:
         except ValueError:
             return 0
 
+    def diffstat_since(self, cwd: str, base_sha: str) -> str:
+        """Generic form of :meth:`diffstat` — diff summary of *cwd*'s HEAD vs
+        *base_sha*, for a plain checkout path with no :class:`WorktreeInfo`
+        (shared-tree digest facts, #245)."""
+        res = self._run(["-C", cwd, "diff", "--stat", f"{base_sha}..HEAD"], None)
+        return res.stdout.strip() if res.ok else ""
+
     def diffstat(self, info: WorktreeInfo) -> str:
         """Human-readable diff summary of the branch vs its base (for the Lead
         merge proposal). Empty string if it can't be computed."""
-        res = self._run(
-            ["-C", info.path, "diff", "--stat", f"{info.base_sha}..HEAD"],
-            None,
-        )
-        return res.stdout.strip() if res.ok else ""
+        return self.diffstat_since(info.path, info.base_sha)
+
+    def uncommitted_count_at(self, cwd: str) -> int:
+        """Generic form of :meth:`uncommitted_count` for a plain checkout path
+        (#245 — shared-tree panes have no :class:`WorktreeInfo` to wrap)."""
+        return len([ln for ln in self.status_porcelain(cwd).splitlines() if ln.strip()])
 
     def uncommitted_count(self, info: WorktreeInfo) -> int:
         """Number of changed paths in the worktree (#244) — `is_dirty` alone
         only answers yes/no; the Lead-facing merge proposal needs the actual
         count so "⚠ N ไฟล์ยังไม่ commit" is a real number, not a guess."""
-        res = self._run(["-C", info.path, "status", "--porcelain"], None)
-        if not res.ok:
-            return 0
-        return len([ln for ln in res.stdout.splitlines() if ln.strip()])
+        return self.uncommitted_count_at(info.path)
 
     def merge_conflicts_with_base(self, git_root: str, branch: str) -> bool | None:
         """Whether a 3-way merge of *branch* against the CURRENT base HEAD
@@ -1142,6 +1160,29 @@ def parse_worktree_list(porcelain: str) -> list[dict]:
     if cur:
         out.append(cur)
     return out
+
+
+def parse_porcelain_paths(porcelain: str) -> list[str]:
+    """Extract changed file paths from ``git status --porcelain`` output.
+
+    Pure — no I/O. Each line is ``XY<space>path`` (short format); a rename
+    line reads ``XY old -> new`` and this keeps only the NEW path, matching
+    what a diffstat would show for the same change. Used by #245's
+    shared-tree digest facts to union "files touched" with the committed
+    diffstat's path list (a shared-tree pane's changes can be committed,
+    uncommitted, or both — neither source alone is the full picture).
+    """
+    paths: list[str] = []
+    for line in porcelain.splitlines():
+        if not line.strip():
+            continue
+        rest = line[3:] if len(line) > 3 else line.strip()
+        if " -> " in rest:
+            rest = rest.split(" -> ", 1)[1]
+        rest = rest.strip()
+        if rest:
+            paths.append(rest)
+    return paths
 
 
 def summarize_diffstat(diffstat: str) -> tuple[int, list[str]]:

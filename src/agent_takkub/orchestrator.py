@@ -1576,6 +1576,23 @@ class Orchestrator(
             # Remember the isolated worktree so done()/close() can finalize it
             # (merge proposal if the branch has commits, else safe-remove).
             ps_assign.worktree = worktree
+            ps_assign.assign_base_sha = None
+        else:
+            # #245 (follow-up to #244): a SHARED-tree pane has no
+            # WorktreeInfo.base_sha to diff "files touched" against — snapshot
+            # HEAD now, once, so done()'s digest fact table can diff against
+            # it later instead of guessing. One-shot per assign event, not
+            # per-tick (#229/#244 boundary): a single bounded `git rev-parse
+            # HEAD` in the pane's resolved cwd. Best-effort — None when the
+            # cwd isn't a git repo or HEAD is unborn; the digest then reports
+            # "ตรวจไม่ได้" rather than a misleading 0.
+            from .worktree_manager import WorktreeManager as _WorktreeManagerSnap
+
+            _snap_pane = self._project_panes(project_ns).get(role_name)
+            _snap_cwd = getattr(_snap_pane, "_session_cwd", None)
+            ps_assign.assign_base_sha = (
+                _WorktreeManagerSnap().head_sha(_snap_cwd) if _snap_cwd else None
+            )
         initial_task_consumed = ps_assign.spawn_initial_task_state in {
             "pending",
             "delivered",
@@ -1800,7 +1817,9 @@ class Orchestrator(
             if callable(setter):
                 setter(branch)
 
-    def _finalize_worktree(self, project_ns: str, from_role: str, worktree: dict) -> None:
+    def _finalize_worktree(
+        self, project_ns: str, from_role: str, worktree: dict, precomputed: dict | None = None
+    ) -> None:
         """Wrap up an isolated pane's worktree when it reports done/close.
 
         * branch has commits → send Lead a MERGE PROPOSAL (propose-then-fire,
@@ -1819,13 +1838,21 @@ class Orchestrator(
         so they contain only tracked source and every git op here is sub-second;
         the WorktreeManager runner's 30s timeout is the hard backstop. Best-effort
         throughout — a git hiccup here must never break the done() flow.
+
+        *precomputed* (#245): `done()` already ran these exact same git reads
+        a few lines earlier to build the digest fact table — when supplied,
+        this method reuses them instead of shelling out a second time for
+        the same answer. Shape: ``{"commits", "dirty", "uncommitted",
+        "merge_conflicts", "diffstat"}``. None (the `close()` call site,
+        which never computes digest facts) falls back to the original
+        compute-here-every-time behaviour, unchanged.
         """
         try:
             from .worktree_manager import WorktreeInfo, WorktreeManager, build_merge_proposal
 
             info = WorktreeInfo.from_dict(worktree)
             mgr = WorktreeManager()
-            commits = mgr.commit_count(info)
+            commits = precomputed["commits"] if precomputed is not None else mgr.commit_count(info)
             if commits > 0:
                 # #244: commits > 0 does NOT mean "ready to merge" — the
                 # branch can carry accepted commits AND still hold fresh
@@ -1840,14 +1867,21 @@ class Orchestrator(
                 # per-tick poll (unlike #229's per-tick FS walk), so two
                 # more fast local git calls stay in the same performance
                 # class as the pre-existing calls, not a new risk.
-                dirty = mgr.is_dirty(info)
-                uncommitted = mgr.uncommitted_count(info) if dirty else 0
-                merge_conflicts = mgr.merge_conflicts_with_base(info.git_root, info.branch)
+                if precomputed is not None:
+                    dirty = precomputed["dirty"]
+                    uncommitted = precomputed["uncommitted"]
+                    merge_conflicts = precomputed["merge_conflicts"]
+                    diffstat_text = precomputed["diffstat"]
+                else:
+                    dirty = mgr.is_dirty(info)
+                    uncommitted = mgr.uncommitted_count(info) if dirty else 0
+                    merge_conflicts = mgr.merge_conflicts_with_base(info.git_root, info.branch)
+                    diffstat_text = mgr.diffstat(info)
                 proposal = build_merge_proposal(
                     from_role,
                     info,
                     commits,
-                    mgr.diffstat(info),
+                    diffstat_text,
                     dirty=dirty,
                     uncommitted=uncommitted,
                     merge_conflicts=merge_conflicts,
@@ -1863,7 +1897,7 @@ class Orchestrator(
                 )
                 self._notify_lead(project_ns, proposal, from_role=from_role, note="")
                 return
-            dirty = mgr.is_dirty(info)
+            dirty = precomputed["dirty"] if precomputed is not None else mgr.is_dirty(info)
             _log_event(
                 "worktree_no_commit_kept",
                 role=from_role,
@@ -2695,6 +2729,123 @@ class Orchestrator(
             body = f"{body}\n{evidence_line}"
         return body
 
+    @staticmethod
+    def _compute_digest_facts(
+        from_role: str,
+        ref: str | None,
+        headline: str,
+        report_path: str | None,
+        had_worktree: dict | None,
+        pane_cwd: str | None,
+        assign_base_sha: str | None,
+    ) -> tuple[object, dict | None]:
+        """One-shot git-fact gather for the Lead Inbox Digest bullet (#245,
+        follow-up to #244). Fired exactly once per `done()` event — never
+        per-tick (see #229/#244 for why that boundary matters on the Qt
+        main thread).
+
+        Returns ``(facts, precomputed)``. For an isolated worktree pane,
+        *precomputed* is the SAME git reads `_finalize_worktree` needs a few
+        lines later in `done()`, so that method reuses them instead of
+        re-running the identical subprocess calls twice per event.
+        *precomputed* is always None for a shared-tree pane — there is
+        nothing for `_finalize_worktree` to reuse there (it only runs at
+        all for worktree panes).
+
+        Provider-neutral (#103): every field here is git state or a plain
+        cwd/sha string the orchestrator already carries — nothing read from
+        a specific CLI's terminal output.
+        """
+        from .digest_facts import DigestFacts, union_files_touched
+        from .worktree_manager import WorktreeInfo, WorktreeManager, summarize_diffstat
+
+        mgr = WorktreeManager()
+
+        if had_worktree:
+            info = WorktreeInfo.from_dict(had_worktree)
+            commits = mgr.commit_count(info)
+            dirty = mgr.is_dirty(info)
+            uncommitted = mgr.uncommitted_count(info) if dirty else 0
+            if commits > 0:
+                merge_conflicts = mgr.merge_conflicts_with_base(info.git_root, info.branch)
+                merge_note = ""
+            else:
+                # Nothing committed yet — "merge clean?" is not a question
+                # that applies (there's nothing on the branch to merge).
+                merge_conflicts = None
+                merge_note = "N/A (ยังไม่มี commit)"
+            diffstat = mgr.diffstat(info)
+            files_touched, dirs = summarize_diffstat(diffstat)
+            facts = DigestFacts(
+                role=from_role,
+                ref=ref,
+                branch=info.branch,
+                commits_ahead=commits,
+                uncommitted=uncommitted,
+                merge_conflicts=merge_conflicts,
+                merge_note=merge_note,
+                files_touched=files_touched,
+                files_dirs=tuple(dirs),
+                report_path=report_path,
+                headline=headline,
+            )
+            precomputed = {
+                "commits": commits,
+                "dirty": dirty,
+                "uncommitted": uncommitted,
+                "merge_conflicts": merge_conflicts,
+                "diffstat": diffstat,
+            }
+            return facts, precomputed
+
+        # Shared-tree pane (#245's explicit follow-up to #244, which "chose
+        # not to guess" here): no WorktreeInfo.base_sha to diff against, so
+        # use the HEAD snapshot _assign_dispatch captured at assign-time
+        # instead (PaneState.assign_base_sha, set only for shared-tree
+        # panes). Multiple panes can share this same tree, so a commit
+        # landing between assign and done is NOT necessarily this pane's own
+        # work — files_note says so explicitly rather than implying an exact
+        # attribution the cockpit cannot actually prove.
+        branch = mgr.current_branch(pane_cwd) if pane_cwd else None
+        if not pane_cwd or not assign_base_sha:
+            return (
+                DigestFacts(
+                    role=from_role,
+                    ref=ref,
+                    branch=branch,
+                    report_path=report_path,
+                    headline=headline,
+                    files_note=(
+                        "ตรวจไม่ได้ (ไม่มี snapshot ตอน assign — cwd ไม่ใช่ git repo "
+                        "หรือ HEAD ว่างตอน assign)"
+                    ),
+                ),
+                None,
+            )
+        uncommitted = mgr.uncommitted_count_at(pane_cwd)
+        diffstat = mgr.diffstat_since(pane_cwd, assign_base_sha)
+        commits_ahead = mgr.commits_since(pane_cwd, assign_base_sha)
+        porcelain = mgr.status_porcelain(pane_cwd)
+        files_touched, dirs = union_files_touched(diffstat, porcelain)
+        facts = DigestFacts(
+            role=from_role,
+            ref=ref,
+            branch=branch,
+            commits_ahead=commits_ahead,
+            uncommitted=uncommitted,
+            merge_conflicts=None,
+            merge_note=("N/A (shared tree — commit อยู่บน branch ที่ Lead เห็นอยู่แล้ว ไม่ต้อง merge)"),
+            files_touched=files_touched,
+            files_dirs=tuple(dirs),
+            files_note=(
+                "เทียบกับ snapshot ตอน assign — อาจรวม commit ของ pane อื่นถ้ามีคน commit "
+                "ทับ shared tree คาบเกี่ยวกัน"
+            ),
+            report_path=report_path,
+            headline=headline,
+        )
+        return facts, None
+
     def done(
         self, from_role: str, note: str = "", project: str | None = None, failed: bool = False
     ) -> tuple[bool, str]:
@@ -2745,6 +2896,7 @@ class Orchestrator(
         had_plan_fanout = _ps_done.plan_fanout
         had_worktree = _ps_done.worktree
         had_assign_ts = _ps_done.assign_ts
+        had_assign_base_sha = _ps_done.assign_base_sha
         if not hasattr(self, "_last_done_task_ids"):
             self._last_done_task_ids = {}
         had_task_id = _ps_done.task_id or self._last_done_task_ids.get(key) or f"pane-{id(pane)}"
@@ -2816,6 +2968,17 @@ class Orchestrator(
         # `notice_body`, which stays the raw/condensed note other consumers
         # (shard aggregate, role_memory failure capture) read unmodified.
         ref_tag = f"[ref {issue_ref}] " if issue_ref else ""
+        # #245: the digest bullet's fact table, computed once here (never
+        # per-tick — see _compute_digest_facts' own docstring for the
+        # #229/#244 boundary this respects). `_worktree_digest_precomputed`
+        # lets `_finalize_worktree` below reuse these SAME git reads instead
+        # of re-running them a few lines later. Both stay None for a FAILED
+        # report — FAILED notices bypass the digest queue entirely
+        # (`_is_blocking_lead_notice`), so no bullet is ever rendered from
+        # them; `_finalize_worktree` still runs for a failed worktree pane
+        # and simply computes its own facts fresh in that (rarer) case.
+        digest_facts = None
+        _worktree_digest_precomputed = None
         if failed:
             notice_body = note
             notice = self._build_verify_fail_handoff(from_role, f"{ref_tag}{note}")
@@ -2834,6 +2997,34 @@ class Orchestrator(
         else:
             notice_body = self._condense_done_note(raw_note, note, evidence_line, session_md_path)
             notice = f"[{from_role} done] {ref_tag}{notice_body}".rstrip()
+            headline = _truncate_at_word_boundary(
+                raw_note.strip().splitlines()[0] if raw_note.strip() else "", 200
+            )
+            pane_cwd = getattr(pane, "_session_cwd", None)
+            try:
+                digest_facts, _worktree_digest_precomputed = self._compute_digest_facts(
+                    from_role,
+                    issue_ref,
+                    headline,
+                    session_md_path,
+                    had_worktree,
+                    pane_cwd,
+                    had_assign_base_sha,
+                )
+            except Exception as exc:  # digest cosmetics must never break done()
+                _log_event(
+                    "digest_facts_error", role=from_role, project=project_ns, error=str(exc)[:200]
+                )
+                from .digest_facts import DigestFacts
+
+                digest_facts = DigestFacts(
+                    role=from_role,
+                    ref=issue_ref,
+                    report_path=session_md_path,
+                    headline=headline,
+                    files_note="ตรวจไม่ได้ (เกิด error ระหว่างคำนวณ)",
+                )
+                _worktree_digest_precomputed = None
         # Shard panes suppress clean per-shard notices in favour of the
         # consolidated handoff. Failures still surface immediately so the
         # fix-loop proposal cannot be delayed or lost.
@@ -2861,6 +3052,7 @@ class Orchestrator(
                     from_role=from_role,
                     note=note,
                     pane_token=origin_pane_token,
+                    digest_facts=digest_facts,
                 )
             else:
                 _log_event(
@@ -2884,7 +3076,9 @@ class Orchestrator(
         # If its branch has commits, send Lead a MERGE PROPOSAL (never auto);
         # otherwise safe-remove the empty worktree.
         if had_worktree:
-            self._finalize_worktree(project_ns, from_role, had_worktree)
+            self._finalize_worktree(
+                project_ns, from_role, had_worktree, precomputed=_worktree_digest_precomputed
+            )
         else:
             # graft code-graph refresh (debounced): the pane wrote directly
             # into the project's tracked cwd (not a worktree — those are a
@@ -5222,6 +5416,12 @@ class Orchestrator(
         snap_requires_commit = _ps_snap.requires_commit_on_done if _ps_snap is not None else False
         snap_shard_total = _ps_snap.shard_total if _ps_snap is not None else 0
         snap_pipeline_run_id = _ps_snap.pipeline_run_id if _ps_snap is not None else None
+        # #245: same task resumes, so the digest baseline must survive too —
+        # a stuck-recover respawn isn't a new assign() dispatch (which is the
+        # only place that takes a FRESH snapshot), so without this restore
+        # the resumed pane would lose its baseline and done()'s fact table
+        # would report "ตรวจไม่ได้" for a pane that actually had one.
+        snap_assign_base_sha = _ps_snap.assign_base_sha if _ps_snap is not None else None
         # #41: carry the stuck-recover attempt count across the close→respawn so
         # the watchdog can enforce STUCK_RECOVER_MAX (close() pops the PaneState).
         snap_recover_attempts = _ps_snap.stuck_recover_attempts if _ps_snap is not None else 0
@@ -5284,6 +5484,8 @@ class Orchestrator(
                 self._ps(key).shard_total = snap_shard_total
             if snap_pipeline_run_id is not None:
                 self._ps(key).pipeline_run_id = snap_pipeline_run_id
+            if snap_assign_base_sha is not None:
+                self._ps(key).assign_base_sha = snap_assign_base_sha
             # m3 fix: if PTY teardown hasn't fired _on_session_exit yet (takes
             # longer than the 2s singleShot on a slow machine), _recent_exits
             # has no entry and spawn()'s can_resume returns False → blank session.

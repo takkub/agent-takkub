@@ -243,6 +243,69 @@ class TestInspect:
         assert r.ran("merge-base", "HEAD", "wt/x-1")
 
 
+# ── Generic (cwd-based) probes — #245 shared-tree digest facts ──────────────
+#
+# `commit_count`/`diffstat`/`uncommitted_count` above are now thin wrappers
+# over these generic `*_since`/`*_at` forms, so their own tests already prove
+# the underlying git args are unchanged. These target the generic entry
+# points directly — the ones a shared-tree pane (no WorktreeInfo) calls.
+
+
+class TestGenericCwdProbes:
+    def test_commits_since_parses(self):
+        r = FakeRunner([(["rev-list", "--count", "abc..HEAD"], _ok("4\n"))])
+        assert WorktreeManager(r).commits_since("/repo", "abc") == 4
+
+    def test_commits_since_zero_on_error(self):
+        r = FakeRunner([(["rev-list", "--count"], _fail())])
+        assert WorktreeManager(r).commits_since("/repo", "abc") == 0
+
+    def test_diffstat_since_returns_stripped_stdout(self):
+        r = FakeRunner([(["diff", "--stat", "abc..HEAD"], _ok(" a.py | 1 +\n"))])
+        assert WorktreeManager(r).diffstat_since("/repo", "abc") == "a.py | 1 +"
+
+    def test_diffstat_since_empty_on_error(self):
+        r = FakeRunner([(["diff", "--stat"], _fail())])
+        assert WorktreeManager(r).diffstat_since("/repo", "abc") == ""
+
+    def test_uncommitted_count_at_counts_nonblank_lines(self):
+        r = FakeRunner([(["status", "--porcelain"], _ok(" M a.ts\n?? b.ts\n"))])
+        assert WorktreeManager(r).uncommitted_count_at("/repo") == 2
+
+    def test_status_porcelain_empty_string_on_error(self):
+        r = FakeRunner([(["status", "--porcelain"], _fail())])
+        assert WorktreeManager(r).status_porcelain("/repo") == ""
+
+    def test_commit_count_delegates_to_commits_since_with_same_args(self):
+        info = WorktreeInfo(path="/w", branch="wt/x-1", base_sha="base123", git_root="/repo")
+        r = FakeRunner([(["rev-list", "--count", "base123..HEAD"], _ok("2\n"))])
+        assert WorktreeManager(r).commit_count(info) == 2
+        assert r.ran("-C", "/w", "rev-list", "--count", "base123..HEAD")
+
+
+class TestParsePorcelainPaths:
+    def test_extracts_plain_paths(self):
+        from agent_takkub.worktree_manager import parse_porcelain_paths
+
+        paths = parse_porcelain_paths(" M src/a.py\n?? src/b.py\n")
+        assert paths == ["src/a.py", "src/b.py"]
+
+    def test_rename_keeps_new_path(self):
+        from agent_takkub.worktree_manager import parse_porcelain_paths
+
+        assert parse_porcelain_paths("R  old/x.py -> new/x.py\n") == ["new/x.py"]
+
+    def test_blank_lines_ignored(self):
+        from agent_takkub.worktree_manager import parse_porcelain_paths
+
+        assert parse_porcelain_paths("\n M a.py\n\n") == ["a.py"]
+
+    def test_empty_input_returns_empty(self):
+        from agent_takkub.worktree_manager import parse_porcelain_paths
+
+        assert parse_porcelain_paths("") == []
+
+
 # ── Destroy (2-tier) ────────────────────────────────────────────────────────
 
 
