@@ -11,6 +11,8 @@ wait
 # ทั้ง 2 panes spawn คู่ขนาน → ทำงานพร้อมกัน Lead รอ report จาก done event
 ```
 
+> ⚠️ `wait` ข้างบนคือ **bash builtin** — รอแค่ `takkub assign` เอง return (ack "queued" ทันที ไม่ใช่รอ teammate ทำงานเสร็จ) ถ้าต้องการบล็อกจริงจนกว่า teammate จบงาน (done report ถึง Lead แล้ว) → ใช้ `takkub wait [--role <r>]... [--timeout <s>]` แทน (#242) ไม่ใช่เขียน polling loop เอง — ดูกฎ "ห้ามกอง background waiter" ใน CLAUDE.md
+
 ## Sequential pattern (รอ done ทีละตัว)
 
 ใช้เมื่อ task หลังต้องการ artifact จาก task ก่อน:

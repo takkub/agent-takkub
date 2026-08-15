@@ -46,11 +46,21 @@ LEAD_ONLY_COMMANDS = frozenset(
         "prune",
         "restart",
         "inbox",  # reads other panes' report bodies — see cli_server._LEAD_ONLY_CMDS (#231)
+        "wait",  # blocks on other panes' delivery pipeline — same rationale as inbox (#242)
         # machine-level npm installs — a teammate pane must never mutate the
         # host toolchain mid-task; Lead/terminal decides when to add a CLI.
         "provider",
     }
 )
+
+# #242: `takkub wait` always carries a bounded timeout — never an unbounded
+# block. No explicit --timeout uses the default; either way the value is
+# clamped into this range before being sent to the server.
+_WAIT_DEFAULT_TIMEOUT_S = 1800.0  # 30 min
+_WAIT_MIN_TIMEOUT_S = 5.0
+_WAIT_MAX_TIMEOUT_S = 7200.0  # 2h hard ceiling
+_WAIT_POLL_INTERVAL_S = 4.0
+_WAIT_POLL_MAX_INTERVAL_S = 15.0
 
 # Commands intended only for teammate panes. Lead summarises inline and never
 # needs to call done on itself — blocking this prevents Lead from accidentally
@@ -835,7 +845,17 @@ def _print_inbox_items(items: object) -> None:
         queue = _INBOX_QUEUE_LABEL.get(item.get("queue", ""), item.get("queue", "?"))
         confirmed = item.get("origin_confirmed")
         flag = " ⚠ unconfirmed origin — role respawned since queued" if confirmed is False else ""
-        print(f"\n  [{role}] · {queue}{flag}")
+        age = ""
+        queued_ts = item.get("queued_ts")
+        if isinstance(queued_ts, (int, float)):
+            age_sec = max(0.0, time.time() - queued_ts)
+            if age_sec < 60:
+                age = f" · queued {int(age_sec)}s ago"
+            elif age_sec < 3600:
+                age = f" · queued {int(age_sec // 60)}m ago"
+            else:
+                age = f" · queued {int(age_sec // 3600)}h ago"
+        print(f"\n  [{role}] · {queue}{age}{flag}")
         body = str(item.get("body", "")).strip()
         for line in body.splitlines():
             print(f"    │ {line}")
@@ -857,6 +877,91 @@ def cmd_inbox(args: argparse.Namespace) -> dict:
     if getattr(args, "role", None):
         payload["role"] = args.role
     return _request(payload)
+
+
+def cmd_wait(args: argparse.Namespace) -> dict:
+    """(lead) block until every requested role's done/FAILED report has
+    actually reached the Lead pane, or --timeout elapses (#242).
+
+    This function IS the canned polling loop — see `lead_wait.py`'s module
+    docstring for the rationale. It replaces the hand-rolled `takkub status`
+    loops every Lead pane used to write for itself; it isn't one more
+    example of writing one. No --role at all defaults to every role
+    currently tracked by this project (same set `takkub list` shows, minus
+    Lead itself).
+    """
+    timeout = getattr(args, "timeout", None) or _WAIT_DEFAULT_TIMEOUT_S
+    timeout = max(_WAIT_MIN_TIMEOUT_S, min(float(timeout), _WAIT_MAX_TIMEOUT_S))
+
+    begin = _request(
+        _with_project(
+            {
+                "cmd": "wait-begin",
+                "roles": getattr(args, "role", None) or [],
+                "timeout": timeout,
+                "from": _from_role(),
+            }
+        )
+    )
+    if not begin.get("ok"):
+        return begin
+
+    wait_id = begin.get("wait_id")
+    roles = begin.get("roles") or []
+    if begin.get("attached"):
+        print(f"[wait] attached to an existing wait already covering: {', '.join(roles)}")
+    else:
+        print(f"[wait] watching: {', '.join(roles)} (timeout {int(timeout)}s)")
+
+    start = time.time()
+    interval = _WAIT_POLL_INTERVAL_S
+    last: dict = {}
+    try:
+        while True:
+            poll = _request(
+                _with_project({"cmd": "wait-poll", "wait_id": wait_id, "from": _from_role()})
+            )
+            if not poll.get("ok"):
+                return poll
+            last = poll
+            pending = poll.get("pending") or {}
+            if not pending or poll.get("expired"):
+                break
+            remaining = timeout - (time.time() - start)
+            if remaining <= 0:
+                break
+            time.sleep(min(interval, remaining))
+            interval = min(interval * 1.3, _WAIT_POLL_MAX_INTERVAL_S)
+    finally:
+        # Server auto-releases the registration once every role resolves or
+        # its own timeout fires — only clean up here on an early client-side
+        # exit (Ctrl-C, exception) that left it dangling.
+        if last.get("pending"):
+            _request(_with_project({"cmd": "wait-end", "wait_id": wait_id, "from": _from_role()}))
+
+    done = last.get("done") or {}
+    failed = last.get("failed") or {}
+    pending = last.get("pending") or {}
+    elapsed = int(last.get("elapsed") or (time.time() - start))
+
+    print(f"\n[wait] resolved after {elapsed}s")
+    if done:
+        print(f"  done: {', '.join(sorted(done))}")
+    if failed:
+        print(f"  FAILED: {', '.join(sorted(failed))}")
+    if pending:
+        print("  still pending (timeout reached):")
+        for role, reason in sorted(pending.items()):
+            print(f"    - {role}: {reason}")
+
+    ok = not pending
+    return {
+        "ok": ok,
+        "msg": "all roles resolved" if ok else f"timeout with {len(pending)} role(s) still pending",
+        "done": done,
+        "failed": failed,
+        "pending": pending,
+    }
 
 
 def cmd_verify(args: argparse.Namespace) -> dict:
@@ -2060,6 +2165,27 @@ def main(argv: list[str] | None = None) -> int:
         help="only show reports from this role (e.g. backend#1)",
     )
     sib.set_defaults(func=cmd_inbox)
+
+    swt = sub.add_parser(
+        "wait",
+        help="(lead) block until role(s)' done/FAILED report actually reaches Lead (#242)",
+    )
+    swt.add_argument(
+        "--role",
+        action="append",
+        default=None,
+        metavar="ROLE",
+        help="role to wait on (repeatable; omit to wait on every active role)",
+    )
+    swt.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=f"max seconds to block (default {int(_WAIT_DEFAULT_TIMEOUT_S)}, "
+        f"capped at {int(_WAIT_MAX_TIMEOUT_S)})",
+    )
+    swt.set_defaults(func=cmd_wait)
 
     sv = sub.add_parser("verify", help="auto-detect stack and run lint/test gate")
     sv.add_argument("--cwd", default=None, help="working directory (default: current dir)")

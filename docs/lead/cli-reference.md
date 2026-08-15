@@ -9,6 +9,7 @@
 takkub list                                            # ดูสถานะ panes ทั้งหมด
 takkub status                                           # per-pane progress + stall detection (post-compact awareness)
 takkub inbox [--role <role>]                           # (lead) อ่านเนื้อ done/FAILED report ที่ยังค้างคิว — status บอกแค่ "queued", inbox โชว์เนื้อจริง (#231); ⚠ unconfirmed origin = role ถูก respawn ระหว่างรอส่ง (#228)
+takkub wait [--role <r>]... [--timeout <s>]            # (lead) บล็อกจนกว่า done/FAILED report ของ role นั้นๆ ถึง Lead pane จริง — ไม่ใช่แค่หายจาก list (#242); ไม่ใส่ --role = รอทุก role active; ไม่ใส่ --timeout = default 1800s, cap 7200s; waiter ซ้อนกันใน project เดียวกัน attach เข้าตัวเดิมอัตโนมัติ ไม่กองซ้ำ
 takkub assign --role frontend "<task>"                 # spawn (ถ้ายังไม่เปิด) + ส่ง task
 takkub assign --role backend --cwd <path> "<task>"     # override role-aware default cwd
 takkub assign --role qa --model <haiku-or-flash-id> "<scan>" # override model เฉพาะ pane ที่ spawn ใหม่; precedence: assign > role > provider > CLI default

@@ -69,6 +69,12 @@ _LEAD_ONLY_CMDS = frozenset(
         # M3#16 sensitivity as status's transcript_tail, not something a
         # confused teammate shell should be able to read cold.
         "inbox",
+        # wait-* (#242): blocks on other panes' delivery pipeline, same
+        # read-sensitivity rationale as inbox — a teammate pane has no
+        # business polling another role's completion state either.
+        "wait-begin",
+        "wait-poll",
+        "wait-end",
     }
 )
 
@@ -688,6 +694,44 @@ class CliServer(QObject):
                 # rationale as status's transcript_tail gate.
                 items = self._orch.inbox_report(project=from_project, role=req.get("role"))
                 self._reply(sock, ok=True, msg=f"{len(items)} pending item(s)", items=items)
+                return
+            elif cmd == "wait-begin":
+                # #242: register (or attach to) a wait for one or more roles.
+                # See lead_wait.py — this is the single per-project poll
+                # registration `takkub wait` blocks on client-side, replacing
+                # the hand-rolled `takkub status` loops Lead used to write.
+                _resolve_project_wb = getattr(self._orch, "_resolve_project", None)
+                project_ns_wb = (
+                    _resolve_project_wb(from_project)
+                    if _resolve_project_wb is not None
+                    else (from_project or "default")
+                )
+                result = self._orch.begin_wait(
+                    project_ns_wb,
+                    req.get("roles") or [],
+                    float(req.get("timeout") or 0.0),
+                )
+                self._reply(sock, **result)
+                return
+            elif cmd == "wait-poll":
+                _resolve_project_wp = getattr(self._orch, "_resolve_project", None)
+                project_ns_wp = (
+                    _resolve_project_wp(from_project)
+                    if _resolve_project_wp is not None
+                    else (from_project or "default")
+                )
+                result = self._orch.poll_wait(project_ns_wp, str(req.get("wait_id") or ""))
+                self._reply(sock, **result)
+                return
+            elif cmd == "wait-end":
+                _resolve_project_we = getattr(self._orch, "_resolve_project", None)
+                project_ns_we = (
+                    _resolve_project_we(from_project)
+                    if _resolve_project_we is not None
+                    else (from_project or "default")
+                )
+                self._orch.end_wait(project_ns_we, str(req.get("wait_id") or ""))
+                self._reply(sock, ok=True, msg="wait ended")
                 return
             elif cmd == "harvest":
                 harvest_since_ts: float | None = None

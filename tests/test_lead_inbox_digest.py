@@ -73,8 +73,10 @@ def test_default_window_debounces_burst_and_renders_single_digest(
 
     written = _written(lead.session)
     assert "📬 [Lead Inbox Digest — 2 updates]" in written
-    assert "• [backend#1] done: Refactored authentication middleware" in written
-    assert "• [CC from frontend -> backend]: Updated API contracts" in written
+    # #241: each line is now prefixed with a "[HH:MM:SS · age]" queued-time
+    # stamp ahead of the "[role]" tag — check content, not exact adjacency.
+    assert "[backend#1] done: Refactored authentication middleware" in written
+    assert "[CC from frontend -> backend]: Updated API contracts" in written
     assert written.count("Lead Inbox Digest") == 1
 
 
@@ -148,7 +150,13 @@ def test_blocking_notice_does_not_wait_behind_pending_digest(
     written = _written(lead.session)
     assert "[qa FAILED] production checkout is broken" in written
     assert "Lead Inbox Digest" not in written
-    assert list(orch._lead_digest_queue[PROJECT]) == [("[backend done] informational", None)]
+    # #241: digest-queue entries now carry a queued_ts third element.
+    remaining = list(orch._lead_digest_queue[PROJECT])
+    assert len(remaining) == 1
+    body, pane_token, queued_ts = remaining[0]
+    assert body == "[backend done] informational"
+    assert pane_token is None
+    assert isinstance(queued_ts, float)
 
 
 def test_auto_chain_flushes_done_digest_first_and_is_not_window_delayed(
@@ -203,4 +211,74 @@ def test_old_timer_cannot_flush_a_new_burst_after_early_handoff(
         first_timer()
 
     assert _written(lead.session) == before
-    assert list(orch._lead_digest_queue[PROJECT]) == [("[backend done] second burst", None)]
+    remaining = list(orch._lead_digest_queue[PROJECT])
+    assert len(remaining) == 1
+    body, pane_token, queued_ts = remaining[0]
+    assert body == "[backend done] second burst"
+    assert pane_token is None
+    assert isinstance(queued_ts, float)
+
+
+def test_digest_line_carries_a_queued_time_stamp(
+    orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TAKKUB_INBOX_DIGEST_MS", "60000")
+    timers: list[tuple[int, object]] = []
+    lead = orch._panes_by_project[PROJECT]["lead"]
+
+    with patch(
+        "agent_takkub.lead_inbox.QTimer.singleShot",
+        side_effect=lambda ms, callback: timers.append((ms, callback)),
+    ):
+        orch._notify_lead(PROJECT, "[backend done] stamped line")
+        timers[0][1]()
+
+    written = _written(lead.session)
+    # "[HH:MM:SS · Ns ago]" precedes the "[role]" tag on the rendered line.
+    assert "[backend] done: stamped line" in written
+    idx = written.index("[backend] done: stamped line")
+    prefix = written[max(0, idx - 20) : idx]
+    assert "ago" in prefix or ":" in prefix
+
+
+def test_item_already_pulled_via_inbox_collapses_in_digest(
+    orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#241 option A: a report Lead already read via `takkub inbox` must not
+    be re-pasted verbatim once the digest window flushes it out too."""
+    monkeypatch.setenv("TAKKUB_INBOX_DIGEST_MS", "60000")
+    timers: list[tuple[int, object]] = []
+    lead = orch._panes_by_project[PROJECT]["lead"]
+
+    with patch(
+        "agent_takkub.lead_inbox.QTimer.singleShot",
+        side_effect=lambda ms, callback: timers.append((ms, callback)),
+    ):
+        orch._notify_lead(PROJECT, "[backend done] secret detail Lead already saw")
+        # Lead pulls it early via `takkub inbox` before the debounce window closes.
+        orch.inbox_report(project=PROJECT)
+        timers[0][1]()
+
+    written = _written(lead.session)
+    assert "secret detail Lead already saw" not in written
+    assert "อ่านแล้วผ่าน takkub inbox" in written
+    assert "[backend]" in written
+
+
+def test_item_not_pulled_via_inbox_renders_full_body(
+    orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TAKKUB_INBOX_DIGEST_MS", "60000")
+    timers: list[tuple[int, object]] = []
+    lead = orch._panes_by_project[PROJECT]["lead"]
+
+    with patch(
+        "agent_takkub.lead_inbox.QTimer.singleShot",
+        side_effect=lambda ms, callback: timers.append((ms, callback)),
+    ):
+        orch._notify_lead(PROJECT, "[backend done] never pulled via inbox")
+        timers[0][1]()
+
+    written = _written(lead.session)
+    assert "never pulled via inbox" in written
+    assert "อ่านแล้วผ่าน takkub inbox" not in written

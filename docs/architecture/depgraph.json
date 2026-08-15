@@ -1,6 +1,6 @@
 {
-  "generated_by": "grimp 3.15",
-  "module_count": 146,
+  "generated_by": "grimp 3.14",
+  "module_count": 147,
   "modules": [
     {
       "module": "agent_takkub",
@@ -727,6 +727,17 @@
       "fan_out": 12
     },
     {
+      "module": "agent_takkub.lead_wait",
+      "imports": [
+        "agent_takkub.roles"
+      ],
+      "imported_by": [
+        "agent_takkub.orchestrator"
+      ],
+      "fan_in": 1,
+      "fan_out": 1
+    },
+    {
       "module": "agent_takkub.limit_autoresume",
       "imports": [
         "agent_takkub.agent_pane",
@@ -851,6 +862,7 @@
         "agent_takkub.lead_context",
         "agent_takkub.lead_draft_state",
         "agent_takkub.lead_inbox",
+        "agent_takkub.lead_wait",
         "agent_takkub.limit_autoresume",
         "agent_takkub.orchestrator_text",
         "agent_takkub.pane_env",
@@ -881,7 +893,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 6,
-      "fan_out": 32
+      "fan_out": 33
     },
     {
       "module": "agent_takkub.orchestrator_text",
@@ -1452,6 +1464,7 @@
         "agent_takkub.headless_pane",
         "agent_takkub.headless_window",
         "agent_takkub.lead_inbox",
+        "agent_takkub.lead_wait",
         "agent_takkub.limit_autoresume",
         "agent_takkub.main_window",
         "agent_takkub.orchestrator",
@@ -1467,7 +1480,7 @@
         "agent_takkub.skill_policy",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 20,
+      "fan_in": 21,
       "fan_out": 0
     },
     {

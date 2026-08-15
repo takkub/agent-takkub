@@ -36,6 +36,7 @@ import pathlib
 import re
 import sys as _sys
 import time
+from datetime import datetime
 
 from PyQt6.QtCore import QTimer
 
@@ -51,6 +52,7 @@ from .lead_draft_state import (
 from .orchestrator_text import (
     _enter_delay_ms,
     _log_event,
+    _notice_fingerprint,
     _paste_payload,
     _sanitize_pane_text,
 )
@@ -262,12 +264,25 @@ def _notice_role_tag(body: str) -> str | None:
     return None
 
 
-def _unwrap_notice_item(item) -> tuple[str, str | None]:
+def _unwrap_notice_item(item) -> tuple[str, str | None, float | None]:
     """Normalise one `_lead_digest_queue`/`_lead_notify_queue` entry to
-    ``(body, pane_token)``. Entries produced by `_enqueue_live_lead_notice`
-    are already `(body, pane_token)` tuples; a bare string (legacy call
-    sites, hand-built test fixtures) means no origin was recorded."""
-    return item if isinstance(item, tuple) else (item, None)
+    ``(body, pane_token, queued_ts)``.
+
+    `_lead_digest_queue` entries (#241) are `(body, pane_token, queued_ts)`
+    3-tuples — `queued_ts` is `time.time()` at enqueue, used to show digest
+    items' age instead of leaving Lead to guess whether a line is fresh or
+    stale. `_enqueue_live_lead_notice` entries are `(body, pane_token)`
+    2-tuples (`queued_ts` reads back `None` — the live queue delivers
+    promptly enough that staleness isn't a concern there). A bare string
+    (legacy call sites, hand-built test fixtures) means no origin or
+    timestamp was recorded."""
+    if isinstance(item, tuple):
+        if len(item) >= 3:
+            return item[0], item[1], item[2]
+        if len(item) == 2:
+            return item[0], item[1], None
+        return (item[0] if item else "", None, None)
+    return item, None, None
 
 
 _STALE_ORIGIN_BANNER = (
@@ -276,24 +291,53 @@ _STALE_ORIGIN_BANNER = (
 )
 
 
-def _format_digest_item(body: str) -> str:
-    """Render one queued notice in the compact Lead Inbox Digest format."""
+def _format_notice_age(now_ts: float, queued_ts: float | None) -> str:
+    """Render ' · Xm ago' for a digest item's queue age, or '' when no
+    timestamp was recorded (#241 — Lead had no way to tell a fresh digest
+    line from one that had been sitting in the debounce window a while,
+    short of cross-referencing the report's session-file path by hand)."""
+    if queued_ts is None:
+        return ""
+    age = max(0.0, now_ts - queued_ts)
+    if age < 60:
+        return f" · {int(age)}s ago"
+    if age < 3600:
+        return f" · {int(age // 60)}m ago"
+    return f" · {int(age // 3600)}h{int((age % 3600) // 60)}m ago"
+
+
+def _format_digest_item(
+    body: str, queued_ts: float | None = None, now_ts: float | None = None
+) -> str:
+    """Render one queued notice in the compact Lead Inbox Digest format.
+
+    Prefixed with a "[HH:MM:SS · age]" stamp whenever `queued_ts` is known
+    (#241) so Lead can judge freshness inline instead of guessing whether a
+    digest line already went stale while it sat in the debounce window.
+    """
     stripped = body.strip()
+    if queued_ts is not None:
+        clock = datetime.fromtimestamp(queued_ts).strftime("%H:%M:%S")
+        age = _format_notice_age(now_ts if now_ts is not None else time.time(), queued_ts)
+        stamp = f"[{clock}{age}] "
+    else:
+        stamp = ""
+
     done_match = _DONE_NOTICE_RE.match(stripped)
     if done_match:
         role, detail = done_match.groups()
         suffix = f": {detail.strip()}" if detail and detail.strip() else ""
-        return f"• [{role.strip()}] done{suffix}"
+        return f"• {stamp}[{role.strip()}] done{suffix}"
 
     cc_match = _CC_NOTICE_RE.match(stripped)
     if cc_match:
         from_role, to_role, detail = cc_match.groups()
         suffix = f": {detail.strip()}" if detail and detail.strip() else ""
-        return f"• [CC from {from_role.strip()} -> {to_role.strip()}]{suffix}"
+        return f"• {stamp}[CC from {from_role.strip()} -> {to_role.strip()}]{suffix}"
 
     # Defensive fallback: only digestible bodies should reach this helper, but
     # preserve a notice rather than drop it if a caller changes its format.
-    return f"• {stripped}"
+    return f"• {stamp}{stripped}"
 
 
 def _delayed_enter(pane: AgentPane, session: PtySession, delay_ms: int) -> None:
@@ -1552,11 +1596,21 @@ class LeadInboxMixin:
         if not pending:
             return False
         items = list(pending)
+        now_ts = time.time()
+        already_read = getattr(self, "_inbox_seen", {}).get(project_ns, ())
         lines = []
         for entry in items:
-            item_body, item_pane_token = _unwrap_notice_item(entry)
-            line = _format_digest_item(item_body)
+            item_body, item_pane_token, item_ts = _unwrap_notice_item(entry)
             role = _notice_role_tag(item_body)
+            if _notice_fingerprint(item_body) in already_read:
+                # #241 option A: Lead already pulled this exact report via
+                # `takkub inbox`/`takkub wait` before the debounce window
+                # closed — collapse instead of re-pasting content Lead has
+                # already read.
+                age = _format_notice_age(now_ts, item_ts)
+                lines.append(f"• [{role or 'system'}] (อ่านแล้วผ่าน takkub inbox{age})")
+                continue
+            line = _format_digest_item(item_body, item_ts, now_ts)
             if self._provenance_stale(project_ns, role, item_pane_token):
                 line = f"{_STALE_ORIGIN_BANNER.format(role=role)}\n{line}"
             lines.append(line)
@@ -1636,7 +1690,7 @@ class LeadInboxMixin:
                 if not hasattr(self, "_lead_digest_queue"):
                     self._lead_digest_queue = {}
                 self._lead_digest_queue.setdefault(project_ns, collections.deque()).append(
-                    (body, pane_token)
+                    (body, pane_token, time.time())
                 )
                 self._arm_lead_digest(project_ns, window_ms)
             elif blocking:
@@ -1739,7 +1793,7 @@ class LeadInboxMixin:
             if not hasattr(self, "_pending_done_notices"):
                 self._pending_done_notices = {}
             for b in items:
-                b_body, b_pane_token = _unwrap_notice_item(b)
+                b_body, b_pane_token, _b_ts = _unwrap_notice_item(b)
                 self._pending_done_notices.setdefault(project_ns, []).append(
                     {"role": "system", "note": "notify", "body": b_body, "pane_token": b_pane_token}
                 )
@@ -1763,7 +1817,7 @@ class LeadInboxMixin:
                 if not hasattr(self, "_pending_done_notices"):
                     self._pending_done_notices = {}
                 for b in items:
-                    b_body, b_pane_token = _unwrap_notice_item(b)
+                    b_body, b_pane_token, _b_ts = _unwrap_notice_item(b)
                     self._pending_done_notices.setdefault(project_ns, []).append(
                         {
                             "role": "system",
@@ -1798,7 +1852,7 @@ class LeadInboxMixin:
                 if not hasattr(self, "_pending_done_notices"):
                     self._pending_done_notices = {}
                 for b in items:
-                    b_body, b_pane_token = _unwrap_notice_item(b)
+                    b_body, b_pane_token, _b_ts = _unwrap_notice_item(b)
                     self._pending_done_notices.setdefault(project_ns, []).append(
                         {
                             "role": "system",
@@ -1820,7 +1874,7 @@ class LeadInboxMixin:
         # torn down between the liveness checks above and this write) never
         # drops the item — see HIGH#1,
         # docs/reviews/2026-07-11-full-system-review-codex.md.
-        raw_body, item_pane_token = _unwrap_notice_item(queue[0])
+        raw_body, item_pane_token, _item_ts = _unwrap_notice_item(queue[0])
         item_role = _notice_role_tag(raw_body)
         if self._provenance_stale(project_ns, item_role, item_pane_token):
             raw_body = f"{_STALE_ORIGIN_BANNER.format(role=item_role)}\n{raw_body}"
@@ -1854,7 +1908,7 @@ class LeadInboxMixin:
             if not hasattr(self, "_pending_done_notices"):
                 self._pending_done_notices = {}
             for b in items:
-                b_body, b_pane_token = _unwrap_notice_item(b)
+                b_body, b_pane_token, _b_ts = _unwrap_notice_item(b)
                 self._pending_done_notices.setdefault(project_ns, []).append(
                     {
                         "role": "system",

@@ -247,6 +247,19 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
+name = "lead-wait-layer"
+type = "forbidden"
+# lead_wait is an engine-layer mixin (mixed into Orchestrator, #242) — must
+# not import orchestrator (cycle) or UI/CLI, same constraint as lead_inbox.
+source_modules = ["agent_takkub.lead_wait"]
+forbidden_modules = [
+    "agent_takkub.orchestrator",
+    "agent_takkub.main_window",
+    "agent_takkub.app",
+    "agent_takkub.cli",
+]
+
+[[tool.importlinter.contracts]]
 name = "limit-autoresume-layer"
 type = "forbidden"
 # limit_autoresume is an engine-layer mixin (mixed into Orchestrator) — must
