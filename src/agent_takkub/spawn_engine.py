@@ -1702,6 +1702,23 @@ class SpawnEngineMixin:
                     _skill_extra = skill_policy.render_skill_appendix(
                         base_role, _skill_roots_for_project(project_ns), spec.context_strategy
                     )
+                    # Permission-gate awareness (#243): this provider has no
+                    # persistent, bypass-proof "ask" mechanism the cockpit
+                    # can enumerate yet (see permission_gates.py module
+                    # docstring) — state that gap explicitly instead of
+                    # silently only covering claude, and still tell the pane
+                    # to report FAILED rather than stall on an unanswered
+                    # prompt.
+                    from .permission_gates import render_generic_gate_note
+
+                    _skill_extra += render_generic_gate_note(
+                        spec.display_name or spec.name.capitalize(),
+                        list(
+                            spec.autonomy_flags.get(
+                                sys.platform, spec.autonomy_flags.get("default", [])
+                            )
+                        ),
+                    )
                     ensure_agents_md(spawn_cwd, extra=_skill_extra)
                 except Exception:
                     _log.exception(
@@ -2120,6 +2137,21 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 except Exception:
                     _log.exception(
                         "could not resolve graft MCP policy for %s; omitting graft guard",
+                        base_role,
+                    )
+                # Permission-gate awareness (#243): surface this project's
+                # `.claude/settings.json` permissions.ask rules + gate-free
+                # alternatives so the pane reports FAILED instead of typing a
+                # gated command and stalling on an unanswered y/N prompt —
+                # fatal in an unattended overnight run. No-op appendix when
+                # the project sets no ask rules.
+                try:
+                    from .permission_gates import render_claude_gate_appendix
+
+                    _appendix += render_claude_gate_appendix(spawn_cwd)
+                except Exception:
+                    _log.exception(
+                        "could not resolve permission gates for %s; omitting gate guard",
                         base_role,
                     )
                 if role_context_available:
