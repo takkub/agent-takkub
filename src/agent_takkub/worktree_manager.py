@@ -35,6 +35,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 from collections.abc import Callable
@@ -471,6 +472,144 @@ def repair_editable_pth_if_stale(git_root: str, removed_path: str) -> str:
     return ""
 
 
+# ── Long-path-safe delete (#226 / #227) ─────────────────────────────────────
+#
+# `git worktree remove` does its own recursive delete of the working tree
+# before it will drop the administrative metadata. On Windows that walk goes
+# through plain (non-extended-length) paths, which are capped at MAX_PATH
+# (260 chars) — a worktree holding an installed pnpm project's nested
+# node_modules routinely exceeds that, so the delete fails partway with
+# "Filename too long" (#226) having ALREADY removed some entries (#227: a
+# real incident where `.git` and `apps/` were gone but `packages/` survived,
+# reported to the Lead as "merged ... but could not delete worktree (kept)" —
+# a lie, since the worktree could no longer be worked in and `.git` itself
+# was gone).
+#
+# Fix: never let git's own delete touch the tracked path at all.
+#   1. `_stage_for_delete` renames the checkout dir aside first. A rename
+#      only rewrites one directory entry — it is NOT a recursive walk, so it
+#      is immune to the MAX_PATH problem regardless of how deep the tree
+#      inside is, and it is atomic: it either fully succeeds (tracked path
+#      now fully gone) or fully fails (tracked path fully untouched). There
+#      is no partial state at the path anything else still points at.
+#   2. `_rmtree_long_path_safe` then deletes the staged copy through the
+#      Win32 extended-length (`\\?\`) path form, which has no MAX_PATH limit.
+#   3. Only once the tracked path is confirmed gone does the caller run
+#      `git worktree remove --force` — at that point it touches no files,
+#      just the small `.git/worktrees/<id>` admin refs, so it can't repeat
+#      the partial-delete failure mode.
+# A failure in step 2 still means step 1 succeeded, so the caller never has
+# to report "kept" for something that no longer exists at the tracked path —
+# only genuine step-1 (rename) failures are truly "kept, fully intact".
+
+
+def _win_long_path(path: Path) -> str:
+    """Extended-length (``\\\\?\\``) form of *path* — routes Win32 file APIs
+    around the 260-char MAX_PATH limit. UNC roots need the ``\\\\?\\UNC\\``
+    variant (``\\\\server\\share`` -> ``\\\\?\\UNC\\server\\share``)."""
+    s = str(path)
+    if s.startswith("\\\\?\\"):
+        return s
+    if s.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + s[2:]
+    return "\\\\?\\" + s
+
+
+def _path_exists_long_safe(path: Path) -> bool:
+    """``path.exists()`` that stays correct past MAX_PATH on Windows — a
+    plain (non-prefixed) check on a too-long path raises/returns False for
+    the wrong reason (path-too-long, not missing), which would make a still-
+    present partial delete look like a clean success."""
+    if sys.platform == "win32":
+        return os.path.exists(_win_long_path(path))
+    return path.exists()
+
+
+def _clear_readonly_and_retry(func: Callable, path: str, exc_info) -> None:
+    """``shutil.rmtree`` onerror hook: files checked out by git (especially
+    inside an installed node_modules) are sometimes read-only on Windows,
+    which blocks unlink/rmdir. Clear the bit and retry once; any further
+    failure is swallowed here — ``rmtree`` must never raise mid-walk — and is
+    instead caught by the caller's post-hoc existence check."""
+    try:
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+    except OSError:
+        pass
+
+
+def _rmtree_long_path_safe(path: Path) -> tuple[bool, str]:
+    """Recursively delete *path*, immune to MAX_PATH on Windows.
+
+    Because ``onerror`` swallows exceptions (rmtree must never raise
+    mid-walk), a clean return does NOT prove full success — success is
+    verified with an explicit post-hoc existence check instead of trusting
+    ``shutil.rmtree``'s silence.
+    """
+    target = _win_long_path(path) if sys.platform == "win32" else str(path)
+    try:
+        shutil.rmtree(target, onerror=_clear_readonly_and_retry)
+    except OSError as exc:
+        return False, str(exc)
+    if _path_exists_long_safe(path):
+        return False, f"{path} ลบไม่หมด (ไฟล์/โฟลเดอร์บางส่วนยังเหลืออยู่)"
+    return True, ""
+
+
+def _stage_for_delete(path: Path) -> tuple[Path | None, str]:
+    """Rename *path* aside before the recursive delete that follows (#227).
+
+    A plain rename moves only the directory entry, not its contents, so —
+    unlike a recursive walk — it can't fail partway through a deep tree: it
+    either fully succeeds (the tracked *path* is now completely gone) or
+    fully fails (nothing touched, *path* still fully intact). Returns
+    ``(path, "")`` unchanged when there was nothing there to move.
+    """
+    if not _path_exists_long_safe(path):
+        return path, ""  # nothing to stage — already gone
+    staged = path.parent / f".trash-{path.name}-{os.getpid()}"
+    src = _win_long_path(path) if sys.platform == "win32" else str(path)
+    dst = _win_long_path(staged) if sys.platform == "win32" else str(staged)
+    try:
+        os.rename(src, dst)
+    except OSError as exc:
+        return None, str(exc)
+    return staged, ""
+
+
+def remove_worktree_tree(path: Path) -> tuple[bool, str, str]:
+    """Best-effort on-disk delete of a worktree checkout directory.
+
+    Returns ``(removed_from_original, message, leftover_path)``:
+
+    * ``removed_from_original`` is False ONLY when *path* is still fully
+      intact — the one case where reporting it as "kept" is accurate. It is
+      True the moment *path* itself no longer exists, whether there was
+      nothing to delete, the delete fully succeeded, or it partially failed
+      (any survivors live only under *leftover_path*, a staged sibling —
+      never at *path*).
+    * ``message`` is empty on a full clean delete, else a human reason.
+    * ``leftover_path`` is non-empty only when staged content survives a
+      failed/partial delete — surfaced so stale disk usage can be found and
+      retried later (the existing orphan-worktree sweep in ``disk_usage.py``
+      already picks up any unregistered dir under the managed worktree root,
+      which is exactly where the staged sibling lives).
+    """
+    staged, err = _stage_for_delete(path)
+    if staged is None:
+        return False, f"ลบไม่ได้ ({err})", ""
+    if staged == path:
+        return True, "", ""  # nothing was there to begin with
+    ok, rm_err = _rmtree_long_path_safe(staged)
+    if ok:
+        return True, "", ""
+    return (
+        True,
+        f"ย้ายออกจาก {path} แล้ว แต่ไฟล์ที่เหลือค้างที่ {staged} ลบไม่หมด ({rm_err})",
+        str(staged),
+    )
+
+
 class WorktreeManager:
     """Stateless lifecycle wrapper around ``git worktree`` for one repo.
 
@@ -664,16 +803,33 @@ class WorktreeManager:
         # Unlink junctions/symlinks FIRST — a recursive delete that followed a
         # junction would destroy the main tree's real node_modules (#81 P2.2).
         self._unlink_links(info)
-        rm = self._run(["-C", info.git_root, "worktree", "remove", info.path], None)
+        # Delete the checkout ourselves (long-path-safe, #226/#227) BEFORE
+        # letting git touch it — see the module-level comment above
+        # `remove_worktree_tree`. Only genuine step-1 (rename) failures leave
+        # *path* untouched, which is the one case "kept" is accurate for.
+        removed, disk_msg, leftover = remove_worktree_tree(Path(info.path))
+        if not removed:
+            return False, disk_msg
+        # Directory is gone — this only touches the small admin refs now, so
+        # it can't repeat the partial-delete failure mode.
+        rm = self._run(["-C", info.git_root, "worktree", "remove", "--force", info.path], None)
         self._run(["-C", info.git_root, "worktree", "prune"], None)
         if not rm.ok:
             tail = (rm.stderr or rm.stdout).strip().splitlines()
-            return False, tail[-1] if tail else f"worktree remove exit {rm.returncode}"
+            detail = tail[-1] if tail else f"worktree remove exit {rm.returncode}"
+            return False, (
+                f"ลบไฟล์ออกจาก {info.path} แล้ว แต่ git ยังลบ metadata ไม่ได้ ({detail}) "
+                f"— รัน `git -C {info.git_root} worktree prune` เอง"
+            )
         # Worktree gone. Delete the branch too ONLY when it added no commits —
         # a branch with work is left for the Lead to merge/inspect.
         if self.commit_count(info) == 0:
             self._run(["-C", info.git_root, "branch", "-D", info.branch], None)
-        return True, repair_editable_pth_if_stale(info.git_root, info.path)
+        repair_note = repair_editable_pth_if_stale(info.git_root, info.path)
+        if leftover:
+            note = f"ไฟล์บางส่วนค้างที่ {leftover} ลบเองทีหลังได้"
+            return True, f"{note} · {repair_note}" if repair_note else note
+        return True, repair_note
 
     # -- CLI ops (P2.4: takkub worktree list / merge / clean) ----------------
 
@@ -709,7 +865,13 @@ class WorktreeManager:
             )
         return rows
 
-    def merge_isolated(self, git_root: str, branch: str, keep: bool = False) -> tuple[bool, str]:
+    def merge_isolated(
+        self,
+        git_root: str,
+        branch: str,
+        keep: bool = False,
+        live_paths: frozenset[str] | set[str] = frozenset(),
+    ) -> tuple[bool, str]:
         """``merge --no-ff`` an isolated branch into the main tree's HEAD, then
         (unless *keep*) remove its worktree + branch.
 
@@ -717,6 +879,13 @@ class WorktreeManager:
         the caller reports the conflict instead of leaving the main tree in a
         conflicted state. The pre-removal link sweep makes cleanup safe even
         when the links record died with a crashed cockpit.
+
+        *live_paths* mirrors :meth:`clean_isolated`'s #187 live-pane guard —
+        a worktree a currently-alive pane still sits in is never removed
+        (#227: the pane can't continue if its cwd is yanked out from under
+        it, and had already committed everything only by luck in the
+        incident that motivated this). The merge itself still happens; only
+        the removal step is skipped.
         """
         rows = [r for r in self.list_isolated(git_root) if r["branch"] == branch]
         if not rows:
@@ -737,16 +906,30 @@ class WorktreeManager:
             )
         if keep:
             return True, f"merged {branch} (–keep: worktree ยังอยู่)"
+        live = {str(Path(p).resolve()) for p in live_paths}
+        if str(Path(row["path"]).resolve()) in live:
+            return True, (
+                f"merged {branch} — worktree ยังมี pane ใช้งานอยู่ (live) จึงไม่ลบ; "
+                f"ปิด pane ก่อนด้วย `takkub close --role <role>` แล้วค่อย `takkub worktree clean`"
+            )
         sweep_link_points(Path(row["path"]))
-        remove = self._run(["-C", git_root, "worktree", "remove", row["path"]], None)
+        removed, disk_msg, leftover = remove_worktree_tree(Path(row["path"]))
+        if not removed:
+            return True, f"merged {branch} แต่ลบ worktree ไม่ได้ ({disk_msg}) — เก็บที่ {row['path']}"
+        remove = self._run(["-C", git_root, "worktree", "remove", "--force", row["path"]], None)
         self._run(["-C", git_root, "worktree", "prune"], None)
         if not remove.ok:
             lines = (remove.stderr or remove.stdout).strip().splitlines()
             detail = lines[-1] if lines else f"exit {remove.returncode}"
-            return True, (f"merged {branch} แต่ลบ worktree ไม่ได้ ({detail}) — เก็บที่ {row['path']}")
+            return True, (
+                f"merged {branch} — ลบไฟล์ออกจาก {row['path']} แล้ว แต่ git ยังลบ metadata ไม่ได้ "
+                f"({detail}) — รัน `git -C {git_root} worktree prune` เอง"
+            )
         self._run(["-C", git_root, "branch", "-d", branch], None)
         repair_note = repair_editable_pth_if_stale(git_root, row["path"])
         msg = f"merged {branch} + cleanup เรียบร้อย"
+        if leftover:
+            msg += f" (ไฟล์บางส่วนค้างที่ {leftover} ลบเองทีหลังได้)"
         return True, f"{msg} · {repair_note}" if repair_note else msg
 
     def clean_isolated(
@@ -801,34 +984,54 @@ class WorktreeManager:
                 out.append(f"KEEP  {row['branch']} — {keep_reason}")
                 continue
             sweep_link_points(Path(row["path"]))
-            args = ["-C", git_root, "worktree", "remove"]
-            if force:
-                args.append("--force")
-            rm = self._run([*args, row["path"]], None)
+            removed, disk_msg, leftover = remove_worktree_tree(Path(row["path"]))
+            if not removed:
+                out.append(
+                    f"FAILED  {row['branch']} — {disk_msg} "
+                    "(ไม่ได้ลบอะไร — worktree และ branch ยังอยู่ครบ)"
+                )
+                continue
+            rm = self._run(["-C", git_root, "worktree", "remove", "--force", row["path"]], None)
             self._run(["-C", git_root, "worktree", "prune"], None)
             if not rm.ok:
                 detail = (rm.stderr or rm.stdout).strip()[:120]
                 out.append(
-                    f"FAILED  {row['branch']} — {detail or f'exit {rm.returncode}'} "
-                    "(ไม่ได้ลบอะไร — worktree และ branch ยังอยู่ครบ)"
+                    f"FAILED  {row['branch']} — ลบไฟล์ออกจาก {row['path']} แล้ว "
+                    f"แต่ git ยังลบ metadata ไม่ได้ ({detail or f'exit {rm.returncode}'}) "
+                    "— รัน `worktree prune` เอง (branch ยังอยู่)"
                 )
                 continue
             self._run(["-C", git_root, "branch", "-D", row["branch"]], None)
             repair_note = repair_editable_pth_if_stale(git_root, row["path"])
-            out.append(f"REMOVED {row['branch']}" + (f" · {repair_note}" if repair_note else ""))
+            note = f"REMOVED {row['branch']}"
+            if leftover:
+                note += f" (ไฟล์บางส่วนค้างที่ {leftover} ลบเองทีหลังได้)"
+            if repair_note:
+                note += f" · {repair_note}"
+            out.append(note)
         return out
 
     def force_remove(self, info: WorktreeInfo) -> tuple[bool, str]:
         """Unconditional teardown (``--force`` + prune + branch -D). Used for
         explicit cleanup where losing uncommitted scratch is acceptable."""
         self._unlink_links(info)  # never recurse through a junction (#81 P2.2)
+        # Long-path-safe delete ourselves first (#226/#227) — see the
+        # module-level comment above `remove_worktree_tree`.
+        removed, disk_msg, leftover = remove_worktree_tree(Path(info.path))
         rm = self._run(["-C", info.git_root, "worktree", "remove", "--force", info.path], None)
         self._run(["-C", info.git_root, "worktree", "prune"], None)
         self._run(["-C", info.git_root, "branch", "-D", info.branch], None)
+        if not removed:
+            return False, disk_msg
         if not rm.ok:
             tail = (rm.stderr or rm.stdout).strip().splitlines()
-            return False, tail[-1] if tail else f"worktree remove --force exit {rm.returncode}"
-        return True, repair_editable_pth_if_stale(info.git_root, info.path)
+            detail = tail[-1] if tail else f"worktree remove --force exit {rm.returncode}"
+            return False, f"ลบไฟล์ออกจาก {info.path} แล้ว แต่ git ยังลบ metadata ไม่ได้ ({detail})"
+        repair_note = repair_editable_pth_if_stale(info.git_root, info.path)
+        if leftover:
+            note = f"ไฟล์บางส่วนค้างที่ {leftover} ลบเองทีหลังได้"
+            return True, f"{note} · {repair_note}" if repair_note else note
+        return True, repair_note
 
 
 def _is_link_point(p: Path) -> bool:
