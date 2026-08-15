@@ -4,6 +4,32 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.63] - 2026-08-15
+
+รอบ **"pane ค้างต้องรู้ตัวใน 1-2 นาที ไม่ใช่ 30 นาที"** — ปิด #247, #248, #249, #250 ต่อจากรอบ 1.0.62 เน้นเรื่องเดียว: สัญญาณที่ cockpit ใช้ตัดสินว่า pane "ยังทำงานอยู่" ต้องเป็นความคืบหน้าจริง ไม่ใช่แค่มีไบต์ไหลออกมา
+
+### Fixed (แก้)
+
+**สัญญาณ liveness ปลอม (#248, #247)**
+- **pane ที่ค้างตั้งแต่วินาทีแรกยังถูกนับว่า "กำลังทำงาน" จนชน ceiling 1800 วินาที** — ต้นเหตุ: `_last_output_ts` ถูกประทับเวลาทุกครั้งที่มี **raw byte** เข้ามา ซึ่งรวม escape sequence ตอน terminal init กับ spinner ที่หมุนอยู่กับที่ด้วย pane ที่ค้างหน้า login หรือหน้าจอว่างจึงดู "มี output ตลอด" ตอนนี้แยก 2 สัญญาณออกจากกัน: `seconds_since_byte()` = มีไบต์ไหม กับ `seconds_since_output()` = **เนื้อหาบนจอเปลี่ยนจริงไหม** โดยเทียบ fingerprint ที่ตัด spinner glyph (braille / `◐◑◒◓` / `|/\-` เดี่ยวๆ) กับจุดไข่ปลาท้ายบรรทัดออกก่อน
+- **auth fail-fast** — pane ที่ตกหล่นการล็อกอินเดิมต้องรอ busy-wait ceiling เต็ม 30 นาทีถึงจะรู้ ตอนนี้ตรวจได้ในไม่กี่วินาที แยก marker เป็น 2 ชั้น: **ชั้น error** (`not signed in`, `please sign in again`, …) กับ **ชั้น transient** (`signing in`, `verifying your account` — ของ gemini) ที่ต้องเงียบครบ grace 45 วินาทีก่อนถึงจะนับ · ทุกการตรวจ scope อยู่แค่ footer region ของจอ ไม่ใช่ทั้งหน้า เนื้อบทสนทนาจึงปนไม่ได้
+- **ready prompt ชนะ auth marker เสมอ + ต้องเจอติดกัน 5 poll ถึงจะสรุป** — กันเคสที่คำว่า auth โผล่ในผลลัพธ์งานปกติ (เช่น log ของ API 401) แล้วถูกตัดสินว่า pane พัง · ด้วยเหตุผลเดียวกัน generic marker ถูกตัดจาก 12 เหลือ 4 ตัว ที่ตัดทิ้งคือคำที่ชนกับ output ของงาน dev ตรงๆ โดยเฉพาะ `not authenticated` ซึ่งเป็นข้อความ 401 default ของ FastAPI
+- **no-content watchdog** — pane ที่ spawn แล้วไม่เคยมีเนื้อหาขึ้นจอเลยภายใน 75 วินาที (`TAKKUB_NO_CONTENT_WATCHDOG_SEC`) จะถูกกู้อัตโนมัติ **สูงสุด 2 ครั้ง** แล้วหยุด ไม่วน respawn ไม่รู้จบ · provider ที่ตายซ้ำจะ degrade ผ่าน `provider_override` (ค้างไว้ข้าม auto-respawn แต่ล้างเมื่อ spawn ใหม่จริง)
+- **`takkub status` แยก `spawning` / `active` / `ready`** — เดิมทุกอย่างเป็น `active` ก้อนเดียว มองไม่ออกว่า pane เพิ่งเปิดหรือรอ input อยู่ (state อื่นไม่ถูกแตะ และตัวเทียบ `== "working"` ที่มีอยู่ยังทำงานเหมือนเดิม)
+
+**`takkub wait` รอไม่จบ (#249)**
+- **role ที่ไม่เคยถูก spawn ทำให้ `wait` ค้างจนหมด timeout** — เดิมคืน `pending` ตลอดเพราะหา pane ไม่เจอ ตอนนี้มี grace 15 วินาที แล้วสรุปเป็น verdict ใหม่ `gone` · pane ที่อยู่ในสถานะจบแล้ว (`empty`/`done`/`exited`/`error`) ก็ตัดสินทันทีไม่ต้องรอ + มี `cancel_wait()`
+- **race 1: `wait` ตอบ `done` ให้กับงานที่ยังไม่เริ่ม** — `_wait_done_events` ไม่เคยถูกล้าง และ pane เพิ่งพลิกเป็น `working` ตอน **delivery** ไม่ใช่ตอน assign ลำดับ `assign` → `wait` จึงไปเจอ event ของรอบก่อนแล้วตอบว่าเสร็จแล้ว ตอนนี้ event ต้องมี `ts >= assign_ts` ของรอบปัจจุบันเท่านั้นถึงจะนับ
+- **race 2: waiter ตัวที่ attach ได้ `err: wait session no longer active` แทนผลลัพธ์** — เจอจากของจริงตอนรันคืนนั้นเอง ตอนนี้ผลที่ resolve แล้วถูก echo ค้างไว้ 30 วินาทีให้ตัวที่มาทีหลังอ่านได้
+
+**context ตอน spawn (#250)**
+- **ทุก role ได้ guard block เหมือนกันหมดทั้งที่ใช้ไม่ได้** — dev-server hygiene กับ stale-file guard ถูกยัดเข้าไฟล์ role ของ `reviewer`/`gemini`/`codex`/`opencode`/`kimi`/`cursor`/`docs`/`analyst`/`security` ด้วย ทั้งที่ role พวกนี้ไม่ยกเซิร์ฟเวอร์และบางตัวไม่แก้ไฟล์เลย ตอนนี้ inject ตาม capability ผ่าน `role_needs_dev_server_guard()` / `role_needs_stale_file_guard()` · บล็อกที่เหมือนกันทุก role รวม 4,353 ตัวอักษร = 20-27% ของไฟล์ role ที่ staged
+
+### Notes
+- QA gate ผ่านแบบ **GO**: pytest 6527 passed / 7 skipped / 0 failed (670s), ruff check + format, `lint-imports` 25/25 contracts, depgraph fresh — รายงานเต็มที่ `docs/qa/gate-248-247-249-250.md`
+- ต้อง **restart cockpit** ถึงจะได้ของทั้งหมดนี้
+- detector ทั้งหมดในรอบนี้ทำงานกับทุก provider ผ่าน `provider_spec` (`auth_error_markers` / `auth_transient_markers` ต่อ provider) — ไม่มี claude-only shortcut เพิ่มใหม่
+
 ## [1.0.62] - 2026-08-15
 
 รอบ **"cockpit หยุดโกหก Lead"** — ปิดครบ #225–#245 (15 ใบ) เน้นสามเรื่อง: สถานะที่รายงานต้องตรงกับความจริง, Lead ต้องมีเครื่องมือรอที่ใช้ได้จริง, และ pane ต้องไม่ค้างรอคนกดโดยไม่มีใครรู้
