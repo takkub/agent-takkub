@@ -52,6 +52,19 @@ def _register_working(orch: Orchestrator, role: str, project: str = PROJECT) -> 
     orch._panes_by_project.setdefault(project, {})[role] = pane
 
 
+def _register_state(orch: Orchestrator, role: str, state: str, project: str = PROJECT) -> None:
+    """A pane sitting in a non-"working" state — used for the #249 terminal-
+    state coverage (a pane that closed, crashed, or is about to auto-close
+    after `done()` should never be indistinguishable from one that's still
+    doing something)."""
+    from unittest.mock import MagicMock
+
+    pane = MagicMock()
+    pane.state = state
+    pane.session = None
+    orch._panes_by_project.setdefault(project, {})[role] = pane
+
+
 class TestBeginWait:
     def test_explicit_roles_register(self, orch: Orchestrator) -> None:
         _register_working(orch, "backend")
@@ -197,6 +210,74 @@ class TestPollWait:
         follow_up = orch.poll_wait(PROJECT, begin["wait_id"])
         assert follow_up["ok"] is False
 
+    def test_terminal_state_with_stale_event_resolves_done(self, orch: Orchestrator) -> None:
+        """#249: a pane that already finished (state flipped to "empty" or
+        still briefly "done" before the 2.5s auto-close) can never produce a
+        NEW report — the stale `_wait_done_events` entry from before the
+        wait even started is the only report it will ever have, so it must
+        resolve now instead of sitting pending until the full timeout."""
+        _register_state(orch, "backend", "empty")
+        orch._wait_done_events[(PROJECT, "backend")] = {
+            "ts": time.time() - 1000,
+            "failed": False,
+        }
+
+        begin = orch.begin_wait(PROJECT, ["backend"], 60.0)
+        result = orch.poll_wait(PROJECT, begin["wait_id"])
+
+        assert result["done"] == {"backend": "delivered"}
+        assert not result["pending"]
+
+    def test_terminal_state_with_stale_failed_event_resolves_failed(
+        self, orch: Orchestrator
+    ) -> None:
+        _register_state(orch, "qa", "exited")
+        orch._wait_done_events[(PROJECT, "qa")] = {
+            "ts": time.time() - 1000,
+            "failed": True,
+        }
+
+        begin = orch.begin_wait(PROJECT, ["qa"], 60.0)
+        result = orch.poll_wait(PROJECT, begin["wait_id"])
+
+        assert result["failed"] == {"qa": "delivered"}
+        assert not result["pending"]
+
+    def test_terminal_state_without_any_event_is_gone(self, orch: Orchestrator) -> None:
+        """A pane closed/crashed with no done() ever recorded (manual close,
+        crash before reporting) — unresolvable, but must not block the wait
+        to the full timeout either (#249 item 1)."""
+        _register_state(orch, "devops", "done")
+
+        begin = orch.begin_wait(PROJECT, ["devops"], 60.0)
+        result = orch.poll_wait(PROJECT, begin["wait_id"])
+
+        assert "devops" in result["gone"]
+        assert not result["pending"]
+        assert not result["done"]
+        assert not result["failed"]
+
+    def test_never_spawned_role_stays_pending_within_grace(self, orch: Orchestrator) -> None:
+        begin = orch.begin_wait(PROJECT, ["ghost"], 60.0)
+
+        result = orch.poll_wait(PROJECT, begin["wait_id"])
+
+        assert "ghost" in result["pending"]
+        assert not result["gone"]
+
+    def test_never_spawned_role_resolves_gone_after_grace(self, orch: Orchestrator) -> None:
+        """#249 item 2: a role with no pane at all — past the async-spawn
+        grace window — must resolve immediately instead of blocking to the
+        full timeout."""
+        begin = orch.begin_wait(PROJECT, ["ghost"], 3600.0)
+        orch._active_waits[PROJECT]["started_ts"] = time.time() - 1000.0
+
+        result = orch.poll_wait(PROJECT, begin["wait_id"])
+
+        assert "ghost" in result["gone"]
+        assert not result["pending"]
+        assert not result["expired"]
+
     def test_timeout_marks_expired_and_removes_registration(self, orch: Orchestrator) -> None:
         _register_working(orch, "backend")
         begin = orch.begin_wait(PROJECT, ["backend"], 1.0)
@@ -225,6 +306,37 @@ class TestEndWait:
 
         assert orch.end_wait(PROJECT, "not-the-id") is False
         assert PROJECT in orch._active_waits
+
+
+class TestCancelWait:
+    """#249 item 5: `takkub wait --cancel` — release whatever is active
+    without needing to know its wait_id (a fresh CLI invocation never has
+    one)."""
+
+    def test_cancel_removes_active_registration(self, orch: Orchestrator) -> None:
+        _register_working(orch, "backend")
+        orch.begin_wait(PROJECT, ["backend"], 60.0)
+
+        ok, msg = orch.cancel_wait(PROJECT)
+
+        assert ok is True
+        assert "backend" in msg
+        assert PROJECT not in orch._active_waits
+
+    def test_cancel_is_noop_when_nothing_active(self, orch: Orchestrator) -> None:
+        ok, msg = orch.cancel_wait(PROJECT)
+
+        assert ok is False
+        assert "no active wait" in msg
+
+    def test_close_all_teammates_cancels_active_wait(self, orch: Orchestrator) -> None:
+        _register_working(orch, "backend")
+        orch.begin_wait(PROJECT, ["backend"], 60.0)
+        assert PROJECT in orch._active_waits
+
+        orch.close_all_teammates(PROJECT)
+
+        assert PROJECT not in orch._active_waits
 
 
 class TestCliWaitCommand:
@@ -313,3 +425,23 @@ class TestCliWaitCommand:
         monkeypatch.setenv("TAKKUB_ROLE", "backend")
         rc = cli.main(["wait"])
         assert rc == 1
+
+    def test_cancel_flag_sends_wait_cancel_and_skips_poll(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        calls: list[dict] = []
+
+        def fake_request(payload: dict) -> dict:
+            calls.append(payload)
+            assert payload["cmd"] == "wait-cancel"
+            return {"ok": True, "msg": "cancelled wait covering 1 role(s): backend"}
+
+        monkeypatch.setattr(cli, "_request", fake_request)
+        monkeypatch.delenv("TAKKUB_ROLE", raising=False)
+
+        rc = cli.main(["wait", "--cancel"])
+        out = capsys.readouterr().out
+
+        assert rc == 0
+        assert len(calls) == 1
+        assert "cancelled" in out

@@ -61,6 +61,12 @@ _WAIT_MIN_TIMEOUT_S = 5.0
 _WAIT_MAX_TIMEOUT_S = 7200.0  # 2h hard ceiling
 _WAIT_POLL_INTERVAL_S = 4.0
 _WAIT_POLL_MAX_INTERVAL_S = 15.0
+# #249 item 4: print a heartbeat line at least this often while roles are
+# still pending, so an external observer (or the Lead session that spawned
+# `takkub wait` as a background shell) can tell "still waiting" apart from
+# "hung" without needing to cross-reference `takkub list`. A role resolving
+# also prints immediately, independent of this interval.
+_WAIT_HEARTBEAT_INTERVAL_S = 30.0
 
 # Commands intended only for teammate panes. Lead summarises inline and never
 # needs to call done on itself — blocking this prevents Lead from accidentally
@@ -891,7 +897,17 @@ def cmd_wait(args: argparse.Namespace) -> dict:
     example of writing one. No --role at all defaults to every role
     currently tracked by this project (same set `takkub list` shows, minus
     Lead itself).
+
+    --cancel (#249 item 5) skips begin/poll entirely and just releases
+    whatever wait registration is active for this project — the cleanup
+    path for a wait that's stuck watching a role that will never resolve
+    (or one the caller simply no longer wants to keep blocking on).
     """
+    if getattr(args, "cancel", False):
+        result = _request(_with_project({"cmd": "wait-cancel", "from": _from_role()}))
+        print(f"[wait] {result.get('msg', 'cancel requested')}")
+        return result
+
     timeout = getattr(args, "timeout", None) or _WAIT_DEFAULT_TIMEOUT_S
     timeout = max(_WAIT_MIN_TIMEOUT_S, min(float(timeout), _WAIT_MAX_TIMEOUT_S))
 
@@ -918,6 +934,8 @@ def cmd_wait(args: argparse.Namespace) -> dict:
     start = time.time()
     interval = _WAIT_POLL_INTERVAL_S
     last: dict = {}
+    last_pending_keys: set[str] = set(roles)
+    last_heartbeat = start
     try:
         while True:
             poll = _request(
@@ -927,6 +945,25 @@ def cmd_wait(args: argparse.Namespace) -> dict:
                 return poll
             last = poll
             pending = poll.get("pending") or {}
+            pending_keys = set(pending)
+            now_t = time.time()
+            # #249 item 4: prove "still waiting" vs "hung" from the outside
+            # — print the instant a role resolves, otherwise no more often
+            # than the heartbeat interval while roles remain pending.
+            resolved_now = last_pending_keys - pending_keys
+            if resolved_now:
+                print(
+                    f"[wait] resolved: {', '.join(sorted(resolved_now))} "
+                    f"— {len(pending_keys)} still pending ({int(now_t - start)}s elapsed)"
+                )
+                last_heartbeat = now_t
+            elif pending and now_t - last_heartbeat >= _WAIT_HEARTBEAT_INTERVAL_S:
+                print(
+                    f"[wait] still waiting on {len(pending_keys)}: "
+                    f"{', '.join(sorted(pending_keys))} ({int(now_t - start)}s elapsed)"
+                )
+                last_heartbeat = now_t
+            last_pending_keys = pending_keys
             if not pending or poll.get("expired"):
                 break
             remaining = timeout - (time.time() - start)
@@ -943,6 +980,7 @@ def cmd_wait(args: argparse.Namespace) -> dict:
 
     done = last.get("done") or {}
     failed = last.get("failed") or {}
+    gone = last.get("gone") or {}
     pending = last.get("pending") or {}
     elapsed = int(last.get("elapsed") or (time.time() - start))
 
@@ -951,6 +989,10 @@ def cmd_wait(args: argparse.Namespace) -> dict:
         print(f"  done: {', '.join(sorted(done))}")
     if failed:
         print(f"  FAILED: {', '.join(sorted(failed))}")
+    if gone:
+        print("  gone (will never report — never spawned or pane already closed):")
+        for role, reason in sorted(gone.items()):
+            print(f"    - {role}: {reason}")
     if pending:
         print("  still pending (timeout reached):")
         for role, reason in sorted(pending.items()):
@@ -962,6 +1004,7 @@ def cmd_wait(args: argparse.Namespace) -> dict:
         "msg": "all roles resolved" if ok else f"timeout with {len(pending)} role(s) still pending",
         "done": done,
         "failed": failed,
+        "gone": gone,
         "pending": pending,
     }
 
@@ -2186,6 +2229,11 @@ def main(argv: list[str] | None = None) -> int:
         metavar="SECONDS",
         help=f"max seconds to block (default {int(_WAIT_DEFAULT_TIMEOUT_S)}, "
         f"capped at {int(_WAIT_MAX_TIMEOUT_S)})",
+    )
+    swt.add_argument(
+        "--cancel",
+        action="store_true",
+        help="release the active wait registration for this project (#249) instead of blocking",
     )
     swt.set_defaults(func=cmd_wait)
 

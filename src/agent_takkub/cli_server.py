@@ -75,6 +75,7 @@ _LEAD_ONLY_CMDS = frozenset(
         "wait-begin",
         "wait-poll",
         "wait-end",
+        "wait-cancel",
     }
 )
 
@@ -732,6 +733,19 @@ class CliServer(QObject):
                 )
                 self._orch.end_wait(project_ns_we, str(req.get("wait_id") or ""))
                 self._reply(sock, ok=True, msg="wait ended")
+                return
+            elif cmd == "wait-cancel":
+                # #249 item 5: `takkub wait --cancel` — releases whatever
+                # registration is active for this project without needing a
+                # wait_id (a fresh CLI invocation never has one).
+                _resolve_project_wc = getattr(self._orch, "_resolve_project", None)
+                project_ns_wc = (
+                    _resolve_project_wc(from_project)
+                    if _resolve_project_wc is not None
+                    else (from_project or "default")
+                )
+                cancelled, cancel_msg = self._orch.cancel_wait(project_ns_wc)
+                self._reply(sock, ok=cancelled, msg=cancel_msg)
                 return
             elif cmd == "harvest":
                 harvest_since_ts: float | None = None
