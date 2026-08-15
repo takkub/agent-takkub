@@ -19,6 +19,7 @@ import json
 import os
 import socket
 import sys
+import time
 from pathlib import Path
 
 from . import config
@@ -110,7 +111,28 @@ def _instance_banner() -> str:
     return "\n".join(lines)
 
 
-def _request(payload: dict) -> dict:
+# #233: `socket.settimeout()` bounds each individual blocking call, not the
+# total time spent in the recv loop below — a server that keeps dribbling
+# non-empty, non-newline-terminated chunks (or anything else that resets the
+# per-call clock before it expires) can hold this loop open indefinitely even
+# though every single recv() "succeeded" within its timeout. _RESPONSE_TIMEOUT_S
+# is enforced as a true wall-clock deadline covering the whole read, so
+# `takkub assign`/every other command always returns within a fixed ceiling
+# instead of hanging silently.
+_RESPONSE_TIMEOUT_S = 15.0
+
+
+def _timeout_response(total_timeout: float) -> dict:
+    return {
+        "ok": False,
+        "msg": (
+            f"timed out waiting for orchestrator response after {total_timeout:.0f}s "
+            "(cockpit may be restarting or wedged) — check `takkub doctor` / `takkub list`"
+        ),
+    }
+
+
+def _request(payload: dict, *, response_timeout: float = _RESPONSE_TIMEOUT_S) -> dict:
     # Stamp the capability token so the server can verify the caller's identity.
     # Lead panes carry TAKKUB_LEAD_TOKEN (authorises Lead-only commands).
     # Teammate panes carry TAKKUB_PANE_TOKEN (authorises send/done).
@@ -120,18 +142,40 @@ def _request(payload: dict) -> dict:
     if token:
         payload["auth"] = token
     s = _connect()
+    deadline = time.monotonic() + response_timeout
     try:
         s.sendall((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
         buf = b""
-        s.settimeout(15)
         while b"\n" not in buf:
-            chunk = s.recv(4096)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return _timeout_response(response_timeout)
+            s.settimeout(remaining)
+            try:
+                chunk = s.recv(4096)
+            except TimeoutError:
+                return _timeout_response(response_timeout)
             if not chunk:
                 break
             buf += chunk
         if not buf:
             return {"ok": False, "msg": "no response from orchestrator"}
-        return json.loads(buf.split(b"\n", 1)[0].decode("utf-8"))
+        line = buf.split(b"\n", 1)[0]
+        try:
+            return json.loads(line.decode("utf-8"))
+        except json.JSONDecodeError as e:
+            # A malformed frame (never valid JSON from cli_server._reply, which
+            # always writes `json.dumps(...) + "\n"`) means something other
+            # than the orchestrator's own reply landed in this response —
+            # surface it as a clear diagnostic instead of letting a bare
+            # traceback or, worse, another silent hang stand in for it.
+            return {
+                "ok": False,
+                "msg": (
+                    f"malformed response from orchestrator ({e}); got {len(line)} byte(s) "
+                    f"starting {line[:80]!r} — check `takkub doctor`"
+                ),
+            }
     finally:
         s.close()
 

@@ -11,6 +11,7 @@ serialised naturally.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import secrets
@@ -38,6 +39,15 @@ _MAX_CONNECTIONS = 32
 # frame before it is closed. Prevents unbounded read-buffer accumulation when
 # a client opens a socket but never writes a newline.
 _IDLE_CONNECTION_TIMEOUT_S = 30.0
+
+# #233: window in which an identical (project, role, task) `assign` is treated
+# as a retry of a request the client already sent, not a fresh dispatch. The
+# CLI's own response wait has a hard deadline (`cli._RESPONSE_TIMEOUT_S`), so
+# an operator who sees "no response" and reruns the exact same `takkub assign`
+# must not risk a duplicate spawn/task-paste (worst case: a side-effecting
+# task like a migration or docker compose up running twice concurrently) if
+# the first request actually did land, just slower than the client waited.
+_ASSIGN_DEDUP_WINDOW_S = 8.0
 
 # Commands that mutate cockpit structure — only the Lead pane is allowed to
 # run these. The gate is enforced server-side so raw TCP clients that bypass
@@ -83,6 +93,11 @@ class CliServer(QObject):
         # {socket: connect_time} — track open connections for the idle-timeout
         # reaper and the connection cap.
         self._open_connections: dict[object, float] = {}
+        # #233: {(project, role, task_hash): last_seen_ts} — recent `assign`
+        # fingerprints so a client retry of the identical request within
+        # _ASSIGN_DEDUP_WINDOW_S is acked without a second dispatch. Pruned
+        # alongside the idle-connection reaper (same 1s tick).
+        self._recent_assign_fingerprints: dict[tuple[str, str, str], float] = {}
         # Reap idle (no newline received) connections once per second.
         self._reaper = QTimer(self)
         self._reaper.setInterval(1_000)
@@ -230,6 +245,17 @@ class CliServer(QObject):
                 sock.disconnectFromHost()
             except Exception:
                 pass
+        fp_cutoff = time.time() - _ASSIGN_DEDUP_WINDOW_S
+        stale_fps = [k for k, ts in self._recent_assign_fingerprints.items() if ts < fp_cutoff]
+        for k in stale_fps:
+            self._recent_assign_fingerprints.pop(k, None)
+
+    @staticmethod
+    def _assign_fingerprint(project_ns: str, role: str, task: str) -> tuple[str, str, str]:
+        task_hash = hashlib.blake2b(
+            (task or "").encode("utf-8", "replace"), digest_size=8
+        ).hexdigest()
+        return (project_ns or "default", role, task_hash)
 
     def _on_ready_read(self, sock: QTcpSocket) -> None:
         # Reject connections whose buffered data exceeds the frame cap without a
@@ -456,6 +482,30 @@ class CliServer(QObject):
                             if collision_err:
                                 self._reply(sock, ok=False, msg=collision_err)
                                 return
+                    # #233: dedup an identical (project, role, task) assign seen
+                    # again within _ASSIGN_DEDUP_WINDOW_S — makes a client retry
+                    # after a client-side timeout safe (never a double-dispatch)
+                    # without needing the caller to pass an explicit request id.
+                    _resolve_project_fp = getattr(self._orch, "_resolve_project", None)
+                    project_ns_fp = (
+                        _resolve_project_fp(from_project)
+                        if _resolve_project_fp is not None
+                        else (from_project or "default")
+                    )
+                    fp = self._assign_fingerprint(project_ns_fp, role, req.get("task", ""))
+                    now_fp = time.time()
+                    last_seen = self._recent_assign_fingerprints.get(fp)
+                    self._recent_assign_fingerprints[fp] = now_fp
+                    if last_seen is not None and (now_fp - last_seen) < _ASSIGN_DEDUP_WINDOW_S:
+                        self._reply(
+                            sock,
+                            ok=True,
+                            msg=(
+                                f"task already queued for {role} moments ago "
+                                "(deduped — safe retry, not re-dispatched)"
+                            ),
+                        )
+                        return
                 delay = self._next_spawn_delay_ms(role, from_project)
                 if cmd == "spawn":
                     QTimer.singleShot(

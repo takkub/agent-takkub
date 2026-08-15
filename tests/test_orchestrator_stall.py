@@ -77,6 +77,10 @@ class _FakeOrch:
     # duplicating the merge logic.
     _pending_notice_roles = Orchestrator._pending_notice_roles
     _has_pending_lead_notice = Orchestrator._has_pending_lead_notice
+    # list_status_detailed also surfaces resource-governor-queued roles
+    # (#240 point 3) — no `_resource_governor` attr on this fake, so
+    # `_queued_resource_roles` safely no-ops via its `getattr(..., None)` guard.
+    _queued_resource_roles = Orchestrator._queued_resource_roles
 
 
 @pytest.fixture

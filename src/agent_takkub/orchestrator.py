@@ -131,7 +131,13 @@ from .pipeline_executor import (  # re-exported for test imports; mixin provides
     _split_shard,
 )
 from .pty_session import PtySession, WritePriority  # re-exported for test imports
-from .resource_governor import GovernorLimits, ResourceGovernor, ResourceToken, classify_resource
+from .resource_governor import (
+    GovernorLimits,
+    ResourceClass,
+    ResourceGovernor,
+    ResourceToken,
+    classify_resource,
+)
 from .roles import LEAD
 from .roles import by_name as _role_by_name
 from .spawn_engine import (  # re-exported for backward compat; mixin provides methods
@@ -662,6 +668,68 @@ _LAST_SESSION_MAX_AGE_SEC = 60 * 60
 # PaneState moved to spawn_engine.py; re-exported above via SpawnEngineMixin import
 
 
+def _describe_resource_wait(
+    role_name: str, resource_class: ResourceClass, reason: str, holders: list[str]
+) -> str:
+    """Human-readable queued message for a role denied a resource-governor
+    slot (#240 point 3) — names the blocking pane(s) instead of just the bare
+    limit reason, and is the single formatting source shared by `assign`'s
+    return value and `_queued_resource_roles`'s `takkub list`/`status`
+    surfacing so the two never drift apart."""
+    blocked_by = f", blocked by {', '.join(holders)}" if holders else ""
+    return f"{role_name} queued — waiting for {resource_class.value} slot ({reason}{blocked_by})"
+
+
+# Restart-reason marker (#232): `cockpit_restart` events.log lines only ever
+# distinguished "cli" (takkub restart) from "user_action" (status-bar
+# button) — an auto-triggered restart (npm self-update, git-pull update, the
+# pip-sync fallback) rode the exact same `_restart_cockpit()` path with no
+# reason of its own, so events.log gave no way to tell "the user restarted
+# this" from "the cockpit restarted itself". A plain `_log_event` line
+# doesn't survive the process exit a restart performs, so the reason is
+# also dropped in this small marker file the OLD process writes right
+# before quitting; the NEW process's `restore_teammates()` reads (and
+# deletes) it once at boot to attribute the Lead-facing restore notice.
+_RESTART_REASON_FILE = RUNTIME_DIR / "restart-reason.json"
+
+
+def _write_restart_reason_marker(reason: str, **extra: object) -> None:
+    try:
+        _write_json_atomic(_RESTART_REASON_FILE, {"reason": reason, **extra})
+    except Exception:
+        pass
+
+
+def _read_and_clear_restart_reason() -> dict:
+    payload: dict = {}
+    try:
+        parsed = json.loads(_RESTART_REASON_FILE.read_text(encoding="utf-8"))
+        if isinstance(parsed, dict):
+            payload = parsed
+    except (OSError, ValueError, json.JSONDecodeError):
+        payload = {}
+    try:
+        _RESTART_REASON_FILE.unlink()
+    except OSError:
+        pass
+    return payload
+
+
+def _restart_reason_suffix(restart_info: dict) -> str:
+    reason = restart_info.get("reason")
+    if reason == "npm_update" and restart_info.get("version"):
+        return f" — restarted to apply update v{restart_info['version']}"
+    if reason == "git_pull_update":
+        return " — restarted to apply a git-pull update"
+    if reason == "pip_sync_fallback":
+        return " — restarted after a dependency sync"
+    if reason == "user_action":
+        return " — user-triggered restart"
+    if reason == "cli":
+        return " — via `takkub restart`"
+    return ""
+
+
 class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMixin, QObject):
     """Owns the pane registry and routes commands.
 
@@ -1189,14 +1257,23 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                         )
                     ),
                 )
+                # #240 point 3: name the blocking pane(s) — `assign` used to
+                # answer only a bare limit-name reason with no way for Lead
+                # to tell which pane to look at, and the queued role vanished
+                # from `takkub list`/`status` entirely (see
+                # `_queued_resource_roles` below) until the slot freed.
+                holders = governor.holders_for_class(resource_class)
                 _log_event(
                     "assign_resource_wait",
                     project=project_ns,
                     role=role_name,
                     resource_class=resource_class.value,
                     reason=decision.reason,
+                    blocked_by=holders,
                 )
-                return True, f"{role_name} queued · waiting for resources ({decision.reason})"
+                return True, _describe_resource_wait(
+                    role_name, resource_class, decision.reason, holders
+                )
             if decision.token is not None:
                 self._resource_tokens[resource_key] = decision.token
         # Fan-out queue (flag-gated, default off): defer a fresh teammate spawn
@@ -1688,6 +1765,10 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         Typing the command IS the confirmation — no dialog on this path.
         """
         _log_event("cockpit_restart", reason="cli")
+        # #232: same marker `_restart_cockpit` writes for its own
+        # auto-triggered reasons, so `restore_teammates()` can attribute the
+        # Lead-facing restore notice to whichever path actually fired.
+        _write_restart_reason_marker("cli")
         QTimer.singleShot(200, self.restartRequested.emit)
         return True, "restarting cockpit — state persisted, app relaunching (panes respawn)"
 
@@ -3284,6 +3365,36 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                 extra[done_role] = self._PENDING_NOTICE_STATE
         return extra
 
+    def _queued_resource_roles(self, project_ns: str, known: dict) -> dict[str, str]:
+        """Roles blocked on a resource-governor slot whose pane hasn't
+        spawned yet (#240 point 3): `assign()` answers `ok` and the role has
+        no pane entry at all until a slot frees, so it used to vanish from
+        `takkub list`/`status` entirely with nothing telling Lead it was
+        still queued — only `runtime/events.log` had the truth."""
+        governor = getattr(self, "_resource_governor", None)
+        if governor is None:
+            return {}
+        try:
+            waiting = governor.snapshot().get("waiting_tasks", [])
+        except Exception:
+            return {}
+        extra: dict[str, str] = {}
+        for item in waiting:
+            if item.get("project_id") != project_ns:
+                continue
+            role = str(item.get("pane_id") or "")
+            if not role or role in known or role in extra:
+                continue
+            reason = str(item.get("reason") or "resources")
+            try:
+                resource_class = ResourceClass(str(item.get("resource_class") or ""))
+            except ValueError:
+                extra[role] = f"{role} queued — waiting for resources ({reason})"
+                continue
+            holders = governor.holders_for_class(resource_class)
+            extra[role] = _describe_resource_wait(role, resource_class, reason, holders)
+        return extra
+
     def inbox_report(self, project: str | None = None, role: str | None = None) -> list[dict]:
         """Read-only snapshot of every done/FAILED report still sitting
         somewhere in the outbound-to-Lead pipeline instead of already
@@ -3373,11 +3484,14 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         Defaults to the active project's view, so a Lead in project-a never
         accidentally sees a backend pane that belongs to project-b. Also
         surfaces a just-closed role whose done report hasn't reached Lead
-        yet (#163) instead of letting it silently vanish from the list.
+        yet (#163), and a role still queued behind a resource-governor slot
+        with no pane yet (#240), instead of letting either silently vanish
+        from the list.
         """
         project_ns = self._resolve_project(project)
         status = {name: p.state for name, p in self._project_panes(project_ns).items()}
         status.update(self._pending_notice_roles(project_ns, status))
+        status.update(self._queued_resource_roles(project_ns, status))
         return status
 
     def _compute_last_progress_ts(self, role: str, project_ns: str, pane: AgentPane) -> float:
@@ -3476,6 +3590,13 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                 "blocked_reason": blocked_reason,
             }
         for role, state in self._pending_notice_roles(project_ns, result).items():
+            result[role] = {
+                "state": state,
+                "stall_minutes": None,
+                "last_progress_ts": 0.0,
+                "blocked_reason": None,
+            }
+        for role, state in self._queued_resource_roles(project_ns, result).items():
             result[role] = {
                 "state": state,
                 "stall_minutes": None,
@@ -3995,6 +4116,11 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             return 0
         if age > _LAST_SESSION_MAX_AGE_SEC:
             return 0
+        # #232: attribute WHY this boot is restoring teammates at all — a
+        # bare "[cockpit restart]" notice didn't distinguish an auto-applied
+        # npm update from a user hitting the restart button, so the reason
+        # was invisible to Lead unless someone went digging in boot.log.
+        restart_reason_suffix = _restart_reason_suffix(_read_and_clear_restart_reason())
         scheduled = 0
         for project, entries in (snap.get("projects") or {}).items():
             if not isinstance(entries, list):
@@ -4015,22 +4141,59 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                     # #9: re-paste the last task so the pane continues working;
                     # queue a Lead notice (delivered when Lead spawns) either
                     # way so the operator knows the pane was re-spawned.
+                    #
+                    # #230: a pane can legitimately finish (`done()` pops the
+                    # ledger's `open[role]` row synchronously) in the window
+                    # between this snapshot being written and an ABRUPT restart
+                    # (crash, forced kill, or any restart path that doesn't run
+                    # through the two graceful write_session_snapshot() call
+                    # sites) — the on-disk snapshot then still shows the
+                    # already-finished task, and re-sending it silently re-runs
+                    # completed work (best case a no-op re-`done`, worst case a
+                    # repeated migration/push). The task ledger's `open` map is
+                    # the one durable, cross-process signal for "is this task
+                    # still actually outstanding" — an absent entry (already
+                    # resolved, or never tracked) means "safe to skip", which
+                    # also fails closed for ledger-write hiccups: burning one
+                    # skipped resend beats duplicating side-effecting work.
+                    task_still_open = False
                     if last_task:
+                        try:
+                            from .task_ledger import load_state as _load_ledger_state
+
+                            task_still_open = role in (
+                                _load_ledger_state(project).get("open") or {}
+                            )
+                        except Exception:
+                            task_still_open = True
+                    if last_task and task_still_open:
                         self._send_when_ready(role, last_task, project=project)
                         notice_body = (
-                            f"[cockpit restart] {role} pane restored from last session "
-                            f"and last task re-sent automatically."
+                            f"[cockpit restart{restart_reason_suffix}] {role} pane restored "
+                            f"from last session and last task re-sent automatically."
                         )
+                    elif last_task:
+                        notice_body = (
+                            f"⚠️ [cockpit restart{restart_reason_suffix}] {role} pane restored "
+                            f"from last session — its last task has no open row in the task "
+                            f"ledger (already completed, or was never tracked), so it was "
+                            f"NOT re-sent automatically to avoid duplicate/side-effect work. "
+                            f"Re-assign manually if it still needs to run."
+                        )
+                        _log_event("teammate_restore_resend_skipped", role=role, project=project)
                     elif role == "shell":
                         # A plain PowerShell pane never carries an assigned task —
                         # restoring it fresh is its normal state, so no ⚠️/re-assign
                         # noise (field report: scary warning on every restart).
-                        notice_body = "[cockpit restart] shell pane restored from last session."
+                        notice_body = (
+                            f"[cockpit restart{restart_reason_suffix}] shell pane restored "
+                            f"from last session."
+                        )
                     else:
                         notice_body = (
-                            f"⚠️ [cockpit restart] {role} pane restored from last session "
-                            f"but last task was not saved — pane started fresh. "
-                            f"Re-assign if needed."
+                            f"⚠️ [cockpit restart{restart_reason_suffix}] {role} pane restored "
+                            f"from last session but last task was not saved — pane started "
+                            f"fresh. Re-assign if needed."
                         )
                     self._pending_done_notices.setdefault(project, []).append(
                         {"role": role, "note": "restore", "body": notice_body}

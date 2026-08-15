@@ -42,3 +42,16 @@ def test_safe_and_maximum_bound_balanced() -> None:
     maximum = performance_settings.preset("maximum", logical_cpus=32, total_memory_gb=128)
     assert safe.max_heavy_global < balanced.max_heavy_global <= maximum.max_heavy_global
     assert safe.hidden_render_ms > balanced.hidden_render_ms > maximum.hidden_render_ms
+
+
+def test_package_install_limit_not_one_in_balanced_or_maximum() -> None:
+    """Issue #240 point 2: a global limit of 1 turned a single misclassified
+    task into a full serializer for every other task sharing its resource
+    class. "safe" mode keeps 1 by design (max conservatism); balanced and
+    maximum must not."""
+    safe = performance_settings.preset("safe", logical_cpus=32, total_memory_gb=128)
+    balanced = performance_settings.preset("balanced", logical_cpus=32, total_memory_gb=128)
+    maximum = performance_settings.preset("maximum", logical_cpus=32, total_memory_gb=128)
+    assert safe.max_package_install_global == 1
+    assert balanced.max_package_install_global >= 2
+    assert maximum.max_package_install_global >= 2

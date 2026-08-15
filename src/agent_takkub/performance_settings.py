@@ -92,7 +92,17 @@ def preset(
         browser,
         min(2, heavy),
         min(2, heavy),
-        1,
+        # #240 point 2: limit=1 turned every misclassified task into a full
+        # global serializer (one wrong classification == every other task
+        # queues behind it, even ones that never install anything). The
+        # classifier fix (`resource_governor._marker_signals`) addresses the
+        # ROOT CAUSE, but a single global slot is still too fragile for a
+        # signal derived by scanning free-form task text — 2 halves the
+        # blast radius of any future misclassification without meaningfully
+        # weakening the guardrail (still a hard global cap, just not a
+        # complete-serialization one). "safe" mode below keeps 1 — its whole
+        # point is maximum conservatism.
+        2,
         85,
         65,
         20,
