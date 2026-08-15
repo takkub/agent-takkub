@@ -812,7 +812,9 @@ def _print_status_report(report: object) -> None:
         human_ts = info.get("last_progress_human", "?")
         abs_ts = info.get("last_progress_abs", "?")
         stall_str = f" ⚠ stalled {stall}m" if stall is not None else ""
-        print(f"\n  [{role}] {state}{stall_str}")
+        blocked = info.get("blocked_reason")
+        blocked_str = f" ⛔ blocked:{blocked}-prompt" if blocked else ""
+        print(f"\n  [{role}] {state}{stall_str}{blocked_str}")
         print(f"    last progress: {human_ts} ({abs_ts})")
         tail = (info.get("transcript_tail") or "").strip()
         if tail:

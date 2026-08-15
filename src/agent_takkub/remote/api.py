@@ -223,8 +223,10 @@ def activity(orch) -> dict:
     for project_ns, panes in (getattr(orch, "_panes_by_project", None) or {}).items():
         roles: list[dict] = []
         lead_out: dict | None = None
+        known_states: dict[str, str] = {}
         for role, pane in panes.items():
             state = getattr(pane, "state", None)
+            known_states[role] = state or ""
             working = state == "working"
             started = getattr(pane, "_working_start", None) if working else None
             runtime_sec = max(0, int(now - started)) if started is not None else 0
@@ -246,6 +248,36 @@ def activity(orch) -> dict:
                     "provider": notify.pane_provider_name(orch, project_ns, role, pane),
                 }
             )
+        # #225: `done()` auto-closes its own pane ~2.5s after reporting, well
+        # before the done-notice necessarily finishes its trip through the
+        # digest/live/durable queues to Lead — a role can vanish from this
+        # feed within seconds of finishing while its report is still in
+        # flight (minutes, in a draft-hold worst case). `list_status`/
+        # `list_status_detailed` already cover this for `takkub list`/
+        # `status` (#163's `_pending_notice_roles`), but this endpoint reads
+        # `_panes_by_project` directly (see docstring) so it never picked up
+        # that fix. Reuse the same helper and fold the pending role in as a
+        # coarse "idle" entry — no notice body, no fine-grained detail,
+        # matching this endpoint's DATA-MIN contract — so a phone polling
+        # this feed doesn't lose track of a role that just finished.
+        if show_team:
+            pending_fn = getattr(orch, "_pending_notice_roles", None)
+            if callable(pending_fn):
+                try:
+                    pending_roles = pending_fn(project_ns, known_states)
+                except Exception:
+                    pending_roles = {}
+                for role in pending_roles:
+                    if role == LEAD.name or role in known_states:
+                        continue
+                    roles.append(
+                        {
+                            "role": role,
+                            "state": "idle",
+                            "runtime_sec": 0,
+                            "provider": notify.pane_provider_name(orch, project_ns, role, None),
+                        }
+                    )
         if roles or lead_out is not None:
             entry: dict = {"project": project_ns, "roles": roles}
             if lead_out is not None:

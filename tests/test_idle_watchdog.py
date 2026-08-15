@@ -81,6 +81,10 @@ def _make_pane(
     # Default: not blocked on a TTY prompt. Without this a MagicMock would return
     # a truthy stub and the TTY-block gate would suppress the idle reminder.
     pane.session.is_blocked_on_tty_prompt.return_value = tty_prompt
+    # Default: not blocked on Claude Code's own permission-approval dialog
+    # (#236). Without this a MagicMock would return a truthy stub and the
+    # same TTY-block gate would suppress the idle reminder.
+    pane.session.is_blocked_on_permission_prompt.return_value = None
     # Default: no malformed tool-call XML on screen.
     pane.session.has_unparsed_tool_call.return_value = unparsed_xml
     # Default: input box is empty (real PtySession returns False when no

@@ -188,6 +188,28 @@ _TTY_PROMPT_RE = re.compile(
 )
 _TTY_PROMPT_TAIL_ROWS = 5
 
+# Claude Code's own tool-permission approval dialog (Bash/Edit/Write/WebFetch,
+# etc.) — a numbered "1. Yes / 2. Yes, and don't ask again / 3. No" menu. Unlike
+# a generic shell y/N prompt (_TTY_PROMPT_RE above) it carries no [y/N] bracket
+# at all, so a pane wedged here matched neither is_at_ready_prompt() (a hard-
+# blocker footer like "esc to cancel" IS on screen, so it correctly reads not-
+# ready) nor is_blocked_on_tty_prompt() (regex miss) — it just silently read as
+# ordinary busy generation forever (#236: a pane sat here 2h51m with `takkub
+# status` reporting "working, progress 0s ago" throughout, because the raw
+# transcript-mtime progress clock kept bumping on the dialog's own redraw).
+# The *question* line varies per tool (Bash: "do you want to proceed?", Edit:
+# "do you want to make this edit to <file>?", Write: "do you want to create
+# <file>?", ...) and isn't exhaustively enumerable, so detection anchors on the
+# numbered options instead: option 1 ("1. Yes") together with a confirming "No"
+# option or "Esc to cancel" footer nearby — both render within the same dialog
+# box but on separate screen rows, hence the two-pattern AND (not a single
+# multi-line regex) over a joined window.
+_PERMISSION_MENU_OPTION1_RE = re.compile(r"^\s*[❯>]?\s*1\.\s*yes\b", re.IGNORECASE | re.MULTILINE)
+_PERMISSION_MENU_CONFIRM_RE = re.compile(
+    r"esc\s*to\s*cancel|^\s*[❯>]?\s*\d\.\s*no\b", re.IGNORECASE | re.MULTILINE
+)
+_PERMISSION_MENU_TAIL_ROWS = 12
+
 # "Enter [to] Confirm" — claude/codex word it "Enter to confirm", agy words
 # its own trust modal "enter Confirm" with no "to" (#186). Tolerate both so
 # is_at_trust_prompt() doesn't silently miss the agy variant.
@@ -1501,6 +1523,42 @@ class PtySession(QObject):
             if _TTY_PROMPT_RE.search(line):
                 return line.strip() or "interactive prompt detected"
         return None
+
+    def is_blocked_on_permission_prompt(self) -> str | None:
+        """Return the matched "1. Yes" option line if the pane is sitting on
+        Claude Code's own tool-permission approval dialog; else ``None``.
+
+        Distinct from ``is_blocked_on_tty_prompt()``: this is the CLI's own
+        in-app modal chrome, not a subprocess prompt, and its numbered-menu
+        rendering has no ``[y/N]`` bracket for that detector's regex to catch
+        (#236). Confirmed only for Claude Code's own wording — codex/gemini-
+        agy/opencode/kimi/cursor may render tool-approval prompts differently
+        (or not gate on one at all); this is a known per-provider gap, not
+        assumed coverage (#103).
+
+        Uses a wider window than ``_TTY_PROMPT_TAIL_ROWS`` (``
+        _PERMISSION_MENU_TAIL_ROWS``) since the option-1 line and its
+        confirming "No"/"Esc to cancel" companion render on separate rows
+        within the dialog box, not the same line.
+        """
+        with self._screen_lock:
+            lines = _safe_screen_display(self.screen)
+            cursor_row = self.screen.cursor.y
+        if not lines:
+            return None
+        lo = max(0, cursor_row - _PERMISSION_MENU_TAIL_ROWS + 1)
+        hi = cursor_row + 1
+        window = lines[lo:hi]
+        joined = "\n".join(window)
+        if not (
+            _PERMISSION_MENU_OPTION1_RE.search(joined)
+            and _PERMISSION_MENU_CONFIRM_RE.search(joined)
+        ):
+            return None
+        for line in window:
+            if _PERMISSION_MENU_OPTION1_RE.search(line):
+                return line.strip() or "permission prompt detected"
+        return "permission prompt detected"
 
     def has_unparsed_tool_call(self) -> str | None:
         """Return the first line containing a literal tool-call XML tag if one is

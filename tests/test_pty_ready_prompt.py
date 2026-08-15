@@ -273,6 +273,113 @@ class TestIsBlockedOnTtyPrompt:
         assert blocked.is_blocked_on_tty_prompt() is not None
 
 
+# -- is_blocked_on_permission_prompt() -- issue #236 -------------------------
+
+
+class TestIsBlockedOnPermissionPrompt:
+    """Claude Code's own numbered tool-permission approval dialog has no
+    [y/N] bracket for is_blocked_on_tty_prompt()'s regex to match, so a pane
+    wedged on one used to read as ordinary busy generation forever — a real
+    incident left a pane stuck 2h51m with `takkub status` reporting "working,
+    progress 0s ago" throughout."""
+
+    def test_bash_permission_dialog_detected(self) -> None:
+        s = _feed_screen(
+            "Bash command",
+            "  rtk curl -s -D - -o /dev/null http://localhost:6700/",
+            "Do you want to proceed?",
+            "❯ 1. Yes",
+            "  2. Yes, and don't ask again for rtk commands in this project",
+            "  3. No, and tell Claude what to do differently (esc)",
+        )
+        result = s.is_blocked_on_permission_prompt()
+        assert result is not None
+        assert "1. yes" in result.lower()
+
+    def test_edit_permission_dialog_detected(self) -> None:
+        # The question line varies per tool — detection must not depend on it.
+        s = _feed_screen(
+            "Do you want to make this edit to orchestrator.py?",
+            "❯ 1. Yes",
+            "  2. Yes, allow all edits during this session",
+            "  3. No, and tell Claude what to do differently (esc)",
+        )
+        assert s.is_blocked_on_permission_prompt() is not None
+
+    def test_returns_none_on_claude_ready_prompt(self) -> None:
+        s = _feed_screen("What would you like to do next?", "bypass permissions")
+        assert s.is_blocked_on_permission_prompt() is None
+
+    def test_returns_none_on_ordinary_busy_spinner(self) -> None:
+        s = _feed_screen("Doing... (esc to cancel, 12s)")
+        assert s.is_blocked_on_permission_prompt() is None
+
+    def test_returns_none_on_empty_screen(self) -> None:
+        s = _feed_screen("")
+        assert s.is_blocked_on_permission_prompt() is None
+
+    def test_returns_none_when_option_1_present_without_confirm_companion(self) -> None:
+        # A numbered list ("1. Yes") alone, with no "No"/"esc to cancel"
+        # nearby, must not false-positive as a permission dialog.
+        s = _feed_screen("Steps:", "1. Yes, run the migration", "2. Verify output")
+        assert s.is_blocked_on_permission_prompt() is None
+
+    def test_returns_none_on_tty_shell_prompt(self) -> None:
+        # Orthogonal to is_blocked_on_tty_prompt() — a generic shell y/N
+        # prompt is not this dialog.
+        s = _feed_screen("Overwrite? [y/N]")
+        assert s.is_blocked_on_permission_prompt() is None
+        assert s.is_blocked_on_tty_prompt() is not None
+
+    def test_real_capture_git_reset_hard_dialog_detected(self) -> None:
+        """Every other test in this class feeds clean, pre-stripped synthetic
+        lines through the pyte screen — they prove the regex is right but
+        never exercise it against a genuine PTY byte stream. This is a
+        verbatim live capture (`runtime/sessions/2026-08-15/agent-takkub/
+        backend#3-082405.transcript.log`, byte offset 44122) of this very
+        session's own pane sitting on the `Bash(git reset --hard:*)`
+        permission gate: 24-bit SGR color codes, absolute-column typewriter
+        jumps (`\\x1b[8G`), and two frames of the busy-dot spinner that
+        repositions the cursor via `\\x1b[36;1H` — all still present, unlike
+        the hand-written fixtures above. Notably the raw bytes render
+        "❯1. Yes" with **no space** between the pointer glyph and "1." (the
+        space in the rendered screen line below comes from pyte padding a
+        `\\x1b[4G` absolute-column jump, not from the source bytes) — proving
+        `_PERMISSION_MENU_OPTION1_RE`'s `[❯>]?\\s*1\\.` really does need its
+        `\\s*` to be zero-width-tolerant, not just in theory."""
+        raw = (
+            b"Permission rule \x1b[1mBash(git reset --hard:*)\x1b[43G\x1b[22mrequires"
+            b"\x1b[52Gconfirmation\x1b[65Gfor\x1b[69Gthis\x1b[74Gcommand.\r\x1b[1C\x1b[1B"
+            b"\x1b[38;2;153;153;153m/perm\x1b[8Gssi\x1b[12Gns to update rules\r\x1b[2B"
+            b"\x1b[39m Do you want to proceed?\x1b[K\r\x1b[1C\x1b[1B"
+            b"\x1b[38;2;177;185;249m\xe2\x9d\xaf\x1b[4G\x1b[38;2;153;153;153m1. "
+            b"\x1b[38;2;177;185;249mYes\r\x1b[1B\x1b[39m   \x1b[38;2;153;153;153m2. "
+            b"\x1b[39mYes, and don\xe2\x80\x99t ask again for: rtk git *\x1b[K\r\x1b[1B  "
+            b"\x1b[4G\x1b[38;2;153;153;153m3. \x1b[39mNo\r\x1b[1B\x1b[K\r\x1b[1C\x1b[1B"
+            b"\x1b[38;2;153;153;153mEsc to cancel \xc2\xb7 Tab to amend \xc2\xb7 "
+            b"ctrl+e to explain\x1b[39m\x1b[K\x1b[36;1H\x1b[32;2H\x1b[H\r\x1b[6B"
+            b"\x1b[38;2;153;153;153m\xe2\x97\x8f\x1b[39m\x1b[36;1H\x1b[32;2H\x1b[H\r\x1b[6B"
+            b"\x1b[38;2;153;153;153m \x1b[39m"
+        )
+        # Production panes render at 110x36 (spawn_engine._PANE_COLS/_PANE_ROWS)
+        # — the spinner's absolute row jump (`\x1b[36;1H` = row 36) only makes
+        # sense reproduced at that size, not the 80x24 used by every other
+        # fixture in this file.
+        s = PtySession(cols=110, rows=36)
+        s._feed_and_log(raw)
+        result = s.is_blocked_on_permission_prompt()
+        assert result is not None
+        assert "1. yes" in result.lower()
+        # Option 2's own wording is "Yes, and don't ask again for: rtk git *"
+        # — a SECOND "yes" one line below option 1's. The matched line must
+        # still anchor to option 1 specifically, not get confused by it.
+        assert "don" not in result.lower()  # would mean it matched option 2's line instead
+        assert "rtk git" not in result
+        # Orthogonal — the generic TTY-prompt regex (no [y/N] bracket in this
+        # dialog) must not also fire on the same real screen.
+        assert s.is_blocked_on_tty_prompt() is None
+
+
 # -- has_unparsed_tool_call() -- issue #59 ------------------------------------
 
 

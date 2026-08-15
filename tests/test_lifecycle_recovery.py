@@ -258,10 +258,10 @@ class _FakeOrchForContentDelta:
     def _project_panes(self, project: str | None = None) -> dict:
         return self._panes_by_project.get(project or "", {})
 
-    def _surface_tty_block_notice(self, role, project, prompt_line) -> None:
+    def _surface_tty_block_notice(self, role, project, prompt_line, *, kind="tty") -> None:
         pass  # no-op stub — TTY-block tests live in test_stuck_recover.py
 
-    def _maybe_surface_tty_block(self, key, role, project, prompt_line, now) -> None:
+    def _maybe_surface_tty_block(self, key, role, project, prompt_line, now, *, kind="tty") -> None:
         pass  # no-op stub
 
     def _check_shell_open_dialog(self, project_name, role, pane, key, now) -> None:
@@ -306,6 +306,7 @@ class TestSpinnerBlindspotsFixed:
         sess = MagicMock()
         sess.is_alive = True
         sess.is_blocked_on_tty_prompt.return_value = None
+        sess.is_blocked_on_permission_prompt.return_value = None
         sess.is_at_update_splash.return_value = False
         # Only spinner lines — non-spinner hash = blake2b("") on every tick
         sess.display_lines.return_value = [SPINNER_LINE, SPINNER_LINE]
@@ -380,6 +381,7 @@ class TestSpinnerBlindspotsFixed:
         sess = MagicMock()
         sess.is_alive = True
         sess.is_blocked_on_tty_prompt.return_value = None
+        sess.is_blocked_on_permission_prompt.return_value = None
         sess.is_at_update_splash.return_value = False
         sess.display_lines.return_value = ["some content"]
         pane.session = sess
@@ -913,6 +915,7 @@ class TestSpinnerFilterRobust:
         sess = MagicMock()
         sess.is_alive = True
         sess.is_blocked_on_tty_prompt.return_value = None
+        sess.is_blocked_on_permission_prompt.return_value = None
         sess.is_at_update_splash.return_value = False
         # Counter line WITHOUT 'esc to interrupt' — would defeat old filter
         sess.display_lines.return_value = ["· 45s · ↑ 2.3k tokens", "· 45s · ↑ 2.3k tokens"]
@@ -948,6 +951,7 @@ class TestSpinnerFilterRobust:
         sess = MagicMock()
         sess.is_alive = True
         sess.is_blocked_on_tty_prompt.return_value = None
+        sess.is_blocked_on_permission_prompt.return_value = None
         sess.is_at_update_splash.return_value = False
         sess.display_lines.return_value = ["⠸ running  esc to stop"]
         pane.session = sess
@@ -981,6 +985,7 @@ class TestSpinnerFilterRobust:
         sess = MagicMock()
         sess.is_alive = True
         sess.is_blocked_on_tty_prompt.return_value = None
+        sess.is_blocked_on_permission_prompt.return_value = None
         sess.is_at_update_splash.return_value = False
         sess.display_lines.return_value = ["↓ 100 tokens  · 12s ·"]
         pane.session = sess
