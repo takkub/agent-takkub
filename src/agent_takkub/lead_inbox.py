@@ -140,19 +140,25 @@ _PROMPT_BLOCK_DEFER_CEILING_MS = 30_000
 
 
 def _prompt_block_reason(session) -> str | None:
-    """Return "trust" / "tty" if *session* is currently sitting on an
-    interactive prompt that needs a keypress before it can accept a task
-    paste, else None.
+    """Return "trust" / "permission" / "tty" if *session* is currently
+    sitting on an interactive prompt that needs a keypress before it can
+    accept a task paste, else None.
 
     This is a state `_send_when_ready` must treat as distinct from "busy
     generating" — a modal that periodically redraws (a spinner, agy's
     boot-phase "verifying your account" text) still advances
     `seconds_since_output()`, so before this it silently fell into the
     ordinary #144 busy-wait extension and the Lead heard nothing concrete
-    for up to BUSY_WAIT_CEILING_SEC (issue #186)."""
+    for up to BUSY_WAIT_CEILING_SEC (issue #186). "permission" (#236) is
+    checked before the generic "tty" catch-all so Claude Code's own
+    numbered tool-approval menu — which has no [y/N] bracket for the tty
+    regex to match — gets its own accurate wording instead of being
+    mislabelled a shell prompt."""
     try:
         if session.is_at_trust_prompt():
             return "trust"
+        if session.is_blocked_on_permission_prompt():
+            return "permission"
         if session.is_blocked_on_tty_prompt():
             return "tty"
     except Exception:
@@ -783,6 +789,28 @@ class LeadInboxMixin:
         pane = self._project_panes(project).get(role_name)
         if pane is None:
             return
+        # #235: two `assign`s for the same role can start two independent
+        # _send_when_ready poll loops — nothing dedupes them *before*
+        # _deliver() runs (DeliveryManager's single-flight gate only exists
+        # once a delivery_id is created, inside _deliver()). Left unguarded,
+        # an OLDER call's poll loop keeps running after a NEWER assign for
+        # the same role has already superseded it, and can fire a stale
+        # "task ยังไม่ถึงมือ" busy-wait/unconfirmed warning about the old
+        # attempt at the exact moment `takkub status` correctly shows the
+        # NEW task already delivered and running — two contradicting
+        # sources of truth reaching Lead at once (proven from a live
+        # saas_admin incident transcript). Each call claims the newest
+        # "generation" for (project, role) up front; every poll abandons
+        # quietly the moment a later call supersedes it — no warning, since
+        # a newer delivery is now the source of truth and will report for
+        # itself.
+        project_ns = self._resolve_project(project)
+        dispatch_key = (project_ns, role_name)
+        dispatch_gens: dict[tuple[str, str], int] = self.__dict__.setdefault(
+            "_send_when_ready_generation", {}
+        )
+        my_generation = dispatch_gens.get(dispatch_key, 0) + 1
+        dispatch_gens[dispatch_key] = my_generation
         elapsed = [0]
         sent = [False]
         # Sticky: once we've ever seen this role parked in the spawn gate's
@@ -938,6 +966,18 @@ class LeadInboxMixin:
 
         def _check() -> None:
             if sent[0]:
+                return
+            if dispatch_gens.get(dispatch_key) != my_generation:
+                # #235: a newer assign() for this same role started a fresh
+                # _send_when_ready generation — abandon this stale poll loop
+                # quietly (mark sent so no later branch tries to _deliver()
+                # the superseded payload either).
+                sent[0] = True
+                _log_event(
+                    "task_deliver_superseded",
+                    project=project_ns,
+                    role=role_name,
+                )
                 return
             if pane.session is None or not pane.session.is_alive:
                 # Session absent or not yet alive — may be deferred by the
@@ -1151,7 +1191,10 @@ class LeadInboxMixin:
         lead = self._project_panes(project_ns).get(LEAD.name)
         if not (lead and lead.session and lead.session.is_alive):
             return
-        kind = "trust/onboarding modal" if reason == "trust" else "interactive shell prompt"
+        kind = {
+            "trust": "trust/onboarding modal",
+            "permission": "tool-permission approval dialog",
+        }.get(reason, "interactive shell prompt")
         msg = (
             f"⚠️ [delivery-blocked-prompt] {role_name} pane ติดอยู่ที่ {kind} "
             f"ที่ต้องกดตอบก่อนถึงจะรับ task ได้ — cockpit กำลัง auto-answer อยู่ "

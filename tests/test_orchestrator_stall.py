@@ -150,6 +150,54 @@ class TestComputeLastProgressTs:
         ts = orch._compute_last_progress_ts("qa", "myproj", pane)
         assert ts == pytest.approx(shot_dir.stat().st_mtime, abs=1)
 
+    def test_content_change_ts_wins_over_stale_transcript_mtime(
+        self, runtime_tmp: pathlib.Path, tmp_path: pathlib.Path
+    ) -> None:
+        """#236: raw transcript mtime bumps on every PTY byte including an
+        animated spinner or a permission-dialog redraw, so a pane wedged on
+        either kept reading "last progress: 0s ago" forever — stall
+        detection could never fire. `last_content_change_ts` (the same
+        spinner-filtered hash clock `_check_stuck_panes` already maintains)
+        must win over a freshly-bumped-but-spinner-only transcript mtime."""
+        import os
+
+        transcript = tmp_path / "backend-120000.transcript.log"
+        transcript.write_bytes(b"spinner frame")
+        # Transcript mtime is "now" (spinner redraw just happened)...
+        now = time.time()
+        os.utime(transcript, (now, now))
+        orch = self._make_orch()
+        pane = _FakePane(transcript_path=str(transcript))
+        # ...but the content-delta clock says content actually froze 10
+        # minutes ago (the genuinely last real progress).
+        stale_content_ts = now - 600
+        orch._ps("default::backend").last_content_change_ts = stale_content_ts
+        ts = orch._compute_last_progress_ts("backend", "default", pane)
+        assert ts == pytest.approx(stale_content_ts, abs=1)
+
+    def test_content_change_ts_used_even_without_transcript_path(
+        self, runtime_tmp: pathlib.Path
+    ) -> None:
+        orch = self._make_orch()
+        pane = _FakePane(transcript_path=None)
+        recent = time.time() - 3
+        orch._ps("default::backend").last_content_change_ts = recent
+        ts = orch._compute_last_progress_ts("backend", "default", pane)
+        assert ts == pytest.approx(recent, abs=1)
+
+    def test_falls_back_to_transcript_mtime_before_first_watchdog_tick(
+        self, runtime_tmp: pathlib.Path, tmp_path: pathlib.Path
+    ) -> None:
+        """A freshly-assigned pane has no `last_content_change_ts` yet (the
+        5s watchdog tick hasn't run) — must still fall back to transcript
+        mtime rather than reading as 0.0/no-progress."""
+        transcript = tmp_path / "backend-120000.transcript.log"
+        transcript.write_bytes(b"output")
+        orch = self._make_orch()
+        pane = _FakePane(transcript_path=str(transcript))
+        ts = orch._compute_last_progress_ts("backend", "default", pane)
+        assert ts == pytest.approx(transcript.stat().st_mtime, abs=1)
+
     def test_screenshot_dir_ignored_for_non_ui_roles(self, runtime_tmp: pathlib.Path) -> None:
         """backend/frontend/devops roles must NOT pick up screenshot dir mtime."""
         from datetime import datetime
@@ -216,6 +264,33 @@ class TestListStatusDetailed:
         result = orch.list_status_detailed("default")
         assert LEAD.name in result
         assert result[LEAD.name]["stall_minutes"] is None
+
+    def test_blocked_reason_none_for_ordinary_working_pane(self, runtime_tmp: pathlib.Path) -> None:
+        pane = _FakePane(state="working", transcript_path=None)
+        pane.session.is_at_trust_prompt.return_value = False
+        pane.session.is_blocked_on_permission_prompt.return_value = None
+        pane.session.is_blocked_on_tty_prompt.return_value = None
+        orch = self._setup_orch(pane)
+        result = orch.list_status_detailed("default")
+        assert result["qa"]["blocked_reason"] is None
+
+    def test_blocked_reason_surfaces_permission_prompt(self, runtime_tmp: pathlib.Path) -> None:
+        """#236: a `working` pane wedged on Claude Code's own tool-permission
+        dialog must report `blocked_reason: "permission"` instead of reading
+        as ordinary `working` with no distinguishing signal."""
+        pane = _FakePane(state="working", transcript_path=None)
+        pane.session.is_at_trust_prompt.return_value = False
+        pane.session.is_blocked_on_permission_prompt.return_value = "1. Yes"
+        orch = self._setup_orch(pane)
+        result = orch.list_status_detailed("default")
+        assert result["qa"]["blocked_reason"] == "permission"
+
+    def test_blocked_reason_none_for_non_working_state(self, runtime_tmp: pathlib.Path) -> None:
+        pane = _FakePane(state="active", transcript_path=None)
+        pane.session.is_at_trust_prompt.return_value = True  # would match if checked
+        orch = self._setup_orch(pane)
+        result = orch.list_status_detailed("default")
+        assert result["qa"]["blocked_reason"] is None
 
 
 class TestPaneStatusReport:

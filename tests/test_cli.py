@@ -1034,3 +1034,43 @@ class TestRestartCli:
         monkeypatch.setenv("TAKKUB_ROLE", "backend")
         assert cli.main(["restart"]) != 0
         assert len(fake_request) == n  # never reached the socket
+
+
+class TestPrintStatusReport:
+    """#236: `takkub status` must surface a pane blocked on a prompt (e.g.
+    Claude Code's own permission-approval dialog) distinctly from ordinary
+    `working`, not silently collapse the two."""
+
+    def test_blocked_reason_renders_marker_line(self, capsys):
+        report = {
+            "project": "p",
+            "panes": {
+                "backend": {
+                    "state": "working",
+                    "stall_minutes": None,
+                    "last_progress_human": "0s ago",
+                    "last_progress_abs": "12:00:00",
+                    "blocked_reason": "permission",
+                }
+            },
+        }
+        cli._print_status_report(report)
+        out = capsys.readouterr().out
+        assert "⛔ blocked:permission-prompt" in out
+
+    def test_no_blocked_marker_for_ordinary_working_pane(self, capsys):
+        report = {
+            "project": "p",
+            "panes": {
+                "backend": {
+                    "state": "working",
+                    "stall_minutes": None,
+                    "last_progress_human": "0s ago",
+                    "last_progress_abs": "12:00:00",
+                    "blocked_reason": None,
+                }
+            },
+        }
+        cli._print_status_report(report)
+        out = capsys.readouterr().out
+        assert "blocked:" not in out

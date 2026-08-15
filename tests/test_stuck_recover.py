@@ -50,6 +50,9 @@ class _FakePane:
             # Default: not blocked on a TTY prompt. Without this, MagicMock
             # returns a truthy stub and the TTY-block gate defers every recovery.
             sess.is_blocked_on_tty_prompt.return_value = None
+            # Default: not blocked on Claude Code's own permission-approval
+            # dialog (#236). Same truthy-MagicMock-stub trap as tty above.
+            sess.is_blocked_on_permission_prompt.return_value = None
             # Default: no update splash (#62). MagicMock returns truthy otherwise,
             # which would route every recovery through the splash path.
             sess.is_at_update_splash.return_value = False
@@ -119,10 +122,12 @@ class _FakeOrch:
         # the fake (the watchdog calls `self._auto_recover_stuck`).
         Orchestrator._auto_recover_stuck(self, role, project, pane, now)  # type: ignore[arg-type]
 
-    def _maybe_surface_tty_block(self, key, role, project, prompt_line, now) -> None:
-        Orchestrator._maybe_surface_tty_block(self, key, role, project, prompt_line, now)  # type: ignore[arg-type]
+    def _maybe_surface_tty_block(self, key, role, project, prompt_line, now, *, kind="tty") -> None:
+        Orchestrator._maybe_surface_tty_block(  # type: ignore[arg-type]
+            self, key, role, project, prompt_line, now, kind=kind
+        )
 
-    def _surface_tty_block_notice(self, role, project, prompt_line) -> None:
+    def _surface_tty_block_notice(self, role, project, prompt_line, *, kind="tty") -> None:
         # Record that Lead was notified so tests can assert surface behaviour.
         self.tty_surface_calls.append((role, project, prompt_line))
 

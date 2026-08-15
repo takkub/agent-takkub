@@ -66,6 +66,7 @@ from .lead_inbox import (  # re-exported for test/compat imports; mixin provides
     _delayed_enter,
     _delayed_enter_verified,
     _notice_role_tag,
+    _prompt_block_reason,
     _safe_session_write,
     _unwrap_notice_item,
 )
@@ -3383,20 +3384,37 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         """Return the most-recent activity timestamp for `pane` (0.0 = no baseline).
 
         Checks three signals and returns the largest (= most recent):
-          1. Transcript file mtime — new PTY bytes written
+          1. Spinner-filtered content-delta clock (`PaneState.last_content_change_ts`,
+             maintained every IDLE_WATCHDOG_INTERVAL_MS tick by `_check_stuck_panes`) —
+             falls back to raw transcript file mtime only before that clock has ever
+             been populated for this pane (e.g. the first few seconds after spawn)
           2. Today's screenshot directory mtime — QA captured a new shot
           3. Last `takkub send` delivery timestamp — orchestrator pushed a message
+
+        #236: signal 1 used to be raw transcript mtime unconditionally, which bumps
+        on every PTY byte including an animated spinner ("Doing... (esc to cancel,
+        412s)") or a permission-dialog redraw — a pane wedged on either read as
+        "last progress: 0s ago" forever, so stall detection could never fire.
+        `last_content_change_ts` is the same spinner/counter-filtered hash clock
+        `_check_stuck_panes`'s auto-recover watchdog already relies on (Lead is
+        skipped there, so Lead panes always fall back to transcript mtime here —
+        matches prior behaviour, Lead was never in scope for stall detection).
         """
         ts = 0.0
 
-        transcript_path = getattr(pane, "_transcript_path", None)
-        if transcript_path:
-            try:
-                mt = pathlib.Path(transcript_path).stat().st_mtime
-                if mt > ts:
-                    ts = mt
-            except OSError:
-                pass
+        ps = (getattr(self, "_pane_state", None) or {}).get(f"{project_ns}::{role}")
+        content_ts = ps.last_content_change_ts if ps is not None else None
+        if content_ts:
+            ts = content_ts
+        else:
+            transcript_path = getattr(pane, "_transcript_path", None)
+            if transcript_path:
+                try:
+                    mt = pathlib.Path(transcript_path).stat().st_mtime
+                    if mt > ts:
+                        ts = mt
+                except OSError:
+                    pass
 
         if _split_shard(role)[0] in ("qa", "critic", "designer"):
             today = datetime.now().strftime("%Y-%m-%d")
@@ -3419,10 +3437,20 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
     def list_status_detailed(self, project: str | None = None) -> dict[str, dict]:
         """Extended status snapshot with stall detection.
 
-        Returns `{role: {"state": str, "stall_minutes": int|None, "last_progress_ts": float}}`.
+        Returns `{role: {"state": str, "stall_minutes": int|None,
+        "last_progress_ts": float, "blocked_reason": str|None}}`.
         `stall_minutes` is set when the pane is `working` and no progress signal
         has been seen for more than STALL_THRESHOLD_SEC.
-        """
+
+        `blocked_reason` (#236) is `None` / "trust" / "permission" / "tty" —
+        set whenever the pane is sitting on a prompt that needs a human
+        keypress, so a Lead reading `takkub status` sees that concretely
+        instead of a bare "working" that never distinguishes "generating"
+        from "stuck waiting for a keypress" (the devops pane that sat on a
+        permission dialog for 2h51m while status kept reporting "working,
+        progress 0s ago"). `pane.state` itself is left untouched — this is
+        additive reporting only, not a new internal pane-state value, so
+        every existing `pane.state == "working"` check elsewhere is unaffected."""
         now = time.time()
         project_ns = self._resolve_project(project)
         result: dict[str, dict] = {}
@@ -3430,19 +3458,30 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             state = pane.state
             stall_minutes: int | None = None
             last_progress_ts = 0.0
+            blocked_reason: str | None = None
             if state == "working" and pane.session is not None and pane.session.is_alive:
                 last_progress_ts = self._compute_last_progress_ts(role, project_ns, pane)
                 if last_progress_ts > 0:
                     silent_for = now - last_progress_ts
                     if silent_for >= STALL_THRESHOLD_SEC:
                         stall_minutes = int(silent_for // 60)
+                try:
+                    blocked_reason = _prompt_block_reason(pane.session)
+                except Exception:
+                    blocked_reason = None
             result[role] = {
                 "state": state,
                 "stall_minutes": stall_minutes,
                 "last_progress_ts": last_progress_ts,
+                "blocked_reason": blocked_reason,
             }
         for role, state in self._pending_notice_roles(project_ns, result).items():
-            result[role] = {"state": state, "stall_minutes": None, "last_progress_ts": 0.0}
+            result[role] = {
+                "state": state,
+                "stall_minutes": None,
+                "last_progress_ts": 0.0,
+                "blocked_reason": None,
+            }
         return result
 
     def performance_status(self, project: str | None = None) -> dict:
@@ -3656,6 +3695,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                 "last_progress_ts": last_ts,
                 "last_progress_human": human_ts,
                 "last_progress_abs": abs_ts,
+                "blocked_reason": info.get("blocked_reason"),
                 "transcript_tail": transcript_tail,
                 "last_screenshot": last_screenshot,
                 "done_events": done_events,
@@ -4341,13 +4381,25 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                     # "press any key"). The idle reminder is the wrong context here
                     # and close→respawn (stuck recover) won't help — the prompt comes
                     # from the subprocess. Surface a separate notice to Lead instead.
-                    _tty_prompt = pane.session.is_blocked_on_tty_prompt()
+                    # #236: also check Claude Code's own numbered tool-permission
+                    # menu (no [y/N] bracket, so is_blocked_on_tty_prompt() alone
+                    # misses it — a pane stuck there used to silently read as
+                    # ordinary busy generation forever).
+                    _perm_prompt = pane.session.is_blocked_on_permission_prompt()
+                    _tty_prompt = _perm_prompt or pane.session.is_blocked_on_tty_prompt()
                     if _tty_prompt:
                         entry["first_idle_ts"] = None
                         entry["last_reminder_ts"] = 0.0
                         entry["notice_rounds"] = 0
                         entry["escalated"] = False
-                        self._maybe_surface_tty_block(key, name, project_name, _tty_prompt, now)
+                        self._maybe_surface_tty_block(
+                            key,
+                            name,
+                            project_name,
+                            _tty_prompt,
+                            now,
+                            kind="permission" if _perm_prompt else "tty",
+                        )
                         continue
                     # Clear block state when no longer blocked.
                     _ps_tty = getattr(self, "_pane_state", {}).get(key)
@@ -4499,8 +4551,12 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                         continue  # still streaming → genuinely busy, not blind
                     if sess.is_at_ready_prompt():
                         continue  # recognised idle → markers working
-                    if sess.is_blocked_on_tty_prompt() or sess.is_at_trust_prompt():
-                        continue  # recognised shell/trust prompt
+                    if (
+                        sess.is_blocked_on_tty_prompt()
+                        or sess.is_at_trust_prompt()
+                        or sess.is_blocked_on_permission_prompt()
+                    ):
+                        continue  # recognised shell/trust/permission prompt
                     if sess.is_at_update_splash():
                         continue  # recognised codex splash (handled elsewhere)
                     # Alive + settled + unrecognised → markers likely stale.
@@ -4592,6 +4648,7 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                         not sess.is_at_ready_prompt()
                         or sess.shows_startup_marker()
                         or sess.is_blocked_on_tty_prompt()
+                        or sess.is_blocked_on_permission_prompt()
                         or ps.rate_limited_until > now
                     ):
                         # #190: don't null out idle_since for the busy stretch
@@ -4852,8 +4909,10 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                     # TTY_BLOCK_SURFACE_AFTER_S grace period and surface immediately
                     # (only the repeat-spam cooldown applies).
                     try:
-                        _tty_stuck = pane.session.is_blocked_on_tty_prompt()
+                        _perm_stuck = pane.session.is_blocked_on_permission_prompt()
+                        _tty_stuck = _perm_stuck or pane.session.is_blocked_on_tty_prompt()
                     except Exception:
+                        _perm_stuck = None
                         _tty_stuck = None
                     if _tty_stuck:
                         _ps_tty = self._ps(key)
@@ -4862,7 +4921,12 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
                         if (
                             now - _ps_tty.last_tty_block_surface_ts
                         ) >= TTY_BLOCK_SURFACE_COOLDOWN_S:
-                            self._surface_tty_block_notice(role, project_name, _tty_stuck)
+                            self._surface_tty_block_notice(
+                                role,
+                                project_name,
+                                _tty_stuck,
+                                kind="permission" if _perm_stuck else "tty",
+                            )
                             _ps_tty.last_tty_block_surface_ts = now
                         continue
                     # Issue #62: codex 'update available!' splash blocks ready-prompt.
@@ -5492,11 +5556,22 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         self.statusChanged.emit()
 
     def _maybe_surface_tty_block(
-        self, key: str, role: str, project: str, prompt_line: str, now: float
+        self,
+        key: str,
+        role: str,
+        project: str,
+        prompt_line: str,
+        now: float,
+        *,
+        kind: str = "tty",
     ) -> None:
         """Record the TTY block start time and call _surface_tty_block_notice
         once the block has lasted TTY_BLOCK_SURFACE_AFTER_S, then re-surface
-        at most every TTY_BLOCK_SURFACE_COOLDOWN_S while still blocked."""
+        at most every TTY_BLOCK_SURFACE_COOLDOWN_S while still blocked.
+
+        ``kind="permission"`` (#236) is Claude Code's own numbered tool-
+        approval dialog rather than a subprocess y/N prompt — same timing
+        machinery, different wording so Lead reads the right remedy."""
         ps = self._ps(key)
         if ps.tty_blocked_since is None:
             ps.tty_blocked_since = now
@@ -5504,12 +5579,15 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
             now - ps.tty_blocked_since >= TTY_BLOCK_SURFACE_AFTER_S
             and now - ps.last_tty_block_surface_ts >= TTY_BLOCK_SURFACE_COOLDOWN_S
         ):
-            self._surface_tty_block_notice(role, project, prompt_line)
+            self._surface_tty_block_notice(role, project, prompt_line, kind=kind)
             ps.last_tty_block_surface_ts = now
 
-    def _surface_tty_block_notice(self, role: str, project: str, prompt_line: str) -> None:
+    def _surface_tty_block_notice(
+        self, role: str, project: str, prompt_line: str, *, kind: str = "tty"
+    ) -> None:
         """Inject a notice into Lead's input when a teammate pane is blocked
-        on an interactive subprocess prompt (issue #54).
+        on an interactive prompt (issue #54; #236 for the permission-dialog
+        variant).
 
         Does NOT auto-close or respawn — surface + nudge only. Lead (or the
         operator) decides whether to send a non-interactive flag or manually
@@ -5517,15 +5595,24 @@ class Orchestrator(PipelineMixin, LeadInboxMixin, SpawnEngineMixin, AutoResumeMi
         lead = self._project_panes(project).get(LEAD.name)
         if not (lead and lead.session and lead.session.is_alive):
             return
-        msg = (
-            f"⚠️ [{role}] ค้างรอ input: '{prompt_line}' — "
-            f"subprocess รอคำตอบ interactive (y/N, passphrase, 'press any key'). "
-            f"แก้: รัน subprocess แบบ non-interactive "
-            f"(เช่น `-y`, `--no-input`, `DEBIAN_FRONTEND=noninteractive`) "
-            f'หรือ `takkub send --to {role} "<คำแนะนำ>"` เพื่อปลด block'
-        )
+        if kind == "permission":
+            msg = (
+                f"⛔ [{role}] ค้างที่ permission-prompt: '{prompt_line}' — "
+                f"tool-permission dialog ของ CLI เอง (ไม่ใช่ subprocess) รอกด 1/2/3 "
+                f"หรือ Esc, ถึงแม้เปิด bypass-permissions ไว้ก็ยังหลุดมาเจอได้. "
+                f"แก้: เข้าไปดู pane ตรงๆ หรือ "
+                f'`takkub send --to {role} "<คำแนะนำ>"` เพื่อปลด block (issue #236)'
+            )
+        else:
+            msg = (
+                f"⚠️ [{role}] ค้างรอ input: '{prompt_line}' — "
+                f"subprocess รอคำตอบ interactive (y/N, passphrase, 'press any key'). "
+                f"แก้: รัน subprocess แบบ non-interactive "
+                f"(เช่น `-y`, `--no-input`, `DEBIAN_FRONTEND=noninteractive`) "
+                f'หรือ `takkub send --to {role} "<คำแนะนำ>"` เพื่อปลด block'
+            )
         self._notify_lead(project, msg)
-        _log_event("tty_block_surface", role=role, project=project, prompt=prompt_line)
+        _log_event("tty_block_surface", role=role, project=project, prompt=prompt_line, kind=kind)
 
     def _inject_idle_reminder(
         self,

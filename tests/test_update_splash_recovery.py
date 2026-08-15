@@ -85,6 +85,7 @@ class _FakeSplashPane:
         sess = MagicMock()
         sess.is_alive = True
         sess.is_blocked_on_tty_prompt.return_value = None
+        sess.is_blocked_on_permission_prompt.return_value = None
         sess.is_at_update_splash.return_value = at_splash
         self.session = sess
 
@@ -119,10 +120,12 @@ class _FakeSplashOrch:
     def _auto_recover_stuck(self, role, project, pane, now):
         Orchestrator._auto_recover_stuck(self, role, project, pane, now)  # type: ignore[arg-type]
 
-    def _maybe_surface_tty_block(self, key, role, project, prompt_line, now):
-        Orchestrator._maybe_surface_tty_block(self, key, role, project, prompt_line, now)  # type: ignore[arg-type]
+    def _maybe_surface_tty_block(self, key, role, project, prompt_line, now, *, kind="tty"):
+        Orchestrator._maybe_surface_tty_block(  # type: ignore[arg-type]
+            self, key, role, project, prompt_line, now, kind=kind
+        )
 
-    def _surface_tty_block_notice(self, role, project, prompt_line):
+    def _surface_tty_block_notice(self, role, project, prompt_line, *, kind="tty"):
         pass
 
     def _check_shell_open_dialog(self, project_name, role, pane, key, now) -> None:

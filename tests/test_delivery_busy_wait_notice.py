@@ -38,6 +38,7 @@ def _live_session() -> MagicMock:
     # non-blocked pane, so pin the mocks to match.
     s.is_at_trust_prompt.return_value = False
     s.is_blocked_on_tty_prompt.return_value = None
+    s.is_blocked_on_permission_prompt.return_value = None
     return s
 
 

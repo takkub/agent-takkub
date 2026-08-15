@@ -68,6 +68,7 @@ def _sess(
     s.seconds_since_output.return_value = quiet
     s.is_at_ready_prompt.return_value = ready
     s.is_blocked_on_tty_prompt.return_value = tty
+    s.is_blocked_on_permission_prompt.return_value = None
     s.is_at_trust_prompt.return_value = trust
     s.is_at_update_splash.return_value = splash
     s.display_lines.return_value = lines or ["", "» reworded prompt nobody knows", ""]

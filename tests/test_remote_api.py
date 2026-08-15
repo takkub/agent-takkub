@@ -273,8 +273,19 @@ class _FakePane:
 
 
 class _FakeOrchWithPanes:
-    def __init__(self, panes_by_project: dict) -> None:
+    def __init__(self, panes_by_project: dict, pending_notice_roles: dict | None = None) -> None:
         self._panes_by_project = panes_by_project
+        # {project_ns: {role: state}} — mirrors Orchestrator._pending_notice_roles'
+        # real return shape when present, letting #225 tests opt in without
+        # touching every other fixture that doesn't care about it.
+        self._pending = pending_notice_roles or {}
+
+    def _pending_notice_roles(self, project_ns: str, known: dict) -> dict:
+        return {
+            role: state
+            for role, state in self._pending.get(project_ns, {}).items()
+            if role not in known
+        }
 
 
 class TestActivity:
@@ -418,6 +429,69 @@ class TestActivity:
     def test_no_open_panes_returns_empty_projects(self):
         result = api.activity(_FakeOrchWithPanes({}))
         assert result == {"projects": []}
+
+    def test_pending_notice_role_stays_visible_after_pane_closes(self, monkeypatch):
+        """#225: done() auto-closes its own pane ~2.5s after reporting, well
+        before the done-notice necessarily finishes its trip to Lead. This
+        endpoint reads `_panes_by_project` directly (unlike `takkub list`/
+        `status`, which #163 already patched via `_pending_notice_roles`) so
+        a role that just finished used to vanish from the mobile feed
+        instantly. It must now surface as a coarse "idle" entry instead."""
+        orch = _FakeOrchWithPanes(
+            {"proj-a": {"lead": _FakePane("idle", None)}},
+            pending_notice_roles={"proj-a": {"backend": "done (pending)"}},
+        )
+        result = api.activity(orch)
+        assert result == {
+            "projects": [
+                {
+                    "project": "proj-a",
+                    "roles": [
+                        {
+                            "role": "backend",
+                            "state": "idle",
+                            "runtime_sec": 0,
+                            "provider": "claude",
+                        }
+                    ],
+                    "lead": {"state": "idle", "runtime_sec": 0, "provider": "claude"},
+                }
+            ]
+        }
+
+    def test_pending_notice_role_omitted_when_show_team_off(self, monkeypatch):
+        """DATA-MIN: PULSE_SHOW_TEAM=False must not leak a teammate's
+        existence via the pending-notice path either — same gate as the
+        live-pane roles list."""
+        monkeypatch.setattr(api._remote_config, "PULSE_SHOW_TEAM", False)
+        orch = _FakeOrchWithPanes(
+            {"proj-a": {"lead": _FakePane("idle", None)}},
+            pending_notice_roles={"proj-a": {"backend": "done (pending)"}},
+        )
+        result = api.activity(orch)
+        assert result == {
+            "projects": [
+                {
+                    "project": "proj-a",
+                    "roles": [],
+                    "lead": {"state": "idle", "runtime_sec": 0, "provider": "claude"},
+                }
+            ]
+        }
+
+    def test_pending_notice_role_not_duplicated_once_live_again(self, monkeypatch):
+        """A role respawned under the same name before its old notice
+        finished delivering must show its real live state once, not a
+        duplicate synthetic "idle" entry alongside it."""
+        orch = _FakeOrchWithPanes(
+            {"proj-a": {"lead": _FakePane("idle", None), "backend": _FakePane("working", None)}},
+            pending_notice_roles={"proj-a": {"backend": "done (pending)"}},
+        )
+        result = api.activity(orch)
+        roles = result["projects"][0]["roles"]
+        assert len(roles) == 1
+        assert roles[0]["role"] == "backend"
+        assert roles[0]["state"] == "working"
 
     def test_never_leaks_task_cwd_or_transcript_fields(self, monkeypatch):
         now = 500.0

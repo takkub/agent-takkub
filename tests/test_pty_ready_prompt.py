@@ -273,6 +273,65 @@ class TestIsBlockedOnTtyPrompt:
         assert blocked.is_blocked_on_tty_prompt() is not None
 
 
+# -- is_blocked_on_permission_prompt() -- issue #236 -------------------------
+
+
+class TestIsBlockedOnPermissionPrompt:
+    """Claude Code's own numbered tool-permission approval dialog has no
+    [y/N] bracket for is_blocked_on_tty_prompt()'s regex to match, so a pane
+    wedged on one used to read as ordinary busy generation forever — a real
+    incident left a pane stuck 2h51m with `takkub status` reporting "working,
+    progress 0s ago" throughout."""
+
+    def test_bash_permission_dialog_detected(self) -> None:
+        s = _feed_screen(
+            "Bash command",
+            "  rtk curl -s -D - -o /dev/null http://localhost:6700/",
+            "Do you want to proceed?",
+            "❯ 1. Yes",
+            "  2. Yes, and don't ask again for rtk commands in this project",
+            "  3. No, and tell Claude what to do differently (esc)",
+        )
+        result = s.is_blocked_on_permission_prompt()
+        assert result is not None
+        assert "1. yes" in result.lower()
+
+    def test_edit_permission_dialog_detected(self) -> None:
+        # The question line varies per tool — detection must not depend on it.
+        s = _feed_screen(
+            "Do you want to make this edit to orchestrator.py?",
+            "❯ 1. Yes",
+            "  2. Yes, allow all edits during this session",
+            "  3. No, and tell Claude what to do differently (esc)",
+        )
+        assert s.is_blocked_on_permission_prompt() is not None
+
+    def test_returns_none_on_claude_ready_prompt(self) -> None:
+        s = _feed_screen("What would you like to do next?", "bypass permissions")
+        assert s.is_blocked_on_permission_prompt() is None
+
+    def test_returns_none_on_ordinary_busy_spinner(self) -> None:
+        s = _feed_screen("Doing... (esc to cancel, 12s)")
+        assert s.is_blocked_on_permission_prompt() is None
+
+    def test_returns_none_on_empty_screen(self) -> None:
+        s = _feed_screen("")
+        assert s.is_blocked_on_permission_prompt() is None
+
+    def test_returns_none_when_option_1_present_without_confirm_companion(self) -> None:
+        # A numbered list ("1. Yes") alone, with no "No"/"esc to cancel"
+        # nearby, must not false-positive as a permission dialog.
+        s = _feed_screen("Steps:", "1. Yes, run the migration", "2. Verify output")
+        assert s.is_blocked_on_permission_prompt() is None
+
+    def test_returns_none_on_tty_shell_prompt(self) -> None:
+        # Orthogonal to is_blocked_on_tty_prompt() — a generic shell y/N
+        # prompt is not this dialog.
+        s = _feed_screen("Overwrite? [y/N]")
+        assert s.is_blocked_on_permission_prompt() is None
+        assert s.is_blocked_on_tty_prompt() is not None
+
+
 # -- has_unparsed_tool_call() -- issue #59 ------------------------------------
 
 

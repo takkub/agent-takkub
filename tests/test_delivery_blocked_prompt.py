@@ -41,6 +41,7 @@ def _live_session() -> MagicMock:
     s.write = MagicMock()
     s.is_at_trust_prompt.return_value = False
     s.is_blocked_on_tty_prompt.return_value = None
+    s.is_blocked_on_permission_prompt.return_value = None
     return s
 
 
@@ -260,15 +261,23 @@ class TestNeverBlindPasteIntoModal:
 
         s = MagicMock()
         s.is_at_trust_prompt.return_value = True
+        s.is_blocked_on_permission_prompt.return_value = None
         s.is_blocked_on_tty_prompt.return_value = None
         assert _prompt_block_reason(s) == "trust"
 
         s2 = MagicMock()
         s2.is_at_trust_prompt.return_value = False
+        s2.is_blocked_on_permission_prompt.return_value = None
         s2.is_blocked_on_tty_prompt.return_value = "Overwrite? (y/n)"
         assert _prompt_block_reason(s2) == "tty"
 
         s3 = MagicMock()
         s3.is_at_trust_prompt.return_value = False
+        s3.is_blocked_on_permission_prompt.return_value = None
         s3.is_blocked_on_tty_prompt.return_value = None
         assert _prompt_block_reason(s3) is None
+
+        s4 = MagicMock()
+        s4.is_at_trust_prompt.return_value = False
+        s4.is_blocked_on_permission_prompt.return_value = "1. Yes"
+        assert _prompt_block_reason(s4) == "permission"
