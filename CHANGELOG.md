@@ -4,6 +4,45 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.64] - 2026-08-16
+
+รอบ **"cockpit เลิกโกหก Lead + ลดค่า token ต่อ pane"** — วันเดียวปิด 16 issue (#251-#266) ที่เกือบทั้งหมดโผล่มาจากการใช้งานจริงเช้าวันนั้น เริ่มจาก remote-control ที่ดับเองทุกคืน แล้วสาวไปเจอตระกูลบั๊ก "สัญญาณที่ดูน่าเชื่อถือแต่ไม่จริง" อีกเป็นพวง
+
+### Fixed (แก้)
+
+**remote-control ตายทุกเช้า (#252, #260)**
+- idle-expire (4 ชม.) เคย `stop()` เซิร์ฟเวอร์+tunnel แล้ว **เขียน `enabled=false` ลงดิสก์** ทำให้เปิด cockpit ใหม่ remote ไม่กลับมาเอง และ re-enable ยัง mint `secret_path`/`token` ใหม่ทุกครั้ง = ต้องสแกน QR ใหม่ทุกเช้า · ตอนนี้แยก **auto-suspend** (พักเอง เก็บ pairing เดิม กลับมาเองตอนเปิด cockpit ใหม่) ออกจาก **Disable ที่ผู้ใช้กดเอง** (revoke pairing ทิ้ง เพื่อเคสมือถือหาย) + `idle_expire_min` ตั้งค่าได้ใน Settings (0 = ปิด)
+- PWA เคยขึ้น chip **"Online" ทั้งที่ tunnel ล่ม** เพราะ `apiFetch` ถือว่า response ที่ resolve = ติดต่อได้ · ตอนนี้แยก 5xx ที่เป็น error page ของ edge (Cloudflare 530 → Offline + บอกว่า cockpit ปิด remote อยู่) ออกจาก 504 JSON ของ cockpit เอง (bridge timeout → ยัง Online แต่บอกว่าตอบช้า)
+
+**สัญญาณที่โกหก Lead (#253, #258, #259, #262, #263, #265, #266)**
+- `takkub wait` **resolve ด้วย done event เก่า** ทำให้ Lead เชื่อว่างานเสร็จแล้วทั้งที่ pane ยังทำอยู่ → commit/สรุปงานที่ยังไม่เสร็จ · แก้โดยยกพื้นความสดด้วย `assign_ts` ของ role นั้น event เก่าจึงชนะ assignment ปัจจุบันไม่ได้อีก (#262)
+- `wait` เคยหูหนวกกับทุกอย่างที่ไม่ใช่ role ที่ตัวเองเฝ้า ตอนนี้ตื่นเมื่อมี blocking report จาก role อื่น (#253) · จาก role ที่เฝ้าเองแต่ไม่ใช่ done/FAILED เช่น `[delivery-unconfirmed]` (#259) · และ **เมื่อเจ้าของพิมพ์ข้อความใหม่เข้ามา** (#265) ซึ่งเดิมต้องรอจนครบ timeout 30 นาที
+- delivery ที่ถูก cancel แล้วยัง **paste ซ้ำทับ composer** ได้ เพราะ path repaste ไม่ได้แนบ validator (#258)
+- notice ถูกส่งถึง Lead โดยไม่เช็คว่ายังจริงอยู่ไหม → Lead ได้แต่ "ข่าวเก่า" (worktree ที่ commit ไปแล้ว, pane ที่ปิดไปแล้ว) ตอนนี้ re-validate ก่อน flush + ติดเวลาเกิดเหตุ (#266)
+- สถานะ pane เคยมาจาก 3 แหล่งที่ขัดกันเอง — เพิ่ม flag `delivery_unconfirmed` ให้ `takkub list` บอกได้ว่า "ยังส่งงานไม่ถึง" แทนที่จะขึ้น working ลอยๆ (#263 บางส่วน)
+
+**งานส่งไม่ถึง pane (#254, #255, #256, #257)**
+- pane ที่ค้างเฟส boot (codex โหลด MCP) เคยเงียบยาวถึง 30 นาทีเพราะ spinner ทำให้ busy-wait ต่ออายุตัวเอง ตอนนี้ยิง `[delivery-boot-stall]` ที่ ~110 วินาที พร้อมบอกวิธีแก้ (#254)
+- เพิ่ม `takkub task cancel --role` + `takkub send` ยกเลิก delivery ค้างให้อัตโนมัติ + `expire_stale()` ที่เดิมเป็น dead code และ scope ผิด (จะกวาด delivery ที่ teammate กำลังทำงานจริงอยู่) (#255)
+- gemini/agy ขึ้น auth-failure หลอกทุก cold start เพราะ banner ของมันพิมพ์ "You are currently not signed in." เอง — ย้ายไปเป็น transient marker ที่มี grace คุม (#256)
+- kimi ไม่มี ready marker เลย (`ready_rules=()`) ทำให้ task **ไม่เคยถูกส่งถึง** — ใส่ marker ที่ capture จาก TUI จริง (#257)
+
+**รายงาน "ไฟล์ที่แตะ" ผิด (#251, #261)**
+- โหมด shared tree เคยรายงาน dirty ทั้งทรี รวมงานของ pane อื่นและไฟล์ค้างเก่า · ตอนนี้ snapshot dirty path + mtime/size ตอน assign แล้วเทียบตอน done · probe ล้มเหลว = แสดง "ตรวจไม่ได้" ไม่ใช่แกล้งบอกว่าสะอาด (#251)
+- `?? dir/` ที่ git ยุบมา ถูกขยายเป็นระดับไฟล์ด้วย `-uall` ที่ scope เฉพาะโฟลเดอร์นั้น (cap 2000 entry + fallback) เพื่อไม่ให้ไฟล์ที่แก้ลึกในโฟลเดอร์ untracked หลุดรายงาน (#261)
+
+### Added (ของใหม่)
+
+- **กันกดปิด pane ผิด** — กด X บนหัว pane หรือบนแท็บ ต้องยืนยันก่อน โดยบอกว่า role ไหน กำลังทำงานอยู่ไหม และมีไฟล์ที่ยังไม่ commit / commit ที่ยังไม่ merge อยู่เท่าไหร่ · default = ยกเลิก · **เส้นทางปิดอัตโนมัติทุกทางไม่ถูกแตะ** (CLI close, auto-close หลัง done, close-all, shutdown) เพื่อไม่ให้ automation ค้างรอคนกด
+- **หลอดแสดงโควต้าในป็อปอัพ usage** — Claude 2 หลอด (5h/7d), Codex 1 หลอด · **provider ที่ไม่มีโควต้าจริง (OpenCode) ไม่มีหลอด** เพราะการวาดหลอดโดยไม่มีตัวหารคือการกุตัวเลข · ข้อมูลเก่า (stale) แสดงต่างจากข้อมูลสด
+
+### Changed (เปลี่ยน)
+
+- **token diet (#267)** — วัดจริงจาก session JSONL พบว่า `CLAUDE.md` ที่ root ถูก Claude Code auto-load เข้า**ทุก pane ทุก role ทุกเทิร์น** (6,728 token) ทั้งที่เนื้อหาส่วนใหญ่เป็นคู่มือ Lead เท่านั้น · ย้ายเนื้อหา Lead-only ไป `docs/lead/role-and-workflow.md` (ครบทุกหัวข้อ ไม่ลดเนื้อหา) เหลือ root CLAUDE.md **948 token** = ลด 5,780 token ต่อ pane ต่อเทิร์น
+- `takkub wait` ลด cap `--timeout` จาก 2 ชั่วโมงเหลือ 30 นาที เพื่อไม่ให้ Lead เผลอ park ยาวโดยไม่มีจุดเช็คอิน (#253)
+- installed build: rewrite path ของเอกสาร `docs/lead/*.md` ตามเข้าไปในตัวไฟล์ที่ ship ไปด้วย ไม่ใช่แค่ระดับบนสุด
+
+
 ## [1.0.63] - 2026-08-15
 
 รอบ **"pane ค้างต้องรู้ตัวใน 1-2 นาที ไม่ใช่ 30 นาที"** — ปิด #247, #248, #249, #250 ต่อจากรอบ 1.0.62 เน้นเรื่องเดียว: สัญญาณที่ cockpit ใช้ตัดสินว่า pane "ยังทำงานอยู่" ต้องเป็นความคืบหน้าจริง ไม่ใช่แค่มีไบต์ไหลออกมา
