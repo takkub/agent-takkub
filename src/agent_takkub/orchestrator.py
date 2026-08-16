@@ -59,6 +59,7 @@ from .lead_context import (  # re-exported for test imports
 )
 from .lead_draft_state import LeadDraftState  # re-exported for test imports
 from .lead_inbox import (  # re-exported for test/compat imports; mixin provides methods
+    _BLOCKING_NOTICE_MARKERS,
     _SUBMIT_MAX_RESENDS,
     _SUBMIT_VERIFY_GRACE_MS,
     LEAD_NOTIFY_BUSY_CAP,
@@ -69,6 +70,7 @@ from .lead_inbox import (  # re-exported for test/compat imports; mixin provides
     _notice_role_tag,
     _prompt_block_reason,
     _safe_session_write,
+    _system_marker_role,
     _unwrap_notice_item,
 )
 from .lead_wait import LeadWaitMixin  # mixin providing takkub-wait methods (#242)
@@ -1037,6 +1039,18 @@ class Orchestrator(
         # submitted yet. Fed by _on_pane_input via
         # LeadInboxMixin._track_lead_draft_input; see lead_inbox.py.
         self._lead_draft_state: dict[str, LeadDraftState] = {}
+        # #265: wall-clock of the most recent byte `_on_pane_input` saw the
+        # Lead pane's owner actually type (submitted or still drafting —
+        # either way proves they're about to act). Stamped from the exact
+        # same choke point as `_lead_draft_state` above, so it inherits the
+        # same guarantee: engine-originated writes (notices/tasks) go
+        # straight to `session.write()` and never pass through here, so
+        # they can never be mistaken for the owner interrupting. Unlike
+        # `_lead_draft_state` (which resets to "empty"/pending_since=0.0 the
+        # instant Enter submits a line), this timestamp is never cleared —
+        # `LeadWaitMixin.poll_wait` needs "did the owner type ANYTHING
+        # after this wait started", not "is a draft currently held".
+        self._lead_last_user_input_ts: dict[str, float] = {}
 
         # Per-cockpit-run capability token. Injected only into the Lead pane
         # env (TAKKUB_LEAD_TOKEN) so the Lead takkub CLI can authenticate
@@ -3754,13 +3768,61 @@ class Orchestrator(
         Returns ``{"role": ..., "detail": ...}`` for the first match
         (first-found, not severity-ranked — a second call after Lead
         handles it and re-waits will surface the next one), else None.
+
+        #259: `inbox_report` tags [spawn-failed]/[delivery-unconfirmed]/
+        [spawn-stuck]/[delivery-boot-stall] notices "system" (`_notice_role_tag`
+        doesn't parse their shape — see `_system_marker_role`'s comment),
+        so before this fix EVERY notice of these 4 kinds was silently
+        dropped here regardless of watched/unwatched, not just for a
+        watched role as originally reported — `_system_marker_role` below
+        recovers the real target role so a genuinely outside role's
+        boot-stall/unconfirmed/stuck notice reaches this interrupt too.
         """
         for item in self.inbox_report(project=project_ns):
             role = item.get("role")
-            if not role or role == "system" or role in watched_roles:
-                continue
             body = str(item.get("body", ""))
+            if role == "system":
+                role = _system_marker_role(body)
+            if not role or role in watched_roles:
+                continue
             if not _is_blocking_lead_notice(body):
+                continue
+            first_line = body.strip().splitlines()[0] if body.strip() else ""
+            return {"role": role, "detail": first_line[:200]}
+        return None
+
+    def _pending_system_notice_for_watched(
+        self, project_ns: str, pending_roles: set[str]
+    ) -> dict[str, str] | None:
+        """(#259) A delivery-health system notice about a role Lead IS
+        watching — [delivery-unconfirmed]/[spawn-stuck]/[delivery-boot-stall]/
+        [spawn-failed] — never calls `done()`/`failed()`, so unlike a
+        watched role's own done/FAILED report (already resolved every
+        poll tick via `_wait_done_events`), this class of notice used to
+        sit invisible in the inbox for the role's own wait until the full
+        --timeout elapsed: `_pending_notice_outside` deliberately skips
+        roles in the watched set (a role's own done/FAILED must resolve
+        through the normal path, not double-fire as an "interrupt"
+        against itself), and nothing else ever checked the watched set
+        for this notice class. Reported live: `wait --role kimi` sat
+        blind for the full 30 minutes while a `[delivery-unconfirmed]
+        kimi ...` notice had been sitting in the inbox since minute 1.5.
+
+        Deliberately restricted to `_system_marker_role` (the 4 system
+        markers only), NOT the broader `_is_blocking_lead_notice` (which
+        also matches `[role FAILED]`) — a watched role's own FAILED
+        already resolves through `_wait_done_events` the moment `failed()`
+        runs; matching it here too would be redundant and races the two
+        resolutions against each other for no benefit.
+
+        Only checked against *pending_roles* (this tick's still-pending
+        watched roles, passed by the caller) — a role that already
+        resolved this tick doesn't need waking.
+        """
+        for item in self.inbox_report(project=project_ns):
+            body = str(item.get("body", ""))
+            role = _system_marker_role(body)
+            if not role or role not in pending_roles:
                 continue
             first_line = body.strip().splitlines()[0] if body.strip() else ""
             return {"role": role, "detail": first_line[:200]}
@@ -4007,11 +4069,75 @@ class Orchestrator(
 
         return ts
 
+    def _role_delivery_unconfirmed(self, project_ns: str, role: str) -> bool:
+        """(#263) True when a "task may not have landed" system notice
+        (spawn-failed / delivery-unconfirmed / spawn-stuck / delivery-boot-stall
+        — `_BLOCKING_NOTICE_MARKERS`, NOT delivery-busy-wait: that one means
+        delivery DID land and the pane is just being slow) is currently
+        pending for *role*.
+
+        Exists because `pane.state` is an ORCHESTRATOR-DECLARED label
+        stamped optimistically at dispatch time ("task assigned = working"),
+        never derived from whether the paste actually reached the pane —
+        real evidence (#263): a gemini pane read "working" from minute one
+        while its screen was stuck on "Signing in..." and the task was
+        never pasted in at all, with the cockpit's own
+        `[delivery-unconfirmed]` notice sitting unread the whole time.
+        `list_status_detailed` surfaces this as an additive flag (not a
+        `pane.state` mutation, so every existing `pane.state == "working"`
+        check elsewhere is unaffected) — a Lead reading `takkub status` can
+        now tell "genuinely running" from "assigned, but delivery layer
+        itself isn't sure it landed" instead of both reading identically as
+        bare "working".
+
+        Deliberately NOT a full unification of the 3 signals #263
+        describes (declared state / ready marker / progress clock) — that
+        would mean re-deriving `pane.state` itself from ready-marker
+        scraping, which lives in provider-specific calibration
+        (`provider_spec.py` / pty_section fixtures) reserved for a parallel
+        fix (#256/#257) this change deliberately does not touch. This is
+        the narrower, safely-additive slice: expose the ALREADY-COMPUTED
+        delivery-health signal next to the existing state instead of
+        trusting `pane.state` alone.
+
+        Scans the 3 raw queues directly (same shape `_has_pending_lead_notice`
+        already reads) rather than going through `inbox_report` — that
+        method's side effect of fingerprinting every returned body into
+        `_inbox_seen` (so a LATER `takkub inbox` pull collapses a digest
+        line the reader already saw) is exactly wrong here: this check runs
+        on every `list_status_detailed()` call (i.e. every `takkub
+        status`/`takkub list`), and marking a still-pending digest item
+        "already read" just because Lead happened to check status would
+        make it render collapsed once it actually flushes — Lead never
+        explicitly read it.
+        """
+
+        def _matches(body: object) -> bool:
+            text = str(body)
+            lowered = text.lower()
+            if not any(marker in lowered for marker in _BLOCKING_NOTICE_MARKERS):
+                return False
+            return _system_marker_role(text) == role
+
+        for entry in getattr(self, "_lead_digest_queue", {}).get(project_ns, ()):
+            body, *_rest = _unwrap_notice_item(entry)
+            if _matches(body):
+                return True
+        for entry in getattr(self, "_lead_notify_queue", {}).get(project_ns, ()):
+            body, *_rest = _unwrap_notice_item(entry)
+            if _matches(body):
+                return True
+        for item in getattr(self, "_pending_done_notices", {}).get(project_ns, ()):
+            if isinstance(item, dict) and _matches(item.get("body", "")):
+                return True
+        return False
+
     def list_status_detailed(self, project: str | None = None) -> dict[str, dict]:
         """Extended status snapshot with stall detection.
 
         Returns `{role: {"state": str, "stall_minutes": int|None,
-        "last_progress_ts": float, "blocked_reason": str|None}}`.
+        "last_progress_ts": float, "blocked_reason": str|None,
+        "delivery_unconfirmed": bool}}`.
         `stall_minutes` is set when the pane is `working` and no progress signal
         has been seen for more than STALL_THRESHOLD_SEC.
 
@@ -4023,7 +4149,13 @@ class Orchestrator(
         permission dialog for 2h51m while status kept reporting "working,
         progress 0s ago"). `pane.state` itself is left untouched — this is
         additive reporting only, not a new internal pane-state value, so
-        every existing `pane.state == "working"` check elsewhere is unaffected."""
+        every existing `pane.state == "working"` check elsewhere is unaffected.
+
+        `delivery_unconfirmed` (#263) is True when a delivery-health system
+        notice is currently pending for this role — see
+        `_role_delivery_unconfirmed`. Same additive-only contract as
+        `blocked_reason`.
+        """
         now = time.time()
         project_ns = self._resolve_project(project)
         result: dict[str, dict] = {}
@@ -4032,6 +4164,7 @@ class Orchestrator(
             stall_minutes: int | None = None
             last_progress_ts = 0.0
             blocked_reason: str | None = None
+            delivery_unconfirmed = False
             if state == "working" and pane.session is not None and pane.session.is_alive:
                 last_progress_ts = self._compute_last_progress_ts(role, project_ns, pane)
                 if last_progress_ts > 0:
@@ -4042,11 +4175,16 @@ class Orchestrator(
                     blocked_reason = _prompt_block_reason(pane.session)
                 except Exception:
                     blocked_reason = None
+                try:
+                    delivery_unconfirmed = self._role_delivery_unconfirmed(project_ns, role)
+                except Exception:
+                    delivery_unconfirmed = False
             result[role] = {
                 "state": self._pane_display_state(pane),
                 "stall_minutes": stall_minutes,
                 "last_progress_ts": last_progress_ts,
                 "blocked_reason": blocked_reason,
+                "delivery_unconfirmed": delivery_unconfirmed,
             }
         for role, state in self._pending_notice_roles(project_ns, result).items():
             result[role] = {
@@ -4054,6 +4192,7 @@ class Orchestrator(
                 "stall_minutes": None,
                 "last_progress_ts": 0.0,
                 "blocked_reason": None,
+                "delivery_unconfirmed": False,
             }
         for role, state in self._queued_resource_roles(project_ns, result).items():
             result[role] = {
@@ -4061,6 +4200,7 @@ class Orchestrator(
                 "stall_minutes": None,
                 "last_progress_ts": 0.0,
                 "blocked_reason": None,
+                "delivery_unconfirmed": False,
             }
         return result
 
@@ -6481,4 +6621,11 @@ class Orchestrator(
             project_ns = self._project_ns_for_pane(pane)
             if project_ns is not None:
                 self._track_lead_draft_input(project_ns, data)
+                # #265: any byte here is proven to be the owner actually
+                # typing (see this method's comment above and
+                # `_lead_last_user_input_ts`'s own docstring) — stamp it so
+                # `LeadWaitMixin.poll_wait` can wake early instead of
+                # leaving the owner queued behind up to --timeout of
+                # teammate polling.
+                self._lead_last_user_input_ts[project_ns] = time.time()
         pane.session.write(data)

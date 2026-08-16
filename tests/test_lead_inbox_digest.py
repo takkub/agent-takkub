@@ -20,6 +20,18 @@ def _lead_pane() -> MagicMock:
     return pane
 
 
+def _working_pane() -> MagicMock:
+    """A non-Lead pane still mid-task — used to make `_other_roles_still_active`
+    (#264) see a genuine burst still forming, so the adaptive short-window
+    path doesn't fire in tests that are specifically about debounce/combine
+    mechanics rather than the adaptive window itself (see
+    test_adaptive_digest_window.py for that)."""
+    pane = MagicMock()
+    pane.state = "working"
+    pane.session = MagicMock()
+    return pane
+
+
 def _written(session: MagicMock) -> str:
     parts: list[str] = []
     for call in session.write.call_args_list:
@@ -49,6 +61,12 @@ def test_default_window_debounces_burst_and_renders_single_digest(
 ) -> None:
     monkeypatch.delenv("TAKKUB_INBOX_DIGEST_MS", raising=False)
     timers: list[tuple[int, object]] = []
+    # #264: the adaptive window only shortens when NO other role is still
+    # active — register one so this stays a genuine "burst still forming"
+    # scenario and keeps testing the full-window debounce/combine behaviour
+    # it's named for (the adaptive path itself is covered separately in
+    # test_adaptive_digest_window.py).
+    orch._panes_by_project[PROJECT]["frontend"] = _working_pane()
 
     with patch(
         "agent_takkub.lead_inbox.QTimer.singleShot",

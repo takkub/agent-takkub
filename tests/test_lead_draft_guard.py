@@ -10,6 +10,12 @@ Covers the engine-side wiring on top of the pure state machine
   - _pump_lead_notify holds delivery while a draft is pending, delivers once
     it clears, and spills to the durable queue once the hold times out.
   - _flush_pending_lead_cc holds while a draft is pending.
+
+Also covers #265's sibling tracker fed by the same choke point:
+Orchestrator._lead_last_user_input_ts, which LeadWaitMixin.poll_wait reads
+to wake `takkub wait` early when the pane's owner types anything. Unlike
+_lead_draft_state it is never cleared on submit — see
+TestOnPaneInputStampsLastUserInputTs.
 """
 
 from __future__ import annotations
@@ -120,6 +126,61 @@ class TestOnPaneInputRouting:
 
         assert lead.session.write.called
         assert getattr(orch, "_lead_draft_state", {}).get(TEST_PROJECT) is None
+
+
+class TestOnPaneInputStampsLastUserInputTs:
+    """#265: `_lead_last_user_input_ts` is stamped from the exact same
+    `_on_pane_input` choke point as `_lead_draft_state` above — same
+    routing rules, same engine-write immunity, proven directly rather than
+    assumed from `TestOnPaneInputRouting`'s coverage of the sibling
+    tracker."""
+
+    def test_lead_pane_input_stamps_the_timestamp(self, orch: Orchestrator) -> None:
+        pane = _make_pane("lead")
+        orch._panes_by_project[TEST_PROJECT] = {"lead": pane}
+        before = time.time()
+
+        orch._on_pane_input("lead", b"hello")
+
+        stamped = orch._lead_last_user_input_ts.get(TEST_PROJECT)
+        assert stamped is not None
+        assert stamped >= before
+
+    def test_non_lead_pane_input_does_not_stamp(self, orch: Orchestrator) -> None:
+        pane = _make_pane("backend")
+        orch._panes_by_project[TEST_PROJECT] = {"backend": pane}
+
+        orch._on_pane_input("backend", b"hello")
+
+        assert getattr(orch, "_lead_last_user_input_ts", {}) == {}
+
+    def test_engine_originated_writes_never_stamp(self, orch: Orchestrator) -> None:
+        """Same #265 false-positive guard as the draft tracker above:
+        _notify_lead bypasses _on_pane_input entirely, so a cockpit-authored
+        notice/task paste must never be mistaken for the owner interrupting
+        `takkub wait`."""
+        lead = _make_pane("lead", ready=True)
+        orch._panes_by_project[TEST_PROJECT] = {"lead": lead}
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            orch._notify_lead(TEST_PROJECT, "an engine-originated notice")
+
+        assert lead.session.write.called
+        assert getattr(orch, "_lead_last_user_input_ts", {}).get(TEST_PROJECT) is None
+
+    def test_stamp_survives_enter_unlike_the_draft_tracker(self, orch: Orchestrator) -> None:
+        """`_lead_draft_state` resets to EMPTY/pending_since=0.0 the instant
+        Enter submits a line — `_lead_last_user_input_ts` must NOT reset,
+        since `poll_wait` needs "did the owner type anything after wait
+        started", not "is a draft currently held"."""
+        pane = _make_pane("lead")
+        orch._panes_by_project[TEST_PROJECT] = {"lead": pane}
+
+        orch._on_pane_input("lead", b"some command")
+        orch._on_pane_input("lead", b"\r")  # Enter — submits the line
+
+        assert orch._lead_draft_state[TEST_PROJECT].state != NONEMPTY
+        assert orch._lead_last_user_input_ts.get(TEST_PROJECT) is not None
 
 
 class TestProjectNsForPane:

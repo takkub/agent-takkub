@@ -19,6 +19,7 @@ import pytest
 from PyQt6.QtCore import QCoreApplication
 
 from agent_takkub import orchestrator as orch_mod
+from agent_takkub.lead_inbox import _INBOX_DIGEST_ADAPTIVE_SETTLE_MS
 from agent_takkub.orchestrator import LEAD, Orchestrator, PaneState
 
 PENDING = Orchestrator._PENDING_NOTICE_STATE
@@ -193,9 +194,16 @@ class TestListStatusSurfacesPendingRole:
 
 
 # ─────────────────────────────────────────────────────────────
-# End-to-end repro: done()'s 2.5s auto-close races the (default 60s) digest
-# window — the pane is gone from the raw registry well before Lead sees the
-# report, but list_status/list_status_detailed keep it visible until then.
+# End-to-end repro: done()'s 2.5s auto-close races the digest window — the
+# pane is gone from the raw registry well before Lead sees the report, but
+# list_status/list_status_detailed keep it visible until then.
+#
+# This repro is a SOLO completion (only "backend" and Lead exist, no other
+# role active) — #264's adaptive window applies its short
+# `_INBOX_DIGEST_ADAPTIVE_SETTLE_MS` settle here rather than the full
+# `_INBOX_DIGEST_WINDOW_MS`, but that settle (3s) is still comfortably
+# longer than the 2.5s auto-close, so the race this test exists to prove —
+# pane gone from the registry before its digest fires — still holds.
 # ─────────────────────────────────────────────────────────────
 
 
@@ -206,7 +214,7 @@ class TestDoneCloseRacesDigestDelivery:
         monkeypatch.setattr(orch_mod, "active_project", lambda: ("proj", {}))
         # The autouse _isolate_runtime fixture forces legacy immediate
         # delivery (TAKKUB_INBOX_DIGEST_MS=0) for the rest of the suite —
-        # this repro is specifically about the production 60s digest window
+        # this repro is specifically about the production digest window
         # racing the pane's own 2.5s close, so restore the real default.
         monkeypatch.delenv("TAKKUB_INBOX_DIGEST_MS", raising=False)
         _mock_done(orch)
@@ -235,9 +243,12 @@ class TestDoneCloseRacesDigestDelivery:
         lead.session.write.assert_not_called()
 
         close_calls = [(ms, cb) for ms, cb in timers if ms == 2_500]
-        digest_calls = [(ms, cb) for ms, cb in timers if ms == 60_000]
+        digest_calls = [(ms, cb) for ms, cb in timers if ms == _INBOX_DIGEST_ADAPTIVE_SETTLE_MS]
         assert len(close_calls) == 1, "done() must schedule exactly one 2.5s auto-close"
-        assert len(digest_calls) == 1, "a clean done notice must arm the 60s digest window"
+        assert len(digest_calls) == 1, (
+            "a solo clean done notice (no other role active) must arm the #264 "
+            "adaptive settle window, not the full digest window"
+        )
 
         # Fire the pane's own auto-close timer (simulates 2.5s elapsing)
         # BEFORE the digest window (simulates it not having elapsed yet).

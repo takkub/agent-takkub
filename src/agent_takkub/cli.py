@@ -930,6 +930,13 @@ def cmd_wait(args: argparse.Namespace) -> dict:
     panes, so re-run `takkub wait` (same or no --role) to resume watching
     them once the interrupting report has been dealt with.
 
+    #265: the same interrupt field also fires — with `reason: "user_input"`
+    — the moment the pane's OWNER types anything into it (submitted or
+    still drafting) after this call started watching. Without this, owner
+    keystrokes typed while `wait` is blocking just sit as queued CLI input,
+    unprocessed until `wait` returns, up to the full --timeout — the owner
+    outranks every teammate role and must never be the one left waiting.
+
     --cancel (#249 item 5) skips begin/poll entirely and just releases
     whatever wait registration is active for this project — the cleanup
     path for a wait that's stuck watching a role that will never resolve
@@ -999,19 +1006,32 @@ def cmd_wait(args: argparse.Namespace) -> dict:
             last_pending_keys = pending_keys
             interrupt = poll.get("interrupt")
             if interrupt:
-                # #253: a blocking report (FAILED/spawn-failed/etc.) from a
-                # role outside --role landed while we were still watching —
-                # stop blocking now instead of riding out the full timeout
-                # deaf to it. The watched roles above are still genuinely
-                # pending in their own panes; only this wait ends.
                 interrupted_by = interrupt
-                print(
-                    f"[wait] interrupted — [{interrupt.get('role')}] needs attention: "
-                    f"{interrupt.get('detail')} "
-                    f"({len(pending_keys)} watched role(s) still pending: "
-                    f"{', '.join(sorted(pending_keys))}) "
-                    "— see `takkub inbox`, then `takkub wait` again to resume watching"
-                )
+                if interrupt.get("reason") == "user_input":
+                    # #265: the owner typed something while this wait was
+                    # blocking — they outrank every role. Stop immediately
+                    # so Lead reads it now instead of leaving it queued as
+                    # unprocessed CLI input for up to the full --timeout.
+                    print(
+                        "[wait] interrupted — คุณพิมพ์ข้อความใหม่เข้ามาระหว่างรอ: "
+                        f"{interrupt.get('detail')} "
+                        f"({len(pending_keys)} watched role(s) still pending: "
+                        f"{', '.join(sorted(pending_keys))}) "
+                        "— อ่าน/จัดการข้อความใหม่ก่อน แล้วค่อย `takkub wait` อีกครั้งเพื่อ resume watching"
+                    )
+                else:
+                    # #253: a blocking report (FAILED/spawn-failed/etc.) from a
+                    # role outside --role landed while we were still watching —
+                    # stop blocking now instead of riding out the full timeout
+                    # deaf to it. The watched roles above are still genuinely
+                    # pending in their own panes; only this wait ends.
+                    print(
+                        f"[wait] interrupted — [{interrupt.get('role')}] needs attention: "
+                        f"{interrupt.get('detail')} "
+                        f"({len(pending_keys)} watched role(s) still pending: "
+                        f"{', '.join(sorted(pending_keys))}) "
+                        "— see `takkub inbox`, then `takkub wait` again to resume watching"
+                    )
                 break
             if not pending or poll.get("expired"):
                 break
@@ -1052,7 +1072,13 @@ def cmd_wait(args: argparse.Namespace) -> dict:
     if ok:
         msg = "all roles resolved"
     elif interrupted_by:
-        msg = f"interrupted by [{interrupted_by.get('role')}]; {len(pending)} role(s) still pending"
+        if interrupted_by.get("reason") == "user_input":
+            msg = f"interrupted by user input; {len(pending)} role(s) still pending"
+        else:
+            msg = (
+                f"interrupted by [{interrupted_by.get('role')}]; "
+                f"{len(pending)} role(s) still pending"
+            )
     else:
         msg = f"timeout with {len(pending)} role(s) still pending"
     return {

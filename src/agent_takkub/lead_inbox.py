@@ -36,6 +36,7 @@ import pathlib
 import re
 import sys as _sys
 import time
+from collections.abc import Callable
 from datetime import datetime
 
 from PyQt6.QtCore import QTimer
@@ -197,7 +198,34 @@ LEAD_NOTIFY_BUSY_CAP = 75
 # parallel burst wakes Lead once instead of once per teammate.  Read the env at
 # enqueue time (rather than only at import) so cockpit launches and tests can
 # configure the policy without rebuilding this module.
-_INBOX_DIGEST_WINDOW_MS = 60_000
+#
+# #264: was 60_000. A prod user described the cockpit as feeling like it
+# "always hangs on something" — traced to this constant applying in full
+# even to a solo done() with nothing else in flight to combine with (see
+# `_INBOX_DIGEST_ADAPTIVE_SETTLE_MS` below for that half of the fix).
+# Lowered to the top of the issue's own 10-15s suggested range rather than
+# the bottom: a genuine parallel fan-out (the case this window exists to
+# serve) can have real completion spread of several seconds under load, and
+# 15s still cuts the worst-case wait 4x versus the old value while keeping
+# more margin for that spread than 10s would.
+_INBOX_DIGEST_WINDOW_MS = 15_000
+
+# #264: used INSTEAD of the full window above once a notice's own enqueue
+# finds no OTHER role in the project still in a non-terminal state (see
+# `_DIGEST_TERMINAL_PANE_STATES`) — i.e. nothing else is plausibly about to
+# join this burst, so there is nothing left to wait for. Not 0: a burst can
+# still be "in flight" for a few seconds even after every role's pane looks
+# terminal (e.g. two shards' done() calls landing a beat apart under load),
+# so a short settle still catches that without paying the full window's
+# tax on the common solo-completion case.
+_INBOX_DIGEST_ADAPTIVE_SETTLE_MS = 3_000
+
+# States from which a role can never produce a NEW report without a fresh
+# assign — mirrors `lead_wait._WAIT_TERMINAL_PANE_STATES`. Duplicated
+# rather than imported to avoid coupling this module to LeadWaitMixin's
+# layer (see both modules' "Layer rule" header comments); both sets are
+# small, stable, and mean the same thing here as there.
+_DIGEST_TERMINAL_PANE_STATES = frozenset({"empty", "done", "exited", "error"})
 
 # Staleness escalation for the durable reaper (#70). When spilled done-notices
 # can't be flushed because the Lead reads as not-ready for this long, the
@@ -251,6 +279,44 @@ _BLOCKING_NOTICE_MARKERS = (
     "[spawn-stuck]",
     "[delivery-boot-stall]",
 )
+
+# #259: these 4 markers are authored by the orchestrator itself
+# (`_warn_lead_*`), not by a teammate's own `done()`/`failed()` call, so
+# they carry their target role as plain text right after the marker
+# (``⚠️ [delivery-unconfirmed] backend pane ...``) instead of the
+# `[role done]`/`[role FAILED]` shape `_notice_role_tag` parses.
+# `_notice_role_tag` returns None for these bodies — `inbox_report` then
+# falls back to `"system"` for them, which is why `_pending_notice_outside`
+# used to skip every one of these notices for every role (watched or not):
+# its `role == "system": continue` guard swallowed them before the
+# blocking-marker check ever ran. Deliberately a separate helper rather
+# than widening `_notice_role_tag` itself: that function's contract feeds
+# `_provenance_stale`'s pane_token verification (#228) for genuine
+# `done()`-authored bodies, and these system notices are never queued with
+# a pane_token to verify — widening it would add an unused, untested code
+# path there for no benefit.
+#
+# #266: also matches `[delivery-busy-wait]` (#144) — same "orchestrator-
+# authored, role name in plain text" shape, and one of the notice classes
+# #266's own evidence named as arriving after the pane it describes had
+# already closed. Not in `_BLOCKING_NOTICE_MARKERS` (it's informational,
+# not urgent) but the SAME re-checkable "is this role's pane still alive"
+# claim as the 4 blocking markers, so it belongs in this set even though it
+# doesn't belong in that one.
+_SYSTEM_MARKER_ROLE_RE = re.compile(
+    r"\[(?:spawn-failed|delivery-unconfirmed|spawn-stuck|delivery-boot-stall|delivery-busy-wait)\]"
+    r"\s+(\S+)",
+    re.IGNORECASE,
+)
+
+
+def _system_marker_role(body: str) -> str | None:
+    """Extract the target role from a delivery-health system notice, or
+    None if *body* doesn't carry one of the 4 markers above. See the
+    comment on `_SYSTEM_MARKER_ROLE_RE` for why this is separate from
+    `_notice_role_tag`."""
+    m = _SYSTEM_MARKER_ROLE_RE.search(body)
+    return m.group(1).strip() if m else None
 
 
 def _is_digestible_lead_notice(body: str) -> bool:
@@ -347,6 +413,23 @@ def _format_notice_age(now_ts: float, queued_ts: float | None) -> str:
     return f" · {int(age // 3600)}h{int((age % 3600) // 60)}m ago"
 
 
+def _occurred_stamp(queued_ts: float | None, now_ts: float | None = None) -> str:
+    """Render a "[HH:MM:SS · age]" prefix (trailing space included) for the
+    wall-clock a notice's underlying event actually occurred, or "" when
+    unknown. Originally #241's digest-only treatment
+    (`_format_digest_item`); #266 extends it to live/durable notices too —
+    every notice class had this available in principle (`queued_ts` is
+    captured at enqueue time everywhere now), but only the digest queue
+    ever rendered it, so a notice that sat through the busy-retry/draft-hold
+    chain (#264) before finally landing looked exactly as fresh as one
+    delivered instantly."""
+    if queued_ts is None:
+        return ""
+    clock = datetime.fromtimestamp(queued_ts).strftime("%H:%M:%S")
+    age = _format_notice_age(now_ts if now_ts is not None else time.time(), queued_ts)
+    return f"[{clock}{age}] "
+
+
 def _format_digest_item(
     body: str,
     queued_ts: float | None = None,
@@ -367,12 +450,7 @@ def _format_digest_item(
     regex-on-prose rendering below, unchanged.
     """
     stripped = body.strip()
-    if queued_ts is not None:
-        clock = datetime.fromtimestamp(queued_ts).strftime("%H:%M:%S")
-        age = _format_notice_age(now_ts if now_ts is not None else time.time(), queued_ts)
-        stamp = f"[{clock}{age}] "
-    else:
-        stamp = ""
+    stamp = _occurred_stamp(queued_ts, now_ts)
 
     if facts is not None:
         return format_digest_fact_line(facts, stamp=stamp)
@@ -478,6 +556,7 @@ def _delayed_enter_verified(
     delivery_id: str | None = None,
     session_generation: int | None = None,
     expires_at: float | None = None,
+    validator: Callable[[], bool] | None = None,
 ) -> None:
     """Like `_delayed_enter`, but recovers a submit that was swallowed.
 
@@ -517,6 +596,21 @@ def _delayed_enter_verified(
     with no args, when the chain stops trying — submitted, gave up, or the
     pane was torn down — so a caller can serialise further writes to the same
     session until this one is no longer in flight (#133).
+
+    ``validator`` (#258): forwarded to every `_safe_session_write` call this
+    function makes — the CR resend below AND the payload repaste — same as
+    the caller's OWN first write of this delivery. Before this fix only that
+    first write carried a validator; the QTimer chain here (queued when the
+    first write's own verify grace period began) kept resending/repasting
+    with no way to notice the delivery was cancelled out from under it in
+    the meantime (`takkub send`/`takkub task cancel`, #255) — a cancel that
+    landed after the chain was already queued still pasted the stale
+    payload straight into the composer. `_WriterThread.run` (pty_session.py)
+    checks
+    `message.validator()` immediately before every native write regardless
+    of which call site attached it, so passing the SAME validator through
+    here closes that gap without the writer needing to know anything about
+    delivery IDs itself.
     """
 
     def _settled() -> None:
@@ -545,6 +639,7 @@ def _delayed_enter_verified(
             delivery_id=delivery_id,
             session_generation=session_generation,
             expires_at=expires_at,
+            validator=validator,
         )
 
         def _verify(
@@ -679,6 +774,7 @@ def _delayed_enter_verified(
                     delivery_id=delivery_id,
                     session_generation=session_generation,
                     expires_at=expires_at,
+                    validator=validator,
                 )
                 paste_baseline[0] = session.last_output_monotonic()
                 QTimer.singleShot(
@@ -790,7 +886,7 @@ class LeadInboxMixin:
             _log_event("inject_lead_prompt", project=project_ns)
             return True
         self._pending_done_notices.setdefault(project_ns, []).append(
-            {"role": "system", "note": "lead prompt", "body": prompt}
+            {"role": "system", "note": "lead prompt", "body": prompt, "queued_ts": time.time()}
         )
         self._save_pending_done_notices(project_ns)
         _log_event("inject_lead_prompt_queued", project=project_ns)
@@ -1062,6 +1158,9 @@ class LeadInboxMixin:
                 delivery_id=delivery.delivery_id,
                 session_generation=generation,
                 expires_at=delivery.expires_at,
+                validator=lambda d=delivery.delivery_id, g=generation: manager.validate_for_write(
+                    d, g
+                ),
             )
             if unconfirmed:
                 # Delivered blind — the pane never signalled ready, so on a cold
@@ -1999,7 +2098,13 @@ class LeadInboxMixin:
     # ------------------------------------------------------------------
 
     def _enqueue_live_lead_notice(
-        self, project_ns: str, body: str, *, front: bool = False, pane_token: str | None = None
+        self,
+        project_ns: str,
+        body: str,
+        *,
+        front: bool = False,
+        pane_token: str | None = None,
+        queued_ts: float | None = None,
     ) -> None:
         """Append one ready-to-deliver body without starting the pump.
 
@@ -2008,13 +2113,21 @@ class LeadInboxMixin:
         delivery time whether that role slot has since been respawned. None
         for system-authored bodies (combined digests, CC relays, engine
         notices) that carry no single-pane origin claim.
+
+        *queued_ts* (#266): defaults to now — pass the original occurrence
+        time through on a requeue so it survives round-trips through the
+        durable store instead of resetting on every hop (see `_notify_lead`).
+        Previously this queue never carried a timestamp at all (documented
+        as "the live queue delivers promptly enough that staleness isn't a
+        concern" — #264/#266 proved that wrong: busy-retry + draft-hold +
+        durable spill can delay live-queue delivery by minutes).
         """
         if not hasattr(self, "_lead_notify_queue"):
             self._lead_notify_queue = {}
         if not hasattr(self, "_lead_notify_pumping"):
             self._lead_notify_pumping = set()
         queue = self._lead_notify_queue.setdefault(project_ns, collections.deque())
-        item = (body, pane_token)
+        item = (body, pane_token, queued_ts if queued_ts is not None else time.time())
         if front:
             # Keep blocking notices FIFO with each other while placing them
             # ahead of informational/digest bodies already waiting on a busy
@@ -2122,6 +2235,69 @@ class LeadInboxMixin:
         current = self._current_pane_identity(project_ns, role)
         return current != pane_token
 
+    def _other_roles_still_active(self, project_ns: str, exclude_role: str) -> bool:
+        """(#264) True if some role OTHER than Lead and *exclude_role* (the
+        one that just produced the notice currently being enqueued) is
+        still in a non-terminal state — i.e. could plausibly still produce
+        its own digestible notice soon enough to join the SAME burst.
+
+        Read via `list_status` — the exact same role→state snapshot
+        `takkub list` shows — rather than a bespoke check, so this can
+        never disagree with what Lead sees when they look. `exclude_role`
+        matters because `_notify_lead` runs from inside `done()` BEFORE
+        that pane's own `pane.set_state("done", ...)` call lands (the
+        notice must exist before the state transition that would otherwise
+        make it "terminal"), so the reporting role's own pane still reads
+        "working" at this exact moment — excluding it by name is the only
+        way to avoid it always counting as its own reason to wait.
+        """
+        status = self.list_status(project=project_ns)
+        for role, state in status.items():
+            if role in (LEAD.name, exclude_role):
+                continue
+            if state not in _DIGEST_TERMINAL_PANE_STATES:
+                return True
+        return False
+
+    def _revalidate_system_notice(self, project_ns: str, body: str) -> str:
+        """(#266) A delivery-health system notice
+        ([delivery-unconfirmed]/[spawn-stuck]/[delivery-boot-stall]/
+        [spawn-failed]/[delivery-busy-wait]) is enqueued the moment the
+        condition is DETECTED, but can then sit in the live/durable queue
+        through the busy-retry cap (~30s), a durable spill, and the reaper's
+        staleness window (up to another 60s) before it's actually pasted —
+        #264's delivery chain. Nothing re-checked whether the condition was
+        still true by the time it finally landed. Real evidence: a
+        `[delivery-unconfirmed] codex ...` notice arrived at Lead's pane
+        AFTER that codex pane had already finished its task and closed.
+
+        Called right before a matching notice is actually written — if the
+        target role's pane has since reached a terminal state (closed,
+        crashed, or simply never existed to begin with — nothing left to
+        confirm or deny), the underlying claim ("still hasn't reached ready
+        / still stuck") can no longer be true, so *body* is prefixed with a
+        "resolved since" banner instead of being presented as Lead's
+        current reality. The original body is kept, not dropped — Lead may
+        still want the history (e.g. to notice a pattern of stalls for that
+        role), just not mistake it for the present.
+
+        Bodies that aren't one of these 5 markers (including plain done/CC/
+        FAILED notices) pass through completely unchanged — this only ever
+        touches the specific claim class that's cheaply re-checkable via
+        the pane registry alone.
+        """
+        role = _system_marker_role(body)
+        if role is None:
+            return body
+        status = self.list_status(project=project_ns)
+        state = status.get(role)
+        if state is not None and state not in _DIGEST_TERMINAL_PANE_STATES:
+            return body  # role's pane is still around and non-terminal — still live
+        return (
+            "✅ [คลี่คลายแล้ว — pane ของ role นี้ปิด/จบไปแล้วตั้งแต่ตอนที่รอส่งข้อความนี้อยู่ "
+            "ข้อความด้านล่างเป็นภาพ ณ ตอนเกิดเหตุ ไม่ใช่สถานะปัจจุบัน]\n" + body
+        )
+
     def _notify_lead(
         self,
         project_ns: str,
@@ -2131,13 +2307,19 @@ class LeadInboxMixin:
         note: str = "notify",
         pane_token: str | None = None,
         digest_facts: DigestFacts | None = None,
+        queued_ts: float | None = None,
     ) -> None:
         """Queue *body* for delivery to the Lead pane.
 
-        If Lead is alive, clean done and peer-CC notices are debounced into one
-        digest (60 s by default). Blocking failures and sequencing handoffs
-        bypass the window. The ready-prompt-aware pump then serialises writes so
-        concurrent notices never overwrite each other mid-generation.
+        If Lead is alive, clean done and peer-CC notices are debounced into
+        one digest (`_INBOX_DIGEST_WINDOW_MS`, 15s by default) — UNLESS
+        (#264) no other role in the project is still active, in which case
+        the much shorter `_INBOX_DIGEST_ADAPTIVE_SETTLE_MS` window applies
+        instead, since there's nothing left to wait for a combine with. See
+        `_other_roles_still_active`. Blocking failures and sequencing
+        handoffs bypass the window entirely. The ready-prompt-aware pump
+        then serialises writes so concurrent notices never overwrite each
+        other mid-generation.
 
         If Lead is absent the item falls directly into the durable
         _pending_done_notices (survives a restart, delivered on next Lead spawn).
@@ -2159,7 +2341,16 @@ class LeadInboxMixin:
         Lazy-initialises queue / pumping-set so partial test fixtures (those that
         use Orchestrator.__new__ and bypass __init__) don't need to pre-populate
         these attributes.
+
+        *queued_ts* (#266): the wall-clock the underlying event actually
+        OCCURRED, defaulting to now. A caller re-routing an item that was
+        already queued once (durable requeue, e.g. `_flush_pending_done_notices`)
+        should pass the ORIGINAL timestamp through here rather than letting
+        it default — otherwise every requeue hop resets "when did this
+        happen" to "whenever it happened to be re-processed", defeating the
+        whole point of stamping it.
         """
+        occurred_ts = queued_ts if queued_ts is not None else time.time()
         lead = self._project_panes(project_ns).get(LEAD.name)
         if lead and lead.session and lead.session.is_alive:
             window_ms = _inbox_digest_window_ms()
@@ -2171,14 +2362,25 @@ class LeadInboxMixin:
                 if not hasattr(self, "_lead_digest_queue"):
                     self._lead_digest_queue = {}
                 self._lead_digest_queue.setdefault(project_ns, collections.deque()).append(
-                    (body, pane_token, time.time(), digest_facts)
+                    (body, pane_token, occurred_ts, digest_facts)
                 )
+                # #264: adaptive window — if nothing else could plausibly
+                # still join this burst, don't make Lead pay the full
+                # window's tax waiting for a combine that will never
+                # happen. Re-evaluated on EVERY notice added to the burst
+                # (each one re-arms via _arm_lead_digest), so the LAST
+                # item in a genuine multi-role burst is the one that
+                # switches to the short settle — not the first.
+                if not self._other_roles_still_active(project_ns, from_role):
+                    window_ms = min(window_ms, _INBOX_DIGEST_ADAPTIVE_SETTLE_MS)
                 self._arm_lead_digest(project_ns, window_ms)
             elif blocking:
                 # Failures are explicitly outside the digest policy. Do not
                 # make Lead read an older informational digest turn before the
                 # blocking alert; the digest keeps its original timer.
-                self._enqueue_live_lead_notice(project_ns, body, front=True, pane_token=pane_token)
+                self._enqueue_live_lead_notice(
+                    project_ns, body, front=True, pane_token=pane_token, queued_ts=occurred_ts
+                )
                 self._arm_lead_notify_pump(project_ns)
             elif "[auto-chain handoff]" in body.lower():
                 combined = self._flush_lead_digest(
@@ -2187,7 +2389,9 @@ class LeadInboxMixin:
                     trailing_body=body,
                 )
                 if not combined:
-                    self._enqueue_live_lead_notice(project_ns, body, pane_token=pane_token)
+                    self._enqueue_live_lead_notice(
+                        project_ns, body, pane_token=pane_token, queued_ts=occurred_ts
+                    )
                 self._arm_lead_notify_pump(project_ns)
             else:
                 # A sequencing handoff must not sit behind the debounce window.
@@ -2195,7 +2399,9 @@ class LeadInboxMixin:
                 # done notes it explicitly tells Lead to re-read. Other
                 # immediate engine notices follow the same chronological rule.
                 self._flush_lead_digest(project_ns, arm_pump=False)
-                self._enqueue_live_lead_notice(project_ns, body, pane_token=pane_token)
+                self._enqueue_live_lead_notice(
+                    project_ns, body, pane_token=pane_token, queued_ts=occurred_ts
+                )
                 self._arm_lead_notify_pump(project_ns)
 
             # Tell the UI Lead has new mail so it can red-dot the Lead pane-tab
@@ -2209,7 +2415,13 @@ class LeadInboxMixin:
             if not hasattr(self, "_pending_done_notices"):
                 self._pending_done_notices = {}
             self._pending_done_notices.setdefault(project_ns, []).append(
-                {"role": from_role, "note": note, "body": body, "pane_token": pane_token}
+                {
+                    "role": from_role,
+                    "note": note,
+                    "body": body,
+                    "pane_token": pane_token,
+                    "queued_ts": occurred_ts,
+                }
             )
             self._save_pending_done_notices(project_ns)
             _log_event("done_notice_queued", project=project_ns, role=from_role)
@@ -2274,9 +2486,15 @@ class LeadInboxMixin:
             if not hasattr(self, "_pending_done_notices"):
                 self._pending_done_notices = {}
             for b in items:
-                b_body, b_pane_token, _b_ts = _unwrap_notice_item(b)
+                b_body, b_pane_token, b_ts = _unwrap_notice_item(b)
                 self._pending_done_notices.setdefault(project_ns, []).append(
-                    {"role": "system", "note": "notify", "body": b_body, "pane_token": b_pane_token}
+                    {
+                        "role": "system",
+                        "note": "notify",
+                        "body": b_body,
+                        "pane_token": b_pane_token,
+                        "queued_ts": b_ts,
+                    }
                 )
             if items:
                 self._save_pending_done_notices(project_ns)
@@ -2298,13 +2516,14 @@ class LeadInboxMixin:
                 if not hasattr(self, "_pending_done_notices"):
                     self._pending_done_notices = {}
                 for b in items:
-                    b_body, b_pane_token, _b_ts = _unwrap_notice_item(b)
+                    b_body, b_pane_token, b_ts = _unwrap_notice_item(b)
                     self._pending_done_notices.setdefault(project_ns, []).append(
                         {
                             "role": "system",
                             "note": "notify_spill",
                             "body": b_body,
                             "pane_token": b_pane_token,
+                            "queued_ts": b_ts,
                         }
                     )
                 if items:
@@ -2333,13 +2552,14 @@ class LeadInboxMixin:
                 if not hasattr(self, "_pending_done_notices"):
                     self._pending_done_notices = {}
                 for b in items:
-                    b_body, b_pane_token, _b_ts = _unwrap_notice_item(b)
+                    b_body, b_pane_token, b_ts = _unwrap_notice_item(b)
                     self._pending_done_notices.setdefault(project_ns, []).append(
                         {
                             "role": "system",
                             "note": "notify_draft_spill",
                             "body": b_body,
                             "pane_token": b_pane_token,
+                            "queued_ts": b_ts,
                         }
                     )
                 if items:
@@ -2355,10 +2575,19 @@ class LeadInboxMixin:
         # torn down between the liveness checks above and this write) never
         # drops the item — see HIGH#1,
         # docs/reviews/2026-07-11-full-system-review-codex.md.
-        raw_body, item_pane_token, _item_ts = _unwrap_notice_item(queue[0])
+        raw_body, item_pane_token, item_ts = _unwrap_notice_item(queue[0])
+        # #266: re-check delivery-health system notices right before they
+        # actually land — see _revalidate_system_notice's docstring for why
+        # (the queue can sit for minutes between enqueue and this point).
+        # No-op for every other notice shape (plain done/CC/FAILED bodies).
+        raw_body = self._revalidate_system_notice(project_ns, raw_body)
         item_role = _notice_role_tag(raw_body)
         if self._provenance_stale(project_ns, item_role, item_pane_token):
             raw_body = f"{_STALE_ORIGIN_BANNER.format(role=item_role)}\n{raw_body}"
+        # #266: stamp every notice with when it actually occurred, not just
+        # when it happened to be flushed — this queue previously carried no
+        # timestamp at all (see _enqueue_live_lead_notice's docstring).
+        raw_body = f"{_occurred_stamp(item_ts)}{raw_body}"
         body = _sanitize_pane_text(raw_body)
         _notify_sess = lead.session
         payload = _paste_payload(body)
@@ -2389,13 +2618,14 @@ class LeadInboxMixin:
             if not hasattr(self, "_pending_done_notices"):
                 self._pending_done_notices = {}
             for b in items:
-                b_body, b_pane_token, _b_ts = _unwrap_notice_item(b)
+                b_body, b_pane_token, b_ts = _unwrap_notice_item(b)
                 self._pending_done_notices.setdefault(project_ns, []).append(
                     {
                         "role": "system",
                         "note": "notify_write_failed",
                         "body": b_body,
                         "pane_token": b_pane_token,
+                        "queued_ts": b_ts,
                     }
                 )
             self._save_pending_done_notices(project_ns)
@@ -2487,7 +2717,16 @@ class LeadInboxMixin:
                     self._pending_done_notices.pop(project_ns, None)
                 self._save_pending_done_notices(project_ns)
             try:
-                self._notify_lead(project_ns, item["body"], pane_token=item.get("pane_token"))
+                # #266: preserve the ORIGINAL occurrence time through this
+                # requeue hop — without it, every durable→live round-trip
+                # would reset "when did this happen" to "whenever it got
+                # reprocessed", defeating _occurred_stamp's whole purpose.
+                self._notify_lead(
+                    project_ns,
+                    item["body"],
+                    pane_token=item.get("pane_token"),
+                    queued_ts=item.get("queued_ts"),
+                )
             except Exception:
                 self._pending_done_notices.setdefault(project_ns, []).insert(0, item)
                 self._save_pending_done_notices(project_ns)
@@ -2598,10 +2837,16 @@ class LeadInboxMixin:
             return
 
         def _flagged(item: dict) -> str:
-            item_body = item.get("body", "")
+            # #266: same re-validate + occurred-at stamping _pump_lead_notify
+            # applies to its own live-queue delivery — this force-deliver
+            # path exists specifically for items that have been stuck
+            # durable through _DONE_NOTICE_STALE_S (60s) of a not-ready
+            # Lead, so it's at LEAST as likely to be carrying stale claims.
+            item_body = self._revalidate_system_notice(project_ns, item.get("body", ""))
             role = _notice_role_tag(item_body)
             if self._provenance_stale(project_ns, role, item.get("pane_token")):
                 item_body = f"{_STALE_ORIGIN_BANNER.format(role=role)}\n{item_body}"
+            item_body = f"{_occurred_stamp(item.get('queued_ts'))}{item_body}"
             return _sanitize_pane_text(item_body)
 
         body = "\n\n".join(_flagged(item) for item in valid)
