@@ -6380,7 +6380,82 @@ class Orchestrator(
         self.spawn(role_name)
 
     def _on_pane_close_clicked(self, role_name: str) -> None:
+        # Pane-header × (AgentPane's own close button) — a USER click, so it
+        # gates on confirm_manual_pane_close(). Every automated close path
+        # (CLI `takkub close`, done-report auto-close, close_all_teammates,
+        # app shutdown) calls close()/close_all_teammates() directly and
+        # never routes through this signal, so automation never blocks on a
+        # human click.
+        pane = self.sender()
+        if not isinstance(pane, AgentPane | HeadlessPane):
+            pane = self.panes.get(role_name)
+        project_ns = self._project_ns_for_pane(pane) if pane is not None else None
+        if project_ns is None:
+            project_ns = self._resolve_project(None)
+        if not self.confirm_manual_pane_close(pane, role_name, project_ns):
+            return
         self.close(role_name)
+
+    def confirm_manual_pane_close(
+        self, pane: AgentPaneLike | None, role_name: str, project: str | None
+    ) -> bool:
+        """Confirm dialog gate for a USER-initiated pane close (pane-header
+        × or tab-bar ×) — issue "กันกดปิด pane ผิด". Returns True to proceed
+        with the close, False if the user cancelled.
+
+        Must NEVER be called from an automated close path: CLI `takkub
+        close`, the done-report auto-close 2.5s after a teammate reports
+        done, `close_all_teammates` (board reset / tab close), or app
+        shutdown. Those call `close()`/`close_all_teammates()` directly —
+        wiring this gate into `close()` itself would hang unattended
+        automation waiting for a click that never comes.
+        """
+        if role_name == LEAD.name:
+            # close() already no-ops Lead unless force=True (tab teardown) —
+            # a dialog here would just be a confusing extra click on what is
+            # already a guaranteed no-op.
+            return True
+
+        from PyQt6.QtWidgets import QMessageBox
+
+        from . import cockpit_theme as theme
+
+        project_ns = self._resolve_project(project)
+        working = bool(pane is not None and getattr(pane, "state", None) == "working")
+        role_obj = getattr(pane, "role", None) if pane is not None else None
+        label = getattr(role_obj, "label", None) or role_name
+
+        if working:
+            lines = [f"'{label}' กำลังทำงานอยู่ — ปิดตอนนี้จะตัดงานที่กำลังรันทิ้งทันที"]
+        else:
+            lines = [f"ปิด pane '{label}'?"]
+
+        key = f"{project_ns}::{role_name}"
+        ps = getattr(self, "_pane_state", {}).get(key)
+        if ps is not None and ps.worktree:
+            try:
+                from .worktree_manager import WorktreeInfo, WorktreeManager
+
+                info = WorktreeInfo.from_dict(ps.worktree)
+                mgr = WorktreeManager()
+                if mgr.is_dirty(info):
+                    n = mgr.uncommitted_count(info)
+                    lines.append(
+                        f"⚠ worktree ({info.branch}) มี {n} ไฟล์ที่ยังไม่ commit — จะหายถ้าปิดตอนนี้"
+                    )
+                commits = mgr.commit_count(info)
+                if commits > 0:
+                    lines.append(f"⚠ branch {info.branch} มี {commits} commit ที่ยังไม่ได้ merge กลับ")
+            except Exception:
+                _log_event("confirm_close_worktree_check_error", role=role_name, project=project_ns)
+
+        parent = pane.window() if isinstance(pane, AgentPane) else None
+        box = theme.themed_message_box(parent)
+        box.setWindowTitle("ปิด pane")
+        box.setText("\n".join(lines))
+        box.setStandardButtons(QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Ok)
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        return box.exec() == QMessageBox.StandardButton.Ok
 
     def _on_pane_input(self, role_name: str, data: bytes) -> None:
         # Route the keystrokes to the pane that ACTUALLY emitted them, not to

@@ -393,10 +393,24 @@ class MainWindow(
     # ──────────────────────────────────────────────────────────────
     def _wire_project_tab(self, tab: ProjectTab) -> None:
         """Route a ProjectTab's pane-tab × close button into the orchestrator
-        close chain — the same teardown path the pane header's own × uses."""
+        close chain — the same teardown path the pane header's own × uses.
+
+        A USER click on the tab's × gates on the same confirm dialog as the
+        pane header's own × (orch.confirm_manual_pane_close). Nothing else
+        calls this connection — auto-close, close-all, and CLI close all go
+        straight to orch.close()/close_all_teammates(), so automation never
+        blocks on it."""
         tab.paneCloseRequested.connect(
-            lambda role, proj=tab.project_name: self.orch.close(role, project=proj)
+            lambda role, proj=tab.project_name, t=tab: self._on_tab_pane_close_requested(
+                role, proj, t
+            )
         )
+
+    def _on_tab_pane_close_requested(self, role: str, project: str, tab: ProjectTab) -> None:
+        pane = tab.teammate_panes.get(role)
+        if not self.orch.confirm_manual_pane_close(pane, role, project):
+            return
+        self.orch.close(role, project=project)
 
     def _ensure_teammate_pane(self, role_name: str, project: str) -> None:
         if role_name == LEAD.name:

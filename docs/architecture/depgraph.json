@@ -302,6 +302,7 @@
         "agent_takkub.headless_window",
         "agent_takkub.logs_panel",
         "agent_takkub.main_window",
+        "agent_takkub.orchestrator",
         "agent_takkub.project_nav",
         "agent_takkub.project_tab",
         "agent_takkub.settings_management.pages.mcp_page",
@@ -324,7 +325,7 @@
         "agent_takkub.usage_meter",
         "agent_takkub.user_actions"
       ],
-      "fan_in": 25,
+      "fan_in": 26,
       "fan_out": 0
     },
     {
@@ -877,6 +878,7 @@
         "agent_takkub.browser_chrome",
         "agent_takkub.chatlog_scanner",
         "agent_takkub.claude_auth_config",
+        "agent_takkub.cockpit_theme",
         "agent_takkub.config",
         "agent_takkub.digest_facts",
         "agent_takkub.disk_usage",
@@ -918,7 +920,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 6,
-      "fan_out": 35
+      "fan_out": 36
     },
     {
       "module": "agent_takkub.orchestrator_text",
