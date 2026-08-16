@@ -47,6 +47,8 @@ class RoutingAction:
     # None = independent, parallel dispatch is fine. Non-None = dispatch in
     # THIS order, waiting for each done (Multi-mode must not fan these out).
     sequence: list[str] | None = None
+    suggested_mode: str = "pane"  # advisory only; Lead chooses at dispatch time
+    mode_reason: str = ""
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -545,7 +547,36 @@ def _route(msg: str) -> dict:
 # ─────────────────────────────────────────────────────────────────────
 
 
-def classify(user_message: str, context: dict | None = None) -> RoutingAction:
+_SUBAGENT_SHAPE = re.compile(
+    r"(?:\b(scan|audit|triage|inventory|locate|search|find|inspect|check|first[ -]pass|fan[ -]out)\b|"
+    r"ตรวจ(?:สอบ|หา)?|เช็ค|ค้นหา|ไล่หา|หาของ|(?<!ปัญ)หา(?=\s|ไฟล์|จุด|ของ|ว่า|ที่)|"
+    r"ทั้ง\s*(?:repo|codebase|โปรเจกต์|โปรเจ็ค))",
+    re.IGNORECASE,
+)
+_PANE_ONLY_SHAPE = re.compile(
+    r"(?:\b(implement|fix|build|create|refactor|migrate|deploy|write|edit|change|remove|"
+    r"cross[ -]check|second opinion)\b|สร้าง|แก้|เพิ่ม|ลบ|ปรับ|เขียน|deploy|codex|gemini)",
+    re.IGNORECASE,
+)
+
+
+def suggest_assign_mode(user_message: str) -> tuple[str, str]:
+    """Suggest execution shape without taking the dispatch decision from Lead."""
+    msg = (user_message or "").strip()
+    if _PANE_ONLY_SHAPE.search(msg):
+        return (
+            "pane",
+            "implementation/intervention or cross-model work benefits from a visible pane",
+        )
+    if _SUBAGENT_SHAPE.search(msg):
+        return (
+            "subagent",
+            "scan/audit/search/triage/fan-out shape fits a same-provider native child",
+        )
+    return "pane", "default preserves the existing visible-pane workflow"
+
+
+def _classify_core(user_message: str, context: dict | None = None) -> RoutingAction:
     """Classify a user message and return the routing action Lead should take.
 
     Args:
@@ -673,3 +704,10 @@ def classify(user_message: str, context: dict | None = None) -> RoutingAction:
         mixed=is_mixed,
         sequence=routing.get("sequence"),
     )
+
+
+def classify(user_message: str, context: dict | None = None) -> RoutingAction:
+    """Classify routing and attach an advisory pane/subagent mode suggestion."""
+    action = _classify_core(user_message, context)
+    action.suggested_mode, action.mode_reason = suggest_assign_mode(user_message)
+    return action

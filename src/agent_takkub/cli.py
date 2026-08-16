@@ -8,6 +8,7 @@ Usage from inside an agent pane (Claude running with TAKKUB_ROLE env set):
   takkub close --role frontend
   takkub list
   takkub done [note]
+  takkub subagent-done --role reviewer [note]
 
 Output is human readable on stdout. Exit 0 on success, 1 on error.
 """
@@ -33,6 +34,7 @@ LEAD_ONLY_COMMANDS = frozenset(
     {
         "spawn",
         "assign",
+        "subagent-done",
         "close",
         "close-all",
         "end-session",
@@ -279,7 +281,8 @@ def cmd_spawn(args: argparse.Namespace) -> dict:
 def cmd_assign(args: argparse.Namespace) -> dict:
     # #1: validate --shards BEFORE the `or 1` fallback so explicit 0 / negative /
     # >8 values are rejected with a clear message rather than silently clamped.
-    _SHARDS_MAX = 8
+    mode = getattr(args, "mode", "pane") or "pane"
+    _SHARDS_MAX = 20 if mode == "subagent" else 8
     _raw_shards = getattr(args, "shards", 1)
     if _raw_shards is not None:
         _shards_int = int(_raw_shards)
@@ -293,6 +296,16 @@ def cmd_assign(args: argparse.Namespace) -> dict:
             }
     shards = int(_raw_shards or 1)
     model = (getattr(args, "model", None) or "").strip() or None
+    if mode == "subagent" and model:
+        return {
+            "ok": False,
+            "msg": "--model cannot be used with --mode subagent: native subagents always use the parent provider/model context",
+        }
+    if mode == "subagent" and getattr(args, "plan", False):
+        return {
+            "ok": False,
+            "msg": "--plan cannot be used with --mode subagent; fan out native subagents directly with --shards",
+        }
     if model:
         from .provider_config import assign_model_override_error, assign_model_override_warning
 
@@ -348,6 +361,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                     "shard_total": shards,
                     "model": model,
                     "feature": getattr(args, "feature", "") or "",
+                    "mode": mode,
                 }
             )
         )
@@ -370,11 +384,18 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                         "isolation": isolation,
                         "model": model,
                         "feature": getattr(args, "feature", "") or "",
+                        "mode": mode,
                     }
                 )
             )
             results.append(resp)
         ok_count = sum(1 for r in results if r.get("ok"))
+        if mode == "subagent":
+            details = "\n".join(str(r.get("msg", "")) for r in results if r.get("msg"))
+            return {
+                "ok": ok_count == shards,
+                "msg": f"registered {ok_count}/{shards} subagents\n{details}".rstrip(),
+            }
         return {"ok": ok_count == shards, "msg": f"queued {ok_count}/{shards} shards"}
     return _request(
         _with_project(
@@ -389,6 +410,21 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                 "isolation": isolation,
                 "model": model,
                 "feature": getattr(args, "feature", "") or "",
+                "mode": mode,
+            }
+        )
+    )
+
+
+def cmd_subagent_done(args: argparse.Namespace) -> dict:
+    return _request(
+        _with_project(
+            {
+                "cmd": "subagent-done",
+                "from": _from_role(),
+                "role": args.role,
+                "note": args.note or "",
+                "failed": bool(getattr(args, "fail", False)),
             }
         )
     )
@@ -1993,6 +2029,13 @@ def main(argv: list[str] | None = None) -> int:
     sa.add_argument("--role", required=True)
     sa.add_argument("--cwd", default=None)
     sa.add_argument(
+        "--mode",
+        choices=("pane", "subagent"),
+        default="pane",
+        help="execution mode: pane (default, existing visible cockpit pane) or subagent "
+        "(native same-provider child in the Lead process; no pane/model diversity)",
+    )
+    sa.add_argument(
         "--model",
         default=None,
         metavar="ID",
@@ -2152,6 +2195,15 @@ def main(argv: list[str] | None = None) -> int:
         help="report a FAILED result (QA/verify failed) → Lead proposes a fix loop",
     )
     sd.set_defaults(func=cmd_done)
+
+    ssd = sub.add_parser(
+        "subagent-done",
+        help="complete a pending --mode subagent assignment through the done pipeline (Lead/native child)",
+    )
+    ssd.add_argument("--role", required=True)
+    ssd.add_argument("note", nargs="?", default="")
+    ssd.add_argument("--fail", action="store_true")
+    ssd.set_defaults(func=cmd_subagent_done)
 
     spg = sub.add_parser(
         "progress",

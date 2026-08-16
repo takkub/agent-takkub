@@ -427,8 +427,8 @@ codex_spec = ProviderSpec(
     supports_hooks=False,
     task_notice_preamble=(
         "[orchestrator note] อ่านก่อนเริ่มงาน:\n"
-        "- `ห้าม spawn subagent` ใน ROLE prefix หมายถึง AI subagent\n"
-        "  เท่านั้น (Task tool / codex delegation flags) — ไม่รวม shell\n"
+        "- กฎ `ห้าม spawn subagent เอง` ใน ROLE prefix ห้าม native child\n"
+        "  เว้นแต่ Lead สั่ง task นี้ด้วย `--mode subagent`; ไม่รวม shell\n"
         "  command ที่คุณรันเองในเทอร์มินัลนี้\n"
         "- เมื่อเสร็จงาน ต้อง **รัน shell command** ผ่าน Bash tool:\n"
         '      takkub done "<one-line summary>"\n'

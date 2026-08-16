@@ -1257,6 +1257,217 @@ class Orchestrator(
             return task
         return f"{_SESSION_GOAL_HEADER}\n{goal}\n\n{task}"
 
+    def _register_subagent(
+        self,
+        role_name: str,
+        cwd: str | None,
+        task: str,
+        *,
+        requires_commit: bool = False,
+        auto_chain: bool = False,
+        shard_total: int = 0,
+        isolation: str = "shared",
+        project: str | None = None,
+        feature: str = "",
+    ) -> tuple[bool, str]:
+        """Register a native child without opening a cockpit pane (#268).
+
+        The Lead process owns native-subagent execution; the cockpit owns the
+        durable task capsule and completion bookkeeping.  This boundary keeps
+        provider-native execution in-process while preserving the ledger,
+        inbox and wait semantics of a normal ``done`` report.
+        """
+        try:
+            role_name = validate_name(role_name, "role")
+        except ValueError as exc:
+            return False, str(exc)
+        if role_name == LEAD.name:
+            return False, "lead cannot assign itself as a subagent"
+        project_ns = self._resolve_project(project)
+        pending = getattr(self, "_subagent_assignments", None)
+        if pending is None:
+            pending = self._subagent_assignments = {}
+        key = (project_ns, role_name)
+        if key in pending:
+            return (
+                False,
+                f"subagent assignment already pending for {role_name}; use {role_name}#N for fan-out",
+            )
+
+        base_role = _split_shard(role_name)[0]
+        run_cwd = cwd or default_cwd_for_role(base_role, project=project_ns)
+        worktree = None
+        if isolation == "worktree":
+            from .worktree_manager import WorktreeManager, load_worktree_config
+
+            if run_cwd:
+                info, warning = WorktreeManager().create(
+                    run_cwd, project_ns, role_name, int(time.time()), exclude_ports=set()
+                )
+            else:
+                info, warning = None, "ไม่มี cwd ให้สร้าง worktree (ระบุ --cwd)"
+            if info is not None:
+                cfg, _ = load_worktree_config(info.git_root)
+                run_cwd = info.path
+                worktree = info.as_dict()
+                task = _append_worktree_hint(task, info.branch, cfg.post_create, info.port)
+            else:
+                self._notify_lead(
+                    project_ns,
+                    f"⚠️ [{role_name}] worktree isolation ใช้ไม่ได้ → subagent ใช้ shared cwd · {warning}",
+                    from_role=role_name,
+                    note="",
+                )
+
+        task = self._apply_session_goal(task, project_ns)
+        task_id = _uuid.uuid4().hex
+        capsule = (
+            f"[ROLE: {role_name} — Lead assigned this task with `takkub assign --mode subagent`]\n"
+            "You are a native subagent of the Lead's current provider. Work directly in the cwd below; "
+            "do not claim independent-provider or cross-model verification.\n"
+            f"cwd: {run_cwd or '(current project cwd)'}\n\n{task}\n\n"
+            f'When finished, run: takkub subagent-done --role {role_name} "<one-line summary>"\n'
+            "For analysis/review, save detailed findings under docs/ before that completion command."
+        )
+        capsule_dir = _task_handoff_dir(project_ns)
+        capsule_path = capsule_dir / (
+            f"{datetime.now().strftime('%H%M%S')}-{role_name}-subagent-{task_id[:8]}.md"
+        )
+        try:
+            capsule_path.write_text(capsule, encoding="utf-8")
+        except OSError as exc:
+            return False, f"could not write subagent task capsule: {exc}"
+
+        from .provider_config import effective_provider_for
+
+        parent_provider = effective_provider_for(LEAD.name, project=project_ns)
+        pending[key] = {
+            "task": task,
+            "task_id": task_id,
+            "cwd": run_cwd,
+            "assign_ts": time.time(),
+            "requires_commit": requires_commit,
+            "auto_chain": auto_chain,
+            "shard_total": shard_total,
+            "worktree": worktree,
+            "provider": parent_provider,
+            "capsule": str(capsule_path),
+        }
+        try:
+            from .task_ledger import create_assignment
+
+            warning = create_assignment(
+                project_ns,
+                role_name,
+                run_cwd,
+                task,
+                self.get_session_goal(project=project_ns),
+                feature,
+                parent_provider,
+            )
+            if warning:
+                self._notify_lead(project_ns, warning, from_role=role_name, note="")
+            self.ledgerChanged.emit(project_ns)
+        except Exception:
+            _log_event(
+                "ledger_hook_error", role=role_name, project=project_ns, stage="subagent-assign"
+            )
+
+        if shard_total > 0:
+            group_key = f"{project_ns}::{base_role}"
+            if group_key not in self._shard_groups:
+                self._shard_groups[group_key] = ShardGroup(base_role=base_role, total=shard_total)
+            else:
+                self._shard_groups[group_key].total = shard_total
+        _log_event(
+            "assign_subagent",
+            role=role_name,
+            project=project_ns,
+            effective_provider=parent_provider,
+            capsule=str(capsule_path),
+        )
+        forward = str(capsule_path).replace(os.sep, "/")
+        return True, (
+            f"subagent registered for {role_name} (provider={parent_provider}, no pane). "
+            f"Dispatch one native subagent with task capsule: {forward}; completion command is inside. "
+            "This mode is same-provider only and is not a cross-model check."
+        )
+
+    def subagent_done(
+        self, role_name: str, note: str = "", project: str | None = None, failed: bool = False
+    ) -> tuple[bool, str]:
+        """Complete a pending native child through done-equivalent sinks (#268)."""
+        try:
+            role_name = validate_name(role_name, "role")
+        except ValueError as exc:
+            return False, str(exc)
+        project_ns = self._resolve_project(project)
+        pending = getattr(self, "_subagent_assignments", {})
+        state = pending.pop((project_ns, role_name), None)
+        if state is None:
+            return False, f"no pending subagent assignment for {role_name}"
+        note = (note or "").strip()
+        now = datetime.now()
+        try:
+            from .task_ledger import mark_done
+
+            warning = mark_done(project_ns, role_name, "fail" if failed else "ok", ts=now)
+            if warning:
+                self._notify_lead(project_ns, warning, from_role=role_name, note="")
+            self.ledgerChanged.emit(project_ns)
+        except Exception:
+            _log_event(
+                "ledger_hook_error", role=role_name, project=project_ns, stage="subagent-done"
+            )
+
+        session_path = self._save_decision_note(project_ns, role_name, note, now=now)
+        body = note if failed else self._condense_done_note(note, note, "", session_path)
+        notice = (
+            self._build_verify_fail_handoff(role_name, note)
+            if failed
+            else f"[{role_name} done · subagent] {body}".rstrip()
+        )
+        shard_total = int(state.get("shard_total", 0) or 0)
+        # Match pane done semantics: clean shard reports are consolidated;
+        # failures surface immediately as blocking notices.
+        if failed or shard_total == 0:
+            self._notify_lead(project_ns, notice, from_role=role_name, note=note)
+        if state.get("requires_commit") and not state.get("worktree") and state.get("cwd"):
+            self._check_uncommitted_async(project_ns, role_name, state["cwd"])
+        if state.get("worktree"):
+            self._finalize_worktree(project_ns, role_name, state["worktree"])
+        if state.get("auto_chain") and not any(
+            p == project_ns and other.get("auto_chain") for (p, _role), other in pending.items()
+        ):
+            self._maybe_fire_auto_chain_handoff(project_ns, True)
+
+        if shard_total > 0:
+            base_role = _split_shard(role_name)[0]
+            group_key = f"{project_ns}::{base_role}"
+            group = self._shard_groups.get(group_key)
+            if group and not group.closed:
+                if failed:
+                    group.failed.add(role_name)
+                    group.failed_notes[role_name] = body
+                else:
+                    group.done[role_name] = body
+                if len(group.done) + len(group.failed) >= group.total:
+                    group.closed = True
+                    self._inject_shard_fanout_handoff(project_ns, group)
+                    self._shard_groups.pop(group_key, None)
+
+        stamp = now.strftime("%Y-%m-%dT%H%M%S")
+        self._recent_done.insert(0, (project_ns, role_name, f"{stamp}-{role_name}.md"))
+        del self._recent_done[20:]
+        getattr(self, "_wait_done_events", {})[(project_ns, role_name)] = {
+            "ts": now.timestamp(),
+            "failed": bool(failed),
+        }
+        self._write_hot_md()
+        self.agentDone.emit(project_ns, role_name, note)
+        _log_event("done_subagent", role=role_name, project=project_ns, note=note[:200])
+        return True, f"{role_name} subagent reported done"
+
     def assign(
         self,
         role_name: str,
@@ -1270,8 +1481,27 @@ class Orchestrator(
         project: str | None = None,
         feature: str = "",
         model: str | None = None,
+        mode: str = "pane",
         _resource_token: ResourceToken | None = None,
     ) -> tuple[bool, str]:
+        if mode not in {"pane", "subagent"}:
+            return False, "mode must be pane or subagent"
+        if mode == "subagent":
+            if model:
+                return False, "model override is not supported in subagent mode"
+            if plan:
+                return False, "plan mode is not supported in subagent mode"
+            return self._register_subagent(
+                role_name,
+                cwd,
+                task,
+                requires_commit=requires_commit,
+                auto_chain=auto_chain,
+                shard_total=shard_total,
+                isolation=isolation,
+                project=project,
+                feature=feature,
+            )
         model = (model or "").strip() or None
         if model:
             from .provider_config import assign_model_override_error

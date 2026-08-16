@@ -57,9 +57,15 @@ class _FakeOrch:
         project=None,
         feature="",
         model=None,
+        mode="pane",
     ):
         self.assign_calls.append((role, cwd, task, requires_commit, auto_chain, isolation))
         self.last_assign_model = model
+        self.last_assign_mode = mode
+        return True, "ok"
+
+    def subagent_done(self, role, note="", project=None, failed=False):
+        self.subagent_done_call = (role, note, project, failed)
         return True, "ok"
 
     def spawn(self, role, cwd=None, project=None):
@@ -78,6 +84,51 @@ def _auth(extra: dict) -> dict:
 
 
 class TestAsyncSpawnDispatch:
+    def test_assign_dedup_fingerprint_separates_execution_modes(self) -> None:
+        assert CliServer._assign_fingerprint("p", "reviewer", "scan", "pane") != (
+            CliServer._assign_fingerprint("p", "reviewer", "scan", "subagent")
+        )
+
+    def test_subagent_assign_registers_inline_without_spawn_delay(self) -> None:
+        orch = _FakeOrch()
+        srv = CliServer(orch)
+        sock = _FakeSock()
+
+        srv._dispatch(
+            sock,
+            _auth(
+                {
+                    "cmd": "assign",
+                    "role": "reviewer",
+                    "task": "scan",
+                    "mode": "subagent",
+                }
+            ),
+        )
+
+        assert _replies(sock)[0]["ok"] is True
+        assert orch.assign_calls == [("reviewer", None, "scan", False, False, "shared")]
+        assert orch.last_assign_mode == "subagent"
+
+    def test_subagent_done_routes_to_completion_handler(self) -> None:
+        orch = _FakeOrch()
+        srv = CliServer(orch)
+        sock = _FakeSock()
+
+        srv._dispatch(
+            sock,
+            _auth(
+                {
+                    "cmd": "subagent-done",
+                    "role": "reviewer",
+                    "note": "clean",
+                }
+            ),
+        )
+
+        assert _replies(sock)[0]["ok"] is True
+        assert orch.subagent_done_call == ("reviewer", "clean", None, False)
+
     def test_assign_acked_immediately_then_deferred(self, qapp: QCoreApplication) -> None:
         orch = _FakeOrch()
         srv = CliServer(orch)

@@ -41,6 +41,41 @@ class TestArgparse:
         cli.main(["assign", "--role", "backend", "--cwd", "/x", "do work"])
         assert fake_request[-1]["cwd"] == "/x"
 
+    def test_assign_mode_defaults_to_pane(self, fake_request: list[dict[str, Any]]) -> None:
+        cli.main(["assign", "--role", "reviewer", "scan auth"])
+        assert fake_request[-1]["mode"] == "pane"
+
+    def test_assign_subagent_mode_forwarded(self, fake_request: list[dict[str, Any]]) -> None:
+        cli.main(["assign", "--role", "reviewer", "--mode", "subagent", "scan auth"])
+        assert fake_request[-1]["mode"] == "subagent"
+
+    def test_subagent_mode_allows_twenty_shards(self, fake_request: list[dict[str, Any]]) -> None:
+        cli.main(["assign", "--role", "reviewer", "--mode", "subagent", "--shards", "20", "scan"])
+        assert len(fake_request) == 20
+        assert all(payload["mode"] == "subagent" for payload in fake_request)
+
+    def test_pane_mode_keeps_existing_eight_shard_cap(
+        self, fake_request: list[dict[str, Any]]
+    ) -> None:
+        assert cli.main(["assign", "--role", "qa", "--shards", "9", "scan"]) == 1
+        assert fake_request == []
+
+    def test_subagent_mode_rejects_model_override(self, fake_request: list[dict[str, Any]]) -> None:
+        rc = cli.main(
+            ["assign", "--role", "reviewer", "--mode", "subagent", "--model", "x", "scan"]
+        )
+        assert rc == 1
+        assert fake_request == []
+
+    def test_subagent_done_payload(
+        self, fake_request: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TAKKUB_ROLE", "lead")
+        cli.main(["subagent-done", "--role", "reviewer", "audit clean"])
+        assert fake_request[-1]["cmd"] == "subagent-done"
+        assert fake_request[-1]["role"] == "reviewer"
+        assert fake_request[-1]["note"] == "audit clean"
+
     def test_assign_with_model_override(self, fake_request: list[dict[str, Any]]) -> None:
         cli.main(["assign", "--role", "qa", "--model", "claude-haiku-4-5", "scan"])
         assert fake_request[-1]["model"] == "claude-haiku-4-5"

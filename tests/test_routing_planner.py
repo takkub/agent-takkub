@@ -13,6 +13,33 @@ from __future__ import annotations
 
 from agent_takkub.routing_planner import ActionKind, RoutingAction, classify, classify_failure
 
+
+class TestAssignModeSuggestion:
+    def test_scan_suggests_subagent(self) -> None:
+        action = classify("audit the auth package for unsafe defaults")
+        assert action.suggested_mode == "subagent"
+
+    def test_thai_search_suggests_subagent(self) -> None:
+        action = classify("ค้นหา config ที่เปิด debug ทั้ง repo")
+        assert action.suggested_mode == "subagent"
+
+    def test_thai_find_suggests_subagent(self) -> None:
+        action = classify("หาไฟล์ที่ประกาศ legacy flag")
+        assert action.suggested_mode == "subagent"
+
+    def test_thai_check_suggests_subagent(self) -> None:
+        action = classify("ตรวจ endpoint ทั้งโปรเจ็ค")
+        assert action.suggested_mode == "subagent"
+
+    def test_implementation_stays_pane(self) -> None:
+        action = classify("fix the auth endpoint")
+        assert action.suggested_mode == "pane"
+
+    def test_cross_model_check_stays_pane(self) -> None:
+        action = classify("codex cross-check this audit")
+        assert action.suggested_mode == "pane"
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────

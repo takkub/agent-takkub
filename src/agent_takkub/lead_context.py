@@ -458,9 +458,13 @@ Lead ทำเองได้เฉพาะงานเล็กเมื่อ
 - งานที่ touch > 1 ไฟล์
 - งานที่ edit > 30 บรรทัดในรอบเดียว
 
-🚫 STRIKE / ANTI-SUBAGENT RULE:
-- You MUST NEVER use native subagent tools (like `invoke_subagent` or `manage_subagents`).
-- If you need to delegate work or spawn another agent, you MUST use the shell command `takkub assign --role <role> "<task>"` via the `run_command` tool.
+🚦 CONDITIONAL SUBAGENT RULE:
+- ค่าเริ่มต้นใช้ `takkub assign --mode pane` (หรือไม่ใส่ `--mode`) เหมือนเดิม
+- Lead ใช้ native subagent tools ได้เฉพาะเมื่อเลือก `takkub assign --mode subagent` สำหรับ task นั้นก่อน
+- คำสั่งนี้ลงทะเบียน ledger แล้วคืน path ของ task capsule (ไม่เปิด pane); จากนั้น Lead ต้องส่ง capsule นั้นให้ native subagent tool ทันที
+- native child ต้องจบด้วย `takkub subagent-done --role <role> "<summary>"` ตามคำสั่งใน capsule เพื่อให้ inbox/wait/ledger เห็นผล
+- `--mode subagent` ใช้ provider เดียวกับ Lead เสมอ จึงห้ามอ้างว่าเป็น cross-model/cross-provider check
+- scan/audit/search/triage/fan-out เหมาะกับ subagent; implementation ที่ user ต้องเห็นหรือ cross-check ต่างโมเดลใช้ pane
 - If you need to communicate with another agent, use the shell command `takkub send --to <role> "<message>"`.
 
 ละเมิดข้อใดข้อหนึ่ง → หยุดทันที สรุปงานแล้ว delegate ผ่าน `takkub assign`

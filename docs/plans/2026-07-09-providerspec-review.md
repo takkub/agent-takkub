@@ -18,7 +18,7 @@ Design §5 ระบุ call site 4 จุด (provider_config, spawn_engine, pt
 
 ### 1a. claude spawn branch — knob ที่ schema ตกหมด (`spawn_engine.py:1377-1575`)
 - **`--plugin-dir` allowlist** (`_default_plugin_dirs(base_role)` + `TAKKUB_EXTRA_PLUGINS`, line 1470-1474) — ไม่มี field. superpowers/agent-skills ถูก hand ผ่าน `--plugin-dir` เพราะ `--setting-sources project,local` ตัด user settings ทิ้ง → เป็น knob บังคับของ claude
-- **`--disallowed-tools Task,AskUserQuestion`** (line 1532-1546) — ไม่มี field. เป็น hard-enforce "ห้าม spawn subagent" + teammate ไม่ได้ AskUserQuestion. codex/gemini ใช้ bypass-approval แทน → ต่าง mechanism ต่อ provider จริงแต่ schema เงียบ
+- **Historical (ก่อน #268):** `--disallowed-tools Task,AskUserQuestion` (line 1532-1546) เคย hard-enforce "ห้าม spawn subagent"; ปัจจุบัน pane mode ยัง block แต่ `--mode subagent` วิ่งใน Lead process
 - **`--model` / `--effort` / `--fallback-model` per-role tier** (`_teammate_tier`, `_lead_model_override`, line 1416-1464) — ไม่มี field. codex/gemini ไม่รับ flag พวกนี้ = provider-specific แต่ไม่มีที่ให้ declare "provider นี้รับ model flag ไหม"
 - **hook wiring `--settings <file>`** (`ensure_hook_settings_file()`, line 1391-1396) — schema มี `supports_hooks: bool` แต่ **ไม่มี flag name**. `--settings` เป็น path ไม่ใช่ inline JSON (Windows quoting). bool อย่างเดียว build argv ไม่ได้
 - **`apply_claude_auth_overrides(env)`** (line 1360) — claude-only env, ไม่มี field

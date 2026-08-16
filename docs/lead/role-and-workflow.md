@@ -37,7 +37,8 @@ Lead spawn เฉพาะ role ที่จำเป็น ใช้ `takkub` C
 
 ```bash
 takkub list | status                                   # สถานะ panes / progress + stall
-takkub assign --role <r> [--cwd <path>] "<task>"       # spawn + ส่ง task
+takkub assign --role <r> [--cwd <path>] "<task>"       # default --mode pane: spawn + ส่ง task
+takkub assign --role <r> --mode subagent "<task>"      # native child provider เดียวกับ Lead, ไม่เปิด pane
 takkub assign --role <r> --isolation worktree "<task>" # แยก worktree (Multi mode แก้ repo เดียวกัน)
 takkub assign --role qa --plan --shards N "<task>"     # planner แบ่ง bucket → fan-out (browser e2e เท่านั้น)
 takkub assign --role <r> --auto-chain "<task>"         # impl done → auto verify sequence
@@ -48,6 +49,10 @@ takkub worktree list | merge --role <r> | clean        # จัดการ wt/*
 takkub close --role <r> | close-all | restart | doctor [--live]
 takkub issue list | new "<title>" --severity <s> --body "..."   # default ลง repo agent-takkub
 ```
+
+เมื่อใช้ `--mode subagent`, stdout จะคืน path ของ task capsule: Lead ต้อง dispatch
+native subagent tool ของ provider ปัจจุบันด้วย capsule นั้นทันที และ child ต้องเรียก
+`takkub subagent-done --role <r> "<summary>"` เพื่อปิด ledger + ส่งเข้า inbox/wait.
 
 ถ้าไม่ระบุ `--cwd`: frontend→web, backend→api, mobile→mobile, devops→api, qa/reviewer/critic→first matched path
 
@@ -125,7 +130,7 @@ codex/gemini ใช้ไม่ได้ (toggle ปิดใน Settings หร
 
 `takkub assign --role <role> --cwd <path> "<task>"` — ทุก task **ขึ้นต้น role declaration + ลงท้าย report**:
 ```
-[ROLE: xxx developer — ทำงานเองโดยตรง ห้าม spawn subagent]
+[ROLE: xxx developer — ทำงานเองโดยตรง ห้าม spawn subagent เอง เว้นแต่ Lead สั่ง task นี้ด้วย --mode subagent]
 <task content>
 รายงานกลับด้วย takkub done เมื่อเสร็จ
 ```
@@ -146,7 +151,7 @@ codex/gemini ใช้ไม่ได้ (toggle ปิดใน Settings หร
 **ทำไม:** Lead ทำเอง = เสีย specialist context + ไม่มี audit trail + flood context window กฎนี้ไม่เปลี่ยนตาม provider หรือ active project
 
 ### กฎที่เคยพลาด
-- ทุก prompt ลงท้าย "รายงานกลับด้วย takkub done เมื่อเสร็จ" + ขึ้นต้น `[ROLE: … ห้าม spawn]` — CLI gate กัน teammate เรียก assign/spawn/close อยู่แล้ว (exit 1)
+- ทุก pane prompt ลงท้าย "รายงานกลับด้วย takkub done เมื่อเสร็จ" + ขึ้นต้นกฎห้าม spawn แบบมีเงื่อนไข `--mode subagent` — CLI gate กัน teammate เรียก assign/spawn/close อยู่แล้ว (exit 1)
 - **รูปภาพ (mockup/screenshot) แพงกว่าไฟล์ข้อความต่อไบต์มาก** (ชาร์จตาม resolution ไม่ใช่ byte) — ก่อน assign หลาย role ให้เปิดรูปเดียวกัน (เช่น critic pipeline ที่ critic+gemini+frontend หลายรอบดู mockup ใบเดียวกัน) ให้พิจารณาหั่นจำนวนคนอ่านก่อน: ให้ role เดียวเปิดแล้วสรุปเป็น text note ให้ role อื่นอ้างอิงต่อ แทนที่จะให้ทุกคน `Read` ไฟล์รูปตรงๆ ซ้ำกัน (เคสจริง: mockup PNG 1.7MB ถูกเปิดซ้ำ 7 รอบข้าม pane จน frontend 2 ตัวชน usage limit พร้อมกัน — 16% token ในเทิร์นเดียว)
 - **Long-running commands ต้อง background/detach เสมอ** (docker compose ไม่มี `-d`, `logs --follow` เปล่า, dev server, `until` ไม่มี timeout = ห้าม foreground) — task spec ที่มี docker/dev server ให้เตือนทุกครั้ง · ตัวอย่าง + verification patterns ที่ใช้ได้จริง (healthcheck > curl poll > logs grep -m1) → `docs/lead/patterns.md`
 - **commit & push (Lead เท่านั้น):** `git status` ก่อนเสมอ · `git add <specific files>` ไม่ใช่ `-A` · รอ user สั่ง commit อย่า auto-commit · **ห้าม push เอง — propose ก่อนทุกครั้ง**

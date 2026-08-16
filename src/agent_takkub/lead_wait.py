@@ -101,7 +101,12 @@ class LeadWaitMixin:
         clean_roles = [r for r in dict.fromkeys(roles or []) if r and r != LEAD.name]
         if not clean_roles:
             known = self.list_status(project=project_ns)
-            clean_roles = sorted(r for r in known if r != LEAD.name)
+            native_pending = {
+                role
+                for (pending_project, role) in getattr(self, "_subagent_assignments", {})
+                if pending_project == project_ns
+            }
+            clean_roles = sorted({r for r in known if r != LEAD.name} | native_pending)
             if not clean_roles:
                 return {
                     "ok": False,
@@ -217,13 +222,21 @@ class LeadWaitMixin:
         """
         event = getattr(self, "_wait_done_events", {}).get((project_ns, role))
         pane_state = getattr(self, "_pane_state", {}).get(_exit_key(project_ns, role))
-        assign_ts = pane_state.assign_ts if pane_state is not None else 0.0
+        subagent_state = getattr(self, "_subagent_assignments", {}).get((project_ns, role))
+        pane_assign_ts = pane_state.assign_ts if pane_state is not None else 0.0
+        subagent_assign_ts = (
+            float(subagent_state.get("assign_ts", 0.0)) if subagent_state is not None else 0.0
+        )
+        assign_ts = max(pane_assign_ts, subagent_assign_ts)
         effective_start = max(started_ts, assign_ts)
         fresh = event is not None and event.get("ts", 0.0) >= effective_start
         if fresh:
             if self._has_pending_lead_notice(project_ns, role):
                 return "pending", "รายงานถูกสร้างแล้ว กำลังรอส่งเข้า Lead (ยังไม่ถึง pane)"
             return ("failed" if event.get("failed") else "done"), None
+
+        if subagent_state is not None:
+            return "pending", "native subagent ยังทำงานอยู่ (ไม่มี pane ตาม --mode subagent)"
 
         pane = panes.get(role)
         if pane is None:

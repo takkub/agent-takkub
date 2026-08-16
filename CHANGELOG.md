@@ -4,6 +4,10 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+### Added
+
+- `takkub assign --mode pane|subagent` (#268): ค่าเริ่มต้นยังเป็น pane; งาน scan/audit/search/triage/fan-out เลือก native subagent provider เดียวกับ Lead ได้โดยไม่เปิด pane และปิดงานผ่าน `subagent-done` เข้าสู่ ledger/inbox/wait เดิม. โหมดนี้ไม่ใช่ cross-model/cross-provider verification.
+
 ## [1.0.64] - 2026-08-16
 
 รอบ **"cockpit เลิกโกหก Lead + ลดค่า token ต่อ pane"** — วันเดียวปิด 16 issue (#251-#266) ที่เกือบทั้งหมดโผล่มาจากการใช้งานจริงเช้าวันนั้น เริ่มจาก remote-control ที่ดับเองทุกคืน แล้วสาวไปเจอตระกูลบั๊ก "สัญญาณที่ดูน่าเชื่อถือแต่ไม่จริง" อีกเป็นพวง

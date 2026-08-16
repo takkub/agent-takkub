@@ -1,7 +1,7 @@
 """Tests for `_rewrite_task_for_codex` — the override-notice prepender
 that gets called on every task heading into a codex pane. Guards against
 the bug where codex misinterprets Lead's standard
-`[ROLE: ... ห้าม spawn subagent]` prefix as also forbidding the
+`[ROLE: ... ห้าม spawn subagent เอง เว้นแต่ ... --mode subagent]` prefix as also forbidding the
 `takkub done` shell command.
 """
 
@@ -17,7 +17,7 @@ def test_prepends_notice_to_plain_task() -> None:
 
 
 def test_prepends_notice_to_role_prefixed_task() -> None:
-    task = "[ROLE: codex reviewer — ทำงานเองโดยตรง ห้าม spawn subagent]\nCross-check refactor X."
+    task = "[ROLE: codex reviewer — ทำงานเองโดยตรง ห้าม spawn subagent เอง เว้นแต่ Lead สั่งด้วย --mode subagent]\nCross-check refactor X."
     out = _rewrite_task_for_codex(task)
     # Notice appears BEFORE the inline ROLE prefix so the override is at
     # equal or greater proximity than the constraint.
