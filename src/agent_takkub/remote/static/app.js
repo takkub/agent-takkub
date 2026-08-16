@@ -250,7 +250,7 @@
     if (state.session) headers["X-Session"] = state.session;
     return fetch(apiUrl(path), Object.assign({}, opts, { headers: headers }))
       .then(function (res) {
-        // #252/#254: a tunnel/edge failure (Cloudflare down, cockpit's
+        // #252: a tunnel/edge failure (Cloudflare down, cockpit's
         // remote toggled off) never reaches the cockpit itself — it's
         // intercepted upstream and answers with its own error page (5xx,
         // text/plain or text/html body), never one of our own JSON
@@ -343,7 +343,7 @@
     return err instanceof TypeError || (err instanceof Error && err.message === "cockpit_unreachable");
   }
 
-  // #254: the other half of the split above — cockpit was reached but its
+  // #252: the other half of the split above — cockpit was reached but its
   // Qt main thread didn't answer in time (bridge timeout, 504 from our own
   // JSON). Distinct from CONN_ERROR_MSG: the chip stays Online, this just
   // tells the user the request itself didn't get an answer.

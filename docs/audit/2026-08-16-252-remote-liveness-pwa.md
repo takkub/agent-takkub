@@ -1,4 +1,4 @@
-# #252/#254 (frontend half) — PWA "Online" chip lied about connectivity in both directions
+# #252 (frontend half) — PWA "Online" chip lied about connectivity in both directions
 
 ## หลักฐานที่พิสูจน์แล้ว
 
@@ -24,13 +24,13 @@
 - `res.status === 404 && hadToken` (token ตาย → pairing) และ `res.status === 403` (`password_required` → password prompt) — auth path เดิมทุกจุด ยืนยันด้วยเทส
 - `src/agent_takkub/remote/*.py` (backend ทำคู่ขนานอยู่)
 
-## #254 follow-up — comment ผิด: cockpit เองก็ตอบ 5xx ได้จริง
+## #252 follow-up — comment ผิด: cockpit เองก็ตอบ 5xx ได้จริง
 
 Lead review รอบสองพบว่าคอมเมนต์ในโค้ด (fix #1 ด้านบน) ที่เขียนว่า "cockpit เอง (`http_server.py`) ไม่เคยตอบ 5xx" **ไม่จริง** — พิสูจน์แล้วจากโค้ด `remote/http_server.py:602-611` (`_respond_marshaled`): ถ้า Qt main thread ไม่ตอบภายใน `_BRIDGE_TIMEOUT_SEC` (8 วิ) จะส่ง `504 {"ok": false, "msg": "orchestrator did not respond"}` เป็น `Content-Type: application/json` ของ cockpit เอง (โค้ดเดียวกันซ้ำใน `_issue_sse_ticket` บรรทัด 613-631)
 
 **ผลของบั๊กเดิม:** เคส "cockpit ติดต่อได้จริงแต่ Qt thread ค้าง" (504 JSON) จะถูกตีความเป็น edge/tunnel outage เหมือน 530 จาก Cloudflare — chip เด้ง Offline พร้อม `CONN_ERROR_MSG` ("tunnel ล่ม หรือ cockpit ปิด remote อยู่") ซึ่งผิดคนละสาเหตุ = liveness signal โกหกอีกทางหนึ่ง
 
-### Fix (#254)
+### Fix (#252)
 
 `apiFetch` แยก 5xx ออกเป็น 2 เส้นทางตาม `Content-Type` ก่อนตัดสินใจ Offline:
 
@@ -41,7 +41,7 @@ Lead review รอบสองพบว่าคอมเมนต์ในโ�
 
 แก้คอมเมนต์เดิมใน `apiFetch` ให้ตรงความจริง อ้างอิง `http_server.py:602-611` ตรงๆ แทนการเคลมว่า cockpit ไม่เคยตอบ 5xx
 
-### ไม่แตะ (#254)
+### ไม่แตะ (#252)
 
 - `src/agent_takkub/remote/*.py` ยังคงไม่แตะ (backend ทำคู่ขนานอยู่ ยังไม่ merge)
 - 404/403 auth path เหมือนเดิมเป๊ะ
