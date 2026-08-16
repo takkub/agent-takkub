@@ -192,6 +192,45 @@ class TestKimiNotLoggedIn:
         assert _auth_failure_reason(lines, "claude", seconds_since_output=0.0) is None
 
 
+class TestIsHardBlockedFor:
+    """`PtySession.is_hard_blocked_for` (#263) — same hard-blocker matching
+    `_classify_ready_for_provider` already runs for `ready_marker_selftest`,
+    exposed as its own query so a caller (`Orchestrator._derive_display_state`)
+    can ask "is this provider's screen showing an active interrupt/generation
+    indicator right now" independent of the ready/not-ready verdict."""
+
+    def _is_hard_blocked(self, lines: list[str], provider: str) -> bool:
+        return PtySession.is_hard_blocked_for(_FakeScreen(lines), provider)
+
+    def test_codex_esc_to_interrupt_is_hard_blocked(self) -> None:
+        lines = ["gpt-5.5 medium", "Working (0s - esc to interrupt)"]
+        assert self._is_hard_blocked(lines, "codex") is True
+
+    def test_codex_idle_composer_is_not_hard_blocked(self) -> None:
+        lines = ["gpt-5.5 medium · ~/project · weekly 86% left · Fast on"]
+        assert self._is_hard_blocked(lines, "codex") is False
+
+    def test_unknown_provider_is_never_hard_blocked(self) -> None:
+        lines = ["esc to interrupt"]
+        assert self._is_hard_blocked(lines, "not-a-real-provider") is False
+
+    def test_provider_with_no_hard_blockers_never_matches(self) -> None:
+        # cursor_spec has no calibrated ready_hard_blockers at all yet.
+        lines = ["esc to interrupt"]
+        assert self._is_hard_blocked(lines, "cursor") is False
+
+    def test_marker_outside_ready_region_does_not_match(self) -> None:
+        lines = ["esc to interrupt"] + [f"line {i}" for i in range(_READY_TAIL_ROWS + 3)]
+        assert self._is_hard_blocked(lines, "codex") is False
+
+    def test_verifying_your_account_exception_is_honored(self) -> None:
+        # Same carve-out as _classify_ready_for_provider: a failed identity
+        # check that already dropped back to prompt must not still read as
+        # hard-blocked just because the phrase scrolled through.
+        lines = ["verifying your account", "please try again shortly"]
+        assert self._is_hard_blocked(lines, "gemini") is False
+
+
 class TestReadyMarkerCalibrationStatus:
     """#257 point 3: a provider whose ready_rules is empty can never satisfy
     is_at_ready_prompt(), so delivery silently stalls — this predicate lets a
