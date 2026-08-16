@@ -55,6 +55,52 @@ def test_cpu_and_memory_hysteresis_is_non_blocking() -> None:
     assert not governor.sample()["overloaded"]
 
 
+def test_request_slot_reports_cpu_high_only_when_cpu_actually_over_pause() -> None:
+    samples = iter([(90.0, 50.0, 10)])
+    governor = ResourceGovernor(_limits(), sampler=lambda: next(samples))
+    governor.sample()
+    decision = _request(governor, "p", "pane")
+    assert not decision.allowed
+    assert decision.reason == "cpu_high"
+
+
+def test_request_slot_reports_memory_low_when_ram_actually_under_pause() -> None:
+    samples = iter([(29.0, 15.0, 10)])
+    governor = ResourceGovernor(_limits(), sampler=lambda: next(samples))
+    governor.sample()
+    decision = _request(governor, "p", "pane")
+    assert not decision.allowed
+    assert decision.reason == "memory_low"
+
+
+def test_request_slot_reports_waiting_resume_when_latched_but_neither_metric_over_pause() -> None:
+    # Issue #274: RAM trips the latch (15% < 20% pause), then recovers to
+    # 21.5% — above the 20% pause line but still below the stricter 25%
+    # resume line — while CPU (29%) was never anywhere near either of its
+    # own thresholds. The old code blamed "cpu_high" here unconditionally.
+    samples = iter([(29.0, 15.0, 10), (29.0, 21.5, 10)])
+    governor = ResourceGovernor(_limits(), sampler=lambda: next(samples))
+    governor.sample()
+    snap = governor.sample()
+    assert snap["overloaded"]
+    assert snap["overload_reason"] == "waiting_resume"
+    decision = _request(governor, "p", "pane")
+    assert not decision.allowed
+    assert decision.reason == "waiting_resume"
+    assert decision.reason != "cpu_high"
+
+
+def test_request_slot_unblocks_once_both_resume_thresholds_clear() -> None:
+    samples = iter([(29.0, 15.0, 10), (29.0, 30.0, 10)])
+    governor = ResourceGovernor(_limits(), sampler=lambda: next(samples))
+    governor.sample()
+    snap = governor.sample()
+    assert not snap["overloaded"]
+    assert snap["overload_reason"] == ""
+    decision = _request(governor, "p", "pane")
+    assert decision.allowed
+
+
 def test_waiting_queue_is_round_robin_by_project() -> None:
     governor = ResourceGovernor(_limits(max_heavy_global=1, max_heavy_per_project=1))
     held = _request(governor, "held", "one")
