@@ -4,6 +4,41 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.67] - 2026-08-16
+
+รอบ **"ลดค่าใช้จ่ายต่อ pane + Lead ต้องมีทางออกเสมอ"**
+
+### Fixed (แก้)
+
+**codex/gemini บูตไม่ทันแล้วงานหาย (#271)**
+- `codex_spec.ready_wait_ms` ตั้งไว้ 90 วินาที แต่เวลาบูตจริงบนเครื่องทดสอบคือ 90-150 วินาที (วัดจาก 4 spawn ในวันเดียว ค้างเกิน 90 วิ ทุกครั้ง) → นาฬิกาหมดตอนยังบูตไม่เสร็จ → ระบบ paste งานแบบ blind เข้า composer ที่ยังไม่พร้อม → **งานตกหล่น 3 ใน 4 รอบ**
+- แก้ที่ต้นเหตุ: **ห้าม blind-paste ขณะที่จอยังแสดง boot marker** (ใช้ `shows_startup_marker()` เดิม) ให้ยืดการรอแทน มีเพดานที่ `BUSY_WAIT_CEILING_SEC` · เป็น provider-agnostic จึงช่วย gemini ที่ค้างเฟส sign-in ด้วย · และยก `ready_wait_ms` ของ codex เป็น 180 วินาที
+
+**notice ตอนปิด pane เตือนทุกครั้งจนไร้ความหมาย (#272)**
+- เดิมเช็คแค่ "มี child process ไหม" แต่ทุก pane มี scaffolding ของ CLI ติดอยู่เสมอ (cmd.exe/conhost.exe/node.exe/pwsh.exe/codex-code-mode-host/python) → **เตือน 100% ของทุกการปิด** กิน context ของ Lead ฟรีวันละหลายสิบใบ
+- เพิ่ม `ProviderSpec.scaffolding_process_names` แยกตาม provider แล้วกรองออกก่อนตัดสินใจ — เตือนเฉพาะเมื่อเหลือ process งานจริง (docker/pytest/build tooling) เจตนาเดิมของ #234 ยังอยู่ครบ
+
+**Lead ไม่มีทางออกเมื่อ provider ของ role พัง (#270)**
+- `--model` ปฏิเสธ claude model id สำหรับ role ที่ map ไป codex ทั้งที่ `--help` เขียนว่า "takes precedence over role/provider defaults" — พอ codex บูตไม่ผ่าน งานทั้งสายค้างโดยไม่มีทางแก้
+- เพิ่ม **`takkub assign --provider <name>`** เป็นทางออกที่แสดงเจตนาชัด · `--model` ตรวจความเข้ากันได้กับ provider **หลัง override** · error message ชี้ทางแก้ · boot-stall notice บอกคำสั่งที่ใช้ได้จริง
+- **ตัดสินใจไม่ auto-degrade ตอน boot-stall** (ต่างจาก auth-failure/no-content ที่ตายสนิท) เพราะ boot-stall ยังกู้เองได้ — เหตุผลเต็มใน `docs/audit/2026-08-16-270-provider-override.md`
+
+**task ยาวส่งไม่ถึง pane ที่อ่านไฟล์ไม่ได้ (#273)**
+- task ยาวถูกแปลงเป็น "ไปอ่าน spec จากไฟล์" แต่ pane ที่ไม่มี file-read tool เปิดไม่ได้ → ตอบ FAILED ทันที เสีย spawn ฟรี และยังไป trigger fix-loop ให้ Lead ไปหา root cause ของงานที่ไม่เคยเริ่ม
+- เพิ่ม `ProviderSpec.supports_agent_file_read` → provider ที่อ่านไฟล์เองไม่ได้จะได้ task แบบ inline แทน pointer · แยก **delivery-failure ออกจาก task-failure** ไม่ให้ปนกัน
+- boot-stall notice แนบ **error จริงจาก provider** (เช่น `codex mcp list`) ต่อท้าย แทนข้อความ generic — ดึงแบบ async ไม่บล็อก Qt thread
+
+**CodeQL 15 alert**
+- แก้จริง 6: `permissions:` ใน ci.yml (2), temp file ไม่ปลอดภัยใน shortcut.js, TOCTOU ใน pathfix.js (เจอบั๊ก EBADF จริงระหว่างแก้), ลบไฟล์ HTML กำพร้าที่ไม่มีใครอ้างถึง
+- dismiss 9 พร้อมหลักฐานและ `codeql[...]` annotation ในโค้ด: hash ใน session_store เป็น session token ไม่ใช่รหัสผ่าน · path guard ของ `_serve_static` ถูกต้องอยู่แล้ว (เขียนใหม่เป็น `is_relative_to()` ให้อ่านง่ายและทดสอบกับ symlink/`..`/drive-letter override) · `state.token` ใน app.js เลือกแค่หน้าจอ ไม่ใช่สิทธิ์ · 5 ใบที่เหลืออยู่ในไฟล์เทส
+
+### Changed (เปลี่ยน)
+
+**token diet รอบ 2 (#267)**
+- แปลกฎที่โมเดลอ่านอย่างเดียวใน role file ทั้ง 16 ใบเป็นภาษาอังกฤษ — staged context **78,657 → 52,053 token (−33.8%)** วัดด้วย tiktoken บนไฟล์ที่ stage แล้วจริง
+- **ข้อความที่ผู้ใช้ต้องอ่านยังเป็นภาษาไทยทั้งหมด** (placeholder ของ `takkub done`, ข้อความตอน blocked, output template ของ qa) — cross-check โดย codex ทีละบรรทัดครบ 16 ไฟล์ พบจุดที่แปลเกิน 26 จุดแล้วคืนกลับเป็นไทย พร้อมแก้คำแปลที่ทำให้ความหมายเพี้ยน 2 จุด
+
+
 ## [1.0.66] - 2026-08-16
 
 ### Fixed (แก้)
