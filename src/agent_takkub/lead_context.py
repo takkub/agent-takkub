@@ -347,8 +347,32 @@ def _build_lead_context_text(
         # Read-able path so an installed Lead's pointers aren't dangling.
         # Dev checkouts (ASSETS_ROOT == REPO_ROOT) are untouched: the
         # relative reference already resolves from the repo root.
-        _docs_lead_dir = (ASSETS_ROOT / "docs" / "lead").as_posix()
+        _docs_lead_dir_path = ASSETS_ROOT / "docs" / "lead"
+        _docs_lead_dir = _docs_lead_dir_path.as_posix()
+        # #267 follow-up: CLAUDE.md only points Lead at
+        # docs/lead/role-and-workflow.md now (the token-diet split) — that
+        # file itself cross-references sibling docs (patterns.md,
+        # cli-reference.md, ...) by the same `docs/lead/...` relative form,
+        # which is equally unresolvable outside a dev checkout. Rewrite the
+        # SHIPPED copies of every staged docs/lead/*.md file in place too, so
+        # Lead's follow-up Read of role-and-workflow.md (or any doc it leads
+        # to) already sees absolute, readable paths instead of a second
+        # dangling hop. Idempotent — safe to redo on every Lead spawn.
+        _staged_docs = (
+            sorted(_docs_lead_dir_path.glob("*.md")) if _docs_lead_dir_path.is_dir() else []
+        )
+        for _doc in _staged_docs:
+            _doc_text = _doc.read_text(encoding="utf-8")
+            _doc_fixed = _doc_text.replace("docs/lead/", f"{_docs_lead_dir}/")
+            if _doc_fixed != _doc_text:
+                _doc.write_text(_doc_fixed, encoding="utf-8")
         base = base.replace("docs/lead/", f"{_docs_lead_dir}/")
+        # Surface the resolved bundle directly in Lead's rendered context
+        # too — not just fixed inside the files Lead may or may not go on to
+        # Read — so an installed Lead has one authoritative, absolute map of
+        # every shipped doc up front.
+        if _staged_docs:
+            base += "\n\n" + "\n".join(f"- `{_docs_lead_dir}/{_doc.name}`" for _doc in _staged_docs)
     if project is not None:
         data = load_projects()
         proj = (data.get("projects") or {}).get(project) or {}
