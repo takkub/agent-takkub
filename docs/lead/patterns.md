@@ -2,6 +2,34 @@
 
 > ย้ายมาจาก cockpit CLAUDE.md (token diet 2026-08-04) — CLAUDE.md เก็บเฉพาะกฎ ไฟล์นี้คือตัวอย่างเต็ม
 
+## Pane vs native subagent (`assign --mode`)
+
+`takkub assign` ไม่ใส่ `--mode` ยังคงเท่ากับ `--mode pane` ทุกประการ เพื่อคง
+พฤติกรรมเดิมและให้ user เห็นงานสดใน cockpit. `routing_planner` แค่แนะนำ mode;
+Lead เป็นผู้ตัดสินสุดท้าย.
+
+| รูปทรงงาน | Mode | เหตุผลหลัก |
+|---|---|---|
+| scan / audit / ค้นหา / triage เทสเสีย / first-pass review | `subagent` | boot เร็วและผลกลับ parent โดยตรง |
+| fan-out จำนวนมากที่แต่ละชิ้นอิสระ | `subagent` | ไม่สร้าง pane/PTY จำนวนมาก |
+| implement / fix / refactor ที่ user อยากดูหรืออาจสั่งแทรก | `pane` | มองเห็นสด ส่งข้อความแทรก และจัดการ permission ได้ |
+| cross-check ต่าง provider/model (เช่น codex เทียบ gemini) | `pane` เท่านั้น | native subagent ใช้ provider เดียวกับ parent เสมอ |
+
+```bash
+# ค่าเริ่มต้นเดิม — เปิด pane
+takkub assign --role backend --mode pane "implement endpoint"
+
+# ลงทะเบียน capsule แล้ว Lead dispatch ผ่าน native subagent tool ของ provider ปัจจุบัน
+takkub assign --role reviewer --mode subagent "scan auth package for unsafe defaults"
+# native child ปิดงานผ่านคำสั่งที่อยู่ใน capsule:
+# takkub subagent-done --role reviewer "summary"
+```
+
+ข้อจำกัดที่ยอมรับโดยตั้งใจ: subagent ไม่มี pane ให้ user ดูสด, `takkub send` แทรก
+กลางทางไม่ได้, approve permission จาก cockpit ไม่ได้, token ตอนทำงานไม่ลด และผลลัพธ์
+ยังเข้ากลับ context ของ parent. ที่สำคัญที่สุดคือมัน **ไม่ใช่ model diversity** — ห้าม
+อ้างว่า subagent ของ Claude/Codex/Gemini เป็น cross-check จาก provider อื่น.
+
 ## Parallel pattern (`&` + `wait`)
 
 ```bash

@@ -239,7 +239,7 @@ class TestGitExclude:
 
 class TestCodexAgentsMdOverrideRule:
     """Guards the section that prevents codex from misreading
-    Lead's `[ROLE: ... ห้าม spawn subagent]` prefix as forbidding the
+    Lead's conditional `[ROLE: ... --mode subagent]` prefix as forbidding the
     mandatory `takkub done` shell call (root cause of the "codex doesn't
     send takkub done" bug — see 2026-05-28 screenshots).
     """

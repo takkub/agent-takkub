@@ -2,7 +2,7 @@
 
 Protocol (newline-delimited JSON):
 
-  request:  {"cmd": "send|assign|spawn|close|done|list|hook|session-report", ...args}
+  request:  {"cmd": "send|assign|spawn|close|done|subagent-done|list|hook|session-report", ...args}
   response: {"ok": bool, "msg": str, ...extras}
 
 Runs on the Qt main thread via QTcpServer so all calls into Orchestrator are
@@ -56,6 +56,7 @@ _LEAD_ONLY_CMDS = frozenset(
     {
         "spawn",
         "assign",
+        "subagent-done",
         "close",
         "close-all",
         "harvest",
@@ -104,7 +105,7 @@ class CliServer(QObject):
         # fingerprints so a client retry of the identical request within
         # _ASSIGN_DEDUP_WINDOW_S is acked without a second dispatch. Pruned
         # alongside the idle-connection reaper (same 1s tick).
-        self._recent_assign_fingerprints: dict[tuple[str, str, str], float] = {}
+        self._recent_assign_fingerprints: dict[tuple[str, str, str, str], float] = {}
         # Reap idle (no newline received) connections once per second.
         self._reaper = QTimer(self)
         self._reaper.setInterval(1_000)
@@ -258,11 +259,13 @@ class CliServer(QObject):
             self._recent_assign_fingerprints.pop(k, None)
 
     @staticmethod
-    def _assign_fingerprint(project_ns: str, role: str, task: str) -> tuple[str, str, str]:
+    def _assign_fingerprint(
+        project_ns: str, role: str, task: str, mode: str = "pane"
+    ) -> tuple[str, str, str, str]:
         task_hash = hashlib.blake2b(
             (task or "").encode("utf-8", "replace"), digest_size=8
         ).hexdigest()
-        return (project_ns or "default", role, task_hash)
+        return (project_ns or "default", role, task_hash, mode)
 
     def _on_ready_read(self, sock: QTcpSocket) -> None:
         # Reject connections whose buffered data exceeds the frame cap without a
@@ -462,6 +465,10 @@ class CliServer(QObject):
                             self._reply(sock, ok=False, msg=cwd_err)
                             return
                 if cmd == "assign":
+                    mode = str(req.get("mode", "pane") or "pane")
+                    if mode not in {"pane", "subagent"}:
+                        self._reply(sock, ok=False, msg="--mode must be pane or subagent")
+                        return
                     from .provider_config import assign_model_override_error
 
                     model_error = assign_model_override_error(
@@ -499,7 +506,7 @@ class CliServer(QObject):
                         if _resolve_project_fp is not None
                         else (from_project or "default")
                     )
-                    fp = self._assign_fingerprint(project_ns_fp, role, req.get("task", ""))
+                    fp = self._assign_fingerprint(project_ns_fp, role, req.get("task", ""), mode)
                     now_fp = time.time()
                     last_seen = self._recent_assign_fingerprints.get(fp)
                     self._recent_assign_fingerprints[fp] = now_fp
@@ -513,6 +520,21 @@ class CliServer(QObject):
                             ),
                         )
                         return
+                if cmd == "assign" and mode == "subagent":
+                    ok, msg = self._orch.assign(
+                        role,
+                        cwd=req.get("cwd"),
+                        task=req.get("task", ""),
+                        requires_commit=bool(req.get("requires_commit", False)),
+                        auto_chain=bool(req.get("auto_chain", False)),
+                        shard_total=int(req.get("shard_total", 0)),
+                        isolation=str(req.get("isolation", "shared") or "shared"),
+                        project=from_project,
+                        feature=str(req.get("feature", "") or ""),
+                        mode=mode,
+                    )
+                    self._reply(sock, ok=ok, msg=msg)
+                    return
                 delay = self._next_spawn_delay_ms(role, from_project)
                 if cmd == "spawn":
                     QTimer.singleShot(
@@ -559,6 +581,13 @@ class CliServer(QObject):
             elif cmd == "done":
                 ok, msg = self._orch.done(
                     req.get("from") or "",
+                    note=req.get("note", ""),
+                    project=from_project,
+                    failed=bool(req.get("failed", False)),
+                )
+            elif cmd == "subagent-done":
+                ok, msg = self._orch.subagent_done(
+                    req.get("role") or "",
                     note=req.get("note", ""),
                     project=from_project,
                     failed=bool(req.get("failed", False)),

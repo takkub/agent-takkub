@@ -4,14 +4,14 @@ applyTo: "**"
 alwaysApply: true
 ---
 
-# 🚫 STRICT RULE: NEVER USE `invoke_subagent` IN THIS PROJECT
+# Native subagent policy
 
 You are operating within the `agent-takkub` codebase, which has its own native agent orchestration system (the Takkub Cockpit).
 
 **CRITICAL CONSTRAINT:**
-- You MUST NEVER use the Gemini native `invoke_subagent` tool.
-- You MUST NEVER use the Gemini native `manage_subagents` tool to spawn or manage subagents.
-- If you need to delegate work or spawn another agent, you MUST use the shell command `takkub assign --role <role> "<task>"` via the `run_command` tool.
+- Do not use Gemini native subagent tools on your own.
+- They are allowed only when Lead selected `takkub assign --mode subagent` for the current task.
+- Otherwise delegate through `takkub assign --role <role> "<task>"` via `run_command`.
 - If you need to communicate with another agent, use the shell command `takkub send --to <role> "<message>"`.
 
 This is a hard constraint requested by the user after a previous agent broke character and used the wrong subagent system. Do not make this mistake again.

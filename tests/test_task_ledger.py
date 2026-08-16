@@ -244,12 +244,12 @@ class TestAtomicWrite:
 
 class TestDeriveSummary:
     def test_declaration_only_falls_back_to_first_line(self) -> None:
-        task = "[ROLE: backend developer — ทำงานเองโดยตรง ห้าม spawn subagent]"
+        task = "[ROLE: backend --mode subagent]"
         assert task_ledger._derive_summary(task) == task
 
     def test_declaration_plus_task_skips_declaration_line(self) -> None:
         task = (
-            "[ROLE: backend developer — ทำงานเองโดยตรง ห้าม spawn subagent]\n"
+            "[ROLE: backend developer — ทำงานเองโดยตรง ห้าม spawn subagent เอง เว้นแต่ Lead สั่งด้วย --mode subagent]\n"
             "งาน A8-tweak: ปรับ Task dock ให้อ่านง่ายขึ้น\n"
         )
         assert task_ledger._derive_summary(task) == "งาน A8-tweak: ปรับ Task dock ให้อ่านง่ายขึ้น"

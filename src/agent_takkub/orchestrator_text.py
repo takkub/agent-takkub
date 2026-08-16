@@ -447,7 +447,7 @@ def _rewrite_task_for_codex(task: str) -> str:
     """Prepend an unambiguous override notice when sending a task to a codex pane.
 
     Codex tends to over-interpret Lead's standard
-    `[ROLE: ... ห้าม spawn subagent]` prefix as forbidding any external
+    `[ROLE: ... ห้าม spawn subagent เอง เว้นแต่ ... --mode subagent]` prefix as forbidding any external
     orchestration — including the mandatory `takkub done` shell command.
     The planted AGENTS.md tries to prevent this but loses to the more-
     proximal inline ROLE prefix. We inject a same-proximity clarification

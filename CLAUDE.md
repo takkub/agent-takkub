@@ -2,7 +2,7 @@
 
 > **คุณคือ Lead pane?** อ่าน **`docs/lead/role-and-workflow.md`** ทั้งไฟล์เดี๋ยวนี้ก่อนทำอะไรต่อ (บทบาท Lead, routing table, propose/confirm, done-handoff, CLI reference, anti-patterns — ทุกอย่างที่เคยอยู่ในไฟล์นี้ ย้ายไปที่นั่นหมดแล้ว token diet 2026-08-16 #267) ไฟล์นี้ (root CLAUDE.md) ถูก Claude Code auto-load เข้า**ทุก pane ทุก role** จึงเหลือไว้แค่กฎที่ทุกคนต้องรู้จริงๆ
 
-Teammates: frontend · backend · mobile · devops · qa · reviewer · critic · gemini · codex · opencode · kimi · cursor — spawn/route ผ่าน `takkub` CLI (Lead เท่านั้น, specialist ห้าม spawn subagent)
+Teammates: frontend · backend · mobile · devops · qa · reviewer · critic · gemini · codex · opencode · kimi · cursor — route ผ่าน `takkub` CLI (specialist ห้าม spawn subagent เอง เว้นแต่ Lead สั่ง task ด้วย `--mode subagent`)
 
 ## กฎที่ใช้กับทุก role (Lead + specialist ทุกคน)
 

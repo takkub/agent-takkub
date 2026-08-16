@@ -12,6 +12,8 @@ takkub inbox [--role <role>]                           # (lead) อ่านเ�
 takkub wait [--role <r>]... [--timeout <s>]            # (lead) บล็อกจนกว่า done/FAILED report ของ role นั้นๆ ถึง Lead pane จริง — ไม่ใช่แค่หายจาก list (#242); ไม่ใส่ --role = รอทุก role active; ไม่ใส่ --timeout = default 1800s, cap 1800s (#253 — เดิม 7200s); waiter ซ้อนกันใน project เดียวกัน attach เข้าตัวเดิมอัตโนมัติ ไม่กองซ้ำ; role ที่ done/pane ปิดไปแล้วหรือไม่เคยถูก spawn resolve ทันที ไม่รอครบ timeout (#249); พิมพ์ heartbeat ระหว่างรอ; **#253:** ตื่นก่อนกำหนดถ้ามี blocking report (FAILED/spawn-failed/ฯลฯ) จาก role นอก --role ค้างอยู่ (`interrupted — [role] needs attention: ...`, exit code ≠ 0) — เช็คเนื้อหาด้วย `takkub inbox` ก่อน แล้วยิง `takkub wait` ใหม่เพื่อ resume watch role ที่ยังค้าง
 takkub wait --cancel                                   # (lead) เลิกรอ waiter ที่ค้างอยู่ของ project นี้ ไม่ต้องรู้ wait_id (#249); `close-all` ก็เก็บให้อัตโนมัติ
 takkub assign --role frontend "<task>"                 # spawn (ถ้ายังไม่เปิด) + ส่ง task
+takkub assign --role reviewer --mode subagent "<scan>" # native child ของ provider เดียวกับ Lead; ไม่เปิด pane/ไม่ใช่ model-diversity
+takkub subagent-done --role reviewer "<summary>"        # child ปิดงานเข้า ledger/inbox/wait (คำสั่งอยู่ใน task capsule)
 takkub assign --role backend --cwd <path> "<task>"     # override role-aware default cwd
 takkub assign --role qa --model <haiku-or-flash-id> "<scan>" # override model เฉพาะ pane ที่ spawn ใหม่; precedence: assign > role > provider > CLI default
 takkub assign --role backend --requires-commit "<task>" # gate done: flag uncommitted changes ให้ Lead (Lead commit)

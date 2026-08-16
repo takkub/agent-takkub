@@ -715,10 +715,10 @@ class PaneRegistry:
 def _teammate_disallowed_tools() -> list[str]:
     """Tools hard-blocked for teammate panes via claude ``--disallowedTools``.
 
-    Default blocks ``Task`` so a teammate can't spawn invisible subagents — the
-    cockpit policy "ห้าม spawn subagent" (CLAUDE.md), which until now was enforced
-    only by the role-prompt and a model could ignore. A teammate fanning out its
-    own Task subagents burns tokens and does work the cockpit can't see in a pane.
+    Pane-mode teammates still block ``Task`` so they cannot create untracked
+    invisible children. ``assign --mode subagent`` never enters this pane spawn
+    path: the Lead's native child runs in the parent provider process and reports
+    through ``subagent-done`` instead.
 
     Override or clear via ``TAKKUB_TEAMMATE_DISALLOWED_TOOLS`` (space/comma-
     separated tool names; empty string disables the block entirely). Only
@@ -2462,9 +2462,9 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             teammate_fallback = _remap_pinned_model(teammate_fallback, env)
             if teammate_fallback:
                 argv.extend(["--fallback-model", teammate_fallback])
-            # Hard-enforce "ห้าม spawn subagent" (CLAUDE.md) at the CLI level so a
-            # teammate can't fan out invisible Task subagents (was prompt-only).
-            # Teammates only; the Lead is left unrestricted. Override/clear via
+            # Hard-enforce the pane-mode side of #268 at the CLI level. Native
+            # subagent mode runs under Lead and never reaches this spawn branch.
+            # Teammate panes stay restricted; the Lead remains unrestricted. Override/clear via
             # TAKKUB_TEAMMATE_DISALLOWED_TOOLS (see _teammate_disallowed_tools).
             _disallowed_tools = _teammate_disallowed_tools()
             if _disallowed_tools:

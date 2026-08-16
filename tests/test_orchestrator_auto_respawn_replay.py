@@ -141,7 +141,7 @@ class TestAutoRespawnReplay:
 
     def test_assign_rewrites_codex_task_with_override_notice(self, orch: Orchestrator) -> None:
         """assign() must prepend the override notice when the role is backed
-        by codex — otherwise codex over-reads `ห้าม spawn subagent` and skips
+        by codex — otherwise codex over-reads the conditional subagent rule and skips
         `takkub done` as a shell command (regression guard for 9fd6001).
         Asserts the call-site, not just the rewriter helper, so removing
         the assign() integration breaks a test.
@@ -154,9 +154,7 @@ class TestAutoRespawnReplay:
         from agent_takkub.orchestrator import _CODEX_TASK_NOTICE
 
         ekey = _exit_key(TEST_PROJECT, "codex")
-        raw_task = (
-            "[ROLE: codex reviewer — ทำงานเองโดยตรง ห้าม spawn subagent]\nCross-check refactor X."
-        )
+        raw_task = "[ROLE: codex reviewer — ทำงานเองโดยตรง ห้าม spawn subagent เอง เว้นแต่ Lead สั่งด้วย --mode subagent]\nCross-check refactor X."
 
         # The rewrite gate uses effective_provider_for(), which degrades codex
         # → claude when the codex CLI isn't installed (provider substitution).
