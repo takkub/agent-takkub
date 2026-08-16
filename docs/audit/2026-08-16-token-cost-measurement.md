@@ -204,3 +204,116 @@ Lead เองได้ประโยชน์เพิ่ม (นอกเห�
 - **ห้ามรัน full suite ตามคำสั่ง** — รันเฉพาะ targeted ตามรายการข้างบน + gate suite เท่านั้น
 
 **ไม่ commit** — รอ Lead review diff บน branch `wt/devops-1786852508`
+
+## 7. Implementation (2026-08-16, worktree `wt/devops-1786859852`) — #267 item 3: translate machine-only-read role-file rules to English
+
+**Scope:** all 16 `.claude/agents/*.md` role source files (analyst, backend, codex, critic, cursor, designer, devops, docs, frontend, gemini, kimi, mobile, opencode, qa, reviewer, security) — the only source for what gets staged verbatim into `runtime/agents/<role>/CLAUDE.md` (confirmed by reading `config.py::agent_role_dir()` + `spawn_engine.py:2009-2020` before starting: no separate "base file" gets merged in at spawn time — each `.claude/agents/<role>.md` IS the complete role prompt, plus a couple of centrally-appended hygiene blocks noted in the "Finding" subsection below).
+
+### Glossary (held constant across every file)
+| Thai | English |
+|---|---|
+| บังคับ | required |
+| ห้าม / เด็ดขาด | Never … / under any circumstances |
+| ทำแทน | Do instead: |
+| ทำไม | Why: |
+| เคสจริง | Real incident |
+| ขอบเขตงาน | Scope |
+| วิธีทำงาน | Workflow |
+| การสื่อสารระหว่าง agents | Communication between agents |
+| การรายงานกลับเมื่อเสร็จ | Reporting back when done |
+| Blocked / ต้องการ clarification | Blocked / need clarification |
+| Roles ที่ส่งหาได้ | Roles you can send to |
+| งานเสร็จ / done | done / finished |
+| ที่ Bash commands อนุญาตให้ใช้ | Bash commands you're allowed to use |
+
+Command names, CLI flags, file paths, and issue numbers (`takkub done`, `--isolation worktree`, `#169`, `#202`, `#234`, …) were never touched — grep-verified after the fact (§ Verification).
+
+### What stayed in Thai (rule 2 of the task, applied deliberately)
+- Every literal example string passed to `takkub done "..."` / `takkub send --to <role> "..."` — these are the actual template for the Thai-language note the user/Lead reads (per prior project convention: [Thai changelog](feedback_thai_changelog.md), [reads summary only](feedback_reads_summary_only.md)), so translating them would change output format, not just save tokens.
+- `critic.md`'s generated design-review markdown template (§`## 📸 Scope` / `✅ ของดีที่ควรเก็บไว้` / `➕ เพิ่ม` / `➖ ลบ` / `🔧 ปรับ` / `🚩 Heuristic violations` / `🎯 Recommended next steps`) — these headings become the literal `.md`/`.html` document Lead/the user opens, not a rule the model reads about itself.
+- `critic.md`'s embedded `takkub send --to gemini "..."` message body — this is CC'd to Lead automatically per the role file's own communication rule, so it counts as user-visible output, not model-only instruction; left untouched out of caution rather than judging it borderline-safe to translate.
+
+Everything else — every heading, warning, numbered step, rule list, and prose explanation that only the model reads to decide how to behave — was translated to English.
+
+### Checklist (counted before touching each file, re-counted after)
+Ran a structural diff across all 16 files comparing `git show HEAD` (source, pre-translation) against the working tree post-translation:
+
+| Check | Result |
+|---|---|
+| `^#{2,3} ` heading count per file | **identical before/after, all 16 files** (e.g. reviewer 14/14, critic 27/27, qa 13/13) |
+| Bullet/numbered-list line count (`^\s*[-0-9]`) per file | **identical before/after, all 16 files** |
+| Total line count per file | **identical before/after, all 16 files** (e.g. devops 166/166, critic 230/230) — every edit was a line-for-line content swap, nothing added or removed structurally |
+
+Full per-file numbers (headings/bullets/lines, before=after in every row):
+```
+analyst   12/12  28/28  127/127     designer  12/12  24/24  116/116     kimi      7/7   20/20  74/74
+backend   14/14  30/30  137/137     devops    14/14  37/37  166/166     mobile    14/14  34/34  141/141
+codex      8/8   22/22  78/78       docs      14/14  32/32  140/140     opencode  7/7   19/19  73/73
+critic    27/27  49/49  230/230     frontend  14/14  30/30  140/140     qa        13/13  16/16  153/153
+cursor     7/7   19/19  73/73       gemini    8/8    24/24  80/80       reviewer  14/14  34/34  145/145
+                                                                          security  14/14  31/31  141/141
+```
+No heading was dropped, merged, or split; no rule was summarized away — this is the artifact meant to make codex/gemini's cross-check fast (diff the structural counts first, then spot-check meaning).
+
+### Before/after token measurement (method identical to §0-§2: tiktoken `cl100k_base` on the **staged** `runtime/agents/<role>/CLAUDE.md`, not the source file — per the wave-3 lesson cited in §"วิธีวัดผล" above)
+
+Procedure: `git stash` the translation → call `agent_takkub.config.agent_role_dir(role)` directly for all 16 roles (no pane spawn) to regenerate `runtime/agents/<role>/CLAUDE.md` fresh from the **original Thai** source → measure with tiktoken → `git stash pop` to restore the translation → regenerate + measure again. `tiktoken` installed/uninstalled in `.venv` same as §0 (confirmed `Successfully uninstalled` afterward).
+
+| role | before (tok) | after (tok) | saved | saved % |
+|---|---:|---:|---:|---:|
+| devops | 6,148 | 4,100 | 2,048 | 33.3% |
+| critic | 6,133 | 4,335 | 1,798 | 29.3% |
+| qa | 5,923 | 4,140 | 1,783 | 30.1% |
+| frontend | 5,447 | 3,528 | 1,919 | 35.2% |
+| mobile | 5,384 | 3,514 | 1,870 | 34.7% |
+| docs | 5,378 | 3,407 | 1,971 | 36.6% |
+| backend | 5,311 | 3,471 | 1,840 | 34.6% |
+| security | 5,186 | 3,390 | 1,796 | 34.6% |
+| reviewer | 5,161 | 3,278 | 1,883 | 36.5% |
+| analyst | 4,919 | 3,201 | 1,718 | 34.9% |
+| designer | 4,538 | 3,062 | 1,476 | 32.5% |
+| gemini | 4,028 | 2,567 | 1,461 | 36.3% |
+| codex | 3,836 | 2,490 | 1,346 | 35.1% |
+| cursor | 3,764 | 2,427 | 1,337 | 35.5% |
+| kimi | 3,759 | 2,437 | 1,322 | 35.2% |
+| opencode | 3,742 | 2,424 | 1,318 | 35.2% |
+| **TOTAL** | **78,657** | **51,771** | **26,886** | **34.2%** |
+
+**Reads lower than the earlier ~45-55% estimate in §"ประมาณ"** — expected and explainable, not a measurement error: that estimate was a pure char/token-efficiency ratio projection ("แปลแล้วยาวขึ้น/สั้นลงแค่ไหนจริง" was explicitly flagged as the unknown); the actual translation kept every `takkub done`/`takkub send` example string and critic's document template in Thai (rule 2), which the estimate didn't carve out. 34.2% is the number that's actually measured, not projected.
+
+Resend-weighted ceiling using the same formula as §4 (133.4 mean turns/session, today's spawn frequency for this project — backend×5, devops×2, frontend×7 non-Lead spawns counted in §4's methodology; the other 13 roles didn't spawn today so their ceiling isn't in today's actual total, only the per-spawn saving is real): **backend/devops/frontend alone → (1,840+2,048+1,919) tok/spawn × 14 non-Lead spawns × 133.4 ≈ 10.9M tok-equivalent/day**, on top of and independent from §5's root-CLAUDE.md diet (different file, same pane, savings stack).
+
+### Finding — reported per task instructions, not touched (§ "ห้ามแตะโค้ด .py … ถ้าเจอให้รายงาน อย่าเดา")
+
+`config.py` contains **4 centrally-appended Thai hygiene blocks** injected into *every* role's staged `CLAUDE.md` at spawn time by Python code, not by the `.claude/agents/*.md` source — outside this task's scope (`.claude/agents/*.md` only) and outside the "prompt builder .py" carve-out without a separate task, so left untouched and reported instead of guessed at:
+
+- `_DEV_SERVER_HYGIENE` (`config.py:603-614`) — appended to every role `role_needs_dev_server_guard()` says needs it (all except `reviewer`/`gemini`/`docs`/`analyst`/`security`/`codex`/`opencode`/`kimi`/`cursor`)
+- `_NON_INTERACTIVE_HYGIENE` (`config.py:622-634`) — appended to every role
+- `_TOKEN_DISCIPLINE_HYGIENE` (`config.py:648-656`) — appended to every role
+- a 4th block (`STALE_FILE_GUARD`, referenced in `config.py:661-663` but defined in `spawn_engine.py`'s `_appendix` builder) — appended to every role except `role_needs_stale_file_guard()`'s exempt set (`reviewer`, `gemini`)
+
+These 3-4 blocks are **not counted** in either the before or after numbers in this section (they're identical Thai text in both cases, added after `agent_role_dir()` builds the base `CLAUDE.md`) — the §2 audit table already flagged this category as measured-but-out-of-scope for #267's role-file-only ask. Translating them is a legitimate follow-up (same token-efficiency logic applies, they're pure model-facing rules with zero example-string content) but requires editing `.py`, which this task explicitly scoped out — flagging for Lead to route as a separate ticket if wanted.
+
+### Regression found + fixed: 4 test files pinned the old Thai wording literally
+
+Running the guard-test suite for `.claude/agents/*.md` (`test_agent_role_files_have_{browser,git,host_destructive,pip_editable}_guard.py`) after translating surfaced real failures — these tests exist specifically to catch exactly this class of change (they're the load-bearing enforcement for non-claude panes per #103, so they pin exact wording on purpose), and the failures were genuine regressions from this task, not pre-existing:
+
+| Test file | Assertion that broke | Fix |
+|---|---|---|
+| `test_agent_role_files_have_browser_guard.py` | `SECTION = "## Browser & เครื่องมือหนัก"`; `"ห้ามสแกนทั้งไดรฟ์"`; `"ได้สิทธิ์ขับ browser"`; `"ห้ามติดตั้งหรือรัน browser driver เอง"` | updated all 4 literals to the new English wording (`"## Browser & heavy tooling"`, `"Never scan the whole drive"`, `"is granted browser access"`, `"Never install or run a browser driver yourself"`) |
+| `test_agent_role_files_have_git_guard.py` | `has_marker = "ห้าม" in content or "NEVER" in content` (my translation uses title-case "Never", not all-caps) | changed to `"ห้าม" in content or "never" in content.lower()` — case-insensitive, still accepts either language |
+| `test_agent_role_files_have_host_destructive_guard.py` | `SECTION = "ห้าม kill process ด้วยชื่อ"`; `"ห้ามสั่ง kill process ด้วยชื่อ"` | updated both to `"Never kill a process by name"` |
+| `test_agent_role_files_have_pip_editable_guard.py` | `SECTION = "ห้าม pip install -e"`; `` "ห้ามรัน `pip install -e" `` | updated both to `"Never run pip install -e"` / `` "Never run `pip install -e" `` |
+
+All 4 files' English replacement strings verified present in all 16 `.claude/agents/*.md` with `grep -c` (exact expected count per file) before editing the tests, so the fix targets confirmed reality, not a guess. This is a deliberate, provable wording change (same class as the `test_kimi_provider.py` fix in §Fix-loop above) — not weakening the guard, since the assertions still require every role file to carry the safety rule, just in the language it's now written in.
+
+### Verification
+- `PYTHONPATH=<repo>/src` (conftest #202 guard, no `pip install -e`), venv = repo-root shared `.venv`: `test_agent_role_files_have_browser_guard.py`, `test_agent_role_files_have_git_guard.py`, `test_agent_role_files_have_host_destructive_guard.py`, `test_agent_role_files_have_pip_editable_guard.py` → 4/4 files green after the fix (were red before)
+- Also ran every other test that references `.claude/agents` / `AGENTS_DIR` / `agent_role_dir` / `ROLE_FILES` (found via `grep -rl`, 27 files total): `test_codex_crash_instrumentation.py`, `test_config.py`, `test_custom_roles.py`, `test_doctor.py`, `test_headless_entrypoint.py`, `test_installed_mode_gate.py`, `test_orchestrator_claude_env_leak.py`, `test_orchestrator_shard.py`, `test_pane_tools_policy.py`, `test_project_memory_inject.py`, `test_provider_models.py`, `test_provider_override.py`, `test_role_registry_sync.py`, `test_roles.py`, `test_settings_management_{roles,skills,ui,ui_phase2}.py`, `test_settings_window.py`, `test_setup_build.py`, `test_skill_audit.py`, `test_spawn_task_delivery.py`, `test_update_helper.py` — green
+- Also spot-checked `test_codex_task_rewrite.py` + `test_disk_usage.py` (both matched via a broader `grep -P '[Thai unicode range]'` sweep of `tests/*.py` for any other hardcoded-Thai dependency on role-file wording) — both use their own literal Thai fixture strings unrelated to `.claude/agents/*.md`, unaffected, green
+- `ruff check` on the 4 edited test files → clean
+- **`test_installed_mode_gate.py` (6 tests) failed** in this environment both **before and after** the translation — confirmed by `git stash` (reverting to the original Thai role files + unmodified test files) and re-running just that file: identical 6 failures (`takkub.exe` console script never materializes, `_venv_bin_dir` empty), same root cause the §Fix-loop entry above already documented (these wheel-build/install fixtures need a specially-prepared clean venv; running them through the shared repo `.venv` doesn't satisfy them) — **pre-existing environment gap, not a regression from this task, not fixed** (out of scope)
+- **Did not run the full suite** per project's targeted-tests-only directive — ran every test that touches the files this task changed (16 role `.md` files + 4 test files), nothing else
+- `git status --short` after all edits: only the 16 `.claude/agents/*.md` files + 4 `tests/test_agent_role_files_have_*_guard.py` files + this audit doc modified — no stray files, no `runtime/` artifacts left (gitignored, cleaned up anyway), `tiktoken` uninstalled from `.venv` (confirmed "Successfully uninstalled")
+
+**ไม่ commit** — รอ Lead review diff บน branch `wt/devops-1786859852` (แนะนำให้ codex/gemini cross-check ความหมายก่อน merge ตามที่ task สั่ง — checklist ด้านบนออกแบบมาให้ตรวจ structural diff ก่อน แล้วค่อย spot-check เนื้อหา)

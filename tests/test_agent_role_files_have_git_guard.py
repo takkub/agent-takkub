@@ -36,6 +36,6 @@ class TestRoleFileGitGuard:
 
     def test_has_prohibition_marker(self, role_file: Path) -> None:
         content = role_file.read_text(encoding="utf-8")
-        # Thai "ห้าม" or English "NEVER" — both acceptable
-        has_marker = "ห้าม" in content or "NEVER" in content
-        assert has_marker, f"{role_file.name} has no prohibition marker (ห้าม / NEVER)"
+        # Thai "ห้าม" or English "never" (any case) — both acceptable
+        has_marker = "ห้าม" in content or "never" in content.lower()
+        assert has_marker, f"{role_file.name} has no prohibition marker (ห้าม / never)"
