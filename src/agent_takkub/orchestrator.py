@@ -2845,7 +2845,6 @@ class Orchestrator(
             WorktreeManager,
             changed_dirty_paths,
             parse_porcelain_paths,
-            snapshot_porcelain_paths,
             summarize_diffstat,
         )
 
@@ -2934,7 +2933,7 @@ class Orchestrator(
                 None,
             )
         uncommitted = len(parse_porcelain_paths(porcelain))
-        current_dirty_snapshot = snapshot_porcelain_paths(assign_git_root, porcelain)
+        current_dirty_snapshot = mgr.dirty_snapshot(assign_git_root, porcelain)
         changed_uncommitted = changed_dirty_paths(assign_dirty_snapshot, current_dirty_snapshot)
         diffstat = mgr.diffstat_since(pane_cwd, assign_base_sha)
         files_touched, dirs = union_files_touched(diffstat, changed_uncommitted)

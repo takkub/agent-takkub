@@ -655,7 +655,7 @@ class WorktreeManager:
         porcelain = self.shared_tree_status_porcelain(cwd)
         if porcelain is None:
             return head_sha, git_root, None
-        return head_sha, git_root, snapshot_porcelain_paths(git_root, porcelain)
+        return head_sha, git_root, self.dirty_snapshot(git_root, porcelain)
 
     # -- create -------------------------------------------------------------
 
@@ -816,6 +816,18 @@ class WorktreeManager:
         res = self._run(["-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"], None)
         name = res.stdout.strip() if res.ok else ""
         return name if name and name != "HEAD" else None
+
+    def dirty_snapshot(self, git_root: str, porcelain: str) -> DirtyTreeSnapshot:
+        """Live-runner wrapper over :func:`snapshot_porcelain_paths` (#261 follow-up).
+
+        Passes this manager's own runner so a collapsed ``?? dir/`` entry gets
+        expanded to its file-level contents instead of always being treated
+        as changed. Assign-time (:meth:`shared_tree_baseline`) and done-time
+        (orchestrator digest) both go through this same method so the
+        expansion is symmetric — comparing an expanded baseline against an
+        un-expanded current (or vice versa) would never match.
+        """
+        return snapshot_porcelain_paths(git_root, porcelain, self._run)
 
     def commits_ahead(self, git_root: str, branch: str) -> int:
         """Commits reachable from *branch* but not from *git_root*'s current
@@ -1248,7 +1260,49 @@ def parse_porcelain_paths(porcelain: str) -> list[str]:
     return [path for _status, path in _parse_porcelain_entries(porcelain)]
 
 
-def snapshot_porcelain_paths(git_root: str, porcelain: str) -> DirtyTreeSnapshot:
+# Cap on how many files a single collapsed untracked-dir entry may expand
+# into via a scoped `-uall` rerun. A dir this large is very likely
+# node_modules/ or similar that escaped .gitignore rather than real pane
+# output — walking+stat'ing thousands of files defeats the point of only
+# fingerprinting paths git already flagged dirty, so past the cap we fall
+# back to the pre-expansion "always changed" folder-level entry instead.
+_DIR_EXPAND_CAP = 2000
+
+
+def _expand_dir_entry(
+    runner: GitRunner, git_root: str, dir_path: str, cap: int
+) -> list[tuple[str, str]] | None:
+    """Re-run status scoped to *dir_path* with ``-uall`` to list its files.
+
+    Returns ``None`` on any git failure or when the expansion exceeds *cap*
+    entries — both signal the caller to fall back to treating the whole
+    directory as a single always-changed entry. An empty list is a genuine
+    (if unusual) "nothing there" result and is returned as-is.
+    """
+    res = runner(["-C", git_root, "status", "--porcelain", "-z", "-uall", "--", dir_path], None)
+    if not res.ok:
+        return None
+    entries = _parse_porcelain_entries(res.stdout)
+    if len(entries) > cap:
+        return None
+    return entries
+
+
+def _lstat_fingerprint(root: Path, path: str) -> tuple[int | None, int | None]:
+    try:
+        stat_result = (root / Path(path)).lstat()
+    except OSError:
+        return None, None
+    return stat_result.st_mtime_ns, stat_result.st_size
+
+
+def snapshot_porcelain_paths(
+    git_root: str,
+    porcelain: str,
+    runner: GitRunner | None = None,
+    *,
+    dir_expand_cap: int = _DIR_EXPAND_CAP,
+) -> DirtyTreeSnapshot:
     """Fingerprint only paths already reported dirty by git.
 
     The tuple is ``(XY status, mtime_ns, size)``.  Metadata equality is used,
@@ -1256,18 +1310,28 @@ def snapshot_porcelain_paths(git_root: str, porcelain: str) -> DirtyTreeSnapshot
     and macOS filesystems.  ``lstat`` avoids following a symlink outside the
     checkout.  A missing path (normally a deletion) is represented by two
     ``None`` values rather than treated as a snapshot failure.
+
+    #261 follow-up: a collapsed ``?? dir/`` entry is expanded to its
+    file-level contents (via *runner*, scoped to just that directory) so an
+    untouched pre-existing untracked folder stops being reported as changed
+    on every single done just because it's present. When *runner* is
+    ``None`` (pure unit-test callers with no git process available) or the
+    expansion fails/exceeds *dir_expand_cap*, the entry is kept as the bare
+    directory path — :func:`changed_dirty_paths` already treats any
+    trailing-``/`` entry as always-changed, which is the safe (false
+    positive, never false negative) fallback #261 established.
     """
     root = Path(git_root)
     snapshot: DirtyTreeSnapshot = {}
     for status, path in _parse_porcelain_entries(porcelain):
-        try:
-            stat_result = (root / Path(path)).lstat()
-        except OSError:
-            mtime_ns = None
-            size = None
-        else:
-            mtime_ns = stat_result.st_mtime_ns
-            size = stat_result.st_size
+        if path.endswith("/") and runner is not None:
+            expanded = _expand_dir_entry(runner, git_root, path, dir_expand_cap)
+            if expanded is not None:
+                for sub_status, sub_path in expanded:
+                    mtime_ns, size = _lstat_fingerprint(root, sub_path)
+                    snapshot[sub_path] = (sub_status, mtime_ns, size)
+                continue
+        mtime_ns, size = _lstat_fingerprint(root, path)
         snapshot[path] = (status, mtime_ns, size)
     return snapshot
 
@@ -1279,10 +1343,24 @@ def changed_dirty_paths(baseline: DirtyTreeSnapshot, current: DirtyTreeSnapshot)
     that disappeared (restored, removed, or committed) as well as a newly
     dirty path.  An unchanged pre-existing untracked screenshot therefore
     disappears from the pane report instead of being attributed to it.
+
+    #261: ``git status`` (without ``-uall``) collapses an untracked directory
+    down to its outer folder name (``?? new_folder/``), so a file created or
+    edited deep inside an already-existing untracked directory never touches
+    that folder's own mtime/size — metadata equality would silently drop a
+    real edit (false negative). Any entry ending in ``/`` is therefore always
+    reported as changed whenever it's present in either snapshot, trading a
+    possible false positive (dir listed with nothing new inside) for never
+    missing a real one — matching the project rule that confident-looking
+    wrong data is worse than no data.
     """
-    return sorted(
-        path for path in baseline.keys() | current.keys() if baseline.get(path) != current.get(path)
-    )
+    changed: set[str] = set()
+    for path in baseline.keys() | current.keys():
+        if path.endswith("/"):
+            changed.add(path)
+        elif baseline.get(path) != current.get(path):
+            changed.add(path)
+    return sorted(changed)
 
 
 def summarize_diffstat(diffstat: str) -> tuple[int, list[str]]:
