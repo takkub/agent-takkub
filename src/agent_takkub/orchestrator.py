@@ -2404,6 +2404,15 @@ class Orchestrator(
         left guessing why a build silently vanished (#234's own repro: a
         `docker images`/`docker ps` hunt after the fact was the only way to
         find out nothing had actually run).
+
+        #272: `children` always includes the provider's own CLI-launcher
+        scaffolding (npm .cmd shim → cmd.exe/conhost.exe/node.exe on Windows,
+        codex's code-mode sandbox host, kimi's python interpreter, ...) —
+        that was every single close, 100% false-positive rate, so this now
+        subtracts each provider's confirmed `scaffolding_process_names` (via
+        `provider_spec.scaffolding_process_names_for`) before deciding
+        whether anything worth warning about is left. Only fires once real
+        work (docker/pytest/build tooling/etc.) survives the filter.
         """
         pid = getattr(session, "_pid", None)
         if not pid:
@@ -2416,16 +2425,26 @@ class Orchestrator(
             return
         if not children:
             return
+        from .provider_config import effective_provider_for
+        from .provider_spec import normalize_process_name, scaffolding_process_names_for
+
+        provider = effective_provider_for(role_name, project=project_ns)
+        scaffolding = scaffolding_process_names_for(provider)
         names: list[str] = []
         for child in children:
             try:
-                names.append(child.name())
+                child_name = child.name()
             except Exception:
-                pass
+                continue
+            if normalize_process_name(child_name) in scaffolding:
+                continue
+            names.append(child_name)
+        if not names:
+            return
         detail = f" ({', '.join(names[:5])}{'…' if len(names) > 5 else ''})" if names else ""
         self._notify_lead(
             project_ns,
-            f"⚠️ [{role_name} closing] {len(children)} subprocess(es) still running under this "
+            f"⚠️ [{role_name} closing] {len(names)} subprocess(es) still running under this "
             f"pane are about to be killed{detail} — if the work wasn't actually finished, use "
             f"`takkub progress` next time instead of `done` until it is.",
             from_role=role_name,
@@ -2435,7 +2454,7 @@ class Orchestrator(
             "close_kills_live_children",
             role=role_name,
             project=project_ns,
-            count=len(children),
+            count=len(names),
             names=names[:10],
         )
 
