@@ -1303,7 +1303,12 @@ class LeadInboxMixin:
                 # whole time it is working — reading that as "stuck at boot"
                 # is what warned about (and, under #276's ceiling, would have
                 # killed) panes that were working perfectly well.
-                _still_booting = pane.session.shows_boot_phase_marker()
+                # #284: widened window — see `shows_boot_phase_marker`'s
+                # docstring for why delivery specifically cannot use the tight
+                # one.
+                from .pty_session import _BOOT_MARKER_TAIL_ROWS
+
+                _still_booting = pane.session.shows_boot_phase_marker(rows=_BOOT_MARKER_TAIL_ROWS)
                 if not isinstance(_still_booting, bool):
                     # Defensive: a real PtySession always returns bool, but a
                     # test double / unconfigured mock session returns a
@@ -1442,7 +1447,25 @@ class LeadInboxMixin:
                 # no content — fall through to the ordinary
                 # elapsed[0] >= max_wait_ms path below as the final safety
                 # net (blind-deliver, unconfirmed).
-            if _pane_ready_now:
+            # #284: a ready verdict is not trustworthy while the provider is
+            # still booting. `is_at_ready_prompt()` only scans the bottom
+            # `_READY_TAIL_ROWS` (6) rows — sized for claude's one-line footer.
+            # codex renders a BORDERED composer plus a status bar, so its
+            # "esc to interrupt" boot line sits further up and drops out of
+            # that window the moment the composer grows by one row (proven:
+            # same screen, 3-row composer → not ready; 4-row composer → READY
+            # while "Booting MCP server: codex_apps (0s • esc to interrupt)"
+            # is plainly on screen). The task then gets pasted into a pane
+            # that has not finished starting — the "ส่งงานเร็วเกินไป" the
+            # cockpit was accused of, and a much better explanation for #276's
+            # lost tasks than anything in the delivery layer itself.
+            #
+            # The boot marker is checked over its own wider window (see
+            # `shows_boot_phase_marker`) precisely because it does NOT depend
+            # on where the composer happens to end. Treated as "not ready yet"
+            # rather than as a blocker so every existing timeout/ceiling path
+            # keeps behaving exactly as before.
+            if _pane_ready_now and not _still_booting:
                 ready_streak[0] += 1
                 # Wait for 5.0 seconds (33 polls of 150ms) of consecutive ready state
                 # to ensure the CLI has finished async background loading (e.g. account verification).

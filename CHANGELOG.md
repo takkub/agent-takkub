@@ -4,6 +4,22 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.70] - 2026-08-16
+
+### Fixed (แก้)
+
+**codex pane ค้าง booting 342-388 วินาที — `codex_apps` โชว์ `esc to interrupt` ทั้งที่ composer พร้อมแล้ว (#283)**
+- `codex_apps` = MCP ในตัวของ codex (feature `apps`, stable, เปิดเป็นค่าเริ่มต้น) — บูตนานหลายนาที และระหว่างนั้นแสดงคำว่า `esc to interrupt` ในแถบสถานะ **ทั้งที่ composer รับ input ได้แล้ว**
+- คำนั้นคือ `ready_hard_blockers` ของ codex_spec เอง → cockpit อ่านว่า pane ยุ่งตลอด ไม่ยอมส่ง task จน timeout
+- วัดจริง เครื่องเดียว task เดียว: **apps เปิด** → ready 342s/388s, task ไม่เคยส่งสำเร็จ · **apps ปิด** → ready **0s**, task ถึงใน **1s**
+- แก้ด้วย `--disable apps` ใน `autonomy_flags` ของ codex_spec (session-scoped ไม่แตะ `~/.codex/config.toml` ของผู้ใช้) — ถอดผ่าน `shared-mcp-*.json` ไม่ได้เพราะ `codex_apps` อยู่ข้างใน codex
+
+**cockpit ส่ง task เร็วเกินไปตอน pane ยังบูตไม่เสร็จ (#284)**
+- `is_at_ready_prompt()` สแกนแค่ 6 แถวล่างสุด (จูนมาสำหรับ footer บรรทัดเดียวของ claude) · codex มีกรอบ composer + status bar → บรรทัด boot หลุดกรอบทันทีที่ composer สูงขึ้นแค่แถวเดียว → เห็นแค่ `Fast off` → อ่านว่าพร้อม
+- และสาขา ready-streak → `_deliver()` **ไม่เคยเช็ค boot marker เลย** (เช็คเฉพาะตอน timeout จะ blind-paste)
+- แก้: เงื่อนไขส่งงานเป็น `ready AND not booting` · boot probe มีกรอบสแกนของตัวเอง (20 แถว) เฉพาะตอนตัดสินส่ง — ที่อื่นยังใช้กรอบแคบกัน boot line เก่าใน scrollback ค้าง
+
+
 ## [1.0.69] - 2026-08-16
 
 ### Changed (เปลี่ยน)

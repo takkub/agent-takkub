@@ -430,8 +430,30 @@ codex_spec = ProviderSpec(
     install_command=["npm", "install", "-g", "@openai/codex"],
     post_install_note="run `codex login` once to sign in",
     custom_discovery_fn=_discover_codex,
+    # `--disable apps` (#283): codex's own built-in `codex_apps` MCP (feature
+    # flag `apps`, stable and ON by default) takes minutes to boot AND paints
+    # "esc to interrupt" in the status bar the whole time — while its composer
+    # is already accepting input. That string is this spec's own
+    # `ready_hard_blockers`, so the cockpit reads the pane as busy and refuses
+    # to deliver until the delivery times out. Measured on the reporter's
+    # machine, same task, same box:
+    #
+    #     apps ON  → pane reaches ready 342s / 388s (2 trials); task NEVER
+    #                delivered (boot-timeout every round)
+    #     apps OFF → ready 0s; task delivered in 1s; work starts immediately
+    #
+    # This is not something the cockpit can route around from the outside:
+    # `codex_apps` is internal to codex, so removing it from the injected
+    # `shared-mcp-*.json` does nothing. Disabling the feature at spawn is the
+    # only lever, and it is session-scoped — `~/.codex/config.toml` is never
+    # touched, matching the same rule `mcp_adapter_variant="session_override"`
+    # already follows for MCP config.
     autonomy_flags={
-        "win32": ["--dangerously-bypass-approvals-and-sandbox"],  # spawn_engine.py:1140-1143
+        "win32": [
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--disable",
+            "apps",
+        ],  # spawn_engine.py:1140-1143
         "default": [
             "--ask-for-approval",
             "never",
@@ -439,6 +461,8 @@ codex_spec = ProviderSpec(
             "workspace-write",
             "-c",
             "sandbox_workspace_write.network_access=true",
+            "--disable",
+            "apps",
         ],  # spawn_engine.py:1144-1153
     },
     # GAP (CLI 0.145.0 --help, checked 2026-07-24): only positional [PROMPT];

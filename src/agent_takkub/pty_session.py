@@ -365,6 +365,20 @@ def _classify_ready(text_lower: str) -> bool:
 # which already anchors tty-prompt detection to the bottom for the same reason.
 _READY_TAIL_ROWS = 6
 
+# #284: the boot-phase probe gets its OWN, taller window. `_READY_TAIL_ROWS` is
+# sized for claude's single-line footer; codex draws a bordered composer plus a
+# status bar above it, so its boot line ("Booting MCP server: … esc to
+# interrupt") sits several rows higher and falls out of a 6-row window as soon
+# as the composer grows by one line — at which point only "Fast off" remains
+# visible and the pane reads READY while it is demonstrably still starting.
+#
+# Widening the READY scan is not the fix: that window is deliberately tight
+# because body text quoting "esc to interrupt" poisoned the verdict (#70/#20).
+# The boot strings are safe to look for further up — they are provider startup
+# chrome, not phrases that show up in a conversation — so only this probe gets
+# the taller window.
+_BOOT_MARKER_TAIL_ROWS = 20
+
 # Provider BOOT chrome: the CLI has not finished starting up, so there is no
 # composer on screen yet to receive anything.
 _BOOT_PHASE_MARKERS: tuple[str, ...] = (
@@ -390,6 +404,22 @@ _QUEUED_MESSAGE_MARKERS: tuple[str, ...] = ("tab to queue message",)
 # Union — the historical meaning, still what `shows_startup_marker` reports and
 # what the idle watchdog wants: "not a genuine work turn to nag about".
 _STARTUP_MARKERS: tuple[str, ...] = _BOOT_PHASE_MARKERS + _QUEUED_MESSAGE_MARKERS
+
+
+def _tail_region(lines: list[str], rows: int) -> str:
+    """Lowercased bottom *rows* non-blank-trailing screen rows."""
+    end = len(lines)
+    while end > 0 and not lines[end - 1].strip():
+        end -= 1
+    start = max(0, end - rows)
+    return "\n".join(lines[start:end]).lower()
+
+
+def _boot_marker_region(lines: list[str]) -> str:
+    """Window the boot-phase probe scans — taller than the ready window so a
+    provider whose composer is several rows tall cannot push its own boot line
+    out of view (#284)."""
+    return _tail_region(lines, _BOOT_MARKER_TAIL_ROWS)
 
 
 def _ready_region(lines: list[str]) -> str:
@@ -1442,7 +1472,7 @@ class PtySession(QObject):
         different question."""
         return any(m in _ready_region(self.display_lines()) for m in _STARTUP_MARKERS)
 
-    def shows_boot_phase_marker(self) -> bool:
+    def shows_boot_phase_marker(self, *, rows: int = _READY_TAIL_ROWS) -> bool:
         """True only while the provider CLI is still starting up — its
         composer does not exist yet, so anything written to the pane lands on
         a splash screen instead of an input box.
@@ -1454,8 +1484,18 @@ class PtySession(QObject):
         use this one — treating a working pane as a stuck boot is what
         produced `[delivery-boot-stall]` warnings for panes that went on to
         finish their tasks normally.
+
+        *rows* widens the scanned window (#284). The default matches the ready
+        window, which keeps a boot line that has scrolled up into the
+        conversation body from reading as "still booting" forever. Delivery
+        passes `_BOOT_MARKER_TAIL_ROWS` instead, because there the tight window
+        is the bug: codex's bordered composer pushes its own live boot line out
+        of 6 rows, leaving a READY verdict for a pane that has not started. The
+        two errors are not symmetric — a false "still booting" costs a bounded
+        wait that the existing delivery timeout already backstops, while a
+        false "ready" pastes the task into a pane that cannot receive it.
         """
-        return any(m in _ready_region(self.display_lines()) for m in _BOOT_PHASE_MARKERS)
+        return any(m in _tail_region(self.display_lines(), rows) for m in _BOOT_PHASE_MARKERS)
 
     def boot_phase_detail(self) -> str:
         """The actual boot line on screen, e.g. ``Starting MCP servers (0/3):
@@ -1470,8 +1510,8 @@ class PtySession(QObject):
         all. Trimmed to a single line and bounded so a redraw artifact can
         never paste a screenful into a notice.
         """
-        for line in reversed(self.display_lines()):
-            lowered = line.lower()
+        for line in reversed(_boot_marker_region(self.display_lines()).splitlines()):
+            lowered = line
             if any(m in lowered for m in _BOOT_PHASE_MARKERS):
                 return " ".join(line.split())[:200]
         return ""
