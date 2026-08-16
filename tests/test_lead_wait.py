@@ -327,6 +327,81 @@ class TestPollWait:
         assert PROJECT not in orch._active_waits
 
 
+class TestPollWaitInterrupt:
+    """#253: a `wait --role qa` used to sit blind for the full --timeout
+    while a blocking report from a role outside --role (e.g. devops FAILED)
+    queued up unseen behind it. `poll_wait` must now wake early for that
+    case instead of only ever resolving the roles it was told to watch."""
+
+    def test_blocking_notice_from_unwatched_role_interrupts(self, orch: Orchestrator) -> None:
+        _register_working(orch, "backend")
+        begin = orch.begin_wait(PROJECT, ["backend"], 60.0)
+        orch._lead_digest_queue = {
+            PROJECT: collections.deque(
+                [("[devops FAILED] docker build failed: exit 1", None, time.time())]
+            )
+        }
+
+        result = orch.poll_wait(PROJECT, begin["wait_id"])
+
+        assert result["interrupt"] == {
+            "role": "devops",
+            "detail": "[devops FAILED] docker build failed: exit 1",
+        }
+        # The interrupt ends the registration like a natural resolution —
+        # "backend" is still genuinely pending in its own pane, only this
+        # wait's tracking stops.
+        assert "backend" in result["pending"]
+        assert PROJECT not in orch._active_waits
+
+    def test_plain_done_notice_from_unwatched_role_does_not_interrupt(
+        self, orch: Orchestrator
+    ) -> None:
+        _register_working(orch, "backend")
+        begin = orch.begin_wait(PROJECT, ["backend"], 60.0)
+        orch._lead_digest_queue = {
+            PROJECT: collections.deque([("[devops done] stack is up", None, time.time())])
+        }
+
+        result = orch.poll_wait(PROJECT, begin["wait_id"])
+
+        assert result["interrupt"] is None
+        assert "backend" in result["pending"]
+        assert PROJECT in orch._active_waits
+
+    def test_blocking_notice_from_a_watched_role_does_not_interrupt(
+        self, orch: Orchestrator
+    ) -> None:
+        """A watched role's own FAILED report resolves normally through
+        `failed` — it must never also fire as an "interrupt" against
+        itself."""
+        _register_working(orch, "qa")
+        begin = orch.begin_wait(PROJECT, ["qa"], 60.0)
+        orch._lead_digest_queue = {
+            PROJECT: collections.deque([("[qa FAILED] assertion error", None, time.time())])
+        }
+
+        result = orch.poll_wait(PROJECT, begin["wait_id"])
+
+        assert result["interrupt"] is None
+
+    def test_no_pending_roles_never_computes_interrupt(self, orch: Orchestrator) -> None:
+        """Once every watched role has already resolved, the poll is about
+        to end the registration on its own — no need to also scan for an
+        interrupt from elsewhere."""
+        _register_working(orch, "backend")
+        begin = orch.begin_wait(PROJECT, ["backend"], 60.0)
+        orch._wait_done_events[(PROJECT, "backend")] = {"ts": time.time(), "failed": False}
+        orch._lead_digest_queue = {
+            PROJECT: collections.deque([("[devops FAILED] boom", None, time.time())])
+        }
+
+        result = orch.poll_wait(PROJECT, begin["wait_id"])
+
+        assert result["interrupt"] is None
+        assert result["done"] == {"backend": "delivered"}
+
+
 class TestResolvedEcho:
     """Real incident (2026-08-15): two `takkub wait` processes attached to
     the same project registration — one poll call resolved every role and
@@ -539,6 +614,58 @@ class TestCliWaitCommand:
         monkeypatch.setenv("TAKKUB_ROLE", "backend")
         rc = cli.main(["wait"])
         assert rc == 1
+
+    def test_interrupt_stops_the_loop_early_with_a_clear_reason(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """#253: an interrupted poll must stop the client-side loop
+        immediately (not keep sleeping/polling toward --timeout) and print
+        which role/report woke it so Lead can act without re-deriving it."""
+        calls: list[dict] = []
+
+        def fake_request(payload: dict) -> dict:
+            calls.append(payload)
+            if payload["cmd"] == "wait-begin":
+                return {
+                    "ok": True,
+                    "msg": "watching 1 role(s)",
+                    "wait_id": "w1",
+                    "roles": ["backend"],
+                    "started_ts": time.time(),
+                    "attached": False,
+                }
+            if payload["cmd"] == "wait-poll":
+                return {
+                    "ok": True,
+                    "msg": "1 role(s) still pending",
+                    "done": {},
+                    "failed": {},
+                    "gone": {},
+                    "pending": {"backend": "ยังทำงานอยู่"},
+                    "elapsed": 5.0,
+                    "expired": False,
+                    "interrupt": {"role": "devops", "detail": "[devops FAILED] boom"},
+                }
+            if payload["cmd"] == "wait-end":
+                return {"ok": True, "msg": "wait ended"}
+            raise AssertionError(f"unexpected cmd: {payload['cmd']}")
+
+        monkeypatch.setattr(cli, "_request", fake_request)
+        monkeypatch.delenv("TAKKUB_ROLE", raising=False)
+
+        rc = cli.main(["wait", "--role", "backend"])
+        out = capsys.readouterr().out
+
+        # Like a timeout, an interrupt leaves watched roles still pending —
+        # not full success — so rc must be non-zero, same as the pre-#253
+        # timeout-with-pending case.
+        assert rc == 1
+        assert "interrupted" in out
+        assert "devops" in out
+        assert "[devops FAILED] boom" in out
+        # Exactly one poll — the loop must not keep polling/sleeping after
+        # an interrupt.
+        assert [c["cmd"] for c in calls] == ["wait-begin", "wait-poll", "wait-end"]
 
     def test_cancel_flag_sends_wait_cancel_and_skips_poll(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
