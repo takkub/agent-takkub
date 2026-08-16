@@ -431,7 +431,9 @@ class TestCheckRuntime:
         findings = check_runtime()
         node = next(f for f in findings if f.name == "node")
         assert node.status == Status.FAIL
-        assert "nodejs.org" in node.fix_hint
+        # Not URL sanitization — just confirming the fix-hint text mentions
+        # nodejs.org; no trust decision is gated on this substring check.
+        assert "nodejs.org" in node.fix_hint  # codeql[py/incomplete-url-substring-sanitization]
 
     def test_npx_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("shutil.which", lambda x: "/usr/bin/node" if x == "node" else None)

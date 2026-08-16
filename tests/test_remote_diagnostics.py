@@ -171,8 +171,11 @@ class TestCheckIngressMismatch:
         cfg.write_text("ingress:\n  - hostname: old.example.com\n    service: http://localhost:1\n")
         msg = diagnostics.check_ingress_mismatch("https://new.example.com", cfg)
         assert msg is not None
-        assert "old.example.com" in msg
-        assert "new.example.com" in msg
+        # Not URL sanitization — just confirming the returned diagnostic
+        # string mentions both hostnames; no trust decision is gated on
+        # this substring check.
+        assert "old.example.com" in msg  # codeql[py/incomplete-url-substring-sanitization]
+        assert "new.example.com" in msg  # codeql[py/incomplete-url-substring-sanitization]
 
     def test_malformed_yaml_returns_none_not_raise(self, tmp_path):
         cfg = tmp_path / "config.yml"

@@ -40,16 +40,35 @@ def path() -> Path:
 
 
 def hash_token(token: str) -> str:
-    """One-way lookup key for a session token — never write the raw token."""
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+    """One-way lookup key for a session token — never write the raw token.
+
+    Not password hashing: `token` is always `secrets.token_urlsafe(24)`
+    (192 bits of server-generated randomness — see `AuthGate.
+    issue_password_session()`), never a human-chosen secret. A slow KDF
+    (PBKDF2/bcrypt/scrypt, as used for `RemoteConfig.password_hash` in
+    `hash_password()`) defends against dictionary/brute-force attacks on
+    *low*-entropy input; it buys nothing here since exhausting a 192-bit
+    space is infeasible at any hash speed, and would add real per-request
+    CPU cost to every polling client for zero security gain.
+    """
+    return hashlib.sha256(
+        token.encode("utf-8")
+    ).hexdigest()  # codeql[py/weak-sensitive-data-hashing]
 
 
 def fingerprint(config: RemoteConfig) -> str:
     """Identity stamp for the auth material currently in effect. Sessions
     minted under a different fingerprint (password/secret_path/token
-    changed since) are never treated as valid — see module docstring."""
+    changed since) are never treated as valid — see module docstring.
+
+    Not a security boundary: this is a local change-detector, never sent
+    over the network or accepted as a credential. `config.password_hash`
+    here is already the PBKDF2 digest (never the raw password — see
+    `auth.hash_password()`), so hashing it again adds no security either
+    way; SHA-256 just gives a fixed-length key to compare/store.
+    """
     raw = f"{config.password_hash}|{config.secret_path}|{config.token}"
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()  # codeql[py/weak-sensitive-data-hashing]
 
 
 def load(current_fingerprint: str) -> dict[str, float]:
