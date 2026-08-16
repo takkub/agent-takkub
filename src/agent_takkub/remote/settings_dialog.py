@@ -49,6 +49,7 @@ import yaml
 from PyQt6.QtWidgets import (
     QApplication,
     QButtonGroup,
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -59,6 +60,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QRadioButton,
+    QSpinBox,
     QVBoxLayout,
 )
 
@@ -149,6 +151,9 @@ def build_config(
     url_mode: str = "random",
     ngrok_domain: str = "",
     ngrok_bin: str = "",
+    secret_path: str = "",
+    token: str = "",
+    idle_expire_min: int = _IDLE_EXPIRE_MIN,
 ) -> RemoteConfig:
     """Assemble a `RemoteConfig` from the dialog's inputs plus the fixed
     "middle of the road" defaults from task spec §2 — the user never has
@@ -156,12 +161,33 @@ def build_config(
     `auth.hash_password`) — this function never sees the plaintext.
     `url_mode`/`ngrok_domain`/`ngrok_bin` are only meaningful for
     `tunnel_type == "ngrok"` — ignored (kept at their defaults) by the
-    Cloudflare modes."""
+    Cloudflare modes.
+
+    #252: `secret_path`/`token` default to "" (mint fresh, same as always —
+    every existing caller/test that omits them keeps that behavior for a
+    brand-new setup). The *dialog* is the one caller that passes the
+    existing pairing identity through on a re-enable (see `_on_toggle`) so
+    `RemoteControl._start()` (which only mints when both are still blank)
+    reuses it instead of silently rotating the pairing URL/QR under a user
+    who never asked to rotate anything — every re-enable used to force
+    every paired phone to re-scan.
+
+    Deliberately NOT auto-rotated when the tunnel identity changes (new
+    domain/provider/mode): the secret_path/token pair authenticates a
+    session against *this server*, independent of which transport carries
+    the request, and the old pairing link already stops resolving the
+    moment `public_url` changes — forcing a rotate on top of that adds
+    friction with no security upside. Rotation stays an explicit, opt-in
+    action (the dialog's "generate a new pairing link" checkbox) rather
+    than something inferred from which other fields changed.
+    """
     return RemoteConfig(
         enabled=False,  # caller flips this on only after a successful start
         mode=mode,
         bind_port=_FIXED_PORT,
         public_url=public_url.strip(),
+        secret_path=secret_path.strip(),
+        token=token.strip(),
         tunnel=TunnelConfig(
             type=tunnel_type,
             credentials_json=credentials_json.strip(),
@@ -171,7 +197,7 @@ def build_config(
             ngrok_bin=ngrok_bin.strip(),
         ),
         auto_start_tunnel=True,
-        idle_expire_min=_IDLE_EXPIRE_MIN,
+        idle_expire_min=idle_expire_min,
         lockout_after_fails=_LOCKOUT_AFTER_FAILS,
         password_hash=password_hash,
     )
@@ -226,6 +252,11 @@ class RemoteSettingsDialog(QDialog):
         # pass it just doesn't get the button, never a crash.
         self._on_stop_tunnel = on_stop_tunnel
         self._is_live = is_live
+        # #252: kept so `_on_toggle` can reuse the existing secret_path/token
+        # on a re-enable instead of `build_config` always minting fresh ones
+        # (see `build_config`'s docstring for why that used to force a
+        # re-scan on every Enable).
+        self._current = current
         self.setWindowTitle("🌐 Remote Control")
         self.setMinimumWidth(480)
 
@@ -381,6 +412,27 @@ class RemoteSettingsDialog(QDialog):
         password_note.setStyleSheet("color:#71717a;")
         layout.addWidget(password_note)
 
+        # #252 item 3: was hardcoded to 240 with no UI knob — now a real
+        # setting. 0 = auto-expire off (`AuthGate.idle_expired()` already
+        # treats `idle_expire_min <= 0` as "never expire").
+        self._idle_expire_spin = QSpinBox()
+        self._idle_expire_spin.setRange(0, 1440)
+        self._idle_expire_spin.setSuffix(" min")
+        self._idle_expire_spin.setSpecialValueText("off (never auto-suspend)")
+        self._idle_expire_spin.setValue(current.idle_expire_min)
+        self._form.addRow("Idle auto-suspend after:", self._idle_expire_spin)
+
+        # #252 item 2: unchecked by default — a re-enable normally reuses
+        # the existing secret_path/token so already-paired phones keep
+        # working without re-scanning the QR. Only check this when the user
+        # actually wants every paired device kicked (lost phone, etc.) —
+        # "Log out all devices" above already covers session invalidation
+        # without touching the pairing identity itself.
+        self._rotate_pairing_check = QCheckBox(
+            "Generate a new pairing link (existing phones will need to re-scan)"
+        )
+        layout.addWidget(self._rotate_pairing_check)
+
         # #196 requirement 4: a way to kill every phone's session without
         # waiting for its idle-expire window — e.g. a phone was lost/stolen,
         # or the user just wants a clean slate. Always available (not gated
@@ -393,9 +445,7 @@ class RemoteSettingsDialog(QDialog):
         logout_row.addStretch(1)
         layout.addLayout(logout_row)
 
-        defaults_note = QLabel(
-            "Preset: idle-expire 240min · lockout after 5 fails · tunnel auto-start."
-        )
+        defaults_note = QLabel("Preset: lockout after 5 fails · tunnel auto-start.")
         defaults_note.setWordWrap(True)
         defaults_note.setStyleSheet("color:#71717a;")
         layout.addWidget(defaults_note)
@@ -494,6 +544,8 @@ class RemoteSettingsDialog(QDialog):
             self._access_control,
             self._password_edit,
             self._password_show_btn,
+            self._idle_expire_spin,
+            self._rotate_pairing_check,
         ):
             w.setEnabled(editable)
         if editable:
@@ -501,6 +553,10 @@ class RemoteSettingsDialog(QDialog):
             # re-enable can't accidentally reuse a stale value on screen.
             self._password_edit.clear()
             self._ngrok_token_edit.clear()
+            # A rotate request is one-shot per Enable click — never leave it
+            # checked across a Disable so the next Enable defaults back to
+            # "keep the existing pairing link".
+            self._rotate_pairing_check.setChecked(False)
 
         self._pairing_edit.setText(pairing_url)
         show_pairing = bool(pairing_url)
@@ -590,6 +646,10 @@ class RemoteSettingsDialog(QDialog):
             return
 
         mode = "control" if self._access_control.isChecked() else "view"
+        # #252 item 2: reuse the existing pairing identity unless the user
+        # explicitly checked "generate a new pairing link" — see
+        # `build_config`'s docstring for why this is the right default.
+        rotate = self._rotate_pairing_check.isChecked()
         config = build_config(
             tunnel_type=tunnel_type,
             credentials_json=credentials_json,
@@ -600,6 +660,9 @@ class RemoteSettingsDialog(QDialog):
             url_mode=url_mode,
             ngrok_domain=ngrok_domain,
             ngrok_bin=ngrok_bin,
+            secret_path="" if rotate else self._current.secret_path,
+            token="" if rotate else self._current.token,
+            idle_expire_min=self._idle_expire_spin.value(),
         )
         ok, msg, pairing_url = self._on_apply(config, True)
         if not ok:

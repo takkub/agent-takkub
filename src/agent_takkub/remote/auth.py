@@ -307,8 +307,11 @@ class AuthGate:
     def allows_control(self) -> bool:
         return self._config.mode == "control"
 
-    # ── idle-expire (§6.1): no request in idle_expire_min -> auto-disable.
-    # RemoteControl polls this from a QTimer and flips config.enabled off.
+    # ── idle-expire (§6.1): no request in idle_expire_min -> auto-suspend.
+    # RemoteControl polls this from a QTimer and tears the live server down
+    # (#252: `config.enabled` on disk is left untouched — see
+    # `RemoteControl._check_idle_expire`'s docstring — so the next boot
+    # brings remote control back up on its own).
     def idle_expired(self) -> bool:
         idle_min = self._config.idle_expire_min
         if idle_min <= 0:

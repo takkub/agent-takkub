@@ -132,7 +132,7 @@ class TestApplyRemoteConfig:
         fake_remote = MagicMock()
         fake_remote.config.pairing_url.return_value = "https://x.example.com/sek/#token=tok"
         monkeypatch.setattr(
-            "agent_takkub.remote.RemoteControl.maybe_start", lambda orch: fake_remote
+            "agent_takkub.remote.RemoteControl.maybe_start", lambda orch, **kw: fake_remote
         )
 
         config = RemoteConfig()
@@ -148,7 +148,9 @@ class TestApplyRemoteConfig:
         _isolate_remote_json(monkeypatch, tmp_path)
         stub = _Stub()
         stub._remote = None
-        monkeypatch.setattr("agent_takkub.remote.RemoteControl.maybe_start", lambda orch: None)
+        monkeypatch.setattr(
+            "agent_takkub.remote.RemoteControl.maybe_start", lambda orch, **kw: None
+        )
 
         ok, msg, pairing_url = stub._apply_remote_config(RemoteConfig(), True)
 
@@ -207,7 +209,7 @@ class TestApplyRemoteConfig:
         new_remote = MagicMock()
         new_remote.config.pairing_url.return_value = ""
         monkeypatch.setattr(
-            "agent_takkub.remote.RemoteControl.maybe_start", lambda orch: new_remote
+            "agent_takkub.remote.RemoteControl.maybe_start", lambda orch, **kw: new_remote
         )
 
         stub._apply_remote_config(RemoteConfig(), True)
@@ -229,7 +231,7 @@ class TestApplyRemoteConfig:
         fake_remote._tunnel = fake_tunnel
         fake_remote.config = RemoteConfig(tunnel=TunnelConfig(type="ngrok", url_mode="random"))
         monkeypatch.setattr(
-            "agent_takkub.remote.RemoteControl.maybe_start", lambda orch: fake_remote
+            "agent_takkub.remote.RemoteControl.maybe_start", lambda orch, **kw: fake_remote
         )
 
         config = RemoteConfig(tunnel=TunnelConfig(type="ngrok", url_mode="random"))
@@ -288,7 +290,7 @@ class TestLogoutAllRemoteSessions:
             ),
         )
         monkeypatch.setattr(
-            "agent_takkub.remote.RemoteControl.maybe_start", lambda orch: fake_remote
+            "agent_takkub.remote.RemoteControl.maybe_start", lambda orch, **kw: fake_remote
         )
 
         config = RemoteConfig(
@@ -318,7 +320,7 @@ class TestLogoutAllRemoteSessions:
             tunnel=TunnelConfig(type="cloudflared", credentials_json="c.json"),
         )
         monkeypatch.setattr(
-            "agent_takkub.remote.RemoteControl.maybe_start", lambda orch: fake_remote
+            "agent_takkub.remote.RemoteControl.maybe_start", lambda orch, **kw: fake_remote
         )
 
         config = RemoteConfig(
@@ -346,7 +348,7 @@ class TestLogoutAllRemoteSessions:
         fake_remote.tunnel_error = "cloudflared exited immediately: exit code 1"
         fake_remote.config = RemoteConfig(auto_start_tunnel=True, tunnel=TunnelConfig(type="quick"))
         monkeypatch.setattr(
-            "agent_takkub.remote.RemoteControl.maybe_start", lambda orch: fake_remote
+            "agent_takkub.remote.RemoteControl.maybe_start", lambda orch, **kw: fake_remote
         )
 
         config = RemoteConfig(tunnel=TunnelConfig(type="quick"))
@@ -392,7 +394,7 @@ class TestApplyRemoteConfigDiagnosticWarning:
         fake_remote.local_probe_note = None
         fake_remote._tunnel = None
         monkeypatch.setattr(
-            "agent_takkub.remote.RemoteControl.maybe_start", lambda orch: fake_remote
+            "agent_takkub.remote.RemoteControl.maybe_start", lambda orch, **kw: fake_remote
         )
 
         ok, msg, _pairing_url = stub._apply_remote_config(RemoteConfig(), True)
@@ -412,7 +414,7 @@ class TestApplyRemoteConfigDiagnosticWarning:
         fake_remote.local_probe_note = None
         fake_remote._tunnel = None
         monkeypatch.setattr(
-            "agent_takkub.remote.RemoteControl.maybe_start", lambda orch: fake_remote
+            "agent_takkub.remote.RemoteControl.maybe_start", lambda orch, **kw: fake_remote
         )
 
         ok, msg, _pairing_url = stub._apply_remote_config(RemoteConfig(), True)
@@ -432,7 +434,7 @@ class TestApplyRemoteConfigDiagnosticWarning:
         fake_remote.local_probe_note = "probe note"
         fake_remote._tunnel = None
         monkeypatch.setattr(
-            "agent_takkub.remote.RemoteControl.maybe_start", lambda orch: fake_remote
+            "agent_takkub.remote.RemoteControl.maybe_start", lambda orch, **kw: fake_remote
         )
 
         ok, msg, _pairing_url = stub._apply_remote_config(RemoteConfig(), True)
@@ -467,7 +469,7 @@ class TestApplyRemoteConfigDiagnosticWarning:
         fake_remote.local_probe_note = None
         fake_remote._tunnel = None
         monkeypatch.setattr(
-            "agent_takkub.remote.RemoteControl.maybe_start", lambda orch: fake_remote
+            "agent_takkub.remote.RemoteControl.maybe_start", lambda orch, **kw: fake_remote
         )
 
         stub._apply_remote_config(RemoteConfig(), True)
