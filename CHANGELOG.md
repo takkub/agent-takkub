@@ -4,6 +4,27 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.65] - 2026-08-16
+
+รอบต่อเนื่องจาก 1.0.64 ในวันเดียวกัน — ปิดสองใบที่ค้างไว้เพราะรอบก่อนทำได้ไม่ครบ
+
+### Fixed (แก้)
+
+**สถานะ pane มีแหล่งความจริงเดียว (#263)**
+- เดิม `takkub list`/`status` เอาสถานะมาจาก 3 ที่ที่เดินแยกกัน: `pane.state` ที่ orchestrator ประกาศเองตอน dispatch · ready marker ที่ scrape จากหน้าจอ · progress clock — ทั้งสามขัดกันเองได้และขัดจริง (gemini ขึ้น "working" ทั้งที่ค้าง "Signing in..." และ task ไม่เคยถูกส่ง · codex ขึ้น "active" ทั้งที่จอโชว์ "Working (esc to interrupt)" · kimi ขึ้น "active" ทั้งที่ค้างหน้า `/login`)
+- เพิ่ม `display_state` ที่ derive จากทั้งสามแหล่งด้วยลำดับความสำคัญที่เขียนไว้ชัด (จอชนะ label ที่ประกาศเองเสมอ): **login-required → booting → waiting-delivery → busy → ค่าเดิม** · เป็น key ใหม่แบบ additive ของเดิมทุกที่ที่อ่าน `state` จึงไม่พัง
+- provider ที่ marker ยัง calibrate ไม่ได้ แสดง unknown อย่างซื่อสัตย์ ไม่ fallback เป็น label ที่ดูมั่นใจ
+
+### Added (ของใหม่)
+
+**subagent mode (#268)**
+- `takkub assign --mode pane|subagent` — งานรูปทรง scan/audit/หาของ/fan-out เยอะๆ รันเป็น subagent ในโปรเซสเดิมได้ ไม่ต้องเปิด pane ใหม่ จึงไม่ต้องรอ provider บูต และไม่เจอบั๊กตระกูล delivery เลย (#254/#255/#256/#257/#26/#144)
+- **default = `pane` พฤติกรรมเดิมไม่เปลี่ยน** · `--mode subagent` ใช้ร่วมกับ `--model` ไม่ได้ (subagent ใช้ provider/model ของ parent เสมอ จึงแทน cross-check ต่างโมเดลไม่ได้ — เขียนข้อจำกัดนี้ไว้ในเอกสารแล้ว) และใช้กับ `--plan` ไม่ได้
+- shard cap: 20 สำหรับ subagent (pane ยังคง 8) · ผลลัพธ์เข้าท่อ `takkub subagent-done` เพื่อให้ ledger/inbox/wait เห็นเหมือน pane ปกติ
+- `routing_planner` แนะนำโหมดให้เมื่อเจอรูปทรงงานที่เข้าข่าย (เป็นข้อเสนอ Lead ตัดสินเอง)
+- ปรับกฎ "ห้าม spawn subagent" ทั้งระบบให้เป็นเงื่อนไขเดียวกัน — **"ห้าม spawn เอง เว้นแต่ Lead สั่งด้วย `--mode subagent`"** ครบทุกจุด (role file ทุกใบ, prompt builder, guard, เอกสาร) เพื่อไม่ให้ teammate ได้รับคำสั่งขัดกันเองในเทิร์นเดียว
+
+
 ### Added
 
 - `takkub assign --mode pane|subagent` (#268): ค่าเริ่มต้นยังเป็น pane; งาน scan/audit/search/triage/fan-out เลือก native subagent provider เดียวกับ Lead ได้โดยไม่เปิด pane และปิดงานผ่าน `subagent-done` เข้าสู่ ledger/inbox/wait เดิม. โหมดนี้ไม่ใช่ cross-model/cross-provider verification.
