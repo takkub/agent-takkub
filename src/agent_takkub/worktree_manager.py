@@ -1279,10 +1279,24 @@ def changed_dirty_paths(baseline: DirtyTreeSnapshot, current: DirtyTreeSnapshot)
     that disappeared (restored, removed, or committed) as well as a newly
     dirty path.  An unchanged pre-existing untracked screenshot therefore
     disappears from the pane report instead of being attributed to it.
+
+    #261: ``git status`` (without ``-uall``) collapses an untracked directory
+    down to its outer folder name (``?? new_folder/``), so a file created or
+    edited deep inside an already-existing untracked directory never touches
+    that folder's own mtime/size — metadata equality would silently drop a
+    real edit (false negative). Any entry ending in ``/`` is therefore always
+    reported as changed whenever it's present in either snapshot, trading a
+    possible false positive (dir listed with nothing new inside) for never
+    missing a real one — matching the project rule that confident-looking
+    wrong data is worse than no data.
     """
-    return sorted(
-        path for path in baseline.keys() | current.keys() if baseline.get(path) != current.get(path)
-    )
+    changed: set[str] = set()
+    for path in baseline.keys() | current.keys():
+        if path.endswith("/"):
+            changed.add(path)
+        elif baseline.get(path) != current.get(path):
+            changed.add(path)
+    return sorted(changed)
 
 
 def summarize_diffstat(diffstat: str) -> tuple[int, list[str]]:

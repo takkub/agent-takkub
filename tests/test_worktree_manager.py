@@ -397,6 +397,30 @@ class TestDirtyPathSnapshots:
             "status.py",
         ]
 
+    def test_untracked_directory_entry_always_reported_even_with_unchanged_metadata(self):
+        """#261: git status collapses an untracked dir to its outer folder, so a
+        file created deep inside never moves the folder's own mtime/size."""
+        baseline = {"new_folder/": ("??", 100, 10)}
+        current = {"new_folder/": ("??", 100, 10)}
+
+        assert changed_dirty_paths(baseline, current) == ["new_folder/"]
+
+    def test_untracked_directory_deep_edit_survives_real_snapshot_roundtrip(self, tmp_path):
+        """#261 repro end-to-end: pre-existing untracked dir, edit a file deep
+        inside it between two real snapshot_porcelain_paths() calls — the
+        outer folder's own stat never changes, so the fix must not rely on it."""
+        deep = tmp_path / "new_folder" / "deep"
+        deep.mkdir(parents=True)
+        (deep / "file.py").write_text("v1", encoding="utf-8")
+
+        porcelain = "?? new_folder/\n"
+        baseline = snapshot_porcelain_paths(str(tmp_path), porcelain)
+
+        (deep / "file.py").write_text("v2-longer", encoding="utf-8")
+        current = snapshot_porcelain_paths(str(tmp_path), porcelain)
+
+        assert changed_dirty_paths(baseline, current) == ["new_folder/"]
+
 
 # ── Destroy (2-tier) ────────────────────────────────────────────────────────
 
