@@ -82,13 +82,35 @@ def test_subagent_mode_rejects_model_override(orch: Orchestrator, tmp_path: Path
     assert "model override" in message
 
 
+def test_subagent_mode_rejects_provider_override(orch: Orchestrator, tmp_path: Path) -> None:
+    # Issue #270: subagents always inherit the parent's provider/model
+    # context — a --provider override is meaningless there, same as --model.
+    ok, message = orch.assign(
+        "reviewer",
+        str(tmp_path),
+        "audit",
+        mode="subagent",
+        provider="claude",
+        project="subtest",
+    )
+    assert ok is False
+    assert "provider override" in message
+
+
 def test_every_builtin_role_has_conditional_subagent_rule() -> None:
     role_files = sorted((REPO_ROOT / ".claude" / "agents").glob("*.md"))
     assert len(role_files) == 16
     for role_file in role_files:
         header = "\n".join(role_file.read_text(encoding="utf-8").splitlines()[:10])
         assert "--mode subagent" in header, role_file.name
-        assert "ห้าม spawn subagent เอง" in header, role_file.name
+        # #267 translated role files to English; the rule's wording changed
+        # but its CONDITIONAL shape must not — this substring only matches
+        # the "unless Lead assigned ... --mode subagent" form, so it still
+        # goes red if a role file regresses to an unconditional ban ("Never
+        # spawn a subagent yourself.") or drops the rule entirely.
+        assert "Never spawn a subagent yourself unless Lead assigned the current task" in header, (
+            role_file.name
+        )
 
 
 def test_cross_provider_limitation_is_documented() -> None:

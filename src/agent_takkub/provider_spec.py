@@ -120,6 +120,23 @@ class ProviderSpec:
     supports_resume: bool = False
     supports_slash_commands: bool = False
     supports_hooks: bool = False
+    # Does this CLI's own agent harness expose a distinct structured
+    # file-read tool, separate from raw shell/exec? (#273). Gates whether
+    # `_task_handoff_pointer` may hand a long task off as "read this file
+    # yourself" instead of pasting it inline — a pane whose ONLY file
+    # access is a shell tool can't honor that instruction at all when shell
+    # reads are also disallowed (#104's "never `cat`/`type` a long path"
+    # convention, baked into the pointer text itself as "ห้ามรัน path เป็น
+    # คำสั่ง shell"), so the pointer becomes an unopenable dead end and the
+    # pane fails the assign before the actual work ever starts. Default
+    # True (most agent CLIs — including claude — do have one); codex is the
+    # one confirmed exception (real incident, issue #273: a codex pane
+    # replied "[FAILED] ไม่มี file-read tool ใน pane นี้" and never began
+    # the task). Never guess this False for an unconfirmed provider — an
+    # unconfirmed provider defaults True and just risks the SAME (rare,
+    # already-existing) paste-swallow class `_task_handoff_pointer` was
+    # built to avoid, not a hard failure.
+    supports_agent_file_read: bool = True
 
     # ─── 9. Claude/provider branch specific knobs ───
     plugin_dirs: tuple[str, ...] = field(default_factory=tuple)
@@ -224,6 +241,25 @@ class ProviderSpec:
     # Empty = no provider-specific scaffolding confirmed yet; the Windows
     # baseline still applies.
     scaffolding_process_names: tuple[str, ...] = field(default_factory=tuple)
+
+    # ─── 15. Boot-stall diagnostic (#273) ───
+    # Argv (relative to the discovered binary, via custom_discovery_fn) for a
+    # quick, one-shot, non-interactive health-check command this CLI ships —
+    # one that prints its OWN real config error on a single line instead of
+    # cockpit only ever being able to say the generic "ค้างอยู่ที่ boot phase".
+    # Real incident (#273): codex's actual failure was `Error: failed to
+    # load bootstrap configuration / Caused by: invalid transport in ...`,
+    # fully diagnosable via `codex mcp list` in under a second — but cockpit
+    # had no way to surface it, costing ~40 minutes of manual guessing.
+    # Run ASYNC (QProcess, never blocking the Qt main thread — mirrors
+    # `Orchestrator._check_uncommitted_async`) by
+    # `lead_inbox._run_boot_diagnostic_async`, fired once per boot-stall
+    # notice, best-effort: a missing/timed-out/errored diagnostic just means
+    # no follow-up appears — the original generic notice always still fires
+    # unchanged. None = no such command confirmed for this provider yet
+    # (never guess one from docs alone — a wrong argv could itself hang or,
+    # worse, mutate state).
+    boot_diagnostic_argv: tuple[str, ...] | None = None
 
 
 # ── binary discovery wrappers ────────────────────────────────────────────────
@@ -455,6 +491,21 @@ codex_spec = ProviderSpec(
     session_resume_flag="resume",
     supports_slash_commands=False,
     supports_hooks=False,
+    # #273: confirmed False by a live incident — a codex pane replied
+    # "[FAILED] ไม่มี file-read tool ใน pane นี้ จึงเปิด task spec ตามข้อห้าม
+    # shell ไม่ได้" when handed a `_task_handoff_pointer` pointer. Codex's
+    # tool set is shell/apply_patch only; it has no structured read-file
+    # tool distinct from the shell exec the pointer explicitly forbids
+    # using on the path (#104). Long tasks fall back to an inline paste for
+    # this provider instead (see `_task_handoff_pointer` callers).
+    supports_agent_file_read=False,
+    # #273: `codex mcp list` prints the real config error on one line
+    # (confirmed: "Error: failed to load bootstrap configuration / Caused
+    # by: invalid transport in ...") when ~/.codex/config.toml's
+    # [mcp_servers.*] table is malformed — exactly what codex silently
+    # hangs at boot on. `codex --help` confirms `mcp list` is read-only
+    # (lists configured servers) — safe to run unconditionally.
+    boot_diagnostic_argv=("mcp", "list"),
     task_notice_preamble=(
         "[orchestrator note] อ่านก่อนเริ่มงาน:\n"
         "- กฎ `ห้าม spawn subagent เอง` ใน ROLE prefix ห้าม native child\n"

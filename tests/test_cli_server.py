@@ -57,10 +57,12 @@ class _FakeOrch:
         project=None,
         feature="",
         model=None,
+        provider=None,
         mode="pane",
     ):
         self.assign_calls.append((role, cwd, task, requires_commit, auto_chain, isolation))
         self.last_assign_model = model
+        self.last_assign_provider = provider
         self.last_assign_mode = mode
         return True, "ok"
 
@@ -187,6 +189,84 @@ class TestAsyncSpawnDispatch:
         assert _replies(sock)[0]["ok"] is False
         qapp.processEvents()
         assert orch.assign_calls == []
+
+    def test_assign_passes_provider_override(self, qapp: QCoreApplication) -> None:
+        # Issue #270.
+        orch = _FakeOrch()
+        srv = CliServer(orch)
+        sock = _FakeSock()
+        srv._dispatch(
+            sock,
+            _auth(
+                {
+                    "cmd": "assign",
+                    "role": "backend",
+                    "task": "t",
+                    "provider": "claude",
+                }
+            ),
+        )
+        qapp.processEvents()
+        assert _replies(sock)[0]["ok"] is True
+        assert orch.last_assign_provider == "claude"
+
+    def test_assign_rejects_unsupported_provider_before_scheduling(
+        self, qapp: QCoreApplication, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.assign_provider_override_error",
+            lambda *_args, **_kwargs: "--provider 'nope' is not a known provider",
+        )
+        orch = _FakeOrch()
+        srv = CliServer(orch)
+        sock = _FakeSock()
+
+        srv._dispatch(
+            sock,
+            _auth({"cmd": "assign", "role": "backend", "provider": "nope", "task": "scan"}),
+        )
+
+        assert _replies(sock)[0]["ok"] is False
+        qapp.processEvents()
+        assert orch.assign_calls == []
+
+    def test_model_error_receives_validated_provider_override(
+        self, qapp: QCoreApplication, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Issue #270: the --model pre-check must be told about a validated
+        # --provider on the same assign, so it checks against what will
+        # actually spawn instead of the role's static config.
+        captured: dict = {}
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.assign_provider_override_error",
+            lambda *_a, **_kw: None,
+        )
+
+        def _fake_model_error(role, model, project, provider_override=None):
+            captured["provider_override"] = provider_override
+            return None
+
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.assign_model_override_error", _fake_model_error
+        )
+        orch = _FakeOrch()
+        srv = CliServer(orch)
+        sock = _FakeSock()
+
+        srv._dispatch(
+            sock,
+            _auth(
+                {
+                    "cmd": "assign",
+                    "role": "backend",
+                    "task": "t",
+                    "provider": "claude",
+                    "model": "claude-opus-5",
+                }
+            ),
+        )
+
+        assert captured["provider_override"] == "claude"
 
 
 class _FakeClock:

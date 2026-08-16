@@ -465,3 +465,94 @@ class TestAssignModelOverrideWarning:
             replace(PROVIDER_REGISTRY["cursor"], model_flag=None),
         )
         assert provider_config.assign_model_override_warning("qa", "cheap-scan") is None
+
+
+class TestAssignProviderOverrideValidation:
+    """Issue #270: `--provider` is a per-assign escape hatch for a role
+    whose configured provider is stuck/broken — Lead didn't have one before,
+    and hand-editing role-providers.json needs a cockpit restart to apply."""
+
+    def test_known_available_provider_accepted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: True)
+        assert provider_config.assign_provider_override_error("claude") is None
+
+    def test_empty_provider_accepted(self) -> None:
+        assert provider_config.assign_provider_override_error(None) is None
+        assert provider_config.assign_provider_override_error("") is None
+
+    def test_unknown_provider_name_is_rejected(self) -> None:
+        error = provider_config.assign_provider_override_error("not-a-real-provider")
+        assert error is not None
+        assert "not-a-real-provider" in error
+
+    def test_disabled_or_uninstalled_provider_is_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The override would just fail the same way the stuck role already
+        # fails — reject it up front with a clear reason instead.
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: False)
+        error = provider_config.assign_provider_override_error("codex")
+        assert error is not None
+        assert "codex" in error
+
+    def test_is_case_insensitive(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: True)
+        assert provider_config.assign_provider_override_error("CLAUDE") is None
+
+
+class TestAssignModelOverrideWithProviderOverride:
+    """Issue #270: `--model` must validate against the OVERRIDDEN provider
+    when `--provider` is given on the same assign, not the role's normal
+    config/availability resolution — and the hard-block error should point
+    at the `--provider` escape hatch when no override was given yet."""
+
+    def test_model_validated_against_provider_override_not_role_config(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Role's normal resolution says codex, but --provider claude on this
+        # same assign means claude is what will actually spawn — a
+        # claude-shaped model id must be accepted, not blocked as
+        # cross-provider.
+        monkeypatch.setattr(provider_config, "effective_provider_for", lambda *_a, **_kw: "codex")
+        error = provider_config.assign_model_override_error(
+            "backend", "claude-opus-5", provider_override="claude"
+        )
+        assert error is None
+
+    def test_model_still_blocked_against_the_override_itself(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(provider_config, "effective_provider_for", lambda *_a, **_kw: "codex")
+        error = provider_config.assign_model_override_error(
+            "backend", "gemini-3.1-pro", provider_override="claude"
+        )
+        assert error is not None
+        assert "claude" in error
+
+    def test_error_hints_at_provider_flag_when_no_override_given(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(provider_config, "effective_provider_for", lambda *_a, **_kw: "codex")
+        error = provider_config.assign_model_override_error("backend", "claude-opus-5")
+        assert error is not None
+        assert "--provider claude" in error
+
+    def test_error_omits_hint_when_override_already_given(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Already used --provider this call (just picked the wrong one) —
+        # repeating the same hint would be noise, not help.
+        monkeypatch.setattr(provider_config, "effective_provider_for", lambda *_a, **_kw: "codex")
+        error = provider_config.assign_model_override_error(
+            "backend", "gemini-3.1-pro", provider_override="claude"
+        )
+        assert error is not None
+        assert "add --provider" not in error
+
+    def test_warning_also_respects_provider_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(provider_config, "effective_provider_for", lambda *_a, **_kw: "codex")
+        warning = provider_config.assign_model_override_warning(
+            "backend", "totally-new-model-9", provider_override="claude"
+        )
+        assert warning is not None
+        assert "claude" in warning

@@ -55,6 +55,14 @@ def orch(qapp, monkeypatch) -> Orchestrator:
     monkeypatch.setattr(
         o, "_project_panes", lambda p=None: o._panes_by_project.get(o._resolve_project(p), {})
     )
+    # #273: `_warn_lead_delivery_boot_stall` now ALSO fires an async
+    # `codex mcp list`-style diagnostic probe. This file tests the notice
+    # text only — the diagnostic follow-up has its own dedicated tests
+    # (test_boot_diagnostic.py). Without this no-op, a dev machine that
+    # actually has codex on PATH would spawn a REAL subprocess here (role
+    # "codex" is forced to provider codex), which is both an unwanted side
+    # effect and a real source of test flakiness/crashes across the suite.
+    monkeypatch.setattr(o, "_run_boot_diagnostic_async", MagicMock())
     return o
 
 

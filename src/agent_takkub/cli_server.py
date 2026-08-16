@@ -469,12 +469,22 @@ class CliServer(QObject):
                     if mode not in {"pane", "subagent"}:
                         self._reply(sock, ok=False, msg="--mode must be pane or subagent")
                         return
-                    from .provider_config import assign_model_override_error
+                    from .provider_config import (
+                        assign_model_override_error,
+                        assign_provider_override_error,
+                    )
 
+                    provider_req = str(req.get("provider", "") or "").strip().lower() or None
+                    if provider_req:
+                        provider_error = assign_provider_override_error(provider_req)
+                        if provider_error:
+                            self._reply(sock, ok=False, msg=provider_error)
+                            return
                     model_error = assign_model_override_error(
                         role,
                         req.get("model"),
                         from_project,
+                        provider_override=provider_req,
                     )
                     if model_error:
                         self._reply(sock, ok=False, msg=model_error)
@@ -557,6 +567,7 @@ class CliServer(QObject):
                             project=from_project,
                             feature=str(req.get("feature", "") or ""),
                             model=(str(req.get("model", "") or "").strip() or None),
+                            provider=(str(req.get("provider", "") or "").strip().lower() or None),
                         ),
                     )
                     self._reply(
