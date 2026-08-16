@@ -240,7 +240,17 @@ _FAILED_NOTICE_RE = re.compile(r"\[[^\]\r\n]*\bFAILED\b[^\]\r\n]*\]", re.IGNOREC
 # spawn-failed. A queued assign stuck past SPAWN_QUEUE_STUCK_SEC
 # (spawn_engine._check_spawn_queue_stuck) is the same "task may not have
 # landed" class of signal and jumps the queue for the same reason.
-_BLOCKING_NOTICE_MARKERS = ("[spawn-failed]", "[delivery-unconfirmed]", "[spawn-stuck]")
+# delivery-boot-stall (#254): same "task may not have landed" class as the
+# three above — fires while the target pane is still stuck loading a
+# provider boot-phase marker (MCP server), well before the ordinary
+# delivery timeout would even notice, so it deserves the same jump-the-
+# digest-queue urgency rather than waiting behind other mail.
+_BLOCKING_NOTICE_MARKERS = (
+    "[spawn-failed]",
+    "[delivery-unconfirmed]",
+    "[spawn-stuck]",
+    "[delivery-boot-stall]",
+)
 
 
 def _is_digestible_lead_notice(body: str) -> bool:
@@ -913,6 +923,14 @@ class LeadInboxMixin:
         # #248/#247 round 2: logged/warned once, the first poll that
         # recognises the pane's provider CLI showing an auth-failure marker.
         auth_failure_warned = [False]
+        # #254: accumulates only while the pane CONTINUOUSLY shows a
+        # provider boot-phase marker (e.g. codex "Booting MCP server: …") —
+        # reset to 0 the instant a poll doesn't see it, so an intermittent
+        # boot flash never adds up across unrelated stalls. Warned once,
+        # separately from busy_wait_logged above, the first time the streak
+        # crosses BOOT_STALL_GRACE_SEC.
+        boot_stall_elapsed = [0]
+        boot_stall_warned = [False]
         # Consecutive-poll counter gating the warn above — see
         # _AUTH_FAILURE_CONFIRM_POLLS. Reset to 0 the moment either the
         # marker stops matching OR the pane reaches its own ready prompt.
@@ -1130,6 +1148,43 @@ class LeadInboxMixin:
                         reason=_reason,
                     )
                     self._warn_lead_delivery_blocked_prompt(role_name, project, _reason)
+            if not boot_stall_warned[0]:
+                # #254: same "checked every poll, own escalation" shape as
+                # the prompt-block check above, for the same reason —
+                # a continuously-redrawing boot spinner (codex/agy loading a
+                # configured MCP server) keeps seconds_since_output() low
+                # forever, so the busy/stall split further below (which only
+                # engages once the ordinary delivery timeout has already
+                # fired) would silently extend #144's busy-wait for up to
+                # BUSY_WAIT_CEILING_SEC with no further signal. Escalating
+                # far earlier, on a short CONTINUOUS streak, gives Lead
+                # something concrete to act on well before that.
+                try:
+                    _booting = pane.session.shows_startup_marker()
+                    if not isinstance(_booting, bool):
+                        # Defensive: a real PtySession always returns bool,
+                        # but a test double / unconfigured mock session
+                        # returns a truthy Mock object by default — never
+                        # treat that as a genuine boot-phase marker hit
+                        # (same guard as the auth-failure check above).
+                        _booting = False
+                except Exception:
+                    _booting = False
+                if _booting:
+                    boot_stall_elapsed[0] += _READY_POLL_INTERVAL_MS
+                    if boot_stall_elapsed[0] >= _orch_attr("BOOT_STALL_GRACE_SEC", 110) * 1000:
+                        boot_stall_warned[0] = True
+                        _log_event(
+                            "task_deliver_boot_stall",
+                            project=self._resolve_project(project),
+                            role=role_name,
+                            elapsed_sec=round(boot_stall_elapsed[0] / 1000, 1),
+                        )
+                        self._warn_lead_delivery_boot_stall(
+                            role_name, project, boot_stall_elapsed[0] / 1000
+                        )
+                else:
+                    boot_stall_elapsed[0] = 0
             try:
                 _pane_ready_now = pane.session.is_at_ready_prompt()
             except Exception:
@@ -1338,6 +1393,42 @@ class LeadInboxMixin:
             kwargs["allow_repaste"] = False
         target(role_name, task, **kwargs)
 
+    def _reap_stale_deliveries(self) -> None:
+        """Sweep `_delivery_manager` for deliveries that have been stuck in
+        an in-flight state (never confirmed accepted) past their TTL and
+        tell Lead about each one (issue #255 item 3).
+
+        `DeliveryManager.expire_stale()` existed with zero callers before
+        this — a delivery that never settles (never reaches ACCEPTED,
+        UNCERTAIN, or FAILED) just sat in the registry forever with no
+        signal to Lead beyond whatever the delivery poll loop itself
+        already sent while it was still running. Wired into the same 5s
+        tick as the other watchdog sub-checks in `_check_idle_teammates`
+        (orchestrator.py) so this runs even for a delivery whose owning
+        `_send_when_ready` poll loop already gave up and stopped ticking on
+        its own (`sent[0] = True` paths) without ever reaching a terminal
+        DeliveryManager state — the one gap none of the poll loop's own
+        one-shot warnings above cover."""
+        delivery_manager = getattr(self, "_delivery_manager", None)
+        if delivery_manager is None:
+            return
+        for delivery in delivery_manager.expire_stale():
+            self._notify_lead(
+                delivery.project_id,
+                f"⚠️ [delivery-stale-reap] task delivery ค้างอยู่สำหรับ {delivery.pane_id} "
+                f"นานเกิน {delivery.expires_at - delivery.created_at:.0f}s โดยไม่ยืนยันว่า "
+                f"ถึงมือ ({delivery.state.value}) — ยกเลิกอัตโนมัติแล้ว ถ้า {delivery.pane_id} "
+                f"ยังไม่ได้รับ task ให้ assign ใหม่ (issue #255)",
+                from_role="system",
+                note="delivery_stale_reap",
+            )
+            _log_event(
+                "delivery_stale_reaped",
+                role=delivery.pane_id,
+                project=delivery.project_id,
+                delivery_id=delivery.delivery_id,
+            )
+
     def _warn_lead_delivery_blocked_prompt(
         self, role_name: str, project: str | None, reason: str
     ) -> None:
@@ -1417,6 +1508,52 @@ class LeadInboxMixin:
             role=role_name,
             project=project_ns,
             seconds_since_output=round(seconds_since_output, 1),
+        )
+
+    def _warn_lead_delivery_boot_stall(
+        self, role_name: str, project: str | None, elapsed_sec: float
+    ) -> None:
+        """Tell the Lead, once, when a delivery poll sees the target pane's
+        provider CLI CONTINUOUSLY showing its own boot-phase marker (e.g.
+        codex/agy "Booting MCP server: …") for BOOT_STALL_GRACE_SEC straight
+        — issue #254.
+
+        Deliberately a SEPARATE notice from the generic busy-wait one
+        (#144) above, fired much earlier (~BOOT_STALL_GRACE_SEC, ~2 min
+        default) and worded as an actionable escalation rather than a
+        progress update: a real incident sat in this exact state with the
+        task NEVER pasted at all (composer still on its startup
+        placeholder) all the way to the 30-minute BUSY_WAIT_CEILING_SEC —
+        #144's single "still waiting" notice at the top of that window gave
+        Lead nothing concrete to act on in the meantime. Names the specific
+        symptom (boot, not generic busy) and the manual recovery — the
+        escape hatch this issue asked for, short of a one-command restart
+        primitive: close the wedged pane and reassign, since the task text
+        itself survives via the ledger (`takkub task show`).
+
+        Callers gate on their own one-shot flag (``boot_stall_warned`` in
+        _send_when_ready's ``_check`` closure) so this fires at most once
+        per delivery. No-op when warning the Lead about itself."""
+        if role_name == LEAD.name:
+            return
+        project_ns = self._resolve_project(project)
+        lead = self._project_panes(project_ns).get(LEAD.name)
+        if not (lead and lead.session and lead.session.is_alive):
+            return
+        msg = (
+            f"⛔ [delivery-boot-stall] {role_name} pane ค้างอยู่ที่ boot phase "
+            f"(กำลังโหลด MCP server) มาแล้ว {elapsed_sec:.0f}s ติดต่อกันโดยไม่ถึง ready prompt "
+            f"— task ยังไม่ถูกส่งเข้าไปเลย นี่ต่างจาก [delivery-busy-wait] ทั่วไป (#144) เพราะ pane "
+            f"นี้ดูเหมือนติด boot ไม่ผ่าน ไม่ใช่แค่กำลังทำงานอยู่ ถ้ายังไม่คลี่คลายเอง แนะนำ "
+            f"`takkub close --role {role_name}` แล้ว assign ใหม่ (task เดิมดูได้ผ่าน "
+            f"`takkub task show --role {role_name}`) (issue #254)"
+        )
+        self._notify_lead(project_ns, msg)
+        _log_event(
+            "delivery_boot_stall_warned",
+            role=role_name,
+            project=project_ns,
+            elapsed_sec=round(elapsed_sec, 1),
         )
 
     def _warn_lead_auth_failure(
