@@ -65,6 +65,7 @@ from .lead_inbox import (  # re-exported for test/compat imports; mixin provides
     LeadInboxMixin,
     _delayed_enter,
     _delayed_enter_verified,
+    _is_blocking_lead_notice,
     _notice_role_tag,
     _prompt_block_reason,
     _safe_session_write,
@@ -3640,6 +3641,41 @@ class Orchestrator(
             if isinstance(item, dict) and item.get("role") == role_name:
                 return True
         return False
+
+    def _pending_notice_outside(
+        self, project_ns: str, watched_roles: set[str]
+    ) -> dict[str, str] | None:
+        """(#253) The first pending Lead notice — digest, live, or durable
+        queue — whose origin role is outside *watched_roles* and needs
+        immediate Lead attention (FAILED / spawn-failed / delivery-
+        unconfirmed / spawn-stuck — same triage `_is_blocking_lead_notice`
+        already uses to jump the digest queue). `poll_wait` uses this to
+        wake a `takkub wait` early instead of leaving Lead deaf to a
+        blocking report from a role it isn't watching for up to the full
+        --timeout — the #253 incident: `wait --role qa` sat blind for 9
+        minutes while devops's done report queued up behind it.
+
+        Plain "done" notices from an unwatched role are deliberately NOT a
+        wake trigger — those are routine parallel-fan-out noise a Lead
+        doesn't need to react to mid-wait; only reports that need a
+        decision jump the wait early. Roles in *watched_roles* are
+        excluded so a role's own report never "interrupts" the very wait
+        that is watching for it — that path already resolves it normally.
+
+        Returns ``{"role": ..., "detail": ...}`` for the first match
+        (first-found, not severity-ranked — a second call after Lead
+        handles it and re-waits will surface the next one), else None.
+        """
+        for item in self.inbox_report(project=project_ns):
+            role = item.get("role")
+            if not role or role == "system" or role in watched_roles:
+                continue
+            body = str(item.get("body", ""))
+            if not _is_blocking_lead_notice(body):
+                continue
+            first_line = body.strip().splitlines()[0] if body.strip() else ""
+            return {"role": role, "detail": first_line[:200]}
+        return None
 
     def _pending_notice_roles(self, project_ns: str, known: dict) -> dict[str, str]:
         """Roles from `_recent_done` no longer in `known` whose report is

@@ -24,7 +24,11 @@ gives Lead a single call that:
     per project. A second `begin_wait` call while one is outstanding
     attaches to it (unions the role set) instead of starting an
     independent poll loop, so a stray duplicate `takkub wait` can never
-    multiply socket load the way the stacked hand-rolled loops did.
+    multiply socket load the way the stacked hand-rolled loops did;
+  - wakes early — instead of staying blind for the full --timeout — when a
+    role OUTSIDE the watched set has a blocking report (FAILED/spawn-
+    failed/etc.) queued for Lead (#253's `poll_wait`'s "interrupt" field,
+    via `Orchestrator._pending_notice_outside`).
 
 The actual blocking loop lives client-side in `cli.cmd_wait` (a single
 `takkub wait` process's own sleep loop) — `CliServer` runs every request on
@@ -259,9 +263,23 @@ class LeadWaitMixin:
         spawned past the grace window, or their pane already reached a
         terminal state with nothing on record) — the registration resolves
         them the same as done/failed rather than blocking on them. The
-        registration is auto-removed once every role resolves (or is gone)
-        or the timeout is reached, so a client never needs to call
-        `end_wait` on the success path — only on early abort (Ctrl-C).
+        registration is auto-removed once every role resolves (or is gone),
+        the timeout is reached, or an interrupt fires (see below), so a
+        client never needs to call `end_wait` on the success path — only on
+        early abort (Ctrl-C).
+
+        ``"interrupt": {"role", "detail"} | None`` (#253): set when a role
+        OUTSIDE this registration's watched set has a blocking notice
+        (FAILED / spawn-failed / delivery-unconfirmed / spawn-stuck) sitting
+        in the outbound-to-Lead pipeline — see `_pending_notice_outside`.
+        Before this, a `wait --role qa` could sit blind for the full
+        --timeout while a `devops` FAILED report queued up unseen behind it
+        (the pane's own auto-close timer doesn't wait for Lead to notice).
+        An interrupt ends the registration exactly like a natural
+        resolution — the watched roles that were still pending stay
+        genuinely pending in their own panes, only this wait's tracking
+        ends, so Lead calls `takkub wait` again to resume watching them
+        after handling the interrupt (`takkub inbox` shows its content).
 
         #242 lets multiple `takkub wait` processes attach to one project's
         registration (unioning role sets) instead of each running an
@@ -322,6 +340,15 @@ class LeadWaitMixin:
             else:
                 pending[role] = detail or "unknown"
 
+        # #253: don't leave Lead deaf to a blocking report from a role it
+        # isn't watching just because the roles it IS watching are still
+        # busy — only checked while something is still pending, since a
+        # fully-resolved poll is already about to end the registration on
+        # its own.
+        interrupt = (
+            self._pending_notice_outside(project_ns, set(active["roles"])) if pending else None
+        )
+
         elapsed = now - started_ts
         expired = elapsed >= active["timeout_s"]
         result = {
@@ -333,8 +360,9 @@ class LeadWaitMixin:
             "pending": pending,
             "elapsed": elapsed,
             "expired": expired,
+            "interrupt": interrupt,
         }
-        if not pending or expired:
+        if not pending or expired or interrupt is not None:
             self._active_waits.pop(project_ns, None)
             # Stash this exact payload so any OTHER client still attached to
             # *wait_id* whose poll lands after this pop echoes the real

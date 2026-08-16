@@ -56,9 +56,24 @@ LEAD_ONLY_COMMANDS = frozenset(
 # #242: `takkub wait` always carries a bounded timeout — never an unbounded
 # block. No explicit --timeout uses the default; either way the value is
 # clamped into this range before being sent to the server.
+#
+# #253 lowered the ceiling from 7200s (2h) to 1800s (30 min). The original
+# incident (`wait --role qa --timeout 3000` sitting blind for 9 minutes while
+# devops's done report queued behind it) is now mostly closed by
+# `poll_wait`'s "interrupt" wake — a FAILED/blocking report from a role
+# OUTSIDE the watched set ends the wait immediately instead of waiting out
+# the timeout. But a 2h ceiling was still a foot-gun on top of that fix: a
+# PLAIN done notice from an unwatched role deliberately does NOT interrupt
+# (routine parallel-fan-out noise, see `_pending_notice_outside`), so a Lead
+# that watches a slow role while several fast ones report clean could still
+# go silent for up to the full ceiling with nothing forcing it to look
+# around. 30 min matches the pre-existing default (a `wait` that would have
+# run longer than that already needed to be re-issued under the old rules
+# too) and forces Lead back into the loop periodically on a genuinely long
+# task instead of treating `wait` as a multi-hour park.
 _WAIT_DEFAULT_TIMEOUT_S = 1800.0  # 30 min
 _WAIT_MIN_TIMEOUT_S = 5.0
-_WAIT_MAX_TIMEOUT_S = 7200.0  # 2h hard ceiling
+_WAIT_MAX_TIMEOUT_S = 1800.0  # 30 min hard ceiling (#253 — was 7200s/2h)
 _WAIT_POLL_INTERVAL_S = 4.0
 _WAIT_POLL_MAX_INTERVAL_S = 15.0
 # #249 item 4: print a heartbeat line at least this often while roles are
@@ -889,7 +904,8 @@ def cmd_inbox(args: argparse.Namespace) -> dict:
 
 def cmd_wait(args: argparse.Namespace) -> dict:
     """(lead) block until every requested role's done/FAILED report has
-    actually reached the Lead pane, or --timeout elapses (#242).
+    actually reached the Lead pane, --timeout elapses, or a blocking report
+    from a role OUTSIDE --role interrupts the wait (#242, #253).
 
     This function IS the canned polling loop — see `lead_wait.py`'s module
     docstring for the rationale. It replaces the hand-rolled `takkub status`
@@ -897,6 +913,15 @@ def cmd_wait(args: argparse.Namespace) -> dict:
     example of writing one. No --role at all defaults to every role
     currently tracked by this project (same set `takkub list` shows, minus
     Lead itself).
+
+    #253: a `wait --role X` used to be deaf for the entire --timeout to a
+    FAILED/spawn-failed/etc. report from role Y it wasn't watching — the
+    report reached Lead's pane eventually (nothing was lost, see
+    lead_inbox.py), but only after this call finally returned, up to 30
+    minutes late. `poll_wait`'s "interrupt" field ends this call the moment
+    that happens; roles still in --role stay genuinely pending in their own
+    panes, so re-run `takkub wait` (same or no --role) to resume watching
+    them once the interrupting report has been dealt with.
 
     --cancel (#249 item 5) skips begin/poll entirely and just releases
     whatever wait registration is active for this project — the cleanup
@@ -936,6 +961,7 @@ def cmd_wait(args: argparse.Namespace) -> dict:
     last: dict = {}
     last_pending_keys: set[str] = set(roles)
     last_heartbeat = start
+    interrupted_by: dict | None = None
     try:
         while True:
             poll = _request(
@@ -964,6 +990,22 @@ def cmd_wait(args: argparse.Namespace) -> dict:
                 )
                 last_heartbeat = now_t
             last_pending_keys = pending_keys
+            interrupt = poll.get("interrupt")
+            if interrupt:
+                # #253: a blocking report (FAILED/spawn-failed/etc.) from a
+                # role outside --role landed while we were still watching —
+                # stop blocking now instead of riding out the full timeout
+                # deaf to it. The watched roles above are still genuinely
+                # pending in their own panes; only this wait ends.
+                interrupted_by = interrupt
+                print(
+                    f"[wait] interrupted — [{interrupt.get('role')}] needs attention: "
+                    f"{interrupt.get('detail')} "
+                    f"({len(pending_keys)} watched role(s) still pending: "
+                    f"{', '.join(sorted(pending_keys))}) "
+                    "— see `takkub inbox`, then `takkub wait` again to resume watching"
+                )
+                break
             if not pending or poll.get("expired"):
                 break
             remaining = timeout - (time.time() - start)
@@ -994,18 +1036,26 @@ def cmd_wait(args: argparse.Namespace) -> dict:
         for role, reason in sorted(gone.items()):
             print(f"    - {role}: {reason}")
     if pending:
-        print("  still pending (timeout reached):")
+        reason_label = "wait interrupted, see above" if interrupted_by else "timeout reached"
+        print(f"  still pending ({reason_label}):")
         for role, reason in sorted(pending.items()):
             print(f"    - {role}: {reason}")
 
     ok = not pending
+    if ok:
+        msg = "all roles resolved"
+    elif interrupted_by:
+        msg = f"interrupted by [{interrupted_by.get('role')}]; {len(pending)} role(s) still pending"
+    else:
+        msg = f"timeout with {len(pending)} role(s) still pending"
     return {
         "ok": ok,
-        "msg": "all roles resolved" if ok else f"timeout with {len(pending)} role(s) still pending",
+        "msg": msg,
         "done": done,
         "failed": failed,
         "gone": gone,
         "pending": pending,
+        "interrupt": interrupted_by,
     }
 
 
