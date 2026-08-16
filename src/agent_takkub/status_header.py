@@ -760,10 +760,47 @@ class StatusHeaderMixin:
         resource_queue_line = f"Resource queue: {int(snap.get('queued_resource_tasks', 0))}"
         if waiting_reasons:
             resource_queue_line += f" (waiting: {', '.join(waiting_reasons)})"
+        overloaded = bool(snap.get("overloaded"))
+        cpu_val = float(snap.get("cpu_percent", 0))
+        ram_val = float(snap.get("available_memory_percent", 0))
+        cpu_pause = float(limits.get("cpu_pause_percent", 0))
+        cpu_resume = float(limits.get("cpu_resume_percent", 0))
+        ram_pause = float(limits.get("min_available_ram_percent", 0))
+        ram_resume = float(limits.get("resume_ram_percent", 0))
+        # #274: label the overload reason from the governor's own snapshot
+        # (overload_reason) instead of a blind "cpu_high" fallback — and for
+        # the "neither metric is over ITS pause line right now" case, spell
+        # out which resume threshold hasn't been met yet, since the hysteresis
+        # requires BOTH cpu<=cpu_resume AND ram>=resume_ram to clear.
+        reason_labels = {
+            "cpu_high": "CPU above pause threshold",
+            "memory_low": "RAM below pause threshold",
+            "waiting_resume": "waiting to clear resume thresholds",
+        }
+        if overloaded:
+            reason_label = reason_labels.get(str(snap.get("overload_reason") or ""), "")
+            load_line = "System Load: OVERLOAD — new heavy work paused"
+            if reason_label:
+                load_line += f" ({reason_label})"
+        else:
+            load_line = "System Load: Normal"
         lines = [
-            f"System Load: {'OVERLOAD — new heavy work paused' if snap.get('overloaded') else 'Normal'}",
-            f"CPU: {float(snap.get('cpu_percent', 0)):.1f}%",
-            f"Available RAM: {float(snap.get('available_memory_percent', 0)):.1f}% ({available_gb:.1f}/{total_gb:.1f} GiB)",
+            load_line,
+            f"CPU: {cpu_val:.1f}%",
+            f"Available RAM: {ram_val:.1f}% ({available_gb:.1f}/{total_gb:.1f} GiB)",
+            "Thresholds: CPU pause ≥"
+            f"{cpu_pause:.0f}% / resume ≤{cpu_resume:.0f}% · "
+            f"RAM pause <{ram_pause:.0f}% / resume ≥{ram_resume:.0f}%",
+        ]
+        if overloaded:
+            still_needed = []
+            if cpu_val > cpu_resume:
+                still_needed.append(f"CPU ≤{cpu_resume:.0f}% (now {cpu_val:.1f}%)")
+            if ram_val < ram_resume:
+                still_needed.append(f"RAM ≥{ram_resume:.0f}% (now {ram_val:.1f}%)")
+            if still_needed:
+                lines.append("Needed to resume: " + " · ".join(still_needed))
+        lines += [
             f"Heavy agents: {int(snap.get('active_heavy_tasks', 0))}/{limits.get('max_heavy_global', '—')}",
             f"Browser agents: {int(by_class.get('browser', 0))}/{limits.get('max_browser_global', '—')}",
             f"Builds: {int(by_class.get('build', 0))}/{limits.get('max_build_global', '—')}",
