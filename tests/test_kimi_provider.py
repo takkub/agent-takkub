@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from agent_takkub.provider_install import installable_providers
-from agent_takkub.provider_spec import PROVIDER_REGISTRY, kimi_spec
+from agent_takkub.provider_spec import PROVIDER_REGISTRY, ReadyRule, kimi_spec
 
 
 class TestKimiSpec:
@@ -32,9 +32,20 @@ class TestKimiSpec:
         assert kimi_spec.autonomy_flags == {"default": ["--yolo"]}
         assert "--auto" not in kimi_spec.autonomy_flags["default"]
 
-    def test_tui_markers_remain_an_explicit_gap(self) -> None:
-        # Still uncalibrated — no authenticated Kimi TUI captured yet.
-        assert kimi_spec.ready_rules == ()
+    def test_ready_and_auth_markers_calibrated_busy_marker_remains_an_explicit_gap(
+        self,
+    ) -> None:
+        # READY: calibrated against a real signed-in Kimi TUI (#257,
+        # commit 7080ec9) — the idle composer footer's distinctive half.
+        assert kimi_spec.ready_rules == (ReadyRule("ctrl-x: toggle mode", True),)
+        # AUTH FAILURE: also calibrated the same day — a credential-less pane
+        # shows "send /login to login" instead of ever reaching the footer.
+        assert kimi_spec.auth_error_markers == ("send /login to login",)
+        # BUSY: still uncalibrated — nobody has captured the footer/status
+        # line while Kimi is actively generating, so this must stay empty
+        # rather than guessed. Guards against silently reintroducing a
+        # guessed busy marker without real TUI evidence behind it.
+        assert kimi_spec.ready_hard_blockers == ()
 
     def test_plants_agents_md_so_teammates_learn_takkub_done(self) -> None:
         # AGENTS.md discovery is confirmed upstream (kimi-cli changelog 1.29.0),

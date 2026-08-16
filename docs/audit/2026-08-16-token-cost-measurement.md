@@ -137,3 +137,41 @@ Scope: ตอบ 4 คำถามด้วยตัวเลข token จริ
 - playwright + chrome-devtools MCP schema token count — ต้อง **qa** รัน `mcp_probe.mjs`-style handshake เอง (devops ทำไม่ได้ตาม role policy)
 - แยก token cost ของ non-Claude provider (codex CLI / gemini-agy / kimi / opencode) — ต้องเขียนตัวแยกวิเคราะห์ log แยกต่างหากทีละ provider เพราะ schema ไม่ตรงกับ JSONL ของ Claude Code
 - แปล role file เป็นอังกฤษจริง + วัด token หลังแปล (ตอนนี้เป็นค่าประมาณจากสัดส่วน char/token เท่านั้น)
+
+---
+
+## 5. Implementation (2026-08-16, worktree `wt/devops-1786850783`) — ตัดจริงตาม §4 อันดับ 1, ข้าม 3 พร้อมเหตุผล
+
+**ทำ:** อันดับ 1 (root CLAUDE.md diet) เท่านั้น ตามคำสั่ง user (ห้ามแตะข้อ 2/แปลอังกฤษ, ห้ามแตะ MCP)
+
+**ข้าม (ไม่ทำ) อันดับ 3 (browser-guard pull-on-demand) — พบ blocking risk ระหว่าง investigate จริง ไม่ใช่แค่ effort สูง:**
+
+สมมติฐานเดิมใน §4 อันดับ 3 ที่ว่า "มี precedent ชัดจาก wave4 (`GRAFT_TOOL_CAVEATS`)" ตรวจแล้วไม่ตรงกับ risk profile ของ browser-guard เพราะ:
+
+- `tests/test_agent_role_files_have_browser_guard.py` (docstring) ระบุตรงๆ ว่า role `.claude/agents/*.md` prose คือ **enforcement ชั้นเดียวที่ non-claude pane (codex/gemini-agy/opencode/kimi/cursor) เห็น** — `pane_guard.py`'s PreToolUse hook บล็อกจริงเฉพาะ **claude pane เท่านั้น**
+- ตาม source ที่อ่านจริง (`spawn_engine.py:1702-1946`, `codex_agents_md.py`): non-claude teammate (ไม่ใช่ Lead) ได้แค่ `CODEX_AGENTS_MD` cheatsheet ทั่วไป + skill appendix เท่านั้น — **ไม่เคยอ่าน `.claude/agents/<role>.md` เลยในเส้นทางปัจจุบัน** ไม่ว่ากรณีไหน ต่างจาก `GRAFT_TOOL_CAVEATS` ที่เป็นแค่ "nice-to-have" caveat (ไม่ใช่ hard safety block) และไม่มี dedicated regression test ผูกกับ multi-provider ไว้แบบนี้
+- สรุปได้ 2 อย่างที่ยังพิสูจน์ไม่ได้ 100% จากขอบเขตงานนี้: (a) test docstring อาจ stale จริง (ไม่ตรง behavior ปัจจุบัน) หรือ (b) มี pathway อื่นที่ยังไม่เจอที่ทำให้ non-claude เห็น prose นี้จริง — ทั้งสองกรณีคือคำถาม **multi-provider correctness** ไม่ใช่ token-diet ล้วนๆ แล้ว
+- เอา token-saving มาแลกกับ "อาจถอด safety net เดียวที่ non-claude มีต่อ browser-driver bloat (เคยกิน cache ถึง 2.88GB/4 builds)" โดยไม่มั่นใจ 100% ว่า assumption ถูก = ไม่คุ้มความเสี่ยงสำหรับ solo devops ตัดสินใจเอง — ไม่ implement, รายงานเป็น finding ให้ Lead ตัดสินว่าจะส่งต่อใคร (แนะนำ: ต้องมีคนตรวจ context_strategy ของ opencode/cursor/gemini เต็มๆ ก่อน ไม่ใช่แค่ codex/kimi ที่ตรวจในรอบนี้ + อาจต้องเขียน test ใหม่แทนที่จะแก้ test เดิม)
+
+**ไฟล์ที่แก้ (อันดับ 1 เท่านั้น):**
+- `CLAUDE.md` (root) — เหลือเฉพาะกฎที่ทุก role ต้องรู้ (godfile-map pointer, multi-provider, cross-platform, test tiers) + pointer บังคับให้ Lead อ่าน `docs/lead/role-and-workflow.md`
+- `docs/lead/role-and-workflow.md` (ใหม่) — ย้ายเนื้อหา Lead-only ทั้งหมดมาแบบ verbatim (บทบาท Lead, parallel dispatch, multi-project tabs, quick reference, vault, auto-routing table, proposal template, confirm handling, done-handoff, lead reply style, auto-fire exceptions, cockpit self-bug auto-issue, unavailable-provider substitution, spawn+assign, anti-patterns) — ไม่ลบกฎใดทิ้ง
+
+**Before/after (วัดจริงด้วย tiktoken cl100k_base เหมือน §0-§2, ติดตั้ง/ถอน `tiktoken` ชั่วคราวรอบใหม่แล้วยืนยัน uninstall สำเร็จอีกครั้ง):**
+
+| ไฟล์ | ก่อน (chars → tok) | หลัง (chars → tok) |
+|---|---:|---:|
+| `CLAUDE.md` (root, ทุก non-Lead pane โหลดเต็ม) | 14,179 → **6,728** | 2,080 → **948** |
+| `docs/lead/role-and-workflow.md` (ใหม่ — pull-on-demand, Lead อ่านเองตอน spawn) | — (ไม่เคยมีไฟล์นี้) | 13,130 → **6,331** |
+
+**ผลตอบแทนที่วัดได้จริง (ไม่ใช่ ceiling ประมาณ):** non-Lead pane ประหยัด **6,728 − 948 = 5,780 tok/spawn** — เอาไปคูณ resend-weighted เดิมของ §4 อันดับ 1 (14 spawn/วัน × 133.4 เทิร์นเฉลี่ย) ได้ **~10.8M tok-เทียบเท่า/วัน** (ต่ำกว่า ceiling เดิมที่ประมาณไว้ 12.5M เพราะไม่ได้ตัดทุกบรรทัด — เหลือ godfile-map/multi-provider/cross-platform/test-tiers ที่ universal จริง + เพิ่ม pointer บรรทัดใหม่)
+
+Lead เองได้ประโยชน์เพิ่ม (นอกเหนือ 14 spawn ที่นับใน §4): `_build_lead_context_text()` (`lead_context.py:336-341`) อ่าน root `CLAUDE.md` เป็น `base` ของ system-prompt-file ตัวเองด้วย — ไฟล์เล็กลงจึงลด base ของ Lead เองไปด้วยเป็นผลพลอยได้ (ไม่ได้นับในตัวเลขข้างบนเพราะ §4 เดิมตั้งใจไม่รวม Lead)
+
+**Verification:**
+- `docs-verify`: `python -m agent_takkub.cli docs-verify` รันจาก worktree นี้ → 10 broken ref เดิม (ไม่เกี่ยวกับไฟล์ที่แก้ — `runtime/*.json` ที่ gitignore ไว้) **ไม่มี broken ref ใหม่จาก `CLAUDE.md` หรือ `docs/lead/role-and-workflow.md`**
+- targeted tests เขียวหมด (ไม่รัน full suite): `test_lead_write_guard.py` `test_lead_context_compact.py` `test_lead_context_docs_lead_rewrite.py` `test_lead_project_rules.py` `test_lead_provider_unlock.py` `test_docs_verify.py` `test_project_rules.py` `test_agent_role_files_have_browser_guard.py` `test_pane_guard.py` — ผ่านทั้งหมด (รันผ่าน `PYTHONPATH=<repo>/src` ตาม conftest's #202 guard, ไม่แตะ shared venv editable install)
+- โค้ดที่อ่าน root `CLAUDE.md` เชิงโปรแกรม (`lead_context.py`, `spawn_engine.py`, `project_rules.py`, `docs_verify.py`) ตรวจแล้วว่าไม่ parse เนื้อหาเฉพาะเจาะจงจากไฟล์ (แค่อ่านทั้งไฟล์เป็น base string + string-replace `docs/lead/` prefix สำหรับ installed build ซึ่งยังทำงานถูกกับ path ใหม่ที่เพิ่ม) — `orchestrator_text.py`/`codex_agents_md.py`/`custom_roles.py` ไม่ได้อ้างอิง `CLAUDE.md` เลย (grep ยืนยันแล้ว)
+- แก้เพิ่มนอกขอบเขตเดิม (ตามคำสั่งแทรกจาก Lead): `tests/test_kimi_provider.py::TestKimiSpec::test_tui_markers_remain_an_explicit_gap` แดงเพราะ #257 (commit 7080ec9) calibrate `kimi_spec.ready_rules` และ `auth_error_markers` ของจริงแล้ว (deterministic, ไม่ใช่ flaky) — อัปเดต assertion ให้ตรง reality ใหม่ (`ready_rules` = calibrated marker, `auth_error_markers` = calibrated `"send /login to login"`) **ยังคง assert `ready_hard_blockers == ()`** (busy-marker gap ที่ยังไม่ calibrate จริง — เจตนาเดิมของเทสไม่หาย) เปลี่ยนชื่อเทสให้ตรงสิ่งที่มันกันจริง — `tests/test_kimi_provider.py` + `tests/test_pty_ready_prompt.py` เขียวหมด, `ruff check` ผ่าน
+
+**ไม่ commit** — รอ Lead review diff บน branch `wt/devops-1786850783`
