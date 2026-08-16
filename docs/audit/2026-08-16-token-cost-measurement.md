@@ -175,3 +175,32 @@ Lead เองได้ประโยชน์เพิ่ม (นอกเห�
 - แก้เพิ่มนอกขอบเขตเดิม (ตามคำสั่งแทรกจาก Lead): `tests/test_kimi_provider.py::TestKimiSpec::test_tui_markers_remain_an_explicit_gap` แดงเพราะ #257 (commit 7080ec9) calibrate `kimi_spec.ready_rules` และ `auth_error_markers` ของจริงแล้ว (deterministic, ไม่ใช่ flaky) — อัปเดต assertion ให้ตรง reality ใหม่ (`ready_rules` = calibrated marker, `auth_error_markers` = calibrated `"send /login to login"`) **ยังคง assert `ready_hard_blockers == ()`** (busy-marker gap ที่ยังไม่ calibrate จริง — เจตนาเดิมของเทสไม่หาย) เปลี่ยนชื่อเทสให้ตรงสิ่งที่มันกันจริง — `tests/test_kimi_provider.py` + `tests/test_pty_ready_prompt.py` เขียวหมด, `ruff check` ผ่าน
 
 **ไม่ commit** — รอ Lead review diff บน branch `wt/devops-1786850783`
+
+## Fix-loop: installed-mode rewrite ไม่ตามเข้าไปแก้ nested reference (QA regression, 2026-08-16)
+
+**อาการที่ QA จับได้:** `tests/test_installed_mode_gate.py::TestInstalledLeadContext::test_docs_lead_shipped_and_rewritten_to_resolvable_paths` แดง (6667 pass / 1 fail) — regression จริงจากการ diet ด้านบน ไม่ใช่เทสเก่าปักหมุด
+
+**Root cause ที่พิสูจน์แล้ว (ไม่ใช่เดา):** สร้าง wheel จริง + ติดตั้งใน venv สะอาด (ไม่มี `agent_takkub` ติดอยู่ก่อน — จำเป็นเพราะ conftest's `_assert_agent_takkub_matches_this_checkout()` no-op เฉพาะตอน `agent_takkub` import ไม่ได้เลย, เครื่องนี้มี stale global install ที่ `Python311/Lib/site-packages/agent_takkub` ทำให้ subprocess ที่สืบทอด `PYTHONPATH` เจือปนผลทดสอบ — ต้องแยก venv ทดสอบต่างหากถึงจะได้ ground truth สะอาด) แล้วรันโค้ดจริงตามที่เทสทำ:
+- staging (`setup.py::_stage_assets`) ยังถูกต้อง 100% — `docs/lead/*.md` ทุกไฟล์ (รวม `role-and-workflow.md` ใหม่) ถูก ship เข้า wheel จริง ยืนยันด้วยการเปิด wheel ตรวจ zip listing
+- ตัวปัญหาจริง: `_build_lead_context_text()` เดิม rewrite แค่ **ระดับเดียว** — string-replace `"docs/lead/"` บน `base` (root CLAUDE.md เอง) ซึ่งหลัง diet มีแค่ pointer เดียวไปยัง `docs/lead/role-and-workflow.md` เท่านั้น ไม่มี `patterns.md`/`cli-reference.md` โผล่ใน `base` อีกต่อไป — ส่วน `role-and-workflow.md` (ไฟล์ที่ถูกชี้ไป) ยังคง cross-reference `docs/lead/patterns.md`, `docs/lead/cli-reference.md` แบบ relative **ข้างในตัวมันเอง** ซึ่งไม่เคยถูก rewrite เลย → ถ้า Lead บน installed build ทำตามคำสั่ง (อ่าน role-and-workflow.md แล้วต้องการเปิด patterns.md ต่อ) จะเจอ path เสียซ้ำอีกชั้นหนึ่ง (functional gap ใหม่ที่ #267 เปิดขึ้นมาโดยไม่ตั้งใจ)
+
+**Fix ที่เลือก (ตัดสินเอง + เหตุผล):** `lead_context.py::_build_lead_context_text()` — ในสาขา installed-mode (`ASSETS_ROOT != REPO_ROOT`) เพิ่ม 2 อย่าง แทนที่จะทำแค่ replace บน `base`:
+1. **Rewrite ไฟล์ staged จริงบนดิสก์ (idempotent):** loop ทุกไฟล์ `ASSETS_ROOT/docs/lead/*.md` (ไม่ใช่แค่ role-and-workflow.md — กันไว้ทุกไฟล์ที่ ship มา เผื่อมี chain ลึกกว่า 1 ชั้น) แล้ว string-replace `"docs/lead/"` → absolute path ในเนื้อไฟล์เอง เขียนทับกลับที่เดิม — แก้ปัญหาจริง: Lead ที่ Read role-and-workflow.md (ผ่าน path ที่ rewrite แล้วเหมือนเดิม) จะเห็น cross-reference ข้างในเป็น absolute พร้อมใช้ทันที ไม่ต้องพึ่ง hop ที่สอง
+2. **แปะ resolved-path map สั้นๆ ต่อท้าย `base`:** list `{absolute_dir}/{filename}.md` ของทุกไฟล์ staged — ทำให้ rendered lead-context (สิ่งที่ `_render_lead_context()` เขียนจริง) มี absolute reference ปรากฏโดยตรง ไม่ต้องพึ่งการที่ Lead ไป Read ไฟล์อื่นก่อนถึงจะเห็น path ที่ถูกต้อง — ต้นทุนเพิ่มน้อยมาก (~5 บรรทัด, ชื่อไฟล์เท่านั้น ไม่ inline เนื้อหา)
+
+**ทางเลือกที่ไม่เลือกและเหตุผล:** พิจารณา inline เนื้อหาเต็มของ `role-and-workflow.md` เข้า `base` เลย (แก้ nested reference ได้ในตัวโดยไม่ต้องมี fix ข้อ 1 แยก) — ปัดทิ้งเพราะเพิ่ม token cost ต่อ Lead spawn ทุกครั้งสูง (~6.3K tok ของไฟล์นั้นเอง ยังไม่รวม chain ต่อไปยัง patterns.md/cli-reference.md ถ้า inline ต่อเนื่อง) ขัดกับเจตนาการ diet ด้านบนโดยตรง ส่วนวิธีที่เลือก (rewrite ไฟล์ staged ในดิสก์ + สรุป path สั้นๆ) ต้นทุนต่อ spawn เพิ่มแค่ไม่กี่สิบ token และแก้ปัญหาจริงแบบทั่วไป (ครอบคลุมทุกไฟล์ที่ ship มา ไม่จำกัดแค่ระดับที่ 2)
+
+**Regress check ต่อ diet เดิม:** `git diff --stat CLAUDE.md` ว่างเปล่า — ไฟล์ root ไม่ถูกแตะเลย (ยัง 948 tok เท่าเดิม) การแก้ทั้งหมดอยู่ใน `lead_context.py` (runtime rendering เท่านั้น ไม่ใช่ source-of-truth doc)
+
+**การ ship จริง (ข้อ 2 ของ task):** ตรวจ wheel ที่ build จริงแล้ว — `docs/lead/*.md` ทุกไฟล์ (`role-and-workflow.md`, `patterns.md`, `cli-reference.md`, และไฟล์อื่นในโฟลเดอร์) ถูก ship เข้า `_assets/docs/lead/` ครบ เพราะ `setup.py::_stage_assets` glob `*.md` ทั้งโฟลเดอร์ (ไม่ได้ select เฉพาะที่ CLAUDE.md อ้างถึง) อยู่แล้วตั้งแต่ก่อนแก้ — ไม่ต้องแก้ staging list
+
+**Cross-platform:** ใช้ `.as_posix()` + `pathlib.Path.glob`/`read_text`/`write_text` ล้วน (ไม่มี platform-specific string) เหมือน pattern เดิมของฟังก์ชันนี้
+
+**Verification:**
+- `PYTHONPATH=<repo>/src` วิธีเดิม (conftest #202 guard) รัน: `test_lead_context_docs_lead_rewrite.py`, `test_setup_build.py`, `test_codex_crash_instrumentation.py`, `test_lead_context_compact.py`, `test_lead_provider_unlock.py`, `test_lead_write_guard.py`, `test_orchestrator_claude_env_leak.py`, `test_orchestrator_reexports.py`, `test_plugin_installer.py`, `test_plugin_policy.py`, `test_project_rules.py`, `test_provider_substitution_note.py`, `test_resume_session_picker.py`, `test_session_brief.py` → เขียวหมด
+- `test_installed_mode_gate.py` ทั้งไฟล์ (8 เทส รวมตัวที่ QA จับ) รันผ่าน **venv สะอาดแยกต่างหาก** (ไม่มี `agent_takkub` ติดตั้งอยู่ก่อน กัน env contamination) — เขียวหมด รวม `test_docs_lead_shipped_and_rewritten_to_resolvable_paths` ที่เคยแดง
+- `ruff check` + `ruff format` ผ่านหลังแก้
+- **พบ pre-existing failure ไม่เกี่ยวกับงานนี้** (ยืนยันด้วย `git stash` แล้วรันซ้ำบนโค้ดเดิม แดงเหมือนกัน): `test_lead_project_rules.py` (3 เทส) + `test_project_scoping.py::TestRenderLeadContext` (2 เทส) — สาเหตุคือ worktree นี้ไม่มีโฟลเดอร์ `runtime/` เลย (`ensure_runtime()` gap เฉพาะ environment นี้ ไม่ใช่โค้ด) — **ไม่ใช่ regression จากงานนี้ ไม่ได้แก้** (นอกขอบเขต task, รายงานไว้เผื่อ Lead อยากตามต่อ)
+- **ห้ามรัน full suite ตามคำสั่ง** — รันเฉพาะ targeted ตามรายการข้างบน + gate suite เท่านั้น
+
+**ไม่ commit** — รอ Lead review diff บน branch `wt/devops-1786852508`
