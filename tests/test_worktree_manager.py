@@ -408,7 +408,9 @@ class TestDirtyPathSnapshots:
     def test_untracked_directory_deep_edit_survives_real_snapshot_roundtrip(self, tmp_path):
         """#261 repro end-to-end: pre-existing untracked dir, edit a file deep
         inside it between two real snapshot_porcelain_paths() calls — the
-        outer folder's own stat never changes, so the fix must not rely on it."""
+        outer folder's own stat never changes, so the fix must not rely on it.
+        No runner passed here (pure/no-git-process path) — must keep falling
+        back to the old always-changed folder marker."""
         deep = tmp_path / "new_folder" / "deep"
         deep.mkdir(parents=True)
         (deep / "file.py").write_text("v1", encoding="utf-8")
@@ -420,6 +422,97 @@ class TestDirtyPathSnapshots:
         current = snapshot_porcelain_paths(str(tmp_path), porcelain)
 
         assert changed_dirty_paths(baseline, current) == ["new_folder/"]
+
+
+class TestDirtyDirExpansion:
+    """#261 follow-up: expanding a collapsed ``?? dir/`` entry to its
+    file-level contents (via a scoped ``-uall`` rerun) must kill the false
+    positive on an untouched pre-existing untracked dir WITHOUT bringing back
+    the original false negative (a deep edit inside it going unreported)."""
+
+    @staticmethod
+    def _fs_expand_runner():
+        """Fake runner: answers a scoped `-uall` rerun by walking the real
+        filesystem under the requested dir, mirroring what real git would
+        report for an entirely-untracked directory."""
+
+        def runner(args: list[str], cwd) -> GitResult:
+            assert "-uall" in args
+            git_root = Path(args[1])
+            dir_path = args[-1]
+            target = git_root / dir_path
+            files = sorted(p for p in target.rglob("*") if p.is_file())
+            entries = [f"?? {p.relative_to(git_root).as_posix()}" for p in files]
+            stdout = "\0".join(entries) + ("\0" if entries else "")
+            return GitResult(0, stdout, "")
+
+        return runner
+
+    def test_untouched_preexisting_untracked_dir_not_reported(self, tmp_path):
+        deep = tmp_path / "screenshots" / "old"
+        deep.mkdir(parents=True)
+        (deep / "shot.png").write_bytes(b"abc")
+        runner = self._fs_expand_runner()
+        porcelain = "?? screenshots/\n"
+
+        baseline = snapshot_porcelain_paths(str(tmp_path), porcelain, runner)
+        current = snapshot_porcelain_paths(str(tmp_path), porcelain, runner)
+
+        assert changed_dirty_paths(baseline, current) == []
+
+    def test_new_file_deep_inside_preexisting_untracked_dir_is_reported(self, tmp_path):
+        deep = tmp_path / "new_folder" / "deep"
+        deep.mkdir(parents=True)
+        (deep / "file.py").write_text("v1", encoding="utf-8")
+        runner = self._fs_expand_runner()
+        porcelain = "?? new_folder/\n"
+
+        baseline = snapshot_porcelain_paths(str(tmp_path), porcelain, runner)
+        (deep / "new.py").write_text("added mid-task", encoding="utf-8")
+        current = snapshot_porcelain_paths(str(tmp_path), porcelain, runner)
+
+        assert changed_dirty_paths(baseline, current) == ["new_folder/deep/new.py"]
+
+    def test_expansion_failure_falls_back_to_folder_marker(self, tmp_path):
+        (tmp_path / "weird").mkdir()
+
+        def failing_runner(args, cwd):
+            return GitResult(1, "", "boom")
+
+        porcelain = "?? weird/\n"
+        baseline = snapshot_porcelain_paths(str(tmp_path), porcelain, failing_runner)
+        current = snapshot_porcelain_paths(str(tmp_path), porcelain, failing_runner)
+
+        # Same fallback fingerprint both times -> still always reported changed,
+        # matching the pre-expansion #261 behavior (safe false positive).
+        assert changed_dirty_paths(baseline, current) == ["weird/"]
+
+    def test_expansion_over_cap_falls_back_to_folder_marker(self, tmp_path):
+        big = tmp_path / "huge"
+        big.mkdir()
+
+        def many_entries_runner(args, cwd):
+            entries = [f"?? huge/f{i}.txt" for i in range(5)]
+            return GitResult(0, "\0".join(entries) + "\0", "")
+
+        porcelain = "?? huge/\n"
+        baseline = snapshot_porcelain_paths(
+            str(tmp_path), porcelain, many_entries_runner, dir_expand_cap=2
+        )
+        current = snapshot_porcelain_paths(
+            str(tmp_path), porcelain, many_entries_runner, dir_expand_cap=2
+        )
+
+        assert changed_dirty_paths(baseline, current) == ["huge/"]
+
+    def test_worktree_manager_dirty_snapshot_uses_its_own_runner(self):
+        runner = FakeRunner([(["status"], _ok("?? sub/f.txt"))])
+        mgr = WorktreeManager(runner)
+
+        snapshot = mgr.dirty_snapshot("/root", "?? dir/\n")
+
+        assert runner.ran("-uall", "--", "dir/")
+        assert "sub/f.txt" in snapshot
 
 
 # ── Destroy (2-tier) ────────────────────────────────────────────────────────

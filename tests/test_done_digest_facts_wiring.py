@@ -239,6 +239,9 @@ class TestSharedTreePaneDigestFacts:
             def shared_tree_status_porcelain(self, cwd):
                 return "?? stale.png\n M src/other.py\n?? src/new.py\n"
 
+            def dirty_snapshot(self, git_root, porcelain):
+                return wm_mod.snapshot_porcelain_paths(git_root, porcelain)
+
         monkeypatch.setattr(wm_mod, "WorktreeManager", lambda *a, **k: _SharedFake())
 
         captured: list[tuple[str, dict]] = []
