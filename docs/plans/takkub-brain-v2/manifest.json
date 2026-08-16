@@ -1,0 +1,27 @@
+{
+  "name": "agent-takkub-brain-plan-v2",
+  "baseline": {
+    "repo": "takkub/agent-takkub",
+    "branch": "main",
+    "commit": "0aee262a2b2648b248822e3bb587a49001b14166",
+    "version": "1.0.68",
+    "date": "2026-08-16"
+  },
+  "supersedes": "agent-takkub-brain-plan-v1",
+  "documents": [
+    "00-CURRENT-BASELINE.md",
+    "01-ARCHITECTURE.md",
+    "02-DATA-MODEL.md",
+    "03-INTEGRATION-HOOKS.md",
+    "04-RETRIEVAL-AND-TOKEN-BUDGET.md",
+    "05-PANE-SUBAGENT-CONTINUITY.md",
+    "06-SECURITY.md",
+    "07-PHASES.md",
+    "08-TEST-PLAN.md",
+    "09-DEFINITION-OF-DONE.md",
+    "CHANGE-FROM-V1.md",
+    "IMPLEMENTATION-CHECKLIST.md",
+    "MASTER-PROMPT.md",
+    "README.md"
+  ]
+}
