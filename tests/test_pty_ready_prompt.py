@@ -80,6 +80,18 @@ def test_gemini_idle_with_update_footer_is_ready_even_if_prompt_missing() -> Non
     assert s.is_at_ready_prompt() is True
 
 
+def test_kimi_idle_footer_is_ready() -> None:
+    # #257: kimi_spec.ready_rules was an empty tuple, so is_at_ready_prompt()
+    # could never return True for a kimi pane no matter what its screen
+    # showed — every assigned task sat undelivered until the busy-wait
+    # ceiling. Captured via direct ConPTY capture against a signed-in
+    # kimi-cli 1.49.x session on Windows, 2026-08-16.
+    s = _feed_screen(
+        "main  @: mention files | ctrl-x: toggle mode | shift-tab: plan mode | ctrl+o: editor"
+    )
+    assert s.is_at_ready_prompt() is True
+
+
 class TestIsAtTrustPrompt:
     """#186: agy's own folder-trust modal words the confirm hint "enter
     Confirm" (no "to"), unlike claude/codex's "Enter to confirm" — the
