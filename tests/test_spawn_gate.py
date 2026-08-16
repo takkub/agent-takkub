@@ -25,6 +25,23 @@ from PyQt6.QtCore import QCoreApplication
 from agent_takkub.lead_inbox import _READY_POLL_FIRST_MS, _READY_POLL_INTERVAL_MS
 from agent_takkub.orchestrator import Orchestrator
 
+
+@pytest.fixture(autouse=True)
+def _live_watch_notices(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#280 moved these watchdog observations out of immediate Lead notices
+    and into the pane's own end-of-life report.
+
+    This file tests the DETECTION — does the watchdog fire at the right
+    moment, about the right role, with the right wording — none of which
+    #280 changed; only the moment Lead is told did. `live` is the policy
+    under which that message is still rendered verbatim, so every assertion
+    below keeps testing exactly what it was written to test. The new routing
+    has its own coverage in tests/test_pane_health_reporting.py and
+    tests/test_pane_health_close_report.py.
+    """
+    monkeypatch.setenv("TAKKUB_PANE_WATCH_NOTICES", "live")
+
+
 TEST_PROJECT = "gatetest"
 
 

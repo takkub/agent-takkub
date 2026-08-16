@@ -79,6 +79,14 @@ class _StubSession:
             raise RuntimeError("boom")
         return self._booting
 
+    def shows_boot_phase_marker(self) -> bool:
+        # #281: the display state asks the boot-phase-only question now — the
+        # wider `shows_startup_marker` also covers "mid-turn with a queued
+        # message", which labelled a working codex pane "booting".
+        if "booting" in self._raise_on:
+            raise RuntimeError("boom")
+        return self._booting
+
     def is_hard_blocked_for(self, provider: str) -> bool:
         if "busy" in self._raise_on:
             raise RuntimeError("boom")
@@ -177,6 +185,9 @@ class _RealSignalSession:
     def shows_startup_marker(self) -> bool:
         return PtySession.shows_startup_marker(self)
 
+    def shows_boot_phase_marker(self) -> bool:
+        return PtySession.shows_boot_phase_marker(self)
+
     def is_hard_blocked_for(self, provider: str) -> bool:
         return PtySession.is_hard_blocked_for(self, provider)
 
@@ -221,6 +232,22 @@ class TestRealTranscriptFixtures:
         pane = _pane("active", session=session, provider="codex")
         result = Orchestrator._derive_display_state(None, pane, "active", False)
         assert result == "booting"
+
+    def test_codex_working_with_a_queued_message_is_not_booting(self) -> None:
+        """#281: codex shows "tab to queue message" the whole time it is
+        working. Reading that as a boot phase made `takkub list` report
+        "booting" for a pane that was actively running its task (and made the
+        delivery watchdog warn about a stall that was not happening)."""
+        session = _RealSignalSession(
+            [
+                "gpt-5.6 high",
+                "Working (12s . esc to interrupt . tab to queue message)",
+            ],
+            seconds_since_output=0.0,
+        )
+        pane = _pane("working", session=session, provider="codex")
+        result = Orchestrator._derive_display_state(None, pane, "working", False)
+        assert result != "booting"
 
     def test_codex_genuinely_busy_with_no_dispatch_is_busy(self) -> None:
         # The issue's own evidence: `takkub list` said "active" while the

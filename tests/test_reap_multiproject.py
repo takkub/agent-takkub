@@ -31,6 +31,14 @@ def _lead(*, ready: bool = True) -> MagicMock:
     s = MagicMock()
     s.is_alive = True
     s.is_at_ready_prompt = MagicMock(return_value=ready)
+    # #279: the reaper refuses to force-paste into an open
+    # trust/permission/tty prompt (the bytes would answer the modal
+    # instead of reaching the composer). A bare MagicMock answers
+    # every probe truthily, so a fake Lead has to say "no prompt"
+    # explicitly to model an ordinary busy pane.
+    s.is_at_trust_prompt = MagicMock(return_value=False)
+    s.is_blocked_on_permission_prompt = MagicMock(return_value=None)
+    s.is_blocked_on_tty_prompt = MagicMock(return_value=None)
     s.write = MagicMock()
     pane.session = s
     return pane

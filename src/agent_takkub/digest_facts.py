@@ -70,8 +70,17 @@ def _files_bit(facts: DigestFacts) -> str:
     if facts.files_touched is None:
         suffix = f" ({facts.files_note})" if facts.files_note else ""
         return f"ไฟล์ที่แตะ:ตรวจไม่ได้{suffix}"
-    dirs = f" ({', '.join(facts.files_dirs[:5])})" if facts.files_dirs else ""
     note = f" · {facts.files_note}" if facts.files_note else ""
+    if facts.files_touched == 0:
+        # #278: a measured (not unverifiable) zero is the one file count that
+        # has to be loud. The incident it comes from: a pane reported done
+        # with a complete-looking summary and Lead only found out nothing had
+        # been built by opening the target file by hand. `0` sitting quietly
+        # in the middle of a fact row reads as just another number, so it is
+        # marked — advisory, never blocking, because analysis/QA/research
+        # tasks legitimately finish having touched nothing.
+        return f"⚠️ ไฟล์ที่แตะ:0 — ยังไม่มีอะไรเปลี่ยน (ถ้าเป็นงาน implementation ให้ตรวจก่อนปิด){note}"
+    dirs = f" ({', '.join(facts.files_dirs[:5])})" if facts.files_dirs else ""
     return f"ไฟล์ที่แตะ:{facts.files_touched}{dirs}{note}"
 
 

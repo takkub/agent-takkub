@@ -502,9 +502,19 @@ codex_spec = ProviderSpec(
     # #273: `codex mcp list` prints the real config error on one line
     # (confirmed: "Error: failed to load bootstrap configuration / Caused
     # by: invalid transport in ...") when ~/.codex/config.toml's
-    # [mcp_servers.*] table is malformed — exactly what codex silently
-    # hangs at boot on. `codex --help` confirms `mcp list` is read-only
-    # (lists configured servers) — safe to run unconditionally.
+    # [mcp_servers.*] table is malformed. `codex --help` confirms `mcp list`
+    # is read-only (lists configured servers) — safe to run unconditionally.
+    #
+    # ⚠ #281: it does NOT see the MCPs the cockpit itself injects. Those go in
+    # session-scoped as `-c mcp_servers.<name>.<key>=…` (see
+    # `mcp_adapter_variant="session_override"` below) and never touch
+    # ~/.codex/config.toml, so `mcp list` answers "No MCP servers configured
+    # yet" while three of them are visibly loading on screen. A whole session
+    # was lost to that answer, concluding codex had no MCPs and disabling an
+    # unrelated plugin. When a codex pane hangs at boot, the authoritative
+    # source is the pane's own "Starting MCP servers (n/N): …" line — which
+    # `PtySession.boot_phase_detail()` now captures — plus the role's
+    # runtime/shared-mcp-<role>.json.
     boot_diagnostic_argv=("mcp", "list"),
     task_notice_preamble=(
         "[orchestrator note] อ่านก่อนเริ่มงาน:\n"

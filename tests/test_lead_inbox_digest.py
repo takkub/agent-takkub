@@ -151,7 +151,12 @@ def test_blocking_notices_bypass_digest(
     with patch("agent_takkub.lead_inbox.QTimer.singleShot"):
         orch._notify_lead(PROJECT, notice)
 
-    assert notice in _written(lead.session)
+    written = _written(lead.session)
+    # This test is about ROUTING (blocking mail must not sit in the digest
+    # window), not wording: #279 collapses a delivery-health notice whose
+    # target pane no longer exists to a one-line "already resolved" note —
+    # only the marker tag is guaranteed to survive that.
+    assert notice[notice.index("[") : notice.index("]") + 1] in written
     assert not orch._lead_digest_queue.get(PROJECT)
 
 

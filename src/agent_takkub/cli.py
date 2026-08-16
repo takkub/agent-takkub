@@ -691,6 +691,7 @@ def cmd_done(args: argparse.Namespace) -> dict:
                 "from": _from_role(),
                 "note": args.note or "",
                 "failed": bool(getattr(args, "fail", False)),
+                "force": bool(getattr(args, "force", False)),
             }
         )
     )
@@ -813,6 +814,37 @@ def _require_lead_for_task_admin(action: str) -> str | None:
             f"       'takkub task show' stays open for everyone; ask lead to clean up the ledger."
         )
     return None
+
+
+def cmd_messages(args: argparse.Namespace) -> dict:
+    """`takkub messages --role <r>` — read back what `takkub send` actually
+    did (issue #277).
+
+    `send` reports that it queued a message, not that anyone read it, and a
+    pane respawn can swallow one whole. This is the lookup that makes that
+    checkable instead of a matter of trust: every message, its delivery state
+    (queued / confirmed received / abandoned), and whether the cockpit had to
+    re-send it after a respawn.
+    """
+    resp = _request(
+        _with_project(
+            {
+                "cmd": "messages",
+                "role": args.role,
+                "limit": int(getattr(args, "limit", 20) or 20),
+                "from": _from_role(),
+            }
+        )
+    )
+    if not resp.get("ok"):
+        return {"ok": False, "msg": resp.get("msg", "messages failed"), "exit_code": 1}
+    lines = resp.get("lines") or []
+    if not lines:
+        print(f"[messages] ยังไม่มีข้อความที่ส่งถึง {args.role} ในโปรเจกต์นี้")
+        return {"ok": True, "msg": "no messages"}
+    for line in lines:
+        _utf8_print(line)
+    return {"ok": True, "msg": resp.get("msg", "messages")}
 
 
 def cmd_task(args: argparse.Namespace) -> dict:
@@ -2233,6 +2265,14 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="report a FAILED result (QA/verify failed) → Lead proposes a fix loop",
     )
+    sd.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "report even though the cockpit has no record of a task reaching this pane "
+            "(manual work driven by hand outside an assign/send) — #278"
+        ),
+    )
     sd.set_defaults(func=cmd_done)
 
     ssd = sub.add_parser(
@@ -2304,6 +2344,14 @@ def main(argv: list[str] | None = None) -> int:
 
     sl = sub.add_parser("list", help="show pane status")
     sl.set_defaults(func=cmd_list)
+
+    smsg = sub.add_parser(
+        "messages",
+        help="(lead) read the `takkub send` audit log for a role — was it actually received? (#277)",
+    )
+    smsg.add_argument("--role", required=True, help="recipient role to look up")
+    smsg.add_argument("--limit", type=int, default=20, help="how many recent messages (default 20)")
+    smsg.set_defaults(func=cmd_messages)
 
     st = sub.add_parser(
         "task",

@@ -365,16 +365,31 @@ def _classify_ready(text_lower: str) -> bool:
 # which already anchors tty-prompt detection to the bottom for the same reason.
 _READY_TAIL_ROWS = 6
 
-# Provider startup / message-queue chrome. Present in the footer region while a
-# codex/agy pane is still cold-booting its MCP servers (and while a message it
-# received during that window sits queued rather than running). Kept beside the
-# ready markers because it is read from the same region — see
-# PtySession.shows_startup_marker.
-_STARTUP_MARKERS: tuple[str, ...] = (
+# Provider BOOT chrome: the CLI has not finished starting up, so there is no
+# composer on screen yet to receive anything.
+_BOOT_PHASE_MARKERS: tuple[str, ...] = (
     "booting mcp server",
     "starting mcp server",
-    "tab to queue message",
 )
+
+# Provider QUEUED-MESSAGE chrome: the composer exists, but the CLI is mid-turn,
+# so input is queued rather than run. codex shows this whenever it is working —
+# NOT only during boot.
+#
+# #281: these two used to be one list, and every consumer inherited "boot" as
+# the meaning of all of it. That is right for the idle watchdog (the original
+# consumer — neither state deserves a forgot-`takkub done` nag) and wrong for
+# everything that reused it afterwards. Proven from a live day of events.log:
+# panes flagged `[delivery-boot-stall] ค้างอยู่ที่ boot phase` at 110s went on
+# to finish their work and call `done` minutes later (13:59→14:03,
+# 15:45→15:54, 20:07→20:17) — they were never booting, they were WORKING with
+# a queued message showing. Left unsplit, #276's new boot ceiling would have
+# closed those panes and failed their tasks at 300s.
+_QUEUED_MESSAGE_MARKERS: tuple[str, ...] = ("tab to queue message",)
+
+# Union — the historical meaning, still what `shows_startup_marker` reports and
+# what the idle watchdog wants: "not a genuine work turn to nag about".
+_STARTUP_MARKERS: tuple[str, ...] = _BOOT_PHASE_MARKERS + _QUEUED_MESSAGE_MARKERS
 
 
 def _ready_region(lines: list[str]) -> str:
@@ -1420,8 +1435,46 @@ class PtySession(QObject):
         transcript: task queued through MCP boot, ran to completion, called
         `takkub done` — the reminders were pure boot-window noise). The idle
         watchdog uses this to tell a genuine work turn ("Working…") apart from
-        a boot/queue phase, so it only arms after the task actually started."""
+        a boot/queue phase, so it only arms after the task actually started.
+
+        #281: for "is this pane still BOOTING", use `shows_boot_phase_marker`
+        instead — this one is deliberately the wider union and answers a
+        different question."""
         return any(m in _ready_region(self.display_lines()) for m in _STARTUP_MARKERS)
+
+    def shows_boot_phase_marker(self) -> bool:
+        """True only while the provider CLI is still starting up — its
+        composer does not exist yet, so anything written to the pane lands on
+        a splash screen instead of an input box.
+
+        Narrower than `shows_startup_marker` on purpose (#281): that one also
+        reports True for a pane that is simply mid-turn with a queued message
+        ("tab to queue message"), which codex shows whenever it is working.
+        Callers deciding "is delivery stuck at boot / may I paste yet" must
+        use this one — treating a working pane as a stuck boot is what
+        produced `[delivery-boot-stall]` warnings for panes that went on to
+        finish their tasks normally.
+        """
+        return any(m in _ready_region(self.display_lines()) for m in _BOOT_PHASE_MARKERS)
+
+    def boot_phase_detail(self) -> str:
+        """The actual boot line on screen, e.g. ``Starting MCP servers (0/3):
+        codex_apps, context7, figma (12s • esc to interrupt)`` — or "" when the
+        pane is not in a boot phase.
+
+        #281: Lead used to be told only the word "booting" while the pane
+        itself was displaying exactly which servers it was waiting on. That
+        line is the one piece of information that makes a stuck boot
+        actionable (it names the server to remove or pin), and the obvious
+        alternative — `codex mcp list` — cannot see cockpit-injected MCPs at
+        all. Trimmed to a single line and bounded so a redraw artifact can
+        never paste a screenful into a notice.
+        """
+        for line in reversed(self.display_lines()):
+            lowered = line.lower()
+            if any(m in lowered for m in _BOOT_PHASE_MARKERS):
+                return " ".join(line.split())[:200]
+        return ""
 
     def is_at_trust_prompt(self) -> bool:
         """True when claude, codex, OR agy is showing a trust-directory modal.

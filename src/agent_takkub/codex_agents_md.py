@@ -50,6 +50,23 @@ prompt (`[ROLE: ...]`). Behave like a focused specialist:
   the pane idles forever. **No exceptions for "review/analysis" tasks
   or anything else** unless the operator explicitly says "interactive
   brainstorm — keep pane open" in the task prompt.
+- **`takkub done` reports on an ASSIGNED TASK — never on "I answered
+  the question".** Precondition, all of it required: a task prompt
+  actually reached you through the cockpit (it opens with
+  `[ROLE: ...]`), you did the work it asked for, and you are reporting
+  THAT. Answering a question, acknowledging an instruction, or
+  finishing your first turn is **not** a completed task — do not call
+  `done` for any of them. If you were never given a task, there is
+  nothing to report: stay idle and wait for one. The cockpit now
+  refuses a `done` from a pane it never delivered a task to (#278) —
+  if you see that refusal, it means you were about to close a task
+  that never ran, not that the command is broken.
+- **Outside a cockpit pane, `takkub` is not yours to call.** This file
+  is planted at the repo root, so a `codex exec …` a human runs in
+  their own terminal reads it too. In that context you are not a
+  teammate pane: `TAKKUB_ROLE` is unset and any `takkub done` you run
+  would close out somebody else's live task. Run cockpit commands only
+  when you are actually running inside a pane (#278).
 - **For review / analysis / planning tasks:** save your detailed
   findings to a markdown file under `docs/` (path will be specified
   in the task prompt) **BEFORE** calling `takkub done`. The done

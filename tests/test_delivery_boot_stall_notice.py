@@ -21,6 +21,22 @@ from agent_takkub import orchestrator as orch_mod
 from agent_takkub.orchestrator import Orchestrator
 
 
+@pytest.fixture(autouse=True)
+def _live_watch_notices(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#280 moved these watchdog observations out of immediate Lead notices
+    and into the pane's own end-of-life report.
+
+    This file tests the DETECTION — does the watchdog fire at the right
+    moment, about the right role, with the right wording — none of which
+    #280 changed; only the moment Lead is told did. `live` is the policy
+    under which that message is still rendered verbatim, so every assertion
+    below keeps testing exactly what it was written to test. The new routing
+    has its own coverage in tests/test_pane_health_reporting.py and
+    tests/test_pane_health_close_report.py.
+    """
+    monkeypatch.setenv("TAKKUB_PANE_WATCH_NOTICES", "live")
+
+
 @pytest.fixture(scope="module")
 def qapp() -> QCoreApplication:
     app = QCoreApplication.instance()
@@ -37,6 +53,7 @@ def _live_session() -> MagicMock:
     s.is_blocked_on_tty_prompt.return_value = None
     s.is_blocked_on_permission_prompt.return_value = None
     s.shows_startup_marker.return_value = False
+    s.shows_boot_phase_marker.return_value = False
     return s
 
 
@@ -80,7 +97,7 @@ class TestBootStallNotice:
         lead = _pane(_live_session())
         codex = _pane(_live_session())
         codex.session.is_at_ready_prompt.side_effect = [False] * 8 + [True] * 10
-        codex.session.shows_startup_marker.side_effect = [True] * 8 + [False] * 10
+        codex.session.shows_boot_phase_marker.side_effect = [True] * 8 + [False] * 10
         codex.session.seconds_since_output.return_value = 2.0  # busy, not stuck
         orch._panes_by_project["P"] = {"lead": lead, "codex": codex}
         monkeypatch.setattr(orch_mod.QTimer, "singleShot", staticmethod(lambda _ms, fn: fn()))
@@ -103,7 +120,7 @@ class TestBootStallNotice:
         lead = _pane(_live_session())
         reviewer = _pane(_live_session())
         reviewer.session.is_at_ready_prompt.side_effect = [False] * 6 + [True] * 10
-        reviewer.session.shows_startup_marker.return_value = False
+        reviewer.session.shows_boot_phase_marker.return_value = False
         reviewer.session.seconds_since_output.return_value = 2.0
         orch._panes_by_project["P"] = {"lead": lead, "reviewer": reviewer}
         monkeypatch.setattr(orch_mod.QTimer, "singleShot", staticmethod(lambda _ms, fn: fn()))
@@ -125,7 +142,7 @@ class TestBootStallNotice:
         codex = _pane(_live_session())
         codex.session.is_at_ready_prompt.side_effect = [False] * 8 + [True] * 10
         # True, False alternating — never more than 1 consecutive hit.
-        codex.session.shows_startup_marker.side_effect = [True, False] * 4 + [False] * 10
+        codex.session.shows_boot_phase_marker.side_effect = [True, False] * 4 + [False] * 10
         codex.session.seconds_since_output.return_value = 2.0
         orch._panes_by_project["P"] = {"lead": lead, "codex": codex}
         monkeypatch.setattr(orch_mod.QTimer, "singleShot", staticmethod(lambda _ms, fn: fn()))
@@ -139,7 +156,7 @@ class TestBootStallNotice:
     def test_unconfigured_mock_session_never_falsely_trips(
         self, orch: Orchestrator, monkeypatch
     ) -> None:
-        """A session double that never pins shows_startup_marker() (an
+        """A session double that never pins shows_boot_phase_marker() (an
         unconfigured MagicMock returns a truthy Mock by default) must not be
         misread as a genuine boot-phase hit — regression guard for the
         isinstance(bool) defensive cast."""
@@ -150,7 +167,7 @@ class TestBootStallNotice:
         reviewer.session.is_at_trust_prompt.return_value = False
         reviewer.session.is_blocked_on_tty_prompt.return_value = None
         reviewer.session.is_blocked_on_permission_prompt.return_value = None
-        # shows_startup_marker deliberately left UNCONFIGURED.
+        # shows_boot_phase_marker deliberately left UNCONFIGURED.
         reviewer.session.is_at_ready_prompt.return_value = True  # ready right away
         orch._panes_by_project["P"] = {"lead": lead, "reviewer": reviewer}
         monkeypatch.setattr(orch_mod.QTimer, "singleShot", staticmethod(lambda _ms, fn: fn()))

@@ -28,6 +28,22 @@ from agent_takkub import orchestrator as orch_mod
 from agent_takkub.orchestrator import Orchestrator
 
 
+@pytest.fixture(autouse=True)
+def _live_watch_notices(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#280 moved these watchdog observations out of immediate Lead notices
+    and into the pane's own end-of-life report.
+
+    This file tests the DETECTION — does the watchdog fire at the right
+    moment, about the right role, with the right wording — none of which
+    #280 changed; only the moment Lead is told did. `live` is the policy
+    under which that message is still rendered verbatim, so every assertion
+    below keeps testing exactly what it was written to test. The new routing
+    has its own coverage in tests/test_pane_health_reporting.py and
+    tests/test_pane_health_close_report.py.
+    """
+    monkeypatch.setenv("TAKKUB_PANE_WATCH_NOTICES", "live")
+
+
 @pytest.fixture(scope="module")
 def qapp() -> QCoreApplication:
     app = QCoreApplication.instance()
@@ -44,6 +60,7 @@ def _live_session() -> MagicMock:
     s.is_blocked_on_tty_prompt.return_value = None
     s.is_blocked_on_permission_prompt.return_value = None
     s.shows_startup_marker.return_value = False
+    s.shows_boot_phase_marker.return_value = False
     return s
 
 
@@ -91,7 +108,7 @@ class TestBootMarkerBlindPasteGuard:
             return poll["n"] <= 20
 
         codex.session.is_at_ready_prompt.side_effect = _ready
-        codex.session.shows_startup_marker.side_effect = _marker
+        codex.session.shows_boot_phase_marker.side_effect = _marker
         orch._panes_by_project["P"] = {"lead": lead, "codex": codex}
         monkeypatch.setattr(orch_mod.QTimer, "singleShot", staticmethod(lambda _ms, fn: fn()))
 
@@ -106,27 +123,42 @@ class TestBootMarkerBlindPasteGuard:
         payload_writes = _written_strings(codex.session)
         assert payload_writes, "task must still be delivered once the pane reaches ready"
 
-    def test_ceiling_still_delivers_if_marker_never_clears(
+    def test_ceiling_fails_the_task_instead_of_blind_pasting(
         self, orch: Orchestrator, monkeypatch
     ) -> None:
-        """A boot that never finishes must not poll forever — once
-        BUSY_WAIT_CEILING_SEC is reached, fall through to a last-resort
-        (unconfirmed) delivery same as the ordinary busy-pane ceiling."""
-        monkeypatch.setattr(orch_mod, "BUSY_WAIT_CEILING_SEC", 1)  # 1s ceiling — fake clock
+        """#276 changed this ceiling's verdict.
+
+        The original #271 fix ended a never-finishing boot with a last-resort
+        blind paste, on the reasoning that some delivery beats none. Live
+        evidence said otherwise: the paste goes onto a splash screen with no
+        composer, so it is lost exactly as this file's own docstring
+        describes — the task was neither delivered nor failed, it simply
+        stopped existing, and a report from an unrelated task later closed it
+        out as done. The ceiling is now BOOT_STALL_CEILING_SEC and it fails
+        the task explicitly instead: ledger flipped, Lead told, pane closed.
+        """
+        monkeypatch.setattr(orch_mod, "BOOT_STALL_CEILING_SEC", 1)  # 1s ceiling — fake clock
         lead = _pane(_live_session())
         codex = _pane(_live_session())
         codex.session.is_at_ready_prompt.return_value = False  # never ready
-        codex.session.shows_startup_marker.return_value = True  # marker never clears
+        codex.session.shows_boot_phase_marker.return_value = True  # marker never clears
         orch._panes_by_project["P"] = {"lead": lead, "codex": codex}
         monkeypatch.setattr(orch_mod.QTimer, "singleShot", staticmethod(lambda _ms, fn: fn()))
+        failures: list[dict] = []
+        monkeypatch.setattr(
+            orch,
+            "_fail_boot_stalled_delivery",
+            lambda role, project, elapsed: failures.append({"role": role, "elapsed": elapsed}),
+        )
 
         with patch("agent_takkub.lead_inbox._log_event"):
             orch._send_when_ready("codex", "run smoke", max_wait_ms=300, project="P")
 
-        payload_writes = _written_strings(codex.session)
-        assert payload_writes, "must still deliver (blind, best-effort) once the ceiling fires"
-        warnings = _written_strings(lead.session)
-        assert any("[delivery-unconfirmed]" in m for m in warnings)
+        assert not _written_strings(codex.session), (
+            "must never blind-paste onto a boot splash — that is how the task got lost"
+        )
+        assert len(failures) == 1, "the task must end as an explicit failure, not silence"
+        assert failures[0]["role"] == "codex"
 
     def test_ready_pane_delivers_immediately_unaffected(
         self, orch: Orchestrator, monkeypatch
@@ -154,7 +186,7 @@ class TestBootMarkerBlindPasteGuard:
         lead = _pane(_live_session())
         codex = _pane(_live_session())
         codex.session.is_at_ready_prompt.return_value = False
-        codex.session.shows_startup_marker.return_value = False
+        codex.session.shows_boot_phase_marker.return_value = False
         codex.session.seconds_since_output.return_value = float("inf")
         orch._panes_by_project["P"] = {"lead": lead, "codex": codex}
         monkeypatch.setattr(orch_mod.QTimer, "singleShot", staticmethod(lambda _ms, fn: fn()))

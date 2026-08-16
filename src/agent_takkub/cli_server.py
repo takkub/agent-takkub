@@ -77,6 +77,9 @@ _LEAD_ONLY_CMDS = frozenset(
         "wait-poll",
         "wait-end",
         "wait-cancel",
+        # messages (#277): the send-audit log carries other roles' full
+        # instruction text — same read-sensitivity call as `inbox` above.
+        "messages",
     }
 )
 
@@ -595,6 +598,7 @@ class CliServer(QObject):
                     note=req.get("note", ""),
                     project=from_project,
                     failed=bool(req.get("failed", False)),
+                    force=bool(req.get("force", False)),
                 )
             elif cmd == "subagent-done":
                 ok, msg = self._orch.subagent_done(
@@ -834,6 +838,15 @@ class CliServer(QObject):
                     self._reply(sock, ok=True, msg=msg_t, **payload_t)
                 else:
                     self._reply(sock, ok=False, msg=msg_t)
+                return
+            elif cmd == "messages":
+                # #277: read-only audit of `takkub send` traffic for one role.
+                ok_m, msg_m, lines_m = self._orch.role_message_log(
+                    req.get("role", ""),
+                    project=from_project,
+                    limit=int(req.get("limit", 20) or 20),
+                )
+                self._reply(sock, ok=ok_m, msg=msg_m, lines=lines_m)
                 return
             elif cmd == "task-reconcile":
                 ok, msg = self._orch.task_reconcile(

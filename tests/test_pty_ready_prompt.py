@@ -666,3 +666,65 @@ def test_stale_boot_line_in_scrollback_does_not_pin_startup_marker() -> None:
     )
     assert s.shows_startup_marker() is False
     assert s.is_at_ready_prompt() is True
+
+
+# ── boot-phase vs queued-message split (#281) ────────────────────────────────
+# `shows_startup_marker()` answers "not a genuine work turn" (idle watchdog).
+# `shows_boot_phase_marker()` answers "the composer does not exist yet"
+# (delivery / boot-stall / `takkub list`). Conflating them made a WORKING codex
+# pane read as a stuck boot — proven from events.log: panes flagged
+# `[delivery-boot-stall]` at 110s went on to call `done` minutes later.
+
+
+def test_boot_phase_marker_true_while_codex_boots_mcp() -> None:
+    s = _feed_screen(
+        "• Booting MCP server: codex_apps (0s • esc to interrupt)",
+        "gpt-5.6 high · ~/project · Fast off",
+    )
+    assert s.shows_boot_phase_marker() is True
+
+
+def test_boot_phase_marker_false_for_a_working_pane_with_a_queued_message() -> None:
+    """The #281 regression in one assertion: codex shows "tab to queue
+    message" the whole time it is working, which is not a boot phase."""
+    s = _feed_screen(
+        "• Ran Get-Content -Raw -LiteralPath 'spec.md'",
+        "esc to interrupt · tab to queue message",
+        "gpt-5.6 high · ~/project · Fast off",
+    )
+    assert s.shows_boot_phase_marker() is False
+    # the wider marker still reports True — the idle watchdog must keep
+    # suppressing its forgot-`takkub done` nag for this pane.
+    assert s.shows_startup_marker() is True
+
+
+def test_boot_phase_marker_ignores_a_stale_boot_line_in_scrollback() -> None:
+    s = _feed_screen(
+        "• Booting MCP server: codex_apps (0s • esc to interrupt)",
+        "• Ran Get-Content -Raw -LiteralPath 'spec.md'",
+        "• done reading the spec",
+        "",
+        "some later output line",
+        "another later output line",
+        "yet another later output line",
+        "gpt-5.6 high · ~/project · Fast off",
+    )
+    assert s.shows_boot_phase_marker() is False
+
+
+def test_boot_phase_detail_names_the_servers_being_waited_on() -> None:
+    """#281: `codex mcp list` cannot see cockpit-injected MCPs, so the pane's
+    own boot line is the only thing that names what a stuck boot is waiting
+    for."""
+    s = _feed_screen(
+        "OpenAI Codex (v0.147.0)",
+        "Starting MCP servers (0/3): codex_apps, context7, figma (12s • esc to interrupt)",
+    )
+    detail = s.boot_phase_detail()
+    assert "context7" in detail and "figma" in detail
+    assert len(detail) <= 200
+
+
+def test_boot_phase_detail_empty_when_not_booting() -> None:
+    s = _feed_screen("gpt-5.6 high · ~/project · Fast off")
+    assert s.boot_phase_detail() == ""

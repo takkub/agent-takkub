@@ -18,8 +18,10 @@ for the durable-force path):
      ([delivery-unconfirmed]/[spawn-stuck]/[delivery-boot-stall]/
      [spawn-failed]/[delivery-busy-wait]) are re-checked against the target
      role's CURRENT pane state; a role whose pane has since reached a
-     terminal state (or vanished entirely) gets the body prefixed with a
-     "resolved since" banner instead of presenting the claim as current.
+     terminal state (or vanished entirely) is collapsed to a one-line
+     "already resolved" note (#279 — the full remediation prose is only
+     worth pasting while there is still something to act on) instead of
+     presenting the claim as current.
   2. `_occurred_stamp` — every notice (not just the pre-existing done-digest
      treatment) is now prefixed with when it actually occurred, surviving
      durable round-trips via `queued_ts` threaded through `_notify_lead`.
@@ -125,7 +127,11 @@ class TestSystemNoticeRevalidatedAtFlush:
 
         written = _written(lead.session)
         assert "คลี่คลายแล้ว" in written
-        assert "delivery-unconfirmed] codex pane ไม่ถึง ready prompt" in written
+        # #279: collapsed to one line — marker + role survive, the multi-line
+        # remediation prose does not (acting on it is exactly what Lead must
+        # NOT do now that the pane is gone).
+        assert "[delivery-unconfirmed] codex" in written
+        assert "ไม่ถึง ready prompt ใน 90s" not in written
 
     def test_delivery_unconfirmed_not_flagged_when_pane_still_active(
         self, orch: Orchestrator
