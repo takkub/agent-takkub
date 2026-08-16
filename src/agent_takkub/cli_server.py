@@ -801,6 +801,11 @@ class CliServer(QObject):
                     force=bool(req.get("force", False)),
                     dry_run=bool(req.get("dry_run", False)),
                 )
+            elif cmd == "task-cancel":
+                ok, msg = self._orch.cancel_task_delivery(
+                    req.get("role", ""),
+                    project=from_project,
+                )
             elif cmd == "harvest-done":
                 harvest_role = req.get("role", "")
                 harvest_note = req.get("note", "harvested by lead")

@@ -808,6 +808,13 @@ def cmd_task(args: argparse.Namespace) -> dict:
                 }
             )
         )
+    if args.t_cmd == "cancel":
+        gate_err = _require_lead_for_task_admin("task cancel")
+        if gate_err:
+            return {"ok": False, "msg": gate_err}
+        return _request(
+            _with_project({"cmd": "task-cancel", "role": args.role, "from": _from_role()})
+        )
     return {"ok": False, "msg": f"unknown task subcommand: {args.t_cmd}"}
 
 
@@ -2214,6 +2221,14 @@ def main(argv: list[str] | None = None) -> int:
         dest="dry_run",
         help="preview without writing",
     )
+    stx = st_sub.add_parser(
+        "cancel",
+        help=(
+            "cancel a role's pending task delivery that is still retrying "
+            "toward its current pane session (issue #255)"
+        ),
+    )
+    stx.add_argument("--role", required=True, help="role name whose pending delivery to cancel")
     st.set_defaults(func=cmd_task)
 
     # Internal — wired as the Stop/Notification hook `command` for every

@@ -410,6 +410,22 @@ BUSY_WAIT_CEILING_SEC = int(os.environ.get("TAKKUB_BUSY_WAIT_CEILING_SEC", "1800
 # Overrideable via env for slower CI/hardware.
 NO_CONTENT_WATCHDOG_SEC = int(os.environ.get("TAKKUB_NO_CONTENT_WATCHDOG_SEC", "75"))
 
+# Issue #254: a pane stuck showing a provider boot-phase marker (codex/agy
+# "Booting MCP server: …") redraws its spinner continuously, so
+# seconds_since_output() never grows and the #144 busy-wait extension above
+# silently renews itself with no further signal until BUSY_WAIT_CEILING_SEC
+# (30 min) — a real incident sat there with the task never delivered at all
+# (composer still showed the placeholder prompt) and Lead had nothing to act
+# on beyond the single "still waiting" notice #144 already sends. This bounds
+# how long lead_inbox._send_when_ready's poll loop tolerates a CONTINUOUS
+# boot-marker streak before escalating with a distinct, more actionable
+# warning naming the stuck phase (issue #254) — well above codex/agy's own
+# ready_wait_ms cold-boot allowance (90s, see provider_spec.py) so an
+# ordinary boot that finishes on time never trips it, but far below
+# BUSY_WAIT_CEILING_SEC so Lead hears about a genuinely wedged boot in
+# roughly two minutes instead of thirty. Overrideable via env.
+BOOT_STALL_GRACE_SEC = int(os.environ.get("TAKKUB_BOOT_STALL_GRACE_SEC", "110"))
+
 
 # Live probe for Qt main-thread heartbeat staleness (#133 — fan-out delivery
 # corruption: concurrent pane spawns backlog the Qt event loop for ~1s at a
@@ -2005,6 +2021,40 @@ class Orchestrator(
             return False, self._unknown_pane_message(to_role, project_ns)
         if pane.session is None or not pane.session.is_alive:
             return False, f"{to_role} is not running (spawn it first)"
+
+        # #255: Lead sending straight into a pane that still has a task
+        # delivery retrying toward it is a strong signal Lead has taken
+        # over recovery by hand (e.g. after the delivery got stuck on a
+        # boot stall, #254) — leaving the old delivery armed means its
+        # self-heal resend re-pastes the ORIGINAL task on top of whatever
+        # Lead just sent the moment the pane reaches ready, silently
+        # duplicating the work. Scoped to Lead-originated sends only
+        # (from_role is None for the CLI's own default, or explicitly
+        # "lead") — a peer teammate messaging another teammate is not
+        # "Lead recovering delivery" and must not cancel anything.
+        if to_role != LEAD.name and from_role in (None, LEAD.name):
+            delivery_manager = getattr(self, "_delivery_manager", None)
+            if delivery_manager is not None:
+                generation = int(getattr(pane, "_session_generation", 0))
+                superseded = delivery_manager.cancel_for_session(project_ns, to_role, generation)
+                if superseded:
+                    last_ids = getattr(self, "_last_delivery_ids", None)
+                    if last_ids is not None:
+                        last_ids.pop((project_ns, to_role), None)
+                    self._notify_lead(
+                        project_ns,
+                        f"ℹ️ [delivery-superseded] ยกเลิก {superseded} pending delivery ที่ค้างอยู่ "
+                        f"สำหรับ {to_role} อัตโนมัติ เพราะเพิ่ง `takkub send` เข้าไปตรงๆ — เดิมจะ "
+                        f"paste task เก่าซ้ำทันทีที่ pane กลับมา ready (issue #255)",
+                        from_role="system",
+                        note="delivery_superseded",
+                    )
+                    _log_event(
+                        "delivery_superseded_by_send",
+                        role=to_role,
+                        project=project_ns,
+                        cancelled=superseded,
+                    )
 
         header = f"[{from_role} → {to_role}] " if from_role and from_role != to_role else ""
         body = header + _sanitize_pane_text(msg)
@@ -4270,6 +4320,39 @@ class Orchestrator(
             return True, "task", {"task": content, "task_file": task_file}
         return True, "task", {"task": ps.last_assigned_task, "task_file": None}
 
+    def cancel_task_delivery(self, role: str, project: str | None = None) -> tuple[bool, str]:
+        """`takkub task cancel --role <r>` — cancel any task delivery still
+        retrying toward `role`'s CURRENT pane session (issue #255).
+
+        A delivery keeps self-healing (resend/repaste) until the target
+        pane reaches its ready prompt or BUSY_WAIT_CEILING_SEC elapses — up
+        to 30 minutes. If Lead recovers a wedged pane manually in the
+        meantime (`takkub send` straight into it once it becomes reachable
+        some other way — see `send()`'s own auto-cancel for that exact
+        case), the ORIGINAL delivery this method targets is for a pane
+        Lead is NOT actively fighting: e.g. Lead decided to abandon the
+        assign entirely and hand the role a different task by hand, or
+        wants to stop the resend storm before closing the pane. Without
+        this, the only way to stop a still-retrying delivery was
+        `close()` (which also tears down the session) —
+        `task_delivery.DeliveryManager.cancel_for_session` already existed
+        and is correct, it simply had no CLI entry point until now."""
+        project_ns = self._resolve_project(project)
+        pane = self._project_panes(project_ns).get(role)
+        if pane is None:
+            return False, self._unknown_pane_message(role, project_ns)
+        delivery_manager = getattr(self, "_delivery_manager", None)
+        if delivery_manager is None:
+            return True, f"no pending delivery for '{role}' (nothing has ever been delivered)"
+        generation = int(getattr(pane, "_session_generation", 0))
+        cancelled = delivery_manager.cancel_for_session(project_ns, role, generation)
+        if cancelled:
+            last_ids = getattr(self, "_last_delivery_ids", None)
+            if last_ids is not None:
+                last_ids.pop((project_ns, role), None)
+            return True, f"cancelled {cancelled} pending delivery(ies) for '{role}'"
+        return True, f"no pending delivery for '{role}'"
+
     def _live_roles(self, project_ns: str) -> frozenset[str]:
         """Roles in *project_ns* with a currently-alive pane session — the
         set `task_ledger`'s reconcile/close guards check before ever
@@ -4808,6 +4891,10 @@ class Orchestrator(
         # Handles the case where notices spilled to _pending_done_notices while
         # Lead was busy — delivers them without requiring a Lead restart.
         self._reap_pending_done_notices()
+        # #255: sweep task deliveries stuck in-flight past their TTL and
+        # tell Lead, instead of a stale delivery going quiet until it
+        # resurfaces as a duplicate paste.
+        self._reap_stale_deliveries()
         # Surface panes whose idle prompt no marker recognises (structural #20
         # staleness detector) — makes an upstream-reword silent break LOUD.
         self._check_stale_markers(now)

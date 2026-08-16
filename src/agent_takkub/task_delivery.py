@@ -47,6 +47,21 @@ _TERMINAL_STATES = {
     DeliveryState.EXPIRED,
     DeliveryState.CANCELLED,
 }
+# States that represent an in-progress DELIVERY ATTEMPT — the paste/submit
+# has not yet been confirmed to have landed. expire_stale() (issue #255) only
+# reaps deliveries stuck in one of these: ACCEPTED/RUNNING/SPAWNED_IDLE mean
+# the task WAS delivered and the teammate may now be working it for hours,
+# so sweeping those by a TTL measured from creation would incorrectly cancel
+# a delivery whose only remaining job is idempotent duplicate-paste
+# prevention, not "being on time".
+_IN_FLIGHT_STATES = {
+    DeliveryState.QUEUED,
+    DeliveryState.WAITING_RESOURCE,
+    DeliveryState.WRITING,
+    DeliveryState.WRITTEN,
+    DeliveryState.SUBMITTING,
+    DeliveryState.UNCERTAIN,
+}
 
 
 @dataclass(slots=True)
@@ -84,7 +99,20 @@ class DeliveryManager:
         self.default_ttl_sec = float(
             default_ttl_sec
             if default_ttl_sec is not None
-            else os.environ.get("TAKKUB_TASK_DELIVERY_TTL_SEC", "30")
+            # #255: must outlast lead_inbox._delayed_enter_verified's own
+            # busy-resend budget (_SUBMIT_BUSY_MAX_RESENDS x
+            # _SUBMIT_VERIFY_GRACE_MS ≈ 90s — the self-heal window for a
+            # slow-but-eventually-successful MCP boot), or every resend past
+            # 30s both (a) gets its DeliveryManager state wrongly flipped to
+            # EXPIRED by _reject_stale even though the CR write it's part of
+            # still lands, and (b) risks the PTY writer thread's own
+            # expires_at staleness check (pty_session.py PtyWriter.run)
+            # silently dropping that same write outright if it happens to
+            # sit in a congested queue. 120s gives ~30s of margin above the
+            # ~90s worst case, well short of BUSY_WAIT_CEILING_SEC (1800s)
+            # so a delivery genuinely stuck this long is still worth
+            # reaping (see expire_stale below).
+            else os.environ.get("TAKKUB_TASK_DELIVERY_TTL_SEC", "120")
         )
         self._clock = clock
         self._event_sink = event_sink
@@ -267,18 +295,27 @@ class DeliveryManager:
             self._emit("task_delivery_cancelled", delivery)
         return len(cancelled)
 
-    def expire_stale(self) -> int:
+    def expire_stale(self) -> list[TaskDelivery]:
+        """Reap deliveries stuck in an in-flight state (see
+        ``_IN_FLIGHT_STATES``) past their TTL and return the ones just
+        expired (issue #255's reaper — see ``Orchestrator._reap_stale_deliveries``,
+        which wires this into the idle watchdog tick and tells Lead about
+        each one instead of it going quiet until a duplicate paste surfaces
+        it). Deliberately narrower than "any non-terminal state" (the old
+        behaviour) — ACCEPTED/RUNNING/SPAWNED_IDLE mean the task already
+        landed and may legitimately run for hours, so those must never be
+        swept by a creation-time TTL."""
         expired: list[TaskDelivery] = []
         with self._lock:
             now = self._clock()
             for delivery in self._deliveries.values():
-                if delivery.state not in _TERMINAL_STATES and delivery.expired(now):
+                if delivery.state in _IN_FLIGHT_STATES and delivery.expired(now):
                     delivery.state = DeliveryState.EXPIRED
                     self._release_active(delivery)
                     expired.append(delivery)
         for delivery in expired:
-            self._emit("task_delivery_expired", delivery)
-        return len(expired)
+            self._emit("task_delivery_expired", delivery, reason="stale_reap")
+        return expired
 
     def snapshot(self) -> list[dict]:
         with self._lock:

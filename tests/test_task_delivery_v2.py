@@ -78,6 +78,51 @@ def test_cancel_session_releases_single_flight() -> None:
     assert second.state is DeliveryState.CANCELLED
 
 
+def test_expire_stale_reaps_in_flight_deliveries_past_ttl() -> None:
+    now = [100.0]
+    manager = DeliveryManager(default_ttl_sec=5, clock=lambda: now[0])
+    stuck = _delivery(manager)
+    assert manager.begin_write(stuck.delivery_id, 1)
+    assert manager.begin_submit(stuck.delivery_id, 1)
+    now[0] = 106.0
+
+    expired = manager.expire_stale()
+
+    assert [d.delivery_id for d in expired] == [stuck.delivery_id]
+    assert stuck.state is DeliveryState.EXPIRED
+
+
+def test_expire_stale_never_reaps_accepted_or_running_delivery() -> None:
+    """issue #255: ACCEPTED/RUNNING mean the task already landed and may
+    legitimately run for hours — a creation-time TTL must never sweep it."""
+    now = [100.0]
+    manager = DeliveryManager(default_ttl_sec=5, clock=lambda: now[0])
+    accepted = _delivery(manager)
+    assert manager.begin_write(accepted.delivery_id, 1)
+    assert manager.begin_submit(accepted.delivery_id, 1)
+    assert manager.mark_accepted(accepted.delivery_id)
+    running = _delivery(manager, generation=2)
+    assert manager.mark_running(running.delivery_id)
+    now[0] = 200.0  # far past the 5s TTL for both
+
+    expired = manager.expire_stale()
+
+    assert expired == []
+    assert accepted.state is DeliveryState.ACCEPTED
+    assert running.state is DeliveryState.RUNNING
+
+
+def test_expire_stale_leaves_terminal_states_alone() -> None:
+    now = [100.0]
+    manager = DeliveryManager(default_ttl_sec=5, clock=lambda: now[0])
+    done = _delivery(manager)
+    assert manager.mark_done(done.delivery_id)
+    now[0] = 200.0
+
+    assert manager.expire_stale() == []
+    assert done.state is DeliveryState.DONE
+
+
 def test_notice_dedupe_is_durable_and_ttl_bounded(tmp_path) -> None:
     now = [100.0]
     path = tmp_path / "notice-dedupe.json"
